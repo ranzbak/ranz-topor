@@ -51,6 +51,7 @@ def make_fixture_board(
     pads="all",
     free_via=True,
     transition_via=False,
+    vcc_stub=False,
 ) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -168,6 +169,8 @@ def make_fixture_board(
         b.Add(a)
     if half_track:
         track((25, 20), (25, 28), "SIG")
+    if vcc_stub:
+        track((20, 20), (27, 24), "VCC", locked=True)
 
     v = pcbnew.PCB_VIA(b)
     v.SetPosition(_v(5, 5))

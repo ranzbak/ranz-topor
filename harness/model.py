@@ -439,6 +439,31 @@ def find_dangling_ends(board) -> list[dict]:
     return out
 
 
+# ---------------------------------------------------------------- pours
+def _export_pours(board, cu: list[int]) -> list[dict]:
+    """Copper zones (not rule areas, net != 0) with the pads and vias they connect to after a refill.
+
+    Needs the zones filled and the connectivity built; both run here (the board is modified in
+    memory only, never saved).
+    """
+    zones = [z for z in board.Zones() if not z.GetIsRuleArea() and int(z.GetNetCode()) != 0]
+    if not zones:
+        return []
+    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    conn = board.GetConnectivity()
+    conn.Build(board)
+    out = []
+    for z in zones:
+        layers = sorted(int(l) for l in z.GetLayerSet().Seq() if int(l) in cu)
+        pads = sorted(f"{p.GetParentFootprint().GetReference()}.{p.GetNumber()}"
+                      for p in conn.GetConnectedPads(z))
+        vias = sorted(_uuid(t) for t in conn.GetConnectedTracks(z) if _is_via(t))
+        out.append({"uuid": _uuid(z), "net": int(z.GetNetCode()), "layers": layers,
+                    "pads": pads, "vias": vias})
+    out.sort(key=lambda d: d["uuid"])
+    return out
+
+
 # ---------------------------------------------------------------- top level
 def export_model(board, rules: dict, *, name: str) -> dict:
     cu = _cu_layers(board)
@@ -466,6 +491,7 @@ def export_model(board, rules: dict, *, name: str) -> dict:
         "outline": _export_outline(board, max_err),
         "keepouts": _export_keepouts(board),
         "net_ties": net_ties,
+        "pours": _export_pours(board, cu),
         "dangling_ends": find_dangling_ends(board),
         "rules": rules,
     }

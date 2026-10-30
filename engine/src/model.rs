@@ -191,6 +191,18 @@ pub struct CopperShape {
     pub owner_ref: Option<String>,
 }
 
+/// Copper zone (not a rule area) with the pads (`"REF.NUM"`) and via uuids it connects to
+/// after a refill; sorted by the harness.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Pour {
+    pub uuid: String,
+    pub net: i32,
+    pub layers: Vec<u32>,
+    pub pads: Vec<String>,
+    pub vias: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Hole {
     pub at: Pt,
@@ -330,6 +342,7 @@ pub struct BoardModel {
     pub keepouts: Vec<Keepout>,
     pub net_ties: Vec<NetTie>,
     pub dangling_ends: Vec<DanglingEnd>,
+    pub pours: Vec<Pour>,
     pub rules: Rules,
 }
 

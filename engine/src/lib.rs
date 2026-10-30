@@ -2,6 +2,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod cdt;
 pub mod check;
+pub mod decompose;
 pub mod fuzz;
 pub mod geom;
 pub mod model;

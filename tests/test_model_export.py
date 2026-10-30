@@ -157,3 +157,11 @@ def test_footprint_rule_area_exported_as_keepout(fixture_board):
     ko = [k for k in m["keepouts"] if k["name"] == "antenna keepout"]
     assert len(ko) == 1 and ko[0]["layers"] == [int(pcbnew.F_Cu)]
     assert ko[0]["no_tracks"] and not ko[0]["no_vias"] and len(ko[0]["poly"]) == 4
+
+
+def test_model_pours_schema(fixture_board):
+    m = export_model(load_board(fixture_board), {}, name="fx")
+    assert len(m["pours"]) == 1
+    z = m["pours"][0]
+    assert set(z) == {"uuid", "net", "layers", "pads", "vias"}
+    assert z["pads"] == sorted(z["pads"]) and z["vias"] == sorted(z["vias"])
