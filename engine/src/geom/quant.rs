@@ -103,15 +103,18 @@ pub fn is_degenerate_arc(a: &Arc) -> bool {
     sag < MIN_SAGITTA_NM || a.chord() < MIN_CHORD_NM
 }
 
-fn quantise_with(p: &Prim, start: IVec2, end: IVec2) -> TrackPrim {
+/// `None` when the primitive collapses to a point (`start == end` after
+/// rounding and not a representable arc); the caller drops it.
+fn quantise_with(p: &Prim, start: IVec2, end: IVec2) -> Option<TrackPrim> {
+    let seg = || (start != end).then_some(TrackPrim::Seg { a: start, b: end });
     match p {
-        Prim::Seg(_) => TrackPrim::Seg { a: start, b: end },
+        Prim::Seg(_) => seg(),
         Prim::Arc(a) => {
             let mid = round_nm(a.mid());
             if is_degenerate_arc(a) || calc_arc_center(start, mid, end).is_none() {
-                TrackPrim::Seg { a: start, b: end }
+                seg()
             } else {
-                TrackPrim::Arc { start, mid, end }
+                Some(TrackPrim::Arc { start, mid, end })
             }
         }
     }
@@ -124,13 +127,18 @@ fn ends(p: &Prim) -> (Vec2, Vec2) {
     }
 }
 
-pub fn quantise(p: &Prim) -> TrackPrim {
+/// Quantise one primitive. `None` means it is zero-length at integer-nm
+/// resolution and must be dropped (never emit a zero-length segment). Note a
+/// full circle whose start and end round to the same point also lands here:
+/// three points cannot represent it.
+pub fn quantise(p: &Prim) -> Option<TrackPrim> {
     let (s, e) = ends(p);
     quantise_with(p, round_nm(s), round_nm(e))
 }
 
 /// Quantise a chain; each shared endpoint is rounded once and reused
-/// bit-identically (23 §4.4).
+/// bit-identically (23 §4.4). Zero-length items are omitted; since such an
+/// item has `start == end`, the neighbours still share their endpoint.
 pub fn quantise_chain(prims: &[Prim]) -> Vec<TrackPrim> {
     let mut out = Vec::with_capacity(prims.len());
     let mut prev: Option<IVec2> = None;
@@ -138,7 +146,7 @@ pub fn quantise_chain(prims: &[Prim]) -> Vec<TrackPrim> {
         let (s, e) = ends(p);
         let start = prev.unwrap_or_else(|| round_nm(s));
         let end = round_nm(e);
-        out.push(quantise_with(p, start, end));
+        out.extend(quantise_with(p, start, end));
         prev = Some(end);
     }
     out
