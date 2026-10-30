@@ -1,0 +1,81 @@
+"""Write engine output items (segments, arcs, vias, groups) into a board."""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pcbnew
+
+
+def _v(p) -> "pcbnew.VECTOR2I":
+    return pcbnew.VECTOR2I(int(p[0]), int(p[1]))
+
+
+def _uuid(item) -> str:
+    return item.m_Uuid.AsString()
+
+
+def _find_group(board, name: str):
+    for g in board.Groups():
+        if g.GetName() == name:
+            return g
+    return None
+
+
+def _group_for(board, groups: dict, name: str):
+    g = groups.get(name)
+    if g is None:
+        g = _find_group(board, name)
+        if g is None:
+            g = pcbnew.PCB_GROUP(board)
+            g.SetName(name)
+            board.Add(g)
+        groups[name] = g
+    return g
+
+
+def _make_item(board, it: dict):
+    if it.get("kind") == "via":
+        v = pcbnew.PCB_VIA(board)
+        v.SetViaType(pcbnew.VIATYPE_THROUGH)
+        v.SetPosition(_v(it["at"]))
+        v.SetWidth(int(it["d"]))
+        if it.get("drill"):
+            v.SetDrill(int(it["drill"]))
+        layers = it.get("layers") or [pcbnew.F_Cu, pcbnew.B_Cu]
+        v.SetLayerPair(int(layers[0]), int(layers[-1]))
+        v.SetNetCode(int(it["net"]))
+        return v
+    prim = it["prim"]
+    if prim["kind"] == "arc":
+        t = pcbnew.PCB_ARC(board)
+        t.SetStart(_v(prim["start"]))
+        t.SetMid(_v(prim["mid"]))
+        t.SetEnd(_v(prim["end"]))
+    else:
+        t = pcbnew.PCB_TRACK(board)
+        t.SetStart(_v(prim["a"]))
+        t.SetEnd(_v(prim["b"]))
+    t.SetWidth(int(it["width"]))
+    t.SetLayer(int(it["layer"]))
+    t.SetNetCode(int(it["net"]))
+    return t
+
+
+def write_items(board, items: list[dict]) -> list[str]:
+    """Add items to the board; return the uuids of created items in input order."""
+    groups: dict = {}
+    ids: list[str] = []
+    for it in items:
+        obj = _make_item(board, it)
+        board.Add(obj)
+        name = it.get("group")
+        if name:
+            _group_for(board, groups, name).AddItem(obj)
+        ids.append(_uuid(obj))
+    return ids
+
+
+def save(board, path) -> Path:
+    path = Path(path)
+    pcbnew.SaveBoard(str(path), board)
+    return path
