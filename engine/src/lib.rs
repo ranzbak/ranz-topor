@@ -1,5 +1,6 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod cdt;
 pub mod check;
 pub mod fuzz;
 pub mod geom;
