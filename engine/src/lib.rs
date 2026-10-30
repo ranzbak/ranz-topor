@@ -8,6 +8,7 @@ pub mod model;
 pub mod obstacle;
 #[cfg(feature = "python")]
 mod py;
+pub mod taut;
 pub mod wires;
 
 #[cfg(test)]
