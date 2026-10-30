@@ -232,7 +232,7 @@ fn example_serde_tag() {
     };
     assert_eq!(
         serde_json::to_string(&t).unwrap(),
-        r#"{"kind":"seg","a":{"x":1,"y":2},"b":{"x":3,"y":4}}"#
+        r#"{"kind":"seg","a":[1,2],"b":[3,4]}"#
     );
 }
 

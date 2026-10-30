@@ -7,10 +7,24 @@ use serde::{Deserialize, Serialize};
 pub type Nm = i32;
 
 /// Integer-nm point (KiCad internal units).
+/// Serialised as a two-element array `[x, y]` (the wire schema of the board model).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(from = "[Nm; 2]", into = "[Nm; 2]")]
 pub struct IVec2 {
     pub x: Nm,
     pub y: Nm,
+}
+
+impl From<[Nm; 2]> for IVec2 {
+    fn from(a: [Nm; 2]) -> Self {
+        IVec2 { x: a[0], y: a[1] }
+    }
+}
+
+impl From<IVec2> for [Nm; 2] {
+    fn from(v: IVec2) -> Self {
+        [v.x, v.y]
+    }
 }
 
 impl IVec2 {
