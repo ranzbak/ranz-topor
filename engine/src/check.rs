@@ -9,9 +9,9 @@ use crate::geom::prim::Aabb;
 use crate::geom::{
     copper_gap, copper_gap_skeleton, dequantise, Grid, Prim, Seg, Skeleton, Track, Vec2,
 };
-use crate::model::{flip_track, BoardModel, Item, Options, Pad, Pt};
+use crate::model::{flip_track, via_layers, BoardModel, Item, Options, Pad};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Violation {
@@ -143,15 +143,6 @@ fn zero_seg(c: Vec2, w: f64) -> Track {
     }
 }
 
-/// Layers a via occupies: both outer layers listed → every board layer; else the listed ones.
-fn via_layers(listed: &[u32], all: &[u32]) -> Vec<u32> {
-    if listed.contains(&0) && listed.contains(&2) {
-        all.to_vec()
-    } else {
-        listed.to_vec()
-    }
-}
-
 pub struct Checker {
     rules_min_clearance: f64,
     hole_clearance: f64,
@@ -171,13 +162,7 @@ impl Checker {
     /// Build one grid per copper layer from the model (math frame, see `BoardModel::from_json`).
     pub fn new(model: &BoardModel, opts: &Options) -> Checker {
         let r = &model.rules;
-        let mut layer_set: BTreeSet<u32> = model.layers.iter().map(|l| l.id).collect();
-        layer_set.extend(model.pads.iter().flat_map(|p| p.layers.iter().copied()));
-        layer_set.extend(model.kept.iter().map(|k| k.layer));
-        layer_set.extend(model.vias.iter().flat_map(|v| v.layers.iter().copied()));
-        layer_set.extend(model.copper_shapes.iter().map(|c| c.layer));
-        layer_set.extend(model.keepouts.iter().flat_map(|k| k.layers.iter().copied()));
-        let all: Vec<u32> = layer_set.into_iter().collect();
+        let all: Vec<u32> = model.all_layer_ids();
 
         let margin = opts.margin_nm as f64;
         let mut max_clr = r
@@ -229,29 +214,11 @@ impl Checker {
             c.grids.insert(*l, Grid::new(cell));
         }
 
-        let tie_nets_of = |ref_: &str| -> Vec<i32> {
-            model
-                .net_ties
-                .iter()
-                .filter(|t| t.ref_ == ref_)
-                .flat_map(|t| t.nets.iter().flatten().copied())
-                .collect()
-        };
-        let group_nets = |p: &Pad| -> Vec<i32> {
-            let (Some(g), Some(t)) = (
-                p.net_tie_group,
-                model.net_ties.iter().find(|t| t.ref_ == p.ref_),
-            ) else {
-                return Vec::new();
-            };
-            t.nets.get(g).cloned().unwrap_or_default()
-        };
+        let tie_nets_of = |ref_: &str| model.tie_nets_of(ref_);
+        let group_nets = |p: &Pad| model.pad_group_nets(p);
 
-        let mut pad_by_hole: HashMap<Pt, usize> = HashMap::new();
-        for (i, p) in model.pads.iter().enumerate() {
-            if p.drill.is_some() {
-                pad_by_hole.insert(p.center, i);
-            }
+        let pad_by_hole = model.pad_by_hole();
+        for p in &model.pads {
             for &l in &p.layers {
                 // KiCad: max(item class, pad class, pad local override).
                 let own = (p.local_clearance.unwrap_or(0) as f64).max(c.clr(p.net));

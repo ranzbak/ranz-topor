@@ -409,6 +409,59 @@ impl BoardModel {
     }
 }
 
+/// Layers a via occupies: both outer layers listed → every board layer; else the listed ones.
+pub fn via_layers(listed: &[u32], all: &[u32]) -> Vec<u32> {
+    if listed.contains(&0) && listed.contains(&2) {
+        all.to_vec()
+    } else {
+        listed.to_vec()
+    }
+}
+
+impl BoardModel {
+    /// Every layer id the model mentions, sorted.
+    pub fn all_layer_ids(&self) -> Vec<u32> {
+        let mut set: std::collections::BTreeSet<u32> = self.layers.iter().map(|l| l.id).collect();
+        set.extend(self.pads.iter().flat_map(|p| p.layers.iter().copied()));
+        set.extend(self.kept.iter().map(|k| k.layer));
+        set.extend(self.vias.iter().flat_map(|v| v.layers.iter().copied()));
+        set.extend(self.copper_shapes.iter().map(|c| c.layer));
+        set.extend(self.keepouts.iter().flat_map(|k| k.layers.iter().copied()));
+        set.into_iter().collect()
+    }
+
+    /// Nets bridged by the net tie footprint `ref_`.
+    pub fn tie_nets_of(&self, ref_: &str) -> Vec<i32> {
+        self.net_ties
+            .iter()
+            .filter(|t| t.ref_ == ref_)
+            .flat_map(|t| t.nets.iter().flatten().copied())
+            .collect()
+    }
+
+    /// Nets of the net-tie group the pad belongs to (empty if none).
+    pub fn pad_group_nets(&self, p: &Pad) -> Vec<i32> {
+        let (Some(g), Some(t)) = (
+            p.net_tie_group,
+            self.net_ties.iter().find(|t| t.ref_ == p.ref_),
+        ) else {
+            return Vec::new();
+        };
+        t.nets.get(g).cloned().unwrap_or_default()
+    }
+
+    /// Drilled pad index by hole position (a PTH hole belongs to its pad).
+    pub fn pad_by_hole(&self) -> HashMap<Pt, usize> {
+        let mut m = HashMap::new();
+        for (i, p) in self.pads.iter().enumerate() {
+            if p.drill.is_some() {
+                m.insert(p.center, i);
+            }
+        }
+        m
+    }
+}
+
 fn poly_skeleton(pts: &[Pt], c: Vec2) -> Skeleton {
     let mut v: Vec<Vec2> = pts.iter().map(|p| p.to_vec2()).collect();
     match v.len() {
