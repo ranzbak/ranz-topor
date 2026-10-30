@@ -347,3 +347,60 @@ fn deterministic() {
     assert_eq!(a.prims, b.prims);
     assert_eq!(a.seq, b.seq);
 }
+
+#[test]
+fn negative_arc_is_dropped() {
+    // eprom wire 19 (A12): the via arc's exit tangent lies behind its entry (wrap -6 deg);
+    // it must be dropped, not kept as a 354 deg loop.
+    let pads = [
+        pad(7, 187.5, -71.0, 1_600_000),
+        pad(7, 189.9, -72.4, 800_000),
+        pad(7, 201.24, -77.41, 1_600_000),
+        pad(2, 187.5, -73.54, 800_000),
+        pad(2, 201.24, -72.33, 800_000),
+    ];
+    let e = TestEnv::new(&model(&pads, "", 200_000));
+    let seq = vec![
+        AnchorRef {
+            anchor: 0,
+            sigma: Orient::Cw,
+        },
+        AnchorRef {
+            anchor: 1,
+            sigma: Orient::Cw,
+        },
+        AnchorRef {
+            anchor: 2,
+            sigma: Orient::Ccw,
+        },
+    ];
+    let c = tauten(v(186.0, -69.79), v(202.74, -78.62), seq, &e).unwrap();
+    assert_eq!(c.pattern(), "SASAS", "{:?}", c.seq);
+    for p in &c.prims {
+        if let Prim::Arc(a) = p {
+            assert!(a.sweep <= std::f64::consts::PI, "loop arc {}", a.sweep);
+        }
+    }
+    assert!(c.length < 20.0 * MM, "{}", c.length);
+}
+
+#[test]
+fn wall_grazed_mid_span_fails_fast() {
+    // Wall y = 0 from x = -5 to 15. Chain wraps a pad above it and dips to y = 0.62 mm at x = 5,
+    // 10 um inside rho_wall (0.63); both wall ends are ~5 mm away, so no end anchor covers it.
+    let outline = format!(
+        r#"{{ "kind": "seg", "a": [{}, 0], "b": [{}, 0] }}"#,
+        (-5.0 * MM) as i64,
+        (15.0 * MM) as i64
+    );
+    let m = model(&[pad(2, 5.0, 1.35, 800_000)], &outline, 500_000);
+    let e = TestEnv::new(&m);
+    let r = tauten(v(0.0, 0.7), v(10.0, 0.7), vec![], &e);
+    match r {
+        Err(TautError::Infeasible(s)) => {
+            assert!(s.contains("mid-span"), "{s}");
+            assert!(s.contains("nm"), "{s}");
+        }
+        other => panic!("{other:?}"),
+    }
+}

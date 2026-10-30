@@ -300,3 +300,58 @@ fn smooth_pour_served_net_is_skipped_with_reason() {
         .reason
         .is_empty());
 }
+
+#[test]
+fn tangent_chain_passes_self_check() {
+    // Foreign pad tangent to the straight hop: centre distance r + clr + w/2 + eps.
+    let y = 0.5 + 0.2 + 0.125 + 0.005;
+    let m = model(
+        &[
+            pad("1", 5, 0.0, 0.0, 1_000_000),
+            pad("2", 5, 10.0, 0.0, 1_000_000),
+            pad("f", 2, 5.0, y, 1_000_000),
+        ],
+        &[seg("h1", 5, (0.0, 0.0), (10.0, 0.0))],
+        "",
+    );
+    let o = opts("");
+    let r = smooth(&m, &o);
+    assert_eq!(r.wires_taut, 1, "{:?}", r.wires);
+    assert_eq!(r.wires[0].status, "taut");
+    // At eps the output may fall short only by rounding (< 2 nm); at design clearance it is clean.
+    let mut m2 = m.clone();
+    m2.kept.retain(|k| !r.replaced.contains(&k.uuid));
+    let strict = Checker::new(&m2, &o).check_items(&r.items);
+    for v in &strict.violations {
+        assert!(v.required - v.gap < 2, "{v:?}");
+    }
+    let o0 = Options {
+        margin_nm: 0,
+        ..o.clone()
+    };
+    assert!(Checker::new(&m2, &o0)
+        .check_items(&r.items)
+        .violations
+        .is_empty());
+}
+
+#[test]
+fn outside_pad_length_excludes_pad_radius() {
+    let m = model(
+        &[
+            pad("1", 5, 0.0, 0.0, 1_600_000),
+            pad("2", 5, 2.0047, 0.0, 1_600_000),
+        ],
+        &[seg("h1", 5, (0.0, 0.0), (2.0047, 0.0))],
+        "",
+    );
+    let r = smooth(&m, &opts(""));
+    assert_eq!(r.wires_taut, 1, "{:?}", r.wires);
+    assert_eq!(r.wires[0].length_nm, 2_004_700);
+    assert_eq!(r.wires[0].length_outside_pads_nm, 404_700);
+    assert_eq!(r.wires[0].hand_outside_pads_nm, 404_700);
+    assert_eq!(r.length_outside_pads_nm, 404_700);
+    assert_eq!(r.hand_outside_pads_nm, 404_700);
+    let n5 = r.nets.iter().find(|n| n.net == 5).unwrap();
+    assert_eq!(n5.length_outside_pads_nm, 404_700);
+}

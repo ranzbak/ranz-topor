@@ -36,7 +36,9 @@ def render_progress(task: str, *, board: str = "eprom-to-kernal", date: str | No
                  f"{wires_total - wires_taut} fallback, arcs {r['arcs']}")
         line2 = (f"DRC routing {drc['routing_new']}, "
                  f"unconnected {drc['incomplete']['unconnected_items']}, "
-                 f"{length_mm:.1f} mm vs hand {hand_mm:.1f} mm")
+                 f"{length_mm:.1f} mm vs hand {hand_mm:.1f} mm, "
+                 f"outside pads {sm.get('outside_mm') or 0.0:.1f} vs "
+                 f"{sm.get('hand_outside_mm') or 0.0:.1f} mm")
         text = f"{line1}\n{line2}"
         topor_png = add_caption(tmp / f"{board}-work" / f"{board}-topor-raw.png", text,
                                 tmp / "topor-progress.png")

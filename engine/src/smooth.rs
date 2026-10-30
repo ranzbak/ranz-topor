@@ -10,7 +10,7 @@
 
 use crate::check::Checker;
 use crate::geom::quant::{quantise_chain, TrackPrim};
-use crate::geom::{dequantise, Vec2};
+use crate::geom::{dequantise, dist_prim_skeleton, Prim, Seg, Skeleton, Vec2};
 use crate::model::{flip_track, BoardModel, Item, Options, TrackItem};
 use crate::obstacle::{ObstacleSet, TerminalObstacle};
 use crate::relax::relax;
@@ -19,6 +19,7 @@ use crate::taut::{Chain, TautError};
 use crate::wires::{extract_wires, Terminal, Wire};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::f64::consts::PI;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Serialize)]
@@ -34,6 +35,9 @@ pub struct WireReport {
     pub anchors: usize,
     pub length_nm: i64,
     pub hand_length_nm: i64,
+    /// Length outside the terminal pads' copper (emitted / hand).
+    pub length_outside_pads_nm: i64,
+    pub hand_outside_pads_nm: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -48,6 +52,9 @@ pub struct NetReport {
     pub taut: usize,
     pub length_nm: i64,
     pub hand_length_nm: i64,
+    /// Length outside the terminal pads' copper (emitted / hand).
+    pub length_outside_pads_nm: i64,
+    pub hand_outside_pads_nm: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -64,6 +71,8 @@ pub struct SmoothResult {
     pub nets_taut: usize,
     pub total_length_nm: i64,
     pub hand_length_nm: i64,
+    pub length_outside_pads_nm: i64,
+    pub hand_outside_pads_nm: i64,
     pub iterations: u32,
     pub converged: bool,
     pub timed_out: bool,
@@ -88,6 +97,108 @@ fn bits(p: Vec2) -> (u64, u64) {
 
 fn prim_len(t: &TrackPrim) -> f64 {
     dequantise(t).length()
+}
+
+/// Inside interval `[t0, t1]` of the segment `a→b` within pad skeleton `sk` (distance to a convex
+/// skeleton is convex along the segment: ternary search for the minimum, bisection for the ends).
+/// Every loop runs a fixed 48 iterations.
+fn inside_interval(a: Vec2, b: Vec2, sk: &Skeleton) -> Option<(f64, f64)> {
+    let g = |t: f64| {
+        let p = a + (b - a) * t;
+        dist_prim_skeleton(&Prim::Seg(Seg { a: p, b: p }), sk)
+    };
+    let (mut lo, mut hi) = (0.0f64, 1.0f64);
+    for _ in 0..48 {
+        let (m1, m2) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+        if g(m1) <= g(m2) {
+            hi = m2;
+        } else {
+            lo = m1;
+        }
+    }
+    let tm = 0.5 * (lo + hi);
+    if g(tm) > 0.0 {
+        return None;
+    }
+    let edge = |mut out: f64, mut inn: f64| {
+        for _ in 0..48 {
+            let m = 0.5 * (out + inn);
+            if g(m) <= 0.0 {
+                inn = m;
+            } else {
+                out = m;
+            }
+        }
+        inn
+    };
+    let t0 = if g(0.0) <= 0.0 { 0.0 } else { edge(0.0, tm) };
+    let t1 = if g(1.0) <= 0.0 { 1.0 } else { edge(1.0, tm) };
+    Some((t0, t1))
+}
+
+/// Length of the chord `a→b` (representing `len` of copper) outside every skeleton.
+fn chord_outside(a: Vec2, b: Vec2, len: f64, sks: &[Skeleton]) -> f64 {
+    let mut iv: Vec<(f64, f64)> = sks
+        .iter()
+        .filter_map(|s| inside_interval(a, b, s))
+        .collect();
+    iv.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let (mut covered, mut end) = (0.0, 0.0f64);
+    for (t0, t1) in iv {
+        let t0 = t0.max(end);
+        if t1 > t0 {
+            covered += t1 - t0;
+            end = t1;
+        }
+    }
+    len * (1.0 - covered).max(0.0)
+}
+
+/// Length of `prims` outside the terminal pads' copper (arcs chorded into ≤ 64 pieces).
+fn outside_len(prims: &[Prim], sks: &[Skeleton]) -> f64 {
+    if sks.is_empty() {
+        return prims.iter().map(Prim::length).sum();
+    }
+    let mut total = 0.0;
+    for p in prims {
+        match p {
+            Prim::Seg(s) => total += chord_outside(s.a, s.b, (s.b - s.a).len(), sks),
+            Prim::Arc(a) => {
+                let n = ((a.sweep / (PI / 32.0)).ceil() as usize).clamp(1, 64);
+                let pt = |k: usize| {
+                    let ang = a.a_start + a.sigma.sign() * a.sweep * (k as f64 / n as f64);
+                    a.c + Vec2 {
+                        x: ang.cos(),
+                        y: ang.sin(),
+                    } * a.r
+                };
+                let piece = a.length() / n as f64;
+                for k in 0..n {
+                    total += chord_outside(pt(k), pt(k + 1), piece, sks);
+                }
+            }
+        }
+    }
+    total
+}
+
+fn terminal_skeletons(model: &BoardModel, w: &Wire) -> Vec<Skeleton> {
+    [&w.start, &w.goal]
+        .into_iter()
+        .filter_map(|t| match t {
+            Terminal::Pad { pad, .. } => model.pads.get(*pad).map(|p| model.skeleton(p, w.layer)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn hand_outside(w: &Wire, sks: &[Skeleton]) -> f64 {
+    let segs: Vec<Prim> = w
+        .hand
+        .windows(2)
+        .map(|v| Prim::Seg(Seg { a: v[0], b: v[1] }))
+        .collect();
+    outside_len(&segs, sks)
 }
 
 fn deadline_after(s: f64, now: Instant) -> Instant {
@@ -272,7 +383,12 @@ pub fn smooth(model: &BoardModel, opts: &Options) -> SmoothResult {
         rounds += 1;
         let mut m = model.clone();
         m.kept.retain(|k| !replaced.contains(k.uuid.as_str()));
-        let rep = Checker::new(&m, opts).check_items(&items);
+        // ε is build headroom, not a rule: check at the design clearance.
+        let check_opts = Options {
+            margin_nm: 0,
+            ..opts.clone()
+        };
+        let rep = Checker::new(&m, &check_opts).check_items(&items);
         let mut any = false;
         for v in &rep.violations {
             let i = owner[v.item];
@@ -292,10 +408,14 @@ pub fn smooth(model: &BoardModel, opts: &Options) -> SmoothResult {
     let mut reports: Vec<WireReport> = Vec::with_capacity(n);
     let mut total_len = 0.0;
     let mut hand_total = 0.0;
+    let (mut out_total, mut hand_out_total) = (0.0, 0.0);
     for (i, w) in wires.iter().enumerate() {
         hand_total += w.hand_len;
         let taut = fail[i].is_none();
-        let (pattern, anchors, len) = if taut {
+        let sks = terminal_skeletons(model, w);
+        let hand_out = hand_outside(w, &sks);
+        hand_out_total += hand_out;
+        let (pattern, anchors, len, out) = if taut {
             let pat: String = emit[i]
                 .iter()
                 .map(|t| match t.prim {
@@ -307,10 +427,14 @@ pub fn smooth(model: &BoardModel, opts: &Options) -> SmoothResult {
             total_len += len;
             items.extend(emit[i].iter().cloned().map(Item::Track));
             replaced.extend(w.kept_uuids.iter().cloned());
-            (pat, chains[i].as_ref().map_or(0, |c| c.seq.len()), len)
+            let out = chains[i]
+                .as_ref()
+                .map_or(len, |c| outside_len(&c.prims, &sks));
+            (pat, chains[i].as_ref().map_or(0, |c| c.seq.len()), len, out)
         } else {
-            (String::new(), 0, w.hand_len)
+            (String::new(), 0, w.hand_len, hand_out)
         };
+        out_total += out;
         reports.push(WireReport {
             id: w.id,
             net: w.net,
@@ -322,6 +446,8 @@ pub fn smooth(model: &BoardModel, opts: &Options) -> SmoothResult {
             anchors,
             length_nm: len.round() as i64,
             hand_length_nm: w.hand_len.round() as i64,
+            length_outside_pads_nm: out.round() as i64,
+            hand_outside_pads_nm: hand_out.round() as i64,
         });
     }
 
@@ -380,6 +506,8 @@ pub fn smooth(model: &BoardModel, opts: &Options) -> SmoothResult {
             taut,
             length_nm: ws.iter().map(|r| r.length_nm).sum(),
             hand_length_nm: ws.iter().map(|r| r.hand_length_nm).sum(),
+            length_outside_pads_nm: ws.iter().map(|r| r.length_outside_pads_nm).sum(),
+            hand_outside_pads_nm: ws.iter().map(|r| r.hand_outside_pads_nm).sum(),
         });
     }
     let nets_total = nets.iter().filter(|x| x.wires > 0).count();
@@ -397,6 +525,8 @@ pub fn smooth(model: &BoardModel, opts: &Options) -> SmoothResult {
         nets_taut,
         total_length_nm: total_len.round() as i64,
         hand_length_nm: hand_total.round() as i64,
+        length_outside_pads_nm: out_total.round() as i64,
+        hand_outside_pads_nm: hand_out_total.round() as i64,
         iterations,
         converged,
         timed_out,

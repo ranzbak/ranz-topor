@@ -6,7 +6,7 @@ use crate::geom::prim::{Aabb, Arc, Circle, Prim, Seg};
 use crate::geom::{bitangent, dist_prim, point_arc, point_seg, GeomError, Orient, Vec2};
 use crate::obstacle::{Core, LayerObstacles};
 use std::collections::HashSet;
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::TAU;
 
 pub const TAUT_PASS_CAP: u32 = 64;
 /// 25 §2 ε-band: drop an anchor only when its slack exceeds this, nm.
@@ -294,7 +294,7 @@ impl Members {
 }
 
 /// Anchors to add for the non-member obstacles that `prim` penetrates (sorted, deduplicated).
-fn penetrations(prim: &Prim, mem: &Members, env: &dyn Env) -> Vec<usize> {
+fn penetrations(prim: &Prim, mem: &Members, env: &dyn Env) -> Result<Vec<usize>, TautError> {
     let l = env.layer();
     let bb = prim.bbox().grow(env.query_grow());
     let mut out: Vec<usize> = Vec::new();
@@ -319,6 +319,15 @@ fn penetrations(prim: &Prim, mem: &Members, env: &dyn Env) -> Vec<usize> {
         let (near, far) = if d(e0) <= d(e1) { (e0, e1) } else { (e1, e0) };
         for e in [near, far] {
             if !mem.has(e, l) && !env.exempt_anchor(e) {
+                // The end anchor must cover the penetration point; otherwise the wall is grazed
+                // mid-span and no end anchor can express the detour.
+                if d(e) >= env.rho_anchor(e) + SLACK_BAND_NM {
+                    let depth = env.rho_wall(w) - core_prim_dist(&wall.core, prim);
+                    return Err(TautError::Infeasible(format!(
+                        "wall {} grazed mid-span by {:.0} nm",
+                        wall.label, depth
+                    )));
+                }
                 out.push(e);
                 break;
             }
@@ -340,7 +349,7 @@ fn penetrations(prim: &Prim, mem: &Members, env: &dyn Env) -> Vec<usize> {
     }
     out.sort_unstable();
     out.dedup();
-    out
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -411,13 +420,9 @@ fn is_slack(
     if point_seg(ci, &s) < ri + SLACK_BAND_NM {
         return false;
     }
-    // (d) current arc sweep: ≤ π keeps the swept region inside the centre triangle; a longer
-    // (looping) arc sweeps within the hull of p, q and the disc, tested via its bbox below
-    let (Ok(sin), Ok(sout)) = (bt(p, me), bt(me, q)) else {
-        return false;
-    };
-    let arc = Arc::from_tangent_points(ci, ri, sigma, sin.b, sout.a);
-    let looping = arc.sweep > PI;
+    // After (b) and (c) a wrap of the current arc is < π (a sweep > π would be a negative arc,
+    // 2π minus a small backward wrap, which is exactly what must go), so the swept region lies
+    // inside the centre triangle.
     let l = env.layer();
     // (e) no non-exempt core centre strictly inside the centre triangle
     let (a, b, c) = (p.c.c, ci, q.c.c);
@@ -431,18 +436,12 @@ fn is_slack(
             y: a.y.max(b.y).max(c.y),
         },
     };
-    let bb = if looping { bb.grow(ri) } else { bb };
     for o in query_anchors(l, bb) {
         let oc = l.anchors[o].c;
         if env.exempt_anchor(o) || key(oc) == key(ci) {
             continue;
         }
-        let inside = if looping {
-            oc.x >= bb.min.x && oc.x <= bb.max.x && oc.y >= bb.min.y && oc.y <= bb.max.y
-        } else {
-            tri_contains(a, b, c, oc)
-        };
-        if inside {
+        if tri_contains(a, b, c, oc) {
             return false;
         }
     }
@@ -450,7 +449,7 @@ fn is_slack(
     let mut mem2 = mem.clone();
     mem2.centres.remove(&key(ci));
     mem2.idx.retain(|&x| key(l.anchors[x].c) != key(ci));
-    penetrations(&Prim::Seg(s), &mem2, env).is_empty()
+    matches!(penetrations(&Prim::Seg(s), &mem2, env), Ok(v) if v.is_empty())
 }
 
 /// Closest point of `prim` to `c`, the travel tangent there, and the fraction along `prim`.
@@ -510,7 +509,7 @@ fn sigma_for(prim: &Prim, c: Vec2, p: Vec2, t: Vec2) -> Orient {
 }
 
 /// `(seq position, path key, anchor, σ)` for every penetration of the current chain.
-fn add_pass(chain: &Chain, env: &dyn Env) -> Vec<(usize, f64, usize, Orient)> {
+fn add_pass(chain: &Chain, env: &dyn Env) -> Result<Vec<(usize, f64, usize, Orient)>, TautError> {
     let l = env.layer();
     let mem = Members::new(&chain.seq, l);
     let arcs = arc_members(chain, env);
@@ -518,7 +517,7 @@ fn add_pass(chain: &Chain, env: &dyn Env) -> Vec<(usize, f64, usize, Orient)> {
     let mut after = 0usize; // seq entries before the current prim
     for (pi, prim) in chain.prims.iter().enumerate() {
         let arc_seq = arcs.iter().find(|(p, _)| *p == pi).map(|&(_, k)| k);
-        for a in penetrations(prim, &mem, env) {
+        for a in penetrations(prim, &mem, env)? {
             let c = l.anchors[a].c;
             let (pt, t, frac) = closest(prim, c);
             let sg = sigma_for(prim, c, pt, t);
@@ -541,7 +540,7 @@ fn add_pass(chain: &Chain, env: &dyn Env) -> Vec<(usize, f64, usize, Orient)> {
     out.sort_by(|x, y| x.0.cmp(&y.0).then(x.1.total_cmp(&y.1)).then(x.2.cmp(&y.2)));
     let mut seen = HashSet::new();
     out.retain(|x| seen.insert(x.2));
-    out
+    Ok(out)
 }
 
 /// Fix-up loop (21 §4, 11 §4, 25 §2 step 3), ≤ `TAUT_PASS_CAP` passes.
@@ -562,7 +561,7 @@ pub fn tauten(
             seq = cur;
             continue;
         }
-        let adds = add_pass(&chain, env);
+        let adds = add_pass(&chain, env)?;
         if adds.is_empty() {
             return Ok(chain);
         }

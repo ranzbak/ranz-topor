@@ -25,7 +25,8 @@ def _fake_router(model, options):
                        "wires": [{"status": "taut"}, {"status": "taut"}, {"status": "partial"}],
                        "nets_total": 2, "nets_taut": 1, "wires_total": 3, "wires_taut": 2,
                        "total_length_nm": 5 * MM,
-                       "hand_length_nm": 6 * MM, "iterations": 7, "timed_out": False}}
+                       "hand_length_nm": 6 * MM, "length_outside_pads_nm": 3 * MM,
+                       "hand_outside_pads_nm": 4 * MM, "iterations": 7, "timed_out": False}}
 
 
 def _list_router(model, options):
@@ -49,9 +50,10 @@ def test_run_bench_accepts_dict_router(fixture_board, tmp_path, capsys):
                         pcb_override=fixture_board.pcb)
     assert r["replaced"] == 1 and r["routed_items"] == 3
     assert r["smooth"] == {"nets_taut": 1, "nets": 2, "wires_taut": 2, "wires": 3,
-                           "length_mm": 5.0, "hand_mm": 6.0, "iterations": 7, "timed_out": False}
+                           "length_mm": 5.0, "hand_mm": 6.0, "outside_mm": 3.0,
+                           "hand_outside_mm": 4.0, "iterations": 7, "timed_out": False}
     out = capsys.readouterr().out
-    assert "smooth: taut 1/2 nets, 2/3 wires, 5.0 mm (hand 6.0), iters 7" in out
+    assert "smooth: taut 1/2 nets, 2/3 wires, 5.0 mm (hand 6.0), outside pads 3.0 (hand 4.0), iters 7" in out
 
 
 def test_run_bench_list_router_still_works(fixture_board, tmp_path, capsys):
@@ -107,7 +109,8 @@ def test_progress_png_caption_and_path(fixture_board, tmp_path, monkeypatch):
     line1 = f"T1.4a: 1/2 nets, 2/3 wires, 1 fallback, arcs {n['arcs']}"
     line2 = (f"DRC routing {d['routing_new']}, unconnected {d['incomplete']['unconnected_items']}, "
              f"{n['track_mm'] + n['arc_mm']:.1f} mm vs hand "
-             f"{res['orig_all']['track_mm'] + res['orig_all']['arc_mm']:.1f} mm")
+             f"{res['orig_all']['track_mm'] + res['orig_all']['arc_mm']:.1f} mm, "
+             f"outside pads 3.0 vs 4.0 mm")
     assert res["caption"] == f"{line1}\n{line2}"
     # hand image is rendered from the same board at the same height: compare the sizes.
     # The two-line topor caption band is 28 + 36 + 2*16 = 96 px; the one-line hand band is 60 px.

@@ -57,6 +57,8 @@ def _smooth_summary(report: dict | None) -> dict | None:
         "wires": len(wires),
         "length_mm": mm("total_length_nm"),
         "hand_mm": mm("hand_length_nm"),
+        "outside_mm": mm("length_outside_pads_nm"),
+        "hand_outside_mm": mm("hand_outside_pads_nm"),
         "iterations": report.get("iterations"),
         "timed_out": report.get("timed_out"),
     }
@@ -85,7 +87,8 @@ def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path) -> s
     if sm:
         head.append(f"  smooth: taut {sm['nets_taut']}/{sm['nets']} nets, "
                     f"{sm['wires_taut']}/{sm['wires']} wires, {sm['length_mm']} mm "
-                    f"(hand {sm['hand_mm']}), iters {sm['iterations']}, "
+                    f"(hand {sm['hand_mm']}), outside pads {sm['outside_mm']} "
+                    f"(hand {sm['hand_outside_mm']}), iters {sm['iterations']}, "
                     f"teardrops_removed {result['teardrops_removed']}")
     drc = summarise(board, routed_drc, base_drc,
                     extra={"width_match": f"{wm['matched']}/{wm['compared']}"})
