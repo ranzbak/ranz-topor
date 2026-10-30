@@ -409,3 +409,25 @@ fn query_returns_only_nearby() {
     };
     assert_eq!(s.query_anchors(0, all).len(), 1000);
 }
+
+#[test]
+fn track_keepout_is_zero_clearance_polygon_for_every_net() {
+    let poly = r#""poly": [[0,0],[3000000,0],[3000000,3000000],[0,3000000]]"#;
+    let body = format!(
+        r#""keepouts": [ {{ "name": "ko", "layers": [0], "no_tracks": true, {poly} }},
+                         {{ "name": "vo", "layers": [0], "no_vias": true, {poly} }} ]"#
+    );
+    let s = build(&model(&body));
+    let l = s.layer(0);
+    assert_eq!((l.anchors.len(), l.walls.len()), (4, 4));
+    assert!(l
+        .walls
+        .iter()
+        .all(|w| w.kind == ObsKind::Keepout && w.label == "keepout:ko"));
+    let a = &l.anchors[0];
+    assert!(
+        !ObstacleSet::exempt(a.net, &a.tie_nets, 0) && !ObstacleSet::exempt(a.net, &a.tie_nets, 5)
+    );
+    assert!(near(s.rho_wall(0, 0, 5, W), 125_000.0 + 5_000.0));
+    assert!(s.layer(2).walls.is_empty());
+}

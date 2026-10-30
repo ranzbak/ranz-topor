@@ -4,8 +4,12 @@
 //! a pad (attached at its centre), a via, a junction (vertex of degree >= 3, fixed) or a
 //! dangling end (degree 1, fixed). An item endpoint lying on the interior of another item
 //! splits that item there, so hand T-junctions without a shared vertex become junctions.
+//! Likewise a same-net via or pad whose copper an item crosses mid-span (no endpoint of that
+//! item inside it) splits the item at the point nearest the via / pad centre, and the via / pad
+//! becomes a terminal there: the taut wire must not leave copper the hand wire connected.
 //! Neighbour lookups go through [`Grid`]; every loop is bounded by the item / vertex count.
 
+use crate::geom::quant::round_nm;
 use crate::geom::{
     copper_gap_skeleton, dequantise, point_arc, point_seg, Aabb, Arc, Grid, IVec2, Prim, Seg,
     Skeleton, Track, Vec2,
@@ -158,6 +162,30 @@ fn interior_param(model: &BoardModel, item: usize, v: IVec2) -> Option<f64> {
     }
 }
 
+/// Point of `item`'s centreline nearest `c`, with its parameter, when strictly interior.
+fn nearest_interior(model: &BoardModel, item: usize, c: Vec2) -> Option<(f64, Vec2)> {
+    let (t, q) = match prim_of(model, item) {
+        Prim::Seg(s) => {
+            let d = s.b - s.a;
+            let l2 = d.len2();
+            if l2 == 0.0 {
+                return None;
+            }
+            let t = (c - s.a).dot(d) / l2;
+            (t, s.a + d * t)
+        }
+        Prim::Arc(a) => {
+            let v = c - a.c;
+            if a.sweep <= 0.0 || v.len2() == 0.0 {
+                return None;
+            }
+            let t = (a.sigma.sign() * (v.angle() - a.a_start)).rem_euclid(TAU) / a.sweep;
+            (t, a.point_at(t))
+        }
+    };
+    (t > 0.0 && t < 1.0).then_some((t, q))
+}
+
 fn arc_samples(a: &Arc) -> usize {
     ((a.sweep.to_degrees() / ARC_STEP_DEG).ceil() as usize).max(1)
 }
@@ -206,6 +234,9 @@ fn split_item(model: &BoardModel, item: usize, splits: &[(f64, IVec2)], out: &mu
 struct Ctx<'a> {
     model: &'a BoardModel,
     pad_grid: Grid<usize>,
+    /// Via / pad indices per net.
+    vias_of: HashMap<i32, Vec<usize>>,
+    pads_of: HashMap<i32, Vec<usize>>,
 }
 
 impl Ctx<'_> {
@@ -252,6 +283,98 @@ fn lex_gt(a: Vec2, b: Vec2) -> bool {
     a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)).is_gt()
 }
 
+/// `(item, split vertex, t)` for every item of the group crossing the copper `inside` mid-span
+/// with no endpoint inside it; the vertex is the item point nearest `c`, rounded to nm.
+fn crossings_of(
+    model: &BoardModel,
+    grid: &Grid<usize>,
+    bb: Aabb,
+    c: Vec2,
+    inside: impl Fn(&Track) -> bool,
+) -> Vec<(usize, IVec2, f64)> {
+    let mut cands = grid.query(bb);
+    cands.sort_unstable();
+    cands.dedup();
+    let mut out = Vec::new();
+    for j in cands {
+        let k = &model.kept[j];
+        let dot = |p: IVec2| Track {
+            prim: Prim::Seg(Seg {
+                a: p.to_f64(),
+                b: p.to_f64(),
+            }),
+            w: 0.0,
+        };
+        let body = Track {
+            prim: prim_of(model, j),
+            w: k.width as f64,
+        };
+        if !inside(&body) || inside(&dot(k.prim.start())) || inside(&dot(k.prim.end())) {
+            continue;
+        }
+        if let Some((t, q)) = nearest_interior(model, j, c) {
+            let v = round_nm(q);
+            if v != k.prim.start() && v != k.prim.end() {
+                out.push((j, v, t));
+            }
+        }
+    }
+    out
+}
+
+/// Same-net vias on `layer` crossed mid-span by group items (copper overlap).
+fn via_contacts(
+    ctx: &Ctx,
+    net: i32,
+    layer: u32,
+    grid: &Grid<usize>,
+    reach: f64,
+) -> Vec<(usize, (usize, IVec2, f64))> {
+    let model = ctx.model;
+    let mut out = Vec::new();
+    for &i in ctx.vias_of.get(&net).map(Vec::as_slice).unwrap_or(&[]) {
+        let v = &model.vias[i];
+        if !(v.layers.is_empty() || v.layers.contains(&layer)) {
+            continue;
+        }
+        let (c, r) = (v.at.to_vec2(), 0.5 * v.d as f64);
+        let disc = Skeleton::Point { p: c, r };
+        let hit = |t: &Track| copper_gap_skeleton(t, &disc) < 0.0;
+        for x in crossings_of(model, grid, point_box(c, r + reach), c, hit) {
+            out.push((i, x));
+        }
+    }
+    out
+}
+
+/// Same-net pads on `layer` crossed mid-span by group items whose nearest centreline point
+/// to the pad centre lies in the pad (the vertex then resolves to the pad, see `pad_at`).
+fn pad_contacts(
+    ctx: &Ctx,
+    net: i32,
+    layer: u32,
+    grid: &Grid<usize>,
+    reach: f64,
+) -> Vec<(usize, (usize, IVec2, f64))> {
+    let model = ctx.model;
+    let mut out = Vec::new();
+    for &i in ctx.pads_of.get(&net).map(Vec::as_slice).unwrap_or(&[]) {
+        let p = &model.pads[i];
+        if !(p.layers.contains(&layer) || p.shapes.contains_key(&layer)) {
+            continue;
+        }
+        let sk = model.skeleton(p, layer);
+        let hit = |t: &Track| copper_gap_skeleton(t, &sk) < 0.0;
+        let c = p.center.to_vec2();
+        for x in crossings_of(model, grid, skeleton_bbox(&sk).grow(reach), c, hit) {
+            if ctx.pad_at(net, layer, x.1) == Some(i) {
+                out.push((i, x));
+            }
+        }
+    }
+    out
+}
+
 /// Extract the wires of one `(net, layer)` group of candidate item indices.
 fn extract_group(
     ctx: &Ctx,
@@ -272,6 +395,21 @@ fn extract_group(
         verts.insert(key_of(k.end()));
     }
     let mut splits: BTreeMap<usize, Vec<(f64, IVec2)>> = BTreeMap::new();
+    // 1b. vias / pads crossed mid-span: split there (vertex -> via / pad terminal)
+    let mut contact: HashMap<(i32, i32), NodeKey> = HashMap::new();
+    let reach = items
+        .iter()
+        .map(|&i| 0.5 * model.kept[i].width as f64)
+        .fold(0.0, f64::max);
+    for (i, v) in via_contacts(ctx, net, layer, &grid, reach) {
+        contact.insert(key_of(v.1), NodeKey::Via(i));
+        verts.insert(key_of(v.1));
+        splits.entry(v.0).or_default().push((v.2, v.1));
+    }
+    for (_, v) in pad_contacts(ctx, net, layer, &grid, reach) {
+        verts.insert(key_of(v.1));
+        splits.entry(v.0).or_default().push((v.2, v.1));
+    }
     for &(x, y) in &verts {
         let v = IVec2 { x, y };
         let mut cands = grid.query(point_box(v.to_f64(), SPLIT_TOL_NM));
@@ -308,6 +446,8 @@ fn extract_group(
         let v = IVec2 { x, y };
         let key = if let Some(p) = ctx.pad_at(net, layer, v) {
             NodeKey::Pad(p)
+        } else if let Some(&k) = contact.get(&(x, y)) {
+            k
         } else if let Some(&i) = via_at.get(&(x as i64, y as i64)) {
             NodeKey::Via(i)
         } else {
@@ -509,7 +649,20 @@ pub fn extract_wires(model: &BoardModel, opts: &Options) -> Extraction {
             pad_grid.insert(bb.grow(1.0), i);
         }
     }
-    let ctx = Ctx { model, pad_grid };
+    let mut vias_of: HashMap<i32, Vec<usize>> = HashMap::new();
+    for (i, v) in model.vias.iter().enumerate() {
+        vias_of.entry(v.net).or_default().push(i);
+    }
+    let mut pads_of: HashMap<i32, Vec<usize>> = HashMap::new();
+    for (i, p) in model.pads.iter().enumerate().filter(|(_, p)| p.net != 0) {
+        pads_of.entry(p.net).or_default().push(i);
+    }
+    let ctx = Ctx {
+        model,
+        pad_grid,
+        vias_of,
+        pads_of,
+    };
     for ((net, layer), items) in &groups {
         extract_group(&ctx, *net, *layer, items, &mut out.wires, &mut out.skipped);
     }

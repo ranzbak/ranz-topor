@@ -127,6 +127,12 @@ def _split(report: DrcReport, baseline: DrcReport | None) -> tuple[dict, dict[st
     return classified, dict(by_type_pre)
 
 
+def new_routing(report: DrcReport, baseline: DrcReport | None) -> list[Violation]:
+    """Routing violations of `report` not in `baseline` (same key as `classify`)."""
+    seen = {_key(v) for v in baseline.violations} if baseline is not None else set()
+    return [v for v in report.violations if v.type in ROUTING_TYPES and _key(v) not in seen]
+
+
 def classify(report: DrcReport, baseline: DrcReport | None) -> dict:
     """Split violations into routing (new / pre-existing), incomplete and other buckets."""
     return _split(report, baseline)[0]

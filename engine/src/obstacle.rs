@@ -25,6 +25,8 @@ pub enum ObsKind {
     Shape,
     Track,
     Terminal,
+    /// Rule area that forbids tracks: no clearance, every net (KiCad `items_not_allowed`).
+    Keepout,
 }
 
 #[derive(Clone, Debug)]
@@ -464,6 +466,23 @@ impl ObstacleSet {
             b.add(&[s.layer], &Frag::polygon(&pts, 0.0, &m));
         }
 
+        // Rule areas forbidding tracks (the smoother emits tracks only): polygon edges, all nets.
+        for k in model
+            .keepouts
+            .iter()
+            .filter(|k| k.no_tracks && k.poly.len() >= 3)
+        {
+            let m = Meta {
+                net: 0,
+                kind: ObsKind::Keepout,
+                own_clr: 0.0,
+                tie_nets: Vec::new(),
+                label: format!("keepout:{}", k.name),
+            };
+            let pts: Vec<Vec2> = k.poly.iter().map(|p| p.to_vec2()).collect();
+            b.add(&k.layers, &Frag::polygon(&pts, 0.0, &m));
+        }
+
         // Kept hand copper that is not being smoothed.
         for k in &model.kept {
             if exclude_kept.contains(&k.uuid) {
@@ -534,6 +553,7 @@ impl ObstacleSet {
         match kind {
             ObsKind::Hole => self.hole_clearance,
             ObsKind::Edge => self.edge_clearance,
+            ObsKind::Keepout => 0.0,
             _ => self.clr(net).max(own_clr).max(self.min_clearance),
         }
     }

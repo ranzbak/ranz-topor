@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -14,13 +15,14 @@ from typing import Callable, Literal
 
 from harness import writer
 from harness.copy import assert_unchanged, copy_project
-from harness.drc import classify, run_drc, summarise
+from harness.drc import classify, new_routing, run_drc, summarise
 from harness.metrics import copper_metrics
 from harness.model import export_model, load_board, write_model_json
 from harness.paths import BENCH_BOARDS
 from harness.render import caption, compose_compare, render_png
 from harness.rip import record_widths, rip_tracks
 from harness.rules import resolve_rules
+from harness.smoother import drc_pins
 
 SUMMARY_MAX = 20
 Router = Callable[[dict, dict], "list[dict] | dict"]
@@ -39,6 +41,15 @@ def _source_pcb(board: str, pcb_override: Path | None) -> Path:
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+def _zone_reach(board) -> float:
+    """Proximity radius (nm) for zone-fill neck violations: twice the largest (clearance + min
+    thickness) of the copper pours (fill keeps that clearance, then drops slivers thinner than
+    min thickness); 1 mm without pours."""
+    r = [int(z.GetLocalClearance() or 0) + int(z.GetMinThickness()) for z in board.Zones()
+         if not z.GetIsRuleArea() and not z.IsTeardropArea()]
+    return 2.0 * max(r) if r else 1_000_000.0
+
 
 def _smooth_summary(report: dict | None) -> dict | None:
     if not report:
@@ -102,6 +113,9 @@ def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path) -> s
         head.append(f"  fallback: {len(fb)} wires (zero slack {sm['wires_zero_slack']})")
         head.extend(f"    wire {f['id']} net {f['net']}"
                     f"{' [zero slack]' if f['zero_slack'] else ''}: {f['reason']}" for f in fb)
+    dl = result.get("drc_loop") or {}
+    if dl.get("rounds", 1) > 1:
+        head.append(f"  drc loop: {dl['rounds']} rounds, {len(dl['pinned'])} pinned")
     drc = summarise(board, routed_drc, base_drc,
                     extra={"width_match": f"{wm['matched']}/{wm['compared']}"})
     lines = head + drc.splitlines() + [f"  outputs: {out_dir}"]
@@ -150,20 +164,45 @@ def run_bench(
     model = export_model(b, rules, name=board)
     write_model_json(model, out_dir / f"{board}--model.json")
 
-    t_route = time.monotonic()
-    routed = router(model, {**options, "threads": threads}) if router is not None else []
-    router_s = time.monotonic() - t_route
-    if isinstance(routed, dict):
-        items = list(routed.get("items") or [])
-        remove_uuids = list(routed.get("remove_uuids") or [])
-        router_report = routed.get("report")
-    else:
-        items, remove_uuids, router_report = list(routed), [], None
-    replaced, teardrops_removed = writer.remove_items_and_teardrops(b, remove_uuids)
-    writer.write_items(b, items)
-    # Save over the working copy so the copied .kicad_pro/.kicad_dru still apply to the DRC run.
-    writer.save(b, cp.pcb)
-    routed_drc = run_drc(cp.pcb, out_dir / f"{board}--drc-routed.json")
+    # DRC loop (plan T1.4, cap `drc_loop_cap`): KiCad DRC after a refill sees copper the engine
+    # does not model (zone-fill necks). A dict router's wires named by, or (zone necks) next to,
+    # a new routing violation are pinned to their hand copper and the routing is redone.
+    loop_cap = int(options.get("drc_loop_cap", 5))
+    reach = _zone_reach(b)
+    pre_route = cp.pcb.with_name(cp.pcb.name + ".pre-route")
+    shutil.copyfile(cp.pcb, pre_route)
+    pinned: dict = dict(options.get("pinned") or {})
+    rounds, router_s = 0, 0.0
+    while True:
+        rounds += 1
+        t_route = time.monotonic()
+        opts = {**options, "threads": threads, **({"pinned": pinned} if pinned else {})}
+        routed = router(model, opts) if router is not None else []
+        router_s += time.monotonic() - t_route
+        if isinstance(routed, dict):
+            items = list(routed.get("items") or [])
+            remove_uuids = list(routed.get("remove_uuids") or [])
+            router_report = routed.get("report")
+        else:
+            items, remove_uuids, router_report = list(routed), [], None
+        remove_uuids, write, unchanged = writer.skip_unchanged(model["kept"], remove_uuids, items)
+        replaced, teardrops_removed = writer.remove_items_and_teardrops(b, remove_uuids)
+        created = dict(zip(writer.write_items(b, write), write))
+        # Save over the working copy so the copied .kicad_pro/.kicad_dru still apply to the DRC run.
+        writer.save(b, cp.pcb)
+        routed_drc = run_drc(cp.pcb, out_dir / f"{board}--drc-routed.json")
+        if router_report is None or rounds > loop_cap:
+            break
+        names = {n["code"]: n["name"] for n in model["nets"]}
+        more = {u: r for u, r in drc_pins(new_routing(routed_drc, base_drc), created,
+                                          router_report.get("wires") or [], names, reach).items()
+                if u not in pinned}
+        if not more:
+            break
+        pinned.update(more)
+        shutil.copyfile(pre_route, cp.pcb)
+        b = load_board(cp)
+    pre_route.unlink()
     topor_raw = render_png(cp.pcb, cp.pcb.parent / f"{board}-topor-raw.png")
 
     routed_all = copper_metrics(b)
@@ -188,8 +227,10 @@ def run_bench(
         "kept": kept,
         "routed_all": routed_all,
         "routed_drc": classify(routed_drc, base_drc),
-        "routed_items": len(items),
+        "routed_items": len(write),
+        "unchanged_items": unchanged,
         "replaced": replaced,
+        "drc_loop": {"rounds": rounds, "pinned": pinned},
         "teardrops_removed": teardrops_removed,
         "router_report": router_report,
         "smooth": _smooth_summary(router_report),

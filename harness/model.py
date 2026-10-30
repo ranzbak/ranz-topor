@@ -286,9 +286,16 @@ def _export_outline(board, max_err: int):
     return out
 
 
+def _rule_areas(board):
+    """Board rule areas, then rule areas owned by footprints (e.g. a module's antenna keepout)."""
+    yield from board.Zones()
+    for fp in board.GetFootprints():
+        yield from fp.Zones()
+
+
 def _export_keepouts(board):
     out = []
-    for z in board.Zones():
+    for z in _rule_areas(board):
         if not z.GetIsRuleArea():
             continue
         ps = z.Outline()

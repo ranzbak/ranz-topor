@@ -33,6 +33,7 @@ fn track_above(gap: i32) -> Item {
             b: [3_000_000, y].into(),
         },
         group: None,
+        wire: None,
     })
 }
 

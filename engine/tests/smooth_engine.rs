@@ -227,20 +227,11 @@ fn smooth_is_deterministic() {
 
 #[test]
 fn smooth_self_check_fallback_restores_obstacle_for_others() {
-    // A (net 5) wraps below the foreign pad through a no_tracks keepout only the checker knows.
-    // B (net 6) runs below at y=-1.5 and passes with A's chain and again with A's hand copper.
-    let keepout = format!(
-        r#", "keepouts": [ {{ "name": "k", "layers": [0], "no_tracks": true, "no_vias": false,
-             "poly": [[{}, {}], [{}, {}], [{}, {}], [{}, {}]] }} ]"#,
-        nm(4.0),
-        nm(0.1),
-        nm(6.0),
-        nm(0.1),
-        nm(6.0),
-        nm(0.6),
-        nm(4.0),
-        nm(0.6)
-    );
+    // A (net 5) wraps tightly below the foreign pad; B (net 6) runs straight at y=-1.5 and
+    // passes with A's chain and again with A's hand copper. A negative build margin stands in
+    // for an engine blind spot: relax keeps 10 µm less than the design clearance, so only the
+    // self-check (design clearance) catches A. (Keepouts used to be that blind spot; T9c made
+    // them obstacles.)
     let m = model(
         &[
             pad("1", 5, 0.0, 0.0, 500_000),
@@ -254,9 +245,9 @@ fn smooth_self_check_fallback_restores_obstacle_for_others() {
             seg("a2", 5, (5.0, -0.6), (10.0, 0.0)),
             seg("b", 6, (0.0, -1.5), (10.0, -1.5)),
         ],
-        &keepout,
+        "",
     );
-    let o = opts("");
+    let o = Options::from_json(r#"{ "existing_copper": "smooth", "margin_nm": -10000 }"#).unwrap();
     let r = smooth(&m, &o);
     assert_eq!(r.self_check_rounds, 2, "{:?}", r.wires);
     let a = r.wires.iter().find(|w| w.net == 5).unwrap();
@@ -444,4 +435,191 @@ fn shared_item_fallback_is_not_zero_slack() {
     for w in shared {
         assert!(!w.zero_slack && w.hand_slack_nm.is_none(), "{w:?}");
     }
+}
+
+// ---- T9c: dcsgonebadge DRC regressions ----
+
+/// Keepout rule area (tracks not allowed) on F.Cu, math-frame mm corners.
+fn keepout(name: &str, x0: f64, y0: f64, x1: f64, y1: f64, tracks: bool) -> String {
+    format!(
+        r#", "keepouts": [ {{ "name": "{name}", "layers": [0], "no_tracks": {tracks}, "no_vias": true,
+             "poly": [[{},{}],[{},{}],[{},{}],[{},{}]] }} ]"#,
+        nm(x0),
+        nm(-y0),
+        nm(x1),
+        nm(-y0),
+        nm(x1),
+        nm(-y1),
+        nm(x0),
+        nm(-y1)
+    )
+}
+
+#[test]
+fn keepout_is_an_obstacle_for_the_taut_wire() {
+    // The hand V passes below a keepout that the straight pad-to-pad line would cross
+    // (dcsgonebadge: I2C_SCL through the ESP32 antenna keepout -> items_not_allowed).
+    let m = model(
+        &[
+            pad("1", 5, 0.0, 0.0, 1_000_000),
+            pad("2", 5, 10.0, 0.0, 1_000_000),
+        ],
+        &[
+            seg("h1", 5, (0.0, 0.0), (5.0, -1.0)),
+            seg("h2", 5, (5.0, -1.0), (10.0, 0.0)),
+        ],
+        &keepout("ko", 4.0, -0.5, 6.0, 1.0, true),
+    );
+    let o = opts("");
+    let r = smooth(&m, &o);
+    assert_eq!(r.wires_taut, 1, "{:?}", r.wires);
+    assert!(r.wires[0].pattern.contains('A'), "{:?}", r.wires);
+    let mut m2 = m.clone();
+    m2.kept.retain(|k| !r.replaced.contains(&k.uuid));
+    let rep = Checker::new(&m2, &o).check_items(&r.items);
+    assert!(rep.violations.is_empty(), "{:?}", rep.violations);
+}
+
+#[test]
+fn via_only_keepout_is_not_a_track_obstacle() {
+    let m = model(
+        &[
+            pad("1", 5, 0.0, 0.0, 1_000_000),
+            pad("2", 5, 10.0, 0.0, 1_000_000),
+        ],
+        &[
+            seg("h1", 5, (0.0, 0.0), (5.0, -1.0)),
+            seg("h2", 5, (5.0, -1.0), (10.0, 0.0)),
+        ],
+        &keepout("ko", 4.0, -0.5, 6.0, 1.0, false),
+    );
+    let r = smooth(&m, &opts(""));
+    assert_eq!(r.wires_taut, 1, "{:?}", r.wires);
+    assert_eq!(r.wires[0].pattern, "S", "{:?}", r.wires);
+}
+
+fn via_json(u: &str, net: i32, x: f64, y: f64) -> String {
+    format!(
+        r#"{{ "uuid": "{u}", "net": {net}, "at": [{}, {}], "d": 600000, "drill": 300000,
+            "layers": [0, 2] }}"#,
+        nm(x),
+        nm(-y)
+    )
+}
+
+#[test]
+fn via_on_track_interior_is_a_wire_terminal() {
+    // dcsgonebadge +3V3: a hand segment runs straight over a same-net via (no vertex there);
+    // the taut wire must still end on the via, else the via dangles on that layer.
+    let m = model(
+        &[
+            pad("1", 5, 0.0, 0.0, 1_000_000),
+            pad("2", 5, 10.0, 0.0, 1_000_000),
+        ],
+        &[
+            seg("h1", 5, (0.0, 0.0), (4.0, -2.0)),
+            seg("h2", 5, (4.0, -2.0), (10.0, 0.0)),
+        ],
+        &format!(r#", "vias": [ {} ]"#, via_json("v", 5, 2.0, -1.0)),
+    );
+    let r = smooth(&m, &opts(""));
+    assert_eq!(r.wires_total, 2, "{:?}", r.wires);
+    assert_eq!(r.wires_taut, 2, "{:?}", r.wires);
+    let v = (nm(2.0) as i32, nm(1.0) as i32);
+    let at_via = items_of(&r)
+        .iter()
+        .flat_map(|t| ends(t))
+        .filter(|&p| p == v)
+        .count();
+    assert_eq!(at_via, 2, "{:?}", r.items);
+}
+
+#[test]
+fn via_overlapping_track_off_centreline_is_a_wire_terminal() {
+    let m = model(
+        &[
+            pad("1", 5, 0.0, 0.0, 1_000_000),
+            pad("2", 5, 10.0, 0.0, 1_000_000),
+        ],
+        &[
+            seg("h1", 5, (0.0, 0.0), (4.0, -2.0)),
+            seg("h2", 5, (4.0, -2.0), (10.0, 0.0)),
+        ],
+        &format!(r#", "vias": [ {} ]"#, via_json("v", 5, 2.05, -1.0)),
+    );
+    let r = smooth(&m, &opts(""));
+    assert_eq!(r.wires_total, 2, "{:?}", r.wires);
+    let v = (nm(2.05) as i32, nm(1.0) as i32);
+    let at_via = items_of(&r)
+        .iter()
+        .flat_map(|t| ends(t))
+        .filter(|&p| p == v)
+        .count();
+    assert_eq!(at_via, 2, "{:?}", r.items);
+}
+
+#[test]
+fn foreign_net_via_on_track_does_not_split() {
+    let m = model(
+        &[
+            pad("1", 5, 0.0, 0.0, 1_000_000),
+            pad("2", 5, 10.0, 0.0, 1_000_000),
+        ],
+        &[seg("h1", 5, (0.0, 0.0), (10.0, 0.0))],
+        &format!(r#", "vias": [ {} ]"#, via_json("v", 6, 5.0, 3.0)),
+    );
+    let r = smooth(&m, &opts(""));
+    assert_eq!(r.wires_total, 1, "{:?}", r.wires);
+}
+
+#[test]
+fn pad_on_track_interior_is_a_wire_terminal() {
+    // A hand segment crossing a same-net pad (bus through a pad) keeps the pad on the wire.
+    let m = model(
+        &[
+            pad("1", 5, 0.0, 0.0, 1_000_000),
+            pad("2", 5, 10.0, 0.0, 1_000_000),
+            pad("m", 5, 2.0, -1.0, 800_000),
+        ],
+        &[
+            seg("h1", 5, (0.0, 0.0), (4.0, -2.0)),
+            seg("h2", 5, (4.0, -2.0), (10.0, 0.0)),
+        ],
+        "",
+    );
+    let r = smooth(&m, &opts(""));
+    assert_eq!(r.wires_total, 2, "{:?}", r.wires);
+    let p = (nm(2.0) as i32, nm(1.0) as i32);
+    let at_pad = items_of(&r)
+        .iter()
+        .flat_map(|t| ends(t))
+        .filter(|&q| q == p)
+        .count();
+    assert_eq!(at_pad, 2, "{:?}", r.items);
+}
+
+#[test]
+fn pinned_item_falls_back_with_reason_and_stays_an_obstacle() {
+    // The DRC loop pins hand items KiCad flagged (e.g. zone-fill necks the engine cannot see).
+    let m = l_route();
+    let r = smooth(
+        &m,
+        &opts(r#", "pinned": { "h2": "drc: connection_width" }"#),
+    );
+    assert_eq!(r.wires_taut, 0, "{:?}", r.wires);
+    assert!(r.items.is_empty() && r.replaced.is_empty());
+    assert_eq!(r.wires[0].status, "fallback");
+    assert_eq!(r.wires[0].reason, "pinned: drc: connection_width");
+    assert!(!r.wires[0].zero_slack);
+}
+
+#[test]
+fn items_and_wire_reports_carry_the_wire_and_its_hand_items() {
+    let m = l_route();
+    let r = smooth(&m, &opts(""));
+    assert_eq!(
+        r.wires[0].kept_uuids,
+        vec!["h1".to_string(), "h2".to_string()]
+    );
+    assert!(items_of(&r).iter().all(|t| t.wire == Some(r.wires[0].id)));
 }

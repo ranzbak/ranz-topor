@@ -43,6 +43,8 @@ pub struct WireReport {
     pub zero_slack: bool,
     /// The hand copper's real slack (0 <= s < ε), only when `zero_slack`.
     pub hand_slack_nm: Option<i64>,
+    /// Hand items (kept uuids) of the wire, in path order.
+    pub kept_uuids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -248,14 +250,30 @@ pub fn smooth(model: &BoardModel, opts: &Options) -> SmoothResult {
     let wires = ex.wires;
     let n = wires.len();
     let mut fail: Vec<Option<String>> = vec![None; n];
+    // Wires holding an item the caller pinned keep their hand copper (and every wire sharing
+    // an item with them, see `propagate`).
+    for (i, w) in wires.iter().enumerate() {
+        if let Some(r) = w.kept_uuids.iter().find_map(|u| opts.pinned.get(u)) {
+            fail[i] = Some(format!("pinned: {r}"));
+        }
+    }
+    propagate(&wires, &mut fail);
 
-    // Obstacles: every extracted wire's kept items are being replaced.
+    // Obstacles: the kept items of every wire still being smoothed are being replaced;
+    // pinned wires' hand copper stays an obstacle.
     let exclude: HashSet<String> = wires
         .iter()
-        .flat_map(|w| w.kept_uuids.iter().cloned())
+        .zip(&fail)
+        .filter(|(_, f)| f.is_none())
+        .flat_map(|(w, _)| w.kept_uuids.iter().cloned())
         .collect();
     let mut tmap: BTreeMap<(u32, (u64, u64), i32), TerminalObstacle> = BTreeMap::new();
-    for w in &wires {
+    for w in wires
+        .iter()
+        .zip(&fail)
+        .filter(|(_, f)| f.is_none())
+        .map(|(w, _)| w)
+    {
         for t in [&w.start, &w.goal] {
             if matches!(t, Terminal::Junction { .. } | Terminal::Dangling { .. }) {
                 let e = tmap
@@ -281,7 +299,8 @@ pub fn smooth(model: &BoardModel, opts: &Options) -> SmoothResult {
     for &l in &layers {
         let mut seen = HashSet::new();
         let mut pts: Vec<Vec2> = Vec::new();
-        for w in wires.iter().filter(|w| w.layer == l) {
+        let on_layer = |(i, w): &(usize, &Wire)| w.layer == l && fail[*i].is_none();
+        for (_, w) in wires.iter().enumerate().filter(on_layer) {
             for p in [w.start.at(), w.goal.at()] {
                 if seen.insert(bits(p)) {
                     pts.push(p);
@@ -290,7 +309,14 @@ pub fn smooth(model: &BoardModel, opts: &Options) -> SmoothResult {
         }
         match build_layer_cdt(obs.layer(l), &pts) {
             Ok(ls) => {
-                for (i, w) in wires.iter().enumerate().filter(|(_, w)| w.layer == l) {
+                let idx: Vec<usize> = wires
+                    .iter()
+                    .enumerate()
+                    .filter(on_layer)
+                    .map(|(i, _)| i)
+                    .collect();
+                for i in idx {
+                    let w = &wires[i];
                     match sketch_wire(w, &ls) {
                         Ok(s) => sketches[i] = Some(s),
                         Err(e) => fail[i] = Some(format!("sketch: {e}")),
@@ -299,7 +325,13 @@ pub fn smooth(model: &BoardModel, opts: &Options) -> SmoothResult {
                 lss.insert(l, ls);
             }
             Err(e) => {
-                for (i, _) in wires.iter().enumerate().filter(|(_, w)| w.layer == l) {
+                let idx: Vec<usize> = wires
+                    .iter()
+                    .enumerate()
+                    .filter(on_layer)
+                    .map(|(i, _)| i)
+                    .collect();
+                for i in idx {
                     fail[i] = Some(format!("sketch: {e}"));
                 }
             }
@@ -362,6 +394,7 @@ pub fn smooth(model: &BoardModel, opts: &Options) -> SmoothResult {
                 width: w.width,
                 prim: flip_track(t),
                 group: None,
+                wire: Some(w.id),
             })
             .collect();
     }
@@ -455,6 +488,7 @@ pub fn smooth(model: &BoardModel, opts: &Options) -> SmoothResult {
                             width: k.width,
                             prim: flip_track(k.prim),
                             group: None,
+                            wire: None,
                         })
                     }),
             );
@@ -535,6 +569,7 @@ pub fn smooth(model: &BoardModel, opts: &Options) -> SmoothResult {
             hand_outside_pads_nm: hand_out.round() as i64,
             zero_slack: zero_slack[i].is_some(),
             hand_slack_nm: zero_slack[i],
+            kept_uuids: w.kept_uuids.clone(),
         });
     }
 

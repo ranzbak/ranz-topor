@@ -179,3 +179,54 @@ def test_bench_reports_teardrops_removed(fixture_board, tmp_path, capsys):
     r = bench.run_bench("fixture", tmp_path / "o", router=router, rip="none", pcb_override=pcb)
     assert r["replaced"] == 1 and r["teardrops_removed"] == 1
     assert "teardrops_removed 1" in capsys.readouterr().out
+
+
+# ---- T9c: DRC loop (zone-fill necks and other copper the engine cannot see) ----
+
+def _viol(type_, *items):
+    from harness.drc import Violation
+    return Violation(type=type_, severity="error", description="",
+                     items=[{"description": d, "pos": {"x": x, "y": y}, "uuid": u} for d, x, y, u in items])
+
+
+def test_drc_pins_direct_hit_and_zone_neck_proximity():
+    from harness.smoother import drc_pins
+    items = {
+        "t1": {"wire": 0, "net": 5, "layer": 0, "prim": {"kind": "seg", "a": [0, 0], "b": [10 * MM, 0]}},
+        "t2": {"wire": 1, "net": 6, "layer": 0, "prim": {"kind": "seg", "a": [0, 3 * MM], "b": [10 * MM, 3 * MM]}},
+        "t3": {"wire": 2, "net": 7, "layer": 0, "prim": {"kind": "seg", "a": [0, 1 * MM], "b": [10 * MM, 1 * MM]}},
+    }
+    wires = [{"id": 0, "kept_uuids": ["h0"]}, {"id": 1, "kept_uuids": ["h1a", "h1b"]},
+             {"id": 2, "kept_uuids": ["h2"]}]
+    names = {5: "A", 6: "B", 7: "GND"}
+    # direct: the violation names an emitted item
+    v = _viol("clearance", ("Track [B] on F.Cu", 5.0, 3.0, "t2"), ("Pad 1 [X] of U1", 5.0, 3.2, "pad"))
+    assert drc_pins([v], items, wires, names, 1_500_000) == {
+        "h1a": "drc clearance at (5.000, 3.000) mm", "h1b": "drc clearance at (5.000, 3.000) mm"}
+    # zone neck: no emitted item named -> foreign-net emitted copper within the radius
+    v = _viol("connection_width", ("Via [GND] on F.Cu - B.Cu", 5.0, 0.5, "via"),
+              ("Zone [GND] on F.Cu and B.Cu, priority 0", 50.0, 50.0, "zone"))
+    assert drc_pins([v], items, wires, names, 1_500_000) == {
+        "h0": "drc connection_width at (5.000, 0.500) mm"}
+
+
+def _thin_router(model, options):
+    """Emits a too-thin SIG track (new track_width violation) unless the DRC loop pinned it."""
+    net = next(n["code"] for n in model["nets"] if n["name"] == "SIG")
+    victim = next(k["uuid"] for k in model["kept"] if not k["locked"])
+    wire = {"id": 0, "net": net, "status": "taut", "reason": "", "kept_uuids": [victim]}
+    if victim in (options.get("pinned") or {}):
+        wire = {**wire, "status": "fallback", "reason": "pinned: " + options["pinned"][victim]}
+        return {"items": [], "remove_uuids": [], "report": {"nets": [], "wires": [wire]}}
+    item = {**_sig_item(net, 0), "width": 100_000, "wire": 0}
+    return {"items": [item], "remove_uuids": [victim], "report": {"nets": [], "wires": [wire]}}
+
+
+def test_run_bench_drc_loop_falls_back_flagged_wire(fixture_board, tmp_path, capsys):
+    r = bench.run_bench("fixture", tmp_path / "o", router=_thin_router, rip="none",
+                        pcb_override=fixture_board.pcb)
+    assert r["routed_drc"]["routing_new"] == 0, r["routed_drc"]
+    assert r["drc_loop"]["rounds"] == 2 and len(r["drc_loop"]["pinned"]) == 1
+    assert next(iter(r["drc_loop"]["pinned"].values())).startswith("drc track_width at (")
+    assert r["replaced"] == 0 and r["routed_items"] == 0
+    assert "drc loop: 2 rounds, 1 pinned" in capsys.readouterr().out

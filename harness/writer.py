@@ -61,6 +61,44 @@ def _make_item(board, it: dict):
     return t
 
 
+def _copper_key(it: dict) -> tuple | None:
+    """Identity of a track/arc's copper (direction-free); None for vias."""
+    prim = it.get("prim")
+    if prim is None:
+        return None
+    if prim["kind"] == "arc":
+        s, e = tuple(prim["start"]), tuple(prim["end"])
+        geo = ("arc", min(s, e), tuple(prim["mid"]), max(s, e))
+    else:
+        a, b = tuple(prim["a"]), tuple(prim["b"])
+        geo = ("seg", min(a, b), max(a, b))
+    return (int(it["net"]), int(it["layer"]), int(it["width"])) + geo
+
+
+def skip_unchanged(kept: list[dict], remove_uuids: list[str],
+                   items: list[dict]) -> tuple[list[str], list[dict], int]:
+    """Drop each (emitted item, removed hand item) pair with identical copper.
+
+    A wire the smoother leaves straight re-emits its hand item unchanged; deleting and
+    re-adding it would only change its uuid (DRC baselines key on uuids) and drop its
+    teardrops. `kept` is the model's kept list. Returns `(remove_uuids, items, n_unchanged)`.
+    """
+    removing = set(remove_uuids)
+    free: dict[tuple, list[str]] = {}
+    for k in kept:
+        if k["uuid"] in removing:
+            free.setdefault(_copper_key(k), []).append(k["uuid"])
+    keep: set[str] = set()
+    out: list[dict] = []
+    for it in items:
+        same = free.get(_copper_key(it)) if it.get("prim") is not None else None
+        if same:
+            keep.add(same.pop(0))
+        else:
+            out.append(it)
+    return [u for u in remove_uuids if u not in keep], out, len(keep)
+
+
 def write_items(board, items: list[dict]) -> list[str]:
     """Add items to the board; return the uuids of created items in input order."""
     groups: dict = {}

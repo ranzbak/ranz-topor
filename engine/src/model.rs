@@ -8,7 +8,7 @@
 use crate::geom::quant::{IVec2, TrackPrim};
 use crate::geom::{Skeleton, Vec2};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Integer-nm point, serialised as `[x, y]`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
@@ -568,6 +568,9 @@ pub struct Options {
     pub existing_copper: ExistingCopper,
     pub scope: Scope,
     pub skip_self_check: bool,
+    /// Smoother: kept uuid -> reason. A wire containing a pinned item keeps its hand copper
+    /// (fallback "pinned: <reason>"); the harness DRC loop pins items KiCad flagged.
+    pub pinned: BTreeMap<String, String>,
 }
 
 impl Default for Options {
@@ -584,6 +587,7 @@ impl Default for Options {
             existing_copper: ExistingCopper::Fixed,
             scope: Scope::default(),
             skip_self_check: false,
+            pinned: BTreeMap::new(),
         }
     }
 }
@@ -624,6 +628,9 @@ pub struct TrackItem {
     pub prim: TrackPrim,
     #[serde(default)]
     pub group: Option<String>,
+    /// Smoother output: id of the wire this item belongs to (`WireReport.id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

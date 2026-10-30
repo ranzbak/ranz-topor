@@ -135,3 +135,25 @@ def test_export_eprom_counts(tmp_path):
     # 5 footprints on the board, but two are pad-less "REF**" graphics, so pads name 3 refs
     assert {p["ref"] for p in m["pads"]} == {fp.GetReference() for fp in b0.GetFootprints() if len(fp.Pads())}
     assert [l["name"] for l in m["layers"]] == ["F.Cu", "B.Cu"]
+
+
+def test_footprint_rule_area_exported_as_keepout(fixture_board):
+    """T9c: a rule area owned by a footprint (e.g. a module's antenna keepout) is a keepout too."""
+    b = load_board(fixture_board)
+    fp = next(iter(b.GetFootprints()))
+    z = pcbnew.ZONE(fp)
+    z.SetIsRuleArea(True)
+    z.SetDoNotAllowTracks(True)
+    z.SetDoNotAllowVias(False)
+    z.SetLayer(pcbnew.F_Cu)
+    z.SetZoneName("antenna keepout")
+    ol = pcbnew.SHAPE_LINE_CHAIN()
+    for x, y in ((2, 2), (4, 2), (4, 4), (2, 4)):
+        ol.Append(pcbnew.VECTOR2I(int(x * 1e6), int(y * 1e6)))
+    ol.SetClosed(True)
+    z.AddPolygon(ol)
+    fp.Add(z)
+    m = export_model(b, {}, name="fx")
+    ko = [k for k in m["keepouts"] if k["name"] == "antenna keepout"]
+    assert len(ko) == 1 and ko[0]["layers"] == [int(pcbnew.F_Cu)]
+    assert ko[0]["no_tracks"] and not ko[0]["no_vias"] and len(ko[0]["poly"]) == 4

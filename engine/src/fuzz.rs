@@ -181,6 +181,7 @@ pub fn fuzz_items(model: &BoardModel, opts: &Options, seed: u64, n: usize) -> Fu
             width: w as i64,
             prim: tp,
             group: None,
+            wire: None,
         });
         let track = Track {
             prim: dequantise(&q),

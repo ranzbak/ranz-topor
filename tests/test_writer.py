@@ -99,3 +99,32 @@ def test_random_arcs_center_matches_engine(fixture_board, engine, tmp_path):
         ex = engine.arc_center_nm(*pr["start"], *pr["mid"], *pr["end"])
         c = by[uid].GetCenter()
         assert abs(c.x - ex[0]) <= 100 and abs(c.y - ex[1]) <= 100
+
+
+def _kept(uuid, a, b, width=250_000, net=3, layer=0):
+    return {"uuid": uuid, "net": net, "layer": layer, "width": width,
+            "prim": {"kind": "seg", "a": a, "b": b}, "locked": False}
+
+
+def test_skip_unchanged_keeps_identical_hand_items():
+    """T9c: an emitted item identical to the hand item it replaces is a no-op (uuid kept), so
+    pre-existing DRC violations on unchanged copper keep their key."""
+    from harness.writer import skip_unchanged
+    kept = [_kept("A", [0, 0], [10, 0]), _kept("B", [10, 0], [20, 5]), _kept("C", [0, 9], [9, 9])]
+    same_rev = {"net": 3, "layer": 0, "width": 250_000, "prim": {"kind": "seg", "a": [10, 0], "b": [0, 0]}}
+    new = {"net": 3, "layer": 0, "width": 250_000, "prim": {"kind": "seg", "a": [10, 0], "b": [20, 6]}}
+    wider = {"net": 3, "layer": 0, "width": 300_000, "prim": {"kind": "seg", "a": [0, 9], "b": [9, 9]}}
+    rm, items, n = skip_unchanged(kept, ["A", "B", "C"], [same_rev, new, wider])
+    assert (rm, items, n) == (["B", "C"], [new, wider], 1)
+    # an item is only a no-op against a hand item that is being removed
+    rm, items, n = skip_unchanged(kept, ["B"], [same_rev])
+    assert (rm, items, n) == (["B"], [same_rev], 0)
+
+
+def test_skip_unchanged_arc_and_via_passthrough():
+    from harness.writer import skip_unchanged
+    arc = {"kind": "arc", "start": [0, 0], "mid": [5, 2], "end": [10, 0]}
+    kept = [{"uuid": "R", "net": 3, "layer": 2, "width": 200_000, "prim": arc, "locked": False}]
+    same = {"net": 3, "layer": 2, "width": 200_000, "prim": dict(arc)}
+    via = {"kind": "via", "net": 3, "at": [0, 0], "d": 600_000, "drill": 300_000, "layers": [0, 2]}
+    assert skip_unchanged(kept, ["R"], [via, same]) == ([], [via], 1)
