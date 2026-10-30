@@ -38,6 +38,11 @@ pub struct WireReport {
     /// Length outside the terminal pads' copper (emitted / hand).
     pub length_outside_pads_nm: i64,
     pub hand_outside_pads_nm: i64,
+    /// Fallback wire whose hand copper is clean at the design clearance but has no room for the
+    /// build margin ε (user ruling: counts as OK, reported as "fallback: zero slack").
+    pub zero_slack: bool,
+    /// The hand copper's real slack (0 <= s < ε), only when `zero_slack`.
+    pub hand_slack_nm: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -50,6 +55,8 @@ pub struct NetReport {
     pub reason: String,
     pub wires: usize,
     pub taut: usize,
+    /// Fallback wires classified as zero slack.
+    pub zero_slack: usize,
     pub length_nm: i64,
     pub hand_length_nm: i64,
     /// Length outside the terminal pads' copper (emitted / hand).
@@ -67,6 +74,7 @@ pub struct SmoothResult {
     pub wires: Vec<WireReport>,
     pub wires_total: usize,
     pub wires_taut: usize,
+    pub wires_zero_slack: usize,
     pub nets_total: usize,
     pub nets_taut: usize,
     pub total_length_nm: i64,
@@ -402,6 +410,77 @@ pub fn smooth(model: &BoardModel, opts: &Options) -> SmoothResult {
         }
     }
 
+    // Zero-slack classification of the fallback wires. Only the two eps-binding failure classes
+    // qualify; the hand copper is judged against the post-smooth board (kept minus replaced, plus
+    // the emitted items), so a neighbour the smoother moved away no longer excuses it. The hand
+    // items are same-net to themselves, hence exempt from each other. Two Checkers built once.
+    let mut zero_slack: Vec<Option<i64>> = vec![None; n];
+    let eligible = |r: &str| r.starts_with("infeasible:") || r.starts_with("inside obstacle:");
+    if (0..n).any(|i| fail[i].as_deref().is_some_and(eligible)) {
+        let eps = opts.margin_nm;
+        let mut post = model.clone();
+        let mut emitted: Vec<Item> = Vec::new();
+        let mut gone: HashSet<&str> = HashSet::new();
+        for i in 0..n {
+            if fail[i].is_none() {
+                emitted.extend(emit[i].iter().cloned().map(Item::Track));
+                gone.extend(wires[i].kept_uuids.iter().map(String::as_str));
+            }
+        }
+        post.kept.retain(|k| !gone.contains(k.uuid.as_str()));
+        let c0 = Checker::new(
+            &post,
+            &Options {
+                margin_nm: 0,
+                ..opts.clone()
+            },
+        );
+        let ce = Checker::new(&post, opts);
+        let by_uuid: HashMap<&str, &crate::model::KeptItem> =
+            model.kept.iter().map(|k| (k.uuid.as_str(), k)).collect();
+        let base = emitted.len();
+        for (i, w) in wires.iter().enumerate() {
+            if !fail[i].as_deref().is_some_and(eligible) {
+                continue;
+            }
+            let mut probe = emitted.clone();
+            probe.extend(
+                w.kept_uuids
+                    .iter()
+                    .filter_map(|u| by_uuid.get(u.as_str()))
+                    .map(|k| {
+                        Item::Track(TrackItem {
+                            net: k.net,
+                            layer: k.layer,
+                            width: k.width,
+                            prim: flip_track(k.prim),
+                            group: None,
+                        })
+                    }),
+            );
+            if probe.len() == base {
+                continue;
+            }
+            let hand_viol = |c: &Checker| -> Vec<crate::check::Violation> {
+                c.check_items(&probe)
+                    .violations
+                    .into_iter()
+                    .filter(|v| v.item >= base)
+                    .collect()
+            };
+            if !hand_viol(&c0).is_empty() {
+                continue;
+            }
+            let slack = hand_viol(&ce)
+                .iter()
+                .map(|v| v.gap - (v.required - eps))
+                .min();
+            if let Some(s) = slack {
+                zero_slack[i] = Some(s.max(0));
+            }
+        }
+    }
+
     // Assemble.
     let mut items: Vec<Item> = Vec::new();
     let mut replaced: BTreeSet<String> = BTreeSet::new();
@@ -441,13 +520,21 @@ pub fn smooth(model: &BoardModel, opts: &Options) -> SmoothResult {
             layer: w.layer,
             width: w.width,
             status: if taut { "taut" } else { "fallback" }.into(),
-            reason: fail[i].clone().unwrap_or_default(),
+            reason: match (zero_slack[i], &fail[i]) {
+                (Some(s), Some(r)) => format!(
+                    "zero slack: hand slack {s} nm < ε {} nm; {r}",
+                    opts.margin_nm
+                ),
+                _ => fail[i].clone().unwrap_or_default(),
+            },
             pattern,
             anchors,
             length_nm: len.round() as i64,
             hand_length_nm: w.hand_len.round() as i64,
             length_outside_pads_nm: out.round() as i64,
             hand_outside_pads_nm: hand_out.round() as i64,
+            zero_slack: zero_slack[i].is_some(),
+            hand_slack_nm: zero_slack[i],
         });
     }
 
@@ -504,6 +591,7 @@ pub fn smooth(model: &BoardModel, opts: &Options) -> SmoothResult {
             reason,
             wires: ws.len(),
             taut,
+            zero_slack: ws.iter().filter(|r| r.zero_slack).count(),
             length_nm: ws.iter().map(|r| r.length_nm).sum(),
             hand_length_nm: ws.iter().map(|r| r.hand_length_nm).sum(),
             length_outside_pads_nm: ws.iter().map(|r| r.length_outside_pads_nm).sum(),
@@ -514,6 +602,7 @@ pub fn smooth(model: &BoardModel, opts: &Options) -> SmoothResult {
     let nets_taut = nets.iter().filter(|x| x.status == "taut").count();
     let wires_taut = reports.iter().filter(|r| r.status == "taut").count();
 
+    let wires_zero_slack = reports.iter().filter(|r| r.zero_slack).count();
     SmoothResult {
         items,
         replaced: replaced.into_iter().collect(),
@@ -521,6 +610,7 @@ pub fn smooth(model: &BoardModel, opts: &Options) -> SmoothResult {
         wires: reports,
         wires_total: n,
         wires_taut,
+        wires_zero_slack,
         nets_total,
         nets_taut,
         total_length_nm: total_len.round() as i64,

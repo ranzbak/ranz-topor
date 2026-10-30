@@ -22,7 +22,10 @@ def _fake_router(model, options):
     victim = next(k["uuid"] for k in model["kept"] if not k["locked"])
     return {"items": [_sig_item(net, i) for i in range(3)], "remove_uuids": [victim],
             "report": {"nets": [{"status": "taut"}, {"status": "partial"}],
-                       "wires": [{"status": "taut"}, {"status": "taut"}, {"status": "partial"}],
+                       "wires": [{"status": "taut"}, {"status": "taut"},
+                                {"id": 2, "net": 9, "status": "fallback", "zero_slack": True,
+                                 "reason": "zero slack: x"}],
+                       "wires_zero_slack": 1,
                        "nets_total": 2, "nets_taut": 1, "wires_total": 3, "wires_taut": 2,
                        "total_length_nm": 5 * MM,
                        "hand_length_nm": 6 * MM, "length_outside_pads_nm": 3 * MM,
@@ -51,7 +54,11 @@ def test_run_bench_accepts_dict_router(fixture_board, tmp_path, capsys):
     assert r["replaced"] == 1 and r["routed_items"] == 3
     assert r["smooth"] == {"nets_taut": 1, "nets": 2, "wires_taut": 2, "wires": 3,
                            "length_mm": 5.0, "hand_mm": 6.0, "outside_mm": 3.0,
-                           "hand_outside_mm": 4.0, "iterations": 7, "timed_out": False}
+                           "hand_outside_mm": 4.0, "iterations": 7, "timed_out": False,
+                           "wires_zero_slack": 1,
+                           "fallback_reasons": [{"id": 2, "net": 9, "zero_slack": True,
+                                                 "reason": "zero slack: x"}],
+                           "length_outside_pads_mm": 3.0, "hand_outside_pads_mm": 4.0}
     out = capsys.readouterr().out
     assert "smooth: taut 1/2 nets, 2/3 wires, 5.0 mm (hand 6.0), outside pads 3.0 (hand 4.0), iters 7" in out
 
@@ -106,7 +113,7 @@ def test_progress_png_caption_and_path(fixture_board, tmp_path, monkeypatch):
     assert png.is_file()
     n = res["routed_all"]
     d = res["routed_drc"]
-    line1 = f"T1.4a: 1/2 nets, 2/3 wires, 1 fallback, arcs {n['arcs']}"
+    line1 = f"T1.4a: 1/2 nets, 2/3 wires, fallback 1 (zero slack 1), arcs {n['arcs']}"
     line2 = (f"DRC routing {d['routing_new']}, unconnected {d['incomplete']['unconnected_items']}, "
              f"{n['track_mm'] + n['arc_mm']:.1f} mm vs hand "
              f"{res['orig_all']['track_mm'] + res['orig_all']['arc_mm']:.1f} mm, "
