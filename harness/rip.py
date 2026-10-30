@@ -138,8 +138,12 @@ def rip_tracks(
             to_remove.append(v)
             rep.removed_vias += 1
 
+    # board.Delete(), not Remove(): Remove() hands ownership of the C++ item to the Python wrapper,
+    # and SWIG has no destructor for PCB_TRACK/PCB_VIA ("memory leak of type 'PCB_TRACK *'"); on
+    # larger boards that corrupts pcbnew's SWIG state for the rest of the process.
     for it in to_remove:
-        board.Remove(it)
+        board.Delete(it)
+    del to_remove, vias, by_net  # wrappers of deleted items must not be touched again
 
     pads_by_net: dict[str, list] = {}
     for fp in board.GetFootprints():

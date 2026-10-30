@@ -7,9 +7,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
-import sys
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -20,7 +19,7 @@ from harness.metrics import copper_metrics
 from harness.model import export_model, load_board, write_model_json
 from harness.paths import BENCH_BOARDS
 from harness.render import caption, compose_compare, render_png
-from harness.rip import record_widths
+from harness.rip import record_widths, rip_tracks
 from harness.rules import resolve_rules
 
 SUMMARY_MAX = 20
@@ -40,35 +39,6 @@ def _source_pcb(board: str, pcb_override: Path | None) -> Path:
 
 
 ROOT = Path(__file__).resolve().parents[1]
-
-# rip_tracks() runs in a child process: its board.Remove() calls leave pcbnew's SWIG state broken
-# for the rest of the process (GetDesignSettings / GetSettingsManager stop working).
-_RIP_CHILD = """
-import json, sys
-from dataclasses import asdict
-from pathlib import Path
-from harness import writer
-from harness.copy import ProjectCopy
-from harness.model import load_board
-from harness.rip import rip_tracks
-pcb, pro, mode, scope, rf = sys.argv[1:6]
-cp = ProjectCopy(pcb=Path(pcb), pro=Path(pro) if pro else None, dru=None)
-b = load_board(cp)
-rep = rip_tracks(b, mode=mode, scope=json.loads(scope), rf_nets=set(json.loads(rf)))
-writer.save(b, pcb)
-print(json.dumps(asdict(rep)))
-"""
-
-
-def _rip_in_subprocess(cp, mode: str, scope: dict | None, rf_nets: set[str]) -> dict:
-    """Rip the copy's tracks in a child process, which saves the result over cp.pcb."""
-    args = [sys.executable, "-c", _RIP_CHILD, str(cp.pcb), str(cp.pro or ""), mode,
-            json.dumps(scope), json.dumps(sorted(rf_nets))]
-    proc = subprocess.run(args, capture_output=True, text=True, cwd=ROOT)
-    if proc.returncode != 0:
-        raise RuntimeError(f"rip step failed (exit {proc.returncode}): {proc.stderr.strip()[-2000:]}")
-    return json.loads(proc.stdout.strip().splitlines()[-1])
-
 
 def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path) -> str:
     o, r, rm = result["orig_all"], result["routed_all"], result["removed"]
@@ -119,11 +89,12 @@ def run_bench(
     # Hand image is rendered from the untouched copy, before anything is saved over it.
     hand_raw = render_png(cp.pcb, cp.pcb.parent / f"{board}-hand-raw.png")
 
-    rep = _rip_in_subprocess(cp, rip, options.get("scope"), set(rf_nets))
+    rep = asdict(rip_tracks(b, mode=rip, scope=options.get("scope"), rf_nets=set(rf_nets)))
+    writer.save(b, cp.pcb)
     removed = {k: rep[k] for k in ("removed_tracks", "removed_arcs", "removed_vias")}
     kept = {k: rep[k] for k in ("kept_locked_tracks", "kept_free_vias", "kept_locked_vias",
                                 "kept_rf_tracks", "kept_rf_vias")}
-    b = load_board(cp)  # fresh board holding the ripped copper the child process saved
+    b = load_board(cp)  # fresh board holding the ripped copper just saved
 
     dru_text = cp.dru.read_text() if cp.dru is not None else None
     rules = resolve_rules(b, dru_text=dru_text, widths_before=widths_before)

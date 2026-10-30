@@ -1,6 +1,8 @@
+import pytest
 import pcbnew
 
 from harness.fixtures import make_fixture_board
+from harness.paths import BENCH_BOARDS
 from harness.rip import record_widths, rip_tracks
 
 
@@ -55,3 +57,32 @@ def test_rip_scoped_by_pad_ref(fixture_board):
     assert r.removed_arcs == 1 and r.removed_tracks == 0 and r.removed_vias == 0
     assert r.kept_locked_tracks == 1
     assert r.nets_to_route == ["SIG"]
+
+
+def test_rip_does_not_corrupt_swig_state(tmp_path):
+    """Regression: board.Remove() in rip left later pcbnew objects as bare SwigPyObject."""
+    import gc
+
+    b = pcbnew.LoadBoard(str(make_fixture_board(tmp_path / "a.kicad_pcb", locked_track=False)))
+    rip_tracks(b)
+    del b
+    gc.collect()
+    b2 = pcbnew.LoadBoard(str(make_fixture_board(tmp_path / "b.kicad_pcb")))
+    assert type(b2.GetDesignSettings()).__name__ == "BOARD_DESIGN_SETTINGS"
+    assert type(pcbnew.GetSettingsManager()).__name__ == "SETTINGS_MANAGER"
+    assert len(list(b2.GetTracks())) > 0
+
+
+@pytest.mark.gate
+def test_rip_real_board_does_not_corrupt_swig_state(tmp_path):
+    """The corruption only showed on a real board (many Remove()d tracks); copy first, never touch the source."""
+    import shutil
+
+    src = BENCH_BOARDS["eprom-to-kernal"]
+    pcb = tmp_path / "e.kicad_pcb"
+    shutil.copy(src, pcb)
+    b = pcbnew.LoadBoard(str(pcb))
+    assert rip_tracks(b).removed_tracks > 0
+    del b
+    b2 = pcbnew.LoadBoard(str(make_fixture_board(tmp_path / "b.kicad_pcb")))
+    assert type(b2.GetDesignSettings()).__name__ == "BOARD_DESIGN_SETTINGS"
