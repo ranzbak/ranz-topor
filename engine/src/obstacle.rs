@@ -94,6 +94,38 @@ impl LayerObstacles {
     }
 }
 
+impl LayerObstacles {
+    /// Anchors whose core circle overlaps `bb`, sorted.
+    pub fn query_anchors(&self, bb: Aabb) -> Vec<usize> {
+        let mut v: Vec<usize> = self
+            .anchor_grid
+            .query(bb)
+            .into_iter()
+            .filter(|&i| {
+                let a = &self.anchors[i];
+                Core::Point(a.c).bbox().grow(a.r_core).overlaps(&bb)
+            })
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// Walls whose core (grown by `r_core`) overlaps `bb`, sorted.
+    pub fn query_walls(&self, bb: Aabb) -> Vec<usize> {
+        let mut v: Vec<usize> = self
+            .wall_grid
+            .query(bb)
+            .into_iter()
+            .filter(|&i| {
+                let w = &self.walls[i];
+                w.core.bbox().grow(w.r_core).overlaps(&bb)
+            })
+            .collect();
+        v.sort_unstable();
+        v
+    }
+}
+
 /// Junction / dangling point of a smoothed wire: an obstacle for other nets only.
 #[derive(Clone, Debug)]
 pub struct TerminalObstacle {
@@ -108,6 +140,7 @@ pub struct ObstacleSet {
     layers: BTreeMap<u32, LayerObstacles>,
     empty: LayerObstacles,
     margin: f64,
+    cell: f64,
     min_clearance: f64,
     hole_clearance: f64,
     edge_clearance: f64,
@@ -303,6 +336,7 @@ impl ObstacleSet {
             layers: BTreeMap::new(),
             empty: LayerObstacles::new(Vec::new(), Vec::new(), cell),
             margin,
+            cell,
             min_clearance: r.min_clearance as f64,
             hole_clearance: r.hole_clearance as f64,
             edge_clearance: r.edge_clearance as f64,
@@ -469,6 +503,17 @@ impl ObstacleSet {
         *self.clearances.get(&net).unwrap_or(&self.default_clearance)
     }
 
+    /// Build margin ε, nm.
+    pub fn margin(&self) -> f64 {
+        self.margin
+    }
+
+    /// Bound on `rho - r_core` of any obstacle and on any pairwise clearance (max width +
+    /// max clearance + margin): grow a query box by this before the exact distance test.
+    pub fn query_grow(&self) -> f64 {
+        self.cell
+    }
+
     /// Layer ids present, ascending.
     pub fn layers(&self) -> Vec<u32> {
         self.layers.keys().copied().collect()
@@ -509,33 +554,11 @@ impl ObstacleSet {
     /// Anchors whose core circle (`r_core`) overlaps `bb`; grow `bb` by the largest `rho`
     /// of interest. Sorted, deduplicated.
     pub fn query_anchors(&self, layer: u32, bb: Aabb) -> Vec<usize> {
-        let l = self.layer(layer);
-        let mut v: Vec<usize> = l
-            .anchor_grid
-            .query(bb)
-            .into_iter()
-            .filter(|&i| {
-                let a = &l.anchors[i];
-                Core::Point(a.c).bbox().grow(a.r_core).overlaps(&bb)
-            })
-            .collect();
-        v.sort_unstable();
-        v
+        self.layer(layer).query_anchors(bb)
     }
 
     /// Walls whose core (grown by `r_core`) overlaps `bb`. Sorted, deduplicated.
     pub fn query_walls(&self, layer: u32, bb: Aabb) -> Vec<usize> {
-        let l = self.layer(layer);
-        let mut v: Vec<usize> = l
-            .wall_grid
-            .query(bb)
-            .into_iter()
-            .filter(|&i| {
-                let w = &l.walls[i];
-                w.core.bbox().grow(w.r_core).overlaps(&bb)
-            })
-            .collect();
-        v.sort_unstable();
-        v
+        self.layer(layer).query_walls(bb)
     }
 }

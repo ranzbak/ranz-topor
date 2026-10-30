@@ -68,8 +68,9 @@ pub fn bitangent(c1: Circle, s1: Orient, c2: Circle, s2: Orient) -> Result<Seg, 
     for h in [1.0, -1.0] {
         if let Some(seg) = candidate(c1, c2, 1.0, sg2, h) {
             if let Some(t) = seg.dir() {
-                if s1.sign() * t.cross(c1.c - seg.a) > 0.0
-                    && s2.sign() * t.cross(c2.c - seg.b) > 0.0
+                // a point terminal (r = 0) has no side
+                if (c1.r == 0.0 || s1.sign() * t.cross(c1.c - seg.a) > 0.0)
+                    && (c2.r == 0.0 || s2.sign() * t.cross(c2.c - seg.b) > 0.0)
                 {
                     return Ok(seg);
                 }

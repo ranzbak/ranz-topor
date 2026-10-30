@@ -11,26 +11,18 @@ use crate::geom::{Orient, Vec2};
 use crate::obstacle::{LayerObstacles, ObsKind};
 use crate::wires::Wire;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::hash::{Hash, Hasher};
 
 /// Frame margin lower bound (nm): 10 mm.
 const FRAME_MARGIN_MIN: f64 = 10_000_000.0;
 /// Retry translations (nm) for a hand lying exactly on a triangulation edge.
 const RETRY_SHIFTS: [(f64, f64); 2] = [(1.0, 2.0), (-2.0, 1.0)];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct AnchorRef {
     /// Index into `LayerObstacles.anchors`.
     pub anchor: usize,
     /// `Ccw`: obstacle on the left of the wire; `Cw`: on the right.
     pub sigma: Orient,
-}
-
-impl Hash for AnchorRef {
-    fn hash<H: Hasher>(&self, h: &mut H) {
-        self.anchor.hash(h);
-        (self.sigma == Orient::Ccw).hash(h);
-    }
 }
 
 #[derive(Clone, Debug)]

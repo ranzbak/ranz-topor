@@ -175,7 +175,10 @@ fn seg_seg_exact(a: &Seg, b: &Seg) -> f64 {
     let w = b.b - b.a;
     let p = a.a - b.a;
     let f = |s: f64, t: f64| (p + u * s - w * t).len2();
-    let mut best = f(0.0, 0.0).min(f(0.0, 1.0)).min(f(1.0, 0.0)).min(f(1.0, 1.0));
+    let mut best = f(0.0, 0.0)
+        .min(f(0.0, 1.0))
+        .min(f(1.0, 0.0))
+        .min(f(1.0, 1.0));
     for e in [0.0, 1.0] {
         if w.len2() > 0.0 {
             best = best.min(f(e, (w.dot(p + u * e) / w.len2()).clamp(0.0, 1.0)));

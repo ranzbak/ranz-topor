@@ -8,7 +8,9 @@ use topor_engine::model::{BoardModel, ExistingCopper, Options};
 use topor_engine::wires::extract_wires;
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: extract_wires <model.json>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: extract_wires <model.json>");
     let text = std::fs::read_to_string(&path).expect("read model json");
     let model = BoardModel::from_json(&text).expect("parse model");
     let opts = Options {

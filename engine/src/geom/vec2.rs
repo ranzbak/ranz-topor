@@ -86,7 +86,7 @@ impl Vec2 {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Orient {
     Ccw,
     Cw,
