@@ -8,6 +8,7 @@ pub const MIN_CHORD_NM: f64 = 10.0;
 pub mod dist;
 pub mod grid;
 pub mod prim;
+pub mod quant;
 pub mod tangent;
 pub mod vec2;
 
@@ -17,5 +18,9 @@ pub use dist::{
 };
 pub use grid::Grid;
 pub use prim::{Aabb, Arc, Circle, Prim, Seg};
+pub use quant::{
+    calc_arc_center, dequantise, is_degenerate_arc, quantise, quantise_chain, round_nm, IVec2, Nm,
+    TrackPrim,
+};
 pub use tangent::{all_bitangents, bitangent, point_circle_tangent, GeomError};
 pub use vec2::{Orient, Vec2};
