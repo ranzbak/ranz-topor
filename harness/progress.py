@@ -32,8 +32,9 @@ def render_progress(task: str, *, board: str = "eprom-to-kernal", date: str | No
         length_mm = r["track_mm"] + r["arc_mm"]
         hand_mm = result["orig_all"]["track_mm"] + result["orig_all"]["arc_mm"]  # board under test
         drc = result["routed_drc"]
+        zs = rep.get("wires_zero_slack", sm.get("wires_zero_slack", 0))
         line1 = (f"{task}: {nets_taut}/{nets_total} nets, {wires_taut}/{wires_total} wires, "
-                 f"{wires_total - wires_taut} fallback, arcs {r['arcs']}")
+                 f"fallback {wires_total - wires_taut} (zero slack {zs}), arcs {r['arcs']}")
         line2 = (f"DRC routing {drc['routing_new']}, "
                  f"unconnected {drc['incomplete']['unconnected_items']}, "
                  f"{length_mm:.1f} mm vs hand {hand_mm:.1f} mm, "

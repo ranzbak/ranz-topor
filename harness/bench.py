@@ -61,6 +61,14 @@ def _smooth_summary(report: dict | None) -> dict | None:
         "hand_outside_mm": mm("hand_outside_pads_nm"),
         "iterations": report.get("iterations"),
         "timed_out": report.get("timed_out"),
+        "wires_zero_slack": report.get("wires_zero_slack",
+                                       sum(1 for w in wires if w.get("zero_slack"))),
+        "fallback_reasons": [
+            {"id": w.get("id"), "net": w.get("net"), "zero_slack": bool(w.get("zero_slack")),
+             "reason": w.get("reason", "")}
+            for w in wires if w.get("status") == "fallback"],
+        "length_outside_pads_mm": mm("length_outside_pads_nm"),
+        "hand_outside_pads_mm": mm("hand_outside_pads_nm"),
     }
 
 
@@ -90,6 +98,10 @@ def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path) -> s
                     f"(hand {sm['hand_mm']}), outside pads {sm['outside_mm']} "
                     f"(hand {sm['hand_outside_mm']}), iters {sm['iterations']}, "
                     f"teardrops_removed {result['teardrops_removed']}")
+        fb = sm["fallback_reasons"]
+        head.append(f"  fallback: {len(fb)} wires (zero slack {sm['wires_zero_slack']})")
+        head.extend(f"    wire {f['id']} net {f['net']}"
+                    f"{' [zero slack]' if f['zero_slack'] else ''}: {f['reason']}" for f in fb)
     drc = summarise(board, routed_drc, base_drc,
                     extra={"width_match": f"{wm['matched']}/{wm['compared']}"})
     lines = head + drc.splitlines() + [f"  outputs: {out_dir}"]
