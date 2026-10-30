@@ -352,8 +352,10 @@ fn checker_via_drill_to_hole() {
              "holes": [ { "at": [0, 0], "d": 1000000, "kind": "npth" } ] }"#,
     )
     .unwrap();
-    let mut o = Options::default();
-    o.margin_nm = 0;
+    let o = Options {
+        margin_nm: 0,
+        ..Options::default()
+    };
     let c = Checker::new(&m, &o);
     let mk = |y: i64, drill: i64| -> Item {
         serde_json::from_str(&format!(

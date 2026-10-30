@@ -49,9 +49,9 @@ def test_check_items_bad_json_raises(engine):
         engine.check_items("{", "[]", "{}")
 
 
-def test_fuzz_items_is_stub(engine):
-    with pytest.raises(NotImplementedError):
-        engine.fuzz_items("{}", "{}", 1, 10)
+def test_fuzz_items_empty_model_truncates(engine):
+    out = json.loads(engine.fuzz_items("{}", "{}", 1, 10))
+    assert out["items"] == [] and out["truncated"] is True
 
 
 def test_schema_compat_with_harness_export(engine, fixture_board):

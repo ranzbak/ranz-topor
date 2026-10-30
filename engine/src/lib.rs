@@ -1,6 +1,7 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod check;
+pub mod fuzz;
 pub mod geom;
 pub mod model;
 #[cfg(feature = "python")]

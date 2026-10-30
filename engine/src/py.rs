@@ -6,7 +6,7 @@ use crate::geom::prim::Aabb;
 use crate::geom::quant::{calc_arc_center, IVec2};
 use crate::geom::{Grid, Vec2};
 use crate::model::{BoardModel, Item, Options};
-use pyo3::exceptions::{PyNotImplementedError, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -38,18 +38,23 @@ fn check_items(
         .map_err(PyValueError::new_err)
 }
 
-/// Implemented in Task 14.
+/// `{"items": [...], "from_arc": [...], "truncated": bool, "attempts": int}` (Items in the
+/// KiCad frame); seeded, deterministic, self-checked unless `skip_self_check` is set.
 #[pyfunction]
-#[pyo3(signature = (_model_json, _options_json, _seed, _n))]
 fn fuzz_items(
-    _model_json: String,
-    _options_json: String,
-    _seed: u64,
-    _n: usize,
+    py: Python<'_>,
+    model_json: String,
+    options_json: String,
+    seed: u64,
+    n: usize,
 ) -> PyResult<String> {
-    Err(PyNotImplementedError::new_err(
-        "fuzz_items is implemented in Task 14",
-    ))
+    py.allow_threads(|| {
+        let model = BoardModel::from_json(&model_json)?;
+        let opts = Options::from_json(&options_json)?;
+        let res = crate::fuzz::fuzz_items(&model, &opts, seed, n);
+        serde_json::to_string(&res).map_err(|e| e.to_string())
+    })
+    .map_err(PyValueError::new_err)
 }
 
 /// Centre of the circle through three integer points, rounded to nm; `None` if collinear.

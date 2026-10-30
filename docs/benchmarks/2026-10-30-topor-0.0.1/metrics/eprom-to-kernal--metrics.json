@@ -1,0 +1,67 @@
+{
+ "board": "eprom-to-kernal",
+ "footprints": 5,
+ "pads": 56,
+ "nets_total": 26,
+ "orig_all": {
+  "segments": 80,
+  "arcs": 0,
+  "vias": 0,
+  "track_mm": 189.934,
+  "arc_mm": 0.0
+ },
+ "orig_drc": {
+  "total": 93,
+  "violations": {
+   "copper_edge_clearance": 21,
+   "courtyards_overlap": 1,
+   "pth_inside_courtyard": 25,
+   "silk_over_copper": 42,
+   "lib_footprint_mismatch": 2,
+   "lib_footprint_issues": 1,
+   "track_dangling": 1
+  }
+ },
+ "removed": {
+  "removed_tracks": 80,
+  "removed_arcs": 0,
+  "removed_vias": 0
+ },
+ "kept": {
+  "kept_locked_tracks": 0,
+  "kept_free_vias": 0,
+  "kept_locked_vias": 0,
+  "kept_rf_tracks": 0,
+  "kept_rf_vias": 0
+ },
+ "routed_all": {
+  "segments": 0,
+  "arcs": 0,
+  "vias": 0,
+  "track_mm": 0.0,
+  "arc_mm": 0.0
+ },
+ "routed_drc": {
+  "routing_new": 12,
+  "routing_preexisting": 0,
+  "incomplete": {
+   "track_dangling": 0,
+   "via_dangling": 0,
+   "unconnected_items": 30
+  },
+  "other": 71,
+  "by_type_new": {
+   "copper_edge_clearance": 12
+  }
+ },
+ "routed_items": 0,
+ "rip": "all",
+ "threads": 4,
+ "runtime_s": 5.065,
+ "router_s": 0.0,
+ "width_match": {
+  "compared": 0,
+  "matched": 0,
+  "mismatched": []
+ }
+}
