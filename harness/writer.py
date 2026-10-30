@@ -79,3 +79,14 @@ def save(board, path) -> Path:
     path = Path(path)
     pcbnew.SaveBoard(str(path), board)
     return path
+
+
+def remove_items(board, uuids: list[str]) -> int:
+    """Delete tracks/arcs/vias by uuid (board.Delete, never Remove); unknown uuids are ignored."""
+    want = set(uuids)
+    if not want:
+        return 0
+    doomed = [t for t in board.GetTracks() if _uuid(t) in want]
+    for t in doomed:
+        board.Delete(t)
+    return len(doomed)
