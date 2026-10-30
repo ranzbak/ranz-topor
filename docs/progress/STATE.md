@@ -12,7 +12,7 @@ task-N-brief.md has already been extracted for all 14 tasks).
 |---|------|--------|
 | 1 | scaffold (T0.1, H) | DONE d5dbec7 (attribution line says Haiku: amend blocked by hook) |
 | 2 | geom vec/prim/tangent (T0.5a, S) | DONE aceef90..10389ef, reviewed, fix round 1 addressed |
-| 3 | geom distances/skeletons (T0.5b, S, F review) | FIX ROUND 1 IN FLIGHT: uncommitted edits to dist.rs/dist_props.rs in main tree by worker a9d4e436482482d06. Then re-check: round_rect rc=min/2 regression tests, oracle tol <= 1 nm |
+| 3 | geom distances/skeletons (T0.5b, S, F review) | DONE db22e56..0503bea (F review Important fixed: collapsed round_rect; oracle ±1e-3 nm) |
 | 4 | grid (T0.5c, S) | committed 95d5507; review: CRITICAL open (fix round 1 NOT yet dispatched): non-finite/huge bbox -> i32 saturation/overflow + unbounded cell loops; query O(area) for big boxes; remove() silent no-op on bbox mismatch. Resume worker a3f319d5d02325c5b or start a fresh sonnet worker |
 | 5 | quant + arc centre (T0.5d, S) | 267e9fb on branch worktree-agent-a3a30c1216025eb10 (NOT merged); FIX ROUND 1 IN FLIGHT by worker a3a30c1216025eb10 (drift-bound derivation, degenerate boundary tests, no zero-length seg). Merge into main after it finishes |
 | 6 | model/check/PyO3/build (T0.1+T0.2, S) | pending: needs 2-5 |
@@ -38,7 +38,7 @@ task-N-brief.md has already been extracted for all 14 tasks).
 - T8: nets_to_route comes from GetConnectedPads (SWIG can't iterate the ratsnest); the free-via check precedes the RF check.
 
 ## Open issues
-- T3 fix (in flight), T4 Critical fix (not dispatched), T5 fix (in flight, unmerged branch).
+- T4 Critical fix (not dispatched), T5 fix (in flight, unmerged branch).
 - The default pytest suite takes ~34 s (DRC runs); fine.
 - Worktrees under .claude/worktrees/ (ignored) can be removed after merge.
 
@@ -98,6 +98,6 @@ topor/
   docs/progress/STATE.md         living state (45 §4), created in Task 1
 
 ## Next 3 actions
-1. Collect the T3 fix (check `git status`; worker commits dist.rs). Verify with cargo test, then ledger T3 complete. Then dispatch the T4 fix round (Critical above) in the main tree.
+1. Dispatch the T4 fix round (Critical above) in the main tree. (T3 fix is done and committed: 0503bea.)
 2. When the T5 fix returns: `git merge worktree-agent-a3a30c1216025eb10`, run cargo test, ledger T5 complete.
 3. Dispatch T6 (sonnet) with the two T6 rulings above, then T10 ∥ T11 (worktrees), T13 (haiku), T14 (sonnet) + F gate review.

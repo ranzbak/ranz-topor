@@ -1,0 +1,14 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 31c077d2d63d81bb354403b0bfd72cceab477a18c28d14d56f32ef3efc0afc0b # shrinks to s = Seg { a: Vec2 { x: -1153847.0900640113, y: -453520.3350956857 }, b: Vec2 { x: -1611366.3420756352, y: 0.0 } }, a = Arc { c: Vec2 { x: 0.0, y: 0.0 }, r: 1415219.20499868, sigma: Ccw, a_start: 0.0, sweep: 5.802512258541357 }
+cc b1d1f4b9d25f030296d4b324d4c166cf3d319e20660865277483111cbb2435d0 # shrinks to a = Arc { c: Vec2 { x: -800000.0, y: 0.0 }, r: 1974194.619003102, sigma: Ccw, a_start: 0.0, sweep: 4.840429777564642 }, b = Arc { c: Vec2 { x: 400000.0, y: 0.0 }, r: 1299497.8296044127, sigma: Ccw, a_start: 0.8317652062701092, sweep: 0.773463321405126 }
+cc 92304ff3583587083bbe2d983f18ce045e888fd7baa21e90ac40087486e14f86 # shrinks to s = Seg { a: Vec2 { x: -1589486.835571966, y: 1471118.8952141062 }, b: Vec2 { x: 1403216.216332895, y: -1882927.0303486786 } }, a = Arc { c: Vec2 { x: -800000.0, y: 800000.0 }, r: 177171.34237927967, sigma: Cw, a_start: 0.0, sweep: 2.397441588421676 }
+cc 0cbccc5fdb065434195b5df6bfac0024c3f31cff6688b79debab71526ead0b7d # shrinks to a = Arc { c: Vec2 { x: 800000.0, y: 0.0 }, r: 491867.85859975487, sigma: Ccw, a_start: 0.0, sweep: 2.299574607458185 }, b = Arc { c: Vec2 { x: 1136523.062451435, y: -825691.5769108317 }, r: 1408998.2500179852, sigma: Ccw, a_start: 0.0, sweep: 6.168918909163698 }
+cc 65105ad5cf32b530896d0f37885d23746991df9790d8c012a2936d41b190f934 # shrinks to a = Seg { a: Vec2 { x: -767409.6308214107, y: 1812434.8043302544 }, b: Vec2 { x: 1825307.6678989055, y: -730994.1239396004 } }, b = Seg { a: Vec2 { x: 1571642.3670153087, y: -707214.4016297995 }, b: Vec2 { x: 1347431.5267213553, y: -212842.98355344732 } }
+cc 4c199eac7df93bf264bbe40ff9b8d92fdfd14a26f0486797e479ddac2361fd3d # shrinks to p = Vec2 { x: -772966.0138930207, y: -1931215.1479794674 }, a = Arc { c: Vec2 { x: 800000.0, y: -800000.0 }, r: 968086.0333563604, sigma: Ccw, a_start: 0.0, sweep: 5.681384458862279 }
+cc 9a3d39b21d6a28de60bebf0c19c52380b33113fd980b053e4f8727b78ef4191b # shrinks to a = Arc { c: Vec2 { x: 737326.9862433146, y: -1978452.8115209185 }, r: 759207.5905261439, sigma: Cw, a_start: 2.3225544146854946, sweep: 2.3296398132973395 }, b = Arc { c: Vec2 { x: 400000.0, y: -400000.0 }, r: 127114.43426634962, sigma: Cw, a_start: 0.0, sweep: 1.7472586951913167 }
+cc 2e51678f5024c6200b9955eb82433998dd41b3cfe0c2d9027ba37238d8ff62db # shrinks to s = Seg { a: Vec2 { x: -1521253.6569701424, y: 1521033.7741419682 }, b: Vec2 { x: -1469972.3448034707, y: 0.0 } }, a = Arc { c: Vec2 { x: 400000.0, y: 400000.0 }, r: 1859368.5030134618, sigma: Cw, a_start: 4.330670065677247, sweep: 1.4702098539757158 }
