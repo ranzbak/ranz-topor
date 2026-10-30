@@ -1,0 +1,408 @@
+{
+    "$schema": "https://schemas.kicad.org/drc.v1.json",
+    "coordinate_units": "mm",
+    "date": "2026-10-30T23:56:37",
+    "ignored_checks": [
+        {
+            "description": "Thermal relief connection to zone incomplete",
+            "key": "starved_thermal"
+        },
+        {
+            "description": "Footprint has no courtyard defined",
+            "key": "missing_courtyard"
+        },
+        {
+            "description": "Solder mask aperture bridges items with different nets",
+            "key": "solder_mask_bridge"
+        },
+        {
+            "description": "Track endpoint not centered on via",
+            "key": "track_not_centered_on_via"
+        },
+        {
+            "description": "Tuning profile track geometries",
+            "key": "tuning_profile_track_geometries"
+        },
+        {
+            "description": "Footprint doesn't match symbol's footprint filters",
+            "key": "footprint_filters_mismatch"
+        },
+        {
+            "description": "Silkscreen clipped by board edge",
+            "key": "silk_edge_clearance"
+        },
+        {
+            "description": "PTH inside courtyard",
+            "key": "pth_inside_courtyard"
+        },
+        {
+            "description": "NPTH inside courtyard",
+            "key": "npth_inside_courtyard"
+        },
+        {
+            "description": "Footprint component type doesn't match footprint pads",
+            "key": "footprint_type_mismatch"
+        }
+    ],
+    "included_severities": [
+        "error",
+        "warning"
+    ],
+    "kicad_version": "10.0.8",
+    "schematic_parity": [],
+    "source": "WICCON-2024-SAO-Nametag.kicad_pcb",
+    "unconnected_items": [],
+    "violations": [
+        {
+            "description": "Silkscreen clipped by solder mask",
+            "items": [
+                {
+                    "description": "Polygon of N1 on F.Silkscreen",
+                    "pos": {
+                        "x": 2.11891,
+                        "y": -13.049244
+                    },
+                    "uuid": "78f2169b-f704-484b-8630-648a4911547b"
+                },
+                {
+                    "description": "PTH pad 1 [+3.3V] of J3",
+                    "pos": {
+                        "x": -57.46,
+                        "y": 36.0
+                    },
+                    "uuid": "f4af7a33-15b9-4d76-8de8-49c244ab8eb6"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_over_copper"
+        },
+        {
+            "description": "Silkscreen clipped by solder mask",
+            "items": [
+                {
+                    "description": "Polygon of N1 on F.Silkscreen",
+                    "pos": {
+                        "x": 2.11891,
+                        "y": -13.049244
+                    },
+                    "uuid": "78f2169b-f704-484b-8630-648a4911547b"
+                },
+                {
+                    "description": "PTH pad 2 [GND] of J3",
+                    "pos": {
+                        "x": -57.46,
+                        "y": 38.54
+                    },
+                    "uuid": "d66a5ca5-b7be-4b2c-b5d2-ec8f10ffc9ef"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_over_copper"
+        },
+        {
+            "description": "Silkscreen clipped by solder mask",
+            "items": [
+                {
+                    "description": "Polygon of N1 on F.Silkscreen",
+                    "pos": {
+                        "x": 2.11891,
+                        "y": -13.049244
+                    },
+                    "uuid": "78f2169b-f704-484b-8630-648a4911547b"
+                },
+                {
+                    "description": "PTH pad 4 [SCL] of J3",
+                    "pos": {
+                        "x": -54.92,
+                        "y": 38.54
+                    },
+                    "uuid": "50285da9-916f-4016-a287-6a5a39f2ef97"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_over_copper"
+        },
+        {
+            "description": "Silkscreen clipped by solder mask",
+            "items": [
+                {
+                    "description": "Polygon of N1 on F.Silkscreen",
+                    "pos": {
+                        "x": 2.11891,
+                        "y": -13.049244
+                    },
+                    "uuid": "78f2169b-f704-484b-8630-648a4911547b"
+                },
+                {
+                    "description": "PTH pad 3 [SDA] of J3",
+                    "pos": {
+                        "x": -54.92,
+                        "y": 36.0
+                    },
+                    "uuid": "cb48f60e-1dbb-40a5-8cd4-1264ea725449"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_over_copper"
+        },
+        {
+            "description": "Silkscreen clipped by solder mask",
+            "items": [
+                {
+                    "description": "Polygon of N1 on F.Silkscreen",
+                    "pos": {
+                        "x": 2.11891,
+                        "y": -13.049244
+                    },
+                    "uuid": "78f2169b-f704-484b-8630-648a4911547b"
+                },
+                {
+                    "description": "PTH pad 5 [unconnected-(J3-Pin_5-Pad5)] of J3",
+                    "pos": {
+                        "x": -52.38,
+                        "y": 36.0
+                    },
+                    "uuid": "d0be6b27-b3ae-412d-b83d-1e4ed52031fd"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_over_copper"
+        },
+        {
+            "description": "Silkscreen clipped by solder mask",
+            "items": [
+                {
+                    "description": "Polygon of N1 on F.Silkscreen",
+                    "pos": {
+                        "x": 2.11891,
+                        "y": -13.049244
+                    },
+                    "uuid": "78f2169b-f704-484b-8630-648a4911547b"
+                },
+                {
+                    "description": "PTH pad 6 [unconnected-(J3-Pin_6-Pad6)] of J3",
+                    "pos": {
+                        "x": -52.38,
+                        "y": 38.54
+                    },
+                    "uuid": "cba27542-484f-447b-99cc-10854d1d7936"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_over_copper"
+        },
+        {
+            "description": "Silkscreen clipped by solder mask",
+            "items": [
+                {
+                    "description": "Polygon of N1 on F.Silkscreen",
+                    "pos": {
+                        "x": 2.11891,
+                        "y": -13.049244
+                    },
+                    "uuid": "78f2169b-f704-484b-8630-648a4911547b"
+                },
+                {
+                    "description": "PTH pad 2 [GND] of J5",
+                    "pos": {
+                        "x": 52.38,
+                        "y": 38.54
+                    },
+                    "uuid": "c1d4e78c-d531-47bc-b72b-38bf2930e7ea"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_over_copper"
+        },
+        {
+            "description": "Silkscreen clipped by solder mask",
+            "items": [
+                {
+                    "description": "Polygon of N1 on F.Silkscreen",
+                    "pos": {
+                        "x": 2.11891,
+                        "y": -13.049244
+                    },
+                    "uuid": "78f2169b-f704-484b-8630-648a4911547b"
+                },
+                {
+                    "description": "PTH pad 1 [+3.3V] of J5",
+                    "pos": {
+                        "x": 52.38,
+                        "y": 36.0
+                    },
+                    "uuid": "2d4de257-719e-46b0-b579-2f07b5bb2024"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_over_copper"
+        },
+        {
+            "description": "Silkscreen clipped by solder mask",
+            "items": [
+                {
+                    "description": "Polygon of N1 on F.Silkscreen",
+                    "pos": {
+                        "x": 2.11891,
+                        "y": -13.049244
+                    },
+                    "uuid": "78f2169b-f704-484b-8630-648a4911547b"
+                },
+                {
+                    "description": "PTH pad 3 [SDA] of J5",
+                    "pos": {
+                        "x": 54.92,
+                        "y": 36.0
+                    },
+                    "uuid": "24500aec-8469-4d7c-9840-0d257defeb5a"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_over_copper"
+        },
+        {
+            "description": "Silkscreen clipped by solder mask",
+            "items": [
+                {
+                    "description": "Polygon of N1 on F.Silkscreen",
+                    "pos": {
+                        "x": 2.11891,
+                        "y": -13.049244
+                    },
+                    "uuid": "78f2169b-f704-484b-8630-648a4911547b"
+                },
+                {
+                    "description": "PTH pad 4 [SCL] of J5",
+                    "pos": {
+                        "x": 54.92,
+                        "y": 38.54
+                    },
+                    "uuid": "ecda42ab-7227-4545-b2c0-658b2a83e7d1"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_over_copper"
+        },
+        {
+            "description": "Silkscreen clipped by solder mask",
+            "items": [
+                {
+                    "description": "Polygon of N1 on F.Silkscreen",
+                    "pos": {
+                        "x": 2.11891,
+                        "y": -13.049244
+                    },
+                    "uuid": "78f2169b-f704-484b-8630-648a4911547b"
+                },
+                {
+                    "description": "PTH pad 5 [unconnected-(J5-Pin_5-Pad5)] of J5",
+                    "pos": {
+                        "x": 57.46,
+                        "y": 36.0
+                    },
+                    "uuid": "4d06f012-c6c8-408e-895a-22907fc66d18"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_over_copper"
+        },
+        {
+            "description": "Silkscreen clipped by solder mask",
+            "items": [
+                {
+                    "description": "Polygon of N1 on F.Silkscreen",
+                    "pos": {
+                        "x": 2.11891,
+                        "y": -13.049244
+                    },
+                    "uuid": "78f2169b-f704-484b-8630-648a4911547b"
+                },
+                {
+                    "description": "PTH pad 6 [unconnected-(J5-Pin_6-Pad6)] of J5",
+                    "pos": {
+                        "x": 57.46,
+                        "y": 38.54
+                    },
+                    "uuid": "a6da4f12-38f8-4f12-93e9-6e338dfeffb5"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_over_copper"
+        },
+        {
+            "description": "Footprint 'C_0402_1005Metric' does not match copy in library 'Capacitor_SMD'",
+            "items": [
+                {
+                    "description": "Footprint C1",
+                    "pos": {
+                        "x": -21.3882,
+                        "y": -19.8204
+                    },
+                    "uuid": "12f0c457-33f3-450c-8043-5e57a6529609"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_mismatch"
+        },
+        {
+            "description": "Footprint 'C_0402_1005Metric' does not match copy in library 'Capacitor_SMD'",
+            "items": [
+                {
+                    "description": "Footprint C3",
+                    "pos": {
+                        "x": -30.4814,
+                        "y": -23.0182
+                    },
+                    "uuid": "1caebd9e-59e7-4af5-a5c6-cf2da407e79a"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_mismatch"
+        },
+        {
+            "description": "Footprint 'C_0805_2012Metric' does not match copy in library 'Capacitor_SMD'",
+            "items": [
+                {
+                    "description": "Footprint C4",
+                    "pos": {
+                        "x": -30.4814,
+                        "y": -20.6306
+                    },
+                    "uuid": "89866b27-e32f-4b3f-ae2e-05aa72b90899"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_mismatch"
+        },
+        {
+            "description": "Footprint 'C_0805_2012Metric' does not match copy in library 'Capacitor_SMD'",
+            "items": [
+                {
+                    "description": "Footprint C2",
+                    "pos": {
+                        "x": -19.8896,
+                        "y": -20.6052
+                    },
+                    "uuid": "de9d3e36-f150-4b1b-9747-9b8bf707f179"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_mismatch"
+        },
+        {
+            "description": "Footprint 'L_Cenker_CKCS6020' does not match copy in library 'Inductor_SMD'",
+            "items": [
+                {
+                    "description": "Footprint L1",
+                    "pos": {
+                        "x": -24.487,
+                        "y": -15.449
+                    },
+                    "uuid": "f7fa1b93-f669-483f-ac14-541926e717d7"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_mismatch"
+        }
+    ]
+}

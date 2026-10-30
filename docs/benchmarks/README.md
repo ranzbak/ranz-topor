@@ -18,6 +18,8 @@ benchmarks/
 | eprom-to-kernal | 2 | simple | 26 nets, THT only, hand routing uses 0.4 mm power traces |
 | wiccon-2023 | 2 | medium | 38 nets, round board, most parts on B.Cu |
 | dcsgonebadge | 2 | robustness only | GND pour instead of planes; **not a quality reference** (user decision) |
+| nametag-sao (`Wiccon/WICCON2024-hardware/nametag_sao_holder`) | 2 | informational, user-provided | 24 nets, 20 footprints, 199 segments, 50 vias, 2 zones |
+| wedding-gift (`wedding-gift-sprite/kicad`) | 2 | informational, user-provided | 87 nets, 42 footprints, 74 segments, 0 vias, 4 zones; hand board has 58 unconnected items |
 | bornhack2026 = **Cyber aegg** (`badge.team/bornhack2026/bornhack2026-hardware`) | 4 | advanced + complex runtime reference | keepouts, RF paths, ~877 vias (many stitching), 200 footprints, 1416 segments; budget **≤ 2 h** full routing; not yet run |
 | tanmatsu (`badge.team/tanmatsu/tanmatsu-hardware`) | 4 | complex, runtime reference | ~1820 nets, 436 footprints, 4933 segments, 1099 vias; budget **≤ 2 h** full routing |
 

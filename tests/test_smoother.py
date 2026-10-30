@@ -230,3 +230,11 @@ def test_run_bench_drc_loop_falls_back_flagged_wire(fixture_board, tmp_path, cap
     assert next(iter(r["drc_loop"]["pinned"].values())).startswith("drc track_width at (")
     assert r["replaced"] == 0 and r["routed_items"] == 0
     assert "drc loop: 2 rounds, 1 pinned" in capsys.readouterr().out
+
+
+def test_progress_pcb_override_without_registry(fixture_board, tmp_path, monkeypatch):
+    monkeypatch.setattr(progress, "smooth_router", _fake_router)
+    res = progress.render_progress("X", board="userboard", date="2026-10-30",
+                                   out_dir=tmp_path / "prog", pcb_override=fixture_board.pcb)
+    assert (tmp_path / "prog" / "2026-10-30-m1-X.png").is_file()
+    assert res["board"] == "userboard"

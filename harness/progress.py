@@ -15,13 +15,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def render_progress(task: str, *, board: str = "eprom-to-kernal", date: str | None = None,
-                    out_dir: Path = ROOT / "docs/benchmarks/progress") -> dict:
+                    out_dir: Path = ROOT / "docs/benchmarks/progress",
+                    pcb_override: Path | None = None) -> dict:
     date = date or datetime.date.today().isoformat()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="topor-progress-") as tmp:
         tmp = Path(tmp)
-        result = bench.run_bench(board, tmp, router=smooth_router, rip="none")
+        result = bench.run_bench(board, tmp, router=smooth_router, rip="none",
+                                 pcb_override=pcb_override)
         sm = result.get("smooth") or {}
         rep = result.get("router_report") or {}
         nets_total = rep.get("nets_total", sm.get("nets", 0))
@@ -56,8 +58,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Render the M1 progress PNG for eprom-to-kernal.")
     ap.add_argument("--task", required=True)
     ap.add_argument("--board", default="eprom-to-kernal")
+    ap.add_argument("--pcb", type=Path, default=None,
+                    help="use this board instead of BENCH_BOARDS[board]")
     args = ap.parse_args(argv)
-    render_progress(args.task, board=args.board)
+    render_progress(args.task, board=args.board, pcb_override=args.pcb)
     return 0
 
 

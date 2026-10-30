@@ -14,6 +14,8 @@ Structure follows [0.0.1](../2026-10-30-topor-0.0.1/README.md). Gate test: `test
 | eprom-to-kernal | 24 / 26 (GND has no tracks, +5V partial) | 25 / 27 | 2 (wires 22, 23, net +5V) | 41 / 8 (53 / 0) | **71.494 mm vs 76.598 mm** | 114.894 mm vs 112.886 mm | **0** | **0** | 0.005 s / 6.5 s |
 | wiccon-2023 (info) | 0 / 38 | 0 / 89 | 0 | 381 / 0 (381 / 0) | 1690.138 vs 1690.138 mm (all fallback) | 1831.971 vs 1831.971 mm | 0 | 0 | 0.010 s / 6.4 s |
 | dcsgonebadge (info) | 23 / 86 | 409 / 645 | 23 (236 fallbacks in all, 3 pinned by the DRC loop) | 1183 / 164 (1369 / 14) | 3800.133 vs 3890.918 mm | 4120.565 vs 4210.279 mm | **0** | 5 items (4 pre-existing + 1, see below), 0 dangling | 2.18 s / 19.6 s (2 DRC-loop rounds) |
+| nametag-sao (info, user board) | 1 / 6 (5 partial; 18 board nets have no tracks) | 28 / 55 | 0 (27 fallbacks in all) | 158 / 34 (199 / 0) | 1067.054 mm vs 1086.795 mm | 1113.878 mm vs 1137.066 mm | **0** | 0 (orig 0) | 0.026 s / 8.0 s |
+| wedding-gift (info, user board) | 0 / 23 | 0 / 23 | 0 (23 fallbacks in all) | 74 / 0 (74 / 0) | 226.124 mm vs 226.124 mm (all fallback) | 259.522 mm vs 259.522 mm | **0** | 58 (orig 58, unchanged) | 0.005 s / 6.7 s |
 
 Gate criteria (user rulings 2026-10-30): every wire taut or a zero-slack fallback; every net taut or partial/fallback
 only through zero-slack wires; length **outside pad copper** emitted <= hand (fallback wires count their hand length
@@ -27,7 +29,7 @@ eprom-to-kernal, hand (left) vs topor (right), zone fills removed:
 
 ![eprom-to-kernal compare](images/eprom-to-kernal-compare.png)
 
-Further images in `images/`: `*-hand.png`, `*-topor.png`, `*-compare.png` for eprom-to-kernal, wiccon-2023, dcsgonebadge.
+Further images in `images/`: `*-hand.png`, `*-topor.png`, `*-compare.png` for eprom-to-kernal, wiccon-2023, dcsgonebadge, nametag-sao, wedding-gift.
 The progress image of this gate task is [../progress/2026-10-30-m1-T1.4-gate.png](../progress/2026-10-30-m1-T1.4-gate.png).
 
 ## Observations
@@ -63,6 +65,17 @@ The progress image of this gate task is [../progress/2026-10-30-m1-T1.4-gate.png
   - The 5th unconnected item (TACT_D track to SW4 pad 2 at 117.825, 126.5) is not new copper state: the second SW4 pad 2 is
     unconnected in the hand board too, and the project's DRC exclusion for it is keyed on the uuid of the hand track
     `6bd2634f`, which the smoother replaced. Not a routing violation.
+- nametag-sao and wedding-gift (informational, user-provided 2-layer boards, not M1 criteria; run with
+  `python -m harness.bench <name> <dir> --rip none --router smoother --pcb <scratch copy>`, source trees sha256-unchanged,
+  progress images `../progress/2026-10-30-m1-nametag-sao.png` and `../progress/2026-10-30-m1-wedding-gift.png`).
+  Both: `routing_new` 0, no crash, existing vias kept (nametag 50 vias), width match all nets.
+  - nametag-sao (KiCad 10 format 20260206, 20 footprints, 199 segments): 28 of 55 wires taut, 34 native arcs, 1 of 6 nets
+    fully taut; 27 fallbacks, 0 zero-slack: `self-check: kept` 13, `sketch: hand vertex on CDT vertex` 8, `shares item ... with a
+    fallback wire` 3, `infeasible` 3 (pad J1:6 <-> J1:5, pad J2:4 <-> kept item, pad J4:1 <-> hole). Length outside pads 1067.1 vs
+    1086.8 mm hand (-1.8 %). DRC 17 pre-existing violations (12 silk_over_copper, 5 lib_footprint_mismatch), unchanged.
+  - wedding-gift (KiCad 10, 74 segments, 0 vias, 4 zones): all 23 wires fall back, `sketch: cdt: constraint (507, 477) crosses
+    another constraint` (same CDT constraint-pair failure as wiccon-2023, open for M1.5); the board is returned unchanged. DRC 205
+    pre-existing violations and 58 unconnected items are identical before and after (the hand board is not fully connected).
 - Deferred items of the [M1 gate review](../../progress/notes/m1-gate-review.md):
   F2 `SS` from degenerate arcs (mitre fix, M1.5); F3 wall-clock deadline not consulted outside relax (M1.5);
   F4 O(k^2) spots A1-A5 and the disc test in drop rule (e) (M2); F5 stack-order fan, harness-side T-split of kept items,
