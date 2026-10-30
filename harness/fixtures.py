@@ -49,6 +49,8 @@ def make_fixture_board(
     half_track=False,
     zone=True,
     pads="all",
+    free_via=True,
+    transition_via=False,
 ) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -172,7 +174,26 @@ def make_fixture_board(
     v.SetDrill(int(0.3 * MM))
     v.SetWidth(int(0.6 * MM))
     v.SetNet(nets["GND"])
+    if free_via:
+        v.SetIsFree(True)
     b.Add(v)
+
+    if transition_via:
+        # SIG layer change at (40,10): F.Cu track, via (not free), B.Cu track
+        track((35, 10), (40, 10), "SIG")
+        v2 = pcbnew.PCB_VIA(b)
+        v2.SetPosition(_v(40, 10))
+        v2.SetDrill(int(0.3 * MM))
+        v2.SetWidth(int(0.6 * MM))
+        v2.SetNet(nets["SIG"])
+        b.Add(v2)
+        t2 = pcbnew.PCB_TRACK(b)
+        t2.SetStart(_v(40, 10))
+        t2.SetEnd(_v(45, 10))
+        t2.SetWidth(int(0.25 * MM))
+        t2.SetLayer(pcbnew.B_Cu)
+        t2.SetNet(nets["SIG"])
+        b.Add(t2)
 
     if zone:
         z = pcbnew.ZONE(b)
