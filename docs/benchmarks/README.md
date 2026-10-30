@@ -42,6 +42,7 @@ copies (verify with sha256 before/after).
 | Run | Router | Summary |
 |---|---|---|
 | [2026-10-30-topola-d832b164](2026-10-30-topola-d832b164/README.md) | Topola `develop` d832b164 | baseline: only the simple board routes; see [43](../design/43-topola-assessment.md) |
+| [2026-10-30-topor-0.1.0](2026-10-30-topor-0.1.0/README.md) | topor 0.1.0 (M1 taut smoother) | eprom-to-kernal gate: 25/27 wires taut + 2 zero-slack, 8 arcs, DRC routing_new 0, outside-pad length 71.5 vs 76.6 mm hand |
 
 ## Progress PNGs
 
