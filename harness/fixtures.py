@@ -1,0 +1,226 @@
+"""Synthetic fixture boards and project files (written to caller-supplied dirs)."""
+import json
+from pathlib import Path
+
+import pcbnew
+
+MM = 1_000_000
+
+
+def _v(x, y):
+    return pcbnew.VECTOR2I(int(round(x * MM)), int(round(y * MM)))
+
+
+def _add_pad(fp, num, shape, size, pos, net, *, drill=None, angle=0.0):
+    p = pcbnew.PAD(fp)
+    p.SetNumber(num)
+    if drill is None:
+        p.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+        ls = pcbnew.LSET()
+        ls.AddLayer(pcbnew.F_Cu)
+        ls.AddLayer(pcbnew.F_Mask)
+        ls.AddLayer(pcbnew.F_Paste)
+        p.SetLayerSet(ls)
+    else:
+        p.SetAttribute(pcbnew.PAD_ATTRIB_PTH)
+        p.SetLayerSet(p.PTHMask())
+        p.SetDrillSize(_v(*drill))
+    p.SetShape(shape)
+    p.SetSize(_v(*size))
+    p.SetPosition(_v(*pos))
+    if angle:
+        p.SetOrientation(pcbnew.EDA_ANGLE(angle, pcbnew.DEGREES_T))
+    if net is not None:
+        p.SetNet(net)
+    fp.Add(p)
+    return p
+
+
+def make_fixture_board(
+    path: Path,
+    *,
+    outline_mm=(50, 40),
+    arc_corner=True,
+    net_tie=False,
+    copper_text=True,
+    npth=True,
+    locked_track=True,
+    arc=True,
+    half_track=False,
+    zone=True,
+    pads="all",
+) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    b = pcbnew.CreateEmptyBoard()
+    b.SetCopperLayerCount(2)
+    nets = {}
+    for name in ("VCC", "SIG", "GND"):
+        n = pcbnew.NETINFO_ITEM(b, name)
+        b.Add(n)
+        nets[name] = n
+
+    W, H = outline_mm
+    r = 5.0
+
+    def edge(shape, a, bb, **kw):
+        s = pcbnew.PCB_SHAPE(b)
+        s.SetShape(shape)
+        s.SetLayer(pcbnew.Edge_Cuts)
+        s.SetWidth(int(0.1 * MM))
+        if shape == pcbnew.SHAPE_T_ARC:
+            s.SetCenter(_v(*kw["center"]))
+            s.SetStart(_v(*a))
+            s.SetArcAngleAndEnd(pcbnew.EDA_ANGLE(kw["angle"], pcbnew.DEGREES_T))
+        else:
+            s.SetStart(_v(*a))
+            s.SetEnd(_v(*bb))
+        if shape == pcbnew.SHAPE_T_BEZIER:
+            s.SetBezierC1(_v(*kw["c1"]))
+            s.SetBezierC2(_v(*kw["c2"]))
+            s.RebuildBezierToSegmentsPointsList(int(0.005 * MM))
+        b.Add(s)
+
+    seg = pcbnew.SHAPE_T_SEGMENT
+    edge(seg, (r if arc_corner else 0, 0), (W, 0))
+    edge(seg, (W, 0), (W, H))
+    # bottom edge is a (gently curved) Bezier
+    edge(pcbnew.SHAPE_T_BEZIER, (W, H), (0, H), c1=(W * 2 / 3, H + 1.0), c2=(W / 3, H + 1.0))
+    if arc_corner:
+        edge(seg, (0, H), (0, r))
+        # quarter arc from (0,r) to (r,0), centre (r,r)
+        edge(pcbnew.SHAPE_T_ARC, (0, r), None, center=(r, r), angle=90.0)
+    else:
+        edge(seg, (0, H), (0, 0))
+
+    if pads is not None:
+        fp = pcbnew.FOOTPRINT(b)
+        fp.SetReference("U1")
+        fp.SetValue("U1")
+        fp.SetPosition(_v(0, 0))
+        b.Add(fp)
+        spec = [
+            ("1", pcbnew.PAD_SHAPE_CIRCLE, (1.6, 1.6), (20, 20), "VCC", dict(drill=(0.8, 0.8))),
+            ("2", pcbnew.PAD_SHAPE_RECT, (1.0, 2.0), (25, 20), "SIG", {}),
+            ("3", pcbnew.PAD_SHAPE_ROUNDRECT, (1.0, 2.0), (30, 20), "SIG", {}),
+            ("4", pcbnew.PAD_SHAPE_OVAL, (1.0, 2.0), (35, 20), "GND", dict(drill=(0.6, 1.2))),
+            ("5", pcbnew.PAD_SHAPE_TRAPEZOID, (1.0, 1.0), (20, 28), "SIG", {}),
+            ("6", pcbnew.PAD_SHAPE_RECT, (1.0, 2.0), (35, 28), "VCC", dict(angle=30.0)),
+        ]
+        if pads != "all":
+            spec = [s for s in spec if s[0] in set(pads)]
+        for num, shp, size, pos, net, kw in spec:
+            p = _add_pad(fp, num, shp, size, pos, nets[net], **kw)
+            if shp == pcbnew.PAD_SHAPE_ROUNDRECT:
+                p.SetRoundRectRadiusRatio(0.25)  # 0.25 mm on the 1.0 mm short side
+            if shp == pcbnew.PAD_SHAPE_TRAPEZOID:
+                p.SetDelta(_v(0.0, 0.2))
+        if npth:
+            p = pcbnew.PAD(fp)
+            p.SetNumber("")
+            p.SetAttribute(pcbnew.PAD_ATTRIB_NPTH)
+            p.SetShape(pcbnew.PAD_SHAPE_CIRCLE)
+            p.SetSize(_v(3.2, 3.2))
+            p.SetDrillSize(_v(3.2, 3.2))
+            p.SetLayerSet(p.UnplatedHoleMask())
+            p.SetPosition(_v(45, 35))
+            fp.Add(p)
+
+    if net_tie:
+        nt = pcbnew.FOOTPRINT(b)
+        nt.SetReference("NT1")
+        nt.SetValue("NT1")
+        nt.SetPosition(_v(0, 0))
+        nt.AddNetTiePadGroup("1,2")
+        b.Add(nt)
+        _add_pad(nt, "1", pcbnew.PAD_SHAPE_RECT, (1.0, 1.0), (10, 30), nets["VCC"])
+        _add_pad(nt, "2", pcbnew.PAD_SHAPE_RECT, (1.0, 1.0), (10.5, 30), nets["SIG"])
+
+    if copper_text:
+        t = pcbnew.PCB_TEXT(b)
+        t.SetText("TOPOR")
+        t.SetLayer(pcbnew.F_Cu)
+        t.SetPosition(_v(40, 30))
+        b.Add(t)
+
+    def track(a, c, net, locked=False):
+        t = pcbnew.PCB_TRACK(b)
+        t.SetStart(_v(*a))
+        t.SetEnd(_v(*c))
+        t.SetWidth(int(0.25 * MM))
+        t.SetLayer(pcbnew.F_Cu)
+        t.SetNet(nets[net])
+        t.SetLocked(locked)
+        b.Add(t)
+
+    if locked_track:
+        track((14, 10), (30, 10), "SIG", locked=True)
+    if arc:
+        a = pcbnew.PCB_ARC(b)
+        a.SetStart(_v(10, 10))
+        a.SetMid(_v(12, 11))
+        a.SetEnd(_v(14, 10))
+        a.SetWidth(int(0.25 * MM))
+        a.SetLayer(pcbnew.F_Cu)
+        a.SetNet(nets["SIG"])
+        b.Add(a)
+    if half_track:
+        track((25, 20), (25, 28), "SIG")
+
+    v = pcbnew.PCB_VIA(b)
+    v.SetPosition(_v(5, 5))
+    v.SetDrill(int(0.3 * MM))
+    v.SetWidth(int(0.6 * MM))
+    v.SetNet(nets["GND"])
+    b.Add(v)
+
+    if zone:
+        z = pcbnew.ZONE(b)
+        z.SetLayer(pcbnew.B_Cu)
+        z.SetNet(nets["GND"])
+        ol = pcbnew.SHAPE_LINE_CHAIN()
+        for x, y in ((1, 1), (W - 1, 1), (W - 1, H - 1), (1, H - 1)):
+            ol.Append(_v(x, y))
+        ol.SetClosed(True)
+        z.AddPolygon(ol)
+        b.Add(z)
+        pcbnew.ZONE_FILLER(b).Fill(b.Zones())
+
+    pcbnew.SaveBoard(str(path), b)
+    return path
+
+
+_DEF_RULES = {
+    "min_clearance": 0.2,
+    "min_track_width": 0.2,
+    "min_copper_edge_clearance": 0.5,
+    "min_hole_clearance": 0.25,
+    "min_hole_to_hole": 0.25,
+    "min_via_diameter": 0.4,
+    "min_through_hole_diameter": 0.3,
+    "min_via_annular_width": 0.05,
+    "max_error": 0.005,
+}
+_DEF_CLASSES = [
+    {"name": "Default", "clearance": 0.2, "track_width": 0.25, "via_diameter": 0.6,
+     "via_drill": 0.3, "priority": 2147483647}
+]
+
+
+def write_project_file(pcb: Path, *, rules: dict, classes: list[dict], patterns=()) -> Path:
+    pcb = Path(pcb)
+    merged = {**_DEF_RULES, **rules}
+    cls = list(classes) if classes else [dict(c) for c in _DEF_CLASSES]
+    doc = {
+        "board": {"design_settings": {"rules": merged}},
+        "net_settings": {
+            "classes": cls,
+            "meta": {"version": 3},
+            "netclass_assignments": {},
+            "netclass_patterns": [dict(p) for p in patterns],
+        },
+        "meta": {"filename": pcb.with_suffix(".kicad_pro").name, "version": 3},
+    }
+    out = pcb.with_suffix(".kicad_pro")
+    out.write_text(json.dumps(doc, indent=2))
+    return out

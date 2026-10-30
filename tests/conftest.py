@@ -18,3 +18,13 @@ def engine():
     except ImportError:
         pytest.skip("topor_engine wheel not built (run maturin develop in engine/)")
     return topor_engine
+
+
+@pytest.fixture
+def fixture_board(tmp_path):
+    from harness.copy import ProjectCopy
+    from harness.fixtures import make_fixture_board, write_project_file
+
+    pcb = make_fixture_board(tmp_path / "fx" / "fixture.kicad_pcb")
+    pro = write_project_file(pcb, rules={}, classes=[])
+    return ProjectCopy(pcb=pcb, pro=pro, dru=None, src_hashes={})
