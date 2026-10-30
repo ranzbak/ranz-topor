@@ -232,3 +232,153 @@ fn checker_uses_grid_not_all_pairs() {
     );
     assert!(rep.violations.is_empty());
 }
+
+// ---- fix round 1: containment in foreign copper, keepouts, via drill ----
+
+fn tr(net: i32, layer: u32, a: [i64; 2], b: [i64; 2], w: i64) -> Item {
+    serde_json::from_str(&format!(
+        r#"{{ "net": {net}, "layer": {layer}, "width": {w},
+             "prim": {{ "kind": "seg", "a": [{}, {}], "b": [{}, {}] }} }}"#,
+        a[0], a[1], b[0], b[1]
+    ))
+    .unwrap()
+}
+
+const SQ: &str = "[[0,0],[10000000,0],[10000000,10000000],[0,10000000]]";
+
+#[test]
+fn checker_item_inside_foreign_shape_flagged() {
+    let m = BoardModel::from_json(&format!(
+        r#"{{ "layers": [ {{ "id": 0 }} ],
+             "copper_shapes": [ {{ "uuid": "s", "net": 1, "layer": 0, "poly": {SQ} }} ] }}"#
+    ))
+    .unwrap();
+    let c = Checker::new(&m, &Options::default());
+    let inside = |net| {
+        tr(
+            net,
+            0,
+            [4_000_000, 5_000_000],
+            [6_000_000, 5_000_000],
+            200_000,
+        )
+    };
+    let rep = c.check_items(&[inside(2)]);
+    assert_eq!(rep.violations.len(), 1);
+    assert_eq!(rep.violations[0].against, "shape:s");
+    assert_eq!(rep.violations[0].gap, 0);
+    assert!(c.check_items(&[inside(1)]).violations.is_empty());
+}
+
+fn keepout_model() -> BoardModel {
+    BoardModel::from_json(&format!(
+        r#"{{ "layers": [ {{ "id": 0 }}, {{ "id": 2 }} ],
+             "keepouts": [ {{ "name": "ko", "layers": [0], "poly": {SQ},
+                              "no_tracks": true, "no_vias": true }} ] }}"#
+    ))
+    .unwrap()
+}
+
+#[test]
+fn checker_keepout_tracks() {
+    let c = Checker::new(&keepout_model(), &Options::default());
+    let inside = tr(
+        1,
+        0,
+        [4_000_000, 5_000_000],
+        [6_000_000, 5_000_000],
+        200_000,
+    );
+    let rep = c.check_items(&[inside]);
+    assert_eq!(rep.violations.len(), 1);
+    assert_eq!(rep.violations[0].against, "keepout:ko");
+    let crossing = tr(
+        1,
+        0,
+        [-5_000_000, 5_000_000],
+        [5_000_000, 5_000_000],
+        200_000,
+    );
+    assert_eq!(c.check_items(&[crossing]).violations.len(), 1);
+    let outside = tr(
+        1,
+        0,
+        [-5_000_000, -3_000_000],
+        [15_000_000, -3_000_000],
+        200_000,
+    );
+    assert!(c.check_items(&[outside]).violations.is_empty());
+    // layer 2 is not covered
+    let other = tr(
+        1,
+        2,
+        [4_000_000, 5_000_000],
+        [6_000_000, 5_000_000],
+        200_000,
+    );
+    assert!(c.check_items(&[other]).violations.is_empty());
+}
+
+#[test]
+fn checker_keepout_via_and_flags() {
+    let c = Checker::new(&keepout_model(), &Options::default());
+    let via: Item = serde_json::from_str(
+        r#"{ "kind": "via", "net": 1, "at": [5000000, 5000000], "d": 600000, "drill": 300000,
+             "layers": [0, 2] }"#,
+    )
+    .unwrap();
+    assert_eq!(c.check_items(&[via]).violations.len(), 1);
+    // no_vias only: tracks pass
+    let m = BoardModel::from_json(&format!(
+        r#"{{ "layers": [ {{ "id": 0 }} ],
+             "keepouts": [ {{ "name": "v", "layers": [0], "poly": {SQ}, "no_vias": true }} ] }}"#
+    ))
+    .unwrap();
+    let c = Checker::new(&m, &Options::default());
+    let t = tr(
+        1,
+        0,
+        [4_000_000, 5_000_000],
+        [6_000_000, 5_000_000],
+        200_000,
+    );
+    assert!(c.check_items(&[t]).violations.is_empty());
+}
+
+#[test]
+fn checker_via_drill_to_hole() {
+    let m = BoardModel::from_json(
+        r#"{ "layers": [ { "id": 0 }, { "id": 2 } ],
+             "holes": [ { "at": [0, 0], "d": 1000000, "kind": "npth" } ] }"#,
+    )
+    .unwrap();
+    let mut o = Options::default();
+    o.margin_nm = 0;
+    let c = Checker::new(&m, &o);
+    let mk = |y: i64, drill: i64| -> Item {
+        serde_json::from_str(&format!(
+            r#"{{ "kind": "via", "net": 1, "at": [0, {y}], "d": 400000, "drill": {drill},
+                 "layers": [0, 2] }}"#
+        ))
+        .unwrap()
+    };
+    // copper gap 0.5 mm, drill gap 0.6 mm: both fine with the defaults
+    assert!(c
+        .check_items(&[mk(1_200_000, 200_000)])
+        .violations
+        .is_empty());
+    // hole_to_hole larger than the copper hole clearance: only the drill check fires.
+    let m2 = BoardModel::from_json(
+        r#"{ "layers": [ { "id": 0 }, { "id": 2 } ],
+             "holes": [ { "at": [0, 0], "d": 1000000, "kind": "npth" } ],
+             "rules": { "hole_to_hole": 600000, "hole_clearance": 100000 } }"#,
+    )
+    .unwrap();
+    let c2 = Checker::new(&m2, &o);
+    // copper gap 0.5 >= 0.1 ok; drill gap 1.2-0.5-0.1 = 0.6 -> borderline ok; at 1.1: 0.5 < 0.6
+    let rep = c2.check_items(&[mk(1_100_000, 200_000)]);
+    // one violation per layer (F.Cu, B.Cu), all against the hole
+    assert_eq!(rep.violations.len(), 2, "{:?}", rep.violations);
+    assert!(rep.violations.iter().all(|v| v.against == "hole:0,0"));
+    assert_eq!(rep.violations[0].required, 600_000);
+}

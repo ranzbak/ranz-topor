@@ -1,8 +1,9 @@
 //! Clearance checker: grid-indexed copper gap tests of candidate items against the board.
 //!
 //! Gaps are copper-to-copper (`copper_gap` / `copper_gap_skeleton`), compared with
-//! `required + margin`. Copper-shape polygons are checked by their edges only (an item
-//! fully inside a filled polygon is not detected). Keepouts are not checked here.
+//! `required + margin`. Copper-shape polygons are checked by their edges (grid obstacles) plus
+//! containment of the item's start point (gap 0). Keepouts (rule areas) and shape polygons
+//! live in a per-layer grid of regions (`region_grids`, bbox query, then exact edge tests).
 
 use crate::geom::prim::Aabb;
 use crate::geom::{
@@ -41,6 +42,34 @@ enum Kind {
     Shape,
     Hole,
     Edge,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RegionKind {
+    Shape,
+    Keepout { tracks: bool, vias: bool },
+}
+
+/// A polygon area: foreign copper shape or keepout.
+struct Region {
+    poly: Vec<Vec2>,
+    bbox: Aabb,
+    net: i32,
+    tie_nets: Vec<i32>,
+    label: String,
+    kind: RegionKind,
+}
+
+fn point_in_poly(p: Vec2, poly: &[Vec2]) -> bool {
+    let n = poly.len();
+    let mut inside = false;
+    for i in 0..n {
+        let (a, b) = (poly[i], poly[(i + 1) % n]);
+        if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x) {
+            inside = !inside;
+        }
+    }
+    inside
 }
 
 enum Geo {
@@ -131,8 +160,11 @@ pub struct Checker {
     clearances: HashMap<i32, f64>,
     default_clearance: f64,
     cell: f64,
+    hole_to_hole: f64,
     obstacles: Vec<Obstacle>,
     grids: HashMap<u32, Grid<usize>>,
+    regions: Vec<Region>,
+    region_grids: HashMap<u32, Grid<usize>>,
 }
 
 impl Checker {
@@ -144,6 +176,7 @@ impl Checker {
         layer_set.extend(model.kept.iter().map(|k| k.layer));
         layer_set.extend(model.vias.iter().flat_map(|v| v.layers.iter().copied()));
         layer_set.extend(model.copper_shapes.iter().map(|c| c.layer));
+        layer_set.extend(model.keepouts.iter().flat_map(|k| k.layers.iter().copied()));
         let all: Vec<u32> = layer_set.into_iter().collect();
 
         let margin = opts.margin_nm as f64;
@@ -186,8 +219,11 @@ impl Checker {
                 .collect(),
             default_clearance: r.default.clearance as f64,
             cell,
+            hole_to_hole: r.hole_to_hole as f64,
             obstacles: Vec::new(),
             grids: HashMap::new(),
+            regions: Vec::new(),
+            region_grids: HashMap::new(),
         };
         for l in &all {
             c.grids.insert(*l, Grid::new(cell));
@@ -264,6 +300,22 @@ impl Checker {
         for s in &model.copper_shapes {
             let tie = s.owner_ref.as_deref().map(tie_nets_of).unwrap_or_default();
             let n = s.poly.len();
+            if n >= 3 {
+                c.add_region(
+                    &[s.layer],
+                    Region {
+                        poly: s.poly.iter().map(|p| p.to_vec2()).collect(),
+                        bbox: Aabb {
+                            min: Vec2 { x: 0.0, y: 0.0 },
+                            max: Vec2 { x: 0.0, y: 0.0 },
+                        },
+                        net: s.net,
+                        tie_nets: tie.clone(),
+                        label: format!("shape:{}", s.uuid),
+                        kind: RegionKind::Shape,
+                    },
+                );
+            }
             for i in 0..n {
                 let seg = Seg {
                     a: s.poly[i].to_vec2(),
@@ -281,6 +333,27 @@ impl Checker {
                         label: format!("shape:{}", s.uuid),
                         own_clr: c.clr(s.net),
                         tie_nets: tie.clone(),
+                    },
+                );
+            }
+        }
+        for k in &model.keepouts {
+            if k.poly.len() >= 3 && (k.no_tracks || k.no_vias) {
+                c.add_region(
+                    &k.layers,
+                    Region {
+                        poly: k.poly.iter().map(|p| p.to_vec2()).collect(),
+                        bbox: Aabb {
+                            min: Vec2 { x: 0.0, y: 0.0 },
+                            max: Vec2 { x: 0.0, y: 0.0 },
+                        },
+                        net: 0,
+                        tie_nets: Vec::new(),
+                        label: format!("keepout:{}", k.name),
+                        kind: RegionKind::Keepout {
+                            tracks: k.no_tracks,
+                            vias: k.no_vias,
+                        },
                     },
                 );
             }
@@ -336,6 +409,43 @@ impl Checker {
         self.obstacles.push(o);
     }
 
+    fn add_region(&mut self, layers: &[u32], mut r: Region) {
+        r.bbox = pts_bbox(r.poly.iter().copied(), 0.0);
+        let idx = self.regions.len();
+        for l in layers {
+            let cell = self.cell;
+            self.region_grids
+                .entry(*l)
+                .or_insert_with(|| Grid::new(cell))
+                .insert(r.bbox, idx);
+        }
+        self.regions.push(r);
+    }
+
+    /// Gap of `item` to a region: `Some(gap <= 0)` when it intersects or lies inside.
+    fn region_hit(item: &Track, r: &Region) -> Option<f64> {
+        let n = r.poly.len();
+        let mut best = f64::INFINITY;
+        for i in 0..n {
+            let edge = Track {
+                prim: Prim::Seg(Seg {
+                    a: r.poly[i],
+                    b: r.poly[(i + 1) % n],
+                }),
+                w: 0.0,
+            };
+            best = best.min(copper_gap(item, &edge));
+        }
+        if best <= 0.0 {
+            return Some(best);
+        }
+        let start = match &item.prim {
+            Prim::Seg(s) => s.a,
+            Prim::Arc(a) => a.start(),
+        };
+        point_in_poly(start, &r.poly).then_some(0.0)
+    }
+
     fn required(&self, item_net: i32, o: &Obstacle) -> f64 {
         let base = match o.kind {
             Kind::Hole => self.hole_clearance,
@@ -386,8 +496,36 @@ impl Checker {
             };
             let bb = track.prim.bbox().grow(0.5 * track.w);
             let mut found: Vec<Violation> = Vec::new();
+            let drill_track = match item {
+                Item::Via(v) if v.drill > 0 => Some(Track {
+                    prim: track.prim,
+                    w: v.drill as f64,
+                }),
+                _ => None,
+            };
+            let is_via = matches!(item, Item::Via(_));
             for &layer in &layers {
                 let mut test = |o: &Obstacle| {
+                    if let (Some(d), Kind::Hole) = (&drill_track, o.kind) {
+                        let gap = o.gap(d);
+                        let req = self.hole_to_hole + self.margin;
+                        if gap < req {
+                            let (g, r) = (gap.round() as i64, req.round() as i64);
+                            match found
+                                .iter_mut()
+                                .find(|v| v.against == o.label && v.layer == layer)
+                            {
+                                Some(v) => v.gap = v.gap.min(g),
+                                None => found.push(Violation {
+                                    item: i,
+                                    against: o.label.clone(),
+                                    layer,
+                                    gap: g,
+                                    required: r,
+                                }),
+                            }
+                        }
+                    }
                     if Self::is_exempt(net, o) {
                         return;
                     }
@@ -419,6 +557,41 @@ impl Checker {
                     let (cands, v) = g.query_counted(bb);
                     rep.candidates_visited += v;
                     cands.iter().for_each(|&k| test(&seen[k]));
+                }
+                if let Some(g) = self.region_grids.get(&layer) {
+                    let (cands, v) = g.query_counted(bb);
+                    rep.candidates_visited += v;
+                    for &k in &cands {
+                        let r = &self.regions[k];
+                        let (applies, req) = match r.kind {
+                            RegionKind::Shape => (
+                                !((r.net != 0 && r.net == net) || r.tie_nets.contains(&net)),
+                                self.clr(net).max(self.rules_min_clearance) + self.margin,
+                            ),
+                            RegionKind::Keepout { tracks, vias } => {
+                                (if is_via { vias } else { tracks }, 0.0)
+                            }
+                        };
+                        if !applies || !r.bbox.overlaps(&bb) {
+                            continue;
+                        }
+                        if let Some(gap) = Self::region_hit(&track, r) {
+                            let g = gap.round() as i64;
+                            match found
+                                .iter_mut()
+                                .find(|v| v.against == r.label && v.layer == layer)
+                            {
+                                Some(v) => v.gap = v.gap.min(g),
+                                None => found.push(Violation {
+                                    item: i,
+                                    against: r.label.clone(),
+                                    layer,
+                                    gap: g,
+                                    required: req.round() as i64,
+                                }),
+                            }
+                        }
+                    }
                 }
             }
             rep.violations.extend(found);
