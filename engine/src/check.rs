@@ -82,7 +82,7 @@ struct Obstacle {
     net: i32,
     kind: Kind,
     label: String,
-    /// Own clearance contribution (pad local override or the obstacle net's clearance), nm.
+    /// Own clearance contribution (max of the obstacle net's clearance and, for pads, the local override), nm.
     own_clr: f64,
     /// Nets bridged by the net tie this obstacle belongs to: not an obstacle for them.
     tie_nets: Vec<i32>,
@@ -253,7 +253,8 @@ impl Checker {
                 pad_by_hole.insert(p.center, i);
             }
             for &l in &p.layers {
-                let own = p.local_clearance.unwrap_or(0) as f64;
+                // KiCad: max(item class, pad class, pad local override).
+                let own = (p.local_clearance.unwrap_or(0) as f64).max(c.clr(p.net));
                 c.add(
                     &[l],
                     Obstacle {
@@ -566,7 +567,10 @@ impl Checker {
                         let (applies, req) = match r.kind {
                             RegionKind::Shape => (
                                 !((r.net != 0 && r.net == net) || r.tie_nets.contains(&net)),
-                                self.clr(net).max(self.rules_min_clearance) + self.margin,
+                                self.clr(net)
+                                    .max(self.clr(r.net))
+                                    .max(self.rules_min_clearance)
+                                    + self.margin,
                             ),
                             RegionKind::Keepout { tracks, vias } => {
                                 (if is_via { vias } else { tracks }, 0.0)

@@ -98,8 +98,11 @@ def test_m0_gate_reproduces_baseline(board, tmp_path):
     if board == "wiccon-2023":
         assert (kept, removed) == (e["kept_free_vias"], e["removed_vias"])
     elif board == "dcsgonebadge":
-        # DEVIATION (reported to the coordinator): the baseline kept 7 "free" vias; the harness
-        # rip (`GetIsFree()`) keeps 2. Only the invariant is asserted here.
+        # DEVIATION: the baseline kept 7 free vias (removed 196); the harness rip (`GetIsFree()`)
+        # keeps 2 (removed 201). Open rip-policy question (README step 1: keep stitching/fence
+        # vias, i.e. vias no track of their net touches), to be settled before M3. Pin the
+        # measured values so any change is visible.
+        assert (kept, removed) == (2, 201)
         assert kept + removed == e["orig_all"]["vias"]
     assert png_size(tmp_path / f"{board}-hand.png") == e["hand_png"]
     d = rmse(tmp_path / f"{board}-hand.png", BASELINE / f"images/{board}-hand.png", tmp_path)

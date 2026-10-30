@@ -398,11 +398,12 @@ impl BoardModel {
         }
     }
 
-    /// `max(per-net clearance, pad local clearance, board minimum)`, nm.
+    /// `max(item net clearance, pad net clearance, pad local clearance, board minimum)`, nm.
     pub fn required_clearance(&self, net: i32, pad: &Pad) -> f64 {
         let r = &self.rules;
         r.net_rule(net)
             .clearance
+            .max(r.net_rule(pad.net).clearance)
             .max(pad.local_clearance.unwrap_or(0))
             .max(r.min_clearance) as f64
     }

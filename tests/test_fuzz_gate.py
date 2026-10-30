@@ -2,6 +2,7 @@
 import json
 import shutil
 
+import pcbnew
 import pytest
 
 from harness.drc import classify, run_drc, summarise
@@ -10,14 +11,22 @@ from harness.rules import resolve_rules
 from harness.writer import save, write_items
 
 
+def _count_tracks(board) -> int:
+    """PCB_TRACK + PCB_ARC items (vias excluded)."""
+    return sum(1 for t in board.GetTracks() if t.GetClass() in ("PCB_TRACK", "PCB_ARC"))
+
+
 def fuzz_drc(cp, engine, tmp_path, seed, n, options, baseline=None):
     """Fuzz on the board `cp`, write the items, run KiCad DRC; return (out, classified, report, model); `baseline` is the DRC of the board before fuzzing."""
     b = load_board(cp)
     rules = resolve_rules(b, dru_text=cp.dru.read_text() if cp.dru else None, widths_before={})
     model = export_model(b, rules, name="fx")
     out = json.loads(engine.fuzz_items(json.dumps(model), json.dumps(options), seed, n))
+    before = _count_tracks(b)
     write_items(b, out["items"])
     pcb = save(b, tmp_path / "fuzz.kicad_pcb")
+    # A partial drop in write/save must be caught directly, not via the DRC counts.
+    assert _count_tracks(pcbnew.LoadBoard(str(pcb))) == before + len(out["items"])
     if cp.pro is not None:
         shutil.copy(cp.pro, tmp_path / "fuzz.kicad_pro")
     rep = run_drc(pcb, tmp_path / "fuzz.json")
