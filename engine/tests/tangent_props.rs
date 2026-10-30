@@ -22,8 +22,9 @@ proptest! {
     prop_assume!((p - c.c).len() > c.r * 1.001);
     for s in [Orient::Ccw, Orient::Cw] {
       let t = point_circle_tangent(p, c, s).unwrap();
-      prop_assert!(((t - c.c).len() - c.r).abs() < 1e-3);
-      prop_assert!((t - c.c).dot(t - p).abs() < 1e-3 * c.r * (p - c.c).len());
+      let scale = 1e8; // coordinate magnitude bound
+      prop_assert!(((t - c.c).len() - c.r).abs() < 1e-9 * scale);
+      prop_assert!((t - c.c).dot(t - p).abs() < 1e-9 * (t - c.c).len() * (t - p).len());
       prop_assert!(s.sign() * (t - p).cross(c.c - t) > 0.0);
     }
   }
@@ -31,9 +32,14 @@ proptest! {
     prop_assume!((c2.c - c1.c).len() > c1.r + c2.r + 1000.0);
     let seg = bitangent(c1, s1, c2, s2).unwrap();
     let t = (seg.b - seg.a).unit().unwrap();
-    prop_assert!(((seg.a - c1.c).len() - c1.r).abs() < 1e-2 && ((seg.b - c2.c).len() - c2.r).abs() < 1e-2);
+    let scale = 1e8;
+    prop_assert!(((seg.a - c1.c).len() - c1.r).abs() < 1e-9 * scale && ((seg.b - c2.c).len() - c2.r).abs() < 1e-9 * scale);
     prop_assert!(s1.sign() * t.cross(c1.c - seg.a) > 0.0 && s2.sign() * t.cross(c2.c - seg.b) > 0.0);
-    prop_assert!((seg.a - c1.c).dot(t).abs() < 1e-3 * c1.r);
+    prop_assert!((seg.a - c1.c).dot(t).abs() < 1e-9 * scale);
+    prop_assert!((seg.b - c2.c).dot(t).abs() < 1e-9 * scale);
+    // distance from each centre to the line equals its radius
+    prop_assert!((t.cross(c1.c - seg.a).abs() - c1.r).abs() < 1e-9 * scale);
+    prop_assert!((t.cross(c2.c - seg.a).abs() - c2.r).abs() < 1e-9 * scale);
   }
   #[test] fn prop_inner_bitangent_infeasible_when_overlapping(c1 in circle(), r2 in 50_000.0f64..5_000_000.0, f in 0.0f64..1.0, ang in 0.0f64..std::f64::consts::TAU) {
     // place c2 so that |r1 - r2| + 1000 < d < r1 + r2 - 1000 (overlapping, not nested)
@@ -82,7 +88,15 @@ fn example_four_bitangents_of_disjoint_circles() {
         },
         r: 1_000_000.0,
     };
-    assert_eq!(all_bitangents(c1, c2).len(), 4);
+    let all = all_bitangents(c1, c2);
+    assert_eq!(all.len(), 4);
+    for sg in &all {
+        let t = sg.dir().unwrap();
+        assert!(
+            ((sg.a - c1.c).len() - c1.r).abs() < 1e-6 && ((sg.b - c2.c).len() - c2.r).abs() < 1e-6
+        );
+        assert!((sg.a - c1.c).dot(t).abs() < 1e-6 && (sg.b - c2.c).dot(t).abs() < 1e-6);
+    }
     let outer = bitangent(c1, Orient::Ccw, c2, Orient::Ccw).unwrap();
     assert!((outer.a.y + 1_000_000.0).abs() < 1e-6 && (outer.b.y + 1_000_000.0).abs() < 1e-6);
 }
@@ -130,4 +144,87 @@ fn example_concentric_and_collinear_degenerate() {
     ));
     let p = |x: f64| Vec2 { x, y: 0.0 };
     assert!(Arc::from_three_points(p(0.0), p(1.0), p(2.0)).is_none());
+}
+
+#[test]
+fn example_contained_circles_outer_infeasible() {
+    let c1 = Circle {
+        c: Vec2 { x: 0.0, y: 0.0 },
+        r: 1_000_000.0,
+    };
+    let c2 = Circle {
+        c: Vec2 {
+            x: 100_000.0,
+            y: 0.0,
+        },
+        r: 100_000.0,
+    };
+    assert!(matches!(
+        bitangent(c1, Orient::Ccw, c2, Orient::Ccw),
+        Err(GeomError::Infeasible)
+    ));
+    assert!(all_bitangents(c1, c2).is_empty());
+}
+
+#[test]
+fn example_concentric_all_bitangents_empty() {
+    let c = Circle {
+        c: Vec2 { x: 3.0, y: 4.0 },
+        r: 10.0,
+    };
+    assert!(all_bitangents(c, Circle { c: c.c, r: 20.0 }).is_empty());
+}
+
+#[test]
+fn example_contains_dir_degenerate() {
+    let c = Vec2 { x: 0.0, y: 0.0 };
+    let zero = Arc {
+        c,
+        r: 10.0,
+        sigma: Orient::Ccw,
+        a_start: 0.5,
+        sweep: 0.0,
+    };
+    assert!(zero.contains_dir(Vec2 {
+        x: 5.0 * 0.5f64.cos(),
+        y: 5.0 * 0.5f64.sin()
+    }));
+    assert!(!zero.contains_dir(Vec2 { x: 0.0, y: 5.0 }));
+    assert!(!zero.contains_dir(c));
+    let big = Arc {
+        c,
+        r: 10.0,
+        sigma: Orient::Ccw,
+        a_start: 0.0,
+        sweep: 4.0,
+    };
+    assert!(!big.contains_dir(c));
+}
+
+#[test]
+fn example_bad_inputs_rejected() {
+    let p = Vec2 { x: 100.0, y: 0.0 };
+    let bad = Circle {
+        c: Vec2 { x: 0.0, y: 0.0 },
+        r: -1.0,
+    };
+    assert!(matches!(
+        point_circle_tangent(p, bad, Orient::Ccw),
+        Err(GeomError::Degenerate)
+    ));
+    let nan = Circle {
+        c: Vec2 {
+            x: f64::NAN,
+            y: 0.0,
+        },
+        r: 1.0,
+    };
+    assert!(matches!(
+        point_circle_tangent(p, nan, Orient::Ccw),
+        Err(GeomError::Degenerate)
+    ));
+    assert!(matches!(
+        bitangent(bad, Orient::Ccw, nan, Orient::Cw),
+        Err(GeomError::Degenerate)
+    ));
 }

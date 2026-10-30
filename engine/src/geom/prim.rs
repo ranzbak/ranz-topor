@@ -109,6 +109,13 @@ impl Arc {
         let e = self.end() - self.c;
         let v = p - self.c;
         let sg = self.sigma.sign();
+        if v.len2() == 0.0 {
+            return false;
+        }
+        if self.sweep == 0.0 {
+            // only the exact start direction counts
+            return s.cross(v) == 0.0 && s.dot(v) > 0.0;
+        }
         if self.sweep <= PI {
             sg * s.cross(v) >= 0.0 && sg * v.cross(e) >= 0.0
         } else {

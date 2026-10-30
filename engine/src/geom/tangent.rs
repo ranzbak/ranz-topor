@@ -11,6 +11,9 @@ pub enum GeomError {
 
 /// Tangent point on `c` for a wire leaving `p` and wrapping `c` with orientation `sigma`.
 pub fn point_circle_tangent(p: Vec2, c: Circle, sigma: Orient) -> Result<Vec2, GeomError> {
+    if !valid(c) || !p.x.is_finite() || !p.y.is_finite() {
+        return Err(GeomError::Degenerate);
+    }
     let w = p - c.c;
     let d = w.len();
     if d <= c.r {
@@ -25,6 +28,11 @@ pub fn point_circle_tangent(p: Vec2, c: Circle, sigma: Orient) -> Result<Vec2, G
         }
     }
     Err(GeomError::Degenerate)
+}
+
+/// Finite centre and finite, non-negative radius (a radius of 0 is a point).
+fn valid(c: Circle) -> bool {
+    c.c.x.is_finite() && c.c.y.is_finite() && c.r.is_finite() && c.r >= 0.0
 }
 
 /// Candidate tangent lines for sign choice `(s1, s2)` and `h`; `None` if none exists.
@@ -46,6 +54,9 @@ fn candidate(c1: Circle, c2: Circle, s1: f64, s2: f64, h: f64) -> Option<Seg> {
 
 /// The bitangent leaving `c1` with orientation `s1` and arriving at `c2` with `s2`.
 pub fn bitangent(c1: Circle, s1: Orient, c2: Circle, s2: Orient) -> Result<Seg, GeomError> {
+    if !valid(c1) || !valid(c2) {
+        return Err(GeomError::Degenerate);
+    }
     let d = (c2.c - c1.c).len();
     if d < 1e-9 {
         return Err(GeomError::Degenerate);
@@ -69,7 +80,11 @@ pub fn bitangent(c1: Circle, s1: Orient, c2: Circle, s2: Orient) -> Result<Seg, 
 }
 
 /// All distinct bitangents (at most 4), directed from `c1` to `c2`.
+/// Empty for invalid (non-finite / negative radius) or concentric circles, and for nested ones.
 pub fn all_bitangents(c1: Circle, c2: Circle) -> Vec<Seg> {
+    if !valid(c1) || !valid(c2) {
+        return Vec::new();
+    }
     let mut out: Vec<Seg> = Vec::with_capacity(4);
     for s2 in [1.0, -1.0] {
         for h in [1.0, -1.0] {
