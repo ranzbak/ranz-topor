@@ -6,6 +6,7 @@ pub mod geom;
 pub mod model;
 #[cfg(feature = "python")]
 mod py;
+pub mod wires;
 
 #[cfg(test)]
 mod tests {
