@@ -42,6 +42,12 @@ its stacks then hold the pair's offsets. Split into two traces only at the pad f
 
 ## 3. Skew from turns
 
+*Glass-weave skew* (Luzin 2015): in FR-4 the glass fabric has εr ≈ 5.8 and the epoxy ≈ 3.8, so two
+identical neighbouring traces — one along a fibre, one between fibres — can differ in propagation
+speed by up to 1.23×. Routing pairs at an angle to the board axes (natural in any-angle routing)
+averages this out; an argument for not snapping diff pairs to 0°/90°.
+
+
 An arc of turning angle `Δθ` makes the outer trace longer by `s·|Δθ|`, **independent of R**.
 Over the whole pair:
 
@@ -76,6 +82,12 @@ Meanders change the topology locally (they occupy area): reserve the meander reg
 sketch *before* final relaxation, or tune only after routing in the remaining free space.
 
 ## 5. Interaction with KiCad's tuning tools
+
+Candidate method for the meander stage: Fang et al. 2024 (arXiv 2407.19195) — reserve a
+non-overlapping region per trace, then fill it by dynamic programming along the existing route
+(obstacle-aware, original routing preserved); diff pairs via MSDTW median trace. Adapt by
+emitting semicircular (arc) bends instead of mitred corners (§4). Fits the complexity budget.
+
 
 KiCad 8+ has a length-tuning tool that generates meanders (including round/arc corner styles)
 and stores them as generator objects. The plugin can either generate its own meanders

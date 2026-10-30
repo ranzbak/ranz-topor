@@ -1,3 +1,16 @@
+# STATE
+
+**M1 (taut smoother) — DONE 2026-10-31** (gate verified by main session: `pytest tests/gate -m "gate or not gate"` → 7 passed).
+Rotation 3 coordinator ended on an auth error right after gate green; this header written by main.
+eprom: 25/27 wires taut + 2 zero-slack fallbacks (+5V, user ruling), 8 arcs, DRC routing 0, unconnected 0,
+outside-pad length 71.494 vs hand 76.598 mm, router ~4 ms. Benchmark docs/benchmarks/2026-10-30-topor-0.1.0/ (eprom, wiccon,
+dcsgone, nametag-sao, wedding-gift). dcsgone routing_new fixed (882f94c). Version 0.1.0.
+**Carry into M2 (first tasks):** F-C2 via holes as obstacles in the checker; CDT failure "constraint crosses another
+constraint" (all wires fall back on wiccon-2023 and wedding-gift); M1.5 F2 SS mitre, F3–F5 (docs/progress/notes/m1-gate-review.md);
+zero-slack check O(emitted×fallback) → spatial-index local query; nametag fallbacks (self-check 13, hand vertex on CDT vertex 8).
+
+---
+
 # topor — progress state
 
 ## Current milestone

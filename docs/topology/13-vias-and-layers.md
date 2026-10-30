@@ -60,6 +60,8 @@ At the topological level a via is "somewhere between these crossings". Placement
    and as an anchor with its own stacks.
 
 **Dense fine-pitch regions (BGA/QFN):** most triangles cannot hold a via → separate fan-out
+(Luzin 2015: escape **inside out** — the number of available channels does not shrink per layer,
+so a 784-ball BGA needs 7 layers instead of 10; routing outside in loses 8 channels per layer.)
 pre-pass (dog-bone vias at pad-grid centres; TopoR escapes BGAs from the centre outwards).
 
 ## 5. KiCad constraints for vias

@@ -125,6 +125,7 @@ minimums). Width must therefore be resolved, in this order:
 | Source | Use |
 |---|---|
 | Custom rule `track_width` (opt/min) matching the net | Explicit intent; highest precedence |
+| Impedance target (netclass/profile + stackup) → computed width/gap per layer, see [26](../geometry/26-impedance-controlled-geometry.md) | Per-layer microstrip/stripline solve; beats plain netclass width |
 | Netclass width, if the net is in a non-`Default` netclass | Explicit intent |
 | Existing routed copper on that net (before ripping), e.g. median width | Recovers hand-chosen widths on already-routed boards |
 | Plugin settings table (net / netclass / pattern → width or current) | User fills gaps; width from current via IPC-2152-style sizing (KiCad's calculator tool covers this, not exposed via API) |
@@ -159,11 +160,12 @@ and stay above the minimums, because routing exactly at a fab minimum leaves no 
 | NPTH to track | 0.2 mm | 0.25 mm |
 | Via hole-to-hole / pad hole-to-hole | 0.2 mm / 0.45 mm | 0.25 mm / 0.5 mm |
 | Inner layer: via hole / PTH hole to copper | 0.2 mm / 0.3 mm | same |
-| Copper to routed edge | ≥ 0.2 mm (edge tolerance ±0.2 mm) | 0.3 mm |
+| Copper to routed edge | ≥ 0.2 mm (edge tolerance ±0.2 mm) | **0.5 mm** (user preference: margin against milling into copper → shorts; dense designs may set less, e.g. eprom-to-kernal 0.25 mm; never below the 0.2 mm floor) |
 | Copper to V-cut | ≥ 0.4 mm | 0.5 mm |
 | Blind/buried vias | HDI only (laser 0.075–0.15 mm) | not used by default |
 
 Notes:
+- **Manufacturer minimums are a floor** (user decision 2026-10-30): a design value below the fab minimum (e.g. copper-to-edge 0.025 mm vs JLCPCB 0.2 mm) is raised to the minimum and flagged in the pre-flight report; design values above it are used as-is.
 - **Hole sizes are discrete.** Fabs drill from a fixed tool set, so a drill size is chosen
   from an allowed list, never computed continuously (e.g. "the via that just fits"). The
   profile carries that list; the router only *selects* via sizes from it, and via diameter

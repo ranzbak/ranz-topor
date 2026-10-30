@@ -67,6 +67,10 @@ secondary descriptions were available during research (2026-10-30).
 - **EDN**, "Speed and improve PCB routing", 2013. https://www.edn.com/speed-and-improve-pcb-routing/
   — flexible routing, Steiner 120° rule, vendor benchmark claims.
 - Wikipedia: https://en.wikipedia.org/wiki/TopoR
+- ★ **S. Yu. Luzin**, "Specifics and Advantages of Flexible Topological Any-Angle Routing", Nürnberg
+  2015 (10 pp.). https://www.rodina-ru.com/files/eremex/topor/en/Nurnberg.pdf (site certificate
+  expired 2026-10) — English; clinch detection rules, local via minimisation on via pairs, double-
+  crossing elimination, concurrent delay equalisation, inside-out BGA escape, glass-weave argument.
 - Books (not seen, UNVERIFIED contents): Luzin, Lyachek, Petrosyan, Polubasov, *Models and
   Algorithms for Automated Design of Electronic and Computer Equipment* (BHV-Petersburg 2010,
   ISBN 978-5-9775-0576-5); Luzin, Lyachek, Polubasov, *Автоматизация проектирования печатных
@@ -98,6 +102,20 @@ secondary descriptions were available during research (2026-10-30).
 
 ## G. Rip-up and negotiation
 
+- **D. Harabor, A. Grastien**, "An Optimal Any-Angle Pathfinding Algorithm" (Anya), *ICAPS 2013*.
+  https://cdn.aaai.org/ojs/13609/13609-40-17127-1-2-20201228.pdf — optimal, online any-angle search
+  on grids, expanding intervals of states instead of points; no preprocessing.
+- **M. Cui, D. Harabor, A. Grastien**, "Compromise-free Pathfinding on a Navigation Mesh"
+  (Polyanya), *IJCAI 2017* (details UNVERIFIED) — Anya generalised to convex-polygon navigation
+  meshes, i.e. directly to our CDT: exact Euclidean shortest-path length as an **admissible A\*
+  heuristic** in the M2 search (point agent; clearance, order and capacity stay in the topology).
+- **A. Nash, S. Koenig**, "Any-Angle Path Planning", *AI Magazine* 34(4), 2013.
+  https://idm-lab.org/bib/abstracts/papers/aimag13.pdf — overview of Theta*, Lazy Theta*, Field D*,
+  A* with post-smoothing: A* variants that propagate along graph edges but allow shortcuts via
+  line-of-sight (parent pointers). For us: cost/length estimate inside the M2 topological search
+  ([12 §6](topology/12-sketch-generation.md#6-recommended-plan-for-this-plugin)); not a replacement
+  for the clearance-aware curved funnel.
+
 - **L. McMurchie, C. Ebeling**, "PathFinder: a negotiation-based performance-driven router for FPGAs", *FPGA 1995*.
 - **A. Haas**, "Whole-Route Planning of a Memory Bus Between Two BGAs…", arXiv 2610.35601 (2026). https://arxiv.org/html/2610.35601 — CP-SAT crossing/layer model; negotiated congestion prices.
 
@@ -123,6 +141,39 @@ secondary descriptions were available during research (2026-10-30).
 - **Freerouting** (shape-based, not topological): https://github.com/freerouting/freerouting
 - **kicad-round-tracks** (corner rounding): https://github.com/mitxela/kicad-round-tracks
 - Altium Situs (commercial, topological global + geometric detail): https://www.altium.com/documentation/altium-designer/pcb/routing/situs-topological-autorouter
+
+## K. Benchmarks and datasets
+
+- **T. Lu et al.**, "OmniRouting: A Semantic-Coupled Multimodal Benchmark for Constraint-Aware
+  Spatial Reasoning in PCB Routing", arXiv 2608.04434 (Aug 2026), CC BY-NC-ND 4.0.
+  https://arxiv.org/abs/2608.04434 — 1,681 industrial schematic-coupled PCB designs (placements,
+  netlists, stackups, routing constraints); finds current LLM/LMM routing weak on path planning,
+  design rules and connectivity (supports an algorithmic engine). Data/code promised, not yet
+  released (2026-10-30); file format UNVERIFIED. Candidate extra benchmark corpus beyond the
+  user's boards ([benchmarks](benchmarks/README.md)).
+
+## L. Constraint-aware PCB routers (non-topological)
+
+- ★ **W. Fang, L. Guo, J. Lin, S. Xiong, H. He, J. Xu, J. Chen**, "Obstacle-Aware Length-Matching
+  Routing for Any-Direction Traces in Printed Circuit Board", arXiv 2407.19195 (2024; preliminary
+  version DAC 2024). https://arxiv.org/abs/2407.19195 — two stages: non-overlapping region per trace,
+  then obstacle-aware meandering by dynamic programming (DP O(n²) in the discretisation, pattern
+  restore O(n), obstacle queries via segment tree O(log² N)) preserving the original route;
+  **MSDTW** (multi-scale dynamic time warping) merges a diff pair into a median trace, meanders it,
+  and splits it back. Any-direction segments, no arcs. Basis for our M5 length matching with arc
+  meanders ([24 §4](geometry/24-length-diffpairs-tuning.md#4-arc-meanders-serpentines)).
+
+- **T.-C. Lin, D. Merrill, Y.-Y. Wu, C. Holtz, C.-K. Cheng**, "A Unified Printed Circuit Board Routing
+  Algorithm With Complicated Constraints and Differential Pairs", *ASP-DAC 2021*, pp. 170–175.
+  https://doi.org/10.1145/3394885.3431568 — full-board router (escape + area in one) handling
+  coupled diff-pair routing and pad-entry constraints; A*-based on a grid (UNVERIFIED, inferred from
+  citing work; full text not accessible). Reference for pad-entry/exit stubs and diff pairs (M4/M5).
+- **M. M. Ozdal, M. D. F. Wong**, "A Length-Matching Routing Algorithm for High-Performance Printed
+  Circuit Boards", *IEEE TCAD* 2006. https://dl.acm.org/doi/10.1109/TCAD.2006.882584 — classic
+  length-matching routing; reference for matched groups / DDR ([12 §3.2](topology/12-sketch-generation.md#32-matched-groups-ddr-byte-lanes-buses)).
+- "A Novel Global Routing Algorithm for Printed Circuit Boards Based on Triangular Grid" (2023).
+  https://www.researchgate.net/publication/376366184 — triangulation-based PCB global routing,
+  close to our routing field (details UNVERIFIED).
 
 ## Reading order for implementers
 

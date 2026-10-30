@@ -29,6 +29,7 @@ No implementation here — algorithms, constraints, risks and sources only.
 - [23 — Exact distance checks, integer-nm robustness](geometry/23-distance-and-drc-checks.md)
 - [24 — Length, differential pairs, meanders](geometry/24-length-diffpairs-tuning.md)
 - [25 — Relaxation, via placement, re-flow](geometry/25-relaxation-and-reflow.md)
+- [26 — Impedance-controlled width/gap](geometry/26-impedance-controlled-geometry.md)
 
 **Benchmarks**
 - [Routing benchmarks over time](benchmarks/README.md) (images + metrics per run)

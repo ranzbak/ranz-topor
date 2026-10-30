@@ -16,6 +16,17 @@ Related: [10](10-triangulation-and-cuts.md), [13 vias and layers](13-vias-and-la
   are checked and rebuilt if not minimal. SURF moves Steiner points and vias with a spring
   model (Dayan & Dai, UCSC-CRL-91-40).
 - MVP: connect each pad to the nearest pad of the partial tree (no T-junction onto a wire).
+- **Pour-served nets** (e.g. GND connected only through a pour and stitching vias, no tracks):
+  connections satisfied by a copper zone after refill are not routed as tracks. Decomposition
+  starts from connectivity *including* zones; only pads the pour does not reach become
+  connections. Routed tracks of other nets must not cut a pour-served pad off its pour (check:
+  `kicad-cli pcb drc --refill-zones` → 0 unconnected). Detecting which nets are pour-served:
+  a zone on that net covers its pads' layers (user override per net).
+  For pads the pour does not reach on their own layer, the cheapest completion is usually a
+  **short stub to a via into the pour** on another layer (fan-out style, [13 §4](13-vias-and-layers.md#4-placing-vias)):
+  either an existing via already standing in the pour (stitching vias are valid attach points)
+  or a new one placed where it lands inside the pour after refill. Cost: via cost vs track
+  length, so the search can choose between a long track and stub + via.
 
 ## 2. Initial routing (sequential)
 
@@ -162,6 +173,16 @@ gEDA toporouter used "ROAR" rip-up plus detour optimisation with pairwise net sc
 
 ## 5. Topological conflicts to detect
 
+Detection rules for **clinches** (Luzin, Nürnberg 2015), all read directly from the triangulation:
+(a) a triangulation edge between two objects (e.g. pads) is crossed by a wire incident to one of
+them ("regular clinch"); (b) an edge connects two same-net objects, is crossed by other nets' wires,
+and the wire joining them does not run along that edge ("U-clinch"); (c) *mutual evasion*: a net-A
+wire goes around a net-B pad while a net-B wire goes around a net-A pad. Once detected, checking
+whether the conflict is resolvable is cheap — far cheaper than rerouting wires one by one, which
+cannot remove these conflicts at all. **Local via minimisation** looks at pairs of adjacent vias:
+in Luzin's example, layer reassignment cannot remove them, rerouting one wire removes them at +36 %
+length, a joint topology change of two wires removes them at only +7 %.
+
 From TopoR (Luzin, Popov & Popov 2013): **loops, half-loops and "clinches"** detected from
 triangulation edges — wires that wrap uselessly around features, or pinch between two others.
 Detect by reduced crossing sequences (a loop = the sequence re-crosses the same edge set
@@ -170,7 +191,12 @@ around a vertex).
 ## 6. Recommended plan for this plugin
 
 1. MST decomposition; order wide-first, then short-first.
-2. Per connection: A* over the per-layer routing graph ([10 §3](10-triangulation-and-cuts.md#3-routing-graph))
+2. Per connection: A* over the per-layer routing graph — with a **Lazy Theta\*-style length
+   estimate** (parent shortcut along the corridor, line-of-sight test against the inflated
+   anchors; Nash & Koenig 2013) instead of summed edge lengths, so partial routes are costed
+   close to their taut length — preferably the exact Euclidean distance from **Polyanya** on the
+   same triangulation (Cui, Harabor & Grastien 2017) as admissible heuristic; exact geometry
+   still comes from the curved funnel — ([10 §3](10-triangulation-and-cuts.md#3-routing-graph))
    with cost = estimated length + capacity overuse penalty + crossing penalty (via cost).
 3. PathFinder iterations until no capacity overuse (or iteration cap).
 4. Double-crossing removal.
