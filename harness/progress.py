@@ -12,7 +12,6 @@ from harness.render import compose_compare
 from harness.smoother import smooth_router
 
 ROOT = Path(__file__).resolve().parents[1]
-HAND_MM = "189.9"
 
 
 def render_progress(task: str, *, board: str = "eprom-to-kernal", date: str | None = None,
@@ -26,10 +25,11 @@ def render_progress(task: str, *, board: str = "eprom-to-kernal", date: str | No
         sm = result.get("smooth") or {}
         r = result["routed_all"]
         length_mm = r["track_mm"] + r["arc_mm"]
+        hand_mm = result["orig_all"]["track_mm"] + result["orig_all"]["arc_mm"]  # board under test
         text = (f"{task}: {sm.get('nets_taut', 0)}/{sm.get('nets', 0)} nets, "
                 f"{sm.get('wires_taut', 0)}/{sm.get('wires', 0)} wires, "
                 f"DRC routing {result['routed_drc']['routing_new']}, "
-                f"{length_mm:.1f} mm vs {HAND_MM} mm")
+                f"{length_mm:.1f} mm vs {hand_mm:.1f} mm")
         topor_png = add_caption(tmp / f"{board}-work" / f"{board}-topor-raw.png", text,
                                 tmp / "topor-progress.png")
         png = out_dir / f"{date}-m1-{task}.png"

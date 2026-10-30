@@ -102,6 +102,7 @@ def run_bench(
     """Run the benchmark procedure for one board; `router=None` routes nothing (M0)."""
     t_start = time.monotonic()
     options = dict(options or {})
+    fab_floor = bool(options.pop("fab_floor_edge_clearance", False))  # harness-only, not an engine option
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     src = _source_pcb(board, pcb_override)
@@ -124,7 +125,8 @@ def run_bench(
     b = load_board(cp)  # fresh board holding the ripped copper just saved
 
     dru_text = cp.dru.read_text() if cp.dru is not None else None
-    rules = resolve_rules(b, dru_text=dru_text, widths_before=widths_before)
+    rules = resolve_rules(b, dru_text=dru_text, widths_before=widths_before,
+                          fab_floor_edge_clearance=fab_floor)
     model = export_model(b, rules, name=board)
     write_model_json(model, out_dir / f"{board}--model.json")
 

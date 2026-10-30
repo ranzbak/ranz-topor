@@ -20,12 +20,15 @@ from tests.test_fuzz_gate import fuzz_drc
 
 ROOT = Path(__file__).resolve().parents[2]
 BASELINE = ROOT / "docs/benchmarks/2026-10-30-topola-d832b164"
+# eprom was re-routed by hand in KiCad 10: its reference is this repo's re-pinned hand image
+TOPOR_REF = ROOT / "docs/benchmarks/2026-10-30-topor-0.0.1"
 
 BOARDS = {
     "eprom-to-kernal": dict(
         footprints=5, pads=56, nets=26,
-        orig_all={"segments": 80, "arcs": 0, "vias": 0, "track_mm": 189.93},
-        orig_drc_total=93, orig_drc={"copper_edge_clearance": 21, "track_dangling": 1},
+        # re-pinned 2026-10-30 after the KiCad 10 hand re-route (was 80 / 189.93 mm / DRC 93)
+        orig_all={"segments": 60, "arcs": 0, "vias": 15, "track_mm": 175.56},
+        orig_drc_total=0, orig_drc={},
         hand_png=(550, 1160)),
     "wiccon-2023": dict(
         footprints=45, pads=124, nets=38,
@@ -105,7 +108,8 @@ def test_m0_gate_reproduces_baseline(board, tmp_path):
         assert (kept, removed) == (2, 201)
         assert kept + removed == e["orig_all"]["vias"]
     assert png_size(tmp_path / f"{board}-hand.png") == e["hand_png"]
-    d = rmse(tmp_path / f"{board}-hand.png", BASELINE / f"images/{board}-hand.png", tmp_path)
+    ref_dir = TOPOR_REF if board == "eprom-to-kernal" else BASELINE
+    d = rmse(tmp_path / f"{board}-hand.png", ref_dir / f"images/{board}-hand.png", tmp_path)
     print(f"GATE {board}: runtime_s={r['runtime_s']} rmse={d:.5f} orig_drc={r['orig_drc']['total']}")
     assert d < 0.02
     assert_unchanged(BENCH_BOARDS[board].parent, src_hashes)

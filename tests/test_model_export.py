@@ -120,6 +120,10 @@ def test_export_eprom_counts(tmp_path):
     m = export_model(load_board(pc), {}, name="eprom")
     assert_unchanged(src.parent, pc.src_hashes)
     assert len(m["pads"]) == 56 and len(m["nets"]) == 26
+    # re-pinned 2026-10-30 after the KiCad 10 hand re-route: 60 kept segments + 15 vias, 0.4 mm x23 + 0.25 mm x37
+    assert len(m["kept"]) == 60 and len(m["vias"]) == 15
+    assert sorted((w, sum(k["width"] == w for k in m["kept"])) for w in {k["width"] for k in m["kept"]}) \
+        == [(250_000, 37), (400_000, 23)]
     # 5 footprints on the board, but two are pad-less "REF**" graphics, so pads name 3 refs
     assert len(list(load_board(pc).GetFootprints())) == 5
     assert {p["ref"] for p in m["pads"]} == {"J1", "U1", "U2"}

@@ -4,7 +4,7 @@
 >
 > **Execution method (chosen by the user 2026-10-30, 45 §4):** rotating coordinator (O) dispatching one worker per task at the tier in the task title (H/S/F); independent tasks in parallel in isolated worktrees; F only for the design notes, failed-gate diagnosis and the gate review marked below. Every worker report is folded into `docs/progress/STATE.md` (≤ 5 lines each); handover at the M1 gate or at ~50 % context / ~15 round-trips.
 
-**Goal:** Take the hand routing of eprom-to-kernal (a copy; source read-only), keep its topology and pull every trace taut into native KiCad segments + arcs: 26/26 nets converted, 0 new routing DRC violations, total length ≤ 189.9 mm, widths unchanged, deterministic, engine time < 2 s, per-trace fallback to the hand copper when a trace fails its self-check.
+**Goal:** Take the hand routing of eprom-to-kernal (a copy; source read-only), keep its topology and pull every trace taut into native KiCad segments + arcs: 26/26 nets converted, 0 new routing DRC violations, total length ≤ 175.6 mm (hand 175.557; re-pinned 2026-10-30 after KiCad 10 hand re-route), widths unchanged, deterministic, engine time < 2 s, per-trace fallback to the hand copper when a trace fails its self-check.
 
 **Architecture:** The engine (Rust) grows five modules on top of M0: `obstacle` (board → anchor circles + walls per layer, 20 §2–3), `wires` (hand copper → wires between terminals), `cdt` + `sketch` (constrained Delaunay triangulation via `spade`, crossing sequences of the hand polylines, funnel → anchor sequence with side σ per anchor, stack order per anchor side; 10, 11 §2, 21 §5), `taut` + `relax` (bitangent/arc chains with stack radii, Gauss–Seidel relaxation over all wires with add/drop fix-ups; 21 §2–5, 25 §2), and `smooth` (orchestration, quantisation, `Checker` self-check, per-wire fallback, report). One new PyO3 function `smooth(model_json, options_json) -> str`. The harness gets `smoother.py` (router callable for `run_bench`), `writer.remove_items`, `progress.py` (progress PNGs) and the M1 gate test. The sketch JSON of the M0 outline is dropped: the engine extracts the topology from `model.kept` itself (the harness only needs `rip="none"`).
 
@@ -24,8 +24,8 @@ All M0 Global Constraints still apply (Linux, `.venv` only, read-only source boa
 - Caps (45 §5a): relaxation iterations `Options.relax_iter_cap` (default 200); sleeve length ≤ `MAX_SLEEVE = 2000` crossings per wire; tauten fix-up passes ≤ `TAUT_PASS_CAP = 64` per wire per iteration; self-check/fallback rounds bounded by the wire count; wall clock `Options.wall_clock_s` with anytime return (`timed_out: true`, best feasible result so far). No all-pairs loops: every neighbour lookup goes through `Grid`.
 - Fallback granularity is the **wire**: a wire that fails extraction, tauten or self-check keeps its hand items (they are not listed in `replaced`); net status `taut` (all wires taut), `partial`, `fallback` or `skipped`.
 - Output is native arcs only: emitted chains alternate segments and arcs (`pattern` never contains `"SS"`), arcs go through `quantise_chain` (degenerate → segment).
-- Gate numbers (45 §1 M1, eprom-to-kernal): 26 nets `taut`, 32/32 wires taut, `routing_new == 0`, `track_mm + arc_mm ≤ 189.9` (hand 189.934), `width_match 26/26` (0.4 mm `+5V`/`GND`, 0.25 mm others), `arcs ≥ 1`, `router_s < 2.0`, two runs byte-identical. eprom is a KiCad-5 project (no `.kicad_pro`): edge clearance 0.5 mm, clearance 0.2 mm, come from pcbnew defaults via `resolve_rules` (M0 Task 10).
-- **Progress PNG (user requirement 2026-10-30):** every task whose completion changes the routing outcome on eprom-to-kernal (first taut traces, all nets, arcs instead of segments, fallback working, DRC count down — Tasks 8 and 9 below, and any later fix task) ends with: `.venv/bin/python -m harness.progress --task <TaskId>` → `docs/benchmarks/progress/<YYYY-MM-DD>-m1-<TaskId>.png` (hand left, topor right, zone fills removed, caption `<TaskId>: <taut>/26 converted, DRC routing <n>, <length> mm vs 189.9 mm`), `git add` + commit of the PNG, and the coordinator immediately sends the path plus the one-line numbers to the main session ("main").
+- Gate numbers (45 §1 M1, eprom-to-kernal) (re-pinned 2026-10-30 after KiCad 10 hand re-route): 26 nets `taut`, 30/30 wires taut, `routing_new == 0`, `track_mm + arc_mm ≤ 175.6` (hand 175.557 over 60 segments, 15 vias), `width_match 26/26` (0.4 mm `+5V`/`GND`: 23 segments, 0.25 mm others: 37 segments), `arcs ≥ 1`, `router_s < 2.0`, two runs byte-identical. eprom is now a KiCad-10 project (`.kicad_pro`, hand re-routed DRC-clean: orig DRC 0, 0 unconnected): edge clearance is the board-setup value 0.2 mm, clearance 0.2 mm, both via `resolve_rules`; the JLCPCB fab floor for the edge (`fab_floor_edge_clearance`, 0.3 mm) is opt-in and off for the gate so the comparison with the hand routing is direct.
+- **Progress PNG (user requirement 2026-10-30):** every task whose completion changes the routing outcome on eprom-to-kernal (first taut traces, all nets, arcs instead of segments, fallback working, DRC count down — Tasks 8 and 9 below, and any later fix task) ends with: `.venv/bin/python -m harness.progress --task <TaskId>` → `docs/benchmarks/progress/<YYYY-MM-DD>-m1-<TaskId>.png` (hand left, topor right, zone fills removed, caption `<TaskId>: <taut>/26 converted, DRC routing <n>, <length> mm vs <hand> mm` (hand = copper length of the board under test)), `git add` + commit of the PNG, and the coordinator immediately sends the path plus the one-line numbers to the main session ("main").
 - Gate escalation (45 §5a): budgets (length, < 2 s, caps) are hypotheses; one F diagnosis round, then stop and escalate to the user with measurements — never relax a budget silently.
 - Commit messages end with the attribution line given by the executing session's system reminder (currently `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`).
 
@@ -399,7 +399,7 @@ Router = Callable[[dict, dict], "list[dict] | dict"]
 # harness/progress.py
 def render_progress(task: str, *, board: str = "eprom-to-kernal", date: str | None = None, out_dir: Path = ROOT / "docs/benchmarks/progress") -> dict:
     """run_bench(board, tmp, router=smooth_router, rip="none"); compare PNG with caption
-    f"{task}: {nets_taut}/{nets} converted, DRC routing {routing_new}, {length_mm:.1f} mm vs 189.9 mm" → out_dir/<date>-m1-<task>.png;
+    f"{task}: {nets_taut}/{nets} converted, DRC routing {routing_new}, {length_mm:.1f} mm vs {hand_mm:.1f} mm" → out_dir/<date>-m1-<task>.png;
     prints the path and the caption line; returns the bench result."""
 # CLI: .venv/bin/python -m harness.progress --task T1.4a [--board eprom-to-kernal]
 ```
@@ -464,7 +464,7 @@ def test_smooth_rejects_bad_json(engine):     # ValueError on "{"
 - [ ] **Step 2: Run** `cargo test --release -p topor-engine --test smooth_engine` → FAIL; `.venv/bin/python -m pytest tests/test_engine_surface.py -k smooth` → FAIL.
 - [ ] **Step 3: Implement `smooth.rs`** and the `py.rs` function per Interfaces; register in `topor_engine`.
 - [ ] **Step 4: Run** both → PASS; clippy clean; `bash tools/build.sh --dev`; `pytest` default suite green.
-- [ ] **Step 5: First eprom result** — `.venv/bin/python -m harness.progress --task T1.4a` (Task 7 tool). Expected: a line `T1.4a: <n>/26 converted, DRC routing <v>, <L> mm vs 189.9 mm` and `docs/benchmarks/progress/2026-10-30-m1-T1.4a.png`. Any `n < 26`, `v > 0` or `L > 189.9` is recorded in STATE.md as the starting point for Task 9 — not a failure of this task.
+- [ ] **Step 5: First eprom result** — `.venv/bin/python -m harness.progress --task T1.4a` (Task 7 tool). Expected: a line `T1.4a: <n>/26 converted, DRC routing <v>, <L> mm vs <hand> mm` and `docs/benchmarks/progress/2026-10-30-m1-T1.4a.png`. Any `n < 26`, `v > 0` or `L > hand` is recorded in STATE.md as the starting point for Task 9 — not a failure of this task.
 - [ ] **Step 6: Commit** `feat(engine): smooth() with self-check and per-wire fallback; progress PNG T1.4a` (includes the PNG). Coordinator sends the PNG path + the caption line to main.
 
 ---
@@ -481,7 +481,7 @@ def test_smooth_rejects_bad_json(engine):     # ValueError on "{"
 - [ ] **Step 1: Write the gate test** `tests/gate/test_m1_gate.py`
 
 ```python
-EPROM = dict(nets=26, wires=32, hand_mm=189.934, max_mm=189.9, replaced=80, compare_png=(1180, 1200))
+EPROM = dict(nets=26, wires=30, hand_mm=175.557, max_mm=175.6, replaced=60, compare_png=(1180, 1200))  (re-pinned 2026-10-30 after KiCad 10 hand re-route)
 
 @pytest.mark.gate
 def test_m1_gate_eprom_taut_smoother(engine, tmp_path):
@@ -489,20 +489,20 @@ def test_m1_gate_eprom_taut_smoother(engine, tmp_path):
     r = run_bench("eprom-to-kernal", tmp_path, router=smooth_router, rip="none", options={"existing_copper": "smooth"})
     s, rep = r["smooth"], r["router_report"]
     assert (s["nets"], s["nets_taut"]) == (26, 26)
-    assert (s["wires"], s["wires_taut"]) == (32, 32)
-    assert {n["name"]: n["wires"] for n in rep["nets"] if n["name"] in ("+5V", "GND")} == {"+5V": 5, "GND": 3}
+    assert (s["wires"], s["wires_taut"]) == (30, 30)
+    assert {n["name"]: n["wires"] for n in rep["nets"] if n["name"] in ("+5V", "GND")} == {"+5V": 3, "GND": 3}
     assert r["routed_drc"]["routing_new"] == 0, r["routed_drc"]
     length = r["routed_all"]["track_mm"] + r["routed_all"]["arc_mm"]
-    assert length <= 189.9 and abs(s["length_mm"] - length) < 0.05
+    assert length <= 175.6 and abs(s["length_mm"] - length) < 0.05
     assert r["routed_all"]["arcs"] >= 1 and all("SS" not in w["pattern"] for w in rep["wires"])
     assert r["width_match"]["compared"] == 26 == r["width_match"]["matched"]
-    assert r["replaced"] == 80 and r["removed"]["removed_tracks"] == 0
+    assert r["replaced"] == 60 and r["removed"]["removed_tracks"] == 0
     assert r["router_s"] < 2.0 and rep["threads_used"] == 1 and not rep["timed_out"]
     model_json = (tmp_path / "eprom-to-kernal--model.json").read_text(); o = json.dumps({"existing_copper": "smooth"})
     assert engine.smooth(model_json, o) == engine.smooth(model_json, o)
     assert png_size(tmp_path / "eprom-to-kernal-compare.png") == EPROM["compare_png"]
     assert_unchanged(src.parent, hashes)
-    print(f"GATE M1 eprom: taut {s['nets_taut']}/26 wires {s['wires_taut']}/32 len {length:.3f} (hand 189.934) "
+    print(f"GATE M1 eprom: taut {s['nets_taut']}/26 wires {s['wires_taut']}/30 len {length:.3f} (hand 175.557) "
           f"drc_new {r['routed_drc']['routing_new']} arcs {r['routed_all']['arcs']} router_s {r['router_s']} iters {rep['iterations']}")
 
 @pytest.mark.gate
@@ -516,7 +516,7 @@ def test_m1_smoother_other_boards_complete(board, tmp_path):
 
 - [ ] **Step 2: Run** `.venv/bin/python -m pytest -m gate tests/gate/test_m1_gate.py -v -s` → expected PASS; if any assertion fails: one F diagnosis note (`docs/progress/notes/m1-gate-diagnosis.md`) → fix task(s) each ending with a progress PNG → re-run; a second failure of the same budget escalates to the user (45 §5a).
 - [ ] **Step 3: Version 0.1.0** — set `engine/Cargo.toml` version to `0.1.0`, `bash tools/build.sh --dev`, `pytest tests/test_scaffold.py tests/test_engine_surface.py` green (version test).
-- [ ] **Step 4: Benchmark run** — `bash tools/bench.sh eprom-to-kernal scratch/bench-0.1.0/eprom --rip none --router smoother` and the same for `wiccon-2023`, `dcsgonebadge`; copy `*-hand.png`, `*-topor.png`, `*-compare.png` into `docs/benchmarks/2026-10-30-topor-0.1.0/images/` and the `--metrics.json`/`--drc-*.json` into `metrics/`; write `README.md` in the 0.0.1 format: metrics table (nets taut, wires, segs/arcs, length vs hand 189.93, DRC routing_new, runtime/router_s), the eprom compare image embedded, observations (edge-clearance pads pre-existing: 12; `track_dangling` 1 from the `+5V` stub kept), raw data link; add the run row to `docs/benchmarks/README.md`.
+- [ ] **Step 4: Benchmark run** — `bash tools/bench.sh eprom-to-kernal scratch/bench-0.1.0/eprom --rip none --router smoother` and the same for `wiccon-2023`, `dcsgonebadge`; copy `*-hand.png`, `*-topor.png`, `*-compare.png` into `docs/benchmarks/2026-10-30-topor-0.1.0/images/` and the `--metrics.json`/`--drc-*.json` into `metrics/`; write `README.md` in the 0.0.1 format: metrics table (nets taut, wires, segs/arcs, length vs hand 175.56, DRC routing_new, runtime/router_s), the eprom compare image embedded, observations (edge-clearance pads pre-existing: 12; `track_dangling` 1 from the `+5V` stub kept), raw data link; add the run row to `docs/benchmarks/README.md`.
 - [ ] **Step 5: Progress PNG** — `.venv/bin/python -m harness.progress --task T1.4-gate` → `docs/benchmarks/progress/2026-10-30-m1-T1.4-gate.png`; coordinator sends path + numbers to main.
 - [ ] **Step 6: Full verification** — `cargo test --release`, `cargo clippy --all-targets -- -D warnings`, `.venv/bin/python -m pytest` (default) and `-m "gate or scaling"`; all green; record the numbers in STATE.md.
 - [ ] **Step 7: Commit** `feat: M1 taut smoother gate and benchmark 0.1.0 (eprom hand vs topor)`; then F gate review (complexity of the new loops: every loop cap named above present; no all-pairs; stack/relax O(k) per wire per iteration) → note `docs/progress/notes/m1-gate-review.md`; conditions fixed before handover.
@@ -532,5 +532,5 @@ def test_m1_smoother_other_boards_complete(board, tmp_path):
 ## Self-review notes
 
 - Spec coverage: T1.1 → Task 1; T1.2 → Tasks 2–4; T1.3 → Tasks 5–6; T1.4 → Tasks 7–9; 44 Must gaps (copper graphics, net ties, per-layer padstacks, local overrides) → Task 1 tests; 12 §3.1 order → wider-first processing in Task 6; 23 §4 quantisation → Task 8 via `quantise_chain`; benchmark images → Task 9 + progress PNGs.
-- Wire count 32 (24 two-pad nets + `+5V` 5 wires with one junction and one dangling end + `GND` 3 wires through pass-through pads `U1.12`/`U2.14`) was measured on the source board on 2026-10-30; the 80 replaced items are the 80 hand segments.
-- Known risk for the length criterion: 9 hand `+5V`/`GND` segments lie inside the 0.5 mm edge clearance (KiCad-10 default on this KiCad-5 board); the smoother must move them inward, which can cost length. If `length ≤ 189.9` fails while everything else passes, that is a user ruling, not a budget relaxation.
+- Wire count 30 (re-pinned 2026-10-30 after KiCad 10 hand re-route) (`engine/examples/extract_wires.rs` on the model JSON: 26 nets, 0 skipped; `+5V` 3 wires, `GND` 3 wires, all other nets 1 wire; total hand length 187.329 mm measured pad-centre to pad-centre, vs 175.557 mm of copper) was measured on a copy of the re-routed KiCad-10 board on 2026-10-30; the 60 replaced items are the 60 hand segments (the 15 vias are terminals, never replaced).
+- Known risk for the length criterion (re-pinned 2026-10-30 after KiCad 10 hand re-route): the hand routing is DRC-clean against the board-setup edge clearance 0.2 mm, so the smoother has no forced inward moves; if `length ≤ 175.6` fails while everything else passes, that is a user ruling, not a budget relaxation.

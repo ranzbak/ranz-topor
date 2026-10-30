@@ -4,64 +4,57 @@
  "pads": 56,
  "nets_total": 26,
  "orig_all": {
-  "segments": 80,
+  "segments": 60,
   "arcs": 0,
-  "vias": 0,
-  "track_mm": 189.934,
+  "vias": 15,
+  "track_mm": 175.557,
   "arc_mm": 0.0
  },
  "orig_drc": {
-  "total": 93,
-  "violations": {
-   "copper_edge_clearance": 21,
-   "courtyards_overlap": 1,
-   "pth_inside_courtyard": 25,
-   "silk_over_copper": 42,
-   "lib_footprint_mismatch": 2,
-   "lib_footprint_issues": 1,
-   "track_dangling": 1
-  }
+  "total": 0,
+  "violations": {}
  },
  "removed": {
-  "removed_tracks": 80,
+  "removed_tracks": 0,
   "removed_arcs": 0,
   "removed_vias": 0
  },
  "kept": {
   "kept_locked_tracks": 0,
-  "kept_free_vias": 0,
+  "kept_free_vias": 15,
   "kept_locked_vias": 0,
   "kept_rf_tracks": 0,
   "kept_rf_vias": 0
  },
  "routed_all": {
-  "segments": 0,
+  "segments": 60,
   "arcs": 0,
-  "vias": 0,
-  "track_mm": 0.0,
+  "vias": 15,
+  "track_mm": 175.557,
   "arc_mm": 0.0
  },
  "routed_drc": {
-  "routing_new": 12,
+  "routing_new": 0,
   "routing_preexisting": 0,
   "incomplete": {
    "track_dangling": 0,
    "via_dangling": 0,
-   "unconnected_items": 30
+   "unconnected_items": 0
   },
-  "other": 71,
-  "by_type_new": {
-   "copper_edge_clearance": 12
-  }
+  "other": 0,
+  "by_type_new": {}
  },
  "routed_items": 0,
- "rip": "all",
+ "replaced": 0,
+ "router_report": null,
+ "smooth": null,
+ "rip": "none",
  "threads": 4,
- "runtime_s": 5.065,
+ "runtime_s": 6.137,
  "router_s": 0.0,
  "width_match": {
-  "compared": 0,
-  "matched": 0,
+  "compared": 26,
+  "matched": 26,
   "mismatched": []
  }
 }

@@ -181,7 +181,13 @@ def resolve_rules(
     widths_before: dict[str, NetWidths],
     settings_table: dict[str, int] | None = None,
     profile: dict = JLCPCB_1OZ,
+    fab_floor_edge_clearance: bool = False,
 ) -> dict:
+    """`fab_floor_edge_clearance`: raise the copper-to-edge clearance to the profile's fab floor.
+
+    Default False: the board's own setting is used (profile only fills an unset 0), so a hand
+    routing made to the design rule can be compared directly.
+    """
     settings_table = settings_table or {}
     ds = board.GetDesignSettings()
     ns = ds.m_NetSettings
@@ -198,6 +204,9 @@ def resolve_rules(
         "edge_clearance": _nz(ds.m_CopperEdgeClearance, profile["edge"]),
         "max_error": _nz(ds.m_MaxError, 5_000),
     }
+
+    if fab_floor_edge_clearance:
+        floors["edge_clearance"] = max(floors["edge_clearance"], profile["edge"])
 
     rules = parse_dru(dru_text) if dru_text else []
     for r in rules:

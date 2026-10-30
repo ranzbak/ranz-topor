@@ -89,7 +89,8 @@ def test_progress_png_caption_and_path(fixture_board, tmp_path, monkeypatch):
     assert png.is_file()
     n = res["routed_all"]
     expected = (f"T1.4a: 1/2 nets, 3/3 wires, DRC routing {res['routed_drc']['routing_new']}, "
-                f"{n['track_mm'] + n['arc_mm']:.1f} mm vs 189.9 mm")
+                f"{n['track_mm'] + n['arc_mm']:.1f} mm vs "
+                f"{res['orig_all']['track_mm'] + res['orig_all']['arc_mm']:.1f} mm")
     assert res["caption"] == expected
     # hand image is rendered from the same board at the same height: compare the sizes
     from harness.render import render_png, caption as cap

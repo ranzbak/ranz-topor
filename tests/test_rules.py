@@ -163,15 +163,29 @@ def test_output_parses_with_engine_rules(tmp_path, engine):
     json.dumps(r)
 
 
+def test_fab_floor_edge_clearance_flag(tmp_path):
+    """Design edge clearance by default; the profile's fab floor only when asked."""
+    b = _board(tmp_path / "a", rules={"min_copper_edge_clearance": 0.025})
+    assert resolve_rules(b, dru_text=None, widths_before={})["edge_clearance"] == 25_000
+    r = resolve_rules(b, dru_text=None, widths_before={}, fab_floor_edge_clearance=True)
+    assert r["edge_clearance"] == JLCPCB_1OZ["edge"]
+    b2 = _board(tmp_path / "b", rules={"min_copper_edge_clearance": 0.5})  # already above the floor
+    r2 = resolve_rules(b2, dru_text=None, widths_before={}, fab_floor_edge_clearance=True)
+    assert r2["edge_clearance"] == 500_000
+
+
 @pytest.mark.gate
-def test_rules_legacy_project_without_kicad_pro(tmp_path):
+def test_rules_eprom_kicad10_project(tmp_path):
+    """Re-pinned 2026-10-30 after the KiCad 10 hand re-route: board setup edge clearance 0.2 mm."""
     src = Path(EPROM)
     pc = copy_project(src, tmp_path / "w")
-    assert pc.pro is None
+    assert pc.pro is not None
     b = load_board(pc)
     widths = record_widths(b)
     r = resolve_rules(b, dru_text=None, widths_before=widths)
-    assert r["edge_clearance"] == 500_000
+    assert r["edge_clearance"] == 200_000  # design value, not the fab floor
+    assert resolve_rules(b, dru_text=None, widths_before=widths,
+                         fab_floor_edge_clearance=True)["edge_clearance"] == JLCPCB_1OZ["edge"]
     assert r["default"]["clearance"] == 200_000 and r["default"]["width"] == 250_000
     codes = {str(n.GetNetname()): str(int(c)) for c, n in b.GetNetsByNetcode().items()}
     for net in ("+5V", "GND"):

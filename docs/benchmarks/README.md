@@ -48,4 +48,4 @@ copies (verify with sha256 before/after).
 `progress/<YYYY-MM-DD>-m1-<TaskId>.png` — one image per M1 task that changes the eprom-to-kernal
 routing outcome (hand left, topor right, zone fills removed). Produced by
 `.venv/bin/python -m harness.progress --task <TaskId>`; the caption carries nets/wires converted,
-new DRC routing violations and total copper length vs the hand 189.9 mm.
+new DRC routing violations and total copper length vs the hand length of the board under test (175.6 mm for eprom-to-kernal, re-pinned 2026-10-30 after the KiCad 10 hand re-route).
