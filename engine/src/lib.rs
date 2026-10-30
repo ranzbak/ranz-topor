@@ -10,6 +10,7 @@ pub mod obstacle;
 mod py;
 pub mod relax;
 pub mod sketch;
+pub mod smooth;
 pub mod taut;
 pub mod wires;
 

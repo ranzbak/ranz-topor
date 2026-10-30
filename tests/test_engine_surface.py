@@ -38,6 +38,36 @@ def _model():
     }
 
 
+def _model_with_track():
+    m = _model()
+    m["pads"].append(
+        {
+            "uuid": "q", "ref": "U2", "number": "1", "net": 2, "attr": "smd", "center": [10_000_000, 0],
+            "rotation_deg": 0.0, "layers": [0], "shapes": {"0": {"kind": "circle", "d": 1_600_000}},
+            "drill": None, "local_clearance": None, "net_tie_group": None,
+        }
+    )
+    m["kept"] = [
+        {"uuid": "k1", "net": 2, "layer": 0, "width": 250_000, "locked": False,
+         "prim": {"kind": "seg", "a": [0, 0], "b": [10_000_000, 0]}}
+    ]
+    return m
+
+
+def test_smooth_surface_round_trip(engine):
+    out = json.loads(engine.smooth(json.dumps(_model_with_track()), json.dumps({"existing_copper": "smooth"})))
+    for key in ("items", "replaced", "nets", "wires", "runtime_s", "threads_used"):
+        assert key in out
+    assert out["threads_used"] == 1
+    assert out["wires_total"] == 1 and out["wires_taut"] == 1
+    assert out["replaced"] == ["k1"] and len(out["items"]) == 1
+
+
+def test_smooth_rejects_bad_json(engine):
+    with pytest.raises(ValueError):
+        engine.smooth("{", "{}")
+
+
 def test_check_items_reports_violation(engine):
     item = {"net": 1, "layer": 0, "width": 250_000, "prim": {"kind": "seg", "a": [0, 1_000_000], "b": [5_000_000, 1_000_000]}}
     rep = json.loads(engine.check_items(json.dumps(_model()), json.dumps([item]), "{}"))
