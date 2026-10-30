@@ -58,25 +58,113 @@ fn samples(p: &Prim) -> Vec<Vec2> {
         })
         .collect()
 }
-/// Dense-sampling oracle (upper bound on the true distance, approximate from below).
-fn sampled(a: &Prim, b: &Prim) -> f64 {
-    let sb = samples(b);
-    let mut best = f64::INFINITY;
-    for p in samples(a) {
-        for q in &sb {
-            best = best.min((p - *q).len2());
+fn at(p: &Prim, t: f64) -> Vec2 {
+    match p {
+        Prim::Seg(s) => s.a + (s.b - s.a) * t,
+        Prim::Arc(a) => a.point_at(t),
+    }
+}
+fn deriv(p: &Prim, t: f64) -> Vec2 {
+    match p {
+        Prim::Seg(s) => s.b - s.a,
+        Prim::Arc(a) => {
+            let ang = a.a_start + a.sigma.sign() * a.sweep * t;
+            v(-ang.sin(), ang.cos()) * (a.r * a.sigma.sign() * a.sweep)
         }
+    }
+}
+fn deriv2(p: &Prim, t: f64) -> Vec2 {
+    match p {
+        Prim::Seg(_) => v(0.0, 0.0),
+        Prim::Arc(a) => (at(p, t) - a.c) * (-a.sweep * a.sweep),
+    }
+}
+/// Local refinement of a sample pair by damped Newton (Levenberg-Marquardt) on
+/// |P(ta) - Q(tb)|^2 with clamping to [0,1]; bounded to 200 iterations.
+fn refine(a: &Prim, b: &Prim, mut ta: f64, mut tb: f64) -> f64 {
+    let f = |x: f64, y: f64| (at(a, x) - at(b, y)).len2();
+    let mut best = f(ta, tb);
+    let mut lam = 1e-6;
+    for _ in 0..200 {
+        let r = at(a, ta) - at(b, tb);
+        let jp = deriv(a, ta);
+        let jq = -deriv(b, tb);
+        // full Hessian of |r|^2/2 (Q enters with a minus sign)
+        let h11 = jp.dot(jp) + r.dot(deriv2(a, ta));
+        let h12 = jp.dot(jq);
+        let h22 = jq.dot(jq) - r.dot(deriv2(b, tb));
+        let (g1, g2) = (jp.dot(r), jq.dot(r));
+        let scale = jp.len2() + jq.len2() + 1e-12;
+        let (m11, m22) = (h11 + lam * scale, h22 + lam * scale);
+        let det = m11 * m22 - h12 * h12;
+        if det.abs() < 1e-300 {
+            lam *= 4.0;
+            continue;
+        }
+        let da = -(m22 * g1 - h12 * g2) / det;
+        let db = -(-h12 * g1 + m11 * g2) / det;
+        // trials: joint step, and single-parameter steps (handle active bounds)
+        let trials = [
+            (da, db),
+            (-g1 / m11.max(1e-12 * scale), 0.0),
+            (0.0, -g2 / m22.max(1e-12 * scale)),
+        ];
+        let mut improved = false;
+        for (xa, xb) in trials {
+            let (na, nb) = ((ta + xa).clamp(0.0, 1.0), (tb + xb).clamp(0.0, 1.0));
+            let nf = f(na, nb);
+            if nf < best {
+                best = nf;
+                ta = na;
+                tb = nb;
+                improved = true;
+                break;
+            }
+        }
+        lam = if improved {
+            (lam * 0.3).max(1e-9)
+        } else {
+            (lam * 4.0).min(1e12)
+        };
     }
     best.sqrt()
 }
-fn max_len(a: &Prim, b: &Prim) -> f64 {
-    a.length().max(b.length())
+/// Dense-sampling oracle refined locally around the best sample pairs: a numerical
+/// minimum accurate to well below 1 nm (not closed-form; test-only).
+fn sampled(a: &Prim, b: &Prim) -> f64 {
+    let sa = samples(a);
+    let sb = samples(b);
+    // best partner per a-sample
+    let mut rows: Vec<(f64, usize, usize)> = Vec::with_capacity(N);
+    for (i, p) in sa.iter().enumerate() {
+        let (mut bj, mut bd) = (0, f64::INFINITY);
+        for (j, q) in sb.iter().enumerate() {
+            let d = (*p - *q).len2();
+            if d < bd {
+                bd = d;
+                bj = j;
+            }
+        }
+        rows.push((bd, i, bj));
+    }
+    let mut cands: Vec<(f64, usize, usize)> = (0..N)
+        .filter(|&i| {
+            (i == 0 || rows[i].0 <= rows[i - 1].0) && (i == N - 1 || rows[i].0 <= rows[i + 1].0)
+        })
+        .map(|i| rows[i])
+        .collect();
+    cands.sort_by(|x, y| x.0.total_cmp(&y.0));
+    cands
+        .iter()
+        .take(12)
+        .map(|&(_, i, j)| refine(a, b, i as f64 / (N - 1) as f64, j as f64 / (N - 1) as f64))
+        .fold(f64::INFINITY, f64::min)
 }
 fn check(a: Prim, b: Prim, d: f64) -> Result<(), TestCaseError> {
     let sd = sampled(&a, &b);
-    let tol = 2.0 * max_len(&a, &b) / N as f64;
-    prop_assert!(d <= sd + 1e-6, "d={d} sampled={sd}");
-    prop_assert!(d >= sd - tol, "d={d} sampled={sd} tol={tol}");
+    prop_assert!(d >= 0.0);
+    prop_assert!(d <= sd + 1e-3, "d={d} refined={sd}");
+    prop_assert!(d >= sd - 1e-3, "d={d} refined={sd}");
     Ok(())
 }
 
@@ -96,6 +184,7 @@ proptest! {
     check(pt, Prim::Arc(a), point_arc(p, &a))?;
   }
   #[test] fn prop_dist_symmetric(a in prim(), b in prim()) {
+    prop_assert!(dist_prim(&a, &b) >= 0.0);
     prop_assert!((dist_prim(&a, &b) - dist_prim(&b, &a)).abs() < 1e-6);
   }
   #[test] fn prop_dist_nonnegative_and_self_zero(a in prim()) {
@@ -349,4 +438,23 @@ fn example_copper_gap_tracks() {
     let a = track(v(0.0, 0.0), v(1e6, 0.0), 200_000.0);
     let b = track(v(0.0, 1e6), v(1e6, 1e6), 300_000.0);
     assert!((copper_gap(&a, &b) - (1e6 - 100_000.0 - 150_000.0)).abs() < 1e-6);
+}
+
+#[test]
+fn regression_round_rect_collapsed_core() {
+    // rc = min(w,h)/2: must agree with the oval / circle skeleton, not report "inside".
+    let rr = Skeleton::round_rect(v(0.0, 0.0), 1e6, 2e6, 5e5, 0.0);
+    let ov = Skeleton::oval(v(0.0, 0.0), 1e6, 2e6, 0.0);
+    let s = Prim::Seg(Seg {
+        a: v(0.0, 1e6),
+        b: v(0.0, 2e6),
+    });
+    assert_eq!(dist_prim_skeleton(&s, &rr), dist_prim_skeleton(&s, &ov));
+    assert_eq!(dist_prim_skeleton(&s, &rr), 0.0);
+    let sq = Skeleton::round_rect(v(0.0, 0.0), 1e6, 1e6, 5e5, 0.0);
+    let far = Prim::Seg(Seg {
+        a: v(3e6, -1e6),
+        b: v(3e6, 1e6),
+    });
+    assert!((dist_prim_skeleton(&far, &sq) - 2.5e6).abs() < 1e-6);
 }

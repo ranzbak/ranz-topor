@@ -60,7 +60,7 @@ pub fn point_arc(p: Vec2, a: &Arc) -> f64 {
 
 /// Unit-direction helper: is the point `c + dir` inside the arc's angular span.
 fn dir_in_span(a: &Arc, dir: Vec2) -> bool {
-    a.contains_dir(a.c + dir)
+    a.contains_dir(a.c + dir * a.r)
 }
 
 /// Distance between a closed segment and an arc.
@@ -222,6 +222,10 @@ impl Skeleton {
         let rc = rc.clamp(0.0, 0.5 * w.min(h));
         let hx = 0.5 * w - rc;
         let hy = 0.5 * h - rc;
+        if hx <= 0.0 || hy <= 0.0 {
+            // Collapsed core (rc at its 50 % limit): same as an oval / circle.
+            return Skeleton::oval(c, w, h, rot);
+        }
         let pts = [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)]
             .iter()
             .map(|&(x, y)| c + Vec2 { x, y }.rot(rot))
@@ -245,7 +249,8 @@ fn prim_poly(p: &Prim, pts: &[Vec2]) -> f64 {
         };
         d = d.min(dist_prim(p, &Prim::Seg(e)));
     }
-    if n >= 3 && d > 0.0 {
+    let area2: f64 = (0..n).map(|i| pts[i].cross(pts[(i + 1) % n])).sum();
+    if n >= 3 && area2 > 0.0 && d > 0.0 {
         // No boundary contact: the connected primitive is entirely in or out.
         let q = match p {
             Prim::Seg(s) => s.a,
