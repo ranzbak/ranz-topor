@@ -119,12 +119,19 @@ def test_export_eprom_counts(tmp_path):
     pc = copy_project(src, tmp_path / "w")
     m = export_model(load_board(pc), {}, name="eprom")
     assert_unchanged(src.parent, pc.src_hashes)
-    assert len(m["pads"]) == 56 and len(m["nets"]) == 26
-    # re-pinned 2026-10-30 after the KiCad 10 hand re-route: 60 kept segments + 15 vias, 0.4 mm x23 + 0.25 mm x37
-    assert len(m["kept"]) == 60 and len(m["vias"]) == 15
-    assert sorted((w, sum(k["width"] == w for k in m["kept"])) for w in {k["width"] for k in m["kept"]}) \
-        == [(250_000, 37), (400_000, 23)]
+    # edit-proof: expectations come from pcbnew on the same copy, not from pinned numbers
+    from harness.measure import copper_facts
+
+    b0 = load_board(pc)
+    facts = copper_facts(b0)
+    assert len(m["pads"]) == sum(len(fp.Pads()) for fp in b0.GetFootprints())
+    assert len(m["nets"]) == len({str(n.GetNetname()) for _, n in b0.GetNetsByNetcode().items() if n.GetNetname()})
+    assert len(m["kept"]) == facts["segments"] + facts["arcs"] and len(m["vias"]) == facts["vias"]
+    assert sum(1 for v in m["vias"] if v["free"]) == facts["free_vias"]
+    got = {}
+    for k in m["kept"]:
+        got[k["width"]] = got.get(k["width"], 0) + 1
+    assert got == facts["widths"]
     # 5 footprints on the board, but two are pad-less "REF**" graphics, so pads name 3 refs
-    assert len(list(load_board(pc).GetFootprints())) == 5
-    assert {p["ref"] for p in m["pads"]} == {"J1", "U1", "U2"}
+    assert {p["ref"] for p in m["pads"]} == {fp.GetReference() for fp in b0.GetFootprints() if len(fp.Pads())}
     assert [l["name"] for l in m["layers"]] == ["F.Cu", "B.Cu"]

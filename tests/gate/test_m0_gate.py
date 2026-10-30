@@ -13,23 +13,18 @@ import pytest
 
 from harness.bench import run_bench
 from harness.copy import assert_unchanged, sha256_tree
-from harness.drc import run_drc
+from harness.drc import ROUTING_TYPES, run_drc
 from harness.paths import BENCH_BOARDS
 from harness.render import CAPTION_PX
 from tests.test_fuzz_gate import fuzz_drc
 
 ROOT = Path(__file__).resolve().parents[2]
 BASELINE = ROOT / "docs/benchmarks/2026-10-30-topola-d832b164"
-# eprom was re-routed by hand in KiCad 10: its reference is this repo's re-pinned hand image
-TOPOR_REF = ROOT / "docs/benchmarks/2026-10-30-topor-0.0.1"
 
 BOARDS = {
-    "eprom-to-kernal": dict(
-        footprints=5, pads=56, nets=26,
-        # re-pinned 2026-10-30 after the KiCad 10 hand re-route (was 80 / 189.93 mm / DRC 93)
-        orig_all={"segments": 60, "arcs": 0, "vias": 15, "track_mm": 175.56},
-        orig_drc_total=0, orig_drc={},
-        hand_png=(550, 1160)),
+    # eprom-to-kernal is hand-edited by the user in KiCad: nothing about its routing is pinned here;
+    # counts are derived from a copy in the same run (`_derive_eprom`), only invariants are fixed.
+    "eprom-to-kernal": None,
     "wiccon-2023": dict(
         footprints=45, pads=124, nets=38,
         orig_all={"segments": 381, "arcs": 0, "vias": 36, "track_mm": 1831.97},
@@ -67,19 +62,51 @@ def rmse(a: Path, b: Path, tmp: Path) -> float:
     return float(m.group(1))
 
 
+def _derive_eprom(tmp: Path) -> dict:
+    """Expectations for the hand board read straight from pcbnew on a private copy."""
+    from harness.copy import copy_project
+    from harness.measure import copper_facts
+    from harness.model import load_board
+    from harness.render import caption, render_png
+
+    cp = copy_project(BENCH_BOARDS["eprom-to-kernal"], tmp / "derive")
+    b = load_board(cp)
+    f = copper_facts(b)
+    fps = list(b.GetFootprints())
+    nets = {str(n.GetNetname()) for _, n in b.GetNetsByNetcode().items() if n.GetNetname()}
+    # the hand image is rendered again from the same copy in this run (render determinism), not
+    # compared with a stored PNG that goes stale whenever the user edits the board
+    ref = caption(render_png(cp.pcb, tmp / "derive-hand-raw.png"), "eprom-to-kernal: hand",
+                  tmp / "derive-hand.png")
+    return dict(
+        footprints=len(fps), pads=sum(len(fp.Pads()) for fp in fps), nets=len(nets),
+        orig_all={"segments": f["segments"], "arcs": f["arcs"], "vias": f["vias"],
+                  "track_mm": f["track_mm"]},
+        hand_png=png_size(ref), hand_ref=ref)
+
+
 @pytest.mark.gate
 @pytest.mark.parametrize("board", BOARDS)
 def test_m0_gate_reproduces_baseline(board, tmp_path):
     src_hashes = sha256_tree(BENCH_BOARDS[board].parent)
-    r = run_bench(board, tmp_path, router=None, rf_nets=frozenset())
     e = BOARDS[board]
+    if board == "eprom-to-kernal":
+        e = _derive_eprom(tmp_path)
+    r = run_bench(board, tmp_path / "bench", router=None, rf_nets=frozenset())
+    tmp_path = tmp_path / "bench"
     assert (r["footprints"], r["pads"], r["nets_total"]) == (e["footprints"], e["pads"], e["nets"])
     for k, v in e["orig_all"].items():
         got = r["orig_all"][k]
         if k == "track_mm":  # the baseline's track length includes the arcs
             got += r["orig_all"]["arc_mm"]
         assert got == pytest.approx(v, abs=0.02), k
-    if board == "dcsgonebadge":
+    if board == "eprom-to-kernal":
+        # invariant of the hand board: DRC-clean routing, nothing unconnected
+        assert not any(v for k, v in r["orig_drc"]["violations"].items() if k in ROUTING_TYPES)
+        assert r["orig_drc"]["total"] == 0, r["orig_drc"]
+        raw = json.loads((tmp_path / f"{board}--drc-orig.json").read_text())
+        assert raw.get("unconnected_items", []) == []
+    elif board == "dcsgonebadge":
         # The baseline's 210 total included 18 library/courtyard/thermal reports that depend on
         # the machine's footprint libraries (192 here); every other type must match exactly.
         base = json.loads((BASELINE / "metrics/dcsgone--drc-orig.json").read_text())
@@ -96,6 +123,9 @@ def test_m0_gate_reproduces_baseline(board, tmp_path):
     for k, v in e.get("orig_drc", {}).items():
         assert r["orig_drc"]["violations"].get(k) == v, k
     kept, removed = r["kept"]["kept_free_vias"], r["removed"]["removed_vias"]
+    if board == "eprom-to-kernal":
+        assert kept + removed == e["orig_all"]["vias"]  # rip removes exactly the non-free vias
+        assert r["removed"]["removed_tracks"] == e["orig_all"]["segments"] and r["removed"]["removed_arcs"] == e["orig_all"]["arcs"]
     print(f"GATE {board}: kept_free_vias={kept} removed_vias={removed} "
           f"(baseline {e.get('kept_free_vias')}/{e.get('removed_vias')})")
     if board == "wiccon-2023":
@@ -108,8 +138,8 @@ def test_m0_gate_reproduces_baseline(board, tmp_path):
         assert (kept, removed) == (2, 201)
         assert kept + removed == e["orig_all"]["vias"]
     assert png_size(tmp_path / f"{board}-hand.png") == e["hand_png"]
-    ref_dir = TOPOR_REF if board == "eprom-to-kernal" else BASELINE
-    d = rmse(tmp_path / f"{board}-hand.png", ref_dir / f"images/{board}-hand.png", tmp_path)
+    ref = e["hand_ref"] if board == "eprom-to-kernal" else BASELINE / f"images/{board}-hand.png"
+    d = rmse(tmp_path / f"{board}-hand.png", ref, tmp_path)
     print(f"GATE {board}: runtime_s={r['runtime_s']} rmse={d:.5f} orig_drc={r['orig_drc']['total']}")
     assert d < 0.02
     assert_unchanged(BENCH_BOARDS[board].parent, src_hashes)
