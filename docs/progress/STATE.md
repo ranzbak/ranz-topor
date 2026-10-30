@@ -1,49 +1,56 @@
 # topor — progress state
 
 ## Current milestone
-M0 (harness + engine skeleton). Plan: docs/superpowers/plans/2026-10-30-topor-m0-harness.md.
-Coordinator rotation 1 ended mid-milestone (forced hand-back); a successor coordinator is needed.
-SDD ledger (full history, rulings, briefs, reports, review diffs): .superpowers/sdd/2026-10-30-topor-m0-harness/
-(progress.md = ledger; worker-rules.md + global-constraints.md + file-structure-and-pcbnew-facts.md are reused in every brief;
-task-N-brief.md has already been extracted for all 14 tasks).
+M0 (harness + engine skeleton) — GATE PASSED 2026-10-30 (F review: PASS WITH CONDITIONS; C1 fixed in 7cbc33e). main@7cbc33e.
+Next: M1 (taut smoother). The plan has only an M1 outline; a detailed M1 plan is needed first (new coordinator).
+SDD ledger (full history, rulings, briefs, reports): .superpowers/sdd/2026-10-30-topor-m0-harness/
+F gate note: docs/progress/notes/m0-gate-review.md.
 
 ## Task status (plan task # / 45 id / tier)
 | # | Task | Status |
 |---|------|--------|
-| 1 | scaffold (T0.1, H) | DONE d5dbec7 (attribution line says Haiku: amend blocked by hook) |
-| 2 | geom vec/prim/tangent (T0.5a, S) | DONE aceef90..10389ef, reviewed, fix round 1 addressed |
-| 3 | geom distances/skeletons (T0.5b, S, F review) | DONE db22e56..0503bea (F review Important fixed: collapsed round_rect; oracle ±1e-3 nm) |
-| 4 | grid (T0.5c, S) | committed 95d5507; review: CRITICAL open (fix round 1 NOT yet dispatched): non-finite/huge bbox -> i32 saturation/overflow + unbounded cell loops; query O(area) for big boxes; remove() silent no-op on bbox mismatch. Resume worker a3f319d5d02325c5b or start a fresh sonnet worker |
-| 5 | quant + arc centre (T0.5d, S) | 267e9fb on branch worktree-agent-a3a30c1216025eb10 (NOT merged); FIX ROUND 1 IN FLIGHT by worker a3a30c1216025eb10 (drift-bound derivation, degenerate boundary tests, no zero-length seg). Merge into main after it finishes |
-| 6 | model/check/PyO3/build (T0.1+T0.2, S) | pending: needs 2-5 |
-| 7 | harness paths/copy/fixtures (T0.3a, S) | DONE 83acf4a |
-| 8 | harness rip (T0.3b, S) | DONE 1ab8d35 |
-| 9 | harness model export (T0.3c, S) | DONE 5675ade |
-| 10 | rules (T0.4, S) | pending: needs 6 (one test uses engine check_items) |
-| 11 | writer (T0.6, S) | pending: needs 6 |
-| 12 | DRC runner (T0.7a, H) | DONE 1a44c0a |
-| 13 | render/metrics/bench (T0.7b, H) | pending: needs 7-12 |
-| 14 | fuzz + M0 gate (T0.8, S, gate review F) | pending |
+| 1 | scaffold (T0.1, H) | DONE d5dbec7 |
+| 2 | geom vec/prim/tangent (T0.5a, S) | DONE ..10389ef, reviewed |
+| 3 | geom distances/skeletons (T0.5b, S, F review) | DONE ..0503bea, reviewed |
+| 4 | grid (T0.5c, S) | DONE 95d5507..c7d40b0 (2 fix rounds, re-review APPROVE) |
+| 5 | quant + arc centre (T0.5d, S) | DONE ..5f5f2fb (merged 884f8dd) |
+| 6 | model/check/PyO3/build (T0.1+T0.2, S) | DONE 6384da3, fix 950714f (poly containment, keepouts, via drill vs holes) |
+| 7 | harness paths/copy/fixtures | DONE 83acf4a |
+| 8 | harness rip | DONE 1ab8d35; SWIG fix 94fd585 (board.Delete instead of Remove) |
+| 9 | harness model export | DONE 5675ade |
+| 10 | rules (T0.4, S) | DONE 2d15ec0 |
+| 11 | writer (T0.6, S) | DONE 5cf8d54 |
+| 12 | DRC runner | DONE 1a44c0a |
+| 13 | render/metrics/bench (H) | DONE bc7c6ac |
+| 14 | fuzz + M0 gate (S, F review) | DONE e4fed3c + gate conditions 7cbc33e |
 
 ## Decisions / rulings
-- Arc-centre agreement with KiCad <= 100 nm; no bit-exact CalcArcCenter port. EPS_BUILD_NM = 5000 nm.
-- kicad-python pinned `>=0.8,<0.9`. Source boards read-only. Python only via .venv.
-- Per-task review only for F-marked tasks and geometry-kernel diffs; other tasks are reviewed by their acceptance tests.
-- T4 scaling test uses constant density (the lattice grows with n), not a fixed 100 mm2 area, which is what O(1)/query means.
-- T5 degenerate rule: sweep > pi is never degenerate (Arc::chord()->0 as sweep->2pi).
-- T6 MUST add a pcbnew-based test: random (s,m,e) -> PCB_ARC.GetCenter vs engine.arc_center_nm, |delta| <= 100 nm (closes the T5 review gap).
-- T6 serde must accept the extra hole key `"slot":[w,h]` emitted by harness/model.py (no deny_unknown_fields, or model it).
-- T9: the plan's "eprom 5 distinct refs" is wrong. There are 5 footprints, but 2 are pad-less REF**, so refs = {J1,U1,U2}.
-- T9: net-tie groups are parsed via PCB_IO_KICAD_SEXPR().Format(fp) (fp.Serialize needs protobuf); copper polys use the outer ring only; zone fills are not exported.
-- T8: nets_to_route comes from GetConnectedPads (SWIG can't iterate the ratsnest); the free-via check precedes the RF check.
+- Arc-centre agreement with KiCad <= 100 nm (tested: 200 random arcs vs pcbnew, engine + writer). EPS_BUILD_NM = 5000 nm.
+- kicad-python pinned `>=0.8,<0.9`. Source boards read-only (sha256 checked in every gate test). Python only via .venv.
+- Wheel tag is cp39-abi3-manylinux_2_34_x86_64 (maturin default), not linux_x86_64.
+- build.sh was run with KICAD_DOCUMENTS_HOME=<scratch>; the real KiCad plugin dir is untouched (install = `bash tools/build.sh --dev`).
+- Grid: i64 cells clamped ±2^31 nm; non-finite bbox → try_insert Err / insert panics; items > 65 536 cells in a side list; remove() uses the stored range.
+- Clearance = max(item net, other net/pad net, pad local, min_clearance) (7cbc33e).
+- rip uses board.Delete (Remove corrupts SWIG state on real boards).
+- Fuzz gate: track_dangling ≥ 1 (not ≥ 1000: same-net items merge); written item count asserted.
+- dcsgonebadge orig DRC 192 vs baseline 210: diff only courtyards_overlap/lib_footprint_issues/starved_thermal (environment); other types exact.
+- dcsgonebadge rip keeps 2 free vias / removes 201 (baseline 7/196) — pinned; rip policy open (see Open issues).
+- Image compare: baseline alpha flattened on white, 60 px caption cropped. Topola-routed images cannot be regenerated (boards gone).
+- Rulings T5/T6/T8/T9 from rotation 1 still hold (see ledger).
 
 ## Open issues
-- T4 Critical fix (not dispatched), T5 fix (in flight, unmerged branch).
-- The default pytest suite takes ~34 s (DRC runs); fine.
-- Worktrees under .claude/worktrees/ (ignored) can be removed after merge.
+- QUESTION for user (before M3): stitching/fence-via policy for rip. README step 1 says keep stitching/fence vias; rip keeps only GetIsFree() vias. On dcsgonebadge that keeps 2 (baseline 7). F suggests "no track of its net touches it" (gives 4) or another definition.
+- Before M2 (F C2): existing vias are copper-only obstacles (model.holes = pad drills only); new vias carry no hole → via hole-to-hole and track-vs-via-hole unchecked; same-net new vias may overlap.
+- Minor (F C3): copper polygons exported as outer ring only → polygon holes give false positives (conservative).
+- Minor: fuzz own cell 2 mm constant; hole_to_hole not in checker cell size formula; grid 65 536-cell items ~5 MB each; grid tests' 2 s timeout may flake under load.
+- Worktrees under .claude/worktrees/ (ignored) are all merged; they can be removed.
 
-## Last gate results
-- None (M0 gate not run). Last suites on main@95d5507: cargo all green; pytest 28 passed, 1 deselected.
+## Last gate results (M0, main@7cbc33e)
+- cargo test --release: 9 suites ok; clippy --all-targets -D warnings clean; pytest default 63 passed; gate+scaling 9 passed (30 s).
+- No-router bench runtime_s: eprom 5.2, wiccon 6.6, dcsgone 12.5 (< 60). Orig metrics exact (dcsgone track 4167.082 + arc 43.197 mm). Orig DRC 93 / 48 / 192.
+- Hand image RMSE vs baseline: 0.0036 / 0.0003 / 0.0025 (< 0.02). Images: docs/benchmarks/2026-10-30-topor-0.0.1/images/{eprom-to-kernal,wiccon-2023,dcsgonebadge}-hand.png.
+- Fuzz (fixture, margin 5000): seeds 1/2/3 → 1000 accepted each (2814/2544/3620 attempts), truncated false, KiCad routing_new 0. Eprom ripped copy seed 1: 1000/20252, routing_new 0. Negative-margin control (−20 µm): 59–98 clearance violations.
+- Scaling: grid_probe 1k→100k candidates/query 4.87→4.92 (1.01×), seconds 1.19× (bounds 4× / 20×).
 
 ## File map
 topor/
@@ -98,6 +105,6 @@ topor/
   docs/progress/STATE.md         living state (45 §4), created in Task 1
 
 ## Next 3 actions
-1. Dispatch the T4 fix round (Critical above) in the main tree. (T3 fix is done and committed: 0503bea.)
-2. When the T5 fix returns: `git merge worktree-agent-a3a30c1216025eb10`, run cargo test, ledger T5 complete.
-3. Dispatch T6 (sonnet) with the two T6 rulings above, then T10 ∥ T11 (worktrees), T13 (haiku), T14 (sonnet) + F gate review.
+1. Ask the user the rip stitching-via question (Open issues 1).
+2. Write the detailed M1 plan (taut smoother, T1.1–T1.4; F design notes for T1.2/T1.3) from the outline in the M0 plan.
+3. Schedule F-C2 (via holes as obstacles) as an early M2 task.
