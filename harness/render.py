@@ -10,6 +10,9 @@ import pcbnew
 from harness.paths import kicad_cli
 
 CAPTION_PX = 60
+CAPTION_FONT_PT = 28
+CAPTION_LINE_PX = 36  # line pitch for multi-line captions
+CAPTION_PAD_PX = 16
 COMPARE_PAD_PX = 20
 
 
@@ -49,18 +52,43 @@ def render_png(pcb: Path, out_png: Path, *, height: int = 1100,
     return out_png
 
 
+def _png_width(png: Path) -> int:
+    out = subprocess.run(["identify", "-format", "%w", str(png)], check=True,
+                         capture_output=True, text=True).stdout
+    return int(out.strip())
+
+
+def _text_width(text: str, pointsize: int) -> int:
+    out = subprocess.run(["convert", "-pointsize", str(pointsize), f"label:{text}",
+                          "-format", "%w", "info:"], check=True,
+                         capture_output=True, text=True).stdout
+    return int(out.strip())
+
+
 def caption(png: Path, text: str, out: Path, *, strip_px: int = CAPTION_PX) -> Path:
-    """Add a white strip of `strip_px` above the image carrying `text` (height grows by strip_px)."""
+    """Add a white strip above the image carrying `text`, one line per newline-separated line.
+
+    The strip is at least `strip_px` high and grows with the line count. The font is 28pt, shrunk
+    only if the widest line would not fit the image width. Single-line captions are unchanged.
+    """
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    # ImageMagick treats '%' as an escape in -annotate text.
-    safe = text.replace("%", "%%")
-    subprocess.run(
-        ["convert", str(png), "-background", "white", "-gravity", "North",
-         "-splice", f"0x{strip_px}", "-fill", "black", "-pointsize", "28",
-         "-annotate", f"+0+{max(1, (strip_px - 28) // 2)}", safe, str(out)],
-        check=True,
-    )
+    lines = text.split("\n")
+    strip = max(strip_px,
+                CAPTION_FONT_PT + (len(lines) - 1) * CAPTION_LINE_PX + 2 * CAPTION_PAD_PX)
+    pointsize = CAPTION_FONT_PT
+    avail = _png_width(png) - 2 * CAPTION_PAD_PX
+    width = _text_width(text.replace("%", "%%"), pointsize)
+    if width > avail:
+        pointsize = max(8, pointsize * avail // width)
+    top = max(1, (strip - (pointsize + (len(lines) - 1) * CAPTION_LINE_PX)) // 2)
+    # Each line is annotated at an explicit y so the line pitch is fixed.
+    cmd = ["convert", str(png), "-background", "white", "-gravity", "North",
+           "-splice", f"0x{strip}", "-fill", "black", "-pointsize", str(pointsize)]
+    for i, line in enumerate(lines):
+        # ImageMagick treats '%' as an escape in -annotate text.
+        cmd += ["-annotate", f"+0+{top + i * CAPTION_LINE_PX}", line.replace("%", "%%")]
+    subprocess.run(cmd + [str(out)], check=True)
     return out
 
 

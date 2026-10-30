@@ -23,13 +23,21 @@ def render_progress(task: str, *, board: str = "eprom-to-kernal", date: str | No
         tmp = Path(tmp)
         result = bench.run_bench(board, tmp, router=smooth_router, rip="none")
         sm = result.get("smooth") or {}
+        rep = result.get("router_report") or {}
+        nets_total = rep.get("nets_total", sm.get("nets", 0))
+        nets_taut = rep.get("nets_taut", sm.get("nets_taut", 0))
+        wires_total = rep.get("wires_total", sm.get("wires", 0))
+        wires_taut = rep.get("wires_taut", sm.get("wires_taut", 0))
         r = result["routed_all"]
         length_mm = r["track_mm"] + r["arc_mm"]
         hand_mm = result["orig_all"]["track_mm"] + result["orig_all"]["arc_mm"]  # board under test
-        text = (f"{task}: {sm.get('nets_taut', 0)}/{sm.get('nets', 0)} nets, "
-                f"{sm.get('wires_taut', 0)}/{sm.get('wires', 0)} wires, "
-                f"DRC routing {result['routed_drc']['routing_new']}, "
-                f"{length_mm:.1f} mm vs {hand_mm:.1f} mm")
+        drc = result["routed_drc"]
+        line1 = (f"{task}: {nets_taut}/{nets_total} nets, {wires_taut}/{wires_total} wires, "
+                 f"{wires_total - wires_taut} fallback, arcs {r['arcs']}")
+        line2 = (f"DRC routing {drc['routing_new']}, "
+                 f"unconnected {drc['incomplete']['unconnected_items']}, "
+                 f"{length_mm:.1f} mm vs hand {hand_mm:.1f} mm")
+        text = f"{line1}\n{line2}"
         topor_png = add_caption(tmp / f"{board}-work" / f"{board}-topor-raw.png", text,
                                 tmp / "topor-progress.png")
         png = out_dir / f"{date}-m1-{task}.png"

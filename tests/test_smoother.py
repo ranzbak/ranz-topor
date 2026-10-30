@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 import types
 
@@ -21,7 +22,9 @@ def _fake_router(model, options):
     victim = next(k["uuid"] for k in model["kept"] if not k["locked"])
     return {"items": [_sig_item(net, i) for i in range(3)], "remove_uuids": [victim],
             "report": {"nets": [{"status": "taut"}, {"status": "partial"}],
-                       "wires": [{"status": "taut"}] * 3, "total_length_nm": 5 * MM,
+                       "wires": [{"status": "taut"}, {"status": "taut"}, {"status": "partial"}],
+                       "nets_total": 2, "nets_taut": 1, "wires_total": 3, "wires_taut": 2,
+                       "total_length_nm": 5 * MM,
                        "hand_length_nm": 6 * MM, "iterations": 7, "timed_out": False}}
 
 
@@ -45,10 +48,10 @@ def test_run_bench_accepts_dict_router(fixture_board, tmp_path, capsys):
     r = bench.run_bench("fixture", tmp_path / "o", router=_fake_router, rip="none",
                         pcb_override=fixture_board.pcb)
     assert r["replaced"] == 1 and r["routed_items"] == 3
-    assert r["smooth"] == {"nets_taut": 1, "nets": 2, "wires_taut": 3, "wires": 3,
+    assert r["smooth"] == {"nets_taut": 1, "nets": 2, "wires_taut": 2, "wires": 3,
                            "length_mm": 5.0, "hand_mm": 6.0, "iterations": 7, "timed_out": False}
     out = capsys.readouterr().out
-    assert "smooth: taut 1/2 nets, 3/3 wires, 5.0 mm (hand 6.0), iters 7" in out
+    assert "smooth: taut 1/2 nets, 2/3 wires, 5.0 mm (hand 6.0), iters 7" in out
 
 
 def test_run_bench_list_router_still_works(fixture_board, tmp_path, capsys):
@@ -57,6 +60,18 @@ def test_run_bench_list_router_still_works(fixture_board, tmp_path, capsys):
     assert r["replaced"] == 0 and r["routed_items"] == 1
     assert r["smooth"] is None and r["router_report"] is None
     assert "smooth:" not in capsys.readouterr().out
+
+
+def test_caption_multiline_grows_band_and_fits_width(tmp_path):
+    from PIL import Image
+
+    from harness.render import caption
+
+    base = tmp_path / "base.png"
+    subprocess.run(["convert", "-size", "300x400", "xc:white", str(base)], check=True)
+    long_text = "x" * 200 + "\n" + "y" * 200 + " 100% of 50%"
+    out = caption(base, long_text, tmp_path / "long.png")
+    assert Image.open(out).size == (300, 400 + 96)  # wide lines shrink the font, width is kept
 
 
 def test_smooth_router_forces_smooth_option(monkeypatch):
@@ -88,15 +103,19 @@ def test_progress_png_caption_and_path(fixture_board, tmp_path, monkeypatch):
     png = tmp_path / "prog" / "2026-10-30-m1-T1.4a.png"
     assert png.is_file()
     n = res["routed_all"]
-    expected = (f"T1.4a: 1/2 nets, 3/3 wires, DRC routing {res['routed_drc']['routing_new']}, "
-                f"{n['track_mm'] + n['arc_mm']:.1f} mm vs "
-                f"{res['orig_all']['track_mm'] + res['orig_all']['arc_mm']:.1f} mm")
-    assert res["caption"] == expected
-    # hand image is rendered from the same board at the same height: compare the sizes
+    d = res["routed_drc"]
+    line1 = f"T1.4a: 1/2 nets, 2/3 wires, 1 fallback, arcs {n['arcs']}"
+    line2 = (f"DRC routing {d['routing_new']}, unconnected {d['incomplete']['unconnected_items']}, "
+             f"{n['track_mm'] + n['arc_mm']:.1f} mm vs hand "
+             f"{res['orig_all']['track_mm'] + res['orig_all']['arc_mm']:.1f} mm")
+    assert res["caption"] == f"{line1}\n{line2}"
+    # hand image is rendered from the same board at the same height: compare the sizes.
+    # The two-line topor caption band is 28 + 36 + 2*16 = 96 px; the one-line hand band is 60 px.
     from harness.render import render_png, caption as cap
-    hand = cap(render_png(fixture_board.pcb, tmp_path / "h.png"), "x", tmp_path / "hc.png")
-    w, h = Image.open(hand).size
-    assert Image.open(png).size == (2 * (w + 40), h + 40)
+    raw = render_png(fixture_board.pcb, tmp_path / "h.png")
+    w, h = Image.open(raw).size
+    assert Image.open(png).size == (2 * (w + 40), h + 96 + 40)
+    assert Image.open(cap(raw, "x", tmp_path / "hc.png")).size == (w, h + 60)
 
 
 def _td_zone(net, layer, x0, y0, x1, y1):
