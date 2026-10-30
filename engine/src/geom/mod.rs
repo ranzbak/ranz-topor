@@ -16,7 +16,7 @@ pub use dist::{
     arc_arc, copper_gap, copper_gap_skeleton, dist_prim, dist_prim_skeleton, point_arc,
     point_circle, point_seg, seg_arc, seg_seg, Skeleton, Track,
 };
-pub use grid::Grid;
+pub use grid::{Grid, GridError};
 pub use prim::{Aabb, Arc, Circle, Prim, Seg};
 pub use quant::{
     calc_arc_center, dequantise, is_degenerate_arc, quantise, quantise_chain, round_nm, IVec2, Nm,
