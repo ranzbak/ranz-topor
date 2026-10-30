@@ -10,8 +10,10 @@ use std::hash::Hash;
 
 /// KiCad world range: coordinates are `i32` nm, so |coord| <= 2^31.
 const WORLD: f64 = 2_147_483_648.0;
-/// Items covering more cells than this go to a side list returned by every query.
-const MAX_ITEM_CELLS: i64 = 1024;
+/// Items covering more cells than this go to a side list returned by every query. Sized so
+/// only board-scale items (huge outline prims) land there; a 20 mm diagonal track on a
+/// 0.5 mm grid (1600 cells) is stored in cells.
+const MAX_ITEM_CELLS: i64 = 65_536;
 
 /// Error returned by [`Grid::try_insert`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,12 +34,20 @@ impl std::error::Error for GridError {}
 
 type Range = (i64, i64, i64, i64);
 
+/// Where an item was stored at insert time.
+#[derive(Clone, Copy)]
+enum Placement {
+    Big,
+    Cells(Range),
+}
+
 /// Uniform grid keyed by `floor(coord / cell)`. An item is stored in every cell its box covers;
 /// items covering more than `MAX_ITEM_CELLS` cells live in a side list instead.
 pub struct Grid<T: Copy + Eq + Hash> {
     cell: f64,
     cells: HashMap<(i64, i64), Vec<T>>,
     big: Vec<T>,
+    placed: HashMap<T, Placement>,
     len: usize,
 }
 
@@ -52,6 +62,7 @@ impl<T: Copy + Eq + Hash> Grid<T> {
             cell,
             cells: HashMap::new(),
             big: Vec::new(),
+            placed: HashMap::new(),
             len: 0,
         }
     }
@@ -91,58 +102,70 @@ impl<T: Copy + Eq + Hash> Grid<T> {
             return Err(GridError::NonFinite);
         }
         let r = self.range(&bbox, 0);
+        // re-inserting an existing item replaces its previous placement
+        if let Some(old) = self.placed.remove(&item) {
+            self.unplace(item, old);
+            self.len -= 1;
+        }
         if Self::count(r) > MAX_ITEM_CELLS {
             self.big.push(item);
+            self.placed.insert(item, Placement::Big);
         } else {
             for x in r.0..=r.1 {
                 for y in r.2..=r.3 {
                     self.cells.entry((x, y)).or_default().push(item);
                 }
             }
+            self.placed.insert(item, Placement::Cells(r));
         }
         self.len += 1;
         Ok(())
     }
 
-    /// Remove `item` previously inserted with the same `bbox`. Returns `false` (and changes
-    /// nothing) if the item is not found in every cell `bbox` covers, e.g. a mismatched box.
+    fn unplace(&mut self, item: T, p: Placement) {
+        match p {
+            Placement::Big => {
+                if let Some(i) = self.big.iter().position(|t| *t == item) {
+                    self.big.swap_remove(i);
+                }
+            }
+            Placement::Cells(r) => {
+                for x in r.0..=r.1 {
+                    for y in r.2..=r.3 {
+                        if let Some(v) = self.cells.get_mut(&(x, y)) {
+                            if let Some(i) = v.iter().position(|t| *t == item) {
+                                v.swap_remove(i);
+                            }
+                            if v.is_empty() {
+                                self.cells.remove(&(x, y));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Remove `item` previously inserted with the same `bbox`. Returns `false` and changes
+    /// nothing if the item is unknown or `bbox` maps to a different cell range than the one
+    /// recorded at insert.
     pub fn remove(&mut self, bbox: Aabb, item: T) -> bool {
         if !finite(&bbox) {
             return false;
         }
+        let Some(&stored) = self.placed.get(&item) else {
+            return false;
+        };
         let r = self.range(&bbox, 0);
-        if Self::count(r) > MAX_ITEM_CELLS {
-            return match self.big.iter().position(|t| *t == item) {
-                Some(p) => {
-                    self.big.swap_remove(p);
-                    self.len -= 1;
-                    true
-                }
-                None => false,
-            };
+        let same = match stored {
+            Placement::Big => Self::count(r) > MAX_ITEM_CELLS,
+            Placement::Cells(sr) => sr == r,
+        };
+        if !same {
+            return false;
         }
-        let has =
-            |g: &Self, x: i64, y: i64| g.cells.get(&(x, y)).is_some_and(|v| v.contains(&item));
-        for x in r.0..=r.1 {
-            for y in r.2..=r.3 {
-                if !has(self, x, y) {
-                    debug_assert!(false, "Grid::remove: bbox does not match insert");
-                    return false;
-                }
-            }
-        }
-        for x in r.0..=r.1 {
-            for y in r.2..=r.3 {
-                if let Some(v) = self.cells.get_mut(&(x, y)) {
-                    if let Some(p) = v.iter().position(|t| *t == item) {
-                        v.swap_remove(p);
-                    }
-                    if v.is_empty() {
-                        self.cells.remove(&(x, y));
-                    }
-                }
-            }
-        }
+        self.placed.remove(&item);
+        self.unplace(item, stored);
         self.len -= 1;
         true
     }
