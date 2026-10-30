@@ -77,11 +77,16 @@ def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path) -> s
         f"  runtime {result['runtime_s']}s (router {result['router_s']}s, "
         f"threads={result['threads']})",
     ]
+    fl = result.get("floors") or []
+    if fl:
+        head.append("  floors: " + "; ".join(f"{f['name']} {f['design_mm']:g} -> {f['floor_mm']:g} mm"
+                                             for f in fl))
     sm = result.get("smooth")
     if sm:
         head.append(f"  smooth: taut {sm['nets_taut']}/{sm['nets']} nets, "
                     f"{sm['wires_taut']}/{sm['wires']} wires, {sm['length_mm']} mm "
-                    f"(hand {sm['hand_mm']}), iters {sm['iterations']}")
+                    f"(hand {sm['hand_mm']}), iters {sm['iterations']}, "
+                    f"teardrops_removed {result['teardrops_removed']}")
     drc = summarise(board, routed_drc, base_drc,
                     extra={"width_match": f"{wm['matched']}/{wm['compared']}"})
     lines = head + drc.splitlines() + [f"  outputs: {out_dir}"]
@@ -102,7 +107,7 @@ def run_bench(
     """Run the benchmark procedure for one board; `router=None` routes nothing (M0)."""
     t_start = time.monotonic()
     options = dict(options or {})
-    fab_floor = bool(options.pop("fab_floor_edge_clearance", False))  # harness-only, not an engine option
+    fab_floors = bool(options.pop("apply_fab_floors", True))  # harness-only, not an engine option
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     src = _source_pcb(board, pcb_override)
@@ -126,7 +131,7 @@ def run_bench(
 
     dru_text = cp.dru.read_text() if cp.dru is not None else None
     rules = resolve_rules(b, dru_text=dru_text, widths_before=widths_before,
-                          fab_floor_edge_clearance=fab_floor)
+                          apply_fab_floors=fab_floors)
     model = export_model(b, rules, name=board)
     write_model_json(model, out_dir / f"{board}--model.json")
 
@@ -139,7 +144,7 @@ def run_bench(
         router_report = routed.get("report")
     else:
         items, remove_uuids, router_report = list(routed), [], None
-    replaced = writer.remove_items(b, remove_uuids)
+    replaced, teardrops_removed = writer.remove_items_and_teardrops(b, remove_uuids)
     writer.write_items(b, items)
     # Save over the working copy so the copied .kicad_pro/.kicad_dru still apply to the DRC run.
     writer.save(b, cp.pcb)
@@ -170,8 +175,12 @@ def run_bench(
         "routed_drc": classify(routed_drc, base_drc),
         "routed_items": len(items),
         "replaced": replaced,
+        "teardrops_removed": teardrops_removed,
         "router_report": router_report,
         "smooth": _smooth_summary(router_report),
+        "floors": [{"name": f["name"], "design_mm": f["design"] / 1e6, "floor_mm": f["floor"] / 1e6}
+                   for f in rules.get("floors_applied", [])],
+        "rules_used": {k: rules[k] / 1e6 for k in ("edge_clearance", "min_clearance", "min_track_width")},
         "rip": rip,
         "threads": threads,
         "runtime_s": round(time.monotonic() - t_start, 3),

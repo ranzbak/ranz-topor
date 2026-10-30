@@ -81,12 +81,42 @@ def save(board, path) -> Path:
     return path
 
 
+def _is_via(t) -> bool:
+    return t.Type() == pcbnew.PCB_VIA_T
+
+
 def remove_items(board, uuids: list[str]) -> int:
     """Delete tracks/arcs/vias by uuid (board.Delete, never Remove); unknown uuids are ignored."""
+    return remove_items_and_teardrops(board, uuids)[0]
+
+
+def remove_items_and_teardrops(board, uuids: list[str]) -> tuple[int, int]:
+    """Delete tracks/arcs/vias by uuid, plus teardrop zones attached to them.
+
+    A teardrop zone (`zone.IsTeardropArea()`) goes when a removed item has the same net, the zone
+    is on a layer the item is on, and the bounding boxes overlap or touch. Returns
+    `(items_removed, teardrops_removed)`; unknown uuids are ignored. `board.Delete`, never Remove.
+    """
     want = set(uuids)
     if not want:
-        return 0
+        return 0, 0
     doomed = [t for t in board.GetTracks() if _uuid(t) in want]
+    # snapshot (net, layers, bbox) before the deletes invalidate the items
+    probes = []
+    for t in doomed:
+        bb = t.GetBoundingBox()
+        layers = {int(l) for l in t.GetLayerSet().Seq()} if _is_via(t) else {int(t.GetLayer())}
+        probes.append((int(t.GetNetCode()), layers, bb))
+    tds = [z for z in board.Zones() if z.IsTeardropArea()]
+    dead_zones = []
+    for z in tds:
+        zb = z.GetBoundingBox()
+        zl = {int(l) for l in z.GetLayerSet().Seq()}
+        zn = int(z.GetNetCode())
+        if any(zn == n and zl & ls and zb.Intersects(bb) for n, ls, bb in probes):
+            dead_zones.append(z)
     for t in doomed:
         board.Delete(t)
-    return len(doomed)
+    for z in dead_zones:
+        board.Delete(z)
+    return len(doomed), len(dead_zones)

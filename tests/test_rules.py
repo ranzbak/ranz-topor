@@ -31,7 +31,7 @@ def _code(b, name):
 def test_profile_values():
     assert JLCPCB_1OZ["width"] == 200_000 and JLCPCB_1OZ["clearance"] == 150_000 and JLCPCB_1OZ["via_d"] == 600_000 and JLCPCB_1OZ["via_drill"] == 300_000
     assert JLCPCB_1OZ["drill_list"] == [200_000, 250_000, 300_000, 400_000, 500_000, 800_000, 1_000_000] and JLCPCB_1OZ["routing_vias"] == [250_000, 300_000, 400_000, 500_000]
-    assert JLCPCB_1OZ["edge"] == 300_000 and JLCPCB_1OZ["pth_hole_to_track"] == 350_000 and JLCPCB_1OZ["npth_to_track"] == 250_000
+    assert JLCPCB_1OZ["edge"] == 200_000 and JLCPCB_1OZ["pth_hole_to_track"] == 350_000 and JLCPCB_1OZ["npth_to_track"] == 250_000
     for k in ("via_d_min_auto", "via_drill_min_auto", "via_hole_to_track", "hole_to_hole_via", "hole_to_hole_pad",
               "vcut", "annular_2l", "annular_4l"):
         assert JLCPCB_1OZ[k] > 0
@@ -60,7 +60,7 @@ def test_rules_fixture_with_project(tmp_path):
     b = _board(tmp_path)
     r = resolve_rules(b, dru_text=None, widths_before={})
     vcc, sig = _code(b, "VCC"), _code(b, "SIG")
-    assert r["edge_clearance"] == 500_000 and r["min_track_width"] == 200_000 and r["hole_clearance"] == 250_000
+    assert r["edge_clearance"] == 500_000 and r["min_track_width"] == 200_000 and r["hole_clearance"] == 350_000  # 0.25 design, raised to the PTH floor
     assert r["per_net"][vcc]["width"] == 400_000 and r["per_net"][vcc]["width_source"] == "netclass"
     assert r["per_net"][sig]["width"] == 250_000 and r["per_net"][sig]["width_source"] == "default"
     assert r["default"]["clearance"] == 200_000 and r["profile"] == "jlcpcb_1oz"
@@ -117,9 +117,9 @@ def test_ignored_rule_has_no_effect(tmp_path):
 def test_track_angle_rule_is_refused(tmp_path):
     b = _board(tmp_path)
     r = resolve_rules(b, dru_text='(rule ang (constraint track_angle (min 45deg)))', widths_before={})
-    assert r["warnings"][0].startswith("REFUSE") and "ang" in r["warnings"][0]
+    assert any(w.startswith("REFUSE") and "ang" in w for w in r["warnings"])
     r = resolve_rules(b, dru_text='(rule seg (constraint track_segment_length (min 1mm)))', widths_before={})
-    assert r["warnings"][0].startswith("REFUSE")
+    assert any(w.startswith("REFUSE") for w in r["warnings"])
 
 
 def test_power_net_on_default_width_warns(tmp_path):
@@ -163,33 +163,72 @@ def test_output_parses_with_engine_rules(tmp_path, engine):
     json.dumps(r)
 
 
-def test_fab_floor_edge_clearance_flag(tmp_path):
-    """Design edge clearance by default; the profile's fab floor only when asked."""
-    b = _board(tmp_path / "a", rules={"min_copper_edge_clearance": 0.025})
-    assert resolve_rules(b, dru_text=None, widths_before={})["edge_clearance"] == 25_000
-    r = resolve_rules(b, dru_text=None, widths_before={}, fab_floor_edge_clearance=True)
-    assert r["edge_clearance"] == JLCPCB_1OZ["edge"]
-    b2 = _board(tmp_path / "b", rules={"min_copper_edge_clearance": 0.5})  # already above the floor
-    r2 = resolve_rules(b2, dru_text=None, widths_before={}, fab_floor_edge_clearance=True)
+def test_fab_floors_raise_and_report(tmp_path):
+    """Fab minimums are floors by default: raised and reported; values above are used as-is."""
+    b = _board(tmp_path / "a", rules={"min_copper_edge_clearance": 0.025, "min_clearance": 0.1,
+                                      "min_track_width": 0.1, "min_hole_clearance": 0.2,
+                                      "min_hole_to_hole": 0.1})
+    r = resolve_rules(b, dru_text=None, widths_before={})
+    assert r["edge_clearance"] == JLCPCB_1OZ["edge"] == 200_000
+    assert r["min_clearance"] == 150_000 and r["min_track_width"] == 200_000
+    assert r["hole_clearance"] == 350_000 and r["hole_to_hole"] == 250_000
+    got = {f["name"]: (f["design"], f["floor"]) for f in r["floors_applied"]}
+    assert got["edge_clearance"] == (25_000, 200_000) and got["min_clearance"] == (100_000, 150_000)
+    assert "floor: edge_clearance 0.025 -> 0.2 mm" in r["warnings"]
+    b2 = _board(tmp_path / "b", rules={"min_copper_edge_clearance": 0.5})  # above the floor: as-is
+    r2 = resolve_rules(b2, dru_text=None, widths_before={})
     assert r2["edge_clearance"] == 500_000
+    assert "edge_clearance" not in {f["name"] for f in r2["floors_applied"]}
+
+
+def test_fab_floors_opt_out(tmp_path):
+    b = _board(tmp_path, rules={"min_copper_edge_clearance": 0.025, "min_clearance": 0.1})
+    r = resolve_rules(b, dru_text=None, widths_before={}, apply_fab_floors=False)
+    assert r["edge_clearance"] == 25_000 and r["min_clearance"] == 100_000
+    assert r["floors_applied"] == [] and not any(w.startswith("floor:") for w in r["warnings"])
 
 
 @pytest.mark.gate
 def test_rules_eprom_kicad10_project(tmp_path):
-    """Re-pinned 2026-10-30 after the KiCad 10 hand re-route: board setup edge clearance 0.2 mm."""
+    """Re-measured 2026-10-30 (R2): project values come through the .kicad_pro; floors reported."""
     src = Path(EPROM)
     pc = copy_project(src, tmp_path / "w")
     assert pc.pro is not None
     b = load_board(pc)
     widths = record_widths(b)
     r = resolve_rules(b, dru_text=None, widths_before=widths)
-    assert r["edge_clearance"] == 200_000  # design value, not the fab floor
+    assert r["edge_clearance"] == 250_000  # board setup 0.25 mm, above the 0.2 mm fab floor
+    assert r["min_clearance"] == 150_000
+    assert {(f["name"], f["design"], f["floor"]) for f in r["floors_applied"]} == {
+        ("min_track_width", 150_000, 200_000), ("hole_clearance", 250_000, 350_000)}
+    assert "floor: min_track_width 0.15 -> 0.2 mm" in r["warnings"]
     assert resolve_rules(b, dru_text=None, widths_before=widths,
-                         fab_floor_edge_clearance=True)["edge_clearance"] == JLCPCB_1OZ["edge"]
-    assert r["default"]["clearance"] == 200_000 and r["default"]["width"] == 250_000
+                         apply_fab_floors=False)["edge_clearance"] == 250_000
+    assert r["default"]["width"] == 250_000
     codes = {str(n.GetNetname()): str(int(c)) for c, n in b.GetNetsByNetcode().items()}
     for net in ("+5V", "GND"):
         assert r["per_net"][codes[net]]["width"] == 400_000
         assert r["per_net"][codes[net]]["width_source"] == "existing_copper"
     assert len(rip_tracks(b, mode="all").nets_to_route) == 26
+    assert_unchanged(src.parent, pc.src_hashes)
+
+
+@pytest.mark.gate
+def test_eprom_rip_none_keeps_free_vias_and_exports_no_pour(tmp_path):
+    """rip=none: 15 free GND stitching vias survive and are exported (fixed obstacles); pour and
+    teardrop zones are not obstacles (only rule areas are exported as keepouts)."""
+    src = Path(EPROM)
+    pc = copy_project(src, tmp_path / "w")
+    b = load_board(pc)
+    zones = list(b.Zones())
+    assert sum(1 for z in zones if z.IsTeardropArea()) == 54
+    assert any(not z.IsTeardropArea() and not z.GetIsRuleArea() for z in zones)  # the GND pour
+    rep = rip_tracks(b, mode="none")
+    assert rep.kept_free_vias == 15 and rep.removed_vias == 0 and rep.removed_tracks == 0
+    assert len(list(b.Zones())) == len(zones)
+    m = export_model(b, resolve_rules(b, dru_text=None, widths_before=record_widths(b)), name="eprom")
+    gnd = next(n["code"] for n in m["nets"] if n["name"] == "GND")
+    assert len(m["vias"]) == 15 and all(v["free"] and v["net"] == gnd for v in m["vias"])
+    assert {(v["d"], v["drill"]) for v in m["vias"]} == {(800_000, 400_000)}
+    assert m["keepouts"] == []  # no rule areas: neither pour nor teardrops became obstacles
     assert_unchanged(src.parent, pc.src_hashes)

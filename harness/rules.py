@@ -20,7 +20,8 @@ JLCPCB_1OZ: dict = {
     "npth_to_track": 250_000,
     "hole_to_hole_via": 250_000,
     "hole_to_hole_pad": 500_000,
-    "edge": 300_000,
+    # copper-to-board-edge floor: 0.2 mm (user statement 2026-10-30, JLCPCB copper-to-edge)
+    "edge": 200_000,
     "vcut": 500_000,
     # (0.45 - 0.25) / 2 for the smallest automatic via; 4-layer boards allow a thinner ring
     "annular_2l": 100_000,
@@ -181,32 +182,44 @@ def resolve_rules(
     widths_before: dict[str, NetWidths],
     settings_table: dict[str, int] | None = None,
     profile: dict = JLCPCB_1OZ,
-    fab_floor_edge_clearance: bool = False,
+    apply_fab_floors: bool = True,
 ) -> dict:
-    """`fab_floor_edge_clearance`: raise the copper-to-edge clearance to the profile's fab floor.
+    """Resolve design rules; manufacturer minimums (the profile) are FLOORS.
 
-    Default False: the board's own setting is used (profile only fills an unset 0), so a hand
-    routing made to the design rule can be compared directly.
+    With `apply_fab_floors` (default) every design value below the profile minimum is raised to it
+    and reported in `floors_applied` (`[{"name", "design", "floor"}]`, nm) and in `warnings`
+    (`floor: <name> <design> -> <floor> mm`); values above the floor are used as-is. A design
+    value of 0 means "unset" and is silently filled from the profile. `apply_fab_floors=False`
+    uses the board's own values (the profile only fills unset zeros).
     """
     settings_table = settings_table or {}
     ds = board.GetDesignSettings()
     ns = ds.m_NetSettings
     warnings: list[str] = []
+    floors_applied: list[dict] = []
+    annular_floor = profile["annular_2l"] if board.GetCopperLayerCount() <= 2 else profile["annular_4l"]
+
+    def floored(name: str, design, floor: int) -> int:
+        design = int(design)
+        if design <= 0:
+            return floor
+        if apply_fab_floors and design < floor:
+            floors_applied.append({"name": name, "design": design, "floor": floor})
+            warnings.append(f"floor: {name} {design / 1e6:g} -> {floor / 1e6:g} mm")
+            return floor
+        return design
 
     floors = {
-        "min_clearance": max(_nz(ds.m_MinClearance, profile["clearance"]), profile["clearance"]),
-        "min_track_width": max(_nz(ds.m_TrackMinWidth, profile["width"]), profile["width"]),
-        "min_via_diameter": _nz(ds.m_ViasMinSize, profile["via_d_min_auto"]),
-        "min_via_drill": _nz(ds.m_MinThroughDrill, profile["via_drill_min_auto"]),
-        "min_annular": _nz(ds.m_ViasMinAnnularWidth, profile["annular_2l"]),
-        "hole_clearance": _nz(ds.m_HoleClearance, profile["pth_hole_to_track"]),
-        "hole_to_hole": _nz(ds.m_HoleToHoleMin, profile["hole_to_hole_via"]),
-        "edge_clearance": _nz(ds.m_CopperEdgeClearance, profile["edge"]),
+        "min_clearance": floored("min_clearance", ds.m_MinClearance, profile["clearance"]),
+        "min_track_width": floored("min_track_width", ds.m_TrackMinWidth, profile["width"]),
+        "min_via_diameter": floored("min_via_diameter", ds.m_ViasMinSize, profile["via_d_min_auto"]),
+        "min_via_drill": floored("min_via_drill", ds.m_MinThroughDrill, profile["via_drill_min_auto"]),
+        "min_annular": floored("min_annular", ds.m_ViasMinAnnularWidth, annular_floor),
+        "hole_clearance": floored("hole_clearance", ds.m_HoleClearance, profile["pth_hole_to_track"]),
+        "hole_to_hole": floored("hole_to_hole", ds.m_HoleToHoleMin, profile["hole_to_hole_via"]),
+        "edge_clearance": floored("edge_clearance", ds.m_CopperEdgeClearance, profile["edge"]),
         "max_error": _nz(ds.m_MaxError, 5_000),
     }
-
-    if fab_floor_edge_clearance:
-        floors["edge_clearance"] = max(floors["edge_clearance"], profile["edge"])
 
     rules = parse_dru(dru_text) if dru_text else []
     for r in rules:
@@ -262,8 +275,8 @@ def resolve_rules(
         return {
             "clearance": clearance,
             "width": width,
-            "via_d": _nz(nc.GetViaDiameter(), profile["via_d"]),
-            "via_drill": _nz(nc.GetViaDrill(), profile["via_drill"]),
+            "via_d": max(_nz(nc.GetViaDiameter(), profile["via_d"]), floors["min_via_diameter"]),
+            "via_drill": max(_nz(nc.GetViaDrill(), profile["via_drill"]), floors["min_via_drill"]),
             "netclass": ncname,
             "width_source": src,
         }
@@ -286,5 +299,6 @@ def resolve_rules(
         "routing_vias": list(profile["routing_vias"]),
         "default": default,
         "per_net": per_net,
+        "floors_applied": floors_applied,
         "warnings": warnings,
     }

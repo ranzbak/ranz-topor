@@ -97,3 +97,56 @@ def test_progress_png_caption_and_path(fixture_board, tmp_path, monkeypatch):
     hand = cap(render_png(fixture_board.pcb, tmp_path / "h.png"), "x", tmp_path / "hc.png")
     w, h = Image.open(hand).size
     assert Image.open(png).size == (2 * (w + 40), h + 40)
+
+
+def _td_zone(net, layer, x0, y0, x1, y1):
+    return (f'\t(zone\n\t\t(net "{net}")\n\t\t(layer "{layer}")\n\t\t(hatch none 0.1)\n'
+            f'\t\t(attr\n\t\t\t(teardrop\n\t\t\t\t(type padvia)\n\t\t\t)\n\t\t)\n'
+            f'\t\t(connect_pads yes\n\t\t\t(clearance 0)\n\t\t)\n\t\t(min_thickness 0.0254)\n'
+            f'\t\t(polygon\n\t\t\t(pts\n\t\t\t\t(xy {x0} {y0}) (xy {x1} {y0}) (xy {x1} {y1}) (xy {x0} {y1})\n'
+            f'\t\t\t)\n\t\t)\n\t)\n')
+
+
+def _board_with_teardrops(fixture_board, tmp_path):
+    """Fixture board with SIG tracks at y=40 and teardrop zones: on track 0 (SIG, F.Cu), far away
+    (SIG, F.Cu), on track 0 but another net (GND), on track 0 but another layer (B.Cu)."""
+    b = pcbnew.LoadBoard(str(fixture_board.pcb))
+    net = b.GetNetcodeFromNetname("SIG")
+    ids = writer.write_items(b, [_sig_item(net, i * 10) for i in range(3)])  # x 40-41, 50-51, 60-61
+    (tmp_path / "src").mkdir()
+    path = writer.save(b, tmp_path / "src" / "td.kicad_pcb")
+    text = path.read_text()
+    zones = (_td_zone("SIG", "F.Cu", 39.5, 39.5, 41.5, 40.5)
+             + _td_zone("SIG", "F.Cu", 100, 100, 101, 101)
+             + _td_zone("GND", "F.Cu", 39.5, 39.5, 41.5, 40.5)
+             + _td_zone("SIG", "B.Cu", 39.5, 39.5, 41.5, 40.5))
+    path.write_text(text.rstrip()[:-1] + zones + ")\n")
+    return pcbnew.LoadBoard(str(path)), ids
+
+
+def test_teardrops_removed_with_replaced_track(fixture_board, tmp_path):
+    b, ids = _board_with_teardrops(fixture_board, tmp_path)
+    tds = [z for z in b.Zones() if z.IsTeardropArea()]
+    assert len(tds) == 4
+    n, t = writer.remove_items_and_teardrops(b, [ids[0]])
+    assert (n, t) == (1, 1)
+    left = [(z.GetNetname(), int(z.GetLayer())) for z in b.Zones() if z.IsTeardropArea()]
+    assert sorted(left) == sorted([("SIG", int(pcbnew.F_Cu)), ("GND", int(pcbnew.F_Cu)),
+                                   ("SIG", int(pcbnew.B_Cu))])
+    # a removal that touches no teardrop keeps them all
+    n, t = writer.remove_items_and_teardrops(b, [ids[2]])
+    assert (n, t) == (1, 0)
+    assert writer.remove_items_and_teardrops(b, []) == (0, 0)
+
+
+def test_bench_reports_teardrops_removed(fixture_board, tmp_path, capsys):
+    b, ids = _board_with_teardrops(fixture_board, tmp_path)
+    pcb = tmp_path / "src" / "td.kicad_pcb"
+    victim = ids[0]
+
+    def router(model, options):
+        return {"items": [], "remove_uuids": [victim], "report": {"nets": [], "wires": []}}
+
+    r = bench.run_bench("fixture", tmp_path / "o", router=router, rip="none", pcb_override=pcb)
+    assert r["replaced"] == 1 and r["teardrops_removed"] == 1
+    assert "teardrops_removed 1" in capsys.readouterr().out
