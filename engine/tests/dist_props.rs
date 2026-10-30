@@ -167,6 +167,47 @@ fn check(a: Prim, b: Prim, d: f64) -> Result<(), TestCaseError> {
     prop_assert!(d >= sd - 1e-3, "d={d} refined={sd}");
     Ok(())
 }
+/// Exact minimum distance between two segments: |P(s) - Q(t)|^2 is a convex quadratic
+/// in (s, t) on [0,1]^2, so the minimum is at an interior stationary point or on an
+/// edge (where it is a clamped 1-D minimum). Test-only; independent of `seg_seg`.
+fn seg_seg_exact(a: &Seg, b: &Seg) -> f64 {
+    let u = a.b - a.a;
+    let w = b.b - b.a;
+    let p = a.a - b.a;
+    let f = |s: f64, t: f64| (p + u * s - w * t).len2();
+    let mut best = f(0.0, 0.0).min(f(0.0, 1.0)).min(f(1.0, 0.0)).min(f(1.0, 1.0));
+    for e in [0.0, 1.0] {
+        if w.len2() > 0.0 {
+            best = best.min(f(e, (w.dot(p + u * e) / w.len2()).clamp(0.0, 1.0)));
+        }
+        if u.len2() > 0.0 {
+            best = best.min(f((-u.dot(p - w * e) / u.len2()).clamp(0.0, 1.0), e));
+        }
+    }
+    // stationarity: [uu, -uw; -uw, ww] (s, t) = (-u.p, w.p)
+    let (uu, ww, uw) = (u.dot(u), w.dot(w), u.dot(w));
+    let det = uu * ww - uw * uw;
+    if det != 0.0 {
+        let (r1, r2) = (-u.dot(p), w.dot(p));
+        let s = (r1 * ww + uw * r2) / det;
+        let t = (uu * r2 + uw * r1) / det;
+        if (0.0..=1.0).contains(&s) && (0.0..=1.0).contains(&t) {
+            best = best.min(f(s, t));
+        }
+    }
+    best.sqrt()
+}
+/// `seg_seg` must equal the exact minimum. Sampling is only a one-sided check: every
+/// sampled pair is a real pair of points, so the true distance can never exceed it.
+/// (The sampled refinement may stall above the minimum; that is not a failure.)
+fn check_seg_seg(a: Seg, b: Seg, d: f64) -> Result<(), TestCaseError> {
+    let exact = seg_seg_exact(&a, &b);
+    prop_assert!(d >= 0.0);
+    prop_assert!((d - exact).abs() <= 1e-3, "d={d} exact={exact}");
+    let sd = sampled(&Prim::Seg(a), &Prim::Seg(b));
+    prop_assert!(d <= sd + 1e-3, "d={d} sampled={sd}");
+    Ok(())
+}
 
 proptest! {
   #![proptest_config(ProptestConfig::with_cases(512))]
@@ -177,7 +218,7 @@ proptest! {
     check(Prim::Arc(a), Prim::Arc(b), arc_arc(&a, &b))?;
   }
   #[test] fn prop_seg_seg_matches_sampling(a in seg(), b in seg()) {
-    check(Prim::Seg(a), Prim::Seg(b), seg_seg(&a, &b))?;
+    check_seg_seg(a, b, seg_seg(&a, &b))?;
   }
   #[test] fn prop_point_arc_matches_sampling(p in vec2(), a in arc()) {
     let pt = Prim::Seg(Seg { a: p, b: p });
@@ -241,6 +282,25 @@ fn example_concentric_arcs_disjoint_spans_use_endpoints() {
     let t1 = arc_deg(c, 1.0e6, 0.0, 90.0);
     let t2 = arc_deg(c, 1.0e6, 90.0, 180.0);
     assert!(arc_arc(&t1, &t2) < 1e-6);
+}
+
+#[test]
+fn regression_seg_seg_sampling_stall() {
+    // Found by prop_seg_seg_matches_sampling. The nearest pair is B's endpoint (t = 1)
+    // against the interior of A (s ~ 0.857). The local sampling refinement stalled at
+    // t ~ 0.99983 and reported ~420.66, an over-estimate; the true distance is 406.37.
+    let a = Seg {
+        a: v(-21657.62185194626, 207504.65258160242),
+        b: v(-1449959.8854126695, 1990071.0454756415),
+    };
+    let b = Seg {
+        a: v(-157074.80140707674, 243316.12905175754),
+        b: v(-1246305.3896104954, 1735253.9149523925),
+    };
+    let want = 406.366563272457;
+    assert!((seg_seg(&a, &b) - want).abs() < 1e-6);
+    assert!((seg_seg_exact(&a, &b) - want).abs() < 1e-6);
+    assert!(sampled(&Prim::Seg(a), &Prim::Seg(b)) >= want - 1e-6);
 }
 
 #[test]
