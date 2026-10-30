@@ -188,9 +188,22 @@ def test_fab_floors_opt_out(tmp_path):
     assert r["floors_applied"] == [] and not any(w.startswith("floor:") for w in r["warnings"])
 
 
+def _pads_by_net(b):
+    out: dict[str, int] = {}
+    for fp in b.GetFootprints():
+        for pad in fp.Pads():
+            if pad.GetNetname():
+                out[str(pad.GetNetname())] = out.get(str(pad.GetNetname()), 0) + 1
+    return out
+
+
 @pytest.mark.gate
 def test_rules_eprom_kicad10_project(tmp_path):
-    """Re-measured 2026-10-30 (R2): project values come through the .kicad_pro; floors reported."""
+    """Project values come through the .kicad_pro; netclass patterns resolve to the effective class.
+
+    Edit-proof: only the netclass setup / board-setup values (stable project settings) and
+    invariants derived from the copy itself are asserted, never counts of the hand routing.
+    """
     src = Path(EPROM)
     pc = copy_project(src, tmp_path / "w")
     assert pc.pro is not None
@@ -204,31 +217,51 @@ def test_rules_eprom_kicad10_project(tmp_path):
     assert "floor: min_track_width 0.15 -> 0.2 mm" in r["warnings"]
     assert resolve_rules(b, dru_text=None, widths_before=widths,
                          apply_fab_floors=False)["edge_clearance"] == 250_000
-    assert r["default"]["width"] == 250_000
+    assert r["default"]["width"] == 250_000 and r["default"]["clearance"] == 200_000
     codes = {str(n.GetNetname()): str(int(c)) for c, n in b.GetNetsByNetcode().items()}
-    for net in ("+5V", "GND"):
-        assert r["per_net"][codes[net]]["width"] == 400_000
-        assert r["per_net"][codes[net]]["width_source"] == "existing_copper"
-    assert len(rip_tracks(b, mode="all").nets_to_route) == 26
+    # pattern / regex assignments (A3, D7, OE -> Signal; +5V, GND -> power), via the effective class
+    expect = {"Signal": (250_000, 250_000, 600_000, 300_000), "power": (250_000, 400_000, 800_000, 400_000)}
+    for net, cls in (("A3", "Signal"), ("D7", "Signal"), ("OE", "Signal"), ("+5V", "power"), ("GND", "power")):
+        pn = r["per_net"][codes[net]]
+        assert pn["netclass"].split(",")[0] == cls, net
+        assert (pn["clearance"], pn["width"], pn["via_d"], pn["via_drill"]) == expect[cls], net
+        assert pn["width_source"] == "netclass", net
+    # every net resolves to a known class, and the class width is never below the profile floor
+    assert {pn["netclass"].split(",")[0] for pn in r["per_net"].values()} <= {"Signal", "power", "Default"}
+    assert all(pn["width"] >= JLCPCB_1OZ["width"] for pn in r["per_net"].values())
+    # all multi-pad nets are connected on the hand board, so ripping everything leaves them to route
+    multi = {n for n, c in _pads_by_net(b).items() if c >= 2}
+    assert set(rip_tracks(b, mode="all").nets_to_route) == multi
     assert_unchanged(src.parent, pc.src_hashes)
 
 
 @pytest.mark.gate
 def test_eprom_rip_none_keeps_free_vias_and_exports_no_pour(tmp_path):
-    """rip=none: 15 free GND stitching vias survive and are exported (fixed obstacles); pour and
-    teardrop zones are not obstacles (only rule areas are exported as keepouts)."""
+    """rip=none: free vias survive and are exported (fixed obstacles); pour and teardrop zones are
+    not obstacles (only rule areas are exported as keepouts). Counts come from the copy itself."""
+    from harness.measure import copper_facts
+
     src = Path(EPROM)
     pc = copy_project(src, tmp_path / "w")
     b = load_board(pc)
+    facts = copper_facts(b)
     zones = list(b.Zones())
-    assert sum(1 for z in zones if z.IsTeardropArea()) == 54
+    teardrops = sum(1 for z in zones if z.IsTeardropArea())
     assert any(not z.IsTeardropArea() and not z.GetIsRuleArea() for z in zones)  # the GND pour
     rep = rip_tracks(b, mode="none")
-    assert rep.kept_free_vias == 15 and rep.removed_vias == 0 and rep.removed_tracks == 0
-    assert len(list(b.Zones())) == len(zones)
+    assert rep.kept_free_vias == facts["free_vias"] and rep.removed_vias == 0 and rep.removed_tracks == 0
+    assert sum(1 for z in b.Zones() if z.IsTeardropArea()) == teardrops and len(list(b.Zones())) == len(zones)
     m = export_model(b, resolve_rules(b, dru_text=None, widths_before=record_widths(b)), name="eprom")
-    gnd = next(n["code"] for n in m["nets"] if n["name"] == "GND")
-    assert len(m["vias"]) == 15 and all(v["free"] and v["net"] == gnd for v in m["vias"])
-    assert {(v["d"], v["drill"]) for v in m["vias"]} == {(800_000, 400_000)}
+    assert len(m["vias"]) == facts["vias"] and sum(1 for v in m["vias"] if v["free"]) == facts["free_vias"]
+    assert all(v["free"] for v in m["vias"]) == (facts["vias"] == facts["free_vias"])
     assert m["keepouts"] == []  # no rule areas: neither pour nor teardrops became obstacles
     assert_unchanged(src.parent, pc.src_hashes)
+
+
+def test_effective_netclass_patterns_on_fixture(tmp_path):
+    """Pattern assignment comes from pcbnew's effective netclass (fixture: *VCC* -> Power)."""
+    b = _board(tmp_path)
+    r = resolve_rules(b, dru_text=None, widths_before={})
+    vcc, sig = r["per_net"][_code(b, "VCC")], r["per_net"][_code(b, "SIG")]
+    assert vcc["netclass"].split(",")[0] == "Power" and vcc["via_d"] == 800_000
+    assert sig["netclass"] == "Default"
