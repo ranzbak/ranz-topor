@@ -1,0 +1,114 @@
+{
+ "board": "dcsgonebadge",
+ "layers": 2,
+ "footprints": 157,
+ "pads": 458,
+ "nets_total": 86,
+ "rf_nets": [],
+ "zone_nets": [
+  "GND"
+ ],
+ "orig_all": {
+  "segments": 1369,
+  "arcs": 14,
+  "vias": 203,
+  "track_mm": 4210.28,
+  "arc_mm": 43.2
+ },
+ "orig_drc": {
+  "exit": 0,
+  "seconds": 5.8,
+  "violations": {
+   "starved_thermal": 3,
+   "courtyards_overlap": 11,
+   "clearance": 11,
+   "silk_overlap": 26,
+   "silk_over_copper": 84,
+   "text_height": 41,
+   "lib_footprint_mismatch": 12,
+   "lib_footprint_issues": 18,
+   "silk_edge_clearance": 3,
+   "connection_width": 1
+  },
+  "total": 210,
+  "unconnected": 5,
+  "stderr": "16:33:18: Font 'Porcelain' not found; substituting 'Noto Sans Bold'.\n16:33:18: Font 'IBM Plex Sans SemiBold' not found; substituting 'Noto Sans Bold'.\n16:33:18: Font 'Barlow SemiBold' not found; substituting 'Noto Sans Bold'.\n16:33:18: Font 'Pacifico' not found; substituting 'Noto Sans Bold'.\n"
+ },
+ "kept": {
+  "locked_tracks": 0,
+  "rf_tracks": 0,
+  "free_vias": 7,
+  "locked_vias": 0,
+  "rf_vias": 0
+ },
+ "removed": {
+  "tracks": 1369,
+  "arcs": 14,
+  "vias": 196
+ },
+ "kept_nets": [],
+ "nets_to_route": 86,
+ "orig_routed_nets": {
+  "segments": 1369,
+  "arcs": 14,
+  "vias": 203,
+  "track_mm": 4210.28,
+  "arc_mm": 43.2
+ },
+ "dsn_export_ok": true,
+ "dsn_bytes": 112535,
+ "dsn_via_type_stripped": 7,
+ "cmdgen": "layers=['F.Cu', 'B.Cu'] principal=F.Cu pins=281 mode=planar width=200.0",
+ "mode": "planar",
+ "width": "200",
+ "topola": {
+  "exit": 0,
+  "seconds": 0.7,
+  "stderr": "topola-eval: ratline 0 routed\ntopola-eval: ratline 1 routed\ntopola-eval: ratline 2 routed\ntopola-eval: ratline 3 routed\ntopola-eval: ratline 4 routed\ntopola-eval: ratline 5 routed\ntopola-eval: ratline 6 routed\ntopola-eval: ratline 7 routed\ntopola-eval: ratline 8 routed\ntopola-eval: ratline 9 routed\ntopola-eval: ratline 10 routed\ntopola-eval: ratline 11 routed\ntopola-eval: ratline 12 routed\ntopola-eval: ratline 13 routed\ntopola-eval: ratline 14 routed\ntopola-eval: ratline 15 routed\ntopola-eval: ratline 16 routed\ntopola-eval: ratline 17 routed\ntopola-eval: ratline 18 routed\ntopola-eval: ratline 19 routed\ntopola-eval: ratline 20 routed\ntopola-eval: ratline 21 routed\ntopola-eval: ratline 22 routed\ntopola-eval: ratline 23 routed\ntopola-eval: ratline 24 routed\ntopola-eval: ratline 25 routed\ntopola-eval: ratline 26 routed\n",
+  "stdout": "",
+  "timeout": false
+ },
+ "ses_bytes": 657694,
+ "ses_import_ok": true,
+ "routed_all": {
+  "segments": 7332,
+  "arcs": 0,
+  "vias": 0,
+  "track_mm": 1738.3,
+  "arc_mm": 0.0
+ },
+ "routed_routed_nets": {
+  "segments": 7332,
+  "arcs": 0,
+  "vias": 0,
+  "track_mm": 1738.3,
+  "arc_mm": 0.0
+ },
+ "routed_short_segments_lt_50um": 3284,
+ "routed_drc": {
+  "exit": 0,
+  "seconds": 7.5,
+  "violations": {
+   "starved_thermal": 15,
+   "track_width": 199,
+   "courtyards_overlap": 11,
+   "clearance": 413,
+   "hole_clearance": 2,
+   "silk_overlap": 26,
+   "silk_over_copper": 47,
+   "text_height": 41,
+   "lib_footprint_mismatch": 12,
+   "lib_footprint_issues": 18,
+   "silk_edge_clearance": 3
+  },
+  "total": 787,
+  "unconnected": 198,
+  "stderr": "16:33:26: Font 'Porcelain' not found; substituting 'Noto Sans Bold'.\n16:33:26: Font 'IBM Plex Sans SemiBold' not found; substituting 'Noto Sans Bold'.\n16:33:26: Font 'Barlow SemiBold' not found; substituting 'Noto Sans Bold'.\n16:33:26: Font 'Pacifico' not found; substituting 'Noto Sans Bold'.\n"
+ },
+ "routed_nets_without_copper": [
+  "unconnected-(J4-Pin_5-Pad5)",
+  "unconnected-(J4-Pin_6-Pad6)",
+  "unconnected-(J5-Pin_5-Pad5)",
+  "unconnected-(J5-Pin_6-Pad6)"
+ ]
+}

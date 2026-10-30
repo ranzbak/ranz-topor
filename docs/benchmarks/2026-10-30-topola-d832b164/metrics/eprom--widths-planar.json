@@ -1,0 +1,231 @@
+{
+ "summary": {
+  "default_netclass_width": 0.25,
+  "nets_with_copper": 26,
+  "nets_hand_width_differs_from_default": 2,
+  "nets_routed": 26,
+  "nets_routed_width_matches_hand": 24,
+  "nets_routed_width_mismatch": [
+   {
+    "net": "+5V",
+    "hand": 0.4,
+    "routed": 0.25
+   },
+   {
+    "net": "GND",
+    "hand": 0.4,
+    "routed": 0.25
+   }
+  ]
+ },
+ "rows": [
+  {
+   "net": "+5V",
+   "orig_min": 0.4,
+   "orig_median": 0.4,
+   "orig_max": 0.4,
+   "routed_median": 0.25,
+   "match": false
+  },
+  {
+   "net": "A0",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "A1",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "A10",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "A11",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "A12",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "A13",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "A14",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "A2",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "A3",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "A4",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "A5",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "A6",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "A7",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "A8",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "A9",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "D0",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "D1",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "D2",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "D3",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "D4",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "D5",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "D6",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "D7",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  },
+  {
+   "net": "GND",
+   "orig_min": 0.4,
+   "orig_median": 0.4,
+   "orig_max": 0.4,
+   "routed_median": 0.25,
+   "match": false
+  },
+  {
+   "net": "OE",
+   "orig_min": 0.25,
+   "orig_median": 0.25,
+   "orig_max": 0.25,
+   "routed_median": 0.25,
+   "match": true
+  }
+ ]
+}

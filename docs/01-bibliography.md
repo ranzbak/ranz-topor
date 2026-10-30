@@ -1,0 +1,134 @@
+# 01 — Annotated bibliography
+
+Grouped by topic. ★ = most important for this project. "No free PDF" means only abstracts /
+secondary descriptions were available during research (2026-10-30).
+
+---
+
+## A. Rubber-band / topological routing — foundations
+
+- **R. Cole, A. Siegel**, "River routing every which way, but loose", *FOCS 1984*, pp. 65–73.
+  https://doi.org/10.1109/SFCS.1984.715902 — Detailed routing given a homotopy; introduces
+  *cuts*; routable iff every cut is safe.
+- ★ **C. E. Leiserson, F. M. Maley**, "Algorithms for routing and testing routability of
+  planar VLSI layouts", *STOC 1985*, pp. 69–78. — Rubber-band equivalent (RBE), rubber-band
+  sketch, cut flow/capacity theorems, spokes; one of the discoveries of the funnel algorithm.
+- **F. M. Maley**, *Single-Layer Wire Routing and Compaction*, MIT Press 1990 (PhD MIT 1987).
+  https://archive.org/details/singlelayerwirer00fmil — Homotopic routing with polygonal
+  metrics; "Algorithm W" (funnel through a corridor).
+- **F. M. Maley**, "Testing homotopic routability under polygonal wiring rules",
+  *Algorithmica* 15, 1996. https://doi.org/10.1007/BF01942604 — O(N log N) routability test.
+- **S. Gao, M. Jerrum, M. Kaufmann, K. Mehlhorn, W. Rülling, C. Storb**, "On continuous
+  homotopic one layer routing", *SoCG 1988*; LNCS 333. https://doi.org/10.1007/3-540-50335-8_24
+  — Euclidean (curved) case; fan-shaped forbidden regions + funnel on universal cover.
+
+## B. SURF (UC Santa Cruz, W. W.-M. Dai's group)
+
+- **W. W.-M. Dai, R. Kong, J. Jue, M. Sato**, "Rubber band routing and dynamic data
+  representation", *ICCAD 1990*. https://ieeexplore.ieee.org/document/129838 — CDT as dynamic
+  structure for incremental routability.
+- ★ **W. W.-M. Dai, T. Dayan, D. Staepelaere**, "Topological routing in SURF: generating a
+  rubber-band sketch", *DAC 1991*, pp. 39–44. https://doi.org/10.1145/127601.127622
+- **W. W.-M. Dai, R. Kong, M. Sato**, "Routability of a rubber-band sketch", *DAC 1991*,
+  pp. 45–48. https://doi.org/10.1145/127601.127623 — Spoke creation; routable iff ERBS exists.
+- **D. Staepelaere, J. Jue, T. Dayan, W. W.-M. Dai**, "SURF: rubber-band routing system for
+  multichip modules", *IEEE Design & Test* 10(4), 1993. https://doi.org/10.1109/54.245960
+- **T. Dayan, W. W.-M. Dai**, "Force-driven constrained wiring optimization", UCSC-CRL-91-40.
+  https://tr.soe.ucsc.edu/research/technical-reports/UCSC-CRL-91-40 — spring model for vias / Steiner points.
+- **D. Staepelaere**, "Geometric Transformations for a Rubber-band Sketch", MS thesis
+  UCSC-CRL-92-39. https://tr.soe.ucsc.edu/sites/default/files/technical-reports/UCSC-CRL-92-39.pdf
+  — free PDF; ERBS → rectilinear/octilinear by plane sweep.
+- **T. Dayan, W. W.-M. Dai**, "Layer Assignment for Rubber Band Routing", UCSC-CRL-93-04.
+  https://tr.soe.ucsc.edu/research/technical-reports/UCSC-CRL-93-04 — sections, steepest descent, detour cost.
+- ★ **T. Dayan**, "Rubber-band Based Topological Router", PhD thesis, UC Santa Cruz 1997,
+  ProQuest 9738147. https://www.proquest.com/openview/eed28af8ffaedc3e6806d96f63529658/1 —
+  the most complete description; regions, region splitting, net ordering. No free PDF.
+
+## C. Curvilinear routing (closest to TopoR geometry)
+
+- ★ **T. Hama, H. Etoh**, "Curvilinear detailed routing algorithm and its extension to
+  wire-spreading and wire-fattening", *ASP-DAC 1998*.
+  https://www.cecs.uci.edu/~papers/compendium94-03/papers/1998/aspdac98/pdffiles/06c_3.pdf —
+  free PDF; lazy fan-shaped forbidden regions on a CDT + funnel; spreading/fattening.
+- **T. Kohira, A. Takahashi**, "An any-angle routing method using quasi-Newton method",
+  *ASP-DAC 2012*. https://ieeexplore.ieee.org/document/6164935/ — continuous post-topology polishing incl. length matching.
+
+## D. TopoR (Eremex)
+
+- ★ **O. B. Polubasov**, «Трассировка в САПР TopoR – взгляд изнутри», *Электроника НТБ*
+  2010 №6. https://www.electronics.ru/journal/article/112 — most detailed public algorithm
+  description (initial routing, cost, rip-up, layer separation, Pareto variants).
+- **S. Yu. Luzin, O. B. Polubasov**, «Топологическая трассировка: реальность или миф?»,
+  *Chip News* 2002 №5. http://chipnews.ru/html.cgi/arhiv/02_05/9.htm — definitions; metrization
+  as the main difficulty; "quasi-triangulation".
+- **S. Yu. Luzin, S. Popov, Yu. Popov**, «Гибкая топологическая трассировка в произвольных
+  направлениях», *Электроника НТБ* 2013 №1. https://www.electronics.ru/journal/article/3556 —
+  conflicts, parallel length matching, BGA escape.
+- **EDN**, "Speed and improve PCB routing", 2013. https://www.edn.com/speed-and-improve-pcb-routing/
+  — flexible routing, Steiner 120° rule, vendor benchmark claims.
+- Wikipedia: https://en.wikipedia.org/wiki/TopoR
+- Books (not seen, UNVERIFIED contents): Luzin, Lyachek, Petrosyan, Polubasov, *Models and
+  Algorithms for Automated Design of Electronic and Computer Equipment* (BHV-Petersburg 2010,
+  ISBN 978-5-9775-0576-5); Luzin, Lyachek, Polubasov, *Автоматизация проектирования печатных
+  плат. Система топологической трассировки TopoR* (SPbGETU LETI 2005).
+- No patents found for TopoR's method (Rospatent not searched directly).
+
+## E. Shortest paths (computational geometry)
+
+- **D. T. Lee, F. P. Preparata**, *Networks* 14(3), 1984. https://doi.org/10.1002/net.3230140304 — funnel algorithm.
+- ★ **J. Hershberger, J. Snoeyink**, "Computing minimum length paths of a given homotopy
+  class", *CGTA* 4(2), 1994. https://doi.org/10.1016/0925-7721(94)90010-8
+- **A. Efrat, S. Kobourov, A. Lubiw**, "Computing homotopic shortest paths efficiently",
+  *CGTA* 35(3), 2006. https://arxiv.org/abs/cs/0204050
+- **S. Bespamyatnikh**, "Computing homotopic shortest paths in the plane", *J. Algorithms* 49(2), 2003.
+- **S. Cabello, Y. Liu, A. Mantler, J. Snoeyink**, "Testing homotopy for paths in the plane", *DCG* 31(1), 2004.
+- **D. Z. Chen, H. Wang**, "Computing shortest paths amid pseudodisks", *SODA 2011*.
+- **V. Polishchuk, J. Mitchell**, "Thick non-crossing paths and minimum-cost flows in polygonal domains", *SoCG 2007*. https://doi.org/10.1145/1247069.1247079
+- **J. Erickson**, lecture notes. https://jeffe.cs.illinois.edu/teaching/comptop/2023/notes/05-shortest-homotopic.html
+- **M. Kallmann**, "Dynamic and robust local clearance triangulations", *ACM TOG* 2014. https://mkallmann.github.io/papers/14-tog-lct.pdf
+
+## F. Via minimisation / layer assignment
+
+- **C.-P. Hsu**, "Minimum-via topological routing", *IEEE TCAD* CAD-2(4), 1983.
+- **M. Marek-Sadowska**, *IEEE TCAD* CAD-3(3), 1984. https://doi.org/10.1109/TCAD.1984.1270074
+- **M. Stallmann, T. Hughes, W. Liu**, "Unconstrained via minimization for topological multilayer routing", *IEEE TCAD* 9(9), 1990. https://doi.org/10.1109/43.59073
+- **N. Naclerio, S. Masuda, K. Nakajima**, "The via minimization problem is NP-complete". https://ieeexplore.ieee.org/document/42135/
+- **R. Y. Pinter**, "Optimal layer assignment for interconnect", ISCAS 1982.
+- **F. Liers, G. Pardella**, simple planar max-cut. http://e-archive.informatik.uni-koeln.de/630/
+
+## G. Rip-up and negotiation
+
+- **L. McMurchie, C. Ebeling**, "PathFinder: a negotiation-based performance-driven router for FPGAs", *FPGA 1995*.
+- **A. Haas**, "Whole-Route Planning of a Memory Bus Between Two BGAs…", arXiv 2610.35601 (2026). https://arxiv.org/html/2610.35601 — CP-SAT crossing/layer model; negotiated congestion prices.
+
+## H. Any-angle packaging (RDL) routing
+
+- **Chung, Chuang, Chang**, "Any-Angle Routing for Redistribution Layers in 2.5D IC Packages", *DAC 2023*. https://doi.org/10.1109/DAC56929.2023.10247899
+- **Chuang et al.**, "RDL routing with dynamic via insertion under irregular via structures", *DAC 2024*. https://doi.org/10.1145/3649329.3657371
+- "RDL routing for InFO WLCSP", *ICCAD 2016*. https://doi.org/10.1145/2966986.2967070 (authors UNVERIFIED)
+
+## I. Curves
+
+- **K. M. Bolton**, "Biarc curves", *Computer-Aided Design* 7(2), 1975.
+- **D. J. Walton, D. S. Meek**, arc-spline approximation of Bézier spirals, *J. Comput. Appl. Math.* 1996.
+- Tutorial: https://raw.org/math/computer-graphics/approximating-bezier-curves-with-circular-arcs/
+
+## J. Open-source implementations
+
+- ★ **Topola** (Rust, MIT/Apache-2.0): https://codeberg.org/mikolaj/topola , https://topola.dev/
+- **gEDA PCB toporouter** (C, `src/toporouter.c`): https://github.com/bert/pcb/wiki/Autorouters:-gEDA-pcb-Toporouter
+- **Salewski Ruby-PCB-Router**: https://github.com/StefanSalewski/Ruby-PCB-Router , http://ssalewski.de/Router.html.en ; Nim port RBR: https://github.com/StefanSalewski/RBR
+- **Woody `pcb_topo`**: https://github.com/jeffmhopkins/Woody/issues/47
+- **KiCadRoutingTools**: https://github.com/drandyhaas/KiCadRoutingTools
+- **Freerouting** (shape-based, not topological): https://github.com/freerouting/freerouting
+- **kicad-round-tracks** (corner rounding): https://github.com/mitxela/kicad-round-tracks
+- Altium Situs (commercial, topological global + geometric detail): https://www.altium.com/documentation/altium-designer/pcb/routing/situs-topological-autorouter
+
+## Reading order for implementers
+
+1. Hama & Etoh 1998 (free; geometry stage almost directly implementable).
+2. Erickson's notes (funnel, homotopy) → Hershberger & Snoeyink.
+3. Staepelaere 1992 thesis + UCSC-CRL-93-04 (free; SURF internals).
+4. Polubasov 2010 (TopoR's search and optimisation strategy).
+5. Topola and gEDA toporouter source code.
+6. Dayan 1997 thesis (purchase) when implementing regions and net ordering.

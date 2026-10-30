@@ -1,0 +1,10 @@
+target/
+plugin/wheels/
+__pycache__/
+*.pyc
+.venv/
+scratch/
+*.kicad_pcb-bak
+docs/.ruff_cache/
+.pytest_cache/
+*.egg-info/

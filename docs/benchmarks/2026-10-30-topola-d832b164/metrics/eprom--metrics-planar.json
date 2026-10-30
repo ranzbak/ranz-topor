@@ -1,0 +1,99 @@
+{
+ "board": "eprom-to-kernal",
+ "layers": 2,
+ "footprints": 5,
+ "pads": 56,
+ "nets_total": 26,
+ "rf_nets": [],
+ "zone_nets": [],
+ "orig_all": {
+  "segments": 80,
+  "arcs": 0,
+  "vias": 0,
+  "track_mm": 189.93,
+  "arc_mm": 0.0
+ },
+ "orig_drc": {
+  "exit": 0,
+  "seconds": 1.9,
+  "violations": {
+   "copper_edge_clearance": 21,
+   "courtyards_overlap": 1,
+   "pth_inside_courtyard": 25,
+   "silk_over_copper": 42,
+   "lib_footprint_mismatch": 2,
+   "lib_footprint_issues": 1,
+   "track_dangling": 1
+  },
+  "total": 93,
+  "unconnected": 0,
+  "stderr": ""
+ },
+ "kept": {
+  "locked_tracks": 0,
+  "rf_tracks": 0,
+  "free_vias": 0,
+  "locked_vias": 0,
+  "rf_vias": 0
+ },
+ "removed": {
+  "tracks": 80,
+  "arcs": 0,
+  "vias": 0
+ },
+ "kept_nets": [],
+ "nets_to_route": 26,
+ "orig_routed_nets": {
+  "segments": 80,
+  "arcs": 0,
+  "vias": 0,
+  "track_mm": 189.93,
+  "arc_mm": 0.0
+ },
+ "dsn_export_ok": true,
+ "dsn_bytes": 10113,
+ "cmdgen": "layers=['F.Cu', 'B.Cu'] pins=56 mode=planar width=250.0",
+ "mode": "planar",
+ "width": "250",
+ "topola": {
+  "exit": 0,
+  "seconds": 0.1,
+  "stderr": "",
+  "stdout": "",
+  "timeout": false
+ },
+ "ses_bytes": 59719,
+ "ses_import_ok": true,
+ "routed_all": {
+  "segments": 1460,
+  "arcs": 0,
+  "vias": 0,
+  "track_mm": 192.17,
+  "arc_mm": 0.0
+ },
+ "routed_routed_nets": {
+  "segments": 1460,
+  "arcs": 0,
+  "vias": 0,
+  "track_mm": 192.17,
+  "arc_mm": 0.0
+ },
+ "routed_short_segments_lt_50um": 1400,
+ "routed_drc": {
+  "exit": 0,
+  "seconds": 2.1,
+  "violations": {
+   "track_width": 16,
+   "copper_edge_clearance": 199,
+   "courtyards_overlap": 1,
+   "pth_inside_courtyard": 25,
+   "silk_over_copper": 42,
+   "lib_footprint_issues": 1,
+   "lib_footprint_mismatch": 2
+  },
+  "total": 286,
+  "unconnected": 0,
+  "stderr": ""
+ },
+ "routed_nets_without_copper": []
+}

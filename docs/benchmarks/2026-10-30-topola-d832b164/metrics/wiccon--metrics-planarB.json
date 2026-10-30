@@ -1,0 +1,69 @@
+{
+ "board": "2023",
+ "layers": 2,
+ "footprints": 45,
+ "pads": 124,
+ "nets_total": 38,
+ "rf_nets": [],
+ "zone_nets": [
+  "GND"
+ ],
+ "orig_all": {
+  "segments": 381,
+  "arcs": 0,
+  "vias": 36,
+  "track_mm": 1831.97,
+  "arc_mm": 0.0
+ },
+ "orig_drc": {
+  "exit": 0,
+  "seconds": 3.9,
+  "violations": {
+   "starved_thermal": 4,
+   "padstack": 2,
+   "text_thickness": 6,
+   "text_height": 10,
+   "lib_footprint_mismatch": 17,
+   "lib_footprint_issues": 7,
+   "silk_edge_clearance": 2
+  },
+  "total": 48,
+  "unconnected": 0,
+  "stderr": ""
+ },
+ "kept": {
+  "locked_tracks": 0,
+  "rf_tracks": 0,
+  "free_vias": 11,
+  "locked_vias": 0,
+  "rf_vias": 0
+ },
+ "removed": {
+  "tracks": 381,
+  "arcs": 0,
+  "vias": 25
+ },
+ "kept_nets": [],
+ "nets_to_route": 38,
+ "orig_routed_nets": {
+  "segments": 381,
+  "arcs": 0,
+  "vias": 36,
+  "track_mm": 1831.97,
+  "arc_mm": 0.0
+ },
+ "dsn_export_ok": true,
+ "dsn_bytes": 67163,
+ "dsn_via_type_stripped": 11,
+ "cmdgen": "layers=['F.Cu', 'B.Cu'] principal=B.Cu pins=102 mode=planar width=250.0",
+ "mode": "planar",
+ "width": "250",
+ "topola": {
+  "exit": -15,
+  "seconds": 1104.6,
+  "stderr": "e (timeout or failure) -> next permutation\ntopola-eval: ratline 21 routed\ntopola-eval: ratline 22 routed\ntopola-eval: ratline 23 of 57 failed: NotFound\ntopola-eval: reconfigure (timeout or failure) -> next permutation\ntopola-eval: ratline 20 routed\ntopola-eval: ratline 21 routed\ntopola-eval: ratline 22 routed\ntopola-eval: ratline 23 of 57 failed: NotFound\ntopola-eval: reconfigure (timeout or failure) -> next permutation\ntopola-eval: ratline 20 routed\ntopola-eval: ratline 21 routed\ntopola-eval: ratline 22 routed\ntopola-eval: ratline 23 of 57 failed: NotFound\ntopola-eval: reconfigure (timeout or failure) -> next permutation\ntopola-eval: ratline 21 routed\ntopola-eval: ratline 22 routed\ntopola-eval: ratline 23 routed\ntopola-eval: ratline 24 routed\ntopola-eval: ratline 25 routed\ntopola-eval: ratline 26 of 57 failed: NotFound\ntopola-eval: reconfigure (timeout or failure) -> next permutation\ntopola-eval: ratline 21 routed\ntopola-eval: ratline 22 routed\ntopola-eval: ratline 23 routed\ntopola-eval: ratline 24 routed\ntopola-eval: ratline 25 routed\ntopola-eval: ratline 26 of 57 failed: NotFound\ntopola-eval: reconfigure (timeout or failure) -> next permutation\ntopola-eval: ratline 21 routed\ntopola-eval: ratline 22 routed\ntopola-eval: ratline 23 of 57 failed: NotFound\ntopola-eval: reconfigure (timeout or failure) -> next permutation\ntopola-eval: ratline 21 routed\ntopola-eval: ratline 22 routed\ntopola-eval: ratline 23 routed\ntopola-eval: ratline 24 routed\ntopola-eval: ratline 25 routed\ntopola-eval: ratline 26 of 57 failed: NotFound\ntopola-eval: reconfigure (timeout or failure) -> next permutation\ntopola-eval: ratline 20 routed\ntopola-eval: ratline 21 routed\ntopola-eval: ratline 22 routed\ntopola-eval: ratline 23 of 57 failed: NotFound\ntopola-eval: reconfigure (timeout or failure) -> next permutation\ntopola-eval: ratline 20 routed\ntopola-eval: ratline 21 routed\ntopola-eval: ratline 22 routed\ntopola-eval: ratline 23 routed\ntopola-eval: ratline 24 routed\ntopola-eval: ratline 25 of 57 failed: NotFound\ntopola-eval: reconfigure (timeout or failure) -> next permutation\ntopola-eval: ratline 21 routed\ntopola-eval: ratline 22 routed\ntopola-eval: ratline 23 of 57 failed: NotFound\ntopola-eval: reconfigure (timeout or failure) -> next permutation\ntopola-eval: ratline 20 routed\ntopola-eval: ratline 21 routed\ntopola-eval: ratline 22 routed\ntopola-eval: ratline 23 of 57 failed: NotFound\ntopola-eval: reconfigure (timeout or failure) -> next permutation\ntopola-eval: ratline 21 routed\ntopola-eval: ratline 22 routed\ntopola-eval: ratline 23 routed\ntopola-eval: ratline 24 routed\ntopola-eval: ratline 25 of 57 failed: NotFound\ntopola-eval: reconfigure (timeout or failure) -> next permutation\ntopola-eval: ratline 20 routed\ntopola-eval: ratline 21 routed\ntopola-eval: ratline 22 routed\ntopola-eval: ratline 23 of 57 failed: NotFound\ntopola-eval: reconfigure (timeout or failure) -> next permutation\ntopola-eval: ratline 21 routed\ntopola-eval: ratline 22 routed\ntopola-eval: ratline 23 routed\n",
+  "stdout": "",
+  "timeout": false
+ },
+ "ses_bytes": 0
+}
