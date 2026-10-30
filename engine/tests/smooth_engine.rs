@@ -402,3 +402,46 @@ fn zero_slack_false_for_dirty_and_taut_wires() {
     assert!(!r.wires[0].zero_slack && r.wires_zero_slack == 0);
     assert!(!r.wires[0].reason.starts_with("zero slack"));
 }
+
+fn squeezed(extra_pads: &[String], extra_kept: &[String]) -> BoardModel {
+    let y = 0.4 + 0.125 + 0.2;
+    let mut pads = vec![
+        pad("1", 5, 0.0, 0.0, 400_000),
+        pad("2", 5, 10.0, 0.0, 400_000),
+        pad("a", 2, 5.0, y, 800_000),
+        pad("b", 2, 5.0, -y, 800_000),
+    ];
+    pads.extend(extra_pads.iter().cloned());
+    let mut kept = vec![seg("h", 5, (0.0, 0.0), (10.0, 0.0))];
+    kept.extend(extra_kept.iter().cloned());
+    model(&pads, &kept, "")
+}
+
+#[test]
+fn timeout_fallback_is_not_zero_slack() {
+    let r = smooth(&squeezed(&[], &[]), &opts(r#", "wall_clock_s": 0.0"#));
+    let w = &r.wires[0];
+    assert_eq!(w.status, "fallback");
+    assert_eq!(w.reason, "timeout", "{w:?}");
+    assert!(!w.zero_slack && w.hand_slack_nm.is_none());
+    assert_eq!(r.wires_zero_slack, 0);
+}
+
+#[test]
+fn shared_item_fallback_is_not_zero_slack() {
+    // Branch T-joins the squeezed hand segment in its interior: wires share kept item "h".
+    let m = squeezed(
+        &[pad("3", 5, 3.0, 3.0, 400_000)],
+        &[seg("br", 5, (3.0, 3.0), (3.0, 0.0))],
+    );
+    let r = smooth(&m, &opts(""));
+    let shared: Vec<_> = r
+        .wires
+        .iter()
+        .filter(|w| w.reason.starts_with("shares item"))
+        .collect();
+    assert!(!shared.is_empty(), "{:?}", r.wires);
+    for w in shared {
+        assert!(!w.zero_slack && w.hand_slack_nm.is_none(), "{w:?}");
+    }
+}

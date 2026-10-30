@@ -410,46 +410,68 @@ pub fn smooth(model: &BoardModel, opts: &Options) -> SmoothResult {
         }
     }
 
-    // Zero-slack classification of the fallback wires: the hand copper (its kept items, still in
-    // the model, same-net so exempt from themselves) passes at the design clearance but not at ε.
-    // Two Checkers built once; one grid query per hand item.
+    // Zero-slack classification of the fallback wires. Only the two eps-binding failure classes
+    // qualify; the hand copper is judged against the post-smooth board (kept minus replaced, plus
+    // the emitted items), so a neighbour the smoother moved away no longer excuses it. The hand
+    // items are same-net to themselves, hence exempt from each other. Two Checkers built once.
     let mut zero_slack: Vec<Option<i64>> = vec![None; n];
-    if fail.iter().any(Option::is_some) {
+    let eligible = |r: &str| r.starts_with("infeasible:") || r.starts_with("inside obstacle:");
+    if (0..n).any(|i| fail[i].as_deref().is_some_and(eligible)) {
         let eps = opts.margin_nm;
+        let mut post = model.clone();
+        let mut emitted: Vec<Item> = Vec::new();
+        let mut gone: HashSet<&str> = HashSet::new();
+        for i in 0..n {
+            if fail[i].is_none() {
+                emitted.extend(emit[i].iter().cloned().map(Item::Track));
+                gone.extend(wires[i].kept_uuids.iter().map(String::as_str));
+            }
+        }
+        post.kept.retain(|k| !gone.contains(k.uuid.as_str()));
         let c0 = Checker::new(
-            model,
+            &post,
             &Options {
                 margin_nm: 0,
                 ..opts.clone()
             },
         );
-        let ce = Checker::new(model, opts);
+        let ce = Checker::new(&post, opts);
         let by_uuid: HashMap<&str, &crate::model::KeptItem> =
             model.kept.iter().map(|k| (k.uuid.as_str(), k)).collect();
+        let base = emitted.len();
         for (i, w) in wires.iter().enumerate() {
-            if fail[i].is_none() {
+            if !fail[i].as_deref().is_some_and(eligible) {
                 continue;
             }
-            let hand: Vec<Item> = w
-                .kept_uuids
-                .iter()
-                .filter_map(|u| by_uuid.get(u.as_str()))
-                .map(|k| {
-                    Item::Track(TrackItem {
-                        net: k.net,
-                        layer: k.layer,
-                        width: k.width,
-                        prim: flip_track(k.prim),
-                        group: None,
-                    })
-                })
-                .collect();
-            if hand.is_empty() || !c0.check_items(&hand).violations.is_empty() {
+            let mut probe = emitted.clone();
+            probe.extend(
+                w.kept_uuids
+                    .iter()
+                    .filter_map(|u| by_uuid.get(u.as_str()))
+                    .map(|k| {
+                        Item::Track(TrackItem {
+                            net: k.net,
+                            layer: k.layer,
+                            width: k.width,
+                            prim: flip_track(k.prim),
+                            group: None,
+                        })
+                    }),
+            );
+            if probe.len() == base {
                 continue;
             }
-            let slack = ce
-                .check_items(&hand)
-                .violations
+            let hand_viol = |c: &Checker| -> Vec<crate::check::Violation> {
+                c.check_items(&probe)
+                    .violations
+                    .into_iter()
+                    .filter(|v| v.item >= base)
+                    .collect()
+            };
+            if !hand_viol(&c0).is_empty() {
+                continue;
+            }
+            let slack = hand_viol(&ce)
                 .iter()
                 .map(|v| v.gap - (v.required - eps))
                 .min();
