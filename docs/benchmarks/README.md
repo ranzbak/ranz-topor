@@ -42,3 +42,10 @@ copies (verify with sha256 before/after).
 | Run | Router | Summary |
 |---|---|---|
 | [2026-10-30-topola-d832b164](2026-10-30-topola-d832b164/README.md) | Topola `develop` d832b164 | baseline: only the simple board routes; see [43](../design/43-topola-assessment.md) |
+
+## Progress PNGs
+
+`progress/<YYYY-MM-DD>-m1-<TaskId>.png` — one image per M1 task that changes the eprom-to-kernal
+routing outcome (hand left, topor right, zone fills removed). Produced by
+`.venv/bin/python -m harness.progress --task <TaskId>`; the caption carries nets/wires converted,
+new DRC routing violations and total copper length vs the hand 189.9 mm.

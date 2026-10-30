@@ -23,7 +23,7 @@ from harness.rip import record_widths, rip_tracks
 from harness.rules import resolve_rules
 
 SUMMARY_MAX = 20
-Router = Callable[[dict, dict], list[dict]]
+Router = Callable[[dict, dict], "list[dict] | dict"]
 
 
 def _source_pcb(board: str, pcb_override: Path | None) -> Path:
@@ -40,6 +40,28 @@ def _source_pcb(board: str, pcb_override: Path | None) -> Path:
 
 ROOT = Path(__file__).resolve().parents[1]
 
+def _smooth_summary(report: dict | None) -> dict | None:
+    if not report:
+        return None
+    nets = report.get("nets") or []
+    wires = report.get("wires") or []
+
+    def mm(key):
+        v = report.get(key)
+        return None if v is None else round(v / 1e6, 3)
+
+    return {
+        "nets_taut": sum(1 for n in nets if n.get("status") == "taut"),
+        "nets": len(nets),
+        "wires_taut": sum(1 for w in wires if w.get("status") == "taut"),
+        "wires": len(wires),
+        "length_mm": mm("total_length_nm"),
+        "hand_mm": mm("hand_length_nm"),
+        "iterations": report.get("iterations"),
+        "timed_out": report.get("timed_out"),
+    }
+
+
 def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path) -> str:
     o, r, rm = result["orig_all"], result["routed_all"], result["removed"]
     wm = result["width_match"]
@@ -55,6 +77,11 @@ def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path) -> s
         f"  runtime {result['runtime_s']}s (router {result['router_s']}s, "
         f"threads={result['threads']})",
     ]
+    sm = result.get("smooth")
+    if sm:
+        head.append(f"  smooth: taut {sm['nets_taut']}/{sm['nets']} nets, "
+                    f"{sm['wires_taut']}/{sm['wires']} wires, {sm['length_mm']} mm "
+                    f"(hand {sm['hand_mm']}), iters {sm['iterations']}")
     drc = summarise(board, routed_drc, base_drc,
                     extra={"width_match": f"{wm['matched']}/{wm['compared']}"})
     lines = head + drc.splitlines() + [f"  outputs: {out_dir}"]
@@ -102,8 +129,15 @@ def run_bench(
     write_model_json(model, out_dir / f"{board}--model.json")
 
     t_route = time.monotonic()
-    items = router(model, {**options, "threads": threads}) if router is not None else []
+    routed = router(model, {**options, "threads": threads}) if router is not None else []
     router_s = time.monotonic() - t_route
+    if isinstance(routed, dict):
+        items = list(routed.get("items") or [])
+        remove_uuids = list(routed.get("remove_uuids") or [])
+        router_report = routed.get("report")
+    else:
+        items, remove_uuids, router_report = list(routed), [], None
+    replaced = writer.remove_items(b, remove_uuids)
     writer.write_items(b, items)
     # Save over the working copy so the copied .kicad_pro/.kicad_dru still apply to the DRC run.
     writer.save(b, cp.pcb)
@@ -133,6 +167,9 @@ def run_bench(
         "routed_all": routed_all,
         "routed_drc": classify(routed_drc, base_drc),
         "routed_items": len(items),
+        "replaced": replaced,
+        "router_report": router_report,
+        "smooth": _smooth_summary(router_report),
         "rip": rip,
         "threads": threads,
         "runtime_s": round(time.monotonic() - t_start, 3),
@@ -150,11 +187,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("board", help=f"one of {sorted(BENCH_BOARDS)}")
     ap.add_argument("out_dir", type=Path)
     ap.add_argument("--rip", choices=["all", "none", "scoped"], default="all")
+    ap.add_argument("--router", choices=["none", "smoother"], default="none")
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--pcb", type=Path, default=None,
                     help="use this board instead of BENCH_BOARDS[board] (synthetic fixtures)")
     args = ap.parse_args(argv)
-    run_bench(args.board, args.out_dir, rip=args.rip, threads=args.threads, pcb_override=args.pcb)
+    router = None
+    if args.router == "smoother":
+        from harness.smoother import smooth_router
+        router = smooth_router
+    run_bench(args.board, args.out_dir, router=router, rip=args.rip, threads=args.threads,
+              pcb_override=args.pcb)
     return 0
 
 
