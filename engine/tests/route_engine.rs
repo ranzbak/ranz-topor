@@ -397,3 +397,19 @@ fn partial_on_emits_two_checked_stubs() {
     let p = r.connections[0].blocking.expect("blocking point");
     assert!((p[1].abs() - 24_000_000).abs() <= 1_000_000, "{p:?}");
 }
+
+/// Fix C: a connection that stays unroutable stops the negotiation after a few unchanged
+/// iterations instead of running to the iteration cap.
+#[test]
+fn route_stuck_connection_stops_early() {
+    let m = wall_model();
+    let r = route(&m, &opts());
+    assert_eq!(r.failed, 1, "{:?}", r.connections);
+    assert!(r.iterations <= 5, "iterations {}", r.iterations);
+    assert!(!r.converged);
+    assert!(
+        r.warnings.iter().any(|w| w.starts_with("stuck after")),
+        "{:?}",
+        r.warnings
+    );
+}

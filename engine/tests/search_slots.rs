@@ -338,6 +338,40 @@ fn planar_invariant_holds_for_many_connections() {
     assert!(routed >= 3, "routed {routed}");
 }
 
+/// Fix A: a bend around a pad pinched against the outline is inadmissible: the pad (r 0.5,
+/// wrap radius 0.83) sits 1.0 mm from the right edge, the wire band needs 0.63 mm beside it.
+#[test]
+fn search_rejects_bend_pinched_against_wall() {
+    let mut b = build(
+        &[
+            ("a", 1, 49.0, 10.0),
+            ("p", 9, 49.0, 20.0),
+            ("b", 1, 49.0, 30.0),
+        ],
+        "",
+    );
+    let (c, s, t) = conn(&b, 0, 1, "a", "b");
+    let hist = vec![0.0; b.g.edges.len()];
+    let o = search(&b.g, b.obs.layer(0), &c, s, t, &params(&hist));
+    match o {
+        SearchOutcome::Found(p) => {
+            // the inner class: no crossed edge reaches the right-hand outline corners
+            for &(e, _) in &p.crossings {
+                let ge = &b.g.edges[e];
+                for v in [ge.a, ge.b] {
+                    assert!(
+                        b.g.verts[v].at.x < 49.9 * MM,
+                        "path squeezes between the pad and the right edge"
+                    );
+                }
+            }
+        }
+        SearchOutcome::Blocked { .. } => {}
+        SearchOutcome::Timeout => panic!("timeout"),
+    }
+    b.g.remove_conn(0);
+}
+
 #[test]
 fn search_blocked_by_wall_reports_ghost() {
     let kept = r#""kept": [ { "uuid": "k9", "net": 9, "layer": 0, "width": 250000, "locked": true,

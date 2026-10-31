@@ -12,7 +12,8 @@ use crate::graph::RouteGraph;
 use crate::model::Options;
 use crate::obstacle::LayerObstacles;
 use crate::search::{
-    default_expansion_cap, search, tier_weight, SearchOutcome, SearchParams, SlotPath,
+    default_expansion_cap, ghost, search, strand_blockers, tier_weight, SearchOutcome,
+    SearchParams, SlotPath,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,6 +23,10 @@ pub const HIST_FAIL: f64 = 1.0;
 pub const HIST_BLOCK: f64 = 0.5;
 pub const HIST_OVERUSE: f64 = 0.5;
 pub const PRESENT_OVERUSE: f64 = crate::search::PRESENT_OVERUSE;
+/// A found path longer than this factor times its ghost path counts as an absurd detour (fix B).
+pub const DETOUR_FACTOR: f64 = 2.0;
+/// Most blockers one connection rips per iteration (keeps the churn bounded).
+pub const MAX_RIP: usize = 3;
 
 /// Clinches found in a routing: `(conn, edge)` pairs.
 #[derive(Clone, Debug, Default, Serialize)]
@@ -45,6 +50,9 @@ pub struct IterOutcome {
     pub blocked: BTreeMap<usize, BlockInfo>,
     pub overuse_edges: usize,
     pub timed_out: bool,
+    /// Connections ripped up this iteration because their strands block another connection's
+    /// ghost path (fix B); they belong to the next active set.
+    pub ripped: Vec<usize>,
 }
 
 type Best = (usize, f64, Vec<Option<SlotPath>>);
@@ -55,6 +63,7 @@ pub struct Negotiator {
     /// Per-connection failure bumps (index like `conns`).
     pub bumps: Vec<u32>,
     pub iteration: u32,
+    pending_rip: BTreeSet<usize>,
     cur: Vec<Option<SlotPath>>,
     best: Option<Best>,
 }
@@ -71,6 +80,7 @@ impl Negotiator {
             history: vec![0.0; edges],
             bumps: vec![0; conns],
             iteration: 0,
+            pending_rip: BTreeSet::new(),
             cur: vec![None; conns],
             best: None,
         }
@@ -98,6 +108,15 @@ impl Negotiator {
         let cap = default_expansion_cap(g);
         let mut blocked = BTreeMap::new();
         let mut timed_out = false;
+        // Rip-up of the previous iteration's blockers: they leave the graph before anything is
+        // searched, so the connection they blocked (bumped, hence first) can pass.
+        for r in std::mem::take(&mut self.pending_rip) {
+            if is_active[r] {
+                g.remove_conn(conns[r].id);
+                self.cur[r] = None;
+            }
+        }
+        let mut ripped: BTreeSet<usize> = BTreeSet::new();
         for i in order(conns, &self.bumps) {
             if !is_active[i] {
                 continue;
@@ -119,6 +138,19 @@ impl Negotiator {
             };
             match search(g, obs, c, s, t, &params) {
                 SearchOutcome::Found(p) => {
+                    // Absurd detour: rip the strands that block the ghost path.
+                    let straight = (conns[i].from.at - conns[i].to.at).len();
+                    if p.est_len > DETOUR_FACTOR * straight && !p.crossings.is_empty() {
+                        if let Some((gp, None, _)) = ghost(g, obs, c, s, t, &params) {
+                            if p.est_len > DETOUR_FACTOR * gp.est_len {
+                                let b = strand_blockers(g, &gp, s, t);
+                                if self.rip(g, i, &b, true) {
+                                    ripped.insert(i);
+                                    ripped.extend(b.iter().copied().filter(|&x| x != i));
+                                }
+                            }
+                        }
+                    }
                     g.insert_path(
                         c.id,
                         s,
@@ -135,6 +167,12 @@ impl Negotiator {
                     blocked_edge,
                     last_reached,
                 } => {
+                    if let (Some(gp), None) = (&ghost, blocked_edge) {
+                        let b = strand_blockers(g, gp, s, t);
+                        if self.rip(g, i, &b, false) {
+                            ripped.extend(b.iter().copied().filter(|&x| x != i));
+                        }
+                    }
                     blocked.insert(
                         i,
                         BlockInfo {
@@ -151,12 +189,33 @@ impl Negotiator {
             }
         }
         let overuse_edges = (0..g.edges.len()).filter(|&e| g.overuse(e) > 0.0).count();
+        self.pending_rip = ripped.clone();
         IterOutcome {
             paths: self.cur.clone(),
             blocked,
             overuse_edges,
             timed_out,
+            ripped: ripped.into_iter().collect(),
         }
+    }
+
+    /// Topological rip-up bookkeeping for connection `i` whose ghost path is blocked by the
+    /// strands of `blockers`: history on the blockers' edges, a bump for `i` when `bump` (a blocked connection is bumped by `penalise_blocked`). `false` (nothing
+    /// done) when there is no blocker or more than [`MAX_RIP`].
+    fn rip(&mut self, g: &RouteGraph, i: usize, blockers: &[usize], bump: bool) -> bool {
+        let b: Vec<usize> = blockers.iter().copied().filter(|&x| x != i).collect();
+        if b.is_empty() || b.len() > MAX_RIP {
+            return false;
+        }
+        for &x in &b {
+            for e in dedup_edges(g.occupancy(x).iter().map(|&(e, _)| e).collect()) {
+                self.history[e] += HIST_BLOCK;
+            }
+        }
+        if bump {
+            self.bumps[i] += 1;
+        }
+        true
     }
 
     /// Relax / self-check failure: history on the connection's edges, bump. The path stays in `g`.

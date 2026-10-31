@@ -213,6 +213,97 @@ impl Cyc {
         Some(if self.fwd[jb] { gap } else { nb - gap })
     }
 
+    /// Like [`Cyc::strands`], with the owning connection of every strand.
+    fn strands_conn(&self, g: &RouteGraph) -> Vec<(i64, i64, usize)> {
+        let mut v = Vec::new();
+        for j in 0..3 {
+            for i in 0..self.n[j] {
+                let partner = g.strand(self.es[j], i, self.f);
+                if let Some(b) = self.pos(partner) {
+                    v.push((self.entry_pos(j, i), b, g.edges[self.es[j]].cross[i].conn));
+                }
+            }
+        }
+        v
+    }
+
+    /// Connections whose strands make [`Cyc::cross_slot`] fail for a chord from `p0` to a new
+    /// port on `e_out` (empty when the chord fits).
+    fn edge_blockers(
+        &self,
+        strands: &[(i64, i64, usize)],
+        p0: i64,
+        e_out: usize,
+        near_v: usize,
+    ) -> Vec<usize> {
+        let Some(jb) = (0..3).find(|&j| self.es[j] == e_out) else {
+            return Vec::new();
+        };
+        let nb = self.n[jb];
+        let rel = |x: i64| (x - p0).rem_euclid(self.total);
+        let b0 = rel(self.epos[jb]);
+        let b1 = b0 + 2 * (nb as i64 - 1);
+        let in_block = |r: i64| nb > 0 && r >= b0 && r <= b1;
+        let near_start = near_v == self.vs[jb];
+        let mut out: Vec<usize> = Vec::new();
+        // (bound, conn): lower bounds `w + 1`, upper bounds `w` on the insertion gap
+        let mut los: Vec<(usize, usize)> = Vec::new();
+        let mut his: Vec<(usize, usize)> = Vec::new();
+        for &(a, b, conn) in strands {
+            let (ra, rb) = (rel(a), rel(b));
+            let (ia, ib) = (in_block(ra), in_block(rb));
+            if ia && ib {
+                continue;
+            }
+            if !ia && !ib {
+                if ra != 0 && rb != 0 && (ra < b0) != (rb < b0) {
+                    out.push(conn);
+                }
+                continue;
+            }
+            let (rj, rq) = if ia { (ra, rb) } else { (rb, ra) };
+            let w = ((rj - b0) / 2) as usize;
+            if rq == 0 {
+                if near_start {
+                    los.push((w + 1, conn));
+                } else {
+                    his.push((w, conn));
+                }
+            } else if rq < b0 {
+                los.push((w + 1, conn));
+            } else {
+                his.push((w, conn));
+            }
+        }
+        let lo = los.iter().map(|x| x.0).max().unwrap_or(0);
+        let hi = his.iter().map(|x| x.0).min().unwrap_or(nb);
+        if lo > hi {
+            out.extend(los.iter().filter(|x| x.0 == lo).map(|x| x.1));
+            out.extend(his.iter().filter(|x| x.0 == hi).map(|x| x.1));
+        }
+        out
+    }
+
+    /// Connections whose strands make [`Cyc::goal_ok`] fail.
+    fn vertex_blockers(&self, strands: &[(i64, i64, usize)], p0: i64, q: usize) -> Vec<usize> {
+        let Some(qp) = self.vertex_pos(q) else {
+            return Vec::new();
+        };
+        let rel = |x: i64| (x - p0).rem_euclid(self.total);
+        let rq = rel(qp);
+        let mut out = Vec::new();
+        for &(a, b, conn) in strands {
+            let (ra, rb) = (rel(a), rel(b));
+            if ra == 0 || rb == 0 || ra == rq || rb == rq {
+                continue;
+            }
+            if (ra < rq) != (rb < rq) {
+                out.push(conn);
+            }
+        }
+        out
+    }
+
     /// May a chord from `p0` end at vertex `q` of this face without crossing a strand?
     fn goal_ok(&self, strands: &[(i64, i64)], p0: i64, q: usize) -> bool {
         let Some(qp) = self.vertex_pos(q) else {
@@ -456,7 +547,7 @@ impl<'a> Search<'a> {
     }
 
     /// First obstacle (along the chord) closer than its required distance: the bend point.
-    fn clearance_bend(&self, a: Vec2, t: Vec2) -> Option<Vec2> {
+    fn clearance_bend(&self, a: Vec2, t: Vec2) -> Option<(Vec2, Option<usize>)> {
         const TOL: f64 = 1.0;
         let chord = Seg { a, b: t };
         let r = t - a;
@@ -472,10 +563,10 @@ impl<'a> Search<'a> {
             },
         };
         let rho = self.g.rho_max() + self.c + 0.5 * self.w + self.eps;
-        let mut best: Option<(f64, Vec2)> = None;
-        let mut offer = |param: f64, p: Vec2| {
-            if best.is_none_or(|(bp, _)| param < bp) {
-                best = Some((param, p));
+        let mut best: Option<(f64, Vec2, Option<usize>)> = None;
+        let mut offer = |param: f64, p: Vec2, v: Option<usize>| {
+            if best.is_none_or(|(bp, _, _)| param < bp) {
+                best = Some((param, p, v));
             }
         };
         for u in self.g.verts_near(bb.grow(rho)) {
@@ -485,7 +576,7 @@ impl<'a> Search<'a> {
             }
             let need = vi.r + vi.clr.max(self.c) + 0.5 * self.w + self.eps;
             if point_seg(vi.at, &chord) < need - TOL {
-                offer((vi.at - a).dot(r) / l2, vi.at);
+                offer((vi.at - a).dot(r) / l2, vi.at, Some(u));
             }
         }
         let wr = self
@@ -524,14 +615,139 @@ impl<'a> Search<'a> {
             if d_apex <= TOL || d >= need - TOL {
                 continue;
             }
-            offer((bend - a).dot(r) / l2, bend);
+            offer((bend - a).dot(r) / l2, bend, None);
         }
-        best.map(|(_, p)| p)
+        best.map(|(_, p, v)| (p, v))
+    }
+
+    /// Side the wire passes vertex `u`: the middle direction of the fan of portal edges incident
+    /// to `u` that the wire crossed in a row (the chain ending at node `s`, then `via`).
+    fn side_hint(&self, u: usize, nodes: &[Node], s: usize, via: Option<usize>) -> Option<Vec2> {
+        let dir = |pe: usize| -> Option<Vec2> {
+            let ge = &self.g.edges[pe];
+            let far = if ge.a == u {
+                ge.b
+            } else if ge.b == u {
+                ge.a
+            } else {
+                return None;
+            };
+            let d = self.g.verts[far].at - self.g.verts[u].at;
+            (d.len() > 1.0).then(|| d * (1.0 / d.len()))
+        };
+        let mut fan: Vec<Vec2> = Vec::new();
+        let mut id = s;
+        while id != 0 {
+            match dir(nodes[id].edge) {
+                Some(d) => fan.push(d),
+                None => break,
+            }
+            id = nodes[id].parent;
+        }
+        fan.reverse();
+        if let Some(d) = via.and_then(dir) {
+            fan.push(d);
+        }
+        let first = *fan.first()?;
+        let total: f64 = fan
+            .windows(2)
+            .map(|w| w[0].cross(w[1]).atan2(w[0].dot(w[1])))
+            .sum();
+        let (sn, cs) = (0.5 * total).sin_cos();
+        Some(Vec2 {
+            x: first.x * cs - first.y * sn,
+            y: first.x * sn + first.y * cs,
+        })
+    }
+
+    /// Fix A: the string bending at vertex `u` (coming from `a`, leaving towards `t`) wraps the
+    /// pad at its bend radius `rho_u`; the arc on the outer side of the turn (sampled at its two
+    /// tangent points, its middle and the quarter points) must keep its band from every foreign
+    /// wall and vertex. The chord tests alone never see a pad pinched against a wall (note
+    /// `m2-route-diagnosis` §4 A). `side` is the unit direction from `u` to the side the wire passes (decided by the
+    /// topology: the chord's side, or the fan of crossed portals). O(q) grid queries.
+    fn bend_ok(&self, a: Vec2, u: usize, t: Vec2, side: Option<Vec2>) -> bool {
+        let side = side.filter(|h| h.len() > 1e-9).map(|h| h * (1.0 / h.len()));
+        const TOL: f64 = 1.0;
+        let vi = &self.g.verts[u];
+        if vi.owner.is_none() || vi.nets.contains(&self.net) {
+            return true;
+        }
+        let (d1, d2) = (vi.at - a, t - vi.at);
+        if d1.len() < 1.0 || d2.len() < 1.0 {
+            return true;
+        }
+        let (d1, d2) = (d1 * (1.0 / d1.len()), d2 * (1.0 / d2.len()));
+        let perp = |d: Vec2| Vec2 { x: -d.y, y: d.x };
+        let Some(mid) = side else {
+            return true;
+        };
+        let toward = |p: Vec2| if p.dot(mid) >= 0.0 { p } else { p * -1.0 };
+        let (n_in, n_out) = (toward(perp(d1)), toward(perp(d2)));
+        let unit = |p: Vec2| {
+            let l = p.len();
+            if l < 1e-9 {
+                mid
+            } else {
+                p * (1.0 / l)
+            }
+        };
+        let dirs = [n_in, unit(n_in + mid), mid, unit(n_out + mid), n_out];
+        let rho = vi.r + vi.clr.max(self.c) + 0.5 * self.w + self.eps;
+        let reach = self.g.rho_max() + self.c + 0.5 * self.w + self.eps;
+        let wr = reach
+            .max(self.g.rules.edge_clearance + self.c + 0.5 * self.w + self.eps)
+            .max(self.g.rules.hole_clearance + self.c + 0.5 * self.w + self.eps);
+        for nd in dirs {
+            let w = vi.at + nd * rho;
+            let wbb = Aabb {
+                min: Vec2 {
+                    x: w.x - wr,
+                    y: w.y - wr,
+                },
+                max: Vec2 {
+                    x: w.x + wr,
+                    y: w.y + wr,
+                },
+            };
+            for wi in self.obs.query_walls(wbb) {
+                let wl = &self.obs.walls[wi];
+                if ObstacleSet::exempt(wl.net, &wl.tie_nets, self.net) {
+                    continue;
+                }
+                let (d, d_u) = match &wl.core {
+                    // point walls are vertices: pad / via pinches are CDT edge capacities
+                    Core::Point(_) => continue,
+                    Core::Seg(s) => (point_seg(w, s), point_seg(vi.at, s)),
+                    Core::Arc(ar) => (
+                        crate::geom::point_arc(w, ar),
+                        crate::geom::point_arc(vi.at, ar),
+                    ),
+                };
+                // u's own shapes (a hole inside its pad, a pad's outline) lie within `rho`
+                if d_u + wl.r_core <= rho + TOL {
+                    continue;
+                }
+                let need =
+                    wl.r_core + self.wall_clearance(wl.kind, wl.own_clr) + 0.5 * self.w + self.eps;
+                if d < need - TOL {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Line of sight from the apex of node `s` to `target` through the portals pushed since:
-    /// returns `(apex, apex_len, portals_kept)`.
-    fn los(&self, nodes: &[Node], s: usize, target: Vec2) -> (Vec2, f64, usize) {
+    /// returns `(apex, apex_len, portals_kept, admissible)`; a pad bend pinched against a wall makes
+    /// the line inadmissible (never in ghost mode).
+    fn los(
+        &self,
+        nodes: &[Node],
+        s: usize,
+        target: Vec2,
+        via: Option<usize>,
+    ) -> (Vec2, f64, usize, bool) {
         let sn = &nodes[s];
         let (mut apex, mut len, mut since) = (sn.apex, sn.apex_len, sn.since);
         if since >= LOS_PORTAL_CAP {
@@ -546,12 +762,13 @@ impl<'a> Search<'a> {
             id = nodes[id].parent;
         }
         portals.reverse();
+        let mut ok = true;
         if (target - apex).len2() < 1.0 {
-            return (apex, len, portals.len());
+            return (apex, len, portals.len(), ok);
         }
         for _ in 0..LOS_PORTAL_CAP + 4 {
             let chord = Seg { a: apex, b: target };
-            let mut miss = None;
+            let mut miss: Option<(usize, usize)> = None;
             for (k, &pe) in portals.iter().enumerate() {
                 let ge = &self.g.edges[pe];
                 let (pa, pb) = (self.g.verts[ge.a].at, self.g.verts[ge.b].at);
@@ -560,21 +777,35 @@ impl<'a> Search<'a> {
                 }
                 if !crosses(apex, target, pa, pb) {
                     let bend = if point_seg(pa, &chord) <= point_seg(pb, &chord) {
-                        pa
+                        ge.a
                     } else {
-                        pb
+                        ge.b
                     };
                     miss = Some((k, bend));
                     break;
                 }
             }
-            if let Some((k, bend)) = miss {
+            if let Some((k, bv)) = miss {
+                let bend = self.g.verts[bv].at;
+                ok &=
+                    self.ghost || self.bend_ok(apex, bv, target, self.side_hint(bv, nodes, s, via));
                 len += dist(apex, bend);
                 apex = bend;
                 portals.drain(..=k);
                 continue;
             }
-            if let Some(bend) = self.clearance_bend(apex, target) {
+            if let Some((bend, bv)) = self.clearance_bend(apex, target) {
+                if let Some(bv) = bv {
+                    // the wire keeps the chord's side of `u` (the chord lies in the corridor)
+                    let ub = self.g.verts[bv].at;
+                    let toward = closest_on_seg(apex, target, ub) - ub;
+                    let side = if toward.len() > 1.0 {
+                        Some(toward)
+                    } else {
+                        self.side_hint(bv, nodes, s, via)
+                    };
+                    ok &= self.ghost || self.bend_ok(apex, bv, target, side);
+                }
                 let r = target - apex;
                 let tb = (bend - apex).dot(r) / r.len2();
                 portals.retain(|&pe| {
@@ -590,7 +821,7 @@ impl<'a> Search<'a> {
             }
             break;
         }
-        (apex, len, portals.len())
+        (apex, len, portals.len(), ok)
     }
 
     fn step_cost(&self, e: usize, delta: f64) -> f64 {
@@ -627,7 +858,10 @@ impl<'a> Search<'a> {
         }
         let s = &st.nodes[parent];
         let p = self.state_point(e, s.apex);
-        let (apex, apex_len, kept) = self.los(&st.nodes, parent, p);
+        let (apex, apex_len, kept, ok) = self.los(&st.nodes, parent, p, Some(e));
+        if !ok {
+            return;
+        }
         let g_len = apex_len + dist(apex, p);
         let delta = (g_len - s.g_len).max(0.0);
         let g_cost = s.g_cost + self.step_cost(e, delta);
@@ -661,7 +895,10 @@ impl<'a> Search<'a> {
     }
 
     fn push_goal(&self, st: &mut State, s: usize) {
-        let (apex, apex_len, _) = self.los(&st.nodes, s, self.goal);
+        let (apex, apex_len, _, ok) = self.los(&st.nodes, s, self.goal, None);
+        if !ok {
+            return;
+        }
         let sn = &st.nodes[s];
         let g_len = apex_len + dist(apex, self.goal);
         let g_cost = sn.g_cost + (g_len - sn.g_len).max(0.0);
@@ -833,6 +1070,74 @@ impl<'a> Search<'a> {
         }
         Run::Blocked
     }
+}
+
+/// Connections whose strands (Rule T) block the slot-free `ghost` path of a connection from
+/// `start_v` to `goal_v`: the strands that cross the ghost's chord in some face (Fix B,
+/// `m2-route-diagnosis` §4 B). Sorted, deduplicated; O(strands in the ghost's faces).
+pub fn strand_blockers(
+    g: &RouteGraph,
+    ghost: &SlotPath,
+    start_v: usize,
+    goal_v: usize,
+) -> Vec<usize> {
+    let mut out: Vec<usize> = Vec::new();
+    let n = ghost.crossings.len();
+    if n == 0 {
+        // direct ghost along the terminals' edge: whoever crosses that edge blocks it
+        if let Some(e) = g.edge(start_v, goal_v) {
+            out.extend(g.edges[e].cross.iter().map(|x| x.conn));
+        }
+        out.sort_unstable();
+        out.dedup();
+        return out;
+    }
+    if ghost.faces.len() != n + 1 {
+        return out;
+    }
+    for k in 0..=n {
+        let f = ghost.faces[k];
+        if f >= g.faces.len() {
+            continue;
+        }
+        let cyc = Cyc::new(g, f);
+        let strands = cyc.strands_conn(g);
+        let (p0, from_v) = if k == 0 {
+            (cyc.vertex_pos(start_v), Some(start_v))
+        } else {
+            let (e, _) = ghost.crossings[k - 1];
+            (cyc.gap_pos(e, g.slot_count(e)), None)
+        };
+        let Some(p0) = p0 else {
+            continue;
+        };
+        if k == n {
+            out.extend(cyc.vertex_blockers(&strands, p0, goal_v));
+            continue;
+        }
+        let e_out = ghost.crossings[k].0;
+        let near_v = match from_v {
+            Some(sv) => {
+                let ge = &g.edges[e_out];
+                if ge.a == sv || ge.b == sv {
+                    sv
+                } else {
+                    ge.a
+                }
+            }
+            None => {
+                let (x, y) = (&g.edges[ghost.crossings[k - 1].0], &g.edges[e_out]);
+                match [x.a, x.b].into_iter().find(|&v| v == y.a || v == y.b) {
+                    Some(v) => v,
+                    None => continue,
+                }
+            }
+        };
+        out.extend(cyc.edge_blockers(&strands, p0, e_out, near_v));
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// Zero-crossing path along the edge between the terminals, if free.

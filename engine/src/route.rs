@@ -514,6 +514,9 @@ struct Blk {
     report: Option<[i64; 2]>,
 }
 
+/// Consecutive unchanged iterations (no overuse, no rip-up) after which `route` gives up.
+const STUCK_REPEATS: u32 = 3;
+
 /// Uniform samples per portal edge of the geometric block probe.
 const PROBE_SAMPLES: usize = 16;
 /// Extra samples at these distances (nm) from either end of a portal edge (narrow places sit
@@ -628,12 +631,27 @@ fn collect_blocks(
 ) -> BTreeMap<usize, Blk> {
     let mut out: BTreeMap<usize, Blk> = BTreeMap::new();
     for (&i, b) in &best.blocked {
-        let (Some(gp), Some(e_b)) = (&b.ghost, b.edge) else {
-            continue;
-        };
         if matches!(best.res.get(i), Some(Res::Fail { perm: true, .. })) {
             continue;
         }
+        let (Some(gp), Some(e_b)) = (&b.ghost, b.edge) else {
+            // Topological block (no blocked edge, e.g. a bend pinched against a wall): the ghost
+            // path is search-infeasible but geometrically probe-able (fallback, note A).
+            if let (Some(gp), None) = (&b.ghost, b.edge) {
+                if gp.faces.len() == gp.crossings.len() + 1 || gp.crossings.is_empty() {
+                    if let Some(p0) = probe_path(g, checker, &cx.conns[i], base, gp) {
+                        out.insert(
+                            i,
+                            Blk {
+                                p0,
+                                report: Some(kicad(p0)),
+                            },
+                        );
+                    }
+                }
+            }
+            continue;
+        };
         let Some(k) = gp.crossings.iter().position(|&(e, _)| e == e_b) else {
             continue;
         };
@@ -1032,6 +1050,7 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                     let mut neg = Negotiator::new(g.edges.len(), m);
                     let mut perm: Vec<Option<String>> = vec![None; m];
                     let mut active: Vec<usize> = (0..m).collect();
+                    let (mut stuck, mut last_sig) = (0u32, None::<(usize, Vec<usize>)>);
                     for _ in 1..=opts.pathfinder_iter_cap {
                         if Instant::now() >= deadline {
                             timed_out = true;
@@ -1104,6 +1123,11 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                         for (&i, b) in &out.blocked {
                             neg.penalise_blocked(i, b);
                         }
+                        // A failed path's reserved room is not a congestion the others can
+                        // resolve: it leaves the graph before the overuse count.
+                        for &i in &failed {
+                            g.remove_conn(i);
+                        }
                         let overuse = neg.penalise_overuse(&g);
                         let (nok, len) = res.iter().fold((0usize, 0.0f64), |(n, l), r| match r {
                             Res::Ok(o) => (n + 1, l + o.len),
@@ -1127,12 +1151,34 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                                 paths: out.paths.clone(),
                             });
                         }
-                        if failed.is_empty() && out.blocked.is_empty() && overuse == 0 {
+                        if failed.is_empty()
+                            && out.blocked.is_empty()
+                            && out.ripped.is_empty()
+                            && overuse == 0
+                        {
                             converged = true;
+                            break;
+                        }
+                        // Stuck: same routed count and same failed / blocked set, nothing left
+                        // to negotiate (no overuse, no rip-up) for `STUCK_REPEATS` iterations.
+                        let mut fb: Vec<usize> = failed.clone();
+                        fb.extend(out.blocked.keys().copied());
+                        fb.sort_unstable();
+                        let sig = (nok, fb);
+                        if overuse == 0 && out.ripped.is_empty() && last_sig.as_ref() == Some(&sig)
+                        {
+                            stuck += 1;
+                        } else {
+                            stuck = 0;
+                        }
+                        last_sig = Some(sig);
+                        if stuck >= STUCK_REPEATS {
+                            warnings.push(format!("stuck after {it} iterations"));
                             break;
                         }
                         let mut next: BTreeSet<usize> = failed.into_iter().collect();
                         next.extend(out.blocked.keys().copied());
+                        next.extend(out.ripped.iter().copied());
                         next.extend(overused_conns(&g));
                         next.retain(|&i| perm[i].is_none());
                         active = next.into_iter().collect();

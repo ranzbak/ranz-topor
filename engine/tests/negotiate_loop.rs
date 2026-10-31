@@ -158,10 +158,11 @@ fn run(
             neg.penalise_blocked(c, bi);
         }
         last = out.paths.clone();
-        if over == 0 && out.blocked.is_empty() {
+        if over == 0 && out.blocked.is_empty() && out.ripped.is_empty() {
             return (neg, out.overuse_edges as u32, last, 0);
         }
         let mut a: std::collections::BTreeSet<usize> = out.blocked.keys().copied().collect();
+        a.extend(out.ripped.iter().copied());
         a.extend(overused_conns(&b.g));
         active = a.into_iter().collect();
     }
@@ -338,4 +339,38 @@ fn iteration_respects_deadline() {
     );
     assert!(out.timed_out);
     assert!(out.paths.iter().all(|p| p.is_none()));
+}
+
+/// Fix B: A (a1-a2, 10 mm) is routed first and cuts B's only short class (the b1-b2 CDT edge,
+/// 5 mm); B's alternative around a1 is more than twice as long, so B's ghost path rips A. A then
+/// takes the longer way round b1 and both converge, B on its short class.
+#[test]
+fn blocked_by_strand_rips_up_blocker() {
+    let mut b = build(
+        &[
+            ("a1", 1, 20.0, 20.0),
+            ("a2", 1, 30.0, 20.0),
+            ("b1", 2, 25.0, 17.5),
+            ("b2", 2, 25.0, 22.5),
+        ],
+        "",
+    );
+    let (mut conns, verts) = setup(&b, &[(1, "a1", "a2"), (2, "b1", "b2")]);
+    conns[0].tier = 2; // A is routed first
+    let (_, _, paths, fail) = run(&mut b, &conns, &verts);
+    assert_eq!(fail, 0, "did not converge in the iteration cap");
+    let pb = paths[1].as_ref().expect("B routed");
+    assert!(
+        pb.est_len < 6.0 * MM,
+        "B keeps its short class: {}",
+        pb.est_len
+    );
+    let pa = paths[0].as_ref().expect("A routed");
+    assert!(pa.est_len > 10.0 * MM, "A detours: {}", pa.est_len);
+    assert_eq!(
+        (0..b.g.edges.len())
+            .filter(|&e| b.g.overuse(e) > 0.0)
+            .count(),
+        0
+    );
 }

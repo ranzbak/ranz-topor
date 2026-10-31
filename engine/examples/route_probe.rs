@@ -683,12 +683,13 @@ fn main() {
         if better {
             best = Some((nok, len, it, statuses));
         }
-        if failed.is_empty() && out.blocked.is_empty() && overuse == 0 {
+        if failed.is_empty() && out.blocked.is_empty() && out.ripped.is_empty() && overuse == 0 {
             println!("  CONVERGED");
             break;
         }
         let mut next: BTreeSet<usize> = failed.into_iter().collect();
         next.extend(out.blocked.keys().copied());
+        next.extend(out.ripped.iter().copied());
         next.extend(overused_conns(&g));
         next.retain(|&i| perm[i].is_none());
         active = next.into_iter().collect();
