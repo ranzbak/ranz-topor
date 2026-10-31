@@ -40,6 +40,7 @@ fn via(net: i32, x_mm: f64, y_mm: f64, drill: i64) -> Item {
         drill,
         layers: vec![],
         group: None,
+        wire: None,
     })
 }
 
