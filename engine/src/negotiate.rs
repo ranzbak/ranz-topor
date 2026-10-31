@@ -11,7 +11,9 @@
 //! parallel against that frozen graph and committed in order; a path whose faces changed since
 //! the freeze (edge versions, sites) is first re-validated in O(k) against the current graph
 //! (`search::revalidate_path`, F4) and searched again, in order, only when that fails.
-//! The absurd-detour ghost is
+//! At the deadline the paths found before it are still committed in order (no search runs after
+//! it: an invalidated path is dropped), so a timed-out iteration leaves its committed subset in
+//! the graph for the anytime result (ruling Q2). The absurd-detour ghost is
 //! computed in the parallel phase and reused while its own faces are unchanged. A connection
 //! blocked before any search by a static fact of the board (a terminal that cannot be left /
 //! entered, `search::terminal_open`, F3) is never searched again (`dead`). Rip-up is damped (F2, scaling diagnosis RC-A2): a connection rips a given
@@ -228,9 +230,11 @@ impl Negotiator {
                             res = SearchOutcome::Found(q);
                         }
                         None => {
+                            // Past the deadline no search runs: the path is dropped, the
+                            // remaining found paths are still committed (anytime).
                             if Instant::now() >= deadline {
                                 timed_out = true;
-                                break;
+                                continue;
                             }
                             resolved_sequentially += 1;
                             let params = params_for(
@@ -321,8 +325,9 @@ impl Negotiator {
                     );
                 }
                 SearchOutcome::Timeout => {
+                    // Anytime (ruling Q2): the searches that finished before the deadline are
+                    // committed in order all the same; this one stays unrouted.
                     timed_out = true;
-                    break;
                 }
             }
         }

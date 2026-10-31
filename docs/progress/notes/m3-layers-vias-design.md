@@ -301,3 +301,20 @@ free-list ids sorted; heap key total; `collect` in index order; no `HashMap` ite
   exhausts the component (#201: 209 668 expansions, 24 s). A sound geometric entry probe is deferred (F4/F8 candidate);
   "all edges unfit" is not a sound static block (the rect-pad fixture of `ghost_is_never_stricter_than_search` is
   all-unfit and routes).
+- **§7 batch re-validation (F4):** a snapshot path whose touched faces changed is re-validated in `O(k)` by
+  `search::revalidate_path` (slots recomputed with `Cyc::cross_slot` against the current strands, every crossed edge
+  passable and fitting, `goal_ok` at the goal / site vertex, `site_free` per via, a direct leg's edge free) and inserted
+  with those slots (`revalidated`); it is searched again only when that fails or the geometry moved (a site of the path
+  changed, or a via activated since the freeze within its own `d/2 + clr + w/2 + ε` of a leg's faces bbox — per leg and
+  per via, no longer `rho_max`). Conservative: the accepted path is never looser than a fresh search.
+- **Anytime (coordinator ruling Q2):** when an iteration times out before any `Snap` exists, the paths it committed are
+  metrized (first pass + one self-check round run regardless of the deadline) and emitted; unrouted connections report
+  `timeout`.
+- **F3b (geometric entry probe) — skipped, not sound.** The forward entry into a goal is `push_goal`'s `los` over the
+  whole apex chain of the arriving state; the only local necessary condition provable from it is "some point of an
+  inside face around the goal has a clear straight segment into the goal", which the pad centre itself satisfies at
+  U7.4 (the centre is 0.375 mm from the neighbour copper > 0.3 mm needed), so it never fires there. What actually blocks
+  U7.4 is the discretisation of the slot search: state points sit at the vertex margins (62.5 µm off the pad axis at a
+  roundrect corner) outside the ±75 µm corridor the 0.2 mm wire has between 0.5 mm-pitch neighbours; a reverse
+  "can the goal be left" probe reproduces that, but it is not a necessary condition of the forward entry (different
+  state points, different apex), so it could block a connection the search would route. Left to the gate review.

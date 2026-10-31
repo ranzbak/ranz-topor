@@ -2426,7 +2426,14 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
                     );
                     if out.timed_out {
                         timed_out = true;
-                        break;
+                        // Anytime (coordinator ruling Q2): with a result already recorded the
+                        // partial iteration is discarded as before; without one, the paths it
+                        // committed are metrized (the first pass and one self-check round run
+                        // regardless of the deadline) and emitted, so a board whose first
+                        // iteration exceeds the budget still returns what it routed.
+                        if best.is_some() {
+                            break;
+                        }
                     }
                     let it = neg.iteration;
                     let routed: Vec<usize> = (0..m)
@@ -2490,7 +2497,11 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
                                     })
                                     .or_else(|| b.site.map(|s| kicad(mg.sites[s].at))),
                             },
-                            (None, None) => fail("not routed"),
+                            (None, None) => fail(if out.timed_out {
+                                "timeout"
+                            } else {
+                                "not routed"
+                            }),
                         })
                         .collect();
                     for (i, r) in mt.res {

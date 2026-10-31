@@ -626,10 +626,14 @@ fn eprom_ripped_front_only_is_the_m2_result() {
 }
 
 /// `n` two-pad nets (round pads d 1 mm on a 3 mm grid, each pair within 9 mm; the layout of
-/// `tests/scaling/synth.py`, with a fixed LCG instead of Python's RNG), front layer only.
+/// `tests/scaling/synth.py`, with a fixed LCG instead of Python's RNG), front layer only, on a
+/// 10 x 10 grid (at most ~48 pairs).
 fn synth_model(n: usize) -> BoardModel {
-    let cols = 10usize;
-    let rows = 10usize;
+    synth_model_grid(n, 10, 10)
+}
+
+/// [`synth_model`] on a `cols x rows` grid.
+fn synth_model_grid(n: usize, cols: usize, rows: usize) -> BoardModel {
     let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut rnd = |m: usize| {
         state = state
@@ -686,12 +690,14 @@ fn synth_model(n: usize) -> BoardModel {
             ));
         }
     }
-    let (lo, hi) = (-3_000_000i64, 30_000_000i64);
+    // outline: the grid plus a 3 mm margin (10 x 10 -> -3..30 mm, as before)
+    let lo = -3_000_000i64;
+    let (hx, hy) = (3_000_000 * (cols as i64 - 1) + 3_000_000, 3_000_000 * (rows as i64 - 1) + 3_000_000);
     let o = [
-        (lo, lo, hi, lo),
-        (hi, lo, hi, hi),
-        (hi, hi, lo, hi),
-        (lo, hi, lo, lo),
+        (lo, lo, hx, lo),
+        (hx, lo, hx, hy),
+        (hx, hy, lo, hy),
+        (lo, hy, lo, lo),
     ]
     .iter()
     .map(|&(a, b, c, d)| format!(r#"{{ "kind": "seg", "a": [{a}, {b}], "b": [{c}, {d}] }}"#))
@@ -1128,4 +1134,36 @@ fn ghost_len_reported_for_every_connection() {
     assert_eq!(rn.connections[0].ghost_len_nm, None);
     let v: serde_json::Value = serde_json::from_str(&json_no_runtime(&rn)).unwrap();
     assert!(v["connections"][0]["ghost_len_nm"].is_null());
+}
+
+/// Anytime (coordinator ruling Q2): a budget that ends inside the first iteration still emits
+/// the paths that iteration committed, metrized and self-checked like any other result, with
+/// `timed_out` set and every unrouted connection reporting `timeout`. Before the fix the loop
+/// broke before the metrization and the result was empty (`routed 0`, scaling diagnosis C).
+/// The budget is a wall clock: 0.5 s in release / 5 s in debug on a 2000-pair synth board whose
+/// setup takes ~0.2 s / ~2 s and whose first search phase (one thread) ~0.4 s / ~4 s.
+#[test]
+fn anytime_timeout_emits_committed_subset() {
+    let m = synth_model_grid(2000, 74, 74);
+    let o = Options {
+        wall_clock_s: if cfg!(debug_assertions) { 5.0 } else { 0.5 },
+        threads: 1,
+        ..Options::default()
+    };
+    let r = route(&m, &o);
+    assert!(r.timed_out);
+    assert!(r.routed > 0, "nothing emitted: {:?}", r.warnings);
+    assert!(r.routed < 2000, "the budget must end inside the run: {}", r.routed);
+    // release: the budget ends inside iteration 1 (the emitted subset is that iteration's);
+    // the unoptimised build may get further before it ends
+    assert!(r.iterations >= 1 && (cfg!(debug_assertions) || r.iterations == 1), "{}", r.iterations);
+    assert_eq!(r.zero_slack, "not run");
+    // unrouted: not searched before the deadline (`timeout`) or a genuine failure of a search
+    // / metrization that did finish
+    assert!(r.connections.iter().all(|c| c.status == "routed"
+        || c.reason == "timeout"
+        || c.reason.starts_with("blocked:")
+        || c.reason.starts_with("infeasible")
+        || c.reason.starts_with("self-check")));
+    clean(&m, &r);
 }
