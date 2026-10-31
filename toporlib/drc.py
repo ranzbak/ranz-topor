@@ -51,8 +51,9 @@ class DrcReport:
     by_type: dict[str, int]
 
 
-def run_drc(pcb: Path, out_json: Path) -> DrcReport:
-    """Run the fixed kicad-cli DRC command; exit 0 and 5 both count as successful runs."""
+def run_drc(pcb: Path, out_json: Path, *, save_board: bool = False) -> DrcReport:
+    """Run the fixed kicad-cli DRC command; exit 0 and 5 both count as successful runs. `save_board` adds
+    ``--save-board``: the refilled board is written back over `pcb`."""
     pcb = Path(pcb)
     out_json = Path(out_json)
     if not pcb.is_file():
@@ -60,6 +61,7 @@ def run_drc(pcb: Path, out_json: Path) -> DrcReport:
     cmd = [
         str(kicad_cli()), "pcb", "drc",
         "--format", "json", "--refill-zones", "--all-track-errors", "--exit-code-violations",
+        *(["--save-board"] if save_board else []),
         "-o", str(out_json), str(pcb),
     ]
     t0 = time.monotonic()

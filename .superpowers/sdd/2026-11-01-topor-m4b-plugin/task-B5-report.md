@@ -48,3 +48,10 @@ Tests: tests/plugin/test_run_flow.py 15 passed in 130 s (accept flow setup 19 s,
 
 ## UNVERIFIED (GUI checklist)
 WxUi progress/preview dialogs driven by the real flow; PNG legibility on light theme and 200 % scaling; wx.GetApp present in KiCad plugin process; IpcBoard.read_model(layer_roles=...) live; svg export against a live-edited unsaved board; highlight alignment on boards whose Edge.Cuts bbox is not the SVG origin (board-area mode with other outlines); cancel latency of the engine from the dialog.
+
+## Fix round (rulings C20/C21)
+- run.py: ripped copy refilled by `run_drc(..., save_board=True)` (kicad-cli pcb drc --refill-zones --save-board; new `save_board` kwarg in toporlib/drc.py), `pcbfile.parse_zone_fills` (new, O(len), zones by uuid) -> `run.refill_pours` recomputes pour fills, reach and dangling ends with `model_ipc.pour_reach` / `dangling_ends` (extracted from the IPC exporter, same code). A zone absent from the file or without fill keeps its model fill. Routed copy is also saved refilled before the SVG export (pours retreat, B.Cu visible).
+- PCB_FORMAT_OLD (error) when `(version N)` < 20260206 (KiCad 10.0 value from snapshot / kicad-cli save); pcbfile.file_version, KICAD10_VERSION.
+- Tests added: parse_zone_fills/version, refuses pre-KiCad-10, wiccon flow connection count == harness model (62 == 62; ~40 s, kept in default suite). Test marker uuid made a valid uuid (kicad-cli re-serialises saved boards).
+- Numbers (existing_copper=rip, FakeBoard, committed copy judged by kicad-cli): wiccon 62/62, vias 37, routing_new 0, unconnected 0, outside pads 1373.553 mm, router_s 3.99, 1 DRC round, wall 16.4 s. eprom 27/27, vias 0, routing_new 0, unconnected 0, router_s 0.10, wall 17.0 s. Both PNGs regenerated.
+- tests/plugin: 109 passed / 7 skipped (one rerun of the marker-affected tests after the uuid fix).

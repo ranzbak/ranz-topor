@@ -25,7 +25,7 @@ from toporlib import pcbfile  # noqa: E402
 from toporlib.drc import classify, run_drc  # noqa: E402
 
 BOARD = "eprom-to-kernal"
-MARKER = "11111111-2222-3333-4444-topor-live-edit"
+MARKER = "11111111-2222-4333-8444-555555555555"  # a valid uuid: kicad-cli re-serialises saved boards
 LIVE_EDIT = (f'\t(gr_line\n\t\t(start 190 70)\n\t\t(end 191 70)\n\t\t(stroke\n\t\t\t(width 0.1)\n'
              f'\t\t\t(type default)\n\t\t)\n\t\t(layer "Cmts.User")\n\t\t(uuid "{MARKER}")\n\t)\n')
 
@@ -439,3 +439,50 @@ def test_accepted_findings_update_config(tmp_path):
     new = run_mod.apply_accepted_findings(Decision(True, accepted_codes=("PAD_OUTSIDE_BOARD",)), fs, cfg, toml)
     assert new.get("nets", "ignore_pads") == ["U1.3", "J2.1"]
     assert "U1.3" in toml.read_text()
+
+
+# ------------------------------------------------------------------ ruling C20 / C21
+def test_parse_zone_fills_and_version(eprom):
+    z = pcbfile.parse_zone_fills(eprom.text)
+    assert z and all(isinstance(k, str) for k in z)
+    polys = [p for v in z.values() for p in v]
+    assert polys and all(p["layer"].endswith(".Cu") and len(p["pts"]) >= 3 for p in polys)
+    assert pcbfile.file_version(eprom.text) >= pcbfile.KICAD10_VERSION
+    assert pcbfile.file_version("(kicad_pcb (version 20211014) (generator pcbnew)\n)") == 20211014
+    assert pcbfile.file_version("garbage") is None
+
+
+def test_run_refuses_pre_kicad10_file(app, eprom, tmp_path, reports):
+    old = re.sub(r"\(version \d+\)", "(version 20211014)", eprom.text, count=1)
+    board = FakeBoard(eprom.pcb, eprom.model, live_text=old, project_dir=eprom.pcb.parent)
+    board, ui, out = do_run(eprom, tmp_path, board=board, engine=ExplodingEngine())
+    assert out.status == "aborted_preflight" and board.commits == []
+    f = [x for x in out.findings if x.code == "PCB_FORMAT_OLD"]
+    assert f and f[0].severity == "error" and "KiCad 10" in f[0].fix
+
+
+def test_run_wiccon_refill_gives_harness_connection_count(app, tmp_path_factory, reports):
+    """Ruling C20: pour reach / dangling ends are recomputed on the refilled ripped copy (harness order
+    rip -> refill -> export), so the engine sees the same connections as the harness model (62)."""
+    from harness import writer
+    from harness.copy import copy_project
+    from harness.model import export_model, load_board
+    from harness.rip import record_widths, rip_tracks
+    from harness.rules import resolve_rules
+
+    d = tmp_path_factory.mktemp("wic")
+    cp = copy_project(board_pcb("wiccon-2023"), d / "w")
+    b = load_board(cp)
+    writer.save(b, cp.pcb)  # the snapshot is a KiCad 6 file; a live save_as copy is KiCad 10 format
+    b = load_board(cp)
+    dru = cp.dru.read_text() if cp.dru is not None else None
+    rules = resolve_rules(b, dru_text=dru, widths_before=record_widths(b))
+    model = export_model(b, rules, name="wiccon", dru_text=dru)
+    board = FakeBoard(cp.pcb, model, project_dir=cp.pcb.parent)
+    out = run_mod.run(board, ScriptedUi(accept=False), CFG, topor_engine, tmp_root=d / "work")
+    _ok(out)
+    rip_tracks(b, mode="all", scope=None, rf_nets=set())
+    ref = json.loads(topor_engine.route(json.dumps(export_model(b, rules, name="wiccon", dru_text=dru)),
+                                        json.dumps({"threads": 4, "wall_clock_s": 60.0})))
+    print(f"wiccon connections: flow {out.total} harness {ref['connections_total']}")
+    assert out.total == ref["connections_total"] == 62
