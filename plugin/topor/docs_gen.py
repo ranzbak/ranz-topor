@@ -46,6 +46,11 @@ def render_reference_md(settings=SETTINGS) -> str:
                 doc += f" *Since {s.since}.*"
             out.append(f"| `{s.key}` | {s.type} | `{_cell(toml_value(s.default))}` | {s.unit} | {_cell(_range_text(s))} | {_cell(doc)} |")
         out.append("")
+        if sec == "layers":
+            out += ["Per-layer roles are written as keys in this section, e.g. `F.Cu = \"signal\"`, `In1.Cu = \"gnd\"`.",
+                    "Roles: `signal`, `mixed`, `gnd`, `pwr`, `jumper`; a layer is routed iff `signal` or `mixed`.",
+                    "Precedence: roles here > KiCad layer types (if any copper layer is power/mixed/jumper) > default by copper count",
+                    "(2: S,S; 4: S,GND,PWR,S; 6: S,GND,PWR,S,GND,S; 8: S,GND,S,PWR,GND,S,GND,S). Other counts need roles here.", ""]
     out += ["## Set in KiCad, not in `topor.toml`", "", "| Behaviour | Where in KiCad |", "|---|---|"]
     out += [f"| {n} | {_cell(p)} |" for n, p in KICAD_ONLY]
     out.append("")

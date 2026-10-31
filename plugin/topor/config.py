@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .findings import Finding
+from .layers import ROLES
 from .schema import (BACKLOG_VALUES, CONFIG_VERSION, CURRENT_VERSION, KICAD_ONLY, SECTIONS, SETTINGS,
                      SETTINGS_BY_KEY, Setting, available)
 
@@ -111,6 +112,7 @@ def toml_value(v) -> str:
 @dataclass(frozen=True)
 class Config:
     values: dict = field(default_factory=dict)  # (section, key) -> value, always complete
+    layer_roles: dict = field(default_factory=dict)  # copper layer name -> role ([layers] F.Cu = "signal")
 
     @staticmethod
     def defaults() -> "Config":
@@ -123,7 +125,7 @@ class Config:
         for k in changes:
             if k not in SETTINGS_BY_KEY:
                 raise KeyError(k)
-        return Config({**self.values, **changes})
+        return Config({**self.values, **changes}, dict(self.layer_roles))
 
     def non_defaults(self) -> dict:
         """{"section.key": value} for every value that differs from its default (run report)."""
@@ -200,10 +202,24 @@ def render_toml(cfg: Config) -> str:
             else:
                 out.append(f"{s.key} = {toml_value(v)}")
             out.append("")
+        if sec == "layers":
+            out += ["# Stackup roles, top to bottom: signal | mixed | gnd | pwr | jumper (routed = signal or mixed).",
+                    "# Precedence: roles here > KiCad layer types (if any is power/mixed/jumper) > default by copper count",
+                    "# (2: S,S  4: S,GND,PWR,S  6: S,GND,PWR,S,GND,S  8: S,GND,S,PWR,GND,S,GND,S). Other counts need roles here.",
+                    "# KiCad: File → Board Setup → Board Editor Layers → layer type"]
+            if cfg.layer_roles:
+                out += [f"{_layer_key(n)} = {toml_value(r)}" for n, r in cfg.layer_roles.items()]
+            else:
+                out += ['# F.Cu = "signal"', '# In1.Cu = "gnd"', '# In2.Cu = "pwr"', '# B.Cu = "signal"']
+            out.append("")
     out.append("# ---- Set in KiCad, not here ----")
     for name, place in KICAD_ONLY:
         out.append(f"# {name}: {place} (not set here)")
     return "\n".join(out) + "\n"
+
+
+def _layer_key(name: str) -> str:
+    return name if re.fullmatch(r"[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*", name) else json.dumps(name)
 
 
 def write_default(path: Path) -> None:
@@ -243,6 +259,7 @@ def load_config(project_dir: Path) -> tuple[Config, list[Finding]]:
         return Config.defaults(), findings
 
     values = dict(Config.defaults().values)
+    layer_roles: dict = {}
     ver = data.pop("version", CONFIG_VERSION)
     if ver != CONFIG_VERSION:
         findings.append(Finding("CFG_VERSION", "warning", f"{CONFIG_NAME} has version = {ver!r}; this plugin reads version {CONFIG_VERSION}.",
@@ -252,7 +269,24 @@ def load_config(project_dir: Path) -> tuple[Config, list[Finding]]:
             findings.append(Finding("CFG_UNKNOWN_KEY", "warning", f"Unknown section or key '{sec}' in {CONFIG_NAME} is ignored.",
                                     f"Check the spelling; valid sections are {', '.join(SECTIONS)} ({DOCS_HINT}).", (sec,)))
             continue
-        for key, raw in table.items():
+        items = list(table.items())
+        if sec == "layers":
+            items = []
+            for key, raw in table.items():
+                if (sec, key) in SETTINGS_BY_KEY:
+                    items.append((key, raw))
+                    continue
+                for lname, lraw in _flatten_layer(key, raw):
+                    if lname.endswith(".Cu"):
+                        full = f"layers.{lname}"
+                        if lraw in ROLES:
+                            layer_roles[lname] = lraw
+                        else:
+                            findings.append(Finding("CFG_VALUE", "warning", f"{full} = {lraw!r} is not a layer role; the layer's role is decided by KiCad layer types or the stackup default.",
+                                                    f"Use one of: {'|'.join(ROLES)} in {CONFIG_NAME} [layers].", (full,)))
+                    else:
+                        items.append((lname, lraw))
+        for key, raw in items:
             s = SETTINGS_BY_KEY.get((sec, key))
             full = f"{sec}.{key}"
             if s is None:
@@ -268,7 +302,16 @@ def load_config(project_dir: Path) -> tuple[Config, list[Finding]]:
                 findings.append(Finding("CFG_VALUE", "warning", f"{full} = {raw!r} {err}; the default {s.default!r} is used.",
                                         f"Correct {full} in {CONFIG_NAME} (allowed: {_range_text(s)}).", (full,)))
             values[(sec, key)] = v
-    return Config(values), findings
+    return Config(values, layer_roles), findings
+
+
+def _flatten_layer(key, raw):
+    """TOML parses bare F.Cu as {F: {Cu: v}}: yield ("F.Cu", v); quoted "F.Cu" arrives flat."""
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            yield from _flatten_layer(f"{key}.{k}", v)
+    else:
+        yield key, raw
 
 
 # ---------------------------------------------------------------- in-place update
