@@ -13,6 +13,7 @@ No implementation here — algorithms, constraints, risks and sources only.
 6. [43 — Topola assessment](design/43-topola-assessment.md): hands-on test of the closest open-source project (fork / reuse parts / reference only).
 7. [44 — Feature gap analysis](design/44-feature-gap-analysis.md): KiCad 10 design features vs. our definition, usage scan of real projects, MoSCoW priorities, gaps to add.
 8. [45 — MVP and implementation plan](design/45-mvp-plan.md): milestones M0–M5, tasks per model tier, rotating coordinator.
+9. [46 — Configuration](design/46-configuration.md): every user-controllable choice, its source (KiCad board setup / plugin config / default) and default.
 
 ## Background knowledge
 
