@@ -54,7 +54,24 @@ M3-R7 rayon 1.10 approved; SWIG pour-fill names verified by a real test on a boa
 | 7 | vias.rs + multigraph.rs | DONE 07c4b56 |
 | 8 | layered slot A* | DONE 80e30d8 |
 | 9 | two-layer route | DONE 4b928ec — eprom 27/27 vias 0 zs 0 outside 64.6/76.6 0.05 s; wiccon 50/60 (83 %, gate 90 %) 9.1 s; dcsgone M2 info router 120 s > 65 FAIL |
-| 10–12 | via reduction · rayon · gate | pending |
+| 10 | via-reduction pass | DONE 6674cab — eprom no-op; wiccon removed 0 of 28 (Ruling P8 overuse <= best) |
+| 11 | rayon batch + deterministic commit | DONE 9005d56 — threads 1/2/4 byte-identical; wiccon 1.90 s @4; dcsgone 120 s |
+| 12 | Steps 1–4 DONE 6c4cd28 (0.3.0, test_m3_gate.py, 2-layer scaling, M2 threads assertion, 45 §5a wording); Steps 5–7 pending |
+| F | gate diagnosis docs/progress/notes/m3-gate-diagnosis.md 48e95bc — fix tasks F1–F7 |
+
+**Rotation 1 handover (2026-10-31, 15 round-trips, integration head on branch worktree-agent-a141224bcf3a2052b;
+shared main checkout at e530f37 — main must fast-forward main to worktree-agent-a141224bcf3a2052b).** Gate run @6c4cd28: 11 passed, 2 failed.
+M3 eprom PASS: 27/27, 25/25, vias 0, F.Cu 90.323 / B.Cu 17.773 mm, outside 64.628 vs hand 76.598, DRC 0/0, arcs 13, router 0.095 s, 1 it,
+zero_slack_wires 0, byte-identical threads 1/2/4. M2 gate eprom PASS. FAIL: wiccon 50/60 (83 %, signal 48/57) 3.5 s; dcsgone 160/231 120.2 s > 65.
+Scaling: layers=2 PASS (ratios 20.9/21.6, vias == routed); **layers=1 FAIL t1000/t100 32.4 > 30** (n=1000 17.7 s, 25 it; was 0.60 s at M3
+start — regression since T9/T11, undiagnosed). test_scaffold (debug cargo) FAIL: route_engine partial_on/off stub self-check in debug only.
+M2 dcsgone info test passes with 0/231 in 60.04 s (check its options). PNGs m3-T9/T10/T11{,-wiccon}.png sent to main.
+**Next (rotation 2):** (1) main's ruling on R-i (wall_clock_s = whole bench run incl. DRC rounds vs per route() call; diagnosis
+recommends whole-run, bound unchanged); (2) fix tasks F1 (outline sub-arcs; measured wiccon 60/60) -> F2 topological ghost -> F3 entry
+pre-check/static dead set -> F4 batch re-validation -> F5 harness remaining budget -> F7 timers (F6 only if eprom byte-identical), each S
+with progress PNG; (3) diagnose the layers=1 scaling regression and the debug-only partial-stub test failures; (4) Task 12 Step 5
+benchmark 0.3.0 + Step 7 F gate review (incl. deferred minors in the ledger: D5 test now accepts routing, Rule T test hand-inserted strand,
+Ruling P3 strict D2/D10 retest now that eprom zs = 0, note §7 amendment for ghost precompute/dead set). Rulings P0–P9 in the ledger.
 
 **M2 history (rotation 1, 2026-10-31).** Plan docs/superpowers/plans/2026-10-31-topor-m2-router.md;
 ledger .superpowers/sdd/2026-10-31-topor-m2-router/progress.md (briefs, reports, rulings R1–R6).
