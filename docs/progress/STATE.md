@@ -73,6 +73,17 @@ with progress PNG; (3) diagnose the layers=1 scaling regression and the debug-on
 benchmark 0.3.0 + Step 7 F gate review (incl. deferred minors in the ledger: D5 test now accepts routing, Rule T test hand-inserted strand,
 Ruling P3 strict D2/D10 retest now that eprom zs = 0, note §7 amendment for ghost precompute/dead set). Rulings P0–P9 in the ledger.
 
+**Rotation 2 (2026-10-31, coordinator on main in the shared checkout, from 87fbe54 = rotation 1 integration head).**
+Main rulings: **M3-R8** (answer to R-i) `wall_clock_s` is the budget of the WHOLE bench run incl. DRC re-route rounds and zero-slack
+re-runs; ≤ 65 s dcsgone bound and all other bounds unchanged; implemented as F5 (harness passes the remaining budget).
+**M3-R9** F1 (outline sub-arcs ≤ 25 µm sagitta), F2 (topological 0-1 BFS ghost), F3 (terminal enterability pre-check + sound static
+dead set), F4 (O(k) batch re-validation, per-via reach), F5, F7 (per-iteration timers) authorised as M3 fixes; F6 only if eprom stays
+byte-identical; TDD, regression test per fix; progress PNG + numbers to main after each outcome-affecting fix.
+**M3-R10** one diagnosis round for the layers=1 scaling regression (F, measure first) + fix; fix the debug-profile partial-stub
+self-check failures at the root cause (not by changing the test profile); explain the M2 dcsgone info test routing 0/231.
+Then Task 12 Step 5 (benchmark 0.3.0) and Step 7 (independent F gate review incl. ledger deferred items). Stop rule (user): no
+budget/requirement relaxation; if a gate item still fails after these fixes: commit, numbers + profile here, report to main.
+
 **M2 history (rotation 1, 2026-10-31).** Plan docs/superpowers/plans/2026-10-31-topor-m2-router.md;
 ledger .superpowers/sdd/2026-10-31-topor-m2-router/progress.md (briefs, reports, rulings R1–R6).
 | # | Task | Status |
