@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use topor_engine::decompose::{Connection, TermKind, TermRef};
 use topor_engine::geom::Vec2;
-use topor_engine::graph::{GraphRules, Port, RouteGraph};
+use topor_engine::graph::{GraphRules, Port, RouteGraph, TerminalInfo};
 use topor_engine::model::{BoardModel, Options};
 use topor_engine::multigraph::MultiGraph;
 use topor_engine::obstacle::ObstacleSet;
@@ -68,6 +68,23 @@ fn pad_json(q: &P) -> String {
 
 fn model(pads: &[P], extra: &str) -> BoardModel {
     let pj: Vec<String> = pads.iter().map(pad_json).collect();
+    model_raw(&pj, extra)
+}
+
+/// Rect SMD pad of net `net` on F.Cu, `w x h` mm, centre at kicad `(x, y)` mm.
+fn rect_pad_json(name: &str, net: i32, x: f64, y: f64, w: f64, h: f64) -> String {
+    format!(
+        r#"{{ "uuid": "{name}", "ref": "{name}", "number": "1", "net": {net},
+          "center": [{}, {}], "layers": [0],
+          "shapes": {{ "0": {{ "kind": "rect", "w": {}, "h": {} }} }} }}"#,
+        (x * MM) as i64,
+        (y * MM) as i64,
+        (w * MM) as i64,
+        (h * MM) as i64
+    )
+}
+
+fn model_raw(pj: &[String], extra: &str) -> BoardModel {
     let s = format!(
         r#"{{ "layers": [ {{ "id": 0, "routable": true }}, {{ "id": 31, "routable": true }} ],
           "outline": [
@@ -118,9 +135,29 @@ struct B {
 }
 
 fn build(m: &BoardModel, sites: Vec<ViaSite>) -> B {
+    build_terms(m, sites, &[])
+}
+
+/// [`build`] with explicit terminal vertices (pad centres of non-round pads), each on the given
+/// layers.
+fn build_terms(m: &BoardModel, sites: Vec<ViaSite>, terms: &[(TerminalInfo, Vec<u32>)]) -> B {
     let mut obs = ObstacleSet::build(m, &Options::default(), &HashSet::new(), &[]);
-    let mg = MultiGraph::build(m, &mut obs, sites, &[0, 31], &[], &rules()).unwrap();
+    let mg = MultiGraph::build_on(m, &mut obs, sites, &[0, 31], terms, &rules()).unwrap();
     B { mg, obs }
+}
+
+/// Terminal at the centre of pad `name` of `net` at kicad `(x, y)` mm (`r 0`, clearance 0.2 mm).
+fn term(name: &str, net: i32, x: f64, y: f64) -> TerminalInfo {
+    TerminalInfo {
+        at: Vec2 {
+            x: x * MM,
+            y: -y * MM,
+        },
+        net,
+        owner: format!("pad:{name}:1"),
+        clr: 200_000.0,
+        r: 0.0,
+    }
 }
 
 /// Terminal vertex of pad `name` on layer index `li`.
@@ -717,4 +754,177 @@ fn insert_path_activates_sites_and_remove_conn_frees_them() {
     assert!(b.mg.owner[0].is_none());
     let again = found(search(&b.mg, &b.obs, &c, &start, &g, &ctx.params()));
     assert_eq!(again.vias(), 1);
+}
+
+/// A ghost element is soft (a crossing or a site the slot search could not take as it stands).
+fn ghost_soft(o: &Option<(SlotPath, Option<(usize, usize)>, Option<usize>, Option<(usize, usize)>)>) -> bool {
+    match o {
+        Some((_, e, s, _)) => e.is_some() || s.is_some(),
+        None => true,
+    }
+}
+
+/// F2 (RC2a): the topological ghost is never stricter than the slot search. Wherever the search
+/// finds a path, the ghost finds one too; where the search's path crosses only fitting, passable
+/// edges and free sites, the ghost's has no soft element at all.
+#[test]
+fn ghost_is_never_stricter_than_search() {
+    let ctx = Ctx::new();
+    // (1) Two 0.6 x 0.3 mm rect SMD pads of one net on F.Cu, 10 mm apart: the search leaves a pad
+    // through the pad's own polygon edges (statically unfit for the pad's own net: the corner
+    // vertices count as clearance gaps), crossed as overuse. The geometric ghost treated every
+    // unfit edge as hard and found no path at all (dcsgone: ghost None for 166 of 231).
+    let m = model_raw(
+        &[
+            rect_pad_json("a", 1, 10.0, 10.0, 0.6, 0.3),
+            rect_pad_json("b", 1, 20.0, 10.0, 0.6, 0.3),
+        ],
+        "",
+    );
+    let terms = [
+        (term("a", 1, 10.0, 10.0), vec![0]),
+        (term("b", 1, 20.0, 10.0), vec![0]),
+    ];
+    let b = build_terms(&m, Vec::new(), &terms);
+    let va = b.mg.vertex_of(0, terms[0].0.at).expect("a");
+    let vb = b.mg.vertex_of(0, terms[1].0.at).expect("b");
+    let c = conn(0, 1, "a", "b");
+    let g0 = &b.mg.layers[0].g;
+    let spokes: Vec<usize> = g0
+        .faces_of_vertex(va)
+        .iter()
+        .flat_map(|&f| g0.faces[f].e)
+        .collect();
+    assert!(
+        spokes.iter().all(|&e| !g0.fits(e, 250_000.0, 200_000.0)),
+        "every edge around the rect pad centre is unfit for its own net"
+    );
+    let start = [(0, va)];
+    let g = goal(&[(0, vb)]);
+    let found_p = found(search(&b.mg, &b.obs, &c, &start, &g, &ctx.params()));
+    assert!(found_p.legs[0].crossings.len() >= 2, "{found_p:?}");
+    let gh = ghost(&b.mg, &b.obs, &c, &start, &g, &ctx.params());
+    let Some((gp, be, bs, _)) = &gh else {
+        panic!("the ghost must find the path the search found");
+    };
+    assert_eq!(*bs, None);
+    let (li, e) = be.expect("the first soft element is a pad-polygon edge");
+    assert_eq!(li, 0);
+    assert!(!g0.fits(e, 250_000.0, 200_000.0) && g0.passable(e, 1), "e{e}");
+    assert!(gp.est_len >= 10.0 * MM - 1.0 && gp.est_len < 10.5 * MM, "{}", gp.est_len);
+    assert_eq!(gp.candidates, 0, "no clearance candidates in the topological ghost");
+
+    // (2) THT pads with F.Cu walled off: the search goes B.Cu without a via; so does the ghost,
+    // with no soft element and the straight length (the F.Cu wall gaps are soft, B.Cu is free).
+    let mut pads = vec![
+        p("a", 1, 10.0, 10.0, 1.0, Kind::Tht),
+        p("b", 1, 40.0, 10.0, 1.0, Kind::Tht),
+    ];
+    pads.extend(wall(25.0, 0));
+    let m = model(&pads, "");
+    let b = build(&m, vec![site(20.0, 20.0), site(30.0, 20.0)]);
+    let start: Vec<(usize, usize)> = (0..2).map(|l| (l, vert(&b, l, "a"))).collect();
+    let g = goal(&(0..2).map(|l| (l, vert(&b, l, "b"))).collect::<Vec<_>>());
+    let found_p = found(search(&b.mg, &b.obs, &c, &start, &g, &ctx.params()));
+    assert_eq!(found_p.legs[0].layer_idx, 1);
+    let gh = ghost(&b.mg, &b.obs, &c, &start, &g, &ctx.params());
+    assert!(!ghost_soft(&gh), "{gh:?}");
+    let gp = gh.unwrap().0;
+    assert_eq!((gp.legs.len(), gp.legs[0].layer_idx, gp.vias()), (1, 1, 0));
+    assert!((gp.est_len - 30.0 * MM).abs() < 1.0, "{}", gp.est_len);
+
+    // (3) SMD F.Cu -> SMD B.Cu: one via for both.
+    let m = model(
+        &[
+            p("a", 1, 10.0, 10.0, 1.0, Kind::F),
+            p("b", 1, 40.0, 10.0, 1.0, Kind::B),
+        ],
+        "",
+    );
+    let b = build(&m, vec![site(25.0, 12.0), site(25.0, 30.0)]);
+    let start = [(0, vert(&b, 0, "a"))];
+    let g = goal(&[(1, vert(&b, 1, "b"))]);
+    let found_p = found(search(&b.mg, &b.obs, &c, &start, &g, &ctx.params()));
+    assert_eq!(found_p.vias(), 1);
+    let gh = ghost(&b.mg, &b.obs, &c, &start, &g, &ctx.params());
+    assert!(!ghost_soft(&gh), "{gh:?}");
+    let gp = gh.unwrap().0;
+    assert_eq!((gp.vias(), gp.legs.len(), gp.sites[0].0), (1, 2, 0));
+    assert!(gp.est_len < 31.0 * MM && gp.est_len > 30.0 * MM, "{}", gp.est_len);
+
+    // (4) F.Cu -> F.Cu behind a full F.Cu wall at `max_vias 2`: down and up again.
+    let m = model(
+        &[
+            p("a", 1, 10.0, 10.0, 1.0, Kind::F),
+            p("b", 1, 40.0, 10.0, 1.0, Kind::F),
+        ],
+        &kept_wall(25.0, &[(0.0, 40.0)]),
+    );
+    let b = build(&m, vec![site(16.0, 12.0), site(34.0, 12.0)]);
+    let start = [(0, vert(&b, 0, "a"))];
+    let g = goal(&[(0, vert(&b, 0, "b"))]);
+    let mut ctx2 = Ctx::new();
+    ctx2.max_vias = 2;
+    let found_p = found(search(&b.mg, &b.obs, &c, &start, &g, &ctx2.params()));
+    assert_eq!(found_p.vias(), 2);
+    let gh = ghost(&b.mg, &b.obs, &c, &start, &g, &ctx2.params());
+    assert!(!ghost_soft(&gh), "{gh:?}");
+    let gp = gh.unwrap().0;
+    assert_eq!(gp.vias(), 2);
+    assert_eq!(
+        gp.legs.iter().map(|l| l.layer_idx).collect::<Vec<_>>(),
+        vec![0, 1, 0]
+    );
+    // at `max_vias 1` the wall can only be crossed softly (through the kept track)
+    let gh1 = ghost(&b.mg, &b.obs, &c, &start, &g, &ctx.params());
+    let _ = gh1;
+}
+
+/// F2: the topological ghost is a Dijkstra over `(layer, edge, dir, vias)` with no geometry:
+/// on a board of ~1k faces per layer it pops well under 50 k nodes and examines no clearance
+/// candidate at all (the geometric ghost visited the whole reachable component with
+/// `O(V)` candidates per chord before conceding).
+#[test]
+fn ghost_cost_is_linear() {
+    let mut pads = vec![
+        p("a", 1, 2.0, 2.0, 1.0, Kind::F),
+        p("b", 1, 48.0, 38.0, 1.0, Kind::B),
+    ];
+    for j in 0..19 {
+        for i in 0..25 {
+            pads.push(p(
+                &format!("x{i}_{j}"),
+                3 + (i + 25 * j) as i32,
+                4.0 + 1.75 * i as f64,
+                4.0 + 1.75 * j as f64,
+                1.0,
+                if (i + j) % 2 == 0 { Kind::F } else { Kind::Tht },
+            ));
+        }
+    }
+    let m = model(&pads, "");
+    let sites: Vec<ViaSite> = (0..6)
+        .map(|k| site(5.0 + 7.0 * k as f64, 2.2))
+        .chain((0..6).map(|k| site(6.0 + 7.0 * k as f64, 38.5)))
+        .collect();
+    let b = build(&m, sites);
+    let faces: usize = b.mg.layers.iter().map(|l| l.g.faces.len()).sum();
+    assert!(faces >= 1000, "faces {faces}");
+    let c = conn(0, 1, "a", "b");
+    let start = [(0, vert(&b, 0, "a"))];
+    let g = goal(&[(1, vert(&b, 1, "b"))]);
+    let ctx = Ctx::new();
+    let t = Instant::now();
+    let (gp, be, bs, _) = ghost(&b.mg, &b.obs, &c, &start, &g, &ctx.params()).expect("ghost");
+    let dt = t.elapsed();
+    assert_eq!((be, bs), (None, None), "{gp:?}");
+    assert!(gp.vias() >= 1);
+    assert!(gp.expansions < 50_000, "pops {}", gp.expansions);
+    assert_eq!(gp.candidates, 0);
+    assert!(dt.as_secs_f64() < 2.0, "{dt:?}");
+    let (g2, ..) = ghost(&b.mg, &b.obs, &c, &start, &g, &ctx.params()).unwrap();
+    assert_eq!(
+        (g2.expansions, g2.est_len.to_bits(), g2.sites.clone()),
+        (gp.expansions, gp.est_len.to_bits(), gp.sites.clone())
+    );
 }

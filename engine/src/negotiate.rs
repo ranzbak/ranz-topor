@@ -13,8 +13,11 @@
 //! The absurd-detour ghost is
 //! computed in the parallel phase and reused while its own faces are unchanged. A connection
 //! whose ghost finds no path at all is blocked by hard geometry alone and is never searched
-//! again (`dead`). Every decision is a function of the (deterministic) search results, so the
-//! outcome does not depend on the thread count.
+//! again (`dead`). Rip-up is damped (F2, scaling diagnosis RC-A2): a connection rips a given
+//! blocker at most [`RIP_PAIR_CAP`] times per run, so two connections that keep ripping each
+//! other out of a shared class stop after a bounded exchange and the history they left decides.
+//! Every decision is a function of the (deterministic) search results, so the outcome does not
+//! depend on the thread count.
 //! No `HashMap` iteration reaches any output; the wall clock is checked before every search.
 
 use crate::decompose::{order, Connection};
@@ -41,6 +44,12 @@ pub const PRESENT_OVERUSE: f64 = crate::search::PRESENT_OVERUSE;
 pub const DETOUR_FACTOR: f64 = 2.0;
 /// Most blockers one connection rips per iteration (keeps the churn bounded).
 pub const MAX_RIP: usize = 3;
+/// Damping (F2, scaling diagnosis RC-A2): a connection rips a given blocker at most this many
+/// times per run. One exchange leaves only `HIST_BLOCK` on the blocker's class, too little to
+/// settle a three-way contention (the F.Cu-only eprom board loses +5V with a cap of 1); three
+/// leave `3 * HIST_BLOCK = 1.5`, the scale of one failure (`HIST_FAIL`). Total rips per run are
+/// then bounded by `RIP_PAIR_CAP * m^2` whatever the length comparisons do.
+pub const RIP_PAIR_CAP: u32 = 3;
 
 /// Clinches found in a routing: `(conn, edge)` pairs (edges of the layer graphs, all layers).
 #[derive(Clone, Debug, Default, Serialize)]
@@ -95,6 +104,9 @@ pub struct Negotiator {
     /// (every dynamic quantity - capacity, strands, owned sites, history - is soft in the ghost),
     /// so they are blocked in every later iteration and are not searched again.
     dead: BTreeSet<usize>,
+    /// Rips per `(ripper, blocker)` pair so far: at most [`RIP_PAIR_CAP`] per run (damping,
+    /// design note §7 amendment).
+    rip_pairs: BTreeMap<(usize, usize), u32>,
     cur: Vec<Option<SlotPath>>,
 }
 
@@ -118,8 +130,14 @@ impl Negotiator {
             iteration: 0,
             pending_rip: BTreeSet::new(),
             dead: BTreeSet::new(),
+            rip_pairs: BTreeMap::new(),
             cur: vec![None; conns],
         }
+    }
+
+    /// The connection is blocked by static facts alone and is not searched again.
+    pub fn is_dead(&self, conn: usize) -> bool {
+        self.dead.contains(&conn)
     }
 
     /// One PathFinder iteration over the `active` connections (indices into `conns`; the others
@@ -398,13 +416,23 @@ impl Negotiator {
     /// Topological rip-up bookkeeping for connection `i` whose ghost path is blocked by the
     /// strands / vias of the connections `blockers`: history on the blockers' leg edges and
     /// sites, a bump for `i` when `bump` (a blocked connection is bumped by `penalise_blocked`).
-    /// `false` (nothing done) when there is no blocker or more than [`MAX_RIP`].
+    /// `false` (nothing done) when there is no blocker, more than [`MAX_RIP`], or one that `i`
+    /// has already ripped [`RIP_PAIR_CAP`] times in this run (damping: without a bound two
+    /// connections sharing one class rip each other every iteration until the stall stop,
+    /// scaling diagnosis RC-A2; the history they leave behind decides the class for whoever is
+    /// searched next).
     fn rip(&mut self, mg: &MultiGraph, i: usize, blockers: &[usize], bump: bool) -> bool {
         let b: Vec<usize> = blockers.iter().copied().filter(|&x| x != i).collect();
-        if b.is_empty() || b.len() > MAX_RIP {
+        if b.is_empty()
+            || b.len() > MAX_RIP
+            || b
+                .iter()
+                .any(|&x| self.rip_pairs.get(&(i, x)).is_some_and(|&n| n >= RIP_PAIR_CAP))
+        {
             return false;
         }
         for &x in &b {
+            *self.rip_pairs.entry((i, x)).or_insert(0) += 1;
             self.add_conn_history(mg, x, HIST_BLOCK, HIST_SITE);
         }
         if bump {

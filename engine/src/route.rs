@@ -48,8 +48,8 @@ use crate::negotiate::{
 use crate::obstacle::{ObstacleSet, TerminalObstacle};
 use crate::relax::{corridor_static, relax, Relaxer, RunOpts, SlotNesting, ZeroSlack};
 use crate::search::{
-    default_expansion_cap, search, tier_weight, via_weight, Goal, SearchOutcome, SearchParams,
-    SlotPath,
+    default_expansion_cap, ghost, search, tier_weight, via_weight, Goal, SearchOutcome,
+    SearchParams, SlotPath,
 };
 use crate::sketch::{
     build_layer_cdt_masked, sketch_from_crossings, stack_order, unanchored_bends, AnchorRef,
@@ -59,6 +59,7 @@ use crate::smooth::{deadline_after, hand_outside, outside_len, terminal_skeleton
 use crate::taut::TautError;
 use crate::vias::{via_sites, via_sizes, ViaSize};
 use crate::wires::{extract_wires, Terminal, Wire};
+use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -106,6 +107,10 @@ pub struct ConnReport {
     /// Face steps the geometric block probe ran for this connection (D9); `None` when it was
     /// not probed (ghost block on an edge, routed, or timed out first). At most `PROBE_STEP_CAP`.
     pub probe_steps: Option<usize>,
+    /// Detour reference (ruling M3-R11): `est_len` of the topological ghost on the empty graph
+    /// (no other connection present, same layers and via rules), nm; `null` when the connection
+    /// was never searched or the ghost found no path (unreachable goal, deadline).
+    pub ghost_len_nm: Option<i64>,
 }
 
 /// A connection the zero-slack retry routed with margin 0 against its corridor (R6).
@@ -2186,6 +2191,8 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
     let mut blocks: BTreeMap<usize, Blk> = BTreeMap::new();
     let mut zs_wires: Vec<usize> = Vec::new();
     let mut n_sites = 0usize;
+    // Detour reference per live connection (M3-R11): the ghost on the empty graph.
+    let mut ghost_ref: Vec<Option<f64>> = vec![None; m];
     let mut via_status: String = if opts.via_reduction { "not run" } else { "off" }.into();
     let mut zs_status: String = if opts.zero_slack_retry {
         "not run"
@@ -2372,6 +2379,34 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
                     goals: &goals,
                     nets: live.iter().map(|c| c.net).collect(),
                 };
+                // Static ghost per connection on the empty graph, in parallel, index order
+                // (deterministic: the ghost is a pure function of the frozen graph).
+                {
+                    let cap = default_expansion_cap(&mg);
+                    let (mg_ro, obs_ro) = (&mg, &obs);
+                    ghost_ref = (0..m)
+                        .into_par_iter()
+                        .map(|i| {
+                            if perm[i].is_some() {
+                                return None;
+                            }
+                            let c = &live[i];
+                            let params = SearchParams {
+                                history: &[],
+                                site_history: &[],
+                                weight: tier_weight(c.tier),
+                                present_overuse: PRESENT_OVERUSE,
+                                expansion_cap: cap,
+                                deadline,
+                                eps: None,
+                                via_cost: opts.via_cost_nm as f64 * via_weight(c.tier),
+                                max_vias: opts.max_vias_per_connection,
+                            };
+                            ghost(mg_ro, obs_ro, c, &starts[i], &goals[i], &params)
+                                .map(|(gp, ..)| gp.est_len)
+                        })
+                        .collect();
+                }
                 let mut neg = Negotiator::new(&mg, m);
                 let mut active: Vec<usize> = (0..m).filter(|&i| perm[i].is_none()).collect();
                 let (mut stuck, mut last_sig) = (0u32, None::<(usize, Vec<usize>)>);
@@ -2657,6 +2692,7 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
             iteration: 0,
             zero_slack: false,
             probe_steps: None,
+            ghost_len_nm: None,
         };
         if let Some(r) = &early[c.id] {
             rep.reason = r.clone();
@@ -2664,6 +2700,7 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
             rep.reason = s.clone();
         } else {
             let i = by_orig[&c.id];
+            rep.ghost_len_nm = ghost_ref[i].map(|l| l.round() as i64);
             match &best {
                 None => rep.reason = no_result.into(),
                 Some(b) => {

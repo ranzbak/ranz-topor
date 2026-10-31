@@ -264,3 +264,26 @@ free-list ids sorted; heap key total; `collect` in index order; no `HashMap` ite
   `Ctx` drops `obs` (passed explicitly, `&mut` only for activation).
 - **P8** Task 8: `SearchParams.via_cost` is the final per-via cost (caller multiplies `via_cost_nm · via_weight(tier)`; the
   reduction pass additionally `× REDUCTION_VIA_FACTOR`); `via_weight(0) = via_weight(1) = 2.0`.
+
+## Amendments (F2, 2026-10-31)
+
+- **§2 / §4 ghost (M3-R9):** the ghost is topological: a Dijkstra over `(layer, edge, dir, vias ≤ max_vias)` plus
+  `AtSite` nodes on the same adjacency, key `(soft, length)` lexicographic (`soft` = edge not passable or not fitting,
+  owned / blocked site; `length` = hops between edge points, the point of the edge nearest the straight line to the goal),
+  no `los`, no clearance candidates, no slots; only faces outside the outline are hard. `est_len` = funnel length of the
+  found crossing sequence (`sketch::funnel`, `O(k)`). Ghost crossings carry the slot `Cyc::cross_slot` would choose from
+  the previous crossing's gap (the append position where none is feasible), and `leg_strand_blockers` walks those slots:
+  the M2 routine assumed append slots everywhere and missed every strand that ends on the ghost's own exit edge (the
+  plus-board fixture `rip_up_ping_pong_is_damped`, wiccon's 0 rips). `GHOST_BLOCK_NM` is gone. Cost
+  `O(Σ_L E_L (max_vias + 1))` per run: dcsgone 976 → 33 ms/run, 0 candidates.
+- **§7 damping (RC-A2):** `Negotiator::rip` keeps `rip_pairs[(ripper, blocker)]`; a connection rips a given blocker at
+  most `RIP_PAIR_CAP = 3` times per run (both the absurd-detour rip and the blocked-ghost rip), so total rips are bounded
+  by `3·m²` whatever the length comparisons do. Why 3 and not 1: one exchange leaves `HIST_BLOCK = 0.5` on the blocker's
+  class, which does not settle a three-way contention (F.Cu-only eprom: with a cap of 1, +5V is left failing on its
+  zero-slack corridor, 26/27); three leave 1.5, the scale of one `HIST_FAIL`. The topological ghost itself already
+  removes the RC-A2 cycle (synth layers=1 n=1000: 17 → 9 iterations, converged, with no damping at all; the cap keeps 9).
+- **§5 report (M3-R11):** `ConnReport.ghost_len_nm` = `est_len` of the ghost on the empty graph (every live connection,
+  computed once in parallel, index order), `null` when never searched; the harness reports `length_nm / ghost_len_nm`.
+  It is not reused by the absurd-detour rule: that rule needs the ghost against the current graph for its blockers, and
+  a funnel length of a hop-sum-optimal sequence is not monotone in the occupancy, so a static reference would not keep
+  the rule's semantics.

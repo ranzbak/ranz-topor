@@ -4,6 +4,7 @@ use topor_engine::check::Checker;
 use topor_engine::geom::quant::TrackPrim;
 use topor_engine::geom::{dequantise, Vec2};
 use topor_engine::model::{BoardModel, ExistingCopper, Item, Options};
+use topor_engine::negotiate::RIP_PAIR_CAP;
 use topor_engine::obstacle::ObstacleSet;
 use topor_engine::route::{route, wire_stats, RouteResult};
 use topor_engine::sketch::{
@@ -972,4 +973,153 @@ fn single_layer_pour_target_keeps_via_sites() {
     assert_eq!(r.connections.len(), 1, "{:?}", r.connections);
     assert_eq!(r.connections[0].to.kind, "pour");
     assert!(r.sites >= 1, "pour completion needs sites, got {}", r.sites);
+}
+
+/// A plus-shaped board (two 3 mm bars crossing at (22, 22)): A (net 1) runs along the horizontal
+/// bar, B (net 2) along the vertical one. Each terminal is a rect pad taller than its bar, so the
+/// pad's own polygon (a constraint chain from outline to outline, hard for the other net) seals
+/// the arm end: neither connection can go round the other's pad, and the faces outside the
+/// outline are hard too. The one routed second is blocked, its ghost crosses the first, the
+/// first is ripped, and next iteration the roles swap.
+fn sealed_cross_model() -> BoardModel {
+    let pts: [(f64, f64); 12] = [
+        (20.5, 2.0),
+        (23.5, 2.0),
+        (23.5, 20.5),
+        (42.0, 20.5),
+        (42.0, 23.5),
+        (23.5, 23.5),
+        (23.5, 42.0),
+        (20.5, 42.0),
+        (20.5, 23.5),
+        (2.0, 23.5),
+        (2.0, 20.5),
+        (20.5, 20.5),
+    ];
+    let segs: Vec<String> = (0..12)
+        .map(|i| {
+            let (a, b) = (pts[i], pts[(i + 1) % 12]);
+            format!(
+                r#"{{ "kind": "seg", "a": [{}, {}], "b": [{}, {}] }}"#,
+                (a.0 * MM) as i64,
+                (-a.1 * MM) as i64,
+                (b.0 * MM) as i64,
+                (-b.1 * MM) as i64
+            )
+        })
+        .collect();
+    let rect = |r: &str, n: &str, net: i32, x: f64, y: f64, w: f64, h: f64| {
+        format!(
+            r#"{{ "uuid": "{r}{n}", "ref": "{r}", "number": "{n}", "net": {net},
+              "center": [{}, {}], "layers": [0],
+              "shapes": {{ "0": {{ "kind": "rect", "w": {}, "h": {} }} }} }}"#,
+            (x * MM) as i64,
+            (-y * MM) as i64,
+            (w * MM) as i64,
+            (h * MM) as i64
+        )
+    };
+    let pads = [
+        rect("A", "1", 1, 4.0, 22.0, 1.0, 4.0),
+        rect("A", "2", 1, 40.0, 22.0, 1.0, 4.0),
+        rect("B", "1", 2, 22.0, 4.0, 4.0, 1.0),
+        rect("B", "2", 2, 22.0, 40.0, 4.0, 1.0),
+    ];
+    let s = format!(
+        r#"{{ "layers": [ {{ "id": 0, "name": "F.Cu" }}, {{ "id": 31, "name": "B.Cu" }} ],
+          "nets": [ {{ "code": 1, "name": "N1" }}, {{ "code": 2, "name": "N2" }} ],
+          "pads": [ {} ], "outline": [ {} ],
+          "rules": {{ "default": {{ "clearance": 200000, "width": 250000 }}, "min_clearance": 0,
+            "hole_clearance": 250000, "edge_clearance": 500000 }} }}"#,
+        pads.join(","),
+        segs.join(",")
+    );
+    front_only(BoardModel::from_json(&s).unwrap_or_else(|e| panic!("{e}\n{s}")))
+}
+
+/// F2 damping (RC-A2): a connection rips a given blocker at most `RIP_PAIR_CAP` times per run.
+/// On the sealed cross A and B rip each other out of the only class every iteration (A routes,
+/// B is blocked and rips A; B routes, A is blocked and rips B; ...): the cap ends the exchange
+/// after exactly `2 * RIP_PAIR_CAP` iterations, every later iteration rips nothing, and the loop
+/// ends by the stall rule. Without the cap every iteration up to the stall stop rips. One routed,
+/// the other blocked, iteration count pinned, deterministic.
+#[test]
+fn rip_up_ping_pong_is_damped() {
+    let m = sealed_cross_model();
+    let o = Options {
+        profile: true,
+        ..opts()
+    };
+    let r = route(&m, &o);
+    assert_eq!((r.routed, r.failed), (1, 1), "{:?}", pat(&r));
+    let p = r.profile.as_ref().unwrap();
+    let rips: Vec<usize> = p.iter().map(|it| it.ripped).collect();
+    let n = 2 * RIP_PAIR_CAP as usize;
+    assert!(rips.len() > n, "{rips:?}");
+    assert!(rips[..n].iter().all(|&k| k > 0), "{rips:?}");
+    assert!(rips[n..].iter().all(|&k| k == 0), "ping-pong not damped: {rips:?}");
+    assert_eq!(r.iterations, 9, "{:?}", r.warnings);
+    assert!(
+        r.warnings.iter().any(|w| w.starts_with("stalled:")),
+        "{:?}",
+        r.warnings
+    );
+    let blocked = r.connections.iter().find(|c| c.status != "routed").unwrap();
+    assert!(blocked.reason.starts_with("blocked: no path"), "{blocked:?}");
+    clean(&m, &r);
+    // deterministic (the profile carries wall-clock seconds: compared without it)
+    let r2 = route(&m, &o);
+    let strip = |r: &RouteResult| {
+        let mut v = serde_json::to_value(r).unwrap();
+        let o = v.as_object_mut().unwrap();
+        o.remove("runtime_s");
+        o.remove("profile");
+        serde_json::to_string(&v).unwrap()
+    };
+    assert_eq!(strip(&r), strip(&r2));
+}
+
+/// F2 (ruling M3-R11): every connection reports `ghost_len_nm`, the funnel length of its
+/// topological ghost on the empty graph (no other connection present): the detour reference
+/// `length_nm / ghost_len_nm` of the harness. A straight pair reports its straight distance; a
+/// walled-off connection still has a ghost (through the wall, soft); a connection that cannot
+/// be searched reports `null`.
+#[test]
+fn ghost_len_reported_for_every_connection() {
+    let m = model(
+        &[
+            P("A", "1", 1, 10.0, 10.0, 1.0, "[0]"),
+            P("A", "2", 1, 30.0, 10.0, 1.0, "[0]"),
+        ],
+        "",
+    );
+    let r = route(&m, &opts());
+    let c = &r.connections[0];
+    assert_eq!(c.status, "routed");
+    assert_eq!(c.ghost_len_nm, Some(20_000_000));
+    assert_eq!(c.length_nm, 20_000_000);
+    let v: serde_json::Value = serde_json::from_str(&json_no_runtime(&r)).unwrap();
+    assert_eq!(v["connections"][0]["ghost_len_nm"], serde_json::json!(20_000_000));
+    // the wall board: the blocked connection still has a ghost length. The ghost minimises soft
+    // elements first: the wall track is a foreign constraint (soft), the 0.7 mm gap at the
+    // board edge fits the capacity model (the edge clearance is geometry, not capacity), so
+    // the reference is the way round the wall end, not the straight line through the wall.
+    let w = wall_model();
+    let rw = route(&w, &opts());
+    let b = rw.connections.iter().find(|c| c.status != "routed").unwrap();
+    let gl = b.ghost_len_nm.expect("ghost round the wall");
+    let straight = ((35.0 - 20.0f64).powi(2) + (28.0 - 20.0f64).powi(2)).sqrt() * MM;
+    assert!(gl as f64 > 2.0 * straight && (gl as f64) < 60.0 * MM, "{gl}");
+    // a pad on no routable layer: never searched, null
+    let n = model(
+        &[
+            P("A", "1", 1, 10.0, 10.0, 1.0, "[0]"),
+            P("A", "2", 1, 30.0, 10.0, 1.0, "[31]"),
+        ],
+        "",
+    );
+    let rn = route(&n, &opts());
+    assert_eq!(rn.connections[0].ghost_len_nm, None);
+    let v: serde_json::Value = serde_json::from_str(&json_no_runtime(&rn)).unwrap();
+    assert!(v["connections"][0]["ghost_len_nm"].is_null());
 }
