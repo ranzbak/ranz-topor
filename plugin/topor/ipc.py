@@ -149,6 +149,18 @@ class IpcBoard:
         self._kicad = kicad
         self._board = board
         self._net_names: dict = {}
+        self._nets: list | None = None  # one get_nets() answer per run (classes, rules and model share it)
+
+    @classmethod
+    def connect(cls, socket_path: str | None = None, token: str | None = None) -> "IpcBoard":
+        """Connect to the KiCad that launched the plugin (``KiCad(socket_path, kicad_token, client_name)``) and
+        fetch its board; raises (kipy ``ConnectionError`` / ``ApiError``) when the API is off or no board is open.
+        The only place the plugin creates a kipy connection (gate review MINOR 3). UNVERIFIED live. O(1) round
+        trips."""
+        from kipy import KiCad  # noqa: PLC0415
+
+        kicad = KiCad(socket_path=socket_path, kicad_token=token, client_name="topor")
+        return cls(kicad, kicad.get_board())
 
     @property
     def board(self):
@@ -184,17 +196,34 @@ class IpcBoard:
         return selection_from_kipy(items, refs)
 
     def read_model(self, rules: dict, pcb_copy: Path, *, layer_roles: dict | None = None) -> dict:
-        from .model_ipc import export_model_ipc  # B3
+        """``export_model_ipc`` with the shared net codes (:meth:`net_codes`) and the ``.kicad_dru`` of the
+        save_as COPY ("" when the copy has none; never the live project dir's file, gate review MINOR 13)."""
+        from . import model_ipc  # B3
 
-        model = export_model_ipc(self.board, self.board.get_project(), Path(pcb_copy).read_text(), rules,
-                                 name=self.board_name(), layer_roles=layer_roles)
+        pcb_copy = Path(pcb_copy)
+        dru = pcb_copy.with_suffix(".kicad_dru")
+        model = model_ipc.export_model_ipc(self.board, self.board.get_project(), pcb_copy.read_text(), rules,
+                                           name=self.board_name(), layer_roles=layer_roles,
+                                           dru_text=dru.read_text() if dru.is_file() else "",
+                                           net_codes=self.net_codes())
         self._net_names = {int(n["code"]): n["name"] for n in model.get("nets", [])}
         return model
 
+    def _net_list(self) -> list:
+        if self._nets is None:
+            self._nets = list(self.board.get_nets())
+        return self._nets
+
+    def net_codes(self) -> dict:
+        """Net name -> code (``toporlib.rules.net_codes_by_name``) of the board's net list, fetched once and
+        shared by :meth:`netclasses`, the rules (``run.resolve_rules``) and :meth:`read_model`. O(N log N)."""
+        from toporlib.rules import net_codes_by_name  # noqa: PLC0415
+
+        return net_codes_by_name([n.name for n in self._net_list()])
+
     def netclasses(self) -> tuple:
         classes = {nc.name: netclass_values(nc) for nc in self.board.get_project().get_net_classes()}
-        nets = list(self.board.get_nets())
-        of = {name: nc.name for name, nc in self.board.get_netclass_for_nets(nets).items()}
+        of = {name: nc.name for name, nc in self.board.get_netclass_for_nets(self._net_list()).items()}
         return classes, of
 
     def commit(self, req: CommitRequest) -> CommitResult:

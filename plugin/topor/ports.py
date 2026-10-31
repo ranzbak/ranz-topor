@@ -134,6 +134,11 @@ class BoardPort(Protocol):
     def netclasses(self) -> tuple:
         """(class name -> NetClassValues, net name -> class name)."""
 
+    def net_codes(self) -> dict | None:
+        """Net name -> code of the board's ONE net list, used for the rules' ``per_net`` keys and the model's
+        ``nets`` (gate review MINOR 13); None = the port's model carries its own codes (FakeBoard), the rules
+        then derive them from :meth:`netclasses`."""
+
     def commit(self, req: CommitRequest) -> CommitResult: ...
     def refill_zones(self) -> None: ...
     def run_action(self, action: str) -> None: ...

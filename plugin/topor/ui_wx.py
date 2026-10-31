@@ -135,6 +135,11 @@ WORDING: dict[str, dict[str, str]] = {
                                    "board as one undo step (Edit → Undo).",
         "done_rejected": "Nothing was changed on the board.",
         "done_cancelled": "Cancelled — nothing was changed on the board.",
+        "done_refill_hint": "Zones were not refilled: press B (Edit → Fill All Zones) to refill them — a separate "
+                            "undo step.",
+        "done_refilled": "Zones were refilled by topor — a second undo step: the first Edit → Undo reverts the refill, "
+                         "the next one the routes.",
+        "done_post_commit": "{message} {fix}",
         "report_dir_label": "Report folder",
         "report_dir": "{report_dir}",
         "open_report_folder": "Open report folder",
@@ -898,6 +903,15 @@ class DoneDialog(_Base):
         icon.SetToolTip("Information")
         body = wx.BoxSizer(wx.VERTICAL)
         body.Add(self.text(self, "report", name, text=msg, wrap_dip=420), 0, wx.BOTTOM, self.group)
+        if outcome == "accepted":
+            facts = getattr(report, "facts", None) or {}
+            if "zones_refilled" in facts:  # ruling C28
+                rid = "done_refilled" if facts["zones_refilled"] else "done_refill_hint"
+                body.Add(self.text(self, "report", rid, wrap_dip=420), 0, wx.BOTTOM, self.group)
+            for f in facts.get("post_commit_failed") or ():  # ruling C30: committed, then a step failed
+                body.Add(self.text(self, "report", "done_post_commit", wrap_dip=420,
+                                   text=W["done_post_commit"].format(message=f.message, fix=f.fix)),
+                         0, wx.BOTTOM, self.group)
         body.Add(self.text(self, "report", "report_dir_label"), 0, wx.BOTTOM, self.row)
         body.Add(self.mono_field(self, "report_dir", str(self.report_dir)), 0, wx.EXPAND)
         top = wx.BoxSizer(wx.HORIZONTAL)

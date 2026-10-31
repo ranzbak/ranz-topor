@@ -15,9 +15,12 @@ preview with Accept (default Reject); ``--selection`` is JSON ``{"pads": [["U1",
 present, else the defaults. Reports go to ``$TOPOR_REPORT_ROOT`` (default ``~/.cache/kicad/10.0/topor``). Run
 with ``PYTHONPATH`` containing the repo root and ``plugin/``.
 
-Exit codes: 0 = accepted / rejected / cancelled / aborted at pre-flight; 1 = error (engine mismatch, exception,
-Rust panic, ...). Every ``BaseException`` (incl. PyO3 ``PanicException``) goes to stderr + the crash log and
-gives exit 1 (31 section 6). Needs no pcbnew (M4-R1).
+Exit codes: 0 = accepted (also when a step after the commit failed: POST_COMMIT_STEP_FAILED) / rejected /
+cancelled / aborted at pre-flight; 1 = error, shown in an error dialog in GUI mode: ENGINE_VERSION,
+KICAD_API_CONNECT, REPORT_DIR_UNWRITABLE, INTERNAL (an exception, or a panic of the engine's routing thread, which
+``RouteJob.wait`` raises as ``RuntimeError``), ENGINE_UNRESPONSIVE (the engine ignored Cancel for
+``run.CANCEL_GRACE_S``). Every other ``BaseException`` (incl. PyO3 ``PanicException``) goes to stderr + the crash
+log and gives exit 1 (31 section 6). Needs no pcbnew (M4-R1); kipy only behind ``topor.ipc``.
 
 Complexity: O(1) glue around one ``run`` call.
 """
@@ -124,27 +127,42 @@ def run_headless(args, shipped_version: str | None, engine=None) -> int:
     return _exit_code(out)
 
 
-def run_gui(shipped_version: str | None, engine=None) -> int:
-    """UNVERIFIED without a running KiCad (GUI checklist)."""
-    import wx  # noqa: PLC0415
+def _fatal(ui, f: Finding) -> int:
+    """stderr + crash log + error dialog for an error before / outside ``run``; exit code 1."""
+    print(f"topor: {f.code}: {f.message} {f.fix}", file=sys.stderr)
+    crash_log(f"{f.code}: {f.message} {f.fix}")
+    ui.error(f)
+    return 1
 
-    from kipy import KiCad  # noqa: PLC0415
 
+def run_gui(shipped_version: str | None, engine=None, *, ui=None, connect=None) -> int:
+    """GUI mode: engine handshake, KiCad connection (``IpcBoard.connect`` over ``KICAD_API_SOCKET`` /
+    ``KICAD_API_TOKEN``), then ``run``. A failed handshake (ENGINE_VERSION) or connection (KICAD_API_CONNECT,
+    ruling C32) shows an error dialog and gives exit 1. `ui` / `connect` are test seams (a recording UI instead of
+    WxUi, no wx.App is created then; a function returning the BoardPort). UNVERIFIED without a running KiCad (GUI
+    checklist)."""
+    from . import messages
     from .ipc import IpcBoard
     from .run import run
-    from .ui_wx import WxUi
 
-    wx.App(False)  # KiCad runs the plugin as its own process: we own the wx.App
-    ui = WxUi()
+    if ui is None:
+        import wx  # noqa: PLC0415
+
+        from .ui_wx import WxUi
+
+        wx.App(False)  # KiCad runs the plugin as its own process: we own the wx.App
+        ui = WxUi()
     bad = handshake(shipped_version, engine)
     if bad is not None:
-        print(f"topor: {bad.message} {bad.fix}", file=sys.stderr)
-        crash_log(f"{bad.code}: {bad.message} {bad.fix}")
-        ui.error(bad)
-        return 1
-    kicad = KiCad(socket_path=os.environ.get("KICAD_API_SOCKET"), kicad_token=os.environ.get("KICAD_API_TOKEN"),
-                  client_name="topor")
-    board = IpcBoard(kicad, kicad.get_board())
+        return _fatal(ui, bad)
+    if connect is None:
+        def connect():
+            return IpcBoard.connect(os.environ.get("KICAD_API_SOCKET"), os.environ.get("KICAD_API_TOKEN"))
+    try:
+        board = connect()
+    except Exception as e:  # noqa: BLE001 - API off, KiCad still starting, no board open (kipy errors)
+        return _fatal(ui, Finding("KICAD_API_CONNECT", "error", f"Cannot connect to KiCad: {type(e).__name__}: {e}",
+                                  messages.fix_for("KICAD_API_CONNECT")))
     tmp = Path(tempfile.mkdtemp(prefix="topor-"))
     try:
         out = run(board, ui, None, engine, tmp_root=tmp)

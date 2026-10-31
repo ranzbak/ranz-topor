@@ -306,5 +306,41 @@ def test_scope_count_follows_radio_and_done_variants(app, tmp_path):
             dd.Destroy()
 
 
+def test_done_dialog_refill_hint_and_post_commit_warning(app, tmp_path):
+    """Ruling C28: after Accept the done notice says whether zones were refilled (press B when not); ruling C30:
+    a step that failed after the commit is shown there too."""
+    W = ui_wx.WORDING["report"]
+    cases = (({"zones_refilled": False}, "done_refill_hint"), ({"zones_refilled": True}, "done_refilled"))
+    for facts, wid in cases:
+        rep = FakeReport(tmp_path)
+        rep.facts = facts
+        dd = ui_wx.DoneDialog("accepted", rep, tmp_path)
+        try:
+            w = dd.widget(wid)
+            assert w is not None, wid
+            assert re.sub(r"\s+", " ", w.GetLabel()) == W[wid]
+            other = "done_refilled" if wid == "done_refill_hint" else "done_refill_hint"
+            assert dd.widget(other) is None
+        finally:
+            dd.Destroy()
+    assert "press B (Edit → Fill All Zones)" in W["done_refill_hint"]
+    rep = FakeReport(tmp_path)
+    rep.facts = {"zones_refilled": False, "post_commit_failed": [Finding(
+        "POST_COMMIT_STEP_FAILED", "warning", "The routes were committed, then zone refill failed: AS_BUSY.",
+        "Ctrl+Z (Edit → Undo) removes the routes.")]}
+    dd = ui_wx.DoneDialog("accepted", rep, tmp_path)
+    try:
+        w = dd.widget("done_post_commit")
+        assert w is not None and "zone refill failed: AS_BUSY" in re.sub(r"\s+", " ", w.GetLabel())
+        assert "Ctrl+Z" in re.sub(r"\s+", " ", w.GetLabel())
+    finally:
+        dd.Destroy()
+    dd = ui_wx.DoneDialog("rejected", rep, tmp_path)  # nothing applied: no refill hint
+    try:
+        assert dd.widget("done_refill_hint") is None and dd.widget("done_post_commit") is None
+    finally:
+        dd.Destroy()
+
+
 def test_elapsed_format_hours():
     assert ui_wx._fmt_time(72) == "1:12" and ui_wx._fmt_time(3725) == "1:02:05"

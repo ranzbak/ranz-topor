@@ -197,6 +197,70 @@ def test_ipcboard_save_copy_and_misc(tmp_path):
     assert "refill" in b.calls and k.actions == ["pcbnew.X"]
 
 
+class _NetBoard(_StubBoard):
+    """Stub with nets / net classes: `get_netclass_for_nets` only knows some nets (as KiCad may answer)."""
+
+    def __init__(self, tmp, nets, classed):
+        super().__init__(tmp)
+        self.nets, self.classed, self.net_calls = nets, classed, 0
+
+    def get_nets(self):
+        self.net_calls += 1
+        return [Net(name=n) for n in self.nets]
+
+    def get_net_classes(self):  # Project.get_net_classes (get_project() is the stub itself)
+        return []
+
+    def get_netclass_for_nets(self, nets):
+        class NC:
+            name = "Default"
+        return {n.name: NC() for n in nets if n.name in self.classed}
+
+
+def test_ipcboard_one_net_list_for_rules_and_model(tmp_path, monkeypatch):
+    """MINOR 13: the rules (run.resolve_rules) and the model (export_model_ipc) get net codes from ONE net
+    list (IpcBoard.net_codes), even when KiCad's net-class answer misses a net; export_model_ipc gets the dru
+    text of the save_as COPY, not of the live project dir."""
+    from topor import model_ipc, run as run_mod
+
+    live = tmp_path / "live"
+    live.mkdir()
+    (live / "b.kicad_dru").write_text('(version 1)\n(rule live_only (constraint clearance (min 9mm)))\n')
+    b = _NetBoard(live, ["VCC", "GND", "SIG", ""], classed={"VCC"})
+    ib = ipc.IpcBoard(_StubKiCad(), b)
+    assert ib.net_codes() == {"GND": 1, "SIG": 2, "VCC": 3}
+    copy_dir = tmp_path / "copy"
+    copy_dir.mkdir()
+    pcb = copy_dir / "b.kicad_pcb"
+    pcb.write_text('(kicad_pcb (version 20260206)\n\t(layers\n\t\t(0 "F.Cu" signal)\n\t\t(2 "B.Cu" signal)\n\t)\n)\n')
+    (copy_dir / "b.kicad_dru").write_text('(version 1)\n(rule copy_only (constraint clearance (min 0.3mm)))\n')
+    rules = run_mod.resolve_rules(ib, pcb, pcb.read_text())
+    assert sorted(rules["per_net"], key=int) == ["1", "2", "3"]  # every net, keyed by the shared codes
+    seen = {}
+
+    def fake_export(board, project, text, rules_, **kw):
+        seen.update(kw)
+        return {"nets": [{"code": c, "name": n} for n, c in kw["net_codes"].items()]}
+
+    monkeypatch.setattr(model_ipc, "export_model_ipc", fake_export)
+    ib.read_model(rules, pcb)
+    assert seen["net_codes"] == ib.net_codes()
+    assert seen["dru_text"] == (copy_dir / "b.kicad_dru").read_text() and "copy_only" in seen["dru_text"]
+    assert b.net_calls == 1  # one get_nets() answer serves the classes, the rules and the model
+    # a copy without .kicad_dru: "" (no custom rules), never the live project's file
+    (copy_dir / "b.kicad_dru").unlink()
+    ib.read_model(rules, pcb)
+    assert seen["dru_text"] == ""
+
+
+def test_ipcboard_connect_reports_connection_error(tmp_path):
+    """MINOR 3: the KiCad connection is made in ipc.py; a missing API socket raises (fast) from connect()."""
+    from kipy.errors import ConnectionError as KipyConnectionError
+
+    with pytest.raises(KipyConnectionError, match="Failed to connect to KiCad"):
+        ipc.IpcBoard.connect(socket_path=f"ipc://{tmp_path / 'nothing.sock'}", token="t")
+
+
 @pytest.mark.skipif(not os.environ.get("KICAD_API_SOCKET"), reason="needs a running KiCad (KICAD_API_SOCKET)")
 def test_ipc_live_smoke(tmp_path):
     from kipy import KiCad

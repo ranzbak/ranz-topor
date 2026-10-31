@@ -470,6 +470,20 @@ def test_export_model_ipc_end_to_end_and_engine_loads_it(engine):
     assert rep["checked"] == 0
 
 
+def test_export_model_ipc_uses_the_given_net_codes():
+    """MINOR 13: the caller passes ONE net-code table to the rule resolver and the exporter."""
+    board = stub_board()
+    codes = {"GND": 5, "VCC": 7}
+    rules = R.resolve_rules_from_project({}, None, netclass_of={}, classes={}, widths_before={}, net_codes=codes)
+    m = M.export_model_ipc(board, StubProject(), LAYERS_4.replace("power", "signal").replace(
+        '(6 "In2.Cu" signal) ', "").replace('(4 "In1.Cu" signal) ', ""), rules, name="stub.kicad_pcb",
+        layer_roles={}, dru_text="", net_codes=codes)
+    assert m["nets"] == [{"code": 5, "name": "GND"}, {"code": 7, "name": "VCC"}]
+    assert sorted(m["rules"]["per_net"]) == ["5", "7"]
+    assert {p["net"] for p in m["pads"]} <= {0, 5, 7} and m["kept"][0]["net"] == 5
+    assert m["pours"][0]["net"] == 5 and m["pours"][0]["pads"] == ["R1.1"]
+
+
 def test_export_model_ipc_via_free_is_the_kicad_flag():
     """Ruling C23: ``free`` comes from the save_as copy text; a via the copy does not list is free (unsure ->
     fixed obstacle, never ripped). The old "no track end touches it" guess is gone: the stub's via has no track."""

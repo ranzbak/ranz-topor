@@ -75,6 +75,9 @@ class FakeBoard:
         self.calls.append(("netclasses", ()))
         return self.netclass_value
 
+    def net_codes(self) -> dict | None:
+        return None  # the fixed model carries its own codes (and rules)
+
     def commit(self, req: CommitRequest) -> CommitResult:
         self.calls.append(("commit", (req,)))
         self.commits.append(req)

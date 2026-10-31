@@ -59,6 +59,23 @@ def test_report_sections_present_and_values(tmp_path):
     assert (tmp_path / "result.json").is_file()
 
 
+def test_report_outcome_line_says_how_zones_are_refilled(tmp_path):
+    """Ruling C28: the summary's Outcome line after Accept tells the user to press B when topor did not refill
+    (run.refill_after_accept = false, the default) and that the refill is a second undo step when it did."""
+    from topor.report import RunReport, outcome_text
+
+    rep = RunReport(tmp_path, {"zones_refilled": False})
+    rep.set_outcome("accepted")
+    line = [ln for ln in rep.summary_lines() if ln.startswith("Outcome:")][0]
+    assert line.startswith(f"Outcome: {outcome_text('accepted')}") and "press B (Edit → Fill All Zones)" in line
+    rep.facts["zones_refilled"] = True
+    line = [ln for ln in rep.summary_lines() if ln.startswith("Outcome:")][0]
+    assert "zones refilled" in line and "second undo step" in line
+    rep.set_outcome("rejected")
+    line = [ln for ln in rep.summary_lines() if ln.startswith("Outcome:")][0]
+    assert line == f"Outcome: {outcome_text('rejected')}"
+
+
 def test_report_summary_lines_le_20(tmp_path):
     res = _result(2000)
     res["connections"] += [_conn(1000 + i, "failed", f"NET{i}", reason="x" * 200) for i in range(500)]

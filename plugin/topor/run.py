@@ -2,7 +2,9 @@
 DRC loop on the copy -> SVG preview -> Accept = one commit / Reject = nothing -> report folder.
 
 ``run(port, ui, cfg, engine, *, tmp_root)`` never touches the live board except in the Accept branch, which is
-exactly one ``port.commit`` followed by ``refill_zones`` and the optional KiCad cleanup / teardrop actions. Every
+exactly one ``port.commit`` (= one undo step), followed only on request by ``refill_zones``
+(``run.refill_after_accept``, default false: the user presses B) and the KiCad cleanup / teardrop actions, each its
+own undo step (ruling C28); a failure after the commit keeps ``accepted`` + POST_COMMIT_STEP_FAILED (C30). Every
 board that is judged or rendered derives from the ``save_as`` copy (live, including unsaved edits), never from
 the file on disk (Review Focus 2). No pcbnew (M4-R1).
 
@@ -42,11 +44,13 @@ from toporlib import rules as rules_mod
 from toporlib.drc import classify, run_drc
 from toporlib.drcloop import DrcJudgement
 
+from . import messages
 from . import preflight as preflight_mod
 from . import preview as preview_mod
 from .config import CONFIG_NAME, Config, load_config, update_config
 from .findings import Finding
 from .layers import resolve_layer_roles
+from .pourreach import dangling_ends, pour_reach
 from .priority import net_priorities
 from .ports import BoardPort, CommitRequest, CommitResult, Decision, Progress, RunSummary, Selection, UiPort
 from .report import RunReport, before_stats_from_model, build_report
@@ -57,7 +61,14 @@ ACTION_CLEANUP = "pcbnew.GlobalEdit.cleanupTracksAndVias"
 ACTION_TEARDROPS = "pcbnew.GlobalEdit.editTeardrops"
 POLL_S = 0.25
 NO_BUDGET_S = 1.0e9  # timeout_s = 0: the DRC loop gets no budget cut; drc_loop_cap still bounds it
+#: After the user's Cancel the engine gets this long to reach a stop check and end its thread; then the run ends
+#: with ENGINE_UNRESPONSIVE instead of polling for ever (gate review B-1, ruling C31). Internal, not a toml key.
+CANCEL_GRACE_S = 30
 _ROUTE_OVERRIDES = ("scope_mode", "existing_copper", "respect_locked", "partial_routes", "timeout_s", "threads")
+
+
+class EngineUnresponsive(RuntimeError):
+    """The engine did not finish within CANCEL_GRACE_S after Cancel (-> ENGINE_UNRESPONSIVE)."""
 
 
 @dataclass
@@ -84,6 +95,7 @@ class RunOutcome:
     wall_s: float = 0.0
     work_dir: Path | None = None
     pcb_copy: Path | None = None
+    refilled_pcb: Path | None = None  # kicad-cli refilled copy of the untouched board (original DRC, ruling C29)
     ripped_pcb: Path | None = None
     routed_pcb: Path | None = None
     via_fallback: dict | None = None  # apply_via_fallback info when VIA_NOT_SET_UP patched the engine rules
@@ -135,12 +147,13 @@ def filter_model(model: dict, ripped) -> dict:
 
 
 def refill_pours(model: dict, refilled_text: str) -> dict:
-    """The model with pour fills, pour reach (pads / vias) and dangling ends recomputed from the refilled ripped
-    copy, matching the harness order rip -> refill -> export (ruling C20). Zones are matched by uuid; a zone
-    that is absent from the file or has no filled polygons keeps its model fill (warning in `notes`).
-    Same functions as the IPC exporter (model_ipc.pour_reach / dangling_ends). O(F * (pads + vias))."""
-    from .model_ipc import dangling_ends, pour_reach  # noqa: PLC0415 - imports kipy
-
+    """The model with pour fills, pour reach (pads / vias) and dangling ends recomputed from a kicad-cli REFILLED
+    copy: the ripped copy (harness order rip -> refill -> export, ruling C20) or, when nothing is ripped, the
+    untouched copy refilled by the original DRC (ruling C29), so the engine never sees the live board's possibly
+    stale fills. Zones are matched by uuid. A zone that the refilled file lists WITHOUT filled polygons on its
+    layers keeps its old fill only as an obstacle (a superset of no copper) and reaches nothing (M4-R8: "not
+    reached"; `warning` says so); a zone absent from the file keeps its model entry. Same functions as the IPC
+    exporter (``topor.pourreach``; no kipy). O(F * (pads + vias))."""
     fills = pcbfile.parse_zone_fills(refilled_text)
     ids = {l["name"]: int(l["id"]) for l in model.get("layers", [])}
     pours = []
@@ -149,7 +162,11 @@ def refill_pours(model: dict, refilled_text: str) -> dict:
         fl = [{"layer": ids[q["layer"]], "outer": q["pts"], "holes": []} for q in polys
               if q["layer"] in ids and ids[q["layer"]] in p["layers"]]
         if not fl:
-            pours.append(p)
+            if p["uuid"] in fills:  # refilled, but nothing filled: connects nothing
+                pours.append({**p, "pads": [], "vias": [],
+                              "warning": "no fill after the kicad-cli refill; old fill kept as obstacle, reaching nothing"})
+            else:
+                pours.append(p)
             continue
         rp, rv = pour_reach(p["net"], p["layers"], fl, model["pads"], model["vias"])
         pours.append({k: v for k, v in {**p, "fills": fl, "pads": rp, "vias": rv}.items() if k != "warning"})
@@ -266,14 +283,19 @@ def widths_before(text: str) -> dict:
 
 
 def resolve_rules(port: BoardPort, pcb_copy: Path, copy_text: str) -> dict:
-    """Rules from the copy's .kicad_pro + .kicad_dru and the port's net classes (toporlib.rules). O(N * R)."""
+    """Rules from the copy's .kicad_pro + .kicad_dru and the port's net classes (toporlib.rules). The ``per_net``
+    keys use the port's ONE net-code table (``port.net_codes()``, the same the model is exported with; gate
+    review MINOR 13); a port without one (FakeBoard: its model carries codes and rules) lets the resolver derive
+    them from the net classes. O(N * R)."""
     pro_p, dru_p = pcb_copy.with_suffix(".kicad_pro"), pcb_copy.with_suffix(".kicad_dru")
     pro = json.loads(pro_p.read_text()) if pro_p.is_file() else {}
     dru = dru_p.read_text() if dru_p.is_file() else None
     classes, of = port.netclasses()
+    codes = port.net_codes() if hasattr(port, "net_codes") else None
     n_cu = max(2, len(pcbfile.parse_layers(copy_text)))
     return rules_mod.resolve_rules_from_project(pro, dru, netclass_of=of, classes=classes,
-                                                widths_before=widths_before(copy_text), copper_layer_count=n_cu)
+                                                widths_before=widths_before(copy_text), copper_layer_count=n_cu,
+                                                net_codes=codes)
 
 
 def _variant(src_pcb: Path, text: str, out_dir: Path) -> Path:
@@ -320,7 +342,10 @@ def run(port: BoardPort, ui: UiPort, cfg: Config | None = None, engine=None, *, 
     project directory (first run: ``ui.first_run_notice``); `engine` defaults to ``topor_engine``.
 
     Returns a :class:`RunOutcome`; exceptions (not BaseException: the PyO3 panic is caught by ``app.main``) are
-    shown with ``ui.error`` and give ``status == "error"``."""
+    shown with ``ui.error`` and give ``status == "error"`` (INTERNAL; ENGINE_UNRESPONSIVE when the engine ignored
+    Cancel), except after a successful commit: then the status stays ``accepted`` with the POST_COMMIT_STEP_FAILED
+    warning (ruling C30). A report folder that cannot be created / written is the REPORT_DIR_UNWRITABLE error
+    before the board is read (ruling C32)."""
     t0 = time.monotonic()
     if engine is None:
         import topor_engine as engine  # noqa: PLC0415
@@ -334,12 +359,22 @@ def run(port: BoardPort, ui: UiPort, cfg: Config | None = None, engine=None, *, 
             if f.code == "CFG_CREATED":
                 ui.first_run_notice(project_dir / CONFIG_NAME)
     ts = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
-    report_dir = _unique(cfg.report_dir_for(project_dir, board_name, ts))
-    report_dir.mkdir(parents=True, exist_ok=True)
-    log = _Log(report_dir / "log.txt")
     ver = dict(versions or {})
     ver.setdefault("plugin", CURRENT_VERSION)
     ver.setdefault("engine", str(engine.version()) if hasattr(engine, "version") else "?")
+    report_dir = cfg.report_dir_for(project_dir, board_name, ts)
+    try:
+        report_dir = _unique(report_dir)
+        report_dir.mkdir(parents=True, exist_ok=True)
+        log = _Log(report_dir / "log.txt")
+    except OSError as e:  # ruling C32: an error dialog, never a silent end
+        err = Finding("REPORT_DIR_UNWRITABLE", "error",
+                      f"The report folder {report_dir} could not be created or written: {type(e).__name__}: {e}",
+                      messages.fix_for("REPORT_DIR_UNWRITABLE"), (str(report_dir),))
+        findings.append(err)
+        ui.set_context(board=board_name, report_dir=None, log_path=None, versions=ver)
+        ui.error(err)
+        return RunOutcome("error", findings=findings, error=err, wall_s=time.monotonic() - t0)
     report = RunReport(report_dir, {"version": ver["engine"], "board": board_name, "timestamp": ts,
                                "versions": dict(ver)})
     out = RunOutcome("error", report=report, report_dir=report_dir, findings=findings)
@@ -353,13 +388,28 @@ def run(port: BoardPort, ui: UiPort, cfg: Config | None = None, engine=None, *, 
     except Exception as e:  # noqa: BLE001 - reported, never crashes the host
         log.exc()
         log.line(f"error: {type(e).__name__}: {e}")
-        out.status = "error"
         out.wall_s = time.monotonic() - t0
-        out.error = Finding("INTERNAL", "error", f"{type(e).__name__}: {e}",
-                            f"see {report_dir / 'log.txt'}; file a bug with the save_as copy (docs/dev/debug.md)")
+        if out.commit is not None:  # ruling C30: the board WAS changed -> still accepted, with a warning
+            w = post_commit_finding("a step after the commit", e)
+            out.findings.append(w)
+            out.status = "accepted"
+            report.facts["post_commit_failed"] = report.facts.get("post_commit_failed", []) + [w]
+            try:
+                report.write(result=_facts_result("accepted", out, None))
+            except Exception:  # noqa: BLE001
+                log.exc()
+            ctx()
+            ui.error(w)
+            return out
+        out.status = "error"
+        if isinstance(e, EngineUnresponsive):
+            out.error = Finding("ENGINE_UNRESPONSIVE", "error", str(e), messages.fix_for("ENGINE_UNRESPONSIVE"))
+        else:  # incl. the engine panic: RouteJob.wait raises RuntimeError("routing thread panicked: ...")
+            out.error = Finding("INTERNAL", "error", f"{type(e).__name__}: {e}", messages.fix_for("INTERNAL"))
+        code = out.error.code
         out.findings.append(out.error)
         report.facts["findings"] = out.findings
-        report.set_outcome("error", "INTERNAL")
+        report.set_outcome("error", code)
         try:
             report.write(result=_facts_result("error", out, None))
         except Exception:  # noqa: BLE001
@@ -367,6 +417,13 @@ def run(port: BoardPort, ui: UiPort, cfg: Config | None = None, engine=None, *, 
         ctx()
         ui.error(out.error)
         return out
+
+
+def post_commit_finding(step: str, e: BaseException) -> Finding:
+    """POST_COMMIT_STEP_FAILED (ruling C30): the routes were committed, then `step` failed. O(1)."""
+    return Finding("POST_COMMIT_STEP_FAILED", "warning",
+                   f"The routes were committed, then {step} failed: {type(e).__name__}: {e}",
+                   messages.fix_for("POST_COMMIT_STEP_FAILED"), (step,))
 
 
 def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, board_name, ts, t0) -> RunOutcome:
@@ -426,7 +483,12 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     orig_drc = None
     if not errors:
         emit("preflight_drc")
-        orig_drc = run_drc(pcb_copy, work / "drc-orig.json")
+        # ruling C29: this DRC refills the zones (--refill-zones) and saves the refilled board into its own file
+        # (the save_as copy stays as KiCad wrote it); the engine's pour fills / reach / dangling ends come from it,
+        # never from the live board's possibly stale fills. No extra kicad-cli run.
+        orig_pcb = _variant(pcb_copy, copy_text, work / "orig")
+        orig_drc = run_drc(orig_pcb, work / "drc-orig.json", save_board=True)
+        out.refilled_pcb = orig_pcb
         out.orig_drc = orig_drc
         log.line(f"DRC of the untouched copy: {len(orig_drc.violations)} violations, "
                  f"{len(orig_drc.unconnected)} unconnected, {orig_drc.seconds:.1f}s")
@@ -478,8 +540,10 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     out.base_drc = base_drc
     log.line(f"rip plan: {len(ripped)} items; baseline DRC {len(base_drc.violations)} violations, {len(base_drc.unconnected)} unconnected")
     eng_model = filter_model(model, ripped)
-    if ripped:
+    if ripped:  # ruling C20: the ripped copy refilled by its own DRC
         eng_model = refill_pours(eng_model, ripped_pcb.read_text())
+    elif out.refilled_pcb is not None:  # ruling C29: the untouched copy refilled by the original DRC
+        eng_model = refill_pours(eng_model, out.refilled_pcb.read_text())
 
     # 4. route + DRC loop
     opts = build_options(cfg, engine, plan=plan, rip=rip, model=model, priorities=priorities)
@@ -497,8 +561,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         if no_budget:
             o = {**o, "wall_clock_s": 0.0}
         job = engine.route_async(json.dumps(m), json.dumps(o))
-        last_poll, cancelled_job = -1e9, False
-        while True:
+        last_poll, cancelled_at = -1e9, None
+        while True:  # ends when the job is done (also after an engine panic: B-1) or CANCEL_GRACE_S after Cancel
             done = job.done()
             now = time.monotonic()
             if done or now - last_poll >= POLL_S:
@@ -507,13 +571,16 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                 state["last"] = p
                 if ui.progress(p) is False:
                     state["cancel"] = True
-                if state["cancel"] and not cancelled_job:
-                    cancelled_job = True
+                if state["cancel"] and cancelled_at is None:
+                    cancelled_at = now
                     job.cancel()
             if done:
                 break
+            if cancelled_at is not None and now - cancelled_at > CANCEL_GRACE_S:
+                log.line(f"engine did not stop within {CANCEL_GRACE_S} s after Cancel")
+                raise EngineUnresponsive(f"The routing engine did not stop within {CANCEL_GRACE_S} s after Cancel.")
             time.sleep(0.02)
-        res = json.loads(job.wait())
+        res = json.loads(job.wait())  # a panicked job raises RuntimeError("routing thread panicked: ...")
         items = res.get("items") or []
         if geometry == "segments":
             items = preview_mod.arcs_to_segments(items, max_err)
@@ -603,12 +670,33 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         ui.done("rejected", report, report_dir)
         return finish("rejected")
 
-    # 6. Accept: one commit, one undo step
+    # 6. Accept: one commit = one undo step. Everything after it is a separate step (ruling C28: refill only with
+    # run.refill_after_accept; cleanup / teardrops opt-in) and a failure there keeps "accepted" (ruling C30).
     n_partial = sum(1 for it in out.items if it.get("group") == "topor-partial")
     req = CommitRequest(remove_uuids=list(ripped), items=out.items,
                         message=f"Topor: routed {out.routed}/{out.total}", group=True)
     out.commit = port.commit(req)
-    port.refill_zones()
+    status = "accepted"
+    out.status = status
+    log.line(f"committed: {out.commit.removed} removed, {out.commit.created} created")
+    post_failed: list = []
+
+    def after_commit(step: str, fn) -> bool:
+        try:
+            fn()
+            return True
+        except Exception as e:  # noqa: BLE001 - the routes are on the board: report, never "not changed"
+            log.exc()
+            log.line(f"after the commit, {step} failed: {type(e).__name__}: {e}")
+            w = post_commit_finding(step, e)
+            findings.append(w)
+            post_failed.append(w)
+            report.facts["post_commit_failed"] = list(post_failed)
+            return False
+
+    report.facts["zones_refilled"] = False
+    if cfg.get("run", "refill_after_accept"):
+        report.facts["zones_refilled"] = after_commit("zone refill", port.refill_zones)
     skipped = []
     for key, action in (("kicad_cleanup", ACTION_CLEANUP), ("kicad_teardrops", ACTION_TEARDROPS)):
         if not cfg.get("run", key):
@@ -616,17 +704,21 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         if n_partial or partial:
             skipped.append(key)
         else:
-            port.run_action(action)
+            after_commit(f"the KiCad action {action}", lambda a=action: port.run_action(a))
     if skipped:
         findings.append(Finding("CLEANUP_SKIPPED_PARTIAL", "info",
                                 "KiCad cleanup / teardrops were skipped because the result has partial routes.",
                                 "Finish the partial connections by hand, then run KiCad → Tools → Cleanup Tracks & Vias "
                                 "yourself.", tuple(skipped)))
     report.facts["notes"] = report.facts["notes"] + list(out.commit.notes)
-    status = "accepted"
+    report.facts["findings"] = list(findings)  # incl. CLEANUP_SKIPPED_PARTIAL / POST_COMMIT_STEP_FAILED
     report.set_outcome(status)
     out.wall_s = time.monotonic() - t0
-    report.write(result=_facts_result(status, out, rr), drc_src=drc_src)
+    after_commit("writing the report", lambda: report.write(result=_facts_result(status, out, rr), drc_src=drc_src))
     ctx()
-    ui.done(status, report, report_dir)
+    if not after_commit("the done notice", lambda: ui.done(status, report, report_dir)):
+        try:
+            ui.error(post_failed[-1])  # the notice failed: tell the user the routes are on the board
+        except Exception:  # noqa: BLE001
+            log.exc()
     return finish(status)

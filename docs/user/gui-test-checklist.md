@@ -40,8 +40,10 @@ wireframes `docs/progress/notes/m4-ui-wireframes.md` (dialog layout, tab order, 
 | R3 | Choose *Rip up and re-route*; on **wiccon** set *Threads* 1 (slower, so Cancel can be hit); **Route**; press **Cancel** once while *Routing — negotiation pass* is shown. | Progress shows phase, routed/total, iteration of up to 30, vias, elapsed / 1:00. After Cancel the label reads *Cancelling — keeping the best result so far…*, the button greys, the dialog closes by itself, and either the preview opens with the best result (summary *Stopped: cancel*) or *Cancelled — nothing was changed on the board.* (nothing routed yet). eprom routes in ~0.1 s: Cancel is usually too late — note it and continue. |
 | R4 | Preview (run again without Cancel if R3 ended without one). | **Topor — Preview: &lt;board&gt;**: *Current board* left, *Result* right; new copper highlighted with a halo visible on the panel background; Zoom Fit / 100 % / 200 % and Ctrl+wheel work; Summary pane = the summary block (*Routed 27/27* eprom, *62/62* wiccon; *DRC new 0 · … · unconnected 0*); report folder path shown. |
 | R5 | **Reject**. | **Topor — Finished**: *Nothing was changed on the board.* The board looks exactly as before (same tracks, same ratsnest); **Edit → Undo** is greyed or shows nothing from topor. |
-| R6 | Run again → (no first-run notice) → *Rip up and re-route* → **Route** → **Accept**. | **Topor — Finished**: *Routed 27/27 connections — applied to the board as one undo step (Edit → Undo).* (wiccon 62/62). The board shows the new curved tracks; zones refilled. |
-| R7 | Press **Ctrl+Z** once. | All topor tracks disappear and the hand routing is back in **one** step; **Edit → Redo** (Ctrl+Shift+Z) brings the result back. |
+| R6 | Run again → (no first-run notice) → *Rip up and re-route* → **Route** → **Accept**. | **Topor — Finished**: *Routed 27/27 connections — applied to the board as one undo step (Edit → Undo).* (wiccon 62/62) and *Zones were not refilled: press B (Edit → Fill All Zones) to refill them — a separate undo step.* The board shows the new curved tracks; zones are **not** refilled yet (default `[run] refill_after_accept = false`). |
+| R7 | Open the **Edit** menu (do not press B first), then press **Ctrl+Z** once. | The top undo entry is topor's commit (*Topor: routed …*, record the exact text); after one Ctrl+Z all topor tracks disappear and the hand routing is back in **one** step; **Edit → Redo** (Ctrl+Shift+Z) brings the result back. |
+| R7b | Redo, press **B** (Edit → Fill All Zones), then **Ctrl+Z** once. | Only the refill is undone (zones look as before B), the topor tracks stay: KiCad's refill is its own undo step. Redo / B again before R8. |
+| R7c | Optional — set `[run] refill_after_accept = true` in `topor.toml`, run again → *Rip up and re-route* → **Accept**. | **Topor — Finished** says *Zones were refilled by topor — a second undo step …*; zones are refilled. Record the top **Edit → Undo** entry: if it is the refill, two Ctrl+Z are needed (refill, then routes); if it is topor's commit, KiCad's IPC refill made no undo entry of its own — note which. |
 | R8 | Redo, then **Inspect → Design Rules Checker** → Run DRC (refill zones). | 0 new violations compared with a DRC of the untouched copy; 0 unconnected items. Record the counts. |
 | R9 | **Open report folder** (preview or finished notice). | The file manager opens `~/.cache/kicad/10.0/topor/<board file name>/<YYYYmmdd-HHMMSS>/` with `report.md`, `preview.png`, `result.json`, `drc.json`, `log.txt`; `report.md` *Outcome* matches what you did (rejected / applied). |
 | R10 | Select two footprints (eprom: **U1** and **U2**; wiccon: **U1** and **U2**), click **Topor: route**, *Rip up and re-route*. | Scope radios enabled; the header count changes with the radio (eprom U1+U2: between 26, touching 30, whole 30; wiccon U1+U2: between 4, touching 31, whole 84 — estimates). Route with **Between selected footprints**: only connections among U1/U2 pads are routed, the rest of the board unchanged; Accept, then Ctrl+Z. |
@@ -114,7 +116,8 @@ Each is code that could not be exercised without a live KiCad. Tick when the exp
 - [ ] `get_project().get_net_classes()` + `get_nets()` + `get_netclass_for_nets()` give the net classes (pre-flight `POWER_BY_NAME` lists only Default-class nets; a net class width shows in the routed widths).
 - [ ] `begin_commit` / `remove_items_by_id` / `create_items` / `push_commit` = **one** undo step; `drop_commit` on failure (R6, R7).
 - [ ] `Group` creation: new tracks in group `topor` (select one track → it selects the group), else the report *Notes* say "Items were not grouped (…)".
-- [ ] `board.refill_zones()` after Accept (zones refilled without pressing B).
+- [ ] `board.refill_zones()` after Accept only with `[run] refill_after_accept = true` (zones refilled without pressing B); whether it is its own undo step (R7c). With the default `false` no refill runs (R6).
+- [ ] `IpcBoard.connect` with the API server off (Preferences → Plugins → untick *Enable KiCad API*, restart): **Topor — Error** with `KICAD_API_CONNECT`, nothing changed.
 - [ ] `kicad.run_action("pcbnew.GlobalEdit.cleanupTracksAndVias")` / `("pcbnew.GlobalEdit.editTeardrops")` open KiCad's dialogs with `[run] kicad_cleanup = true` / `kicad_teardrops = true` in `topor.toml` (record whether the action names are accepted).
 
 **B3 — live kipy fields of the model exporter** (`plugin/topor/model_ipc.py`; covered by [IPC parity](#ipc-parity))
@@ -188,6 +191,7 @@ Fill in one row per step and board. *Result*: pass / fail / n.a.
 | eprom-to-kernal | R5 Reject, board unchanged, Undo greyed | | |
 | eprom-to-kernal | R6 Accept (27/27) | | |
 | eprom-to-kernal | R7 one Ctrl+Z reverts all | | |
+| eprom-to-kernal | R7b B is its own undo step; R7c refill_after_accept (optional) | | |
 | eprom-to-kernal | R8 KiCad DRC 0 new, 0 unconnected | | |
 | eprom-to-kernal | R9 report folder | | |
 | eprom-to-kernal | R10 selection scope between (U1+U2) | | |
@@ -203,6 +207,7 @@ Fill in one row per step and board. *Result*: pass / fail / n.a.
 | wiccon-2023 | R5 Reject, board unchanged, Undo greyed | | |
 | wiccon-2023 | R6 Accept (62/62) | | |
 | wiccon-2023 | R7 one Ctrl+Z reverts all | | |
+| wiccon-2023 | R7b B is its own undo step; R7c refill_after_accept (optional) | | |
 | wiccon-2023 | R8 KiCad DRC 0 new, 0 unconnected | | |
 | wiccon-2023 | R9 report folder | | |
 | wiccon-2023 | R10 selection scope between (U1+U2) | | |

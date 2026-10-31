@@ -9,6 +9,7 @@ import json
 import math
 import re
 import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -149,6 +150,8 @@ class ExplodingEngine:
 
 
 class PanicJob:
+    """Behaves like the real RouteJob after a panic of its thread (gate review B-1): done() is True, wait()
+    raises RuntimeError carrying the panic message (see tests/plugin/test_engine_job.py for the real one)."""
     n = 0
 
     def progress(self):
@@ -156,18 +159,53 @@ class PanicJob:
         return json.dumps({"phase": "route", "iteration": 1, "routed": 0, "total": 27, "vias": 0, "elapsed_s": 0.1})
 
     def done(self):
-        return self.n >= 1  # the thread ended (panicked); wait() raises
+        return True  # the thread ended (panicked); wait() raises
 
     def cancel(self):
         pass
 
     def wait(self):
-        raise ValueError("routing thread panicked")
+        raise RuntimeError("routing thread panicked: fake panic in the test double")
 
 
 class PanicEngine(ExplodingEngine):
     def route_async(self, m, o):
         return PanicJob()
+
+
+class RealPanicEngine(ExplodingEngine):
+    """The REAL RouteJob whose routing thread panics (engine test hook ``_route_async_panicking``)."""
+
+    def route_async(self, m, o):
+        return topor_engine._route_async_panicking("index out of bounds in the test hook")
+
+
+class HangJob:
+    """A job whose thread never ends (an engine stuck outside its deadline checks): done() stays False."""
+
+    def __init__(self):
+        self.cancelled = False
+
+    def progress(self):
+        return json.dumps({"phase": "route", "iteration": 1, "routed": 0, "total": 27, "vias": 0, "elapsed_s": 0.1})
+
+    def done(self):
+        return False
+
+    def cancel(self):
+        self.cancelled = True
+
+    def wait(self):
+        raise AssertionError("wait() on a job that never finishes would block for ever")
+
+
+class HangEngine(ExplodingEngine):
+    def __init__(self):
+        self.jobs = []
+
+    def route_async(self, m, o):
+        self.jobs.append(HangJob())
+        return self.jobs[-1]
 
 
 def _mark_partial(out_json):
@@ -238,7 +276,9 @@ def test_run_accept_single_commit(accepted, tmp_path):
     assert req.items == out.items and len(req.items) > 27
     assert req.message == f"Topor: routed {out.routed}/{out.total}"
     assert req.group is True and {it["group"] for it in req.items} == {"topor"}
-    assert board.refills == 1
+    assert board.refills == 0  # ruling C28: run.refill_after_accept defaults to false -> Accept = one undo step
+    assert out.report.facts["zones_refilled"] is False
+    assert "press B (Edit → Fill All Zones)" in (out.report_dir / "report.md").read_text()
     assert board.actions == ["pcbnew.GlobalEdit.cleanupTracksAndVias", "pcbnew.GlobalEdit.editTeardrops"]
     names = ui.names()
     assert names.index("preview") < names.index("done")
@@ -335,17 +375,140 @@ def test_run_partial_routes_group(app, eprom, tmp_path, reports):
     assert set(board.groups) == {"topor", "topor-partial"}
 
 
-def test_run_engine_panic_reported_not_crashed(app, eprom, tmp_path, reports):
-    board, ui, out = do_run(eprom, tmp_path, engine=PanicEngine(), strict=False)
+@pytest.mark.parametrize("engine_cls", [PanicEngine, RealPanicEngine])
+def test_run_engine_panic_reported_not_crashed(app, eprom, tmp_path, reports, engine_cls):
+    """Gate review B-1: a panic of the routing thread ends the run with INTERNAL (never a hang); the REAL
+    RouteJob is driven through a panic with the engine's test hook."""
+    from topor import messages
+
+    t0 = time.monotonic()
+    board, ui, out = do_run(eprom, tmp_path, engine=engine_cls(), strict=False)
+    assert time.monotonic() - t0 < 120
     assert out.status == "error" and board.commits == []
     errs = [c[1][0] for c in ui.calls if c[0] == "error"]
     assert len(errs) == 1 and errs[0].code == "INTERNAL" and errs[0].severity == "error"
-    assert "panicked" in errs[0].message and "log.txt" in errs[0].fix and "debug.md" in errs[0].fix
+    assert "routing thread panicked" in errs[0].message
+    if engine_cls is RealPanicEngine:
+        assert "index out of bounds in the test hook" in errs[0].message
+    assert errs[0].fix == messages.fix_for("INTERNAL")  # MINOR 6: the catalogue text
+    assert "log.txt" in errs[0].fix and "debug.md" in errs[0].fix
     log = (out.report_dir / "log.txt").read_text()
     assert "panicked" in log and "Traceback" in log
     assert "done" not in ui.names() and "preview" not in ui.names()
     ctx = [c for c in ui.calls if c[0] == "set_context"]
     assert ctx and ctx[-1][1][1] == out.report_dir  # error dialog can open the report folder
+
+
+def test_cancel_grace_default_is_30_s():
+    assert run_mod.CANCEL_GRACE_S == 30
+
+
+def test_run_engine_unresponsive_after_cancel(app, eprom, tmp_path, reports, monkeypatch):
+    """Ruling C31: after Cancel the flow waits at most CANCEL_GRACE_S for done(), then ends with the
+    ENGINE_UNRESPONSIVE error (never an endless poll)."""
+    monkeypatch.setattr(run_mod, "CANCEL_GRACE_S", 0.5)
+    eng = HangEngine()
+    ui = ScriptedUi(accept=True, cancel_at_iteration=1)
+    t0 = time.monotonic()
+    board, ui, out = do_run(eprom, tmp_path, ui=ui, engine=eng, strict=False)
+    assert time.monotonic() - t0 < 120
+    assert len(eng.jobs) == 1 and eng.jobs[0].cancelled
+    assert out.status == "error" and board.commits == [] and board.refills == 0
+    errs = [c[1][0] for c in ui.calls if c[0] == "error"]
+    assert len(errs) == 1 and errs[0].code == "ENGINE_UNRESPONSIVE" and errs[0].severity == "error"
+    assert out.error is errs[0] and "0.5 s" in errs[0].message
+    assert "done" not in ui.names() and "preview" not in ui.names()
+    assert json.loads((out.report_dir / "result.json").read_text())["status"] == "error"
+
+
+class FailingBoard(FakeBoard):
+    """FakeBoard whose post-commit steps fail on request ("refill", "action")."""
+
+    def __init__(self, *a, fail=(), **kw):
+        super().__init__(*a, **kw)
+        self.fail = set(fail)
+
+    def refill_zones(self):
+        super().refill_zones()
+        if "refill" in self.fail:
+            raise RuntimeError("AS_BUSY: zone refill did not finish")
+
+    def run_action(self, action):
+        super().run_action(action)
+        if "action" in self.fail:
+            raise RuntimeError(f"unknown action {action}")
+
+
+@pytest.mark.parametrize("step", ["refill", "action", "report", "done"])
+def test_run_failure_after_commit_stays_accepted(app, eprom, tmp_path, reports, monkeypatch, step):
+    """Ruling C30 (gate review I-1): a failure after the successful commit (refill, KiCad action, report write,
+    the done dialog) keeps status "accepted" and adds the POST_COMMIT_STEP_FAILED warning; never INTERNAL /
+    "board not changed"."""
+    from topor import app as app_mod
+
+    cfg = CFG
+    if step == "refill":
+        cfg = CFG.with_values({("run", "refill_after_accept"): True})
+    if step == "action":  # refill on (and succeeding), then the cleanup action fails
+        cfg = CFG.with_values({("run", "refill_after_accept"): True, ("run", "kicad_cleanup"): True})
+    if step == "report":
+        real_write = run_mod.RunReport.write
+
+        def write(self, *a, **kw):
+            if (kw.get("result") or {}).get("status") == "accepted":
+                raise OSError(28, "No space left on device")
+            return real_write(self, *a, **kw)
+
+        monkeypatch.setattr(run_mod.RunReport, "write", write)
+
+    class Ui(ScriptedUi):
+        def done(self, outcome, report, report_dir):
+            super().done(outcome, report, report_dir)
+            if step == "done":
+                raise RuntimeError("wx: dialog could not be created")
+
+    text = eprom.text.rstrip()
+    board = FailingBoard(eprom.pcb, eprom.model, live_text=text[:-1].rstrip("\n") + "\n" + LIVE_EDIT + ")\n",
+                         project_dir=eprom.pcb.parent, fail=(step,))
+    ui = Ui(accept=True)
+    board, ui, out = do_run(eprom, tmp_path, ui=ui, cfg=cfg, board=board, strict=False)
+    assert out.status == "accepted" and app_mod._exit_code(out) == 0
+    assert len(board.commits) == 1 and out.commit is not None
+    pc = [f for f in out.findings if f.code == "POST_COMMIT_STEP_FAILED"]
+    assert len(pc) == 1 and pc[0].severity == "warning", out.findings
+    assert "committed" in pc[0].message and "Ctrl+Z" in pc[0].fix and "Edit → Undo" in pc[0].fix
+    assert not any(f.code == "INTERNAL" for f in out.findings) and out.error is None
+    errs = [c[1][0] for c in ui.calls if c[0] == "error"]
+    if step == "done":
+        assert [e.code for e in errs] == ["POST_COMMIT_STEP_FAILED"]
+    else:
+        assert errs == []
+        assert [c[1][0] for c in ui.calls if c[0] == "done"] == ["accepted"]
+    if step in ("refill", "action"):
+        res = json.loads((out.report_dir / "result.json").read_text())
+        assert res["status"] == "accepted" and "POST_COMMIT_STEP_FAILED" in (out.report_dir / "report.md").read_text()
+    if step == "refill":
+        assert board.refills == 1 and out.report.facts["zones_refilled"] is False and "zone refill" in pc[0].message
+    if step == "action":  # refill_after_accept = true: exactly one refill after the commit (ruling C28)
+        assert board.refills == 1 and out.report.facts["zones_refilled"] is True
+        assert board.actions == [run_mod.ACTION_CLEANUP] and run_mod.ACTION_CLEANUP in pc[0].message
+        assert "zones refilled" in (out.report_dir / "report.md").read_text()
+
+
+def test_run_report_dir_unwritable_is_an_error(eprom, tmp_path, monkeypatch):
+    """Ruling C32 (gate review I-5): a report folder that cannot be created gives the REPORT_DIR_UNWRITABLE
+    error through ui.error (a dialog in KiCad), the board is not read further and nothing is routed."""
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("a file where the report root should be")
+    monkeypatch.setenv("TOPOR_REPORT_ROOT", str(blocker / "reports"))
+    board = make_board(eprom)
+    ui = ScriptedUi()
+    out = run_mod.run(board, ui, CFG, ExplodingEngine(), tmp_root=tmp_path / "work")
+    assert out.status == "error" and out.error is not None and out.error.code == "REPORT_DIR_UNWRITABLE"
+    errs = [c[1][0] for c in ui.calls if c[0] == "error"]
+    assert errs == [out.error] and errs[0].severity == "error"
+    assert str(blocker) in errs[0].message and "output.report_dir" in errs[0].fix
+    assert board.commits == [] and not any(c[0] == "save_copy" for c in board.calls)
 
 
 def test_run_preview_png_written_with_caption(rejected):
@@ -626,3 +789,61 @@ def test_apply_via_fallback_pure():
     lo = Config.defaults().with_values({("vias", "fallback_diameter_mm"): 0.3, ("vias", "fallback_drill_mm"): 0.1})
     new, info = run_mod.apply_via_fallback(rules, lo)
     assert (new["default"]["via_d"], new["default"]["via_drill"]) == (450_000, 250_000) and info["clamped"]
+
+
+# ------------------------------------------------------------------ ruling C29 (gate review I-6)
+def test_run_fixed_takes_pour_fills_from_the_refilled_copy(app, eprom, tmp_path, reports):
+    """existing_copper = "fixed" (nothing ripped): the engine's pour fills / reach / dangling ends come from the
+    kicad-cli REFILLED copy of the untouched board (the original DRC run, ``--refill-zones --save-board``), not
+    from the live board's possibly stale fills. The FakeBoard model carries a deliberately wrong fill (one
+    rectangle over the whole board) that "reaches" a pad and a via that do not exist."""
+    from topor import pourreach
+
+    gnd = next(p for p in eprom.model["pours"] if p.get("fills") and p.get("pads"))
+    xs = [pd["center"][0] for pd in eprom.model["pads"]]
+    ys = [pd["center"][1] for pd in eprom.model["pads"]]
+    big = [[min(xs) - 10**7, min(ys) - 10**7], [max(xs) + 10**7, min(ys) - 10**7],
+           [max(xs) + 10**7, max(ys) + 10**7], [min(xs) - 10**7, max(ys) + 10**7]]
+    stale_fills = [{"layer": l, "outer": big, "holes": []} for l in gnd["layers"]]
+    stale = {**gnd, "fills": stale_fills, "pads": ["FAKE.1"], "vias": ["fake-via"]}
+    model = {**eprom.model, "pours": [stale if p is gnd else p for p in eprom.model["pours"]]}
+    src = Eprom()
+    src.pcb, src.text, src.model = eprom.pcb, eprom.text, model
+    board = _project(src, tmp_path)
+    eng = CaptureEngine()
+    cfg = Config.defaults().with_values({("run", "timeout_s"): 60.0})
+    assert cfg.get("run", "existing_copper") == "fixed"
+    board, ui, out = do_run(eprom, tmp_path, board=board, cfg=cfg, engine=eng)
+    assert out.ripped == [] and eng.models, "the engine was not called"
+    assert out.refilled_pcb is not None and out.refilled_pcb.is_file() and out.refilled_pcb != out.pcb_copy
+    seen = next(p for p in eng.models[0]["pours"] if p["uuid"] == gnd["uuid"])
+    ids = {l["name"]: int(l["id"]) for l in model["layers"]}
+    want = [{"layer": ids[q["layer"]], "outer": q["pts"], "holes": []}
+            for q in pcbfile.parse_zone_fills(out.refilled_pcb.read_text())[gnd["uuid"]]
+            if q["layer"] in ids and ids[q["layer"]] in gnd["layers"]]
+    assert want and seen["fills"] == want and seen["fills"] != stale_fills
+    assert "FAKE.1" not in seen["pads"] and "fake-via" not in seen["vias"]
+    rp, rv = pourreach.pour_reach(gnd["net"], gnd["layers"], want, model["pads"], model["vias"])
+    assert (seen["pads"], seen["vias"]) == (rp, rv) and rp
+    assert set(rp) <= set(gnd["pads"])  # the refilled reach errs toward "not reached" vs pcbnew (C26)
+    # the save_as copy itself stays as KiCad wrote it (the refill went into a separate file)
+    assert out.pcb_copy.read_text() == board.text
+
+
+def test_refill_pours_zone_unfilled_after_refill_reaches_nothing():
+    """M4-R8: a zone that is in the refilled copy but has no fill there reaches nothing (its old fill stays as the
+    obstacle: a superset of no copper); a zone absent from the copy keeps its model entry."""
+    model = {"layers": [{"id": 0, "name": "F.Cu"}, {"id": 2, "name": "B.Cu"}],
+             "pads": [{"ref": "R1", "number": "1", "net": 1, "layers": [0], "center": [0, 0], "rotation_deg": 0.0,
+                       "shapes": {"0": {"kind": "rect", "w": 1_000_000, "h": 1_000_000}}}],
+             "vias": [], "kept": [],
+             "pours": [{"uuid": "z-empty", "net": 1, "layers": [0], "pads": ["R1.1"], "vias": [],
+                        "fills": [{"layer": 0, "outer": [[-5, -5], [5, -5], [5, 5]], "holes": []}]},
+                       {"uuid": "z-absent", "net": 1, "layers": [0], "pads": ["R1.1"], "vias": [],
+                        "fills": [{"layer": 0, "outer": [[-5, -5], [5, -5], [5, 5]], "holes": []}]}]}
+    text = '(kicad_pcb\n\t(zone\n\t\t(net "N")\n\t\t(layer "F.Cu")\n\t\t(uuid "z-empty")\n\t)\n)\n'
+    out = run_mod.refill_pours(model, text)
+    empty, absent = out["pours"]
+    assert empty["pads"] == [] and empty["vias"] == [] and empty["fills"] == model["pours"][0]["fills"]
+    assert "warning" in empty
+    assert absent == model["pours"][1]
