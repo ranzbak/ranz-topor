@@ -6,10 +6,12 @@
 //! layer, is exclusive, and blocks the sites too close to it (hole-to-hole / copper clearance).
 //! Per-layer graph paths are indexed by *leg id* (P2): `wire_of` / `conn_wires` live here.
 
+use crate::decompose::Connection;
 use crate::geom::{dequantise, Aabb, Grid, Prim, Vec2};
 use crate::graph::{GraphRules, RouteGraph, TerminalInfo};
 use crate::model::BoardModel;
 use crate::obstacle::ObstacleSet;
+use crate::search::SlotPath;
 use crate::sketch::{build_layer_cdt, ConstraintSet, LayerSketch};
 use crate::vias::{ViaSite, ViaSize};
 
@@ -39,6 +41,8 @@ pub struct MultiGraph {
     pub wire_of: Vec<Option<(usize, usize)>>,
     /// Connection -> its leg ids in leg order (P2).
     pub conn_wires: Vec<Vec<usize>>,
+    /// Board rules (via sizes of a net for the layered search).
+    pub rules: crate::model::Rules,
     hole_to_hole: f64,
     max_d_all: f64,
     grid: Grid<usize>,
@@ -162,6 +166,7 @@ impl MultiGraph {
             site_version: vec![0; n],
             wire_of: Vec::new(),
             conn_wires: Vec::new(),
+            rules: model.rules.clone(),
             hole_to_hole: model.rules.hole_to_hole as f64,
             max_d_all,
             grid,
@@ -338,8 +343,8 @@ impl MultiGraph {
 
     /// Allocate `n` leg ids for `conn` (P2): the smallest free ids first, then fresh ones;
     /// recorded in `wire_of` / `conn_wires`. The caller inserts each leg with
-    /// `layers[leg.layer_idx].g.insert_path(k, ..)` and activates its sites (the
-    /// `insert_path(conn, &SlotPath)` wrapper arrives with the layered search, Task 8).
+    /// `layers[leg.layer_idx].g.insert_path(k, ..)` and activates its sites (or use
+    /// [`MultiGraph::insert_path`]).
     /// O(n log F).
     pub fn alloc_legs(&mut self, conn: usize, n: usize) -> Vec<usize> {
         if self.conn_wires.len() <= conn {
@@ -364,6 +369,36 @@ impl MultiGraph {
             ids.push(k);
         }
         self.conn_wires[conn] = ids.clone();
+        ids
+    }
+
+    /// Insert a routed layered path of `conn` (P2): one leg id per leg
+    /// ([`MultiGraph::alloc_legs`]), `layers[leg.layer_idx].g.insert_path(leg_id, ..)` per leg
+    /// with the connection's width / clearance, then [`MultiGraph::activate`] per via site (after
+    /// the legs, so the crossing slots the search saw stay valid). Returns the leg ids in leg
+    /// order. O(legs * path cost + vias * (layers * deg + neighbours)).
+    pub fn insert_path(
+        &mut self,
+        conn: &Connection,
+        path: &SlotPath,
+        obs: &mut ObstacleSet,
+    ) -> Vec<usize> {
+        let ids = self.alloc_legs(conn.id, path.legs.len());
+        let (w, clr) = (conn.width as f64, conn.clearance as f64);
+        for (leg, &k) in path.legs.iter().zip(&ids) {
+            self.layers[leg.layer_idx].g.insert_path(
+                k,
+                leg.start,
+                leg.goal,
+                &leg.crossings,
+                &leg.faces,
+                w,
+                clr,
+            );
+        }
+        for &(s, size) in &path.sites {
+            self.activate(s, conn.id, conn.net, size, clr, obs);
+        }
         ids
     }
 

@@ -7,10 +7,10 @@ use topor_engine::geom::{dequantise, Prim, Vec2};
 use topor_engine::graph::{GraphRules, RouteGraph};
 use topor_engine::model::{BoardModel, DrcSpot, Options, Pt};
 use topor_engine::obstacle::ObstacleSet;
-use topor_engine::search::{
-    ghost, probe_bend_ok, probe_clearance_bend, search, SearchOutcome, SearchParams, SlotPath,
-    LOS_PORTAL_CAP,
+use topor_engine::search::planar::{
+    ghost, search, PlanarPath as SlotPath, SearchOutcome, SearchParams,
 };
+use topor_engine::search::{probe_bend_ok, probe_clearance_bend, LOS_PORTAL_CAP};
 use topor_engine::sketch::{build_layer_cdt, ConstraintSet, LayerSketch};
 
 const MM: f64 = 1_000_000.0;

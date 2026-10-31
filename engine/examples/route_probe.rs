@@ -25,7 +25,7 @@ use topor_engine::model::{flip_track, BoardModel, Item, Options, TrackItem};
 use topor_engine::negotiate::{overused_conns, Negotiator};
 use topor_engine::obstacle::{Core, ObstacleSet, TerminalObstacle};
 use topor_engine::relax::relax;
-use topor_engine::search::SlotPath;
+use topor_engine::search::planar::PlanarPath as SlotPath;
 use topor_engine::sketch::{
     build_layer_cdt, sketch_from_crossings, stack_order, unanchored_bends, AnchorRef,
     ConstraintSet, LayerSketch, Sketch,

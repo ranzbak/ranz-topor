@@ -11,10 +11,11 @@ use crate::decompose::{order, Connection};
 use crate::graph::RouteGraph;
 use crate::model::Options;
 use crate::obstacle::LayerObstacles;
-use crate::search::{
-    default_expansion_cap, ghost, search, strand_blockers, tier_weight, SearchOutcome,
-    SearchParams, SlotPath,
+use crate::search::planar::{
+    default_expansion_cap, ghost, search, strand_blockers, PlanarPath as SlotPath, SearchOutcome,
+    SearchParams,
 };
+use crate::search::tier_weight;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;

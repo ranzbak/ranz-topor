@@ -6,7 +6,7 @@ use topor_engine::graph::{CrossEntry, GraphRules, RouteGraph};
 use topor_engine::model::{BoardModel, Options};
 use topor_engine::negotiate::*;
 use topor_engine::obstacle::ObstacleSet;
-use topor_engine::search::SlotPath;
+use topor_engine::search::planar::PlanarPath as SlotPath;
 use topor_engine::sketch::{build_layer_cdt, ConstraintSet, LayerSketch};
 
 const MM: f64 = 1_000_000.0;

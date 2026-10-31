@@ -34,9 +34,10 @@ use crate::negotiate::{
 };
 use crate::obstacle::{LayerObstacles, ObstacleSet, TerminalObstacle};
 use crate::relax::{corridor_static, relax, slot_nesting_of, Relaxer, RunOpts, ZeroSlack};
-use crate::search::{
-    default_expansion_cap, search, tier_weight, SearchOutcome, SearchParams, SlotPath,
+use crate::search::planar::{
+    default_expansion_cap, search, PlanarPath as SlotPath, SearchOutcome, SearchParams,
 };
+use crate::search::tier_weight;
 use crate::sketch::{
     build_layer_cdt, sketch_from_crossings, stack_order, unanchored_bends, AnchorRef,
     ConstraintSet, LayerSketch, Sketch,
@@ -897,9 +898,16 @@ fn collect_blocks(
             if let (Some(gp), None) = (&b.ghost, b.edge) {
                 if gp.faces.len() == gp.crossings.len() + 1 || gp.crossings.is_empty() {
                     let mut steps = 0;
-                    if let Some(p0) =
-                        probe_path(g, checker, &cx.conns[i], cx.layer, base, gp, cx.deadline, &mut steps)
-                    {
+                    if let Some(p0) = probe_path(
+                        g,
+                        checker,
+                        &cx.conns[i],
+                        cx.layer,
+                        base,
+                        gp,
+                        cx.deadline,
+                        &mut steps,
+                    ) {
                         out.insert(
                             i,
                             Blk {

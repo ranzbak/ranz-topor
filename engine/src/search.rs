@@ -1,18 +1,33 @@
-//! Planar slot A* per connection with a Lazy-Theta*-style length estimate, and the slot-free
-//! ghost search (M2 / T2.3a; design note `docs/progress/notes/m2-search-design.md` §1-3).
+//! Layered slot A* per connection with a Lazy-Theta*-style length estimate, via moves at via
+//! sites and pour goals, and the slot-free ghost search (M2 / T2.3a, M3 / T3.1; design notes
+//! `docs/progress/notes/m2-search-design.md` §1-3 and `m3-layers-vias-design.md` §2).
 //!
-//! State `(edge, slot, dir)`: the new wire crosses `edge` at insertion position `slot` and enters
-//! the face `edges[edge].faces[dir]`. Transitions follow Rule T (no two strands cross inside a
-//! face; port order is the cyclic order of the face boundary). Cost is the string-pulled length
-//! (apex shortcut, <= `LOS_PORTAL_CAP` portals per line-of-sight) scaled by history / present
-//! congestion; `h` is the Euclidean distance to the goal. Complexity: O(V log V) with
-//! `V = 2(E + X)` states, each expansion O(`n_max` + `LOS_PORTAL_CAP`^2); expansions are capped at
-//! `8 (E + X) + 64`. Only lookups touch hash containers; ties are broken by the heap key.
+//! State `(layer, edge, slot, dir)`: the new wire crosses `edge` of layer `layer` at insertion
+//! position `slot` and enters the face `edges[edge].faces[dir]`. Transitions follow Rule T (no two
+//! strands cross inside a face; port order is the cyclic order of the face boundary). Cost is the
+//! string-pulled length (apex shortcut, <= `LOS_PORTAL_CAP` portals per line-of-sight) scaled by
+//! history / present congestion; `h` is the Euclidean distance to the nearest goal.
+//!
+//! *Via moves (M3).* A state entering a face that has an unowned via-site vertex may stand on the
+//! site (`AtSite`) at the price `via_cost * (1 + omega * site_history)`; from there the search
+//! leaves on every other layer through the faces around the site's vertex of that layer (the M2
+//! start rules). A path is cut into [`Leg`]s at the sites. A pour goal is reached by the via itself
+//! (P1): the path ends at a site inside the pour and `sites.len() == legs.len()`.
+//!
+//! Complexity: `O(V' log V')`, `V' = sum_L 2 (E_L + X_L) + 2 S` states (times `max_vias + 1` for
+//! the via counter), each expansion `O(n_max + LOS_PORTAL_CAP^2 + (C + 1) local)`; expansions are
+//! capped at `8 sum_L (E_L + X_L) + 4 S + 64`. Only lookups touch hash containers; ties are
+//! broken by the heap key.
+//!
+//! The single-layer entry points of M2 (`planar::search` & co) run the same core on one
+//! `RouteGraph` without sites; [`SlotPath::single_layer`] adapts their [`planar::PlanarPath`].
 
 use crate::decompose::Connection;
 use crate::geom::{point_seg, seg_arc, seg_seg, Aabb, Seg, Vec2};
 use crate::graph::{Port, RouteGraph};
+use crate::multigraph::MultiGraph;
 use crate::obstacle::{Core, LayerObstacles, ObsKind, ObstacleSet};
+use crate::vias::{via_sizes, ViaSize};
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -38,23 +53,101 @@ pub fn tier_weight(tier: u8) -> f64 {
     }
 }
 
-/// Expansion cap `8 (E + X) + 64` of the slot search.
-pub fn default_expansion_cap(g: &RouteGraph) -> usize {
-    let x: usize = (0..g.edges.len()).map(|e| g.slot_count(e)).sum();
-    8 * (g.edges.len() + x) + 64
+/// Via-cost multiplier of a priority tier (P8): tiers 0/1 pay double, tier 4 pays 0.75x. The
+/// caller multiplies `Options.via_cost_nm` by it to get [`SearchParams::via_cost`].
+pub fn via_weight(tier: u8) -> f64 {
+    match tier {
+        0 | 1 => 2.0,
+        2 | 3 => 1.0,
+        _ => 0.75,
+    }
+}
+
+/// Expansion cap `8 sum_L (E_L + X_L) + 4 S + 64` of the layered slot search. O(sum_L E_L).
+pub fn default_expansion_cap(mg: &MultiGraph) -> usize {
+    let gs: Vec<&RouteGraph> = mg.layers.iter().map(|c| &c.g).collect();
+    cap_of(&gs, mg.sites.len(), false)
+}
+
+/// `8 sum (E + X) + 4 S + 64`, or `8 sum E + 4 S + 64` for the ghost. O(sum E).
+fn cap_of(gs: &[&RouteGraph], sites: usize, ghost: bool) -> usize {
+    let mut n = 0usize;
+    for g in gs {
+        let x: usize = if ghost {
+            0
+        } else {
+            (0..g.edges.len()).map(|e| g.slot_count(e)).sum()
+        };
+        n += 8 * (g.edges.len() + x);
+    }
+    n + 4 * sites + 64
+}
+
+/// One run of a path on a single layer, from the vertex `start` to the vertex `goal` of that
+/// layer (a terminal, or the vertex of a via site).
+#[derive(Clone, Debug)]
+pub struct Leg {
+    pub layer_idx: usize,
+    pub start: usize,
+    pub goal: usize,
+    /// `(edge, slot)` in travel order, slots as seen by the search (the graph before the insert).
+    pub crossings: Vec<(usize, usize)>,
+    /// Start face first; `faces.len() == crossings.len() + 1` (empty for a direct leg).
+    pub faces: Vec<usize>,
+    pub est_len: f64,
 }
 
 #[derive(Clone, Debug)]
 pub struct SlotPath {
     pub conn: usize,
-    /// `(edge, slot)` in travel order, slots as seen by the search (the graph before the insert).
-    pub crossings: Vec<(usize, usize)>,
-    /// Start face first; `faces.len() == crossings.len() + 1` (empty for a direct path).
-    pub faces: Vec<usize>,
+    pub legs: Vec<Leg>,
+    /// `(site, size)` per via; `legs.len() - 1` of them, or `legs.len()` for a pour path (the
+    /// last via lands in the pour, P1).
+    pub sites: Vec<(usize, ViaSize)>,
+    /// Sum of the legs' `est_len`.
     pub est_len: f64,
+    /// Search cost at the goal, including the via costs.
+    pub cost: f64,
     pub expansions: usize,
     /// Sum of the clearance-query candidates (vertices + walls) examined over the whole search.
     pub candidates: usize,
+}
+
+impl SlotPath {
+    /// Number of vias of the path. O(1).
+    pub fn vias(&self) -> usize {
+        self.sites.len()
+    }
+
+    /// Crossings of the legs on layer `layer_idx`, in travel order. O(crossings).
+    pub fn crossings_on(&self, layer_idx: usize) -> Vec<(usize, usize)> {
+        self.legs
+            .iter()
+            .filter(|l| l.layer_idx == layer_idx)
+            .flat_map(|l| l.crossings.iter().copied())
+            .collect()
+    }
+
+    /// Adapter of a single-layer (layer 0) planar path from `start` to `goal`: one leg, no
+    /// site, `cost = est_len`. O(crossings).
+    pub fn single_layer(p: &planar::PlanarPath, start: usize, goal: usize) -> SlotPath {
+        SlotPath {
+            conn: p.conn,
+            legs: vec![Leg {
+                layer_idx: 0,
+                start,
+                goal,
+                crossings: p.crossings.clone(),
+                faces: p.faces.clone(),
+                est_len: p.est_len,
+            }],
+            sites: Vec::new(),
+            est_len: p.est_len,
+            cost: p.est_len,
+            expansions: p.expansions,
+            candidates: p.candidates,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -62,24 +155,43 @@ pub enum SearchOutcome {
     Found(SlotPath),
     Blocked {
         ghost: Option<SlotPath>,
-        blocked_edge: Option<usize>,
+        /// First soft-blocked edge of the ghost in travel order, `(layer_idx, edge)`.
+        blocked_edge: Option<(usize, usize)>,
+        /// First soft-blocked element is an owned / blocked site (P5).
+        blocked_site: Option<usize>,
+        /// Crossing before the blocked element, `(leg, index in leg.crossings)` (P5).
         last_reached: Option<(usize, usize)>,
     },
     Timeout,
 }
 
+/// Where the connection ends: terminal vertices `(layer_idx, vertex)` on every layer of the
+/// target and, for a pour target, the sites inside the pour (sorted).
+#[derive(Clone, Debug, Default)]
+pub struct Goal {
+    pub vertices: Vec<(usize, usize)>,
+    pub pour_sites: Vec<usize>,
+    /// Informational (P1).
+    pub pour_layer: Option<usize>,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct SearchParams<'a> {
-    /// Per-edge history cost (indexed by edge; missing entries are 0).
-    pub history: &'a [f64],
+    /// Per-edge history cost `[layer_idx][edge]` (missing entries are 0).
+    pub history: &'a [Vec<f64>],
+    /// Per-site history cost (missing entries are 0).
+    pub site_history: &'a [f64],
     /// `omega`: history / present weight of the connection's tier.
     pub weight: f64,
     pub present_overuse: f64,
     pub expansion_cap: usize,
     pub deadline: Instant,
-    /// Build margin ε of the admissibility and geometry tests; `None` = the graph's `rules.eps`.
-    /// The zero-slack retry (R6) searches one connection at `Some(0.0)`.
+    /// Build margin ε of the admissibility and geometry tests; `None` = the graphs'
+    /// `rules.eps`. The zero-slack retry (R6) searches one connection at `Some(0.0)`.
     pub eps: Option<f64>,
+    /// Final cost of one via, nm (P8: the caller applied `via_weight(tier)`).
+    pub via_cost: f64,
+    pub max_vias: u32,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -392,8 +504,17 @@ fn crosses(a: Vec2, t: Vec2, pa: Vec2, pb: Vec2) -> bool {
 // Search machinery
 // ---------------------------------------------------------------------------------------------
 
+const K_ROOT: u8 = 0;
+const K_EDGE: u8 = 1;
+const K_SITE: u8 = 2;
+const K_GOAL: u8 = 3;
+
 #[derive(Clone, Debug)]
 struct Node {
+    kind: u8,
+    layer: usize,
+    /// Root / goal: the vertex of `layer`; site: the site id.
+    v: usize,
     edge: usize,
     slot: usize,
     dir: u8,
@@ -404,16 +525,26 @@ struct Node {
     apex_len: f64,
     /// Portals (including this node's edge) since the apex.
     since: usize,
-    /// State point on `edge`.
+    /// State point on `edge` (the site / goal point for those nodes).
     p: Vec2,
     g_len: f64,
     g_cost: f64,
+    /// Vias used up to and including this node.
+    vias: u32,
+    /// Latest `K_SITE` ancestor (a site node: the previous one); `usize::MAX` if none.
+    last_site: usize,
+    size: Option<ViaSize>,
 }
+
+/// Closed-set / best-cost key `(layer, edge, slot, dir, vias_used)`; a site node uses
+/// `edge = usize::MAX, slot = site, dir = 0`.
+type Key = (usize, usize, usize, u8, u32);
 
 #[derive(Clone, Copy, Debug)]
 struct Item {
     f: f64,
     h: f64,
+    layer: usize,
     edge: usize,
     slot: usize,
     dir: u8,
@@ -424,6 +555,7 @@ impl Ord for Item {
     fn cmp(&self, o: &Self) -> Ordering {
         o.f.total_cmp(&self.f)
             .then(o.h.total_cmp(&self.h))
+            .then(o.layer.cmp(&self.layer))
             .then(o.edge.cmp(&self.edge))
             .then(o.slot.cmp(&self.slot))
             .then(o.dir.cmp(&self.dir))
@@ -446,8 +578,8 @@ impl Eq for Item {}
 struct State {
     nodes: Vec<Node>,
     heap: BinaryHeap<Item>,
-    best: HashMap<(usize, usize, u8), f64>,
-    closed: HashSet<(usize, usize, u8)>,
+    best: HashMap<Key, f64>,
+    closed: HashSet<Key>,
 }
 
 enum Run {
@@ -456,6 +588,680 @@ enum Run {
     Timeout,
 }
 
+/// Search inputs shared by the layered and the planar entry points.
+#[derive(Clone, Copy)]
+struct Common<'a> {
+    site_history: &'a [f64],
+    weight: f64,
+    present_overuse: f64,
+    expansion_cap: usize,
+    deadline: Instant,
+    eps: Option<f64>,
+    via_cost: f64,
+    max_vias: u32,
+}
+
+/// The graphs a search runs on: one `(graph, obstacles)` per layer index, plus the multigraph
+/// (sites, ownership) when there are via sites.
+struct Env<'a> {
+    layers: Vec<(&'a RouteGraph, &'a LayerObstacles)>,
+    mg: Option<&'a MultiGraph>,
+}
+
+impl<'a> Env<'a> {
+    fn of(mg: &'a MultiGraph, obs: &'a ObstacleSet) -> Env<'a> {
+        Env {
+            layers: mg
+                .layers
+                .iter()
+                .map(|c| (&c.g, obs.layer(c.layer)))
+                .collect(),
+            mg: Some(mg),
+        }
+    }
+
+    fn sites(&self) -> usize {
+        self.mg.map_or(0, |m| m.sites.len())
+    }
+
+    fn graphs(&self) -> Vec<&'a RouteGraph> {
+        self.layers.iter().map(|l| l.0).collect()
+    }
+}
+
+/// The layered A*: one [`Search`] helper per layer, the node arena, the via moves.
+struct Layered<'a> {
+    ls: Vec<Search<'a>>,
+    mg: Option<&'a MultiGraph>,
+    start: &'a [(usize, usize)],
+    goal: &'a Goal,
+    goal_set: HashSet<(usize, usize)>,
+    /// Positions of the goal vertices.
+    targets: Vec<Vec2>,
+    /// Bounding box of the pour sites.
+    pour_bb: Option<Aabb>,
+    sizes: Vec<ViaSize>,
+    site_history: &'a [f64],
+    via_cost: f64,
+    max_vias: u32,
+    omega: f64,
+    net: i32,
+    conn_id: usize,
+    ghost: bool,
+    /// Expansions so far of the running `run` (statistics).
+    exps: Cell<usize>,
+}
+
+fn other_dir(g: &RouteGraph, e: usize, f: usize) -> u8 {
+    u8::from(g.edges[e].faces[0] == Some(f))
+}
+
+impl<'a> Layered<'a> {
+    fn new(
+        env: &Env<'a>,
+        hists: &[&'a [f64]],
+        conn: &'a Connection,
+        start: &'a [(usize, usize)],
+        goal: &'a Goal,
+        p: &Common<'a>,
+        ghost: bool,
+    ) -> Self {
+        let ls: Vec<Search<'a>> = env
+            .layers
+            .iter()
+            .enumerate()
+            .map(|(i, &(g, obs))| {
+                Search::new(
+                    g,
+                    obs,
+                    conn,
+                    hists.get(i).copied().unwrap_or(&[]),
+                    p.weight,
+                    p.present_overuse,
+                    p.eps,
+                    ghost,
+                )
+            })
+            .collect();
+        let targets = goal
+            .vertices
+            .iter()
+            .map(|&(l, v)| env.layers[l].0.verts[v].at)
+            .collect();
+        let pour_bb = env.mg.and_then(|mg| {
+            let mut it = goal.pour_sites.iter().map(|&s| mg.sites[s].at);
+            let first = it.next()?;
+            Some(it.fold(
+                Aabb {
+                    min: first,
+                    max: first,
+                },
+                |b, q| Aabb {
+                    min: Vec2 {
+                        x: b.min.x.min(q.x),
+                        y: b.min.y.min(q.y),
+                    },
+                    max: Vec2 {
+                        x: b.max.x.max(q.x),
+                        y: b.max.y.max(q.y),
+                    },
+                },
+            ))
+        });
+        let sizes = env
+            .mg
+            .map(|mg| via_sizes(&mg.rules, conn.net))
+            .unwrap_or_default();
+        Layered {
+            ls,
+            mg: env.mg,
+            start,
+            goal,
+            goal_set: goal.vertices.iter().copied().collect(),
+            targets,
+            pour_bb,
+            sizes,
+            site_history: p.site_history,
+            via_cost: p.via_cost,
+            max_vias: p.max_vias,
+            omega: p.weight,
+            net: conn.net,
+            conn_id: conn.id,
+            ghost,
+            exps: Cell::new(0),
+        }
+    }
+
+    /// Goal point nearest to `p` (`p` itself when there is no goal). O(|goal vertices|).
+    fn nearest(&self, p: Vec2) -> Vec2 {
+        let mut best = p;
+        let mut bd = f64::INFINITY;
+        for &t in &self.targets {
+            let d = dist(p, t);
+            if d < bd {
+                bd = d;
+                best = t;
+            }
+        }
+        if let Some(bb) = self.pour_bb {
+            let q = Vec2 {
+                x: p.x.clamp(bb.min.x, bb.max.x),
+                y: p.y.clamp(bb.min.y, bb.max.y),
+            };
+            if dist(p, q) < bd {
+                best = q;
+            }
+        }
+        best
+    }
+
+    /// Admissible heuristic: Euclidean distance to the nearest goal vertex or to the bounding
+    /// box of the pour sites (ignores via cost). O(|goal vertices|).
+    fn h(&self, p: Vec2) -> f64 {
+        dist(p, self.nearest(p))
+    }
+
+    /// The site cannot take any via at the moment (owned, blocked, or too small for every size).
+    fn site_soft_blocked(&self, s: usize) -> bool {
+        let Some(mg) = self.mg else {
+            return true;
+        };
+        mg.owner[s].is_some()
+            || mg.blocked[s] > 0
+            || !self
+                .sizes
+                .iter()
+                .any(|z| mg.sites[s].max_d >= z.d && mg.sites[s].max_drill >= z.drill)
+    }
+
+    /// Largest via size for site `s`: the first of `via_sizes` with `site_free` (the ghost
+    /// ignores occupancy). O(|sizes|).
+    fn via_choice(&self, s: usize) -> Option<ViaSize> {
+        let mg = self.mg?;
+        let site = &mg.sites[s];
+        if self.ghost {
+            self.sizes
+                .iter()
+                .copied()
+                .find(|z| site.max_d >= z.d && site.max_drill >= z.drill)
+                .or_else(|| self.sizes.last().copied())
+        } else {
+            self.sizes
+                .iter()
+                .copied()
+                .find(|&z| mg.site_free(s, self.net, z))
+        }
+    }
+
+    fn inherit_site(st: &State, parent: usize) -> usize {
+        if st.nodes[parent].kind == K_SITE {
+            parent
+        } else {
+            st.nodes[parent].last_site
+        }
+    }
+
+    fn node_key(&self, n: &Node) -> Key {
+        match n.kind {
+            K_SITE => (n.layer, usize::MAX, n.v, 0, n.vias),
+            _ => (
+                n.layer,
+                n.edge,
+                if self.ghost { 0 } else { n.slot },
+                n.dir,
+                n.vias,
+            ),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_state(
+        &self,
+        st: &mut State,
+        parent: usize,
+        layer: usize,
+        e: usize,
+        slot: usize,
+        dir: u8,
+        fin: usize,
+    ) {
+        let sr = &self.ls[layer];
+        let vias = st.nodes[parent].vias;
+        let key = (layer, e, if self.ghost { 0 } else { slot }, dir, vias);
+        if st.closed.contains(&key) {
+            return;
+        }
+        let s = &st.nodes[parent];
+        let p = sr.state_point(e, s.apex, self.nearest(s.apex));
+        let (apex, apex_len, kept, ok) = sr.los(&st.nodes, parent, p, Some(e));
+        if !ok {
+            return;
+        }
+        let g_len = apex_len + dist(apex, p);
+        let delta = (g_len - s.g_len).max(0.0);
+        let g_cost = s.g_cost + sr.step_cost(e, delta);
+        if st.best.get(&key).is_some_and(|&b| b <= g_cost) {
+            return;
+        }
+        st.best.insert(key, g_cost);
+        let h = self.h(p);
+        let id = st.nodes.len();
+        let last_site = Self::inherit_site(st, parent);
+        st.nodes.push(Node {
+            kind: K_EDGE,
+            layer,
+            v: 0,
+            edge: e,
+            slot,
+            dir,
+            parent,
+            face_in: fin,
+            apex,
+            apex_len,
+            since: kept + 1,
+            p,
+            g_len,
+            g_cost,
+            vias,
+            last_site,
+            size: None,
+        });
+        st.heap.push(Item {
+            f: g_cost + h,
+            h,
+            layer,
+            edge: e,
+            slot,
+            dir,
+            id,
+        });
+    }
+
+    fn push_goal(&self, st: &mut State, parent: usize, layer: usize, v: usize) {
+        let sr = &self.ls[layer];
+        let goal = sr.g.verts[v].at;
+        let (apex, apex_len, _, ok) = sr.los(&st.nodes, parent, goal, None);
+        if !ok {
+            return;
+        }
+        let sn = &st.nodes[parent];
+        let g_len = apex_len + dist(apex, goal);
+        let g_cost = sn.g_cost + (g_len - sn.g_len).max(0.0);
+        let id = st.nodes.len();
+        let (vias, last_site) = (sn.vias, Self::inherit_site(st, parent));
+        st.nodes.push(Node {
+            kind: K_GOAL,
+            layer,
+            v,
+            edge: usize::MAX,
+            slot: v,
+            dir: 1,
+            parent,
+            face_in: 0,
+            apex,
+            apex_len,
+            since: 0,
+            p: goal,
+            g_len,
+            g_cost,
+            vias,
+            last_site,
+            size: None,
+        });
+        st.heap.push(Item {
+            f: g_cost,
+            h: 0.0,
+            layer,
+            edge: usize::MAX,
+            slot: v,
+            dir: 1,
+            id,
+        });
+    }
+
+    /// Push the node "standing on the via of site `s`" reached from `parent` on `layer`.
+    fn push_via(&self, st: &mut State, parent: usize, layer: usize, s: usize, size: ViaSize) {
+        let Some(mg) = self.mg else {
+            return;
+        };
+        let sr = &self.ls[layer];
+        let at = mg.sites[s].at;
+        let (apex, apex_len, _, ok) = sr.los(&st.nodes, parent, at, None);
+        if !ok {
+            return;
+        }
+        let sn = &st.nodes[parent];
+        let g_len = apex_len + dist(apex, at);
+        let hist = self.site_history.get(s).copied().unwrap_or(0.0);
+        let mut cost = (g_len - sn.g_len).max(0.0) + self.via_cost * (1.0 + self.omega * hist);
+        if self.ghost && self.site_soft_blocked(s) {
+            cost += GHOST_BLOCK_NM;
+        }
+        let g_cost = sn.g_cost + cost;
+        let vias = sn.vias + 1;
+        let key = (layer, usize::MAX, s, 0, vias);
+        if st.closed.contains(&key) || st.best.get(&key).is_some_and(|&b| b <= g_cost) {
+            return;
+        }
+        st.best.insert(key, g_cost);
+        let last_site = Self::inherit_site(st, parent);
+        let id = st.nodes.len();
+        let h = self.h(at);
+        st.nodes.push(Node {
+            kind: K_SITE,
+            layer,
+            v: s,
+            edge: usize::MAX,
+            slot: s,
+            dir: 0,
+            parent,
+            face_in: 0,
+            apex: at,
+            apex_len: g_len,
+            since: 0,
+            p: at,
+            g_len,
+            g_cost,
+            vias,
+            last_site,
+            size: Some(size),
+        });
+        st.heap.push(Item {
+            f: g_cost + h,
+            h,
+            layer,
+            edge: usize::MAX,
+            slot: s,
+            dir: 0,
+            id,
+        });
+    }
+
+    /// Via move from `parent` (on `layer`, entering a face of `cyc`) to the site vertex `v` of
+    /// that face: `vias < max_vias`, the site is not in the ancestor chain, some size is free,
+    /// and the M2 goal rule `goal_ok` holds (note §2). O(vias + |sizes|) plus the `los` test.
+    #[allow(clippy::too_many_arguments)]
+    fn try_via(
+        &self,
+        st: &mut State,
+        parent: usize,
+        layer: usize,
+        v: usize,
+        cyc: &Cyc,
+        strands: &[(i64, i64)],
+        p0: i64,
+    ) {
+        let Some(s) = self.ls[layer].g.verts[v].site else {
+            return;
+        };
+        if self.mg.is_none() || st.nodes[parent].vias >= self.max_vias {
+            return;
+        }
+        let mut id = Self::inherit_site(st, parent);
+        while id != usize::MAX {
+            if st.nodes[id].v == s {
+                return;
+            }
+            id = st.nodes[id].last_site;
+        }
+        let Some(size) = self.via_choice(s) else {
+            return;
+        };
+        if !self.ghost && !cyc.goal_ok(strands, p0, v) {
+            return;
+        }
+        self.push_via(st, parent, layer, s, size);
+    }
+
+    /// The M2 start rules from vertex `v` of `layer`: leave every inside face around `v`
+    /// through each of its edges. A root (`root`) also tries via moves to the site vertices of
+    /// those faces; a via arrival tries the goal vertices of its faces. O(deg * n_max).
+    fn leave_vertex(&self, st: &mut State, parent: usize, layer: usize, v: usize, root: bool) {
+        let g = self.ls[layer].g;
+        for &f in g.faces_of_vertex(v) {
+            if !g.faces[f].inside {
+                continue;
+            }
+            let cyc = Cyc::new(g, f);
+            let strands = if self.ghost {
+                Vec::new()
+            } else {
+                cyc.strands(g)
+            };
+            let p0 = cyc.vertex_pos(v).unwrap_or(0);
+            for &e_out in &g.faces[f].e {
+                let dir = other_dir(g, e_out, f);
+                if self.ghost {
+                    if !self.ls[layer].hard(e_out) {
+                        self.push_state(st, parent, layer, e_out, g.slot_count(e_out), dir, f);
+                    }
+                    continue;
+                }
+                if !g.passable(e_out, self.net) {
+                    continue;
+                }
+                let ge = &g.edges[e_out];
+                let near_v = if ge.a == v || ge.b == v { v } else { ge.a };
+                if let Some(slot) = cyc.cross_slot(&strands, p0, e_out, near_v) {
+                    self.push_state(st, parent, layer, e_out, slot, dir, f);
+                }
+            }
+            for &vv in &g.faces[f].v {
+                if vv == v {
+                    continue;
+                }
+                if root {
+                    self.try_via(st, parent, layer, vv, &cyc, &strands, p0);
+                } else if self.goal_set.contains(&(layer, vv))
+                    && (self.ghost || cyc.goal_ok(&strands, p0, vv))
+                {
+                    self.push_goal(st, parent, layer, vv);
+                }
+            }
+        }
+    }
+
+    fn finish(&self, st: &State, end_id: usize, expansions: usize) -> SlotPath {
+        let mut chain = vec![end_id];
+        while st.nodes[*chain.last().unwrap()].kind != K_ROOT {
+            let p = st.nodes[*chain.last().unwrap()].parent;
+            chain.push(p);
+        }
+        chain.reverse();
+        let root = &st.nodes[chain[0]];
+        let (mut cur_layer, mut cur_start) = (root.layer, root.v);
+        let mut legs: Vec<Leg> = Vec::new();
+        let mut sites: Vec<(usize, ViaSize)> = Vec::new();
+        let (mut cross, mut faces): (Vec<(usize, usize)>, Vec<usize>) = (Vec::new(), Vec::new());
+        let mut start_len = 0.0;
+        let mut pending: Option<usize> = None;
+        for &i in &chain[1..] {
+            let n = &st.nodes[i];
+            if let (Some(s), Some(mg)) = (pending.take(), self.mg) {
+                cur_layer = n.layer;
+                cur_start = mg.site_vertex[s][n.layer];
+            }
+            match n.kind {
+                K_EDGE => {
+                    if cross.is_empty() {
+                        faces.push(n.face_in);
+                    }
+                    cross.push((n.edge, n.slot));
+                    faces.push(
+                        self.ls[n.layer].g.edges[n.edge].faces[n.dir as usize]
+                            .unwrap_or(usize::MAX),
+                    );
+                }
+                K_SITE => {
+                    let goal_v = self.mg.map_or(0, |mg| mg.site_vertex[n.v][cur_layer]);
+                    legs.push(Leg {
+                        layer_idx: cur_layer,
+                        start: cur_start,
+                        goal: goal_v,
+                        crossings: std::mem::take(&mut cross),
+                        faces: std::mem::take(&mut faces),
+                        est_len: n.g_len - start_len,
+                    });
+                    start_len = n.g_len;
+                    sites.push((n.v, n.size.unwrap_or(ViaSize { d: 0, drill: 0 })));
+                    pending = Some(n.v);
+                }
+                _ => {
+                    legs.push(Leg {
+                        layer_idx: n.layer,
+                        start: cur_start,
+                        goal: n.v,
+                        crossings: std::mem::take(&mut cross),
+                        faces: std::mem::take(&mut faces),
+                        est_len: n.g_len - start_len,
+                    });
+                }
+            }
+        }
+        let end = &st.nodes[end_id];
+        SlotPath {
+            conn: self.conn_id,
+            legs,
+            sites,
+            est_len: end.g_len,
+            cost: end.g_cost,
+            expansions,
+            candidates: self.ls.iter().map(|s| s.cands.get()).sum(),
+        }
+    }
+
+    /// [`Layered::run`] with the per-process search counters ([`search_totals`]): two clock
+    /// reads and a few relaxed atomic adds per search, none in the expansion loop.
+    fn run_timed(&self, cap: usize, deadline: Instant) -> Run {
+        let t0 = Instant::now();
+        let r = self.run(cap, deadline);
+        let ns = t0.elapsed().as_nanos() as u64;
+        let k = usize::from(self.ghost);
+        TOT[k].ns.fetch_add(ns, AtOrd::Relaxed);
+        TOT[k].calls.fetch_add(1, AtOrd::Relaxed);
+        TOT[k]
+            .expansions
+            .fetch_add(self.exps.get() as u64, AtOrd::Relaxed);
+        let cands: usize = self.ls.iter().map(|s| s.cands.get()).sum();
+        let bends: usize = self.ls.iter().map(|s| s.bends.get()).sum();
+        TOT[k].candidates.fetch_add(cands as u64, AtOrd::Relaxed);
+        TOT[k].bends.fetch_add(bends as u64, AtOrd::Relaxed);
+        r
+    }
+
+    /// The A* loop. `O(V' log V')`; see the module docs.
+    fn run(&self, cap: usize, deadline: Instant) -> Run {
+        let mut st = State::default();
+        for &(l, v) in self.start {
+            let at_p = self.ls[l].g.verts[v].at;
+            st.nodes.push(Node {
+                kind: K_ROOT,
+                layer: l,
+                v,
+                edge: usize::MAX,
+                slot: 0,
+                dir: 0,
+                parent: 0,
+                face_in: 0,
+                apex: at_p,
+                apex_len: 0.0,
+                since: 0,
+                p: at_p,
+                g_len: 0.0,
+                g_cost: 0.0,
+                vias: 0,
+                last_site: usize::MAX,
+                size: None,
+            });
+        }
+        // start states: leave every face around each start vertex through each edge
+        for (i, &(l, v)) in self.start.iter().enumerate() {
+            self.leave_vertex(&mut st, i, l, v, true);
+        }
+        let mut expansions = 0usize;
+        while let Some(it) = st.heap.pop() {
+            let node = st.nodes[it.id].clone();
+            if node.kind == K_GOAL {
+                return Run::Found(Box::new(self.finish(&st, it.id, expansions)));
+            }
+            if !st.closed.insert(self.node_key(&node)) {
+                continue;
+            }
+            if node.kind == K_SITE && self.goal.pour_sites.binary_search(&node.v).is_ok() {
+                return Run::Found(Box::new(self.finish(&st, it.id, expansions)));
+            }
+            if expansions >= cap {
+                return Run::Blocked;
+            }
+            expansions += 1;
+            self.exps.set(expansions);
+            if expansions.is_multiple_of(16) && Instant::now() >= deadline {
+                return Run::Timeout;
+            }
+            if node.kind == K_SITE {
+                let Some(mg) = self.mg else {
+                    continue;
+                };
+                for l2 in 0..self.ls.len() {
+                    if l2 != node.layer {
+                        let v = mg.site_vertex[node.v][l2];
+                        self.leave_vertex(&mut st, it.id, l2, v, false);
+                    }
+                }
+                continue;
+            }
+            let (l, e, slot, dir) = (node.layer, node.edge, node.slot, node.dir);
+            let g = self.ls[l].g;
+            let Some(f) = g.edges[e].faces[dir as usize] else {
+                continue;
+            };
+            let cyc = Cyc::new(g, f);
+            let strands = if self.ghost {
+                Vec::new()
+            } else {
+                cyc.strands(g)
+            };
+            let p0 = if self.ghost {
+                0
+            } else {
+                cyc.gap_pos(e, slot).unwrap_or(0)
+            };
+            for &e_out in &g.faces[f].e {
+                if e_out == e {
+                    continue;
+                }
+                let nd = other_dir(g, e_out, f);
+                if self.ghost {
+                    if !self.ls[l].hard(e_out) {
+                        self.push_state(&mut st, it.id, l, e_out, g.slot_count(e_out), nd, f);
+                    }
+                    continue;
+                }
+                if !g.passable(e_out, self.net) {
+                    continue;
+                }
+                let (x, y) = (&g.edges[e], &g.edges[e_out]);
+                let Some(v) = [x.a, x.b].into_iter().find(|&v| v == y.a || v == y.b) else {
+                    continue;
+                };
+                if let Some(s2) = cyc.cross_slot(&strands, p0, e_out, v) {
+                    self.push_state(&mut st, it.id, l, e_out, s2, nd, f);
+                }
+            }
+            for &vv in &g.faces[f].v {
+                if self.goal_set.contains(&(l, vv)) && (self.ghost || cyc.goal_ok(&strands, p0, vv))
+                {
+                    self.push_goal(&mut st, it.id, l, vv);
+                }
+                self.try_via(&mut st, it.id, l, vv, &cyc, &strands, p0);
+            }
+        }
+        Run::Blocked
+    }
+}
+
+/// Per-layer geometry / cost helper of one search: the graph and obstacles of one layer, the
+/// connection's parameters and the layer's history. The A* itself is [`Layered`].
 struct Search<'a> {
     g: &'a RouteGraph,
     obs: &'a LayerObstacles,
@@ -464,17 +1270,12 @@ struct Search<'a> {
     w: f64,
     c: f64,
     eps: f64,
-    start_v: usize,
-    goal_v: usize,
-    goal: Vec2,
     hist: &'a [f64],
     omega: f64,
     present_overuse: f64,
     ghost: bool,
     /// Candidates returned by `clearance_bend` queries (statistics).
     cands: Cell<usize>,
-    /// Expansions so far of the running `run` (statistics).
-    exps: Cell<usize>,
     /// `clearance_bend` calls so far (statistics).
     bends: Cell<usize>,
     /// Candidate lists of grid-aligned query boxes, `[vertices, walls]` (see `cached_near`).
@@ -482,13 +1283,15 @@ struct Search<'a> {
 }
 
 impl<'a> Search<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         g: &'a RouteGraph,
         obs: &'a LayerObstacles,
         conn: &'a Connection,
-        start_v: usize,
-        goal_v: usize,
-        p: &SearchParams<'a>,
+        hist: &'a [f64],
+        weight: f64,
+        present_overuse: f64,
+        eps: Option<f64>,
         ghost: bool,
     ) -> Self {
         Search {
@@ -498,16 +1301,12 @@ impl<'a> Search<'a> {
             net: conn.net,
             w: conn.width as f64,
             c: conn.clearance as f64,
-            eps: p.eps.unwrap_or(g.rules.eps),
-            start_v,
-            goal_v,
-            goal: g.verts[goal_v].at,
-            hist: p.history,
-            omega: p.weight,
-            present_overuse: p.present_overuse,
+            eps: eps.unwrap_or(g.rules.eps),
+            hist,
+            omega: weight,
+            present_overuse,
             ghost,
             cands: Cell::new(0),
-            exps: Cell::new(0),
             bends: Cell::new(0),
             near: [RefCell::new(HashMap::new()), RefCell::new(HashMap::new())],
         }
@@ -553,7 +1352,7 @@ impl<'a> Search<'a> {
     }
 
     /// State point of edge `e`: usable sub-segment point nearest to the segment `apex -> goal`.
-    fn state_point(&self, e: usize, apex: Vec2) -> Vec2 {
+    fn state_point(&self, e: usize, apex: Vec2, goal: Vec2) -> Vec2 {
         let ge = &self.g.edges[e];
         let (pa, pb) = (self.g.verts[ge.a].at, self.g.verts[ge.b].at);
         let len = dist(pa, pb);
@@ -568,7 +1367,7 @@ impl<'a> Search<'a> {
             (ra / len, 1.0 - rb / len)
         };
         let d = pb - pa;
-        seg_closest(pa + d * t0, pa + d * t1, apex, self.goal)
+        seg_closest(pa + d * t0, pa + d * t1, apex, goal)
     }
 
     /// Edge the slot-free ghost never crosses: a wire runs along it, a face is outside the
@@ -811,7 +1610,7 @@ impl<'a> Search<'a> {
         };
         let mut fan: Vec<Vec2> = Vec::new();
         let mut id = s;
-        while id != 0 {
+        while nodes[id].kind == K_EDGE {
             match dir(nodes[id].edge) {
                 Some(d) => fan.push(d),
                 None => break,
@@ -1035,270 +1834,15 @@ impl<'a> Search<'a> {
         };
         delta * (1.0 + self.omega * hist) * (1.0 + self.omega * (present - 1.0))
     }
-
-    fn push_state(
-        &self,
-        st: &mut State,
-        parent: usize,
-        e: usize,
-        slot: usize,
-        dir: u8,
-        fin: usize,
-    ) {
-        let key = (e, if self.ghost { 0 } else { slot }, dir);
-        if st.closed.contains(&key) {
-            return;
-        }
-        let s = &st.nodes[parent];
-        let p = self.state_point(e, s.apex);
-        let (apex, apex_len, kept, ok) = self.los(&st.nodes, parent, p, Some(e));
-        if !ok {
-            return;
-        }
-        let g_len = apex_len + dist(apex, p);
-        let delta = (g_len - s.g_len).max(0.0);
-        let g_cost = s.g_cost + self.step_cost(e, delta);
-        if st.best.get(&key).is_some_and(|&b| b <= g_cost) {
-            return;
-        }
-        st.best.insert(key, g_cost);
-        let h = dist(p, self.goal);
-        let id = st.nodes.len();
-        st.nodes.push(Node {
-            edge: e,
-            slot,
-            dir,
-            parent,
-            face_in: fin,
-            apex,
-            apex_len,
-            since: kept + 1,
-            p,
-            g_len,
-            g_cost,
-        });
-        st.heap.push(Item {
-            f: g_cost + h,
-            h,
-            edge: e,
-            slot,
-            dir,
-            id,
-        });
-    }
-
-    fn push_goal(&self, st: &mut State, s: usize) {
-        let (apex, apex_len, _, ok) = self.los(&st.nodes, s, self.goal, None);
-        if !ok {
-            return;
-        }
-        let sn = &st.nodes[s];
-        let g_len = apex_len + dist(apex, self.goal);
-        let g_cost = sn.g_cost + (g_len - sn.g_len).max(0.0);
-        let id = st.nodes.len();
-        st.nodes.push(Node {
-            edge: usize::MAX,
-            slot: 0,
-            dir: 0,
-            parent: s,
-            face_in: 0,
-            apex,
-            apex_len,
-            since: 0,
-            p: self.goal,
-            g_len,
-            g_cost,
-        });
-        st.heap.push(Item {
-            f: g_cost,
-            h: 0.0,
-            edge: usize::MAX,
-            slot: 0,
-            dir: 0,
-            id,
-        });
-    }
-
-    fn other_dir(&self, e: usize, f: usize) -> u8 {
-        u8::from(self.g.edges[e].faces[0] == Some(f))
-    }
-
-    fn finish(&self, st: &State, goal_id: usize, expansions: usize) -> SlotPath {
-        let mut chain = Vec::new();
-        let mut id = st.nodes[goal_id].parent;
-        while id != 0 {
-            chain.push(id);
-            id = st.nodes[id].parent;
-        }
-        chain.reverse();
-        let mut faces = Vec::with_capacity(chain.len() + 1);
-        if let Some(&first) = chain.first() {
-            faces.push(st.nodes[first].face_in);
-        }
-        for &i in &chain {
-            let n = &st.nodes[i];
-            faces.push(self.g.edges[n.edge].faces[n.dir as usize].unwrap_or(usize::MAX));
-        }
-        SlotPath {
-            conn: self.conn.id,
-            crossings: chain
-                .iter()
-                .map(|&i| (st.nodes[i].edge, st.nodes[i].slot))
-                .collect(),
-            faces,
-            est_len: st.nodes[goal_id].g_len,
-            expansions,
-            candidates: self.cands.get(),
-        }
-    }
-
-    /// [`Search::run`] with the per-process search counters ([`search_totals`]): two clock reads
-    /// and a few relaxed atomic adds per search, none in the expansion loop.
-    fn run_timed(&self, cap: usize, deadline: Instant) -> Run {
-        let t0 = Instant::now();
-        let r = self.run(cap, deadline);
-        let ns = t0.elapsed().as_nanos() as u64;
-        let k = usize::from(self.ghost);
-        TOT[k].ns.fetch_add(ns, AtOrd::Relaxed);
-        TOT[k].calls.fetch_add(1, AtOrd::Relaxed);
-        TOT[k]
-            .expansions
-            .fetch_add(self.exps.get() as u64, AtOrd::Relaxed);
-        TOT[k]
-            .candidates
-            .fetch_add(self.cands.get() as u64, AtOrd::Relaxed);
-        TOT[k]
-            .bends
-            .fetch_add(self.bends.get() as u64, AtOrd::Relaxed);
-        r
-    }
-
-    fn run(&self, cap: usize, deadline: Instant) -> Run {
-        let g = self.g;
-        let at_p = g.verts[self.start_v].at;
-        let mut st = State::default();
-        st.nodes.push(Node {
-            edge: usize::MAX,
-            slot: 0,
-            dir: 0,
-            parent: 0,
-            face_in: 0,
-            apex: at_p,
-            apex_len: 0.0,
-            since: 0,
-            p: at_p,
-            g_len: 0.0,
-            g_cost: 0.0,
-        });
-        // start states: leave every face around the start vertex through each edge
-        for &f in g.faces_of_vertex(self.start_v) {
-            if !g.faces[f].inside {
-                continue;
-            }
-            let cyc = Cyc::new(g, f);
-            let strands = if self.ghost {
-                Vec::new()
-            } else {
-                cyc.strands(g)
-            };
-            let p0 = cyc.vertex_pos(self.start_v).unwrap_or(0);
-            for &e_out in &g.faces[f].e {
-                let dir = self.other_dir(e_out, f);
-                if self.ghost {
-                    if !self.hard(e_out) {
-                        self.push_state(&mut st, 0, e_out, g.slot_count(e_out), dir, f);
-                    }
-                    continue;
-                }
-                if !g.passable(e_out, self.net) {
-                    continue;
-                }
-                let ge = &g.edges[e_out];
-                let near_v = if ge.a == self.start_v || ge.b == self.start_v {
-                    self.start_v
-                } else {
-                    ge.a
-                };
-                if let Some(slot) = cyc.cross_slot(&strands, p0, e_out, near_v) {
-                    self.push_state(&mut st, 0, e_out, slot, dir, f);
-                }
-            }
-        }
-        let mut expansions = 0usize;
-        while let Some(it) = st.heap.pop() {
-            if it.edge == usize::MAX {
-                return Run::Found(Box::new(self.finish(&st, it.id, expansions)));
-            }
-            let key = (it.edge, if self.ghost { 0 } else { it.slot }, it.dir);
-            if !st.closed.insert(key) {
-                continue;
-            }
-            if expansions >= cap {
-                return Run::Blocked;
-            }
-            expansions += 1;
-            self.exps.set(expansions);
-            if expansions.is_multiple_of(16) && Instant::now() >= deadline {
-                return Run::Timeout;
-            }
-            let (e, slot, dir) = (it.edge, it.slot, it.dir);
-            let Some(f) = g.edges[e].faces[dir as usize] else {
-                continue;
-            };
-            let cyc = Cyc::new(g, f);
-            let strands = if self.ghost {
-                Vec::new()
-            } else {
-                cyc.strands(g)
-            };
-            let p0 = if self.ghost {
-                0
-            } else {
-                cyc.gap_pos(e, slot).unwrap_or(0)
-            };
-            for &e_out in &g.faces[f].e {
-                if e_out == e {
-                    continue;
-                }
-                let nd = self.other_dir(e_out, f);
-                if self.ghost {
-                    if !self.hard(e_out) {
-                        self.push_state(&mut st, it.id, e_out, g.slot_count(e_out), nd, f);
-                    }
-                    continue;
-                }
-                if !g.passable(e_out, self.net) {
-                    continue;
-                }
-                let (x, y) = (&g.edges[e], &g.edges[e_out]);
-                let Some(v) = [x.a, x.b].into_iter().find(|&v| v == y.a || v == y.b) else {
-                    continue;
-                };
-                if let Some(s2) = cyc.cross_slot(&strands, p0, e_out, v) {
-                    self.push_state(&mut st, it.id, e_out, s2, nd, f);
-                }
-            }
-            if g.faces[f].v.contains(&self.goal_v)
-                && (self.ghost || cyc.goal_ok(&strands, p0, self.goal_v))
-            {
-                self.push_goal(&mut st, it.id);
-            }
-        }
-        Run::Blocked
-    }
 }
 
-/// Connections whose strands (Rule T) block the slot-free `ghost` path of a connection from
-/// `start_v` to `goal_v`: the strands that cross the ghost's chord in some face (Fix B,
-/// `m2-route-diagnosis` §4 B). Sorted, deduplicated; O(strands in the ghost's faces).
-pub fn strand_blockers(
-    g: &RouteGraph,
-    ghost: &SlotPath,
-    start_v: usize,
-    goal_v: usize,
-) -> Vec<usize> {
+/// Connections whose strands (Rule T) block the slot-free ghost `leg` on its layer graph `g`:
+/// the strands that cross the leg's chord in some face (Fix B, `m2-route-diagnosis` §4 B).
+/// Sorted, deduplicated; O(strands in the leg's faces).
+pub fn leg_strand_blockers(g: &RouteGraph, leg: &Leg) -> Vec<usize> {
+    let (start_v, goal_v) = (leg.start, leg.goal);
     let mut out: Vec<usize> = Vec::new();
-    let n = ghost.crossings.len();
+    let n = leg.crossings.len();
     if n == 0 {
         // direct ghost along the terminals' edge: whoever crosses that edge blocks it
         if let Some(e) = g.edge(start_v, goal_v) {
@@ -1308,11 +1852,11 @@ pub fn strand_blockers(
         out.dedup();
         return out;
     }
-    if ghost.faces.len() != n + 1 {
+    if leg.faces.len() != n + 1 {
         return out;
     }
     for k in 0..=n {
-        let f = ghost.faces[k];
+        let f = leg.faces[k];
         if f >= g.faces.len() {
             continue;
         }
@@ -1321,7 +1865,7 @@ pub fn strand_blockers(
         let (p0, from_v) = if k == 0 {
             (cyc.vertex_pos(start_v), Some(start_v))
         } else {
-            let (e, _) = ghost.crossings[k - 1];
+            let (e, _) = leg.crossings[k - 1];
             (cyc.gap_pos(e, g.slot_count(e)), None)
         };
         let Some(p0) = p0 else {
@@ -1331,7 +1875,7 @@ pub fn strand_blockers(
             out.extend(cyc.vertex_blockers(&strands, p0, goal_v));
             continue;
         }
-        let e_out = ghost.crossings[k].0;
+        let e_out = leg.crossings[k].0;
         let near_v = match from_v {
             Some(sv) => {
                 let ge = &g.edges[e_out];
@@ -1342,7 +1886,7 @@ pub fn strand_blockers(
                 }
             }
             None => {
-                let (x, y) = (&g.edges[ghost.crossings[k - 1].0], &g.edges[e_out]);
+                let (x, y) = (&g.edges[leg.crossings[k - 1].0], &g.edges[e_out]);
                 match [x.a, x.b].into_iter().find(|&v| v == y.a || v == y.b) {
                     Some(v) => v,
                     None => continue,
@@ -1356,10 +1900,23 @@ pub fn strand_blockers(
     out
 }
 
-/// Zero-crossing path along the edge between the terminals, if free.
-/// Rejected when the chord bends around a third obstacle inside its clearance band (D3).
+/// Leg ids (P2) whose strands block the slot-free `ghost` path: [`leg_strand_blockers`] per
+/// ghost leg on its layer. Sorted, deduplicated; O(strands in the ghost's faces).
+pub fn strand_blockers(mg: &MultiGraph, ghost: &SlotPath) -> Vec<usize> {
+    let mut out: Vec<usize> = ghost
+        .legs
+        .iter()
+        .flat_map(|leg| leg_strand_blockers(&mg.layers[leg.layer_idx].g, leg))
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Zero-crossing path along the edge between the terminals `s` and `t` of layer `layer`, if
+/// free. Rejected when the chord bends around a third obstacle inside its clearance band (D3).
 /// O(local) for one chord query.
-fn direct(sr: &Search, s: usize, t: usize) -> Option<SlotPath> {
+fn direct(sr: &Search, layer: usize, s: usize, t: usize) -> Option<SlotPath> {
     let (g, conn) = (sr.g, sr.conn);
     let e = g.edge(s, t)?;
     if g.passable(e, conn.net) && g.slot_count(e) == 0 && g.along(e).is_none() {
@@ -1367,11 +1924,20 @@ fn direct(sr: &Search, s: usize, t: usize) -> Option<SlotPath> {
         if sr.clearance_bend(p, q, &[]).is_some() {
             return None;
         }
+        let len = dist(p, q);
         return Some(SlotPath {
             conn: conn.id,
-            crossings: Vec::new(),
-            faces: Vec::new(),
-            est_len: dist(p, q),
+            legs: vec![Leg {
+                layer_idx: layer,
+                start: s,
+                goal: t,
+                crossings: Vec::new(),
+                faces: Vec::new(),
+                est_len: len,
+            }],
+            sites: Vec::new(),
+            est_len: len,
+            cost: len,
             expansions: 0,
             candidates: sr.cands.get(),
         });
@@ -1425,82 +1991,188 @@ pub fn search_totals_reset() {
     }
 }
 
-/// Planar slot search for `conn` from vertex `start_v` to `goal_v`. A blocked search runs
-/// [`ghost`] under the same deadline and reports its path and first blocked edge.
-pub fn search(
-    g: &RouteGraph,
-    obs: &LayerObstacles,
+/// `direct` per layer in index order (D3 included), starts and goals in the given order; the
+/// first free one wins. O(layers * starts * goals * local).
+fn find_direct(lay: &Layered) -> Option<SlotPath> {
+    for (li, sr) in lay.ls.iter().enumerate() {
+        for &(l, s) in lay.start.iter().filter(|x| x.0 == li) {
+            let _ = l;
+            for &(_, t) in lay.goal.vertices.iter().filter(|x| x.0 == li) {
+                if let Some(d) = direct(sr, li, s, t) {
+                    return Some(d);
+                }
+            }
+        }
+    }
+    None
+}
+
+type GhostOut = (
+    SlotPath,
+    Option<(usize, usize)>,
+    Option<usize>,
+    Option<(usize, usize)>,
+);
+
+fn search_in(
+    env: &Env,
+    hists: &[&[f64]],
     conn: &Connection,
-    start_v: usize,
-    goal_v: usize,
-    p: &SearchParams,
+    start: &[(usize, usize)],
+    goal: &Goal,
+    p: &Common,
 ) -> SearchOutcome {
     if Instant::now() >= p.deadline {
         return SearchOutcome::Timeout;
     }
-    let s = Search::new(g, obs, conn, start_v, goal_v, p, false);
-    if let Some(d) = direct(&s, start_v, goal_v) {
+    let lay = Layered::new(env, hists, conn, start, goal, p, false);
+    if let Some(d) = find_direct(&lay) {
         return SearchOutcome::Found(d);
     }
-    let cap = p.expansion_cap.min(default_expansion_cap(g));
-    match s.run_timed(cap, p.deadline) {
+    let cap = p
+        .expansion_cap
+        .min(cap_of(&env.graphs(), env.sites(), false));
+    match lay.run_timed(cap, p.deadline) {
         Run::Found(path) => SearchOutcome::Found(*path),
         Run::Timeout => SearchOutcome::Timeout,
-        Run::Blocked => {
-            let gh = ghost(g, obs, conn, start_v, goal_v, p);
-            match gh {
-                Some((path, blocked_edge, last_reached)) => SearchOutcome::Blocked {
-                    ghost: Some(path),
-                    blocked_edge,
-                    last_reached,
-                },
-                None => SearchOutcome::Blocked {
-                    ghost: None,
-                    blocked_edge: None,
-                    last_reached: None,
-                },
-            }
-        }
+        Run::Blocked => match ghost_in(env, hists, conn, start, goal, p) {
+            Some((path, blocked_edge, blocked_site, last_reached)) => SearchOutcome::Blocked {
+                ghost: Some(path),
+                blocked_edge,
+                blocked_site,
+                last_reached,
+            },
+            None => SearchOutcome::Blocked {
+                ghost: None,
+                blocked_edge: None,
+                blocked_site: None,
+                last_reached: None,
+            },
+        },
     }
 }
 
-/// Slot-free ghost search: ignores capacity and foreign constraint edges at a price of
-/// [`GHOST_BLOCK_NM`] per blocked edge. Returns `(path, first blocked edge, crossing before it)`;
-/// ghost crossings carry `slot = slot_count(edge)` (append position).
-#[allow(clippy::type_complexity)]
-pub fn ghost(
-    g: &RouteGraph,
-    obs: &LayerObstacles,
+fn ghost_in(
+    env: &Env,
+    hists: &[&[f64]],
     conn: &Connection,
-    start_v: usize,
-    goal_v: usize,
-    p: &SearchParams,
-) -> Option<(SlotPath, Option<usize>, Option<(usize, usize)>)> {
-    let s = Search::new(g, obs, conn, start_v, goal_v, p, true);
-    if let Some(e) = g.edge(start_v, goal_v) {
-        if !s.hard(e) {
-            let path = SlotPath {
-                conn: conn.id,
-                crossings: Vec::new(),
-                faces: Vec::new(),
-                est_len: dist(g.verts[start_v].at, g.verts[goal_v].at),
-                expansions: 0,
-                candidates: 0,
-            };
-            return Some((path, None, None));
+    start: &[(usize, usize)],
+    goal: &Goal,
+    p: &Common,
+) -> Option<GhostOut> {
+    let lay = Layered::new(env, hists, conn, start, goal, p, true);
+    for (li, sr) in lay.ls.iter().enumerate() {
+        for &(_, s) in start.iter().filter(|x| x.0 == li) {
+            for &(_, t) in goal.vertices.iter().filter(|x| x.0 == li) {
+                if let Some(e) = sr.g.edge(s, t) {
+                    if !sr.hard(e) {
+                        let len = dist(sr.g.verts[s].at, sr.g.verts[t].at);
+                        let path = SlotPath {
+                            conn: conn.id,
+                            legs: vec![Leg {
+                                layer_idx: li,
+                                start: s,
+                                goal: t,
+                                crossings: Vec::new(),
+                                faces: Vec::new(),
+                                est_len: len,
+                            }],
+                            sites: Vec::new(),
+                            est_len: len,
+                            cost: len,
+                            expansions: 0,
+                            candidates: 0,
+                        };
+                        return Some((path, None, None, None));
+                    }
+                }
+            }
         }
     }
-    let cap = 8 * g.edges.len() + 64;
-    let Run::Found(mut path) = s.run_timed(cap, p.deadline) else {
+    let cap = cap_of(&env.graphs(), env.sites(), true);
+    let Run::Found(mut path) = lay.run_timed(cap, p.deadline) else {
         return None;
     };
-    for c in &mut path.crossings {
-        c.1 = g.slot_count(c.0);
+    for leg in &mut path.legs {
+        let g = env.layers[leg.layer_idx].0;
+        for c in &mut leg.crossings {
+            c.1 = g.slot_count(c.0);
+        }
     }
-    let k = path.crossings.iter().position(|&(e, _)| s.soft_blocked(e));
-    let blocked_edge = k.map(|k| path.crossings[k].0);
-    let last_reached = k.and_then(|k| k.checked_sub(1)).map(|k| path.crossings[k]);
-    Some((*path, blocked_edge, last_reached))
+    // the first soft-blocked element in travel order: a crossing, or the site ending a leg
+    for (j, leg) in path.legs.iter().enumerate() {
+        let sr = &lay.ls[leg.layer_idx];
+        if let Some(k) = leg.crossings.iter().position(|&(e, _)| sr.soft_blocked(e)) {
+            let edge = (leg.layer_idx, leg.crossings[k].0);
+            let last = k.checked_sub(1).map(|k| (j, k));
+            return Some((*path, Some(edge), None, last));
+        }
+        if let Some(&(s, _)) = path.sites.get(j) {
+            if lay.site_soft_blocked(s) {
+                let last = leg.crossings.len().checked_sub(1).map(|k| (j, k));
+                return Some((*path, None, Some(s), last));
+            }
+        }
+    }
+    Some((*path, None, None, None))
+}
+
+fn hist_refs(history: &[Vec<f64>], layers: usize) -> Vec<&[f64]> {
+    (0..layers)
+        .map(|i| history.get(i).map_or(&[][..], |v| v.as_slice()))
+        .collect()
+}
+
+fn common<'a>(p: &SearchParams<'a>) -> Common<'a> {
+    Common {
+        site_history: p.site_history,
+        weight: p.weight,
+        present_overuse: p.present_overuse,
+        expansion_cap: p.expansion_cap,
+        deadline: p.deadline,
+        eps: p.eps,
+        via_cost: p.via_cost,
+        max_vias: p.max_vias,
+    }
+}
+
+/// Layered slot search for `conn` from the `start` vertices `(layer_idx, vertex)` (one per
+/// layer of the source terminal) to `goal`. A blocked search runs [`ghost`] under the same
+/// deadline and reports its path and first blocked edge / site.
+///
+/// Complexity: `O(V' log V')`, `V' = sum_L 2 (E_L + X_L) + 2 S`; per expansion
+/// `O(n_max + C^2 + (C + 1) local)`; expansions are capped by
+/// `min(p.expansion_cap, default_expansion_cap(mg))`.
+pub fn search(
+    mg: &MultiGraph,
+    obs: &ObstacleSet,
+    conn: &Connection,
+    start: &[(usize, usize)],
+    goal: &Goal,
+    p: &SearchParams,
+) -> SearchOutcome {
+    let env = Env::of(mg, obs);
+    let hists = hist_refs(p.history, env.layers.len());
+    search_in(&env, &hists, conn, start, goal, &common(p))
+}
+
+/// Slot-free ghost search: ignores capacity and foreign constraint edges at a price of
+/// [`GHOST_BLOCK_NM`] per blocked edge **and** per owned / blocked site (vias and layers are
+/// otherwise free, `max_vias` still applies). Returns `(path, first blocked edge
+/// (layer_idx, edge), first blocked site, crossing before it (leg, index))`: the first
+/// soft-blocked element in travel order (P5); ghost crossings carry `slot = slot_count(edge)`.
+/// Cap `8 sum_L E_L + 4 S + 64`; same complexity as [`search`].
+pub fn ghost(
+    mg: &MultiGraph,
+    obs: &ObstacleSet,
+    conn: &Connection,
+    start: &[(usize, usize)],
+    goal: &Goal,
+    p: &SearchParams,
+) -> Option<GhostOut> {
+    let env = Env::of(mg, obs);
+    let hists = hist_refs(p.history, env.layers.len());
+    ghost_in(&env, &hists, conn, start, goal, &common(p))
 }
 
 /// Test hook: the first clearance bend of the chord `a -> t` of `conn`, with the sleeve query
@@ -1515,15 +2187,7 @@ pub fn probe_clearance_bend(
     portals: &[usize],
     full: bool,
 ) -> Option<(Vec2, Option<usize>)> {
-    let p = SearchParams {
-        history: &[],
-        weight: 1.0,
-        present_overuse: PRESENT_OVERUSE,
-        expansion_cap: usize::MAX,
-        deadline: Instant::now() + std::time::Duration::from_secs(3600),
-        eps: None,
-    };
-    let s = Search::new(g, obs, conn, 0, 0, &p, false);
+    let s = Search::new(g, obs, conn, &[], 1.0, PRESENT_OVERUSE, None, false);
     // no portals = one box over the chord's whole bbox
     s.clearance_bend(a, t, if full { &[] } else { portals })
 }
@@ -1539,13 +2203,176 @@ pub fn probe_bend_ok(
     t: Vec2,
     side: Vec2,
 ) -> bool {
-    let p = SearchParams {
-        history: &[],
-        weight: 1.0,
-        present_overuse: PRESENT_OVERUSE,
-        expansion_cap: usize::MAX,
-        deadline: Instant::now() + std::time::Duration::from_secs(3600),
-        eps: None,
-    };
-    Search::new(g, obs, conn, 0, 0, &p, false).bend_ok(a, u, t, Some(side))
+    Search::new(g, obs, conn, &[], 1.0, PRESENT_OVERUSE, None, false).bend_ok(a, u, t, Some(side))
+}
+
+/// The single-layer (M2) entry points: the layered core on one [`RouteGraph`] without via
+/// sites. `negotiate` / `route` use them until the multi-layer negotiation lands (Task 9);
+/// [`SlotPath::single_layer`] turns a [`PlanarPath`] into the layered type.
+pub mod planar {
+    use super::*;
+
+    /// A single-layer path: one run of `(edge, slot)` crossings.
+    #[derive(Clone, Debug)]
+    pub struct PlanarPath {
+        pub conn: usize,
+        /// `(edge, slot)` in travel order, slots as seen by the search (the graph before the insert).
+        pub crossings: Vec<(usize, usize)>,
+        /// Start face first; `faces.len() == crossings.len() + 1` (empty for a direct path).
+        pub faces: Vec<usize>,
+        pub est_len: f64,
+        pub expansions: usize,
+        /// Sum of the clearance-query candidates (vertices + walls) examined over the whole search.
+        pub candidates: usize,
+    }
+
+    impl PlanarPath {
+        fn of(p: SlotPath) -> PlanarPath {
+            let leg = p.legs.into_iter().next();
+            let (crossings, faces) =
+                leg.map_or((Vec::new(), Vec::new()), |l| (l.crossings, l.faces));
+            PlanarPath {
+                conn: p.conn,
+                crossings,
+                faces,
+                est_len: p.est_len,
+                expansions: p.expansions,
+                candidates: p.candidates,
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    pub enum SearchOutcome {
+        Found(PlanarPath),
+        Blocked {
+            ghost: Option<PlanarPath>,
+            blocked_edge: Option<usize>,
+            last_reached: Option<(usize, usize)>,
+        },
+        Timeout,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    pub struct SearchParams<'a> {
+        /// Per-edge history cost (indexed by edge; missing entries are 0).
+        pub history: &'a [f64],
+        /// `omega`: history / present weight of the connection's tier.
+        pub weight: f64,
+        pub present_overuse: f64,
+        pub expansion_cap: usize,
+        pub deadline: Instant,
+        /// Build margin ε of the admissibility and geometry tests; `None` = the graph's
+        /// `rules.eps`. The zero-slack retry (R6) searches one connection at `Some(0.0)`.
+        pub eps: Option<f64>,
+    }
+
+    fn common(p: &SearchParams) -> Common<'static> {
+        Common {
+            site_history: &[],
+            weight: p.weight,
+            present_overuse: p.present_overuse,
+            expansion_cap: p.expansion_cap,
+            deadline: p.deadline,
+            eps: p.eps,
+            via_cost: 0.0,
+            max_vias: 0,
+        }
+    }
+
+    /// Expansion cap `8 (E + X) + 64` of the planar slot search. O(E).
+    pub fn default_expansion_cap(g: &RouteGraph) -> usize {
+        cap_of(&[g], 0, false)
+    }
+
+    fn goal_of(t: usize) -> Goal {
+        Goal {
+            vertices: vec![(0, t)],
+            pour_sites: Vec::new(),
+            pour_layer: None,
+        }
+    }
+
+    /// Planar slot search for `conn` from vertex `start_v` to `goal_v`. A blocked search runs
+    /// [`ghost`] under the same deadline and reports its path and first blocked edge.
+    /// Complexity `O(V log V)`, `V = 2 (E + X)`.
+    pub fn search(
+        g: &RouteGraph,
+        obs: &LayerObstacles,
+        conn: &Connection,
+        start_v: usize,
+        goal_v: usize,
+        p: &SearchParams,
+    ) -> SearchOutcome {
+        let env = Env {
+            layers: vec![(g, obs)],
+            mg: None,
+        };
+        let goal = goal_of(goal_v);
+        let start = [(0usize, start_v)];
+        match search_in(&env, &[p.history], conn, &start, &goal, &common(p)) {
+            super::SearchOutcome::Found(path) => SearchOutcome::Found(PlanarPath::of(path)),
+            super::SearchOutcome::Timeout => SearchOutcome::Timeout,
+            super::SearchOutcome::Blocked {
+                ghost,
+                blocked_edge,
+                last_reached,
+                ..
+            } => {
+                let last = ghost
+                    .as_ref()
+                    .zip(last_reached)
+                    .map(|(gp, (leg, k))| gp.legs[leg].crossings[k]);
+                SearchOutcome::Blocked {
+                    ghost: ghost.map(PlanarPath::of),
+                    blocked_edge: blocked_edge.map(|x| x.1),
+                    last_reached: last,
+                }
+            }
+        }
+    }
+
+    /// Slot-free ghost search: ignores capacity and foreign constraint edges at a price of
+    /// [`GHOST_BLOCK_NM`] per blocked edge. Returns `(path, first blocked edge, crossing before
+    /// it)`; ghost crossings carry `slot = slot_count(edge)` (append position).
+    #[allow(clippy::type_complexity)]
+    pub fn ghost(
+        g: &RouteGraph,
+        obs: &LayerObstacles,
+        conn: &Connection,
+        start_v: usize,
+        goal_v: usize,
+        p: &SearchParams,
+    ) -> Option<(PlanarPath, Option<usize>, Option<(usize, usize)>)> {
+        let env = Env {
+            layers: vec![(g, obs)],
+            mg: None,
+        };
+        let goal = goal_of(goal_v);
+        let start = [(0usize, start_v)];
+        let (path, edge, _, last) = ghost_in(&env, &[p.history], conn, &start, &goal, &common(p))?;
+        let last = last.map(|(leg, k)| path.legs[leg].crossings[k]);
+        Some((PlanarPath::of(path), edge.map(|x| x.1), last))
+    }
+
+    /// Connections whose strands (Rule T) block the slot-free `ghost` path of a connection from
+    /// `start_v` to `goal_v` ([`leg_strand_blockers`]). Sorted, deduplicated.
+    pub fn strand_blockers(
+        g: &RouteGraph,
+        ghost: &PlanarPath,
+        start_v: usize,
+        goal_v: usize,
+    ) -> Vec<usize> {
+        leg_strand_blockers(
+            g,
+            &Leg {
+                layer_idx: 0,
+                start: start_v,
+                goal: goal_v,
+                crossings: ghost.crossings.clone(),
+                faces: ghost.faces.clone(),
+                est_len: ghost.est_len,
+            },
+        )
+    }
 }
