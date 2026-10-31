@@ -23,6 +23,9 @@ fn pad(i: usize, net: i32, x: i64, y: i64) -> Pad {
         drill: None,
         local_clearance: None,
         net_tie_group: None,
+        zone_connection: None,
+        thermal_gap: None,
+        spoke_angle_deg: None,
     }
 }
 

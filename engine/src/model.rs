@@ -37,7 +37,7 @@ impl Pt {
             y: self.y as f64,
         }
     }
-    fn flip(&mut self) {
+    pub fn flip(&mut self) {
         self.y = self.y.saturating_neg();
     }
 }
@@ -146,6 +146,16 @@ pub struct Pad {
     pub local_clearance: Option<i64>,
     #[serde(default)]
     pub net_tie_group: Option<usize>,
+    /// Zone connection override (KiCad `ZONE_CONNECTION`: 0 none, 1 thermal, 2 full,
+    /// 3 THT thermal); `None` = the zone's setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone_connection: Option<i32>,
+    /// Thermal relief gap override, nm; `None` = the zone's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_gap: Option<i64>,
+    /// Thermal spoke angle in degrees (KiCad: 90 = along the pad axes); `None` = 90.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spoke_angle_deg: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -201,16 +211,34 @@ pub struct Pour {
     pub layers: Vec<u32>,
     pub pads: Vec<String>,
     pub vias: Vec<String>,
-    /// Filled-copper outer outlines per zone layer (KiCad frame on the wire; `from_json` flips Y).
+    /// Filled-copper outlines per zone layer (KiCad frame on the wire; `from_json` flips Y).
     pub fills: Vec<PourFill>,
+    /// Zone clearance setting, nm (0: the net rule's clearance applies).
+    pub clearance: i64,
+    /// Zone minimum fill thickness, nm (KiCad prunes fill features thinner than this).
+    pub min_thickness: i64,
+    /// Thermal relief gap, nm.
+    pub thermal_gap: i64,
+    /// Thermal spoke width, nm.
+    pub spoke_width: i64,
+    /// Pad connection (KiCad `ZONE_CONNECTION`: 0 none, 1 thermal, 2 full, 3 THT thermal).
+    #[serde(default = "default_pad_connection")]
+    pub pad_connection: i32,
 }
 
-/// One outer ring of a zone's filled copper on `layer` (holes dropped, like M0 copper shapes).
+fn default_pad_connection() -> i32 {
+    1
+}
+
+/// One outline of a zone's filled copper on `layer`: outer ring plus its holes (the holes are
+/// empty in models exported before the pour-reach check; the router then over-approximates
+/// the fill).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PourFill {
     pub layer: u32,
     pub outer: Vec<Pt>,
+    pub holes: Vec<Vec<Pt>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -385,6 +413,9 @@ impl BoardModel {
         for p in &mut self.pours {
             for f in &mut p.fills {
                 f.outer.iter_mut().for_each(Pt::flip);
+                for h in &mut f.holes {
+                    h.iter_mut().for_each(Pt::flip);
+                }
             }
         }
         for h in &mut self.holes {
@@ -552,6 +583,8 @@ pub struct Scope {
     pub nets: Vec<String>,
     pub netclasses: Vec<String>,
     pub pads: Vec<PadRef>,
+    /// Via uuids (model vias) selected as terminals.
+    pub vias: Vec<String>,
     pub footprints: Vec<String>,
     /// Polygon in the KiCad frame; `None` = no area limit.
     pub area: Option<Vec<Pt>>,
@@ -564,6 +597,7 @@ impl Scope {
         self.nets.is_empty()
             && self.netclasses.is_empty()
             && self.pads.is_empty()
+            && self.vias.is_empty()
             && self.footprints.is_empty()
             && self.area.is_none()
     }

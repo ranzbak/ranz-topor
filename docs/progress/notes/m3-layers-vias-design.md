@@ -318,3 +318,52 @@ free-list ids sorted; heap key total; `collect` in index order; no `HashMap` ite
   roundrect corner) outside the ±75 µm corridor the 0.2 mm wire has between 0.5 mm-pitch neighbours; a reverse
   "can the goal be left" probe reproduces that, but it is not a necessary condition of the forward entry (different
   state points, different apex), so it could block a connection the search would route. Left to the gate review.
+
+## 9. Pour reach after routing (`pourcheck.rs`, `route.rs` completion passes; R3-pourreach, 2026-10-31)
+
+**Bug.** wiccon-2023 (2d3063e70ed5) routed 60/60 with routing_new 0, but the routed DRC reported 2 unconnected items, both
+GND: `U1.15` (SMD 2.5 × 1.0 mm on B.Cu) ↔ zone and `J2.2` (PTH ⌀1.7) ↔ zone. Measured on the refilled routed board (pcbnew
+SWIG, zone: thermal relief, gap 0.508, spoke 0.508, min thickness 0.254, clearance 0.508): KiCad's four spoke test points per
+pad (pad bbox edge + gap + ε, `buildThermalSpokes`) were all outside the refilled copper — U1.15: nearest fill 1.4–1.8 mm away
+on every side, GPIO0 passing 0.3–0.5 mm from the pad's top/left edge and RST below-right on B.Cu; J2.2: MISO (B.Cu, 1.18 mm from
+the centre), MOSI (F.Cu, 1.30 mm) and 4v in the thermal band on both pour layers. In the original both pads were served by
+spokes alone (no GND via or track within 4 mm; U1.15 spokes at 180°/270°, J2.2 at 180°/270° on both layers); the ripped
+board's fill reaches them, so `decompose` (Task 6) correctly made no connection for them — and nothing kept that true while
+the foreign nets routed. Root cause: *pour-reached* was decided on the pre-route fill and never re-verified.
+
+**Fix (engine, preferred (a)): verify the reach after routing, complete what was lost, negotiate if the completion is boxed in.**
+
+*Fill approximation* (`pourcheck::check_pour_reach`, per (pour, layer), parallel, deterministic): raster of the pre-route fill
+polygons at `cell = max(25 µm, √(bbox area / 4·10⁶))` — the exported fill is KiCad's own (fractured outlines; holes exported
+too), so it already carries every knockout of the pre-existing copper and the thermal holes + spokes of the pour's pads —
+minus the router's foreign-net tracks/vias dilated by `max(zone clearance, net clearances) + min_thickness/2 + cell/√2`
+(clearance knockout, then the min-width opening, conservative by half a cell); 4-connected islands by flood fill.
+*Connectivity* of the pour net: union-find over islands, pads, vias (model + routed) and tracks (kept + routed): a thermal pad
+joins the island a spoke test point lands in (a point is in the opened fill when a fill cell lies within `min_thickness/2`
+of it), a solid pad the islands under its copper (`ZONE_CONNECTION` per zone, pad override exported), a via the island under
+its disc, a track the islands it runs over; tracks join the pads / vias / tracks they touch (copper gap ≤ 0). *Main component*
+= the one with the most pour-listed items (ties: largest fill area). *Lost* = listed pads/vias and pads of connections routed
+in this run that are not in it. `O(cells + Σ stamps + T·(P+V+T))`.
+
+*Completion passes* (`route_inner` → `route_pass` × (1 + ≤ `POUR_REACH_PASSES` = 3)): pass 1 routes a pour-completion
+connection per lost cluster against the routed copper as fixed obstacles (`with_routed_copper`: items → kept/vias with uuids
+`topor:<i>`, pours relisted with the main component's items only, `Scope { pads: lost, vias: lost }`; pour goals restricted
+to via sites inside the main component, `site_in_main`, so the completion via cannot land in a cut-off island). When a
+completion is blocked (wiccon U1.15: no via of any allowed size fits around the pad, GPIO0/RST seal it), the next pass
+unfreezes the routed foreign connections whose copper lies within `hull + 2·(default via + clearance)` of the lost item: their
+reports/items are dropped (`drop_conns`, ids renumbered), their terminals join the scope, and they re-route together with the
+completion in one negotiation. A pass that still fails after unfreezing, a pad blocked by fixed copper only, the pass cap or
+the budget end the loop with a `pour reach: … without pour` warning. A model without fills, or a clean check, returns pass 1
+untouched (eprom byte-identical). Results merge by `merge_pass` (ids continue, per-net reports and totals recomputed).
+
+wiccon: 60/60 → 62/62 (J2.2 + U1.15 completion, 1 via each; pass 2 re-routed GPIO15, RST, SCLK, GPIO0 ×2 around U1.15),
+unconnected 2 → 0, routing_new 0, vias 33 → 37, router 1.5 → 3.4 s (4 threads), threads 1/4 byte-identical.
+
+Pinned: `pourcheck::tests::{untouched_fill_keeps_every_listed_pad, foreign_track_cutting_the_fill_loses_the_pad_on_the_small_side,
+same_net_track_and_via_bridge_the_cut_pad, routed_pad_whose_via_lands_in_a_cut_island_is_lost,
+spokes_blocked_on_all_four_sides_lose_the_pad}`, `route_pour_reach_completes_pad_cut_off_by_foreign_track` (route_layers:
+one routed connection and a cut-off pad before; completion via inside the main fill, byte-identical across threads after).
+Harness: `preexisting_unconnected` (count + items; an unconnected pair is pre-existing iff the same uuid pair is unconnected
+in the ripped-unrouted DRC) in `classify` / bench metrics / summary / caption, `test_unconnected_preexisting_iff_same_pair_in_ripped_baseline`.
+Model: `Pour { clearance, min_thickness, thermal_gap, spoke_width, pad_connection }`, `PourFill.holes`,
+`Pad { zone_connection?, thermal_gap?, spoke_angle_deg? }`, `Scope.vias`.

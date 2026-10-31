@@ -512,3 +512,62 @@ fn route_pad_in_arc_pocket_routes() {
         clean(&m, &r);
     }
 }
+
+/// Pour reach (M3): GND THT pads U1.1 (4, 15) and U3.1 (20, 15) are listed by a B.Cu pour
+/// [2, 32] x [2, 32] mm (thermal, gap 0.5, min thickness 0.254). Net 2 runs a straight B.Cu
+/// track from A (7, 2.3) to B (7, 31.7) that splits the fill; U1.1 is left on the small side,
+/// U3.1 on the main one. Without the pour-reach check the result ends with one routed
+/// connection and U1.1 without copper to the pour (KiCad: unconnected items); with it, a
+/// pour-completion pass routes U1.1 on F.Cu to a via inside the main fill (x > 7.5 mm).
+#[test]
+fn route_pour_reach_completes_pad_cut_off_by_foreign_track() {
+    let pour = r#""pours": [ { "uuid": "zz", "net": 1, "layers": [31], "pads": ["U1.1", "U3.1"],
+        "vias": [], "clearance": 200000, "min_thickness": 254000, "thermal_gap": 500000,
+        "spoke_width": 500000, "pad_connection": 1,
+        "fills": [ { "layer": 31, "outer": [[2000000, 2000000], [32000000, 2000000],
+          [32000000, 32000000], [2000000, 32000000]] } ] } ],"#;
+    let m = model(
+        &[
+            p("U1", 1, 4.0, 15.0, Kind::Tht),
+            p("U3", 1, 20.0, 15.0, Kind::Tht),
+            p("A", 2, 7.0, 2.3, Kind::B),
+            p("B", 2, 7.0, 31.7, Kind::B),
+        ],
+        pour,
+    );
+    let r = route(&m, &opts());
+    assert_eq!(r.connections.len(), 2, "{:?}", r.connections);
+    let sig = &r.connections[0];
+    assert_eq!((sig.net, sig.status.as_str(), sig.vias), (2, "routed", 0), "{sig:?}");
+    let c = &r.connections[1];
+    assert_eq!((c.id, c.net, c.to.kind.as_str()), (1, 1, "pour"), "{c:?}");
+    assert_eq!(c.from.label, "U1.1");
+    assert_eq!(c.status, "routed", "{c:?}");
+    assert_eq!(c.vias, 1, "{c:?}");
+    let v = vias(&r);
+    assert_eq!(v.len(), 1);
+    let (x, y) = (v[0].at.x as f64, v[0].at.y as f64);
+    assert!(
+        x > 7.5 * MM && x < 32.0 * MM && y > 2.0 * MM && y < 32.0 * MM,
+        "via ({x}, {y}) is inside the main fill component"
+    );
+    assert_eq!((r.routed, r.connections_total, r.vias), (2, 2, 1));
+    let gnd = r.nets.iter().find(|n| n.net == 1).unwrap();
+    assert_eq!((gnd.status.as_str(), gnd.connections, gnd.vias), ("routed", 1, 1));
+    assert!(
+        r.warnings.iter().any(|w| w.starts_with("pour reach pass 1: 1 item(s)") && w.contains("U1.1")),
+        "{:?}",
+        r.warnings
+    );
+    assert!(!r.warnings.iter().any(|w| w.contains("still without pour")), "{:?}", r.warnings);
+    clean(&m, &r);
+    let strip = |r: &RouteResult| {
+        let mut v = serde_json::to_value(r).unwrap();
+        let o = v.as_object_mut().unwrap();
+        o.remove("runtime_s");
+        o.remove("threads_used");
+        serde_json::to_string(&v).unwrap()
+    };
+    let again = route(&m, &Options { threads: 4, ..opts() });
+    assert_eq!(strip(&r), strip(&again));
+}

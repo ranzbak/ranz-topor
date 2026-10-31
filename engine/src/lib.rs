@@ -10,6 +10,7 @@ pub mod model;
 pub mod multigraph;
 pub mod negotiate;
 pub mod obstacle;
+pub mod pourcheck;
 #[cfg(feature = "python")]
 mod py;
 pub mod relax;

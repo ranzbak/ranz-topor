@@ -25,6 +25,9 @@ fn pad(num: usize, net: i32, x: i64, y: i64) -> Pad {
         drill: None,
         local_clearance: None,
         net_tie_group: None,
+        zone_connection: None,
+        thermal_gap: None,
+        spoke_angle_deg: None,
     }
 }
 
@@ -160,6 +163,7 @@ fn pour_served_net() {
         pads: vec!["U1.1".into(), "U1.2".into()],
         vias: vec![],
         fills: vec![],
+        ..Pour::default()
     });
     let d = decompose(&m, &Options::default(), &[0]);
     assert!(d.connections.is_empty());
@@ -183,6 +187,7 @@ fn pour_on_other_layer_does_not_join_smd_pad() {
         pads: vec!["U1.1".into(), "U1.2".into()],
         vias: vec![],
         fills: vec![],
+        ..Pour::default()
     });
     let d = decompose(&m, &Options::default(), &[0]);
     assert_eq!(d.connections.len(), 1);
@@ -392,6 +397,7 @@ fn rect_fill(layer: u32, x0: i64, y0: i64, x1: i64, y1: i64) -> PourFill {
     PourFill {
         layer,
         outer: vec![pt(x0, y0), pt(x1, y0), pt(x1, y1), pt(x0, y1)],
+        holes: vec![],
     }
 }
 
@@ -421,6 +427,7 @@ fn gnd_pour(pads: &[&str], fills: Vec<PourFill>) -> Pour {
         pads: pads.iter().map(|s| s.to_string()).collect(),
         vias: vec![],
         fills,
+        ..Pour::default()
     }
 }
 

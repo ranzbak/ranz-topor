@@ -122,6 +122,32 @@ def _pad_shape(pad, layer: int) -> dict:
     return {"kind": "poly", "pts": _hull(pts)}
 
 
+def _pad_zone_fields(pad, fp) -> dict:
+    """Pad-level zone connection overrides for the engine's pour-reach check: `zone_connection`
+    (KiCad ZONE_CONNECTION, pad override else footprint override, absent when inherited),
+    `thermal_gap` (nm, absent when inherited) and `spoke_angle_deg`."""
+    out: dict = {}
+    conn = int(pad.GetLocalZoneConnection())
+    if conn == int(pcbnew.ZONE_CONNECTION_INHERITED):
+        try:
+            conn = int(fp.GetLocalZoneConnection())
+        except AttributeError:
+            conn = int(pcbnew.ZONE_CONNECTION_INHERITED)
+    if conn != int(pcbnew.ZONE_CONNECTION_INHERITED):
+        out["zone_connection"] = conn
+    try:
+        gap = pad.GetLocalThermalGapOverride()
+    except AttributeError:
+        gap = None
+    if gap is not None and int(gap) > 0:
+        out["thermal_gap"] = int(gap)
+    try:
+        out["spoke_angle_deg"] = float(pad.GetThermalSpokeAngle().AsDegrees())
+    except AttributeError:
+        pass
+    return out
+
+
 def _export_pads(board, cu: list[int], tie_groups: dict):
     pads, holes, net_ties = [], [], []
     cu_set = set(cu)
@@ -154,6 +180,7 @@ def _export_pads(board, cu: list[int], tie_groups: dict):
                     "drill": drill,
                     "local_clearance": int(lc) if lc is not None else None,
                     "net_tie_group": by_num.get(num) if groups else None,
+                    **_pad_zone_fields(pad, fp),
                 }
             )
             if drill is not None:
@@ -445,7 +472,9 @@ def _ring(chain) -> list[list[int]]:
 
 
 def _pour_fills(z, layers: list[int]) -> tuple[list[dict], str | None]:
-    """Outer rings (holes dropped) of the zone's filled copper per layer, nm, KiCad frame.
+    """Outlines of the zone's filled copper per layer (outer ring + holes), nm, KiCad frame.
+    KiCad hands the fill fractured (holes as zero-width slits of the outer ring), so `holes`
+    is usually empty; the engine rasters the rings even-odd either way.
 
     Falls back to the zone's drawn outline (with a warning string) when the filled list is
     unavailable. O(total fill points).
@@ -455,12 +484,25 @@ def _pour_fills(z, layers: list[int]) -> tuple[list[dict], str | None]:
         for l in layers:
             ps = z.GetFilledPolysList(l)
             for k in range(ps.OutlineCount()):
-                fills.append({"layer": l, "outer": _ring(ps.Outline(k))})
+                fills.append({"layer": l, "outer": _ring(ps.Outline(k)),
+                              "holes": [_ring(ps.Hole(k, h)) for h in range(ps.HoleCount(k))]})
         return fills, None
     except AttributeError as e:
         warn = f"filled polygon list unavailable ({e}); using zone outline"
     ol = _ring(z.Outline().Outline(0))
-    return [{"layer": l, "outer": ol} for l in layers], warn
+    return [{"layer": l, "outer": ol, "holes": []} for l in layers], warn
+
+
+def _zone_settings(z) -> dict:
+    """Fill settings the engine's pour-reach check needs (nm; KiCad ZONE_CONNECTION int)."""
+    clr = z.GetLocalClearance()
+    return {
+        "clearance": int(clr) if clr is not None else 0,
+        "min_thickness": int(z.GetMinThickness()),
+        "thermal_gap": int(z.GetThermalReliefGap()),
+        "spoke_width": int(z.GetThermalReliefSpokeWidth()),
+        "pad_connection": int(z.GetPadConnection()),
+    }
 
 
 def _export_pours(board, cu: list[int]) -> list[dict]:
@@ -486,7 +528,7 @@ def _export_pours(board, cu: list[int]) -> list[dict]:
                       if _is_via(t) and any(t.IsOnLayer(l) for l in layers))
         fills, warn = _pour_fills(z, layers)
         d = {"uuid": _uuid(z), "net": int(z.GetNetCode()), "layers": layers,
-             "pads": pads, "vias": vias, "fills": fills}
+             "pads": pads, "vias": vias, "fills": fills, **_zone_settings(z)}
         if warn:
             d["warning"] = warn
         out.append(d)

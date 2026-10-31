@@ -177,8 +177,15 @@ def test_model_pours_schema(fixture_board):
     m = export_model(load_board(fixture_board), {}, name="fx")
     assert len(m["pours"]) == 1
     z = m["pours"][0]
-    assert set(z) == {"uuid", "net", "layers", "pads", "vias", "fills"}
+    assert set(z) == {"uuid", "net", "layers", "pads", "vias", "fills", "clearance",
+                      "min_thickness", "thermal_gap", "spoke_width", "pad_connection"}
     assert z["pads"] == sorted(z["pads"]) and z["vias"] == sorted(z["vias"])
+    assert z["min_thickness"] > 0 and z["thermal_gap"] > 0 and z["spoke_width"] > 0
+    assert z["pad_connection"] in (0, 1, 2, 3)
+    assert all(set(f) == {"layer", "outer", "holes"} for f in z["fills"])
+    pads = [p for p in m["pads"] if p["net"] == z["net"]]
+    assert pads and all("zone_connection" not in p and p["spoke_angle_deg"] in (45.0, 90.0)
+                        for p in pads)
 
 
 def test_model_pours_exclude_teardrop_zones(tmp_path):

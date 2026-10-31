@@ -35,10 +35,11 @@ use crate::cdt::Crossing;
 use crate::check::{Checker, ItemIndex};
 use crate::decompose::{decompose, terminal_of, Connection, TermKind, TermRef};
 use crate::geom::quant::{quantise_chain, round_nm, TrackPrim};
-use crate::geom::{dequantise, Skeleton, Vec2};
+use crate::geom::{dequantise, dist_prim_skeleton, Skeleton, Vec2};
 use crate::graph::{GraphRules, RouteGraph, TerminalInfo};
 use crate::model::{
-    flip_track, BoardModel, ExistingCopper, Item, Options, PadAttr, Pt, TrackItem, ViaItem,
+    flip_track, BoardModel, ExistingCopper, Item, Options, PadAttr, PadRef, Pt, Scope, TrackItem,
+    ViaItem,
 };
 use crate::multigraph::MultiGraph;
 use crate::negotiate::{
@@ -46,6 +47,7 @@ use crate::negotiate::{
     PRESENT_OVERUSE,
 };
 use crate::obstacle::{ObstacleSet, TerminalObstacle};
+use crate::pourcheck::{check_pour_reach, with_routed_copper, PourReach};
 use crate::relax::{corridor_static, relax, Relaxer, RunOpts, SlotNesting, ZeroSlack};
 use crate::search::{
     default_expansion_cap, ghost, search, tier_weight, via_weight, Goal, SearchOutcome,
@@ -178,6 +180,9 @@ pub struct RouteResult {
     /// Per-iteration timers; only with `Options::profile` (never in the default output).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<Vec<IterProfile>>,
+    /// `connections[..].id` of every item (same order as `items`); in-process only.
+    #[serde(skip)]
+    pub item_conn: Vec<usize>,
 }
 
 /// One PathFinder iteration's cost (diagnostics, `Options::profile`). Seconds are wall clock.
@@ -2137,14 +2142,387 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
     }
 }
 
-/// Route the unconnected nets of `model` on every routable copper layer, with through vias at
-/// pre-placed sites (M3): decompose, obstacles, via sites, one graph per layer, PathFinder over
-/// layers and sites, per-leg metrization with a self-check, partial stubs, reports.
+/// Pour-completion passes after the first routing pass (`pourcheck`): pads and vias that were
+/// connected through a pour and lost their fill island to the routed copper get a
+/// pour-completion connection. Pass 1 routes it against the routed copper as fixed obstacles;
+/// when that is blocked, pass 2 unfreezes the routed foreign connections within the lost item's
+/// escape radius and re-routes them together with the completion (negotiation); one more pass
+/// catches a reach the re-routing broke.
+pub const POUR_REACH_PASSES: u32 = 3;
+
+/// Pad indices at the ends of the routed connections of `r`.
+fn routed_pads(model: &BoardModel, r: &RouteResult) -> Vec<usize> {
+    let mut out: Vec<usize> = r
+        .connections
+        .iter()
+        .filter(|c| c.status == "routed")
+        .flat_map(|c| [&c.from, &c.to])
+        .filter(|t| t.kind == "pad")
+        .filter_map(|t| pad_of_label(model, &t.label))
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+fn pad_of_label(model: &BoardModel, label: &str) -> Option<usize> {
+    let pr = PadRef::try_from(label.to_string()).ok()?;
+    model
+        .pads
+        .iter()
+        .position(|p| p.ref_ == pr.ref_ && p.number == pr.number)
+}
+
+fn pad_label(model: &BoardModel, pi: usize) -> String {
+    format!("{}.{}", model.pads[pi].ref_, model.pads[pi].number)
+}
+
+/// Radius of the smallest disc about the pad centre containing its copper on any layer.
+fn pad_hull_r(model: &BoardModel, pi: usize) -> f64 {
+    let pad = &model.pads[pi];
+    let c = pad.center.to_vec2();
+    pad.layers
+        .iter()
+        .map(|&l| match model.skeleton(pad, l) {
+            Skeleton::Point { p, r } => (p - c).len() + r,
+            Skeleton::Seg { s, r } => (s.a - c).len().max((s.b - c).len()) + r,
+            Skeleton::Poly { pts, r } => pts.iter().map(|p| (*p - c).len()).fold(0.0, f64::max) + r,
+        })
+        .fold(0.0, f64::max)
+}
+
+/// Remove the connections `ids` (reports, items, zero-slack entries) and renumber the rest
+/// 0..n in order.
+fn drop_conns(r: &mut RouteResult, ids: &BTreeSet<usize>) {
+    let keep: Vec<bool> = r.item_conn.iter().map(|c| !ids.contains(c)).collect();
+    let mut k = 0;
+    r.items.retain(|_| {
+        k += 1;
+        keep[k - 1]
+    });
+    r.item_conn.retain(|c| !ids.contains(c));
+    r.connections.retain(|c| !ids.contains(&c.id));
+    r.zero_slack_wires.retain(|z| !ids.contains(&z.conn));
+    let map: BTreeMap<usize, usize> = r
+        .connections
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.id, i))
+        .collect();
+    for (i, c) in r.connections.iter_mut().enumerate() {
+        c.id = i;
+    }
+    for c in &mut r.item_conn {
+        *c = map[c];
+    }
+    for z in &mut r.zero_slack_wires {
+        z.conn = map[&z.conn];
+    }
+}
+
+/// Append a pass's result to `r` (connection ids continue after `r`'s) and recompute the
+/// per-net reports, counters and lengths from the reports and items.
+fn merge_pass(r: &mut RouteResult, model: &BoardModel, mut r2: RouteResult) {
+    let off = r.connections.len();
+    for c in &mut r2.connections {
+        c.id += off;
+    }
+    r.items.extend(r2.items);
+    r.item_conn
+        .extend(r2.item_conn.into_iter().map(|c| c + off));
+    r.connections.extend(r2.connections);
+    for n2 in r2.nets {
+        if !r.nets.iter().any(|n| n.net == n2.net) {
+            r.nets.push(n2);
+        }
+    }
+    for n in &mut r.nets {
+        let cs: Vec<&ConnReport> = r.connections.iter().filter(|c| c.net == n.net).collect();
+        let count = |s: &str| cs.iter().filter(|c| c.status == s).count();
+        n.connections = cs.len();
+        n.routed = count("routed");
+        n.partial = count("partial");
+        n.failed = count("failed");
+        n.vias = cs.iter().map(|c| c.vias).sum();
+        n.length_nm = cs.iter().map(|c| c.length_nm).sum();
+        n.length_outside_pads_nm = cs.iter().map(|c| c.length_outside_pads_nm).sum();
+        if !cs.is_empty() {
+            n.status = if n.routed == cs.len() {
+                "routed"
+            } else if n.routed == 0 && n.partial == 0 {
+                "failed"
+            } else {
+                "partial"
+            }
+            .into();
+        }
+    }
+    r.connections_total = r.connections.len();
+    r.routed = r
+        .connections
+        .iter()
+        .filter(|c| c.status == "routed")
+        .count();
+    r.partial = r
+        .connections
+        .iter()
+        .filter(|c| c.status == "partial")
+        .count();
+    r.failed = r
+        .connections
+        .iter()
+        .filter(|c| c.status == "failed")
+        .count();
+    r.nets_total = r.nets.iter().filter(|n| n.connections > 0).count();
+    r.nets_routed = r
+        .nets
+        .iter()
+        .filter(|n| n.connections > 0 && n.status == "routed")
+        .count();
+    let ok = r.connections.iter().filter(|c| c.status == "routed");
+    r.total_length_nm = ok.clone().map(|c| c.length_nm).sum();
+    r.length_outside_pads_nm = ok.map(|c| c.length_outside_pads_nm).sum();
+    r.vias = r.connections.iter().map(|c| c.vias).sum();
+    let mut by_layer: BTreeMap<String, f64> = BTreeMap::new();
+    for it in &r.items {
+        if let Item::Track(t) = it {
+            *by_layer.entry(layer_name(model, t.layer)).or_insert(0.0) +=
+                dequantise(&t.prim).length();
+        }
+    }
+    r.length_by_layer_nm = by_layer
+        .into_iter()
+        .map(|(k, v)| (k, v.round() as i64))
+        .collect();
+    r.iterations += r2.iterations;
+    r.converged &= r2.converged;
+    r.overuse_edges += r2.overuse_edges;
+    r.relax_iterations += r2.relax_iterations;
+    r.self_check_rounds = r.self_check_rounds.max(r2.self_check_rounds);
+    r.check_candidates_visited += r2.check_candidates_visited;
+    r.timed_out |= r2.timed_out;
+    r.warnings.extend(
+        r2.warnings
+            .into_iter()
+            .map(|w| format!("pour completion pass: {w}")),
+    );
+    for mut z in r2.zero_slack_wires {
+        z.conn += off;
+        r.zero_slack_wires.push(z);
+    }
+    if let (Some(p), Some(p2)) = (r.profile.as_mut(), r2.profile) {
+        p.extend(p2);
+    }
+}
+
+/// Route the unconnected nets of `model` (`route_pass`), then verify the pour reach of every
+/// pour-connected pad and via against the routed copper (`pourcheck`) and, for the items that
+/// lost their fill island, run up to `POUR_REACH_PASSES` pour-completion passes (see the
+/// constant). The result is a pure function of the model and options (every pass is), so the
+/// thread count does not change it; a model without pour fills returns the first pass as is.
+fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
+    let t0 = Instant::now();
+    let mut r = route_pass(model, opts, None);
+    let has_fill = model
+        .pours
+        .iter()
+        .any(|z| z.net != 0 && z.fills.iter().any(|f| f.outer.len() >= 3));
+    if !has_fill {
+        return r;
+    }
+    let mut passes = 0u32;
+    let mut unfroze = false;
+    loop {
+        let reach = check_pour_reach(model, &r.items, &routed_pads(model, &r));
+        if reach.is_clean() {
+            break;
+        }
+        let lost_pads: Vec<String> = reach
+            .lost_pads
+            .iter()
+            .map(|&pi| pad_label(model, pi))
+            .collect();
+        let lost: Vec<String> = lost_pads
+            .iter()
+            .cloned()
+            .chain(reach.lost_vias.iter().map(|u| format!("via {u}")))
+            .collect();
+        r.warnings.extend(reach.notes.iter().cloned());
+        let stop = |r: &mut RouteResult, why: &str| {
+            r.warnings.push(format!(
+                "pour reach: {} item(s) without pour after {passes} completion pass(es) ({why}): {}",
+                lost.len(),
+                lost.join(", ")
+            ));
+        };
+        // Earlier completion attempts for the still-lost items that did not route are retried;
+        // on a retry the routed foreign connections within the lost item's escape radius
+        // (hull + 2 · (default via + clearance)) are unfrozen and re-routed with it.
+        let lost_labels: BTreeSet<&str> = lost_pads
+            .iter()
+            .map(String::as_str)
+            .chain(reach.lost_vias.iter().map(String::as_str))
+            .collect();
+        let retry: BTreeSet<usize> = r
+            .connections
+            .iter()
+            .filter(|c| {
+                c.status != "routed"
+                    && c.to.kind == "pour"
+                    && lost_labels.contains(c.from.label.as_str())
+            })
+            .map(|c| c.id)
+            .collect();
+        let mut unfreeze: BTreeSet<usize> = BTreeSet::new();
+        if !retry.is_empty() {
+            if unfroze {
+                stop(&mut r, "blocked after re-routing the neighbours");
+                break;
+            }
+            let rule = &model.rules.default;
+            let reach_r = 2.0 * (rule.via_d + rule.clearance) as f64;
+            let mut centres: Vec<(i32, Vec2, f64)> = reach
+                .lost_pads
+                .iter()
+                .map(|&pi| {
+                    (
+                        model.pads[pi].net,
+                        model.pads[pi].center.to_vec2(),
+                        pad_hull_r(model, pi) + reach_r,
+                    )
+                })
+                .collect();
+            centres.extend(
+                model
+                    .vias
+                    .iter()
+                    .filter(|v| reach.lost_vias.contains(&v.uuid))
+                    .map(|v| (v.net, v.at.to_vec2(), 0.5 * v.d as f64 + reach_r)),
+            );
+            for (k, it) in r.items.iter().enumerate() {
+                let cid = r.item_conn[k];
+                if r.connections[cid].status != "routed" {
+                    continue;
+                }
+                for &(lnet, c, radius) in &centres {
+                    let (inet, dist) = match it {
+                        Item::Track(t) => (
+                            t.net,
+                            dist_prim_skeleton(
+                                &dequantise(&flip_track(t.prim)),
+                                &Skeleton::Point { p: c, r: 0.0 },
+                            ) - 0.5 * t.width as f64,
+                        ),
+                        Item::Via(v) => {
+                            let mut at = v.at;
+                            at.flip();
+                            (v.net, (at.to_vec2() - c).len() - 0.5 * v.d as f64)
+                        }
+                    };
+                    if inet != lnet && dist <= radius {
+                        unfreeze.insert(cid);
+                    }
+                }
+            }
+            if unfreeze.is_empty() {
+                stop(&mut r, "blocked by fixed copper");
+                break;
+            }
+            unfroze = true;
+        }
+        if passes >= POUR_REACH_PASSES {
+            stop(&mut r, "pass cap");
+            break;
+        }
+        let remaining = opts.wall_clock_s - t0.elapsed().as_secs_f64();
+        if r.timed_out || remaining <= 0.0 {
+            stop(&mut r, "no budget");
+            r.timed_out = true;
+            break;
+        }
+        passes += 1;
+        // Terminals of the unfrozen connections join the scope; their copper and the retried
+        // attempts leave the result before the pass.
+        let mut scope_pads: Vec<PadRef> = reach
+            .lost_pads
+            .iter()
+            .map(|&pi| PadRef {
+                ref_: model.pads[pi].ref_.clone(),
+                number: model.pads[pi].number.clone(),
+            })
+            .collect();
+        let mut scope_vias: Vec<String> = reach.lost_vias.clone();
+        let mut unfrozen_names: Vec<String> = Vec::new();
+        for c in r.connections.iter().filter(|c| unfreeze.contains(&c.id)) {
+            unfrozen_names.push(format!("{} #{}", c.name, c.id));
+            for t in [&c.from, &c.to] {
+                match t.kind.as_str() {
+                    "pad" => {
+                        if let Ok(pr) = PadRef::try_from(t.label.clone()) {
+                            scope_pads.push(pr);
+                        }
+                    }
+                    "via" => scope_vias.push(t.label.clone()),
+                    _ => {}
+                }
+            }
+        }
+        let drop: BTreeSet<usize> = retry.union(&unfreeze).copied().collect();
+        drop_conns(&mut r, &drop);
+        // The fixed copper is what remains; the pour goals keep the main component of the
+        // check above (with every routed item present: the robustly connected fill).
+        let now = check_pour_reach(model, &r.items, &routed_pads(model, &r));
+        let mut m2 = with_routed_copper(model, &r.items, &now);
+        for z in &mut m2.pours {
+            z.pads.retain(|s| !lost_labels.contains(s.as_str()));
+            z.vias.retain(|u| !lost_labels.contains(u.as_str()));
+        }
+        let opts2 = Options {
+            scope: Scope {
+                pads: scope_pads,
+                vias: scope_vias,
+                ..Scope::default()
+            },
+            wall_clock_s: remaining,
+            existing_copper: ExistingCopper::Fixed,
+            ..opts.clone()
+        };
+        let r2 = route_pass(&m2, &opts2, Some(&reach));
+        r.warnings.push(format!(
+            "pour reach pass {passes}: {} item(s) lost the pour after routing ({}); {} \
+             connection(s) routed {}/{}, vias {}{}",
+            lost.len(),
+            lost.join(", "),
+            if unfreeze.is_empty() {
+                "completion"
+            } else {
+                "completion + re-routed neighbour"
+            },
+            r2.routed,
+            r2.connections_total,
+            r2.vias,
+            if unfrozen_names.is_empty() {
+                String::new()
+            } else {
+                format!("; re-routed: {}", unfrozen_names.join(", "))
+            }
+        ));
+        merge_pass(&mut r, model, r2);
+    }
+    r.runtime_s = t0.elapsed().as_secs_f64();
+    r
+}
+
+/// One routing pass over the unconnected nets of `model` on every routable copper layer, with
+/// through vias at pre-placed sites (M3): decompose, obstacles, via sites, one graph per layer,
+/// PathFinder over layers and sites, per-leg metrization with a self-check, partial stubs,
+/// reports. `reach` (completion passes) restricts the pour goals to via sites inside the main
+/// fill component.
 ///
 /// Complexity: dominated by the PathFinder loop, `O(iters · m · V' log V')` with
 /// `V' = Σ_L 2(E_L + X_L) + 2S`, plus `O(changed · q)` self-checks per iteration (see the
 /// module header, `negotiate` and `multigraph`).
-fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
+fn route_pass(model: &BoardModel, opts: &Options, reach: Option<&PourReach>) -> RouteResult {
     let t0 = Instant::now();
     let deadline = deadline_after(opts.wall_clock_s, t0);
     let mut warnings: Vec<String> = Vec::new();
@@ -2256,10 +2634,8 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
         // vertices otherwise just multiply the faces of the single graph (synth n=1000: 11 837
         // sites, 12x the expansions and 70x the clearance candidates per search, overuse on
         // the free-ended edges that never clears, 25 stalled iterations instead of 7).
-        let needs_sites = routable.len() >= 2
-            || live
-                .iter()
-                .any(|c| matches!(c.to.kind, TermKind::Pour(_)));
+        let needs_sites =
+            routable.len() >= 2 || live.iter().any(|c| matches!(c.to.kind, TermKind::Pour(_)));
         let sites = if needs_sites {
             via_sites(
                 model,
@@ -2321,6 +2697,12 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
         match MultiGraph::build_on(model, &mut obs, sites, &routable, &terms, &rules) {
             Err(e) => setup_fail = Some(format!("sketch: {e}")),
             Ok(mut mg) => {
+                if let Some(reach) = reach {
+                    for s in 0..mg.sites.len() {
+                        let at = mg.sites[s].at;
+                        mg.in_pour[s].retain(|&zi| reach.site_in_main(zi, &routable, at));
+                    }
+                }
                 let mut perm: Vec<Option<String>> = vec![None; m];
                 // Start vertices on every layer of the source terminal; the goal is the same
                 // for a terminal, the sites inside the pour for a pour target.
@@ -2676,6 +3058,7 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
         "not routed: no completed iteration"
     };
     let mut items: Vec<Item> = Vec::new();
+    let mut item_conn: Vec<usize> = Vec::new();
     let mut reports: Vec<ConnReport> = Vec::with_capacity(all.len());
     let (mut total_len, mut out_total) = (0.0, 0.0);
     let mut by_layer: BTreeMap<String, f64> = BTreeMap::new();
@@ -2745,6 +3128,7 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
                             total_len += o.len;
                             out_total += o.out;
                             items.extend(o.items.iter().cloned());
+                            item_conn.resize(items.len(), rep.id);
                         }
                         Res::Fail {
                             reason, blocking, ..
@@ -2768,6 +3152,7 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
                                     rep.anchors = p.anchors;
                                     rep.crossings = p.crossings;
                                     items.extend(p.items.iter().cloned().map(Item::Track));
+                                    item_conn.resize(items.len(), rep.id);
                                 }
                                 Some(Partial::Dropped) => {
                                     rep.reason = "partial stub failed self-check".into();
@@ -2870,5 +3255,6 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
         zero_slack_wires,
         zero_slack: zs_status,
         profile: opts.profile.then_some(profile),
+        item_conn,
     }
 }

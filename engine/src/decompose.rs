@@ -225,12 +225,15 @@ impl<'a> Selector<'a> {
             || self.in_area(p.center.to_vec2())
     }
 
-    fn via(&self, net: i32, at: Vec2) -> bool {
-        self.opts.scope.is_whole_board() || self.net_selected(net) || self.in_area(at)
+    fn via(&self, net: i32, at: Vec2, uuid: &str) -> bool {
+        self.opts.scope.is_whole_board()
+            || self.net_selected(net)
+            || self.in_area(at)
+            || self.opts.scope.vias.iter().any(|u| u == uuid)
     }
 }
 
-fn parse_pour_pad(s: &str) -> Option<PadRef> {
+pub fn parse_pour_pad(s: &str) -> Option<PadRef> {
     PadRef::try_from(s.to_string()).ok()
 }
 
@@ -416,7 +419,7 @@ pub fn decompose(model: &BoardModel, opts: &Options, layers: &[u32]) -> Decompos
                 kind: PortKind::Via(vi),
                 at: v.at.to_vec2(),
             });
-            if sel.via(net, v.at.to_vec2()) {
+            if sel.via(net, v.at.to_vec2(), &v.uuid) {
                 c.selected = true;
                 selected_terms += 1;
             }
