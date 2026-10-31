@@ -115,7 +115,9 @@ def test_progress_png_caption_and_path(fixture_board, tmp_path, monkeypatch):
     d = res["routed_drc"]
     line1 = (f"T1.4a: 1/2 nets, 2/3 wires, fallback 1 (zero slack 1), arcs {n['arcs']}, "
              f"pcb {res['pcb_sha256'][:12]}")
-    line2 = (f"DRC routing {d['routing_new']} preexisting {d['routing_preexisting']}, unconnected {d['incomplete']['unconnected_items']}, "
+    pre = d["incomplete"]["unconnected_preexisting"]
+    line2 = (f"DRC routing {d['routing_new']} preexisting {d['routing_preexisting']}, "
+             f"unconnected {d['incomplete']['unconnected_items']}{f' (pre {pre})' if pre else ''}, "
              f"{n['track_mm'] + n['arc_mm']:.1f} mm vs hand "
              f"{res['orig_all']['track_mm'] + res['orig_all']['arc_mm']:.1f} mm, "
              f"outside pads 3.0 vs 4.0 mm")

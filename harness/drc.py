@@ -106,6 +106,27 @@ def _is_pre(v: Violation, seen: set, router_uuids) -> bool:
     return not (router_uuids and _uuids(v) & set(router_uuids))
 
 
+def _unconnected_key(u: dict) -> tuple:
+    """Identity of an unconnected-items entry: the sorted uuids of its item pair."""
+    return tuple(sorted(str(i.get("uuid", "")) for i in u.get("items", [])))
+
+
+def _unconnected_desc(u: dict) -> list[str]:
+    return [str(i.get("description", "")) for i in u.get("items", [])]
+
+
+def split_unconnected(report: DrcReport, baseline: DrcReport | None) -> tuple[list[dict], list[dict]]:
+    """(new, pre-existing) unconnected items. Pre-existing iff the same item pair (sorted uuids)
+    is unconnected in the baseline, the ripped-but-unrouted board: those are pairs the router
+    left unrouted; `new` are pairs that were connected before routing and are not afterwards
+    (e.g. a pad that lost its pour fill to the routed copper)."""
+    seen = {_unconnected_key(u) for u in baseline.unconnected} if baseline is not None else set()
+    new, pre = [], []
+    for u in report.unconnected:
+        (pre if _unconnected_key(u) in seen else new).append(u)
+    return new, pre
+
+
 def _split(report: DrcReport, baseline: DrcReport | None,
            router_uuids=None) -> tuple[dict, dict[str, int]]:
     seen = {_key(v) for v in baseline.violations} if baseline is not None else set()
@@ -127,6 +148,7 @@ def _split(report: DrcReport, baseline: DrcReport | None,
                 by_type_new[v.type] += 1
         else:
             other += 1
+    unc_new, unc_pre = split_unconnected(report, baseline)
     classified = {
         "routing_new": routing_new,
         "routing_preexisting": routing_pre,
@@ -135,7 +157,10 @@ def _split(report: DrcReport, baseline: DrcReport | None,
             "track_dangling": incomplete["track_dangling"],
             "via_dangling": incomplete["via_dangling"],
             "unconnected_items": len(report.unconnected),
+            "unconnected_new": len(unc_new),
+            "unconnected_preexisting": len(unc_pre),
         },
+        "unconnected_preexisting_items": [_unconnected_desc(u) for u in unc_pre],
         "other": other,
         "by_type_new": dict(by_type_new),
     }
@@ -172,6 +197,7 @@ def summarise(board: str, report: DrcReport, baseline: DrcReport | None = None,
     lines = [
         f"DRC {board}: routing_new={c['routing_new']} preexisting={c['routing_preexisting']} "
         f"other={c['other']} incomplete={dangling}/{inc['unconnected_items']} "
+        f"(unconnected new {inc['unconnected_new']}, preexisting {inc['unconnected_preexisting']}) "
         f"exit={report.exit_code} {report.seconds:.1f}s"
     ]
     types = set(c["by_type_new"]) | set(pre_by_type)

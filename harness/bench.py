@@ -215,6 +215,11 @@ def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path,
                     + (f", {len(dl['spots'])} spots" if dl.get("spots") else ""))
     pe = result["preexisting"]
     head.append(f"  preexisting {pe['count']} {pe['by_type']} (ripped-board baseline)")
+    pu = result.get("preexisting_unconnected") or {}
+    if pu.get("count"):
+        head.append(f"  preexisting unconnected {pu['count']}: "
+                    + "; ".join(" <-> ".join(i) for i in pu["items"][:5])
+                    + (" ..." if len(pu["items"]) > 5 else ""))
     drc = summarise(board, routed_drc, base_drc,
                     extra={"width_match": f"{wm['matched']}/{wm['compared']}"},
                     router_uuids=router_uuids)
@@ -407,6 +412,8 @@ def run_bench(
         "routed_drc": final_drc,
         "preexisting": {"count": final_drc["routing_preexisting"],
                         "by_type": final_drc["by_type_preexisting"]},
+        "preexisting_unconnected": {"count": final_drc["incomplete"]["unconnected_preexisting"],
+                                    "items": final_drc["unconnected_preexisting_items"]},
         "routed_items": len(write),
         "unchanged_items": unchanged,
         "replaced": replaced,

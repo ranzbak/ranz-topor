@@ -282,8 +282,10 @@ def test_partial_routes_on_writes_grouped_stubs(engine, tmp_path):
     assert len(grp) == 1
     # the fixture's free GND via is dangling in the source board already (baseline, not new)
     base_vias = r["orig_drc"]["violations"].get("via_dangling", 0)
-    assert r["routed_drc"]["incomplete"] == {"track_dangling": 2, "via_dangling": base_vias,
-                                             "unconnected_items": 1}
+    inc = r["routed_drc"]["incomplete"]
+    assert {k: inc[k] for k in ("track_dangling", "via_dangling", "unconnected_items")} == {
+        "track_dangling": 2, "via_dangling": base_vias, "unconnected_items": 1}
+    assert inc["unconnected_new"] + inc["unconnected_preexisting"] == 1
     assert r["routed_drc"]["routing_new"] == 0
     assert abs(r["router_report"]["connections"][0]["blocking"][1] / 1e6 - 24.0) <= 1.0
     assert r["route"]["partial"] == 1

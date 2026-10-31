@@ -32,6 +32,12 @@ def detour_caption(stats: dict | None) -> str | None:
             f"(max {stats['max']:.1f}) \N{EM DASH} {top}")
 
 
+def _pre_unc(drc: dict) -> str:
+    """` (pre N)` when N unconnected items are pre-existing (same pair in the ripped baseline)."""
+    n = (drc.get("incomplete") or {}).get("unconnected_preexisting", 0)
+    return f" (pre {n})" if n else ""
+
+
 def _sha_suffix(result: dict) -> str:
     """`, pcb <sha12>` of the input pcb actually read (empty if the result carries none)."""
     sha = result.get("pcb_sha256")
@@ -51,7 +57,8 @@ def m3_caption(task: str, result: dict, threads: int) -> str:
              f"zero slack {len(zs.get('wires') or [])}, iters {rt.get('iterations')}"
              f"{_sha_suffix(result)}")
     line2 = (f"DRC routing {drc['routing_new']} preexisting {drc.get('routing_preexisting', 0)}, "
-             f"unconnected {drc['incomplete']['unconnected_items']}, "
+             f"unconnected {drc['incomplete']['unconnected_items']}"
+             f"{_pre_unc(drc)}, "
              f"outside pads {rt.get('outside_mm') or 0.0:.1f} vs hand "
              f"{(rt.get('hand_outside_mm') or 0.0):.1f} mm, "
              f"F.Cu {by.get('F.Cu', 0.0):.1f} / B.Cu {by.get('B.Cu', 0.0):.1f} mm, "
@@ -108,7 +115,8 @@ def render_progress(task: str, *, board: str = "eprom-to-kernal", date: str | No
                  f"fallback {wires_total - wires_taut} (zero slack {zs}), arcs {r['arcs']}"
                  f"{_sha_suffix(result)}")
         line2 = (f"DRC routing {drc['routing_new']} preexisting {drc.get('routing_preexisting', 0)}, "
-                 f"unconnected {drc['incomplete']['unconnected_items']}, "
+                 f"unconnected {drc['incomplete']['unconnected_items']}"
+                 f"{_pre_unc(drc)}, "
                  f"{length_mm:.1f} mm vs hand {hand_mm:.1f} mm, "
                  f"outside pads {sm.get('outside_mm') or 0.0:.1f} vs "
                  f"{sm.get('hand_outside_mm') or 0.0:.1f} mm")
