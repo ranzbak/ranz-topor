@@ -6,6 +6,7 @@ __pycache__/
 scratch/
 *.kicad_pcb-bak
 docs/.ruff_cache/
+docs/benchmarks/
 .pytest_cache/
 *.egg-info/
 .claude/

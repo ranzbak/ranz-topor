@@ -19,7 +19,7 @@ from harness.render import CAPTION_PX
 from tests.test_fuzz_gate import fuzz_drc
 
 ROOT = Path(__file__).resolve().parents[2]
-BASELINE = ROOT / "docs/benchmarks/2026-10-30-topola-d832b164"
+BASELINE = ROOT / "tests/fixtures/m0-baseline"  # copied from the (now untracked) Topola benchmark run
 
 BOARDS = {
     # eprom-to-kernal is hand-edited by the user in KiCad: nothing about its routing is pinned here;
