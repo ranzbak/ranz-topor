@@ -154,7 +154,8 @@ def _smooth_summary(report: dict | None) -> dict | None:
     }
 
 
-def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path) -> str:
+def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path,
+             router_uuids=None) -> str:
     o, r, rm = result["orig_all"], result["routed_all"], result["removed"]
     wm = result["width_match"]
     head = [
@@ -212,8 +213,11 @@ def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path) -> s
     if dl.get("rounds", 1) > 1:
         head.append(f"  drc loop: {dl['rounds']} rounds, {len(dl.get('pinned') or {})} pinned"
                     + (f", {len(dl['spots'])} spots" if dl.get("spots") else ""))
+    pe = result["preexisting"]
+    head.append(f"  preexisting {pe['count']} {pe['by_type']} (ripped-board baseline)")
     drc = summarise(board, routed_drc, base_drc,
-                    extra={"width_match": f"{wm['matched']}/{wm['compared']}"})
+                    extra={"width_match": f"{wm['matched']}/{wm['compared']}"},
+                    router_uuids=router_uuids)
     lines = head + drc.splitlines() + [f"  outputs: {out_dir}"]
     return "\n".join(lines[:SUMMARY_MAX])
 
@@ -243,7 +247,7 @@ def run_bench(
     pcb_sha256 = file_sha256(src)
 
     cp = copy_project(src, out_dir / f"{board}-work")
-    base_drc = run_drc(cp.pcb, out_dir / f"{board}--drc-orig.json")
+    orig_drc = run_drc(cp.pcb, out_dir / f"{board}--drc-orig.json")
 
     b = load_board(cp)
     fps = list(b.GetFootprints())
@@ -268,6 +272,9 @@ def run_bench(
     removed = {k: rep[k] for k in ("removed_tracks", "removed_arcs", "removed_vias", "removed_teardrops")}
     kept = {k: rep[k] for k in ("kept_locked_tracks", "kept_free_vias", "kept_locked_vias",
                                 "kept_rf_tracks", "kept_rf_vias")}
+    # routing_new baseline: DRC of the ripped-but-unrouted board (same --refill-zones). Kept
+    # items keep their uuid across save, so (type, uuids) matches pre-existing problems.
+    base_drc = run_drc(cp.pcb, out_dir / f"{board}--drc-ripped.json")
     b = load_board(cp)  # fresh board holding the ripped copper just saved
 
     model = export_model(b, rules, name=board)
@@ -323,7 +330,7 @@ def run_bench(
             if zs_names and not zs_off:
                 wires = [{"id": w.get("conn"), "net": w.get("name")}
                          for w in router_report.get("zero_slack_wires") or []]
-                bad = (classify(routed_drc, base_drc)["routing_new"] > 0
+                bad = (classify(routed_drc, base_drc, created)["routing_new"] > 0
                        or len(routed_drc.unconnected) > 0)
                 if bad:
                     zero_slack = {"status": "rejected by DRC", "wires": wires}
@@ -341,7 +348,7 @@ def run_bench(
                               "wires": []}
             have = {(sp["layer"], tuple(sp["at"])) for sp in spots}
             fresh = []
-            for sp in drc_spots(new_routing(routed_drc, base_drc), created, model, reach,
+            for sp in drc_spots(new_routing(routed_drc, base_drc, created), created, model, reach,
                                 float(max(rules["min_clearance"],
                                           rules["default"].get("clearance", 0)))):
                 if (sp["layer"], tuple(sp["at"])) not in have:
@@ -357,7 +364,7 @@ def run_bench(
             b = load_board(cp)
             continue
         names = {n["code"]: n["name"] for n in model["nets"]}
-        more = {u: r for u, r in drc_pins(new_routing(routed_drc, base_drc), created,
+        more = {u: r for u, r in drc_pins(new_routing(routed_drc, base_drc, created), created,
                                           router_report.get("wires") or [], names, reach).items()
                 if u not in pinned}
         if not more:
@@ -385,17 +392,21 @@ def run_bench(
     route = _route_summary(router_report, model["layers"])
     if route is not None and hand_stats is not None:
         route["hand_outside_mm"] = round(hand_stats["hand_outside_pads_nm"] / 1e6, 3)
+    final_drc = classify(routed_drc, base_drc, created)
     result = {
         "board": board,
         "footprints": len(fps),
         "pads": sum(len(fp.Pads()) for fp in fps),
         "nets_total": len(model["nets"]),
         "orig_all": orig_all,
-        "orig_drc": {"total": len(base_drc.violations), "violations": base_drc.by_type},
+        "orig_drc": {"total": len(orig_drc.violations), "violations": orig_drc.by_type},
+        "ripped_drc": {"total": len(base_drc.violations), "violations": base_drc.by_type},
         "removed": removed,
         "kept": kept,
         "routed_all": routed_all,
-        "routed_drc": classify(routed_drc, base_drc),
+        "routed_drc": final_drc,
+        "preexisting": {"count": final_drc["routing_preexisting"],
+                        "by_type": final_drc["by_type_preexisting"]},
         "routed_items": len(write),
         "unchanged_items": unchanged,
         "replaced": replaced,
@@ -420,7 +431,7 @@ def run_bench(
     }
     (out_dir / f"{board}--metrics.json").write_text(json.dumps(result, indent=1))
     assert_unchanged(src.parent, cp.src_hashes)
-    print(_summary(board, result, routed_drc, base_drc, out_dir))
+    print(_summary(board, result, routed_drc, base_drc, out_dir, created))
     return result
 
 

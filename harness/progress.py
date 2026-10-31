@@ -50,7 +50,7 @@ def m3_caption(task: str, result: dict, threads: int) -> str:
              f"vias {rt.get('vias', 0)}, arcs {r['arcs']}, "
              f"zero slack {len(zs.get('wires') or [])}, iters {rt.get('iterations')}"
              f"{_sha_suffix(result)}")
-    line2 = (f"DRC routing {drc['routing_new']}, "
+    line2 = (f"DRC routing {drc['routing_new']} preexisting {drc.get('routing_preexisting', 0)}, "
              f"unconnected {drc['incomplete']['unconnected_items']}, "
              f"outside pads {rt.get('outside_mm') or 0.0:.1f} vs hand "
              f"{(rt.get('hand_outside_mm') or 0.0):.1f} mm, "
@@ -107,7 +107,7 @@ def render_progress(task: str, *, board: str = "eprom-to-kernal", date: str | No
         line1 = (f"{task}: {nets_taut}/{nets_total} nets, {wires_taut}/{wires_total} wires, "
                  f"fallback {wires_total - wires_taut} (zero slack {zs}), arcs {r['arcs']}"
                  f"{_sha_suffix(result)}")
-        line2 = (f"DRC routing {drc['routing_new']}, "
+        line2 = (f"DRC routing {drc['routing_new']} preexisting {drc.get('routing_preexisting', 0)}, "
                  f"unconnected {drc['incomplete']['unconnected_items']}, "
                  f"{length_mm:.1f} mm vs hand {hand_mm:.1f} mm, "
                  f"outside pads {sm.get('outside_mm') or 0.0:.1f} vs "

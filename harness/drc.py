@@ -90,10 +90,24 @@ def run_drc(pcb: Path, out_json: Path) -> DrcReport:
 
 
 def _key(v: Violation) -> tuple:
-    return (v.type, v.description, tuple(sorted(str(i.get("uuid", "")) for i in v.items)))
+    """Robust identity of a violation: type + sorted item uuids (never the description text,
+    which carries measured values)."""
+    return (v.type, tuple(sorted(str(i.get("uuid", "")) for i in v.items)))
 
 
-def _split(report: DrcReport, baseline: DrcReport | None) -> tuple[dict, dict[str, int]]:
+def _uuids(v: Violation) -> set[str]:
+    return {str(i.get("uuid", "")) for i in v.items}
+
+
+def _is_pre(v: Violation, seen: set, router_uuids) -> bool:
+    """Pre-existing iff it matches the ripped-board baseline and names no router-written item."""
+    if not seen or _key(v) not in seen:
+        return False
+    return not (router_uuids and _uuids(v) & set(router_uuids))
+
+
+def _split(report: DrcReport, baseline: DrcReport | None,
+           router_uuids=None) -> tuple[dict, dict[str, int]]:
     seen = {_key(v) for v in baseline.violations} if baseline is not None else set()
     routing_new = 0
     routing_pre = 0
@@ -105,7 +119,7 @@ def _split(report: DrcReport, baseline: DrcReport | None) -> tuple[dict, dict[st
         if v.type in INCOMPLETE_TYPES:
             incomplete[v.type] += 1
         elif v.type in ROUTING_TYPES:
-            if _key(v) in seen:
+            if _is_pre(v, seen, router_uuids):
                 routing_pre += 1
                 by_type_pre[v.type] += 1
             else:
@@ -116,6 +130,7 @@ def _split(report: DrcReport, baseline: DrcReport | None) -> tuple[dict, dict[st
     classified = {
         "routing_new": routing_new,
         "routing_preexisting": routing_pre,
+        "by_type_preexisting": dict(by_type_pre),
         "incomplete": {
             "track_dangling": incomplete["track_dangling"],
             "via_dangling": incomplete["via_dangling"],
@@ -127,15 +142,22 @@ def _split(report: DrcReport, baseline: DrcReport | None) -> tuple[dict, dict[st
     return classified, dict(by_type_pre)
 
 
-def new_routing(report: DrcReport, baseline: DrcReport | None) -> list[Violation]:
-    """Routing violations of `report` not in `baseline` (same key as `classify`)."""
+def new_routing(report: DrcReport, baseline: DrcReport | None,
+                router_uuids=None) -> list[Violation]:
+    """Routing violations of `report` that are not pre-existing (same rule as `classify`)."""
     seen = {_key(v) for v in baseline.violations} if baseline is not None else set()
-    return [v for v in report.violations if v.type in ROUTING_TYPES and _key(v) not in seen]
+    return [v for v in report.violations
+            if v.type in ROUTING_TYPES and not _is_pre(v, seen, router_uuids)]
 
 
-def classify(report: DrcReport, baseline: DrcReport | None) -> dict:
-    """Split violations into routing (new / pre-existing), incomplete and other buckets."""
-    return _split(report, baseline)[0]
+def classify(report: DrcReport, baseline: DrcReport | None, router_uuids=None) -> dict:
+    """Split violations into routing (new / pre-existing), incomplete and other buckets.
+
+    `baseline` is the DRC of the ripped-but-unrouted board; a violation matching it by
+    (type, item uuids) is pre-existing unless one of its items is in `router_uuids`
+    (uuids of router-written items: router copper always counts).
+    """
+    return _split(report, baseline, router_uuids)[0]
 
 
 def is_clean(classified: dict) -> bool:
@@ -143,8 +165,8 @@ def is_clean(classified: dict) -> bool:
 
 
 def summarise(board: str, report: DrcReport, baseline: DrcReport | None = None,
-              extra: dict | None = None) -> str:
-    c, pre_by_type = _split(report, baseline)
+              extra: dict | None = None, router_uuids=None) -> str:
+    c, pre_by_type = _split(report, baseline, router_uuids)
     inc = c["incomplete"]
     dangling = inc["track_dangling"] + inc["via_dangling"]
     lines = [
