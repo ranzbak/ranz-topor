@@ -40,13 +40,12 @@ from toporlib import rules as rules_mod
 from toporlib.detour import detour_line, detour_stats
 from toporlib.drc import classify, run_drc
 from toporlib.drcloop import DrcJudgement
-from toporlib.kicad_cli import kicad_cli
 
+from . import preflight as preflight_mod
 from . import preview as preview_mod
 from .config import CONFIG_NAME, Config, load_config, update_config
 from .findings import Finding
-from .layers import resolve_layer_roles
-from .ports import BoardPort, CommitRequest, CommitResult, Decision, Progress, RunSummary, UiPort
+from .ports import BoardPort, CommitRequest, CommitResult, Decision, Progress, RunSummary, Selection, UiPort
 from .report import RunReport
 from .schema import CURRENT_VERSION
 
@@ -103,33 +102,24 @@ class _Log:
 
 
 # ---------------------------------------------------------------- seams
-def preflight_findings(cfg: Config, config_findings, copy_text: str) -> list:
-    """Pre-flight findings known to the alpha: config findings, layer roles, kicad-cli presence. (B6 extends.)"""
-    out = list(config_findings)
-    ver = pcbfile.file_version(copy_text)
-    if ver is None or ver < pcbfile.KICAD10_VERSION:
-        out.append(Finding("PCB_FORMAT_OLD", "error",
-                           f"The board file format (version {ver}) is older than KiCad 10 ({pcbfile.KICAD10_VERSION}); "
-                           "topor edits the file text and would silently skip items written in the old format.",
-                           "Open the board in KiCad 10 and save it (File → Save), then run Topor again.",
-                           (str(ver),)))
-    copper = [(l["name"], l["type"]) for l in pcbfile.parse_layers(copy_text)]
-    out += resolve_layer_roles(copper, cfg.layer_roles)[1]
-    if not Path(kicad_cli()).is_file():
-        out.append(Finding("KICAD_CLI_MISSING", "error", f"kicad-cli was not found at {kicad_cli()}.",
-                           "Install KiCad 10 with its command-line tools or set the KICAD_CLI environment variable "
-                           "to the kicad-cli executable.", (str(kicad_cli()),)))
-    return out
+def preflight_findings(cfg: Config, config_findings, copy_text: str, *, model=None, rules=None, sel=None,
+                       pro=None, orig_drc=None) -> list:
+    """Pre-flight findings (B6, ``preflight.preflight``): config, format, layer roles + plane zones, vias,
+    pads outside the outline, rules, copper, scope, defaults. Without `model` only the text-based checks run."""
+    return preflight_mod.preflight(model or {}, rules or {}, cfg, sel or Selection(), orig_drc,
+                                   list(config_findings), pcb_text=copy_text, pro=pro)
 
 
 def connection_estimate(model: dict) -> tuple:
-    """(connections, nets with >= 2 pads): spanning-tree estimate pads - 1 per net. (B6 makes it exact.)"""
-    pads: dict = {}
-    for p in model.get("pads", []):
-        if p.get("net"):
-            pads[p["net"]] = pads.get(p["net"], 0) + 1
-    multi = [n for n, c in pads.items() if c >= 2]
-    return sum(pads[n] - 1 for n in multi), len(multi)
+    """(connections, nets with >= 2 pads): spanning-tree estimate pads - 1 per net (``preflight.connection_count``)."""
+    return preflight_mod.connection_count(model)
+
+
+def connections_by_scope(model: dict) -> dict:
+    """Connections per scope mode for ``RunSummary.connections_by_scope`` (between / touching / whole).
+    Until the scope task (B7) lands every mode carries the whole-board count. O(pads)."""
+    n = connection_estimate(model)[0]
+    return {"between": n, "touching": n, "whole": n}
 
 
 def rip_plan(model: dict, cfg: Config) -> list:
@@ -286,17 +276,6 @@ def _zone_reach(model: dict) -> float:
     return 2.0 * max(r) if r else 1_000_000.0
 
 
-def _preexisting_finding(rep) -> Finding | None:
-    n, u = len(rep.violations), len(rep.unconnected)
-    if not n and not u:
-        return None
-    types = ", ".join(f"{t} {c}" for t, c in sorted(rep.by_type.items(), key=lambda kv: (-kv[1], kv[0]))[:6])
-    return Finding("PREEXISTING_DRC", "info",
-                   f"KiCad DRC already reports {n} violation(s) and {u} unconnected item(s) on the board before "
-                   f"routing" + (f" ({types})" if types else "") + "; they are listed as pre-existing.",
-                   "Nothing to do; run Inspect → Design Rules Checker in KiCad to see them.")
-
-
 def _facts_result(status: str, out: RunOutcome, report: dict | None) -> dict:
     slim = {k: v for k, v in (report or {}).items() if k != "items"}
     return {"status": status, "routed": out.routed, "total": out.total, "stop_reason": out.stop_reason,
@@ -394,7 +373,14 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
              f"{len(model.get('vias', []))} vias, {len(model.get('nets', []))} nets")
 
     # 2. pre-flight
-    findings += [f for f in preflight_findings(cfg, (), copy_text) if f not in findings]
+    sel = port.selection()
+    pro_p = pcb_copy.with_suffix(".kicad_pro")
+    try:
+        pro = json.loads(pro_p.read_text()) if pro_p.is_file() else {}
+    except ValueError:
+        pro = {}
+    findings += [f for f in preflight_findings(cfg, (), copy_text, model=model, rules=rules, sel=sel, pro=pro)
+                 if f not in findings]
     errors = [f for f in findings if f.severity == "error"]
     orig_drc = None
     if not errors:
@@ -403,15 +389,14 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         out.orig_drc = orig_drc
         log.line(f"DRC of the untouched copy: {len(orig_drc.violations)} violations, "
                  f"{len(orig_drc.unconnected)} unconnected, {orig_drc.seconds:.1f}s")
-        pf = _preexisting_finding(orig_drc)
+        pf = preflight_mod.preexisting_drc(orig_drc, cfg)
         if pf is not None:
             findings.append(pf)
     conns, nets = connection_estimate(model)
-    sel = port.selection()
     summary = RunSummary(connections=conns, nets=nets, layers=len(model.get("layers", [])),
                          engine_version=report.facts["version"], board=board_name,
                          has_selection=bool(sel.footprints or sel.pads),
-                         connections_by_scope={"whole": conns})
+                         connections_by_scope=connections_by_scope(model))
     report.facts.update(findings=findings, nets=nets, layers=summary.layers)
     decision = ui.preflight(findings, summary, cfg)
     errors = [f for f in findings if f.severity == "error"]
