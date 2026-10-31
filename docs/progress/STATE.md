@@ -36,7 +36,7 @@ point walls/foreign vertices; Negotiator::record_best unused; wedding-gift 20/43
 Gate review: docs/progress/notes/m2-gate-review.md. Ledger .superpowers/sdd/2026-10-31-topor-m2-router/progress.md.
 
 **M3 IN PROGRESS** — two layers + vias. Plan docs/superpowers/plans/2026-10-31-topor-m3-layers-vias.md; ledger
-.superpowers/sdd/2026-10-31-topor-m3-layers-vias/progress.md. Rotation 1 coordinator from 8ace64c.
+.superpowers/sdd/2026-10-31-topor-m3-layers-vias/progress.md. Rotation 1 coordinator from 8ace64c. INTEGRATION BRANCH = worktree-agent-a141224bcf3a2052b (coordinator pinned to that worktree; main must ff-merge it).
 Main rulings: M3-R1 per-connection layer assignment by layered search (SURF step 4), planar max-cut → M5 (>2 layers), 45 §5a wording
 updated in Task 12. M3-R2 via-reduction pass replaces double-crossing removal. M3-R3 discrete via sites; Weiszfeld placement → M4.
 M3-R4 zero_slack_wires not a hard 0-assertion; a kept zero-slack wire must be DRC-accepted; count reported; Task 10 F diagnosis if > 0 on
@@ -45,12 +45,16 @@ assertion → `== r["threads"]`; eprom still meets M2 numbers (27/27, routing_ne
 M3-R7 rayon 1.10 approved; SWIG pour-fill names verified by a real test on a board copy before use.
 | # | Task | Status |
 |---|------|--------|
-| 1 | persistent checker ItemIndex | in progress |
-| 2 | RC3 sleeve queries + D2/D3/D7/D10 | in progress |
-| 3 | D1/D6/D9/D4/D5/D8, drop record_best | in progress |
-| 4 | harness: pour fills, 2-layer fixture, via spots, M3 progress | in progress |
-| 5 | F design note m3-layers-vias-design.md | in progress |
-| 6–12 | decompose layers · vias/multigraph · layered search · route 2L · via reduction · rayon · gate | pending |
+| 1 | persistent checker ItemIndex | DONE 15a614c |
+| 2 | RC3 sleeve queries + D2/D3/D7/D10 (+ fix: dcsgone gate 45.7→16.9 s) | DONE 4010c90, 85c21fb |
+| 3 | D1/D6/D9/D4/D5/D8, drop record_best | DONE 72a1843, 3b8e0bd |
+| 4 | harness: pour fills (SWIG names verified), 2-layer fixture, via spots, M3 progress | DONE f239f6b |
+| 5 | F design note m3-layers-vias-design.md (amendments P1–P8) | DONE a0db5a4 |
+| 6 | decompose layers + pour completion | DONE 887e92d |
+| 7 | vias.rs + multigraph.rs | DONE 07c4b56 |
+| 8 | layered slot A* | DONE 80e30d8 |
+| 9 | two-layer route | DONE 4b928ec — eprom 27/27 vias 0 zs 0 outside 64.6/76.6 0.05 s; wiccon 50/60 (83 %, gate 90 %) 9.1 s; dcsgone M2 info router 120 s > 65 FAIL |
+| 10–12 | via reduction · rayon · gate | pending |
 
 **M2 history (rotation 1, 2026-10-31).** Plan docs/superpowers/plans/2026-10-31-topor-m2-router.md;
 ledger .superpowers/sdd/2026-10-31-topor-m2-router/progress.md (briefs, reports, rulings R1–R6).
