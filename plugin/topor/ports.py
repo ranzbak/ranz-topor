@@ -79,6 +79,9 @@ class RunSummary:
     nets: int = 0
     layers: int = 0
     engine_version: str = ""
+    board: str = ""  # board name for the dialog titles
+    has_selection: bool = False  # the KiCad selection contains footprints (enables the scope radios)
+    connections_by_scope: dict = field(default_factory=dict)  # "whole"|"between"|"touching" -> count (live header)
 
 
 @dataclass
@@ -109,7 +112,9 @@ class Progress:
 
 @runtime_checkable
 class Report(Protocol):
-    """Run report (B8). The ports only need the summary block."""
+    """Run report (B8). The ports need the summary block and the report folder (preview shows and opens it)."""
+    dir: Path
+
     def summary_lines(self) -> list: ...
 
 
