@@ -83,3 +83,4 @@ def test_modules_import_with_pcbnew_blocked():
     assert "toporlib.drcloop" in r.stdout and "toporlib.drc " in r.stdout + " "
     assert "topor.ports" in r.stdout and "topor.fake" in r.stdout and "topor.ipc" in r.stdout
     assert "toporlib.pcbfile" in r.stdout
+    assert "topor.app" in r.stdout  # B10: the entry-point wiring imports with pcbnew blocked

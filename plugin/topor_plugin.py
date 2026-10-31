@@ -1,23 +1,20 @@
-"""Topor KiCad plugin entry point (M0: engine version handshake only; M4 adds the IPC work)."""
+"""Topor KiCad plugin entry point: puts the plugin directory on ``sys.path`` (so ``topor`` and ``toporlib``
+import inside KiCad's plugin venv) and hands over to ``topor.app.main()``."""
+import os
 import sys
 
 # Rewritten by tools/build.sh to the engine version this plugin was shipped with.
-SHIPPED_VERSION = "0.3.0"
+SHIPPED_VERSION = "0.4.0"
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
 
 def main() -> int:
-    import topor_engine
+    from topor.app import main as app_main
 
-    got = topor_engine.version()
-    if got != SHIPPED_VERSION:
-        print(
-            f"topor: engine version mismatch: installed {got}, plugin shipped with "
-            f"{SHIPPED_VERSION}. Restart the PCB Editor or use Recreate Plugin Environment.",
-            file=sys.stderr,
-        )
-        return 1
-    print(f"topor engine {got} ok")
-    return 0
+    return app_main(sys.argv[1:], shipped_version=SHIPPED_VERSION)
 
 
 if __name__ == "__main__":
