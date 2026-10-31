@@ -8,7 +8,7 @@
   as you need them. Never read the whole plan file.
 - Work in the directory you were started in (your git worktree). Commit there with the conventional commit message the brief
   gives, ending with the line:  Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-  NEVER push. Never modify anything under ~/work/kicad/projects. Never write to the user's KiCad config, plugin dir or plugin venv;
+  NEVER push (no `git push` of any branch, ever — only the main session pushes). Never modify anything under ~/work/kicad/projects. Never write to the user's KiCad config, plugin dir or plugin venv;
   never run `tools/build.sh --dev`; never touch a running KiCad.
 - Commands: `cargo test --release --manifest-path engine/Cargo.toml [--test X]`,
   `cargo clippy --all-targets --manifest-path engine/Cargo.toml -- -D warnings` (clean).
@@ -26,3 +26,5 @@
 - Report: write the full report (what changed per file, decisions + why, test commands + summarised output, numbers the brief asks
   for, UNVERIFIED items, concerns) to the report-file path in your dispatch. Final reply SHORT: status
   (DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT), commit hash(es) + branch, one-line test summary, concerns (≤ 5 lines).
+- Benchmark/progress PNGs under docs/benchmarks/ are committed with `git add -f` (a local .gitignore change is pending the user's decision; never edit .gitignore).
+- M4-R8: IPC model approximations must be conservative (superset obstacles, 'not reached' pour reach, unsure via = fixed) and tests assert that direction.
