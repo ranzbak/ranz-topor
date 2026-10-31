@@ -1,6 +1,6 @@
 # STATE
 
-**M4b IN PROGRESS** — KiCad IPC plugin, version 0.4.0. Plan docs/superpowers/plans/2026-11-01-topor-m4-in-kicad.md (rev. 2) Part 1 (P1, B0–B12);
+**M4b GATE REACHED (headless), awaiting main verify + user GUI results** — KiCad IPC plugin, version 0.4.0. Plan docs/superpowers/plans/2026-11-01-topor-m4-in-kicad.md (rev. 2) Part 1 (P1, B0–B12);
 ledger .superpowers/sdd/2026-11-01-topor-m4b-plugin/progress.md. Rotation 1 coordinator on main from 07864ea. Projects tree 8153f4de51ba4d65.
 Main rulings: **M4-R1** (user) no pcbnew/SWIG in the plugin runtime (IPC kipy 0.8 + file formats + kicad-cli; guard test B0). **M4-R2** (user) plugin first
 (M4b 0.4.0), engine second (M4a 0.5.0). **M4-R3** (user) UI tasks invoke ecc:frontend-design-direction, ecc:make-interfaces-feel-better, ecc:accessibility
@@ -29,8 +29,16 @@ Verify @520ea88: default pytest 278 passed, 1 failed (test_scaffold debug cargo 
 | B8 run report | DONE 9e2a3fa |
 | B9 wx dialogs | DONE a2cb355 |
 | B10 entry point, app, build, 0.4.0 | DONE f8b3be2 |
-| B11 docs | TODO (rotation 2) |
-| B12 gate (headless e2e, GUI checklist, parity, F review) | TODO (rotation 2) |
+| B11 docs | DONE d98303c (merge 3bc69f5) |
+| R8 M4-R8 conservative IPC approximations, exact via free, keep_unconnected_vias | DONE ef53a0c (merge b850c8c) |
+| QB12 Q-b via fallback + B12 Step 1 gate tests | DONE 4536a28, 903025b (merge 7eed234) |
+| B12 Step 3 F review docs/progress/notes/m4b-gate-review.md (1 B, 7 I, 14 M) | DONE d802995; fixes FX1 ce28490/7988a0d, FX2 bac2e02..38900f7 (merges, 3a6417e) |
+| B12 Step 2 GUI checklist (user) docs/user/gui-test-checklist.md | PENDING (user) |
+
+**Rotation 2 (coordinator on main 6f15057 → see ledger).** Rulings C23–C34 (ledger + global-constraints.md): C23 via free = exact flag from the save_as copy (unknown → kept); C24 `[run] keep_unconnected_vias` true; C25 copper graphics circumscribed, text bbox +0.5×size; C26 pour reach ⊆ pcbnew; C27 Q-b fallback into engine rules; C28 `[run] refill_after_accept` false (Accept = one undo step; user presses B); C29 fills/reach always from the kicad-cli refilled copy; C30 POST_COMMIT_STEP_FAILED keeps "accepted"; C31 engine panic → done()+exception, cancel grace 30 s → ENGINE_UNRESPONSIVE; C32 pre-run failures show a dialog; C33 VIA_NOT_SET_UP reads via_dimensions (fires on wiccon, wedding); C34 no-effect keys say so in their doc string.
+Gate verify @3a6417e (no load, engine rebuilt from main): `cargo test --release` 364 passed; clippy -D warnings clean; `.venv/bin/pytest -q` 451 passed, 7 skipped (incl. test_scaffold, test_no_pcbnew); `pytest tests/plugin` 269 passed, 7 skipped (live); `pytest tests/gate -m "gate or not gate" -q -s` 21 passed (M0–M3 + M4b, 582 s); docs_gen --check clean.
+M4b headless (FakeBoard + harness model, existing_copper=rip, committed copy judged by kicad-cli): eprom 27/27 vias 0 routing_new 0 unconnected 0 outside 64.628 mm router 0.06 s 1 DRC round; wiccon 62/62 vias 37 routing_new 0 unconnected 0 outside 1373.553 mm router 3.07 s 1 round; scope U1+U2 between est 26 → 24/24, touching est 30 → 27/27, routing_new 0. PNGs (local, untracked): docs/benchmarks/progress/2026-10-31-m4-B12-{eprom-to-kernal,wiccon-2023}.png.
+Open for the user GUI test: whether IPC refill is its own undo step (C28), text bbox from the server, hatched fills / copper Bezier tolerance, live parity, KiCad 10 menu wordings (checklist rows).
 
 
 **M1 (taut smoother) — DONE 2026-10-31** (gate verified by main session: `pytest tests/gate -m "gate or not gate"` → 7 passed).
