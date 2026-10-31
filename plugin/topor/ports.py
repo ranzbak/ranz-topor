@@ -127,7 +127,9 @@ class BoardPort(Protocol):
         and its project files (.kicad_pro / .kicad_dru) in `dst_dir`; returns the .kicad_pcb path."""
 
     def selection(self) -> Selection: ...
-    def read_model(self, rules: dict, pcb_copy: Path) -> dict: ...
+    def read_model(self, rules: dict, pcb_copy: Path, *, layer_roles: dict | None = None) -> dict:
+        """BoardModel dict. `layer_roles` = ``cfg.layer_roles`` (copper layer name -> role); ports whose model
+        is fixed (FakeBoard) ignore it."""
 
     def netclasses(self) -> tuple:
         """(class name -> NetClassValues, net name -> class name)."""
@@ -152,3 +154,8 @@ class UiPort(Protocol):
         ``cancelled``."""
 
     def error(self, finding: Finding) -> None: ...
+
+    def set_context(self, board: str | None = None, report_dir: Any = None, log_path: Any = None,
+                    versions: dict | None = None) -> None:
+        """Board name, report folder, log.txt path and version strings the dialogs show; the run flow calls
+        it before ``preview`` / ``done`` / ``error``."""

@@ -183,11 +183,11 @@ class IpcBoard:
             refs = {fp.id.value: fp.reference_field.text.value for fp in self.board.get_footprints()}
         return selection_from_kipy(items, refs)
 
-    def read_model(self, rules: dict, pcb_copy: Path) -> dict:
+    def read_model(self, rules: dict, pcb_copy: Path, *, layer_roles: dict | None = None) -> dict:
         from .model_ipc import export_model_ipc  # B3
 
         model = export_model_ipc(self.board, self.board.get_project(), Path(pcb_copy).read_text(), rules,
-                                 name=self.board_name())
+                                 name=self.board_name(), layer_roles=layer_roles)
         self._net_names = {int(n["code"]): n["name"] for n in model.get("nets", [])}
         return model
 

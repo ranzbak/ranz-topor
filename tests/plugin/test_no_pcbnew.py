@@ -58,7 +58,7 @@ import importlib, pkgutil, sys
 sys.modules['pcbnew'] = None            # any `import pcbnew` now raises ImportError
 import toporlib
 mods = ['toporlib'] + [m.name for m in pkgutil.walk_packages(toporlib.__path__, 'toporlib.')]
-opts = ['topor.ports', 'topor.fake', 'topor.ipc', 'topor.app']
+opts = ['topor.ports', 'topor.fake', 'topor.ipc', 'topor.app', 'topor.run', 'topor.preview', 'topor.report']
 if importlib.util.find_spec('wx') is not None:
     opts.append('topor.ui_wx')
 for opt in opts:  # later tasks add these; picked up automatically
