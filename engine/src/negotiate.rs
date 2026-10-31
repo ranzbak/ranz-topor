@@ -12,8 +12,8 @@
 //! the freeze (edge versions, sites) is searched again, in order, against the current graph.
 //! The absurd-detour ghost is
 //! computed in the parallel phase and reused while its own faces are unchanged. A connection
-//! whose ghost finds no path at all is blocked by hard geometry alone and is never searched
-//! again (`dead`). Rip-up is damped (F2, scaling diagnosis RC-A2): a connection rips a given
+//! blocked before any search by a static fact of the board (a terminal that cannot be left /
+//! entered, `search::terminal_open`, F3) is never searched again (`dead`). Rip-up is damped (F2, scaling diagnosis RC-A2): a connection rips a given
 //! blocker at most [`RIP_PAIR_CAP`] times per run, so two connections that keep ripping each
 //! other out of a shared class stop after a bounded exchange and the history they left decides.
 //! Every decision is a function of the (deterministic) search results, so the outcome does not
@@ -68,6 +68,9 @@ pub struct BlockInfo {
     pub ghost: Option<SlotPath>,
     /// Crossing before the blocked element, `(leg, index in leg.crossings)` (P5).
     pub last_reached: Option<(usize, usize)>,
+    /// Blocked by a static fact of the board (F3): the reason, reported as is; such a
+    /// connection is `dead`.
+    pub static_reason: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -100,10 +103,11 @@ pub struct Negotiator {
     pub bumps: Vec<u32>,
     pub iteration: u32,
     pending_rip: BTreeSet<usize>,
-    /// Connections whose slot-free ghost found no path at all: blocked by hard geometry alone
-    /// (every dynamic quantity - capacity, strands, owned sites, history - is soft in the ghost),
-    /// so they are blocked in every later iteration and are not searched again.
-    dead: BTreeSet<usize>,
+    /// Connections blocked by a static fact of the board (F3: a terminal without an inside
+    /// face that has a statically passable edge or a via site; every dynamic quantity -
+    /// capacity, strands, owned sites, `along`, history - is excluded), with the reason: blocked
+    /// in every later iteration and not searched again.
+    dead: BTreeMap<usize, String>,
     /// Rips per `(ripper, blocker)` pair so far: at most [`RIP_PAIR_CAP`] per run (damping,
     /// design note §7 amendment).
     rip_pairs: BTreeMap<(usize, usize), u32>,
@@ -129,7 +133,7 @@ impl Negotiator {
             bumps: vec![0; conns],
             iteration: 0,
             pending_rip: BTreeSet::new(),
-            dead: BTreeSet::new(),
+            dead: BTreeMap::new(),
             rip_pairs: BTreeMap::new(),
             cur: vec![None; conns],
         }
@@ -137,7 +141,7 @@ impl Negotiator {
 
     /// The connection is blocked by static facts alone and is not searched again.
     pub fn is_dead(&self, conn: usize) -> bool {
-        self.dead.contains(&conn)
+        self.dead.contains_key(&conn)
     }
 
     /// One PathFinder iteration over the `active` connections (indices into `conns`; the others
@@ -262,9 +266,10 @@ impl Negotiator {
                     blocked_edge,
                     blocked_site,
                     last_reached,
+                    static_reason,
                 } => {
-                    if ghost.is_none() && Instant::now() < deadline {
-                        self.dead.insert(i);
+                    if let Some(r) = &static_reason {
+                        self.dead.insert(i, r.clone());
                     }
                     if let (Some(gp), None) = (&ghost, blocked_edge) {
                         let b = site_aware_blockers(mg, gp);
@@ -279,6 +284,7 @@ impl Negotiator {
                             site: blocked_site,
                             ghost,
                             last_reached,
+                            static_reason,
                         },
                     );
                 }
@@ -325,17 +331,18 @@ impl Negotiator {
         goals: &[Goal],
         opts: &Options,
         deadline: Instant,
-        dead: &BTreeSet<usize>,
+        dead: &BTreeMap<usize, String>,
     ) -> Vec<(SearchOutcome, Option<GhostOut>)> {
         let cap = default_expansion_cap(mg);
         idx.par_iter()
             .map(|&i| {
-                if dead.contains(&i) {
+                if let Some(r) = dead.get(&i) {
                     let none = SearchOutcome::Blocked {
                         ghost: None,
                         blocked_edge: None,
                         blocked_site: None,
                         last_reached: None,
+                        static_reason: Some(r.clone()),
                     };
                     return (none, None);
                 }

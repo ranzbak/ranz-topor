@@ -322,6 +322,7 @@ fn blocked_connection_is_bumped_first_next_iteration() {
         site: None,
         ghost: None,
         last_reached: None,
+        static_reason: None,
     };
     neg.penalise_blocked(1, &info);
     assert_eq!(neg.bumps[1], 1);
@@ -706,5 +707,45 @@ fn iteration_batch_commit_invalidates_shared_edge() {
         let (r2, sig2, u2) = channel_iteration(n);
         assert_eq!((r2, u2), (resolved, users), "threads {n}");
         assert_eq!(sig2, sig, "threads {n}");
+    }
+}
+
+/// F3: `dead` holds static blocks only. (a) B is blocked by A's via at the only site that fits
+/// its 0.6 mm via: a dynamic block (ghost through the owned site, no static reason) - B is not
+/// dead, A is ripped and B routes. (b) A pad outside the outline (every face around its vertex
+/// is outside): blocked before any search with the static reason, dead, and reported the same
+/// way in every later iteration without a search.
+#[test]
+fn dead_only_for_static_blocks() {
+    let mut t = two_layers(&contention_pads(), contention_sites());
+    let (neg, paths, ripped, done) = negotiate_contention(&mut t);
+    assert!(done && ripped.contains(&0));
+    assert!(!neg.is_dead(1), "a block by another connection's via is not static");
+    assert!(paths[1].is_some(), "B routed after the rip-up");
+    let mut b = build(&[("a", 1, 10.0, 20.0), ("b", 1, 60.0, 20.0)], "");
+    let (conns, verts) = setup(&b, &[(1, "a", "b")]);
+    let mut neg = Negotiator::new(&b.mg, 1);
+    let opts = Options::default();
+    let (starts, goals) = (starts_of(&verts), goals_of(&verts));
+    for it in 1..=2 {
+        let out = neg.iteration(
+            &mut b.mg,
+            &mut b.obs,
+            &conns,
+            &[0],
+            &starts,
+            &goals,
+            &opts,
+            far(),
+        );
+        let info = out.blocked.get(&0).expect("blocked");
+        let r = info.static_reason.as_deref().expect("static reason");
+        assert!(
+            r.starts_with("blocked: terminal cannot be entered"),
+            "it {it}: {r}"
+        );
+        assert!(info.ghost.is_none() && info.edge.is_none() && info.site.is_none());
+        assert!(neg.is_dead(0), "it {it}");
+        assert!(out.ripped.is_empty());
     }
 }

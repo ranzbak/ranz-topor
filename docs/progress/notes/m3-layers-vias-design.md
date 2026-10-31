@@ -287,3 +287,17 @@ free-list ids sorted; heap key total; `collect` in index order; no `HashMap` ite
   It is not reused by the absurd-detour rule: that rule needs the ghost against the current graph for its blockers, and
   a funnel length of a hop-sum-optimal sequence is not monotone in the occupancy, so a static reference would not keep
   the rule's semantics.
+- **§2 / §4 terminal pre-check and `dead` (F3):** before any search, `search::terminal_open(g, v, net)` must hold for
+  some start vertex and (terminal goals) some goal vertex: an inside face around the vertex with a statically passable
+  edge (`RouteGraph::passable_static`: both faces inside, constraint owned by the net; `along` excluded) or a via-site
+  vertex. Otherwise `Blocked { ghost: None, static_reason: Some("blocked: terminal cannot be left/entered (width w,
+  clearance c)") }` at once, `O(Σ deg)`, no expansion, no ghost (`ghost_len_nm` null). `Negotiator.dead` holds exactly
+  these connections (with the reason, repeated every iteration without a search); a ghost `None` no longer makes a
+  connection dead. Finding on dcsgone U7.4 (#201/#202/#203, net65 at 0.2 mm / 0.2 mm, 0.5 mm pitch): the rule does
+  **not** fire — all 4 faces around v3284 are inside and all 12 edges are passable; every edge is statically unfit
+  (spokes cap 195 194 nm, long sides 375 000, short sides 0 against a need of 605 000) and the block is geometric: a
+  0.2 mm wire with 0.2 mm clearance must keep its centreline within ±75 µm of the pad axis between the 0.5 mm-pitch
+  neighbours and no state point of a first / last move lies there, so `los` refuses every entry and the search
+  exhausts the component (#201: 209 668 expansions, 24 s). A sound geometric entry probe is deferred (F4/F8 candidate);
+  "all edges unfit" is not a sound static block (the rect-pad fixture of `ghost_is_never_stricter_than_search` is
+  all-unfit and routes).

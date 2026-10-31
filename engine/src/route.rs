@@ -1997,6 +1997,7 @@ fn zero_slack_attempt<'a>(
                 blocked_edge,
                 blocked_site,
                 last_reached,
+                static_reason,
             } => {
                 paths[d] = None;
                 res[d] = fail("blocked: no path (zero-slack retry)");
@@ -2007,6 +2008,7 @@ fn zero_slack_attempt<'a>(
                         site: blocked_site,
                         ghost,
                         last_reached,
+                        static_reason,
                     },
                 );
             }
@@ -2468,10 +2470,12 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
                                 blocking: None,
                             },
                             (None, Some(b)) => Res::Fail {
-                                reason: if b.edge.is_some() || b.site.is_some() {
-                                    "blocked: no path (wall, capacity or via sites)".into()
-                                } else {
-                                    "blocked: no path".into()
+                                reason: match &b.static_reason {
+                                    Some(r) => r.clone(),
+                                    None if b.edge.is_some() || b.site.is_some() => {
+                                        "blocked: no path (wall, capacity or via sites)".into()
+                                    }
+                                    None => "blocked: no path".into(),
                                 },
                                 perm: false,
                                 blocking: b

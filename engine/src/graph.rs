@@ -446,10 +446,14 @@ impl RouteGraph {
     /// Both faces inside the outline, no wire running along it, and (constraint edges) `net`
     /// is an owner net.
     pub fn passable(&self, e: usize, net: i32) -> bool {
+        self.edges[e].along.is_none() && self.passable_static(e, net)
+    }
+
+    /// [`RouteGraph::passable`] without the dynamic part (a wire running along the edge): both
+    /// faces inside the outline and, for a constraint edge, `net` an owner net. A static fact of
+    /// the board (F3: terminal pre-check, `dead` set).
+    pub fn passable_static(&self, e: usize, net: i32) -> bool {
         let g = &self.edges[e];
-        if g.along.is_some() {
-            return false;
-        }
         let inside = |f: Option<usize>| f.is_some_and(|f| self.faces[f].inside);
         inside(g.faces[0]) && inside(g.faces[1]) && (!g.constraint || g.owner_nets.contains(&net))
     }

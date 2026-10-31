@@ -167,8 +167,52 @@ pub enum SearchOutcome {
         blocked_site: Option<usize>,
         /// Crossing before the blocked element, `(leg, index in leg.crossings)` (P5).
         last_reached: Option<(usize, usize)>,
+        /// Blocked before any search by a static fact of the board (F3): a terminal has no
+        /// inside face with a statically passable edge or a via site, so it can never be left /
+        /// entered whatever the other connections do. The negotiator marks such a connection
+        /// `dead`.
+        static_reason: Option<String>,
     },
     Timeout,
+}
+
+/// F3: vertex `v` of `g` can be left / entered by `net` as far as the static graph goes: some
+/// inside face around it has an edge that is statically passable for the net, or a via-site
+/// vertex (a via move leaves through the other layer). O(deg). Every first move of the slot
+/// search (`leave_vertex`, `push_goal`) needs one of these, so a terminal without them is
+/// blocked in every iteration, whatever the other connections do; the converse does not hold
+/// (geometry may still refuse every move: dcsgone's U7 at 0.5 mm pitch).
+pub fn terminal_open(g: &RouteGraph, v: usize, net: i32) -> bool {
+    g.faces_of_vertex(v).iter().any(|&f| {
+        let face = &g.faces[f];
+        face.inside
+            && (face.e.iter().any(|&e| g.passable_static(e, net))
+                || face.v.iter().any(|&vv| vv != v && g.verts[vv].site.is_some()))
+    })
+}
+
+/// F3 pre-check of a search: `Some(reason)` when the start cannot be left or the goal (terminal
+/// goals only; a pour goal is a site) cannot be entered on any layer. O(Σ deg).
+fn static_block(
+    env: &Env,
+    conn: &Connection,
+    start: &[(usize, usize)],
+    goal: &Goal,
+) -> Option<String> {
+    let open = |l: usize, v: usize| terminal_open(env.layers[l].0, v, conn.net);
+    let start_ok = start.iter().any(|&(l, v)| open(l, v));
+    let goal_ok = goal.vertices.is_empty() || goal.vertices.iter().any(|&(l, v)| open(l, v));
+    let what = match (start_ok, goal_ok) {
+        (true, true) => return None,
+        (false, true) => "left",
+        (true, false) => "entered",
+        (false, false) => "left/entered",
+    };
+    Some(format!(
+        "blocked: terminal cannot be {what} (width {:.3} mm, clearance {:.3} mm)",
+        conn.width as f64 * 1e-6,
+        conn.clearance as f64 * 1e-6
+    ))
 }
 
 /// Where the connection ends: terminal vertices `(layer_idx, vertex)` on every layer of the
@@ -2022,6 +2066,15 @@ fn search_in(
     if Instant::now() >= p.deadline {
         return SearchOutcome::Timeout;
     }
+    if let Some(reason) = static_block(env, conn, start, goal) {
+        return SearchOutcome::Blocked {
+            ghost: None,
+            blocked_edge: None,
+            blocked_site: None,
+            last_reached: None,
+            static_reason: Some(reason),
+        };
+    }
     let lay = Layered::new(env, hists, conn, start, goal, p, false);
     if let Some(d) = find_direct(&lay) {
         return SearchOutcome::Found(d);
@@ -2038,12 +2091,14 @@ fn search_in(
                 blocked_edge,
                 blocked_site,
                 last_reached,
+                static_reason: None,
             },
             None => SearchOutcome::Blocked {
                 ghost: None,
                 blocked_edge: None,
                 blocked_site: None,
                 last_reached: None,
+                static_reason: None,
             },
         },
     }
@@ -2528,6 +2583,9 @@ fn ghost_in(
     goal: &Goal,
     p: &Common,
 ) -> Option<GhostOut> {
+    if static_block(env, conn, start, goal).is_some() {
+        return None;
+    }
     let lay = Layered::new(env, hists, conn, start, goal, p, true);
     let cap = cap_of(&env.graphs(), env.sites(), true);
     let Run::Found(mut path) = lay.run_timed(cap, p.deadline) else {
@@ -2613,8 +2671,8 @@ pub fn search(
 /// soft-blocked element in travel order (P5); ghost crossings carry the slot the slot search
 /// would choose (`cross_slot`; the append position `slot_count(edge)` where no slot is
 /// feasible), `est_len` is the funnel length of the crossing sequence. Cap `8 sum_L E_L + 4 S +
-/// 64` pops;
-/// `O(sum_L E_L (max_vias + 1))`, no clearance candidates.
+/// 64` pops; `O(sum_L E_L (max_vias + 1))`, no clearance candidates. `None` also for a
+/// terminal that cannot be left / entered statically ([`terminal_open`], F3).
 pub fn ghost(
     mg: &MultiGraph,
     obs: &ObstacleSet,
