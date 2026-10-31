@@ -160,6 +160,7 @@ fn pour_served_net() {
         layers: vec![0],
         pads: vec!["U1.1".into(), "U1.2".into()],
         vias: vec![],
+        fills: vec![],
     });
     let d = decompose(&m, &Options::default(), 0);
     assert!(d.connections.is_empty());
@@ -182,6 +183,7 @@ fn pour_on_other_layer_does_not_join_smd_pad() {
         layers: vec![2],
         pads: vec!["U1.1".into(), "U1.2".into()],
         vias: vec![],
+        fills: vec![],
     });
     let d = decompose(&m, &Options::default(), 0);
     assert_eq!(d.connections.len(), 1);

@@ -113,6 +113,21 @@ def test_write_model_json(fixture_board, tmp_path):
     assert json.loads(p.read_text())["board"] == "fx"
 
 
+@pytest.mark.skipif(not Path(EPROM).is_file(), reason="eprom-to-kernal benchmark board not available")
+def test_eprom_gnd_pour_fill_outlines_via_swig(tmp_path):
+    """Pins the SWIG names of the filled-polygon export (GetFilledPolysList, OutlineCount, Outline,
+    PointCount, CPoint) against a copy of a real board with filled GND pours."""
+    pc = copy_project(Path(EPROM), tmp_path / "w")
+    m = export_model(load_board(pc), {}, name="eprom")
+    gnd = _codes(m)["GND"]
+    pours = [p for p in m["pours"] if p["net"] == gnd]
+    assert pours and all("warning" not in p for p in pours)
+    fills = [f for p in pours for f in p["fills"]]
+    assert fills and {f["layer"] for f in fills} <= set(pours[0]["layers"])
+    assert all(len(f["outer"]) >= 4 for f in fills)
+    assert sum(len(f["outer"]) for f in fills) > 1000  # real fills are detailed polygons
+
+
 @pytest.mark.gate
 def test_export_eprom_counts(tmp_path):
     src = Path(EPROM)
@@ -163,7 +178,7 @@ def test_model_pours_schema(fixture_board):
     m = export_model(load_board(fixture_board), {}, name="fx")
     assert len(m["pours"]) == 1
     z = m["pours"][0]
-    assert set(z) == {"uuid", "net", "layers", "pads", "vias"}
+    assert set(z) == {"uuid", "net", "layers", "pads", "vias", "fills"}
     assert z["pads"] == sorted(z["pads"]) and z["vias"] == sorted(z["vias"])
 
 

@@ -17,10 +17,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def render_progress(task: str, *, board: str = "eprom-to-kernal", date: str | None = None,
                     out_dir: Path = ROOT / "docs/benchmarks/progress",
-                    pcb_override: Path | None = None, router: str = "smoother") -> dict:
+                    pcb_override: Path | None = None, router: str = "smoother",
+                    threads: int = 4) -> dict:
     if router == "topor":
-        return _render_progress_m2(task, board=board, date=date, out_dir=out_dir,
-                                   pcb_override=pcb_override)
+        return _render_progress_m3(task, board=board, date=date, out_dir=out_dir,
+                                   pcb_override=pcb_override, threads=threads)
     date = date or datetime.date.today().isoformat()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -58,39 +59,35 @@ def render_progress(task: str, *, board: str = "eprom-to-kernal", date: str | No
     return result
 
 
-def _render_progress_m2(task: str, *, board: str, date: str | None, out_dir: Path,
-                        pcb_override: Path | None) -> dict:
+def _render_progress_m3(task: str, *, board: str, date: str | None, out_dir: Path,
+                        pcb_override: Path | None, threads: int = 4) -> dict:
     date = date or datetime.date.today().isoformat()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="topor-progress-") as tmp:
         tmp = Path(tmp)
-        result = bench.run_bench(board, tmp, router=route_router, rip="all",
+        result = bench.run_bench(board, tmp, router=route_router, rip="all", threads=threads,
                                  pcb_override=pcb_override)
         rt = result.get("route") or {}
         r, o = result["routed_all"], result["orig_all"]
         drc = result["routed_drc"]
         zs = result.get("zero_slack") or {}
-        zs_names = [w["net"] for w in zs.get("wires") or []]
-        zs_text = f"zero slack {len(zs_names)}"
-        if zs_names:
-            zs_text += f" ({', '.join(zs_names)})"
-        elif zs.get("status") not in (None, "kept", "not attempted"):
-            zs_text += f" ({zs['status']})"
+        by = rt.get("length_by_layer_mm") or {}
         line1 = (f"{task}: {rt.get('routed', 0)}/{rt.get('connections', 0)} connections, "
                  f"{rt.get('nets_routed', 0)}/{rt.get('nets', 0)} nets, "
                  f"partial {rt.get('partial', 0)}, failed {rt.get('failed', 0)}, "
-                 f"arcs {r['arcs']}, {zs_text}, iters {rt.get('iterations')}")
+                 f"vias {rt.get('vias', 0)}, arcs {r['arcs']}, "
+                 f"zero slack {len(zs.get('wires') or [])}, iters {rt.get('iterations')}")
         line2 = (f"DRC routing {drc['routing_new']}, "
                  f"unconnected {drc['incomplete']['unconnected_items']}, "
                  f"outside pads {rt.get('outside_mm') or 0.0:.1f} vs hand "
                  f"{(rt.get('hand_outside_mm') or 0.0):.1f} mm, "
-                 f"KiCad {r['track_mm'] + r['arc_mm']:.1f} vs hand "
-                 f"{o['track_mm'] + o['arc_mm']:.1f} mm, router {result['router_s']:.2f} s")
+                 f"F.Cu {by.get('F.Cu', 0.0):.1f} / B.Cu {by.get('B.Cu', 0.0):.1f} mm, "
+                 f"router {result['router_s']:.2f} s on {rt.get('threads_used') or threads} threads")
         text = f"{line1}\n{line2}"
         topor_png = add_caption(tmp / f"{board}-work" / f"{board}-topor-raw.png", text,
                                 tmp / "topor-progress.png")
-        png = out_dir / f"{date}-m2-{task}.png"
+        png = out_dir / f"{date}-m3-{task}.png"
         compose_compare(tmp / f"{board}-hand.png", topor_png, png)
     result["caption"] = text
     result["png"] = str(png)
@@ -106,8 +103,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--pcb", type=Path, default=None,
                     help="use this board instead of BENCH_BOARDS[board]")
     ap.add_argument("--router", choices=["smoother", "topor"], default="smoother")
+    ap.add_argument("--threads", type=int, default=4)
     args = ap.parse_args(argv)
-    render_progress(args.task, board=args.board, pcb_override=args.pcb, router=args.router)
+    render_progress(args.task, board=args.board, pcb_override=args.pcb, router=args.router,
+                    threads=args.threads)
     return 0
 
 
