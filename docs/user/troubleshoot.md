@@ -228,7 +228,7 @@ and compare with `drc.json` in the report folder. If the router's copper really 
 
 **Cause.** nets.do_not_touch lists nets whose copper is fixed; or one of its patterns matches no net on this board.
 
-**Fix.** Check the pattern spelling in nets.do_not_touch against the net names (KiCad → Inspect → Board Statistics → Nets shows them).
+**Fix.** Check the pattern spelling in nets.do_not_touch against the net names (KiCad → View → Panels → Net Inspector lists them).
 
 ### DRILL_OUTSIDE_FILTER
 
@@ -410,6 +410,6 @@ and compare with `drc.json` in the report folder. If the router's copper really 
 
 *Severity: warning.*
 
-**Cause.** KiCad has no via sizes set up (factory defaults only), so topor falls back to its own via size.
+**Cause.** KiCad has no via sizes set up (no pre-defined via, and every net class via is KiCad's factory 0.8 / 0.4 mm), so every net with that via is routed with vias.fallback_diameter_mm / vias.fallback_drill_mm (0.8 / 0.4 mm by default) and, where space requires, smaller vias from topor's fab profile (a drill of 0.25, 0.3, 0.4 or 0.5 mm below the fallback drill, never below the board's minimum via drill and annular ring).
 
-**Fix.** Set vias in KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias (or a net class), or set vias.fallback_diameter_mm and vias.fallback_drill_mm.
+**Fix.** Set the via size and hole of the net classes in KiCad → File → Board Setup → Design Rules → Net Classes (topor routes each net with its net class via), or set vias.fallback_diameter_mm and vias.fallback_drill_mm. A via in KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias also clears this finding, but topor 0.4.0 does not route with pre-defined vias (from 0.5.0).

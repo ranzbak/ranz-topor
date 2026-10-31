@@ -530,7 +530,7 @@ def factory_eprom(tmp_path_factory):
     pro = json.loads(pro_p.read_text())
     for c in pro["net_settings"]["classes"]:
         c.update(via_diameter=0.8, via_drill=0.4)
-    pro["board"]["design_settings"].pop("via_sizes_list", None)
+    pro["board"]["design_settings"]["via_dimensions"] = [{"diameter": 0.0, "drill": 0.0}]  # KiCad's placeholder
     pro_p.write_text(json.dumps(pro))
     b = load_board(cp)
     dru = cp.dru.read_text() if cp.dru is not None else None
