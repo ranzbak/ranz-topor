@@ -72,6 +72,8 @@ SETTINGS: list[Setting] = [
        choices=("fixed", "smooth", "rip"), engine="existing_copper"),
     _s("run", "respect_locked", "bool", True, "Treat locked tracks and vias as fixed obstacles; false lets topor rip or smooth them.",
        kicad="KiCad → item Properties → Locked"),
+    _s("run", "keep_unconnected_vias", "bool", True, "Never rip a via that no track of its own net touches (stitching vias without KiCad's free flag); false rips them like routing vias.",
+       kicad="KiCad → via Properties → Free"),
     _s("run", "scope_mode", "str", "between", "With a footprint selection: between = connections whose pads are all on selected footprints; touching = any connection with a selected pad.",
        choices=("between", "touching"), kicad="KiCad → select footprints in the PCB editor"),
     _s("run", "unrouted_only", "bool", False, "Route only connections that have no copper yet and leave all existing copper untouched."),

@@ -131,3 +131,17 @@ def test_parse_layers_on_snapshots():
     b = pcbfile.parse_layers(board_pcb("bornhack2026").read_text())
     assert [(g["id"], g["name"], g["type"]) for g in b] == [
         (0, "F.Cu", "signal"), (4, "In1.Cu", "power"), (6, "In2.Cu", "power"), (2, "B.Cu", "signal")]
+
+
+def test_via_free_flags_kicad10_and_legacy_forms():
+    text = ('(kicad_pcb (version 20260206)\n'
+            '\t(via\n\t\t(at 1 2)\n\t\t(size 0.8)\n\t\t(drill 0.4)\n\t\t(layers "F.Cu" "B.Cu")\n\t\t(free yes)\n'
+            '\t\t(net "GND")\n\t\t(uuid "aaaa-1")\n\t)\n'
+            '\t(via\n\t\t(at 3 4)\n\t\t(size 0.8)\n\t\t(drill 0.4)\n\t\t(layers "F.Cu" "B.Cu")\n'
+            '\t\t(net "free")\n\t\t(uuid "aaaa-2")\n\t)\n'
+            '\t(via (at 5 6) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (free) (net 1) (tstamp bbbb-3))\n'
+            '\t(via (at 7 8) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (free no) (net 1) (tstamp bbbb-4))\n'
+            '\t(via (at 9 9) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (free yes) (net 1))\n'
+            '\t(segment (start 0 0) (end 1 1) (width 0.2) (layer "F.Cu") (net 1) (uuid "cccc-5"))\n'
+            '\t(footprint "x" (uuid "dddd-6") (fp_line (start 0 0) (end 1 0) (free yes)))\n)\n')
+    assert pcbfile.via_free_flags(text) == {"aaaa-1": True, "aaaa-2": False, "bbbb-3": True, "bbbb-4": False}

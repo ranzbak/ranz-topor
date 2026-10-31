@@ -49,6 +49,7 @@ class RipPlan:
     engine_existing_copper: str = "fixed"
     kept_locked: int = 0
     kept_do_not_touch: int = 0
+    kept_unconnected_vias: int = 0  # unflagged vias no same-net track end touches (keep_unconnected_vias)
 
 
 def _empty_scope(unrouted_only: bool) -> dict:
@@ -204,11 +205,43 @@ def scope_from_selection(sel: Selection, model: dict, cfg: Config, whole: bool =
     return ScopePlan(mode, scope, frozenset(nets), n_conn, counts, findings, tuple(sel.footprints))
 
 
+def _touched_vias(model: dict) -> set:
+    """Uuids of the vias that a same-net ``kept`` track end touches (within the via radius, on a copper layer of
+    the via's span). Per-net index of track ends: O(V + K + sum over nets of v_n * k_n) for v_n vias and k_n
+    track ends of net n (each via only looks at its own net's ends)."""
+    order = [int(l["id"]) for l in model.get("layers", [])] or [0, 2]
+    pos = {l: i for i, l in enumerate(order)}
+
+    def span(v) -> set:
+        ls = [int(x) for x in v.get("layers") or [order[0], order[-1]]]
+        lo, hi = sorted((pos.get(ls[0], 0), pos.get(ls[-1], len(order) - 1)))
+        return set(order[lo:hi + 1])
+
+    ends: dict = {}
+    for k in model.get("kept", []):
+        p = k.get("prim") or {}
+        for q in ((p.get("a"), p.get("b")) if p.get("kind") == "seg" else (p.get("start"), p.get("end"))):
+            if q is not None:
+                ends.setdefault(k.get("net"), []).append((k.get("layer"), q[0], q[1]))
+    out = set()
+    for v in model.get("vias", []):
+        if v.get("at") is None:
+            continue  # no position: cannot prove a track uses it -> untouched (kept with the default key)
+        r = float(v.get("d") or 0) / 2.0
+        ls = span(v)
+        x, y = v["at"]
+        if any(l in ls and math.hypot(ex - x, ey - y) <= r for l, ex, ey in ends.get(v.get("net"), ())):
+            out.add(v["uuid"])
+    return out
+
+
 def rip_plan(model: dict, plan: ScopePlan, cfg: Config) -> RipPlan:
     """Copper to delete for ``run.existing_copper``: ``fixed`` nothing; ``rip`` the tracks and vias of the nets in
-    `plan.nets`, except locked ones when ``respect_locked``, ``do_not_touch`` nets and free vias (a via that
-    connects to nothing but copper); ``smooth`` nothing is removed and the engine gets ``smooth``.
-    ``unrouted_only`` never removes anything. O(K + V)."""
+    `plan.nets`, except locked ones when ``respect_locked``, ``do_not_touch`` nets, free vias (KiCad's flag) and,
+    with ``keep_unconnected_vias`` (default), every via that no same-net ``kept`` track end touches within its
+    radius on a layer of its span (stitching vias without the flag; ruling C24); ``smooth`` nothing is removed
+    and the engine gets ``smooth``. ``unrouted_only`` never removes anything. O(K + V) plus the per-net via
+    test of :func:`_touched_vias`."""
     policy = cfg.get("run", "existing_copper")
     out = RipPlan(engine_existing_copper="smooth" if policy == "smooth" else "fixed")
     if policy != "rip" or cfg.get("run", "unrouted_only"):
@@ -216,7 +249,8 @@ def rip_plan(model: dict, plan: ScopePlan, cfg: Config) -> RipPlan:
     names = {n["code"]: n["name"] for n in model.get("nets", [])}
     excluded = do_not_touch_nets(model, cfg)
     keep_locked = cfg.get("run", "respect_locked")
-    for kind, free_ok in (("kept", False), ("vias", True)):
+    touched = _touched_vias(model) if cfg.get("run", "keep_unconnected_vias") else None
+    for kind, is_via in (("kept", False), ("vias", True)):
         for it in model.get(kind, []):
             name = names.get(it.get("net"))
             if name is None:
@@ -227,8 +261,10 @@ def rip_plan(model: dict, plan: ScopePlan, cfg: Config) -> RipPlan:
                 continue
             elif keep_locked and it.get("locked"):
                 out.kept_locked += 1
-            elif free_ok and it.get("free"):
+            elif is_via and it.get("free"):
                 continue
+            elif is_via and touched is not None and it["uuid"] not in touched:
+                out.kept_unconnected_vias += 1
             else:
                 out.remove_uuids.append(it["uuid"])
     return out

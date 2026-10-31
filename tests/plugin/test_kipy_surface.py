@@ -20,7 +20,8 @@ ATTRS = {
                          "create_items", "remove_items_by_id", "get_selection", "get_tracks", "get_vias",
                          "get_pads", "get_footprints", "get_shapes", "get_zones", "get_nets", "get_groups",
                          "get_netclass_for_nets", "get_pad_shapes_as_polygons", "get_stackup",
-                         "get_enabled_layers", "get_layer_name", "refill_zones", "get_items_by_id"],
+                         "get_enabled_layers", "get_layer_name", "refill_zones", "get_items_by_id",
+                         "get_text", "get_item_bounding_box"],
     "kipy.KiCad": ["run_action", "get_board"],
     "kipy.project.Project": ["get_net_classes", "path"],
     "kipy.board_types.Zone": ["filled_polygons", "outline", "layers", "is_rule_area", "net", "name",
@@ -38,6 +39,8 @@ ATTRS = {
     "kipy.board_types.Group": ["items", "name", "id"],
     "kipy.project_types.NetClass": ["clearance", "track_width", "via_diameter", "via_drill", "name"],
     "kipy.board_types.Net": ["name"],
+    "kipy.board_types.BoardText": ["attributes", "layer", "id"],  # R8: text margin from the text size
+    "kipy.common_types.TextAttributes": ["size"],
     "kipy.geometry.Vector2": ["from_xy", "x", "y"],
 }
 # class -> {method: [parameter names, in order, after self]}
@@ -52,6 +55,7 @@ SIGS = {
 PROTO = {
     "kipy.proto.board.board_types_pb2.Zone": ["rule_area_settings.keepout_tracks", "rule_area_settings.keepout_vias"],
     "kipy.proto.board.board_types_pb2.Group": ["name", "items"],
+    "kipy.proto.common.types.base_types_pb2.GraphicRectangleAttributes": ["corner_radius"],  # R8: KiCad 10 rounded rect
 }
 # module -> names
 MODS = {
