@@ -32,6 +32,7 @@ Which nets are touched, how they are classified and prioritised.
 |---|---|---|---|---|---|
 | `do_not_touch` | list | `[]` |  | any | Net names or glob patterns whose copper is a fixed obstacle and never routed, ripped or smoothed. |
 | `power_pattern` | str | `"^(\\+\|-)?\\d\|^(V\|VCC\|VDD\|VBAT\|GND\|AGND\|PWR)"` |  | any | Regex naming power nets, applied only to nets still in the Default netclass; the pre-flight lists every net classified this way. KiCad: KiCad → File → Board Setup → Design Rules → Net Classes (a netclass wins over this pattern). |
+| `ground_pattern` | str | `"^/?(GND\|AGND\|DGND\|PGND\|SGND\|VSS)"` |  | any | Regex (case-insensitive) naming ground nets, used to check that a GND plane layer has a ground zone; power nets use power_pattern. |
 | `priority` | table | `{}` |  | any | Net name or glob → priority 1..3 (1 routed first); overrides the @N name marker and topor_pN netclasses. KiCad: KiCad → Board Setup → Net Classes (netclass topor_p1..p3) or the @N marker in the net name. |
 | `pour_served` | table | `{}` |  | any | Net name → true/false to force or forbid serving a net by a copper pour; absent = automatic. |
 | `ignore_pads` | list | `[]` |  | any | Pads (REF.PAD, e.g. "U1.3") skipped as terminals, typically pads outside the board; written by the pre-flight dialog. |
@@ -45,7 +46,7 @@ Via cost, count and size policy (sizes themselves come from KiCad).
 | `via_cost_mm` | float | `2.0` | mm | 0 .. 1000 | Search cost of one via in mm of extra trace: the router accepts up to this much longer to avoid a via. |
 | `max_per_connection` | int | `4` |  | 0 .. 32 | Maximum vias on one connection. |
 | `reduction` | bool | `true` |  | true\|false | After convergence remove vias whose via-free route is not much longer. |
-| `reduction_len_slack_pct` | float | `10` | % | 0 .. 1000 | A via is removed when the via-free route is at most this much longer (not yet applied by the engine). |
+| `reduction_len_slack_pct` | float | `10` | % | 0 .. 1000 | A via is removed when the via-free route is at most this much longer. *Since 0.5.0.* |
 | `via_in_pad` | bool | `false` |  | true\|false | Allow vias inside SMD pads; pre-flight warns when KiCad's via protection is not filled and capped. KiCad: KiCad → File → Board Setup → Board Stackup → Board Finish → Via protection. *Since 0.5.0.* |
 | `allowed_drills_mm` | list | `[]` | mm | any | Optional fab filter: only these drill diameters may be used; empty = no filter. *Since 0.5.0.* |
 | `fallback_drill_mm` | float | `0.4` | mm | 0.05 .. 10 | Drill used when KiCad has no via sizes set up. KiCad: KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias. |
@@ -56,14 +57,18 @@ Via cost, count and size policy (sizes themselves come from KiCad).
 
 ## `[layers]`
 
-Routing layers and per-layer preferences.
+Stackup roles per copper layer (F.Cu = "signal", In1.Cu = "gnd", ...) and per-layer preferences.
 
 | Key | Type | Default | Unit | Range | Description |
 |---|---|---|---|---|---|
-| `route` | table | `{}` |  | any | Layer name → true/false overriding whether to route on it; absent = by KiCad layer type (signal and mixed yes, power no). KiCad: KiCad → File → Board Setup → Board Editor Layers → layer type. |
 | `preferred_direction` | table | `{}` |  | any | Layer name → "h", "v" or "none"; steers traces along a direction at cost direction_cost. *Since 0.5.0.* |
 | `direction_cost` | float | `0.0` |  | 0 .. 100 | Extra cost factor for running against a layer's preferred direction; 0 = off. *Since 0.5.0.* |
 | `pour_cut_cost_mm` | float | `1.0` | mm | 0 .. 1000 | Cost in mm of trace for cutting through a copper pour. *Since 0.5.0.* |
+
+Per-layer roles are written as keys in this section, e.g. `F.Cu = "signal"`, `In1.Cu = "gnd"`.
+Roles: `signal`, `mixed`, `gnd`, `pwr`, `jumper`; a layer is routed iff `signal` or `mixed`.
+Precedence: roles here > KiCad layer types (if any copper layer is power/mixed/jumper) > default by copper count
+(2: S,S; 4: S,GND,PWR,S; 6: S,GND,PWR,S,GND,S; 8: S,GND,S,PWR,GND,S,GND,S). Other counts need roles here.
 
 ## `[search]`
 
@@ -74,7 +79,7 @@ Path search tuning.
 | `detour_factor` | float | `2.0` |  | 1 .. 100 | A connection longer than this multiple of its ghost-line length is treated as a detour and ripped. |
 | `margin_um` | float | `5` | µm | 0 .. 1000 | Safety margin added to every clearance during search. |
 | `zero_slack_retry` | bool | `true` |  | true\|false | One extra pass lets a connection use a corridor pinched below the margin but not below the rules. |
-| `exit_stubs` | str | `"auto"` |  | auto\|on\|off | Pad exit stubs for fine-pitch pads: auto, on or off. *Since 0.5.0.* |
+| `exit_stubs` | str | `"auto"` |  | auto\|all\|off | Pad exit stubs for fine-pitch pads: auto, all or off. *Since 0.5.0.* |
 | `steiner` | bool | `true` |  | true\|false | Allow same-net T-junctions in the middle of a track instead of only at pads. *Since 0.5.0.* |
 | `dangling_ends` | str | `"continue"` |  | continue\|drop | What to do with existing track ends that connect to nothing: continue them or drop them. *Since 0.5.0.* |
 | `strict_unfit_edges` | bool | `false` |  | true\|false | Fail a connection when a graph edge is too narrow for its trace instead of widening the search. *Since 0.5.0.* |
