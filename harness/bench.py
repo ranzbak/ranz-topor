@@ -259,7 +259,7 @@ def run_bench(
     dru_text = cp.dru.read_text() if cp.dru is not None else None
     rules = resolve_rules(b, dru_text=dru_text, widths_before=widths_before,
                           apply_fab_floors=fab_floors)
-    pre_model = export_model(b, rules, name=board)  # the untouched hand board (hand stats)
+    pre_model = export_model(b, rules, name=board, dru_text=dru_text)  # the untouched hand board (hand stats)
     hand_stats = None
     try:
         import topor_engine
@@ -277,7 +277,7 @@ def run_bench(
     base_drc = run_drc(cp.pcb, out_dir / f"{board}--drc-ripped.json")
     b = load_board(cp)  # fresh board holding the ripped copper just saved
 
-    model = export_model(b, rules, name=board)
+    model = export_model(b, rules, name=board, dru_text=dru_text)
     write_model_json(model, out_dir / f"{board}--model.json")
 
     # DRC loop (plan T1.4, cap `drc_loop_cap`) lives in toporlib.drcloop; the board writes and the

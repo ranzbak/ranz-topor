@@ -76,7 +76,7 @@ def measure(board: str, work: Path) -> list[str]:
     rules = resolve_rules(b, dru_text=cp.dru.read_text() if cp.dru else None, widths_before=widths)
     drc = run_drc(cp.pcb, work / "drc.json")
     routing = sum(v for k, v in drc.by_type.items() if k in ROUTING_TYPES)
-    model = export_model(b, rules, name=board)
+    model = export_model(b, rules, name=board, dru_text=cp.dru.read_text() if cp.dru else None)
     mj = write_model_json(model, work / "model.json")
     ncls = Counter(r["netclass"] for r in rules["per_net"].values())
     nets_cls = Counter(rules["per_net"][str(n["code"])]["netclass"] for n in model["nets"]

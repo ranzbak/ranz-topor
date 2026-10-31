@@ -265,3 +265,110 @@ def test_effective_netclass_patterns_on_fixture(tmp_path):
     vcc, sig = r["per_net"][_code(b, "VCC")], r["per_net"][_code(b, "SIG")]
     assert vcc["netclass"].split(",")[0] == "Power" and vcc["via_d"] == 800_000
     assert sig["netclass"] == "Default"
+
+
+# ---------------------------------------------------------------- pure resolver (M4-R1)
+def _pure_vs_swig(b, pro_path, dru_text=None):
+    """Pure resolver fed from the .kicad_pro JSON + net names only == the SWIG front end."""
+    from toporlib import rules as R
+    pro = json.loads(Path(pro_path).read_text())
+    nets = {str(n.GetNetname()): int(c) for c, n in b.GetNetsByNetcode().items() if int(c) != 0}
+    kw = dict(widths_before={}, settings_table={"SIG": 300_000} if "SIG" in nets else None)
+    swig = resolve_rules(b, dru_text=dru_text, **kw)
+    pure = R.resolve_rules_from_project(
+        pro, dru_text, netclass_of=R.netclass_of_from_pro(pro, nets), classes=R.classes_from_pro(pro),
+        net_codes=nets, copper_layer_count=int(b.GetCopperLayerCount()), **kw)
+    assert pure == swig
+    return pure
+
+
+def test_resolve_rules_pure_equals_swig(tmp_path):
+    b = _board(tmp_path)
+    pro = tmp_path / "w" / "f.kicad_pro"
+    assert pro.is_file()
+    r = _pure_vs_swig(b, pro, dru_text="(rule w (condition \"A.NetName == 'SIG'\") (constraint track_width (opt 0.3mm)))")
+    assert r["per_net"][_code(b, "SIG")]["width_source"] == "custom_rule"
+    assert r["per_net"][_code(b, "VCC")]["netclass"].split(",")[0] == "Power"
+    _pure_vs_swig(b, pro)  # and with no custom rules (floors, settings table)
+
+
+@pytest.mark.parametrize("board", ["eprom-to-kernal", "wiccon-2023"])
+def test_resolve_rules_pure_equals_swig_snapshots(board, tmp_path):
+    pc = copy_project(BENCH_BOARDS[board], tmp_path / "w")
+    _pure_vs_swig(load_board(pc), pc.pro, dru_text=pc.dru.read_text() if pc.dru else None)
+
+
+def test_net_codes_by_name_is_sorted_and_one_based():
+    from toporlib.rules import net_codes_by_name
+    assert net_codes_by_name(["b", "", "a", "b"]) == {"a": 1, "b": 2}
+
+
+# ---------------------------------------------------------------- dru `disallow` -> keepouts
+_SQ = [[0, 0], [10_000_000, 0], [10_000_000, 10_000_000], [0, 10_000_000]]
+_AREAS = [{"name": "ant", "layers": [0, 2], "poly": _SQ, "no_tracks": False, "no_vias": False},
+          {"name": "ant", "layers": [0, 2], "poly": [[p[0] + 20_000_000, p[1]] for p in _SQ],
+           "no_tracks": False, "no_vias": False}]
+_LAYERS = {"F.Cu": 0, "B.Cu": 2}
+
+
+def test_dru_disallow_rule_becomes_keepout():
+    from toporlib.dru import dru_keepouts
+    rs = parse_dru('(rule no_ant (condition "A.insideArea(\'ant\')") (constraint disallow track via))')
+    assert rs[0].disallow == ("track", "via")
+    ks, warns = dru_keepouts(rs, _AREAS, _LAYERS)
+    assert warns == []
+    assert ks == [{"name": "dru:no_ant", "layers": [0, 2], "poly": a["poly"], "no_tracks": True, "no_vias": True}
+                  for a in _AREAS]  # one keepout per outline of the named rule area
+    # via only, one layer
+    rs = parse_dru('(rule v (layer "B.Cu") (condition "B.intersectsArea(\'ant\') && A.Type == \'Via\'")'
+                   ' (constraint disallow via))')
+    ks, _ = dru_keepouts(rs, _AREAS, _LAYERS)
+    assert [(k["layers"], k["no_tracks"], k["no_vias"]) for k in ks] == [([2], False, True)] * 2
+
+
+def test_dru_disallow_skips_and_warns():
+    from toporlib.dru import dru_keepouts
+    ign = parse_dru('(rule a (severity ignore) (condition "A.insideArea(\'ant\')") (constraint disallow track))')
+    assert dru_keepouts(ign, _AREAS, _LAYERS) == ([], [])
+    pad_only = parse_dru('(rule a (condition "A.insideArea(\'ant\')") (constraint disallow pad footprint))')
+    assert dru_keepouts(pad_only, _AREAS, _LAYERS) == ([], [])  # not routing relevant
+    no_area = parse_dru('(rule b (constraint disallow track))')
+    ks, w = dru_keepouts(no_area, _AREAS, _LAYERS)
+    assert ks == [] and len(w) == 1 and w[0].startswith("REFUSE") and "b" in w[0]
+    ors = parse_dru('(rule c (condition "A.insideArea(\'ant\') || A.NetName == \'X\'") (constraint disallow via))')
+    ks, w = dru_keepouts(ors, _AREAS, _LAYERS)
+    assert ks == [] and w and w[0].startswith("REFUSE")
+    missing = parse_dru('(rule d (condition "A.insideArea(\'nope\')") (constraint disallow track))')
+    ks, w = dru_keepouts(missing, _AREAS, _LAYERS)
+    assert ks == [] and w and "nope" in w[0]
+
+
+def test_resolve_rules_warns_disallow_without_area():
+    from toporlib.rules import resolve_rules_from_project
+    r = resolve_rules_from_project({}, '(rule b (constraint disallow via))', netclass_of={}, classes={},
+                                   widths_before={})
+    assert any(w.startswith("REFUSE") and "rule b" in w for w in r["warnings"])
+
+
+def test_harness_export_merges_dru_keepouts(tmp_path):
+    import pcbnew
+    b = _board(tmp_path)
+    z = pcbnew.ZONE(b)
+    z.SetIsRuleArea(True)
+    z.SetZoneName("ant")
+    z.SetLayerSet(pcbnew.LSET.ExternalCuMask())
+    z.SetDoNotAllowTracks(False)
+    z.SetDoNotAllowVias(False)
+    z.AppendCorner(pcbnew.VECTOR2I(0, 0), -1)
+    for p in ((5_000_000, 0), (5_000_000, 5_000_000), (0, 5_000_000)):
+        z.AppendCorner(pcbnew.VECTOR2I(*p), -1)
+    b.Add(z)
+    dru = '(rule no_ant (condition "A.insideArea(\'ant\')") (constraint disallow track))'
+    r = resolve_rules(b, dru_text=dru, widths_before={})
+    m = export_model(b, r, name="x", dru_text=dru)
+    ant = [k for k in m["keepouts"] if k["name"] == "ant"]
+    dk = [k for k in m["keepouts"] if k["name"] == "dru:no_ant"]
+    assert len(ant) == 1 and not ant[0]["no_tracks"]
+    assert len(dk) == 1 and dk[0]["no_tracks"] and not dk[0]["no_vias"] and dk[0]["poly"] == ant[0]["poly"]
+    assert dk[0]["layers"] == ant[0]["layers"] == [0, 2]
+    assert [k for k in export_model(b, r, name="x")["keepouts"] if k["name"].startswith("dru:")] == []

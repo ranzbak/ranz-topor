@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
-import math
 import re
 from pathlib import Path
 
 import pcbnew
+
+from toporlib.dru import merge_dru_keepouts
+from toporlib.geom import find_dangling, hull, track_item
 
 _KIND = {
     pcbnew.LT_SIGNAL: "signal",
@@ -48,26 +50,7 @@ def _outline_pts(poly_set, idx=0) -> list[list[int]]:
     return [[int(o.CPoint(i).x), int(o.CPoint(i).y)] for i in range(o.PointCount())]
 
 
-def _hull(pts: list[list[int]]) -> list[list[int]]:
-    """Convex hull (Andrew monotone chain)."""
-    pts = sorted(set(map(tuple, pts)))
-    if len(pts) <= 2:
-        return [list(p) for p in pts]
-
-    def cross(o, a, b):
-        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
-
-    lo: list = []
-    for p in pts:
-        while len(lo) >= 2 and cross(lo[-2], lo[-1], p) <= 0:
-            lo.pop()
-        lo.append(p)
-    up: list = []
-    for p in reversed(pts):
-        while len(up) >= 2 and cross(up[-2], up[-1], p) <= 0:
-            up.pop()
-        up.append(p)
-    return [list(p) for p in lo[:-1] + up[:-1]]
+_hull = hull
 
 
 def _uuid(item) -> str:
@@ -340,73 +323,9 @@ def _export_keepouts(board):
 
 
 # ---------------------------------------------------------------- dangling ends
-def _arc_center(s, m, e):
-    ax, ay = s
-    bx, by = m
-    cx, cy = e
-    d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
-    if d == 0:
-        return None
-    a2, b2, c2 = ax * ax + ay * ay, bx * bx + by * by, cx * cx + cy * cy
-    ux = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / d
-    uy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / d
-    return ux, uy
-
-
-def _dist_pt_seg(p, a, b) -> float:
-    dx, dy = b[0] - a[0], b[1] - a[1]
-    L2 = dx * dx + dy * dy
-    if L2 == 0:
-        return math.hypot(p[0] - a[0], p[1] - a[1])
-    t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2))
-    return math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy))
-
-
-def _on_arc_sweep(p, c, s, m, e) -> bool:
-    """True when the ray c->p lies within the angular sweep s->m->e."""
-    tau = 2 * math.pi
-
-    def ang(q):
-        return math.atan2(q[1] - c[1], q[0] - c[0])
-
-    a_s, a_m, a_e, a_p = ang(s), ang(m), ang(e), ang(p)
-    if (a_m - a_s) % tau <= (a_e - a_s) % tau:  # counter-clockwise in atan2 frame
-        return (a_p - a_s) % tau <= (a_e - a_s) % tau
-    return (a_s - a_p) % tau <= (a_s - a_e) % tau
-
-
-def _dist_pt_item(p, it) -> float:
-    if it["arc"] is None:
-        return _dist_pt_seg(p, it["s"], it["e"])
-    c, r = it["arc"]
-    if _on_arc_sweep(p, c, it["s"], it["m"], it["e"]):
-        return abs(math.hypot(p[0] - c[0], p[1] - c[1]) - r)
-    return min(math.hypot(p[0] - it["s"][0], p[1] - it["s"][1]),
-               math.hypot(p[0] - it["e"][0], p[1] - it["e"][1]))
-
-
-def _direction(it, end_is_e: bool):
-    s, e = it["s"], it["e"]
-    far = e if end_is_e else s
-    near = s if end_is_e else e
-    if it["arc"] is None:
-        dx, dy = far[0] - near[0], far[1] - near[1]
-    else:
-        c, _ = it["arc"]
-        dx, dy = -(far[1] - c[1]), far[0] - c[0]
-        m = it["m"]
-        if dx * (far[0] - m[0]) + dy * (far[1] - m[1]) < 0:
-            dx, dy = -dx, -dy
-    n = math.hypot(dx, dy) or 1.0
-    return [dx / n, dy / n]
-
-
 def find_dangling_ends(board) -> list[dict]:
-    """Track/arc endpoints touching no same-net pad, via or other same-net track/arc.
-
-    Same-net items are bucketed per (net, layer), so cost is linear in the item count
-    for boards whose nets are small (the normal case).
-    """
+    """Track/arc endpoints touching no same-net pad, via or other same-net track/arc
+    (`toporlib.geom.find_dangling`; pad containment from pcbnew's effective pad polygons)."""
     items = []
     vias_by_net: dict[int, list] = {}
     for t in board.GetTracks():
@@ -415,15 +334,8 @@ def find_dangling_ends(board) -> list[dict]:
                 (_pt(t.GetPosition()), int(t.GetWidth(pcbnew.F_Cu)) / 2.0,
                  {int(l) for l in t.GetLayerSet().Seq()}))
             continue
-        s, e = _pt(t.GetStart()), _pt(t.GetEnd())
-        it = {"uuid": _uuid(t), "net": int(t.GetNetCode()), "layer": int(t.GetLayer()),
-              "w": int(t.GetWidth()), "s": s, "e": e, "m": None, "arc": None}
-        if _is_arc(t):
-            it["m"] = _pt(t.GetMid())
-            c = _arc_center(s, it["m"], e)
-            if c is not None:
-                it["arc"] = (c, math.hypot(s[0] - c[0], s[1] - c[1]))
-        items.append(it)
+        items.append(track_item(_uuid(t), t.GetNetCode(), t.GetLayer(), t.GetWidth(), _pt(t.GetStart()),
+                                _pt(t.GetEnd()), _pt(t.GetMid()) if _is_arc(t) else None))
 
     pads_by_net: dict[int, list] = {}
     for fp in board.GetFootprints():
@@ -443,27 +355,7 @@ def find_dangling_ends(board) -> list[dict]:
                 return True
         return False
 
-    groups: dict[tuple, list] = {}
-    for it in items:
-        groups.setdefault((it["net"], it["layer"]), []).append(it)
-
-    out = []
-    for it in items:
-        net, layer = it["net"], it["layer"]
-        same = groups[(net, layer)]
-        for end_is_e in (False, True):
-            p = it["e"] if end_is_e else it["s"]
-            if net and in_pad(net, layer, p):
-                continue
-            if any(layer in ls and math.hypot(p[0] - c[0], p[1] - c[1]) <= r
-                   for c, r, ls in vias_by_net.get(net, ())):
-                continue
-            if any(o is not it and (p in (o["s"], o["e"]) or _dist_pt_item(p, o) <= o["w"] / 2.0)
-                   for o in same):
-                continue
-            out.append({"item": it["uuid"], "net": net, "layer": layer, "width": it["w"],
-                        "end": list(p), "direction": _direction(it, end_is_e)})
-    return out
+    return find_dangling(items, vias_by_net, in_pad)
 
 
 # ---------------------------------------------------------------- pours
@@ -537,7 +429,8 @@ def _export_pours(board, cu: list[int]) -> list[dict]:
 
 
 # ---------------------------------------------------------------- top level
-def export_model(board, rules: dict, *, name: str) -> dict:
+def export_model(board, rules: dict, *, name: str, dru_text: str | None = None) -> dict:
+    """The BoardModel dict. `dru_text` (the .kicad_dru) adds its `disallow` rules as keepouts."""
     cu = _cu_layers(board)
     max_err = int(board.GetDesignSettings().m_MaxError) or 5000
     layers = []
@@ -550,6 +443,8 @@ def export_model(board, rules: dict, *, name: str) -> dict:
     tie_groups = {fp.GetReference(): _net_tie_groups(fp) for fp in board.GetFootprints() if fp.IsNetTie()}
     pads, holes, net_ties = _export_pads(board, cu, tie_groups)
     kept, vias = _export_copper(board)
+    keepouts, rules = merge_dru_keepouts(_export_keepouts(board), rules, dru_text,
+                                         {l["name"]: l["id"] for l in layers})
     return {
         "units": "nm",
         "board": name,
@@ -561,7 +456,7 @@ def export_model(board, rules: dict, *, name: str) -> dict:
         "copper_shapes": _export_copper_shapes(board, cu, max_err),
         "holes": holes,
         "outline": _export_outline(board, max_err),
-        "keepouts": _export_keepouts(board),
+        "keepouts": keepouts,
         "net_ties": net_ties,
         "pours": _export_pours(board, cu),
         "dangling_ends": find_dangling_ends(board),
