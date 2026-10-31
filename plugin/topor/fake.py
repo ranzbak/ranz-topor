@@ -67,7 +67,7 @@ class FakeBoard:
         self.calls.append(("selection", ()))
         return self.selection_value
 
-    def read_model(self, rules: dict, pcb_copy: Path) -> dict:
+    def read_model(self, rules: dict, pcb_copy: Path, *, layer_roles: dict | None = None) -> dict:
         self.calls.append(("read_model", (rules, Path(pcb_copy))))
         return self.model
 
@@ -151,3 +151,6 @@ class ScriptedUi:
 
     def error(self, finding: Finding) -> None:
         self.calls.append(("error", (finding,)))
+
+    def set_context(self, board=None, report_dir=None, log_path=None, versions=None) -> None:
+        self.calls.append(("set_context", (board, report_dir, log_path, versions)))
