@@ -1,9 +1,25 @@
 # Knowledge library: topological routing with smoothly curved, minimal-length traces
 
-Feasibility study and background knowledge for a TopoR-style router as a KiCad plugin.
-No implementation here — algorithms, constraints, risks and sources only.
+Feasibility study and background knowledge for a TopoR-style router as a KiCad plugin, plus the user and
+developer guides of the implementation (topor 0.4.0).
 
-## Start here
+## User guide
+
+- [Install](user/install.md) — build, install into KiCad 10, enable the KiCad API, plugin environment.
+- [Operate](user/operate.md) — first run, findings, options, scope, progress, preview, Accept / Reject / undo,
+  report folder, priorities, limitations.
+- [Configuration reference](user/configuration.md) — every `topor.toml` key (generated from the schema).
+- [Troubleshooting](user/troubleshoot.md) — one section per message code, exit codes, install problems.
+- [GUI test checklist](user/gui-test-checklist.md) — manual acceptance test in KiCad.
+
+## Developer
+
+- [Contributing](../CONTRIBUTING.md) — layout, build, tests, read-only boards, schema → toml → docs, commits.
+- [Debugging](dev/debug.md) — `route_probe`, `gate_diag --detour`, `--profile`, progress PNGs,
+  `harness.measure`, headless plugin runs, reproducing a plugin run, filing a bug.
+- [UI wireframes](progress/notes/m4-ui-wireframes.md) — the plugin dialogs (layout, keys, wording).
+
+## Start here (research)
 
 1. [00 — Overview](00-overview.md): what the method is, why it works, the pipeline.
 2. [02 — Feasibility study](02-feasibility-study.md): verdict, risks, effort, open questions.

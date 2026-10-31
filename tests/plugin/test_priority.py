@@ -15,6 +15,23 @@ def test_marker_parse_table(name, want):
     assert parse_marker(name) == want
 
 
+def test_priority_order_doc_matches_behaviour():
+    """Ruling C22: ``[nets] priority`` does NOT override the marker or the netclass; the schema doc (and so
+    topor.toml comments and configuration.md) states the order priority.py implements."""
+    from topor.schema import SETTINGS_BY_KEY
+
+    doc = SETTINGS_BY_KEY[("nets", "priority")].doc
+    assert "overrides" not in doc, doc
+    assert doc.index("@N") < doc.index("topor_pN") < doc.index("this table"), doc
+    cfg = CFG.with_values({("nets", "priority"): {"A@1": 3, "B": 3, "C": 3, "D*": 2, "DX": 3}})
+    of = {"A@1": "topor_p2", "B": "topor_p2"}
+    pr, _ = net_priorities(["A@1", "B", "C", "DX", "DY"], of, cfg)
+    assert pr["A@1"] == 1  # marker beats netclass and table
+    assert pr["B"] == 2  # netclass beats table
+    assert pr["C"] == 3  # table alone
+    assert pr["DX"] == 3 and pr["DY"] == 2  # exact name beats a glob
+
+
 def test_marker_ignored_finding():
     pr, fs = net_priorities(["DQ@13", "A@4", "OK@2"], {}, CFG)
     assert pr == {"OK@2": 2}
