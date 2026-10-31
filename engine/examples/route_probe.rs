@@ -129,7 +129,7 @@ fn main() {
                 it.overuse_edges
             );
         }
-        let sum = |f: fn(&topor_engine::route::IterProfile) -> f64| p.iter().map(f).sum::<f64>();
+        let sum = |f: fn(&topor_engine::route::IterProfile) -> f64| p.iter().map(f).fold(0.0, |a, b| a + b);
         println!(
             "  total search {:.3}s commit {:.3}s metrize {:.3}s (check {:.3}s) of {:.3}s",
             sum(|i| i.search_s),
