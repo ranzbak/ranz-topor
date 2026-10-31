@@ -554,6 +554,9 @@ fn eprom_ripped_stalls_and_zero_slack_retry_passes_length_gate() {
     let names: Vec<&str> = r.zero_slack_wires.iter().map(|w| w.name.as_str()).collect();
     assert_eq!(names, vec!["+5V"]);
     assert!(r.length_outside_pads_nm < 76_598_000, "{}", r.length_outside_pads_nm);
+    // M2 gate bound (B1: 67.095 mm); incremental metrization (B2) must not regress it.
+    assert!(r.length_outside_pads_nm <= 67_100_000, "{}", r.length_outside_pads_nm);
+    assert_eq!(r.failed, 0);
     let again = route(&m, &opts());
     assert_eq!(json_no_runtime(&r), json_no_runtime(&again));
     // Retry off: 27/27 as well, but the long +5V / A13 pair and no zero-slack wire.

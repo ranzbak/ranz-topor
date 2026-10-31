@@ -3,8 +3,11 @@
 //! per-connection feedback -> `RouteResult`.
 //!
 //! M2 routes on one layer (F.Cu). Every PathFinder iteration searches the active connections,
-//! sketches every routed slot path (`sketch_from_crossings`), relaxes all of them together,
-//! quantises and self-checks; a connection failing relax or the self-check is penalised
+//! sketches every routed slot path (`sketch_from_crossings`) and metrizes incrementally
+//! (`MetrState`, Fix-B2): only the searched / ripped-up connections, those whose anchor
+//! sequence or slot nesting changed and, as chains move, their neighbours are re-tautened,
+//! re-quantised and re-checked; the first call completes a pass over every wire before the
+//! deadline counts (anytime). A connection failing relax or the self-check is penalised
 //! (`penalise_failed`) and re-searched. A connection whose terminal lies inside a foreign
 //! obstacle (`InsideObstacle`) is class-independent: it is failed once, removed from the graph
 //! and never searched again (design note §4).
@@ -30,7 +33,7 @@ use crate::negotiate::{
     PRESENT_OVERUSE,
 };
 use crate::obstacle::{LayerObstacles, ObstacleSet, TerminalObstacle};
-use crate::relax::{corridor_static, relax, relax_slots, slot_nesting, ZeroSlack};
+use crate::relax::{corridor_static, relax, slot_nesting_of, Relaxer, RunOpts, ZeroSlack};
 use crate::search::{
     default_expansion_cap, search, tier_weight, SearchOutcome, SearchParams, SlotPath,
 };
@@ -279,15 +282,91 @@ fn path_crossings(g: &RouteGraph, c: usize) -> Option<Vec<Crossing>> {
     )
 }
 
-/// Sketch, relax, quantise and self-check the connections `routed` (live indices) of `g`.
-fn metrize(cx: &Ctx, g: &RouteGraph, routed: &[usize]) -> Metrized {
-    metrize_zs(cx, g, routed, None)
+/// Metrization state kept across PathFinder iterations (Fix-B2, design note
+/// `m2-metrize-design.md` §2.2): wire `k` = live connection `k`. Only the wires whose sketch,
+/// nesting, zero-slack corridor or neighbourhood changed are re-tautened, re-quantised and
+/// re-checked; the others keep their chains, items and results.
+#[derive(Clone)]
+struct MetrState {
+    rx: Relaxer,
+    /// Last sketch sequence per live connection (`None`: not in the relaxer).
+    seqs: Vec<Option<Vec<AnchorRef>>>,
+    ncross: Vec<usize>,
+    /// Quantised result of the current chain, before the self-check.
+    ok: Vec<Option<ConnOk>>,
+    /// Last result (`None`: not metrized since the connection was placed).
+    res: Vec<Option<Res>>,
+    /// `ok[k]` must be (re-)checked: its chain changed since its last check, or the check failed.
+    pending: Vec<bool>,
+}
+
+impl MetrState {
+    fn new(cx: &Ctx) -> MetrState {
+        let wires: Vec<Wire> = cx
+            .conns
+            .iter()
+            .enumerate()
+            .map(|(k, c)| Wire {
+                id: k,
+                net: c.net,
+                layer: c.layer,
+                width: c.width,
+                start: terminal_of(&c.from),
+                goal: terminal_of(&c.to),
+                hand: vec![c.from.at, c.to.at],
+                kept_uuids: Vec::new(),
+                hand_len: c.est_len,
+            })
+            .collect();
+        let m = wires.len();
+        MetrState {
+            rx: Relaxer::new(wires, cx.obs),
+            seqs: vec![None; m],
+            ncross: vec![0; m],
+            ok: vec![None; m],
+            res: vec![None; m],
+            pending: vec![false; m],
+        }
+    }
+
+    fn drop_wire(&mut self, k: usize) {
+        if self.seqs[k].is_some() {
+            self.rx.remove(k);
+        }
+        self.seqs[k] = None;
+        self.ok[k] = None;
+        self.res[k] = None;
+        self.pending[k] = false;
+    }
+}
+
+/// Sketch, relax, quantise and self-check the connections `routed` (live indices) of `g`,
+/// incrementally from `st` (`work`: connections searched or ripped up this iteration).
+fn metrize(
+    cx: &Ctx,
+    g: &RouteGraph,
+    routed: &[usize],
+    st: &mut MetrState,
+    work: &[usize],
+) -> Metrized {
+    metrize_zs(cx, g, routed, None, st, work)
 }
 
 /// [`metrize`] with one connection's zero-slack corridor (R6): that wire is relaxed at margin 0
 /// against the corridor and its self-check tolerates [`ZS_QUANT_TOL_NM`] (integer-nm rounding of
 /// an exact tangency); every other wire is judged as in [`metrize`].
-fn metrize_zs(cx: &Ctx, g: &RouteGraph, routed: &[usize], zs: Option<&ZsSpec>) -> Metrized {
+///
+/// Anytime (45 §5a): the first relaxation of a fresh state completes one pass over every wire
+/// regardless of the deadline, and a timed-out call still quantises and checks (one round) what
+/// it has, so a result exists. `timed_out` is reported either way.
+fn metrize_zs(
+    cx: &Ctx,
+    g: &RouteGraph,
+    routed: &[usize],
+    zs: Option<&ZsSpec>,
+    st: &mut MetrState,
+    work: &[usize],
+) -> Metrized {
     let mut out = Metrized {
         res: Vec::new(),
         relax_iterations: 0,
@@ -295,137 +374,199 @@ fn metrize_zs(cx: &Ctx, g: &RouteGraph, routed: &[usize], zs: Option<&ZsSpec>) -
         timed_out: false,
         zs_corridor: None,
     };
-    let mut wires: Vec<Wire> = Vec::new();
-    let mut sketches: Vec<Sketch> = Vec::new();
-    let mut live_of: Vec<usize> = Vec::new();
-    let mut ncross: Vec<usize> = Vec::new();
+    let m = cx.conns.len();
+    let mut in_routed = vec![false; m];
+    for &i in routed {
+        in_routed[i] = true;
+    }
+    let mut searched = vec![false; m];
+    for &i in work {
+        searched[i] = true;
+    }
+    for (k, &listed) in in_routed.iter().enumerate() {
+        if !listed && (st.seqs[k].is_some() || st.res[k].is_some()) {
+            st.drop_wire(k);
+        }
+    }
+    // Step 1: re-sketch; a wire whose anchor sequence changed, or that was searched again (its
+    // old chain may be a stale fixed point that failed the self-check), starts from scratch.
     for &i in routed {
         let c = &cx.conns[i];
         let Some(path) = path_crossings(g, c.id) else {
-            out.res.push((i, fail("sketch: inconsistent slot path")));
+            st.drop_wire(i);
+            st.res[i] = Some(fail("sketch: inconsistent slot path"));
             continue;
         };
         let (start, goal) = (c.from.at, c.to.at);
         if let Some(p) = unanchored_bends(start, goal, &path, cx.ls).first() {
-            out.res.push((
-                i,
-                fail(format!(
-                    "sketch: path bends at a wall split vertex ({}, {})",
-                    kicad(*p)[0],
-                    kicad(*p)[1]
-                )),
-            ));
+            st.drop_wire(i);
+            st.res[i] = Some(fail(format!(
+                "sketch: path bends at a wall split vertex ({}, {})",
+                kicad(*p)[0],
+                kicad(*p)[1]
+            )));
             continue;
         }
-        let k = wires.len();
-        let s = sketch_from_crossings(k, start, goal, path, cx.ls);
-        ncross.push(s.crossings.len());
-        sketches.push(s);
-        wires.push(Wire {
-            id: k,
-            net: c.net,
-            layer: c.layer,
-            width: c.width,
-            start: terminal_of(&c.from),
-            goal: terminal_of(&c.to),
-            hand: vec![start, goal],
-            kept_uuids: Vec::new(),
-            hand_len: c.est_len,
-        });
-        live_of.push(i);
+        let s = sketch_from_crossings(i, start, goal, path, cx.ls);
+        st.ncross[i] = s.crossings.len();
+        if searched[i] || st.seqs[i].as_ref() != Some(&s.seq) {
+            st.rx.set(i, &s.seq);
+            st.seqs[i] = Some(s.seq);
+            st.ok[i] = None;
+            st.res[i] = None;
+            st.pending[i] = false;
+        }
     }
-    let n = wires.len();
-    if n == 0 {
+    let present: Vec<usize> = (0..m).filter(|&k| st.seqs[k].is_some()).collect();
+    if present.is_empty() {
+        for &i in routed {
+            if let Some(r) = &st.res[i] {
+                out.res.push((i, r.clone()));
+            }
+        }
         return out;
     }
-    // Stacks from the slot topology (Fix-B1 (a)): wire k = live_of[k] = conn id in `g`.
-    let conn_of: Vec<usize> = live_of.iter().map(|&i| cx.conns[i].id).collect();
-    let nesting = slot_nesting(g, &conn_of);
-    if Instant::now() >= cx.deadline {
-        out.timed_out = true;
-        return out;
-    }
-    let zsw: Option<ZeroSlack> = zs.and_then(|z| {
-        Some(ZeroSlack {
-            wire: live_of.iter().position(|&l| l == z.live)?,
-            anchors: z.anchors.clone(),
-            walls: z.walls.clone(),
-        })
+    // Stacks from the slot topology (Fix-B1 (a)): wire k = live k = conn id in `g`; wires
+    // whose inner lists changed are queued by the relaxer.
+    let pairs: Vec<(usize, usize)> = present.iter().map(|&k| (k, cx.conns[k].id)).collect();
+    st.rx.set_nesting(&slot_nesting_of(g, &pairs));
+    let zsw: Option<ZeroSlack> = zs.filter(|z| st.seqs[z.live].is_some()).map(|z| ZeroSlack {
+        wire: z.live,
+        anchors: z.anchors.clone(),
+        walls: z.walls.clone(),
     });
-    let r = relax_slots(
-        &wires,
-        &sketches,
+    // Step 2: incremental Gauss–Seidel.
+    let work: Vec<usize> = work
+        .iter()
+        .copied()
+        .filter(|&k| st.seqs[k].is_some())
+        .collect();
+    let run = st.rx.run(
+        &work,
         cx.obs,
-        &nesting,
-        cx.opts,
-        cx.deadline,
-        zsw.as_ref(),
+        &RunOpts {
+            opts: cx.opts,
+            deadline: cx.deadline,
+            zs: zsw.as_ref(),
+            anytime: true,
+        },
     );
-    out.relax_iterations = r.iterations;
-    if r.timed_out {
-        out.timed_out = true;
-        return out;
-    }
-    if let Some(z) = zsw.as_ref().filter(|z| z.anchors.is_none() && z.walls.is_none()) {
-        if let Some(Ok(ch)) = r.chains.get(z.wire) {
+    out.relax_iterations = run.sweeps;
+    out.timed_out = run.timed_out;
+    if let Some(z) = zsw
+        .as_ref()
+        .filter(|z| z.anchors.is_none() && z.walls.is_none())
+    {
+        if let Ok(ch) = &st.rx.chains()[z.wire] {
             let band = cx.obs.margin();
-            out.zs_corridor = Some(corridor_static(&wires, z.wire, ch, cx.obs, Some(z), band));
+            out.zs_corridor = Some(corridor_static(
+                st.rx.wires(),
+                z.wire,
+                ch,
+                cx.obs,
+                Some(z),
+                band,
+            ));
         }
     }
     let zs_wire = zsw.as_ref().map(|z| z.wire);
-    let mut results: Vec<Option<Res>> = vec![None; n];
-    let mut emit: Vec<Vec<TrackItem>> = vec![Vec::new(); n];
-    let mut chains = Vec::with_capacity(n);
-    for (k, c) in r.chains.into_iter().enumerate() {
-        match c {
+    // Quantise the wires whose chain changed (or that have no result yet).
+    let mut changed = vec![false; m];
+    for &k in &run.changed {
+        changed[k] = true;
+    }
+    for &k in &present {
+        if !changed[k] && st.res[k].is_some() {
+            continue;
+        }
+        st.ok[k] = None;
+        st.pending[k] = false;
+        match &st.rx.chains()[k] {
             Ok(ch) => {
                 let q = quantise_chain(&ch.prims);
                 if q.is_empty() {
-                    results[k] = Some(fail("empty chain after quantisation"));
-                } else {
-                    let w = &wires[k];
-                    emit[k] = q
-                        .into_iter()
-                        .map(|t| TrackItem {
-                            net: w.net,
-                            layer: w.layer,
-                            width: w.width,
-                            prim: flip_track(t),
-                            group: None,
-                            wire: Some(live_of[k]),
-                        })
-                        .collect();
+                    st.res[k] = Some(fail("empty chain after quantisation"));
+                    continue;
                 }
-                chains.push(Some(ch));
+                let w = &st.rx.wires()[k];
+                let items: Vec<TrackItem> = q
+                    .into_iter()
+                    .map(|t| TrackItem {
+                        net: w.net,
+                        layer: w.layer,
+                        width: w.width,
+                        prim: flip_track(t),
+                        group: None,
+                        wire: Some(k),
+                    })
+                    .collect();
+                let sks: Vec<Skeleton> = terminal_skeletons(cx.model, w);
+                let pattern: String = items
+                    .iter()
+                    .map(|t| match t.prim {
+                        TrackPrim::Seg { .. } => 'S',
+                        TrackPrim::Arc { .. } => 'A',
+                    })
+                    .collect();
+                let len: f64 = items.iter().map(|t| dequantise(&t.prim).length()).sum();
+                st.ok[k] = Some(ConnOk {
+                    items,
+                    len,
+                    out: outside_len(&ch.prims, &sks),
+                    pattern,
+                    anchors: ch.seq.len(),
+                    crossings: st.ncross[k],
+                });
+                st.res[k] = None;
+                st.pending[k] = true;
             }
-            Err(e) => {
-                results[k] = Some(taut_reason(&e));
-                chains.push(None);
-            }
+            Err(e) => st.res[k] = Some(taut_reason(e)),
         }
     }
 
-    // Self-check rounds (fallback granularity = connection).
+    // Step 3: self-check rounds (fallback granularity = connection) of the pending wires
+    // against the checked ones (listed first: a violation is charged to the later item, the
+    // wire that moved). A failed wire stays pending for the next call.
+    for &k in &present {
+        if st.pending[k] && st.ok[k].is_some() {
+            st.res[k] = None;
+        }
+    }
     loop {
-        if cx.opts.skip_self_check || out.rounds as usize > n {
+        if cx.opts.skip_self_check || out.rounds as usize > present.len() {
             break;
         }
         let mut items: Vec<Item> = Vec::new();
         let mut owner: Vec<usize> = Vec::new();
-        for k in 0..n {
-            if results[k].is_none() {
-                for t in &emit[k] {
+        let mut base = 0usize;
+        for pass in [false, true] {
+            for &k in &present {
+                if st.pending[k] != pass {
+                    continue;
+                }
+                let Some(o) = &st.ok[k] else {
+                    continue;
+                };
+                if !pass && !matches!(st.res[k], Some(Res::Ok(_))) {
+                    continue;
+                }
+                for t in &o.items {
                     items.push(Item::Track(t.clone()));
                     owner.push(k);
                 }
             }
+            if !pass {
+                base = items.len();
+            }
         }
-        if items.is_empty() {
+        if items.len() == base {
             break;
         }
         if Instant::now() >= cx.deadline {
             out.timed_out = true;
-            return out;
+            if out.rounds >= 1 {
+                break;
+            }
         }
         out.rounds += 1;
         let rep = cx.checker.check_items(&items);
@@ -435,11 +576,12 @@ fn metrize_zs(cx: &Ctx, g: &RouteGraph, routed: &[usize], zs: Option<&ZsSpec>) -
             if zs_wire == Some(k) && v.gap + ZS_QUANT_TOL_NM >= v.required {
                 continue;
             }
-            if results[k].is_none() {
-                results[k] = Some(fail(format!(
+            if !matches!(st.res[k], Some(Res::Fail { .. })) {
+                st.res[k] = Some(fail(format!(
                     "self-check: {} (gap {} < {} nm)",
                     v.against, v.gap, v.required
                 )));
+                st.pending[k] = true;
                 any = true;
             }
         }
@@ -447,32 +589,15 @@ fn metrize_zs(cx: &Ctx, g: &RouteGraph, routed: &[usize], zs: Option<&ZsSpec>) -
             break;
         }
     }
-
-    for k in 0..n {
-        let res = match results[k].take() {
-            Some(r) => r,
-            None => {
-                let ch = chains[k].as_ref().expect("chain of a checked wire");
-                let sks: Vec<Skeleton> = terminal_skeletons(cx.model, &wires[k]);
-                let pattern: String = emit[k]
-                    .iter()
-                    .map(|t| match t.prim {
-                        TrackPrim::Seg { .. } => 'S',
-                        TrackPrim::Arc { .. } => 'A',
-                    })
-                    .collect();
-                let len: f64 = emit[k].iter().map(|t| dequantise(&t.prim).length()).sum();
-                Res::Ok(ConnOk {
-                    items: std::mem::take(&mut emit[k]),
-                    len,
-                    out: outside_len(&ch.prims, &sks),
-                    pattern,
-                    anchors: ch.seq.len(),
-                    crossings: ncross[k],
-                })
-            }
-        };
-        out.res.push((live_of[k], res));
+    for &k in &present {
+        if st.pending[k] && st.res[k].is_none() {
+            st.res[k] = st.ok[k].clone().map(Res::Ok);
+            st.pending[k] = false;
+        }
+    }
+    for &i in routed {
+        let r = st.res[i].clone().unwrap_or_else(|| fail("not metrized"));
+        out.res.push((i, r));
     }
     out
 }
@@ -963,6 +1088,8 @@ struct Snap {
     paths: Vec<Option<SlotPath>>,
     /// The routing graph as it stood in this iteration (the retry pass starts from it).
     g: RouteGraph,
+    /// Metrization state of this iteration (the retry pass continues from it).
+    metr: MetrState,
 }
 
 /// `(crossings, faces, (start, goal))` as `insert_path` takes them.
@@ -1156,12 +1283,13 @@ fn zero_slack_attempt<'a>(
         Some(Res::Fail { reason, .. }) => reason,
         _ => "not metrized".into(),
     };
-    let mt_a = metrize_zs(cx, &g, &routed, None);
+    let mut st_a = best.metr.clone();
+    let mt_a = metrize_zs(cx, &g, &routed, None, &mut st_a, &[]);
     if mt_a.timed_out {
         return Err(ZS_DEADLINE.into());
     }
-    let (mt, zs) = if matches!(res_of(&mt_a, c), Some(Res::Ok(_))) {
-        (mt_a, Vec::new())
+    let (mt, zs, metr) = if matches!(res_of(&mt_a, c), Some(Res::Ok(_))) {
+        (mt_a, Vec::new(), st_a)
     } else {
         // Identification: margin 0 against everything names the corridor.
         let ident = ZsSpec {
@@ -1169,7 +1297,8 @@ fn zero_slack_attempt<'a>(
             anchors: None,
             walls: None,
         };
-        let mt_b = metrize_zs(cx, &g, &routed, Some(&ident));
+        let mut st_b = st_a.clone();
+        let mt_b = metrize_zs(cx, &g, &routed, Some(&ident), &mut st_b, &[]);
         if mt_b.timed_out {
             return Err(ZS_DEADLINE.into());
         }
@@ -1185,7 +1314,8 @@ fn zero_slack_attempt<'a>(
             anchors: Some(anchors),
             walls: Some(walls),
         };
-        let mt_c = metrize_zs(cx, &g, &routed, Some(&spec));
+        let mut st_c = st_a;
+        let mt_c = metrize_zs(cx, &g, &routed, Some(&spec), &mut st_c, &[]);
         if mt_c.timed_out {
             return Err(ZS_DEADLINE.into());
         }
@@ -1195,7 +1325,7 @@ fn zero_slack_attempt<'a>(
                 reason(res_of(&mt_c, c))
             ));
         }
-        (mt_c, vec![c])
+        (mt_c, vec![c], st_c)
     };
     for (i, r) in mt.res {
         res[i] = r;
@@ -1220,6 +1350,7 @@ fn zero_slack_attempt<'a>(
             blocked,
             paths,
             g,
+            metr,
         },
         zs,
     ))
@@ -1398,6 +1529,7 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                     let mut active: Vec<usize> = (0..m).collect();
                     let (mut stuck, mut last_sig) = (0u32, None::<(usize, Vec<usize>)>);
                     let mut stale = 0u32;
+                    let mut metr = MetrState::new(&cx);
                     for _ in 1..=opts.pathfinder_iter_cap {
                         if Instant::now() >= deadline {
                             timed_out = true;
@@ -1413,10 +1545,16 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                         let routed: Vec<usize> = (0..m)
                             .filter(|&i| out.paths[i].is_some() && perm[i].is_none())
                             .collect();
-                        let mt = metrize(&cx, &g, &routed);
+                        let mut work: Vec<usize> = active.clone();
+                        work.extend(out.ripped.iter().copied());
+                        let mt = metrize(&cx, &g, &routed, &mut metr, &work);
+                        // Anytime: a timed-out metrization still yields what it completed; the
+                        // loop ends after this iteration's result is recorded.
                         if mt.timed_out {
                             timed_out = true;
-                            break;
+                            if mt.res.is_empty() {
+                                break;
+                            }
                         }
                         iterations = it;
                         let mut res: Vec<Res> = (0..m)
@@ -1496,9 +1634,13 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                                 blocked: out.blocked.clone(),
                                 paths: out.paths.clone(),
                                 g: g.clone(),
+                                metr: metr.clone(),
                             });
                         } else {
                             stale += 1;
+                        }
+                        if timed_out {
+                            break;
                         }
                         if failed.is_empty()
                             && out.blocked.is_empty()
