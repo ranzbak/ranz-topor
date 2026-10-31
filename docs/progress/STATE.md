@@ -26,26 +26,26 @@ ledger .superpowers/sdd/2026-10-31-topor-m2-router/progress.md (briefs, reports,
 | 10 | partial_routes | DONE bba4488 |
 | F-diag | m2-route-diagnosis.md (A13 pinch, A14 enclosure, non-convergence) | DONE f8b57c9 |
 | Fix-ABC | bend-pinch admissibility, topological rip-up, stuck stop | DONE 5f1a4a8 |
-| Fix-R6 | local zero-slack retry (+5V corridor) + stall stop | NEXT |
-| 11 | gate test, scaling test, 0.2.0, benchmark 0.2.0, F gate review | TODO |
+| Fix-R6 | local zero-slack retry (+5V corridor, DRC judge) + stall stop (STALL_ITERS 8) | DONE 663e7d9 |
+| 11 | gate test, scaling test, 0.2.0, benchmark 0.2.0, compare PNGs, F gate review | NEXT (rotation 2) |
 **M2 rulings:** R1 work on main, never push. R2 verification = acceptance commands + diff stat; F reviews at the gate (Tasks 3, 6, 7 incl.).
 R3 parallel worktree workers don't touch the shared .venv. R5 (main): length gate failing ONLY on zero-slack +5V nets → compare remaining
 nets, report +5V separately. **R6 (main, 2026-10-31):** keep margin_nm 5000 globally; after negotiation, a connection still failed and
 blocked solely by a sub-ε corridor gets ONE local retry with margin 0 on its corridor edges (no new negotiation loop); accept the
 zero-slack wire only if kicad-cli DRC gives routing_new 0, else drop it ("zero-slack rejected by DRC") and gate per option (i) on 26/27
 with the casualty named; report zero_slack_wires = N + net names in metrics and PNG caption; the casualty (if any) becomes an M3 gate
-item (27/27 via B.Cu + via). Nothing else relaxed. Coordinator applies R6 by analogy to the +5V corridor whose pinch forces A13's
+item (27/27 via B.Cu + via). Nothing else relaxed. **R6b (main):** R6 applies to the +5V corridor whose sub-ε pinch forces a detour; keep only if DRC routing_new 0 AND unconnected 0 AND outside length strictly drops, else revert; zero_slack_wires in metrics/caption; no further analogies — new relaxations need main. R8 (coord.): Fix-R6 calls accepted — 1 nm quantisation tolerance for the zero-slack self-check (DRC judges), corridor as taut-stage obstacles, ≤ 4 candidates one attempt each. (Superseded note:) coordinator applied R6 by analogy to the +5V corridor whose pinch forces A13's
 detour (told main; if main narrows R6, the length gate is reported FAIL).
 **M2 eprom numbers (rip all, --router topor):** T9 26/27, outside 82.2 vs 76.6, router 0.31 s. Fix-ABC: 27/27 conns, 25/25 nets,
 failed 0, arcs 15, routing_new 0, unconnected 0, outside pads 95.32 vs hand 76.60 (FAIL; +5V 26.92 vs 23.90, A13 29.47 vs 9.38 left loop,
 others 38.93 vs 43.32), A14 5.47 vs 5.79, KiCad 138.8 vs 112.9, router 0.60 s, iterations 50 (alternates 26/27↔27/27, not converged).
-PNGs: docs/benchmarks/progress/2026-10-31-m2-{T9,T10,FixABC}.png (all sent to main). Tests: cargo all green, clippy clean, pytest 98, M1 gate 3.
+**Fix-R6 (current, 663e7d9): 27/27 conns, 25/25 nets, failed 0, partial 0, arcs 12, routing_new 0, unconnected 0, outside pads 67.03 vs hand 76.60 (no net above hand: +5V 19.00/23.90, A13 9.10/9.38, A14 5.47/5.79), zero_slack_wires 1 (+5V #24 U2.28→J1.2, DRC accepted), KiCad 110.5 vs 112.9, router 0.10–0.24 s, iterations 16, deterministic.**
+PNGs: docs/benchmarks/progress/2026-10-31-m2-{T9,T10,FixABC,FixR6}.png (all sent to main). Tests (663e7d9): cargo all green, clippy clean, pytest 99 passed, M1 gate 3 passed.
 **Deferred to the F gate review:** terminal clr = min_clearance in graph (provisional); non-fitting edge only 4× penalised; direct
 zero-crossing path has no third-vertex clearance check; contended-channel test never exercises the history switch; A4 split-vertex
 bend → connection fails (no end-to-end test); partial stubs start at the terminal, not last_reached; spot vertex blocks every net in
 search; clinches summary prints len(u); block probe cost on large boards; Fix-ABC bend test skips foreign vertices / point walls.
-**M2 next 3 actions:** (1) Fix-R6 (F impl): local zero-slack retry with DRC judge + no-improvement stall stop → eprom length gate,
-PNG; (2) Task 11 (gate test, scaling, 0.2.0, benchmark, compare PNGs); (3) F gate review, then handover.
+**M2 next 3 actions (rotation 2):** (1) Task 11 (S): tests/gate/test_m2_gate.py with the plan numbers + zero_slack_wires reported, scaling test, version 0.2.0, build.sh --dev, benchmark 0.2.0 + gate compare PNGs (send to main); the brief is task-11-brief.md (run scripts/task-brief); (2) F gate review (complexity of new loops incl. Fix-ABC rip-up and Fix-R6 retry, Tasks 3/6/7 algorithms, deferred list above); (3) fix findings, re-run gate, report to main (main pushes).
 
 ---
 
