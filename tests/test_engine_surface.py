@@ -124,3 +124,18 @@ def test_arc_center_matches_pcbnew(engine):
         got = engine.arc_center_nm(*(v for p in pts for v in p))
         assert got is not None
         assert abs(got[0] - c.x) <= 100 and abs(got[1] - c.y) <= 100, (pts, got, (c.x, c.y))
+
+
+def test_route_surface_round_trip(engine):
+    m = _model_with_track()
+    m["kept"] = []
+    m["layers"][0]["routable"] = True
+    out = json.loads(engine.route(json.dumps(m), json.dumps({"wall_clock_s": 10.0})))
+    for key in ("items", "connections", "nets", "runtime_s", "iterations", "warnings"):
+        assert key in out
+    assert out["threads_used"] == 1
+    assert out["routed"] == 1 and len(out["items"]) == 1
+    stats = json.loads(engine.wire_stats(json.dumps(_model_with_track())))
+    assert stats["wires"] == 1 and stats["skipped"] == 0
+    with pytest.raises(ValueError):
+        engine.route("{", "{}")

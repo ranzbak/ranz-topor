@@ -136,6 +136,15 @@ pub fn build_layer_cdt(
     })
 }
 
+impl LayerSketch {
+    /// Canonical CDT vertex at exactly position `p` (an input point).
+    pub fn vertex_at(&self, p: Vec2) -> Option<usize> {
+        self.vertex_of
+            .get(&key(p))
+            .map(|&i| self.cdt.vertex_index(i))
+    }
+}
+
 /// Tolerance (nm) for "lies on a wall chord".
 const OWNER_TOL: f64 = 1.0;
 
@@ -331,11 +340,31 @@ pub fn sketch_wire(wire: &Wire, ls: &LayerSketch) -> Result<Sketch, String> {
     if crossings.iter().any(|c| is_frame_edge(ls, c)) {
         return Err("hand leaves frame".into());
     }
+    Ok(finish_sketch(wire.id, hand[0], hand[n - 1], crossings, ls))
+}
+
+/// Funnel bends `(portal index, is_left, σ)` of reduced `crossings` between `start` and `goal`.
+fn bends(
+    start: Vec2,
+    goal: Vec2,
+    crossings: &[Crossing],
+    ls: &LayerSketch,
+) -> Vec<(usize, bool, Orient)> {
     let portals: Vec<(Vec2, Vec2)> = crossings
         .iter()
         .map(|c| (ls.cdt.vertex_pos(c.left), ls.cdt.vertex_pos(c.right)))
         .collect();
-    let seq = funnel(hand[0], hand[n - 1], &portals)
+    funnel(start, goal, &portals)
+}
+
+fn finish_sketch(
+    wire: usize,
+    start: Vec2,
+    goal: Vec2,
+    crossings: Vec<Crossing>,
+    ls: &LayerSketch,
+) -> Sketch {
+    let seq = bends(start, goal, &crossings, ls)
         .into_iter()
         .filter_map(|(i, is_left, sigma)| {
             let v = if is_left {
@@ -346,11 +375,43 @@ pub fn sketch_wire(wire: &Wire, ls: &LayerSketch) -> Result<Sketch, String> {
             ls.point_to_anchor[v].map(|anchor| AnchorRef { anchor, sigma })
         })
         .collect();
-    Ok(Sketch {
-        wire: wire.id,
+    Sketch {
+        wire,
         seq,
         crossings,
-    })
+    }
+}
+
+/// Router entry: crossings of a slot path (steps 5-6 of `sketch_wire`: reduce, funnel, anchors).
+pub fn sketch_from_crossings(
+    wire: usize,
+    start: Vec2,
+    goal: Vec2,
+    crossings: Vec<Crossing>,
+    ls: &LayerSketch,
+) -> Sketch {
+    finish_sketch(wire, start, goal, Cdt::reduce(&crossings), ls)
+}
+
+/// Positions of funnel bends at vertices without an anchor (split vertices of crossing
+/// constraints; ledger A4). `sketch_from_crossings` drops such bends, which would straighten the
+/// path through the wall; the router fails the connection instead (`ConstraintSet::Routing`).
+pub fn unanchored_bends(
+    start: Vec2,
+    goal: Vec2,
+    crossings: &[Crossing],
+    ls: &LayerSketch,
+) -> Vec<Vec2> {
+    let red = Cdt::reduce(crossings);
+    bends(start, goal, &red, ls)
+        .into_iter()
+        .filter_map(|(i, is_left, _)| {
+            let v = if is_left { red[i].left } else { red[i].right };
+            ls.point_to_anchor[v]
+                .is_none()
+                .then(|| ls.cdt.vertex_pos(v))
+        })
+        .collect()
 }
 
 /// Stack order per `(anchor, σ)` from crossings on shared edges (21 §5): candidates are wires

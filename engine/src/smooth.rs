@@ -167,7 +167,7 @@ fn chord_outside(a: Vec2, b: Vec2, len: f64, sks: &[Skeleton]) -> f64 {
 }
 
 /// Length of `prims` outside the terminal pads' copper (arcs chorded into ≤ 64 pieces).
-fn outside_len(prims: &[Prim], sks: &[Skeleton]) -> f64 {
+pub(crate) fn outside_len(prims: &[Prim], sks: &[Skeleton]) -> f64 {
     if sks.is_empty() {
         return prims.iter().map(Prim::length).sum();
     }
@@ -194,7 +194,7 @@ fn outside_len(prims: &[Prim], sks: &[Skeleton]) -> f64 {
     total
 }
 
-fn terminal_skeletons(model: &BoardModel, w: &Wire) -> Vec<Skeleton> {
+pub(crate) fn terminal_skeletons(model: &BoardModel, w: &Wire) -> Vec<Skeleton> {
     [&w.start, &w.goal]
         .into_iter()
         .filter_map(|t| match t {
@@ -204,7 +204,7 @@ fn terminal_skeletons(model: &BoardModel, w: &Wire) -> Vec<Skeleton> {
         .collect()
 }
 
-fn hand_outside(w: &Wire, sks: &[Skeleton]) -> f64 {
+pub(crate) fn hand_outside(w: &Wire, sks: &[Skeleton]) -> f64 {
     let segs: Vec<Prim> = w
         .hand
         .windows(2)
@@ -213,7 +213,7 @@ fn hand_outside(w: &Wire, sks: &[Skeleton]) -> f64 {
     outside_len(&segs, sks)
 }
 
-fn deadline_after(s: f64, now: Instant) -> Instant {
+pub(crate) fn deadline_after(s: f64, now: Instant) -> Instant {
     let d = Duration::try_from_secs_f64(s.max(0.0)).unwrap_or(Duration::from_secs(86_400 * 365));
     now.checked_add(d)
         .unwrap_or_else(|| now + Duration::from_secs(86_400 * 365))
