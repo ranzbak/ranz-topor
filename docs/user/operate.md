@@ -26,16 +26,18 @@ Contents: [Quick start](#quick-start) · [Where the settings come from](#where-t
 
 Three sources, in this order (46 §1): **KiCad's board setup** for everything KiCad already knows
 (rules, widths, via sizes, net classes, layer types, locks) → **`topor.toml`** next to the `.kicad_pro`
-for topor's own choices → topor's built-in defaults. Every finding names the place to change.
+for topor's own choices → topor's built-in defaults. Every finding names the place to change. One thing is
+not yours to set in 0.4.0: KiCad's design-rule minimums below topor's fab profile are raised to it, and the
+router may add smaller fab-profile vias ([Fab minimums and via sizes](#fab-minimums-and-via-sizes)).
 
 ### Settings topor reads from KiCad
 
 | What | Where in KiCad |
 |---|---|
-| Clearance; minimum via, hole and annular ring | KiCad → File → Board Setup → Design Rules → Constraints |
+| Clearance; minimum via, hole and annular ring | KiCad → File → Board Setup → Design Rules → Constraints (values below the [fab floors](#fab-minimums-and-via-sizes) are raised) |
 | Copper-to-edge clearance | KiCad → File → Board Setup → Design Rules → Constraints → Copper to Edge Clearance |
 | Track widths | KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Track Widths and netclass track width |
-| Via sizes and pre-defined vias | KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias and netclass via size/drill (topor uses `[vias] fallback_diameter_mm` / `fallback_drill_mm` only when nothing is set up: [`VIA_NOT_SET_UP`](troubleshoot.md#via_not_set_up)) |
+| Via sizes | KiCad → File → Board Setup → Design Rules → Net Classes (via size / hole): each net routes with its net class via, plus smaller [fab-profile vias](#fab-minimums-and-via-sizes) where space requires. Pre-defined Sizes → Vias are **not** routed with in 0.4.0; they only stop [`VIA_NOT_SET_UP`](troubleshoot.md#via_not_set_up), which uses `[vias] fallback_diameter_mm` / `fallback_drill_mm` when nothing is set up |
 | Net classes and net assignments; power net classes; `topor_p1`..`topor_p3` priority classes | KiCad → File → Board Setup → Design Rules → Net Classes |
 | Custom rules (`.kicad_dru`; `disallow track/via` areas become keepouts, track-angle rules are refused) | KiCad → File → Board Setup → Design Rules → Custom Rules |
 | Layer types (signal / power / mixed / jumper) → plane or routed layer | KiCad → File → Board Setup → Board Editor Layers |
@@ -47,6 +49,43 @@ for topor's own choices → topor's built-in defaults. Every finding names the p
 
 Everything is read from a copy of the board as it is in the editor **right now**, including unsaved
 edits (topor saves that copy itself; your file on disk is not touched).
+
+### Fab minimums and via sizes
+
+topor's rule resolver (`toporlib/rules.py`) treats a built-in fab profile, **JLCPCB 1 oz** (`JLCPCB_1OZ`), as
+**floors**: every KiCad design-rule minimum below the profile's value is raised to it; values above it are used
+as they are. In 0.4.0 this is always on: there is **no `topor.toml` key to turn the floors off** (the switch
+`apply_fab_floors` exists only in the developer harness). KiCad's DRC still judges the result with your own
+rules, so the floors only make topor more conservative than your board needs.
+
+| KiCad rule (`.kicad_pro` `board.design_settings.rules`) | topor floor |
+|---|---|
+| Minimum clearance (`min_clearance`) | 0.15 mm |
+| Minimum track width (`min_track_width`) | 0.2 mm |
+| Minimum via diameter (`min_via_diameter`) | 0.45 mm |
+| Minimum through hole (`min_through_hole_diameter`) → minimum via drill | 0.25 mm |
+| Minimum annular width (`min_via_annular_width`) | 0.1 mm (2 copper layers), 0.075 mm (4 or more) |
+| Copper to hole clearance (`min_hole_clearance`) | 0.35 mm |
+| Hole to hole clearance (`min_hole_to_hole`) | 0.25 mm |
+| Copper to edge clearance (`min_copper_edge_clearance`) | 0.2 mm |
+
+- A rule left at 0 (unset) silently takes the floor; a rule set below the floor is raised and listed. The
+  raised ones are in the run report: **report.md → Settings → Fab floors raised** (`name design → floor mm`).
+- Per net, the clearance and the track width are at least these minimums (a net class clearance or width below
+  them is raised too), and the net's via is its net class *Via Size* / *Via Hole* (a class without them: the
+  Default class, else KiCad's built-in 0.6 / 0.3 mm), raised to the minimum via diameter / drill.
+- **Via sizes the router uses** (`engine/src/vias.rs`, `via_sizes`): for each net first its own via, then,
+  where space requires, smaller vias from the profile's drill list **0.25, 0.3, 0.4, 0.5 mm**: every such drill
+  that is at least the (floored) minimum via drill and smaller than the net's drill, with diameter = drill +
+  2 × minimum annular width (at least the minimum via diameter), kept only when that diameter is smaller than
+  the net's via. Example: wiccon-2023 (factory 0.8 / 0.4 mm net class, minimum via drill 0.3 mm, annular
+  0.1 mm) may get 0.8 / 0.4 and 0.5 / 0.3 mm vias.
+- KiCad's **pre-defined vias** (KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias,
+  `via_dimensions` in the `.kicad_pro`) are **not read** for routing in 0.4.0; routing with them (and a fallback to the profile only
+  when the list is empty) arrives in 0.5.0. They do decide whether
+  [`VIA_NOT_SET_UP`](troubleshoot.md#via_not_set_up) fires: no pre-defined via and only KiCad's factory
+  0.8 / 0.4 mm net class via → the nets with that via get `[vias] fallback_diameter_mm` /
+  `fallback_drill_mm` (0.8 / 0.4 mm by default) as their own via, plus the smaller profile vias above.
 
 ### topor.toml
 
@@ -109,7 +148,7 @@ Tick **Save these options to topor.toml** to keep them (only these `[run]` keys 
 | Existing copper | Keep as obstacles · Keep and smooth · Rip up and re-route | `[run] existing_copper` = `fixed` / `smooth` / `rip` |
 | Respect locked tracks and vias | on: locked copper is never ripped | `[run] respect_locked` |
 | Keep partial routes | on: connections that cannot finish are drawn up to the blocking point (group `topor-partial`) | `[run] partial_routes` |
-| Time limit | seconds, `0` = no limit (Cancel is then the only stop) | `[run] timeout_s` |
+| Time limit | seconds of router time, `0` = no limit (Cancel is then the only stop); KiCad's DRC, the refill and the preview export are not counted | `[run] timeout_s` |
 | Threads | `0` = all cores but one | `[run] threads` |
 
 *Existing copper* decides what happens to tracks and vias that are already on the board:
@@ -121,7 +160,8 @@ board *Keep as obstacles* finds nothing to route. **Keep and smooth** is accepte
 *Keep as obstacles* (see [Limitations](#limitations)).
 
 Every other `topor.toml` key (`unrouted_only`, `[vias]`, `[iterations]`, …) is file-only: edit the file.
-**Help** opens this page. **Route** (Enter) starts routing.
+**Help** opens this guide (`operate.md` of the installed plugin) in the program your desktop uses for `.md`
+files (a browser or a text editor), at the top of the file. **Route** (Enter) starts routing.
 
 ## Scope by selection
 
@@ -145,10 +185,13 @@ A selection that yields nothing gives [`SCOPE_EMPTY`](troubleshoot.md#scope_empt
 **Topor — Routing &lt;board&gt;** shows the phase (*Preparing geometry*, *Routing — negotiation pass*,
 *Routing finished*, *Verifying with KiCad DRC*, *Rendering the preview*), routed/total, the optimisation
 iteration out of `[iterations] max`, the via count and elapsed time against the time limit.
-The run ends by itself when no more progress is made (`[iterations]`), at the time limit, or when you
-press **Cancel** (or Esc / Enter): the label changes to *Cancelling — keeping the best result so far…*
-and the best result found so far goes on to KiCad DRC and the preview. If nothing was routed yet, the run
-ends with *Cancelled — nothing was changed on the board.*
+The run ends by itself when no more progress is made (`[iterations]`), when the router has used the time
+limit (`[run] timeout_s` counts router time only: the pre-flight DRC, the DRC rounds and the kicad-cli
+refill / preview exports come on top), or when you press **Cancel** (or Esc / Enter): the label changes to
+*Cancelling — keeping the best result so far…* and the best result found so far goes on to KiCad DRC and
+the preview. If nothing was routed yet, the run ends with *Cancelled — nothing was changed on the board.*
+Cancel reacts within about a second while routing; during KiCad DRC, refill or the preview export (5–20 s
+each) the dialog may not respond ([While topor runs](#while-topor-runs)).
 
 After routing, the result is written into the board copy and checked with KiCad's DRC (`kicad-cli`). If
 the router's copper causes violations, topor pins those spots and routes again, up to
@@ -252,8 +295,17 @@ unsure about is kept. KiCad's DRC of the result stays the judge.
   whole board the engine option `ignore_pads` arrives in 0.5.0, so those pads are still routed to.
 - **Existing copper `smooth`**: the engine treats it as `fixed` and says so in the report.
 - **`[nets] pour_served`** and **`[run] detour_reference`** are accepted but have no effect in 0.4.0
-  (the report always lists detours measured against the straight line between the pads).
+  (the report always lists the detour ratio = routed length / length of the connection's topological ghost
+  path, the shortest path the router finds for it on the empty board with the same layers and via rules;
+  `toporlib/detour.py`).
 - Keys marked *since 0.5.0* in [configuration.md](configuration.md) are written commented-out.
+
+### While topor runs
+
+- Cancel reacts within about a second while routing; during KiCad DRC / refill / preview export (5–20 s each)
+  the dialog may not respond.
+- Do not edit the board while topor runs; Accept commits the result computed from the board as it was when you
+  pressed Route (precisely: when you clicked **Topor: route**, when topor saved its copy of the board).
 
 ### Reading the board over the KiCad API (IPC): approximations and their safe direction
 
@@ -295,7 +347,8 @@ Measured on six snapshot boards (offline tests against KiCad's own polygons); th
   UNVERIFIED on a live KiCad until the GUI checklist ran.
 - **Via sizes**: when KiCad has no via sizes set up ([`VIA_NOT_SET_UP`](troubleshoot.md#via_not_set_up)),
   topor uses `[vias] fallback_diameter_mm` / `[vias] fallback_drill_mm` (0.8 / 0.4 mm) for every net whose
-  via size is KiCad's factory default.
+  via size is KiCad's factory default. On every board the router may add smaller fab-profile vias, and
+  KiCad's pre-defined vias are not read ([Fab minimums and via sizes](#fab-minimums-and-via-sizes)).
 
 **Not yet**: pad exit stubs for fine pitch, same-net T-junctions, via relaxation and per-layer costs
 (0.5.0); free via placement and the 45° mode (backlog). Plugin calls that need a running KiCad are listed
