@@ -620,6 +620,8 @@ pub struct Options {
     pub via_cost_nm: i64,
     /// Router (M3): maximum vias on one connection.
     pub max_vias_per_connection: u32,
+    /// Router (M3-R2): after convergence, one via-reduction pass (TopoR lifting).
+    pub via_reduction: bool,
 }
 
 impl Default for Options {
@@ -641,6 +643,7 @@ impl Default for Options {
             zero_slack_retry: true,
             via_cost_nm: 2_000_000,
             max_vias_per_connection: 4,
+            via_reduction: true,
         }
     }
 }

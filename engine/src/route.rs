@@ -1659,6 +1659,136 @@ impl Route<'_> {
     }
 }
 
+/// Via-reduction cost factor: the per-via cost of the reduction search is this many times the
+/// loop's (TopoR lifting, note §6).
+pub const REDUCTION_VIA_FACTOR: f64 = 4.0;
+/// A reduction may lengthen the connection's outside-pad length by at most this factor.
+pub const REDUCTION_LEN_SLACK: f64 = 1.10;
+
+/// Counters of [`via_reduction_pass`].
+struct Reduction {
+    /// Vias removed.
+    removed: usize,
+    /// Candidate connections tried.
+    candidates: usize,
+    /// The deadline cut the pass short.
+    timed_out: bool,
+}
+
+/// Via-reduction (M3-R2, TopoR lifting): one pass over the connections with `vias >= 1`, in
+/// order `(-vias, id)`. Each leaves the graph and is searched again with the via cost times
+/// [`REDUCTION_VIA_FACTOR`] against the final history; the result replaces the old path iff it has
+/// fewer vias, metrizes with every previously routed connection still routed, adds no overuse
+/// and its outside-pad length is at most [`REDUCTION_LEN_SLACK`] times the old one. A trial runs
+/// on a copy of the best snapshot's graphs and metrization state (P7), so a rejection simply
+/// drops it; the obstacle anchors are then re-synced from `best.mg`. Pour-goal connections
+/// (their via is the goal) are not candidates. `best` is updated in place and `obs` ends synced
+/// to it.
+/// Complexity: `O(m_v * (V' log V' + metrize))` plus one graph/state copy per candidate.
+fn via_reduction_pass(
+    cx: &Ctx,
+    obs: &mut ObstacleSet,
+    rt: &Route,
+    neg: &Negotiator,
+    best: &mut Snap,
+) -> Reduction {
+    let live = cx.conns;
+    let m = live.len();
+    let mut cands: Vec<(usize, usize)> = (0..m)
+        .filter_map(|i| match &best.res[i] {
+            Res::Ok(k) if k.vias >= 1 && rt.goals[i].pour_sites.is_empty() => Some((k.vias, i)),
+            _ => None,
+        })
+        .collect();
+    cands.sort_by_key(|&(v, i)| (std::cmp::Reverse(v), i));
+    let mut out = Reduction {
+        removed: 0,
+        candidates: 0,
+        timed_out: false,
+    };
+    for (_, c) in cands {
+        if Instant::now() >= cx.deadline {
+            out.timed_out = true;
+            break;
+        }
+        out.candidates += 1;
+        let Res::Ok(old) = best.res[c].clone() else {
+            continue;
+        };
+        let mut mg = best.mg.clone();
+        mg.sync_anchors(obs, &rt.net_of());
+        mg.remove_conn(c, obs);
+        let params = SearchParams {
+            history: &neg.history,
+            site_history: &neg.site_history,
+            weight: tier_weight(live[c].tier),
+            present_overuse: PRESENT_OVERUSE,
+            expansion_cap: default_expansion_cap(&mg),
+            deadline: cx.deadline,
+            eps: None,
+            via_cost: cx.opts.via_cost_nm as f64 * via_weight(live[c].tier) * REDUCTION_VIA_FACTOR,
+            max_vias: cx.opts.max_vias_per_connection,
+        };
+        let p = match search(&mg, obs, &live[c], &rt.starts[c], &rt.goals[c], &params) {
+            SearchOutcome::Found(p) if p.vias() < old.vias => p,
+            SearchOutcome::Timeout => {
+                out.timed_out = true;
+                break;
+            }
+            _ => continue,
+        };
+        mg.insert_path(&live[c], &p, obs);
+        let routed: Vec<usize> = (0..m)
+            .filter(|&i| matches!(best.res[i], Res::Ok(_)))
+            .collect();
+        let mut metr = best.metr.clone();
+        let mt = metrize(cx, obs, &mg, &routed, &mut metr, &[c]);
+        if mt.timed_out {
+            out.timed_out = true;
+            break;
+        }
+        let all_ok =
+            mt.res.len() == routed.len() && mt.res.iter().all(|(_, r)| matches!(r, Res::Ok(_)));
+        let overuse: usize = mg
+            .layers
+            .iter()
+            .map(|l| {
+                (0..l.g.edges.len())
+                    .filter(|&e| l.g.overuse(e) > 0.0)
+                    .count()
+            })
+            .sum();
+        let short = mt.res.iter().any(|(i, r)| {
+            *i == c && matches!(r, Res::Ok(k) if k.out <= old.out * REDUCTION_LEN_SLACK)
+        });
+        if !(all_ok && short && overuse <= best.overuse_edges) {
+            continue;
+        }
+        let mut res = best.res.clone();
+        for (i, r) in mt.res {
+            res[i] = r;
+        }
+        let mut paths = best.paths.clone();
+        out.removed += old.vias - p.vias();
+        paths[c] = Some(p);
+        let (nok, vias, len, outl) = tally(&res);
+        best.clinches = detect_clinches(&mg, live, &paths, rt.starts);
+        best.routed = nok;
+        best.vias = vias;
+        best.len = len;
+        best.out = outl;
+        best.res = res;
+        best.overuse_edges = overuse;
+        best.relax_iterations = mt.relax_iterations;
+        best.rounds = mt.rounds;
+        best.paths = paths;
+        best.mg = mg;
+        best.metr = metr;
+    }
+    best.mg.sync_anchors(obs, &rt.net_of());
+    out
+}
+
 /// Zero-slack retry (R6), one pass from the best iteration's graph. The detoured connections
 /// (`est_len > DETOUR_FACTOR × straight`) leave the graph; every routed connection is searched
 /// once at margin 0 (empty history). The candidates (single-leg paths, estimated gain >
@@ -1989,6 +2119,7 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
     let mut blocks: BTreeMap<usize, Blk> = BTreeMap::new();
     let mut zs_wires: Vec<usize> = Vec::new();
     let mut n_sites = 0usize;
+    let mut via_status: String = if opts.via_reduction { "not run" } else { "off" }.into();
     let mut zs_status: String = if opts.zero_slack_retry {
         "not run"
     } else {
@@ -2327,6 +2458,25 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                         break;
                     }
                 }
+                if !opts.via_reduction {
+                    via_status = "off".into();
+                } else if timed_out {
+                    via_status = "skipped: timeout".into();
+                } else if let Some(b) = best.as_mut() {
+                    let v0 = b.vias;
+                    let r = via_reduction_pass(&cx, &mut obs, &rt, &neg, b);
+                    via_status = if r.timed_out {
+                        format!(
+                            "skipped: timeout (removed {} of {v0} vias in {} candidates)",
+                            r.removed, r.candidates
+                        )
+                    } else {
+                        format!(
+                            "removed {} of {v0} vias in {} candidates",
+                            r.removed, r.candidates
+                        )
+                    };
+                }
                 if !timed_out && opts.zero_slack_retry {
                     if let Some(b) = &best {
                         match zero_slack_pass(&cx, &mut obs, &rt, b) {
@@ -2548,7 +2698,7 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
             .map(|(k, v)| (k, v.round() as i64))
             .collect(),
         sites: n_sites,
-        via_reduction: "not run".into(),
+        via_reduction: via_status,
         iterations,
         converged,
         overuse_edges: best.as_ref().map_or(0, |b| b.overuse_edges),

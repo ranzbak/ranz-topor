@@ -378,3 +378,108 @@ fn route_two_layers_deterministic() {
     assert_eq!(json_no_runtime(&a), json_no_runtime(&b));
     clean(&m, &a);
 }
+
+/// F -> F connection A(10,20) -> B(30,20) with a short locked F.Cu wall between (net 3,
+/// y from `y0` to `y1` mm at x = 20). A cheap via makes the first iterations hop under it.
+fn wall_model(y0: f64, y1: f64) -> BoardModel {
+    model(
+        &[
+            p("A", 1, 10.0, 20.0, Kind::F),
+            p("B", 1, 30.0, 20.0, Kind::F),
+            p("W", 3, 20.0, y0, Kind::F),
+            p("X", 3, 20.0, y1, Kind::F),
+        ],
+        &format!(
+            r#""kept": [ {{ "uuid": "wall", "net": 3, "layer": 0, "width": 250000, "locked": true,
+            "prim": {{ "kind": "seg", "a": [20000000, {}], "b": [20000000, {}] }} }} ],"#,
+            (y0 * MM) as i64,
+            (y1 * MM) as i64
+        ),
+    )
+}
+
+fn cheap_via(reduce: bool) -> Options {
+    Options {
+        via_cost_nm: 400_000,
+        via_reduction: reduce,
+        ..opts()
+    }
+}
+
+#[test]
+fn via_reduction_removes_detourable_via_pair() {
+    let m = wall_model(17.0, 23.0);
+    let off = route(&m, &cheap_via(false));
+    assert_eq!(off.via_reduction, "off");
+    assert_eq!(off.routed, 1, "{:?}", off.connections);
+    assert_eq!(
+        off.vias, 2,
+        "cheap vias hop under the wall: {:?}",
+        off.connections
+    );
+    let r = route(&m, &cheap_via(true));
+    assert_eq!(r.routed, 1, "{:?}", r.connections);
+    assert_eq!(r.vias, 0, "{} {:?}", r.via_reduction, r.connections);
+    assert!(
+        r.via_reduction
+            .starts_with("removed 2 of 2 vias in 1 candidates"),
+        "{}",
+        r.via_reduction
+    );
+    assert!(vias(&r).is_empty());
+    clean(&m, &r);
+}
+
+#[test]
+fn via_reduction_keeps_necessary_vias_and_length_bound() {
+    // F -> B pad pair: the via is necessary.
+    let m = model(
+        &[
+            p("A", 1, 10.0, 20.0, Kind::F),
+            p("B", 1, 30.0, 20.0, Kind::B),
+        ],
+        "",
+    );
+    let r = route(&m, &cheap_via(true));
+    assert_eq!(r.vias, 1);
+    assert!(
+        r.via_reduction
+            .starts_with("removed 0 of 1 vias in 1 candidates"),
+        "{}",
+        r.via_reduction
+    );
+    clean(&m, &r);
+    // A 10 mm wall: the search at 4x via cost prefers the F.Cu detour (+14 %), but it is longer
+    // than REDUCTION_LEN_SLACK allows: the vias stay.
+    let m = wall_model(15.0, 25.0);
+    let r = route(
+        &m,
+        &Options {
+            via_cost_nm: 800_000,
+            ..cheap_via(true)
+        },
+    );
+    assert_eq!(r.routed, 1, "{:?}", r.connections);
+    assert_eq!(r.vias, 2, "{} {:?}", r.via_reduction, r.connections);
+    assert!(
+        r.via_reduction
+            .starts_with("removed 0 of 2 vias in 1 candidates"),
+        "{}",
+        r.via_reduction
+    );
+    clean(&m, &r);
+}
+
+#[test]
+fn via_reduction_off_option() {
+    let m = wall_model(17.0, 23.0);
+    let r = route(&m, &cheap_via(false));
+    assert_eq!(r.via_reduction, "off");
+    assert_eq!(r.vias, 2);
+    let d = route(&m, &opts());
+    assert!(
+        d.via_reduction.starts_with("removed"),
+        "{}",
+        d.via_reduction
+    );
+}

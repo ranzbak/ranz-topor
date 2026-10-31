@@ -113,6 +113,7 @@ def _route_summary(report: dict | None, layers: list[dict] | None = None) -> dic
         "zero_slack_wires": [{"id": w.get("conn"), "net": w.get("name")}
                              for w in (report.get("zero_slack_wires") or [])],
         "zero_slack": report.get("zero_slack"),
+        "via_reduction": report.get("via_reduction"),
     }
 
 
@@ -197,6 +198,7 @@ def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path) -> s
                     + " / ".join(f"{n} {v}" for n, v in rt['length_by_layer_mm'].items()) + " mm")
         zs = result.get("zero_slack") or {}
         names = [w["net"] for w in zs.get("wires") or []]
+        head.append(f"  via reduction: {rt.get('via_reduction')}")
         head.append(f"  zero slack: {zs.get('status')}, {len(names)} wire(s)"
                     + (f" ({', '.join(names)})" if names else ""))
     partial = (result.get("router_report") or {}).get("partial") or 0
