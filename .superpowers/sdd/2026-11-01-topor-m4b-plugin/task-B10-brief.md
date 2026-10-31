@@ -1,0 +1,7 @@
+### Task B10 (S): entry point, app wiring, `--headless`, build/install — `plugin/topor_plugin.py`, `plugin/topor/app.py`, `plugin/plugin.json`, `tools/build.sh`
+
+**Files:** Modify `plugin/topor_plugin.py`, `plugin/plugin.json` (`version` 0.4.0, `min_version` `"3.11"`, action name "Topor: route", description "Route the board or the selection with Topor"), `tools/build.sh` (ships `plugin/topor/`, `toporlib/`, `docs/user/`; `requirements.txt` unchanged: `--find-links wheels`, `kicad-python>=0.8,<0.9`, `topor-engine==<version>`); create `app.py`; tests `tests/test_scaffold.py`, `tests/plugin/test_app.py`.
+
+- [ ] **Step 1:** `app.main(argv)`: handshake, `KiCad(socket_path=env KICAD_API_SOCKET, kicad_token=env KICAD_API_TOKEN, client_name="topor")`, `get_board()`, `IpcBoard`, `WxUi`, `run(...)`; `--headless <pcb> --model <json> [--accept] [--selection JSON]` on `FakeBoard` + `ScriptedUi`; all `BaseException` → stderr + exit 1. Tests `test_build_layout_in_scratch_kicad_home` (`KICAD_DOCUMENTS_HOME=<tmp>`; real plugin dir untouched; no `harness/` shipped), `test_headless_run_on_fixture_accepts`, `test_no_pcbnew` now imports `topor.app`. Commit `feat(plugin): entry point, app wiring, headless mode, build/install`.
+- [ ] **Step 2 (M4b-α, user):** `bash tools/build.sh --dev`; the user routes **copies** of eprom and wiccon from KiCad (`harness.copy.copy_project` into `scratch/gui/<board>/`) following the draft checklist; result recorded in STATE.
+

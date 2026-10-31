@@ -1,0 +1,11 @@
+### Task B0 (S): `toporlib/` extraction, DRC-loop injection, no-pcbnew guard, backlog rows — `toporlib/`, `harness/`, `docs/design/45-mvp-plan.md`
+
+**Files:** Create `toporlib/{__init__,kicad_cli,drc,dru,detour,drcloop}.py`; modify `harness/drc.py`, `harness/metrics.py`, `harness/rules.py`, `harness/paths.py` (thin wrappers/re-exports), `harness/bench.py:262-420` (calls `route_with_drc_loop`), `docs/design/45-mvp-plan.md` §3 (two backlog rows); tests `tests/plugin/test_no_pcbnew.py`, `tests/test_drcloop.py`, existing harness tests unchanged.
+
+**Interfaces:**
+- Produces: `toporlib.drcloop.route_with_drc_loop(model: dict, options: dict, *, route_fn: Callable[[dict, dict], dict], drc_fn: Callable[[list[dict]], DrcJudgement], base_drc, orig_drc, budget_s: float, loop_cap: int) -> LoopResult` — the loop now inside `run_bench` (DRC spots, zero-slack judge, M3-R8 remaining budget) with the board writes and DRC behind `drc_fn(items) -> DrcJudgement(report: DrcReport, created: dict)`; `LoopResult(router_report, items, created, routed_drc, rounds, pinned, spots, zero_slack, budget_exhausted, router_s)`; `run_bench` output dict unchanged. `toporlib.drc` = today's `harness/drc.py` (kicad-cli only). `toporlib.detour.detour_stats/detour_line`. `toporlib.dru.parse_dru/match_condition`. `toporlib.kicad_cli.kicad_cli()`.
+  `test_no_pcbnew`: AST scan of `plugin/**/*.py` and `toporlib/**/*.py` for `pcbnew` imports (none) + `subprocess.run([sys.executable, "-c", "import sys; sys.modules['pcbnew'] = None; import topor.app"])` exit 0 (B10 completes the import; until then `topor.ports`).
+
+- [ ] **Step 1:** `test_drcloop_matches_run_bench_on_fixture` (pin pre-refactor `routed_drc`/`drc_loop` JSON of a fixture run as expected values). Run → FAIL. Extract. PASS; `.venv/bin/pytest -q` and `tests/gate/test_m3_gate.py -k eprom` unchanged.
+- [ ] **Step 2:** `test_no_pcbnew` passes; 45 §3 backlog rows: "Fully free via placement (incremental CDT) — when bounded relaxation isn't enough, or as an optional routing mode for complex boards (user 2026-10-31)" and "Harness migration to the file/`kicad-cli` path (no pcbnew) before KiCad 11". Commit `refactor(toporlib): shared pure modules, injected DRC loop, no-pcbnew guard; backlog rows`.
+

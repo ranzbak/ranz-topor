@@ -1,5 +1,23 @@
 # STATE
 
+**M4b IN PROGRESS** — KiCad IPC plugin, version 0.4.0. Plan docs/superpowers/plans/2026-11-01-topor-m4-in-kicad.md (rev. 2) Part 1 (P1, B0–B12);
+ledger .superpowers/sdd/2026-11-01-topor-m4b-plugin/progress.md. Rotation 1 coordinator on main from 07864ea. Projects tree 8153f4de51ba4d65.
+Main rulings: **M4-R1** (user) no pcbnew/SWIG in the plugin runtime (IPC kipy 0.8 + file formats + kicad-cli; guard test B0). **M4-R2** (user) plugin first
+(M4b 0.4.0), engine second (M4a 0.5.0). **M4-R3** (user) UI tasks invoke ecc:frontend-design-direction, ecc:make-interfaces-feel-better, ecc:accessibility
+(B4/B9), adapted to wxPython; wireframes F-reviewed before implementation. **M4-R4** (user) run reports → ~/.cache/kicad/10.0/topor/<project>/<timestamp>/
++ "Open report folder" button; `[output] report_dir` may redirect into the project. **M4-R5** (main, Q1) pad parity polygon-equivalent within 1 µm
+(custom/trapezoid/chamfered as polygons). **M4-R6** (main, Q2/Q3) pour reach oracle = kicad-cli DRC unconnected on the save_as copy (harness pcbnew
+secondary); preview = kicad-cli SVG, KiCad theme colours, routed copy highlighted if the export allows.
+Coordinator rulings C0–C12 in the ledger (C1 report_dir default "" = cache dir; C2 kipy 0.8.0 in .venv; C7 pcbfile find/remove/append in B2; C8 α scope; C9 0.4.0 bump in B10).
+M4b-α (whole-board route from KiCad) = P1, B0, B1, B2, B3, B4, B5, B9, B10 → user GUI test.
+| Task | Status |
+|------|--------|
+| P1 engine stop rule/cancel/route_async/default_options | dispatched |
+| B0 toporlib + DRC-loop injection + no-pcbnew guard | dispatched |
+| B1 schema / topor.toml / config reference | dispatched |
+| B4 UI wireframes (F) | dispatched |
+
+
 **M1 (taut smoother) — DONE 2026-10-31** (gate verified by main session: `pytest tests/gate -m "gate or not gate"` → 7 passed).
 Rotation 3 coordinator ended on an auth error right after gate green; this header written by main.
 eprom: 25/27 wires taut + 2 zero-slack fallbacks (+5V, user ruling), 8 arcs, DRC routing 0, unconnected 0,
