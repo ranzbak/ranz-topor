@@ -11,6 +11,11 @@ Rust engine as PyO3/maturin abi3 wheel + thin Python plugin, Linux first
 benchmarks per run in [benchmarks/](../benchmarks/README.md). Source boards in
 `~/work/kicad/projects` are **read-only**; all work happens on copies.
 
+**Configurability rule (user, 2026-10-31):** when a routing/style/rule choice is a judgement call
+(bend angles, acute bends, via sizes, margins, priorities, partial routes, …), make it a **config
+setting with a sane default** rather than hard-coding it — "if in doubt, make it configurable".
+Defaults are the safe/conventional choice; every non-default value used in a run appears in the report.
+
 ---
 
 ## 1. Milestone ladder
@@ -76,7 +81,7 @@ design, hardest implementations, failure diagnosis, gate reviews.
 | T3.3 | Gate on eprom + wiccon | O | T3.2 | Gate M3 | — |
 | **M4** | IPC adapter, plugin UI/pre-flight, priority tiers, Steiner, exit stubs, keepouts, DRC loop, **routing scope / partial reroute** (selected **pins/pads** — route only the connections between/at the selected pads, e.g. two pins or all pins of a selected footprint — selected nets, netclasses, area, or unrouted-only; scope comes from the current KiCad selection read through the API, name of the selection call UNVERIFIED; everything outside the scope is kept as fixed obstacles; includes batch re-flow of selected nets after moving parts; **partially routed boards in general**: existing copper of a net — complete or partial, hand-made or from an earlier run — is kept and counts as part of that net's tree, and new routes may attach to any point of it (track ends, vias, existing segments), not only to pads; the user chooses per run whether existing tracks are fixed, may be smoothed, or may be ripped up; **finishing hand-started traces**: a dangling end of a hand-drawn track (endpoint not on a pad, via or other same-net copper) is a route start — the router continues from it on the same layer with the same width, leaves it tangent-continuous (G1) in the hand trace's direction, and treats the hand trace's path as a topology hint (which sides of obstacles it already passed) rather than changing it), **partial routes option** (user toggle, default off: unfinishable connections drawn DRC-clean from both ends up to the blocking point, grouped as `topor-partial` and listed in the report; DRC dangling/unconnected counted separately) | S (UI H) | M3 | Gate M4 | 30, 31, 12 §3, 44 |
 | **M5** | Scoped after M4 from [44 — feature gap analysis](44-feature-gap-analysis.md) | F plans | M4 | — | 44 |
-| **Backlog (after M4)** | **Traditional 45° routing mode** (user request 2026-10-31): optional per-run switch, default curved; reuses topology/search/negotiation, replaces the arc metrization by octilinear (0°/45°/90°) taut paths in the same homotopy class; bends are 45° turns, a 90° turn only where two 45° turns do not fit (EMI, user 2026-10-31; reported per bend), never acute; same DRC/length gates; plugin option + benchmark column | S (design F) | M4 | — | 44 §4 |
+| **Backlog (after M4)** | **Traditional 45° routing mode** (user request 2026-10-31): optional per-run switch, default curved; reuses topology/search/negotiation, replaces the arc metrization by octilinear (0°/45°/90°) taut paths in the same homotopy class; bends are 45° turns, a 90° turn only where two 45° turns do not fit (EMI, user 2026-10-31; reported per bend), never acute — both configurable (`bend_90`, `bend_acute`), these are the defaults; same DRC/length gates; plugin option + benchmark column | S (design F) | M4 | — | 44 §4 |
 
 ## 4. Orchestration: rotating coordinator, narrow workers
 
