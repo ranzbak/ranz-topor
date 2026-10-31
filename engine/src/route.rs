@@ -22,7 +22,7 @@
 //! routes at least as much with a shorter outside-pad length; the harness DRC is the final judge.
 
 use crate::cdt::Crossing;
-use crate::check::Checker;
+use crate::check::{Checker, ItemIndex};
 use crate::decompose::{decompose, terminal_of, Connection, TermKind, TermRef};
 use crate::geom::quant::{quantise_chain, round_nm, TrackPrim};
 use crate::geom::{dequantise, Prim, Skeleton, Vec2};
@@ -125,6 +125,8 @@ pub struct RouteResult {
     pub clinches: ClinchReport,
     pub relax_iterations: u32,
     pub self_check_rounds: u32,
+    /// Grid candidates visited by the self-checks up to the reported iteration (scaling diagnostic).
+    pub check_candidates_visited: usize,
     pub timed_out: bool,
     pub runtime_s: f64,
     pub threads_used: usize,
@@ -298,6 +300,14 @@ struct MetrState {
     res: Vec<Option<Res>>,
     /// `ok[k]` must be (re-)checked: its chain changed since its last check, or the check failed.
     pending: Vec<bool>,
+    /// Items of the wires that passed their self-check (`res` is `Ok`), indexed once and kept
+    /// across calls: a round checks only the pending wires against it, O(changed * q) instead
+    /// of re-walking every emitted item.
+    idx: ItemIndex,
+    /// Ids in `idx` per wire (empty: the wire is not indexed).
+    item_ids: Vec<Vec<usize>>,
+    /// Grid candidates visited by the self-checks so far.
+    check_visited: usize,
 }
 
 impl MetrState {
@@ -326,10 +336,21 @@ impl MetrState {
             ok: vec![None; m],
             res: vec![None; m],
             pending: vec![false; m],
+            idx: ItemIndex::new(cx.checker.cell()),
+            item_ids: vec![Vec::new(); m],
+            check_visited: 0,
+        }
+    }
+
+    /// Remove wire `k`'s items from the index. O(cells of its items).
+    fn unindex(&mut self, k: usize) {
+        for id in std::mem::take(&mut self.item_ids[k]) {
+            self.idx.remove(id);
         }
     }
 
     fn drop_wire(&mut self, k: usize) {
+        self.unindex(k);
         if self.seqs[k].is_some() {
             self.rx.remove(k);
         }
@@ -412,6 +433,7 @@ fn metrize_zs(
         if searched[i] || st.seqs[i].as_ref() != Some(&s.seq) {
             st.rx.set(i, &s.seq);
             st.seqs[i] = Some(s.seq);
+            st.unindex(i);
             st.ok[i] = None;
             st.res[i] = None;
             st.pending[i] = false;
@@ -479,6 +501,7 @@ fn metrize_zs(
         if !changed[k] && st.res[k].is_some() {
             continue;
         }
+        st.unindex(k);
         st.ok[k] = None;
         st.pending[k] = false;
         match &st.rx.chains()[k] {
@@ -536,30 +559,12 @@ fn metrize_zs(
         if cx.opts.skip_self_check || out.rounds as usize > present.len() {
             break;
         }
-        let mut items: Vec<Item> = Vec::new();
-        let mut owner: Vec<usize> = Vec::new();
-        let mut base = 0usize;
-        for pass in [false, true] {
-            for &k in &present {
-                if st.pending[k] != pass {
-                    continue;
-                }
-                let Some(o) = &st.ok[k] else {
-                    continue;
-                };
-                if !pass && !matches!(st.res[k], Some(Res::Ok(_))) {
-                    continue;
-                }
-                for t in &o.items {
-                    items.push(Item::Track(t.clone()));
-                    owner.push(k);
-                }
-            }
-            if !pass {
-                base = items.len();
-            }
-        }
-        if items.len() == base {
+        let pend: Vec<usize> = present
+            .iter()
+            .copied()
+            .filter(|&k| st.pending[k] && st.ok[k].is_some())
+            .collect();
+        if pend.is_empty() {
             break;
         }
         if Instant::now() >= cx.deadline {
@@ -569,21 +574,35 @@ fn metrize_zs(
             }
         }
         out.rounds += 1;
-        let rep = cx.checker.check_items(&items);
+        // Each pending wire is checked against the persistent index (the checked wires) and the
+        // pending wires before it (inserted as the walk proceeds, removed after the round): a
+        // violation is charged to the later wire, the one that moved.
+        let mut temp: Vec<usize> = Vec::new();
         let mut any = false;
-        for v in &rep.violations {
-            let k = owner[v.item];
-            if zs_wire == Some(k) && v.gap + ZS_QUANT_TOL_NM >= v.required {
-                continue;
+        for &k in &pend {
+            let items: Vec<Item> = st.ok[k]
+                .iter()
+                .flat_map(|o| o.items.iter().cloned().map(Item::Track))
+                .collect();
+            let rep = cx.checker.check_against(&st.idx, &items, &[]);
+            st.check_visited += rep.candidates_visited;
+            temp.extend(items.iter().map(|it| st.idx.insert(it)));
+            for v in &rep.violations {
+                if zs_wire == Some(k) && v.gap + ZS_QUANT_TOL_NM >= v.required {
+                    continue;
+                }
+                if !matches!(st.res[k], Some(Res::Fail { .. })) {
+                    st.res[k] = Some(fail(format!(
+                        "self-check: {} (gap {} < {} nm)",
+                        v.against, v.gap, v.required
+                    )));
+                    st.pending[k] = true;
+                    any = true;
+                }
             }
-            if !matches!(st.res[k], Some(Res::Fail { .. })) {
-                st.res[k] = Some(fail(format!(
-                    "self-check: {} (gap {} < {} nm)",
-                    v.against, v.gap, v.required
-                )));
-                st.pending[k] = true;
-                any = true;
-            }
+        }
+        for id in temp {
+            st.idx.remove(id);
         }
         if !any {
             break;
@@ -593,6 +612,14 @@ fn metrize_zs(
         if st.pending[k] && st.res[k].is_none() {
             st.res[k] = st.ok[k].clone().map(Res::Ok);
             st.pending[k] = false;
+            if let Some(o) = &st.ok[k] {
+                let ids: Vec<usize> = o
+                    .items
+                    .iter()
+                    .map(|t| st.idx.insert(&Item::Track(t.clone())))
+                    .collect();
+                st.item_ids[k] = ids;
+            }
         }
     }
     for &i in routed {
@@ -1113,10 +1140,11 @@ fn take_path(g: &RouteGraph, conn: usize) -> Option<PathArgs> {
 
 /// `(routed, Σlen, Σoutside)` of a result vector.
 fn tally(res: &[Res]) -> (usize, f64, f64) {
-    res.iter().fold((0usize, 0.0f64, 0.0f64), |(n, l, o), r| match r {
-        Res::Ok(k) => (n + 1, l + k.len, o + k.out),
-        _ => (n, l, o),
-    })
+    res.iter()
+        .fold((0usize, 0.0f64, 0.0f64), |(n, l, o), r| match r {
+            Res::Ok(k) => (n + 1, l + k.len, o + k.out),
+            _ => (n, l, o),
+        })
 }
 
 /// Zero-slack retry (R6), one pass from the best iteration's graph. The detoured connections
@@ -1170,13 +1198,27 @@ fn zero_slack_pass(
         }
         let (s, t) = verts[i];
         let out = if detoured.contains(&i) {
-            search(&g, layer_obs, &live[i], s, t, &params(live[i].tier, Some(0.0)))
+            search(
+                &g,
+                layer_obs,
+                &live[i],
+                s,
+                t,
+                &params(live[i].tier, Some(0.0)),
+            )
         } else {
             let Some((cr, faces, _)) = take_path(&g, i) else {
                 continue;
             };
             g.remove_conn(i);
-            let out = search(&g, layer_obs, &live[i], s, t, &params(live[i].tier, Some(0.0)));
+            let out = search(
+                &g,
+                layer_obs,
+                &live[i],
+                s,
+                t,
+                &params(live[i].tier, Some(0.0)),
+            );
             let c = &live[i];
             g.insert_path(i, s, t, &cr, &faces, c.width as f64, c.clearance as f64);
             out
@@ -1448,7 +1490,12 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
     let mut partials: BTreeMap<usize, Partial> = BTreeMap::new();
     let mut blocks: BTreeMap<usize, Blk> = BTreeMap::new();
     let mut zs_wires: Vec<usize> = Vec::new();
-    let mut zs_status: String = if opts.zero_slack_retry { "not run" } else { "off" }.into();
+    let mut zs_status: String = if opts.zero_slack_retry {
+        "not run"
+    } else {
+        "off"
+    }
+    .into();
 
     if m > 0 {
         // Obstacles: junction / dangling ends of copper attach points are terminals.
@@ -1886,6 +1933,7 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
             .unwrap_or_default(),
         relax_iterations: best.as_ref().map_or(0, |b| b.relax_iterations),
         self_check_rounds: best.as_ref().map_or(0, |b| b.rounds),
+        check_candidates_visited: best.as_ref().map_or(0, |b| b.metr.check_visited),
         timed_out,
         runtime_s: t0.elapsed().as_secs_f64(),
         threads_used: 1,

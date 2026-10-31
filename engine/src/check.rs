@@ -11,7 +11,8 @@ use crate::geom::{
 };
 use crate::model::{flip_track, via_layers, BoardModel, Item, Options, Pad};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Violation {
@@ -72,12 +73,16 @@ fn point_in_poly(p: Vec2, poly: &[Vec2]) -> bool {
     inside
 }
 
+#[derive(Clone)]
 enum Geo {
     Track(Track),
     Skel(Skeleton),
 }
 
+#[derive(Clone)]
 struct Obstacle {
+    /// Drill of an indexed via (hole-to-hole target); board holes are `Kind::Hole` obstacles.
+    hole: Option<Track>,
     geo: Geo,
     net: i32,
     kind: Kind,
@@ -225,6 +230,7 @@ impl Checker {
                 c.add(
                     &[l],
                     Obstacle {
+                        hole: None,
                         geo: Geo::Skel(model.skeleton(p, l)),
                         net: p.net,
                         kind: Kind::Pad,
@@ -240,6 +246,7 @@ impl Checker {
             c.add(
                 &ls,
                 Obstacle {
+                    hole: None,
                     geo: Geo::Track(zero_seg(v.at.to_vec2(), v.d as f64)),
                     net: v.net,
                     kind: Kind::Via,
@@ -253,6 +260,7 @@ impl Checker {
                 c.add(
                     &all,
                     Obstacle {
+                        hole: None,
                         geo: Geo::Track(zero_seg(v.at.to_vec2(), v.drill as f64)),
                         net: v.net,
                         kind: Kind::Hole,
@@ -267,6 +275,7 @@ impl Checker {
             c.add(
                 &[k.layer],
                 Obstacle {
+                    hole: None,
                     geo: Geo::Track(Track {
                         prim: dequantise(&k.prim),
                         w: k.width as f64,
@@ -306,6 +315,7 @@ impl Checker {
                 c.add(
                     &[s.layer],
                     Obstacle {
+                        hole: None,
                         geo: Geo::Track(Track {
                             prim: Prim::Seg(seg),
                             w: 0.0,
@@ -346,6 +356,7 @@ impl Checker {
             c.add(
                 &all,
                 Obstacle {
+                    hole: None,
                     geo: Geo::Track(zero_seg(h.at.to_vec2(), h.d as f64)),
                     net: owner.map_or(0, |p| p.net),
                     kind: Kind::Hole,
@@ -359,6 +370,7 @@ impl Checker {
             c.add(
                 &all,
                 Obstacle {
+                    hole: None,
                     geo: Geo::Track(Track {
                         prim: dequantise(o),
                         w: 0.0,
@@ -428,13 +440,13 @@ impl Checker {
         point_in_poly(start, &r.poly).then_some(0.0)
     }
 
-    fn required(&self, item_net: i32, o: &Obstacle) -> f64 {
+    fn required(&self, item_net: i32, o: &Obstacle, own_clr: f64) -> f64 {
         let base = match o.kind {
             Kind::Hole => self.hole_clearance,
             Kind::Edge => self.edge_clearance,
             _ => self
                 .clr(item_net)
-                .max(o.own_clr)
+                .max(own_clr)
                 .max(self.rules_min_clearance),
         };
         base + self.margin
@@ -444,52 +456,78 @@ impl Checker {
         (o.net != 0 && o.net == item_net) || o.tie_nets.contains(&item_net)
     }
 
+    /// Grid cell size of the checker (an [`ItemIndex`] must use the same).
+    pub fn cell(&self) -> f64 {
+        self.cell
+    }
+
     /// Check `items` (wire frame: KiCad, Y down) against the board and against each other.
     /// Each item is tested against grid candidates and the earlier items only.
+    /// O(n * q): `q` grid candidates per item.
     pub fn check_items(&self, items: &[Item]) -> CheckReport {
         let mut rep = CheckReport::default();
+        let mut idx = ItemIndex::new(self.cell);
+        let all_layers = self.all_layers();
+        for (i, item) in items.iter().enumerate() {
+            self.check_one(&idx, i, item, &[], &all_layers, &mut rep);
+            idx.insert(item);
+        }
+        rep
+    }
+
+    /// `items` against the board obstacles and against every indexed item except the ids in
+    /// `skip` (sorted) and except each other (callers index what they keep). `Violation.against`
+    /// for an indexed item is `item:<id>`. O(|items| * q), independent of the index size.
+    pub fn check_against(&self, idx: &ItemIndex, items: &[Item], skip: &[usize]) -> CheckReport {
+        let mut rep = CheckReport::default();
+        let all_layers = self.all_layers();
+        for (i, item) in items.iter().enumerate() {
+            self.check_one(idx, i, item, skip, &all_layers, &mut rep);
+        }
+        rep
+    }
+
+    fn all_layers(&self) -> Vec<u32> {
         let mut all_layers: Vec<u32> = self.grids.keys().copied().collect();
         all_layers.sort_unstable();
-        // Earlier items, inserted as the walk proceeds.
-        let mut seen: Vec<Obstacle> = Vec::new();
-        let mut seen_grids: HashMap<u32, Grid<usize>> = HashMap::new();
+        all_layers
+    }
 
-        for (i, item) in items.iter().enumerate() {
-            let (net, layers, track) = match item {
-                Item::Track(t) => (
-                    t.net,
-                    vec![t.layer],
-                    Track {
-                        prim: dequantise(&flip_track(t.prim)),
-                        w: t.width as f64,
-                    },
-                ),
-                Item::Via(v) => (
-                    v.net,
-                    via_layers(&v.layers, &all_layers),
-                    zero_seg(
-                        Vec2 {
-                            x: v.at.x as f64,
-                            y: -(v.at.y as f64),
-                        },
-                        v.d as f64,
-                    ),
-                ),
-            };
-            let bb = track.prim.bbox().grow(0.5 * track.w);
-            let mut found: Vec<Violation> = Vec::new();
-            let drill_track = match item {
-                Item::Via(v) if v.drill > 0 => Some(Track {
-                    prim: track.prim,
-                    w: v.drill as f64,
-                }),
-                _ => None,
-            };
-            let is_via = matches!(item, Item::Via(_));
-            for &layer in &layers {
-                let mut test = |o: &Obstacle| {
-                    if let (Some(d), Kind::Hole) = (&drill_track, o.kind) {
-                        let gap = o.gap(d);
+    fn check_one(
+        &self,
+        idx: &ItemIndex,
+        i: usize,
+        item: &Item,
+        skip: &[usize],
+        all_layers: &[u32],
+        rep: &mut CheckReport,
+    ) {
+        let (net, track) = item_track(item);
+        let layers = match item {
+            Item::Track(t) => vec![t.layer],
+            // a via without listed layers occupies every layer (as in the index)
+            Item::Via(v) if v.layers.is_empty() => all_layers.to_vec(),
+            Item::Via(v) => via_layers(&v.layers, all_layers),
+        };
+        let bb = track.prim.bbox().grow(0.5 * track.w);
+        let mut found: Vec<Violation> = Vec::new();
+        let drill_track = match item {
+            Item::Via(v) if v.drill > 0 => Some(Track {
+                prim: track.prim,
+                w: v.drill as f64,
+            }),
+            _ => None,
+        };
+        let is_via = matches!(item, Item::Via(_));
+        for &layer in &layers {
+            let mut test = |o: &Obstacle, own_clr: f64| {
+                if let Some(d) = &drill_track {
+                    let hole_gap = match (&o.hole, o.kind) {
+                        (_, Kind::Hole) => Some(o.gap(d)),
+                        (Some(h), _) => Some(copper_gap(d, h)),
+                        _ => None,
+                    };
+                    if let Some(gap) = hole_gap {
                         let req = self.hole_to_hole + self.margin;
                         if gap < req {
                             let (g, r) = (gap.round() as i64, req.round() as i64);
@@ -507,103 +545,218 @@ impl Checker {
                             }
                         }
                     }
-                    if Self::is_exempt(net, o) {
-                        return;
+                }
+                if Self::is_exempt(net, o) {
+                    return;
+                }
+                let req = self.required(net, o, own_clr);
+                let gap = o.gap(&track);
+                if gap < req {
+                    let (g, r) = (gap.round() as i64, req.round() as i64);
+                    match found
+                        .iter_mut()
+                        .find(|v| v.against == o.label && v.layer == layer && v.required == r)
+                    {
+                        Some(v) => v.gap = v.gap.min(g),
+                        None => found.push(Violation {
+                            item: i,
+                            against: o.label.clone(),
+                            layer,
+                            gap: g,
+                            required: r,
+                        }),
                     }
-                    let req = self.required(net, o);
-                    let gap = o.gap(&track);
-                    if gap < req {
-                        let (g, r) = (gap.round() as i64, req.round() as i64);
+                }
+            };
+            if let Some(g) = self.grids.get(&layer) {
+                let (cands, v) = g.query_counted(bb);
+                rep.candidates_visited += v;
+                cands
+                    .iter()
+                    .for_each(|&k| test(&self.obstacles[k], self.obstacles[k].own_clr));
+            }
+            for key in [layer, WILD] {
+                if let Some(g) = idx.grids.get(&key) {
+                    let (cands, v) = g.query_counted(bb);
+                    rep.candidates_visited += v;
+                    for &k in &cands {
+                        if skip.binary_search(&k).is_ok() {
+                            continue;
+                        }
+                        if let Some(slot) = &idx.obstacles[k] {
+                            test(&slot.0, self.clr(slot.0.net));
+                        }
+                    }
+                }
+            }
+            if let Some(g) = self.region_grids.get(&layer) {
+                let (cands, v) = g.query_counted(bb);
+                rep.candidates_visited += v;
+                for &k in &cands {
+                    let r = &self.regions[k];
+                    let (applies, req) = match r.kind {
+                        RegionKind::Shape => (
+                            !((r.net != 0 && r.net == net) || r.tie_nets.contains(&net)),
+                            self.clr(net)
+                                .max(self.clr(r.net))
+                                .max(self.rules_min_clearance)
+                                + self.margin,
+                        ),
+                        RegionKind::Keepout { tracks, vias } => {
+                            (if is_via { vias } else { tracks }, 0.0)
+                        }
+                    };
+                    if !applies || !r.bbox.overlaps(&bb) {
+                        continue;
+                    }
+                    if let Some(gap) = Self::region_hit(&track, r) {
+                        let g = gap.round() as i64;
                         match found
                             .iter_mut()
-                            .find(|v| v.against == o.label && v.layer == layer && v.required == r)
+                            .find(|v| v.against == r.label && v.layer == layer)
                         {
                             Some(v) => v.gap = v.gap.min(g),
                             None => found.push(Violation {
                                 item: i,
-                                against: o.label.clone(),
+                                against: r.label.clone(),
                                 layer,
                                 gap: g,
-                                required: r,
+                                required: req.round() as i64,
                             }),
                         }
                     }
-                };
-                if let Some(g) = self.grids.get(&layer) {
-                    let (cands, v) = g.query_counted(bb);
-                    rep.candidates_visited += v;
-                    cands.iter().for_each(|&k| test(&self.obstacles[k]));
-                }
-                if let Some(g) = seen_grids.get(&layer) {
-                    let (cands, v) = g.query_counted(bb);
-                    rep.candidates_visited += v;
-                    cands.iter().for_each(|&k| test(&seen[k]));
-                }
-                if let Some(g) = self.region_grids.get(&layer) {
-                    let (cands, v) = g.query_counted(bb);
-                    rep.candidates_visited += v;
-                    for &k in &cands {
-                        let r = &self.regions[k];
-                        let (applies, req) = match r.kind {
-                            RegionKind::Shape => (
-                                !((r.net != 0 && r.net == net) || r.tie_nets.contains(&net)),
-                                self.clr(net)
-                                    .max(self.clr(r.net))
-                                    .max(self.rules_min_clearance)
-                                    + self.margin,
-                            ),
-                            RegionKind::Keepout { tracks, vias } => {
-                                (if is_via { vias } else { tracks }, 0.0)
-                            }
-                        };
-                        if !applies || !r.bbox.overlaps(&bb) {
-                            continue;
-                        }
-                        if let Some(gap) = Self::region_hit(&track, r) {
-                            let g = gap.round() as i64;
-                            match found
-                                .iter_mut()
-                                .find(|v| v.against == r.label && v.layer == layer)
-                            {
-                                Some(v) => v.gap = v.gap.min(g),
-                                None => found.push(Violation {
-                                    item: i,
-                                    against: r.label.clone(),
-                                    layer,
-                                    gap: g,
-                                    required: req.round() as i64,
-                                }),
-                            }
-                        }
-                    }
                 }
             }
-            rep.violations.extend(found);
-            rep.checked += 1;
-
-            // Insert as an obstacle for later items.
-            let idx = seen.len();
-            let o = Obstacle {
-                geo: Geo::Track(track),
-                net,
-                kind: if matches!(item, Item::Via(_)) {
-                    Kind::Via
-                } else {
-                    Kind::Track
-                },
-                label: format!("item:{i}"),
-                own_clr: self.clr(net),
-                tie_nets: Vec::new(),
-            };
-            let obb = o.bbox();
-            for &layer in &layers {
-                seen_grids
-                    .entry(layer)
-                    .or_insert_with(|| Grid::new(self.cell))
-                    .insert(obb, idx);
-            }
-            seen.push(o);
         }
-        rep
+        rep.violations.extend(found);
+        rep.checked += 1;
+    }
+}
+
+/// Grid key of items occupying every layer (vias without a listed layer).
+const WILD: u32 = u32::MAX;
+
+/// Net and checker-frame track (flipped, dequantised; a via is a zero-length segment of
+/// width `d`) of an item.
+fn item_track(item: &Item) -> (i32, Track) {
+    match item {
+        Item::Track(t) => (
+            t.net,
+            Track {
+                prim: dequantise(&flip_track(t.prim)),
+                w: t.width as f64,
+            },
+        ),
+        Item::Via(v) => (
+            v.net,
+            zero_seg(
+                Vec2 {
+                    x: v.at.x as f64,
+                    y: -(v.at.y as f64),
+                },
+                v.d as f64,
+            ),
+        ),
+    }
+}
+
+/// Persistent index of emitted items, usable as obstacles by [`Checker::check_against`].
+/// Slots are reused (smallest free id first) so ids are deterministic. A via lists its layers;
+/// one without listed layers blocks every layer. Insert and remove are
+/// O(cells covered by the item); the clearance of an indexed item is resolved by the checker.
+#[derive(Clone)]
+pub struct ItemIndex {
+    cell: f64,
+    /// Obstacle and the grid keys it was placed under.
+    obstacles: Vec<Option<(Obstacle, Vec<u32>)>>,
+    grids: HashMap<u32, Grid<usize>>,
+    free: BinaryHeap<Reverse<usize>>,
+    live: usize,
+}
+
+impl ItemIndex {
+    /// `cell` = [`Checker::cell`].
+    pub fn new(cell: f64) -> ItemIndex {
+        ItemIndex {
+            cell,
+            obstacles: Vec::new(),
+            grids: HashMap::new(),
+            free: BinaryHeap::new(),
+            live: 0,
+        }
+    }
+
+    /// Index `item`; returns its id (label `item:<id>`). O(cells covered).
+    pub fn insert(&mut self, item: &Item) -> usize {
+        let (net, track) = item_track(item);
+        let id = match self.free.pop() {
+            Some(Reverse(i)) => i,
+            None => {
+                self.obstacles.push(None);
+                self.obstacles.len() - 1
+            }
+        };
+        let (keys, kind, hole) = match item {
+            Item::Track(t) => (vec![t.layer], Kind::Track, None),
+            Item::Via(v) => {
+                let keys =
+                    if v.layers.is_empty() || (v.layers.contains(&0) && v.layers.contains(&2)) {
+                        vec![WILD]
+                    } else {
+                        v.layers.clone()
+                    };
+                let hole = (v.drill > 0).then_some(Track {
+                    prim: track.prim,
+                    w: v.drill as f64,
+                });
+                (keys, Kind::Via, hole)
+            }
+        };
+        let o = Obstacle {
+            hole,
+            geo: Geo::Track(track),
+            net,
+            kind,
+            label: format!("item:{id}"),
+            own_clr: 0.0,
+            tie_nets: Vec::new(),
+        };
+        let bb = o.bbox();
+        for &k in &keys {
+            let cell = self.cell;
+            self.grids
+                .entry(k)
+                .or_insert_with(|| Grid::new(cell))
+                .insert(bb, id);
+        }
+        self.obstacles[id] = Some((o, keys));
+        self.live += 1;
+        id
+    }
+
+    /// Drop item `id` (no-op if absent) and free its slot. O(cells covered).
+    pub fn remove(&mut self, id: usize) {
+        let Some((o, keys)) = self.obstacles.get_mut(id).and_then(Option::take) else {
+            return;
+        };
+        let bb = o.bbox();
+        for k in keys {
+            if let Some(g) = self.grids.get_mut(&k) {
+                g.remove(bb, id);
+                if g.is_empty() {
+                    self.grids.remove(&k);
+                }
+            }
+        }
+        self.free.push(Reverse(id));
+        self.live -= 1;
+    }
+
+    pub fn len(&self) -> usize {
+        self.live
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.live == 0
     }
 }
