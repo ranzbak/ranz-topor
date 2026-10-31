@@ -129,34 +129,57 @@ fn refine(a: &Prim, b: &Prim, mut ta: f64, mut tb: f64) -> f64 {
     }
     best.sqrt()
 }
+/// Local minima of a nearest-partner profile (index, partner) — `d[k] <= d[k±1]`.
+fn local_minima(d: &[(f64, usize)]) -> Vec<(f64, usize, usize)> {
+    let n = d.len();
+    (0..n)
+        .filter(|&k| (k == 0 || d[k].0 <= d[k - 1].0) && (k == n - 1 || d[k].0 <= d[k + 1].0))
+        .map(|k| (d[k].0, k, d[k].1))
+        .collect()
+}
 /// Dense-sampling oracle refined locally around the best sample pairs: a numerical
 /// minimum accurate to well below 1 nm (not closed-form; test-only).
+///
+/// Refinement seeds are the local minima of the nearest-partner profile seen from
+/// *both* curves plus the four endpoints with their nearest partner. The minimum of
+/// two curves is always at an endpoint of one of them or at an interior stationary
+/// pair, so the endpoint seeds are what makes the oracle robust when one curve is
+/// shorter than the other's sample spacing (regression_arc_arc_short_arc_endpoint:
+/// the only a-side local minimum partnered the short arc's far endpoint, and the
+/// refinement sat behind a ridge of the distance-along-b profile, 19 nm too high).
 fn sampled(a: &Prim, b: &Prim) -> f64 {
     let sa = samples(a);
     let sb = samples(b);
-    // best partner per a-sample
-    let mut rows: Vec<(f64, usize, usize)> = Vec::with_capacity(N);
+    // nearest partner per a-sample (rows) and per b-sample (cols)
+    let mut rows: Vec<(f64, usize)> = vec![(f64::INFINITY, 0); N];
+    let mut cols: Vec<(f64, usize)> = vec![(f64::INFINITY, 0); N];
     for (i, p) in sa.iter().enumerate() {
-        let (mut bj, mut bd) = (0, f64::INFINITY);
         for (j, q) in sb.iter().enumerate() {
             let d = (*p - *q).len2();
-            if d < bd {
-                bd = d;
-                bj = j;
+            if d < rows[i].0 {
+                rows[i] = (d, j);
+            }
+            if d < cols[j].0 {
+                cols[j] = (d, i);
             }
         }
-        rows.push((bd, i, bj));
     }
-    let mut cands: Vec<(f64, usize, usize)> = (0..N)
-        .filter(|&i| {
-            (i == 0 || rows[i].0 <= rows[i - 1].0) && (i == N - 1 || rows[i].0 <= rows[i + 1].0)
-        })
-        .map(|i| rows[i])
+    let mut seeds: Vec<(f64, usize, usize)> = Vec::new();
+    let mut row_min = local_minima(&rows);
+    row_min.sort_by(|x, y| x.0.total_cmp(&y.0));
+    seeds.extend(row_min.into_iter().take(12));
+    let mut col_min: Vec<(f64, usize, usize)> = local_minima(&cols)
+        .into_iter()
+        .map(|(d, j, i)| (d, i, j))
         .collect();
-    cands.sort_by(|x, y| x.0.total_cmp(&y.0));
-    cands
+    col_min.sort_by(|x, y| x.0.total_cmp(&y.0));
+    seeds.extend(col_min.into_iter().take(12));
+    for k in [0, N - 1] {
+        seeds.push((rows[k].0, k, rows[k].1));
+        seeds.push((cols[k].0, cols[k].1, k));
+    }
+    seeds
         .iter()
-        .take(12)
         .map(|&(_, i, j)| refine(a, b, i as f64 / (N - 1) as f64, j as f64 / (N - 1) as f64))
         .fold(f64::INFINITY, f64::min)
 }
@@ -520,4 +543,80 @@ fn regression_round_rect_collapsed_core() {
         b: v(3e6, 1e6),
     });
     assert!((dist_prim_skeleton(&far, &sq) - 2.5e6).abs() < 1e-6);
+}
+
+/// The short arc of the pinned proptest seed 73bbee5d (dist_props.proptest-regressions).
+/// It lies just inside circle A and contains the point of its own circle nearest A's
+/// centre, so the radial gap along B is concave: a ridge at t ~ 0.82 with a local
+/// minimum at B's end (40965.568) and the global minimum at B's start (40946.756).
+fn short_arc_pair() -> (Arc, Arc) {
+    let a = Arc {
+        c: v(400000.0, 0.0),
+        r: 1461239.0573534225,
+        sigma: Orient::Ccw,
+        a_start: 4.122865603397133,
+        sweep: 5.529437672065165,
+    };
+    let b = Arc {
+        c: v(0.0, -1421260.1630519025),
+        r: 56203.11528607596,
+        sigma: Orient::Cw,
+        a_start: 1.3224416509457886,
+        sweep: 0.03159795681474856,
+    };
+    (a, b)
+}
+
+#[test]
+fn regression_arc_arc_short_arc_endpoint() {
+    // Found by prop_arc_arc_matches_sampling (debug run). arc_arc gave 40946.756, the
+    // sampling oracle 40965.568: the oracle's only seed partnered B's far endpoint and
+    // refined into the wrong basin. The implementation was right: the witness pair is
+    // B's start and its radial foot on A, which lies inside A's span.
+    let (a, b) = short_arc_pair();
+    let want = 40946.75600607041;
+    let q = b.start();
+    let foot = a.c + (q - a.c) * (a.r / (q - a.c).len());
+    assert!(a.contains_dir(foot));
+    assert!(((q - foot).len() - want).abs() < 1e-6);
+    // Fine scan of the radial gap along B (closest A point for each B point).
+    let scan = (0..=4000)
+        .map(|k| {
+            let q = b.point_at(k as f64 / 4000.0);
+            let foot = a.c + (q - a.c) * (a.r / (q - a.c).len());
+            assert!(a.contains_dir(foot));
+            (q - foot).len()
+        })
+        .fold(f64::INFINITY, f64::min);
+    assert!((scan - want).abs() < 1e-6, "scan={scan}");
+    assert!((arc_arc(&a, &b) - want).abs() < 1e-6, "{}", arc_arc(&a, &b));
+    assert!((arc_arc(&b, &a) - want).abs() < 1e-6, "{}", arc_arc(&b, &a));
+    // The repaired oracle agrees from either side.
+    let sd = sampled(&Prim::Arc(a), &Prim::Arc(b));
+    assert!((sd - want).abs() < 1e-3, "sampled={sd}");
+    let sd = sampled(&Prim::Arc(b), &Prim::Arc(a));
+    assert!((sd - want).abs() < 1e-3, "sampled={sd}");
+}
+
+#[test]
+fn regression_seg_arc_short_arc_endpoint() {
+    // Same short arc against the tangent of circle A at the radial foot of B's start:
+    // the gap along B has the same ridge, the segment's samples (3000 nm apart) are
+    // coarser than B (1776 nm), and the minimum is at B's start (= the radial gap).
+    // seg_arc's candidate set (endpoints, intersections, foot-of-centre pair) is
+    // complete for this configuration; the test pins it next to the arc-arc case.
+    let (a, b) = short_arc_pair();
+    let want = 40946.75600607041;
+    let u = (b.start() - a.c).unit().unwrap();
+    let f = a.c + u * a.r;
+    let s = Seg {
+        a: f - u.perp() * 3.0e6,
+        b: f + u.perp() * 3.0e6,
+    };
+    assert!((point_seg(b.start(), &s) - want).abs() < 1e-6);
+    assert!((seg_arc(&s, &b) - want).abs() < 1e-6, "{}", seg_arc(&s, &b));
+    let sd = sampled(&Prim::Seg(s), &Prim::Arc(b));
+    assert!((sd - want).abs() < 1e-3, "sampled={sd}");
+    let sd = sampled(&Prim::Arc(b), &Prim::Seg(s));
+    assert!((sd - want).abs() < 1e-3, "sampled={sd}");
 }
