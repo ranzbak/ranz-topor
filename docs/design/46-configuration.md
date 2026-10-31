@@ -74,7 +74,7 @@ and debugging. Concretely:
 
 Parse rule: `@` + one digit 1–3, followed by end of name or a non-digit, in the **last path
 segment** of the net name, after removing overbar markup `~{…}`. Names are never changed by
-topor; the marker is only read. `@` acceptance in KiCad 10 labels is UNVERIFIED — check before use.
+topor; the marker is only read. `@` in KiCad 10 net names: verified by the user (2026-10-31).
 
 | Convention | How to combine | Example |
 |---|---|---|
