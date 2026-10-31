@@ -214,6 +214,10 @@ def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path) -> s
     return "\n".join(lines[:SUMMARY_MAX])
 
 
+ENGINE_WALL_CLOCK_S = 60.0  # engine/src/model.rs Options::default().wall_clock_s
+MIN_RERUN_BUDGET_S = 1.0  # a DRC-loop / zero-slack re-route needs at least this much budget left
+
+
 def run_bench(
     board: str,
     out_dir: Path,
@@ -279,10 +283,18 @@ def run_bench(
     zero_slack: dict = {"status": "not attempted", "wires": []}
     zs_off = options.get("zero_slack_retry") is False
     rounds, router_s = 0, 0.0
+    # M3-R8: wall_clock_s is the budget of the whole bench run; later rounds get what is left.
+    total_budget = float(options.get("wall_clock_s", ENGINE_WALL_CLOCK_S))
+    budget_exhausted = False
+
+    def out_of_budget() -> bool:
+        return total_budget - router_s < MIN_RERUN_BUDGET_S
+
     while True:
         rounds += 1
         t_route = time.monotonic()
-        opts = {**options, "threads": threads, **({"pinned": pinned} if pinned else {}),
+        opts = {**options, "threads": threads,
+                **({"wall_clock_s": max(0.0, total_budget - router_s)} if rounds > 1 else {}), **({"pinned": pinned} if pinned else {}),
                 **({"drc_spots": spots} if spots else {}),
                 **({"zero_slack_retry": False} if zs_off else {})}
         routed = router(model, opts) if router is not None else []
@@ -310,6 +322,10 @@ def run_bench(
                        or len(routed_drc.unconnected) > 0)
                 if bad:
                     zero_slack = {"status": "rejected by DRC", "wires": wires}
+                    if out_of_budget():  # no time for the re-run: keep this board, flagged
+                        zero_slack["budget_exhausted"] = True
+                        budget_exhausted = True
+                        break
                     zs_off = True
                     shutil.copyfile(pre_route, cp.pcb)
                     b = load_board(cp)
@@ -328,6 +344,9 @@ def run_bench(
                     fresh.append(sp)
             if not fresh:
                 break
+            if out_of_budget():
+                budget_exhausted = True
+                break
             spots.extend(fresh)
             shutil.copyfile(pre_route, cp.pcb)
             b = load_board(cp)
@@ -337,6 +356,9 @@ def run_bench(
                                           router_report.get("wires") or [], names, reach).items()
                 if u not in pinned}
         if not more:
+            break
+        if out_of_budget():
+            budget_exhausted = True
             break
         pinned.update(more)
         shutil.copyfile(pre_route, cp.pcb)
@@ -372,7 +394,8 @@ def run_bench(
         "routed_items": len(write),
         "unchanged_items": unchanged,
         "replaced": replaced,
-        "drc_loop": {"rounds": rounds, "pinned": pinned, "spots": spots},
+        "drc_loop": {"rounds": rounds, "pinned": pinned, "spots": spots,
+                     "budget_exhausted": budget_exhausted},
         "zero_slack": zero_slack,
         "teardrops_removed": teardrops_removed,
         "router_report": router_report,
