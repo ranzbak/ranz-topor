@@ -12,10 +12,10 @@ What a run does and how long it may take.
 
 | Key | Type | Default | Unit | Range | Description |
 |---|---|---|---|---|---|
-| `timeout_s` | float | `60` | s | 0 .. 86400 | Wall-clock limit of the whole run including DRC rounds; 0 or "none" disables it (Cancel is then the only stop). |
+| `timeout_s` | float | `60` | s | 0 .. 86400 | Limit on router time: all routing passes of the run together stop after this long; the pre-flight DRC, the DRC rounds and the kicad-cli refill / preview exports are not counted. 0 or "none" disables it (Cancel is then the only stop). |
 | `threads` | int | `0` |  | 0 .. 256 | Worker threads; 0 = all cores but one. |
 | `partial_routes` | bool | `false` |  | true\|false | Keep the connections that did route when others fail, instead of discarding the whole result. |
-| `existing_copper` | str | `"fixed"` |  | fixed\|smooth\|rip | Policy for existing tracks and vias: fixed = obstacle, smooth = keep topology but smooth, rip = re-route. |
+| `existing_copper` | str | `"fixed"` |  | fixed\|smooth\|rip | Policy for existing tracks and vias: fixed = obstacle, smooth = keep topology but smooth, rip = re-route. (smooth is treated as fixed in 0.4.0.) |
 | `respect_locked` | bool | `true` |  | true\|false | Treat locked tracks and vias as fixed obstacles; false lets topor rip or smooth them. KiCad: KiCad → item Properties → Locked. |
 | `keep_unconnected_vias` | bool | `true` |  | true\|false | Never rip a via that no track of its own net touches (stitching vias without KiCad's free flag); false rips them like routing vias. KiCad: KiCad → via Properties → Free. |
 | `scope_mode` | str | `"between"` |  | between\|touching | With a footprint selection: between = connections whose pads are all on selected footprints; touching = any connection with a selected pad. KiCad: KiCad → select footprints in the PCB editor. |
@@ -23,7 +23,7 @@ What a run does and how long it may take.
 | `fail_on_preexisting` | bool | `false` |  | true\|false | Abort when kept or locked copper already has DRC violations; false only lists them as pre-existing. |
 | `kicad_cleanup` | bool | `false` |  | true\|false | After Accept, open KiCad's own Cleanup Tracks and Vias dialog (you confirm it there). |
 | `kicad_teardrops` | bool | `false` |  | true\|false | After Accept, open KiCad's teardrop dialog (you confirm it there). |
-| `detour_reference` | bool | `true` |  | true\|false | Compare every routed connection with a DRC-feasible direct path and report detours in the run report. |
+| `detour_reference` | bool | `true` |  | true\|false | Compare every routed connection with a DRC-feasible direct path and report detours in the run report. (No effect in 0.4.0; applied from 0.5.0.) |
 
 ## `[nets]`
 
@@ -34,13 +34,13 @@ Which nets are touched, how they are classified and prioritised.
 | `do_not_touch` | list | `[]` |  | any | Net names or glob patterns whose copper is a fixed obstacle and never routed, ripped or smoothed. |
 | `power_pattern` | str | `"^(\\+\|-)?\\d\|^(V\|VCC\|VDD\|VBAT\|GND\|AGND\|PWR)"` |  | any | Regex naming power nets, applied only to nets still in the Default netclass; the pre-flight lists every net classified this way. KiCad: KiCad → File → Board Setup → Design Rules → Net Classes (a netclass wins over this pattern). |
 | `ground_pattern` | str | `"^/?(GND\|AGND\|DGND\|PGND\|SGND\|VSS)"` |  | any | Regex (case-insensitive) naming ground nets, used to check that a GND plane layer has a ground zone; power nets use power_pattern. |
-| `priority` | table | `{}` |  | any | Net name or glob → priority 1..3 (1 routed first). Precedence: the @N name marker wins over a topor_pN netclass, which wins over this table; an exact name here wins over a glob (lowest number among matching globs). In 0.4.0 priorities are computed and reported; the engine uses them from 0.5.0. KiCad: KiCad → File → Board Setup → Design Rules → Net Classes (netclass topor_p1..p3) or the @N marker in the net name. |
-| `pour_served` | table | `{}` |  | any | Net name → true/false to force or forbid serving a net by a copper pour; absent = automatic. |
-| `ignore_pads` | list | `[]` |  | any | Pads (REF.PAD, e.g. "U1.3") skipped as terminals, typically pads outside the board; written by the pre-flight dialog. |
+| `priority` | table | `{}` |  | any | Net name or glob → priority 1..3 (1 routed first). Precedence: the @N name marker wins over a topor_pN netclass, which wins over this table; an exact name here wins over a glob (lowest number among matching globs). (In 0.4.0 priorities are computed and reported, but the routing order does not follow them yet; from 0.5.0.) KiCad: KiCad → File → Board Setup → Design Rules → Net Classes (netclass topor_p1..p3) or the @N marker in the net name. |
+| `pour_served` | table | `{}` |  | any | Net name → true/false to force or forbid serving a net by a copper pour; absent = automatic. (No effect in 0.4.0; applied from 0.5.0.) |
+| `ignore_pads` | list | `[]` |  | any | Pads (REF.PAD, e.g. "U1.3") skipped as terminals, typically pads outside the board; written by the pre-flight dialog. (In 0.4.0 applied to a footprint / pad selection scope only: a whole-board run still routes to these pads; whole board from 0.5.0.) |
 
 ## `[vias]`
 
-Via cost, count and size policy (sizes themselves come from KiCad).
+Via cost, count and size policy (each net routes with its KiCad net class via, plus smaller fab-profile vias where space requires; see operate.md, Fab minimums).
 
 | Key | Type | Default | Unit | Range | Description |
 |---|---|---|---|---|---|
@@ -133,8 +133,8 @@ PathFinder constants; change only when you know the router.
 |---|---|
 | Clearance | KiCad → File → Board Setup → Design Rules → Constraints |
 | Track widths | KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Track Widths and netclass track width |
-| Via sizes and pre-defined vias | KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias and netclass via size/drill |
-| Minimum via, hole and annular ring | KiCad → File → Board Setup → Design Rules → Constraints |
+| Via sizes | KiCad → File → Board Setup → Design Rules → Net Classes (via size / hole per net; Pre-defined Sizes → Vias are not routed with before 0.5.0) |
+| Minimum via, hole and annular ring | KiCad → File → Board Setup → Design Rules → Constraints (values below topor's fab floors are raised; see operate.md, Fab minimums) |
 | Copper-to-edge clearance | KiCad → File → Board Setup → Design Rules → Constraints → Copper to Edge Clearance |
 | Netclasses and net assignments | KiCad → File → Board Setup → Design Rules → Net Classes |
 | Custom rules | KiCad → File → Board Setup → Design Rules → Custom Rules (.kicad_dru) |
