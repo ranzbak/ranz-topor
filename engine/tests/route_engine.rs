@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 use topor_engine::cdt::Crossing;
 use topor_engine::check::Checker;
+use topor_engine::geom::quant::TrackPrim;
 use topor_engine::geom::Vec2;
-use topor_engine::model::{BoardModel, ExistingCopper, Options};
+use topor_engine::model::{BoardModel, ExistingCopper, Item, Options};
 use topor_engine::obstacle::ObstacleSet;
 use topor_engine::route::{route, wire_stats, RouteResult};
 use topor_engine::sketch::{
@@ -320,4 +321,79 @@ fn split_vertex_bend_is_reported_not_silently_dropped() {
     assert!(sketch_from_crossings(0, start, goal, cr, &ls)
         .seq
         .is_empty());
+}
+
+/// VCC pads 1 (20,20) / 2 (35,28) walled off by a locked GND track y = 24 mm between two GND pads
+/// at the board sides (0.7 mm gap to the outline: a 0.25 mm wire needs 0.95 mm).
+fn wall_model() -> BoardModel {
+    model(
+        &[
+            P("A", "1", 1, 20.0, 20.0, 1.0, "[0]"),
+            P("A", "2", 1, 35.0, 28.0, 1.0, "[0]"),
+            P("W", "1", 3, 1.2, 24.0, 1.0, "[0]"),
+            P("W", "2", 3, 48.8, 24.0, 1.0, "[0]"),
+        ],
+        r#""kept": [ { "uuid": "wall", "net": 3, "layer": 0, "width": 250000, "locked": true,
+            "prim": { "kind": "seg", "a": [1200000, -24000000], "b": [48800000, -24000000] } } ],"#,
+    )
+}
+
+#[test]
+fn partial_off_emits_nothing_for_blocked_connection() {
+    let m = wall_model();
+    let r = route(&m, &opts());
+    assert_eq!(r.failed, 1, "{:?}", r.connections);
+    assert_eq!(r.partial, 0);
+    assert!(r.items.is_empty());
+    let p = r.connections[0].blocking.expect("blocking point");
+    assert!((p[1].abs() - 24_000_000).abs() <= 1_000_000, "{p:?}");
+}
+
+#[test]
+fn partial_on_emits_two_checked_stubs() {
+    let m = wall_model();
+    let o = Options {
+        partial_routes: true,
+        ..opts()
+    };
+    let r = route(&m, &o);
+    assert_eq!(r.partial, 1, "{:?}", r.connections);
+    assert_eq!(r.connections[0].status, "partial");
+    assert!(r.items.len() >= 2);
+    for it in &r.items {
+        let Item::Track(t) = it else {
+            panic!("non-track item")
+        };
+        assert_eq!(t.group.as_deref(), Some("topor-partial"));
+        assert_eq!(t.wire, Some(0));
+    }
+    // Far ends: distance to the wall centreline (y = 24 mm) is the 0.455 mm clearance.
+    let ends: Vec<f64> = r
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Track(t) => Some(t),
+            _ => None,
+        })
+        .flat_map(|t| match t.prim {
+            TrackPrim::Seg { a, b } => [a, b],
+            TrackPrim::Arc { start, end, .. } => [start, end],
+        })
+        .map(|p| (p.y as f64 + 24.0 * MM).abs())
+        .collect();
+    let near = ends.iter().cloned().fold(f64::MAX, f64::min);
+    assert!((455_000.0..=460_000.0).contains(&near), "{ends:?}");
+    assert_eq!(
+        ends.iter().filter(|d| **d < 470_000.0).count(),
+        2,
+        "{ends:?}"
+    );
+    let c = Options {
+        margin_nm: 0,
+        ..Options::default()
+    };
+    let rep = Checker::new(&m, &c).check_items(&r.items);
+    assert!(rep.violations.is_empty(), "{:?}", rep.violations);
+    let p = r.connections[0].blocking.expect("blocking point");
+    assert!((p[1].abs() - 24_000_000).abs() <= 1_000_000, "{p:?}");
 }

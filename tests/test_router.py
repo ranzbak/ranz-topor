@@ -143,3 +143,36 @@ def test_bench_summary_prints_partial_line(fixture_board, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "  partial=2" in out
     assert "  route: routed 2/4 connections, 1/2 nets, partial 2, failed 0" in out
+
+
+# ---- T10 (M2): partial_routes ----
+
+
+def _wall_pcb(tmp_path):
+    return make_fixture_board(tmp_path / "src" / "wall.kicad_pcb", pads=("1", "6"), wall=True,
+                              locked_track=False, arc=False)
+
+
+def test_partial_routes_off_leaves_net_unconnected(engine, tmp_path):
+    pcb = _wall_pcb(tmp_path)
+    r = bench.run_bench("wall", tmp_path / "o", router=route_router, rip="all", pcb_override=pcb,
+                        options={"partial_routes": False})
+    assert r["routed_items"] == 0 and r["router_report"]["connections"][0]["status"] == "failed"
+    assert r["routed_drc"]["incomplete"]["unconnected_items"] == 1 and r["routed_drc"]["routing_new"] == 0
+
+
+def test_partial_routes_on_writes_grouped_stubs(engine, tmp_path):
+    pcb = _wall_pcb(tmp_path)
+    r = bench.run_bench("wall", tmp_path / "o", router=route_router, rip="all", pcb_override=pcb,
+                        options={"partial_routes": True})
+    assert r["routed_items"] >= 2
+    b = pcbnew.LoadBoard(str(tmp_path / "o" / "wall-work" / "wall.kicad_pcb"))
+    grp = [g for g in b.Groups() if g.GetName() == "topor-partial"]
+    assert len(grp) == 1
+    # the fixture's free GND via is dangling in the source board already (baseline, not new)
+    base_vias = r["orig_drc"]["violations"].get("via_dangling", 0)
+    assert r["routed_drc"]["incomplete"] == {"track_dangling": 2, "via_dangling": base_vias,
+                                             "unconnected_items": 1}
+    assert r["routed_drc"]["routing_new"] == 0
+    assert abs(r["router_report"]["connections"][0]["blocking"][1] / 1e6 - 24.0) <= 1.0
+    assert r["route"]["partial"] == 1

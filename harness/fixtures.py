@@ -52,6 +52,7 @@ def make_fixture_board(
     free_via=True,
     transition_via=False,
     vcc_stub=False,
+    wall=False,
 ) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -171,6 +172,17 @@ def make_fixture_board(
         track((25, 20), (25, 28), "SIG")
     if vcc_stub:
         track((20, 20), (27, 24), "VCC", locked=True)
+    if wall:
+        # Locked GND wall across the board at y=24: the 0.7 mm left to the outline cannot take a
+        # 0.25 mm wire (0.2 + 0.25 + 0.5 = 0.95 mm), so pads above/below are walled off.
+        wfp = pcbnew.FOOTPRINT(b)
+        wfp.SetReference("W1")
+        wfp.SetValue("W1")
+        wfp.SetPosition(_v(0, 0))
+        b.Add(wfp)
+        for num, x in (("7", 1.2), ("8", 48.8)):
+            _add_pad(wfp, num, pcbnew.PAD_SHAPE_CIRCLE, (1.0, 1.0), (x, 24), nets["GND"], drill=(0.5, 0.5))
+        track((1.2, 24), (48.8, 24), "GND", locked=True)
 
     v = pcbnew.PCB_VIA(b)
     v.SetPosition(_v(5, 5))

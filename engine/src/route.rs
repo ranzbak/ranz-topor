@@ -15,20 +15,21 @@
 use crate::cdt::Crossing;
 use crate::check::Checker;
 use crate::decompose::{decompose, terminal_of, Connection, TermKind, TermRef};
-use crate::geom::quant::{quantise_chain, TrackPrim};
+use crate::geom::quant::{quantise_chain, round_nm, TrackPrim};
 use crate::geom::{dequantise, Prim, Skeleton, Vec2};
 use crate::graph::{GraphRules, RouteGraph, TerminalInfo};
 use crate::model::{flip_track, via_layers, BoardModel, ExistingCopper, Item, Options, TrackItem};
-use crate::negotiate::{detect_clinches, overused_conns, ClinchReport, Negotiator};
+use crate::negotiate::{detect_clinches, overused_conns, BlockInfo, ClinchReport, Negotiator};
 use crate::obstacle::{ObstacleSet, TerminalObstacle};
 use crate::relax::relax;
+use crate::search::SlotPath;
 use crate::sketch::{
     build_layer_cdt, sketch_from_crossings, stack_order, unanchored_bends, AnchorRef,
     ConstraintSet, LayerSketch, Sketch,
 };
 use crate::smooth::{deadline_after, hand_outside, outside_len, terminal_skeletons};
 use crate::taut::TautError;
-use crate::wires::{extract_wires, Wire};
+use crate::wires::{extract_wires, Terminal, Wire};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Instant;
@@ -409,6 +410,445 @@ fn metrize(cx: &Ctx, g: &RouteGraph, routed: &[usize]) -> Metrized {
     out
 }
 
+/// Bisection steps of the stub length (`λ` resolution < 3 nm on a board).
+const STUB_BISECT_STEPS: u32 = 24;
+/// Group name of the emitted stubs.
+const PARTIAL_GROUP: &str = "topor-partial";
+
+enum Partial {
+    Stubs(PartialOk),
+    /// Stubs were drawn but none survived the self-check.
+    Dropped,
+}
+
+struct PartialOk {
+    items: Vec<TrackItem>,
+    stubs: usize,
+    len: f64,
+    out: f64,
+    pattern: String,
+    anchors: usize,
+    crossings: usize,
+}
+
+/// Crossing of edge `e` at ghost slot `slot` entered from face `prev` (ghost entries are not in
+/// the graph, so the slot interval count is `cross.len() + 2`).
+fn ghost_crossing(g: &RouteGraph, e: usize, slot: usize, prev: usize) -> Crossing {
+    let ge = &g.edges[e];
+    let (left, right) = if ge.faces[0] == Some(prev) {
+        (ge.b, ge.a)
+    } else {
+        (ge.a, ge.b)
+    };
+    let from_a = (slot.min(ge.cross.len()) as f64 + 1.0) / (ge.cross.len() as f64 + 2.0);
+    let t = if left == ge.a { from_a } else { 1.0 - from_a };
+    Crossing { left, right, t }
+}
+
+fn crossing_point(g: &RouteGraph, c: &Crossing) -> Vec2 {
+    let (l, r) = (g.verts[c.left].at, g.verts[c.right].at);
+    l + (r - l) * c.t
+}
+
+/// Straight stub item (engine frame in, KiCad frame out) of connection `c`.
+fn stub_item(c: &Connection, a: Vec2, b: Vec2) -> TrackItem {
+    TrackItem {
+        net: c.net,
+        layer: c.layer,
+        width: c.width,
+        prim: flip_track(TrackPrim::Seg {
+            a: round_nm(a),
+            b: round_nm(b),
+        }),
+        group: None,
+        wire: None,
+    }
+}
+
+/// One stub candidate: the wire from `start` along `crossings` to the junction `end`.
+struct StubSpec {
+    conn: usize,
+    start: Terminal,
+    end: Vec2,
+    crossings: Vec<Crossing>,
+}
+
+/// Longest stub `q -> p0` (largest `λ`) that stays clear at margin `ε` of the model and `base`.
+fn bisect_stub(
+    checker: &Checker,
+    c: &Connection,
+    base: &[Item],
+    q: Vec2,
+    p0: Vec2,
+) -> Option<Vec2> {
+    let ok = |lam: f64| {
+        let p = q + (p0 - q) * lam;
+        let mut items: Vec<Item> = base.to_vec();
+        items.push(Item::Track(stub_item(c, q, p)));
+        let last = items.len() - 1;
+        !checker
+            .check_items(&items)
+            .violations
+            .iter()
+            .any(|v| v.item == last)
+    };
+    let (mut lo, mut hi) = (0.0f64, 1.0f64);
+    if ok(1.0) {
+        return Some(p0);
+    }
+    for _ in 0..STUB_BISECT_STEPS {
+        let mid = 0.5 * (lo + hi);
+        if ok(mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    (lo > 0.0).then(|| q + (p0 - q) * lo)
+}
+
+/// A located block: both stubs of a failed connection aim at `p0`.
+struct Blk {
+    p0: Vec2,
+    /// Reported blocking point (KiCad frame) when `Res::Fail` carries none.
+    report: Option<[i64; 2]>,
+}
+
+/// Uniform samples per portal edge of the geometric block probe.
+const PROBE_SAMPLES: usize = 16;
+/// Extra samples at these distances (nm) from either end of a portal edge (narrow places sit
+/// next to the obstacles that are the edge's endpoints).
+const PROBE_NEAR_NM: [f64; 6] = [
+    400_000.0,
+    800_000.0,
+    1_200_000.0,
+    1_600_000.0,
+    2_400_000.0,
+    3_200_000.0,
+];
+
+fn edge_samples(g: &RouteGraph, e: usize) -> Vec<Vec2> {
+    let ge = &g.edges[e];
+    let (a, b) = (g.verts[ge.a].at, g.verts[ge.b].at);
+    let len = (b - a).len().max(1.0);
+    let mut ts: Vec<f64> = (1..=PROBE_SAMPLES)
+        .map(|k| k as f64 / (PROBE_SAMPLES as f64 + 1.0))
+        .collect();
+    for d in PROBE_NEAR_NM {
+        if d < 0.5 * len {
+            ts.push(d / len);
+            ts.push(1.0 - d / len);
+        }
+    }
+    ts.iter().map(|&t| a + (b - a) * t).collect()
+}
+
+/// First face step of a slot path that no straight wire can cross (the path is search-feasible
+/// but geometrically blocked, e.g. a gap between a pad and a wall narrower than the wire):
+/// returns the tightest spot of the least-violating crossing.
+fn probe_path(
+    g: &RouteGraph,
+    checker: &Checker,
+    c: &Connection,
+    base: &[Item],
+    path: &SlotPath,
+) -> Option<Vec2> {
+    let n = path.crossings.len();
+    for j in 0..=n {
+        let a: Vec<Vec2> = if j == 0 {
+            vec![c.from.at]
+        } else {
+            edge_samples(g, path.crossings[j - 1].0)
+        };
+        let b: Vec<Vec2> = if j == n {
+            vec![c.to.at]
+        } else {
+            edge_samples(g, path.crossings[j].0)
+        };
+        let mut items = base.to_vec();
+        let mut pairs: Vec<(Vec2, Vec2)> = Vec::new();
+        for &p in &a {
+            for &q in &b {
+                items.push(Item::Track(stub_item(c, p, q)));
+                pairs.push((p, q));
+            }
+        }
+        let rep = checker.check_items(&items);
+        let mut deficit = vec![0.0f64; pairs.len()];
+        for v in &rep.violations {
+            if v.item >= base.len() {
+                let d = &mut deficit[v.item - base.len()];
+                *d = d.max((v.required - v.gap) as f64);
+            }
+        }
+        if deficit.contains(&0.0) {
+            continue;
+        }
+        let k = (0..pairs.len()).min_by(|&x, &y| deficit[x].total_cmp(&deficit[y]))?;
+        // Pinch: the tightest spot along the least-violating segment.
+        let (p, q) = pairs[k];
+        let mut items = base.to_vec();
+        let dots: Vec<Vec2> = (0..=32).map(|m| p + (q - p) * (m as f64 / 32.0)).collect();
+        items.extend(dots.iter().map(|&d| Item::Track(stub_item(c, d, d))));
+        // Most obstacles squeezing the dot, then the largest shortfall, then nearest the middle.
+        let mut hits: Vec<Vec<&str>> = vec![Vec::new(); dots.len()];
+        let mut worst = vec![0.0f64; dots.len()];
+        let rep = checker.check_items(&items);
+        for v in &rep.violations {
+            if v.item >= base.len() {
+                let k = v.item - base.len();
+                worst[k] = worst[k].max((v.required - v.gap) as f64);
+                if !hits[k].contains(&v.against.as_str()) {
+                    hits[k].push(v.against.as_str());
+                }
+            }
+        }
+        let m = (0..dots.len())
+            .max_by(|&x, &y| {
+                hits[x]
+                    .len()
+                    .cmp(&hits[y].len())
+                    .then(worst[x].total_cmp(&worst[y]))
+                    .then(x.abs_diff(16).cmp(&y.abs_diff(16)).reverse())
+            })
+            .unwrap_or(0);
+        return Some(dots[m]);
+    }
+    None
+}
+
+/// Blocks of the failed connections of the best iteration: ghost blocks (`BlockInfo`) and, for
+/// connections that found a slot path which then failed metrization, the geometric probe.
+fn collect_blocks(
+    cx: &Ctx,
+    g: &RouteGraph,
+    best: &Snap,
+    checker: &Checker,
+    base: &[Item],
+) -> BTreeMap<usize, Blk> {
+    let mut out: BTreeMap<usize, Blk> = BTreeMap::new();
+    for (&i, b) in &best.blocked {
+        let (Some(gp), Some(e_b)) = (&b.ghost, b.edge) else {
+            continue;
+        };
+        if matches!(best.res.get(i), Some(Res::Fail { perm: true, .. })) {
+            continue;
+        }
+        let Some(k) = gp.crossings.iter().position(|&(e, _)| e == e_b) else {
+            continue;
+        };
+        if gp.faces.len() != gp.crossings.len() + 1 {
+            continue;
+        }
+        let p0 = crossing_point(
+            g,
+            &ghost_crossing(g, gp.crossings[k].0, gp.crossings[k].1, gp.faces[k]),
+        );
+        out.insert(i, Blk { p0, report: None });
+    }
+    for (i, r) in best.res.iter().enumerate() {
+        let Res::Fail { perm: false, .. } = r else {
+            continue;
+        };
+        if out.contains_key(&i) || best.blocked.contains_key(&i) {
+            continue;
+        }
+        let Some(Some(path)) = best.paths.get(i) else {
+            continue;
+        };
+        if path.faces.len() != path.crossings.len() + 1 && !path.crossings.is_empty() {
+            continue;
+        }
+        let c = &cx.conns[i];
+        if let Some(p0) = probe_path(g, checker, c, base, path) {
+            out.insert(
+                i,
+                Blk {
+                    p0,
+                    report: Some(kicad(p0)),
+                },
+            );
+        }
+    }
+    out
+}
+
+/// Stubs of the failed connections of the best iteration (note §6).
+fn partial_pass(
+    cx: &Ctx,
+    blocks: &BTreeMap<usize, Blk>,
+    eps_checker: &Checker,
+    mut base: Vec<Item>,
+    orig: &[usize],
+) -> BTreeMap<usize, Partial> {
+    let mut result: BTreeMap<usize, Partial> = BTreeMap::new();
+    let routed = base.clone();
+    let mut specs: Vec<StubSpec> = Vec::new();
+    for (&i, b) in blocks {
+        let c = &cx.conns[i];
+        for start in [terminal_of(&c.from), terminal_of(&c.to)] {
+            let q = start.at();
+            let Some(p) = bisect_stub(eps_checker, c, &base, q, b.p0) else {
+                continue;
+            };
+            let Ok(crossings) = cx.ls.cdt.crossings(&[q, p]) else {
+                continue;
+            };
+            base.push(Item::Track(stub_item(c, q, p)));
+            specs.push(StubSpec {
+                conn: i,
+                start,
+                end: p,
+                crossings,
+            });
+        }
+    }
+    if specs.is_empty() {
+        return result;
+    }
+    for sp in &specs {
+        result.entry(sp.conn).or_insert(Partial::Dropped);
+    }
+    // Metrize every stub together (one relax), quantise, then self-check at margin 0 against the
+    // routed items (earlier) and earlier stubs.
+    let mut wires: Vec<Wire> = Vec::new();
+    let mut sketches: Vec<Sketch> = Vec::new();
+    let mut spec_of: Vec<usize> = Vec::new();
+    for (si, sp) in specs.iter().enumerate() {
+        let c = &cx.conns[sp.conn];
+        let start = sp.start.at();
+        if !unanchored_bends(start, sp.end, &sp.crossings, cx.ls).is_empty() {
+            continue;
+        }
+        let k = wires.len();
+        sketches.push(sketch_from_crossings(
+            k,
+            start,
+            sp.end,
+            sp.crossings.clone(),
+            cx.ls,
+        ));
+        wires.push(Wire {
+            id: k,
+            net: c.net,
+            layer: c.layer,
+            width: c.width,
+            start: sp.start.clone(),
+            goal: Terminal::Junction { at: sp.end },
+            hand: vec![start, sp.end],
+            kept_uuids: Vec::new(),
+            hand_len: 0.0,
+        });
+        spec_of.push(si);
+    }
+    if wires.is_empty() || Instant::now() >= cx.deadline {
+        return result;
+    }
+    let mut orders: HashMap<u32, HashMap<AnchorRef, Vec<usize>>> = HashMap::new();
+    for l in wires.iter().map(|w| w.layer).collect::<BTreeSet<_>>() {
+        orders.insert(l, stack_order(&sketches, cx.ls));
+    }
+    let r = relax(&wires, &sketches, cx.obs, &orders, cx.opts, cx.deadline);
+    if r.timed_out {
+        return result;
+    }
+    let n = wires.len();
+    let mut emit: Vec<Option<Vec<TrackItem>>> = vec![None; n];
+    let mut chains = Vec::new();
+    for (k, ch) in r.chains.into_iter().enumerate() {
+        match ch {
+            Ok(ch) => {
+                let q = quantise_chain(&ch.prims);
+                if !q.is_empty() {
+                    let w = &wires[k];
+                    emit[k] = Some(
+                        q.into_iter()
+                            .map(|t| TrackItem {
+                                net: w.net,
+                                layer: w.layer,
+                                width: w.width,
+                                prim: flip_track(t),
+                                group: Some(PARTIAL_GROUP.into()),
+                                wire: Some(orig[specs[spec_of[k]].conn]),
+                            })
+                            .collect(),
+                    );
+                }
+                chains.push(Some(ch));
+            }
+            Err(_) => chains.push(None),
+        }
+    }
+    let mut rounds = 0usize;
+    while rounds <= n {
+        rounds += 1;
+        let mut items = routed.clone();
+        let mut owner: Vec<usize> = Vec::new();
+        for (k, e) in emit.iter().enumerate() {
+            if let Some(e) = e {
+                for t in e {
+                    items.push(Item::Track(t.clone()));
+                    owner.push(k);
+                }
+            }
+        }
+        if owner.is_empty() || cx.opts.skip_self_check {
+            break;
+        }
+        let rep = cx.checker.check_items(&items);
+        let mut any = false;
+        for v in &rep.violations {
+            if v.item >= routed.len() && emit[owner[v.item - routed.len()]].take().is_some() {
+                any = true;
+            }
+        }
+        if !any {
+            break;
+        }
+    }
+    for k in 0..n {
+        let (Some(e), Some(ch)) = (emit[k].take(), chains[k].as_ref()) else {
+            continue;
+        };
+        let sks: Vec<Skeleton> = terminal_skeletons(cx.model, &wires[k]);
+        let len: f64 = e.iter().map(|t| dequantise(&t.prim).length()).sum();
+        let pat: String = e
+            .iter()
+            .map(|t| match t.prim {
+                TrackPrim::Seg { .. } => 'S',
+                TrackPrim::Arc { .. } => 'A',
+            })
+            .collect();
+        let out = outside_len(&ch.prims, &sks);
+        let ncross = sketches[k].crossings.len();
+        let slot = result
+            .get_mut(&specs[spec_of[k]].conn)
+            .expect("seeded above");
+        match slot {
+            Partial::Stubs(p) => {
+                p.items.extend(e);
+                p.stubs += 1;
+                p.len += len;
+                p.out += out;
+                p.pattern = format!("{}|{}", p.pattern, pat);
+                p.crossings += ncross;
+            }
+            Partial::Dropped => {
+                *slot = Partial::Stubs(PartialOk {
+                    items: e,
+                    stubs: 1,
+                    len,
+                    out,
+                    pattern: pat,
+                    anchors: 0,
+                    crossings: ncross,
+                });
+            }
+        }
+    }
+    result
+}
+
 #[derive(Clone)]
 struct Snap {
     routed: usize,
@@ -419,6 +859,8 @@ struct Snap {
     clinches: ClinchReport,
     relax_iterations: u32,
     rounds: u32,
+    blocked: BTreeMap<usize, BlockInfo>,
+    paths: Vec<Option<SlotPath>>,
 }
 
 fn layer_name(model: &BoardModel, id: u32) -> String {
@@ -510,6 +952,8 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
     let mut best: Option<Snap> = None;
     let (mut iterations, mut converged, mut timed_out) = (0u32, false, false);
     let mut setup_fail: Option<String> = None;
+    let mut partials: BTreeMap<usize, Partial> = BTreeMap::new();
+    let mut blocks: BTreeMap<usize, Blk> = BTreeMap::new();
 
     if m > 0 {
         // Obstacles: junction / dangling ends of copper attach points are terminals.
@@ -679,6 +1123,8 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                                 clinches: detect_clinches(&g, &live, &out.paths, &verts),
                                 relax_iterations: mt.relax_iterations,
                                 rounds: mt.rounds,
+                                blocked: out.blocked.clone(),
+                                paths: out.paths.clone(),
                             });
                         }
                         if failed.is_empty() && out.blocked.is_empty() && overuse == 0 {
@@ -693,6 +1139,24 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                         if active.is_empty() {
                             converged = true;
                             break;
+                        }
+                    }
+                    if !timed_out {
+                        if let Some(b) = &best {
+                            let eps_checker = Checker::new(model, opts);
+                            let base: Vec<Item> = b
+                                .res
+                                .iter()
+                                .filter_map(|r| match r {
+                                    Res::Ok(o) => Some(o),
+                                    _ => None,
+                                })
+                                .flat_map(|o| o.items.iter().cloned().map(Item::Track))
+                                .collect();
+                            blocks = collect_blocks(&cx, &g, b, &eps_checker, &base);
+                            if opts.partial_routes {
+                                partials = partial_pass(&cx, &blocks, &eps_checker, base, &orig);
+                            }
                         }
                     }
                 }
@@ -766,6 +1230,28 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                         } => {
                             rep.reason = reason.clone();
                             rep.blocking = *blocking;
+                            if rep.blocking.is_none() {
+                                rep.blocking = blocks.get(&i).and_then(|b| b.report);
+                            }
+                            match partials.get(&i) {
+                                Some(Partial::Stubs(p)) => {
+                                    rep.status = "partial".into();
+                                    rep.reason = format!(
+                                        "partial: {} stub(s) toward the blocking point",
+                                        p.stubs
+                                    );
+                                    rep.length_nm = p.len.round() as i64;
+                                    rep.length_outside_pads_nm = p.out.round() as i64;
+                                    rep.pattern = p.pattern.clone();
+                                    rep.anchors = p.anchors;
+                                    rep.crossings = p.crossings;
+                                    items.extend(p.items.iter().cloned().map(Item::Track));
+                                }
+                                Some(Partial::Dropped) => {
+                                    rep.reason = "partial stub failed self-check".into();
+                                }
+                                None => {}
+                            }
                         }
                     }
                 }
