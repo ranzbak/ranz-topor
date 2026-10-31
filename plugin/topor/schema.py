@@ -52,7 +52,7 @@ def _s(section, key, type_, default, doc, *, unit="", range=None, choices=None, 
 SECTIONS = {
     "run": "What a run does and how long it may take.",
     "nets": "Which nets are touched, how they are classified and prioritised.",
-    "vias": "Via cost, count and size policy (sizes themselves come from KiCad).",
+    "vias": "Via cost, count and size policy (each net routes with its KiCad net class via, plus smaller fab-profile vias where space requires; see operate.md, Fab minimums).",
     "layers": "Stackup roles per copper layer (F.Cu = \"signal\", In1.Cu = \"gnd\", ...) and per-layer preferences.",
     "search": "Path search tuning.",
     "ripup": "Rip-up and re-route escalation.",
@@ -63,12 +63,12 @@ SECTIONS = {
 
 SETTINGS: list[Setting] = [
     # ---- [run]
-    _s("run", "timeout_s", "float", 60, "Wall-clock limit of the whole run including DRC rounds; 0 or \"none\" disables it (Cancel is then the only stop).",
+    _s("run", "timeout_s", "float", 60, "Limit on router time: all routing passes of the run together stop after this long; the pre-flight DRC, the DRC rounds and the kicad-cli refill / preview exports are not counted. 0 or \"none\" disables it (Cancel is then the only stop).",
        unit="s", range=(0, 86400), engine="wall_clock_s"),
     _s("run", "threads", "int", 0, "Worker threads; 0 = all cores but one.", range=(0, 256), engine="threads"),
     _s("run", "partial_routes", "bool", False, "Keep the connections that did route when others fail, instead of discarding the whole result.",
        engine="partial_routes"),
-    _s("run", "existing_copper", "str", "fixed", "Policy for existing tracks and vias: fixed = obstacle, smooth = keep topology but smooth, rip = re-route.",
+    _s("run", "existing_copper", "str", "fixed", "Policy for existing tracks and vias: fixed = obstacle, smooth = keep topology but smooth, rip = re-route. (smooth is treated as fixed in 0.4.0.)",
        choices=("fixed", "smooth", "rip"), engine="existing_copper"),
     _s("run", "respect_locked", "bool", True, "Treat locked tracks and vias as fixed obstacles; false lets topor rip or smooth them.",
        kicad="KiCad → item Properties → Locked"),
@@ -82,17 +82,17 @@ SETTINGS: list[Setting] = [
     _s("run", "kicad_teardrops", "bool", False, "After Accept, open KiCad's teardrop dialog (you confirm it there)."),
     _s("run", "refill_after_accept", "bool", False, "After Accept, refill all zones from topor (a second undo step in KiCad). false = Accept is exactly one undo step; press B (Edit → Fill All Zones) yourself.",
        kicad="KiCad → Edit → Fill All Zones (B)"),
-    _s("run", "detour_reference", "bool", True, "Compare every routed connection with a DRC-feasible direct path and report detours in the run report."),
+    _s("run", "detour_reference", "bool", True, "Compare every routed connection with a DRC-feasible direct path and report detours in the run report. (No effect in 0.4.0; applied from 0.5.0.)"),
     # ---- [nets]
     _s("nets", "do_not_touch", "list", [], "Net names or glob patterns whose copper is a fixed obstacle and never routed, ripped or smoothed.",
        elem="str"),
     _s("nets", "power_pattern", "str", POWER_PATTERN, "Regex naming power nets, applied only to nets still in the Default netclass; the pre-flight lists every net classified this way.",
        kicad="KiCad → File → Board Setup → Design Rules → Net Classes (a netclass wins over this pattern)"),
     _s("nets", "ground_pattern", "str", "^/?(GND|AGND|DGND|PGND|SGND|VSS)", "Regex (case-insensitive) naming ground nets, used to check that a GND plane layer has a ground zone; power nets use power_pattern."),
-    _s("nets", "priority", "table", {}, "Net name or glob → priority 1..3 (1 routed first). Precedence: the @N name marker wins over a topor_pN netclass, which wins over this table; an exact name here wins over a glob (lowest number among matching globs). In 0.4.0 priorities are computed and reported; the engine uses them from 0.5.0.",
+    _s("nets", "priority", "table", {}, "Net name or glob → priority 1..3 (1 routed first). Precedence: the @N name marker wins over a topor_pN netclass, which wins over this table; an exact name here wins over a glob (lowest number among matching globs). (In 0.4.0 priorities are computed and reported, but the routing order does not follow them yet; from 0.5.0.)",
        kicad="KiCad → File → Board Setup → Design Rules → Net Classes (netclass topor_p1..p3) or the @N marker in the net name"),
-    _s("nets", "pour_served", "table", {}, "Net name → true/false to force or forbid serving a net by a copper pour; absent = automatic."),
-    _s("nets", "ignore_pads", "list", [], "Pads (REF.PAD, e.g. \"U1.3\") skipped as terminals, typically pads outside the board; written by the pre-flight dialog.",
+    _s("nets", "pour_served", "table", {}, "Net name → true/false to force or forbid serving a net by a copper pour; absent = automatic. (No effect in 0.4.0; applied from 0.5.0.)"),
+    _s("nets", "ignore_pads", "list", [], "Pads (REF.PAD, e.g. \"U1.3\") skipped as terminals, typically pads outside the board; written by the pre-flight dialog. (In 0.4.0 applied to a footprint / pad selection scope only: a whole-board run still routes to these pads; whole board from 0.5.0.)",
        elem="str"),
     # ---- [vias]
     _s("vias", "via_cost_mm", "float", 2.0, "Search cost of one via in mm of extra trace: the router accepts up to this much longer to avoid a via.",
@@ -168,15 +168,15 @@ ENGINE_INTERNAL = {
     "scope": "built per run from the KiCad selection and scope_mode, not stored",
     "net_priority": "built per run from @N markers, netclasses and [nets] priority",
     "via_cost_by_net": "built per run from [vias] cost_by_priority / cost_by_netclass",
-    "detour_reference_budget_pct": "internal budget of the detour reference search; run.detour_reference switches it",
+    "detour_reference_budget_pct": "internal budget of the detour reference search; run.detour_reference will switch it (0.5.0)",
 }
 
 # KiCad-owned behaviours, written as comment-only entries: (name, place)
 KICAD_ONLY = [
     ("Clearance", "KiCad → File → Board Setup → Design Rules → Constraints"),
     ("Track widths", "KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Track Widths and netclass track width"),
-    ("Via sizes and pre-defined vias", "KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias and netclass via size/drill"),
-    ("Minimum via, hole and annular ring", "KiCad → File → Board Setup → Design Rules → Constraints"),
+    ("Via sizes", "KiCad → File → Board Setup → Design Rules → Net Classes (via size / hole per net; Pre-defined Sizes → Vias are not routed with before 0.5.0)"),
+    ("Minimum via, hole and annular ring", "KiCad → File → Board Setup → Design Rules → Constraints (values below topor's fab floors are raised; see operate.md, Fab minimums)"),
     ("Copper-to-edge clearance", "KiCad → File → Board Setup → Design Rules → Constraints → Copper to Edge Clearance"),
     ("Netclasses and net assignments", "KiCad → File → Board Setup → Design Rules → Net Classes"),
     ("Custom rules", "KiCad → File → Board Setup → Design Rules → Custom Rules (.kicad_dru)"),

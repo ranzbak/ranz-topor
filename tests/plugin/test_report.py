@@ -76,6 +76,20 @@ def test_report_outcome_line_says_how_zones_are_refilled(tmp_path):
     assert line == f"Outcome: {outcome_text('rejected')}"
 
 
+def test_report_settings_list_fab_floors(tmp_path):
+    """F I-4: the design values the fab profile raised (toporlib.rules floors_applied) are in Settings."""
+    rep = build_report(_result(), DRC, Config.defaults(), [], "whole board", {}, {}, dir=tmp_path,
+                       facts={"floors_applied": [{"name": "min_track_width", "design": 150_000, "floor": 200_000},
+                                                 {"name": "hole_clearance", "design": 250_000, "floor": 350_000}]})
+    md = rep.to_markdown()
+    settings = md.split("## Settings\n", 1)[1].split("\n## ", 1)[0]
+    assert "Fab floors raised (JLCPCB 1 oz profile): min_track_width 0.15 → 0.2 mm, hole_clearance 0.25 → 0.35 mm" \
+        in settings, settings
+    none = build_report(_result(), DRC, Config.defaults(), [], "whole board", {}, {}, dir=tmp_path,
+                        facts={"floors_applied": []}).to_markdown()
+    assert "Fab floors raised (JLCPCB 1 oz profile): none" in none
+
+
 def test_report_summary_lines_le_20(tmp_path):
     res = _result(2000)
     res["connections"] += [_conn(1000 + i, "failed", f"NET{i}", reason="x" * 200) for i in range(500)]

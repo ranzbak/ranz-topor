@@ -453,6 +453,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     copy_text = pcb_copy.read_text()
     log.line(f"save_as copy: {pcb_copy} ({len(copy_text)} bytes)")
     rules = resolve_rules(port, pcb_copy, copy_text)
+    report.facts["floors_applied"] = list(rules.get("floors_applied") or [])  # report.md Settings (F I-4)
     pro_p = pcb_copy.with_suffix(".kicad_pro")
     try:
         pro = json.loads(pro_p.read_text()) if pro_p.is_file() else {}

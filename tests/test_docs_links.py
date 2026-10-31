@@ -121,6 +121,26 @@ def test_operate_md_reaches_every_kicad_setting_and_toml_key():
         assert f"[{sec}]" in text, f"operate.md does not mention the [{sec}] section"
 
 
+def test_operate_md_fab_floors_match_the_profile():
+    """F I-4: operate.md documents the fab floors with the values of toporlib.rules.JLCPCB_1OZ, the extra via
+    drills (routing_vias), where the report lists them, that pre-defined vias are not read and that no
+    topor.toml key turns the floors off."""
+    from toporlib.rules import JLCPCB_1OZ as P
+
+    text = (USER / "operate.md").read_text(encoding="utf-8")
+    sec = text.split("### Fab minimums and via sizes", 1)[1].split("\n### ", 1)[0]
+    mm = lambda nm: f"{nm / 1e6:g} mm"  # noqa: E731
+    for k in ("clearance", "width", "via_d_min_auto", "via_drill_min_auto", "annular_2l", "annular_4l",
+              "pth_hole_to_track", "hole_to_hole_via", "edge"):
+        assert mm(P[k]) in sec, (k, mm(P[k]))
+    assert ", ".join(f"{d / 1e6:g}" for d in P["routing_vias"]) + " mm" in sec
+    for words in ("JLCPCB", "Fab floors raised", "no `topor.toml` key", "not read", "0.5.0", "VIA_NOT_SET_UP"):
+        assert words in sec, words
+    lim = text.split("## Limitations", 1)[1]
+    assert "Cancel reacts within about a second while routing" in lim
+    assert "Do not edit the board while topor runs" in lim
+
+
 def test_operate_md_limitations_section():
     text = (USER / "operate.md").read_text(encoding="utf-8")
     assert "limitations" in anchors(USER / "operate.md")

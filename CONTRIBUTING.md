@@ -30,8 +30,9 @@ tools/build.sh --dev                    # ... and reinstall the wheel into .venv
 
 `tools/build.sh --dev` writes into KiCad's plugin environment
 (`~/.cache/kicad/10.0/python-environments/org.topor.router`): run it on your own machine, not from
-automated jobs. `KICAD_DOCUMENTS_HOME=<dir> tools/build.sh` installs into a scratch KiCad folder instead
-(that is what `tests/plugin/test_app.py` does). Version bumps change `engine/Cargo.toml`, `Cargo.lock`,
+automated jobs. `TOPOR_KICAD_HOME=<dir>/kicad/10.0 tools/build.sh` (versioned folder) or
+`KICAD_DOCUMENTS_HOME=<dir> tools/build.sh` (KiCad's unversioned root, `10.0` is appended) installs into a scratch
+KiCad folder instead (that is what `tests/plugin/test_app.py` does). Version bumps change `engine/Cargo.toml`, `Cargo.lock`,
 `plugin/plugin.json`, `plugin/requirements.txt`, `SHIPPED_VERSION` in `plugin/topor_plugin.py` and
 `CURRENT_VERSION` in `plugin/topor/schema.py` together (`tests/test_scaffold.py` compares the first four;
 `CURRENT_VERSION` decides which *since* keys are active).

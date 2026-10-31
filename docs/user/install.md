@@ -30,8 +30,10 @@ tools/build.sh         # builds the engine wheel and copies the plugin into KiCa
 ```
 
 `tools/build.sh` builds `target/wheels/topor_engine-0.4.0-*.whl` and installs the plugin to
-`~/.local/share/kicad/10.0/plugins/org.topor.router/` (set `KICAD_DOCUMENTS_HOME` to use another KiCad
-user folder; `TOPOR_VENV` to use another venv with `maturin`):
+`~/.local/share/kicad/10.0/plugins/org.topor.router/`. To install into another KiCad user folder set
+`TOPOR_KICAD_HOME` to the versioned folder (`TOPOR_KICAD_HOME=/some/dir/kicad/10.0` → `/some/dir/kicad/10.0/plugins/…`);
+`KICAD_DOCUMENTS_HOME` is honoured as KiCad reads it, the unversioned root (`/some/dir/kicad` → `10.0` is
+appended). `TOPOR_VENV` selects another venv with `maturin`:
 
 ```
 org.topor.router/
@@ -100,7 +102,7 @@ rm -rf ~/.cache/kicad/10.0/topor                                 # run reports a
 
 | Path | What |
 |---|---|
-| `~/.local/share/kicad/10.0/plugins/org.topor.router/` | the installed plugin (`KICAD_DOCUMENTS_HOME` overrides the root) |
+| `~/.local/share/kicad/10.0/plugins/org.topor.router/` | the installed plugin (`TOPOR_KICAD_HOME` = another `…/kicad/10.0` folder, or KiCad's `KICAD_DOCUMENTS_HOME` root + `10.0`) |
 | `~/.cache/kicad/10.0/python-environments/org.topor.router/` | the plugin's Python environment, made by KiCad |
 | `<project>/topor.toml` | per-project settings, created on the first run ([configuration.md](configuration.md)) |
 | `~/.cache/kicad/10.0/topor/<board>/<YYYYmmdd-HHMMSS>/` | one report folder per run ([operate.md](operate.md#report-folder)); `$TOPOR_REPORT_ROOT` or `$XDG_CACHE_HOME` move it, `[output] report_dir` in `topor.toml` redirects it |

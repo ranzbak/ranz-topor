@@ -4,14 +4,25 @@
 #   tools/build.sh --dev    additionally pip-reinstall the wheel into the dev venv and the KiCad venv
 # Environment overrides:
 #   TOPOR_VENV           venv holding maturin/pip (default: <repo>/.venv)
-#   KICAD_DOCUMENTS_HOME KiCad 10.0 user dir (default: ${XDG_DATA_HOME:-~/.local/share}/kicad/10.0)
+#   TOPOR_KICAD_HOME     the versioned KiCad 10.0 user dir to install into (e.g. ~/.local/share/kicad/10.0);
+#                        wins over KICAD_DOCUMENTS_HOME
+#   KICAD_DOCUMENTS_HOME as KiCad reads it: the UNversioned documents root (e.g. ~/.local/share/kicad);
+#                        10.0 is appended
+# Default: ${XDG_DATA_HOME:-~/.local/share}/kicad/10.0. The plugin goes to <that>/plugins/org.topor.router.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 DEV=0
 [ "${1:-}" = "--dev" ] && DEV=1
 VENV="${TOPOR_VENV:-$ROOT/.venv}"
-KICAD_HOME="${KICAD_DOCUMENTS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/kicad/10.0}"
+KICAD_VER="10.0"
+if [ -n "${TOPOR_KICAD_HOME:-}" ]; then
+    KICAD_HOME="$TOPOR_KICAD_HOME"
+elif [ -n "${KICAD_DOCUMENTS_HOME:-}" ]; then
+    KICAD_HOME="${KICAD_DOCUMENTS_HOME%/}/$KICAD_VER"
+else
+    KICAD_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/kicad/$KICAD_VER"
+fi
 ID="org.topor.router"
 PLUGIN_DIR="$KICAD_HOME/plugins/$ID"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' engine/Cargo.toml | head -1)"

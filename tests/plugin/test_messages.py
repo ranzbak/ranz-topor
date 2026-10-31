@@ -93,3 +93,16 @@ def test_marker_conflict_text_matches_priority_order():
     cause = messages.MESSAGES["MARKER_CONFLICT"].cause
     order = cause.split("wins", 1)[1]  # "... wins: the @N marker, then the topor_pN netclass, then nets.priority"
     assert order.index("marker") < order.index("netclass") < order.index("nets.priority"), cause
+
+
+def test_do_not_touch_fix_names_the_net_inspector():
+    """F MINOR 8: Board Statistics lists counts, not net names; the Net Inspector panel lists the nets."""
+    fix = messages.MESSAGES["DO_NOT_TOUCH"].fix
+    assert "Net Inspector" in fix and "Board Statistics" not in fix, fix
+
+
+def test_via_not_set_up_states_what_really_happens():
+    """F I-4: the fallback via, the smaller fab-profile vias and that pre-defined vias are not routed with."""
+    m = messages.MESSAGES["VIA_NOT_SET_UP"]
+    assert "vias.fallback_diameter_mm" in m.cause and "smaller" in m.cause and "fab" in m.cause, m.cause
+    assert "Net Classes" in m.fix and "Pre-defined Sizes" in m.fix and "0.5.0" in m.fix, m.fix

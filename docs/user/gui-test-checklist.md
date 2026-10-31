@@ -37,7 +37,7 @@ wireframes `docs/progress/notes/m4-ui-wireframes.md` (dialog layout, tab order, 
 |---|---|---|
 | R1 | Click **Topor: route**. | **Topor — Settings file created** with the path `scratch/gui/<board>/topor.toml`; the file exists. **Open file** opens it in the text editor and the dialog stays; **Continue** goes on. |
 | R2 | Look at the pre-flight dialog. | Progress *Checking the board (KiCad DRC)* first, then **Topor — Route &lt;board&gt;**. Header: *N connections in scope · nets · 2 copper layers · engine 0.4.0* (N is an estimate: eprom 30, wiccon 84 from the harness model; the routed total later is 27 / 62). Findings: no error; eprom headless reference shows `POWER_BY_NAME` (GND, +5V) — record the list. Selecting a row fills Cause / Fix. Scope radios greyed with *(nothing selected in KiCad)*. |
-| R3 | Choose *Rip up and re-route*; on **wiccon** set *Threads* 1 (slower, so Cancel can be hit); **Route**; press **Cancel** once while *Routing — negotiation pass* is shown. | Progress shows phase, routed/total, iteration of up to 30, vias, elapsed / 1:00. After Cancel the label reads *Cancelling — keeping the best result so far…*, the button greys, the dialog closes by itself, and either the preview opens with the best result (summary *Stopped: cancel*) or *Cancelled — nothing was changed on the board.* (nothing routed yet). eprom routes in ~0.1 s: Cancel is usually too late — note it and continue. |
+| R3 | Choose *Rip up and re-route*; on **wiccon** set *Threads* 1 (slower, so Cancel can be hit); **Route**; press **Cancel** once while *Routing — negotiation pass* is shown. | Progress shows phase, routed/total, iteration of up to 30, vias, elapsed / 1:00. After Cancel the label reads *Cancelling — keeping the best result so far…*, the button greys, the dialog closes by itself, and either the preview opens with the best result (summary *Stopped: cancel*) or *Cancelled — nothing was changed on the board.* (nothing routed yet). Cancel reacts within about a second while routing; during KiCad DRC / refill / preview export (5–20 s each) the dialog may not respond — note how long. eprom routes in ~0.1 s: Cancel is usually too late — note it and continue. |
 | R4 | Preview (run again without Cancel if R3 ended without one). | **Topor — Preview: &lt;board&gt;**: *Current board* left, *Result* right; new copper highlighted with a halo visible on the panel background; Zoom Fit / 100 % / 200 % and Ctrl+wheel work; Summary pane = the summary block (*Routed 27/27* eprom, *62/62* wiccon; *DRC new 0 · … · unconnected 0*); report folder path shown. |
 | R5 | **Reject**. | **Topor — Finished**: *Nothing was changed on the board.* The board looks exactly as before (same tracks, same ratsnest); **Edit → Undo** is greyed or shows nothing from topor. |
 | R6 | Run again → (no first-run notice) → *Rip up and re-route* → **Route** → **Accept**. | **Topor — Finished**: *Routed 27/27 connections — applied to the board as one undo step (Edit → Undo).* (wiccon 62/62) and *Zones were not refilled: press B (Edit → Fill All Zones) to refill them — a separate undo step.* The board shows the new curved tracks; zones are **not** refilled yet (default `[run] refill_after_accept = false`). |
@@ -47,7 +47,7 @@ wireframes `docs/progress/notes/m4-ui-wireframes.md` (dialog layout, tab order, 
 | R8 | Redo, then **Inspect → Design Rules Checker** → Run DRC (refill zones). | 0 new violations compared with a DRC of the untouched copy; 0 unconnected items. Record the counts. |
 | R9 | **Open report folder** (preview or finished notice). | The file manager opens `~/.cache/kicad/10.0/topor/<board file name>/<YYYYmmdd-HHMMSS>/` with `report.md`, `preview.png`, `result.json`, `drc.json`, `log.txt`; `report.md` *Outcome* matches what you did (rejected / applied). |
 | R10 | Select two footprints (eprom: **U1** and **U2**; wiccon: **U1** and **U2**), click **Topor: route**, *Rip up and re-route*. | Scope radios enabled; the header count changes with the radio (eprom U1+U2: between 26, touching 30, whole 30; wiccon U1+U2: between 4, touching 31, whole 84 — estimates). Route with **Between selected footprints**: only connections among U1/U2 pads are routed, the rest of the board unchanged; Accept, then Ctrl+Z. |
-| R11 | Pre-flight **Help** (Alt+H). | The browser opens `…/org.topor.router/docs/user/operate.md#options` (the *Options* section). |
+| R11 | Pre-flight **Help** (Alt+H). | `…/org.topor.router/docs/user/operate.md` opens in the desktop's default viewer for `.md` files (a browser or a text editor), at the top of the file (no jump to a section). Record which program opened it. |
 | R12 | Optional — error dialog: in the installed `topor_plugin.py` set `SHIPPED_VERSION = "0.0.0"`, run, then `bash tools/build.sh` to restore. | **Topor — Error** with `ENGINE_VERSION`, Fix *Restart the PCB Editor or use Recreate Plugin Environment.*; **Copy details** copies and flips to *Copied* for 2 s; *Open report folder* greyed with *(no report folder yet)*; Close; nothing changed on the board. |
 | R13 | Optional — blocked pre-flight: put `[run] fail_on_preexisting = true` in `topor.toml` on a board with existing DRC violations (or start KiCad with `KICAD_CLI=/nonexistent`). | Route disabled; status line *Cannot route: 1 error(s) — see Fix above.* with an error icon; Cancel works. |
 
@@ -142,12 +142,12 @@ Each is code that could not be exercised without a live KiCad. Tick when the exp
 - [ ] `kicad-cli pcb export svg` background (ruling C15 Q5): does it follow the KiCad colour theme? Record the panel background colour in light and dark; the halo must stay visible on both.
 - [ ] Highlight aligned with the new tracks (also on wiccon's round outline).
 - [ ] `IpcBoard.read_model(layer_roles=…)` honours `[layers]` roles from `topor.toml`.
-- [ ] Cancel latency: the dialog reacts within about a second (R3).
+- [ ] Cancel latency: the dialog reacts within about a second while routing; during KiCad DRC / refill / preview export (5–20 s each) it may not respond — record the longest wait (R3).
 
 **B6 — pre-flight detection from the board file** (`plugin/topor/preflight.py`)
 
 - [ ] Via protection: set filling + capping in KiCad → File → Board Setup → Board Stackup → Board Finish → Via protection, save a copy, set `vias.via_in_pad = true` (since 0.5.0, uncomment it): `VIA_IN_PAD_UNPROTECTED` appears without protection and disappears with it (record the token KiCad 10 writes).
-- [ ] `VIA_NOT_SET_UP` appears on a board with only KiCad's factory via (0.8 / 0.4 mm, no Pre-defined Sizes → Vias) and not on eprom / wiccon if they have via sizes set up.
+- [ ] `VIA_NOT_SET_UP` (ruling C33: no `via_dimensions` entry with a diameter > 0 in the `.kicad_pro` and only KiCad's factory 0.8 / 0.4 mm net class via) appears on **wiccon** (only KiCad's `{0, 0}` placeholder in Pre-defined Sizes → Vias) and not on **eprom** (net class *Signal* 0.6 / 0.3 mm); adding a via in File → Board Setup → Design Rules → Pre-defined Sizes → Vias on the wiccon copy makes it disappear (record that KiCad writes it to `board.design_settings.via_dimensions`).
 - [ ] Groups: on a copy with a group (select two items → right-click → Grouping → Group, save), `GROUPS_UNAVAILABLE` appears.
 - [ ] `TRACK_ANGLE_RULE`: a custom rule `(constraint track_angle …)` gives the error.
 
@@ -174,8 +174,10 @@ Each is code that could not be exercised without a live KiCad. Tick when the exp
   protection; Preferences → Plugins (Enable KiCad API, Python interpreter, Recreate Plugin Environment);
   Tools → External Plugins; Tools → Cleanup Tracks & Vias; Inspect → Design Rules Checker; Edit → Fill All
   Zones (B); Edit → Undo; item Properties → Locked; and the paths in the *Fix* texts of
-  [troubleshoot.md](troubleshoot.md#findings) (e.g. Edit → Unlock Selected, Inspect → Board Statistics,
-  Edit → Ungroup) — wrong ones are fixed in `plugin/topor/messages.py`.
+  [troubleshoot.md](troubleshoot.md#findings) (e.g. Edit → Unlock Selected, Edit → Ungroup) — wrong ones are
+  fixed in `plugin/topor/messages.py`.
+- [ ] UNVERIFIED: the Net Inspector panel is at **View → Panels → Net Inspector** in KiCad 10 and lists the net
+  names (used by the `DO_NOT_TOUCH` fix); record the real path if it differs.
 
 ## Results
 

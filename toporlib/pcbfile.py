@@ -6,7 +6,7 @@ footprint graphics are never mistaken for tracks. ``parse_layers`` reads the ``(
 
 Complexity: ``find_items`` is O(len(text)) (one regex pass, string-literal aware); ``remove_items`` is
 O(len(text) + #removed) ; ``append_items`` is O(len(text) + #items) (a final-paren search and one
-concatenation).
+concatenation; plus O(L log L) per via without layers, L = copper layers).
 """
 
 from __future__ import annotations
@@ -102,10 +102,18 @@ def _net(it: dict, net_names: dict | None) -> str:
     return f"\t\t(net {_q(name)})\n"
 
 
+def _top_down(lid: int) -> tuple:
+    """Sort key of KiCad 10 copper layer ids in stackup order: F.Cu (0), In1.Cu (4), In2.Cu (6), ..., B.Cu (2)."""
+    lid = int(lid)
+    return (lid == 2, lid)
+
+
 def _one(it: dict, layer_names: dict, net_names: dict | None) -> str:
     uid = it.get("uuid") or str(_uuid.uuid4())
     if it.get("kind") == "via":
-        la = it.get("layers") or sorted(layer_names)[:1] + sorted(layer_names)[-1:]
+        # no layers (engine through via): first / last copper layer top-down, i.e. F.Cu / B.Cu as to_kipy_item
+        order = sorted(layer_names, key=_top_down)
+        la = it.get("layers") or order[:1] + order[-1:]
         top, bot = layer_names[int(la[0])], layer_names[int(la[-1])]
         s = (f"\t(via\n\t\t(at {_mm(it['at'][0])} {_mm(it['at'][1])})\n\t\t(size {_mm(it['d'])})\n")
         if it.get("drill"):

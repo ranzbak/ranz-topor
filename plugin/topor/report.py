@@ -51,7 +51,8 @@ class RunReport:
     """Facts + files of one run. `facts` keys (all optional, missing -> n/a): version, board, timestamp, routed,
     total, nets, layers, partial, failed, vias, vias_before, length_mm, length_before_mm, routing_new,
     preexisting, unconnected, detour_line, stop_reason, iterations, elapsed_s, threads, scope, existing_copper,
-    respect_locked, non_default, defaults_used, findings (list of Finding), notes (list of str), drc_rounds;
+    respect_locked, non_default, defaults_used, findings (list of Finding), notes (list of str), drc_rounds,
+    floors_applied (toporlib.rules ``[{"name", "design", "floor"}]`` nm; set by run.py);
     set by build_report: connection_rows, net_rows, partial_routes, zero_slack_wires, vias_in_pads,
     ignored_pads, fallbacks, accepted_codes, non_defaults, versions, drc_by_type_*, unconnected_pre*."""
 
@@ -187,6 +188,10 @@ class RunReport:
         out = ["Non-default settings:"] + ([f"- {k} = {v!r}" for k, v in sorted(nd.items())] or ["- none"])
         out.append(f"Built-in defaults used: {_na(f.get('defaults_used'))} settings")
         out.append("Accepted fallbacks: " + (", ".join(f["fallbacks"]) if f.get("fallbacks") else "none"))
+        if "floors_applied" in f:  # toporlib.rules: KiCad minimums below the fab profile, raised (F I-4)
+            fl = f["floors_applied"] or []
+            out.append("Fab floors raised (JLCPCB 1 oz profile): " + (", ".join(
+                f"{x['name']} {x['design'] / MM:g} → {x['floor'] / MM:g} mm" for x in fl) if fl else "none"))
         if f.get("toml_path"):
             out.append(f"Config file: {f['toml_path']}")
         return out

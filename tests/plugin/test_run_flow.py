@@ -693,7 +693,7 @@ def factory_eprom(tmp_path_factory):
     pro = json.loads(pro_p.read_text())
     for c in pro["net_settings"]["classes"]:
         c.update(via_diameter=0.8, via_drill=0.4)
-    pro["board"]["design_settings"].pop("via_sizes_list", None)
+    pro["board"]["design_settings"]["via_dimensions"] = [{"diameter": 0.0, "drill": 0.0}]  # KiCad's placeholder
     pro_p.write_text(json.dumps(pro))
     b = load_board(cp)
     dru = cp.dru.read_text() if cp.dru is not None else None
@@ -767,7 +767,10 @@ def test_via_sizes_set_up_leaves_rules_unchanged(app, eprom, tmp_path, reports):
     assert eng.models[0]["rules"] == eprom.model["rules"]
     assert out.via_fallback is None
     assert json.loads((out.report_dir / "result.json").read_text())["via_fallback"] is None
-    assert "via fallback" not in (out.report_dir / "report.md").read_text()
+    md = (out.report_dir / "report.md").read_text()
+    assert "via fallback" not in md
+    # F I-4: eprom's own minimums below the fab profile (track 0.15, hole clearance 0.25 mm) are listed as raised
+    assert "min_track_width 0.15 → 0.2 mm" in md and "hole_clearance 0.25 → 0.35 mm" in md, md
 
 
 def test_apply_via_fallback_pure():

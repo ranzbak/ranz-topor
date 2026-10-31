@@ -19,7 +19,8 @@ def test_every_setting_documented():
         assert (s.section, s.key) not in seen
         seen.add((s.section, s.key))
         assert s.doc.strip() and "\n" not in s.doc, (s.section, s.key)
-        assert s.doc.rstrip().endswith("."), (s.section, s.key)
+        # a sentence; a trailing "(... 0.4.0 ...)" statement (ruling C34) ends with ".)"
+        assert s.doc.rstrip().endswith((".", ".)")), (s.section, s.key)
         assert s.type in {"int", "float", "bool", "str", "list", "table"}
     for name, place in schema.KICAD_ONLY:
         assert name and place.startswith("KiCad")
@@ -93,3 +94,53 @@ def test_cli_check_passes():
                        env={"PYTHONPATH": str(ROOT / "plugin"), "PATH": "/usr/bin"},
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr + r.stdout
+
+
+NO_EFFECT = "(No effect in 0.4.0; applied from 0.5.0.)"
+#: live keys whose 0.4.0 effect is partial: the doc string ends with the precise statement (ruling C34)
+PARTIAL = {
+    ("nets", "priority"): "routing order",
+    ("nets", "ignore_pads"): "selection",
+    ("run", "existing_copper"): "smooth is treated as fixed in 0.4.0",
+}
+
+
+def _consumers() -> str:
+    """Source of every plugin / toporlib module that reads settings (not the schema, loader or doc generator)."""
+    skip = {"schema.py", "config.py", "docs_gen.py"}
+    return "\n".join(p.read_text() for base in ("plugin/topor", "toporlib")
+                     for p in sorted((ROOT / base).glob("*.py")) if p.name not in skip)
+
+
+def test_keys_without_effect_say_so():
+    """Ruling C34 / F I-7: a live key that 0.4.0 does not apply keeps its key, and its doc string (rendered into
+    topor.toml and configuration.md) ends with the no-effect marker or the precise partial statement."""
+    by = schema.SETTINGS_BY_KEY
+    for k in (("nets", "pour_served"), ("run", "detour_reference")):
+        assert by[k].doc.endswith(NO_EFFECT), (k, by[k].doc)
+        assert schema.available(by[k])  # stays a live key: a user's value carries into 0.5.0
+    for k, words in PARTIAL.items():
+        last = by[k].doc.rsplit("(", 1)[-1]
+        assert "0.4.0" in last and words in last and by[k].doc.endswith(".)"), (k, by[k].doc)
+    md = (ROOT / "docs/user/configuration.md").read_text()
+    text = render_toml(Config.defaults())
+    assert md.count(NO_EFFECT) >= 2 and text.count(NO_EFFECT) >= 2
+
+
+def test_live_plugin_keys_have_a_consumer_or_the_marker():
+    """Every live key the engine does not take (engine_field None) is read somewhere in plugin/ or toporlib/,
+    or says that it has no effect in 0.4.0."""
+    src = _consumers()
+    for s in schema.SETTINGS:
+        if s.engine_field or not schema.available(s) or s.section == "layers":
+            continue
+        if NO_EFFECT in s.doc:
+            assert f'"{s.key}"' not in src, f"{s.section}.{s.key} is read but documented as without effect"
+            continue
+        assert f'"{s.key}"' in src, f"{s.section}.{s.key}: no consumer and no '{NO_EFFECT}'"
+
+
+def test_timeout_doc_says_what_is_charged():
+    """F MINOR 4: drcloop charges only router time (route_fn); pre-flight DRC, DRC rounds, exports are not."""
+    doc = schema.SETTINGS_BY_KEY[("run", "timeout_s")].doc
+    assert "router time" in doc and "not counted" in doc and "whole run" not in doc, doc

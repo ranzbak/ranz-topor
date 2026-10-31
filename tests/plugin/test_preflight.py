@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import copy
+import json
+
+import pytest
 
 from topor import preflight as pf
 from topor.config import Config
@@ -53,7 +56,11 @@ def rules(**over):
 
 
 PCB_OK = '(kicad_pcb (version 20260206) (generator "pcbnew") (layers (0 "F.Cu" signal) (2 "B.Cu" signal)) (setup))'
-PRO_VIAS = {"board": {"design_settings": {"via_sizes_list": [{"diameter": 0.6, "drill": 0.3}]}}}
+# KiCad's .kicad_pro shape (as in every snapshot project): pre-defined vias are
+# board.design_settings.via_dimensions, whose first entry is always the {0, 0} placeholder
+PRO_VIAS = {"board": {"design_settings": {"via_dimensions": [{"diameter": 0.0, "drill": 0.0},
+                                                             {"diameter": 0.6, "drill": 0.3}]}},
+            "net_settings": {"classes": [{"name": "Default", "via_diameter": 0.8, "via_drill": 0.4}]}}
 
 
 def run(model=None, *, rl=None, cfg=None, sel=None, drc=None, cfg_findings=(), pcb=PCB_OK, pro=PRO_VIAS):
@@ -155,9 +162,70 @@ def test_via_not_set_up():
     assert "0.8" in f.message and "0.4" in f.message
 
 
+def test_via_not_set_up_says_what_happens():
+    """F I-4: the finding names the fallback via AND the smaller fab-profile vias the engine may add
+    (engine/src/vias.rs via_sizes: routing_vias drills in [min_via_drill, via_drill), d = max(drill + 2 * annular,
+    min_via_diameter), only when d is smaller than the net's own via)."""
+    rl = rules(min_via_diameter=450_000, min_via_drill=300_000, min_annular=100_000,
+               routing_vias=[250_000, 300_000, 400_000, 500_000])
+    f = one(run(rl=rl, pro={}), "VIA_NOT_SET_UP")
+    assert "0.8 / 0.4 mm" in f.message and "0.5 / 0.3 mm" in f.message, f.message
+    assert "0.25" not in f.message  # below the board's (floored) minimum via drill
+    cfg = Config.defaults().with_values({("vias", "fallback_diameter_mm"): 1.0, ("vias", "fallback_drill_mm"): 0.5})
+    f = one(run(rl=rl, pro={}, cfg=cfg), "VIA_NOT_SET_UP")
+    assert "1 / 0.5 mm" in f.message and "0.6 / 0.4 mm" in f.message and "0.5 / 0.3 mm" in f.message, f.message
+    f = one(run(pro={}), "VIA_NOT_SET_UP")  # rules without routing_vias: no extra sizes claimed
+    assert "smaller" not in f.message, f.message
+    assert "not read" in f.fix or "0.5.0" in f.fix  # pre-defined vias stop the finding but are not routed with
+
+
 def test_via_set_up_in_class_no_finding():
     pro = {"net_settings": {"classes": [{"name": "Default", "via_diameter": 0.6, "via_drill": 0.3}]}}
     assert "VIA_NOT_SET_UP" not in codes(run(pro=pro))
+
+
+def _pro(via_dimensions, *classes):
+    return {"board": {"design_settings": {"via_dimensions": via_dimensions}},
+            "net_settings": {"classes": [{"name": n, "via_diameter": d, "via_drill": r} for n, d, r in classes]}}
+
+
+def test_via_predefined_in_via_dimensions_no_finding():
+    """Ruling C33 / F I-3: a real via_dimensions entry is a pre-defined via even with factory net classes."""
+    pro = _pro([{"diameter": 0.0, "drill": 0.0}, {"diameter": 0.6, "drill": 0.3}], ("Default", 0.8, 0.4))
+    assert pf.via_setup_missing(pro) is False
+    assert "VIA_NOT_SET_UP" not in codes(run(pro=pro))
+
+
+def test_via_dimensions_placeholder_only_fires():
+    """KiCad always writes the {0, 0} placeholder first; on its own it is not a via size."""
+    pro = _pro([{"diameter": 0.0, "drill": 0.0}], ("Default", 0.8, 0.4))
+    assert pf.via_setup_missing(pro) is True
+    assert one(run(pro=pro), "VIA_NOT_SET_UP").severity == "warning"
+    assert pf.via_setup_missing(_pro([], ("Default", 0.8, 0.4))) is True
+
+
+def test_via_sizes_list_is_not_a_kicad_key():
+    """The invented key `via_sizes_list` is not read (KiCad writes via_dimensions)."""
+    pro = _pro([{"diameter": 0.0, "drill": 0.0}], ("Default", 0.8, 0.4))
+    pro["board"]["design_settings"]["via_sizes_list"] = [{"diameter": 0.6, "drill": 0.3}]
+    assert pf.via_setup_missing(pro) is True
+
+
+#: snapshot boards on which VIA_NOT_SET_UP fires (C33): wiccon-2023 has only the via_dimensions placeholder and
+#: the factory Default class, wedding-gift an empty list and the factory class. eprom-to-kernal has an empty list
+#: but its Signal class sets 0.6 / 0.3; bornhack2026, dcsgonebadge and nametag-sao have pre-defined vias.
+VIA_NOT_SET_UP_BOARDS = {"wiccon-2023", "wedding-gift"}
+
+
+@pytest.mark.parametrize("board", ["bornhack2026", "dcsgonebadge", "eprom-to-kernal", "nametag-sao",
+                                   "wedding-gift", "wiccon-2023"])
+def test_via_setup_on_snapshot_projects(board):
+    from harness.paths import board_pcb
+
+    pro = json.loads(board_pcb(board).with_suffix(".kicad_pro").read_text())
+    assert "via_dimensions" in pro["board"]["design_settings"]  # the key KiCad writes
+    assert pf.via_setup_missing(pro) is (board in VIA_NOT_SET_UP_BOARDS)
+    assert ("VIA_NOT_SET_UP" in codes(run(pro=pro))) is (board in VIA_NOT_SET_UP_BOARDS)
 
 
 def _via(drill):

@@ -10,8 +10,12 @@ asserts the direction, not equality:
     1 um (IPC ⊇ pcbnew; the bounded excess is proven offline in test_ipc_conservative.py). An arc whose stored
     mid point is not its angular midpoint is compared with pcbnew's polygon of the same arc drawn with the true
     midpoint (pcbnew's own polygon of such an arc is off-centre; KiCad's DRC shape is the true arc);
+  * keepouts: per (name, copper layers, no_tracks, no_vias) the IPC keepout CONTAINS the harness area within 1 um
+    (IPC flattens arc edges outward, the harness inscribed; F MINOR 14);
   * pours: same uuid / net / layers / settings; fills polygon-equivalent (symmetric difference <= 1 um^2);
-    reached pads / vias of the IPC side ⊆ the harness side (pour reach errs toward "not reached", C26);
+    reached pads / vias of the IPC side ⊆ the harness side (pour reach errs toward "not reached", C26). Both sides
+    see the same fill: the harness model is built from a pcbnew-refilled copy (:func:`refilled_copy`), whose text
+    the IPC exporter also gets, and the live board is refilled first;
   * via ``free``: exact (C23; the IPC side reads KiCad's flag from the save_as copy).
 Net codes differ between the sides (pcbnew's vs sorted-name), so everything is compared by net NAME. Polygon
 areas use pcbnew SHAPE_POLY_SET (test side only)."""
@@ -142,13 +146,12 @@ def compare_models(h: dict, i: dict) -> list[str]:
         if abs(lh - li) > 0.01 * max(lh, 1):  # flattened circle / bezier edges are not point-identical
             bad.append("outline differs")
 
-    key = lambda k: (k["name"], str(k["poly"]))  # noqa: E731
-    if srt(h["keepouts"], key) != srt(i["keepouts"], key):
-        bad.append("keepouts differ")
     if srt(h["net_ties"], str) != srt(i["net_ties"], str):
         bad.append("net_ties differ")
 
     from tests.plugin.test_ipc_conservative import inflated, minus_area, sps, sps_fills  # pcbnew: test side only
+
+    bad += _keepout_differences(h, i, inflated, minus_area, sps)
 
     def shapes(m):
         out: dict = {}
@@ -189,6 +192,49 @@ def compare_models(h: dict, i: dict) -> list[str]:
     if de(h["dangling_ends"]) != de(i["dangling_ends"]):
         bad.append("dangling_ends differ")
     return bad
+
+
+def _keepout_groups(m) -> dict:
+    """(name, copper layer ids, no_tracks, no_vias) -> outline rings. Layers outside the model's copper layers are
+    dropped (the IPC exporter keeps copper layers only; pcbnew's layer set may name others)."""
+    cu = {int(g["id"]) for g in m["layers"]}
+    out: dict = {}
+    for k in m["keepouts"]:
+        key = (k["name"], tuple(sorted({int(x) for x in k.get("layers") or ()} & cu)),
+               bool(k.get("no_tracks")), bool(k.get("no_vias")))
+        out.setdefault(key, []).append(k["poly"])
+    return out
+
+
+def _keepout_differences(h, i, inflated, minus_area, sps) -> list[str]:
+    """Keepouts by containment (M4-R8): same groups, and per group the harness area minus the IPC area grown by
+    1 um is at most EPS_AREA. A bigger IPC keepout passes (conservative), a smaller one fails. O(K) groups."""
+    gh, gi = _keepout_groups(h), _keepout_groups(i)
+    bad = []
+    if set(gh) != set(gi):
+        bad.append(f"keepout groups differ: -{sorted(set(gh) - set(gi), key=str)[:3]} "
+                   f"+{sorted(set(gi) - set(gh), key=str)[:3]}")
+    for k in sorted(set(gh) & set(gi), key=str):
+        miss = minus_area(sps(gh[k]), inflated(sps(gi[k]), UM))
+        if miss > EPS_AREA:
+            bad.append(f"keepout {k[0]!r} layers {list(k[1])}: {miss:.0f} nm^2 of the harness area outside the IPC keepout")
+    return bad
+
+
+def refilled_copy(src_pcb, dst_dir):
+    """Copy the project of `src_pcb` into `dst_dir`, refill every zone with pcbnew's ZONE_FILLER and save the copy, so
+    the harness model (and the IPC exporter, which gets the copy's text) see filled zones like the refilled live
+    board. Returns ``(ProjectCopy, pcbnew BOARD of the refilled copy)``. Test side only."""
+    import pcbnew
+
+    from harness.copy import copy_project
+    from harness.model import load_board
+
+    pc = copy_project(src_pcb, dst_dir)
+    b = load_board(pc)
+    pcbnew.ZONE_FILLER(b).Fill(b.Zones())
+    pcbnew.SaveBoard(str(pc.pcb), b)
+    return pc, load_board(pc)
 
 
 # ---------------------------------------------------------------- offline self-tests of the comparison
@@ -265,6 +311,50 @@ def test_compare_models_asserts_the_conservative_directions():
     assert any(b.startswith("vias ") for b in compare_models(h, flag))
 
 
+def test_compare_models_keepouts_by_containment():
+    """F MINOR 14: an IPC keepout that contains the harness one (arc edges flattened outward) passes; a smaller one,
+    another layer set or another flag fails."""
+    import copy
+
+    from tests.plugin.test_model_ipc import StubProject, stub_board
+    from topor import model_ipc as M
+    from toporlib import rules as R
+
+    rules = R.resolve_rules_from_project({}, None, netclass_of={"": "Default"}, classes={}, widths_before={})
+    base = M.export_model_ipc(stub_board(), StubProject(), '(kicad_pcb (layers (0 "F.Cu" signal) (2 "B.Cu" signal)))',
+                              rules, name="x.kicad_pcb")
+    MM = 1_000_000
+    sq = lambda c, r: [[c - r, c - r], [c + r, c - r], [c + r, c + r], [c - r, c + r]]  # noqa: E731
+    ko = {"name": "KO", "layers": [0, 2], "poly": sq(10 * MM, MM), "no_tracks": True, "no_vias": True}
+    h = {**copy.deepcopy(base), "keepouts": [ko]}
+    assert compare_models(h, copy.deepcopy(h)) == []
+    bigger = {**copy.deepcopy(h), "keepouts": [{**ko, "poly": sq(10 * MM, MM + 400)}]}
+    assert compare_models(h, bigger) == []  # IPC flattened outward: conservative
+    inscribed = {**copy.deepcopy(h), "keepouts": [{**ko, "poly": sq(10 * MM, MM - 300)}]}
+    assert compare_models(h, inscribed) == []  # within 1 um
+    smaller = {**copy.deepcopy(h), "keepouts": [{**ko, "poly": sq(10 * MM, MM - 5000)}]}
+    assert any("outside the IPC keepout" in b for b in compare_models(h, smaller))
+    other = {**copy.deepcopy(h), "keepouts": [{**ko, "layers": [0]}]}
+    assert any("keepout groups differ" in b for b in compare_models(h, other))
+    flag = {**copy.deepcopy(h), "keepouts": [{**ko, "no_vias": False}]}
+    assert any("keepout groups differ" in b for b in compare_models(h, flag))
+    noncu = {**copy.deepcopy(h), "keepouts": [{**ko, "layers": [0, 2, 37]}]}  # a non-copper id on the pcbnew side
+    assert compare_models(noncu, h) == []
+
+
+def test_refilled_copy_has_fills_and_leaves_the_snapshot(tmp_path):
+    """The harness side of the live test reads a refilled copy (F MINOR 14); the snapshot itself is never written."""
+    from harness.paths import board_pcb
+
+    src = board_pcb("wiccon-2023")
+    before = src.read_bytes()
+    pc, b = refilled_copy(src, tmp_path / "w")
+    assert pc.pcb.parent == tmp_path / "w" and src.read_bytes() == before
+    pours = [z for z in b.Zones() if not z.GetIsRuleArea() and int(z.GetNetCode()) != 0]
+    assert pours and all(z.IsFilled() for z in pours)
+    assert "filled_polygon" in pc.pcb.read_text()
+
+
 def test_true_arc_reference_replaces_skewed_arcs_only():
     import pcbnew
 
@@ -331,8 +421,7 @@ def test_ipc_parity(board_name, tmp_path):
     """Open the snapshot board in KiCad first (GUI checklist); the harness model of the same file is the oracle."""
     from kipy import KiCad
 
-    from harness.copy import copy_project
-    from harness.model import export_model, load_board
+    from harness.model import export_model
     from harness.paths import BENCH_BOARDS
     from harness.rip import record_widths
     from harness.rules import resolve_rules
@@ -343,8 +432,7 @@ def test_ipc_parity(board_name, tmp_path):
     src = BENCH_BOARDS[board_name]
     if board.name != src.name:
         pytest.skip(f"KiCad has {board.name!r} open, not {src.name!r}")
-    pc = copy_project(src, tmp_path / "w")
-    b = load_board(pc)
+    pc, b = refilled_copy(src, tmp_path / "w")  # like with like: both sides see refilled zones
     dru = pc.dru.read_text() if pc.dru else None
     rules = resolve_rules(b, dru_text=dru, widths_before=record_widths(b))
     board.refill_zones()  # UNVERIFIED: live
