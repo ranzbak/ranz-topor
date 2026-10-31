@@ -833,9 +833,12 @@ fn block_probe_respects_deadline_and_step_cap() {
     );
     assert!(t0.elapsed().as_secs_f64() < 1.0, "{:?}", t0.elapsed());
     assert!(r.timed_out, "{} routed", r.routed);
+    // Generous budget: the unoptimised build needs > 10 s here, and a probe that starts after
+    // the deadline is (correctly) skipped, so the assertions below must not race the clock.
     let r = route(
         &m,
         &Options {
+            wall_clock_s: 600.0,
             partial_routes: true,
             ..opts()
         },
