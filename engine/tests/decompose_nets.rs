@@ -491,7 +491,7 @@ fn pour_completion_connects_unreached_cluster_to_pour() {
     assert!((c.to.at.x - 30.0 * MM as f64).abs() < 1.0 && (c.to.at.y - 15.0 * MM as f64).abs() < 1.0);
     assert!(!d.nets[0].pour_served);
     assert_eq!(d.nets[0].connections, vec![0]);
-    assert!(matches!(terminal_of(&c.to), Terminal::Via { .. }));
+    assert!(matches!(terminal_of(&c.to), Terminal::Site { .. }));
 }
 
 #[test]

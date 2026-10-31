@@ -1,52 +1,67 @@
-//! `route()` orchestration (M2 / T2.4a): decompose -> graph -> negotiation (slot search) ->
-//! metrization hand-off to the M1 `relax` -> quantisation -> `Checker` self-check with
+//! `route()` orchestration (M2 / T2.4a, M3 / T3.1-T3.2): decompose -> obstacles -> via sites ->
+//! one graph per routable layer (`MultiGraph`) -> negotiation over layers and via sites ->
+//! per-leg metrization with the M1/M2 `relax` -> quantisation -> `Checker` self-check with
 //! per-connection feedback -> `RouteResult`.
 //!
-//! M2 routes on one layer (F.Cu). Every PathFinder iteration searches the active connections,
-//! sketches every routed slot path (`sketch_from_crossings`) and metrizes incrementally
-//! (`MetrState`, Fix-B2): only the searched / ripped-up connections, those whose anchor
-//! sequence or slot nesting changed and, as chains move, their neighbours are re-tautened,
-//! re-quantised and re-checked; the first call completes a pass over every wire before the
-//! deadline counts (anytime). A connection failing relax or the self-check is penalised
-//! (`penalise_failed`) and re-searched. A connection whose terminal lies inside a foreign
-//! obstacle (`InsideObstacle`) is class-independent: it is failed once, removed from the graph
-//! and never searched again (design note §4).
-//! Caps: iterations `pathfinder_iter_cap`, self-check rounds <= routed connections + 1, the wall
-//! clock is checked before every search (negotiate), relax call and self-check round. Output is
-//! ordered by connection id; no `HashMap` iteration reaches it.
+//! Every routable copper layer is searched at once: a connection starts on every layer of its
+//! source terminal, ends on every layer of its target (a pour target is a via site inside the
+//! pour) and changes layer at via sites. One routed path is a list of *legs*, one wire per leg
+//! (wire id = leg id of the `MultiGraph`, P2): leg `j` runs from the real terminal or the via
+//! `j - 1` to the via `j` or the target; a via is a `ViaItem` (through, `layers: []`) attached to
+//! the leg that ends at it. A connection is routed iff every leg and via passes the self-check.
+//! Every PathFinder iteration searches the active connections, sketches every routed leg on the
+//! triangulation of the *real* obstacles (`base_crossings`: the dormant via-site vertices that the
+//! search winds around bend no wire) and metrizes incrementally (`MetrState`, Fix-B2): only the
+//! searched / ripped-up connections, those whose anchor sequence or nesting changed and, as chains
+//! move, their neighbours are re-tautened, re-quantised and re-checked; the first call completes a
+//! pass over every wire before the deadline counts (anytime). A connection failing relax or the
+//! self-check is penalised (`penalise_failed`) and re-searched. A connection whose terminal lies
+//! inside a foreign obstacle (`InsideObstacle`) is class-independent: it is failed once, removed
+//! from the graph and never searched again (design note §4). Early failures (no search):
+//! `"terminal not on any routable layer"`, `"no via site inside pour"`.
+//! Caps: iterations `pathfinder_iter_cap`, self-check rounds <= routed legs + 1, the wall clock is
+//! checked before every search (negotiate), relax call and self-check round. Output is ordered
+//! by connection id; no `HashMap` iteration reaches it.
 //!
 //! Stall stop: the loop also ends after [`STALL_ITERS`] iterations without a better best
-//! (by `(routed, Σlen)`). Zero-slack retry (R6, `Options::zero_slack_retry`): after the loop,
-//! [`zero_slack_pass`] lets one connection take a corridor pinched below ε with margin 0 against
-//! that corridor only, re-routes the detoured connections once and keeps the result when it
-//! routes at least as much with a shorter outside-pad length; the harness DRC is the final judge.
+//! (by `(routed, vias, Σlen)`). Zero-slack retry (R6, `Options::zero_slack_retry`): after the
+//! loop, [`zero_slack_pass`] lets one connection take a corridor pinched below ε with margin 0
+//! against that corridor only (candidates: single-leg paths), re-routes the detoured connections
+//! once and keeps the result when it routes at least as much with a shorter outside-pad length;
+//! the harness DRC is the final judge. Partial stubs grow on the first leg of a blocked
+//! connection's ghost (D6). The via-reduction pass is Task 10.
 
 use crate::cdt::Crossing;
 use crate::check::{Checker, ItemIndex};
 use crate::decompose::{decompose, terminal_of, Connection, TermKind, TermRef};
 use crate::geom::quant::{quantise_chain, round_nm, TrackPrim};
-use crate::geom::{dequantise, Prim, Skeleton, Vec2};
+use crate::geom::{dequantise, Skeleton, Vec2};
 use crate::graph::{GraphRules, RouteGraph, TerminalInfo};
-use crate::model::{flip_track, BoardModel, ExistingCopper, Item, Options, TrackItem};
+use crate::model::{
+    flip_track, BoardModel, ExistingCopper, Item, Options, PadAttr, Pt, TrackItem, ViaItem,
+};
+use crate::multigraph::MultiGraph;
 use crate::negotiate::{
     detect_clinches, overused_conns, BlockInfo, ClinchReport, Negotiator, DETOUR_FACTOR,
     PRESENT_OVERUSE,
 };
-use crate::obstacle::{LayerObstacles, ObstacleSet, TerminalObstacle};
-use crate::relax::{corridor_static, relax, slot_nesting_of, Relaxer, RunOpts, ZeroSlack};
-use crate::search::planar::{
-    default_expansion_cap, search, PlanarPath as SlotPath, SearchOutcome, SearchParams,
+use crate::obstacle::{ObstacleSet, TerminalObstacle};
+use crate::relax::{corridor_static, relax, Relaxer, RunOpts, SlotNesting, ZeroSlack};
+use crate::search::{
+    default_expansion_cap, search, tier_weight, via_weight, Goal, SearchOutcome, SearchParams,
+    SlotPath,
 };
-use crate::search::tier_weight;
 use crate::sketch::{
-    build_layer_cdt, sketch_from_crossings, stack_order, unanchored_bends, AnchorRef,
+    build_layer_cdt_masked, sketch_from_crossings, stack_order, unanchored_bends, AnchorRef,
     ConstraintSet, LayerSketch, Sketch,
 };
 use crate::smooth::{deadline_after, hand_outside, outside_len, terminal_skeletons};
 use crate::taut::TautError;
+use crate::vias::{via_sites, via_sizes, ViaSize};
 use crate::wires::{extract_wires, Terminal, Wire};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Clone, Debug, Serialize)]
@@ -68,6 +83,12 @@ pub struct ConnReport {
     /// `routed`, `partial` or `failed`.
     pub status: String,
     pub reason: String,
+    /// Vias of the routed connection.
+    pub vias: usize,
+    /// Names of the copper layers the legs run on (dedup, in path order); empty when not routed.
+    pub layers: Vec<String>,
+    /// Via positions (KiCad frame, nm), in path order.
+    pub via_sites: Vec<[i64; 2]>,
     pub from: TermOut,
     pub to: TermOut,
     pub length_nm: i64,
@@ -106,6 +127,7 @@ pub struct NetRouteReport {
     pub routed: usize,
     pub partial: usize,
     pub failed: usize,
+    pub vias: usize,
     pub length_nm: i64,
     pub length_outside_pads_nm: i64,
 }
@@ -123,6 +145,14 @@ pub struct RouteResult {
     pub nets_routed: usize,
     pub total_length_nm: i64,
     pub length_outside_pads_nm: i64,
+    /// Vias of the routed connections.
+    pub vias: usize,
+    /// Routed track length per copper layer name, nm.
+    pub length_by_layer_nm: BTreeMap<String, i64>,
+    /// Candidate via sites of the run.
+    pub sites: usize,
+    /// Via-reduction pass outcome (Task 10): `not run` until then.
+    pub via_reduction: String,
     pub iterations: u32,
     pub converged: bool,
     pub overuse_edges: usize,
@@ -196,7 +226,24 @@ fn bits(p: Vec2) -> (u64, u64) {
 /// One routed connection after metrization and self-check.
 #[derive(Clone, Debug)]
 struct ConnOk {
-    items: Vec<TrackItem>,
+    /// Tracks of every leg and the connection's vias, in leg order.
+    items: Vec<Item>,
+    len: f64,
+    out: f64,
+    pattern: String,
+    anchors: usize,
+    crossings: usize,
+    vias: usize,
+    /// Layer ids of the legs (dedup, in path order).
+    layers: Vec<u32>,
+    /// Via positions, KiCad frame nm.
+    via_sites: Vec<[i64; 2]>,
+}
+
+/// One metrized leg: its tracks and the via that ends it (if any).
+#[derive(Clone, Debug)]
+struct LegOk {
+    items: Vec<Item>,
     len: f64,
     out: f64,
     pattern: String,
@@ -239,11 +286,10 @@ fn taut_reason(e: &TautError) -> Res {
 struct Ctx<'a> {
     model: &'a BoardModel,
     opts: &'a Options,
-    obs: &'a ObstacleSet,
-    ls: &'a LayerSketch,
+    /// Routable layer ids, sorted; a layer index is the position in this list (P7: the obstacle
+    /// set is passed explicitly, `Ctx` does not hold it).
+    layers: &'a [u32],
     conns: &'a [Connection],
-    /// The single routable layer of M2/M3-Task-6 (multi-layer search follows in Task 9).
-    layer: u32,
     checker: &'a Checker,
     deadline: Instant,
 }
@@ -259,17 +305,19 @@ struct Metrized {
     zs_corridor: Option<(Vec<usize>, Vec<usize>)>,
 }
 
-/// Zero-slack corridor of live connection `live` for [`metrize_zs`]: margin 0 against the listed
-/// anchors / walls of the layer obstacles, `None` = against every obstacle (identification).
+/// Zero-slack corridor of live connection `live` (one leg) for [`metrize_zs`]: margin 0 against
+/// the listed anchors / walls of the layer obstacles, `None` = against every obstacle
+/// (identification).
 struct ZsSpec {
     live: usize,
     anchors: Option<Vec<usize>>,
     walls: Option<Vec<usize>>,
 }
 
-/// Crossings of the live path of connection `c` in the direction of travel.
-fn path_crossings(g: &RouteGraph, c: usize) -> Option<Vec<Crossing>> {
-    let (cross, faces, _) = g.path_of(c)?;
+/// Crossings of the live path of leg `k` of `g` in the direction of travel (graph edges,
+/// `t` from the slot index).
+fn path_crossings(g: &RouteGraph, k: usize) -> Option<Vec<Crossing>> {
+    let (cross, faces, _) = g.path_of(k)?;
     if cross.is_empty() {
         return Some(Vec::new());
     }
@@ -291,105 +339,311 @@ fn path_crossings(g: &RouteGraph, c: usize) -> Option<Vec<Crossing>> {
     )
 }
 
+/// Offset (nm) of the sleeve polyline's interior points along the direction of travel, which
+/// takes a point that lies exactly on an edge of `base` off it without changing its order
+/// relative to the other wires on the edge.
+const POLY_SHIFT_NM: f64 = 1.0;
+
+/// Crossings of `base` (the triangulation of the real obstacles: dormant via sites deleted) by
+/// the polyline `start -> slot points of cr -> end`. The polyline follows the slot path through
+/// the same faces of `g`, so it is in the slot path's homotopy class relative to every vertex, in
+/// particular relative to every real obstacle, and the polylines of different wires keep the
+/// order of their slots; the free (dormant) site vertices the slot path winds around no longer
+/// constrain the sketch (M3 §5). `None` on a degenerate position. O(|cr| + crossings).
+fn base_crossings(
+    g: &RouteGraph,
+    cr: &[Crossing],
+    start: Vec2,
+    end: Vec2,
+    base: &LayerSketch,
+) -> Option<Vec<Crossing>> {
+    let mut pts: Vec<Vec2> = Vec::with_capacity(cr.len() + 2);
+    pts.push(start);
+    pts.extend(cr.iter().map(|c| crossing_point(g, c)));
+    pts.push(end);
+    let n = pts.len();
+    let mut poly = pts.clone();
+    for i in 1..n - 1 {
+        let d = pts[i + 1] - pts[i - 1];
+        let l = d.len();
+        if l > 0.0 {
+            poly[i] = pts[i] + d * (POLY_SHIFT_NM / l);
+        }
+    }
+    base.cdt.crossings(&poly).ok()
+}
+
+/// Crossings of the live path of leg `k` of `g` with `base` (see [`base_crossings`]).
+fn leg_crossings(
+    g: &RouteGraph,
+    k: usize,
+    start: Vec2,
+    goal: Vec2,
+    base: &LayerSketch,
+) -> Option<Vec<Crossing>> {
+    let cr = path_crossings(g, k)?;
+    if cr.is_empty() {
+        // A direct leg along an edge of the graph: the straight segment between the terminals.
+        return Some(base.cdt.crossings(&[start, goal]).unwrap_or_default());
+    }
+    base_crossings(g, &cr, start, goal, base)
+}
+
+/// Nesting of the legs `legs` (`(leg id, reduced crossings of the sketch triangulation base)`)
+/// of one layer, read off the order of their crossings along the edges of `base` incident to
+/// an anchor: the wires nearer the anchor on a fan edge are nested inside. As
+/// `relax::slot_nesting_of`, but on the triangulation of the real obstacles, so a wire that
+/// passes a pad beyond a free site vertex is still nested outside the wires between it and the pad.
+/// O(Σ crossings · log).
+fn base_nesting(legs: &[(usize, &[Crossing])], base: &LayerSketch, out: &mut SlotNesting) {
+    use crate::geom::Orient;
+    // edge (min, max) -> [(leg, fraction from the min vertex)]
+    let mut on_edge: BTreeMap<(usize, usize), Vec<(usize, f64)>> = BTreeMap::new();
+    let frac_min = |c: &Crossing| if c.left < c.right { c.t } else { 1.0 - c.t };
+    for &(k, cs) in legs {
+        for c in cs {
+            on_edge
+                .entry((c.left.min(c.right), c.left.max(c.right)))
+                .or_default()
+                .push((k, frac_min(c)));
+        }
+    }
+    let mut both: BTreeSet<(usize, usize)> = BTreeSet::new();
+    for &(k, cs) in legs {
+        for c in cs {
+            let key = (c.left.min(c.right), c.left.max(c.right));
+            let list = &on_edge[&key];
+            for (v, sigma) in [(c.left, Orient::Ccw), (c.right, Orient::Cw)] {
+                let Some(anchor) = base.point_to_anchor[v] else {
+                    continue;
+                };
+                let dist = |f: f64| if v == key.0 { f } else { 1.0 - f };
+                let mine = dist(frac_min(c));
+                let mut inner: Vec<(f64, usize)> = list
+                    .iter()
+                    .filter(|&&(j, f)| j != k && dist(f) < mine)
+                    .map(|&(j, f)| (dist(f), j))
+                    .collect();
+                inner.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+                out.inner
+                    .entry((k, AnchorRef { anchor, sigma }))
+                    .or_default()
+                    .push(inner.into_iter().map(|x| x.1).collect());
+                match out.sides.insert((k, anchor), sigma) {
+                    Some(s0) if s0 != sigma => {
+                        both.insert((k, anchor));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    for key in both {
+        out.sides.remove(&key);
+    }
+}
+
+/// Sketch triangulations of the real obstacles per layer: the layer's anchors minus the dormant
+/// via-site anchors, plus its terminals. O(Σ_L N_L log N_L).
+fn real_sketches(obs: &ObstacleSet, mg: &MultiGraph) -> Vec<Arc<LayerSketch>> {
+    mg.layers
+        .iter()
+        .map(|c| {
+            let lo = obs.layer(c.layer);
+            build_layer_cdt_masked(lo, &c.terminals, ConstraintSet::Routing, &|i| {
+                let a = &lo.anchors[i];
+                a.site.is_none() || a.enabled
+            })
+            .map(Arc::new)
+            .unwrap_or_else(|_| c.ls.clone())
+        })
+        .collect()
+}
+
+fn legs_of(mg: &MultiGraph, conn: usize) -> &[usize] {
+    mg.conn_wires.get(conn).map_or(&[][..], |v| v.as_slice())
+}
+
+/// The two terminals of leg `ord` of live connection `conn` (P6): the real terminals at the
+/// path ends, a `Terminal::Site` at every via; `None` when the path and the site list disagree.
+fn leg_terminals(
+    cx: &Ctx,
+    mg: &MultiGraph,
+    conn: usize,
+    ord: usize,
+    nlegs: usize,
+) -> Option<(Terminal, Terminal)> {
+    let c = &cx.conns[conn];
+    let sites = mg.sites_of(conn);
+    let site = |s: usize| Terminal::Site {
+        site: s,
+        at: mg.sites[s].at,
+    };
+    let start = if ord == 0 {
+        terminal_of(&c.from)
+    } else {
+        site(*sites.get(ord - 1)?)
+    };
+    let pour = matches!(c.to.kind, TermKind::Pour(_));
+    let goal = if ord + 1 == nlegs && !pour {
+        terminal_of(&c.to)
+    } else {
+        site(*sites.get(ord)?)
+    };
+    Some((start, goal))
+}
+
 /// Metrization state kept across PathFinder iterations (Fix-B2, design note
-/// `m2-metrize-design.md` §2.2): wire `k` = live connection `k`. Only the wires whose sketch,
-/// nesting, zero-slack corridor or neighbourhood changed are re-tautened, re-quantised and
-/// re-checked; the others keep their chains, items and results.
+/// `m2-metrize-design.md` §2.2, `m3-layers-vias-design.md` §5): one wire per *leg* (P2), wire id
+/// = leg id `k` of the `MultiGraph`. Only the wires whose sketch, nesting, zero-slack corridor or
+/// neighbourhood changed are re-tautened, re-quantised and re-checked; the others keep their
+/// chains, items and results. A connection is `Ok` iff every one of its legs passed.
 #[derive(Clone)]
 struct MetrState {
     rx: Relaxer,
-    /// Last sketch sequence per live connection (`None`: not in the relaxer).
+    /// Leg ids of each live connection as last installed (empty: none).
+    conn_legs: Vec<Vec<usize>>,
+    /// Per leg: layer index, connection.
+    leg_layer: Vec<usize>,
+    leg_conn: Vec<usize>,
+    /// Last sketch sequence per leg (`None`: not in the relaxer).
     seqs: Vec<Option<Vec<AnchorRef>>>,
     ncross: Vec<usize>,
+    /// Reduced crossings of the sketch triangulation per leg (the nesting input).
+    bcross: Vec<Vec<Crossing>>,
     /// Quantised result of the current chain, before the self-check.
-    ok: Vec<Option<ConnOk>>,
-    /// Last result (`None`: not metrized since the connection was placed).
-    res: Vec<Option<Res>>,
+    ok: Vec<Option<LegOk>>,
+    /// Failure of the leg (taut, quantisation, sketch or self-check).
+    fail: Vec<Option<Res>>,
     /// `ok[k]` must be (re-)checked: its chain changed since its last check, or the check failed.
     pending: Vec<bool>,
-    /// Items of the wires that passed their self-check (`res` is `Ok`), indexed once and kept
-    /// across calls: a round checks only the pending wires against it, O(changed * q) instead
-    /// of re-walking every emitted item.
+    /// Items of the legs that passed their self-check (and whose connection is complete),
+    /// indexed once and kept across calls: a round checks only the pending legs against it,
+    /// O(changed * q) instead of re-walking every emitted item.
     idx: ItemIndex,
-    /// Ids in `idx` per wire (empty: the wire is not indexed).
+    /// Ids in `idx` per leg (empty: the leg is not indexed).
     item_ids: Vec<Vec<usize>>,
     /// Grid candidates visited by the self-checks so far.
     check_visited: usize,
+    /// Sketch triangulations of the real obstacles, with the sorted active sites they were
+    /// built for (rebuilt when a via is added or released).
+    base: Option<(Vec<usize>, Vec<Arc<LayerSketch>>)>,
 }
 
 impl MetrState {
-    fn new(cx: &Ctx) -> MetrState {
-        let wires: Vec<Wire> = cx
-            .conns
-            .iter()
-            .enumerate()
-            .map(|(k, c)| Wire {
-                id: k,
-                net: c.net,
-                layer: cx.layer,
-                width: c.width,
-                start: terminal_of(&c.from),
-                goal: terminal_of(&c.to),
-                hand: vec![c.from.at, c.to.at],
-                kept_uuids: Vec::new(),
-                hand_len: c.est_len,
-            })
-            .collect();
-        let m = wires.len();
+    fn new(cx: &Ctx, obs: &ObstacleSet) -> MetrState {
         MetrState {
-            rx: Relaxer::new(wires, cx.obs),
-            seqs: vec![None; m],
-            ncross: vec![0; m],
-            ok: vec![None; m],
-            res: vec![None; m],
-            pending: vec![false; m],
+            rx: Relaxer::with_layers(cx.layers, obs),
+            conn_legs: vec![Vec::new(); cx.conns.len()],
+            leg_layer: Vec::new(),
+            leg_conn: Vec::new(),
+            seqs: Vec::new(),
+            ncross: Vec::new(),
+            bcross: Vec::new(),
+            ok: Vec::new(),
+            fail: Vec::new(),
+            pending: Vec::new(),
             idx: ItemIndex::new(cx.checker.cell()),
-            item_ids: vec![Vec::new(); m],
+            item_ids: Vec::new(),
             check_visited: 0,
+            base: None,
         }
     }
 
-    /// Remove wire `k`'s items from the index. O(cells of its items).
+    /// The sketch triangulations for the current via occupancy of `mg`. O(S) when cached,
+    /// O(Σ_L N_L log N_L) after a via was added or released.
+    fn base_for(&mut self, obs: &ObstacleSet, mg: &MultiGraph) -> Vec<Arc<LayerSketch>> {
+        let key: Vec<usize> = (0..mg.sites.len())
+            .filter(|&s| mg.owner[s].is_some())
+            .collect();
+        if let Some((k, v)) = &self.base {
+            if *k == key {
+                return v.clone();
+            }
+        }
+        let v = real_sketches(obs, mg);
+        self.base = Some((key, v.clone()));
+        v
+    }
+
+    /// Grow the per-leg tables to hold leg `k`. O(1) amortised.
+    fn ensure(&mut self, k: usize) {
+        if self.seqs.len() <= k {
+            let n = k + 1;
+            self.leg_layer.resize(n, 0);
+            self.leg_conn.resize(n, 0);
+            self.seqs.resize(n, None);
+            self.ncross.resize(n, 0);
+            self.bcross.resize(n, Vec::new());
+            self.ok.resize(n, None);
+            self.fail.resize(n, None);
+            self.pending.resize(n, false);
+            self.item_ids.resize(n, Vec::new());
+        }
+    }
+
+    /// Remove leg `k`'s items from the index. O(cells of its items).
     fn unindex(&mut self, k: usize) {
         for id in std::mem::take(&mut self.item_ids[k]) {
             self.idx.remove(id);
         }
     }
 
-    fn drop_wire(&mut self, k: usize) {
+    fn drop_leg(&mut self, k: usize) {
         self.unindex(k);
         if self.seqs[k].is_some() {
             self.rx.remove(k);
         }
         self.seqs[k] = None;
         self.ok[k] = None;
-        self.res[k] = None;
+        self.fail[k] = None;
         self.pending[k] = false;
     }
 }
 
-/// Sketch, relax, quantise and self-check the connections `routed` (live indices) of `g`,
+/// Sketch, relax, quantise and self-check the connections `routed` (live indices) of `mg`,
 /// incrementally from `st` (`work`: connections searched or ripped up this iteration).
 fn metrize(
     cx: &Ctx,
-    g: &RouteGraph,
+    obs: &ObstacleSet,
+    mg: &MultiGraph,
     routed: &[usize],
     st: &mut MetrState,
     work: &[usize],
 ) -> Metrized {
-    metrize_zs(cx, g, routed, None, st, work)
+    metrize_zs(cx, obs, mg, routed, None, st, work)
 }
 
-/// [`metrize`] with one connection's zero-slack corridor (R6): that wire is relaxed at margin 0
-/// against the corridor and its self-check tolerates [`ZS_QUANT_TOL_NM`] (integer-nm rounding of
-/// an exact tangency); every other wire is judged as in [`metrize`].
+/// The via item of site `s` for connection `conn` (KiCad frame).
+fn via_item(mg: &MultiGraph, s: usize, net: i32, conn: usize) -> Item {
+    let size = mg.owner[s].map_or(ViaSize { d: 0, drill: 0 }, |(_, z)| z);
+    let [x, y] = kicad(mg.sites[s].at);
+    Item::Via(ViaItem {
+        kind: "via".into(),
+        net,
+        at: Pt { x, y },
+        d: size.d,
+        drill: size.drill,
+        layers: Vec::new(),
+        group: None,
+        wire: Some(conn),
+    })
+}
+
+/// [`metrize`] with one connection's zero-slack corridor (R6): that connection's (single) leg is
+/// relaxed at margin 0 against the corridor and its self-check tolerates [`ZS_QUANT_TOL_NM`]
+/// (integer-nm rounding of an exact tangency); every other wire is judged as in [`metrize`].
 ///
 /// Anytime (45 §5a): the first relaxation of a fresh state completes one pass over every wire
 /// regardless of the deadline, and a timed-out call still quantises and checks (one round) what
 /// it has, so a result exists. `timed_out` is reported either way.
+///
+/// Complexity: `O(changed legs * (relax + q))` plus `O(legs)` bookkeeping and `SlotNesting`
+/// `O(sum occupancy * n_max)` per layer.
 fn metrize_zs(
     cx: &Ctx,
-    g: &RouteGraph,
+    obs: &ObstacleSet,
+    mg: &MultiGraph,
     routed: &[usize],
     zs: Option<&ZsSpec>,
     st: &mut MetrState,
@@ -411,68 +665,116 @@ fn metrize_zs(
     for &i in work {
         searched[i] = true;
     }
-    for (k, &listed) in in_routed.iter().enumerate() {
-        if !listed && (st.seqs[k].is_some() || st.res[k].is_some()) {
-            st.drop_wire(k);
-        }
-    }
-    // Step 1: re-sketch; a wire whose anchor sequence changed, or that was searched again (its
-    // old chain may be a stale fixed point that failed the self-check), starts from scratch.
-    for &i in routed {
-        let c = &cx.conns[i];
-        let Some(path) = path_crossings(g, c.id) else {
-            st.drop_wire(i);
-            st.res[i] = Some(fail("sketch: inconsistent slot path"));
-            continue;
-        };
-        let (start, goal) = (c.from.at, c.to.at);
-        if let Some(p) = unanchored_bends(start, goal, &path, cx.ls).first() {
-            st.drop_wire(i);
-            st.res[i] = Some(fail(format!(
-                "sketch: path bends at a wall split vertex ({}, {})",
-                kicad(*p)[0],
-                kicad(*p)[1]
-            )));
-            continue;
-        }
-        let s = sketch_from_crossings(i, start, goal, path, cx.ls);
-        st.ncross[i] = s.crossings.len();
-        if searched[i] || st.seqs[i].as_ref() != Some(&s.seq) {
-            st.rx.set(i, &s.seq);
-            st.seqs[i] = Some(s.seq);
-            st.unindex(i);
-            st.ok[i] = None;
-            st.res[i] = None;
-            st.pending[i] = false;
-        }
-    }
-    let present: Vec<usize> = (0..m).filter(|&k| st.seqs[k].is_some()).collect();
-    if present.is_empty() {
-        for &i in routed {
-            if let Some(r) = &st.res[i] {
-                out.res.push((i, r.clone()));
+    // Step 0: connections that left, were searched again, or whose legs were re-allocated drop
+    // all their legs first (a leg id may move to another connection).
+    for i in 0..m {
+        let stale = !in_routed[i] || searched[i] || st.conn_legs[i] != legs_of(mg, i);
+        if stale {
+            for k in std::mem::take(&mut st.conn_legs[i]) {
+                st.drop_leg(k);
             }
         }
-        return out;
     }
-    // Stacks from the slot topology (Fix-B1 (a)): wire k = live k = conn id in `g`; wires
-    // whose inner lists changed are queued by the relaxer.
-    let pairs: Vec<(usize, usize)> = present.iter().map(|&k| (k, cx.conns[k].id)).collect();
-    st.rx.set_nesting(&slot_nesting_of(g, &pairs));
-    let zsw: Option<ZeroSlack> = zs.filter(|z| st.seqs[z.live].is_some()).map(|z| ZeroSlack {
-        wire: z.live,
+    // Step 1: re-sketch; a leg whose anchor sequence changed starts from scratch.
+    let base = st.base_for(obs, mg);
+    for &i in routed {
+        let c = &cx.conns[i];
+        let ks = legs_of(mg, i).to_vec();
+        let installing = st.conn_legs[i].is_empty();
+        if installing {
+            st.conn_legs[i] = ks.clone();
+        }
+        for (ord, &k) in ks.iter().enumerate() {
+            st.ensure(k);
+            let (Some(li), Some((start_t, goal_t))) =
+                (mg.leg_layer(k), leg_terminals(cx, mg, i, ord, ks.len()))
+            else {
+                st.drop_leg(k);
+                st.fail[k] = Some(fail("sketch: inconsistent slot path"));
+                continue;
+            };
+            if installing {
+                st.leg_layer[k] = li;
+                st.leg_conn[k] = i;
+                st.rx.replace(
+                    k,
+                    Wire {
+                        id: k,
+                        net: c.net,
+                        layer: cx.layers[li],
+                        width: c.width,
+                        hand: vec![start_t.at(), goal_t.at()],
+                        hand_len: (goal_t.at() - start_t.at()).len(),
+                        start: start_t.clone(),
+                        goal: goal_t.clone(),
+                        kept_uuids: Vec::new(),
+                    },
+                );
+            }
+            let g = &mg.layers[li].g;
+            let ls = &*base[li];
+            let Some(path) = leg_crossings(g, k, start_t.at(), goal_t.at(), ls) else {
+                st.drop_leg(k);
+                st.fail[k] = Some(fail("sketch: inconsistent slot path"));
+                continue;
+            };
+            let (start, goal) = (start_t.at(), goal_t.at());
+            if let Some(p) = unanchored_bends(start, goal, &path, ls).first() {
+                st.drop_leg(k);
+                st.fail[k] = Some(fail(format!(
+                    "sketch: path bends at a wall split vertex ({}, {})",
+                    kicad(*p)[0],
+                    kicad(*p)[1]
+                )));
+                continue;
+            }
+            let s = sketch_from_crossings(k, start, goal, path, ls);
+            st.ncross[k] = s.crossings.len();
+            st.bcross[k] = s.crossings.clone();
+            if st.seqs[k].as_ref() != Some(&s.seq) {
+                st.rx.set(k, &s.seq);
+                st.seqs[k] = Some(s.seq);
+                st.unindex(k);
+                st.ok[k] = None;
+                st.fail[k] = None;
+                st.pending[k] = false;
+            }
+        }
+    }
+    let nk = st.seqs.len();
+    let present: Vec<usize> = (0..nk).filter(|&k| st.seqs[k].is_some()).collect();
+    // Stacks from the nesting of the crossings on the sketch triangulation (Fix-B1 (a)); leg ids (unique
+    // across layers, so the per-layer nestings merge without collisions).
+    let mut nesting = SlotNesting::default();
+    for (li, sk) in base.iter().enumerate() {
+        let legs: Vec<(usize, &[Crossing])> = present
+            .iter()
+            .filter(|&&k| st.leg_layer[k] == li)
+            .map(|&k| (k, st.bcross[k].as_slice()))
+            .collect();
+        if !legs.is_empty() {
+            base_nesting(&legs, sk, &mut nesting);
+        }
+    }
+    st.rx.set_nesting(&nesting);
+    let zs_leg = zs.and_then(|z| match legs_of(mg, z.live) {
+        [k] if st.seqs.get(*k).is_some_and(|s| s.is_some()) => Some(*k),
+        _ => None,
+    });
+    let zsw: Option<ZeroSlack> = zs.zip(zs_leg).map(|(z, k)| ZeroSlack {
+        wire: k,
         anchors: z.anchors.clone(),
         walls: z.walls.clone(),
     });
     // Step 2: incremental Gauss–Seidel.
-    let work: Vec<usize> = work
+    let work_legs: Vec<usize> = work
         .iter()
-        .copied()
+        .flat_map(|&i| st.conn_legs[i].iter().copied())
         .filter(|&k| st.seqs[k].is_some())
         .collect();
     let run = st.rx.run(
-        &work,
-        cx.obs,
+        &work_legs,
+        obs,
         &RunOpts {
             opts: cx.opts,
             deadline: cx.deadline,
@@ -487,25 +789,25 @@ fn metrize_zs(
         .filter(|z| z.anchors.is_none() && z.walls.is_none())
     {
         if let Ok(ch) = &st.rx.chains()[z.wire] {
-            let band = cx.obs.margin();
+            let band = obs.margin();
             out.zs_corridor = Some(corridor_static(
                 st.rx.wires(),
                 z.wire,
                 ch,
-                cx.obs,
+                obs,
                 Some(z),
                 band,
             ));
         }
     }
     let zs_wire = zsw.as_ref().map(|z| z.wire);
-    // Quantise the wires whose chain changed (or that have no result yet).
-    let mut changed = vec![false; m];
+    // Quantise the legs whose chain changed (or that have no result yet).
+    let mut changed = vec![false; nk];
     for &k in &run.changed {
         changed[k] = true;
     }
     for &k in &present {
-        if !changed[k] && st.res[k].is_some() {
+        if !changed[k] && (st.ok[k].is_some() || st.fail[k].is_some()) {
             continue;
         }
         st.unindex(k);
@@ -515,31 +817,47 @@ fn metrize_zs(
             Ok(ch) => {
                 let q = quantise_chain(&ch.prims);
                 if q.is_empty() {
-                    st.res[k] = Some(fail("empty chain after quantisation"));
+                    st.fail[k] = Some(fail("empty chain after quantisation"));
                     continue;
                 }
                 let w = &st.rx.wires()[k];
-                let items: Vec<TrackItem> = q
+                let conn = st.leg_conn[k];
+                let mut items: Vec<Item> = q
                     .into_iter()
-                    .map(|t| TrackItem {
-                        net: w.net,
-                        layer: w.layer,
-                        width: w.width,
-                        prim: flip_track(t),
-                        group: None,
-                        wire: Some(k),
+                    .map(|t| {
+                        Item::Track(TrackItem {
+                            net: w.net,
+                            layer: w.layer,
+                            width: w.width,
+                            prim: flip_track(t),
+                            group: None,
+                            wire: Some(conn),
+                        })
                     })
                     .collect();
                 let sks: Vec<Skeleton> = terminal_skeletons(cx.model, w);
                 let pattern: String = items
                     .iter()
-                    .map(|t| match t.prim {
-                        TrackPrim::Seg { .. } => 'S',
-                        TrackPrim::Arc { .. } => 'A',
+                    .filter_map(|t| match t {
+                        Item::Track(t) => Some(match t.prim {
+                            TrackPrim::Seg { .. } => 'S',
+                            TrackPrim::Arc { .. } => 'A',
+                        }),
+                        _ => None,
                     })
                     .collect();
-                let len: f64 = items.iter().map(|t| dequantise(&t.prim).length()).sum();
-                st.ok[k] = Some(ConnOk {
+                let len: f64 = items
+                    .iter()
+                    .filter_map(|t| match t {
+                        Item::Track(t) => Some(dequantise(&t.prim).length()),
+                        _ => None,
+                    })
+                    .sum();
+                let ord = st.conn_legs[conn].iter().position(|&x| x == k).unwrap_or(0);
+                if let Some(&s) = mg.sites_of(conn).get(ord) {
+                    items.push(via_item(mg, s, w.net, conn));
+                }
+                st.ok[k] = Some(LegOk {
                     items,
                     len,
                     out: outside_len(&ch.prims, &sks),
@@ -547,19 +865,19 @@ fn metrize_zs(
                     anchors: ch.seq.len(),
                     crossings: st.ncross[k],
                 });
-                st.res[k] = None;
+                st.fail[k] = None;
                 st.pending[k] = true;
             }
-            Err(e) => st.res[k] = Some(taut_reason(e)),
+            Err(e) => st.fail[k] = Some(taut_reason(e)),
         }
     }
 
-    // Step 3: self-check rounds (fallback granularity = connection) of the pending wires
+    // Step 3: self-check rounds (fallback granularity = connection) of the pending legs
     // against the checked ones (listed first: a violation is charged to the later item, the
-    // wire that moved). A failed wire stays pending for the next call.
+    // wire that moved). A failed leg stays pending for the next call.
     for &k in &present {
         if st.pending[k] && st.ok[k].is_some() {
-            st.res[k] = None;
+            st.fail[k] = None;
         }
     }
     loop {
@@ -581,16 +899,16 @@ fn metrize_zs(
             }
         }
         out.rounds += 1;
-        // Each pending wire is checked against the persistent index (the checked wires) and the
-        // pending wires before it (inserted as the walk proceeds, removed after the round): a
-        // violation is charged to the later wire, the one that moved.
+        // Each pending leg is checked against the persistent index (the checked legs) and the
+        // pending legs before it (inserted as the walk proceeds, removed after the round): a
+        // violation is charged to the later leg, the one that moved.
         let mut temp: Vec<usize> = Vec::new();
         let mut any = false;
         for &k in &pend {
             let items: Vec<Item> = st.ok[k]
-                .iter()
-                .flat_map(|o| o.items.iter().cloned().map(Item::Track))
-                .collect();
+                .as_ref()
+                .map(|o| o.items.clone())
+                .unwrap_or_default();
             let rep = cx.checker.check_against(&st.idx, &items, &[]);
             st.check_visited += rep.candidates_visited;
             temp.extend(items.iter().map(|it| st.idx.insert(it)));
@@ -598,8 +916,8 @@ fn metrize_zs(
                 if zs_wire == Some(k) && v.gap + ZS_QUANT_TOL_NM >= v.required {
                     continue;
                 }
-                if !matches!(st.res[k], Some(Res::Fail { .. })) {
-                    st.res[k] = Some(fail(format!(
+                if st.fail[k].is_none() {
+                    st.fail[k] = Some(fail(format!(
                         "self-check: {} (gap {} < {} nm)",
                         v.against, v.gap, v.required
                     )));
@@ -615,22 +933,65 @@ fn metrize_zs(
             break;
         }
     }
-    for &k in &present {
-        if st.pending[k] && st.res[k].is_none() {
-            st.res[k] = st.ok[k].clone().map(Res::Ok);
-            st.pending[k] = false;
-            if let Some(o) = &st.ok[k] {
-                let ids: Vec<usize> = o
-                    .items
+    // Index the legs that passed, once their whole connection is complete.
+    for &i in routed {
+        let ks = st.conn_legs[i].clone();
+        let broken = ks
+            .iter()
+            .any(|&k| st.fail[k].is_some() || st.ok[k].is_none());
+        if broken {
+            for &k in &ks {
+                st.unindex(k);
+                st.pending[k] = st.ok[k].is_some();
+            }
+            continue;
+        }
+        for &k in &ks {
+            if st.pending[k] {
+                st.pending[k] = false;
+                let ids: Vec<usize> = st.ok[k]
                     .iter()
-                    .map(|t| st.idx.insert(&Item::Track(t.clone())))
+                    .flat_map(|o| o.items.iter())
+                    .map(|it| st.idx.insert(it))
                     .collect();
                 st.item_ids[k] = ids;
             }
         }
     }
     for &i in routed {
-        let r = st.res[i].clone().unwrap_or_else(|| fail("not metrized"));
+        let ks = &st.conn_legs[i];
+        let r = if ks.is_empty() {
+            fail("not metrized")
+        } else if let Some(f) = ks.iter().find_map(|&k| st.fail[k].clone()) {
+            f
+        } else if ks.iter().any(|&k| st.ok[k].is_none() || st.pending[k]) {
+            fail("not metrized")
+        } else {
+            let legs: Vec<&LegOk> = ks.iter().filter_map(|&k| st.ok[k].as_ref()).collect();
+            let sites = mg.sites_of(i);
+            let mut layers: Vec<u32> = Vec::new();
+            for &k in ks {
+                let l = cx.layers[st.leg_layer[k]];
+                if !layers.contains(&l) {
+                    layers.push(l);
+                }
+            }
+            Res::Ok(ConnOk {
+                items: legs.iter().flat_map(|o| o.items.iter().cloned()).collect(),
+                len: legs.iter().map(|o| o.len).sum(),
+                out: legs.iter().map(|o| o.out).sum(),
+                pattern: legs
+                    .iter()
+                    .map(|o| o.pattern.as_str())
+                    .collect::<Vec<_>>()
+                    .join("|"),
+                anchors: legs.iter().map(|o| o.anchors).sum(),
+                crossings: legs.iter().map(|o| o.crossings).sum(),
+                vias: sites.len(),
+                layers,
+                via_sites: sites.iter().map(|&s| kicad(mg.sites[s].at)).collect(),
+            })
+        };
         out.res.push((i, r));
     }
     out
@@ -694,6 +1055,8 @@ fn stub_item(c: &Connection, layer: u32, a: Vec2, b: Vec2) -> TrackItem {
 /// One stub candidate: the wire from `start` along `crossings` to the junction `end`.
 struct StubSpec {
     conn: usize,
+    /// Layer index of the stub.
+    layer: usize,
     start: Terminal,
     end: Vec2,
     crossings: Vec<Crossing>,
@@ -736,6 +1099,8 @@ fn bisect_stub(
 
 /// A located block: both stubs of a failed connection aim at `p0`.
 struct Blk {
+    /// Layer index of the stubs (the ghost's first leg).
+    layer: usize,
     p0: Vec2,
     /// Reported blocking point (KiCad frame) when `Res::Fail` carries none.
     report: Option<[i64; 2]>,
@@ -806,25 +1171,27 @@ fn probe_path(
     c: &Connection,
     layer: u32,
     base: &[Item],
-    path: &SlotPath,
+    crossings: &[(usize, usize)],
+    from: Vec2,
+    to: Vec2,
     deadline: Instant,
     steps: &mut usize,
 ) -> Option<Vec2> {
-    let n = path.crossings.len();
+    let n = crossings.len();
     for j in 0..=n {
         if *steps >= PROBE_STEP_CAP || Instant::now() >= deadline {
             return None;
         }
         *steps += 1;
         let a: Vec<Vec2> = if j == 0 {
-            vec![c.from.at]
+            vec![from]
         } else {
-            edge_samples(g, path.crossings[j - 1].0)
+            edge_samples(g, crossings[j - 1].0)
         };
         let b: Vec<Vec2> = if j == n {
-            vec![c.to.at]
+            vec![to]
         } else {
-            edge_samples(g, path.crossings[j].0)
+            edge_samples(g, crossings[j].0)
         };
         let mut items = base.to_vec();
         let mut pairs: Vec<(Vec2, Vec2)> = Vec::new();
@@ -880,69 +1247,102 @@ fn probe_path(
 
 /// Blocks of the failed connections of the best iteration: ghost blocks (`BlockInfo`) and, for
 /// connections that found a slot path which then failed metrization, the geometric probe.
+/// Stubs are only drawn on the ghost's / path's first leg (D6 rule): a block on a later leg or
+/// at a via site yields no stub.
 fn collect_blocks(
     cx: &Ctx,
-    g: &RouteGraph,
+    mg: &MultiGraph,
     best: &Snap,
     checker: &Checker,
     base: &[Item],
 ) -> BTreeMap<usize, Blk> {
     let mut out: BTreeMap<usize, Blk> = BTreeMap::new();
+    // End of the first leg of `path`: the connection's target, or the first via.
+    let leg0_end = |c: &Connection, p: &SlotPath| -> Vec2 {
+        match p.sites.first() {
+            Some(&(s, _)) if p.legs.len() > 1 || matches!(c.to.kind, TermKind::Pour(_)) => {
+                mg.sites[s].at
+            }
+            _ => c.to.at,
+        }
+    };
     for (&i, b) in &best.blocked {
         if matches!(best.res.get(i), Some(Res::Fail { perm: true, .. })) {
             continue;
         }
-        let (Some(gp), Some(e_b)) = (&b.ghost, b.edge) else {
+        let Some(gp) = &b.ghost else { continue };
+        let Some(leg0) = gp.legs.first() else {
+            continue;
+        };
+        let g0 = &mg.layers[leg0.layer_idx].g;
+        let c = &cx.conns[i];
+        let Some((li_b, e_b)) = b.edge else {
             // Topological block (no blocked edge, e.g. a bend pinched against a wall): the ghost
             // path is search-infeasible but geometrically probe-able (fallback, note A).
-            if let (Some(gp), None) = (&b.ghost, b.edge) {
-                if gp.faces.len() == gp.crossings.len() + 1 || gp.crossings.is_empty() {
-                    let mut steps = 0;
-                    if let Some(p0) = probe_path(
-                        g,
-                        checker,
-                        &cx.conns[i],
-                        cx.layer,
-                        base,
-                        gp,
-                        cx.deadline,
-                        &mut steps,
-                    ) {
-                        out.insert(
-                            i,
-                            Blk {
-                                p0,
-                                report: Some(kicad(p0)),
-                                steps: Some(steps),
-                                fwd: None,
-                            },
-                        );
-                    }
+            if b.site.is_none()
+                && (leg0.faces.len() == leg0.crossings.len() + 1 || leg0.crossings.is_empty())
+            {
+                let mut steps = 0;
+                if let Some(p0) = probe_path(
+                    g0,
+                    checker,
+                    c,
+                    cx.layers[leg0.layer_idx],
+                    base,
+                    &leg0.crossings,
+                    c.from.at,
+                    leg0_end(c, gp),
+                    cx.deadline,
+                    &mut steps,
+                ) {
+                    out.insert(
+                        i,
+                        Blk {
+                            layer: leg0.layer_idx,
+                            p0,
+                            report: Some(kicad(p0)),
+                            steps: Some(steps),
+                            fwd: None,
+                        },
+                    );
                 }
             }
             continue;
         };
-        let Some(k) = gp.crossings.iter().position(|&(e, _)| e == e_b) else {
+        // The blocked edge must lie on the first leg.
+        if li_b != leg0.layer_idx {
+            continue;
+        }
+        let Some(k) = leg0.crossings.iter().position(|&(e, _)| e == e_b) else {
             continue;
         };
-        if gp.faces.len() != gp.crossings.len() + 1 {
+        if leg0.faces.len() != leg0.crossings.len() + 1 {
             continue;
         }
         let p0 = crossing_point(
-            g,
-            &ghost_crossing(g, gp.crossings[k].0, gp.crossings[k].1, gp.faces[k]),
+            g0,
+            &ghost_crossing(g0, leg0.crossings[k].0, leg0.crossings[k].1, leg0.faces[k]),
         );
         // D6: the forward stub starts at the crossing point of `last_reached` (the crossing
         // before the blocked edge) and follows the ghost crossings up to it.
         let fwd = (k > 0).then(|| {
+            let last = ghost_crossing(
+                g0,
+                leg0.crossings[k - 1].0,
+                leg0.crossings[k - 1].1,
+                leg0.faces[k - 1],
+            );
             let cr: Vec<Crossing> = (0..k)
-                .map(|j| ghost_crossing(g, gp.crossings[j].0, gp.crossings[j].1, gp.faces[j]))
+                .map(|j| {
+                    ghost_crossing(g0, leg0.crossings[j].0, leg0.crossings[j].1, leg0.faces[j])
+                })
                 .collect();
-            (crossing_point(g, &cr[k - 1]), cr)
+            (crossing_point(g0, &last), cr)
         });
         out.insert(
             i,
             Blk {
+                layer: leg0.layer_idx,
                 p0,
                 report: None,
                 steps: None,
@@ -960,15 +1360,30 @@ fn collect_blocks(
         let Some(Some(path)) = best.paths.get(i) else {
             continue;
         };
-        if path.faces.len() != path.crossings.len() + 1 && !path.crossings.is_empty() {
+        let Some(leg0) = path.legs.first() else {
+            continue;
+        };
+        if leg0.faces.len() != leg0.crossings.len() + 1 && !leg0.crossings.is_empty() {
             continue;
         }
         let c = &cx.conns[i];
         let mut steps = 0;
-        if let Some(p0) = probe_path(g, checker, c, cx.layer, base, path, cx.deadline, &mut steps) {
+        if let Some(p0) = probe_path(
+            &mg.layers[leg0.layer_idx].g,
+            checker,
+            c,
+            cx.layers[leg0.layer_idx],
+            base,
+            &leg0.crossings,
+            c.from.at,
+            leg0_end(c, path),
+            cx.deadline,
+            &mut steps,
+        ) {
             out.insert(
                 i,
                 Blk {
+                    layer: leg0.layer_idx,
                     p0,
                     report: Some(kicad(p0)),
                     steps: Some(steps),
@@ -983,6 +1398,8 @@ fn collect_blocks(
 /// Stubs of the failed connections of the best iteration (note §6).
 fn partial_pass(
     cx: &Ctx,
+    obs: &ObstacleSet,
+    mg: &MultiGraph,
     blocks: &BTreeMap<usize, Blk>,
     eps_checker: &Checker,
     mut base: Vec<Item>,
@@ -990,30 +1407,45 @@ fn partial_pass(
 ) -> BTreeMap<usize, Partial> {
     let mut result: BTreeMap<usize, Partial> = BTreeMap::new();
     let routed = base.clone();
+    let sk_base = real_sketches(obs, mg);
     let mut specs: Vec<StubSpec> = Vec::new();
     for (&i, b) in blocks {
         let c = &cx.conns[i];
+        let layer = cx.layers[b.layer];
+        let ls = &*sk_base[b.layer];
+        let g0 = &mg.layers[b.layer].g;
         for (side, start) in [terminal_of(&c.from), terminal_of(&c.to)]
             .into_iter()
             .enumerate()
         {
+            // The reverse stub needs copper of the goal terminal on the stub's layer (a pour
+            // target has none: its via is not a terminal).
+            if side == 1
+                && (matches!(c.to.kind, TermKind::Pour(_)) || !c.to.layers.contains(&layer))
+            {
+                continue;
+            }
             // D6: the forward stub grows from the `last_reached` crossing point through the
             // ghost crossings; the reverse stub from the goal terminal as before.
             let fwd: Option<&(Vec2, Vec<Crossing>)> = if side == 0 { b.fwd.as_ref() } else { None };
             let q = fwd.map_or(start.at(), |f| f.0);
-            let Some(p) = bisect_stub(eps_checker, c, cx.layer, &base, q, b.p0) else {
+            let Some(p) = bisect_stub(eps_checker, c, layer, &base, q, b.p0) else {
                 continue;
             };
             let crossings = match fwd {
-                Some(f) => f.1.clone(),
-                None => match cx.ls.cdt.crossings(&[q, p]) {
+                Some(f) => match base_crossings(g0, &f.1, start.at(), p, ls) {
+                    Some(cr) => cr,
+                    None => continue,
+                },
+                None => match ls.cdt.crossings(&[q, p]) {
                     Ok(cr) => cr,
                     Err(_) => continue,
                 },
             };
-            base.push(Item::Track(stub_item(c, cx.layer, q, p)));
+            base.push(Item::Track(stub_item(c, layer, q, p)));
             specs.push(StubSpec {
                 conn: i,
+                layer: b.layer,
                 start,
                 end: p,
                 crossings,
@@ -1034,7 +1466,8 @@ fn partial_pass(
     for (si, sp) in specs.iter().enumerate() {
         let c = &cx.conns[sp.conn];
         let start = sp.start.at();
-        if !unanchored_bends(start, sp.end, &sp.crossings, cx.ls).is_empty() {
+        let ls = &*sk_base[sp.layer];
+        if !unanchored_bends(start, sp.end, &sp.crossings, ls).is_empty() {
             continue;
         }
         let k = wires.len();
@@ -1043,12 +1476,12 @@ fn partial_pass(
             start,
             sp.end,
             sp.crossings.clone(),
-            cx.ls,
+            ls,
         ));
         wires.push(Wire {
             id: k,
             net: c.net,
-            layer: cx.layer,
+            layer: cx.layers[sp.layer],
             width: c.width,
             start: sp.start.clone(),
             goal: Terminal::Junction { at: sp.end },
@@ -1062,10 +1495,17 @@ fn partial_pass(
         return result;
     }
     let mut orders: HashMap<u32, HashMap<AnchorRef, Vec<usize>>> = HashMap::new();
-    for l in wires.iter().map(|w| w.layer).collect::<BTreeSet<_>>() {
-        orders.insert(l, stack_order(&sketches, cx.ls));
+    for (li, &l) in cx.layers.iter().enumerate() {
+        let on: Vec<Sketch> = sketches
+            .iter()
+            .filter(|sk| wires[sk.wire].layer == l)
+            .cloned()
+            .collect();
+        if !on.is_empty() {
+            orders.insert(l, stack_order(&on, &sk_base[li]));
+        }
     }
-    let r = relax(&wires, &sketches, cx.obs, &orders, cx.opts, cx.deadline);
+    let r = relax(&wires, &sketches, obs, &orders, cx.opts, cx.deadline);
     if r.timed_out {
         return result;
     }
@@ -1169,6 +1609,8 @@ fn partial_pass(
 #[derive(Clone)]
 struct Snap {
     routed: usize,
+    /// Vias of the routed connections.
+    vias: usize,
     len: f64,
     /// Σ outside-pad length of the routed connections.
     out: f64,
@@ -1180,78 +1622,88 @@ struct Snap {
     rounds: u32,
     blocked: BTreeMap<usize, BlockInfo>,
     paths: Vec<Option<SlotPath>>,
-    /// The routing graph as it stood in this iteration (the retry pass starts from it).
-    g: RouteGraph,
+    /// The routing graphs and site occupancy as they stood in this iteration (the retry pass
+    /// starts from it; the obstacle anchors are re-synced from `mg.owner`, P7).
+    mg: MultiGraph,
     /// Metrization state of this iteration (the retry pass continues from it).
     metr: MetrState,
 }
 
-/// `(crossings, faces, (start, goal))` as `insert_path` takes them.
-type PathArgs = (Vec<(usize, usize)>, Vec<usize>, (usize, usize));
-
-/// Path of `conn` in `g` as `insert_path` arguments with the slots converted from the current
-/// frame to the pre-insert frame (an edge crossed twice by the same path counts its earlier own
-/// crossing out).
-fn take_path(g: &RouteGraph, conn: usize) -> Option<PathArgs> {
-    let (cross, faces, st) = g.path_of(conn)?;
-    let mut conv = Vec::with_capacity(cross.len());
-    for (k, &(e, s)) in cross.iter().enumerate() {
-        let before = cross[..k]
-            .iter()
-            .filter(|&&(e2, s2)| e2 == e && s2 < s)
-            .count();
-        conv.push((e, s - before));
-    }
-    Some((conv, faces.to_vec(), st))
+/// `(routed, vias, Σlen, Σoutside)` of a result vector.
+fn tally(res: &[Res]) -> (usize, usize, f64, f64) {
+    res.iter().fold(
+        (0usize, 0usize, 0.0f64, 0.0f64),
+        |(n, v, l, o), r| match r {
+            Res::Ok(k) => (n + 1, v + k.vias, l + k.len, o + k.out),
+            _ => (n, v, l, o),
+        },
+    )
 }
 
-/// `(routed, Σlen, Σoutside)` of a result vector.
-fn tally(res: &[Res]) -> (usize, f64, f64) {
-    res.iter()
-        .fold((0usize, 0.0f64, 0.0f64), |(n, l, o), r| match r {
-            Res::Ok(k) => (n + 1, l + k.len, o + k.out),
-            _ => (n, l, o),
-        })
+/// Best-iteration order (note §4): more routed, then fewer vias, then shorter.
+fn better_than(nok: usize, vias: usize, len: f64, b: &Snap) -> bool {
+    nok > b.routed || (nok == b.routed && (vias < b.vias || (vias == b.vias && len < b.len)))
+}
+
+/// Per-run search inputs shared by the loop and the retry pass.
+struct Route<'a> {
+    starts: &'a [Vec<(usize, usize)>],
+    goals: &'a [Goal],
+    /// Net of each live connection (obstacle anchor re-sync).
+    nets: Vec<i32>,
+}
+
+impl Route<'_> {
+    fn net_of(&self) -> impl Fn(usize) -> i32 + '_ {
+        move |c| self.nets[c]
+    }
 }
 
 /// Zero-slack retry (R6), one pass from the best iteration's graph. The detoured connections
 /// (`est_len > DETOUR_FACTOR × straight`) leave the graph; every routed connection is searched
-/// once at margin 0 (empty history). The candidates (estimated gain > [`ZS_GAIN_MIN_NM`]) are
-/// tried by descending gain (ties: lowest id), at most [`ZS_MAX_CANDIDATES`] of them, each in a
-/// fresh copy of the best graph ([`zero_slack_attempt`]); the first that routes at least as much
-/// with a shorter outside-pad length wins. Returns the new snapshot and the zero-slack
-/// connections (empty when the candidate's new path turned out feasible at ε); `Err(reason)`
-/// (the last attempt's) leaves the best iteration unchanged.
+/// once at margin 0 (empty history). The candidates (single-leg paths, estimated gain >
+/// [`ZS_GAIN_MIN_NM`]) are tried by descending gain (ties: lowest id), at most
+/// [`ZS_MAX_CANDIDATES`] of them, each in a fresh copy of the best graph
+/// ([`zero_slack_attempt`]); the first that routes at least as much with a shorter outside-pad
+/// length wins. Returns the new snapshot and the zero-slack connections (empty when the
+/// candidate's new path turned out feasible at ε); `Err(reason)` (the last attempt's) leaves the
+/// best iteration unchanged. `obs` is left in the state of the last attempt: the caller re-syncs
+/// it. Complexity: one margin-0 search per routed connection plus ≤ `ZS_MAX_CANDIDATES`
+/// metrizations.
 fn zero_slack_pass(
     cx: &Ctx,
+    obs: &mut ObstacleSet,
+    rt: &Route,
     best: &Snap,
-    verts: &[(usize, usize)],
-    layer_obs: &LayerObstacles,
 ) -> Result<(Snap, Vec<usize>), String> {
     let live = cx.conns;
     let m = live.len();
-    let mut g = best.g.clone();
+    let mut mg = best.mg.clone();
+    mg.sync_anchors(obs, &rt.net_of());
     let ok = |i: usize| matches!(best.res[i], Res::Ok(_));
     let detoured: Vec<usize> = (0..m)
         .filter(|&i| {
             ok(i)
                 && best.paths[i].as_ref().is_some_and(|p| {
-                    !p.crossings.is_empty()
+                    p.legs.iter().any(|l| !l.crossings.is_empty())
                         && p.est_len > DETOUR_FACTOR * (live[i].from.at - live[i].to.at).len()
                 })
         })
         .collect();
     for &d in &detoured {
-        g.remove_conn(d);
+        mg.remove_conn(d, obs);
     }
-    let cap = default_expansion_cap(&g);
+    let cap = default_expansion_cap(&mg);
     let params = |tier: u8, eps: Option<f64>| SearchParams {
         history: &[],
+        site_history: &[],
         weight: tier_weight(tier),
         present_overuse: PRESENT_OVERUSE,
         expansion_cap: cap,
         deadline: cx.deadline,
         eps,
+        via_cost: cx.opts.via_cost_nm as f64 * via_weight(tier),
+        max_vias: cx.opts.max_vias_per_connection,
     };
     // Candidates: margin-0 searches over the routed connections (a detoured one with the other
     // detoured ones absent; any other with its own path taken out and put back).
@@ -1263,37 +1715,35 @@ fn zero_slack_pass(
         if Instant::now() >= cx.deadline {
             return Err(ZS_DEADLINE.into());
         }
-        let (s, t) = verts[i];
         let out = if detoured.contains(&i) {
             search(
-                &g,
-                layer_obs,
+                &mg,
+                obs,
                 &live[i],
-                s,
-                t,
+                &rt.starts[i],
+                &rt.goals[i],
                 &params(live[i].tier, Some(0.0)),
             )
         } else {
-            let Some((cr, faces, _)) = take_path(&g, i) else {
+            let Some(taken) = mg.take_path(i) else {
                 continue;
             };
-            g.remove_conn(i);
+            mg.remove_conn(i, obs);
             let out = search(
-                &g,
-                layer_obs,
+                &mg,
+                obs,
                 &live[i],
-                s,
-                t,
+                &rt.starts[i],
+                &rt.goals[i],
                 &params(live[i].tier, Some(0.0)),
             );
-            let c = &live[i];
-            g.insert_path(i, s, t, &cr, &faces, c.width as f64, c.clearance as f64);
+            mg.insert_path(&live[i], &taken, obs);
             out
         };
         match out {
             SearchOutcome::Found(p) => {
                 let gain = old - p.est_len;
-                if gain > ZS_GAIN_MIN_NM {
+                if gain > ZS_GAIN_MIN_NM && p.legs.len() == 1 && p.sites.is_empty() {
                     cands.push((gain, i, p));
                 }
             }
@@ -1302,10 +1752,10 @@ fn zero_slack_pass(
         }
     }
     cands.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-    drop(g);
+    drop(mg);
     let mut last = "no candidate".to_string();
     for (_, c, p) in cands.into_iter().take(ZS_MAX_CANDIDATES) {
-        match zero_slack_attempt(cx, best, verts, layer_obs, &detoured, c, p, &params) {
+        match zero_slack_attempt(cx, obs, rt, best, &detoured, c, p, &params) {
             Ok(r) => return Ok(r),
             Err(e) if e == ZS_DEADLINE => return Err(e),
             Err(e) => last = format!("#{}: {e}", live[c].id),
@@ -1322,9 +1772,9 @@ fn zero_slack_pass(
 #[allow(clippy::too_many_arguments)]
 fn zero_slack_attempt<'a>(
     cx: &Ctx,
+    obs: &mut ObstacleSet,
+    rt: &Route,
     best: &Snap,
-    verts: &[(usize, usize)],
-    layer_obs: &LayerObstacles,
     detoured: &[usize],
     c: usize,
     p: SlotPath,
@@ -1333,24 +1783,14 @@ fn zero_slack_attempt<'a>(
     let live = cx.conns;
     let m = live.len();
     let ok = |i: usize| matches!(best.res[i], Res::Ok(_));
-    let mut g = best.g.clone();
+    let mut mg = best.mg.clone();
+    mg.sync_anchors(obs, &rt.net_of());
     for &d in detoured {
-        g.remove_conn(d);
+        mg.remove_conn(d, obs);
     }
-    let insert = |g: &mut RouteGraph, i: usize, p: &SlotPath| {
-        let c = &live[i];
-        g.insert_path(
-            i,
-            verts[i].0,
-            verts[i].1,
-            &p.crossings,
-            &p.faces,
-            c.width as f64,
-            c.clearance as f64,
-        );
-    };
-    g.remove_conn(c);
-    insert(&mut g, c, &p);
+    mg.remove_conn(c, obs);
+    mg.insert_path(&live[c], &p, obs);
+    let mut work: Vec<usize> = vec![c];
     let mut paths: Vec<Option<SlotPath>> = best.paths.clone();
     paths[c] = Some(p);
     let mut blocked = best.blocked.clone();
@@ -1359,15 +1799,23 @@ fn zero_slack_attempt<'a>(
         if Instant::now() >= cx.deadline {
             return Err(ZS_DEADLINE.into());
         }
-        let (s, t) = verts[d];
-        match search(&g, layer_obs, &live[d], s, t, &params(live[d].tier, None)) {
+        work.push(d);
+        match search(
+            &mg,
+            obs,
+            &live[d],
+            &rt.starts[d],
+            &rt.goals[d],
+            &params(live[d].tier, None),
+        ) {
             SearchOutcome::Found(p) => {
-                insert(&mut g, d, &p);
+                mg.insert_path(&live[d], &p, obs);
                 paths[d] = Some(p);
             }
             SearchOutcome::Blocked {
                 ghost,
                 blocked_edge,
+                blocked_site,
                 last_reached,
             } => {
                 paths[d] = None;
@@ -1376,6 +1824,7 @@ fn zero_slack_attempt<'a>(
                     d,
                     BlockInfo {
                         edge: blocked_edge,
+                        site: blocked_site,
                         ghost,
                         last_reached,
                     },
@@ -1393,7 +1842,7 @@ fn zero_slack_attempt<'a>(
         _ => "not metrized".into(),
     };
     let mut st_a = best.metr.clone();
-    let mt_a = metrize_zs(cx, &g, &routed, None, &mut st_a, &[]);
+    let mt_a = metrize_zs(cx, obs, &mg, &routed, None, &mut st_a, &work);
     if mt_a.timed_out {
         return Err(ZS_DEADLINE.into());
     }
@@ -1407,7 +1856,7 @@ fn zero_slack_attempt<'a>(
             walls: None,
         };
         let mut st_b = st_a.clone();
-        let mt_b = metrize_zs(cx, &g, &routed, Some(&ident), &mut st_b, &[]);
+        let mt_b = metrize_zs(cx, obs, &mg, &routed, Some(&ident), &mut st_b, &[]);
         if mt_b.timed_out {
             return Err(ZS_DEADLINE.into());
         }
@@ -1424,7 +1873,7 @@ fn zero_slack_attempt<'a>(
             walls: Some(walls),
         };
         let mut st_c = st_a;
-        let mt_c = metrize_zs(cx, &g, &routed, Some(&spec), &mut st_c, &[]);
+        let mt_c = metrize_zs(cx, obs, &mg, &routed, Some(&spec), &mut st_c, &[]);
         if mt_c.timed_out {
             return Err(ZS_DEADLINE.into());
         }
@@ -1439,15 +1888,24 @@ fn zero_slack_attempt<'a>(
     for (i, r) in mt.res {
         res[i] = r;
     }
-    let (nok, len, out) = tally(&res);
+    let (nok, vias, len, out) = tally(&res);
     if !(nok > best.routed || (nok == best.routed && out < best.out)) {
         return Err("no length gain".into());
     }
-    let overuse_edges = (0..g.edges.len()).filter(|&e| g.overuse(e) > 0.0).count();
-    let clinches = detect_clinches(&g, live, &paths, verts);
+    let overuse_edges = mg
+        .layers
+        .iter()
+        .map(|l| {
+            (0..l.g.edges.len())
+                .filter(|&e| l.g.overuse(e) > 0.0)
+                .count()
+        })
+        .sum();
+    let clinches = detect_clinches(&mg, live, &paths, rt.starts);
     Ok((
         Snap {
             routed: nok,
+            vias,
             len,
             out,
             iteration: best.iteration,
@@ -1458,7 +1916,7 @@ fn zero_slack_attempt<'a>(
             rounds: mt.rounds,
             blocked,
             paths,
-            g,
+            mg,
             metr,
         },
         zs,
@@ -1469,16 +1927,18 @@ fn layer_name(model: &BoardModel, id: u32) -> String {
     match model.layers.iter().find(|l| l.id == id) {
         Some(l) if !l.name.is_empty() => l.name.clone(),
         _ if id == 0 => "F.Cu".into(),
+        _ if id == 31 => "B.Cu".into(),
         _ => format!("layer {id}"),
     }
 }
 
-/// Terminal lies on copper of `layer` (`TermRef.layers` is filled by the decomposition).
-fn on_layer(t: &TermRef, layer: u32) -> bool {
-    t.layers.contains(&layer)
-}
-
-/// Route the unconnected nets of `model` on F.Cu.
+/// Route the unconnected nets of `model` on every routable copper layer, with through vias at
+/// pre-placed sites (M3): decompose, obstacles, via sites, one graph per layer, PathFinder over
+/// layers and sites, per-leg metrization with a self-check, partial stubs, reports.
+///
+/// Complexity: dominated by the PathFinder loop, `O(iters · m · V' log V')` with
+/// `V' = Σ_L 2(E_L + X_L) + 2S`, plus `O(changed · q)` self-checks per iteration (see the
+/// module header, `negotiate` and `multigraph`).
 pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
     let t0 = Instant::now();
     let deadline = deadline_after(opts.wall_clock_s, t0);
@@ -1493,23 +1953,7 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
         .map(|l| l.id)
         .collect();
     routable.sort_unstable();
-    let layer = if routable.contains(&0) {
-        0
-    } else {
-        routable.iter().copied().min().unwrap_or(0)
-    };
-    let unused: Vec<String> = routable
-        .iter()
-        .filter(|&&l| l != layer)
-        .map(|&l| layer_name(model, l))
-        .collect();
-    if !unused.is_empty() {
-        warnings.push(format!(
-            "routable layers {} unused (M2 routes on {} only)",
-            unused.join(", "),
-            layer_name(model, layer)
-        ));
-    }
+    routable.dedup();
     if routable.is_empty() {
         warnings.push("no routable layer".into());
     }
@@ -1519,7 +1963,6 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
         warnings.push(format!("net {net} skipped: {r}"));
     }
     let all = &dec.connections;
-    let lname = layer_name(model, layer);
 
     // Connections that can be searched, renumbered 0..m (the negotiator indexes by id).
     let mut early: Vec<Option<String>> = vec![None; all.len()];
@@ -1528,10 +1971,8 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
     for c in all {
         if routable.is_empty() {
             early[c.id] = Some("no routable layer".into());
-        } else if matches!(c.to.kind, TermKind::Pour(_)) {
-            early[c.id] = Some("pour completion needs vias (Task 9)".into());
-        } else if !on_layer(&c.from, layer) || !on_layer(&c.to, layer) {
-            early[c.id] = Some(format!("terminal not on layer {lname}"));
+        } else if c.from.layers.is_empty() || c.to.layers.is_empty() {
+            early[c.id] = Some("terminal not on any routable layer".into());
         } else {
             let mut l = c.clone();
             l.id = live.len();
@@ -1547,6 +1988,7 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
     let mut partials: BTreeMap<usize, Partial> = BTreeMap::new();
     let mut blocks: BTreeMap<usize, Blk> = BTreeMap::new();
     let mut zs_wires: Vec<usize> = Vec::new();
+    let mut n_sites = 0usize;
     let mut zs_status: String = if opts.zero_slack_retry {
         "not run"
     } else {
@@ -1556,272 +1998,367 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
 
     if m > 0 {
         // Obstacles: junction / dangling ends of copper attach points are terminals.
-        let mut tmap: BTreeMap<((u64, u64), i32), TerminalObstacle> = BTreeMap::new();
+        let mut tmap: BTreeMap<(u32, (u64, u64), i32), TerminalObstacle> = BTreeMap::new();
         for c in &live {
             for t in [&c.from, &c.to] {
-                if matches!(t.kind, TermKind::Copper(_) | TermKind::Dangling(_)) {
-                    let e = tmap
-                        .entry((bits(t.at), c.net))
-                        .or_insert_with(|| TerminalObstacle {
+                if let (TermKind::Copper(_) | TermKind::Dangling(_), Some(&layer)) =
+                    (&t.kind, t.layers.first())
+                {
+                    let e = tmap.entry((layer, bits(t.at), c.net)).or_insert_with(|| {
+                        TerminalObstacle {
                             layer,
                             at: t.at,
                             net: c.net,
                             width: c.width,
                             label: format!("terminal:net{}", c.net),
-                        });
+                        }
+                    });
                     e.width = e.width.max(c.width);
                 }
             }
         }
         let tobs: Vec<TerminalObstacle> = tmap.into_values().collect();
-        let obs = ObstacleSet::build(model, opts, &HashSet::new(), &tobs);
+        let mut obs = ObstacleSet::build(model, opts, &HashSet::new(), &tobs);
 
-        let mut seen = HashSet::new();
-        let mut pts: Vec<Vec2> = Vec::new();
-        let mut tinfo: Vec<TerminalInfo> = Vec::new();
+        // Via sites (P3): after the obstacles, before the graphs. Escape sites next to the SMD
+        // terminal pads; sizes = the union of the live nets' via sizes, largest first.
+        let escape: Vec<usize> = live
+            .iter()
+            .flat_map(|c| [&c.from, &c.to])
+            .filter_map(|t| match t.kind {
+                TermKind::Pad(pi) if model.pads[pi].attr == PadAttr::Smd => Some(pi),
+                _ => None,
+            })
+            .collect::<BTreeSet<usize>>()
+            .into_iter()
+            .collect();
+        let mut sizes: Vec<ViaSize> = live
+            .iter()
+            .map(|c| c.net)
+            .collect::<BTreeSet<i32>>()
+            .into_iter()
+            .flat_map(|n| via_sizes(&model.rules, n))
+            .collect();
+        sizes.sort_by_key(|z| std::cmp::Reverse((z.d, z.drill)));
+        sizes.dedup();
+        let fit_checker = Checker::new(model, opts);
+        let sites = via_sites(
+            model,
+            &obs,
+            &fit_checker,
+            &routable,
+            &escape,
+            &sizes,
+            opts.margin_nm as f64,
+        );
+        n_sites = sites.len();
+
+        // Terminals of the graphs: one vertex per position, on the layers it has copper on.
+        let mut term_at: BTreeMap<(u64, u64), usize> = BTreeMap::new();
+        let mut terms: Vec<(TerminalInfo, Vec<u32>)> = Vec::new();
         for c in &live {
             for t in [&c.from, &c.to] {
-                if seen.insert(bits(t.at)) {
-                    pts.push(t.at);
-                    tinfo.push(TerminalInfo {
-                        at: t.at,
-                        net: c.net,
-                        owner: t.label.clone(),
-                        clr: (c.clearance as f64).max(model.rules.min_clearance as f64),
-                        r: match t.kind {
-                            TermKind::Copper(_) | TermKind::Dangling(_) => 0.5 * c.width as f64,
-                            _ => 0.0,
-                        },
-                    });
+                if matches!(t.kind, TermKind::Pour(_)) {
+                    continue;
+                }
+                match term_at.get(&bits(t.at)) {
+                    Some(&i) => {
+                        for l in &t.layers {
+                            if !terms[i].1.contains(l) {
+                                terms[i].1.push(*l);
+                            }
+                        }
+                    }
+                    None => {
+                        term_at.insert(bits(t.at), terms.len());
+                        terms.push((
+                            TerminalInfo {
+                                at: t.at,
+                                net: c.net,
+                                owner: t.label.clone(),
+                                clr: (c.clearance as f64).max(model.rules.min_clearance as f64),
+                                r: match t.kind {
+                                    TermKind::Copper(_) | TermKind::Dangling(_) => {
+                                        0.5 * c.width as f64
+                                    }
+                                    _ => 0.0,
+                                },
+                            },
+                            t.layers.clone(),
+                        ));
+                    }
                 }
             }
         }
-        match build_layer_cdt(obs.layer(layer), &pts, ConstraintSet::Routing) {
+        let rules = GraphRules {
+            eps: opts.margin_nm as f64,
+            min_clearance: model.rules.min_clearance as f64,
+            edge_clearance: model.rules.edge_clearance as f64,
+            hole_clearance: model.rules.hole_clearance as f64,
+        };
+        match MultiGraph::build_on(model, &mut obs, sites, &routable, &terms, &rules) {
             Err(e) => setup_fail = Some(format!("sketch: {e}")),
-            Ok(ls) => {
-                let outline: Vec<Prim> = model.outline.iter().map(dequantise).collect();
-                let rules = GraphRules {
-                    eps: opts.margin_nm as f64,
-                    min_clearance: model.rules.min_clearance as f64,
-                    edge_clearance: model.rules.edge_clearance as f64,
-                    hole_clearance: model.rules.hole_clearance as f64,
+            Ok(mut mg) => {
+                let mut perm: Vec<Option<String>> = vec![None; m];
+                // Start vertices on every layer of the source terminal; the goal is the same
+                // for a terminal, the sites inside the pour for a pour target.
+                let vertices = |t: &TermRef| -> Vec<(usize, usize)> {
+                    routable
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, l)| t.layers.contains(l))
+                        .filter_map(|(li, _)| mg.vertex_of(li, t.at).map(|v| (li, v)))
+                        .collect()
                 };
-                let mut g = RouteGraph::build(&ls, obs.layer(layer), &outline, &tinfo, &rules);
-                let verts: Vec<Option<(usize, usize)>> = live
-                    .iter()
-                    .map(|c| Some((ls.vertex_at(c.from.at)?, ls.vertex_at(c.to.at)?)))
-                    .collect();
-                if let Some(i) = verts.iter().position(Option::is_none) {
-                    setup_fail = Some(format!(
-                        "sketch: terminal of {} is not a CDT vertex",
-                        live[i].from.label
-                    ));
-                } else {
-                    let verts: Vec<(usize, usize)> = verts.into_iter().flatten().collect();
-                    let check_opts = Options {
-                        margin_nm: 0,
-                        ..opts.clone()
-                    };
-                    let checker = Checker::new(model, &check_opts);
-                    let cx = Ctx {
-                        model,
-                        opts,
-                        layer,
-                        obs: &obs,
-                        ls: &ls,
-                        conns: &live,
-                        checker: &checker,
-                        deadline,
-                    };
-                    let layer_obs = obs.layer(layer);
-                    let mut neg = Negotiator::new(g.edges.len(), m);
-                    let mut perm: Vec<Option<String>> = vec![None; m];
-                    let mut active: Vec<usize> = (0..m).collect();
-                    let (mut stuck, mut last_sig) = (0u32, None::<(usize, Vec<usize>)>);
-                    let mut stale = 0u32;
-                    let mut metr = MetrState::new(&cx);
-                    for _ in 1..=opts.pathfinder_iter_cap {
-                        if Instant::now() >= deadline {
-                            timed_out = true;
-                            break;
-                        }
-                        let out = neg
-                            .iteration(&mut g, layer_obs, &live, &active, &verts, opts, deadline);
-                        if out.timed_out {
-                            timed_out = true;
-                            break;
-                        }
-                        let it = neg.iteration;
-                        let routed: Vec<usize> = (0..m)
-                            .filter(|&i| out.paths[i].is_some() && perm[i].is_none())
-                            .collect();
-                        let mut work: Vec<usize> = active.clone();
-                        work.extend(out.ripped.iter().copied());
-                        let mt = metrize(&cx, &g, &routed, &mut metr, &work);
-                        // Anytime: a timed-out metrization still yields what it completed; the
-                        // loop ends after this iteration's result is recorded.
-                        if mt.timed_out {
-                            timed_out = true;
-                            if mt.res.is_empty() {
-                                break;
+                let mut starts: Vec<Vec<(usize, usize)>> = Vec::with_capacity(m);
+                let mut goals: Vec<Goal> = Vec::with_capacity(m);
+                for (i, c) in live.iter().enumerate() {
+                    let st = vertices(&c.from);
+                    let goal = match c.to.kind {
+                        TermKind::Pour(zi) => {
+                            let pour_sites: Vec<usize> = (0..mg.sites.len())
+                                .filter(|&s| mg.in_pour[s].contains(&zi))
+                                .collect();
+                            if pour_sites.is_empty() {
+                                perm[i] = Some("no via site inside pour".into());
+                            }
+                            Goal {
+                                vertices: Vec::new(),
+                                pour_layer: routable.iter().position(|l| c.to.layers.contains(l)),
+                                pour_sites,
                             }
                         }
-                        iterations = it;
-                        let mut res: Vec<Res> = (0..m)
-                            .map(|i| match (&perm[i], out.blocked.get(&i)) {
-                                (Some(r), _) => Res::Fail {
-                                    reason: r.clone(),
-                                    perm: true,
-                                    blocking: None,
+                        _ => Goal {
+                            vertices: vertices(&c.to),
+                            pour_sites: Vec::new(),
+                            pour_layer: None,
+                        },
+                    };
+                    if perm[i].is_none()
+                        && (st.is_empty()
+                            || (goal.vertices.is_empty() && goal.pour_sites.is_empty()))
+                    {
+                        perm[i] = Some("terminal not on any routable layer".into());
+                    }
+                    starts.push(st);
+                    goals.push(goal);
+                }
+                let check_opts = Options {
+                    margin_nm: 0,
+                    ..opts.clone()
+                };
+                let checker = Checker::new(model, &check_opts);
+                let cx = Ctx {
+                    model,
+                    opts,
+                    layers: &routable,
+                    conns: &live,
+                    checker: &checker,
+                    deadline,
+                };
+                let rt = Route {
+                    starts: &starts,
+                    goals: &goals,
+                    nets: live.iter().map(|c| c.net).collect(),
+                };
+                let mut neg = Negotiator::new(&mg, m);
+                let mut active: Vec<usize> = (0..m).filter(|&i| perm[i].is_none()).collect();
+                let (mut stuck, mut last_sig) = (0u32, None::<(usize, Vec<usize>)>);
+                let mut stale = 0u32;
+                let mut metr = MetrState::new(&cx, &obs);
+                for _ in 1..=opts.pathfinder_iter_cap {
+                    if Instant::now() >= deadline {
+                        timed_out = true;
+                        break;
+                    }
+                    let out = neg.iteration(
+                        &mut mg, &mut obs, &live, &active, &starts, &goals, opts, deadline,
+                    );
+                    if out.timed_out {
+                        timed_out = true;
+                        break;
+                    }
+                    let it = neg.iteration;
+                    let routed: Vec<usize> = (0..m)
+                        .filter(|&i| {
+                            out.paths[i].is_some()
+                                && perm[i].is_none()
+                                && !legs_of(&mg, i).is_empty()
+                        })
+                        .collect();
+                    let mut work: Vec<usize> = active.clone();
+                    work.extend(out.ripped.iter().copied());
+                    let mt = metrize(&cx, &obs, &mg, &routed, &mut metr, &work);
+                    // Anytime: a timed-out metrization still yields what it completed; the
+                    // loop ends after this iteration's result is recorded.
+                    if mt.timed_out {
+                        timed_out = true;
+                        if mt.res.is_empty() {
+                            break;
+                        }
+                    }
+                    iterations = it;
+                    let mut res: Vec<Res> = (0..m)
+                        .map(|i| match (&perm[i], out.blocked.get(&i)) {
+                            (Some(r), _) => Res::Fail {
+                                reason: r.clone(),
+                                perm: true,
+                                blocking: None,
+                            },
+                            (None, Some(b)) => Res::Fail {
+                                reason: if b.edge.is_some() || b.site.is_some() {
+                                    "blocked: no path (wall, capacity or via sites)".into()
+                                } else {
+                                    "blocked: no path".into()
                                 },
-                                (None, Some(b)) => Res::Fail {
-                                    reason: if b.edge.is_some() {
-                                        "blocked: no path (wall or capacity)".into()
-                                    } else {
-                                        "blocked: no path".into()
-                                    },
-                                    perm: false,
-                                    blocking: b.edge.map(|e| {
+                                perm: false,
+                                blocking: b
+                                    .edge
+                                    .map(|(li, e)| {
+                                        let g = &mg.layers[li].g;
                                         let ge = &g.edges[e];
                                         kicad((g.verts[ge.a].at + g.verts[ge.b].at) * 0.5)
-                                    }),
-                                },
-                                (None, None) => fail("not routed"),
+                                    })
+                                    .or_else(|| b.site.map(|s| kicad(mg.sites[s].at))),
+                            },
+                            (None, None) => fail("not routed"),
+                        })
+                        .collect();
+                    for (i, r) in mt.res {
+                        res[i] = r;
+                    }
+                    // Feedback: failures first (class-independent ones leave the graph).
+                    let mut failed: Vec<usize> = Vec::new();
+                    for (i, r) in res.iter().enumerate() {
+                        if let Res::Fail {
+                            reason, perm: p, ..
+                        } = r
+                        {
+                            if out.blocked.contains_key(&i) {
+                                continue;
+                            }
+                            if *p {
+                                if perm[i].is_none() {
+                                    perm[i] = Some(reason.clone());
+                                    mg.remove_conn(i, &mut obs);
+                                }
+                            } else {
+                                failed.push(i);
+                            }
+                        }
+                    }
+                    for &i in &failed {
+                        neg.penalise_failed(&mg, i);
+                    }
+                    for (&i, b) in &out.blocked {
+                        neg.penalise_blocked(i, b);
+                    }
+                    // A failed path's reserved room is not a congestion the others can
+                    // resolve: it leaves the graph before the overuse count.
+                    for &i in &failed {
+                        mg.remove_conn(i, &mut obs);
+                    }
+                    let overuse = neg.penalise_overuse(&mg);
+                    let (nok, vias, len, out_len) = tally(&res);
+                    let better = best.as_ref().is_none_or(|b| better_than(nok, vias, len, b));
+                    if better {
+                        stale = 0;
+                        best = Some(Snap {
+                            routed: nok,
+                            vias,
+                            len,
+                            out: out_len,
+                            iteration: it,
+                            res,
+                            overuse_edges: overuse,
+                            clinches: detect_clinches(&mg, &live, &out.paths, &starts),
+                            relax_iterations: mt.relax_iterations,
+                            rounds: mt.rounds,
+                            blocked: out.blocked.clone(),
+                            paths: out.paths.clone(),
+                            mg: mg.clone(),
+                            metr: metr.clone(),
+                        });
+                    } else {
+                        stale += 1;
+                    }
+                    if timed_out {
+                        break;
+                    }
+                    if failed.is_empty()
+                        && out.blocked.is_empty()
+                        && out.ripped.is_empty()
+                        && overuse == 0
+                    {
+                        converged = true;
+                        break;
+                    }
+                    // Stuck: same routed count and same failed / blocked set, nothing left
+                    // to negotiate (no overuse, no rip-up) for `STUCK_REPEATS` iterations.
+                    let mut fb: Vec<usize> = failed.clone();
+                    fb.extend(out.blocked.keys().copied());
+                    fb.sort_unstable();
+                    let sig = (nok, fb);
+                    if overuse == 0 && out.ripped.is_empty() && last_sig.as_ref() == Some(&sig) {
+                        stuck += 1;
+                    } else {
+                        stuck = 0;
+                    }
+                    last_sig = Some(sig);
+                    if stuck >= STUCK_REPEATS {
+                        warnings.push(format!("stuck after {it} iterations"));
+                        break;
+                    }
+                    if stale >= STALL_ITERS {
+                        warnings.push(format!(
+                            "stalled: no better routing for {STALL_ITERS} iterations, \
+                             stopped after {it}"
+                        ));
+                        break;
+                    }
+                    let mut next: BTreeSet<usize> = failed.into_iter().collect();
+                    next.extend(out.blocked.keys().copied());
+                    next.extend(out.ripped.iter().copied());
+                    next.extend(overused_conns(&mg));
+                    next.retain(|&i| perm[i].is_none());
+                    active = next.into_iter().collect();
+                    if active.is_empty() {
+                        converged = true;
+                        break;
+                    }
+                }
+                if !timed_out && opts.zero_slack_retry {
+                    if let Some(b) = &best {
+                        match zero_slack_pass(&cx, &mut obs, &rt, b) {
+                            Ok((snap, zs)) => {
+                                zs_wires = zs;
+                                zs_status = "kept".into();
+                                best = Some(snap);
+                            }
+                            Err(r) => zs_status = r,
+                        }
+                    }
+                }
+                if let Some(b) = &best {
+                    // The obstacle anchors follow the best iteration (P7).
+                    b.mg.sync_anchors(&mut obs, &rt.net_of());
+                }
+                if !timed_out {
+                    if let Some(b) = &best {
+                        let eps_checker = Checker::new(model, opts);
+                        let base: Vec<Item> = b
+                            .res
+                            .iter()
+                            .filter_map(|r| match r {
+                                Res::Ok(o) => Some(o),
+                                _ => None,
                             })
+                            .flat_map(|o| o.items.iter().cloned())
                             .collect();
-                        for (i, r) in mt.res {
-                            res[i] = r;
-                        }
-                        // Feedback: failures first (class-independent ones leave the graph).
-                        let mut failed: Vec<usize> = Vec::new();
-                        for (i, r) in res.iter().enumerate() {
-                            if let Res::Fail {
-                                reason, perm: p, ..
-                            } = r
-                            {
-                                if out.blocked.contains_key(&i) {
-                                    continue;
-                                }
-                                if *p {
-                                    if perm[i].is_none() {
-                                        perm[i] = Some(reason.clone());
-                                        g.remove_conn(i);
-                                    }
-                                } else {
-                                    failed.push(i);
-                                }
-                            }
-                        }
-                        for &i in &failed {
-                            neg.penalise_failed(&g, i);
-                        }
-                        for (&i, b) in &out.blocked {
-                            neg.penalise_blocked(i, b);
-                        }
-                        // A failed path's reserved room is not a congestion the others can
-                        // resolve: it leaves the graph before the overuse count.
-                        for &i in &failed {
-                            g.remove_conn(i);
-                        }
-                        let overuse = neg.penalise_overuse(&g);
-                        let (nok, len, out_len) = tally(&res);
-                        let better = best
-                            .as_ref()
-                            .is_none_or(|b| nok > b.routed || (nok == b.routed && len < b.len));
-                        if better {
-                            stale = 0;
-                            best = Some(Snap {
-                                routed: nok,
-                                len,
-                                out: out_len,
-                                iteration: it,
-                                res,
-                                overuse_edges: overuse,
-                                clinches: detect_clinches(&g, &live, &out.paths, &verts),
-                                relax_iterations: mt.relax_iterations,
-                                rounds: mt.rounds,
-                                blocked: out.blocked.clone(),
-                                paths: out.paths.clone(),
-                                g: g.clone(),
-                                metr: metr.clone(),
-                            });
-                        } else {
-                            stale += 1;
-                        }
-                        if timed_out {
-                            break;
-                        }
-                        if failed.is_empty()
-                            && out.blocked.is_empty()
-                            && out.ripped.is_empty()
-                            && overuse == 0
-                        {
-                            converged = true;
-                            break;
-                        }
-                        // Stuck: same routed count and same failed / blocked set, nothing left
-                        // to negotiate (no overuse, no rip-up) for `STUCK_REPEATS` iterations.
-                        let mut fb: Vec<usize> = failed.clone();
-                        fb.extend(out.blocked.keys().copied());
-                        fb.sort_unstable();
-                        let sig = (nok, fb);
-                        if overuse == 0 && out.ripped.is_empty() && last_sig.as_ref() == Some(&sig)
-                        {
-                            stuck += 1;
-                        } else {
-                            stuck = 0;
-                        }
-                        last_sig = Some(sig);
-                        if stuck >= STUCK_REPEATS {
-                            warnings.push(format!("stuck after {it} iterations"));
-                            break;
-                        }
-                        if stale >= STALL_ITERS {
-                            warnings.push(format!(
-                                "stalled: no better routing for {STALL_ITERS} iterations, \
-                                 stopped after {it}"
-                            ));
-                            break;
-                        }
-                        let mut next: BTreeSet<usize> = failed.into_iter().collect();
-                        next.extend(out.blocked.keys().copied());
-                        next.extend(out.ripped.iter().copied());
-                        next.extend(overused_conns(&g));
-                        next.retain(|&i| perm[i].is_none());
-                        active = next.into_iter().collect();
-                        if active.is_empty() {
-                            converged = true;
-                            break;
-                        }
-                    }
-                    if !timed_out && opts.zero_slack_retry {
-                        if let Some(b) = &best {
-                            match zero_slack_pass(&cx, b, &verts, layer_obs) {
-                                Ok((snap, zs)) => {
-                                    zs_wires = zs;
-                                    zs_status = "kept".into();
-                                    best = Some(snap);
-                                }
-                                Err(r) => zs_status = r,
-                            }
-                        }
-                    }
-                    if !timed_out {
-                        if let Some(b) = &best {
-                            let eps_checker = Checker::new(model, opts);
-                            let base: Vec<Item> = b
-                                .res
-                                .iter()
-                                .filter_map(|r| match r {
-                                    Res::Ok(o) => Some(o),
-                                    _ => None,
-                                })
-                                .flat_map(|o| o.items.iter().cloned().map(Item::Track))
-                                .collect();
-                            blocks = collect_blocks(&cx, &g, b, &eps_checker, &base);
-                            if opts.partial_routes {
-                                partials = partial_pass(&cx, &blocks, &eps_checker, base, &orig);
-                            }
+                        blocks = collect_blocks(&cx, &b.mg, b, &eps_checker, &base);
+                        if opts.partial_routes {
+                            partials =
+                                partial_pass(&cx, &obs, &b.mg, &blocks, &eps_checker, base, &orig);
                         }
                     }
                 }
@@ -1842,6 +2379,8 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
     let mut items: Vec<Item> = Vec::new();
     let mut reports: Vec<ConnReport> = Vec::with_capacity(all.len());
     let (mut total_len, mut out_total) = (0.0, 0.0);
+    let mut by_layer: BTreeMap<String, f64> = BTreeMap::new();
+    let first_layer = routable.first().copied().unwrap_or(0);
     for c in all {
         let name = dec
             .nets
@@ -1853,10 +2392,13 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
             id: c.id,
             net: c.net,
             name,
-            layer,
+            layer: first_layer,
             width: c.width,
             status: "failed".into(),
             reason: String::new(),
+            vias: 0,
+            layers: Vec::new(),
+            via_sites: Vec::new(),
             from: term_out(&c.from),
             to: term_out(&c.to),
             length_nm: 0,
@@ -1884,6 +2426,16 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                     match &b.res[i] {
                         Res::Ok(o) => {
                             rep.status = "routed".into();
+                            rep.layer = o.layers.first().copied().unwrap_or(first_layer);
+                            rep.vias = o.vias;
+                            rep.layers = o.layers.iter().map(|&l| layer_name(model, l)).collect();
+                            rep.via_sites = o.via_sites.clone();
+                            for it in &o.items {
+                                if let Item::Track(t) = it {
+                                    *by_layer.entry(layer_name(model, t.layer)).or_insert(0.0) +=
+                                        dequantise(&t.prim).length();
+                                }
+                            }
                             rep.length_nm = o.len.round() as i64;
                             rep.length_outside_pads_nm = o.out.round() as i64;
                             rep.pattern = o.pattern.clone();
@@ -1891,7 +2443,7 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                             rep.crossings = o.crossings;
                             total_len += o.len;
                             out_total += o.out;
-                            items.extend(o.items.iter().cloned().map(Item::Track));
+                            items.extend(o.items.iter().cloned());
                         }
                         Res::Fail {
                             reason, blocking, ..
@@ -1955,6 +2507,7 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
             routed,
             partial,
             failed,
+            vias: cs.iter().map(|r| r.vias).sum(),
             length_nm: cs.iter().map(|r| r.length_nm).sum(),
             length_outside_pads_nm: cs.iter().map(|r| r.length_outside_pads_nm).sum(),
         });
@@ -1976,6 +2529,7 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
             name: r.name.clone(),
         })
         .collect();
+    let reports_vias: usize = reports.iter().map(|r| r.vias).sum();
     RouteResult {
         items,
         connections_total: reports.len(),
@@ -1988,6 +2542,13 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
         nets_routed,
         total_length_nm: total_len.round() as i64,
         length_outside_pads_nm: out_total.round() as i64,
+        vias: reports_vias,
+        length_by_layer_nm: by_layer
+            .into_iter()
+            .map(|(k, v)| (k, v.round() as i64))
+            .collect(),
+        sites: n_sites,
+        via_reduction: "not run".into(),
         iterations,
         converged,
         overuse_edges: best.as_ref().map_or(0, |b| b.overuse_edges),

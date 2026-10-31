@@ -14,13 +14,19 @@ use crate::obstacle::ObstacleSet;
 use crate::search::SlotPath;
 use crate::sketch::{build_layer_cdt, ConstraintSet, LayerSketch};
 use crate::vias::{ViaSite, ViaSize};
+use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct LayerCtx {
     pub layer: u32,
-    pub ls: LayerSketch,
+    /// Immutable after the build; shared by snapshots (P7).
+    pub ls: Arc<LayerSketch>,
     pub g: RouteGraph,
+    /// Positions of the terminal vertices of this layer (input of the CDT after the anchors).
+    pub terminals: Vec<Vec2>,
 }
 
+#[derive(Clone)]
 pub struct MultiGraph {
     pub layers: Vec<LayerCtx>,
     pub sites: Vec<ViaSite>,
@@ -123,7 +129,12 @@ impl MultiGraph {
             let ls = build_layer_cdt(obs.layer(l), &pos, ConstraintSet::Routing)?;
             let infos: Vec<TerminalInfo> = on.into_iter().cloned().collect();
             let g = RouteGraph::build(&ls, obs.layer(l), &outline, &infos, rules);
-            ctxs.push(LayerCtx { layer: l, ls, g });
+            ctxs.push(LayerCtx {
+                layer: l,
+                ls: Arc::new(ls),
+                g,
+                terminals: pos,
+            });
         }
         let mut site_vertex = Vec::with_capacity(sites.len());
         for (s, site) in sites.iter().enumerate() {
@@ -431,5 +442,68 @@ impl MultiGraph {
         v.sort_unstable();
         v.dedup();
         v
+    }
+
+    /// Index of the layer whose graph holds the path of leg `k`. O(layers).
+    pub fn leg_layer(&self, k: usize) -> Option<usize> {
+        self.layers.iter().position(|c| c.g.path_of(k).is_some())
+    }
+
+    /// The path of `conn` as currently inserted, as a [`SlotPath`] whose slots are converted
+    /// to the pre-insert frame (an edge crossed twice by the same leg counts its earlier own
+    /// crossing out), so that [`MultiGraph::insert_path`] reproduces it after a removal.
+    /// `est_len` / `cost` are 0. O(legs * path length).
+    pub fn take_path(&self, conn: usize) -> Option<SlotPath> {
+        let ks = self.conn_wires.get(conn)?;
+        if ks.is_empty() {
+            return None;
+        }
+        let mut legs = Vec::with_capacity(ks.len());
+        for &k in ks {
+            let li = self.leg_layer(k)?;
+            let (cross, faces, (start, goal)) = self.layers[li].g.path_of(k)?;
+            let crossings: Vec<(usize, usize)> = cross
+                .iter()
+                .enumerate()
+                .map(|(i, &(e, s))| {
+                    let before = cross[..i]
+                        .iter()
+                        .filter(|&&(e2, s2)| e2 == e && s2 < s)
+                        .count();
+                    (e, s - before)
+                })
+                .collect();
+            legs.push(crate::search::Leg {
+                layer_idx: li,
+                start,
+                goal,
+                crossings,
+                faces: faces.to_vec(),
+                est_len: 0.0,
+            });
+        }
+        let sites: Vec<(usize, ViaSize)> = self
+            .sites_of(conn)
+            .iter()
+            .filter_map(|&s| self.owner[s].map(|(_, z)| (s, z)))
+            .collect();
+        Some(SlotPath {
+            conn,
+            legs,
+            sites,
+            est_len: 0.0,
+            cost: 0.0,
+            expansions: 0,
+            candidates: 0,
+        })
+    }
+
+    /// Bring the obstacle anchors in line with the site owners of `self` (after a snapshot
+    /// restore, P7): active sites enabled with their size and the net `net_of(conn)`, the others
+    /// dormant. O(S * layers).
+    pub fn sync_anchors(&self, obs: &mut ObstacleSet, net_of: &dyn Fn(usize) -> i32) {
+        for (s, o) in self.owner.iter().enumerate() {
+            obs.set_site(&self.site_anchor[s], o.map(|(c, z)| (net_of(c), z)));
+        }
     }
 }

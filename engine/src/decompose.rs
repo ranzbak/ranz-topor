@@ -695,9 +695,9 @@ pub fn terminal_of(t: &TermRef) -> crate::wires::Terminal {
         TermKind::Via(i) => Terminal::Via { via: *i, at: t.at },
         TermKind::Copper(_) => Terminal::Junction { at: t.at },
         TermKind::Dangling(_) => Terminal::Dangling { at: t.at },
-        // The via lands in the pour; `usize::MAX` = no existing via item.
-        TermKind::Pour(_) => Terminal::Via {
-            via: usize::MAX,
+        // The via lands in the pour: a router via site, assigned by the search (P6).
+        TermKind::Pour(_) => Terminal::Site {
+            site: usize::MAX,
             at: t.at,
         },
     }

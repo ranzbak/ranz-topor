@@ -134,6 +134,10 @@ def test_route_surface_round_trip(engine):
     for key in ("items", "connections", "nets", "runtime_s", "iterations", "warnings"):
         assert key in out
     assert out["threads_used"] == 1
+    for key in ("vias", "length_by_layer_nm", "sites"):
+        assert key in out
+    assert out["vias"] == 0 and out["sites"] >= 0
+    assert out["length_by_layer_nm"] == {"F.Cu": out["total_length_nm"]}
     assert out["routed"] == 1 and len(out["items"]) == 1
     stats = json.loads(engine.wire_stats(json.dumps(_model_with_track())))
     assert stats["wires"] == 1 and stats["skipped"] == 0

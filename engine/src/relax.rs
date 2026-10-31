@@ -565,7 +565,7 @@ pub struct Relaxer {
     stacks: HashMap<u32, Stacks>,
     dyns: HashMap<u32, DynLayer>,
     /// Relax order rank per wire (wider first, then by net, then by id).
-    rank: Vec<usize>,
+    rank: Vec<Rank>,
     /// Wires whose inputs changed since the last run (sorted by rank in `run`).
     queued: BTreeSet<usize>,
     last_zs: Option<ZeroSlack>,
@@ -574,7 +574,62 @@ pub struct Relaxer {
     cell: f64,
 }
 
+/// Relax order key: wider first, then by net, then by id.
+type Rank = (i64, i32, usize);
+
+fn rank_of(w: &Wire, k: usize) -> Rank {
+    (-w.width, w.net, k)
+}
+
 impl Relaxer {
+    /// Slot mode with no wires yet and stacks for `layers`: wires are installed with
+    /// [`Relaxer::replace`] as the router allocates them (the multi-layer router, whose wire
+    /// ids are leg ids that change layer and connection over a run).
+    pub fn with_layers(layers: &[u32], obs: &ObstacleSet) -> Relaxer {
+        let empty = SlotNesting::default();
+        let mut rx = Self::with_stacks(Vec::new(), obs, &|_| Stacks::from_slots(&empty));
+        for &l in layers {
+            rx.stacks.entry(l).or_insert_with(|| Stacks::from_slots(&empty));
+            rx.dyns
+                .entry(l)
+                .or_insert_with(|| DynLayer::new(obs.query_grow()));
+        }
+        rx
+    }
+
+    /// Install `w` as wire `k` (growing the tables), replacing the previous occupant of the
+    /// slot. The previous wire must have been removed (`!is_present(k)`) so that no state of
+    /// it is left in the stacks / dynamic obstacles. The wire's layer must be one of the
+    /// layers given to [`Relaxer::with_layers`]. O(1) amortised.
+    pub fn replace(&mut self, k: usize, w: Wire) {
+        if k >= self.wires.len() {
+            let pad = Wire {
+                id: 0,
+                net: 0,
+                layer: w.layer,
+                width: 0,
+                start: w.start.clone(),
+                goal: w.goal.clone(),
+                hand: Vec::new(),
+                kept_uuids: Vec::new(),
+                hand_len: 0.0,
+            };
+            for j in self.wires.len()..=k {
+                let mut p = pad.clone();
+                p.id = j;
+                self.rank.push(rank_of(&p, j));
+                self.wires.push(p);
+                self.present.push(false);
+                self.chains.push(not_relaxed());
+                self.seqs.push(Vec::new());
+                self.sketch_seqs.push(Vec::new());
+            }
+        }
+        debug_assert!(!self.present[k], "replace of a present wire");
+        self.rank[k] = rank_of(&w, k);
+        self.wires[k] = w;
+    }
+
     /// Slot mode (stacks from [`SlotNesting`], `set_nesting`); every wire absent until `set`.
     pub fn new(wires: Vec<Wire>, obs: &ObstacleSet) -> Relaxer {
         let empty = SlotNesting::default();
@@ -594,18 +649,7 @@ impl Relaxer {
             dyns.entry(w.layer)
                 .or_insert_with(|| DynLayer::new(obs.query_grow()));
         }
-        let mut order: Vec<usize> = (0..n).collect();
-        order.sort_by(|&a, &b| {
-            wires[b]
-                .width
-                .cmp(&wires[a].width)
-                .then(wires[a].net.cmp(&wires[b].net))
-                .then(a.cmp(&b))
-        });
-        let mut rank = vec![0usize; n];
-        for (r, &k) in order.iter().enumerate() {
-            rank[k] = r;
-        }
+        let rank: Vec<Rank> = wires.iter().enumerate().map(|(k, w)| rank_of(w, k)).collect();
         Relaxer {
             present: vec![false; n],
             chains: (0..n).map(|_| not_relaxed()).collect(),
@@ -793,7 +837,7 @@ impl Relaxer {
             self.last_zs = ro.zs.cloned();
         }
         self.queued.extend(work.iter().copied());
-        let mut cur: BTreeSet<(usize, usize)> = std::mem::take(&mut self.queued)
+        let mut cur: BTreeSet<(Rank, usize)> = std::mem::take(&mut self.queued)
             .into_iter()
             .filter(|&k| self.present[k])
             .map(|k| (self.rank[k], k))
@@ -804,7 +848,7 @@ impl Relaxer {
         let mut changed: BTreeSet<usize> = BTreeSet::new();
         'outer: while !cur.is_empty() && st.sweeps < ro.opts.relax_iter_cap {
             let first = st.sweeps == 0 && anytime_first;
-            let mut next: BTreeSet<(usize, usize)> = BTreeSet::new();
+            let mut next: BTreeSet<(Rank, usize)> = BTreeSet::new();
             while let Some((r, k)) = cur.pop_first() {
                 if !first && Instant::now() >= ro.deadline {
                     st.timed_out = true;

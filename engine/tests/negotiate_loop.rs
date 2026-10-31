@@ -1,13 +1,13 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use topor_engine::decompose::{order, Connection, TermKind, TermRef};
-use topor_engine::geom::{dequantise, Prim};
-use topor_engine::graph::{CrossEntry, GraphRules, RouteGraph};
+use topor_engine::graph::{CrossEntry, GraphRules};
 use topor_engine::model::{BoardModel, Options};
+use topor_engine::multigraph::MultiGraph;
 use topor_engine::negotiate::*;
 use topor_engine::obstacle::ObstacleSet;
-use topor_engine::search::planar::PlanarPath as SlotPath;
-use topor_engine::sketch::{build_layer_cdt, ConstraintSet, LayerSketch};
+use topor_engine::search::{Goal, SlotPath};
+use topor_engine::vias::{SiteOrigin, ViaSite};
 
 const MM: f64 = 1_000_000.0;
 
@@ -44,10 +44,32 @@ fn round_pad(name: &str, net: i32, x_mm: f64, y_mm: f64) -> String {
     )
 }
 
+/// One routable layer (F.Cu): the M2 negotiation tests run through the layered API on a
+/// single-layer `MultiGraph` without via sites.
 struct Built {
-    g: RouteGraph,
-    ls: LayerSketch,
+    mg: MultiGraph,
     obs: ObstacleSet,
+}
+
+type Verts = Vec<(usize, usize)>;
+
+fn starts_of(v: &Verts) -> Vec<Vec<(usize, usize)>> {
+    v.iter().map(|&(s, _)| vec![(0, s)]).collect()
+}
+
+fn goals_of(v: &Verts) -> Vec<Goal> {
+    v.iter()
+        .map(|&(_, t)| Goal {
+            vertices: vec![(0, t)],
+            pour_sites: Vec::new(),
+            pour_layer: None,
+        })
+        .collect()
+}
+
+/// Crossings `(edge, slot)` of the single leg of `p` (layer 0).
+fn xs(p: &SlotPath) -> Vec<(usize, usize)> {
+    p.crossings_on(0)
 }
 
 fn small_pad(name: &str, net: i32, x_mm: f64, y_mm: f64) -> String {
@@ -73,17 +95,15 @@ fn build(pads: &[(&str, i32, f64, f64)], extra: &str) -> Built {
         outline50x40()
     );
     let m = BoardModel::from_json(&s).unwrap();
-    let obs = ObstacleSet::build(&m, &Options::default(), &HashSet::new(), &[]);
-    let ls = build_layer_cdt(obs.layer(0), &[], ConstraintSet::Routing).unwrap();
-    let outline: Vec<Prim> = m.outline.iter().map(dequantise).collect();
+    let mut obs = ObstacleSet::build(&m, &Options::default(), &HashSet::new(), &[]);
     let rules = GraphRules {
         eps: 5_000.0,
         min_clearance: 0.0,
         edge_clearance: 500_000.0,
         hole_clearance: 250_000.0,
     };
-    let g = RouteGraph::build(&ls, obs.layer(0), &outline, &[], &rules);
-    Built { g, ls, obs }
+    let mg = MultiGraph::build(&m, &mut obs, Vec::new(), &[0], &[], &rules).unwrap();
+    Built { mg, obs }
 }
 
 fn vert(b: &Built, name: &str) -> usize {
@@ -95,7 +115,7 @@ fn vert(b: &Built, name: &str) -> usize {
         .iter()
         .position(|a| a.label == label)
         .unwrap();
-    b.ls.cdt.vertex_index(ai)
+    b.mg.layers[0].ls.cdt.vertex_index(ai)
 }
 
 fn mkconn(b: &Built, id: usize, net: i32, from: &str, to: &str) -> (Connection, (usize, usize)) {
@@ -103,10 +123,11 @@ fn mkconn(b: &Built, id: usize, net: i32, from: &str, to: &str) -> (Connection, 
     let term = |v: usize, l: &str| TermRef {
         kind: TermKind::Pad(0),
         label: l.to_string(),
-        at: b.g.verts[v].at,
+        at: b.mg.layers[0].g.verts[v].at,
         layers: vec![0],
     };
-    let est = (b.g.verts[s].at - b.g.verts[t].at).len();
+    let g = &b.mg.layers[0].g;
+    let est = (g.verts[s].at - g.verts[t].at).len();
     (
         Connection {
             id,
@@ -154,21 +175,23 @@ type FirstRun = (
 /// `run` plus the paths of iteration 1 (`IterOutcome.paths`).
 fn run_first(b: &mut Built, conns: &[Connection], verts: &[(usize, usize)]) -> FirstRun {
     let mut first: Vec<Option<SlotPath>> = Vec::new();
-    let mut neg = Negotiator::new(b.g.edges.len(), conns.len());
+    let mut neg = Negotiator::new(&b.mg, conns.len());
     let opts = Options::default();
+    let (starts, goals) = (starts_of(&verts.to_vec()), goals_of(&verts.to_vec()));
     let mut active: Vec<usize> = (0..conns.len()).collect();
     let mut last = Vec::new();
     for _ in 0..opts.pathfinder_iter_cap {
         let out = neg.iteration(
-            &mut b.g,
-            b.obs.layer(0),
+            &mut b.mg,
+            &mut b.obs,
             conns,
             &active,
-            verts,
+            &starts,
+            &goals,
             &opts,
             far(),
         );
-        let over = neg.penalise_overuse(&b.g);
+        let over = neg.penalise_overuse(&b.mg);
         for (&c, bi) in &out.blocked {
             neg.penalise_blocked(c, bi);
         }
@@ -181,7 +204,7 @@ fn run_first(b: &mut Built, conns: &[Connection], verts: &[(usize, usize)]) -> F
         }
         let mut a: std::collections::BTreeSet<usize> = out.blocked.keys().copied().collect();
         a.extend(out.ripped.iter().copied());
-        a.extend(overused_conns(&b.g));
+        a.extend(overused_conns(&b.mg));
         active = a.into_iter().collect();
     }
     (neg, 99, last, 1, first)
@@ -236,17 +259,17 @@ fn run_channel() -> (Vec<Option<SlotPath>>, usize, Vec<usize>) {
     let (_, over, paths, fail) = run(&mut b, &conns, &verts);
     assert_eq!(fail, 0, "did not converge in the iteration cap");
     assert_eq!(over, 0);
-    let ch = [b.g.edge(vert(&b, "u1"), vert(&b, "w1")).unwrap()];
+    let g = &b.mg.layers[0].g;
+    let ch = [g.edge(vert(&b, "u1"), vert(&b, "w1")).unwrap()];
     let users: Vec<usize> = (0..2)
         .filter(|&c| {
-            let (x, _, _) = b.g.path_of(c).unwrap();
+            let k = b.mg.conn_wires[c][0];
+            let (x, _, _) = g.path_of(k).unwrap();
             x.iter().any(|(e, _)| ch.contains(e))
         })
         .collect();
     assert_eq!(
-        (0..b.g.edges.len())
-            .filter(|&e| b.g.overuse(e) > 0.0)
-            .count(),
+        (0..g.edges.len()).filter(|&e| g.overuse(e) > 0.0).count(),
         0
     );
     (paths, users.len(), users)
@@ -259,9 +282,7 @@ fn negotiate_contended_channel_routes_both() {
     assert_eq!(n1, 1, "exactly one wire uses the channel");
     let (p2, _, _) = run_channel();
     let key = |p: &Vec<Option<SlotPath>>| -> Vec<Vec<(usize, usize)>> {
-        p.iter()
-            .map(|x| x.as_ref().unwrap().crossings.clone())
-            .collect()
+        p.iter().map(|x| xs(x.as_ref().unwrap())).collect()
     };
     assert_eq!(key(&p1), key(&p2));
 }
@@ -275,13 +296,16 @@ fn negotiate_contended_channel_history_switch() {
     let (conns, verts) = setup(&b, &[(1, "sa", "ta"), (2, "sb", "tb")]);
     let (neg, over, last, fail, first) = run_first(&mut b, &conns, &verts);
     assert_eq!((fail, over), (0, 0));
-    let ch = b.g.edge(vert(&b, "u1"), vert(&b, "w1")).unwrap();
-    let uses = |p: &Option<SlotPath>| p.as_ref().unwrap().crossings.iter().any(|&(e, _)| e == ch);
+    let ch = b.mg.layers[0]
+        .g
+        .edge(vert(&b, "u1"), vert(&b, "w1"))
+        .unwrap();
+    let uses = |p: &Option<SlotPath>| xs(p.as_ref().unwrap()).iter().any(|&(e, _)| e == ch);
     assert!(
         first.iter().all(uses),
         "both wires take the channel in iteration 1"
     );
-    assert!(neg.history[ch] > 0.0, "history {}", neg.history[ch]);
+    assert!(neg.history[0][ch] > 0.0, "history {}", neg.history[0][ch]);
     let detour: Vec<usize> = (0..2).filter(|&c| !uses(&last[c])).collect();
     assert_eq!(detour.len(), 1, "exactly one wire switched to the detour");
     assert!(uses(&first[detour[0]]));
@@ -291,16 +315,18 @@ fn negotiate_contended_channel_history_switch() {
 fn blocked_connection_is_bumped_first_next_iteration() {
     let b = channel_board();
     let (conns, _) = setup(&b, &[(1, "sa", "ta"), (2, "sb", "tb")]);
-    let mut neg = Negotiator::new(b.g.edges.len(), 2);
+    let mut neg = Negotiator::new(&b.mg, 2);
     assert_eq!(order(&conns, &neg.bumps)[0], 0);
     let info = BlockInfo {
         edge: None,
+        site: None,
         ghost: None,
         last_reached: None,
     };
     neg.penalise_blocked(1, &info);
     assert_eq!(neg.bumps[1], 1);
-    assert!(neg.history.iter().all(|&h| h == 0.0));
+    assert!(neg.history.iter().flatten().all(|&h| h == 0.0));
+    assert!(neg.site_history.iter().all(|&h| h == 0.0));
     assert_eq!(order(&conns, &neg.bumps)[0], 1);
 }
 
@@ -308,13 +334,13 @@ fn blocked_connection_is_bumped_first_next_iteration() {
 fn overuse_raises_history_on_overused_edges_only() {
     let mut b = channel_board();
     let (u1, w1) = (vert(&b, "u1"), vert(&b, "w1"));
-    let e = b.g.edge(u1, w1).unwrap();
-    let cap = b.g.edges[e].cap;
-    let mut neg = Negotiator::new(b.g.edges.len(), 8);
-    assert_eq!(neg.penalise_overuse(&b.g), 0);
+    let e = b.mg.layers[0].g.edge(u1, w1).unwrap();
+    let cap = b.mg.layers[0].g.edges[e].cap;
+    let mut neg = Negotiator::new(&b.mg, 8);
+    assert_eq!(neg.penalise_overuse(&b.mg), 0);
     let mut c = 0;
-    while b.g.overuse(e) == 0.0 {
-        b.g.insert(
+    while b.mg.layers[0].g.overuse(e) == 0.0 {
+        b.mg.layers[0].g.insert(
             c,
             e,
             c,
@@ -328,8 +354,8 @@ fn overuse_raises_history_on_overused_edges_only() {
         c += 1;
         assert!(c < 8, "cap {cap}");
     }
-    assert_eq!(neg.penalise_overuse(&b.g), 1);
-    for (i, &h) in neg.history.iter().enumerate() {
+    assert_eq!(neg.penalise_overuse(&b.mg), 1);
+    for (i, &h) in neg.history[0].iter().enumerate() {
         assert_eq!(h, if i == e { HIST_OVERUSE } else { 0.0 });
     }
 }
@@ -347,21 +373,43 @@ fn u_clinch_detected_and_regular_absent() {
     );
     // F first so that it crosses the N edge, then N detours.
     let (conns, verts) = setup(&b, &[(2, "f1", "f2"), (1, "n1", "n2")]);
-    let e = b.g.edge(verts[1].0, verts[1].1).expect("N edge exists");
+    let e = b.mg.layers[0]
+        .g
+        .edge(verts[1].0, verts[1].1)
+        .expect("N edge exists");
     let opts = Options::default();
-    let mut neg = Negotiator::new(b.g.edges.len(), 2);
-    let out = neg.iteration(&mut b.g, b.obs.layer(0), &conns, &[0], &verts, &opts, far());
+    let (starts, goals) = (starts_of(&verts), goals_of(&verts));
+    let mut neg = Negotiator::new(&b.mg, 2);
+    let out = neg.iteration(
+        &mut b.mg,
+        &mut b.obs,
+        &conns,
+        &[0],
+        &starts,
+        &goals,
+        &opts,
+        far(),
+    );
     assert!(out.paths[0].is_some());
     assert!(
-        b.g.edges[e].cross.iter().any(|x| x.conn == 0),
+        b.mg.layers[0].g.edges[e]
+            .cross
+            .iter()
+            .any(|x| b.mg.conns_of_legs(&[x.conn]) == vec![0]),
         "F crosses the N edge"
     );
-    let out = neg.iteration(&mut b.g, b.obs.layer(0), &conns, &[1], &verts, &opts, far());
-    assert!(
-        !out.paths[1].as_ref().unwrap().crossings.is_empty(),
-        "N detours"
+    let out = neg.iteration(
+        &mut b.mg,
+        &mut b.obs,
+        &conns,
+        &[1],
+        &starts,
+        &goals,
+        &opts,
+        far(),
     );
-    let rep = detect_clinches(&b.g, &conns, &out.paths, &verts);
+    assert!(!xs(out.paths[1].as_ref().unwrap()).is_empty(), "N detours");
+    let rep = detect_clinches(&b.mg, &conns, &out.paths, &starts);
     assert_eq!(rep.u, vec![(0, e)]);
     assert!(rep.regular.is_empty());
 }
@@ -370,13 +418,14 @@ fn u_clinch_detected_and_regular_absent() {
 fn iteration_respects_deadline() {
     let mut b = channel_board();
     let (conns, verts) = setup(&b, &[(1, "sa", "ta"), (2, "sb", "tb")]);
-    let mut neg = Negotiator::new(b.g.edges.len(), 2);
+    let mut neg = Negotiator::new(&b.mg, 2);
     let out = neg.iteration(
-        &mut b.g,
-        b.obs.layer(0),
+        &mut b.mg,
+        &mut b.obs,
         &conns,
         &[0, 1],
-        &verts,
+        &starts_of(&verts),
+        &goals_of(&verts),
         &Options::default(),
         Instant::now(),
     );
@@ -410,10 +459,201 @@ fn blocked_by_strand_rips_up_blocker() {
     );
     let pa = paths[0].as_ref().expect("A routed");
     assert!(pa.est_len > 10.0 * MM, "A detours: {}", pa.est_len);
+    let g = &b.mg.layers[0].g;
     assert_eq!(
-        (0..b.g.edges.len())
-            .filter(|&e| b.g.overuse(e) > 0.0)
-            .count(),
+        (0..g.edges.len()).filter(|&e| g.overuse(e) > 0.0).count(),
         0
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Via sites (M3 / T3.1): site ownership in the negotiation
+// ---------------------------------------------------------------------------------------------
+
+fn site_at(x: f64, y: f64, d: i64, drill: i64) -> ViaSite {
+    ViaSite {
+        at: topor_engine::geom::Vec2 {
+            x: x * MM,
+            y: -y * MM,
+        },
+        max_d: d,
+        max_drill: drill,
+        origin: SiteOrigin::Face,
+    }
+}
+
+/// F.Cu-only (`front`) or B.Cu-only SMD pad of net `net` at kicad `(x, y)` mm.
+fn smd(name: &str, net: i32, x: f64, y: f64, front: bool) -> String {
+    let (l, sh) = if front { (0, "0") } else { (31, "31") };
+    format!(
+        r#"{{ "uuid": "{name}", "ref": "{name}", "number": "1", "net": {net},
+          "center": [{}, {}], "layers": [{l}],
+          "shapes": {{ "{sh}": {{ "kind": "circle", "d": 1000000 }} }} }}"#,
+        (x * MM) as i64,
+        (y * MM) as i64
+    )
+}
+
+struct Two {
+    mg: MultiGraph,
+    obs: ObstacleSet,
+}
+
+fn two_layers(pads: &[String], sites: Vec<ViaSite>) -> Two {
+    let s = format!(
+        r#"{{ "layers": [ {{ "id": 0 }}, {{ "id": 31 }} ], "pads": [ {} ],
+          "outline": [ {} ],
+          "rules": {{ "default": {{ "clearance": 200000, "width": 250000 }}, "min_clearance": 0,
+            "hole_clearance": 250000, "hole_to_hole": 250000, "edge_clearance": 500000,
+            "per_net": {{ "1": {{ "clearance": 200000, "width": 250000, "via_d": 400000,
+                                  "via_drill": 250000 }} }} }} }}"#,
+        pads.join(","),
+        outline50x40()
+    );
+    let m = BoardModel::from_json(&s).unwrap();
+    let mut obs = ObstacleSet::build(&m, &Options::default(), &HashSet::new(), &[]);
+    let rules = GraphRules {
+        eps: 5_000.0,
+        min_clearance: 0.0,
+        edge_clearance: 500_000.0,
+        hole_clearance: 250_000.0,
+    };
+    let mg = MultiGraph::build(&m, &mut obs, sites, &[0, 31], &[], &rules).unwrap();
+    Two { mg, obs }
+}
+
+fn vertex_on(t: &Two, li: usize, name: &str) -> usize {
+    let label = format!("pad:{name}:1");
+    let layer = t.mg.layers[li].layer;
+    let ai = t
+        .obs
+        .layer(layer)
+        .anchors
+        .iter()
+        .position(|a| a.label == label)
+        .unwrap_or_else(|| panic!("no pad {name} on layer {layer}"));
+    t.mg.layers[li].ls.cdt.vertex_index(ai)
+}
+
+fn contention_sites() -> Vec<ViaSite> {
+    vec![
+        site_at(25.0, 15.0, 600_000, 300_000),
+        site_at(25.7, 15.0, 600_000, 300_000),
+        site_at(25.0, 35.0, 400_000, 250_000),
+    ]
+}
+
+fn contention_pads() -> Vec<String> {
+    vec![
+        smd("a1", 1, 5.0, 10.0, true),
+        smd("a2", 1, 45.0, 10.0, false),
+        smd("b1", 2, 5.0, 20.0, true),
+        smd("b2", 2, 45.0, 20.0, false),
+    ]
+}
+
+/// Negotiate the two connections of `site_rip_up_frees_owner_for_blocked_connection`; returns
+/// the negotiator, the last paths, every connection ripped and whether it converged.
+fn negotiate_contention(t: &mut Two) -> (Negotiator, Vec<Option<SlotPath>>, Vec<usize>, bool) {
+    let term = |t: &Two, n: &str, li: usize, layer: u32| TermRef {
+        kind: TermKind::Pad(0),
+        label: n.to_string(),
+        at: t.mg.layers[li].g.verts[vertex_on(t, li, n)].at,
+        layers: vec![layer],
+    };
+    let mk = |t: &Two, id: usize, net: i32, f: &str, b: &str| {
+        let (from, to) = (term(t, f, 0, 0), term(t, b, 1, 31));
+        let est = (from.at - to.at).len();
+        Connection {
+            id,
+            net,
+            width: 250_000,
+            clearance: 200_000,
+            tier: 3,
+            from,
+            to,
+            est_len: est,
+        }
+    };
+    let conns = vec![mk(t, 0, 1, "a1", "a2"), mk(t, 1, 2, "b1", "b2")];
+    let starts: Vec<Vec<(usize, usize)>> = vec![
+        vec![(0, vertex_on(t, 0, "a1"))],
+        vec![(0, vertex_on(t, 0, "b1"))],
+    ];
+    let goals: Vec<Goal> = ["a2", "b2"]
+        .iter()
+        .map(|n| Goal {
+            vertices: vec![(1, vertex_on(t, 1, n))],
+            pour_sites: Vec::new(),
+            pour_layer: None,
+        })
+        .collect();
+    let mut neg = Negotiator::new(&t.mg, 2);
+    let opts = Options::default();
+    let mut active: Vec<usize> = vec![0, 1];
+    let mut ripped_ever: Vec<usize> = Vec::new();
+    let mut last = Vec::new();
+    for _ in 0..opts.pathfinder_iter_cap {
+        let out = neg.iteration(
+            &mut t.mg,
+            &mut t.obs,
+            &conns,
+            &active,
+            &starts,
+            &goals,
+            &opts,
+            far(),
+        );
+        neg.penalise_overuse(&t.mg);
+        for (&c, bi) in &out.blocked {
+            neg.penalise_blocked(c, bi);
+        }
+        ripped_ever.extend(out.ripped.iter().copied());
+        last = out.paths.clone();
+        if out.blocked.is_empty() && out.ripped.is_empty() && out.overuse_edges == 0 {
+            return (neg, last, ripped_ever, true);
+        }
+        let mut a: std::collections::BTreeSet<usize> = out.blocked.keys().copied().collect();
+        a.extend(out.ripped.iter().copied());
+        a.extend(overused_conns(&t.mg));
+        active = a.into_iter().collect();
+    }
+    (neg, last, ripped_ever, false)
+}
+
+/// A (net 1, small 0.4 mm vias) and B (net 2, 0.6 mm vias) both go F.Cu -> B.Cu through a middle
+/// column with two sites 0.7 mm apart (an active via blocks the other) and one far site that only
+/// fits the small via. A is routed first and takes a middle site; B is blocked, its ghost uses
+/// the owned site, so A is ripped (history on its site) and B (bumped, now first) takes the
+/// middle; A then finds the far site. Both routed, one via each, within the iteration cap.
+#[test]
+fn site_rip_up_frees_owner_for_blocked_connection() {
+    let mut t = two_layers(&contention_pads(), contention_sites());
+    let (neg, paths, ripped, done) = negotiate_contention(&mut t);
+    assert!(done, "did not converge in the iteration cap");
+    assert!(neg.iteration <= 50);
+    assert!(
+        ripped.contains(&0),
+        "A (the site owner) was ripped: {ripped:?}"
+    );
+    assert!(
+        neg.site_history[0] + neg.site_history[1] > 0.0,
+        "history on the contested site: {:?}",
+        neg.site_history
+    );
+    let (pa, pb) = (paths[0].as_ref().unwrap(), paths[1].as_ref().unwrap());
+    assert_eq!((pa.vias(), pb.vias()), (1, 1));
+    assert_eq!(pa.sites[0].0, 2, "A took the far small-via site");
+    assert!(pb.sites[0].0 <= 1, "B took a middle site");
+    assert_eq!(t.mg.owner[pa.sites[0].0].map(|o| o.0), Some(0));
+    assert_eq!(t.mg.owner[pb.sites[0].0].map(|o| o.0), Some(1));
+    // deterministic
+    let mut t2 = two_layers(&contention_pads(), contention_sites());
+    let (_, paths2, _, _) = negotiate_contention(&mut t2);
+    let sig = |p: &Vec<Option<SlotPath>>| -> Vec<Vec<usize>> {
+        p.iter()
+            .map(|x| x.as_ref().unwrap().sites.iter().map(|s| s.0).collect())
+            .collect()
+    };
+    assert_eq!(sig(&paths), sig(&paths2));
 }

@@ -1371,13 +1371,13 @@ impl<'a> Search<'a> {
     }
 
     /// Edge the slot-free ghost never crosses: a wire runs along it, a face is outside the
-    /// outline, or it is statically unfit, `cap < w + eps + 2 max(c, c_e)` even when empty (D2).
+    /// outline, or it is statically unfit, `cap < w + eps + gaps * max(c, c_e)` even when empty (D2; `gaps` = 2 minus the free ends).
     /// The planar search keeps such an edge as a costly overuse crossing: the board
     /// `eprom-to-kernal` routes +5V through one (zero-slack retry, `route_engine`). O(1).
     fn hard(&self, e: usize) -> bool {
         let ge = &self.g.edges[e];
         ge.along.is_some()
-            || ge.cap < self.w + self.eps + 2.0 * self.c.max(ge.c_e)
+            || ge.cap < self.w + self.eps + ge.end_gaps() as f64 * self.c.max(ge.c_e)
             || !ge
                 .faces
                 .iter()

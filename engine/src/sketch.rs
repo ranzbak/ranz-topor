@@ -82,8 +82,30 @@ pub fn build_layer_cdt(
     terminals: &[Vec2],
     cons: ConstraintSet,
 ) -> Result<LayerSketch, String> {
+    build_layer_cdt_masked(obs, terminals, cons, &|_| true)
+}
+
+/// [`build_layer_cdt`] over the anchors `keep` selects only; `point_to_anchor` still holds
+/// indices into `obs.anchors`. The router builds the sketch triangulation of the real obstacles
+/// this way, without the dormant via-site anchors (free vertices bend no wire, M3 §5).
+/// Wall end points must be kept. O(N log N).
+pub fn build_layer_cdt_masked(
+    obs: &LayerObstacles,
+    terminals: &[Vec2],
+    cons: ConstraintSet,
+    keep: &dyn Fn(usize) -> bool,
+) -> Result<LayerSketch, String> {
     let na = obs.anchors.len();
-    let mut pts: Vec<Vec2> = obs.anchors.iter().map(|a| a.c).collect();
+    let mut pt_of_anchor: Vec<Option<usize>> = vec![None; na];
+    let mut anchor_of_pt: Vec<usize> = Vec::new();
+    let mut pts: Vec<Vec2> = Vec::new();
+    for (i, a) in obs.anchors.iter().enumerate() {
+        if keep(i) {
+            pt_of_anchor[i] = Some(pts.len());
+            anchor_of_pt.push(i);
+            pts.push(a.c);
+        }
+    }
     pts.extend_from_slice(terminals);
     if pts.is_empty() {
         return Err("cdt: no points".into());
@@ -111,14 +133,14 @@ pub fn build_layer_cdt(
         .walls
         .iter()
         .filter(|w| cons.includes(w.kind))
-        .map(|w| (w.ends[0], w.ends[1]))
+        .filter_map(|w| Some((pt_of_anchor[w.ends[0]]?, pt_of_anchor[w.ends[1]]?)))
         .collect();
     let cdt = Cdt::build(&pts, &cons_pairs).map_err(|e| format!("cdt: {e}"))?;
     let mut point_to_anchor = vec![None; cdt.num_vertices()];
-    for i in 0..na {
-        let v = cdt.vertex_index(i);
+    for (pi, &ai) in anchor_of_pt.iter().enumerate() {
+        let v = cdt.vertex_index(pi);
         if point_to_anchor[v].is_none() {
-            point_to_anchor[v] = Some(i);
+            point_to_anchor[v] = Some(ai);
         }
     }
     let constraint_owner = constraint_owners(obs, &cdt, cons);

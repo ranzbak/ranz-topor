@@ -33,6 +33,9 @@ pub enum Terminal {
     Via { via: usize, at: Vec2 },
     Junction { at: Vec2 },
     Dangling { at: Vec2 },
+    /// A via site of the router (M3, P6): the end of a leg that changes layer, or the via of a
+    /// pour connection. `site` indexes `MultiGraph::sites` (`usize::MAX`: not yet assigned).
+    Site { site: usize, at: Vec2 },
 }
 
 impl Terminal {
@@ -41,7 +44,8 @@ impl Terminal {
             Terminal::Pad { at, .. }
             | Terminal::Via { at, .. }
             | Terminal::Junction { at }
-            | Terminal::Dangling { at } => *at,
+            | Terminal::Dangling { at }
+            | Terminal::Site { at, .. } => *at,
         }
     }
 

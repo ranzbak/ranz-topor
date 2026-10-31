@@ -156,12 +156,12 @@ def make_fixture_board(
         t.SetPosition(_v(40, 30))
         b.Add(t)
 
-    def track(a, c, net, locked=False):
+    def track(a, c, net, locked=False, layer=pcbnew.F_Cu):
         t = pcbnew.PCB_TRACK(b)
         t.SetStart(_v(*a))
         t.SetEnd(_v(*c))
         t.SetWidth(int(0.25 * MM))
-        t.SetLayer(pcbnew.F_Cu)
+        t.SetLayer(layer)
         t.SetNet(nets[net])
         t.SetLocked(locked)
         b.Add(t)
@@ -182,8 +182,8 @@ def make_fixture_board(
     if vcc_stub:
         track((20, 20), (27, 24), "VCC", locked=True)
     if wall:
-        # Locked GND wall across the board at y=24: the 0.7 mm left to the outline cannot take a
-        # 0.25 mm wire (0.2 + 0.25 + 0.5 = 0.95 mm), so pads above/below are walled off.
+        # Locked GND wall across the board at y=24 on F.Cu and B.Cu: the 0.7 mm left to the outline
+        # cannot take a 0.25 mm wire (0.2 + 0.25 + 0.5 = 0.95 mm), so pads above/below are walled off.
         wfp = pcbnew.FOOTPRINT(b)
         wfp.SetReference("W1")
         wfp.SetValue("W1")
@@ -192,6 +192,9 @@ def make_fixture_board(
         for num, x in (("7", 1.2), ("8", 48.8)):
             _add_pad(wfp, num, pcbnew.PAD_SHAPE_CIRCLE, (1.0, 1.0), (x, 24), nets["GND"], drill=(0.5, 0.5))
         track((1.2, 24), (48.8, 24), "GND", locked=True)
+        # M3: the board has two routable layers, so the wall closes B.Cu as well (the THT end
+        # pads join both walls).
+        track((1.2, 24), (48.8, 24), "GND", locked=True, layer=pcbnew.B_Cu)
 
     v = pcbnew.PCB_VIA(b)
     v.SetPosition(_v(5, 5))

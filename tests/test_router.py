@@ -85,6 +85,23 @@ def test_route_router_on_fixture(engine, fixture_board, tmp_path):
     assert r["route"]["hand_outside_mm"] is not None
 
 
+def test_route_router_on_b_pads_fixture(engine, tmp_path):
+    """M3: SIG pads on B.Cu need a via to reach the F.Cu pads; the via lands in the board as a
+    through PCB_VIA, the whole board routes and KiCad DRC finds nothing new."""
+    pc = _board(tmp_path / "bp" / "fixture.kicad_pcb", b_pads=True)
+    r = bench.run_bench("fixture", tmp_path / "out", router=route_router, rip="all",
+                        pcb_override=pc.pcb)
+    rep = r["router_report"]
+    assert rep["routed"] == rep["connections_total"] and rep["failed"] == 0
+    assert r["routed_drc"]["routing_new"] == 0
+    assert r["route"]["vias"] >= 1 and rep["vias"] == r["route"]["vias"]
+    assert set(r["route"]["length_by_layer_mm"]) >= {"B.Cu"}
+    routed_pcb = next((tmp_path / "out" / "fixture-work").glob("*.kicad_pcb"))
+    b = pcbnew.LoadBoard(str(routed_pcb))
+    vias = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_VIA_T]
+    assert any(v.GetViaType() == pcbnew.VIATYPE_THROUGH and v.GetNetname() == "SIG" for v in vias)
+
+
 def test_drc_spots_from_violation_names_written_item():
     created = {"u1": _trk(3, 5, width=300_000)}
     model = {"nets": [{"code": 3, "name": "SIG"}]}

@@ -55,10 +55,26 @@ pub struct GEdge {
     pub owner_nets: Vec<i32>,
     pub cap: f64,
     pub c_e: f64,
+    /// `[a, b]` is a free (dormant via-site) vertex: nothing is there to keep clear of, so the
+    /// end gap of that side is 0 in [`RouteGraph::fits_at`], [`RouteGraph::overuse`] and the
+    /// static fit of the search (M3).
+    pub free: [bool; 2],
     /// Crossing entries ordered `a -> b`.
     pub cross: Vec<CrossEntry>,
     /// Connection whose wire runs along this edge (empty crossing path between its terminals).
     pub along: Option<usize>,
+}
+
+impl GEdge {
+    /// Ends of the edge that need a clearance gap: 2 minus the free (dormant site) ends. O(1).
+    pub fn end_gaps(&self) -> usize {
+        2 - self.free.iter().filter(|&&f| f).count()
+    }
+}
+
+/// A dormant via-site vertex: no copper, no clearance (`set_site(None)`).
+fn is_free(v: &VertexInfo) -> bool {
+    v.site.is_some() && v.owner.is_none()
 }
 
 #[derive(Clone, Debug)]
@@ -279,6 +295,7 @@ impl RouteGraph {
                 owner_nets,
                 cap: (pb.at - pa.at).len() - pa.r - pb.r,
                 c_e: pa.clr.max(pb.clr),
+                free: [is_free(pa), is_free(pb)],
                 cross: Vec::new(),
                 along: None,
             });
@@ -381,6 +398,7 @@ impl RouteGraph {
             let c_e = pa.clr.max(pb.clr);
             self.edges[e].cap = cap;
             self.edges[e].c_e = c_e;
+            self.edges[e].free = [is_free(pa), is_free(pb)];
         }
         self.bump(all);
         inc
@@ -427,7 +445,7 @@ impl RouteGraph {
     pub fn fits_at(&self, e: usize, w: f64, c: f64, eps: f64) -> bool {
         let g = &self.edges[e];
         let used: f64 = g.cross.iter().map(|x| x.width + eps + x.clr.max(c)).sum();
-        used + w + eps + 2.0 * c.max(g.c_e) <= g.cap
+        used + w + eps + g.end_gaps() as f64 * c.max(g.c_e) <= g.cap
     }
 
     /// `(need_all - cap).max(0)`.
@@ -443,7 +461,12 @@ impl RouteGraph {
             .windows(2)
             .map(|p| p[0].clr.max(p[1].clr))
             .sum::<f64>();
-        need += first.clr.max(g.c_e) + last.clr.max(g.c_e);
+        if !g.free[0] {
+            need += first.clr.max(g.c_e);
+        }
+        if !g.free[1] {
+            need += last.clr.max(g.c_e);
+        }
         (need - g.cap).max(0.0)
     }
 
