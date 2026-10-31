@@ -8,6 +8,7 @@ file copies.
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import uuid as _uuid
 from pathlib import Path
@@ -77,6 +78,18 @@ class FakeBoard:
 
     def net_codes(self) -> dict | None:
         return None  # the fixed model carries its own codes (and rules)
+
+    def fingerprint(self) -> str:
+        """Counts + sha256 of the text of every track / via / footprint item (uuid, position, orientation live
+        in that text) of the current in-memory board. O(len(text))."""
+        self.calls.append(("fingerprint", ()))
+        spans = pcbfile.find_items(self.text, ("segment", "arc", "via", "footprint"))
+        h = hashlib.sha256()
+        counts: dict = {}
+        for sp in spans:
+            counts[sp.kind] = counts.get(sp.kind, 0) + 1
+            h.update(self.text[sp.start:sp.end].encode())
+        return f"{sorted(counts.items())}:{h.hexdigest()[:16]}"
 
     def commit(self, req: CommitRequest) -> CommitResult:
         self.calls.append(("commit", (req,)))

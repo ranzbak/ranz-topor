@@ -43,6 +43,7 @@ from toporlib import drcloop, pcbfile
 from toporlib import rules as rules_mod
 from toporlib.drc import classify, run_drc
 from toporlib.drcloop import DrcJudgement
+from toporlib.kicad_cli import KicadCliCancelled, KicadCliTimeout
 
 from . import messages
 from . import preflight as preflight_mod
@@ -69,6 +70,10 @@ _ROUTE_OVERRIDES = ("scope_mode", "existing_copper", "respect_locked", "partial_
 
 class EngineUnresponsive(RuntimeError):
     """The engine did not finish within CANCEL_GRACE_S after Cancel (-> ENGINE_UNRESPONSIVE)."""
+
+
+class BoardChanged(RuntimeError):
+    """The board's fingerprint differs from the start of the run (-> BOARD_CHANGED_DURING_RUN, nothing committed)."""
 
 
 @dataclass
@@ -409,6 +414,10 @@ def run(port: BoardPort, ui: UiPort, cfg: Config | None = None, engine=None, *, 
         out.status = "error"
         if isinstance(e, EngineUnresponsive):
             out.error = Finding("ENGINE_UNRESPONSIVE", "error", str(e), messages.fix_for("ENGINE_UNRESPONSIVE"))
+        elif isinstance(e, KicadCliTimeout):  # MINOR 10: kicad-cli killed after run.kicad_cli_timeout_s
+            out.error = Finding("KICAD_CLI_TIMEOUT", "error", str(e), messages.fix_for("KICAD_CLI_TIMEOUT"))
+        elif isinstance(e, BoardChanged):  # MINOR 11: nothing was committed
+            out.error = Finding("BOARD_CHANGED_DURING_RUN", "error", str(e), messages.fix_for("BOARD_CHANGED_DURING_RUN"))
         else:  # incl. the engine panic: RouteJob.wait raises RuntimeError("routing thread panicked: ...")
             out.error = Finding("INTERNAL", "error", f"{type(e).__name__}: {e}", messages.fix_for("INTERNAL"))
         code = out.error.code
@@ -449,9 +458,41 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         report.set_outcome(status, error_code)
         return out
 
+    def cli_kw(phase: str, *, cancellable: bool) -> dict:
+        """kicad-cli options (MINOR 10): the run.kicad_cli_timeout_s limit and a poll callback that pumps the UI
+        every 0.25 s via ``emit(phase)``. `cancellable`: Cancel kills the process (pre-flight phase); after the
+        routing the Cancel only stops further rounds, the best result is still judged and previewed."""
+        limit = float(cfg.get("run", "kicad_cli_timeout_s") or 0)
+
+        def poll():
+            emit(phase)
+            return not (cancellable and state["cancel"])
+
+        return {"timeout_s": limit or None, "on_poll": poll}
+
+    def fingerprint(when: str):
+        """BoardPort.fingerprint, never fatal: a failing fingerprint (UNVERIFIED over IPC) only disables the check."""
+        try:
+            fp = port.fingerprint()
+            log.line(f"board fingerprint {when}: {fp}")
+            return fp
+        except Exception as e:  # noqa: BLE001
+            log.exc()
+            log.line(f"board fingerprint {when} failed ({type(e).__name__}: {e}); the changed-board check is off")
+            return None
+
+    def abort_preflight(reason: str) -> RunOutcome:
+        log.line("aborted at pre-flight: " + reason)
+        report.write(result=_facts_result("aborted_preflight", out, None))
+        report.set_outcome("aborted_preflight")
+        report.write(result=_facts_result("aborted_preflight", out, None))
+        return finish("aborted_preflight")
+
+    emit("setup")  # a window / progress before the first slow call (save_as, IPC model export)
     tmp_root.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="topor-", dir=tmp_root))
     out.work_dir = work
+    start_fp = fingerprint("at start")  # MINOR 11: compared again right before the commit
     # 1. the live board, as KiCad holds it right now (unsaved edits included)
     pcb_copy = port.save_copy(work / "current")
     out.pcb_copy = pcb_copy
@@ -493,7 +534,11 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         # (the save_as copy stays as KiCad wrote it); the engine's pour fills / reach / dangling ends come from it,
         # never from the live board's possibly stale fills. No extra kicad-cli run.
         orig_pcb = _variant(pcb_copy, copy_text, work / "orig")
-        orig_drc = run_drc(orig_pcb, work / "drc-orig.json", save_board=True)
+        try:
+            orig_drc = run_drc(orig_pcb, work / "drc-orig.json", save_board=True,
+                               **cli_kw("preflight_drc", cancellable=True))
+        except KicadCliCancelled:
+            return abort_preflight("cancelled during the pre-flight DRC")
         out.refilled_pcb = orig_pcb
         out.orig_drc = orig_drc
         log.line(f"DRC of the untouched copy: {len(orig_drc.violations)} violations, "
@@ -515,11 +560,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     decision = ui.preflight(findings, summary, cfg)
     errors = [f for f in findings if f.severity == "error"]
     if errors or not decision.proceed or state["cancel"]:
-        log.line("aborted at pre-flight: " + (", ".join(f.code for f in errors) or "declined"))
-        report.write(result=_facts_result("aborted_preflight", out, None))
-        report.set_outcome("aborted_preflight")
-        report.write(result=_facts_result("aborted_preflight", out, None))
-        return finish("aborted_preflight")
+        return abort_preflight(", ".join(f.code for f in errors) or "declined")
     toml = project_dir / CONFIG_NAME
     cfg = apply_accepted_findings(decision, findings, cfg, toml)
     over = {k: v for k, v in decision.overrides.items() if k in _ROUTE_OVERRIDES}
@@ -540,7 +581,11 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     out.ripped_pcb = ripped_pcb
     if ripped:
         emit("preflight_drc")
-        base_drc = run_drc(ripped_pcb, work / "drc-ripped.json", save_board=True)  # saved = zones refilled
+        try:  # saved = zones refilled
+            base_drc = run_drc(ripped_pcb, work / "drc-ripped.json", save_board=True,
+                               **cli_kw("preflight_drc", cancellable=True))
+        except KicadCliCancelled:
+            return abort_preflight("cancelled during the baseline DRC")
     else:
         base_drc = orig_drc
     out.base_drc = base_drc
@@ -606,7 +651,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         text = pcbfile.append_items(text, with_ids, layer_names=layer_names, net_names=net_names)
         pcb = _variant(pcb_copy, text, routed_dir)
         out.routed_pcb = pcb
-        rep = run_drc(pcb, routed_dir / "drc-routed.json", save_board=True)  # refilled zones for the preview
+        rep = run_drc(pcb, routed_dir / "drc-routed.json", save_board=True,  # refilled zones for the preview
+                      **cli_kw("drc", cancellable=False))
         log.line(f"DRC round {state['rounds']}: {len(rep.violations)} violations, {len(rep.unconnected)} unconnected, "
                  f"{rep.seconds:.1f}s")
         j = DrcJudgement(rep, {w["uuid"]: orig for w, orig in zip(with_ids, items)})
@@ -659,8 +705,14 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     try:
         _, notes = preview_mod.render_ex(
             pcb_copy, out.routed_pcb, png, caption, new_items=out.items, outline=model.get("outline"),
-            layer_names=[l["name"] for l in model.get("layers", []) if l.get("routable", True)] or None)
+            layer_names=[l["name"] for l in model.get("layers", []) if l.get("routable", True)] or None,
+            **cli_kw("preview", cancellable=False))
         report.facts["notes"] = report.facts["notes"] + notes
+    except KicadCliTimeout as e:  # the numbers still allow a decision; the timeout is named in the findings
+        log.exc()
+        log.line(f"preview timed out: {e}")
+        findings.append(Finding("KICAD_CLI_TIMEOUT", "warning", f"The preview could not be rendered: {e}",
+                                messages.fix_for("KICAD_CLI_TIMEOUT")))
     except Exception as e:  # noqa: BLE001 - the numbers still allow a decision
         log.exc()
         log.line(f"preview failed: {e}")
@@ -676,7 +728,15 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         ui.done("rejected", report, report_dir)
         return finish("rejected")
 
-    # 6. Accept: one commit = one undo step. Everything after it is a separate step (ruling C28: refill only with
+    # 6. MINOR 11: the board must be exactly what it was when the run started (KiCad stays editable meanwhile)
+    if start_fp is not None:
+        now_fp = fingerprint("before the commit")
+        if now_fp is not None and now_fp != start_fp:
+            log.line(f"board changed during the run: {start_fp} -> {now_fp}; nothing committed")
+            raise BoardChanged("The board was edited while Topor ran (items were added, deleted or moved), "
+                               "so nothing was committed.")
+
+    # 7. Accept: one commit = one undo step. Everything after it is a separate step (ruling C28: refill only with
     # run.refill_after_accept; cleanup / teardrops opt-in) and a failure there keeps "accepted" (ruling C30).
     n_partial = sum(1 for it in out.items if it.get("group") == "topor-partial")
     req = CommitRequest(remove_uuids=list(ripped), items=out.items,

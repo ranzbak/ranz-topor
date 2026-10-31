@@ -104,7 +104,9 @@ routes are on the board, a later step such as the zone refill failed).
 ([ENGINE_VERSION](#engine_version)), a module is missing (sections above), KiCad could not be reached
 ([KICAD_API_CONNECT](#kicad_api_connect)), the report folder could not be written
 ([REPORT_DIR_UNWRITABLE](#report_dir_unwritable)), the engine did not stop after Cancel
-([ENGINE_UNRESPONSIVE](#engine_unresponsive)), or an unexpected exception or engine panic happened
+([ENGINE_UNRESPONSIVE](#engine_unresponsive)), a kicad-cli call ran out of time
+([KICAD_CLI_TIMEOUT](#kicad_cli_timeout)), the board was edited during the run
+([BOARD_CHANGED_DURING_RUN](#board_changed_during_run)), or an unexpected exception or engine panic happened
 ([INTERNAL](#internal)). The board is not changed in any of these cases.
 
 **Fix.** Read the last entry of `~/.cache/kicad/10.0/topor/topor-crash.log` (and `log.txt` in the report
@@ -146,6 +148,14 @@ refilled.
 and compare with `drc.json` in the report folder. If the router's copper really violates a rule, file a bug.
 
 ## Findings
+
+### BOARD_CHANGED_DURING_RUN
+
+*Severity: error.*
+
+**Cause.** The board was edited while Topor ran (items were added, deleted or moved), so the computed routes may no longer fit. Nothing was committed and the board is exactly as you left it.
+
+**Fix.** Undo your edits (KiCad → Edit → Undo) or run Topor again; do not edit the board while Topor runs.
 
 ### CFG_CREATED
 
@@ -290,6 +300,14 @@ and compare with `drc.json` in the report folder. If the router's copper really 
 **Cause.** kicad-cli, which topor uses for DRC and the preview, was not found.
 
 **Fix.** Install KiCad 10 with its command-line tools (KiCad → Help → About KiCad → Copy Version Info shows the install), or set the KICAD_CLI environment variable.
+
+### KICAD_CLI_TIMEOUT
+
+*Severity: error.*
+
+**Cause.** A kicad-cli call (the DRC with zone refill, or the SVG export of the preview) did not finish within run.kicad_cli_timeout_s and was stopped. On a large board or a busy machine KiCad's own checks can take minutes. The board was not changed.
+
+**Fix.** Raise run.kicad_cli_timeout_s in topor.toml (seconds; 0 = no timeout), close other heavy programs, then run Topor again; if kicad-cli hangs even on a small board, run it by hand on a saved copy (docs/dev/debug.md).
 
 ### LAYER_ROLES_NEEDED
 

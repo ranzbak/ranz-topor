@@ -139,6 +139,11 @@ class BoardPort(Protocol):
         ``nets`` (gate review MINOR 13); None = the port's model carries its own codes (FakeBoard), the rules
         then derive them from :meth:`netclasses`."""
 
+    def fingerprint(self) -> str:
+        """Cheap board fingerprint (item counts + a hash of track / via uuids + positions and footprint
+        references + positions + orientations). The run flow takes it at the start and again right before the
+        commit; a difference means the board was edited during the run (BOARD_CHANGED_DURING_RUN)."""
+
     def commit(self, req: CommitRequest) -> CommitResult: ...
     def refill_zones(self) -> None: ...
     def run_action(self, action: str) -> None: ...

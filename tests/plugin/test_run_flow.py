@@ -339,7 +339,8 @@ def test_run_aborts_on_error_finding(app, eprom, tmp_path, reports):
     assert any(f.code == "LAYER_ROLES_NEEDED" and f.severity == "error" for f in out.findings)
     pf = [c for c in ui.calls if c[0] == "preflight"]
     assert len(pf) == 1 and any(f.code == "LAYER_ROLES_NEEDED" for f in pf[0][1][0])
-    assert board.commits == [] and "progress" not in ui.names()
+    # MINOR 10: the only progress call before the pre-flight is the early "setup" one (no DRC, no routing)
+    assert board.commits == [] and [c[1][0].phase for c in ui.calls if c[0] == "progress"] == ["setup"]
 
 
 def test_run_declined_preflight_aborts(app, eprom, tmp_path, reports):

@@ -8,6 +8,7 @@ batching beyond ``create_items`` / ``remove_items_by_id``, which are used).
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 from pathlib import Path
 
@@ -138,6 +139,26 @@ def netclass_values(nc) -> NetClassValues:
     return NetClassValues(nc.name, nc.clearance, nc.track_width, nc.via_diameter, nc.via_drill)
 
 
+# ---------------------------------------------------------------- fingerprint
+
+
+def board_fingerprint(tracks, vias, footprints) -> str:
+    """Item counts + sha256 of the sorted track / via (uuid, position, layer) and footprint (reference,
+    position, orientation) lines, from kipy objects (or any object with the same attributes). Moving, adding or
+    deleting a track, via or footprint changes it. O(n log n)."""
+    lines = []
+    for t in tracks:
+        end = t.end
+        lines.append(f"t {t.id.value} {t.start.x} {t.start.y} {end.x} {end.y} {int(t.layer)}")
+    for v in vias:
+        lines.append(f"v {v.id.value} {v.position.x} {v.position.y}")
+    for f in footprints:
+        lines.append(f"f {f.reference_field.text.value} {f.position.x} {f.position.y} {f.orientation.degrees:.4f}")
+    lines.sort()
+    h = hashlib.sha256("\n".join(lines).encode()).hexdigest()[:16]
+    return f"t{len(tracks)}v{len(vias)}f{len(footprints)}:{h}"
+
+
 # ---------------------------------------------------------------- the board
 
 
@@ -226,6 +247,12 @@ class IpcBoard:
         of = {name: nc.name for name, nc in self.board.get_netclass_for_nets(self._net_list()).items()}
         return classes, of
 
+    def fingerprint(self) -> str:
+        """:func:`board_fingerprint` of the live board: three IPC round trips (get_tracks, get_vias,
+        get_footprints). UNVERIFIED live (GUI checklist)."""
+        b = self.board
+        return board_fingerprint(list(b.get_tracks()), list(b.get_vias()), list(b.get_footprints()))
+
     def commit(self, req: CommitRequest) -> CommitResult:
         board = self.board
         notes: list = []
@@ -276,4 +303,4 @@ class IpcBoard:
 
 
 __all__ = ["IpcBoard", "to_kipy_item", "selection_from_kipy", "pcbnew_to_kipy_layer", "kipy_to_pcbnew_layer",
-           "netclass_values"]
+           "netclass_values", "board_fingerprint"]

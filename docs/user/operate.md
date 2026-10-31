@@ -190,8 +190,13 @@ limit (`[run] timeout_s` counts router time only: the pre-flight DRC, the DRC ro
 refill / preview exports come on top), or when you press **Cancel** (or Esc / Enter): the label changes to
 *Cancelling — keeping the best result so far…* and the best result found so far goes on to KiCad DRC and
 the preview. If nothing was routed yet, the run ends with *Cancelled — nothing was changed on the board.*
-Cancel reacts within about a second while routing; during KiCad DRC, refill or the preview export (5–20 s
-each) the dialog may not respond ([While topor runs](#while-topor-runs)).
+Cancel reacts within about a second in every phase: while routing, and also while `kicad-cli` runs (pre-flight
+DRC with zone refill, the DRC rounds, the preview export) because topor polls the running `kicad-cli` every
+0.25 s and keeps the dialog alive. Cancel during the pre-flight DRC stops `kicad-cli` and ends the run with
+nothing changed; Cancel after the routing started keeps the best result (the DRC and the preview of that result
+still finish). A `kicad-cli` call that runs longer than `[run] kicad_cli_timeout_s` (default 120 s, `0` = no
+limit) is stopped and the run ends with [KICAD_CLI_TIMEOUT](troubleshoot.md#kicad_cli_timeout) (board unchanged).
+Before the routing starts the progress dialog already shows *Preparing geometry* while topor reads the board.
 
 After routing, the result is written into the board copy and checked with KiCad's DRC (`kicad-cli`). If
 the router's copper causes violations, topor pins those spots and routes again, up to
@@ -311,10 +316,13 @@ unsure about is kept. KiCad's DRC of the result stays the judge.
 
 ### While topor runs
 
-- Cancel reacts within about a second while routing; during KiCad DRC / refill / preview export (5–20 s each)
-  the dialog may not respond.
+- Cancel reacts within about a second in every phase (see [Progress and Cancel](#progress-and-cancel)).
 - Do not edit the board while topor runs; Accept commits the result computed from the board as it was when you
   pressed Route (precisely: when you clicked **Topor: route**, when topor saved its copy of the board).
+  This is checked, always (no setting): topor takes a fingerprint of the board (counts, track / via ids and
+  positions, footprint references, positions and orientations) at the start and again right before it
+  commits. If they differ nothing is committed and the run ends with
+  [BOARD_CHANGED_DURING_RUN](troubleshoot.md#board_changed_during_run); undo your edits or run Topor again.
 
 ### Reading the board over the KiCad API (IPC): approximations and their safe direction
 
