@@ -61,7 +61,7 @@ struct Region {
     kind: RegionKind,
 }
 
-fn point_in_poly(p: Vec2, poly: &[Vec2]) -> bool {
+pub(crate) fn point_in_poly(p: Vec2, poly: &[Vec2]) -> bool {
     let n = poly.len();
     let mut inside = false;
     for i in 0..n {
