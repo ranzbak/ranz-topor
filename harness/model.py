@@ -441,12 +441,14 @@ def find_dangling_ends(board) -> list[dict]:
 
 # ---------------------------------------------------------------- pours
 def _export_pours(board, cu: list[int]) -> list[dict]:
-    """Copper zones (not rule areas, net != 0) with the pads and vias they connect to after a refill.
+    """Real copper pours (not rule areas, not teardrop zones, net != 0) with the pads and vias they
+    connect to after a refill; a pad/via is listed only if it has copper on one of the zone's layers.
 
     Needs the zones filled and the connectivity built; both run here (the board is modified in
     memory only, never saved).
     """
-    zones = [z for z in board.Zones() if not z.GetIsRuleArea() and int(z.GetNetCode()) != 0]
+    zones = [z for z in board.Zones() if not z.GetIsRuleArea() and not z.IsTeardropArea()
+             and int(z.GetNetCode()) != 0]
     if not zones:
         return []
     pcbnew.ZONE_FILLER(board).Fill(board.Zones())
@@ -456,8 +458,9 @@ def _export_pours(board, cu: list[int]) -> list[dict]:
     for z in zones:
         layers = sorted(int(l) for l in z.GetLayerSet().Seq() if int(l) in cu)
         pads = sorted(f"{p.GetParentFootprint().GetReference()}.{p.GetNumber()}"
-                      for p in conn.GetConnectedPads(z))
-        vias = sorted(_uuid(t) for t in conn.GetConnectedTracks(z) if _is_via(t))
+                      for p in conn.GetConnectedPads(z) if any(p.IsOnLayer(l) for l in layers))
+        vias = sorted(_uuid(t) for t in conn.GetConnectedTracks(z)
+                      if _is_via(t) and any(t.IsOnLayer(l) for l in layers))
         out.append({"uuid": _uuid(z), "net": int(z.GetNetCode()), "layers": layers,
                     "pads": pads, "vias": vias})
     out.sort(key=lambda d: d["uuid"])

@@ -307,7 +307,8 @@ pub fn decompose(model: &BoardModel, opts: &Options, layer: u32) -> Decompositio
                 }
             }
         }
-        // Pours join the pads and vias they list (a pour is a node of its own).
+        // Pours join the pads and vias they list that have copper on one of the pour's layers
+        // (a pour is a node of its own).
         for z in &pours {
             let mut first: Option<usize> = None;
             let mut join = |n: usize, dsu: &mut Dsu| match first {
@@ -317,13 +318,21 @@ pub fn decompose(model: &BoardModel, opts: &Options, layer: u32) -> Decompositio
             for s in &z.pads {
                 let Some(r) = parse_pour_pad(s) else { continue };
                 if let Some(a) = pads.iter().position(|&pi| {
-                    model.pads[pi].ref_ == r.ref_ && model.pads[pi].number == r.number
+                    model.pads[pi].ref_ == r.ref_
+                        && model.pads[pi].number == r.number
+                        && model.pads[pi].layers.iter().any(|l| z.layers.contains(l))
                 }) {
                     join(a, &mut dsu);
                 }
             }
             for u in &z.vias {
-                if let Some(b) = vias.iter().position(|&vi| &model.vias[vi].uuid == u) {
+                if let Some(b) = vias.iter().position(|&vi| {
+                    let v = &model.vias[vi];
+                    &v.uuid == u
+                        && via_layers(&v.layers, &all_layers)
+                            .iter()
+                            .any(|l| z.layers.contains(l))
+                }) {
                     join(np + b, &mut dsu);
                 }
             }

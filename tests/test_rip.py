@@ -86,3 +86,14 @@ def test_rip_real_board_does_not_corrupt_swig_state(tmp_path):
     del b
     b2 = pcbnew.LoadBoard(str(make_fixture_board(tmp_path / "b.kicad_pcb")))
     assert type(b2.GetDesignSettings()).__name__ == "BOARD_DESIGN_SETTINGS"
+
+
+def test_rip_all_deletes_teardrop_zones_of_ripped_tracks(tmp_path):
+    from harness.fixtures import add_teardrop_zone
+
+    pcb = make_fixture_board(tmp_path / "td.kicad_pcb", half_track=True, locked_track=False)
+    add_teardrop_zone(pcb, "SIG", "F.Cu", [(24, 19), (26, 19), (26, 29), (24, 29)])
+    b = pcbnew.LoadBoard(str(pcb))
+    rep = rip_tracks(b)
+    assert rep.removed_teardrops == 1
+    assert not any(z.IsTeardropArea() for z in b.Zones()) and len(list(b.Zones())) == 1

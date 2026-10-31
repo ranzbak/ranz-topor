@@ -165,3 +165,14 @@ def test_model_pours_schema(fixture_board):
     z = m["pours"][0]
     assert set(z) == {"uuid", "net", "layers", "pads", "vias"}
     assert z["pads"] == sorted(z["pads"]) and z["vias"] == sorted(z["vias"])
+
+
+def test_model_pours_exclude_teardrop_zones(tmp_path):
+    from harness.fixtures import add_teardrop_zone
+
+    pcb = make_fixture_board(tmp_path / "td.kicad_pcb", half_track=True)
+    add_teardrop_zone(pcb, "SIG", "F.Cu", [(24, 19), (26, 19), (26, 29), (24, 29)])
+    b = pcbnew.LoadBoard(str(pcb))
+    assert sum(1 for z in b.Zones() if z.IsTeardropArea()) == 1
+    m = export_model(b, {}, name="fx")
+    assert len(m["pours"]) == 1 and m["pours"][0]["layers"] == [int(pcbnew.B_Cu)]

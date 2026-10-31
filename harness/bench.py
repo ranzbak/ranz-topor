@@ -153,7 +153,7 @@ def run_bench(
 
     rep = asdict(rip_tracks(b, mode=rip, scope=options.get("scope"), rf_nets=set(rf_nets)))
     writer.save(b, cp.pcb)
-    removed = {k: rep[k] for k in ("removed_tracks", "removed_arcs", "removed_vias")}
+    removed = {k: rep[k] for k in ("removed_tracks", "removed_arcs", "removed_vias", "removed_teardrops")}
     kept = {k: rep[k] for k in ("kept_locked_tracks", "kept_free_vias", "kept_locked_vias",
                                 "kept_rf_tracks", "kept_rf_vias")}
     b = load_board(cp)  # fresh board holding the ripped copper just saved

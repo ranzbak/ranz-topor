@@ -214,6 +214,19 @@ def make_fixture_board(
     return path
 
 
+def add_teardrop_zone(pcb: Path, net: str, layer: str, poly_mm) -> None:
+    """Append a KiCad-style teardrop zone (attr teardrop padvia) to a saved board file (text edit:
+    pcbnew's python API does not expose the teardrop type enum)."""
+    pcb = Path(pcb)
+    text = pcb.read_text()
+    pts = " ".join(f"(xy {x} {y})" for x, y in poly_mm)
+    zone = (f'(zone (net "{net}") (layer "{layer}") (hatch none 0.1) (priority 30000) '
+            f'(attr (teardrop (type padvia))) (connect_pads yes (clearance 0)) (min_thickness 0.0254) '
+            f'(fill yes (island_removal_mode 1)) (polygon (pts {pts})))')
+    i = text.rstrip().rfind(")")
+    pcb.write_text(text[:i] + zone + "\n" + text[i:])
+
+
 _DEF_RULES = {
     "min_clearance": 0.2,
     "min_track_width": 0.2,

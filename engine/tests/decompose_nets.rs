@@ -157,7 +157,7 @@ fn pour_served_net() {
     m.pours.push(Pour {
         uuid: "z".into(),
         net: 1,
-        layers: vec![2],
+        layers: vec![0],
         pads: vec!["U1.1".into(), "U1.2".into()],
         vias: vec![],
     });
@@ -170,6 +170,23 @@ fn pour_served_net() {
     let d = decompose(&m, &Options::default(), 0);
     assert_eq!(d.connections.len(), 1);
     assert!(!d.nets[0].pour_served);
+}
+
+#[test]
+fn pour_on_other_layer_does_not_join_smd_pad() {
+    // Pads are F.Cu-only SMD (layer 0); the pour is on B.Cu (layer 2): listed or not, no union.
+    let mut m = model(&[(0, 0), (30, 0)]);
+    m.pours.push(Pour {
+        uuid: "z".into(),
+        net: 1,
+        layers: vec![2],
+        pads: vec!["U1.1".into(), "U1.2".into()],
+        vias: vec![],
+    });
+    let d = decompose(&m, &Options::default(), 0);
+    assert_eq!(d.connections.len(), 1);
+    assert!(!d.nets[0].pour_served);
+    assert_eq!(d.nets[0].clusters, 2);
 }
 
 #[test]

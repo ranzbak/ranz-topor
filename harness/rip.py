@@ -21,6 +21,7 @@ class RipReport:
     removed_tracks: int = 0
     removed_arcs: int = 0
     removed_vias: int = 0
+    removed_teardrops: int = 0
     kept_locked_tracks: int = 0
     kept_free_vias: int = 0
     kept_locked_vias: int = 0
@@ -141,8 +142,11 @@ def rip_tracks(
     # board.Delete(), not Remove(): Remove() hands ownership of the C++ item to the Python wrapper,
     # and SWIG has no destructor for PCB_TRACK/PCB_VIA ("memory leak of type 'PCB_TRACK *'"); on
     # larger boards that corrupts pcbnew's SWIG state for the rest of the process.
-    for it in to_remove:
-        board.Delete(it)
+    # Same-net teardrop zones touching a ripped item go with it (as when the smoother replaces a wire).
+    from harness.writer import remove_items_and_teardrops
+
+    rep.removed_teardrops = remove_items_and_teardrops(
+        board, [it.m_Uuid.AsString() for it in to_remove])[1]
     del to_remove, vias, by_net  # wrappers of deleted items must not be touched again
 
     pads_by_net: dict[str, list] = {}
