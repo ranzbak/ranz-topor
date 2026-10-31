@@ -2,7 +2,7 @@
 import sys
 
 # Rewritten by tools/build.sh to the engine version this plugin was shipped with.
-SHIPPED_VERSION = "0.2.0"
+SHIPPED_VERSION = "0.3.0"
 
 
 def main() -> int:

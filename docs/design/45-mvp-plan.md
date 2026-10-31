@@ -139,7 +139,7 @@ No stage may be exponential or factorial in the number of nets, pads or crossing
 | Search per connection (A*) | O(V log V), V ≈ triangulation size | admissible heuristic; bounded expansion count |
 | Negotiated rip-up (PathFinder) | O(iterations · m · V log V) | iteration cap (default 50) + history costs; no order permutations |
 | Metrization / relaxation | O(k) per wire per iteration | iteration cap + ε-band; stacks updated locally |
-| Layer assignment | 2 layers: polynomial (planar max-cut); > 2: heuristic | exact solvers only on local subproblems with a time limit |
+| Layer assignment | M3 (2 layers): per-connection, by layered search (SURF step 4: shortest path in the layered graph); planar max-cut deferred to M5 (> 2 layers: heuristic) | exact solvers only on local subproblems with a time limit |
 | Variants | N × single run | N = thread count |
 | KiCad DRC loop | O(iterations) × seconds | iteration cap (default 5) |
 

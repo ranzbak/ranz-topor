@@ -38,7 +38,7 @@ def test_m2_gate_eprom_router(engine, tmp_path):
     # length gate: outside pad copper, both sides measured in this run
     assert rep["length_outside_pads_nm"] <= hs["hand_outside_pads_nm"], \
         (rep["length_outside_pads_nm"], hs["hand_outside_pads_nm"])
-    assert r["router_s"] < 2.0 and rep["threads_used"] == 1 and not rep["timed_out"]
+    assert r["router_s"] < 2.0 and rep["threads_used"] == r["threads"] and not rep["timed_out"]
     assert rep["iterations"] <= 50
     # R6/R8: a zero-slack wire is only kept when kicad-cli DRC accepted it (routing_new == 0 above)
     assert not zs or r["zero_slack"]["status"] == "kept", (zs, r["zero_slack"])

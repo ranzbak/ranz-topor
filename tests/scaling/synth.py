@@ -47,13 +47,15 @@ def _pair_cells(n_pairs: int, seed: int, reach: float) -> tuple[list[tuple[int, 
         rows += 1
 
 
-def synth_model(n_pairs: int, seed: int, jitter_nm: int = 0) -> dict:
+def synth_model(n_pairs: int, seed: int, jitter_nm: int = 0, layers: int = 1) -> dict:
     """`n_pairs` two-pad nets, round pads d 1.0 mm on a 3 mm pitch grid, every pair within 9 mm (REACH).
 
     Cells that cannot be paired within reach are skipped; rows are added until exactly `n_pairs`
     pairs exist. The outline is the pad bbox plus the 2 mm margin. `jitter_nm=0` (default) is the
     exact collinear grid. `jitter_nm=J>0` offsets each pad centre by a seeded integer in [-J, J] per
     axis; pairing then uses a reach shortened by 2*sqrt(2)*J so every pair stays within REACH.
+    `layers=2` adds B.Cu (id 31, routable); the second pad of every pair is SMD on B.Cu only, so every
+    connection needs exactly one via.
     """
     reach = REACH - math.ceil(2 * math.sqrt(2) * jitter_nm) if jitter_nm else REACH
     cells, pairs = _pair_cells(n_pairs, seed, reach)
@@ -69,9 +71,10 @@ def synth_model(n_pairs: int, seed: int, jitter_nm: int = 0) -> dict:
     pads = []
     for net, (i, j) in enumerate(pairs, start=1):
         for k, c in enumerate((i, j), start=1):
+            lay = 31 if layers == 2 and k == 2 else 0
             pads.append({"uuid": f"p{net}-{k}", "ref": f"P{net}", "number": str(k), "net": net,
-                         "attr": "smd", "center": centre(c), "rotation_deg": 0.0, "layers": [0],
-                         "shapes": {"0": {"kind": "circle", "d": PAD_D}},
+                         "attr": "smd", "center": centre(c), "rotation_deg": 0.0, "layers": [lay],
+                         "shapes": {str(lay): {"kind": "circle", "d": PAD_D}},
                          "drill": None, "local_clearance": None, "net_tie_group": None})
     xs = [p["center"][0] for p in pads]
     ys = [p["center"][1] for p in pads]
@@ -82,8 +85,9 @@ def synth_model(n_pairs: int, seed: int, jitter_nm: int = 0) -> dict:
     rule = {"clearance": 200_000, "width": 250_000, "via_d": 600_000, "via_drill": 300_000,
             "netclass": "Default", "width_source": "default"}
     return {
-        "units": "nm", "board": f"synth-{n_pairs}-{seed}" + (f"-j{jitter_nm}" if jitter_nm else ""),
-        "layers": [{"id": 0, "name": "F.Cu", "kind": "signal", "routable": True}],
+        "units": "nm", "board": f"synth-{n_pairs}-{seed}" + (f"-j{jitter_nm}" if jitter_nm else "") + ("-l2" if layers == 2 else ""),
+        "layers": [{"id": 0, "name": "F.Cu", "kind": "signal", "routable": True}]
+                  + ([{"id": 31, "name": "B.Cu", "kind": "signal", "routable": True}] if layers == 2 else []),
         "nets": [{"code": n, "name": f"N{n}"} for n in range(1, len(pairs) + 1)],
         "pads": pads, "vias": [], "kept": [], "copper_shapes": [], "holes": [],
         "outline": outline, "keepouts": [], "net_ties": [], "dangling_ends": [],
