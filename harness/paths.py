@@ -1,7 +1,6 @@
 """Filesystem locations used by the harness (Linux only)."""
 import hashlib
 import json
-import os
 from collections.abc import MutableMapping
 from pathlib import Path
 
@@ -107,8 +106,7 @@ class _BenchBoards(MutableMapping):
 BENCH_BOARDS = _BenchBoards()
 
 
-def kicad_cli() -> Path:
-    return Path(os.environ.get("KICAD_CLI", "/usr/bin/kicad-cli"))
+from toporlib.kicad_cli import kicad_cli  # noqa: E402,F401  (re-export)
 
 
 def plugin_dir(identifier: str = "org.topor.router") -> Path:

@@ -17,15 +17,18 @@ from typing import Callable, Literal
 from harness import writer
 from harness.copy import _sha as file_sha256
 from harness.copy import assert_unchanged, copy_project
-from harness.drc import classify, new_routing, run_drc, summarise
+from harness.drc import classify, run_drc, summarise
 from harness.metrics import copper_metrics, detour_line, detour_stats
 from harness.model import export_model, load_board, write_model_json
 from harness.paths import BENCH_BOARDS
 from harness.render import caption, compose_compare, render_png
 from harness.rip import record_widths, rip_tracks
-from harness.router import drc_spots
 from harness.rules import resolve_rules
-from harness.smoother import drc_pins
+
+from toporlib import drcloop  # noqa: E402
+from toporlib.drcloop import (  # noqa: E402
+    ENGINE_WALL_CLOCK_S, MIN_RERUN_BUDGET_S, DrcJudgement, _zero_slack_names,
+)
 
 SUMMARY_MAX = 20
 Router = Callable[[dict, dict], "list[dict] | dict"]
@@ -116,10 +119,6 @@ def _route_summary(report: dict | None, layers: list[dict] | None = None) -> dic
         "zero_slack": report.get("zero_slack"),
         "via_reduction": report.get("via_reduction"),
     }
-
-
-def _zero_slack_names(report: dict | None) -> list[str]:
-    return [str(w.get("name")) for w in ((report or {}).get("zero_slack_wires") or [])]
 
 
 def _smooth_summary(report: dict | None) -> dict | None:
@@ -227,10 +226,6 @@ def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path,
     return "\n".join(lines[:SUMMARY_MAX])
 
 
-ENGINE_WALL_CLOCK_S = 60.0  # engine/src/model.rs Options::default().wall_clock_s
-MIN_RERUN_BUDGET_S = 1.0  # a DRC-loop / zero-slack re-route needs at least this much budget left
-
-
 def run_bench(
     board: str,
     out_dir: Path,
@@ -285,101 +280,46 @@ def run_bench(
     model = export_model(b, rules, name=board)
     write_model_json(model, out_dir / f"{board}--model.json")
 
-    # DRC loop (plan T1.4, cap `drc_loop_cap`): KiCad DRC after a refill sees copper the engine
-    # does not model (zone-fill necks). A dict router's wires named by, or (zone necks) next to,
-    # a new routing violation are pinned to their hand copper and the routing is redone.
+    # DRC loop (plan T1.4, cap `drc_loop_cap`) lives in toporlib.drcloop; the board writes and the
+    # kicad-cli DRC (pcbnew side) sit behind `drc_fn`. M3-R8: wall_clock_s is the budget of the
+    # whole bench run; later rounds get what is left.
     loop_cap = int(options.get("drc_loop_cap", 5))
     reach = _zone_reach(b)
     pre_route = cp.pcb.with_name(cp.pcb.name + ".pre-route")
     shutil.copyfile(cp.pcb, pre_route)
-    pinned: dict = dict(options.get("pinned") or {})
-    spots: list = list(options.get("drc_spots") or [])
-    # Zero-slack retry judge (R6): a topor result that used a zero-slack corridor is kept only
-    # when KiCad DRC reports no new routing violation and nothing unconnected; otherwise the
-    # board is restored and the router runs again with the retry off.
-    zero_slack: dict = {"status": "not attempted", "wires": []}
-    zs_off = options.get("zero_slack_retry") is False
-    rounds, router_s = 0, 0.0
-    # M3-R8: wall_clock_s is the budget of the whole bench run; later rounds get what is left.
-    total_budget = float(options.get("wall_clock_s", ENGINE_WALL_CLOCK_S))
-    budget_exhausted = False
+    state: dict = {"b": b, "first": True, "write": [], "unchanged": 0, "replaced": 0,
+                   "teardrops_removed": 0}
 
-    def out_of_budget() -> bool:
-        return total_budget - router_s < MIN_RERUN_BUDGET_S
-
-    while True:
-        rounds += 1
-        t_route = time.monotonic()
-        opts = {**options, "threads": threads,
-                **({"wall_clock_s": max(0.0, total_budget - router_s)} if rounds > 1 else {}), **({"pinned": pinned} if pinned else {}),
-                **({"drc_spots": spots} if spots else {}),
-                **({"zero_slack_retry": False} if zs_off else {})}
-        routed = router(model, opts) if router is not None else []
-        router_s += time.monotonic() - t_route
-        if isinstance(routed, dict):
-            items = list(routed.get("items") or [])
-            remove_uuids = list(routed.get("remove_uuids") or [])
-            router_report = routed.get("report")
-        else:
-            items, remove_uuids, router_report = list(routed), [], None
-        remove_uuids, write, unchanged = writer.skip_unchanged(model["kept"], remove_uuids, items)
-        replaced, teardrops_removed = writer.remove_items_and_teardrops(b, remove_uuids)
-        created = dict(zip(writer.write_items(b, write), write))
-        # Save over the working copy so the copied .kicad_pro/.kicad_dru still apply to the DRC run.
-        writer.save(b, cp.pcb)
-        routed_drc = run_drc(cp.pcb, out_dir / f"{board}--drc-routed.json")
-        if router_report is None or rounds > loop_cap:
-            break
-        if "connections" in router_report:  # topor: DRC spots for the offending nets
-            zs_names = _zero_slack_names(router_report)
-            if zs_names and not zs_off:
-                wires = [{"id": w.get("conn"), "net": w.get("name")}
-                         for w in router_report.get("zero_slack_wires") or []]
-                bad = (classify(routed_drc, base_drc, created)["routing_new"] > 0
-                       or len(routed_drc.unconnected) > 0)
-                if bad:
-                    zero_slack = {"status": "rejected by DRC", "wires": wires}
-                    if out_of_budget():  # no time for the re-run: keep this board, flagged
-                        zero_slack["budget_exhausted"] = True
-                        budget_exhausted = True
-                        break
-                    zs_off = True
-                    shutil.copyfile(pre_route, cp.pcb)
-                    b = load_board(cp)
-                    continue
-                zero_slack = {"status": "kept", "wires": wires}
-            elif zero_slack["status"] == "not attempted" and not zs_off:
-                zero_slack = {"status": str(router_report.get("zero_slack") or "not run"),
-                              "wires": []}
-            have = {(sp["layer"], tuple(sp["at"])) for sp in spots}
-            fresh = []
-            for sp in drc_spots(new_routing(routed_drc, base_drc, created), created, model, reach,
-                                float(max(rules["min_clearance"],
-                                          rules["default"].get("clearance", 0)))):
-                if (sp["layer"], tuple(sp["at"])) not in have:
-                    have.add((sp["layer"], tuple(sp["at"])))
-                    fresh.append(sp)
-            if not fresh:
-                break
-            if out_of_budget():
-                budget_exhausted = True
-                break
-            spots.extend(fresh)
+    def drc_fn(items, remove_uuids=()):
+        if not state["first"]:  # re-route after feedback: restore the unrouted board
             shutil.copyfile(pre_route, cp.pcb)
-            b = load_board(cp)
-            continue
-        names = {n["code"]: n["name"] for n in model["nets"]}
-        more = {u: r for u, r in drc_pins(new_routing(routed_drc, base_drc, created), created,
-                                          router_report.get("wires") or [], names, reach).items()
-                if u not in pinned}
-        if not more:
-            break
-        if out_of_budget():
-            budget_exhausted = True
-            break
-        pinned.update(more)
-        shutil.copyfile(pre_route, cp.pcb)
-        b = load_board(cp)
+            state["b"] = load_board(cp)
+        state["first"] = False
+        bd = state["b"]
+        rem, write, unchanged = writer.skip_unchanged(model["kept"], list(remove_uuids), items)
+        replaced, teardrops_removed = writer.remove_items_and_teardrops(bd, rem)
+        created = dict(zip(writer.write_items(bd, write), write))
+        state.update(write=write, unchanged=unchanged, replaced=replaced,
+                     teardrops_removed=teardrops_removed)
+        # Save over the working copy so the copied .kicad_pro/.kicad_dru still apply to the DRC run.
+        writer.save(bd, cp.pcb)
+        return DrcJudgement(run_drc(cp.pcb, out_dir / f"{board}--drc-routed.json"), created)
+
+    def route_fn(m, o):
+        return router(m, o) if router is not None else []
+
+    loop = drcloop.route_with_drc_loop(
+        model, {**options, "threads": threads}, route_fn=route_fn, drc_fn=drc_fn,
+        base_drc=base_drc, orig_drc=orig_drc,
+        budget_s=float(options.get("wall_clock_s", ENGINE_WALL_CLOCK_S)), loop_cap=loop_cap,
+        reach_nm=reach,
+        clearance_nm=float(max(rules["min_clearance"], rules["default"].get("clearance", 0))))
+    b = state["b"]
+    write, unchanged, replaced = state["write"], state["unchanged"], state["replaced"]
+    teardrops_removed = state["teardrops_removed"]
+    routed_drc, created, router_report = loop.routed_drc, loop.created, loop.router_report
+    rounds, pinned, spots = loop.rounds, loop.pinned, loop.spots
+    zero_slack, budget_exhausted, router_s = loop.zero_slack, loop.budget_exhausted, loop.router_s
     pre_route.unlink()
     topor_raw = render_png(cp.pcb, cp.pcb.parent / f"{board}-topor-raw.png")
 
