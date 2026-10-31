@@ -14,6 +14,7 @@ use crate::obstacle::ObstacleSet;
 use crate::search::SlotPath;
 use crate::sketch::{build_layer_cdt, ConstraintSet, LayerSketch};
 use crate::vias::{ViaSite, ViaSize};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -55,7 +56,7 @@ pub struct MultiGraph {
     blocks_of: Vec<Vec<usize>>,
     blocked_by: Vec<Vec<usize>>,
     conn_sites: Vec<Vec<usize>>,
-    free_ids: Vec<usize>,
+    free_ids: BTreeSet<usize>,
     clock: u64,
 }
 
@@ -192,22 +193,32 @@ impl MultiGraph {
             blocks_of: vec![Vec::new(); n],
             blocked_by: vec![Vec::new(); n],
             conn_sites: Vec::new(),
-            free_ids: Vec::new(),
+            free_ids: BTreeSet::new(),
             clock: 0,
         })
     }
 
     /// Pour indices (sorted) whose fill on a routable layer contains the site and keeps the
-    /// via annulus (`max_d / 2`) inside it. O(S * sum of ring sizes).
+    /// via annulus (`max_d / 2`) inside it: inside `outer`, outside every hole, and the annulus
+    /// clear of the outer ring and of every hole ring. O(S * sum of (|outer| + sum |holes|)).
     fn pour_membership(model: &BoardModel, sites: &[ViaSite], layers: &[u32]) -> Vec<Vec<usize>> {
-        let rings: Vec<Vec<Vec<Vec2>>> = model
+        type Fill = (Vec<Vec2>, Vec<Vec<Vec2>>);
+        let rings: Vec<Vec<Fill>> = model
             .pours
             .iter()
             .map(|p| {
                 p.fills
                     .iter()
                     .filter(|f| layers.contains(&f.layer))
-                    .map(|f| f.outer.iter().map(|q| q.to_vec2()).collect())
+                    .map(|f| {
+                        (
+                            f.outer.iter().map(|q| q.to_vec2()).collect(),
+                            f.holes
+                                .iter()
+                                .map(|h| h.iter().map(|q| q.to_vec2()).collect())
+                                .collect(),
+                        )
+                    })
                     .collect()
             })
             .collect();
@@ -219,12 +230,19 @@ impl MultiGraph {
                     .iter()
                     .enumerate()
                     .filter(|(_, fills)| {
-                        fills.iter().any(|ring| {
-                            ring.len() >= 3
-                                && in_ring(s.at, ring)
-                                && (0..ring.len()).all(|i| {
+                        fills.iter().any(|(ring, holes)| {
+                            let clear = |ring: &[Vec2]| {
+                                (0..ring.len()).all(|i| {
                                     dist_point_seg(s.at, ring[i], ring[(i + 1) % ring.len()]) >= r
                                 })
+                            };
+                            ring.len() >= 3
+                                && in_ring(s.at, ring)
+                                && clear(ring)
+                                && holes
+                                    .iter()
+                                    .filter(|h| h.len() >= 3)
+                                    .all(|h| !in_ring(s.at, h) && clear(h))
                         })
                     })
                     .map(|(pi, _)| pi)
@@ -369,7 +387,7 @@ impl MultiGraph {
     /// recorded in `wire_of` / `conn_wires`. The caller inserts each leg with
     /// `layers[leg.layer_idx].g.insert_path(k, ..)` and activates its sites (or use
     /// [`MultiGraph::insert_path`]).
-    /// O(n log F).
+    /// O(n log F) (`BTreeSet::pop_first`).
     pub fn alloc_legs(&mut self, conn: usize, n: usize) -> Vec<usize> {
         if self.conn_wires.len() <= conn {
             self.conn_wires.resize(conn + 1, Vec::new());
@@ -378,14 +396,12 @@ impl MultiGraph {
             self.conn_wires[conn].is_empty(),
             "conn {conn} still has legs"
         );
-        self.free_ids.sort_unstable();
         let mut ids = Vec::with_capacity(n);
         for ord in 0..n {
-            let k = if self.free_ids.is_empty() {
-                self.wire_of.len()
-            } else {
-                self.free_ids.remove(0)
-            };
+            let k = self
+                .free_ids
+                .pop_first()
+                .unwrap_or(self.wire_of.len());
             if k == self.wire_of.len() {
                 self.wire_of.push(None);
             }
@@ -442,7 +458,7 @@ impl MultiGraph {
                 c.g.remove_conn(k);
             }
             self.wire_of[k] = None;
-            self.free_ids.push(k);
+            self.free_ids.insert(k);
         }
     }
 

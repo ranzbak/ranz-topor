@@ -208,3 +208,28 @@ fn leg_ids_are_allocated_from_the_sorted_free_list() {
     assert_eq!(mg.conns_of_legs(&[0, 1, 2]), vec![1]);
     assert_eq!(mg.alloc_legs(5, 2), vec![0, 1]);
 }
+
+#[test]
+fn site_inside_fill_hole_is_not_in_pour() {
+    // fill 5..20 mm square with a hole 10..14 mm (kicad frame, y flipped by from_json)
+    let extra = format!(
+        r#""pads": [ {} ],
+          "pours": [ {{ "uuid": "z", "net": 1, "layers": [31], "pads": [], "vias": [],
+             "fills": [ {{ "layer": 31,
+               "outer": [[5000000, 5000000], [20000000, 5000000],
+                         [20000000, 20000000], [5000000, 20000000]],
+               "holes": [ [[10000000, 10000000], [14000000, 10000000],
+                           [14000000, 14000000], [10000000, 14000000]] ] }} ] }} ]"#,
+        pad(0, 1, 40.0, 30.0)
+    );
+    let m = model(&extra);
+    // in the hole (12, 12); beside the hole (17, 12); annulus 0.3 crossing the hole edge (14.1, 12)
+    let (mg, _) = build(
+        &m,
+        vec![site(12.0, -12.0), site(17.0, -12.0), site(14.1, -12.0)],
+    );
+    let by_pos = |x: f64| (0..3).find(|&s| mg.sites[s].at.x == x * MM).unwrap();
+    assert!(mg.in_pour[by_pos(12.0)].is_empty(), "site inside the hole");
+    assert_eq!(mg.in_pour[by_pos(17.0)], vec![0]);
+    assert!(mg.in_pour[by_pos(14.1)].is_empty(), "annulus crosses the hole edge");
+}

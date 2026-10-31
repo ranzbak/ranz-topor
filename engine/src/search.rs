@@ -242,6 +242,9 @@ pub struct SearchParams<'a> {
     /// Final cost of one via, nm (P8: the caller applied `via_weight(tier)`).
     pub via_cost: f64,
     pub max_vias: u32,
+    /// D-1 (`Options.strict_unfit_edges`): the layered search rejects an edge that is unfit even
+    /// when empty (`!fits(e)`) in `push_state`; the ghost keeps pricing it as soft.
+    pub strict_unfit_edges: bool,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -649,6 +652,7 @@ struct Common<'a> {
     eps: Option<f64>,
     via_cost: f64,
     max_vias: u32,
+    strict_unfit: bool,
 }
 
 /// The graphs a search runs on: one `(graph, obstacles)` per layer index, plus the multigraph
@@ -721,7 +725,7 @@ impl<'a> Layered<'a> {
             .iter()
             .enumerate()
             .map(|(i, &(g, obs))| {
-                Search::new(
+                let mut s = Search::new(
                     g,
                     obs,
                     conn,
@@ -730,7 +734,9 @@ impl<'a> Layered<'a> {
                     p.present_overuse,
                     p.eps,
                     ghost,
-                )
+                );
+                s.strict_unfit = p.strict_unfit && !ghost;
+                s
             })
             .collect();
         let targets = goal
@@ -873,6 +879,9 @@ impl<'a> Layered<'a> {
         let vias = st.nodes[parent].vias;
         let key = (layer, e, slot, dir, vias);
         if st.closed.contains(&key) {
+            return;
+        }
+        if sr.strict_unfit && !sr.fits(e) {
             return;
         }
         let s = &st.nodes[parent];
@@ -1292,6 +1301,8 @@ struct Search<'a> {
     omega: f64,
     present_overuse: f64,
     ghost: bool,
+    /// Reject statically unfit edges in `push_state` (D-1; never in the ghost).
+    strict_unfit: bool,
     /// Candidates returned by `clearance_bend` queries (statistics).
     cands: Cell<usize>,
     /// `clearance_bend` calls so far (statistics).
@@ -1324,6 +1335,7 @@ impl<'a> Search<'a> {
             omega: weight,
             present_overuse,
             ghost,
+            strict_unfit: false,
             cands: Cell::new(0),
             bends: Cell::new(0),
             near: [RefCell::new(HashMap::new()), RefCell::new(HashMap::new())],
@@ -2698,6 +2710,7 @@ fn common<'a>(p: &SearchParams<'a>) -> Common<'a> {
         eps: p.eps,
         via_cost: p.via_cost,
         max_vias: p.max_vias,
+        strict_unfit: p.strict_unfit_edges,
     }
 }
 
@@ -2846,6 +2859,7 @@ pub mod planar {
             eps: p.eps,
             via_cost: 0.0,
             max_vias: 0,
+            strict_unfit: false,
         }
     }
 

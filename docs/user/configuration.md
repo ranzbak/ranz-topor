@@ -84,7 +84,8 @@ Path search tuning.
 | `exit_stubs` | str | `"auto"` |  | auto\|all\|off | Pad exit stubs for fine-pitch pads: auto, all or off. *Since 0.5.0.* |
 | `steiner` | bool | `true` |  | true\|false | Allow same-net T-junctions in the middle of a track instead of only at pads. *Since 0.5.0.* |
 | `dangling_ends` | str | `"continue"` |  | continue\|drop | What to do with existing track ends that connect to nothing: continue them or drop them. *Since 0.5.0.* |
-| `strict_unfit_edges` | bool | `false` |  | true\|false | Fail a connection when a graph edge is too narrow for its trace instead of widening the search. *Since 0.5.0.* |
+| `strict_unfit_edges` | bool | `false` |  | true\|false | Fail a connection when a graph edge is too narrow for its trace even when empty, instead of pricing the crossing as overuse (stricter; may leave tight boards incomplete). |
+| `pour_listed_via_goals` | bool | `false` |  | true\|false | A connection to a copper pour may end on a same-net via the pour already lists instead of always placing a new via (saves vias, may lengthen the trace). |
 
 ## `[ripup]`
 

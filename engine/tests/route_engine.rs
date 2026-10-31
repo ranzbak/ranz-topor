@@ -785,6 +785,40 @@ fn route_split_vertex_bend_fails_connection_once() {
     clean(&m, &r);
 }
 
+/// D2 (M3 review D-2): the split-vertex failure pinned end to end. A locked X of net-5 tracks
+/// (corner to corner) closes the board into four wedges; the net-5 pads sit in the left and the
+/// right wedge, so the only slot path runs through the crossing and bends at its split vertex.
+/// The connection fails with the clear reason and the run does not loop.
+#[test]
+fn route_split_vertex_bend_fails_with_reason() {
+    let x = |a: (i64, i64), b: (i64, i64), n: i64| -> String {
+        format!(
+            r#"{{ "uuid": "k{n}", "net": 5, "layer": 0, "width": 250000, "locked": true,
+            "prim": {{ "kind": "seg", "a": [{}, {}], "b": [{}, {}] }} }}"#,
+            a.0 * 1_000_000,
+            a.1 * 1_000_000,
+            b.0 * 1_000_000,
+            b.1 * 1_000_000
+        )
+    };
+    let m = model(
+        &[
+            P("A", "1", 5, 8.0, 20.0, 1.0, "[0]"),
+            P("A", "2", 5, 42.0, 20.0, 1.0, "[0]"),
+        ],
+        &format!(
+            r#""kept": [ {}, {} ],"#,
+            x((0, 0), (50, -40), 1),
+            x((0, -40), (50, 0), 2)
+        ),
+    );
+    let r = route(&m, &opts());
+    assert!(r.iterations <= 5, "iterations {}", r.iterations);
+    let a = r.connections.iter().find(|c| c.net == 5).unwrap();
+    assert_eq!(a.status, "failed", "{a:?}");
+    assert!(a.reason.starts_with("sketch: path bends at a wall split vertex"), "{}", a.reason);
+}
+
 /// D6: a foreign pad sits on the straight line between the start and the blocking wall (a locked
 /// track spanning the board). The forward stub grows from the `last_reached` crossing along the
 /// ghost crossings, so it passes the pad and reaches the wall clearance; the old stub from the

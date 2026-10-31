@@ -641,7 +641,7 @@ pub struct Expert {
     pub present_overuse: f64,
     /// Candidates the zero-slack retry tries.
     pub zero_slack_candidates: usize,
-    /// Relaxation sweep cap (see [`Options::relax_cap`]).
+    /// Relaxation sweep cap (single source; see [`Options::relax_cap`]).
     pub relax_iter_cap: u32,
 }
 
@@ -684,8 +684,6 @@ pub struct Options {
     pub ripup_max_per_pair: u32,
     /// Expert knobs (`topor.toml [expert]`).
     pub expert: Expert,
-    /// Relaxation sweep cap; the effective value is [`Options::relax_cap`].
-    pub relax_iter_cap: u32,
     pub drc_loop_cap: u32,
     pub seed: u64,
     pub existing_copper: ExistingCopper,
@@ -700,6 +698,16 @@ pub struct Options {
     /// that is pinched below the margin ε (but not below the rules) with margin 0 against that
     /// corridor only; kept when it shortens the routing. The harness DRC is the final judge.
     pub zero_slack_retry: bool,
+    /// Router (D-1, `topor.toml [search] strict_unfit_edges`): the layered search rejects a
+    /// graph edge that is too narrow for the connection's trace even when empty
+    /// (`!fits(e)`) instead of pricing it as an overuse crossing. Off by default (the default
+    /// keeps boards such as `eprom-to-kernal` routable through one pinched edge).
+    pub strict_unfit_edges: bool,
+    /// Router (D-6, `topor.toml [search] pour_listed_via_goals`): a connection to a pour may end
+    /// on a same-net via the pour already lists (no new via) instead of always placing one.
+    /// Off by default: on wiccon-2023 it saves one via but lengthens the GND connection (outside
+    /// pads 1381.4 mm, over the 1380 mm M3 bound), so it is the user's trade-off.
+    pub pour_listed_via_goals: bool,
     /// Router (M3): cost of one via in nm of wire length.
     pub via_cost_nm: i64,
     /// Router (M3): maximum vias on one connection.
@@ -725,7 +733,6 @@ impl Default for Options {
             ripup_growth: 2.0,
             ripup_max_per_pair: 8,
             expert: Expert::default(),
-            relax_iter_cap: 200,
             drc_loop_cap: 5,
             seed: 1,
             existing_copper: ExistingCopper::Fixed,
@@ -734,6 +741,8 @@ impl Default for Options {
             pinned: BTreeMap::new(),
             drc_spots: Vec::new(),
             zero_slack_retry: true,
+            strict_unfit_edges: false,
+            pour_listed_via_goals: false,
             via_cost_nm: 2_000_000,
             max_vias_per_connection: 4,
             via_reduction: true,
@@ -747,17 +756,27 @@ impl Options {
         if s.trim().is_empty() {
             return Ok(Options::default());
         }
-        serde_json::from_str(s).map_err(|e| format!("options json: {e}"))
+        let mut v: serde_json::Value =
+            serde_json::from_str(s).map_err(|e| format!("options json: {e}"))?;
+        // Legacy input key: a top-level `relax_iter_cap` (before 0.5.0) is the single source
+        // `expert.relax_iter_cap`; an explicit `expert.relax_iter_cap` wins.
+        if let Some(obj) = v.as_object_mut() {
+            if let Some(cap) = obj.remove("relax_iter_cap") {
+                let ex = obj
+                    .entry("expert")
+                    .or_insert_with(|| serde_json::Value::Object(Default::default()));
+                if let Some(ex) = ex.as_object_mut() {
+                    ex.entry("relax_iter_cap").or_insert(cap);
+                }
+            }
+        }
+        serde_json::from_value(v).map_err(|e| format!("options json: {e}"))
     }
 
-    /// Effective relaxation sweep cap: the top-level `relax_iter_cap` when it differs from the
-    /// default 200 (older option JSON, tests), else `expert.relax_iter_cap`. O(1).
+    /// Effective relaxation sweep cap: `expert.relax_iter_cap` (the one source of truth; the
+    /// pre-0.5.0 top-level JSON key is folded into it by [`Options::from_json`]). O(1).
     pub fn relax_cap(&self) -> u32 {
-        if self.relax_iter_cap != 200 {
-            self.relax_iter_cap
-        } else {
-            self.expert.relax_iter_cap
-        }
+        self.expert.relax_iter_cap
     }
 
     /// `threads`, or `available_parallelism() - 1` (min 1) when 0.

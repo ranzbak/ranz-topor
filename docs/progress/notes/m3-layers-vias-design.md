@@ -225,6 +225,17 @@ iteration `O(|active| · V′ log V′ / threads + Σ |T(p)| + re-searches)`, re
 `route_threads_byte_identical`, `threads_zero_uses_available_parallelism_minus_one`, `parallel_self_check_matches_sequential`,
 `iteration_batch_commit_invalidates_shared_edge` (Review Focus 5).
 
+**Amendment (M3 review D-7, A0, 2026-11-01): phase-2 ghost precompute.** Phase (2) also precomputes, for every connection whose
+found path `is_detour` (`est_len > detour_factor · straight` and at least one strand crossed), the slot-free ghost against the
+same frozen snapshot (`pre`: `Some(Some((ghost, ..)))`, `Some(None)` = the ghost found no path, `None` = not precomputed because
+the path was not a detour candidate). In the commit phase (3) the absurd-detour test reuses `pre` instead of searching again
+when it is still `usable`: for `Some(Some(gp))` that is `path_valid(gp, t0_layers, t0_sites, activated) == Validity::Ok` (no edge
+of the ghost's faces changed since `t0`; commits only add occupancy, so no cheaper ghost can appear), for `Some(None)` always
+(an unreachable goal stays unreachable). Otherwise the ghost is recomputed against the current graph. The precompute is a pure
+function of the frozen inputs and `usable` of the commit-ordered graph, so the thread-count independence argument (i)–(iii)
+above is unchanged; the saving is the sequential ghost searches of phase (3), `O(candidates · V′ log V′ / threads)` moved into
+phase (2).
+
 ## 8. Complexity table (45 §5a) and caps
 
 | Component | Cost | Cap / bound | Pinned by |
@@ -264,6 +275,11 @@ free-list ids sorted; heap key total; `collect` in index order; no `HashMap` ite
   `Ctx` drops `obs` (passed explicitly, `&mut` only for activation).
 - **P8** Task 8: `SearchParams.via_cost` is the final per-via cost (caller multiplies `via_cost_nm · via_weight(tier)`; the
   reduction pass additionally `× REDUCTION_VIA_FACTOR`); `via_weight(0) = via_weight(1) = 2.0`.
+
+- **P1a (M3 review D-6, A0, 0.5.0)** the listed same-net pour vias are now actually goal vertices of a pour connection
+  (`route.rs::listed_pour_vias`: model vias of the net listed in `pour.vias`, restricted to the main fill component in completion
+  passes): the path may end on such a via with no new via (`sites.len() == legs.len() - 1`), the last leg's goal terminal is
+  `Terminal::Via` (`leg_terminals`). Test `pour_connection_uses_listed_same_net_via_as_goal`.
 
 ## Amendments (F2, 2026-10-31)
 
