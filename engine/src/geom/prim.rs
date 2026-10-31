@@ -82,6 +82,27 @@ impl Arc {
                 y: self.r * a.sin(),
             }
     }
+    /// Split into equal sub-arcs (same `c`, `r`, `sigma`) whose chord sagitta is at most `max_sag`;
+    /// one piece when `r <= max_sag`. Sub-arc `i` starts at `a_start + sigma * sweep * i / n`.
+    pub fn split_sagitta(&self, max_sag: f64) -> Vec<Arc> {
+        let n = if self.r > max_sag {
+            (self.sweep.abs() / (2.0 * (1.0 - max_sag / self.r).acos()))
+                .ceil()
+                .max(1.0) as usize
+        } else {
+            1
+        };
+        if n == 1 {
+            return vec![*self];
+        }
+        (0..n)
+            .map(|i| Arc {
+                a_start: self.a_start + self.sigma.sign() * self.sweep * (i as f64 / n as f64),
+                sweep: self.sweep / n as f64,
+                ..*self
+            })
+            .collect()
+    }
     pub fn start(&self) -> Vec2 {
         self.point_at(0.0)
     }
@@ -240,5 +261,50 @@ impl Prim {
             Prim::Seg(s) => s.len(),
             Prim::Arc(a) => a.length(),
         }
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+
+    #[test]
+    fn split_sagitta_bounds_sagitta_and_preserves_ends() {
+        for sigma in [Orient::Ccw, Orient::Cw] {
+            let a = Arc {
+                c: Vec2 { x: 1e6, y: -2e6 },
+                r: 20e6,
+                sigma,
+                a_start: 0.7,
+                sweep: std::f64::consts::PI,
+            };
+            let subs = a.split_sagitta(25_000.0);
+            assert!(subs.len() > 1);
+            assert!((subs[0].start() - a.start()).len() < 1e-3);
+            assert!((subs.last().unwrap().end() - a.end()).len() < 1e-3);
+            let mut tot = 0.0;
+            for (i, s) in subs.iter().enumerate() {
+                assert_eq!((s.c, s.r, s.sigma), (a.c, a.r, a.sigma));
+                let sag = s.r * (1.0 - (s.sweep / 2.0).cos());
+                assert!(sag <= 25_000.0 + 1e-6, "sub-arc {i} sagitta {sag}");
+                tot += s.sweep;
+                if i > 0 {
+                    assert!((subs[i - 1].end() - s.start()).len() < 1e-3);
+                }
+            }
+            assert!((tot - a.sweep).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn split_sagitta_small_radius_is_one_piece() {
+        let a = Arc {
+            c: Vec2 { x: 0.0, y: 0.0 },
+            r: 20_000.0,
+            sigma: Orient::Ccw,
+            a_start: 0.0,
+            sweep: 1.0,
+        };
+        assert_eq!(a.split_sagitta(25_000.0), vec![a]);
     }
 }

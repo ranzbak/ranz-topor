@@ -691,3 +691,70 @@ impl RouteGraph {
         self.rho_max
     }
 }
+
+#[cfg(test)]
+mod outline_tests {
+    use super::*;
+    use crate::geom::{outline_prims, IVec2, TrackPrim};
+
+    fn iv(x: i32, y: i32) -> IVec2 {
+        IVec2 { x, y }
+    }
+
+    /// 40 x 40 mm body whose right edge is a 180 degree arc (r 20 mm) bulging to x = 60 mm.
+    fn d_outline() -> Vec<TrackPrim> {
+        let mm = 1_000_000i32;
+        vec![
+            TrackPrim::Seg {
+                a: iv(0, 0),
+                b: iv(40 * mm, 0),
+            },
+            TrackPrim::Arc {
+                start: iv(40 * mm, 0),
+                mid: iv(60 * mm, 20 * mm),
+                end: iv(40 * mm, 40 * mm),
+            },
+            TrackPrim::Seg {
+                a: iv(40 * mm, 40 * mm),
+                b: iv(0, 40 * mm),
+            },
+            TrackPrim::Seg {
+                a: iv(0, 40 * mm),
+                b: iv(0, 0),
+            },
+        ]
+    }
+
+    #[test]
+    fn inside_outline_handles_arc_pockets() {
+        let mm = 1e6;
+        let pocket = Vec2 {
+            x: 48.0 * mm,
+            y: 20.0 * mm,
+        };
+        let outside = Vec2 {
+            x: 61.0 * mm,
+            y: 20.0 * mm,
+        };
+        let o = d_outline();
+        let collapsed: Vec<(Vec2, Vec2)> = o
+            .iter()
+            .map(|t| chord(&crate::geom::dequantise(t)))
+            .collect();
+        assert!(
+            !inside_outline(pocket, &collapsed),
+            "chords must misclassify the pocket"
+        );
+        let prims = outline_prims(&o);
+        let chords: Vec<(Vec2, Vec2)> = prims.iter().map(chord).collect();
+        assert!(inside_outline(pocket, &chords));
+        assert!(inside_outline(
+            Vec2 {
+                x: 10.0 * mm,
+                y: 20.0 * mm
+            },
+            &chords
+        ));
+        assert!(!inside_outline(outside, &chords));
+    }
+}

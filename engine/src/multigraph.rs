@@ -7,7 +7,7 @@
 //! Per-layer graph paths are indexed by *leg id* (P2): `wire_of` / `conn_wires` live here.
 
 use crate::decompose::Connection;
-use crate::geom::{dequantise, Aabb, Grid, Prim, Vec2};
+use crate::geom::{outline_prims, Aabb, Grid, Prim, Vec2};
 use crate::graph::{GraphRules, RouteGraph, TerminalInfo};
 use crate::model::BoardModel;
 use crate::obstacle::ObstacleSet;
@@ -117,7 +117,7 @@ impl MultiGraph {
         rules: &GraphRules,
     ) -> Result<MultiGraph, String> {
         let site_anchor = obs.add_site_anchors(&sites, layers);
-        let outline: Vec<Prim> = model.outline.iter().map(dequantise).collect();
+        let outline: Vec<Prim> = outline_prims(&model.outline);
         // Layers build in parallel (read-only `obs`), collected in layer order.
         let obs_ro: &ObstacleSet = obs;
         let built: Vec<Result<LayerCtx, String>> = {

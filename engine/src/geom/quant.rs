@@ -166,6 +166,26 @@ pub fn quantise_chain(prims: &[Prim]) -> Vec<TrackPrim> {
     out
 }
 
+/// Chord sagitta bound for outline arcs (>> `max_error` 5 um, << `edge_clearance` 200 um).
+pub const OUTLINE_SAGITTA_NM: f64 = 25_000.0;
+
+/// Board outline as primitives with every arc split into sub-arcs of chord sagitta
+/// <= `OUTLINE_SAGITTA_NM`, so walls hug the rim and chord parity tests match the true outline.
+pub fn outline_prims(outline: &[TrackPrim]) -> Vec<Prim> {
+    let mut out = Vec::with_capacity(outline.len());
+    for t in outline {
+        match dequantise(t) {
+            Prim::Arc(a) => out.extend(
+                a.split_sagitta(OUTLINE_SAGITTA_NM)
+                    .into_iter()
+                    .map(Prim::Arc),
+            ),
+            p => out.push(p),
+        }
+    }
+    out
+}
+
 /// What KiCad will see: arcs are rebuilt from the three integer points.
 pub fn dequantise(t: &TrackPrim) -> Prim {
     match *t {

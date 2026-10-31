@@ -8,7 +8,7 @@
 
 use crate::cdt::Cdt;
 use crate::check::Checker;
-use crate::geom::{dequantise, Aabb, Grid, Skeleton, Vec2};
+use crate::geom::{outline_prims, Aabb, Grid, Skeleton, Vec2};
 use crate::graph::{chord, inside_outline};
 use crate::model::{BoardModel, Rules};
 use crate::obstacle::ObstacleSet;
@@ -149,11 +149,8 @@ pub fn via_sites(
     }
     if pts.len() >= 3 {
         if let Ok(cdt) = Cdt::build(&pts, &[]) {
-            let chords: Vec<(Vec2, Vec2)> = model
-                .outline
-                .iter()
-                .map(|o| chord(&dequantise(o)))
-                .collect();
+            let chords: Vec<(Vec2, Vec2)> =
+                outline_prims(&model.outline).iter().map(chord).collect();
             for f in cdt.topology().faces {
                 let [a, b, c] = f.map(|v| cdt.vertex_pos(v));
                 let cen = (a + b + c) * (1.0 / 3.0);

@@ -256,3 +256,31 @@ fn site_pitch_dedup_and_determinism() {
         }
     }
 }
+
+#[test]
+fn face_sites_exist_in_arc_pocket() {
+    // 40 x 40 mm body + 180 degree arc pocket (r 20 mm) to x = 60 mm; pads only in the body so the
+    // pocket's faces are bounded by the rim anchors alone.
+    let s = format!(
+        r#"{{ "layers": [ {{ "id": 0, "routable": true }}, {{ "id": 31, "routable": true }} ],
+          "nets": [ {{ "code": 1, "name": "A" }} ],
+          "outline": [
+            {{ "kind": "seg", "a": [0, 0], "b": [40000000, 0] }},
+            {{ "kind": "arc", "start": [40000000, 0], "mid": [60000000, 20000000], "end": [40000000, 40000000] }},
+            {{ "kind": "seg", "a": [40000000, 40000000], "b": [0, 40000000] }},
+            {{ "kind": "seg", "a": [0, 40000000], "b": [0, 0] }} ],
+          "pads": [ {} ],
+          "rules": {{ "default": {{ "clearance": 200000, "width": 250000 }}, "min_clearance": 0,
+            "hole_clearance": 250000, "hole_to_hole": 250000, "edge_clearance": 500000,
+            "min_via_drill": 250000, "min_annular": 100000, "min_via_diameter": 400000 }} }}"#,
+        round_pad(0, 1, 10.0, 20.0)
+    );
+    let m = BoardModel::from_json(&s).unwrap();
+    let sites = sites_of(&m, &[]);
+    let in_pocket = sites.iter().filter(|s| s.at.x > 42.0 * MM).count();
+    assert!(
+        in_pocket > 0,
+        "no via site in the arc pocket: {} sites",
+        sites.len()
+    );
+}

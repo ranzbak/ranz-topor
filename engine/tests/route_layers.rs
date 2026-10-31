@@ -56,17 +56,24 @@ fn pad_json(q: &P) -> String {
 
 /// 50 x 40 mm board, two routable layers, JLCPCB-like rules (0.6 / 0.3 mm default via).
 fn model(pads: &[P], extra: &str) -> BoardModel {
+    model_outline(
+        pads,
+        extra,
+        r#"{ "kind": "seg", "a": [0, 0], "b": [50000000, 0] },
+            { "kind": "seg", "a": [50000000, 0], "b": [50000000, 40000000] },
+            { "kind": "seg", "a": [50000000, 40000000], "b": [0, 40000000] },
+            { "kind": "seg", "a": [0, 40000000], "b": [0, 0] }"#,
+    )
+}
+
+fn model_outline(pads: &[P], extra: &str, outline: &str) -> BoardModel {
     let nets: Vec<String> = (1..=12)
         .map(|n| format!(r#"{{ "code": {n}, "name": "N{n}" }}"#))
         .collect();
     let s = format!(
         r#"{{ "layers": [ {{ "id": 0, "name": "F.Cu" }}, {{ "id": 31, "name": "B.Cu" }} ],
           "nets": [ {} ],
-          "outline": [
-            {{ "kind": "seg", "a": [0, 0], "b": [50000000, 0] }},
-            {{ "kind": "seg", "a": [50000000, 0], "b": [50000000, 40000000] }},
-            {{ "kind": "seg", "a": [50000000, 40000000], "b": [0, 40000000] }},
-            {{ "kind": "seg", "a": [0, 40000000], "b": [0, 0] }} ],
+          "outline": [ {outline} ],
           "pads": [ {} ], {extra}
           "rules": {{ "default": {{ "clearance": 200000, "width": 250000 }}, "min_clearance": 0,
             "hole_clearance": 250000, "hole_to_hole": 250000, "edge_clearance": 500000 }} }}"#,
@@ -482,4 +489,26 @@ fn via_reduction_off_option() {
         "{}",
         d.via_reduction
     );
+}
+
+/// 40 x 40 mm body with a 180 degree arc (r 20 mm, centre (40, 20)) bulging to x = 60 mm in place of
+/// the right edge: with the arc collapsed to its chord the pocket x > 40 mm lies "outside".
+const POCKET_OUTLINE: &str = r#"{ "kind": "seg", "a": [0, 0], "b": [40000000, 0] },
+    { "kind": "arc", "start": [40000000, 0], "mid": [60000000, 20000000], "end": [40000000, 40000000] },
+    { "kind": "seg", "a": [40000000, 40000000], "b": [0, 40000000] },
+    { "kind": "seg", "a": [0, 40000000], "b": [0, 0] }"#;
+
+#[test]
+fn route_pad_in_arc_pocket_routes() {
+    for (ka, kb) in [(Kind::F, Kind::F), (Kind::B, Kind::B)] {
+        let m = model_outline(
+            &[p("A", 1, 50.0, 20.0, ka), p("B", 1, 10.0, 20.0, kb)],
+            "",
+            POCKET_OUTLINE,
+        );
+        let r = route(&m, &opts());
+        assert_eq!(r.routed, 1, "{:?}", r.connections);
+        assert_eq!(r.vias, 0);
+        clean(&m, &r);
+    }
 }

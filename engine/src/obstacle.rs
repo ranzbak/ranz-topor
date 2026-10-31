@@ -10,7 +10,7 @@
 //! so a query is O(1) on average, followed by an exact bounding-box filter.
 
 use crate::geom::prim::Aabb;
-use crate::geom::{dequantise, Grid, Prim, Seg, Skeleton, Vec2};
+use crate::geom::{dequantise, outline_prims, Grid, Prim, Seg, Skeleton, Vec2};
 use crate::model::{via_layers, BoardModel, Options};
 use crate::vias::{ViaSite, ViaSize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -474,8 +474,8 @@ impl ObstacleSet {
                 label: "edge".into(),
             };
             let mut f = Frag::default();
-            for o in &model.outline {
-                f.prim(&dequantise(o), 0.0, &m, true);
+            for o in &outline_prims(&model.outline) {
+                f.prim(o, 0.0, &m, true);
             }
             b.add(&all, &f);
         }
