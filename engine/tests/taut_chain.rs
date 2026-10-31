@@ -1,6 +1,6 @@
 use std::cell::Cell;
 use std::collections::HashSet;
-use topor_engine::geom::{bitangent, Aabb, Circle, Orient, Prim, Vec2};
+use topor_engine::geom::{bitangent, Aabb, Circle, Orient, Prim, Seg, Vec2};
 use topor_engine::model::{BoardModel, Options};
 use topor_engine::obstacle::{LayerObstacles, ObstacleSet};
 use topor_engine::taut::{chain_geometry, tauten, AnchorRef, DynObstacle, Env, TautError};
@@ -42,6 +42,8 @@ struct TestEnv {
     dyns: Vec<DynObstacle>,
     stack: Option<(AnchorRef, f64)>,
     flip: Option<Cell<u32>>,
+    /// Slot sides `(anchor, σ)` the wire's path passes anchors on (Fix-B1).
+    sides: Vec<(usize, Orient)>,
 }
 
 impl TestEnv {
@@ -51,6 +53,7 @@ impl TestEnv {
             dyns: Vec::new(),
             stack: None,
             flip: None,
+            sides: Vec::new(),
         }
     }
 }
@@ -100,6 +103,9 @@ impl Env for TestEnv {
     }
     fn query_grow(&self) -> f64 {
         self.set.query_grow()
+    }
+    fn slot_side(&self, a: usize) -> Option<Orient> {
+        self.sides.iter().find(|s| s.0 == a).map(|s| s.1)
     }
 }
 
@@ -402,5 +408,121 @@ fn wall_grazed_mid_span_fails_fast() {
             assert!(s.contains("nm"), "{s}");
         }
         other => panic!("{other:?}"),
+    }
+}
+
+// --- Fix-B1 (b): dyn penetrations never add own terminals or far adjacent anchors -------------
+
+/// Review §1.2 step 3 model: wire 0 (net 3) leaves its own start pad P (0, 0); wire 1's arc wraps
+/// P and sweeps across wire 0's exit. P is wire 0's terminal: it is never inserted, whatever the
+/// geometry says; the conflict is wire 1's (its stack at P must contain wire 0).
+#[test]
+fn own_terminal_pad_is_never_an_anchor() {
+    let mut e = TestEnv::new(&model(&[pad(NET, 0.0, 0.0, 800_000)], "", 200_000));
+    let (c60, s60) = (60f64.to_radians().cos(), 60f64.to_radians().sin());
+    let arc = topor_engine::geom::Arc::from_tangent_points(
+        v(0.0, 0.0),
+        1_200_000.0,
+        Orient::Ccw,
+        Vec2 {
+            x: 1_200_000.0 * c60,
+            y: -1_200_000.0 * s60,
+        },
+        Vec2 {
+            x: 1_200_000.0 * c60,
+            y: 1_200_000.0 * s60,
+        },
+    );
+    e.dyns.push(DynObstacle {
+        prim: Prim::Arc(arc),
+        width: W,
+        net: 2,
+        wire: 1,
+        anchor: Some(pad_ref(Orient::Ccw)),
+        adjacent: [None, None],
+    });
+    let c = tauten(v(0.0, 0.0), v(6.0, 0.0), vec![], &e).unwrap();
+    assert!(c.seq.iter().all(|a| a.anchor != 0), "{:?}", c.seq);
+    assert_eq!(c.pattern(), "S");
+}
+
+/// Wire 1's segment (5, -3) -> (5, 3) is tangent to its arcs at pads A (5.83, -3) and B (5.83, 3);
+/// wire 0's chord crosses it mid-span, 3 mm from either pad. Neither pad can express the detour:
+/// nothing is added (the conflict is settled on wire 1's turn), instead of a 6 mm loop via A/B.
+#[test]
+fn dyn_seg_crossed_mid_span_adds_no_far_anchor() {
+    let mut e = TestEnv::new(&model(
+        &[pad(2, 5.83, -3.0, 800_000), pad(2, 5.83, 3.0, 800_000)],
+        "",
+        200_000,
+    ));
+    e.dyns.push(DynObstacle {
+        prim: Prim::Seg(Seg {
+            a: v(5.0, -3.0),
+            b: v(5.0, 3.0),
+        }),
+        width: W,
+        net: 2,
+        wire: 1,
+        anchor: None,
+        adjacent: [
+            Some(AnchorRef {
+                anchor: 0,
+                sigma: Orient::Cw,
+            }),
+            Some(AnchorRef {
+                anchor: 1,
+                sigma: Orient::Cw,
+            }),
+        ],
+    });
+    let c = tauten(v(0.0, 0.0), v(10.0, 0.0), vec![], &e).unwrap();
+    assert!(c.seq.is_empty(), "{:?}", c.seq);
+}
+
+/// The same segment crossed next to pad A (within A's stack radius): A is the detour.
+#[test]
+fn dyn_seg_crossed_at_its_anchor_adds_that_anchor() {
+    let mut e = TestEnv::new(&model(
+        &[pad(2, 5.83, -3.0, 800_000), pad(2, 5.83, 3.0, 800_000)],
+        "",
+        200_000,
+    ));
+    e.dyns.push(DynObstacle {
+        prim: Prim::Seg(Seg {
+            a: v(5.0, -3.0),
+            b: v(5.0, 3.0),
+        }),
+        width: W,
+        net: 2,
+        wire: 1,
+        anchor: None,
+        adjacent: [
+            Some(AnchorRef {
+                anchor: 0,
+                sigma: Orient::Cw,
+            }),
+            Some(AnchorRef {
+                anchor: 1,
+                sigma: Orient::Cw,
+            }),
+        ],
+    });
+    let c = tauten(v(0.0, -2.9), v(10.0, -2.9), vec![], &e).unwrap();
+    assert_eq!(c.seq.iter().map(|a| a.anchor).collect::<Vec<_>>(), vec![0]);
+}
+
+// --- Fix-B1 (c): a tie anchor re-added by the fix-up loop takes the slot side -----------------
+
+#[test]
+fn tie_anchor_is_added_on_the_slot_side() {
+    let mut e = one_pad(5.0, 0.0, 2);
+    for (sigma, sign) in [(Orient::Cw, 1.0), (Orient::Ccw, -1.0)] {
+        e.sides = vec![(0, sigma)];
+        let c = tauten(v(0.0, 0.0), v(10.0, 0.0), vec![], &e).unwrap();
+        assert_eq!(c.seq, vec![pad_ref(sigma)]);
+        assert_eq!(c.pattern(), "SAS");
+        let Prim::Arc(a) = c.prims[1] else { panic!() };
+        assert!(a.mid().y * sign > 0.0, "{sigma:?}: mid {:?}", a.mid());
     }
 }

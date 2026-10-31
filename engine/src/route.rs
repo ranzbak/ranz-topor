@@ -30,7 +30,7 @@ use crate::negotiate::{
     PRESENT_OVERUSE,
 };
 use crate::obstacle::{LayerObstacles, ObstacleSet, TerminalObstacle};
-use crate::relax::{corridor_static, relax, relax_zs, ZeroSlack};
+use crate::relax::{corridor_static, relax, relax_slots, slot_nesting, ZeroSlack};
 use crate::search::{
     default_expansion_cap, search, tier_weight, SearchOutcome, SearchParams, SlotPath,
 };
@@ -270,13 +270,7 @@ fn path_crossings(g: &RouteGraph, c: usize) -> Option<Vec<Crossing>> {
             .zip(faces)
             .map(|(&(e, slot), &prev)| {
                 let ge = &g.edges[e];
-                // Entering from the face left of a->b means travelling clockwise of a->b:
-                // `b` is then on the left of the direction of travel.
-                let (left, right) = if ge.faces[0] == Some(prev) {
-                    (ge.b, ge.a)
-                } else {
-                    (ge.a, ge.b)
-                };
+                let (left, right) = g.crossing_lr(e, prev);
                 let from_a = (slot as f64 + 1.0) / (ge.cross.len() as f64 + 1.0);
                 let t = if left == ge.a { from_a } else { 1.0 - from_a };
                 Crossing { left, right, t }
@@ -344,10 +338,9 @@ fn metrize_zs(cx: &Ctx, g: &RouteGraph, routed: &[usize], zs: Option<&ZsSpec>) -
     if n == 0 {
         return out;
     }
-    let mut orders: HashMap<u32, HashMap<AnchorRef, Vec<usize>>> = HashMap::new();
-    for l in wires.iter().map(|w| w.layer).collect::<BTreeSet<_>>() {
-        orders.insert(l, stack_order(&sketches, cx.ls));
-    }
+    // Stacks from the slot topology (Fix-B1 (a)): wire k = live_of[k] = conn id in `g`.
+    let conn_of: Vec<usize> = live_of.iter().map(|&i| cx.conns[i].id).collect();
+    let nesting = slot_nesting(g, &conn_of);
     if Instant::now() >= cx.deadline {
         out.timed_out = true;
         return out;
@@ -359,11 +352,11 @@ fn metrize_zs(cx: &Ctx, g: &RouteGraph, routed: &[usize], zs: Option<&ZsSpec>) -
             walls: z.walls.clone(),
         })
     });
-    let r = relax_zs(
+    let r = relax_slots(
         &wires,
         &sketches,
         cx.obs,
-        &orders,
+        &nesting,
         cx.opts,
         cx.deadline,
         zsw.as_ref(),

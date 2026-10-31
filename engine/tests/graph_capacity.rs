@@ -544,3 +544,53 @@ fn terminal_vertices_carry_owner_and_nets() {
     assert_eq!(b.g.verts[v].anchor, None);
     assert_eq!(b.g.verts[v].r, 0.0);
 }
+
+// --- Fix-B1 (a): slot nesting from the graph ---------------------------------------------------
+
+#[test]
+fn slot_nesting_follows_slot_order() {
+    use topor_engine::relax::slot_nesting;
+    use topor_engine::sketch::AnchorRef;
+    let (b, _) = two_pads_b(2.6);
+    let mut g = b.g;
+    let v = vert_of_label_g(&g, &b.obs, &b.ls, "pad:a:1");
+    let (_, fs) = fan_edges(&g, v);
+    let shared = g.faces[fs[0]]
+        .e
+        .iter()
+        .copied()
+        .find(|e| g.edges[*e].faces.contains(&Some(fs[1])))
+        .unwrap();
+    let goal = g.faces[fs[1]]
+        .v
+        .iter()
+        .copied()
+        .find(|&x| x != g.edges[shared].a && x != g.edges[shared].b)
+        .unwrap();
+    // conn 7 first, conn 8 inserted at slot 0 shifts 7 to slot 1: 8 is nearer edge end `a`
+    g.insert_path(7, v, goal, &[(shared, 0)], &[fs[0], fs[1]], W, C);
+    g.insert_path(8, v, goal, &[(shared, 0)], &[fs[0], fs[1]], W, C);
+    // wires: k = 0 is conn 7, k = 1 is conn 8
+    let n = slot_nesting(&g, &[7, 8]);
+    let ge = &g.edges[shared];
+    assert!(ge.a == v || ge.b == v, "shared edge is incident to v");
+    let av = g.verts[v].anchor.expect("pad vertex is an anchor");
+    // the wire nearer v on the edge is inside the other one at v, on the side v is passed on
+    let (inner, outer) = if ge.a == v { (1usize, 0usize) } else { (0, 1) };
+    let side = n.sides[&(outer, av)];
+    assert_eq!(n.sides[&(inner, av)], side);
+    let key = |k: usize| {
+        (
+            k,
+            AnchorRef {
+                anchor: av,
+                sigma: side,
+            },
+        )
+    };
+    assert_eq!(n.inner[&key(outer)], vec![vec![inner]]);
+    assert_eq!(n.inner[&key(inner)], vec![Vec::<usize>::new()]);
+    // a conn unknown to the wire list (capacity-only entry) is skipped
+    let n = slot_nesting(&g, &[7]);
+    assert_eq!(n.inner[&key(0)].concat(), Vec::<usize>::new());
+}

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use topor_engine::geom::{copper_gap, Orient, Prim, Track, Vec2};
 use topor_engine::model::{BoardModel, Options};
 use topor_engine::obstacle::ObstacleSet;
-use topor_engine::relax::{relax, RelaxResult, Stacks};
+use topor_engine::relax::{relax, relax_slots, RelaxResult, SlotNesting, Stacks};
 use topor_engine::sketch::{AnchorRef, Sketch};
 use topor_engine::taut::Chain;
 use topor_engine::wires::{Terminal, Wire};
@@ -293,5 +293,68 @@ fn failed_wire_does_not_block_others() {
     let r = run(&wires, &[vec![], vec![]], &obs, &orders(&[]));
     assert!(r.chains[0].is_err());
     assert!(r.chains[1].is_ok());
+    assert!(r.converged);
+}
+
+// --- Fix-B1 (a): membership from slots, not "every listed wire" ------------------------------
+
+type Inner = ((usize, AnchorRef), Vec<Vec<usize>>);
+
+fn nesting(inner: &[Inner]) -> SlotNesting {
+    SlotNesting {
+        inner: inner.iter().cloned().collect(),
+        sides: HashMap::new(),
+    }
+}
+
+#[test]
+fn slot_stacks_count_only_wires_in_inner_slots() {
+    let (obs, wires, _, o) = two_wire_setup("");
+    let a = aref(0, Orient::Ccw);
+    // old mode: both listed, both members: wire 1 is stacked over wire 0
+    let old = Stacks::new(o[&0].clone());
+    assert!(near(old.radius(a, 1, &wires, &obs), 1_260_000.0, 1.0));
+    // slot mode, wire 0 in the slot between the pad and wire 1 on one fan edge
+    let s = Stacks::from_slots(&nesting(&[((1, a), vec![vec![0]])]));
+    assert!(near(s.radius(a, 0, &wires, &obs), 730_000.0, 1.0));
+    assert!(near(s.radius(a, 1, &wires, &obs), 1_260_000.0, 1.0));
+    // slot mode, wire 0 listed at the anchor (crosses another fan edge) but not inside wire 1
+    let s = Stacks::from_slots(&nesting(&[((1, a), vec![vec![]]), ((0, a), vec![vec![]])]));
+    assert!(near(s.radius(a, 1, &wires, &obs), 805_000.0, 1.0));
+    assert!(near(s.radius(a, 0, &wires, &obs), 730_000.0, 1.0));
+    // the radius is the max over fan edges, not the stack of their union
+    let s = Stacks::from_slots(&nesting(&[((1, a), vec![vec![0], vec![]])]));
+    assert!(near(s.radius(a, 1, &wires, &obs), 1_260_000.0, 1.0));
+}
+
+#[test]
+fn slot_membership_follows_the_inner_wires_bends() {
+    // wire 0 is in wire 1's slot: it counts until its own tauten shows no bend at the pad (21 §5
+    // membership), and counts again once it bends there (on either side)
+    let (obs, wires, _, _) = two_wire_setup("");
+    let a = aref(0, Orient::Ccw);
+    let mut s = Stacks::from_slots(&nesting(&[((1, a), vec![vec![0]])]));
+    assert!(near(s.radius(a, 1, &wires, &obs), 1_260_000.0, 1.0));
+    s.set_members(0, &[]);
+    assert!(near(s.radius(a, 1, &wires, &obs), 805_000.0, 1.0));
+    s.set_members(0, &[aref(0, Orient::Cw)]);
+    assert!(near(s.radius(a, 1, &wires, &obs), 1_260_000.0, 1.0));
+}
+
+#[test]
+fn relax_slots_stacks_the_outer_wire() {
+    let (obs, wires, seqs, _) = two_wire_setup("");
+    let a = aref(0, Orient::Ccw);
+    let sk: Vec<Sketch> = seqs
+        .iter()
+        .enumerate()
+        .map(|(i, s)| sketch(i, s.clone()))
+        .collect();
+    let n = nesting(&[((1, a), vec![vec![0]])]);
+    let r = relax_slots(&wires, &sk, &obs, &n, &Options::default(), far(), None);
+    let c0 = r.chains[0].as_ref().unwrap();
+    let c1 = r.chains[1].as_ref().unwrap();
+    assert!(near(arcs(c0)[0].0, 730_000.0, 1.0), "{:?}", arcs(c0));
+    assert!(near(arcs(c1)[0].0, 1_260_000.0, 1.0), "{:?}", arcs(c1));
     assert!(r.converged);
 }

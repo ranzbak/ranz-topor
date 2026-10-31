@@ -195,3 +195,89 @@ fn sketch_is_deterministic() {
         assert_eq!(x.crossings, y.crossings);
     }
 }
+
+// --- Fix-B1 (c): a portal vertex exactly on the string is a bend on its portal side -----------
+
+#[test]
+fn funnel_tie_right_vertex_bends_cw() {
+    // start / vertex / goal collinear; the touched vertex is the portal's right vertex
+    let b = funnel(mm(0., 0.), mm(6., 0.), &portals(&[((3., 1.), (3., 0.))]));
+    assert_eq!(b, vec![(0, false, Orient::Cw)]);
+}
+
+#[test]
+fn funnel_tie_left_vertex_bends_ccw() {
+    let b = funnel(mm(0., 0.), mm(6., 0.), &portals(&[((3., 0.), (3., -1.))]));
+    assert_eq!(b, vec![(0, true, Orient::Ccw)]);
+}
+
+#[test]
+fn funnel_tie_through_two_collinear_vertices() {
+    // a pin row: both touched vertices become bends, each on its own portal side
+    let b = funnel(
+        mm(0., 0.),
+        mm(9., 0.),
+        &portals(&[((3., 1.), (3., 0.)), ((6., 0.), (6., -1.))]),
+    );
+    assert_eq!(b, vec![(0, false, Orient::Cw), (1, true, Orient::Ccw)]);
+}
+
+/// Pad at (5, 0) exactly on the chord (0, 0) -> (10, 0); a helper terminal at (5, -2) gives the
+/// CDT an edge from the pad downwards which the slot path "crosses" at the tie.
+fn tie_layer() -> (LayerSketch, usize, usize) {
+    let ws = vec![
+        wire(0, &[(0., 0.), (10., 0.)]),
+        wire(1, &[(5., -2.), (5., -3.)]),
+    ];
+    let ls = layer_sketch(0.0, &ws);
+    let pv = ls.vertex_at(mm(5., 0.)).unwrap();
+    let below = ls.vertex_at(mm(5., -2.)).unwrap();
+    assert!(ls.cdt.is_edge(pv, below), "pad-below is a CDT edge");
+    (ls, pv, below)
+}
+
+#[test]
+fn sketch_tie_keeps_bend_on_slot_side() {
+    use topor_engine::cdt::Crossing;
+    use topor_engine::sketch::sketch_from_crossings;
+    let (ls, pv, below) = tie_layer();
+    let a = pad_anchor(&ls);
+    // pad on the left of travel (slot between pad and the vertex below): Ccw
+    let s = sketch_from_crossings(
+        0,
+        mm(0., 0.),
+        mm(10., 0.),
+        vec![Crossing {
+            left: pv,
+            right: below,
+            t: 0.5,
+        }],
+        &ls,
+    );
+    assert_eq!(
+        s.seq,
+        vec![AnchorRef {
+            anchor: a,
+            sigma: Orient::Ccw
+        }]
+    );
+    // the same edge entered from the other face: pad on the right: Cw
+    let s = sketch_from_crossings(
+        0,
+        mm(0., 0.),
+        mm(10., 0.),
+        vec![Crossing {
+            left: below,
+            right: pv,
+            t: 0.5,
+        }],
+        &ls,
+    );
+    assert_eq!(
+        s.seq,
+        vec![AnchorRef {
+            anchor: a,
+            sigma: Orient::Cw
+        }]
+    );
+}

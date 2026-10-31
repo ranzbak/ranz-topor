@@ -75,6 +75,11 @@ pub trait Env {
     fn stack_radius(&self, a: AnchorRef) -> f64;
     /// Bound on `rho − r_core` and on every `dyn_clearance` (query pre-grow).
     fn query_grow(&self) -> f64;
+    /// Side on which this wire's slot path passes anchor `a` (Fix-B1 (c)): an anchor the fix-up
+    /// loop adds takes this σ instead of the geometric guess, which is a coin toss on a tie.
+    fn slot_side(&self, _a: usize) -> Option<Orient> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -356,22 +361,26 @@ fn core_prim_dist(c: &Core, q: &Prim) -> f64 {
     }
 }
 
-/// Anchors already in the sequence (by index or bit-equal centre).
+/// Anchors already in the sequence (by index or bit-equal centre), plus the chain's own
+/// terminals: an anchor centred on `start` or `goal` is never a candidate (Fix-B1 (b)).
 #[derive(Clone)]
 struct Members {
     idx: HashSet<usize>,
     centres: HashSet<(u64, u64)>,
+    terms: [(u64, u64); 2],
 }
 
 impl Members {
-    fn new(seq: &[AnchorRef], l: &LayerObstacles) -> Self {
+    fn new(seq: &[AnchorRef], l: &LayerObstacles, start: Vec2, goal: Vec2) -> Self {
         Members {
             idx: seq.iter().map(|a| a.anchor).collect(),
             centres: seq.iter().map(|a| key(l.anchors[a.anchor].c)).collect(),
+            terms: [key(start), key(goal)],
         }
     }
     fn has(&self, a: usize, l: &LayerObstacles) -> bool {
-        self.idx.contains(&a) || self.centres.contains(&key(l.anchors[a].c))
+        let c = key(l.anchors[a].c);
+        self.idx.contains(&a) || self.centres.contains(&c) || self.terms.contains(&c)
     }
 }
 
@@ -424,9 +433,24 @@ fn penetrations(prim: &Prim, mem: &Members, env: &dyn Env) -> Result<Vec<usize>,
             Prim::Seg(_) => d.adjacent.iter().flatten().copied().collect(),
         };
         for a in cands {
-            if !mem.has(a.anchor, l) && !env.exempt_anchor(a.anchor) {
-                out.push(a.anchor);
+            if mem.has(a.anchor, l) || env.exempt_anchor(a.anchor) {
+                continue;
             }
+            // A penetrated segment names its end anchors only when the conflict is at one of
+            // them (within this wire's ring there plus the query band); a mid-span crossing is
+            // settled on the other wire's turn, against this wire's arc or near this wire's own
+            // anchors — never by a detour to a far anchor (Fix-B1 (b), M1 F5 fan rule).
+            if matches!(d.prim, Prim::Seg(_)) {
+                let sigma = env.slot_side(a.anchor).unwrap_or(a.sigma);
+                let ring = env.stack_radius(AnchorRef {
+                    anchor: a.anchor,
+                    sigma,
+                });
+                if point_prim(l.anchors[a.anchor].c, prim) >= ring + env.query_grow() {
+                    continue;
+                }
+            }
+            out.push(a.anchor);
         }
     }
     out.sort_unstable();
@@ -454,7 +478,7 @@ fn drop_pass(start: Vec2, goal: Vec2, seq: &mut Vec<AnchorRef>, env: &dyn Env) -
     let n = seq.len();
     let r: Vec<f64> = seq.iter().map(|a| env.stack_radius(*a)).collect();
     let ctr = |i: usize| l.anchors[seq[i].anchor].c;
-    let mut mem = Members::new(seq, l);
+    let mut mem = Members::new(seq, l, start, goal);
     let mut kept: Vec<usize> = Vec::with_capacity(n);
     let mut dropped = false;
     for i in 0..n {
@@ -591,9 +615,14 @@ fn sigma_for(prim: &Prim, c: Vec2, p: Vec2, t: Vec2) -> Orient {
 }
 
 /// `(seq position, path key, anchor, σ)` for every penetration of the current chain.
-fn add_pass(chain: &Chain, env: &dyn Env) -> Result<Vec<(usize, f64, usize, Orient)>, TautError> {
+fn add_pass(
+    chain: &Chain,
+    start: Vec2,
+    goal: Vec2,
+    env: &dyn Env,
+) -> Result<Vec<(usize, f64, usize, Orient)>, TautError> {
     let l = env.layer();
-    let mem = Members::new(&chain.seq, l);
+    let mem = Members::new(&chain.seq, l, start, goal);
     let arcs = arc_members(chain, env);
     let mut out = Vec::new();
     let mut after = 0usize; // seq entries before the current prim
@@ -602,7 +631,9 @@ fn add_pass(chain: &Chain, env: &dyn Env) -> Result<Vec<(usize, f64, usize, Orie
         for a in penetrations(prim, &mem, env)? {
             let c = l.anchors[a].c;
             let (pt, t, frac) = closest(prim, c);
-            let sg = sigma_for(prim, c, pt, t);
+            let sg = env
+                .slot_side(a)
+                .unwrap_or_else(|| sigma_for(prim, c, pt, t));
             let pos = match arc_seq {
                 Some(k) => {
                     if frac < 0.5 {
@@ -643,7 +674,7 @@ pub fn tauten(
             seq = cur;
             continue;
         }
-        let adds = add_pass(&chain, env)?;
+        let adds = add_pass(&chain, start, goal, env)?;
         if adds.is_empty() {
             return Ok(chain);
         }

@@ -5,7 +5,8 @@
 //! a wire needs at `(anchor, σ)` given the wires nested inside it. Every neighbour lookup goes
 //! through a `Grid`; cost per iteration is O(Σ prims · passes · q). Iteration cap and deadline
 //! bound the run; no randomness and no hash-order dependence (candidates are sorted).
-use crate::geom::{Aabb, Grid, Prim, Vec2};
+use crate::geom::{Aabb, Grid, Orient, Prim, Vec2};
+use crate::graph::RouteGraph;
 use crate::model::Options;
 use crate::obstacle::{LayerObstacles, ObsKind, ObstacleSet};
 use crate::sketch::Sketch;
@@ -66,11 +67,107 @@ fn rho_anchor_zs(
     }
 }
 
-/// Stack state of one layer: nesting order (from the sketch) and current membership.
+/// Nesting read off the slot paths (Fix-B1 (a), design note `m2-metrize-design.md` §1.1): the
+/// slot index of a crossing on an edge incident to an anchor is the exact number of wires between
+/// the anchor and the crossing wire there.
+#[derive(Clone, Debug, Default)]
+pub struct SlotNesting {
+    /// `(wire k, (anchor, σ))` -> for every fan edge of the anchor that `k` crosses with the
+    /// anchor on side σ, the wires between the anchor and `k`, innermost first.
+    pub inner: HashMap<(usize, AnchorRef), Vec<Vec<usize>>>,
+    /// `(wire k, anchor)` -> side on which `k`'s slot path passes the anchor; absent when `k`
+    /// crosses no fan edge of it, or passes it on both sides.
+    pub sides: HashMap<(usize, usize), Orient>,
+}
+
+/// [`SlotNesting`] of the wires `conn_of[k]` (graph connection id of wire `k`) from their paths in
+/// `g`. Entries of other connections (capacity-only inserts, wires not listed) are skipped.
+/// O(Σ occupancy · n_max).
+pub fn slot_nesting(g: &RouteGraph, conn_of: &[usize]) -> SlotNesting {
+    let wire_of: HashMap<usize, usize> = conn_of.iter().enumerate().map(|(k, &c)| (c, k)).collect();
+    let mut out = SlotNesting::default();
+    let mut both: BTreeSet<(usize, usize)> = BTreeSet::new();
+    for (k, &conn) in conn_of.iter().enumerate() {
+        let Some((cross, faces, _)) = g.path_of(conn) else {
+            continue;
+        };
+        if faces.len() != cross.len() + 1 {
+            continue;
+        }
+        for (&(e, slot), &prev) in cross.iter().zip(faces) {
+            let ge = &g.edges[e];
+            let (left, right) = g.crossing_lr(e, prev);
+            let wires_of = |range: &mut dyn Iterator<Item = usize>| -> Vec<usize> {
+                range
+                    .filter_map(|i| wire_of.get(&ge.cross[i].conn).copied())
+                    .collect()
+            };
+            // slots nearer `a` than `slot`, nearest first / nearer `b`, nearest first
+            let near_a = wires_of(&mut (0..slot.min(ge.cross.len())));
+            let near_b = wires_of(&mut (slot + 1..ge.cross.len()).rev());
+            for (v, sigma) in [(left, Orient::Ccw), (right, Orient::Cw)] {
+                let Some(anchor) = g.verts[v].anchor else {
+                    continue;
+                };
+                let list = if v == ge.a { &near_a } else { &near_b };
+                out.inner
+                    .entry((k, AnchorRef { anchor, sigma }))
+                    .or_default()
+                    .push(list.clone());
+                match out.sides.insert((k, anchor), sigma) {
+                    Some(s) if s != sigma => {
+                        both.insert((k, anchor));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    for key in both {
+        out.sides.remove(&key);
+    }
+    out
+}
+
+/// 21 §5 fold: radius of `wire` at anchor `a` over the wires `inner` nested inside it, innermost
+/// first: `R_j = max(ρ_j, max_{i<j}(R_i + w_i/2 + c(i,j) + w_j/2))`. O(|inner|²).
+fn stacked_radius(
+    inner: &[usize],
+    wire: usize,
+    a: usize,
+    wires: &[Wire],
+    obs: &ObstacleSet,
+    zs: Option<&ZeroSlack>,
+) -> f64 {
+    let mut done: Vec<(usize, f64)> = Vec::with_capacity(inner.len() + 1);
+    for &j in inner.iter().chain(std::iter::once(&wire)) {
+        let mut r = rho_anchor_zs(obs, wires, j, a, zs);
+        for &(i, ri) in &done {
+            let need = ri
+                + 0.5 * wires[i].width as f64
+                + pair_clearance(obs, wires, i, j)
+                + 0.5 * wires[j].width as f64;
+            r = r.max(need);
+        }
+        done.push((j, r));
+    }
+    done.last().map(|x| x.1).unwrap_or(0.0)
+}
+
+/// Stack state of one layer. Two modes: hand sketches (`new`: nesting order per `(anchor, σ)`
+/// from `stack_order`, membership = wires whose current chain bends there, initially every listed
+/// wire) and slot paths (`from_slots`: the wires that can be inside `k` at `(anchor, σ)` are read
+/// off the slot indices, per fan edge; of those, the ones whose current chain bends at the anchor
+/// count, every one of them before its first tauten). One arc has one radius, so an inner wire
+/// running straight past the anchor must not inflate the ring (a header pin gap would not fit).
 pub struct Stacks {
     pub order: HashMap<AnchorRef, Vec<usize>>,
     members: HashMap<AnchorRef, BTreeSet<usize>>,
     by_wire: HashMap<usize, Vec<AnchorRef>>,
+    slots: Option<SlotNesting>,
+    /// Slot mode: anchors (by index, either σ) at which each tautened wire's chain has an arc;
+    /// a wire without an entry has not been tautened yet and counts everywhere (conservative).
+    bends: HashMap<usize, BTreeSet<usize>>,
 }
 
 impl Stacks {
@@ -88,7 +185,25 @@ impl Stacks {
             order,
             members,
             by_wire,
+            slots: None,
+            bends: HashMap::new(),
         }
+    }
+
+    /// Slot mode (Fix-B1 (a)).
+    pub fn from_slots(nesting: &SlotNesting) -> Stacks {
+        Stacks {
+            order: HashMap::new(),
+            members: HashMap::new(),
+            by_wire: HashMap::new(),
+            slots: Some(nesting.clone()),
+            bends: HashMap::new(),
+        }
+    }
+
+    /// Side on which `wire`'s slot path passes anchor `a` (slot mode only).
+    pub fn slot_side(&self, wire: usize, a: usize) -> Option<Orient> {
+        self.slots.as_ref().and_then(|s| s.sides.get(&(wire, a)).copied())
     }
 
     /// Stack radius of `wire` at `a` (21 §5), counting only current members nested inside it.
@@ -106,6 +221,25 @@ impl Stacks {
         obs: &ObstacleSet,
         zs: Option<&ZeroSlack>,
     ) -> f64 {
+        if let Some(n) = &self.slots {
+            // Max over the fan edges (nested wires in different sectors do not stack), counting
+            // the inner wires whose current chain bends at the anchor (21 §5 membership).
+            let bends = |j: usize| self.bends.get(&j).is_none_or(|b| b.contains(&a.anchor));
+            return n
+                .inner
+                .get(&(wire, a))
+                .map(|lists| {
+                    lists
+                        .iter()
+                        .map(|l| {
+                            let l: Vec<usize> = l.iter().copied().filter(|&j| bends(j)).collect();
+                            stacked_radius(&l, wire, a.anchor, wires, obs, zs)
+                        })
+                        .fold(0.0, f64::max)
+                })
+                .filter(|&r| r > 0.0)
+                .unwrap_or_else(|| rho_anchor_zs(obs, wires, wire, a.anchor, zs));
+        }
         let listed = self.order.get(&a).map(Vec::as_slice).unwrap_or(&[]);
         let pos = |w: usize| -> (usize, usize) {
             match listed.iter().position(|&x| x == w) {
@@ -113,7 +247,6 @@ impl Stacks {
                 None => (listed.len(), w),
             }
         };
-        let rho = |w: usize| rho_anchor_zs(obs, wires, w, a.anchor, zs);
         let mine = pos(wire);
         let mut inner: Vec<usize> = self
             .members
@@ -126,23 +259,16 @@ impl Stacks {
             })
             .unwrap_or_default();
         inner.sort_by_key(|&w| pos(w));
-        let mut done: Vec<(usize, f64)> = Vec::with_capacity(inner.len() + 1);
-        for &j in inner.iter().chain(std::iter::once(&wire)) {
-            let mut r = rho(j);
-            for &(i, ri) in &done {
-                let need = ri
-                    + 0.5 * wires[i].width as f64
-                    + pair_clearance(obs, wires, i, j)
-                    + 0.5 * wires[j].width as f64;
-                r = r.max(need);
-            }
-            done.push((j, r));
-        }
-        done.last().map(|x| x.1).unwrap_or(0.0)
+        stacked_radius(&inner, wire, a.anchor, wires, obs, zs)
     }
 
-    /// Replace the memberships of `wire` with `arcs`.
+    /// Replace the memberships of `wire` with `arcs` (the anchors its chain bends at).
     pub fn set_members(&mut self, wire: usize, arcs: &[AnchorRef]) {
+        if self.slots.is_some() {
+            self.bends
+                .insert(wire, arcs.iter().map(|a| a.anchor).collect());
+            return;
+        }
         if let Some(old) = self.by_wire.remove(&wire) {
             for a in old {
                 if let Some(m) = self.members.get_mut(&a) {
@@ -255,6 +381,9 @@ impl Env for WireEnv<'_> {
     fn query_grow(&self) -> f64 {
         self.obs.query_grow()
     }
+    fn slot_side(&self, a: usize) -> Option<Orient> {
+        self.stacks.slot_side(self.k, a)
+    }
 }
 
 /// Dynamic obstacles of a finished chain (prims ↔ seq mapping from `arc_members`).
@@ -356,6 +485,34 @@ pub fn relax_zs(
     deadline: Instant,
     zs: Option<&ZeroSlack>,
 ) -> RelaxResult {
+    let stacks = |l: u32| Stacks::new(orders.get(&l).cloned().unwrap_or_default());
+    relax_impl(wires, sketches, obs, &stacks, opts, deadline, zs)
+}
+
+/// [`relax_zs`] for slot paths: stacks from [`SlotNesting`] (wire ids = indices into `wires`,
+/// anchors per layer, so one nesting serves every layer).
+pub fn relax_slots(
+    wires: &[Wire],
+    sketches: &[Sketch],
+    obs: &ObstacleSet,
+    nesting: &SlotNesting,
+    opts: &Options,
+    deadline: Instant,
+    zs: Option<&ZeroSlack>,
+) -> RelaxResult {
+    let stacks = |_: u32| Stacks::from_slots(nesting);
+    relax_impl(wires, sketches, obs, &stacks, opts, deadline, zs)
+}
+
+fn relax_impl(
+    wires: &[Wire],
+    sketches: &[Sketch],
+    obs: &ObstacleSet,
+    stacks_of: &dyn Fn(u32) -> Stacks,
+    opts: &Options,
+    deadline: Instant,
+    zs: Option<&ZeroSlack>,
+) -> RelaxResult {
     let n = wires.len();
     let mut chains: Vec<Result<Chain, TautError>> = (0..n)
         .map(|_| Err(TautError::Sleeve("not relaxed".into())))
@@ -365,9 +522,7 @@ pub fn relax_zs(
     let mut stacks: HashMap<u32, Stacks> = HashMap::new();
     let mut dyns: HashMap<u32, DynLayer> = HashMap::new();
     for w in wires {
-        stacks
-            .entry(w.layer)
-            .or_insert_with(|| Stacks::new(orders.get(&w.layer).cloned().unwrap_or_default()));
+        stacks.entry(w.layer).or_insert_with(|| stacks_of(w.layer));
         dyns.entry(w.layer)
             .or_insert_with(|| DynLayer::new(obs.query_grow()));
     }

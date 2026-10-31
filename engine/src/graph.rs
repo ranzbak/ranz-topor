@@ -297,6 +297,18 @@ impl RouteGraph {
         &self.faces_of_vertex[v]
     }
 
+    /// `(left, right)` vertices of edge `e` for a path crossing it out of face `prev`: entering
+    /// from the face left of `a -> b` means travelling clockwise of `a -> b`, so `b` is then on
+    /// the left of the direction of travel.
+    pub fn crossing_lr(&self, e: usize, prev: usize) -> (usize, usize) {
+        let ge = &self.edges[e];
+        if ge.faces[0] == Some(prev) {
+            (ge.b, ge.a)
+        } else {
+            (ge.a, ge.b)
+        }
+    }
+
     /// Both faces inside the outline, no wire running along it, and (constraint edges) `net`
     /// is an owner net.
     pub fn passable(&self, e: usize, net: i32) -> bool {

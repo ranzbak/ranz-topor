@@ -215,7 +215,9 @@ fn prev_of(ch: &VecDeque<Ent>, apex: Vec2) -> Vec2 {
 /// Funnel (11 §2 step 4, Lee-Preparata) over portals `(left, right)` seen in the direction of
 /// travel; returns interior vertices `(portal index, is_left, σ)`. A left bend has the
 /// obstacle on the left (`Ccw`), a right bend on the right (`Cw`). Each portal vertex is pushed
-/// once and popped at most once: O(k).
+/// once and popped at most once: O(k). A portal vertex exactly on the string (a collinear tie,
+/// Fix-B1 (c)) is kept on its chain and becomes a bend on its portal side: the slot path passes
+/// it on that side, and an inflated anchor on the string is never slack.
 pub fn funnel(start: Vec2, goal: Vec2, portals: &[(Vec2, Vec2)]) -> Vec<(usize, bool, Orient)> {
     let k = portals.len();
     let mut out = Vec::new();
@@ -232,7 +234,7 @@ pub fn funnel(start: Vec2, goal: Vec2, portals: &[(Vec2, Vec2)]) -> Vec<(usize, 
         // right vertex
         if r != apex && right.back().is_none_or(|e| e.0 != r) {
             while !right.is_empty()
-                && cross3(prev_of(&right, apex), right.back().unwrap().0, r) >= 0.0
+                && cross3(prev_of(&right, apex), right.back().unwrap().0, r) > 0.0
             {
                 right.pop_back();
                 steps += 1;
@@ -252,7 +254,7 @@ pub fn funnel(start: Vec2, goal: Vec2, portals: &[(Vec2, Vec2)]) -> Vec<(usize, 
         }
         // left vertex
         if l != apex && left.back().is_none_or(|e| e.0 != l) {
-            while !left.is_empty() && cross3(prev_of(&left, apex), left.back().unwrap().0, l) <= 0.0
+            while !left.is_empty() && cross3(prev_of(&left, apex), left.back().unwrap().0, l) < 0.0
             {
                 left.pop_back();
                 steps += 1;
