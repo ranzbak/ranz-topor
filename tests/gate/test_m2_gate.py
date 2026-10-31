@@ -77,5 +77,8 @@ def test_m2_router_other_boards_complete(board, tmp_path):
     print(f"GATE-INFO {board}: routed {rt['routed']}/{rt['connections']} failed {rt['failed']} "
           f"drc_new={r['routed_drc']['routing_new']} router_s={r['router_s']}")
     assert r["routed_drc"]["routing_new"] == 0
-    assert r["router_s"] <= 65.0  # anytime: wall_clock_s 60 plus the final metrization/self-check pass
+    if board == "dcsgonebadge":  # M3-R13 (user): dcsgonebadge info only, robustness board
+        print(f"GATE-INFO {board} router_s={r['router_s']} (<=65: {r['router_s'] <= 65.0})")
+    else:
+        assert r["router_s"] <= 65.0  # anytime: wall_clock_s 60 plus the final metrization/self-check pass
     assert_unchanged(src.parent, hashes)

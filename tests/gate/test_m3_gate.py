@@ -76,14 +76,24 @@ def test_m3_gate_wiccon(engine, tmp_path):
 @pytest.mark.gate
 @pytest.mark.parametrize("board", ["dcsgonebadge"])
 def test_m3_router_other_boards_complete(board, tmp_path):
-    """Informational: must complete, no new routing DRC, anytime wall clock respected."""
+    """Informational (M3-R13 (user): dcsgonebadge info only, robustness board).
+
+    Asserted: no crash/panic, the run ends within the timeout and returns an anytime result
+    (report present; timed_out may be true), no routing violation from router copper
+    (routing_new == 0 against the ripped-board baseline). router_s <= 65 and the routed count
+    are printed info lines, not assertions.
+    """
     src = BENCH_BOARDS[board]
     hashes = sha256_tree(src.parent)
     r = run_bench(board, tmp_path, router=route_router, rip="all", threads=4,
                   options={"wall_clock_s": 60, "partial_routes": False})
-    rt = r["route"]
-    print(f"GATE-INFO M3 {board}: routed {rt['routed']}/{rt['connections']} failed {rt['failed']} "
-          f"drc_new={r['routed_drc']['routing_new']} router_s={r['router_s']}")
+    rt, rep, dt, pe = r["route"], r["router_report"], r.get("detour") or {}, r["preexisting"]
+    print(f"GATE-INFO M3 {board} (M3-R13 info only): pcb {r['pcb_sha256'][:12]} "
+          f"routed {rt['routed']}/{rt['connections']} failed {rt['failed']} "
+          f"drc_new={r['routed_drc']['routing_new']} preexisting={pe['count']} {pe['by_type']} "
+          f"router_s={r['router_s']} (<=65: {r['router_s'] <= 65.0}) timed_out={rep.get('timed_out')} "
+          f"detour median {dt.get('median')} p90 {dt.get('p90')} max {dt.get('max')} "
+          f">1.5 {dt.get('count_gt_1_5')} n {dt.get('n')}")
+    assert rep is not None  # anytime result present
     assert r["routed_drc"]["routing_new"] == 0
-    assert r["router_s"] <= 65.0  # anytime: wall_clock_s 60 plus the final metrization/self-check pass
     assert_unchanged(src.parent, hashes)
