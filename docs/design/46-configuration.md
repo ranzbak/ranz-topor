@@ -24,6 +24,27 @@ Input for the M4 plan (plugin options) and the backlog. Decisions below are the 
 There is no "fab profile" that overrides the board: the old built-in JLCPCB table becomes the
 *template* for the plugin config's fab-agnostic fields (drill list, via-in-pad, …), not a rule source.
 
+### 1.1 Documentation requirement (user, 2026-10-31)
+
+The plugin must be usable **without AI** — installation, configuration, operation, contributing
+and debugging. Concretely:
+
+- **Self-documenting `topor.toml`:** every key carries a comment with meaning, unit, default,
+  allowed range/values and what changes when you change it. Behaviours that are set **in KiCad**
+  (clearances, widths, via sizes, edge clearance, netclasses, custom rules, layer types, locks)
+  appear as comment-only entries naming the exact KiCad place, e.g.
+  `# Clearance: KiCad → File → Board Setup → Design Rules → Constraints (not set here)`.
+- **Config reference** (`docs/user/configuration.md`): one table per section, generated from the
+  same source as the file comments, so they cannot drift (a test fails if a key is undocumented).
+- **User guide** (`docs/user/`): install (build script, wheel, KiCad API server, plugin environment),
+  first run, options dialog, pre-flight warnings and what to do about each, reading the run
+  report, undo, known limitations; troubleshooting by symptom.
+- **Contributor guide** (`CONTRIBUTING.md` + `docs/dev/`): repo layout, build, tests (unit, gate,
+  scaling, benchmarks), running the harness on a copied board, debug tools (`route_probe`,
+  profile timers, progress PNGs), how to file a bug with a reproducible board copy.
+- Every warning/error message names its cause and the fix (which KiCad setting or `topor.toml`
+  key), never only an internal code.
+
 ## 2. Settings
 
 | # | Setting | Source | Default | Notes |

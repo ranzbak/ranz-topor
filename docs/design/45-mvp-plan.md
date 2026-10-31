@@ -15,6 +15,13 @@ benchmarks per run in [benchmarks/](../benchmarks/README.md). Source boards in
 (bend angles, acute bends, via sizes, margins, priorities, partial routes, …), make it a **config
 setting with a sane default** rather than hard-coding it — "if in doubt, make it configurable".
 Defaults are the safe/conventional choice; every non-default value used in a run appears in the report.
+Settings live in `topor.toml` in the project directory ([46](46-configuration.md)).
+
+**Usable without AI (user, 2026-10-31):** installation, configuration, operation, contributing and
+debugging must work from human-written docs alone — self-documenting `topor.toml` (every key:
+meaning, unit, default, range; KiCad-controlled behaviours point to the exact Board Setup place),
+user guide, config reference, contributor/debug guide, actionable messages ([46 §1.1](46-configuration.md#11-documentation-requirement-user-2026-10-31)).
+Part of the M4 gate, not an afterthought.
 
 ---
 
