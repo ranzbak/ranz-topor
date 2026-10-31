@@ -113,10 +113,10 @@ fn main() {
         }
     }
     if let Some(p) = &r.profile {
-        println!("  iter  search_s  commit_s metrize_s  check_s searched re-searched ripped routed overuse");
+        println!("  iter  search_s  commit_s metrize_s  check_s searched re-searched revalid ripped routed overuse");
         for it in p {
             println!(
-                "  {:>4} {:>9.3} {:>9.3} {:>9.3} {:>8.3} {:>8} {:>11} {:>6} {:>6} {:>6}",
+                "  {:>4} {:>9.3} {:>9.3} {:>9.3} {:>8.3} {:>8} {:>11} {:>7} {:>6} {:>6} {:>6}",
                 it.iteration,
                 it.search_s,
                 it.commit_s,
@@ -124,6 +124,7 @@ fn main() {
                 it.check_s,
                 it.searched,
                 it.re_searched,
+                it.revalidated,
                 it.ripped,
                 it.routed,
                 it.overuse_edges

@@ -1850,6 +1850,61 @@ impl<'a> Search<'a> {
     }
 }
 
+/// F4 (design note §7): re-validate a path found against a frozen graph in `O(k)` against the
+/// current `mg` instead of searching again. Per leg, walking its faces from the previous
+/// crossing's gap: every crossed edge passable and fitting, its slot recomputed with
+/// `Cyc::cross_slot` against the current strands (the slot search's own rule, including the
+/// start rule from a via arrival on the other layer); the goal / site vertex reachable by
+/// `goal_ok`; every via site still `site_free`; a direct leg's edge still free as `direct`
+/// requires. `Some(path with the recomputed slots)` or `None` (search again). Conservative: an
+/// unfit edge (which the search may cross as overuse) is rejected, so the result is never
+/// looser than a fresh search.
+pub fn revalidate_path(mg: &MultiGraph, c: &Connection, p: &SlotPath) -> Option<SlotPath> {
+    let mut q = p.clone();
+    let (w, clr) = (c.width as f64, c.clearance as f64);
+    for (j, leg) in q.legs.iter_mut().enumerate() {
+        let g = &mg.layers[leg.layer_idx].g;
+        let n = leg.crossings.len();
+        if n == 0 {
+            let e = g.edge(leg.start, leg.goal)?;
+            if !g.passable(e, c.net) || g.slot_count(e) != 0 || g.along(e).is_some() {
+                return None;
+            }
+        } else {
+            if leg.faces.len() != n + 1 || leg.faces.iter().any(|&f| f >= g.faces.len()) {
+                return None;
+            }
+            for k in 0..=n {
+                let cyc = Cyc::new(g, leg.faces[k]);
+                let strands = cyc.strands(g);
+                let p0 = if k == 0 {
+                    cyc.vertex_pos(leg.start)?
+                } else {
+                    cyc.gap_pos(leg.crossings[k - 1].0, leg.crossings[k - 1].1)?
+                };
+                if k == n {
+                    if !cyc.goal_ok(&strands, p0, leg.goal) {
+                        return None;
+                    }
+                    break;
+                }
+                let e_out = leg.crossings[k].0;
+                if !g.passable(e_out, c.net) || !g.fits(e_out, w, clr) {
+                    return None;
+                }
+                let near_v = leg_near_v(g, leg, k)?;
+                leg.crossings[k].1 = cyc.cross_slot(&strands, p0, e_out, near_v)?;
+            }
+        }
+        if let Some(&(s, size)) = q.sites.get(j) {
+            if !mg.site_free(s, c.net, size) {
+                return None;
+            }
+        }
+    }
+    Some(q)
+}
+
 /// Shared vertex of the entry and exit edges of face `k` of `leg` (the start vertex for the
 /// first face); `None` when the two edges share no vertex.
 fn leg_near_v(g: &RouteGraph, leg: &Leg, k: usize) -> Option<usize> {

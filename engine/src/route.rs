@@ -196,6 +196,8 @@ pub struct IterProfile {
     pub searched: usize,
     /// Paths invalidated by an earlier commit and searched again.
     pub re_searched: usize,
+    /// Paths invalidated by an earlier commit and accepted by the O(k) re-validation (F4).
+    pub revalidated: usize,
     /// Connections ripped up for the next iteration.
     pub ripped: usize,
     pub routed: usize,
@@ -2457,6 +2459,7 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
                             check_s: mt.check_s,
                             searched: out.searched,
                             re_searched: out.resolved_sequentially,
+                            revalidated: out.revalidated,
                             ripped: out.ripped.len(),
                             routed: routed.len(),
                             overuse_edges: out.overuse_edges,

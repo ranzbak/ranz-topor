@@ -749,3 +749,93 @@ fn dead_only_for_static_blocks() {
         assert!(out.ripped.is_empty());
     }
 }
+
+/// A wall of pads at x = 25 with one 6 mm gap (y = 17..23, room for both wires).
+fn wide_gap_board() -> Built {
+    build(
+        &[
+            ("sa", 1, 10.0, 19.6),
+            ("sb", 2, 10.0, 20.4),
+            ("ta", 1, 40.0, 19.6),
+            ("tb", 2, 40.0, 20.4),
+            ("u1", 3, 25.0, 17.0),
+            ("u2", 3, 25.0, 14.46),
+            ("u3", 3, 25.0, 11.92),
+            ("w1", 3, 25.0, 23.0),
+            ("w2", 3, 25.0, 25.54),
+            ("w3", 3, 25.0, 28.08),
+        ],
+        "",
+    )
+}
+
+/// One batch iteration of the two connections of `wide_gap_board` on a pool of `threads`:
+/// `(resolved_sequentially, revalidated, overuse, crossings of both paths)`.
+fn wide_gap_iteration(threads: usize) -> (usize, usize, usize, Vec<Vec<(usize, usize)>>) {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .unwrap();
+    pool.install(|| {
+        let mut b = wide_gap_board();
+        let (conns, verts) = setup(&b, &[(1, "sa", "ta"), (2, "sb", "tb")]);
+        let mut neg = Negotiator::new(&b.mg, conns.len());
+        let out = neg.iteration(
+            &mut b.mg,
+            &mut b.obs,
+            &conns,
+            &[0, 1],
+            &starts_of(&verts),
+            &goals_of(&verts),
+            &Options::default(),
+            far(),
+        );
+        assert!(!out.timed_out);
+        let xs_all: Vec<Vec<(usize, usize)>> =
+            out.paths.iter().map(|p| xs(p.as_ref().unwrap())).collect();
+        (
+            out.resolved_sequentially,
+            out.revalidated,
+            out.overuse_edges,
+            xs_all,
+        )
+    })
+}
+
+/// F4: both connections are searched against the frozen empty graph and both pick the wide gap;
+/// A's commit bumps the edge versions of the gap faces, so B's path fails `path_valid`, but the
+/// O(k) re-validation against the current graph finds a slot next to A's strand in every face,
+/// every edge still fits and B is inserted with those slots (`revalidated == 1`,
+/// `resolved_sequentially == 0`). The result equals the sequential order (A, then B searched
+/// against A's path) and is identical for every pool size.
+#[test]
+fn batch_validation_accepts_unaffected_paths() {
+    let (resolved, revalidated, overuse, batch) = wide_gap_iteration(1);
+    assert_eq!((resolved, revalidated, overuse), (0, 1, 0));
+    assert!(!batch[1].is_empty(), "B crosses the gap");
+    for n in [2, 4] {
+        let (r, v, o, x) = wide_gap_iteration(n);
+        assert_eq!((r, v, o, &x), (0, 1, 0, &batch), "threads {n}");
+    }
+    // sequential reference: A alone, then B against A's path
+    let mut b = wide_gap_board();
+    let (conns, verts) = setup(&b, &[(1, "sa", "ta"), (2, "sb", "tb")]);
+    let mut neg = Negotiator::new(&b.mg, conns.len());
+    let (starts, goals) = (starts_of(&verts), goals_of(&verts));
+    let mut seq = Vec::new();
+    for i in 0..2 {
+        let out = neg.iteration(
+            &mut b.mg,
+            &mut b.obs,
+            &conns,
+            &[i],
+            &starts,
+            &goals,
+            &Options::default(),
+            far(),
+        );
+        assert_eq!((out.resolved_sequentially, out.revalidated), (0, 0));
+        seq.push(xs(out.paths[i].as_ref().unwrap()));
+    }
+    assert_eq!(batch, seq, "batch re-validation equals the sequential order");
+}

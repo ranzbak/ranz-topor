@@ -9,7 +9,8 @@
 //! plus O(Σ_L E_L + S) for the overuse sweep.
 //! Batch mode (T3.11, note §7): all active connections leave the graph, are searched in
 //! parallel against that frozen graph and committed in order; a path whose faces changed since
-//! the freeze (edge versions, sites) is searched again, in order, against the current graph.
+//! the freeze (edge versions, sites) is first re-validated in O(k) against the current graph
+//! (`search::revalidate_path`, F4) and searched again, in order, only when that fails.
 //! The absurd-detour ghost is
 //! computed in the parallel phase and reused while its own faces are unchanged. A connection
 //! blocked before any search by a static fact of the board (a terminal that cannot be left /
@@ -26,8 +27,8 @@ use crate::model::Options;
 use crate::multigraph::MultiGraph;
 use crate::obstacle::ObstacleSet;
 use crate::search::{
-    default_expansion_cap, ghost, search, strand_blockers, tier_weight, via_weight, Goal,
-    SearchOutcome, SearchParams, SlotPath,
+    default_expansion_cap, ghost, revalidate_path, search, strand_blockers, tier_weight,
+    via_weight, Goal, SearchOutcome, SearchParams, SlotPath,
 };
 use rayon::prelude::*;
 use serde::Serialize;
@@ -86,6 +87,9 @@ pub struct IterOutcome {
     pub ripped: Vec<usize>,
     /// Paths of the batch invalidated by an earlier commit and searched again (note §7).
     pub resolved_sequentially: usize,
+    /// Paths of the batch invalidated by an earlier commit and accepted by the O(k)
+    /// re-validation against the current graph (F4), slots recomputed.
+    pub revalidated: usize,
     /// Profile: seconds of the parallel search phase (2) and of the commit phase (3, including
     /// the sequential re-searches), and the number of connections searched in phase 2.
     pub search_s: f64,
@@ -180,6 +184,7 @@ impl Negotiator {
         }
         let mut ripped: BTreeSet<usize> = BTreeSet::new();
         let mut resolved_sequentially = 0usize;
+        let mut revalidated = 0usize;
         let seq: Vec<usize> = order(conns, &self.bumps)
             .into_iter()
             .filter(|&i| is_active[i])
@@ -204,20 +209,42 @@ impl Negotiator {
         // sequentially, against the graph as it then stands (the M2 order is kept).
         let t0_layers: Vec<u64> = mg.layers.iter().map(|c| c.g.clock).collect();
         let t0_sites = mg.clock();
-        let mut activated: Vec<Vec2> = Vec::new();
+        let mut activated: Vec<(Vec2, f64)> = Vec::new();
         for (&i, (mut res, mut pre)) in todo.iter().zip(results) {
             let c = &conns[i];
             if let SearchOutcome::Found(p) = &res {
-                if !Self::path_valid(mg, c, p, &t0_layers, t0_sites, &activated) {
-                    if Instant::now() >= deadline {
-                        timed_out = true;
-                        break;
+                let v = Self::path_valid(mg, c, p, &t0_layers, t0_sites, &activated);
+                if v != Validity::Ok {
+                    // Faces changed: the O(k) re-validation (F4); a via near the path changed
+                    // the geometry: search again.
+                    let fast = if v == Validity::Faces {
+                        revalidate_path(mg, c, p)
+                    } else {
+                        None
+                    };
+                    match fast {
+                        Some(q) => {
+                            revalidated += 1;
+                            res = SearchOutcome::Found(q);
+                        }
+                        None => {
+                            if Instant::now() >= deadline {
+                                timed_out = true;
+                                break;
+                            }
+                            resolved_sequentially += 1;
+                            let params = params_for(
+                                c,
+                                &self.history,
+                                &self.site_history,
+                                cap,
+                                deadline,
+                                opts,
+                            );
+                            res = search(mg, obs, c, &starts[i], &goals[i], &params);
+                            pre = None;
+                        }
                     }
-                    resolved_sequentially += 1;
-                    let params =
-                        params_for(c, &self.history, &self.site_history, cap, deadline, opts);
-                    res = search(mg, obs, c, &starts[i], &goals[i], &params);
-                    pre = None;
                 }
             }
             match res {
@@ -229,6 +256,7 @@ impl Negotiator {
                         let usable = match &pre {
                             Some(Some((gp, ..))) => {
                                 Self::path_valid(mg, c, gp, &t0_layers, t0_sites, &activated)
+                                    == Validity::Ok
                             }
                             Some(None) => true,
                             None => false,
@@ -258,7 +286,11 @@ impl Negotiator {
                         }
                     }
                     mg.insert_path(c, &p, obs);
-                    activated.extend(p.sites.iter().map(|&(s, _)| mg.sites[s].at));
+                    activated.extend(
+                        p.sites
+                            .iter()
+                            .map(|&(s, z)| (mg.sites[s].at, 0.5 * z.d as f64 + c.clearance as f64)),
+                    );
                     self.cur[i] = Some(p);
                 }
                 SearchOutcome::Blocked {
@@ -315,6 +347,7 @@ impl Negotiator {
             timed_out,
             ripped: ripped.into_iter().collect(),
             resolved_sequentially,
+            revalidated,
         }
     }
 
@@ -362,24 +395,26 @@ impl Negotiator {
             .collect()
     }
 
-    /// Batch validity of a snapshot path `p` of `c` (note §7, P4): no edge of any face the
-    /// legs touch changed since the freeze (`t0_layers`), no site of the path changed
-    /// (`t0_sites`), and no site activated since the freeze (`activated`) lies within
-    /// `rho_max + w/2 + eps` of the bounding box of the touched faces' vertices.
-    /// O(Σ|faces| + |p.sites| + |activated|).
+    /// Batch validity of a snapshot path `p` of `c` (note §7, P4): `Sites` when a site of the
+    /// path changed since the freeze (`t0_sites`) or a via activated since the freeze
+    /// (`activated`, `(centre, d/2 + clr)`) lies within that via's own `d/2 + clr + w/2 + eps`
+    /// of the bounding box of some leg's faces (F4: per leg and per via, not `rho_max` of the
+    /// layer); otherwise `Faces` when an edge of a face a leg touches changed (`t0_layers`);
+    /// otherwise `Ok`. O(Σ|faces| · (1 + |activated|) + |p.sites|).
     fn path_valid(
         mg: &MultiGraph,
         c: &Connection,
         p: &SlotPath,
         t0_layers: &[u64],
         t0_sites: u64,
-        activated: &[Vec2],
-    ) -> bool {
+        activated: &[(Vec2, f64)],
+    ) -> Validity {
         if p.sites.iter().any(|&(s, _)| mg.site_version[s] > t0_sites) {
-            return false;
+            return Validity::Sites;
         }
-        let mut bb: Option<Aabb> = None;
-        let mut rho: f64 = 0.0;
+        let mut faces_changed = false;
+        let eps = mg.layers.first().map_or(0.0, |l| l.g.rules.eps);
+        let grow = 0.5 * c.width as f64 + eps;
         for leg in &p.legs {
             let g = &mg.layers[leg.layer_idx].g;
             let faces = g.leg_faces(leg.start, leg.goal, &leg.faces);
@@ -387,9 +422,12 @@ impl Negotiator {
             if g.clock > t0_layers[leg.layer_idx]
                 && !g.faces_unchanged_since(&faces, t0_layers[leg.layer_idx])
             {
-                return false;
+                faces_changed = true;
             }
-            rho = rho.max(g.rho_max());
+            if activated.is_empty() {
+                continue;
+            }
+            let mut bb: Option<Aabb> = None;
             for &f in &faces {
                 for &v in &g.faces[f].v {
                     let at = g.verts[v].at;
@@ -408,16 +446,19 @@ impl Negotiator {
                     });
                 }
             }
+            let Some(bb) = bb else { continue };
+            if activated.iter().any(|&(a, r)| {
+                let b = bb.grow(r + grow);
+                a.x >= b.min.x && a.x <= b.max.x && a.y >= b.min.y && a.y <= b.max.y
+            }) {
+                return Validity::Sites;
+            }
         }
-        if activated.is_empty() {
-            return true;
+        if faces_changed {
+            Validity::Faces
+        } else {
+            Validity::Ok
         }
-        let Some(bb) = bb else { return true };
-        let eps = mg.layers.first().map_or(0.0, |l| l.g.rules.eps);
-        let bb = bb.grow(rho + 0.5 * c.width as f64 + eps);
-        !activated
-            .iter()
-            .any(|a| a.x >= bb.min.x && a.x <= bb.max.x && a.y >= bb.min.y && a.y <= bb.max.y)
     }
 
     /// Topological rip-up bookkeeping for connection `i` whose ghost path is blocked by the
@@ -498,6 +539,16 @@ impl Negotiator {
         }
         n
     }
+}
+
+/// Outcome of [`Negotiator::path_valid`] (note §7, F4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Validity {
+    Ok,
+    /// An edge of a touched face changed: topology only, the O(k) re-validation applies.
+    Faces,
+    /// A site of the path or a via near it changed: the geometry moved, search again.
+    Sites,
 }
 
 /// Ghost path with its first blocked edge / site and the crossing before it (see `search::ghost`).
