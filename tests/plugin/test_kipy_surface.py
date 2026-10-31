@@ -41,6 +41,7 @@ ATTRS = {
     "kipy.board_types.Net": ["name"],
     "kipy.board_types.BoardText": ["attributes", "layer", "id"],  # R8: text margin from the text size
     "kipy.common_types.TextAttributes": ["size"],
+    "kipy.geometry.Angle": ["degrees"],  # board_fingerprint (MINOR 11)
     "kipy.geometry.Vector2": ["from_xy", "x", "y"],
 }
 # class -> {method: [parameter names, in order, after self]}

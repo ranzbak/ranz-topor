@@ -80,6 +80,8 @@ SETTINGS: list[Setting] = [
     _s("run", "fail_on_preexisting", "bool", False, "Abort when kept or locked copper already has DRC violations; false only lists them as pre-existing."),
     _s("run", "kicad_cleanup", "bool", False, "After Accept, open KiCad's own Cleanup Tracks and Vias dialog (you confirm it there)."),
     _s("run", "kicad_teardrops", "bool", False, "After Accept, open KiCad's teardrop dialog (you confirm it there)."),
+    _s("run", "kicad_cli_timeout_s", "float", 120, "Limit for each kicad-cli call (DRC with zone refill, preview export): a call that runs longer is killed and the run ends with KICAD_CLI_TIMEOUT, board unchanged. Raise it for very large boards. 0 disables the limit (Cancel still works).",
+       unit="s", range=(0, 86400)),
     _s("run", "refill_after_accept", "bool", False, "After Accept, refill all zones from topor (a second undo step in KiCad). false = Accept is exactly one undo step; press B (Edit → Fill All Zones) yourself.",
        kicad="KiCad → Edit → Fill All Zones (B)"),
     _s("run", "detour_reference", "bool", True, "Compare every routed connection with a DRC-feasible direct path and report detours in the run report. (No effect in 0.4.0; applied from 0.5.0.)"),

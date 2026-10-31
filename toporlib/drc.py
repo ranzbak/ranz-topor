@@ -4,13 +4,12 @@ run_drc is O(kicad-cli); classify/split/summarise are O(V + U) in violations + u
 from __future__ import annotations
 
 import json
-import subprocess
 import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from toporlib.kicad_cli import kicad_cli
+from toporlib.kicad_cli import kicad_cli, run_cli
 
 ROUTING_TYPES = {
     "clearance",
@@ -51,9 +50,11 @@ class DrcReport:
     by_type: dict[str, int]
 
 
-def run_drc(pcb: Path, out_json: Path, *, save_board: bool = False) -> DrcReport:
+def run_drc(pcb: Path, out_json: Path, *, save_board: bool = False, timeout_s: float | None = None,
+            on_poll=None) -> DrcReport:
     """Run the fixed kicad-cli DRC command; exit 0 and 5 both count as successful runs. `save_board` adds
-    ``--save-board``: the refilled board is written back over `pcb`."""
+    ``--save-board``: the refilled board is written back over `pcb`. `timeout_s` / `on_poll` as in
+    :func:`toporlib.kicad_cli.run_cli` (kill + KicadCliTimeout / KicadCliCancelled); both None = blocking wait."""
     pcb = Path(pcb)
     out_json = Path(out_json)
     if not pcb.is_file():
@@ -65,7 +66,7 @@ def run_drc(pcb: Path, out_json: Path, *, save_board: bool = False) -> DrcReport
         "-o", str(out_json), str(pcb),
     ]
     t0 = time.monotonic()
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = run_cli(cmd, timeout_s=timeout_s, on_poll=on_poll)
     seconds = time.monotonic() - t0
     if proc.returncode not in (0, 5):
         raise RuntimeError(

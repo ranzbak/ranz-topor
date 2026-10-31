@@ -137,7 +137,7 @@ def test_operate_md_fab_floors_match_the_profile():
     for words in ("JLCPCB", "Fab floors raised", "no `topor.toml` key", "not read", "0.5.0", "VIA_NOT_SET_UP"):
         assert words in sec, words
     lim = text.split("## Limitations", 1)[1]
-    assert "Cancel reacts within about a second while routing" in lim
+    assert "Cancel reacts within about a second in every phase" in lim  # MINOR 10
     assert "Do not edit the board while topor runs" in lim
 
 

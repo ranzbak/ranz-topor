@@ -27,11 +27,10 @@ from __future__ import annotations
 
 import math
 import re
-import subprocess
 from pathlib import Path
 
 from toporlib import geom
-from toporlib.kicad_cli import kicad_cli
+from toporlib.kicad_cli import kicad_cli, run_cli
 
 PREVIEW_HIGHLIGHT_RGB = (0, 139, 139)
 PREVIEW_HIGHLIGHT_FALLBACK_RGB = (208, 64, 208)
@@ -141,8 +140,10 @@ def overlay_svg(svg_text: str, items: list, origin_nm: tuple, tint, *, layer_rgb
 
 
 # ---------------------------------------------------------------- kicad-cli
-def export_svg(pcb: Path, out_svg: Path, layers=SVG_LAYERS) -> Path:
-    """Board-area SVG of `pcb` (command in the module doc). Raises RuntimeError on failure. O(kicad-cli)."""
+def export_svg(pcb: Path, out_svg: Path, layers=SVG_LAYERS, *, timeout_s: float | None = None,
+               on_poll=None) -> Path:
+    """Board-area SVG of `pcb` (command in the module doc). Raises RuntimeError on failure; `timeout_s` / `on_poll` as in
+    :func:`toporlib.kicad_cli.run_cli` (KicadCliTimeout / KicadCliCancelled). O(kicad-cli)."""
     cli = kicad_cli()
     if not Path(cli).is_file():
         raise RuntimeError(f"kicad-cli not found: {cli}")
@@ -150,7 +151,7 @@ def export_svg(pcb: Path, out_svg: Path, layers=SVG_LAYERS) -> Path:
     out_svg.parent.mkdir(parents=True, exist_ok=True)
     cmd = [str(cli), "pcb", "export", "svg", "--layers", ",".join(layers), "--exclude-drawing-sheet",
            "--page-size-mode", "2", "--mode-single", "-o", str(out_svg), str(pcb)]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = run_cli(cmd, timeout_s=timeout_s, on_poll=on_poll)
     if proc.returncode != 0 or not out_svg.is_file():
         raise RuntimeError(f"kicad-cli svg export failed (exit {proc.returncode}) on {pcb}: {proc.stderr.strip()}")
     return out_svg
@@ -189,15 +190,16 @@ def _rasterise(svg: Path, scale: float):
 
 
 def render(before_pcb: Path, after_pcb: Path, out_png: Path, caption, *, new_items: list | None = None,
-           outline: list | None = None, layer_names: list | None = None, panel_px: tuple = (700, 760)) -> Path:
+           outline: list | None = None, layer_names: list | None = None, panel_px: tuple = (700, 760),
+           timeout_s: float | None = None, on_poll=None) -> Path:
     """Compose the preview PNG; see :func:`render_ex` (this returns only the path)."""
     return render_ex(before_pcb, after_pcb, out_png, caption, new_items=new_items, outline=outline,
-                     layer_names=layer_names, panel_px=panel_px)[0]
+                     layer_names=layer_names, panel_px=panel_px, timeout_s=timeout_s, on_poll=on_poll)[0]
 
 
 def render_ex(before_pcb: Path, after_pcb: Path, out_png: Path, caption, *, new_items: list | None = None,
               outline: list | None = None, layer_names: list | None = None,
-              panel_px: tuple = (700, 760)) -> tuple:
+              panel_px: tuple = (700, 760), timeout_s: float | None = None, on_poll=None) -> tuple:
     """Export both boards, draw them side by side with `caption` (str or list of lines) above, the panel titles
     ``Current board`` / ``Result`` and a legend below; write `out_png`. Returns ``(out_png, notes)``; `notes`
     are report lines about what the render could not do (e.g. highlight skipped). Needs a ``wx.App``."""
@@ -211,8 +213,8 @@ def render_ex(before_pcb: Path, after_pcb: Path, out_png: Path, caption, *, new_
     work.mkdir(parents=True, exist_ok=True)
     layers = tuple(layer_names or ()) + ("Edge.Cuts",) if layer_names else SVG_LAYERS
     notes: list = []
-    svg_b = export_svg(before_pcb, work / "before.svg", layers)
-    svg_a = export_svg(after_pcb, work / "after.svg", layers)
+    svg_b = export_svg(before_pcb, work / "before.svg", layers, timeout_s=timeout_s, on_poll=on_poll)
+    svg_a = export_svg(after_pcb, work / "after.svg", layers, timeout_s=timeout_s, on_poll=on_poll)
 
     bg = wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW)
     fg = wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOWTEXT)
