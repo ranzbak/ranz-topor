@@ -769,9 +769,11 @@ fn wide_gap_board() -> Built {
     )
 }
 
-/// One batch iteration of the two connections of `wide_gap_board` on a pool of `threads`:
 /// `(resolved_sequentially, revalidated, overuse, crossings of both paths)`.
-fn wide_gap_iteration(threads: usize) -> (usize, usize, usize, Vec<Vec<(usize, usize)>>) {
+type WideGapRun = (usize, usize, usize, Vec<Vec<(usize, usize)>>);
+
+/// One batch iteration of the two connections of `wide_gap_board` on a pool of `threads`.
+fn wide_gap_iteration(threads: usize) -> WideGapRun {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build()
