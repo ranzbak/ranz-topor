@@ -1,6 +1,7 @@
 """`.kicad_dru` custom-rule subset parser and condition matcher. Pure; no pcbnew.
 
-parse_dru is O(T) in tokens; match_condition is O(C) in the condition length."""
+parse_dru is O(T) in tokens; match_condition is O(C) in the condition length; dru_keepouts is
+O(K * A) for K rules and A rule-area outlines."""
 from __future__ import annotations
 
 import re
@@ -16,6 +17,7 @@ class DruRule:
     condition: str | None = None
     constraints: dict[str, dict[str, int]] = field(default_factory=dict)
     severity: str | None = None
+    disallow: tuple[str, ...] = ()  # item kinds of a `(constraint disallow track via ...)`
 
 
 # ------------------------------------------------------------------ s-expression
@@ -100,6 +102,8 @@ def parse_dru(text: str) -> list[DruRule]:
                         if v is not None:
                             vals[arg[0]] = v
                 r.constraints[str(sub[1])] = vals
+                if sub[1] == "disallow":
+                    r.disallow = tuple(str(a) for a in sub[2:] if not isinstance(a, list))
         rules.append(r)
     return rules
 
@@ -144,3 +148,79 @@ def match_condition(cond: str | None, *, net_name: str, netclass: str, ref: str 
 
 
 # ------------------------------------------------------------------ resolution
+
+
+# ------------------------------------------------------------------ disallow -> keepouts
+_AREA_TERM = re.compile(r"^[AB]\.(?:insideArea|intersectsArea)\('([^']*)'\)$")
+_TYPE_TERM = re.compile(r"^[AB]\.Type\s*==\s*'[^']*'$")
+
+
+def _disallow_areas(cond: str | None) -> list[str] | None:
+    """Rule-area names named by a `disallow` condition, or None when the condition is not one of the
+    supported shapes (`A.insideArea('x')` / `A.intersectsArea('x')`, optionally `&&` an item-type test)."""
+    if cond is None or not cond.strip() or "||" in cond or "!" in cond.replace("!=", ""):
+        return None
+    names: list[str] = []
+    for t in cond.split("&&"):
+        t = t.strip()
+        m = _AREA_TERM.match(t)
+        if m:
+            names.append(m.group(1))
+        elif not _TYPE_TERM.match(t):
+            return None
+    return names or None
+
+
+def dru_keepouts(rules: list[DruRule], areas: list[dict], layer_ids: dict[str, int]) -> tuple[list[dict], list[str]]:
+    """Keepouts from `(constraint disallow track|via ...)` rules that name a rule area.
+
+    `areas`: the rule-area outlines as model keepout dicts (``name, layers, poly``), `layer_ids`: copper
+    layer name -> engine id. Each matching outline yields ``{"name": "dru:<rule>", "layers", "poly",
+    "no_tracks", "no_vias"}`` (layers: the rule's ``(layer ...)`` -- a copper name, ``outer`` or ``inner`` --
+    else the area's). Rules that disallow neither track nor via, or are ``ignore``d, give nothing. A rule
+    this cannot place (no / unsupported condition, unknown area) gives a ``REFUSE: ...`` warning and no
+    keepout. Returns (keepouts, warnings)."""
+    out: list[dict] = []
+    warns: list[str] = []
+    ids = sorted(layer_ids.values())
+    outer = {i for i in ids if i in (0, 2)}
+    for r in rules:
+        if not r.disallow or r.severity in ("ignore", "exclude"):
+            continue
+        no_tracks, no_vias = "track" in r.disallow, "via" in r.disallow
+        if not (no_tracks or no_vias):
+            continue
+        names = _disallow_areas(r.condition)
+        if names is None:
+            warns.append(f"REFUSE: rule {r.name} disallows {' '.join(r.disallow)} without a supported "
+                         "area condition (A.insideArea('name'))")
+            continue
+        rule_layers: set[int] | None = None
+        if r.layer:
+            rule_layers = (outer if r.layer == "outer" else set(ids) - outer if r.layer == "inner"
+                           else {layer_ids[r.layer]} if r.layer in layer_ids else None)
+        for nm in names:
+            hit = [a for a in areas if a["name"] == nm]
+            if not hit:
+                warns.append(f"REFUSE: rule {r.name} disallows {' '.join(r.disallow)} in rule area '{nm}', "
+                             "which does not exist")
+            for a in hit:
+                lay = list(a["layers"]) if rule_layers is None else sorted(set(a["layers"]) & rule_layers)
+                if lay:
+                    out.append({"name": f"dru:{r.name}", "layers": lay, "poly": a["poly"],
+                                "no_tracks": no_tracks, "no_vias": no_vias})
+    return out, warns
+
+
+def merge_dru_keepouts(keepouts: list[dict], rules: dict, dru_text: str | None,
+                       layer_ids: dict[str, int]) -> tuple[list[dict], dict]:
+    """`keepouts` (rule-area model dicts) plus the keepouts of the .kicad_dru `disallow` rules; `rules` is
+    returned with new REFUSE warnings appended (a copy; the input is not modified). O(K * A)."""
+    if not dru_text:
+        return keepouts, rules
+    extra, warns = dru_keepouts(parse_dru(dru_text), keepouts, layer_ids)
+    have = set(rules.get("warnings", []))
+    new = [w for w in warns if w not in have]
+    if new:
+        rules = {**rules, "warnings": [*rules.get("warnings", []), *new]}
+    return keepouts + extra, rules

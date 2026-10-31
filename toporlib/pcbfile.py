@@ -1,7 +1,7 @@
 """Minimal `.kicad_pcb` s-expression editing: find / remove / append copper items (segment, arc, via).
 
 Pure text, no pcbnew (M4-R1). Only the top-level children of ``(kicad_pcb ...)`` are considered, so
-footprint graphics are never mistaken for tracks. B3 adds ``parse_layers``.
+footprint graphics are never mistaken for tracks. ``parse_layers`` reads the ``(layers ...)`` table.
 
 Complexity: ``find_items`` is O(len(text)) (one regex pass, string-literal aware); ``remove_items`` is
 O(len(text) + #removed) ; ``append_items`` is O(len(text) + #items) (a final-paren search and one
@@ -140,3 +140,42 @@ def append_items(text: str, items: list[dict], *, layer_names: dict, net_names: 
     if not head.endswith("\n"):
         head += "\n"
     return head + body + text[end:]
+
+
+_COPPER_TYPES = ("signal", "power", "mixed", "jumper")
+_LAYERS_HEAD = re.compile(r"\(\s*layers\b")
+_LAYER_ENTRY = re.compile(r'\(\s*(\d+)\s+"((?:[^"\\]|\\.)*)"\s+([A-Za-z_]+)')
+
+
+def parse_layers(text: str) -> list[dict]:
+    """Copper layers of the board file's top-level ``(layers ...)`` table, top -> bottom:
+    ``[{"id": int, "name": str, "type": "signal"|"power"|"mixed"|"jumper"}]``. ``id`` is the engine /
+    pcbnew copper id (F.Cu 0, B.Cu 2, In<n>.Cu 2n+2) derived from the layer NAME, so legacy files that
+    number B.Cu 31 give the same ids. Non-copper (``user``) layers are skipped. Order: F.Cu, inner
+    layers by number, B.Cu. O(len(text)) (one bounded scan of the table)."""
+    head = _LAYERS_HEAD.search(text)
+    if head is None:
+        return []
+    depth, end = 0, len(text)
+    for m in _TOKEN.finditer(text, head.start()):
+        if m.group() == "(":
+            depth += 1
+        elif m.group() == ")":
+            depth -= 1
+            if depth == 0:
+                end = m.end()
+                break
+    out = []
+    for m in _LAYER_ENTRY.finditer(text, head.end(), end):
+        raw, name, typ = int(m.group(1)), m.group(2), m.group(3)
+        if typ not in _COPPER_TYPES:
+            continue
+        inner = re.fullmatch(r"In(\d+)\.Cu", name)
+        lid = 0 if name == "F.Cu" else 2 if name == "B.Cu" else 2 * int(inner.group(1)) + 2 if inner else raw
+        out.append({"id": lid, "name": name, "type": typ})
+
+    def top_down(g):
+        return (0, 0) if g["id"] == 0 else (2, 0) if g["id"] == 2 else (1, g["id"])
+
+    out.sort(key=top_down)
+    return out

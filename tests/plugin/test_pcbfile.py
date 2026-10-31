@@ -104,3 +104,30 @@ def test_append_items_uses_given_uuid_and_validates():
     assert out.rstrip().endswith(")")
     with pytest.raises(KeyError):
         pcbfile.append_items(t, [{**it, "layer": 9}], layer_names={2: "B.Cu"}, net_names={2: "N"})
+
+
+def test_parse_layers_synthetic_4layer():
+    t = ('(kicad_pcb (version 20260101)\n\t(layers\n\t\t(0 "F.Cu" signal)\n\t\t(4 "In1.Cu" power)\n'
+         '\t\t(6 "In2.Cu" power "PWR plane")\n\t\t(2 "B.Cu" signal)\n\t\t(9 "F.Adhes" user "F.Adhesive")\n'
+         '\t\t(5 "F.SilkS" user)\n\t)\n\t(segment (layers "F.Cu"))\n)')
+    got = pcbfile.parse_layers(t)
+    assert [(g["id"], g["name"], g["type"]) for g in got] == [
+        (0, "F.Cu", "signal"), (4, "In1.Cu", "power"), (6, "In2.Cu", "power"), (2, "B.Cu", "signal")]
+
+
+def test_parse_layers_orders_top_to_bottom_and_types():
+    t = ('(kicad_pcb (layers (0 "F.Cu" mixed) (8 "In3.Cu" jumper) (4 "In1.Cu" signal) (6 "In2.Cu" signal) '
+         '(2 "B.Cu" signal)))')
+    assert [(g["name"], g["type"]) for g in pcbfile.parse_layers(t)] == [
+        ("F.Cu", "mixed"), ("In1.Cu", "signal"), ("In2.Cu", "signal"), ("In3.Cu", "jumper"), ("B.Cu", "signal")]
+    assert pcbfile.parse_layers("(kicad_pcb)") == []
+
+
+def test_parse_layers_on_snapshots():
+    from harness.paths import board_pcb
+    assert [g["name"] for g in pcbfile.parse_layers(board_pcb("eprom-to-kernal").read_text())] == ["F.Cu", "B.Cu"]
+    w = pcbfile.parse_layers(board_pcb("wiccon-2023").read_text())  # legacy file: B.Cu is numbered 31
+    assert [(g["id"], g["name"]) for g in w] == [(0, "F.Cu"), (2, "B.Cu")]
+    b = pcbfile.parse_layers(board_pcb("bornhack2026").read_text())
+    assert [(g["id"], g["name"], g["type"]) for g in b] == [
+        (0, "F.Cu", "signal"), (4, "In1.Cu", "power"), (6, "In2.Cu", "power"), (2, "B.Cu", "signal")]
