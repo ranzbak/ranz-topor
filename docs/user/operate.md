@@ -258,8 +258,8 @@ A priority 1..3 (1 = routed first) comes from, strongest first:
 Nets in a power net class (or, while still in *Default*, matching `[nets] power_pattern`) get priority 2
 when nothing else sets one ([`POWER_BY_NAME`](troubleshoot.md#power_by_name)). Both halves of a
 differential pair get the higher priority ([`MARKER_PAIR`](troubleshoot.md#marker_pair)); sources that
-disagree give [`MARKER_CONFLICT`](troubleshoot.md#marker_conflict). In 0.4.0 the priorities are computed
-and reported; the engine uses them from 0.5.0.
+disagree give [`MARKER_CONFLICT`](troubleshoot.md#marker_conflict). The engine routes priority 1 first and
+gives it the cheapest search weight (and the highest via cost); nets without a priority are tier 3.
 
 ## Keyboard
 
@@ -296,14 +296,14 @@ unsure about is kept. KiCad's DRC of the result stays the judge.
 
 ### Settings not applied by the engine yet (0.5.0)
 
-- **Net priorities** (`@N`, `topor_pN`, `[nets] priority`): computed, checked and reported; the engine
-  option `net_priority` arrives in 0.5.0, so routing order does not follow them yet.
-- **`[nets] do_not_touch`**: applied by the plugin — those nets are left out of the scope and never ripped —
-  because the engine option `exclude_nets` arrives in 0.5.0.
-- **`[nets] ignore_pads`**: applied when you route a selection (the pads are left out of the scope); on the
-  whole board the engine option `ignore_pads` arrives in 0.5.0, so those pads are still routed to.
+- **Net priorities** (`@N`, `topor_pN`, `[nets] priority`), **`[nets] do_not_touch`**, **`[nets] ignore_pads`**
+  and **`[nets] pour_served`** are applied by the engine (0.5.0): priorities set the routing order and weight;
+  do-not-touch nets are never routed and their copper stays a fixed obstacle (status `excluded` in the net
+  table); ignored pads are neither terminals nor obstacles and their connections are listed as `ignored: pad
+  outside board` (they are not counted in the connection total); `pour_served = true` makes the net's
+  connections only pour connections, `false` routes it pad to pad although it has a pour.
 - **Existing copper `smooth`**: the engine treats it as `fixed` and says so in the report.
-- **`[nets] pour_served`** and **`[run] detour_reference`** are accepted but have no effect in 0.4.0
+- **`[run] detour_reference`** is accepted but has no effect in 0.4.0
   (the report always lists the detour ratio = routed length / length of the connection's topological ghost
   path, the shortest path the router finds for it on the empty board with the same layers and via rules;
   `toporlib/detour.py`).

@@ -65,6 +65,8 @@ pub struct NetInfo {
     pub pads: usize,
     pub clusters: usize,
     pub pour_served: bool,
+    /// Do-not-touch net (`Options.exclude_nets`): no connections.
+    pub excluded: bool,
     pub in_scope: bool,
     /// Ids into `Decomposition.connections`.
     pub connections: Vec<usize>,
@@ -250,7 +252,9 @@ type NetItems = (Vec<usize>, Vec<usize>, Vec<usize>);
 /// Decompose every net into the connections still to route; `layers` = routable copper layers
 /// (sorted). In a net with a pour every cluster without the pour gets one connection to it
 /// (pour completion, 12 §1), otherwise the clusters are joined by an MST.
-/// O(pads^2) per net for the MST ports plus O(P) per cluster port for the pour distance.
+/// O(pads^2) per net for the MST ports plus O(P) per cluster port for the pour distance; the
+/// option lookups (`net_priority`, `exclude_nets`, `pour_served`) add O(log N + |exclude_nets|)
+/// per net.
 pub fn decompose(model: &BoardModel, opts: &Options, layers: &[u32]) -> Decomposition {
     let sel = Selector::new(model, opts);
     let all_layers = model.all_layer_ids();
@@ -275,16 +279,40 @@ pub fn decompose(model: &BoardModel, opts: &Options, layers: &[u32]) -> Decompos
     let kept_boxes: Vec<_> = kept_prims.iter().map(|p| p.bbox()).collect();
 
     let mut out = Decomposition::default();
+    let name_of = |net: i32| -> String {
+        model
+            .nets
+            .iter()
+            .find(|n| n.code == net)
+            .map(|n| n.name.clone())
+            .unwrap_or_default()
+    };
     for (&net, (pads, vias, kept)) in &by_net {
         if pads.is_empty() {
             continue; // no terminal: nothing to connect
         }
+        let net_name = name_of(net);
+        if opts.exclude_nets.contains(&net_name) {
+            out.nets.push(NetInfo {
+                net,
+                name: net_name,
+                pads: pads.len(),
+                clusters: 0,
+                pour_served: false,
+                excluded: true,
+                in_scope: false,
+                connections: Vec::new(),
+            });
+            continue;
+        }
+        let force_pour = opts.pour_served.get(&net_name).copied();
         let (np, nv, nk) = (pads.len(), vias.len(), kept.len());
+        // `pour_served = false`: the pour is not used to join pads (signal net).
         let pours: Vec<(usize, &Pour)> = model
             .pours
             .iter()
             .enumerate()
-            .filter(|(_, z)| z.net == net)
+            .filter(|(_, z)| z.net == net && force_pour != Some(false))
             .collect();
         let npz = pours.len();
         // Local node ids: pads, vias, kept items.
@@ -479,7 +507,14 @@ pub fn decompose(model: &BoardModel, opts: &Options, layers: &[u32]) -> Decompos
                     .copied()
                     .filter(|&i| !clusters[i].pours.is_empty() && !clusters[i].ports.is_empty())
                     .collect();
-                mst(&clusters, &with_pour)
+                if force_pour == Some(true) {
+                    Vec::new() // pour islands are served by the pour, not joined by signal copper
+                } else {
+                    mst(&clusters, &with_pour)
+                }
+            } else if force_pour == Some(true) {
+                // Forced pour-served without a usable pour: trusted, nothing to route.
+                Vec::new()
             } else if selected_terms == 1 {
                 // Lone selected terminal: nearest other cluster of the net.
                 let a = chosen[0];
@@ -501,10 +536,21 @@ pub fn decompose(model: &BoardModel, opts: &Options, layers: &[u32]) -> Decompos
                 mst(&clusters, &chosen)
             };
             let rule = model.rules.net_rule(net);
-            let tier = if rule.width > model.rules.default.width {
-                2
-            } else {
-                3
+            let tier = match opts.net_priority.get(&net_name) {
+                Some(&t) if (1..=4).contains(&t) => t,
+                other => {
+                    if other.is_some() {
+                        out.warnings.push(format!(
+                            "net {net_name}: priority {} outside 1..4 ignored",
+                            other.copied().unwrap_or(0)
+                        ));
+                    }
+                    if rule.width > model.rules.default.width {
+                        2
+                    } else {
+                        3
+                    }
+                }
             };
             let mut edges = edges;
             edges.sort_by_key(|&(a, b, ..)| (a.min(b), a.max(b)));
@@ -555,22 +601,18 @@ pub fn decompose(model: &BoardModel, opts: &Options, layers: &[u32]) -> Decompos
         if let Some(r) = skipped {
             out.skipped.push((net, r));
         }
-        let pour_served = if net_has_pour {
+        let pour_served = if net_has_pour || force_pour == Some(true) {
             conn_ids.is_empty()
         } else {
             !pours.is_empty() && np + nv >= 2 && conn_ids.is_empty()
         };
         out.nets.push(NetInfo {
             net,
-            name: model
-                .nets
-                .iter()
-                .find(|n| n.code == net)
-                .map(|n| n.name.clone())
-                .unwrap_or_default(),
+            name: net_name,
             pads: np,
             clusters: nclusters,
             pour_served,
+            excluded: false,
             in_scope,
             connections: conn_ids,
         });
