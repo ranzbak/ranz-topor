@@ -10,21 +10,30 @@ constraint" (all wires fall back on wiccon-2023 and wedding-gift); M1.5 F2 SS mi
 zero-slack check O(emitted×fallback) → spatial-index local query; nametag fallbacks (self-check 13, hand vertex on CDT vertex 8).
 
 
-**M2 (single-layer router) — GATE BLOCKED: eprom gate PASS, scaling gate FAIL, escalated to main/user (45 §5a)** (rotation 2, 2026-10-31, HEAD after f314966).
-Version 0.2.0. Gate: `.venv/bin/pytest tests/gate -m "gate or not gate" -q -s` → 10 passed (M0+M1+M2). eprom: 27/27 conns, 25/25 nets,
-failed 0, partial 0, routing_new 0, unconnected 0, outside pads 67.034 vs hand 76.598 mm, KiCad 110.502 vs 112.886, arcs 12, router 0.116 s,
-16 it, zero_slack_wires 1 (+5V, DRC-kept), byte-identical twice. Info: wiccon 8/60 0.03 s; dcsgone 22/231 47.5 s; nametag 14/31 18.9 s;
-wedding 32/81 1.07 s; all routing_new 0. Benchmark docs/benchmarks/2026-10-31-topor-0.2.0/; PNGs docs/benchmarks/progress/2026-10-31-m2-gate{,-nametag-sao,-wedding-gift}.png.
-**Scaling FAIL** (`pytest tests/scaling -m scaling`, synth seed 1): n=10 0.0016 s 10/10; n=100 25.3 s 75/100; n=1000 timed out (0 it).
-F diagnosis/gate review docs/progress/notes/m2-gate-review.md: time is all in relax; BLOCKING B1 metrization not slot-topology faithful
-(relax.rs Stacks::new membership, taut.rs penetrations own-pad/far anchors, sketch.rs funnel collinear tie); B2 global relax of all wires
-per PathFinder iteration (route.rs ~1420; n=1000 first relax never finishes → no result); B3 synth.py >9 mm leftover pairing + exact
-collinear grid (user decides whether collinearity stays). Fixes B1/B2 are engine redesign-sized → awaiting main/user ruling, NOT started.
-**M3 carry-over (DEFERRED from the review):** RC3 search clearance_bend O(V) per expansion (dcsgone ghost searches 0.58 s each);
-D1 terminal clr = min_clearance; D2 statically unfit edge only 4× penalised; D3 direct path lacks third-vertex clearance; D4 contended
-test never exercises history switch; D5 A4 split-vertex no e2e test; D6 stubs from terminal not last_reached; D7 spot vertex blocks all nets;
-D8 clinches len(u) cosmetic; D9 block probe no deadline (5.3 s dcsgone); D10 bend_ok skips point walls/foreign vertices; Negotiator::record_best unused;
-plus vias/layers, rayon, dangling G1 → M4.
+**M2 DONE (0.2.0)** — single-layer router, 2026-10-31, rotation 3 coordinator (HEAD after 0d9e614). Ruling R9 (main): B1–B3 fixed, no budget relaxed, scaling not waived.
+Gate: `.venv/bin/pytest tests/gate -m "gate or not gate" -q -s` → 10 passed (M0+M1+M2). eprom: 27/27 conns, 25/25 nets, failed 0, partial 0,
+routing_new 0, unconnected 0, width 25/25, outside pads 67.095 vs hand 76.598 mm (was 67.034; ≤ 67.1 bound), KiCad 110.564 vs 112.886, arcs 13,
+router 0.169 s, 16 it, zero_slack_wires 1 (+5V, DRC-kept), byte-identical runs. Info: wiccon 8/60 0.029 s; dcsgone 24/231 45.8 s (was 22).
+**Scaling PASS:** `.venv/bin/pytest tests/scaling -m scaling -q -s` → 2 passed: n=10 0.002 s 10/10 (1 it), n=100 0.0352 s 100/100 (2 it),
+n=1000 0.5704 s 1000/1000 (7 it), t100/t10 17.20 (≤ 40), t1000/t100 16.21 (≤ 30), no timeout (was n=100 75/100 25.3 s, n=1000 timeout).
+Other: cargo test --release all green (24 suites), clippy -D warnings clean, `.venv/bin/pytest -q` 122 passed. ~/work/kicad/projects sha256 unchanged.
+Fixes: B3 5578d9b (synth pairs ≤ 9 mm, leftovers skipped; exact collinear grid kept as gating fixture; `jitter_nm` extra variant);
+design note 1ad0464 docs/progress/notes/m2-metrize-design.md; B1 c65a5df (SlotNesting stacks with dynamic membership — static slot
+membership rejected, it broke eprom J1 pin gap → 91 mm; penetrations never add own terminals / far adjacent anchors; funnel collinear tie
+= bend on portal side, re-added anchors take slot side); B2 b8444a6 (Relaxer kept across PathFinder iterations, work set = searched/ripped
+wires + dyn neighbours + slot dependents, first complete pass ignores the deadline → anytime result; n=1000 tautens 52 000 → 1 627).
+Profile n=1000 after B2 (0.56 s): search 0.15, metrize 0.22 (relax 0.11, self-check 0.13 over 12 calls), zero-slack pass 0.18.
+Benchmark 0.2.0 re-run 0d9e614 docs/benchmarks/2026-10-31-topor-0.2.0/ (eprom as above; wiccon 8/60; dcsgone 24/231 44.4 s; nametag 17/31
+0/6 nets 44.2 s 30 it (was 14/31, 10 it); wedding 32/81, 20/43 nets (was 21/43), 0.11 s; routing_new 0 everywhere).
+PNGs docs/benchmarks/progress/2026-10-31-m2-gate-B12{,-nametag-sao,-wedding-gift}.png.
+**M3 carry-over:** vias/layers (27/27 eprom via B.Cu if a zero-slack casualty appears), rayon/threads (wiccon < 10 s on 4 threads),
+dangling G1 → M4; RC3 search clearance_bend O(V) per expansion (dcsgone ghost searches ~0.58 s each, router 45 s); self-check
+`check_items` re-inserts the whole base per call (largest metrize cost at n=1000) → persistent item index; zero-slack pass searches;
+re-sketch only changed wires; D1 terminal clr = min_clearance; D2 statically unfit edge only 4× penalised; D3 direct path lacks
+third-vertex clearance; D4 contended test never exercises history switch; D5 A4 split-vertex no e2e test; D6 stubs from terminal not
+last_reached; D7 spot vertex blocks all nets; D8 clinches len(u) cosmetic; D9 block probe no deadline (dcsgone 5.3 s); D10 bend_ok skips
+point walls/foreign vertices; Negotiator::record_best unused; wedding-gift 20/43 nets (−1 vs pre-B1) and nametag 30 it at 44 s (info boards).
+Gate review: docs/progress/notes/m2-gate-review.md. Ledger .superpowers/sdd/2026-10-31-topor-m2-router/progress.md.
 
 **M2 history (rotation 1, 2026-10-31).** Plan docs/superpowers/plans/2026-10-31-topor-m2-router.md;
 ledger .superpowers/sdd/2026-10-31-topor-m2-router/progress.md (briefs, reports, rulings R1–R6).
@@ -44,6 +53,10 @@ ledger .superpowers/sdd/2026-10-31-topor-m2-router/progress.md (briefs, reports,
 | Fix-ABC | bend-pinch admissibility, topological rip-up, stuck stop | DONE 5f1a4a8 |
 | Fix-R6 | local zero-slack retry (+5V corridor, DRC judge) + stall stop (STALL_ITERS 8) | DONE 663e7d9 |
 | 11 | gate test, scaling test, 0.2.0, benchmark 0.2.0, compare PNGs, F gate review | eprom gate PASS ac31995; bench+PNGs f314966; scaling FAIL; review m2-gate-review.md (B1–B3 blocking, escalated) |
+| Fix-B3 | synth ≤ 9 mm pairs, collinear grid kept, jitter variant | DONE 5578d9b |
+| Fix-B1 | slot-faithful metrization (note m2-metrize-design.md 1ad0464) | DONE c65a5df |
+| Fix-B2 | incremental metrization, anytime first pass | DONE b8444a6 (scaling PASS) |
+| Bench-R3 | benchmark 0.2.0 re-run, gate PNGs B12 | DONE 0d9e614 |
 **M2 rulings:** R1 work on main, never push. R2 verification = acceptance commands + diff stat; F reviews at the gate (Tasks 3, 6, 7 incl.).
 R3 parallel worktree workers don't touch the shared .venv. R5 (main): length gate failing ONLY on zero-slack +5V nets → compare remaining
 nets, report +5V separately. **R6 (main, 2026-10-31):** keep margin_nm 5000 globally; after negotiation, a connection still failed and
