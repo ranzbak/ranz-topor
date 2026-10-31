@@ -460,7 +460,11 @@ fn zero_slack_retry_uses_margin_zero_on_corridor_only() {
     // Through the corridor: the centreline reaches the edge band, 0.5 + 0.125 = 0.625 mm
     // from the y = 0 edge.
     assert!((max_y(&r) + 625_000.0).abs() <= 2.0, "max y {}", max_y(&r));
-    assert!(r.connections[0].length_nm < 40_000_000, "{}", r.connections[0].length_nm);
+    assert!(
+        r.connections[0].length_nm < 40_000_000,
+        "{}",
+        r.connections[0].length_nm
+    );
     // Design clearance holds to the board file's resolution: an exact tangency rebuilt from
     // integer-nm points may read a nanometre short (KiCad's own DRCEpsilon is 500 nm).
     let c0 = Options {
@@ -469,7 +473,10 @@ fn zero_slack_retry_uses_margin_zero_on_corridor_only() {
     };
     for v in &Checker::new(&m, &c0).check_items(&r.items).violations {
         assert!(v.gap + 1 >= v.required, "{v:?}");
-        assert!(v.against == "pad:C:1" || v.against.starts_with("edge"), "{v:?}");
+        assert!(
+            v.against == "pad:C:1" || v.against.starts_with("edge"),
+            "{v:?}"
+        );
     }
     // Margin 0 on the corridor only: at a margin of 4 µm only C and the edge are too close,
     // the bend around E (and everything else) still has its ε slack.
@@ -549,13 +556,25 @@ fn eprom_ripped_stalls_and_zero_slack_retry_passes_length_gate() {
         "{:?}",
         r.warnings
     );
-    assert!(r.iterations < 50 && r.iterations >= STALL_ITERS, "{}", r.iterations);
+    assert!(
+        r.iterations < 50 && r.iterations >= STALL_ITERS,
+        "{}",
+        r.iterations
+    );
     assert_eq!(r.zero_slack, "kept");
     let names: Vec<&str> = r.zero_slack_wires.iter().map(|w| w.name.as_str()).collect();
     assert_eq!(names, vec!["+5V"]);
-    assert!(r.length_outside_pads_nm < 76_598_000, "{}", r.length_outside_pads_nm);
+    assert!(
+        r.length_outside_pads_nm < 76_598_000,
+        "{}",
+        r.length_outside_pads_nm
+    );
     // M2 gate bound (B1: 67.095 mm); incremental metrization (B2) must not regress it.
-    assert!(r.length_outside_pads_nm <= 67_100_000, "{}", r.length_outside_pads_nm);
+    assert!(
+        r.length_outside_pads_nm <= 67_100_000,
+        "{}",
+        r.length_outside_pads_nm
+    );
     assert_eq!(r.failed, 0);
     let again = route(&m, &opts());
     assert_eq!(json_no_runtime(&r), json_no_runtime(&again));
@@ -570,5 +589,109 @@ fn eprom_ripped_stalls_and_zero_slack_retry_passes_length_gate() {
     assert_eq!(off.routed, 27);
     assert!(off.zero_slack_wires.is_empty());
     assert_eq!(off.iterations, r.iterations);
-    assert!(off.length_outside_pads_nm > 76_598_000, "{}", off.length_outside_pads_nm);
+    assert!(
+        off.length_outside_pads_nm > 76_598_000,
+        "{}",
+        off.length_outside_pads_nm
+    );
+}
+
+/// `n` two-pad nets (round pads d 1 mm on a 3 mm grid, each pair within 9 mm; the layout of
+/// `tests/scaling/synth.py`, with a fixed LCG instead of Python's RNG), front layer only.
+fn synth_model(n: usize) -> BoardModel {
+    let cols = 10usize;
+    let rows = 10usize;
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut rnd = |m: usize| {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((state >> 33) as usize) % m
+    };
+    let cells = cols * rows;
+    let mut order: Vec<usize> = (0..cells).collect();
+    for i in (1..cells).rev() {
+        order.swap(i, rnd(i + 1));
+    }
+    let mut free: Vec<bool> = vec![true; cells];
+    let xy = |c: usize| ((c % cols) as f64, (c / cols) as f64);
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    for &i in &order {
+        if pairs.len() == n {
+            break;
+        }
+        if !free[i] {
+            continue;
+        }
+        free[i] = false;
+        let near: Vec<usize> = (0..cells)
+            .filter(|&j| {
+                free[j] && {
+                    let (a, b) = (xy(i), xy(j));
+                    ((a.0 - b.0).hypot(a.1 - b.1)) * 3.0 <= 9.0
+                }
+            })
+            .collect();
+        if near.is_empty() {
+            continue;
+        }
+        let j = near[rnd(near.len())];
+        free[j] = false;
+        pairs.push((i, j));
+    }
+    assert_eq!(pairs.len(), n);
+    let nets: Vec<String> = (1..=n)
+        .map(|k| format!(r#"{{ "code": {k}, "name": "N{k}" }}"#))
+        .collect();
+    let mut pads = Vec::new();
+    for (k, &(i, j)) in pairs.iter().enumerate() {
+        for (num, c) in [(1, i), (2, j)] {
+            let (x, y) = xy(c);
+            pads.push(format!(
+                r#"{{ "uuid": "p{k}-{num}", "ref": "P{k}", "number": "{num}", "net": {net}, "attr": "smd",
+                  "center": [{px}, {py}], "layers": [0],
+                  "shapes": {{ "0": {{ "kind": "circle", "d": 1000000 }} }} }}"#,
+                net = k + 1,
+                px = (x * 3.0 * MM) as i64,
+                py = (y * 3.0 * MM) as i64
+            ));
+        }
+    }
+    let (lo, hi) = (-3_000_000i64, 30_000_000i64);
+    let o = [
+        (lo, lo, hi, lo),
+        (hi, lo, hi, hi),
+        (hi, hi, lo, hi),
+        (lo, hi, lo, lo),
+    ]
+    .iter()
+    .map(|&(a, b, c, d)| format!(r#"{{ "kind": "seg", "a": [{a}, {b}], "b": [{c}, {d}] }}"#))
+    .collect::<Vec<_>>()
+    .join(",");
+    let s = format!(
+        r#"{{ "layers": [ {{ "id": 0, "name": "F.Cu" }} ], "nets": [ {} ], "pads": [ {} ],
+          "outline": [ {o} ],
+          "rules": {{ "default": {{ "clearance": 200000, "width": 250000 }}, "min_clearance": 0,
+            "hole_clearance": 250000, "edge_clearance": 500000 }} }}"#,
+        nets.join(","),
+        pads.join(",")
+    );
+    BoardModel::from_json(&s).unwrap_or_else(|e| panic!("{e}\n{s}"))
+}
+
+#[test]
+fn route_self_check_rounds_scale_with_changed_wires() {
+    let m = synth_model(40);
+    let r = route(&m, &opts());
+    assert!(r.routed > 0, "nothing routed");
+    assert!(r.self_check_rounds <= 3, "rounds {}", r.self_check_rounds);
+    assert!(
+        r.check_candidates_visited < 40 * 40 * 10,
+        "visited {}",
+        r.check_candidates_visited
+    );
+    eprintln!(
+        "routed {}/{} rounds {} visited {}",
+        r.routed, r.connections_total, r.self_check_rounds, r.check_candidates_visited
+    );
 }
