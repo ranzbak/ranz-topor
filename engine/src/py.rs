@@ -2,18 +2,16 @@
 //! Every function releases the GIL while it computes.
 
 use crate::check::Checker;
-use crate::control::RunControl;
+use crate::control::{Job, JobError, RunControl};
 use crate::geom::prim::Aabb;
 use crate::geom::quant::{calc_arc_center, IVec2};
 use crate::geom::{Grid, Vec2};
 use crate::model::{BoardModel, Item, Options};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[pyfunction]
@@ -90,17 +88,15 @@ fn default_options() -> PyResult<String> {
     serde_json::to_string(&Options::default()).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
-type JobResult = Result<String, String>;
-
 /// A routing run on its own thread: `progress()` (JSON of `control::Progress`), `cancel()`,
 /// `done()`, `wait()` (blocks with the GIL released; the `RouteResult` JSON, idempotent).
-/// Complexity of every method except `wait`: O(1).
+/// `done()` is also true after the routing thread panicked (gate review B-1, ruling C31); `wait()`
+/// then raises `RuntimeError("routing thread panicked: <message>")`; a failed run (result not
+/// serialisable) raises `ValueError`. Complexity of every method except `wait`: O(1).
 #[pyclass]
 struct RouteJob {
     ctl: RunControl,
-    handle: Mutex<Option<std::thread::JoinHandle<JobResult>>>,
-    result: Mutex<Option<JobResult>>,
-    finished: Arc<AtomicBool>,
+    job: Job,
 }
 
 #[pymethods]
@@ -115,23 +111,16 @@ impl RouteJob {
     }
 
     fn done(&self) -> bool {
-        self.finished.load(Ordering::Acquire)
+        self.job.done()
     }
 
     fn wait(&self, py: Python<'_>) -> PyResult<String> {
-        py.allow_threads(|| {
-            let mut res = self.result.lock().map_err(|e| e.to_string())?;
-            if res.is_none() {
-                let h = self.handle.lock().map_err(|e| e.to_string())?.take();
-                let r = match h {
-                    Some(h) => h.join().unwrap_or_else(|_| Err("routing thread panicked".into())),
-                    None => Err("job already consumed".into()),
-                };
-                *res = Some(r);
+        py.allow_threads(|| self.job.wait()).map_err(|e| match e {
+            JobError::Failed(m) => PyValueError::new_err(m),
+            JobError::Panicked(m) => {
+                PyRuntimeError::new_err(format!("routing thread panicked: {m}"))
             }
-            res.clone().unwrap_or_else(|| Err("no result".into()))
         })
-        .map_err(PyValueError::new_err)
     }
 }
 
@@ -142,20 +131,24 @@ fn route_async(model_json: String, options_json: String) -> PyResult<RouteJob> {
     let model = BoardModel::from_json(&model_json).map_err(PyValueError::new_err)?;
     let opts = Options::from_json(&options_json).map_err(PyValueError::new_err)?;
     let ctl = RunControl::default();
-    let finished = Arc::new(AtomicBool::new(false));
-    let (c2, f2) = (ctl.clone(), finished.clone());
-    let handle = std::thread::spawn(move || {
+    let c2 = ctl.clone();
+    let job = Job::spawn(move || {
         let res = crate::route::route_with(&model, &opts, &c2);
-        let out = serde_json::to_string(&res).map_err(|e| e.to_string());
-        f2.store(true, Ordering::Release);
-        out
+        serde_json::to_string(&res).map_err(|e| e.to_string())
     });
-    Ok(RouteJob {
-        ctl,
-        handle: Mutex::new(Some(handle)),
-        result: Mutex::new(None),
-        finished,
-    })
+    Ok(RouteJob { ctl, job })
+}
+
+/// TEST HOOK, not part of the plugin API: `topor` never calls it and nothing in `topor.toml` or the
+/// engine `Options` reaches it. A [`RouteJob`] whose thread panics with `message`, so the Python
+/// tests drive the REAL job object through a panic (gate review B-1). O(1).
+#[pyfunction]
+fn _route_async_panicking(message: String) -> RouteJob {
+    let job = Job::spawn(move || -> Result<String, String> { panic!("{message}") });
+    RouteJob {
+        ctl: RunControl::default(),
+        job,
+    }
 }
 
 /// `WireStats` JSON of the hand copper of `model_json` (length gate reference).
@@ -249,6 +242,7 @@ fn topor_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(smooth, m)?)?;
     m.add_function(wrap_pyfunction!(route, m)?)?;
     m.add_function(wrap_pyfunction!(route_async, m)?)?;
+    m.add_function(wrap_pyfunction!(_route_async_panicking, m)?)?;
     m.add_function(wrap_pyfunction!(default_options, m)?)?;
     m.add_class::<RouteJob>()?;
     m.add_function(wrap_pyfunction!(wire_stats, m)?)?;
