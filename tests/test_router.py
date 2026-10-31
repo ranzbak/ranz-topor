@@ -148,11 +148,19 @@ def test_progress_m3_caption_and_path(engine, fixture_board, tmp_path):
                                    out_dir=tmp_path / "prog", pcb_override=fixture_board.pcb,
                                    router="topor")
     assert (tmp_path / "prog" / "2026-10-31-m3-T4.png").is_file()
-    l1, l2 = res["caption"].split("\n")
+    lines = res["caption"].split("\n")
+    l1, l2 = lines[0], lines[1]
     assert l1.startswith("T4: ") and " connections, " in l1 and "partial " in l1
     assert "vias " in l1 and "arcs " in l1 and "iters " in l1
+    # the input pcb sha12 ends line 1 (res carries the full sha256)
+    assert l1.endswith(f", pcb {res['pcb_sha256'][:12]}")
     assert l2.startswith("DRC routing ") and " vs hand " in l2 and "B.Cu" in l2
     assert l2.endswith(" threads")
+    # M3-R11: line 3 is the detour summary, present only when detour stats exist
+    d = progress.detour_caption(res.get("detour"))
+    assert lines[2:] == ([d] if d else [])
+    if d:
+        assert lines[2].startswith("detours > 1.5: ")
 
 
 def test_export_pours_have_fill_outlines(fixture_board):

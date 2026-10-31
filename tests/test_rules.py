@@ -5,11 +5,11 @@ import pytest
 
 from harness.copy import assert_unchanged, copy_project
 from harness.fixtures import make_fixture_board, write_project_file
+from harness.paths import BENCH_BOARDS
 from harness.model import export_model, load_board
 from harness.rip import NetWidths, record_widths, rip_tracks
 from harness.rules import JLCPCB_1OZ, match_condition, parse_dru, resolve_rules
 
-EPROM = "/home/paul/work/kicad/projects/eprom-to-kernal/eprom-to-kernal/eprom-to-kernal.kicad_pcb"
 
 CLASSES = [
     {"name": "Default", "clearance": 0.2, "track_width": 0.25, "via_diameter": 0.6, "via_drill": 0.3,
@@ -204,7 +204,7 @@ def test_rules_eprom_kicad10_project(tmp_path):
     Edit-proof: only the netclass setup / board-setup values (stable project settings) and
     invariants derived from the copy itself are asserted, never counts of the hand routing.
     """
-    src = Path(EPROM)
+    src = BENCH_BOARDS["eprom-to-kernal"]
     pc = copy_project(src, tmp_path / "w")
     assert pc.pro is not None
     b = load_board(pc)
@@ -241,7 +241,7 @@ def test_eprom_rip_none_keeps_free_vias_and_exports_no_pour(tmp_path):
     not obstacles (only rule areas are exported as keepouts). Counts come from the copy itself."""
     from harness.measure import copper_facts
 
-    src = Path(EPROM)
+    src = BENCH_BOARDS["eprom-to-kernal"]
     pc = copy_project(src, tmp_path / "w")
     b = load_board(pc)
     facts = copper_facts(b)

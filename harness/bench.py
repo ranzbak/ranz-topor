@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable, Literal
 
 from harness import writer
+from harness.copy import _sha as file_sha256
 from harness.copy import assert_unchanged, copy_project
 from harness.drc import classify, new_routing, run_drc, summarise
 from harness.metrics import copper_metrics, detour_line, detour_stats
@@ -34,7 +35,7 @@ def _source_pcb(board: str, pcb_override: Path | None) -> Path:
     if pcb_override is not None:
         src = Path(pcb_override)
     elif board in BENCH_BOARDS:
-        src = BENCH_BOARDS[board]
+        src = BENCH_BOARDS[board]  # verified snapshot (harness.paths.board_pcb)
     else:
         raise KeyError(f"unknown benchmark board {board!r}; known: {sorted(BENCH_BOARDS)}")
     if not src.is_file():
@@ -239,6 +240,7 @@ def run_bench(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     src = _source_pcb(board, pcb_override)
+    pcb_sha256 = file_sha256(src)
 
     cp = copy_project(src, out_dir / f"{board}-work")
     base_drc = run_drc(cp.pcb, out_dir / f"{board}--drc-orig.json")
@@ -409,6 +411,7 @@ def run_bench(
         "floors": [{"name": f["name"], "design_mm": f["design"] / 1e6, "floor_mm": f["floor"] / 1e6}
                    for f in rules.get("floors_applied", [])],
         "rules_used": {k: rules[k] / 1e6 for k in ("edge_clearance", "min_clearance", "min_track_width")},
+        "pcb_sha256": pcb_sha256,
         "rip": rip,
         "threads": threads,
         "runtime_s": round(time.monotonic() - t_start, 3),

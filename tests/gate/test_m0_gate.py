@@ -135,8 +135,11 @@ def test_m0_gate_reproduces_baseline(board, tmp_path):
         # keeps 2 (removed 201). Open rip-policy question (README step 1: keep stitching/fence
         # vias, i.e. vias no track of their net touches), to be settled before M3. Pin the
         # measured values so any change is visible.
-        assert (kept, removed) == (2, 201)
-        assert kept + removed == e["orig_all"]["vias"]
+        # Re-pinned after the user locked the edge GND trace (snapshot 3e7e66f862a7: 22 locked GND
+        # items): removed 201 -> 197, the 4 vias touched by that locked copper are retained.
+        assert (kept, removed) == (2, 197)
+        assert kept + removed + 4 == e["orig_all"]["vias"]
+        assert r["kept"]["kept_locked_tracks"] == 22
     assert png_size(tmp_path / f"{board}-hand.png") == e["hand_png"]
     ref = e["hand_ref"] if board == "eprom-to-kernal" else BASELINE / f"images/{board}-hand.png"
     d = rmse(tmp_path / f"{board}-hand.png", ref, tmp_path)

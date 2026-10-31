@@ -113,7 +113,8 @@ def test_progress_png_caption_and_path(fixture_board, tmp_path, monkeypatch):
     assert png.is_file()
     n = res["routed_all"]
     d = res["routed_drc"]
-    line1 = f"T1.4a: 1/2 nets, 2/3 wires, fallback 1 (zero slack 1), arcs {n['arcs']}"
+    line1 = (f"T1.4a: 1/2 nets, 2/3 wires, fallback 1 (zero slack 1), arcs {n['arcs']}, "
+             f"pcb {res['pcb_sha256'][:12]}")
     line2 = (f"DRC routing {d['routing_new']}, unconnected {d['incomplete']['unconnected_items']}, "
              f"{n['track_mm'] + n['arc_mm']:.1f} mm vs hand "
              f"{res['orig_all']['track_mm'] + res['orig_all']['arc_mm']:.1f} mm, "

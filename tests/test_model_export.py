@@ -6,10 +6,10 @@ import pytest
 
 from harness.copy import assert_unchanged, copy_project
 from harness.fixtures import make_fixture_board, write_project_file
+from harness.paths import BENCH_BOARDS
 from harness.model import export_model, find_dangling_ends, load_board, write_model_json
 from harness.rip import rip_tracks
 
-EPROM = "/home/paul/work/kicad/projects/eprom-to-kernal/eprom-to-kernal/eprom-to-kernal.kicad_pcb"
 
 
 def _codes(m):
@@ -113,11 +113,10 @@ def test_write_model_json(fixture_board, tmp_path):
     assert json.loads(p.read_text())["board"] == "fx"
 
 
-@pytest.mark.skipif(not Path(EPROM).is_file(), reason="eprom-to-kernal benchmark board not available")
 def test_eprom_gnd_pour_fill_outlines_via_swig(tmp_path):
     """Pins the SWIG names of the filled-polygon export (GetFilledPolysList, OutlineCount, Outline,
     PointCount, CPoint) against a copy of a real board with filled GND pours."""
-    pc = copy_project(Path(EPROM), tmp_path / "w")
+    pc = copy_project(BENCH_BOARDS["eprom-to-kernal"], tmp_path / "w")
     m = export_model(load_board(pc), {}, name="eprom")
     gnd = _codes(m)["GND"]
     pours = [p for p in m["pours"] if p["net"] == gnd]
@@ -130,7 +129,7 @@ def test_eprom_gnd_pour_fill_outlines_via_swig(tmp_path):
 
 @pytest.mark.gate
 def test_export_eprom_counts(tmp_path):
-    src = Path(EPROM)
+    src = BENCH_BOARDS["eprom-to-kernal"]
     pc = copy_project(src, tmp_path / "w")
     m = export_model(load_board(pc), {}, name="eprom")
     assert_unchanged(src.parent, pc.src_hashes)

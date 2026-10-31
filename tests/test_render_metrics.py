@@ -72,3 +72,12 @@ def test_run_bench_no_router_on_fixture(fixture_board, tmp_path):
     assert (tmp_path / "fx--metrics.json").exists()
     assert (tmp_path / "fx-hand.png").exists()
     assert r["routed_all"]["segments"] == 1  # only the locked track survives
+
+
+def test_metrics_json_carries_input_pcb_sha256(fixture_board, tmp_path):
+    import json
+
+    r = run_bench("fx", tmp_path, router=None, pcb_override=fixture_board.pcb)
+    want = hashlib.sha256(fixture_board.pcb.read_bytes()).hexdigest()
+    assert r["pcb_sha256"] == want
+    assert json.loads((tmp_path / "fx--metrics.json").read_text())["pcb_sha256"] == want

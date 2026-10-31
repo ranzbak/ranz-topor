@@ -32,6 +32,12 @@ def detour_caption(stats: dict | None) -> str | None:
             f"(max {stats['max']:.1f}) \N{EM DASH} {top}")
 
 
+def _sha_suffix(result: dict) -> str:
+    """`, pcb <sha12>` of the input pcb actually read (empty if the result carries none)."""
+    sha = result.get("pcb_sha256")
+    return f", pcb {sha[:12]}" if sha else ""
+
+
 def m3_caption(task: str, result: dict, threads: int) -> str:
     rt = result.get("route") or {}
     r = result["routed_all"]
@@ -42,7 +48,8 @@ def m3_caption(task: str, result: dict, threads: int) -> str:
              f"{rt.get('nets_routed', 0)}/{rt.get('nets', 0)} nets, "
              f"partial {rt.get('partial', 0)}, failed {rt.get('failed', 0)}, "
              f"vias {rt.get('vias', 0)}, arcs {r['arcs']}, "
-             f"zero slack {len(zs.get('wires') or [])}, iters {rt.get('iterations')}")
+             f"zero slack {len(zs.get('wires') or [])}, iters {rt.get('iterations')}"
+             f"{_sha_suffix(result)}")
     line2 = (f"DRC routing {drc['routing_new']}, "
              f"unconnected {drc['incomplete']['unconnected_items']}, "
              f"outside pads {rt.get('outside_mm') or 0.0:.1f} vs hand "
@@ -98,7 +105,8 @@ def render_progress(task: str, *, board: str = "eprom-to-kernal", date: str | No
         drc = result["routed_drc"]
         zs = rep.get("wires_zero_slack", sm.get("wires_zero_slack", 0))
         line1 = (f"{task}: {nets_taut}/{nets_total} nets, {wires_taut}/{wires_total} wires, "
-                 f"fallback {wires_total - wires_taut} (zero slack {zs}), arcs {r['arcs']}")
+                 f"fallback {wires_total - wires_taut} (zero slack {zs}), arcs {r['arcs']}"
+                 f"{_sha_suffix(result)}")
         line2 = (f"DRC routing {drc['routing_new']}, "
                  f"unconnected {drc['incomplete']['unconnected_items']}, "
                  f"{length_mm:.1f} mm vs hand {hand_mm:.1f} mm, "
