@@ -24,6 +24,13 @@ install_into() { # $1 = plugin-layout dir
     mkdir -p "$d/wheels"
     rm -f "$d"/wheels/topor_engine-*.whl
     cp plugin/plugin.json "$d/plugin.json"
+    # Python packages: plugin/topor, toporlib (pure, no pcbnew), user docs. No harness/ (dev/test only).
+    rm -rf "$d/topor" "$d/toporlib" "$d/docs"
+    cp -r plugin/topor "$d/topor"
+    cp -r toporlib "$d/toporlib"
+    mkdir -p "$d/docs/user"
+    if [ -d docs/user ]; then cp -r docs/user/. "$d/docs/user/"; fi
+    find "$d" -name __pycache__ -type d -prune -exec rm -rf {} +
     sed "s/^SHIPPED_VERSION = .*/SHIPPED_VERSION = \"$VERSION\"/" plugin/topor_plugin.py > "$d/topor_plugin.py.tmp"
     mv "$d/topor_plugin.py.tmp" "$d/topor_plugin.py"
     cp "$WHEEL" "$d/wheels/"
