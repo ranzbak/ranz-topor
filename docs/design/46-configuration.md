@@ -58,7 +58,7 @@ and debugging. Concretely:
 | 7 | Detour limit before rip-up | plugin config | 2.0 × ghost length | tied to the detour metric |
 | 8a | Pour-served nets (connect via pour + via-to-pour stubs) | plugin config | auto (net has a pour on a plane/mixed layer) | per-net override |
 | 8b | **Do-not-touch nets** | plugin config (list, patterns allowed) | empty | their copper is a fixed obstacle; never routed, ripped, or smoothed |
-| 9 | Via in SMD pad | KiCad Board Setup via protection (`m_FillVias`, `m_CapVias`, `m_PlugVias*`, `m_TentVias*` in KiCad 10) → allowed only when vias are filled + capped; `topor.toml` override | off unless filled + capped | depends on fab process |
+| 9 | Via in SMD pad | `topor.toml` `via_in_pad` (user choice); KiCad Board Setup via protection (`m_FillVias`, `m_CapVias`, … in KiCad 10) read for the check | off | user 2026-10-31: the user may enable it; if enabled while KiCad's via protection is not filled + capped, pre-flight warns (solder wicking / voids, fab-dependent) and the run report lists every via placed in a pad |
 | 10 | Output geometry | plugin option | native arcs | segment approximation and the 45° mode (`bend_90`, `bend_acute`) are other values |
 | 11 | KiCad cleanup / teardrops after routing | plugin option | off | can be invoked from the plugin: IPC run-action opens KiCad's own dialog, user confirms ([30 §4.2](../kicad/30-kicad-constraints.md#42-delegating-post-processing-to-kicad-tools)); not headless |
 | 12 | Preferred direction per layer | plugin config | none | |
