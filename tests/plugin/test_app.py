@@ -128,12 +128,21 @@ def test_plugin_json_fields():
     assert a["name"] == "Topor: route" and a["description"] == "Route the board or the selection with Topor"
 
 
-def test_build_layout_in_scratch_kicad_home(tmp_path):
-    real_before = _snapshot(REAL_PLUGIN_DIR)
-    env = {**os.environ, "KICAD_DOCUMENTS_HOME": str(tmp_path / "kicad10"), "TOPOR_VENV": sys.prefix}
+def _build(**env_over):
+    env = {k: v for k, v in os.environ.items() if k not in ("TOPOR_KICAD_HOME", "KICAD_DOCUMENTS_HOME")}
+    env.update(TOPOR_VENV=sys.prefix, **env_over)
     r = subprocess.run(["bash", str(ROOT / "tools" / "build.sh")], cwd=ROOT, env=env, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[-2000:]
-    d = tmp_path / "kicad10" / "plugins" / "org.topor.router"
+    return r
+
+
+def test_build_layout_in_scratch_kicad_home(tmp_path):
+    """build.sh into a scratch KiCad home (ruling C3; never the real one). F MINOR 9: KICAD_DOCUMENTS_HOME is
+    KiCad's UNversioned documents root (10.0 is appended); TOPOR_KICAD_HOME is the versioned dir and wins."""
+    real_before = _snapshot(REAL_PLUGIN_DIR)
+    _build(KICAD_DOCUMENTS_HOME=str(tmp_path / "kdocs"))
+    d = tmp_path / "kdocs" / "10.0" / "plugins" / "org.topor.router"
+    assert not (tmp_path / "kdocs" / "plugins").exists()
     for name in ("plugin.json", "topor_plugin.py", "requirements.txt"):
         assert (d / name).is_file(), name
     for name in ("topor", "toporlib", "docs/user", "wheels"):
@@ -157,5 +166,10 @@ def test_build_layout_in_scratch_kicad_home(tmp_path):
                           "m=u.module_from_spec(s); s.loader.exec_module(m); import topor.app, toporlib.drc; print('ok')"],
                          cwd=tmp_path, capture_output=True, text=True, env=env2)
     assert pr2.returncode == 0 and "ok" in pr2.stdout, pr2.stderr
+    # TOPOR_KICAD_HOME (versioned dir) wins over KICAD_DOCUMENTS_HOME
+    r = _build(TOPOR_KICAD_HOME=str(tmp_path / "kicad10"), KICAD_DOCUMENTS_HOME=str(tmp_path / "other"))
+    d2 = tmp_path / "kicad10" / "plugins" / "org.topor.router"
+    assert (d2 / "topor" / "app.py").is_file() and list((d2 / "wheels").glob("topor_engine-0.4.0-*.whl"))
+    assert not (tmp_path / "other").exists() and str(d2) in r.stdout
     # the user's real KiCad plugin dir is untouched (Ruling C3)
     assert _snapshot(REAL_PLUGIN_DIR) == real_before
