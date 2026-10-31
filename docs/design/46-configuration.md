@@ -50,7 +50,7 @@ and debugging. Concretely:
 | # | Setting | Source | Default | Notes |
 |---|---|---|---|---|
 | 1 | Clearances, widths, via sizes, annular ring, hole sizes | board setup | — | fab-specific values are entered in KiCad, not in topor |
-| 2 | **Drill list** (allowed via drills) | plugin config | 0.25 / 0.30 / 0.40 / 0.50 / 0.80 / 1.00 mm | pre-flight: every hole size used in the design but missing from the list → warning + question "add to drill list?" (yes updates the config) |
+| 2 | **Via sizes** (diameter + drill) | KiCad: netclass via size/drill per net + Board Setup → Pre-defined Sizes → Vias (`m_ViasDimensionsList`), limited by Design Rules → Constraints (min via size, min hole, min annular) | if the pre-defined via list is empty **and** the netclass vias are KiCad's factory values: warn "via sizes not set up" and use **0.4 mm drill / 0.8 mm via** (configurable fallback) | user 2026-10-31: per net, the netclass via first, then other pre-defined vias (smaller ones only where space requires); `topor.toml` `allowed_drills` is an optional fab filter (empty = no filter); pre-flight warns about hole sizes in the design outside that filter and offers to add them |
 | 3 | Copper-to-edge clearance | board setup | 0.5 mm only if the board sets none (fab floor 0.2) | |
 | 4 | Power-net recognition | netclass first; name pattern only for nets still in `Default` (user: option c) | pattern `^(\+\|-)?\d\|^(V\|VCC\|VDD\|VBAT\|GND\|AGND\|PWR)` editable in `topor.toml` | pre-flight lists every net classified by name guess |
 | 5 | Net priority | `@1`/`@2`/`@3` marker in the net name (user: accepted) + netclass `topor_p1..p3` alternative | no marker = normal | combination rules §2.1 |
@@ -58,7 +58,7 @@ and debugging. Concretely:
 | 7 | Detour limit before rip-up | plugin config | 2.0 × ghost length | tied to the detour metric |
 | 8a | Pour-served nets (connect via pour + via-to-pour stubs) | plugin config | auto (net has a pour on a plane/mixed layer) | per-net override |
 | 8b | **Do-not-touch nets** | plugin config (list, patterns allowed) | empty | their copper is a fixed obstacle; never routed, ripped, or smoothed |
-| 9 | Via in SMD pad | plugin config | off | depends on fab process (filled/capped vias) |
+| 9 | Via in SMD pad | KiCad Board Setup via protection (`m_FillVias`, `m_CapVias`, `m_PlugVias*`, `m_TentVias*` in KiCad 10) → allowed only when vias are filled + capped; `topor.toml` override | off unless filled + capped | depends on fab process |
 | 10 | Output geometry | plugin option | native arcs | segment approximation and the 45° mode (`bend_90`, `bend_acute`) are other values |
 | 11 | KiCad cleanup / teardrops after routing | plugin option | off | can be invoked from the plugin: IPC run-action opens KiCad's own dialog, user confirms ([30 §4.2](../kicad/30-kicad-constraints.md#42-delegating-post-processing-to-kicad-tools)); not headless |
 | 12 | Preferred direction per layer | plugin config | none | |
