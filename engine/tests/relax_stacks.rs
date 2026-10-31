@@ -261,10 +261,8 @@ fn converges_and_is_deterministic() {
 #[test]
 fn relax_iter_cap_respected() {
     let (obs, wires, seqs, o) = two_wire_setup("");
-    let opts = Options {
-        relax_iter_cap: 1,
-        ..Options::default()
-    };
+    let mut opts = Options::default();
+    opts.expert.relax_iter_cap = 1;
     let r = run_with(&wires, &seqs, &obs, &o, &opts, far());
     assert_eq!(r.iterations, 1);
     assert!(!r.converged);

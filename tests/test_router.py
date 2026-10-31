@@ -146,7 +146,7 @@ def test_bench_drc_loop_reroutes_with_spots(fixture_board, tmp_path):
 def test_progress_m3_caption_and_path(engine, fixture_board, tmp_path):
     res = progress.render_progress("T4", board="fixture", date="2026-10-31",
                                    out_dir=tmp_path / "prog", pcb_override=fixture_board.pcb,
-                                   router="topor")
+                                   router="topor", milestone="m3")
     assert (tmp_path / "prog" / "2026-10-31-m3-T4.png").is_file()
     lines = res["caption"].split("\n")
     l1, l2 = lines[0], lines[1]
@@ -326,3 +326,35 @@ def test_bench_zero_slack_rejected_by_drc_reverts(fixture_board, tmp_path):
     metrics = json.loads((tmp_path / "o" / "fixture--metrics.json").read_text())
     assert metrics["zero_slack"]["status"] == "rejected by DRC"
 
+
+
+def test_progress_m4_name_and_caption_lines(engine, fixture_board, tmp_path):
+    # default milestone is m4: <date>-m4-<task>-<board>.png; --options merge over board defaults
+    res = progress.render_progress("A0", board="fixture", date="2026-11-01",
+                                   out_dir=tmp_path / "prog", pcb_override=fixture_board.pcb,
+                                   router="topor", options={"wall_clock_s": 30})
+    assert (tmp_path / "prog" / "2026-11-01-m4-A0-fixture.png").is_file()
+    lines = res["caption"].split("\n")
+    stop = (res["router_report"] or {}).get("stop_reason")
+    assert stop, "the engine reports a stop_reason"
+    assert lines[-1] == f"stop_reason: {stop}"  # the last caption line
+    assert lines[0].startswith("A0: ") and lines[1].startswith("DRC routing ")
+    # bench columns of the result: detour (reference) is empty until A7, ghost stats and vias/net
+    cols = res["columns"]
+    assert set(cols) == {"detour", "detour_ghost", "stop_reason", "vias_per_net"}
+    assert cols["detour"] is None and cols["stop_reason"] == stop
+    assert cols["detour_ghost"] == res["detour"]
+
+
+def test_progress_options_and_names_are_pure_helpers():
+    assert progress.board_options("dcsgonebadge", "m4") == {"wall_clock_s": 600, "partial_routes": False}
+    assert progress.board_options("dcsgonebadge", "m3") == {"wall_clock_s": 60, "partial_routes": False}
+    assert progress.board_options("eprom-to-kernal", "m4") is None
+    assert progress.merged_options("dcsgonebadge", "m4", {"wall_clock_s": 120}) == {
+        "wall_clock_s": 120, "partial_routes": False}
+    assert progress.merged_options("eprom-to-kernal", "m4", None) is None
+    assert progress.merged_options("eprom-to-kernal", "m4", {"threads": 2}) == {"threads": 2}
+    assert progress.progress_png_name("D", "m4", "A0", "wiccon") == "D-m4-A0-wiccon.png"
+    assert progress.progress_png_name("D", "m3", "T4", "x") == "D-m3-T4.png"
+    assert progress.progress_png_name("D", "m1", "T1") == "D-m1-T1.png"
+    assert progress.progress_png_name("D", "m4", "A0") == "D-m4-A0.png"

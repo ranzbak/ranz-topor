@@ -623,6 +623,7 @@ fn params_for<'a>(
         eps: None,
         via_cost: opts.via_cost_nm as f64 * via_weight(c.tier),
         max_vias: opts.max_vias_per_connection,
+        strict_unfit_edges: opts.strict_unfit_edges,
     }
 }
 

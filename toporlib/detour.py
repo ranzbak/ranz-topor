@@ -6,19 +6,21 @@ from __future__ import annotations
 MM = 1_000_000  # nm per mm
 
 
-def detour_stats(connections) -> dict | None:
-    """Detour ratio (routed length / ghost length) over routed connections (ruling M3-R11).
+def detour_stats(connections, ref_key: str = "ghost_len_nm") -> dict | None:
+    """Detour ratio (routed length / reference length) over routed connections (ruling M3-R11).
 
-    Returns None when no connection carries the `ghost_len_nm` field (old engine). Connections
-    that are not routed, or have a null / non-positive ghost length, count as `no_reference`.
+    The reference is the connection field `ref_key`: `ghost_len_nm` (the topological ghost, the
+    default) or the DRC-feasible shortest path of M3-R15 (`detour_ref_len_nm`, A7).
+    Returns None when no connection carries the field (old engine). Connections
+    that are not routed, or have a null / non-positive reference length, count as `no_reference`.
     """
     conns = list(connections or [])
-    if not any("ghost_len_nm" in c for c in conns):
+    if not any(ref_key in c for c in conns):
         return None
     rows: list[dict] = []
     no_ref = 0
     for c in conns:
-        ghost = c.get("ghost_len_nm")
+        ghost = c.get(ref_key)
         length = c.get("length_nm")
         if c.get("status") != "routed" or not ghost or ghost <= 0 or length is None:
             no_ref += 1

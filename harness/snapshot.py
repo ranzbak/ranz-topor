@@ -22,9 +22,21 @@ def _sha(p: Path) -> str:
 
 
 def snapshot_board(name: str, store: Path) -> tuple[str, dict]:
+    """Snapshot ``name`` into ``store/<name>/<sha12 of the pcb>/`` and return ``(sha12, manifest)``.
+
+    The directory is keyed by the pcb hash and immutable: copied and verified against the source
+    only when it is created. An existing snapshot is returned as it is (its manifest is kept) even
+    when sidecar files (.kicad_pro/.dru/.prl) of the source were edited since; only its own pcb
+    copy is re-hashed. An edited pcb has a new hash and therefore a new directory.
+    """
     pcb = SOURCE_BOARDS[name]
     h = _sha(pcb)
     dst = store / name / h[:12]
+    manifest = dst / "MANIFEST.json"
+    if dst.exists() and manifest.is_file():
+        if _sha(dst / pcb.name) != h:
+            raise RuntimeError(f"snapshot pcb does not match its directory hash: {dst / pcb.name}")
+        return h[:12], json.loads(manifest.read_text())
     if not dst.exists():
         dst.mkdir(parents=True)
         for f in pcb.parent.iterdir():
@@ -38,7 +50,7 @@ def snapshot_board(name: str, store: Path) -> tuple[str, dict]:
     m = {"board": name, "source": str(pcb), "pcb_sha256": h,
          "source_mtime": datetime.datetime.fromtimestamp(pcb.stat().st_mtime).isoformat(timespec="seconds"),
          "files": sorted(f.name for f in dst.iterdir() if f.name != "MANIFEST.json")}
-    (dst / "MANIFEST.json").write_text(json.dumps(m, indent=1))
+    manifest.write_text(json.dumps(m, indent=1))
     return h[:12], m
 
 

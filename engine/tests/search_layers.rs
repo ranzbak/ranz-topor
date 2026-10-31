@@ -230,6 +230,7 @@ impl Ctx {
             eps: None,
             via_cost: self.via_cost,
             max_vias: self.max_vias,
+            strict_unfit_edges: false,
         }
     }
 }
@@ -930,4 +931,57 @@ fn ghost_cost_is_linear() {
         (g2.expansions, g2.est_len.to_bits(), g2.sites.clone()),
         (gp.expansions, gp.est_len.to_bits(), gp.sites.clone())
     );
+}
+
+/// Board 3.2 mm wide (kicad x 9..12.2, y 0..20) with a pinch: THT pads of nets 2 and 3 at
+/// (10, 10) and (11.2, 10) leave 0.2 mm between them and no room outside, on both layers.
+fn pinch_model() -> BoardModel {
+    let pads = [
+        p("a", 1, 10.6, 5.0, 1.0, Kind::Tht),
+        p("b", 1, 10.6, 15.0, 1.0, Kind::Tht),
+        p("x", 2, 10.0, 10.0, 1.0, Kind::Tht),
+        p("y", 3, 11.2, 10.0, 1.0, Kind::Tht),
+    ];
+    let pj: Vec<String> = pads.iter().map(pad_json).collect();
+    let (x0, x1, y1) = (9_000_000, 12_200_000, 20_000_000);
+    let s = format!(
+        r#"{{ "layers": [ {{ "id": 0, "routable": true }}, {{ "id": 31, "routable": true }} ],
+          "outline": [
+            {{ "kind": "seg", "a": [{x0}, 0], "b": [{x1}, 0] }},
+            {{ "kind": "seg", "a": [{x1}, 0], "b": [{x1}, {y1}] }},
+            {{ "kind": "seg", "a": [{x1}, {y1}], "b": [{x0}, {y1}] }},
+            {{ "kind": "seg", "a": [{x0}, {y1}], "b": [{x0}, 0] }} ],
+          "pads": [ {} ],
+          "rules": {{ "default": {{ "clearance": 200000, "width": 250000 }}, "min_clearance": 0,
+            "hole_clearance": 250000, "hole_to_hole": 250000, "edge_clearance": 500000 }} }}"#,
+        pj.join(",")
+    );
+    BoardModel::from_json(&s).unwrap()
+}
+
+#[test]
+fn strict_unfit_edge_rejected_in_search() {
+    let m = pinch_model();
+    let b = build(&m, vec![]);
+    let c = conn(0, 1, "a", "b");
+    let start: Vec<(usize, usize)> = (0..2).map(|l| (l, vert(&b, l, "a"))).collect();
+    let g = goal(&(0..2).map(|l| (l, vert(&b, l, "b"))).collect::<Vec<_>>());
+    let ctx = Ctx::new();
+    // the pinch edge is unfit even when empty
+    let li = 0;
+    let e = b.mg.layers[li]
+        .g
+        .edge(vert(&b, li, "x"), vert(&b, li, "y"))
+        .expect("pinch edge");
+    assert!(!b.mg.layers[li].g.fits_at(e, 250_000.0, 200_000.0, 5_000.0));
+    // default: the unfit gap is priced as an overuse crossing, the connection is found
+    let loose = found(search(&b.mg, &b.obs, &c, &start, &g, &ctx.params()));
+    assert!(loose.legs.iter().any(|l| l.crossings.iter().any(|&(x, _)| x == e)));
+    // strict: no unfit edge is entered, the search is blocked (the ghost keeps pricing it soft)
+    let mut sp = ctx.params();
+    sp.strict_unfit_edges = true;
+    match search(&b.mg, &b.obs, &c, &start, &g, &sp) {
+        SearchOutcome::Blocked { .. } => {}
+        other => panic!("strict search must be blocked, got {other:?}"),
+    }
 }

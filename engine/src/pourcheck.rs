@@ -34,6 +34,9 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const MIN_CELL_NM: f64 = 25_000.0;
 /// Cell budget per (pour, layer) raster.
 pub const CELL_BUDGET: f64 = 4.0e6;
+/// Stamped-cell budget of one `check_pour_reach` run (all pours): once spent, further capsule
+/// knockouts are skipped (the check turns optimistic and says so in `notes`).
+pub const STAMP_CELL_BUDGET: u64 = 16_000_000;
 /// KiCad `ZONE_CONNECTION` values.
 pub const CONN_NONE: i32 = 0;
 pub const CONN_THERMAL: i32 = 1;
@@ -119,7 +122,18 @@ impl Raster {
 
 /// Build the fill mask of `rings` (even-odd over outer rings and holes), knock out `stamps`
 /// (capsules of radius `r`), label the 4-connected islands.
-fn build_raster(rings: &[&[Vec2]], stamps: &[(Seg, f64)]) -> Raster {
+///
+/// Knockouts run one scanline per raster row: a capsule meets a row in one interval, so a stamp
+/// visits `O(rows spanned + cells covered)` cells (`O(L/res * w/res)` for a track of length `L` and
+/// width `w`), not its whole bounding box. At most `allowance` cells are stamped and `stop` is
+/// polled every 64 stamps; either cut leaves later stamps out. Returns the raster, the number of
+/// cells stamped and whether the stamping was cut short. Total `O(nx*ny + stamped cells)`.
+fn build_raster(
+    rings: &[&[Vec2]],
+    stamps: &[(Seg, f64)],
+    allowance: u64,
+    stop: &dyn Fn() -> bool,
+) -> (Raster, u64, bool) {
     let mut bb: Option<Aabb> = None;
     for ring in rings {
         for p in ring.iter() {
@@ -182,15 +196,35 @@ fn build_raster(rings: &[&[Vec2]], stamps: &[(Seg, f64)]) -> Raster {
             }
         }
     }
-    // Knockouts.
-    for (s, rad) in stamps {
+    // Knockouts: one interval per capsule and row.
+    let mut stamped = 0u64;
+    let mut cut = false;
+    'stamps: for (k, (s, rad)) in stamps.iter().enumerate() {
+        if k % 64 == 0 && stop() {
+            cut = true;
+            break;
+        }
         let sb = Prim::Seg(*s).bbox().grow(*rad);
-        let (i0, i1, j0, j1) = r.range(&sb);
+        let (_, _, j0, j1) = r.range(&sb);
         for j in j0..j1 {
-            for i in i0..i1 {
-                if fill[j * nx + i] && point_seg(r.centre(i, j), s) <= *rad {
-                    fill[j * nx + i] = false;
+            let yc = y0 + (j as f64 + 0.5) * res;
+            let Some((lo, hi)) = capsule_row_span(s, *rad, yc) else {
+                continue;
+            };
+            let i0 = ((lo - x0) / res - 0.5).ceil().max(0.0) as usize;
+            let i1 = (((hi - x0) / res - 0.5).floor().max(-1.0) as isize).min(nx as isize - 1);
+            let mut i = i0 as isize;
+            if i1 - i + 1 > 0 {
+                let n = (i1 - i + 1) as u64;
+                if stamped + n > allowance {
+                    cut = true;
+                    break 'stamps;
                 }
+                stamped += n;
+            }
+            while i <= i1 {
+                fill[j * nx + i as usize] = false;
+                i += 1;
             }
         }
     }
@@ -230,7 +264,48 @@ fn build_raster(rings: &[&[Vec2]], stamps: &[(Seg, f64)]) -> Raster {
         }
         r.area[id as usize] = cells as f64 * res * res;
     }
-    r
+    (r, stamped, cut)
+}
+
+/// x-interval where the horizontal line `y = yc` meets the capsule (segment `s` grown by `rad`);
+/// `None` when it misses. The capsule is convex, so the union of the two end discs and the
+/// centre rectangle is one interval. O(1).
+fn capsule_row_span(s: &Seg, rad: f64, yc: f64) -> Option<(f64, f64)> {
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    let mut add = |x: f64| {
+        lo = lo.min(x);
+        hi = hi.max(x);
+    };
+    for p in [s.a, s.b] {
+        let dy = (yc - p.y).abs();
+        if dy <= rad {
+            let dx = (rad * rad - dy * dy).sqrt();
+            add(p.x - dx);
+            add(p.x + dx);
+        }
+    }
+    let d = s.b - s.a;
+    let len = d.len();
+    if len > 0.0 {
+        let n = Vec2 {
+            x: -d.y / len * rad,
+            y: d.x / len * rad,
+        };
+        let q = [s.a + n, s.b + n, s.b - n, s.a - n];
+        for k in 0..4 {
+            let (a, b) = (q[k], q[(k + 1) % 4]);
+            if a.y == b.y {
+                if a.y == yc {
+                    add(a.x);
+                    add(b.x);
+                }
+            } else if (a.y <= yc && yc <= b.y) || (b.y <= yc && yc <= a.y) {
+                add(a.x + (yc - a.y) / (b.y - a.y) * (b.x - a.x));
+            }
+        }
+    }
+    (lo <= hi).then_some((lo, hi))
 }
 
 /// Capsule stamps (segment, radius) of a track primitive in the math frame, radius `r`.
@@ -351,6 +426,9 @@ pub struct PourReach {
     pub main_vias: BTreeMap<usize, Vec<String>>,
     /// One line per checked net: islands, main component size, lost items.
     pub notes: Vec<String>,
+    /// Raster cells knocked out by capsule stamps, all pours (diagnostic; bounded by
+    /// [`STAMP_CELL_BUDGET`]).
+    pub stamped_cells: u64,
 }
 
 impl PourReach {
@@ -394,6 +472,21 @@ fn pad_index(model: &BoardModel, label: &str) -> Option<usize> {
 /// `route`). `routed_pads` = pad indices at the ends of connections routed in this run (their
 /// copper must reach the main component too).
 pub fn check_pour_reach(model: &BoardModel, items: &[Item], routed_pads: &[usize]) -> PourReach {
+    check_pour_reach_until(model, items, routed_pads, None)
+}
+
+/// [`check_pour_reach`] with a deadline (and the cancel flag): the capsule stamping of every pour
+/// polls it, and once it fires (or [`STAMP_CELL_BUDGET`] is spent, shared deterministically: each
+/// net's rasters split the budget left at the net's start equally) the remaining knockouts are
+/// skipped and a note says so. O(nets * pours * (cells + stamped cells)).
+pub fn check_pour_reach_until(
+    model: &BoardModel,
+    items: &[Item],
+    routed_pads: &[usize],
+    deadline: Option<std::time::Instant>,
+) -> PourReach {
+    let stop = move || deadline.map_or_else(crate::control::cancelled, crate::control::expired);
+    let mut budget_left = STAMP_CELL_BUDGET;
     let mut out = PourReach::default();
     let all = model.all_layer_ids();
     let rules = &model.rules;
@@ -455,7 +548,8 @@ pub fn check_pour_reach(model: &BoardModel, items: &[Item], routed_pads: &[usize
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        let built: Vec<((usize, u32), Raster)> = keys
+        let allowance = budget_left / keys.len().max(1) as u64;
+        let built: Vec<((usize, u32), Raster, u64, bool)> = keys
             .par_iter()
             .map(|&(zi, layer)| {
                 let z = &model.pours[zi];
@@ -490,10 +584,23 @@ pub fn check_pour_reach(model: &BoardModel, items: &[Item], routed_pads: &[usize
                 {
                     stamps.push((Seg { a: *at, b: *at }, r + dil(*inet)));
                 }
-                ((zi, layer), build_raster(&rings, &stamps))
+                let (raster, stamped, cut) = build_raster(&rings, &stamps, allowance, &stop);
+                ((zi, layer), raster, stamped, cut)
             })
             .collect();
-        let mut rasters: BTreeMap<(usize, u32), Raster> = built.into_iter().collect();
+        for (k, _, stamped, cut) in &built {
+            out.stamped_cells += stamped;
+            budget_left = budget_left.saturating_sub(*stamped);
+            if *cut {
+                out.notes.push(format!(
+                    "pour {} layer {}: knockout stamping cut short (cell budget or deadline); \
+                     reach check optimistic",
+                    k.0, k.1
+                ));
+            }
+        }
+        let mut rasters: BTreeMap<(usize, u32), Raster> =
+            built.into_iter().map(|(k, r, _, _)| (k, r)).collect();
 
         // Nodes: islands, pads, vias, tracks of the net.
         let mut island_base: BTreeMap<(usize, u32), usize> = BTreeMap::new();
@@ -990,6 +1097,45 @@ mod tests {
                 y: -10.0e6
             }
         ));
+    }
+
+    #[test]
+    fn pourcheck_long_diagonal_track_stamps_linear() {
+        let m = model();
+        // 41.6 mm diagonal of the 30 x 30 mm fill: the bounding box is the whole fill.
+        let items = [seg(2, 31, (2_300_000, 2_300_000), (31_700_000, 31_700_000))];
+        let r = check_pour_reach(&m, &items, &[]);
+        let rings: Vec<Vec<Vec2>> = vec![m.pours[0].fills[0]
+            .outer
+            .iter()
+            .map(|p| p.to_vec2())
+            .collect()];
+        let refs: Vec<&[Vec2]> = rings.iter().map(|v| v.as_slice()).collect();
+        let res = build_cell(&refs);
+        let l = 29.4e6f64 * std::f64::consts::SQRT_2;
+        let w = 2.0 * (125_000.0 + 200_000.0 + 127_000.0 + 0.71 * res);
+        let bound = 4.0 * (l / res) * (w / res) + 64.0;
+        assert!(r.stamped_cells > 0);
+        assert!(
+            (r.stamped_cells as f64) <= bound,
+            "stamped {} > bound {bound}",
+            r.stamped_cells
+        );
+        // the knockout still separates U1 (above the diagonal) from U3 (below)
+        assert!(!r.is_clean(), "{:?}", r.notes);
+    }
+
+    #[test]
+    fn stamp_budget_exhaustion_is_noted_not_fatal() {
+        let m = model();
+        let items = [seg(2, 31, (2_300_000, 2_300_000), (31_700_000, 31_700_000))];
+        let r = check_pour_reach_until(&m, &items, &[], Some(std::time::Instant::now()));
+        assert!(
+            r.notes.iter().any(|n| n.contains("cut short")),
+            "{:?}",
+            r.notes
+        );
+        assert_eq!(r.stamped_cells, 0);
     }
 
     #[test]

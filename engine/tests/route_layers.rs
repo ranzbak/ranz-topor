@@ -105,6 +105,14 @@ fn json_no_runtime(r: &RouteResult) -> String {
     serde_json::to_string(&v).unwrap()
 }
 
+fn json_no_runtime_threads(r: &RouteResult) -> String {
+    let mut v = serde_json::to_value(r).unwrap();
+    let o = v.as_object_mut().unwrap();
+    o.remove("runtime_s");
+    o.remove("threads_used");
+    serde_json::to_string(&v).unwrap()
+}
+
 fn tracks_on(r: &RouteResult, layer: u32) -> usize {
     r.items
         .iter()
@@ -559,7 +567,7 @@ fn route_pour_reach_completes_pad_cut_off_by_foreign_track() {
         "{:?}",
         r.warnings
     );
-    assert!(!r.warnings.iter().any(|w| w.contains("still without pour")), "{:?}", r.warnings);
+    assert!(!r.warnings.iter().any(|w| w.contains("without pour after")), "{:?}", r.warnings);
     clean(&m, &r);
     let strip = |r: &RouteResult| {
         let mut v = serde_json::to_value(r).unwrap();
@@ -570,4 +578,72 @@ fn route_pour_reach_completes_pad_cut_off_by_foreign_track() {
     };
     let again = route(&m, &Options { threads: 4, ..opts() });
     assert_eq!(strip(&r), strip(&again));
+}
+
+/// D3 (M3 review D-3): the Rule-T via counter-example end to end (note section 2, the unit test is
+/// `via_move_respects_rule_t_at_site` in `search_layers.rs`, which has to hand-insert the foreign
+/// strand). Foreign F.Cu pads `p` and `q` (net 2) enclose the F.Cu source `x` (net 1) of a
+/// connection to a B.Cu pad, so the net-2 strand leaves `p` right beside the via sites next to
+/// `x`; the router must route both nets with a via placed on the correct side of that strand,
+/// DRC-clean and deterministic.
+#[test]
+fn rule_t_via_counter_example() {
+    let m = model(
+        &[
+            p("p", 2, 20.0, 20.0, Kind::F),
+            p("q", 2, 20.0, 28.0, Kind::F),
+            p("x", 1, 20.0, 24.0, Kind::F),
+            p("b", 1, 40.0, 22.0, Kind::B),
+        ],
+        "",
+    );
+    let r = route(&m, &opts());
+    assert_eq!((r.routed, r.connections_total), (2, 2), "{:?}", r.connections);
+    let net1 = r.connections.iter().find(|c| c.net == 1).unwrap();
+    assert_eq!(net1.vias, 1, "{net1:?}");
+    clean(&m, &r);
+    let again = route(&m, &Options { threads: 4, ..opts() });
+    assert_eq!(json_no_runtime_threads(&r), json_no_runtime_threads(&again));
+}
+
+/// D-6: GND SMD pad U2.1 (F.Cu) outside a B.Cu pour that lists the through via `v1` (inside the
+/// fill, net 1): the pour connection ends on that via (a goal vertex on F.Cu), so no new via is
+/// placed and the track ends at the via centre.
+#[test]
+fn pour_connection_uses_listed_same_net_via_as_goal() {
+    let m = model(
+        &[p("U2", 1, 40.0, 15.0, Kind::F)],
+        r#""vias": [ { "uuid": "v1", "net": 1, "at": [20000000, 15000000], "d": 600000,
+                "drill": 300000, "layers": [0, 31] } ],
+            "pours": [ { "uuid": "zz", "net": 1, "layers": [31], "pads": [], "vias": ["v1"],
+              "fills": [ { "layer": 31,
+                "outer": [[0, 0], [30000000, 0], [30000000, 30000000], [0, 30000000]] } ] } ],"#,
+    );
+    // default: off, a new via is placed inside the fill (the M3 behaviour)
+    let off = route(&m, &opts());
+    assert_eq!(off.connections[0].vias, 1, "{:?}", off.connections);
+    let o = Options { pour_listed_via_goals: true, ..opts() };
+    let r = route(&m, &o);
+    assert_eq!(r.connections.len(), 1, "{:?}", r.connections);
+    let c = &r.connections[0];
+    assert_eq!(c.to.kind, "pour");
+    assert_eq!(c.status, "routed", "{c:?}");
+    assert_eq!(c.vias, 0, "{c:?}");
+    assert!(vias(&r).is_empty(), "no new via: {:?}", vias(&r));
+    // the track ends on the listed via
+    let hits_via = r.items.iter().any(|i| match i {
+        Item::Track(t) => {
+            let e = |q: topor_engine::geom::quant::IVec2| (q.x as i64 - 20_000_000).abs() <= 2
+                && (q.y as i64 - 15_000_000).abs() <= 2;
+            match t.prim {
+                topor_engine::geom::quant::TrackPrim::Seg { a, b } => e(a) || e(b),
+                _ => false,
+            }
+        }
+        _ => false,
+    });
+    assert!(hits_via, "{:?}", r.items);
+    clean(&m, &r);
+    let again = route(&m, &Options { threads: 4, ..o });
+    assert_eq!(json_no_runtime_threads(&r), json_no_runtime_threads(&again));
 }

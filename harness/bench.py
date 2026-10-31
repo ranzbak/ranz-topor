@@ -121,6 +121,34 @@ def _route_summary(report: dict | None, layers: list[dict] | None = None) -> dic
     }
 
 
+def bench_columns(report: dict | None) -> dict:
+    """The M4 bench columns of a router report: `detour` (M3-R15 reference, DRC-feasible shortest
+    path, `detour_ref_len_nm` per connection, filled by A7; None until then), `detour_ghost`
+    (routed / ghost length stats), `stop_reason`, `vias_per_net` (`{net name: vias}` for nets with
+    vias, the report's own `vias_per_net` when the engine emits one)."""
+    rep = report or {}
+    conns = rep.get("connections")
+    vpn = rep.get("vias_per_net")
+    if vpn is None and "nets" in rep:
+        vpn = {n.get("name") or str(n.get("net")): n["vias"] for n in rep["nets"] if n.get("vias")}
+    return {
+        "detour": detour_stats(conns, "detour_ref_len_nm"),
+        "detour_ghost": detour_stats(conns),
+        "stop_reason": rep.get("stop_reason"),
+        "vias_per_net": vpn,
+    }
+
+
+def _columns_line(cols: dict) -> str:
+    def d(s):
+        return "-" if not s or not s.get("n") else (
+            f"med {s['median']:.2f} p90 {s['p90']:.2f} max {s['max']:.2f} >1.5 {s['count_gt_1_5']}")
+    v = cols.get("vias_per_net")
+    vtxt = "-" if v is None else f"{len(v)} nets, max {max(v.values(), default=0)}"
+    return (f"columns: detour {d(cols.get('detour'))} | ghost {d(cols.get('detour_ghost'))} | "
+            f"stop {cols.get('stop_reason') or '-'} | vias/net {vtxt}")
+
+
 def _smooth_summary(report: dict | None) -> dict | None:
     if not report or "connections" in report:
         return None
@@ -202,6 +230,7 @@ def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path,
         dl_ = detour_line(result.get("detour"))
         if dl_:
             head.append(f"  {dl_}")
+        head.append(f"  {_columns_line(result['columns'])}")
         head.append(f"  via reduction: {rt.get('via_reduction')}")
         head.append(f"  zero slack: {zs.get('status')}, {len(names)} wire(s)"
                     + (f" ({', '.join(names)})" if names else ""))
@@ -365,6 +394,7 @@ def run_bench(
         "smooth": _smooth_summary(router_report),
         "route": route,
         "detour": detour_stats((router_report or {}).get("connections")),
+        "columns": bench_columns(router_report),
         "hand_stats": hand_stats,
         "floors": [{"name": f["name"], "design_mm": f["design"] / 1e6, "floor_mm": f["floor"] / 1e6}
                    for f in rules.get("floors_applied", [])],

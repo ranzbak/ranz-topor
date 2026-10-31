@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import tempfile
 from pathlib import Path
 
@@ -16,11 +17,28 @@ ROOT = Path(__file__).resolve().parents[1]
 DETOUR_THRESHOLD = 1.5
 # Informational boards: the M2/M3 gate tests run them with these options.
 _LONG_BOARD_OPTIONS = {"wall_clock_s": 60, "partial_routes": False}
+# M4a gate options of dcsgonebadge (M3-R14, ruling A-C3): whole run <= 10 min, no partial routes.
+_M4_GATE_OPTIONS = {"wall_clock_s": 600, "partial_routes": False}
 
 
-def board_options(board: str) -> dict | None:
-    """run_bench options for `board` (None = defaults); mirrors tests/gate/test_m3_gate.py."""
-    return dict(_LONG_BOARD_OPTIONS) if board == "dcsgonebadge" else None
+def board_options(board: str, milestone: str = "m3") -> dict | None:
+    """run_bench options for `board` (None = defaults); mirrors tests/gate/test_m3_gate.py
+    (`milestone` m3: 60 s) and the M4a gate (`milestone` m4: 600 s) for dcsgonebadge."""
+    if board != "dcsgonebadge":
+        return None
+    return dict(_M4_GATE_OPTIONS if milestone == "m4" else _LONG_BOARD_OPTIONS)
+
+
+def merged_options(board: str, milestone: str, extra: dict | None) -> dict | None:
+    """Board defaults with the `--options` JSON merged over them (None when both are empty)."""
+    out = {**(board_options(board, milestone) or {}), **(extra or {})}
+    return out or None
+
+
+def progress_png_name(date: str, milestone: str, task: str, board: str | None = None) -> str:
+    """`<date>-<milestone>-<task>[-<board>].png`; m1/m3 files keep their board-less names."""
+    suffix = f"-{board}" if board and milestone not in ("m1", "m3") else ""
+    return f"{date}-{milestone}-{task}{suffix}.png"
 
 
 def detour_caption(stats: dict | None) -> str | None:
@@ -68,7 +86,7 @@ def m3_caption(task: str, result: dict, threads: int) -> str:
     if d:
         lines.append(d)
     stop = (result.get("router_report") or {}).get("stop_reason")
-    if stop:  # M4 engines report why the loop ended (last line)
+    if stop:  # M4 engines report why the loop ended (always the last line)
         lines.append(f"stop_reason: {stop}")
     return "\n".join(lines)
 
@@ -92,10 +110,14 @@ def _highlight_detours(raw: Path, result: dict, pcb: Path) -> Path:
 def render_progress(task: str, *, board: str = "eprom-to-kernal", date: str | None = None,
                     out_dir: Path = ROOT / "docs/benchmarks/progress",
                     pcb_override: Path | None = None, router: str = "smoother",
-                    threads: int = 4, milestone: str = "m3") -> dict:
+                    threads: int = 4, milestone: str | None = None,
+                    options: dict | None = None) -> dict:
+    """Render the hand-vs-topor PNG. `milestone` defaults to m4 for the topor router (m1 for the
+    smoother); `options` are merged over the board's default run options."""
     if router == "topor":
         return _render_progress_m3(task, board=board, date=date, out_dir=out_dir,
-                                   pcb_override=pcb_override, threads=threads, milestone=milestone)
+                                   pcb_override=pcb_override, threads=threads,
+                                   milestone=milestone or "m4", options=options)
     date = date or datetime.date.today().isoformat()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -126,7 +148,7 @@ def render_progress(task: str, *, board: str = "eprom-to-kernal", date: str | No
         text = f"{line1}\n{line2}"
         topor_png = add_caption(tmp / f"{board}-work" / f"{board}-topor-raw.png", text,
                                 tmp / "topor-progress.png")
-        png = out_dir / f"{date}-m1-{task}.png"
+        png = out_dir / progress_png_name(date, milestone or "m1", task)
         compose_compare(tmp / f"{board}-hand.png", topor_png, png)
     result["caption"] = text
     result["png"] = str(png)
@@ -136,22 +158,22 @@ def render_progress(task: str, *, board: str = "eprom-to-kernal", date: str | No
 
 
 def _render_progress_m3(task: str, *, board: str, date: str | None, out_dir: Path,
-                        pcb_override: Path | None, threads: int = 4, milestone: str = "m3") -> dict:
+                        pcb_override: Path | None, threads: int = 4, milestone: str = "m4",
+                        options: dict | None = None) -> dict:
     date = date or datetime.date.today().isoformat()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="topor-progress-") as tmp:
         tmp = Path(tmp)
         result = bench.run_bench(board, tmp, router=route_router, rip="all", threads=threads,
-                                 pcb_override=pcb_override, options=board_options(board))
+                                 pcb_override=pcb_override,
+                                 options=merged_options(board, milestone, options))
         text = m3_caption(task, result, threads)
         work = tmp / f"{board}-work"
         pcb = work / bench._source_pcb(board, pcb_override).name
         raw = _highlight_detours(work / f"{board}-topor-raw.png", result, pcb)
         topor_png = add_caption(raw, text, tmp / "topor-progress.png")
-        # m3: `<date>-m3-<task>.png`; m4: `<date>-m4-<task>-<board>.png`
-        png = out_dir / (f"{date}-m4-{task}-{board}.png" if milestone == "m4"
-                         else f"{date}-m3-{task}.png")
+        png = out_dir / progress_png_name(date, milestone, task, board)
         compose_compare(tmp / f"{board}-hand.png", topor_png, png)
     result["caption"] = text
     result["png"] = str(png)
@@ -168,11 +190,16 @@ def main(argv: list[str] | None = None) -> int:
                     help="use this board instead of BENCH_BOARDS[board]")
     ap.add_argument("--router", choices=["smoother", "topor"], default="smoother")
     ap.add_argument("--threads", type=int, default=4)
-    ap.add_argument("--milestone", choices=["m3", "m4"], default="m3",
-                    help="only changes the output name (m4: <date>-m4-<task>-<board>.png)")
+    ap.add_argument("--milestone", choices=["m3", "m4"], default="m4",
+                    help="output name <date>-<milestone>-<task>[-<board>].png; m4 also selects "
+                         "the M4 gate options of dcsgonebadge (600 s)")
+    ap.add_argument("--options", default=None, metavar="JSON",
+                    help="engine options JSON merged over the board defaults, "
+                         "e.g. '{\"wall_clock_s\": 300}'")
     args = ap.parse_args(argv)
+    extra = json.loads(args.options) if args.options else None
     render_progress(args.task, board=args.board, pcb_override=args.pcb, router=args.router,
-                    threads=args.threads, milestone=args.milestone)
+                    threads=args.threads, milestone=args.milestone, options=extra)
     return 0
 
 

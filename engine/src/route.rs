@@ -49,7 +49,7 @@ use crate::negotiate::{
     detect_clinches, overused_conns, BlockInfo, ClinchReport, Negotiator,
 };
 use crate::obstacle::{ObstacleSet, TerminalObstacle};
-use crate::pourcheck::{check_pour_reach, with_routed_copper, PourReach};
+use crate::pourcheck::{check_pour_reach_until, with_routed_copper, PourReach};
 use crate::relax::{corridor_static, relax, Relaxer, RunOpts, SlotNesting, ZeroSlack};
 use crate::search::{
     default_expansion_cap, ghost, search, tier_weight, via_weight, Goal, SearchOutcome,
@@ -512,6 +512,39 @@ fn real_sketches(obs: &ObstacleSet, mg: &MultiGraph) -> Vec<Arc<LayerSketch>> {
         .collect()
 }
 
+/// D-6: the same-net vias `pour` lists (`pour.vias`, model vias of the connection's net) as
+/// goal terminals of a pour connection, restricted to the main fill component when `reach` is
+/// given. O(vias * listed).
+fn listed_pour_vias(
+    model: &BoardModel,
+    zi: usize,
+    net: i32,
+    routable: &[u32],
+    reach: Option<&PourReach>,
+) -> Vec<TermRef> {
+    let all = model.all_layer_ids();
+    let listed = &model.pours[zi].vias;
+    model
+        .vias
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| v.net == net && listed.contains(&v.uuid))
+        .filter(|(_, v)| reach.is_none_or(|r| r.main_vias.get(&zi).is_some_and(|m| m.contains(&v.uuid))))
+        .filter_map(|(vi, v)| {
+            let layers: Vec<u32> = crate::model::via_layers(&v.layers, &all)
+                .into_iter()
+                .filter(|l| routable.contains(l))
+                .collect();
+            (!layers.is_empty()).then(|| TermRef {
+                kind: TermKind::Via(vi),
+                label: v.uuid.clone(),
+                at: v.at.to_vec2(),
+                layers,
+            })
+        })
+        .collect()
+}
+
 fn legs_of(mg: &MultiGraph, conn: usize) -> &[usize] {
     mg.conn_wires.get(conn).map_or(&[][..], |v| v.as_slice())
 }
@@ -539,8 +572,18 @@ fn leg_terminals(
     let pour = matches!(c.to.kind, TermKind::Pour(_));
     let goal = if ord + 1 == nlegs && !pour {
         terminal_of(&c.to)
+    } else if let Some(&s) = sites.get(ord) {
+        site(s)
+    } else if ord + 1 == nlegs {
+        // D-6: a pour connection that ended on a same-net via the pour lists (no new via)
+        let k = *mg.conn_wires.get(conn)?.get(ord)?;
+        let li = mg.leg_layer(k)?;
+        let (_, _, (_, gv)) = mg.layers[li].g.path_of(k)?;
+        let at = mg.layers[li].g.verts[gv].at;
+        let vi = cx.model.vias.iter().position(|v| (v.at.to_vec2() - at).len() <= 2.0 && v.net == c.net)?;
+        Terminal::Via { via: vi, at }
     } else {
-        site(*sites.get(ord)?)
+        return None;
     };
     Some((start, goal))
 }
@@ -1806,6 +1849,7 @@ fn via_reduction_pass(
             eps: None,
             via_cost: cx.opts.via_cost_nm as f64 * via_weight(live[c].tier) * REDUCTION_VIA_FACTOR,
             max_vias: cx.opts.max_vias_per_connection,
+            strict_unfit_edges: cx.opts.strict_unfit_edges,
         };
         let p = match search(&mg, obs, &live[c], &rt.starts[c], &rt.goals[c], &params) {
             SearchOutcome::Found(p) if p.vias() < old.vias => p,
@@ -1912,6 +1956,7 @@ fn zero_slack_pass(
         eps,
         via_cost: cx.opts.via_cost_nm as f64 * via_weight(tier),
         max_vias: cx.opts.max_vias_per_connection,
+        strict_unfit_edges: cx.opts.strict_unfit_edges,
     };
     // Candidates: margin-0 searches over the routed connections (a detoured one with the other
     // detoured ones absent; any other with its own path taken out and put back).
@@ -2363,6 +2408,7 @@ fn merge_pass(r: &mut RouteResult, model: &BoardModel, mut r2: RouteResult) {
 /// thread count does not change it; a model without pour fills returns the first pass as is.
 fn route_inner(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteResult {
     let t0 = Instant::now();
+    let reach_deadline = deadline_after(opts.wall_clock_s, t0);
     ctl.update("setup", 0, 0, 0, 0, 0.0);
     let mut r = route_pass(model, opts, None, ctl, 0, t0);
     let has_fill = model
@@ -2376,7 +2422,7 @@ fn route_inner(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteRes
     let mut passes = 0u32;
     let mut unfroze = false;
     loop {
-        let reach = check_pour_reach(model, &r.items, &routed_pads(model, &r));
+        let reach = check_pour_reach_until(model, &r.items, &routed_pads(model, &r), Some(reach_deadline));
         if reach.is_clean() {
             break;
         }
@@ -2523,7 +2569,7 @@ fn route_inner(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteRes
         drop_conns(&mut r, &drop);
         // The fixed copper is what remains; the pour goals keep the main component of the
         // check above (with every routed item present: the robustly connected fill).
-        let now = check_pour_reach(model, &r.items, &routed_pads(model, &r));
+        let now = check_pour_reach_until(model, &r.items, &routed_pads(model, &r), Some(reach_deadline));
         let mut m2 = with_routed_copper(model, &r.items, &now);
         for z in &mut m2.pours {
             z.pads.retain(|s| !lost_labels.contains(s.as_str()));
@@ -2719,8 +2765,18 @@ fn route_pass(
         // Terminals of the graphs: one vertex per position, on the layers it has copper on.
         let mut term_at: BTreeMap<(u64, u64), usize> = BTreeMap::new();
         let mut terms: Vec<(TerminalInfo, Vec<u32>)> = Vec::new();
-        for c in &live {
-            for t in [&c.from, &c.to] {
+        // A pour target contributes the same-net vias the pour lists (D-6).
+        let pour_vias: Vec<Vec<TermRef>> = live
+            .iter()
+            .map(|c| match c.to.kind {
+                TermKind::Pour(zi) if opts.pour_listed_via_goals => {
+                    listed_pour_vias(model, zi, c.net, &routable, reach)
+                }
+                _ => Vec::new(),
+            })
+            .collect();
+        for (ci, c) in live.iter().enumerate() {
+            for t in [&c.from, &c.to].into_iter().chain(pour_vias[ci].iter()) {
                 if matches!(t.kind, TermKind::Pour(_)) {
                     continue;
                 }
@@ -2788,11 +2844,15 @@ fn route_pass(
                             let pour_sites: Vec<usize> = (0..mg.sites.len())
                                 .filter(|&s| mg.in_pour[s].contains(&zi))
                                 .collect();
-                            if pour_sites.is_empty() {
+                            // D-6: every listed same-net via is a goal vertex on each of its
+                            // routable layers (the path ends on it, no new via).
+                            let vertices: Vec<(usize, usize)> =
+                                pour_vias[i].iter().flat_map(&vertices).collect();
+                            if pour_sites.is_empty() && vertices.is_empty() {
                                 perm[i] = Some("no via site inside pour".into());
                             }
                             Goal {
-                                vertices: Vec::new(),
+                                vertices,
                                 pour_layer: routable.iter().position(|l| c.to.layers.contains(l)),
                                 pour_sites,
                             }
@@ -2852,6 +2912,7 @@ fn route_pass(
                                 eps: None,
                                 via_cost: opts.via_cost_nm as f64 * via_weight(c.tier),
                                 max_vias: opts.max_vias_per_connection,
+                                strict_unfit_edges: opts.strict_unfit_edges,
                             };
                             ghost(mg_ro, obs_ro, c, &starts[i], &goals[i], &params)
                                 .map(|(gp, ..)| gp.est_len)
