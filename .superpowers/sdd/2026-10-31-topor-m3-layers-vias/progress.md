@@ -64,3 +64,15 @@ R6 M2 threads assertion change ok, eprom must still meet M2 gate numbers; R7 ray
 - Projects tree hash command: `cd ~/work/kicad/projects; find . -type f | sort | xargs -d '\n' sha256sum | sha256sum` → f104ae67… (start of rotation 2: unchanged).
 - Main rulings M3-R8 (whole-run wall_clock_s, F5), M3-R9 (F1–F5, F7 authorised; F6 only if eprom byte-identical), M3-R10 (layers=1 scaling diagnosis + fix; debug partial-stub root cause; explain M2 dcsgone 0/231) — recorded in STATE.
 - Ruling Q1 (coord.): F1+F5+F7 to one sonnet worker on main (shared .venv owner); layers=1 scaling + debug-stub diagnosis to one F worker in a worktree in parallel (cargo only, no maturin/.venv engine builds) — cost if wrong: merge conflicts in route.rs.
+- W1 (sonnet) F1 d5965e4, F5 21f1bc1, F7 78aa49c, 3ec880c: wiccon 60/60 33 vias 16 it; eprom byte-identical; dcsgone pre-F2 profile: iteration 1 search 114 s, commit 18–64 s/it (≈145/200 re-searched), metrize < 0.3 s.
+- W2 (fable) 222c620, b8cc938: RC-A1 sites on single-layer boards (fixed); RC-A2 detour rip-up ping-pong (→ F2 damping); B debug deadline; C anytime gap. Merged dd1cfec (route_engine.rs test conflict, both kept). cargo green, clippy clean.
+- Main restarted coordinator session; no F2/F3 work in flight lost (worktrees checked). M3-R11 detour metric recorded in STATE.
+- Ruling Q2 (coord.): the anytime gap (committed iteration-1 paths never emitted on timeout) is fixed inside F4 — small, required for the anytime contract the ≤ 65 s bound assumes — cost if wrong: one extra change main did not list.
+- Ruling Q3 (coord.): F2+F3 → one fable worker on main (venv owner) incl. engine `ghost_len_nm` per connection (empty-graph F2 ghost); R11 harness metrics/PNG highlight → sonnet worker in a worktree in parallel (no maturin).
+- W3 (fable, main) F2 4cc9dad/09adbfd, F3 cf97d47/1bc20df: see STATE. W4 (sonnet, worktree) R11 40ea0df merged. M3-R12 ratchet ruling forwarded to W3 (re-pin in its next commit). W3 resumed for F4 + anytime gap (Q2) + F3b geometric entry probe.
+
+## Rotation 3 (2026-10-31) — coordinator on main, base 7f7e0af
+- Projects tree baseline 8153f4de51ba4d65 (find ! _autosave ! .lck ! ~); user edited dcsgonebadge (22 locked GND items). Snapshots scratch/boards/<board>/<sha12>/.
+- W5 (sonnet, main) 219348e snapshot store (BOARD_SNAPSHOTS, board_pcb actionable error, harness/snapshot.py, pcb_sha256 in metrics, sha12 in captions, caption test fixed); M0 gate re-pin dcsgone rip removed_vias 201 → 197 (4 vias touched by locked copper kept), kept_locked_tracks 22. a1ac31b tests/test_locked_copper.py (4 pass; dcsgone 86/231 in 60 s under CPU contention, routing_new 0, 4 pre-existing).
+- W6 (fable, worktree) 2894bed: arc_arc correct, proptest oracle basin trap fixed + deterministic regressions; 6d89c9a clippy alias duplicated main's 3a0f067 → conflict resolved to main's version (merge 0fe8261). cargo debug + release green, clippy clean.
+- Main ruling M3-R13 (dcsgone info only; Task 7 → M4) and Task 3 direction (pre-existing attribution) recorded in STATE.
