@@ -21,7 +21,7 @@ The engine already has `Options.scope` {pads, nets, area, unrouted_only} with MS
 
 ## Results
 - eprom, select U1+U2: between = 26 estimated connections (engine decomposed 24 with copper removed; estimate ignores pours/ties), touching = 30. Real engine route with the `between` scope routes only nets that have >= 2 pads on U1/U2 (`routed_nets <= plan.nets`), and the `touching` scope yields more connections.
-- `.venv/bin/pytest -q tests/plugin`: see final line below.
+- `.venv/bin/pytest -q tests/plugin` (all, incl. test_run_flow with real engine and kicad-cli): 139 passed, 7 skipped (live-KiCad tests), 650 s.
 
 ## Concerns
 - Brief precedence (marker > netclass > `[nets] priority`) contradicts the schema text for `[nets] priority` ("overrides the @N marker and topor_pN netclasses"). I followed the brief. B6/schema owner should align the text.
