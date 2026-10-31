@@ -248,6 +248,20 @@ impl Checker {
                     tie_nets: Vec::new(),
                 },
             );
+            if v.drill > 0 {
+                // The drill pierces every copper layer, whatever layers carry via copper.
+                c.add(
+                    &all,
+                    Obstacle {
+                        geo: Geo::Track(zero_seg(v.at.to_vec2(), v.drill as f64)),
+                        net: v.net,
+                        kind: Kind::Hole,
+                        label: format!("viahole:{}", v.uuid),
+                        own_clr: 0.0,
+                        tie_nets: Vec::new(),
+                    },
+                );
+            }
         }
         for k in &model.kept {
             c.add(
@@ -479,10 +493,9 @@ impl Checker {
                         let req = self.hole_to_hole + self.margin;
                         if gap < req {
                             let (g, r) = (gap.round() as i64, req.round() as i64);
-                            match found
-                                .iter_mut()
-                                .find(|v| v.against == o.label && v.layer == layer)
-                            {
+                            match found.iter_mut().find(|v| {
+                                v.against == o.label && v.layer == layer && v.required == r
+                            }) {
                                 Some(v) => v.gap = v.gap.min(g),
                                 None => found.push(Violation {
                                     item: i,
@@ -503,7 +516,7 @@ impl Checker {
                         let (g, r) = (gap.round() as i64, req.round() as i64);
                         match found
                             .iter_mut()
-                            .find(|v| v.against == o.label && v.layer == layer)
+                            .find(|v| v.against == o.label && v.layer == layer && v.required == r)
                         {
                             Some(v) => v.gap = v.gap.min(g),
                             None => found.push(Violation {
