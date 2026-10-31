@@ -54,7 +54,7 @@ and debugging. Concretely:
 | 3 | Copper-to-edge clearance | board setup | 0.5 mm only if the board sets none (fab floor 0.2) | |
 | 4 | Power-net recognition | netclass first; name pattern only for nets still in `Default` (user: option c) | pattern `^(\+\|-)?\d\|^(V\|VCC\|VDD\|VBAT\|GND\|AGND\|PWR)` editable in `topor.toml` | pre-flight lists every net classified by name guess |
 | 5 | Net priority | `@1`/`@2`/`@3` marker in the net name (user: accepted) + netclass `topor_p1..p3` alternative | no marker = normal | combination rules §2.1 |
-| 6 | Extra length accepted to save a via | plugin config | 10 % | |
+| 6 | **Via minimisation** (user 2026-10-31) | `topor.toml` `[vias]` + per-netclass / per-priority override | `via_cost_mm = 2.0` (search: one via costs as much as 2 mm of extra trace, i.e. the router accepts up to 2 mm longer to avoid a via), `max_per_connection = 4`, `reduction_len_slack = 10 %` (clean-up pass removes a via if the via-free route is ≤ 10 % longer) | one meaningful unit: **mm of trace per via**; suggested overrides: high-speed / `@1` nets 5 mm, power 0.5 mm (vias are cheap, low inductance in parallel); report shows via count per net and vs hand |
 | 7 | Detour limit before rip-up | plugin config | 2.0 × ghost length | tied to the detour metric |
 | 8a | Pour-served nets (connect via pour + via-to-pour stubs) | plugin config | auto (net has a pour on a plane/mixed layer) | per-net override |
 | 8b | **Do-not-touch nets** | plugin config (list, patterns allowed) | empty | their copper is a fixed obstacle; never routed, ripped, or smoothed |
