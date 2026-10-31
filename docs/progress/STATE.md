@@ -9,13 +9,26 @@ Main rulings: **M4-R1** (user) no pcbnew/SWIG in the plugin runtime (IPC kipy 0.
 (custom/trapezoid/chamfered as polygons). **M4-R6** (main, Q2/Q3) pour reach oracle = kicad-cli DRC unconnected on the save_as copy (harness pcbnew
 secondary); preview = kicad-cli SVG, KiCad theme colours, routed copy highlighted if the export allows.
 Coordinator rulings C0–C12 in the ledger (C1 report_dir default "" = cache dir; C2 kipy 0.8.0 in .venv; C7 pcbfile find/remove/append in B2; C8 α scope; C9 0.4.0 bump in B10).
-M4b-α (whole-board route from KiCad) = P1, B0, B1, B2, B3, B4, B5, B9, B10 → user GUI test.
+M4b-α (whole-board route from KiCad) = P1, B0, B1, B2, B3, B4, B5, B9, B10 — **REACHED 2026-10-31 (main 5eada54), user GUI test pending** (copies scratch/gui/{eprom-to-kernal,wiccon-2023}/).
+**M4-R7** (user, 46 row 13 b82fb33) stackup roles by copper count (2 S,S · 4 S,GND,PWR,S · 6 S,GND,PWR,S,GND,S · 8 S,GND,S,PWR,GND,S,GND,S); precedence topor.toml [layers] > KiCad layer types (if any non-signal) > defaults; other counts → LAYER_ROLES_NEEDED; plane without matching filled zone → PLANE_NO_ZONE warning with fix text. Done in B1 (layers.py), B3 (layer_plan), B6 (preflight).
+Headless numbers (FakeBoard + real engine, existing_copper=rip, committed copy judged by kicad-cli): eprom 27/27, vias 0, routing_new 0, unconnected 0, router 0.10 s; wiccon 62/62, vias 37, routing_new 0, unconnected 0, outside 1373.553 mm, router 3.99 s, 1 DRC round. PNGs docs/benchmarks/progress/2026-10-31-m4-{P1-wiccon-2023,B5-preview-eprom-to-kernal,B5-preview-wiccon-2023}.png.
+Verify @520ea88: default pytest 278 passed, 1 failed (test_scaffold debug cargo under 3-worker load; green alone), clippy clean; @5eada54 tests/plugin 178 passed, 7 skipped (live). Projects tree now 1565ce5bd98f39b8 (user cloned Lutje/ 18:56; no topor writes).
 | Task | Status |
 |------|--------|
-| P1 engine stop rule/cancel/route_async/default_options | dispatched |
-| B0 toporlib + DRC-loop injection + no-pcbnew guard | dispatched |
-| B1 schema / topor.toml / config reference | dispatched |
-| B4 UI wireframes (F) | dispatched |
+| P1 engine stop rule/cancel/route_async/default_options | DONE 9415324 (wiccon 26→20 it, "no gain", 62/62) |
+| B0 toporlib + DRC-loop injection + no-pcbnew guard | DONE 85ea454 |
+| B1 schema / topor.toml / config reference (+M4-R7 roles) | DONE 6b5906f, 710ad10 |
+| B2 ports, FakeBoard, ScriptedUi, IpcBoard, kipy surface | DONE 6775628 |
+| B3 IPC model exporter, pure rules, parse_layers/layer_plan | DONE 75775c2 (parity approximations → main) |
+| B4 UI wireframes (F) + F review | DONE 76f9b77, 8bcdefa |
+| B5 run flow, preview, single commit (+C20 refill, C21 format guard) | DONE ef5007a, 1818c3f |
+| B6 pre-flight + messages + troubleshoot.md | DONE f6f61f9 |
+| B7 scope, rip plan, @N priorities | DONE 329e7b1 |
+| B8 run report | DONE 9e2a3fa |
+| B9 wx dialogs | DONE a2cb355 |
+| B10 entry point, app, build, 0.4.0 | DONE f8b3be2 |
+| B11 docs | TODO (rotation 2) |
+| B12 gate (headless e2e, GUI checklist, parity, F review) | TODO (rotation 2) |
 
 
 **M1 (taut smoother) — DONE 2026-10-31** (gate verified by main session: `pytest tests/gate -m "gate or not gate"` → 7 passed).
