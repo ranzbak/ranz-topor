@@ -80,7 +80,11 @@ fn front_only(mut m: BoardModel) -> BoardModel {
 
 fn opts() -> Options {
     Options {
-        wall_clock_s: 10.0,
+        // These tests pin geometry and iteration counts, not the clock: a budget that cannot
+        // fire. The unoptimised build spends ~6 s in the block probe of the wall fixture alone
+        // and the suite runs its tests concurrently; a 10 s budget made the partial pass skip
+        // its stubs under load (debug-only failures). Tests of the deadline set their own.
+        wall_clock_s: 600.0,
         // 22 tests run concurrently in a debug build: one thread each avoids oversubscribing the cores
         threads: 1,
         ..Options::default()
@@ -575,14 +579,18 @@ fn eprom_ripped_two_layers_routes_all_without_zero_slack() {
     assert_eq!(json_no_runtime(&r), json_no_runtime(&again));
 }
 
-/// R6 on the real board, F.Cu only (the M2 situation). The graph now carries free via-site
-/// vertices, so the negotiation takes another way than in M2 and the +5V corridor retry finds no
-/// candidate; the router still routes all but one connection, stops early and stays clean.
+/// R6 on the real board, F.Cu only: the M2 situation and the M2 gate result. A single routable
+/// layer gets no via sites (M3 scaling diagnosis), so the graph is the M2 graph again: 27/27,
+/// stall stop, the +5V corridor as the one zero-slack wire (R6, DRC-judged: its tangencies are
+/// exact to the 1 nm quantisation, `ZS_QUANT_TOL_NM`), outside-pad length at the M2 gate bound
+/// (67.095 mm, B1). With free via-site vertices in the graph (T9–T12) the negotiation took
+/// another way, 26/27 without the corridor.
 #[test]
-fn eprom_ripped_front_only_stops_early_and_is_clean() {
+fn eprom_ripped_front_only_is_the_m2_result() {
     let m = front_only(eprom_ripped());
     let r = route(&m, &opts());
-    assert!(r.routed >= 26, "{} routed {:?}", r.routed, r.failed);
+    assert_eq!(r.sites, 0);
+    assert_eq!(r.routed, 27, "{} routed {:?}", r.routed, r.failed);
     assert!(r.iterations < 50, "{}", r.iterations);
     assert!(
         r.warnings
@@ -591,8 +599,21 @@ fn eprom_ripped_front_only_stops_early_and_is_clean() {
         "{:?}",
         r.warnings
     );
-    assert!(r.length_outside_pads_nm < 76_598_000);
-    clean(&m, &r);
+    assert_eq!(r.zero_slack, "kept");
+    let zs: Vec<&str> = r.zero_slack_wires.iter().map(|w| w.name.as_str()).collect();
+    assert_eq!(zs, vec!["+5V"]);
+    assert!(r.length_outside_pads_nm <= 67_100_000, "{}", r.length_outside_pads_nm);
+    // Clean at margin 0 except the zero-slack wire, within the 1 nm quantisation tolerance.
+    let zs_conn = r.zero_slack_wires[0].conn;
+    let o = Options {
+        margin_nm: 0,
+        ..Options::default()
+    };
+    let rep = Checker::new(&m, &o).check_items(&r.items);
+    for v in &rep.violations {
+        let on_zs = matches!(&r.items[v.item], Item::Track(t) if t.wire == Some(zs_conn));
+        assert!(on_zs && v.gap + 1 >= v.required, "{v:?}");
+    }
     let again = route(&m, &opts());
     assert_eq!(json_no_runtime(&r), json_no_runtime(&again));
 }
@@ -868,4 +889,48 @@ fn block_probe_respects_deadline_and_step_cap() {
             "{n}"
         );
     }
+}
+
+/// Regression (M3 scaling diagnosis, layers=1): a board with one routable layer has no layer to
+/// change to, so no via sites are generated. Dormant site vertices multiplied the faces of the
+/// single graph (synth n=1000: 11 837 sites, 12x expansions / 70x clearance candidates per
+/// search, overuse that never cleared, 25 stalled iterations and 999/1000 instead of 7
+/// converged iterations and 1000/1000).
+#[test]
+fn single_layer_board_generates_no_via_sites() {
+    // 4 x 3 grid of 1 mm SMD pads on a 3 mm pitch, six horizontal pairs (synth-like).
+    let refs: &'static [&'static str] = &["P1", "P2", "P3", "P4", "P5", "P6"];
+    let mut pads = Vec::new();
+    for net in 1..=6i32 {
+        let (col, row) = (((net - 1) % 2) * 2, (net - 1) / 2);
+        let (x, y) = (10.0 + col as f64 * 3.0, 10.0 + row as f64 * 3.0);
+        let r = refs[(net - 1) as usize];
+        pads.push(P(r, "1", net, x, y, 1.0, "[0]"));
+        pads.push(P(r, "2", net, x + 3.0, y, 1.0, "[0]"));
+    }
+    let m = model(&pads, "");
+    let r = route(&m, &opts());
+    assert_eq!(r.sites, 0, "sites on a single-layer board");
+    assert_eq!(r.routed, 6, "{:?}", r.connections);
+    assert_eq!(r.vias, 0);
+    assert_eq!(r.iterations, 1);
+    assert!(r.converged);
+    clean(&m, &r);
+}
+
+/// A pour target on a single-layer board still needs its via sites (the pour goal is a site).
+#[test]
+fn single_layer_pour_target_keeps_via_sites() {
+    let m = model(
+        &[
+            P("U1", "1", 1, 10.0, 15.0, 1.0, "[0]"),
+            P("U2", "1", 1, 40.0, 15.0, 1.0, "[0]"),
+        ],
+        r#""pours": [ { "uuid": "zz", "net": 1, "layers": [0], "pads": ["U1.1"], "vias": [],
+            "fills": [ { "layer": 0, "outer": [[0, 0], [30000000, 0], [30000000, -30000000], [0, -30000000]] } ] } ],"#,
+    );
+    let r = route(&m, &opts());
+    assert_eq!(r.connections.len(), 1, "{:?}", r.connections);
+    assert_eq!(r.connections[0].to.kind, "pour");
+    assert!(r.sites >= 1, "pour completion needs sites, got {}", r.sites);
 }

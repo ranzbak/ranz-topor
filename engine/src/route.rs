@@ -1006,6 +1006,8 @@ enum Partial {
     Stubs(PartialOk),
     /// Stubs were drawn but none survived the self-check.
     Dropped,
+    /// Stubs were drawn but the deadline passed before they were metrized and checked.
+    Skipped,
 }
 
 struct PartialOk {
@@ -1491,7 +1493,19 @@ fn partial_pass(
         });
         spec_of.push(si);
     }
-    if wires.is_empty() || Instant::now() >= cx.deadline {
+    // A deadline here (or in the relax below) is reported as such: the stubs were not
+    // checked, so "failed self-check" would be wrong (seen in the unoptimised build, whose
+    // block probe alone runs for seconds).
+    let skipped = |result: &mut BTreeMap<usize, Partial>| {
+        for p in result.values_mut() {
+            *p = Partial::Skipped;
+        }
+    };
+    if wires.is_empty() {
+        return result;
+    }
+    if Instant::now() >= cx.deadline {
+        skipped(&mut result);
         return result;
     }
     let mut orders: HashMap<u32, HashMap<AnchorRef, Vec<usize>>> = HashMap::new();
@@ -1507,6 +1521,7 @@ fn partial_pass(
     }
     let r = relax(&wires, &sketches, obs, &orders, cx.opts, cx.deadline);
     if r.timed_out {
+        skipped(&mut result);
         return result;
     }
     let n = wires.len();
@@ -1590,7 +1605,7 @@ fn partial_pass(
                 p.pattern = format!("{}|{}", p.pattern, pat);
                 p.crossings += ncross;
             }
-            Partial::Dropped => {
+            Partial::Dropped | Partial::Skipped => {
                 *slot = Partial::Stubs(PartialOk {
                     items: e,
                     stubs: 1,
@@ -2194,15 +2209,28 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
         sizes.sort_by_key(|z| std::cmp::Reverse((z.d, z.drill)));
         sizes.dedup();
         let fit_checker = Checker::new(model, opts);
-        let sites = via_sites(
-            model,
-            &obs,
-            &fit_checker,
-            &routable,
-            &escape,
-            &sizes,
-            opts.margin_nm as f64,
-        );
+        // With one routable layer there is no layer to change to: a site can only serve as a
+        // pour goal, so sites exist only when a live connection targets a pour. Dormant site
+        // vertices otherwise just multiply the faces of the single graph (synth n=1000: 11 837
+        // sites, 12x the expansions and 70x the clearance candidates per search, overuse on
+        // the free-ended edges that never clears, 25 stalled iterations instead of 7).
+        let needs_sites = routable.len() >= 2
+            || live
+                .iter()
+                .any(|c| matches!(c.to.kind, TermKind::Pour(_)));
+        let sites = if needs_sites {
+            via_sites(
+                model,
+                &obs,
+                &fit_checker,
+                &routable,
+                &escape,
+                &sizes,
+                opts.margin_nm as f64,
+            )
+        } else {
+            Vec::new()
+        };
         n_sites = sites.len();
 
         // Terminals of the graphs: one vertex per position, on the layers it has copper on.
@@ -2641,6 +2669,9 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
                                 }
                                 Some(Partial::Dropped) => {
                                     rep.reason = "partial stub failed self-check".into();
+                                }
+                                Some(Partial::Skipped) => {
+                                    rep.reason = "partial stubs skipped: deadline".into();
                                 }
                                 None => {}
                             }
