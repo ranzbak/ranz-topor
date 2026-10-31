@@ -61,7 +61,7 @@ struct Region {
     kind: RegionKind,
 }
 
-fn point_in_poly(p: Vec2, poly: &[Vec2]) -> bool {
+pub(crate) fn point_in_poly(p: Vec2, poly: &[Vec2]) -> bool {
     let n = poly.len();
     let mut inside = false;
     for i in 0..n {
@@ -454,6 +454,27 @@ impl Checker {
 
     fn is_exempt(item_net: i32, o: &Obstacle) -> bool {
         (o.net != 0 && o.net == item_net) || o.tie_nets.contains(&item_net)
+    }
+
+    /// A through via of `size` at `at` (math frame, nm) violates nothing: net 0 is foreign to
+    /// every pad / track / shape, so copper clearance, edge, NPTH / hole clearance,
+    /// hole-to-hole and `no_vias` keepouts all apply. Build the checker with margin `eps` for
+    /// the site fit (P3). O(q) grid candidates.
+    pub fn via_fits(&self, at: Vec2, size: crate::vias::ViaSize) -> bool {
+        let item = Item::Via(crate::model::ViaItem {
+            kind: "via".into(),
+            net: 0,
+            at: crate::model::Pt {
+                x: at.x.round() as i64,
+                y: (-at.y).round() as i64,
+            },
+            d: size.d,
+            drill: size.drill,
+            layers: Vec::new(),
+            group: None,
+            wire: None,
+        });
+        self.check_items(&[item]).violations.is_empty()
     }
 
     /// Grid cell size of the checker (an [`ItemIndex`] must use the same).

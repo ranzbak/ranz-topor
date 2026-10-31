@@ -12,6 +12,7 @@
 use crate::geom::prim::Aabb;
 use crate::geom::{dequantise, Grid, Prim, Seg, Skeleton, Vec2};
 use crate::model::{via_layers, BoardModel, Options};
+use crate::vias::{ViaSite, ViaSize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub use crate::geom::Arc;
@@ -57,6 +58,10 @@ pub struct Anchor {
     pub label: String,
     /// Non-empty: the anchor is an obstacle only for these nets (DRC spots).
     pub only_nets: Vec<i32>,
+    /// `false`: a dormant via-site anchor, an obstacle for nobody ([`ObstacleSet::exempt_anchor`]).
+    pub enabled: bool,
+    /// Via-site index for anchors created by [`ObstacleSet::add_site_anchors`].
+    pub site: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -99,6 +104,15 @@ impl LayerObstacles {
 }
 
 impl LayerObstacles {
+    /// Append an anchor and index it (box grown by `grid_r`, the largest radius it may take).
+    fn push_anchor(&mut self, a: Anchor, grid_r: f64) -> usize {
+        let i = self.anchors.len();
+        self.anchor_grid
+            .insert(Core::Point(a.c).bbox().grow(grid_r), i);
+        self.anchors.push(a);
+        i
+    }
+
     /// Anchors whose core circle overlaps `bb`, sorted.
     pub fn query_anchors(&self, bb: Aabb) -> Vec<usize> {
         let mut v: Vec<usize> = self
@@ -150,6 +164,10 @@ pub struct ObstacleSet {
     edge_clearance: f64,
     default_clearance: f64,
     clearances: HashMap<i32, f64>,
+    /// Layer ids of the site anchors, in the order of `add_site_anchors`' `layers`.
+    site_layers: Vec<u32>,
+    /// Dormant core radius (`max_d / 2`) per site.
+    site_r: Vec<f64>,
 }
 
 /// Obstacle attributes shared by every anchor / wall of one source item.
@@ -190,6 +208,8 @@ impl Frag {
             tie_nets: m.tie_nets.clone(),
             label: m.label.clone(),
             only_nets: Vec::new(),
+            enabled: true,
+            site: None,
         });
         let i = self.anchors.len() - 1;
         self.seen.insert(key(c), i);
@@ -353,6 +373,8 @@ impl ObstacleSet {
             edge_clearance: r.edge_clearance as f64,
             default_clearance: r.default.clearance as f64,
             clearances,
+            site_layers: Vec::new(),
+            site_r: Vec::new(),
         };
 
         let all = model.all_layer_ids();
@@ -565,6 +587,71 @@ impl ObstacleSet {
         self.layers.keys().copied().collect()
     }
 
+    /// Append one dormant anchor per site on every layer of `layers` (kind `Via`, `enabled`
+    /// false, `r_core = max_d / 2`, net 0, label `site:<i>`); returns `[site][layer idx] ->
+    /// anchor index`. The anchor grid box uses `max_d / 2` and is never grown later. Call
+    /// once, before the layer CDTs are built (the sites then enter them as anchor points).
+    /// O(S * layers).
+    pub fn add_site_anchors(&mut self, sites: &[ViaSite], layers: &[u32]) -> Vec<Vec<usize>> {
+        self.site_layers = layers.to_vec();
+        self.site_r = sites.iter().map(|s| 0.5 * s.max_d as f64).collect();
+        let cell = self.cell;
+        let mut out = vec![Vec::with_capacity(layers.len()); sites.len()];
+        for &l in layers {
+            let lo = self
+                .layers
+                .entry(l)
+                .or_insert_with(|| LayerObstacles::new(Vec::new(), Vec::new(), cell));
+            for (i, s) in sites.iter().enumerate() {
+                let r = 0.5 * s.max_d as f64;
+                let a = Anchor {
+                    c: s.at,
+                    r_core: r,
+                    net: 0,
+                    kind: ObsKind::Via,
+                    own_clr: 0.0,
+                    tie_nets: Vec::new(),
+                    label: format!("site:{i}"),
+                    only_nets: Vec::new(),
+                    enabled: false,
+                    site: Some(i),
+                };
+                out[i].push(lo.push_anchor(a, r));
+            }
+        }
+        out
+    }
+
+    /// Activate (`Some((net, size))`: enabled, `r_core = d / 2`, net, `own_clr` = the net's
+    /// clearance) or release (`None`: disabled, `r_core = max_d / 2`, net 0) the anchors of
+    /// one site; `site_anchors[i]` is the anchor on the i-th layer given to
+    /// `add_site_anchors`. O(layers).
+    pub fn set_site(&mut self, site_anchors: &[usize], active: Option<(i32, ViaSize)>) {
+        for (li, &ai) in site_anchors.iter().enumerate() {
+            let l = self.site_layers[li];
+            let (own, min) = (active.map_or(0.0, |(n, _)| self.clr(n)), self.min_clearance);
+            let Some(lo) = self.layers.get_mut(&l) else {
+                continue;
+            };
+            let a = &mut lo.anchors[ai];
+            let dormant_r = a.site.map_or(a.r_core, |s| self.site_r[s]);
+            match active {
+                Some((net, size)) => {
+                    a.enabled = true;
+                    a.net = net;
+                    a.r_core = 0.5 * size.d as f64;
+                    a.own_clr = own.max(min);
+                }
+                None => {
+                    a.enabled = false;
+                    a.net = 0;
+                    a.r_core = dormant_r;
+                    a.own_clr = 0.0;
+                }
+            }
+        }
+    }
+
     /// Obstacles of `layer` (empty set for an unknown layer).
     pub fn layer(&self, layer: u32) -> &LayerObstacles {
         self.layers.get(&layer).unwrap_or(&self.empty)
@@ -577,7 +664,8 @@ impl ObstacleSet {
 
     /// [`ObstacleSet::exempt`] for an anchor, plus the `only_nets` rule of DRC spots.
     pub fn exempt_anchor(a: &Anchor, net: i32) -> bool {
-        Self::exempt(a.net, &a.tie_nets, net)
+        !a.enabled
+            || Self::exempt(a.net, &a.tie_nets, net)
             || (!a.only_nets.is_empty() && !a.only_nets.contains(&net))
     }
 

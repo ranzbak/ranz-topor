@@ -27,7 +27,7 @@ use crate::decompose::{decompose, terminal_of, Connection, TermKind, TermRef};
 use crate::geom::quant::{quantise_chain, round_nm, TrackPrim};
 use crate::geom::{dequantise, Prim, Skeleton, Vec2};
 use crate::graph::{GraphRules, RouteGraph, TerminalInfo};
-use crate::model::{flip_track, via_layers, BoardModel, ExistingCopper, Item, Options, TrackItem};
+use crate::model::{flip_track, BoardModel, ExistingCopper, Item, Options, TrackItem};
 use crate::negotiate::{
     detect_clinches, overused_conns, BlockInfo, ClinchReport, Negotiator, DETOUR_FACTOR,
     PRESENT_OVERUSE,
@@ -180,6 +180,7 @@ fn term_out(t: &TermRef) -> TermOut {
             TermKind::Via(_) => "via",
             TermKind::Copper(_) => "copper",
             TermKind::Dangling(_) => "dangling",
+            TermKind::Pour(_) => "pour",
         }
         .into(),
         label: t.label.clone(),
@@ -240,6 +241,8 @@ struct Ctx<'a> {
     obs: &'a ObstacleSet,
     ls: &'a LayerSketch,
     conns: &'a [Connection],
+    /// The single routable layer of M2/M3-Task-6 (multi-layer search follows in Task 9).
+    layer: u32,
     checker: &'a Checker,
     deadline: Instant,
 }
@@ -322,7 +325,7 @@ impl MetrState {
             .map(|(k, c)| Wire {
                 id: k,
                 net: c.net,
-                layer: c.layer,
+                layer: cx.layer,
                 width: c.width,
                 start: terminal_of(&c.from),
                 goal: terminal_of(&c.to),
@@ -673,10 +676,10 @@ fn crossing_point(g: &RouteGraph, c: &Crossing) -> Vec2 {
 }
 
 /// Straight stub item (engine frame in, KiCad frame out) of connection `c`.
-fn stub_item(c: &Connection, a: Vec2, b: Vec2) -> TrackItem {
+fn stub_item(c: &Connection, layer: u32, a: Vec2, b: Vec2) -> TrackItem {
     TrackItem {
         net: c.net,
-        layer: c.layer,
+        layer,
         width: c.width,
         prim: flip_track(TrackPrim::Seg {
             a: round_nm(a),
@@ -699,6 +702,7 @@ struct StubSpec {
 fn bisect_stub(
     checker: &Checker,
     c: &Connection,
+    layer: u32,
     base: &[Item],
     q: Vec2,
     p0: Vec2,
@@ -706,7 +710,7 @@ fn bisect_stub(
     let ok = |lam: f64| {
         let p = q + (p0 - q) * lam;
         let mut items: Vec<Item> = base.to_vec();
-        items.push(Item::Track(stub_item(c, q, p)));
+        items.push(Item::Track(stub_item(c, layer, q, p)));
         let last = items.len() - 1;
         !checker
             .check_items(&items)
@@ -794,10 +798,12 @@ pub const PROBE_STEP_CAP: usize = 64;
 /// returns the tightest spot of the least-violating crossing. At most `PROBE_STEP_CAP` steps
 /// are examined and the deadline is checked before every step (`None` on either limit);
 /// `steps` receives the number of steps run. Cost O(steps · (|base| + 784) · q) (D9).
+#[allow(clippy::too_many_arguments)]
 fn probe_path(
     g: &RouteGraph,
     checker: &Checker,
     c: &Connection,
+    layer: u32,
     base: &[Item],
     path: &SlotPath,
     deadline: Instant,
@@ -823,7 +829,7 @@ fn probe_path(
         let mut pairs: Vec<(Vec2, Vec2)> = Vec::new();
         for &p in &a {
             for &q in &b {
-                items.push(Item::Track(stub_item(c, p, q)));
+                items.push(Item::Track(stub_item(c, layer, p, q)));
                 pairs.push((p, q));
             }
         }
@@ -843,7 +849,7 @@ fn probe_path(
         let (p, q) = pairs[k];
         let mut items = base.to_vec();
         let dots: Vec<Vec2> = (0..=32).map(|m| p + (q - p) * (m as f64 / 32.0)).collect();
-        items.extend(dots.iter().map(|&d| Item::Track(stub_item(c, d, d))));
+        items.extend(dots.iter().map(|&d| Item::Track(stub_item(c, layer, d, d))));
         // Most obstacles squeezing the dot, then the largest shortfall, then nearest the middle.
         let mut hits: Vec<Vec<&str>> = vec![Vec::new(); dots.len()];
         let mut worst = vec![0.0f64; dots.len()];
@@ -892,7 +898,7 @@ fn collect_blocks(
                 if gp.faces.len() == gp.crossings.len() + 1 || gp.crossings.is_empty() {
                     let mut steps = 0;
                     if let Some(p0) =
-                        probe_path(g, checker, &cx.conns[i], base, gp, cx.deadline, &mut steps)
+                        probe_path(g, checker, &cx.conns[i], cx.layer, base, gp, cx.deadline, &mut steps)
                     {
                         out.insert(
                             i,
@@ -951,7 +957,7 @@ fn collect_blocks(
         }
         let c = &cx.conns[i];
         let mut steps = 0;
-        if let Some(p0) = probe_path(g, checker, c, base, path, cx.deadline, &mut steps) {
+        if let Some(p0) = probe_path(g, checker, c, cx.layer, base, path, cx.deadline, &mut steps) {
             out.insert(
                 i,
                 Blk {
@@ -987,7 +993,7 @@ fn partial_pass(
             // ghost crossings; the reverse stub from the goal terminal as before.
             let fwd: Option<&(Vec2, Vec<Crossing>)> = if side == 0 { b.fwd.as_ref() } else { None };
             let q = fwd.map_or(start.at(), |f| f.0);
-            let Some(p) = bisect_stub(eps_checker, c, &base, q, b.p0) else {
+            let Some(p) = bisect_stub(eps_checker, c, cx.layer, &base, q, b.p0) else {
                 continue;
             };
             let crossings = match fwd {
@@ -997,7 +1003,7 @@ fn partial_pass(
                     Err(_) => continue,
                 },
             };
-            base.push(Item::Track(stub_item(c, q, p)));
+            base.push(Item::Track(stub_item(c, cx.layer, q, p)));
             specs.push(StubSpec {
                 conn: i,
                 start,
@@ -1034,7 +1040,7 @@ fn partial_pass(
         wires.push(Wire {
             id: k,
             net: c.net,
-            layer: c.layer,
+            layer: cx.layer,
             width: c.width,
             start: sp.start.clone(),
             goal: Terminal::Junction { at: sp.end },
@@ -1459,23 +1465,9 @@ fn layer_name(model: &BoardModel, id: u32) -> String {
     }
 }
 
-/// Terminal lies on copper of `layer`.
-fn on_layer(model: &BoardModel, t: &TermRef, layer: u32) -> bool {
-    match &t.kind {
-        TermKind::Pad(i) => model
-            .pads
-            .get(*i)
-            .is_some_and(|p| p.layers.contains(&layer)),
-        TermKind::Via(i) => model
-            .vias
-            .get(*i)
-            .is_some_and(|v| via_layers(&v.layers, &model.all_layer_ids()).contains(&layer)),
-        TermKind::Copper(u) | TermKind::Dangling(u) => model
-            .kept
-            .iter()
-            .find(|k| &k.uuid == u)
-            .is_none_or(|k| k.layer == layer),
-    }
+/// Terminal lies on copper of `layer` (`TermRef.layers` is filled by the decomposition).
+fn on_layer(t: &TermRef, layer: u32) -> bool {
+    t.layers.contains(&layer)
 }
 
 /// Route the unconnected nets of `model` on F.Cu.
@@ -1486,12 +1478,13 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
     if opts.existing_copper == ExistingCopper::Smooth {
         warnings.push("existing_copper=smooth ignored by route(); treated as fixed".into());
     }
-    let routable: Vec<u32> = model
+    let mut routable: Vec<u32> = model
         .layers
         .iter()
         .filter(|l| l.routable)
         .map(|l| l.id)
         .collect();
+    routable.sort_unstable();
     let layer = if routable.contains(&0) {
         0
     } else {
@@ -1512,7 +1505,8 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
     if routable.is_empty() {
         warnings.push("no routable layer".into());
     }
-    let dec = decompose(model, opts, layer);
+    let dec = decompose(model, opts, &routable);
+    warnings.extend(dec.warnings.iter().cloned());
     for (net, r) in &dec.skipped {
         warnings.push(format!("net {net} skipped: {r}"));
     }
@@ -1526,7 +1520,9 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
     for c in all {
         if routable.is_empty() {
             early[c.id] = Some("no routable layer".into());
-        } else if !on_layer(model, &c.from, layer) || !on_layer(model, &c.to, layer) {
+        } else if matches!(c.to.kind, TermKind::Pour(_)) {
+            early[c.id] = Some("pour completion needs vias (Task 9)".into());
+        } else if !on_layer(&c.from, layer) || !on_layer(&c.to, layer) {
             early[c.id] = Some(format!("terminal not on layer {lname}"));
         } else {
             let mut l = c.clone();
@@ -1622,6 +1618,7 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                     let cx = Ctx {
                         model,
                         opts,
+                        layer,
                         obs: &obs,
                         ls: &ls,
                         conns: &live,
@@ -1848,7 +1845,7 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
             id: c.id,
             net: c.net,
             name,
-            layer: c.layer,
+            layer,
             width: c.width,
             status: "failed".into(),
             reason: String::new(),

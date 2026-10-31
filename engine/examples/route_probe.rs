@@ -226,7 +226,7 @@ fn main() {
     let deadline = t0 + std::time::Duration::from_secs_f64(opts.wall_clock_s);
     let layer = 0u32;
 
-    let dec = decompose(&model, &opts, layer);
+    let dec = decompose(&model, &opts, &[layer]);
     let name_of = |net: i32| -> String {
         dec.nets
             .iter()
@@ -478,7 +478,7 @@ fn main() {
             wires.push(Wire {
                 id: k,
                 net: c.net,
-                layer: c.layer,
+                layer,
                 width: c.width,
                 start: terminal_of(&c.from),
                 goal: terminal_of(&c.to),
@@ -512,7 +512,7 @@ fn main() {
                             .into_iter()
                             .map(|t| TrackItem {
                                 net: c.net,
-                                layer: c.layer,
+                                layer,
                                 width: c.width,
                                 prim: flip_track(t),
                                 group: None,
