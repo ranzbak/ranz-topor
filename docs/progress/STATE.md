@@ -35,6 +35,23 @@ last_reached; D7 spot vertex blocks all nets; D8 clinches len(u) cosmetic; D9 bl
 point walls/foreign vertices; Negotiator::record_best unused; wedding-gift 20/43 nets (−1 vs pre-B1) and nametag 30 it at 44 s (info boards).
 Gate review: docs/progress/notes/m2-gate-review.md. Ledger .superpowers/sdd/2026-10-31-topor-m2-router/progress.md.
 
+**M3 IN PROGRESS** — two layers + vias. Plan docs/superpowers/plans/2026-10-31-topor-m3-layers-vias.md; ledger
+.superpowers/sdd/2026-10-31-topor-m3-layers-vias/progress.md. Rotation 1 coordinator from 8ace64c.
+Main rulings: M3-R1 per-connection layer assignment by layered search (SURF step 4), planar max-cut → M5 (>2 layers), 45 §5a wording
+updated in Task 12. M3-R2 via-reduction pass replaces double-crossing removal. M3-R3 discrete via sites; Weiszfeld placement → M4.
+M3-R4 zero_slack_wires not a hard 0-assertion; a kept zero-slack wire must be DRC-accepted; count reported; Task 10 F diagnosis if > 0 on
+eprom. M3-R5 wiccon ≥ 90 % over all router connections incl. pour completion; signal-only ratio reported too. M3-R6 M2 gate threads
+assertion → `== r["threads"]`; eprom still meets M2 numbers (27/27, routing_new 0, unconnected 0, outside ≤ hand 76.598 mm).
+M3-R7 rayon 1.10 approved; SWIG pour-fill names verified by a real test on a board copy before use.
+| # | Task | Status |
+|---|------|--------|
+| 1 | persistent checker ItemIndex | in progress |
+| 2 | RC3 sleeve queries + D2/D3/D7/D10 | in progress |
+| 3 | D1/D6/D9/D4/D5/D8, drop record_best | in progress |
+| 4 | harness: pour fills, 2-layer fixture, via spots, M3 progress | in progress |
+| 5 | F design note m3-layers-vias-design.md | in progress |
+| 6–12 | decompose layers · vias/multigraph · layered search · route 2L · via reduction · rayon · gate | pending |
+
 **M2 history (rotation 1, 2026-10-31).** Plan docs/superpowers/plans/2026-10-31-topor-m2-router.md;
 ledger .superpowers/sdd/2026-10-31-topor-m2-router/progress.md (briefs, reports, rulings R1–R6).
 | # | Task | Status |
