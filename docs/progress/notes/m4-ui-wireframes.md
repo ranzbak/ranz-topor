@@ -302,6 +302,8 @@ Cancel without preview (never after `error`, which has its own dialog); modal, m
 +------------------------------------------------------------------+
 | (i)  Routed 27/27 connections — applied to the board as one      |
 |      undo step (Edit → Undo).                                     |
+|      Zones were not refilled: press B (Edit → Fill All Zones) to  |
+|      refill them — a separate undo step.                          |
 |      Report folder                                               |
 |      [ ~/.cache/kicad/10.0/topor/eprom-to-kernal/20261101-101530 ]|
 | [ Open report folder ]                               [ Close ]   |
@@ -310,7 +312,10 @@ Cancel without preview (never after `error`, which has its own dialog); modal, m
 
 Text by `outcome`: `accepted` → `done_accepted` (prefixed "Stopped early by Cancel: " when
 `stop_reason == "cancel"`, row `done_accepted_cancelled`), `rejected` → `done_rejected`,
-`cancelled` → `done_cancelled`. Focus `Close` (default); Enter/Esc = Close; mnemonics Alt+O Open
+`cancelled` → `done_cancelled`. After `accepted` only (FX1, rulings C28 / C30): `done_refill_hint`
+when `[run] refill_after_accept = false` (the default; report fact `zones_refilled` false) or
+`done_refilled` when topor refilled the zones after the commit; one `done_post_commit` line per
+POST_COMMIT_STEP_FAILED finding (report fact `post_commit_failed`). Focus `Close` (default); Enter/Esc = Close; mnemonics Alt+O Open
 report folder, Alt+C Close. No empty/busy/error state.
 
 ## 6. Error — `UiPort.error(finding)`
@@ -507,6 +512,9 @@ title/label/button/checkbox/choice/heading/text).
 | report | done_accepted_cancelled | text | Stopped early by Cancel: routed {routed}/{total} connections — applied to the board as one undo step (Edit → Undo). |
 | report | done_rejected | text | Nothing was changed on the board. |
 | report | done_cancelled | text | Cancelled — nothing was changed on the board. |
+| report | done_refill_hint | text | Zones were not refilled: press B (Edit → Fill All Zones) to refill them — a separate undo step. |
+| report | done_refilled | text | Zones were refilled by topor — a second undo step: the first Edit → Undo reverts the refill, the next one the routes. |
+| report | done_post_commit | text | {message} {fix} |
 | report | report_dir_label | label | Report folder |
 | report | report_dir | text | {report_dir} |
 | report | open_report_folder | button | Open report folder |

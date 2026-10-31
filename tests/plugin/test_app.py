@@ -69,6 +69,75 @@ def test_main_baseexception_exits_1_and_logs(tmp_path, capsys):
     assert "pyo3 panic" in (tmp_path / "reports" / "topor-crash.log").read_text()
 
 
+class RecordingUi:
+    """Stands in for WxUi in run_gui (no window is ever shown): records every call."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __getattr__(self, name):
+        def rec(*a, **kw):
+            self.calls.append((name, a))
+        return rec
+
+
+def test_run_gui_kicad_api_connect_failure_shows_error_and_exits_1(tmp_path, monkeypatch, capsys):
+    """Ruling C32 (gate review I-5): the KiCad API connection fails (API server off) -> an error dialog with
+    KICAD_API_CONNECT, crash log entry, exit 1. The REAL kipy connect is used, on a socket that does not exist."""
+    monkeypatch.setenv("KICAD_API_SOCKET", f"ipc://{tmp_path / 'no-kicad-here.sock'}")
+    monkeypatch.setenv("KICAD_API_TOKEN", "test-token")
+    ui = RecordingUi()
+    rc = app.run_gui(None, _Eng("0.4.0"), ui=ui)
+    assert rc == 1
+    errs = [c[1][0] for c in ui.calls if c[0] == "error"]
+    assert len(errs) == 1 and errs[0].code == "KICAD_API_CONNECT" and errs[0].severity == "error"
+    assert "Enable KiCad API" in errs[0].fix and "→" in errs[0].fix
+    assert "KICAD_API_CONNECT" in (tmp_path / "reports" / "topor-crash.log").read_text()
+    assert "KICAD_API_CONNECT" in capsys.readouterr().err
+
+
+def test_run_gui_connect_seam_failure(tmp_path):
+    def boom():
+        raise ConnectionError("Failed to connect to KiCad: Connection refused")
+
+    ui = RecordingUi()
+    assert app.run_gui(None, _Eng("0.4.0"), ui=ui, connect=boom) == 1
+    errs = [c[1][0] for c in ui.calls if c[0] == "error"]
+    assert [e.code for e in errs] == ["KICAD_API_CONNECT"] and "Connection refused" in errs[0].message
+
+
+def test_main_headless_report_dir_unwritable_exits_1(tmp_path, monkeypatch, capsys):
+    """Ruling C32: a report root that cannot be created -> REPORT_DIR_UNWRITABLE (ui.error), exit 1."""
+    blocker = tmp_path / "file-not-dir"
+    blocker.write_text("x")
+    monkeypatch.setenv("TOPOR_REPORT_ROOT", str(blocker / "sub"))
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text("(kicad_pcb (version 20260206) (generator pcbnew))\n")
+    mp = tmp_path / "m.json"
+    mp.write_text("{}")
+    rc = app.main(["--headless", str(pcb), "--model", str(mp)], shipped_version=None, engine=_Eng("0.4.0"))
+    assert rc == 1
+    assert "REPORT_DIR_UNWRITABLE" in capsys.readouterr().err
+
+
+def test_app_and_run_do_not_import_kipy():
+    """MINOR 3: the KiCad connection lives behind topor.ipc (IpcBoard.connect); the run flow needs no kipy (the
+    pure pour reach / dangling ends live in topor.pourreach, not in model_ipc)."""
+    import ast
+
+    for name in ("app.py", "run.py"):
+        tree = ast.parse((ROOT / "plugin" / "topor" / name).read_text())
+        mods = set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Import):
+                mods |= {a.name for a in n.names}
+            elif isinstance(n, ast.ImportFrom):
+                mods.add(("." * n.level) + (n.module or ""))
+        assert not {m for m in mods if m.split(".")[0] == "kipy"}, (name, mods)
+        if name == "run.py":
+            assert ".model_ipc" not in mods and ".ipc" not in mods, mods
+
+
 def test_headless_needs_model(capsys):
     assert app.main(["--headless", "a.kicad_pcb"]) == 2
 

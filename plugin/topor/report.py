@@ -68,6 +68,14 @@ class RunReport:
     def set_outcome(self, status: str, error_code: str = "") -> None:
         self.status, self.error_code = status, error_code
 
+    def _refill_note(self) -> str:
+        """Tail of the Outcome line after Accept (ruling C28): how the zones get refilled. O(1)."""
+        if self.status != "accepted" or "zones_refilled" not in self.facts:
+            return ""
+        if self.facts["zones_refilled"]:
+            return " · zones refilled by topor (a second undo step)"
+        return " · zones not refilled: press B (Edit → Fill All Zones), a separate undo step"
+
     # ---- summary block (wireframe section 5); fixed line set, so <= 20 lines whatever the board
     def summary_lines(self) -> list:
         f = self.facts
@@ -93,7 +101,7 @@ class RunReport:
             f"locked {_na(f.get('respect_locked'))}",
             f"Settings: {_na(f.get('non_default'))} non-default, {_na(f.get('defaults_used'))} built-in defaults",
             f"Findings: {sev('error')} errors · {sev('warning')} warnings · {sev('info')} notes",
-            f"Outcome: {outcome_text(self.status, self.error_code)}",
+            f"Outcome: {outcome_text(self.status, self.error_code)}" + self._refill_note(),
             f"Report: {self.dir}",
         ]
         return lines[:SUMMARY_MAX_LINES]

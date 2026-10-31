@@ -23,6 +23,7 @@ What a run does and how long it may take.
 | `fail_on_preexisting` | bool | `false` |  | true\|false | Abort when kept or locked copper already has DRC violations; false only lists them as pre-existing. |
 | `kicad_cleanup` | bool | `false` |  | true\|false | After Accept, open KiCad's own Cleanup Tracks and Vias dialog (you confirm it there). |
 | `kicad_teardrops` | bool | `false` |  | true\|false | After Accept, open KiCad's teardrop dialog (you confirm it there). |
+| `refill_after_accept` | bool | `false` |  | true\|false | After Accept, refill all zones from topor (a second undo step in KiCad). false = Accept is exactly one undo step; press B (Edit → Fill All Zones) yourself. KiCad: KiCad → Edit → Fill All Zones (B). |
 | `detour_reference` | bool | `true` |  | true\|false | Compare every routed connection with a DRC-feasible direct path and report detours in the run report. |
 
 ## `[nets]`

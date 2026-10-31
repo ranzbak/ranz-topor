@@ -167,13 +167,22 @@ KiCad's DRC of the routed copy — it is the number to decide on. If the image c
 ## Accept, Reject and undo
 
 - **Accept** (Enter) applies the result as **one** KiCad commit: the ripped tracks/vias are removed and the
-  new ones created, then zones are refilled. One **Edit → Undo** (Ctrl+Z) reverts all of it. New tracks
+  new ones created. That is **one undo step**: one **Edit → Undo** (Ctrl+Z) reverts all of it. New tracks
   are put in a group `topor` (`topor-partial` for partial routes) when KiCad allows it.
-- **Reject** (Esc) writes nothing; the board is exactly as before and Undo has nothing new.
+- **Zones are not refilled** by default (`[run] refill_after_accept = false`): press **B**
+  (KiCad → Edit → Fill All Zones) yourself; KiCad's DRC also refills when you run it. That refill is its own
+  undo step. With `refill_after_accept = true` topor refills the zones right after the commit — a
+  **second** undo step: the first Ctrl+Z reverts the refill, the next one the routes.
 - After Accept, `[run] kicad_cleanup = true` / `kicad_teardrops = true` open KiCad's own *Cleanup Tracks
-  and Vias* / teardrop dialogs (you confirm them there); they are skipped when the result has partial
-  routes ([`CLEANUP_SKIPPED_PARTIAL`](troubleshoot.md#cleanup_skipped_partial)).
-- **Topor — Finished** confirms what happened and shows the report folder.
+  and Vias* / teardrop dialogs (you confirm them there); each is a **separate** undo step after the
+  routes. They are skipped when the result has partial routes
+  ([`CLEANUP_SKIPPED_PARTIAL`](troubleshoot.md#cleanup_skipped_partial)).
+- If one of these later steps fails (refill, cleanup / teardrops, writing the report), the routes stay on
+  the board and the run still counts as accepted, with the warning
+  [`POST_COMMIT_STEP_FAILED`](troubleshoot.md#post_commit_step_failed); Ctrl+Z removes the routes.
+- **Reject** (Esc) writes nothing; the board is exactly as before and Undo has nothing new.
+- **Topor — Finished** confirms what happened, says whether the zones were refilled (press B when not) and
+  shows the report folder.
 - Then run **Inspect → Design Rules Checker** in KiCad.
 
 ## Report folder

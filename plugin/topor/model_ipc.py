@@ -6,10 +6,13 @@ Everything that only reshapes data is a pure function over kipy wrappers (unit-t
 protos): ``pad_from_kipy``, ``shape_to_prims``, ``shape_to_polys``, ``zone_to_keepouts``, ``zone_to_pour``,
 ``track_to_kept``, ``via_to_model``, ``layer_plan``. Only :func:`export_model_ipc` talks to a live ``Board``;
 the live-only calls are marked ``UNVERIFIED`` (get_pad_shapes_as_polygons, get_item_bounding_box,
-get_enabled_layers, get_zones filled polygons, ...).
+get_enabled_layers, get_zones filled polygons, ...). The kipy-free pour-reach / dangling-end geometry
+(``pad_contains``, ``pad_sample_points``, ``pour_reach``, ``dangling_ends``) lives in ``topor.pourreach`` and is
+re-exported here (gate review MINOR 3).
 
 Conventions (documented deviations from the harness, see the B3 report):
-  * net codes are ``toporlib.rules.net_codes_by_name`` (sorted names, 1-based), shared with the rule resolver;
+  * net codes are ``toporlib.rules.net_codes_by_name`` (sorted names, 1-based) of ONE net list, passed to both
+    the rule resolver and the exporter (``IpcBoard.net_codes``, gate review MINOR 13);
   * pad rotation is ``padstack.angle`` (absolute, as kipy's own footprint-rotation code treats it);
   * keepout layers are the copper layers only.
 
@@ -73,6 +76,7 @@ from toporlib.rules import net_codes_by_name
 from .findings import Finding
 from .ipc import kipy_to_pcbnew_layer
 from .layers import is_routed, resolve_layer_roles_ex
+from .pourreach import _top_down, dangling_ends, pad_contains, pad_sample_points, pour_reach  # noqa: F401 - re-exported
 
 _PSS = bt.PadStackShape
 _HULL_SHAPES = (_PSS.PSS_TRAPEZOID, _PSS.PSS_CHAMFEREDRECT, _PSS.PSS_CUSTOM)
@@ -92,10 +96,6 @@ def cu_id(bl) -> int | None:
         return kipy_to_pcbnew_layer(bl)
     except ValueError:
         return None
-
-
-def _top_down(i: int) -> tuple:
-    return (0, 0) if i == 0 else (2, 0) if i == 2 else (1, i)
 
 
 def layer_plan(pcb_copy_text: str, cfg_roles: dict[str, str]) -> tuple[list[dict], list[Finding]]:
@@ -281,75 +281,6 @@ def pad_from_kipy(pad, *, ref: str, net_codes: dict, cu_ids: set, poly_fn=None, 
         if drill["w"] != drill["h"]:
             hole["slot"] = [drill["w"], drill["h"]]
     return out, hole
-
-
-def pad_contains(pad: dict, layer: int, p) -> bool:
-    """True when point `p` lies in the copper of model pad `pad` on `layer` (rotation and shape aware). O(1)
-    (O(n) for a ``poly`` hull)."""
-    sh = pad["shapes"].get(str(layer))
-    if sh is None:
-        return False
-    if sh["kind"] == "poly":
-        return geom.point_in_ring(p, sh["pts"])
-    th = math.radians(pad["rotation_deg"])
-    dx, dy = p[0] - pad["center"][0], p[1] - pad["center"][1]
-    lx = dx * math.cos(th) - dy * math.sin(th)
-    ly = dx * math.sin(th) + dy * math.cos(th)
-    if sh["kind"] == "circle":
-        return math.hypot(lx, ly) <= sh["d"] / 2.0
-    w, h = sh["w"] / 2.0, sh["h"] / 2.0
-    if sh["kind"] == "rect":
-        return abs(lx) <= w and abs(ly) <= h
-    if sh["kind"] == "oval":
-        r = min(w, h)
-        qx, qy = max(abs(lx) - (w - r), 0.0), max(abs(ly) - (h - r), 0.0)
-        return math.hypot(qx, qy) <= r
-    r = min(sh["rc"], w, h)  # roundrect
-    qx, qy = max(abs(lx) - (w - r), 0.0), max(abs(ly) - (h - r), 0.0)
-    return math.hypot(qx, qy) <= r
-
-
-def pad_sample_points(pad: dict, layer: int) -> list[list[float]]:
-    """Probe points (absolute nm) of the pour-reach test, every one INSIDE the model pad's copper on `layer`
-    (M4-R8: reach errs toward "not reached"): the centre plus, in the 8 directions of the pad's box (corners and
-    edge midpoints), the point at 98 % of the way to the shape's boundary (a circle / oval / roundrect corner
-    probe is pulled in onto the rounded edge, so it is never outside the pad). ``poly`` pads: the centre and the
-    hull vertices / edge midpoints pulled 2 % toward the centre, kept only when inside the hull (a concave custom
-    pad's hull may still exceed its copper: listed in the module limitations). O(1) (O(n) for a hull)."""
-    sh = pad["shapes"].get(str(layer))
-    cx, cy = pad["center"]
-    if sh is None:
-        return []
-    if sh["kind"] == "poly":
-        pts = sh["pts"]
-        mids = [[(pts[i][0] + pts[(i + 1) % len(pts)][0]) / 2, (pts[i][1] + pts[(i + 1) % len(pts)][1]) / 2]
-                for i in range(len(pts))]
-        cand = [[cx + 0.98 * (q[0] - cx), cy + 0.98 * (q[1] - cy)] for q in [*pts, *mids]]
-        return [[cx, cy]] + [q for q in cand if pad_contains(pad, layer, q)]
-    w, h = (sh["d"], sh["d"]) if sh["kind"] == "circle" else (sh["w"], sh["h"])
-    th = math.radians(pad["rotation_deg"])
-    c, s = math.cos(th), math.sin(th)
-
-    def place(lx, ly):
-        return [cx + lx * c + ly * s, cy - lx * s + ly * c]
-
-    out = [[float(cx), float(cy)]]
-    for sx in (-1, 0, 1):
-        for sy in (-1, 0, 1):
-            if (sx, sy) == (0, 0):
-                continue
-            ux, uy = sx * w / 2.0, sy * h / 2.0
-            lo, hi = 0.0, 1.0  # largest k in [0, 1] with k * (ux, uy) inside the shape (bisection, 20 steps)
-            if pad_contains(pad, layer, place(ux, uy)):
-                lo = 1.0
-            else:
-                for _ in range(20):
-                    mid = (lo + hi) / 2
-                    lo, hi = (mid, hi) if pad_contains(pad, layer, place(mid * ux, mid * uy)) else (lo, mid)
-            k = 0.98 * lo
-            if k > 0:
-                out.append(place(k * ux, k * uy))
-    return out
 
 
 # ---------------------------------------------------------------- tracks / vias
@@ -614,47 +545,6 @@ def zone_to_pour(zone, *, net_codes: dict, cu_ids: set, pads: list, vias: list, 
     return d
 
 
-def _in_span(span: list, layer: int) -> bool:
-    lo, hi = sorted(span, key=_top_down)
-    return _top_down(lo) <= _top_down(layer) <= _top_down(hi)
-
-
-def pour_reach(code: int, layers: list, fills: list, pads: list, vias: list) -> tuple:
-    """(reached pad refs "REF.NUM", reached via uuids) of a pour of net `code` on `layers` with `fills`
-    (dicts layer/outer/holes). A same-net pad is reached on a zone layer when one of its probe points lies in
-    that layer's fill (even-odd over all rings); a same-net via when its centre does (over its span). Shared by
-    the IPC exporter and the run flow's post-rip refill. O(F * (pads + vias))."""
-    rings: dict[int, list] = {}
-    for f in fills:
-        rings.setdefault(f["layer"], []).extend([f["outer"], *f.get("holes", [])])
-    reach_pads = sorted(f"{p['ref']}.{p['number']}" for p in pads if p["net"] == code and any(
-        l in rings and any(geom.point_in_rings(pt, rings[l]) for pt in pad_sample_points(p, l))
-        for l in p["layers"] if l in layers))
-    reach_vias = sorted(v["uuid"] for v in vias if v["net"] == code and any(
-        l in rings and geom.point_in_rings(v["at"], rings[l]) for l in layers if _in_span(v["layers"], l)))
-    return reach_pads, reach_vias
-
-
-def dangling_ends(kept: list, vias: list, pads: list, cu_order: list) -> list:
-    """Dangling track ends of the `kept` entries (same rule as the exporter / harness). O(items)."""
-    pad_by_net: dict[int, list] = {}
-    for p in pads:
-        pad_by_net.setdefault(p["net"], []).append(p)
-    items = [geom.track_item(k["uuid"], k["net"], k["layer"], k["width"],
-                             k["prim"]["a"] if k["prim"]["kind"] == "seg" else k["prim"]["start"],
-                             k["prim"]["b"] if k["prim"]["kind"] == "seg" else k["prim"]["end"],
-                             k["prim"].get("mid")) for k in kept]
-    vias_by_net: dict[int, list] = {}
-    for v in vias:
-        vias_by_net.setdefault(v["net"], []).append(
-            (v["at"], v["d"] / 2.0, {l for l in cu_order if _in_span(v["layers"], l)}))
-
-    def in_pad(net, layer, pt) -> bool:
-        return any(pad_contains(p, layer, pt) for p in pad_by_net.get(net, ()))
-
-    return geom.find_dangling(items, vias_by_net, in_pad)
-
-
 # ---------------------------------------------------------------- the exporter
 def _is_copper_pour(z) -> bool:
     return z.type == bt.ZoneType.ZT_COPPER and z.net is not None and bool(z.net.name)
@@ -675,14 +565,18 @@ def _dru_text(project, board_name: str, dru_text: str | None) -> str | None:
 
 
 def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: str,
-                     layer_roles: dict | None = None, dru_text: str | None = None) -> dict:
+                     layer_roles: dict | None = None, dru_text: str | None = None,
+                     net_codes: dict | None = None) -> dict:
     """BoardModel dict of the board open in KiCad, same schema as ``harness.model.export_model``.
 
     `board`: ``kipy.board.Board``; `project`: its ``Project`` (the ``.kicad_dru`` next to it is used for
-    `disallow` keepouts unless `dru_text` is given); `pcb_copy_text`: the ``save_as`` copy's text (layer
-    types); `rules`: the resolved rules dict (``toporlib.rules``, made with the same net codes); `layer_roles`:
-    ``cfg.layer_roles``. The zones should be refilled before the call (``Board.refill_zones``), otherwise a
-    pour falls back to its outline with a warning. The returned ``layers`` carry ``kind``, ``role``,
+    `disallow` keepouts unless `dru_text` is given; ``IpcBoard.read_model`` passes the save_as COPY's file,
+    "" when the copy has none); `pcb_copy_text`: the ``save_as`` copy's text (layer types); `rules`: the
+    resolved rules dict (``toporlib.rules``); `net_codes`: net name -> code, the SAME table the rules were
+    resolved with (default: ``net_codes_by_name`` of ``board.get_nets()``); `layer_roles`: ``cfg.layer_roles``.
+    The fills are the live board's as they are (possibly stale): the run flow replaces fills, reach and dangling
+    ends from the kicad-cli refilled copy (``run.refill_pours``, ruling C29); a zone without fills stands in with
+    its outline (warning) and reaches nothing. The returned ``layers`` carry ``kind``, ``role``,
     ``role_source`` and ``routable`` (:func:`layer_plan`); its findings are the caller's business (call
     :func:`layer_plan` for them). UNVERIFIED live: every ``board.*`` call below."""
     max_err = int(rules.get("max_error") or 5000)
@@ -694,8 +588,7 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
     cu_order = [g["id"] for g in plan]
     cu_ids = set(cu_order)
 
-    net_names = [n.name for n in board.get_nets()]
-    codes = net_codes_by_name(net_names)
+    codes = dict(net_codes) if net_codes is not None else net_codes_by_name([n.name for n in board.get_nets()])
     nets = [{"code": c, "name": n} for n, c in sorted(codes.items(), key=lambda kv: kv[1])]
 
     def poly_fn(pad, bl):  # UNVERIFIED: Board.get_pad_shapes_as_polygons
@@ -794,4 +687,4 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
 
 __all__ = ["export_model_ipc", "layer_plan", "pad_from_kipy", "pad_shape", "pad_contains", "shape_to_prims",
            "shape_to_polys", "zone_to_keepouts", "zone_to_pour", "track_to_kept", "via_to_model", "via_free", "ring_pts",
-           "cu_id", "text_box_poly", "text_margin", "pour_reach", "pad_sample_points"]
+           "cu_id", "text_box_poly", "text_margin", "pour_reach", "pad_sample_points", "dangling_ends"]

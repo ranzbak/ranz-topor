@@ -31,7 +31,8 @@ under **Tools → External Plugins**. Then see the sections below.
 ### Cannot connect to KiCad (API server off)
 
 **Cause.** The plugin talks to KiCad over its IPC API. With the API disabled the plugin cannot read the
-board; the crash log shows a connection error from `kipy`, exit code 1.
+board: an error dialog shows [KICAD_API_CONNECT](#kicad_api_connect), the crash log has the connection
+error from `kipy`, exit code 1.
 
 **Fix.** KiCad → Preferences → Plugins → tick **Enable KiCad API**, restart the PCB Editor, run again.
 
@@ -94,12 +95,16 @@ plugin "exited with code N". The codes:
 ### The plugin exited with code 0
 
 Normal end: the result was accepted or rejected, the run was cancelled, or it stopped at the pre-flight
-dialog. Nothing to do.
+dialog. Nothing to do — except after a [POST_COMMIT_STEP_FAILED](#post_commit_step_failed) warning (the
+routes are on the board, a later step such as the zone refill failed).
 
 ### The plugin exited with code 1
 
-**Cause.** An error: the engine version check failed ([ENGINE_VERSION](#engine_version)), a module is
-missing (sections above), KiCad could not be reached, or an unexpected exception or engine panic happened
+**Cause.** An error, shown in a *Topor — Error* dialog: the engine version check failed
+([ENGINE_VERSION](#engine_version)), a module is missing (sections above), KiCad could not be reached
+([KICAD_API_CONNECT](#kicad_api_connect)), the report folder could not be written
+([REPORT_DIR_UNWRITABLE](#report_dir_unwritable)), the engine did not stop after Cancel
+([ENGINE_UNRESPONSIVE](#engine_unresponsive)), or an unexpected exception or engine panic happened
 ([INTERNAL](#internal)). The board is not changed in any of these cases.
 
 **Fix.** Read the last entry of `~/.cache/kicad/10.0/topor/topor-crash.log` (and `log.txt` in the report
@@ -238,6 +243,14 @@ and compare with `drc.json` in the report folder. If the router's copper really 
 
 **Fix.** Add the drill to vias.allowed_drills_mm (accepting the finding does it) or change the via sizes in KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias.
 
+### ENGINE_UNRESPONSIVE
+
+*Severity: error.*
+
+**Cause.** After Cancel the routing engine did not stop within the grace period (it is stuck outside its stop checks), so the run was ended without a result. The board was not changed.
+
+**Fix.** Run again with a shorter run.timeout_s; if it recurs, file a bug with log.txt and result.json from the report folder (docs/dev/debug.md). If KiCad stays slow, save and restart it (KiCad → File → Exit).
+
 ### ENGINE_VERSION
 
 *Severity: error.*
@@ -261,6 +274,14 @@ and compare with `drc.json` in the report folder. If the router's copper really 
 **Cause.** An unexpected internal error stopped the run. The board was not changed.
 
 **Fix.** Run again; if it recurs, file a bug with log.txt and result.json from the report folder (Open report folder in the dialog) and a copy of the project folder saved with KiCad → File → Save (docs/dev/debug.md).
+
+### KICAD_API_CONNECT
+
+*Severity: error.*
+
+**Cause.** topor could not connect to KiCad over its IPC API (the API server is off, KiCad is still starting, or no board is open in the PCB Editor). The board was not changed.
+
+**Fix.** KiCad → Preferences → Plugins → tick Enable KiCad API, restart the PCB Editor with the board open, then press the Topor button again.
 
 ### KICAD_CLI_MISSING
 
@@ -358,6 +379,14 @@ and compare with `drc.json` in the report folder. If the router's copper really 
 
 **Fix.** Add a zone on that layer with a ground/power net covering the board outline (KiCad → Place → Add Filled Zone), then refill zones (KiCad → Edit → Fill All Zones, B), or change the role in topor.toml [layers].
 
+### POST_COMMIT_STEP_FAILED
+
+*Severity: warning.*
+
+**Cause.** The routes were committed to the board, then a later step failed (zone refill, a KiCad cleanup / teardrop action, writing the report or showing the done notice); the routes stay on the board.
+
+**Fix.** Ctrl+Z (Edit → Undo) removes the routes; or keep them and do the failed step yourself: refill zones with B (KiCad → Edit → Fill All Zones), run KiCad → Tools → Cleanup Tracks & Vias, or check the report folder (output.report_dir).
+
 ### POWER_BY_NAME
 
 *Severity: info.*
@@ -381,6 +410,14 @@ and compare with `drc.json` in the report folder. If the router's copper really 
 **Cause.** The preview image could not be rendered; the DRC numbers in the summary are still valid.
 
 **Fix.** Check kicad-cli in KiCad → Help → About KiCad and the log in the report folder.
+
+### REPORT_DIR_UNWRITABLE
+
+*Severity: error.*
+
+**Cause.** The run's report folder could not be created or written (read-only folder, full disk, or a file where the folder should be), so topor stopped before reading the board. The board was not changed.
+
+**Fix.** Point output.report_dir in topor.toml at a folder you can write (e.g. "topor-reports" inside the project folder), or fix the permissions / free disk space for the folder named in the message.
 
 ### SCOPE_EMPTY
 

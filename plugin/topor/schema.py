@@ -80,6 +80,8 @@ SETTINGS: list[Setting] = [
     _s("run", "fail_on_preexisting", "bool", False, "Abort when kept or locked copper already has DRC violations; false only lists them as pre-existing."),
     _s("run", "kicad_cleanup", "bool", False, "After Accept, open KiCad's own Cleanup Tracks and Vias dialog (you confirm it there)."),
     _s("run", "kicad_teardrops", "bool", False, "After Accept, open KiCad's teardrop dialog (you confirm it there)."),
+    _s("run", "refill_after_accept", "bool", False, "After Accept, refill all zones from topor (a second undo step in KiCad). false = Accept is exactly one undo step; press B (Edit → Fill All Zones) yourself.",
+       kicad="KiCad → Edit → Fill All Zones (B)"),
     _s("run", "detour_reference", "bool", True, "Compare every routed connection with a DRC-feasible direct path and report detours in the run report."),
     # ---- [nets]
     _s("nets", "do_not_touch", "list", [], "Net names or glob patterns whose copper is a fixed obstacle and never routed, ripped or smoothed.",

@@ -123,6 +123,10 @@ def test_m4b_gate_headless_eprom_and_wiccon(app, board, tmp_path):
     assert out.report.facts.get("existing_copper") == "rip"
     assert len(board_port.commits) == 1 and out.commit is not None
     assert board_port.commits[0].items == out.items and set(board_port.commits[0].remove_uuids) == set(out.ripped)
+    # MINOR 12: FakeBoard skips unknown uuids silently, so the commit must have removed every ripped item; with
+    # the default run.refill_after_accept = false (ruling C28) Accept is the commit alone: no refill, no action
+    assert out.ripped and out.commit.removed == len(out.ripped) and out.commit.created == len(out.items)
+    assert board_port.refills == 0 and board_port.actions == []
     assert (out.routed, out.total) == (EXPECTED[board], EXPECTED[board])
 
     # the committed board (FakeBoard's second save_copy) judged by kicad-cli (M4-R6 oracle)

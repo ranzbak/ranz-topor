@@ -23,6 +23,18 @@ def test_default_file_roundtrips_to_defaults(tmp_path):
     tomllib.loads((tmp_path / "topor.toml").read_text())
 
 
+def test_refill_after_accept_key(tmp_path):
+    """Ruling C28 (gate review I-2): Accept = exactly one undo step by default; the refill is opt-in."""
+    s = schema.SETTINGS_BY_KEY[("run", "refill_after_accept")]
+    assert s.type == "bool" and s.default is False and s.plugin_field == "run.refill_after_accept"
+    assert s.engine_field is None
+    assert "second undo step" in s.doc and "press B (Edit → Fill All Zones)" in s.doc
+    assert s.kicad_place == "KiCad → Edit → Fill All Zones (B)"
+    (tmp_path / "topor.toml").write_text('version = 1\n[run]\nrefill_after_accept = true\n')
+    cfg, findings = load_config(tmp_path)
+    assert findings == [] and cfg.get("run", "refill_after_accept") is True
+
+
 def test_unknown_key_warns_not_ignored(tmp_path):
     (tmp_path / "topor.toml").write_text(
         'version = 1\n[run]\ntimeut_s = 5\n[bogus]\nx = 1\n'
