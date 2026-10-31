@@ -11,6 +11,7 @@ pub mod obstacle;
 #[cfg(feature = "python")]
 mod py;
 pub mod relax;
+pub mod search;
 pub mod sketch;
 pub mod smooth;
 pub mod taut;
