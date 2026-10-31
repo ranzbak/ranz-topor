@@ -567,6 +567,17 @@ impl Scope {
     }
 }
 
+/// A circular obstacle that only `net` must avoid (harness DRC loop: KiCad flagged copper of
+/// `net` at `at` on `layer`; the router keeps `r` nm from `at`). `at` is in the KiCad frame.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DrcSpot {
+    pub layer: u32,
+    pub at: Pt,
+    pub r: i64,
+    pub net: i32,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Options {
@@ -584,6 +595,8 @@ pub struct Options {
     /// Smoother: kept uuid -> reason. A wire containing a pinned item keeps its hand copper
     /// (fallback "pinned: <reason>"); the harness DRC loop pins items KiCad flagged.
     pub pinned: BTreeMap<String, String>,
+    /// Router: per-net circular obstacles from the harness DRC loop.
+    pub drc_spots: Vec<DrcSpot>,
 }
 
 impl Default for Options {
@@ -601,6 +614,7 @@ impl Default for Options {
             scope: Scope::default(),
             skip_self_check: false,
             pinned: BTreeMap::new(),
+            drc_spots: Vec::new(),
         }
     }
 }

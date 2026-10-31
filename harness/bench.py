@@ -21,6 +21,7 @@ from harness.model import export_model, load_board, write_model_json
 from harness.paths import BENCH_BOARDS
 from harness.render import caption, compose_compare, render_png
 from harness.rip import record_widths, rip_tracks
+from harness.router import drc_spots
 from harness.rules import resolve_rules
 from harness.smoother import drc_pins
 
@@ -51,8 +52,33 @@ def _zone_reach(board) -> float:
     return 2.0 * max(r) if r else 1_000_000.0
 
 
+def _route_summary(report: dict | None) -> dict | None:
+    """Condensed topor `RouteResult` (None for other routers' reports)."""
+    if not report or "connections" not in report:
+        return None
+
+    def mm(key):
+        v = report.get(key)
+        return None if v is None else round(v / 1e6, 3)
+
+    return {
+        "connections": report.get("connections_total", 0),
+        "routed": report.get("routed", 0),
+        "partial": report.get("partial", 0),
+        "failed": report.get("failed", 0),
+        "nets": report.get("nets_total", 0),
+        "nets_routed": report.get("nets_routed", 0),
+        "length_mm": mm("total_length_nm"),
+        "outside_mm": mm("length_outside_pads_nm"),
+        "hand_outside_mm": None,
+        "iterations": report.get("iterations"),
+        "timed_out": report.get("timed_out"),
+        "clinches": report.get("clinches"),
+    }
+
+
 def _smooth_summary(report: dict | None) -> dict | None:
-    if not report:
+    if not report or "connections" in report:
         return None
     nets = report.get("nets") or []
     wires = report.get("wires") or []
@@ -113,9 +139,22 @@ def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path) -> s
         head.append(f"  fallback: {len(fb)} wires (zero slack {sm['wires_zero_slack']})")
         head.extend(f"    wire {f['id']} net {f['net']}"
                     f"{' [zero slack]' if f['zero_slack'] else ''}: {f['reason']}" for f in fb)
+    rt = result.get("route")
+    if rt:
+        cl = rt["clinches"]
+        u = cl.get("u", 0) if isinstance(cl, dict) else cl
+        u = len(u) if isinstance(u, list) else u
+        head.append(f"  route: routed {rt['routed']}/{rt['connections']} connections, "
+                    f"{rt['nets_routed']}/{rt['nets']} nets, partial {rt['partial']}, "
+                    f"failed {rt['failed']}, outside pads {rt['outside_mm']} "
+                    f"(hand {rt['hand_outside_mm']}), iters {rt['iterations']}, clinches {u}")
+    partial = (result.get("router_report") or {}).get("partial") or 0
+    if partial > 0:
+        head.append(f"  partial={partial}")
     dl = result.get("drc_loop") or {}
     if dl.get("rounds", 1) > 1:
-        head.append(f"  drc loop: {dl['rounds']} rounds, {len(dl['pinned'])} pinned")
+        head.append(f"  drc loop: {dl['rounds']} rounds, {len(dl.get('pinned') or {})} pinned"
+                    + (f", {len(dl['spots'])} spots" if dl.get("spots") else ""))
     drc = summarise(board, routed_drc, base_drc,
                     extra={"width_match": f"{wm['matched']}/{wm['compared']}"})
     lines = head + drc.splitlines() + [f"  outputs: {out_dir}"]
@@ -151,6 +190,17 @@ def run_bench(
     # Hand image is rendered from the untouched copy, before anything is saved over it.
     hand_raw = render_png(cp.pcb, cp.pcb.parent / f"{board}-hand-raw.png")
 
+    dru_text = cp.dru.read_text() if cp.dru is not None else None
+    rules = resolve_rules(b, dru_text=dru_text, widths_before=widths_before,
+                          apply_fab_floors=fab_floors)
+    pre_model = export_model(b, rules, name=board)  # the untouched hand board (hand stats)
+    hand_stats = None
+    try:
+        import topor_engine
+        hand_stats = json.loads(topor_engine.wire_stats(json.dumps(pre_model)))
+    except ImportError:
+        pass
+
     rep = asdict(rip_tracks(b, mode=rip, scope=options.get("scope"), rf_nets=set(rf_nets)))
     writer.save(b, cp.pcb)
     removed = {k: rep[k] for k in ("removed_tracks", "removed_arcs", "removed_vias", "removed_teardrops")}
@@ -158,9 +208,6 @@ def run_bench(
                                 "kept_rf_tracks", "kept_rf_vias")}
     b = load_board(cp)  # fresh board holding the ripped copper just saved
 
-    dru_text = cp.dru.read_text() if cp.dru is not None else None
-    rules = resolve_rules(b, dru_text=dru_text, widths_before=widths_before,
-                          apply_fab_floors=fab_floors)
     model = export_model(b, rules, name=board)
     write_model_json(model, out_dir / f"{board}--model.json")
 
@@ -172,11 +219,13 @@ def run_bench(
     pre_route = cp.pcb.with_name(cp.pcb.name + ".pre-route")
     shutil.copyfile(cp.pcb, pre_route)
     pinned: dict = dict(options.get("pinned") or {})
+    spots: list = list(options.get("drc_spots") or [])
     rounds, router_s = 0, 0.0
     while True:
         rounds += 1
         t_route = time.monotonic()
-        opts = {**options, "threads": threads, **({"pinned": pinned} if pinned else {})}
+        opts = {**options, "threads": threads, **({"pinned": pinned} if pinned else {}),
+                **({"drc_spots": spots} if spots else {})}
         routed = router(model, opts) if router is not None else []
         router_s += time.monotonic() - t_route
         if isinstance(routed, dict):
@@ -193,6 +242,21 @@ def run_bench(
         routed_drc = run_drc(cp.pcb, out_dir / f"{board}--drc-routed.json")
         if router_report is None or rounds > loop_cap:
             break
+        if "connections" in router_report:  # topor: DRC spots for the offending nets
+            have = {(sp["layer"], tuple(sp["at"])) for sp in spots}
+            fresh = []
+            for sp in drc_spots(new_routing(routed_drc, base_drc), created, model, reach,
+                                float(max(rules["min_clearance"],
+                                          rules["default"].get("clearance", 0)))):
+                if (sp["layer"], tuple(sp["at"])) not in have:
+                    have.add((sp["layer"], tuple(sp["at"])))
+                    fresh.append(sp)
+            if not fresh:
+                break
+            spots.extend(fresh)
+            shutil.copyfile(pre_route, cp.pcb)
+            b = load_board(cp)
+            continue
         names = {n["code"]: n["name"] for n in model["nets"]}
         more = {u: r for u, r in drc_pins(new_routing(routed_drc, base_drc), created,
                                           router_report.get("wires") or [], names, reach).items()
@@ -216,6 +280,9 @@ def run_bench(
     topor_png = caption(topor_raw, f"{board}: topor", out_dir / f"{board}-topor.png")
     compose_compare(hand_png, topor_png, out_dir / f"{board}-compare.png")
 
+    route = _route_summary(router_report)
+    if route is not None and hand_stats is not None:
+        route["hand_outside_mm"] = round(hand_stats["hand_outside_pads_nm"] / 1e6, 3)
     result = {
         "board": board,
         "footprints": len(fps),
@@ -230,10 +297,12 @@ def run_bench(
         "routed_items": len(write),
         "unchanged_items": unchanged,
         "replaced": replaced,
-        "drc_loop": {"rounds": rounds, "pinned": pinned},
+        "drc_loop": {"rounds": rounds, "pinned": pinned, "spots": spots},
         "teardrops_removed": teardrops_removed,
         "router_report": router_report,
         "smooth": _smooth_summary(router_report),
+        "route": route,
+        "hand_stats": hand_stats,
         "floors": [{"name": f["name"], "design_mm": f["design"] / 1e6, "floor_mm": f["floor"] / 1e6}
                    for f in rules.get("floors_applied", [])],
         "rules_used": {k: rules[k] / 1e6 for k in ("edge_clearance", "min_clearance", "min_track_width")},
@@ -254,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("board", help=f"one of {sorted(BENCH_BOARDS)}")
     ap.add_argument("out_dir", type=Path)
     ap.add_argument("--rip", choices=["all", "none", "scoped"], default="all")
-    ap.add_argument("--router", choices=["none", "smoother"], default="none")
+    ap.add_argument("--router", choices=["none", "smoother", "topor"], default="none")
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--pcb", type=Path, default=None,
                     help="use this board instead of BENCH_BOARDS[board] (synthetic fixtures)")
@@ -263,6 +332,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.router == "smoother":
         from harness.smoother import smooth_router
         router = smooth_router
+    elif args.router == "topor":
+        from harness.router import route_router
+        router = route_router
     run_bench(args.board, args.out_dir, router=router, rip=args.rip, threads=args.threads,
               pcb_override=args.pcb)
     return 0

@@ -55,6 +55,8 @@ pub struct Anchor {
     pub own_clr: f64,
     pub tie_nets: Vec<i32>,
     pub label: String,
+    /// Non-empty: the anchor is an obstacle only for these nets (DRC spots).
+    pub only_nets: Vec<i32>,
 }
 
 #[derive(Clone, Debug)]
@@ -187,6 +189,7 @@ impl Frag {
             own_clr: m.own_clr,
             tie_nets: m.tie_nets.clone(),
             label: m.label.clone(),
+            only_nets: Vec::new(),
         });
         let i = self.anchors.len() - 1;
         self.seen.insert(key(c), i);
@@ -506,6 +509,24 @@ impl ObstacleSet {
             b.add(&[k.layer], &f);
         }
 
+        // DRC spots: a core-less circle that only its own net avoids (exempt for every other).
+        for (i, sp) in opts.drc_spots.iter().enumerate() {
+            let m = Meta {
+                net: 0,
+                kind: ObsKind::Keepout,
+                own_clr: 0.0,
+                tie_nets: Vec::new(),
+                label: format!("spot:{i}"),
+            };
+            let at = Vec2 {
+                x: sp.at.x as f64,
+                y: -(sp.at.y as f64),
+            };
+            let mut f = Frag::point(at, sp.r as f64, &m);
+            f.anchors[0].only_nets = vec![sp.net];
+            b.add(&[sp.layer], &f);
+        }
+
         for t in terminals {
             let m = Meta {
                 net: t.net,
@@ -552,6 +573,12 @@ impl ObstacleSet {
     /// Same-net or net-tie obstacles are not obstacles (mirrors `Checker::is_exempt`).
     pub fn exempt(a_net: i32, a_tie: &[i32], net: i32) -> bool {
         (a_net != 0 && a_net == net) || a_tie.contains(&net)
+    }
+
+    /// [`ObstacleSet::exempt`] for an anchor, plus the `only_nets` rule of DRC spots.
+    pub fn exempt_anchor(a: &Anchor, net: i32) -> bool {
+        Self::exempt(a.net, &a.tie_nets, net)
+            || (!a.only_nets.is_empty() && !a.only_nets.contains(&net))
     }
 
     /// Required copper clearance of an obstacle for a wire of `net`, nm (without margin).

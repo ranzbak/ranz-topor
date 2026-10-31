@@ -431,3 +431,59 @@ fn track_keepout_is_zero_clearance_polygon_for_every_net() {
     assert!(near(s.rho_wall(0, 0, 5, W), 125_000.0 + 5_000.0));
     assert!(s.layer(2).walls.is_empty());
 }
+
+#[test]
+fn drc_spot_is_an_obstacle_only_for_its_net() {
+    use topor_engine::model::DrcSpot;
+    use topor_engine::route::route;
+    let m = BoardModel::from_json(&format!(
+        r#"{{ "layers": [ {{ "id": 0 }}, {{ "id": 31 }} ], "nets": [ {{"code":1,"name":"N1"}}, {{"code":2,"name":"N2"}} ],
+          "pads": [
+            {{ "uuid":"a1","ref":"A","number":"1","net":1,"center":[5000000,-10000000],"layers":[0],"shapes":{{"0":{{"kind":"circle","d":1000000}}}} }},
+            {{ "uuid":"a2","ref":"A","number":"2","net":1,"center":[15000000,-10000000],"layers":[0],"shapes":{{"0":{{"kind":"circle","d":1000000}}}} }},
+            {{ "uuid":"b1","ref":"B","number":"1","net":2,"center":[5000000,-20000000],"layers":[0],"shapes":{{"0":{{"kind":"circle","d":1000000}}}} }},
+            {{ "uuid":"b2","ref":"B","number":"2","net":2,"center":[15000000,-20000000],"layers":[0],"shapes":{{"0":{{"kind":"circle","d":1000000}}}} }} ],
+          "outline": [ {{"kind":"seg","a":[0,0],"b":[30000000,0]}}, {{"kind":"seg","a":[30000000,0]," b":[30000000,-30000000]}},
+                       {{"kind":"seg","a":[30000000,-30000000],"b":[0,-30000000]}}, {{"kind":"seg","a":[0,-30000000],"b":[0,0]}} ],
+          "rules": {} }}"#,
+        rules()
+    ).replace("\" b\"", "\"b\""))
+    .unwrap();
+    let spot = |net, y| DrcSpot {
+        layer: 0,
+        at: topor_engine::model::Pt { x: 10_000_000, y },
+        r: 400_000,
+        net,
+    };
+    let o = Options {
+        drc_spots: vec![spot(1, -10_000_000), spot(2, -10_000_000)],
+        ..Options::default()
+    };
+    let set = ObstacleSet::build(&m, &o, &HashSet::new(), &[]);
+    let a = set
+        .layer(0)
+        .anchors
+        .iter()
+        .find(|a| a.label == "spot:0")
+        .expect("spot anchor");
+    assert_eq!(a.only_nets, vec![1]);
+    assert_eq!(a.kind, ObsKind::Keepout);
+    assert!(!ObstacleSet::exempt_anchor(a, 1) && ObstacleSet::exempt_anchor(a, 2));
+
+    let ro = Options {
+        drc_spots: vec![spot(1, -10_000_000), spot(1, -20_000_000)],
+        wall_clock_s: 10.0,
+        ..Options::default()
+    };
+    let r = route(&m, &ro);
+    let pat = |net| {
+        r.connections
+            .iter()
+            .find(|c| c.net == net)
+            .unwrap()
+            .pattern
+            .clone()
+    };
+    assert!(pat(1).contains('A'), "{}", pat(1));
+    assert!(!pat(2).contains('A'), "{}", pat(2));
+}

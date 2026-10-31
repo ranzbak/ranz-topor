@@ -173,7 +173,7 @@ impl Env for WireEnv<'_> {
     }
     fn exempt_anchor(&self, a: usize) -> bool {
         let o = &self.layer().anchors[a];
-        ObstacleSet::exempt(o.net, &o.tie_nets, self.wires[self.k].net)
+        ObstacleSet::exempt_anchor(o, self.wires[self.k].net)
     }
     fn exempt_wall(&self, i: usize) -> bool {
         let o = &self.layer().walls[i];

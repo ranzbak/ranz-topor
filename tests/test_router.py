@@ -47,3 +47,99 @@ def test_fixture_vcc_stub_is_locked_and_touches_pad1(tmp_path):
     assert stubs[0]["width"] == int(0.25 * MM) and stubs[0]["layer"] == int(pcbnew.F_Cu)
     base = _board(tmp_path / "b.kicad_pcb")
     assert not [k for k in _export(base)["kept"] if k["net"] == vcc]
+
+
+# ---- T9 (M2): route_router, DRC spots, hand stats, progress ----
+
+import json  # noqa: E402
+
+from harness import bench, progress  # noqa: E402
+from harness.drc import Violation  # noqa: E402
+from harness.router import drc_spots, route_router  # noqa: E402
+
+MM_ = 1_000_000
+
+
+def _viol(type_, *items):
+    return Violation(type=type_, severity="error", description="",
+                     items=[{"description": d, "pos": {"x": x, "y": y}, "uuid": u}
+                            for d, x, y, u in items])
+
+
+def _trk(net, y_mm, width=250_000, layer=0):
+    return {"net": net, "layer": layer, "width": width,
+            "prim": {"kind": "seg", "a": [0, y_mm * MM_], "b": [10 * MM_, y_mm * MM_]}}
+
+
+def test_route_router_on_fixture(engine, fixture_board, tmp_path):
+    r = bench.run_bench("fixture", tmp_path, router=route_router, rip="all",
+                        pcb_override=fixture_board.pcb)
+    rep = r["router_report"]
+    assert rep["connections_total"] >= 3 and r["routed_drc"]["routing_new"] == 0
+    assert r["hand_stats"]["wires"] >= 1 and r["route"]["routed"] == rep["routed"]
+    assert r["route"]["hand_outside_mm"] is not None
+
+
+def test_drc_spots_from_violation_names_written_item():
+    created = {"u1": _trk(3, 5, width=300_000)}
+    model = {"nets": [{"code": 3, "name": "SIG"}]}
+    v = _viol("clearance", ("Track [SIG] on F.Cu", 7.0, 5.0, "u1"), ("Pad 1 [X] of U1", 8.0, 5.2, "pad"))
+    spots = drc_spots([v], created, model, 1_500_000, 200_000)
+    assert spots == [{"layer": 0, "at": [7 * MM_, 5 * MM_], "r": 500_000, "net": 3}]
+
+
+def test_drc_spots_zone_neck_uses_reach():
+    created = {"u1": _trk(3, 5), "u2": _trk(4, 40)}
+    model = {"nets": [{"code": 3, "name": "SIG"}, {"code": 4, "name": "OTHER"}, {"code": 5, "name": "GND"}]}
+    v = _viol("connection_width", ("Via [GND] on F.Cu - B.Cu", 5.0, 5.5, "via"),
+              ("Zone [GND] on F.Cu and B.Cu, priority 0", 50.0, 50.0, "zone"))
+    spots = drc_spots([v], created, model, 1_500_000, 200_000)
+    assert spots == [{"layer": 0, "at": [5 * MM_, int(5.5 * MM_)], "r": 1_500_000, "net": 3}]
+
+
+def _fake_topor(model, options):
+    net = next(n["code"] for n in model["nets"] if n["name"] == "SIG")
+    item = {**_trk(net, 40, width=100_000), "wire": 0}
+    item["prim"] = {"kind": "seg", "a": [40 * MM_, 40 * MM_], "b": [41 * MM_, 40 * MM_]}
+    _fake_topor.seen.append(list(options.get("drc_spots") or []))
+    return {"items": [item], "remove_uuids": [],
+            "report": {"connections": [], "connections_total": 1, "routed": 1, "partial": 0,
+                       "failed": 0, "nets_total": 1, "nets_routed": 1, "iterations": 3,
+                       "clinches": {"regular": 0, "u": 0}}}
+
+
+_fake_topor.seen = []
+
+
+def test_bench_drc_loop_reroutes_with_spots(fixture_board, tmp_path):
+    _fake_topor.seen.clear()
+    r = bench.run_bench("fixture", tmp_path / "o", router=_fake_topor, rip="none",
+                        pcb_override=fixture_board.pcb)
+    # round 1 emits a too-thin track (new track_width violation naming it); round 2 carries a spot
+    assert r["drc_loop"]["rounds"] == 2, r["drc_loop"]
+    assert _fake_topor.seen[0] == [] and len(_fake_topor.seen[1]) == 1
+    assert r["drc_loop"]["spots"] == _fake_topor.seen[1]
+
+
+def test_progress_m2_caption_and_path(engine, fixture_board, tmp_path):
+    res = progress.render_progress("T9", board="fixture", date="2026-10-31",
+                                   out_dir=tmp_path / "prog", pcb_override=fixture_board.pcb,
+                                   router="topor")
+    assert (tmp_path / "prog" / "2026-10-31-m2-T9.png").is_file()
+    l1, l2 = res["caption"].split("\n")
+    assert l1.startswith("T9: ") and " connections, " in l1 and "partial " in l1 and "arcs " in l1
+    assert l2.startswith("DRC routing ") and " vs hand " in l2 and l2.endswith(" s")
+
+
+def test_bench_summary_prints_partial_line(fixture_board, tmp_path, capsys):
+    def router(model, options):
+        return {"items": [], "remove_uuids": [],
+                "report": {"connections": [], "connections_total": 4, "routed": 2, "partial": 2,
+                           "failed": 0, "nets_total": 2, "nets_routed": 1, "iterations": 1,
+                           "clinches": {"regular": 0, "u": 1}}}
+
+    bench.run_bench("fixture", tmp_path / "o", router=router, rip="none",
+                    pcb_override=fixture_board.pcb)
+    out = capsys.readouterr().out
+    assert "  partial=2" in out
+    assert "  route: routed 2/4 connections, 1/2 nets, partial 2, failed 0" in out
