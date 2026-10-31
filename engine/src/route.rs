@@ -85,7 +85,8 @@ pub struct ConnReport {
     pub name: String,
     pub layer: u32,
     pub width: i64,
-    /// `routed`, `partial` or `failed`.
+    /// `routed`, `partial`, `failed` or `ignored` (pad in `Options.ignore_pads`; not counted in
+    /// `connections_total`).
     pub status: String,
     pub reason: String,
     /// Vias of the routed connection.
@@ -130,7 +131,8 @@ pub struct ZeroSlackWire {
 pub struct NetRouteReport {
     pub net: i32,
     pub name: String,
-    /// `routed`, `partial`, `failed`, `pour_served`, `complete` or `out_of_scope`.
+    /// `routed`, `partial`, `failed`, `pour_served`, `complete`, `out_of_scope` or `excluded`
+    /// (do-not-touch net).
     pub status: String,
     pub connections: usize,
     pub routed: usize,
@@ -2154,6 +2156,86 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
 /// the best result so far (`stop_reason == "cancel"`), `ctl.progress` is updated per iteration
 /// and per pass. The cancel flag is installed on every thread of the run's private pool.
 pub fn route_with(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteResult {
+    if opts.ignore_pads.is_empty() {
+        return route_with_pool(model, opts, ctl);
+    }
+    let (filtered, ignored) = drop_ignored_pads(model, opts);
+    let mut r = route_with_pool(&filtered, opts, ctl);
+    append_ignored(&mut r, model, &ignored);
+    r
+}
+
+/// `model` without the pads of `opts.ignore_pads` (no terminal, no obstacle) and the removed pad
+/// indices of `model`. O(P log I).
+fn drop_ignored_pads(model: &BoardModel, opts: &Options) -> (BoardModel, Vec<usize>) {
+    let ign: BTreeSet<(&str, &str)> = opts
+        .ignore_pads
+        .iter()
+        .map(|p| (p.ref_.as_str(), p.number.as_str()))
+        .collect();
+    let mut filtered = model.clone();
+    let mut removed = Vec::new();
+    let mut i = 0usize;
+    filtered.pads.retain(|p| {
+        let hit = ign.contains(&(p.ref_.as_str(), p.number.as_str()));
+        if hit {
+            removed.push(i);
+        }
+        i += 1;
+        !hit
+    });
+    (filtered, removed)
+}
+
+/// One `ignored` [`ConnReport`] per removed pad on a net (net 0 pads have no connections).
+/// Not counted in `connections_total`. O(I).
+fn append_ignored(r: &mut RouteResult, model: &BoardModel, removed: &[usize]) {
+    for &pi in removed {
+        let p = &model.pads[pi];
+        if p.net == 0 {
+            continue;
+        }
+        let t = TermRef {
+            kind: TermKind::Pad(pi),
+            label: format!("{}.{}", p.ref_, p.number),
+            at: p.center.to_vec2(),
+            layers: Vec::new(),
+        };
+        let name = model
+            .nets
+            .iter()
+            .find(|n| n.code == p.net)
+            .map(|n| n.name.clone())
+            .unwrap_or_default();
+        r.connections.push(ConnReport {
+            id: r.connections.len(),
+            net: p.net,
+            name,
+            layer: 0,
+            width: model.rules.net_rule(p.net).width,
+            status: "ignored".into(),
+            reason: "pad outside board".into(),
+            vias: 0,
+            layers: Vec::new(),
+            via_sites: Vec::new(),
+            from: term_out(&t),
+            to: term_out(&t),
+            length_nm: 0,
+            length_outside_pads_nm: 0,
+            pattern: String::new(),
+            anchors: 0,
+            crossings: 0,
+            blocking: None,
+            g1_angle_deg: None,
+            iteration: 0,
+            zero_slack: false,
+            probe_steps: None,
+            ghost_len_nm: None,
+        });
+    }
+}
+
+fn route_with_pool(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteResult {
     let n = opts.effective_threads().max(1);
     let flag = ctl.cancel.clone();
     let built = rayon::ThreadPoolBuilder::new()
@@ -3275,7 +3357,9 @@ fn route_pass(
         let cs: Vec<&ConnReport> = n.connections.iter().map(|&i| &reports[i]).collect();
         let count = |s: &str| cs.iter().filter(|r| r.status == s).count();
         let (routed, partial, failed) = (count("routed"), count("partial"), count("failed"));
-        let status = if n.pour_served {
+        let status = if n.excluded {
+            "excluded"
+        } else if n.pour_served {
             "pour_served"
         } else if !n.in_scope {
             "out_of_scope"

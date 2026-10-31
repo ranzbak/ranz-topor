@@ -709,6 +709,23 @@ pub struct Options {
     /// Diagnostics: emit `RouteResult.profile` (per-iteration timers). Off by default: timings
     /// are run-dependent and must not enter the (thread-count independent) result JSON.
     pub profile: bool,
+    /// Net name -> priority tier `1..=4` (1 routed first and cheapest per length, 4 last; see
+    /// `search::tier_weight` / `via_weight`). Overrides the inferred tier (wide net 2, else 3).
+    /// The plugin builds it from `@N` marker > `topor_pN` netclass > `[nets] priority` (1..3) and
+    /// power-by-name (2); its numbers are the engine tiers 1:1. Values outside `1..=4` are
+    /// ignored with a warning. Empty = inference.
+    pub net_priority: BTreeMap<String, u8>,
+    /// Do-not-touch nets (names, already expanded): never decomposed, never routed; their copper
+    /// stays a fixed obstacle; `NetRouteReport.status == "excluded"`.
+    pub exclude_nets: Vec<String>,
+    /// Ignored pads (`REF.NUMBER`): removed from the model before routing (no terminal, no
+    /// obstacle); each is reported as a `ConnReport` with `status == "ignored"`,
+    /// `reason == "pad outside board"`.
+    pub ignore_pads: Vec<PadRef>,
+    /// Per-net pour override: `true` = treat the net as pour-served (only pour completion edges
+    /// to its pour; pour-less / fill-less nets get no connections), `false` = route it as a
+    /// signal net even if it has a pour (the pour is not used to join pads). Absent = automatic.
+    pub pour_served: BTreeMap<String, bool>,
 }
 
 impl Default for Options {
@@ -738,6 +755,10 @@ impl Default for Options {
             max_vias_per_connection: 4,
             via_reduction: true,
             profile: false,
+            net_priority: BTreeMap::new(),
+            exclude_nets: Vec::new(),
+            ignore_pads: Vec::new(),
+            pour_served: BTreeMap::new(),
         }
     }
 }
