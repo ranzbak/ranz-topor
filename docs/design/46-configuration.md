@@ -52,8 +52,8 @@ and debugging. Concretely:
 | 1 | Clearances, widths, via sizes, annular ring, hole sizes | board setup | — | fab-specific values are entered in KiCad, not in topor |
 | 2 | **Drill list** (allowed via drills) | plugin config | 0.25 / 0.30 / 0.40 / 0.50 / 0.80 / 1.00 mm | pre-flight: every hole size used in the design but missing from the list → warning + question "add to drill list?" (yes updates the config) |
 | 3 | Copper-to-edge clearance | board setup | 0.5 mm only if the board sets none (fab floor 0.2) | |
-| 4 | Power-net recognition by name | plugin config | *open — explained to user, awaiting answer* | |
-| 5 | Net priority | net-name convention (*proposal* `@1`…`@3` suffix) + netclass alternative | no suffix = normal | must not clash with KiCad conventions (`+`/`-` and `_P`/`_N` diff pairs, `~{…}` overbar, `[..]` buses, `{..}` groups, `/` hierarchy) |
+| 4 | Power-net recognition | netclass first; name pattern only for nets still in `Default` (user: option c) | pattern `^(\+\|-)?\d\|^(V\|VCC\|VDD\|VBAT\|GND\|AGND\|PWR)` editable in `topor.toml` | pre-flight lists every net classified by name guess |
+| 5 | Net priority | `@1`/`@2`/`@3` marker in the net name (user: accepted) + netclass `topor_p1..p3` alternative | no marker = normal | combination rules §2.1 |
 | 6 | Extra length accepted to save a via | plugin config | 10 % | |
 | 7 | Detour limit before rip-up | plugin config | 2.0 × ghost length | tied to the detour metric |
 | 8a | Pour-served nets (connect via pour + via-to-pour stubs) | plugin config | auto (net has a pour on a plane/mixed layer) | per-net override |
@@ -69,6 +69,25 @@ and debugging. Concretely:
 | — | Engine options already exposed | `Options` (engine/src/model.rs) | margin 5 µm, threads, wall clock, caps, partial routes off, scope, existing-copper policy, zero-slack retry, via cost, max vias/connection, via reduction | |
 | — | Expert (config file only) | plugin config `[expert]` | current constants | PathFinder history weights (`HIST_*`, `PRESENT_OVERUSE`), zero-slack retry limits |
 | — | Fixed (not configurable) | code | — | numeric tolerances, grid cell sizes, parallel thresholds, `MIN_SAGITTA`, outline sub-arc sagitta: correctness, not taste |
+
+### 2.1 Priority marker `@N` and other KiCad naming conventions
+
+Parse rule: `@` + one digit 1–3, followed by end of name or a non-digit, in the **last path
+segment** of the net name, after removing overbar markup `~{…}`. Names are never changed by
+topor; the marker is only read. `@` acceptance in KiCad 10 labels is UNVERIFIED — check before use.
+
+| Convention | How to combine | Example |
+|---|---|---|
+| Diff pair `+`/`-`, `P`/`N`, `_P`/`_N` (KiCad matches the **last** characters) | marker **before** the polarity suffix, identical on both halves — otherwise KiCad no longer pairs them | `USB_D@1+` / `USB_D@1-`, `CLK@1_P` / `CLK@1_N` |
+| Bus `PREFIX[0..7]` (member = prefix + index) | marker plus a separator in the prefix, so the index does not merge into the digit | `DQ@1_[0..7]` → `DQ@1_0`…; `DQ@1[0..7]` would give `DQ@10` → ignored + warning |
+| Bus group `{…}` | marker on the member names inside the group | `MEM{DQ@1_[0..7] DQS@1+ DQS@1-}` |
+| Hierarchy `/sheet/…` | marker in the label text; sheet prefixes are ignored | `/ddr/DQ@1_0` |
+| Overbar `~{…}` | inside or outside the braces | `~{RESET}@2`, `~{RESET@2}` |
+| Power nets `+5V`, `GND` | prefer netclass (no symbol rename) | netclass `topor_p1` |
+| KiCad netclass patterns | Board Setup → Net Classes → assignments can match the marker (`*@1*`), so the same name also gets widths/clearances | pattern `*@1*` → netclass `HighSpeed` |
+
+Conflicts: marker and `topor_pN` netclass disagree → the marker wins (more specific), pre-flight
+warns. Diff-pair halves with different markers → warning, the pair gets the higher priority.
 
 ## 3. Backlog items from this list (Could)
 
