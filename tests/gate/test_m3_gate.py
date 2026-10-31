@@ -65,11 +65,12 @@ def test_m3_gate_wiccon(engine, tmp_path):
     assert rep["routed"] >= 0.9 * rep["connections_total"], (rep["routed"], rep["connections_total"])
     assert drc["routing_new"] == 0 and r["router_s"] < 10.0 and not rep["timed_out"]
     model_json = (tmp_path / "wiccon-2023--model.json").read_text()
-    runs = [json.loads(engine.route(model_json, json.dumps({"threads": t}))) for t in (1, 4)]
+    # plan "M3 gate numbers": two runs and threads 1/2/4 byte-identical (gate review B-2)
+    runs = [json.loads(engine.route(model_json, json.dumps({"threads": t}))) for t in (1, 2, 4, 4)]
     for x in runs:
         x.pop("runtime_s")
         x.pop("threads_used")
-    assert json.dumps(runs[0], sort_keys=True) == json.dumps(runs[1], sort_keys=True)
+    assert len({json.dumps(x, sort_keys=True) for x in runs}) == 1
     assert_unchanged(src.parent, hashes)
 
 

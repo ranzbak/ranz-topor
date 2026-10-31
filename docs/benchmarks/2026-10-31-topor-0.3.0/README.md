@@ -9,14 +9,16 @@ Structure follows [0.2.0](../2026-10-31-topor-0.2.0/README.md). Raw runs are in 
 
 ## Metrics
 
+`preexisting_unconnected` = unconnected item pairs already open on the ORIGINAL (hand) board (gate review B-3, 0f6875a; recomputed from metrics/*--drc-{orig,routed}.json after the fix — the metrics json files of this run still carry the earlier ripped-baseline count). Router-unrouted connections are never pre-existing.
+
 | Board | pcb sha12 | Routed / connections | Nets routed / total | Partial / failed | Segs / arcs | Vias (router / all) | F.Cu / B.Cu mm | Outside-pad length vs hand | DRC routing_new | Preexisting (routing) | preexisting_unconnected | Unconnected | router_s / runtime | Iterations | Threads | via_reduction | zero_slack_wires | Detour median / p90 / max / count > 1.5 | Top detour offender |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | eprom-to-kernal | bfaf705c0f25 | **27 / 27** | **25 / 25** (GND pour-served) | **0 / 0** | 40 / 13 | 0 / 17 | 90.323 / 17.773 | **64.628 mm vs 76.598 mm** | **0** | 0 | 0 | **0** | 0.058 s / 10.4 s | 1 | 4 | removed 0 of 0 vias in 0 candidates | 0 | 1.00 / 1.03 / 1.312 / 0 | A11 (1.312) |
 | wiccon-2023 | 2d3063e70ed5 | **62 / 62** (signal-only 57 / 57) | 27 / 27 | 0 / 0 | 162 / 66 | 37 / 48 | 666.280 / 857.316 | 1373.553 mm vs 1690.138 mm | **0** | 0 | 0 | **0** | 3.337 s / 14.2 s | 26 | 4 | removed 2 of 35 vias in 20 candidates | 0 | 1.00 / 1.088 / 1.449 / 0 | RST (1.449) |
-| dcsgonebadge (info) run 1 | 3e7e66f862a7 | 148 / 231 (signal-only 114 / 196) | 21 / 66 | 0 / 83 | 321 / 91 | 102 / 108 | 389.042 / 484.327 | 708.992 mm vs 3574.745 mm | 0 | 4 (clearance) | 53 | 87 | 60.186 s / 79.5 s (timed out) | 1 | 4 | skipped: timeout | 0 | 1.00 / 1.374 / 3.491 / 12 (n 148, 83 without reference) | USB+ (3.491) |
-| dcsgonebadge (info) run 2 | 3e7e66f862a7 | 148 / 231 | 21 / 66 | 0 / 83 | 321 / 91 | 102 / 108 | 389.042 / 484.327 | 708.992 mm vs 3574.745 mm | 0 | 4 (clearance) | 54 | 87 | 60.162 s / 79.8 s (timed out) | 1 | 4 | skipped: timeout | 0 | 1.00 / 1.374 / 3.491 / 12 | USB+ (3.491) |
+| dcsgonebadge (info) run 1 | 3e7e66f862a7 | 148 / 231 (signal-only 114 / 196) | 21 / 66 | 0 / 83 | 321 / 91 | 102 / 108 | 389.042 / 484.327 | 708.992 mm vs 3574.745 mm | 0 | 4 (clearance) | 1 | 87 | 60.186 s / 79.5 s (timed out) | 1 | 4 | skipped: timeout | 0 | 1.00 / 1.374 / 3.491 / 12 (n 148, 83 without reference) | USB+ (3.491) |
+| dcsgonebadge (info) run 2 | 3e7e66f862a7 | 148 / 231 | 21 / 66 | 0 / 83 | 321 / 91 | 102 / 108 | 389.042 / 484.327 | 708.992 mm vs 3574.745 mm | 0 | 4 (clearance) | 1 | 87 | 60.162 s / 79.8 s (timed out) | 1 | 4 | skipped: timeout | 0 | 1.00 / 1.374 / 3.491 / 12 | USB+ (3.491) |
 | nametag-sao (info, user board) | ca9b0acc5ff0 | 32 / 32 | 7 / 7 | 0 / 0 | 91 / 56 | 4 / 39 | 641.002 / 394.466 | 980.199 mm vs 1086.795 mm | 0 | 0 | 0 | 0 | 2.199 s / 14.9 s | 19 | 4 | removed 0 of 3 vias in 2 candidates | 0 | 1.002 / 1.055 / 1.073 / 0 | SDA (1.073) |
-| wedding-gift (info, user board) | 683d3088a14f | 70 / 81 (signal-only 40 / 51) | 34 / 43 | 0 / 11 | 153 / 54 | 57 / 57 | 394.727 / 174.393 | 490.566 mm vs 226.124 mm | 0 | 16 (copper_edge_clearance) | 6 | 14 | 60.096 s / 70.5 s (timed out) | 10 | 4 | skipped: timeout | 0 | 1.00 / 1.311 / 1.659 / 2 (n 70, 11 without reference) | Net-(Q1-Pad2) (1.659) |
+| wedding-gift (info, user board) | 683d3088a14f | 70 / 81 (signal-only 40 / 51) | 34 / 43 | 0 / 11 | 153 / 54 | 57 / 57 | 394.727 / 174.393 | 490.566 mm vs 226.124 mm | 0 | 16 (copper_edge_clearance) | 5 | 14 | 60.096 s / 70.5 s (timed out) | 10 | 4 | skipped: timeout | 0 | 1.00 / 1.311 / 1.659 / 2 (n 70, 11 without reference) | Net-(Q1-Pad2) (1.659) |
 
 "Vias (router / all)": vias placed by the router / all vias on the routed board (router + kept free/stitching vias). "Preexisting (routing)"
 are DRC violations of router copper that already exist in the ripped baseline and are not caused by new routing; `routing_new` is the gate figure.
@@ -77,7 +79,7 @@ Gate progress images: [eprom](../progress/2026-10-31-m3-T12-gate.png), [wiccon-2
   3.3 s in 26 iterations. Max detour 1.45 (RST), none > 1.5.
 - dcsgonebadge: two consecutive runs both routed 148 / 231 in 60 s (timed out, anytime result, via reduction skipped), router_s 60.186 s / 60.162 s. Same as the 148 measured
   earlier today at fdf8c10; the pour-reach commit 4bb63a1 did not lower it in these runs (one earlier run at that commit gave 110 / 231; not reproduced). 12 connections have detour > 1.5 (max 3.49, USB+); 83 failed connections.
-  4 preexisting clearance violations; routing_new 0. preexisting_unconnected 53 / 54 between the two runs (KiCad ratsnest count differs by 1). M2 was 24 / 231.
+  4 preexisting clearance violations; routing_new 0. preexisting_unconnected 1 in both runs (original board's own open ratsnest: 4); the other 86 unconnected are the 83 unrouted connections (ratsnest pairs). M2 was 24 / 231.
 - nametag-sao: 32 / 32 (M2: 17 / 31), 7 / 7 nets, 4 router vias, 2.2 s, 19 iterations, max detour 1.07.
 - wedding-gift: 70 / 81 (M2: 32 / 81), 34 / 43 nets, timed out at 60 s with 10 iterations; 11 failed. 16 preexisting copper_edge_clearance violations (routing_new 0), 6 preexisting unconnected.
   The hand board is not fully connected, so the routed length (491 mm outside pads) is not comparable with the hand 226 mm. Informational.

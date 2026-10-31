@@ -117,9 +117,10 @@ def _unconnected_desc(u: dict) -> list[str]:
 
 def split_unconnected(report: DrcReport, baseline: DrcReport | None) -> tuple[list[dict], list[dict]]:
     """(new, pre-existing) unconnected items. Pre-existing iff the same item pair (sorted uuids)
-    is unconnected in the baseline, the ripped-but-unrouted board: those are pairs the router
-    left unrouted; `new` are pairs that were connected before routing and are not afterwards
-    (e.g. a pad that lost its pour fill to the routed copper)."""
+    is unconnected in the baseline, the ORIGINAL (hand) board: the board's own open ratsnest.
+    Everything else is `new` — connections the router left unrouted as well as pairs that lost
+    their connection (e.g. a pad cut off from its pour) — so a router failure is never hidden as
+    pre-existing (M3 gate review B-3: the ripped board's ratsnest is the router's own work list)."""
     seen = {_unconnected_key(u) for u in baseline.unconnected} if baseline is not None else set()
     new, pre = [], []
     for u in report.unconnected:
@@ -128,7 +129,8 @@ def split_unconnected(report: DrcReport, baseline: DrcReport | None) -> tuple[li
 
 
 def _split(report: DrcReport, baseline: DrcReport | None,
-           router_uuids=None) -> tuple[dict, dict[str, int]]:
+           router_uuids=None, unconnected_baseline: DrcReport | None = None
+           ) -> tuple[dict, dict[str, int]]:
     seen = {_key(v) for v in baseline.violations} if baseline is not None else set()
     routing_new = 0
     routing_pre = 0
@@ -148,7 +150,7 @@ def _split(report: DrcReport, baseline: DrcReport | None,
                 by_type_new[v.type] += 1
         else:
             other += 1
-    unc_new, unc_pre = split_unconnected(report, baseline)
+    unc_new, unc_pre = split_unconnected(report, unconnected_baseline)
     classified = {
         "routing_new": routing_new,
         "routing_preexisting": routing_pre,
@@ -175,14 +177,17 @@ def new_routing(report: DrcReport, baseline: DrcReport | None,
             if v.type in ROUTING_TYPES and not _is_pre(v, seen, router_uuids)]
 
 
-def classify(report: DrcReport, baseline: DrcReport | None, router_uuids=None) -> dict:
+def classify(report: DrcReport, baseline: DrcReport | None, router_uuids=None,
+             unconnected_baseline: DrcReport | None = None) -> dict:
     """Split violations into routing (new / pre-existing), incomplete and other buckets.
 
     `baseline` is the DRC of the ripped-but-unrouted board; a violation matching it by
     (type, item uuids) is pre-existing unless one of its items is in `router_uuids`
-    (uuids of router-written items: router copper always counts).
+    (uuids of router-written items: router copper always counts). Unconnected items are
+    pre-existing only against `unconnected_baseline`, the original (hand) board's DRC; without
+    it every unconnected item is new.
     """
-    return _split(report, baseline, router_uuids)[0]
+    return _split(report, baseline, router_uuids, unconnected_baseline)[0]
 
 
 def is_clean(classified: dict) -> bool:
@@ -190,8 +195,9 @@ def is_clean(classified: dict) -> bool:
 
 
 def summarise(board: str, report: DrcReport, baseline: DrcReport | None = None,
-              extra: dict | None = None, router_uuids=None) -> str:
-    c, pre_by_type = _split(report, baseline, router_uuids)
+              extra: dict | None = None, router_uuids=None,
+              unconnected_baseline: DrcReport | None = None) -> str:
+    c, pre_by_type = _split(report, baseline, router_uuids, unconnected_baseline)
     inc = c["incomplete"]
     dangling = inc["track_dangling"] + inc["via_dangling"]
     lines = [

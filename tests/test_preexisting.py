@@ -53,13 +53,15 @@ def test_no_baseline_all_new_and_other_types_untouched():
     assert c["routing_new"] == 1 and c["routing_preexisting"] == 0 and c["other"] == 1
 
 
-def test_unconnected_preexisting_iff_same_pair_in_ripped_baseline():
-    base = _rep(unconnected=[_u("p1", "p2"), _u("p3", "z")])
+def test_unconnected_preexisting_iff_same_pair_in_original_baseline():
+    orig = _rep(unconnected=[_u("p1", "p2"), _u("p3", "z")])
     routed = _rep(unconnected=[_u("z", "p3", "zone", "pad"), _u("p5", "z")])
-    new, pre = split_unconnected(routed, base)
+    new, pre = split_unconnected(routed, orig)
     assert [u["items"][0]["uuid"] for u in new] == ["p5"]
     assert [u["items"][0]["uuid"] for u in pre] == ["z"]
-    c = classify(routed, base)
+    # the ripped baseline (router work list) never makes an unconnected item pre-existing
+    assert classify(routed, orig)["incomplete"]["unconnected_preexisting"] == 0
+    c = classify(routed, None, unconnected_baseline=orig)
     assert c["incomplete"] == {"track_dangling": 0, "via_dangling": 0, "unconnected_items": 2,
                                "unconnected_new": 1, "unconnected_preexisting": 1}
     assert c["unconnected_preexisting_items"] == [["zone", "pad"]]

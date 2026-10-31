@@ -155,7 +155,7 @@ def _smooth_summary(report: dict | None) -> dict | None:
 
 
 def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path,
-             router_uuids=None) -> str:
+             router_uuids=None, orig_drc=None) -> str:
     o, r, rm = result["orig_all"], result["routed_all"], result["removed"]
     wm = result["width_match"]
     head = [
@@ -217,12 +217,12 @@ def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path,
     head.append(f"  preexisting {pe['count']} {pe['by_type']} (ripped-board baseline)")
     pu = result.get("preexisting_unconnected") or {}
     if pu.get("count"):
-        head.append(f"  preexisting unconnected {pu['count']}: "
+        head.append(f"  preexisting unconnected (original board) {pu['count']}: "
                     + "; ".join(" <-> ".join(i) for i in pu["items"][:5])
                     + (" ..." if len(pu["items"]) > 5 else ""))
     drc = summarise(board, routed_drc, base_drc,
                     extra={"width_match": f"{wm['matched']}/{wm['compared']}"},
-                    router_uuids=router_uuids)
+                    router_uuids=router_uuids, unconnected_baseline=orig_drc)
     lines = head + drc.splitlines() + [f"  outputs: {out_dir}"]
     return "\n".join(lines[:SUMMARY_MAX])
 
@@ -397,7 +397,7 @@ def run_bench(
     route = _route_summary(router_report, model["layers"])
     if route is not None and hand_stats is not None:
         route["hand_outside_mm"] = round(hand_stats["hand_outside_pads_nm"] / 1e6, 3)
-    final_drc = classify(routed_drc, base_drc, created)
+    final_drc = classify(routed_drc, base_drc, created, unconnected_baseline=orig_drc)
     result = {
         "board": board,
         "footprints": len(fps),
@@ -438,7 +438,7 @@ def run_bench(
     }
     (out_dir / f"{board}--metrics.json").write_text(json.dumps(result, indent=1))
     assert_unchanged(src.parent, cp.src_hashes)
-    print(_summary(board, result, routed_drc, base_drc, out_dir, created))
+    print(_summary(board, result, routed_drc, base_drc, out_dir, created, orig_drc))
     return result
 
 
