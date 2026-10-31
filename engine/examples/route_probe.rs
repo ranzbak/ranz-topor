@@ -181,7 +181,9 @@ fn main() {
         }
         i += 1;
     }
-    let path = path.expect("usage: route_probe <model.json> [--iters N] [--margin NM] [--watch A,B] [--quiet]");
+    let path = path.expect(
+        "usage: route_probe <model.json> [--iters N] [--margin NM] [--watch A,B] [--quiet]",
+    );
     let json = std::fs::read_to_string(&path).expect("read model");
     let model = BoardModel::from_json(&json).expect("parse model");
     let mut opts = Options::default();
@@ -277,6 +279,11 @@ fn main() {
                     at: t.at,
                     net: c.net,
                     owner: t.label.clone(),
+                    clr: (c.clearance as f64).max(model.rules.min_clearance as f64),
+                    r: match t.kind {
+                        TermKind::Copper(_) | TermKind::Dangling(_) => 0.5 * c.width as f64,
+                        _ => 0.0,
+                    },
                 });
             }
         }

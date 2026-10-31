@@ -82,6 +82,10 @@ pub struct TerminalInfo {
     pub at: Vec2,
     pub net: i32,
     pub owner: String,
+    /// Clearance of the terminal's net rule, `max(net clearance, min_clearance)`.
+    pub clr: f64,
+    /// Core radius: `width / 2` for a `Copper` / `Dangling` junction, 0 for pad / via centres.
+    pub r: f64,
 }
 
 /// One end of a strand inside a face.
@@ -209,8 +213,8 @@ impl RouteGraph {
                     anchor: None,
                     owner: Some(t.owner.clone()),
                     nets: sorted_nets(t.net, &[]),
-                    r: 0.0,
-                    clr: rules.min_clearance,
+                    r: t.r,
+                    clr: t.clr.max(rules.min_clearance),
                 }
             } else {
                 VertexInfo {

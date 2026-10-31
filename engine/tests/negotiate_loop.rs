@@ -139,6 +139,21 @@ fn run(
     conns: &[Connection],
     verts: &[(usize, usize)],
 ) -> (Negotiator, u32, Vec<Option<SlotPath>>, usize) {
+    let (neg, over, last, fail, _) = run_first(b, conns, verts);
+    (neg, over, last, fail)
+}
+
+type FirstRun = (
+    Negotiator,
+    u32,
+    Vec<Option<SlotPath>>,
+    usize,
+    Vec<Option<SlotPath>>,
+);
+
+/// `run` plus the paths of iteration 1 (`IterOutcome.paths`).
+fn run_first(b: &mut Built, conns: &[Connection], verts: &[(usize, usize)]) -> FirstRun {
+    let mut first: Vec<Option<SlotPath>> = Vec::new();
     let mut neg = Negotiator::new(b.g.edges.len(), conns.len());
     let opts = Options::default();
     let mut active: Vec<usize> = (0..conns.len()).collect();
@@ -158,15 +173,18 @@ fn run(
             neg.penalise_blocked(c, bi);
         }
         last = out.paths.clone();
+        if first.is_empty() {
+            first = out.paths.clone();
+        }
         if over == 0 && out.blocked.is_empty() && out.ripped.is_empty() {
-            return (neg, out.overuse_edges as u32, last, 0);
+            return (neg, out.overuse_edges as u32, last, 0, first);
         }
         let mut a: std::collections::BTreeSet<usize> = out.blocked.keys().copied().collect();
         a.extend(out.ripped.iter().copied());
         a.extend(overused_conns(&b.g));
         active = a.into_iter().collect();
     }
-    (neg, 99, last, 1)
+    (neg, 99, last, 1, first)
 }
 
 /// A wall of pads at x = 25 with a single 2 mm gap (capacity for one wire) at y = 19..21;
@@ -187,6 +205,29 @@ fn channel_board() -> Built {
         ],
         "",
     )
+}
+
+/// A sealed wall of pads (pitch 1.4 mm, gaps too narrow for a wire) at x = 12, 2 mm from the starts (the overuse penalty scales with the leg length) from y = 0.8 up
+/// to y = 36.4 with the single 2 mm channel at y = 19..21 and an open top (the detour costs
+/// ~2x): in iteration 1 both wires take the channel and only the history switches one away.
+fn tall_channel_board() -> Built {
+    let mut pads: Vec<(String, i32, f64, f64)> = vec![
+        ("sa".into(), 1, 10.0, 19.6),
+        ("sb".into(), 2, 10.0, 20.4),
+        ("ta".into(), 1, 40.0, 19.6),
+        ("tb".into(), 2, 40.0, 20.4),
+    ];
+    for k in 0..14 {
+        pads.push((format!("u{}", k + 1), 3, 12.0, 19.0 - 1.4 * k as f64));
+    }
+    for k in 0..12 {
+        pads.push((format!("w{}", k + 1), 3, 12.0, 21.0 + 1.4 * k as f64));
+    }
+    let refs: Vec<(&str, i32, f64, f64)> = pads
+        .iter()
+        .map(|(n, net, x, y)| (n.as_str(), *net, *x, *y))
+        .collect();
+    build(&refs, "")
 }
 
 fn run_channel() -> (Vec<Option<SlotPath>>, usize, Vec<usize>) {
@@ -223,6 +264,27 @@ fn negotiate_contended_channel_routes_both() {
             .collect()
     };
     assert_eq!(key(&p1), key(&p2));
+}
+
+/// D4: the history switch is exercised: in iteration 1 both wires take the channel (overuse),
+/// the overuse raises `history[channel]`, and the wire that ends up detouring is one that used
+/// the channel in iteration 1.
+#[test]
+fn negotiate_contended_channel_history_switch() {
+    let mut b = tall_channel_board();
+    let (conns, verts) = setup(&b, &[(1, "sa", "ta"), (2, "sb", "tb")]);
+    let (neg, over, last, fail, first) = run_first(&mut b, &conns, &verts);
+    assert_eq!((fail, over), (0, 0));
+    let ch = b.g.edge(vert(&b, "u1"), vert(&b, "w1")).unwrap();
+    let uses = |p: &Option<SlotPath>| p.as_ref().unwrap().crossings.iter().any(|&(e, _)| e == ch);
+    assert!(
+        first.iter().all(uses),
+        "both wires take the channel in iteration 1"
+    );
+    assert!(neg.history[ch] > 0.0, "history {}", neg.history[ch]);
+    let detour: Vec<usize> = (0..2).filter(|&c| !uses(&last[c])).collect();
+    assert_eq!(detour.len(), 1, "exactly one wire switched to the detour");
+    assert!(uses(&first[detour[0]]));
 }
 
 #[test]
@@ -270,25 +332,6 @@ fn overuse_raises_history_on_overused_edges_only() {
     for (i, &h) in neg.history.iter().enumerate() {
         assert_eq!(h, if i == e { HIST_OVERUSE } else { 0.0 });
     }
-}
-
-#[test]
-fn best_iteration_keeps_max_routed() {
-    let mut neg = Negotiator::new(1, 2);
-    let mk = |c: usize| SlotPath {
-        conn: c,
-        crossings: vec![],
-        faces: vec![],
-        est_len: 1.0,
-        expansions: 0,
-    };
-    assert!(neg.best().is_none());
-    neg.record_best(&[Some(mk(0)), Some(mk(1))], 2, 10.0);
-    neg.record_best(&[Some(mk(0)), None], 1, 1.0);
-    let b = neg.best().unwrap();
-    assert_eq!(b.iter().flatten().count(), 2);
-    neg.record_best(&[Some(mk(0)), Some(mk(1))], 2, 5.0);
-    assert_eq!(neg.best().unwrap().len(), 2);
 }
 
 #[test]

@@ -535,6 +535,8 @@ fn terminal_vertices_carry_owner_and_nets() {
             at,
             net: 3,
             owner: "junction:x".into(),
+            clr: 200_000.0,
+            r: 0.0,
         }],
     );
     let v = (0..b.g.verts.len())
@@ -543,6 +545,46 @@ fn terminal_vertices_carry_owner_and_nets() {
     assert_eq!(b.g.verts[v].nets, vec![3]);
     assert_eq!(b.g.verts[v].anchor, None);
     assert_eq!(b.g.verts[v].r, 0.0);
+}
+
+#[test]
+fn terminal_vertex_uses_net_clearance_and_junction_radius() {
+    let t_at = Vec2 {
+        x: 20.0 * MM,
+        y: -20.0 * MM,
+    };
+    let body = format!(
+        r#""pads": [ {} ], "outline": [ {} ]"#,
+        round_pad("a", 1, 10.0, 10.0),
+        outline50x40()
+    );
+    let b = build_with(
+        &body,
+        500_000,
+        &[TerminalInfo {
+            at: t_at,
+            net: 3,
+            owner: "junction:x".into(),
+            clr: 300_000.0,
+            r: 200_000.0,
+        }],
+    );
+    let t = (0..b.g.verts.len())
+        .find(|&v| b.g.verts[v].owner.as_deref() == Some("junction:x"))
+        .unwrap();
+    assert_eq!(b.g.verts[t].clr, 300_000.0);
+    assert_eq!(b.g.verts[t].r, 200_000.0);
+    let e =
+        b.g.edges
+            .iter()
+            .enumerate()
+            .find(|(_, e)| e.a == t || e.b == t);
+    let (_, e) = e.unwrap();
+    let (o, other) = if e.a == t { (e.b, e.a) } else { (e.a, e.b) };
+    let _ = other;
+    let d = (b.g.verts[t].at - b.g.verts[o].at).len();
+    assert!((e.cap - (d - 200_000.0 - b.g.verts[o].r)).abs() < 1.0);
+    assert!(e.c_e >= 300_000.0);
 }
 
 // --- Fix-B1 (a): slot nesting from the graph ---------------------------------------------------

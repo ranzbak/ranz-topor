@@ -53,7 +53,7 @@ fn pad(p: &P) -> String {
 }
 
 fn model(pads: &[P], extra: &str) -> BoardModel {
-    let nets: Vec<String> = (1..=6)
+    let nets: Vec<String> = (1..=40)
         .map(|n| format!(r#"{{ "code": {n}, "name": "N{n}" }}"#))
         .collect();
     let s = format!(
@@ -460,7 +460,11 @@ fn zero_slack_retry_uses_margin_zero_on_corridor_only() {
     // Through the corridor: the centreline reaches the edge band, 0.5 + 0.125 = 0.625 mm
     // from the y = 0 edge.
     assert!((max_y(&r) + 625_000.0).abs() <= 2.0, "max y {}", max_y(&r));
-    assert!(r.connections[0].length_nm < 40_000_000, "{}", r.connections[0].length_nm);
+    assert!(
+        r.connections[0].length_nm < 40_000_000,
+        "{}",
+        r.connections[0].length_nm
+    );
     // Design clearance holds to the board file's resolution: an exact tangency rebuilt from
     // integer-nm points may read a nanometre short (KiCad's own DRCEpsilon is 500 nm).
     let c0 = Options {
@@ -469,7 +473,10 @@ fn zero_slack_retry_uses_margin_zero_on_corridor_only() {
     };
     for v in &Checker::new(&m, &c0).check_items(&r.items).violations {
         assert!(v.gap + 1 >= v.required, "{v:?}");
-        assert!(v.against == "pad:C:1" || v.against.starts_with("edge"), "{v:?}");
+        assert!(
+            v.against == "pad:C:1" || v.against.starts_with("edge"),
+            "{v:?}"
+        );
     }
     // Margin 0 on the corridor only: at a margin of 4 µm only C and the edge are too close,
     // the bend around E (and everything else) still has its ε slack.
@@ -549,13 +556,25 @@ fn eprom_ripped_stalls_and_zero_slack_retry_passes_length_gate() {
         "{:?}",
         r.warnings
     );
-    assert!(r.iterations < 50 && r.iterations >= STALL_ITERS, "{}", r.iterations);
+    assert!(
+        r.iterations < 50 && r.iterations >= STALL_ITERS,
+        "{}",
+        r.iterations
+    );
     assert_eq!(r.zero_slack, "kept");
     let names: Vec<&str> = r.zero_slack_wires.iter().map(|w| w.name.as_str()).collect();
     assert_eq!(names, vec!["+5V"]);
-    assert!(r.length_outside_pads_nm < 76_598_000, "{}", r.length_outside_pads_nm);
+    assert!(
+        r.length_outside_pads_nm < 76_598_000,
+        "{}",
+        r.length_outside_pads_nm
+    );
     // M2 gate bound (B1: 67.095 mm); incremental metrization (B2) must not regress it.
-    assert!(r.length_outside_pads_nm <= 67_100_000, "{}", r.length_outside_pads_nm);
+    assert!(
+        r.length_outside_pads_nm <= 67_100_000,
+        "{}",
+        r.length_outside_pads_nm
+    );
     assert_eq!(r.failed, 0);
     let again = route(&m, &opts());
     assert_eq!(json_no_runtime(&r), json_no_runtime(&again));
@@ -570,5 +589,171 @@ fn eprom_ripped_stalls_and_zero_slack_retry_passes_length_gate() {
     assert_eq!(off.routed, 27);
     assert!(off.zero_slack_wires.is_empty());
     assert_eq!(off.iterations, r.iterations);
-    assert!(off.length_outside_pads_nm > 76_598_000, "{}", off.length_outside_pads_nm);
+    assert!(
+        off.length_outside_pads_nm > 76_598_000,
+        "{}",
+        off.length_outside_pads_nm
+    );
+}
+
+/// D5: a Routing-constraint split vertex (two crossing same-net kept tracks, here a locked X of
+/// net 5 corner to corner) that the net-5 connection's slot path has to bend around: the
+/// connection fails once with a clear reason (`unanchored_bends`), the other connection routes,
+/// and the negotiation stops early instead of looping. The pad positions were found by a seeded
+/// random search over this fixture; the two foreign pads (nets 4 and 2) fix the homotopy.
+#[test]
+fn route_split_vertex_bend_fails_connection_once() {
+    let x = |a: (i64, i64), b: (i64, i64)| -> String {
+        format!(
+            r#"{{ "uuid": "k{}", "net": 5, "layer": 0, "width": 250000, "locked": true,
+            "prim": {{ "kind": "seg", "a": [{}, {}], "b": [{}, {}] }} }}"#,
+            a.1,
+            a.0 * 1_000_000,
+            a.1 * 1_000_000,
+            b.0 * 1_000_000,
+            b.1 * 1_000_000
+        )
+    };
+    let m = model(
+        &[
+            P("A", "1", 5, 22.345, 4.015, 1.0, "[0]"),
+            P("A", "2", 5, 25.575, 34.878, 1.0, "[0]"),
+            P("F", "1", 4, 26.48, 23.629, 1.0, "[0]"),
+            P("G", "1", 2, 24.073, 14.05, 1.0, "[0]"),
+            P("H", "1", 6, 4.0, 20.0, 1.0, "[0]"),
+            P("H", "2", 6, 10.0, 20.0, 1.0, "[0]"),
+        ],
+        &format!(
+            r#""kept": [ {}, {} ],"#,
+            x((0, 0), (50, -40)),
+            x((0, -40), (50, 0))
+        ),
+    );
+    let r = route(&m, &opts());
+    assert!(r.iterations <= 5, "iterations {}", r.iterations);
+    let by = |n: i32| r.connections.iter().find(|c| c.net == n).unwrap();
+    assert_eq!(by(6).status, "routed", "{:?}", r.connections);
+    let a = by(5);
+    assert_eq!(a.status, "failed", "{a:?}");
+    assert!(
+        a.reason.contains("split vertex") || a.reason.starts_with("infeasible"),
+        "{}",
+        a.reason
+    );
+}
+
+/// D6: a foreign pad sits on the straight line between the start and the blocking wall (a locked
+/// track spanning the board). The forward stub grows from the `last_reached` crossing along the
+/// ghost crossings, so it passes the pad and reaches the wall clearance; the old stub from the
+/// terminal straight to the blocking point was stopped by the pad and dropped.
+#[test]
+fn partial_stub_starts_at_last_reached() {
+    let m = model(
+        &[
+            P("A", "1", 1, 20.0, 20.0, 1.0, "[0]"),
+            P("A", "2", 1, 35.0, 28.0, 1.0, "[0]"),
+            P("F", "1", 4, 22.5, 22.0, 1.0, "[0]"),
+        ],
+        r#""kept": [ { "uuid": "wall", "net": 3, "layer": 0, "width": 250000, "locked": true,
+            "prim": { "kind": "seg", "a": [0, -24000000], "b": [50000000, -24000000] } } ],"#,
+    );
+    let o = Options {
+        partial_routes: true,
+        ..opts()
+    };
+    let r = route(&m, &o);
+    let c = r.connections.iter().find(|c| c.net == 1).unwrap();
+    assert_eq!(c.status, "partial", "{c:?}");
+    let ends: Vec<f64> = r
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Track(t) if t.net == 1 => Some(t),
+            _ => None,
+        })
+        .flat_map(|t| match t.prim {
+            TrackPrim::Seg { a, b } => [a, b],
+            TrackPrim::Arc { start, end, .. } => [start, end],
+        })
+        .map(|p| (p.y as f64 + 24.0 * MM).abs())
+        .collect();
+    let near = ends.iter().cloned().fold(f64::MAX, f64::min);
+    assert!((455_000.0..=460_000.0).contains(&near), "{ends:?}");
+    // Both the forward stub (past the foreign pad) and the reverse stub reach the wall clearance.
+    assert_eq!(
+        ends.iter().filter(|d| **d < 470_000.0).count(),
+        2,
+        "{ends:?}"
+    );
+    let chk = Options {
+        margin_nm: 0,
+        ..Options::default()
+    };
+    let rep = Checker::new(&m, &chk).check_items(&r.items);
+    assert!(rep.violations.is_empty(), "{:?}", rep.violations);
+}
+
+/// 10 walled-off connections (nets 10..19, one pad pair each across the wall) plus 20 free ones
+/// (nets 20..39).
+fn probe_model() -> BoardModel {
+    let n = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+    let mut pads = vec![
+        P("W", "1", 3, 1.2, 24.0, 1.0, "[0]"),
+        P("W", "2", 3, 48.8, 24.0, 1.0, "[0]"),
+    ];
+    for k in 0..10 {
+        let x = 6.0 + 4.0 * k as f64;
+        pads.push(P(n(format!("U{k}")), "1", 10 + k, x, 30.0, 0.8, "[0]"));
+        pads.push(P(n(format!("U{k}")), "2", 10 + k, x, 18.0, 0.8, "[0]"));
+    }
+    for k in 0..20 {
+        let x = 4.0 + 2.0 * k as f64;
+        pads.push(P(n(format!("F{k}")), "1", 20 + k, x, 36.0, 0.6, "[0]"));
+        pads.push(P(n(format!("F{k}")), "2", 20 + k, x, 38.0, 0.6, "[0]"));
+    }
+    model(
+        &pads,
+        r#""kept": [ { "uuid": "wall", "net": 3, "layer": 0, "width": 250000, "locked": true,
+            "prim": { "kind": "seg", "a": [1200000, -24000000], "b": [48800000, -24000000] } } ],"#,
+    )
+}
+
+/// D9: the block probe stops at the deadline and at `PROBE_STEP_CAP` steps per connection.
+#[test]
+fn block_probe_respects_deadline_and_step_cap() {
+    let m = probe_model();
+    let t0 = std::time::Instant::now();
+    let r = route(
+        &m,
+        &Options {
+            wall_clock_s: 0.05,
+            partial_routes: true,
+            ..Options::default()
+        },
+    );
+    assert!(t0.elapsed().as_secs_f64() < 1.0, "{:?}", t0.elapsed());
+    assert!(r.timed_out, "{} routed", r.routed);
+    let r = route(
+        &m,
+        &Options {
+            partial_routes: true,
+            ..opts()
+        },
+    );
+    assert!(!r.timed_out);
+    assert_eq!(r.connections.len(), 30);
+    let blocked: Vec<_> = r
+        .connections
+        .iter()
+        .filter(|c| c.status != "routed")
+        .collect();
+    assert!(blocked.len() >= 10, "{} not routed", blocked.len());
+    for c in blocked {
+        assert!(c.blocking.is_some(), "{c:?}");
+        let n = c.probe_steps.expect("walled-off connections are probed");
+        assert!(
+            (1..=topor_engine::route::PROBE_STEP_CAP).contains(&n),
+            "{n}"
+        );
+    }
 }
