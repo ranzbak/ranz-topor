@@ -498,3 +498,131 @@ def test_run_report_has_every_section(app, eprom, tmp_path, reports):
     assert f["routed"] == 27 and f["vias_before"] is not None and f["length_before_mm"] is not None
     assert f["versions"]["engine"] and "non-default" in "\n".join(out.report.summary_lines())
     assert "Total " in md and "routing_new" in md and "Outside pads" in md
+
+
+# ------------------------------------------------------------------ Q-b / ruling C27: VIA_NOT_SET_UP applies the fallback
+class CaptureEngine(ProxyEngine):
+    """Records the model / options the run hands to the engine; the route returns nothing (fast, no preview)."""
+
+    def __init__(self):
+        super().__init__(hold=1, patch=_nothing_routed)
+        self.models, self.options = [], []
+
+    def route_async(self, m, o):
+        self.models.append(json.loads(m))
+        self.options.append(json.loads(o))
+        return super().route_async(m, o)
+
+
+@pytest.fixture(scope="module")
+def factory_eprom(tmp_path_factory):
+    """eprom project whose .kicad_pro has only KiCad's factory via size (every net class 0.8 / 0.4, no
+    pre-defined via sizes) -> VIA_NOT_SET_UP fires; the model is harness-built from that project (pcbnew,
+    test side), so its rules carry what KiCad would resolve for it."""
+    from harness.copy import copy_project
+    from harness.model import export_model, load_board
+    from harness.rip import record_widths
+    from harness.rules import resolve_rules
+
+    d = tmp_path_factory.mktemp("factory")
+    cp = copy_project(board_pcb(BOARD), d / BOARD)
+    pro_p = cp.pcb.with_suffix(".kicad_pro")
+    pro = json.loads(pro_p.read_text())
+    for c in pro["net_settings"]["classes"]:
+        c.update(via_diameter=0.8, via_drill=0.4)
+    pro["board"]["design_settings"].pop("via_sizes_list", None)
+    pro_p.write_text(json.dumps(pro))
+    b = load_board(cp)
+    dru = cp.dru.read_text() if cp.dru is not None else None
+    rules = resolve_rules(b, dru_text=dru, widths_before=record_widths(b))
+    e = Eprom()
+    e.model = export_model(b, rules, name=BOARD, dru_text=dru)
+    e.pcb = cp.pcb
+    e.text = cp.pcb.read_text()
+    return e
+
+
+def _project(src, tmp_path, *, toml=None):
+    """Copy of the project of `src` (an Eprom) into tmp_path, optionally with a topor.toml beside it."""
+    d = tmp_path / "vproj"
+    d.mkdir()
+    for ext in (".kicad_pcb", ".kicad_pro", ".kicad_dru"):
+        s = src.pcb.with_suffix(ext)
+        if s.is_file():
+            shutil.copyfile(s, d / s.name)
+    if toml is not None:
+        (d / "topor.toml").write_text(toml)
+    return FakeBoard(d / src.pcb.name, src.model, project_dir=d)
+
+
+def _via_sizes(rules):
+    return ({(rules["default"]["via_d"], rules["default"]["via_drill"])}
+            | {(r["via_d"], r["via_drill"]) for r in rules["per_net"].values()})
+
+
+def test_via_not_set_up_applies_fallback_to_engine_rules(app, eprom, factory_eprom, tmp_path, reports):
+    # a class without via fields resolves to toporlib's class default 0.6 / 0.3 (_CLASS_DEFAULTS_NM): the
+    # "nothing set up" size every net carries here, which the fallback must replace
+    src = Eprom()
+    src.pcb, src.text = factory_eprom.pcb, factory_eprom.text
+    r = factory_eprom.model["rules"]
+    unset = {"via_d": 600_000, "via_drill": 300_000}
+    src.model = {**factory_eprom.model, "rules": {**r, "default": {**r["default"], **unset},
+                                                  "per_net": {k: {**v, **unset} for k, v in r["per_net"].items()}}}
+    board = _project(src, tmp_path)
+    eng = CaptureEngine()
+    board, ui, out = do_run(eprom, tmp_path, board=board, engine=eng)
+    assert any(f.code == "VIA_NOT_SET_UP" for f in out.findings)
+    assert eng.models, "the engine was not called"
+    rules = eng.models[0]["rules"]
+    assert rules["per_net"] and _via_sizes(rules) == {(800_000, 400_000)}
+    assert out.via_fallback["diameter_nm"] == 800_000 and out.via_fallback["drill_nm"] == 400_000
+    res = json.loads((out.report_dir / "result.json").read_text())
+    assert res["via_fallback"]["diameter_nm"] == 800_000 and res["via_fallback"]["drill_nm"] == 400_000
+    md = (out.report_dir / "report.md").read_text()
+    assert "via fallback 0.8 / 0.4 mm" in md and "VIA_NOT_SET_UP" in md
+
+
+def test_via_fallback_from_topor_toml(app, factory_eprom, tmp_path, reports):
+    toml = 'version = 1\n\n[vias]\nfallback_diameter_mm = 0.7\nfallback_drill_mm = 0.35\n'
+    board = _project(factory_eprom, tmp_path, toml=toml)
+    eng = CaptureEngine()
+    out = run_mod.run(board, ScriptedUi(), None, eng, tmp_root=tmp_path / "work")
+    _ok(out)
+    assert any(f.code == "VIA_NOT_SET_UP" for f in out.findings)
+    assert _via_sizes(factory_eprom.model["rules"]) == {(800_000, 400_000)}  # KiCad's factory size before
+    rules = eng.models[0]["rules"]
+    assert _via_sizes(rules) == {(700_000, 350_000)}
+    assert "via fallback 0.7 / 0.35 mm" in (out.report_dir / "report.md").read_text()
+
+
+def test_via_sizes_set_up_leaves_rules_unchanged(app, eprom, tmp_path, reports):
+    board = _project(eprom, tmp_path)  # eprom's own .kicad_pro: Signal 0.6 / 0.3 -> via sizes are set up
+    eng = CaptureEngine()
+    board, ui, out = do_run(eprom, tmp_path, board=board, engine=eng)
+    assert not any(f.code == "VIA_NOT_SET_UP" for f in out.findings)
+    assert eng.models[0]["rules"] == eprom.model["rules"]
+    assert out.via_fallback is None
+    assert json.loads((out.report_dir / "result.json").read_text())["via_fallback"] is None
+    assert "via fallback" not in (out.report_dir / "report.md").read_text()
+
+
+def test_apply_via_fallback_pure():
+    cfg = Config.defaults().with_values({("vias", "fallback_diameter_mm"): 0.7, ("vias", "fallback_drill_mm"): 0.35})
+    rules = {"min_via_diameter": 450_000, "min_via_drill": 250_000,
+             "default": {"via_d": 600_000, "via_drill": 300_000, "width": 1},
+             "per_net": {"1": {"via_d": 600_000, "via_drill": 300_000, "width": 2},
+                         "2": {"via_d": 800_000, "via_drill": 400_000},   # KiCad factory size
+                         "3": {"via_d": 500_000, "via_drill": 250_000}}}  # a size somebody set: kept
+    new, info = run_mod.apply_via_fallback(rules, cfg)
+    assert new["default"] == {"via_d": 700_000, "via_drill": 350_000, "width": 1}
+    assert new["per_net"]["1"] == {"via_d": 700_000, "via_drill": 350_000, "width": 2}
+    assert new["per_net"]["2"] == {"via_d": 700_000, "via_drill": 350_000}
+    assert new["per_net"]["3"] == rules["per_net"]["3"]
+    assert rules["default"]["via_d"] == 600_000  # input not mutated
+    assert info["diameter_nm"] == 700_000 and info["drill_nm"] == 350_000 and info["per_net"] == 2
+    assert not info["clamped"]
+    # the board's minimums still apply
+    lo = Config.defaults().with_values({("vias", "fallback_diameter_mm"): 0.3, ("vias", "fallback_drill_mm"): 0.1})
+    new, info = run_mod.apply_via_fallback(rules, lo)
+    assert (new["default"]["via_d"], new["default"]["via_drill"]) == (450_000, 250_000) and info["clamped"]
