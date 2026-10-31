@@ -5,7 +5,12 @@
 //!     connection probe which dynamic occupancy (vias, direct paths, everything) stands in the
 //!     ghost's way.
 //!
-//! `cargo run --release --example gate_diag -- <model.json> [--options JSON] [--iters N] [--skip-a] [--probes]`
+//! `cargo run --release --example gate_diag -- <model.json> [--options JSON] [--iters N] [--skip-a] [--probes]
+//!     [--detour 34,208]`
+//!
+//! `--detour`: for the given connection ids (M3-R11 detour diagnosis) dump, on the EMPTY graph,
+//! the slot-search path and the topological ghost crossing by crossing (edge ends, length, cap,
+//! need, fits / passable), plus the path the negotiator finally committed.
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Instant;
 use topor_engine::check::Checker;
@@ -29,6 +34,10 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mut path, mut options_json, mut iters, mut skip_a, mut probes) =
         (None, None, 15u32, false, false);
+    let mut detour: Vec<usize> = Vec::new();
+    // `--chord ID,L,x0,y0,x1,y1[,x2,y2...]` (mm, math frame): clearance bends of the chords of
+    // connection ID on layer index L, as the slot search's `los` would see them.
+    let mut chords: Vec<(usize, usize, Vec<topor_engine::geom::Vec2>)> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -42,6 +51,22 @@ fn main() {
             }
             "--skip-a" => skip_a = true,
             "--probes" => probes = true,
+            "--chord" => {
+                let v: Vec<f64> = args[i + 1].split(',').map(|x| x.parse().unwrap()).collect();
+                let pts = v[2..]
+                    .chunks(2)
+                    .map(|c| topor_engine::geom::Vec2 {
+                        x: c[0] * 1e6,
+                        y: c[1] * 1e6,
+                    })
+                    .collect();
+                chords.push((v[0] as usize, v[1] as usize, pts));
+                i += 1;
+            }
+            "--detour" => {
+                detour = args[i + 1].split(',').map(|x| x.parse().unwrap()).collect();
+                i += 1;
+            }
             a => path = Some(a.to_string()),
         }
         i += 1;
@@ -575,6 +600,281 @@ fn main() {
             let p = params(c);
             let r = search(&mg, &obs, c, &goals[i].vertices, &rg, &p);
             println!("  #{} reverse search: {}", c.id, outcome_str(&r));
+        }
+    }
+
+    // ---- (D) detour diagnosis: paths crossing by crossing on the empty graph
+    if !detour.is_empty() {
+        println!("== (D) detour diagnosis (empty graph)");
+        let dump = |mg: &MultiGraph,
+                    c: &Connection,
+                    p: &topor_engine::search::SlotPath,
+                    tag: &str| {
+            let need_w = c.width as f64 + opts.margin_nm as f64;
+            let cc = (c.clearance as f64).max(model.rules.min_clearance as f64);
+            println!(
+                "  #{} {tag}: vias {} legs {} est {:.3}mm cost {:.3}mm exp {}",
+                c.id,
+                p.sites.len(),
+                p.legs.len(),
+                p.est_len * 1e-6,
+                p.cost * 1e-6,
+                p.expansions
+            );
+            for (j, leg) in p.legs.iter().enumerate() {
+                let g = &mg.layers[leg.layer_idx].g;
+                let (sv, gv) = (&g.verts[leg.start], &g.verts[leg.goal]);
+                println!(
+                    "    leg {j} L{} start v{} ({:.3},{:.3}) goal v{} ({:.3},{:.3}) est {:.3}mm crossings {}",
+                    leg.layer_idx,
+                    leg.start,
+                    sv.at.x * 1e-6,
+                    sv.at.y * 1e-6,
+                    leg.goal,
+                    gv.at.x * 1e-6,
+                    gv.at.y * 1e-6,
+                    leg.est_len * 1e-6,
+                    leg.crossings.len()
+                );
+                for &(e, slot) in &leg.crossings {
+                    let ge = &g.edges[e];
+                    let (va, vb) = (&g.verts[ge.a], &g.verts[ge.b]);
+                    let need = need_w + ge.end_gaps() as f64 * cc.max(ge.c_e);
+                    let cap = ge.cap;
+                    println!(
+                        "      e{e} slot {slot}/{}: ({:.3},{:.3}){}{} -> ({:.3},{:.3}){}{} len {:.3} cap {:.3} need {:.3}{} c_e {:.0} gaps {} {}{}fits {} pass {}",
+                        g.slot_count(e),
+                        va.at.x * 1e-6,
+                        va.at.y * 1e-6,
+                        va.owner.as_deref().map(|o| format!("[{o}]")).unwrap_or_default(),
+                        if va.nets.is_empty() { String::new() } else { format!("{:?}", va.nets) },
+                        vb.at.x * 1e-6,
+                        vb.at.y * 1e-6,
+                        vb.owner.as_deref().map(|o| format!("[{o}]")).unwrap_or_default(),
+                        if vb.nets.is_empty() { String::new() } else { format!("{:?}", vb.nets) },
+                        (va.at - vb.at).len() * 1e-6,
+                        cap * 1e-6,
+                        need * 1e-6,
+                        if cap < need { " UNFIT" } else { "" },
+                        ge.c_e,
+                        ge.end_gaps(),
+                        if ge.constraint { format!("CONSTR{:?} ", ge.owner_nets) } else { String::new() },
+                        if ge.along.is_some() { "ALONG " } else { "" },
+                        g.fits(e, c.width as f64, cc),
+                        g.passable(e, c.net)
+                    );
+                }
+                if j < p.sites.len() {
+                    let (s, z) = p.sites[j];
+                    let st = &mg.sites[s];
+                    println!(
+                        "    via site {s} at ({:.3},{:.3}) size {:?} origin {:?} owner {:?} blocked {}",
+                        st.at.x * 1e-6,
+                        st.at.y * 1e-6,
+                        z,
+                        st.origin,
+                        mg.owner[s],
+                        mg.blocked[s]
+                    );
+                }
+            }
+        };
+        for &id in &detour {
+            let Some(i) = live.iter().position(|c| c.id == id) else {
+                println!("  #{id}: not a live connection");
+                continue;
+            };
+            let c = &live[i];
+            println!("  {}", label(c));
+            if let Some(p) = &paths[i] {
+                dump(&mg, c, p, "committed (negotiator, final iteration)");
+            }
+            let p = params(c);
+            match search(&mg, &obs, c, &starts[i], &goals[i], &p) {
+                SearchOutcome::Found(sp) => dump(&mg, c, &sp, "search alone"),
+                o => println!("  #{id} search alone: {}", outcome_str(&o)),
+            }
+            match ghost(&mg, &obs, c, &starts[i], &goals[i], &p) {
+                Some((gp, be, bs, _)) => {
+                    dump(&mg, c, &gp, "ghost");
+                    println!("    ghost first soft block: edge {be:?} site {bs:?}");
+                }
+                None => println!("  #{id} ghost: NONE"),
+            }
+            // with every other committed path present: which ghost edges are soft and who
+            // occupies them (negotiation order vs static geometry)
+            let alone = match search(&mg, &obs, c, &starts[i], &goals[i], &p) {
+                SearchOutcome::Found(sp) => Some(sp),
+                _ => None,
+            };
+            let others: Vec<usize> = (0..m).filter(|&j| j != i && paths[j].is_some()).collect();
+            for &j in &others {
+                mg.insert_path(&live[j], paths[j].as_ref().unwrap(), &mut obs);
+            }
+            if let Some(sp) = &alone {
+                let cc = (c.clearance as f64).max(model.rules.min_clearance as f64);
+                println!("  #{id} the empty-graph search path with all others present:");
+                for leg in &sp.legs {
+                    let g = &mg.layers[leg.layer_idx].g;
+                    for &(e, _) in &leg.crossings {
+                        let ge = &g.edges[e];
+                        let pass = g.passable(e, c.net);
+                        let fits = g.fits(e, c.width as f64, cc);
+                        if pass && fits && ge.cross.is_empty() {
+                            continue;
+                        }
+                        let occ: Vec<String> = ge
+                            .cross
+                            .iter()
+                            .map(|x| match mg.wire_of.get(x.conn).cloned().flatten() {
+                                Some((cc, _)) => format!(
+                                    "#{} net{} {}->{}",
+                                    live[cc].id,
+                                    live[cc].net,
+                                    live[cc].from.label,
+                                    live[cc].to.label
+                                ),
+                                None => format!("leg{}", x.conn),
+                            })
+                            .collect();
+                        println!(
+                            "      L{} e{e} ({:.3},{:.3})->({:.3},{:.3}) cap {:.3} pass {pass} fits {fits} along {:?} occupied by {:?}",
+                            leg.layer_idx,
+                            g.verts[ge.a].at.x * 1e-6,
+                            g.verts[ge.a].at.y * 1e-6,
+                            g.verts[ge.b].at.x * 1e-6,
+                            g.verts[ge.b].at.y * 1e-6,
+                            ge.cap * 1e-6,
+                            ge.along.map(|k| mg.wire_of.get(k).cloned().flatten().map(|(cc, _)| live[cc].id)),
+                            occ
+                        );
+                    }
+                }
+            }
+            match search(&mg, &obs, c, &starts[i], &goals[i], &p) {
+                SearchOutcome::Found(sp) => dump(&mg, c, &sp, "search with all others present"),
+                o => println!(
+                    "  #{id} search with all others present: {}",
+                    outcome_str(&o)
+                ),
+            }
+            if let Some((gp, be, bs, _)) = ghost(&mg, &obs, c, &starts[i], &goals[i], &p) {
+                println!(
+                    "  #{id} ghost with all others present: vias {} est {:.3}mm first soft edge {be:?} site {bs:?}",
+                    gp.sites.len(),
+                    gp.est_len * 1e-6
+                );
+                let cc = (c.clearance as f64).max(model.rules.min_clearance as f64);
+                for leg in &gp.legs {
+                    let g = &mg.layers[leg.layer_idx].g;
+                    for &(e, _) in &leg.crossings {
+                        let ge = &g.edges[e];
+                        let pass = g.passable(e, c.net);
+                        let fits = g.fits(e, c.width as f64, cc);
+                        if pass && fits {
+                            continue;
+                        }
+                        let occ: Vec<String> = ge
+                            .cross
+                            .iter()
+                            .map(|x| match mg.wire_of.get(x.conn).cloned().flatten() {
+                                Some((cc, _)) => format!(
+                                    "#{} net{} {}->{}",
+                                    live[cc].id,
+                                    live[cc].net,
+                                    live[cc].from.label,
+                                    live[cc].to.label
+                                ),
+                                None => format!("leg{}", x.conn),
+                            })
+                            .collect();
+                        println!(
+                            "      soft L{} e{e} ({:.3},{:.3})->({:.3},{:.3}) cap {:.3} pass {pass} fits {fits} along {:?} occupied by {:?}",
+                            leg.layer_idx,
+                            g.verts[ge.a].at.x * 1e-6,
+                            g.verts[ge.a].at.y * 1e-6,
+                            g.verts[ge.b].at.x * 1e-6,
+                            g.verts[ge.b].at.y * 1e-6,
+                            ge.cap * 1e-6,
+                            ge.along.map(|k| mg.wire_of.get(k).cloned().flatten().map(|(cc, _)| live[cc].id)),
+                            occ
+                        );
+                    }
+                }
+            }
+            for &j in &others {
+                mg.remove_conn(live[j].id, &mut obs);
+            }
+        }
+    }
+
+    // ---- (E) clearance-bend probes along given chords (empty graph)
+    for (id, li, pts) in &chords {
+        let Some(c) = live.iter().find(|c| c.id == *id) else {
+            println!("  chord #{id}: not live");
+            continue;
+        };
+        let g = &mg.layers[*li].g;
+        let lobs = obs.layer(mg.layers[*li].layer);
+        println!("== (E) chords of #{id} on L{li}");
+        for w in pts.windows(2) {
+            let (a, t) = (w[0], w[1]);
+            let full = topor_engine::search::probe_clearance_bend(g, lobs, c, a, t, &[], true);
+            let desc = |b: &Option<(topor_engine::geom::Vec2, Option<usize>)>| match b {
+                None => "none".to_string(),
+                Some((p, v)) => format!(
+                    "bend ({:.3},{:.3}) at vertex {:?}",
+                    p.x * 1e-6,
+                    p.y * 1e-6,
+                    v.map(|v| {
+                        let vi = &g.verts[v];
+                        format!(
+                            "v{v} ({:.3},{:.3}) r {:.0} clr {:.0} nets {:?} {}",
+                            vi.at.x * 1e-6,
+                            vi.at.y * 1e-6,
+                            vi.r,
+                            vi.clr,
+                            vi.nets,
+                            vi.owner.clone().unwrap_or_default()
+                        )
+                    })
+                ),
+            };
+            println!(
+                "  chord ({:.3},{:.3}) -> ({:.3},{:.3}) len {:.3}: full-box {}",
+                a.x * 1e-6,
+                a.y * 1e-6,
+                t.x * 1e-6,
+                t.y * 1e-6,
+                (t - a).len() * 1e-6,
+                desc(&full)
+            );
+            // vertices near the chord
+            let bb = topor_engine::geom::Aabb {
+                min: topor_engine::geom::Vec2 {
+                    x: a.x.min(t.x) - 600_000.0,
+                    y: a.y.min(t.y) - 600_000.0,
+                },
+                max: topor_engine::geom::Vec2 {
+                    x: a.x.max(t.x) + 600_000.0,
+                    y: a.y.max(t.y) + 600_000.0,
+                },
+            };
+            for v in g.verts_near(bb) {
+                let vi = &g.verts[v];
+                if vi.owner.is_none() {
+                    continue;
+                }
+                println!(
+                    "      near v{v} ({:.3},{:.3}) r {:.0} clr {:.0} nets {:?} {}",
+                    vi.at.x * 1e-6,
+                    vi.at.y * 1e-6,
+                    vi.r,
+                    vi.clr,
+                    vi.nets,
+                    vi.owner.clone().unwrap_or_default()
+                );
+            }
         }
     }
 }
