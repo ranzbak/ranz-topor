@@ -1,0 +1,7 @@
+### Task A16 (S; F check in A3): escalating per-pair rip cost — `negotiate.rs`, `route.rs`
+
+**Interfaces:** `rip()` adds `opts.expert.hist_block · growth^(k−1)` for the k-th rip of B by A, refuses at `k ≥ ripup_max_per_pair`; `RIP_PAIR_CAP` removed; `RouteResult.ripup: RipReport { rips_per_connection: Vec<u32>, pairs_at_backstop: Vec<[usize; 2]>, total: u32 }`; bound `O(max_per_pair · m²)`.
+
+- [ ] **Step 1:** `ping_pong_pair_converges_before_backstop` (`max(rip_pairs) ≤ 4 < 8`, no backstop pair), `backstop_stops_rips`, `growth_one_is_constant_cost`, `ripup_threads_byte_identical` (`engine/tests/negotiate_ripup.rs`). FAIL → implement → PASS.
+- [ ] **Step 2:** eprom incl. the F.Cu-only guard and wiccon not worse (iterations reported). PNG `--task A16 --board wiccon-2023`. Commit `feat(negotiate): escalating per-pair rip cost with backstop`.
+

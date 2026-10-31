@@ -1,0 +1,6 @@
+### Task A11 (S): layer cost terms — pour cut and preferred direction — `search.rs`, `route.rs`, `model.rs`
+
+**Interfaces:** `Options.pour_cut_cost_nm: i64 = 1_000_000` per mm inside a foreign pour, `Options.layer_direction: BTreeMap<String, f64>`, `Options.direction_cost: f64 = 0.0`; additive step costs (admissible), `O(1)` per step via `in_pour` of the face.
+
+- [ ] **Step 1:** `leg_through_foreign_pour_prefers_other_layer_when_cost_set`, `preferred_direction_cost_tilts_choice`, `costs_zero_match_m3` (`engine/tests/route_layer_cost.rs`). FAIL → implement → PASS. eprom B.Cu GND pour islands before/after reported. PNG `--task A11`. Commit `feat(search): pour-cut and preferred-direction layer costs`.
+

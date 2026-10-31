@@ -1,0 +1,6 @@
+### Task A9 (S): priority tiers, do-not-touch nets, ignored pads — `decompose.rs`, `model.rs`, `route.rs`
+
+**Interfaces:** `Options.net_priority: BTreeMap<String, u8>`, `exclude_nets: Vec<String>`, `ignore_pads: Vec<PadRef>`; `Connection.tier` = table value (1..4) else M3 inference; excluded nets never decomposed, their copper fixed (`NetRouteReport.status == "excluded"`); ignored pads → no terminal/obstacle, `ConnReport.status == "ignored"`, reason `"pad outside board"`.
+
+- [ ] **Step 1:** `priority_table_orders_and_weights`, `tier_4_pays_lower_via_cost`, `excluded_net_copper_is_fixed_obstacle`, `ignored_pad_skipped_and_reported` (`engine/tests/route_priority.rs`). FAIL → implement → PASS. eprom/wiccon byte-identical without options. Commit `feat(route): priority tiers from options, do-not-touch nets, ignored pads`.
+

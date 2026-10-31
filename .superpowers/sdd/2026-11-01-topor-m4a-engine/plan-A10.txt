@@ -1,0 +1,6 @@
+### Task A10 (S): via rules from the board setup — `vias.rs`, `model.rs`, `route.rs`, `toporlib/rules.py`
+
+**Interfaces:** `Rules.predefined_vias: Vec<[i64; 2]>`, `Rules.via_fallback: [i64; 2] = [800_000, 400_000]`; `Options.allowed_drills_nm: Vec<i64>`, `via_in_pad: bool = false`, `via_cost_by_net: BTreeMap<String, i64>`, `reduction_len_slack_pct: f64 = 10.0`; `via_sizes(rules, net, opts)`: netclass via first, then smaller predefined vias (filtered, `≥ min_via_drill`), fallback only when the list is empty **and** the netclass is at KiCad factory values (warning `"via fallback 0.8/0.4 used"`); `RouteResult.vias_in_pads: Vec<[i64;2]>`; `toporlib.rules` exports `predefined_vias` from `.kicad_pro` `m_ViasDimensionsList` and the factory-default warning.
+
+- [ ] **Step 1:** `via_sizes_prefer_netclass_then_predefined_smaller`, `allowed_drills_filters_predefined`, `fallback_only_when_nothing_set_up`, `via_in_pad_site_inside_own_smd_pad_only_when_enabled`, `reduction_slack_from_options`, `via_cost_by_net_overrides_default` (`engine/tests/via_rules.rs`); `test_rules_exports_predefined_vias_and_factory_default_warning`. FAIL → implement → PASS; eprom/wiccon byte-identical. Commit `feat(vias): predefined via list, fallback warning, allowed_drills, via-in-pad, per-net via cost`.
+

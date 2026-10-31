@@ -1,0 +1,7 @@
+### Task A5 (S): same-net Steiner attachment and net ordering (M4-D3) — `decompose.rs`, `search.rs`, `route.rs`, `wires.rs`
+
+**Interfaces:** `Goal::OwnStrand { conn, leg, edge }`; `ConnReport.junction: bool`; `Options.steiner: bool = true`. One extra goal set per sibling, `O(Σ sibling leg length)` per search.
+
+- [ ] **Step 1:** `t_junction_onto_routed_sibling` (#207 fixture: ≤ 1.2 mm T-junction, 0 vias, sibling split, self-check clean), `t_junction_onto_hand_copper`, `steiner_off_is_m3_behaviour`, `junction_angle_below_60_is_rejected` (`engine/tests/route_steiner.rs`). FAIL → implement → PASS.
+- [ ] **Step 2:** eprom/wiccon not worse; threads byte-identical; dcsgone 60 s `count > 1.5` reported (expected ≤ 6). PNG `--task A5 --board dcsgonebadge`. Commit `feat(route): same-net Steiner T-junctions and net ordering`.
+

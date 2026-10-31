@@ -1,0 +1,6 @@
+### Task A13 (S): bounded via position relaxation (M3-R3) — `relax.rs`, `route.rs`
+
+**Interfaces:** `Options.via_relaxation: bool = true`; `RouteResult.via_relaxation: String`; pass after via reduction per note §5.
+
+- [ ] **Step 1:** `via_moves_toward_force_balance_within_face_star`, `via_relaxation_rejects_move_into_keepout`, `via_relaxation_off_matches_previous`, `via_relaxation_threads_byte_identical` (`engine/tests/route_via_relax.rs`). FAIL → implement → PASS. wiccon: via count unchanged, outside ≤ previous, DRC 0. PNG `--task A13 --board wiccon-2023`. Commit `feat(route): bounded via position relaxation`.
+

@@ -1,0 +1,7 @@
+### Task A4 (S): own-net / same-net capacity, wall-aware (M4-D1) — `graph.rs`, `search.rs`
+
+**Interfaces:** `RouteGraph::fits_for(e, net, w, c) -> bool`, `RouteGraph.wall_r: Vec<f64>`; own-net ends charge 0 gap + core radius back; same-net strands on `e` charge 0 gap. Build `O(E·q)`.
+
+- [ ] **Step 1:** `own_tip_edge_fits_own_net`, `two_same_net_strands_share_one_tip_edge`, `own_end_edge_against_outline_wall_stays_unfit`, `search_layers (1)` flips to "fits, ghost not soft" (`engine/tests/graph_ownnet.rs`). FAIL → implement → PASS.
+- [ ] **Step 2:** `eprom_ripped_front_only_is_the_m2_result` green; eprom two-layer identity re-verified; wiccon not worse (vias ≤ 33 expected). PNGs `--task A4` dcsgone + wiccon. Commit `feat(graph): own-net and same-net capacity, wall-aware`.
+

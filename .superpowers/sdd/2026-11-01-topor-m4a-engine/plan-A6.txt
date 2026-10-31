@@ -1,0 +1,7 @@
+### Task A6 (S): pad exit stubs — `route.rs`, `wires.rs`, `decompose.rs`, `model.rs`
+
+**Interfaces:** `Terminal::Stub { pad: Vec2, end: Vec2, layer: u32 }`; `Options.exit_stubs: String` (`"auto" | "all" | "off"`, default `"auto"`); `ConnReport.stub_nm: i64`; generation `O(T·q)`.
+
+- [ ] **Step 1:** `stub_generated_for_unfit_fine_pitch_pad`, `stub_skipped_when_infeasible` (reason `"stub infeasible"`), `exit_stubs_off_matches_previous`, `exit_stubs_all_on_every_smd_pad` (`engine/tests/route_stubs.rs`). FAIL → implement → PASS.
+- [ ] **Step 2:** eprom byte-identical (THT only); wiccon not worse; dcsgone #201 routed. PNG `--task A6 --board dcsgonebadge`. Commit `feat(route): pad exit stubs (auto/all/off)`.
+

@@ -1,0 +1,6 @@
+### Task A14 (S): finishing hand-started traces — G1 continuation — `wires.rs`, `relax.rs`, `route.rs`, `model.rs`, `harness/fixtures.py`
+
+**Interfaces:** `Terminal::Dangling { at, direction }`; `Options.dangling_ends: String` (`"continue" | "fixed"`, default `"continue"`); `g1_angle_deg` computed; `make_fixture_board(..., dangling_trace=True)`.
+
+- [ ] **Step 1:** `dangling_end_continues_tangent` (`g1_angle_deg ≤ 1.0`, same width/layer, hand copper untouched), `dangling_hint_keeps_side`, `dangling_fixed_mode_is_m3` (`engine/tests/route_g1.rs`); `test_bench_dangling_fixture_g1`. FAIL → implement → PASS. No PNG from the fixture (test pattern); eprom PNG only if its numbers moved. Commit `feat(route): G1 continuation of hand-started traces`.
+

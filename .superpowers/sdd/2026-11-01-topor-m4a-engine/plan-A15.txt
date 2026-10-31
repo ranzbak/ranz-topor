@@ -1,0 +1,6 @@
+### Task A15 (S, gate review F): M4a gate, version 0.5.0, benchmark 0.5.0, review
+
+- [ ] **Step 1:** `test_m4_gate_eprom_not_worse`, `test_m4_gate_wiccon_not_worse` (Global Constraints numbers); `pytest tests/gate -m "gate or not gate"` all green (M0–M4b + M4a); `pytest tests/scaling -m scaling` green; `since = "0.5.0"` schema keys become active (B1 commented lines un-commented in `render_toml`, reference regenerated).
+- [ ] **Step 2:** version 0.5.0; `bash tools/build.sh --dev`; benchmark `docs/benchmarks/<date>-topor-0.5.0/` on all boards with the A0/A7 columns; gate PNGs `--task A15-gate` for eprom, wiccon, dcsgone; `docs/benchmarks/README.md` row.
+- [ ] **Step 3 (F):** independent review: complexity of every new loop (A1, A4–A7, A13, A14, A16), note conformance, determinism audit, D-1..D-10 closure, gate tests vs numbers; BLOCKING fixed → STATE "M4a DONE (0.5.0) — M4 complete". Commit `docs(state): M4a DONE (0.5.0)`.
+
