@@ -90,6 +90,8 @@ design, hardest implementations, failure diagnosis, gate reviews.
 | **M5** | Scoped after M4 from [44 — feature gap analysis](44-feature-gap-analysis.md) | F plans | M4 | — | 44 |
 | **Backlog (after M4)** | **Traditional 45° routing mode** (user request 2026-10-31): optional per-run switch, default curved; reuses topology/search/negotiation, replaces the arc metrization by octilinear (0°/45°/90°) taut paths in the same homotopy class; bends are 45° turns, a 90° turn only where two 45° turns do not fit (EMI, user 2026-10-31; reported per bend), never acute — both configurable (`bend_90`, `bend_acute`), these are the defaults; same DRC/length gates; plugin option + benchmark column | S (design F) | M4 | — | 44 §4 |
 | **Backlog (after M4)** | **Missing-width warning** (user request 2026-10-31): pre-flight check — when no default net width is set (no netclass/rule/settings width, [30 §5.1](../kicad/30-kicad-constraints.md#51-missing-or-default-track-widths)), show a warning listing every net that still needs a width and stating that those nets default to **0.25 mm** (default value configurable); the user must click **OK** to accept the default before routing starts (Cancel aborts, nothing changed); accepted fallback widths listed in the run report | S (UI H) | M4 | — | 30 §5.1 |
+| **Backlog (after M4)** | **Fully free via placement (incremental CDT)** — when bounded relaxation isn't enough, or as an optional routing mode for complex boards (user 2026-10-31) | S (design F) | M4 | — | 25 §3 |
+| **Backlog (after M4)** | **Harness migration to the file/`kicad-cli` path (no pcbnew) before KiCad 11** — the dev/test harness still uses pcbnew SWIG as the oracle | S | M4 | — | 31 §6 |
 
 ## 4. Orchestration: rotating coordinator, narrow workers
 
