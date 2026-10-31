@@ -95,12 +95,12 @@ fn conn(b: &Built, id: usize, net: i32, from: &str, to: &str) -> (Connection, us
         kind: TermKind::Pad(0),
         label: l.to_string(),
         at: b.g.verts[v].at,
+        layers: vec![0],
     };
     (
         Connection {
             id,
             net,
-            layer: 0,
             width: 250_000,
             clearance: 200_000,
             tier: 3,

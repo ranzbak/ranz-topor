@@ -1,7 +1,7 @@
 use topor_engine::decompose::{decompose, order, terminal_of, Connection, TermKind, TermRef};
 use topor_engine::geom::{IVec2, TrackPrim, Vec2};
 use topor_engine::model::{
-    BoardModel, DanglingEnd, KeptItem, Net, NetRule, Options, Pad, PadRef, PadShape, Pour, Pt,
+    BoardModel, PourFill, DanglingEnd, KeptItem, Net, NetRule, Options, Pad, PadRef, PadShape, Pour, Pt,
     Scope,
 };
 use topor_engine::wires::Terminal;
@@ -88,7 +88,7 @@ fn scoped(s: Scope) -> Options {
 #[test]
 fn two_pad_net_is_one_connection() {
     let m = model(&[(0, 0), (10, 0)]);
-    let d = decompose(&m, &Options::default(), 0);
+    let d = decompose(&m, &Options::default(), &[0]);
     assert_eq!(d.connections.len(), 1);
     let c = &d.connections[0];
     assert_eq!(
@@ -97,7 +97,6 @@ fn two_pad_net_is_one_connection() {
     );
     assert!((c.est_len - 10.0 * MM as f64).abs() < 1.0);
     assert_eq!(c.net, 1);
-    assert_eq!(c.layer, 0);
     assert_eq!(c.tier, 3);
     assert_eq!(c.width, m.rules.net_rule(1).width);
     assert_eq!(d.nets.len(), 1);
@@ -108,7 +107,7 @@ fn two_pad_net_is_one_connection() {
 #[test]
 fn four_pad_net_is_mst_of_three() {
     let m = model(&[(0, 0), (10, 0), (20, 0), (10, 30)]);
-    let d = decompose(&m, &Options::default(), 0);
+    let d = decompose(&m, &Options::default(), &[0]);
     assert_eq!(d.connections.len(), 3);
     assert_eq!(
         labels(&d),
@@ -125,7 +124,7 @@ fn four_pad_net_is_mst_of_three() {
 fn partial_trace_cluster_attaches_at_track_end() {
     let mut m = model(&[(0, 0), (30, 0)]);
     m.kept.push(seg("k1", 1, (0.0, 0.0), (12.0, 0.0)));
-    let d = decompose(&m, &Options::default(), 0);
+    let d = decompose(&m, &Options::default(), &[0]);
     assert_eq!(d.nets[0].clusters, 2);
     assert_eq!(d.connections.len(), 1);
     let c = &d.connections[0];
@@ -145,7 +144,7 @@ fn partial_trace_cluster_attaches_at_track_end() {
 fn complete_net_yields_zero_connections() {
     let mut m = model(&[(0, 0), (30, 0)]);
     m.kept.push(seg("k1", 1, (0.0, 0.0), (30.0, 0.0)));
-    let d = decompose(&m, &Options::default(), 0);
+    let d = decompose(&m, &Options::default(), &[0]);
     assert!(d.connections.is_empty());
     assert_eq!(d.nets[0].clusters, 1);
     assert!(!d.nets[0].pour_served);
@@ -162,13 +161,13 @@ fn pour_served_net() {
         vias: vec![],
         fills: vec![],
     });
-    let d = decompose(&m, &Options::default(), 0);
+    let d = decompose(&m, &Options::default(), &[0]);
     assert!(d.connections.is_empty());
     assert!(d.nets[0].pour_served);
     assert_eq!(d.nets[0].clusters, 1);
 
     m.pours[0].pads = vec!["U1.1".into()];
-    let d = decompose(&m, &Options::default(), 0);
+    let d = decompose(&m, &Options::default(), &[0]);
     assert_eq!(d.connections.len(), 1);
     assert!(!d.nets[0].pour_served);
 }
@@ -185,7 +184,7 @@ fn pour_on_other_layer_does_not_join_smd_pad() {
         vias: vec![],
         fills: vec![],
     });
-    let d = decompose(&m, &Options::default(), 0);
+    let d = decompose(&m, &Options::default(), &[0]);
     assert_eq!(d.connections.len(), 1);
     assert!(!d.nets[0].pour_served);
     assert_eq!(d.nets[0].clusters, 2);
@@ -201,7 +200,7 @@ fn scope_pads_restricts_to_those_pads() {
         ],
         ..Scope::default()
     };
-    let d = decompose(&m, &scoped(s), 0);
+    let d = decompose(&m, &scoped(s), &[0]);
     assert_eq!(labels(&d), vec![("U1.1".into(), "U1.2".into())]);
 }
 
@@ -212,7 +211,7 @@ fn scope_single_pad_connects_to_nearest_cluster() {
         pads: vec![PadRef::try_from("U1.3".to_string()).unwrap()],
         ..Scope::default()
     };
-    let d = decompose(&m, &scoped(s), 0);
+    let d = decompose(&m, &scoped(s), &[0]);
     assert_eq!(d.connections.len(), 1);
     let c = &d.connections[0];
     let mut l = [c.from.label.as_str(), c.to.label.as_str()];
@@ -233,7 +232,7 @@ fn scope_nets_and_netclasses() {
             ..NetRule::default()
         },
     );
-    let d = decompose(&m, &Options::default(), 0);
+    let d = decompose(&m, &Options::default(), &[0]);
     assert_eq!(d.connections.len(), 2);
     assert_eq!(d.connections[1].width, 400_000);
     assert_eq!(d.connections[1].tier, 2);
@@ -244,7 +243,7 @@ fn scope_nets_and_netclasses() {
             nets: vec!["A".into()],
             ..Scope::default()
         }),
-        0,
+        &[0],
     );
     assert_eq!(d.connections.len(), 1);
     assert_eq!(d.connections[0].net, 1);
@@ -258,7 +257,7 @@ fn scope_nets_and_netclasses() {
             netclasses: vec!["power".into()],
             ..Scope::default()
         }),
-        0,
+        &[0],
     );
     assert_eq!(d.connections.len(), 1);
     assert_eq!(d.connections[0].net, 2);
@@ -297,7 +296,7 @@ fn scope_area_selects_pads_inside() {
             area: Some(sq(-5, 15, 15, 25)),
             ..Scope::default()
         }),
-        0,
+        &[0],
     );
     assert_eq!(d.connections.len(), 1);
     assert_eq!(d.connections[0].net, 2);
@@ -308,11 +307,11 @@ fn conn(id: usize, net: i32, width: i64, tier: u8, len_mm: f64) -> Connection {
         kind: TermKind::Pad(0),
         label: "U1.1".into(),
         at: Vec2 { x: 0.0, y: 0.0 },
+        layers: vec![0],
     };
     Connection {
         id,
         net,
-        layer: 0,
         width,
         clearance: 200_000,
         tier,
@@ -352,7 +351,7 @@ fn dangling_end_is_a_terminal() {
         end: Pt { x: 5 * MM, y: 0 },
         direction: [1.0, 0.0],
     });
-    let d = decompose(&m, &Options::default(), 0);
+    let d = decompose(&m, &Options::default(), &[0]);
     assert_eq!(d.connections.len(), 1);
     let c = &d.connections[0];
     assert_eq!(c.from.kind, TermKind::Dangling("k1".into()));
@@ -376,9 +375,167 @@ fn via_is_a_terminal_and_joins_clusters() {
     });
     // track from pad 1 to the via centre: one cluster {pad1, via}; pad 2 alone
     m.kept.push(seg("k1", 1, (0.0, 0.0), (15.0, 0.0)));
-    let d = decompose(&m, &Options::default(), 0);
+    let d = decompose(&m, &Options::default(), &[0]);
     assert_eq!(d.nets[0].clusters, 2);
     assert_eq!(d.connections.len(), 1);
     assert_eq!(d.connections[0].from.kind, TermKind::Via(0));
     assert_eq!(d.connections[0].from.label, "v1");
+}
+
+// ---- M3 Task 6: terminal layers and pour completion ----
+
+fn pt(x: i64, y: i64) -> Pt {
+    Pt { x: x * MM, y: y * MM }
+}
+
+fn rect_fill(layer: u32, x0: i64, y0: i64, x1: i64, y1: i64) -> PourFill {
+    PourFill {
+        layer,
+        outer: vec![pt(x0, y0), pt(x1, y0), pt(x1, y1), pt(x0, y1)],
+    }
+}
+
+fn tht(num: usize, net: i32, x: i64, y: i64) -> Pad {
+    let mut p = pad(num, net, x, y);
+    p.layers = vec![0, 31];
+    p.shapes = [
+        (0u32, PadShape::Circle { d: 1_600_000 }),
+        (31u32, PadShape::Circle { d: 1_600_000 }),
+    ]
+    .into();
+    p
+}
+
+fn smd_b(num: usize, net: i32, x: i64, y: i64) -> Pad {
+    let mut p = pad(num, net, x, y);
+    p.layers = vec![31];
+    p.shapes = [(31u32, PadShape::Circle { d: 1_600_000 })].into();
+    p
+}
+
+fn gnd_pour(pads: &[&str], fills: Vec<PourFill>) -> Pour {
+    Pour {
+        uuid: "zz".into(),
+        net: 1,
+        layers: vec![31],
+        pads: pads.iter().map(|s| s.to_string()).collect(),
+        vias: vec![],
+        fills,
+    }
+}
+
+/// Net 1: THT pad U1.1 at (10,15) inside the fill, SMD F.Cu pads at the given spots.
+fn pour_model(extra: &[(i64, i64)], listed: &[&str], fills: Vec<PourFill>) -> BoardModel {
+    let mut m = model(&[]);
+    m.pads.push(tht(1, 1, 10, 15));
+    for (i, &(x, y)) in extra.iter().enumerate() {
+        m.pads.push(pad(i + 2, 1, x, y));
+    }
+    m.pours.push(gnd_pour(listed, fills));
+    m
+}
+
+const L2: [u32; 2] = [0, 31];
+
+#[test]
+fn terminals_carry_their_copper_layers() {
+    let mut m = model(&[]);
+    m.pads.push(tht(1, 1, 0, 0));
+    m.pads.push(smd_b(2, 1, 10, 0));
+    m.pads.push(pad(3, 1, 20, 0));
+    m.vias.push(topor_engine::model::Via {
+        uuid: "v1".into(),
+        net: 1,
+        at: pt(30, 0),
+        d: 600_000,
+        drill: 300_000,
+        layers: vec![0, 31],
+        free: false,
+        locked: false,
+    });
+    let d = decompose(&m, &Options::default(), &L2);
+    let mut by: std::collections::BTreeMap<String, Vec<u32>> = Default::default();
+    for c in &d.connections {
+        for t in [&c.from, &c.to] {
+            by.insert(t.label.clone(), t.layers.clone());
+        }
+    }
+    assert_eq!(by["U1.1"], vec![0, 31]);
+    assert_eq!(by["U1.2"], vec![31]);
+    assert_eq!(by["U1.3"], vec![0]);
+    assert_eq!(by["v1"], vec![0, 31]);
+}
+
+#[test]
+fn decompose_layers_argument_filters_terminal_layers() {
+    let mut m = model(&[]);
+    m.pads.push(smd_b(1, 1, 0, 0));
+    m.pads.push(tht(2, 1, 10, 0));
+    let d = decompose(&m, &Options::default(), &[0]);
+    let c = &d.connections[0];
+    assert_eq!(c.from.layers, Vec::<u32>::new());
+    assert_eq!(c.to.layers, vec![0]);
+}
+
+#[test]
+fn pour_completion_connects_unreached_cluster_to_pour() {
+    let m = pour_model(&[(40, 15)], &["U1.1"], vec![rect_fill(31, 0, 0, 30, 30)]);
+    let d = decompose(&m, &Options::default(), &L2);
+    assert_eq!(d.connections.len(), 1);
+    let c = &d.connections[0];
+    assert_eq!(c.from.label, "U1.2");
+    assert_eq!(c.to.kind, TermKind::Pour(0));
+    assert_eq!(c.to.label, "pour:zz");
+    assert_eq!(c.to.layers, vec![31]);
+    assert!((c.est_len - 10.0 * MM as f64).abs() < 1.0);
+    assert!((c.to.at.x - 30.0 * MM as f64).abs() < 1.0 && (c.to.at.y - 15.0 * MM as f64).abs() < 1.0);
+    assert!(!d.nets[0].pour_served);
+    assert_eq!(d.nets[0].connections, vec![0]);
+    assert!(matches!(terminal_of(&c.to), Terminal::Via { .. }));
+}
+
+#[test]
+fn pour_served_net_without_gaps_has_no_connections() {
+    let m = pour_model(&[(20, 20)], &["U1.1", "U1.2"], vec![rect_fill(31, 0, 0, 30, 30)]);
+    // U1.2 is F.Cu SMD: the pour (B.Cu) does not join it, so it needs a connection...
+    let d = decompose(&m, &Options::default(), &L2);
+    assert_eq!(d.connections.len(), 1);
+    // ...whereas a THT pad listed by the pour is served.
+    let mut m = pour_model(&[], &["U1.1", "U1.2"], vec![rect_fill(31, 0, 0, 30, 30)]);
+    m.pads.push(tht(2, 1, 20, 20));
+    let d = decompose(&m, &Options::default(), &L2);
+    assert!(d.connections.is_empty());
+    assert!(d.nets[0].pour_served);
+}
+
+#[test]
+fn inside_cluster_has_zero_length_pour_connection() {
+    let m = pour_model(&[(20, 20)], &["U1.1"], vec![rect_fill(31, 0, 0, 30, 30)]);
+    let d = decompose(&m, &Options::default(), &L2);
+    assert_eq!(d.connections.len(), 1);
+    assert_eq!(d.connections[0].est_len, 0.0);
+}
+
+#[test]
+fn two_unreached_clusters_each_connect_to_the_pour_not_each_other() {
+    let m = pour_model(&[(40, 15), (40, 20)], &["U1.1"], vec![rect_fill(31, 0, 0, 30, 30)]);
+    let d = decompose(&m, &Options::default(), &L2);
+    assert_eq!(d.connections.len(), 2);
+    assert!(d.connections.iter().all(|c| c.to.kind == TermKind::Pour(0)));
+    let mut f: Vec<_> = d.connections.iter().map(|c| c.from.label.clone()).collect();
+    f.sort();
+    assert_eq!(f, ["U1.2", "U1.3"]);
+}
+
+#[test]
+fn pour_without_fills_falls_back_to_m2() {
+    let m = pour_model(&[(40, 15)], &["U1.1"], vec![]);
+    let d = decompose(&m, &Options::default(), &L2);
+    assert!(d.warnings.iter().any(|w| w.contains("pour zz has no fill outline")));
+    assert_eq!(d.connections.len(), 1);
+    assert!(d.connections.iter().all(|c| !matches!(c.to.kind, TermKind::Pour(_))));
+    assert_eq!(
+        (d.connections[0].from.label.as_str(), d.connections[0].to.label.as_str()),
+        ("U1.1", "U1.2")
+    );
 }
