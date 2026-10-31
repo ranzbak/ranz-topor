@@ -10,8 +10,14 @@ Input for the M4 plan (plugin options) and the backlog. Decisions below are the 
 
 1. **KiCad board setup** (design rules, netclasses, custom rules, stackup, drill/via sizes, edge
    clearance, layer types, locked items) — always wins where it has a value.
-2. **Plugin config** (fab-agnostic, per project with a user-level default file) — everything the
-   board setup cannot express.
+2. **Plugin config** (fab-agnostic) — everything the board setup cannot express. It is a
+   **file in the project directory**, `topor.toml` next to the `.kicad_pro` (user, 2026-10-31), so
+   it is project-specific and checked in together with the KiCad design. Plain TOML: readable,
+   diff-friendly, comments allowed; not stored inside `.kicad_pro` (KiCad rewrites that file).
+   If missing, the plugin creates it on first run with all defaults written out and commented, and
+   says so in the report. Changes made from the plugin (e.g. "add to drill list?" → yes, accepted
+   fallback widths) are written back to this file. Unknown keys → warning, not silent ignore; a
+   `version` key allows later migration.
 3. **Built-in defaults** (safe/conventional) — only where 1 and 2 are silent; the run report and
    pre-flight list every value that came from here.
 
