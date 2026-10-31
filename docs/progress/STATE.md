@@ -83,6 +83,8 @@ byte-identical; TDD, regression test per fix; progress PNG + numbers to main aft
 self-check failures at the root cause (not by changing the test profile); explain the M2 dcsgone info test routing 0/231.
 Then Task 12 Step 5 (benchmark 0.3.0) and Step 7 (independent F gate review incl. ledger deferred items). Stop rule (user): no
 budget/requirement relaxation; if a gate item still fails after these fixes: commit, numbers + profile here, report to main.
+**M3-R11** (main) detour metric per connection = routed length / ghost length; bench metrics carry median, p90, max, count > 1.5, top 10; PNGs highlight detours > 1.5 with a caption line; after F2–F4 one F diagnosis of the top offenders on wiccon/dcsgone, cheap bounded fixes in M3, rest → M4; no hard threshold without main's ruling. Main also asks for docs/benchmarks/progress/2026-10-31-m3-<fix>-dcsgonebadge.png after each of F2/F3/F4 (both layers, caption routed/total, vias, DRC, router_s) + message.
+Done so far: F1 d5965e4 (wiccon 60/60, eprom byte-identical), F5 21f1bc1, F7 78aa49c, scaling fix 222c620 (no via sites on single-layer boards: synth n=1000 1.25 s 1000/1000, t1000/t100 24.2; debug stub failures = 10 s deadline in debug → "partial stubs skipped: deadline", test budget 600 s), note docs/progress/notes/m3-scaling-diagnosis.md; merge dd1cfec. M2 dcsgone 0/231 = iteration-1 timeout before any metrize (anytime gap) → fixed with F4 (Ruling Q2, coordinator).
 
 **M2 history (rotation 1, 2026-10-31).** Plan docs/superpowers/plans/2026-10-31-topor-m2-router.md;
 ledger .superpowers/sdd/2026-10-31-topor-m2-router/progress.md (briefs, reports, rulings R1–R6).
