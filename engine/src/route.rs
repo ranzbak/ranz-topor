@@ -213,8 +213,22 @@ pub struct IterProfile {
     pub revalidated: usize,
     /// Connections ripped up for the next iteration.
     pub ripped: usize,
+    /// Paths the negotiator holds after the commit (before metrization).
     pub routed: usize,
     pub overuse_edges: usize,
+    /// Connections metrized and self-checked OK this iteration (what `routed` reports when
+    /// this is the best iteration). DX diagnosis instrumentation, profile only.
+    pub ok: usize,
+    /// Connections blocked by the search this iteration.
+    pub blocked: usize,
+    /// Paths found but rejected by sketch / relax / self-check (re-searched next iteration).
+    pub metrize_failed: usize,
+    /// Vias of the OK connections.
+    pub vias: usize,
+    /// Stop-rule cost of the OK connections: `Σ length + via_cost · vias` (nm).
+    pub cost_nm: f64,
+    /// This iteration became the best so far (`better_than`).
+    pub best: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -3062,6 +3076,7 @@ fn route_pass(
                             ripped: out.ripped.len(),
                             routed: routed.len(),
                             overuse_edges: out.overuse_edges,
+                            ..Default::default()
                         });
                     }
                     let mut res: Vec<Res> = (0..m)
@@ -3133,6 +3148,15 @@ fn route_pass(
                     let overuse = neg.penalise_overuse(&mg);
                     let (nok, vias, len, out_len) = tally(&res);
                     let better = best.as_ref().is_none_or(|b| better_than(nok, vias, len, b));
+                    if let Some(p) = profile.last_mut() {
+                        // Profile only (`Options::profile`): the outcome of this iteration.
+                        p.ok = nok;
+                        p.blocked = out.blocked.len();
+                        p.metrize_failed = failed.len();
+                        p.vias = vias;
+                        p.cost_nm = len + opts.via_cost_nm as f64 * vias as f64;
+                        p.best = better;
+                    }
                     if better {
                         best = Some(Snap {
                             routed: nok,
