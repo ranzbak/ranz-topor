@@ -16,6 +16,8 @@ Seams (plug-in points for the later tasks; each is a plain function here):
     * ``report.RunReport``          B8: the full report (the run fills ``report.facts``; ``write`` is the only
                                     call made on it besides ``summary_lines`` / ``set_outcome``).
     * ``apply_accepted_findings``   B6: persists accepted PAD_OUTSIDE_BOARD / DRILL_OUTSIDE_FILTER choices.
+    * ``apply_via_fallback``        Q-b / ruling C27: VIA_NOT_SET_UP -> ``vias.fallback_*`` written into the
+                                    engine's via rules (before read_model, and into the model's own rules).
 
 Complexity: O(1) rounds of kicad-cli (original DRC, ripped DRC when copper is ripped, one DRC per router round
 (<= drc_loop_cap), two SVG exports) around one engine run; the python glue is O(len(board text) + items) per
@@ -84,6 +86,7 @@ class RunOutcome:
     pcb_copy: Path | None = None
     ripped_pcb: Path | None = None
     routed_pcb: Path | None = None
+    via_fallback: dict | None = None  # apply_via_fallback info when VIA_NOT_SET_UP patched the engine rules
 
 
 class _Log:
@@ -180,6 +183,41 @@ def build_options(cfg: Config, engine, threads_override=None, *, plan=None, rip=
     return opts
 
 
+FACTORY_VIA_NM = (800_000, 400_000)  # KiCad's factory net class via (diameter, drill)
+
+
+def apply_via_fallback(rules: dict, cfg: Config) -> tuple:
+    """VIA_NOT_SET_UP (ruling C27): the rules with ``vias.fallback_diameter_mm`` / ``vias.fallback_drill_mm``
+    written into the fields the engine reads for the via size (``NetRule.via_d`` / ``via_drill``, nm) of the
+    default rule and of every per-net rule that carries the "not set up" size: KiCad's factory 0.8 / 0.4 mm or
+    the default rule's own (pre-patch) size. A per-net size somebody set (another value) is kept. The board's
+    minimums (``min_via_diameter`` / ``min_via_drill``) still apply (``clamped`` when they raise a value).
+    Returns ``(new_rules, info)``; `rules` is not modified. O(#per-net rules)."""
+    want_d = int(round(float(cfg.get("vias", "fallback_diameter_mm")) * 1_000_000))
+    want_r = int(round(float(cfg.get("vias", "fallback_drill_mm")) * 1_000_000))
+    d = max(want_d, int(rules.get("min_via_diameter") or 0))
+    r = max(want_r, int(rules.get("min_via_drill") or 0))
+    default = dict(rules.get("default") or {})
+    unset = {FACTORY_VIA_NM, (default.get("via_d"), default.get("via_drill"))}
+    per_net, n = {}, 0
+    for k, nr in (rules.get("per_net") or {}).items():
+        if (nr.get("via_d"), nr.get("via_drill")) in unset:
+            per_net[k] = {**nr, "via_d": d, "via_drill": r}
+            n += 1
+        else:
+            per_net[k] = nr
+    info = {"diameter_nm": d, "drill_nm": r, "default_before": [default.get("via_d"), default.get("via_drill")],
+            "per_net": n, "per_net_total": len(per_net), "clamped": (d, r) != (want_d, want_r)}
+    return {**rules, "default": {**default, "via_d": d, "via_drill": r}, "per_net": per_net}, info
+
+
+def via_fallback_text(info: dict) -> str:
+    """Report line for an applied via fallback. O(1)."""
+    return (f"via fallback {info['diameter_nm'] / 1e6:g} / {info['drill_nm'] / 1e6:g} mm (diameter / drill) "
+            f"applied to the default rule and {info['per_net']}/{info['per_net_total']} net rules (VIA_NOT_SET_UP"
+            + (", raised to the board minimums" if info.get("clamped") else "") + ")")
+
+
 def apply_accepted_findings(decision: Decision, findings: list, cfg: Config, toml_path: Path) -> Config:
     """Persist accepted PAD_OUTSIDE_BOARD (-> ``nets.ignore_pads``) and DRILL_OUTSIDE_FILTER (-> appended to
     ``vias.allowed_drills_mm``) choices with ``update_config``; returns the updated Config. (B6 owns the
@@ -271,7 +309,7 @@ def _facts_result(status: str, out: RunOutcome, report: dict | None) -> dict:
     return {"status": status, "routed": out.routed, "total": out.total, "stop_reason": out.stop_reason,
             "cancelled": out.cancelled, "rounds": out.rounds, "router_s": round(out.router_s, 3),
             "wall_s": round(out.wall_s, 3), "items": len(out.items), "ripped": len(out.ripped), "drc": out.drc,
-            "findings": [asdict(f) for f in out.findings], "route": slim,
+            "findings": [asdict(f) for f in out.findings], "route": slim, "via_fallback": out.via_fallback,
             "pcb_copy": str(out.pcb_copy) if out.pcb_copy else None}
 
 
@@ -358,18 +396,30 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     copy_text = pcb_copy.read_text()
     log.line(f"save_as copy: {pcb_copy} ({len(copy_text)} bytes)")
     rules = resolve_rules(port, pcb_copy, copy_text)
-    model = port.read_model(rules, pcb_copy, layer_roles=cfg.layer_roles)
-    out.model = model
-    log.line(f"model: {len(model.get('pads', []))} pads, {len(model.get('kept', []))} tracks, "
-             f"{len(model.get('vias', []))} vias, {len(model.get('nets', []))} nets")
-
-    # 2. pre-flight
-    sel = port.selection()
     pro_p = pcb_copy.with_suffix(".kicad_pro")
     try:
         pro = json.loads(pro_p.read_text()) if pro_p.is_file() else {}
     except ValueError:
         pro = {}
+    # VIA_NOT_SET_UP (ruling C27): the fallback via size goes into the rules the engine receives
+    via_fb = preflight_mod.via_setup_missing(pro, cfg)
+    if via_fb:
+        rules, out.via_fallback = apply_via_fallback(rules, cfg)
+    model = port.read_model(rules, pcb_copy, layer_roles=cfg.layer_roles)
+    if via_fb and model.get("rules"):
+        # the engine reads model["rules"]: patch them too (idempotent for the IPC model, which embeds `rules`;
+        # needed for a port whose model carries its own rules, e.g. FakeBoard with a harness model). The
+        # reported info is the one of the engine's input.
+        mr, out.via_fallback = apply_via_fallback(model["rules"], cfg)
+        model = {**model, "rules": mr}
+    out.model = model
+    log.line(f"model: {len(model.get('pads', []))} pads, {len(model.get('kept', []))} tracks, "
+             f"{len(model.get('vias', []))} vias, {len(model.get('nets', []))} nets")
+    if out.via_fallback:
+        log.line(via_fallback_text(out.via_fallback))
+
+    # 2. pre-flight
+    sel = port.selection()
     findings += [f for f in preflight_findings(cfg, (), copy_text, model=model, rules=rules, sel=sel, pro=pro)
                  if f not in findings]
     errors = [f for f in findings if f.severity == "error"]
@@ -507,7 +557,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     partial = int(rr.get("partial", 0))
     scope_info = {"mode": cfg.get("run", "scope_mode") if (sel.footprints or sel.pads) else "whole board",
                   "ignored_pads": list(cfg.get("nets", "ignore_pads")),
-                  "accepted_codes": list(decision.accepted_codes)}
+                  "accepted_codes": list(decision.accepted_codes),
+                  "fallbacks": [via_fallback_text(out.via_fallback)] if out.via_fallback else []}
     build_report({**rr, "items": out.items}, classified, cfg, findings, scope_info, before_stats,
                  {"router_s": out.router_s, "drc_rounds": loop.rounds}, report=report,
                  facts={"layers": report.facts.get("layers"), "versions": report.facts.get("versions"),

@@ -122,7 +122,10 @@ def _layer_type_findings(layers: list) -> list:
 
 
 # ------------------------------------------------------------------ vias
-def _via_setup_missing(pro: dict | None, cfg) -> bool:
+def via_setup_missing(pro: dict | None, cfg=None) -> bool:
+    """True when the ``.kicad_pro`` has no pre-defined via size and no net class with a via size other than
+    KiCad's factory 0.8 / 0.4 mm (VIA_NOT_SET_UP; run.apply_via_fallback then patches the engine rules).
+    O(#net classes)."""
     pro = pro or {}
     ds = (pro.get("board") or {}).get("design_settings") or {}
     if ds.get("via_sizes_list"):
@@ -138,7 +141,7 @@ def _via_setup_missing(pro: dict | None, cfg) -> bool:
 
 def _via_findings(model: dict, rules: dict, cfg, pcb_text: str | None, pro: dict | None) -> list:
     out = []
-    if _via_setup_missing(pro, cfg):
+    if via_setup_missing(pro, cfg):
         d, r = cfg.get("vias", "fallback_diameter_mm"), cfg.get("vias", "fallback_drill_mm")
         out.append(_mk("VIA_NOT_SET_UP",
                        f"KiCad has no via sizes set up; topor falls back to {d:g} / {r:g} mm (diameter / drill) "
@@ -368,4 +371,4 @@ def preflight(model: dict, rules: dict, cfg, sel, orig_drc, cfg_findings, *, pcb
     return out
 
 
-__all__ = ["preflight", "preexisting_drc", "connection_count", "outline_rings"]
+__all__ = ["preflight", "preexisting_drc", "connection_count", "outline_rings", "via_setup_missing"]
