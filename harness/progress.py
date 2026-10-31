@@ -70,10 +70,17 @@ def _render_progress_m2(task: str, *, board: str, date: str | None, out_dir: Pat
         rt = result.get("route") or {}
         r, o = result["routed_all"], result["orig_all"]
         drc = result["routed_drc"]
+        zs = result.get("zero_slack") or {}
+        zs_names = [w["net"] for w in zs.get("wires") or []]
+        zs_text = f"zero slack {len(zs_names)}"
+        if zs_names:
+            zs_text += f" ({', '.join(zs_names)})"
+        elif zs.get("status") not in (None, "kept", "not attempted"):
+            zs_text += f" ({zs['status']})"
         line1 = (f"{task}: {rt.get('routed', 0)}/{rt.get('connections', 0)} connections, "
                  f"{rt.get('nets_routed', 0)}/{rt.get('nets', 0)} nets, "
                  f"partial {rt.get('partial', 0)}, failed {rt.get('failed', 0)}, "
-                 f"arcs {r['arcs']}")
+                 f"arcs {r['arcs']}, {zs_text}, iters {rt.get('iterations')}")
         line2 = (f"DRC routing {drc['routing_new']}, "
                  f"unconnected {drc['incomplete']['unconnected_items']}, "
                  f"outside pads {rt.get('outside_mm') or 0.0:.1f} vs hand "

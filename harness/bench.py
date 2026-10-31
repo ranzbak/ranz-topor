@@ -74,7 +74,14 @@ def _route_summary(report: dict | None) -> dict | None:
         "iterations": report.get("iterations"),
         "timed_out": report.get("timed_out"),
         "clinches": report.get("clinches"),
+        "zero_slack_wires": [{"id": w.get("conn"), "net": w.get("name")}
+                             for w in (report.get("zero_slack_wires") or [])],
+        "zero_slack": report.get("zero_slack"),
     }
+
+
+def _zero_slack_names(report: dict | None) -> list[str]:
+    return [str(w.get("name")) for w in ((report or {}).get("zero_slack_wires") or [])]
 
 
 def _smooth_summary(report: dict | None) -> dict | None:
@@ -148,6 +155,10 @@ def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path) -> s
                     f"{rt['nets_routed']}/{rt['nets']} nets, partial {rt['partial']}, "
                     f"failed {rt['failed']}, outside pads {rt['outside_mm']} "
                     f"(hand {rt['hand_outside_mm']}), iters {rt['iterations']}, clinches {u}")
+        zs = result.get("zero_slack") or {}
+        names = [w["net"] for w in zs.get("wires") or []]
+        head.append(f"  zero slack: {zs.get('status')}, {len(names)} wire(s)"
+                    + (f" ({', '.join(names)})" if names else ""))
     partial = (result.get("router_report") or {}).get("partial") or 0
     if partial > 0:
         head.append(f"  partial={partial}")
@@ -220,12 +231,18 @@ def run_bench(
     shutil.copyfile(cp.pcb, pre_route)
     pinned: dict = dict(options.get("pinned") or {})
     spots: list = list(options.get("drc_spots") or [])
+    # Zero-slack retry judge (R6): a topor result that used a zero-slack corridor is kept only
+    # when KiCad DRC reports no new routing violation and nothing unconnected; otherwise the
+    # board is restored and the router runs again with the retry off.
+    zero_slack: dict = {"status": "not attempted", "wires": []}
+    zs_off = options.get("zero_slack_retry") is False
     rounds, router_s = 0, 0.0
     while True:
         rounds += 1
         t_route = time.monotonic()
         opts = {**options, "threads": threads, **({"pinned": pinned} if pinned else {}),
-                **({"drc_spots": spots} if spots else {})}
+                **({"drc_spots": spots} if spots else {}),
+                **({"zero_slack_retry": False} if zs_off else {})}
         routed = router(model, opts) if router is not None else []
         router_s += time.monotonic() - t_route
         if isinstance(routed, dict):
@@ -243,6 +260,22 @@ def run_bench(
         if router_report is None or rounds > loop_cap:
             break
         if "connections" in router_report:  # topor: DRC spots for the offending nets
+            zs_names = _zero_slack_names(router_report)
+            if zs_names and not zs_off:
+                wires = [{"id": w.get("conn"), "net": w.get("name")}
+                         for w in router_report.get("zero_slack_wires") or []]
+                bad = (classify(routed_drc, base_drc)["routing_new"] > 0
+                       or len(routed_drc.unconnected) > 0)
+                if bad:
+                    zero_slack = {"status": "rejected by DRC", "wires": wires}
+                    zs_off = True
+                    shutil.copyfile(pre_route, cp.pcb)
+                    b = load_board(cp)
+                    continue
+                zero_slack = {"status": "kept", "wires": wires}
+            elif zero_slack["status"] == "not attempted" and not zs_off:
+                zero_slack = {"status": str(router_report.get("zero_slack") or "not run"),
+                              "wires": []}
             have = {(sp["layer"], tuple(sp["at"])) for sp in spots}
             fresh = []
             for sp in drc_spots(new_routing(routed_drc, base_drc), created, model, reach,
@@ -298,6 +331,7 @@ def run_bench(
         "unchanged_items": unchanged,
         "replaced": replaced,
         "drc_loop": {"rounds": rounds, "pinned": pinned, "spots": spots},
+        "zero_slack": zero_slack,
         "teardrops_removed": teardrops_removed,
         "router_report": router_report,
         "smooth": _smooth_summary(router_report),

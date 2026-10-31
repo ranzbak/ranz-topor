@@ -43,6 +43,7 @@ enum Placement {
 
 /// Uniform grid keyed by `floor(coord / cell)`. An item is stored in every cell its box covers;
 /// items covering more than `MAX_ITEM_CELLS` cells live in a side list instead.
+#[derive(Clone)]
 pub struct Grid<T: Copy + Eq + Hash> {
     cell: f64,
     cells: HashMap<(i64, i64), Vec<T>>,

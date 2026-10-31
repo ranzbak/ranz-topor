@@ -2,10 +2,10 @@ use std::collections::HashSet;
 use topor_engine::cdt::Crossing;
 use topor_engine::check::Checker;
 use topor_engine::geom::quant::TrackPrim;
-use topor_engine::geom::Vec2;
+use topor_engine::geom::{dequantise, Vec2};
 use topor_engine::model::{BoardModel, ExistingCopper, Item, Options};
 use topor_engine::obstacle::ObstacleSet;
-use topor_engine::route::{route, wire_stats, RouteResult};
+use topor_engine::route::{route, wire_stats, RouteResult, STALL_ITERS};
 use topor_engine::sketch::{
     build_layer_cdt, sketch_from_crossings, unanchored_bends, ConstraintSet,
 };
@@ -412,4 +412,160 @@ fn route_stuck_connection_stops_early() {
         "{:?}",
         r.warnings
     );
+}
+
+/// R6 zero-slack retry board. Net 1 (A1 -> A2) along the top edge; the foreign pad C (net 3)
+/// sits exactly `r + clr + w + edge_clr` = 1.45 mm below the edge: the corridor above it has
+/// zero slack (feasible at margin 0, 10 µm short at ε = 5 µm). A locked net-3 track from C
+/// down to C2 walls the board, leaving the long way round below C2 (0.34 mm slack). Pad E
+/// (net 4) bends the corridor path on the A2 side with room to spare (a bend that keeps ε).
+fn zero_slack_model() -> BoardModel {
+    model(
+        &[
+            P("A", "1", 1, 5.0, 1.45, 1.0, "[0]"),
+            P("A", "2", 1, 35.0, 1.45, 1.0, "[0]"),
+            P("C", "1", 3, 20.0, 1.45, 1.0, "[0]"),
+            P("C", "2", 3, 20.0, 14.0, 1.0, "[0]"),
+            P("E", "1", 4, 30.0, 1.9, 1.0, "[0]"),
+        ],
+        r#""kept": [ { "uuid": "wall", "net": 3, "layer": 0, "width": 250000, "locked": true,
+            "prim": { "kind": "seg", "a": [20000000, -1450000], "b": [20000000, -14000000] } } ],"#,
+    )
+}
+
+/// Largest KiCad-frame y (nm) reached by the items (arcs by their rebuilt geometry; the board
+/// spans y in [-40, 0] mm, so this is the point nearest the y = 0 edge).
+fn max_y(r: &RouteResult) -> f64 {
+    r.items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Track(t) => Some(dequantise(&t.prim).bbox().max.y),
+            _ => None,
+        })
+        .fold(f64::MIN, f64::max)
+}
+
+/// R6: the retry routes net 1 through the zero-slack corridor above C with margin 0 against
+/// that corridor only (C and the board edge); the bend around E keeps ε. Retry off: the long
+/// way round, no zero-slack wire.
+#[test]
+fn zero_slack_retry_uses_margin_zero_on_corridor_only() {
+    let m = zero_slack_model();
+    let r = route(&m, &opts());
+    assert_eq!(r.routed, 1, "{:?}", r.connections);
+    assert_eq!(r.zero_slack, "kept", "{:?}", r.warnings);
+    assert_eq!(r.zero_slack_wires.len(), 1);
+    assert_eq!(r.zero_slack_wires[0].net, 1);
+    assert!(r.connections[0].zero_slack);
+    // Through the corridor: the centreline reaches the edge band, 0.5 + 0.125 = 0.625 mm
+    // from the y = 0 edge.
+    assert!((max_y(&r) + 625_000.0).abs() <= 2.0, "max y {}", max_y(&r));
+    assert!(r.connections[0].length_nm < 40_000_000, "{}", r.connections[0].length_nm);
+    // Design clearance holds to the board file's resolution: an exact tangency rebuilt from
+    // integer-nm points may read a nanometre short (KiCad's own DRCEpsilon is 500 nm).
+    let c0 = Options {
+        margin_nm: 0,
+        ..Options::default()
+    };
+    for v in &Checker::new(&m, &c0).check_items(&r.items).violations {
+        assert!(v.gap + 1 >= v.required, "{v:?}");
+        assert!(v.against == "pad:C:1" || v.against.starts_with("edge"), "{v:?}");
+    }
+    // Margin 0 on the corridor only: at a margin of 4 µm only C and the edge are too close,
+    // the bend around E (and everything else) still has its ε slack.
+    let c4 = Options {
+        margin_nm: 4_000,
+        ..Options::default()
+    };
+    let rep = Checker::new(&m, &c4).check_items(&r.items);
+    let mut against: Vec<&str> = rep.violations.iter().map(|v| v.against.as_str()).collect();
+    against.sort_unstable();
+    against.dedup();
+    assert!(against.contains(&"pad:C:1"), "{against:?}");
+    assert!(against.iter().any(|a| a.starts_with("edge")), "{against:?}");
+    assert!(!against.contains(&"pad:E:1"), "{against:?}");
+    assert_eq!(against.len(), 2, "{against:?}");
+
+    let off = route(
+        &m,
+        &Options {
+            zero_slack_retry: false,
+            ..opts()
+        },
+    );
+    assert_eq!(off.routed, 1, "{:?}", off.connections);
+    assert_eq!(off.zero_slack, "off");
+    assert!(off.zero_slack_wires.is_empty());
+    assert!(!off.connections[0].zero_slack);
+    assert!(max_y(&off) < -1_000_000.0, "max y {}", max_y(&off));
+    assert!(off.connections[0].length_nm > r.connections[0].length_nm);
+    clean(&m, &off);
+    // The retry pass only adds to a finished negotiation: same iterations either way.
+    assert_eq!(off.iterations, r.iterations);
+    let (a, b) = (route(&m, &opts()), route(&m, &opts()));
+    assert_eq!(json_no_runtime(&a), json_no_runtime(&b));
+}
+
+/// Retry on, no sub-ε corridor to gain from: the result is the plain negotiation's.
+#[test]
+fn zero_slack_retry_without_candidate_is_identity() {
+    let m = four_nets();
+    let on = route(&m, &opts());
+    let off = route(
+        &m,
+        &Options {
+            zero_slack_retry: false,
+            ..opts()
+        },
+    );
+    assert_eq!(on.zero_slack, "no candidate", "{}", on.zero_slack);
+    assert_eq!(off.zero_slack, "off");
+    assert_eq!(on.items, off.items);
+    assert_eq!(on.length_outside_pads_nm, off.length_outside_pads_nm);
+    assert_eq!(on.iterations, off.iterations);
+}
+
+/// The eprom-to-kernal benchmark board after `harness.rip --rip all` (model JSON of the M2
+/// bench, F.Cu, 27 connections / 25 nets; hand outside-pad length 76.598 mm).
+fn eprom_ripped() -> BoardModel {
+    BoardModel::from_json(include_str!("fixtures/eprom-to-kernal-ripped.json")).unwrap()
+}
+
+/// R6 on the real board. Stall stop: the negotiation oscillates between 26/27 and 27/27 after
+/// its best (iteration 8) and used to run to the cap of 50; now it stops after `STALL_ITERS`
+/// iterations without a better best. Zero-slack retry: +5V U2.28 -> J1.2 takes the hand's
+/// corridor along the top edge (margin 0 against J1.3 / J1.4 and the edge only), A13 is
+/// re-routed into its short class, and the outside-pad length drops below the hand's.
+/// Deterministic: two runs give byte-identical reports.
+#[test]
+fn eprom_ripped_stalls_and_zero_slack_retry_passes_length_gate() {
+    let m = eprom_ripped();
+    let r = route(&m, &opts());
+    assert_eq!(r.routed, 27, "{:?}", r.failed);
+    assert_eq!(r.nets_routed, 25);
+    assert!(!r.converged);
+    assert!(
+        r.warnings.iter().any(|w| w.starts_with("stalled:")),
+        "{:?}",
+        r.warnings
+    );
+    assert!(r.iterations < 50 && r.iterations >= STALL_ITERS, "{}", r.iterations);
+    assert_eq!(r.zero_slack, "kept");
+    let names: Vec<&str> = r.zero_slack_wires.iter().map(|w| w.name.as_str()).collect();
+    assert_eq!(names, vec!["+5V"]);
+    assert!(r.length_outside_pads_nm < 76_598_000, "{}", r.length_outside_pads_nm);
+    let again = route(&m, &opts());
+    assert_eq!(json_no_runtime(&r), json_no_runtime(&again));
+    // Retry off: 27/27 as well, but the long +5V / A13 pair and no zero-slack wire.
+    let off = route(
+        &m,
+        &Options {
+            zero_slack_retry: false,
+            ..opts()
+        },
+    );
+    assert_eq!(off.routed, 27);
+    assert!(off.zero_slack_wires.is_empty());
+    assert_eq!(off.iterations, r.iterations);
+    assert!(off.length_outside_pads_nm > 76_598_000, "{}", off.length_outside_pads_nm);
 }

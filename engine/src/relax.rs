@@ -9,7 +9,9 @@ use crate::geom::{Aabb, Grid, Prim, Vec2};
 use crate::model::Options;
 use crate::obstacle::{LayerObstacles, ObsKind, ObstacleSet};
 use crate::sketch::Sketch;
-use crate::taut::{arc_members, tauten, AnchorRef, Chain, DynObstacle, Env, TautError};
+use crate::taut::{
+    arc_members, corridor_obstacles, tauten, AnchorRef, Chain, DynObstacle, Env, TautError,
+};
 use crate::wires::Wire;
 use std::collections::{BTreeSet, HashMap};
 use std::time::Instant;
@@ -26,6 +28,42 @@ fn pair_clearance(obs: &ObstacleSet, wires: &[Wire], i: usize, j: usize) -> f64 
     }
     let ci = obs.clearance(wi.net, ObsKind::Track, wi.net, 0.0);
     obs.clearance(wj.net, ObsKind::Track, wi.net, ci) + obs.margin()
+}
+
+/// Zero-slack retry (R6): wire `wire` keeps margin 0 (instead of ε) against the listed static
+/// obstacles of its layer, `None` = against every anchor / wall. Clearances to other wires keep ε.
+#[derive(Clone, Debug, Default)]
+pub struct ZeroSlack {
+    pub wire: usize,
+    pub anchors: Option<Vec<usize>>,
+    pub walls: Option<Vec<usize>>,
+}
+
+impl ZeroSlack {
+    fn anchor(&self, wire: usize, a: usize) -> bool {
+        wire == self.wire && self.anchors.as_ref().is_none_or(|v| v.binary_search(&a).is_ok())
+    }
+
+    fn wall(&self, wire: usize, w: usize) -> bool {
+        wire == self.wire && self.walls.as_ref().is_none_or(|v| v.binary_search(&w).is_ok())
+    }
+}
+
+/// `ρ_anchor` of `wire` at anchor `a`: margin 0 where the zero-slack corridor applies.
+fn rho_anchor_zs(
+    obs: &ObstacleSet,
+    wires: &[Wire],
+    wire: usize,
+    a: usize,
+    zs: Option<&ZeroSlack>,
+) -> f64 {
+    let w = &wires[wire];
+    let r = obs.rho_anchor(w.layer, a, w.net, w.width as f64);
+    if zs.is_some_and(|z| z.anchor(wire, a)) {
+        r - obs.margin()
+    } else {
+        r
+    }
 }
 
 /// Stack state of one layer: nesting order (from the sketch) and current membership.
@@ -56,7 +94,18 @@ impl Stacks {
     /// Stack radius of `wire` at `a` (21 §5), counting only current members nested inside it.
     /// Unlisted wires are positioned after all listed ones, by id.
     pub fn radius(&self, a: AnchorRef, wire: usize, wires: &[Wire], obs: &ObstacleSet) -> f64 {
-        let layer = wires[wire].layer;
+        self.radius_zs(a, wire, wires, obs, None)
+    }
+
+    /// [`Stacks::radius`] with the zero-slack corridor of `zs` applied to its wire.
+    pub fn radius_zs(
+        &self,
+        a: AnchorRef,
+        wire: usize,
+        wires: &[Wire],
+        obs: &ObstacleSet,
+        zs: Option<&ZeroSlack>,
+    ) -> f64 {
         let listed = self.order.get(&a).map(Vec::as_slice).unwrap_or(&[]);
         let pos = |w: usize| -> (usize, usize) {
             match listed.iter().position(|&x| x == w) {
@@ -64,7 +113,7 @@ impl Stacks {
                 None => (listed.len(), w),
             }
         };
-        let rho = |w: usize| obs.rho_anchor(layer, a.anchor, wires[w].net, wires[w].width as f64);
+        let rho = |w: usize| rho_anchor_zs(obs, wires, w, a.anchor, zs);
         let mine = pos(wire);
         let mut inner: Vec<usize> = self
             .members
@@ -157,6 +206,7 @@ struct WireEnv<'a> {
     obs: &'a ObstacleSet,
     stacks: &'a Stacks,
     dynl: &'a DynLayer,
+    zs: Option<&'a ZeroSlack>,
 }
 
 impl Env for WireEnv<'_> {
@@ -164,12 +214,16 @@ impl Env for WireEnv<'_> {
         self.obs.layer(self.wires[self.k].layer)
     }
     fn rho_anchor(&self, a: usize) -> f64 {
-        let w = &self.wires[self.k];
-        self.obs.rho_anchor(w.layer, a, w.net, w.width as f64)
+        rho_anchor_zs(self.obs, self.wires, self.k, a, self.zs)
     }
     fn rho_wall(&self, i: usize) -> f64 {
         let w = &self.wires[self.k];
-        self.obs.rho_wall(w.layer, i, w.net, w.width as f64)
+        let r = self.obs.rho_wall(w.layer, i, w.net, w.width as f64);
+        if self.zs.is_some_and(|z| z.wall(self.k, i)) {
+            r - self.obs.margin()
+        } else {
+            r
+        }
     }
     fn exempt_anchor(&self, a: usize) -> bool {
         let o = &self.layer().anchors[a];
@@ -195,7 +249,8 @@ impl Env for WireEnv<'_> {
             + 0.5 * d.width
     }
     fn stack_radius(&self, a: AnchorRef) -> f64 {
-        self.stacks.radius(a, self.k, self.wires, self.obs)
+        self.stacks
+            .radius_zs(a, self.k, self.wires, self.obs, self.zs)
     }
     fn query_grow(&self) -> f64 {
         self.obs.query_grow()
@@ -264,6 +319,43 @@ pub fn relax(
     opts: &Options,
     deadline: Instant,
 ) -> RelaxResult {
+    relax_zs(wires, sketches, obs, orders, opts, deadline, None)
+}
+
+/// Static obstacles pinching `chain` (of wire `k`, tautened under `zs`) within `band`: see
+/// [`corridor_obstacles`].
+pub fn corridor_static(
+    wires: &[Wire],
+    k: usize,
+    chain: &Chain,
+    obs: &ObstacleSet,
+    zs: Option<&ZeroSlack>,
+    band: f64,
+) -> (Vec<usize>, Vec<usize>) {
+    let stacks = Stacks::new(HashMap::new());
+    let dynl = DynLayer::new(obs.query_grow());
+    let env = WireEnv {
+        k,
+        wires,
+        obs,
+        stacks: &stacks,
+        dynl: &dynl,
+        zs,
+    };
+    corridor_obstacles(chain, &env, band)
+}
+
+/// [`relax`] with one wire's zero-slack corridor (R6): that wire is tautened at margin 0 against
+/// the obstacles `zs` names; everything else keeps ε.
+pub fn relax_zs(
+    wires: &[Wire],
+    sketches: &[Sketch],
+    obs: &ObstacleSet,
+    orders: &HashMap<u32, HashMap<AnchorRef, Vec<usize>>>,
+    opts: &Options,
+    deadline: Instant,
+    zs: Option<&ZeroSlack>,
+) -> RelaxResult {
     let n = wires.len();
     let mut chains: Vec<Result<Chain, TautError>> = (0..n)
         .map(|_| Err(TautError::Sleeve("not relaxed".into())))
@@ -307,6 +399,7 @@ pub fn relax(
                     obs,
                     stacks: &stacks[&w.layer],
                     dynl: &*dynl,
+                    zs,
                 };
                 match tauten(w.start.at(), w.goal.at(), seqs[k].clone(), &env) {
                     Ok(c) => {

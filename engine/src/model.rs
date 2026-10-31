@@ -597,6 +597,10 @@ pub struct Options {
     pub pinned: BTreeMap<String, String>,
     /// Router: per-net circular obstacles from the harness DRC loop.
     pub drc_spots: Vec<DrcSpot>,
+    /// Router (R6): after negotiation, one retry pass in which a connection may take a corridor
+    /// that is pinched below the margin ε (but not below the rules) with margin 0 against that
+    /// corridor only; kept when it shortens the routing. The harness DRC is the final judge.
+    pub zero_slack_retry: bool,
 }
 
 impl Default for Options {
@@ -615,6 +619,7 @@ impl Default for Options {
             skip_self_check: false,
             pinned: BTreeMap::new(),
             drc_spots: Vec::new(),
+            zero_slack_retry: true,
         }
     }
 }

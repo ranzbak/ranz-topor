@@ -240,6 +240,88 @@ pub fn arc_members(chain: &Chain, env: &dyn Env) -> Vec<(usize, usize)> {
     out
 }
 
+/// Zero-slack corridor of a chain tautened at margin 0 (R6): the static obstacles that pinch
+/// it, as sorted, deduplicated `(anchors, walls)`. A primitive is *tight* to an obstacle when it
+/// runs within `band` (= ε) of its inflation. Tightness by construction is ignored: an arc is
+/// always tight to the anchor it wraps, and a tangent segment, at its ends, to the anchors of
+/// its neighbouring arcs and to whatever those arcs are tight to. What remains is a pinch: an
+/// arc tight to a further obstacle (the wrapped anchor and that obstacle), or a segment tight
+/// to an obstacle of its own (that obstacle and the segment's neighbouring anchors, which it
+/// cannot move away from). Exempt obstacles are skipped.
+pub fn corridor_obstacles(chain: &Chain, env: &dyn Env, band: f64) -> (Vec<usize>, Vec<usize>) {
+    let l = env.layer();
+    let n = chain.prims.len();
+    let wrapped: Vec<Option<usize>> = {
+        let arcs = arc_members(chain, env);
+        (0..n)
+            .map(|pi| {
+                arcs.iter()
+                    .find(|&&(p, _)| p == pi)
+                    .map(|&(_, s)| chain.seq[s].anchor)
+            })
+            .collect()
+    };
+    let tight: Vec<(Vec<usize>, Vec<usize>)> = chain
+        .prims
+        .iter()
+        .map(|prim| {
+            let bb = prim.bbox().grow(env.query_grow() + band);
+            let a: Vec<usize> = query_anchors(l, bb)
+                .into_iter()
+                .filter(|&a| {
+                    !env.exempt_anchor(a)
+                        && point_prim(l.anchors[a].c, prim) < env.rho_anchor(a) + band
+                })
+                .collect();
+            let w: Vec<usize> = query_walls(l, bb)
+                .into_iter()
+                .filter(|&w| {
+                    !env.exempt_wall(w)
+                        && core_prim_dist(&l.walls[w].core, prim) < env.rho_wall(w) + band
+                })
+                .collect();
+            (a, w)
+        })
+        .collect();
+    let (mut anchors, mut walls) = (Vec::new(), Vec::new());
+    for (pi, prim) in chain.prims.iter().enumerate() {
+        let (ta, tw) = &tight[pi];
+        // Tight by construction: the wrapped anchor of an arc; for a segment, the neighbouring
+        // arcs' anchors and everything those arcs are tight to.
+        let (mut own_a, mut own_w): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
+        let neighbours: Vec<usize> = match prim {
+            Prim::Arc(_) => vec![pi],
+            Prim::Seg(_) => [pi.checked_sub(1), (pi + 1 < n).then_some(pi + 1)]
+                .into_iter()
+                .flatten()
+                .filter(|&q| matches!(chain.prims[q], Prim::Arc(_)))
+                .collect(),
+        };
+        let mut adjacent: Vec<usize> = Vec::new();
+        for &q in &neighbours {
+            adjacent.extend(wrapped[q]);
+            if matches!(prim, Prim::Seg(_)) {
+                own_a.extend(tight[q].0.iter().copied());
+                own_w.extend(tight[q].1.iter().copied());
+            }
+        }
+        own_a.extend(adjacent.iter().copied());
+        let foreign_a: Vec<usize> = ta.iter().copied().filter(|a| !own_a.contains(a)).collect();
+        let foreign_w: Vec<usize> = tw.iter().copied().filter(|w| !own_w.contains(w)).collect();
+        if foreign_a.is_empty() && foreign_w.is_empty() {
+            continue;
+        }
+        anchors.extend(foreign_a);
+        anchors.extend(adjacent.iter().copied().filter(|a| ta.contains(a)));
+        walls.extend(foreign_w);
+    }
+    anchors.sort_unstable();
+    anchors.dedup();
+    walls.sort_unstable();
+    walls.dedup();
+    (anchors, walls)
+}
+
 // ---------------------------------------------------------------------------------------------
 // obstacle queries
 

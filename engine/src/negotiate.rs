@@ -135,6 +135,7 @@ impl Negotiator {
                 present_overuse: PRESENT_OVERUSE,
                 expansion_cap: cap,
                 deadline,
+                eps: None,
             };
             match search(g, obs, c, s, t, &params) {
                 SearchOutcome::Found(p) => {

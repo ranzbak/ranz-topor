@@ -105,6 +105,7 @@ struct PathRec {
 /// `(crossings (edge, slot), faces, (start, goal))` of an inserted path.
 pub type PathView<'a> = (&'a [(usize, usize)], &'a [usize], (usize, usize));
 
+#[derive(Clone)]
 pub struct RouteGraph {
     pub verts: Vec<VertexInfo>,
     pub edges: Vec<GEdge>,
@@ -309,8 +310,13 @@ impl RouteGraph {
 
     /// A further connection of width `w`, clearance `c` still fits edge `e` (10 §4).
     pub fn fits(&self, e: usize, w: f64, c: f64) -> bool {
+        self.fits_at(e, w, c, self.rules.eps)
+    }
+
+    /// [`RouteGraph::fits`] with the build margin `eps` instead of the graph's (the zero-slack
+    /// retry tests a corridor at margin 0).
+    pub fn fits_at(&self, e: usize, w: f64, c: f64, eps: f64) -> bool {
         let g = &self.edges[e];
-        let eps = self.rules.eps;
         let used: f64 = g.cross.iter().map(|x| x.width + eps + x.clr.max(c)).sum();
         used + w + eps + 2.0 * c.max(g.c_e) <= g.cap
     }

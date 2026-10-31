@@ -11,6 +11,12 @@
 //! Caps: iterations `pathfinder_iter_cap`, self-check rounds <= routed connections + 1, the wall
 //! clock is checked before every search (negotiate), relax call and self-check round. Output is
 //! ordered by connection id; no `HashMap` iteration reaches it.
+//!
+//! Stall stop: the loop also ends after [`STALL_ITERS`] iterations without a better best
+//! (by `(routed, Σlen)`). Zero-slack retry (R6, `Options::zero_slack_retry`): after the loop,
+//! [`zero_slack_pass`] lets one connection take a corridor pinched below ε with margin 0 against
+//! that corridor only, re-routes the detoured connections once and keeps the result when it
+//! routes at least as much with a shorter outside-pad length; the harness DRC is the final judge.
 
 use crate::cdt::Crossing;
 use crate::check::Checker;
@@ -19,10 +25,15 @@ use crate::geom::quant::{quantise_chain, round_nm, TrackPrim};
 use crate::geom::{dequantise, Prim, Skeleton, Vec2};
 use crate::graph::{GraphRules, RouteGraph, TerminalInfo};
 use crate::model::{flip_track, via_layers, BoardModel, ExistingCopper, Item, Options, TrackItem};
-use crate::negotiate::{detect_clinches, overused_conns, BlockInfo, ClinchReport, Negotiator};
-use crate::obstacle::{ObstacleSet, TerminalObstacle};
-use crate::relax::relax;
-use crate::search::SlotPath;
+use crate::negotiate::{
+    detect_clinches, overused_conns, BlockInfo, ClinchReport, Negotiator, DETOUR_FACTOR,
+    PRESENT_OVERUSE,
+};
+use crate::obstacle::{LayerObstacles, ObstacleSet, TerminalObstacle};
+use crate::relax::{corridor_static, relax, relax_zs, ZeroSlack};
+use crate::search::{
+    default_expansion_cap, search, tier_weight, SearchOutcome, SearchParams, SlotPath,
+};
 use crate::sketch::{
     build_layer_cdt, sketch_from_crossings, stack_order, unanchored_bends, AnchorRef,
     ConstraintSet, LayerSketch, Sketch,
@@ -65,6 +76,17 @@ pub struct ConnReport {
     pub g1_angle_deg: Option<f64>,
     /// PathFinder iteration the report comes from.
     pub iteration: u32,
+    /// Routed by the zero-slack retry with margin 0 against its corridor (R6).
+    pub zero_slack: bool,
+}
+
+/// A connection the zero-slack retry routed with margin 0 against its corridor (R6).
+#[derive(Clone, Debug, Serialize)]
+pub struct ZeroSlackWire {
+    /// Connection id (`ConnReport::id`).
+    pub conn: usize,
+    pub net: i32,
+    pub name: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -104,6 +126,11 @@ pub struct RouteResult {
     pub runtime_s: f64,
     pub threads_used: usize,
     pub warnings: Vec<String>,
+    /// Zero-slack retry (R6) connections, by id.
+    pub zero_slack_wires: Vec<ZeroSlackWire>,
+    /// Outcome of the zero-slack retry: `off`, `kept`, `no candidate`, `no length gain`,
+    /// `infeasible: …`, `skipped: deadline` or `not run`.
+    pub zero_slack: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -215,6 +242,17 @@ struct Metrized {
     relax_iterations: u32,
     rounds: u32,
     timed_out: bool,
+    /// Zero-slack identification pass (`ZsSpec` without corridor): the static obstacles that
+    /// pinch the relaxed wire, `(anchors, walls)` (`corridor_obstacles`).
+    zs_corridor: Option<(Vec<usize>, Vec<usize>)>,
+}
+
+/// Zero-slack corridor of live connection `live` for [`metrize_zs`]: margin 0 against the listed
+/// anchors / walls of the layer obstacles, `None` = against every obstacle (identification).
+struct ZsSpec {
+    live: usize,
+    anchors: Option<Vec<usize>>,
+    walls: Option<Vec<usize>>,
 }
 
 /// Crossings of the live path of connection `c` in the direction of travel.
@@ -249,11 +287,19 @@ fn path_crossings(g: &RouteGraph, c: usize) -> Option<Vec<Crossing>> {
 
 /// Sketch, relax, quantise and self-check the connections `routed` (live indices) of `g`.
 fn metrize(cx: &Ctx, g: &RouteGraph, routed: &[usize]) -> Metrized {
+    metrize_zs(cx, g, routed, None)
+}
+
+/// [`metrize`] with one connection's zero-slack corridor (R6): that wire is relaxed at margin 0
+/// against the corridor and its self-check tolerates [`ZS_QUANT_TOL_NM`] (integer-nm rounding of
+/// an exact tangency); every other wire is judged as in [`metrize`].
+fn metrize_zs(cx: &Ctx, g: &RouteGraph, routed: &[usize], zs: Option<&ZsSpec>) -> Metrized {
     let mut out = Metrized {
         res: Vec::new(),
         relax_iterations: 0,
         rounds: 0,
         timed_out: false,
+        zs_corridor: None,
     };
     let mut wires: Vec<Wire> = Vec::new();
     let mut sketches: Vec<Sketch> = Vec::new();
@@ -306,12 +352,34 @@ fn metrize(cx: &Ctx, g: &RouteGraph, routed: &[usize]) -> Metrized {
         out.timed_out = true;
         return out;
     }
-    let r = relax(&wires, &sketches, cx.obs, &orders, cx.opts, cx.deadline);
+    let zsw: Option<ZeroSlack> = zs.and_then(|z| {
+        Some(ZeroSlack {
+            wire: live_of.iter().position(|&l| l == z.live)?,
+            anchors: z.anchors.clone(),
+            walls: z.walls.clone(),
+        })
+    });
+    let r = relax_zs(
+        &wires,
+        &sketches,
+        cx.obs,
+        &orders,
+        cx.opts,
+        cx.deadline,
+        zsw.as_ref(),
+    );
     out.relax_iterations = r.iterations;
     if r.timed_out {
         out.timed_out = true;
         return out;
     }
+    if let Some(z) = zsw.as_ref().filter(|z| z.anchors.is_none() && z.walls.is_none()) {
+        if let Some(Ok(ch)) = r.chains.get(z.wire) {
+            let band = cx.obs.margin();
+            out.zs_corridor = Some(corridor_static(&wires, z.wire, ch, cx.obs, Some(z), band));
+        }
+    }
+    let zs_wire = zsw.as_ref().map(|z| z.wire);
     let mut results: Vec<Option<Res>> = vec![None; n];
     let mut emit: Vec<Vec<TrackItem>> = vec![Vec::new(); n];
     let mut chains = Vec::with_capacity(n);
@@ -371,8 +439,14 @@ fn metrize(cx: &Ctx, g: &RouteGraph, routed: &[usize]) -> Metrized {
         let mut any = false;
         for v in &rep.violations {
             let k = owner[v.item];
+            if zs_wire == Some(k) && v.gap + ZS_QUANT_TOL_NM >= v.required {
+                continue;
+            }
             if results[k].is_none() {
-                results[k] = Some(fail(format!("self-check: {}", v.against)));
+                results[k] = Some(fail(format!(
+                    "self-check: {} (gap {} < {} nm)",
+                    v.against, v.gap, v.required
+                )));
                 any = true;
             }
         }
@@ -516,6 +590,19 @@ struct Blk {
 
 /// Consecutive unchanged iterations (no overuse, no rip-up) after which `route` gives up.
 const STUCK_REPEATS: u32 = 3;
+/// Consecutive iterations without a better best (by `(routed, Σlen)`) after which `route` stops
+/// (stall stop, R6).
+pub const STALL_ITERS: u32 = 8;
+/// Zero-slack retry: smallest estimated-length gain (nm) that makes a connection a candidate.
+const ZS_GAIN_MIN_NM: f64 = 100_000.0;
+/// Zero-slack retry: candidates tried (by descending gain) before the pass gives up.
+const ZS_MAX_CANDIDATES: usize = 4;
+/// Zero-slack retry outcome when the wall clock runs out during the pass.
+const ZS_DEADLINE: &str = "skipped: deadline";
+/// Zero-slack retry: self-check tolerance of the zero-slack wire, nm. An exact tangency rebuilt
+/// from integer-nm points (arc centre from three rounded points) is short by under a nanometre;
+/// KiCad's own `DRCEpsilon` is 500 nm. The board file cannot express less than 1 nm.
+const ZS_QUANT_TOL_NM: i64 = 1;
 
 /// Uniform samples per portal edge of the geometric block probe.
 const PROBE_SAMPLES: usize = 16;
@@ -871,6 +958,8 @@ fn partial_pass(
 struct Snap {
     routed: usize,
     len: f64,
+    /// Σ outside-pad length of the routed connections.
+    out: f64,
     iteration: u32,
     res: Vec<Res>,
     overuse_edges: usize,
@@ -879,6 +968,268 @@ struct Snap {
     rounds: u32,
     blocked: BTreeMap<usize, BlockInfo>,
     paths: Vec<Option<SlotPath>>,
+    /// The routing graph as it stood in this iteration (the retry pass starts from it).
+    g: RouteGraph,
+}
+
+/// `(crossings, faces, (start, goal))` as `insert_path` takes them.
+type PathArgs = (Vec<(usize, usize)>, Vec<usize>, (usize, usize));
+
+/// Path of `conn` in `g` as `insert_path` arguments with the slots converted from the current
+/// frame to the pre-insert frame (an edge crossed twice by the same path counts its earlier own
+/// crossing out).
+fn take_path(g: &RouteGraph, conn: usize) -> Option<PathArgs> {
+    let (cross, faces, st) = g.path_of(conn)?;
+    let mut conv = Vec::with_capacity(cross.len());
+    for (k, &(e, s)) in cross.iter().enumerate() {
+        let before = cross[..k]
+            .iter()
+            .filter(|&&(e2, s2)| e2 == e && s2 < s)
+            .count();
+        conv.push((e, s - before));
+    }
+    Some((conv, faces.to_vec(), st))
+}
+
+/// `(routed, Σlen, Σoutside)` of a result vector.
+fn tally(res: &[Res]) -> (usize, f64, f64) {
+    res.iter().fold((0usize, 0.0f64, 0.0f64), |(n, l, o), r| match r {
+        Res::Ok(k) => (n + 1, l + k.len, o + k.out),
+        _ => (n, l, o),
+    })
+}
+
+/// Zero-slack retry (R6), one pass from the best iteration's graph. The detoured connections
+/// (`est_len > DETOUR_FACTOR × straight`) leave the graph; every routed connection is searched
+/// once at margin 0 (empty history). The candidates (estimated gain > [`ZS_GAIN_MIN_NM`]) are
+/// tried by descending gain (ties: lowest id), at most [`ZS_MAX_CANDIDATES`] of them, each in a
+/// fresh copy of the best graph ([`zero_slack_attempt`]); the first that routes at least as much
+/// with a shorter outside-pad length wins. Returns the new snapshot and the zero-slack
+/// connections (empty when the candidate's new path turned out feasible at ε); `Err(reason)`
+/// (the last attempt's) leaves the best iteration unchanged.
+fn zero_slack_pass(
+    cx: &Ctx,
+    best: &Snap,
+    verts: &[(usize, usize)],
+    layer_obs: &LayerObstacles,
+) -> Result<(Snap, Vec<usize>), String> {
+    let live = cx.conns;
+    let m = live.len();
+    let mut g = best.g.clone();
+    let ok = |i: usize| matches!(best.res[i], Res::Ok(_));
+    let detoured: Vec<usize> = (0..m)
+        .filter(|&i| {
+            ok(i)
+                && best.paths[i].as_ref().is_some_and(|p| {
+                    !p.crossings.is_empty()
+                        && p.est_len > DETOUR_FACTOR * (live[i].from.at - live[i].to.at).len()
+                })
+        })
+        .collect();
+    for &d in &detoured {
+        g.remove_conn(d);
+    }
+    let cap = default_expansion_cap(&g);
+    let params = |tier: u8, eps: Option<f64>| SearchParams {
+        history: &[],
+        weight: tier_weight(tier),
+        present_overuse: PRESENT_OVERUSE,
+        expansion_cap: cap,
+        deadline: cx.deadline,
+        eps,
+    };
+    // Candidates: margin-0 searches over the routed connections (a detoured one with the other
+    // detoured ones absent; any other with its own path taken out and put back).
+    let mut cands: Vec<(f64, usize, SlotPath)> = Vec::new();
+    for i in (0..m).filter(|&i| ok(i)) {
+        let Some(old) = best.paths[i].as_ref().map(|p| p.est_len) else {
+            continue;
+        };
+        if Instant::now() >= cx.deadline {
+            return Err(ZS_DEADLINE.into());
+        }
+        let (s, t) = verts[i];
+        let out = if detoured.contains(&i) {
+            search(&g, layer_obs, &live[i], s, t, &params(live[i].tier, Some(0.0)))
+        } else {
+            let Some((cr, faces, _)) = take_path(&g, i) else {
+                continue;
+            };
+            g.remove_conn(i);
+            let out = search(&g, layer_obs, &live[i], s, t, &params(live[i].tier, Some(0.0)));
+            let c = &live[i];
+            g.insert_path(i, s, t, &cr, &faces, c.width as f64, c.clearance as f64);
+            out
+        };
+        match out {
+            SearchOutcome::Found(p) => {
+                let gain = old - p.est_len;
+                if gain > ZS_GAIN_MIN_NM {
+                    cands.push((gain, i, p));
+                }
+            }
+            SearchOutcome::Blocked { .. } => {}
+            SearchOutcome::Timeout => return Err(ZS_DEADLINE.into()),
+        }
+    }
+    cands.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    drop(g);
+    let mut last = "no candidate".to_string();
+    for (_, c, p) in cands.into_iter().take(ZS_MAX_CANDIDATES) {
+        match zero_slack_attempt(cx, best, verts, layer_obs, &detoured, c, p, &params) {
+            Ok(r) => return Ok(r),
+            Err(e) if e == ZS_DEADLINE => return Err(e),
+            Err(e) => last = format!("#{}: {e}", live[c].id),
+        }
+    }
+    Err(last)
+}
+
+/// One candidate of [`zero_slack_pass`]: connection `c` takes `p` in a copy of the best graph
+/// without the detoured connections; the other detoured connections are re-routed once at ε.
+/// Metrization: at ε first; if `c` fails, at margin 0 against every obstacle to name its
+/// corridor (the obstacles pinching the chain, `corridor_obstacles`), then at margin 0 against
+/// that corridor only.
+#[allow(clippy::too_many_arguments)]
+fn zero_slack_attempt<'a>(
+    cx: &Ctx,
+    best: &Snap,
+    verts: &[(usize, usize)],
+    layer_obs: &LayerObstacles,
+    detoured: &[usize],
+    c: usize,
+    p: SlotPath,
+    params: &dyn Fn(u8, Option<f64>) -> SearchParams<'a>,
+) -> Result<(Snap, Vec<usize>), String> {
+    let live = cx.conns;
+    let m = live.len();
+    let ok = |i: usize| matches!(best.res[i], Res::Ok(_));
+    let mut g = best.g.clone();
+    for &d in detoured {
+        g.remove_conn(d);
+    }
+    let insert = |g: &mut RouteGraph, i: usize, p: &SlotPath| {
+        let c = &live[i];
+        g.insert_path(
+            i,
+            verts[i].0,
+            verts[i].1,
+            &p.crossings,
+            &p.faces,
+            c.width as f64,
+            c.clearance as f64,
+        );
+    };
+    g.remove_conn(c);
+    insert(&mut g, c, &p);
+    let mut paths: Vec<Option<SlotPath>> = best.paths.clone();
+    paths[c] = Some(p);
+    let mut blocked = best.blocked.clone();
+    let mut res: Vec<Res> = best.res.clone();
+    for &d in detoured.iter().filter(|&&d| d != c) {
+        if Instant::now() >= cx.deadline {
+            return Err(ZS_DEADLINE.into());
+        }
+        let (s, t) = verts[d];
+        match search(&g, layer_obs, &live[d], s, t, &params(live[d].tier, None)) {
+            SearchOutcome::Found(p) => {
+                insert(&mut g, d, &p);
+                paths[d] = Some(p);
+            }
+            SearchOutcome::Blocked {
+                ghost,
+                blocked_edge,
+                last_reached,
+            } => {
+                paths[d] = None;
+                res[d] = fail("blocked: no path (zero-slack retry)");
+                blocked.insert(
+                    d,
+                    BlockInfo {
+                        edge: blocked_edge,
+                        ghost,
+                        last_reached,
+                    },
+                );
+            }
+            SearchOutcome::Timeout => return Err(ZS_DEADLINE.into()),
+        }
+    }
+    let routed: Vec<usize> = (0..m).filter(|&i| paths[i].is_some() && ok(i)).collect();
+    let res_of = |mt: &Metrized, i: usize| -> Option<Res> {
+        mt.res.iter().find(|(j, _)| *j == i).map(|(_, r)| r.clone())
+    };
+    let reason = |r: Option<Res>| match r {
+        Some(Res::Fail { reason, .. }) => reason,
+        _ => "not metrized".into(),
+    };
+    let mt_a = metrize_zs(cx, &g, &routed, None);
+    if mt_a.timed_out {
+        return Err(ZS_DEADLINE.into());
+    }
+    let (mt, zs) = if matches!(res_of(&mt_a, c), Some(Res::Ok(_))) {
+        (mt_a, Vec::new())
+    } else {
+        // Identification: margin 0 against everything names the corridor.
+        let ident = ZsSpec {
+            live: c,
+            anchors: None,
+            walls: None,
+        };
+        let mt_b = metrize_zs(cx, &g, &routed, Some(&ident));
+        if mt_b.timed_out {
+            return Err(ZS_DEADLINE.into());
+        }
+        if !matches!(res_of(&mt_b, c), Some(Res::Ok(_))) {
+            return Err(format!(
+                "infeasible at margin 0: {}",
+                reason(res_of(&mt_b, c))
+            ));
+        }
+        let (anchors, walls) = mt_b.zs_corridor.unwrap_or_default();
+        let spec = ZsSpec {
+            live: c,
+            anchors: Some(anchors),
+            walls: Some(walls),
+        };
+        let mt_c = metrize_zs(cx, &g, &routed, Some(&spec));
+        if mt_c.timed_out {
+            return Err(ZS_DEADLINE.into());
+        }
+        if !matches!(res_of(&mt_c, c), Some(Res::Ok(_))) {
+            return Err(format!(
+                "infeasible with corridor margin 0: {}",
+                reason(res_of(&mt_c, c))
+            ));
+        }
+        (mt_c, vec![c])
+    };
+    for (i, r) in mt.res {
+        res[i] = r;
+    }
+    let (nok, len, out) = tally(&res);
+    if !(nok > best.routed || (nok == best.routed && out < best.out)) {
+        return Err("no length gain".into());
+    }
+    let overuse_edges = (0..g.edges.len()).filter(|&e| g.overuse(e) > 0.0).count();
+    let clinches = detect_clinches(&g, live, &paths, verts);
+    Ok((
+        Snap {
+            routed: nok,
+            len,
+            out,
+            iteration: best.iteration,
+            res,
+            overuse_edges,
+            clinches,
+            relax_iterations: mt.relax_iterations,
+            rounds: mt.rounds,
+            blocked,
+            paths,
+            g,
+        },
+        zs,
+    ))
 }
 
 fn layer_name(model: &BoardModel, id: u32) -> String {
@@ -972,6 +1323,8 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
     let mut setup_fail: Option<String> = None;
     let mut partials: BTreeMap<usize, Partial> = BTreeMap::new();
     let mut blocks: BTreeMap<usize, Blk> = BTreeMap::new();
+    let mut zs_wires: Vec<usize> = Vec::new();
+    let mut zs_status: String = if opts.zero_slack_retry { "not run" } else { "off" }.into();
 
     if m > 0 {
         // Obstacles: junction / dangling ends of copper attach points are terminals.
@@ -1051,6 +1404,7 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                     let mut perm: Vec<Option<String>> = vec![None; m];
                     let mut active: Vec<usize> = (0..m).collect();
                     let (mut stuck, mut last_sig) = (0u32, None::<(usize, Vec<usize>)>);
+                    let mut stale = 0u32;
                     for _ in 1..=opts.pathfinder_iter_cap {
                         if Instant::now() >= deadline {
                             timed_out = true;
@@ -1129,18 +1483,17 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                             g.remove_conn(i);
                         }
                         let overuse = neg.penalise_overuse(&g);
-                        let (nok, len) = res.iter().fold((0usize, 0.0f64), |(n, l), r| match r {
-                            Res::Ok(o) => (n + 1, l + o.len),
-                            _ => (n, l),
-                        });
+                        let (nok, len, out_len) = tally(&res);
                         neg.record_best(&out.paths, nok, len);
                         let better = best
                             .as_ref()
                             .is_none_or(|b| nok > b.routed || (nok == b.routed && len < b.len));
                         if better {
+                            stale = 0;
                             best = Some(Snap {
                                 routed: nok,
                                 len,
+                                out: out_len,
                                 iteration: it,
                                 res,
                                 overuse_edges: overuse,
@@ -1149,7 +1502,10 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                                 rounds: mt.rounds,
                                 blocked: out.blocked.clone(),
                                 paths: out.paths.clone(),
+                                g: g.clone(),
                             });
+                        } else {
+                            stale += 1;
                         }
                         if failed.is_empty()
                             && out.blocked.is_empty()
@@ -1176,6 +1532,13 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                             warnings.push(format!("stuck after {it} iterations"));
                             break;
                         }
+                        if stale >= STALL_ITERS {
+                            warnings.push(format!(
+                                "stalled: no better routing for {STALL_ITERS} iterations, \
+                                 stopped after {it}"
+                            ));
+                            break;
+                        }
                         let mut next: BTreeSet<usize> = failed.into_iter().collect();
                         next.extend(out.blocked.keys().copied());
                         next.extend(out.ripped.iter().copied());
@@ -1185,6 +1548,18 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                         if active.is_empty() {
                             converged = true;
                             break;
+                        }
+                    }
+                    if !timed_out && opts.zero_slack_retry {
+                        if let Some(b) = &best {
+                            match zero_slack_pass(&cx, b, &verts, layer_obs) {
+                                Ok((snap, zs)) => {
+                                    zs_wires = zs;
+                                    zs_status = "kept".into();
+                                    best = Some(snap);
+                                }
+                                Err(r) => zs_status = r,
+                            }
                         }
                     }
                     if !timed_out {
@@ -1248,6 +1623,7 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
             blocking: None,
             g1_angle_deg: None,
             iteration: 0,
+            zero_slack: false,
         };
         if let Some(r) = &early[c.id] {
             rep.reason = r.clone();
@@ -1259,6 +1635,7 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                 None => rep.reason = no_result.into(),
                 Some(b) => {
                     rep.iteration = b.iteration;
+                    rep.zero_slack = zs_wires.contains(&i);
                     match &b.res[i] {
                         Res::Ok(o) => {
                             rep.status = "routed".into();
@@ -1344,6 +1721,15 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
     let routed = reports.iter().filter(|r| r.status == "routed").count();
     let partial = reports.iter().filter(|r| r.status == "partial").count();
     let failed = reports.iter().filter(|r| r.status == "failed").count();
+    let zero_slack_wires: Vec<ZeroSlackWire> = reports
+        .iter()
+        .filter(|r| r.zero_slack)
+        .map(|r| ZeroSlackWire {
+            conn: r.id,
+            net: r.net,
+            name: r.name.clone(),
+        })
+        .collect();
     RouteResult {
         items,
         connections_total: reports.len(),
@@ -1369,5 +1755,7 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
         runtime_s: t0.elapsed().as_secs_f64(),
         threads_used: 1,
         warnings,
+        zero_slack_wires,
+        zero_slack: zs_status,
     }
 }

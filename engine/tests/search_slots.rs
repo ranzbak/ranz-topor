@@ -120,6 +120,7 @@ fn params(hist: &[f64]) -> SearchParams<'_> {
         present_overuse: 4.0,
         expansion_cap: usize::MAX,
         deadline: Instant::now() + Duration::from_secs(30),
+        eps: None,
     }
 }
 

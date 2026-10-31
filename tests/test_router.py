@@ -176,3 +176,39 @@ def test_partial_routes_on_writes_grouped_stubs(engine, tmp_path):
     assert r["routed_drc"]["routing_new"] == 0
     assert abs(r["router_report"]["connections"][0]["blocking"][1] / 1e6 - 24.0) <= 1.0
     assert r["route"]["partial"] == 1
+
+
+def _fake_zero_slack(model, options):
+    """R6 judge: with the retry on, a zero-slack wire that KiCad DRC rejects (too thin);
+    with it off (second call), a clean wire and no zero-slack wire."""
+    net = next(n["code"] for n in model["nets"] if n["name"] == "SIG")
+    on = options.get("zero_slack_retry") is not False
+    _fake_zero_slack.seen.append(on)
+    width = 100_000 if on else 250_000
+    item = {**_trk(net, 20, width=width), "wire": 0}
+    item["prim"] = {"kind": "seg", "a": [30 * MM_, 20 * MM_], "b": [31 * MM_, 20 * MM_]}
+    zs = [{"conn": 0, "net": net, "name": "SIG"}] if on else []
+    return {"items": [item], "remove_uuids": [],
+            "report": {"connections": [], "connections_total": 1, "routed": 1, "partial": 0,
+                       "failed": 0, "nets_total": 1, "nets_routed": 1, "iterations": 3,
+                       "clinches": {"regular": 0, "u": 0}, "zero_slack_wires": zs,
+                       "zero_slack": "kept" if on else "off"}}
+
+
+_fake_zero_slack.seen = []
+
+
+def test_bench_zero_slack_rejected_by_drc_reverts(fixture_board, tmp_path):
+    _fake_zero_slack.seen.clear()
+    r = bench.run_bench("fixture", tmp_path / "o", router=_fake_zero_slack, rip="none",
+                        pcb_override=fixture_board.pcb)
+    # round 1: retry on, DRC flags the wire -> board restored, round 2 with the retry off
+    assert _fake_zero_slack.seen == [True, False]
+    assert r["zero_slack"] == {"status": "rejected by DRC",
+                               "wires": [{"id": 0, "net": "SIG"}]}
+    assert r["routed_drc"]["routing_new"] == 0
+    assert r["route"]["zero_slack_wires"] == [] and r["route"]["zero_slack"] == "off"
+    assert r["drc_loop"]["rounds"] == 2
+    metrics = json.loads((tmp_path / "o" / "fixture--metrics.json").read_text())
+    assert metrics["zero_slack"]["status"] == "rejected by DRC"
+

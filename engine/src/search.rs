@@ -71,6 +71,9 @@ pub struct SearchParams<'a> {
     pub present_overuse: f64,
     pub expansion_cap: usize,
     pub deadline: Instant,
+    /// Build margin ε of the admissibility and geometry tests; `None` = the graph's `rules.eps`.
+    /// The zero-slack retry (R6) searches one connection at `Some(0.0)`.
+    pub eps: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -481,7 +484,7 @@ impl<'a> Search<'a> {
             net: conn.net,
             w: conn.width as f64,
             c: conn.clearance as f64,
-            eps: g.rules.eps,
+            eps: p.eps.unwrap_or(g.rules.eps),
             start_v,
             goal_v,
             goal: g.verts[goal_v].at,
@@ -532,8 +535,12 @@ impl<'a> Search<'a> {
                 .all(|f| f.is_some_and(|f| self.g.faces[f].inside))
     }
 
+    fn fits(&self, e: usize) -> bool {
+        self.g.fits_at(e, self.w, self.c, self.eps)
+    }
+
     fn soft_blocked(&self, e: usize) -> bool {
-        !self.g.passable(e, self.net) || !self.g.fits(e, self.w, self.c)
+        !self.g.passable(e, self.net) || !self.fits(e)
     }
 
     fn wall_clearance(&self, kind: ObsKind, own_clr: f64) -> f64 {
@@ -834,7 +841,7 @@ impl<'a> Search<'a> {
                 };
         }
         let hist = self.hist.get(e).copied().unwrap_or(0.0);
-        let present = if self.g.fits(e, self.w, self.c) {
+        let present = if self.fits(e) {
             1.0
         } else {
             let cap = self.g.edges[e].cap.max(1.0);

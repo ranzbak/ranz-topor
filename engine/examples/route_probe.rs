@@ -1,8 +1,8 @@
 //! Dev tool (M2 diagnosis, F): replay `route()` iteration by iteration and print what the
 //! negotiation, the sketch, the relax stage and the self-check do to every connection.
 //!
-//! `cargo run --release --example route_probe -- <model.json> [--iters N] [--watch NAME,...]
-//!     [--quiet]`
+//! `cargo run --release --example route_probe -- <model.json> [--iters N] [--margin NM]
+//!     [--watch NAME,...] [--quiet]`
 //!
 //! Mirrors `route::route` on F.Cu (same decompose, obstacle set, CDT, graph, negotiator,
 //! metrization and feedback order; `Options::default()`), but prints per iteration: the search
@@ -160,11 +160,16 @@ fn main() {
     let mut iters: Option<u32> = None;
     let mut watch: BTreeSet<String> = BTreeSet::new();
     let mut quiet = false;
+    let mut margin: Option<i64> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--iters" => {
                 iters = Some(args[i + 1].parse().expect("--iters N"));
+                i += 1;
+            }
+            "--margin" => {
+                margin = Some(args[i + 1].parse().expect("--margin NM"));
                 i += 1;
             }
             "--watch" => {
@@ -176,12 +181,15 @@ fn main() {
         }
         i += 1;
     }
-    let path = path.expect("usage: route_probe <model.json> [--iters N] [--watch A,B] [--quiet]");
+    let path = path.expect("usage: route_probe <model.json> [--iters N] [--margin NM] [--watch A,B] [--quiet]");
     let json = std::fs::read_to_string(&path).expect("read model");
     let model = BoardModel::from_json(&json).expect("parse model");
     let mut opts = Options::default();
     if let Some(n) = iters {
         opts.pathfinder_iter_cap = n;
+    }
+    if let Some(e) = margin {
+        opts.margin_nm = e;
     }
     let t0 = Instant::now();
     let deadline = t0 + std::time::Duration::from_secs_f64(opts.wall_clock_s);
