@@ -1179,6 +1179,10 @@ impl<'a> Layered<'a> {
         let bends: usize = self.ls.iter().map(|s| s.bends.get()).sum();
         TOT[k].candidates.fetch_add(cands as u64, AtOrd::Relaxed);
         TOT[k].bends.fetch_add(bends as u64, AtOrd::Relaxed);
+        let skipped: usize = self.ls.iter().map(|s| s.skipped.get()).sum();
+        let hits: usize = self.ls.iter().map(|s| s.memo_hits.get()).sum();
+        TOT[k].skipped.fetch_add(skipped as u64, AtOrd::Relaxed);
+        TOT[k].memo_hits.fetch_add(hits as u64, AtOrd::Relaxed);
         r
     }
 
@@ -1278,6 +1282,35 @@ impl<'a> Layered<'a> {
     }
 }
 
+/// A `clearance_bend` result: the bend point and the vertex it bends at (`None` for a wall).
+type BendResult = Option<(Vec2, Option<usize>)>;
+
+/// The exact-preserving speed-ups of [`Search::clearance_bend`] (A1); every combination returns
+/// the same bend, the all-off mode is the reference of the equality tests.
+#[derive(Clone, Copy, Debug)]
+#[doc(hidden)]
+pub struct BendMode {
+    /// Skip the candidate scan of a sub-chord inside a face's free disk.
+    pub skip: bool,
+    /// Memoise per search on the chord's end points.
+    pub memo: bool,
+    /// Test candidates in ascending chord parameter and stop at the first violation.
+    pub early: bool,
+}
+
+impl BendMode {
+    pub const FAST: BendMode = BendMode {
+        skip: true,
+        memo: true,
+        early: true,
+    };
+    pub const EXACT: BendMode = BendMode {
+        skip: false,
+        memo: false,
+        early: false,
+    };
+}
+
 /// Per-layer geometry / cost helper of one search: the graph and obstacles of one layer, the
 /// connection's parameters and the layer's history. The A* itself is [`Layered`].
 struct Search<'a> {
@@ -1296,6 +1329,22 @@ struct Search<'a> {
     cands: Cell<usize>,
     /// `clearance_bend` calls so far (statistics).
     bends: Cell<usize>,
+    /// Sub-chord scans skipped by the face clear radius (statistics).
+    skipped: Cell<usize>,
+    /// `clearance_bend` calls answered from `memo` (statistics).
+    memo_hits: Cell<usize>,
+    /// Which exact-preserving speed-ups `clearance_bend` uses (all on; tests switch them off).
+    mode: BendMode,
+    /// `clearance_bend` results of this search keyed by the chord's end points (bit patterns).
+    /// The result is a function of `(a, t)` alone (the portals only restrict the candidate
+    /// query to a superset of the chord's sleeve), so membership is the only use: no
+    /// iteration order reaches the output.
+    memo: RefCell<HashMap<[u64; 4], BendResult>>,
+    /// `bend_ok` results of this search keyed by `(a, u, t, side)` (a pure function of its
+    /// arguments within one search; membership only).
+    ok_memo: RefCell<HashMap<[u64; 7], bool>>,
+    /// Per wall index: a graph vertex sits on this point wall (`bend_ok` skips those).
+    pw_vertex: RefCell<HashMap<usize, bool>>,
     /// Candidate lists of grid-aligned query boxes, `[vertices, walls]` (see `cached_near`).
     near: [RefCell<NearCache>; 2],
 }
@@ -1326,6 +1375,12 @@ impl<'a> Search<'a> {
             ghost,
             cands: Cell::new(0),
             bends: Cell::new(0),
+            skipped: Cell::new(0),
+            memo_hits: Cell::new(0),
+            mode: BendMode::FAST,
+            memo: RefCell::new(HashMap::new()),
+            ok_memo: RefCell::new(HashMap::new()),
+            pw_vertex: RefCell::new(HashMap::new()),
             near: [RefCell::new(HashMap::new()), RefCell::new(HashMap::new())],
         }
     }
@@ -1424,20 +1479,18 @@ impl<'a> Search<'a> {
         }
     }
 
-    /// Boxes covering the chord `a -> t` grown by `grow`: one per sub-chord between consecutive
-    /// portal crossing points (`seg_closest(chord, portal)` parameters, sorted), so a long
-    /// diagonal chord queries `<= portals.len() + 1` local boxes instead of its full bbox.
-    /// O(C log C).
-    fn sleeve_boxes(a: Vec2, t: Vec2, portals: &[(Vec2, Vec2)], grow: f64) -> Vec<Aabb> {
+    /// Pieces covering the chord `a -> t` grown by `grow`: one box per sub-chord between
+    /// consecutive portal crossing parameters (`crossings`, sorted `(param, portal edge)`), so a
+    /// long diagonal chord queries `<= portals.len() + 1` local boxes instead of its full bbox.
+    /// Each piece is `(box, p0, p1)`, the chord parameters of its end points. O(C).
+    fn sleeve_pieces(
+        a: Vec2,
+        t: Vec2,
+        crossings: &[(f64, usize)],
+        grow: f64,
+    ) -> Vec<(Aabb, f64, f64)> {
         let r = t - a;
-        let l2 = r.len2().max(1.0);
-        let mut params: Vec<f64> = portals
-            .iter()
-            .map(|&(pa, pb)| {
-                let x = seg_closest(a, t, pa, pb);
-                ((x - a).dot(r) / l2).clamp(0.0, 1.0)
-            })
-            .collect();
+        let mut params: Vec<f64> = crossings.iter().map(|c| c.0).collect();
         params.push(0.0);
         params.push(1.0);
         params.sort_by(f64::total_cmp);
@@ -1465,7 +1518,11 @@ impl<'a> Search<'a> {
             while j + 1 < params.len() && params[j + 1] - params[i] <= max_t {
                 j += 1;
             }
-            out.push(boxed(a + r * params[i], a + r * params[j]));
+            out.push((
+                boxed(a + r * params[i], a + r * params[j]),
+                params[i],
+                params[j],
+            ));
             i = j;
         }
         out
@@ -1506,33 +1563,91 @@ impl<'a> Search<'a> {
         out.extend_from_slice(list);
     }
 
+    /// A face whose free disk contains the whole sub-chord `p0..p1` of the chord `a -> a + r`
+    /// (A1). `radius(f)` is the free radius of face `f` for the obstacle kind being scanned
+    /// (`clear_r - rho` for vertices, `clear_w - (c + w/2 + eps)` for walls); the disk is
+    /// centred on the face's incentre and convex, so both end points inside means every point
+    /// of the sub-chord is inside, i.e. at least the required clearance from every obstacle of
+    /// that kind that is not an own corner / own wall of the face (those the caller still tests
+    /// exactly). Candidate faces are the ones next to the portals crossed within `[p0, p1]`;
+    /// at most 4 portals (8 faces) are tried. A 1 nm margin absorbs rounding. O(1).
+    fn free_face(
+        &self,
+        a: Vec2,
+        r: Vec2,
+        crossings: &[(f64, usize)],
+        p0: f64,
+        p1: f64,
+        radius: impl Fn(usize) -> f64,
+    ) -> Option<usize> {
+        let (pl, ql) = (a + r * p0, a + r * p1);
+        for &(_, pe) in crossings.iter().filter(|c| c.0 >= p0 && c.0 <= p1).take(4) {
+            for f in self.g.edges[pe].faces.iter().flatten() {
+                let rad = radius(*f) - 1.0;
+                if rad > 0.0 {
+                    let c = self.g.incentre[*f];
+                    if (pl - c).len2() <= rad * rad && (ql - c).len2() <= rad * rad {
+                        return Some(*f);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// First obstacle (along the chord) closer than its required distance: the bend point.
     /// `portals` are the edges the chord crosses (the `since` chain of [`Search::los`]; empty for
     /// a direct chord): the obstacle queries run on the sleeve around the chord, the sub-chord
     /// boxes between consecutive portal crossings, merged into one sorted, dedup'd candidate
-    /// list. Per call `O((C + 1) * local)`, `C = portals.len()`.
+    /// list. Three exact-preserving speed-ups ([`BendMode`]): (a) a sub-chord inside a face's
+    /// free disk is not scanned (the face's own corners / walls are tested instead), (b) the
+    /// result is memoised per search on `(a, t)`, (c) candidates are tested in ascending chord
+    /// parameter and the scan stops once no later candidate can beat the best bend.
+    /// Per call `O((C + 1) * local)`, `C = portals.len()`; a memo hit is `O(1)`.
     fn clearance_bend(&self, a: Vec2, t: Vec2, portals: &[usize]) -> Option<(Vec2, Option<usize>)> {
-        const TOL: f64 = 1.0;
         self.bends.set(self.bends.get() + 1);
+        if !self.mode.memo {
+            return self.scan_bend(a, t, portals);
+        }
+        let key = [a.x.to_bits(), a.y.to_bits(), t.x.to_bits(), t.y.to_bits()];
+        if let Some(hit) = self.memo.borrow().get(&key) {
+            self.memo_hits.set(self.memo_hits.get() + 1);
+            return *hit;
+        }
+        let res = self.scan_bend(a, t, portals);
+        self.memo.borrow_mut().insert(key, res);
+        res
+    }
+
+    fn scan_bend(&self, a: Vec2, t: Vec2, portals: &[usize]) -> Option<(Vec2, Option<usize>)> {
+        const TOL: f64 = 1.0;
         let chord = Seg { a, b: t };
         let r = t - a;
         let l2 = r.len2().max(1.0);
-        let psegs: Vec<(Vec2, Vec2)> = portals
+        let mut crossings: Vec<(f64, usize)> = portals
             .iter()
             .map(|&pe| {
                 let ge = &self.g.edges[pe];
-                (self.g.verts[ge.a].at, self.g.verts[ge.b].at)
+                let x = seg_closest(a, t, self.g.verts[ge.a].at, self.g.verts[ge.b].at);
+                (((x - a).dot(r) / l2).clamp(0.0, 1.0), pe)
             })
             .collect();
-        let rho = self.g.rho_max() + self.c + 0.5 * self.w + self.eps;
-        let mut best: Option<(f64, Vec2, Option<usize>)> = None;
-        let mut offer = |param: f64, p: Vec2, v: Option<usize>| {
-            if best.is_none_or(|(bp, _, _)| param < bp) {
-                best = Some((param, p, v));
-            }
-        };
+        crossings.sort_by(|x, y| x.0.total_cmp(&y.0));
+        let half = 0.5 * self.w + self.eps;
+        let rho = self.g.rho_max() + self.c + half;
+        // candidates `(lower bound of the offered parameter, kind 0 vertex / 1 wall, index,
+        // need)`: the order key `(kind, index)` reproduces the original tie-break
+        let mut order: Vec<(f64, u8, usize, f64)> = Vec::new();
         let mut vcand: Vec<usize> = Vec::new();
-        for bb in Self::sleeve_boxes(a, t, &psegs, rho) {
+        for (bb, p0, p1) in Self::sleeve_pieces(a, t, &crossings, rho) {
+            if self.mode.skip {
+                let free = self.free_face(a, r, &crossings, p0, p1, |f| self.g.clear_r[f] - rho);
+                if let Some(f) = free {
+                    self.skipped.set(self.skipped.get() + 1);
+                    vcand.extend_from_slice(&self.g.faces[f].v);
+                    continue;
+                }
+            }
             self.cached_near(0, bb, rho, &mut vcand);
         }
         vcand.sort_unstable();
@@ -1543,10 +1658,8 @@ impl<'a> Search<'a> {
             if !self.foreign(u) || vi.at == a {
                 continue;
             }
-            let need = vi.r + vi.clr.max(self.c) + 0.5 * self.w + self.eps;
-            if point_seg(vi.at, &chord) < need - TOL {
-                offer((vi.at - a).dot(r) / l2, vi.at, Some(u));
-            }
+            let need = vi.r + vi.clr.max(self.c) + half;
+            order.push(((vi.at - a).dot(r) / l2, 0, u, need));
         }
         let wr = self
             .g
@@ -1554,10 +1667,18 @@ impl<'a> Search<'a> {
             .max(self.g.rules.edge_clearance)
             .max(self.g.rules.hole_clearance)
             + self.c
-            + 0.5 * self.w
-            + self.eps;
+            + half;
+        let wfree = self.c.max(0.0) + half;
         let mut wcand: Vec<usize> = Vec::new();
-        for bb in Self::sleeve_boxes(a, t, &psegs, wr) {
+        for (bb, p0, p1) in Self::sleeve_pieces(a, t, &crossings, wr) {
+            if self.mode.skip {
+                let free = self.free_face(a, r, &crossings, p0, p1, |f| self.g.clear_w[f] - wfree);
+                if let Some(f) = free {
+                    self.skipped.set(self.skipped.get() + 1);
+                    wcand.extend_from_slice(&self.g.face_walls[f]);
+                    continue;
+                }
+            }
             self.cached_near(1, bb, wr, &mut wcand);
         }
         wcand.sort_unstable();
@@ -1569,8 +1690,7 @@ impl<'a> Search<'a> {
             if self.wall_exempt(wl) {
                 continue;
             }
-            let need =
-                wl.r_core + self.wall_clearance(wl.kind, wl.own_clr) + 0.5 * self.w + self.eps;
+            let need = wl.r_core + self.wall_clearance(wl.kind, wl.own_clr) + half;
             // the core is at least its bbox's gap to the chord's bbox away from the chord
             let wb = match &wl.core {
                 Core::Point(p) => Some((p.x, p.y, p.x, p.y)),
@@ -1589,30 +1709,61 @@ impl<'a> Search<'a> {
                     continue;
                 }
             }
-            let (d, d_apex, bend) = match &wl.core {
-                Core::Point(p) => (point_seg(*p, &chord), dist(*p, a), *p),
-                Core::Seg(s) => (
-                    seg_seg(&chord, s),
-                    point_seg(a, s),
-                    seg_closest(s.a, s.b, a, t),
-                ),
-                Core::Arc(ar) => {
-                    let pts = [ar.point_at(0.0), ar.point_at(0.5), ar.point_at(1.0)];
-                    let mut bp = pts[0];
-                    for &p in &pts[1..] {
-                        if point_seg(p, &chord) < point_seg(bp, &chord) {
-                            bp = p;
+            // every bend point lies on the core, inside its bbox: the smallest corner
+            // projection bounds the offered parameter from below
+            let bx = wl.core.bbox();
+            let mut lb = f64::INFINITY;
+            for x in [bx.min.x, bx.max.x] {
+                for y in [bx.min.y, bx.max.y] {
+                    lb = lb.min(((x - a.x) * r.x + (y - a.y) * r.y) / l2);
+                }
+            }
+            order.push((lb, 1, wi, need));
+        }
+        order.sort_unstable_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)));
+        let mut best: Option<(f64, u8, usize, Vec2, Option<usize>)> = None;
+        for (lb, kind, idx, need) in order {
+            if self.mode.early && best.is_some_and(|b| lb > b.0 + 1e-9) {
+                break;
+            }
+            let found: Option<(f64, Vec2, Option<usize>)> = if kind == 0 {
+                let vi = &self.g.verts[idx];
+                (point_seg(vi.at, &chord) < need - TOL).then_some((lb, vi.at, Some(idx)))
+            } else {
+                let wl = &self.obs.walls[idx];
+                let (d, d_apex, bend) = match &wl.core {
+                    Core::Point(p) => (point_seg(*p, &chord), dist(*p, a), *p),
+                    Core::Seg(s) => (
+                        seg_seg(&chord, s),
+                        point_seg(a, s),
+                        seg_closest(s.a, s.b, a, t),
+                    ),
+                    Core::Arc(ar) => {
+                        let pts = [ar.point_at(0.0), ar.point_at(0.5), ar.point_at(1.0)];
+                        let mut bp = pts[0];
+                        for &p in &pts[1..] {
+                            if point_seg(p, &chord) < point_seg(bp, &chord) {
+                                bp = p;
+                            }
                         }
+                        (seg_arc(&chord, ar), crate::geom::point_arc(a, ar), bp)
                     }
-                    (seg_arc(&chord, ar), crate::geom::point_arc(a, ar), bp)
+                };
+                if d_apex <= TOL || d >= need - TOL {
+                    None
+                } else {
+                    Some(((bend - a).dot(r) / l2, bend, None))
                 }
             };
-            if d_apex <= TOL || d >= need - TOL {
-                continue;
+            if let Some((param, p, v)) = found {
+                let better =
+                    best.is_none_or(|b| param < b.0 || (param == b.0 && (kind, idx) < (b.1, b.2)));
+                if better {
+                    best = Some((param, kind, idx, p, v));
+                }
             }
-            offer((bend - a).dot(r) / l2, bend, None);
         }
-        best.map(|(_, p, v)| (p, v))
+        best.map(|b| (b.3, b.4))
     }
 
     /// Side the wire passes vertex `u`: the middle direction of the fan of portal edges incident
@@ -1660,8 +1811,52 @@ impl<'a> Search<'a> {
     /// tangent points, its middle and the quarter points) must keep its band from every foreign
     /// wall and vertex. The chord tests alone never see a pad pinched against a wall (note
     /// `m2-route-diagnosis` §4 A). `side` is the unit direction from `u` to the side the wire passes (decided by the
-    /// topology: the chord's side, or the fan of crossed portals). O(q) grid queries.
+    /// topology: the chord's side, or the fan of crossed portals). O(q) grid queries on the
+    /// search's lattice-cached candidate lists; memoised per search on `(a, u, t, side)` (A1:
+    /// the same string is re-tested for every slot of an edge), a hit is `O(1)`.
     fn bend_ok(&self, a: Vec2, u: usize, t: Vec2, side: Option<Vec2>) -> bool {
+        if self.mode.memo {
+            let sd = side.unwrap_or(Vec2 {
+                x: f64::NAN,
+                y: f64::NAN,
+            });
+            let key = [
+                a.x.to_bits(),
+                a.y.to_bits(),
+                t.x.to_bits(),
+                t.y.to_bits(),
+                u as u64,
+                sd.x.to_bits(),
+                sd.y.to_bits(),
+            ];
+            let hit = self.ok_memo.borrow().get(&key).copied();
+            match hit {
+                Some(h) => h,
+                None => {
+                    let r = self.bend_ok_i(a, u, t, side);
+                    self.ok_memo.borrow_mut().insert(key, r);
+                    r
+                }
+            }
+        } else {
+            self.bend_ok_i(a, u, t, side)
+        }
+    }
+
+    /// A graph vertex sits exactly on the point wall `wi` at `p` (memoised per search). O(1)
+    /// amortised.
+    fn point_wall_is_vertex(&self, wi: usize, p: Vec2) -> bool {
+        if !self.mode.memo {
+            return !self.g.verts_near(Aabb { min: p, max: p }).is_empty();
+        }
+        *self
+            .pw_vertex
+            .borrow_mut()
+            .entry(wi)
+            .or_insert_with(|| !self.g.verts_near(Aabb { min: p, max: p }).is_empty())
+    }
+
+    fn bend_ok_i(&self, a: Vec2, u: usize, t: Vec2, side: Option<Vec2>) -> bool {
         let side = side.filter(|h| h.len() > 1e-9).map(|h| h * (1.0 / h.len()));
         const TOL: f64 = 1.0;
         let vi = &self.g.verts[u];
@@ -1706,7 +1901,9 @@ impl<'a> Search<'a> {
                 },
             };
             // foreign graph vertices pinching the arc sample (D10)
-            for j in self.g.verts_near(wbb) {
+            let mut vc: Vec<usize> = Vec::new();
+            self.cached_near(0, wbb, wr, &mut vc);
+            for j in vc {
                 let vj = &self.g.verts[j];
                 // a pinch against a vertex joined to `u` by an unfit edge is that edge's capacity
                 // (D2); only the other, non-adjacent vertices need this test
@@ -1718,7 +1915,9 @@ impl<'a> Search<'a> {
                     return false;
                 }
             }
-            for wi in self.obs.query_walls(wbb) {
+            let mut wc: Vec<usize> = Vec::new();
+            self.cached_near(1, wbb, wr, &mut wc);
+            for wi in wc {
                 let wl = &self.obs.walls[wi];
                 if self.wall_exempt(wl) {
                     continue;
@@ -1727,7 +1926,7 @@ impl<'a> Search<'a> {
                     // point walls that are graph vertices were tested above; the others
                     // (e.g. a keepout point) are tested here
                     Core::Point(p) => {
-                        if !self.g.verts_near(Aabb { min: *p, max: *p }).is_empty() {
+                        if self.point_wall_is_vertex(wi, *p) {
                             continue;
                         }
                         (dist(w, *p), dist(vi.at, *p))
@@ -2050,6 +2249,8 @@ struct Tot {
     expansions: AtomicU64,
     candidates: AtomicU64,
     bends: AtomicU64,
+    skipped: AtomicU64,
+    memo_hits: AtomicU64,
 }
 impl Tot {
     const fn new() -> Tot {
@@ -2059,14 +2260,16 @@ impl Tot {
             expansions: AtomicU64::new(0),
             candidates: AtomicU64::new(0),
             bends: AtomicU64::new(0),
+            skipped: AtomicU64::new(0),
+            memo_hits: AtomicU64::new(0),
         }
     }
 }
 static TOT: [Tot; 2] = [Tot::new(), Tot::new()];
 
 /// Per-process totals of the A* runs: `[planar, ghost]` as `(nanoseconds, runs, expansions,
-/// candidates, clearance_bend calls)`. Diagnostic counters for `route_probe`; reset with [`search_totals_reset`].
-pub fn search_totals() -> [(u64, u64, u64, u64, u64); 2] {
+/// candidates, clearance_bend calls, skipped sub-chord scans, memo hits)`. Diagnostic counters for `route_probe`; reset with [`search_totals_reset`].
+pub fn search_totals() -> [(u64, u64, u64, u64, u64, u64, u64); 2] {
     let f = |t: &Tot| {
         (
             t.ns.load(AtOrd::Relaxed),
@@ -2074,6 +2277,8 @@ pub fn search_totals() -> [(u64, u64, u64, u64, u64); 2] {
             t.expansions.load(AtOrd::Relaxed),
             t.candidates.load(AtOrd::Relaxed),
             t.bends.load(AtOrd::Relaxed),
+            t.skipped.load(AtOrd::Relaxed),
+            t.memo_hits.load(AtOrd::Relaxed),
         )
     };
     [f(&TOT[0]), f(&TOT[1])]
@@ -2081,7 +2286,15 @@ pub fn search_totals() -> [(u64, u64, u64, u64, u64); 2] {
 
 pub fn search_totals_reset() {
     for t in &TOT {
-        for a in [&t.ns, &t.calls, &t.expansions, &t.candidates, &t.bends] {
+        for a in [
+            &t.ns,
+            &t.calls,
+            &t.expansions,
+            &t.candidates,
+            &t.bends,
+            &t.skipped,
+            &t.memo_hits,
+        ] {
             a.store(0, AtOrd::Relaxed);
         }
     }
@@ -2761,6 +2974,30 @@ pub fn probe_clearance_bend(
     s.clearance_bend(a, t, if full { &[] } else { portals })
 }
 
+/// Test hook: `clearance_bend` of `a -> t` under `mode` on a fresh search, called `repeat` times
+/// (a memoising mode answers the repeats from the memo); returns the last result, the number of
+/// skipped sub-chord scans and the memo hits.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn probe_clearance_bend_mode(
+    g: &RouteGraph,
+    obs: &LayerObstacles,
+    conn: &Connection,
+    a: Vec2,
+    t: Vec2,
+    portals: &[usize],
+    mode: BendMode,
+    repeat: usize,
+) -> (Option<(Vec2, Option<usize>)>, usize, usize) {
+    let mut s = Search::new(g, obs, conn, &[], 1.0, PRESENT_OVERUSE, None, false);
+    s.mode = mode;
+    let mut last = None;
+    for _ in 0..repeat.max(1) {
+        last = s.clearance_bend(a, t, portals);
+    }
+    (last, s.skipped.get(), s.memo_hits.get())
+}
+
 /// Test hook: [`Search::bend_ok`] of a string `a -> u -> t` passing `u` on the `side` direction.
 #[doc(hidden)]
 pub fn probe_bend_ok(
@@ -2773,6 +3010,30 @@ pub fn probe_bend_ok(
     side: Vec2,
 ) -> bool {
     Search::new(g, obs, conn, &[], 1.0, PRESENT_OVERUSE, None, false).bend_ok(a, u, t, Some(side))
+}
+
+/// Test hook: `bend_ok` under `mode` on a fresh search, called `repeat` times (the memo answers
+/// the repeats); the last result.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn probe_bend_ok_mode(
+    g: &RouteGraph,
+    obs: &LayerObstacles,
+    conn: &Connection,
+    a: Vec2,
+    u: usize,
+    t: Vec2,
+    side: Vec2,
+    mode: BendMode,
+    repeat: usize,
+) -> bool {
+    let mut s = Search::new(g, obs, conn, &[], 1.0, PRESENT_OVERUSE, None, false);
+    s.mode = mode;
+    let mut last = true;
+    for _ in 0..repeat.max(1) {
+        last = s.bend_ok(a, u, t, Some(side));
+    }
+    last
 }
 
 /// The single-layer (M2) entry points: the layered core on one [`RouteGraph`] without via

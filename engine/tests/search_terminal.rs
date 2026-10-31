@@ -53,7 +53,7 @@ fn search_blocks_unenterable_goal_instantly() {
             ..Options::default()
         },
     );
-    let [(_, runs, exps, cands, _), (_, g_runs, g_exps, _, _)] = search_totals();
+    let [(_, runs, exps, cands, ..), (_, g_runs, g_exps, ..)] = search_totals();
     assert_eq!((runs, exps, cands), (0, 0, 0), "no slot search ran");
     assert_eq!((g_runs, g_exps), (0, 0), "no ghost ran");
     assert_eq!(r.routed, 0);

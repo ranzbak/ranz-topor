@@ -38,7 +38,7 @@ pub enum Core {
 }
 
 impl Core {
-    fn bbox(&self) -> Aabb {
+    pub fn bbox(&self) -> Aabb {
         match self {
             Core::Point(p) => Aabb { min: *p, max: *p },
             Core::Seg(s) => Prim::Seg(*s).bbox(),

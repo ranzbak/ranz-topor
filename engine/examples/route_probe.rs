@@ -130,7 +130,9 @@ fn main() {
                 it.overuse_edges
             );
         }
-        let sum = |f: fn(&topor_engine::route::IterProfile) -> f64| p.iter().map(f).fold(0.0, |a, b| a + b);
+        let sum = |f: fn(&topor_engine::route::IterProfile) -> f64| {
+            p.iter().map(f).fold(0.0, |a, b| a + b)
+        };
         println!(
             "  total search {:.3}s commit {:.3}s metrize {:.3}s (check {:.3}s) of {:.3}s",
             sum(|i| i.search_s),
@@ -141,9 +143,9 @@ fn main() {
         );
     }
     let tot = topor_engine::search::search_totals();
-    for (name, (ns, n, e, c, b)) in ["search", "ghost"].iter().zip(tot) {
+    for (name, (ns, n, e, c, b, sk, mh)) in ["search", "ghost"].iter().zip(tot) {
         println!(
-            "  {name}: {:.3}s in {n} runs, expansions {e} ({:.0}/run), candidates {c} ({:.0}/run), bend queries {b} ({:.0}/cand-per-query), {:.2} ms/run",
+            "  {name}: {:.3}s in {n} runs, expansions {e} ({:.0}/run), candidates {c} ({:.0}/run), bend queries {b} ({:.0}/cand-per-query), skipped sub-chords {sk}, memo hits {mh}, {:.2} ms/run",
             ns as f64 * 1e-9,
             e as f64 / n.max(1) as f64,
             c as f64 / n.max(1) as f64,

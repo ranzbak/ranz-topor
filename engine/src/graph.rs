@@ -141,6 +141,26 @@ pub struct RouteGraph {
     paths: Vec<Option<PathRec>>,
     vgrid: Grid<usize>,
     rho_max: f64,
+    /// Per face: incentre (centre of the largest inscribed disk; degenerate faces: centroid).
+    pub incentre: Vec<Vec2>,
+    /// Per face `f`, the vertex part of the clear radius: distance from `incentre[f]` to the
+    /// nearest vertex that is not a corner of `f`, capped at `2 * longest edge(f)` (the cap
+    /// only lowers it, so it stays a lower bound); `-1` for a degenerate face. Static: vertex
+    /// positions never move; a vertex's *extent* (`r + clr`, which `set_site` can raise) is
+    /// charged at query time through [`RouteGraph::rho_max`].
+    pub clear_r: Vec<f64>,
+    /// Per face `f`, the wall part of the clear radius: the minimum over every wall `w` that is
+    /// not one of the face's own walls (see `face_walls`) of
+    /// `dist(incentre[f], core(w)) - r_core(w) - static_clearance(w)`, capped like `clear_r`
+    /// (`static_clearance` = the wall's clearance with a zero connection clearance). A wire of
+    /// half-width `w/2` and clearance `c` needs at most `r_core + static_clearance + c + w/2 +
+    /// eps` from the core, so the disk of radius `clear_w - (c + w/2 + eps)` around the incentre
+    /// is free of every non-face wall. `-1` for a degenerate face.
+    pub clear_w: Vec<f64>,
+    /// Per face: the walls both of whose end anchors are corners of the face (a wall along one
+    /// of its edges, a pad outline on its corner); excluded from `clear_w`, to be tested
+    /// exactly whenever a scan of the face is skipped. Sorted.
+    pub face_walls: Vec<Vec<usize>>,
     /// Per edge: value of `clock` at the last change that can affect a path through the edge
     /// (P4): `insert_path` / `remove_conn` bump every edge of every face the path touches
     /// (plus the `along` edge and its two faces); `set_site` bumps every edge of every face
@@ -197,6 +217,162 @@ fn sorted_nets(net: i32, tie: &[i32]) -> Vec<i32> {
     v.sort_unstable();
     v.dedup();
     v
+}
+
+/// Wall clearance with a zero connection clearance (the static part of the search's
+/// `wall_clearance`).
+fn static_wall_clr(kind: ObsKind, own_clr: f64, r: &GraphRules) -> f64 {
+    match kind {
+        ObsKind::Hole => r.hole_clearance,
+        ObsKind::Edge => r.edge_clearance,
+        ObsKind::Keepout => 0.0,
+        _ => own_clr.max(r.min_clearance),
+    }
+}
+
+/// Per-face incentre, vertex / wall clear radii and own walls (see the `RouteGraph` fields).
+/// One bounded vertex-grid query and one bounded wall-grid query per face, so `O(F * q)` with
+/// `q` the hits inside a box of side `~4 * longest edge` (+ the walls' reach).
+type FaceClear = (Vec<Vec2>, Vec<f64>, Vec<f64>, Vec<Vec<usize>>);
+
+#[allow(clippy::too_many_arguments)]
+fn face_clearance(
+    ls: &LayerSketch,
+    obs: &LayerObstacles,
+    rules: &GraphRules,
+    verts: &[VertexInfo],
+    faces: &[Face],
+    vgrid: &Grid<usize>,
+    faces_of_vertex: &[Vec<usize>],
+    rho_max: f64,
+) -> FaceClear {
+    use crate::geom::{point_arc, point_seg, Seg};
+    use crate::obstacle::Core;
+    // anchor -> vertex, anchor -> walls ending at it
+    let mut anchor_vertex: Vec<Option<usize>> = vec![None; obs.anchors.len()];
+    for (v, a) in ls.point_to_anchor.iter().enumerate() {
+        if let Some(a) = *a {
+            if a < anchor_vertex.len() {
+                anchor_vertex[a] = Some(v);
+            }
+        }
+    }
+    let mut walls_at: Vec<Vec<usize>> = vec![Vec::new(); obs.anchors.len()];
+    let mut reach = 0.0f64; // largest r_core + static clearance of any wall
+    let sclr: Vec<f64> = obs
+        .walls
+        .iter()
+        .map(|w| static_wall_clr(w.kind, w.own_clr, rules))
+        .collect();
+    for (wi, w) in obs.walls.iter().enumerate() {
+        reach = reach.max(w.r_core + sclr[wi]);
+        for &e in &w.ends {
+            if e < walls_at.len() && walls_at[e].last() != Some(&wi) {
+                walls_at[e].push(wi);
+            }
+        }
+    }
+    let n = faces.len();
+    let (mut inc, mut cv, mut cw, mut fw) = (
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+    );
+    for f in faces {
+        let p = [verts[f.v[0]].at, verts[f.v[1]].at, verts[f.v[2]].at];
+        // side opposite corner i
+        let side = [
+            (p[1] - p[2]).len(),
+            (p[2] - p[0]).len(),
+            (p[0] - p[1]).len(),
+        ];
+        let per = side[0] + side[1] + side[2];
+        let area2 = (p[1] - p[0]).cross(p[2] - p[0]).abs();
+        if per <= 0.0 || area2 <= 1e-9 * per * per {
+            inc.push((p[0] + p[1] + p[2]) * (1.0 / 3.0));
+            cv.push(-1.0);
+            cw.push(-1.0);
+            fw.push(Vec::new());
+            continue;
+        }
+        let c = (p[0] * side[0] + p[1] * side[1] + p[2] * side[2]) * (1.0 / per);
+        let longest = side[0].max(side[1]).max(side[2]);
+        // A skip needs a disk around `c` that holds the sub-chord end points (on the face's
+        // edges, so `>= inradius` away and `<= longest` away) with the search's reach `rho >=
+        // rho_max` to spare. Cheap reject: the nearest vertex of the faces around the corners
+        // is an upper bound of the clear distance; below `inradius + rho_max` the face can
+        // never skip, and `-1` (never skip) is a valid lower bound.
+        let inradius = area2 / per;
+        let mut ub = f64::INFINITY;
+        for &v in &f.v {
+            for &f2 in &faces_of_vertex[v] {
+                for &u in &faces[f2].v {
+                    if !f.v.contains(&u) {
+                        ub = ub.min((verts[u].at - c).len());
+                    }
+                }
+            }
+        }
+        if ub < inradius + rho_max {
+            inc.push(c);
+            cv.push(-1.0);
+            cw.push(-1.0);
+            fw.push(Vec::new());
+            continue;
+        }
+        // a larger clear radius never helps: clipping it only lowers the lower bound
+        let cap = longest + 2.0 * rho_max + 2_000_000.0;
+        // own walls
+        let mut own: Vec<usize> = Vec::new();
+        for &v in &f.v {
+            if let Some(a) = verts[v].anchor {
+                for &wi in walls_at.get(a).map(Vec::as_slice).unwrap_or(&[]) {
+                    let ok = obs.walls[wi].ends.iter().all(|&e| {
+                        anchor_vertex
+                            .get(e)
+                            .copied()
+                            .flatten()
+                            .is_some_and(|ev| f.v.contains(&ev))
+                    });
+                    if ok {
+                        own.push(wi);
+                    }
+                }
+            }
+        }
+        own.sort_unstable();
+        own.dedup();
+        // vertex part
+        let bb = Aabb { min: c, max: c }.grow(cap);
+        let mut rv = cap;
+        for i in vgrid.query(bb) {
+            if !f.v.contains(&i) {
+                rv = rv.min((verts[i].at - c).len());
+            }
+        }
+        // wall part: a wall whose core is farther than cap + reach cannot lower the minimum
+        // below `cap`
+        let wb = Aabb { min: c, max: c }.grow(cap + reach);
+        let mut rw = cap;
+        for wi in obs.query_walls(wb) {
+            if own.binary_search(&wi).is_ok() {
+                continue;
+            }
+            let w = &obs.walls[wi];
+            let d = match &w.core {
+                Core::Point(q) => (*q - c).len(),
+                Core::Seg(s) => point_seg(c, &Seg { a: s.a, b: s.b }),
+                Core::Arc(ar) => point_arc(c, ar),
+            };
+            rw = rw.min(d - w.r_core - sclr[wi]);
+        }
+        inc.push(c);
+        cv.push(rv);
+        cw.push(rw);
+        fw.push(own);
+    }
+    (inc, cv, cw, fw)
 }
 
 impl RouteGraph {
@@ -323,10 +499,24 @@ impl RouteGraph {
             });
         }
 
+        let (incentre, clear_r, clear_w, face_walls) = face_clearance(
+            ls,
+            obs,
+            rules,
+            &verts,
+            &faces,
+            &vgrid,
+            &faces_of_vertex,
+            rho_max,
+        );
         RouteGraph {
             verts,
             edges,
             faces,
+            incentre,
+            clear_r,
+            clear_w,
+            face_walls,
             rules: *rules,
             edge_of,
             faces_of_vertex,
