@@ -45,9 +45,11 @@ from . import preview as preview_mod
 from .config import CONFIG_NAME, Config, load_config, update_config
 from .findings import Finding
 from .layers import resolve_layer_roles
+from .priority import net_priorities
 from .ports import BoardPort, CommitRequest, CommitResult, Decision, Progress, RunSummary, UiPort
 from .report import RunReport, before_stats_from_model, build_report
 from .schema import CURRENT_VERSION
+from .scope import connections_by_scope, do_not_touch_nets, rip_plan, scope_from_selection
 
 ACTION_CLEANUP = "pcbnew.GlobalEdit.cleanupTracksAndVias"
 ACTION_TEARDROPS = "pcbnew.GlobalEdit.editTeardrops"
@@ -131,19 +133,6 @@ def connection_estimate(model: dict) -> tuple:
     return sum(pads[n] - 1 for n in multi), len(multi)
 
 
-def rip_plan(model: dict, cfg: Config) -> list:
-    """uuids to remove on Accept. `existing_copper = fixed` / `smooth` (default fixed): nothing; `rip`: every
-    track and via, except locked ones when `respect_locked` and free vias (copper that connects to nothing
-    but a via, the harness rule); `unrouted_only` ripples nothing. (B7 refines with scope / do_not_touch.)"""
-    if cfg.get("run", "existing_copper") != "rip" or cfg.get("run", "unrouted_only"):
-        return []
-    keep_locked = cfg.get("run", "respect_locked")
-    ripped = [k["uuid"] for k in model.get("kept", []) if not (keep_locked and k.get("locked"))]
-    ripped += [v["uuid"] for v in model.get("vias", [])
-               if not (keep_locked and v.get("locked")) and not v.get("free")]
-    return ripped
-
-
 def filter_model(model: dict, ripped) -> dict:
     """The model the engine sees after the rip: ripped tracks / vias, dangling ends of ripped tracks and pour
     reach through ripped vias are gone. Does not modify `model`. O(model items)."""
@@ -181,17 +170,24 @@ def refill_pours(model: dict, refilled_text: str) -> dict:
             "dangling_ends": dangling_ends(model["kept"], model["vias"], model["pads"], cu)}
 
 
-def build_options(cfg: Config, engine, threads_override=None) -> dict:
+def build_options(cfg: Config, engine, threads_override=None, *, plan=None, rip=None, model=None,
+                  priorities=None) -> dict:
     """Engine options: ``cfg.engine_options()`` restricted to keys the engine knows, plus the plugin's own
-    additions. The plugin does the ripping, so the engine always sees ``existing_copper = fixed``. (B7 adds
-    scope / net_priority / exclude_nets / ignore_pads here.)"""
+    additions: ``scope`` (``plan.engine_scope``, scope.py), ``existing_copper`` (``rip.engine_existing_copper``:
+    the plugin does the ripping, so only ``smooth`` is passed on), and, when the engine knows the key,
+    ``net_priority`` (net name -> 1..3), ``exclude_nets`` (``do_not_touch`` expanded against `model`) and
+    ``ignore_pads``. O(#nets) for the expansion."""
     known = json.loads(engine.default_options())
     opts = {k: v for k, v in cfg.engine_options().items() if k in known}
-    opts["existing_copper"] = "fixed"
-    if cfg.get("run", "unrouted_only") and isinstance(known.get("scope"), dict):
-        opts["scope"] = {**known["scope"], "unrouted_only": True}
-    for key, val in (("exclude_nets", list(cfg.get("nets", "do_not_touch"))),
-                     ("ignore_pads", list(cfg.get("nets", "ignore_pads")))):
+    opts["existing_copper"] = rip.engine_existing_copper if rip is not None else "fixed"
+    if isinstance(known.get("scope"), dict):
+        if plan is not None:
+            opts["scope"] = {**known["scope"], **plan.engine_scope}
+        elif cfg.get("run", "unrouted_only"):
+            opts["scope"] = {**known["scope"], "unrouted_only": True}
+    excluded = sorted(do_not_touch_nets(model, cfg)) if model is not None else list(cfg.get("nets", "do_not_touch"))
+    for key, val in (("exclude_nets", excluded), ("ignore_pads", list(cfg.get("nets", "ignore_pads"))),
+                     ("net_priority", dict(priorities or {}))):
         if key in known and val:
             opts[key] = val
     if threads_override is not None:
@@ -412,7 +408,11 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     summary = RunSummary(connections=conns, nets=nets, layers=len(model.get("layers", [])),
                          engine_version=report.facts["version"], board=board_name,
                          has_selection=bool(sel.footprints or sel.pads),
-                         connections_by_scope={"whole": conns})
+                         connections_by_scope=connections_by_scope(sel, model, cfg))
+    classes_of = port.netclasses()[1]
+    priorities, prio_findings = net_priorities([n["name"] for n in model.get("nets", [])], classes_of, cfg)
+    pre_plan = scope_from_selection(sel, model, cfg)
+    findings += [f for f in prio_findings + pre_plan.findings if f not in findings]
     report.facts.update(findings=findings, nets=nets, layers=summary.layers)
     decision = ui.preflight(findings, summary, cfg)
     errors = [f for f in findings if f.severity == "error"]
@@ -429,11 +429,13 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         cfg = cfg.with_values({("run", k): v for k, v in over.items()})
         if decision.save_to_toml and toml.is_file():
             update_config(toml, {f"run.{k}": v for k, v in over.items()})
-    # `scope_whole` is honoured (the alpha routes the whole board anyway) and never written to topor.toml.
+    # `scope_whole` (dialog: whole board although a selection exists) ignores the selection; never written to topor.toml.
+    plan = scope_from_selection(sel, model, cfg, whole=bool(decision.overrides.get("scope_whole")))
     log.line(f"decision: overrides {decision.overrides}, accepted {decision.accepted_codes}")
 
     # 3. rip plan -> the unrouted baseline
-    ripped = rip_plan(model, cfg)
+    rip = rip_plan(model, plan, cfg)
+    ripped = rip.remove_uuids
     out.ripped = ripped
     ripped_text = pcbfile.remove_items(copy_text, ripped)
     ripped_pcb = _variant(pcb_copy, ripped_text, work / "ripped")
@@ -450,7 +452,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         eng_model = refill_pours(eng_model, ripped_pcb.read_text())
 
     # 4. route + DRC loop
-    opts = build_options(cfg, engine)
+    opts = build_options(cfg, engine, plan=plan, rip=rip, model=model, priorities=priorities)
     budget = float(opts.get("wall_clock_s", 60.0))
     no_budget = budget <= 0
     geometry = cfg.get("output", "geometry")
