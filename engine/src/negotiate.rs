@@ -74,6 +74,11 @@ pub struct IterOutcome {
     pub ripped: Vec<usize>,
     /// Paths of the batch invalidated by an earlier commit and searched again (note §7).
     pub resolved_sequentially: usize,
+    /// Profile: seconds of the parallel search phase (2) and of the commit phase (3, including
+    /// the sequential re-searches), and the number of connections searched in phase 2.
+    pub search_s: f64,
+    pub commit_s: f64,
+    pub searched: usize,
 }
 
 /// PathFinder state over the layers and via sites of a [`MultiGraph`] (note §4).
@@ -169,7 +174,10 @@ impl Negotiator {
         let dead = self.dead.clone();
         // (2) Every search reads only the frozen graph: results are independent of the pool size.
         let todo: Vec<usize> = if timed_out { Vec::new() } else { seq.clone() };
+        let t_search = Instant::now();
         let results = self.search_all(mg, obs, conns, &todo, starts, goals, opts, deadline, &dead);
+        let search_s = t_search.elapsed().as_secs_f64();
+        let t_commit = Instant::now();
         // (3) Commit in order; a path invalidated by an earlier commit is searched again,
         // sequentially, against the graph as it then stands (the M2 order is kept).
         let t0_layers: Vec<u64> = mg.layers.iter().map(|c| c.g.clock).collect();
@@ -272,7 +280,11 @@ impl Negotiator {
             })
             .sum();
         self.pending_rip = ripped.clone();
+        let commit_s = t_commit.elapsed().as_secs_f64();
         IterOutcome {
+            search_s,
+            commit_s,
+            searched: todo.len(),
             paths: self.cur.clone(),
             blocked,
             overuse_edges,

@@ -2,7 +2,7 @@
 //! per connection plus the layered-search counters.
 //!
 //! `cargo run --release --example route_probe -- <model.json> [--options '<Options JSON>']
-//!     [--iters N] [--margin NM] [--quiet] [--dump out.json]`
+//!     [--iters N] [--margin NM] [--quiet] [--profile] [--dump out.json]`
 //!
 //! Engine-only reproduction of a harness run (same `route()` entry point, no Python). The M2
 //! iteration-by-iteration replay of the single-layer pipeline (search order, sketch, relax and
@@ -14,7 +14,7 @@ use topor_engine::model::{BoardModel, Options};
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mut path, mut options_json, mut iters, mut margin) = (None, None, None, None);
-    let mut quiet = false;
+    let (mut quiet, mut profile) = (false, false);
     let mut dump: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
@@ -32,6 +32,7 @@ fn main() {
                 i += 1;
             }
             "--quiet" => quiet = true,
+            "--profile" => profile = true,
             "--dump" => {
                 dump = Some(args[i + 1].clone());
                 i += 1;
@@ -49,6 +50,7 @@ fn main() {
         Some(oj) => Options::from_json(&oj).expect("parse --options"),
         None => Options::default(),
     };
+    o.profile |= profile; // or `"profile": true` in --options
     if let Some(n) = iters {
         o.pathfinder_iter_cap = n;
     }
@@ -109,6 +111,33 @@ fn main() {
                 c.pattern
             );
         }
+    }
+    if let Some(p) = &r.profile {
+        println!("  iter  search_s  commit_s metrize_s  check_s searched re-searched ripped routed overuse");
+        for it in p {
+            println!(
+                "  {:>4} {:>9.3} {:>9.3} {:>9.3} {:>8.3} {:>8} {:>11} {:>6} {:>6} {:>6}",
+                it.iteration,
+                it.search_s,
+                it.commit_s,
+                it.metrize_s,
+                it.check_s,
+                it.searched,
+                it.re_searched,
+                it.ripped,
+                it.routed,
+                it.overuse_edges
+            );
+        }
+        let sum = |f: fn(&topor_engine::route::IterProfile) -> f64| p.iter().map(f).sum::<f64>();
+        println!(
+            "  total search {:.3}s commit {:.3}s metrize {:.3}s (check {:.3}s) of {:.3}s",
+            sum(|i| i.search_s),
+            sum(|i| i.commit_s),
+            sum(|i| i.metrize_s),
+            sum(|i| i.check_s),
+            wall
+        );
     }
     let tot = topor_engine::search::search_totals();
     for (name, (ns, n, e, c, b)) in ["search", "ghost"].iter().zip(tot) {

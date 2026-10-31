@@ -869,3 +869,42 @@ fn block_probe_respects_deadline_and_step_cap() {
         );
     }
 }
+
+#[test]
+fn profile_absent_by_default_and_per_iteration_when_enabled() {
+    let m = four_nets();
+    let off = route(&m, &opts());
+    let v = serde_json::to_value(&off).unwrap();
+    assert!(
+        v.get("profile").is_none(),
+        "profile must not be emitted by default"
+    );
+    assert_eq!(json_no_runtime(&off), json_no_runtime(&route(&m, &opts())));
+
+    let on = route(
+        &m,
+        &Options {
+            profile: true,
+            ..opts()
+        },
+    );
+    let p = on.profile.as_ref().expect("profile enabled");
+    assert_eq!(p.len(), on.iterations as usize, "{p:?}");
+    for (i, it) in p.iter().enumerate() {
+        assert_eq!(it.iteration as usize, i + 1);
+        assert!(
+            it.search_s >= 0.0 && it.commit_s >= 0.0 && it.metrize_s >= 0.0 && it.check_s >= 0.0
+        );
+        assert!(it.check_s <= it.metrize_s + 1e-9);
+    }
+    assert_eq!(p[0].searched, 4);
+    // the enabled run routes identically
+    let mut a = serde_json::to_value(&on).unwrap();
+    a.as_object_mut().unwrap().remove("profile");
+    let mut b = serde_json::to_value(&off).unwrap();
+    for k in ["runtime_s", "threads_used"] {
+        a.as_object_mut().unwrap().remove(k);
+        b.as_object_mut().unwrap().remove(k);
+    }
+    assert_eq!(a, b);
+}

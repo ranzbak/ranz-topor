@@ -170,6 +170,31 @@ pub struct RouteResult {
     /// Outcome of the zero-slack retry: `off`, `kept`, `no candidate`, `no length gain`,
     /// `infeasible: …`, `skipped: deadline` or `not run`.
     pub zero_slack: String,
+    /// Per-iteration timers; only with `Options::profile` (never in the default output).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<Vec<IterProfile>>,
+}
+
+/// One PathFinder iteration's cost (diagnostics, `Options::profile`). Seconds are wall clock.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct IterProfile {
+    pub iteration: u32,
+    /// Parallel search phase.
+    pub search_s: f64,
+    /// Sequential commit phase including the re-searches of invalidated paths.
+    pub commit_s: f64,
+    /// Metrization (sketch, relax, quantise, self-check), `check_s` included.
+    pub metrize_s: f64,
+    /// Self-check rounds inside the metrization.
+    pub check_s: f64,
+    /// Connections searched in the parallel phase.
+    pub searched: usize,
+    /// Paths invalidated by an earlier commit and searched again.
+    pub re_searched: usize,
+    /// Connections ripped up for the next iteration.
+    pub ripped: usize,
+    pub routed: usize,
+    pub overuse_edges: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -299,6 +324,8 @@ struct Metrized {
     res: Vec<(usize, Res)>,
     relax_iterations: u32,
     rounds: u32,
+    /// Seconds spent in the self-check rounds (profile).
+    check_s: f64,
     timed_out: bool,
     /// Zero-slack identification pass (`ZsSpec` without corridor): the static obstacles that
     /// pinch the relaxed wire, `(anchors, walls)` (`corridor_obstacles`).
@@ -653,6 +680,7 @@ fn metrize_zs(
         res: Vec::new(),
         relax_iterations: 0,
         rounds: 0,
+        check_s: 0.0,
         timed_out: false,
         zs_corridor: None,
     };
@@ -880,6 +908,7 @@ fn metrize_zs(
             st.fail[k] = None;
         }
     }
+    let t_check = Instant::now();
     loop {
         if cx.opts.skip_self_check || out.rounds as usize > present.len() {
             break;
@@ -933,6 +962,7 @@ fn metrize_zs(
             break;
         }
     }
+    out.check_s = t_check.elapsed().as_secs_f64();
     // Index the legs that passed, once their whole connection is complete.
     for &i in routed {
         let ks = st.conn_legs[i].clone();
@@ -2133,6 +2163,7 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
     }
     let m = live.len();
 
+    let mut profile: Vec<IterProfile> = Vec::new();
     let mut best: Option<Snap> = None;
     let (mut iterations, mut converged, mut timed_out) = (0u32, false, false);
     let mut setup_fail: Option<String> = None;
@@ -2340,7 +2371,9 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
                         .collect();
                     let mut work: Vec<usize> = active.clone();
                     work.extend(out.ripped.iter().copied());
+                    let t_metrize = Instant::now();
                     let mt = metrize(&cx, &obs, &mg, &routed, &mut metr, &work);
+                    let metrize_s = t_metrize.elapsed().as_secs_f64();
                     // Anytime: a timed-out metrization still yields what it completed; the
                     // loop ends after this iteration's result is recorded.
                     if mt.timed_out {
@@ -2350,6 +2383,20 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
                         }
                     }
                     iterations = it;
+                    if opts.profile {
+                        profile.push(IterProfile {
+                            iteration: it,
+                            search_s: out.search_s,
+                            commit_s: out.commit_s,
+                            metrize_s,
+                            check_s: mt.check_s,
+                            searched: out.searched,
+                            re_searched: out.resolved_sequentially,
+                            ripped: out.ripped.len(),
+                            routed: routed.len(),
+                            overuse_edges: out.overuse_edges,
+                        });
+                    }
                     let mut res: Vec<Res> = (0..m)
                         .map(|i| match (&perm[i], out.blocked.get(&i)) {
                             (Some(r), _) => Res::Fail {
@@ -2736,5 +2783,6 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
         warnings,
         zero_slack_wires,
         zero_slack: zs_status,
+        profile: opts.profile.then_some(profile),
     }
 }
