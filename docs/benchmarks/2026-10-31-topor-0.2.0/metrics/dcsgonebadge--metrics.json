@@ -1,0 +1,10092 @@
+{
+ "board": "dcsgonebadge",
+ "footprints": 157,
+ "pads": 458,
+ "nets_total": 86,
+ "orig_all": {
+  "segments": 1369,
+  "arcs": 14,
+  "vias": 203,
+  "track_mm": 4167.082,
+  "arc_mm": 43.197
+ },
+ "orig_drc": {
+  "total": 192,
+  "violations": {
+   "starved_thermal": 2,
+   "courtyards_overlap": 6,
+   "clearance": 11,
+   "silk_overlap": 26,
+   "silk_over_copper": 84,
+   "text_height": 41,
+   "lib_footprint_mismatch": 12,
+   "lib_footprint_issues": 6,
+   "silk_edge_clearance": 3,
+   "connection_width": 1
+  }
+ },
+ "removed": {
+  "removed_tracks": 1369,
+  "removed_arcs": 14,
+  "removed_vias": 201,
+  "removed_teardrops": 0
+ },
+ "kept": {
+  "kept_locked_tracks": 0,
+  "kept_free_vias": 2,
+  "kept_locked_vias": 0,
+  "kept_rf_tracks": 0,
+  "kept_rf_vias": 0
+ },
+ "routed_all": {
+  "segments": 39,
+  "arcs": 17,
+  "vias": 2,
+  "track_mm": 214.317,
+  "arc_mm": 4.119
+ },
+ "routed_drc": {
+  "routing_new": 0,
+  "routing_preexisting": 4,
+  "incomplete": {
+   "track_dangling": 0,
+   "via_dangling": 0,
+   "unconnected_items": 192
+  },
+  "other": 158,
+  "by_type_new": {}
+ },
+ "routed_items": 56,
+ "unchanged_items": 0,
+ "replaced": 0,
+ "drc_loop": {
+  "rounds": 1,
+  "pinned": {},
+  "spots": []
+ },
+ "zero_slack": {
+  "status": "#3: infeasible at margin 0: self-check: hole:85680000,-125320000 (gap 277951 < 350000 nm)",
+  "wires": []
+ },
+ "teardrops_removed": 0,
+ "router_report": {
+  "items": [
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      53050000,
+      121500000
+     ],
+     "b": [
+      53050000,
+      123850000
+     ]
+    },
+    "group": null,
+    "wire": 1
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      70300000,
+      123850000
+     ],
+     "b": [
+      67247181,
+      111430871
+     ]
+    },
+    "group": null,
+    "wire": 3
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      67247181,
+      111430871
+     ],
+     "mid": [
+      67218359,
+      110710549
+     ],
+     "end": [
+      67473731,
+      110036399
+     ]
+    },
+    "group": null,
+    "wire": 3
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      67473731,
+      110036399
+     ],
+     "b": [
+      74161214,
+      99443946
+     ]
+    },
+    "group": null,
+    "wire": 3
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      74161214,
+      99443946
+     ],
+     "mid": [
+      74199308,
+      99408047
+     ],
+     "end": [
+      74250000,
+      99395000
+     ]
+    },
+    "group": null,
+    "wire": 3
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      74250000,
+      99395000
+     ],
+     "b": [
+      80250000,
+      99395000
+     ]
+    },
+    "group": null,
+    "wire": 3
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      80250000,
+      99395000
+     ],
+     "mid": [
+      80310461,
+      99414154
+     ],
+     "end": [
+      80348863,
+      99464629
+     ]
+    },
+    "group": null,
+    "wire": 3
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      80348863,
+      99464629
+     ],
+     "b": [
+      87163794,
+      118512508
+     ]
+    },
+    "group": null,
+    "wire": 3
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      87163794,
+      118512508
+     ],
+     "mid": [
+      87190179,
+      118606202
+     ],
+     "end": [
+      87203407,
+      118702637
+     ]
+    },
+    "group": null,
+    "wire": 3
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      87203407,
+      118702637
+     ],
+     "b": [
+      87550000,
+      123850000
+     ]
+    },
+    "group": null,
+    "wire": 3
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      87550000,
+      123850000
+     ],
+     "b": [
+      88580740,
+      126653703
+     ]
+    },
+    "group": null,
+    "wire": 4
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      88580740,
+      126653703
+     ],
+     "mid": [
+      88591273,
+      126686774
+     ],
+     "end": [
+      88598863,
+      126720642
+     ]
+    },
+    "group": null,
+    "wire": 4
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      88598863,
+      126720642
+     ],
+     "b": [
+      89050000,
+      129250000
+     ]
+    },
+    "group": null,
+    "wire": 4
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      115875000,
+      123875000
+     ],
+     "b": [
+      117825000,
+      124500000
+     ]
+    },
+    "group": null,
+    "wire": 5
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      98625000,
+      123875000
+     ],
+     "b": [
+      100575000,
+      124500000
+     ]
+    },
+    "group": null,
+    "wire": 6
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      55500000,
+      97250000
+     ],
+     "b": [
+      57450000,
+      97875000
+     ]
+    },
+    "group": null,
+    "wire": 7
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      64125000,
+      123875000
+     ],
+     "b": [
+      66075000,
+      124500000
+     ]
+    },
+    "group": null,
+    "wire": 8
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      53050000,
+      73900000
+     ],
+     "b": [
+      57950000,
+      88350000
+     ]
+    },
+    "group": null,
+    "wire": 9
+   },
+   {
+    "net": 6,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      123562500,
+      98875000
+     ],
+     "b": [
+      123562500,
+      102250000
+     ]
+    },
+    "group": null,
+    "wire": 10
+   },
+   {
+    "net": 6,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      123562500,
+      98875000
+     ],
+     "b": [
+      123562500,
+      95500000
+     ]
+    },
+    "group": null,
+    "wire": 11
+   },
+   {
+    "net": 7,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      100045000,
+      53000000
+     ],
+     "b": [
+      97895000,
+      56500000
+     ]
+    },
+    "group": null,
+    "wire": 12
+   },
+   {
+    "net": 14,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      113925000,
+      126500000
+     ],
+     "b": [
+      117825000,
+      126500000
+     ]
+    },
+    "group": null,
+    "wire": 15
+   },
+   {
+    "net": 20,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      96675000,
+      126500000
+     ],
+     "b": [
+      100575000,
+      126500000
+     ]
+    },
+    "group": null,
+    "wire": 16
+   },
+   {
+    "net": 21,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      126950000,
+      52850000
+     ],
+     "b": [
+      127980740,
+      55653703
+     ]
+    },
+    "group": null,
+    "wire": 17
+   },
+   {
+    "net": 21,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      127980740,
+      55653703
+     ],
+     "mid": [
+      127998888,
+      55720780
+     ],
+     "end": [
+      128005000,
+      55790000
+     ]
+    },
+    "group": null,
+    "wire": 17
+   },
+   {
+    "net": 21,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      128005000,
+      55790000
+     ],
+     "b": [
+      128005000,
+      56510000
+     ]
+    },
+    "group": null,
+    "wire": 17
+   },
+   {
+    "net": 21,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      128005000,
+      56510000
+     ],
+     "mid": [
+      128004724,
+      56524772
+     ],
+     "end": [
+      128003895,
+      56539524
+     ]
+    },
+    "group": null,
+    "wire": 17
+   },
+   {
+    "net": 21,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      128003895,
+      56539524
+     ],
+     "b": [
+      126950000,
+      70600000
+     ]
+    },
+    "group": null,
+    "wire": 17
+   },
+   {
+    "net": 23,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      104800000,
+      56150000
+     ],
+     "b": [
+      99858296,
+      57198360
+     ]
+    },
+    "group": null,
+    "wire": 19
+   },
+   {
+    "net": 23,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      99858296,
+      57198360
+     ],
+     "mid": [
+      99826822,
+      57203335
+     ],
+     "end": [
+      99795000,
+      57205000
+     ]
+    },
+    "group": null,
+    "wire": 19
+   },
+   {
+    "net": 23,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      99795000,
+      57205000
+     ],
+     "b": [
+      97495000,
+      57205000
+     ]
+    },
+    "group": null,
+    "wire": 19
+   },
+   {
+    "net": 23,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      97495000,
+      57205000
+     ],
+     "mid": [
+      97387044,
+      57185255
+     ],
+     "end": [
+      97293065,
+      57128577
+     ]
+    },
+    "group": null,
+    "wire": 19
+   },
+   {
+    "net": 23,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      97293065,
+      57128577
+     ],
+     "b": [
+      92450000,
+      52850000
+     ]
+    },
+    "group": null,
+    "wire": 19
+   },
+   {
+    "net": 26,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      79425000,
+      126500000
+     ],
+     "b": [
+      83325000,
+      126500000
+     ]
+    },
+    "group": null,
+    "wire": 22
+   },
+   {
+    "net": 31,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      53550000,
+      99875000
+     ],
+     "b": [
+      57450000,
+      99875000
+     ]
+    },
+    "group": null,
+    "wire": 26
+   },
+   {
+    "net": 34,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      122050000,
+      127150000
+     ],
+     "b": [
+      123080740,
+      124346297
+     ]
+    },
+    "group": null,
+    "wire": 27
+   },
+   {
+    "net": 34,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      123080740,
+      124346297
+     ],
+     "mid": [
+      123098888,
+      124279220
+     ],
+     "end": [
+      123105000,
+      124210000
+     ]
+    },
+    "group": null,
+    "wire": 27
+   },
+   {
+    "net": 34,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      123105000,
+      124210000
+     ],
+     "b": [
+      123105000,
+      123490000
+     ]
+    },
+    "group": null,
+    "wire": 27
+   },
+   {
+    "net": 34,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      123105000,
+      123490000
+     ],
+     "mid": [
+      123101136,
+      123434886
+     ],
+     "end": [
+      123089620,
+      123380850
+     ]
+    },
+    "group": null,
+    "wire": 27
+   },
+   {
+    "net": 34,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      123089620,
+      123380850
+     ],
+     "b": [
+      119793124,
+      111915720
+     ]
+    },
+    "group": null,
+    "wire": 27
+   },
+   {
+    "net": 34,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      119793124,
+      111915720
+     ],
+     "mid": [
+      119683466,
+      111756350
+     ],
+     "end": [
+      119500000,
+      111695000
+     ]
+    },
+    "group": null,
+    "wire": 27
+   },
+   {
+    "net": 34,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      119500000,
+      111695000
+     ],
+     "b": [
+      117500000,
+      111695000
+     ]
+    },
+    "group": null,
+    "wire": 27
+   },
+   {
+    "net": 34,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      117500000,
+      111695000
+     ],
+     "mid": [
+      117352417,
+      111733084
+     ],
+     "end": [
+      117241690,
+      111837824
+     ]
+    },
+    "group": null,
+    "wire": 27
+   },
+   {
+    "net": 34,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      117241690,
+      111837824
+     ],
+     "b": [
+      109700000,
+      123850000
+     ]
+    },
+    "group": null,
+    "wire": 27
+   },
+   {
+    "net": 36,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      57950000,
+      52850000
+     ],
+     "b": [
+      61468041,
+      50738487
+     ]
+    },
+    "group": null,
+    "wire": 29
+   },
+   {
+    "net": 36,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      61468041,
+      50738487
+     ],
+     "mid": [
+      61543564,
+      50706073
+     ],
+     "end": [
+      61625000,
+      50695000
+     ]
+    },
+    "group": null,
+    "wire": 29
+   },
+   {
+    "net": 36,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      61625000,
+      50695000
+     ],
+     "b": [
+      66625000,
+      50695000
+     ]
+    },
+    "group": null,
+    "wire": 29
+   },
+   {
+    "net": 36,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      66625000,
+      50695000
+     ],
+     "mid": [
+      66771122,
+      50732281
+     ],
+     "end": [
+      66881522,
+      50835011
+     ]
+    },
+    "group": null,
+    "wire": 29
+   },
+   {
+    "net": 36,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      66881522,
+      50835011
+     ],
+     "b": [
+      70300000,
+      56150000
+     ]
+    },
+    "group": null,
+    "wire": 29
+   },
+   {
+    "net": 40,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      75200000,
+      52850000
+     ],
+     "b": [
+      77518022,
+      54241501
+     ]
+    },
+    "group": null,
+    "wire": 30
+   },
+   {
+    "net": 40,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      77518022,
+      54241501
+     ],
+     "mid": [
+      77585079,
+      54271443
+     ],
+     "end": [
+      77657349,
+      54284489
+     ]
+    },
+    "group": null,
+    "wire": 30
+   },
+   {
+    "net": 40,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      77657349,
+      54284489
+     ],
+     "b": [
+      85092651,
+      54715511
+     ]
+    },
+    "group": null,
+    "wire": 30
+   },
+   {
+    "net": 40,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      85092651,
+      54715511
+     ],
+     "mid": [
+      85164921,
+      54728557
+     ],
+     "end": [
+      85231978,
+      54758499
+     ]
+    },
+    "group": null,
+    "wire": 30
+   },
+   {
+    "net": 40,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      85231978,
+      54758499
+     ],
+     "b": [
+      87550000,
+      56150000
+     ]
+    },
+    "group": null,
+    "wire": 30
+   },
+   {
+    "net": 41,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      62175000,
+      126500000
+     ],
+     "b": [
+      66075000,
+      126500000
+     ]
+    },
+    "group": null,
+    "wire": 31
+   },
+   {
+    "net": 76,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      94320000,
+      129500000
+     ],
+     "b": [
+      94320000,
+      125320000
+     ]
+    },
+    "group": null,
+    "wire": 32
+   }
+  ],
+  "connections": [
+   {
+    "id": 0,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D16.1",
+     "at": [
+      57950000,
+      73900000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C16.1",
+     "at": [
+      54550000,
+      72250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 1,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "self-check: hole:55500000,-116625000 (gap 205000 < 350000 nm)",
+    "from": {
+     "kind": "pad",
+     "label": "D14.1",
+     "at": [
+      57950000,
+      109400000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C13.1",
+     "at": [
+      53050000,
+      121500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 2,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D14.1",
+     "at": [
+      57950000,
+      109400000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C14.1",
+     "at": [
+      56450000,
+      108750000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 3,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "C13.1",
+     "at": [
+      53050000,
+      121500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D13.1",
+     "at": [
+      53050000,
+      123850000
+     ]
+    },
+    "length_nm": 2350000,
+    "length_outside_pads_nm": 1175000,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 4,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 4,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "self-check: hole:124500000,-63375000 (gap 205000 < 350000 nm)",
+    "from": {
+     "kind": "pad",
+     "label": "D5.1",
+     "at": [
+      126950000,
+      56150000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D6.1",
+     "at": [
+      122050000,
+      70600000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 5,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D5.1",
+     "at": [
+      126950000,
+      56150000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C5.1",
+     "at": [
+      123550000,
+      53000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 6,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D15.1",
+     "at": [
+      57950000,
+      91650000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C15.1",
+     "at": [
+      54550000,
+      99750000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 7,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D4.1",
+     "at": [
+      109700000,
+      56150000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C4.1",
+     "at": [
+      106300000,
+      53000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 8,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D4.1",
+     "at": [
+      109700000,
+      56150000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C5.1",
+     "at": [
+      123550000,
+      53000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 9,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "D12.1",
+     "at": [
+      70300000,
+      123850000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D11.1",
+     "at": [
+      87550000,
+      123850000
+     ]
+    },
+    "length_nm": 58586076,
+    "length_outside_pads_nm": 57671660,
+    "pattern": "SASASASAS",
+    "anchors": 4,
+    "crossings": 70,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 10,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D12.1",
+     "at": [
+      70300000,
+      123850000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C12.1",
+     "at": [
+      68450000,
+      128500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 11,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D8.1",
+     "at": [
+      122050000,
+      106100000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C8.1",
+     "at": [
+      123550000,
+      107750000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 12,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D8.1",
+     "at": [
+      122050000,
+      106100000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "TP7.1",
+     "at": [
+      118500000,
+      95600000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 13,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D7.1",
+     "at": [
+      122050000,
+      88350000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C6.1",
+     "at": [
+      123550000,
+      72250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 14,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D7.1",
+     "at": [
+      122050000,
+      88350000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C7.1",
+     "at": [
+      123550000,
+      90000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 15,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D13.1",
+     "at": [
+      53050000,
+      123850000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C12.1",
+     "at": [
+      68450000,
+      128500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 16,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D9.1",
+     "at": [
+      122050000,
+      123850000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C9.1",
+     "at": [
+      123550000,
+      125500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 17,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D9.1",
+     "at": [
+      122050000,
+      123850000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C8.1",
+     "at": [
+      123550000,
+      107750000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 18,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D9.1",
+     "at": [
+      122050000,
+      123850000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C23.1",
+     "at": [
+      111500000,
+      120050000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 19,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D6.1",
+     "at": [
+      122050000,
+      70600000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C6.1",
+     "at": [
+      123550000,
+      72250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 20,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "D11.1",
+     "at": [
+      87550000,
+      123850000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C11.1",
+     "at": [
+      89050000,
+      129250000
+     ]
+    },
+    "length_nm": 5625882,
+    "length_outside_pads_nm": 4409994,
+    "pattern": "SAS",
+    "anchors": 1,
+    "crossings": 10,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 21,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D11.1",
+     "at": [
+      87550000,
+      123850000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "Q2.3",
+     "at": [
+      102250000,
+      118937500
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 22,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D1.1",
+     "at": [
+      57950000,
+      56150000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C2.1",
+     "at": [
+      71800000,
+      53000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 23,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D1.1",
+     "at": [
+      57950000,
+      56150000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C16.1",
+     "at": [
+      54550000,
+      72250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 24,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D1.1",
+     "at": [
+      57950000,
+      56150000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C1.1",
+     "at": [
+      54550000,
+      53000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 25,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D2.1",
+     "at": [
+      75200000,
+      56150000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C2.1",
+     "at": [
+      71800000,
+      53000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 26,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D2.1",
+     "at": [
+      75200000,
+      56150000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C3.1",
+     "at": [
+      89050000,
+      53000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 27,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D3.1",
+     "at": [
+      92450000,
+      56150000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C3.1",
+     "at": [
+      89050000,
+      53000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 28,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D3.1",
+     "at": [
+      92450000,
+      56150000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C4.1",
+     "at": [
+      106300000,
+      53000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 29,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D10.1",
+     "at": [
+      104800000,
+      123850000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "Q2.3",
+     "at": [
+      102250000,
+      118937500
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 30,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D10.1",
+     "at": [
+      104800000,
+      123850000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U3.3",
+     "at": [
+      109637500,
+      121950000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 31,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C7.1",
+     "at": [
+      123550000,
+      90000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "TP7.1",
+     "at": [
+      118500000,
+      95600000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 32,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U2.5",
+     "at": [
+      106137500,
+      101375000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "TP7.1",
+     "at": [
+      118500000,
+      95600000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 33,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C14.1",
+     "at": [
+      56450000,
+      108750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C15.1",
+     "at": [
+      54550000,
+      99750000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 34,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U3.1",
+     "at": [
+      109637500,
+      120050000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U3.3",
+     "at": [
+      109637500,
+      121950000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 35,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U3.1",
+     "at": [
+      109637500,
+      120050000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C23.1",
+     "at": [
+      111500000,
+      120050000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 36,
+    "net": 1,
+    "name": "VCC",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U3.3",
+     "at": [
+      109637500,
+      121950000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C10.1",
+     "at": [
+      111350000,
+      128750000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 37,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "BT1.2",
+     "at": [
+      115875000,
+      128400000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "SW4.0",
+     "at": [
+      115875000,
+      127125000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 38,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "SW4.0",
+     "at": [
+      115875000,
+      123875000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "SW4.1",
+     "at": [
+      117825000,
+      124500000
+     ]
+    },
+    "length_nm": 2047712,
+    "length_outside_pads_nm": 1105456,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 6,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 39,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "SW6.3",
+     "at": [
+      100000000,
+      127750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "SW3.0",
+     "at": [
+      98625000,
+      127125000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 40,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "SW3.0",
+     "at": [
+      98625000,
+      123875000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "SW3.1",
+     "at": [
+      100575000,
+      124500000
+     ]
+    },
+    "length_nm": 2047712,
+    "length_outside_pads_nm": 1105456,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 8,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 41,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C18.1",
+     "at": [
+      82050000,
+      128000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "SW2.0",
+     "at": [
+      81375000,
+      127125000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 42,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "R6.2",
+     "at": [
+      82087500,
+      123500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "SW2.1",
+     "at": [
+      83325000,
+      124500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 43,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C15.2",
+     "at": [
+      56450000,
+      99750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "SW5.0",
+     "at": [
+      55500000,
+      100500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 44,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "SW5.0",
+     "at": [
+      55500000,
+      97250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "SW5.1",
+     "at": [
+      57450000,
+      97875000
+     ]
+    },
+    "length_nm": 2047712,
+    "length_outside_pads_nm": 1105456,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 5,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 45,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C12.2",
+     "at": [
+      66550000,
+      128500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "SW1.0",
+     "at": [
+      64125000,
+      127125000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 46,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "SW1.0",
+     "at": [
+      64125000,
+      123875000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "SW1.1",
+     "at": [
+      66075000,
+      124500000
+     ]
+    },
+    "length_nm": 2047712,
+    "length_outside_pads_nm": 1105456,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 7,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 47,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U4.21",
+     "at": [
+      108500000,
+      113000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U4.3",
+     "at": [
+      106562500,
+      113000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 48,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U4.10",
+     "at": [
+      109500000,
+      111062500
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U4.9",
+     "at": [
+      109000000,
+      111062500
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 49,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U4.10",
+     "at": [
+      109500000,
+      111062500
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U4.11",
+     "at": [
+      110437500,
+      112000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 50,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.29",
+     "at": [
+      88710000,
+      105750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.29",
+     "at": [
+      87460000,
+      105750000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 51,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.29",
+     "at": [
+      88710000,
+      105750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.29",
+     "at": [
+      88710000,
+      107000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 52,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "TP6.1",
+     "at": [
+      69000000,
+      111000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "TP6.1",
+     "at": [
+      69000000,
+      111000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 53,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "SW3.0",
+     "at": [
+      98625000,
+      123875000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "SW6.3",
+     "at": [
+      100000000,
+      122250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 54,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "SW5.0",
+     "at": [
+      55500000,
+      97250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J3.1",
+     "at": [
+      56930000,
+      95250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 55,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J3.9",
+     "at": [
+      56930000,
+      91250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J3.8",
+     "at": [
+      56930000,
+      91750000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 56,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J3.15",
+     "at": [
+      56930000,
+      88250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J3.16",
+     "at": [
+      56930000,
+      87750000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 57,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C19.2",
+     "at": [
+      94250000,
+      121250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U7.3",
+     "at": [
+      90850000,
+      121000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 58,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U6.9",
+     "at": [
+      124325000,
+      84875000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U6.4",
+     "at": [
+      125775000,
+      85625000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 59,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U5.9",
+     "at": [
+      125500000,
+      122000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U5.1",
+     "at": [
+      124750000,
+      121100000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 60,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U5.9",
+     "at": [
+      125500000,
+      122000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U5.4",
+     "at": [
+      126250000,
+      121100000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 61,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U5.9",
+     "at": [
+      125500000,
+      122000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U5.6",
+     "at": [
+      125750000,
+      122900000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 62,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.29",
+     "at": [
+      87460000,
+      105750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.29",
+     "at": [
+      86210000,
+      105750000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 63,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.29",
+     "at": [
+      87460000,
+      105750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.29",
+     "at": [
+      87460000,
+      107000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 64,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.29",
+     "at": [
+      86210000,
+      105750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.29",
+     "at": [
+      86210000,
+      107000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 65,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.29",
+     "at": [
+      88710000,
+      107000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.29",
+     "at": [
+      88710000,
+      108250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 66,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.29",
+     "at": [
+      87460000,
+      107000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.29",
+     "at": [
+      87460000,
+      108250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 67,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.29",
+     "at": [
+      86210000,
+      107000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.29",
+     "at": [
+      86210000,
+      108250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 68,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "SW6.2",
+     "at": [
+      102500000,
+      122250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "SW6.3",
+     "at": [
+      100000000,
+      122250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 69,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J3.16",
+     "at": [
+      56930000,
+      87750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J3.18",
+     "at": [
+      56930000,
+      86750000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 70,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J3.18",
+     "at": [
+      56930000,
+      86750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J3.21",
+     "at": [
+      56930000,
+      85250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 71,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U7.3",
+     "at": [
+      90850000,
+      121000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U7.8",
+     "at": [
+      90087500,
+      121000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 72,
+    "net": 4,
+    "name": "Net-(D15-DOUT)",
+    "layer": 0,
+    "width": 200000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "D16.4",
+     "at": [
+      53050000,
+      73900000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D15.2",
+     "at": [
+      57950000,
+      88350000
+     ]
+    },
+    "length_nm": 15258195,
+    "length_outside_pads_nm": 14307857,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 5,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 73,
+    "net": 5,
+    "name": "Net-(D20-K)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D20.1",
+     "at": [
+      125437500,
+      98875000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R13.2",
+     "at": [
+      125412500,
+      98875000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 74,
+    "net": 6,
+    "name": "+5V",
+    "layer": 0,
+    "width": 200000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "D20.2",
+     "at": [
+      123562500,
+      98875000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D21.2",
+     "at": [
+      123562500,
+      102250000
+     ]
+    },
+    "length_nm": 3375000,
+    "length_outside_pads_nm": 1975000,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 4,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 75,
+    "net": 6,
+    "name": "+5V",
+    "layer": 0,
+    "width": 200000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "D20.2",
+     "at": [
+      123562500,
+      98875000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D19.2",
+     "at": [
+      123562500,
+      95500000
+     ]
+    },
+    "length_nm": 3375000,
+    "length_outside_pads_nm": 1975000,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 6,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 76,
+    "net": 6,
+    "name": "+5V",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D21.2",
+     "at": [
+      123562500,
+      102250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "TP9.1",
+     "at": [
+      118500000,
+      104500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 77,
+    "net": 6,
+    "name": "+5V",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U4.2",
+     "at": [
+      106562500,
+      113500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U4.4",
+     "at": [
+      106562500,
+      112500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 78,
+    "net": 6,
+    "name": "+5V",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U4.2",
+     "at": [
+      106562500,
+      113500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U4.19",
+     "at": [
+      108000000,
+      114937500
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 79,
+    "net": 6,
+    "name": "+5V",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U4.2",
+     "at": [
+      106562500,
+      113500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C22.1",
+     "at": [
+      101500000,
+      113200000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 80,
+    "net": 6,
+    "name": "+5V",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U4.17",
+     "at": [
+      109000000,
+      114937500
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U4.18",
+     "at": [
+      108500000,
+      114937500
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 81,
+    "net": 6,
+    "name": "+5V",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U4.17",
+     "at": [
+      109000000,
+      114937500
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "TP9.1",
+     "at": [
+      118500000,
+      104500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 82,
+    "net": 6,
+    "name": "+5V",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U4.18",
+     "at": [
+      108500000,
+      114937500
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U4.19",
+     "at": [
+      108000000,
+      114937500
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 83,
+    "net": 6,
+    "name": "+5V",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D23.1",
+     "at": [
+      96500000,
+      119350000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C22.1",
+     "at": [
+      101500000,
+      113200000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 84,
+    "net": 6,
+    "name": "+5V",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D23.1",
+     "at": [
+      96500000,
+      119350000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C19.1",
+     "at": [
+      94250000,
+      119350000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 85,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J5.1",
+     "at": [
+      113335000,
+      132000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U3.5",
+     "at": [
+      107362500,
+      120050000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 86,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J4.1",
+     "at": [
+      61585000,
+      132000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J6.3",
+     "at": [
+      76750000,
+      125000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 87,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J4.1",
+     "at": [
+      61585000,
+      132000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "Q1.2",
+     "at": [
+      61062500,
+      116050000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 88,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "D24.2",
+     "at": [
+      100045000,
+      53000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "Q4.1",
+     "at": [
+      97895000,
+      56500000
+     ]
+    },
+    "length_nm": 4107615,
+    "length_outside_pads_nm": 2659460,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 5,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 89,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "Q4.1",
+     "at": [
+      97895000,
+      56500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C28.2",
+     "at": [
+      123550000,
+      75000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 90,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "Q4.1",
+     "at": [
+      97895000,
+      56500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R17.1",
+     "at": [
+      80412500,
+      53250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 91,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "R12.2",
+     "at": [
+      55475000,
+      77750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J3.20",
+     "at": [
+      56930000,
+      85750000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 92,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C29.2",
+     "at": [
+      123550000,
+      78000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C28.2",
+     "at": [
+      123550000,
+      75000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 93,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C29.2",
+     "at": [
+      123550000,
+      78000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U6.8",
+     "at": [
+      122875000,
+      84125000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 94,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "R10.1",
+     "at": [
+      110337500,
+      118000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C24.2",
+     "at": [
+      108700000,
+      118000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 95,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "R21.2",
+     "at": [
+      109000000,
+      102250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R22.1",
+     "at": [
+      111000000,
+      102250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 96,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "R21.2",
+     "at": [
+      109000000,
+      102250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R2.2",
+     "at": [
+      101750000,
+      102250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 97,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "R21.2",
+     "at": [
+      109000000,
+      102250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C24.2",
+     "at": [
+      108700000,
+      118000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 98,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "R22.1",
+     "at": [
+      111000000,
+      102250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "TP8.1",
+     "at": [
+      118500000,
+      100000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 99,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.2",
+     "at": [
+      83010000,
+      99750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R2.2",
+     "at": [
+      101750000,
+      102250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 100,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.2",
+     "at": [
+      83010000,
+      99750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R1.1",
+     "at": [
+      71087500,
+      100000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 101,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J3.17",
+     "at": [
+      56930000,
+      87250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J3.19",
+     "at": [
+      56930000,
+      86250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 102,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J3.17",
+     "at": [
+      56930000,
+      87250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R16.2",
+     "at": [
+      54587500,
+      102000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 103,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J3.19",
+     "at": [
+      56930000,
+      86250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J3.20",
+     "at": [
+      56930000,
+      85750000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 104,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U3.5",
+     "at": [
+      107362500,
+      120050000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C24.2",
+     "at": [
+      108700000,
+      118000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 105,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "TP8.1",
+     "at": [
+      118500000,
+      100000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U6.8",
+     "at": [
+      122875000,
+      84125000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 106,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "Q1.2",
+     "at": [
+      61062500,
+      116050000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R16.2",
+     "at": [
+      54587500,
+      102000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 107,
+    "net": 7,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "R1.1",
+     "at": [
+      71087500,
+      100000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R16.2",
+     "at": [
+      54587500,
+      102000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 108,
+    "net": 8,
+    "name": "I2C_SDA",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J5.3",
+     "at": [
+      115875000,
+      132000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U5.8",
+     "at": [
+      124750000,
+      122900000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 109,
+    "net": 8,
+    "name": "I2C_SDA",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J4.3",
+     "at": [
+      64125000,
+      132000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J6.2",
+     "at": [
+      77750000,
+      125000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 110,
+    "net": 8,
+    "name": "I2C_SDA",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "R22.2",
+     "at": [
+      111000000,
+      100425000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.19",
+     "at": [
+      93170000,
+      117250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 111,
+    "net": 8,
+    "name": "I2C_SDA",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "R22.2",
+     "at": [
+      111000000,
+      100425000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "TP2.1",
+     "at": [
+      120500000,
+      87500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 112,
+    "net": 8,
+    "name": "I2C_SDA",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "R22.2",
+     "at": [
+      111000000,
+      100425000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U5.8",
+     "at": [
+      124750000,
+      122900000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 113,
+    "net": 8,
+    "name": "I2C_SDA",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.19",
+     "at": [
+      93170000,
+      117250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J6.2",
+     "at": [
+      77750000,
+      125000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 114,
+    "net": 8,
+    "name": "I2C_SDA",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "TP2.1",
+     "at": [
+      120500000,
+      87500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U6.5",
+     "at": [
+      122875000,
+      85625000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 115,
+    "net": 9,
+    "name": "I2C_SCL",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J5.4",
+     "at": [
+      115875000,
+      134540000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.18",
+     "at": [
+      94440000,
+      117250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 116,
+    "net": 9,
+    "name": "I2C_SCL",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J5.4",
+     "at": [
+      115875000,
+      134540000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U5.7",
+     "at": [
+      125250000,
+      122900000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 117,
+    "net": 9,
+    "name": "I2C_SCL",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J4.4",
+     "at": [
+      64125000,
+      134540000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J6.1",
+     "at": [
+      78750000,
+      125000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 118,
+    "net": 9,
+    "name": "I2C_SCL",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "TP1.1",
+     "at": [
+      120500000,
+      83500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R21.1",
+     "at": [
+      109000000,
+      100425000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 119,
+    "net": 9,
+    "name": "I2C_SCL",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "TP1.1",
+     "at": [
+      120500000,
+      83500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U6.6",
+     "at": [
+      122875000,
+      85125000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 120,
+    "net": 9,
+    "name": "I2C_SCL",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "R21.1",
+     "at": [
+      109000000,
+      100425000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.18",
+     "at": [
+      94440000,
+      117250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 121,
+    "net": 9,
+    "name": "I2C_SCL",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.18",
+     "at": [
+      94440000,
+      117250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J6.1",
+     "at": [
+      78750000,
+      125000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 122,
+    "net": 12,
+    "name": "Net-(D14-DOUT)",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "infeasible: wall pad:D14:3 grazed mid-span by 1800 nm",
+    "from": {
+     "kind": "pad",
+     "label": "D14.2",
+     "at": [
+      57950000,
+      106100000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D15.4",
+     "at": [
+      53050000,
+      91650000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 123,
+    "net": 13,
+    "name": "Net-(D13-DOUT)",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "infeasible: wall edge grazed mid-span by 455000 nm",
+    "from": {
+     "kind": "pad",
+     "label": "D14.4",
+     "at": [
+      53050000,
+      109400000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D13.2",
+     "at": [
+      53050000,
+      127150000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": [
+     50322158,
+     124913217
+    ],
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 124,
+    "net": 14,
+    "name": "TACT_D",
+    "layer": 0,
+    "width": 200000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "SW4.2",
+     "at": [
+      113925000,
+      126500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "SW4.2",
+     "at": [
+      117825000,
+      126500000
+     ]
+    },
+    "length_nm": 3900000,
+    "length_outside_pads_nm": 2800000,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 10,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 125,
+    "net": 14,
+    "name": "TACT_D",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "SW4.2",
+     "at": [
+      113925000,
+      126500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.15",
+     "at": [
+      98250000,
+      117250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 126,
+    "net": 14,
+    "name": "TACT_D",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.15",
+     "at": [
+      98250000,
+      117250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "TP5.1",
+     "at": [
+      103500000,
+      104500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 127,
+    "net": 17,
+    "name": "IR_RX",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "IC1.3",
+     "at": [
+      84525000,
+      55770000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.16",
+     "at": [
+      96980000,
+      117250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 128,
+    "net": 18,
+    "name": "Net-(IC1-VCC)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "IC1.4",
+     "at": [
+      84525000,
+      53230000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C31.1",
+     "at": [
+      84450000,
+      53250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 129,
+    "net": 18,
+    "name": "Net-(IC1-VCC)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C31.1",
+     "at": [
+      84450000,
+      53250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R17.2",
+     "at": [
+      78587500,
+      53250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 130,
+    "net": 19,
+    "name": "Net-(D21-K)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D21.1",
+     "at": [
+      125437500,
+      102250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R14.2",
+     "at": [
+      125412500,
+      102250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 131,
+    "net": 20,
+    "name": "TACT_C",
+    "layer": 0,
+    "width": 200000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "SW3.2",
+     "at": [
+      96675000,
+      126500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "SW3.2",
+     "at": [
+      100575000,
+      126500000
+     ]
+    },
+    "length_nm": 3900000,
+    "length_outside_pads_nm": 2800000,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 10,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 132,
+    "net": 20,
+    "name": "TACT_C",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "SW3.2",
+     "at": [
+      96675000,
+      126500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.11",
+     "at": [
+      94440000,
+      99750000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 133,
+    "net": 21,
+    "name": "Net-(D5-DOUT)",
+    "layer": 0,
+    "width": 200000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "D5.2",
+     "at": [
+      126950000,
+      52850000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D6.4",
+     "at": [
+      126950000,
+      70600000
+     ]
+    },
+    "length_nm": 17975796,
+    "length_outside_pads_nm": 17045087,
+    "pattern": "SASAS",
+    "anchors": 2,
+    "crossings": 11,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 134,
+    "net": 22,
+    "name": "Net-(D4-DOUT)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "blocked: no path",
+    "from": {
+     "kind": "pad",
+     "label": "D5.4",
+     "at": [
+      122050000,
+      56150000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D4.2",
+     "at": [
+      109700000,
+      52850000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 135,
+    "net": 23,
+    "name": "Net-(D3-DOUT)",
+    "layer": 0,
+    "width": 200000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "D4.4",
+     "at": [
+      104800000,
+      56150000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D3.2",
+     "at": [
+      92450000,
+      52850000
+     ]
+    },
+    "length_nm": 14098451,
+    "length_outside_pads_nm": 12652085,
+    "pattern": "SASAS",
+    "anchors": 2,
+    "crossings": 82,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 136,
+    "net": 24,
+    "name": "Net-(D12-DOUT)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "blocked: no path",
+    "from": {
+     "kind": "pad",
+     "label": "D12.2",
+     "at": [
+      70300000,
+      127150000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D13.4",
+     "at": [
+      57950000,
+      123850000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 137,
+    "net": 25,
+    "name": "Net-(D11-DOUT)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "infeasible: wall pad:D11:1 grazed mid-span by 3386 nm",
+    "from": {
+     "kind": "pad",
+     "label": "D12.4",
+     "at": [
+      75200000,
+      123850000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D11.2",
+     "at": [
+      87550000,
+      127150000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": [
+     68041452,
+     108979228
+    ],
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 138,
+    "net": 26,
+    "name": "TACT_B",
+    "layer": 0,
+    "width": 200000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "SW2.2",
+     "at": [
+      79425000,
+      126500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "SW2.2",
+     "at": [
+      83325000,
+      126500000
+     ]
+    },
+    "length_nm": 3900000,
+    "length_outside_pads_nm": 2800000,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 11,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 139,
+    "net": 26,
+    "name": "TACT_B",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "SW2.2",
+     "at": [
+      83325000,
+      126500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.23",
+     "at": [
+      88090000,
+      117250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 140,
+    "net": 27,
+    "name": "Net-(D8-DOUT)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "self-check: hole:124500000,-116625000 (gap 205000 < 350000 nm)",
+    "from": {
+     "kind": "pad",
+     "label": "D8.2",
+     "at": [
+      122050000,
+      109400000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D9.4",
+     "at": [
+      126950000,
+      123850000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 141,
+    "net": 28,
+    "name": "Net-(D7-DOUT)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "infeasible: wall pad:D8:1 grazed mid-span by 3627 nm",
+    "from": {
+     "kind": "pad",
+     "label": "D8.4",
+     "at": [
+      126950000,
+      106100000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D7.2",
+     "at": [
+      122050000,
+      91650000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 142,
+    "net": 29,
+    "name": "Net-(D6-DOUT)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "blocked: no path",
+    "from": {
+     "kind": "pad",
+     "label": "D7.4",
+     "at": [
+      126950000,
+      88350000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D6.2",
+     "at": [
+      122050000,
+      73900000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 143,
+    "net": 30,
+    "name": "Net-(D24-K)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D24.1",
+     "at": [
+      97245000,
+      53000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R19.1",
+     "at": [
+      93587500,
+      53000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 144,
+    "net": 31,
+    "name": "Net-(U1-EN{slash}CHIP_PU)",
+    "layer": 0,
+    "width": 200000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "SW5.2",
+     "at": [
+      53550000,
+      99875000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "SW5.2",
+     "at": [
+      57450000,
+      99875000
+     ]
+    },
+    "length_nm": 3900000,
+    "length_outside_pads_nm": 2800000,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 10,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 145,
+    "net": 31,
+    "name": "Net-(U1-EN{slash}CHIP_PU)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "SW5.2",
+     "at": [
+      57450000,
+      99875000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C17.2",
+     "at": [
+      56400000,
+      106500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 146,
+    "net": 31,
+    "name": "Net-(U1-EN{slash}CHIP_PU)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "SW5.2",
+     "at": [
+      57450000,
+      99875000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R1.2",
+     "at": [
+      72912500,
+      100000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 147,
+    "net": 31,
+    "name": "Net-(U1-EN{slash}CHIP_PU)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.3",
+     "at": [
+      84280000,
+      99750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R1.2",
+     "at": [
+      72912500,
+      100000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 148,
+    "net": 32,
+    "name": "/Inputoutput/Recv_ALSense",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "Q4.2",
+     "at": [
+      99395000,
+      56500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R20.1",
+     "at": [
+      95412500,
+      55000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 149,
+    "net": 33,
+    "name": "Net-(BT1-Pin_1)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "TP10.1",
+     "at": [
+      118500000,
+      113000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U4.14",
+     "at": [
+      110437500,
+      113500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 150,
+    "net": 33,
+    "name": "Net-(BT1-Pin_1)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C27.2",
+     "at": [
+      122950000,
+      122000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C26.1",
+     "at": [
+      113500000,
+      120050000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 151,
+    "net": 33,
+    "name": "Net-(BT1-Pin_1)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C27.2",
+     "at": [
+      122950000,
+      122000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U5.2",
+     "at": [
+      125250000,
+      121100000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 152,
+    "net": 33,
+    "name": "Net-(BT1-Pin_1)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U4.14",
+     "at": [
+      110437500,
+      113500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U4.15",
+     "at": [
+      110437500,
+      114000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 153,
+    "net": 33,
+    "name": "Net-(BT1-Pin_1)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U4.15",
+     "at": [
+      110437500,
+      114000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U4.16",
+     "at": [
+      109500000,
+      114937500
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 154,
+    "net": 33,
+    "name": "Net-(BT1-Pin_1)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U4.16",
+     "at": [
+      109500000,
+      114937500
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C26.1",
+     "at": [
+      113500000,
+      120050000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 155,
+    "net": 33,
+    "name": "Net-(BT1-Pin_1)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C26.1",
+     "at": [
+      113500000,
+      120050000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "BT1.1",
+     "at": [
+      114625000,
+      128400000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 156,
+    "net": 33,
+    "name": "Net-(BT1-Pin_1)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U5.2",
+     "at": [
+      125250000,
+      121100000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U5.3",
+     "at": [
+      125750000,
+      121100000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 157,
+    "net": 34,
+    "name": "Net-(D10-DIN)",
+    "layer": 0,
+    "width": 200000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "D9.2",
+     "at": [
+      122050000,
+      127150000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D10.4",
+     "at": [
+      109700000,
+      123850000
+     ]
+    },
+    "length_nm": 32771769,
+    "length_outside_pads_nm": 31760983,
+    "pattern": "SASASASAS",
+    "anchors": 4,
+    "crossings": 25,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 158,
+    "net": 35,
+    "name": "Net-(D10-DOUT)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "blocked: no path",
+    "from": {
+     "kind": "pad",
+     "label": "D11.4",
+     "at": [
+      92450000,
+      123850000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D10.2",
+     "at": [
+      104800000,
+      127150000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 159,
+    "net": 36,
+    "name": "Net-(D1-DOUT)",
+    "layer": 0,
+    "width": 200000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "D1.2",
+     "at": [
+      57950000,
+      52850000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D2.4",
+     "at": [
+      70300000,
+      56150000
+     ]
+    },
+    "length_nm": 15892120,
+    "length_outside_pads_nm": 14521418,
+    "pattern": "SASAS",
+    "anchors": 2,
+    "crossings": 29,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 160,
+    "net": 37,
+    "name": "RGB_DAT",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D1.4",
+     "at": [
+      53050000,
+      56150000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U2.4",
+     "at": [
+      106137500,
+      99475000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 161,
+    "net": 38,
+    "name": "TFT_RST",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "TP3.1",
+     "at": [
+      83000000,
+      115000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.27",
+     "at": [
+      83010000,
+      117250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 162,
+    "net": 39,
+    "name": "Net-(D17-A)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D17.2",
+     "at": [
+      122950000,
+      81500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R10.2",
+     "at": [
+      112162500,
+      118000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 163,
+    "net": 39,
+    "name": "Net-(D17-A)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D17.2",
+     "at": [
+      122950000,
+      81500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D18.2",
+     "at": [
+      122950000,
+      81500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 164,
+    "net": 40,
+    "name": "Net-(D2-DOUT)",
+    "layer": 0,
+    "width": 200000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "D2.2",
+     "at": [
+      75200000,
+      52850000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D3.4",
+     "at": [
+      87550000,
+      56150000
+     ]
+    },
+    "length_nm": 13149469,
+    "length_outside_pads_nm": 11478195,
+    "pattern": "SASAS",
+    "anchors": 2,
+    "crossings": 13,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 165,
+    "net": 41,
+    "name": "TACT_A",
+    "layer": 0,
+    "width": 200000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "SW1.2",
+     "at": [
+      62175000,
+      126500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "SW1.2",
+     "at": [
+      66075000,
+      126500000
+     ]
+    },
+    "length_nm": 3900000,
+    "length_outside_pads_nm": 2800000,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 10,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 166,
+    "net": 41,
+    "name": "TACT_A",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "SW1.2",
+     "at": [
+      66075000,
+      126500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.21",
+     "at": [
+      90630000,
+      117250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 167,
+    "net": 42,
+    "name": "Net-(D19-K)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D19.1",
+     "at": [
+      125437500,
+      95500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R11.2",
+     "at": [
+      125412500,
+      95500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 168,
+    "net": 43,
+    "name": "Net-(JP1-A)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "JP1.1",
+     "at": [
+      57300000,
+      80000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R12.1",
+     "at": [
+      57300000,
+      77750000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 169,
+    "net": 44,
+    "name": "Net-(J3-Pin_22)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "JP1.2",
+     "at": [
+      56000000,
+      80000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J3.22",
+     "at": [
+      56930000,
+      84750000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 170,
+    "net": 46,
+    "name": "Net-(Q2-G)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "Q2.1",
+     "at": [
+      101300000,
+      117062500
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "SW6.1",
+     "at": [
+      105000000,
+      122250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 171,
+    "net": 46,
+    "name": "Net-(Q2-G)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "Q2.1",
+     "at": [
+      101300000,
+      117062500
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R15.2",
+     "at": [
+      101337500,
+      115000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 172,
+    "net": 46,
+    "name": "Net-(Q2-G)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "SW6.1",
+     "at": [
+      105000000,
+      127750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "SW6.1",
+     "at": [
+      105000000,
+      122250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 173,
+    "net": 47,
+    "name": "Net-(Q2-S)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "Q2.2",
+     "at": [
+      103200000,
+      117062500
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C25.2",
+     "at": [
+      105000000,
+      116100000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 174,
+    "net": 47,
+    "name": "Net-(Q2-S)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "Q2.2",
+     "at": [
+      103200000,
+      117062500
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R15.1",
+     "at": [
+      103162500,
+      115000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 175,
+    "net": 47,
+    "name": "Net-(Q2-S)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C25.2",
+     "at": [
+      105000000,
+      116100000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U4.1",
+     "at": [
+      106562500,
+      114000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 176,
+    "net": 47,
+    "name": "Net-(Q2-S)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U4.1",
+     "at": [
+      106562500,
+      114000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U4.20",
+     "at": [
+      107500000,
+      114937500
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 177,
+    "net": 48,
+    "name": "Net-(Q3-C)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "R19.2",
+     "at": [
+      95412500,
+      53000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "Q3.3",
+     "at": [
+      98645000,
+      53125000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 178,
+    "net": 49,
+    "name": "Net-(U4-PROG1)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "R7.2",
+     "at": [
+      112587500,
+      113000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U4.13",
+     "at": [
+      110437500,
+      113000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 179,
+    "net": 50,
+    "name": "Net-(U4-PROG3)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "R8.2",
+     "at": [
+      112587500,
+      111000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U4.12",
+     "at": [
+      110437500,
+      112500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 180,
+    "net": 51,
+    "name": "Net-(D22-K)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C21.1",
+     "at": [
+      62950000,
+      112000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C20.1",
+     "at": [
+      62950000,
+      108990000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 181,
+    "net": 51,
+    "name": "Net-(D22-K)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C21.1",
+     "at": [
+      62950000,
+      112000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "Q1.3",
+     "at": [
+      62937500,
+      117000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 182,
+    "net": 51,
+    "name": "Net-(D22-K)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J2.1",
+     "at": [
+      52600000,
+      123375000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D22.1",
+     "at": [
+      63650000,
+      120500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 183,
+    "net": 51,
+    "name": "Net-(D22-K)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D22.1",
+     "at": [
+      63650000,
+      120500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "Q1.3",
+     "at": [
+      62937500,
+      117000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 184,
+    "net": 52,
+    "name": "/Powermanage/NTCLEV",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "R9.2",
+     "at": [
+      105037500,
+      111500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U4.5",
+     "at": [
+      106562500,
+      112000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 185,
+    "net": 52,
+    "name": "/Powermanage/NTCLEV",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U4.5",
+     "at": [
+      106562500,
+      112000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "BT1.3",
+     "at": [
+      117125000,
+      128400000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 186,
+    "net": 53,
+    "name": "Net-(U4-STAT2)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "R11.1",
+     "at": [
+      123587500,
+      95500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U4.7",
+     "at": [
+      108000000,
+      111062500
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 187,
+    "net": 54,
+    "name": "Net-(J1-CC1)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "R6.1",
+     "at": [
+      83912500,
+      123500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U7.10",
+     "at": [
+      90112500,
+      120000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 188,
+    "net": 54,
+    "name": "Net-(J1-CC1)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U7.1",
+     "at": [
+      90887500,
+      120000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U7.10",
+     "at": [
+      90112500,
+      120000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 189,
+    "net": 54,
+    "name": "Net-(J1-CC1)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U7.1",
+     "at": [
+      90887500,
+      120000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J1.A5",
+     "at": [
+      91250000,
+      124405000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 190,
+    "net": 55,
+    "name": "Net-(U4-~{PG})",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U4.6",
+     "at": [
+      107500000,
+      111062500
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R14.1",
+     "at": [
+      123587500,
+      102250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 191,
+    "net": 56,
+    "name": "Net-(U4-STAT1{slash}~{LBO})",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U4.8",
+     "at": [
+      108500000,
+      111062500
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R13.1",
+     "at": [
+      123587500,
+      98875000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 192,
+    "net": 57,
+    "name": "SPI_~{CS1}",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.4",
+     "at": [
+      85550000,
+      99750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "TP14.1",
+     "at": [
+      68500000,
+      99500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 193,
+    "net": 57,
+    "name": "SPI_~{CS1}",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "TP14.1",
+     "at": [
+      68500000,
+      99500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J3.5",
+     "at": [
+      56930000,
+      93250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 194,
+    "net": 58,
+    "name": "SPI_SCK",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.5",
+     "at": [
+      86820000,
+      99750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "TP13.1",
+     "at": [
+      68500000,
+      93000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 195,
+    "net": 58,
+    "name": "SPI_SCK",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "TP13.1",
+     "at": [
+      68500000,
+      93000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J3.6",
+     "at": [
+      56930000,
+      92750000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 196,
+    "net": 59,
+    "name": "SPI_SDO",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.6",
+     "at": [
+      88090000,
+      99750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "TP17.1",
+     "at": [
+      61750000,
+      99500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 197,
+    "net": 59,
+    "name": "SPI_SDO",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "TP17.1",
+     "at": [
+      61750000,
+      99500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J3.2",
+     "at": [
+      56930000,
+      94750000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 198,
+    "net": 63,
+    "name": "/Microcontrol/STRAP_8",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.10",
+     "at": [
+      93170000,
+      99750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R2.1",
+     "at": [
+      101750000,
+      100425000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 199,
+    "net": 63,
+    "name": "/Microcontrol/STRAP_8",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.10",
+     "at": [
+      93170000,
+      99750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "TP4.1",
+     "at": [
+      93170000,
+      95000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 200,
+    "net": 63,
+    "name": "/Microcontrol/STRAP_8",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U2.2",
+     "at": [
+      103862500,
+      100425000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R2.1",
+     "at": [
+      101750000,
+      100425000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 201,
+    "net": 65,
+    "name": "USB-",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.13",
+     "at": [
+      96980000,
+      99750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U7.4",
+     "at": [
+      90887500,
+      121500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 202,
+    "net": 65,
+    "name": "USB-",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U7.4",
+     "at": [
+      90887500,
+      121500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U7.7",
+     "at": [
+      90112500,
+      121500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 203,
+    "net": 65,
+    "name": "USB-",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U7.4",
+     "at": [
+      90887500,
+      121500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J1.B7",
+     "at": [
+      90750000,
+      124405000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 204,
+    "net": 65,
+    "name": "USB-",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J1.A7",
+     "at": [
+      89750000,
+      124405000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J1.B7",
+     "at": [
+      90750000,
+      124405000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 205,
+    "net": 66,
+    "name": "USB+",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.14",
+     "at": [
+      98250000,
+      99750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U7.5",
+     "at": [
+      90887500,
+      122000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 206,
+    "net": 66,
+    "name": "USB+",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U7.5",
+     "at": [
+      90887500,
+      122000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U7.6",
+     "at": [
+      90112500,
+      122000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 207,
+    "net": 66,
+    "name": "USB+",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U7.6",
+     "at": [
+      90112500,
+      122000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J1.A6",
+     "at": [
+      90250000,
+      124405000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 208,
+    "net": 66,
+    "name": "USB+",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J1.A6",
+     "at": [
+      90250000,
+      124405000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J1.B6",
+     "at": [
+      89250000,
+      124405000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 209,
+    "net": 67,
+    "name": "IR_TX",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.17",
+     "at": [
+      95710000,
+      117250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R18.1",
+     "at": [
+      103412500,
+      53000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 210,
+    "net": 68,
+    "name": "/Microcontrol/VIBRAMOTOR",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.20",
+     "at": [
+      91900000,
+      117250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R3.1",
+     "at": [
+      62912500,
+      114250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 211,
+    "net": 72,
+    "name": "TFT_D~{C}",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.26",
+     "at": [
+      84280000,
+      117250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "TP12.1",
+     "at": [
+      66000000,
+      104500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 212,
+    "net": 72,
+    "name": "TFT_D~{C}",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "TP12.1",
+     "at": [
+      66000000,
+      104500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J3.7",
+     "at": [
+      56930000,
+      92250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 213,
+    "net": 73,
+    "name": "Net-(D23-A)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D23.2",
+     "at": [
+      96500000,
+      122650000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J1.A4",
+     "at": [
+      92450000,
+      124405000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 214,
+    "net": 73,
+    "name": "Net-(D23-A)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J1.A4",
+     "at": [
+      92450000,
+      124405000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J1.A9",
+     "at": [
+      87550000,
+      124405000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 215,
+    "net": 73,
+    "name": "Net-(D23-A)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J1.A4",
+     "at": [
+      92450000,
+      124405000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J1.B9",
+     "at": [
+      92450000,
+      124405000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 216,
+    "net": 73,
+    "name": "Net-(D23-A)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J1.A9",
+     "at": [
+      87550000,
+      124405000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J1.B4",
+     "at": [
+      87550000,
+      124405000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 217,
+    "net": 75,
+    "name": "Net-(Q3-B)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "R18.2",
+     "at": [
+      101587500,
+      53000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "Q3.1",
+     "at": [
+      99595000,
+      55000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 218,
+    "net": 76,
+    "name": "Net-(J1-SHIELD)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C18.2",
+     "at": [
+      83950000,
+      128000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R4.1",
+     "at": [
+      83912500,
+      126000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 219,
+    "net": 76,
+    "name": "Net-(J1-SHIELD)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C18.2",
+     "at": [
+      83950000,
+      128000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J1.S1",
+     "at": [
+      85680000,
+      129500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 220,
+    "net": 76,
+    "name": "Net-(J1-SHIELD)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "R4.1",
+     "at": [
+      83912500,
+      126000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J1.S1",
+     "at": [
+      85680000,
+      125320000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 221,
+    "net": 76,
+    "name": "Net-(J1-SHIELD)",
+    "layer": 0,
+    "width": 200000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "J1.S1",
+     "at": [
+      94320000,
+      129500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J1.S1",
+     "at": [
+      94320000,
+      125320000
+     ]
+    },
+    "length_nm": 4180000,
+    "length_outside_pads_nm": 2330000,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 6,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 222,
+    "net": 76,
+    "name": "Net-(J1-SHIELD)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "blocked: no path",
+    "from": {
+     "kind": "pad",
+     "label": "J1.S1",
+     "at": [
+      94320000,
+      129500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J1.S1",
+     "at": [
+      85680000,
+      129500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": [
+     88858371,
+     126892149
+    ],
+    "g1_angle_deg": null,
+    "iteration": 1,
+    "zero_slack": false
+   },
+   {
+    "id": 223,
+    "net": 77,
+    "name": "Net-(J3-Pin_3)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J3.3",
+     "at": [
+      56930000,
+      94250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R16.1",
+     "at": [
+      56412500,
+      102000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 224,
+    "net": 77,
+    "name": "Net-(J3-Pin_3)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C30.1",
+     "at": [
+      56450000,
+      104250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "TP16.1",
+     "at": [
+      69000000,
+      104500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 225,
+    "net": 77,
+    "name": "Net-(J3-Pin_3)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C30.1",
+     "at": [
+      56450000,
+      104250000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R16.1",
+     "at": [
+      56412500,
+      102000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 226,
+    "net": 78,
+    "name": "/Inputoutput/TFT_~{TE}",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J3.4",
+     "at": [
+      56930000,
+      93750000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "TP15.1",
+     "at": [
+      65000000,
+      99750000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 227,
+    "net": 80,
+    "name": "Net-(J1-CC2)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U7.2",
+     "at": [
+      90887500,
+      120500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U7.9",
+     "at": [
+      90112500,
+      120500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 228,
+    "net": 80,
+    "name": "Net-(J1-CC2)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U7.9",
+     "at": [
+      90112500,
+      120500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J1.B5",
+     "at": [
+      88250000,
+      124405000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 229,
+    "net": 80,
+    "name": "Net-(J1-CC2)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J1.B5",
+     "at": [
+      88250000,
+      124405000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R5.2",
+     "at": [
+      83912500,
+      121500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 230,
+    "net": 85,
+    "name": "Net-(Q1-G)",
+    "layer": 0,
+    "width": 200000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "Q1.1",
+     "at": [
+      61062500,
+      117950000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R3.2",
+     "at": [
+      61087500,
+      114250000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   }
+  ],
+  "nets": [
+   {
+    "net": 1,
+    "name": "VCC",
+    "status": "partial",
+    "connections": 37,
+    "routed": 3,
+    "partial": 0,
+    "failed": 34,
+    "length_nm": 66561958,
+    "length_outside_pads_nm": 63256654
+   },
+   {
+    "net": 2,
+    "name": "unconnected-(D16-DOUT-Pad2)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 3,
+    "name": "GND",
+    "status": "partial",
+    "connections": 35,
+    "routed": 4,
+    "partial": 0,
+    "failed": 31,
+    "length_nm": 8190848,
+    "length_outside_pads_nm": 4421824
+   },
+   {
+    "net": 4,
+    "name": "Net-(D15-DOUT)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 15258195,
+    "length_outside_pads_nm": 14307857
+   },
+   {
+    "net": 5,
+    "name": "Net-(D20-K)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 6,
+    "name": "+5V",
+    "status": "partial",
+    "connections": 11,
+    "routed": 2,
+    "partial": 0,
+    "failed": 9,
+    "length_nm": 6750000,
+    "length_outside_pads_nm": 3950000
+   },
+   {
+    "net": 7,
+    "name": "+3V3",
+    "status": "partial",
+    "connections": 23,
+    "routed": 1,
+    "partial": 0,
+    "failed": 22,
+    "length_nm": 4107615,
+    "length_outside_pads_nm": 2659460
+   },
+   {
+    "net": 8,
+    "name": "I2C_SDA",
+    "status": "failed",
+    "connections": 7,
+    "routed": 0,
+    "partial": 0,
+    "failed": 7,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 9,
+    "name": "I2C_SCL",
+    "status": "failed",
+    "connections": 7,
+    "routed": 0,
+    "partial": 0,
+    "failed": 7,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 10,
+    "name": "unconnected-(J5-Pin_5-Pad5)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 11,
+    "name": "unconnected-(J5-Pin_6-Pad6)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 12,
+    "name": "Net-(D14-DOUT)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 13,
+    "name": "Net-(D13-DOUT)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 14,
+    "name": "TACT_D",
+    "status": "partial",
+    "connections": 3,
+    "routed": 1,
+    "partial": 0,
+    "failed": 2,
+    "length_nm": 3900000,
+    "length_outside_pads_nm": 2800000
+   },
+   {
+    "net": 15,
+    "name": "unconnected-(J4-Pin_5-Pad5)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 16,
+    "name": "unconnected-(J4-Pin_6-Pad6)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 17,
+    "name": "IR_RX",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 18,
+    "name": "Net-(IC1-VCC)",
+    "status": "failed",
+    "connections": 2,
+    "routed": 0,
+    "partial": 0,
+    "failed": 2,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 19,
+    "name": "Net-(D21-K)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 20,
+    "name": "TACT_C",
+    "status": "partial",
+    "connections": 2,
+    "routed": 1,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 3900000,
+    "length_outside_pads_nm": 2800000
+   },
+   {
+    "net": 21,
+    "name": "Net-(D5-DOUT)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 17975796,
+    "length_outside_pads_nm": 17045087
+   },
+   {
+    "net": 22,
+    "name": "Net-(D4-DOUT)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 23,
+    "name": "Net-(D3-DOUT)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 14098451,
+    "length_outside_pads_nm": 12652085
+   },
+   {
+    "net": 24,
+    "name": "Net-(D12-DOUT)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 25,
+    "name": "Net-(D11-DOUT)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 26,
+    "name": "TACT_B",
+    "status": "partial",
+    "connections": 2,
+    "routed": 1,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 3900000,
+    "length_outside_pads_nm": 2800000
+   },
+   {
+    "net": 27,
+    "name": "Net-(D8-DOUT)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 28,
+    "name": "Net-(D7-DOUT)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 29,
+    "name": "Net-(D6-DOUT)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 30,
+    "name": "Net-(D24-K)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 31,
+    "name": "Net-(U1-EN{slash}CHIP_PU)",
+    "status": "partial",
+    "connections": 4,
+    "routed": 1,
+    "partial": 0,
+    "failed": 3,
+    "length_nm": 3900000,
+    "length_outside_pads_nm": 2800000
+   },
+   {
+    "net": 32,
+    "name": "/Inputoutput/Recv_ALSense",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 33,
+    "name": "Net-(BT1-Pin_1)",
+    "status": "failed",
+    "connections": 8,
+    "routed": 0,
+    "partial": 0,
+    "failed": 8,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 34,
+    "name": "Net-(D10-DIN)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 32771769,
+    "length_outside_pads_nm": 31760983
+   },
+   {
+    "net": 35,
+    "name": "Net-(D10-DOUT)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 36,
+    "name": "Net-(D1-DOUT)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 15892120,
+    "length_outside_pads_nm": 14521418
+   },
+   {
+    "net": 37,
+    "name": "RGB_DAT",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 38,
+    "name": "TFT_RST",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 39,
+    "name": "Net-(D17-A)",
+    "status": "failed",
+    "connections": 2,
+    "routed": 0,
+    "partial": 0,
+    "failed": 2,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 40,
+    "name": "Net-(D2-DOUT)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 13149469,
+    "length_outside_pads_nm": 11478195
+   },
+   {
+    "net": 41,
+    "name": "TACT_A",
+    "status": "partial",
+    "connections": 2,
+    "routed": 1,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 3900000,
+    "length_outside_pads_nm": 2800000
+   },
+   {
+    "net": 42,
+    "name": "Net-(D19-K)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 43,
+    "name": "Net-(JP1-A)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 44,
+    "name": "Net-(J3-Pin_22)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 45,
+    "name": "TFT_WHAT",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 46,
+    "name": "Net-(Q2-G)",
+    "status": "failed",
+    "connections": 3,
+    "routed": 0,
+    "partial": 0,
+    "failed": 3,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 47,
+    "name": "Net-(Q2-S)",
+    "status": "failed",
+    "connections": 4,
+    "routed": 0,
+    "partial": 0,
+    "failed": 4,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 48,
+    "name": "Net-(Q3-C)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 49,
+    "name": "Net-(U4-PROG1)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 50,
+    "name": "Net-(U4-PROG3)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 51,
+    "name": "Net-(D22-K)",
+    "status": "failed",
+    "connections": 4,
+    "routed": 0,
+    "partial": 0,
+    "failed": 4,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 52,
+    "name": "/Powermanage/NTCLEV",
+    "status": "failed",
+    "connections": 2,
+    "routed": 0,
+    "partial": 0,
+    "failed": 2,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 53,
+    "name": "Net-(U4-STAT2)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 54,
+    "name": "Net-(J1-CC1)",
+    "status": "failed",
+    "connections": 3,
+    "routed": 0,
+    "partial": 0,
+    "failed": 3,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 55,
+    "name": "Net-(U4-~{PG})",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 56,
+    "name": "Net-(U4-STAT1{slash}~{LBO})",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 57,
+    "name": "SPI_~{CS1}",
+    "status": "failed",
+    "connections": 2,
+    "routed": 0,
+    "partial": 0,
+    "failed": 2,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 58,
+    "name": "SPI_SCK",
+    "status": "failed",
+    "connections": 2,
+    "routed": 0,
+    "partial": 0,
+    "failed": 2,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 59,
+    "name": "SPI_SDO",
+    "status": "failed",
+    "connections": 2,
+    "routed": 0,
+    "partial": 0,
+    "failed": 2,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 60,
+    "name": "SPI_SDI",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 61,
+    "name": "unconnected-(U1-GPIO0{slash}ADC1_CH0{slash}XTAL_32K_P-Pad8)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 62,
+    "name": "unconnected-(U1-GPIO1{slash}ADC1_CH1{slash}XTAL_32K_N-Pad9)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 63,
+    "name": "/Microcontrol/STRAP_8",
+    "status": "failed",
+    "connections": 3,
+    "routed": 0,
+    "partial": 0,
+    "failed": 3,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 64,
+    "name": "unconnected-(U1-GPIO14-Pad12)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 65,
+    "name": "USB-",
+    "status": "failed",
+    "connections": 4,
+    "routed": 0,
+    "partial": 0,
+    "failed": 4,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 66,
+    "name": "USB+",
+    "status": "failed",
+    "connections": 4,
+    "routed": 0,
+    "partial": 0,
+    "failed": 4,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 67,
+    "name": "IR_TX",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 68,
+    "name": "/Microcontrol/VIBRAMOTOR",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 69,
+    "name": "unconnected-(U1-NC-Pad22)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 70,
+    "name": "unconnected-(U1-U0RXD{slash}GPIO17-Pad24)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 71,
+    "name": "unconnected-(U1-U0TXD{slash}GPIO16-Pad25)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 72,
+    "name": "TFT_D~{C}",
+    "status": "failed",
+    "connections": 2,
+    "routed": 0,
+    "partial": 0,
+    "failed": 2,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 73,
+    "name": "Net-(D23-A)",
+    "status": "failed",
+    "connections": 4,
+    "routed": 0,
+    "partial": 0,
+    "failed": 4,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 74,
+    "name": "unconnected-(U2-NC-Pad1)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 75,
+    "name": "Net-(Q3-B)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 76,
+    "name": "Net-(J1-SHIELD)",
+    "status": "partial",
+    "connections": 5,
+    "routed": 1,
+    "partial": 0,
+    "failed": 4,
+    "length_nm": 4180000,
+    "length_outside_pads_nm": 2330000
+   },
+   {
+    "net": 77,
+    "name": "Net-(J3-Pin_3)",
+    "status": "failed",
+    "connections": 3,
+    "routed": 0,
+    "partial": 0,
+    "failed": 3,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 78,
+    "name": "/Inputoutput/TFT_~{TE}",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 79,
+    "name": "unconnected-(U3-NC-Pad4)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 80,
+    "name": "Net-(J1-CC2)",
+    "status": "failed",
+    "connections": 3,
+    "routed": 0,
+    "partial": 0,
+    "failed": 3,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 81,
+    "name": "unconnected-(U6-NC-Pad1)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 82,
+    "name": "unconnected-(U6-NC-Pad2)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 83,
+    "name": "unconnected-(U6-NC-Pad3)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 84,
+    "name": "unconnected-(U6-NC-Pad7)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 85,
+    "name": "Net-(Q1-G)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 86,
+    "name": "unconnected-(U5-~{ALRT}-Pad5)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   }
+  ],
+  "connections_total": 231,
+  "routed": 22,
+  "partial": 0,
+  "failed": 209,
+  "nets_total": 66,
+  "nets_routed": 6,
+  "total_length_nm": 218436221,
+  "length_outside_pads_nm": 192383561,
+  "iterations": 9,
+  "converged": false,
+  "overuse_edges": 14,
+  "clinches": {
+   "regular": [],
+   "u": []
+  },
+  "relax_iterations": 3,
+  "self_check_rounds": 2,
+  "timed_out": false,
+  "runtime_s": 47.474568822,
+  "threads_used": 1,
+  "warnings": [
+   "routable layers B.Cu unused (M2 routes on F.Cu only)",
+   "net 2 skipped: no other terminal in the net",
+   "net 10 skipped: no other terminal in the net",
+   "net 11 skipped: no other terminal in the net",
+   "net 15 skipped: no other terminal in the net",
+   "net 16 skipped: no other terminal in the net",
+   "net 45 skipped: no other terminal in the net",
+   "net 60 skipped: no other terminal in the net",
+   "net 61 skipped: no other terminal in the net",
+   "net 62 skipped: no other terminal in the net",
+   "net 64 skipped: no other terminal in the net",
+   "net 69 skipped: no other terminal in the net",
+   "net 70 skipped: no other terminal in the net",
+   "net 71 skipped: no other terminal in the net",
+   "net 74 skipped: no other terminal in the net",
+   "net 79 skipped: no other terminal in the net",
+   "net 81 skipped: no other terminal in the net",
+   "net 82 skipped: no other terminal in the net",
+   "net 83 skipped: no other terminal in the net",
+   "net 84 skipped: no other terminal in the net",
+   "net 86 skipped: no other terminal in the net",
+   "stalled: no better routing for 8 iterations, stopped after 9"
+  ],
+  "zero_slack_wires": [],
+  "zero_slack": "#3: infeasible at margin 0: self-check: hole:85680000,-125320000 (gap 277951 < 350000 nm)"
+ },
+ "smooth": null,
+ "route": {
+  "connections": 231,
+  "routed": 22,
+  "partial": 0,
+  "failed": 209,
+  "nets": 66,
+  "nets_routed": 6,
+  "length_mm": 218.436,
+  "outside_mm": 192.384,
+  "hand_outside_mm": 3890.918,
+  "iterations": 9,
+  "timed_out": false,
+  "clinches": {
+   "regular": [],
+   "u": []
+  },
+  "zero_slack_wires": [],
+  "zero_slack": "#3: infeasible at margin 0: self-check: hole:85680000,-125320000 (gap 277951 < 350000 nm)"
+ },
+ "hand_stats": {
+  "wires": 645,
+  "skipped": 44,
+  "hand_length_nm": 4218679988,
+  "hand_outside_pads_nm": 3890918285
+ },
+ "floors": [
+  {
+   "name": "min_clearance",
+   "design_mm": 0.1,
+   "floor_mm": 0.15
+  },
+  {
+   "name": "min_track_width",
+   "design_mm": 0.1,
+   "floor_mm": 0.2
+  },
+  {
+   "name": "min_via_diameter",
+   "design_mm": 0.25,
+   "floor_mm": 0.45
+  },
+  {
+   "name": "min_via_drill",
+   "design_mm": 0.15,
+   "floor_mm": 0.25
+  },
+  {
+   "name": "min_annular",
+   "design_mm": 0.05,
+   "floor_mm": 0.1
+  },
+  {
+   "name": "hole_clearance",
+   "design_mm": 0.1,
+   "floor_mm": 0.35
+  },
+  {
+   "name": "hole_to_hole",
+   "design_mm": 0.2,
+   "floor_mm": 0.25
+  }
+ ],
+ "rules_used": {
+  "edge_clearance": 0.2,
+  "min_clearance": 0.15,
+  "min_track_width": 0.2
+ },
+ "rip": "all",
+ "threads": 4,
+ "runtime_s": 63.1,
+ "router_s": 47.482,
+ "width_match": {
+  "compared": 16,
+  "matched": 13,
+  "mismatched": [
+   "GND",
+   "Net-(J1-SHIELD)",
+   "VCC"
+  ]
+ }
+}

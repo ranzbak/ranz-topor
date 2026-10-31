@@ -1,0 +1,3655 @@
+{
+ "board": "nametag-sao",
+ "footprints": 20,
+ "pads": 76,
+ "nets_total": 24,
+ "orig_all": {
+  "segments": 199,
+  "arcs": 0,
+  "vias": 50,
+  "track_mm": 1137.066,
+  "arc_mm": 0.0
+ },
+ "orig_drc": {
+  "total": 17,
+  "violations": {
+   "silk_over_copper": 12,
+   "lib_footprint_mismatch": 5
+  }
+ },
+ "removed": {
+  "removed_tracks": 199,
+  "removed_arcs": 0,
+  "removed_vias": 15,
+  "removed_teardrops": 0
+ },
+ "kept": {
+  "kept_locked_tracks": 0,
+  "kept_free_vias": 35,
+  "kept_locked_vias": 0,
+  "kept_rf_tracks": 0,
+  "kept_rf_vias": 0
+ },
+ "routed_all": {
+  "segments": 61,
+  "arcs": 47,
+  "vias": 35,
+  "track_mm": 672.936,
+  "arc_mm": 35.866
+ },
+ "routed_drc": {
+  "routing_new": 0,
+  "routing_preexisting": 0,
+  "incomplete": {
+   "track_dangling": 0,
+   "via_dangling": 2,
+   "unconnected_items": 17
+  },
+  "other": 17,
+  "by_type_new": {}
+ },
+ "routed_items": 108,
+ "unchanged_items": 0,
+ "replaced": 0,
+ "drc_loop": {
+  "rounds": 1,
+  "pinned": {},
+  "spots": []
+ },
+ "zero_slack": {
+  "status": "#11: no length gain",
+  "wires": []
+ },
+ "teardrops_removed": 0,
+ "router_report": {
+  "items": [
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -2540000,
+      60000000
+     ],
+     "b": [
+      -620089,
+      58908893
+     ]
+    },
+    "group": null,
+    "wire": 0
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -620089,
+      58908893
+     ],
+     "mid": [
+      -515586,
+      58855799
+     ],
+     "end": [
+      -406586,
+      58812687
+     ]
+    },
+    "group": null,
+    "wire": 0
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -406586,
+      58812687
+     ],
+     "b": [
+      55326586,
+      39727313
+     ]
+    },
+    "group": null,
+    "wire": 0
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      55326586,
+      39727313
+     ],
+     "mid": [
+      56170139,
+      38429653
+     ],
+     "end": [
+      55112316,
+      37299823
+     ]
+    },
+    "group": null,
+    "wire": 0
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      55112316,
+      37299823
+     ],
+     "b": [
+      54727684,
+      37240177
+     ]
+    },
+    "group": null,
+    "wire": 0
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      54727684,
+      37240177
+     ],
+     "mid": [
+      54507016,
+      37185103
+     ],
+     "end": [
+      54299911,
+      37091107
+     ]
+    },
+    "group": null,
+    "wire": 0
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      54299911,
+      37091107
+     ],
+     "b": [
+      52380000,
+      36000000
+     ]
+    },
+    "group": null,
+    "wire": 0
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -44960000,
+      -18000000
+     ],
+     "b": [
+      -46051107,
+      -16080089
+     ]
+    },
+    "group": null,
+    "wire": 1
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -46051107,
+      -16080089
+     ],
+     "mid": [
+      -46133365,
+      -15905240
+     ],
+     "end": [
+      -46187807,
+      -15719836
+     ]
+    },
+    "group": null,
+    "wire": 1
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -46187807,
+      -15719836
+     ],
+     "b": [
+      -56768842,
+      34278868
+     ]
+    },
+    "group": null,
+    "wire": 1
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -56768842,
+      34278868
+     ],
+     "mid": [
+      -56787051,
+      34349113
+     ],
+     "end": [
+      -56811512,
+      34417432
+     ]
+    },
+    "group": null,
+    "wire": 1
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -56811512,
+      34417432
+     ],
+     "b": [
+      -57460000,
+      36000000
+     ]
+    },
+    "group": null,
+    "wire": 1
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -44960000,
+      -18000000
+     ],
+     "b": [
+      -58284616,
+      -40565840
+     ]
+    },
+    "group": null,
+    "wire": 2
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -58284616,
+      -40565840
+     ],
+     "mid": [
+      -58359393,
+      -40714077
+     ],
+     "end": [
+      -58413947,
+      -40870889
+     ]
+    },
+    "group": null,
+    "wire": 2
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -58413947,
+      -40870889
+     ],
+     "b": [
+      -59000000,
+      -43000000
+     ]
+    },
+    "group": null,
+    "wire": 2
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -2540000,
+      -30000000
+     ],
+     "b": [
+      -1448893,
+      -28080089
+     ]
+    },
+    "group": null,
+    "wire": 4
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -1448893,
+      -28080089
+     ],
+     "mid": [
+      -1354897,
+      -27872984
+     ],
+     "end": [
+      -1299823,
+      -27652316
+     ]
+    },
+    "group": null,
+    "wire": 4
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -1299823,
+      -27652316
+     ],
+     "b": [
+      -1240177,
+      -27267684
+     ]
+    },
+    "group": null,
+    "wire": 4
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -1240177,
+      -27267684
+     ],
+     "mid": [
+      -933593,
+      -26621293
+     ],
+     "end": [
+      -323632,
+      -26247446
+     ]
+    },
+    "group": null,
+    "wire": 4
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -323632,
+      -26247446
+     ],
+     "b": [
+      2047461,
+      -25614599
+     ]
+    },
+    "group": null,
+    "wire": 4
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      2047461,
+      -25614599
+     ],
+     "mid": [
+      2117065,
+      -25597414
+     ],
+     "end": [
+      2187265,
+      -25582854
+     ]
+    },
+    "group": null,
+    "wire": 4
+   },
+   {
+    "net": 1,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      2187265,
+      -25582854
+     ],
+     "b": [
+      39880000,
+      -18500000
+     ]
+    },
+    "group": null,
+    "wire": 4
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      0,
+      60000000
+     ],
+     "b": [
+      1091107,
+      61919911
+     ]
+    },
+    "group": null,
+    "wire": 6
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      1091107,
+      61919911
+     ],
+     "mid": [
+      1084720,
+      63171195
+     ],
+     "end": [
+      0,
+      63795000
+     ]
+    },
+    "group": null,
+    "wire": 6
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      0,
+      63795000
+     ],
+     "b": [
+      -2540000,
+      63795000
+     ]
+    },
+    "group": null,
+    "wire": 6
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -2540000,
+      63795000
+     ],
+     "mid": [
+      -3252789,
+      63572936
+     ],
+     "end": [
+      -3713331,
+      62985329
+     ]
+    },
+    "group": null,
+    "wire": 6
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -3713331,
+      62985329
+     ],
+     "b": [
+      -4381021,
+      61226135
+     ]
+    },
+    "group": null,
+    "wire": 6
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -4381021,
+      61226135
+     ],
+     "mid": [
+      -4431953,
+      61044769
+     ],
+     "end": [
+      -4449975,
+      60857251
+     ]
+    },
+    "group": null,
+    "wire": 6
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -4449975,
+      60857251
+     ],
+     "b": [
+      -4482566,
+      56093188
+     ]
+    },
+    "group": null,
+    "wire": 6
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -4482566,
+      56093188
+     ],
+     "mid": [
+      -4245476,
+      55285594
+     ],
+     "end": [
+      -3601974,
+      54743078
+     ]
+    },
+    "group": null,
+    "wire": 6
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -3601974,
+      54743078
+     ],
+     "b": [
+      -116249,
+      53236097
+     ]
+    },
+    "group": null,
+    "wire": 6
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -116249,
+      53236097
+     ],
+     "mid": [
+      -102938,
+      53230484
+     ],
+     "end": [
+      -89528,
+      53225110
+     ]
+    },
+    "group": null,
+    "wire": 6
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -89528,
+      53225110
+     ],
+     "b": [
+      52615472,
+      32651110
+     ]
+    },
+    "group": null,
+    "wire": 6
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      52615472,
+      32651110
+     ],
+     "mid": [
+      53216985,
+      32657577
+     ],
+     "end": [
+      53646071,
+      33079175
+     ]
+    },
+    "group": null,
+    "wire": 6
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      53646071,
+      33079175
+     ],
+     "b": [
+      54920000,
+      36000000
+     ]
+    },
+    "group": null,
+    "wire": 6
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -42420000,
+      -18000000
+     ],
+     "b": [
+      -43511107,
+      -16080089
+     ]
+    },
+    "group": null,
+    "wire": 7
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -43511107,
+      -16080089
+     ],
+     "mid": [
+      -43605103,
+      -15872984
+     ],
+     "end": [
+      -43660177,
+      -15652316
+     ]
+    },
+    "group": null,
+    "wire": 7
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -43660177,
+      -15652316
+     ],
+     "b": [
+      -43719823,
+      -15267684
+     ]
+    },
+    "group": null,
+    "wire": 7
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -43719823,
+      -15267684
+     ],
+     "mid": [
+      -43724092,
+      -15241923
+     ],
+     "end": [
+      -43728897,
+      -15216257
+     ]
+    },
+    "group": null,
+    "wire": 7
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -43728897,
+      -15216257
+     ],
+     "b": [
+      -53083728,
+      32033345
+     ]
+    },
+    "group": null,
+    "wire": 7
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -53083728,
+      32033345
+     ],
+     "mid": [
+      -53108565,
+      32128103
+     ],
+     "end": [
+      -53144728,
+      32219143
+     ]
+    },
+    "group": null,
+    "wire": 7
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -53144728,
+      32219143
+     ],
+     "b": [
+      -54920000,
+      36000000
+     ]
+    },
+    "group": null,
+    "wire": 7
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -42420000,
+      -18000000
+     ],
+     "b": [
+      -54269552,
+      -43528388
+     ]
+    },
+    "group": null,
+    "wire": 9
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -54269552,
+      -43528388
+     ],
+     "mid": [
+      -54597091,
+      -43957924
+     ],
+     "end": [
+      -55074838,
+      -44209998
+     ]
+    },
+    "group": null,
+    "wire": 9
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -55074838,
+      -44209998
+     ],
+     "b": [
+      -57203949,
+      -44796051
+     ]
+    },
+    "group": null,
+    "wire": 9
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      54920000,
+      36000000
+     ],
+     "b": [
+      57296487,
+      31680865
+     ]
+    },
+    "group": null,
+    "wire": 10
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      57296487,
+      31680865
+     ],
+     "mid": [
+      57395369,
+      31329365
+     ],
+     "end": [
+      57328794,
+      30970341
+     ]
+    },
+    "group": null,
+    "wire": 10
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      57328794,
+      30970341
+     ],
+     "b": [
+      38022806,
+      -13190341
+     ]
+    },
+    "group": null,
+    "wire": 10
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      38022806,
+      -13190341
+     ],
+     "mid": [
+      38033575,
+      -13858850
+     ],
+     "end": [
+      38545723,
+      -14288647
+     ]
+    },
+    "group": null,
+    "wire": 10
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      38545723,
+      -14288647
+     ],
+     "b": [
+      40214683,
+      -14750450
+     ]
+    },
+    "group": null,
+    "wire": 10
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      40214683,
+      -14750450
+     ],
+     "mid": [
+      40817410,
+      -15125562
+     ],
+     "end": [
+      41120177,
+      -15767684
+     ]
+    },
+    "group": null,
+    "wire": 10
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      41120177,
+      -15767684
+     ],
+     "b": [
+      41179823,
+      -16152316
+     ]
+    },
+    "group": null,
+    "wire": 10
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      41179823,
+      -16152316
+     ],
+     "mid": [
+      41234897,
+      -16372984
+     ],
+     "end": [
+      41328893,
+      -16580089
+     ]
+    },
+    "group": null,
+    "wire": 10
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      41328893,
+      -16580089
+     ],
+     "b": [
+      42420000,
+      -18500000
+     ]
+    },
+    "group": null,
+    "wire": 10
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      0,
+      -30000000
+     ],
+     "b": [
+      1091107,
+      -28080089
+     ]
+    },
+    "group": null,
+    "wire": 11
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      1091107,
+      -28080089
+     ],
+     "mid": [
+      1185103,
+      -27872984
+     ],
+     "end": [
+      1240177,
+      -27652316
+     ]
+    },
+    "group": null,
+    "wire": 11
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      1240177,
+      -27652316
+     ],
+     "b": [
+      1299823,
+      -27267684
+     ]
+    },
+    "group": null,
+    "wire": 11
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      1299823,
+      -27267684
+     ],
+     "mid": [
+      1666359,
+      -26559014
+     ],
+     "end": [
+      2385984,
+      -26214486
+     ]
+    },
+    "group": null,
+    "wire": 11
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      2385984,
+      -26214486
+     ],
+     "b": [
+      40306991,
+      -21525315
+     ]
+    },
+    "group": null,
+    "wire": 11
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      40306991,
+      -21525315
+     ],
+     "mid": [
+      40653099,
+      -21397288
+     ],
+     "end": [
+      40905712,
+      -21128274
+     ]
+    },
+    "group": null,
+    "wire": 11
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      40905712,
+      -21128274
+     ],
+     "b": [
+      42420000,
+      -18500000
+     ]
+    },
+    "group": null,
+    "wire": 11
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      55360949,
+      -42952051
+     ],
+     "b": [
+      43714974,
+      -21208073
+     ]
+    },
+    "group": null,
+    "wire": 12
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      43714974,
+      -21208073
+     ],
+     "mid": [
+      43706429,
+      -21191669
+     ],
+     "end": [
+      43698264,
+      -21175074
+     ]
+    },
+    "group": null,
+    "wire": 12
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      43698264,
+      -21175074
+     ],
+     "b": [
+      42420000,
+      -18500000
+     ]
+    },
+    "group": null,
+    "wire": 12
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      0,
+      62540000
+     ],
+     "b": [
+      -1919911,
+      61448893
+     ]
+    },
+    "group": null,
+    "wire": 13
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -1919911,
+      61448893
+     ],
+     "mid": [
+      -2198644,
+      61332316
+     ],
+     "end": [
+      -2497160,
+      61285731
+     ]
+    },
+    "group": null,
+    "wire": 13
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -2497160,
+      61285731
+     ],
+     "b": [
+      -3403825,
+      61254764
+     ]
+    },
+    "group": null,
+    "wire": 13
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -3403825,
+      61254764
+     ],
+     "mid": [
+      -3680261,
+      61132442
+     ],
+     "end": [
+      -3794991,
+      60852771
+     ]
+    },
+    "group": null,
+    "wire": 13
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -3794991,
+      60852771
+     ],
+     "b": [
+      -3827581,
+      56088707
+     ]
+    },
+    "group": null,
+    "wire": 13
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -3827581,
+      56088707
+     ],
+     "mid": [
+      -3634102,
+      55559664
+     ],
+     "end": [
+      -3141186,
+      55286983
+     ]
+    },
+    "group": null,
+    "wire": 13
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -3141186,
+      55286983
+     ],
+     "b": [
+      321786,
+      54771217
+     ]
+    },
+    "group": null,
+    "wire": 13
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      321786,
+      54771217
+     ],
+     "mid": [
+      373843,
+      54761706
+     ],
+     "end": [
+      425162,
+      54748794
+     ]
+    },
+    "group": null,
+    "wire": 13
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      425162,
+      54748794
+     ],
+     "b": [
+      52726040,
+      39746350
+     ]
+    },
+    "group": null,
+    "wire": 13
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      52726040,
+      39746350
+     ],
+     "mid": [
+      52866489,
+      39696872
+     ],
+     "end": [
+      53000089,
+      39631107
+     ]
+    },
+    "group": null,
+    "wire": 13
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      53000089,
+      39631107
+     ],
+     "b": [
+      54920000,
+      38540000
+     ]
+    },
+    "group": null,
+    "wire": 13
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -42420000,
+      -15460000
+     ],
+     "b": [
+      -52444691,
+      32177652
+     ]
+    },
+    "group": null,
+    "wire": 14
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -52444691,
+      32177652
+     ],
+     "mid": [
+      -52463896,
+      32257655
+     ],
+     "end": [
+      -52487577,
+      32336450
+     ]
+    },
+    "group": null,
+    "wire": 14
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -52487577,
+      32336450
+     ],
+     "b": [
+      -53571238,
+      35605062
+     ]
+    },
+    "group": null,
+    "wire": 14
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -53571238,
+      35605062
+     ],
+     "mid": [
+      -53599922,
+      35705355
+     ],
+     "end": [
+      -53620177,
+      35807684
+     ]
+    },
+    "group": null,
+    "wire": 14
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -53620177,
+      35807684
+     ],
+     "b": [
+      -53679823,
+      36192316
+     ]
+    },
+    "group": null,
+    "wire": 14
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -53679823,
+      36192316
+     ],
+     "mid": [
+      -53734897,
+      36412984
+     ],
+     "end": [
+      -53828893,
+      36620089
+     ]
+    },
+    "group": null,
+    "wire": 14
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -53828893,
+      36620089
+     ],
+     "b": [
+      -54920000,
+      38540000
+     ]
+    },
+    "group": null,
+    "wire": 14
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -42420000,
+      -15460000
+     ],
+     "b": [
+      -41328893,
+      -17379911
+     ]
+    },
+    "group": null,
+    "wire": 16
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -41328893,
+      -17379911
+     ],
+     "mid": [
+      -41168654,
+      -17904307
+     ],
+     "end": [
+      -41247293,
+      -18446970
+     ]
+    },
+    "group": null,
+    "wire": 16
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -41247293,
+      -18446970
+     ],
+     "b": [
+      -41697015,
+      -19626898
+     ]
+    },
+    "group": null,
+    "wire": 16
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -41697015,
+      -19626898
+     ],
+     "mid": [
+      -41741490,
+      -19798229
+     ],
+     "end": [
+      -41747444,
+      -19975139
+     ]
+    },
+    "group": null,
+    "wire": 16
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -41747444,
+      -19975139
+     ],
+     "b": [
+      -40827956,
+      -31967861
+     ]
+    },
+    "group": null,
+    "wire": 16
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -40827956,
+      -31967861
+     ],
+     "mid": [
+      -40867927,
+      -32286995
+     ],
+     "end": [
+      -41029645,
+      -32565010
+     ]
+    },
+    "group": null,
+    "wire": 16
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -41029645,
+      -32565010
+     ],
+     "b": [
+      -52674953,
+      -45631070
+     ]
+    },
+    "group": null,
+    "wire": 16
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -52674953,
+      -45631070
+     ],
+     "mid": [
+      -52699314,
+      -45657625
+     ],
+     "end": [
+      -52724427,
+      -45683470
+     ]
+    },
+    "group": null,
+    "wire": 16
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -52724427,
+      -45683470
+     ],
+     "b": [
+      -54520479,
+      -47479521
+     ]
+    },
+    "group": null,
+    "wire": 16
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -54520479,
+      -47479521
+     ],
+     "mid": [
+      -55407898,
+      -47847102
+     ],
+     "end": [
+      -56295317,
+      -47479521
+     ]
+    },
+    "group": null,
+    "wire": 16
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -56295317,
+      -47479521
+     ],
+     "b": [
+      -58091368,
+      -45683470
+     ]
+    },
+    "group": null,
+    "wire": 16
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      -58091368,
+      -45683470
+     ],
+     "mid": [
+      -58417284,
+      -44475360
+     ],
+     "end": [
+      -57537009,
+      -43586053
+     ]
+    },
+    "group": null,
+    "wire": 16
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      -57537009,
+      -43586053
+     ],
+     "b": [
+      -55407898,
+      -43000000
+     ]
+    },
+    "group": null,
+    "wire": 16
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      57157000,
+      -44748102
+     ],
+     "b": [
+      56570947,
+      -42618991
+     ]
+    },
+    "group": null,
+    "wire": 19
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      56570947,
+      -42618991
+     ],
+     "mid": [
+      56456286,
+      -42339464
+     ],
+     "end": [
+      56278143,
+      -42095441
+     ]
+    },
+    "group": null,
+    "wire": 19
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      56278143,
+      -42095441
+     ],
+     "b": [
+      55658932,
+      -41432436
+     ]
+    },
+    "group": null,
+    "wire": 19
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      55658932,
+      -41432436
+     ],
+     "mid": [
+      55649778,
+      -41422298
+     ],
+     "end": [
+      55640972,
+      -41411856
+     ]
+    },
+    "group": null,
+    "wire": 19
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      55640972,
+      -41411856
+     ],
+     "b": [
+      54722583,
+      -40284954
+     ]
+    },
+    "group": null,
+    "wire": 19
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      54722583,
+      -40284954
+     ],
+     "mid": [
+      54667356,
+      -40208433
+     ],
+     "end": [
+      54621464,
+      -40125975
+     ]
+    },
+    "group": null,
+    "wire": 19
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      54621464,
+      -40125975
+     ],
+     "b": [
+      45149736,
+      -20478425
+     ]
+    },
+    "group": null,
+    "wire": 19
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      45149736,
+      -20478425
+     ],
+     "mid": [
+      45074330,
+      -20352735
+     ],
+     "end": [
+      44977383,
+      -20242802
+     ]
+    },
+    "group": null,
+    "wire": 19
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      44977383,
+      -20242802
+     ],
+     "b": [
+      44098208,
+      -19412327
+     ]
+    },
+    "group": null,
+    "wire": 19
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      44098208,
+      -19412327
+     ],
+     "mid": [
+      43849067,
+      -19083826
+     ],
+     "end": [
+      43719823,
+      -18692316
+     ]
+    },
+    "group": null,
+    "wire": 19
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      43719823,
+      -18692316
+     ],
+     "b": [
+      43660177,
+      -18307684
+     ]
+    },
+    "group": null,
+    "wire": 19
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      43660177,
+      -18307684
+     ],
+     "mid": [
+      43605103,
+      -18087016
+     ],
+     "end": [
+      43511107,
+      -17879911
+     ]
+    },
+    "group": null,
+    "wire": 19
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      43511107,
+      -17879911
+     ],
+     "b": [
+      42420000,
+      -15960000
+     ]
+    },
+    "group": null,
+    "wire": 19
+   }
+  ],
+  "connections": [
+   {
+    "id": 0,
+    "net": 1,
+    "name": "+3.3V",
+    "layer": 0,
+    "width": 500000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "J7.1",
+     "at": [
+      -2540000,
+      60000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J5.1",
+     "at": [
+      52380000,
+      36000000
+     ]
+    },
+    "length_nm": 67741827,
+    "length_outside_pads_nm": 65786475,
+    "pattern": "SASASAS",
+    "anchors": 3,
+    "crossings": 114,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 2,
+    "zero_slack": false
+   },
+   {
+    "id": 1,
+    "net": 1,
+    "name": "+3.3V",
+    "layer": 0,
+    "width": 500000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "J2.1",
+     "at": [
+      -44960000,
+      -18000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J3.1",
+     "at": [
+      -57460000,
+      36000000
+     ]
+    },
+    "length_nm": 55556658,
+    "length_outside_pads_nm": 53660387,
+    "pattern": "SASAS",
+    "anchors": 2,
+    "crossings": 33,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 2,
+    "zero_slack": false
+   },
+   {
+    "id": 2,
+    "net": 1,
+    "name": "+3.3V",
+    "layer": 0,
+    "width": 500000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "J2.1",
+     "at": [
+      -44960000,
+      -18000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J6.1",
+     "at": [
+      -59000000,
+      -43000000
+     ]
+    },
+    "length_nm": 28746753,
+    "length_outside_pads_nm": 26781955,
+    "pattern": "SAS",
+    "anchors": 1,
+    "crossings": 16,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 2,
+    "zero_slack": false
+   },
+   {
+    "id": 3,
+    "net": 1,
+    "name": "+3.3V",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J2.1",
+     "at": [
+      -44960000,
+      -18000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C4.1",
+     "at": [
+      -30481400,
+      -21580600
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 4,
+    "net": 1,
+    "name": "+3.3V",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "blocked: no path",
+    "from": {
+     "kind": "pad",
+     "label": "J5.1",
+     "at": [
+      52380000,
+      36000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J4.1",
+     "at": [
+      39880000,
+      -18500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": [
+     52160526,
+     33116423
+    ],
+    "g1_angle_deg": null,
+    "iteration": 2,
+    "zero_slack": false
+   },
+   {
+    "id": 5,
+    "net": 1,
+    "name": "+3.3V",
+    "layer": 0,
+    "width": 500000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "J1.1",
+     "at": [
+      -2540000,
+      -30000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J4.1",
+     "at": [
+      39880000,
+      -18500000
+     ]
+    },
+    "length_nm": 45453890,
+    "length_outside_pads_nm": 43611336,
+    "pattern": "SASASAS",
+    "anchors": 3,
+    "crossings": 29,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 2,
+    "zero_slack": false
+   },
+   {
+    "id": 6,
+    "net": 1,
+    "name": "+3.3V",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "J1.1",
+     "at": [
+      -2540000,
+      -30000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.2",
+     "at": [
+      -24434800,
+      -19879900
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 7,
+    "net": 1,
+    "name": "+3.3V",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "blocked: no path",
+    "from": {
+     "kind": "pad",
+     "label": "J8.1",
+     "at": [
+      57157000,
+      -41156000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J4.1",
+     "at": [
+      39880000,
+      -18500000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": [
+     40704247,
+     -20738353
+    ],
+    "g1_angle_deg": null,
+    "iteration": 2,
+    "zero_slack": false
+   },
+   {
+    "id": 8,
+    "net": 1,
+    "name": "+3.3V",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C3.2",
+     "at": [
+      -30001400,
+      -23018200
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C4.1",
+     "at": [
+      -30481400,
+      -21580600
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 9,
+    "net": 1,
+    "name": "+3.3V",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C3.2",
+     "at": [
+      -30001400,
+      -23018200
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D1.1",
+     "at": [
+      -28220800,
+      -22915600
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 10,
+    "net": 1,
+    "name": "+3.3V",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D1.1",
+     "at": [
+      -28220800,
+      -22915600
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.2",
+     "at": [
+      -24434800,
+      -19879900
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 11,
+    "net": 3,
+    "name": "SDA",
+    "layer": 0,
+    "width": 500000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "J7.3",
+     "at": [
+      0,
+      60000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J5.3",
+     "at": [
+      54920000,
+      36000000
+     ]
+    },
+    "length_nm": 82439290,
+    "length_outside_pads_nm": 80739289,
+    "pattern": "SASASASASASAS",
+    "anchors": 6,
+    "crossings": 185,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 2,
+    "zero_slack": false
+   },
+   {
+    "id": 12,
+    "net": 3,
+    "name": "SDA",
+    "layer": 0,
+    "width": 500000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "J2.3",
+     "at": [
+      -42420000,
+      -18000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J3.3",
+     "at": [
+      -54920000,
+      36000000
+     ]
+    },
+    "length_nm": 55644957,
+    "length_outside_pads_nm": 53944957,
+    "pattern": "SASASAS",
+    "anchors": 3,
+    "crossings": 31,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 2,
+    "zero_slack": false
+   },
+   {
+    "id": 13,
+    "net": 3,
+    "name": "SDA",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "infeasible: wall shape:aa9e6355-d4a0-487d-9037-ed5e13582f62 grazed mid-span by 334 nm",
+    "from": {
+     "kind": "pad",
+     "label": "J2.3",
+     "at": [
+      -42420000,
+      -18000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J1.3",
+     "at": [
+      0,
+      -30000000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": [
+     -43620000,
+     -15460000
+    ],
+    "g1_angle_deg": null,
+    "iteration": 2,
+    "zero_slack": false
+   },
+   {
+    "id": 14,
+    "net": 3,
+    "name": "SDA",
+    "layer": 0,
+    "width": 500000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "J2.3",
+     "at": [
+      -42420000,
+      -18000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J6.3",
+     "at": [
+      -57203949,
+      -44796051
+     ]
+    },
+    "length_nm": 31441611,
+    "length_outside_pads_nm": 29741610,
+    "pattern": "SAS",
+    "anchors": 1,
+    "crossings": 16,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 2,
+    "zero_slack": false
+   },
+   {
+    "id": 15,
+    "net": 3,
+    "name": "SDA",
+    "layer": 0,
+    "width": 500000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "J5.3",
+     "at": [
+      54920000,
+      36000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J4.3",
+     "at": [
+      42420000,
+      -18500000
+     ]
+    },
+    "length_nm": 61465948,
+    "length_outside_pads_nm": 59765948,
+    "pattern": "SASASASAS",
+    "anchors": 4,
+    "crossings": 47,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 2,
+    "zero_slack": false
+   },
+   {
+    "id": 16,
+    "net": 3,
+    "name": "SDA",
+    "layer": 0,
+    "width": 500000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "J1.3",
+     "at": [
+      0,
+      -30000000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J4.3",
+     "at": [
+      42420000,
+      -18500000
+     ]
+    },
+    "length_nm": 46664696,
+    "length_outside_pads_nm": 44964695,
+    "pattern": "SASASAS",
+    "anchors": 3,
+    "crossings": 29,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 2,
+    "zero_slack": false
+   },
+   {
+    "id": 17,
+    "net": 3,
+    "name": "SDA",
+    "layer": 0,
+    "width": 500000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "J8.3",
+     "at": [
+      55360949,
+      -42952051
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J4.3",
+     "at": [
+      42420000,
+      -18500000
+     ]
+    },
+    "length_nm": 27668142,
+    "length_outside_pads_nm": 25968142,
+    "pattern": "SAS",
+    "anchors": 1,
+    "crossings": 13,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 2,
+    "zero_slack": false
+   },
+   {
+    "id": 18,
+    "net": 4,
+    "name": "SCL",
+    "layer": 0,
+    "width": 500000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "J7.4",
+     "at": [
+      0,
+      62540000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J5.4",
+     "at": [
+      54920000,
+      38540000
+     ]
+    },
+    "length_nm": 70779326,
+    "length_outside_pads_nm": 69079327,
+    "pattern": "SASASASASAS",
+    "anchors": 5,
+    "crossings": 118,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 2,
+    "zero_slack": false
+   },
+   {
+    "id": 19,
+    "net": 4,
+    "name": "SCL",
+    "layer": 0,
+    "width": 500000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "J2.4",
+     "at": [
+      -42420000,
+      -15460000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J3.4",
+     "at": [
+      -54920000,
+      38540000
+     ]
+    },
+    "length_nm": 55550859,
+    "length_outside_pads_nm": 53850859,
+    "pattern": "SASASAS",
+    "anchors": 3,
+    "crossings": 30,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 2,
+    "zero_slack": false
+   },
+   {
+    "id": 20,
+    "net": 4,
+    "name": "SCL",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "self-check: item:18 (gap -500000 < 150000 nm)",
+    "from": {
+     "kind": "pad",
+     "label": "J2.4",
+     "at": [
+      -42420000,
+      -15460000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J1.4",
+     "at": [
+      0,
+      -27460000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": [
+     -40435625,
+     -16510551
+    ],
+    "g1_angle_deg": null,
+    "iteration": 2,
+    "zero_slack": false
+   },
+   {
+    "id": 21,
+    "net": 4,
+    "name": "SCL",
+    "layer": 0,
+    "width": 500000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "J2.4",
+     "at": [
+      -42420000,
+      -15460000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J6.4",
+     "at": [
+      -55407898,
+      -43000000
+     ]
+    },
+    "length_nm": 47060949,
+    "length_outside_pads_nm": 45360950,
+    "pattern": "SASASASASASAS",
+    "anchors": 6,
+    "crossings": 46,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 2,
+    "zero_slack": false
+   },
+   {
+    "id": 22,
+    "net": 4,
+    "name": "SCL",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "self-check: item:6 (gap 98027 < 150000 nm)",
+    "from": {
+     "kind": "pad",
+     "label": "J5.4",
+     "at": [
+      54920000,
+      38540000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J4.4",
+     "at": [
+      42420000,
+      -15960000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": [
+     53052963,
+     34187793
+    ],
+    "g1_angle_deg": null,
+    "iteration": 2,
+    "zero_slack": false
+   },
+   {
+    "id": 23,
+    "net": 4,
+    "name": "SCL",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "infeasible: pad:J8:3 <-> pad:J8:1",
+    "from": {
+     "kind": "pad",
+     "label": "J1.4",
+     "at": [
+      0,
+      -27460000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J4.4",
+     "at": [
+      42420000,
+      -15960000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": [
+     -1494118,
+     -27460000
+    ],
+    "g1_angle_deg": null,
+    "iteration": 2,
+    "zero_slack": false
+   },
+   {
+    "id": 24,
+    "net": 4,
+    "name": "SCL",
+    "layer": 0,
+    "width": 500000,
+    "status": "routed",
+    "reason": "",
+    "from": {
+     "kind": "pad",
+     "label": "J8.4",
+     "at": [
+      57157000,
+      -44748102
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "J4.4",
+     "at": [
+      42420000,
+      -15960000
+     ]
+    },
+    "length_nm": 32586890,
+    "length_outside_pads_nm": 30886890,
+    "pattern": "SASASASASASAS",
+    "anchors": 6,
+    "crossings": 16,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 2,
+    "zero_slack": false
+   },
+   {
+    "id": 25,
+    "net": 21,
+    "name": "Net-(SW1-B)",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C1.2",
+     "at": [
+      -21388200,
+      -19340400
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C2.1",
+     "at": [
+      -19889600,
+      -19655200
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 26,
+    "net": 21,
+    "name": "Net-(SW1-B)",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "C1.2",
+     "at": [
+      -21388200,
+      -19340400
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "L1.1",
+     "at": [
+      -22387000,
+      -15449000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 27,
+    "net": 21,
+    "name": "Net-(SW1-B)",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "SW1.2",
+     "at": [
+      750000,
+      -34070000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "C2.1",
+     "at": [
+      -19889600,
+      -19655200
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 28,
+    "net": 22,
+    "name": "Net-(BT1-+)",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "BT1.1",
+     "at": [
+      -6350000,
+      -18500000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "SW1.1",
+     "at": [
+      -2250000,
+      -34070000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 29,
+    "net": 23,
+    "name": "Net-(D1-A)",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "D1.2",
+     "at": [
+      -28220800,
+      -19615600
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.3",
+     "at": [
+      -25934800,
+      -19792400
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   },
+   {
+    "id": 30,
+    "net": 23,
+    "name": "Net-(D1-A)",
+    "layer": 0,
+    "width": 500000,
+    "status": "failed",
+    "reason": "terminal not on layer F.Cu",
+    "from": {
+     "kind": "pad",
+     "label": "U1.3",
+     "at": [
+      -25934800,
+      -19792400
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "L1.2",
+     "at": [
+      -26587000,
+      -15449000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false
+   }
+  ],
+  "nets": [
+   {
+    "net": 1,
+    "name": "+3.3V",
+    "status": "partial",
+    "connections": 11,
+    "routed": 4,
+    "partial": 0,
+    "failed": 7,
+    "length_nm": 197499128,
+    "length_outside_pads_nm": 189840153
+   },
+   {
+    "net": 2,
+    "name": "GND",
+    "status": "pour_served",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 3,
+    "name": "SDA",
+    "status": "partial",
+    "connections": 7,
+    "routed": 6,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 305324644,
+    "length_outside_pads_nm": 295124641
+   },
+   {
+    "net": 4,
+    "name": "SCL",
+    "status": "partial",
+    "connections": 7,
+    "routed": 4,
+    "partial": 0,
+    "failed": 3,
+    "length_nm": 205978024,
+    "length_outside_pads_nm": 199178026
+   },
+   {
+    "net": 5,
+    "name": "unconnected-(J7-Pin_5-Pad5)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 6,
+    "name": "unconnected-(J7-Pin_6-Pad6)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 7,
+    "name": "unconnected-(J2-Pin_5-Pad5)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 8,
+    "name": "unconnected-(J2-Pin_6-Pad6)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 9,
+    "name": "unconnected-(J5-Pin_5-Pad5)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 10,
+    "name": "unconnected-(J5-Pin_6-Pad6)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 11,
+    "name": "unconnected-(J3-Pin_5-Pad5)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 12,
+    "name": "unconnected-(J3-Pin_6-Pad6)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 13,
+    "name": "unconnected-(J1-Pin_5-Pad5)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 14,
+    "name": "unconnected-(J1-Pin_6-Pad6)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 15,
+    "name": "unconnected-(J6-Pin_5-Pad5)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 16,
+    "name": "unconnected-(J6-Pin_6-Pad6)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 17,
+    "name": "unconnected-(J8-Pin_5-Pad5)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 18,
+    "name": "unconnected-(J8-Pin_6-Pad6)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 19,
+    "name": "unconnected-(J4-Pin_5-Pad5)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 20,
+    "name": "unconnected-(J4-Pin_6-Pad6)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 21,
+    "name": "Net-(SW1-B)",
+    "status": "failed",
+    "connections": 3,
+    "routed": 0,
+    "partial": 0,
+    "failed": 3,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 22,
+    "name": "Net-(BT1-+)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 23,
+    "name": "Net-(D1-A)",
+    "status": "failed",
+    "connections": 2,
+    "routed": 0,
+    "partial": 0,
+    "failed": 2,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 24,
+    "name": "unconnected-(SW1-C-Pad3)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   }
+  ],
+  "connections_total": 31,
+  "routed": 14,
+  "partial": 0,
+  "failed": 17,
+  "nets_total": 6,
+  "nets_routed": 0,
+  "total_length_nm": 708801795,
+  "length_outside_pads_nm": 684142821,
+  "iterations": 10,
+  "converged": false,
+  "overuse_edges": 1,
+  "clinches": {
+   "regular": [],
+   "u": []
+  },
+  "relax_iterations": 4,
+  "self_check_rounds": 2,
+  "timed_out": false,
+  "runtime_s": 18.904775041,
+  "threads_used": 1,
+  "warnings": [
+   "routable layers B.Cu unused (M2 routes on F.Cu only)",
+   "net 5 skipped: no other terminal in the net",
+   "net 6 skipped: no other terminal in the net",
+   "net 7 skipped: no other terminal in the net",
+   "net 8 skipped: no other terminal in the net",
+   "net 9 skipped: no other terminal in the net",
+   "net 10 skipped: no other terminal in the net",
+   "net 11 skipped: no other terminal in the net",
+   "net 12 skipped: no other terminal in the net",
+   "net 13 skipped: no other terminal in the net",
+   "net 14 skipped: no other terminal in the net",
+   "net 15 skipped: no other terminal in the net",
+   "net 16 skipped: no other terminal in the net",
+   "net 17 skipped: no other terminal in the net",
+   "net 18 skipped: no other terminal in the net",
+   "net 19 skipped: no other terminal in the net",
+   "net 20 skipped: no other terminal in the net",
+   "net 24 skipped: no other terminal in the net",
+   "stalled: no better routing for 8 iterations, stopped after 10"
+  ],
+  "zero_slack_wires": [],
+  "zero_slack": "#11: no length gain"
+ },
+ "smooth": null,
+ "route": {
+  "connections": 31,
+  "routed": 14,
+  "partial": 0,
+  "failed": 17,
+  "nets": 6,
+  "nets_routed": 0,
+  "length_mm": 708.802,
+  "outside_mm": 684.143,
+  "hand_outside_mm": 1086.795,
+  "iterations": 10,
+  "timed_out": false,
+  "clinches": {
+   "regular": [],
+   "u": []
+  },
+  "zero_slack_wires": [],
+  "zero_slack": "#11: no length gain"
+ },
+ "hand_stats": {
+  "wires": 55,
+  "skipped": 8,
+  "hand_length_nm": 1139230592,
+  "hand_outside_pads_nm": 1086794805
+ },
+ "floors": [
+  {
+   "name": "min_clearance",
+   "design_mm": 0.09,
+   "floor_mm": 0.15
+  },
+  {
+   "name": "min_track_width",
+   "design_mm": 0.09,
+   "floor_mm": 0.2
+  },
+  {
+   "name": "min_via_diameter",
+   "design_mm": 0.25,
+   "floor_mm": 0.45
+  },
+  {
+   "name": "min_via_drill",
+   "design_mm": 0.2,
+   "floor_mm": 0.25
+  },
+  {
+   "name": "min_annular",
+   "design_mm": 0.05,
+   "floor_mm": 0.1
+  },
+  {
+   "name": "hole_clearance",
+   "design_mm": 0.254,
+   "floor_mm": 0.35
+  }
+ ],
+ "rules_used": {
+  "edge_clearance": 0.2,
+  "min_clearance": 0.15,
+  "min_track_width": 0.2
+ },
+ "rip": "all",
+ "threads": 4,
+ "runtime_s": 28.739,
+ "router_s": 18.906,
+ "width_match": {
+  "compared": 3,
+  "matched": 3,
+  "mismatched": []
+ }
+}
