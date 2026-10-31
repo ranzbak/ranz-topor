@@ -136,6 +136,8 @@ class RunReport:
         out.append("Zero-slack connections: " + (", ".join(f["zero_slack_wires"]) if f.get("zero_slack_wires")
                                                   else "none"))
         out.append("Ignored pads: " + (", ".join(f["ignored_pads"]) if f.get("ignored_pads") else "none"))
+        out.append("Excluded nets (do not touch): " + (", ".join(f["excluded_nets"]) if f.get("excluded_nets")
+                                                      else "none"))
         return out
 
     def _vias(self) -> list:
@@ -337,6 +339,7 @@ def build_report(result: dict, drc: dict | None, cfg, findings, scope, before_st
         "zero_slack_wires": [w.get("name") or str(w.get("conn")) for w in result.get("zero_slack_wires") or []],
         "vias_in_pads": _vias_in_pads(items, before.get("pads") or []),
         "ignored_pads": list(scope.get("ignored_pads") or []),
+        "excluded_nets": [n.get("name") for n in result.get("nets") or [] if n.get("status") == "excluded"],
         "fallbacks": list(scope.get("fallbacks") or []),
         "accepted_codes": list(scope.get("accepted_codes") or ()),
         "findings": list(findings or []),

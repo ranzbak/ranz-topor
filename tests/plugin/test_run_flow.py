@@ -850,3 +850,68 @@ def test_refill_pours_zone_unfilled_after_refill_reaches_nothing():
     assert empty["pads"] == [] and empty["vias"] == [] and empty["fills"] == model["pours"][0]["fills"]
     assert "warning" in empty
     assert absent == model["pours"][1]
+
+
+# ------------------------------------------------------------------ A9: priorities / do-not-touch / ignored pads / pour_served
+class OptionsEngine(ProxyEngine):
+    """Real engine; records the model / options JSON handed to route_async."""
+
+    def __init__(self):
+        super().__init__(hold=1)
+        self.models, self.options = [], []
+
+    def route_async(self, m, o):
+        self.models.append(json.loads(m))
+        self.options.append(json.loads(o))
+        return super().route_async(m, o)
+
+
+def _signal_net(model, skip=()):
+    """(name, code) of a net with >= 2 pads and hand copper that is not a ground / power net."""
+    pads, kept = {}, {}
+    for p in model["pads"]:
+        pads[p["net"]] = pads.get(p["net"], 0) + 1
+    for k in model["kept"]:
+        kept[k["net"]] = kept.get(k["net"], 0) + 1
+    for n in model["nets"]:
+        if n["code"] and pads.get(n["code"], 0) >= 2 and kept.get(n["code"]) and n["name"] not in skip \
+                and not re.search(r"GND|VCC|\+5V|\+3V3|VDD", n["name"]):
+            return n["name"], n["code"]
+    pytest.skip("no signal net with hand copper")
+
+
+def test_a9_options_reach_the_engine_and_excluded_net_stays(app, eprom, tmp_path, reports):
+    name, code = _signal_net(eprom.model)
+    pad = next(p for p in eprom.model["pads"] if p["net"] != code and p["net"])
+    ref = f"{pad['ref']}.{pad['number']}"
+    other = next(n["name"] for n in eprom.model["nets"] if n["code"] and n["name"] != name)
+    toml = ('version = 1\n\n[run]\nexisting_copper = "rip"\n\n[nets]\n'
+            f'do_not_touch = ["{name}"]\nignore_pads = ["{ref}"]\n'
+            f'pour_served = {{ "{other}" = false, "nonsense" = "yes" }}\n'
+            f'priority = {{ "{other}" = 1 }}\n')
+    board = _project(eprom, tmp_path, toml=toml)
+    eng = OptionsEngine()
+    out = run_mod.run(board, ScriptedUi(), None, eng, tmp_root=tmp_path / "work")
+    _ok(out)
+    o = eng.options[0]
+    assert o["exclude_nets"] == [name]
+    assert o["ignore_pads"] == [ref]
+    assert o["pour_served"] == {other: False}  # only real booleans reach the engine
+    assert o["net_priority"][other] == 1 and all(1 <= v <= 3 for v in o["net_priority"].values())
+    # the excluded net's hand copper is not ripped and the engine did not route it
+    kept_uuids = {k["uuid"] for k in eprom.model["kept"] if k["net"] == code}
+    assert kept_uuids and not (kept_uuids & set(out.ripped))
+    assert not any(it.get("net") == code for it in out.items)
+    md = (out.report_dir / "report.md").read_text()
+    assert f"Excluded nets (do not touch): {name}" in md
+    assert ref in md  # ignored pad listed in the report
+
+
+def test_a9_build_options_defaults_are_left_out(eprom):
+    cfg = Config.defaults()
+    opts = run_mod.build_options(cfg, ProxyEngine(), model=eprom.model, priorities={})
+    for k in ("exclude_nets", "ignore_pads", "net_priority", "pour_served"):
+        assert k not in opts, k  # empty = the engine's own default
+    opts = run_mod.build_options(cfg.with_values({("nets", "pour_served"): {"GND": True, "X": 1}}),
+                                 ProxyEngine(), model=eprom.model, priorities={"A": 2})
+    assert opts["pour_served"] == {"GND": True} and opts["net_priority"] == {"A": 2}

@@ -99,8 +99,6 @@ def test_cli_check_passes():
 NO_EFFECT = "(No effect in 0.4.0; applied from 0.5.0.)"
 #: live keys whose 0.4.0 effect is partial: the doc string ends with the precise statement (ruling C34)
 PARTIAL = {
-    ("nets", "priority"): "routing order",
-    ("nets", "ignore_pads"): "selection",
     ("run", "existing_copper"): "smooth is treated as fixed in 0.4.0",
 }
 
@@ -116,7 +114,7 @@ def test_keys_without_effect_say_so():
     """Ruling C34 / F I-7: a live key that 0.4.0 does not apply keeps its key, and its doc string (rendered into
     topor.toml and configuration.md) ends with the no-effect marker or the precise partial statement."""
     by = schema.SETTINGS_BY_KEY
-    for k in (("nets", "pour_served"), ("run", "detour_reference")):
+    for k in (("run", "detour_reference"),):  # A9: pour_served / priority / ignore_pads are applied now
         assert by[k].doc.endswith(NO_EFFECT), (k, by[k].doc)
         assert schema.available(by[k])  # stays a live key: a user's value carries into 0.5.0
     for k, words in PARTIAL.items():
@@ -124,7 +122,7 @@ def test_keys_without_effect_say_so():
         assert "0.4.0" in last and words in last and by[k].doc.endswith(".)"), (k, by[k].doc)
     md = (ROOT / "docs/user/configuration.md").read_text()
     text = render_toml(Config.defaults())
-    assert md.count(NO_EFFECT) >= 2 and text.count(NO_EFFECT) >= 2
+    assert md.count(NO_EFFECT) >= 1 and text.count(NO_EFFECT) >= 1
 
 
 def test_live_plugin_keys_have_a_consumer_or_the_marker():

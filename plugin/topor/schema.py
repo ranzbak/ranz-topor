@@ -89,10 +89,10 @@ SETTINGS: list[Setting] = [
     _s("nets", "power_pattern", "str", POWER_PATTERN, "Regex naming power nets, applied only to nets still in the Default netclass; the pre-flight lists every net classified this way.",
        kicad="KiCad → File → Board Setup → Design Rules → Net Classes (a netclass wins over this pattern)"),
     _s("nets", "ground_pattern", "str", "^/?(GND|AGND|DGND|PGND|SGND|VSS)", "Regex (case-insensitive) naming ground nets, used to check that a GND plane layer has a ground zone; power nets use power_pattern."),
-    _s("nets", "priority", "table", {}, "Net name or glob → priority 1..3 (1 routed first). Precedence: the @N name marker wins over a topor_pN netclass, which wins over this table; an exact name here wins over a glob (lowest number among matching globs). (In 0.4.0 priorities are computed and reported, but the routing order does not follow them yet; from 0.5.0.)",
+    _s("nets", "priority", "table", {}, "Net name or glob → priority 1..3 (1 routed first). Precedence: the @N name marker wins over a topor_pN netclass, which wins over this table; an exact name here wins over a glob (lowest number among matching globs). Tier 1 is routed first and pays the most per via; unmarked nets are tier 3, power nets tier 2.",
        kicad="KiCad → File → Board Setup → Design Rules → Net Classes (netclass topor_p1..p3) or the @N marker in the net name"),
-    _s("nets", "pour_served", "table", {}, "Net name → true/false to force or forbid serving a net by a copper pour; absent = automatic. (No effect in 0.4.0; applied from 0.5.0.)"),
-    _s("nets", "ignore_pads", "list", [], "Pads (REF.PAD, e.g. \"U1.3\") skipped as terminals, typically pads outside the board; written by the pre-flight dialog. (In 0.4.0 applied to a footprint / pad selection scope only: a whole-board run still routes to these pads; whole board from 0.5.0.)",
+    _s("nets", "pour_served", "table", {}, "Net name → true/false to force or forbid serving a net by a copper pour; absent = automatic. true: only pour connections are made for the net (none when it has no usable pour); false: the net is routed pad to pad although it has a pour."),
+    _s("nets", "ignore_pads", "list", [], "Pads (REF.PAD, e.g. \"U1.3\") skipped as terminals, typically pads outside the board; written by the pre-flight dialog. Their connections are reported as ignored; they are neither terminals nor obstacles.",
        elem="str"),
     # ---- [vias]
     _s("vias", "via_cost_mm", "float", 2.0, "Search cost of one via in mm of extra trace: the router accepts up to this much longer to avoid a via.",
@@ -167,6 +167,9 @@ ENGINE_INTERNAL = {
     "seed": "fixed for byte-identical, reproducible results",
     "scope": "built per run from the KiCad selection and scope_mode, not stored",
     "net_priority": "built per run from @N markers, netclasses and [nets] priority",
+    "exclude_nets": "built per run from [nets] do_not_touch (patterns expanded against the board's net names)",
+    "ignore_pads": "passed through from [nets] ignore_pads (REF.PAD strings) by run.build_options",
+    "pour_served": "passed through from [nets] pour_served (boolean entries only) by run.build_options",
     "via_cost_by_net": "built per run from [vias] cost_by_priority / cost_by_netclass",
     "detour_reference_budget_pct": "internal budget of the detour reference search; run.detour_reference will switch it (0.5.0)",
 }

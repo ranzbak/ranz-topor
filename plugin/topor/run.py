@@ -180,8 +180,11 @@ def build_options(cfg: Config, engine, threads_override=None, *, plan=None, rip=
     """Engine options: ``cfg.engine_options()`` restricted to keys the engine knows, plus the plugin's own
     additions: ``scope`` (``plan.engine_scope``, scope.py), ``existing_copper`` (``rip.engine_existing_copper``:
     the plugin does the ripping, so only ``smooth`` is passed on), and, when the engine knows the key,
-    ``net_priority`` (net name -> 1..3), ``exclude_nets`` (``do_not_touch`` expanded against `model`) and
-    ``ignore_pads``. O(#nets) for the expansion."""
+    ``net_priority`` (net name -> 1..3; the numbers are the engine tiers 1:1: 1 is routed first and pays the
+    most per via, 3 is the normal tier, the plugin never produces 4), ``exclude_nets`` (``do_not_touch``
+    expanded against `model`), ``ignore_pads`` (``REF.PAD`` strings exactly as stored in topor.toml, the
+    engine's ``PadRef`` format) and ``pour_served`` (net name -> bool; non-boolean entries are dropped).
+    O(#nets) for the expansion."""
     known = json.loads(engine.default_options())
     opts = {k: v for k, v in cfg.engine_options().items() if k in known}
     opts["existing_copper"] = rip.engine_existing_copper if rip is not None else "fixed"
@@ -192,7 +195,9 @@ def build_options(cfg: Config, engine, threads_override=None, *, plan=None, rip=
             opts["scope"] = {**known["scope"], "unrouted_only": True}
     excluded = sorted(do_not_touch_nets(model, cfg)) if model is not None else list(cfg.get("nets", "do_not_touch"))
     for key, val in (("exclude_nets", excluded), ("ignore_pads", list(cfg.get("nets", "ignore_pads"))),
-                     ("net_priority", dict(priorities or {}))):
+                     ("net_priority", dict(priorities or {})),
+                     ("pour_served", {str(k): v for k, v in dict(cfg.get("nets", "pour_served") or {}).items()
+                                      if isinstance(v, bool)})):
         if key in known and val:
             opts[key] = val
     if threads_override is not None:
