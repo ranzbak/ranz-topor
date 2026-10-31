@@ -486,3 +486,15 @@ def test_run_wiccon_refill_gives_harness_connection_count(app, tmp_path_factory,
                                         json.dumps({"threads": 4, "wall_clock_s": 60.0})))
     print(f"wiccon connections: flow {out.total} harness {ref['connections_total']}")
     assert out.total == ref["connections_total"] == 62
+
+
+def test_run_report_has_every_section(app, eprom, tmp_path, reports):
+    """B8: the real flow writes a report.md with all nine sections and real numbers."""
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False))
+    md = (out.report_dir / "report.md").read_text()
+    for s in ("Summary", "Connections", "Vias", "Length", "DRC", "Findings", "Settings", "Files", "Versions"):
+        assert f"\n## {s}\n" in md, s
+    f = out.report.facts
+    assert f["routed"] == 27 and f["vias_before"] is not None and f["length_before_mm"] is not None
+    assert f["versions"]["engine"] and "non-default" in "\n".join(out.report.summary_lines())
+    assert "Total " in md and "routing_new" in md and "Outside pads" in md

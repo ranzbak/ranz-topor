@@ -37,7 +37,6 @@ from pathlib import Path
 
 from toporlib import drcloop, pcbfile
 from toporlib import rules as rules_mod
-from toporlib.detour import detour_line, detour_stats
 from toporlib.drc import classify, run_drc
 from toporlib.drcloop import DrcJudgement
 from toporlib.kicad_cli import kicad_cli
@@ -47,7 +46,7 @@ from .config import CONFIG_NAME, Config, load_config, update_config
 from .findings import Finding
 from .layers import resolve_layer_roles
 from .ports import BoardPort, CommitRequest, CommitResult, Decision, Progress, RunSummary, UiPort
-from .report import RunReport
+from .report import RunReport, before_stats_from_model, build_report
 from .schema import CURRENT_VERSION
 
 ACTION_CLEANUP = "pcbnew.GlobalEdit.cleanupTracksAndVias"
@@ -333,7 +332,8 @@ def run(port: BoardPort, ui: UiPort, cfg: Config | None = None, engine=None, *, 
     ver = dict(versions or {})
     ver.setdefault("plugin", CURRENT_VERSION)
     ver.setdefault("engine", str(engine.version()) if hasattr(engine, "version") else "?")
-    report = RunReport(report_dir, {"version": ver["engine"], "board": board_name, "timestamp": ts})
+    report = RunReport(report_dir, {"version": ver["engine"], "board": board_name, "timestamp": ts,
+                               "versions": dict(ver)})
     out = RunOutcome("error", report=report, report_dir=report_dir, findings=findings)
 
     def ctx() -> None:
@@ -407,6 +407,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         if pf is not None:
             findings.append(pf)
     conns, nets = connection_estimate(model)
+    before_stats = before_stats_from_model(model)
     sel = port.selection()
     summary = RunSummary(connections=conns, nets=nets, layers=len(model.get("layers", [])),
                          engine_version=report.facts["version"], board=board_name,
@@ -522,18 +523,14 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     out.drc = classified
     inc = classified["incomplete"]
     partial = int(rr.get("partial", 0))
-    stats = detour_stats(rr.get("connections"))
-    report.facts.update(
-        routed=out.routed, total=out.total, partial=partial, failed=rr.get("failed"), nets=rr.get("nets_total", report.facts.get("nets")),
-        vias=rr.get("vias"), vias_before=len(model.get("vias", [])),
-        length_mm=None if rr.get("length_outside_pads_nm") is None else round(rr["length_outside_pads_nm"] / 1e6, 3),
-        routing_new=classified["routing_new"], preexisting=classified["routing_preexisting"],
-        unconnected=inc["unconnected_new"], detour_line=detour_line(stats), stop_reason=out.stop_reason,
-        iterations=rr.get("iterations"), elapsed_s=round(out.router_s, 1), threads=rr.get("threads_used"),
-        existing_copper=cfg.get("run", "existing_copper"), respect_locked=cfg.get("run", "respect_locked"),
-        non_default=len(cfg.non_defaults()), findings=findings,
-        notes=[f"geometry: {geometry}", f"DRC rounds: {loop.rounds}"] + (
-            ["time budget exhausted"] if loop.budget_exhausted else []))
+    scope_info = {"mode": cfg.get("run", "scope_mode") if (sel.footprints or sel.pads) else "whole board",
+                  "ignored_pads": list(cfg.get("nets", "ignore_pads")),
+                  "accepted_codes": list(decision.accepted_codes)}
+    build_report({**rr, "items": out.items}, classified, cfg, findings, scope_info, before_stats,
+                 {"router_s": out.router_s, "drc_rounds": loop.rounds}, report=report,
+                 facts={"layers": report.facts.get("layers"), "versions": report.facts.get("versions"),
+                        "notes": [f"geometry: {geometry}", f"DRC rounds: {loop.rounds}"] + (
+                            ["time budget exhausted"] if loop.budget_exhausted else [])})
     log.line(f"routed {out.routed}/{out.total}, stop {out.stop_reason}, rounds {loop.rounds}, "
              f"routing_new {classified['routing_new']}, unconnected_new {inc['unconnected_new']}")
     drc_src = routed_dir / "drc-routed.json"
