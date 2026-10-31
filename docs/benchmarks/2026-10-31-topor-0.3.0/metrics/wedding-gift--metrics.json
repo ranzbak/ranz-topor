@@ -1,0 +1,9866 @@
+{
+ "board": "wedding-gift",
+ "footprints": 42,
+ "pads": 203,
+ "nets_total": 87,
+ "orig_all": {
+  "segments": 74,
+  "arcs": 0,
+  "vias": 0,
+  "track_mm": 259.522,
+  "arc_mm": 0.0
+ },
+ "orig_drc": {
+  "total": 205,
+  "violations": {
+   "solder_mask_bridge": 33,
+   "starved_thermal": 4,
+   "invalid_outline": 12,
+   "copper_edge_clearance": 16,
+   "courtyards_overlap": 3,
+   "silk_overlap": 83,
+   "silk_over_copper": 7,
+   "lib_footprint_mismatch": 41,
+   "lib_footprint_issues": 1,
+   "silk_edge_clearance": 1,
+   "isolated_copper": 4
+  }
+ },
+ "ripped_drc": {
+  "total": 205,
+  "violations": {
+   "solder_mask_bridge": 33,
+   "starved_thermal": 4,
+   "invalid_outline": 12,
+   "copper_edge_clearance": 16,
+   "courtyards_overlap": 3,
+   "silk_overlap": 83,
+   "silk_over_copper": 7,
+   "lib_footprint_mismatch": 41,
+   "lib_footprint_issues": 1,
+   "silk_edge_clearance": 1,
+   "isolated_copper": 4
+  }
+ },
+ "removed": {
+  "removed_tracks": 74,
+  "removed_arcs": 0,
+  "removed_vias": 0,
+  "removed_teardrops": 0
+ },
+ "kept": {
+  "kept_locked_tracks": 0,
+  "kept_free_vias": 0,
+  "kept_locked_vias": 0,
+  "kept_rf_tracks": 0,
+  "kept_rf_vias": 0
+ },
+ "routed_all": {
+  "segments": 153,
+  "arcs": 54,
+  "vias": 57,
+  "track_mm": 544.464,
+  "arc_mm": 24.656
+ },
+ "routed_drc": {
+  "routing_new": 0,
+  "routing_preexisting": 16,
+  "by_type_preexisting": {
+   "copper_edge_clearance": 16
+  },
+  "incomplete": {
+   "track_dangling": 0,
+   "via_dangling": 3,
+   "unconnected_items": 14,
+   "unconnected_new": 8,
+   "unconnected_preexisting": 6
+  },
+  "unconnected_preexisting_items": [
+   [
+    "Pad 2 [Net-(D4-Pad2)] of D4 on F.Cu",
+    "Pad 4 [Net-(D4-Pad2)] of D5 on F.Cu"
+   ],
+   [
+    "Pad 1 [+3V3] of R1 on B.Cu",
+    "Pad 1 [+3V3] of R2 on B.Cu"
+   ],
+   [
+    "Pad 2 [Net-(D1-Pad2)] of D1 on B.Cu",
+    "Pad 2 [Net-(D1-Pad2)] of R1 on B.Cu"
+   ],
+   [
+    "Pad 2 [Net-(D2-Pad2)] of D2 on B.Cu",
+    "Pad 2 [Net-(D2-Pad2)] of R2 on B.Cu"
+   ],
+   [
+    "Pad 5 [rxd] of U2 on B.Cu",
+    "Pad 35 [rxd] of U3 on B.Cu"
+   ],
+   [
+    "Pad 1 [Net-(D9-Pad1)] of D9 on B.Cu",
+    "Pad 23 [Net-(D9-Pad1)] of U2 on B.Cu"
+   ]
+  ],
+  "other": 187,
+  "by_type_new": {}
+ },
+ "preexisting": {
+  "count": 16,
+  "by_type": {
+   "copper_edge_clearance": 16
+  }
+ },
+ "preexisting_unconnected": {
+  "count": 6,
+  "items": [
+   [
+    "Pad 2 [Net-(D4-Pad2)] of D4 on F.Cu",
+    "Pad 4 [Net-(D4-Pad2)] of D5 on F.Cu"
+   ],
+   [
+    "Pad 1 [+3V3] of R1 on B.Cu",
+    "Pad 1 [+3V3] of R2 on B.Cu"
+   ],
+   [
+    "Pad 2 [Net-(D1-Pad2)] of D1 on B.Cu",
+    "Pad 2 [Net-(D1-Pad2)] of R1 on B.Cu"
+   ],
+   [
+    "Pad 2 [Net-(D2-Pad2)] of D2 on B.Cu",
+    "Pad 2 [Net-(D2-Pad2)] of R2 on B.Cu"
+   ],
+   [
+    "Pad 5 [rxd] of U2 on B.Cu",
+    "Pad 35 [rxd] of U3 on B.Cu"
+   ],
+   [
+    "Pad 1 [Net-(D9-Pad1)] of D9 on B.Cu",
+    "Pad 23 [Net-(D9-Pad1)] of U2 on B.Cu"
+   ]
+  ]
+ },
+ "routed_items": 264,
+ "unchanged_items": 0,
+ "replaced": 0,
+ "drc_loop": {
+  "rounds": 1,
+  "pinned": {},
+  "spots": [],
+  "budget_exhausted": false
+ },
+ "zero_slack": {
+  "status": "not run",
+  "wires": []
+ },
+ "teardrops_removed": 0,
+ "router_report": {
+  "items": [
+   {
+    "net": 1,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      30212000,
+      104242000
+     ],
+     "b": [
+      30212000,
+      102387000
+     ]
+    },
+    "group": null,
+    "wire": 0
+   },
+   {
+    "kind": "via",
+    "net": 1,
+    "at": [
+     30212000,
+     102387000
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 0
+   },
+   {
+    "net": 2,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      24562000,
+      159602000
+     ],
+     "b": [
+      24562000,
+      158095612
+     ]
+    },
+    "group": null,
+    "wire": 1
+   },
+   {
+    "kind": "via",
+    "net": 2,
+    "at": [
+     24562000,
+     158095612
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 1
+   },
+   {
+    "net": 2,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      24562000,
+      158095612
+     ],
+     "b": [
+      26381846,
+      154448154
+     ]
+    },
+    "group": null,
+    "wire": 1
+   },
+   {
+    "kind": "via",
+    "net": 2,
+    "at": [
+     26381846,
+     154448154
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 1
+   },
+   {
+    "net": 2,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      26381846,
+      154448154
+     ],
+     "b": [
+      27762000,
+      152818000
+     ]
+    },
+    "group": null,
+    "wire": 1
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      24562000,
+      164502000
+     ],
+     "b": [
+      24562000,
+      161108388
+     ]
+    },
+    "group": null,
+    "wire": 2
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     24562000,
+     161108388
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 2
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      24562000,
+      187870000
+     ],
+     "b": [
+      27065162,
+      179628111
+     ]
+    },
+    "group": null,
+    "wire": 3
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     27065162,
+     179628111
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 3
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      24562000,
+      152818000
+     ],
+     "b": [
+      24562000,
+      154324388
+     ]
+    },
+    "group": null,
+    "wire": 4
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     24562000,
+     154324388
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 4
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      24562000,
+      141388000
+     ],
+     "b": [
+      24562000,
+      142894388
+     ]
+    },
+    "group": null,
+    "wire": 5
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     24562000,
+     142894388
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 5
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      30316000,
+      94666000
+     ],
+     "b": [
+      28809612,
+      94666000
+     ]
+    },
+    "group": null,
+    "wire": 6
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     28809612,
+     94666000
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 6
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      24562000,
+      129704000
+     ],
+     "b": [
+      23055612,
+      129704000
+     ]
+    },
+    "group": null,
+    "wire": 7
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     23055612,
+     129704000
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 7
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      15672000,
+      147230000
+     ],
+     "b": [
+      15672000,
+      148736388
+     ]
+    },
+    "group": null,
+    "wire": 8
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     15672000,
+     148736388
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 8
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      15672000,
+      135546000
+     ],
+     "b": [
+      15672000,
+      137052388
+     ]
+    },
+    "group": null,
+    "wire": 9
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     15672000,
+     137052388
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 9
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      15672000,
+      123862000
+     ],
+     "b": [
+      15672000,
+      125368388
+     ]
+    },
+    "group": null,
+    "wire": 10
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     15672000,
+     125368388
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 10
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      21680000,
+      112954000
+     ],
+     "b": [
+      20173612,
+      112954000
+     ]
+    },
+    "group": null,
+    "wire": 11
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     20173612,
+     112954000
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 11
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      28795359,
+      105537762
+     ],
+     "b": [
+      28357000,
+      104242000
+     ]
+    },
+    "group": null,
+    "wire": 12
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     28357000,
+     104242000
+    ],
+    "d": 500000,
+    "drill": 300000,
+    "layers": [],
+    "group": null,
+    "wire": 12
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      35216000,
+      147904000
+     ],
+     "b": [
+      35216000,
+      149410388
+     ]
+    },
+    "group": null,
+    "wire": 13
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     35216000,
+     149410388
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 13
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      39186641,
+      101294238
+     ],
+     "b": [
+      37882071,
+      100541044
+     ]
+    },
+    "group": null,
+    "wire": 14
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     37882071,
+     100541044
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 14
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      40970000,
+      136488000
+     ],
+     "b": [
+      40970000,
+      137994388
+     ]
+    },
+    "group": null,
+    "wire": 15
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     40970000,
+     137994388
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 15
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      40970000,
+      124804000
+     ],
+     "b": [
+      39463612,
+      124804000
+     ]
+    },
+    "group": null,
+    "wire": 16
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     39463612,
+     124804000
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 16
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      49860000,
+      142330000
+     ],
+     "b": [
+      49860000,
+      143836388
+     ]
+    },
+    "group": null,
+    "wire": 17
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     49860000,
+     143836388
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 17
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      49860000,
+      130646000
+     ],
+     "b": [
+      48353612,
+      130646000
+     ]
+    },
+    "group": null,
+    "wire": 18
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     48353612,
+     130646000
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 18
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      49860000,
+      118962000
+     ],
+     "b": [
+      48353612,
+      118962000
+     ]
+    },
+    "group": null,
+    "wire": 19
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     48353612,
+     118962000
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 19
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      38952000,
+      112954000
+     ],
+     "b": [
+      37445612,
+      112954000
+     ]
+    },
+    "group": null,
+    "wire": 20
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     37445612,
+     112954000
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 20
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      24562000,
+      176186000
+     ],
+     "b": [
+      26255612,
+      176186000
+     ]
+    },
+    "group": null,
+    "wire": 21
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     26255612,
+     176186000
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 21
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      40970000,
+      182970000
+     ],
+     "b": [
+      37770000,
+      181463612
+     ]
+    },
+    "group": null,
+    "wire": 22
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     37770000,
+     181463612
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 22
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      40970000,
+      171286000
+     ],
+     "b": [
+      39276388,
+      171286000
+     ]
+    },
+    "group": null,
+    "wire": 23
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     39276388,
+     171286000
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 23
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      40970000,
+      159602000
+     ],
+     "b": [
+      40970000,
+      161108388
+     ]
+    },
+    "group": null,
+    "wire": 24
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     40970000,
+     161108388
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 24
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      40970000,
+      147918000
+     ],
+     "b": [
+      40970000,
+      149424388
+     ]
+    },
+    "group": null,
+    "wire": 25
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     40970000,
+     149424388
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 25
+   },
+   {
+    "net": 3,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      35262000,
+      155265000
+     ],
+     "b": [
+      36171928,
+      155361854
+     ]
+    },
+    "group": null,
+    "wire": 26
+   },
+   {
+    "net": 3,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      36171928,
+      155361854
+     ],
+     "mid": [
+      36255649,
+      155382068
+     ],
+     "end": [
+      36331289,
+      155423257
+     ]
+    },
+    "group": null,
+    "wire": 26
+   },
+   {
+    "net": 3,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      36331289,
+      155423257
+     ],
+     "b": [
+      37336657,
+      156155539
+     ]
+    },
+    "group": null,
+    "wire": 26
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     37336657,
+     156155539
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 26
+   },
+   {
+    "net": 3,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      42462000,
+      152665000
+     ],
+     "b": [
+      39463612,
+      152818000
+     ]
+    },
+    "group": null,
+    "wire": 27
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     39463612,
+     152818000
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 27
+   },
+   {
+    "net": 3,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      42462000,
+      154615000
+     ],
+     "b": [
+      40953534,
+      154615000
+     ]
+    },
+    "group": null,
+    "wire": 28
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     40953534,
+     154615000
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 28
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      40953534,
+      154615000
+     ],
+     "b": [
+      39543221,
+      156166392
+     ]
+    },
+    "group": null,
+    "wire": 28
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     39543221,
+     156166392
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 28
+   },
+   {
+    "net": 3,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      42462000,
+      157215000
+     ],
+     "b": [
+      40953534,
+      157215000
+     ]
+    },
+    "group": null,
+    "wire": 29
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     40953534,
+     157215000
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 29
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      40953534,
+      157215000
+     ],
+     "b": [
+      37770000,
+      158095612
+     ]
+    },
+    "group": null,
+    "wire": 29
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     37770000,
+     158095612
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 29
+   },
+   {
+    "net": 3,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      42462000,
+      157865000
+     ],
+     "b": [
+      41552072,
+      157961854
+     ]
+    },
+    "group": null,
+    "wire": 30
+   },
+   {
+    "net": 3,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      41552072,
+      157961854
+     ],
+     "mid": [
+      41459693,
+      157985545
+     ],
+     "end": [
+      41377947,
+      158034664
+     ]
+    },
+    "group": null,
+    "wire": 30
+   },
+   {
+    "net": 3,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      41377947,
+      158034664
+     ],
+     "b": [
+      39463612,
+      159602000
+     ]
+    },
+    "group": null,
+    "wire": 30
+   },
+   {
+    "kind": "via",
+    "net": 3,
+    "at": [
+     39463612,
+     159602000
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 30
+   },
+   {
+    "net": 4,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      27762000,
+      164502000
+     ],
+     "b": [
+      24562000,
+      171286000
+     ]
+    },
+    "group": null,
+    "wire": 31
+   },
+   {
+    "net": 6,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      27762000,
+      187870000
+     ],
+     "b": [
+      28585492,
+      183785216
+     ]
+    },
+    "group": null,
+    "wire": 33
+   },
+   {
+    "net": 6,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      28585492,
+      183785216
+     ],
+     "mid": [
+      28587973,
+      183771399
+     ],
+     "end": [
+      28589864,
+      183757488
+     ]
+    },
+    "group": null,
+    "wire": 33
+   },
+   {
+    "net": 6,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      28589864,
+      183757488
+     ],
+     "b": [
+      31162738,
+      161255802
+     ]
+    },
+    "group": null,
+    "wire": 33
+   },
+   {
+    "kind": "via",
+    "net": 6,
+    "at": [
+     31162738,
+     161255802
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 33
+   },
+   {
+    "net": 6,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      31162738,
+      161255802
+     ],
+     "b": [
+      29999630,
+      156182276
+     ]
+    },
+    "group": null,
+    "wire": 33
+   },
+   {
+    "kind": "via",
+    "net": 6,
+    "at": [
+     29999630,
+     156182276
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 33
+   },
+   {
+    "net": 6,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      29999630,
+      156182276
+     ],
+     "b": [
+      31037296,
+      149522778
+     ]
+    },
+    "group": null,
+    "wire": 33
+   },
+   {
+    "net": 6,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      31037296,
+      149522778
+     ],
+     "mid": [
+      31034765,
+      149282809
+     ],
+     "end": [
+      30954556,
+      149056628
+     ]
+    },
+    "group": null,
+    "wire": 33
+   },
+   {
+    "net": 6,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      30954556,
+      149056628
+     ],
+     "b": [
+      30316000,
+      147904000
+     ]
+    },
+    "group": null,
+    "wire": 33
+   },
+   {
+    "net": 7,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      24562000,
+      147918000
+     ],
+     "b": [
+      26225805,
+      144667568
+     ]
+    },
+    "group": null,
+    "wire": 34
+   },
+   {
+    "net": 7,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      26225805,
+      144667568
+     ],
+     "mid": [
+      26231553,
+      144656092
+     ],
+     "end": [
+      26237098,
+      144644517
+     ]
+    },
+    "group": null,
+    "wire": 34
+   },
+   {
+    "net": 7,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      26237098,
+      144644517
+     ],
+     "b": [
+      27762000,
+      141388000
+     ]
+    },
+    "group": null,
+    "wire": 34
+   },
+   {
+    "net": 8,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      24562000,
+      136488000
+     ],
+     "b": [
+      27762000,
+      129704000
+     ]
+    },
+    "group": null,
+    "wire": 35
+   },
+   {
+    "net": 9,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      35216000,
+      94666000
+     ],
+     "b": [
+      36271347,
+      97240848
+     ]
+    },
+    "group": null,
+    "wire": 36
+   },
+   {
+    "net": 9,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      36271347,
+      97240848
+     ],
+     "mid": [
+      36288045,
+      97293981
+     ],
+     "end": [
+      36295570,
+      97349165
+     ]
+    },
+    "group": null,
+    "wire": 36
+   },
+   {
+    "net": 9,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      36295570,
+      97349165
+     ],
+     "b": [
+      36415359,
+      99694238
+     ]
+    },
+    "group": null,
+    "wire": 36
+   },
+   {
+    "net": 10,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      30316000,
+      97866000
+     ],
+     "b": [
+      30254529,
+      100102822
+     ]
+    },
+    "group": null,
+    "wire": 37
+   },
+   {
+    "net": 10,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      30254529,
+      100102822
+     ],
+     "mid": [
+      30208149,
+      100262667
+     ],
+     "end": [
+      30089654,
+      100379545
+     ]
+    },
+    "group": null,
+    "wire": 37
+   },
+   {
+    "net": 10,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      30089654,
+      100379545
+     ],
+     "b": [
+      29223628,
+      100879545
+     ]
+    },
+    "group": null,
+    "wire": 37
+   },
+   {
+    "net": 10,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      29223628,
+      100879545
+     ],
+     "mid": [
+      29165284,
+      100906046
+     ],
+     "end": [
+      29102917,
+      100920772
+     ]
+    },
+    "group": null,
+    "wire": 37
+   },
+   {
+    "net": 10,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      29102917,
+      100920772
+     ],
+     "b": [
+      26345359,
+      101294238
+     ]
+    },
+    "group": null,
+    "wire": 37
+   },
+   {
+    "net": 11,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      24562000,
+      124804000
+     ],
+     "b": [
+      26568660,
+      125805782
+     ]
+    },
+    "group": null,
+    "wire": 38
+   },
+   {
+    "net": 11,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      26568660,
+      125805782
+     ],
+     "mid": [
+      26924031,
+      126197098
+     ],
+     "end": [
+      26922104,
+      126725694
+     ]
+    },
+    "group": null,
+    "wire": 38
+   },
+   {
+    "net": 11,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      26922104,
+      126725694
+     ],
+     "b": [
+      18872000,
+      147230000
+     ]
+    },
+    "group": null,
+    "wire": 38
+   },
+   {
+    "net": 12,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      15672000,
+      142330000
+     ],
+     "b": [
+      18872000,
+      135546000
+     ]
+    },
+    "group": null,
+    "wire": 39
+   },
+   {
+    "net": 13,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      15672000,
+      130646000
+     ],
+     "b": [
+      18872000,
+      123862000
+     ]
+    },
+    "group": null,
+    "wire": 40
+   },
+   {
+    "net": 14,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      15672000,
+      118962000
+     ],
+     "b": [
+      21680000,
+      116154000
+     ]
+    },
+    "group": null,
+    "wire": 41
+   },
+   {
+    "net": 15,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      26580000,
+      112954000
+     ],
+     "b": [
+      31566641,
+      103937762
+     ]
+    },
+    "group": null,
+    "wire": 42
+   },
+   {
+    "net": 16,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      35216000,
+      144704000
+     ],
+     "b": [
+      33110764,
+      146181371
+     ]
+    },
+    "group": null,
+    "wire": 43
+   },
+   {
+    "net": 16,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      33110764,
+      146181371
+     ],
+     "mid": [
+      32855292,
+      146500458
+     ],
+     "end": [
+      32811395,
+      146906852
+     ]
+    },
+    "group": null,
+    "wire": 43
+   },
+   {
+    "net": 16,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      32811395,
+      146906852
+     ],
+     "b": [
+      35262000,
+      160673466
+     ]
+    },
+    "group": null,
+    "wire": 43
+   },
+   {
+    "kind": "via",
+    "net": 16,
+    "at": [
+     35262000,
+     160673466
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 43
+   },
+   {
+    "net": 16,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      35262000,
+      160673466
+     ],
+     "b": [
+      36659975,
+      163067599
+     ]
+    },
+    "group": null,
+    "wire": 43
+   },
+   {
+    "net": 16,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      36659975,
+      163067599
+     ],
+     "mid": [
+      36667914,
+      163082009
+     ],
+     "end": [
+      36675126,
+      163096797
+     ]
+    },
+    "group": null,
+    "wire": 43
+   },
+   {
+    "net": 16,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      36675126,
+      163096797
+     ],
+     "b": [
+      37195000,
+      164234000
+     ]
+    },
+    "group": null,
+    "wire": 43
+   },
+   {
+    "net": 17,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      36736641,
+      105537762
+     ],
+     "b": [
+      36715615,
+      112951930
+     ]
+    },
+    "group": null,
+    "wire": 44
+   },
+   {
+    "net": 17,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      36715615,
+      112951930
+     ],
+     "mid": [
+      36753250,
+      113185375
+     ],
+     "end": [
+      36863529,
+      113394545
+     ]
+    },
+    "group": null,
+    "wire": 44
+   },
+   {
+    "net": 17,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      36863529,
+      113394545
+     ],
+     "b": [
+      38952000,
+      116154000
+     ]
+    },
+    "group": null,
+    "wire": 44
+   },
+   {
+    "net": 18,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      40970000,
+      141388000
+     ],
+     "b": [
+      37770000,
+      147918000
+     ]
+    },
+    "group": null,
+    "wire": 45
+   },
+   {
+    "net": 19,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      37770000,
+      136488000
+     ],
+     "b": [
+      40970000,
+      129704000
+     ]
+    },
+    "group": null,
+    "wire": 46
+   },
+   {
+    "net": 20,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      37770000,
+      124804000
+     ],
+     "b": [
+      41702849,
+      128720159
+     ]
+    },
+    "group": null,
+    "wire": 47
+   },
+   {
+    "net": 20,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      41702849,
+      128720159
+     ],
+     "mid": [
+      41754415,
+      128786643
+     ],
+     "end": [
+      41787492,
+      128864007
+     ]
+    },
+    "group": null,
+    "wire": 47
+   },
+   {
+    "net": 20,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      41787492,
+      128864007
+     ],
+     "b": [
+      45842508,
+      143169993
+     ]
+    },
+    "group": null,
+    "wire": 47
+   },
+   {
+    "net": 20,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      45842508,
+      143169993
+     ],
+     "mid": [
+      45875585,
+      143247357
+     ],
+     "end": [
+      45927151,
+      143313841
+     ]
+    },
+    "group": null,
+    "wire": 47
+   },
+   {
+    "net": 20,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      45927151,
+      143313841
+     ],
+     "b": [
+      49860000,
+      147230000
+     ]
+    },
+    "group": null,
+    "wire": 47
+   },
+   {
+    "net": 21,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      46660000,
+      142330000
+     ],
+     "b": [
+      49860000,
+      135546000
+     ]
+    },
+    "group": null,
+    "wire": 48
+   },
+   {
+    "net": 22,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      46660000,
+      130646000
+     ],
+     "b": [
+      49860000,
+      123862000
+     ]
+    },
+    "group": null,
+    "wire": 49
+   },
+   {
+    "net": 23,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      46660000,
+      118962000
+     ],
+     "b": [
+      43852000,
+      112954000
+     ]
+    },
+    "group": null,
+    "wire": 50
+   },
+   {
+    "net": 25,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      37770000,
+      182970000
+     ],
+     "b": [
+      37131444,
+      181817372
+     ]
+    },
+    "group": null,
+    "wire": 51
+   },
+   {
+    "net": 25,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      37131444,
+      181817372
+     ],
+     "mid": [
+      37042268,
+      181406108
+     ],
+     "end": [
+      37194929,
+      181013953
+     ]
+    },
+    "group": null,
+    "wire": 51
+   },
+   {
+    "net": 25,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      37194929,
+      181013953
+     ],
+     "b": [
+      40970000,
+      176186000
+     ]
+    },
+    "group": null,
+    "wire": 51
+   },
+   {
+    "net": 26,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      37770000,
+      171286000
+     ],
+     "b": [
+      40970000,
+      164502000
+     ]
+    },
+    "group": null,
+    "wire": 52
+   },
+   {
+    "net": 27,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      37770000,
+      159602000
+     ],
+     "b": [
+      41276873,
+      157869486
+     ]
+    },
+    "group": null,
+    "wire": 53
+   },
+   {
+    "net": 27,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      41276873,
+      157869486
+     ],
+     "mid": [
+      41573590,
+      157600268
+     ],
+     "end": [
+      41683534,
+      157215000
+     ]
+    },
+    "group": null,
+    "wire": 53
+   },
+   {
+    "net": 27,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      41683534,
+      157215000
+     ],
+     "b": [
+      41683534,
+      154615000
+     ]
+    },
+    "group": null,
+    "wire": 53
+   },
+   {
+    "net": 27,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      41683534,
+      154615000
+     ],
+     "mid": [
+      41668312,
+      154466701
+     ],
+     "end": [
+      41623281,
+      154324587
+     ]
+    },
+    "group": null,
+    "wire": 53
+   },
+   {
+    "net": 27,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      41623281,
+      154324587
+     ],
+     "b": [
+      40970000,
+      152818000
+     ]
+    },
+    "group": null,
+    "wire": 53
+   },
+   {
+    "net": 28,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      24250000,
+      180474000
+     ],
+     "b": [
+      25387203,
+      180993874
+     ]
+    },
+    "group": null,
+    "wire": 57
+   },
+   {
+    "net": 28,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      25387203,
+      180993874
+     ],
+     "mid": [
+      25400587,
+      181000361
+     ],
+     "end": [
+      25413665,
+      181007445
+     ]
+    },
+    "group": null,
+    "wire": 57
+   },
+   {
+    "net": 28,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      25413665,
+      181007445
+     ],
+     "b": [
+      25589540,
+      181107895
+     ]
+    },
+    "group": null,
+    "wire": 57
+   },
+   {
+    "net": 28,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      25589540,
+      181107895
+     ],
+     "mid": [
+      25999255,
+      181202442
+     ],
+     "end": [
+      26393154,
+      181055306
+     ]
+    },
+    "group": null,
+    "wire": 57
+   },
+   {
+    "net": 28,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      26393154,
+      181055306
+     ],
+     "b": [
+      27506731,
+      180209417
+     ]
+    },
+    "group": null,
+    "wire": 57
+   },
+   {
+    "net": 28,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      27506731,
+      180209417
+     ],
+     "mid": [
+      27741348,
+      179903197
+     ],
+     "end": [
+      27787136,
+      179520156
+     ]
+    },
+    "group": null,
+    "wire": 57
+   },
+   {
+    "net": 28,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      27787136,
+      179520156
+     ],
+     "b": [
+      25576372,
+      164735198
+     ]
+    },
+    "group": null,
+    "wire": 57
+   },
+   {
+    "net": 28,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      25576372,
+      164735198
+     ],
+     "mid": [
+      25564226,
+      164683194
+     ],
+     "end": [
+      25543852,
+      164633829
+     ]
+    },
+    "group": null,
+    "wire": 57
+   },
+   {
+    "net": 28,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      25543852,
+      164633829
+     ],
+     "b": [
+      23911965,
+      161440584
+     ]
+    },
+    "group": null,
+    "wire": 57
+   },
+   {
+    "net": 28,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      23911965,
+      161440584
+     ],
+     "mid": [
+      23852273,
+      161279230
+     ],
+     "end": [
+      23832000,
+      161108388
+     ]
+    },
+    "group": null,
+    "wire": 57
+   },
+   {
+    "net": 28,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      23832000,
+      161108388
+     ],
+     "b": [
+      23832000,
+      158095612
+     ]
+    },
+    "group": null,
+    "wire": 57
+   },
+   {
+    "net": 28,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      23832000,
+      158095612
+     ],
+     "mid": [
+      23846373,
+      157951467
+     ],
+     "end": [
+      23888925,
+      157812998
+     ]
+    },
+    "group": null,
+    "wire": 57
+   },
+   {
+    "net": 28,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      23888925,
+      157812998
+     ],
+     "b": [
+      25235075,
+      154607002
+     ]
+    },
+    "group": null,
+    "wire": 57
+   },
+   {
+    "net": 28,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      25235075,
+      154607002
+     ],
+     "mid": [
+      25259406,
+      154540083
+     ],
+     "end": [
+      25277103,
+      154471112
+     ]
+    },
+    "group": null,
+    "wire": 57
+   },
+   {
+    "net": 28,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      25277103,
+      154471112
+     ],
+     "b": [
+      26575097,
+      148144945
+     ]
+    },
+    "group": null,
+    "wire": 57
+   },
+   {
+    "net": 28,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      33530097,
+      148144945
+     ],
+     "b": [
+      32231415,
+      149068729
+     ]
+    },
+    "group": null,
+    "wire": 58
+   },
+   {
+    "net": 28,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      32231415,
+      149068729
+     ],
+     "mid": [
+      32112259,
+      149133778
+     ],
+     "end": [
+      31981156,
+      149169010
+     ]
+    },
+    "group": null,
+    "wire": 58
+   },
+   {
+    "net": 28,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      31981156,
+      149169010
+     ],
+     "b": [
+      30316000,
+      149410388
+     ]
+    },
+    "group": null,
+    "wire": 58
+   },
+   {
+    "kind": "via",
+    "net": 28,
+    "at": [
+     30316000,
+     149410388
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 58
+   },
+   {
+    "net": 28,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      30316000,
+      149410388
+     ],
+     "b": [
+      28450097,
+      149510975
+     ]
+    },
+    "group": null,
+    "wire": 58
+   },
+   {
+    "kind": "via",
+    "net": 28,
+    "at": [
+     28450097,
+     149510975
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 58
+   },
+   {
+    "net": 28,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      28450097,
+      149510975
+     ],
+     "b": [
+      26575097,
+      148144945
+     ]
+    },
+    "group": null,
+    "wire": 58
+   },
+   {
+    "net": 28,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      32512000,
+      104242000
+     ],
+     "b": [
+      32512000,
+      97942000
+     ]
+    },
+    "group": null,
+    "wire": 59
+   },
+   {
+    "net": 32,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      24250000,
+      179204000
+     ],
+     "b": [
+      25387203,
+      179723874
+     ]
+    },
+    "group": null,
+    "wire": 62
+   },
+   {
+    "net": 32,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      25387203,
+      179723874
+     ],
+     "mid": [
+      25463369,
+      179772259
+     ],
+     "end": [
+      25523581,
+      179839465
+     ]
+    },
+    "group": null,
+    "wire": 62
+   },
+   {
+    "net": 32,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      25523581,
+      179839465
+     ],
+     "b": [
+      25951586,
+      180474000
+     ]
+    },
+    "group": null,
+    "wire": 62
+   },
+   {
+    "kind": "via",
+    "net": 32,
+    "at": [
+     25951586,
+     180474000
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 62
+   },
+   {
+    "net": 32,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      25951586,
+      180474000
+     ],
+     "b": [
+      23784692,
+      177114886
+     ]
+    },
+    "group": null,
+    "wire": 62
+   },
+   {
+    "net": 32,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      23784692,
+      177114886
+     ],
+     "mid": [
+      23745447,
+      177029242
+     ],
+     "end": [
+      23732000,
+      176936000
+     ]
+    },
+    "group": null,
+    "wire": 62
+   },
+   {
+    "net": 32,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      23732000,
+      176936000
+     ],
+     "b": [
+      23732000,
+      170536000
+     ]
+    },
+    "group": null,
+    "wire": 62
+   },
+   {
+    "net": 32,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      23732000,
+      170536000
+     ],
+     "mid": [
+      23735958,
+      170485042
+     ],
+     "end": [
+      23747738,
+      170435307
+     ]
+    },
+    "group": null,
+    "wire": 62
+   },
+   {
+    "net": 32,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      23747738,
+      170435307
+     ],
+     "b": [
+      25376262,
+      165352693
+     ]
+    },
+    "group": null,
+    "wire": 62
+   },
+   {
+    "net": 32,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      25376262,
+      165352693
+     ],
+     "mid": [
+      25380782,
+      165337312
+     ],
+     "end": [
+      25384549,
+      165321730
+     ]
+    },
+    "group": null,
+    "wire": 62
+   },
+   {
+    "net": 32,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      25384549,
+      165321730
+     ],
+     "b": [
+      27762000,
+      154324388
+     ]
+    },
+    "group": null,
+    "wire": 62
+   },
+   {
+    "kind": "via",
+    "net": 32,
+    "at": [
+     27762000,
+     154324388
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 62
+   },
+   {
+    "net": 32,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      27762000,
+      154324388
+     ],
+     "b": [
+      29149050,
+      149721604
+     ]
+    },
+    "group": null,
+    "wire": 62
+   },
+   {
+    "net": 32,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      29149050,
+      149721604
+     ],
+     "mid": [
+      29173401,
+      149412327
+     ],
+     "end": [
+      29067118,
+      149120866
+     ]
+    },
+    "group": null,
+    "wire": 62
+   },
+   {
+    "net": 32,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      29067118,
+      149120866
+     ],
+     "b": [
+      28450097,
+      148144945
+     ]
+    },
+    "group": null,
+    "wire": 62
+   },
+   {
+    "net": 32,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      28462597,
+      144984945
+     ],
+     "b": [
+      28450097,
+      148144945
+     ]
+    },
+    "group": null,
+    "wire": 63
+   },
+   {
+    "net": 52,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      33542597,
+      144984945
+     ],
+     "b": [
+      31655097,
+      148144945
+     ]
+    },
+    "group": null,
+    "wire": 65
+   },
+   {
+    "net": 61,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      41250000,
+      176664000
+     ],
+     "b": [
+      40112797,
+      176144126
+     ]
+    },
+    "group": null,
+    "wire": 66
+   },
+   {
+    "net": 61,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      40112797,
+      176144126
+     ],
+     "mid": [
+      40010410,
+      176070929
+     ],
+     "end": [
+      39942874,
+      175964722
+     ]
+    },
+    "group": null,
+    "wire": 66
+   },
+   {
+    "net": 61,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      39942874,
+      175964722
+     ],
+     "b": [
+      39050957,
+      173695618
+     ]
+    },
+    "group": null,
+    "wire": 66
+   },
+   {
+    "kind": "via",
+    "net": 61,
+    "at": [
+     39050957,
+     173695618
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 66
+   },
+   {
+    "net": 61,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      39050957,
+      173695618
+     ],
+     "b": [
+      37079828,
+      172305693
+     ]
+    },
+    "group": null,
+    "wire": 66
+   },
+   {
+    "net": 61,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      37079828,
+      172305693
+     ],
+     "mid": [
+      36977035,
+      172187893
+     ],
+     "end": [
+      36940000,
+      172036000
+     ]
+    },
+    "group": null,
+    "wire": 66
+   },
+   {
+    "net": 61,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      36940000,
+      172036000
+     ],
+     "b": [
+      36940000,
+      170536000
+     ]
+    },
+    "group": null,
+    "wire": 66
+   },
+   {
+    "net": 61,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      36940000,
+      170536000
+     ],
+     "mid": [
+      36946444,
+      170471104
+     ],
+     "end": [
+      36965524,
+      170408743
+     ]
+    },
+    "group": null,
+    "wire": 66
+   },
+   {
+    "net": 61,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      36965524,
+      170408743
+     ],
+     "b": [
+      38994284,
+      165554717
+     ]
+    },
+    "group": null,
+    "wire": 66
+   },
+   {
+    "net": 61,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      38994284,
+      165554717
+     ],
+     "mid": [
+      39039671,
+      165406373
+     ],
+     "end": [
+      39055000,
+      165252000
+     ]
+    },
+    "group": null,
+    "wire": 66
+   },
+   {
+    "net": 61,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      39055000,
+      165252000
+     ],
+     "b": [
+      39055000,
+      163752000
+     ]
+    },
+    "group": null,
+    "wire": 66
+   },
+   {
+    "net": 61,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      39055000,
+      163752000
+     ],
+     "mid": [
+      38999538,
+      163462174
+     ],
+     "end": [
+      38840990,
+      163213302
+     ]
+    },
+    "group": null,
+    "wire": 66
+   },
+   {
+    "net": 61,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      38840990,
+      163213302
+     ],
+     "b": [
+      37725984,
+      162031459
+     ]
+    },
+    "group": null,
+    "wire": 66
+   },
+   {
+    "net": 61,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      37725984,
+      162031459
+     ],
+     "mid": [
+      36532662,
+      162839347
+     ],
+     "end": [
+      37920460,
+      162451123
+     ]
+    },
+    "group": null,
+    "wire": 66
+   },
+   {
+    "net": 61,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      37920460,
+      162451123
+     ],
+     "b": [
+      37770000,
+      161108388
+     ]
+    },
+    "group": null,
+    "wire": 66
+   },
+   {
+    "kind": "via",
+    "net": 61,
+    "at": [
+     37770000,
+     161108388
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 66
+   },
+   {
+    "net": 61,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      37770000,
+      161108388
+     ],
+     "b": [
+      35262000,
+      159165000
+     ]
+    },
+    "group": null,
+    "wire": 66
+   },
+   {
+    "net": 65,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      26562597,
+      144984945
+     ],
+     "b": [
+      25636856,
+      145062403
+     ]
+    },
+    "group": null,
+    "wire": 68
+   },
+   {
+    "net": 65,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      25636856,
+      145062403
+     ],
+     "mid": [
+      24975853,
+      144750562
+     ],
+     "end": [
+      24916415,
+      144022114
+     ]
+    },
+    "group": null,
+    "wire": 68
+   },
+   {
+    "net": 65,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      24916415,
+      144022114
+     ],
+     "b": [
+      26575097,
+      140524945
+     ]
+    },
+    "group": null,
+    "wire": 68
+   },
+   {
+    "net": 66,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      26562597,
+      144334945
+     ],
+     "b": [
+      25575989,
+      144334945
+     ]
+    },
+    "group": null,
+    "wire": 70
+   },
+   {
+    "kind": "via",
+    "net": 66,
+    "at": [
+     25575989,
+     144334945
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 70
+   },
+   {
+    "net": 66,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      25575989,
+      144334945
+     ],
+     "b": [
+      26951621,
+      140525907
+     ]
+    },
+    "group": null,
+    "wire": 70
+   },
+   {
+    "net": 66,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      26951621,
+      140525907
+     ],
+     "mid": [
+      27048817,
+      140386102
+     ],
+     "end": [
+      27202768,
+      140313359
+     ]
+    },
+    "group": null,
+    "wire": 70
+   },
+   {
+    "net": 66,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      27202768,
+      140313359
+     ],
+     "b": [
+      33530097,
+      139158915
+     ]
+    },
+    "group": null,
+    "wire": 70
+   },
+   {
+    "kind": "via",
+    "net": 66,
+    "at": [
+     33530097,
+     139158915
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 70
+   },
+   {
+    "net": 66,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      33530097,
+      139158915
+     ],
+     "b": [
+      33530097,
+      140524945
+     ]
+    },
+    "group": null,
+    "wire": 70
+   },
+   {
+    "net": 67,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      31642597,
+      144984945
+     ],
+     "b": [
+      31642597,
+      145971553
+     ]
+    },
+    "group": null,
+    "wire": 71
+   },
+   {
+    "kind": "via",
+    "net": 67,
+    "at": [
+     31642597,
+     145971553
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 71
+   },
+   {
+    "net": 67,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      31642597,
+      145971553
+     ],
+     "b": [
+      31655097,
+      141890975
+     ]
+    },
+    "group": null,
+    "wire": 71
+   },
+   {
+    "kind": "via",
+    "net": 67,
+    "at": [
+     31655097,
+     141890975
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 71
+   },
+   {
+    "net": 67,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      31655097,
+      141890975
+     ],
+     "b": [
+      31655097,
+      140524945
+     ]
+    },
+    "group": null,
+    "wire": 71
+   },
+   {
+    "net": 67,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      31642597,
+      144984945
+     ],
+     "b": [
+      30316000,
+      146397612
+     ]
+    },
+    "group": null,
+    "wire": 72
+   },
+   {
+    "kind": "via",
+    "net": 67,
+    "at": [
+     30316000,
+     146397612
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 72
+   },
+   {
+    "net": 67,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      30316000,
+      146397612
+     ],
+     "b": [
+      31269447,
+      147144174
+     ]
+    },
+    "group": null,
+    "wire": 72
+   },
+   {
+    "net": 67,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      31269447,
+      147144174
+     ],
+     "mid": [
+      31344943,
+      147227674
+     ],
+     "end": [
+      31387980,
+      147331690
+     ]
+    },
+    "group": null,
+    "wire": 72
+   },
+   {
+    "net": 67,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      31387980,
+      147331690
+     ],
+     "b": [
+      33753534,
+      157865000
+     ]
+    },
+    "group": null,
+    "wire": 72
+   },
+   {
+    "kind": "via",
+    "net": 67,
+    "at": [
+     33753534,
+     157865000
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 72
+   },
+   {
+    "net": 67,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      33753534,
+      157865000
+     ],
+     "b": [
+      34138119,
+      158306699
+     ]
+    },
+    "group": null,
+    "wire": 72
+   },
+   {
+    "net": 67,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      34138119,
+      158306699
+     ],
+     "mid": [
+      34234547,
+      158382674
+     ],
+     "end": [
+      34352072,
+      158418146
+     ]
+    },
+    "group": null,
+    "wire": 72
+   },
+   {
+    "net": 67,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      34352072,
+      158418146
+     ],
+     "b": [
+      35262000,
+      158515000
+     ]
+    },
+    "group": null,
+    "wire": 72
+   },
+   {
+    "net": 68,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      31642597,
+      144334945
+     ],
+     "b": [
+      32629205,
+      144334945
+     ]
+    },
+    "group": null,
+    "wire": 73
+   },
+   {
+    "kind": "via",
+    "net": 68,
+    "at": [
+     32629205,
+     144334945
+    ],
+    "d": 500000,
+    "drill": 300000,
+    "layers": [],
+    "group": null,
+    "wire": 73
+   },
+   {
+    "net": 68,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      32629205,
+      144334945
+     ],
+     "b": [
+      32381586,
+      141819460
+     ]
+    },
+    "group": null,
+    "wire": 73
+   },
+   {
+    "net": 68,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      32381586,
+      141819460
+     ],
+     "mid": [
+      32118763,
+      141327136
+     ],
+     "end": [
+      31584947,
+      141164353
+     ]
+    },
+    "group": null,
+    "wire": 73
+   },
+   {
+    "net": 68,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      31584947,
+      141164353
+     ],
+     "b": [
+      29268388,
+      141388000
+     ]
+    },
+    "group": null,
+    "wire": 73
+   },
+   {
+    "kind": "via",
+    "net": 68,
+    "at": [
+     29268388,
+     141388000
+    ],
+    "d": 500000,
+    "drill": 300000,
+    "layers": [],
+    "group": null,
+    "wire": 73
+   },
+   {
+    "net": 68,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      29268388,
+      141388000
+     ],
+     "b": [
+      28450097,
+      140524945
+     ]
+    },
+    "group": null,
+    "wire": 73
+   },
+   {
+    "net": 69,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      24367597,
+      124014945
+     ],
+     "b": [
+      23055612,
+      124804000
+     ]
+    },
+    "group": null,
+    "wire": 74
+   },
+   {
+    "kind": "via",
+    "net": 69,
+    "at": [
+     23055612,
+     124804000
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 74
+   },
+   {
+    "net": 69,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      23055612,
+      124804000
+     ],
+     "b": [
+      23802174,
+      125757447
+     ]
+    },
+    "group": null,
+    "wire": 74
+   },
+   {
+    "net": 69,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      23802174,
+      125757447
+     ],
+     "mid": [
+      23803622,
+      125759282
+     ],
+     "end": [
+      23805082,
+      125761106
+     ]
+    },
+    "group": null,
+    "wire": 74
+   },
+   {
+    "net": 69,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      23805082,
+      125761106
+     ],
+     "b": [
+      24367597,
+      126458915
+     ]
+    },
+    "group": null,
+    "wire": 74
+   },
+   {
+    "kind": "via",
+    "net": 69,
+    "at": [
+     24367597,
+     126458915
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 74
+   },
+   {
+    "net": 69,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      24367597,
+      126458915
+     ],
+     "b": [
+      24367597,
+      127824945
+     ]
+    },
+    "group": null,
+    "wire": 74
+   },
+   {
+    "net": 70,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      26242597,
+      124014945
+     ],
+     "b": [
+      24943915,
+      123091161
+     ]
+    },
+    "group": null,
+    "wire": 76
+   },
+   {
+    "net": 70,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      24943915,
+      123091161
+     ],
+     "mid": [
+      24785906,
+      123012144
+     ],
+     "end": [
+      24611347,
+      122984945
+     ]
+    },
+    "group": null,
+    "wire": 76
+   },
+   {
+    "net": 70,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      24611347,
+      122984945
+     ],
+     "b": [
+      24123847,
+      122984945
+     ]
+    },
+    "group": null,
+    "wire": 76
+   },
+   {
+    "net": 70,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      24123847,
+      122984945
+     ],
+     "mid": [
+      24000692,
+      122998318
+     ],
+     "end": [
+      23883278,
+      123037815
+     ]
+    },
+    "group": null,
+    "wire": 76
+   },
+   {
+    "net": 70,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      23883278,
+      123037815
+     ],
+     "b": [
+      21767597,
+      124014945
+     ]
+    },
+    "group": null,
+    "wire": 76
+   },
+   {
+    "net": 71,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      26242597,
+      127824945
+     ],
+     "b": [
+      26242597,
+      126458915
+     ]
+    },
+    "group": null,
+    "wire": 77
+   },
+   {
+    "kind": "via",
+    "net": 71,
+    "at": [
+     26242597,
+     126458915
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 77
+   },
+   {
+    "net": 71,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      26242597,
+      126458915
+     ],
+     "b": [
+      24651810,
+      127131316
+     ]
+    },
+    "group": null,
+    "wire": 77
+   },
+   {
+    "net": 71,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      24651810,
+      127131316
+     ],
+     "b": [
+      24650459,
+      127131886
+     ]
+    },
+    "group": null,
+    "wire": 77
+   },
+   {
+    "net": 71,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      24650459,
+      127131886
+     ],
+     "b": [
+      23001567,
+      127824945
+     ]
+    },
+    "group": null,
+    "wire": 77
+   },
+   {
+    "kind": "via",
+    "net": 71,
+    "at": [
+     23001567,
+     127824945
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 77
+   },
+   {
+    "net": 71,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      23001567,
+      127824945
+     ],
+     "b": [
+      21767597,
+      127824945
+     ]
+    },
+    "group": null,
+    "wire": 77
+   },
+   {
+    "net": 74,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      19892597,
+      124014945
+     ],
+     "b": [
+      21191279,
+      124938729
+     ]
+    },
+    "group": null,
+    "wire": 79
+   },
+   {
+    "net": 74,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      21191279,
+      124938729
+     ],
+     "mid": [
+      21266032,
+      124983758
+     ],
+     "end": [
+      21346750,
+      125016929
+     ]
+    },
+    "group": null,
+    "wire": 79
+   },
+   {
+    "net": 74,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      21346750,
+      125016929
+     ],
+     "b": [
+      22830286,
+      125498354
+     ]
+    },
+    "group": null,
+    "wire": 79
+   },
+   {
+    "net": 74,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      22830286,
+      125498354
+     ],
+     "mid": [
+      22919880,
+      125521270
+     ],
+     "end": [
+      23011653,
+      125532675
+     ]
+    },
+    "group": null,
+    "wire": 79
+   },
+   {
+    "net": 74,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      23011653,
+      125532675
+     ],
+     "b": [
+      26286556,
+      125730240
+     ]
+    },
+    "group": null,
+    "wire": 79
+   },
+   {
+    "net": 74,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      26286556,
+      125730240
+     ],
+     "mid": [
+      26627298,
+      125838508
+     ],
+     "end": [
+      26875762,
+      126095594
+     ]
+    },
+    "group": null,
+    "wire": 79
+   },
+   {
+    "net": 74,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      26875762,
+      126095594
+     ],
+     "b": [
+      34163262,
+      138795594
+     ]
+    },
+    "group": null,
+    "wire": 79
+   },
+   {
+    "net": 74,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      34163262,
+      138795594
+     ],
+     "mid": [
+      34205313,
+      138881458
+     ],
+     "end": [
+      34235783,
+      138972081
+     ]
+    },
+    "group": null,
+    "wire": 79
+   },
+   {
+    "net": 74,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      34235783,
+      138972081
+     ],
+     "b": [
+      38837535,
+      156353226
+     ]
+    },
+    "group": null,
+    "wire": 79
+   },
+   {
+    "net": 74,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      38837535,
+      156353226
+     ],
+     "mid": [
+      39343773,
+      156868617
+     ],
+     "end": [
+      40045344,
+      156696271
+     ]
+    },
+    "group": null,
+    "wire": 79
+   },
+   {
+    "net": 74,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      40045344,
+      156696271
+     ],
+     "b": [
+      41360013,
+      155450466
+     ]
+    },
+    "group": null,
+    "wire": 79
+   },
+   {
+    "net": 74,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      41360013,
+      155450466
+     ],
+     "mid": [
+      41448750,
+      155390355
+     ],
+     "end": [
+      41552072,
+      155361854
+     ]
+    },
+    "group": null,
+    "wire": 79
+   },
+   {
+    "net": 74,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      41552072,
+      155361854
+     ],
+     "b": [
+      42462000,
+      155265000
+     ]
+    },
+    "group": null,
+    "wire": 79
+   },
+   {
+    "net": 75,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      35262000,
+      157215000
+     ],
+     "b": [
+      36770466,
+      157215000
+     ]
+    },
+    "group": null,
+    "wire": 80
+   },
+   {
+    "kind": "via",
+    "net": 75,
+    "at": [
+     36770466,
+     157215000
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 80
+   },
+   {
+    "net": 75,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      36770466,
+      157215000
+     ],
+     "b": [
+      37638876,
+      156820042
+     ]
+    },
+    "group": null,
+    "wire": 80
+   },
+   {
+    "net": 75,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      37638876,
+      156820042
+     ],
+     "mid": [
+      37907893,
+      156610060
+     ],
+     "end": [
+      38052069,
+      156300745
+     ]
+    },
+    "group": null,
+    "wire": 80
+   },
+   {
+    "net": 75,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      38052069,
+      156300745
+     ],
+     "b": [
+      38593406,
+      153633641
+     ]
+    },
+    "group": null,
+    "wire": 80
+   },
+   {
+    "net": 75,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      38593406,
+      153633641
+     ],
+     "mid": [
+      38594697,
+      153626924
+     ],
+     "end": [
+      38595848,
+      153620182
+     ]
+    },
+    "group": null,
+    "wire": 80
+   },
+   {
+    "net": 75,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      38595848,
+      153620182
+     ],
+     "b": [
+      38742796,
+      152702567
+     ]
+    },
+    "group": null,
+    "wire": 80
+   },
+   {
+    "net": 75,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      38742796,
+      152702567
+     ],
+     "mid": [
+      38881136,
+      152377975
+     ],
+     "end": [
+      39155556,
+      152156183
+     ]
+    },
+    "group": null,
+    "wire": 80
+   },
+   {
+    "net": 75,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      39155556,
+      152156183
+     ],
+     "b": [
+      40970000,
+      151311612
+     ]
+    },
+    "group": null,
+    "wire": 80
+   },
+   {
+    "kind": "via",
+    "net": 75,
+    "at": [
+     40970000,
+     151311612
+    ],
+    "d": 800000,
+    "drill": 400000,
+    "layers": [],
+    "group": null,
+    "wire": 80
+   },
+   {
+    "net": 75,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      40970000,
+      151311612
+     ],
+     "b": [
+      41321856,
+      151786466
+     ]
+    },
+    "group": null,
+    "wire": 80
+   },
+   {
+    "net": 75,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      41321856,
+      151786466
+     ],
+     "mid": [
+      41423153,
+      151876451
+     ],
+     "end": [
+      41552072,
+      151918146
+     ]
+    },
+    "group": null,
+    "wire": 80
+   },
+   {
+    "net": 75,
+    "layer": 2,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      41552072,
+      151918146
+     ],
+     "b": [
+      42462000,
+      152015000
+     ]
+    },
+    "group": null,
+    "wire": 80
+   }
+  ],
+  "connections": [
+   {
+    "id": 0,
+    "net": 1,
+    "name": "+BATT",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "B.Cu"
+    ],
+    "via_sites": [
+     [
+      30212000,
+      102387000
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "U1.3",
+     "at": [
+      30212000,
+      104242000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:fcf78dad-4882-4cb9-bd6e-98e975ed7c14",
+     "at": [
+      30212000,
+      104242000
+     ]
+    },
+    "length_nm": 1855000,
+    "length_outside_pads_nm": 855000,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1855000
+   },
+   {
+    "id": 1,
+    "net": 2,
+    "name": "Net-(D6-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 2,
+    "layers": [
+     "F.Cu",
+     "B.Cu"
+    ],
+    "via_sites": [
+     [
+      24562000,
+      158095612
+     ],
+     [
+      26381846,
+      154448154
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D6.2",
+     "at": [
+      24562000,
+      159602000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D7.4",
+     "at": [
+      27762000,
+      152818000
+     ]
+    },
+    "length_nm": 7718572,
+    "length_outside_pads_nm": 6194768,
+    "pattern": "S|S|S",
+    "anchors": 0,
+    "crossings": 3,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 7500844
+   },
+   {
+    "id": 2,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      24562000,
+      161108388
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D6.3",
+     "at": [
+      24562000,
+      164502000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      24562000,
+      164275500
+     ]
+    },
+    "length_nm": 3393612,
+    "length_outside_pads_nm": 2643612,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 3,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 3393612
+   },
+   {
+    "id": 3,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      27065162,
+      179628111
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D4.3",
+     "at": [
+      24562000,
+      187870000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      25811223,
+      182626000
+     ]
+    },
+    "length_nm": 8613626,
+    "length_outside_pads_nm": 7829799,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 5,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 8798459
+   },
+   {
+    "id": 4,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      24562000,
+      154324388
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D7.3",
+     "at": [
+      24562000,
+      152818000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      24562000,
+      152818000
+     ]
+    },
+    "length_nm": 1506388,
+    "length_outside_pads_nm": 756388,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1506388
+   },
+   {
+    "id": 5,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      24562000,
+      142894388
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D8.3",
+     "at": [
+      24562000,
+      141388000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      24562000,
+      141388000
+     ]
+    },
+    "length_nm": 1506388,
+    "length_outside_pads_nm": 756388,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1506388
+   },
+   {
+    "id": 6,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      28809612,
+      94666000
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D17.3",
+     "at": [
+      30316000,
+      94666000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      30316000,
+      94666000
+     ]
+    },
+    "length_nm": 1506388,
+    "length_outside_pads_nm": 756388,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1506388
+   },
+   {
+    "id": 7,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      23055612,
+      129704000
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D11.3",
+     "at": [
+      24562000,
+      129704000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      24562000,
+      129704000
+     ]
+    },
+    "length_nm": 1506388,
+    "length_outside_pads_nm": 1006388,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1506388
+   },
+   {
+    "id": 8,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      15672000,
+      148736388
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D12.3",
+     "at": [
+      15672000,
+      147230000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      15672000,
+      147230000
+     ]
+    },
+    "length_nm": 1506388,
+    "length_outside_pads_nm": 756388,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1506388
+   },
+   {
+    "id": 9,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      15672000,
+      137052388
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D13.3",
+     "at": [
+      15672000,
+      135546000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      15672000,
+      135546000
+     ]
+    },
+    "length_nm": 1506388,
+    "length_outside_pads_nm": 756388,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1506388
+   },
+   {
+    "id": 10,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      15672000,
+      125368388
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D14.3",
+     "at": [
+      15672000,
+      123862000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      15672000,
+      123862000
+     ]
+    },
+    "length_nm": 1506388,
+    "length_outside_pads_nm": 756388,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1506388
+   },
+   {
+    "id": 11,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      20173612,
+      112954000
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D15.3",
+     "at": [
+      21680000,
+      112954000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      21680000,
+      112954000
+     ]
+    },
+    "length_nm": 1506388,
+    "length_outside_pads_nm": 756388,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1506388
+   },
+   {
+    "id": 12,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      28357000,
+      104242000
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D16.3",
+     "at": [
+      28795359,
+      105537762
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      28795359,
+      105537762
+     ]
+    },
+    "length_nm": 1367903,
+    "length_outside_pads_nm": 603052,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1367903
+   },
+   {
+    "id": 13,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      35216000,
+      149410388
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D3.3",
+     "at": [
+      35216000,
+      147904000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      35216000,
+      147904000
+     ]
+    },
+    "length_nm": 1506388,
+    "length_outside_pads_nm": 1006388,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1506388
+   },
+   {
+    "id": 14,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      37882071,
+      100541044
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D18.3",
+     "at": [
+      39186641,
+      101294238
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      39186641,
+      101294238
+     ]
+    },
+    "length_nm": 1506388,
+    "length_outside_pads_nm": 1006388,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1506388
+   },
+   {
+    "id": 15,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      40970000,
+      137994388
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D24.3",
+     "at": [
+      40970000,
+      136488000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      40970000,
+      136488000
+     ]
+    },
+    "length_nm": 1506388,
+    "length_outside_pads_nm": 756388,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1506388
+   },
+   {
+    "id": 16,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      39463612,
+      124804000
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D23.3",
+     "at": [
+      40970000,
+      124804000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      40970000,
+      124804000
+     ]
+    },
+    "length_nm": 1506388,
+    "length_outside_pads_nm": 1006388,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1506388
+   },
+   {
+    "id": 17,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      49860000,
+      143836388
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D22.3",
+     "at": [
+      49860000,
+      142330000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      49860000,
+      142330000
+     ]
+    },
+    "length_nm": 1506388,
+    "length_outside_pads_nm": 756388,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1506388
+   },
+   {
+    "id": 18,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      48353612,
+      130646000
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D21.3",
+     "at": [
+      49860000,
+      130646000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      49860000,
+      130646000
+     ]
+    },
+    "length_nm": 1506388,
+    "length_outside_pads_nm": 1006388,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1506388
+   },
+   {
+    "id": 19,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      48353612,
+      118962000
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D20.3",
+     "at": [
+      49860000,
+      118962000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      49860000,
+      118962000
+     ]
+    },
+    "length_nm": 1506388,
+    "length_outside_pads_nm": 1006388,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1506388
+   },
+   {
+    "id": 20,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      37445612,
+      112954000
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D19.3",
+     "at": [
+      38952000,
+      112954000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      38952000,
+      112954000
+     ]
+    },
+    "length_nm": 1506388,
+    "length_outside_pads_nm": 756388,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1506388
+   },
+   {
+    "id": 21,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      26255612,
+      176186000
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D5.3",
+     "at": [
+      24562000,
+      176186000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      25740140,
+      176073033
+     ]
+    },
+    "length_nm": 1693612,
+    "length_outside_pads_nm": 1193612,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 2,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1693612
+   },
+   {
+    "id": 22,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      37770000,
+      181463612
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D28.3",
+     "at": [
+      40970000,
+      182970000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      40970000,
+      181998000
+     ]
+    },
+    "length_nm": 3536835,
+    "length_outside_pads_nm": 2984205,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 4,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 3536835
+   },
+   {
+    "id": 23,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      39276388,
+      171286000
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D27.3",
+     "at": [
+      40970000,
+      171286000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      39741500,
+      171286000
+     ]
+    },
+    "length_nm": 1693612,
+    "length_outside_pads_nm": 1193612,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1693612
+   },
+   {
+    "id": 24,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      40970000,
+      161108388
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D26.3",
+     "at": [
+      40970000,
+      159602000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      40970000,
+      159602000
+     ]
+    },
+    "length_nm": 1506388,
+    "length_outside_pads_nm": 756388,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1506388
+   },
+   {
+    "id": 25,
+    "net": 3,
+    "name": "GND",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      40970000,
+      149424388
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D25.3",
+     "at": [
+      40970000,
+      147918000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      40970000,
+      147918000
+     ]
+    },
+    "length_nm": 1506388,
+    "length_outside_pads_nm": 756388,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 1506388
+   },
+   {
+    "id": 26,
+    "net": 3,
+    "name": "GND",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "B.Cu"
+    ],
+    "via_sites": [
+     [
+      37336657,
+      156155539
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "U2.7",
+     "at": [
+      35262000,
+      155265000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      36485758,
+      155273989
+     ]
+    },
+    "length_nm": 2331600,
+    "length_outside_pads_nm": 1451658,
+    "pattern": "SAS",
+    "anchors": 1,
+    "crossings": 3,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 2275369
+   },
+   {
+    "id": 27,
+    "net": 3,
+    "name": "GND",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "B.Cu"
+    ],
+    "via_sites": [
+     [
+      39463612,
+      152818000
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "U2.18",
+     "at": [
+      42462000,
+      152665000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      41238241,
+      152656012
+     ]
+    },
+    "length_nm": 3002289,
+    "length_outside_pads_nm": 2126150,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 3,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 3002289
+   },
+   {
+    "id": 28,
+    "net": 3,
+    "name": "GND",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 2,
+    "layers": [
+     "B.Cu",
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      40953534,
+      154615000
+     ],
+     [
+      39543221,
+      156166392
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "U2.21",
+     "at": [
+      42462000,
+      154615000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      41238241,
+      154606012
+     ]
+    },
+    "length_nm": 3605082,
+    "length_outside_pads_nm": 2730082,
+    "pattern": "S|S",
+    "anchors": 0,
+    "crossings": 1,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 3340057
+   },
+   {
+    "id": 29,
+    "net": 3,
+    "name": "GND",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 2,
+    "layers": [
+     "B.Cu",
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      40953534,
+      157215000
+     ],
+     [
+      37770000,
+      158095612
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "U2.25",
+     "at": [
+      42462000,
+      157215000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      41348029,
+      157294659
+     ]
+    },
+    "length_nm": 4811550,
+    "length_outside_pads_nm": 3936550,
+    "pattern": "S|S",
+    "anchors": 0,
+    "crossings": 6,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 3265897
+   },
+   {
+    "id": 30,
+    "net": 3,
+    "name": "GND",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "B.Cu"
+    ],
+    "via_sites": [
+     [
+      39463612,
+      159602000
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "U2.26",
+     "at": [
+      42462000,
+      157865000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      41352925,
+      157783932
+     ]
+    },
+    "length_nm": 3580585,
+    "length_outside_pads_nm": 2700642,
+    "pattern": "SAS",
+    "anchors": 1,
+    "crossings": 5,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 3423723
+   },
+   {
+    "id": 31,
+    "net": 4,
+    "name": "Net-(D5-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D6.4",
+     "at": [
+      27762000,
+      164502000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D5.2",
+     "at": [
+      24562000,
+      171286000
+     ]
+    },
+    "length_nm": 7500844,
+    "length_outside_pads_nm": 5842343,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 5,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 7500844
+   },
+   {
+    "id": 32,
+    "net": 5,
+    "name": "Net-(D4-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "failed",
+    "reason": "infeasible: site:105 <-> site:139",
+    "vias": 0,
+    "layers": [],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D4.2",
+     "at": [
+      24562000,
+      182970000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D5.4",
+     "at": [
+      27762000,
+      176186000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 7500844
+   },
+   {
+    "id": 33,
+    "net": 6,
+    "name": "Net-(D3-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 2,
+    "layers": [
+     "F.Cu",
+     "B.Cu"
+    ],
+    "via_sites": [
+     [
+      31162738,
+      161255802
+     ],
+     [
+      29999630,
+      156182276
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D4.4",
+     "at": [
+      27762000,
+      187870000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D3.2",
+     "at": [
+      30316000,
+      147904000
+     ]
+    },
+    "length_nm": 40588184,
+    "length_outside_pads_nm": 39251493,
+    "pattern": "SAS|S|SAS",
+    "anchors": 2,
+    "crossings": 20,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 40304880
+   },
+   {
+    "id": 34,
+    "net": 7,
+    "name": "Net-(D7-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D7.2",
+     "at": [
+      24562000,
+      147918000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D8.4",
+     "at": [
+      27762000,
+      141388000
+     ]
+    },
+    "length_nm": 7273047,
+    "length_outside_pads_nm": 5602348,
+    "pattern": "SAS",
+    "anchors": 1,
+    "crossings": 7,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 7271925
+   },
+   {
+    "id": 35,
+    "net": 8,
+    "name": "Net-(D11-Pad4)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D8.2",
+     "at": [
+      24562000,
+      136488000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D11.4",
+     "at": [
+      27762000,
+      129704000
+     ]
+    },
+    "length_nm": 7500844,
+    "length_outside_pads_nm": 5842343,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 7,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 7500844
+   },
+   {
+    "id": 36,
+    "net": 9,
+    "name": "Net-(D17-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D17.2",
+     "at": [
+      35216000,
+      94666000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D18.4",
+     "at": [
+      36415359,
+      99694238
+     ]
+    },
+    "length_nm": 5242385,
+    "length_outside_pads_nm": 3808512,
+    "pattern": "SAS",
+    "anchors": 1,
+    "crossings": 8,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 5184966
+   },
+   {
+    "id": 37,
+    "net": 10,
+    "name": "Net-(D16-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D17.4",
+     "at": [
+      30316000,
+      97866000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D16.2",
+     "at": [
+      26345359,
+      101294238
+     ]
+    },
+    "length_nm": 6485274,
+    "length_outside_pads_nm": 5444716,
+    "pattern": "SASAS",
+    "anchors": 2,
+    "crossings": 8,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 5266790
+   },
+   {
+    "id": 38,
+    "net": 11,
+    "name": "Net-(D11-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D11.2",
+     "at": [
+      24562000,
+      124804000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D12.4",
+     "at": [
+      18872000,
+      147230000
+     ]
+    },
+    "length_nm": 25352550,
+    "length_outside_pads_nm": 23987974,
+    "pattern": "SAS",
+    "anchors": 1,
+    "crossings": 26,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 23144740
+   },
+   {
+    "id": 39,
+    "net": 12,
+    "name": "Net-(D12-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D12.2",
+     "at": [
+      15672000,
+      142330000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D13.4",
+     "at": [
+      18872000,
+      135546000
+     ]
+    },
+    "length_nm": 7500844,
+    "length_outside_pads_nm": 5842343,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 6,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 7500844
+   },
+   {
+    "id": 40,
+    "net": 13,
+    "name": "Net-(D13-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D13.2",
+     "at": [
+      15672000,
+      130646000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D14.4",
+     "at": [
+      18872000,
+      123862000
+     ]
+    },
+    "length_nm": 7500844,
+    "length_outside_pads_nm": 5842343,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 6,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 7511922
+   },
+   {
+    "id": 41,
+    "net": 14,
+    "name": "Net-(D14-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D14.2",
+     "at": [
+      15672000,
+      118962000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D15.4",
+     "at": [
+      21680000,
+      116154000
+     ]
+    },
+    "length_nm": 6631812,
+    "length_outside_pads_nm": 5252024,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 8,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 6781305
+   },
+   {
+    "id": 42,
+    "net": 15,
+    "name": "Net-(D15-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D15.2",
+     "at": [
+      26580000,
+      112954000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D16.4",
+     "at": [
+      31566641,
+      103937762
+     ]
+    },
+    "length_nm": 10303356,
+    "length_outside_pads_nm": 9148329,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 9,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 10472525
+   },
+   {
+    "id": 43,
+    "net": 16,
+    "name": "Net-(D3-Pad4)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 1,
+    "layers": [
+     "F.Cu",
+     "B.Cu"
+    ],
+    "via_sites": [
+     [
+      35262000,
+      160673466
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "D3.4",
+     "at": [
+      35216000,
+      144704000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U3.23",
+     "at": [
+      37195000,
+      164234000
+     ]
+    },
+    "length_nm": 21439225,
+    "length_outside_pads_nm": 19486456,
+    "pattern": "SAS|SAS",
+    "anchors": 2,
+    "crossings": 19,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 19893380
+   },
+   {
+    "id": 44,
+    "net": 17,
+    "name": "Net-(D18-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D18.2",
+     "at": [
+      36736641,
+      105537762
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D19.4",
+     "at": [
+      38952000,
+      116154000
+     ]
+    },
+    "length_nm": 11349889,
+    "length_outside_pads_nm": 9858218,
+    "pattern": "SAS",
+    "anchors": 1,
+    "crossings": 12,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 10860082
+   },
+   {
+    "id": 45,
+    "net": 18,
+    "name": "Net-(D24-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D24.2",
+     "at": [
+      40970000,
+      141388000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D25.4",
+     "at": [
+      37770000,
+      147918000
+     ]
+    },
+    "length_nm": 7271925,
+    "length_outside_pads_nm": 5601498,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 8,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 7361565
+   },
+   {
+    "id": 46,
+    "net": 19,
+    "name": "Net-(D23-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D24.4",
+     "at": [
+      37770000,
+      136488000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D23.2",
+     "at": [
+      40970000,
+      129704000
+     ]
+    },
+    "length_nm": 7500844,
+    "length_outside_pads_nm": 5842343,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 5,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 7601645
+   },
+   {
+    "id": 47,
+    "net": 20,
+    "name": "Net-(D22-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D23.4",
+     "at": [
+      37770000,
+      124804000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D22.2",
+     "at": [
+      49860000,
+      147230000
+     ]
+    },
+    "length_nm": 26307249,
+    "length_outside_pads_nm": 24896033,
+    "pattern": "SASAS",
+    "anchors": 2,
+    "crossings": 26,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 25596482
+   },
+   {
+    "id": 48,
+    "net": 21,
+    "name": "Net-(D21-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D22.4",
+     "at": [
+      46660000,
+      142330000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D21.2",
+     "at": [
+      49860000,
+      135546000
+     ]
+    },
+    "length_nm": 7500844,
+    "length_outside_pads_nm": 5842343,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 5,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 7500844
+   },
+   {
+    "id": 49,
+    "net": 22,
+    "name": "Net-(D20-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D21.4",
+     "at": [
+      46660000,
+      130646000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D20.2",
+     "at": [
+      49860000,
+      123862000
+     ]
+    },
+    "length_nm": 7500844,
+    "length_outside_pads_nm": 5842343,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 5,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 7601645
+   },
+   {
+    "id": 50,
+    "net": 23,
+    "name": "Net-(D19-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D20.4",
+     "at": [
+      46660000,
+      118962000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D19.2",
+     "at": [
+      43852000,
+      112954000
+     ]
+    },
+    "length_nm": 6631812,
+    "length_outside_pads_nm": 5252024,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 6,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 6631812
+   },
+   {
+    "id": 51,
+    "net": 25,
+    "name": "Net-(D27-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D28.4",
+     "at": [
+      37770000,
+      182970000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D27.2",
+     "at": [
+      40970000,
+      176186000
+     ]
+    },
+    "length_nm": 8300090,
+    "length_outside_pads_nm": 6630960,
+    "pattern": "SAS",
+    "anchors": 1,
+    "crossings": 10,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 7511922
+   },
+   {
+    "id": 52,
+    "net": 26,
+    "name": "Net-(D26-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D27.4",
+     "at": [
+      37770000,
+      171286000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D26.2",
+     "at": [
+      40970000,
+      164502000
+     ]
+    },
+    "length_nm": 7500844,
+    "length_outside_pads_nm": 5842343,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 5,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 7511922
+   },
+   {
+    "id": 53,
+    "net": 27,
+    "name": "Net-(D25-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D26.4",
+     "at": [
+      37770000,
+      159602000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D25.2",
+     "at": [
+      40970000,
+      152818000
+     ]
+    },
+    "length_nm": 9264005,
+    "length_outside_pads_nm": 7888842,
+    "pattern": "SASAS",
+    "anchors": 2,
+    "crossings": 9,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 7511922
+   },
+   {
+    "id": 54,
+    "net": 28,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 250000,
+    "status": "failed",
+    "reason": "blocked: terminal cannot be left/entered (width 0.250 mm, clearance 0.200 mm)",
+    "vias": 0,
+    "layers": [],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "R1.1",
+     "at": [
+      57055097,
+      139254945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R2.1",
+     "at": [
+      57055097,
+      135444945
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": null
+   },
+   {
+    "id": 55,
+    "net": 28,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 250000,
+    "status": "failed",
+    "reason": "blocked: terminal cannot be left (width 0.250 mm, clearance 0.200 mm)",
+    "vias": 0,
+    "layers": [],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "R1.1",
+     "at": [
+      57055097,
+      139254945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R8.2",
+     "at": [
+      33530097,
+      148144945
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": null
+   },
+   {
+    "id": 56,
+    "net": 28,
+    "name": "+3V3",
+    "layer": 0,
+    "width": 250000,
+    "status": "failed",
+    "reason": "blocked: terminal cannot be left (width 0.250 mm, clearance 0.200 mm)",
+    "vias": 0,
+    "layers": [],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "R2.1",
+     "at": [
+      57055097,
+      135444945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.2",
+     "at": [
+      32512000,
+      104242000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": null
+   },
+   {
+    "id": 57,
+    "net": 28,
+    "name": "+3V3",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "B.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "U3.2",
+     "at": [
+      24250000,
+      180474000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R5.1",
+     "at": [
+      26575097,
+      148144945
+     ]
+    },
+    "length_nm": 36882705,
+    "length_outside_pads_nm": 35085784,
+    "pattern": "SASASASASASASAS",
+    "anchors": 7,
+    "crossings": 43,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 33004517
+   },
+   {
+    "id": 58,
+    "net": 28,
+    "name": "+3V3",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 2,
+    "layers": [
+     "B.Cu",
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      30316000,
+      149410388
+     ],
+     [
+      28450097,
+      149510975
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "R8.2",
+     "at": [
+      33530097,
+      148144945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R5.1",
+     "at": [
+      26575097,
+      148144945
+     ]
+    },
+    "length_nm": 7736883,
+    "length_outside_pads_nm": 6535472,
+    "pattern": "SAS|S|S",
+    "anchors": 1,
+    "crossings": 16,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 7080208
+   },
+   {
+    "id": 59,
+    "net": 28,
+    "name": "+3V3",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "B.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "U1.2",
+     "at": [
+      32512000,
+      104242000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U1.2",
+     "at": [
+      32512000,
+      97942000
+     ]
+    },
+    "length_nm": 6300000,
+    "length_outside_pads_nm": 4300000,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 3,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 6300000
+   },
+   {
+    "id": 60,
+    "net": 29,
+    "name": "Net-(D1-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "failed",
+    "reason": "blocked: terminal cannot be left/entered (width 0.250 mm, clearance 0.200 mm)",
+    "vias": 0,
+    "layers": [],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "R1.2",
+     "at": [
+      58930097,
+      139254945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D1.2",
+     "at": [
+      54182597,
+      139254945
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": null
+   },
+   {
+    "id": 61,
+    "net": 30,
+    "name": "Net-(D2-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "failed",
+    "reason": "blocked: terminal cannot be left/entered (width 0.250 mm, clearance 0.200 mm)",
+    "vias": 0,
+    "layers": [],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "R2.2",
+     "at": [
+      58930097,
+      135444945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D2.2",
+     "at": [
+      54182597,
+      135444945
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": null
+   },
+   {
+    "id": 62,
+    "net": 32,
+    "name": "reset",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 2,
+    "layers": [
+     "B.Cu",
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      25951586,
+      180474000
+     ],
+     [
+      27762000,
+      154324388
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "U3.3",
+     "at": [
+      24250000,
+      179204000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R5.2",
+     "at": [
+      28450097,
+      148144945
+     ]
+    },
+    "length_nm": 36093279,
+    "length_outside_pads_nm": 34254241,
+    "pattern": "SAS|SASASAS|SAS",
+    "anchors": 7,
+    "crossings": 30,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 32045319
+   },
+   {
+    "id": 63,
+    "net": 32,
+    "name": "reset",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "B.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "Q1.6",
+     "at": [
+      28462597,
+      144984945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R5.2",
+     "at": [
+      28450097,
+      148144945
+     ]
+    },
+    "length_nm": 3160025,
+    "length_outside_pads_nm": 2260018,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 11,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 3160036
+   },
+   {
+    "id": 64,
+    "net": 52,
+    "name": "boot",
+    "layer": 0,
+    "width": 250000,
+    "status": "failed",
+    "reason": "infeasible: wall pad:D26:4 grazed mid-span by 153290 nm",
+    "vias": 0,
+    "layers": [],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "U3.25",
+     "at": [
+      41250000,
+      165234000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R8.1",
+     "at": [
+      31655097,
+      148144945
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 19917871
+   },
+   {
+    "id": 65,
+    "net": 52,
+    "name": "boot",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "B.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "Q2.6",
+     "at": [
+      33542597,
+      144984945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R8.1",
+     "at": [
+      31655097,
+      148144945
+     ]
+    },
+    "length_nm": 3680796,
+    "length_outside_pads_nm": 2688649,
+    "pattern": "S",
+    "anchors": 0,
+    "crossings": 11,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 3680796
+   },
+   {
+    "id": 66,
+    "net": 61,
+    "name": "txd",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 2,
+    "layers": [
+     "B.Cu",
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      39050957,
+      173695618
+     ],
+     [
+      37770000,
+      161108388
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "U3.34",
+     "at": [
+      41250000,
+      176664000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U2.1",
+     "at": [
+      35262000,
+      159165000
+     ]
+    },
+    "length_nm": 26230258,
+    "length_outside_pads_nm": 24780580,
+    "pattern": "SAS|SASASASASAS|S",
+    "anchors": 6,
+    "crossings": 19,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 19007215
+   },
+   {
+    "id": 67,
+    "net": 62,
+    "name": "rxd",
+    "layer": 0,
+    "width": 250000,
+    "status": "failed",
+    "reason": "self-check: item:78 (gap -202616 < 200000 nm)",
+    "vias": 0,
+    "layers": [],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "U3.35",
+     "at": [
+      41250000,
+      177934000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U2.5",
+     "at": [
+      35262000,
+      156565000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 23340215
+   },
+   {
+    "id": 68,
+    "net": 65,
+    "name": "rts#",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "B.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "Q1.1",
+     "at": [
+      26562597,
+      144984945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R7.1",
+     "at": [
+      26575097,
+      140524945
+     ]
+    },
+    "length_nm": 6330475,
+    "length_outside_pads_nm": 5245157,
+    "pattern": "SAS",
+    "anchors": 1,
+    "crossings": 8,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 4658059
+   },
+   {
+    "id": 69,
+    "net": 65,
+    "name": "rts#",
+    "layer": 0,
+    "width": 250000,
+    "status": "failed",
+    "reason": "blocked: no path (wall, capacity or via sites)",
+    "vias": 0,
+    "layers": [],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "Q1.1",
+     "at": [
+      26562597,
+      144984945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U2.3",
+     "at": [
+      35262000,
+      157865000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": [
+     26887597,
+     144984945
+    ],
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 15850277
+   },
+   {
+    "id": 70,
+    "net": 66,
+    "name": "Net-(Q1-Pad2)",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 2,
+    "layers": [
+     "B.Cu",
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      25575989,
+      144334945
+     ],
+     [
+      33530097,
+      139158915
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "Q1.2",
+     "at": [
+      26562597,
+      144334945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R6.2",
+     "at": [
+      33530097,
+      140524945
+     ]
+    },
+    "length_nm": 13178691,
+    "length_outside_pads_nm": 12153692,
+    "pattern": "S|SAS|S",
+    "anchors": 1,
+    "crossings": 12,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 7941460
+   },
+   {
+    "id": 71,
+    "net": 67,
+    "name": "dtr#",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 2,
+    "layers": [
+     "B.Cu",
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      31642597,
+      145971553
+     ],
+     [
+      31655097,
+      141890975
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "Q2.1",
+     "at": [
+      31642597,
+      144984945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R6.1",
+     "at": [
+      31655097,
+      140524945
+     ]
+    },
+    "length_nm": 6433235,
+    "length_outside_pads_nm": 5533236,
+    "pattern": "S|S|S",
+    "anchors": 0,
+    "crossings": 5,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 4658059
+   },
+   {
+    "id": 72,
+    "net": 67,
+    "name": "dtr#",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 2,
+    "layers": [
+     "B.Cu",
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      30316000,
+      146397612
+     ],
+     [
+      33753534,
+      157865000
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "Q2.1",
+     "at": [
+      31642597,
+      144984945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U2.2",
+     "at": [
+      35262000,
+      158515000
+     ]
+    },
+    "length_nm": 15918472,
+    "length_outside_pads_nm": 14764168,
+    "pattern": "S|SAS|SAS",
+    "anchors": 2,
+    "crossings": 14,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 14403856
+   },
+   {
+    "id": 73,
+    "net": 68,
+    "name": "Net-(Q2-Pad2)",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 2,
+    "layers": [
+     "B.Cu",
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      32629205,
+      144334945
+     ],
+     [
+      29268388,
+      141388000
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "Q2.2",
+     "at": [
+      31642597,
+      144334945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R7.2",
+     "at": [
+      28450097,
+      140524945
+     ]
+    },
+    "length_nm": 8176204,
+    "length_outside_pads_nm": 7150822,
+    "pattern": "S|SAS|S",
+    "anchors": 1,
+    "crossings": 8,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 4998014
+   },
+   {
+    "id": 74,
+    "net": 69,
+    "name": "VBUS",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 2,
+    "layers": [
+     "B.Cu",
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      23055612,
+      124804000
+     ],
+     [
+      24367597,
+      126458915
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "R4.1",
+     "at": [
+      24367597,
+      124014945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R3.1",
+     "at": [
+      24367597,
+      127824945
+     ]
+    },
+    "length_nm": 5008948,
+    "length_outside_pads_nm": 3740074,
+    "pattern": "S|SAS|S",
+    "anchors": 1,
+    "crossings": 7,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 3830643
+   },
+   {
+    "id": 75,
+    "net": 69,
+    "name": "VBUS",
+    "layer": 0,
+    "width": 250000,
+    "status": "failed",
+    "reason": "blocked: no path (wall, capacity or via sites)",
+    "vias": 0,
+    "layers": [],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "R3.1",
+     "at": [
+      24367597,
+      127824945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U2.20",
+     "at": [
+      42462000,
+      153965000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": [
+     24611347,
+     127824945
+    ],
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 31932801
+   },
+   {
+    "id": 76,
+    "net": 70,
+    "name": "Net-(D10-Pad2)",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "B.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "R4.2",
+     "at": [
+      26242597,
+      124014945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D10.2",
+     "at": [
+      21767597,
+      124014945
+     ]
+    },
+    "length_nm": 5014633,
+    "length_outside_pads_nm": 3879398,
+    "pattern": "SASAS",
+    "anchors": 2,
+    "crossings": 7,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 4581370
+   },
+   {
+    "id": 77,
+    "net": 71,
+    "name": "Net-(D9-Pad2)",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 2,
+    "layers": [
+     "B.Cu",
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      26242597,
+      126458915
+     ],
+     [
+      23001567,
+      127824945
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "R3.2",
+     "at": [
+      26242597,
+      127824945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D9.2",
+     "at": [
+      21767597,
+      127824945
+     ]
+    },
+    "length_nm": 6117147,
+    "length_outside_pads_nm": 4929647,
+    "pattern": "S|SSS|S",
+    "anchors": 1,
+    "crossings": 13,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 4581370
+   },
+   {
+    "id": 78,
+    "net": 73,
+    "name": "Net-(D9-Pad1)",
+    "layer": 0,
+    "width": 250000,
+    "status": "failed",
+    "reason": "infeasible: site:322 <-> site:338",
+    "vias": 0,
+    "layers": [],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D9.1",
+     "at": [
+      19892597,
+      127824945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U2.23",
+     "at": [
+      42462000,
+      155915000
+     ]
+    },
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 36216921
+   },
+   {
+    "id": 79,
+    "net": 74,
+    "name": "Net-(D10-Pad1)",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "B.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D10.1",
+     "at": [
+      19892597,
+      124014945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U2.22",
+     "at": [
+      42462000,
+      155265000
+     ]
+    },
+    "length_nm": 44783163,
+    "length_outside_pads_nm": 43304968,
+    "pattern": "SASASASASASAS",
+    "anchors": 6,
+    "crossings": 54,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 38769683
+   },
+   {
+    "id": 80,
+    "net": 75,
+    "name": "Net-(C1-Pad2)",
+    "layer": 2,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 2,
+    "layers": [
+     "B.Cu",
+     "F.Cu"
+    ],
+    "via_sites": [
+     [
+      36770466,
+      157215000
+     ],
+     [
+      40970000,
+      151311612
+     ]
+    ],
+    "from": {
+     "kind": "pad",
+     "label": "U2.4",
+     "at": [
+      35262000,
+      157215000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U2.17",
+     "at": [
+      42462000,
+      152015000
+     ]
+    },
+    "length_nm": 11308971,
+    "length_outside_pads_nm": 9554028,
+    "pattern": "S|SASASAS|SAS",
+    "anchors": 4,
+    "crossings": 14,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 3,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 8918670
+   }
+  ],
+  "nets": [
+   {
+    "net": 1,
+    "name": "+BATT",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 1,
+    "length_nm": 1855000,
+    "length_outside_pads_nm": 855000
+   },
+   {
+    "net": 2,
+    "name": "Net-(D6-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 2,
+    "length_nm": 7718572,
+    "length_outside_pads_nm": 6194768
+   },
+   {
+    "net": 3,
+    "name": "GND",
+    "status": "routed",
+    "connections": 29,
+    "routed": 29,
+    "partial": 0,
+    "failed": 0,
+    "vias": 31,
+    "length_nm": 64745290,
+    "length_outside_pads_nm": 44507958
+   },
+   {
+    "net": 4,
+    "name": "Net-(D5-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 7500844,
+    "length_outside_pads_nm": 5842343
+   },
+   {
+    "net": 5,
+    "name": "Net-(D4-Pad2)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 6,
+    "name": "Net-(D3-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 2,
+    "length_nm": 40588184,
+    "length_outside_pads_nm": 39251493
+   },
+   {
+    "net": 7,
+    "name": "Net-(D7-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 7273047,
+    "length_outside_pads_nm": 5602348
+   },
+   {
+    "net": 8,
+    "name": "Net-(D11-Pad4)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 7500844,
+    "length_outside_pads_nm": 5842343
+   },
+   {
+    "net": 9,
+    "name": "Net-(D17-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 5242385,
+    "length_outside_pads_nm": 3808512
+   },
+   {
+    "net": 10,
+    "name": "Net-(D16-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 6485274,
+    "length_outside_pads_nm": 5444716
+   },
+   {
+    "net": 11,
+    "name": "Net-(D11-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 25352550,
+    "length_outside_pads_nm": 23987974
+   },
+   {
+    "net": 12,
+    "name": "Net-(D12-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 7500844,
+    "length_outside_pads_nm": 5842343
+   },
+   {
+    "net": 13,
+    "name": "Net-(D13-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 7500844,
+    "length_outside_pads_nm": 5842343
+   },
+   {
+    "net": 14,
+    "name": "Net-(D14-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 6631812,
+    "length_outside_pads_nm": 5252024
+   },
+   {
+    "net": 15,
+    "name": "Net-(D15-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 10303356,
+    "length_outside_pads_nm": 9148329
+   },
+   {
+    "net": 16,
+    "name": "Net-(D3-Pad4)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 1,
+    "length_nm": 21439225,
+    "length_outside_pads_nm": 19486456
+   },
+   {
+    "net": 17,
+    "name": "Net-(D18-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 11349889,
+    "length_outside_pads_nm": 9858218
+   },
+   {
+    "net": 18,
+    "name": "Net-(D24-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 7271925,
+    "length_outside_pads_nm": 5601498
+   },
+   {
+    "net": 19,
+    "name": "Net-(D23-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 7500844,
+    "length_outside_pads_nm": 5842343
+   },
+   {
+    "net": 20,
+    "name": "Net-(D22-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 26307249,
+    "length_outside_pads_nm": 24896033
+   },
+   {
+    "net": 21,
+    "name": "Net-(D21-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 7500844,
+    "length_outside_pads_nm": 5842343
+   },
+   {
+    "net": 22,
+    "name": "Net-(D20-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 7500844,
+    "length_outside_pads_nm": 5842343
+   },
+   {
+    "net": 23,
+    "name": "Net-(D19-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 6631812,
+    "length_outside_pads_nm": 5252024
+   },
+   {
+    "net": 24,
+    "name": "Net-(D28-Pad2)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 25,
+    "name": "Net-(D27-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 8300090,
+    "length_outside_pads_nm": 6630960
+   },
+   {
+    "net": 26,
+    "name": "Net-(D26-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 7500844,
+    "length_outside_pads_nm": 5842343
+   },
+   {
+    "net": 27,
+    "name": "Net-(D25-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 9264005,
+    "length_outside_pads_nm": 7888842
+   },
+   {
+    "net": 28,
+    "name": "+3V3",
+    "status": "partial",
+    "connections": 6,
+    "routed": 3,
+    "partial": 0,
+    "failed": 3,
+    "vias": 2,
+    "length_nm": 50919588,
+    "length_outside_pads_nm": 45921256
+   },
+   {
+    "net": 29,
+    "name": "Net-(D1-Pad2)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 30,
+    "name": "Net-(D2-Pad2)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 31,
+    "name": "Net-(D1-Pad1)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 32,
+    "name": "reset",
+    "status": "routed",
+    "connections": 2,
+    "routed": 2,
+    "partial": 0,
+    "failed": 0,
+    "vias": 2,
+    "length_nm": 39253304,
+    "length_outside_pads_nm": 36514259
+   },
+   {
+    "net": 33,
+    "name": "Net-(U3-Pad4)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 34,
+    "name": "Net-(U3-Pad5)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 35,
+    "name": "Net-(U3-Pad6)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 36,
+    "name": "Net-(U3-Pad7)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 37,
+    "name": "Net-(U3-Pad8)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 38,
+    "name": "Net-(U3-Pad9)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 39,
+    "name": "Net-(U3-Pad10)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 40,
+    "name": "Net-(U3-Pad11)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 41,
+    "name": "Net-(U3-Pad12)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 42,
+    "name": "Net-(U3-Pad13)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 43,
+    "name": "Net-(U3-Pad14)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 44,
+    "name": "Net-(U3-Pad16)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 45,
+    "name": "Net-(U3-Pad17)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 46,
+    "name": "Net-(U3-Pad18)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 47,
+    "name": "Net-(U3-Pad19)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 48,
+    "name": "Net-(U3-Pad20)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 49,
+    "name": "Net-(U3-Pad21)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 50,
+    "name": "Net-(U3-Pad22)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 51,
+    "name": "Net-(U3-Pad24)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 52,
+    "name": "boot",
+    "status": "partial",
+    "connections": 2,
+    "routed": 1,
+    "partial": 0,
+    "failed": 1,
+    "vias": 0,
+    "length_nm": 3680796,
+    "length_outside_pads_nm": 2688649
+   },
+   {
+    "net": 53,
+    "name": "Net-(U3-Pad26)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 54,
+    "name": "Net-(U3-Pad27)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 55,
+    "name": "Net-(U3-Pad28)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 56,
+    "name": "Net-(U3-Pad29)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 57,
+    "name": "Net-(U3-Pad30)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 58,
+    "name": "Net-(U3-Pad31)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 59,
+    "name": "Net-(U3-Pad32)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 60,
+    "name": "Net-(U3-Pad33)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 61,
+    "name": "txd",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 2,
+    "length_nm": 26230258,
+    "length_outside_pads_nm": 24780580
+   },
+   {
+    "net": 62,
+    "name": "rxd",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 63,
+    "name": "Net-(U3-Pad36)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 64,
+    "name": "Net-(U3-Pad37)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 65,
+    "name": "rts#",
+    "status": "partial",
+    "connections": 2,
+    "routed": 1,
+    "partial": 0,
+    "failed": 1,
+    "vias": 0,
+    "length_nm": 6330475,
+    "length_outside_pads_nm": 5245157
+   },
+   {
+    "net": 66,
+    "name": "Net-(Q1-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 2,
+    "length_nm": 13178691,
+    "length_outside_pads_nm": 12153692
+   },
+   {
+    "net": 67,
+    "name": "dtr#",
+    "status": "routed",
+    "connections": 2,
+    "routed": 2,
+    "partial": 0,
+    "failed": 0,
+    "vias": 4,
+    "length_nm": 22351707,
+    "length_outside_pads_nm": 20297404
+   },
+   {
+    "net": 68,
+    "name": "Net-(Q2-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 2,
+    "length_nm": 8176204,
+    "length_outside_pads_nm": 7150822
+   },
+   {
+    "net": 69,
+    "name": "VBUS",
+    "status": "partial",
+    "connections": 2,
+    "routed": 1,
+    "partial": 0,
+    "failed": 1,
+    "vias": 2,
+    "length_nm": 5008948,
+    "length_outside_pads_nm": 3740074
+   },
+   {
+    "net": 70,
+    "name": "Net-(D10-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 5014633,
+    "length_outside_pads_nm": 3879398
+   },
+   {
+    "net": 71,
+    "name": "Net-(D9-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 2,
+    "length_nm": 6117147,
+    "length_outside_pads_nm": 4929647
+   },
+   {
+    "net": 72,
+    "name": "Net-(D2-Pad1)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 73,
+    "name": "Net-(D9-Pad1)",
+    "status": "failed",
+    "connections": 1,
+    "routed": 0,
+    "partial": 0,
+    "failed": 1,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 74,
+    "name": "Net-(D10-Pad1)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 44783163,
+    "length_outside_pads_nm": 43304968
+   },
+   {
+    "net": 75,
+    "name": "Net-(C1-Pad2)",
+    "status": "routed",
+    "connections": 1,
+    "routed": 1,
+    "partial": 0,
+    "failed": 0,
+    "vias": 2,
+    "length_nm": 11308971,
+    "length_outside_pads_nm": 9554028
+   },
+   {
+    "net": 76,
+    "name": "Net-(U2-Pad6)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 77,
+    "name": "Net-(U2-Pad9)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 78,
+    "name": "Net-(U2-Pad10)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 79,
+    "name": "Net-(U2-Pad11)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 80,
+    "name": "Net-(U2-Pad12)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 81,
+    "name": "Net-(U2-Pad13)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 82,
+    "name": "Net-(U2-Pad14)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 83,
+    "name": "Net-(J1-Pad3)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 84,
+    "name": "Net-(J1-Pad2)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 85,
+    "name": "Net-(U2-Pad19)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 86,
+    "name": "Net-(U2-Pad27)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   },
+   {
+    "net": 87,
+    "name": "Net-(U2-Pad28)",
+    "status": "complete",
+    "connections": 0,
+    "routed": 0,
+    "partial": 0,
+    "failed": 0,
+    "vias": 0,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
+   }
+  ],
+  "connections_total": 81,
+  "routed": 70,
+  "partial": 0,
+  "failed": 11,
+  "nets_total": 43,
+  "nets_routed": 34,
+  "total_length_nm": 569120300,
+  "length_outside_pads_nm": 490565830,
+  "vias": 57,
+  "length_by_layer_nm": {
+   "B.Cu": 174393368,
+   "F.Cu": 394726932
+  },
+  "sites": 481,
+  "via_reduction": "skipped: timeout",
+  "iterations": 10,
+  "converged": false,
+  "overuse_edges": 40,
+  "clinches": {
+   "regular": [],
+   "u": []
+  },
+  "relax_iterations": 3,
+  "self_check_rounds": 2,
+  "check_candidates_visited": 19134,
+  "timed_out": true,
+  "runtime_s": 60.090424608,
+  "threads_used": 4,
+  "warnings": [
+   "net 24 skipped: no other terminal in the net",
+   "net 31 skipped: no other terminal in the net",
+   "net 33 skipped: no other terminal in the net",
+   "net 34 skipped: no other terminal in the net",
+   "net 35 skipped: no other terminal in the net",
+   "net 36 skipped: no other terminal in the net",
+   "net 37 skipped: no other terminal in the net",
+   "net 38 skipped: no other terminal in the net",
+   "net 39 skipped: no other terminal in the net",
+   "net 40 skipped: no other terminal in the net",
+   "net 41 skipped: no other terminal in the net",
+   "net 42 skipped: no other terminal in the net",
+   "net 43 skipped: no other terminal in the net",
+   "net 44 skipped: no other terminal in the net",
+   "net 45 skipped: no other terminal in the net",
+   "net 46 skipped: no other terminal in the net",
+   "net 47 skipped: no other terminal in the net",
+   "net 48 skipped: no other terminal in the net",
+   "net 49 skipped: no other terminal in the net",
+   "net 50 skipped: no other terminal in the net",
+   "net 51 skipped: no other terminal in the net",
+   "net 53 skipped: no other terminal in the net",
+   "net 54 skipped: no other terminal in the net",
+   "net 55 skipped: no other terminal in the net",
+   "net 56 skipped: no other terminal in the net",
+   "net 57 skipped: no other terminal in the net",
+   "net 58 skipped: no other terminal in the net",
+   "net 59 skipped: no other terminal in the net",
+   "net 60 skipped: no other terminal in the net",
+   "net 63 skipped: no other terminal in the net",
+   "net 64 skipped: no other terminal in the net",
+   "net 72 skipped: no other terminal in the net",
+   "net 76 skipped: no other terminal in the net",
+   "net 77 skipped: no other terminal in the net",
+   "net 78 skipped: no other terminal in the net",
+   "net 79 skipped: no other terminal in the net",
+   "net 80 skipped: no other terminal in the net",
+   "net 81 skipped: no other terminal in the net",
+   "net 82 skipped: no other terminal in the net",
+   "net 83 skipped: no other terminal in the net",
+   "net 84 skipped: no other terminal in the net",
+   "net 85 skipped: no other terminal in the net",
+   "net 86 skipped: no other terminal in the net",
+   "net 87 skipped: no other terminal in the net",
+   "pour reach net +BATT: 18 island(s) on 2 raster(s), 24 listed item(s), main component 24 of 24, lost: []",
+   "pour reach net GND: 6 island(s) on 2 raster(s), 4 listed item(s), main component 3 of 4, lost: [D4.3, D5.3, U3.1]",
+   "pour reach: 3 item(s) without pour after 0 completion pass(es) (no budget): D4.3, D5.3, U3.1"
+  ],
+  "zero_slack_wires": [],
+  "zero_slack": "not run"
+ },
+ "smooth": null,
+ "route": {
+  "connections": 81,
+  "routed": 70,
+  "partial": 0,
+  "failed": 11,
+  "nets": 43,
+  "nets_routed": 34,
+  "length_mm": 569.12,
+  "outside_mm": 490.566,
+  "vias": 57,
+  "length_by_layer_mm": {
+   "B.Cu": 174.393,
+   "F.Cu": 394.727
+  },
+  "threads_used": 4,
+  "hand_outside_mm": 226.124,
+  "iterations": 10,
+  "timed_out": true,
+  "clinches": {
+   "regular": [],
+   "u": []
+  },
+  "zero_slack_wires": [],
+  "zero_slack": "not run",
+  "via_reduction": "skipped: timeout"
+ },
+ "detour": {
+  "median": 1.0,
+  "p90": 1.311,
+  "max": 1.659,
+  "count_gt_1_5": 2,
+  "n": 70,
+  "no_reference": 11,
+  "top10": [
+   {
+    "id": 70,
+    "name": "Net-(Q1-Pad2)",
+    "from": {
+     "kind": "pad",
+     "label": "Q1.2",
+     "at": [
+      26562597,
+      144334945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R6.2",
+     "at": [
+      33530097,
+      140524945
+     ]
+    },
+    "length_mm": 13.179,
+    "ghost_mm": 7.941,
+    "ratio": 1.659
+   },
+   {
+    "id": 73,
+    "name": "Net-(Q2-Pad2)",
+    "from": {
+     "kind": "pad",
+     "label": "Q2.2",
+     "at": [
+      31642597,
+      144334945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R7.2",
+     "at": [
+      28450097,
+      140524945
+     ]
+    },
+    "length_mm": 8.176,
+    "ghost_mm": 4.998,
+    "ratio": 1.636
+   },
+   {
+    "id": 29,
+    "name": "GND",
+    "from": {
+     "kind": "pad",
+     "label": "U2.25",
+     "at": [
+      42462000,
+      157215000
+     ]
+    },
+    "to": {
+     "kind": "pour",
+     "label": "pour:9371a1a8-82d6-45c1-a837-2da356fb9a3f",
+     "at": [
+      41348029,
+      157294659
+     ]
+    },
+    "length_mm": 4.812,
+    "ghost_mm": 3.266,
+    "ratio": 1.473
+   },
+   {
+    "id": 71,
+    "name": "dtr#",
+    "from": {
+     "kind": "pad",
+     "label": "Q2.1",
+     "at": [
+      31642597,
+      144984945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R6.1",
+     "at": [
+      31655097,
+      140524945
+     ]
+    },
+    "length_mm": 6.433,
+    "ghost_mm": 4.658,
+    "ratio": 1.381
+   },
+   {
+    "id": 66,
+    "name": "txd",
+    "from": {
+     "kind": "pad",
+     "label": "U3.34",
+     "at": [
+      41250000,
+      176664000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U2.1",
+     "at": [
+      35262000,
+      159165000
+     ]
+    },
+    "length_mm": 26.23,
+    "ghost_mm": 19.007,
+    "ratio": 1.38
+   },
+   {
+    "id": 68,
+    "name": "rts#",
+    "from": {
+     "kind": "pad",
+     "label": "Q1.1",
+     "at": [
+      26562597,
+      144984945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R7.1",
+     "at": [
+      26575097,
+      140524945
+     ]
+    },
+    "length_mm": 6.33,
+    "ghost_mm": 4.658,
+    "ratio": 1.359
+   },
+   {
+    "id": 77,
+    "name": "Net-(D9-Pad2)",
+    "from": {
+     "kind": "pad",
+     "label": "R3.2",
+     "at": [
+      26242597,
+      127824945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D9.2",
+     "at": [
+      21767597,
+      127824945
+     ]
+    },
+    "length_mm": 6.117,
+    "ghost_mm": 4.581,
+    "ratio": 1.335
+   },
+   {
+    "id": 74,
+    "name": "VBUS",
+    "from": {
+     "kind": "pad",
+     "label": "R4.1",
+     "at": [
+      24367597,
+      124014945
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "R3.1",
+     "at": [
+      24367597,
+      127824945
+     ]
+    },
+    "length_mm": 5.009,
+    "ghost_mm": 3.831,
+    "ratio": 1.308
+   },
+   {
+    "id": 80,
+    "name": "Net-(C1-Pad2)",
+    "from": {
+     "kind": "pad",
+     "label": "U2.4",
+     "at": [
+      35262000,
+      157215000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "U2.17",
+     "at": [
+      42462000,
+      152015000
+     ]
+    },
+    "length_mm": 11.309,
+    "ghost_mm": 8.919,
+    "ratio": 1.268
+   },
+   {
+    "id": 53,
+    "name": "Net-(D25-Pad2)",
+    "from": {
+     "kind": "pad",
+     "label": "D26.4",
+     "at": [
+      37770000,
+      159602000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D25.2",
+     "at": [
+      40970000,
+      152818000
+     ]
+    },
+    "length_mm": 9.264,
+    "ghost_mm": 7.512,
+    "ratio": 1.233
+   }
+  ]
+ },
+ "hand_stats": {
+  "wires": 23,
+  "skipped": 0,
+  "hand_length_nm": 259522085,
+  "hand_outside_pads_nm": 226124489
+ },
+ "floors": [
+  {
+   "name": "min_via_diameter",
+   "design_mm": 0.4,
+   "floor_mm": 0.45
+  },
+  {
+   "name": "hole_clearance",
+   "design_mm": 0.25,
+   "floor_mm": 0.35
+  },
+  {
+   "name": "edge_clearance",
+   "design_mm": 0.075,
+   "floor_mm": 0.2
+  }
+ ],
+ "rules_used": {
+  "edge_clearance": 0.2,
+  "min_clearance": 0.15,
+  "min_track_width": 0.2
+ },
+ "pcb_sha256": "683d3088a14f96f3bb7d50a2ee03629c3d01717e05c6e49561b7f449fe432c01",
+ "rip": "all",
+ "threads": 4,
+ "runtime_s": 70.494,
+ "router_s": 60.096,
+ "width_match": {
+  "compared": 22,
+  "matched": 22,
+  "mismatched": []
+ }
+}

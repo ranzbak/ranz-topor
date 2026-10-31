@@ -46,6 +46,7 @@ copies (verify with sha256 before/after).
 | [2026-10-30-topola-d832b164](2026-10-30-topola-d832b164/README.md) | Topola `develop` d832b164 | baseline: only the simple board routes; see [43](../design/43-topola-assessment.md) |
 | [2026-10-30-topor-0.1.0](2026-10-30-topor-0.1.0/README.md) | topor 0.1.0 (M1 taut smoother) | eprom-to-kernal gate: 25/27 wires taut + 2 zero-slack, 8 arcs, DRC routing_new 0, outside-pad length 71.5 vs 76.6 mm hand |
 | [2026-10-31-topor-0.2.0](2026-10-31-topor-0.2.0/README.md) | topor 0.2.0 (M2 single-layer router) | eprom-to-kernal: 27/27 connections, 25/25 nets, 13 arcs, DRC routing_new 0, unconnected 0, outside-pad 67.1 vs 76.6 mm hand, 0.16 s; re-run after B1-B3, scaling test passes, M2 gate closed |
+| [2026-10-31-topor-0.3.0](2026-10-31-topor-0.3.0/README.md) | topor 0.3.0 (M3 two-layer router) | eprom-to-kernal: 27/27, 0 routing_new, 0 unconnected, outside-pad 64.6 vs 76.6 mm hand, 0.06 s; wiccon-2023: 62/62, 0 DRC, 3.3 s; dcsgonebadge (info) 148/231 in 60 s |
 
 ## Progress PNGs
 
