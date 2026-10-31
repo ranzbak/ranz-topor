@@ -39,6 +39,8 @@ pub struct Cdt {
     tri: Tri,
     /// input index -> canonical (spade vertex) index
     map: Vec<usize>,
+    /// Vertex count after the point loop; canonical ids `>= n_inputs` are split vertices.
+    n_inputs: usize,
 }
 
 fn p2(v: Vec2) -> Point2<f64> {
@@ -55,7 +57,7 @@ fn fh(i: usize) -> FixedVertexHandle {
 
 impl Cdt {
     /// Points are deduplicated (coincident inputs share a vertex). Constraints
-    /// are index pairs (outline edges).
+    /// are index pairs; crossing ones are split (never an error). `Err` only for non-finite points.
     pub fn build(points: &[Vec2], constraints: &[(usize, usize)]) -> Result<Cdt, String> {
         let mut tri = Tri::new();
         let mut map = Vec::with_capacity(points.len());
@@ -68,6 +70,7 @@ impl Cdt {
                 .map_err(|e| format!("insert point {i}: {e:?}"))?;
             map.push(h.index());
         }
+        let n_inputs = tri.num_vertices();
         for &(a, b) in constraints {
             let ca = *map
                 .get(a)
@@ -78,16 +81,40 @@ impl Cdt {
             if ca == cb {
                 continue;
             }
-            if !tri.can_add_constraint(fh(ca), fh(cb)) {
-                return Err(format!("constraint ({a}, {b}) crosses another constraint"));
-            }
-            tri.add_constraint(fh(ca), fh(cb));
+            // Crossing constraints are split at the intersection; overlapping and duplicate
+            // constraints reuse the existing constraint edges.
+            tri.add_constraint_and_split(fh(ca), fh(cb), |p| V { pos: p });
         }
-        Ok(Cdt { tri, map })
+        Ok(Cdt { tri, map, n_inputs })
     }
 
     pub fn num_vertices(&self) -> usize {
         self.tri.num_vertices()
+    }
+
+    /// Number of vertices before constraint insertion (deduplicated inputs).
+    pub fn num_inputs(&self) -> usize {
+        self.n_inputs
+    }
+
+    /// Whether canonical vertex `v` was created by splitting crossing constraints.
+    pub fn is_split_vertex(&self, v: usize) -> bool {
+        v >= self.n_inputs
+    }
+
+    /// Constraint edges as canonical `(a, b)` with `a < b`, sorted.
+    pub fn constraint_edges(&self) -> Vec<(usize, usize)> {
+        let mut out: Vec<(usize, usize)> = self
+            .tri
+            .undirected_edges()
+            .filter(|e| self.tri.is_constraint_edge(e.fix()))
+            .map(|e| {
+                let [a, b] = e.vertices().map(|v| v.fix().index());
+                (a.min(b), a.max(b))
+            })
+            .collect();
+        out.sort_unstable();
+        out
     }
 
     /// Canonical index after dedup of input point `input`.

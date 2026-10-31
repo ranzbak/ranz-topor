@@ -3,7 +3,8 @@ use topor_engine::geom::{Orient, Vec2};
 use topor_engine::model::{BoardModel, Options};
 use topor_engine::obstacle::ObstacleSet;
 use topor_engine::sketch::{
-    build_layer_cdt, funnel, sketch_wire, stack_order, AnchorRef, LayerSketch, Sketch,
+    build_layer_cdt, funnel, sketch_wire, stack_order, AnchorRef, ConstraintSet, LayerSketch,
+    Sketch,
 };
 use topor_engine::wires::{Terminal, Wire};
 
@@ -101,7 +102,7 @@ fn layer_sketch(pad_math_y: f64, wires: &[Wire]) -> LayerSketch {
         .iter()
         .flat_map(|w| [w.hand[0], *w.hand.last().unwrap()])
         .collect();
-    build_layer_cdt(obs.layer(0), &terms).unwrap()
+    build_layer_cdt(obs.layer(0), &terms, ConstraintSet::EdgeOnly).unwrap()
 }
 
 fn pad_anchor(ls: &LayerSketch) -> usize {

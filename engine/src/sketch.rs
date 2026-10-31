@@ -7,7 +7,7 @@
 //! order-dependent `HashMap` iteration.
 
 use crate::cdt::{Cdt, Crossing};
-use crate::geom::{Orient, Vec2};
+use crate::geom::{Aabb, Orient, Vec2};
 use crate::obstacle::{LayerObstacles, ObsKind};
 use crate::wires::Wire;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -34,8 +34,35 @@ pub struct Sketch {
     pub crossings: Vec<Crossing>,
 }
 
+/// Which walls become CDT constraints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstraintSet {
+    /// Board outline only (the smoother).
+    EdgeOnly,
+    /// Outline, pad hulls, kept tracks, copper shapes and keepouts (the router).
+    Routing,
+}
+
+impl ConstraintSet {
+    fn includes(self, k: ObsKind) -> bool {
+        match self {
+            ConstraintSet::EdgeOnly => k == ObsKind::Edge,
+            ConstraintSet::Routing => matches!(
+                k,
+                ObsKind::Edge | ObsKind::Pad | ObsKind::Track | ObsKind::Shape | ObsKind::Keepout
+            ),
+        }
+    }
+}
+
+/// `(kind, net, tie_nets, label)` of the wall that owns a constraint edge.
+pub type ConstraintOwner = (ObsKind, i32, Vec<i32>, String);
+
 pub struct LayerSketch {
     pub cdt: Cdt,
+    /// Constraint edge (canonical `(min, max)`) -> owning wall; every constraint piece has one
+    /// (split pieces inherit the wall they lie on; the first wall in wall order wins).
+    pub constraint_owner: HashMap<(usize, usize), ConstraintOwner>,
     /// Indexed by canonical CDT vertex; `None` for terminals and frame corners.
     pub point_to_anchor: Vec<Option<usize>>,
     /// Exact position -> first input index at that position.
@@ -49,8 +76,12 @@ fn key(p: Vec2) -> (u64, u64) {
 }
 
 /// Per layer: CDT points = anchor centres, then `terminals`, then 4 frame corners;
-/// constraints = `Edge` walls (design note §1).
-pub fn build_layer_cdt(obs: &LayerObstacles, terminals: &[Vec2]) -> Result<LayerSketch, String> {
+/// constraints = the walls selected by `cons` (design note §1); crossing constraints are split.
+pub fn build_layer_cdt(
+    obs: &LayerObstacles,
+    terminals: &[Vec2],
+    cons: ConstraintSet,
+) -> Result<LayerSketch, String> {
     let na = obs.anchors.len();
     let mut pts: Vec<Vec2> = obs.anchors.iter().map(|a| a.c).collect();
     pts.extend_from_slice(terminals);
@@ -76,13 +107,13 @@ pub fn build_layer_cdt(obs: &LayerObstacles, terminals: &[Vec2]) -> Result<Layer
             y: if sy < 0.0 { lo.y - m } else { hi.y + m },
         });
     }
-    let cons: Vec<(usize, usize)> = obs
+    let cons_pairs: Vec<(usize, usize)> = obs
         .walls
         .iter()
-        .filter(|w| w.kind == ObsKind::Edge)
+        .filter(|w| cons.includes(w.kind))
         .map(|w| (w.ends[0], w.ends[1]))
         .collect();
-    let cdt = Cdt::build(&pts, &cons).map_err(|e| format!("cdt: {e}"))?;
+    let cdt = Cdt::build(&pts, &cons_pairs).map_err(|e| format!("cdt: {e}"))?;
     let mut point_to_anchor = vec![None; cdt.num_vertices()];
     for i in 0..na {
         let v = cdt.vertex_index(i);
@@ -90,6 +121,7 @@ pub fn build_layer_cdt(obs: &LayerObstacles, terminals: &[Vec2]) -> Result<Layer
             point_to_anchor[v] = Some(i);
         }
     }
+    let constraint_owner = constraint_owners(obs, &cdt, cons);
     let mut vertex_of = HashMap::with_capacity(pts.len());
     for (i, p) in pts.iter().enumerate() {
         vertex_of.entry(key(*p)).or_insert(i);
@@ -97,10 +129,61 @@ pub fn build_layer_cdt(obs: &LayerObstacles, terminals: &[Vec2]) -> Result<Layer
     let frame = [0, 1, 2, 3].map(|j| cdt.vertex_index(nf + j));
     Ok(LayerSketch {
         cdt,
+        constraint_owner,
         point_to_anchor,
         vertex_of,
         frame,
     })
+}
+
+/// Tolerance (nm) for "lies on a wall chord".
+const OWNER_TOL: f64 = 1.0;
+
+/// Owner of every constraint edge: the first wall (wall order) whose chord contains both
+/// endpoints within `OWNER_TOL` (geometric, because split vertices are not exactly on the chord).
+fn constraint_owners(
+    obs: &LayerObstacles,
+    cdt: &Cdt,
+    cons: ConstraintSet,
+) -> HashMap<(usize, usize), ConstraintOwner> {
+    let mut out = HashMap::new();
+    for (u, v) in cdt.constraint_edges() {
+        let (pu, pv) = (cdt.vertex_pos(u), cdt.vertex_pos(v));
+        let bb = Aabb {
+            min: Vec2 {
+                x: pu.x.min(pv.x),
+                y: pu.y.min(pv.y),
+            },
+            max: Vec2 {
+                x: pu.x.max(pv.x),
+                y: pu.y.max(pv.y),
+            },
+        }
+        .grow(OWNER_TOL);
+        for wi in obs.query_walls(bb) {
+            let w = &obs.walls[wi];
+            if !cons.includes(w.kind) {
+                continue;
+            }
+            let (a, b) = (obs.anchors[w.ends[0]].c, obs.anchors[w.ends[1]].c);
+            let d = b - a;
+            let len2 = d.x * d.x + d.y * d.y;
+            if len2 == 0.0 {
+                continue;
+            }
+            let len = len2.sqrt();
+            let on = |p: Vec2| {
+                let q = p - a;
+                let t = (q.x * d.x + q.y * d.y) / len2;
+                (-1e-9..=1.0 + 1e-9).contains(&t) && d.cross(q).abs() / len <= OWNER_TOL
+            };
+            if on(pu) && on(pv) {
+                out.insert((u, v), (w.kind, w.net, w.tie_nets.clone(), w.label.clone()));
+                break;
+            }
+        }
+    }
+    out
 }
 
 fn cross3(o: Vec2, a: Vec2, b: Vec2) -> f64 {

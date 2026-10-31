@@ -262,8 +262,14 @@ impl Frag {
                 self.wall(Core::Seg(*s), r, m, [a, b]);
             }
             Prim::Arc(arc) => {
-                let a = self.anchor(arc.start(), r, m, share);
-                let b = self.anchor(arc.end(), r, m, share);
+                // Model coordinates are integer nm: snap the computed arc ends so joints with
+                // neighbouring primitives share one anchor.
+                let snap = |p: Vec2| Vec2 {
+                    x: p.x.round(),
+                    y: p.y.round(),
+                };
+                let a = self.anchor(snap(arc.start()), r, m, share);
+                let b = self.anchor(snap(arc.end()), r, m, share);
                 self.wall(Core::Arc(*arc), r, m, [a, b]);
             }
         }

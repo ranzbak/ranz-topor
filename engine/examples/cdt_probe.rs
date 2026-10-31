@@ -618,7 +618,7 @@ fn main() {
             lo.walls.len(),
             kinds.join(" ")
         );
-        match build_layer_cdt(lo, &[]) {
+        match build_layer_cdt(lo, &[], topor_engine::sketch::ConstraintSet::EdgeOnly) {
             Ok(ls) => println!(
                 "  build_layer_cdt (EdgeOnly, as shipped): Ok, {} vertices",
                 ls.cdt.num_vertices()

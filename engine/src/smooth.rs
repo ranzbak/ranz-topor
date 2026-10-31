@@ -14,7 +14,9 @@ use crate::geom::{dequantise, dist_prim_skeleton, Prim, Seg, Skeleton, Vec2};
 use crate::model::{flip_track, BoardModel, Item, Options, TrackItem};
 use crate::obstacle::{ObstacleSet, TerminalObstacle};
 use crate::relax::relax;
-use crate::sketch::{build_layer_cdt, sketch_wire, stack_order, AnchorRef, LayerSketch, Sketch};
+use crate::sketch::{
+    build_layer_cdt, sketch_wire, stack_order, AnchorRef, ConstraintSet, LayerSketch, Sketch,
+};
 use crate::taut::{Chain, TautError};
 use crate::wires::{extract_wires, Terminal, Wire};
 use serde::Serialize;
@@ -307,7 +309,7 @@ pub fn smooth(model: &BoardModel, opts: &Options) -> SmoothResult {
                 }
             }
         }
-        match build_layer_cdt(obs.layer(l), &pts) {
+        match build_layer_cdt(obs.layer(l), &pts, ConstraintSet::EdgeOnly) {
             Ok(ls) => {
                 let idx: Vec<usize> = wires
                     .iter()
