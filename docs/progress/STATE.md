@@ -9,12 +9,50 @@ dcsgone, nametag-sao, wedding-gift). dcsgone routing_new fixed (882f94c). Versio
 constraint" (all wires fall back on wiccon-2023 and wedding-gift); M1.5 F2 SS mitre, F3–F5 (docs/progress/notes/m1-gate-review.md);
 zero-slack check O(emitted×fallback) → spatial-index local query; nametag fallbacks (self-check 13, hand vertex on CDT vertex 8).
 
+
+**M2 (single-layer router) — IN PROGRESS** (coordinator rotation 1, 2026-10-31). Plan docs/superpowers/plans/2026-10-31-topor-m2-router.md;
+ledger .superpowers/sdd/2026-10-31-topor-m2-router/progress.md (briefs, reports, rulings R1–R6).
+| # | Task | Status |
+|---|------|--------|
+| 1 | via holes as Checker obstacles (F-C2) | DONE 2552333 |
+| 2 | CDT add_constraint_and_split, ConstraintSet (F note m2-cdt-diagnosis.md) | DONE cb9ca73 (wiccon 0 "crosses" fallbacks) |
+| 3 | graph.rs routing graph + cut capacity + slots (+A1–A5 from Task 5 note) | DONE c0f3de6 |
+| 4 | pours export, decompose.rs | DONE ae7bd7c; Fix-4a 6f04bc6 (teardrops were exported as pours) |
+| 5 | F note m2-search-design.md | DONE 5b55c14 |
+| 6 | search.rs slot A* + ghost | DONE 1ebb17e |
+| 7 | negotiate.rs | DONE a86d660 |
+| 8 | route.rs + PyO3 route/wire_stats | DONE 670f162 |
+| 9 | harness router.py, bench --router topor, DRC spots, progress | DONE 68efda8 |
+| 10 | partial_routes | DONE bba4488 |
+| F-diag | m2-route-diagnosis.md (A13 pinch, A14 enclosure, non-convergence) | DONE f8b57c9 |
+| Fix-ABC | bend-pinch admissibility, topological rip-up, stuck stop | DONE 5f1a4a8 |
+| Fix-R6 | local zero-slack retry (+5V corridor) + stall stop | NEXT |
+| 11 | gate test, scaling test, 0.2.0, benchmark 0.2.0, F gate review | TODO |
+**M2 rulings:** R1 work on main, never push. R2 verification = acceptance commands + diff stat; F reviews at the gate (Tasks 3, 6, 7 incl.).
+R3 parallel worktree workers don't touch the shared .venv. R5 (main): length gate failing ONLY on zero-slack +5V nets → compare remaining
+nets, report +5V separately. **R6 (main, 2026-10-31):** keep margin_nm 5000 globally; after negotiation, a connection still failed and
+blocked solely by a sub-ε corridor gets ONE local retry with margin 0 on its corridor edges (no new negotiation loop); accept the
+zero-slack wire only if kicad-cli DRC gives routing_new 0, else drop it ("zero-slack rejected by DRC") and gate per option (i) on 26/27
+with the casualty named; report zero_slack_wires = N + net names in metrics and PNG caption; the casualty (if any) becomes an M3 gate
+item (27/27 via B.Cu + via). Nothing else relaxed. Coordinator applies R6 by analogy to the +5V corridor whose pinch forces A13's
+detour (told main; if main narrows R6, the length gate is reported FAIL).
+**M2 eprom numbers (rip all, --router topor):** T9 26/27, outside 82.2 vs 76.6, router 0.31 s. Fix-ABC: 27/27 conns, 25/25 nets,
+failed 0, arcs 15, routing_new 0, unconnected 0, outside pads 95.32 vs hand 76.60 (FAIL; +5V 26.92 vs 23.90, A13 29.47 vs 9.38 left loop,
+others 38.93 vs 43.32), A14 5.47 vs 5.79, KiCad 138.8 vs 112.9, router 0.60 s, iterations 50 (alternates 26/27↔27/27, not converged).
+PNGs: docs/benchmarks/progress/2026-10-31-m2-{T9,T10,FixABC}.png (all sent to main). Tests: cargo all green, clippy clean, pytest 98, M1 gate 3.
+**Deferred to the F gate review:** terminal clr = min_clearance in graph (provisional); non-fitting edge only 4× penalised; direct
+zero-crossing path has no third-vertex clearance check; contended-channel test never exercises the history switch; A4 split-vertex
+bend → connection fails (no end-to-end test); partial stubs start at the terminal, not last_reached; spot vertex blocks every net in
+search; clinches summary prints len(u); block probe cost on large boards; Fix-ABC bend test skips foreign vertices / point walls.
+**M2 next 3 actions:** (1) Fix-R6 (F impl): local zero-slack retry with DRC judge + no-improvement stall stop → eprom length gate,
+PNG; (2) Task 11 (gate test, scaling, 0.2.0, benchmark, compare PNGs); (3) F gate review, then handover.
+
 ---
 
 # topor — progress state
 
 ## Current milestone
-M1 (taut smoother) — IN PROGRESS. Coordinator rotation 1 handed over 2026-10-30 at main@HEAD (after ~17 worker round-trips).
+M2 — see header. (Below: M1 history.) M1 (taut smoother) was IN PROGRESS at this point. Coordinator rotation 1 handed over 2026-10-30 at main@HEAD (after ~17 worker round-trips).
 Plan: docs/superpowers/plans/2026-10-30-topor-m1-smoother.md. SDD ledger (rulings, briefs, reports, eprom dumps):
 .superpowers/sdd/2026-10-30-topor-m1-smoother/progress.md. M0 history: .superpowers/sdd/2026-10-30-topor-m0-harness/.
 Gate BLOCKED on 2 user rulings (see Open issues 1–2). Tasks 1–8 done; Task 9 (0.1.0, gate test, benchmark) + F gate review remain.
