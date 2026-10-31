@@ -2,6 +2,7 @@
 //! Every function releases the GIL while it computes.
 
 use crate::check::Checker;
+use crate::control::RunControl;
 use crate::geom::prim::Aabb;
 use crate::geom::quant::{calc_arc_center, IVec2};
 use crate::geom::{Grid, Vec2};
@@ -11,6 +12,8 @@ use pyo3::prelude::*;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[pyfunction]
@@ -79,6 +82,80 @@ fn route(py: Python<'_>, model_json: String, options_json: String) -> PyResult<S
         serde_json::to_string(&res).map_err(|e| e.to_string())
     })
     .map_err(PyValueError::new_err)
+}
+
+/// Options of the engine as JSON: `Options::default()` (every field, nested `expert` included).
+#[pyfunction]
+fn default_options() -> PyResult<String> {
+    serde_json::to_string(&Options::default()).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+type JobResult = Result<String, String>;
+
+/// A routing run on its own thread: `progress()` (JSON of `control::Progress`), `cancel()`,
+/// `done()`, `wait()` (blocks with the GIL released; the `RouteResult` JSON, idempotent).
+/// Complexity of every method except `wait`: O(1).
+#[pyclass]
+struct RouteJob {
+    ctl: RunControl,
+    handle: Mutex<Option<std::thread::JoinHandle<JobResult>>>,
+    result: Mutex<Option<JobResult>>,
+    finished: Arc<AtomicBool>,
+}
+
+#[pymethods]
+impl RouteJob {
+    fn progress(&self) -> PyResult<String> {
+        serde_json::to_string(&self.ctl.snapshot())
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    fn cancel(&self) {
+        self.ctl.request_cancel();
+    }
+
+    fn done(&self) -> bool {
+        self.finished.load(Ordering::Acquire)
+    }
+
+    fn wait(&self, py: Python<'_>) -> PyResult<String> {
+        py.allow_threads(|| {
+            let mut res = self.result.lock().map_err(|e| e.to_string())?;
+            if res.is_none() {
+                let h = self.handle.lock().map_err(|e| e.to_string())?.take();
+                let r = match h {
+                    Some(h) => h.join().unwrap_or_else(|_| Err("routing thread panicked".into())),
+                    None => Err("job already consumed".into()),
+                };
+                *res = Some(r);
+            }
+            res.clone().unwrap_or_else(|| Err("no result".into()))
+        })
+        .map_err(PyValueError::new_err)
+    }
+}
+
+/// Start a routing run on a background thread (see [`RouteJob`]); the model and options are
+/// parsed here, so bad JSON raises immediately.
+#[pyfunction]
+fn route_async(model_json: String, options_json: String) -> PyResult<RouteJob> {
+    let model = BoardModel::from_json(&model_json).map_err(PyValueError::new_err)?;
+    let opts = Options::from_json(&options_json).map_err(PyValueError::new_err)?;
+    let ctl = RunControl::default();
+    let finished = Arc::new(AtomicBool::new(false));
+    let (c2, f2) = (ctl.clone(), finished.clone());
+    let handle = std::thread::spawn(move || {
+        let res = crate::route::route_with(&model, &opts, &c2);
+        let out = serde_json::to_string(&res).map_err(|e| e.to_string());
+        f2.store(true, Ordering::Release);
+        out
+    });
+    Ok(RouteJob {
+        ctl,
+        handle: Mutex::new(Some(handle)),
+        result: Mutex::new(None),
+        finished,
+    })
 }
 
 /// `WireStats` JSON of the hand copper of `model_json` (length gate reference).
@@ -171,6 +248,9 @@ fn topor_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fuzz_items, m)?)?;
     m.add_function(wrap_pyfunction!(smooth, m)?)?;
     m.add_function(wrap_pyfunction!(route, m)?)?;
+    m.add_function(wrap_pyfunction!(route_async, m)?)?;
+    m.add_function(wrap_pyfunction!(default_options, m)?)?;
+    m.add_class::<RouteJob>()?;
     m.add_function(wrap_pyfunction!(wire_stats, m)?)?;
     m.add_function(wrap_pyfunction!(arc_center_nm, m)?)?;
     m.add_function(wrap_pyfunction!(grid_probe, m)?)?;

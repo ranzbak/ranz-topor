@@ -627,14 +627,64 @@ pub struct DrcSpot {
     pub net: i32,
 }
 
+/// Expert knobs of the negotiation (`topor.toml [expert]`); defaults are the M3 constants.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Expert {
+    /// History added to the edges of a connection that failed relax / self-check.
+    pub hist_fail: f64,
+    /// History added to the edges / sites that block a connection.
+    pub hist_block: f64,
+    /// History added to every overused edge per iteration.
+    pub hist_overuse: f64,
+    /// Present-congestion factor of the search cost.
+    pub present_overuse: f64,
+    /// Candidates the zero-slack retry tries.
+    pub zero_slack_candidates: usize,
+    /// Relaxation sweep cap (see [`Options::relax_cap`]).
+    pub relax_iter_cap: u32,
+}
+
+impl Default for Expert {
+    fn default() -> Self {
+        Expert {
+            hist_fail: 1.0,
+            hist_block: 0.5,
+            hist_overuse: 0.5,
+            present_overuse: 4.0,
+            zero_slack_candidates: 4,
+            relax_iter_cap: 200,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Options {
     pub margin_nm: i64,
     pub threads: usize,
     pub partial_routes: bool,
+    /// Wall-clock budget of the run in seconds; `0.0` disables the timeout (the stop rule and
+    /// the iteration cap still end the run).
     pub wall_clock_s: f64,
+    /// Most PathFinder iterations of one pass (`topor.toml [routing] pathfinder_iter_cap`).
     pub pathfinder_iter_cap: u32,
+    /// Stop rule: the pass ends when over the last `patience` iterations no connection was
+    /// newly routed and the best cost improved by less than `min_gain_pct` in total.
+    pub patience: u32,
+    /// Stop rule: total best-cost gain (percent) over `patience` iterations below which the
+    /// run counts as converged-by-no-gain.
+    pub min_gain_pct: f64,
+    /// An accepted path longer than this factor times its slot-free ghost counts as an absurd
+    /// detour and triggers rip-up of the blockers.
+    pub detour_factor: f64,
+    /// Rip-up cost growth per repeated rip of one `(ripper, blocker)` pair (consumed by A16).
+    pub ripup_growth: f64,
+    /// Rips per `(ripper, blocker)` pair and run (damping cap).
+    pub ripup_max_per_pair: u32,
+    /// Expert knobs (`topor.toml [expert]`).
+    pub expert: Expert,
+    /// Relaxation sweep cap; the effective value is [`Options::relax_cap`].
     pub relax_iter_cap: u32,
     pub drc_loop_cap: u32,
     pub seed: u64,
@@ -668,7 +718,13 @@ impl Default for Options {
             threads: 0,
             partial_routes: false,
             wall_clock_s: 60.0,
-            pathfinder_iter_cap: 50,
+            pathfinder_iter_cap: 30,
+            patience: 5,
+            min_gain_pct: 1.0,
+            detour_factor: 2.0,
+            ripup_growth: 2.0,
+            ripup_max_per_pair: 8,
+            expert: Expert::default(),
             relax_iter_cap: 200,
             drc_loop_cap: 5,
             seed: 1,
@@ -692,6 +748,16 @@ impl Options {
             return Ok(Options::default());
         }
         serde_json::from_str(s).map_err(|e| format!("options json: {e}"))
+    }
+
+    /// Effective relaxation sweep cap: the top-level `relax_iter_cap` when it differs from the
+    /// default 200 (older option JSON, tests), else `expert.relax_iter_cap`. O(1).
+    pub fn relax_cap(&self) -> u32 {
+        if self.relax_iter_cap != 200 {
+            self.relax_iter_cap
+        } else {
+            self.expert.relax_iter_cap
+        }
     }
 
     /// `threads`, or `available_parallelism() - 1` (min 1) when 0.

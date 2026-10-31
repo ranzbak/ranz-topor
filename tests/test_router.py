@@ -158,7 +158,8 @@ def test_progress_m3_caption_and_path(engine, fixture_board, tmp_path):
     assert l2.endswith(" threads")
     # M3-R11: line 3 is the detour summary, present only when detour stats exist
     d = progress.detour_caption(res.get("detour"))
-    assert lines[2:] == ([d] if d else [])
+    tail = [x for x in lines[2:] if not x.startswith("stop_reason: ")]  # P1: optional last line
+    assert tail == ([d] if d else [])
     if d:
         assert lines[2].startswith("detours > 1.5: ")
 

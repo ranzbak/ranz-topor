@@ -151,3 +151,70 @@ def test_route_threads_option(engine):
     m["layers"][0]["routable"] = True
     out = json.loads(engine.route(json.dumps(m), json.dumps({"wall_clock_s": 10.0, "threads": 2})))
     assert out["threads_used"] == 2
+
+
+def _rust_pub_fields(root, struct):
+    import re
+
+    src = (root / "engine/src/model.rs").read_text()
+    body = src.split(f"pub struct {struct} {{")[1].split("\n}\n")[0]
+    return re.findall(r"^\s+pub (\w+):", body, flags=re.M)
+
+
+def test_default_options_lists_every_field(engine, root):
+    d = json.loads(engine.default_options())
+    top = _rust_pub_fields(root, "Options")
+    assert top and set(top) == set(d), set(top) ^ set(d)
+    expert = _rust_pub_fields(root, "Expert")
+    assert expert and set(expert) == set(d["expert"]), set(expert) ^ set(d["expert"])
+    assert d["pathfinder_iter_cap"] == 30 and d["patience"] == 5 and d["min_gain_pct"] == 1.0
+    assert d["wall_clock_s"] == 60.0 and d["detour_factor"] == 2.0
+    assert d["ripup_growth"] == 2.0 and d["ripup_max_per_pair"] == 8
+    assert d["expert"] == {"hist_fail": 1.0, "hist_block": 0.5, "hist_overuse": 0.5, "present_overuse": 4.0,
+                           "zero_slack_candidates": 4, "relax_iter_cap": 200}
+    # every key parses back as options (round trip)
+    m = _model_with_track()
+    m["kept"] = []
+    out = json.loads(engine.route(json.dumps(m), json.dumps({**d, "wall_clock_s": 10.0})))
+    assert out["routed"] == 1 and out["stop_reason"] == "converged"
+
+
+def _strip(r):
+    r = dict(r)
+    r.pop("runtime_s")
+    return r
+
+
+def test_route_async_roundtrip_fixture(engine):
+    m = _model_with_track()
+    m["kept"] = []
+    m["layers"][0]["routable"] = True
+    mj, oj = json.dumps(m), json.dumps({"wall_clock_s": 10.0, "threads": 2})
+    job = engine.route_async(mj, oj)
+    out = json.loads(job.wait())
+    assert job.done()
+    assert _strip(out) == _strip(json.loads(engine.route(mj, oj)))
+    assert job.wait() == job.wait()  # idempotent
+    p = json.loads(job.progress())
+    assert p["phase"] == "done" and p["routed"] == out["routed"] and p["total"] == out["connections_total"]
+    with pytest.raises(ValueError):
+        engine.route_async("{", "{}")
+
+
+def test_route_async_cancel_returns_anytime_result(engine):
+    """Cancel after 2 s of a board that routes for >= 5 s: anytime result, no panic (ruling C10)."""
+    import time
+
+    from tests.scaling.synth import synth_model
+
+    m = synth_model(400, 1, layers=2)  # ~12 s uncancelled (2 threads)
+    mj = json.dumps(m)
+    job = engine.route_async(mj, json.dumps({"wall_clock_s": 0.0, "threads": 2}))
+    time.sleep(2.0)
+    assert not job.done()
+    job.cancel()
+    out = json.loads(job.wait())
+    assert out["stop_reason"] == "cancel" and out["timed_out"]
+    assert out["routed"] >= 1
+    chk = json.loads(engine.check_items(mj, json.dumps(out["items"]), json.dumps({"margin_nm": 0})))
+    assert chk["violations"] == []

@@ -61,7 +61,7 @@ fn options_defaults() {
     let o = Options::from_json("{}").unwrap();
     assert_eq!(o.margin_nm, 5000);
     assert!(!o.partial_routes);
-    assert_eq!(o.pathfinder_iter_cap, 50);
+    assert_eq!(o.pathfinder_iter_cap, 30);
     assert_eq!(o.drc_loop_cap, 5);
     assert_eq!(o.wall_clock_s, 60.0);
     assert_eq!(

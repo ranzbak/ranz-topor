@@ -1228,7 +1228,7 @@ impl<'a> Layered<'a> {
             }
             expansions += 1;
             self.exps.set(expansions);
-            if expansions.is_multiple_of(16) && Instant::now() >= deadline {
+            if expansions.is_multiple_of(16) && crate::control::expired(deadline) {
                 return Run::Timeout;
             }
             if node.kind == K_SITE {
@@ -2121,7 +2121,7 @@ fn search_in(
     goal: &Goal,
     p: &Common,
 ) -> SearchOutcome {
-    if Instant::now() >= p.deadline {
+    if crate::control::expired(p.deadline) {
         return SearchOutcome::Timeout;
     }
     if let Some(reason) = static_block(env, conn, start, goal) {
@@ -2484,7 +2484,7 @@ impl<'a> Layered<'a> {
             }
             pops += 1;
             self.exps.set(pops);
-            if pops.is_multiple_of(16) && Instant::now() >= deadline {
+            if pops.is_multiple_of(16) && crate::control::expired(deadline) {
                 return Run::Timeout;
             }
             if node.kind == K_SITE {

@@ -206,7 +206,7 @@ fn smooth_fixed_copper_is_skipped() {
 #[test]
 fn smooth_zero_wall_clock_times_out() {
     let m = l_route();
-    let r = smooth(&m, &opts(r#", "wall_clock_s": 0.0"#));
+    let r = smooth(&m, &opts(r#", "wall_clock_s": 1e-6"#));
     assert!(r.timed_out);
     assert!(r.items.is_empty(), "{:?}", r.items);
     assert!(r.runtime_s < 0.5);
@@ -410,7 +410,7 @@ fn squeezed(extra_pads: &[String], extra_kept: &[String]) -> BoardModel {
 
 #[test]
 fn timeout_fallback_is_not_zero_slack() {
-    let r = smooth(&squeezed(&[], &[]), &opts(r#", "wall_clock_s": 0.0"#));
+    let r = smooth(&squeezed(&[], &[]), &opts(r#", "wall_clock_s": 1e-6"#));
     let w = &r.wires[0];
     assert_eq!(w.status, "fallback");
     assert_eq!(w.reason, "timeout", "{w:?}");

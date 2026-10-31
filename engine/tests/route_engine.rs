@@ -228,7 +228,7 @@ fn route_zero_wall_clock_times_out() {
     let r = route(
         &m,
         &Options {
-            wall_clock_s: 0.0,
+            wall_clock_s: 1e-6,
             ..Options::default()
         },
     );
@@ -596,7 +596,7 @@ fn eprom_ripped_front_only_is_the_m2_result() {
     assert!(
         r.warnings
             .iter()
-            .any(|w| w.starts_with("stalled:") || w.starts_with("stuck after")),
+            .any(|w| w.starts_with("no gain:") || w.starts_with("stuck after")),
         "{:?}",
         r.warnings
     );
@@ -1060,6 +1060,11 @@ fn rip_up_ping_pong_is_damped() {
     let m = sealed_cross_model();
     let o = Options {
         profile: true,
+        // the stop rule's patience of the pre-P1 stall stop (8 iterations): the damping is
+        // observed over the iterations after the cap bit
+        patience: 8,
+        // the cap of the M3 constant `RIP_PAIR_CAP` (the option defaults to 8 since P1)
+        ripup_max_per_pair: RIP_PAIR_CAP,
         ..opts()
     };
     let r = route(&m, &o);
@@ -1072,7 +1077,7 @@ fn rip_up_ping_pong_is_damped() {
     assert!(rips[n..].iter().all(|&k| k == 0), "ping-pong not damped: {rips:?}");
     assert_eq!(r.iterations, 9, "{:?}", r.warnings);
     assert!(
-        r.warnings.iter().any(|w| w.starts_with("stalled:")),
+        r.warnings.iter().any(|w| w.starts_with("no gain:")),
         "{:?}",
         r.warnings
     );
