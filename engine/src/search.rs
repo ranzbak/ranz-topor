@@ -13,11 +13,14 @@ use crate::decompose::Connection;
 use crate::geom::{point_seg, seg_arc, seg_seg, Aabb, Seg, Vec2};
 use crate::graph::{Port, RouteGraph};
 use crate::obstacle::{Core, LayerObstacles, ObsKind, ObstacleSet};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering as AtOrd};
 use std::time::Instant;
 
+/// Sub-chords of a clearance query are merged up to this many query radii long.
+const MERGE_LEN_FACTOR: f64 = 4.0;
 /// Maximum portals one line-of-sight test walks (note §2, `C`).
 pub const LOS_PORTAL_CAP: usize = 32;
 /// Ghost penalty for crossing a blocked edge, nm (10 m).
@@ -470,6 +473,12 @@ struct Search<'a> {
     ghost: bool,
     /// Candidates returned by `clearance_bend` queries (statistics).
     cands: Cell<usize>,
+    /// Expansions so far of the running `run` (statistics).
+    exps: Cell<usize>,
+    /// `clearance_bend` calls so far (statistics).
+    bends: Cell<usize>,
+    /// Candidate lists of grid-aligned query boxes, `[vertices, walls]` (see `cached_near`).
+    near: [RefCell<NearCache>; 2],
 }
 
 impl<'a> Search<'a> {
@@ -498,6 +507,9 @@ impl<'a> Search<'a> {
             present_overuse: p.present_overuse,
             ghost,
             cands: Cell::new(0),
+            exps: Cell::new(0),
+            bends: Cell::new(0),
+            near: [RefCell::new(HashMap::new()), RefCell::new(HashMap::new())],
         }
     }
 
@@ -622,10 +634,55 @@ impl<'a> Search<'a> {
             }
             .grow(grow)
         };
-        params
-            .windows(2)
-            .map(|w| boxed(a + r * w[0], a + r * w[1]))
-            .collect()
+        // Sub-chords shorter than `MERGE_LEN_FACTOR * grow` are queried together: a grid query
+        // has a fixed cost per box, so one box per tiny sub-chord would cost more than it saves.
+        let max_t = MERGE_LEN_FACTOR * grow / r.len().max(1.0);
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i + 1 < params.len() {
+            let mut j = i + 1;
+            while j + 1 < params.len() && params[j + 1] - params[i] <= max_t {
+                j += 1;
+            }
+            out.push(boxed(a + r * params[i], a + r * params[j]));
+            i = j;
+        }
+        out
+    }
+
+    /// Append the vertices (`kind` 0) or walls (`kind` 1) near `bb` to `out`. The box is rounded
+    /// outwards to a lattice of pitch `q` (the query radius) and the candidate list of that box
+    /// is memoised for the lifetime of the search: expansions of one search probe overlapping
+    /// corridors again and again, and a grid query costs far more than the exact tests on its
+    /// result. The lists are supersets of the exact box's, in the same ascending order, so
+    /// the first bend found is unchanged. O(1) amortised per hit.
+    fn cached_near(&self, kind: usize, bb: Aabb, q: f64, out: &mut Vec<usize>) {
+        let q = q.max(1.0);
+        let key = (
+            (bb.min.x / q).floor() as i64,
+            (bb.min.y / q).floor() as i64,
+            (bb.max.x / q).ceil() as i64,
+            (bb.max.y / q).ceil() as i64,
+        );
+        let mut cache = self.near[kind].borrow_mut();
+        let list = cache.entry(key).or_insert_with(|| {
+            let big = Aabb {
+                min: Vec2 {
+                    x: key.0 as f64 * q,
+                    y: key.1 as f64 * q,
+                },
+                max: Vec2 {
+                    x: key.2 as f64 * q,
+                    y: key.3 as f64 * q,
+                },
+            };
+            if kind == 0 {
+                self.g.verts_near(big)
+            } else {
+                self.obs.query_walls(big)
+            }
+        });
+        out.extend_from_slice(list);
     }
 
     /// First obstacle (along the chord) closer than its required distance: the bend point.
@@ -635,6 +692,7 @@ impl<'a> Search<'a> {
     /// list. Per call `O((C + 1) * local)`, `C = portals.len()`.
     fn clearance_bend(&self, a: Vec2, t: Vec2, portals: &[usize]) -> Option<(Vec2, Option<usize>)> {
         const TOL: f64 = 1.0;
+        self.bends.set(self.bends.get() + 1);
         let chord = Seg { a, b: t };
         let r = t - a;
         let l2 = r.len2().max(1.0);
@@ -654,7 +712,7 @@ impl<'a> Search<'a> {
         };
         let mut vcand: Vec<usize> = Vec::new();
         for bb in Self::sleeve_boxes(a, t, &psegs, rho) {
-            vcand.extend(self.g.verts_near(bb));
+            self.cached_near(0, bb, rho, &mut vcand);
         }
         vcand.sort_unstable();
         vcand.dedup();
@@ -679,11 +737,12 @@ impl<'a> Search<'a> {
             + self.eps;
         let mut wcand: Vec<usize> = Vec::new();
         for bb in Self::sleeve_boxes(a, t, &psegs, wr) {
-            wcand.extend(self.obs.query_walls(bb));
+            self.cached_near(1, bb, wr, &mut wcand);
         }
         wcand.sort_unstable();
         wcand.dedup();
         self.cands.set(self.cands.get() + wcand.len());
+        let cb = (a.x.min(t.x), a.y.min(t.y), a.x.max(t.x), a.y.max(t.y));
         for wi in wcand {
             let wl = &self.obs.walls[wi];
             if self.wall_exempt(wl) {
@@ -691,6 +750,24 @@ impl<'a> Search<'a> {
             }
             let need =
                 wl.r_core + self.wall_clearance(wl.kind, wl.own_clr) + 0.5 * self.w + self.eps;
+            // the core is at least its bbox's gap to the chord's bbox away from the chord
+            let wb = match &wl.core {
+                Core::Point(p) => Some((p.x, p.y, p.x, p.y)),
+                Core::Seg(s) => Some((
+                    s.a.x.min(s.b.x),
+                    s.a.y.min(s.b.y),
+                    s.a.x.max(s.b.x),
+                    s.a.y.max(s.b.y),
+                )),
+                Core::Arc(_) => None,
+            };
+            if let Some(wb) = wb {
+                let gx = (cb.0 - wb.2).max(wb.0 - cb.2).max(0.0);
+                let gy = (cb.1 - wb.3).max(wb.1 - cb.3).max(0.0);
+                if gx * gx + gy * gy >= need * need {
+                    continue;
+                }
+            }
             let (d, d_apex, bend) = match &wl.core {
                 Core::Point(p) => (point_seg(*p, &chord), dist(*p, a), *p),
                 Core::Seg(s) => (
@@ -1075,6 +1152,27 @@ impl<'a> Search<'a> {
         }
     }
 
+    /// [`Search::run`] with the per-process search counters ([`search_totals`]): two clock reads
+    /// and a few relaxed atomic adds per search, none in the expansion loop.
+    fn run_timed(&self, cap: usize, deadline: Instant) -> Run {
+        let t0 = Instant::now();
+        let r = self.run(cap, deadline);
+        let ns = t0.elapsed().as_nanos() as u64;
+        let k = usize::from(self.ghost);
+        TOT[k].ns.fetch_add(ns, AtOrd::Relaxed);
+        TOT[k].calls.fetch_add(1, AtOrd::Relaxed);
+        TOT[k]
+            .expansions
+            .fetch_add(self.exps.get() as u64, AtOrd::Relaxed);
+        TOT[k]
+            .candidates
+            .fetch_add(self.cands.get() as u64, AtOrd::Relaxed);
+        TOT[k]
+            .bends
+            .fetch_add(self.bends.get() as u64, AtOrd::Relaxed);
+        r
+    }
+
     fn run(&self, cap: usize, deadline: Instant) -> Run {
         let g = self.g;
         let at_p = g.verts[self.start_v].at;
@@ -1139,6 +1237,7 @@ impl<'a> Search<'a> {
                 return Run::Blocked;
             }
             expansions += 1;
+            self.exps.set(expansions);
             if expansions.is_multiple_of(16) && Instant::now() >= deadline {
                 return Run::Timeout;
             }
@@ -1280,6 +1379,52 @@ fn direct(sr: &Search, s: usize, t: usize) -> Option<SlotPath> {
     None
 }
 
+/// Candidate lists keyed by a lattice-aligned query box.
+type NearCache = HashMap<(i64, i64, i64, i64), Vec<usize>>;
+
+struct Tot {
+    ns: AtomicU64,
+    calls: AtomicU64,
+    expansions: AtomicU64,
+    candidates: AtomicU64,
+    bends: AtomicU64,
+}
+impl Tot {
+    const fn new() -> Tot {
+        Tot {
+            ns: AtomicU64::new(0),
+            calls: AtomicU64::new(0),
+            expansions: AtomicU64::new(0),
+            candidates: AtomicU64::new(0),
+            bends: AtomicU64::new(0),
+        }
+    }
+}
+static TOT: [Tot; 2] = [Tot::new(), Tot::new()];
+
+/// Per-process totals of the A* runs: `[planar, ghost]` as `(nanoseconds, runs, expansions,
+/// candidates, clearance_bend calls)`. Diagnostic counters for `route_probe`; reset with [`search_totals_reset`].
+pub fn search_totals() -> [(u64, u64, u64, u64, u64); 2] {
+    let f = |t: &Tot| {
+        (
+            t.ns.load(AtOrd::Relaxed),
+            t.calls.load(AtOrd::Relaxed),
+            t.expansions.load(AtOrd::Relaxed),
+            t.candidates.load(AtOrd::Relaxed),
+            t.bends.load(AtOrd::Relaxed),
+        )
+    };
+    [f(&TOT[0]), f(&TOT[1])]
+}
+
+pub fn search_totals_reset() {
+    for t in &TOT {
+        for a in [&t.ns, &t.calls, &t.expansions, &t.candidates, &t.bends] {
+            a.store(0, AtOrd::Relaxed);
+        }
+    }
+}
+
 /// Planar slot search for `conn` from vertex `start_v` to `goal_v`. A blocked search runs
 /// [`ghost`] under the same deadline and reports its path and first blocked edge.
 pub fn search(
@@ -1298,7 +1443,7 @@ pub fn search(
         return SearchOutcome::Found(d);
     }
     let cap = p.expansion_cap.min(default_expansion_cap(g));
-    match s.run(cap, p.deadline) {
+    match s.run_timed(cap, p.deadline) {
         Run::Found(path) => SearchOutcome::Found(*path),
         Run::Timeout => SearchOutcome::Timeout,
         Run::Blocked => {
@@ -1346,7 +1491,7 @@ pub fn ghost(
         }
     }
     let cap = 8 * g.edges.len() + 64;
-    let Run::Found(mut path) = s.run(cap, p.deadline) else {
+    let Run::Found(mut path) = s.run_timed(cap, p.deadline) else {
         return None;
     };
     for c in &mut path.crossings {

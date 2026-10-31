@@ -161,6 +161,7 @@ fn main() {
     let mut watch: BTreeSet<String> = BTreeSet::new();
     let mut quiet = false;
     let mut margin: Option<i64> = None;
+    let mut options_json: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -176,6 +177,10 @@ fn main() {
                 watch.extend(args[i + 1].split(',').map(str::to_string));
                 i += 1;
             }
+            "--options" => {
+                options_json = Some(args[i + 1].clone());
+                i += 1;
+            }
             "--quiet" => quiet = true,
             a => path = Some(a.to_string()),
         }
@@ -186,6 +191,30 @@ fn main() {
     );
     let json = std::fs::read_to_string(&path).expect("read model");
     let model = BoardModel::from_json(&json).expect("parse model");
+    if let Some(oj) = options_json {
+        // engine-only reproduction of a harness run: `route()` with the given Options JSON
+        let o = Options::from_json(&oj).expect("parse --options");
+        topor_engine::search::search_totals_reset();
+        let t = Instant::now();
+        let r = topor_engine::route::route(&model, &o);
+        let wall = t.elapsed().as_secs_f64();
+        println!(
+            "route(): {:.3}s wall, runtime_s {:.3}, routed {} / {}, iterations {}, converged {}, timed_out {}",
+            wall, r.runtime_s, r.routed, r.connections_total, r.iterations, r.converged, r.timed_out
+        );
+        let tot = topor_engine::search::search_totals();
+        for (name, (ns, n, e, c, b)) in ["planar", "ghost"].iter().zip(tot) {
+            println!(
+                "  {name}: {:.3}s in {n} runs, expansions {e} ({:.0}/run), candidates {c} ({:.0}/run), bend queries {b} ({:.0}/cand-per-query), {:.2} ms/run",
+                ns as f64 * 1e-9,
+                e as f64 / n.max(1) as f64,
+                c as f64 / n.max(1) as f64,
+                c as f64 / b.max(1) as f64,
+                ns as f64 * 1e-6 / n.max(1) as f64
+            );
+        }
+        return;
+    }
     let mut opts = Options::default();
     if let Some(n) = iters {
         opts.pathfinder_iter_cap = n;
