@@ -149,12 +149,15 @@ def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path) -> s
     rt = result.get("route")
     if rt:
         cl = rt["clinches"]
+        reg = cl.get("regular", 0) if isinstance(cl, dict) else 0
+        reg = len(reg) if isinstance(reg, list) else reg
         u = cl.get("u", 0) if isinstance(cl, dict) else cl
         u = len(u) if isinstance(u, list) else u
         head.append(f"  route: routed {rt['routed']}/{rt['connections']} connections, "
                     f"{rt['nets_routed']}/{rt['nets']} nets, partial {rt['partial']}, "
                     f"failed {rt['failed']}, outside pads {rt['outside_mm']} "
-                    f"(hand {rt['hand_outside_mm']}), iters {rt['iterations']}, clinches {u}")
+                    f"(hand {rt['hand_outside_mm']}), iters {rt['iterations']}, "
+                    f"clinches regular {reg} u {u}")
         zs = result.get("zero_slack") or {}
         names = [w["net"] for w in zs.get("wires") or []]
         head.append(f"  zero slack: {zs.get('status')}, {len(names)} wire(s)"

@@ -81,6 +81,9 @@ pub struct ConnReport {
     pub iteration: u32,
     /// Routed by the zero-slack retry with margin 0 against its corridor (R6).
     pub zero_slack: bool,
+    /// Face steps the geometric block probe ran for this connection (D9); `None` when it was
+    /// not probed (ghost block on an edge, routed, or timed out first). At most `PROBE_STEP_CAP`.
+    pub probe_steps: Option<usize>,
 }
 
 /// A connection the zero-slack retry routed with margin 0 against its corridor (R6).
@@ -731,6 +734,11 @@ struct Blk {
     p0: Vec2,
     /// Reported blocking point (KiCad frame) when `Res::Fail` carries none.
     report: Option<[i64; 2]>,
+    /// Face steps the geometric probe ran (`None` for a ghost block).
+    steps: Option<usize>,
+    /// D6: forward stub start `Q_f` (crossing point of `last_reached`) and the ghost crossings
+    /// before the blocked edge; `None` => the stub starts at the terminal.
+    fwd: Option<(Vec2, Vec<Crossing>)>,
 }
 
 /// Consecutive unchanged iterations (no overuse, no rip-up) after which `route` gives up.
@@ -778,18 +786,29 @@ fn edge_samples(g: &RouteGraph, e: usize) -> Vec<Vec2> {
     ts.iter().map(|&t| a + (b - a) * t).collect()
 }
 
+/// Most face steps the block probe examines per connection (D9).
+pub const PROBE_STEP_CAP: usize = 64;
+
 /// First face step of a slot path that no straight wire can cross (the path is search-feasible
 /// but geometrically blocked, e.g. a gap between a pad and a wall narrower than the wire):
-/// returns the tightest spot of the least-violating crossing.
+/// returns the tightest spot of the least-violating crossing. At most `PROBE_STEP_CAP` steps
+/// are examined and the deadline is checked before every step (`None` on either limit);
+/// `steps` receives the number of steps run. Cost O(steps · (|base| + 784) · q) (D9).
 fn probe_path(
     g: &RouteGraph,
     checker: &Checker,
     c: &Connection,
     base: &[Item],
     path: &SlotPath,
+    deadline: Instant,
+    steps: &mut usize,
 ) -> Option<Vec2> {
     let n = path.crossings.len();
     for j in 0..=n {
+        if *steps >= PROBE_STEP_CAP || Instant::now() >= deadline {
+            return None;
+        }
+        *steps += 1;
         let a: Vec<Vec2> = if j == 0 {
             vec![c.from.at]
         } else {
@@ -871,12 +890,17 @@ fn collect_blocks(
             // path is search-infeasible but geometrically probe-able (fallback, note A).
             if let (Some(gp), None) = (&b.ghost, b.edge) {
                 if gp.faces.len() == gp.crossings.len() + 1 || gp.crossings.is_empty() {
-                    if let Some(p0) = probe_path(g, checker, &cx.conns[i], base, gp) {
+                    let mut steps = 0;
+                    if let Some(p0) =
+                        probe_path(g, checker, &cx.conns[i], base, gp, cx.deadline, &mut steps)
+                    {
                         out.insert(
                             i,
                             Blk {
                                 p0,
                                 report: Some(kicad(p0)),
+                                steps: Some(steps),
+                                fwd: None,
                             },
                         );
                     }
@@ -894,7 +918,23 @@ fn collect_blocks(
             g,
             &ghost_crossing(g, gp.crossings[k].0, gp.crossings[k].1, gp.faces[k]),
         );
-        out.insert(i, Blk { p0, report: None });
+        // D6: the forward stub starts at the crossing point of `last_reached` (the crossing
+        // before the blocked edge) and follows the ghost crossings up to it.
+        let fwd = (k > 0).then(|| {
+            let cr: Vec<Crossing> = (0..k)
+                .map(|j| ghost_crossing(g, gp.crossings[j].0, gp.crossings[j].1, gp.faces[j]))
+                .collect();
+            (crossing_point(g, &cr[k - 1]), cr)
+        });
+        out.insert(
+            i,
+            Blk {
+                p0,
+                report: None,
+                steps: None,
+                fwd,
+            },
+        );
     }
     for (i, r) in best.res.iter().enumerate() {
         let Res::Fail { perm: false, .. } = r else {
@@ -910,12 +950,15 @@ fn collect_blocks(
             continue;
         }
         let c = &cx.conns[i];
-        if let Some(p0) = probe_path(g, checker, c, base, path) {
+        let mut steps = 0;
+        if let Some(p0) = probe_path(g, checker, c, base, path, cx.deadline, &mut steps) {
             out.insert(
                 i,
                 Blk {
                     p0,
                     report: Some(kicad(p0)),
+                    steps: Some(steps),
+                    fwd: None,
                 },
             );
         }
@@ -936,13 +979,23 @@ fn partial_pass(
     let mut specs: Vec<StubSpec> = Vec::new();
     for (&i, b) in blocks {
         let c = &cx.conns[i];
-        for start in [terminal_of(&c.from), terminal_of(&c.to)] {
-            let q = start.at();
+        for (side, start) in [terminal_of(&c.from), terminal_of(&c.to)]
+            .into_iter()
+            .enumerate()
+        {
+            // D6: the forward stub grows from the `last_reached` crossing point through the
+            // ghost crossings; the reverse stub from the goal terminal as before.
+            let fwd: Option<&(Vec2, Vec<Crossing>)> = if side == 0 { b.fwd.as_ref() } else { None };
+            let q = fwd.map_or(start.at(), |f| f.0);
             let Some(p) = bisect_stub(eps_checker, c, &base, q, b.p0) else {
                 continue;
             };
-            let Ok(crossings) = cx.ls.cdt.crossings(&[q, p]) else {
-                continue;
+            let crossings = match fwd {
+                Some(f) => f.1.clone(),
+                None => match cx.ls.cdt.crossings(&[q, p]) {
+                    Ok(cr) => cr,
+                    Err(_) => continue,
+                },
             };
             base.push(Item::Track(stub_item(c, q, p)));
             specs.push(StubSpec {
@@ -1530,6 +1583,11 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                         at: t.at,
                         net: c.net,
                         owner: t.label.clone(),
+                        clr: (c.clearance as f64).max(model.rules.min_clearance as f64),
+                        r: match t.kind {
+                            TermKind::Copper(_) | TermKind::Dangling(_) => 0.5 * c.width as f64,
+                            _ => 0.0,
+                        },
                     });
                 }
             }
@@ -1662,7 +1720,6 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                         }
                         let overuse = neg.penalise_overuse(&g);
                         let (nok, len, out_len) = tally(&res);
-                        neg.record_best(&out.paths, nok, len);
                         let better = best
                             .as_ref()
                             .is_none_or(|b| nok > b.routed || (nok == b.routed && len < b.len));
@@ -1806,6 +1863,7 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
             g1_angle_deg: None,
             iteration: 0,
             zero_slack: false,
+            probe_steps: None,
         };
         if let Some(r) = &early[c.id] {
             rep.reason = r.clone();
@@ -1838,6 +1896,7 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
                             if rep.blocking.is_none() {
                                 rep.blocking = blocks.get(&i).and_then(|b| b.report);
                             }
+                            rep.probe_steps = blocks.get(&i).and_then(|b| b.steps);
                             match partials.get(&i) {
                                 Some(Partial::Stubs(p)) => {
                                     rep.status = "partial".into();

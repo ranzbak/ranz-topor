@@ -55,8 +55,6 @@ pub struct IterOutcome {
     pub ripped: Vec<usize>,
 }
 
-type Best = (usize, f64, Vec<Option<SlotPath>>);
-
 pub struct Negotiator {
     /// Per-edge history cost.
     pub history: Vec<f64>,
@@ -65,7 +63,6 @@ pub struct Negotiator {
     pub iteration: u32,
     pending_rip: BTreeSet<usize>,
     cur: Vec<Option<SlotPath>>,
-    best: Option<Best>,
 }
 
 fn dedup_edges(mut v: Vec<usize>) -> Vec<usize> {
@@ -82,7 +79,6 @@ impl Negotiator {
             iteration: 0,
             pending_rip: BTreeSet::new(),
             cur: vec![None; conns],
-            best: None,
         }
     }
 
@@ -248,21 +244,6 @@ impl Negotiator {
             }
         }
         n
-    }
-
-    /// Keep the best iteration: more routed connections, then shorter total length.
-    pub fn record_best(&mut self, paths: &[Option<SlotPath>], routed: usize, len: f64) {
-        let better = match &self.best {
-            None => true,
-            Some((r, l, _)) => routed > *r || (routed == *r && len < *l),
-        };
-        if better {
-            self.best = Some((routed, len, paths.to_vec()));
-        }
-    }
-
-    pub fn best(&self) -> Option<&Vec<Option<SlotPath>>> {
-        self.best.as_ref().map(|b| &b.2)
     }
 }
 
