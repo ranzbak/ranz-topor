@@ -1,7 +1,7 @@
 {
     "$schema": "https://schemas.kicad.org/drc.v1.json",
     "coordinate_units": "mm",
-    "date": "2026-10-31T03:57:29",
+    "date": "2026-10-31T05:43:12",
     "ignored_checks": [
         {
             "description": "Footprint has no courtyard defined",
@@ -1372,6 +1372,144 @@
             "description": "Rear solder mask aperture bridges items with different nets",
             "items": [
                 {
+                    "description": "Pad 1 [txd] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 159.165
+                    },
+                    "uuid": "9335749c-1a89-4a63-9891-3837ef8a2008"
+                },
+                {
+                    "description": "Pad 2 [dtr#] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 158.515
+                    },
+                    "uuid": "5ca78048-2f56-422f-9c65-6d7eac5d23f2"
+                }
+            ],
+            "severity": "error",
+            "type": "solder_mask_bridge"
+        },
+        {
+            "description": "Rear solder mask aperture bridges items with different nets",
+            "items": [
+                {
+                    "description": "Pad 2 [dtr#] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 158.515
+                    },
+                    "uuid": "5ca78048-2f56-422f-9c65-6d7eac5d23f2"
+                },
+                {
+                    "description": "Pad 3 [rts#] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 157.865
+                    },
+                    "uuid": "c0813100-4234-440a-971f-597ef4547b67"
+                }
+            ],
+            "severity": "error",
+            "type": "solder_mask_bridge"
+        },
+        {
+            "description": "Rear solder mask aperture bridges items with different nets",
+            "items": [
+                {
+                    "description": "Pad 3 [rts#] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 157.865
+                    },
+                    "uuid": "c0813100-4234-440a-971f-597ef4547b67"
+                },
+                {
+                    "description": "Pad 4 [Net-(C1-Pad2)] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 157.215
+                    },
+                    "uuid": "9579cd7c-94ae-4338-8f10-a6552e4d1a7f"
+                }
+            ],
+            "severity": "error",
+            "type": "solder_mask_bridge"
+        },
+        {
+            "description": "Rear solder mask aperture bridges items with different nets",
+            "items": [
+                {
+                    "description": "Pad 4 [Net-(C1-Pad2)] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 157.215
+                    },
+                    "uuid": "9579cd7c-94ae-4338-8f10-a6552e4d1a7f"
+                },
+                {
+                    "description": "Pad 5 [rxd] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 156.565
+                    },
+                    "uuid": "d5fbec82-8fb8-409b-8854-fe93ca070a33"
+                }
+            ],
+            "severity": "error",
+            "type": "solder_mask_bridge"
+        },
+        {
+            "description": "Rear solder mask aperture bridges items with different nets",
+            "items": [
+                {
+                    "description": "Pad 5 [rxd] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 156.565
+                    },
+                    "uuid": "d5fbec82-8fb8-409b-8854-fe93ca070a33"
+                },
+                {
+                    "description": "Pad 6 [Net-(U2-Pad6)] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 155.915
+                    },
+                    "uuid": "2bfd02de-09e9-4ca1-8157-5ec4698e2824"
+                }
+            ],
+            "severity": "error",
+            "type": "solder_mask_bridge"
+        },
+        {
+            "description": "Rear solder mask aperture bridges items with different nets",
+            "items": [
+                {
+                    "description": "Pad 6 [Net-(U2-Pad6)] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 155.915
+                    },
+                    "uuid": "2bfd02de-09e9-4ca1-8157-5ec4698e2824"
+                },
+                {
+                    "description": "Pad 7 [GND] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 155.265
+                    },
+                    "uuid": "ce1d6f90-c739-46ee-96a9-94c657e32855"
+                }
+            ],
+            "severity": "error",
+            "type": "solder_mask_bridge"
+        },
+        {
+            "description": "Rear solder mask aperture bridges items with different nets",
+            "items": [
+                {
                     "description": "Pad 1 [rts#] of Q1 on B.Cu",
                     "pos": {
                         "x": 26.562597,
@@ -1395,20 +1533,43 @@
             "description": "Rear solder mask aperture bridges items with different nets",
             "items": [
                 {
-                    "description": "Pad 1 [txd] of U2 on B.Cu",
+                    "description": "Pad 7 [GND] of U2 on B.Cu",
                     "pos": {
                         "x": 35.262,
-                        "y": 159.165
+                        "y": 155.265
                     },
-                    "uuid": "9335749c-1a89-4a63-9891-3837ef8a2008"
+                    "uuid": "ce1d6f90-c739-46ee-96a9-94c657e32855"
                 },
                 {
-                    "description": "Pad 2 [dtr#] of U2 on B.Cu",
+                    "description": "Pad 8 [<no net>] of U2 on B.Cu",
                     "pos": {
                         "x": 35.262,
-                        "y": 158.515
+                        "y": 154.615
                     },
-                    "uuid": "5ca78048-2f56-422f-9c65-6d7eac5d23f2"
+                    "uuid": "c63a0414-b6c2-4735-b174-84c92be937ad"
+                }
+            ],
+            "severity": "error",
+            "type": "solder_mask_bridge"
+        },
+        {
+            "description": "Rear solder mask aperture bridges items with different nets",
+            "items": [
+                {
+                    "description": "Pad 8 [<no net>] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 154.615
+                    },
+                    "uuid": "c63a0414-b6c2-4735-b174-84c92be937ad"
+                },
+                {
+                    "description": "Pad 9 [Net-(U2-Pad9)] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 153.965
+                    },
+                    "uuid": "0036a034-0274-4fe6-b7c1-9ddc0eba50b7"
                 }
             ],
             "severity": "error",
@@ -1441,6 +1602,29 @@
             "description": "Rear solder mask aperture bridges items with different nets",
             "items": [
                 {
+                    "description": "Pad 9 [Net-(U2-Pad9)] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 153.965
+                    },
+                    "uuid": "0036a034-0274-4fe6-b7c1-9ddc0eba50b7"
+                },
+                {
+                    "description": "Pad 10 [Net-(U2-Pad10)] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 153.315
+                    },
+                    "uuid": "e1dcb4a5-587f-4955-a71c-b00eb46a8164"
+                }
+            ],
+            "severity": "error",
+            "type": "solder_mask_bridge"
+        },
+        {
+            "description": "Rear solder mask aperture bridges items with different nets",
+            "items": [
+                {
                     "description": "Pad 4 [<no net>] of Q1 on B.Cu",
                     "pos": {
                         "x": 28.462597,
@@ -1464,20 +1648,20 @@
             "description": "Rear solder mask aperture bridges items with different nets",
             "items": [
                 {
-                    "description": "Pad 2 [dtr#] of U2 on B.Cu",
+                    "description": "Pad 10 [Net-(U2-Pad10)] of U2 on B.Cu",
                     "pos": {
                         "x": 35.262,
-                        "y": 158.515
+                        "y": 153.315
                     },
-                    "uuid": "5ca78048-2f56-422f-9c65-6d7eac5d23f2"
+                    "uuid": "e1dcb4a5-587f-4955-a71c-b00eb46a8164"
                 },
                 {
-                    "description": "Pad 3 [rts#] of U2 on B.Cu",
+                    "description": "Pad 11 [Net-(U2-Pad11)] of U2 on B.Cu",
                     "pos": {
                         "x": 35.262,
-                        "y": 157.865
+                        "y": 152.665
                     },
-                    "uuid": "c0813100-4234-440a-971f-597ef4547b67"
+                    "uuid": "bb20394c-c5b7-408f-9f28-8c4aa5e7ee65"
                 }
             ],
             "severity": "error",
@@ -1510,20 +1694,20 @@
             "description": "Rear solder mask aperture bridges items with different nets",
             "items": [
                 {
-                    "description": "Pad 3 [rts#] of U2 on B.Cu",
+                    "description": "Pad 11 [Net-(U2-Pad11)] of U2 on B.Cu",
                     "pos": {
                         "x": 35.262,
-                        "y": 157.865
+                        "y": 152.665
                     },
-                    "uuid": "c0813100-4234-440a-971f-597ef4547b67"
+                    "uuid": "bb20394c-c5b7-408f-9f28-8c4aa5e7ee65"
                 },
                 {
-                    "description": "Pad 4 [Net-(C1-Pad2)] of U2 on B.Cu",
+                    "description": "Pad 12 [Net-(U2-Pad12)] of U2 on B.Cu",
                     "pos": {
                         "x": 35.262,
-                        "y": 157.215
+                        "y": 152.015
                     },
-                    "uuid": "9579cd7c-94ae-4338-8f10-a6552e4d1a7f"
+                    "uuid": "09a851ed-ad0b-4cc3-b72a-e363a15c6562"
                 }
             ],
             "severity": "error",
@@ -1556,259 +1740,6 @@
             "description": "Rear solder mask aperture bridges items with different nets",
             "items": [
                 {
-                    "description": "Pad 2 [Net-(Q2-Pad2)] of Q2 on B.Cu",
-                    "pos": {
-                        "x": 31.642597,
-                        "y": 144.334945
-                    },
-                    "uuid": "546e32c1-ddfd-48f5-8ef7-9ded8e07b831"
-                },
-                {
-                    "description": "Pad 3 [<no net>] of Q2 on B.Cu",
-                    "pos": {
-                        "x": 31.642597,
-                        "y": 143.684945
-                    },
-                    "uuid": "56596d52-eef2-4bde-a502-c2292c9b16d0"
-                }
-            ],
-            "severity": "error",
-            "type": "solder_mask_bridge"
-        },
-        {
-            "description": "Rear solder mask aperture bridges items with different nets",
-            "items": [
-                {
-                    "description": "Pad 4 [Net-(C1-Pad2)] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 157.215
-                    },
-                    "uuid": "9579cd7c-94ae-4338-8f10-a6552e4d1a7f"
-                },
-                {
-                    "description": "Pad 5 [rxd] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 156.565
-                    },
-                    "uuid": "d5fbec82-8fb8-409b-8854-fe93ca070a33"
-                }
-            ],
-            "severity": "error",
-            "type": "solder_mask_bridge"
-        },
-        {
-            "description": "Rear solder mask aperture bridges items with different nets",
-            "items": [
-                {
-                    "description": "Pad 4 [<no net>] of Q2 on B.Cu",
-                    "pos": {
-                        "x": 33.542597,
-                        "y": 143.684945
-                    },
-                    "uuid": "1d31360e-31c9-473a-828e-89240ccaae2f"
-                },
-                {
-                    "description": "Pad 5 [<no net>] of Q2 on B.Cu",
-                    "pos": {
-                        "x": 33.542597,
-                        "y": 144.334945
-                    },
-                    "uuid": "29a511db-c5fb-4d8e-8cb3-91175bb28d7d"
-                }
-            ],
-            "severity": "error",
-            "type": "solder_mask_bridge"
-        },
-        {
-            "description": "Rear solder mask aperture bridges items with different nets",
-            "items": [
-                {
-                    "description": "Pad 5 [rxd] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 156.565
-                    },
-                    "uuid": "d5fbec82-8fb8-409b-8854-fe93ca070a33"
-                },
-                {
-                    "description": "Pad 6 [Net-(U2-Pad6)] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 155.915
-                    },
-                    "uuid": "2bfd02de-09e9-4ca1-8157-5ec4698e2824"
-                }
-            ],
-            "severity": "error",
-            "type": "solder_mask_bridge"
-        },
-        {
-            "description": "Rear solder mask aperture bridges items with different nets",
-            "items": [
-                {
-                    "description": "Pad 5 [<no net>] of Q2 on B.Cu",
-                    "pos": {
-                        "x": 33.542597,
-                        "y": 144.334945
-                    },
-                    "uuid": "29a511db-c5fb-4d8e-8cb3-91175bb28d7d"
-                },
-                {
-                    "description": "Pad 6 [boot] of Q2 on B.Cu",
-                    "pos": {
-                        "x": 33.542597,
-                        "y": 144.984945
-                    },
-                    "uuid": "021df87a-aa31-4d77-a007-e9130167d7a7"
-                }
-            ],
-            "severity": "error",
-            "type": "solder_mask_bridge"
-        },
-        {
-            "description": "Rear solder mask aperture bridges items with different nets",
-            "items": [
-                {
-                    "description": "Pad 6 [Net-(U2-Pad6)] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 155.915
-                    },
-                    "uuid": "2bfd02de-09e9-4ca1-8157-5ec4698e2824"
-                },
-                {
-                    "description": "Pad 7 [GND] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 155.265
-                    },
-                    "uuid": "ce1d6f90-c739-46ee-96a9-94c657e32855"
-                }
-            ],
-            "severity": "error",
-            "type": "solder_mask_bridge"
-        },
-        {
-            "description": "Rear solder mask aperture bridges items with different nets",
-            "items": [
-                {
-                    "description": "Pad 7 [GND] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 155.265
-                    },
-                    "uuid": "ce1d6f90-c739-46ee-96a9-94c657e32855"
-                },
-                {
-                    "description": "Pad 8 [<no net>] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 154.615
-                    },
-                    "uuid": "c63a0414-b6c2-4735-b174-84c92be937ad"
-                }
-            ],
-            "severity": "error",
-            "type": "solder_mask_bridge"
-        },
-        {
-            "description": "Rear solder mask aperture bridges items with different nets",
-            "items": [
-                {
-                    "description": "Pad 8 [<no net>] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 154.615
-                    },
-                    "uuid": "c63a0414-b6c2-4735-b174-84c92be937ad"
-                },
-                {
-                    "description": "Pad 9 [Net-(U2-Pad9)] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 153.965
-                    },
-                    "uuid": "0036a034-0274-4fe6-b7c1-9ddc0eba50b7"
-                }
-            ],
-            "severity": "error",
-            "type": "solder_mask_bridge"
-        },
-        {
-            "description": "Rear solder mask aperture bridges items with different nets",
-            "items": [
-                {
-                    "description": "Pad 9 [Net-(U2-Pad9)] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 153.965
-                    },
-                    "uuid": "0036a034-0274-4fe6-b7c1-9ddc0eba50b7"
-                },
-                {
-                    "description": "Pad 10 [Net-(U2-Pad10)] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 153.315
-                    },
-                    "uuid": "e1dcb4a5-587f-4955-a71c-b00eb46a8164"
-                }
-            ],
-            "severity": "error",
-            "type": "solder_mask_bridge"
-        },
-        {
-            "description": "Rear solder mask aperture bridges items with different nets",
-            "items": [
-                {
-                    "description": "Pad 10 [Net-(U2-Pad10)] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 153.315
-                    },
-                    "uuid": "e1dcb4a5-587f-4955-a71c-b00eb46a8164"
-                },
-                {
-                    "description": "Pad 11 [Net-(U2-Pad11)] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 152.665
-                    },
-                    "uuid": "bb20394c-c5b7-408f-9f28-8c4aa5e7ee65"
-                }
-            ],
-            "severity": "error",
-            "type": "solder_mask_bridge"
-        },
-        {
-            "description": "Rear solder mask aperture bridges items with different nets",
-            "items": [
-                {
-                    "description": "Pad 11 [Net-(U2-Pad11)] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 152.665
-                    },
-                    "uuid": "bb20394c-c5b7-408f-9f28-8c4aa5e7ee65"
-                },
-                {
-                    "description": "Pad 12 [Net-(U2-Pad12)] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 152.015
-                    },
-                    "uuid": "09a851ed-ad0b-4cc3-b72a-e363a15c6562"
-                }
-            ],
-            "severity": "error",
-            "type": "solder_mask_bridge"
-        },
-        {
-            "description": "Rear solder mask aperture bridges items with different nets",
-            "items": [
-                {
                     "description": "Pad 12 [Net-(U2-Pad12)] of U2 on B.Cu",
                     "pos": {
                         "x": 35.262,
@@ -1823,6 +1754,29 @@
                         "y": 151.365
                     },
                     "uuid": "e4159663-fe05-49df-9d0d-c2da81a2e6c0"
+                }
+            ],
+            "severity": "error",
+            "type": "solder_mask_bridge"
+        },
+        {
+            "description": "Rear solder mask aperture bridges items with different nets",
+            "items": [
+                {
+                    "description": "Pad 2 [Net-(Q2-Pad2)] of Q2 on B.Cu",
+                    "pos": {
+                        "x": 31.642597,
+                        "y": 144.334945
+                    },
+                    "uuid": "546e32c1-ddfd-48f5-8ef7-9ded8e07b831"
+                },
+                {
+                    "description": "Pad 3 [<no net>] of Q2 on B.Cu",
+                    "pos": {
+                        "x": 31.642597,
+                        "y": 143.684945
+                    },
+                    "uuid": "56596d52-eef2-4bde-a502-c2292c9b16d0"
                 }
             ],
             "severity": "error",
@@ -1855,6 +1809,29 @@
             "description": "Rear solder mask aperture bridges items with different nets",
             "items": [
                 {
+                    "description": "Pad 4 [<no net>] of Q2 on B.Cu",
+                    "pos": {
+                        "x": 33.542597,
+                        "y": 143.684945
+                    },
+                    "uuid": "1d31360e-31c9-473a-828e-89240ccaae2f"
+                },
+                {
+                    "description": "Pad 5 [<no net>] of Q2 on B.Cu",
+                    "pos": {
+                        "x": 33.542597,
+                        "y": 144.334945
+                    },
+                    "uuid": "29a511db-c5fb-4d8e-8cb3-91175bb28d7d"
+                }
+            ],
+            "severity": "error",
+            "type": "solder_mask_bridge"
+        },
+        {
+            "description": "Rear solder mask aperture bridges items with different nets",
+            "items": [
+                {
                     "description": "Pad 15 [Net-(J1-Pad3)] of U2 on B.Cu",
                     "pos": {
                         "x": 42.462,
@@ -1869,6 +1846,29 @@
                         "y": 151.365
                     },
                     "uuid": "83e7781f-8082-4341-8c2c-7f3a0897b10e"
+                }
+            ],
+            "severity": "error",
+            "type": "solder_mask_bridge"
+        },
+        {
+            "description": "Rear solder mask aperture bridges items with different nets",
+            "items": [
+                {
+                    "description": "Pad 5 [<no net>] of Q2 on B.Cu",
+                    "pos": {
+                        "x": 33.542597,
+                        "y": 144.334945
+                    },
+                    "uuid": "29a511db-c5fb-4d8e-8cb3-91175bb28d7d"
+                },
+                {
+                    "description": "Pad 6 [boot] of Q2 on B.Cu",
+                    "pos": {
+                        "x": 33.542597,
+                        "y": 144.984945
+                    },
+                    "uuid": "021df87a-aa31-4d77-a007-e9130167d7a7"
                 }
             ],
             "severity": "error",

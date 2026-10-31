@@ -39,11 +39,11 @@
   "kept_rf_vias": 0
  },
  "routed_all": {
-  "segments": 39,
-  "arcs": 17,
+  "segments": 47,
+  "arcs": 23,
   "vias": 2,
-  "track_mm": 214.317,
-  "arc_mm": 4.119
+  "track_mm": 255.049,
+  "arc_mm": 5.858
  },
  "routed_drc": {
   "routing_new": 0,
@@ -51,12 +51,12 @@
   "incomplete": {
    "track_dangling": 0,
    "via_dangling": 0,
-   "unconnected_items": 192
+   "unconnected_items": 190
   },
-  "other": 158,
+  "other": 159,
   "by_type_new": {}
  },
- "routed_items": 56,
+ "routed_items": 70,
  "unchanged_items": 0,
  "replaced": 0,
  "drc_loop": {
@@ -470,6 +470,144 @@
     "wire": 12
    },
    {
+    "net": 12,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      57950000,
+      106100000
+     ],
+     "b": [
+      53825280,
+      106992668
+     ]
+    },
+    "group": null,
+    "wire": 13
+   },
+   {
+    "net": 12,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      53825280,
+      106992668
+     ],
+     "mid": [
+      53767969,
+      107001908
+     ],
+     "end": [
+      53710000,
+      107005000
+     ]
+    },
+    "group": null,
+    "wire": 13
+   },
+   {
+    "net": 12,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      53710000,
+      107005000
+     ],
+     "b": [
+      52390000,
+      107005000
+     ]
+    },
+    "group": null,
+    "wire": 13
+   },
+   {
+    "net": 12,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      52390000,
+      107005000
+     ],
+     "mid": [
+      52004627,
+      106845373
+     ],
+     "end": [
+      51845000,
+      106460000
+     ]
+    },
+    "group": null,
+    "wire": 13
+   },
+   {
+    "net": 12,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      51845000,
+      106460000
+     ],
+     "b": [
+      51845000,
+      105740000
+     ]
+    },
+    "group": null,
+    "wire": 13
+   },
+   {
+    "net": 12,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      51845000,
+      105740000
+     ],
+     "mid": [
+      51845497,
+      105716721
+     ],
+     "end": [
+      51846989,
+      105693484
+     ]
+    },
+    "group": null,
+    "wire": 13
+   },
+   {
+    "net": 12,
+    "layer": 0,
+    "width": 500000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      51846989,
+      105693484
+     ],
+     "b": [
+      53050000,
+      91650000
+     ]
+    },
+    "group": null,
+    "wire": 13
+   },
+   {
     "net": 14,
     "layer": 0,
     "width": 200000,
@@ -718,6 +856,144 @@
     },
     "group": null,
     "wire": 22
+   },
+   {
+    "net": 28,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      126950000,
+      106100000
+     ],
+     "b": [
+      122779808,
+      106848782
+     ]
+    },
+    "group": null,
+    "wire": 24
+   },
+   {
+    "net": 28,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      122779808,
+      106848782
+     ],
+     "mid": [
+      122745042,
+      106853443
+     ],
+     "end": [
+      122710000,
+      106855000
+     ]
+    },
+    "group": null,
+    "wire": 24
+   },
+   {
+    "net": 28,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      122710000,
+      106855000
+     ],
+     "b": [
+      121390000,
+      106855000
+     ]
+    },
+    "group": null,
+    "wire": 24
+   },
+   {
+    "net": 28,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      121390000,
+      106855000
+     ],
+     "mid": [
+      121110693,
+      106739307
+     ],
+     "end": [
+      120995000,
+      106460000
+     ]
+    },
+    "group": null,
+    "wire": 24
+   },
+   {
+    "net": 28,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      120995000,
+      106460000
+     ],
+     "b": [
+      120995000,
+      105740000
+     ]
+    },
+    "group": null,
+    "wire": 24
+   },
+   {
+    "net": 28,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      120995000,
+      105740000
+     ],
+     "mid": [
+      120995276,
+      105725228
+     ],
+     "end": [
+      120996105,
+      105710476
+     ]
+    },
+    "group": null,
+    "wire": 24
+   },
+   {
+    "net": 28,
+    "layer": 0,
+    "width": 200000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      120996105,
+      105710476
+     ],
+     "b": [
+      122050000,
+      91650000
+     ]
+    },
+    "group": null,
+    "wire": 24
    },
    {
     "net": 31,
@@ -5303,8 +5579,8 @@
     "name": "Net-(D14-DOUT)",
     "layer": 0,
     "width": 500000,
-    "status": "failed",
-    "reason": "infeasible: wall pad:D14:3 grazed mid-span by 1800 nm",
+    "status": "routed",
+    "reason": "",
     "from": {
      "kind": "pad",
      "label": "D14.2",
@@ -5321,11 +5597,11 @@
       91650000
      ]
     },
-    "length_nm": 0,
-    "length_outside_pads_nm": 0,
-    "pattern": "",
-    "anchors": 0,
-    "crossings": 0,
+    "length_nm": 21373940,
+    "length_outside_pads_nm": 20154930,
+    "pattern": "SASASAS",
+    "anchors": 3,
+    "crossings": 12,
     "blocking": null,
     "g1_angle_deg": null,
     "iteration": 1,
@@ -5361,8 +5637,8 @@
     "anchors": 0,
     "crossings": 0,
     "blocking": [
-     50322158,
-     124913217
+     50381796,
+     124381371
     ],
     "g1_angle_deg": null,
     "iteration": 1,
@@ -5769,7 +6045,7 @@
     "length_nm": 14098451,
     "length_outside_pads_nm": 12652085,
     "pattern": "SASAS",
-    "anchors": 2,
+    "anchors": 4,
     "crossings": 82,
     "blocking": null,
     "g1_angle_deg": null,
@@ -5955,8 +6231,8 @@
     "name": "Net-(D7-DOUT)",
     "layer": 0,
     "width": 200000,
-    "status": "failed",
-    "reason": "infeasible: wall pad:D8:1 grazed mid-span by 3627 nm",
+    "status": "routed",
+    "reason": "",
     "from": {
      "kind": "pad",
      "label": "D8.4",
@@ -5973,11 +6249,11 @@
       91650000
      ]
     },
-    "length_nm": 0,
-    "length_outside_pads_nm": 0,
-    "pattern": "",
-    "anchors": 0,
-    "crossings": 0,
+    "length_nm": 21096993,
+    "length_outside_pads_nm": 19883737,
+    "pattern": "SASASAS",
+    "anchors": 3,
+    "crossings": 14,
     "blocking": null,
     "g1_angle_deg": null,
     "iteration": 1,
@@ -6588,7 +6864,7 @@
     "length_nm": 15892120,
     "length_outside_pads_nm": 14521418,
     "pattern": "SASAS",
-    "anchors": 2,
+    "anchors": 6,
     "crossings": 29,
     "blocking": null,
     "g1_angle_deg": null,
@@ -9138,13 +9414,13 @@
    {
     "net": 12,
     "name": "Net-(D14-DOUT)",
-    "status": "failed",
+    "status": "routed",
     "connections": 1,
-    "routed": 0,
+    "routed": 1,
     "partial": 0,
-    "failed": 1,
-    "length_nm": 0,
-    "length_outside_pads_nm": 0
+    "failed": 0,
+    "length_nm": 21373940,
+    "length_outside_pads_nm": 20154930
    },
    {
     "net": 13,
@@ -9314,13 +9590,13 @@
    {
     "net": 28,
     "name": "Net-(D7-DOUT)",
-    "status": "failed",
+    "status": "routed",
     "connections": 1,
-    "routed": 0,
+    "routed": 1,
     "partial": 0,
-    "failed": 1,
-    "length_nm": 0,
-    "length_outside_pads_nm": 0
+    "failed": 0,
+    "length_nm": 21096993,
+    "length_outside_pads_nm": 19883737
    },
    {
     "net": 29,
@@ -9962,16 +10238,16 @@
    }
   ],
   "connections_total": 231,
-  "routed": 22,
+  "routed": 24,
   "partial": 0,
-  "failed": 209,
+  "failed": 207,
   "nets_total": 66,
-  "nets_routed": 6,
-  "total_length_nm": 218436221,
-  "length_outside_pads_nm": 192383561,
+  "nets_routed": 8,
+  "total_length_nm": 260907155,
+  "length_outside_pads_nm": 232422228,
   "iterations": 9,
   "converged": false,
-  "overuse_edges": 14,
+  "overuse_edges": 15,
   "clinches": {
    "regular": [],
    "u": []
@@ -9979,7 +10255,7 @@
   "relax_iterations": 3,
   "self_check_rounds": 2,
   "timed_out": false,
-  "runtime_s": 47.474568822,
+  "runtime_s": 44.351716658,
   "threads_used": 1,
   "warnings": [
    "routable layers B.Cu unused (M2 routes on F.Cu only)",
@@ -10011,13 +10287,13 @@
  "smooth": null,
  "route": {
   "connections": 231,
-  "routed": 22,
+  "routed": 24,
   "partial": 0,
-  "failed": 209,
+  "failed": 207,
   "nets": 66,
-  "nets_routed": 6,
-  "length_mm": 218.436,
-  "outside_mm": 192.384,
+  "nets_routed": 8,
+  "length_mm": 260.907,
+  "outside_mm": 232.422,
   "hand_outside_mm": 3890.918,
   "iterations": 9,
   "timed_out": false,
@@ -10078,13 +10354,14 @@
  },
  "rip": "all",
  "threads": 4,
- "runtime_s": 63.1,
- "router_s": 47.482,
+ "runtime_s": 59.395,
+ "router_s": 44.356,
  "width_match": {
-  "compared": 16,
-  "matched": 13,
+  "compared": 18,
+  "matched": 14,
   "mismatched": [
    "GND",
+   "Net-(D14-DOUT)",
    "Net-(J1-SHIELD)",
    "VCC"
   ]

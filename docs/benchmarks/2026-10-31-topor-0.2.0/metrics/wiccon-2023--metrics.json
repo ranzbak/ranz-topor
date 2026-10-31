@@ -2893,7 +2893,7 @@
   "relax_iterations": 2,
   "self_check_rounds": 1,
   "timed_out": false,
-  "runtime_s": 0.025271036,
+  "runtime_s": 0.024540699,
   "threads_used": 1,
   "warnings": [
    "routable layers B.Cu unused (M2 routes on F.Cu only)",
@@ -2962,7 +2962,7 @@
  },
  "rip": "all",
  "threads": 4,
- "runtime_s": 8.993,
+ "runtime_s": 8.395,
  "router_s": 0.026,
  "width_match": {
   "compared": 6,

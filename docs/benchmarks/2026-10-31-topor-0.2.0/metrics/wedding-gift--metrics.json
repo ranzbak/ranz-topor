@@ -40,11 +40,11 @@
   "kept_rf_vias": 0
  },
  "routed_all": {
-  "segments": 60,
-  "arcs": 28,
+  "segments": 59,
+  "arcs": 27,
   "vias": 0,
-  "track_mm": 362.068,
-  "arc_mm": 5.504
+  "track_mm": 365.501,
+  "arc_mm": 4.221
  },
  "routed_drc": {
   "routing_new": 0,
@@ -57,7 +57,7 @@
   "other": 189,
   "by_type_new": {}
  },
- "routed_items": 88,
+ "routed_items": 86,
  "unchanged_items": 0,
  "replaced": 0,
  "drc_loop": {
@@ -587,6 +587,104 @@
       136488000
      ],
      "b": [
+      45892888,
+      143273782
+     ]
+    },
+    "group": null,
+    "wire": 8
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      45892888,
+      143273782
+     ],
+     "mid": [
+      46010080,
+      143373980
+     ],
+     "end": [
+      46160000,
+      143410000
+     ]
+    },
+    "group": null,
+    "wire": 8
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      46160000,
+      143410000
+     ],
+     "b": [
+      47160000,
+      143410000
+     ]
+    },
+    "group": null,
+    "wire": 8
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      47160000,
+      143410000
+     ],
+     "mid": [
+      47223778,
+      143403778
+     ],
+     "end": [
+      47285152,
+      143385347
+     ]
+    },
+    "group": null,
+    "wire": 8
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      47285152,
+      143385347
+     ],
+     "b": [
+      49860000,
+      142330000
+     ]
+    },
+    "group": null,
+    "wire": 8
+   },
+   {
+    "net": 3,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      40970000,
+      136488000
+     ],
+     "b": [
       49860000,
       130646000
      ]
@@ -869,8 +967,8 @@
       124804000
      ],
      "b": [
-      28494849,
-      128720159
+      25385492,
+      128888784
      ]
     },
     "group": null,
@@ -883,15 +981,15 @@
     "prim": {
      "kind": "arc",
      "start": [
-      28494849,
-      128720159
+      25385492,
+      128888784
      ],
      "mid": [
-      28566746,
-      128827390
+      25390369,
+      128921230
      ],
      "end": [
-      28592000,
+      25392000,
       128954000
      ]
     },
@@ -905,11 +1003,11 @@
     "prim": {
      "kind": "seg",
      "a": [
-      28592000,
+      25392000,
       128954000
      ],
      "b": [
-      28592000,
+      25392000,
       130454000
      ]
     },
@@ -923,15 +1021,15 @@
     "prim": {
      "kind": "arc",
      "start": [
-      28592000,
+      25392000,
       130454000
      ],
      "mid": [
-      28588042,
+      25388042,
       130504958
      ],
      "end": [
-      28576262,
+      25376262,
       130554693
      ]
     },
@@ -945,11 +1043,11 @@
     "prim": {
      "kind": "seg",
      "a": [
-      28576262,
+      25376262,
       130554693
      ],
      "b": [
-      26947738,
+      23747738,
       135637307
      ]
     },
@@ -963,16 +1061,16 @@
     "prim": {
      "kind": "arc",
      "start": [
-      26947738,
+      23747738,
       135637307
      ],
      "mid": [
-      26944110,
-      135649423
+      23735958,
+      135687042
      ],
      "end": [
-      26940949,
-      135661670
+      23732000,
+      135738000
      ]
     },
     "group": null,
@@ -985,12 +1083,12 @@
     "prim": {
      "kind": "seg",
      "a": [
-      26940949,
-      135661670
+      23732000,
+      135738000
      ],
      "b": [
-      25383051,
-      142214330
+      23732000,
+      137238000
      ]
     },
     "group": null,
@@ -1003,12 +1101,92 @@
     "prim": {
      "kind": "arc",
      "start": [
-      25383051,
-      142214330
+      23732000,
+      137238000
      ],
      "mid": [
-      25338302,
-      142318436
+      23741200,
+      137315380
+     ],
+     "end": [
+      23768289,
+      137388445
+     ]
+    },
+    "group": null,
+    "wire": 20
+   },
+   {
+    "net": 11,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      23768289,
+      137388445
+     ],
+     "b": [
+      25355711,
+      140487555
+     ]
+    },
+    "group": null,
+    "wire": 20
+   },
+   {
+    "net": 11,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      25355711,
+      140487555
+     ],
+     "mid": [
+      25382800,
+      140560620
+     ],
+     "end": [
+      25392000,
+      140638000
+     ]
+    },
+    "group": null,
+    "wire": 20
+   },
+   {
+    "net": 11,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "seg",
+     "a": [
+      25392000,
+      140638000
+     ],
+     "b": [
+      25392000,
+      142138000
+     ]
+    },
+    "group": null,
+    "wire": 20
+   },
+   {
+    "net": 11,
+    "layer": 0,
+    "width": 250000,
+    "prim": {
+     "kind": "arc",
+     "start": [
+      25392000,
+      142138000
+     ],
+     "mid": [
+      25357433,
+      142285035
      ],
      "end": [
       25260974,
@@ -1167,144 +1345,6 @@
     "wire": 25
    },
    {
-    "net": 18,
-    "layer": 0,
-    "width": 250000,
-    "prim": {
-     "kind": "seg",
-     "a": [
-      40970000,
-      141388000
-     ],
-     "b": [
-      34251099,
-      147153565
-     ]
-    },
-    "group": null,
-    "wire": 26
-   },
-   {
-    "net": 18,
-    "layer": 0,
-    "width": 250000,
-    "prim": {
-     "kind": "arc",
-     "start": [
-      34251099,
-      147153565
-     ],
-     "mid": [
-      34166152,
-      147266191
-     ],
-     "end": [
-      34136000,
-      147404000
-     ]
-    },
-    "group": null,
-    "wire": 26
-   },
-   {
-    "net": 18,
-    "layer": 0,
-    "width": 250000,
-    "prim": {
-     "kind": "seg",
-     "a": [
-      34136000,
-      147404000
-     ],
-     "b": [
-      34136000,
-      148404000
-     ]
-    },
-    "group": null,
-    "wire": 26
-   },
-   {
-    "net": 18,
-    "layer": 0,
-    "width": 250000,
-    "prim": {
-     "kind": "arc",
-     "start": [
-      34136000,
-      148404000
-     ],
-     "mid": [
-      34232655,
-      148637345
-     ],
-     "end": [
-      34466000,
-      148734000
-     ]
-    },
-    "group": null,
-    "wire": 26
-   },
-   {
-    "net": 18,
-    "layer": 0,
-    "width": 250000,
-    "prim": {
-     "kind": "seg",
-     "a": [
-      34466000,
-      148734000
-     ],
-     "b": [
-      35966000,
-      148734000
-     ]
-    },
-    "group": null,
-    "wire": 26
-   },
-   {
-    "net": 18,
-    "layer": 0,
-    "width": 250000,
-    "prim": {
-     "kind": "arc",
-     "start": [
-      35966000,
-      148734000
-     ],
-     "mid": [
-      36038131,
-      148726020
-     ],
-     "end": [
-      36106773,
-      148702468
-     ]
-    },
-    "group": null,
-    "wire": 26
-   },
-   {
-    "net": 18,
-    "layer": 0,
-    "width": 250000,
-    "prim": {
-     "kind": "seg",
-     "a": [
-      36106773,
-      148702468
-     ],
-     "b": [
-      37770000,
-      147918000
-     ]
-    },
-    "group": null,
-    "wire": 26
-   },
-   {
     "net": 19,
     "layer": 0,
     "width": 250000,
@@ -1351,12 +1391,12 @@
       128888784
      ],
      "mid": [
-      36941631,
-      128921230
+      36945963,
+      128891552
      ],
      "end": [
-      36940000,
-      128954000
+      36945441,
+      128894324
      ]
     },
     "group": null,
@@ -1369,12 +1409,12 @@
     "prim": {
      "kind": "seg",
      "a": [
-      36940000,
-      128954000
+      36945441,
+      128894324
      ],
      "b": [
-      36940000,
-      137238000
+      34141441,
+      144144324
      ]
     },
     "group": null,
@@ -1387,16 +1427,16 @@
     "prim": {
      "kind": "arc",
      "start": [
-      36940000,
-      137238000
+      34141441,
+      144144324
      ],
      "mid": [
-      36981410,
-      137398049
+      34137363,
+      144174038
      ],
      "end": [
-      37095247,
-      137517931
+      34136000,
+      144204000
      ]
     },
     "group": null,
@@ -1409,12 +1449,12 @@
     "prim": {
      "kind": "seg",
      "a": [
-      37095247,
-      137517931
+      34136000,
+      144204000
      ],
      "b": [
-      41644753,
-      140358069
+      34136000,
+      148404000
      ]
     },
     "group": null,
@@ -1427,16 +1467,16 @@
     "prim": {
      "kind": "arc",
      "start": [
-      41644753,
-      140358069
+      34136000,
+      148404000
      ],
      "mid": [
-      41651300,
-      140362264
+      34221963,
+      148626140
      ],
      "end": [
-      41657746,
-      140366612
+      34435067,
+      148732547
      ]
     },
     "group": null,
@@ -1449,12 +1489,12 @@
     "prim": {
      "kind": "seg",
      "a": [
-      41657746,
-      140366612
+      34435067,
+      148732547
      ],
      "b": [
-      45972254,
-      143351388
+      37239067,
+      148996547
      ]
     },
     "group": null,
@@ -1467,16 +1507,16 @@
     "prim": {
      "kind": "arc",
      "start": [
-      45972254,
-      143351388
+      37239067,
+      148996547
      ],
      "mid": [
-      46061659,
-      143395006
+      37254516,
+      148997637
      ],
      "end": [
-      46160000,
-      143410000
+      37270000,
+      148998000
      ]
     },
     "group": null,
@@ -1489,12 +1529,12 @@
     "prim": {
      "kind": "seg",
      "a": [
-      46160000,
-      143410000
+      37270000,
+      148998000
      ],
      "b": [
-      47160000,
-      143410000
+      41470000,
+      148998000
      ]
     },
     "group": null,
@@ -1507,16 +1547,16 @@
     "prim": {
      "kind": "arc",
      "start": [
-      47160000,
-      143410000
+      41470000,
+      148998000
      ],
      "mid": [
-      47295900,
-      143380718
+      41489842,
+      148997403
      ],
      "end": [
-      47407682,
-      143298068
+      41509613,
+      148995614
      ]
     },
     "group": null,
@@ -1529,12 +1569,12 @@
     "prim": {
      "kind": "seg",
      "a": [
-      47407682,
-      143298068
+      41509613,
+      148995614
      ],
      "b": [
-      49112318,
-      141361932
+      47199613,
+      148307614
      ]
     },
     "group": null,
@@ -1547,16 +1587,16 @@
     "prim": {
      "kind": "arc",
      "start": [
-      49112318,
-      141361932
+      47199613,
+      148307614
      ],
      "mid": [
-      49224100,
-      141279282
+      47243131,
+      148299357
      ],
      "end": [
-      49360000,
-      141250000
+      47285152,
+      148285347
      ]
     },
     "group": null,
@@ -1569,88 +1609,8 @@
     "prim": {
      "kind": "seg",
      "a": [
-      49360000,
-      141250000
-     ],
-     "b": [
-      50360000,
-      141250000
-     ]
-    },
-    "group": null,
-    "wire": 28
-   },
-   {
-    "net": 20,
-    "layer": 0,
-    "width": 250000,
-    "prim": {
-     "kind": "arc",
-     "start": [
-      50360000,
-      141250000
-     ],
-     "mid": [
-      50593345,
-      141346655
-     ],
-     "end": [
-      50690000,
-      141580000
-     ]
-    },
-    "group": null,
-    "wire": 28
-   },
-   {
-    "net": 20,
-    "layer": 0,
-    "width": 250000,
-    "prim": {
-     "kind": "seg",
-     "a": [
-      50690000,
-      141580000
-     ],
-     "b": [
-      50690000,
-      143080000
-     ]
-    },
-    "group": null,
-    "wire": 28
-   },
-   {
-    "net": 20,
-    "layer": 0,
-    "width": 250000,
-    "prim": {
-     "kind": "arc",
-     "start": [
-      50690000,
-      143080000
-     ],
-     "mid": [
-      50688369,
-      143112770
-     ],
-     "end": [
-      50683492,
-      143145216
-     ]
-    },
-    "group": null,
-    "wire": 28
-   },
-   {
-    "net": 20,
-    "layer": 0,
-    "width": 250000,
-    "prim": {
-     "kind": "seg",
-     "a": [
-      50683492,
-      143145216
+      47285152,
+      148285347
      ],
      "b": [
       49860000,
@@ -1835,7 +1795,7 @@
     "crossings": 7,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -1937,7 +1897,7 @@
     "crossings": 11,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -2039,7 +1999,7 @@
     "crossings": 9,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -2073,7 +2033,7 @@
     "crossings": 12,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -2141,7 +2101,7 @@
     "crossings": 9,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -2175,7 +2135,7 @@
     "crossings": 12,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -2209,7 +2169,7 @@
     "crossings": 7,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -2277,7 +2237,7 @@
     "crossings": 9,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -2320,8 +2280,8 @@
     "name": "GND",
     "layer": 0,
     "width": 250000,
-    "status": "failed",
-    "reason": "infeasible: wall pad:D23:4 grazed mid-span by 3956 nm",
+    "status": "routed",
+    "reason": "",
     "from": {
      "kind": "pad",
      "label": "D24.3",
@@ -2338,17 +2298,14 @@
       142330000
      ]
     },
-    "length_nm": 0,
-    "length_outside_pads_nm": 0,
-    "pattern": "",
-    "anchors": 0,
-    "crossings": 0,
-    "blocking": [
-     49230588,
-     141668235
-    ],
+    "length_nm": 12605763,
+    "length_outside_pads_nm": 11213921,
+    "pattern": "SASAS",
+    "anchors": 2,
+    "crossings": 12,
+    "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -2382,7 +2339,7 @@
     "crossings": 9,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -2416,7 +2373,7 @@
     "crossings": 11,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -2450,7 +2407,7 @@
     "crossings": 8,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -2484,7 +2441,7 @@
     "crossings": 9,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -2858,7 +2815,7 @@
     "crossings": 5,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -2892,7 +2849,7 @@
     "crossings": 7,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -2926,7 +2883,7 @@
     "crossings": 29,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -2960,7 +2917,7 @@
     "crossings": 7,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -2994,7 +2951,7 @@
     "crossings": 7,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -3028,7 +2985,7 @@
     "crossings": 0,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -3062,7 +3019,7 @@
     "crossings": 0,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -3089,14 +3046,14 @@
       147230000
      ]
     },
-    "length_nm": 27746288,
-    "length_outside_pads_nm": 26413939,
-    "pattern": "SASASASAS",
-    "anchors": 4,
-    "crossings": 29,
+    "length_nm": 26382103,
+    "length_outside_pads_nm": 24990272,
+    "pattern": "SASASASASASAS",
+    "anchors": 6,
+    "crossings": 30,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -3130,7 +3087,7 @@
     "crossings": 7,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -3164,7 +3121,7 @@
     "crossings": 7,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -3198,7 +3155,7 @@
     "crossings": 6,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -3232,7 +3189,7 @@
     "crossings": 8,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -3300,7 +3257,7 @@
     "crossings": 10,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -3309,8 +3266,8 @@
     "name": "Net-(D24-Pad2)",
     "layer": 0,
     "width": 250000,
-    "status": "routed",
-    "reason": "",
+    "status": "failed",
+    "reason": "self-check: item:38 (gap -250000 < 200000 nm)",
     "from": {
      "kind": "pad",
      "label": "D24.2",
@@ -3327,14 +3284,17 @@
       147918000
      ]
     },
-    "length_nm": 14140625,
-    "length_outside_pads_nm": 12928947,
-    "pattern": "SASASAS",
-    "anchors": 3,
-    "crossings": 19,
-    "blocking": null,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0,
+    "pattern": "",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": [
+     41745882,
+     147127529
+    ],
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -3368,7 +3328,7 @@
     "crossings": 5,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -3395,14 +3355,14 @@
       147230000
      ]
     },
-    "length_nm": 35066503,
-    "length_outside_pads_nm": 33536325,
-    "pattern": "SASASASASASASASAS",
-    "anchors": 8,
-    "crossings": 35,
+    "length_nm": 40115559,
+    "length_outside_pads_nm": 38810101,
+    "pattern": "SASASASASASAS",
+    "anchors": 10,
+    "crossings": 37,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -3436,7 +3396,7 @@
     "crossings": 5,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -3470,7 +3430,7 @@
     "crossings": 5,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -3504,7 +3464,7 @@
     "crossings": 5,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -3538,7 +3498,7 @@
     "crossings": 5,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -3572,7 +3532,7 @@
     "crossings": 5,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -3606,7 +3566,7 @@
     "crossings": 5,
     "blocking": null,
     "g1_angle_deg": null,
-    "iteration": 5,
+    "iteration": 1,
     "zero_slack": false
    },
    {
@@ -4556,11 +4516,11 @@
     "name": "GND",
     "status": "partial",
     "connections": 29,
-    "routed": 11,
+    "routed": 12,
     "partial": 0,
-    "failed": 18,
-    "length_nm": 118770632,
-    "length_outside_pads_nm": 104429496
+    "failed": 17,
+    "length_nm": 131376395,
+    "length_outside_pads_nm": 115643417
    },
    {
     "net": 4,
@@ -4647,8 +4607,8 @@
     "routed": 1,
     "partial": 0,
     "failed": 0,
-    "length_nm": 27746288,
-    "length_outside_pads_nm": 26413939
+    "length_nm": 26382103,
+    "length_outside_pads_nm": 24990272
    },
    {
     "net": 12,
@@ -4719,13 +4679,13 @@
    {
     "net": 18,
     "name": "Net-(D24-Pad2)",
-    "status": "routed",
+    "status": "failed",
     "connections": 1,
-    "routed": 1,
+    "routed": 0,
     "partial": 0,
-    "failed": 0,
-    "length_nm": 14140625,
-    "length_outside_pads_nm": 12928947
+    "failed": 1,
+    "length_nm": 0,
+    "length_outside_pads_nm": 0
    },
    {
     "net": 19,
@@ -4746,8 +4706,8 @@
     "routed": 1,
     "partial": 0,
     "failed": 0,
-    "length_nm": 35066503,
-    "length_outside_pads_nm": 33536325
+    "length_nm": 40115559,
+    "length_outside_pads_nm": 38810101
    },
    {
     "net": 21,
@@ -5492,10 +5452,10 @@
   "partial": 0,
   "failed": 49,
   "nets_total": 43,
-  "nets_routed": 21,
-  "total_length_nm": 367571332,
-  "length_outside_pads_nm": 321053282,
-  "iterations": 12,
+  "nets_routed": 20,
+  "total_length_nm": 369721340,
+  "length_outside_pads_nm": 323188366,
+  "iterations": 4,
   "converged": false,
   "overuse_edges": 0,
   "clinches": {
@@ -5505,7 +5465,7 @@
   "relax_iterations": 2,
   "self_check_rounds": 1,
   "timed_out": false,
-  "runtime_s": 1.06749831,
+  "runtime_s": 0.110552703,
   "threads_used": 1,
   "warnings": [
    "routable layers B.Cu unused (M2 routes on F.Cu only)",
@@ -5553,7 +5513,7 @@
    "net 85 skipped: no other terminal in the net",
    "net 86 skipped: no other terminal in the net",
    "net 87 skipped: no other terminal in the net",
-   "stuck after 12 iterations"
+   "stuck after 4 iterations"
   ],
   "zero_slack_wires": [],
   "zero_slack": "kept"
@@ -5565,11 +5525,11 @@
   "partial": 0,
   "failed": 49,
   "nets": 43,
-  "nets_routed": 21,
-  "length_mm": 367.571,
-  "outside_mm": 321.053,
+  "nets_routed": 20,
+  "length_mm": 369.721,
+  "outside_mm": 323.188,
   "hand_outside_mm": 226.124,
-  "iterations": 12,
+  "iterations": 4,
   "timed_out": false,
   "clinches": {
    "regular": [],
@@ -5608,11 +5568,11 @@
  },
  "rip": "all",
  "threads": 4,
- "runtime_s": 9.229,
- "router_s": 1.069,
+ "runtime_s": 8.242,
+ "router_s": 0.112,
  "width_match": {
-  "compared": 21,
-  "matched": 21,
+  "compared": 20,
+  "matched": 20,
   "mismatched": []
  }
 }

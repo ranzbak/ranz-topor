@@ -45,7 +45,7 @@ copies (verify with sha256 before/after).
 |---|---|---|
 | [2026-10-30-topola-d832b164](2026-10-30-topola-d832b164/README.md) | Topola `develop` d832b164 | baseline: only the simple board routes; see [43](../design/43-topola-assessment.md) |
 | [2026-10-30-topor-0.1.0](2026-10-30-topor-0.1.0/README.md) | topor 0.1.0 (M1 taut smoother) | eprom-to-kernal gate: 25/27 wires taut + 2 zero-slack, 8 arcs, DRC routing_new 0, outside-pad length 71.5 vs 76.6 mm hand |
-| [2026-10-31-topor-0.2.0](2026-10-31-topor-0.2.0/README.md) | topor 0.2.0 (M2 single-layer router) | eprom-to-kernal: 27/27 connections, 25/25 nets, 12 arcs, DRC routing_new 0, unconnected 0, outside-pad 67.0 vs 76.6 mm hand, 0.11 s; scaling test still failing, M2 not closed |
+| [2026-10-31-topor-0.2.0](2026-10-31-topor-0.2.0/README.md) | topor 0.2.0 (M2 single-layer router) | eprom-to-kernal: 27/27 connections, 25/25 nets, 13 arcs, DRC routing_new 0, unconnected 0, outside-pad 67.1 vs 76.6 mm hand, 0.16 s; re-run after B1-B3, scaling test passes, M2 gate closed |
 
 ## Progress PNGs
 
@@ -54,4 +54,4 @@ routing outcome (hand left, topor right, zone fills removed). Produced by
 `.venv/bin/python -m harness.progress --task <TaskId>`; the caption carries nets/wires converted,
 new DRC routing violations and total copper length vs the hand length of the board under test (175.6 mm for eprom-to-kernal, re-pinned 2026-10-30 after the KiCad 10 hand re-route).
 
-M2 images: `progress/<YYYY-MM-DD>-m2-<TaskId>.png`, same procedure with `--router topor`; the gate images are `2026-10-31-m2-gate.png` (eprom, 27/27, 67.0 vs 76.6 mm) plus `-gate-nametag-sao` and `-gate-wedding-gift` (informational user boards).
+M2 images: `progress/<YYYY-MM-DD>-m2-<TaskId>.png`, same procedure with `--router topor`; the gate images are `2026-10-31-m2-gate.png` (eprom, 27/27, 67.0 vs 76.6 mm; re-run after B1-B3: `2026-10-31-m2-gate-B12*.png`, 67.1 mm) plus `-gate-nametag-sao` and `-gate-wedding-gift` (informational user boards).

@@ -1,7 +1,7 @@
 {
     "$schema": "https://schemas.kicad.org/drc.v1.json",
     "coordinate_units": "mm",
-    "date": "2026-10-31T03:57:34",
+    "date": "2026-10-31T05:43:16",
     "ignored_checks": [
         {
             "description": "Footprint has no courtyard defined",
@@ -59,20 +59,20 @@
             "description": "Missing connection between items",
             "items": [
                 {
-                    "description": "Track [GND] on F.Cu, length 3,3209 mm",
+                    "description": "Pad 3 [GND] of D15 on F.Cu",
                     "pos": {
                         "x": 21.68,
                         "y": 112.954
                     },
-                    "uuid": "a69104b1-88e3-460f-b2bd-2888f4bceb0a"
+                    "uuid": "6323d519-87bd-4042-9a8e-f566d456d9a2"
                 },
                 {
-                    "description": "Track [GND] on F.Cu, length 1,0000 mm",
+                    "description": "Track (arc) [GND] on F.Cu, length 0,3112 mm",
                     "pos": {
                         "x": 19.372,
-                        "y": 122.782
+                        "y": 123.112
                     },
-                    "uuid": "fa718d02-7fbd-4b3d-b279-5adfd99213ff"
+                    "uuid": "cae6452d-e0bf-45c4-9e43-143cd0b34475"
                 }
             ],
             "severity": "error",
@@ -89,21 +89,6 @@
                     },
                     "uuid": "1f51fe66-e4f7-43a1-85cf-fcd7a758be92"
                 },
-                {
-                    "description": "Pad 3 [GND] of D4 on F.Cu",
-                    "pos": {
-                        "x": 24.562,
-                        "y": 187.87
-                    },
-                    "uuid": "de6914fb-ac31-4e3d-9fed-e4abb34fbea6"
-                }
-            ],
-            "severity": "error",
-            "type": "unconnected_items"
-        },
-        {
-            "description": "Missing connection between items",
-            "items": [
                 {
                     "description": "Pad 3 [GND] of D5 on F.Cu",
                     "pos": {
@@ -111,6 +96,44 @@
                         "y": 176.186
                     },
                     "uuid": "bcb2e186-863e-4bd9-b8cd-f1415435ed00"
+                }
+            ],
+            "severity": "error",
+            "type": "unconnected_items"
+        },
+        {
+            "description": "Missing connection between items",
+            "items": [
+                {
+                    "description": "Pad 3 [GND] of D6 on F.Cu",
+                    "pos": {
+                        "x": 24.562,
+                        "y": 164.502
+                    },
+                    "uuid": "26fa4f5b-baf1-4915-9d59-31af2da3139f"
+                },
+                {
+                    "description": "Pad 15 [GND] of U3 on B.Cu",
+                    "pos": {
+                        "x": 27.035,
+                        "y": 164.234
+                    },
+                    "uuid": "b66b2f8f-0bcb-4b3f-aa4d-14b4af4f114d"
+                }
+            ],
+            "severity": "error",
+            "type": "unconnected_items"
+        },
+        {
+            "description": "Missing connection between items",
+            "items": [
+                {
+                    "description": "Pad 3 [GND] of D4 on F.Cu",
+                    "pos": {
+                        "x": 24.562,
+                        "y": 187.87
+                    },
+                    "uuid": "de6914fb-ac31-4e3d-9fed-e4abb34fbea6"
                 },
                 {
                     "description": "Pad 1 [GND] of U3 on B.Cu",
@@ -128,20 +151,20 @@
             "description": "Missing connection between items",
             "items": [
                 {
-                    "description": "Pad 15 [GND] of U3 on B.Cu",
+                    "description": "Pad 3 [GND] of D17 on F.Cu",
                     "pos": {
-                        "x": 27.035,
-                        "y": 164.234
+                        "x": 30.316,
+                        "y": 94.666
                     },
-                    "uuid": "b66b2f8f-0bcb-4b3f-aa4d-14b4af4f114d"
+                    "uuid": "9e7935a1-15b7-4481-90b4-8678421df1ed"
                 },
                 {
-                    "description": "Pad 3 [GND] of D6 on F.Cu",
+                    "description": "Pad 1 [GND] of U1 on B.Cu",
                     "pos": {
-                        "x": 24.562,
-                        "y": 164.502
+                        "x": 34.812,
+                        "y": 104.242
                     },
-                    "uuid": "26fa4f5b-baf1-4915-9d59-31af2da3139f"
+                    "uuid": "0a464f3f-6a9d-42b7-9e72-41aba4be26bb"
                 }
             ],
             "severity": "error",
@@ -187,76 +210,7 @@
                         "x": 24.650159,
                         "y": 111.193088
                     },
-                    "uuid": "3d1d13e9-710e-418d-a3ea-e947dea53358"
-                }
-            ],
-            "severity": "error",
-            "type": "unconnected_items"
-        },
-        {
-            "description": "Missing connection between items",
-            "items": [
-                {
-                    "description": "Pad 1 [GND] of U1 on B.Cu",
-                    "pos": {
-                        "x": 34.812,
-                        "y": 104.242
-                    },
-                    "uuid": "0a464f3f-6a9d-42b7-9e72-41aba4be26bb"
-                },
-                {
-                    "description": "Pad 3 [GND] of D19 on F.Cu",
-                    "pos": {
-                        "x": 38.952,
-                        "y": 112.954
-                    },
-                    "uuid": "664e344d-b395-4771-a3e0-97a6599e9a61"
-                }
-            ],
-            "severity": "error",
-            "type": "unconnected_items"
-        },
-        {
-            "description": "Missing connection between items",
-            "items": [
-                {
-                    "description": "Pad 1 [GND] of U1 on B.Cu",
-                    "pos": {
-                        "x": 34.812,
-                        "y": 104.242
-                    },
-                    "uuid": "0a464f3f-6a9d-42b7-9e72-41aba4be26bb"
-                },
-                {
-                    "description": "Pad 3 [GND] of D17 on F.Cu",
-                    "pos": {
-                        "x": 30.316,
-                        "y": 94.666
-                    },
-                    "uuid": "9e7935a1-15b7-4481-90b4-8678421df1ed"
-                }
-            ],
-            "severity": "error",
-            "type": "unconnected_items"
-        },
-        {
-            "description": "Missing connection between items",
-            "items": [
-                {
-                    "description": "Pad 7 [GND] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 155.265
-                    },
-                    "uuid": "ce1d6f90-c739-46ee-96a9-94c657e32855"
-                },
-                {
-                    "description": "Pad 3 [GND] of D26 on F.Cu",
-                    "pos": {
-                        "x": 40.97,
-                        "y": 159.602
-                    },
-                    "uuid": "964acb7c-9bf2-455c-9d27-27fa0e616898"
+                    "uuid": "324b32a8-a665-4453-a661-7fb6623c2e27"
                 }
             ],
             "severity": "error",
@@ -279,7 +233,7 @@
                         "x": 24.562,
                         "y": 152.818
                     },
-                    "uuid": "bbacc60d-7f2a-4342-829f-391e08f5c3e3"
+                    "uuid": "b05b08a5-a98b-470d-8c86-fe71089fe901"
                 }
             ],
             "severity": "error",
@@ -289,12 +243,35 @@
             "description": "Missing connection between items",
             "items": [
                 {
-                    "description": "Track [GND] on F.Cu, length 2,7827 mm",
+                    "description": "Pad 3 [GND] of D19 on F.Cu",
                     "pos": {
-                        "x": 38.395152,
-                        "y": 146.862653
+                        "x": 38.952,
+                        "y": 112.954
                     },
-                    "uuid": "a734167a-f848-4bd5-9099-0639505f3f23"
+                    "uuid": "664e344d-b395-4771-a3e0-97a6599e9a61"
+                },
+                {
+                    "description": "Pad 1 [GND] of U1 on B.Cu",
+                    "pos": {
+                        "x": 34.812,
+                        "y": 104.242
+                    },
+                    "uuid": "0a464f3f-6a9d-42b7-9e72-41aba4be26bb"
+                }
+            ],
+            "severity": "error",
+            "type": "unconnected_items"
+        },
+        {
+            "description": "Missing connection between items",
+            "items": [
+                {
+                    "description": "Track [GND] on F.Cu, length 10,5004 mm",
+                    "pos": {
+                        "x": 49.86,
+                        "y": 142.33
+                    },
+                    "uuid": "5b1cfa60-0551-44f4-99b7-42da25ebc916"
                 },
                 {
                     "description": "Pad 18 [GND] of U2 on B.Cu",
@@ -320,12 +297,12 @@
                     "uuid": "964acb7c-9bf2-455c-9d27-27fa0e616898"
                 },
                 {
-                    "description": "Pad 26 [GND] of U2 on B.Cu",
+                    "description": "Pad 7 [GND] of U2 on B.Cu",
                     "pos": {
-                        "x": 42.462,
-                        "y": 157.865
+                        "x": 35.262,
+                        "y": 155.265
                     },
-                    "uuid": "21d590f3-b533-4452-a2e5-d8c7ae567acc"
+                    "uuid": "ce1d6f90-c739-46ee-96a9-94c657e32855"
                 }
             ],
             "severity": "error",
@@ -404,6 +381,29 @@
             "description": "Missing connection between items",
             "items": [
                 {
+                    "description": "Pad 21 [GND] of U2 on B.Cu",
+                    "pos": {
+                        "x": 42.462,
+                        "y": 154.615
+                    },
+                    "uuid": "9218f0ef-4fa2-4486-a41b-dfa386b2b50f"
+                },
+                {
+                    "description": "Pad 25 [GND] of U2 on B.Cu",
+                    "pos": {
+                        "x": 42.462,
+                        "y": 157.215
+                    },
+                    "uuid": "09361a5e-e80a-4e7f-84d3-b456c8ca278e"
+                }
+            ],
+            "severity": "error",
+            "type": "unconnected_items"
+        },
+        {
+            "description": "Missing connection between items",
+            "items": [
+                {
                     "description": "Pad 25 [GND] of U2 on B.Cu",
                     "pos": {
                         "x": 42.462,
@@ -427,43 +427,20 @@
             "description": "Missing connection between items",
             "items": [
                 {
-                    "description": "Pad 25 [GND] of U2 on B.Cu",
+                    "description": "Pad 26 [GND] of U2 on B.Cu",
                     "pos": {
                         "x": 42.462,
-                        "y": 157.215
+                        "y": 157.865
                     },
-                    "uuid": "09361a5e-e80a-4e7f-84d3-b456c8ca278e"
+                    "uuid": "21d590f3-b533-4452-a2e5-d8c7ae567acc"
                 },
                 {
-                    "description": "Pad 21 [GND] of U2 on B.Cu",
-                    "pos": {
-                        "x": 42.462,
-                        "y": 154.615
-                    },
-                    "uuid": "9218f0ef-4fa2-4486-a41b-dfa386b2b50f"
-                }
-            ],
-            "severity": "error",
-            "type": "unconnected_items"
-        },
-        {
-            "description": "Missing connection between items",
-            "items": [
-                {
-                    "description": "Track [GND] on F.Cu, length 10,5004 mm",
-                    "pos": {
-                        "x": 49.86,
-                        "y": 142.33
-                    },
-                    "uuid": "41452dc6-66a7-4fe4-b121-8f9ff77718a8"
-                },
-                {
-                    "description": "Track [GND] on F.Cu, length 10,6377 mm",
+                    "description": "Pad 3 [GND] of D26 on F.Cu",
                     "pos": {
                         "x": 40.97,
-                        "y": 136.488
+                        "y": 159.602
                     },
-                    "uuid": "fcca019a-1cfe-4d84-a111-28313c8a1bd7"
+                    "uuid": "964acb7c-9bf2-455c-9d27-27fa0e616898"
                 }
             ],
             "severity": "error",
@@ -533,6 +510,29 @@
                         "y": 164.234
                     },
                     "uuid": "7dd517ea-1090-458f-9b98-b50324def35c"
+                }
+            ],
+            "severity": "error",
+            "type": "unconnected_items"
+        },
+        {
+            "description": "Missing connection between items",
+            "items": [
+                {
+                    "description": "Pad 4 [Net-(D24-Pad2)] of D25 on F.Cu",
+                    "pos": {
+                        "x": 37.77,
+                        "y": 147.918
+                    },
+                    "uuid": "098effac-920f-4582-881f-42d5cae4a77e"
+                },
+                {
+                    "description": "Pad 2 [Net-(D24-Pad2)] of D24 on F.Cu",
+                    "pos": {
+                        "x": 40.97,
+                        "y": 141.388
+                    },
+                    "uuid": "d0c138ab-ea5c-4ab4-8923-1f5f955f0172"
                 }
             ],
             "severity": "error",
@@ -1165,52 +1165,6 @@
             "description": "Rear solder mask aperture bridges items with different nets",
             "items": [
                 {
-                    "description": "Pad 1 [txd] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 159.165
-                    },
-                    "uuid": "9335749c-1a89-4a63-9891-3837ef8a2008"
-                },
-                {
-                    "description": "Pad 2 [dtr#] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 158.515
-                    },
-                    "uuid": "5ca78048-2f56-422f-9c65-6d7eac5d23f2"
-                }
-            ],
-            "severity": "error",
-            "type": "solder_mask_bridge"
-        },
-        {
-            "description": "Rear solder mask aperture bridges items with different nets",
-            "items": [
-                {
-                    "description": "Pad 2 [dtr#] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 158.515
-                    },
-                    "uuid": "5ca78048-2f56-422f-9c65-6d7eac5d23f2"
-                },
-                {
-                    "description": "Pad 3 [rts#] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 157.865
-                    },
-                    "uuid": "c0813100-4234-440a-971f-597ef4547b67"
-                }
-            ],
-            "severity": "error",
-            "type": "solder_mask_bridge"
-        },
-        {
-            "description": "Rear solder mask aperture bridges items with different nets",
-            "items": [
-                {
                     "description": "Pad 1 [rts#] of Q1 on B.Cu",
                     "pos": {
                         "x": 26.562597,
@@ -1257,29 +1211,6 @@
             "description": "Rear solder mask aperture bridges items with different nets",
             "items": [
                 {
-                    "description": "Pad 3 [rts#] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 157.865
-                    },
-                    "uuid": "c0813100-4234-440a-971f-597ef4547b67"
-                },
-                {
-                    "description": "Pad 4 [Net-(C1-Pad2)] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 157.215
-                    },
-                    "uuid": "9579cd7c-94ae-4338-8f10-a6552e4d1a7f"
-                }
-            ],
-            "severity": "error",
-            "type": "solder_mask_bridge"
-        },
-        {
-            "description": "Rear solder mask aperture bridges items with different nets",
-            "items": [
-                {
                     "description": "Pad 4 [<no net>] of Q1 on B.Cu",
                     "pos": {
                         "x": 28.462597,
@@ -1294,29 +1225,6 @@
                         "y": 144.334945
                     },
                     "uuid": "5ebf6b5d-115e-4d95-a089-2590494d3b71"
-                }
-            ],
-            "severity": "error",
-            "type": "solder_mask_bridge"
-        },
-        {
-            "description": "Rear solder mask aperture bridges items with different nets",
-            "items": [
-                {
-                    "description": "Pad 4 [Net-(C1-Pad2)] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 157.215
-                    },
-                    "uuid": "9579cd7c-94ae-4338-8f10-a6552e4d1a7f"
-                },
-                {
-                    "description": "Pad 5 [rxd] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 156.565
-                    },
-                    "uuid": "d5fbec82-8fb8-409b-8854-fe93ca070a33"
                 }
             ],
             "severity": "error",
@@ -1349,29 +1257,6 @@
             "description": "Rear solder mask aperture bridges items with different nets",
             "items": [
                 {
-                    "description": "Pad 5 [rxd] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 156.565
-                    },
-                    "uuid": "d5fbec82-8fb8-409b-8854-fe93ca070a33"
-                },
-                {
-                    "description": "Pad 6 [Net-(U2-Pad6)] of U2 on B.Cu",
-                    "pos": {
-                        "x": 35.262,
-                        "y": 155.915
-                    },
-                    "uuid": "2bfd02de-09e9-4ca1-8157-5ec4698e2824"
-                }
-            ],
-            "severity": "error",
-            "type": "solder_mask_bridge"
-        },
-        {
-            "description": "Rear solder mask aperture bridges items with different nets",
-            "items": [
-                {
                     "description": "Pad 1 [dtr#] of Q2 on B.Cu",
                     "pos": {
                         "x": 31.642597,
@@ -1395,20 +1280,20 @@
             "description": "Rear solder mask aperture bridges items with different nets",
             "items": [
                 {
-                    "description": "Pad 6 [Net-(U2-Pad6)] of U2 on B.Cu",
+                    "description": "Pad 1 [txd] of U2 on B.Cu",
                     "pos": {
                         "x": 35.262,
-                        "y": 155.915
+                        "y": 159.165
                     },
-                    "uuid": "2bfd02de-09e9-4ca1-8157-5ec4698e2824"
+                    "uuid": "9335749c-1a89-4a63-9891-3837ef8a2008"
                 },
                 {
-                    "description": "Pad 7 [GND] of U2 on B.Cu",
+                    "description": "Pad 2 [dtr#] of U2 on B.Cu",
                     "pos": {
                         "x": 35.262,
-                        "y": 155.265
+                        "y": 158.515
                     },
-                    "uuid": "ce1d6f90-c739-46ee-96a9-94c657e32855"
+                    "uuid": "5ca78048-2f56-422f-9c65-6d7eac5d23f2"
                 }
             ],
             "severity": "error",
@@ -1441,6 +1326,29 @@
             "description": "Rear solder mask aperture bridges items with different nets",
             "items": [
                 {
+                    "description": "Pad 2 [dtr#] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 158.515
+                    },
+                    "uuid": "5ca78048-2f56-422f-9c65-6d7eac5d23f2"
+                },
+                {
+                    "description": "Pad 3 [rts#] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 157.865
+                    },
+                    "uuid": "c0813100-4234-440a-971f-597ef4547b67"
+                }
+            ],
+            "severity": "error",
+            "type": "solder_mask_bridge"
+        },
+        {
+            "description": "Rear solder mask aperture bridges items with different nets",
+            "items": [
+                {
                     "description": "Pad 4 [<no net>] of Q2 on B.Cu",
                     "pos": {
                         "x": 33.542597,
@@ -1464,20 +1372,20 @@
             "description": "Rear solder mask aperture bridges items with different nets",
             "items": [
                 {
-                    "description": "Pad 7 [GND] of U2 on B.Cu",
+                    "description": "Pad 3 [rts#] of U2 on B.Cu",
                     "pos": {
                         "x": 35.262,
-                        "y": 155.265
+                        "y": 157.865
                     },
-                    "uuid": "ce1d6f90-c739-46ee-96a9-94c657e32855"
+                    "uuid": "c0813100-4234-440a-971f-597ef4547b67"
                 },
                 {
-                    "description": "Pad 8 [<no net>] of U2 on B.Cu",
+                    "description": "Pad 4 [Net-(C1-Pad2)] of U2 on B.Cu",
                     "pos": {
                         "x": 35.262,
-                        "y": 154.615
+                        "y": 157.215
                     },
-                    "uuid": "c63a0414-b6c2-4735-b174-84c92be937ad"
+                    "uuid": "9579cd7c-94ae-4338-8f10-a6552e4d1a7f"
                 }
             ],
             "severity": "error",
@@ -1501,6 +1409,98 @@
                         "y": 144.984945
                     },
                     "uuid": "021df87a-aa31-4d77-a007-e9130167d7a7"
+                }
+            ],
+            "severity": "error",
+            "type": "solder_mask_bridge"
+        },
+        {
+            "description": "Rear solder mask aperture bridges items with different nets",
+            "items": [
+                {
+                    "description": "Pad 4 [Net-(C1-Pad2)] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 157.215
+                    },
+                    "uuid": "9579cd7c-94ae-4338-8f10-a6552e4d1a7f"
+                },
+                {
+                    "description": "Pad 5 [rxd] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 156.565
+                    },
+                    "uuid": "d5fbec82-8fb8-409b-8854-fe93ca070a33"
+                }
+            ],
+            "severity": "error",
+            "type": "solder_mask_bridge"
+        },
+        {
+            "description": "Rear solder mask aperture bridges items with different nets",
+            "items": [
+                {
+                    "description": "Pad 5 [rxd] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 156.565
+                    },
+                    "uuid": "d5fbec82-8fb8-409b-8854-fe93ca070a33"
+                },
+                {
+                    "description": "Pad 6 [Net-(U2-Pad6)] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 155.915
+                    },
+                    "uuid": "2bfd02de-09e9-4ca1-8157-5ec4698e2824"
+                }
+            ],
+            "severity": "error",
+            "type": "solder_mask_bridge"
+        },
+        {
+            "description": "Rear solder mask aperture bridges items with different nets",
+            "items": [
+                {
+                    "description": "Pad 6 [Net-(U2-Pad6)] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 155.915
+                    },
+                    "uuid": "2bfd02de-09e9-4ca1-8157-5ec4698e2824"
+                },
+                {
+                    "description": "Pad 7 [GND] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 155.265
+                    },
+                    "uuid": "ce1d6f90-c739-46ee-96a9-94c657e32855"
+                }
+            ],
+            "severity": "error",
+            "type": "solder_mask_bridge"
+        },
+        {
+            "description": "Rear solder mask aperture bridges items with different nets",
+            "items": [
+                {
+                    "description": "Pad 7 [GND] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 155.265
+                    },
+                    "uuid": "ce1d6f90-c739-46ee-96a9-94c657e32855"
+                },
+                {
+                    "description": "Pad 8 [<no net>] of U2 on B.Cu",
+                    "pos": {
+                        "x": 35.262,
+                        "y": 154.615
+                    },
+                    "uuid": "c63a0414-b6c2-4735-b174-84c92be937ad"
                 }
             ],
             "severity": "error",
