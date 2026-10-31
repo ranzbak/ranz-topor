@@ -1,9 +1,10 @@
-# M4 UI design — wireframes for the Topor KiCad 10 plugin dialogs (Task B4, draft for review)
+# M4 UI design — wireframes for the Topor KiCad 10 plugin dialogs (Task B4, reviewed)
 
 **Scope.** Six screens of the IPC plugin (wxPython 4.2.1, own process started by KiCad 10, Linux/GTK
 first): (1) first-run `topor.toml` notice, (2) options + pre-flight, (3) progress, (4) preview
-Accept/Reject, (5) run report, (6) error. B9 implements `WxUi(UiPort)` from this note verbatim; B5's
-flow calls it: `first_run_notice` → `preflight` → `progress`… → `preview` → (report) / `error`.
+Accept/Reject, (5) run report + done notice, (6) error. B9 implements `WxUi(UiPort)` from this note
+verbatim; B5's flow calls it: `first_run_notice` → `progress`(pre-flight DRC) → `preflight` →
+`progress`… → `preview` → `done` / `error`. Reviewed (F): `.superpowers/sdd/2026-11-01-topor-m4b-plugin/task-B4-review.md`.
 
 ## 0. Common rules (apply to every dialog)
 
@@ -18,8 +19,11 @@ flow calls it: `first_run_notice` → `preflight` → `progress`… → `preview
   on Windows — never hand-order them. Extra actions (`Open file`, `Open report folder`, `Copy
   details`, `Help`) sit in a left-aligned row of the same bottom line (`wx.ID_HELP` goes in the
   std sizer). `SetAffirmativeId(wx.ID_OK)`, `SetEscapeId(wx.ID_CANCEL)` → **Enter = default,
-  Esc = Cancel** on every dialog; the window-manager close box = Esc. Mnemonics (`&Route`) are set on
-  every button and checkbox; the Wording tables list `GetLabelText()` (mnemonic stripped).
+  Esc = Cancel** on every dialog; the window-manager close box = Esc. `AddButton` takes stock ids
+  only, so the bottom line is `wx.BoxSizer(HORIZONTAL)`: extra buttons, stretch spacer, std sizer.
+  Mnemonics (`&Route`) are set on every button, checkbox and radio; each dialog lists its set below
+  and no letter repeats within a dialog (`Cancel`/`Close` always own `C`); the Wording tables list
+  `GetLabelText()` (mnemonic stripped).
 - **Sizes / HiDPI.** All sizes below are DIP; code uses `self.FromDIP(wx.Size(w, h))` /
   `FromDIP(n)`; at 200 % scaling the physical size doubles automatically. Minimum button width
   `FromDIP(88)`; vertical spacing between rows `FromDIP(6)`, between groups `FromDIP(12)`, dialog
@@ -30,14 +34,19 @@ flow calls it: `first_run_notice` → `preflight` → `progress`… → `preview
   `wx.SystemSettings.GetColour(wx.SYS_COLOUR_BTNFACE / WINDOW / WINDOWTEXT / GRAYTEXT / HIGHLIGHT /
   HIGHLIGHTTEXT)`; dark/light is whatever GTK gives the process (`wx.SystemSettings.GetAppearance()
   .IsDark()` only for the preview tint check). Severity is shown by **icon + word** (`wx.ArtProvider`
-  `ART_ERROR / ART_WARNING / ART_INFORMATION`, `FromDIP(16)`), never by colour alone. The single
-  exception is the preview's new-copper highlight (§4).
+  `ART_ERROR / ART_WARNING / ART_INFORMATION`, `FromDIP(16)`, via a `wx.ImageList` in the list;
+  if GTK renders the icons poorly at 200 % the icon is dropped and the word stays — the word is
+  mandatory), never by colour alone. The single exception is the preview's new-copper highlight (§4).
 - **Text.** Default GUI font; paths and details in a read-only `wx.TextCtrl` (selectable, copyable,
   `wx.FONTFAMILY_TELETYPE`), `wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_BESTWRAP` for prose. Long
-  messages wrap; nothing truncates silently. Every finding/error shows **code, cause, fix** (46 §1.1).
+  messages wrap; nothing truncates silently. Every finding/error shows **code, cause, fix** (46 §1.1);
+  a fix names only a KiCad menu path or a key that exists in `plugin/topor/schema.py`, never an
+  invented one.
 - **Keyboard.** Tab order = reading order (top-left → bottom-right, buttons last). Focus starts on
   the first editable control, or on the default button when there is none. Every control has a
-  label (`wx.StaticText` immediately before it, so GTK's a11y tree names it).
+  label: a `wx.StaticText` immediately before it, **and** — because wx/GTK sets no ATK label-for
+  relation — `SetName(label)` + `SetToolTip(label)` on controls whose text is not their own
+  (`Choice`, `SpinCtrl`, `TextCtrl`, `ListCtrl`, the image window).
 - **States.** Each dialog defines *empty*, *busy* and *error* below; where a state does not exist
   it is stated. Never a disabled control without a visible reason.
 
@@ -59,9 +68,9 @@ flow calls it: `first_run_notice` → `preflight` → `progress`… → `preview
 +------------------------------------------------------------------+
 ```
 
-Min 440×200. Focus: `Continue` (default). Keys: Enter/Esc = Continue, Alt+O = Open file (opens the
-file in the system editor via `wx.LaunchDefaultApplication`, dialog stays open), Tab cycles path
-field → Open file → Continue. Path field: read-only, monospace, selectable. No empty/busy state;
+Min 440×200. Focus: `Continue` (default). Keys: Enter/Esc = Continue; mnemonics Alt+O Open file
+(opens the file in the system editor via `wx.LaunchDefaultApplication`, dialog stays open), Alt+C
+Continue; Tab cycles path field → Open file → Continue. Path field: read-only, monospace, selectable. No empty/busy state;
 error state: if the file could not be written B5 raises → dialog 6 (`CFG_CREATED` is info only).
 
 ## 2. Options + pre-flight — `UiPort.preflight(findings, summary, cfg) -> Decision`
@@ -92,28 +101,33 @@ error state: if the file could not be written B5 raises → dialog 6 (`CFG_CREAT
 |   [x] Respect locked tracks and vias                                       |
 |   [ ] Keep partial routes                                                  |
 |   Time limit  [  60 ]^ s   0 = no limit                                    |
-|   Threads     [   0 ]^     0 = all cores                                   |
+|   Threads     [   0 ]^     0 = all cores but one                           |
 |   [ ] Save these options to topor.toml                                     |
 |                                                                            |
 | [ Help ]                                           [ Cancel ]  [ Route ]   |
 +----------------------------------------------------------------------------+
+   error state, bottom line:
+| [ Help ]  (x) Cannot route: 1 error — see Fix above.  [ Cancel ]  [ Route ]|  (Route disabled)
 ```
 
-Resizable, min 640×560, opens at 720×620; the findings list takes the extra height. Default `Route`.
+Resizable, min 640×480 (list ≥ 4 rows, Cause pane 3 lines), opens at 720×620 clamped to 90 % of
+the display client area; the findings list takes the extra height. Default `Route`.
 
 **Behaviour.**
 
-- Header line = `RunSummary` (connections in scope, nets, layers, engine version).
-- Findings list: `wx.ListCtrl` report mode, sorted error → warn → info, then by code; icon + word in
-  column 1 (`Error` / `Warn` / `Note`). Selecting a row fills the Cause/Fix pane (read-only
-  `TextCtrl`, 3 lines min, wraps). The `Accept` checkbox is visible only for acceptable codes
-  (`PAD_OUTSIDE_BOARD` → "skip these pads … `ignore_pads`", `DRILL_OUTSIDE_FILTER` → "add these
-  drills to `allowed_drills_mm`"); each checked code goes to `Decision.accepted_codes`. Row 1 is
-  selected on open. Message column = `Finding.message`; items (`Finding.items`) appear in the Cause
-  text, up to 10, then "… and {n} more (all in the report)".
-- **Error present → `Route` disabled** and the status text left of the buttons reads
-  `Cannot route: {n} error(s) — see Fix above.` (so the disabled button has a visible reason).
-  Warnings never block. `fail_on_preexisting` turns `PREEXISTING_DRC` into an error (B6).
+- Header line = `RunSummary` (connections in scope, nets, layers, engine version). The connection
+  count follows the Scope radio live, from `RunSummary.connections_by_scope[mode]` (B6/B7).
+- Findings list: `wx.ListCtrl` report mode, sorted error → warning → info, then by code; icon + word
+  in column 1 from `Finding.severity`: `error` → `Error`, `warning` → `Warn`, `info` → `Note`.
+  Selecting a row fills the Cause/Fix pane (read-only `TextCtrl`, 3 lines min, wraps). **One**
+  `Accept` checkbox sits under the pane, shown only while the selected row's code is acceptable
+  and relabelled per code (`PAD_OUTSIDE_BOARD` → `accept_pads`, `DRILL_OUTSIDE_FILTER` →
+  `accept_drills`); its checked state is kept per code, and the checked codes form
+  `Decision.accepted_codes`. Row 1 is selected on open. Message column = `Finding.message`; items
+  (`Finding.items`) appear in the Cause text, up to 10, then "… and {n} more (all in the report)".
+- **Error present → `Route` disabled** and the status text left of the buttons (error icon + text)
+  reads `Cannot route: {n} error(s) — see Fix above.` (so the disabled button has a visible
+  reason). Warnings never block. `fail_on_preexisting` turns `PREEXISTING_DRC` into an error (B6).
 - Scope radios: enabled only when the KiCad selection contains footprints; otherwise the two
   selection radios are disabled and `Whole board` is checked, with the grey hint
   `(nothing selected in KiCad)` after it. Initial value = `cfg.scope_mode` if a selection exists.
@@ -121,7 +135,8 @@ Resizable, min 640×560, opens at 720×620; the findings list takes the extra he
   `Rip up and re-route` (`rip`). Respect locked = `respect_locked`; partial routes =
   `partial_routes`; Time limit = `timeout_s` (`SpinCtrl` 0…86 400, step 10); Threads = `threads`
   (0…256). `Save these options to topor.toml` → `Decision.save_to_toml` (B1 `update_config`,
-  comments kept). Initial values = `cfg`; the header count is for `cfg.scope_mode` (see open Q4).
+  comments kept). Initial values = `cfg`. Every other `topor.toml` key (`unrouted_only`,
+  `[iterations]`, `[vias]`, …) is file-only and never gets a dialog control.
 - Returns `Decision(proceed, accepted_codes, overrides)`; Cancel/Esc → `proceed=False`, nothing
   written (not even accepted codes).
 - **Empty:** no findings → list has zero rows; the Cause pane shows
@@ -129,11 +144,13 @@ Resizable, min 640×560, opens at 720×620; the findings list takes the extra he
   pre-flight (incl. the kicad-cli DRC on the copy) runs *before* this dialog under dialog 3 with phase
   `Checking the board (KiCad DRC)`. **Error:** see "Error present".
 - Keys: Tab list → Cause pane → Accept → Scope radios (arrows) → Existing copper → Respect locked →
-  Keep partial → Time limit → Threads → Save → Help → Cancel → Route. Enter = Route (also from the
-  list), Esc = Cancel, Alt+R Route, Alt+A Accept, Alt+L Respect locked, Alt+K Keep partial, Alt+S
-  Save, Alt+H Help (opens `docs/user/operate.md#options` via the default browser). Mnemonics only on
-  buttons/checkboxes/radios (GTK `wx.StaticText` mnemonics do not move focus); spin controls are
-  reached by Tab.
+  Keep partial → Time limit → Threads → Save → Help → Cancel → Route. Enter = Route; inside the
+  GTK list Enter raises `EVT_LIST_ITEM_ACTIVATED`, which B9 binds to the Route handler (no-op while
+  disabled). Esc = Cancel. Mnemonics: Alt+R Route, Alt+A Accept, Alt+W Whole board, Alt+B Between,
+  Alt+T Touching, Alt+L Respect locked, Alt+K Keep partial, Alt+S Save, Alt+H Help (opens
+  `docs/user/operate.md#options` via the default browser), Alt+C Cancel. Mnemonics only on
+  buttons/checkboxes/radios (GTK `wx.StaticText` mnemonics do not move focus); `Choice` and spin
+  controls are reached by Tab.
 
 ## 3. Progress — `UiPort.progress(p) -> bool`
 
@@ -148,27 +165,33 @@ Resizable, min 640×560, opens at 720×620; the findings list takes the extra he
 | Iteration   3 of up to 30        Routed    12 / 27        |
 | Vias        4                    Elapsed   0:12 / 1:00    |
 |                                                           |
-| Cancel keeps the best result so far and shows the preview.|
+| Cancel keeps the best result so far.                      |
 |                                                           |
 |                                              [ Cancel ]   |
 +-----------------------------------------------------------+
 ```
 
 Min 460×240, not resizable. Opened on the first `progress()` call (modeless `Show()`), updated on
-every call (B5 polls every 0.25 s), hidden when `p.phase == "done"` or when any other `UiPort`
-method is called (belt and braces). The dialog never blocks: `WxUi.progress` updates the widgets,
-calls `wx.YieldIfNeeded()` and returns `not self._cancelled`.
+every call (B5 polls every 0.25 s) and **closed only by the next other `UiPort` call**
+(`preflight`, `preview`, `error`, `done`) — never on a phase value, because the plugin phases
+`drc` and `preview` come *after* the engine's `done`, and the DRC loop may re-enter `route`. The
+dialog never blocks: `WxUi.progress` updates the widgets, calls `wx.YieldIfNeeded()` and returns
+`not self._cancelled`.
 
-- Phase label text = `Progress.phase` mapped through a table (B9): `preflight_drc` →
-  `Checking the board (KiCad DRC)`, `metrize` → `Preparing geometry`, `route` →
-  `Routing — negotiation pass`, `drc` → `Verifying with KiCad DRC`, `smooth` → `Smoothing`,
-  unknown → the raw phase string. Gauge: determinate `routed/total` when `total > 0` and phase is
-  `route`; otherwise `Pulse()` (indeterminate) every call.
-- Numbers right-aligned in fixed-width labels. Elapsed `m:ss`; limit shown as `/ {limit}` or
-  `/ no limit` when `timeout_s == 0` (then Cancel is the only stop — the hint line says so).
+- Phase label text = `Progress.phase` mapped through a table (B9). Engine phases (`control.rs`,
+  exactly these): `setup` → `Preparing geometry`, `route` → `Routing — negotiation pass`, `done` →
+  `Routing finished`. Plugin phases (B5 sets them on its own `Progress` copies): `preflight_drc` →
+  `Checking the board (KiCad DRC)`, `drc` → `Verifying with KiCad DRC`, `preview` →
+  `Rendering the preview`. Anything else → the raw phase string. Gauge: determinate `routed/total`
+  only when phase is `route` and `total > 0`; otherwise `Pulse()` (indeterminate) every call.
+  Iteration cap `{cap}` = `[iterations] max` (default 30).
+- Numbers right-aligned in fixed-width labels. Elapsed and limit both `m:ss` (`h:mm:ss` from one
+  hour); limit shown as `/ {limit}` or `/ no limit` when `timeout_s == 0` (then Cancel is the only
+  stop — the hint line says so).
 - **Cancel** (default and escape; Enter also triggers it): label becomes
   `Cancelling — keeping the best result so far…`, button disabled, gauge pulses; the method returns
-  `False` from then on; B5 calls `job.cancel()` and continues with DRC + preview.
+  `False` from then on; B5 calls `job.cancel()` and continues with DRC + preview when anything was
+  routed, else ends with outcome `cancelled` (§5).
 - **Empty:** before the first engine iteration `routed/total` shows `– / {total}`. **Busy:** is the
   normal state. **Error:** none; an exception closes this dialog and opens dialog 6.
 - Keys: Esc/Enter/Alt+C = Cancel; Tab stays on Cancel.
@@ -179,7 +202,7 @@ calls `wx.YieldIfNeeded()` and returns `not self._cancelled`.
 +--------------------------------------------------------------------------------------+
 | Topor — Preview: eprom-to-kernal                                                 [x] |
 +--------------------------------------------------------------------------------------+
-| Zoom [ Fit v ]            Legend: F.Cu  B.Cu  ■ new copper (highlighted)              |
+| Zoom [ Fit v ]            Legend: F.Cu · B.Cu · ■ new copper (highlighted)            |
 | +----------------------------------+ +----------------------------------+            |
 | |         Current board            | |            Result                | | Summary   |
 | |                                  | |                                  | |-----------|
@@ -195,38 +218,43 @@ calls `wx.YieldIfNeeded()` and returns `not self._cancelled`.
 +--------------------------------------------------------------------------------------+
 ```
 
-Resizable, min 960×600, opens at 85 % of the display (`wx.Display.GetClientArea()`), remembers its
-size per session only. Default `Accept`, Esc = `Reject`. Accept = one KiCad commit (one undo step
+Resizable, min 800×520 (the image area scrolls, so the minimum is set by the summary pane and the
+buttons), opens at 85 % of the display (`wx.Display.GetClientArea()`), remembers its size per
+session only. Default `Accept`, Esc = `Reject`. Accept = one KiCad commit (one undo step
 `Edit → Undo`), Reject = nothing written (B5).
 
-- Image: the one PNG B5 renders (both panels + caption lines) in a `wx.ScrolledWindow` with a
-  `wx.StaticBitmap`; `Zoom` choice `Fit` (default, keeps aspect) / `100 %` / `200 %`; mouse wheel
-  scrolls, Ctrl+wheel steps the zoom. The titles `Current board` / `Result` and the legend are part
-  of the PNG caption (B5) **and** repeated as dialog labels, so a screen reader gets them.
+- Image: the one PNG B5 renders (both panels + caption lines) in a `wx.ScrolledWindow`
+  (`wx.WANTS_CHARS`, `SetCanFocus(True)`, 1 px `SYS_COLOUR_GRAYTEXT` border) with a
+  `wx.StaticBitmap`; `Zoom` choice `Fit` (default, fits the DIP client area, keeps aspect) /
+  `100 %` (one PNG pixel per DIP, i.e. ×2 physical at 200 %) / `200 %`; mouse wheel scrolls,
+  Ctrl+wheel steps the zoom. The titles `Current board` / `Result` and the legend are part of the
+  PNG caption (B5) **and** repeated as dialog labels (text; only the new-copper swatch is drawn),
+  so a screen reader gets them.
 - **Highlight (the one hard-coded colour).** New copper is drawn in its layer colour with a halo
-  `2 × width` underneath in `PREVIEW_HIGHLIGHT_RGB = (0, 139, 139)` (#008B8B). Contrast against
-  white #FFFFFF 4.2:1 and against a dark window #2D2D2D 3.3:1 (WCAG 3:1 for graphics, both themes);
-  distinguishable from F.Cu #C83434 and B.Cu #4D7FC4 by hue only (luminance contrast against the
+  `2 × width` underneath in `PREVIEW_HIGHLIGHT_RGB = (0, 139, 139)` (#008B8B). Contrast: white
+  #FFFFFF 4.15:1, KiCad dark board #001023 4.61:1, dark window #2D2D2D 3.32:1, but Adwaita-dark
+  #353535 only 2.96:1 — hence the runtime check below (WCAG 3:1 for graphics, both themes).
+  Distinguishable from F.Cu #C83434 and B.Cu #4D7FC4 by hue only (luminance contrast against the
   copper colours is ≈ 1:1), which is why the halo *width* (shape) and the existing copper drawn at
   60 % alpha in the Result panel carry the distinction — the cue is never colour only.
   B5 computes the contrast of the tint against the actual panel background at render time (relative
   luminance, WCAG formula) and falls back to `PREVIEW_HIGHLIGHT_FALLBACK_RGB = (208, 64, 208)`
-  (#D040D0, 3.9:1 / 3.5:1) if the primary is < 3:1. Panel background = KiCad theme
-  `board.background` when the export carries it (UNVERIFIED for `kicad-cli pcb export svg`), else
-  `SYS_COLOUR_WINDOW`. Both constants live in `plugin/topor/preview.py` (B5); B9 imports them for
-  the legend swatch.
+  (#D040D0: 3.94 / 4.85 / 3.49 / 3.11:1 on the same four backgrounds) if the primary is < 3:1.
+  Panel background = KiCad theme `board.background` when the export carries it (**UNVERIFIED** for
+  `kicad-cli pcb export svg`; GUI checklist item), else `SYS_COLOUR_WINDOW`. Both constants live in
+  `plugin/topor/preview.py` (B5); B9 imports them for the legend swatch.
 - Summary pane: `report.summary_lines()` (≤ 20, §5) in a read-only `TextCtrl`, min width 260.
   Report folder: read-only monospace field with the full path; `Open report folder` →
-  `wx.LaunchDefaultApplication(dir)`; disabled with grey hint `(not written yet)` only if B5 has not
-  written the folder (see open Q2).
+  `wx.LaunchDefaultApplication(dir)`, always enabled: B5 writes `report.md` and `preview.png` into
+  the folder *before* calling `preview()` and rewrites the `Outcome:` line afterwards.
 - **Empty:** image missing/unreadable → the image area shows `Preview could not be rendered
   (see log.txt in the report folder)`; Accept stays enabled (the DRC numbers in the summary are the
   decision basis). **Busy:** none. **Error:** none (exceptions → dialog 6).
 - Keys: Tab Zoom → image (arrows/PgUp/PgDn scroll) → Summary → Report folder → Open report folder →
-  Reject → Accept. Enter = Accept, Esc = Reject, Alt+O Open report folder, Alt+A Accept, Alt+R
-  Reject.
+  Reject → Accept. Enter = Accept, Esc = Reject. Mnemonics: Alt+O Open report folder, Alt+A Accept,
+  Alt+R Reject.
 
-## 5. Run report — `report.md` + the summary shown in the preview (B8)
+## 5. Run report (`report.md`, B8) and done notice — `UiPort.done(outcome: str, report, report_dir: Path) -> None`
 
 Written to `<report_dir>/report.md` next to `preview.png`, `result.json`, `drc.json`, `log.txt`.
 `report_dir` default (C1): `${TOPOR_REPORT_ROOT:-${XDG_CACHE_HOME:-~/.cache}/kicad/10.0/topor}/
@@ -252,8 +280,10 @@ Outcome: {outcome}
 Report: {report_dir}
 ```
 
-`{outcome}` ∈ `applied as one undo step` / `rejected — board unchanged` / `cancelled — best result
-shown` / `aborted at pre-flight` / `error {code}`.
+`{outcome}` maps 1:1 to B5's `RunOutcome.status`: `accepted` → `applied as one undo step`,
+`rejected` → `rejected — board unchanged`, `cancelled` → `cancelled — nothing applied` (Cancel with
+nothing routed, so no preview was shown), `aborted_preflight` → `aborted at pre-flight`, `error` →
+`error {code}`. Cancel followed by Accept/Reject is `accepted`/`rejected` with `Stopped: cancel`.
 
 **`report.md` structure** (headings in the Wording table): 1 Summary (block above) · 2 Connections
 (table: net, from → to, status routed/partial/failed, reason + blocking point for non-routed, rips)
@@ -263,7 +293,8 @@ ratio) · 5 DRC (`routing_new` by type, `preexisting` list, unconnected items; w
 source, built-in defaults used, accepted fallbacks, `topor.toml` path) · 8 Files (the five files) ·
 9 Versions (engine, plugin, kipy, KiCad, kicad-cli). Empty sections print `none`.
 
-**Done notice** (after Accept/Reject; UiPort addition proposed in Q1), min 440×220:
+**Done notice** — `UiPort.done(outcome, report, report_dir)`, called by B5 after Accept, Reject or a
+Cancel without preview (never after `error`, which has its own dialog); modal, min 440×220:
 
 ```text
 +------------------------------------------------------------------+
@@ -277,8 +308,10 @@ source, built-in defaults used, accepted fallbacks, `topor.toml` path) · 8 File
 +------------------------------------------------------------------+
 ```
 
-Second line variants: `Nothing was changed on the board.` (Reject), `Cancelled — the best result
-was shown; nothing was changed.` (Cancel + Reject). Enter/Esc = Close, Alt+O = Open report folder.
+Text by `outcome`: `accepted` → `done_accepted` (prefixed "Stopped early by Cancel: " when
+`stop_reason == "cancel"`, row `done_accepted_cancelled`), `rejected` → `done_rejected`,
+`cancelled` → `done_cancelled`. Focus `Close` (default); Enter/Esc = Close; mnemonics Alt+O Open
+report folder, Alt+C Close. No empty/busy/error state.
 
 ## 6. Error — `UiPort.error(finding)`
 
@@ -290,8 +323,8 @@ was shown; nothing was changed.` (Cancel + Reject). Enter/Esc = Close, Alt+O = O
 |      kicad-cli was not found, so the result cannot be verified.  |
 |                                                                  |
 |      Fix                                                         |
-|      Install KiCad 10 with kicad-cli on PATH, or set              |
-|      [paths] kicad_cli in topor.toml.                            |
+|      Install KiCad 10 (kicad-cli at /usr/bin/kicad-cli), or set   |
+|      the KICAD_CLI environment variable before starting KiCad.   |
 |                                                                  |
 |      Details                                                     |
 |      [ code: KICAD_CLI_MISSING                                 ] |
@@ -308,26 +341,32 @@ then `… and {n} more`), log path, versions, timestamp — what a bug report ne
 (`docs/dev/debug.md`). `Copy details` → `wx.TheClipboard` (label flips to `Copied` for 2 s via
 `wx.CallLater`, then back — the label change is the only feedback, no toast).
 `Open report folder` disabled with hint `(no report folder yet)` when the run failed before the
-folder existed. Enter/Esc = Close, Alt+C Copy details, Alt+O Open report folder. For `INTERNAL`
-(panic/exception) the message is B5's generic text and the fix names `log.txt` + the bug-report
-guide. Nothing is written to the board on this path.
+folder existed (the only dialog where this state exists). Focus `Close` (default); Enter/Esc =
+Close; mnemonics Alt+D Copy details (`Copy &details` — `C` belongs to Close), Alt+O Open report
+folder, Alt+C Close. Tab: Details → Copy details → Open report folder → Close. The example fix
+above names the real resolution (`toporlib/kicad_cli.py`: `$KICAD_CLI`, else `/usr/bin/kicad-cli`);
+B6's `messages.py` owns the final text. For `INTERNAL` (panic/exception) the message is B5's generic
+text and the fix names `log.txt` + the bug-report guide. Nothing is written to the board on this path.
 
 ## 7. Sizes, keyboard and theme — checklist for the GUI test
 
 | Dialog | Min DIP | At 200 % (px) | Default | Esc | Resizable |
 |---|---|---|---|---|---|
 | first_run | 440×200 | 880×400 | Continue | Continue | no |
-| preflight | 640×560 | 1280×1120 | Route (disabled on error) | Cancel | yes |
+| preflight | 640×480 | 1280×960 | Route (disabled on error) | Cancel | yes |
 | progress | 460×240 | 920×480 | Cancel | Cancel | no |
-| preview | 960×600 | 1920×1200 | Accept | Reject | yes |
+| preview | 800×520 | 1600×1040 | Accept | Reject | yes |
 | report (done) | 440×220 | 880×440 | Close | Close | no |
 | error | 520×320 | 1040×640 | Close | Close | yes |
 
-At 200 % the preflight and preview minimums exceed a 1366×768 laptop at 100 % — fine, since 200 %
-implies a ≥ 2560-wide display; on smaller displays `wx.Dialog` clamps to the client area and the
-list/image scroll. Dark theme: every surface is a system colour; icons from the GTK icon theme;
-highlight tint checked ≥ 3:1 at runtime (§4). GUI checklist acceptance (B11): tab order as listed,
-Esc = Cancel, Enter = default, readable at 100 % / 200 %, dark theme.
+Every minimum fits a 1920×1080 panel at 200 % (GTK scales in integer steps, so 13″ 1080p laptops do
+run at 200 %) and a 1366×768 panel at 100 %. Opening sizes are clamped to 90 % of
+`wx.Display.GetClientArea()`; the findings list and the preview image scroll, nothing else needs
+to. Dark theme: every surface is a system colour; icons from the GTK icon theme; highlight tint
+checked ≥ 3:1 at runtime (§4). GUI checklist acceptance (B11): tab order as listed, Esc = Cancel,
+Enter = default, mnemonics as listed, readable at 100 % / 200 %, dark theme, and — UNVERIFIED until
+then — whether the `kicad-cli pcb export svg` background follows the KiCad theme (check the preview
+in light and dark; the halo must stay visible on both).
 
 ## 8. Skill guidance applied
 
@@ -350,12 +389,16 @@ Esc = Cancel, Enter = default, readable at 100 % / 200 %, dark theme.
   (wx modal dialogs) and Esc to leave; focus order and keyboard map per dialog; error messages carry
   a correction (Fix) and the disabled Route states why; no redundant entry (options pre-filled from
   `topor.toml`, "Save" writes them back). Rejected/not applicable: ARIA roles, iOS/Android
-  mappings, `aria-live` (progress updates are plain label changes — GTK AT-SPI announces focused
-  widgets only; noted as a limitation).
+  mappings, `aria-live`. **Known wx/GTK limitations:** no live region (progress label changes are
+  not announced; the `wx.Gauge` is at least exposed as a progress bar), and no label-for relation
+  from a `wx.StaticText` (mitigated by `SetName`/`SetToolTip`, §0).
 
 ## Wording
 
-Text is the exact user-visible string (`GetLabelText()`, mnemonic stripped); `{…}` = runtime value.
+Text is the exact user-visible string (`GetLabelText()`, mnemonic stripped); `{…}` = runtime value;
+a literal `\n` in a cell = newline. B9's `test_wx_ui_wording_matches_wireframes` parses these six
+tables (`dialog` ∈ first_run/preflight/progress/preview/report/error, `kind` ∈
+title/label/button/checkbox/choice/heading/text).
 
 ### first_run
 
@@ -403,7 +446,7 @@ Text is the exact user-visible string (`GetLabelText()`, mnemonic stripped); `{�
 | preflight | timeout_unit | label | s |
 | preflight | timeout_hint | label | 0 = no limit |
 | preflight | threads_label | label | Threads |
-| preflight | threads_hint | label | 0 = all cores |
+| preflight | threads_hint | label | 0 = all cores but one |
 | preflight | save_toml | checkbox | Save these options to topor.toml |
 | preflight | blocked_status | label | Cannot route: {n} error(s) — see Fix above. |
 | preflight | help | button | Help |
@@ -415,11 +458,12 @@ Text is the exact user-visible string (`GetLabelText()`, mnemonic stripped); `{�
 | dialog | id | kind | text |
 |---|---|---|---|
 | progress | title | title | Topor — Routing {board} |
-| progress | phase_preflight_drc | text | Checking the board (KiCad DRC) |
-| progress | phase_metrize | text | Preparing geometry |
+| progress | phase_setup | text | Preparing geometry |
 | progress | phase_route | text | Routing — negotiation pass |
+| progress | phase_done | text | Routing finished |
+| progress | phase_preflight_drc | text | Checking the board (KiCad DRC) |
 | progress | phase_drc | text | Verifying with KiCad DRC |
-| progress | phase_smooth | text | Smoothing |
+| progress | phase_preview | text | Rendering the preview |
 | progress | phase_cancelling | text | Cancelling — keeping the best result so far… |
 | progress | gauge_value | text | {routed} / {total} |
 | progress | iteration_label | label | Iteration |
@@ -431,7 +475,7 @@ Text is the exact user-visible string (`GetLabelText()`, mnemonic stripped); `{�
 | progress | elapsed_label | label | Elapsed |
 | progress | elapsed_value | text | {elapsed} / {limit} |
 | progress | elapsed_nolimit | text | {elapsed} / no limit |
-| progress | cancel_hint | label | Cancel keeps the best result so far and shows the preview. |
+| progress | cancel_hint | label | Cancel keeps the best result so far. |
 | progress | cancel | button | Cancel |
 
 ### preview
@@ -443,14 +487,13 @@ Text is the exact user-visible string (`GetLabelText()`, mnemonic stripped); `{�
 | preview | zoom_fit | choice | Fit |
 | preview | zoom_100 | choice | 100 % |
 | preview | zoom_200 | choice | 200 % |
-| preview | legend_label | label | Legend: F.Cu  B.Cu  new copper (highlighted) |
+| preview | legend_label | label | Legend: F.Cu · B.Cu · new copper (highlighted) |
 | preview | before_heading | heading | Current board |
 | preview | after_heading | heading | Result |
 | preview | summary_heading | heading | Summary |
 | preview | no_image | text | Preview could not be rendered (see log.txt in the report folder) |
 | preview | report_dir_label | label | Report folder |
 | preview | report_dir | text | {report_dir} |
-| preview | report_dir_pending | label | (not written yet) |
 | preview | open_report_folder | button | Open report folder |
 | preview | reject | button | Reject |
 | preview | accept | button | Accept |
@@ -461,8 +504,9 @@ Text is the exact user-visible string (`GetLabelText()`, mnemonic stripped); `{�
 |---|---|---|---|
 | report | title | title | Topor — Finished |
 | report | done_accepted | text | Routed {routed}/{total} connections — applied to the board as one undo step (Edit → Undo). |
+| report | done_accepted_cancelled | text | Stopped early by Cancel: routed {routed}/{total} connections — applied to the board as one undo step (Edit → Undo). |
 | report | done_rejected | text | Nothing was changed on the board. |
-| report | done_cancelled | text | Cancelled — the best result was shown; nothing was changed. |
+| report | done_cancelled | text | Cancelled — nothing was changed on the board. |
 | report | report_dir_label | label | Report folder |
 | report | report_dir | text | {report_dir} |
 | report | open_report_folder | button | Open report folder |
@@ -493,7 +537,7 @@ Text is the exact user-visible string (`GetLabelText()`, mnemonic stripped); `{�
 | report | sum_report | text | Report: {report_dir} |
 | report | outcome_accepted | text | applied as one undo step |
 | report | outcome_rejected | text | rejected — board unchanged |
-| report | outcome_cancelled | text | cancelled — best result shown |
+| report | outcome_cancelled | text | cancelled — nothing applied |
 | report | outcome_preflight | text | aborted at pre-flight |
 | report | outcome_error | text | error {code} |
 
