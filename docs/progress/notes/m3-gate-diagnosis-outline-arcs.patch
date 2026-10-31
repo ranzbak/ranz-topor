@@ -1,0 +1,109 @@
+diff --git a/engine/src/graph.rs b/engine/src/graph.rs
+index 79c53b6..bd950b9 100644
+--- a/engine/src/graph.rs
++++ b/engine/src/graph.rs
+@@ -161,6 +161,33 @@ pub(crate) fn chord(p: &Prim) -> (Vec2, Vec2) {
+     }
+ }
+ 
++/// EXPERIMENT (gate diagnosis): outline as chords with arcs tessellated to sagitta <= 10 um.
++pub(crate) const OUTLINE_SAGITTA_NM: f64 = 10_000.0;
++pub(crate) fn outline_chords(outline: &[Prim]) -> Vec<(Vec2, Vec2)> {
++    let mut out = Vec::new();
++    for p in outline {
++        match p {
++            Prim::Seg(s) => out.push((s.a, s.b)),
++            Prim::Arc(a) => {
++                let n = if a.r > OUTLINE_SAGITTA_NM {
++                    (a.sweep.abs() / (2.0 * (1.0 - OUTLINE_SAGITTA_NM / a.r).acos()))
++                        .ceil()
++                        .max(1.0) as usize
++                } else {
++                    1
++                };
++                let mut prev = a.point_at(0.0);
++                for i in 1..=n {
++                    let q = a.point_at(i as f64 / n as f64);
++                    out.push((prev, q));
++                    prev = q;
++                }
++            }
++        }
++    }
++    out
++}
++
+ /// Ray-casting parity of `p` against the outline chords; empty outline => inside.
+ pub(crate) fn inside_outline(p: Vec2, chords: &[(Vec2, Vec2)]) -> bool {
+     if chords.is_empty() {
+@@ -302,7 +329,7 @@ impl RouteGraph {
+             edge_of.insert((a, b), i);
+         }
+ 
+-        let chords: Vec<(Vec2, Vec2)> = outline.iter().map(chord).collect();
++        let chords: Vec<(Vec2, Vec2)> = outline_chords(outline);
+         let mut faces = Vec::with_capacity(topo.faces.len());
+         let mut faces_of_vertex = vec![Vec::new(); nv];
+         for (fi, &v) in topo.faces.iter().enumerate() {
+diff --git a/engine/src/obstacle.rs b/engine/src/obstacle.rs
+index 2be3852..19fb32e 100644
+--- a/engine/src/obstacle.rs
++++ b/engine/src/obstacle.rs
+@@ -475,7 +475,29 @@ impl ObstacleSet {
+             };
+             let mut f = Frag::default();
+             for o in &model.outline {
+-                f.prim(&dequantise(o), 0.0, &m, true);
++                // EXPERIMENT (gate diagnosis): arcs as sub-arcs with chord sagitta <= 25 um so the
++                // CDT constraint polyline follows the rim instead of the arc's chord.
++                match dequantise(o) {
++                    Prim::Arc(a) => {
++                        const SAG: f64 = 25_000.0;
++                        let n = if a.r > SAG {
++                            (a.sweep.abs() / (2.0 * (1.0 - SAG / a.r).acos())).ceil().max(1.0) as usize
++                        } else {
++                            1
++                        };
++                        for i in 0..n {
++                            let sub = crate::geom::Arc {
++                                c: a.c,
++                                r: a.r,
++                                sigma: a.sigma,
++                                a_start: a.a_start + a.sigma.sign() * a.sweep * (i as f64 / n as f64),
++                                sweep: a.sweep / n as f64,
++                            };
++                            f.prim(&Prim::Arc(sub), 0.0, &m, true);
++                        }
++                    }
++                    p => f.prim(&p, 0.0, &m, true),
++                }
+             }
+             b.add(&all, &f);
+         }
+diff --git a/engine/src/vias.rs b/engine/src/vias.rs
+index 4ec7ab3..2dd9fd9 100644
+--- a/engine/src/vias.rs
++++ b/engine/src/vias.rs
+@@ -9,7 +9,7 @@
+ use crate::cdt::Cdt;
+ use crate::check::Checker;
+ use crate::geom::{dequantise, Aabb, Grid, Skeleton, Vec2};
+-use crate::graph::{chord, inside_outline};
++use crate::graph::{inside_outline, outline_chords};
+ use crate::model::{BoardModel, Rules};
+ use crate::obstacle::ObstacleSet;
+ use serde::Serialize;
+@@ -149,11 +149,8 @@ pub fn via_sites(
+     }
+     if pts.len() >= 3 {
+         if let Ok(cdt) = Cdt::build(&pts, &[]) {
+-            let chords: Vec<(Vec2, Vec2)> = model
+-                .outline
+-                .iter()
+-                .map(|o| chord(&dequantise(o)))
+-                .collect();
++            let prims: Vec<crate::geom::Prim> = model.outline.iter().map(dequantise).collect();
++            let chords: Vec<(Vec2, Vec2)> = outline_chords(&prims);
+             for f in cdt.topology().faces {
+                 let [a, b, c] = f.map(|v| cdt.vertex_pos(v));
+                 let cen = (a + b + c) * (1.0 / 3.0);
