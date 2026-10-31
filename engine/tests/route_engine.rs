@@ -583,8 +583,8 @@ fn eprom_ripped_two_layers_routes_all_without_zero_slack() {
 /// R6 on the real board, F.Cu only: the M2 situation and the M2 gate result. A single routable
 /// layer gets no via sites (M3 scaling diagnosis), so the graph is the M2 graph again: 27/27,
 /// stall stop, the +5V corridor as the one zero-slack wire (R6, DRC-judged: its tangencies are
-/// exact to the 1 nm quantisation, `ZS_QUANT_TOL_NM`), outside-pad length at the M2 gate bound
-/// (67.095 mm, B1). With free via-site vertices in the graph (T9–T12) the negotiation took
+/// exact to the 1 nm quantisation, `ZS_QUANT_TOL_NM`), outside-pad length ratcheted at 67.8 mm
+/// (M2 result 67.095 mm; ruling M3-R12, see the comment at the assertion). With free via-site vertices in the graph (T9–T12) the negotiation took
 /// another way, 26/27 without the corridor.
 #[test]
 fn eprom_ripped_front_only_is_the_m2_result() {
@@ -603,7 +603,13 @@ fn eprom_ripped_front_only_is_the_m2_result() {
     assert_eq!(r.zero_slack, "kept");
     let zs: Vec<&str> = r.zero_slack_wires.iter().map(|w| w.name.as_str()).collect();
     assert_eq!(zs, vec!["+5V"]);
-    assert!(r.length_outside_pads_nm <= 67_100_000, "{}", r.length_outside_pads_nm);
+    // Ratchet (ruling M3-R12): the M2 result was 67.095 mm. With the Rule-T rip fix of commit
+    // 4cc9dad (ghost slots as `cross_slot` chooses them, so strands ending on the ghost's exit
+    // edge are reported as blockers) the rips become effective and the negotiation takes
+    // another trajectory: A12 takes a route 0.73 mm longer (67.767 mm). Bound = that + 33 µm,
+    // and always below the hand's 76.598 mm.
+    assert!(r.length_outside_pads_nm <= 67_800_000, "{}", r.length_outside_pads_nm);
+    assert!(r.length_outside_pads_nm <= 76_598_000, "{}", r.length_outside_pads_nm);
     // Clean at margin 0 except the zero-slack wire, within the 1 nm quantisation tolerance.
     let zs_conn = r.zero_slack_wires[0].conn;
     let o = Options {
