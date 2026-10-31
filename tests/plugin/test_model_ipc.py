@@ -219,18 +219,44 @@ def test_shape_to_prims_flattened_closed_and_bounded():
 
 
 def test_shape_to_polys_capsule_and_filled_rect():
+    """M4-R8 / C25: obstacles CONTAIN the shape (circumscribed), with bounded excess (full check against pcbnew:
+    tests/plugin/test_ipc_conservative.py)."""
+    err = min(1000, M.OBSTACLE_ERR_NM)
     (ring,) = M.shape_to_polys(seg_shape((0, 0), (10 * MM, 0), width=200_000), 1000)
     xs, ys = [p[0] for p in ring], [p[1] for p in ring]
-    assert (min(xs), max(xs)) == (-100_000, 10 * MM + 100_000) and (min(ys), max(ys)) == (-100_000, 100_000)
+    assert -100_000 - err - 2 <= min(xs) <= -100_000 and 10 * MM + 100_000 <= max(xs) <= 10 * MM + 100_000 + err + 2
+    assert -100_000 - err - 2 <= min(ys) <= -100_000 and 100_000 <= max(ys) <= 100_000 + err + 2
+    for q in ring:  # every vertex on or outside the true capsule, by at most err (+ rounding)
+        d = math.hypot(q[0] - min(max(q[0], 0), 10 * MM), q[1])
+        assert 100_000 - 1 <= d <= 100_000 + err + 2, (q, d)
     r = BoardRectangle()
-    r.top_left = kipy.geometry.Vector2.from_xy(0, 0)
-    r.bottom_right = kipy.geometry.Vector2.from_xy(2 * MM, MM)
+    r.top_left = kipy.geometry.Vector2.from_xy(2 * MM, MM)  # corners given in any order: normalised
+    r.bottom_right = kipy.geometry.Vector2.from_xy(0, 0)
     r.attributes.stroke.width = 200_000
     r.attributes.fill.filled = True
-    assert M.shape_to_polys(r, 1000) == [[[-100_000, -100_000], [2_100_000, -100_000], [2_100_000, 1_100_000],
-                                          [-100_000, 1_100_000]]]
+    (box,) = M.shape_to_polys(r, 1000)
+    xs, ys = [p[0] for p in box], [p[1] for p in box]
+    assert (min(xs), max(xs), min(ys), max(ys)) == (-100_001, 2_100_001, -100_001, 1_100_001)
+    for q in box:  # rounded corners of radius w/2 (KiCad's stroke), circumscribed
+        dx, dy = max(-q[0], q[0] - 2 * MM, 0), max(-q[1], q[1] - MM, 0)
+        assert dx == 0 or dy == 0 or 100_000 - 1 <= math.hypot(dx, dy) <= 100_000 + err + 2, q
     r.attributes.fill.filled = False
     assert len(M.shape_to_polys(r, 1000)) == 4  # four stroked sides
+
+
+def test_pad_sample_points_lie_inside_the_pad():
+    """Pour-reach probes never lie outside the pad copper (C26: reach errs toward 'not reached')."""
+    for sh in ({"kind": "circle", "d": MM}, {"kind": "oval", "w": 3 * MM, "h": MM},
+               {"kind": "roundrect", "w": 2 * MM, "h": MM, "rc": 400_000}, {"kind": "rect", "w": 2 * MM, "h": MM}):
+        for rot in (0.0, 30.0, 90.0):
+            pad = {"center": [5 * MM, 7 * MM], "rotation_deg": rot, "shapes": {"0": sh}}
+            pts = M.pad_sample_points(pad, 0)
+            assert len(pts) == 9 and all(M.pad_contains(pad, 0, q) for q in pts), (sh, rot)
+    # a fill touching only the diagonal box corner of a round pad (outside its copper) does not reach it
+    pad = {"ref": "U1", "number": "1", "net": 1, "layers": [0], "center": [0, 0], "rotation_deg": 0.0,
+           "shapes": {"0": {"kind": "circle", "d": MM}}}
+    corner = [[440_000, 440_000], [600_000, 440_000], [600_000, 600_000], [440_000, 600_000]]
+    assert M.pour_reach(1, [0], [{"layer": 0, "outer": corner, "holes": []}], [pad], []) == ([], [])
 
 
 # ---------------------------------------------------------------- zones
@@ -308,7 +334,7 @@ def test_zone_to_pour_fill_reach_and_settings():
     unfilled = mk_zone(bt.ZoneType.ZT_COPPER, [FCU], net="GND")
     d = M.zone_to_pour(unfilled, net_codes=CODES, cu_ids={0, 2}, pads=pads, vias=vias, max_err=5000)
     assert "outline" in d["warning"] and d["fills"][0]["outer"] == [list(p) for p in SQ]
-    assert d["pads"] == ["R1.1", "R1.2"]  # the outline has no hole: the pad at the hole centre counts
+    assert d["pads"] == [] and d["vias"] == []  # M4-R8: an unfilled zone reaches nothing (not reached)
 
 
 # ---------------------------------------------------------------- layer roles (M4-R7)
@@ -442,3 +468,18 @@ def test_export_model_ipc_end_to_end_and_engine_loads_it(engine):
     assert set(m["layers"][0]) == {"id", "name", "kind", "role", "role_source", "routable"}
     rep = json.loads(engine.check_items(json.dumps(m), "[]", "{}"))
     assert rep["checked"] == 0
+
+
+def test_export_model_ipc_via_free_is_the_kicad_flag():
+    """Ruling C23: ``free`` comes from the save_as copy text; a via the copy does not list is free (unsure ->
+    fixed obstacle, never ripped). The old "no track end touches it" guess is gone: the stub's via has no track."""
+    board = stub_board()
+    board.vs[0].id.value = vid = "0b5b6ef8-2bbc-46d8-a400-554a387cf306"
+    rules = R.resolve_rules_from_project({}, None, netclass_of={"": "Default"}, classes={}, widths_before={})
+    base = '(kicad_pcb (version 20260206) (layers (0 "F.Cu" signal) (2 "B.Cu" signal))\n'
+    for tail, want in (("", True),
+                       (f'(via (at 30 8) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net "GND") (uuid "{vid}"))', False),
+                       (f'(via (at 30 8) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (free yes) (net "GND") (uuid "{vid}"))', True),
+                       ('(via (at 30 8) (size 0.8) (layers "F.Cu" "B.Cu") (net "GND") (uuid "other"))', True)):
+        m = M.export_model_ipc(board, StubProject(), base + tail + "\n)\n", rules, name="x.kicad_pcb", dru_text="")
+        assert m["vias"][0]["free"] is want, tail

@@ -1,7 +1,8 @@
 """Minimal `.kicad_pcb` s-expression editing: find / remove / append copper items (segment, arc, via).
 
 Pure text, no pcbnew (M4-R1). Only the top-level children of ``(kicad_pcb ...)`` are considered, so
-footprint graphics are never mistaken for tracks. ``parse_layers`` reads the ``(layers ...)`` table.
+footprint graphics are never mistaken for tracks. ``parse_layers`` reads the ``(layers ...)`` table,
+``via_free_flags`` KiCad's per-via "free" flag (not in the IPC API).
 
 Complexity: ``find_items`` is O(len(text)) (one regex pass, string-literal aware); ``remove_items`` is
 O(len(text) + #removed) ; ``append_items`` is O(len(text) + #items) (a final-paren search and one
@@ -233,4 +234,24 @@ def parse_zone_fills(text: str) -> dict:
                 head = chunk[: heads[0]] if heads else chunk
                 u = _Z_UUID.search(head)
                 out[u.group(1) if u else f"#{zi - 1}"] = polys
+    return out
+
+
+_FREE = re.compile(r"\(\s*free(?:\s+(yes|no|true|false))?\s*\)")
+_VIA_ID = re.compile(r'\(\s*(?:uuid|tstamp)\s+"?([0-9A-Za-z\-]+)"?\s*\)')
+
+
+def via_free_flags(text: str) -> dict[str, bool]:
+    """KiCad's "free" flag of every top-level via: ``{via uuid: bool}`` (ruling C23; the IPC API of KiCad 10 /
+    kipy 0.8 does not expose it). KiCad 10 writes ``(free yes)`` and ``(uuid "…")``; legacy files (KiCad 6)
+    ``(free)`` and ``(tstamp …)``; ``(free no)`` / no token = False. A via without an id is skipped (the caller
+    treats a missing uuid as free = unsure). O(len(text)) (one tokenizer pass plus a bounded regex per via)."""
+    out: dict[str, bool] = {}
+    for sp in find_items(text, ("via",)):
+        body = text[sp.start:sp.end]
+        m = _VIA_ID.search(body)
+        if not m:
+            continue
+        f = _FREE.search(body)
+        out[m.group(1)] = bool(f) and (f.group(1) or "yes") in ("yes", "true")
     return out

@@ -1,16 +1,20 @@
-"""IPC-vs-harness model parity (M4-R5). LIVE: needs a running KiCad (KICAD_API_SOCKET) with the snapshot board
-open in the PCB editor; skipped otherwise (never started or touched by the test suite). The comparison helpers
+"""IPC-vs-harness model parity (M4-R5, M4-R8). LIVE: needs a running KiCad (KICAD_API_SOCKET) with the snapshot
+board open in the PCB editor; skipped otherwise (never started or touched by the test suite). The comparison helpers
 are self-tested offline.
 
-Tolerances: every coordinate 0 nm, except
-  * pad shapes: polygon-equivalent within 1 um (a native shape on one side vs a polygon on the other is
+Every coordinate must be equal (0 nm), except where M4-R8 allows a CONSERVATIVE approximation; there the test
+asserts the direction, not equality:
+  * pad shapes: polygon-equivalent within 1 um (M4-R5; a native shape on one side vs a polygon on the other is
     compared as polygons; same native kind -> exact numbers, roundrect radius within 1 um);
-  * copper_shapes (stroked graphics are polygonised by two different engines): same uuid/layer/net, bounding
-    box within 2 * max_error;
-  * pours: same uuid/net/layers/settings and reached pads/vias; fills compared by area (0.5 %), because KiCad
-    refills them on each side;
-  * via ``free`` is approximated on the IPC side and not compared.
-Net codes differ between the sides (pcbnew's vs sorted-name), so everything is compared by net NAME."""
+  * copper_shapes (graphics and text): per (uuid, layer) the IPC obstacle CONTAINS the harness polygon within
+    1 um (IPC ⊇ pcbnew; the bounded excess is proven offline in test_ipc_conservative.py). An arc whose stored
+    mid point is not its angular midpoint is compared with pcbnew's polygon of the same arc drawn with the true
+    midpoint (pcbnew's own polygon of such an arc is off-centre; KiCad's DRC shape is the true arc);
+  * pours: same uuid / net / layers / settings; fills polygon-equivalent (symmetric difference <= 1 um^2);
+    reached pads / vias of the IPC side ⊆ the harness side (pour reach errs toward "not reached", C26);
+  * via ``free``: exact (C23; the IPC side reads KiCad's flag from the save_as copy).
+Net codes differ between the sides (pcbnew's vs sorted-name), so everything is compared by net NAME. Polygon
+areas use pcbnew SHAPE_POLY_SET (test side only)."""
 import math
 import os
 
@@ -18,7 +22,8 @@ import pytest
 
 from toporlib import geom
 
-MAX_ERR_SLACK = 2  # x max_error
+UM = 1000
+EPS_AREA = 1.0 * UM * UM  # nm^2
 
 PAD_TOL = 1000  # nm
 
@@ -128,7 +133,6 @@ def compare_models(h: dict, i: dict) -> list[str]:
             a, b = dict(ha[u]), dict(ia[u])
             if nh[a.pop("net")] != ni[b.pop("net")]:
                 bad.append(f"{sect} {u} net")
-            a.pop("free", None), b.pop("free", None)
             if a != b:
                 bad.append(f"{sect} {u}: {a} vs {b}")
 
@@ -144,36 +148,42 @@ def compare_models(h: dict, i: dict) -> list[str]:
     if srt(h["net_ties"], str) != srt(i["net_ties"], str):
         bad.append("net_ties differ")
 
-    def boxes(m):
-        out = {}
+    from tests.plugin.test_ipc_conservative import inflated, minus_area, sps, sps_fills  # pcbnew: test side only
+
+    def shapes(m):
+        out: dict = {}
         for c in m["copper_shapes"]:
-            xs, ys = [q[0] for q in c["poly"]], [q[1] for q in c["poly"]]
-            o = out.setdefault((c["uuid"], c["layer"]), [min(xs), min(ys), max(xs), max(ys)])
-            o[:] = [min(o[0], *xs), min(o[1], *ys), max(o[2], *xs), max(o[3], *ys)]
+            out.setdefault((c["uuid"], c["layer"]), []).append(c["poly"])
         return out
 
-    me = MAX_ERR_SLACK * h["rules"].get("max_error", 5000)
-    bh, bi = boxes(h), boxes(i)
-    if set(bh) != set(bi):
-        bad.append("copper_shapes (uuid, layer) sets differ")
-    for k in set(bh) & set(bi):
-        if any(abs(x - y) > me for x, y in zip(bh[k], bi[k])):
-            bad.append(f"copper_shape {k} bbox {bh[k]} vs {bi[k]}")
+    sh, si = shapes(h), shapes(i)
+    if set(sh) != set(si):
+        bad.append(f"copper_shapes (uuid, layer) sets differ: -{sorted(set(sh) - set(si))[:3]} "
+                   f"+{sorted(set(si) - set(sh))[:3]}")
+    for k in sorted(set(sh) & set(si)):
+        miss = minus_area(sps(sh[k]), inflated(sps(si[k]), UM))
+        if miss > EPS_AREA:
+            bad.append(f"copper_shape {k}: {miss:.0f} nm^2 of the harness polygon outside the IPC obstacle")
 
     hz, iz = {z["uuid"]: z for z in h["pours"]}, {z["uuid"]: z for z in i["pours"]}
     if set(hz) != set(iz):
         bad.append("pour uuid sets differ")
     for u in set(hz) & set(iz):
         a, b = hz[u], iz[u]
-        for f in ("layers", "pads", "vias", "clearance", "min_thickness", "thermal_gap", "spoke_width", "pad_connection"):
+        for f in ("layers", "clearance", "min_thickness", "thermal_gap", "spoke_width", "pad_connection"):
             if a[f] != b[f]:
                 bad.append(f"pour {u} {f}: {a[f]} vs {b[f]}")
         if nh[a["net"]] != ni[b["net"]]:
             bad.append(f"pour {u} net")
-        fa = sum(_area([f["outer"], *f["holes"]]) for f in a["fills"])
-        fb = sum(_area([f["outer"], *f["holes"]]) for f in b["fills"])
-        if abs(fa - fb) > 0.005 * max(fa, 1):
-            bad.append(f"pour {u} fill area {fa} vs {fb}")
+        for f in ("pads", "vias"):
+            extra = sorted(set(b[f]) - set(a[f]))
+            if extra:
+                bad.append(f"pour {u} {f}: IPC reaches what pcbnew does not: {extra[:5]}")
+        for l in a["layers"]:
+            fa, fb = sps_fills(a["fills"], l), sps_fills(b["fills"], l)
+            sym = minus_area(fa, fb) + minus_area(fb, fa)
+            if sym > EPS_AREA:
+                bad.append(f"pour {u} layer {l}: fill symmetric difference {sym:.0f} nm^2")
 
     de = lambda ls: sorted(((x["item"], tuple(x["end"])) for x in ls))  # noqa: E731
     if de(h["dangling_ends"]) != de(i["dangling_ends"]):
@@ -216,6 +226,101 @@ def test_compare_models_detects_a_difference():
     assert any("center" in b for b in bad) and any("kept" in b for b in bad)
 
 
+def test_compare_models_asserts_the_conservative_directions():
+    """M4-R8: a bigger IPC obstacle / fewer reached items pass; a smaller obstacle, an IPC-only reach, a fill
+    difference or a different free flag fail."""
+    import copy
+
+    from tests.plugin.test_model_ipc import StubProject, stub_board
+    from topor import model_ipc as M
+    from toporlib import rules as R
+
+    rules = R.resolve_rules_from_project({}, None, netclass_of={"": "Default"}, classes={}, widths_before={})
+    h = M.export_model_ipc(stub_board(), StubProject(), '(kicad_pcb (layers (0 "F.Cu" signal) (2 "B.Cu" signal)))',
+                           rules, name="x.kicad_pcb")
+    assert h["copper_shapes"] and h["pours"] and h["pours"][0]["pads"] and h["vias"]
+
+    def scaled(m, k):
+        out = copy.deepcopy(m)
+        for c in out["copper_shapes"]:
+            cx = sum(q[0] for q in c["poly"]) / len(c["poly"])
+            cy = sum(q[1] for q in c["poly"]) / len(c["poly"])
+            c["poly"] = [[int(cx + k * (q[0] - cx)), int(cy + k * (q[1] - cy))] for q in c["poly"]]
+        return out
+
+    assert compare_models(h, scaled(h, 1.01)) == []  # IPC obstacle bigger: conservative
+    assert any("outside the IPC obstacle" in b for b in compare_models(h, scaled(h, 0.99)))
+    fewer = copy.deepcopy(h)
+    fewer["pours"][0]["pads"] = []
+    assert compare_models(h, fewer) == []  # IPC reaches less: conservative
+    assert any("IPC reaches" in b for b in compare_models(fewer, h))
+    holed = copy.deepcopy(h)
+    f = holed["pours"][0]["fills"][0]
+    x0, y0 = min(q[0] for q in f["outer"]), min(q[1] for q in f["outer"])
+    f["holes"] = [[[x0 + 10_000, y0 + 10_000], [x0 + 20_000, y0 + 10_000], [x0 + 20_000, y0 + 20_000],
+                   [x0 + 10_000, y0 + 20_000]]]
+    assert any("fill symmetric difference" in b for b in compare_models(h, holed))
+    flag = copy.deepcopy(h)
+    flag["vias"][0]["free"] = not flag["vias"][0]["free"]
+    assert any(b.startswith("vias ") for b in compare_models(h, flag))
+
+
+def test_true_arc_reference_replaces_skewed_arcs_only():
+    import pcbnew
+
+    from tests.plugin.test_ipc_conservative import kipy_shape
+
+    b = pcbnew.BOARD()
+    MM = 1_000_000
+    shapes = []
+    for mid in ((7_071_068, 7_071_068), (0, 10 * MM)):  # 180 deg arc: skewed mid (45 deg) / true midpoint (90 deg)
+        s = pcbnew.PCB_SHAPE(b, pcbnew.SHAPE_T_ARC)
+        s.SetLayer(pcbnew.F_Cu)
+        s.SetWidth(300_000)
+        s.SetArcGeometry(pcbnew.VECTOR2I(10 * MM, 0), pcbnew.VECTOR2I(*mid), pcbnew.VECTOR2I(-10 * MM, 0))
+        b.Add(s)
+        shapes.append(s)
+    from topor import model_ipc as M
+
+    h = {"rules": {"max_error": 5000}, "copper_shapes": [
+        {"uuid": s.m_Uuid.AsString(), "net": 0, "layer": 0, "poly": [[0, 0], [1, 0], [1, 1]], "owner_ref": None}
+        for s in shapes]}
+    out = with_true_arc_reference(h, b)
+    by = {c["uuid"]: c for c in out["copper_shapes"]}
+    assert by[shapes[1].m_Uuid.AsString()]["poly"] == [[0, 0], [1, 0], [1, 1]]  # untouched
+    fixed = by[shapes[0].m_Uuid.AsString()]["poly"]
+    assert len(fixed) > 10
+    ipc = M.shape_to_polys(kipy_shape(shapes[0]), 5000)
+    i = {**out, "copper_shapes": [{"uuid": shapes[0].m_Uuid.AsString(), "layer": 0, "poly": r} for r in ipc]}
+    from tests.plugin.test_ipc_conservative import inflated, minus_area, sps
+
+    assert minus_area(sps([fixed]), inflated(sps(ipc), UM)) <= EPS_AREA
+    del i
+
+
+def with_true_arc_reference(h: dict, b) -> dict:
+    """The harness model with the copper_shapes polygons of every arc whose stored mid point is skewed replaced by
+    pcbnew's polygon of the same arc drawn with its true midpoint (test_ipc_conservative.reference_item; KiCad's
+    DRC shape is that arc, test_ipc_conservative.assert_drc_shape_is_the_arc proves it offline)."""
+    from tests.plugin.test_ipc_conservative import arc_mid_skew, copper_items, item_poly
+
+    max_err = int(h["rules"].get("max_error") or 5000)
+    fix = {}
+    for it in copper_items(b, ("PCB_SHAPE",)):
+        if arc_mid_skew(it) >= 1e-4:
+            ps = item_poly(it, max_err)
+            fix[(it.m_Uuid.AsString(), int(it.GetLayer()))] = [
+                [[int(ps.Outline(k).CPoint(j).x), int(ps.Outline(k).CPoint(j).y)]
+                 for j in range(ps.Outline(k).PointCount())] for k in range(ps.OutlineCount())]
+    if not fix:
+        return h
+    keep = [c for c in h["copper_shapes"] if (c["uuid"], c["layer"]) not in fix]
+    for (u, l), rings in fix.items():
+        orig = next((c for c in h["copper_shapes"] if c["uuid"] == u), {"net": 0, "owner_ref": None})
+        keep += [{"uuid": u, "net": orig["net"], "layer": l, "poly": r, "owner_ref": orig["owner_ref"]} for r in rings]
+    return {**h, "copper_shapes": keep}
+
+
 # ---------------------------------------------------------------- live
 BOARDS = ["eprom-to-kernal", "wiccon-2023", "dcsgonebadge", "bornhack2026", "nametag-sao", "wedding-gift"]
 
@@ -244,5 +349,6 @@ def test_ipc_parity(board_name, tmp_path):
     rules = resolve_rules(b, dru_text=dru, widths_before=record_widths(b))
     board.refill_zones()  # UNVERIFIED: live
     h = export_model(b, rules, name=board_name, dru_text=dru)
+    h = with_true_arc_reference(h, b)
     m = export_model_ipc(board, board.get_project(), pc.pcb.read_text(), rules, name=board_name, dru_text=dru)
     assert compare_models(h, m) == []

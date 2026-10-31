@@ -24,12 +24,19 @@ def tiny():
     pads = [_pad("A", "1", 1, 0, 0), _pad("B", "1", 1, 10, 0), _pad("C", "1", 1, 20, 0),
             _pad("A", "2", 2, 0, 5), _pad("B", "2", 2, 10, 5),
             _pad("A", "3", 3, 0, 9), _pad("C", "3", 3, 20, 9), _pad("A", "4", 4, 0, 12)]
-    kept = [{"uuid": "t1", "net": 1, "locked": False}, {"uuid": "t2", "net": 1, "locked": True},
-            {"uuid": "t3", "net": 2, "locked": False}, {"uuid": "t4", "net": 3, "locked": False}]
-    vias = [{"uuid": "v1", "net": 1, "locked": False, "free": False},
-            {"uuid": "v2", "net": 1, "locked": False, "free": True},
-            {"uuid": "v3", "net": 2, "locked": True, "free": False}]
-    return {"nets": nets, "pads": pads, "kept": kept, "vias": vias}
+    def seg(a, b):
+        return {"kind": "seg", "a": list(a), "b": list(b)}
+
+    kept = [{"uuid": "t1", "net": 1, "locked": False, "layer": 0, "width": 2, "prim": seg((0, 0), (5, 2))},
+            {"uuid": "t2", "net": 1, "locked": True, "layer": 0, "width": 2, "prim": seg((10, 0), (5, 2))},
+            {"uuid": "t3", "net": 2, "locked": False, "layer": 2, "width": 2, "prim": seg((0, 5), (5, 7))},
+            {"uuid": "t4", "net": 3, "locked": False, "layer": 0, "width": 2, "prim": seg((0, 9), (20, 9))}]
+    # v1 / v3 are routing vias (a same-net track ends on them), v2 is flagged free
+    vias = [{"uuid": "v1", "net": 1, "locked": False, "free": False, "at": [5, 2], "d": 2, "layers": [0, 2]},
+            {"uuid": "v2", "net": 1, "locked": False, "free": True, "at": [30, 30], "d": 2, "layers": [0, 2]},
+            {"uuid": "v3", "net": 2, "locked": True, "free": False, "at": [5, 7], "d": 2, "layers": [0, 2]}]
+    layers = [{"id": 0, "name": "F.Cu"}, {"id": 2, "name": "B.Cu"}]
+    return {"nets": nets, "pads": pads, "kept": kept, "vias": vias, "layers": layers}
 
 
 def cfg(**kw):
@@ -124,6 +131,32 @@ def test_rip_plan_policies():
     dnt = CFG.with_values({("run", "existing_copper"): "rip", ("nets", "do_not_touch"): ["N2"]})
     r = rip_plan(m, scope_from_selection(Selection(), m, dnt), dnt)
     assert set(r.remove_uuids) == {"t1", "t4", "v1"} and r.kept_do_not_touch == 2
+
+
+def test_rip_plan_keep_unconnected_vias():
+    """Ruling C24: a via no same-net kept track end touches (within its radius, on a layer of its span) is a
+    stitching via and is never ripped by default; flagged free vias are kept; routing vias are ripped;
+    keep_unconnected_vias = false rips the untouched unflagged ones."""
+    m = tiny()
+    m["layers"] = [{"id": 0, "name": "F.Cu"}, {"id": 4, "name": "In1.Cu"}, {"id": 2, "name": "B.Cu"}]
+    m["vias"] += [
+        {"uuid": "stitch", "net": 3, "locked": False, "free": False, "at": [40, 40], "d": 2, "layers": [0, 2]},
+        {"uuid": "near", "net": 3, "locked": False, "free": False, "at": [20, 11.5], "d": 4, "layers": [0, 2]},
+        {"uuid": "othernet", "net": 3, "locked": False, "free": False, "at": [5, 2], "d": 2, "layers": [0, 2]},
+        {"uuid": "blind", "net": 1, "locked": False, "free": False, "at": [0, 0], "d": 2, "layers": [2, 4]},
+        {"uuid": "edge", "net": 3, "locked": False, "free": False, "at": [21, 9], "d": 2, "layers": [0, 2]}]
+    # near: t4's end (20, 9) is 2.5 from it, radius 2 -> untouched; othernet: a net-1 end, not net 3;
+    # blind: t1 starts at (0, 0) but on F.Cu, outside the In1-B.Cu span; edge: t4's end exactly on the rim
+    whole = scope_from_selection(Selection(), m, CFG)
+    rip = rip_plan(m, whole, cfg(existing_copper="rip"))
+    assert set(rip.remove_uuids) == {"t1", "t3", "t4", "v1", "edge"}
+    assert rip.kept_unconnected_vias == 4 and rip.kept_locked == 2
+    off = rip_plan(m, whole, cfg(existing_copper="rip", keep_unconnected_vias=False))
+    assert set(off.remove_uuids) == {"t1", "t3", "t4", "v1", "edge", "stitch", "near", "othernet", "blind"}
+    assert "v2" not in off.remove_uuids and off.kept_unconnected_vias == 0  # KiCad's free flag always wins
+    # a via without a position cannot be proven used: kept by default
+    m["vias"].append({"uuid": "nopos", "net": 3, "locked": False, "free": False})
+    assert "nopos" not in rip_plan(m, whole, cfg(existing_copper="rip")).remove_uuids
 
 
 # ------------------------------------------------------------------ eprom oracle + real engine
