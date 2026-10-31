@@ -35,6 +35,16 @@ impl HasPosition for V {
 
 type Tri = ConstrainedDelaunayTriangulation<V>;
 
+/// Combinatorial view of the triangulation: sorted edges and inner faces.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Topology {
+    /// Canonical `(a, b)` with `a < b`, `is_constraint`; sorted.
+    pub edges: Vec<(usize, usize, bool)>,
+    /// Counter-clockwise vertex triples of the inner faces, each rotated so the smallest
+    /// vertex comes first; sorted.
+    pub faces: Vec<[usize; 3]>,
+}
+
 pub struct Cdt {
     tri: Tri,
     /// input index -> canonical (spade vertex) index
@@ -115,6 +125,35 @@ impl Cdt {
             .collect();
         out.sort_unstable();
         out
+    }
+
+    /// Sorted edges and inner (finite) faces. O(V log V).
+    pub fn topology(&self) -> Topology {
+        let mut edges: Vec<(usize, usize, bool)> = self
+            .tri
+            .undirected_edges()
+            .map(|e| {
+                let [a, b] = e.vertices().map(|v| v.fix().index());
+                (a.min(b), a.max(b), self.tri.is_constraint_edge(e.fix()))
+            })
+            .collect();
+        edges.sort_unstable();
+        let mut faces: Vec<[usize; 3]> = self
+            .tri
+            .inner_faces()
+            .map(|f| {
+                let [a, b, c] = f.vertices().map(|v| v.fix().index());
+                if a <= b && a <= c {
+                    [a, b, c]
+                } else if b <= c {
+                    [b, c, a]
+                } else {
+                    [c, a, b]
+                }
+            })
+            .collect();
+        faces.sort_unstable();
+        Topology { edges, faces }
     }
 
     /// Canonical index after dedup of input point `input`.

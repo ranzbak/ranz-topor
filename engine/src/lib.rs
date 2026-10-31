@@ -5,6 +5,7 @@ pub mod check;
 pub mod decompose;
 pub mod fuzz;
 pub mod geom;
+pub mod graph;
 pub mod model;
 pub mod obstacle;
 #[cfg(feature = "python")]
