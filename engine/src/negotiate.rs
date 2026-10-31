@@ -118,6 +118,28 @@ pub struct Negotiator {
     /// design note §7 amendment).
     rip_pairs: BTreeMap<(usize, usize), u32>,
     cur: Vec<Option<SlotPath>>,
+    /// Tunables (history increments, rip cap); the M3 constants until [`Negotiator::configure`].
+    cfg: NegCfg,
+}
+
+/// Negotiation tunables taken from `Options` (`expert.*`, `ripup_max_per_pair`).
+#[derive(Clone, Copy, Debug)]
+struct NegCfg {
+    hist_fail: f64,
+    hist_block: f64,
+    hist_overuse: f64,
+    rip_pair_cap: u32,
+}
+
+impl Default for NegCfg {
+    fn default() -> Self {
+        NegCfg {
+            hist_fail: HIST_FAIL,
+            hist_block: HIST_BLOCK,
+            hist_overuse: HIST_OVERUSE,
+            rip_pair_cap: RIP_PAIR_CAP,
+        }
+    }
 }
 
 fn dedup_edges(mut v: Vec<usize>) -> Vec<usize> {
@@ -142,7 +164,18 @@ impl Negotiator {
             dead: BTreeMap::new(),
             rip_pairs: BTreeMap::new(),
             cur: vec![None; conns],
+            cfg: NegCfg::default(),
         }
+    }
+
+    /// Take the tunables from `opts` (history increments, rip-up cap per pair). O(1).
+    pub fn configure(&mut self, opts: &Options) {
+        self.cfg = NegCfg {
+            hist_fail: opts.expert.hist_fail,
+            hist_block: opts.expert.hist_block,
+            hist_overuse: opts.expert.hist_overuse,
+            rip_pair_cap: opts.ripup_max_per_pair,
+        };
     }
 
     /// The connection is blocked by static facts alone and is not searched again.
@@ -192,7 +225,7 @@ impl Negotiator {
             .filter(|&i| is_active[i])
             .collect();
         // (1) Snapshot: every active connection leaves the graph (its sites are released).
-        if Instant::now() >= deadline {
+        if crate::control::expired(deadline) {
             timed_out = true;
         } else {
             for &i in &seq {
@@ -232,7 +265,7 @@ impl Negotiator {
                         None => {
                             // Past the deadline no search runs: the path is dropped, the
                             // remaining found paths are still committed (anytime).
-                            if Instant::now() >= deadline {
+                            if crate::control::expired(deadline) {
                                 timed_out = true;
                                 continue;
                             }
@@ -254,7 +287,7 @@ impl Negotiator {
             match res {
                 SearchOutcome::Found(p) => {
                     // Absurd detour: rip the strands that block the ghost path.
-                    if is_detour(c, &p) {
+                    if is_detour(c, &p, opts.detour_factor) {
                         // The snapshot ghost stands while its own faces are unchanged
                         // (commits only add occupancy, so no cheaper ghost can appear).
                         let usable = match &pre {
@@ -280,7 +313,7 @@ impl Negotiator {
                             }
                         };
                         if let Some((gp, None, None, _)) = gh {
-                            if p.est_len > DETOUR_FACTOR * gp.est_len {
+                            if p.est_len > opts.detour_factor * gp.est_len {
                                 let b = mg.conns_of_legs(&strand_blockers(mg, &gp));
                                 if self.rip(mg, i, &b, true) {
                                     ripped.insert(i);
@@ -390,7 +423,7 @@ impl Negotiator {
                 // The absurd-detour test of the commit needs the ghost: compute it here, in
                 // parallel, and let the commit reuse it while its faces are unchanged.
                 let g = match &r {
-                    SearchOutcome::Found(path) if is_detour(c, path) => {
+                    SearchOutcome::Found(path) if is_detour(c, path, opts.detour_factor) => {
                         Some(ghost(mg, obs, c, &starts[i], &goals[i], &p))
                     }
                     _ => None,
@@ -480,13 +513,13 @@ impl Negotiator {
             || b.len() > MAX_RIP
             || b
                 .iter()
-                .any(|&x| self.rip_pairs.get(&(i, x)).is_some_and(|&n| n >= RIP_PAIR_CAP))
+                .any(|&x| self.rip_pairs.get(&(i, x)).is_some_and(|&n| n >= self.cfg.rip_pair_cap))
         {
             return false;
         }
         for &x in &b {
             *self.rip_pairs.entry((i, x)).or_insert(0) += 1;
-            self.add_conn_history(mg, x, HIST_BLOCK, HIST_SITE);
+            self.add_conn_history(mg, x, self.cfg.hist_block, self.cfg.hist_block);
         }
         if bump {
             self.bumps[i] += 1;
@@ -511,7 +544,7 @@ impl Negotiator {
 
     /// Relax / self-check failure: history on the connection's edges, bump. The path stays in `mg`.
     pub fn penalise_failed(&mut self, mg: &MultiGraph, conn: usize) {
-        self.add_conn_history(mg, conn, HIST_FAIL, 0.0);
+        self.add_conn_history(mg, conn, self.cfg.hist_fail, 0.0);
         self.bumps[conn] += 1;
     }
 
@@ -521,11 +554,11 @@ impl Negotiator {
         if let Some(gp) = &b.ghost {
             for leg in &gp.legs {
                 for e in dedup_edges(leg.crossings.iter().map(|&(e, _)| e).collect()) {
-                    self.history[leg.layer_idx][e] += HIST_BLOCK;
+                    self.history[leg.layer_idx][e] += self.cfg.hist_block;
                 }
             }
             for &(s, _) in &gp.sites {
-                self.site_history[s] += HIST_SITE;
+                self.site_history[s] += self.cfg.hist_block;
             }
         }
         self.bumps[conn] += 1;
@@ -537,7 +570,7 @@ impl Negotiator {
         for (li, c) in mg.layers.iter().enumerate() {
             for e in 0..c.g.edges.len() {
                 if c.g.overuse(e) > 0.0 {
-                    self.history[li][e] += HIST_OVERUSE;
+                    self.history[li][e] += self.cfg.hist_overuse;
                     n += 1;
                 }
             }
@@ -566,9 +599,9 @@ type GhostOut = Option<(
 
 /// Absurd-detour precondition (fix B): `p` is longer than [`DETOUR_FACTOR`] times the straight
 /// distance and crosses at least one strand. O(legs).
-fn is_detour(c: &Connection, p: &SlotPath) -> bool {
+fn is_detour(c: &Connection, p: &SlotPath, factor: f64) -> bool {
     let straight = (c.from.at - c.to.at).len();
-    p.est_len > DETOUR_FACTOR * straight && p.legs.iter().any(|l| !l.crossings.is_empty())
+    p.est_len > factor * straight && p.legs.iter().any(|l| !l.crossings.is_empty())
 }
 
 /// Search parameters of connection `c` over the given histories.
@@ -584,7 +617,7 @@ fn params_for<'a>(
         history,
         site_history,
         weight: tier_weight(c.tier),
-        present_overuse: PRESENT_OVERUSE,
+        present_overuse: opts.expert.present_overuse,
         expansion_cap: cap,
         deadline,
         eps: None,

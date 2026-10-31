@@ -846,11 +846,11 @@ impl Relaxer {
         let mut st = RunStats::default();
         let mut tautened: BTreeSet<usize> = BTreeSet::new();
         let mut changed: BTreeSet<usize> = BTreeSet::new();
-        'outer: while !cur.is_empty() && st.sweeps < ro.opts.relax_iter_cap {
+        'outer: while !cur.is_empty() && st.sweeps < ro.opts.relax_cap() {
             let first = st.sweeps == 0 && anytime_first;
             let mut next: BTreeSet<(Rank, usize)> = BTreeSet::new();
             while let Some((r, k)) = cur.pop_first() {
-                if !first && Instant::now() >= ro.deadline {
+                if !first && crate::control::expired(ro.deadline) {
                     st.timed_out = true;
                     // Anytime: the leftovers stay queued for the next call.
                     self.queued.extend(cur.iter().chain(&next).map(|&(_, k)| k));

@@ -67,6 +67,9 @@ def m3_caption(task: str, result: dict, threads: int) -> str:
     d = detour_caption(result.get("detour"))
     if d:
         lines.append(d)
+    stop = (result.get("router_report") or {}).get("stop_reason")
+    if stop:  # M4 engines report why the loop ended (last line)
+        lines.append(f"stop_reason: {stop}")
     return "\n".join(lines)
 
 
@@ -89,10 +92,10 @@ def _highlight_detours(raw: Path, result: dict, pcb: Path) -> Path:
 def render_progress(task: str, *, board: str = "eprom-to-kernal", date: str | None = None,
                     out_dir: Path = ROOT / "docs/benchmarks/progress",
                     pcb_override: Path | None = None, router: str = "smoother",
-                    threads: int = 4) -> dict:
+                    threads: int = 4, milestone: str = "m3") -> dict:
     if router == "topor":
         return _render_progress_m3(task, board=board, date=date, out_dir=out_dir,
-                                   pcb_override=pcb_override, threads=threads)
+                                   pcb_override=pcb_override, threads=threads, milestone=milestone)
     date = date or datetime.date.today().isoformat()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -133,7 +136,7 @@ def render_progress(task: str, *, board: str = "eprom-to-kernal", date: str | No
 
 
 def _render_progress_m3(task: str, *, board: str, date: str | None, out_dir: Path,
-                        pcb_override: Path | None, threads: int = 4) -> dict:
+                        pcb_override: Path | None, threads: int = 4, milestone: str = "m3") -> dict:
     date = date or datetime.date.today().isoformat()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -146,7 +149,9 @@ def _render_progress_m3(task: str, *, board: str, date: str | None, out_dir: Pat
         pcb = work / bench._source_pcb(board, pcb_override).name
         raw = _highlight_detours(work / f"{board}-topor-raw.png", result, pcb)
         topor_png = add_caption(raw, text, tmp / "topor-progress.png")
-        png = out_dir / f"{date}-m3-{task}.png"
+        # m3: `<date>-m3-<task>.png`; m4: `<date>-m4-<task>-<board>.png`
+        png = out_dir / (f"{date}-m4-{task}-{board}.png" if milestone == "m4"
+                         else f"{date}-m3-{task}.png")
         compose_compare(tmp / f"{board}-hand.png", topor_png, png)
     result["caption"] = text
     result["png"] = str(png)
@@ -163,9 +168,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="use this board instead of BENCH_BOARDS[board]")
     ap.add_argument("--router", choices=["smoother", "topor"], default="smoother")
     ap.add_argument("--threads", type=int, default=4)
+    ap.add_argument("--milestone", choices=["m3", "m4"], default="m3",
+                    help="only changes the output name (m4: <date>-m4-<task>-<board>.png)")
     args = ap.parse_args(argv)
     render_progress(args.task, board=args.board, pcb_override=args.pcb, router=args.router,
-                    threads=args.threads)
+                    threads=args.threads, milestone=args.milestone)
     return 0
 
 

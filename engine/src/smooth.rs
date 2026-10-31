@@ -213,8 +213,14 @@ pub(crate) fn hand_outside(w: &Wire, sks: &[Skeleton]) -> f64 {
     outside_len(&segs, sks)
 }
 
+/// Deadline `s` seconds after `now`; `s == 0.0` disables the timeout (far future, one year).
 pub(crate) fn deadline_after(s: f64, now: Instant) -> Instant {
-    let d = Duration::try_from_secs_f64(s.max(0.0)).unwrap_or(Duration::from_secs(86_400 * 365));
+    let year = Duration::from_secs(86_400 * 365);
+    let d = if s == 0.0 {
+        year
+    } else {
+        Duration::try_from_secs_f64(s.max(0.0)).unwrap_or(year)
+    };
     now.checked_add(d)
         .unwrap_or_else(|| now + Duration::from_secs(86_400 * 365))
 }

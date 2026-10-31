@@ -23,8 +23,10 @@
 //! checked before every search (negotiate), relax call and self-check round. Output is ordered
 //! by connection id; no `HashMap` iteration reaches it.
 //!
-//! Stall stop: the loop also ends after [`STALL_ITERS`] iterations without a better best
-//! (by `(routed, vias, Σlen)`). Zero-slack retry (R6, `Options::zero_slack_retry`): after the
+//! Stop rule (`Options::patience`, `min_gain_pct`): the loop ends (`stop_reason` `no gain`) when
+//! over the last `patience` iterations no connection was newly routed and the best cost
+//! `Σ length + via_cost · vias` improved by less than `min_gain_pct` percent in total; cancel
+//! (`RunControl`) ends it like a timeout. Zero-slack retry (R6, `Options::zero_slack_retry`): after the
 //! loop, [`zero_slack_pass`] lets one connection take a corridor pinched below ε with margin 0
 //! against that corridor only (candidates: single-leg paths), re-routes the detoured connections
 //! once and keeps the result when it routes at least as much with a shorter outside-pad length;
@@ -41,10 +43,10 @@ use crate::model::{
     flip_track, BoardModel, ExistingCopper, Item, Options, PadAttr, PadRef, Pt, Scope, TrackItem,
     ViaItem,
 };
+use crate::control::RunControl;
 use crate::multigraph::MultiGraph;
 use crate::negotiate::{
-    detect_clinches, overused_conns, BlockInfo, ClinchReport, Negotiator, DETOUR_FACTOR,
-    PRESENT_OVERUSE,
+    detect_clinches, overused_conns, BlockInfo, ClinchReport, Negotiator,
 };
 use crate::obstacle::{ObstacleSet, TerminalObstacle};
 use crate::pourcheck::{check_pour_reach, with_routed_copper, PourReach};
@@ -169,6 +171,10 @@ pub struct RouteResult {
     /// Grid candidates visited by the self-checks up to the reported iteration (scaling diagnostic).
     pub check_candidates_visited: usize,
     pub timed_out: bool,
+    /// Why the (first) routing pass ended: `converged`, `cap` (iteration cap), `no gain` (stop
+    /// rule: `patience` iterations without a newly routed connection or `min_gain_pct` gain),
+    /// `timeout`, `cancel` or `stuck`.
+    pub stop_reason: String,
     pub runtime_s: f64,
     pub threads_used: usize,
     pub warnings: Vec<String>,
@@ -329,6 +335,13 @@ struct Ctx<'a> {
     conns: &'a [Connection],
     checker: &'a Checker,
     deadline: Instant,
+}
+
+impl Ctx<'_> {
+    /// Deadline passed or run cancelled (O(1)); every deadline site of the pass uses this.
+    fn stop(&self) -> bool {
+        crate::control::expired(self.deadline)
+    }
 }
 
 struct Metrized {
@@ -933,7 +946,7 @@ fn metrize_zs(
         if pend.is_empty() {
             break;
         }
-        if Instant::now() >= cx.deadline {
+        if cx.stop() {
             out.timed_out = true;
             if out.rounds >= 1 {
                 break;
@@ -1157,13 +1170,8 @@ struct Blk {
 
 /// Consecutive unchanged iterations (no overuse, no rip-up) after which `route` gives up.
 const STUCK_REPEATS: u32 = 3;
-/// Consecutive iterations without a better best (by `(routed, Σlen)`) after which `route` stops
-/// (stall stop, R6).
-pub const STALL_ITERS: u32 = 8;
 /// Zero-slack retry: smallest estimated-length gain (nm) that makes a connection a candidate.
 const ZS_GAIN_MIN_NM: f64 = 100_000.0;
-/// Zero-slack retry: candidates tried (by descending gain) before the pass gives up.
-const ZS_MAX_CANDIDATES: usize = 4;
 /// Zero-slack retry outcome when the wall clock runs out during the pass.
 const ZS_DEADLINE: &str = "skipped: deadline";
 /// Zero-slack retry: self-check tolerance of the zero-slack wire, nm. An exact tangency rebuilt
@@ -1223,7 +1231,7 @@ fn probe_path(
 ) -> Option<Vec2> {
     let n = crossings.len();
     for j in 0..=n {
-        if *steps >= PROBE_STEP_CAP || Instant::now() >= deadline {
+        if *steps >= PROBE_STEP_CAP || crate::control::expired(deadline) {
             return None;
         }
         *steps += 1;
@@ -1546,7 +1554,7 @@ fn partial_pass(
     if wires.is_empty() {
         return result;
     }
-    if Instant::now() >= cx.deadline {
+    if cx.stop() {
         skipped(&mut result);
         return result;
     }
@@ -1702,6 +1710,19 @@ fn better_than(nok: usize, vias: usize, len: f64, b: &Snap) -> bool {
     nok > b.routed || (nok == b.routed && (vias < b.vias || (vias == b.vias && len < b.len)))
 }
 
+/// Stop rule (`patience`, `min_gain_pct`): over the last `patience` iterations the best routed
+/// count did not grow and the best cost fell by less than `min_gain_pct` percent in total.
+/// `hist` holds the best `(routed, cost)` after every iteration. O(1).
+pub fn no_gain(hist: &[(usize, f64)], opts: &Options) -> bool {
+    let p = opts.patience.max(1) as usize;
+    if hist.len() <= p {
+        return false;
+    }
+    let (r0, c0) = hist[hist.len() - 1 - p];
+    let (r1, c1) = hist[hist.len() - 1];
+    r1 <= r0 && c0 - c1 < opts.min_gain_pct / 100.0 * c0
+}
+
 /// Per-run search inputs shared by the loop and the retry pass.
 struct Route<'a> {
     starts: &'a [Vec<(usize, usize)>],
@@ -1764,7 +1785,7 @@ fn via_reduction_pass(
         timed_out: false,
     };
     for (_, c) in cands {
-        if Instant::now() >= cx.deadline {
+        if cx.stop() {
             out.timed_out = true;
             break;
         }
@@ -1779,7 +1800,7 @@ fn via_reduction_pass(
             history: &neg.history,
             site_history: &neg.site_history,
             weight: tier_weight(live[c].tier),
-            present_overuse: PRESENT_OVERUSE,
+            present_overuse: cx.opts.expert.present_overuse,
             expansion_cap: default_expansion_cap(&mg),
             deadline: cx.deadline,
             eps: None,
@@ -1850,12 +1871,12 @@ fn via_reduction_pass(
 /// (`est_len > DETOUR_FACTOR × straight`) leave the graph; every routed connection is searched
 /// once at margin 0 (empty history). The candidates (single-leg paths, estimated gain >
 /// [`ZS_GAIN_MIN_NM`]) are tried by descending gain (ties: lowest id), at most
-/// [`ZS_MAX_CANDIDATES`] of them, each in a fresh copy of the best graph
+/// `expert.zero_slack_candidates` of them, each in a fresh copy of the best graph
 /// ([`zero_slack_attempt`]); the first that routes at least as much with a shorter outside-pad
 /// length wins. Returns the new snapshot and the zero-slack connections (empty when the
 /// candidate's new path turned out feasible at ε); `Err(reason)` (the last attempt's) leaves the
 /// best iteration unchanged. `obs` is left in the state of the last attempt: the caller re-syncs
-/// it. Complexity: one margin-0 search per routed connection plus ≤ `ZS_MAX_CANDIDATES`
+/// it. Complexity: one margin-0 search per routed connection plus ≤ `expert.zero_slack_candidates`
 /// metrizations.
 fn zero_slack_pass(
     cx: &Ctx,
@@ -1873,7 +1894,7 @@ fn zero_slack_pass(
             ok(i)
                 && best.paths[i].as_ref().is_some_and(|p| {
                     p.legs.iter().any(|l| !l.crossings.is_empty())
-                        && p.est_len > DETOUR_FACTOR * (live[i].from.at - live[i].to.at).len()
+                        && p.est_len > cx.opts.detour_factor * (live[i].from.at - live[i].to.at).len()
                 })
         })
         .collect();
@@ -1885,7 +1906,7 @@ fn zero_slack_pass(
         history: &[],
         site_history: &[],
         weight: tier_weight(tier),
-        present_overuse: PRESENT_OVERUSE,
+        present_overuse: cx.opts.expert.present_overuse,
         expansion_cap: cap,
         deadline: cx.deadline,
         eps,
@@ -1899,7 +1920,7 @@ fn zero_slack_pass(
         let Some(old) = best.paths[i].as_ref().map(|p| p.est_len) else {
             continue;
         };
-        if Instant::now() >= cx.deadline {
+        if cx.stop() {
             return Err(ZS_DEADLINE.into());
         }
         let out = if detoured.contains(&i) {
@@ -1941,7 +1962,7 @@ fn zero_slack_pass(
     cands.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
     drop(mg);
     let mut last = "no candidate".to_string();
-    for (_, c, p) in cands.into_iter().take(ZS_MAX_CANDIDATES) {
+    for (_, c, p) in cands.into_iter().take(cx.opts.expert.zero_slack_candidates) {
         match zero_slack_attempt(cx, obs, rt, best, &detoured, c, p, &params) {
             Ok(r) => return Ok(r),
             Err(e) if e == ZS_DEADLINE => return Err(e),
@@ -1983,7 +2004,7 @@ fn zero_slack_attempt<'a>(
     let mut blocked = best.blocked.clone();
     let mut res: Vec<Res> = best.res.clone();
     for &d in detoured.iter().filter(|&&d| d != c) {
-        if Instant::now() >= cx.deadline {
+        if cx.stop() {
             return Err(ZS_DEADLINE.into());
         }
         work.push(d);
@@ -2126,15 +2147,32 @@ fn layer_name(model: &BoardModel, id: u32) -> String {
 /// warning `thread pool unavailable: 1 thread`). Every thread count gives the same routing
 /// (deterministic in-order batch commit, note m3 §7).
 pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
+    route_with(model, opts, &RunControl::default())
+}
+
+/// [`route`] under a [`RunControl`]: `ctl.cancel` ends the run at the next deadline check with
+/// the best result so far (`stop_reason == "cancel"`), `ctl.progress` is updated per iteration
+/// and per pass. The cancel flag is installed on every thread of the run's private pool.
+pub fn route_with(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteResult {
     let n = opts.effective_threads().max(1);
-    match rayon::ThreadPoolBuilder::new().num_threads(n).build() {
+    let flag = ctl.cancel.clone();
+    let built = rayon::ThreadPoolBuilder::new()
+        .num_threads(n)
+        .start_handler({
+            let flag = flag.clone();
+            move |_| crate::control::install_cancel(Some(flag.clone()))
+        })
+        .build();
+    match built {
         Ok(pool) => {
-            let mut r = pool.install(|| route_inner(model, opts));
+            let mut r = pool.install(|| route_inner(model, opts, ctl));
             r.threads_used = n;
             r
         }
         Err(_) => {
-            let mut r = route_inner(model, opts);
+            crate::control::install_cancel(Some(flag));
+            let mut r = route_inner(model, opts, ctl);
+            crate::control::install_cancel(None);
             r.warnings.push("thread pool unavailable: 1 thread".into());
             r.threads_used = 1;
             r
@@ -2300,6 +2338,9 @@ fn merge_pass(r: &mut RouteResult, model: &BoardModel, mut r2: RouteResult) {
     r.relax_iterations += r2.relax_iterations;
     r.self_check_rounds = r.self_check_rounds.max(r2.self_check_rounds);
     r.check_candidates_visited += r2.check_candidates_visited;
+    if r2.timed_out && !r.timed_out {
+        r.stop_reason = r2.stop_reason.clone();
+    }
     r.timed_out |= r2.timed_out;
     r.warnings.extend(
         r2.warnings
@@ -2320,14 +2361,16 @@ fn merge_pass(r: &mut RouteResult, model: &BoardModel, mut r2: RouteResult) {
 /// lost their fill island, run up to `POUR_REACH_PASSES` pour-completion passes (see the
 /// constant). The result is a pure function of the model and options (every pass is), so the
 /// thread count does not change it; a model without pour fills returns the first pass as is.
-fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
+fn route_inner(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteResult {
     let t0 = Instant::now();
-    let mut r = route_pass(model, opts, None);
+    ctl.update("setup", 0, 0, 0, 0, 0.0);
+    let mut r = route_pass(model, opts, None, ctl, 0, t0);
     let has_fill = model
         .pours
         .iter()
         .any(|z| z.net != 0 && z.fills.iter().any(|f| f.outer.len() >= 3));
     if !has_fill {
+        ctl.update("done", r.iterations, r.routed, r.connections_total, r.vias, t0.elapsed().as_secs_f64());
         return r;
     }
     let mut passes = 0u32;
@@ -2434,9 +2477,18 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
             stop(&mut r, "pass cap");
             break;
         }
-        let remaining = opts.wall_clock_s - t0.elapsed().as_secs_f64();
-        if r.timed_out || remaining <= 0.0 {
+        // `wall_clock_s == 0.0` disables the timeout: the remaining budget stays 0.0 (disabled).
+        let disabled = opts.wall_clock_s == 0.0;
+        let remaining = if disabled {
+            0.0
+        } else {
+            opts.wall_clock_s - t0.elapsed().as_secs_f64()
+        };
+        if r.timed_out || ctl.is_cancelled() || (!disabled && remaining <= 0.0) {
             stop(&mut r, "no budget");
+            if !r.timed_out {
+                r.stop_reason = if ctl.is_cancelled() { "cancel" } else { "timeout" }.into();
+            }
             r.timed_out = true;
             break;
         }
@@ -2487,7 +2539,7 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
             existing_copper: ExistingCopper::Fixed,
             ..opts.clone()
         };
-        let r2 = route_pass(&m2, &opts2, Some(&reach));
+        let r2 = route_pass(&m2, &opts2, Some(&reach), ctl, r.iterations, t0);
         r.warnings.push(format!(
             "pour reach pass {passes}: {} item(s) lost the pour after routing ({}); {} \
              connection(s) routed {}/{}, vias {}{}",
@@ -2510,6 +2562,7 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
         merge_pass(&mut r, model, r2);
     }
     r.runtime_s = t0.elapsed().as_secs_f64();
+    ctl.update("done", r.iterations, r.routed, r.connections_total, r.vias, r.runtime_s);
     r
 }
 
@@ -2522,7 +2575,14 @@ fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
 /// Complexity: dominated by the PathFinder loop, `O(iters · m · V' log V')` with
 /// `V' = Σ_L 2(E_L + X_L) + 2S`, plus `O(changed · q)` self-checks per iteration (see the
 /// module header, `negotiate` and `multigraph`).
-fn route_pass(model: &BoardModel, opts: &Options, reach: Option<&PourReach>) -> RouteResult {
+fn route_pass(
+    model: &BoardModel,
+    opts: &Options,
+    reach: Option<&PourReach>,
+    ctl: &RunControl,
+    iter_base: u32,
+    run_t0: Instant,
+) -> RouteResult {
     let t0 = Instant::now();
     let deadline = deadline_after(opts.wall_clock_s, t0);
     let mut warnings: Vec<String> = Vec::new();
@@ -2568,6 +2628,11 @@ fn route_pass(model: &BoardModel, opts: &Options, reach: Option<&PourReach>) -> 
     let mut profile: Vec<IterProfile> = Vec::new();
     let mut best: Option<Snap> = None;
     let (mut iterations, mut converged, mut timed_out) = (0u32, false, false);
+    // Why the loop ended when not by convergence / timeout (`stuck`, `no gain`).
+    let mut stop_why: Option<&'static str> = None;
+    let mut loop_ran = false;
+    // Best `(routed, cost)` after each iteration (stop rule).
+    let mut best_hist: Vec<(usize, f64)> = Vec::new();
     let mut setup_fail: Option<String> = None;
     let mut partials: BTreeMap<usize, Partial> = BTreeMap::new();
     let mut blocks: BTreeMap<usize, Blk> = BTreeMap::new();
@@ -2781,7 +2846,7 @@ fn route_pass(model: &BoardModel, opts: &Options, reach: Option<&PourReach>) -> 
                                 history: &[],
                                 site_history: &[],
                                 weight: tier_weight(c.tier),
-                                present_overuse: PRESENT_OVERUSE,
+                                present_overuse: opts.expert.present_overuse,
                                 expansion_cap: cap,
                                 deadline,
                                 eps: None,
@@ -2794,12 +2859,14 @@ fn route_pass(model: &BoardModel, opts: &Options, reach: Option<&PourReach>) -> 
                         .collect();
                 }
                 let mut neg = Negotiator::new(&mg, m);
+                neg.configure(opts);
                 let mut active: Vec<usize> = (0..m).filter(|&i| perm[i].is_none()).collect();
                 let (mut stuck, mut last_sig) = (0u32, None::<(usize, Vec<usize>)>);
-                let mut stale = 0u32;
                 let mut metr = MetrState::new(&cx, &obs);
+                ctl.update("route", iter_base, 0, 0, 0, run_t0.elapsed().as_secs_f64());
                 for _ in 1..=opts.pathfinder_iter_cap {
-                    if Instant::now() >= deadline {
+                    loop_ran = true;
+                    if crate::control::expired(deadline) {
                         timed_out = true;
                         break;
                     }
@@ -2924,7 +2991,6 @@ fn route_pass(model: &BoardModel, opts: &Options, reach: Option<&PourReach>) -> 
                     let (nok, vias, len, out_len) = tally(&res);
                     let better = best.as_ref().is_none_or(|b| better_than(nok, vias, len, b));
                     if better {
-                        stale = 0;
                         best = Some(Snap {
                             routed: nok,
                             vias,
@@ -2941,8 +3007,17 @@ fn route_pass(model: &BoardModel, opts: &Options, reach: Option<&PourReach>) -> 
                             mg: mg.clone(),
                             metr: metr.clone(),
                         });
-                    } else {
-                        stale += 1;
+                    }
+                    if let Some(b) = &best {
+                        best_hist.push((b.routed, b.len + opts.via_cost_nm as f64 * b.vias as f64));
+                        ctl.update(
+                            "route",
+                            iter_base + it,
+                            b.routed,
+                            live.len(),
+                            b.vias,
+                            run_t0.elapsed().as_secs_f64(),
+                        );
                     }
                     if timed_out {
                         break;
@@ -2969,13 +3044,16 @@ fn route_pass(model: &BoardModel, opts: &Options, reach: Option<&PourReach>) -> 
                     last_sig = Some(sig);
                     if stuck >= STUCK_REPEATS {
                         warnings.push(format!("stuck after {it} iterations"));
+                        stop_why = Some("stuck");
                         break;
                     }
-                    if stale >= STALL_ITERS {
+                    if no_gain(&best_hist, opts) {
                         warnings.push(format!(
-                            "stalled: no better routing for {STALL_ITERS} iterations, \
-                             stopped after {it}"
+                            "no gain: no connection newly routed and cost improved < {}% \
+                             over {} iterations, stopped after {it}",
+                            opts.min_gain_pct, opts.patience
                         ));
+                        stop_why = Some("no gain");
                         break;
                     }
                     let mut next: BTreeSet<usize> = failed.into_iter().collect();
@@ -3047,6 +3125,28 @@ fn route_pass(model: &BoardModel, opts: &Options, reach: Option<&PourReach>) -> 
         }
     }
 
+    // A cancel that arrived while a late stage (via reduction, zero-slack retry, stubs) was
+    // running ends those stages early: the result is the anytime result, reported as cancelled.
+    if ctl.is_cancelled() {
+        timed_out = true;
+    }
+    let stop_reason: &str = if timed_out {
+        if ctl.is_cancelled() {
+            "cancel"
+        } else {
+            "timeout"
+        }
+    } else if converged {
+        "converged"
+    } else if let Some(w) = stop_why {
+        w
+    } else if loop_ran {
+        "cap"
+    } else if setup_fail.is_some() {
+        "stuck"
+    } else {
+        "converged"
+    };
     // Assemble.
     let mut by_orig: BTreeMap<usize, usize> = BTreeMap::new();
     for (i, &o) in orig.iter().enumerate() {
@@ -3249,6 +3349,7 @@ fn route_pass(model: &BoardModel, opts: &Options, reach: Option<&PourReach>) -> 
         self_check_rounds: best.as_ref().map_or(0, |b| b.rounds),
         check_candidates_visited: best.as_ref().map_or(0, |b| b.metr.check_visited),
         timed_out,
+        stop_reason: stop_reason.to_string(),
         runtime_s: t0.elapsed().as_secs_f64(),
         threads_used: 1,
         warnings,
