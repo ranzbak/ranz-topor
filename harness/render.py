@@ -92,6 +92,52 @@ def caption(png: Path, text: str, out: Path, *, strip_px: int = CAPTION_PX) -> P
     return out
 
 
+def _png_height(png: Path) -> int:
+    out = subprocess.run(["identify", "-format", "%h", str(png)], check=True,
+                         capture_output=True, text=True).stdout
+    return int(out.strip())
+
+
+def board_bbox_nm(pcb: Path) -> tuple[int, int, int, int]:
+    """(x0, y0, x1, y1) in KiCad nm of the area `render_png` fits to the page (board edges)."""
+    b = pcbnew.LoadBoard(str(pcb))
+    bb = b.GetBoardEdgesBoundingBox()
+    if bb.GetWidth() <= 0 or bb.GetHeight() <= 0:
+        bb = b.GetBoundingBox()
+    return (int(bb.GetX()), int(bb.GetY()),
+            int(bb.GetX() + bb.GetWidth()), int(bb.GetY() + bb.GetHeight()))
+
+
+def highlight_points(png: Path, out: Path, pairs, *, bbox_nm, radius_px: int = 14,
+                     color: str = "#ff00cc", width_px: int = 4) -> Path:
+    """Ring every `[x, y]` (KiCad-frame nm, Y down like the SVG) of `pairs` on `png`.
+
+    `bbox_nm` = (x0, y0, x1, y1) is the board area the image was fitted to (`render_png` uses
+    `--page-size-mode 2`, so the image spans exactly that box): pixel = (nm - origin) * size /
+    extent. Engine report `at` values are already in the KiCad frame (the engine's Y flip is
+    internal), so no flip is applied here. Each pair's two terminals are joined by a thin line.
+    """
+    out = Path(out)
+    x0, y0, x1, y1 = bbox_nm
+    w, h = _png_width(png), _png_height(png)
+    sx, sy = w / (x1 - x0), h / (y1 - y0)
+
+    def px(at):
+        return (at[0] - x0) * sx, (at[1] - y0) * sy
+
+    cmd = ["convert", str(png), "-fill", "none", "-stroke", color, "-strokewidth", str(width_px)]
+    for pts in pairs:
+        pp = [px(a) for a in pts]
+        for cx, cy in pp:
+            cmd += ["-draw", f"circle {cx:.1f},{cy:.1f} {cx + radius_px:.1f},{cy:.1f}"]
+        if len(pp) == 2:
+            cmd += ["-strokewidth", "1", "-draw",
+                    f"line {pp[0][0]:.1f},{pp[0][1]:.1f} {pp[1][0]:.1f},{pp[1][1]:.1f}",
+                    "-strokewidth", str(width_px)]
+    subprocess.run(cmd + [str(out)], check=True)
+    return out
+
+
 def compose_compare(left_png: Path, right_png: Path, out_png: Path, *,
                     pad_px: int = COMPARE_PAD_PX) -> Path:
     """Left and right images side by side, each surrounded by `pad_px` of white."""

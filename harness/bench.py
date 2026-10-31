@@ -17,7 +17,7 @@ from typing import Callable, Literal
 from harness import writer
 from harness.copy import assert_unchanged, copy_project
 from harness.drc import classify, new_routing, run_drc, summarise
-from harness.metrics import copper_metrics
+from harness.metrics import copper_metrics, detour_line, detour_stats
 from harness.model import export_model, load_board, write_model_json
 from harness.paths import BENCH_BOARDS
 from harness.render import caption, compose_compare, render_png
@@ -198,6 +198,9 @@ def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path) -> s
                     + " / ".join(f"{n} {v}" for n, v in rt['length_by_layer_mm'].items()) + " mm")
         zs = result.get("zero_slack") or {}
         names = [w["net"] for w in zs.get("wires") or []]
+        dl_ = detour_line(result.get("detour"))
+        if dl_:
+            head.append(f"  {dl_}")
         head.append(f"  via reduction: {rt.get('via_reduction')}")
         head.append(f"  zero slack: {zs.get('status')}, {len(names)} wire(s)"
                     + (f" ({', '.join(names)})" if names else ""))
@@ -401,6 +404,7 @@ def run_bench(
         "router_report": router_report,
         "smooth": _smooth_summary(router_report),
         "route": route,
+        "detour": detour_stats((router_report or {}).get("connections")),
         "hand_stats": hand_stats,
         "floors": [{"name": f["name"], "design_mm": f["design"] / 1e6, "floor_mm": f["floor"] / 1e6}
                    for f in rules.get("floors_applied", [])],
