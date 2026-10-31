@@ -13,6 +13,7 @@ use crate::decompose::Connection;
 use crate::geom::{point_seg, seg_arc, seg_seg, Aabb, Seg, Vec2};
 use crate::graph::{Port, RouteGraph};
 use crate::obstacle::{Core, LayerObstacles, ObsKind, ObstacleSet};
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::time::Instant;
@@ -49,6 +50,8 @@ pub struct SlotPath {
     pub faces: Vec<usize>,
     pub est_len: f64,
     pub expansions: usize,
+    /// Sum of the clearance-query candidates (vertices + walls) examined over the whole search.
+    pub candidates: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -465,6 +468,8 @@ struct Search<'a> {
     omega: f64,
     present_overuse: f64,
     ghost: bool,
+    /// Candidates returned by `clearance_bend` queries (statistics).
+    cands: Cell<usize>,
 }
 
 impl<'a> Search<'a> {
@@ -492,7 +497,35 @@ impl<'a> Search<'a> {
             omega: p.weight,
             present_overuse: p.present_overuse,
             ghost,
+            cands: Cell::new(0),
         }
+    }
+
+    /// `u` is an obstacle for this search's net: an owned vertex whose nets do not include it;
+    /// a DRC spot (`owner` `spot:*`) blocks only the nets listed in its anchor's `only_nets`
+    /// (empty = every net) (D7). O(1).
+    fn foreign(&self, u: usize) -> bool {
+        let vi = &self.g.verts[u];
+        if vi.owner.is_none() {
+            return false;
+        }
+        if vi.owner.as_deref().is_some_and(|o| o.starts_with("spot:")) {
+            if let Some(a) = vi.anchor.and_then(|ai| self.obs.anchors.get(ai)) {
+                return a.only_nets.is_empty() || a.only_nets.contains(&self.net);
+            }
+        }
+        !vi.nets.contains(&self.net)
+    }
+
+    /// Wall not an obstacle for this net: same-net / tie exemption, or a DRC spot (anchor with
+    /// `only_nets`) that does not list the net (D7). O(1).
+    fn wall_exempt(&self, wl: &crate::obstacle::Wall) -> bool {
+        ObstacleSet::exempt(wl.net, &wl.tie_nets, self.net)
+            || self
+                .obs
+                .anchors
+                .get(wl.ends[0])
+                .is_some_and(|a| !a.only_nets.is_empty() && !a.only_nets.contains(&self.net))
     }
 
     /// Distance from a vertex a wire's centreline must keep along an edge end.
@@ -500,7 +533,7 @@ impl<'a> Search<'a> {
         let vi = &self.g.verts[v];
         if vi.owner.is_none() {
             0.0
-        } else if vi.nets.contains(&self.net) {
+        } else if !self.foreign(v) {
             vi.r
         } else {
             vi.r + vi.clr.max(self.c) + 0.5 * self.w + self.eps
@@ -526,9 +559,14 @@ impl<'a> Search<'a> {
         seg_closest(pa + d * t0, pa + d * t1, apex, self.goal)
     }
 
+    /// Edge the slot-free ghost never crosses: a wire runs along it, a face is outside the
+    /// outline, or it is statically unfit, `cap < w + eps + 2 max(c, c_e)` even when empty (D2).
+    /// The planar search keeps such an edge as a costly overuse crossing: the board
+    /// `eprom-to-kernal` routes +5V through one (zero-slack retry, `route_engine`). O(1).
     fn hard(&self, e: usize) -> bool {
         let ge = &self.g.edges[e];
         ge.along.is_some()
+            || ge.cap < self.w + self.eps + 2.0 * self.c.max(ge.c_e)
             || !ge
                 .faces
                 .iter()
@@ -553,22 +591,60 @@ impl<'a> Search<'a> {
         }
     }
 
+    /// Boxes covering the chord `a -> t` grown by `grow`: one per sub-chord between consecutive
+    /// portal crossing points (`seg_closest(chord, portal)` parameters, sorted), so a long
+    /// diagonal chord queries `<= portals.len() + 1` local boxes instead of its full bbox.
+    /// O(C log C).
+    fn sleeve_boxes(a: Vec2, t: Vec2, portals: &[(Vec2, Vec2)], grow: f64) -> Vec<Aabb> {
+        let r = t - a;
+        let l2 = r.len2().max(1.0);
+        let mut params: Vec<f64> = portals
+            .iter()
+            .map(|&(pa, pb)| {
+                let x = seg_closest(a, t, pa, pb);
+                ((x - a).dot(r) / l2).clamp(0.0, 1.0)
+            })
+            .collect();
+        params.push(0.0);
+        params.push(1.0);
+        params.sort_by(f64::total_cmp);
+        params.dedup();
+        let boxed = |p: Vec2, q: Vec2| {
+            Aabb {
+                min: Vec2 {
+                    x: p.x.min(q.x),
+                    y: p.y.min(q.y),
+                },
+                max: Vec2 {
+                    x: p.x.max(q.x),
+                    y: p.y.max(q.y),
+                },
+            }
+            .grow(grow)
+        };
+        params
+            .windows(2)
+            .map(|w| boxed(a + r * w[0], a + r * w[1]))
+            .collect()
+    }
+
     /// First obstacle (along the chord) closer than its required distance: the bend point.
-    fn clearance_bend(&self, a: Vec2, t: Vec2) -> Option<(Vec2, Option<usize>)> {
+    /// `portals` are the edges the chord crosses (the `since` chain of [`Search::los`]; empty for
+    /// a direct chord): the obstacle queries run on the sleeve around the chord, the sub-chord
+    /// boxes between consecutive portal crossings, merged into one sorted, dedup'd candidate
+    /// list. Per call `O((C + 1) * local)`, `C = portals.len()`.
+    fn clearance_bend(&self, a: Vec2, t: Vec2, portals: &[usize]) -> Option<(Vec2, Option<usize>)> {
         const TOL: f64 = 1.0;
         let chord = Seg { a, b: t };
         let r = t - a;
         let l2 = r.len2().max(1.0);
-        let bb = Aabb {
-            min: Vec2 {
-                x: a.x.min(t.x),
-                y: a.y.min(t.y),
-            },
-            max: Vec2 {
-                x: a.x.max(t.x),
-                y: a.y.max(t.y),
-            },
-        };
+        let psegs: Vec<(Vec2, Vec2)> = portals
+            .iter()
+            .map(|&pe| {
+                let ge = &self.g.edges[pe];
+                (self.g.verts[ge.a].at, self.g.verts[ge.b].at)
+            })
+            .collect();
         let rho = self.g.rho_max() + self.c + 0.5 * self.w + self.eps;
         let mut best: Option<(f64, Vec2, Option<usize>)> = None;
         let mut offer = |param: f64, p: Vec2, v: Option<usize>| {
@@ -576,9 +652,16 @@ impl<'a> Search<'a> {
                 best = Some((param, p, v));
             }
         };
-        for u in self.g.verts_near(bb.grow(rho)) {
+        let mut vcand: Vec<usize> = Vec::new();
+        for bb in Self::sleeve_boxes(a, t, &psegs, rho) {
+            vcand.extend(self.g.verts_near(bb));
+        }
+        vcand.sort_unstable();
+        vcand.dedup();
+        self.cands.set(self.cands.get() + vcand.len());
+        for u in vcand {
             let vi = &self.g.verts[u];
-            if vi.owner.is_none() || vi.nets.contains(&self.net) || vi.at == a {
+            if !self.foreign(u) || vi.at == a {
                 continue;
             }
             let need = vi.r + vi.clr.max(self.c) + 0.5 * self.w + self.eps;
@@ -594,9 +677,16 @@ impl<'a> Search<'a> {
             + self.c
             + 0.5 * self.w
             + self.eps;
-        for wi in self.obs.query_walls(bb.grow(wr)) {
+        let mut wcand: Vec<usize> = Vec::new();
+        for bb in Self::sleeve_boxes(a, t, &psegs, wr) {
+            wcand.extend(self.obs.query_walls(bb));
+        }
+        wcand.sort_unstable();
+        wcand.dedup();
+        self.cands.set(self.cands.get() + wcand.len());
+        for wi in wcand {
             let wl = &self.obs.walls[wi];
-            if ObstacleSet::exempt(wl.net, &wl.tie_nets, self.net) {
+            if self.wall_exempt(wl) {
                 continue;
             }
             let need =
@@ -677,7 +767,7 @@ impl<'a> Search<'a> {
         let side = side.filter(|h| h.len() > 1e-9).map(|h| h * (1.0 / h.len()));
         const TOL: f64 = 1.0;
         let vi = &self.g.verts[u];
-        if vi.owner.is_none() || vi.nets.contains(&self.net) {
+        if !self.foreign(u) {
             return true;
         }
         let (d1, d2) = (vi.at - a, t - vi.at);
@@ -717,14 +807,33 @@ impl<'a> Search<'a> {
                     y: w.y + wr,
                 },
             };
+            // foreign graph vertices pinching the arc sample (D10)
+            for j in self.g.verts_near(wbb) {
+                let vj = &self.g.verts[j];
+                // a pinch against a vertex joined to `u` by an unfit edge is that edge's capacity
+                // (D2); only the other, non-adjacent vertices need this test
+                if j == u || !self.foreign(j) || self.g.edge(u, j).is_some_and(|e| self.hard(e)) {
+                    continue;
+                }
+                let need = vj.r + vj.clr.max(self.c) + 0.5 * self.w + self.eps;
+                if dist(w, vj.at) < need - TOL {
+                    return false;
+                }
+            }
             for wi in self.obs.query_walls(wbb) {
                 let wl = &self.obs.walls[wi];
-                if ObstacleSet::exempt(wl.net, &wl.tie_nets, self.net) {
+                if self.wall_exempt(wl) {
                     continue;
                 }
                 let (d, d_u) = match &wl.core {
-                    // point walls are vertices: pad / via pinches are CDT edge capacities
-                    Core::Point(_) => continue,
+                    // point walls that are graph vertices were tested above; the others
+                    // (e.g. a keepout point) are tested here
+                    Core::Point(p) => {
+                        if !self.g.verts_near(Aabb { min: *p, max: *p }).is_empty() {
+                            continue;
+                        }
+                        (dist(w, *p), dist(vi.at, *p))
+                    }
                     Core::Seg(s) => (point_seg(w, s), point_seg(vi.at, s)),
                     Core::Arc(ar) => (
                         crate::geom::point_arc(w, ar),
@@ -801,7 +910,7 @@ impl<'a> Search<'a> {
                 portals.drain(..=k);
                 continue;
             }
-            if let Some((bend, bv)) = self.clearance_bend(apex, target) {
+            if let Some((bend, bv)) = self.clearance_bend(apex, target, &portals) {
                 if let Some(bv) = bv {
                     // the wire keeps the chord's side of `u` (the chord lies in the corridor)
                     let ub = self.g.verts[bv].at;
@@ -962,6 +1071,7 @@ impl<'a> Search<'a> {
             faces,
             est_len: st.nodes[goal_id].g_len,
             expansions,
+            candidates: self.cands.get(),
         }
     }
 
@@ -1148,15 +1258,23 @@ pub fn strand_blockers(
 }
 
 /// Zero-crossing path along the edge between the terminals, if free.
-fn direct(g: &RouteGraph, conn: &Connection, s: usize, t: usize) -> Option<SlotPath> {
+/// Rejected when the chord bends around a third obstacle inside its clearance band (D3).
+/// O(local) for one chord query.
+fn direct(sr: &Search, s: usize, t: usize) -> Option<SlotPath> {
+    let (g, conn) = (sr.g, sr.conn);
     let e = g.edge(s, t)?;
     if g.passable(e, conn.net) && g.slot_count(e) == 0 && g.along(e).is_none() {
+        let (p, q) = (g.verts[s].at, g.verts[t].at);
+        if sr.clearance_bend(p, q, &[]).is_some() {
+            return None;
+        }
         return Some(SlotPath {
             conn: conn.id,
             crossings: Vec::new(),
             faces: Vec::new(),
-            est_len: dist(g.verts[s].at, g.verts[t].at),
+            est_len: dist(p, q),
             expansions: 0,
+            candidates: sr.cands.get(),
         });
     }
     None
@@ -1175,11 +1293,11 @@ pub fn search(
     if Instant::now() >= p.deadline {
         return SearchOutcome::Timeout;
     }
-    if let Some(d) = direct(g, conn, start_v, goal_v) {
+    let s = Search::new(g, obs, conn, start_v, goal_v, p, false);
+    if let Some(d) = direct(&s, start_v, goal_v) {
         return SearchOutcome::Found(d);
     }
     let cap = p.expansion_cap.min(default_expansion_cap(g));
-    let s = Search::new(g, obs, conn, start_v, goal_v, p, false);
     match s.run(cap, p.deadline) {
         Run::Found(path) => SearchOutcome::Found(*path),
         Run::Timeout => SearchOutcome::Timeout,
@@ -1222,6 +1340,7 @@ pub fn ghost(
                 faces: Vec::new(),
                 est_len: dist(g.verts[start_v].at, g.verts[goal_v].at),
                 expansions: 0,
+                candidates: 0,
             };
             return Some((path, None, None));
         }
@@ -1237,4 +1356,51 @@ pub fn ghost(
     let blocked_edge = k.map(|k| path.crossings[k].0);
     let last_reached = k.and_then(|k| k.checked_sub(1)).map(|k| path.crossings[k]);
     Some((*path, blocked_edge, last_reached))
+}
+
+/// Test hook: the first clearance bend of the chord `a -> t` of `conn`, with the sleeve query
+/// (`portals` = edges crossed) or, with `full`, the single full-bbox query it replaced.
+#[doc(hidden)]
+pub fn probe_clearance_bend(
+    g: &RouteGraph,
+    obs: &LayerObstacles,
+    conn: &Connection,
+    a: Vec2,
+    t: Vec2,
+    portals: &[usize],
+    full: bool,
+) -> Option<(Vec2, Option<usize>)> {
+    let p = SearchParams {
+        history: &[],
+        weight: 1.0,
+        present_overuse: PRESENT_OVERUSE,
+        expansion_cap: usize::MAX,
+        deadline: Instant::now() + std::time::Duration::from_secs(3600),
+        eps: None,
+    };
+    let s = Search::new(g, obs, conn, 0, 0, &p, false);
+    // no portals = one box over the chord's whole bbox
+    s.clearance_bend(a, t, if full { &[] } else { portals })
+}
+
+/// Test hook: [`Search::bend_ok`] of a string `a -> u -> t` passing `u` on the `side` direction.
+#[doc(hidden)]
+pub fn probe_bend_ok(
+    g: &RouteGraph,
+    obs: &LayerObstacles,
+    conn: &Connection,
+    a: Vec2,
+    u: usize,
+    t: Vec2,
+    side: Vec2,
+) -> bool {
+    let p = SearchParams {
+        history: &[],
+        weight: 1.0,
+        present_overuse: PRESENT_OVERUSE,
+        expansion_cap: usize::MAX,
+        deadline: Instant::now() + std::time::Duration::from_secs(3600),
+        eps: None,
+    };
+    Search::new(g, obs, conn, 0, 0, &p, false).bend_ok(a, u, t, Some(side))
 }
