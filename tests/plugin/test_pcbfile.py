@@ -106,6 +106,20 @@ def test_append_items_uses_given_uuid_and_validates():
         pcbfile.append_items(t, [{**it, "layer": 9}], layer_names={2: "B.Cu"}, net_names={2: "N"})
 
 
+def test_append_via_without_layers_is_through_on_4_layers():
+    """F MINOR 1: engine vias carry ``layers: []``; on a 4-layer board (ids 0, 2, 4, 6) the default is the top-down
+    first / last copper layer, F.Cu and B.Cu (as ipc.to_kipy_item), never In2.Cu."""
+    t = "(kicad_pcb\n\t(version 1)\n)\n"
+    via = {"kind": "via", "net": 1, "at": [0, 0], "d": 600_000, "drill": 300_000, "layers": []}
+    names = {0: "F.Cu", 2: "B.Cu", 4: "In1.Cu", 6: "In2.Cu"}
+    out = pcbfile.append_items(t, [via], layer_names=names, net_names={1: "N"})
+    assert '(layers "F.Cu" "B.Cu")' in out, out
+    for order in ({6: "In2.Cu", 4: "In1.Cu", 2: "B.Cu", 0: "F.Cu"}, {0: "F.Cu", 2: "B.Cu"}):
+        assert '(layers "F.Cu" "B.Cu")' in pcbfile.append_items(t, [via], layer_names=order, net_names={1: "N"})
+    blind = {**via, "layers": [0, 4]}  # explicit layers are kept
+    assert '(layers "F.Cu" "In1.Cu")' in pcbfile.append_items(t, [blind], layer_names=names, net_names={1: "N"})
+
+
 def test_parse_layers_synthetic_4layer():
     t = ('(kicad_pcb (version 20260101)\n\t(layers\n\t\t(0 "F.Cu" signal)\n\t\t(4 "In1.Cu" power)\n'
          '\t\t(6 "In2.Cu" power "PWR plane")\n\t\t(2 "B.Cu" signal)\n\t\t(9 "F.Adhes" user "F.Adhesive")\n'
