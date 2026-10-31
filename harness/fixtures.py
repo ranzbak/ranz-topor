@@ -11,15 +11,15 @@ def _v(x, y):
     return pcbnew.VECTOR2I(int(round(x * MM)), int(round(y * MM)))
 
 
-def _add_pad(fp, num, shape, size, pos, net, *, drill=None, angle=0.0):
+def _add_pad(fp, num, shape, size, pos, net, *, drill=None, angle=0.0, back=False):
     p = pcbnew.PAD(fp)
     p.SetNumber(num)
     if drill is None:
         p.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
         ls = pcbnew.LSET()
-        ls.AddLayer(pcbnew.F_Cu)
-        ls.AddLayer(pcbnew.F_Mask)
-        ls.AddLayer(pcbnew.F_Paste)
+        ls.AddLayer(pcbnew.B_Cu if back else pcbnew.F_Cu)
+        ls.AddLayer(pcbnew.B_Mask if back else pcbnew.F_Mask)
+        ls.AddLayer(pcbnew.B_Paste if back else pcbnew.F_Paste)
         p.SetLayerSet(ls)
     else:
         p.SetAttribute(pcbnew.PAD_ATTRIB_PTH)
@@ -53,7 +53,12 @@ def make_fixture_board(
     transition_via=False,
     vcc_stub=False,
     wall=False,
+    b_pads=False,
+    pour_gap_pad=False,
 ) -> Path:
+    """Synthetic board. `b_pads`: SIG pads "2"/"3" are SMD on B.Cu (SIG then needs a via to reach
+    the F.Cu pads). `pour_gap_pad`: GND SMD pad "9" on F.Cu at (10, 30) that the B.Cu GND pour
+    cannot reach."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     b = pcbnew.CreateEmptyBoard()
@@ -114,11 +119,15 @@ def make_fixture_board(
         if pads != "all":
             spec = [s for s in spec if s[0] in set(pads)]
         for num, shp, size, pos, net, kw in spec:
+            if b_pads and num in ("2", "3"):
+                kw = {**kw, "back": True}
             p = _add_pad(fp, num, shp, size, pos, nets[net], **kw)
             if shp == pcbnew.PAD_SHAPE_ROUNDRECT:
                 p.SetRoundRectRadiusRatio(0.25)  # 0.25 mm on the 1.0 mm short side
             if shp == pcbnew.PAD_SHAPE_TRAPEZOID:
                 p.SetDelta(_v(0.0, 0.2))
+        if pour_gap_pad:
+            _add_pad(fp, "9", pcbnew.PAD_SHAPE_RECT, (1.0, 1.0), (10, 30), nets["GND"])
         if npth:
             p = pcbnew.PAD(fp)
             p.SetNumber("")

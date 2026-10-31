@@ -1,8 +1,13 @@
+import re
+import subprocess
+
 import pcbnew
+import pytest
 
 from harness.copy import ProjectCopy
 from harness.fixtures import MM, make_fixture_board, write_project_file
 from harness.model import export_model, load_board
+from harness.render import render_png
 from harness.rip import record_widths
 from harness.rules import resolve_rules
 
@@ -121,14 +126,95 @@ def test_bench_drc_loop_reroutes_with_spots(fixture_board, tmp_path):
     assert r["drc_loop"]["spots"] == _fake_topor.seen[1]
 
 
-def test_progress_m2_caption_and_path(engine, fixture_board, tmp_path):
-    res = progress.render_progress("T9", board="fixture", date="2026-10-31",
+def test_progress_m3_caption_and_path(engine, fixture_board, tmp_path):
+    res = progress.render_progress("T4", board="fixture", date="2026-10-31",
                                    out_dir=tmp_path / "prog", pcb_override=fixture_board.pcb,
                                    router="topor")
-    assert (tmp_path / "prog" / "2026-10-31-m2-T9.png").is_file()
+    assert (tmp_path / "prog" / "2026-10-31-m3-T4.png").is_file()
     l1, l2 = res["caption"].split("\n")
-    assert l1.startswith("T9: ") and " connections, " in l1 and "partial " in l1 and "arcs " in l1
-    assert l2.startswith("DRC routing ") and " vs hand " in l2 and l2.endswith(" s")
+    assert l1.startswith("T4: ") and " connections, " in l1 and "partial " in l1
+    assert "vias " in l1 and "arcs " in l1 and "iters " in l1
+    assert l2.startswith("DRC routing ") and " vs hand " in l2 and "B.Cu" in l2
+    assert l2.endswith(" threads")
+
+
+def test_export_pours_have_fill_outlines(fixture_board):
+    m = _export(fixture_board)
+    fills = m["pours"][0]["fills"]
+    assert fills and fills[0]["layer"] == int(pcbnew.B_Cu)
+    ring = fills[0]["outer"]
+    assert len(ring) >= 4
+    xs, ys = [p[0] for p in ring], [p[1] for p in ring]
+    # the 50x40 mm zone outline is inset 1 mm; the fill stays inside it
+    assert min(xs) >= 1 * MM and max(xs) <= 49 * MM and min(ys) >= 1 * MM and max(ys) <= 39 * MM
+
+
+def test_fixture_b_pads_puts_sig_pads_on_b_cu(tmp_path):
+    m = _export(_board(tmp_path / "b.kicad_pcb", b_pads=True))
+    by = {p["number"]: p for p in m["pads"]}
+    assert by["2"]["layers"] == [int(pcbnew.B_Cu)] and by["3"]["layers"] == [int(pcbnew.B_Cu)]
+    assert by["5"]["layers"] == [int(pcbnew.F_Cu)]
+    b = pcbnew.LoadBoard(str(tmp_path / "b.kicad_pcb"))
+    p2 = next(p for p in b.GetPads() if p.GetNumber() == "2")
+    assert p2.IsOnLayer(pcbnew.B_Cu) and not p2.IsOnLayer(pcbnew.F_Cu)
+
+
+def test_fixture_pour_gap_pad_is_not_reached(tmp_path):
+    m = _export(_board(tmp_path / "g.kicad_pcb", pour_gap_pad=True))
+    p9 = next(p for p in m["pads"] if p["number"] == "9")
+    assert p9["net"] == _code(m, "GND") and p9["layers"] == [int(pcbnew.F_Cu)]
+    assert "U1.9" not in m["pours"][0]["pads"]
+
+
+def test_drc_spots_via_item_spots_every_layer():
+    via = {"kind": "via", "net": 3, "at": [7 * MM_, 5 * MM_], "d": 600_000, "drill": 300_000,
+           "layers": [0, 31]}
+    model = {"nets": [{"code": 3, "name": "SIG"}], "layers": [{"id": 0}, {"id": 31}]}
+    v = _viol("clearance", ("Via [SIG] on F.Cu - B.Cu", 7.0, 5.0, "uv"),
+              ("Pad 1 [X] of U1", 8.0, 5.2, "pad"))
+    spots = drc_spots([v], {"uv": via}, model, 1_500_000, 200_000)
+    assert spots == [{"layer": l, "at": [7 * MM_, 5 * MM_], "r": 800_000, "net": 3}
+                     for l in (0, 31)]
+
+
+def test_route_summary_has_vias_and_layer_lengths():
+    seg = lambda layer, x: {"net": 1, "layer": layer, "width": 250_000,
+                            "prim": {"kind": "seg", "a": [0, 0], "b": [x * MM_, 0]}}
+    via = lambda x: {"kind": "via", "net": 1, "at": [x, 0], "d": 600_000, "layers": [0, 31]}
+    rep = {"connections": [], "connections_total": 1, "routed": 1, "items": [
+        seg(0, 3), seg(31, 4), via(0), via(1), {**seg(0, 0), "prim": {
+            "kind": "arc", "start": [0, 0], "mid": [MM_, MM_], "end": [2 * MM_, 0]}}],
+           "threads_used": 2}
+    s = bench._route_summary(rep, [{"id": 0, "name": "F.Cu"}, {"id": 31, "name": "B.Cu"}])
+    assert s["vias"] == 2 and s["threads_used"] == 2
+    assert set(s["length_by_layer_mm"]) == {"F.Cu", "B.Cu"}
+    assert s["length_by_layer_mm"]["B.Cu"] == 4.0
+    assert s["length_by_layer_mm"]["F.Cu"] == pytest.approx(3.0 + 3.14159265, abs=1e-3)  # + half circle r=1
+
+
+def test_render_b_cu_copper_is_distinct(tmp_path):
+    def board(name, layer):
+        pcb = make_fixture_board(tmp_path / name / "b.kicad_pcb", locked_track=False, arc=False,
+                                 zone=False, pads=None, free_via=False, copper_text=False,
+                                 npth=False)
+        if layer is not None:
+            b = pcbnew.LoadBoard(str(pcb))
+            t = pcbnew.PCB_TRACK(b)
+            t.SetStart(pcbnew.VECTOR2I(10 * MM, 20 * MM))
+            t.SetEnd(pcbnew.VECTOR2I(40 * MM, 20 * MM))
+            t.SetWidth(int(1.0 * MM))
+            t.SetLayer(layer)
+            b.Add(t)
+            pcbnew.SaveBoard(str(pcb), b)
+        return render_png(pcb, tmp_path / f"{name}.png")
+
+    def rmse(a, b):
+        out = subprocess.run(["compare", "-metric", "RMSE", str(a), str(b), "null:"],
+                             capture_output=True, text=True).stderr
+        return float(re.search(r"\(([0-9.e+-]+)\)", out).group(1))
+
+    f, bk, none = board("f", pcbnew.F_Cu), board("b", pcbnew.B_Cu), board("n", None)
+    assert rmse(f, bk) > 0.002 and rmse(f, none) > 0.002 and rmse(bk, none) > 0.002
 
 
 def test_bench_summary_prints_partial_line(fixture_board, tmp_path, capsys):

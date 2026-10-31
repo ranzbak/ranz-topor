@@ -440,6 +440,29 @@ def find_dangling_ends(board) -> list[dict]:
 
 
 # ---------------------------------------------------------------- pours
+def _ring(chain) -> list[list[int]]:
+    return [[int(chain.CPoint(i).x), int(chain.CPoint(i).y)] for i in range(chain.PointCount())]
+
+
+def _pour_fills(z, layers: list[int]) -> tuple[list[dict], str | None]:
+    """Outer rings (holes dropped) of the zone's filled copper per layer, nm, KiCad frame.
+
+    Falls back to the zone's drawn outline (with a warning string) when the filled list is
+    unavailable. O(total fill points).
+    """
+    fills: list[dict] = []
+    try:
+        for l in layers:
+            ps = z.GetFilledPolysList(l)
+            for k in range(ps.OutlineCount()):
+                fills.append({"layer": l, "outer": _ring(ps.Outline(k))})
+        return fills, None
+    except AttributeError as e:
+        warn = f"filled polygon list unavailable ({e}); using zone outline"
+    ol = _ring(z.Outline().Outline(0))
+    return [{"layer": l, "outer": ol} for l in layers], warn
+
+
 def _export_pours(board, cu: list[int]) -> list[dict]:
     """Real copper pours (not rule areas, not teardrop zones, net != 0) with the pads and vias they
     connect to after a refill; a pad/via is listed only if it has copper on one of the zone's layers.
@@ -461,8 +484,12 @@ def _export_pours(board, cu: list[int]) -> list[dict]:
                       for p in conn.GetConnectedPads(z) if any(p.IsOnLayer(l) for l in layers))
         vias = sorted(_uuid(t) for t in conn.GetConnectedTracks(z)
                       if _is_via(t) and any(t.IsOnLayer(l) for l in layers))
-        out.append({"uuid": _uuid(z), "net": int(z.GetNetCode()), "layers": layers,
-                    "pads": pads, "vias": vias})
+        fills, warn = _pour_fills(z, layers)
+        d = {"uuid": _uuid(z), "net": int(z.GetNetCode()), "layers": layers,
+             "pads": pads, "vias": vias, "fills": fills}
+        if warn:
+            d["warning"] = warn
+        out.append(d)
     out.sort(key=lambda d: d["uuid"])
     return out
 

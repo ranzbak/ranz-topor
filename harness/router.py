@@ -32,7 +32,7 @@ def drc_spots(violations, created: dict, model: dict, reach_nm: float,
     (zone-fill necks: KiCad names the via / pad and the zone, copper the engine cannot see) the
     blamed items are the written ones of another net whose centreline passes within `reach_nm`
     of a named position. The spot sits at the lowest non-zone item position (nm, KiCad frame);
-    its radius is `reach_nm` for `connection_width`, else `clearance_nm` + the widest blamed item.
+    a via item yields one spot per copper layer; its radius is `reach_nm` for `connection_width`, else `clearance_nm` + the widest blamed item.
     """
     names = {n["code"]: n["name"] for n in model.get("nets", [])}
     spots: list[dict] = []
@@ -57,5 +57,11 @@ def drc_spots(violations, created: dict, model: dict, reach_nm: float,
             mine = [h for h in hits if h["net"] == net]
             r = (reach_nm if v.type == "connection_width"
                  else clearance_nm + max(h.get("width") or h.get("d") or 0 for h in mine))
-            spots.append({"layer": _layer_of(mine[0]), "at": at, "r": int(round(r)), "net": net})
+            if any(h.get("kind") == "via" for h in mine):  # through via: copper on every layer
+                layers = sorted(int(l["id"]) for l in model.get("layers", [])
+                                ) or [_layer_of(mine[0])]
+            else:
+                layers = [_layer_of(mine[0])]
+            spots.extend({"layer": l, "at": at, "r": int(round(r)), "net": net}
+                         for l in layers)
     return spots

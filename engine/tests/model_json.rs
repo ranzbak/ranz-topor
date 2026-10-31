@@ -384,3 +384,21 @@ fn checker_via_drill_to_hole() {
     assert!(rep.violations.iter().all(|v| v.against == "hole:0,0"));
     assert_eq!(rep.violations[0].required, 600_000);
 }
+
+#[test]
+fn pour_fills_and_via_options_round_trip() {
+    let m = BoardModel::from_json(
+        r#"{ "pours": [ { "uuid": "z", "net": 1, "layers": [2],
+             "fills": [ { "layer": 2, "outer": [[1000, 2000], [3000, -4000], [5, 6]] } ] } ],
+             "rules": {} }"#,
+    )
+    .unwrap();
+    let f = &m.pours[0].fills[0];
+    assert_eq!(f.layer, 2);
+    assert_eq!(f.outer.len(), 3);
+    assert_eq!((f.outer[0].x, f.outer[0].y), (1000, -2000));
+    assert_eq!((f.outer[1].x, f.outer[1].y), (3000, 4000));
+    let o = Options::from_json("{}").unwrap();
+    assert_eq!(o.via_cost_nm, 2_000_000);
+    assert_eq!(o.max_vias_per_connection, 4);
+}

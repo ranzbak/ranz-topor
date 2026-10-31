@@ -201,6 +201,16 @@ pub struct Pour {
     pub layers: Vec<u32>,
     pub pads: Vec<String>,
     pub vias: Vec<String>,
+    /// Filled-copper outer outlines per zone layer (KiCad frame on the wire; `from_json` flips Y).
+    pub fills: Vec<PourFill>,
+}
+
+/// One outer ring of a zone's filled copper on `layer` (holes dropped, like M0 copper shapes).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PourFill {
+    pub layer: u32,
+    pub outer: Vec<Pt>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -371,6 +381,11 @@ impl BoardModel {
         }
         for c in &mut self.copper_shapes {
             c.poly.iter_mut().for_each(Pt::flip);
+        }
+        for p in &mut self.pours {
+            for f in &mut p.fills {
+                f.outer.iter_mut().for_each(Pt::flip);
+            }
         }
         for h in &mut self.holes {
             h.at.flip();
@@ -601,6 +616,10 @@ pub struct Options {
     /// that is pinched below the margin ε (but not below the rules) with margin 0 against that
     /// corridor only; kept when it shortens the routing. The harness DRC is the final judge.
     pub zero_slack_retry: bool,
+    /// Router (M3): cost of one via in nm of wire length.
+    pub via_cost_nm: i64,
+    /// Router (M3): maximum vias on one connection.
+    pub max_vias_per_connection: u32,
 }
 
 impl Default for Options {
@@ -620,6 +639,8 @@ impl Default for Options {
             pinned: BTreeMap::new(),
             drc_spots: Vec::new(),
             zero_slack_retry: true,
+            via_cost_nm: 2_000_000,
+            max_vias_per_connection: 4,
         }
     }
 }
@@ -678,6 +699,9 @@ pub struct ViaItem {
     pub layers: Vec<u32>,
     #[serde(default)]
     pub group: Option<String>,
+    /// Router output: id of the wire this via belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire: Option<usize>,
 }
 
 impl Item {

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import time
 from dataclasses import asdict
@@ -52,10 +53,42 @@ def _zone_reach(board) -> float:
     return 2.0 * max(r) if r else 1_000_000.0
 
 
-def _route_summary(report: dict | None) -> dict | None:
-    """Condensed topor `RouteResult` (None for other routers' reports)."""
+def _prim_len(prim: dict) -> float:
+    """Length (nm) of a seg or arc primitive of the wire JSON."""
+    if prim.get("kind") == "arc":
+        a, m, e = prim["start"], prim["mid"], prim["end"]
+        d = 2.0 * (a[0] * (m[1] - e[1]) + m[0] * (e[1] - a[1]) + e[0] * (a[1] - m[1]))
+        chord = math.dist(a, e)
+        if abs(d) < 1e-9:
+            return chord
+        ux = ((a[0]**2 + a[1]**2) * (m[1] - e[1]) + (m[0]**2 + m[1]**2) * (e[1] - a[1])
+              + (e[0]**2 + e[1]**2) * (a[1] - m[1])) / d
+        uy = ((a[0]**2 + a[1]**2) * (e[0] - m[0]) + (m[0]**2 + m[1]**2) * (a[0] - e[0])
+              + (e[0]**2 + e[1]**2) * (m[0] - a[0])) / d
+        r = math.dist((ux, uy), a)
+        ang = lambda p: math.atan2(p[1] - uy, p[0] - ux)
+        sweep = (ang(e) - ang(a)) % (2 * math.pi)
+        if (ang(m) - ang(a)) % (2 * math.pi) > sweep:  # mid not on the ccw side: go the other way
+            sweep = 2 * math.pi - sweep
+        return r * sweep
+    return math.dist(prim["a"], prim["b"])
+
+
+_DEFAULT_LAYER_NAMES = {0: "F.Cu", 2: "B.Cu", 31: "B.Cu"}
+
+
+def _route_summary(report: dict | None, layers: list[dict] | None = None) -> dict | None:
+    """Condensed topor `RouteResult` (None for other routers' reports). `layers` is the model's
+    layer list (id -> name for the per-layer length)."""
     if not report or "connections" not in report:
         return None
+    names = {int(l["id"]): l["name"] for l in layers or []} or _DEFAULT_LAYER_NAMES
+    items = report.get("items") or []
+    by_layer: dict[str, float] = {}
+    for it in items:
+        if it.get("kind") != "via" and it.get("prim"):
+            n = names.get(int(it["layer"]), str(it["layer"]))
+            by_layer[n] = by_layer.get(n, 0.0) + _prim_len(it["prim"])
 
     def mm(key):
         v = report.get(key)
@@ -70,6 +103,9 @@ def _route_summary(report: dict | None) -> dict | None:
         "nets_routed": report.get("nets_routed", 0),
         "length_mm": mm("total_length_nm"),
         "outside_mm": mm("length_outside_pads_nm"),
+        "vias": sum(1 for it in items if it.get("kind") == "via"),
+        "length_by_layer_mm": {n: round(v / 1e6, 3) for n, v in sorted(by_layer.items())},
+        "threads_used": report.get("threads_used"),
         "hand_outside_mm": None,
         "iterations": report.get("iterations"),
         "timed_out": report.get("timed_out"),
@@ -157,7 +193,8 @@ def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path) -> s
                     f"{rt['nets_routed']}/{rt['nets']} nets, partial {rt['partial']}, "
                     f"failed {rt['failed']}, outside pads {rt['outside_mm']} "
                     f"(hand {rt['hand_outside_mm']}), iters {rt['iterations']}, "
-                    f"clinches regular {reg} u {u}")
+                    f"clinches regular {reg} u {u}, vias {rt['vias']}, "
+                    + " / ".join(f"{n} {v}" for n, v in rt['length_by_layer_mm'].items()) + " mm")
         zs = result.get("zero_slack") or {}
         names = [w["net"] for w in zs.get("wires") or []]
         head.append(f"  zero slack: {zs.get('status')}, {len(names)} wire(s)"
@@ -316,7 +353,7 @@ def run_bench(
     topor_png = caption(topor_raw, f"{board}: topor", out_dir / f"{board}-topor.png")
     compose_compare(hand_png, topor_png, out_dir / f"{board}-compare.png")
 
-    route = _route_summary(router_report)
+    route = _route_summary(router_report, model["layers"])
     if route is not None and hand_stats is not None:
         route["hand_outside_mm"] = round(hand_stats["hand_outside_pads_nm"] / 1e6, 3)
     result = {
