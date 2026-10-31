@@ -392,14 +392,7 @@ def zone_to_pour(zone, *, net_codes: dict, cu_ids: set, pads: list, vias: list, 
         warn = "filled polygon list unavailable (zone not filled); using zone outline"
         ol = ring_pts(zone.outline.outline, max_err)
         fills = [{"layer": i, "outer": ol, "holes": []} for i in layers]
-    rings: dict[int, list] = {}
-    for f in fills:
-        rings.setdefault(f["layer"], []).extend([f["outer"], *f["holes"]])
-    reach_pads = sorted(f"{p['ref']}.{p['number']}" for p in pads if p["net"] == code and any(
-        l in rings and any(geom.point_in_rings(pt, rings[l]) for pt in pad_sample_points(p, l))
-        for l in p["layers"] if l in layers))
-    reach_vias = sorted(v["uuid"] for v in vias if v["net"] == code and any(
-        l in rings and geom.point_in_rings(v["at"], rings[l]) for l in layers if _in_span(v["layers"], l)))
+    reach_pads, reach_vias = pour_reach(code, layers, fills, pads, vias)
     cs, th = zone.proto.copper_settings, zone.proto.copper_settings.connection.thermal_spokes
     d = {"uuid": zone.id.value, "net": code, "layers": layers, "pads": reach_pads, "vias": reach_vias,
          "fills": fills,
@@ -415,6 +408,42 @@ def zone_to_pour(zone, *, net_codes: dict, cu_ids: set, pads: list, vias: list, 
 def _in_span(span: list, layer: int) -> bool:
     lo, hi = sorted(span, key=_top_down)
     return _top_down(lo) <= _top_down(layer) <= _top_down(hi)
+
+
+def pour_reach(code: int, layers: list, fills: list, pads: list, vias: list) -> tuple:
+    """(reached pad refs "REF.NUM", reached via uuids) of a pour of net `code` on `layers` with `fills`
+    (dicts layer/outer/holes). A same-net pad is reached on a zone layer when one of its probe points lies in
+    that layer's fill (even-odd over all rings); a same-net via when its centre does (over its span). Shared by
+    the IPC exporter and the run flow's post-rip refill. O(F * (pads + vias))."""
+    rings: dict[int, list] = {}
+    for f in fills:
+        rings.setdefault(f["layer"], []).extend([f["outer"], *f.get("holes", [])])
+    reach_pads = sorted(f"{p['ref']}.{p['number']}" for p in pads if p["net"] == code and any(
+        l in rings and any(geom.point_in_rings(pt, rings[l]) for pt in pad_sample_points(p, l))
+        for l in p["layers"] if l in layers))
+    reach_vias = sorted(v["uuid"] for v in vias if v["net"] == code and any(
+        l in rings and geom.point_in_rings(v["at"], rings[l]) for l in layers if _in_span(v["layers"], l)))
+    return reach_pads, reach_vias
+
+
+def dangling_ends(kept: list, vias: list, pads: list, cu_order: list) -> list:
+    """Dangling track ends of the `kept` entries (same rule as the exporter / harness). O(items)."""
+    pad_by_net: dict[int, list] = {}
+    for p in pads:
+        pad_by_net.setdefault(p["net"], []).append(p)
+    items = [geom.track_item(k["uuid"], k["net"], k["layer"], k["width"],
+                             k["prim"]["a"] if k["prim"]["kind"] == "seg" else k["prim"]["start"],
+                             k["prim"]["b"] if k["prim"]["kind"] == "seg" else k["prim"]["end"],
+                             k["prim"].get("mid")) for k in kept]
+    vias_by_net: dict[int, list] = {}
+    for v in vias:
+        vias_by_net.setdefault(v["net"], []).append(
+            (v["at"], v["d"] / 2.0, {l for l in cu_order if _in_span(v["layers"], l)}))
+
+    def in_pad(net, layer, pt) -> bool:
+        return any(pad_contains(p, layer, pt) for p in pad_by_net.get(net, ()))
+
+    return geom.find_dangling(items, vias_by_net, in_pad)
 
 
 # ---------------------------------------------------------------- the exporter
@@ -544,20 +573,7 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
                     for z in zones if _is_copper_pour(z)), key=lambda d: d["uuid"])
 
     # dangling ends
-    pad_by_net: dict[int, list] = {}
-    for p in pads:
-        pad_by_net.setdefault(p["net"], []).append(p)
-    items = [geom.track_item(k["uuid"], k["net"], k["layer"], k["width"],
-                             k["prim"]["a"] if k["prim"]["kind"] == "seg" else k["prim"]["start"],
-                             k["prim"]["b"] if k["prim"]["kind"] == "seg" else k["prim"]["end"],
-                             k["prim"].get("mid")) for k in kept]
-    vias_by_net: dict[int, list] = {}
-    for v in vias:
-        vias_by_net.setdefault(v["net"], []).append(
-            (v["at"], v["d"] / 2.0, {l for l in cu_order if _in_span(v["layers"], l)}))
-
-    def in_pad(net, layer, pt) -> bool:
-        return any(pad_contains(p, layer, pt) for p in pad_by_net.get(net, ()))
+    dangling = dangling_ends(kept, vias, pads, cu_order)
 
     return {
         "units": "nm",
@@ -573,7 +589,7 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
         "keepouts": keepouts,
         "net_ties": net_ties,
         "pours": pours,
-        "dangling_ends": geom.find_dangling(items, vias_by_net, in_pad),
+        "dangling_ends": dangling,
         "rules": rules,
     }
 

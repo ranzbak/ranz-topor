@@ -106,6 +106,13 @@ class _Log:
 def preflight_findings(cfg: Config, config_findings, copy_text: str) -> list:
     """Pre-flight findings known to the alpha: config findings, layer roles, kicad-cli presence. (B6 extends.)"""
     out = list(config_findings)
+    ver = pcbfile.file_version(copy_text)
+    if ver is None or ver < pcbfile.KICAD10_VERSION:
+        out.append(Finding("PCB_FORMAT_OLD", "error",
+                           f"The board file format (version {ver}) is older than KiCad 10 ({pcbfile.KICAD10_VERSION}); "
+                           "topor edits the file text and would silently skip items written in the old format.",
+                           "Open the board in KiCad 10 and save it (File → Save), then run Topor again.",
+                           (str(ver),)))
     copper = [(l["name"], l["type"]) for l in pcbfile.parse_layers(copy_text)]
     out += resolve_layer_roles(copper, cfg.layer_roles)[1]
     if not Path(kicad_cli()).is_file():
@@ -149,6 +156,30 @@ def filter_model(model: dict, ripped) -> dict:
             "vias": [v for v in model.get("vias", []) if v["uuid"] not in gone],
             "dangling_ends": [d for d in model.get("dangling_ends", []) if d.get("item") not in gone],
             "pours": [{**p, "vias": [u for u in p.get("vias", []) if u not in gone]} for p in model.get("pours", [])]}
+
+
+def refill_pours(model: dict, refilled_text: str) -> dict:
+    """The model with pour fills, pour reach (pads / vias) and dangling ends recomputed from the refilled ripped
+    copy, matching the harness order rip -> refill -> export (ruling C20). Zones are matched by uuid; a zone
+    that is absent from the file or has no filled polygons keeps its model fill (warning in `notes`).
+    Same functions as the IPC exporter (model_ipc.pour_reach / dangling_ends). O(F * (pads + vias))."""
+    from .model_ipc import dangling_ends, pour_reach  # noqa: PLC0415 - imports kipy
+
+    fills = pcbfile.parse_zone_fills(refilled_text)
+    ids = {l["name"]: int(l["id"]) for l in model.get("layers", [])}
+    pours = []
+    for p in model.get("pours", []):
+        polys = fills.get(p["uuid"]) or []
+        fl = [{"layer": ids[q["layer"]], "outer": q["pts"], "holes": []} for q in polys
+              if q["layer"] in ids and ids[q["layer"]] in p["layers"]]
+        if not fl:
+            pours.append(p)
+            continue
+        rp, rv = pour_reach(p["net"], p["layers"], fl, model["pads"], model["vias"])
+        pours.append({k: v for k, v in {**p, "fills": fl, "pads": rp, "vias": rv}.items() if k != "warning"})
+    cu = [int(l["id"]) for l in model.get("layers", [])]
+    return {**model, "pours": pours,
+            "dangling_ends": dangling_ends(model["kept"], model["vias"], model["pads"], cu)}
 
 
 def build_options(cfg: Config, engine, threads_override=None) -> dict:
@@ -408,12 +439,14 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     out.ripped_pcb = ripped_pcb
     if ripped:
         emit("preflight_drc")
-        base_drc = run_drc(ripped_pcb, work / "drc-ripped.json")
+        base_drc = run_drc(ripped_pcb, work / "drc-ripped.json", save_board=True)  # saved = zones refilled
     else:
         base_drc = orig_drc
     out.base_drc = base_drc
     log.line(f"rip plan: {len(ripped)} items; baseline DRC {len(base_drc.violations)} violations, {len(base_drc.unconnected)} unconnected")
     eng_model = filter_model(model, ripped)
+    if ripped:
+        eng_model = refill_pours(eng_model, ripped_pcb.read_text())
 
     # 4. route + DRC loop
     opts = build_options(cfg, engine)
@@ -467,7 +500,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         text = pcbfile.append_items(text, with_ids, layer_names=layer_names, net_names=net_names)
         pcb = _variant(pcb_copy, text, routed_dir)
         out.routed_pcb = pcb
-        rep = run_drc(pcb, routed_dir / "drc-routed.json")
+        rep = run_drc(pcb, routed_dir / "drc-routed.json", save_board=True)  # refilled zones for the preview
         log.line(f"DRC round {state['rounds']}: {len(rep.violations)} violations, {len(rep.unconnected)} unconnected, "
                  f"{rep.seconds:.1f}s")
         j = DrcJudgement(rep, {w["uuid"]: orig for w, orig in zip(with_ids, items)})

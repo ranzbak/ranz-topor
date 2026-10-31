@@ -179,3 +179,58 @@ def parse_layers(text: str) -> list[dict]:
 
     out.sort(key=top_down)
     return out
+
+
+_VERSION = re.compile(r"\(\s*kicad_pcb\s*\(\s*version\s+(\d+)\s*\)")
+_XY = re.compile(r"\(\s*xy\s+(-?[0-9.eE+-]+)\s+(-?[0-9.eE+-]+)\s*\)")
+_FILLED = re.compile(r"\(\s*filled_polygon\b")
+_LAYER_NAME = re.compile(r'\(\s*layer\s+"((?:[^"\\]|\\.)*)"\s*\)')
+_Z_UUID = re.compile(r'\(\s*uuid\s+"?([0-9A-Za-z\-]+)"?\s*\)')
+
+#: `(version N)` written by KiCad 10.0 (snapshot eprom-to-kernal, kicad-cli 10.0.8 `pcb drc --save-board`).
+KICAD10_VERSION = 20260206
+
+
+def file_version(text: str) -> int | None:
+    """The ``(version N)`` of a board file header, None when absent. O(1) (head only)."""
+    m = _VERSION.search(text[:2000])
+    return int(m.group(1)) if m else None
+
+
+def _nm(v: str) -> int:
+    return int(round(float(v) * 1_000_000))
+
+
+def parse_zone_fills(text: str) -> dict:
+    """Filled polygons of the top-level zones: ``{zone uuid: [{"layer": name, "pts": [[x_nm, y_nm], ...]}]}``.
+    Each ``filled_polygon`` is one ring (KiCad writes holes as slits / separate rings, so even-odd tests work on
+    the union). Zones without uuid are keyed ``"#<index>"``. O(len(text))."""
+    out: dict = {}
+    depth, zi = 0, 0
+    zstart = -1
+    for m in _TOKEN.finditer(text):
+        c = m.group()
+        if c == "(":
+            if depth == 1:
+                w = _WORD.match(text, m.end())
+                if w and w.group() == "zone":
+                    zstart = m.start()
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 1 and zstart >= 0:
+                chunk = text[zstart:m.end()]
+                zstart = -1
+                zi += 1
+                polys = []
+                heads = [h.start() for h in _FILLED.finditer(chunk)]
+                for a, b in zip(heads, heads[1:] + [len(chunk)]):
+                    part = chunk[a:b]
+                    lm = _LAYER_NAME.search(part)
+                    pts = [[_nm(x), _nm(y)] for x, y in _XY.findall(part)]
+                    if lm and len(pts) >= 3:
+                        polys.append({"layer": lm.group(1), "pts": pts})
+                head = chunk[: heads[0]] if heads else chunk
+                u = _Z_UUID.search(head)
+                out[u.group(1) if u else f"#{zi - 1}"] = polys
+    return out
