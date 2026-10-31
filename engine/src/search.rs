@@ -2048,6 +2048,9 @@ fn find_direct(lay: &Layered) -> Option<SlotPath> {
     None
 }
 
+/// First soft element of a ghost: `(edge (layer_idx, edge), site, crossing before it)`.
+type SoftHit = (Option<(usize, usize)>, Option<usize>, Option<(usize, usize)>);
+
 type GhostOut = (
     SlotPath,
     Option<(usize, usize)>,
@@ -2595,7 +2598,7 @@ fn ghost_in(
         assign_ghost_slots(env.layers[leg.layer_idx].0, leg);
     }
     // the first soft-blocked element in travel order: a crossing, or the site ending a leg
-    let mut first: Option<(Option<(usize, usize)>, Option<usize>, Option<(usize, usize)>)> = None;
+    let mut first: Option<SoftHit> = None;
     for (j, leg) in path.legs.iter().enumerate() {
         let sr = &lay.ls[leg.layer_idx];
         if leg.crossings.is_empty() {

@@ -756,8 +756,11 @@ fn insert_path_activates_sites_and_remove_conn_frees_them() {
     assert_eq!(again.vias(), 1);
 }
 
+/// `ghost()` result: `(path, first blocked edge, first blocked site, crossing before it)`.
+type GhostOut = Option<(SlotPath, Option<(usize, usize)>, Option<usize>, Option<(usize, usize)>)>;
+
 /// A ghost element is soft (a crossing or a site the slot search could not take as it stands).
-fn ghost_soft(o: &Option<(SlotPath, Option<(usize, usize)>, Option<usize>, Option<(usize, usize)>)>) -> bool {
+fn ghost_soft(o: &GhostOut) -> bool {
     match o {
         Some((_, e, s, _)) => e.is_some() || s.is_some(),
         None => true,
@@ -894,7 +897,7 @@ fn ghost_cost_is_linear() {
         for i in 0..25 {
             pads.push(p(
                 &format!("x{i}_{j}"),
-                3 + (i + 25 * j) as i32,
+                3 + i + 25 * j,
                 4.0 + 1.75 * i as f64,
                 4.0 + 1.75 * j as f64,
                 1.0,
