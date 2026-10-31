@@ -66,6 +66,9 @@ and debugging. Concretely:
 | 14 | **Respect locked tracks/vias** | plugin option | on (locked copper = fixed obstacle) | off lets topor rip/smooth locked copper |
 | 15 | Bend rules (45° mode) | plugin config | `bend_90: only_if_no_fit`, `bend_acute: never` | backlog |
 | 16 | Missing-width fallback | pre-flight dialog | 0.25 mm, user clicks OK | backlog |
+| 17 | Rip-up loop limit (times one connection may be ripped by the same blocker) | `topor.toml` | 3 (`RIP_PAIR_CAP`) | user 2026-10-31; also the PathFinder iteration cap |
+| 18 | **Timeout** (whole run incl. DRC rounds, M3-R8) | `topor.toml` | 60 s; `0` / `none` = disabled | user 2026-10-31; when disabled the progress dialog's **Cancel** is the only stop and returns the best result so far; Big-O budget unaffected |
+| 19 | **Preview before apply** | plugin flow (M4) | always on | user 2026-10-31: after routing, show a preview (PNG: hand/current vs result, both layers, new copper highlighted, report summary incl. unrouted, vias, detours, DRC) and ask **Accept / Reject**; only Accept writes to KiCad, as one undo step; Reject leaves the board untouched |
 | — | Engine options already exposed | `Options` (engine/src/model.rs) | margin 5 µm, threads, wall clock, caps, partial routes off, scope, existing-copper policy, zero-slack retry, via cost, max vias/connection, via reduction | |
 | — | Expert (config file only) | plugin config `[expert]` | current constants | PathFinder history weights (`HIST_*`, `PRESENT_OVERUSE`), zero-slack retry limits |
 | — | Fixed (not configurable) | code | — | numeric tolerances, grid cell sizes, parallel thresholds, `MIN_SAGITTA`, outline sub-arc sagitta: correctness, not taste |
