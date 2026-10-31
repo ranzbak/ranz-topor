@@ -2,7 +2,7 @@
 //! per connection plus the layered-search counters.
 //!
 //! `cargo run --release --example route_probe -- <model.json> [--options '<Options JSON>']
-//!     [--iters N] [--margin NM] [--quiet]`
+//!     [--iters N] [--margin NM] [--quiet] [--dump out.json]`
 //!
 //! Engine-only reproduction of a harness run (same `route()` entry point, no Python). The M2
 //! iteration-by-iteration replay of the single-layer pipeline (search order, sketch, relax and
@@ -15,6 +15,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mut path, mut options_json, mut iters, mut margin) = (None, None, None, None);
     let mut quiet = false;
+    let mut dump: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -31,6 +32,10 @@ fn main() {
                 i += 1;
             }
             "--quiet" => quiet = true,
+            "--dump" => {
+                dump = Some(args[i + 1].clone());
+                i += 1;
+            }
             a => path = Some(a.to_string()),
         }
         i += 1;
@@ -54,6 +59,14 @@ fn main() {
     let t = Instant::now();
     let r = topor_engine::route::route(&model, &o);
     let wall = t.elapsed().as_secs_f64();
+    if let Some(d) = &dump {
+        // result JSON without the run-dependent fields (determinism checks across thread counts)
+        let mut v = serde_json::to_value(&r).unwrap();
+        let o = v.as_object_mut().unwrap();
+        o.remove("runtime_s");
+        o.remove("threads_used");
+        std::fs::write(d, serde_json::to_string(&v).unwrap()).expect("write dump");
+    }
     println!(
         "route(): {:.3}s wall, runtime_s {:.3}, routed {} / {}, vias {}, sites {}, iterations {}, converged {}, timed_out {}",
         wall,

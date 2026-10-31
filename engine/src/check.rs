@@ -498,12 +498,27 @@ impl Checker {
 
     /// `items` against the board obstacles and against every indexed item except the ids in
     /// `skip` (sorted) and except each other (callers index what they keep). `Violation.against`
-    /// for an indexed item is `item:<id>`. O(|items| * q), independent of the index size.
+    /// for an indexed item is `item:<id>`. Items are checked in parallel on the current rayon
+    /// pool (one report per item, concatenated in item order, so the result is independent of
+    /// the thread count). O(|items| * q), independent of the index size; wall time / threads.
     pub fn check_against(&self, idx: &ItemIndex, items: &[Item], skip: &[usize]) -> CheckReport {
-        let mut rep = CheckReport::default();
+        use rayon::prelude::*;
         let all_layers = self.all_layers();
-        for (i, item) in items.iter().enumerate() {
-            self.check_one(idx, i, item, skip, &all_layers, &mut rep);
+        let one = |(i, item): (usize, &Item)| {
+            let mut r = CheckReport::default();
+            self.check_one(idx, i, item, skip, &all_layers, &mut r);
+            r
+        };
+        let parts: Vec<CheckReport> = if items.len() < PAR_MIN_ITEMS {
+            items.iter().enumerate().map(one).collect()
+        } else {
+            items.par_iter().enumerate().map(one).collect()
+        };
+        let mut rep = CheckReport::default();
+        for r in parts {
+            rep.checked += r.checked;
+            rep.candidates_visited += r.candidates_visited;
+            rep.violations.extend(r.violations);
         }
         rep
     }
@@ -653,6 +668,9 @@ impl Checker {
         rep.checked += 1;
     }
 }
+
+/// Fewest items for which `check_against` fans out over the pool.
+const PAR_MIN_ITEMS: usize = 16;
 
 /// Grid key of items occupying every layer (vias without a listed layer).
 const WILD: u32 = u32::MAX;

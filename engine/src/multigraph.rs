@@ -118,24 +118,32 @@ impl MultiGraph {
     ) -> Result<MultiGraph, String> {
         let site_anchor = obs.add_site_anchors(&sites, layers);
         let outline: Vec<Prim> = model.outline.iter().map(dequantise).collect();
-        let mut ctxs = Vec::with_capacity(layers.len());
-        for &l in layers {
-            let on: Vec<&TerminalInfo> = terminals
-                .iter()
-                .filter(|(_, ls)| ls.contains(&l))
-                .map(|(t, _)| t)
-                .collect();
-            let pos: Vec<Vec2> = on.iter().map(|t| t.at).collect();
-            let ls = build_layer_cdt(obs.layer(l), &pos, ConstraintSet::Routing)?;
-            let infos: Vec<TerminalInfo> = on.into_iter().cloned().collect();
-            let g = RouteGraph::build(&ls, obs.layer(l), &outline, &infos, rules);
-            ctxs.push(LayerCtx {
-                layer: l,
-                ls: Arc::new(ls),
-                g,
-                terminals: pos,
-            });
-        }
+        // Layers build in parallel (read-only `obs`), collected in layer order.
+        let obs_ro: &ObstacleSet = obs;
+        let built: Vec<Result<LayerCtx, String>> = {
+            use rayon::prelude::*;
+            layers
+                .par_iter()
+                .map(|&l| {
+                    let on: Vec<&TerminalInfo> = terminals
+                        .iter()
+                        .filter(|(_, ls)| ls.contains(&l))
+                        .map(|(t, _)| t)
+                        .collect();
+                    let pos: Vec<Vec2> = on.iter().map(|t| t.at).collect();
+                    let ls = build_layer_cdt(obs_ro.layer(l), &pos, ConstraintSet::Routing)?;
+                    let infos: Vec<TerminalInfo> = on.into_iter().cloned().collect();
+                    let g = RouteGraph::build(&ls, obs_ro.layer(l), &outline, &infos, rules);
+                    Ok(LayerCtx {
+                        layer: l,
+                        ls: Arc::new(ls),
+                        g,
+                        terminals: pos,
+                    })
+                })
+                .collect()
+        };
+        let ctxs: Vec<LayerCtx> = built.into_iter().collect::<Result<_, _>>()?;
         let mut site_vertex = Vec::with_capacity(sites.len());
         for (s, site) in sites.iter().enumerate() {
             let mut row = Vec::with_capacity(ctxs.len());
@@ -240,6 +248,11 @@ impl MultiGraph {
 
     fn reach(&self, d: f64, clr: f64) -> f64 {
         0.5 * d + 0.5 * self.max_d_all + clr.max(self.hole_to_hole)
+    }
+
+    /// Current site clock (value of the last site change). O(1).
+    pub fn clock(&self) -> u64 {
+        self.clock
     }
 
     /// Make site `s` the via of connection `conn` (net `net`, `size`, clearance `clr`):

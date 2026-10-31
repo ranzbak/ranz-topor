@@ -2062,6 +2062,27 @@ fn layer_name(model: &BoardModel, id: u32) -> String {
     }
 }
 
+/// Route `model`: runs [`route_inner`] on a rayon pool of `opts.effective_threads()` threads
+/// (`threads_used` = pool size; if the pool cannot be built the run is sequential with the
+/// warning `thread pool unavailable: 1 thread`). Every thread count gives the same routing
+/// (deterministic in-order batch commit, note m3 §7).
+pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
+    let n = opts.effective_threads().max(1);
+    match rayon::ThreadPoolBuilder::new().num_threads(n).build() {
+        Ok(pool) => {
+            let mut r = pool.install(|| route_inner(model, opts));
+            r.threads_used = n;
+            r
+        }
+        Err(_) => {
+            let mut r = route_inner(model, opts);
+            r.warnings.push("thread pool unavailable: 1 thread".into());
+            r.threads_used = 1;
+            r
+        }
+    }
+}
+
 /// Route the unconnected nets of `model` on every routable copper layer, with through vias at
 /// pre-placed sites (M3): decompose, obstacles, via sites, one graph per layer, PathFinder over
 /// layers and sites, per-leg metrization with a self-check, partial stubs, reports.
@@ -2069,7 +2090,7 @@ fn layer_name(model: &BoardModel, id: u32) -> String {
 /// Complexity: dominated by the PathFinder loop, `O(iters · m · V' log V')` with
 /// `V' = Σ_L 2(E_L + X_L) + 2S`, plus `O(changed · q)` self-checks per iteration (see the
 /// module header, `negotiate` and `multigraph`).
-pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
+fn route_inner(model: &BoardModel, opts: &Options) -> RouteResult {
     let t0 = Instant::now();
     let deadline = deadline_after(opts.wall_clock_s, t0);
     let mut warnings: Vec<String> = Vec::new();

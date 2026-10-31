@@ -81,6 +81,8 @@ fn front_only(mut m: BoardModel) -> BoardModel {
 fn opts() -> Options {
     Options {
         wall_clock_s: 10.0,
+        // 22 tests run concurrently in a debug build: one thread each avoids oversubscribing the cores
+        threads: 1,
         ..Options::default()
     }
 }

@@ -657,3 +657,54 @@ fn site_rip_up_frees_owner_for_blocked_connection() {
     };
     assert_eq!(sig(&paths), sig(&paths2));
 }
+
+/// Run one iteration of the two-connection channel board on a pool of `threads`; returns
+/// `(resolved_sequentially, per-connection path signature, channel users)`.
+fn channel_iteration(threads: usize) -> (usize, Vec<String>, usize) {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .unwrap();
+    pool.install(|| {
+        let mut b = channel_board();
+        let (conns, verts) = setup(&b, &[(1, "sa", "ta"), (2, "sb", "tb")]);
+        let mut neg = Negotiator::new(&b.mg, conns.len());
+        let out = neg.iteration(
+            &mut b.mg,
+            &mut b.obs,
+            &conns,
+            &[0, 1],
+            &starts_of(&verts),
+            &goals_of(&verts),
+            &Options::default(),
+            far(),
+        );
+        assert!(!out.timed_out);
+        let sig: Vec<String> = out.paths.iter().map(|p| format!("{:?}", p)).collect();
+        let g = &b.mg.layers[0].g;
+        let ch = g.edge(vert(&b, "u1"), vert(&b, "w1")).unwrap();
+        let users = (0..2)
+            .filter(|&c| {
+                let k = b.mg.conn_wires[c][0];
+                g.path_of(k).unwrap().0.iter().any(|&(e, _)| e == ch)
+            })
+            .count();
+        (out.resolved_sequentially, sig, users)
+    })
+}
+
+/// Both connections are searched against the same frozen graph and both pick the cap-1 channel;
+/// the commit of the first changes the channel's faces, so the second path is invalidated and
+/// searched again (it detours, as in the sequential M2 order). Identical for every pool size.
+#[test]
+fn iteration_batch_commit_invalidates_shared_edge() {
+    let (resolved, sig, users) = channel_iteration(1);
+    assert_eq!(resolved, 1, "second path invalidated");
+    assert_eq!(users, 1, "one wire detours around the wall");
+    assert!(sig.iter().all(|s| s.starts_with("Some")), "{sig:?}");
+    for n in [2, 4] {
+        let (r2, sig2, u2) = channel_iteration(n);
+        assert_eq!((r2, u2), (resolved, users), "threads {n}");
+        assert_eq!(sig2, sig, "threads {n}");
+    }
+}

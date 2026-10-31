@@ -133,7 +133,7 @@ def test_route_surface_round_trip(engine):
     out = json.loads(engine.route(json.dumps(m), json.dumps({"wall_clock_s": 10.0})))
     for key in ("items", "connections", "nets", "runtime_s", "iterations", "warnings"):
         assert key in out
-    assert out["threads_used"] == 1
+    assert out["threads_used"] >= 1
     for key in ("vias", "length_by_layer_nm", "sites"):
         assert key in out
     assert out["vias"] == 0 and out["sites"] >= 0
@@ -143,3 +143,11 @@ def test_route_surface_round_trip(engine):
     assert stats["wires"] == 1 and stats["skipped"] == 0
     with pytest.raises(ValueError):
         engine.route("{", "{}")
+
+
+def test_route_threads_option(engine):
+    m = _model_with_track()
+    m["kept"] = []
+    m["layers"][0]["routable"] = True
+    out = json.loads(engine.route(json.dumps(m), json.dumps({"wall_clock_s": 10.0, "threads": 2})))
+    assert out["threads_used"] == 2

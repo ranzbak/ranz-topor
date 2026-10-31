@@ -404,6 +404,25 @@ impl RouteGraph {
         inc
     }
 
+    /// Faces whose edges a path leg `start -> goal` through `faces` depends on (P4): `faces`
+    /// itself, or for a direct leg (`faces` empty) the faces of the edge `start-goal`.
+    /// O(|faces|).
+    pub fn leg_faces(&self, start: usize, goal: usize, faces: &[usize]) -> Vec<usize> {
+        if !faces.is_empty() {
+            return faces.to_vec();
+        }
+        self.edge(start, goal)
+            .map(|e| self.edges[e].faces.iter().flatten().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// True iff every edge of every face in `faces` has `edge_version <= t0`. O(|faces|).
+    pub fn faces_unchanged_since(&self, faces: &[usize], t0: u64) -> bool {
+        faces
+            .iter()
+            .all(|&f| self.faces[f].e.iter().all(|&e| self.edge_version[e] <= t0))
+    }
+
     pub fn edge(&self, a: usize, b: usize) -> Option<usize> {
         self.edge_of.get(&(a.min(b), a.max(b))).copied()
     }

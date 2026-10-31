@@ -7,9 +7,18 @@
 //! back through `penalise_failed`, `penalise_blocked` and `penalise_overuse`.
 //! Complexity per iteration: O(m · V' log V') searches (V' = states of all layers plus sites)
 //! plus O(Σ_L E_L + S) for the overuse sweep.
+//! Batch mode (T3.11, note §7): all active connections leave the graph, are searched in
+//! parallel against that frozen graph and committed in order; a path whose faces changed since
+//! the freeze (edge versions, sites) is searched again, in order, against the current graph.
+//! The absurd-detour ghost is
+//! computed in the parallel phase and reused while its own faces are unchanged. A connection
+//! whose ghost finds no path at all is blocked by hard geometry alone and is never searched
+//! again (`dead`). Every decision is a function of the (deterministic) search results, so the
+//! outcome does not depend on the thread count.
 //! No `HashMap` iteration reaches any output; the wall clock is checked before every search.
 
 use crate::decompose::{order, Connection};
+use crate::geom::{Aabb, Vec2};
 use crate::model::Options;
 use crate::multigraph::MultiGraph;
 use crate::obstacle::ObstacleSet;
@@ -17,6 +26,7 @@ use crate::search::{
     default_expansion_cap, ghost, search, strand_blockers, tier_weight, via_weight, Goal,
     SearchOutcome, SearchParams, SlotPath,
 };
+use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
@@ -62,6 +72,8 @@ pub struct IterOutcome {
     /// Connections ripped up this iteration because their strands (or vias) block another
     /// connection's ghost path (fix B); they belong to the next active set.
     pub ripped: Vec<usize>,
+    /// Paths of the batch invalidated by an earlier commit and searched again (note §7).
+    pub resolved_sequentially: usize,
 }
 
 /// PathFinder state over the layers and via sites of a [`MultiGraph`] (note §4).
@@ -74,6 +86,10 @@ pub struct Negotiator {
     pub bumps: Vec<u32>,
     pub iteration: u32,
     pending_rip: BTreeSet<usize>,
+    /// Connections whose slot-free ghost found no path at all: blocked by hard geometry alone
+    /// (every dynamic quantity - capacity, strands, owned sites, history - is soft in the ghost),
+    /// so they are blocked in every later iteration and are not searched again.
+    dead: BTreeSet<usize>,
     cur: Vec<Option<SlotPath>>,
 }
 
@@ -96,6 +112,7 @@ impl Negotiator {
             bumps: vec![0; conns],
             iteration: 0,
             pending_rip: BTreeSet::new(),
+            dead: BTreeSet::new(),
             cur: vec![None; conns],
         }
     }
@@ -135,37 +152,72 @@ impl Negotiator {
             }
         }
         let mut ripped: BTreeSet<usize> = BTreeSet::new();
-        for i in order(conns, &self.bumps) {
-            if !is_active[i] {
-                continue;
+        let mut resolved_sequentially = 0usize;
+        let seq: Vec<usize> = order(conns, &self.bumps)
+            .into_iter()
+            .filter(|&i| is_active[i])
+            .collect();
+        // (1) Snapshot: every active connection leaves the graph (its sites are released).
+        if Instant::now() >= deadline {
+            timed_out = true;
+        } else {
+            for &i in &seq {
+                mg.remove_conn(conns[i].id, obs);
+                self.cur[i] = None;
             }
-            if Instant::now() >= deadline {
-                timed_out = true;
-                break;
-            }
+        }
+        let dead = self.dead.clone();
+        // (2) Every search reads only the frozen graph: results are independent of the pool size.
+        let todo: Vec<usize> = if timed_out { Vec::new() } else { seq.clone() };
+        let results = self.search_all(mg, obs, conns, &todo, starts, goals, opts, deadline, &dead);
+        // (3) Commit in order; a path invalidated by an earlier commit is searched again,
+        // sequentially, against the graph as it then stands (the M2 order is kept).
+        let t0_layers: Vec<u64> = mg.layers.iter().map(|c| c.g.clock).collect();
+        let t0_sites = mg.clock();
+        let mut activated: Vec<Vec2> = Vec::new();
+        for (&i, (mut res, mut pre)) in todo.iter().zip(results) {
             let c = &conns[i];
-            mg.remove_conn(c.id, obs);
-            self.cur[i] = None;
-            let params = SearchParams {
-                history: &self.history,
-                site_history: &self.site_history,
-                weight: tier_weight(c.tier),
-                present_overuse: PRESENT_OVERUSE,
-                expansion_cap: cap,
-                deadline,
-                eps: None,
-                via_cost: opts.via_cost_nm as f64 * via_weight(c.tier),
-                max_vias: opts.max_vias_per_connection,
-            };
-            match search(mg, obs, c, &starts[i], &goals[i], &params) {
+            if let SearchOutcome::Found(p) = &res {
+                if !Self::path_valid(mg, c, p, &t0_layers, t0_sites, &activated) {
+                    if Instant::now() >= deadline {
+                        timed_out = true;
+                        break;
+                    }
+                    resolved_sequentially += 1;
+                    let params =
+                        params_for(c, &self.history, &self.site_history, cap, deadline, opts);
+                    res = search(mg, obs, c, &starts[i], &goals[i], &params);
+                    pre = None;
+                }
+            }
+            match res {
                 SearchOutcome::Found(p) => {
                     // Absurd detour: rip the strands that block the ghost path.
-                    let straight = (c.from.at - c.to.at).len();
-                    let crosses = p.legs.iter().any(|l| !l.crossings.is_empty());
-                    if p.est_len > DETOUR_FACTOR * straight && crosses {
-                        if let Some((gp, None, None, _)) =
-                            ghost(mg, obs, c, &starts[i], &goals[i], &params)
-                        {
+                    if is_detour(c, &p) {
+                        // The snapshot ghost stands while its own faces are unchanged
+                        // (commits only add occupancy, so no cheaper ghost can appear).
+                        let usable = match &pre {
+                            Some(Some((gp, ..))) => {
+                                Self::path_valid(mg, c, gp, &t0_layers, t0_sites, &activated)
+                            }
+                            Some(None) => true,
+                            None => false,
+                        };
+                        let gh = match pre {
+                            Some(g) if usable => g,
+                            _ => {
+                                let params = params_for(
+                                    c,
+                                    &self.history,
+                                    &self.site_history,
+                                    cap,
+                                    deadline,
+                                    opts,
+                                );
+                                ghost(mg, obs, c, &starts[i], &goals[i], &params)
+                            }
+                        };
+                        if let Some((gp, None, None, _)) = gh {
                             if p.est_len > DETOUR_FACTOR * gp.est_len {
                                 let b = mg.conns_of_legs(&strand_blockers(mg, &gp));
                                 if self.rip(mg, i, &b, true) {
@@ -176,6 +228,7 @@ impl Negotiator {
                         }
                     }
                     mg.insert_path(c, &p, obs);
+                    activated.extend(p.sites.iter().map(|&(s, _)| mg.sites[s].at));
                     self.cur[i] = Some(p);
                 }
                 SearchOutcome::Blocked {
@@ -184,6 +237,9 @@ impl Negotiator {
                     blocked_site,
                     last_reached,
                 } => {
+                    if ghost.is_none() && Instant::now() < deadline {
+                        self.dead.insert(i);
+                    }
                     if let (Some(gp), None) = (&ghost, blocked_edge) {
                         let b = site_aware_blockers(mg, gp);
                         if self.rip(mg, i, &b, false) {
@@ -222,7 +278,109 @@ impl Negotiator {
             overuse_edges,
             timed_out,
             ripped: ripped.into_iter().collect(),
+            resolved_sequentially,
         }
+    }
+
+    /// Search `idx` (indices into `conns`) in parallel against the frozen `mg`; results in `idx`
+    /// order. Dead connections are not searched (see `dead`). O(|idx| · V' log V' / threads).
+    #[allow(clippy::too_many_arguments)]
+    fn search_all(
+        &self,
+        mg: &MultiGraph,
+        obs: &ObstacleSet,
+        conns: &[Connection],
+        idx: &[usize],
+        starts: &[Vec<(usize, usize)>],
+        goals: &[Goal],
+        opts: &Options,
+        deadline: Instant,
+        dead: &BTreeSet<usize>,
+    ) -> Vec<(SearchOutcome, Option<GhostOut>)> {
+        let cap = default_expansion_cap(mg);
+        idx.par_iter()
+            .map(|&i| {
+                if dead.contains(&i) {
+                    let none = SearchOutcome::Blocked {
+                        ghost: None,
+                        blocked_edge: None,
+                        blocked_site: None,
+                        last_reached: None,
+                    };
+                    return (none, None);
+                }
+                let c = &conns[i];
+                let p = params_for(c, &self.history, &self.site_history, cap, deadline, opts);
+                let r = search(mg, obs, c, &starts[i], &goals[i], &p);
+                // The absurd-detour test of the commit needs the ghost: compute it here, in
+                // parallel, and let the commit reuse it while its faces are unchanged.
+                let g = match &r {
+                    SearchOutcome::Found(path) if is_detour(c, path) => {
+                        Some(ghost(mg, obs, c, &starts[i], &goals[i], &p))
+                    }
+                    _ => None,
+                };
+                (r, g)
+            })
+            .collect()
+    }
+
+    /// Batch validity of a snapshot path `p` of `c` (note §7, P4): no edge of any face the
+    /// legs touch changed since the freeze (`t0_layers`), no site of the path changed
+    /// (`t0_sites`), and no site activated since the freeze (`activated`) lies within
+    /// `rho_max + w/2 + eps` of the bounding box of the touched faces' vertices.
+    /// O(Σ|faces| + |p.sites| + |activated|).
+    fn path_valid(
+        mg: &MultiGraph,
+        c: &Connection,
+        p: &SlotPath,
+        t0_layers: &[u64],
+        t0_sites: u64,
+        activated: &[Vec2],
+    ) -> bool {
+        if p.sites.iter().any(|&(s, _)| mg.site_version[s] > t0_sites) {
+            return false;
+        }
+        let mut bb: Option<Aabb> = None;
+        let mut rho: f64 = 0.0;
+        for leg in &p.legs {
+            let g = &mg.layers[leg.layer_idx].g;
+            let faces = g.leg_faces(leg.start, leg.goal, &leg.faces);
+            // A clock that has not moved cannot have changed any edge.
+            if g.clock > t0_layers[leg.layer_idx]
+                && !g.faces_unchanged_since(&faces, t0_layers[leg.layer_idx])
+            {
+                return false;
+            }
+            rho = rho.max(g.rho_max());
+            for &f in &faces {
+                for &v in &g.faces[f].v {
+                    let at = g.verts[v].at;
+                    bb = Some(match bb {
+                        None => Aabb { min: at, max: at },
+                        Some(b) => Aabb {
+                            min: Vec2 {
+                                x: b.min.x.min(at.x),
+                                y: b.min.y.min(at.y),
+                            },
+                            max: Vec2 {
+                                x: b.max.x.max(at.x),
+                                y: b.max.y.max(at.y),
+                            },
+                        },
+                    });
+                }
+            }
+        }
+        if activated.is_empty() {
+            return true;
+        }
+        let Some(bb) = bb else { return true };
+        let eps = mg.layers.first().map_or(0.0, |l| l.g.rules.eps);
+        let bb = bb.grow(rho + 0.5 * c.width as f64 + eps);
+        !activated
+            .iter()
+            .any(|a| a.x >= bb.min.x && a.x <= bb.max.x && a.y >= bb.min.y && a.y <= bb.max.y)
     }
 
     /// Topological rip-up bookkeeping for connection `i` whose ghost path is blocked by the
@@ -292,6 +450,43 @@ impl Negotiator {
             }
         }
         n
+    }
+}
+
+/// Ghost path with its first blocked edge / site and the crossing before it (see `search::ghost`).
+type GhostOut = Option<(
+    SlotPath,
+    Option<(usize, usize)>,
+    Option<usize>,
+    Option<(usize, usize)>,
+)>;
+
+/// Absurd-detour precondition (fix B): `p` is longer than [`DETOUR_FACTOR`] times the straight
+/// distance and crosses at least one strand. O(legs).
+fn is_detour(c: &Connection, p: &SlotPath) -> bool {
+    let straight = (c.from.at - c.to.at).len();
+    p.est_len > DETOUR_FACTOR * straight && p.legs.iter().any(|l| !l.crossings.is_empty())
+}
+
+/// Search parameters of connection `c` over the given histories.
+fn params_for<'a>(
+    c: &Connection,
+    history: &'a [Vec<f64>],
+    site_history: &'a [f64],
+    cap: usize,
+    deadline: Instant,
+    opts: &Options,
+) -> SearchParams<'a> {
+    SearchParams {
+        history,
+        site_history,
+        weight: tier_weight(c.tier),
+        present_overuse: PRESENT_OVERUSE,
+        expansion_cap: cap,
+        deadline,
+        eps: None,
+        via_cost: opts.via_cost_nm as f64 * via_weight(c.tier),
+        max_vias: opts.max_vias_per_connection,
     }
 }
 
