@@ -7,6 +7,7 @@ pub mod fuzz;
 pub mod geom;
 pub mod graph;
 pub mod model;
+pub mod negotiate;
 pub mod obstacle;
 #[cfg(feature = "python")]
 mod py;
