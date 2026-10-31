@@ -276,6 +276,7 @@ fn overuse_raises_history_on_overused_edges_only() {
 fn best_iteration_keeps_max_routed() {
     let mut neg = Negotiator::new(1, 2);
     let mk = |c: usize| SlotPath {
+        candidates: 0,
         conn: c,
         crossings: vec![],
         faces: vec![],
