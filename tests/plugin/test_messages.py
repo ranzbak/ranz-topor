@@ -60,3 +60,36 @@ def test_troubleshoot_matches_catalogue():
     for code, m in messages.MESSAGES.items():
         sec = text.split(f"### {code}\n", 1)[1].split("\n### ", 1)[0]
         assert m.cause in sec and m.fix in sec, code
+
+
+def test_troubleshoot_generated_part_is_current():
+    """The part after '## Findings' is exactly ``render_troubleshoot()`` (regenerate after editing MESSAGES)."""
+    text = (ROOT / "docs" / "user" / "troubleshoot.md").read_text()
+    assert text.split("\n## Findings\n\n", 1)[1].rstrip("\n") == messages.render_troubleshoot().rstrip("\n")
+
+
+def _app_exit_codes() -> set:
+    """Exit codes topor.app.main returns (``return 0|1|2`` and ``_exit_code``), plus argparse's usage exit 2."""
+    src = (ROOT / "plugin" / "topor" / "app.py").read_text()
+    return {int(c) for c in re.findall(r"return\s+(\d)\b", src)} | {0, 1, 2}
+
+
+def test_troubleshoot_covers_exit_codes_and_install_problems():
+    """B11: besides one section per code, troubleshoot.md explains every exit code of the plugin process
+    ("exited with code N") and the wheel / plugin-environment problems."""
+    text = (ROOT / "docs" / "user" / "troubleshoot.md").read_text()
+    heads = re.findall(r"^### (.+?)\s*$", text, re.M)
+    low = [h.lower() for h in heads]
+    for n in sorted(_app_exit_codes()):
+        assert any(f"exited with code {n}" in h for h in low), f"no '### ... exited with code {n}' section"
+    for topic in ("no module named topor_engine", "no module named kipy", "button", "plugin environment",
+                  "python", "api"):
+        assert any(topic in h for h in low), f"no troubleshooting section about {topic!r}"
+    assert "topor-crash.log" in text and "Recreate Plugin Environment" in text
+
+
+def test_marker_conflict_text_matches_priority_order():
+    """Ruling C22: the catalogue states the precedence priority.py implements (marker > netclass > table)."""
+    cause = messages.MESSAGES["MARKER_CONFLICT"].cause
+    order = cause.split("wins", 1)[1]  # "... wins: the @N marker, then the topor_pN netclass, then nets.priority"
+    assert order.index("marker") < order.index("netclass") < order.index("nets.priority"), cause

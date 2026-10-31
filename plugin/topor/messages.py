@@ -60,7 +60,7 @@ MESSAGES: dict[str, Msg] = {
         "Open the board in KiCad 10 and save it (KiCad → File → Save), then run topor again."),
     "INTERNAL": Msg("error",
         "An unexpected internal error stopped the run. The board was not changed.",
-        "Run again; if it recurs, attach log.txt and the board copy from the report folder (Open report folder in the dialog; KiCad → Edit → Undo shows nothing from topor)."),
+        "Run again; if it recurs, file a bug with log.txt and result.json from the report folder (Open report folder in the dialog) and a copy of the project folder saved with KiCad → File → Save (docs/dev/debug.md)."),
     # ---------------------------------------------------------------- stackup
     "LAYER_ROLES_NEEDED": Msg("error",
         "The board has a copper-layer count with no default stackup (not 2, 4, 6 or 8) and no role is set for some layer.",
@@ -89,7 +89,7 @@ MESSAGES: dict[str, Msg] = {
         "An @N priority marker in a net name could not be used (out of range or on a net that is not routed); it is ignored.",
         "Use @1, @2 or @3 in the net name (KiCad → Schematic → net label) or set nets.priority."),
     "MARKER_CONFLICT": Msg("warning",
-        "The @N marker in the net name disagrees with the topor_pN netclass or with nets.priority; the stronger source wins (nets.priority, then netclass, then marker).",
+        "The @N marker in the net name disagrees with the topor_pN netclass or with nets.priority; the stronger source wins: the @N marker, then the topor_pN netclass, then nets.priority.",
         "Remove one source: edit the net label or KiCad → File → Board Setup → Design Rules → Net Classes, or nets.priority."),
     "MARKER_PAIR": Msg("warning",
         "The two halves of a differential pair carry different @N markers; the lower number is used for both.",
@@ -134,7 +134,7 @@ MESSAGES: dict[str, Msg] = {
         "Check kicad-cli in KiCad → Help → About KiCad and the log in the report folder."),
     "CLEANUP_SKIPPED_PARTIAL": Msg("info",
         "KiCad cleanup / teardrops were skipped because the result has partial routes.",
-        "Finish the partial connections by hand, then run KiCad → Inspect → Cleanup Tracks & Vias yourself (run.kicad_cleanup)."),
+        "Finish the partial connections by hand, then run KiCad → Tools → Cleanup Tracks & Vias yourself (run.kicad_cleanup)."),
 }
 
 

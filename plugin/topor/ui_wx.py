@@ -163,7 +163,22 @@ WORDING: dict[str, dict[str, str]] = {
 PHASE_KEYS = {p: f"phase_{p}" for p in ("setup", "route", "done", "preflight_drc", "drc", "preview")}
 
 ACCEPT_CODES = {"PAD_OUTSIDE_BOARD": "accept_pads", "DRILL_OUTSIDE_FILTER": "accept_drills"}
-HELP_DOC = Path(__file__).resolve().parents[2] / "docs" / "user" / "operate.md"
+HELP_REL = Path("docs") / "user" / "operate.md"
+HELP_ANCHOR = "options"
+
+
+def find_help_doc(module_file) -> Path | None:
+    """operate.md for the Help button: the installed plugin layout first (``org.topor.router/topor/ui_wx.py`` ->
+    ``org.topor.router/docs/user/``, tools/build.sh), then the repo layout (``plugin/topor/ui_wx.py`` ->
+    ``<repo>/docs/user/``); None when neither exists. O(1)."""
+    here = Path(module_file).resolve()
+    for base in (here.parents[1], here.parents[2]):
+        if (base / HELP_REL).is_file():
+            return base / HELP_REL
+    return None
+
+
+HELP_DOC = find_help_doc(__file__)
 _SEV_ORDER = {"error": 0, "warning": 1, "info": 2}
 _SEV_WORD = {"error": "sev_error", "warning": "sev_warn", "info": "sev_info"}
 _SEV_ART = {"error": wx.ART_ERROR, "warning": wx.ART_WARNING, "info": wx.ART_INFORMATION}
@@ -588,8 +603,8 @@ class PreflightDialog(_Base):
             self.list.SetColumnWidth(2, w)
 
     def _on_help(self, _evt) -> None:
-        if HELP_DOC.exists():
-            wx.LaunchDefaultBrowser(HELP_DOC.as_uri() + "#options")
+        if HELP_DOC is not None and HELP_DOC.exists():
+            wx.LaunchDefaultBrowser(HELP_DOC.as_uri() + "#" + HELP_ANCHOR)
 
     def decision(self, proceed: bool) -> Decision:
         """The user's answer. Cancel/Esc -> nothing proceeds and nothing is saved (not even accepted codes)."""

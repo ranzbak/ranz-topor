@@ -4,28 +4,40 @@ topor routes PCB connections as smooth, taut traces (straight segments joined by
 using topological routing: first decide *which side of every obstacle* a wire passes, then pull
 each wire tight. It respects KiCad's design rules and checks its output with KiCad's own DRC.
 
-Engine in Rust (`engine/`), packaged as a Python wheel; KiCad plugin in `plugin/`; test and
-benchmark harness in `harness/`. Linux only for now.
+Engine in Rust (`engine/`), packaged as a Python wheel; KiCad 10 plugin in `plugin/` (IPC API);
+test and benchmark harness in `harness/`. Linux only for now.
 
-## Status (version 0.3.0, milestone M3)
+## Status (version 0.4.0, milestone M4b: the plugin)
 
-| Works now | Not yet (milestone M4) |
+| Works now, from inside KiCad 10 | Comes in 0.5.0 (milestone M4a: the engine) |
 |---|---|
-| Two-layer routing with vias, arcs, pours, keepouts, locked copper kept | Routing from inside KiCad (the plugin button only checks the install) |
-| eprom-to-kernal 27/27 and wiccon-2023 62/62 routed, 0 DRC errors | `topor.toml` project config, pre-flight checks, preview + Accept/Reject |
-| Command-line routing of a **copy** of a board, with DRC and PNG report | Routing scope (selected parts/nets), priority markers `@1..@3` |
-| Deterministic output, configurable threads | dcsgonebadge 100 % (now 148/231 in 60 s) |
+| **Topor: route** button: pre-flight findings (code, cause, fix), options, progress with Cancel, before/after preview, **Accept = one undo step** / Reject = nothing changed | dcsgonebadge 231/231 routed, 0 router DRC, ≤ 10 min (now 148/231 in 60 s) |
+| Whole board or a selection (between / touching selected footprints); existing copper kept, or ripped and re-routed; locked copper respected | priorities used for routing order (`@N` markers, `topor_pN` net classes, `[nets] priority` — computed and reported now) |
+| Self-documenting `topor.toml` per project, generated [reference](docs/user/configuration.md); every finding names the KiCad menu or the key to change | pad exit stubs for fine pitch, same-net T-junctions, via rules from the board setup, bounded via relaxation, layer costs |
+| Result verified by `kicad-cli` DRC on a copy before you decide; report folder (report, preview, DRC, log) per run | engine-side `do_not_touch` / `ignore_pads` options (applied by the plugin's scope now) |
+| eprom-to-kernal 27/27 and wiccon-2023 62/62 routed, `routing_new 0`, `unconnected 0` (headless, judged by `kicad-cli`) | eprom / wiccon not worse than now |
 
-Benchmarks and progress images: [docs/benchmarks/](docs/benchmarks/README.md).
-Design and research library: [docs/](docs/README.md).
+The plugin needs a live GUI test before the 0.4.0 gate closes:
+[docs/user/gui-test-checklist.md](docs/user/gui-test-checklist.md). Known limits:
+[operate.md → Limitations](docs/user/operate.md#limitations).
 
 ## Requirements
 
-- Linux, KiCad **10.0** (with `kicad-cli` and the `pcbnew` Python module, normally `/usr/bin/python3`)
-- Rust toolchain (stable, tested with 1.96) — <https://rustup.rs>
-- Python 3.9+ with `venv`
+- Linux (x86_64), **KiCad 10.0** with `kicad-cli` (tested 10.0.8)
+- **Python ≥ 3.11** as KiCad's plugin interpreter (normally `/usr/bin/python3`), with the system wxPython 4.2
+- Rust toolchain (stable, tested 1.96) — <https://rustup.rs> — to build the engine wheel
+- For development: the system `pcbnew` Python module (harness and tests only, never the plugin)
 
-## Build
+## User guide
+
+1. [Install](docs/user/install.md) — build, install into KiCad, enable the KiCad API, plugin environment.
+2. [Operate](docs/user/operate.md) — first run, findings, options, scope by selection, progress, preview,
+   Accept / Reject / undo, report folder, priorities, limitations.
+3. [Configuration reference](docs/user/configuration.md) — every `topor.toml` key (generated).
+4. [Troubleshooting](docs/user/troubleshoot.md) — one section per message code, exit codes, install problems.
+5. [GUI test checklist](docs/user/gui-test-checklist.md) — the manual acceptance test in KiCad.
+
+## Quick start
 
 ```bash
 git clone git@github.com:ranzbak/ranz-topor.git topor && cd topor
@@ -33,22 +45,11 @@ tools/dev-venv.sh          # creates .venv (maturin, pytest; sees the system pcb
 tools/build.sh             # builds the engine wheel and installs the plugin into KiCad
 ```
 
-`tools/build.sh` builds `target/wheels/topor_engine-<version>-*.whl`, copies it to `plugin/wheels/`
-and installs the plugin files to `~/.local/share/kicad/10.0/plugins/org.topor.router/`
-(override with `KICAD_DOCUMENTS_HOME`). `tools/build.sh --dev` also installs the wheel into the dev
-venv and into KiCad's plugin environment, so a rebuilt engine is picked up without reinstalling.
+Then KiCad → **Preferences → Plugins** → tick **Enable KiCad API**, open a **copy** of a board in the PCB
+Editor (KiCad creates the plugin environment the first time) and click **Topor: route**. Details:
+[install.md](docs/user/install.md).
 
-## Install check in KiCad
-
-1. KiCad → **Preferences → Plugins**: enable the **API server** (KiCad's IPC API).
-2. Open any board in the **PCB Editor**. KiCad creates the plugin's Python environment and installs
-   the wheel from `plugin/wheels` (first time: may take a minute).
-3. The toolbar shows a **Topor** button ("Topor: route"). In 0.3.0 it only checks that the engine
-   is installed and prints `topor engine 0.3.0 ok`.
-4. If it reports a version mismatch: rebuild with `tools/build.sh`, then in KiCad use
-   **Preferences → Plugins → Recreate Plugin Environment** (or restart the PCB Editor).
-
-## Route a board from the command line (0.3.0)
+## Route a board from the command line
 
 The harness never touches your project: it routes a **snapshot copy**.
 
@@ -60,15 +61,20 @@ The harness never touches your project: it routes a **snapshot copy**.
 ```
 
 The output directory holds the routed board in `<board>-work/<board>.kicad_pcb` (open it in KiCad to
-inspect), DRC json files (original, ripped, routed),
-`<board>--metrics.json` (routed, vias, length, detours, DRC) and comparison PNGs (hand vs topor).
-To add your own board, add it to `BENCH_BOARDS` in `harness/paths.py` and snapshot it.
+inspect), DRC json files (original, ripped, routed), `<board>--metrics.json` (routed, vias, length,
+detours, DRC) and comparison PNGs (hand vs topor). More tools (engine probes, headless plugin runs,
+reproducing a plugin run): [docs/dev/debug.md](docs/dev/debug.md).
 
-## Tests
+## Development
+
+[CONTRIBUTING.md](CONTRIBUTING.md): layout, build, tests, read-only boards, configuration and message
+catalogues, commit style. Benchmarks and progress images are generated locally into `docs/benchmarks/`
+(`harness.bench`, `harness.progress`; not in git) — key numbers are quoted in `docs/progress/STATE.md`.
+Design and research library: [docs/](docs/README.md).
 
 ```bash
 .venv/bin/pytest                                   # unit + integration (default)
-.venv/bin/pytest tests/gate -m "gate or not gate"  # milestone gates M0–M3 (~10 min)
+.venv/bin/pytest tests/gate -m "gate or not gate"  # milestone gates (~10 min)
 .venv/bin/pytest tests/scaling -m scaling          # complexity/scaling budget
 (cd engine && cargo test --release && cargo clippy --all-targets -- -D warnings)
 ```
@@ -78,13 +84,9 @@ To add your own board, add it to `BENCH_BOARDS` in `harness/paths.py` and snapsh
 | Path | What |
 |---|---|
 | `engine/` | Rust engine: geometry kernel, triangulation, topological search, negotiation, smoothing, checker |
-| `harness/` | Python: board snapshot/copy, rip, model export, rules, writer, DRC, render, bench |
-| `plugin/` | KiCad IPC plugin (`plugin.json`, entry point, `wheels/`, `requirements.txt`) |
+| `plugin/` | KiCad IPC plugin: `plugin.json`, entry point, `topor/` package (flow, dialogs, pre-flight, config), `wheels/`, `requirements.txt` |
+| `toporlib/` | pure-Python code shared by plugin and harness (DRC, rules, DRC loop, board-file edits) |
+| `harness/` | dev/test only: board snapshot/copy, rip, model export, rules, writer, DRC, render, bench |
 | `tools/` | `build.sh`, `dev-venv.sh`, `bench.sh`, `render.sh` |
-| `tests/` | pytest suites (unit, `gate/`, `scaling/`) |
-| `docs/` | research library, design, plans, progress notes, benchmarks |
-
-## Documentation still to come (M4)
-
-A user guide (install, `topor.toml` reference, operation, troubleshooting), a GUI test checklist,
-and a contributor/debug guide — see [docs/design/46-configuration.md](docs/design/46-configuration.md) §1.1.
+| `tests/` | pytest suites (unit, `plugin/`, `gate/`, `scaling/`) |
+| `docs/` | user guide, developer guide, research library, design, plans, progress notes, benchmarks |

@@ -1,10 +1,144 @@
 # Troubleshooting
 
-Every message topor shows has a code, a cause and a fix. Each code has a section below (`### CODE`); the
-text is generated from `plugin/topor/messages.py`, so it cannot drift (a test fails if a code is missing
-or the text differs). Run `.venv/bin/python -c "import sys; sys.path.insert(0, 'plugin'); from topor import messages; print(messages.render_troubleshoot())"`
-to regenerate the sections after editing the catalogue. Severity: **error** stops the run, **warning**
-needs your attention, **info** is for the record.
+Every message topor shows has a **code**, a **cause** and a **fix**; each code has a section under
+[Findings](#findings) (`### CODE`). Severity: **error** stops the run, **warning** needs your attention,
+**info** is for the record. Problems that happen before topor can show a dialog (installation, plugin
+environment, exit codes) come first.
+
+Where to look:
+
+1. The dialog itself (code, message, Fix). **Copy details** in the error dialog copies what a bug report
+   needs.
+2. The run's report folder (**Open report folder**; default `~/.cache/kicad/10.0/topor/<board>/<timestamp>/`):
+   `log.txt` (every step), `report.md`, `result.json`, `drc.json` — see [operate.md](operate.md#report-folder).
+3. The crash log `~/.cache/kicad/10.0/topor/topor-crash.log` (or `$TOPOR_REPORT_ROOT/topor-crash.log`):
+   every fatal error of the plugin process is appended there with a time stamp and the Python traceback,
+   also when no dialog could be shown.
+4. Still stuck: [docs/dev/debug.md](../dev/debug.md#filing-a-bug) explains how to file a bug.
+
+## Installation and start-up
+
+### The Topor button does not appear
+
+**Cause.** KiCad did not load the plugin: it is not installed, the KiCad API is off, the plugin
+environment is still being created or failed, or the configured Python is older than 3.11.
+
+**Fix.** Check that `~/.local/share/kicad/10.0/plugins/org.topor.router/plugin.json` exists (else run
+`tools/build.sh`, [install.md](install.md)); tick **Enable KiCad API** in KiCad → Preferences → Plugins;
+restart the PCB Editor and wait a minute on the first start. Look for **Topor: route** in the toolbar and
+under **Tools → External Plugins**. Then see the sections below.
+
+### Cannot connect to KiCad (API server off)
+
+**Cause.** The plugin talks to KiCad over its IPC API. With the API disabled the plugin cannot read the
+board; the crash log shows a connection error from `kipy`, exit code 1.
+
+**Fix.** KiCad → Preferences → Plugins → tick **Enable KiCad API**, restart the PCB Editor, run again.
+
+### Python interpreter older than 3.11
+
+**Cause.** `plugin.json` requires Python ≥ 3.11 (topor reads `topor.toml` with `tomllib`). KiCad builds the
+plugin environment with the interpreter set in its preferences; an older one is refused or fails on import.
+
+**Fix.** KiCad → Preferences → Plugins → **Python interpreter**: choose a Python 3.11+ (normally
+`/usr/bin/python3`), then **Recreate Plugin Environment** (below).
+
+### Plugin environment not created or pip fails
+
+**Cause.** On first load KiCad creates `~/.cache/kicad/10.0/python-environments/org.topor.router/` and runs
+`pip install -r requirements.txt` there: `kicad-python` 0.8.x comes from PyPI (needs network), the engine
+wheel `topor-engine==0.4.0` from the plugin's `wheels/` folder (`--only-binary`, so only a built wheel works).
+A missing wheel, no network, or a half-finished environment from an interrupted install stops it.
+
+**Fix.** Check that `~/.local/share/kicad/10.0/plugins/org.topor.router/wheels/topor_engine-0.4.0-*.whl`
+exists (else `tools/build.sh`). Then KiCad → Preferences → Plugins, right-click the Topor action →
+**Recreate Plugin Environment**. If that is not offered, close KiCad, delete
+`~/.cache/kicad/10.0/python-environments/org.topor.router/` and start KiCad again — it rebuilds the
+environment from scratch.
+
+### No module named topor_engine
+
+**Cause.** The engine wheel is not installed in the plugin environment (the crash log shows
+`ModuleNotFoundError: No module named 'topor_engine'`, exit code 1).
+
+**Fix.** Rebuild with `tools/build.sh`, then **Recreate Plugin Environment** (above). Developers can
+reinstall it in place:
+`~/.cache/kicad/10.0/python-environments/org.topor.router/bin/pip install --force-reinstall --no-deps plugin/wheels/topor_engine-0.4.0-*.whl`
+(this is what `tools/build.sh --dev` does).
+
+### No module named kipy
+
+**Cause.** `kicad-python` (module `kipy`) is missing from the plugin environment — usually the first
+install had no network.
+
+**Fix.** Connect to the network and **Recreate Plugin Environment** (above).
+
+### No module named wx
+
+**Cause.** The dialogs use the system wxPython; the plugin environment sees system packages only when it
+was built from the system Python.
+
+**Fix.** Install KiCad's wxPython package (Ubuntu: `python3-wxgtk4.0`), set the Python interpreter in
+KiCad → Preferences → Plugins to `/usr/bin/python3`, then **Recreate Plugin Environment**.
+
+### ENGINE_VERSION after an update
+
+The engine in the plugin environment is older or newer than the plugin. See
+[ENGINE_VERSION](#engine_version): rebuild, then **Recreate Plugin Environment** or restart the PCB Editor.
+
+## Exit codes
+
+KiCad runs topor as a separate process; when it ends with a non-zero exit code KiCad may report that the
+plugin "exited with code N". The codes:
+
+### The plugin exited with code 0
+
+Normal end: the result was accepted or rejected, the run was cancelled, or it stopped at the pre-flight
+dialog. Nothing to do.
+
+### The plugin exited with code 1
+
+**Cause.** An error: the engine version check failed ([ENGINE_VERSION](#engine_version)), a module is
+missing (sections above), KiCad could not be reached, or an unexpected exception or engine panic happened
+([INTERNAL](#internal)). The board is not changed in any of these cases.
+
+**Fix.** Read the last entry of `~/.cache/kicad/10.0/topor/topor-crash.log` (and `log.txt` in the report
+folder if the run got that far); it names the cause. If it is not one of the sections here, file a bug
+([debug.md](../dev/debug.md#filing-a-bug)).
+
+### The plugin exited with code 2
+
+**Cause.** Wrong command-line arguments. KiCad passes none, so this only happens when topor is run by hand
+(`python -m topor.app --headless …` without `--model`, or a misspelt option).
+
+**Fix.** Use the usage line printed on stderr, or [debug.md](../dev/debug.md#headless-runs).
+
+### The plugin exited with another code
+
+**Cause.** The process was killed — e.g. 137 or -9 is SIGKILL, typically the system running out of memory
+on a very large board; a negative number is the signal.
+
+**Fix.** Route a selection instead of the whole board, set a time limit (`[run] timeout_s`), or fewer
+threads (`[run] threads`); file a bug with the board if it recurs.
+
+## Results
+
+### Nothing to route on a routed board
+
+**Cause.** With *Existing copper: Keep as obstacles* (`[run] existing_copper = "fixed"`, the default) topor
+only routes what is not connected yet; on a fully routed board that is nothing
+([NOTHING_ROUTED](#nothing_routed) or 0 connections in the header).
+
+**Fix.** Choose *Rip up and re-route* in the [Options](operate.md#options), or route a selection.
+
+### The result has new DRC errors in KiCad
+
+**Cause.** topor checks its result with KiCad's DRC before the preview (the *DRC new* line of the summary).
+A difference to KiCad's interactive DRC usually means the board changed after the run, or zones were not
+refilled.
+
+**Fix.** Refill zones (KiCad → Edit → Fill All Zones, B), run KiCad → Inspect → Design Rules Checker again,
+and compare with `drc.json` in the report folder. If the router's copper really violates a rule, file a bug.
 
 ## Findings
 
@@ -70,7 +204,7 @@ needs your attention, **info** is for the record.
 
 **Cause.** KiCad cleanup / teardrops were skipped because the result has partial routes.
 
-**Fix.** Finish the partial connections by hand, then run KiCad → Inspect → Cleanup Tracks & Vias yourself (run.kicad_cleanup).
+**Fix.** Finish the partial connections by hand, then run KiCad → Tools → Cleanup Tracks & Vias yourself (run.kicad_cleanup).
 
 ### DANGLING_ENDS
 
@@ -126,7 +260,7 @@ needs your attention, **info** is for the record.
 
 **Cause.** An unexpected internal error stopped the run. The board was not changed.
 
-**Fix.** Run again; if it recurs, attach log.txt and the board copy from the report folder (Open report folder in the dialog; KiCad → Edit → Undo shows nothing from topor).
+**Fix.** Run again; if it recurs, file a bug with log.txt and result.json from the report folder (Open report folder in the dialog) and a copy of the project folder saved with KiCad → File → Save (docs/dev/debug.md).
 
 ### KICAD_CLI_MISSING
 
@@ -164,7 +298,7 @@ needs your attention, **info** is for the record.
 
 *Severity: warning.*
 
-**Cause.** The @N marker in the net name disagrees with the topor_pN netclass or with nets.priority; the stronger source wins (nets.priority, then netclass, then marker).
+**Cause.** The @N marker in the net name disagrees with the topor_pN netclass or with nets.priority; the stronger source wins: the @N marker, then the topor_pN netclass, then nets.priority.
 
 **Fix.** Remove one source: edit the net label or KiCad → File → Board Setup → Design Rules → Net Classes, or nets.priority.
 

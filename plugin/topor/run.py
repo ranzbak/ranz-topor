@@ -620,7 +620,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     if skipped:
         findings.append(Finding("CLEANUP_SKIPPED_PARTIAL", "info",
                                 "KiCad cleanup / teardrops were skipped because the result has partial routes.",
-                                "Finish the partial connections by hand, then run Inspect → Cleanup Tracks & Vias "
+                                "Finish the partial connections by hand, then run KiCad → Tools → Cleanup Tracks & Vias "
                                 "yourself.", tuple(skipped)))
     report.facts["notes"] = report.facts["notes"] + list(out.commit.notes)
     status = "accepted"

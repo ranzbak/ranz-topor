@@ -34,7 +34,7 @@ Which nets are touched, how they are classified and prioritised.
 | `do_not_touch` | list | `[]` |  | any | Net names or glob patterns whose copper is a fixed obstacle and never routed, ripped or smoothed. |
 | `power_pattern` | str | `"^(\\+\|-)?\\d\|^(V\|VCC\|VDD\|VBAT\|GND\|AGND\|PWR)"` |  | any | Regex naming power nets, applied only to nets still in the Default netclass; the pre-flight lists every net classified this way. KiCad: KiCad → File → Board Setup → Design Rules → Net Classes (a netclass wins over this pattern). |
 | `ground_pattern` | str | `"^/?(GND\|AGND\|DGND\|PGND\|SGND\|VSS)"` |  | any | Regex (case-insensitive) naming ground nets, used to check that a GND plane layer has a ground zone; power nets use power_pattern. |
-| `priority` | table | `{}` |  | any | Net name or glob → priority 1..3 (1 routed first); overrides the @N name marker and topor_pN netclasses. KiCad: KiCad → Board Setup → Net Classes (netclass topor_p1..p3) or the @N marker in the net name. |
+| `priority` | table | `{}` |  | any | Net name or glob → priority 1..3 (1 routed first). Precedence: the @N name marker wins over a topor_pN netclass, which wins over this table; an exact name here wins over a glob (lowest number among matching globs). In 0.4.0 priorities are computed and reported; the engine uses them from 0.5.0. KiCad: KiCad → File → Board Setup → Design Rules → Net Classes (netclass topor_p1..p3) or the @N marker in the net name. |
 | `pour_served` | table | `{}` |  | any | Net name → true/false to force or forbid serving a net by a copper pour; absent = automatic. |
 | `ignore_pads` | list | `[]` |  | any | Pads (REF.PAD, e.g. "U1.3") skipped as terminals, typically pads outside the board; written by the pre-flight dialog. |
 
