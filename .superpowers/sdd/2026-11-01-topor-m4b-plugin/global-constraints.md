@@ -119,3 +119,11 @@ docs/benchmarks/<date>-topor-0.5.0/   (A15)
 - C3 nobody but the user/main runs `tools/build.sh --dev` (it writes the real KiCad plugin venv). Workers test build.sh only with KICAD_DOCUMENTS_HOME=<scratch dir> and without --dev.
 - C4 never touch a running KiCad; IPC live tests skip without KICAD_API_SOCKET.
 - C5 boards only from scratch/boards/<board>/<sha12>/ snapshots (harness.paths); GUI copies go to scratch/gui/<board>/.
+
+## Coordinator rulings (rotation 2) — see ledger for reasons and cost-if-wrong
+- C23 Via `free` in the IPC model = the exact KiCad flag read from the save_as copy text (`(via … (free yes) … (uuid U))`, toporlib.pcbfile); a via whose uuid is not found / copy unparsable → free=True (unsure → kept as fixed obstacle). Harness model keeps pcbnew GetIsFree (parity: exact equality).
+- C24 rip_plan keeps a via when it is free OR (new key `[run] keep_unconnected_vias = true`, default true) no same-net kept track end touches it on a layer of its span (stitching vias without the KiCad flag are never ripped). Same rule for FakeBoard/harness models and IPC models.
+- C25 copper graphics → IPC obstacle polygons are CIRCUMSCRIBED (never inscribed): every arc/cap/circle vertex placed so the polygon contains the true curve; tested ⊇ pcbnew TransformShapeToPolygon within 1 µm and outward excess ≤ max_error + 1 µm. Text = bounding box, grown by a margin only if the offline test shows pcbnew's bbox does not contain the text polygon.
+- C26 pour reach by probe points must be ⊆ pcbnew connectivity on every snapshot board (offline test feeding pcbnew-derived pads/vias/fills to model_ipc.pour_reach); any excess → stricter rule, never looser. kicad-cli DRC stays the oracle (M4-R6).
+- C27 Q-b: when VIA_NOT_SET_UP fires, run() writes `vias.fallback_diameter_mm` / `vias.fallback_drill_mm` (default 0.8 / 0.4) into the resolved rules the engine receives (default class + every per-net entry that carries the factory via size) before routing; the run report lists it; tested end to end (engine input carries the values; a changed toml value changes them).
+- Projects tree hash (rotation 2 command, run in ~/work/kicad/projects): `find . -type f -not -path '*/.git/*' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16` → baseline caefdaad6d57d4bb (2026-10-31 19:53).
