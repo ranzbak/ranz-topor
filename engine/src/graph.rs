@@ -28,6 +28,9 @@ pub struct VertexInfo {
     pub r: f64,
     /// Vertex clearance.
     pub clr: f64,
+    /// Via-site index when the vertex is a via site (`r 0`, `clr 0`, `nets []`, `owner None`
+    /// while the site is unowned; see [`RouteGraph::set_site`]).
+    pub site: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -122,13 +125,20 @@ pub struct RouteGraph {
     paths: Vec<Option<PathRec>>,
     vgrid: Grid<usize>,
     rho_max: f64,
+    /// Per edge: value of `clock` at the last change that can affect a path through the edge
+    /// (P4): `insert_path` / `remove_conn` bump every edge of every face the path touches
+    /// (plus the `along` edge and its two faces); `set_site` bumps every edge of every face
+    /// around the vertex; a plain `insert` bumps its edge.
+    pub edge_version: Vec<u64>,
+    /// Version counter of this layer graph (`edge_version` values are `<= clock`).
+    pub clock: u64,
 }
 
 fn key(p: Vec2) -> (u64, u64) {
     ((p.x + 0.0).to_bits(), (p.y + 0.0).to_bits())
 }
 
-fn chord(p: &Prim) -> (Vec2, Vec2) {
+pub(crate) fn chord(p: &Prim) -> (Vec2, Vec2) {
     match p {
         Prim::Seg(s) => (s.a, s.b),
         Prim::Arc(a) => (a.point_at(0.0), a.point_at(1.0)),
@@ -136,7 +146,7 @@ fn chord(p: &Prim) -> (Vec2, Vec2) {
 }
 
 /// Ray-casting parity of `p` against the outline chords; empty outline => inside.
-fn inside_outline(p: Vec2, chords: &[(Vec2, Vec2)]) -> bool {
+pub(crate) fn inside_outline(p: Vec2, chords: &[(Vec2, Vec2)]) -> bool {
     if chords.is_empty() {
         return true;
     }
@@ -195,13 +205,27 @@ impl RouteGraph {
             let anchor = ls.point_to_anchor.get(v).copied().flatten();
             let info = if let Some(ai) = anchor {
                 let a = &obs.anchors[ai];
-                VertexInfo {
-                    at,
-                    anchor,
-                    owner: Some(a.label.clone()),
-                    nets: sorted_nets(a.net, &a.tie_nets),
-                    r: a.r_core,
-                    clr: vertex_clr(a.kind, a.own_clr, rules),
+                if a.enabled {
+                    VertexInfo {
+                        at,
+                        anchor,
+                        owner: Some(a.label.clone()),
+                        nets: sorted_nets(a.net, &a.tie_nets),
+                        r: a.r_core,
+                        clr: vertex_clr(a.kind, a.own_clr, rules),
+                        site: a.site,
+                    }
+                } else {
+                    // dormant via site: a free vertex until `set_site` activates it
+                    VertexInfo {
+                        at,
+                        anchor,
+                        owner: None,
+                        nets: Vec::new(),
+                        r: 0.0,
+                        clr: 0.0,
+                        site: a.site,
+                    }
                 }
             } else if let Some(&ti) = (!cdt.is_split_vertex(v))
                 .then(|| term_at.get(&key(at)))
@@ -215,6 +239,7 @@ impl RouteGraph {
                     nets: sorted_nets(t.net, &[]),
                     r: t.r,
                     clr: t.clr.max(rules.min_clearance),
+                    site: None,
                 }
             } else {
                 VertexInfo {
@@ -224,6 +249,7 @@ impl RouteGraph {
                     nets: Vec::new(),
                     r: 0.0,
                     clr: 0.0,
+                    site: None,
                 }
             };
             rho_max = rho_max.max(info.r + info.clr);
@@ -232,6 +258,7 @@ impl RouteGraph {
         }
 
         let topo = cdt.topology();
+        let nedges = topo.edges.len();
         let mut edges: Vec<GEdge> = Vec::with_capacity(topo.edges.len());
         let mut edge_of = HashMap::with_capacity(topo.edges.len());
         for (i, &(a, b, constraint)) in topo.edges.iter().enumerate() {
@@ -290,7 +317,73 @@ impl RouteGraph {
             paths: Vec::new(),
             vgrid,
             rho_max,
+            edge_version: vec![0; nedges],
+            clock: 0,
         }
+    }
+
+    /// Stamp `edges` with a fresh version.
+    fn bump(&mut self, edges: impl IntoIterator<Item = usize>) {
+        self.clock += 1;
+        let c = self.clock;
+        for e in edges {
+            self.edge_version[e] = c;
+        }
+    }
+
+    fn face_edges(&self, faces: &[usize]) -> Vec<usize> {
+        faces
+            .iter()
+            .flat_map(|&f| self.faces[f].e)
+            .collect::<Vec<_>>()
+    }
+
+    /// Activate (`Some((net, r, clr, owner))`) or release (`None`) the via-site vertex `v`:
+    /// set `r`, `clr`, `nets = [net]`, `owner`, recompute `cap = |ab| - r_a - r_b` and `c_e =
+    /// max(clr_a, clr_b)` of the incident edges, raise `rho_max` (never lowered: it is an
+    /// upper bound), bump `edge_version` of every edge of every face around `v` (P4).
+    /// Returns the incident edges recomputed, sorted. O(deg).
+    pub fn set_site(&mut self, v: usize, active: Option<(i32, f64, f64, String)>) -> Vec<usize> {
+        debug_assert!(
+            self.verts[v].site.is_some(),
+            "set_site on a non-site vertex"
+        );
+        match active {
+            Some((net, r, clr, owner)) => {
+                let vi = &mut self.verts[v];
+                vi.nets = vec![net];
+                vi.r = r;
+                vi.clr = clr;
+                vi.owner = Some(owner);
+                self.rho_max = self.rho_max.max(r + clr);
+            }
+            None => {
+                let vi = &mut self.verts[v];
+                vi.nets = Vec::new();
+                vi.r = 0.0;
+                vi.clr = 0.0;
+                vi.owner = None;
+            }
+        }
+        let around = self.faces_of_vertex[v].clone();
+        let all = self.face_edges(&around);
+        let mut inc: Vec<usize> = all
+            .iter()
+            .copied()
+            .filter(|&e| self.edges[e].a == v || self.edges[e].b == v)
+            .collect();
+        inc.sort_unstable();
+        inc.dedup();
+        for &e in &inc {
+            let (a, b) = (self.edges[e].a, self.edges[e].b);
+            let (pa, pb) = (&self.verts[a], &self.verts[b]);
+            let cap = (pb.at - pa.at).len() - pa.r - pb.r;
+            let c_e = pa.clr.max(pb.clr);
+            self.edges[e].cap = cap;
+            self.edges[e].c_e = c_e;
+        }
+        self.bump(all);
+        inc
     }
 
     pub fn edge(&self, a: usize, b: usize) -> Option<usize> {
@@ -392,6 +485,7 @@ impl RouteGraph {
         debug_assert_eq!(conn, entry.conn);
         self.ensure(conn);
         let slot = slot.min(self.edges[e].cross.len());
+        self.bump([e]);
         self.edges[e].cross.insert(slot, entry);
         for i in (slot + 1..self.edges[e].cross.len()).rev() {
             let x = self.edges[e].cross[i];
@@ -450,6 +544,12 @@ impl RouteGraph {
                 },
             );
         }
+        let mut touched = self.face_edges(faces);
+        if let Some(e) = along {
+            let fs: Vec<usize> = self.edges[e].faces.iter().flatten().copied().collect();
+            touched.extend(self.face_edges(&fs));
+        }
+        self.bump(touched);
         self.paths[conn] = Some(PathRec {
             start: start_v,
             goal: goal_v,
@@ -499,6 +599,7 @@ impl RouteGraph {
         let mut touched: Vec<usize> = self.occupancy[conn].iter().map(|&(e, _)| e).collect();
         touched.sort_unstable();
         touched.dedup();
+        let touched_edges = touched.clone();
         for e in touched {
             let old = std::mem::take(&mut self.edges[e].cross);
             let mut kept = Vec::with_capacity(old.len());
@@ -515,11 +616,16 @@ impl RouteGraph {
             self.edges[e].cross = kept;
         }
         self.occupancy[conn].clear();
+        let mut bumped = touched_edges;
         if let Some(p) = self.paths[conn].take() {
+            bumped.extend(self.face_edges(&p.faces));
             if let Some(e) = p.along {
                 self.edges[e].along = None;
+                let fs: Vec<usize> = self.edges[e].faces.iter().flatten().copied().collect();
+                bumped.extend(self.face_edges(&fs));
             }
         }
+        self.bump(bumped);
     }
 
     /// Vertices whose position lies inside `bb`, sorted.

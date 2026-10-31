@@ -1,3 +1,4 @@
+#![allow(clippy::needless_range_loop)]
 use std::collections::HashSet;
 use topor_engine::geom::{dequantise, Aabb, Prim, Vec2};
 use topor_engine::graph::{CrossEntry, GraphRules, Port, RouteGraph, TerminalInfo};
@@ -635,4 +636,86 @@ fn slot_nesting_follows_slot_order() {
     // a conn unknown to the wire list (capacity-only entry) is skipped
     let n = slot_nesting(&g, &[7]);
     assert_eq!(n.inner[&key(0)].concat(), Vec::<usize>::new());
+}
+
+#[test]
+fn graph_set_site_recomputes_only_incident_edges() {
+    use topor_engine::vias::{SiteOrigin, ViaSite};
+    let body = format!(
+        r#""pads": [ {}, {} ], "outline": [ {} ]"#,
+        round_pad("a", 1, 10.0, 10.0),
+        round_pad("b", 2, 14.0, 10.0),
+        outline50x40()
+    );
+    let s = format!(
+        r#"{{ "layers": [ {{ "id": 0 }}, {{ "id": 2 }} ], {body},
+          "rules": {{ "default": {{ "clearance": 200000, "width": 250000 }}, "min_clearance": 0,
+            "hole_clearance": 250000, "edge_clearance": 500000 }} }}"#
+    );
+    let m = BoardModel::from_json(&s).unwrap();
+    let mut obs = ObstacleSet::build(&m, &Options::default(), &HashSet::new(), &[]);
+    let sites = vec![ViaSite {
+        at: Vec2 {
+            x: 12.0 * MM,
+            y: 3.0 * MM,
+        },
+        max_d: 600_000,
+        max_drill: 300_000,
+        origin: SiteOrigin::Face,
+    }];
+    let sa = obs.add_site_anchors(&sites, &[0]);
+    let ls = build_layer_cdt(obs.layer(0), &[], ConstraintSet::Routing).unwrap();
+    let outline: Vec<Prim> = m.outline.iter().map(dequantise).collect();
+    let rules = GraphRules {
+        eps: 5_000.0,
+        min_clearance: 0.0,
+        edge_clearance: 500_000.0,
+        hole_clearance: 250_000.0,
+    };
+    let mut g = RouteGraph::build(&ls, obs.layer(0), &outline, &[], &rules);
+    let v = ls.vertex_at(sites[0].at).unwrap();
+    assert_eq!(g.verts[v].site, Some(0));
+    assert_eq!((g.verts[v].r, g.verts[v].clr), (0.0, 0.0));
+    assert!(obs.layer(0).anchors[sa[0][0]].site == Some(0));
+    assert!(g.edge_version.iter().all(|&x| x == 0));
+    let caps: Vec<f64> = g.edges.iter().map(|e| e.cap).collect();
+    let around: HashSet<usize> = g
+        .faces_of_vertex(v)
+        .iter()
+        .flat_map(|&f| g.faces[f].e)
+        .collect();
+    let inc = g.set_site(v, Some((1, 300_000.0, 200_000.0, "via:0:0".into())));
+    assert!(!inc.is_empty());
+    let want: Vec<usize> = (0..g.edges.len())
+        .filter(|&e| g.edges[e].a == v || g.edges[e].b == v)
+        .collect();
+    assert_eq!(inc, want);
+    let mut untouched = 0;
+    for e in 0..g.edges.len() {
+        let incident = g.edges[e].a == v || g.edges[e].b == v;
+        assert_eq!(g.edge_version[e] > 0, around.contains(&e), "edge {e}");
+        if incident {
+            assert!((g.edges[e].cap - (caps[e] - 300_000.0)).abs() < 1e-6);
+        } else {
+            assert_eq!(g.edges[e].cap, caps[e], "non-incident cap untouched");
+        }
+        untouched += usize::from(g.edge_version[e] == 0);
+    }
+    assert!(untouched > 0, "edges away from the site keep their version");
+    assert!(g.rho_max() >= 500_000.0);
+    g.set_site(v, None);
+    for e in 0..g.edges.len() {
+        assert_eq!(g.edges[e].cap, caps[e]);
+    }
+}
+
+#[test]
+fn edge_version_bumps_on_insert_and_remove() {
+    let (mut g, e) = two_pads(2.6);
+    let v0 = g.edge_version[e];
+    g.insert(0, e, 0, ent(0));
+    let v1 = g.edge_version[e];
+    assert!(v1 > v0);
+    g.remove_conn(0);
+    assert!(g.edge_version[e] > v1);
 }

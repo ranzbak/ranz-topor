@@ -7,6 +7,7 @@ pub mod fuzz;
 pub mod geom;
 pub mod graph;
 pub mod model;
+pub mod multigraph;
 pub mod negotiate;
 pub mod obstacle;
 #[cfg(feature = "python")]
@@ -17,6 +18,7 @@ pub mod search;
 pub mod sketch;
 pub mod smooth;
 pub mod taut;
+pub mod vias;
 pub mod wires;
 
 #[cfg(test)]
