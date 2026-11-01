@@ -246,6 +246,9 @@ pub struct Goal {
     pub copper: Vec<(usize, usize)>,
     /// Least junction angle (degrees) against the sibling's chord; 0 = any.
     pub junction_min_angle_deg: f64,
+    /// Shared plane vias (`Options.plane_via_share`): sites the path may also end on when a via
+    /// of the connection's own net occupies them at search time (resolved by [`with_shared`]).
+    pub shared_sites: Vec<usize>,
     /// Most `length + via_cost * vias` a junction path may have (A5: the connection's own
     /// pad-to-pad ghost on the empty board times `expert.steiner_ghost_factor`); `None` = any.
     pub junction_cap: Option<f64>,
@@ -3606,6 +3609,28 @@ fn common<'a>(p: &SearchParams<'a>) -> Common<'a> {
 /// Complexity: `O(V' log V')`, `V' = sum_L 2 (E_L + X_L) + 2 S`; per expansion
 /// `O(n_max + C^2 + (C + 1) local)`; expansions are capped by
 /// `min(p.expansion_cap, default_expansion_cap(mg))`.
+/// `goal` with its [`Goal::shared_sites`] that a via of `conn`'s net (another connection's)
+/// occupies now added as goal vertices on every layer: the path ends on that via. O(shared ·
+/// layers).
+pub fn with_shared<'g>(mg: &MultiGraph, conn: &Connection, goal: &'g Goal) -> std::borrow::Cow<'g, Goal> {
+    if goal.shared_sites.is_empty() {
+        return std::borrow::Cow::Borrowed(goal);
+    }
+    let mut g = goal.clone();
+    for &s in &goal.shared_sites {
+        if mg.owner.get(s).copied().flatten().is_none_or(|(o, _)| o == conn.id) {
+            continue;
+        }
+        for (li, c) in mg.layers.iter().enumerate() {
+            let v = mg.site_vertex[s][li];
+            if c.g.verts[v].nets.contains(&conn.net) && !g.vertices.contains(&(li, v)) {
+                g.vertices.push((li, v));
+            }
+        }
+    }
+    std::borrow::Cow::Owned(g)
+}
+
 pub fn search(
     mg: &MultiGraph,
     obs: &ObstacleSet,
@@ -3614,6 +3639,7 @@ pub fn search(
     goal: &Goal,
     p: &SearchParams,
 ) -> SearchOutcome {
+    let goal = &*with_shared(mg, conn, goal);
     let env = Env::of(mg, obs);
     let hists = hist_refs(p.history, env.layers.len());
     let cp = common(p);
@@ -3674,6 +3700,7 @@ pub fn ghost(
     goal: &Goal,
     p: &SearchParams,
 ) -> Option<GhostOut> {
+    let goal = &*with_shared(mg, conn, goal);
     let env = Env::of(mg, obs);
     let hists = hist_refs(p.history, env.layers.len());
     ghost_in(&env, &hists, conn, start, goal, &common(p))

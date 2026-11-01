@@ -126,6 +126,10 @@ SETTINGS: list[Setting] = [
        engine="via_shove"),
     _s("vias", "plane_via_ring", "bool", True, "Offer plane vias candidate positions all around their SMD pad (two rings of 16), not only on the pad's four axes, so the via can go to whichever side is free.",
        engine="plane_via_ring"),
+    _s("vias", "plane_via_share", "bool", True, "A pad of a plane net may also end on a via of its own net that another pad already drops onto the plane, within plane_via_share_max_mm, instead of needing its own via (fewer vias in crowded spots; pads with no free via site of their own still connect).",
+       engine="plane_via_share"),
+    _s("vias", "plane_via_share_max_mm", "float", 2.0, "Largest distance from a pad to a shared plane via (see plane_via_share).", unit="mm", range=(0, 50),
+       engine="plane_via_share_max_nm"),
     # ---- [layers]
     _s("layers", "preferred_direction", "table", {}, "Layer name → \"h\" (along x), \"v\" (along y) or \"none\"; traces running across it pay direction_cost. Layers without an entry are free.",
        kicad="KiCad → File → Board Setup → Board Editor Layers (layer names)"),

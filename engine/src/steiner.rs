@@ -276,6 +276,7 @@ pub fn plan(
             copper,
             junction_min_angle_deg: sn.min_angle_deg,
             junction_cap: goal.junction_cap,
+            shared_sites: Vec::new(),
         },
     })
 }

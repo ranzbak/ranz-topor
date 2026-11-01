@@ -76,6 +76,11 @@ pub struct MultiGraph {
     /// Connections removed because the sibling they were attached to was removed (A5 cascade),
     /// in removal order since the last [`MultiGraph::take_cascaded`].
     cascaded: Vec<usize>,
+    /// Shared plane via (`Options.plane_via_share`): per connection, the site of another
+    /// connection's via its path ends on (no via of its own there).
+    shared_on: Vec<Option<usize>>,
+    /// Connections with `shared_on` set.
+    n_shared: usize,
     /// Number of `Some` entries of `junction` (the cascade scan is skipped while 0).
     n_junctions: usize,
     /// A5, per leg id: where the leg's metrized chain crosses each of its crossed edges (in
@@ -289,6 +294,8 @@ impl MultiGraph {
             junction: Vec::new(),
             steiner_reject: BTreeSet::new(),
             cascaded: Vec::new(),
+            shared_on: Vec::new(),
+            n_shared: 0,
             n_junctions: 0,
             chain_cross: Vec::new(),
             hole_to_hole: model.rules.hole_to_hole as f64,
@@ -595,6 +602,24 @@ impl MultiGraph {
         for &(s, size) in &path.sites {
             self.activate(s, conn.id, conn.net, size, clr, obs);
         }
+        // A path that ends on a site it does not own ends on another connection's via there
+        // (a shared plane via): it depends on that via like a junction on its sibling.
+        if let Some(last) = path.legs.last() {
+            let g = &self.layers[last.layer_idx].g;
+            let shared = g.verts.get(last.goal).and_then(|v| v.site).filter(|&s| {
+                !path.sites.iter().any(|&(x, _)| x == s)
+                    && self.owner.get(s).copied().flatten().is_some_and(|(o, _)| o != conn.id)
+            });
+            if self.shared_on.len() <= conn.id {
+                self.shared_on.resize(conn.id + 1, None);
+            }
+            match (self.shared_on[conn.id].is_some(), shared.is_some()) {
+                (false, true) => self.n_shared += 1,
+                (true, false) => self.n_shared -= 1,
+                _ => {}
+            }
+            self.shared_on[conn.id] = shared;
+        }
         if let Some(j) = &path.junction {
             if self.junction.len() <= conn.id {
                 self.junction.resize(conn.id + 1, None);
@@ -628,17 +653,37 @@ impl MultiGraph {
     /// Connections whose path ends on a junction with `conn`'s copper (sorted). O(m) while any
     /// junction exists, O(1) otherwise.
     pub fn dependents(&self, conn: usize) -> Vec<usize> {
-        if self.n_junctions == 0 {
-            return Vec::new();
+        let mut out: Vec<usize> = if self.n_junctions == 0 {
+            Vec::new()
+        } else {
+            (0..self.junction.len())
+                .filter(|&d| {
+                    self.junction[d]
+                        .as_ref()
+                        .and_then(|j| j.sibling)
+                        .is_some_and(|(s, _)| s == conn)
+                })
+                .collect()
+        };
+        if self.n_shared > 0 {
+            out.extend((0..self.shared_on.len()).filter(|&d| {
+                self.shared_on[d]
+                    .is_some_and(|s| self.owner.get(s).copied().flatten().is_some_and(|(o, _)| o == conn))
+            }));
+            out.sort_unstable();
+            out.dedup();
         }
-        (0..self.junction.len())
-            .filter(|&d| {
-                self.junction[d]
-                    .as_ref()
-                    .and_then(|j| j.sibling)
-                    .is_some_and(|(s, _)| s == conn)
-            })
-            .collect()
+        out
+    }
+
+    /// Whether another connection's path ends on site `s` (a shared plane via). O(m).
+    pub fn site_shared(&self, s: usize) -> bool {
+        self.n_shared > 0 && self.shared_on.contains(&Some(s))
+    }
+
+    /// The site of another connection's via that `conn`'s path ends on. O(1).
+    pub fn shared_site_of(&self, conn: usize) -> Option<usize> {
+        self.shared_on.get(conn).copied().flatten()
     }
 
     /// `conn` ends in a junction or has a connection attached to it. O(m) (see `dependents`).
@@ -665,6 +710,11 @@ impl MultiGraph {
         if let Some(j) = self.junction.get_mut(conn) {
             if j.take().is_some() {
                 self.n_junctions -= 1;
+            }
+        }
+        if let Some(x) = self.shared_on.get_mut(conn) {
+            if x.take().is_some() {
+                self.n_shared -= 1;
             }
         }
         for s in self.sites_of(conn).to_vec() {

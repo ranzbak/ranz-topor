@@ -896,6 +896,11 @@ pub struct Options {
     /// Via sites (plane vias): the SMD pads of plane-pour connections get a ring of candidate
     /// sites all around them (`vias::via_sites_ring`), not only the four axis escape sites.
     pub plane_via_ring: bool,
+    /// Plane vias: an SMD pad of a plane-pour connection may also end on a via of its own net
+    /// that another connection drops onto the plane, within `plane_via_share_max_nm` of the pad.
+    pub plane_via_share: bool,
+    /// Largest pad-to-via distance for a shared plane via (nm).
+    pub plane_via_share_max_nm: i64,
     /// Negotiation: a connection that fails its metrization rips the connections whose vias
     /// its failure names or that sit next to the pad / wall it names (escalating rip cost), so
     /// those vias can move to another site. Off by default: on qmtech and the dcsgone USB crop
@@ -1000,6 +1005,8 @@ impl Default for Options {
             via_relaxation: true,
             via_shove: false,
             plane_via_ring: true,
+            plane_via_share: true,
+            plane_via_share_max_nm: 2_000_000,
             blame_vias: false,
             rip_pass: true,
             profile: false,

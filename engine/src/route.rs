@@ -760,6 +760,14 @@ fn leg_terminals(
         terminal_of(&c.to)
     } else if let Some(&s) = sites.get(ord) {
         site(s)
+    } else if let (true, Some(s)) = (ord + 1 == nlegs, mg.shared_site_of(conn)) {
+        // A shared plane via: the path ends on another connection's via of the net (it must
+        // still be there, else the leg fails and the connection searches again).
+        mg.owner.get(s).copied().flatten().filter(|&(o, _)| o != conn)?;
+        Terminal::Site {
+            site: s,
+            at: via_at.get(&s).copied().unwrap_or(mg.sites[s].at),
+        }
     } else if ord + 1 == nlegs {
         // D-6: a pour connection that ended on a same-net via the pour lists (no new via)
         let k = *mg.conn_wires.get(conn)?.get(ord)?;
@@ -3195,7 +3203,14 @@ fn via_relaxation_pass(cx: &Ctx, obs: &mut ObstacleSet, rt: &Route, best: &mut S
         if legs_of(&best.mg, c).len() != sites.len() + 1 {
             continue;
         }
-        vias.extend(sites.iter().enumerate().map(|(j, &s)| (s, c, j)));
+        // A via another connection ends on (shared plane via) stays where it is.
+        vias.extend(
+            sites
+                .iter()
+                .enumerate()
+                .filter(|&(_, &s)| !best.mg.site_shared(s))
+                .map(|(j, &s)| (s, c, j)),
+        );
     }
     vias.sort_unstable();
     out.vias = vias.len();
@@ -5311,6 +5326,9 @@ fn route_pass(
                 };
                 let mut starts: Vec<Vec<(usize, usize)>> = Vec::with_capacity(m);
                 let mut goals: Vec<Goal> = Vec::with_capacity(m);
+                // Plane pads with no own via site in reach, only shared ones: the reason when
+                // no shared via turned up either.
+                let mut share_only: Vec<Option<String>> = vec![None; m];
                 for (i, c) in live.iter().enumerate() {
                     let st = vertices(&c.from);
                     let goal = match c.to.kind {
@@ -5328,7 +5346,27 @@ fn route_pass(
                             // routable layers (the path ends on it, no new via).
                             let vertices: Vec<(usize, usize)> =
                                 pour_vias[i].iter().flat_map(&vertices).collect();
-                            if pour_sites.is_empty() && vertices.is_empty() {
+                            // Shared plane vias: plane-fill sites within the share distance; the
+                            // search ends on one when a via of the net occupies it.
+                            let shared_sites: Vec<usize> = if plane && opts.plane_via_share {
+                                (0..mg.sites.len())
+                                    .filter(|&s| mg.in_pour[s].contains(&zi))
+                                    .filter(|&s| {
+                                        plane_via_gap(model, &c.from, mg.sites[s].at)
+                                            <= opts.plane_via_share_max_nm as f64
+                                    })
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            };
+                            if pour_sites.is_empty() && vertices.is_empty() && !shared_sites.is_empty() {
+                                share_only[i] = Some(format!(
+                                    "no via site within {:.2} mm of the terminal and no shared via within {:.2} mm (plane pour)",
+                                    opts.plane_via_max_nm as f64 * 1e-6,
+                                    opts.plane_via_share_max_nm as f64 * 1e-6
+                                ));
+                            }
+                            if pour_sites.is_empty() && vertices.is_empty() && shared_sites.is_empty() {
                                 perm[i] = Some(if plane {
                                     format!(
                                         "no via site within {:.2} mm of the terminal (plane pour)",
@@ -5342,6 +5380,7 @@ fn route_pass(
                                 vertices,
                                 pour_layer: routable.iter().position(|l| c.to.layers.contains(l)),
                                 pour_sites,
+                                shared_sites,
                                 ..Default::default()
                             }
                         }
@@ -5354,7 +5393,9 @@ fn route_pass(
                     };
                     if perm[i].is_none()
                         && (st.is_empty()
-                            || (goal.vertices.is_empty() && goal.pour_sites.is_empty()))
+                            || (goal.vertices.is_empty()
+                                && goal.pour_sites.is_empty()
+                                && goal.shared_sites.is_empty()))
                     {
                         perm[i] = Some("terminal not on any routable layer".into());
                     }
@@ -5781,6 +5822,15 @@ fn route_pass(
                 if let Some(b) = &best {
                     // The obstacle anchors follow the best iteration (P7).
                     b.mg.sync_anchors(&mut obs, &rt.net_of());
+                }
+                if let Some(b) = best.as_mut() {
+                    for (i, why) in share_only.iter().enumerate() {
+                        if let (Some(why), Res::Fail { reason, .. }) = (why, &mut b.res[i]) {
+                            if reason.starts_with("blocked") {
+                                *reason = why.clone();
+                            }
+                        }
+                    }
                 }
                 if opts.rip_pass {
                     if timed_out {

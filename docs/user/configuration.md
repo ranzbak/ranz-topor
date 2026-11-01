@@ -62,6 +62,8 @@ Via cost, count and size policy (each net routes with its KiCad net class via, p
 | `via_relaxation` | bool | `true` |  | true\|false | Let the relaxation pass move vias a bounded distance to shorten traces. *Since 0.5.0.* |
 | `via_shove` | bool | `false` |  | true\|false | When a planned trace does not fit at its width because another connection's via is in the way, push that via aside (inside the area around its site, up to 0.8 mm, passing the push on to at most three neighbours) instead of failing the trace. |
 | `plane_via_ring` | bool | `true` |  | true\|false | Offer plane vias candidate positions all around their SMD pad (two rings of 16), not only on the pad's four axes, so the via can go to whichever side is free. |
+| `plane_via_share` | bool | `true` |  | true\|false | A pad of a plane net may also end on a via of its own net that another pad already drops onto the plane, within plane_via_share_max_mm, instead of needing its own via (fewer vias in crowded spots; pads with no free via site of their own still connect). |
+| `plane_via_share_max_mm` | float | `2.0` | mm | 0 .. 50 | Largest distance from a pad to a shared plane via (see plane_via_share). |
 
 ## `[layers]`
 

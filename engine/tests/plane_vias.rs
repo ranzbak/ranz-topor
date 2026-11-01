@@ -104,6 +104,7 @@ fn no_site_within_max_distance_fails_with_reason() {
         &m,
         &Options {
             plane_via_max_nm: 0,
+            plane_via_share: false,
             ..opts()
         },
     );
@@ -111,6 +112,16 @@ fn no_site_within_max_distance_fails_with_reason() {
         assert_eq!(c.status, "failed", "{c:?}");
         assert_eq!(
             c.reason, "no via site within 0.00 mm of the terminal (plane pour)",
+            "{c:?}"
+        );
+    }
+    // With sharing, no pad has a via of its own to share: the reason names both distances.
+    let r2 = route(&m, &Options { plane_via_max_nm: 0, ..opts() });
+    for c in r2.connections.iter().filter(|c| c.net == 1) {
+        assert_eq!(c.status, "failed", "{c:?}");
+        assert_eq!(
+            c.reason,
+            "no via site within 0.00 mm of the terminal and no shared via within 2.00 mm (plane pour)",
             "{c:?}"
         );
     }
@@ -157,4 +168,18 @@ fn plane_vias_off_keeps_the_old_failure() {
         assert_eq!(c.status, "failed", "{c:?}");
         assert_eq!(c.reason, "terminal not on any routable layer");
     }
+}
+
+/// Shared plane vias are on by default (2 mm); with sharing off the plane fixtures route the
+/// same and stay clean (on this board every pad has a free site of its own).
+#[test]
+fn plane_via_share_default_and_same_without_contention() {
+    let d = Options::default();
+    assert!(d.plane_via_share && d.plane_via_share_max_nm == 2_000_000);
+    assert!(Options::from_json("{}").unwrap().plane_via_share);
+    let m = model();
+    let on = route(&m, &opts());
+    let off = route(&m, &Options { plane_via_share: false, ..opts() });
+    assert_eq!((on.routed, on.vias), (off.routed, off.vias));
+    clean(&m, &on);
 }
