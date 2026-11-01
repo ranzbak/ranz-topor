@@ -90,3 +90,10 @@ Design and research library: [docs/](docs/README.md).
 | `tools/` | `build.sh`, `dev-venv.sh`, `bench.sh`, `render.sh` |
 | `tests/` | pytest suites (unit, `plugin/`, `gate/`, `scaling/`) |
 | `docs/` | user guide, developer guide, research library, design, plans, progress notes, benchmarks |
+
+## License
+
+topor is free software, licensed under the **GNU General Public License, version 2 or (at your
+option) any later version** (SPDX: `GPL-2.0-or-later`); see [LICENSE](LICENSE).
+Copyright (C) 2026 Paul Honig and contributors. This license allows reusing code from other GPL
+routers such as the gEDA PCB toporouter (GPL-2.0-or-later); keep their copyright notices when doing so.

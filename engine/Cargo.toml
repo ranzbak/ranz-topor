@@ -2,6 +2,7 @@
 name = "topor-engine"
 version = "0.4.0"
 edition = "2021"
+license = "GPL-2.0-or-later"
 
 [lib]
 name = "topor_engine"

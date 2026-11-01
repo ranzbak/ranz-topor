@@ -5,6 +5,7 @@ build-backend = "maturin"
 [project]
 name = "topor-engine"
 requires-python = ">=3.9"
+license = { text = "GPL-2.0-or-later" }
 dynamic = ["version"]
 
 [tool.maturin]
