@@ -1,0 +1,323 @@
+# DG prototypes (task DG, rotation 2): NOT FOR MERGE. diff -ru of engine/src at bde9602 (headsrc) vs the
+# measured prototype copy (varsrc). Env-selected: TOPOR_DG_VARIANT=0..9 (net-order variants, decompose::order_variant),
+# TOPOR_DG_HARD=<file> (variant 7), TOPOR_DG_REPAIR=1..4 (generalised repair in junction_repair_pass: 1 all
+# failures, 2 + strict unfit edges, 3 + empty history, 4 + depth-2 re-route of broken neighbours; prints DGREPAIR
+# lines incl. the null re-metrization test). Apply with: cd engine && patch -p2 < ../docs/progress/notes/m4-dcsgone-dg-prototypes.patch
+diff --color -ru headsrc/engine/src/decompose.rs varsrc/engine/src/decompose.rs
+--- headsrc/engine/src/decompose.rs	2026-11-01 06:39:04.000000000 +0100
++++ varsrc/engine/src/decompose.rs	2026-11-01 07:12:28.009450305 +0100
+@@ -893,3 +893,84 @@
+         },
+     }
+ }
++
++/// DG prototype (worktree only, not for merge): deterministic net-order variants selected by
++/// the env var `TOPOR_DG_VARIANT` (0 = `order`), `TOPOR_DG_HARD` = file of `net\tlabelA\tlabelB`
++/// lines (sorted labels) routed first in variant 7. O(m log m).
++pub fn order_variant(conns: &[Connection], bumps: &[u32]) -> Vec<usize> {
++    let v: u32 = std::env::var("TOPOR_DG_VARIANT")
++        .ok()
++        .and_then(|s| s.parse().ok())
++        .unwrap_or(0);
++    if v == 0 {
++        return order(conns, bumps);
++    }
++    fn mix(mut x: u64) -> u64 {
++        x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
++        x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
++        x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
++        x ^ (x >> 31)
++    }
++    let hard: Vec<bool> = if v == 7 {
++        let set: std::collections::BTreeSet<String> = std::env::var("TOPOR_DG_HARD")
++            .ok()
++            .and_then(|p| std::fs::read_to_string(p).ok())
++            .map(|s| s.lines().map(|l| l.trim_end().to_string()).collect())
++            .unwrap_or_default();
++        conns
++            .iter()
++            .map(|c| {
++                let (a, b) = if c.from.label <= c.to.label {
++                    (&c.from.label, &c.to.label)
++                } else {
++                    (&c.to.label, &c.from.label)
++                };
++                set.contains(&format!("{}\t{}\t{}", c.net, a, b))
++            })
++            .collect()
++    } else {
++        vec![false; conns.len()]
++    };
++    let mut idx: Vec<usize> = (0..conns.len()).collect();
++    idx.sort_by(|&a, &b| {
++        let (ca, cb) = (&conns[a], &conns[b]);
++        let ba = bumps.get(a).copied().unwrap_or(0);
++        let bb = bumps.get(b).copied().unwrap_or(0);
++        let head = bb.cmp(&ba).then(ca.tier.cmp(&cb.tier));
++        let rest = match v {
++            // longer first within width
++            1 => cb.width.cmp(&ca.width).then(cb.est_len.total_cmp(&ca.est_len)),
++            // shorter first, width ignored
++            2 => ca.est_len.total_cmp(&cb.est_len),
++            // seeded shuffle within width
++            3 | 4 => {
++                let s = v as u64 * 0x1234_5678;
++                cb.width
++                    .cmp(&ca.width)
++                    .then(mix(ca.id as u64 ^ s).cmp(&mix(cb.id as u64 ^ s)))
++            }
++            // nets grouped in a seeded net order, shorter first inside the net
++            5 | 6 => {
++                let s = v as u64 * 0x9876_5431;
++                cb.width
++                    .cmp(&ca.width)
++                    .then(mix(ca.net as u64 ^ s).cmp(&mix(cb.net as u64 ^ s)))
++                    .then(ca.est_len.total_cmp(&cb.est_len))
++            }
++            // pour connections after every pad-pad connection, then the default order
++            9 => matches!(ca.to.kind, TermKind::Pour(_))
++                .cmp(&matches!(cb.to.kind, TermKind::Pour(_)))
++                .then(cb.width.cmp(&ca.width))
++                .then(ca.est_len.total_cmp(&cb.est_len)),
++            // first-pass failures first, then the default order
++            7 => hard[b]
++                .cmp(&hard[a])
++                .then(cb.width.cmp(&ca.width))
++                .then(ca.est_len.total_cmp(&cb.est_len)),
++            // narrow first (reverse width), shorter first
++            _ => ca.width.cmp(&cb.width).then(ca.est_len.total_cmp(&cb.est_len)),
++        };
++        head.then(rest).then(ca.net.cmp(&cb.net)).then(ca.id.cmp(&cb.id))
++    });
++    idx
++}
+diff --color -ru headsrc/engine/src/negotiate.rs varsrc/engine/src/negotiate.rs
+--- headsrc/engine/src/negotiate.rs	2026-11-01 06:39:04.000000000 +0100
++++ varsrc/engine/src/negotiate.rs	2026-11-01 06:54:00.522669099 +0100
+@@ -280,7 +280,7 @@
+         let mut ripped: BTreeSet<usize> = BTreeSet::new();
+         let mut resolved_sequentially = 0usize;
+         let mut revalidated = 0usize;
+-        let seq: Vec<usize> = order(conns, &self.bumps)
++        let seq: Vec<usize> = crate::decompose::order_variant(conns, &self.bumps)
+             .into_iter()
+             .filter(|&i| is_active[i])
+             .collect();
+diff --color -ru headsrc/engine/src/route.rs varsrc/engine/src/route.rs
+--- headsrc/engine/src/route.rs	2026-11-01 06:39:04.000000000 +0100
++++ varsrc/engine/src/route.rs	2026-11-01 07:36:21.243966653 +0100
+@@ -2731,12 +2731,40 @@
+ ) -> (usize, usize) {
+     let live = cx.conns;
+     let m = live.len();
++    // DG prototype: TOPOR_DG_REPAIR=1 every non-permanent failure is a candidate, =2 also with
++    // strict unfit edges in its search, =3 strict and empty history.
++    let repair: u32 = std::env::var("TOPOR_DG_REPAIR")
++        .ok()
++        .and_then(|s| s.parse().ok())
++        .unwrap_or(0);
+     let cands: Vec<usize> = (0..m)
+         .filter(|&i| {
+-            matches!(&best.res[i], Res::Fail { reason, perm: false, .. } if reason.starts_with("junction:"))
++            matches!(&best.res[i], Res::Fail { reason, perm: false, .. } if repair > 0 || reason.starts_with("junction:"))
+         })
+         .collect();
+     let mut fixed = 0usize;
++    if repair > 0 {
++        // null test: re-metrize the unchanged best graph
++        let mut mg0 = best.mg.clone();
++        mg0.sync_anchors(obs, &rt.net_of());
++        let routed0: Vec<usize> = (0..m).filter(|&i| matches!(best.res[i], Res::Ok(_))).collect();
++        let mut metr0 = best.metr.clone();
++        let mt0 = metrize(cx, obs, &mg0, &routed0, &mut metr0, &[]);
++        let bad: Vec<String> = mt0
++            .res
++            .iter()
++            .filter_map(|(i, r)| match r {
++                Res::Fail { reason, .. } => Some(format!("#{} {}", live[*i].id, reason)),
++                _ => None,
++            })
++            .collect();
++        eprintln!(
++            "DGREPAIR null re-metrize of the best graph: {} of {} fail {:?}",
++            bad.len(),
++            routed0.len(),
++            bad
++        );
++    }
+     for &c in &cands {
+         if cx.stop() {
+             break;
+@@ -2747,9 +2775,11 @@
+         if !mg.take_cascaded().is_empty() {
+             continue;
+         }
++        let empty: Vec<Vec<f64>> = Vec::new();
++        let empty_s: Vec<f64> = Vec::new();
+         let params = SearchParams {
+-            history: &neg.history,
+-            site_history: &neg.site_history,
++            history: if repair >= 3 { &empty } else { &neg.history },
++            site_history: if repair >= 3 { &empty_s } else { &neg.site_history },
+             weight: tier_weight(live[c].tier),
+             present_overuse: cx.opts.expert.present_overuse,
+             expansion_cap: default_expansion_cap(&mg),
+@@ -2757,33 +2787,145 @@
+             eps: None,
+             via_cost: cx.opts.via_cost_for(live[c].net) as f64 * via_weight(live[c].tier),
+             max_vias: cx.opts.max_vias_per_connection,
+-            strict_unfit_edges: cx.opts.strict_unfit_edges,
++            strict_unfit_edges: cx.opts.strict_unfit_edges || repair >= 2,
+         };
+         let p = match search(&mg, obs, &live[c], &rt.starts[c], &rt.goals[c], &params) {
+             SearchOutcome::Found(p) => p,
+             SearchOutcome::Timeout => break,
+-            SearchOutcome::Blocked { .. } => continue,
++            SearchOutcome::Blocked { .. } => {
++                if repair > 0 {
++                    eprintln!("DGREPAIR #{} {} blocked", live[c].id, live[c].from.label);
++                }
++                continue;
++            }
+         };
+         mg.insert_path(&live[c], &p, obs);
+         let routed: Vec<usize> = (0..m)
+             .filter(|&i| i == c || matches!(best.res[i], Res::Ok(_)))
+             .collect();
+         let mut metr = best.metr.clone();
+-        let mt = metrize(cx, obs, &mg, &routed, &mut metr, &[c]);
++        let mut mt = metrize(cx, obs, &mg, &routed, &mut metr, &[c]);
+         if mt.timed_out {
+             break;
+         }
+-        let all_ok =
++        let mut all_ok =
+             mt.res.len() == routed.len() && mt.res.iter().all(|(_, r)| matches!(r, Res::Ok(_)));
++        // DG prototype, mode >= 4: depth-2 repair - the (<= 2) neighbours the new path breaks
++        // are searched again in the graph with it, then everything is metrized once more.
++        let mut extra: Vec<(usize, SlotPath)> = Vec::new();
++        if !all_ok && repair >= 4 {
++            let own_ok = mt.res.iter().any(|(i, r)| *i == c && matches!(r, Res::Ok(_)));
++            let broken: Vec<usize> = mt
++                .res
++                .iter()
++                .filter(|(i, r)| *i != c && !matches!(r, Res::Ok(_)))
++                .map(|(i, _)| *i)
++                .collect();
++            if own_ok && !broken.is_empty() && broken.len() <= 2 {
++                let mut mg2 = mg.clone();
++                let mut ok2 = true;
++                for &y in &broken {
++                    mg2.remove_conn(y, obs);
++                    if !mg2.take_cascaded().is_empty() {
++                        ok2 = false;
++                        break;
++                    }
++                    let py = SearchParams {
++                        weight: tier_weight(live[y].tier),
++                        via_cost: cx.opts.via_cost_for(live[y].net) as f64
++                            * via_weight(live[y].tier),
++                        expansion_cap: default_expansion_cap(&mg2),
++                        ..params
++                    };
++                    match search(&mg2, obs, &live[y], &rt.starts[y], &rt.goals[y], &py) {
++                        SearchOutcome::Found(q) => {
++                            mg2.insert_path(&live[y], &q, obs);
++                            extra.push((y, q));
++                        }
++                        _ => {
++                            ok2 = false;
++                            break;
++                        }
++                    }
++                }
++                if ok2 {
++                    let mut metr2 = best.metr.clone();
++                    let mut work = vec![c];
++                    work.extend(broken.iter().copied());
++                    let mt2 = metrize(cx, obs, &mg2, &routed, &mut metr2, &work);
++                    let ok_all = !mt2.timed_out
++                        && mt2.res.len() == routed.len()
++                        && mt2.res.iter().all(|(_, r)| matches!(r, Res::Ok(_)));
++                    eprintln!(
++                        "DGREPAIR #{} depth-2 over {:?}: {}",
++                        live[c].id,
++                        broken.iter().map(|&y| live[y].id).collect::<Vec<_>>(),
++                        if ok_all { "OK" } else { "fail" }
++                    );
++                    if ok_all {
++                        mt = mt2;
++                        mg = mg2;
++                        metr = metr2;
++                        all_ok = true;
++                    } else {
++                        extra.clear();
++                    }
++                } else {
++                    extra.clear();
++                    eprintln!("DGREPAIR #{} depth-2: neighbour blocked", live[c].id);
++                }
++            }
++        }
+         if !all_ok {
++            if repair > 0 {
++                let own = mt.res.iter().find(|(i, _)| *i == c).map(|(_, r)| match r {
++                    Res::Ok(_) => "ok".to_string(),
++                    Res::Fail { reason, .. } => reason.clone(),
++                    _ => "other".to_string(),
++                });
++                let broke = mt
++                    .res
++                    .iter()
++                    .filter(|(i, r)| *i != c && !matches!(r, Res::Ok(_)))
++                    .count();
++                for (i, r) in mt.res.iter() {
++                    if *i != c {
++                        if let Res::Fail { reason, .. } = r {
++                            let before = match &best.res[*i] {
++                                Res::Ok(_) => "ok",
++                                _ => "not ok",
++                            };
++                            eprintln!(
++                                "DGREPAIR   broken #{} {}->{} (best: {before}): {reason}",
++                                live[*i].id, live[*i].from.label, live[*i].to.label
++                            );
++                        }
++                    }
++                }
++                eprintln!(
++                    "DGREPAIR #{} {} found {:.2} mm v{} -> own {:?}, others broken {}",
++                    live[c].id,
++                    live[c].from.label,
++                    p.est_len * 1e-6,
++                    p.sites.len(),
++                    own,
++                    broke
++                );
++            }
+             continue;
+         }
++        if repair > 0 {
++            eprintln!("DGREPAIR #{} {} REPAIRED", live[c].id, live[c].from.label);
++        }
+         let mut res = best.res.clone();
+         for (i, r) in mt.res {
+             res[i] = r;
+         }
+         let mut paths = best.paths.clone();
+         paths[c] = Some(p);
++        for (y, q) in extra {
++            paths[y] = Some(q);
++        }
+         let (nok, vias, len, outl) = tally(&res);
+         best.clinches = detect_clinches(&mg, live, &paths, rt.starts);
+         best.routed = nok;
+@@ -4692,7 +4834,7 @@
+                         break;
+                     }
+                 }
+-                if opts.steiner && !timed_out {
++                if (opts.steiner || std::env::var("TOPOR_DG_REPAIR").is_ok()) && !timed_out {
+                     if let Some(b) = best.as_mut() {
+                         let (fixed, n) = junction_repair_pass(&cx, &mut obs, &rt, &neg, b);
+                         if n > 0 {
