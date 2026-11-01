@@ -258,6 +258,16 @@ def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path,
     return "\n".join(lines[:SUMMARY_MAX])
 
 
+# wall_clock_s 0 = no engine deadline (engine semantics): the DRC loop then gets no budget cut either
+# (same rule as plugin/topor/run.py NO_BUDGET_S); drc_loop_cap still bounds the rounds.
+NO_BUDGET_S = 1.0e9
+
+
+def _drc_budget_s(options: dict) -> float:
+    wc = float(options.get("wall_clock_s", ENGINE_WALL_CLOCK_S))
+    return wc if wc > 0 else NO_BUDGET_S
+
+
 def run_bench(
     board: str,
     out_dir: Path,
@@ -346,7 +356,7 @@ def run_bench(
     loop = drcloop.route_with_drc_loop(
         model, {**options, "threads": threads}, route_fn=route_fn, drc_fn=drc_fn,
         base_drc=base_drc, orig_drc=orig_drc,
-        budget_s=float(options.get("wall_clock_s", ENGINE_WALL_CLOCK_S)), loop_cap=loop_cap,
+        budget_s=_drc_budget_s(options), loop_cap=loop_cap,
         reach_nm=reach,
         clearance_nm=float(max(rules["min_clearance"], rules["default"].get("clearance", 0))))
     b = state["b"]

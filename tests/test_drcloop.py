@@ -70,3 +70,11 @@ def test_drcloop_pin_round_matches_run_bench_on_fixture(fixture_board, tmp_path,
     assert list(dl["pinned"].values()) == ["drc track_width at (40.000, 40.000) mm"]
     assert r["zero_slack"] == {"status": "not attempted", "wires": []}
     assert (r["routed_items"], r["unchanged_items"], r["replaced"]) == (0, 0, 0)
+
+
+def test_wall_clock_zero_gives_the_drc_loop_no_budget_cut():
+    """wall_clock_s 0 disables the engine deadline; the harness DRC loop must not read it as an
+    exhausted budget (DG concern 1: a second DRC round never ran, routing_new stayed 1)."""
+    assert bench._drc_budget_s({"wall_clock_s": 0}) == bench.NO_BUDGET_S
+    assert bench._drc_budget_s({"wall_clock_s": 600}) == 600.0
+    assert bench._drc_budget_s({}) == float(bench.ENGINE_WALL_CLOCK_S)
