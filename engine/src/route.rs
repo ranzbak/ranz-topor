@@ -279,7 +279,7 @@ fn term_out(t: &TermRef) -> TermOut {
             TermKind::Pad(_) => "pad",
             TermKind::Via(_) => "via",
             TermKind::Copper(_) => "copper",
-            TermKind::Dangling(_) => "dangling",
+            TermKind::Dangling(..) => "dangling",
             TermKind::Pour(_) => "pour",
         }
         .into(),
@@ -295,6 +295,8 @@ fn bits(p: Vec2) -> (u64, u64) {
 /// One routed connection after metrization and self-check.
 #[derive(Clone, Debug)]
 struct ConnOk {
+    /// Worst G1 angle of a continued dangling end, `None` without one (A14).
+    g1: Option<f64>,
     /// Tracks of every leg and the connection's vias, in leg order.
     items: Vec<Item>,
     len: f64,
@@ -312,6 +314,9 @@ struct ConnOk {
 /// One metrized leg: its tracks and the via that ends it (if any).
 #[derive(Clone, Debug)]
 struct LegOk {
+    /// Worst angle (deg) between a continued dangling end's hand direction and the leg's tangent
+    /// there (A14); 0 without one.
+    g1: f64,
     items: Vec<Item>,
     len: f64,
     out: f64,
@@ -944,6 +949,11 @@ fn metrize_zs(
                 }
                 let w = &st.rx.wires()[k];
                 let conn = st.leg_conn[k];
+                let g1 = g1_angle(&q, w);
+                if g1 > G1_TOL_DEG {
+                    st.fail[k] = Some(fail(format!("g1: {g1:.2} deg off the hand direction")));
+                    continue;
+                }
                 let mut items: Vec<Item> = q
                     .into_iter()
                     .map(|t| {
@@ -980,6 +990,7 @@ fn metrize_zs(
                     items.push(via_item(mg, s, w.net, conn));
                 }
                 st.ok[k] = Some(LegOk {
+                    g1,
                     items,
                     len,
                     out: outside_len(&ch.prims, &sks),
@@ -1092,6 +1103,9 @@ fn metrize_zs(
             fail("not metrized")
         } else {
             let legs: Vec<&LegOk> = ks.iter().filter_map(|&k| st.ok[k].as_ref()).collect();
+            let has_dangling = [&cx.conns[i].from, &cx.conns[i].to]
+                .iter()
+                .any(|t| matches!(t.kind, TermKind::Dangling(_, Some(_))));
             let sites = mg.sites_of(i);
             let mut layers: Vec<u32> = Vec::new();
             for &k in ks {
@@ -1101,6 +1115,7 @@ fn metrize_zs(
                 }
             }
             Res::Ok(ConnOk {
+                g1: has_dangling.then(|| legs.iter().map(|o| o.g1).fold(0.0, f64::max)),
                 items: legs.iter().flat_map(|o| o.items.iter().cloned()).collect(),
                 len: legs.iter().map(|o| o.len).sum(),
                 out: legs.iter().map(|o| o.out).sum(),
@@ -1119,6 +1134,41 @@ fn metrize_zs(
         out.res.push((i, r));
     }
     out
+}
+
+/// A continued dangling end must be left within this angle of the hand direction, deg (A14).
+const G1_TOL_DEG: f64 = 1.0;
+
+/// Unit tangent of `p` at its start / end, travel direction (`None` for a degenerate prim).
+fn prim_tangent(p: &Prim, at_end: bool) -> Option<Vec2> {
+    match p {
+        Prim::Seg(s) => s.dir(),
+        Prim::Arc(a) => {
+            let pt = if at_end { a.end() } else { a.start() };
+            let t = (pt - a.c).unit()?.perp();
+            Some(if a.sigma == crate::geom::Orient::Ccw { t } else { -t })
+        }
+    }
+}
+
+/// Worst angle (deg) between the hand direction of a continued dangling start / goal terminal
+/// of `w` and the tangent of the quantised chain `q` there (math frame); 0 when `w` has none.
+/// O(1).
+fn g1_angle(q: &[TrackPrim], w: &Wire) -> f64 {
+    let ang = |t: Option<Vec2>, d: Vec2| -> f64 {
+        match (t, d.unit()) {
+            (Some(t), Some(d)) => t.dot(d).clamp(-1.0, 1.0).acos().to_degrees(),
+            _ => 0.0,
+        }
+    };
+    let mut worst = 0.0f64;
+    if let (Terminal::Dangling { direction: Some(d), .. }, Some(first)) = (&w.start, q.first()) {
+        worst = worst.max(ang(prim_tangent(&dequantise(first), false), *d));
+    }
+    if let (Terminal::Dangling { direction: Some(d), .. }, Some(last)) = (&w.goal, q.last()) {
+        worst = worst.max(ang(prim_tangent(&dequantise(last), true), -*d));
+    }
+    worst
 }
 
 /// Bisection steps of the stub length (`λ` resolution < 3 nm on a board).
@@ -2876,7 +2926,7 @@ fn route_pass(
         let mut tmap: BTreeMap<(u32, (u64, u64), i32), TerminalObstacle> = BTreeMap::new();
         for c in &live {
             for t in [&c.from, &c.to] {
-                if let (TermKind::Copper(_) | TermKind::Dangling(_), Some(&layer)) =
+                if let (TermKind::Copper(_) | TermKind::Dangling(..), Some(&layer)) =
                     (&t.kind, t.layers.first())
                 {
                     let e = tmap.entry((layer, bits(t.at), c.net)).or_insert_with(|| {
@@ -2982,7 +3032,7 @@ fn route_pass(
                                 owner: t.label.clone(),
                                 clr: (c.clearance as f64).max(model.rules.min_clearance as f64),
                                 r: match t.kind {
-                                    TermKind::Copper(_) | TermKind::Dangling(_) => {
+                                    TermKind::Copper(_) | TermKind::Dangling(..) => {
                                         0.5 * c.width as f64
                                     }
                                     _ => 0.0,
@@ -3544,6 +3594,7 @@ fn route_pass(
                             rep.pattern = o.pattern.clone();
                             rep.anchors = o.anchors;
                             rep.crossings = o.crossings;
+                            rep.g1_angle_deg = o.g1;
                             total_len += o.len;
                             out_total += o.out;
                             items.extend(o.items.iter().cloned());

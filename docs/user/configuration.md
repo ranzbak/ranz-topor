@@ -85,7 +85,7 @@ Path search tuning.
 | `zero_slack_failed` | bool | `true` |  | true\|false | The zero-slack pass also tries connections that failed, before any length gain of routed ones (a connection whose only corridor is pinched below the margin still gets its attempt). *Since 0.5.0.* |
 | `exit_stubs` | str | `"auto"` |  | auto\|all\|off | Pad exit stubs for fine-pitch pads: auto, all or off. *Since 0.5.0.* |
 | `steiner` | bool | `true` |  | true\|false | Allow same-net T-junctions in the middle of a track instead of only at pads. *Since 0.5.0.* |
-| `dangling_ends` | str | `"continue"` |  | continue\|drop | What to do with existing track ends that connect to nothing: continue them or drop them. *Since 0.5.0.* |
+| `dangling_ends` | str | `"continue"` |  | continue\|fixed\|drop | What to do with an existing track that ends at nothing (a hand-started trace): continue = the new copper leaves its end along the same direction (smooth, same width and layer); fixed = the end stays a fixed point and the new copper may leave at an angle; drop = remove that track and route from the pad. *Since 0.5.0.* |
 | `strict_unfit_edges` | bool | `false` |  | true\|false | Fail a connection when a graph edge is too narrow for its trace even when empty, instead of pricing the crossing as overuse (stricter; may leave tight boards incomplete). |
 | `pour_listed_via_goals` | bool | `false` |  | true\|false | A connection to a copper pour may end on a same-net via the pour already lists instead of always placing a new via (saves vias, may lengthen the trace). |
 

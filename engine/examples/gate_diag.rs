@@ -98,7 +98,7 @@ fn main() {
     let mut tmap: BTreeMap<(u32, (u64, u64), i32), TerminalObstacle> = BTreeMap::new();
     for c in &live {
         for t in [&c.from, &c.to] {
-            if let (TermKind::Copper(_) | TermKind::Dangling(_), Some(&layer)) =
+            if let (TermKind::Copper(_) | TermKind::Dangling(..), Some(&layer)) =
                 (&t.kind, t.layers.first())
             {
                 let e =
@@ -186,7 +186,7 @@ fn main() {
                             owner: t.label.clone(),
                             clr: (c.clearance as f64).max(model.rules.min_clearance as f64),
                             r: match t.kind {
-                                TermKind::Copper(_) | TermKind::Dangling(_) => 0.5 * c.width as f64,
+                                TermKind::Copper(_) | TermKind::Dangling(..) => 0.5 * c.width as f64,
                                 _ => 0.0,
                             },
                         },

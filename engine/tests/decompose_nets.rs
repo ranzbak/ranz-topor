@@ -359,7 +359,7 @@ fn dangling_end_is_a_terminal() {
     let d = decompose(&m, &Options::default(), &[0]);
     assert_eq!(d.connections.len(), 1);
     let c = &d.connections[0];
-    assert_eq!(c.from.kind, TermKind::Dangling("k1".into()));
+    assert_eq!(c.from.kind, TermKind::Dangling("k1".into(), Some([1.0, 0.0])));
     assert!((c.from.at.x - 5.0 * MM as f64).abs() < 1.0);
     assert!(matches!(terminal_of(&c.from), Terminal::Dangling { .. }));
 }

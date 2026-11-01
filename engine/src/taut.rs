@@ -80,7 +80,29 @@ pub trait Env {
     fn slot_side(&self, _a: usize) -> Option<Orient> {
         None
     }
+    /// G1 rail at the start terminal (A14): the chain leaves `start` along `dir`.
+    fn start_rail(&self) -> Option<Rail> {
+        None
+    }
+    /// G1 rail at the goal terminal (A14): the chain arrives at `goal` travelling along `dir`.
+    fn goal_rail(&self) -> Option<Rail> {
+        None
+    }
 }
+
+/// Tangent rail of a terminal (A14, design note `m4-capacity-steiner-design.md` §4): the chain
+/// touches the terminal tangent to `dir` on a disc of radius `r` (the chain's bend radius at the
+/// centreline, `w/2 + max(c, R_min)`), on the side the chain turns to. Used only when the
+/// straight bitangent would deviate from `dir` by more than [`RAIL_TOL_DEG`].
+#[derive(Clone, Copy, Debug)]
+pub struct Rail {
+    /// Unit travel direction at the terminal.
+    pub dir: Vec2,
+    pub r: f64,
+}
+
+/// A bitangent deviating from a rail's direction by less than this needs no rail disc, deg.
+pub const RAIL_TOL_DEG: f64 = 0.25;
 
 // ---------------------------------------------------------------------------------------------
 // geometry
@@ -172,34 +194,90 @@ pub fn chain_geometry(
         nodes.push(node(a, l.anchors[a.anchor].c, env.stack_radius(a)));
     }
     nodes.push(term(goal));
-    let mut segs = Vec::with_capacity(nodes.len() - 1);
-    for i in 0..nodes.len() - 1 {
-        match bt(&nodes[i], &nodes[i + 1]) {
-            Ok(s) => segs.push(s),
-            Err(GeomError::InsideObstacle) => {
-                let who = if i + 1 < nodes.len() - 1 { i } else { i - 1 };
-                let who = who.min(kept.len().saturating_sub(1));
-                return Err(TautError::InsideObstacle(
-                    kept.get(who)
-                        .map(|a| label(l, a.anchor))
-                        .unwrap_or_default(),
-                ));
+    let segs_of = |nodes: &[Node]| -> Result<Vec<Seg>, TautError> {
+        let mut segs = Vec::with_capacity(nodes.len() - 1);
+        for i in 0..nodes.len() - 1 {
+            match bt(&nodes[i], &nodes[i + 1]) {
+                Ok(s) => segs.push(s),
+                Err(GeomError::InsideObstacle) => {
+                    let who = if i + 1 < nodes.len() - 1 { i } else { i.saturating_sub(1) };
+                    let who = who.min(kept.len().saturating_sub(1));
+                    return Err(TautError::InsideObstacle(
+                        kept.get(who)
+                            .map(|a| label(l, a.anchor))
+                            .unwrap_or_default(),
+                    ));
+                }
+                Err(_) => {
+                    let n = |j: usize| -> String {
+                        if j == 0 {
+                            "start".into()
+                        } else if j == nodes.len() - 1 {
+                            "goal".into()
+                        } else {
+                            label(l, kept[j - 1].anchor)
+                        }
+                    };
+                    return Err(TautError::Infeasible(format!("{} <-> {}", n(i), n(i + 1))));
+                }
             }
-            Err(_) => {
-                let n = |j: usize| -> String {
-                    if j == 0 {
-                        "start".into()
-                    } else if j == nodes.len() - 1 {
-                        "goal".into()
-                    } else {
-                        label(l, kept[j - 1].anchor)
-                    }
-                };
-                return Err(TautError::Infeasible(format!("{} <-> {}", n(i), n(i + 1))));
+        }
+        Ok(segs)
+    };
+    let mut segs = segs_of(&nodes)?;
+    // G1 rails (A14): where the straight bitangent leaves / arrives off the hand direction, the
+    // terminal becomes a tangent disc on the side of the turn and the chain starts / ends with an
+    // arc on it.
+    let n = nodes.len();
+    let mut rails: [Option<(Vec2, Orient)>; 2] = [None, None];
+    if env.start_rail().is_some() || env.goal_rail().is_some() {
+        let tol = RAIL_TOL_DEG.to_radians().cos();
+        let disc = |p: Vec2, t: Vec2, side: Orient, r: f64| -> (Vec2, Node) {
+            let c = p + t.perp() * (side.sign() * r);
+            (
+                c,
+                Node {
+                    c: Circle { c, r },
+                    s: Some(side),
+                },
+            )
+        };
+        if let Some(rl) = env.start_rail() {
+            if let Some(e) = segs[0].dir() {
+                if e.dot(rl.dir) < tol {
+                    let side = if rl.dir.cross(e) >= 0.0 { Orient::Ccw } else { Orient::Cw };
+                    let (c, nd) = disc(start, rl.dir, side, rl.r);
+                    nodes[0] = nd;
+                    rails[0] = Some((c, side));
+                }
             }
+        }
+        if let Some(rl) = env.goal_rail() {
+            if let Some(e) = segs[n - 2].dir() {
+                if e.dot(rl.dir) < tol {
+                    let side = if e.cross(rl.dir) >= 0.0 { Orient::Ccw } else { Orient::Cw };
+                    let (c, nd) = disc(goal, rl.dir, side, rl.r);
+                    nodes[n - 1] = nd;
+                    rails[1] = Some((c, side));
+                }
+            }
+        }
+        if rails.iter().any(Option::is_some) {
+            segs = segs_of(&nodes).map_err(|e| match e {
+                TautError::InsideObstacle(w) | TautError::Infeasible(w) => {
+                    TautError::Infeasible(format!("g1 rail: {w}"))
+                }
+                e => e,
+            })?;
         }
     }
     let mut prims: Vec<Prim> = Vec::new();
+    if let Some((c, side)) = rails[0] {
+        let arc = Arc::from_tangent_points(c, nodes[0].c.r, side, start, segs[0].a);
+        if !is_zero_sweep(&arc) {
+            prims.push(Prim::Arc(arc));
+        }
+    }
     push_seg(&mut prims, segs[0]);
     for (i, a) in kept.iter().enumerate() {
         let arc = Arc::from_tangent_points(
@@ -215,6 +293,12 @@ pub fn chain_geometry(
         } else {
             prims.push(Prim::Arc(arc));
             prims.push(Prim::Seg(segs[i + 1]));
+        }
+    }
+    if let Some((c, side)) = rails[1] {
+        let arc = Arc::from_tangent_points(c, nodes[n - 1].c.r, side, segs[n - 2].b, goal);
+        if !is_zero_sweep(&arc) {
+            prims.push(Prim::Arc(arc));
         }
     }
     let length = prims.iter().map(|p| p.length()).sum();

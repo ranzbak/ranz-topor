@@ -30,7 +30,7 @@
 //! The single-layer entry points of M2 (`planar::search` & co) run the same core on one
 //! `RouteGraph` without sites; [`SlotPath::single_layer`] adapts their [`planar::PlanarPath`].
 
-use crate::decompose::Connection;
+use crate::decompose::{Connection, TermKind};
 use crate::geom::{point_seg, seg_arc, seg_seg, Aabb, Seg, Vec2};
 use crate::graph::{Port, RouteGraph};
 use crate::multigraph::MultiGraph;
@@ -712,6 +712,32 @@ struct Layered<'a> {
     ghost: bool,
     /// Expansions so far of the running `run` (statistics).
     exps: Cell<usize>,
+    /// A14 topology hint: root vertex `(layer, v)` of a continued dangling end -> the only face
+    /// the search may leave it through (the face the hand direction enters).
+    root_face: Vec<((usize, usize), usize)>,
+}
+
+/// The inside face around vertex `v` of `g` whose wedge at `v` contains direction `d` (a ray
+/// along an edge takes the first such face); `None` when the ray enters no inside face.
+/// O(deg v).
+fn ray_face(g: &RouteGraph, v: usize, d: Vec2) -> Option<usize> {
+    let at = g.verts[v].at;
+    g.faces_of_vertex(v).iter().copied().find(|&f| {
+        let face = &g.faces[f];
+        if !face.inside {
+            return false;
+        }
+        let o: Vec<Vec2> = face
+            .v
+            .iter()
+            .filter(|&&u| u != v)
+            .map(|&u| g.verts[u].at - at)
+            .collect();
+        let [pa, pb] = [o[0], o[1]];
+        let w = pa.cross(pb);
+        let tol = 1e-9 * w.abs();
+        w.signum() * pa.cross(d) >= -tol && w.signum() * d.cross(pb) >= -tol
+    })
 }
 
 fn other_dir(g: &RouteGraph, e: usize, f: usize) -> u8 {
@@ -719,6 +745,7 @@ fn other_dir(g: &RouteGraph, e: usize, f: usize) -> u8 {
 }
 
 impl<'a> Layered<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         env: &Env<'a>,
         hists: &[&'a [f64]],
@@ -727,6 +754,7 @@ impl<'a> Layered<'a> {
         goal: &'a Goal,
         p: &Common<'a>,
         ghost: bool,
+        hint: bool,
     ) -> Self {
         let mut ls: Vec<Search<'a>> = env
             .layers
@@ -795,6 +823,16 @@ impl<'a> Layered<'a> {
             .mg
             .map(|mg| via_sizes_baked(&mg.rules, conn.net))
             .unwrap_or_default();
+        let mut root_face = Vec::new();
+        if let (true, TermKind::Dangling(_, Some(d))) = (hint && !ghost, &conn.from.kind) {
+            if let Some(d) = (Vec2 { x: d[0], y: d[1] }).unit() {
+                for &(l, v) in start {
+                    if let Some(f) = ray_face(env.layers[l].0, v, d) {
+                        root_face.push(((l, v), f));
+                    }
+                }
+            }
+        }
         Layered {
             ls,
             mg: env.mg,
@@ -812,7 +850,28 @@ impl<'a> Layered<'a> {
             conn_id: conn.id,
             ghost,
             exps: Cell::new(0),
+            root_face,
         }
+    }
+
+    /// A14: a root vertex with a topology hint may only be left through its hinted face.
+    fn root_allows(&self, root: bool, layer: usize, v: usize, f: usize) -> bool {
+        !root
+            || self
+                .root_face
+                .iter()
+                .find(|(k, _)| *k == (layer, v))
+                .is_none_or(|&(_, hf)| hf == f)
+    }
+
+    /// A14: leaving a hinted root through its hinted face, the first crossing is the edge
+    /// opposite the root (the edge the hand direction exits the face through).
+    fn root_edge_allows(&self, root: bool, layer: usize, v: usize, f: usize, e: usize) -> bool {
+        if !root || !self.root_face.iter().any(|(k, _)| *k == (layer, v)) {
+            return true;
+        }
+        let face = &self.ls[layer].g.faces[f];
+        face.v.iter().position(|&u| u == v).is_some_and(|i| face.e[i] == e)
     }
 
     /// Goal point nearest to `p` (`p` itself when there is no goal). O(|goal vertices|).
@@ -1107,7 +1166,7 @@ impl<'a> Layered<'a> {
     fn leave_vertex(&self, st: &mut State, parent: usize, layer: usize, v: usize, root: bool) {
         let g = self.ls[layer].g;
         for &f in g.faces_of_vertex(v) {
-            if !g.faces[f].inside {
+            if !g.faces[f].inside || !self.root_allows(root, layer, v, f) {
                 continue;
             }
             let cyc = Cyc::new(g, f);
@@ -1115,7 +1174,8 @@ impl<'a> Layered<'a> {
             let p0 = cyc.vertex_pos(v).unwrap_or(0);
             for &e_out in &g.faces[f].e {
                 let dir = other_dir(g, e_out, f);
-                if !g.passable(e_out, self.net) {
+                if !g.passable(e_out, self.net) || !self.root_edge_allows(root, layer, v, f, e_out)
+                {
                     continue;
                 }
                 let ge = &g.edges[e_out];
@@ -2621,6 +2681,25 @@ fn search_in(
     goal: &Goal,
     p: &Common,
 ) -> SearchOutcome {
+    let hinted = matches!(conn.from.kind, TermKind::Dangling(_, Some(_)));
+    let out = search_in_h(env, hists, conn, start, goal, p, hinted);
+    // A14: the hand direction is a preference of the topology, not a requirement: when the
+    // hinted face leaves no path, search without it (the G1 rail still holds the direction).
+    if hinted && matches!(out, SearchOutcome::Blocked { .. }) {
+        return search_in_h(env, hists, conn, start, goal, p, false);
+    }
+    out
+}
+
+fn search_in_h(
+    env: &Env,
+    hists: &[&[f64]],
+    conn: &Connection,
+    start: &[(usize, usize)],
+    goal: &Goal,
+    p: &Common,
+    hint: bool,
+) -> SearchOutcome {
     if crate::control::expired(p.deadline) {
         return SearchOutcome::Timeout;
     }
@@ -2633,7 +2712,7 @@ fn search_in(
             static_reason: Some(reason),
         };
     }
-    let lay = Layered::new(env, hists, conn, start, goal, p, false);
+    let lay = Layered::new(env, hists, conn, start, goal, p, false, hint);
     if let Some(d) = find_direct(&lay) {
         return SearchOutcome::Found(d);
     }
@@ -2913,7 +2992,7 @@ impl<'a> Layered<'a> {
     fn tleave_vertex(&self, st: &mut TState, parent: usize, layer: usize, v: usize, root: bool) {
         let g = self.ls[layer].g;
         for &f in g.faces_of_vertex(v) {
-            if !g.faces[f].inside {
+            if !g.faces[f].inside || !self.root_allows(root, layer, v, f) {
                 continue;
             }
             for &e_out in &g.faces[f].e {
@@ -3144,7 +3223,7 @@ fn ghost_in(
     if static_block(env, conn, start, goal).is_some() {
         return None;
     }
-    let lay = Layered::new(env, hists, conn, start, goal, p, true);
+    let lay = Layered::new(env, hists, conn, start, goal, p, true, false);
     let cap = cap_of(&env.graphs(), env.sites(), true);
     let Run::Found(mut path) = lay.run_timed(cap, p.deadline) else {
         return None;

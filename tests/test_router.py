@@ -358,3 +358,26 @@ def test_progress_options_and_names_are_pure_helpers():
     assert progress.progress_png_name("D", "m3", "T4", "x") == "D-m3-T4.png"
     assert progress.progress_png_name("D", "m1", "T1") == "D-m1-T1.png"
     assert progress.progress_png_name("D", "m4", "A0") == "D-m4-A0.png"
+
+
+def test_bench_dangling_fixture_g1(engine, tmp_path):
+    """A14: the hand-started SIG track of the fixture ends in the open; the router continues it with the
+    same width and layer, leaving the end within 1 degree of the hand direction, and keeps the hand copper."""
+    pcb = make_fixture_board(tmp_path / "dg" / "fixture.kicad_pcb", dangling_trace=True, locked_track=False,
+                             arc=False, zone=False)
+    pro = write_project_file(pcb, rules={}, classes=[])
+    pc = ProjectCopy(pcb=pcb, pro=pro, dru=None, src_hashes={})
+    m = _export(pc)
+    sig = _code(m, "SIG")
+    assert [d for d in m["dangling_ends"] if d["net"] == sig and d["end"] == [22 * MM, int(26.5 * MM)]]
+    r = bench.run_bench("fixture", tmp_path / "o", router=route_router, rip="none", pcb_override=pcb,
+                        options={"wall_clock_s": 30})
+    conns = [c for c in r["router_report"]["connections"] if c["from"]["kind"] == "dangling"]
+    assert len(conns) == 1 and conns[0]["status"] == "routed", r["router_report"]["connections"]
+    assert conns[0]["g1_angle_deg"] is not None and conns[0]["g1_angle_deg"] <= 1.0
+    assert r["routed_drc"]["routing_new"] == 0
+    # fixed mode (M3): no G1 promise
+    rf = bench.run_bench("fixture", tmp_path / "of", router=route_router, rip="none", pcb_override=pcb,
+                         options={"wall_clock_s": 30, "dangling_ends": "fixed"})
+    cf = [c for c in rf["router_report"]["connections"] if "dangling" in (c["from"]["kind"], c["to"]["kind"])]
+    assert cf and cf[0]["g1_angle_deg"] is None

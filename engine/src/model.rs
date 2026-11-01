@@ -759,6 +759,13 @@ pub struct Options {
     /// ones: a connection whose only corridor is pinched below ε gets its margin-0 attempt even
     /// when the negotiation never routed it at ε. Off = M3 (routed connections only).
     pub zero_slack_failed: bool,
+    /// Router (A14, `topor.toml [search] dangling_ends`): what a connection that starts at the free
+    /// end of a hand-started track does. `"continue"` (default): the new copper leaves the end
+    /// along the hand direction (G1, `g1_angle_deg <= 1`); `"fixed"`: M3 behaviour, the end is
+    /// a fixed point and the new copper may leave at any angle; `"drop"`: the plugin rips the
+    /// dangling stubs of the nets in scope before the run (the engine then sees none and routes
+    /// from the pads; for the engine it behaves like `"fixed"`).
+    pub dangling_ends: String,
     /// Router (D-1, `topor.toml [search] strict_unfit_edges`): the layered search rejects a
     /// graph edge that is too narrow for the connection's trace even when empty
     /// (`!fits(e)`) instead of pricing it as an overuse crossing. Off by default (the default
@@ -853,6 +860,7 @@ impl Default for Options {
             drc_spots: Vec::new(),
             zero_slack_retry: true,
             zero_slack_failed: true,
+            dangling_ends: "continue".into(),
             strict_unfit_edges: false,
             pour_listed_via_goals: false,
             via_cost_nm: 2_000_000,

@@ -11,7 +11,7 @@ use crate::model::Options;
 use crate::obstacle::{LayerObstacles, ObsKind, ObstacleSet};
 use crate::sketch::Sketch;
 use crate::taut::{
-    arc_members, corridor_obstacles, tauten, AnchorRef, Chain, DynObstacle, Env, TautError,
+    arc_members, corridor_obstacles, tauten, AnchorRef, Chain, DynObstacle, Env, Rail, TautError,
 };
 use crate::wires::Wire;
 use std::collections::{BTreeSet, HashMap};
@@ -464,6 +464,32 @@ impl Env for WireEnv<'_> {
     }
     fn slot_side(&self, a: usize) -> Option<Orient> {
         self.stacks.slot_side(self.k, a)
+    }
+    fn start_rail(&self) -> Option<Rail> {
+        self.rail(&self.wires[self.k].start, 1.0)
+    }
+    fn goal_rail(&self) -> Option<Rail> {
+        self.rail(&self.wires[self.k].goal, -1.0)
+    }
+}
+
+impl WireEnv<'_> {
+    /// G1 rail (A14) of a continued dangling terminal: bend radius `w/2 + c` (the net's
+    /// clearance) at the centreline. `sign` = +1 leaving (start), -1 arriving (goal: the chain
+    /// travels against the hand direction). O(1).
+    fn rail(&self, t: &crate::wires::Terminal, sign: f64) -> Option<Rail> {
+        let crate::wires::Terminal::Dangling {
+            direction: Some(d), ..
+        } = t
+        else {
+            return None;
+        };
+        let w = &self.wires[self.k];
+        let c = self.obs.clearance(w.net, ObsKind::Track, w.net, 0.0);
+        Some(Rail {
+            dir: d.unit()? * sign,
+            r: 0.5 * w.width as f64 + c,
+        })
     }
 }
 
