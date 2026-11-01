@@ -339,11 +339,13 @@ def test_progress_m4_name_and_caption_lines(engine, fixture_board, tmp_path):
     assert stop, "the engine reports a stop_reason"
     assert lines[-1] == f"stop_reason: {stop}"  # the last caption line
     assert lines[0].startswith("A0: ") and lines[1].startswith("DRC routing ")
-    # bench columns of the result: detour (reference) is empty until A7, ghost stats and vias/net
+    # bench columns of the result: detour (DRC-feasible reference, A7), detour_ghost, stop_reason and vias/net
     cols = res["columns"]
     assert set(cols) == {"detour", "detour_ghost", "stop_reason", "vias_per_net"}
-    assert cols["detour"] is None and cols["stop_reason"] == stop
-    assert cols["detour_ghost"] == res["detour"]
+    assert cols["stop_reason"] == stop
+    assert {"median", "p90", "max", "count_gt_1_5"} <= set(cols["detour"]), cols["detour"]  # A7: filled, not None
+    assert cols["detour"] == res["detour"] and cols["detour_ghost"] == res["detour_ghost"]  # A7: res["detour"] = reference
+    assert cols["detour"]["field"] == "ref_len_nm" and cols["detour_ghost"]["field"] == "ghost_len_nm"
 
 
 def test_progress_options_and_names_are_pure_helpers():

@@ -113,18 +113,26 @@ def _consumers() -> str:
 
 
 def test_keys_without_effect_say_so():
-    """Ruling C34 / F I-7: a live key that 0.4.0 does not apply keeps its key, and its doc string (rendered into
-    topor.toml and configuration.md) ends with the no-effect marker or the precise partial statement."""
+    """Ruling C34 / F I-7: a live key that the running version does not apply keeps its key, and its doc string
+    (rendered into topor.toml and configuration.md) ends with the no-effect marker; a key that is applied carries
+    no marker. After A9 / A7 every formerly no-effect key is live, so the marked set is empty; the rule stays
+    checked: marked set == the keys with no consumer (no engine field, never read in plugin/ or toporlib/)."""
     by = schema.SETTINGS_BY_KEY
-    for k in ():  # A9 / A7: pour_served, priority, ignore_pads, detour_reference are applied now
+    src = _consumers()
+    marked = {k for k, s in by.items() if NO_EFFECT in s.doc}
+    consumerless = {k for k, s in by.items()
+                    if not s.engine_field and schema.available(s) and s.section != "layers"
+                    and f'"{s.key}"' not in src}
+    assert marked == consumerless, f"marked without effect != no consumer: {sorted(marked ^ consumerless)}"
+    for k in marked:
         assert by[k].doc.endswith(NO_EFFECT), (k, by[k].doc)
-        assert schema.available(by[k])  # stays a live key: a user's value carries into 0.5.0
+        assert schema.available(by[k])  # stays a live key: a user's value carries into the next version
     for k, words in PARTIAL.items():
         last = by[k].doc.rsplit("(", 1)[-1]
         assert "0.4.0" in last and words in last and by[k].doc.endswith(".)"), (k, by[k].doc)
     md = (ROOT / "docs/user/configuration.md").read_text()
     text = render_toml(Config.defaults())
-    assert md.count(NO_EFFECT) >= 1 and text.count(NO_EFFECT) >= 1
+    assert md.count(NO_EFFECT) == len(marked) and text.count(NO_EFFECT) == len(marked)
     assert "detour_reference" in md and "No effect in 0.4.0; applied from 0.5.0.) |" not in md.split("`detour_reference`")[1].split("\n")[0]
 
 
