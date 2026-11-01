@@ -94,6 +94,12 @@ def test_engine_options_units(tmp_path):
     assert o["expert"]["relax_iter_cap"] == 200
     assert o["drc_loop_cap"] == 5
     assert o["ripup_growth"] == 1.25 and o["ripup_max_per_pair"] == 8
+    assert o["plane_vias"] is True and o["plane_via_max_nm"] == 1_000_000
+    # every engine length field (…_nm) gets an int: the engine's serde refuses a float for an i64
+    for s in schema.SETTINGS:
+        if s.engine_field and s.engine_field.endswith("_nm") and s.engine_field in o:
+            v = o[s.engine_field]
+            assert all(isinstance(x, int) for x in v) if isinstance(v, list) else isinstance(v, int), s.key
     assert o["patience"] == 5 and o["min_gain_pct"] == 1.0
     assert o["detour_factor"] == 2.0
     # M4a-only settings are not sent to the engine yet
