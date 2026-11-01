@@ -1977,14 +1977,22 @@ fn zero_slack_pass(
     // Candidates: margin-0 searches over the routed connections (a detoured one with the other
     // detoured ones absent; any other with its own path taken out and put back).
     let mut cands: Vec<(f64, usize, SlotPath)> = Vec::new();
-    for i in (0..m).filter(|&i| ok(i)) {
-        let Some(old) = best.paths[i].as_ref().map(|p| p.est_len) else {
-            continue;
+    // A4 (`Options.zero_slack_failed`): a connection that failed (not permanently) is a
+    // candidate too, ahead of every length gain (it routes one more): its only corridor may be
+    // the one pinched below ε (eprom F.Cu: +5V along the top edge).
+    let failed = |i: usize| {
+        cx.opts.zero_slack_failed && matches!(best.res[i], Res::Fail { perm: false, .. })
+    };
+    for i in (0..m).filter(|&i| ok(i) || failed(i)) {
+        let old = match best.paths[i].as_ref() {
+            Some(p) if ok(i) => p.est_len,
+            _ if !ok(i) => f64::INFINITY,
+            _ => continue,
         };
         if cx.stop() {
             return Err(ZS_DEADLINE.into());
         }
-        let out = if detoured.contains(&i) {
+        let out = if detoured.contains(&i) || (!ok(i) && mg.take_path(i).is_none()) {
             search(
                 &mg,
                 obs,
@@ -2011,7 +2019,11 @@ fn zero_slack_pass(
         };
         match out {
             SearchOutcome::Found(p) => {
-                let gain = old - p.est_len;
+                let gain = if old.is_finite() {
+                    old - p.est_len
+                } else {
+                    f64::MAX
+                };
                 if gain > ZS_GAIN_MIN_NM && p.legs.len() == 1 && p.sites.is_empty() {
                     cands.push((gain, i, p));
                 }
@@ -2104,7 +2116,9 @@ fn zero_slack_attempt<'a>(
             SearchOutcome::Timeout => return Err(ZS_DEADLINE.into()),
         }
     }
-    let routed: Vec<usize> = (0..m).filter(|&i| paths[i].is_some() && ok(i)).collect();
+    let routed: Vec<usize> = (0..m)
+        .filter(|&i| paths[i].is_some() && (ok(i) || i == c))
+        .collect();
     let res_of = |mt: &Metrized, i: usize| -> Option<Res> {
         mt.res.iter().find(|(j, _)| *j == i).map(|(_, r)| r.clone())
     };
@@ -2914,6 +2928,11 @@ fn route_pass(
         match MultiGraph::build_on(model, &mut obs, sites, &routable, &terms, &rules) {
             Err(e) => setup_fail = Some(format!("sketch: {e}")),
             Ok(mut mg) => {
+                mg.set_capacity_mode(crate::graph::CapacityMode {
+                    own_net: opts.expert.own_net_capacity,
+                    wall_aware: opts.expert.wall_aware_capacity,
+                    transit: opts.expert.transit_pinch,
+                });
                 if let Some(reach) = reach {
                     for s in 0..mg.sites.len() {
                         let at = mg.sites[s].at;

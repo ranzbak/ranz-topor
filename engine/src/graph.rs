@@ -16,6 +16,14 @@ use std::collections::{BTreeMap, HashMap};
 /// Cell size (nm) of the vertex grid.
 const VERT_CELL: f64 = 5_000_000.0;
 
+/// Largest chord sagitta (nm) of the pieces an arc wall is split into by the wall term (the
+/// sagitta is added to the blocking radius, so the split is conservative).
+const ARC_SAG_NM: f64 = 10_000.0;
+
+/// A wall whose core passes this close (nm) to a vertex's centre belongs to that vertex's
+/// item (or is the wall a split vertex lies on): the transit pinch skips it.
+const TOUCH_NM: f64 = 1_000.0;
+
 #[derive(Clone, Debug)]
 pub struct VertexInfo {
     pub at: Vec2,
@@ -55,6 +63,8 @@ pub struct GEdge {
     pub owner_nets: Vec<i32>,
     pub cap: f64,
     pub c_e: f64,
+    /// `|ab|` (centre to centre), the `L` of the own-net capacity rule ([`RouteGraph::fits_for`]).
+    pub len: f64,
     /// `[a, b]` is a free (dormant via-site) vertex: nothing is there to keep clear of, so the
     /// end gap of that side is 0 in [`RouteGraph::fits_at`], [`RouteGraph::overuse`] and the
     /// static fit of the search (M3).
@@ -75,6 +85,134 @@ impl GEdge {
 /// A dormant via-site vertex: no copper, no clearance (`set_site(None)`).
 fn is_free(v: &VertexInfo) -> bool {
     v.site.is_some() && v.owner.is_none()
+}
+
+/// Net of a strand whose connection never told the graph its net (plain `insert`,
+/// `insert_path` without a net): never equal to a connection's net, so it is always charged
+/// as a foreign strand (M3 behaviour).
+pub const UNKNOWN_NET: i32 = i32::MIN;
+
+/// Which capacity rule [`RouteGraph::fits_for`] / [`RouteGraph::overuse`] apply (M4-D1,
+/// `topor.toml [expert] own_net_capacity` / `wall_aware_capacity`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapacityMode {
+    /// Own-net ends charge no gap and give the core radius back; same-net strands charge no
+    /// gap between each other. `false` = the net-blind M3 rule ([`RouteGraph::fits_at`]).
+    pub own_net: bool,
+    /// With an own end, foreign walls that are not edge ends (outline, keepouts, long pad
+    /// sides) remove the part of the edge they block (`W_n(e)`). `false` = the withdrawn F6
+    /// behaviour (outline-wall corridors accepted, taut fails).
+    pub wall_aware: bool,
+    /// Transit pinch ([`RouteGraph::transit_fits`]): a face transit around a vertex that a
+    /// foreign wall pinches inside the face's wedge (a via next to the board edge, whose
+    /// edges reach only the outline corners) is refused by the slot search, where taut would
+    /// report the wall grazed mid-span.
+    pub transit: bool,
+}
+
+impl Default for CapacityMode {
+    fn default() -> Self {
+        CapacityMode {
+            own_net: true,
+            wall_aware: true,
+            transit: true,
+        }
+    }
+}
+
+/// The parts of a wall the wall term of the capacity rule needs (copied from
+/// `LayerObstacles.walls` at build: walls are static for the life of a graph).
+#[derive(Clone, Debug)]
+struct WallLite {
+    core: crate::obstacle::Core,
+    r_core: f64,
+    kind: ObsKind,
+    own_clr: f64,
+    net: i32,
+    tie_nets: Vec<i32>,
+    /// `only_nets` of the wall's first end anchor (DRC spots; empty = every net).
+    only_nets: Vec<i32>,
+    /// Anchor indices of the wall's two ends.
+    ends: [usize; 2],
+}
+
+/// Per edge, the wall candidates of the wall term (design note §1 `walls_near`): walls whose
+/// core box meets the edge's box grown by the vertex radius bound and the obstacle query
+/// reach (the wall term skips the walls ending at `a` or `b`; the transit pinch uses them).
+/// CSR layout, sorted per edge, static; shared between graph clones.
+#[derive(Debug, Default)]
+struct WallsNear {
+    walls: Vec<WallLite>,
+    /// `idx[start[e]..start[e + 1]]` are the wall indices of edge `e`.
+    start: Vec<u32>,
+    idx: Vec<u32>,
+}
+
+/// End terms and demand of the own-net capacity rule for one new strand on one edge (see
+/// [`RouteGraph::fit_parts`]). Parameters are along `a -> b`, `0` at `a`, `len` at `b`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FitParts {
+    /// Usable sub-segment `[E_a - K_a, L - E_b + K_b]`.
+    pub lo: f64,
+    pub hi: f64,
+    /// `Σ_x (w_x + ε + g(x)) + w + ε`.
+    pub need: f64,
+    /// An own end gave its gap (and radius) back: the wall term applies.
+    pub wall: bool,
+    /// Connection clearance the wall term charges: `max(c, c_x)` over the new and the
+    /// existing strands (each strand of the stack keeps its clearance to the walls).
+    pub c_wall: f64,
+}
+
+/// Blocked parameter interval of the line `p + u t` against the stadium of radius `rr` around
+/// the segment `s0 s1` (a disc when `s0 == s1`): the stadium is convex, so its intersection
+/// with the line is the hull of the end-disc and band intersections. `None` when disjoint. O(1).
+fn stadium_interval(p: Vec2, u: Vec2, s0: Vec2, s1: Vec2, rr: f64) -> Option<(f64, f64)> {
+    let disc = |q: Vec2| -> Option<(f64, f64)> {
+        let d = p - q;
+        let b = d.dot(u);
+        let disc = b * b - d.len2() + rr * rr;
+        (disc > 0.0).then(|| {
+            let s = disc.sqrt();
+            (-b - s, -b + s)
+        })
+    };
+    let mut out: Option<(f64, f64)> = None;
+    let mut add = |iv: Option<(f64, f64)>| {
+        if let Some((a, b)) = iv {
+            out = Some(match out {
+                None => (a, b),
+                Some((x, y)) => (x.min(a), y.max(b)),
+            });
+        }
+    };
+    add(disc(s0));
+    let sv = s1 - s0;
+    let ls = sv.len();
+    if ls > 0.0 {
+        add(disc(s1));
+        let v = sv * (1.0 / ls);
+        let n = v.perp();
+        // f(t) = f0 + f1 t inside (lo, hi): the t-interval (all / nothing when f1 ~ 0)
+        let clip = |f0: f64, f1: f64, lo: f64, hi: f64| -> Option<(f64, f64)> {
+            if f1.abs() < 1e-12 {
+                return (f0 > lo && f0 < hi).then_some((f64::NEG_INFINITY, f64::INFINITY));
+            }
+            let (t0, t1) = ((lo - f0) / f1, (hi - f0) / f1);
+            Some((t0.min(t1), t0.max(t1)))
+        };
+        let d = p - s0;
+        if let (Some(x), Some(y)) = (
+            clip(d.dot(n), u.dot(n), -rr, rr),
+            clip(d.dot(v), u.dot(v), 0.0, ls),
+        ) {
+            let (a, b) = (x.0.max(y.0), x.1.min(y.1));
+            if a < b {
+                add(Some((a, b)));
+            }
+        }
+    }
+    out
 }
 
 #[derive(Clone, Debug)]
@@ -168,6 +306,14 @@ pub struct RouteGraph {
     pub edge_version: Vec<u64>,
     /// Version counter of this layer graph (`edge_version` values are `<= clock`).
     pub clock: u64,
+    /// Capacity rule (M4-D1); default own-net + wall-aware + transit pinch.
+    pub cap_mode: CapacityMode,
+    /// Per strand id (the `conn` of `insert_path` / `insert`): its net, [`UNKNOWN_NET`] when the
+    /// caller did not give one.
+    strand_net: Vec<i32>,
+    /// Wall candidates of the wall term and the transit pinch, per edge (static, shared
+    /// between clones).
+    walls_near: std::sync::Arc<WallsNear>,
 }
 
 fn key(p: Vec2) -> (u64, u64) {
@@ -375,6 +521,55 @@ fn face_clearance(
     (inc, cv, cw, fw)
 }
 
+/// `walls_near` of every edge: one wall-grid query per edge with the edge's box grown by the larger end radius (the usable
+/// sub-segment reaches past an own end) plus twice `obs.query_grow()` (a bound on every wall's
+/// `rho - r_core` for any connection, twice for the transit pinch: vertex gap + width + wall
+/// clearance). `O(E · q)`; sorted per edge.
+fn walls_near(obs: &LayerObstacles, verts: &[VertexInfo], edges: &[GEdge]) -> WallsNear {
+    let walls: Vec<WallLite> = obs
+        .walls
+        .iter()
+        .map(|w| WallLite {
+            core: w.core.clone(),
+            r_core: w.r_core,
+            kind: w.kind,
+            own_clr: w.own_clr,
+            net: w.net,
+            tie_nets: w.tie_nets.clone(),
+            only_nets: obs
+                .anchors
+                .get(w.ends[0])
+                .map(|a| a.only_nets.clone())
+                .unwrap_or_default(),
+            ends: w.ends,
+        })
+        .collect();
+    let grow = obs.query_grow();
+    let mut start = Vec::with_capacity(edges.len() + 1);
+    let mut idx: Vec<u32> = Vec::new();
+    for ge in edges {
+        start.push(idx.len() as u32);
+        let (va, vb) = (&verts[ge.a], &verts[ge.b]);
+        let ext = |v: &VertexInfo| {
+            v.anchor
+                .and_then(|ai| obs.anchors.get(ai))
+                .map_or(v.r, |a| a.r_core.max(v.r))
+        };
+        let bb = Aabb {
+            min: va.at,
+            max: va.at,
+        }
+        .union(&Aabb {
+            min: vb.at,
+            max: vb.at,
+        })
+        .grow(ext(va).max(ext(vb)) + 2.0 * grow);
+        idx.extend(obs.query_walls(bb).into_iter().map(|wi| wi as u32));
+    }
+    start.push(idx.len() as u32);
+    WallsNear { walls, start, idx }
+}
+
 impl RouteGraph {
     pub fn build(
         ls: &LayerSketch,
@@ -471,6 +666,7 @@ impl RouteGraph {
                 owner_nets,
                 cap: (pb.at - pa.at).len() - pa.r - pb.r,
                 c_e: pa.clr.max(pb.clr),
+                len: (pb.at - pa.at).len(),
                 free: [is_free(pa), is_free(pb)],
                 cross: Vec::new(),
                 along: None,
@@ -509,6 +705,7 @@ impl RouteGraph {
             &faces_of_vertex,
             rho_max,
         );
+        let walls_near = std::sync::Arc::new(walls_near(obs, &verts, &edges));
         RouteGraph {
             verts,
             edges,
@@ -526,6 +723,9 @@ impl RouteGraph {
             rho_max,
             edge_version: vec![0; nedges],
             clock: 0,
+            cap_mode: CapacityMode::default(),
+            strand_net: Vec::new(),
+            walls_near,
         }
     }
 
@@ -661,8 +861,436 @@ impl RouteGraph {
         used + w + eps + g.end_gaps() as f64 * c.max(g.c_e) <= g.cap
     }
 
-    /// `(need_all - cap).max(0)`.
+    /// Net of strand `conn` ([`UNKNOWN_NET`] when never given). O(1).
+    pub fn strand_net(&self, conn: usize) -> i32 {
+        self.strand_net.get(conn).copied().unwrap_or(UNKNOWN_NET)
+    }
+
+    /// `net` is one of the nets of vertex `v` (anchor net or tie net; an owned via site's
+    /// net). A dormant site and an unowned vertex have no nets. O(log nets).
+    pub fn is_own(&self, v: usize, net: i32) -> bool {
+        net != UNKNOWN_NET && self.verts[v].nets.binary_search(&net).is_ok()
+    }
+
+    /// End terms and demand of the own-net capacity rule (design note
+    /// `m4-capacity-steiner-design.md` §1) for a new strand of net `net`, width `w`, clearance
+    /// `c` on edge `e`, at margin `eps`:
+    ///
+    /// - `E_v = 0` for a free end and for an own end with no foreign strand on `e`;
+    ///   `r_v + max_x max(c_x, c_e)` for an own end with foreign strands `x`; `r_v + max(c, c_e)`
+    ///   for any other end (the M3 end term);
+    /// - `K_v = min(r_v, w_min / 2)` for an own end with `E_v = 0` (the strand may run over the
+    ///   own core, but its centreline must cross the segment, so its copper reaches at most half
+    ///   the narrowest strand's width past the vertex; design note: `r_v`, equal whenever
+    ///   `r_v <= w/2`);
+    /// - `g(x) = 0` for a same-net strand, else `max(c_x, c)`.
+    ///
+    /// `lo = E_a - K_a`, `hi = L - E_b + K_b`, `need = Σ_x (w_x + ε + g(x)) + w + ε`; `wall`
+    /// iff an own end has `E_v = 0` (the wall term then applies). With no own end and no
+    /// same-net strand `hi - lo - need` equals the M3 slack. O(n_max).
+    pub fn fit_parts(&self, e: usize, net: i32, w: f64, c: f64, eps: f64) -> FitParts {
+        self.fit_parts_of(e, net, w, c, eps, &self.edges[e].cross)
+    }
+
+    /// [`RouteGraph::fit_parts`] of the empty edge (no strand). O(1).
+    pub fn fit_parts_empty(&self, e: usize, net: i32, w: f64, c: f64, eps: f64) -> FitParts {
+        self.fit_parts_of(e, net, w, c, eps, &[])
+    }
+
+    fn fit_parts_of(
+        &self,
+        e: usize,
+        net: i32,
+        w: f64,
+        c: f64,
+        eps: f64,
+        cross: &[CrossEntry],
+    ) -> FitParts {
+        let g = &self.edges[e];
+        let mut need = w + eps;
+        for x in cross {
+            need += x.width + eps;
+            if self.strand_net(x.conn) != net || net == UNKNOWN_NET {
+                need += x.clr.max(c);
+            }
+        }
+        // The copper of the strand next to an own end reaches at most half its width past the
+        // vertex (its centreline must cross the segment `ab`): `K_v = min(r_v, w_min / 2)`.
+        let half = cross.iter().map(|x| x.width).fold(w, f64::min) * 0.5;
+        let mut wall = false;
+        let mut end = |v: usize, free: bool| -> (f64, f64) {
+            if free {
+                return (0.0, 0.0);
+            }
+            let vi = &self.verts[v];
+            if self.is_own(v, net) {
+                let foreign_gap = cross
+                    .iter()
+                    .filter(|x| !self.is_own(v, self.strand_net(x.conn)))
+                    .map(|x| x.clr.max(g.c_e))
+                    .fold(None, |m: Option<f64>, x| Some(m.map_or(x, |m| m.max(x))));
+                match foreign_gap {
+                    Some(gap) => (vi.r + gap, 0.0),
+                    None => {
+                        wall = true;
+                        (0.0, vi.r.min(half))
+                    }
+                }
+            } else {
+                (vi.r + c.max(g.c_e), 0.0)
+            }
+        };
+        let (ea, ka) = end(g.a, g.free[0]);
+        let (eb, kb) = end(g.b, g.free[1]);
+        FitParts {
+            lo: ea - ka,
+            hi: g.len - eb + kb,
+            need,
+            wall,
+            c_wall: cross.iter().map(|x| x.clr).fold(c, f64::max),
+        }
+    }
+
+    /// Wall term of the capacity rule (design note §1 `W_n(e)`): the longest piece of `[lo,
+    /// hi]` (parameters along `a -> b`, copper extents like the end terms) that no foreign wall
+    /// of `walls_near(e)` keeps the copper of net `net`, clearance `c`, out of: a wall `W`
+    /// blocks `{t : dist(p(t), core(W)) < r_W + clr(W)}`. Deviation from the note (which
+    /// grows the blocked set by `w/2 + eps` and compares it with the copper demand `need`, so
+    /// counts the width twice: a 0.2 mm track out of a 0.25 mm pad tip at 0.5 mm pitch, 0.275
+    /// mm from each neighbour, came out unfit); `w` and `eps` are in `need` (`clr` as the
+    /// search's `wall_clearance`:
+    /// holes `hole_clearance`, edges `edge_clearance`, keepouts 0, else `max(own, c,
+    /// min_clearance)`); walls ending at the anchor of `a` or `b` (the end terms price them),
+    /// same-net / tie walls and DRC spots not listing the net are exempt; arcs are split into
+    /// chords whose sagitta is added to the radius (conservative). `hi - lo` when nothing
+    /// blocks. O(k log k), `k = |walls_near(e)|` (+ arc pieces).
+    pub fn wall_free_len(&self, e: usize, net: i32, c: f64, lo: f64, hi: f64) -> f64 {
+        use crate::obstacle::{Core, ObstacleSet};
+        if hi <= lo {
+            return 0.0;
+        }
+        let wn = &*self.walls_near;
+        let (Some(&s0), Some(&s1)) = (wn.start.get(e), wn.start.get(e + 1)) else {
+            return hi - lo;
+        };
+        let g = &self.edges[e];
+        let (pa, pb) = (self.verts[g.a].at, self.verts[g.b].at);
+        let Some(u) = (pb - pa).unit() else {
+            return hi - lo;
+        };
+        let r = &self.rules;
+        let ends = [self.verts[g.a].anchor, self.verts[g.b].anchor];
+        let mut blocked: Vec<(f64, f64)> = Vec::new();
+        for &wi in &wn.idx[s0 as usize..s1 as usize] {
+            let wl = &wn.walls[wi as usize];
+            if ObstacleSet::exempt(wl.net, &wl.tie_nets, net)
+                || (!wl.only_nets.is_empty() && !wl.only_nets.contains(&net))
+            {
+                continue;
+            }
+            let clr = match wl.kind {
+                ObsKind::Hole => r.hole_clearance,
+                ObsKind::Edge => r.edge_clearance,
+                ObsKind::Keepout => 0.0,
+                _ => wl.own_clr.max(c).max(r.min_clearance),
+            };
+            if wl.ends.iter().any(|&x| ends.contains(&Some(x))) {
+                continue;
+            }
+            let rr = wl.r_core + clr;
+            let mut push = |iv: Option<(f64, f64)>| {
+                if let Some((x, y)) = iv {
+                    let (x, y) = (x.max(lo), y.min(hi));
+                    if x < y {
+                        blocked.push((x, y));
+                    }
+                }
+            };
+            match &wl.core {
+                Core::Point(q) => push(stadium_interval(pa, u, *q, *q, rr)),
+                Core::Seg(s) => push(stadium_interval(pa, u, s.a, s.b, rr)),
+                Core::Arc(ar) => {
+                    for piece in ar.split_sagitta(ARC_SAG_NM) {
+                        let sag = piece.sagitta();
+                        push(stadium_interval(
+                            pa,
+                            u,
+                            piece.start(),
+                            piece.end(),
+                            rr + sag,
+                        ));
+                    }
+                }
+            }
+        }
+        if blocked.is_empty() {
+            return hi - lo;
+        }
+        blocked.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.total_cmp(&y.1)));
+        let (mut best, mut at) = (0.0f64, lo);
+        for (x, y) in blocked {
+            if x > at {
+                best = best.max(x - at);
+            }
+            at = at.max(y);
+        }
+        best.max(hi - at)
+    }
+
+    /// Transit pinch (`cap_mode.transit`): a strand that enters face `f` across
+    /// `e1` and leaves it across `e2` passes around their shared vertex `o`, inside the wedge of
+    /// `f` at `o`. A foreign wall whose core reaches into that wedge closer to `o` than `r_o +
+    /// gap_o + w + eps + r_W + clr(W)` leaves no room for the strand (eprom: a via 0.25 mm from
+    /// the board edge, where the vertex-only edge capacity sees only the outline corner 5 mm
+    /// away). `gap_o = max(c, clr_o)` (0 for a free vertex); an own `o` never pinches (the
+    /// strand may run over the own copper); walls touching `o`'s centre (its own item, the wall
+    /// a split vertex lies on) are skipped; same-net / tie walls exempt. Static (strands on the
+    /// edges are the edge capacity's business). Candidates: `walls_near(e1) ∪ walls_near(e2)`.
+    /// O(k), arcs split into chords (sagitta added).
+    #[allow(clippy::too_many_arguments)]
+    pub fn transit_fits(
+        &self,
+        f: usize,
+        e1: usize,
+        e2: usize,
+        net: i32,
+        w: f64,
+        c: f64,
+        eps: f64,
+    ) -> bool {
+        use crate::obstacle::{Core, ObstacleSet};
+        if !self.cap_mode.transit {
+            return true;
+        }
+        let (x, y) = (&self.edges[e1], &self.edges[e2]);
+        let Some(o) = [x.a, x.b].into_iter().find(|&v| v == y.a || v == y.b) else {
+            return true;
+        };
+        let ov = &self.verts[o];
+        let free = ov.site.is_some() && ov.owner.is_none();
+        if self.is_own(o, net) {
+            return true;
+        }
+        let other = |g: &GEdge| if g.a == o { g.b } else { g.a };
+        let (po, px, py) = (ov.at, self.verts[other(x)].at, self.verts[other(y)].at);
+        let (dx, dy) = (px - po, py - po);
+        let s = dx.cross(dy);
+        if s.abs() < 1e-9 || !self.faces[f].v.contains(&o) {
+            return true;
+        }
+        let sg = s.signum();
+        let gap = if free { 0.0 } else { c.max(ov.clr) };
+        let base = ov.r + gap + w + eps;
+        let r = &self.rules;
+        let wn = &*self.walls_near;
+        // distance from `o` to the part of segment `a b` inside the wedge (None: outside)
+        let wedge_dist = |a: Vec2, b: Vec2| -> Option<f64> {
+            let (mut t0, mut t1) = (0.0f64, 1.0f64);
+            for (n0, n1) in [
+                (sg * dx.cross(a - po), sg * dx.cross(b - po)),
+                (sg * (a - po).cross(dy), sg * (b - po).cross(dy)),
+            ] {
+                // keep n(t) = n0 + (n1 - n0) t >= 0
+                let dn = n1 - n0;
+                if dn.abs() < 1e-12 {
+                    if n0 < 0.0 {
+                        return None;
+                    }
+                } else {
+                    let t = -n0 / dn;
+                    if dn > 0.0 {
+                        t0 = t0.max(t);
+                    } else {
+                        t1 = t1.min(t);
+                    }
+                }
+            }
+            if t0 > t1 {
+                return None;
+            }
+            let (qa, qb) = (a + (b - a) * t0, a + (b - a) * t1);
+            Some(crate::geom::point_seg(
+                po,
+                &crate::geom::Seg { a: qa, b: qb },
+            ))
+        };
+        for &e in [e1, e2].iter() {
+            let (Some(&s0), Some(&s1)) = (wn.start.get(e), wn.start.get(e + 1)) else {
+                continue;
+            };
+            for &wi in &wn.idx[s0 as usize..s1 as usize] {
+                let wl = &wn.walls[wi as usize];
+                if ObstacleSet::exempt(wl.net, &wl.tie_nets, net)
+                    || (!wl.only_nets.is_empty() && !wl.only_nets.contains(&net))
+                {
+                    continue;
+                }
+                let clr = match wl.kind {
+                    ObsKind::Hole => r.hole_clearance,
+                    ObsKind::Edge => r.edge_clearance,
+                    ObsKind::Keepout => 0.0,
+                    _ => wl.own_clr.max(c).max(r.min_clearance),
+                };
+                let need = base + wl.r_core + clr;
+                let mut pieces: Vec<(Vec2, Vec2, f64)> = Vec::new();
+                match &wl.core {
+                    Core::Point(q) => pieces.push((*q, *q, 0.0)),
+                    Core::Seg(sg2) => pieces.push((sg2.a, sg2.b, 0.0)),
+                    Core::Arc(ar) => {
+                        for pc in ar.split_sagitta(ARC_SAG_NM) {
+                            pieces.push((pc.start(), pc.end(), pc.sagitta()));
+                        }
+                    }
+                }
+                // a wall through o's centre is o's own item (or the wall o is split on)
+                let touch = pieces.iter().any(|&(a, b, sag)| {
+                    crate::geom::point_seg(po, &crate::geom::Seg { a, b }) <= TOUCH_NM + sag
+                });
+                if touch {
+                    continue;
+                }
+                for &(a, b, sag) in &pieces {
+                    if let Some(d) = wedge_dist(a, b) {
+                        if d - sag < need {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// A further connection of net `net`, width `w`, clearance `c` still fits edge `e` under
+    /// the graph's capacity rule ([`RouteGraph::cap_mode`]), at the graph's margin. See
+    /// [`RouteGraph::fits_for_at`].
+    pub fn fits_for(&self, e: usize, net: i32, w: f64, c: f64) -> bool {
+        self.fits_for_at(e, net, w, c, self.rules.eps)
+    }
+
+    /// Own-net / same-net capacity, wall-aware (M4-D1, design note §1): `need <= hi - lo`
+    /// ([`RouteGraph::fit_parts`]) and, when an own end gave its gap back and `wall_aware` is
+    /// on, `need <=` the longest wall-free piece of `[lo, hi]`
+    /// ([`RouteGraph::wall_free_len`]). `own_net == false`: the net-blind M3 rule
+    /// ([`RouteGraph::fits_at`]). O(n_max + k log k).
+    pub fn fits_for_at(&self, e: usize, net: i32, w: f64, c: f64, eps: f64) -> bool {
+        self.fits_for_with(e, net, w, c, eps, |lo, hi, cw| {
+            self.wall_free_len(e, net, cw, lo, hi)
+        })
+    }
+
+    /// [`RouteGraph::fits_for_at`] with the wall term supplied by the caller (`wall(lo, hi,
+    /// c_wall)` = the longest wall-free piece; the search memoises it per edge). O(n_max) + the
+    /// closure.
+    pub fn fits_for_with(
+        &self,
+        e: usize,
+        net: i32,
+        w: f64,
+        c: f64,
+        eps: f64,
+        wall: impl FnOnce(f64, f64, f64) -> f64,
+    ) -> bool {
+        if !self.cap_mode.own_net || !self.own_rule_applies(e, net, true) {
+            return self.fits_at(e, w, c, eps);
+        }
+        self.parts_fit(&self.fit_parts(e, net, w, c, eps), wall)
+    }
+
+    /// The own-net rule can differ from M3 on `e` for net `net`: an end owned by `net` or (with
+    /// `strands`) a strand of `net` on `e`. Otherwise the M3 formula is evaluated as such, so
+    /// boards without the case stay bit-identical. O(n_max).
+    fn own_rule_applies(&self, e: usize, net: i32, strands: bool) -> bool {
+        let g = &self.edges[e];
+        (!g.free[0] && self.is_own(g.a, net))
+            || (!g.free[1] && self.is_own(g.b, net))
+            || (strands
+                && net != UNKNOWN_NET
+                && g.cross.iter().any(|x| self.strand_net(x.conn) == net))
+    }
+
+    /// The empty edge `e` fits one strand of net `net` (the static fit: `!` of the search's
+    /// `hard` capacity part). `own_net == false`: `cap >= w + eps + end_gaps * max(c, c_e)`
+    /// (M3). O(1) + the closure.
+    pub fn fits_empty_with(
+        &self,
+        e: usize,
+        net: i32,
+        w: f64,
+        c: f64,
+        eps: f64,
+        wall: impl FnOnce(f64, f64, f64) -> f64,
+    ) -> bool {
+        if !self.cap_mode.own_net || !self.own_rule_applies(e, net, false) {
+            let ge = &self.edges[e];
+            return ge.cap >= w + eps + ge.end_gaps() as f64 * c.max(ge.c_e);
+        }
+        self.parts_fit(&self.fit_parts_empty(e, net, w, c, eps), wall)
+    }
+
+    fn parts_fit(&self, p: &FitParts, wall: impl FnOnce(f64, f64, f64) -> f64) -> bool {
+        if p.need > p.hi - p.lo {
+            return false;
+        }
+        !(p.wall && self.cap_mode.wall_aware) || p.need <= wall(p.lo, p.hi, p.c_wall)
+    }
+
+    /// Overuse of edge `e` under the graph's capacity rule: the strands present, in slot
+    /// order, need `Σ (w_x + ε)` plus `max(c_i, c_j)` between consecutive strands of different
+    /// nets (0 for the same net) plus, at each end, `r_v + max(c_s, c_e)` for the strand `s`
+    /// next to it, or 0 for a free end or when `s`'s net owns `v` (then `min(r_v, w_s / 2)` is
+    /// credited);
+    /// `overuse = (need - L - credits).max(0)`. `own_net == false`: the net-blind M3
+    /// accounting. Equal to M3 when no strand's net owns an end and no two neighbours share a
+    /// net. O(n_max).
     pub fn overuse(&self, e: usize) -> f64 {
+        if !self.cap_mode.own_net {
+            return self.overuse_m3(e);
+        }
+        let g = &self.edges[e];
+        let (Some(first), Some(last)) = (g.cross.first(), g.cross.last()) else {
+            return 0.0;
+        };
+        let own_end = (!g.free[0] && self.is_own(g.a, self.strand_net(first.conn)))
+            || (!g.free[1] && self.is_own(g.b, self.strand_net(last.conn)));
+        let same_pair = g.cross.windows(2).any(|p| {
+            let n0 = self.strand_net(p[0].conn);
+            n0 != UNKNOWN_NET && n0 == self.strand_net(p[1].conn)
+        });
+        if !own_end && !same_pair {
+            return self.overuse_m3(e);
+        }
+        let eps = self.rules.eps;
+        let mut need: f64 = g.cross.iter().map(|x| x.width + eps).sum();
+        need += g
+            .cross
+            .windows(2)
+            .map(|p| {
+                let (n0, n1) = (self.strand_net(p[0].conn), self.strand_net(p[1].conn));
+                if n0 == n1 && n0 != UNKNOWN_NET {
+                    0.0
+                } else {
+                    p[0].clr.max(p[1].clr)
+                }
+            })
+            .sum::<f64>();
+        let mut credit = 0.0;
+        for (v, free, s) in [(g.a, g.free[0], first), (g.b, g.free[1], last)] {
+            if free {
+                continue;
+            }
+            let r = self.verts[v].r;
+            if self.is_own(v, self.strand_net(s.conn)) {
+                credit += r.min(0.5 * s.width);
+            } else {
+                need += r + s.clr.max(g.c_e);
+            }
+        }
+        (need - g.len - credit).max(0.0)
+    }
+
+    /// The net-blind M3 overuse: `(need_all - cap).max(0)`.
+    fn overuse_m3(&self, e: usize) -> f64 {
         let g = &self.edges[e];
         let (Some(first), Some(last)) = (g.cross.first(), g.cross.last()) else {
             return 0.0;
@@ -700,6 +1328,9 @@ impl RouteGraph {
         if self.occupancy.len() <= conn {
             self.occupancy.resize(conn + 1, Vec::new());
             self.paths.resize(conn + 1, None);
+        }
+        if self.strand_net.len() <= conn {
+            self.strand_net.resize(conn + 1, UNKNOWN_NET);
         }
     }
 
@@ -751,7 +1382,35 @@ impl RouteGraph {
         width: f64,
         clr: f64,
     ) {
+        self.insert_path_net(
+            conn,
+            UNKNOWN_NET,
+            start_v,
+            goal_v,
+            crossings,
+            faces,
+            width,
+            clr,
+        );
+    }
+
+    /// [`RouteGraph::insert_path`] recording the strand's net (own-net / same-net capacity,
+    /// [`RouteGraph::fits_for`], [`RouteGraph::overuse`]); the net is forgotten again by
+    /// [`RouteGraph::remove_conn`]. Same cost as `insert_path`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_path_net(
+        &mut self,
+        conn: usize,
+        net: i32,
+        start_v: usize,
+        goal_v: usize,
+        crossings: &[(usize, usize)],
+        faces: &[usize],
+        width: f64,
+        clr: f64,
+    ) {
         self.ensure(conn);
+        self.strand_net[conn] = net;
         debug_assert!(self.paths[conn].is_none() && self.occupancy[conn].is_empty());
         let mut along = None;
         if crossings.is_empty() {
@@ -852,6 +1511,9 @@ impl RouteGraph {
             self.edges[e].cross = kept;
         }
         self.occupancy[conn].clear();
+        if let Some(n) = self.strand_net.get_mut(conn) {
+            *n = UNKNOWN_NET;
+        }
         let mut bumped = touched_edges;
         if let Some(p) = self.paths[conn].take() {
             bumped.extend(self.face_edges(&p.faces));
