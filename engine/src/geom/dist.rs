@@ -289,3 +289,116 @@ pub fn copper_gap(a: &Track, b: &Track) -> f64 {
 pub fn copper_gap_skeleton(t: &Track, sk: &Skeleton) -> f64 {
     dist_prim_skeleton(&t.prim, sk) - 0.5 * t.w
 }
+
+/// Closest point of the skeleton's *core* (point / segment / convex CCW polygon region) to `q`;
+/// `q` itself when it lies inside a polygon core. O(v).
+fn core_closest(sk: &Skeleton, q: Vec2) -> Vec2 {
+    let on_seg = |s: &Seg| {
+        let d = s.b - s.a;
+        let l2 = d.len2();
+        if l2 == 0.0 {
+            return s.a;
+        }
+        s.a + d * ((q - s.a).dot(d) / l2).clamp(0.0, 1.0)
+    };
+    match sk {
+        Skeleton::Point { p, .. } => *p,
+        Skeleton::Seg { s, .. } => on_seg(s),
+        Skeleton::Poly { pts, .. } => {
+            let n = pts.len();
+            if n == 0 {
+                return q;
+            }
+            if n >= 3 && (0..n).all(|i| (pts[(i + 1) % n] - pts[i]).cross(q - pts[i]) >= 0.0) {
+                return q;
+            }
+            let mut best = pts[0];
+            for i in 0..n {
+                let c = on_seg(&Seg {
+                    a: pts[i],
+                    b: pts[(i + 1) % n],
+                });
+                if (c - q).len2() < (best - q).len2() {
+                    best = c;
+                }
+            }
+            best
+        }
+    }
+}
+
+fn skeleton_r(sk: &Skeleton) -> f64 {
+    match sk {
+        Skeleton::Point { r, .. } | Skeleton::Seg { r, .. } | Skeleton::Poly { r, .. } => *r,
+    }
+}
+
+/// Closest point of the pad copper (core ⊕ disc `r`) to `q`; `q` itself when inside. O(v).
+pub fn skeleton_closest_point(sk: &Skeleton, q: Vec2) -> Vec2 {
+    let c = core_closest(sk, q);
+    let (d, r) = ((q - c).len(), skeleton_r(sk));
+    if d <= r {
+        q
+    } else {
+        c + (q - c) * (r / d)
+    }
+}
+
+/// Signed-ish distance of `q` to the pad copper: `≤ 0` inside or on the boundary. O(v).
+pub fn point_skeleton(q: Vec2, sk: &Skeleton) -> f64 {
+    (q - core_closest(sk, q)).len() - skeleton_r(sk)
+}
+
+/// Copper gap between two pad skeletons, `≤ 0` when they touch or overlap. O(v_a · v_b).
+pub fn skeleton_gap(a: &Skeleton, b: &Skeleton) -> f64 {
+    let rb = skeleton_r(b);
+    let prims: Vec<Prim> = match b {
+        Skeleton::Point { p, .. } => vec![Prim::Seg(Seg { a: *p, b: *p })],
+        Skeleton::Seg { s, .. } => vec![Prim::Seg(*s)],
+        Skeleton::Poly { pts, .. } => (0..pts.len())
+            .map(|i| {
+                Prim::Seg(Seg {
+                    a: pts[i],
+                    b: pts[(i + 1) % pts.len()],
+                })
+            })
+            .collect(),
+    };
+    let mut g = prims
+        .iter()
+        .map(|p| dist_prim_skeleton(p, a) - rb)
+        .fold(f64::INFINITY, f64::min);
+    // `a` entirely inside the polygon core of `b` (no edge of `b` near it).
+    if let (Skeleton::Poly { pts, .. }, true) = (b, g > 0.0) {
+        let q = core_closest(a, pts.first().copied().unwrap_or_default());
+        if point_skeleton(q, b) <= 0.0 {
+            g = g.min(0.0);
+        }
+    }
+    g
+}
+
+#[cfg(test)]
+mod skeleton_point_tests {
+    use super::*;
+
+    fn v(x: f64, y: f64) -> Vec2 {
+        Vec2 { x, y }
+    }
+
+    #[test]
+    fn closest_point_and_gap_of_rect_and_circle() {
+        let r = Skeleton::rect(v(0.0, 0.0), 2.0, 2.0, 0.0);
+        assert_eq!(skeleton_closest_point(&r, v(3.0, 0.5)), v(1.0, 0.5));
+        assert_eq!(skeleton_closest_point(&r, v(0.2, 0.3)), v(0.2, 0.3));
+        assert!(point_skeleton(v(1.0, 0.0), &r) <= 0.0 && point_skeleton(v(1.1, 0.0), &r) > 0.0);
+        let c = Skeleton::circle(v(4.0, 0.0), 2.0);
+        assert!((skeleton_closest_point(&c, v(0.0, 0.0)) - v(3.0, 0.0)).len() < 1e-12);
+        assert!((skeleton_gap(&r, &c) - 2.0).abs() < 1e-12);
+        assert!((skeleton_gap(&c, &r) - 2.0).abs() < 1e-12);
+        let inner = Skeleton::circle(v(0.0, 0.0), 0.5);
+        assert!(skeleton_gap(&inner, &r) <= 0.0 && skeleton_gap(&r, &inner) <= 0.0);
+        let touching = Skeleton::rect(v(2.0, 0.0), 2.0, 2.0, 0.0);
+        assert!(skeleton_gap(&r, &touching) <= 0.0);
+    }
+}

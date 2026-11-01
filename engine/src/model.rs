@@ -552,6 +552,53 @@ impl BoardModel {
         t.nets.get(g).cloned().unwrap_or_default()
     }
 
+    /// The other pads of pad `pi`'s footprint that belong to a net-tie group, when that
+    /// footprint is a net tie (KiCad `FOOTPRINT::MapPadNumbersToNetTieGroups` ≥ 0), as indices
+    /// into `pads`. Empty for every pad of an ordinary footprint. O(T) for an ordinary
+    /// footprint, O(T + P) for a net-tie footprint (T net ties, P pads).
+    pub fn tie_group_pads_of(&self, pi: usize) -> Vec<usize> {
+        let p = &self.pads[pi];
+        if !self.net_ties.iter().any(|t| t.ref_ == p.ref_) {
+            return Vec::new();
+        }
+        (0..self.pads.len())
+            .filter(|&j| {
+                j != pi && self.pads[j].ref_ == p.ref_ && self.pads[j].net_tie_group.is_some()
+            })
+            .collect()
+    }
+
+    /// Nets (other than its own) for which pad `pi` is no obstacle in the routing model: the
+    /// nets of tie-group pads of the same net-tie footprint whose copper touches or overlaps
+    /// `pi`'s on a shared layer ("fused" tie pads).
+    ///
+    /// KiCad 10 (`DRC_ENGINE::IsNetTieExclusion`, verified with kicad-cli 10.0.8 in task NT,
+    /// `engine/tests/net_tie.rs`) allows a track of net N to collide with a pad of a net-tie
+    /// footprint only where the collision lies inside a tie-group pad of net N of that
+    /// footprint. That needs the two pads to overlap; a gapped tie pad (dcsgonebadge JP1, 0.3 mm)
+    /// is an ordinary obstacle for the other tied net. For fused pads the routing model exempts
+    /// the whole pad (a track ending in its own pad cannot keep clearance from the fused
+    /// neighbour); the exact rule is enforced by `Checker` (self-check), which rejects a
+    /// collision outside the own pad. O(T + P + k · v²) for k tie-group pads of v vertices.
+    pub fn pad_fused_tie_nets(&self, pi: usize) -> Vec<i32> {
+        let p = &self.pads[pi];
+        let mut nets: Vec<i32> = Vec::new();
+        for j in self.tie_group_pads_of(pi) {
+            let q = &self.pads[j];
+            if q.net == 0 || q.net == p.net || nets.contains(&q.net) {
+                continue;
+            }
+            let fused = p.layers.iter().filter(|l| q.layers.contains(l)).any(|&l| {
+                crate::geom::skeleton_gap(&self.skeleton(p, l), &self.skeleton(q, l)) <= 0.0
+            });
+            if fused {
+                nets.push(q.net);
+            }
+        }
+        nets.sort_unstable();
+        nets
+    }
+
     /// Drilled pad index by hole position (a PTH hole belongs to its pad).
     pub fn pad_by_hole(&self) -> HashMap<Pt, usize> {
         let mut m = HashMap::new();

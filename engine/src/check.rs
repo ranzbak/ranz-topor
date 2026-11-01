@@ -7,9 +7,10 @@
 
 use crate::geom::prim::Aabb;
 use crate::geom::{
-    copper_gap, copper_gap_skeleton, dequantise, Grid, Prim, Seg, Skeleton, Track, Vec2,
+    copper_gap, copper_gap_skeleton, dequantise, point_skeleton, skeleton_closest_point, Grid,
+    Prim, Seg, Skeleton, Track, Vec2,
 };
-use crate::model::{flip_track, via_layers, BoardModel, Item, Options, Pad};
+use crate::model::{flip_track, via_layers, BoardModel, Item, Options};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
@@ -89,8 +90,13 @@ struct Obstacle {
     label: String,
     /// Own clearance contribution (max of the obstacle net's clearance and, for pads, the local override), nm.
     own_clr: f64,
-    /// Nets bridged by the net tie this obstacle belongs to: not an obstacle for them.
+    /// Nets bridged by the net tie this obstacle belongs to: not an obstacle for them (the
+    /// net-less copper graphics of a net-tie footprint, KiCad case 25 in `tests/net_tie.rs`).
     tie_nets: Vec<i32>,
+    /// Pads of a net-tie footprint: the footprint's other tie-group pads `(net, copper on this
+    /// layer)`. A collision with an item of one of these nets is allowed only inside that pad
+    /// ([`tie_exclusion`], KiCad `DRC_ENGINE::IsNetTieExclusion`).
+    tie_pads: Vec<(i32, Skeleton)>,
 }
 
 impl Obstacle {
@@ -245,10 +251,18 @@ impl Checker {
         }
 
         let tie_nets_of = |ref_: &str| model.tie_nets_of(ref_);
-        let group_nets = |p: &Pad| model.pad_group_nets(p);
+        let tie_pads = |pi: usize, l: u32| -> Vec<(i32, Skeleton)> {
+            model
+                .tie_group_pads_of(pi)
+                .into_iter()
+                .map(|j| &model.pads[j])
+                .filter(|q| q.net != 0 && q.layers.contains(&l))
+                .map(|q| (q.net, model.skeleton(q, l)))
+                .collect()
+        };
 
         let pad_by_hole = model.pad_by_hole();
-        for p in &model.pads {
+        for (pi, p) in model.pads.iter().enumerate() {
             for &l in &p.layers {
                 // KiCad: max(item class, pad class, pad local override).
                 let own = model.pad_own_clearance(p, c.clr(p.net));
@@ -261,7 +275,8 @@ impl Checker {
                         kind: Kind::Pad,
                         label: format!("pad:{}:{}", p.ref_, p.number),
                         own_clr: own,
-                        tie_nets: group_nets(p),
+                        tie_nets: Vec::new(),
+                        tie_pads: tie_pads(pi, l),
                     },
                 );
             }
@@ -278,6 +293,7 @@ impl Checker {
                     label: format!("via:{}", v.uuid),
                     own_clr: c.clr(v.net),
                     tie_nets: Vec::new(),
+                    tie_pads: Vec::new(),
                 },
             );
             if v.drill > 0 {
@@ -292,6 +308,7 @@ impl Checker {
                         label: format!("viahole:{}", v.uuid),
                         own_clr: 0.0,
                         tie_nets: Vec::new(),
+                        tie_pads: Vec::new(),
                     },
                 );
             }
@@ -310,6 +327,7 @@ impl Checker {
                     label: format!("kept:{}", k.uuid),
                     own_clr: c.clr(k.net),
                     tie_nets: Vec::new(),
+                    tie_pads: Vec::new(),
                 },
             );
         }
@@ -350,6 +368,7 @@ impl Checker {
                         label: format!("shape:{}", s.uuid),
                         own_clr: c.clr(s.net),
                         tie_nets: tie.clone(),
+                        tie_pads: Vec::new(),
                     },
                 );
             }
@@ -387,7 +406,9 @@ impl Checker {
                     kind: Kind::Hole,
                     label: format!("hole:{},{}", h.at.x, h.at.y),
                     own_clr: 0.0,
-                    tie_nets: owner.map(group_nets).unwrap_or_default(),
+                    // the drill of a net-tie pad is an obstacle for the other tied nets (task NT)
+                    tie_nets: Vec::new(),
+                    tie_pads: Vec::new(),
                 },
             );
         }
@@ -405,6 +426,7 @@ impl Checker {
                     label: "edge".into(),
                     own_clr: 0.0,
                     tie_nets: Vec::new(),
+                    tie_pads: Vec::new(),
                 },
             );
         }
@@ -475,6 +497,18 @@ impl Checker {
                 .max(self.rules_min_clearance),
         };
         base + self.margin
+    }
+
+    /// KiCad's net-tie exclusion for a pad `o` of a net-tie footprint against an item of `net`
+    /// (copper `track`): allowed iff the collision lies inside a tie-group pad of `net` of the
+    /// same footprint ([`tie_exclusion`]). O(1) for every other obstacle.
+    fn tie_excluded(o: &Obstacle, net: i32, track: &Track) -> bool {
+        let Geo::Skel(own) = &o.geo else {
+            return false;
+        };
+        o.tie_pads
+            .iter()
+            .any(|(n, q)| *n == net && tie_exclusion(track, own, q))
     }
 
     fn is_exempt(item_net: i32, o: &Obstacle) -> bool {
@@ -612,7 +646,7 @@ impl Checker {
                 }
                 let req = self.required(net, o, own_clr);
                 let gap = o.gap(&track);
-                if gap < req {
+                if gap < req && !Self::tie_excluded(o, net, &track) {
                     let (g, r) = (gap.round() as i64, req.round() as i64);
                     match found
                         .iter_mut()
@@ -692,6 +726,40 @@ impl Checker {
         rep.violations.extend(found);
         rep.checked += 1;
     }
+}
+
+/// Samples along an item's centreline for [`tie_exclusion`] (cap) and their spacing, nm.
+const TIE_SAMPLES_MAX: usize = 1024;
+const TIE_SAMPLE_STEP_NM: f64 = 2_000.0;
+
+/// KiCad 10 `DRC_ENGINE::IsNetTieExclusion` (verified with kicad-cli 10.0.8, task NT,
+/// `tests/net_tie.rs`): a collision of `item` with the net-tie pad `own` is allowed iff the
+/// collision position lies inside the item net's tie pad `q`. The position is taken as the
+/// point of `own`'s copper nearest to the item centreline; conservatively the nearest
+/// centreline point must lie in `q` as well. Both lie in `q` only when `own` and `q` overlap
+/// (fused tie pads); a gapped tie pad is never excluded. The nearest centreline point is found
+/// on ≤ [`TIE_SAMPLES_MAX`] samples (first minimum, deterministic).
+/// O(s · v), s samples, v skeleton vertices; only run for a violation against a tie pad.
+fn tie_exclusion(item: &Track, own: &Skeleton, q: &Skeleton) -> bool {
+    let len = item.prim.length();
+    let n = ((len / TIE_SAMPLE_STEP_NM).ceil() as usize).clamp(1, TIE_SAMPLES_MAX - 1);
+    let at = |i: usize| {
+        let f = i as f64 / n as f64;
+        match &item.prim {
+            Prim::Seg(s) => s.a + (s.b - s.a) * f,
+            Prim::Arc(a) => a.point_at(f),
+        }
+    };
+    let (mut best, mut best_d) = (at(0), f64::INFINITY);
+    for i in 0..=n {
+        let c = at(i);
+        let d = point_skeleton(c, own);
+        if d < best_d {
+            (best, best_d) = (c, d);
+        }
+    }
+    let pos = skeleton_closest_point(own, best);
+    point_skeleton(pos, q) <= 0.0 && point_skeleton(best, q) <= 0.0
 }
 
 /// Fewest items for which `check_against` fans out over the pool.
@@ -784,6 +852,7 @@ impl ItemIndex {
             label: format!("item:{id}"),
             own_clr: 0.0,
             tie_nets: Vec::new(),
+            tie_pads: Vec::new(),
         };
         let bb = o.bbox();
         for &k in &keys {

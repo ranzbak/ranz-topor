@@ -148,6 +148,32 @@ fn poly_pad_anchor_per_vertex() {
     assert_eq!(s.layer(0).walls.len(), 4);
 }
 
+/// Two pads of one net-tie footprint U1 (`net_tie_pad_groups "1,2"`, nets 2 and 4), circles of
+/// 1.6 mm (`extra` JSON fields each), centres `dx` apart on layer 0, plus `more` model fields.
+fn tie_pair(dx: i64, extra: &str, more: &str) -> BoardModel {
+    let pad = |n: &str, net: i32, x: i64| {
+        format!(
+            r#"{{ "uuid": "p{n}", "ref": "U1", "number": "{n}", "net": {net}, "net_tie_group": 0,
+                "center": [{x}, 10000000], "layers": [0],
+                "shapes": {{ "0": {{ "kind": "circle", "d": 1600000 }} }} {extra} }}"#
+        )
+    };
+    model(&format!(
+        r#""pads": [ {}, {} ], {more}
+           "net_ties": [ {{ "ref": "U1", "groups": [["1", "2"]], "nets": [[2, 4]] }} ]"#,
+        pad("1", 2, 10_000_000),
+        pad("2", 4, 10_000_000 + dx)
+    ))
+}
+
+/// Exemptions KiCad 10 allows (kicad-cli 10.0.8, task NT, evidence table in `tests/net_tie.rs`):
+/// same-net copper; for a net-tie footprint, a track of tied net N may collide with the tie pad
+/// of the other net only inside N's own tie pad (cases 24 / 35), which needs the two pads to
+/// touch or overlap ("fused"): such a pad is exempt for N in the routing model (the `Checker`
+/// enforces the exact position rule, `tests/net_tie.rs`). The footprint's net-less copper
+/// graphics stay exempt for every tied net (case 25, `copper_shape_polygon_and_tie_owner`).
+/// The exemption this test pinned before task NT (a lone tie-group pad exempt for every net of
+/// its group) is illegal in KiCad: `gapped_net_tie_pad_is_an_obstacle_for_the_other_tied_net`.
 #[test]
 fn same_net_and_net_tie_are_exempt() {
     let m = model(&pad(
@@ -162,6 +188,31 @@ fn same_net_and_net_tie_are_exempt() {
     assert!(!ObstacleSet::exempt(a.net, &a.tie_nets, 2));
     assert!(!ObstacleSet::exempt(0, &[], 0));
 
+    // fused tie pads (1.6 mm discs 1.2 mm apart overlap): each exempt for the other tied net
+    let s = build(&tie_pair(1_200_000, "", ""));
+    let (a, b) = (&s.layer(0).anchors[0], &s.layer(0).anchors[1]);
+    assert_eq!((a.net, b.net), (2, 4));
+    assert!(ObstacleSet::exempt(a.net, &a.tie_nets, 4));
+    assert!(ObstacleSet::exempt(b.net, &b.tie_nets, 2));
+    assert!(!ObstacleSet::exempt(a.net, &a.tie_nets, 5));
+    // touching (copper gap 0) counts as fused
+    let s = build(&tie_pair(1_600_000, "", ""));
+    let a = &s.layer(0).anchors[0];
+    assert!(ObstacleSet::exempt(a.net, &a.tie_nets, 4));
+}
+
+/// The illegal exemption (dcsgonebadge JP1.1 <-> Net-(J3-Pin_22), A5 report concern 3): KiCad 10
+/// flags a track of the other tied net touching or within clearance of a GAPPED tie pad (cases
+/// 1, 8, 20, 22, 31 in `tests/net_tie.rs`), so such a pad is an ordinary obstacle for that net;
+/// a lone tie-group pad (no pad of the other net to collide inside) is no exemption either.
+#[test]
+fn gapped_net_tie_pad_is_an_obstacle_for_the_other_tied_net() {
+    let s = build(&tie_pair(1_900_000, "", "")); // 0.3 mm copper gap, as JP1
+    let (a, b) = (&s.layer(0).anchors[0], &s.layer(0).anchors[1]);
+    assert!(!ObstacleSet::exempt(a.net, &a.tie_nets, 4));
+    assert!(!ObstacleSet::exempt(b.net, &b.tie_nets, 2));
+    assert!(ObstacleSet::exempt(a.net, &a.tie_nets, 2));
+
     let body = format!(
         r#"{}, "net_ties": [ {{ "ref": "U1", "groups": [], "nets": [[2, 4]] }} ]"#,
         pad(
@@ -173,8 +224,28 @@ fn same_net_and_net_tie_are_exempt() {
     );
     let s = build(&model(&body));
     let a = &s.layer(0).anchors[0];
-    assert!(ObstacleSet::exempt(a.net, &a.tie_nets, 4));
+    assert!(!ObstacleSet::exempt(a.net, &a.tie_nets, 4));
     assert!(!ObstacleSet::exempt(a.net, &a.tie_nets, 5));
+}
+
+/// A PTH tie pad's drill is an obstacle for the other tied net, even when the pads are fused.
+#[test]
+fn net_tie_pad_drill_is_an_obstacle_for_the_other_tied_net() {
+    let m = tie_pair(
+        1_200_000,
+        r#", "attr": "pth", "drill": { "w": 800000, "h": 800000 }"#,
+        r#""holes": [ { "at": [10000000, 10000000], "d": 800000, "kind": "pth" } ],"#,
+    );
+    let s = build(&m);
+    let hole = s
+        .layer(0)
+        .anchors
+        .iter()
+        .find(|a| a.kind == ObsKind::Hole)
+        .expect("hole anchor");
+    assert_eq!(hole.net, 2);
+    assert!(ObstacleSet::exempt(hole.net, &hole.tie_nets, 2));
+    assert!(!ObstacleSet::exempt(hole.net, &hole.tie_nets, 4));
 }
 
 #[test]
