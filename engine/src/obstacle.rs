@@ -392,9 +392,11 @@ impl ObstacleSet {
             b.layers.entry(l).or_default();
         }
 
-        // Pads: per-layer padstack (44 §3.1).
-        for p in &model.pads {
-            let tie = model.pad_group_nets(p);
+        // Pads: per-layer padstack (44 §3.1). A net-tie pad is exempt only for its own net and
+        // the nets of fused tie-group pads of its footprint ([`BoardModel::pad_fused_tie_nets`]):
+        // KiCad 10 flags a track of the other tied net touching a gapped tie pad.
+        for (pi, p) in model.pads.iter().enumerate() {
+            let tie = model.pad_fused_tie_nets(pi);
             let own = model.pad_own_clearance(p, set.clr(p.net));
             for &l in &p.layers {
                 let m = Meta {
@@ -441,7 +443,8 @@ impl ObstacleSet {
                 net: owner.map_or(0, |p| p.net),
                 kind: ObsKind::Hole,
                 own_clr: 0.0,
-                tie_nets: owner.map(|p| model.pad_group_nets(p)).unwrap_or_default(),
+                // the drill of a net-tie pad is an obstacle for the other tied nets (task NT)
+                tie_nets: Vec::new(),
                 label: format!("hole:{},{}", h.at.x, h.at.y),
             };
             let c = h.at.to_vec2();

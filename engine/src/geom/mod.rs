@@ -14,7 +14,8 @@ pub mod vec2;
 
 pub use dist::{
     arc_arc, copper_gap, copper_gap_skeleton, dist_prim, dist_prim_skeleton, point_arc,
-    point_circle, point_seg, seg_arc, seg_seg, Skeleton, Track,
+    point_circle, point_seg, point_skeleton, seg_arc, seg_seg, skeleton_closest_point,
+    skeleton_gap, Skeleton, Track,
 };
 pub use grid::{Grid, GridError};
 pub use prim::{Aabb, Arc, Circle, Prim, Seg};
