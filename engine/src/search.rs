@@ -46,6 +46,14 @@ use std::time::Instant;
 const MERGE_LEN_FACTOR: f64 = 4.0;
 /// Maximum portals one line-of-sight test walks (note §2, `C`).
 pub const LOS_PORTAL_CAP: usize = 32;
+/// A bend of `los` "approaches" the target when it moves the apex at least this much (nm) closer
+/// than every apex before it (A2).
+const LOS_TOL: f64 = 1.0;
+/// A line leaving a terminal is inadmissible after this many consecutive bends of `los` that do
+/// not approach the target (A2 / M4-D2). 2 = one non-approaching bend is tolerated (a neighbour's
+/// corner beside the exit); the bound only decides how early a pinched terminal exit is given up
+/// (U7.4 at 0.2 mm: after two bends instead of a 5-9 mm spiral).
+const LOS_STALL_CAP: usize = 2;
 /// Present-congestion factor of a non-fitting edge (note §2).
 pub const PRESENT_OVERUSE: f64 = 4.0;
 
@@ -911,7 +919,11 @@ impl<'a> Layered<'a> {
             face_in: fin,
             apex,
             apex_len,
-            since: kept + 1,
+            since: if sr.apex_past(e, dir, apex) {
+                0
+            } else {
+                kept + 1
+            },
             p,
             g_len,
             g_cost,
@@ -1358,6 +1370,10 @@ struct Search<'a> {
     pw_vertex: RefCell<HashMap<usize, bool>>,
     /// Candidate lists of grid-aligned query boxes, `[vertices, walls]` (see `cached_near`).
     near: [RefCell<NearCache>; 2],
+    /// Usable parameter intervals of an edge for the state point (`state_point`), keyed by the
+    /// edge: a function of the edge and the search's net / width / clearance alone (the graph is
+    /// not mutated during a search), so membership is the only use.
+    sp_memo: RefCell<HashMap<usize, Vec<(f64, f64)>>>,
 }
 
 impl<'a> Search<'a> {
@@ -1394,6 +1410,7 @@ impl<'a> Search<'a> {
             ok_memo: RefCell::new(HashMap::new()),
             pw_vertex: RefCell::new(HashMap::new()),
             near: [RefCell::new(HashMap::new()), RefCell::new(HashMap::new())],
+            sp_memo: RefCell::new(HashMap::new()),
         }
     }
 
@@ -1437,6 +1454,13 @@ impl<'a> Search<'a> {
     }
 
     /// State point of edge `e`: usable sub-segment point nearest to the segment `apex -> goal`.
+    /// The usable set is the edge minus its end margins (`margin_of`) minus, for every other
+    /// foreign vertex `u` within `r_u + max(clr_u, c) + w/2 + eps` of the edge, the parameter
+    /// interval where the centreline would come closer than that to `u` (A2 / M4-D2: a 0.3 mm
+    /// pad tip 0.2 mm from a foreign pad keeps only the window the wire fits through, instead of
+    /// the own corner next to the neighbour). When nothing is left (an unfit edge, crossed as
+    /// overuse) the end-margin point is kept. Intervals memoised per edge (`edge_window`); per
+    /// call O(k) for k intervals, the first call per edge O(q) (one lattice-cached vertex query).
     fn state_point(&self, e: usize, apex: Vec2, goal: Vec2) -> Vec2 {
         let ge = &self.g.edges[e];
         let (pa, pb) = (self.g.verts[ge.a].at, self.g.verts[ge.b].at);
@@ -1444,15 +1468,118 @@ impl<'a> Search<'a> {
         if len <= 0.0 {
             return pa;
         }
+        let d = pb - pa;
+        let win = self.edge_window(e);
+        let mut best: Option<(f64, Vec2)> = None;
+        for &(t0, t1) in win.iter() {
+            let q = seg_closest(pa + d * t0, pa + d * t1, apex, goal);
+            let qd = point_seg(q, &Seg { a: apex, b: goal });
+            if best.is_none_or(|b| qd < b.0) {
+                best = Some((qd, q));
+            }
+        }
+        best.map(|b| b.1).unwrap_or(pa)
+    }
+
+    /// Usable parameter intervals of edge `e` for the state point (see `state_point`), sorted,
+    /// never empty (the end-margin interval when every point is pinched). O(q log q) once per
+    /// edge and search, then a memo hit.
+    fn edge_window(&self, e: usize) -> Vec<(f64, f64)> {
+        if let Some(w) = self.sp_memo.borrow().get(&e) {
+            return w.clone();
+        }
+        let ge = &self.g.edges[e];
+        let (pa, pb) = (self.g.verts[ge.a].at, self.g.verts[ge.b].at);
+        let len = dist(pa, pb).max(1e-9);
         let (ra, rb) = (self.margin_of(ge.a), self.margin_of(ge.b));
-        let (t0, t1) = if ra + rb >= len {
+        let base = if ra + rb >= len {
             let t = ra / (ra + rb).max(1e-9);
             (t, t)
         } else {
             (ra / len, 1.0 - rb / len)
         };
+        let half = 0.5 * self.w + self.eps;
+        let reach = self.g.rho_max() + self.c + half;
         let d = pb - pa;
-        seg_closest(pa + d * t0, pa + d * t1, apex, goal)
+        let bb = Aabb {
+            min: Vec2 {
+                x: pa.x.min(pb.x),
+                y: pa.y.min(pb.y),
+            },
+            max: Vec2 {
+                x: pa.x.max(pb.x),
+                y: pa.y.max(pb.y),
+            },
+        }
+        .grow(reach);
+        let mut cand: Vec<usize> = Vec::new();
+        self.cached_near(0, bb, reach, &mut cand);
+        cand.sort_unstable();
+        cand.dedup();
+        // excluded parameter intervals `(lo, hi)` of the foreign vertices pinching the edge
+        let mut cut: Vec<(f64, f64)> = Vec::new();
+        for u in cand {
+            if u == ge.a || u == ge.b || !self.foreign(u) {
+                continue;
+            }
+            let vi = &self.g.verts[u];
+            let need = vi.r + vi.clr.max(self.c) + half;
+            let rel = vi.at - pa;
+            let h = d.cross(rel).abs() / len;
+            if h >= need {
+                continue;
+            }
+            let tc = rel.dot(d) / (len * len);
+            let s = (need * need - h * h).sqrt() / len;
+            cut.push((tc - s, tc + s));
+        }
+        cut.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.total_cmp(&y.1)));
+        let mut win: Vec<(f64, f64)> = Vec::new();
+        let mut lo = base.0;
+        for (c0, c1) in cut {
+            if c0 > lo {
+                win.push((lo, c0.min(base.1)));
+            }
+            lo = lo.max(c1);
+            if lo > base.1 {
+                break;
+            }
+        }
+        if lo <= base.1 {
+            win.push((lo, base.1));
+        }
+        win.retain(|w| w.0 <= w.1);
+        if win.is_empty() {
+            win.push(base);
+        }
+        self.sp_memo.borrow_mut().insert(e, win.clone());
+        win
+    }
+
+    /// A2 / M4-D2: the apex returned for a crossing of edge `e` into `faces[dir]` is the entered
+    /// face's third vertex (a clearance bend at a foreign corner across `e`): the string has
+    /// passed `e` already, so `e` and the portals before it are no portal of the next line of
+    /// sight (they sent it back to the near end of `e`). Only that vertex: an apex farther away
+    /// keeps the portal chain (dropping it could let later chords cut corners). O(1).
+    fn apex_past(&self, e: usize, dir: u8, apex: Vec2) -> bool {
+        let ge = &self.g.edges[e];
+        let Some(f) = ge.faces[dir as usize] else {
+            return false;
+        };
+        self.g.faces[f]
+            .v
+            .iter()
+            .any(|&w| w != ge.a && w != ge.b && self.g.verts[w].at == apex)
+    }
+
+    /// `a` is the position of a foreign vertex (the apex of a clearance / portal bend of `los`,
+    /// as opposed to a terminal or a state point). One lattice-cached point query of pitch `q`;
+    /// O(1) amortised.
+    fn wrap_apex(&self, a: Vec2, q: f64) -> bool {
+        let mut at: Vec<usize> = Vec::new();
+        self.cached_near(0, Aabb { min: a, max: a }, q, &mut at);
+        at.into_iter()
+            .any(|u| self.g.verts[u].at == a && self.foreign(u))
     }
 
     /// Statically unusable edge: a wire runs along it, a face is outside the outline, or it is
@@ -1768,6 +1895,13 @@ impl<'a> Search<'a> {
                 }
             };
             if let Some((param, p, v)) = found {
+                // A2 / M4-D2: from a wrap apex (the string bends at a foreign vertex and leaves
+                // its clearance circle tangentially) an obstacle at or behind the apex is not on
+                // the way to `t`: bending there sent the string back (#208's spiral around a
+                // 0.3 mm pad tip, the other corner of the same pad 0.3 mm behind the apex)
+                if param <= 0.0 && self.wrap_apex(a, rho) {
+                    continue;
+                }
                 let better =
                     best.is_none_or(|b| param < b.0 || (param == b.0 && (kind, idx) < (b.1, b.2)));
                 if better {
@@ -1965,7 +2099,15 @@ impl<'a> Search<'a> {
 
     /// Line of sight from the apex of node `s` to `target` through the portals pushed since:
     /// returns `(apex, apex_len, portals_kept, admissible)`; a pad bend pinched against a wall makes
-    /// the line inadmissible (never in ghost mode).
+    /// the line inadmissible (never in ghost mode). A2 / M4-D2: a line leaving a terminal (`s` the
+    /// root) is also inadmissible when its bend loop does not converge, i.e. `LOS_STALL_CAP` bends
+    /// in a row do not bring the apex closer to the target, or `LOS_PORTAL_CAP + 4` bends end
+    /// without a clear chord (U7.4 at 0.2 mm: the exit is pinched at the pad itself, the string
+    /// used to spiral 5-9 mm around the neighbours first). Later lines keep the old behaviour (a
+    /// pinched gap between two obstacles makes the string oscillate; its accumulated length is
+    /// the price of crossing it, which the F.Cu-only eprom negotiation relies on). The #208 runaway
+    /// itself is removed at its cause (`edge_window`, `wrap_apex`, `apex_past`). O(LOS_PORTAL_CAP
+    /// * (C + bend)).
     fn los(
         &self,
         nodes: &[Node],
@@ -1987,11 +2129,24 @@ impl<'a> Search<'a> {
             id = nodes[id].parent;
         }
         portals.reverse();
+        let strict = sn.kind == K_ROOT && !self.ghost;
         let mut ok = true;
         if (target - apex).len2() < 1.0 {
             return (apex, len, portals.len(), ok);
         }
+        // bends since the apex last came closer to the target
+        let (mut best, mut stalls) = (f64::INFINITY, 0usize);
         for _ in 0..LOS_PORTAL_CAP + 4 {
+            let d_t = dist(apex, target);
+            if d_t < best - LOS_TOL {
+                best = d_t;
+                stalls = 0;
+            } else {
+                stalls += 1;
+                if strict && stalls >= LOS_STALL_CAP {
+                    return (apex, len, portals.len(), false);
+                }
+            }
             let chord = Seg { a: apex, b: target };
             let mut miss: Option<(usize, usize)> = None;
             for (k, &pe) in portals.iter().enumerate() {
@@ -2044,9 +2199,10 @@ impl<'a> Search<'a> {
                 apex = bend;
                 continue;
             }
-            break;
+            return (apex, len, portals.len(), ok);
         }
-        (apex, len, portals.len(), ok)
+        // the bend loop hit its cap without reaching a clear chord
+        (apex, len, portals.len(), ok && !strict)
     }
 
     fn step_cost(&self, e: usize, delta: f64) -> f64 {
@@ -3047,6 +3203,44 @@ pub fn probe_bend_ok_mode(
         last = s.bend_ok(a, u, t, Some(side));
     }
     last
+}
+
+/// Test hook (A2): the first step of the slot search leaving vertex `v` through edge `e` towards
+/// `goal`: the state point on `e` (`state_point`) and the line of sight to it from `v`
+/// (`los`). Returns `(state point, apex, apex_len, admissible)`. O(q + LOS_PORTAL_CAP * bend).
+#[doc(hidden)]
+pub fn probe_entry(
+    g: &RouteGraph,
+    obs: &LayerObstacles,
+    conn: &Connection,
+    v: usize,
+    e: usize,
+    goal: Vec2,
+) -> (Vec2, Vec2, f64, bool) {
+    let s = Search::new(g, obs, conn, &[], 1.0, PRESENT_OVERUSE, None, false);
+    let at = g.verts[v].at;
+    let root = Node {
+        kind: K_ROOT,
+        layer: 0,
+        v,
+        edge: usize::MAX,
+        slot: 0,
+        dir: 0,
+        parent: 0,
+        face_in: 0,
+        apex: at,
+        apex_len: 0.0,
+        since: 0,
+        p: at,
+        g_len: 0.0,
+        g_cost: 0.0,
+        vias: 0,
+        last_site: usize::MAX,
+        size: None,
+    };
+    let p = s.state_point(e, at, goal);
+    let (apex, apex_len, _, ok) = s.los(&[root], 0, p, Some(e));
+    (p, apex, apex_len, ok)
 }
 
 /// The single-layer (M2) entry points: the layered core on one [`RouteGraph`] without via
