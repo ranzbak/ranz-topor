@@ -32,3 +32,6 @@
   (routed/total, failed, vias, routing_new, unconnected, router_s, detour max/count>1.5). PNG `--milestone m4 --task A11 --board dcsgonebadge`
   (and wiccon if its numbers moved).
 - Regenerate configuration.md; docs_gen --check clean; remove "(available from 0.5.0)"/"No effect in 0.4.0" tails of keys you make live.
+- DX diagnosis (docs/progress/notes/m4-dcsgone-diagnosis.md §6): A10/A13 are NOT completion levers on dcsgone (0 "no via site"
+  reasons), but **A11 pour-cut cost is** (≈ 5 + 2): pass-1 copper cuts 20 GND items off the fill → 26 + 22 + 3 completion connections
+  and 15 re-routes. Report for dcsgone: pour-completion pass count, completion connections, unconnected, with pour_cut_cost 0 vs 1.0.

@@ -35,6 +35,26 @@ Briefs: task-<ID>-brief.md (plan text extracted + coordinator additions). Report
   wrong: listed pour vias unused as goals (M3 behaviour), revisit in A5 (same-net attachment).
 - Ruling A-C7: group 2 = DX (F dcsgone diagnosis now, plan A12 Step 2 moved forward because A1 made dcsgone stop-rule-limited, not
   time-limited) ‖ A3 (F note) ‖ A2 ‖ A7 ‖ A10+A11 (one S worker, two commits) — cost if wrong: DX re-run after A4–A6.
+- Ruling A-C8 (main, user: Fable usage 73 %): no fable workers/reviewers from now on; engine-algorithm tasks (A4, A2, A5, A6+NX,
+  A12 fixes) and the F gate review → default model (Opus); routine (docs, tests, mechanical, plugin) → sonnet; ask main before any
+  fable use — cost if wrong: weaker design depth on hard tasks (mitigated by DX/A3 notes).
+- Ruling A-C9 (TopoR "necking", main request; = DX fix NX): trace necking to the pad is implemented together with A6 (exit stubs) as
+  one task A6+NX: first/last piece of a connection at min(w, pad_width − 2ε) ≥ KiCad min_track_width (incl. netclass/rules) for
+  ≤ neck_max_mm; keys `[search] neck_to_pad` (default true only if DRC-clean on all snapshot boards, else false) and
+  `[search] neck_max_mm` (default 2 × pad length per DX, measured) — cost if wrong: necked pieces narrower than the netclass width
+  (DRC-checked; KiCad connection_width rules respected).
+- Ruling A-C10 (TopoR "multiple variants", main request): K deterministic variants (net-order permutations / seeds, one per thread,
+  keep best by (routed, routing_new, vias, length), stable tie-break) as `[search] variants` — decided after A4/A2/HC/A5/A6 numbers;
+  default 1 unless measured as a gain inside the 600 s budget — cost if wrong: an unused completion lever.
+- Ruling A-C11 (DX §1): dcsgone gate predicate = routed == connections_total (incl. pour-completion connections; 255 today),
+  failed == partial == 0, unconnected_items == 0, routing_new == 0, runtime ≤ 600 s; `RouteResult.connections_initial` (first-pass
+  decomposition = 231) printed and all 231 first-pass connections routed — cost if wrong: none (stricter than "231/231").
+- Ruling A-C12 (A3 concern 1): `[search] dangling_ends` ∈ {continue (default, G1 continuation), fixed (M3: hand stub kept as fixed
+  copper, route from pads), drop (rip the dangling hand stub in scope)}; engine `Options.dangling_ends` takes the same strings (A14) —
+  cost if wrong: one choice's semantics.
+- Ruling A-C13 (TopoR "route all, repair later", "teardrop smoothing", BGA strategy, global via minimisation, re-optimise after the
+  engineer moves parts, lines-only mode): backlog rows only (task HC part 3); auto placement is a NON-GOAL (user: "components are
+  placed by the enigneer, this is not a task of the router.") — cost if wrong: none.
 - Ruling A-C5: existing_copper = "smooth" stays "treated as fixed" in 0.5.0 (documented, backlog row in 45 §3; no A-task in the plan);
   [nets] pour_served implemented in A9 (per-net override of the auto pour-served decision); [run] detour_reference implemented by A7
   (engine Options.detour_reference + budget share; plugin key maps to it) — cost if wrong: smoothing of existing copper missing in 0.5.0
@@ -61,3 +81,17 @@ router 600.3 s, runtime 659.8 s, routing_new 0, preexisting 4 (clearance, hand c
   Concerns: tests after code; ignored pads not in connections_total; scope.py redundant net list left.
 - AP: run_cli Popen+poll+timeout+cancel ([run] kicad_cli_timeout_s 120, KICAD_CLI_TIMEOUT), early setup progress, fingerprint before
   commit (BOARD_CHANGED_DURING_RUN); cancel during DRC rounds/preview export not killing kicad-cli (bounded by timeout); live UNVERIFIED rows.
+- A3 DONE 99c7aab (merge f15895b): note docs/progress/notes/m4-capacity-steiner-design.md; concerns → A-C12, wiccon outside headroom
+  6.4 mm (stubs must report delta), Steiner changes eprom (not-worse, not identity).
+- DX DONE fcc66c4 + 5a3399c (profile-only IterProfile) (merge 50103c8): note docs/progress/notes/m4-dcsgone-diagnosis.md. 231 = first
+  pass, 255 = after 3 pour-completion passes. 67 failed: own-pad/fine-pitch capacity 23 (12 need a neck), metrization rejects 37
+  (taut pinch 11, wall grazed 7, NPTH hole clearance 6, via-site pair 4, sketch 4, self-check 3, other 2), pour completion 5, dynamic
+  2; 0 "no room". Negotiator holds 205–215 paths/it, 156–175 survive metrization. Commit phase 44 % runtime. No option is a lever.
+  Ranked: A4 ≈ 25–35, NX neck ≈ 12, HC NPTH hole clearance 6, A2 6 + detours, A5 8–10, A11 pour-cut ≈ 5+2, taut slack band 2–3;
+  not levers: A16, A13, A10, stop rule, via cost.
+- Verify @7d87e7e (merged group 1): cargo 36 suites ok; pytest default 1 failed (test_operate_md_limitations_section expects
+  'net_priority' — A9 removed that limitation; test fixed c502dda), rest passed; dcsgone gate options 188/255, failed 67, vias 199,
+  42 it, stop "no gain", routing_new 0, unconnected 62, router 111 s, runtime 162 s.
+- Debug proptest counter-example dist_props::prop_arc_arc_matches_sampling (DX) → task HC part 2.
+- Group 2 dispatched: A4 (opus), A2 (opus), HC (sonnet: NPTH clearance + proptest oracle + TopoR backlog rows), A7 (sonnet),
+  A10+A11 (sonnet).

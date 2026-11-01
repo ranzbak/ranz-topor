@@ -16,3 +16,7 @@
   routed/total, failed, vias, routing_new, preexisting, unconnected, router_s, runtime_s, iterations, stop_reason, detour
   median/p90/max/count>1.5/top 5. PNG `--milestone m4 --task A2 --board dcsgonebadge` (A0's harness defaults apply the gate options).
 - eprom + wiccon: byte-identical or not-worse with the diff explained (gate numbers in global-constraints.md "Not worse than M3").
+- DX diagnosis (docs/progress/notes/m4-dcsgone-diagnosis.md, merged) item 4: A2 fixes 6 direct failures (#191/192/193/212/213/197 —
+  U7's pads block the search itself: no state on any exit even when priced) + the 5.2× and 3.6× detours. Use its ids/labels. A parallel
+  worker does A4 (own-net capacity in graph.rs fits_for/wall_r + search.rs callers) — keep your search.rs edits to state_point / los /
+  verts_near so the merge stays clean; report which of the DX cases route with A2 alone.
