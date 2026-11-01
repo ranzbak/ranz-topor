@@ -5432,6 +5432,11 @@ fn route_pass(
                             partials =
                                 partial_pass(&cx, &obs, &b.mg, &blocks, &eps_checker, base, &orig);
                         }
+                        // The probe and the stubs stop at the deadline: a run that ended "stuck"
+                        // before it but lost its block points / stubs to it is reported as a timeout.
+                        if crate::control::expired(cx.deadline) {
+                            timed_out = true;
+                        }
                     }
                 }
             }
