@@ -82,6 +82,8 @@ pub struct LayerObstacles {
     pub walls: Vec<Wall>,
     anchor_grid: Grid<usize>,
     wall_grid: Grid<usize>,
+    /// [`ObstacleSet::query_grow`] of the set this layer belongs to.
+    cell: f64,
 }
 
 impl LayerObstacles {
@@ -99,7 +101,14 @@ impl LayerObstacles {
             walls,
             anchor_grid,
             wall_grid,
+            cell,
         }
+    }
+
+    /// Bound on `rho - r_core` of any obstacle of this layer for any connection (the set's
+    /// [`ObstacleSet::query_grow`]). O(1).
+    pub fn query_grow(&self) -> f64 {
+        self.cell
     }
 }
 

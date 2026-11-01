@@ -82,6 +82,7 @@ Path search tuning.
 | `detour_factor` | float | `2.0` |  | 1 .. 100 | A connection longer than this multiple of its ghost-line length is treated as a detour and ripped. |
 | `margin_um` | float | `5` | µm | 0 .. 1000 | Safety margin added to every clearance during search. |
 | `zero_slack_retry` | bool | `true` |  | true\|false | One extra pass lets a connection use a corridor pinched below the margin but not below the rules. |
+| `zero_slack_failed` | bool | `true` |  | true\|false | The zero-slack pass also tries connections that failed, before any length gain of routed ones (a connection whose only corridor is pinched below the margin still gets its attempt). *Since 0.5.0.* |
 | `exit_stubs` | str | `"auto"` |  | auto\|all\|off | Pad exit stubs for fine-pitch pads: auto, all or off. *Since 0.5.0.* |
 | `steiner` | bool | `true` |  | true\|false | Allow same-net T-junctions in the middle of a track instead of only at pads. *Since 0.5.0.* |
 | `dangling_ends` | str | `"continue"` |  | continue\|drop | What to do with existing track ends that connect to nothing: continue them or drop them. *Since 0.5.0.* |
@@ -128,6 +129,9 @@ PathFinder constants; change only when you know the router.
 | `present_overuse` | float | `4.0` |  | 0 .. 100 | PathFinder present-congestion penalty per unit of overuse. |
 | `zero_slack_candidates` | int | `4` |  | 1 .. 64 | Candidate corridors tried per connection in the zero-slack retry. |
 | `relax_iter_cap` | int | `200` |  | 1 .. 10000 | Iteration cap of the relaxation (smoothing) pass. |
+| `own_net_capacity` | bool | `true` |  | true\|false | Capacity rule: a pad's own edges charge no clearance gap for its own net and give its corner radius back, same-net tracks need no gap between each other (false = the net-blind 0.4.0 rule). *Since 0.5.0.* |
+| `wall_aware_capacity` | bool | `true` |  | true\|false | Capacity rule: on an edge with an own-net end, walls along it that are not its ends (board edge, keepouts, long pad sides) remove the part they block. *Since 0.5.0.* |
+| `transit_pinch` | bool | `true` |  | true\|false | Search: refuse to pass around a pad or via that a wall (board edge, keepout, other copper) pinches below the track's width plus clearances. *Since 0.5.0.* |
 | `drc_loop_cap` | int | `5` |  | 1 .. 50 | Maximum route / DRC / re-route rounds. |
 
 ## Set in KiCad, not in `topor.toml`

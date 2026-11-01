@@ -378,6 +378,14 @@ impl MultiGraph {
         &self.blocked_by[t]
     }
 
+    /// Set the capacity rule of every layer graph (M4-D1, `Options.expert.own_net_capacity` /
+    /// `wall_aware_capacity`). O(layers).
+    pub fn set_capacity_mode(&mut self, mode: crate::graph::CapacityMode) {
+        for c in &mut self.layers {
+            c.g.cap_mode = mode;
+        }
+    }
+
     /// Sites activated for `conn`, in activation order. O(1).
     pub fn sites_of(&self, conn: usize) -> &[usize] {
         self.conn_sites.get(conn).map_or(&[], |v| v.as_slice())
@@ -426,8 +434,9 @@ impl MultiGraph {
         let ids = self.alloc_legs(conn.id, path.legs.len());
         let (w, clr) = (conn.width as f64, conn.clearance as f64);
         for (leg, &k) in path.legs.iter().zip(&ids) {
-            self.layers[leg.layer_idx].g.insert_path(
+            self.layers[leg.layer_idx].g.insert_path_net(
                 k,
+                conn.net,
                 leg.start,
                 leg.goal,
                 &leg.crossings,

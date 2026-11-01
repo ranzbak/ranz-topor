@@ -137,15 +137,25 @@ fn main() {
     sizes.dedup();
     let fit_checker = Checker::new(&model, &opts);
     let t = Instant::now();
-    let sites = via_sites(
-        &model,
-        &obs,
-        &fit_checker,
-        &routable,
-        &escape,
-        &sizes,
-        opts.margin_nm as f64,
-    );
+    // as `route()`: one routable layer and no pour target -> no via sites
+    let needs_sites = routable.len() >= 2
+        || dec
+            .connections
+            .iter()
+            .any(|c| matches!(c.to.kind, TermKind::Pour(_)));
+    let sites = if needs_sites {
+        via_sites(
+            &model,
+            &obs,
+            &fit_checker,
+            &routable,
+            &escape,
+            &sizes,
+            opts.margin_nm as f64,
+        )
+    } else {
+        Vec::new()
+    };
     println!(
         "sites {} ({:.2}s), sizes {:?}",
         sites.len(),
@@ -195,6 +205,11 @@ fn main() {
     let t = Instant::now();
     let mut mg =
         MultiGraph::build_on(&model, &mut obs, sites, &routable, &terms, &rules).expect("mg");
+    mg.set_capacity_mode(topor_engine::graph::CapacityMode {
+        own_net: opts.expert.own_net_capacity,
+        wall_aware: opts.expert.wall_aware_capacity,
+        transit: opts.expert.transit_pinch,
+    });
     println!("multigraph {:.2}s", t.elapsed().as_secs_f64());
     for (li, c) in mg.layers.iter().enumerate() {
         let x: usize = (0..c.g.edges.len()).map(|e| c.g.slot_count(e)).sum();
@@ -587,7 +602,7 @@ fn main() {
                     ge.b, vb.at.x * 1e-6, vb.at.y * 1e-6, vb.r, vb.nets, vb.owner.clone().unwrap_or_default(),
                     (va.at - vb.at).len(), ge.cap, needs, ge.c_e, ge.end_gaps(), ge.constraint, ge.owner_nets,
                     ge.faces.map(|f| f.map(|f| g.faces[f].inside)), ge.along,
-                    g.passable(e, c.net), g.fits(e, c.width as f64, cc)
+                    g.passable(e, c.net), g.fits_for(e, c.net, c.width as f64, cc)
                 );
             }
         }
@@ -661,7 +676,7 @@ fn main() {
                         ge.end_gaps(),
                         if ge.constraint { format!("CONSTR{:?} ", ge.owner_nets) } else { String::new() },
                         if ge.along.is_some() { "ALONG " } else { "" },
-                        g.fits(e, c.width as f64, cc),
+                        g.fits_for(e, c.net, c.width as f64, cc),
                         g.passable(e, c.net)
                     );
                 }
@@ -720,7 +735,7 @@ fn main() {
                     for &(e, _) in &leg.crossings {
                         let ge = &g.edges[e];
                         let pass = g.passable(e, c.net);
-                        let fits = g.fits(e, c.width as f64, cc);
+                        let fits = g.fits_for(e, c.net, c.width as f64, cc);
                         if pass && fits && ge.cross.is_empty() {
                             continue;
                         }
@@ -771,7 +786,7 @@ fn main() {
                     for &(e, _) in &leg.crossings {
                         let ge = &g.edges[e];
                         let pass = g.passable(e, c.net);
-                        let fits = g.fits(e, c.width as f64, cc);
+                        let fits = g.fits_for(e, c.net, c.width as f64, cc);
                         if pass && fits {
                             continue;
                         }

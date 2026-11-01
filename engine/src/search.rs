@@ -881,6 +881,13 @@ impl<'a> Layered<'a> {
         if st.closed.contains(&key) {
             return;
         }
+        // A4 transit pinch: the face transit from the parent's crossing (same layer) around
+        // their shared vertex must have room (refused, not priced: the geometry cannot realise
+        // it at any cost; the margin-0 zero-slack search re-tests at its own margin)
+        let pn = &st.nodes[parent];
+        if pn.kind == K_EDGE && pn.layer == layer && !sr.transit_ok(fin, pn.edge, e) {
+            return;
+        }
         if sr.strict_unfit && !sr.fits(e) {
             return;
         }
@@ -1358,6 +1365,12 @@ struct Search<'a> {
     pw_vertex: RefCell<HashMap<usize, bool>>,
     /// Candidate lists of grid-aligned query boxes, `[vertices, walls]` (see `cached_near`).
     near: [RefCell<NearCache>; 2],
+    /// Wall term of the capacity rule (`RouteGraph::wall_free_len`) of this search's net /
+    /// width / clearance, keyed by `(edge, lo, hi, c_wall bits)` (membership only). About one
+    /// entry per own-end edge the search tests: `O(Σ_{v own} deg(v))` entries, `O(k log k)` each.
+    wall_memo: RefCell<HashMap<(usize, u64, u64, u64), f64>>,
+    /// `RouteGraph::transit_fits` per `(face, edge, edge)` (membership only).
+    transit_memo: RefCell<HashMap<(usize, usize, usize), bool>>,
 }
 
 impl<'a> Search<'a> {
@@ -1394,6 +1407,8 @@ impl<'a> Search<'a> {
             ok_memo: RefCell::new(HashMap::new()),
             pw_vertex: RefCell::new(HashMap::new()),
             near: [RefCell::new(HashMap::new()), RefCell::new(HashMap::new())],
+            wall_memo: RefCell::new(HashMap::new()),
+            transit_memo: RefCell::new(HashMap::new()),
         }
     }
 
@@ -1463,15 +1478,49 @@ impl<'a> Search<'a> {
     fn hard(&self, e: usize) -> bool {
         let ge = &self.g.edges[e];
         ge.along.is_some()
-            || ge.cap < self.w + self.eps + ge.end_gaps() as f64 * self.c.max(ge.c_e)
+            || !self
+                .g
+                .fits_empty_with(e, self.net, self.w, self.c, self.eps, |lo, hi, cw| {
+                    self.wall_free(e, lo, hi, cw)
+                })
             || !ge
                 .faces
                 .iter()
                 .all(|f| f.is_some_and(|f| self.g.faces[f].inside))
     }
 
+    /// The edge still fits this connection (`RouteGraph::fits_for`, own-net / same-net,
+    /// wall-aware; the wall term memoised per search). O(n_max) + O(k log k) once per edge.
     fn fits(&self, e: usize) -> bool {
-        self.g.fits_at(e, self.w, self.c, self.eps)
+        self.g
+            .fits_for_with(e, self.net, self.w, self.c, self.eps, |lo, hi, cw| {
+                self.wall_free(e, lo, hi, cw)
+            })
+    }
+
+    /// Memoised `RouteGraph::transit_fits` of this search's net / width / clearance for the
+    /// transit of face `f` from `e1` to `e2`. O(k) once per transit.
+    fn transit_ok(&self, f: usize, e1: usize, e2: usize) -> bool {
+        let key = (f, e1.min(e2), e1.max(e2));
+        if let Some(&v) = self.transit_memo.borrow().get(&key) {
+            return v;
+        }
+        let v = self
+            .g
+            .transit_fits(f, e1, e2, self.net, self.w, self.c, self.eps);
+        self.transit_memo.borrow_mut().insert(key, v);
+        v
+    }
+
+    /// Memoised `RouteGraph::wall_free_len` of edge `e` over `[lo, hi]` at wall clearance `cw`.
+    fn wall_free(&self, e: usize, lo: f64, hi: f64, cw: f64) -> f64 {
+        let key = (e, lo.to_bits(), hi.to_bits(), cw.to_bits());
+        if let Some(&v) = self.wall_memo.borrow().get(&key) {
+            return v;
+        }
+        let v = self.g.wall_free_len(e, self.net, cw, lo, hi);
+        self.wall_memo.borrow_mut().insert(key, v);
+        v
     }
 
     /// Soft element of the topological ghost: the slot search cannot cross `e` as it stands
@@ -2100,7 +2149,20 @@ pub fn revalidate_path(mg: &MultiGraph, c: &Connection, p: &SlotPath) -> Option<
                     break;
                 }
                 let e_out = leg.crossings[k].0;
-                if !g.passable(e_out, c.net) || !g.fits(e_out, w, clr) {
+                if !g.passable(e_out, c.net) || !g.fits_for(e_out, c.net, w, clr) {
+                    return None;
+                }
+                if k > 0
+                    && !g.transit_fits(
+                        leg.faces[k],
+                        leg.crossings[k - 1].0,
+                        e_out,
+                        c.net,
+                        w,
+                        clr,
+                        g.rules.eps,
+                    )
+                {
                     return None;
                 }
                 let near_v = leg_near_v(g, leg, k)?;

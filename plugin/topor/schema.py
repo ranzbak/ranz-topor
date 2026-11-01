@@ -124,6 +124,8 @@ SETTINGS: list[Setting] = [
     _s("search", "margin_um", "float", 5, "Safety margin added to every clearance during search.", unit="µm", range=(0, 1000), engine="margin_nm"),
     _s("search", "zero_slack_retry", "bool", True, "One extra pass lets a connection use a corridor pinched below the margin but not below the rules.",
        engine="zero_slack_retry"),
+    _s("search", "zero_slack_failed", "bool", True, "The zero-slack pass also tries connections that failed, before any length gain of routed ones (a connection whose only corridor is pinched below the margin still gets its attempt).",
+       engine="zero_slack_failed", since=V5),
     _s("search", "exit_stubs", "str", "auto", "Pad exit stubs for fine-pitch pads: auto, all or off.", choices=("auto", "all", "off"), since=V5),
     _s("search", "steiner", "bool", True, "Allow same-net T-junctions in the middle of a track instead of only at pads.", since=V5),
     _s("search", "dangling_ends", "str", "continue", "What to do with existing track ends that connect to nothing: continue them or drop them.",
@@ -154,6 +156,12 @@ SETTINGS: list[Setting] = [
     _s("expert", "present_overuse", "float", 4.0, "PathFinder present-congestion penalty per unit of overuse.", range=(0, 100), engine="expert.present_overuse"),
     _s("expert", "zero_slack_candidates", "int", 4, "Candidate corridors tried per connection in the zero-slack retry.", range=(1, 64), engine="expert.zero_slack_candidates"),
     _s("expert", "relax_iter_cap", "int", 200, "Iteration cap of the relaxation (smoothing) pass.", range=(1, 10000), engine="expert.relax_iter_cap"),
+    _s("expert", "own_net_capacity", "bool", True, "Capacity rule: a pad's own edges charge no clearance gap for its own net and give its corner radius back, same-net tracks need no gap between each other (false = the net-blind 0.4.0 rule).",
+       engine="expert.own_net_capacity", since=V5),
+    _s("expert", "wall_aware_capacity", "bool", True, "Capacity rule: on an edge with an own-net end, walls along it that are not its ends (board edge, keepouts, long pad sides) remove the part they block.",
+       engine="expert.wall_aware_capacity", since=V5),
+    _s("expert", "transit_pinch", "bool", True, "Search: refuse to pass around a pad or via that a wall (board edge, keepout, other copper) pinches below the track's width plus clearances.",
+       engine="expert.transit_pinch", since=V5),
     _s("expert", "drc_loop_cap", "int", 5, "Maximum route / DRC / re-route rounds.", range=(1, 50), engine="drc_loop_cap"),
 ]
 

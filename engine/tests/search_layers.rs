@@ -775,9 +775,12 @@ fn ghost_soft(o: &GhostOut) -> bool {
 fn ghost_is_never_stricter_than_search() {
     let ctx = Ctx::new();
     // (1) Two 0.6 x 0.3 mm rect SMD pads of one net on F.Cu, 10 mm apart: the search leaves a pad
-    // through the pad's own polygon edges (statically unfit for the pad's own net: the corner
-    // vertices count as clearance gaps), crossed as overuse. The geometric ghost treated every
-    // unfit edge as hard and found no path at all (dcsgone: ghost None for 166 of 231).
+    // through the pad's own polygon edges. Net-blind (M3) they are statically unfit (the corner
+    // vertices count as clearance gaps) and were crossed as overuse, the ghost's first soft
+    // element; with the own-net capacity of M4-D1 (A4: own ends charge no gap, design note
+    // m4-capacity-steiner-design.md §1 row 6: tip 0.3 / need 0.205) they fit the pad's own net,
+    // so search and ghost agree and the ghost has no soft element at all. (The geometric ghost
+    // of M2 treated every unfit edge as hard and found no path: dcsgone ghost None for 166/231.)
     let m = model_raw(
         &[
             rect_pad_json("a", 1, 10.0, 10.0, 0.6, 0.3),
@@ -801,20 +804,20 @@ fn ghost_is_never_stricter_than_search() {
         .collect();
     assert!(
         spokes.iter().all(|&e| !g0.fits(e, 250_000.0, 200_000.0)),
-        "every edge around the rect pad centre is unfit for its own net"
+        "net-blind (M3): every edge around the rect pad centre is unfit"
     );
+    assert!(
+        spokes.iter().all(|&e| g0.fits_for(e, 1, 250_000.0, 200_000.0)),
+        "own-net: every edge around the rect pad centre fits the pad's own net"
+    );
+    assert!(spokes.iter().all(|&e| !g0.fits_for(e, 2, 250_000.0, 200_000.0)));
     let start = [(0, va)];
     let g = goal(&[(0, vb)]);
     let found_p = found(search(&b.mg, &b.obs, &c, &start, &g, &ctx.params()));
     assert!(found_p.legs[0].crossings.len() >= 2, "{found_p:?}");
     let gh = ghost(&b.mg, &b.obs, &c, &start, &g, &ctx.params());
-    let Some((gp, be, bs, _)) = &gh else {
-        panic!("the ghost must find the path the search found");
-    };
-    assert_eq!(*bs, None);
-    let (li, e) = be.expect("the first soft element is a pad-polygon edge");
-    assert_eq!(li, 0);
-    assert!(!g0.fits(e, 250_000.0, 200_000.0) && g0.passable(e, 1), "e{e}");
+    assert!(!ghost_soft(&gh), "fits, ghost not soft: {gh:?}");
+    let (gp, ..) = gh.as_ref().expect("the ghost must find the path the search found");
     assert!(gp.est_len >= 10.0 * MM - 1.0 && gp.est_len < 10.5 * MM, "{}", gp.est_len);
     assert_eq!(gp.candidates, 0, "no clearance candidates in the topological ghost");
 

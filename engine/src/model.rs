@@ -643,6 +643,21 @@ pub struct Expert {
     pub zero_slack_candidates: usize,
     /// Relaxation sweep cap (single source; see [`Options::relax_cap`]).
     pub relax_iter_cap: u32,
+    /// Capacity rule (M4-D1, `topor.toml [expert] own_net_capacity`): a pad's own edges charge
+    /// no clearance gap for its own net and give the corner radius back, same-net strands
+    /// charge no gap between each other. `false` = the net-blind M3 rule (identity
+    /// experiments only).
+    pub own_net_capacity: bool,
+    /// Capacity rule (M4-D1, `topor.toml [expert] wall_aware_capacity`): with an own end,
+    /// foreign walls along the edge that are not its ends (outline, keepouts, long pad sides)
+    /// remove the blocked part of the edge. `false` = F6 behaviour (outline-wall corridors
+    /// accepted that the metrization then rejects).
+    pub wall_aware_capacity: bool,
+    /// Search (A4, `topor.toml [expert] transit_pinch`): the slot search refuses a face
+    /// transit around a vertex that a foreign wall pinches below the strand's need (a via next
+    /// to the board edge: the vertex-only edge capacity sees only the outline corner), where
+    /// the metrization would report the wall grazed mid-span. `false` = M3.
+    pub transit_pinch: bool,
 }
 
 impl Default for Expert {
@@ -654,6 +669,9 @@ impl Default for Expert {
             present_overuse: 4.0,
             zero_slack_candidates: 4,
             relax_iter_cap: 200,
+            own_net_capacity: true,
+            wall_aware_capacity: true,
+            transit_pinch: true,
         }
     }
 }
@@ -698,6 +716,11 @@ pub struct Options {
     /// that is pinched below the margin ε (but not below the rules) with margin 0 against that
     /// corridor only; kept when it shortens the routing. The harness DRC is the final judge.
     pub zero_slack_retry: bool,
+    /// Router (A4, `topor.toml [search] zero_slack_failed`): the zero-slack retry also tries
+    /// the connections that failed (not permanently), ahead of the length gains of routed
+    /// ones: a connection whose only corridor is pinched below ε gets its margin-0 attempt even
+    /// when the negotiation never routed it at ε. Off = M3 (routed connections only).
+    pub zero_slack_failed: bool,
     /// Router (D-1, `topor.toml [search] strict_unfit_edges`): the layered search rejects a
     /// graph edge that is too narrow for the connection's trace even when empty
     /// (`!fits(e)`) instead of pricing it as an overuse crossing. Off by default (the default
@@ -758,6 +781,7 @@ impl Default for Options {
             pinned: BTreeMap::new(),
             drc_spots: Vec::new(),
             zero_slack_retry: true,
+            zero_slack_failed: true,
             strict_unfit_edges: false,
             pour_listed_via_goals: false,
             via_cost_nm: 2_000_000,
