@@ -114,7 +114,7 @@ def test_keys_without_effect_say_so():
     """Ruling C34 / F I-7: a live key that 0.4.0 does not apply keeps its key, and its doc string (rendered into
     topor.toml and configuration.md) ends with the no-effect marker or the precise partial statement."""
     by = schema.SETTINGS_BY_KEY
-    for k in (("run", "detour_reference"),):  # A9: pour_served / priority / ignore_pads are applied now
+    for k in ():  # A9 / A7: pour_served, priority, ignore_pads, detour_reference are applied now
         assert by[k].doc.endswith(NO_EFFECT), (k, by[k].doc)
         assert schema.available(by[k])  # stays a live key: a user's value carries into 0.5.0
     for k, words in PARTIAL.items():
@@ -123,6 +123,7 @@ def test_keys_without_effect_say_so():
     md = (ROOT / "docs/user/configuration.md").read_text()
     text = render_toml(Config.defaults())
     assert md.count(NO_EFFECT) >= 1 and text.count(NO_EFFECT) >= 1
+    assert "detour_reference" in md and "No effect in 0.4.0; applied from 0.5.0.) |" not in md.split("`detour_reference`")[1].split("\n")[0]
 
 
 def test_live_plugin_keys_have_a_consumer_or_the_marker():

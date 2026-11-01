@@ -84,7 +84,7 @@ SETTINGS: list[Setting] = [
        unit="s", range=(0, 86400)),
     _s("run", "refill_after_accept", "bool", False, "After Accept, refill all zones from topor (a second undo step in KiCad). false = Accept is exactly one undo step; press B (Edit → Fill All Zones) yourself.",
        kicad="KiCad → Edit → Fill All Zones (B)"),
-    _s("run", "detour_reference", "bool", True, "Compare every routed connection with a DRC-feasible direct path and report detours in the run report. (No effect in 0.4.0; applied from 0.5.0.)"),
+    _s("run", "detour_reference", "bool", True, "Compare every routed connection with a DRC-feasible direct path (one extra search per connection, 10 % of the remaining time budget at most) and report detours against it in the run report; false = the report compares with the topological ghost line only.", engine="detour_reference"),
     # ---- [nets]
     _s("nets", "do_not_touch", "list", [], "Net names or glob patterns whose copper is a fixed obstacle and never routed, ripped or smoothed.",
        elem="str"),
@@ -183,7 +183,7 @@ ENGINE_INTERNAL = {
     "ignore_pads": "passed through from [nets] ignore_pads (REF.PAD strings) by run.build_options",
     "pour_served": "passed through from [nets] pour_served (boolean entries only) by run.build_options",
     "via_cost_by_net": "built per run from [vias] cost_by_priority / cost_by_netclass",
-    "detour_reference_budget_pct": "internal budget of the detour reference search; run.detour_reference will switch it (0.5.0)",
+    "detour_reference_budget_pct": "internal: the run passes 10 (percent of the remaining budget) whenever run.detour_reference is on",
 }
 
 # KiCad-owned behaviours, written as comment-only entries: (name, place)

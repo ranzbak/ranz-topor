@@ -95,6 +95,8 @@ class RunReport:
         ]
         if f.get("detour_line"):
             lines.append(f"Detours {f['detour_line']}")
+        if f.get("detour_ghost_line"):
+            lines.append(f"Detours vs ghost line {f['detour_ghost_line']}")
         lines += [
             f"Stopped: {_na(f.get('stop_reason'))} after {_na(f.get('iterations'))} iterations, "
             f"{_na(f.get('elapsed_s'))} s, {_na(f.get('threads'))} threads",
@@ -164,6 +166,8 @@ class RunReport:
             out += [f"| {r['net']} | {r['length_mm']} | {_na(r['length_before_mm'])} |" for r in rows] + [""]
         out.append(f"Outside pads {f['length_mm']} mm (current {_na(f.get('length_before_mm'))} mm).")
         out.append(f"Detours: {f.get('detour_line') or 'n/a'}")
+        if f.get("detour_ghost_line"):
+            out.append(f"Detours vs ghost line: {f['detour_ghost_line']}")
         out += [f"- {r.get('name')} {r.get('from')} -> {r.get('to')}: ratio {r.get('ratio')}"
                 for r in f.get("detour_top") or []]
         return out
@@ -299,7 +303,10 @@ def build_report(result: dict, drc: dict | None, cfg, findings, scope, before_st
     scope = {"mode": scope} if isinstance(scope, str) else dict(scope or {})
     conns = result.get("connections") or []
     items = result.get("items") or []
-    stats = detour_stats(conns)
+    ref_stats = detour_stats(conns, field="ref_len_nm")
+    ghost_stats = detour_stats(conns)
+    # the DRC-feasible reference when the engine computed it (M3-R15), else the topological ghost
+    stats = ref_stats if ref_stats and ref_stats.get("n") else ghost_stats
     inc = drc.get("incomplete") or {}
     nd = cfg.non_defaults() if cfg is not None else {}
     rows = []
@@ -331,6 +338,7 @@ def build_report(result: dict, drc: dict | None, cfg, findings, scope, before_st
         "drc_by_type_new": drc.get("by_type_new"), "drc_by_type_pre": drc.get("by_type_preexisting"),
         "drc_rounds": timing.get("drc_rounds"),
         "detour_line": detour_line(stats), "detour_top": (stats or {}).get("top10", [])[:5],
+        "detour_ghost_line": detour_line(ghost_stats) if stats is not ghost_stats else None,
         "stop_reason": result.get("stop_reason"), "iterations": result.get("iterations"),
         "elapsed_s": None if el is None else round(el, 1), "threads": result.get("threads_used"),
         "scope": scope.get("mode"),

@@ -781,6 +781,14 @@ pub struct Options {
     /// to its pour; pour-less / fill-less nets get no connections), `false` = route it as a
     /// signal net even if it has a pour (the pour is not used to join pads). Absent = automatic.
     pub pour_served: BTreeMap<String, bool>,
+    /// Offline / report only (M3-R15): also search every connection once on the fixed copper
+    /// alone with full clearance and width (a DRC-feasible shortest path) and report it as
+    /// `ConnReport::ref_len_nm`. Never changes the routing. Off by default (costs one search per
+    /// connection).
+    pub detour_reference: bool,
+    /// Share (percent, 0..=100) of the remaining wall-clock budget the reference searches may
+    /// use; connections not finished in time fall back to the ghost (`ref_kind = "ghost"`).
+    pub detour_reference_budget_pct: f64,
 }
 
 impl Default for Options {
@@ -816,6 +824,8 @@ impl Default for Options {
             exclude_nets: Vec::new(),
             ignore_pads: Vec::new(),
             pour_served: BTreeMap::new(),
+            detour_reference: false,
+            detour_reference_budget_pct: 10.0,
         }
     }
 }

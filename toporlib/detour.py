@@ -6,21 +6,25 @@ from __future__ import annotations
 MM = 1_000_000  # nm per mm
 
 
-def detour_stats(connections, ref_key: str = "ghost_len_nm") -> dict | None:
-    """Detour ratio (routed length / reference length) over routed connections (ruling M3-R11).
+SHORT_REF_NM = 2 * MM  # references shorter than this inflate the ratio (caption flag)
 
-    The reference is the connection field `ref_key`: `ghost_len_nm` (the topological ghost, the
-    default) or the DRC-feasible shortest path of M3-R15 (`detour_ref_len_nm`, A7).
-    Returns None when no connection carries the field (old engine). Connections
-    that are not routed, or have a null / non-positive reference length, count as `no_reference`.
+
+def detour_stats(connections, field: str = "ghost_len_nm") -> dict | None:
+    """Detour ratio (routed length / reference length) over routed connections (M3-R11, M3-R15).
+
+    `field` names the reference: `ghost_len_nm` (topological ghost, default) or `ref_len_nm`
+    (DRC-feasible reference; `ref_kind == "ghost"` marks a per-connection ghost fallback, counted
+    in `ghost_fallbacks`). Returns None when no connection carries the field (old engine / option
+    off). Connections that are not routed, or have a null / non-positive reference, count as
+    `no_reference`. `short_ref` counts rows whose reference is < 2 mm (their ratio is noisy).
     """
     conns = list(connections or [])
-    if not any(ref_key in c for c in conns):
+    if not any(field in c for c in conns):
         return None
     rows: list[dict] = []
     no_ref = 0
     for c in conns:
-        ghost = c.get(ref_key)
+        ghost = c.get(field)
         length = c.get("length_nm")
         if c.get("status") != "routed" or not ghost or ghost <= 0 or length is None:
             no_ref += 1
@@ -30,6 +34,8 @@ def detour_stats(connections, ref_key: str = "ghost_len_nm") -> dict | None:
             "from": c.get("from"), "to": c.get("to"),
             "length_mm": round(length / MM, 3), "ghost_mm": round(ghost / MM, 3),
             "ratio": round(length / ghost, 3),
+            "ref_kind": c.get("ref_kind") if field == "ref_len_nm" else None,
+            "short_ref": ghost < SHORT_REF_NM,
         })
     ratios = sorted(r["ratio"] for r in rows)
     n = len(ratios)
@@ -47,11 +53,17 @@ def detour_stats(connections, ref_key: str = "ghost_len_nm") -> dict | None:
         "median": pct(0.5), "p90": pct(0.9), "max": ratios[-1] if n else None,
         "count_gt_1_5": sum(1 for x in ratios if x > 1.5),
         "n": n, "no_reference": no_ref, "top10": top[:10],
+        "field": field,
+        "ghost_fallbacks": sum(1 for r in rows if r["ref_kind"] == "ghost"),
+        "short_ref": sum(1 for r in rows if r["short_ref"]),
     }
 
 
 def detour_line(stats: dict | None) -> str | None:
     if not stats or not stats.get("n"):
         return None
-    return (f"detour median {stats['median']:.3f} p90 {stats['p90']:.3f} "
+    line = (f"detour median {stats['median']:.3f} p90 {stats['p90']:.3f} "
             f"max {stats['max']:.3f} >1.5: {stats['count_gt_1_5']}")
+    if stats.get("field") == "ref_len_nm":
+        line += f" (ghost fallbacks {stats.get('ghost_fallbacks', 0)})"
+    return line

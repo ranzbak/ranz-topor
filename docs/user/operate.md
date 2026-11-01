@@ -308,10 +308,12 @@ unsure about is kept. KiCad's DRC of the result stays the judge.
   outside board` (they are not counted in the connection total); `pour_served = true` makes the net's
   connections only pour connections, `false` routes it pad to pad although it has a pour.
 - **Existing copper `smooth`**: the engine treats it as `fixed` and says so in the report.
-- **`[run] detour_reference`** is accepted but has no effect in 0.4.0
-  (the report always lists the detour ratio = routed length / length of the connection's topological ghost
-  path, the shortest path the router finds for it on the empty board with the same layers and via rules;
-  `toporlib/detour.py`).
+- **`[run] detour_reference`** (default on, 0.5.0): the report's detour ratio is the routed length divided by the
+  length of a DRC-feasible reference path, one extra search per connection on the fixed copper only (full
+  clearance and width, same layers and via rules; at most 10 % of the remaining time budget). A connection whose
+  reference search fails or runs out of time falls back to its topological ghost path (the shortest path on the
+  empty board that may squeeze through foreign pads) and is counted as a "ghost fallback"; the report also lists
+  the ratio against the ghost line (`detour_ghost`). Off = ghost line only (`toporlib/detour.py`).
 - Keys marked *since 0.5.0* in [configuration.md](configuration.md) are written commented-out.
 
 ### While topor runs
