@@ -152,7 +152,10 @@ fn t_junction_onto_routed_sibling() {
         }
     }));
     clean(&m, &r);
-    // Pad to pad (M3): the pair is longer, nothing more is routed.
+    // Pad to pad (steiner off) routes no more. Since A6 (exit stubs, 3cddcc9) USB- U7.4 -> J1.B7
+    // routes pad to pad and takes the room U7.6 -> J1.A6 needs (self-check, the same on the
+    // A6-only engine), so with both USB nets live the pad-to-pad pair is incomplete (7 of 8);
+    // the T routes all 8.
     let off = route(
         &m,
         &Options {
@@ -160,13 +163,23 @@ fn t_junction_onto_routed_sibling() {
             ..usb()
         },
     );
+    assert!(off.connections.iter().all(|c| !c.junction));
+    assert!(r.routed >= off.routed, "{} < {}", r.routed, off.routed);
+    // The pad-to-pad pair (both routed with USB- only an obstacle) is longer than the T pair.
+    let mut plus = usb();
+    plus.steiner = false;
+    plus.scope.nets = vec!["USB+".into()];
+    let offp = route(&m, &plus);
     let (u0, a0) = (
-        conn(&off, "USB+", "U7.6", "J1.A6"),
-        conn(&off, "USB+", "J1.A6", "J1.B6"),
+        conn(&offp, "USB+", "U7.6", "J1.A6"),
+        conn(&offp, "USB+", "J1.A6", "J1.B6"),
+    );
+    assert_eq!(
+        (u0.status.as_str(), a0.status.as_str()),
+        ("routed", "routed")
     );
     assert!(!u0.junction && !a0.junction);
     assert!(pair < (u0.length_nm + a0.length_nm) as f64);
-    assert!(r.routed >= off.routed, "{} < {}", r.routed, off.routed);
 }
 
 /// A one-layer board with a hand track A1 -> A2 (kept, `existing_copper = fixed`) and a third
@@ -247,9 +260,17 @@ fn t_junction_onto_hand_copper() {
     assert!(off.connections[0].length_nm as f64 > 11.0 * MM);
 }
 
-/// `steiner = false` is the pre-A5 router: the result digests (items, per-connection status /
-/// length / vias / reason, iterations) equal those of main 946530c on the USB crop and on the
-/// ripped eprom board (both layers), and no connection reports a junction.
+/// `steiner = false` runs no junction code path: the result digests (items, per-connection
+/// status / length / vias / reason, iterations) equal those of the engines without A5, and no
+/// connection reports a junction. Evidence for the pins (TE, the `probe` digest of this file on
+/// each engine, threads 1): main 946530c (before A5 / A6) crop `0xc58dd349af135e63`, eprom
+/// `0x4bbf8e934c970d2f`; A6 alone (3cddcc9: exit stubs, U7 bridges, touching same-net pads one
+/// cluster, crop 41 -> 37 connections) crop `0xf913eefd138a3898`, which the A5 merge (a233d62)
+/// reproduces with steiner off; A16 (escalating rip cost) + A13 (via relaxation, 6ff3d00) crop
+/// `0xeb872b371095cb1d`, and 6ff3d00 with `via_relaxation = false, ripup_growth = 1,
+/// ripup_max_per_pair = 1000` (the pre-A16 constant rip cost, no backstop) gives `0xf913...`
+/// again, so that change is theirs; A14 (ea1f064) and TE leave both unchanged. The eprom digest
+/// is the same on every engine (no stubs, no rips, no via to relax).
 #[test]
 fn steiner_off_is_m3_behaviour() {
     let off = Options {
@@ -262,11 +283,26 @@ fn steiner_off_is_m3_behaviour() {
     assert!(re.connections.iter().all(|c| !c.junction));
     assert_eq!(
         (digest(&rc), digest(&re)),
-        (CROP_DIGEST_946530C, EPROM_DIGEST_946530C),
-        "steiner off differs from main"
+        (CROP_DIGEST_EA1F064, EPROM_DIGEST_946530C),
+        "steiner off differs from the engine without A5"
+    );
+    // With A16 / A13 neutralised: the A6-only engine, bit for bit.
+    let a6 = Options {
+        via_relaxation: false,
+        ripup_growth: 1.0,
+        ripup_max_per_pair: 1000,
+        ..off
+    };
+    let r6 = route(&crop(), &a6);
+    assert!(r6.connections.iter().all(|c| !c.junction));
+    assert_eq!(
+        digest(&r6),
+        CROP_DIGEST_3CDDCC9,
+        "steiner off differs from A6 alone"
     );
 }
-const CROP_DIGEST_946530C: u64 = 0xc58d_d349_af13_5e63;
+const CROP_DIGEST_EA1F064: u64 = 0xeb87_2b37_1095_cb1d;
+const CROP_DIGEST_3CDDCC9: u64 = 0xf913_eefd_138a_3898;
 const EPROM_DIGEST_946530C: u64 = 0x4bbf_8e93_4c97_0d2f;
 
 /// A junction whose final chord meets the sibling below `steiner_min_angle_deg` is refused: the

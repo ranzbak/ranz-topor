@@ -5,7 +5,8 @@ use topor_engine::geom::quant::TrackPrim;
 use topor_engine::geom::{dequantise, Vec2};
 use topor_engine::model::{BoardModel, ExistingCopper, Item, Options};
 use topor_engine::obstacle::ObstacleSet;
-use topor_engine::route::{route, wire_stats, RouteResult};
+use topor_engine::control::RunControl;
+use topor_engine::route::{route, route_with, wire_stats, RouteResult};
 use topor_engine::sketch::{
     build_layer_cdt, sketch_from_crossings, unanchored_bends, ConstraintSet,
 };
@@ -1200,34 +1201,110 @@ fn ghost_len_reported_for_every_connection() {
     assert!(v["connections"][0]["ghost_len_nm"].is_null());
 }
 
+/// Elapsed run time (s, the engine's own clock) at which the PathFinder loop of the first pass
+/// starts: the `route` phase of the [`RunControl`] progress before iteration 1 has ended. With
+/// `cancel_after_it1` (calibration run) the poller asks for a cancel once iteration 1 has
+/// ended. `None` when the poller never saw that state. The poll loop is capped (10 min).
+fn watch_loop_start(
+    ctl: &RunControl,
+    cancel_after_it1: bool,
+) -> std::thread::JoinHandle<Option<f64>> {
+    let c2 = ctl.clone();
+    std::thread::spawn(move || {
+        let mut loop_at = None;
+        for _ in 0..600_000 {
+            let p = c2.snapshot();
+            if loop_at.is_none() && p.phase == "route" && p.iteration == 0 {
+                loop_at = Some(p.elapsed_s);
+            }
+            if p.phase == "done" {
+                break;
+            }
+            if cancel_after_it1 && p.iteration >= 1 {
+                c2.request_cancel();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        loop_at
+    })
+}
+
 /// Anytime (coordinator ruling Q2): a budget that ends inside the first iteration still emits
 /// the paths that iteration committed, metrized and self-checked like any other result, with
 /// `timed_out` set and every unrouted connection reporting `timeout`. Before the fix the loop
 /// broke before the metrization and the result was empty (`routed 0`, scaling diagnosis C).
-/// The budget is a wall clock: 0.5 s in release / 5 s in debug on a 2000-pair synth board whose
-/// setup takes ~0.2 s / ~2 s and whose first search phase (one thread) ~0.4 s / ~4 s.
+///
+/// The budget is a wall clock on a 2000-pair synth board (setup ~0.2 s, first search phase
+/// ~0.4 s, one thread, release, quiet machine). A fixed budget (it was 0.5 s release / 5 s
+/// debug) ends in the setup on a loaded machine, where no search ran and nothing can be emitted
+/// (the TE flake). So the budget is placed by measurement: a calibration run reports when the
+/// loop starts and how long iteration 1 searches and commits (`Options::profile`); the measured
+/// run gets the loop start plus half of that. The measured run counts only when its own loop
+/// started before its deadline and the deadline cut the search (some connection `timeout`);
+/// otherwise the machine changed speed between the two runs and the pair is repeated (at most 5
+/// attempts, then the test fails).
 #[test]
 fn anytime_timeout_emits_committed_subset() {
     let m = synth_model_grid(2000, 74, 74);
-    let o = Options {
-        wall_clock_s: if cfg!(debug_assertions) { 5.0 } else { 0.5 },
+    let base = Options {
         threads: 1,
         ..Options::default()
     };
-    let r = route(&m, &o);
-    assert!(r.timed_out);
-    assert!(r.routed > 0, "nothing emitted: {:?}", r.warnings);
-    assert!(r.routed < 2000, "the budget must end inside the run: {}", r.routed);
-    // release: the budget ends inside iteration 1 (the emitted subset is that iteration's);
-    // the unoptimised build may get further before it ends
-    assert!(r.iterations >= 1 && (cfg!(debug_assertions) || r.iterations == 1), "{}", r.iterations);
-    assert_eq!(r.zero_slack, "not run");
-    // unrouted: not searched before the deadline (`timeout`) or a genuine failure of a search
-    // / metrization that did finish
-    assert!(r.connections.iter().all(|c| c.status == "routed"
-        || c.reason == "timeout"
-        || c.reason.starts_with("blocked:")
-        || c.reason.starts_with("infeasible")
-        || c.reason.starts_with("self-check")));
-    clean(&m, &r);
+    for attempt in 0..5 {
+        // Calibration: no deadline, cancelled once iteration 1 has ended.
+        let ctl = RunControl::default();
+        let w = watch_loop_start(&ctl, true);
+        let cal = route_with(
+            &m,
+            &Options {
+                wall_clock_s: 0.0,
+                profile: true,
+                ..base.clone()
+            },
+            &ctl,
+        );
+        let (Some(loop_at), Some(p1)) = (
+            w.join().unwrap(),
+            cal.profile.as_ref().and_then(|p| p.first()).cloned(),
+        ) else {
+            continue;
+        };
+        let search = p1.search_s + p1.commit_s;
+        let budget = loop_at + 0.5 * search;
+        let ctl = RunControl::default();
+        let w = watch_loop_start(&ctl, false);
+        let r = route_with(
+            &m,
+            &Options {
+                wall_clock_s: budget,
+                ..base.clone()
+            },
+            &ctl,
+        );
+        let started = w.join().unwrap().is_some_and(|t| t < budget);
+        let cut = r.connections.iter().any(|c| c.reason == "timeout");
+        if !(started && cut) {
+            eprintln!(
+                "attempt {attempt}: budget {budget:.3} s (loop at {loop_at:.3} s, search \
+                 {search:.3} s) missed iteration 1 (loop started before: {started}, cut: {cut})"
+            );
+            continue;
+        }
+        assert!(r.timed_out);
+        assert!(r.routed > 0, "nothing emitted: {:?}", r.warnings);
+        assert!(r.routed < 2000, "the budget must end inside the run: {}", r.routed);
+        // the budget ends inside iteration 1 (the emitted subset is that iteration's)
+        assert_eq!(r.iterations, 1);
+        assert_eq!(r.zero_slack, "not run");
+        // unrouted: not searched before the deadline (`timeout`) or a genuine failure of a search
+        // / metrization that did finish
+        assert!(r.connections.iter().all(|c| c.status == "routed"
+            || c.reason == "timeout"
+            || c.reason.starts_with("blocked:")
+            || c.reason.starts_with("infeasible")
+            || c.reason.starts_with("self-check")));
+        clean(&m, &r);
+        return;
+    }
+    panic!("no budget ended inside iteration 1 in 5 measured attempts");
 }

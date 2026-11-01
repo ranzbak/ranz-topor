@@ -367,9 +367,15 @@ fn neck_to_pad_narrows_wide_net_at_fine_pitch_pad() {
 fn exit_stubs_off_matches_previous() {
     // Golden digest of the pre-A6 engine (main 946530c) on this fixture and options: FNV-1a 64
     // of the canonical JSON (sorted keys, no spaces) of `items`, plus the connection outcomes.
+    // The features merged after A6 that act on this fixture are off as well (TE): A5 Steiner
+    // T-junctions (U7.6 -> J1.A6 ends on a sibling, 1.39 mm instead of 2.41 mm pad to pad) and
+    // A13 via relaxation (moves the vias of connections 1 and 6). Until TE the A5 T here failed
+    // in its metrization and the default-option result still equalled this golden.
     let m = model();
     let opts = Options {
         exit_stubs: "off".into(),
+        steiner: false,
+        via_relaxation: false,
         ..usb_scope(&["USB-", "USB+", "Net-(J1-CC2)", "Net-(J1-CC1)"])
     };
     let p = plan(&m, &opts);
