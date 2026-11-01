@@ -545,26 +545,38 @@ fn walls_near(obs: &LayerObstacles, verts: &[VertexInfo], edges: &[GEdge]) -> Wa
         })
         .collect();
     let grow = obs.query_grow();
+    let ext = |v: &VertexInfo| {
+        v.anchor
+            .and_then(|ai| obs.anchors.get(ai))
+            .map_or(v.r, |a| a.r_core.max(v.r))
+    };
+    // one independent query per edge, in parallel; collected in edge order (deterministic)
+    let per_edge: Vec<Vec<usize>> = if obs.walls.is_empty() {
+        vec![Vec::new(); edges.len()]
+    } else {
+        use rayon::prelude::*;
+        edges
+            .par_iter()
+            .map(|ge| {
+                let (va, vb) = (&verts[ge.a], &verts[ge.b]);
+                let bb = Aabb {
+                    min: va.at,
+                    max: va.at,
+                }
+                .union(&Aabb {
+                    min: vb.at,
+                    max: vb.at,
+                })
+                .grow(ext(va).max(ext(vb)) + 2.0 * grow);
+                obs.query_walls(bb)
+            })
+            .collect()
+    };
     let mut start = Vec::with_capacity(edges.len() + 1);
-    let mut idx: Vec<u32> = Vec::new();
-    for ge in edges {
+    let mut idx: Vec<u32> = Vec::with_capacity(per_edge.iter().map(Vec::len).sum());
+    for ws in per_edge {
         start.push(idx.len() as u32);
-        let (va, vb) = (&verts[ge.a], &verts[ge.b]);
-        let ext = |v: &VertexInfo| {
-            v.anchor
-                .and_then(|ai| obs.anchors.get(ai))
-                .map_or(v.r, |a| a.r_core.max(v.r))
-        };
-        let bb = Aabb {
-            min: va.at,
-            max: va.at,
-        }
-        .union(&Aabb {
-            min: vb.at,
-            max: vb.at,
-        })
-        .grow(ext(va).max(ext(vb)) + 2.0 * grow);
-        idx.extend(obs.query_walls(bb).into_iter().map(|wi| wi as u32));
+        idx.extend(ws.into_iter().map(|wi| wi as u32));
     }
     start.push(idx.len() as u32);
     WallsNear { walls, start, idx }
