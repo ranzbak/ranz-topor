@@ -35,6 +35,8 @@ install_into() { # $1 = plugin-layout dir
     mkdir -p "$d/wheels"
     rm -f "$d"/wheels/topor_engine-*.whl
     cp plugin/plugin.json "$d/plugin.json"
+    rm -rf "$d/icons"
+    cp -r plugin/icons "$d/icons"  # toolbar button images named in plugin.json
     # Python packages: plugin/topor, toporlib (pure, no pcbnew), user docs. No harness/ (dev/test only).
     rm -rf "$d/topor" "$d/toporlib" "$d/docs"
     cp -r plugin/topor "$d/topor"
