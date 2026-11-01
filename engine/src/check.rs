@@ -148,6 +148,31 @@ fn zero_seg(c: Vec2, w: f64) -> Track {
     }
 }
 
+/// Copper-free hole as a track: a circle of diameter `d`, or for a slot the capsule of its
+/// short side along its long axis (axis-aligned, as `ObstacleSet::build` models it: the
+/// router and the Checker must see the same hole). O(1).
+fn hole_track(h: &crate::model::Hole) -> Track {
+    let c = h.at.to_vec2();
+    match h.slot {
+        Some([w, hh]) if w != hh => {
+            let half = 0.5 * (w - hh).abs() as f64;
+            let axis = if w >= hh {
+                Vec2 { x: half, y: 0.0 }
+            } else {
+                Vec2 { x: 0.0, y: half }
+            };
+            Track {
+                prim: Prim::Seg(Seg {
+                    a: c - axis,
+                    b: c + axis,
+                }),
+                w: w.min(hh) as f64,
+            }
+        }
+        _ => zero_seg(c, h.d as f64),
+    }
+}
+
 pub struct Checker {
     rules_min_clearance: f64,
     hole_clearance: f64,
@@ -226,7 +251,7 @@ impl Checker {
         for p in &model.pads {
             for &l in &p.layers {
                 // KiCad: max(item class, pad class, pad local override).
-                let own = (p.local_clearance.unwrap_or(0) as f64).max(c.clr(p.net));
+                let own = model.pad_own_clearance(p, c.clr(p.net));
                 c.add(
                     &[l],
                     Obstacle {
@@ -357,7 +382,7 @@ impl Checker {
                 &all,
                 Obstacle {
                     hole: None,
-                    geo: Geo::Track(zero_seg(h.at.to_vec2(), h.d as f64)),
+                    geo: Geo::Track(hole_track(h)),
                     net: owner.map_or(0, |p| p.net),
                     kind: Kind::Hole,
                     label: format!("hole:{},{}", h.at.x, h.at.y),

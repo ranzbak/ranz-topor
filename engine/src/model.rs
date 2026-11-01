@@ -457,14 +457,38 @@ impl BoardModel {
         }
     }
 
-    /// `max(item net clearance, pad net clearance, pad local clearance, board minimum)`, nm.
+    /// `max(item net clearance, pad net clearance, pad local clearance, board minimum)`, nm;
+    /// an NPTH pad also charges `hole_clearance` ([`BoardModel::pad_own_clearance`]).
     pub fn required_clearance(&self, net: i32, pad: &Pad) -> f64 {
         let r = &self.rules;
         r.net_rule(net)
             .clearance
             .max(r.net_rule(pad.net).clearance)
             .max(pad.local_clearance.unwrap_or(0))
-            .max(r.min_clearance) as f64
+            .max(r.min_clearance)
+            .max(self.npth_hole_clearance(pad)) as f64
+    }
+
+    /// `hole_clearance` for an NPTH pad, else 0, nm. An NPTH pad is a net-0 copper shape *and*
+    /// a drilled hole at the same centre, so the CDT vertex (one per position) can carry only
+    /// one of the two anchors; the pad anchor must therefore charge the larger clearance
+    /// itself, in every stage (graph capacity, search, sketch / taut, relax, Checker).
+    /// O(1).
+    pub fn npth_hole_clearance(&self, pad: &Pad) -> i64 {
+        if pad.attr == PadAttr::Npth {
+            self.rules.hole_clearance
+        } else {
+            0
+        }
+    }
+
+    /// Own clearance of a pad's copper as an obstacle: `max(pad local clearance, `net_clr`, NPTH
+    /// hole clearance)`, nm. The one helper behind `ObstacleSet::build` and `Checker::new`.
+    /// O(1).
+    pub fn pad_own_clearance(&self, pad: &Pad, net_clr: f64) -> f64 {
+        (pad.local_clearance.unwrap_or(0) as f64)
+            .max(net_clr)
+            .max(self.npth_hole_clearance(pad) as f64)
     }
 }
 

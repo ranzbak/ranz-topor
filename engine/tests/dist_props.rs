@@ -7,6 +7,7 @@ use topor_engine::geom::{
 };
 
 const N: usize = 2000;
+const SEEDS: usize = 12;
 
 fn v(x: f64, y: f64) -> Vec2 {
     Vec2 { x, y }
@@ -167,20 +168,81 @@ fn sampled(a: &Prim, b: &Prim) -> f64 {
     let mut seeds: Vec<(f64, usize, usize)> = Vec::new();
     let mut row_min = local_minima(&rows);
     row_min.sort_by(|x, y| x.0.total_cmp(&y.0));
-    seeds.extend(row_min.into_iter().take(12));
+    seeds.extend(row_min.into_iter().take(SEEDS));
     let mut col_min: Vec<(f64, usize, usize)> = local_minima(&cols)
         .into_iter()
         .map(|(d, j, i)| (d, i, j))
         .collect();
     col_min.sort_by(|x, y| x.0.total_cmp(&y.0));
-    seeds.extend(col_min.into_iter().take(12));
+    seeds.extend(col_min.into_iter().take(SEEDS));
     for k in [0, N - 1] {
         seeds.push((rows[k].0, k, rows[k].1));
         seeds.push((cols[k].0, cols[k].1, k));
     }
-    seeds
+    let grid = seeds
         .iter()
         .map(|&(_, i, j)| refine(a, b, i as f64 / (N - 1) as f64, j as f64 / (N - 1) as f64))
+        .fold(f64::INFINITY, f64::min);
+    grid.min(profile_min(a, b)).min(profile_min(b, a))
+}
+/// Independent exact distance from a point to a primitive (test-only, not `geom::point_*`).
+fn point_to_prim(q: Vec2, p: &Prim) -> f64 {
+    match p {
+        Prim::Seg(s) => {
+            let u = s.b - s.a;
+            let t = if u.len2() > 0.0 {
+                ((q - s.a).dot(u) / u.len2()).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            (q - (s.a + u * t)).len()
+        }
+        Prim::Arc(a) => {
+            let mut d = (a.start() - q).len().min((a.end() - q).len());
+            if (q - a.c).len() > 0.0 {
+                let foot = a.c + (q - a.c) * (a.r / (q - a.c).len());
+                if a.contains_dir(foot) {
+                    d = d.min((q - foot).len());
+                }
+            } else if a.sweep > 0.0 {
+                d = d.min(a.r);
+            }
+            d
+        }
+    }
+}
+/// Minimum over `a`'s parameter of the exact distance to `b`: a 1-D profile with no
+/// partner-sample quantisation (regression_arc_arc_near_concentric: for nearly concentric
+/// arcs the 2000x2000 nearest-partner profile has hundreds of tied local minima and the 12
+/// best seeds all sat in the wrong basin, 6.7 nm high). Dense scan, then golden-section
+/// refinement of the best local minima of the profile. O(M + K log(1/eps)), M = 20000.
+fn profile_min(a: &Prim, b: &Prim) -> f64 {
+    const M: usize = 20_000;
+    let f = |t: f64| point_to_prim(at(a, t), b);
+    let prof: Vec<f64> = (0..=M).map(|k| f(k as f64 / M as f64)).collect();
+    let mut mins: Vec<(f64, usize)> = (0..=M)
+        .filter(|&k| (k == 0 || prof[k] <= prof[k - 1]) && (k == M || prof[k] <= prof[k + 1]))
+        .map(|k| (prof[k], k))
+        .collect();
+    mins.sort_by(|x, y| x.0.total_cmp(&y.0));
+    mins.iter()
+        .take(12)
+        .map(|&(d0, k)| {
+            let (mut lo, mut hi) = (
+                k.saturating_sub(1) as f64 / M as f64,
+                ((k + 1).min(M)) as f64 / M as f64,
+            );
+            for _ in 0..80 {
+                let m1 = lo + (hi - lo) / 3.0;
+                let m2 = hi - (hi - lo) / 3.0;
+                if f(m1) < f(m2) {
+                    hi = m2;
+                } else {
+                    lo = m1;
+                }
+            }
+            d0.min(f(0.5 * (lo + hi)))
+        })
         .fold(f64::INFINITY, f64::min)
 }
 fn check(a: Prim, b: Prim, d: f64) -> Result<(), TestCaseError> {
@@ -619,4 +681,67 @@ fn regression_seg_arc_short_arc_endpoint() {
     assert!((sd - want).abs() < 1e-3, "sampled={sd}");
     let sd = sampled(&Prim::Arc(b), &Prim::Seg(s));
     assert!((sd - want).abs() < 1e-3, "sampled={sd}");
+}
+
+fn near_concentric_pair() -> (Arc, Arc) {
+    let a = Arc {
+        c: v(-800549.6885420157, -807637.6065073739),
+        r: 1966315.95029234,
+        sigma: Orient::Cw,
+        a_start: 2.5195661285126523,
+        sweep: 3.2089898132921144,
+    };
+    let b = Arc {
+        c: v(-800000.0, -800000.0),
+        r: 1972284.7145767987,
+        sigma: Orient::Ccw,
+        a_start: 3.383681098996437,
+        sweep: 5.311841872798016,
+    };
+    (a, b)
+}
+
+#[test]
+fn regression_arc_arc_near_concentric() {
+    // Found by prop_arc_arc_matches_sampling (debug run): arc_arc 1524.798 nm, the sampling
+    // oracle 1531.462 nm. The implementation is right and the oracle was the trap: with the
+    // arcs nearly concentric (centres 7.6 um apart, radii 6 um apart) the nearest-partner
+    // profile is flat, so its refinement seeds were all in the wrong basin when seen from
+    // `a`, while from `b` the same oracle found 1524.798. Independent evidence below: a
+    // 4M-point scan along `b` against the exact point-to-arc distance, golden-refined.
+    let (a, b) = near_concentric_pair();
+    let want = 1524.7978899081;
+    let (da, db) = (arc_arc(&a, &b), arc_arc(&b, &a));
+    assert!((da - want).abs() < 1e-6 && (db - want).abs() < 1e-6, "{da} {db}");
+    let n = 4_000_000;
+    let g = |t: f64| point_to_prim(b.point_at(t), &Prim::Arc(a));
+    let (mut best, mut bt) = (f64::INFINITY, 0.0);
+    for k in 0..=n {
+        let t = k as f64 / n as f64;
+        let d = g(t);
+        if d < best {
+            best = d;
+            bt = t;
+        }
+    }
+    assert!(best >= want - 1e-6 && best - want < 1e-2, "scan={best}");
+    let (mut lo, mut hi) = (
+        (bt - 2.0 / n as f64).max(0.0),
+        (bt + 2.0 / n as f64).min(1.0),
+    );
+    for _ in 0..100 {
+        let m1 = lo + (hi - lo) / 3.0;
+        let m2 = hi - (hi - lo) / 3.0;
+        if g(m1) < g(m2) {
+            hi = m2;
+        } else {
+            lo = m1;
+        }
+    }
+    assert!((g(0.5 * (lo + hi)) - want).abs() < 1e-6);
+    // The repaired oracle agrees from either side.
+    for (x, y) in [(a, b), (b, a)] {
+        let sd = sampled(&Prim::Arc(x), &Prim::Arc(y));
+        assert!((sd - want).abs() < 1e-3, "sampled={sd}");
+    }
 }
