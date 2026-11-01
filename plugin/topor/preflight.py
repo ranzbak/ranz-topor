@@ -292,7 +292,9 @@ def _copper_findings(model: dict, cfg) -> list:
         act = cfg.get("search", "dangling_ends")
         out.append(_mk("DANGLING_ENDS",
                        f"{len(dang)} existing track end(s) connect to nothing; search.dangling_ends = {act!r}: "
-                       + ("they are continued." if act == "continue" else "they are dropped."),
+                       + {"continue": "the new copper continues them tangentially.",
+                          "fixed": "they stay fixed points; the new copper may leave at an angle.",
+                          "drop": "they are removed and routed from the pad."}.get(str(act), "they are continued."),
                        [d.get("uuid", "") for d in dang[:20]]))
     return out
 

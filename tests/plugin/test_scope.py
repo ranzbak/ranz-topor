@@ -211,3 +211,36 @@ def test_scope_between_vs_touching(eprom):
         assert it.get("net") in names
     res_t = _routed(bare, {"scope": t.engine_scope, "partial_routes": True})
     assert res_t["connections_total"] > res["connections_total"]
+
+
+def test_dangling_drop_removes_only_the_dead_end_stub():
+    """A14: search.dangling_ends = "drop" removes the dead-end arm (a stub drawn as two segments goes as a whole,
+    up to the joint); fixed / continue remove nothing; do_not_touch and locked (respect_locked) stubs stay."""
+    m = tiny()
+    for p in m["pads"]:
+        p["shapes"] = {"0": {"kind": "circle", "d": 2}}
+    # net 3: t4 runs A3 (0, 9) .. C3 (20, 9); a two-segment arm s1 (10, 9) -> (12, 11), s2 (12, 11) -> (14, 11)
+    m["kept"] += [
+        {"uuid": "s1", "net": 3, "locked": False, "layer": 0, "width": 2,
+         "prim": {"kind": "seg", "a": [10, 9], "b": [12, 11]}},
+        {"uuid": "s2", "net": 3, "locked": False, "layer": 0, "width": 2,
+         "prim": {"kind": "seg", "a": [12, 11], "b": [14, 11]}}]
+    m["dangling_ends"] = [{"item": "s2", "net": 3, "layer": 0, "width": 2, "end": [14, 11], "direction": [1.0, 0.0]}]
+    whole = scope_from_selection(Selection(), m, CFG)
+    drop = CFG.with_values({("search", "dangling_ends"): "drop"})
+    r = rip_plan(m, whole, drop)
+    assert sorted(r.remove_uuids) == ["s1", "s2"] and r.engine_existing_copper == "fixed"
+    for mode in ("continue", "fixed"):
+        assert rip_plan(m, whole, CFG.with_values({("search", "dangling_ends"): mode})).remove_uuids == []
+    locked = drop.with_values({("run", "respect_locked"): True})
+    m2 = json.loads(json.dumps(m))
+    m2["kept"][-1]["locked"] = True
+    assert rip_plan(m2, whole, locked).remove_uuids == []
+    dnt = drop.with_values({("nets", "do_not_touch"): ["GND"]})
+    assert rip_plan(m, scope_from_selection(Selection(), m, dnt), dnt).remove_uuids == []
+    # an arm that starts on a pad stops there; a lone free-ended track goes alone
+    m3 = json.loads(json.dumps(m))
+    m3["kept"][-2]["prim"] = {"kind": "seg", "a": [0, 9], "b": [12, 11]}  # s1 starts on pad A3
+    assert sorted(rip_plan(m3, whole, drop).remove_uuids) == ["s1", "s2"]
+    m3["kept"].pop(-2)
+    assert rip_plan(m3, whole, drop).remove_uuids == ["s2"]

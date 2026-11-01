@@ -88,7 +88,7 @@ Path search tuning.
 | `neck_max_mm` | float | `0.0` | mm | 0 .. 100 | Longest necked stub; 0 = twice the pad's long side. *Since 0.5.0.* |
 | `pad_bridge_max_mm` | float | `2.0` | mm | 0 .. 100 | Two pads of one footprint on the same net at most this far apart are joined by one straight track when it fits (possibly off the pad centre line), instead of a searched route; with exit_stubs = auto only where a pad needs a stub. 0 = off. *Since 0.5.0.* |
 | `steiner` | bool | `true` |  | true\|false | Allow same-net T-junctions: a connection may end on an already routed track of its own net (or on kept hand copper it connects to) instead of only at a pad, so sibling connections of one net share a pad exit (false = pad to pad only). *Since 0.5.0.* |
-| `dangling_ends` | str | `"continue"` |  | continue\|drop | What to do with existing track ends that connect to nothing: continue them or drop them. *Since 0.5.0.* |
+| `dangling_ends` | str | `"continue"` |  | continue\|fixed\|drop | What to do with an existing track that ends at nothing (a hand-started trace): continue = the new copper leaves its end along the same direction (smooth, same width and layer); fixed = the end stays a fixed point and the new copper may leave at an angle; drop = remove that track and route from the pad. *Since 0.5.0.* |
 | `strict_unfit_edges` | bool | `false` |  | true\|false | Fail a connection when a graph edge is too narrow for its trace even when empty, instead of pricing the crossing as overuse (stricter; may leave tight boards incomplete). |
 | `pour_listed_via_goals` | bool | `false` |  | true\|false | A connection to a copper pour may end on a same-net via the pour already lists instead of always placing a new via (saves vias, may lengthen the trace). |
 

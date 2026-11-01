@@ -55,10 +55,12 @@ def make_fixture_board(
     wall=False,
     b_pads=False,
     pour_gap_pad=False,
+    dangling_trace=False,
 ) -> Path:
     """Synthetic board. `b_pads`: SIG pads "2"/"3" are SMD on B.Cu (SIG then needs a via to reach
     the F.Cu pads). `pour_gap_pad`: GND SMD pad "9" on F.Cu at (10, 30) that the B.Cu GND pour
-    cannot reach."""
+    cannot reach. `dangling_trace`: a hand-started SIG track from pad "5" (20, 28) up and to the right,
+    ending at (22, 26.5) in the open (a dangling end heading ~37 degrees up; pad "2" is further up)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     b = pcbnew.CreateEmptyBoard()
@@ -179,6 +181,8 @@ def make_fixture_board(
         b.Add(a)
     if half_track:
         track((25, 20), (25, 28), "SIG")
+    if dangling_trace:
+        track((20, 28), (22, 26.5), "SIG")
     if vcc_stub:
         track((20, 20), (27, 24), "VCC", locked=True)
     if wall:

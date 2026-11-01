@@ -32,7 +32,9 @@ pub enum Terminal {
     Pad { pad: usize, at: Vec2 },
     Via { via: usize, at: Vec2 },
     Junction { at: Vec2 },
-    Dangling { at: Vec2 },
+    /// Free end of a hand track. `direction` (unit, travel out of the track) is set for a router
+    /// terminal that continues it (A14); smoothed hand wires leave it `None`.
+    Dangling { at: Vec2, direction: Option<Vec2> },
     /// A via site of the router (M3, P6): the end of a leg that changes layer, or the via of a
     /// pour connection. `site` indexes `MultiGraph::sites` (`usize::MAX`: not yet assigned).
     Site { site: usize, at: Vec2 },
@@ -47,7 +49,7 @@ impl Terminal {
             Terminal::Pad { at, .. }
             | Terminal::Via { at, .. }
             | Terminal::Junction { at }
-            | Terminal::Dangling { at }
+            | Terminal::Dangling { at, .. }
             | Terminal::Site { at, .. } => *at,
             Terminal::Stub { end, .. } => *end,
         }
@@ -284,7 +286,10 @@ fn terminal_of(ctx: &Ctx, key: NodeKey, deg: usize) -> Terminal {
             if deg >= 3 {
                 Terminal::Junction { at }
             } else {
-                Terminal::Dangling { at }
+                Terminal::Dangling {
+                    at,
+                    direction: None,
+                }
             }
         }
     }

@@ -84,9 +84,13 @@ fn wire(id: usize, hand: &[(f64, f64)]) -> Wire {
         net: 3,
         layer: 0,
         width: 250_000,
-        start: Terminal::Dangling { at: h[0] },
+        start: Terminal::Dangling {
+            at: h[0],
+            direction: None,
+        },
         goal: Terminal::Dangling {
             at: *h.last().unwrap(),
+            direction: None,
         },
         hand: h,
         kept_uuids: vec![],

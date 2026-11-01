@@ -225,9 +225,9 @@ and compare with `drc.json` in the report folder. If the router's copper really 
 
 *Severity: info.*
 
-**Cause.** Existing tracks end at nothing (dead ends); topor either continues them or drops them (search.dangling_ends).
+**Cause.** Existing tracks end at nothing (dead ends); topor continues them along their direction, keeps them as fixed points or drops them (search.dangling_ends).
 
-**Fix.** Set search.dangling_ends to continue or drop, or tidy them first in KiCad → Inspect → Design Rules Checker.
+**Fix.** Set search.dangling_ends to continue, fixed or drop, or tidy them first in KiCad → Inspect → Design Rules Checker.
 
 ### DEFAULTS_USED
 

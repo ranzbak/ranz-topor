@@ -22,8 +22,9 @@ pub enum TermKind {
     Via(usize),
     /// End of hand copper (a junction), kept item uuid.
     Copper(String),
-    /// Free end of a half-drawn track, kept item uuid.
-    Dangling(String),
+    /// Free end of a half-drawn track, kept item uuid, and the unit travel direction at the end
+    /// (math frame) the new copper must continue (`Options::dangling_ends == "continue"`).
+    Dangling(String, Option<[f64; 2]>),
     /// Pour-completion target: index into `model.pours`.
     Pour(usize),
     /// Pad exit stub (A6, [`crate::stubs`]): the connection attaches at the stub end
@@ -619,14 +620,21 @@ pub fn decompose(model: &BoardModel, opts: &Options, layers: &[u32]) -> Decompos
                     (b, a, pb, pa)
                 };
                 let id = out.connections.len();
+                let mut from = term_ref(model, opts, &clusters[lo].ports[plo], net, layers);
+                let mut to = term_ref(model, opts, &clusters[hi].ports[phi], net, layers);
+                // A14: a continued dangling end is the search root (the hint is a root rule).
+                let cont = |t: &TermRef| matches!(t.kind, TermKind::Dangling(_, Some(_)));
+                if cont(&to) && !cont(&from) {
+                    std::mem::swap(&mut from, &mut to);
+                }
                 out.connections.push(Connection {
                     id,
                     net,
                     width: rule.width,
                     clearance: rule.clearance,
                     tier,
-                    from: term_ref(model, &clusters[lo].ports[plo], net, layers),
-                    to: term_ref(model, &clusters[hi].ports[phi], net, layers),
+                    from,
+                    to,
                     est_len: d,
                 });
                 out.conn_clusters.push((cl_base + lo, cl_base + hi));
@@ -644,7 +652,7 @@ pub fn decompose(model: &BoardModel, opts: &Options, layers: &[u32]) -> Decompos
                     width: rule.width,
                     clearance: rule.clearance,
                     tier,
-                    from: term_ref(model, &clusters[a].ports[pi], net, layers),
+                    from: term_ref(model, opts, &clusters[a].ports[pi], net, layers),
                     to: TermRef {
                         kind: TermKind::Pour(zi),
                         label: format!("pour:{}", model.pours[zi].uuid),
@@ -743,7 +751,13 @@ fn mst(clusters: &[Cluster], nodes: &[usize]) -> Vec<(usize, usize, usize, usize
     edges
 }
 
-fn term_ref(model: &BoardModel, port: &Port, net: i32, layers: &[u32]) -> TermRef {
+fn term_ref(
+    model: &BoardModel,
+    opts: &Options,
+    port: &Port,
+    net: i32,
+    layers: &[u32],
+) -> TermRef {
     let keep = |ls: &[u32]| -> Vec<u32> {
         let mut v: Vec<u32> = ls.iter().copied().filter(|l| layers.contains(l)).collect();
         v.sort_unstable();
@@ -768,12 +782,13 @@ fn term_ref(model: &BoardModel, port: &Port, net: i32, layers: &[u32]) -> TermRe
         },
         PortKind::Kept(i) => {
             let k = &model.kept[i];
-            let dangling = model.dangling_ends.iter().any(|d| {
+            let dangling = model.dangling_ends.iter().find(|d| {
                 d.item == k.uuid && d.net == net && (d.end.to_vec2() - port.at).len() <= 2.0
             });
             TermRef {
-                kind: if dangling {
-                    TermKind::Dangling(k.uuid.clone())
+                kind: if let Some(d) = dangling {
+                    let dir = (opts.dangling_ends == "continue").then_some(d.direction);
+                    TermKind::Dangling(k.uuid.clone(), dir)
                 } else {
                     TermKind::Copper(k.uuid.clone())
                 },
@@ -862,7 +877,10 @@ pub fn terminal_of(t: &TermRef) -> crate::wires::Terminal {
         TermKind::Pad(i) => Terminal::Pad { pad: *i, at: t.at },
         TermKind::Via(i) => Terminal::Via { via: *i, at: t.at },
         TermKind::Copper(_) => Terminal::Junction { at: t.at },
-        TermKind::Dangling(_) => Terminal::Dangling { at: t.at },
+        TermKind::Dangling(_, dir) => Terminal::Dangling {
+            at: t.at,
+            direction: dir.map(|d| Vec2 { x: d[0], y: d[1] }),
+        },
         TermKind::Stub { start, .. } => Terminal::Stub {
             pad: *start,
             end: t.at,

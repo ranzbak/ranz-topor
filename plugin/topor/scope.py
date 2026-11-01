@@ -235,6 +235,83 @@ def _touched_vias(model: dict) -> set:
     return out
 
 
+def _extent(pad: dict) -> float:
+    """Largest dimension (nm) of a pad's copper, from its shape records; 0 when unknown."""
+    best = 0.0
+    for sh in (pad.get("shapes") or {}).values():
+        if not isinstance(sh, dict):
+            continue
+        for k in ("d", "w", "h"):
+            if isinstance(sh.get(k), (int, float)):
+                best = max(best, float(sh[k]))
+        poly = sh.get("poly") or sh.get("pts")
+        if poly:
+            xs = [q[0] for q in poly]
+            ys = [q[1] for q in poly]
+            best = max(best, math.hypot(max(xs) - min(xs), max(ys) - min(ys)))
+    return best
+
+
+def _ends(k: dict) -> list:
+    p = k.get("prim") or {}
+    pts = (p.get("a"), p.get("b")) if p.get("kind") == "seg" else (p.get("start"), p.get("end"))
+    return [q for q in pts if q is not None]
+
+
+def _dangling_stubs(model: dict, plan: ScopePlan, cfg: Config) -> list:
+    """Uuids of the dead-end stubs to drop for ``search.dangling_ends = "drop"``: every kept track with a dangling
+    end on a net of `plan.nets` (not ``do_not_touch``, not locked with ``respect_locked``), then the chain behind
+    it while its far end joins exactly one other kept track of the net and no pad or via (a stub drawn as several
+    segments goes as a whole). Pad containment is conservative (the pad's largest dimension), so less is dropped
+    when in doubt. O(D * k) for D dangling ends and k tracks of the net (per-net index)."""
+    names = {n["code"]: n["name"] for n in model.get("nets", [])}
+    excluded = do_not_touch_nets(model, cfg)
+    keep_locked = cfg.get("run", "respect_locked")
+    by_net: dict = {}
+    for k in model.get("kept", []):
+        by_net.setdefault(k.get("net"), []).append(k)
+    by_uuid = {k["uuid"]: k for k in model.get("kept", []) if "uuid" in k}
+
+    def joins_pad_or_via(net, q) -> bool:
+        for pd in model.get("pads", []):
+            if pd.get("net") == net and pd.get("center") is not None:
+                cx, cy = _xy(pd)
+                if math.hypot(q[0] - cx, q[1] - cy) <= _extent(pd) / 2.0 + 1.0:
+                    return True
+        for v in model.get("vias", []):
+            if v.get("net") == net and v.get("at") is not None:
+                if math.hypot(q[0] - v["at"][0], q[1] - v["at"][1]) <= float(v.get("d") or 0) / 2.0 + 1.0:
+                    return True
+        return False
+
+    out: list = []
+    seen: set = set()
+    for d in model.get("dangling_ends", []):
+        k = by_uuid.get(d.get("item"))
+        name = names.get(d.get("net"))
+        if k is None or name is None or name in excluded or name not in plan.nets:
+            continue
+        end = tuple(d["end"])
+        while k is not None and k["uuid"] not in seen:
+            if keep_locked and k.get("locked"):
+                break
+            seen.add(k["uuid"])
+            out.append(k["uuid"])
+            far = [q for q in _ends(k) if tuple(q) != end]
+            if not far:
+                break
+            q = tuple(far[0])
+            if joins_pad_or_via(k.get("net"), q):
+                break
+            others = [o for o in by_net.get(k.get("net"), [])
+                      if o is not k and o["uuid"] not in seen and o.get("layer") == k.get("layer")
+                      and any(math.hypot(q[0] - e[0], q[1] - e[1]) <= 1.0 for e in _ends(o))]
+            if len(others) != 1:
+                break
+            k, end = others[0], q
+    return out
+
+
 def rip_plan(model: dict, plan: ScopePlan, cfg: Config) -> RipPlan:
     """Copper to delete for ``run.existing_copper``: ``fixed`` nothing; ``rip`` the tracks and vias of the nets in
     `plan.nets`, except locked ones when ``respect_locked``, ``do_not_touch`` nets, free vias (KiCad's flag) and,
@@ -244,7 +321,11 @@ def rip_plan(model: dict, plan: ScopePlan, cfg: Config) -> RipPlan:
     test of :func:`_touched_vias`."""
     policy = cfg.get("run", "existing_copper")
     out = RipPlan(engine_existing_copper="smooth" if policy == "smooth" else "fixed")
-    if policy != "rip" or cfg.get("run", "unrouted_only"):
+    if cfg.get("run", "unrouted_only"):
+        return out
+    if policy != "rip":
+        if cfg.get("search", "dangling_ends") == "drop":  # A14: only the dead-end stubs go
+            out.remove_uuids.extend(_dangling_stubs(model, plan, cfg))
         return out
     names = {n["code"]: n["name"] for n in model.get("nets", [])}
     excluded = do_not_touch_nets(model, cfg)
