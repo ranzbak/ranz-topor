@@ -102,3 +102,28 @@ def test_highlight_changes_pixel(tmp_path):
 def test_progress_accepts_dcsgonebadge():
     assert progress.board_options("dcsgonebadge") == {"wall_clock_s": 60, "partial_routes": False}
     assert progress.board_options("eprom-to-kernal") is None
+
+
+def test_detour_stats_uses_reference_and_reports_ghost():
+    def rc(i, length, ref, ghost, kind="feasible"):
+        c = _c(i, length, ghost)
+        c.update(ref_len_nm=ref, ref_kind=kind)
+        return c
+
+    conns = [rc(1, 29_000_000, 29_000_000, 10_000_000),          # ghost says 2.9, reference 1.0
+             rc(2, 30_000_000, 20_000_000, 10_000_000, "ghost"),  # fallback: ref == ghost length
+             rc(3, 15_000_000, 1_000_000, 1_000_000)]             # short reference (< 2 mm)
+    conns[1]["ref_len_nm"] = conns[1]["ghost_len_nm"] = 10_000_000
+    ref = detour_stats(conns, field="ref_len_nm")
+    ghost = detour_stats(conns, field="ghost_len_nm")
+    assert ref["field"] == "ref_len_nm" and ghost["field"] == "ghost_len_nm"
+    assert [r["id"] for r in ref["top10"]] == [3, 2, 1] or ref["top10"][0]["id"] == 3
+    r1 = next(r for r in ref["top10"] if r["id"] == 1)
+    g1 = next(r for r in ghost["top10"] if r["id"] == 1)
+    assert r1["ratio"] == 1.0 and g1["ratio"] == 2.9
+    assert ref["ghost_fallbacks"] == 1 and ref["short_ref"] == 1
+    assert ghost["ghost_fallbacks"] == 0
+    assert detour_line(ref).endswith("(ghost fallbacks 1)")
+    assert "fallbacks" not in detour_line(ghost)
+    # old engine: no ref field at all
+    assert detour_stats([_c(1, 5, 5)], field="ref_len_nm") is None

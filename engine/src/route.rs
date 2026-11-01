@@ -115,6 +115,13 @@ pub struct ConnReport {
     /// (no other connection present, same layers and via rules), nm; `null` when the connection
     /// was never searched or the ghost found no path (unreachable goal, deadline).
     pub ghost_len_nm: Option<i64>,
+    /// DRC-feasible detour reference (M3-R15, `Options::detour_reference`): `est_len` of the slot
+    /// search of this connection alone on the fixed copper (full clearance / width, same layers,
+    /// via rules and `via_cost`), nm. With `ref_kind == "ghost"` the search failed (or the budget
+    /// ran out) and this is the ghost length. `None` when the option is off or neither exists.
+    pub ref_len_nm: Option<i64>,
+    /// `"feasible"` (slot search found the reference), `"ghost"` (fallback, flagged), `"none"`.
+    pub ref_kind: String,
 }
 
 /// A connection the zero-slack retry routed with margin 0 against its corridor (R6).
@@ -2640,6 +2647,8 @@ fn route_pass(
     let mut n_sites = 0usize;
     // Detour reference per live connection (M3-R11): the ghost on the empty graph.
     let mut ghost_ref: Vec<Option<f64>> = vec![None; m];
+    // DRC-feasible reference per live connection (M3-R15): (length, is_feasible).
+    let mut feas_ref: Vec<Option<f64>> = vec![None; m];
     let mut via_status: String = if opts.via_reduction { "not run" } else { "off" }.into();
     let mut zs_status: String = if opts.zero_slack_retry {
         "not run"
@@ -2855,6 +2864,47 @@ fn route_pass(
                             };
                             ghost(mg_ro, obs_ro, c, &starts[i], &goals[i], &params)
                                 .map(|(gp, ..)| gp.est_len)
+                        })
+                        .collect();
+                }
+                // DRC-feasible reference (M3-R15): one slot search per connection on the same
+                // empty graph (fixed copper only), after the ghost, under its own deadline share.
+                // `O(m * search)`, `par_iter` collected in index order; capped by the expansion
+                // cap and the share deadline (and the run deadline / cancel through `stop`).
+                if opts.detour_reference {
+                    let cap = default_expansion_cap(&mg);
+                    let (mg_ro, obs_ro) = (&mg, &obs);
+                    let share = (opts.detour_reference_budget_pct / 100.0).clamp(0.0, 1.0);
+                    let ref_deadline = if opts.wall_clock_s == 0.0 {
+                        deadline
+                    } else {
+                        let left = deadline
+                            .saturating_duration_since(Instant::now())
+                            .mul_f64(share);
+                        Instant::now() + left
+                    };
+                    feas_ref = (0..m)
+                        .into_par_iter()
+                        .map(|i| {
+                            if perm[i].is_some() || ctl.is_cancelled() {
+                                return None;
+                            }
+                            let c = &live[i];
+                            let params = SearchParams {
+                                history: &[],
+                                site_history: &[],
+                                weight: tier_weight(c.tier),
+                                present_overuse: opts.expert.present_overuse,
+                                expansion_cap: cap,
+                                deadline: ref_deadline,
+                                eps: None,
+                                via_cost: opts.via_cost_nm as f64 * via_weight(c.tier),
+                                max_vias: opts.max_vias_per_connection,
+                            };
+                            match search(mg_ro, obs_ro, c, &starts[i], &goals[i], &params) {
+                                SearchOutcome::Found(p) => Some(p.est_len),
+                                _ => None,
+                            }
                         })
                         .collect();
                 }
@@ -3194,6 +3244,8 @@ fn route_pass(
             zero_slack: false,
             probe_steps: None,
             ghost_len_nm: None,
+            ref_len_nm: None,
+            ref_kind: "none".into(),
         };
         if let Some(r) = &early[c.id] {
             rep.reason = r.clone();
@@ -3202,6 +3254,19 @@ fn route_pass(
         } else {
             let i = by_orig[&c.id];
             rep.ghost_len_nm = ghost_ref[i].map(|l| l.round() as i64);
+            if opts.detour_reference {
+                match (feas_ref[i], ghost_ref[i]) {
+                    (Some(l), _) => {
+                        rep.ref_len_nm = Some(l.round() as i64);
+                        rep.ref_kind = "feasible".into();
+                    }
+                    (None, Some(g)) => {
+                        rep.ref_len_nm = Some(g.round() as i64);
+                        rep.ref_kind = "ghost".into();
+                    }
+                    _ => {}
+                }
+            }
             match &best {
                 None => rep.reason = no_result.into(),
                 Some(b) => {

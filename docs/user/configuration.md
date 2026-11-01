@@ -24,7 +24,7 @@ What a run does and how long it may take.
 | `kicad_cleanup` | bool | `false` |  | true\|false | After Accept, open KiCad's own Cleanup Tracks and Vias dialog (you confirm it there). |
 | `kicad_teardrops` | bool | `false` |  | true\|false | After Accept, open KiCad's teardrop dialog (you confirm it there). |
 | `refill_after_accept` | bool | `false` |  | true\|false | After Accept, refill all zones from topor (a second undo step in KiCad). false = Accept is exactly one undo step; press B (Edit → Fill All Zones) yourself. KiCad: KiCad → Edit → Fill All Zones (B). |
-| `detour_reference` | bool | `true` |  | true\|false | Compare every routed connection with a DRC-feasible direct path and report detours in the run report. (No effect in 0.4.0; applied from 0.5.0.) |
+| `detour_reference` | bool | `true` |  | true\|false | Compare every routed connection with a DRC-feasible direct path (one extra search per connection, 10 % of the remaining time budget at most) and report detours against it in the run report; false = the report compares with the topological ghost line only. |
 
 ## `[nets]`
 

@@ -28,8 +28,13 @@ def detour_caption(stats: dict | None) -> str | None:
     if not stats or not stats.get("n"):
         return None
     top = ", ".join(f"{r['name']} {r['ratio']:.1f}" for r in stats["top10"][:3])
-    return (f"detours > {DETOUR_THRESHOLD}: {stats['count_gt_1_5']} "
-            f"(max {stats['max']:.1f}) \N{EM DASH} {top}")
+    s = (f"detours > {DETOUR_THRESHOLD}: {stats['count_gt_1_5']} "
+         f"(max {stats['max']:.1f}) \N{EM DASH} {top}")
+    if stats.get("field") == "ref_len_nm":
+        s += f" vs DRC-feasible reference (ghost fallbacks {stats.get('ghost_fallbacks', 0)}"
+        short = stats.get("short_ref", 0)
+        s += f", ghost < 2 mm {short})" if short else ")"
+    return s
 
 
 def _pre_unc(drc: dict) -> str:
@@ -80,7 +85,8 @@ def _highlight_detours(raw: Path, result: dict, pcb: Path) -> Path:
         return raw
     pairs = []
     for c in (result.get("router_report") or {}).get("connections") or []:
-        g, ln = c.get("ghost_len_nm"), c.get("length_nm")
+        g = c.get(stats.get("field") or "ghost_len_nm")
+        ln = c.get("length_nm")
         if c.get("status") == "routed" and g and g > 0 and ln and ln / g > DETOUR_THRESHOLD:
             pairs.append((c["from"]["at"], c["to"]["at"]))
     if not pairs:

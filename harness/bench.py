@@ -201,7 +201,10 @@ def _summary(board: str, result: dict, routed_drc, base_drc, out_dir: Path,
         names = [w["net"] for w in zs.get("wires") or []]
         dl_ = detour_line(result.get("detour"))
         if dl_:
-            head.append(f"  {dl_}")
+            head.append(f"  {dl_} vs DRC-feasible reference")
+        dg_ = detour_line(result.get("detour_ghost"))
+        if dg_:
+            head.append(f"  {dg_.replace('detour', 'detour_ghost', 1)}")
         head.append(f"  via reduction: {rt.get('via_reduction')}")
         head.append(f"  zero slack: {zs.get('status')}, {len(names)} wire(s)"
                     + (f" ({', '.join(names)})" if names else ""))
@@ -240,6 +243,9 @@ def run_bench(
     """Run the benchmark procedure for one board; `router=None` routes nothing (M0)."""
     t_start = time.monotonic()
     options = dict(options or {})
+    # Offline benchmark: also compute the DRC-feasible detour reference (M3-R15); never changes
+    # the routing, costs one slot search per connection (the plugin default is its own setting).
+    options.setdefault("detour_reference", True)
     fab_floors = bool(options.pop("apply_fab_floors", True))  # harness-only, not an engine option
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -364,7 +370,11 @@ def run_bench(
         "router_report": router_report,
         "smooth": _smooth_summary(router_report),
         "route": route,
-        "detour": detour_stats((router_report or {}).get("connections")),
+        # `detour` = routed length / DRC-feasible reference (ghost fallback flagged per
+        # connection via `ref_kind`); `detour_ghost` = against the topological ghost (M3-R11).
+        "detour": detour_stats((router_report or {}).get("connections"), field="ref_len_nm"),
+        "detour_ghost": detour_stats((router_report or {}).get("connections"),
+                                     field="ghost_len_nm"),
         "hand_stats": hand_stats,
         "floors": [{"name": f["name"], "design_mm": f["design"] / 1e6, "floor_mm": f["floor"] / 1e6}
                    for f in rules.get("floors_applied", [])],

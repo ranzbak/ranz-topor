@@ -175,6 +175,10 @@ def refill_pours(model: dict, refilled_text: str) -> dict:
             "dangling_ends": dangling_ends(model["kept"], model["vias"], model["pads"], cu)}
 
 
+#: share of the remaining time budget the detour reference searches may use (engine-internal, not a setting)
+DETOUR_REFERENCE_BUDGET_PCT = 10.0
+
+
 def build_options(cfg: Config, engine, threads_override=None, *, plan=None, rip=None, model=None,
                   priorities=None) -> dict:
     """Engine options: ``cfg.engine_options()`` restricted to keys the engine knows, plus the plugin's own
@@ -195,6 +199,8 @@ def build_options(cfg: Config, engine, threads_override=None, *, plan=None, rip=
                      ("net_priority", dict(priorities or {}))):
         if key in known and val:
             opts[key] = val
+    if opts.get("detour_reference") and "detour_reference_budget_pct" in known:
+        opts["detour_reference_budget_pct"] = DETOUR_REFERENCE_BUDGET_PCT
     if threads_override is not None:
         opts["threads"] = int(threads_override)
     return opts

@@ -709,6 +709,14 @@ pub struct Options {
     /// Diagnostics: emit `RouteResult.profile` (per-iteration timers). Off by default: timings
     /// are run-dependent and must not enter the (thread-count independent) result JSON.
     pub profile: bool,
+    /// Offline / report only (M3-R15): also search every connection once on the fixed copper
+    /// alone with full clearance and width (a DRC-feasible shortest path) and report it as
+    /// `ConnReport::ref_len_nm`. Never changes the routing. Off by default (costs one search per
+    /// connection).
+    pub detour_reference: bool,
+    /// Share (percent, 0..=100) of the remaining wall-clock budget the reference searches may
+    /// use; connections not finished in time fall back to the ghost (`ref_kind = "ghost"`).
+    pub detour_reference_budget_pct: f64,
 }
 
 impl Default for Options {
@@ -738,6 +746,8 @@ impl Default for Options {
             max_vias_per_connection: 4,
             via_reduction: true,
             profile: false,
+            detour_reference: false,
+            detour_reference_budget_pct: 10.0,
         }
     }
 }
