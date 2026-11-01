@@ -98,7 +98,7 @@ Rip-up and re-route escalation.
 
 | Key | Type | Default | Unit | Range | Description |
 |---|---|---|---|---|---|
-| `growth` | float | `2.0` |  | 1 .. 10 | Each time a connection rips the same blocker, the history cost left on it is multiplied by this. |
+| `growth` | float | `1.25` |  | 1 .. 10 | Each time a connection rips the same blocker, the history cost left on it is multiplied by this. |
 | `max_per_pair` | int | `8` |  | 1 .. 1000 | Hard backstop on how often one connection may rip the same other connection (bounds the runtime). |
 
 ## `[iterations]`

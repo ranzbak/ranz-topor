@@ -169,7 +169,7 @@ def test_default_options_lists_every_field(engine, root):
     assert expert and set(expert) == set(d["expert"]), set(expert) ^ set(d["expert"])
     assert d["pathfinder_iter_cap"] == 30 and d["patience"] == 5 and d["min_gain_pct"] == 1.0
     assert d["wall_clock_s"] == 60.0 and d["detour_factor"] == 2.0
-    assert d["ripup_growth"] == 2.0 and d["ripup_max_per_pair"] == 8
+    assert d["ripup_growth"] == 1.25 and d["ripup_max_per_pair"] == 8
     assert d["expert"] == {"hist_fail": 1.0, "hist_block": 0.5, "hist_overuse": 0.5, "present_overuse": 4.0,
                            "zero_slack_candidates": 4, "relax_iter_cap": 200,
                            "own_net_capacity": True, "wall_aware_capacity": True, "transit_pinch": True,

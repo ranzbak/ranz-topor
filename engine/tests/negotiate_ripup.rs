@@ -96,7 +96,7 @@ fn rips_per_iteration(r: &RouteResult) -> Vec<usize> {
     r.profile.as_ref().unwrap().iter().map(|it| it.ripped).collect()
 }
 
-/// With the defaults (growth 2, backstop 8, patience 5) the A/B exchange ends by the stop rule
+/// With the defaults (growth 1.25, backstop 8, patience 5) the A/B exchange ends by the stop rule
 /// after a handful of rips: no pair gets near the backstop, no pair is refused, and the report
 /// agrees with the per-iteration profile.
 #[test]

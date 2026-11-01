@@ -172,7 +172,7 @@ impl Default for NegCfg {
             hist_block: HIST_BLOCK,
             hist_overuse: HIST_OVERUSE,
             rip_pair_cap: 8,
-            rip_growth: 2.0,
+            rip_growth: 1.25,
         }
     }
 }

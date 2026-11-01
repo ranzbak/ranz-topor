@@ -147,7 +147,7 @@ SETTINGS: list[Setting] = [
     _s("search", "pour_listed_via_goals", "bool", False, "A connection to a copper pour may end on a same-net via the pour already lists instead of always placing a new via (saves vias, may lengthen the trace).",
        engine="pour_listed_via_goals"),
     # ---- [ripup]
-    _s("ripup", "growth", "float", 2.0, "Each time a connection rips the same blocker, the history cost left on it is multiplied by this.",
+    _s("ripup", "growth", "float", 1.25, "Each time a connection rips the same blocker, the history cost left on it is multiplied by this.",
        range=(1.0, 10), engine="ripup_growth"),
     _s("ripup", "max_per_pair", "int", 8, "Hard backstop on how often one connection may rip the same other connection (bounds the runtime).",
        range=(1, 1000), engine="ripup_max_per_pair"),

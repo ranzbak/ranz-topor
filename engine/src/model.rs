@@ -757,7 +757,8 @@ pub struct Options {
     /// An accepted path longer than this factor times its slot-free ghost counts as an absurd
     /// detour and triggers rip-up of the blockers.
     pub detour_factor: f64,
-    /// Rip-up cost growth per repeated rip of one `(ripper, blocker)` pair (consumed by A16).
+    /// Rip-up cost growth per repeated rip of one `(ripper, blocker)` pair (default 1.25, by measurement: see
+    /// task GR, the F.Cu-only eprom guards hold on the plateau 1.0 .. 1.75 but not at 2.0).
     pub ripup_growth: f64,
     /// Rips per `(ripper, blocker)` pair and run (damping cap).
     pub ripup_max_per_pair: u32,
@@ -897,7 +898,7 @@ impl Default for Options {
             patience: 5,
             min_gain_pct: 1.0,
             detour_factor: 2.0,
-            ripup_growth: 2.0,
+            ripup_growth: 1.25,
             ripup_max_per_pair: 8,
             expert: Expert::default(),
             drc_loop_cap: 5,
