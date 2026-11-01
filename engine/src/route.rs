@@ -697,6 +697,10 @@ struct MetrState {
     /// sibling's chain after refinement), and the angle measured at it.
     jat: Vec<Option<Vec2>>,
     jangle: Vec<Option<f64>>,
+    /// A5, per live connection: the junction point fell back to its base point because the
+    /// refined point's leg did not relax (`revert_failed_junctions`); it is not refined again
+    /// until the connection's legs change.
+    jpin: Vec<bool>,
     /// Via positions moved off their site by the via-relaxation pass (A13), site -> math frame
     /// nm; empty during the negotiation.
     via_at: BTreeMap<usize, Vec2>,
@@ -721,6 +725,7 @@ impl MetrState {
             base: None,
             jat: vec![None; cx.conns.len()],
             jangle: vec![None; cx.conns.len()],
+            jpin: vec![false; cx.conns.len()],
             via_at: BTreeMap::new(),
         }
     }
@@ -1087,7 +1092,9 @@ fn nearest_on_prims(tgt: &[Prim], p: Vec2) -> Option<Vec2> {
 
 /// A5: move every routed junction's point onto its target (nearest the joining wire's approach,
 /// see [`junction_point`]); a move of more than [`JUNCTION_MOVE_TOL_NM`] re-installs and
-/// re-sketches the junction leg. Returns the moved legs (sorted by connection).
+/// re-sketches the junction leg. Returns the moved legs (sorted by connection) and, for those
+/// moved to a refined point other than the base point, `(connection, leg, base point)`: the
+/// fallback of [`revert_failed_junctions`]. Connections pinned by that fallback are skipped.
 /// O(junctions · (chain · samples + sketch)).
 fn refine_junctions(
     cx: &Ctx,
@@ -1095,12 +1102,16 @@ fn refine_junctions(
     st: &mut MetrState,
     base: &[Arc<LayerSketch>],
     routed: &[usize],
-) -> Vec<usize> {
+) -> (Vec<usize>, Vec<(usize, usize, Vec2)>) {
     let mut moved = Vec::new();
+    let mut refined = Vec::new();
     for &i in routed {
         let Some(jn) = mg.junction_of(i) else {
             continue;
         };
+        if st.jpin[i] {
+            continue;
+        }
         let Some(&kb) = st.conn_legs[i].last() else {
             continue;
         };
@@ -1134,9 +1145,45 @@ fn refine_junctions(
         let goal_t = Terminal::Junction { at: j1 };
         if sketch_leg(cx, mg, st, &base[li], i, kb, li, &start_t, &goal_t, true) {
             moved.push(kb);
+            if (j1 - b0).len() > JUNCTION_MOVE_TOL_NM {
+                refined.push((i, kb, b0));
+            }
         }
     }
-    moved
+    (moved, refined)
+}
+
+/// A5 (TE): a junction leg moved by [`refine_junctions`] to a refined point (nearest the joining
+/// wire's approach) whose chain then fails to relax goes back to its base point (the target's
+/// point nearest the search's junction estimate) and is pinned there. The refined point is
+/// only a shortening: the joining wire's last piece can come out exactly along the clearance
+/// ring of an obstacle it passes (the refined point is the foot of the approach on the
+/// sibling), where the relaxation wraps that obstacle the wrong way (a near-full arc) and
+/// reports the leg infeasible although the base point routes. Returns the re-sketched legs.
+/// O(refined · sketch).
+fn revert_failed_junctions(
+    cx: &Ctx,
+    mg: &MultiGraph,
+    st: &mut MetrState,
+    base: &[Arc<LayerSketch>],
+    refined: &[(usize, usize, Vec2)],
+) -> Vec<usize> {
+    let mut back = Vec::new();
+    for &(i, kb, b0) in refined {
+        if !matches!(st.rx.chains().get(kb), Some(Err(_))) {
+            continue;
+        }
+        let start_t = st.rx.wires()[kb].start.clone();
+        st.jat[i] = Some(b0);
+        st.jpin[i] = true;
+        let li = st.leg_layer[kb];
+        st.drop_leg(kb);
+        let goal_t = Terminal::Junction { at: b0 };
+        if sketch_leg(cx, mg, st, &base[li], i, kb, li, &start_t, &goal_t, true) {
+            back.push(kb);
+        }
+    }
+    back
 }
 
 /// A5: first point where the chain `prims` crosses segment `s` (arcs sampled), `None` when it
@@ -1525,6 +1572,7 @@ fn metrize_zs(
             }
             st.jat[i] = None;
             st.jangle[i] = None;
+            st.jpin[i] = false;
         }
     }
     // Step 1: re-sketch; a leg whose anchor sequence changed starts from scratch.
@@ -1594,7 +1642,7 @@ fn metrize_zs(
             if cx.stop() {
                 break;
             }
-            let moved = refine_junctions(cx, mg, st, &base, routed);
+            let (moved, refined) = refine_junctions(cx, mg, st, &base, routed);
             if moved.is_empty() {
                 break;
             }
@@ -1615,6 +1663,29 @@ fn metrize_zs(
             out.relax_iterations += r2.sweeps;
             out.timed_out |= r2.timed_out;
             run_changed.extend(r2.changed.iter().copied());
+            // A refined junction point whose leg does not relax falls back to the base point.
+            let back = revert_failed_junctions(cx, mg, st, &base, &refined);
+            if !back.is_empty() {
+                let present: Vec<usize> = (0..st.seqs.len())
+                    .filter(|&k| st.seqs[k].is_some())
+                    .collect();
+                let jpairs = junction_pairs(mg, st, routed);
+                let nesting = metr_nesting(st, &base, &present, &jpairs);
+                st.rx.set_nesting(&nesting);
+                let r3 = st.rx.run(
+                    &back,
+                    obs,
+                    &RunOpts {
+                        opts: cx.opts,
+                        deadline: cx.deadline,
+                        zs: zsw.as_ref(),
+                        anytime: true,
+                    },
+                );
+                out.relax_iterations += r3.sweeps;
+                out.timed_out |= r3.timed_out;
+                run_changed.extend(r3.changed.iter().copied());
+            }
         }
     }
     let nk = st.seqs.len();
