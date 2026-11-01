@@ -386,7 +386,7 @@ impl ObstacleSet {
         // Pads: per-layer padstack (44 §3.1).
         for p in &model.pads {
             let tie = model.pad_group_nets(p);
-            let own = (p.local_clearance.unwrap_or(0) as f64).max(set.clr(p.net));
+            let own = model.pad_own_clearance(p, set.clr(p.net));
             for &l in &p.layers {
                 let m = Meta {
                     net: p.net,
