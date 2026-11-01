@@ -480,6 +480,7 @@ fn site_at(x: f64, y: f64, d: i64, drill: i64) -> ViaSite {
         max_d: d,
         max_drill: drill,
         origin: SiteOrigin::Face,
+        net: None,
     }
 }
 

@@ -88,6 +88,51 @@ def net_codes_by_name(names) -> dict[str, int]:
 
 
 # ------------------------------------------------------------------ project JSON
+#: KiCad's factory Default net class via (diameter, drill) in mm as the ``.kicad_pro`` writes it.
+FACTORY_VIA_MM = (0.8, 0.4)
+
+
+def predefined_vias_from_pro(pro: dict) -> list[list[int]]:
+    """KiCad's pre-defined via list: ``board.design_settings.via_dimensions`` entries with a diameter > 0 (KiCad
+    always writes a ``{"diameter": 0, "drill": 0}`` placeholder first), as ``[diameter_nm, drill_nm]`` in file
+    order, duplicates dropped. O(V)."""
+    ds = (pro.get("board") or {}).get("design_settings") or {}
+    out: list[list[int]] = []
+    for v in ds.get("via_dimensions") or []:
+        try:
+            if not isinstance(v, dict) or float(v.get("diameter") or 0) <= 0:
+                continue
+            e = [_nm(v["diameter"]), _nm(v.get("drill") or 0)]
+        except (TypeError, ValueError, KeyError):
+            continue
+        if e not in out:
+            out.append(e)
+    return out
+
+
+def via_setup_missing_from(predefined: list, classes: dict) -> bool:
+    """True when the board sets no via size up: no pre-defined via and no net class (`classes`: name ->
+    :class:`NetClassVals`, nm) with a via size other than KiCad's factory 0.8 / 0.4 mm (an unset class value counts
+    as factory). The engine's ``via_sizes`` applies its via fallback exactly then (ruling C27 / C33). O(C)."""
+    if predefined:
+        return False
+    factory = tuple(int(round(v * 1e6)) for v in FACTORY_VIA_MM)
+    for c in classes.values():
+        d, r = c.via_diameter, c.via_drill
+        if d is None and r is None:
+            continue
+        if (d, r) != factory and not (d in (None, 0) and r in (None, 0)):
+            return False
+    return True
+
+
+def via_setup_missing(pro: dict | None) -> bool:
+    """:func:`via_setup_missing_from` for a parsed ``.kicad_pro`` (pre-defined list + ``net_settings.classes``).
+    O(V + C)."""
+    pro = pro or {}
+    return via_setup_missing_from(predefined_vias_from_pro(pro), classes_from_pro(pro))
+
+
 def classes_from_pro(pro: dict) -> dict[str, NetClassVals]:
     """``net_settings.classes`` of a .kicad_pro as ``{name: NetClassVals}`` (a missing key -> None). O(C)."""
     out: dict[str, NetClassVals] = {}
@@ -284,11 +329,16 @@ def resolve_rules_from_project(
     for name in sorted(unparsed):
         warnings.append(f"unparsed condition in rule {name}: using strictest fallback")
 
+    predefined = predefined_vias_from_pro(pro)
+    if via_setup_missing_from(predefined, classes):
+        warnings.append("via sizes not set up: no pre-defined via and every net class via is KiCad's factory "
+                        "0.8/0.4 mm (the engine's via fallback applies)")
     return {
         **floors,
         "profile": "jlcpcb_1oz",
         "drill_list": list(profile["drill_list"]),
         "routing_vias": list(profile["routing_vias"]),
+        "predefined_vias": predefined,
         "default": default,
         "per_net": per_net,
         "floors_applied": floors_applied,

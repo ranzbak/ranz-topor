@@ -35,7 +35,7 @@ use crate::geom::{point_seg, seg_arc, seg_seg, Aabb, Seg, Vec2};
 use crate::graph::{Port, RouteGraph};
 use crate::multigraph::MultiGraph;
 use crate::obstacle::{Core, LayerObstacles, ObsKind, ObstacleSet};
-use crate::vias::{via_sizes, ViaSize};
+use crate::vias::{via_sizes_baked, ViaSize};
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -760,7 +760,7 @@ impl<'a> Layered<'a> {
         });
         let sizes = env
             .mg
-            .map(|mg| via_sizes(&mg.rules, conn.net))
+            .map(|mg| via_sizes_baked(&mg.rules, conn.net))
             .unwrap_or_default();
         Layered {
             ls,

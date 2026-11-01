@@ -45,16 +45,16 @@ Via cost, count and size policy (each net routes with its KiCad net class via, p
 
 | Key | Type | Default | Unit | Range | Description |
 |---|---|---|---|---|---|
-| `via_cost_mm` | float | `2.0` | mm | 0 .. 1000 | Search cost of one via in mm of extra trace: the router accepts up to this much longer to avoid a via. |
+| `via_cost_mm` | float | `2.0` | mm | 0 .. 1000 | Search cost of one via in mm of extra trace: the router accepts up to this much longer to avoid a via. Overridden per net by cost_by_netclass (strongest) and cost_by_priority; this value is used for every other net. |
 | `max_per_connection` | int | `4` |  | 0 .. 32 | Maximum vias on one connection. |
 | `reduction` | bool | `true` |  | true\|false | After convergence remove vias whose via-free route is not much longer. |
-| `reduction_len_slack_pct` | float | `10` | % | 0 .. 1000 | A via is removed when the via-free route is at most this much longer. *Since 0.5.0.* |
-| `via_in_pad` | bool | `false` |  | true\|false | Allow vias inside SMD pads; pre-flight warns when KiCad's via protection is not filled and capped. KiCad: KiCad → File → Board Setup → Board Stackup → Board Finish → Via protection. *Since 0.5.0.* |
-| `allowed_drills_mm` | list | `[]` | mm | any | Optional fab filter: only these drill diameters may be used; empty = no filter. *Since 0.5.0.* |
-| `fallback_drill_mm` | float | `0.4` | mm | 0.05 .. 10 | Drill used when KiCad has no via sizes set up. KiCad: KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias. |
+| `reduction_len_slack_pct` | float | `10` | % | 0 .. 1000 | A via is removed when the via-free route is at most this much longer. |
+| `via_in_pad` | bool | `false` |  | true\|false | Allow vias inside the net's own SMD pads (two extra via sites per pad, on its long axis); the run report lists every via placed in a pad. Pre-flight warns when KiCad's via protection is not filled and capped. KiCad: KiCad → File → Board Setup → Board Stackup → Board Finish → Via protection. |
+| `allowed_drills_mm` | list | `[]` | mm | any | Optional fab filter: of the smaller alternative vias (KiCad's pre-defined vias and the fab profile) only these drill diameters may be used; empty = no filter. A net class via is always used as set in KiCad (the pre-flight warns when its drill is not listed). |
+| `fallback_drill_mm` | float | `0.4` | mm | 0.05 .. 10 | Drill used when KiCad has no via sizes set up (no pre-defined via and every net class at KiCad's factory 0.8 / 0.4 mm). The plugin writes it into the engine rules; the engine's via rule (engine/src/vias.rs) is the single place that applies it. KiCad: KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias. |
 | `fallback_diameter_mm` | float | `0.8` | mm | 0.1 .. 20 | Via diameter used when KiCad has no via sizes set up. KiCad: KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias. |
-| `cost_by_priority` | table | `{}` |  | any | Priority ("1".."3") → via cost in mm, e.g. 5 for high-speed nets. *Since 0.5.0.* |
-| `cost_by_netclass` | table | `{}` |  | any | Netclass name → via cost in mm, e.g. 0.5 for power. *Since 0.5.0.* |
+| `cost_by_priority` | table | `{}` | mm | any | Priority ("1".."3") → via cost in mm, e.g. 5 for high-speed nets. Precedence per net: cost_by_netclass > cost_by_priority > via_cost_mm. |
+| `cost_by_netclass` | table | `{}` | mm | any | Netclass name → via cost in mm, e.g. 0.5 for power. Strongest of the three via cost settings (a composite class such as "Power,Default" takes the first listed class that has an entry). KiCad: KiCad → File → Board Setup → Design Rules → Net Classes. |
 | `via_relaxation` | bool | `true` |  | true\|false | Let the relaxation pass move vias a bounded distance to shorten traces. *Since 0.5.0.* |
 
 ## `[layers]`
@@ -134,7 +134,7 @@ PathFinder constants; change only when you know the router.
 |---|---|
 | Clearance | KiCad → File → Board Setup → Design Rules → Constraints |
 | Track widths | KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Track Widths and netclass track width |
-| Via sizes | KiCad → File → Board Setup → Design Rules → Net Classes (via size / hole per net; Pre-defined Sizes → Vias are not routed with before 0.5.0) |
+| Via sizes | KiCad → File → Board Setup → Design Rules → Net Classes (via size / hole per net) and Pre-defined Sizes → Vias (the smaller ones are used where space requires) |
 | Minimum via, hole and annular ring | KiCad → File → Board Setup → Design Rules → Constraints (values below topor's fab floors are raised; see operate.md, Fab minimums) |
 | Copper-to-edge clearance | KiCad → File → Board Setup → Design Rules → Constraints → Copper to Edge Clearance |
 | Netclasses and net assignments | KiCad → File → Board Setup → Design Rules → Net Classes |

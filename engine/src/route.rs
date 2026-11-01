@@ -37,7 +37,7 @@ use crate::cdt::Crossing;
 use crate::check::{Checker, ItemIndex};
 use crate::decompose::{decompose, terminal_of, Connection, TermKind, TermRef};
 use crate::geom::quant::{quantise_chain, round_nm, TrackPrim};
-use crate::geom::{dequantise, dist_prim_skeleton, Skeleton, Vec2};
+use crate::geom::{dequantise, dist_prim_skeleton, Prim, Seg, Skeleton, Vec2};
 use crate::graph::{GraphRules, RouteGraph, TerminalInfo};
 use crate::model::{
     flip_track, BoardModel, ExistingCopper, Item, Options, PadAttr, PadRef, Pt, Scope, TrackItem,
@@ -61,7 +61,7 @@ use crate::sketch::{
 };
 use crate::smooth::{deadline_after, hand_outside, outside_len, terminal_skeletons};
 use crate::taut::TautError;
-use crate::vias::{via_sites, via_sizes, ViaSize};
+use crate::vias::{via_fallback_used, via_sites_opts, via_sizes, ViaSize};
 use crate::wires::{extract_wires, Terminal, Wire};
 use rayon::prelude::*;
 use serde::Serialize;
@@ -160,6 +160,9 @@ pub struct RouteResult {
     pub length_by_layer_nm: BTreeMap<String, i64>,
     /// Candidate via sites of the run.
     pub sites: usize,
+    /// Routed vias whose centre lies inside an SMD pad of their own net (via-in-pad; only with
+    /// `Options.via_in_pad`), KiCad frame nm, sorted.
+    pub vias_in_pads: Vec<[i64; 2]>,
     /// Via-reduction pass outcome (Task 10): `not run` until then.
     pub via_reduction: String,
     pub iterations: u32,
@@ -1740,8 +1743,8 @@ impl Route<'_> {
 /// Via-reduction cost factor: the per-via cost of the reduction search is this many times the
 /// loop's (TopoR lifting, note §6).
 pub const REDUCTION_VIA_FACTOR: f64 = 4.0;
-/// A reduction may lengthen the connection's outside-pad length by at most this factor.
-pub const REDUCTION_LEN_SLACK: f64 = 1.10;
+// A reduction may lengthen the connection's outside-pad length by at most
+// `Options::reduction_len_slack()` (`1 + reduction_len_slack_pct / 100`, default 1.10).
 
 /// Counters of [`via_reduction_pass`].
 struct Reduction {
@@ -1757,7 +1760,7 @@ struct Reduction {
 /// order `(-vias, id)`. Each leaves the graph and is searched again with the via cost times
 /// [`REDUCTION_VIA_FACTOR`] against the final history; the result replaces the old path iff it has
 /// fewer vias, metrizes with every previously routed connection still routed, adds no overuse
-/// and its outside-pad length is at most [`REDUCTION_LEN_SLACK`] times the old one. A trial runs
+/// and its outside-pad length is at most `Options::reduction_len_slack()` times the old one. A trial runs
 /// on a copy of the best snapshot's graphs and metrization state (P7), so a rejection simply
 /// drops it; the obstacle anchors are then re-synced from `best.mg`. Pour-goal connections
 /// (their via is the goal) are not candidates. `best` is updated in place and `obs` ends synced
@@ -1804,7 +1807,9 @@ fn via_reduction_pass(
             expansion_cap: default_expansion_cap(&mg),
             deadline: cx.deadline,
             eps: None,
-            via_cost: cx.opts.via_cost_nm as f64 * via_weight(live[c].tier) * REDUCTION_VIA_FACTOR,
+            via_cost: cx.opts.via_cost_for(live[c].net) as f64
+                * via_weight(live[c].tier)
+                * REDUCTION_VIA_FACTOR,
             max_vias: cx.opts.max_vias_per_connection,
         };
         let p = match search(&mg, obs, &live[c], &rt.starts[c], &rt.goals[c], &params) {
@@ -1837,7 +1842,7 @@ fn via_reduction_pass(
             })
             .sum();
         let short = mt.res.iter().any(|(i, r)| {
-            *i == c && matches!(r, Res::Ok(k) if k.out <= old.out * REDUCTION_LEN_SLACK)
+            *i == c && matches!(r, Res::Ok(k) if k.out <= old.out * cx.opts.reduction_len_slack())
         });
         if !(all_ok && short && overuse <= best.overuse_edges) {
             continue;
@@ -1902,7 +1907,7 @@ fn zero_slack_pass(
         mg.remove_conn(d, obs);
     }
     let cap = default_expansion_cap(&mg);
-    let params = |tier: u8, eps: Option<f64>| SearchParams {
+    let params = |net: i32, tier: u8, eps: Option<f64>| SearchParams {
         history: &[],
         site_history: &[],
         weight: tier_weight(tier),
@@ -1910,7 +1915,7 @@ fn zero_slack_pass(
         expansion_cap: cap,
         deadline: cx.deadline,
         eps,
-        via_cost: cx.opts.via_cost_nm as f64 * via_weight(tier),
+        via_cost: cx.opts.via_cost_for(net) as f64 * via_weight(tier),
         max_vias: cx.opts.max_vias_per_connection,
     };
     // Candidates: margin-0 searches over the routed connections (a detoured one with the other
@@ -1930,7 +1935,7 @@ fn zero_slack_pass(
                 &live[i],
                 &rt.starts[i],
                 &rt.goals[i],
-                &params(live[i].tier, Some(0.0)),
+                &params(live[i].net, live[i].tier, Some(0.0)),
             )
         } else {
             let Some(taken) = mg.take_path(i) else {
@@ -1943,7 +1948,7 @@ fn zero_slack_pass(
                 &live[i],
                 &rt.starts[i],
                 &rt.goals[i],
-                &params(live[i].tier, Some(0.0)),
+                &params(live[i].net, live[i].tier, Some(0.0)),
             );
             mg.insert_path(&live[i], &taken, obs);
             out
@@ -1986,7 +1991,7 @@ fn zero_slack_attempt<'a>(
     detoured: &[usize],
     c: usize,
     p: SlotPath,
-    params: &dyn Fn(u8, Option<f64>) -> SearchParams<'a>,
+    params: &dyn Fn(i32, u8, Option<f64>) -> SearchParams<'a>,
 ) -> Result<(Snap, Vec<usize>), String> {
     let live = cx.conns;
     let m = live.len();
@@ -2014,7 +2019,7 @@ fn zero_slack_attempt<'a>(
             &live[d],
             &rt.starts[d],
             &rt.goals[d],
-            &params(live[d].tier, None),
+            &params(live[d].net, live[d].tier, None),
         ) {
             SearchOutcome::Found(p) => {
                 mg.insert_path(&live[d], &p, obs);
@@ -2154,6 +2159,57 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
 /// the best result so far (`stop_reason == "cancel"`), `ctl.progress` is updated per iteration
 /// and per pass. The cancel flag is installed on every thread of the run's private pool.
 pub fn route_with(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteResult {
+    // Resolve the options that the search reads by net code / through the rules (A10): the
+    // per-net via cost by net name, the drill filter. The caller's inputs are not modified.
+    let mut opts_r;
+    let mut model_r;
+    let (mut model, mut opts) = (model, opts);
+    if !opts.via_cost_by_net.is_empty() {
+        opts_r = opts.clone();
+        opts_r.via_cost_by_code = model
+            .nets
+            .iter()
+            .filter_map(|n| opts.via_cost_by_net.get(&n.name).map(|&c| (n.code, c)))
+            .collect();
+        opts = &opts_r;
+    }
+    if !opts.allowed_drills_nm.is_empty() {
+        model_r = model.clone();
+        model_r.rules.allowed_drills = opts.allowed_drills_nm.clone();
+        model = &model_r;
+    }
+    let mut r = route_with_resolved(model, opts, ctl);
+    r.vias_in_pads = vias_in_pads(model, &r.items);
+    r
+}
+
+/// Positions (KiCad frame, nm) of the routed vias whose centre lies inside an SMD pad of their
+/// own net (via-in-pad: the fab must fill and cap them). O(V * P) for V vias and P pads.
+fn vias_in_pads(model: &BoardModel, items: &[Item]) -> Vec<[i64; 2]> {
+    let mut out: Vec<[i64; 2]> = Vec::new();
+    for it in items {
+        let Item::Via(v) = it else { continue };
+        let q = Vec2 {
+            x: v.at.x as f64,
+            y: -(v.at.y as f64),
+        };
+        let pt = Prim::Seg(Seg { a: q, b: q });
+        let inside = model.pads.iter().any(|p| {
+            p.net == v.net
+                && p.attr == PadAttr::Smd
+                && p.layers.first().is_some_and(|&l| {
+                    dist_prim_skeleton(&pt, &model.skeleton(p, l)) <= 0.0
+                })
+        });
+        if inside {
+            out.push([v.at.x, v.at.y]);
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+fn route_with_resolved(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteResult {
     let n = opts.effective_threads().max(1);
     let flag = ctl.cancel.clone();
     let built = rayon::ThreadPoolBuilder::new()
@@ -2689,10 +2745,17 @@ fn route_pass(
             .map(|c| c.net)
             .collect::<BTreeSet<i32>>()
             .into_iter()
-            .flat_map(|n| via_sizes(&model.rules, n))
+            .flat_map(|n| via_sizes(&model.rules, n, opts))
             .collect();
         sizes.sort_by_key(|z| std::cmp::Reverse((z.d, z.drill)));
         sizes.dedup();
+        if iter_base == 0 && live.iter().any(|c| via_fallback_used(&model.rules, c.net)) {
+            warnings.push(format!(
+                "via fallback {:.1}/{:.1} used",
+                model.rules.via_fallback[0] as f64 / 1e6,
+                model.rules.via_fallback[1] as f64 / 1e6
+            ));
+        }
         let fit_checker = Checker::new(model, opts);
         // With one routable layer there is no layer to change to: a site can only serve as a
         // pour goal, so sites exist only when a live connection targets a pour. Dormant site
@@ -2702,7 +2765,7 @@ fn route_pass(
         let needs_sites =
             routable.len() >= 2 || live.iter().any(|c| matches!(c.to.kind, TermKind::Pour(_)));
         let sites = if needs_sites {
-            via_sites(
+            via_sites_opts(
                 model,
                 &obs,
                 &fit_checker,
@@ -2710,6 +2773,7 @@ fn route_pass(
                 &escape,
                 &sizes,
                 opts.margin_nm as f64,
+                opts.via_in_pad,
             )
         } else {
             Vec::new()
@@ -2850,7 +2914,7 @@ fn route_pass(
                                 expansion_cap: cap,
                                 deadline,
                                 eps: None,
-                                via_cost: opts.via_cost_nm as f64 * via_weight(c.tier),
+                                via_cost: opts.via_cost_for(c.net) as f64 * via_weight(c.tier),
                                 max_vias: opts.max_vias_per_connection,
                             };
                             ghost(mg_ro, obs_ro, c, &starts[i], &goals[i], &params)
@@ -3337,6 +3401,7 @@ fn route_pass(
             .map(|(k, v)| (k, v.round() as i64))
             .collect(),
         sites: n_sites,
+        vias_in_pads: Vec::new(),
         via_reduction: via_status,
         iterations,
         converged,

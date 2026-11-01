@@ -88,6 +88,21 @@ fn default_options() -> PyResult<String> {
     serde_json::to_string(&Options::default()).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// Via sizes of net `net` as JSON `[[d, drill], ...]` (largest first): `vias::via_sizes` for the
+/// `rules` object (the model's `rules` JSON) and `options_json`. Used by the plugin / harness
+/// tests that keep the Python pre-flight in agreement with the engine.
+#[pyfunction]
+fn via_sizes(rules_json: String, net: i32, options_json: String) -> PyResult<String> {
+    let rules: crate::model::Rules =
+        serde_json::from_str(&rules_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let opts = Options::from_json(&options_json).map_err(PyValueError::new_err)?;
+    let out: Vec<[i64; 2]> = crate::vias::via_sizes(&rules, net, &opts)
+        .into_iter()
+        .map(|s| [s.d, s.drill])
+        .collect();
+    serde_json::to_string(&out).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 /// A routing run on its own thread: `progress()` (JSON of `control::Progress`), `cancel()`,
 /// `done()`, `wait()` (blocks with the GIL released; the `RouteResult` JSON, idempotent).
 /// `done()` is also true after the routing thread panicked (gate review B-1, ruling C31); `wait()`
@@ -244,6 +259,7 @@ fn topor_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(route_async, m)?)?;
     m.add_function(wrap_pyfunction!(_route_async_panicking, m)?)?;
     m.add_function(wrap_pyfunction!(default_options, m)?)?;
+    m.add_function(wrap_pyfunction!(via_sizes, m)?)?;
     m.add_class::<RouteJob>()?;
     m.add_function(wrap_pyfunction!(wire_stats, m)?)?;
     m.add_function(wrap_pyfunction!(arc_center_nm, m)?)?;

@@ -662,6 +662,7 @@ fn graph_set_site_recomputes_only_incident_edges() {
         max_d: 600_000,
         max_drill: 300_000,
         origin: SiteOrigin::Face,
+        net: None,
     }];
     let sa = obs.add_site_anchors(&sites, &[0]);
     let ls = build_layer_cdt(obs.layer(0), &[], ConstraintSet::Routing).unwrap();

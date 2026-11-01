@@ -11,7 +11,8 @@ LOCKED_COPPER, DANGLING_ENDS, DO_NOT_TOUCH, SCOPE_EMPTY, NON_DEFAULTS, DEFAULTS_
 
 Via sizes "not set up" (ruling C33) = no ``board.design_settings.via_dimensions`` entry with a diameter > 0 (the
 first entry is KiCad's ``{0, 0}`` placeholder) and no net class setting ``via_diameter`` / ``via_drill`` other
-than KiCad's factory 0.8 / 0.4 mm in the ``.kicad_pro`` (tested on the six snapshot projects).
+than KiCad's factory 0.8 / 0.4 mm in the ``.kicad_pro`` (tested on the six snapshot projects); the one
+implementation is ``toporlib.rules.via_setup_missing`` (the engine applies its via fallback under the same condition).
 
 UNVERIFIED against a live KiCad 10 board file / project (documented, tests use synthetic inputs):
   * via protection = the ``(capping yes)`` and ``(filling yes)`` forms in the board file's ``(setup ...)``;
@@ -30,6 +31,7 @@ from pathlib import Path
 
 from toporlib import geom, pcbfile
 from toporlib.kicad_cli import kicad_cli
+from toporlib.rules import via_setup_missing as rules_via_setup_missing
 
 from .findings import Finding
 from .layers import resolve_layer_roles
@@ -37,7 +39,6 @@ from .messages import MESSAGES
 
 _NM = 1_000_000.0
 _TOL = 1000  # nm: outline endpoints closer than this are the same point
-_FACTORY_VIA = (0.8, 0.4)  # KiCad's factory Default net class via (mm)
 _GND_FLAGS = re.IGNORECASE
 
 
@@ -125,37 +126,28 @@ def _layer_type_findings(layers: list) -> list:
 
 # ------------------------------------------------------------------ vias
 def via_setup_missing(pro: dict | None, cfg=None) -> bool:
-    """True when the ``.kicad_pro`` has no pre-defined via size and no net class with a via size other than
-    KiCad's factory 0.8 / 0.4 mm (VIA_NOT_SET_UP, ruling C33; run.apply_via_fallback then patches the engine
-    rules). Pre-defined vias = ``board.design_settings.via_dimensions`` entries with a diameter > 0 (KiCad always
-    writes a ``{"diameter": 0, "drill": 0}`` placeholder first). O(#via sizes + #net classes)."""
-    pro = pro or {}
-    ds = (pro.get("board") or {}).get("design_settings") or {}
-    for v in ds.get("via_dimensions") or []:
-        try:
-            if isinstance(v, dict) and float(v.get("diameter") or 0) > 0:
-                return False
-        except (TypeError, ValueError):
-            continue
-    for c in (pro.get("net_settings") or {}).get("classes") or []:
-        d, r = c.get("via_diameter"), c.get("via_drill")
-        if d is None and r is None:
-            continue
-        if (d, r) != _FACTORY_VIA and not (d in (None, 0) and r in (None, 0)):
-            return False
-    return True
+    """True when the ``.kicad_pro`` sets no via up (VIA_NOT_SET_UP, ruling C33): no pre-defined via and no net class
+    via other than KiCad's factory 0.8 / 0.4 mm. One function for the harness, the plugin and the engine's rule:
+    :func:`toporlib.rules.via_setup_missing`. O(#via sizes + #net classes)."""
+    return rules_via_setup_missing(pro)
 
 
-def smaller_profile_vias(rules: dict, d_nm: int, drill_nm: int) -> list:
+def smaller_profile_vias(rules: dict, d_nm: int, drill_nm: int, allowed_drills_nm=()) -> list:
     """The extra via sizes ``(d, drill)`` nm, largest first, that the engine may use for a net whose own via is
-    ``(d_nm, drill_nm)``: mirrors ``engine/src/vias.rs`` ``via_sizes`` -- every ``rules.routing_vias`` drill in
-    ``[min_via_drill, drill_nm)`` with ``d = max(drill + 2 * min_annular, min_via_diameter)``, kept only when
-    ``d < d_nm``. Empty when the rules carry no ``routing_vias``. O(R log R) for R routing drills."""
+    ``(d_nm, drill_nm)``: mirrors ``engine/src/vias.rs`` ``sizes_for`` -- every ``rules.predefined_vias`` entry and
+    every ``rules.routing_vias`` drill (``d = max(drill + 2 * min_annular, min_via_diameter)``) with
+    ``drill >= min_via_drill``, ``d >= min_via_diameter``, ``(d - drill) / 2 >= min_annular``, ``d < d_nm``,
+    ``drill < drill_nm`` and, when ``allowed_drills_nm`` is not empty, its drill in it. Agreement with the engine is
+    tested on the six snapshot projects (tests/plugin/test_via_rule_agreement.py). O((P + R) log (P + R))."""
     lo, ann = int(rules.get("min_via_drill") or 0), int(rules.get("min_annular") or 0)
     dmin = int(rules.get("min_via_diameter") or 0)
-    sizes = {(max(dr + 2 * ann, dmin), dr) for dr in (int(x) for x in rules.get("routing_vias") or [])
-             if lo <= dr < drill_nm}
-    return sorted((s for s in sizes if s[0] < d_nm), reverse=True)
+    cand = [(int(d), int(r)) for d, r in rules.get("predefined_vias") or []]
+    cand += [(max(int(x) + 2 * ann, dmin), int(x)) for x in rules.get("routing_vias") or []]
+    allowed = {int(x) for x in allowed_drills_nm}
+    sizes = {(d, r) for d, r in cand
+             if r >= lo and d >= dmin and 2 * ann <= d - r and d < d_nm and r < drill_nm
+             and (not allowed or r in allowed)}
+    return sorted(sizes, reverse=True)
 
 
 def _via_findings(model: dict, rules: dict, cfg, pcb_text: str | None, pro: dict | None) -> list:
@@ -165,7 +157,8 @@ def _via_findings(model: dict, rules: dict, cfg, pcb_text: str | None, pro: dict
         # the fallback as run.apply_via_fallback writes it (the board's minimums still apply)
         d_nm = max(int(round(d * _NM)), int(rules.get("min_via_diameter") or 0))
         r_nm = max(int(round(r * _NM)), int(rules.get("min_via_drill") or 0))
-        extra = smaller_profile_vias(rules, d_nm, r_nm)
+        extra = smaller_profile_vias(rules, d_nm, r_nm,
+                                     [int(round(float(x) * _NM)) for x in cfg.get("vias", "allowed_drills_mm")])
         more = ("; where space requires, also the smaller fab-profile via(s) "
                 + ", ".join(f"{_mm(a)} / {_mm(b)} mm" for a, b in extra)) if extra else ""
         out.append(_mk("VIA_NOT_SET_UP",

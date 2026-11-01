@@ -621,7 +621,7 @@ fn params_for<'a>(
         expansion_cap: cap,
         deadline,
         eps: None,
-        via_cost: opts.via_cost_nm as f64 * via_weight(c.tier),
+        via_cost: opts.via_cost_for(c.net) as f64 * via_weight(c.tier),
         max_vias: opts.max_vias_per_connection,
     }
 }

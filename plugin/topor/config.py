@@ -24,7 +24,7 @@ CONFIG_NAME = "topor.toml"
 DOCS_HINT = "see docs/user/configuration.md"
 
 # engine_field -> multiplier from the config unit to the engine unit (mm -> nm, µm -> nm)
-_ENGINE_SCALE = {"via_cost_nm": 1_000_000, "margin_nm": 1000}
+_ENGINE_SCALE = {"via_cost_nm": 1_000_000, "margin_nm": 1000, "allowed_drills_nm": 1_000_000}
 
 
 # ---------------------------------------------------------------- value handling
@@ -141,7 +141,9 @@ class Config:
                 continue
             v = self.values[(s.section, s.key)]
             f = s.engine_field
-            if f in _ENGINE_SCALE:
+            if f in _ENGINE_SCALE and isinstance(v, (list, tuple)):
+                v = [int(round(x * _ENGINE_SCALE[f])) for x in v]
+            elif f in _ENGINE_SCALE:
                 v = int(round(v * _ENGINE_SCALE[f]))
             elif s.type == "float":
                 v = float(v)

@@ -57,7 +57,9 @@ def test_since_keys_are_commented_out_until_available():
             n += 1
             assert f"# {s.key} =" in text
             assert not re.search(rf"^{s.key} =", text, re.M)
-    assert n >= 10
+    # the number of not-yet-live keys shrinks as engine tasks land (A10 made 5 live, A11 makes 3 more); the
+    # floor only guards that the commented-out mechanism is still exercised
+    assert n >= 1
     assert "(available from 0.5.0)" in text
 
 

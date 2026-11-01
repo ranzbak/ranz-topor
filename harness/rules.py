@@ -30,7 +30,8 @@ def _swig_inputs(board) -> tuple[dict, dict, dict, dict]:
         "min_hole_to_hole": mm(ds.m_HoleToHoleMin),
         "min_copper_edge_clearance": mm(ds.m_CopperEdgeClearance),
         "max_error": mm(ds.m_MaxError),
-    }}}}
+    }, "via_dimensions": [{"diameter": mm(v.m_Diameter), "drill": mm(v.m_Drill)}
+                          for v in ds.m_ViasDimensionsList]}}}
     classes: dict[str, NetClassVals] = {}
     of: dict[str, str] = {}
     codes: dict[str, int] = {}

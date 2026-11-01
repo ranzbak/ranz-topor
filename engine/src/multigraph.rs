@@ -238,9 +238,11 @@ impl MultiGraph {
         self.layers.iter().position(|l| l.layer == layer)
     }
 
-    /// Site `s` can take a via of `size`: unowned, not blocked, large enough. O(1).
-    pub fn site_free(&self, s: usize, _net: i32, size: ViaSize) -> bool {
+    /// Site `s` can take a via of `size` for `net`: unowned, not reserved for another net (a site
+    /// inside a pad), not blocked, large enough. O(1).
+    pub fn site_free(&self, s: usize, net: i32, size: ViaSize) -> bool {
         self.owner[s].is_none()
+            && self.sites[s].net.is_none_or(|n| n == net)
             && self.blocked[s] == 0
             && self.sites[s].max_d >= size.d
             && self.sites[s].max_drill >= size.drill
