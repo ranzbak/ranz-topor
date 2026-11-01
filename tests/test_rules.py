@@ -92,6 +92,21 @@ def test_custom_rule_width_beats_everything(tmp_path):
     assert r["per_net"][_code(b, "GND")]["width_source"] == "default"
 
 
+def test_custom_rule_track_width_min_is_the_net_min_width(tmp_path):
+    """A6/NX: a custom `track_width (min …)` is the floor a necked exit stub may not go below
+    (engine NetRule.min_width); nets without such a rule carry 0."""
+    b = _board(tmp_path)
+    r = resolve_rules(
+        b,
+        dru_text='(rule w (condition "A.NetName == \'SIG\'") (constraint track_width (min 0.25mm) (opt 0.3mm)))',
+        widths_before={},
+    )
+    sig = _code(b, "SIG")
+    assert r["per_net"][sig]["width"] == 300_000 and r["per_net"][sig]["min_width"] == 250_000
+    assert r["per_net"][_code(b, "GND")]["min_width"] == 0
+    assert r["default"]["min_width"] == 0
+
+
 def test_unknown_condition_is_strictest_with_warning(tmp_path):
     b = _board(tmp_path)
     r = resolve_rules(

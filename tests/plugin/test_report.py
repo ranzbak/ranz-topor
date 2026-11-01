@@ -59,6 +59,31 @@ def test_report_sections_present_and_values(tmp_path):
     assert (tmp_path / "result.json").is_file()
 
 
+def test_report_lists_exit_stubs_and_necks(tmp_path):
+    """A6/NX: every used exit stub, necked ones separately (pad, length x width, net width, offset, bridge)."""
+    res = _result()
+    res["stubs"] = [
+        {"pad": "U7.4", "width": 200_000, "net_width": 200_000, "length_nm": 617_500, "necked": False,
+         "offset_nm": -50_000, "bridge": None, "used": True},
+        {"pad": "U4.14", "width": 240_000, "net_width": 500_000, "length_nm": 867_500, "necked": True,
+         "offset_nm": 0, "bridge": None, "used": True},
+        {"pad": "U7.2", "width": 200_000, "net_width": 200_000, "length_nm": 775_000, "necked": False,
+         "offset_nm": 50_000, "bridge": "U7.9", "used": True},
+        {"pad": "J1.A6", "width": 300_000, "net_width": 500_000, "length_nm": 1_000_000, "necked": True,
+         "offset_nm": 0, "bridge": None, "used": False},
+    ]
+    rep = build_report(res, DRC, Config.defaults(), [], "whole board", None, None, dir=tmp_path)
+    f = rep.facts
+    assert f["exit_stubs"] == ["U7.4 0.62 mm x 0.20 mm, 0.050 mm off centre",
+                               "U4.14 0.87 mm x 0.24 mm (net 0.50 mm)",
+                               "U7.2 0.78 mm x 0.20 mm, 0.050 mm off centre, to U7.9"]
+    assert f["necked_stubs"] == ["U4.14 0.87 mm x 0.24 mm (net 0.50 mm)"]
+    md = rep.to_markdown()
+    assert "Necked stubs (narrower than the net width): U4.14 0.87 mm x 0.24 mm (net 0.50 mm)" in md
+    rep2 = build_report(_result(), DRC, Config.defaults(), [], "whole board", None, None, dir=tmp_path)
+    assert "Exit stubs: none" in rep2.to_markdown()
+
+
 def test_report_outcome_line_says_how_zones_are_refilled(tmp_path):
     """Ruling C28: the summary's Outcome line after Accept tells the user to press B when topor did not refill
     (run.refill_after_accept = false, the default) and that the refill is a second undo step when it did."""

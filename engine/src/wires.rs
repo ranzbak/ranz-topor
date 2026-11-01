@@ -36,6 +36,9 @@ pub enum Terminal {
     /// A via site of the router (M3, P6): the end of a leg that changes layer, or the via of a
     /// pour connection. `site` indexes `MultiGraph::sites` (`usize::MAX`: not yet assigned).
     Site { site: usize, at: Vec2 },
+    /// Pad exit stub (A6, [`crate::stubs`]): the wire attaches at `end`, the outer end of the
+    /// stub that starts at `pad` (inside the pad) on `layer`; a fixed point like a junction.
+    Stub { pad: Vec2, end: Vec2, layer: u32 },
 }
 
 impl Terminal {
@@ -46,12 +49,16 @@ impl Terminal {
             | Terminal::Junction { at }
             | Terminal::Dangling { at }
             | Terminal::Site { at, .. } => *at,
+            Terminal::Stub { end, .. } => *end,
         }
     }
 
     /// Junction and dangling terminals stay where the hand copper put them.
     pub fn is_fixed_point(&self) -> bool {
-        matches!(self, Terminal::Junction { .. } | Terminal::Dangling { .. })
+        matches!(
+            self,
+            Terminal::Junction { .. } | Terminal::Dangling { .. } | Terminal::Stub { .. }
+        )
     }
 }
 

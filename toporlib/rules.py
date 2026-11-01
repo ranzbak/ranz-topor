@@ -256,9 +256,12 @@ def resolve_rules_from_project(
 
     unparsed: set[str] = set()
 
-    def apply_dru(net_name: str, netclass: str, clearance: int) -> tuple[int, int | None]:
-        """Return (clearance, custom width or None) after applying matching custom rules."""
+    def apply_dru(net_name: str, netclass: str, clearance: int) -> tuple[int, int | None, int]:
+        """Return (clearance, custom width or None, custom minimum width or 0) after applying matching
+        custom rules; the minimum is the largest `track_width` min of the matching rules (the floor a
+        necked exit stub may not go below, engine NetRule.min_width)."""
         width = None
+        min_w = 0
         for r in rules:
             if r.severity in ("ignore", "exclude"):
                 continue
@@ -273,11 +276,13 @@ def resolve_rules_from_project(
                 if cl is not None and cl > clearance:
                     clearance = cl
                 tw = r.constraints.get("track_width", {})
+                if "min" in tw:
+                    min_w = max(min_w, int(tw["min"]))
                 if "opt" in tw:
                     width = tw["opt"]  # last matching rule wins
                 elif "min" in tw:
                     width = max(width or 0, tw["min"])
-        return clearance, width
+        return clearance, width, min_w
 
     def eff(ncname: str, field: str) -> int:
         """First class of the (composite) name that sets `field`, else Default, else KiCad's built-in."""
@@ -292,7 +297,7 @@ def resolve_rules_from_project(
     def net_rule(net_name: str) -> dict:
         ncname = netclass_of.get(net_name, "Default")
         clearance = max(eff(ncname, "clearance"), floors["min_clearance"])
-        clearance, custom_w = apply_dru(net_name, ncname, clearance)
+        clearance, custom_w, custom_min_w = apply_dru(net_name, ncname, clearance)
         class_w = eff(ncname, "track_width")
         non_default = any(p != "Default" for p in ncname.split(","))
         if custom_w is not None:
@@ -315,6 +320,7 @@ def resolve_rules_from_project(
             "via_drill": max(_nz(eff(ncname, "via_drill"), profile["via_drill"]), floors["min_via_drill"]),
             "netclass": ncname,
             "width_source": src,
+            "min_width": custom_min_w,
         }
 
     default = net_rule("")

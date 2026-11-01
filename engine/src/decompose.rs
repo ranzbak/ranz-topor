@@ -7,7 +7,7 @@
 
 use crate::geom::{
     copper_gap, copper_gap_skeleton, dequantise, dist_prim_skeleton, point_arc, point_seg, Prim,
-    Seg, Track, Vec2,
+    Seg, Skeleton, Track, Vec2,
 };
 use crate::check::point_in_poly;
 use crate::model::{via_layers, BoardModel, Options, Pad, PadRef, Pour, Pt};
@@ -26,6 +26,13 @@ pub enum TermKind {
     Dangling(String),
     /// Pour-completion target: index into `model.pours`.
     Pour(usize),
+    /// Pad exit stub (A6, [`crate::stubs`]): the connection attaches at the stub end
+    /// (`TermRef.at`, outside the pad) of the stub that starts at `start` inside pad `pad`.
+    Stub {
+        pad: usize,
+        #[serde(serialize_with = "ser_vec2")]
+        start: Vec2,
+    },
 }
 
 fn ser_vec2<S: serde::Serializer>(v: &Vec2, s: S) -> Result<S::Ok, S::Error> {
@@ -322,6 +329,26 @@ pub fn decompose(model: &BoardModel, opts: &Options, layers: &[u32]) -> Decompos
             w: model.kept[ki].width as f64,
         };
 
+        // Same-net pads whose copper touches on a common layer are one cluster (KiCad connects
+        // overlapping pads: the USB-C VBUS / GND pad pairs A4 + B9, A1 + B12). O(np²) per net
+        // with a bounding-radius prefilter.
+        for (a, &pi) in pads.iter().enumerate() {
+            let pa = &model.pads[pi];
+            let (ca, ra) = pad_reach(model, pa);
+            for (b, &pj) in pads.iter().enumerate().skip(a + 1) {
+                let pb = &model.pads[pj];
+                let (cb, rb) = pad_reach(model, pb);
+                if (ca - cb).len() > ra + rb {
+                    continue;
+                }
+                let touch = pa.layers.iter().filter(|l| pb.layers.contains(l)).any(|&l| {
+                    skeleton_gap(&model.skeleton(pa, l), &model.skeleton(pb, l)) <= 0.0
+                });
+                if touch {
+                    dsu.union(a, b);
+                }
+            }
+        }
         for (a, &pi) in pads.iter().enumerate() {
             let pad = &model.pads[pi];
             for (c, &ki) in kept.iter().enumerate() {
@@ -732,6 +759,58 @@ pub fn order(conns: &[Connection], bumps: &[u32]) -> Vec<usize> {
     idx
 }
 
+/// Centre and bounding radius of a pad's copper over its layers (contact prefilter). O(layers).
+fn pad_reach(model: &BoardModel, p: &Pad) -> (Vec2, f64) {
+    let c = p.center.to_vec2();
+    let r = p
+        .layers
+        .iter()
+        .map(|&l| match model.skeleton(p, l) {
+            Skeleton::Point { p, r } => (p - c).len() + r,
+            Skeleton::Seg { s, r } => (s.a - c).len().max((s.b - c).len()) + r,
+            Skeleton::Poly { pts, r } => pts.iter().map(|q| (*q - c).len()).fold(0.0, f64::max) + r,
+        })
+        .fold(0.0, f64::max);
+    (c, r)
+}
+
+/// Copper gap between two pad skeletons (negative when they overlap). O(points²).
+pub fn skeleton_gap(a: &Skeleton, b: &Skeleton) -> f64 {
+    fn prims(s: &Skeleton) -> (Vec<Prim>, f64) {
+        match s {
+            Skeleton::Point { p, r } => (vec![Prim::Seg(Seg { a: *p, b: *p })], *r),
+            Skeleton::Seg { s, r } => (vec![Prim::Seg(*s)], *r),
+            Skeleton::Poly { pts, r } => {
+                let n = pts.len();
+                let v = if n == 1 {
+                    vec![Prim::Seg(Seg { a: pts[0], b: pts[0] })]
+                } else {
+                    (0..n)
+                        .map(|i| {
+                            Prim::Seg(Seg {
+                                a: pts[i],
+                                b: pts[(i + 1) % n],
+                            })
+                        })
+                        .collect()
+                };
+                (v, *r)
+            }
+        }
+    }
+    let (pa, ra) = prims(a);
+    let (pb, rb) = prims(b);
+    let ab = pa
+        .iter()
+        .map(|p| dist_prim_skeleton(p, b) - ra)
+        .fold(f64::INFINITY, f64::min);
+    let ba = pb
+        .iter()
+        .map(|p| dist_prim_skeleton(p, a) - rb)
+        .fold(f64::INFINITY, f64::min);
+    ab.min(ba)
+}
+
 /// Wire terminal of a connection end.
 pub fn terminal_of(t: &TermRef) -> crate::wires::Terminal {
     use crate::wires::Terminal;
@@ -740,6 +819,11 @@ pub fn terminal_of(t: &TermRef) -> crate::wires::Terminal {
         TermKind::Via(i) => Terminal::Via { via: *i, at: t.at },
         TermKind::Copper(_) => Terminal::Junction { at: t.at },
         TermKind::Dangling(_) => Terminal::Dangling { at: t.at },
+        TermKind::Stub { start, .. } => Terminal::Stub {
+            pad: *start,
+            end: t.at,
+            layer: t.layers.first().copied().unwrap_or(0),
+        },
         // The via lands in the pour: a router via site, assigned by the search (P6).
         TermKind::Pour(_) => Terminal::Site {
             site: usize::MAX,

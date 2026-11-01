@@ -314,6 +314,13 @@ unsure about is kept. KiCad's DRC of the result stays the judge.
   reference search fails or runs out of time falls back to its topological ghost path (the shortest path on the
   empty board that may squeeze through foreign pads) and is counted as a "ghost fallback"; the report also lists
   the ratio against the ghost line (`detour_ghost`). Off = ghost line only (`toporlib/detour.py`).
+- **Pad exit stubs and necking** (`[search] exit_stubs`, `neck_to_pad`, `neck_max_mm`, `pad_bridge_max_mm`,
+  0.5.0): a pad that cannot be left from its centre at the net's track width (fine-pitch rows) gets a short
+  straight stub out of the pad row, if needed starting off the pad's centre line or narrower than the net width
+  (never below KiCad's minimum track width, KiCad → File → Board Setup → Design Rules → Constraints → Minimum track width, or a custom-rule `track_width` minimum); two close pads of one
+  footprint on the same net may be joined by one straight track. Every stub is checked against the clearance
+  rules before routing; the report lists the stubs and the necked ones. A pad with no room for a stub is
+  reported as `stub infeasible: <pad>` in the warnings and keeps the pad-centre start.
 - Keys marked *since 0.5.0* in [configuration.md](configuration.md) are written commented-out.
 
 ### While topor runs
@@ -369,6 +376,6 @@ Measured on six snapshot boards (offline tests against KiCad's own polygons); th
   via size is KiCad's factory default. On every board the router may add smaller fab-profile vias, and
   KiCad's pre-defined vias are not read ([Fab minimums and via sizes](#fab-minimums-and-via-sizes)).
 
-**Not yet**: pad exit stubs for fine pitch, same-net T-junctions, via relaxation and per-layer costs
+**Not yet**: same-net T-junctions, via relaxation and per-layer costs
 (0.5.0); free via placement and the 45° mode (backlog). Plugin calls that need a running KiCad are listed
 as UNVERIFIED in [gui-test-checklist.md](gui-test-checklist.md) until that checklist has been run.
