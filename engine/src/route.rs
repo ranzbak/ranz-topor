@@ -2826,6 +2826,7 @@ fn route_pass(
         match MultiGraph::build_on(model, &mut obs, sites, &routable, &terms, &rules) {
             Err(e) => setup_fail = Some(format!("sketch: {e}")),
             Ok(mut mg) => {
+                mg.set_layer_costs(model, opts);
                 if let Some(reach) = reach {
                     for s in 0..mg.sites.len() {
                         let at = mg.sites[s].at;

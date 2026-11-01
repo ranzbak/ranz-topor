@@ -63,9 +63,9 @@ Stackup roles per copper layer (F.Cu = "signal", In1.Cu = "gnd", ...) and per-la
 
 | Key | Type | Default | Unit | Range | Description |
 |---|---|---|---|---|---|
-| `preferred_direction` | table | `{}` |  | any | Layer name → "h", "v" or "none"; steers traces along a direction at cost direction_cost. *Since 0.5.0.* |
-| `direction_cost` | float | `0.0` |  | 0 .. 100 | Extra cost factor for running against a layer's preferred direction; 0 = off. *Since 0.5.0.* |
-| `pour_cut_cost_mm` | float | `1.0` | mm | 0 .. 1000 | Cost in mm of trace for cutting through a copper pour. *Since 0.5.0.* |
+| `preferred_direction` | table | `{}` |  | any | Layer name → "h" (along x), "v" (along y) or "none"; traces running across it pay direction_cost. Layers without an entry are free. KiCad: KiCad → File → Board Setup → Board Editor Layers (layer names). |
+| `direction_cost` | float | `0.0` |  | 0 .. 100 | Extra cost factor for running against a layer's preferred direction: a step of length L at angle a to it costs an extra L * direction_cost * \|sin a\|; 0 = off. |
+| `pour_cut_cost_mm` | float | `0.0` | mm | 0 .. 1000 | Extra cost, in mm of trace per mm, of running inside the filled copper of another net's pour on a layer (cutting a pour into islands costs the pour its connectivity); 0 = off. Measured: 1.0 made wiccon 58/61 with 83 vias and eprom 1.2 mm longer, so it is off by default; try 0.1 to 0.5 on boards whose pour islands after routing. |
 
 Per-layer roles are written as keys in this section, e.g. `F.Cu = "signal"`, `In1.Cu = "gnd"`.
 Roles: `signal`, `mixed`, `gnd`, `pwr`, `jumper`; a layer is routed iff `signal` or `mixed`.

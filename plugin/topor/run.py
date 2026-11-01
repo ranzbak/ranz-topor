@@ -226,6 +226,12 @@ def build_options(cfg: Config, engine, threads_override=None, *, plan=None, rip=
                      ("net_priority", dict(priorities or {}))):
         if key in known and val:
             opts[key] = val
+    if "layer_direction" in known:
+        angle = {"h": 0.0, "v": 90.0}
+        dirs = {str(k): angle[str(v).lower()] for k, v in dict(cfg.get("layers", "preferred_direction")).items()
+                if str(v).lower() in angle}
+        if dirs:
+            opts["layer_direction"] = dirs
     if "via_cost_by_net" in known and model is not None:
         costs = via_costs_by_net(cfg, model, priorities)
         if costs:

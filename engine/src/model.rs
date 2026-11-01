@@ -730,6 +730,17 @@ pub struct Options {
     /// Router (A10): a via is removed by the reduction pass when the via-free route is at most
     /// this many percent longer (outside pads).
     pub reduction_len_slack_pct: f64,
+    /// Router (A11): extra cost in nm of cost per mm of track inside a foreign-net copper pour
+    /// (the fill of a zone of another net on that layer), charged per step; 0 disables. Default 0
+    /// (measured: 1 000 000 = 1 mm per mm makes wiccon 58/61 with 83 vias and eprom 65.9 mm
+    /// outside pads instead of 62/62, 37 vias and 64.6 mm, so it is opt-in).
+    pub pour_cut_cost_nm: i64,
+    /// Router (A11): preferred routing direction per layer name, in degrees (0 = along x,
+    /// 90 = along y); see `direction_cost`.
+    pub layer_direction: BTreeMap<String, f64>,
+    /// Router (A11): a step of length `L` at angle `a` to its layer's preferred direction costs
+    /// an extra `L * direction_cost * |sin a|`; 0 disables (layers without an entry are free).
+    pub direction_cost: f64,
     /// Router (M3): maximum vias on one connection.
     pub max_vias_per_connection: u32,
     /// Router (M3-R2): after convergence, one via-reduction pass (TopoR lifting).
@@ -768,6 +779,9 @@ impl Default for Options {
             allowed_drills_nm: Vec::new(),
             via_in_pad: false,
             reduction_len_slack_pct: 10.0,
+            pour_cut_cost_nm: 0,
+            layer_direction: BTreeMap::new(),
+            direction_cost: 0.0,
             max_vias_per_connection: 4,
             via_reduction: true,
             profile: false,

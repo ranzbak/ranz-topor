@@ -114,9 +114,10 @@ SETTINGS: list[Setting] = [
        kicad="KiCad → File → Board Setup → Design Rules → Net Classes"),
     _s("vias", "via_relaxation", "bool", True, "Let the relaxation pass move vias a bounded distance to shorten traces.", since=V5),
     # ---- [layers]
-    _s("layers", "preferred_direction", "table", {}, "Layer name → \"h\", \"v\" or \"none\"; steers traces along a direction at cost direction_cost.", since=V5),
-    _s("layers", "direction_cost", "float", 0.0, "Extra cost factor for running against a layer's preferred direction; 0 = off.", range=(0, 100), since=V5),
-    _s("layers", "pour_cut_cost_mm", "float", 1.0, "Cost in mm of trace for cutting through a copper pour.", unit="mm", range=(0, 1000), since=V5),
+    _s("layers", "preferred_direction", "table", {}, "Layer name → \"h\" (along x), \"v\" (along y) or \"none\"; traces running across it pay direction_cost. Layers without an entry are free.",
+       kicad="KiCad → File → Board Setup → Board Editor Layers (layer names)"),
+    _s("layers", "direction_cost", "float", 0.0, "Extra cost factor for running against a layer's preferred direction: a step of length L at angle a to it costs an extra L * direction_cost * |sin a|; 0 = off.", range=(0, 100), engine="direction_cost"),
+    _s("layers", "pour_cut_cost_mm", "float", 0.0, "Extra cost, in mm of trace per mm, of running inside the filled copper of another net's pour on a layer (cutting a pour into islands costs the pour its connectivity); 0 = off. Measured: 1.0 made wiccon 58/61 with 83 vias and eprom 1.2 mm longer, so it is off by default; try 0.1 to 0.5 on boards whose pour islands after routing.", unit="mm", range=(0, 1000), engine="pour_cut_cost_nm"),
     # ---- [search]
     _s("search", "detour_factor", "float", 2.0, "A connection longer than this multiple of its ghost-line length is treated as a detour and ripped.",
        range=(1.0, 100), engine="detour_factor"),
@@ -169,6 +170,7 @@ ENGINE_INTERNAL = {
     "scope": "built per run from the KiCad selection and scope_mode, not stored",
     "net_priority": "built per run from @N markers, netclasses and [nets] priority",
     "via_cost_by_net": "built per run from [vias] cost_by_priority / cost_by_netclass (net name -> nm)",
+    "layer_direction": "built per run from [layers] preferred_direction (\"h\" -> 0, \"v\" -> 90 degrees)",
     "via_cost_by_code": "run-time form of via_cost_by_net by net code, filled by the engine",
     "detour_reference_budget_pct": "internal budget of the detour reference search; run.detour_reference will switch it (0.5.0)",
 }

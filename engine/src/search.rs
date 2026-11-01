@@ -716,7 +716,7 @@ impl<'a> Layered<'a> {
         p: &Common<'a>,
         ghost: bool,
     ) -> Self {
-        let ls: Vec<Search<'a>> = env
+        let mut ls: Vec<Search<'a>> = env
             .layers
             .iter()
             .enumerate()
@@ -733,6 +733,25 @@ impl<'a> Layered<'a> {
                 )
             })
             .collect();
+        if let Some(mg) = env.mg {
+            let lcost = &mg.layer_cost;
+            for (i, sr) in ls.iter_mut().enumerate() {
+                let dir = lcost
+                    .dir
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .filter(|_| lcost.dir_cost > 0.0)
+                    .map(|u| (u, lcost.dir_cost));
+                if lcost.pour_per_nm > 0.0 || dir.is_some() {
+                    sr.lc = Some(LayerCostRef {
+                        face_pour: &mg.layers[i].face_pour,
+                        pour_per_nm: lcost.pour_per_nm,
+                        dir,
+                    });
+                }
+            }
+        }
         let targets = goal
             .vertices
             .iter()
@@ -883,7 +902,7 @@ impl<'a> Layered<'a> {
         }
         let g_len = apex_len + dist(apex, p);
         let delta = (g_len - s.g_len).max(0.0);
-        let g_cost = s.g_cost + sr.step_cost(e, delta);
+        let g_cost = s.g_cost + sr.step_cost(e, delta) + sr.layer_extra(fin, delta, apex, p);
         if st.best.get(&key).is_some_and(|&b| b <= g_cost) {
             return;
         }
@@ -1298,6 +1317,18 @@ struct Search<'a> {
     bends: Cell<usize>,
     /// Candidate lists of grid-aligned query boxes, `[vertices, walls]` (see `cached_near`).
     near: [RefCell<NearCache>; 2],
+    /// Layer cost terms of this layer (A11); `None` = none.
+    lc: Option<LayerCostRef<'a>>,
+}
+
+/// One layer's view of the A11 layer cost terms ([`crate::multigraph::LayerCost`]).
+#[derive(Clone, Copy)]
+struct LayerCostRef<'a> {
+    /// `face_pour` of the layer (empty = no pour cost).
+    face_pour: &'a [i32],
+    pour_per_nm: f64,
+    /// Unit preferred direction of the layer and the cost factor of running across it.
+    dir: Option<(Vec2, f64)>,
 }
 
 impl<'a> Search<'a> {
@@ -1327,6 +1358,7 @@ impl<'a> Search<'a> {
             cands: Cell::new(0),
             bends: Cell::new(0),
             near: [RefCell::new(HashMap::new()), RefCell::new(HashMap::new())],
+            lc: None,
         }
     }
 
@@ -1836,6 +1868,31 @@ impl<'a> Search<'a> {
             break;
         }
         (apex, len, portals.len(), ok)
+    }
+
+    /// Additive A11 terms of a step of length `delta` that ends at `p` after the straight chord
+    /// from `apex`, made inside face `fin`: `delta * pour_per_nm` when `fin` is covered by a pour
+    /// of another net, plus `|p - apex| * dir_cost * |sin a|` against the layer's preferred
+    /// direction. Both >= 0 (admissible). O(1).
+    fn layer_extra(&self, fin: usize, delta: f64, apex: Vec2, p: Vec2) -> f64 {
+        let Some(lc) = &self.lc else {
+            return 0.0;
+        };
+        let mut x = 0.0;
+        if lc.pour_per_nm > 0.0 {
+            let n = lc.face_pour.get(fin).copied().unwrap_or(0);
+            if n != 0 && n != self.net {
+                x += delta * lc.pour_per_nm;
+            }
+        }
+        if let Some((u, k)) = lc.dir {
+            let d = p - apex;
+            let l = d.len();
+            if l > 0.0 {
+                x += l * k * (u.cross(d) / l).abs();
+            }
+        }
+        x
     }
 
     fn step_cost(&self, e: usize, delta: f64) -> f64 {

@@ -22,13 +22,29 @@ pub struct LayerCtx {
     /// Immutable after the build; shared by snapshots (P7).
     pub ls: Arc<LayerSketch>,
     pub g: RouteGraph,
+    /// Per face of `g`: the net of the pour whose fill covers the face centroid on this layer,
+    /// `0` for none (A11; filled by [`MultiGraph::set_layer_costs`], empty until then).
+    pub face_pour: Vec<i32>,
     /// Positions of the terminal vertices of this layer (input of the CDT after the anchors).
     pub terminals: Vec<Vec2>,
+}
+
+/// Per-layer cost terms of the search (A11), both additive and non-negative (so the ghost
+/// heuristic stays admissible): `pour_per_nm` per nm of a step through a face covered by a
+/// foreign pour's fill, and `dir_cost * |sin a|` per nm of a step at angle `a` to the layer's
+/// preferred direction `dir[layer idx]` (unit vector). All zero by default (M3 behaviour).
+#[derive(Clone, Debug, Default)]
+pub struct LayerCost {
+    pub pour_per_nm: f64,
+    pub dir_cost: f64,
+    pub dir: Vec<Option<Vec2>>,
 }
 
 #[derive(Clone)]
 pub struct MultiGraph {
     pub layers: Vec<LayerCtx>,
+    /// Layer cost terms of the search (A11).
+    pub layer_cost: LayerCost,
     pub sites: Vec<ViaSite>,
     /// `[site][layer idx]` -> CDT vertex of the site on that layer.
     pub site_vertex: Vec<Vec<usize>>,
@@ -68,6 +84,69 @@ fn dist_point_seg(p: Vec2, a: Vec2, b: Vec2) -> f64 {
         0.0
     };
     (p - (a + ab * t)).len()
+}
+
+/// Net of the foreign-candidate pour covering each inside face centroid of `g` on `layer`
+/// (`0`: none). Pours of net 0 are skipped; of several covering pours the first in model order wins.
+/// O(F * R) with a bounding-box test per ring.
+fn face_pours(model: &BoardModel, layer: u32, g: &RouteGraph) -> Vec<i32> {
+    struct R {
+        net: i32,
+        bb: Aabb,
+        outer: Vec<Vec2>,
+        holes: Vec<Vec<Vec2>>,
+    }
+    let mut rings: Vec<R> = Vec::new();
+    for p in model.pours.iter().filter(|p| p.net != 0) {
+        for f in p.fills.iter().filter(|f| f.layer == layer && f.outer.len() >= 3) {
+            let outer: Vec<Vec2> = f.outer.iter().map(|q| q.to_vec2()).collect();
+            let (mut lo, mut hi) = (outer[0], outer[0]);
+            for q in &outer {
+                lo = Vec2 {
+                    x: lo.x.min(q.x),
+                    y: lo.y.min(q.y),
+                };
+                hi = Vec2 {
+                    x: hi.x.max(q.x),
+                    y: hi.y.max(q.y),
+                };
+            }
+            rings.push(R {
+                net: p.net,
+                bb: Aabb { min: lo, max: hi },
+                outer,
+                holes: f
+                    .holes
+                    .iter()
+                    .filter(|h| h.len() >= 3)
+                    .map(|h| h.iter().map(|q| q.to_vec2()).collect())
+                    .collect(),
+            });
+        }
+    }
+    if rings.is_empty() {
+        return vec![0; g.faces.len()];
+    }
+    g.faces
+        .iter()
+        .map(|f| {
+            if !f.inside {
+                return 0;
+            }
+            let c = (g.verts[f.v[0]].at + g.verts[f.v[1]].at + g.verts[f.v[2]].at) * (1.0 / 3.0);
+            rings
+                .iter()
+                .find(|r| {
+                    c.x >= r.bb.min.x
+                        && c.x <= r.bb.max.x
+                        && c.y >= r.bb.min.y
+                        && c.y <= r.bb.max.y
+                        && in_ring(c, &r.outer)
+                        && !r.holes.iter().any(|h| in_ring(c, h))
+                })
+                .map_or(0, |r| r.net)
+        })
+        .collect()
 }
 
 fn in_ring(p: Vec2, ring: &[Vec2]) -> bool {
@@ -138,6 +217,7 @@ impl MultiGraph {
                         layer: l,
                         ls: Arc::new(ls),
                         g,
+                        face_pour: Vec::new(),
                         terminals: pos,
                     })
                 })
@@ -176,6 +256,7 @@ impl MultiGraph {
         let n = sites.len();
         Ok(MultiGraph {
             layers: ctxs,
+            layer_cost: LayerCost::default(),
             sites,
             site_vertex,
             site_anchor,
@@ -195,6 +276,38 @@ impl MultiGraph {
             free_ids: Vec::new(),
             clock: 0,
         })
+    }
+
+    /// Install the layer cost terms of `opts` (A11): the foreign-pour face table of every layer
+    /// when `pour_cut_cost_nm > 0`, the unit direction vectors when `direction_cost > 0`.
+    /// Complexity: `O(F_L * R_L)` per layer for `F_L` faces and `R_L` fill rings of the layer
+    /// (bounding-box culled point-in-ring tests, once per build), `O(layers)` otherwise.
+    pub fn set_layer_costs(&mut self, model: &BoardModel, opts: &crate::model::Options) {
+        self.layer_cost = LayerCost::default();
+        for c in &mut self.layers {
+            c.face_pour.clear();
+        }
+        if opts.pour_cut_cost_nm > 0 {
+            self.layer_cost.pour_per_nm = opts.pour_cut_cost_nm as f64 / 1_000_000.0;
+            for c in &mut self.layers {
+                c.face_pour = face_pours(model, c.layer, &c.g);
+            }
+        }
+        if opts.direction_cost > 0.0 && !opts.layer_direction.is_empty() {
+            self.layer_cost.dir_cost = opts.direction_cost;
+            self.layer_cost.dir = self
+                .layers
+                .iter()
+                .map(|c| {
+                    let name = model.layers.iter().find(|l| l.id == c.layer).map(|l| &l.name)?;
+                    let a = opts.layer_direction.get(name)?.to_radians();
+                    Some(Vec2 {
+                        x: a.cos(),
+                        y: a.sin(),
+                    })
+                })
+                .collect();
+        }
     }
 
     /// Pour indices (sorted) whose fill on a routable layer contains the site and keeps the
