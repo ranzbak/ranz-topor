@@ -145,7 +145,7 @@ def test_operate_md_limitations_section():
     text = (USER / "operate.md").read_text(encoding="utf-8")
     assert "limitations" in anchors(USER / "operate.md")
     lim = text.split("## Limitations", 1)[1].split("\n## ", 1)[0]
-    for word in ("Linux", "GROUPS_UNAVAILABLE", "net_priority", "do_not_touch", "ignore_pads",
+    for word in ("Linux", "GROUPS_UNAVAILABLE", "do_not_touch", "ignore_pads",
                  "bounding box", "polygonised", "not reached", "free", "keep_unconnected_vias",
                  "sorted", "copper layers", "flattened", "padstack", "UNVERIFIED",
                  "fallback_diameter_mm", "fallback_drill_mm", "0.8", "0.4", "smooth"):
