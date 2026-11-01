@@ -244,26 +244,42 @@ fn timeout_zero_is_disabled() {
     assert_eq!(r.stop_reason, "timeout");
 }
 
+/// Cancel during a run returns the best result so far. Uncancelled this board routes for about
+/// 12 s in a release build (2 threads). The cancel is placed by the run's progress, not by the
+/// wall clock: once iteration 1 has ended (a best result exists). A fixed 2 s sleep (before TE)
+/// landed in the setup or inside iteration 1 on a loaded machine, before anything was
+/// committed, and then nothing could be returned. "Promptly" is measured from the cancel.
 #[test]
-#[cfg_attr(debug_assertions, ignore = "timing test (cancel after 2 s): release build only")]
+#[cfg_attr(debug_assertions, ignore = "timing test (cancel after iteration 1): release build only")]
 fn route_async_cancel_returns_anytime_result() {
-    // Uncancelled this board routes for about 12 s in a release build (2 threads).
     let _g = heavy();
     let m = synth_two_layer(400);
     let ctl = RunControl::default();
     let c2 = ctl.clone();
     let canceller = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(2));
-        c2.cancel.store(true, Ordering::Relaxed);
+        // capped poll (10 min); the cancel instant, `None` when the run ended first
+        for _ in 0..600_000 {
+            let p = c2.snapshot();
+            if p.phase == "done" {
+                return None;
+            }
+            if p.iteration >= 1 {
+                c2.cancel.store(true, Ordering::Relaxed);
+                return Some(Instant::now());
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        None
     });
-    let t = Instant::now();
     let r = route_with(&m, &opts(0.0), &ctl);
-    canceller.join().unwrap();
+    let done = Instant::now();
+    let at = canceller.join().unwrap().expect("the run ended before iteration 1 was seen");
     assert_eq!(r.stop_reason, "cancel", "{:?}", r.warnings);
     assert!(r.timed_out);
     assert!(r.routed >= 1, "routed {}", r.routed);
-    // stop_reason "cancel" means the run was still going at 2 s; it returns promptly after
-    assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
+    // stop_reason "cancel" means the run was still going at the cancel; it returns promptly after
+    let after = done.saturating_duration_since(at);
+    assert!(after < Duration::from_secs(8), "{after:?} after the cancel");
     clean(&m, &r);
     assert_eq!(ctl.snapshot().phase, "done");
 }
