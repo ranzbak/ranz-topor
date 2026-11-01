@@ -55,6 +55,24 @@ Briefs: task-<ID>-brief.md (plan text extracted + coordinator additions). Report
 - Ruling A-C13 (TopoR "route all, repair later", "teardrop smoothing", BGA strategy, global via minimisation, re-optimise after the
   engineer moves parts, lines-only mode): backlog rows only (task HC part 3); auto placement is a NON-GOAL (user: "components are
   placed by the enigneer, this is not a task of the router.") — cost if wrong: none.
+- Ruling A-C14 (A4): new options all default true, all false = M3 exactly: `[expert] own_net_capacity`, `[expert]
+  wall_aware_capacity`, `[expert] transit_pinch` (push_state refuses a transit through a pinch no graph edge sees — the F6 guard
+  case: via 0.25 mm from the board edge), `[search] zero_slack_failed` (zero-slack retry also for failed connections); own-end radius
+  credit min(r, w/2) and wall term in copper terms (note §1 deviations, numbers in task-A4-report.md) — cost if wrong: one default.
+- Ruling A-C15 (A11): `[layers] pour_cut_cost_mm` default 0.0 (engine + schema), not the plan's 1.0: 1.0 is worse on eprom (outside
+  65.874 > 64.7 mm gate) and wiccon (58/61, 83 vias, 35.6 s); on dcsgone 1.0 keeps GND items in the pour (lost 17 → 2) but routes less
+  (164 vs 171/231 under load). Revisit only with a value sweep — cost if wrong: extra pour-completion passes on dcsgone.
+- Ruling A-C16 (A2): los convergence rule applied only to lines leaving a terminal (everywhere breaks the M2 front-only guard,
+  92.35 > 67.8 mm); LOS_STALL_CAP 2 internal; roundrect corner-tangent discretisation not done (not needed after state_point shrink) —
+  cost if wrong: residual los runaway away from terminals (detour stats watch it).
+- Ruling A-C17 (A10): via sizes = netclass via, then the union of KiCad pre-defined vias and the fab-profile vias (eprom/wiccon/dcsgone
+  unchanged); fallback 0.8/0.4 warning only when it changes a size; engine/plugin rule agreement test on the six snapshots — cost if
+  wrong: an extra smaller via size offered where the user listed none.
+- Ruling A-C18 (main, user): topor is GPL-2.0-or-later (93f2126); porting from the gEDA PCB toporouter (GPL-2.0-or-later) is allowed
+  with the original copyright + attribution at the port site, origin in the commit message, one A-C ruling per port; no new
+  Apache-2.0-only runtime crates — cost: none.
+- Ruling A-C19 (main): detour count > 1.5 and max (reference + ghost) are non-regression acceptance items in every task, next to
+  completion — cost: none.
 - Ruling A-C5: existing_copper = "smooth" stays "treated as fixed" in 0.5.0 (documented, backlog row in 45 §3; no A-task in the plan);
   [nets] pour_served implemented in A9 (per-net override of the auto pour-served decision); [run] detour_reference implemented by A7
   (engine Options.detour_reference + budget share; plugin key maps to it) — cost if wrong: smoothing of existing copper missing in 0.5.0
@@ -95,3 +113,20 @@ router 600.3 s, runtime 659.8 s, routing_new 0, preexisting 4 (clearance, hand c
 - Debug proptest counter-example dist_props::prop_arc_arc_matches_sampling (DX) → task HC part 2.
 - Group 2 dispatched: A4 (opus), A2 (opus), HC (sonnet: NPTH clearance + proptest oracle + TopoR backlog rows), A7 (sonnet),
   A10+A11 (sonnet).
+- Group 2 results (merged 4f1d15d A2 search.rs memo-field conflict, 606baa4 HC, A4 merge, 4a339e6 A7 (operate/model/bench/detour/
+  test_config_docs conflicts; field ref_len_nm; bench detour + detour_ghost + columns), A10/A11 merge (route_with: ignore pads →
+  via option resolution → pool; search fields)); clippy clean, docs check clean, maturin develop from main.
+  - A4 72b9d90/e847c82: dcsgone (loaded) 190/242, failed 52, vias 190, unconnected 51, 28 it, detour max 3.5; metrize_failed/it 34–53
+    → 20–26, overused edges 315–475 → 29–51; eprom guards identical; wiccon 62/62 vias 36, 1365.5 mm. Concern: anytime_timeout test
+    flaky (5/6 in binary on A4). → A-C14.
+  - A2 33d170b: #208 los runaway fixed; U7 middle pads need an off-centre in-pad stub (A6); dcsgone 180/239 failed 59, vias 146, detour
+    max 2.71, 11 > 1.5; VCC U3.1→U3.3 31 mm/4 vias → 3.29 mm/0; wiccon 62/62 vias 35, 1379.36 mm (0.64 mm headroom!). → A-C16.
+  - HC 2b359ba/fca57b2/86e839b: NPTH clearance via BoardModel::pad_own_clearance (CDT kept first anchor per position = the pad's 0.2
+    mm), slot holes as capsules in the Checker; arc_arc correct, oracle fixed (1-D profile scan); 44/45 TopoR rows, placement non-goal.
+    dcsgone (600 s, loaded, timeout) 170 → 178/231, hole failures 8 → 0. eprom/wiccon identical.
+  - A7 f7983f0: reference search per connection (fixed copper, full clearance) under budget pct; eprom ref max 1.147, wiccon 1.434, 0
+    fallbacks; dcsgone 60 s: 120/231 ghost fallbacks at 10 %; at 100 % it ate the budget. Reference = search est_len (not metrized).
+  - A10/A11 4162039/3e7a9ae: predefined vias, allowed drills, via-in-pad, per-net via cost (plugin by netclass > by priority >
+    via_cost_mm), engine/preflight agreement test; layer costs default off (A-C15). eprom/wiccon identical.
+- Main messages: detours got worse after A1 (20 > 1.5) — hairpin in A1 PNG is VCC U3.1→U3.3 (11.6×, 31 mm/4 vias), fixed by A2
+  (3.29 mm, 0 vias); Blake toporouter: detour-optimisation-by-rip-up phase + variants (→ successor tasks DO/VR); GPL (A-C18).

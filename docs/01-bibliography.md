@@ -135,6 +135,11 @@ secondary descriptions were available during research (2026-10-30).
 
 - ★ **Topola** (Rust, MIT/Apache-2.0): https://codeberg.org/mikolaj/topola , https://topola.dev/
 - **gEDA PCB toporouter** (C, `src/toporouter.c`): https://github.com/bert/pcb/wiki/Autorouters:-gEDA-pcb-Toporouter
+  - Anthony Blake's toporouter pages (archived 2009–2011; GPL-2.0-or-later code): main page
+    https://web.archive.org/web/20110227055406/http://anthonix.resnet.scms.waikato.ac.nz/toporouter/ and the detour
+    optimisation page http://web.archive.org/web/20100914113959/http://anthonix.resnet.scms.waikato.ac.nz:80/toporouter/detour.html
+    (detour optimisation by rip-up, deterministic variants, multiple traces on constraint edges; noted limit: poor results
+    with few layers and dense constraints).
 - **Salewski Ruby-PCB-Router**: https://github.com/StefanSalewski/Ruby-PCB-Router , http://ssalewski.de/Router.html.en ; Nim port RBR: https://github.com/StefanSalewski/RBR
 - **Woody `pcb_topo`**: https://github.com/jeffmhopkins/Woody/issues/47
 - **KiCadRoutingTools**: https://github.com/drandyhaas/KiCadRoutingTools
