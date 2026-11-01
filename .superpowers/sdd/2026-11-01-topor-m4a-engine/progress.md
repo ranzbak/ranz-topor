@@ -73,6 +73,18 @@ Briefs: task-<ID>-brief.md (plan text extracted + coordinator additions). Report
   Apache-2.0-only runtime crates — cost: none.
 - Ruling A-C19 (main): detour count > 1.5 and max (reference + ghost) are non-regression acceptance items in every task, next to
   completion — cost: none.
+- Ruling A-C20 (A6): `[search] neck_to_pad` default true (routing_new 0 on all six snapshots), `neck_max_mm` 0 = 2 × pad long
+  side, NEW `[search] pad_bridge_max_mm` 2.0 (two pads of one footprint ≤ 2 mm apart joined by one straight track, possibly off
+  the centre line — U7.4→U7.7, U7.2→U7.9); overlapping same-net pads merged (total 243 → 241) — cost if wrong: one default each.
+- Ruling A-C21 (A5): `steiner_ghost_factor` 1.0 (junction cost capped at the connection's ghost cost; uncapped Ts made wiccon 1385.9 >
+  1380 mm); junction angle limit 60°; Weiszfeld junction relaxation not done; `pour_listed_via_goals` stays false (A-C6; wiccon with it
+  33 vias / 1368.5 mm — candidate to flip after a dcsgone measurement) — cost if wrong: fewer T-junctions.
+- Ruling A-C22 (A16) OPEN → main Q1: with `[ripup] growth 2.0` (user default) the F.Cu-only M2 guard
+  `eprom_ripped_front_only_is_the_m2_result` gives 27/27 clean but 92.29 mm (> 67.8 bound, > hand 76.6); growth 1.0/1.5 = M3, 1.75/1.9/3.0
+  = 26/27. Worker runs the guard with growth 1.0 / max_per_pair 3 and adds a default-options pin (27/27, clean). Merged as is; needs
+  main's ruling (accept, or default growth change) — cost if wrong: a single-layer board class at +25 mm.
+- Ruling A-C23 (A14): topology hint = one forced root face (not the note's prefix walk), rails = one disc on the turn side of radius
+  w/2 + clearance; `drop` implemented in the plugin rip plan (engine treats drop as fixed) — cost if wrong: weaker hint on long hand stubs.
 - Ruling A-C5: existing_copper = "smooth" stays "treated as fixed" in 0.5.0 (documented, backlog row in 45 §3; no A-task in the plan);
   [nets] pour_served implemented in A9 (per-net override of the auto pour-served decision); [run] detour_reference implemented by A7
   (engine Options.detour_reference + budget share; plugin key maps to it) — cost if wrong: smoothing of existing copper missing in 0.5.0
@@ -130,3 +142,33 @@ router 600.3 s, runtime 659.8 s, routing_new 0, preexisting 4 (clearance, hand c
     via_cost_mm), engine/preflight agreement test; layer costs default off (A-C15). eprom/wiccon identical.
 - Main messages: detours got worse after A1 (20 > 1.5) — hairpin in A1 PNG is VCC U3.1→U3.3 (11.6×, 31 mm/4 vias), fixed by A2
   (3.29 mm, 0 vias); Blake toporouter: detour-optimisation-by-rip-up phase + variants (→ successor tasks DO/VR); GPL (A-C18).
+- Group 3 (A6+NX opus, A5 opus, A16+A13 sonnet, A14 sonnet) merged: A6 f45dc37 (clean), A5 712a36a (model/route/schema
+  conflicts: stub/neck + junction fields), A16+A13 62af5ad/8eb47e3 (route.rs 8 hunks: junction_repair_pass + via_relaxation_pass,
+  leg_terminals(via_at) with mut goal_t, rip report), A14 d2d123a (Dangling(dir) + Stub terminals, hint arg) → ea1f064; clippy clean,
+  docs check clean, maturin develop.
+  - A6 alone: dcsgone 210/241, failed 31, detour max 4.56 (8 > 1.5). A5 alone: 198/243 failed 45 (worker base 196/246), wiccon 34 vias.
+    A16: wiccon identical, A13: wiccon outside −10.8 mm, detour max 1.449 → 1.243. A14: no snapshot change (dcsgone 31 dangling ends
+    = locked GND, not exercised).
+- Verify @ea1f064 (quiet machine, coordinator): dcsgone gate options 204/241 (first pass 231), failed 37, vias 196, routing_new 0,
+  pre 4, unconnected 39, 24 it, "no gain", router 120 s, runtime 146 s, detour ref med 1.000 p90 1.296 max 4.62 >1.5 9 (U1-EN 4.6,
+  VCC 4.2, TACT_B 3.6), ghost max 4.66 >1.5 15. eprom 27/27, 0 vias, 64.6 mm, ref max 1.1, 0.04 s. wiccon 62/62, 34 vias, 1363.4 mm,
+  ref max 1.3, 1.56 s, "no gain". PNGs docs/benchmarks/progress/2026-11-01-m4-G3-merged-{dcsgonebadge,eprom-to-kernal,wiccon-2023}.png.
+  Note: group-2 merge (946530c) quiet run 201/243 failed 42, 113 s; under load (10–25) the same run times out after 1–2 iterations.
+- Known failing / flaky tests reported by workers (also on 946530c): route_detour_ref::reference_is_feasible_not_topological,
+  tests/plugin/test_config_docs.py::test_keys_without_effect_say_so (NO_EFFECT count ≥ 1 — no key left without effect), test_router m3/m4
+  progress test, test_scaffold (debug cargo flake), route_engine::anytime_timeout_emits_committed_subset (0.5 s, load-flaky),
+  route_control::route_async_cancel_returns_anytime_result (load-flaky). A5: JP1 net-tie short in unlimited-time dcsgone runs
+  (tracks may touch the other net's pad of a net-tie group) → fix task.
+- Rotation 1 worker round-trips: 15 (A0, A1, A9, AP, DX, A3, A4, A2, HC, A7, A10+A11, A6+NX, A5, A16+A13, A14) → hand back.
+- Verify @ea1f064 (coordinator, after hand-back numbers): clippy -D warnings clean; docs_gen --check clean.
+  cargo test --release --no-fail-fast: 42 suites ok, FAILED: graph_ownnet::front_only_plus5v_needs_zero_slack_for_failed (A4 test vs
+  A16 default growth 2.0 — Q1/A-C22), route_steiner 4 of 6 (t_junction_onto_routed_sibling ("routed","failed"),
+  junction_angle_below_60_is_rejected (no junction), steiner_threads_byte_identical (no "junction":true), steiner_off_is_m3_behaviour
+  (digest differs)) — already failing at a233d62 = A5 ⊕ A6 interaction (stubs / pad bridges change the U7 crop fixture), NOT a
+  thread nondeterminism; route_detour_ref::reference_is_feasible_not_topological (since A7 merge); anytime_timeout (flaky).
+  pytest default: 503 passed, 4 failed (test_config_docs::test_keys_without_effect_say_so, test_run_flow::
+  test_run_wiccon_refill_gives_harness_connection_count (plugin path 63 vs harness 62 connections), test_router::
+  test_progress_m4_name_and_caption_lines, test_scaffold (debug cargo = the cargo failures above)).
+  gate (M0–M4b): 18 passed, 3 failed: M2 + M3 dcsgone info tests (60 s): 204/240, failed 36, **drc_new 1** (routing_new must be 0,
+  M3-R13 — probably A5's JP1 net-tie short; at 600 s the DRC loop clears it), M4b headless wiccon (total 63 ≠ 62, same as the plugin
+  run-flow test). eprom/wiccon M0–M3 gate numbers green (eprom 27/27 64.628 mm 0 vias; wiccon 62/62 34 vias 1363.375 mm 1.49 s).

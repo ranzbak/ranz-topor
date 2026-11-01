@@ -1,5 +1,22 @@
 # STATE
 
+**M4a IN PROGRESS (engine 0.5.0), rotation 1 handed back at 15 worker round-trips** — plan docs/superpowers/plans/2026-11-01-topor-m4-in-kicad.md rev 2 Part 2;
+ledger .superpowers/sdd/2026-11-01-topor-m4a-engine/progress.md (rulings A-C1..A-C23, worker-contract.md, global-constraints.md). Main ea1f064+ (not pushed).
+Done + merged: A0 (D-1..D-10), A1 (search speed: bend_ok memo, candidates/query 109→11), A2 (fine-pitch entry / los), A3 (note m4-capacity-steiner-design.md),
+A4 (own-net capacity), A5 (Steiner), A6+NX (exit stubs, in-pad off-centre starts, necking, pad bridges), A7 (DRC-feasible detour reference), A9 (priorities /
+exclude / ignore_pads / pour_served, plugin wiring), A10 (via rules), A11 (layer costs, pour cut default 0 — A-C15), A13 (via relaxation), A14 (G1), A16 (rip cost),
+HC (NPTH hole clearance, arc_arc oracle, TopoR backlog rows), AP (plugin MINOR 10/11), DX (note m4-dcsgone-diagnosis.md).
+Numbers @ea1f064, quiet machine, gate options (600 s, threads 4): **dcsgone 204/241 (first pass 231), failed 37, vias 196, routing_new 0, preexisting 4,
+unconnected 39, router 120 s, runtime 146 s, stop "no gain", detour (DRC-feasible ref) med 1.000 p90 1.296 max 4.62 >1.5 9 — GATE NOT MET** (0.4.0: 172/231, 600 s
+timeout). eprom 27/27, 0 vias, 64.6 mm, detour max 1.1, 0.04 s. wiccon 62/62, 34 vias, 1363.4 mm, detour max 1.3, 1.56 s.
+PNGs (local) docs/benchmarks/progress/2026-11-01-m4-G3-merged-{dcsgonebadge,eprom-to-kernal,wiccon-2023}.png.
+OPEN for main: Q1 (A-C22) F.Cu-only M2 guard at default ripup growth 2.0 = 92.29 mm (guard now run with growth 1.0/max 3). Remaining: A12 dcsgone completion
+(37 failed; second diagnosis round), TopoR/Blake variants + detour-optimisation phase (A-C10), JP1 net-tie short (A5), failing/flaky tests (ledger), A15 (0.5.0,
+benchmark, F review), M4a gate test tests/gate/test_m4_gate.py.
+Verify @ea1f064: clippy clean, docs check clean; cargo FAILED graph_ownnet front_only (Q1), route_steiner 4/6 (A5⊕A6 fixture interaction, from a233d62),
+route_detour_ref reference_is_feasible (A7), anytime_timeout (flaky); pytest 503 passed 4 failed; gate 18 passed 3 failed (M2/M3 dcsgone 60 s info: drc_new 1 —
+JP1 net-tie short?; M4b wiccon plugin path 63 ≠ 62 connections). Details in the ledger log.
+
 **M4b GATE REACHED (headless), awaiting main verify + user GUI results** — KiCad IPC plugin, version 0.4.0. Plan docs/superpowers/plans/2026-11-01-topor-m4-in-kicad.md (rev. 2) Part 1 (P1, B0–B12);
 ledger .superpowers/sdd/2026-11-01-topor-m4b-plugin/progress.md. Rotation 1 coordinator on main from 07864ea. Projects tree 8153f4de51ba4d65.
 Main rulings: **M4-R1** (user) no pcbnew/SWIG in the plugin runtime (IPC kipy 0.8 + file formats + kicad-cli; guard test B0). **M4-R2** (user) plugin first
