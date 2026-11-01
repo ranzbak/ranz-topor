@@ -294,10 +294,10 @@ fn plane_via_ring_offers_sites_all_around_the_pad() {
     let obs = ObstacleSet::build(&m, &o, &HashSet::new(), &[]);
     let ck = Checker::new(&m, &o);
     let sizes = via_sizes(&m.rules, 0, &o);
-    let plain = via_sites_ring(&m, &obs, &ck, &[0, 31], &[0, 1], &sizes, EPS, false, &[], &[]);
+    let plain = via_sites_ring(&m, &obs, &ck, &[0, 31], &[0, 1], &sizes, EPS, false, &[], &[], &[]);
     let old = via_sites_opts(&m, &obs, &ck, &[0, 31], &[0, 1], &sizes, EPS, false);
     assert_eq!(plain.iter().map(|s| s.at).collect::<Vec<_>>(), old.iter().map(|s| s.at).collect::<Vec<_>>());
-    let ring = via_sites_ring(&m, &obs, &ck, &[0, 31], &[0, 1], &sizes, EPS, false, &[], &[0]);
+    let ring = via_sites_ring(&m, &obs, &ck, &[0, 31], &[0, 1], &sizes, EPS, false, &[], &[0], &[]);
     let c = Vec2 { x: 15.0 * MM, y: -15.0 * MM };
     let near = |v: &[ViaSite]| v.iter().filter(|s| (s.at - c).len() < 3.0 * MM).count();
     assert!(near(&ring) >= near(&plain) + RING_DIRS, "{} vs {}", near(&ring), near(&plain));
@@ -328,4 +328,71 @@ fn ring_on_blame_off_by_default() {
     }
     let o = Options::from_json(r#"{ "plane_via_ring": false, "blame_vias": true }"#).unwrap();
     assert!(!o.plane_via_ring && o.blame_vias);
+}
+
+/// A QFN-like footprint: eight 0.3 x 0.8 mm pads around a 3 x 3 mm exposed pad (GND).
+fn qfn_model() -> BoardModel {
+    let mut pads = Vec::new();
+    for k in 0..8 {
+        let (x, y) = if k < 4 { (13.0 + k as f64 * 0.65, 13.0) } else { (13.0 + (k - 4) as f64 * 0.65, 17.0) };
+        pads.push(format!(
+            r#"{{ "uuid": "q{k}", "ref": "U1", "number": "{n}", "net": 2, "attr": "smd",
+              "center": [{}, {}], "layers": [0],
+              "shapes": {{ "0": {{ "kind": "rect", "w": 300000, "h": 800000 }} }} }}"#,
+            (x * MM) as i64,
+            (y * MM) as i64,
+            n = k + 1
+        ));
+    }
+    pads.push(
+        r#"{ "uuid": "ep", "ref": "U1", "number": "9", "net": 1, "attr": "smd",
+          "center": [14000000, 15000000], "layers": [0],
+          "shapes": { "0": { "kind": "rect", "w": 3000000, "h": 3000000 } } }"#
+            .into(),
+    );
+    pads.push(
+        r#"{ "uuid": "r1", "ref": "R1", "number": "1", "net": 1, "attr": "smd",
+          "center": [25000000, 15000000], "layers": [0],
+          "shapes": { "0": { "kind": "rect", "w": 3000000, "h": 3000000 } } }"#
+            .into(),
+    );
+    let s = format!(
+        r#"{{ "layers": [ {{ "id": 0, "routable": true }}, {{ "id": 31, "routable": true }} ],
+          "nets": [ {{ "code": 1, "name": "GND" }}, {{ "code": 2, "name": "S" }} ],
+          "outline": [
+            {{ "kind": "seg", "a": [0, 0], "b": [30000000, 0] }},
+            {{ "kind": "seg", "a": [30000000, 0], "b": [30000000, 30000000] }},
+            {{ "kind": "seg", "a": [30000000, 30000000], "b": [0, 30000000] }},
+            {{ "kind": "seg", "a": [0, 30000000], "b": [0, 0] }} ],
+          "pads": [ {} ],
+          "rules": {{ "default": {{ "clearance": 200000, "width": 250000 }}, "min_clearance": 0,
+            "hole_clearance": 250000, "hole_to_hole": 250000, "edge_clearance": 500000,
+            "min_via_drill": 250000, "min_annular": 100000, "min_via_diameter": 400000 }} }}"#,
+        pads.join(",")
+    );
+    BoardModel::from_json(&s).unwrap_or_else(|e| panic!("{e}\n{s}"))
+}
+
+/// Thermal pad vias: the exposed centre pad of the QFN is found (the lone large pad of R1 is
+/// not: a footprint needs four pads), and with `thermal_pad_vias` it gets several own-net
+/// sites inside it while `via_in_pad` stays off; without it, none.
+#[test]
+fn exposed_pad_gets_thermal_via_sites() {
+    use topor_engine::vias::{exposed_pads, via_sites_ring};
+    let m = qfn_model();
+    let ep = m.pads.iter().position(|p| p.number == "9").unwrap();
+    assert_eq!(exposed_pads(&m), vec![ep]);
+    let o = Options::default();
+    let obs = ObstacleSet::build(&m, &o, &HashSet::new(), &[]);
+    let ck = Checker::new(&m, &o);
+    let sizes = via_sizes(&m.rules, 0, &o);
+    let all: Vec<usize> = (0..m.pads.len()).collect();
+    let inside = |s: &ViaSite| (s.at.x - 14.0 * MM).abs() < 1.5 * MM && (s.at.y + 15.0 * MM).abs() < 1.5 * MM;
+    let with = via_sites_ring(&m, &obs, &ck, &[0, 31], &all, &sizes, EPS, false, &[], &[], &[ep]);
+    let own: Vec<&ViaSite> = with.iter().filter(|s| inside(s)).collect();
+    assert!(own.len() >= 4, "{} thermal sites", own.len());
+    assert!(own.iter().all(|s| s.net == Some(1) && matches!(s.origin, SiteOrigin::InPad(p) if p == ep)));
+    let without = via_sites_ring(&m, &obs, &ck, &[0, 31], &all, &sizes, EPS, false, &[], &[], &[]);
+    assert!(!without.iter().any(inside));
+    assert!(Options::default().thermal_pad_vias);
 }

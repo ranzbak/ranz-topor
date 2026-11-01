@@ -15,6 +15,8 @@ fn opts(rip: bool, threads: usize) -> Options {
         wall_clock_s: 600.0,
         threads,
         rip_pass: rip,
+        // the pass alone (continuation rounds renumber the connections they retry)
+        continue_rounds: 0,
         ..Options::default()
     }
 }

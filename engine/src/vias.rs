@@ -15,6 +15,7 @@ use crate::graph::{chord, inside_outline};
 use crate::model::{BoardModel, Item, Options, PadAttr, Pt, Rules, ViaItem};
 use crate::obstacle::ObstacleSet;
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 /// Minimum distance between two sites, nm (0.1 mm).
 pub const MIN_SITE_PITCH_NM: f64 = 100_000.0;
@@ -240,7 +241,63 @@ pub fn via_sites_stubs(
     in_pad: bool,
     stub_pads: &[usize],
 ) -> Vec<ViaSite> {
-    via_sites_ring(model, obs, checker, layers, escape_pads, sizes, eps, in_pad, stub_pads, &[])
+    via_sites_ring(model, obs, checker, layers, escape_pads, sizes, eps, in_pad, stub_pads, &[], &[])
+}
+
+/// Width and height (nm, pad frame) of a pad's shape on `layer` (its first shape otherwise);
+/// `None` for a polygon. O(1).
+fn pad_wh(pad: &crate::model::Pad, layer: u32) -> Option<(f64, f64)> {
+    use crate::model::PadShape;
+    match pad.shapes.get(&layer).or_else(|| pad.shapes.values().next())? {
+        PadShape::Circle { d } => Some((*d as f64, *d as f64)),
+        PadShape::Rect { w, h } | PadShape::RoundRect { w, h, .. } | PadShape::Oval { w, h } => {
+            Some((*w as f64, *h as f64))
+        }
+        PadShape::Poly { .. } => None,
+    }
+}
+
+/// Smallest exposed-pad area (nm²): 1 mm².
+const EXPOSED_MIN_AREA: f64 = 1.0e12;
+/// An exposed pad is at least this many times the median area of its footprint's other pads.
+const EXPOSED_AREA_RATIO: f64 = 4.0;
+
+/// Exposed (thermal) pads: per footprint with at least 4 pads, the largest SMD pad of a net
+/// when its area is at least [`EXPOSED_MIN_AREA`] and [`EXPOSED_AREA_RATIO`] times the median
+/// area of the footprint's other pads (the centre pad of a QFN / DFN / power package). Vias in
+/// such a pad are normal (thermal vias), so it gets in-pad sites even without
+/// `Options.via_in_pad` (`Options.thermal_pad_vias`). Sorted. O(P log P).
+pub fn exposed_pads(model: &BoardModel) -> Vec<usize> {
+    let mut by_ref: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (pi, p) in model.pads.iter().enumerate() {
+        by_ref.entry(p.ref_.as_str()).or_default().push(pi);
+    }
+    let area = |pi: usize| {
+        let p = &model.pads[pi];
+        let l = p.layers.first().copied().unwrap_or(0);
+        pad_wh(p, l).map_or(0.0, |(w, h)| w * h)
+    };
+    let mut out = Vec::new();
+    for pads in by_ref.values() {
+        if pads.len() < 4 {
+            continue;
+        }
+        let Some(&big) = pads.iter().max_by(|&&a, &&b| area(a).total_cmp(&area(b)).then(b.cmp(&a))) else {
+            continue;
+        };
+        let p = &model.pads[big];
+        if p.attr != PadAttr::Smd || p.net <= 0 || area(big) < EXPOSED_MIN_AREA {
+            continue;
+        }
+        let mut rest: Vec<f64> = pads.iter().filter(|&&q| q != big).map(|&q| area(q)).collect();
+        rest.sort_by(f64::total_cmp);
+        let median = rest[rest.len() / 2];
+        if median > 0.0 && area(big) >= EXPOSED_AREA_RATIO * median {
+            out.push(big);
+        }
+    }
+    out.sort_unstable();
+    out
 }
 
 /// Directions per ring of [`via_sites_ring`].
@@ -266,6 +323,7 @@ pub fn via_sites_ring(
     in_pad: bool,
     stub_pads: &[usize],
     ring_pads: &[usize],
+    thermal_pads: &[usize],
 ) -> Vec<ViaSite> {
     let r = &model.rules;
     let d_def = r.default.via_d as f64;
@@ -396,8 +454,34 @@ pub fn via_sites_ring(
                 }
             }
         }
-        own.sort_by(|a, b| a.0.x.total_cmp(&b.0.x).then(a.0.y.total_cmp(&b.0.y)));
     }
+    // Thermal vias: a grid of own-net sites inside each exposed pad (pitch: a default via
+    // plus the hole-to-hole clearance, at least 1 mm), kept where the centre is in the pad.
+    let pitch = (d_def + r.hole_to_hole as f64).max(1_000_000.0);
+    for &pi in thermal_pads {
+        let pad = &model.pads[pi];
+        let Some(layer) = pad.layers.iter().copied().find(|l| layers.contains(l)) else {
+            continue;
+        };
+        let Some((w, h)) = pad_wh(pad, layer) else {
+            continue;
+        };
+        let c = pad.center.to_vec2();
+        let rot = pad.rotation_deg.to_radians();
+        let (ux, uy) = (Vec2 { x: 1.0, y: 0.0 }.rot(rot), Vec2 { x: 0.0, y: 1.0 }.rot(rot));
+        let (kx, ky) = ((0.5 * w / pitch).floor() as i64, (0.5 * h / pitch).floor() as i64);
+        let sk = model.skeleton(pad, layer);
+        for i in -kx..=kx {
+            for j in -ky..=ky {
+                let q = c + ux * (i as f64 * pitch) + uy * (j as f64 * pitch);
+                let pt = Prim::Seg(Seg { a: q, b: q });
+                if dist_prim_skeleton(&pt, &sk) <= 0.0 {
+                    own.push((q, pi));
+                }
+            }
+        }
+    }
+    own.sort_by(|a, b| a.0.x.total_cmp(&b.0.x).then(a.0.y.total_cmp(&b.0.y)));
 
     let cands = own
         .into_iter()

@@ -273,10 +273,11 @@ fn t_junction_onto_hand_copper() {
 /// is the same on every engine (no stubs, no rips, no via to relax).
 #[test]
 fn steiner_off_is_m3_behaviour() {
-    // The pins predate the blocker rip pass: compare without it.
+    // The pins predate the blocker rip pass and the continuation rounds: compare without them.
     let off = Options {
         steiner: false,
         rip_pass: false,
+        continue_rounds: 0,
         ..opts()
     };
     // The ea1f064 pin was taken at that engine's default `ripup_growth = 2.0` (A-C24 moved the

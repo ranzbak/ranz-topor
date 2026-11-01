@@ -899,6 +899,9 @@ pub struct Options {
     /// Plane vias: an SMD pad of a plane-pour connection may also end on a via of its own net
     /// that another connection drops onto the plane, within `plane_via_share_max_nm` of the pad.
     pub plane_via_share: bool,
+    /// Via sites: the exposed (thermal) centre pad of a QFN / DFN-like footprint gets a grid of
+    /// in-pad sites of its own net (`vias::exposed_pads`), independent of `via_in_pad`.
+    pub thermal_pad_vias: bool,
     /// Largest pad-to-via distance for a shared plane via (nm).
     pub plane_via_share_max_nm: i64,
     /// Negotiation: a connection that fails its metrization rips the connections whose vias
@@ -910,6 +913,9 @@ pub struct Options {
     /// routed connection whose strands / vias block the most failed connections is ripped, its
     /// victims routed first, then it again; kept on a net gain of routed connections.
     pub rip_pass: bool,
+    /// Continuation rounds (`route::continue_rounds`): at most this many extra passes route the
+    /// still-failed connections against everything routed so far as fixed copper; 0 = off.
+    pub continue_rounds: u32,
     /// Diagnostics: emit `RouteResult.profile` (per-iteration timers). Off by default: timings
     /// are run-dependent and must not enter the (thread-count independent) result JSON.
     pub profile: bool,
@@ -1006,9 +1012,11 @@ impl Default for Options {
             via_shove: false,
             plane_via_ring: true,
             plane_via_share: true,
+            thermal_pad_vias: true,
             plane_via_share_max_nm: 2_000_000,
             blame_vias: false,
             rip_pass: true,
+            continue_rounds: 3,
             profile: false,
             net_priority: BTreeMap::new(),
             exclude_nets: Vec::new(),

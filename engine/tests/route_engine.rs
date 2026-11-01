@@ -88,6 +88,9 @@ fn opts() -> Options {
         wall_clock_s: 600.0,
         // 22 tests run concurrently in a debug build: one thread each avoids oversubscribing the cores
         threads: 1,
+        // iteration counts are the negotiation's; the continuation rounds add their own
+        // (route_continue.rs)
+        continue_rounds: 0,
         ..Options::default()
     }
 }

@@ -17,6 +17,8 @@ fn opts(shove: bool, threads: usize) -> Options {
         wall_clock_s: 600.0,
         threads,
         via_shove: shove,
+        // the shove alone: a continuation round routes the pinched connection without it
+        continue_rounds: 0,
         ..Options::default()
     }
 }
@@ -49,8 +51,8 @@ fn shove_routes_the_pinched_connection() {
     assert!(d_off.reason.starts_with("infeasible: ") && d_off.reason.contains("site:"), "{}", d_off.reason);
     assert_eq!(d_on.status, "routed", "{}", d_on.reason);
     assert_eq!(off.via_shove, "off");
-    assert_eq!(on.via_shove, "routed 1 of 1 pinched connections, shoved 1 vias");
-    assert_eq!(on.routed, off.routed + 1);
+    assert_eq!(on.via_shove, "routed 2 of 2 pinched connections, shoved 2 vias");
+    assert_eq!(on.routed, off.routed + 2);
     for (a, b) in off.connections.iter().zip(&on.connections) {
         assert!(a.status != "routed" || b.status == "routed", "{} lost: {}", a.id, b.reason);
     }

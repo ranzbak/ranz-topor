@@ -63,7 +63,7 @@ use crate::sketch::{
 use crate::smooth::{deadline_after, hand_outside, outside_len, terminal_skeletons};
 use crate::stubs::{attach as attach_stubs, plan_stubs, with_stubs, StubOut, StubPlan};
 use crate::taut::TautError;
-use crate::vias::{via_fallback_used, via_sites_ring, via_sizes, ViaSize};
+use crate::vias::{exposed_pads, via_fallback_used, via_sites_ring, via_sizes, ViaSize};
 use crate::wires::{extract_wires, Terminal, Wire};
 use rayon::prelude::*;
 use serde::Serialize;
@@ -3324,8 +3324,11 @@ const SHOVE_STEPS_NM: [f64; 6] = [
 /// push on to a neighbour).
 const SHOVE_ROUNDS: usize = 4;
 
-/// Offenders tried per [`blocker_rip_pass`] (all attempts together).
+/// Least attempts per [`blocker_rip_pass`] (all offenders together); the pass gets two per
+/// failed connection, at most [`RIP_PASS_ATTEMPTS_MAX`].
 const RIP_PASS_ATTEMPTS: usize = 24;
+/// Most attempts per [`blocker_rip_pass`].
+const RIP_PASS_ATTEMPTS_MAX: usize = 96;
 /// Attempts per offender in one pass (each costs `ripup_growth` more in its order).
 const RIP_PASS_PER_OFFENDER: u32 = 3;
 /// Victims routed per attempt (the offender's highest-priority victims first, then by the
@@ -3410,7 +3413,11 @@ fn blocker_rip_pass(
     };
     let use_back = needs_back(cx, obs, rt, best);
     let mut tries: BTreeMap<usize, u32> = BTreeMap::new();
-    while out.attempts < RIP_PASS_ATTEMPTS {
+    let failed_n = (0..live.len())
+        .filter(|&i| matches!(best.res[i], Res::Fail { perm: false, .. }))
+        .count();
+    let budget = (2 * failed_n).clamp(RIP_PASS_ATTEMPTS, RIP_PASS_ATTEMPTS_MAX);
+    while out.attempts < budget {
         if cx.stop() {
             out.timed_out = true;
             break;
@@ -4673,6 +4680,7 @@ fn route_inner(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteRes
         .iter()
         .any(|z| z.net != 0 && z.fills.iter().any(|f| f.outer.len() >= 3));
     if !has_fill {
+        continue_rounds(model, opts, ctl, t0, reach_deadline, &mut r);
         dedupe_stub_items(&mut r, model);
         ctl.update("done", r.iterations, r.routed, r.connections_total, r.vias, t0.elapsed().as_secs_f64());
         return r;
@@ -4747,31 +4755,7 @@ fn route_inner(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteRes
                     .filter(|v| reach.lost_vias.contains(&v.uuid))
                     .map(|v| (v.net, v.at.to_vec2(), 0.5 * v.d as f64 + reach_r)),
             );
-            for (k, it) in r.items.iter().enumerate() {
-                let cid = r.item_conn[k];
-                if r.connections[cid].status != "routed" {
-                    continue;
-                }
-                for &(lnet, c, radius) in &centres {
-                    let (inet, dist) = match it {
-                        Item::Track(t) => (
-                            t.net,
-                            dist_prim_skeleton(
-                                &dequantise(&flip_track(t.prim)),
-                                &Skeleton::Point { p: c, r: 0.0 },
-                            ) - 0.5 * t.width as f64,
-                        ),
-                        Item::Via(v) => {
-                            let mut at = v.at;
-                            at.flip();
-                            (v.net, (at.to_vec2() - c).len() - 0.5 * v.d as f64)
-                        }
-                    };
-                    if inet != lnet && dist <= radius {
-                        unfreeze.insert(cid);
-                    }
-                }
-            }
+            unfreeze = connections_near(&r, &centres).into_keys().collect();
             if unfreeze.is_empty() {
                 stop(&mut r, "blocked by fixed copper");
                 break;
@@ -4867,10 +4851,224 @@ fn route_inner(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteRes
         ));
         merge_pass(&mut r, model, r2);
     }
+    continue_rounds(model, opts, ctl, t0, reach_deadline, &mut r);
     dedupe_stub_items(&mut r, model);
     r.runtime_s = t0.elapsed().as_secs_f64();
     ctl.update("done", r.iterations, r.routed, r.connections_total, r.vias, r.runtime_s);
     r
+}
+
+/// Routed connections of `r` with copper (a track or via) of another net within `radius` of a
+/// centre `(net, centre, radius)`, with the number of centres each reaches (its blocker
+/// score). O(items · centres).
+fn connections_near(r: &RouteResult, centres: &[(i32, Vec2, f64)]) -> BTreeMap<usize, usize> {
+    let mut out: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+    for (k, it) in r.items.iter().enumerate() {
+        let cid = r.item_conn[k];
+        if r.connections[cid].status != "routed" {
+            continue;
+        }
+        for (ci, &(lnet, c, radius)) in centres.iter().enumerate() {
+            let (inet, dist) = match it {
+                Item::Track(t) => (
+                    t.net,
+                    dist_prim_skeleton(
+                        &dequantise(&flip_track(t.prim)),
+                        &Skeleton::Point { p: c, r: 0.0 },
+                    ) - 0.5 * t.width as f64,
+                ),
+                Item::Via(v) => {
+                    let mut at = v.at;
+                    at.flip();
+                    (v.net, (at.to_vec2() - c).len() - 0.5 * v.d as f64)
+                }
+            };
+            if inet != lnet && dist <= radius {
+                out.entry(cid).or_default().insert(ci);
+            }
+        }
+    }
+    out.into_iter().map(|(c, hit)| (c, hit.len())).collect()
+}
+
+/// Whether a failure can change in a continuation round (not a terminal / via-site verdict).
+fn retryable(reason: &str) -> bool {
+    !(reason.starts_with("terminal ")
+        || reason.starts_with("no via site")
+        || reason.starts_with("inside obstacle")
+        || reason.starts_with("timeout")
+        || reason.is_empty())
+}
+
+/// Continuation rounds (`Options.continue_rounds`): the connections still failed for a reason
+/// that can change are routed again in a pass of their own, against everything routed so far
+/// as fixed copper (`with_routed_copper`): the decomposition joins them to any copper of their
+/// net, so a round only has to close the remaining gaps. A round first also releases routed
+/// connections with copper in the escape area of the retried connections' pads (pad hull + 2 ·
+/// (default via + clearance), as the pour-reach pass) and routes them together (the
+/// negotiation decides who goes where): those whose copper is in the escape areas of at least
+/// `max - (round - 1)` retried pads, so the bar drops each round (round 1 releases only the
+/// worst blockers); that is kept only when it routes more than it released, else the round
+/// runs again without releasing. Their earlier attempts leave the
+/// result; the round's connections are appended (`merge_pass`). Stops when a round routes
+/// nothing new, after `continue_rounds` rounds, or when the budget is spent.
+/// O(rounds · 2 passes).
+fn continue_rounds(
+    model: &BoardModel,
+    opts: &Options,
+    ctl: &RunControl,
+    t0: Instant,
+    reach_deadline: Instant,
+    r: &mut RouteResult,
+) {
+    for round in 1..=opts.continue_rounds {
+        let retry: BTreeSet<usize> = r
+            .connections
+            .iter()
+            .filter(|c| c.status != "routed" && retryable(&c.reason))
+            .map(|c| c.id)
+            .collect();
+        if retry.is_empty() {
+            break;
+        }
+        let rule = &model.rules.default;
+        let reach_r = 2.0 * (rule.via_d + rule.clearance) as f64;
+        let centres: Vec<(i32, Vec2, f64)> = r
+            .connections
+            .iter()
+            .filter(|c| retry.contains(&c.id))
+            .flat_map(|c| [&c.from, &c.to])
+            .filter(|t| t.kind == "pad")
+            .filter_map(|t| pad_of_label(model, &t.label))
+            .map(|pi| {
+                let p = &model.pads[pi];
+                (p.net, p.center.to_vec2(), pad_hull_r(model, pi) + reach_r)
+            })
+            .collect();
+        // The bar drops each round: round k releases the neighbours that block at least
+        // `max - (k - 1)` of the retried pads (round 1 only the worst blockers).
+        let score: BTreeMap<usize, usize> = connections_near(r, &centres)
+            .into_iter()
+            .filter(|(c, _)| !retry.contains(c))
+            .collect();
+        let bar = score
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .saturating_sub(round as usize - 1)
+            .max(1);
+        let release: BTreeSet<usize> = score
+            .iter()
+            .filter(|&(_, &n)| n >= bar)
+            .map(|(&c, _)| c)
+            .collect();
+        let mut gained = None;
+        for with_release in [true, false] {
+            if with_release && release.is_empty() {
+                continue;
+            }
+            let empty = BTreeSet::new();
+            let rel = if with_release { &release } else { &empty };
+            let prev = r.clone();
+            let Some(routed) = round_pass(model, opts, ctl, t0, reach_deadline, r, &retry, rel, round)
+            else {
+                return;
+            };
+            if with_release && routed <= rel.len() {
+                *r = prev;
+                r.warnings.push(format!(
+                    "continue round {round}: releasing {} neighbour(s) routed {routed}, no gain; \
+                     undone",
+                    rel.len()
+                ));
+                continue;
+            }
+            if routed == 0 {
+                // nothing new: the result stays as it was (ids, totals), only the note is kept
+                let note = r.warnings.pop();
+                *r = prev;
+                r.warnings.extend(note);
+            }
+            gained = Some(routed - rel.len());
+            break;
+        }
+        if gained.unwrap_or(0) == 0 {
+            break;
+        }
+    }
+}
+
+/// One continuation pass: the connections `retry` and `release` leave `r` and are routed
+/// together against the rest of `r` as fixed copper; the result is appended. `None` when the
+/// budget is spent (nothing done). Returns the pass's routed count.
+#[allow(clippy::too_many_arguments)]
+fn round_pass(
+    model: &BoardModel,
+    opts: &Options,
+    ctl: &RunControl,
+    t0: Instant,
+    reach_deadline: Instant,
+    r: &mut RouteResult,
+    retry: &BTreeSet<usize>,
+    release: &BTreeSet<usize>,
+    round: u32,
+) -> Option<usize> {
+    let disabled = opts.wall_clock_s == 0.0;
+    let remaining = if disabled {
+        0.0
+    } else {
+        opts.wall_clock_s - t0.elapsed().as_secs_f64()
+    };
+    if r.timed_out || ctl.is_cancelled() || (!disabled && remaining <= 0.0) {
+        r.warnings.push(format!("continue round {round}: no budget"));
+        return None;
+    }
+    let mut scope_pads: Vec<PadRef> = Vec::new();
+    let mut scope_vias: Vec<String> = Vec::new();
+    for c in r
+        .connections
+        .iter()
+        .filter(|c| retry.contains(&c.id) || release.contains(&c.id))
+    {
+        for t in [&c.from, &c.to] {
+            match t.kind.as_str() {
+                "pad" => {
+                    if let Ok(pr) = PadRef::try_from(t.label.clone()) {
+                        scope_pads.push(pr);
+                    }
+                }
+                "via" => scope_vias.push(t.label.clone()),
+                _ => {}
+            }
+        }
+    }
+    let drop: BTreeSet<usize> = retry.union(release).copied().collect();
+    drop_conns(r, &drop);
+    let fixed = unique_items(r);
+    let now = check_pour_reach_until(model, &fixed, &routed_pads(model, r), Some(reach_deadline));
+    let m2 = with_routed_copper(model, &fixed, &now);
+    let opts2 = Options {
+        scope: Scope {
+            pads: scope_pads,
+            vias: scope_vias,
+            ..Scope::default()
+        },
+        wall_clock_s: remaining,
+        existing_copper: ExistingCopper::Fixed,
+        ..opts.clone()
+    };
+    let r2 = route_pass(&m2, &opts2, Some(&now), ctl, r.iterations, t0);
+    let routed = r2.routed;
+    r.warnings.push(format!(
+        "continue round {round}: {routed} of {} connection(s) routed against the fixed copper \
+         ({} retried, {} neighbour(s) released)",
+        r2.connections_total,
+        retry.len(),
+        release.len()
+    ));
+    merge_pass(r, model, r2);
+    Some(routed)
 }
 
 /// A5: the Steiner context of one pass: per live connection its net, the clusters of its ends
@@ -5190,6 +5388,15 @@ fn route_pass(
                 .collect::<BTreeSet<usize>>()
                 .into_iter()
                 .collect();
+            // Exposed (thermal) pads of the live terminals get in-pad sites (`thermal_pad_vias`).
+            let thermal: Vec<usize> = if opts.thermal_pad_vias {
+                exposed_pads(model)
+                    .into_iter()
+                    .filter(|pi| escape.binary_search(pi).is_ok())
+                    .collect()
+            } else {
+                Vec::new()
+            };
             via_sites_ring(
                 model,
                 &obs,
@@ -5201,6 +5408,7 @@ fn route_pass(
                 opts.via_in_pad,
                 &stub_pads,
                 &ring,
+                &thermal,
             )
         } else {
             Vec::new()

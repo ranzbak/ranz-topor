@@ -126,6 +126,8 @@ SETTINGS: list[Setting] = [
        engine="via_shove"),
     _s("vias", "plane_via_ring", "bool", True, "Offer plane vias candidate positions all around their SMD pad (two rings of 16), not only on the pad's four axes, so the via can go to whichever side is free.",
        engine="plane_via_ring"),
+    _s("vias", "thermal_pad_vias", "bool", True, "Allow vias inside the exposed (thermal) centre pad of QFN / DFN-like packages (the largest pad of a footprint, at least 4x its other pads), even when via_in_pad is off: thermal vias there are standard.",
+       engine="thermal_pad_vias"),
     _s("vias", "plane_via_share", "bool", True, "A pad of a plane net may also end on a via of its own net that another pad already drops onto the plane, within plane_via_share_max_mm, instead of needing its own via (fewer vias in crowded spots; pads with no free via site of their own still connect).",
        engine="plane_via_share"),
     _s("vias", "plane_via_share_max_mm", "float", 2.0, "Largest distance from a pad to a shared plane via (see plane_via_share).", unit="mm", range=(0, 50),
@@ -175,6 +177,8 @@ SETTINGS: list[Setting] = [
        range=(1, 100), engine="patience"),
     _s("iterations", "min_gain_pct", "float", 1.0, "Smallest total cost improvement over the patience window that counts as progress.",
        unit="%", range=(0, 100), engine="min_gain_pct"),
+    _s("iterations", "continue_rounds", "int", 3, "Extra rounds for the connections that are still unrouted: each round routes them again against everything routed so far as fixed copper (they may join any copper of their net) and first tries releasing the routed connections that block them most; the bar for releasing drops each round. Stops when a round routes nothing new; 0 = off.",
+       range=(0, 10), engine="continue_rounds"),
     # ---- [output]
     _s("output", "geometry", "str", "arcs", "Track geometry: arcs = native KiCad arcs, segments = straight-segment approximation.",
        choices=("arcs", "segments")),
