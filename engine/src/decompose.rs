@@ -80,6 +80,19 @@ pub struct Decomposition {
     pub skipped: Vec<(i32, String)>,
     /// Model problems found while decomposing (e.g. a pour without fill outline).
     pub warnings: Vec<String>,
+    /// Per connection id: the copper clusters `(from, to)` it joins, as run-unique cluster ids
+    /// (a pour target: the cluster holding the pour). The same-net Steiner attachment (A5) joins
+    /// a connection only onto copper of the cluster component on its far side.
+    pub conn_clusters: Vec<(usize, usize)>,
+    /// Kept item index (into `model.kept`) -> run-unique cluster id of its copper cluster.
+    pub kept_cluster: BTreeMap<usize, usize>,
+    /// Pad index (into `model.pads`) / via index (into `model.vias`) -> run-unique cluster id.
+    pub pad_cluster: BTreeMap<usize, usize>,
+    pub via_cluster: BTreeMap<usize, usize>,
+    /// Per connection id: rank inside its net by `est_len` ascending, ties by id (M4-D3 net
+    /// ordering: short spokes first; identical to the shorter-first rule of [`order`] within a
+    /// net, so the routing order is unchanged). O(p log p) per net.
+    pub net_rank: Vec<usize>,
 }
 
 struct Dsu(Vec<usize>);
@@ -287,6 +300,7 @@ pub fn decompose(model: &BoardModel, opts: &Options, layers: &[u32]) -> Decompos
             .map(|n| n.name.clone())
             .unwrap_or_default()
     };
+    let mut cl_base = 0usize;
     for (&net, (pads, vias, kept)) in &by_net {
         if pads.is_empty() {
             continue; // no terminal: nothing to connect
@@ -467,6 +481,22 @@ pub fn decompose(model: &BoardModel, opts: &Options, layers: &[u32]) -> Decompos
             }
         }
 
+        for (k, &ki) in kept.iter().enumerate() {
+            out.kept_cluster.insert(ki, cl_base + cl_of_node[np + nv + k]);
+        }
+        for (a, &pi) in pads.iter().enumerate() {
+            out.pad_cluster.insert(pi, cl_base + cl_of_node[a]);
+        }
+        for (b, &vi) in vias.iter().enumerate() {
+            out.via_cluster.insert(vi, cl_base + cl_of_node[np + b]);
+        }
+        let pour_cluster = |zi: usize| -> usize {
+            cl_base
+                + clusters
+                    .iter()
+                    .position(|c| c.pours.contains(&zi))
+                    .unwrap_or(0)
+        };
         // A pour without listed items is a cluster without ports; it is no copper cluster to join.
         let nclusters = clusters.iter().filter(|c| !c.ports.is_empty()).count();
         let in_scope = selected_terms > 0;
@@ -572,6 +602,7 @@ pub fn decompose(model: &BoardModel, opts: &Options, layers: &[u32]) -> Decompos
                     to: term_ref(model, &clusters[hi].ports[phi], net, layers),
                     est_len: d,
                 });
+                out.conn_clusters.push((cl_base + lo, cl_base + hi));
                 conn_ids.push(id);
             }
             for (a, pi, zi, q, d) in pour_edges {
@@ -595,9 +626,22 @@ pub fn decompose(model: &BoardModel, opts: &Options, layers: &[u32]) -> Decompos
                     },
                     est_len: d,
                 });
+                out.conn_clusters.push((cl_base + a, pour_cluster(zi)));
                 conn_ids.push(id);
             }
         }
+        let mut ranked: Vec<usize> = conn_ids.clone();
+        ranked.sort_by(|&x, &y| {
+            out.connections[x]
+                .est_len
+                .total_cmp(&out.connections[y].est_len)
+                .then(x.cmp(&y))
+        });
+        out.net_rank.resize(out.connections.len(), 0);
+        for (r, &c) in ranked.iter().enumerate() {
+            out.net_rank[c] = r;
+        }
+        cl_base += clusters.len();
         if let Some(r) = skipped {
             out.skipped.push((net, r));
         }

@@ -357,6 +357,8 @@ fn front_only_plus5v_needs_zero_slack_for_failed() {
     m3.expert.own_net_capacity = false;
     m3.expert.transit_pinch = false;
     m3.zero_slack_failed = false;
+    // M3 = every M4 rule off, the A5 Steiner attachment included.
+    m3.steiner = false;
     assert_eq!(
         topor_engine::route::route(&m, &m3).routed,
         27,

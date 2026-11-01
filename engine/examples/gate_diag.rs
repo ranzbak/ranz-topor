@@ -247,12 +247,14 @@ fn main() {
                     vertices: Vec::new(),
                     pour_layer: None,
                     pour_sites,
+                    ..Default::default()
                 }
             }
             _ => Goal {
                 vertices: vertices(&mg, &c.to),
                 pour_sites: Vec::new(),
                 pour_layer: None,
+                ..Default::default()
             },
         };
         if st.is_empty() || (goal.vertices.is_empty() && goal.pour_sites.is_empty()) {
@@ -612,6 +614,7 @@ fn main() {
                 vertices: starts[i].clone(),
                 pour_sites: Vec::new(),
                 pour_layer: None,
+                ..Default::default()
             };
             let p = params(c);
             let r = search(&mg, &obs, c, &goals[i].vertices, &rg, &p);

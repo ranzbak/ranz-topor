@@ -125,6 +125,8 @@ pub struct SlotPath {
     pub expansions: usize,
     /// Sum of the clearance-query candidates (vertices + walls) examined over the whole search.
     pub candidates: usize,
+    /// Same-net T-junction end (A5); `None` = the path ends at a terminal / pour site.
+    pub junction: Option<JunctionEnd>,
 }
 
 impl SlotPath {
@@ -160,6 +162,7 @@ impl SlotPath {
             cost: p.est_len,
             expansions: p.expansions,
             candidates: p.candidates,
+            junction: None,
         }
     }
 }
@@ -209,7 +212,10 @@ fn static_block(
 ) -> Option<String> {
     let open = |l: usize, v: usize| terminal_open(env.layers[l].0, v, conn.net);
     let start_ok = start.iter().any(|&(l, v)| open(l, v));
-    let goal_ok = goal.vertices.is_empty() || goal.vertices.iter().any(|&(l, v)| open(l, v));
+    let goal_ok = goal.vertices.is_empty()
+        || !goal.strands.is_empty()
+        || !goal.copper.is_empty()
+        || goal.vertices.iter().any(|&(l, v)| open(l, v));
     let what = match (start_ok, goal_ok) {
         (true, true) => return None,
         (false, true) => "left",
@@ -224,13 +230,65 @@ fn static_block(
 }
 
 /// Where the connection ends: terminal vertices `(layer_idx, vertex)` on every layer of the
-/// target and, for a pour target, the sites inside the pour (sorted).
+/// target and, for a pour target, the sites inside the pour (sorted). With the same-net Steiner
+/// attachment (A5) also the crossings of routed sibling legs (`strands`) and the constraint
+/// edges of kept hand copper (`copper`) the path may end on in a T-junction; both are filled per
+/// search by [`crate::steiner::plan`] from the multigraph (empty = pad / pour goals only, M3).
 #[derive(Clone, Debug, Default)]
 pub struct Goal {
     pub vertices: Vec<(usize, usize)>,
     pub pour_sites: Vec<usize>,
     /// Informational (P1).
     pub pour_layer: Option<usize>,
+    /// Sibling crossings a junction may end on (A5).
+    pub strands: Vec<OwnStrand>,
+    /// `(layer_idx, edge)` constraint edges of same-net kept tracks of the target cluster (A5).
+    pub copper: Vec<(usize, usize)>,
+    /// Least junction angle (degrees) against the sibling's chord; 0 = any.
+    pub junction_min_angle_deg: f64,
+    /// Most `length + via_cost * vias` a junction path may have (A5: the connection's own
+    /// pad-to-pad ghost on the empty board times `expert.steiner_ghost_factor`); `None` = any.
+    pub junction_cap: Option<f64>,
+}
+
+/// A crossing of a committed leg of a same-net sibling connection (A5, M4-D3, design note
+/// `m4-capacity-steiner-design.md` §2): a state that crosses `edge` of `layer_idx` at an
+/// insertion slot adjacent to the sibling's entry (`slot` or `slot + 1`: nothing between the two
+/// strands, Rule T) may end there on the sibling's copper.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OwnStrand {
+    /// Sibling live connection and the ordinal of its leg.
+    pub conn: usize,
+    pub leg: usize,
+    pub layer_idx: usize,
+    pub edge: usize,
+    /// Index of the sibling's entry on `edge` (the graph as frozen for the search).
+    pub slot: usize,
+    /// Unit direction of the sibling's chord through `edge` (previous -> next port point).
+    pub dir: Vec2,
+    /// The sibling's port point on `edge` (slot fraction), the junction estimate.
+    pub at: Vec2,
+}
+
+/// End of a path that joins same-net copper in a T-junction (A5) instead of a terminal: the
+/// last leg's last crossing is a zero-width half crossing of `edge` next to the sibling (or on
+/// the hand track's constraint edge); its `Leg::goal` is an end vertex of `edge` (placeholder,
+/// never entered).
+#[derive(Clone, Debug, PartialEq)]
+pub struct JunctionEnd {
+    pub layer_idx: usize,
+    pub edge: usize,
+    /// `(sibling live connection, leg ordinal)`; `None` = kept hand copper.
+    pub sibling: Option<(usize, usize)>,
+    /// Search estimate of the junction point.
+    pub at: Vec2,
+    /// Search estimate of the junction angle (degrees, 0..=90; 90 for hand copper).
+    pub angle_deg: f64,
+    /// The path runs from the connection's `to` terminal to a junction on the `from` side.
+    pub reversed: bool,
+    /// Search length estimate of the whole path (the metrization rejects a junction whose
+    /// metrized length overshoots it, `Options.expert.steiner_len_slack`).
+    pub est_len: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -353,6 +411,32 @@ impl Cyc {
         e_out: usize,
         near_v: usize,
     ) -> Option<usize> {
+        let (lo, hi, jb) = self.cross_range(strands, p0, e_out, near_v)?;
+        let near_start = near_v == self.vs[jb];
+        let gap = if near_start { lo } else { hi };
+        Some(self.slot_of_gap(jb, gap))
+    }
+
+    /// Insertion slot of gap `gap` (counted from the face cycle's side) of face edge `jb`. O(1).
+    fn slot_of_gap(&self, jb: usize, gap: usize) -> usize {
+        if self.fwd[jb] {
+            gap
+        } else {
+            self.n[jb] - gap
+        }
+    }
+
+    /// The gaps `lo..=hi` (face-cycle order) of `e_out` a chord from `p0` may take without
+    /// crossing a strand, and the face edge index of `e_out`; `None` when none. [`Cyc::cross_slot`]
+    /// picks the gap nearest `near_v`; the junction goals (A5) test adjacency to a sibling's
+    /// entry against the whole range. O(strands).
+    fn cross_range(
+        &self,
+        strands: &[(i64, i64)],
+        p0: i64,
+        e_out: usize,
+        near_v: usize,
+    ) -> Option<(usize, usize, usize)> {
         let jb = (0..3).find(|&j| self.es[j] == e_out)?;
         let nb = self.n[jb];
         let rel = |x: i64| (x - p0).rem_euclid(self.total);
@@ -391,8 +475,16 @@ impl Cyc {
         if lo > hi {
             return None;
         }
-        let gap = if near_start { lo } else { hi };
-        Some(if self.fwd[jb] { gap } else { nb - gap })
+        Some((lo, hi, jb))
+    }
+
+    /// Slot `slot` of face edge `jb` lies in the gap range `lo..=hi`. O(1).
+    fn slot_in_range(&self, jb: usize, lo: usize, hi: usize, slot: usize) -> bool {
+        if slot > self.n[jb] {
+            return false;
+        }
+        let gap = if self.fwd[jb] { slot } else { self.n[jb] - slot };
+        gap >= lo && gap <= hi
     }
 
     /// Like [`Cyc::strands`], with the owning connection of every strand.
@@ -549,6 +641,17 @@ fn seg_closest(s0: Vec2, s1: Vec2, a: Vec2, b: Vec2) -> Vec2 {
     best
 }
 
+/// Acute angle (degrees, 0..=90) between the chord `apex -> p` and the unit direction `dir`;
+/// 90 for a chord shorter than 1 nm (no direction to judge). O(1).
+pub fn junction_angle(apex: Vec2, p: Vec2, dir: Vec2) -> f64 {
+    let d = p - apex;
+    let l = d.len();
+    if l <= 1.0 {
+        return 90.0;
+    }
+    (d.dot(dir) / l).abs().min(1.0).acos().to_degrees()
+}
+
 /// Chord `a -> t` passes strictly through the interior of portal `pa pb`.
 fn crosses(a: Vec2, t: Vec2, pa: Vec2, pb: Vec2) -> bool {
     let r = t - a;
@@ -569,6 +672,10 @@ const K_ROOT: u8 = 0;
 const K_EDGE: u8 = 1;
 const K_SITE: u8 = 2;
 const K_GOAL: u8 = 3;
+/// Junction goal (A5): the path ends on a sibling's / hand track's copper at `edge`.
+const K_JUNC: u8 = 4;
+/// `Node::jx` of a hand-copper junction: `JX_COPPER + index into Goal::copper`.
+const JX_COPPER: usize = 1 << 40;
 
 #[derive(Clone, Debug)]
 struct Node {
@@ -595,6 +702,9 @@ struct Node {
     /// Latest `K_SITE` ancestor (a site node: the previous one); `usize::MAX` if none.
     last_site: usize,
     size: Option<ViaSize>,
+    /// Junction goal (`K_JUNC`): index into `Goal::strands`, or `JX_COPPER + i` for
+    /// `Goal::copper[i]`; `usize::MAX` otherwise.
+    jx: usize,
 }
 
 /// Closed-set / best-cost key `(layer, edge, slot, dir, vias_used)`; a site node uses
@@ -712,6 +822,12 @@ struct Layered<'a> {
     ghost: bool,
     /// Expansions so far of the running `run` (statistics).
     exps: Cell<usize>,
+    /// Junction goals (A5): `(layer, edge)` -> indices into `goal.strands` (lookup only).
+    jmap: HashMap<(usize, usize), Vec<usize>>,
+    /// `(layer, edge)` -> index into `goal.copper` (lookup only).
+    cmap: HashMap<(usize, usize), usize>,
+    /// Segments of the junction edges (sorted by `(layer, edge)`): the heuristic's extra targets.
+    jsegs: Vec<(Vec2, Vec2)>,
 }
 
 fn other_dir(g: &RouteGraph, e: usize, f: usize) -> u8 {
@@ -795,6 +911,25 @@ impl<'a> Layered<'a> {
             .mg
             .map(|mg| via_sizes_baked(&mg.rules, conn.net))
             .unwrap_or_default();
+        let mut jmap: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        let mut jkeys: Vec<(usize, usize)> = Vec::new();
+        for (i, st) in goal.strands.iter().enumerate() {
+            jmap.entry((st.layer_idx, st.edge)).or_default().push(i);
+            jkeys.push((st.layer_idx, st.edge));
+        }
+        let cmap: HashMap<(usize, usize), usize> =
+            goal.copper.iter().enumerate().map(|(i, &k)| (k, i)).collect();
+        jkeys.extend(goal.copper.iter().copied());
+        jkeys.sort_unstable();
+        jkeys.dedup();
+        let jsegs: Vec<(Vec2, Vec2)> = jkeys
+            .iter()
+            .filter_map(|&(l, e)| {
+                let g = env.layers.get(l)?.0;
+                let ge = g.edges.get(e)?;
+                Some((g.verts[ge.a].at, g.verts[ge.b].at))
+            })
+            .collect();
         Layered {
             ls,
             mg: env.mg,
@@ -812,6 +947,9 @@ impl<'a> Layered<'a> {
             conn_id: conn.id,
             ghost,
             exps: Cell::new(0),
+            jmap,
+            cmap,
+            jsegs,
         }
     }
 
@@ -839,9 +977,145 @@ impl<'a> Layered<'a> {
     }
 
     /// Admissible heuristic: Euclidean distance to the nearest goal vertex or to the bounding
-    /// box of the pour sites (ignores via cost). O(|goal vertices|).
+    /// box of the pour sites (ignores via cost), or to the nearest junction edge (A5).
+    /// O(|goal vertices| + |junction edges|).
     fn h(&self, p: Vec2) -> f64 {
-        dist(p, self.nearest(p))
+        let mut d = dist(p, self.nearest(p));
+        for &(a, b) in &self.jsegs {
+            d = d.min(point_seg(p, &Seg { a, b }));
+        }
+        d
+    }
+
+    /// Junction goals (A5) of a chord from `p0` (in face `fin` of `cyc`) to a new port on
+    /// `e_out`: every sibling strand on `e_out` whose entry is adjacent to a gap the chord may
+    /// take (nothing between the two strands), and a hand-copper constraint edge at the chord's
+    /// own slot. O(strands of the face + strands on `e_out`) plus one `los` per goal pushed.
+    #[allow(clippy::too_many_arguments)]
+    fn try_junction(
+        &self,
+        st: &mut State,
+        parent: usize,
+        layer: usize,
+        fin: usize,
+        cyc: &Cyc,
+        strands: &[(i64, i64)],
+        p0: i64,
+        e_out: usize,
+        near_v: usize,
+    ) {
+        if self.jmap.is_empty() && self.cmap.is_empty() {
+            return;
+        }
+        let key = (layer, e_out);
+        let (js, cj) = (self.jmap.get(&key), self.cmap.get(&key));
+        if js.is_none() && cj.is_none() {
+            return;
+        }
+        let Some((lo, hi, jb)) = cyc.cross_range(strands, p0, e_out, near_v) else {
+            return;
+        };
+        if let Some(js) = js {
+            for &i in js {
+                let sd = &self.goal.strands[i];
+                if let Some(sl) = [sd.slot, sd.slot + 1]
+                    .into_iter()
+                    .find(|&sl| cyc.slot_in_range(jb, lo, hi, sl))
+                {
+                    self.push_junction(st, parent, layer, e_out, sl, fin, i, sd.at);
+                }
+            }
+        }
+        if let Some(&ci) = cj {
+            let gap = if near_v == cyc.vs[jb] { lo } else { hi };
+            let apex = st.nodes[parent].apex;
+            self.push_junction(
+                st,
+                parent,
+                layer,
+                e_out,
+                cyc.slot_of_gap(jb, gap),
+                fin,
+                JX_COPPER + ci,
+                apex,
+            );
+        }
+    }
+
+    /// Push the junction goal node on `e` at insertion slot `slot` (A5): the junction point is
+    /// the state point of `e` nearest the chord from the apex toward `hint`; a sibling junction
+    /// whose final chord meets the sibling's chord below `junction_min_angle_deg` is refused.
+    /// Cost = the leg cost so far (no via, no congestion term on `e`: the end overlaps the
+    /// sibling's copper). O(1) plus the `los` test.
+    #[allow(clippy::too_many_arguments)]
+    fn push_junction(
+        &self,
+        st: &mut State,
+        parent: usize,
+        layer: usize,
+        e: usize,
+        slot: usize,
+        fin: usize,
+        jx: usize,
+        hint: Vec2,
+    ) {
+        let sr = &self.ls[layer];
+        let apex0 = st.nodes[parent].apex;
+        let p = sr.state_point(e, apex0, hint);
+        let (apex, apex_len, _, ok) = sr.los(&st.nodes, parent, p, Some(e));
+        if !ok {
+            return;
+        }
+        if jx < JX_COPPER
+            && junction_angle(apex, p, self.goal.strands[jx].dir)
+                < self.goal.junction_min_angle_deg
+        {
+            return;
+        }
+        let sn = &st.nodes[parent];
+        let g_len = apex_len + dist(apex, p);
+        // A junction must not cost more than the connection's own pad route on the empty
+        // board: it is there to share a pad exit or save a via, not to dodge congestion.
+        if self
+            .goal
+            .junction_cap
+            .is_some_and(|cap| g_len + self.via_cost * sn.vias as f64 > cap)
+        {
+            return;
+        }
+        let delta = (g_len - sn.g_len).max(0.0);
+        let g_cost = sn.g_cost + delta + sr.layer_extra(fin, delta, apex, p);
+        let (vias, last_site) = (sn.vias, Self::inherit_site(st, parent));
+        let id = st.nodes.len();
+        st.nodes.push(Node {
+            kind: K_JUNC,
+            layer,
+            v: sr.g.edges[e].a,
+            edge: e,
+            slot,
+            dir: 0,
+            parent,
+            face_in: fin,
+            apex,
+            apex_len,
+            since: 0,
+            p,
+            g_len,
+            g_cost,
+            vias,
+            last_site,
+            size: None,
+            jx,
+        });
+        st.heap.push(Item {
+            f: g_cost,
+            h: 0.0,
+            layer,
+            edge: e,
+            slot,
+            dir: 2,
+            id,
+        });
     }
 
     /// The site cannot take any via at the moment (owned, blocked, or too small for every size).
@@ -956,6 +1230,7 @@ impl<'a> Layered<'a> {
             vias,
             last_site,
             size: None,
+            jx: usize::MAX,
         });
         st.heap.push(Item {
             f: g_cost + h,
@@ -998,6 +1273,7 @@ impl<'a> Layered<'a> {
             vias,
             last_site,
             size: None,
+            jx: usize::MAX,
         });
         st.heap.push(Item {
             f: g_cost,
@@ -1053,6 +1329,7 @@ impl<'a> Layered<'a> {
             vias,
             last_site,
             size: Some(size),
+            jx: usize::MAX,
         });
         st.heap.push(Item {
             f: g_cost + h,
@@ -1123,6 +1400,7 @@ impl<'a> Layered<'a> {
                 if let Some(slot) = cyc.cross_slot(&strands, p0, e_out, near_v) {
                     self.push_state(st, parent, layer, e_out, slot, dir, f);
                 }
+                self.try_junction(st, parent, layer, f, &cyc, &strands, p0, e_out, near_v);
             }
             for &vv in &g.faces[f].v {
                 if vv == v {
@@ -1151,6 +1429,7 @@ impl<'a> Layered<'a> {
         let (mut cross, mut faces): (Vec<(usize, usize)>, Vec<usize>) = (Vec::new(), Vec::new());
         let mut start_len = 0.0;
         let mut pending: Option<usize> = None;
+        let mut junction: Option<JunctionEnd> = None;
         for &i in &chain[1..] {
             let n = &st.nodes[i];
             if let (Some(s), Some(mg)) = (pending.take(), self.mg) {
@@ -1182,6 +1461,36 @@ impl<'a> Layered<'a> {
                     sites.push((n.v, n.size.unwrap_or(ViaSize { d: 0, drill: 0 })));
                     pending = Some(n.v);
                 }
+                K_JUNC => {
+                    // The half crossing of the junction edge closes the leg (no face after it).
+                    if cross.is_empty() {
+                        faces.push(n.face_in);
+                    }
+                    cross.push((n.edge, n.slot));
+                    legs.push(Leg {
+                        layer_idx: n.layer,
+                        start: cur_start,
+                        goal: n.v,
+                        crossings: std::mem::take(&mut cross),
+                        faces: std::mem::take(&mut faces),
+                        est_len: n.g_len - start_len,
+                    });
+                    let (sibling, angle_deg) = if n.jx >= JX_COPPER {
+                        (None, 90.0)
+                    } else {
+                        let sd = &self.goal.strands[n.jx];
+                        (Some((sd.conn, sd.leg)), junction_angle(n.apex, n.p, sd.dir))
+                    };
+                    junction = Some(JunctionEnd {
+                        layer_idx: n.layer,
+                        edge: n.edge,
+                        sibling,
+                        at: n.p,
+                        angle_deg,
+                        reversed: false,
+                        est_len: n.g_len,
+                    });
+                }
                 _ => {
                     legs.push(Leg {
                         layer_idx: n.layer,
@@ -1203,6 +1512,7 @@ impl<'a> Layered<'a> {
             cost: end.g_cost,
             expansions,
             candidates: self.ls.iter().map(|s| s.cands.get()).sum(),
+            junction,
         }
     }
 
@@ -1256,6 +1566,7 @@ impl<'a> Layered<'a> {
                 vias: 0,
                 last_site: usize::MAX,
                 size: None,
+                jx: usize::MAX,
             });
         }
         // start states: leave every face around each start vertex through each edge
@@ -1265,7 +1576,7 @@ impl<'a> Layered<'a> {
         let mut expansions = 0usize;
         while let Some(it) = st.heap.pop() {
             let node = st.nodes[it.id].clone();
-            if node.kind == K_GOAL {
+            if node.kind == K_GOAL || node.kind == K_JUNC {
                 return Run::Found(Box::new(self.finish(&st, it.id, expansions)));
             }
             if !st.closed.insert(self.node_key(&node)) {
@@ -1317,6 +1628,7 @@ impl<'a> Layered<'a> {
                 if let Some(s2) = cyc.cross_slot(&strands, p0, e_out, v) {
                     self.push_state(&mut st, it.id, l, e_out, s2, nd, f);
                 }
+                self.try_junction(&mut st, it.id, l, f, &cyc, &strands, p0, e_out, v);
             }
             for &vv in &g.faces[f].v {
                 if self.goal_set.contains(&(l, vv)) && cyc.goal_ok(&strands, p0, vv) {
@@ -2522,6 +2834,7 @@ fn direct(sr: &Search, layer: usize, s: usize, t: usize) -> Option<SlotPath> {
             cost: len,
             expansions: 0,
             candidates: sr.cands.get(),
+            junction: None,
         });
     }
     None
@@ -2634,8 +2947,12 @@ fn search_in(
         };
     }
     let lay = Layered::new(env, hists, conn, start, goal, p, false);
-    if let Some(d) = find_direct(&lay) {
-        return SearchOutcome::Found(d);
+    // With junction goals (A5) the A* decides: a junction may beat the direct edge.
+    let junctions = !goal.strands.is_empty() || !goal.copper.is_empty();
+    if !junctions {
+        if let Some(d) = find_direct(&lay) {
+            return SearchOutcome::Found(d);
+        }
     }
     let cap = p
         .expansion_cap
@@ -3092,6 +3409,7 @@ impl<'a> Layered<'a> {
             cost: est_len,
             expansions: pops,
             candidates: 0,
+            junction: None,
         }
     }
 }
@@ -3219,7 +3537,44 @@ pub fn search(
 ) -> SearchOutcome {
     let env = Env::of(mg, obs);
     let hists = hist_refs(p.history, env.layers.len());
-    search_in(&env, &hists, conn, start, goal, &common(p))
+    let cp = common(p);
+    if goal.strands.is_empty() && goal.copper.is_empty() {
+        if let Some(plan) = crate::steiner::plan(mg, conn, start, goal) {
+            return steiner_search(&env, &hists, conn, start, goal, &plan, &cp);
+        }
+    }
+    search_in(&env, &hists, conn, start, goal, &cp)
+}
+
+/// The search with the junction goals of `plan` (A5): forward (junctions on the target side)
+/// or reversed (from the `to` terminal toward junctions on the `from` side). When the reversed
+/// search ends at the pad or is blocked, the plain forward search decides. O(one or two
+/// searches).
+fn steiner_search(
+    env: &Env,
+    hists: &[&[f64]],
+    conn: &Connection,
+    start: &[(usize, usize)],
+    goal: &Goal,
+    plan: &crate::steiner::Plan,
+    p: &Common,
+) -> SearchOutcome {
+    if !plan.reversed {
+        return search_in(env, hists, conn, start, &plan.goal, p);
+    }
+    match search_in(env, hists, conn, &plan.start, &plan.goal, p) {
+        SearchOutcome::Found(mut path) => {
+            if let Some(j) = path.junction.as_mut() {
+                j.reversed = true;
+                return SearchOutcome::Found(path);
+            }
+            // No junction won: the plain forward search decides (pad-to-pad paths stay those
+            // of the forward search, which the reversed one need not reproduce).
+            search_in(env, hists, conn, start, goal, p)
+        }
+        SearchOutcome::Timeout => SearchOutcome::Timeout,
+        SearchOutcome::Blocked { .. } => search_in(env, hists, conn, start, goal, p),
+    }
 }
 
 /// Topological ghost search (F2): a Dijkstra over `(layer, edge, dir, vias)` keyed by
@@ -3356,6 +3711,7 @@ pub fn probe_entry(
         vias: 0,
         last_site: usize::MAX,
         size: None,
+        jx: usize::MAX,
     };
     let p = s.state_point(e, at, goal);
     let (apex, apex_len, _, ok) = s.los(&[root], 0, p, Some(e));
@@ -3447,6 +3803,7 @@ pub mod planar {
             vertices: vec![(0, t)],
             pour_sites: Vec::new(),
             pour_layer: None,
+            ..Default::default()
         }
     }
 

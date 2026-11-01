@@ -178,6 +178,7 @@ fn run(e: &Env, c: &Connection, max_vias: u32) -> SearchOutcome {
         vertices: vertices(e, c.to.at, &c.to.layers),
         pour_sites: Vec::new(),
         pour_layer: None,
+        ..Default::default()
     };
     search(&e.mg, &e.obs, c, &start, &goal, &p)
 }
