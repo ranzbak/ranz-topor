@@ -111,7 +111,8 @@ SETTINGS: list[Setting] = [
        kicad="KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias"),
     _s("vias", "cost_by_priority", "table", {}, "Priority (\"1\"..\"3\") → via cost in mm, e.g. 5 for high-speed nets.", since=V5),
     _s("vias", "cost_by_netclass", "table", {}, "Netclass name → via cost in mm, e.g. 0.5 for power.", since=V5),
-    _s("vias", "via_relaxation", "bool", True, "Let the relaxation pass move vias a bounded distance to shorten traces.", since=V5),
+    _s("vias", "via_relaxation", "bool", True, "Let the relaxation pass move vias a bounded distance to shorten traces.", since=V5,
+       engine="via_relaxation"),
     # ---- [layers]
     _s("layers", "preferred_direction", "table", {}, "Layer name → \"h\", \"v\" or \"none\"; steers traces along a direction at cost direction_cost.", since=V5),
     _s("layers", "direction_cost", "float", 0.0, "Extra cost factor for running against a layer's preferred direction; 0 = off.", range=(0, 100), since=V5),

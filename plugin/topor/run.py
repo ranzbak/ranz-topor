@@ -340,6 +340,12 @@ def _ripup_notes(rr: dict) -> list:
     return [line]
 
 
+def _via_relax_notes(rr: dict) -> list:
+    """Run-report note for the via-relaxation pass (engine ``via_relaxation``; none when off / not run)."""
+    v = rr.get("via_relaxation")
+    return [f"via relaxation: {v}"] if v and v not in ("off", "not run") else []
+
+
 def _facts_result(status: str, out: RunOutcome, report: dict | None) -> dict:
     slim = {k: v for k, v in (report or {}).items() if k != "items"}
     return {"status": status, "routed": out.routed, "total": out.total, "stop_reason": out.stop_reason,
@@ -644,7 +650,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     build_report({**rr, "items": out.items}, classified, cfg, findings, scope_info, before_stats,
                  {"router_s": out.router_s, "drc_rounds": loop.rounds}, report=report,
                  facts={"layers": report.facts.get("layers"), "versions": report.facts.get("versions"),
-                        "notes": [f"geometry: {geometry}", f"DRC rounds: {loop.rounds}"] + _ripup_notes(rr) + (
+                        "notes": [f"geometry: {geometry}", f"DRC rounds: {loop.rounds}"] + _ripup_notes(rr) + _via_relax_notes(rr) + (
                             ["time budget exhausted"] if loop.budget_exhausted else [])})
     log.line(f"routed {out.routed}/{out.total}, stop {out.stop_reason}, rounds {loop.rounds}, "
              f"routing_new {classified['routing_new']}, unconnected_new {inc['unconnected_new']}")

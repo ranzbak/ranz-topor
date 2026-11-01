@@ -861,3 +861,14 @@ def test_ripup_notes_lists_totals_and_backstop_pairs():
     rp = {"total": 6, "max_pair": 3, "rips_per_connection": [3, 3, 0], "pairs_at_backstop": [[1, 0]]}
     (line,) = _ripup_notes({"ripup": rp})
     assert "6 rips" in line and "2 connections" in line and "max 3 per pair" in line and "1->0" in line
+
+
+def test_via_relax_notes_only_when_the_pass_ran():
+    """A13: the run report names the via-relaxation outcome unless it was off or never ran."""
+    from topor.run import _via_relax_notes
+
+    assert _via_relax_notes({}) == []
+    assert _via_relax_notes({"via_relaxation": "off"}) == []
+    assert _via_relax_notes({"via_relaxation": "not run"}) == []
+    assert _via_relax_notes({"via_relaxation": "moved 8 of 30 vias, -2004 um"}) == [
+        "via relaxation: moved 8 of 30 vias, -2004 um"]

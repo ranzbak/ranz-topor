@@ -706,6 +706,9 @@ pub struct Options {
     pub max_vias_per_connection: u32,
     /// Router (M3-R2): after convergence, one via-reduction pass (TopoR lifting).
     pub via_reduction: bool,
+    /// Router (A13): after via reduction, move each via a bounded distance inside the star of
+    /// its site towards the straight line between its two legs' last anchors.
+    pub via_relaxation: bool,
     /// Diagnostics: emit `RouteResult.profile` (per-iteration timers). Off by default: timings
     /// are run-dependent and must not enter the (thread-count independent) result JSON.
     pub profile: bool,
@@ -737,6 +740,7 @@ impl Default for Options {
             via_cost_nm: 2_000_000,
             max_vias_per_connection: 4,
             via_reduction: true,
+            via_relaxation: true,
             profile: false,
         }
     }
