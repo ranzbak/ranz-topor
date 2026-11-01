@@ -135,6 +135,12 @@ fn main() {
                 it.cost_nm * 1e-6,
                 if it.best { "*" } else { "" }
             );
+            if !it.fail_classes.is_empty() || !it.blocked_classes.is_empty() {
+                println!(
+                    "        mfail {:?} | blocked {:?}",
+                    it.fail_classes, it.blocked_classes
+                );
+            }
         }
         let sum = |f: fn(&topor_engine::route::IterProfile) -> f64| {
             p.iter().map(f).fold(0.0, |a, b| a + b)

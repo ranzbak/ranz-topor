@@ -988,6 +988,11 @@ fn profile_absent_by_default_and_per_iteration_when_enabled() {
         assert!(it.check_s <= it.metrize_s + 1e-9);
     }
     assert_eq!(p[0].searched, 4);
+    // DG: the failure / blocked histograms account for every counted connection
+    for it in p {
+        assert_eq!(it.fail_classes.values().sum::<usize>(), it.metrize_failed, "{it:?}");
+        assert_eq!(it.blocked_classes.values().sum::<usize>(), it.blocked, "{it:?}");
+    }
     // the enabled run routes identically
     let mut a = serde_json::to_value(&on).unwrap();
     a.as_object_mut().unwrap().remove("profile");
@@ -1230,4 +1235,27 @@ fn anytime_timeout_emits_committed_subset() {
         || c.reason.starts_with("infeasible")
         || c.reason.starts_with("self-check")));
     clean(&m, &r);
+}
+
+/// DG diagnosis: the profile-only failure classes drop labels and numbers, keep the mechanism.
+#[test]
+fn reason_class_keeps_the_mechanism() {
+    use topor_engine::route::reason_class;
+    let cases = [
+        ("infeasible: site:278 <-> site:274", "pinch site-site"),
+        ("infeasible: pad:TP5:1 <-> site:395", "pinch pad-site"),
+        ("infeasible: site:390 <-> pad:Q2:1", "pinch pad-site"),
+        ("infeasible: wall pad:J3:MP grazed mid-span by 5669 nm", "wall pad graze"),
+        ("infeasible: wall shape:ead0b243 grazed mid-span by 443 nm", "wall shape <5um"),
+        ("infeasible: wall pad:U1:1 grazed mid-span by 305000 nm", "wall pad deep"),
+        ("self-check: viahole:topor:193 (gap 305000 < 350000 nm)", "check viahole"),
+        ("self-check: item:338 (gap -171177 < 200000 nm)", "check item"),
+        ("sketch: inconsistent slot path", "sketch"),
+        ("junction: angle 41.0 deg < 60 deg", "junction angle"),
+        ("junction: sibling not routed", "junction sibling not routed"),
+        ("blocked: no path", "blocked"),
+    ];
+    for (r, want) in cases {
+        assert_eq!(reason_class(r), want, "{r}");
+    }
 }

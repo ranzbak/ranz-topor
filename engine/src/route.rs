@@ -262,6 +262,67 @@ pub struct IterProfile {
     pub best: bool,
     /// A5: commit-phase re-searches toward a sibling committed earlier in the iteration.
     pub steiner_researched: usize,
+    /// DG diagnosis, profile only: the `metrize_failed` connections by [`reason_class`] of
+    /// their failure reason (sums to `metrize_failed`).
+    pub fail_classes: BTreeMap<String, usize>,
+    /// DG diagnosis, profile only: the `blocked` connections by what the search last saw:
+    /// `static` (a terminal that cannot be left / entered), `edge` / `site` (a priced edge or
+    /// via site on the ghost path), `none` (sums to `blocked`).
+    pub blocked_classes: BTreeMap<String, usize>,
+}
+
+/// DG diagnosis (profile only): a short class of a failure reason, for the per-iteration
+/// histogram [`IterProfile::fail_classes`]: `pinch site-site` (taut cannot join two anchors),
+/// `wall pad` (a wall grazed mid-span), `check viahole` (self-check against a via drill),
+/// `sketch`, `junction <class>`, … Labels and numbers are dropped. O(len).
+pub fn reason_class(reason: &str) -> String {
+    if let Some(rest) = reason.strip_prefix("junction: ") {
+        return format!("junction {}", reason_class(rest));
+    }
+    let kind = |label: &str| -> String {
+        label
+            .trim()
+            .split(':')
+            .next()
+            .unwrap_or("")
+            .trim_start_matches('(')
+            .to_string()
+    };
+    if let Some(rest) = reason.strip_prefix("infeasible: ") {
+        if let Some(w) = rest.strip_prefix("wall ") {
+            // depth bucket: below the 5 um build margin, a graze, or the chord through the core
+            let depth = w
+                .rsplit_once(" by ")
+                .and_then(|(_, d)| d.trim_end_matches(" nm").parse::<f64>().ok());
+            let bucket = match depth {
+                Some(d) if d < 5_000.0 => " <5um",
+                Some(d) if d < 100_000.0 => " graze",
+                Some(_) => " deep",
+                None => "",
+            };
+            return format!("wall {}{bucket}", kind(w));
+        }
+        if let Some((a, b)) = rest.split_once(" <-> ") {
+            let (mut ka, mut kb) = (kind(a), kind(b));
+            if kb < ka {
+                std::mem::swap(&mut ka, &mut kb);
+            }
+            return format!("pinch {ka}-{kb}");
+        }
+        return format!("infeasible {}", rest.split_whitespace().next().unwrap_or(""));
+    }
+    if let Some(rest) = reason.strip_prefix("self-check: ") {
+        return format!("check {}", kind(rest));
+    }
+    if let Some((head, _)) = reason.split_once(':') {
+        return head.to_string();
+    }
+    reason
+        .split_whitespace()
+        .take_while(|w| !w.chars().any(|c| c.is_ascii_digit()))
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -4610,6 +4671,23 @@ fn route_pass(
                         p.ok = nok;
                         p.blocked = out.blocked.len();
                         p.metrize_failed = failed.len();
+                        for &i in &failed {
+                            if let Res::Fail { reason, .. } = &res[i] {
+                                *p.fail_classes.entry(reason_class(reason)).or_default() += 1;
+                            }
+                        }
+                        for b in out.blocked.values() {
+                            let k = if b.static_reason.is_some() {
+                                "static"
+                            } else if b.edge.is_some() {
+                                "edge"
+                            } else if b.site.is_some() {
+                                "site"
+                            } else {
+                                "none"
+                            };
+                            *p.blocked_classes.entry(k.into()).or_default() += 1;
+                        }
                         p.vias = vias;
                         p.cost_nm = len + opts.via_cost_nm as f64 * vias as f64;
                         p.best = better;
