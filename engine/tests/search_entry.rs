@@ -74,7 +74,7 @@ fn env(clearance: Option<i64>) -> Env {
         .map(|c| c.net)
         .collect::<BTreeSet<i32>>()
         .into_iter()
-        .flat_map(|n| via_sizes(&model.rules, n))
+        .flat_map(|n| via_sizes(&model.rules, n, &opts))
         .collect();
     sizes.sort_by_key(|z| std::cmp::Reverse((z.d, z.drill)));
     sizes.dedup();

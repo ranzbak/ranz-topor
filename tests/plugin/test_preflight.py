@@ -176,7 +176,7 @@ def test_via_not_set_up_says_what_happens():
     assert "1 / 0.5 mm" in f.message and "0.6 / 0.4 mm" in f.message and "0.5 / 0.3 mm" in f.message, f.message
     f = one(run(pro={}), "VIA_NOT_SET_UP")  # rules without routing_vias: no extra sizes claimed
     assert "smaller" not in f.message, f.message
-    assert "not read" in f.fix or "0.5.0" in f.fix  # pre-defined vias stop the finding but are not routed with
+    assert "pre-defined" in f.fix and "smaller" in f.fix  # pre-defined vias stop the finding and are routed with (0.5.0)
 
 
 def test_via_set_up_in_class_no_finding():

@@ -184,6 +184,37 @@ def refill_pours(model: dict, refilled_text: str) -> dict:
 DETOUR_REFERENCE_BUDGET_PCT = 10.0
 
 
+def via_costs_by_net(cfg: Config, model: dict, priorities: dict | None) -> dict:
+    """``Options.via_cost_by_net`` (net name -> via cost nm) from ``[vias] cost_by_netclass`` and
+    ``cost_by_priority``; precedence per net: by netclass > by priority > ``via_cost_mm`` (nets without an entry are
+    left out and use the global cost). A composite class (``"Power,Default"``) takes the first listed class that has
+    an entry. Non-numeric entries are skipped. O(#nets * classes per net)."""
+    by_class = {str(k): v for k, v in dict(cfg.get("vias", "cost_by_netclass")).items()}
+    by_prio = {str(k): v for k, v in dict(cfg.get("vias", "cost_by_priority")).items()}
+    if not by_class and not by_prio:
+        return {}
+
+    def nm(v):
+        return int(round(float(v) * 1_000_000)) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+    per_net = (model.get("rules") or {}).get("per_net") or {}
+    out: dict = {}
+    for n in model.get("nets", []):
+        name = n.get("name")
+        if not name:
+            continue
+        cost = None
+        for c in str((per_net.get(str(n.get("code"))) or {}).get("netclass") or "").split(","):
+            if c in by_class and nm(by_class[c]) is not None:
+                cost = nm(by_class[c])
+                break
+        if cost is None and priorities and name in priorities:
+            cost = nm(by_prio.get(str(priorities[name])))
+        if cost is not None:
+            out[name] = cost
+    return out
+
+
 def build_options(cfg: Config, engine, threads_override=None, *, plan=None, rip=None, model=None,
                   priorities=None) -> dict:
     """Engine options: ``cfg.engine_options()`` restricted to keys the engine knows, plus the plugin's own
@@ -211,6 +242,16 @@ def build_options(cfg: Config, engine, threads_override=None, *, plan=None, rip=
             opts[key] = val
     if opts.get("detour_reference") and "detour_reference_budget_pct" in known:
         opts["detour_reference_budget_pct"] = DETOUR_REFERENCE_BUDGET_PCT
+    if "layer_direction" in known:
+        angle = {"h": 0.0, "v": 90.0}
+        dirs = {str(k): angle[str(v).lower()] for k, v in dict(cfg.get("layers", "preferred_direction")).items()
+                if str(v).lower() in angle}
+        if dirs:
+            opts["layer_direction"] = dirs
+    if "via_cost_by_net" in known and model is not None:
+        costs = via_costs_by_net(cfg, model, priorities)
+        if costs:
+            opts["via_cost_by_net"] = costs
     if threads_override is not None:
         opts["threads"] = int(threads_override)
     return opts
@@ -225,7 +266,10 @@ def apply_via_fallback(rules: dict, cfg: Config) -> tuple:
     default rule and of every per-net rule that carries the "not set up" size: KiCad's factory 0.8 / 0.4 mm or
     the default rule's own (pre-patch) size. A per-net size somebody set (another value) is kept. The board's
     minimums (``min_via_diameter`` / ``min_via_drill``) still apply (``clamped`` when they raise a value).
-    Returns ``(new_rules, info)``; `rules` is not modified. O(#per-net rules)."""
+    The same size is also written to ``rules["via_fallback"]``, the field the engine's via rule
+    (``engine/src/vias.rs`` ``via_sizes``) applies under the same condition (no pre-defined via, class at the
+    factory size): the engine is the single place of truth, this function only makes the report and the
+    ``NetRule`` sizes agree with it. Returns ``(new_rules, info)``; `rules` is not modified. O(#per-net rules)."""
     want_d = int(round(float(cfg.get("vias", "fallback_diameter_mm")) * 1_000_000))
     want_r = int(round(float(cfg.get("vias", "fallback_drill_mm")) * 1_000_000))
     d = max(want_d, int(rules.get("min_via_diameter") or 0))
@@ -241,7 +285,8 @@ def apply_via_fallback(rules: dict, cfg: Config) -> tuple:
             per_net[k] = nr
     info = {"diameter_nm": d, "drill_nm": r, "default_before": [default.get("via_d"), default.get("via_drill")],
             "per_net": n, "per_net_total": len(per_net), "clamped": (d, r) != (want_d, want_r)}
-    return {**rules, "default": {**default, "via_d": d, "via_drill": r}, "per_net": per_net}, info
+    return {**rules, "via_fallback": [d, r], "default": {**default, "via_d": d, "via_drill": r},
+            "per_net": per_net}, info
 
 
 def via_fallback_text(info: dict) -> str:

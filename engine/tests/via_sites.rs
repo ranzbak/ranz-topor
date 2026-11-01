@@ -63,7 +63,7 @@ fn model(extra: &str) -> BoardModel {
 fn sites_of(m: &BoardModel, escape: &[usize]) -> Vec<ViaSite> {
     let obs = ObstacleSet::build(m, &Options::default(), &HashSet::new(), &[]);
     let ck = Checker::new(m, &Options::default());
-    let sizes = via_sizes(&m.rules, 0);
+    let sizes = via_sizes(&m.rules, 0, &Options::default());
     via_sites(m, &obs, &ck, &[0, 31], escape, &sizes, EPS)
 }
 
@@ -72,7 +72,7 @@ fn via_sizes_default_then_smaller_routing_vias() {
     let m = model(r#""pads": []"#);
     let sz = |d, drill| ViaSize { d, drill };
     assert_eq!(
-        via_sizes(&m.rules, 0),
+        via_sizes(&m.rules, 0, &Options::default()),
         vec![sz(600_000, 300_000), sz(450_000, 250_000)]
     );
     let mut r = m.rules.clone();
@@ -85,7 +85,7 @@ fn via_sizes_default_then_smaller_routing_vias() {
         },
     );
     assert_eq!(
-        via_sizes(&r, 7),
+        via_sizes(&r, 7, &Options::default()),
         vec![
             sz(800_000, 400_000),
             // note §1: d = max(drill + 2 * min_annular, min_via_diameter) = 0.3 + 0.2
@@ -93,7 +93,7 @@ fn via_sizes_default_then_smaller_routing_vias() {
             sz(450_000, 250_000)
         ]
     );
-    for s in via_sizes(&r, 7).iter().chain(via_sizes(&r, 0).iter()) {
+    for s in via_sizes(&r, 7, &Options::default()).iter().chain(via_sizes(&r, 0, &Options::default()).iter()) {
         assert!(r.routing_vias.contains(&s.drill) && s.drill != 200_000 && s.drill != 150_000);
     }
 }

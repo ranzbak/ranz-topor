@@ -329,6 +329,17 @@ pub struct Rules {
     pub profile: String,
     pub drill_list: Vec<i64>,
     pub routing_vias: Vec<i64>,
+    /// KiCad's pre-defined via list (`board.design_settings.via_dimensions`, entries with a
+    /// diameter > 0), `[diameter, drill]` nm. The smaller ones are alternatives for tight spots
+    /// (`vias::via_sizes`).
+    pub predefined_vias: Vec<[i64; 2]>,
+    /// `[diameter, drill]` nm used instead of KiCad's factory 0.8 / 0.4 net class via when the
+    /// board sets no via up (`predefined_vias` empty and the net's class at the factory size).
+    /// The single place of truth for the fallback (`vias::via_sizes`); the plugin only fills it.
+    pub via_fallback: [i64; 2],
+    /// Run-time copy of `Options.allowed_drills_nm` (set by `route`, never serialized).
+    #[serde(skip)]
+    pub allowed_drills: Vec<i64>,
     pub default: NetRule,
     pub per_net: HashMap<i32, NetRule>,
     pub warnings: Vec<String>,
@@ -351,6 +362,9 @@ impl Default for Rules {
                 200_000, 250_000, 300_000, 400_000, 500_000, 800_000, 1_000_000,
             ],
             routing_vias: vec![250_000, 300_000, 400_000, 500_000],
+            predefined_vias: Vec::new(),
+            via_fallback: [800_000, 400_000],
+            allowed_drills: Vec::new(),
             default: NetRule::default(),
             per_net: HashMap::new(),
             warnings: Vec::new(),
@@ -757,6 +771,31 @@ pub struct Options {
     pub pour_listed_via_goals: bool,
     /// Router (M3): cost of one via in nm of wire length.
     pub via_cost_nm: i64,
+    /// Router (A10): per-net via cost in nm by net name; overrides `via_cost_nm` (the plugin
+    /// resolves `[vias] cost_by_netclass` > `cost_by_priority` > `via_cost_mm` into it).
+    pub via_cost_by_net: BTreeMap<String, i64>,
+    /// Run-time form of `via_cost_by_net` by net code: filled by `route` from the model's net
+    /// names (anything passed in is replaced when `via_cost_by_net` is not empty). Internal.
+    pub via_cost_by_code: BTreeMap<i32, i64>,
+    /// Router (A10): when non-empty only these drills (nm) are used for the *alternative* via
+    /// sizes (predefined and profile vias); the net's own class via is never dropped.
+    pub allowed_drills_nm: Vec<i64>,
+    /// Router (A10): allow via sites inside the net's own SMD pads (fab must fill and cap).
+    pub via_in_pad: bool,
+    /// Router (A10): a via is removed by the reduction pass when the via-free route is at most
+    /// this many percent longer (outside pads).
+    pub reduction_len_slack_pct: f64,
+    /// Router (A11): extra cost in nm of cost per mm of track inside a foreign-net copper pour
+    /// (the fill of a zone of another net on that layer), charged per step; 0 disables. Default 0
+    /// (measured: 1 000 000 = 1 mm per mm makes wiccon 58/61 with 83 vias and eprom 65.9 mm
+    /// outside pads instead of 62/62, 37 vias and 64.6 mm, so it is opt-in).
+    pub pour_cut_cost_nm: i64,
+    /// Router (A11): preferred routing direction per layer name, in degrees (0 = along x,
+    /// 90 = along y); see `direction_cost`.
+    pub layer_direction: BTreeMap<String, f64>,
+    /// Router (A11): a step of length `L` at angle `a` to its layer's preferred direction costs
+    /// an extra `L * direction_cost * |sin a|`; 0 disables (layers without an entry are free).
+    pub direction_cost: f64,
     /// Router (M3): maximum vias on one connection.
     pub max_vias_per_connection: u32,
     /// Router (M3-R2): after convergence, one via-reduction pass (TopoR lifting).
@@ -817,6 +856,14 @@ impl Default for Options {
             strict_unfit_edges: false,
             pour_listed_via_goals: false,
             via_cost_nm: 2_000_000,
+            via_cost_by_net: BTreeMap::new(),
+            via_cost_by_code: BTreeMap::new(),
+            allowed_drills_nm: Vec::new(),
+            via_in_pad: false,
+            reduction_len_slack_pct: 10.0,
+            pour_cut_cost_nm: 0,
+            layer_direction: BTreeMap::new(),
+            direction_cost: 0.0,
             max_vias_per_connection: 4,
             via_reduction: true,
             profile: false,
@@ -856,6 +903,19 @@ impl Options {
     /// pre-0.5.0 top-level JSON key is folded into it by [`Options::from_json`]). O(1).
     pub fn relax_cap(&self) -> u32 {
         self.expert.relax_iter_cap
+    }
+
+    /// Via cost in nm of a via on net `code`: the per-net override, else `via_cost_nm`. O(log n).
+    pub fn via_cost_for(&self, code: i32) -> i64 {
+        self.via_cost_by_code
+            .get(&code)
+            .copied()
+            .unwrap_or(self.via_cost_nm)
+    }
+
+    /// Length factor of the via-reduction acceptance: `1 + reduction_len_slack_pct / 100`.
+    pub fn reduction_len_slack(&self) -> f64 {
+        1.0 + self.reduction_len_slack_pct.max(0.0) / 100.0
     }
 
     /// `threads`, or `available_parallelism() - 1` (min 1) when 0.

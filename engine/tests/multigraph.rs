@@ -42,6 +42,7 @@ fn site(x_mm: f64, y_mm: f64) -> ViaSite {
         max_d: 600_000,
         max_drill: 300_000,
         origin: SiteOrigin::Face,
+        net: None,
     }
 }
 
