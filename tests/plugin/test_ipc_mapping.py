@@ -171,6 +171,59 @@ def test_ipcboard_commit_sequence(tmp_path):
     assert (res.removed, res.created, res.created_ids) == (2, 2, ["new-0", "new-1"])
 
 
+class _SendKiCad:
+    """kipy client stand-in: records the commands, answers BeginCommit with id ``c1``."""
+
+    def __init__(self):
+        self.sent = []
+
+    def send(self, cmd, response_type):
+        self.sent.append(cmd)
+        r = response_type()
+        if hasattr(r, "id"):
+            r.id.value = "c1"
+        return r
+
+
+class _DocBoard(_StubBoard):
+    """A board with a kipy client and a document (the live path of ``ipc.begin_commit``)."""
+
+    def __init__(self, tmp):
+        super().__init__(tmp)
+        from kipy.proto.common.types import DocumentSpecifier, DocumentType
+
+        self._kicad = _SendKiCad()
+        self.document = DocumentSpecifier(type=DocumentType.DOCTYPE_PCB, board_filename="b.kicad_pcb")
+
+
+def test_commit_names_the_document(tmp_path):
+    """KiCad 10.0.7 refuses BeginCommit / EndCommit without the document when several editors are
+    open: both carry ``ItemHeader{document}`` (fields 1 and 4) on the wire."""
+    from kipy.proto.common.types.base_types_pb2 import ItemHeader
+
+    b = _DocBoard(tmp_path)
+    ib = ipc.IpcBoard(_StubKiCad(), b)
+    ib._net_names = NETS
+    ib.commit(CommitRequest([], [SEG], "msg"))
+    begin, end = b._kicad.sent[0], b._kicad.sent[-1]
+    raw = ItemHeader(document=b.document).SerializeToString()
+    assert type(begin).__name__ == "BeginCommit" and begin.SerializeToString() == bytes([0x0A, len(raw)]) + raw
+    assert type(end).__name__ == "EndCommit" and end.id.value == "c1" and end.message == "msg"
+    assert end.SerializeToString().endswith(bytes([0x22, len(raw)]) + raw)
+    assert ItemHeader.FromString(begin.SerializeToString()[2:]).document.board_filename == "b.kicad_pcb"
+
+
+def test_commit_drop_names_the_document(tmp_path):
+    from kipy.proto.common.commands.editor_commands_pb2 import CommitAction
+
+    b = _DocBoard(tmp_path)
+    ib = ipc.IpcBoard(_StubKiCad(), b)  # no net names -> KeyError while building items
+    with pytest.raises(KeyError):
+        ib.commit(CommitRequest([], [SEG], "m"))
+    end = b._kicad.sent[-1]
+    assert type(end).__name__ == "EndCommit" and end.action == CommitAction.CMA_DROP
+
+
 def test_ipcboard_commit_drops_on_error(tmp_path):
     b = _StubBoard(tmp_path)
     ib = ipc.IpcBoard(_StubKiCad(), b)  # no net names -> KeyError while building items

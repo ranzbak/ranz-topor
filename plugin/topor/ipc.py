@@ -162,6 +162,58 @@ def board_fingerprint(tracks, vias, footprints) -> str:
 # ---------------------------------------------------------------- the board
 
 
+def _with_document(msg, field: int, doc) -> None:
+    """Append ``ItemHeader{document: doc}`` as field ``field`` to ``msg``. KiCad 10.0.7 added this
+    header to ``BeginCommit`` (field 1) and ``EndCommit`` (field 4) and refuses a commit without it
+    when several editors are open; kicad-python 0.8 has no such field, so it travels as an unknown
+    field (KiCad before 10.0.7 skips it)."""
+    from kipy.proto.common.types.base_types_pb2 import ItemHeader
+
+    if "header" in msg.DESCRIPTOR.fields_by_name:
+        msg.header.document.CopyFrom(doc)
+        return
+    raw = ItemHeader(document=doc).SerializeToString()
+    n, size = len(raw), b""
+    while True:
+        b, n = n & 0x7F, n >> 7
+        size += bytes([b | (0x80 if n else 0)])
+        if not n:
+            break
+    msg.MergeFromString(bytes([(field << 3) | 2]) + size + raw)
+
+
+def begin_commit(board):
+    """``board.begin_commit()`` naming the board's document (:func:`_with_document`). A board
+    without a kipy client (test stubs) uses its own ``begin_commit``."""
+    if not hasattr(board, "_kicad"):
+        return board.begin_commit()
+    from kipy.common_types import Commit
+    from kipy.proto.common.commands.editor_commands_pb2 import BeginCommit, BeginCommitResponse
+
+    cmd = BeginCommit()
+    _with_document(cmd, 1, board.document)
+    return Commit(board._kicad.send(cmd, BeginCommitResponse).id)
+
+
+def end_commit(board, commit, message: str = "", drop: bool = False) -> None:
+    """``board.push_commit`` / ``drop_commit`` naming the board's document (field 4 of
+    ``EndCommit``); a board without a kipy client uses its own methods."""
+    if not hasattr(board, "_kicad"):
+        if drop:
+            board.drop_commit(commit)
+        else:
+            board.push_commit(commit, message)
+        return
+    from kipy.proto.common.commands.editor_commands_pb2 import CommitAction, EndCommit, EndCommitResponse
+
+    cmd = EndCommit()
+    cmd.id.CopyFrom(commit.id)
+    cmd.action = CommitAction.CMA_DROP if drop else CommitAction.CMA_COMMIT
+    cmd.message = message
+    _with_document(cmd, 4, board.document)
+    board._kicad.send(cmd, EndCommitResponse)
+
+
 class IpcBoard:
     """BoardPort over kipy. `kicad` is a connected ``kipy.KiCad``; the board is fetched lazily with
     ``kicad.get_board()`` (the board open in the PCB editor that launched the plugin)."""
@@ -256,7 +308,7 @@ class IpcBoard:
     def commit(self, req: CommitRequest) -> CommitResult:
         board = self.board
         notes: list = []
-        commit = board.begin_commit()
+        commit = begin_commit(board)
         try:
             if req.remove_uuids:
                 board.remove_items_by_id([KIID(value=u) for u in req.remove_uuids])
@@ -265,10 +317,10 @@ class IpcBoard:
             grouped = False
             if req.group and created:
                 grouped = self._group(created, req.items, notes)
-            board.push_commit(commit, req.message)
+            end_commit(board, commit, req.message)
         except Exception:
             try:
-                board.drop_commit(commit)
+                end_commit(board, commit, drop=True)
             except Exception:
                 pass
             raise
