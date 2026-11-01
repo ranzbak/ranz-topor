@@ -124,6 +124,8 @@ SETTINGS: list[Setting] = [
        engine="via_relaxation"),
     _s("vias", "via_shove", "bool", False, "When a planned trace does not fit at its width because another connection's via is in the way, push that via aside (inside the area around its site, up to 0.8 mm, passing the push on to at most three neighbours) instead of failing the trace.",
        engine="via_shove"),
+    _s("vias", "plane_via_ring", "bool", True, "Offer plane vias candidate positions all around their SMD pad (two rings of 16), not only on the pad's four axes, so the via can go to whichever side is free.",
+       engine="plane_via_ring"),
     # ---- [layers]
     _s("layers", "preferred_direction", "table", {}, "Layer name → \"h\" (along x), \"v\" (along y) or \"none\"; traces running across it pay direction_cost. Layers without an entry are free.",
        kicad="KiCad → File → Board Setup → Board Editor Layers (layer names)"),
@@ -157,6 +159,8 @@ SETTINGS: list[Setting] = [
     # ---- [ripup]
     _s("ripup", "growth", "float", 1.25, "Each time a connection rips the same blocker, the history cost left on it is multiplied by this.",
        range=(1.0, 10), engine="ripup_growth"),
+    _s("ripup", "blame_vias", "bool", False, "Experimental: when a trace does not fit at its width, rip the connections whose vias it is squeezed against (with the same escalating cost and cap as other rips), so those vias can move to another site. Off by default: on the benchmarks the extra rips route fewer connections.",
+       engine="blame_vias"),
     _s("ripup", "max_per_pair", "int", 8, "Hard backstop on how often one connection may rip the same other connection (bounds the runtime).",
        range=(1, 1000), engine="ripup_max_per_pair"),
     # ---- [iterations]

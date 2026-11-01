@@ -644,6 +644,14 @@ impl Negotiator {
         true
     }
 
+    /// Blame the vias (`Options.blame_vias`): connection `i` failed its metrization squeezed
+    /// by the vias of `owners`; they are ripped like blockers ([`Negotiator::rip`]: escalating
+    /// history on their edges and sites per `(i, owner)` pair, the same caps), without a bump
+    /// for `i` (its failure already bumped it). `true` when the rip was made.
+    pub fn blame(&mut self, mg: &MultiGraph, i: usize, owners: &[usize]) -> bool {
+        self.rip(mg, i, owners, false)
+    }
+
     /// The run's rip-up report for `conns` connections. O(pairs).
     pub fn rip_report(&self, conns: usize) -> RipReport {
         let mut per = vec![0u32; conns];

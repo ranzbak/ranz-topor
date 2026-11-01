@@ -62,7 +62,7 @@ use crate::sketch::{
 use crate::smooth::{deadline_after, hand_outside, outside_len, terminal_skeletons};
 use crate::stubs::{attach as attach_stubs, plan_stubs, with_stubs, StubOut, StubPlan};
 use crate::taut::TautError;
-use crate::vias::{via_fallback_used, via_sites_stubs, via_sizes, ViaSize};
+use crate::vias::{via_fallback_used, via_sites_ring, via_sizes, ViaSize};
 use crate::wires::{extract_wires, Terminal, Wire};
 use rayon::prelude::*;
 use serde::Serialize;
@@ -667,6 +667,54 @@ fn listed_pour_vias(
             })
         })
         .collect()
+}
+
+/// Vias within this distance of an obstacle a failure names are blamed for it (`blame_vias`).
+const BLAME_RADIUS_NM: f64 = 1_200_000.0;
+
+/// Owners of the other connections' vias that squeezed `conn`'s failed metrization
+/// (`blame_vias`): the via a pinch names (`infeasible: site:N <-> …`), and the vias within
+/// [`BLAME_RADIUS_NM`] of a pad or wall the failure names (`infeasible: a <-> b`, `infeasible:
+/// wall X grazed …`, `inside obstacle: X`). Other failures blame nobody. Sorted.
+/// O(anchors + sites near).
+fn blamed_owners(
+    cx: &Ctx,
+    obs: &ObstacleSet,
+    mg: &MultiGraph,
+    conn: usize,
+    reason: &str,
+) -> Vec<usize> {
+    let labels: Vec<&str> = if let Some((a, b)) = pinch_labels(reason) {
+        vec![a, b]
+    } else if let Some(rest) = reason.strip_prefix("infeasible: wall ") {
+        rest.split(" grazed").next().into_iter().collect()
+    } else if let Some(x) = reason.strip_prefix("inside obstacle: ") {
+        vec![x]
+    } else {
+        Vec::new()
+    };
+    let owner = |s: usize| mg.owner.get(s).copied().flatten().map(|(o, _)| o).filter(|&o| o != conn);
+    let mut out = BTreeSet::new();
+    let mut pts: Vec<Vec2> = Vec::new();
+    for l in labels {
+        if let Some(s) = site_of_label(l) {
+            out.extend(owner(s));
+        } else if l != "start" && l != "goal" {
+            for &ly in cx.layers {
+                pts.extend(obs.layer(ly).anchors.iter().filter(|a| a.label == l).map(|a| a.c));
+            }
+        }
+    }
+    for p in pts {
+        let bb = crate::geom::Aabb { min: p, max: p }.grow(BLAME_RADIUS_NM);
+        for s in mg.sites_near(bb) {
+            let at = obs.site_at(&mg.site_anchor[s]).unwrap_or(mg.sites[s].at);
+            if (at - p).len() <= BLAME_RADIUS_NM {
+                out.extend(owner(s));
+            }
+        }
+    }
+    out.into_iter().collect()
 }
 
 fn legs_of(mg: &MultiGraph, conn: usize) -> &[usize] {
@@ -4823,7 +4871,22 @@ fn route_pass(
             routable.len() >= 2 || live.iter().any(|c| matches!(c.to.kind, TermKind::Pour(_)));
         let sites = if needs_sites {
             let stub_pads: Vec<usize> = stub_plan.by_pad.keys().copied().collect();
-            via_sites_stubs(
+            // Plane vias may sit on any free side of their pad (`plane_via_ring`).
+            let ring: Vec<usize> = live
+                .iter()
+                .filter(|c| {
+                    opts.plane_via_ring
+                        && matches!(c.to.kind, TermKind::Pour(_))
+                        && !c.to.layers.iter().any(|l| routable.contains(l))
+                })
+                .filter_map(|c| match c.from.kind {
+                    TermKind::Pad(pi) if model.pads[pi].attr == PadAttr::Smd => Some(pi),
+                    _ => None,
+                })
+                .collect::<BTreeSet<usize>>()
+                .into_iter()
+                .collect();
+            via_sites_ring(
                 model,
                 &obs,
                 &fit_checker,
@@ -4833,6 +4896,7 @@ fn route_pass(
                 opts.margin_nm as f64,
                 opts.via_in_pad,
                 &stub_pads,
+                &ring,
             )
         } else {
             Vec::new()
@@ -5236,6 +5300,22 @@ fn route_pass(
                     for &i in &failed {
                         neg.penalise_failed(&mg, i);
                     }
+                    // Blame the vias (`blame_vias`): a wire that did not fit was squeezed by the
+                    // vias next to the obstacle its failure names; their owners are ripped
+                    // (escalating cost on their sites, per pair) and search again, so they can
+                    // take another site.
+                    let mut blamed: BTreeSet<usize> = BTreeSet::new();
+                    if opts.blame_vias {
+                        for &i in &failed {
+                            let Res::Fail { reason, .. } = &res[i] else {
+                                continue;
+                            };
+                            let owners = blamed_owners(&cx, &obs, &mg, i, reason);
+                            if neg.blame(&mg, i, &owners) {
+                                blamed.extend(owners);
+                            }
+                        }
+                    }
                     for (&i, b) in &out.blocked {
                         neg.penalise_blocked(i, b);
                     }
@@ -5321,7 +5401,11 @@ fn route_pass(
                     fb.extend(out.blocked.keys().copied());
                     fb.sort_unstable();
                     let sig = (nok, fb);
-                    if overuse == 0 && out.ripped.is_empty() && last_sig.as_ref() == Some(&sig) {
+                    if overuse == 0
+                        && out.ripped.is_empty()
+                        && blamed.is_empty()
+                        && last_sig.as_ref() == Some(&sig)
+                    {
                         stuck += 1;
                     } else {
                         stuck = 0;
@@ -5345,6 +5429,7 @@ fn route_pass(
                     next.extend(cascaded);
                     next.extend(out.blocked.keys().copied());
                     next.extend(out.ripped.iter().copied());
+                    next.extend(blamed.iter().copied());
                     next.extend(overused_conns(&mg));
                     next.retain(|&i| perm[i].is_none());
                     active = next.into_iter().collect();

@@ -240,6 +240,33 @@ pub fn via_sites_stubs(
     in_pad: bool,
     stub_pads: &[usize],
 ) -> Vec<ViaSite> {
+    via_sites_ring(model, obs, checker, layers, escape_pads, sizes, eps, in_pad, stub_pads, &[])
+}
+
+/// Directions per ring of [`via_sites_ring`].
+pub const RING_DIRS: usize = 16;
+/// Rings per pad of [`via_sites_ring`]: the escape radius, then half a default via further out.
+pub const RING_COUNT: usize = 2;
+
+/// [`via_sites_stubs`] with a ring of candidates around each pad of `ring_pads` (the SMD pads
+/// of plane-net connections, `Options.plane_via_ring`): [`RING_DIRS`] directions on
+/// [`RING_COUNT`] circles, the first at the escape radius (`hull_r + c_pad + d_default/2 +
+/// eps`), each next one `d_default/2` further out, so a plane via can sit on any free side of
+/// its pad instead of only on its four axes. Walked after the escape sites, before the face
+/// sites, with the same fit and pitch rules. Extra `O(R · 32 · |sizes| · q)` for `R` ring pads.
+#[allow(clippy::too_many_arguments)]
+pub fn via_sites_ring(
+    model: &BoardModel,
+    obs: &ObstacleSet,
+    checker: &Checker,
+    layers: &[u32],
+    escape_pads: &[usize],
+    sizes: &[ViaSize],
+    eps: f64,
+    in_pad: bool,
+    stub_pads: &[usize],
+    ring_pads: &[usize],
+) -> Vec<ViaSite> {
     let r = &model.rules;
     let d_def = r.default.via_d as f64;
     let mut c_max = r
@@ -289,6 +316,29 @@ pub fn via_sites_stubs(
         }
     }
     escapes.sort_by(|a, b| a.0.x.total_cmp(&b.0.x).then(a.0.y.total_cmp(&b.0.y)));
+    let mut rings: Vec<(Vec2, usize)> = Vec::new();
+    for &pi in ring_pads {
+        let pad = &model.pads[pi];
+        let c = pad.center.to_vec2();
+        let layer = pad
+            .layers
+            .iter()
+            .copied()
+            .find(|l| layers.contains(l))
+            .or_else(|| pad.layers.first().copied())
+            .unwrap_or(0);
+        let hull = hull_radius(&model.skeleton(pad, layer), c);
+        let r0 = hull + model.required_clearance(0, pad) + 0.5 * d_def + eps;
+        let rot = pad.rotation_deg.to_radians();
+        for ring in 0..RING_COUNT {
+            let rr = r0 + ring as f64 * 0.5 * d_def;
+            for k in 0..RING_DIRS {
+                let a = rot + std::f64::consts::TAU * k as f64 / RING_DIRS as f64;
+                rings.push((c + Vec2 { x: 1.0, y: 0.0 }.rot(a) * rr, pi));
+            }
+        }
+    }
+    rings.sort_by(|a, b| a.0.x.total_cmp(&b.0.x).then(a.0.y.total_cmp(&b.0.y)));
     stub_escapes.sort_by(|a, b| a.0.x.total_cmp(&b.0.x).then(a.0.y.total_cmp(&b.0.y)));
 
     let mut faces_c: Vec<Vec2> = Vec::new();
@@ -359,6 +409,11 @@ pub fn via_sites_stubs(
         )
         .chain(
             escapes
+                .into_iter()
+                .map(|(p, pi)| (p, SiteOrigin::Escape(pi), None)),
+        )
+        .chain(
+            rings
                 .into_iter()
                 .map(|(p, pi)| (p, SiteOrigin::Escape(pi), None)),
         )

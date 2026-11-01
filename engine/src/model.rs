@@ -893,6 +893,14 @@ pub struct Options {
     /// a pinch against another connection's via gets its planned path back and that via is pushed away
     /// from the pinch, inside the star of its site, until the connection fits.
     pub via_shove: bool,
+    /// Via sites (plane vias): the SMD pads of plane-pour connections get a ring of candidate
+    /// sites all around them (`vias::via_sites_ring`), not only the four axis escape sites.
+    pub plane_via_ring: bool,
+    /// Negotiation: a connection that fails its metrization rips the connections whose vias
+    /// its failure names or that sit next to the pad / wall it names (escalating rip cost), so
+    /// those vias can move to another site. Off by default: on qmtech and the dcsgone USB crop
+    /// the extra rips churn the negotiation and fewer connections route.
+    pub blame_vias: bool,
     /// Diagnostics: emit `RouteResult.profile` (per-iteration timers). Off by default: timings
     /// are run-dependent and must not enter the (thread-count independent) result JSON.
     pub profile: bool,
@@ -987,6 +995,8 @@ impl Default for Options {
             via_reduction: true,
             via_relaxation: true,
             via_shove: false,
+            plane_via_ring: true,
+            blame_vias: false,
             profile: false,
             net_priority: BTreeMap::new(),
             exclude_nets: Vec::new(),

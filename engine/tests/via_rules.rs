@@ -282,3 +282,50 @@ fn reduction_slack_from_options() {
     );
     assert_eq!(r.vias, 0, "{} {:?}", r.via_reduction, r.connections);
 }
+
+/// Plane-via ring (`via_sites_ring`): a ring pad gets candidates on every side, not only its
+/// four axis escape sites; every ring candidate keeps the via clear of the pad (it fits) and
+/// lies on one of the two ring radii; an empty ring list is the old site set.
+#[test]
+fn plane_via_ring_offers_sites_all_around_the_pad() {
+    use topor_engine::vias::{via_sites_ring, RING_COUNT, RING_DIRS};
+    let m = smd_model();
+    let o = Options::default();
+    let obs = ObstacleSet::build(&m, &o, &HashSet::new(), &[]);
+    let ck = Checker::new(&m, &o);
+    let sizes = via_sizes(&m.rules, 0, &o);
+    let plain = via_sites_ring(&m, &obs, &ck, &[0, 31], &[0, 1], &sizes, EPS, false, &[], &[]);
+    let old = via_sites_opts(&m, &obs, &ck, &[0, 31], &[0, 1], &sizes, EPS, false);
+    assert_eq!(plain.iter().map(|s| s.at).collect::<Vec<_>>(), old.iter().map(|s| s.at).collect::<Vec<_>>());
+    let ring = via_sites_ring(&m, &obs, &ck, &[0, 31], &[0, 1], &sizes, EPS, false, &[], &[0]);
+    let c = Vec2 { x: 15.0 * MM, y: -15.0 * MM };
+    let near = |v: &[ViaSite]| v.iter().filter(|s| (s.at - c).len() < 3.0 * MM).count();
+    assert!(near(&ring) >= near(&plain) + RING_DIRS, "{} vs {}", near(&ring), near(&plain));
+    // a site in every 45-degree sector around the pad
+    for k in 0..8 {
+        let lo = k as f64 * std::f64::consts::FRAC_PI_4 - std::f64::consts::PI;
+        assert!(
+            ring.iter().any(|s| {
+                let d = s.at - c;
+                let a = d.y.atan2(d.x);
+                d.len() < 3.0 * MM && a >= lo && a < lo + std::f64::consts::FRAC_PI_4
+            }),
+            "no ring site in sector {k}"
+        );
+    }
+    for s in &ring {
+        assert!(ck.via_fits(s.at, ViaSize { d: s.max_d, drill: s.max_drill }));
+    }
+    assert_eq!(RING_COUNT, 2);
+}
+
+/// `plane_via_ring` is on and `blame_vias` off by default (older option JSON too); both can be
+/// switched.
+#[test]
+fn ring_on_blame_off_by_default() {
+    for o in [Options::default(), Options::from_json("{}").unwrap()] {
+        assert!(o.plane_via_ring && !o.blame_vias);
+    }
+    let o = Options::from_json(r#"{ "plane_via_ring": false, "blame_vias": true }"#).unwrap();
+    assert!(!o.plane_via_ring && o.blame_vias);
+}

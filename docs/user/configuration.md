@@ -61,6 +61,7 @@ Via cost, count and size policy (each net routes with its KiCad net class via, p
 | `cost_by_netclass` | table | `{}` | mm | any | Netclass name → via cost in mm, e.g. 0.5 for power. Strongest of the three via cost settings (a composite class such as "Power,Default" takes the first listed class that has an entry). KiCad: KiCad → File → Board Setup → Design Rules → Net Classes. |
 | `via_relaxation` | bool | `true` |  | true\|false | Let the relaxation pass move vias a bounded distance to shorten traces. *Since 0.5.0.* |
 | `via_shove` | bool | `false` |  | true\|false | When a planned trace does not fit at its width because another connection's via is in the way, push that via aside (inside the area around its site, up to 0.8 mm, passing the push on to at most three neighbours) instead of failing the trace. |
+| `plane_via_ring` | bool | `true` |  | true\|false | Offer plane vias candidate positions all around their SMD pad (two rings of 16), not only on the pad's four axes, so the via can go to whichever side is free. |
 
 ## `[layers]`
 
@@ -103,6 +104,7 @@ Rip-up and re-route escalation.
 | Key | Type | Default | Unit | Range | Description |
 |---|---|---|---|---|---|
 | `growth` | float | `1.25` |  | 1 .. 10 | Each time a connection rips the same blocker, the history cost left on it is multiplied by this. |
+| `blame_vias` | bool | `false` |  | true\|false | Experimental: when a trace does not fit at its width, rip the connections whose vias it is squeezed against (with the same escalating cost and cap as other rips), so those vias can move to another site. Off by default: on the benchmarks the extra rips route fewer connections. |
 | `max_per_pair` | int | `8` |  | 1 .. 1000 | Hard backstop on how often one connection may rip the same other connection (bounds the runtime). |
 
 ## `[iterations]`
