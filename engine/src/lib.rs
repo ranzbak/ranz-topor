@@ -19,6 +19,7 @@ pub mod route;
 pub mod search;
 pub mod sketch;
 pub mod smooth;
+pub mod stubs;
 pub mod taut;
 pub mod vias;
 pub mod wires;

@@ -221,6 +221,25 @@ pub fn via_sites_opts(
     eps: f64,
     in_pad: bool,
 ) -> Vec<ViaSite> {
+    via_sites_stubs(model, obs, checker, layers, escape_pads, sizes, eps, in_pad, &[])
+}
+
+/// [`via_sites_opts`] with the pads that carry an exit stub (A6, `crate::stubs`): their four
+/// escape positions are additionally offered as sites of the pad's own net (walked before the
+/// plain escape sites, fitted with the net's own copper exempt), so the stub of the pad does not
+/// remove the escape via that the pad had without it. Extra `O(4 S · |sizes| · q)`.
+#[allow(clippy::too_many_arguments)]
+pub fn via_sites_stubs(
+    model: &BoardModel,
+    obs: &ObstacleSet,
+    checker: &Checker,
+    layers: &[u32],
+    escape_pads: &[usize],
+    sizes: &[ViaSize],
+    eps: f64,
+    in_pad: bool,
+    stub_pads: &[usize],
+) -> Vec<ViaSite> {
     let r = &model.rules;
     let d_def = r.default.via_d as f64;
     let mut c_max = r
@@ -242,7 +261,10 @@ pub fn via_sites_opts(
     let cull = 0.5 * d_def + c_max as f64 + eps;
 
     let mut escapes: Vec<(Vec2, usize)> = Vec::new();
-    for &pi in escape_pads {
+    let mut stub_escapes: Vec<(Vec2, usize)> = Vec::new();
+    let mut esc_pads: Vec<(usize, bool)> = escape_pads.iter().map(|&p| (p, false)).collect();
+    esc_pads.extend(stub_pads.iter().map(|&p| (p, true)));
+    for (pi, own_net) in esc_pads {
         let pad = &model.pads[pi];
         let c = pad.center.to_vec2();
         let layer = pad
@@ -257,10 +279,17 @@ pub fn via_sites_opts(
         let rot = pad.rotation_deg.to_radians();
         for k in 0..4 {
             let u = Vec2 { x: 1.0, y: 0.0 }.rot(rot + k as f64 * std::f64::consts::FRAC_PI_2);
-            escapes.push((c + u * big_r, pi));
+            if own_net {
+                if pad.net > 0 {
+                    stub_escapes.push((c + u * big_r, pi));
+                }
+            } else {
+                escapes.push((c + u * big_r, pi));
+            }
         }
     }
     escapes.sort_by(|a, b| a.0.x.total_cmp(&b.0.x).then(a.0.y.total_cmp(&b.0.y)));
+    stub_escapes.sort_by(|a, b| a.0.x.total_cmp(&b.0.x).then(a.0.y.total_cmp(&b.0.y)));
 
     let mut faces_c: Vec<Vec2> = Vec::new();
     let mut pts: Vec<Vec2> = Vec::new();
@@ -323,6 +352,11 @@ pub fn via_sites_opts(
     let cands = own
         .into_iter()
         .map(|(p, pi)| (p, SiteOrigin::InPad(pi), Some(model.pads[pi].net)))
+        .chain(
+            stub_escapes
+                .into_iter()
+                .map(|(p, pi)| (p, SiteOrigin::Escape(pi), Some(model.pads[pi].net))),
+        )
         .chain(
             escapes
                 .into_iter()

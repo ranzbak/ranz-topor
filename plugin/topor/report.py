@@ -137,6 +137,9 @@ class RunReport:
         out.append("Partial routes: " + (", ".join(f["partial_routes"]) if f.get("partial_routes") else "none"))
         out.append("Zero-slack connections: " + (", ".join(f["zero_slack_wires"]) if f.get("zero_slack_wires")
                                                   else "none"))
+        out.append("Exit stubs: " + (", ".join(f["exit_stubs"]) if f.get("exit_stubs") else "none"))
+        out.append("Necked stubs (narrower than the net width): " + (", ".join(f["necked_stubs"])
+                                                                     if f.get("necked_stubs") else "none"))
         out.append("Ignored pads: " + (", ".join(f["ignored_pads"]) if f.get("ignored_pads") else "none"))
         out.append("Excluded nets (do not touch): " + (", ".join(f["excluded_nets"]) if f.get("excluded_nets")
                                                       else "none"))
@@ -288,6 +291,18 @@ def _vias_in_pads(items, pads) -> list:
     return out
 
 
+def _stub_text(s: dict) -> str:
+    """`U7.4 0.62 mm x 0.20 mm` (+ `, 0.05 mm off centre`, `, to U7.7` for a bridge) of a used stub row."""
+    t = f"{s.get('pad')} {s.get('length_nm', 0) / MM:.2f} mm x {s.get('width', 0) / MM:.2f} mm"
+    if s.get("necked"):
+        t += f" (net {s.get('net_width', 0) / MM:.2f} mm)"
+    if s.get("offset_nm"):
+        t += f", {abs(s['offset_nm']) / MM:.3f} mm off centre"
+    if s.get("bridge"):
+        t += f", to {s['bridge']}"
+    return t
+
+
 def build_report(result: dict, drc: dict | None, cfg, findings, scope, before_stats: dict | None,
                  timing: dict | None, *, dir: Path | None = None, report: RunReport | None = None,
                  facts: dict | None = None) -> RunReport:
@@ -346,6 +361,8 @@ def build_report(result: dict, drc: dict | None, cfg, findings, scope, before_st
         "partial_routes": [r["net"] for r in rows if r["status"] == "partial"],
         "zero_slack_wires": [w.get("name") or str(w.get("conn")) for w in result.get("zero_slack_wires") or []],
         "vias_in_pads": _vias_in_pads(items, before.get("pads") or []),
+        "exit_stubs": [_stub_text(s) for s in result.get("stubs") or [] if s.get("used")],
+        "necked_stubs": [_stub_text(s) for s in result.get("stubs") or [] if s.get("used") and s.get("necked")],
         "ignored_pads": list(scope.get("ignored_pads") or []),
         "excluded_nets": [n.get("name") for n in result.get("nets") or [] if n.get("status") == "excluded"],
         "fallbacks": list(scope.get("fallbacks") or []),

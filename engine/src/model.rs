@@ -299,6 +299,10 @@ pub struct NetRule {
     pub via_drill: i64,
     pub netclass: String,
     pub width_source: String,
+    /// Least track width the net may use (nm): the largest `track_width` minimum of the custom
+    /// rules matching the net (KiCad `(constraint track_width (min …))`); 0 = none. The engine's
+    /// effective minimum is `max(Rules.min_track_width, min_width)` (necked exit stubs, A6/NX).
+    pub min_width: i64,
 }
 
 impl Default for NetRule {
@@ -310,6 +314,7 @@ impl Default for NetRule {
             via_drill: 300_000,
             netclass: "Default".into(),
             width_source: "default".into(),
+            min_width: 0,
         }
     }
 }
@@ -828,6 +833,23 @@ pub struct Options {
     /// Share (percent, 0..=100) of the remaining wall-clock budget the reference searches may
     /// use; connections not finished in time fall back to the ghost (`ref_kind = "ghost"`).
     pub detour_reference_budget_pct: f64,
+    /// Router (A6, `topor.toml [search] exit_stubs`): pad exit stubs (`crate::stubs`). `"auto"`:
+    /// a straight stub out of a pad whose centre exit at the net width violates the clearance
+    /// (fine-pitch rows; off-centre or necked when needed); `"all"`: also every SMD terminal pad
+    /// with a long axis; `"off"`: M3 (attach at the pad centre).
+    pub exit_stubs: String,
+    /// Router (NX, `topor.toml [search] neck_to_pad`): an exit stub may be narrower than the net
+    /// width (down to the effective minimum track width) when the full width does not fit out of
+    /// the pad ("necking"); the rest of the connection keeps the net width.
+    pub neck_to_pad: bool,
+    /// Router (NX, `topor.toml [search] neck_max_mm`): longest necked stub, nm; 0 = twice the
+    /// pad's long side.
+    pub neck_max_nm: i64,
+    /// Router (A6, `topor.toml [search] pad_bridge_max_mm`): a connection between two pads of
+    /// one footprint at most this far apart (centre to centre, nm) whose straight line is clean,
+    /// possibly only off the centre line, is routed by that one track (`exit_stubs` auto: only
+    /// where a pad needs a stub); 0 = off.
+    pub pad_bridge_max_nm: i64,
 }
 
 impl Default for Options {
@@ -873,6 +895,10 @@ impl Default for Options {
             pour_served: BTreeMap::new(),
             detour_reference: false,
             detour_reference_budget_pct: 10.0,
+            exit_stubs: "auto".into(),
+            neck_to_pad: true,
+            neck_max_nm: 0,
+            pad_bridge_max_nm: 2_000_000,
         }
     }
 }

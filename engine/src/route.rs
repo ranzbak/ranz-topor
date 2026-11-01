@@ -60,8 +60,9 @@ use crate::sketch::{
     ConstraintSet, LayerSketch, Sketch,
 };
 use crate::smooth::{deadline_after, hand_outside, outside_len, terminal_skeletons};
+use crate::stubs::{attach as attach_stubs, plan_stubs, with_stubs, StubOut, StubPlan};
 use crate::taut::TautError;
-use crate::vias::{via_fallback_used, via_sites_opts, via_sizes, ViaSize};
+use crate::vias::{via_fallback_used, via_sites_stubs, via_sizes, ViaSize};
 use crate::wires::{extract_wires, Terminal, Wire};
 use rayon::prelude::*;
 use serde::Serialize;
@@ -123,6 +124,13 @@ pub struct ConnReport {
     pub ref_len_nm: Option<i64>,
     /// `"feasible"` (slot search found the reference), `"ghost"` (fallback, flagged), `"none"`.
     pub ref_kind: String,
+    /// Pad exit stubs (A6) of the routed connection: total length of its stubs, nm (counted in
+    /// `length_nm` / `length_outside_pads_nm`); 0 without one.
+    pub stub_nm: i64,
+    /// Necked part (NX) of `stub_nm`: the stubs narrower than the net width, nm.
+    pub neck_nm: i64,
+    /// Narrowest necked stub width, nm; `None` without a neck.
+    pub neck_width_nm: Option<i64>,
 }
 
 /// A connection the zero-slack retry routed with margin 0 against its corridor (R6).
@@ -201,6 +209,8 @@ pub struct RouteResult {
     /// `connections[..].id` of every item (same order as `items`); in-process only.
     #[serde(skip)]
     pub item_conn: Vec<usize>,
+    /// Pad exit stubs (A6 / NX) planned by the routing passes, in pass and pad order.
+    pub stubs: Vec<StubOut>,
 }
 
 /// One PathFinder iteration's cost (diagnostics, `Options::profile`). Seconds are wall clock.
@@ -276,7 +286,7 @@ fn kicad(p: Vec2) -> [i64; 2] {
 fn term_out(t: &TermRef) -> TermOut {
     TermOut {
         kind: match t.kind {
-            TermKind::Pad(_) => "pad",
+            TermKind::Pad(_) | TermKind::Stub { .. } => "pad",
             TermKind::Via(_) => "via",
             TermKind::Copper(_) => "copper",
             TermKind::Dangling(_) => "dangling",
@@ -2318,6 +2328,9 @@ fn append_ignored(r: &mut RouteResult, model: &BoardModel, removed: &[usize]) {
             ghost_len_nm: None,
             ref_len_nm: None,
             ref_kind: "none".into(),
+            stub_nm: 0,
+            neck_nm: 0,
+            neck_width_nm: None,
         });
     }
 }
@@ -2571,9 +2584,51 @@ fn merge_pass(r: &mut RouteResult, model: &BoardModel, mut r2: RouteResult) {
         z.conn += off;
         r.zero_slack_wires.push(z);
     }
+    r.stubs.extend(r2.stubs);
     if let (Some(p), Some(p2)) = (r.profile.as_mut(), r2.profile) {
         p.extend(p2);
     }
+}
+
+/// `r.items` without the duplicate exit-stub items ([`crate::stubs::stub_duplicates`]). O(I log S).
+fn unique_items(r: &RouteResult) -> Vec<Item> {
+    let dup = crate::stubs::stub_duplicates(&r.items, &r.stubs);
+    r.items
+        .iter()
+        .zip(&dup)
+        .filter(|(_, d)| d.is_none())
+        .map(|(it, _)| it.clone())
+        .collect()
+}
+
+/// Remove the duplicate exit-stub items of `r` (and their share of the totals): the final
+/// result carries every stub once. O(I log S).
+fn dedupe_stub_items(r: &mut RouteResult, model: &BoardModel) {
+    let dup = crate::stubs::stub_duplicates(&r.items, &r.stubs);
+    if dup.iter().all(Option::is_none) {
+        return;
+    }
+    let (mut keep_items, mut keep_conn) = (Vec::new(), Vec::new());
+    let items = std::mem::take(&mut r.items);
+    let mut conns = std::mem::take(&mut r.item_conn);
+    conns.resize(items.len(), usize::MAX);
+    for ((it, c), d) in items.into_iter().zip(conns).zip(&dup) {
+        match d {
+            Some(s) => {
+                r.total_length_nm -= s.length_nm;
+                r.length_outside_pads_nm -= s.outside_nm;
+                if let Some(v) = r.length_by_layer_nm.get_mut(&layer_name(model, s.layer)) {
+                    *v -= s.length_nm;
+                }
+            }
+            None => {
+                keep_items.push(it);
+                keep_conn.push(c);
+            }
+        }
+    }
+    r.items = keep_items;
+    r.item_conn = keep_conn;
 }
 
 /// Route the unconnected nets of `model` (`route_pass`), then verify the pour reach of every
@@ -2591,13 +2646,15 @@ fn route_inner(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteRes
         .iter()
         .any(|z| z.net != 0 && z.fills.iter().any(|f| f.outer.len() >= 3));
     if !has_fill {
+        dedupe_stub_items(&mut r, model);
         ctl.update("done", r.iterations, r.routed, r.connections_total, r.vias, t0.elapsed().as_secs_f64());
         return r;
     }
     let mut passes = 0u32;
     let mut unfroze = false;
     loop {
-        let reach = check_pour_reach_until(model, &r.items, &routed_pads(model, &r), Some(reach_deadline));
+        let reach =
+            check_pour_reach_until(model, &unique_items(&r), &routed_pads(model, &r), Some(reach_deadline));
         if reach.is_clean() {
             break;
         }
@@ -2744,8 +2801,9 @@ fn route_inner(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteRes
         drop_conns(&mut r, &drop);
         // The fixed copper is what remains; the pour goals keep the main component of the
         // check above (with every routed item present: the robustly connected fill).
-        let now = check_pour_reach_until(model, &r.items, &routed_pads(model, &r), Some(reach_deadline));
-        let mut m2 = with_routed_copper(model, &r.items, &now);
+        let fixed = unique_items(&r);
+        let now = check_pour_reach_until(model, &fixed, &routed_pads(model, &r), Some(reach_deadline));
+        let mut m2 = with_routed_copper(model, &fixed, &now);
         for z in &mut m2.pours {
             z.pads.retain(|s| !lost_labels.contains(s.as_str()));
             z.vias.retain(|u| !lost_labels.contains(u.as_str()));
@@ -2782,6 +2840,7 @@ fn route_inner(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteRes
         ));
         merge_pass(&mut r, model, r2);
     }
+    dedupe_stub_items(&mut r, model);
     r.runtime_s = t0.elapsed().as_secs_f64();
     ctl.update("done", r.iterations, r.routed, r.connections_total, r.vias, r.runtime_s);
     r
@@ -2846,6 +2905,43 @@ fn route_pass(
     }
     let m = live.len();
 
+    // Pad exit stubs (A6 / NX, `crate::stubs`): planned on the board of this pass, then fixed
+    // copper of the net for every later stage (obstacles, CDT, via sites, self-check); the stub
+    // ends are the connections' terminals. `all` / the reports keep the pad terminals.
+    let stub_plan: StubPlan = if m > 0 {
+        plan_stubs(model, opts, &live, &routable, &|| {
+            ctl.is_cancelled() || crate::control::expired(deadline)
+        })
+    } else {
+        StubPlan::default()
+    };
+    warnings.extend(stub_plan.warnings.iter().cloned());
+    // Bridged connections (one straight same-net track between two pads of a footprint) are
+    // routed by the plan: they leave the live set (original id -> stub index).
+    let mut bridged: BTreeMap<usize, usize> = BTreeMap::new();
+    if !stub_plan.bridges.is_empty() {
+        let (old_live, old_orig) = (std::mem::take(&mut live), std::mem::take(&mut orig));
+        for (mut c, o) in old_live.into_iter().zip(old_orig) {
+            if let Some(&k) = stub_plan.bridges.get(&c.id) {
+                bridged.insert(o, k);
+                continue;
+            }
+            c.id = live.len();
+            orig.push(o);
+            live.push(c);
+        }
+    }
+    let m = live.len();
+    let conn_stubs = attach_stubs(&mut live, &stub_plan);
+    let stub_model;
+    let model: &BoardModel = if stub_plan.is_empty() {
+        model
+    } else {
+        stub_model = with_stubs(model, &stub_plan);
+        &stub_model
+    };
+    let mut stub_used = vec![false; stub_plan.stubs.len()];
+
     let mut profile: Vec<IterProfile> = Vec::new();
     let mut best: Option<Snap> = None;
     let (mut iterations, mut converged, mut timed_out) = (0u32, false, false);
@@ -2876,8 +2972,10 @@ fn route_pass(
         let mut tmap: BTreeMap<(u32, (u64, u64), i32), TerminalObstacle> = BTreeMap::new();
         for c in &live {
             for t in [&c.from, &c.to] {
-                if let (TermKind::Copper(_) | TermKind::Dangling(_), Some(&layer)) =
-                    (&t.kind, t.layers.first())
+                if let (
+                    TermKind::Copper(_) | TermKind::Dangling(_) | TermKind::Stub { .. },
+                    Some(&layer),
+                ) = (&t.kind, t.layers.first())
                 {
                     let e = tmap.entry((layer, bits(t.at), c.net)).or_insert_with(|| {
                         TerminalObstacle {
@@ -2901,7 +2999,11 @@ fn route_pass(
             .iter()
             .flat_map(|c| [&c.from, &c.to])
             .filter_map(|t| match t.kind {
-                TermKind::Pad(pi) if model.pads[pi].attr == PadAttr::Smd => Some(pi),
+                TermKind::Pad(pi) | TermKind::Stub { pad: pi, .. }
+                    if model.pads[pi].attr == PadAttr::Smd =>
+                {
+                    Some(pi)
+                }
                 _ => None,
             })
             .collect::<BTreeSet<usize>>()
@@ -2932,7 +3034,8 @@ fn route_pass(
         let needs_sites =
             routable.len() >= 2 || live.iter().any(|c| matches!(c.to.kind, TermKind::Pour(_)));
         let sites = if needs_sites {
-            via_sites_opts(
+            let stub_pads: Vec<usize> = stub_plan.by_pad.keys().copied().collect();
+            via_sites_stubs(
                 model,
                 &obs,
                 &fit_checker,
@@ -2941,6 +3044,7 @@ fn route_pass(
                 &sizes,
                 opts.margin_nm as f64,
                 opts.via_in_pad,
+                &stub_pads,
             )
         } else {
             Vec::new()
@@ -2982,9 +3086,9 @@ fn route_pass(
                                 owner: t.label.clone(),
                                 clr: (c.clearance as f64).max(model.rules.min_clearance as f64),
                                 r: match t.kind {
-                                    TermKind::Copper(_) | TermKind::Dangling(_) => {
-                                        0.5 * c.width as f64
-                                    }
+                                    TermKind::Copper(_)
+                                    | TermKind::Dangling(_)
+                                    | TermKind::Stub { .. } => 0.5 * c.width as f64,
                                     _ => 0.0,
                                 },
                             },
@@ -3500,27 +3604,80 @@ fn route_pass(
             ghost_len_nm: None,
             ref_len_nm: None,
             ref_kind: "none".into(),
+            stub_nm: 0,
+            neck_nm: 0,
+            neck_width_nm: None,
         };
+        if let Some(&k) = bridged.get(&c.id) {
+            // A6 bridge: the connection is the one planned track (checked with the plan).
+            let st = &stub_plan.stubs[k];
+            stub_used[k] = true;
+            let (l, o) = (st.len(), st.outside_len(model));
+            rep.status = "routed".into();
+            rep.layer = st.layer;
+            rep.layers = vec![layer_name(model, st.layer)];
+            rep.length_nm = l.round() as i64;
+            rep.length_outside_pads_nm = o.round() as i64;
+            rep.pattern = "S".into();
+            rep.stub_nm = l.round() as i64;
+            rep.ghost_len_nm = Some(l.round() as i64);
+            if opts.detour_reference {
+                rep.ref_len_nm = Some(l.round() as i64);
+                rep.ref_kind = "feasible".into();
+            }
+            *by_layer.entry(layer_name(model, st.layer)).or_insert(0.0) += l;
+            total_len += l;
+            out_total += o;
+            items.push(st.item(None));
+            item_conn.resize(items.len(), rep.id);
+            reports.push(rep);
+            continue;
+        }
         if let Some(r) = &early[c.id] {
             rep.reason = r.clone();
         } else if let Some(s) = setup_fail.as_ref() {
             rep.reason = s.clone();
         } else {
             let i = by_orig[&c.id];
-            rep.ghost_len_nm = ghost_ref[i].map(|l| l.round() as i64);
+            // The references run between the stub ends; the stubs are part of every pad-to-pad
+            // path, so they count on both sides of the detour ratio (A6).
+            let stubs_i: Vec<usize> = conn_stubs[i].iter().flatten().copied().collect();
+            let stub_len: f64 = stubs_i.iter().map(|&k| stub_plan.stubs[k].len()).sum();
+            rep.ghost_len_nm = ghost_ref[i].map(|l| (l + stub_len).round() as i64);
             if opts.detour_reference {
                 match (feas_ref[i], ghost_ref[i]) {
                     (Some(l), _) => {
-                        rep.ref_len_nm = Some(l.round() as i64);
+                        rep.ref_len_nm = Some((l + stub_len).round() as i64);
                         rep.ref_kind = "feasible".into();
                     }
                     (None, Some(g)) => {
-                        rep.ref_len_nm = Some(g.round() as i64);
+                        rep.ref_len_nm = Some((g + stub_len).round() as i64);
                         rep.ref_kind = "ghost".into();
                     }
                     _ => {}
                 }
             }
+            // Stub items of the connection (first / last item) with their lengths (A6 / NX).
+            let mut emit_stubs = |k: usize,
+                                  rep: &mut ConnReport,
+                                  items: &mut Vec<Item>,
+                                  item_conn: &mut Vec<usize>,
+                                  by_layer: &mut BTreeMap<String, f64>|
+             -> (f64, f64) {
+                let st = &stub_plan.stubs[k];
+                stub_used[k] = true;
+                let (l, o) = (st.len(), st.outside_len(model));
+                items.push(st.item(Some(i)));
+                item_conn.resize(items.len(), rep.id);
+                *by_layer.entry(layer_name(model, st.layer)).or_insert(0.0) += l;
+                rep.stub_nm += l.round() as i64;
+                if st.necked() {
+                    rep.neck_nm += l.round() as i64;
+                    rep.neck_width_nm =
+                        Some(rep.neck_width_nm.map_or(st.width, |w| w.min(st.width)));
+                }
+                (l, o)
+            };
             match &best {
                 None => rep.reason = no_result.into(),
                 Some(b) => {
@@ -3539,15 +3696,38 @@ fn route_pass(
                                         dequantise(&t.prim).length();
                                 }
                             }
-                            rep.length_nm = o.len.round() as i64;
-                            rep.length_outside_pads_nm = o.out.round() as i64;
+                            let (mut len, mut out) = (o.len, o.out);
+                            if let Some(k) = conn_stubs[i][0] {
+                                let (l, ou) = emit_stubs(
+                                    k,
+                                    &mut rep,
+                                    &mut items,
+                                    &mut item_conn,
+                                    &mut by_layer,
+                                );
+                                len += l;
+                                out += ou;
+                            }
+                            items.extend(o.items.iter().cloned());
+                            item_conn.resize(items.len(), rep.id);
+                            if let Some(k) = conn_stubs[i][1] {
+                                let (l, ou) = emit_stubs(
+                                    k,
+                                    &mut rep,
+                                    &mut items,
+                                    &mut item_conn,
+                                    &mut by_layer,
+                                );
+                                len += l;
+                                out += ou;
+                            }
+                            rep.length_nm = len.round() as i64;
+                            rep.length_outside_pads_nm = out.round() as i64;
                             rep.pattern = o.pattern.clone();
                             rep.anchors = o.anchors;
                             rep.crossings = o.crossings;
-                            total_len += o.len;
-                            out_total += o.out;
-                            items.extend(o.items.iter().cloned());
-                            item_conn.resize(items.len(), rep.id);
+                            total_len += len;
+                            out_total += out;
                         }
                         Res::Fail {
                             reason, blocking, ..
@@ -3565,8 +3745,22 @@ fn route_pass(
                                         "partial: {} stub(s) toward the blocking point",
                                         p.stubs
                                     );
-                                    rep.length_nm = p.len.round() as i64;
-                                    rep.length_outside_pads_nm = p.out.round() as i64;
+                                    let (mut len, mut out) = (p.len, p.out);
+                                    // Exit stubs join the partial pieces to their pads.
+                                    for k in stubs_i.iter().copied() {
+                                        let mut by_layer_p = BTreeMap::new();
+                                        let (l, ou) = emit_stubs(
+                                            k,
+                                            &mut rep,
+                                            &mut items,
+                                            &mut item_conn,
+                                            &mut by_layer_p,
+                                        );
+                                        len += l;
+                                        out += ou;
+                                    }
+                                    rep.length_nm = len.round() as i64;
+                                    rep.length_outside_pads_nm = out.round() as i64;
                                     rep.pattern = p.pattern.clone();
                                     rep.anchors = p.anchors;
                                     rep.crossings = p.crossings;
@@ -3679,5 +3873,11 @@ fn route_pass(
         zero_slack: zs_status,
         profile: opts.profile.then_some(profile),
         item_conn,
+        stubs: stub_plan
+            .stubs
+            .iter()
+            .zip(&stub_used)
+            .map(|(st, &u)| st.out(model, u))
+            .collect(),
     }
 }
