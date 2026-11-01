@@ -2726,6 +2726,86 @@ struct Reduction {
     timed_out: bool,
 }
 
+/// Put the planned paths of the failed (not perm) connections `i` of snapshot `b` with
+/// `want(i)` back into `mg` (a path whose via site is taken in `mg` stays out; see
+/// [`needs_back`] for when the passes want them); returns them. The
+/// negotiation metrizes an iteration with these paths and their vias in the graph and removes
+/// them only afterwards, so the snapshot's wires were sketched with them: a re-metrize without
+/// them may sketch a routed wire differently and fail it (qmtech: two fine-pitch exits), which
+/// rejects every candidate of a pass that keeps all routed connections. Undo with
+/// [`take_back`] before the graph is stored or its overuse counted. O(failed · path).
+fn put_back(
+    cx: &Ctx,
+    mg: &mut MultiGraph,
+    obs: &mut ObstacleSet,
+    b: &Snap,
+    want: &dyn Fn(usize) -> bool,
+) -> Vec<usize> {
+    let mut back = Vec::new();
+    for (i, conn) in cx.conns.iter().enumerate() {
+        if !want(i) {
+            continue;
+        }
+        let (Res::Fail { perm: false, .. }, Some(Some(p))) = (&b.res[i], b.paths.get(i)) else {
+            continue;
+        };
+        if !mg.conn_wires.get(i).is_none_or(|v| v.is_empty())
+            || p.sites.iter().any(|&(s, _)| mg.owner.get(s).copied().flatten().is_some())
+        {
+            continue;
+        }
+        mg.insert_path(conn, p, obs);
+        back.push(i);
+    }
+    back
+}
+
+/// Whether passes on snapshot `b` need [`put_back`]: a no-op re-metrize of the routed
+/// connections on `b.mg` alone fails one of them. Where it does not, the passes keep the graph
+/// without the failed paths (their wires constrain nothing that is emitted). One metrization.
+fn needs_back(cx: &Ctx, obs: &mut ObstacleSet, rt: &Route, b: &Snap) -> bool {
+    let routed = routed_with(b, &[], None);
+    let mut metr = b.metr.clone();
+    b.mg.sync_anchors(obs, &rt.net_of());
+    let mt = metrize(cx, obs, &b.mg, &routed, &mut metr, &[]);
+    !mt.timed_out && !ok_kept(&mt, &routed, b, None)
+}
+
+/// Remove the paths [`put_back`] inserted. O(Σ path).
+fn take_back(mg: &mut MultiGraph, obs: &mut ObstacleSet, back: &[usize]) {
+    for &i in back {
+        mg.remove_conn(i, obs);
+    }
+}
+
+/// The connections to metrize for snapshot `b` with `back` put back and `extra` added: the
+/// routed ones, `back`, `extra`; sorted. O(m).
+fn routed_with(b: &Snap, back: &[usize], extra: Option<usize>) -> Vec<usize> {
+    (0..b.res.len())
+        .filter(|&i| matches!(b.res[i], Res::Ok(_)) || back.contains(&i) || Some(i) == extra)
+        .collect()
+}
+
+/// Every connection of `routed` that `b` had routed is routed in `mt`, and so is `c` (when
+/// given); the put-back ones may fail. O(|routed|).
+fn ok_kept(mt: &Metrized, routed: &[usize], b: &Snap, c: Option<usize>) -> bool {
+    mt.res.len() == routed.len()
+        && mt.res.iter().all(|(i, r)| {
+            matches!(r, Res::Ok(_)) || (Some(*i) != c && !matches!(b.res[*i], Res::Ok(_)))
+        })
+}
+
+/// `b.res` with the results of `mt` for the connections `b` had routed and for `c`. O(m).
+fn merged_res(b: &Snap, mt: Metrized, c: Option<usize>) -> Vec<Res> {
+    let mut res = b.res.clone();
+    for (i, r) in mt.res {
+        if Some(i) == c || matches!(b.res[i], Res::Ok(_)) {
+            res[i] = r;
+        }
+    }
+    res
+}
+
 /// Via-reduction (M3-R2, TopoR lifting): one pass over the connections with `vias >= 1`, in
 /// order `(-vias, id)`. Each leaves the graph and is searched again with the via cost times
 /// [`REDUCTION_VIA_FACTOR`] against the final history; the result replaces the old path iff it has
@@ -2759,6 +2839,7 @@ fn via_reduction_pass(
         })
         .collect();
     cands.sort_by_key(|&(v, i)| (std::cmp::Reverse(v), i));
+    let use_back = !cands.is_empty() && needs_back(cx, obs, rt, best);
     let mut out = Reduction {
         removed: 0,
         candidates: 0,
@@ -2799,17 +2880,16 @@ fn via_reduction_pass(
             _ => continue,
         };
         mg.insert_path(&live[c], &p, obs);
-        let routed: Vec<usize> = (0..m)
-            .filter(|&i| matches!(best.res[i], Res::Ok(_)))
-            .collect();
+        let back = put_back(cx, &mut mg, obs, best, &|_| use_back);
+        let routed = routed_with(best, &back, None);
         let mut metr = best.metr.clone();
         let mt = metrize(cx, obs, &mg, &routed, &mut metr, &[c]);
         if mt.timed_out {
             out.timed_out = true;
             break;
         }
-        let all_ok =
-            mt.res.len() == routed.len() && mt.res.iter().all(|(_, r)| matches!(r, Res::Ok(_)));
+        let all_ok = ok_kept(&mt, &routed, best, Some(c));
+        take_back(&mut mg, obs, &back);
         let overuse: usize = mg
             .layers
             .iter()
@@ -2825,10 +2905,8 @@ fn via_reduction_pass(
         if !(all_ok && short && overuse <= best.overuse_edges) {
             continue;
         }
-        let mut res = best.res.clone();
-        for (i, r) in mt.res {
-            res[i] = r;
-        }
+        let (relax_iterations, rounds) = (mt.relax_iterations, mt.rounds);
+        let res = merged_res(best, mt, Some(c));
         let mut paths = best.paths.clone();
         out.removed += old.vias - p.vias();
         paths[c] = Some(p);
@@ -2840,8 +2918,8 @@ fn via_reduction_pass(
         best.out = outl;
         best.res = res;
         best.overuse_edges = overuse;
-        best.relax_iterations = mt.relax_iterations;
-        best.rounds = mt.rounds;
+        best.relax_iterations = relax_iterations;
+        best.rounds = rounds;
         best.paths = paths;
         best.mg = mg;
         best.metr = metr;
@@ -2871,6 +2949,7 @@ fn junction_repair_pass(
             matches!(&best.res[i], Res::Fail { reason, perm: false, .. } if reason.starts_with("junction:"))
         })
         .collect();
+    let use_back = !cands.is_empty() && needs_back(cx, obs, rt, best);
     let mut fixed = 0usize;
     for &c in &cands {
         if cx.stop() {
@@ -2900,23 +2979,19 @@ fn junction_repair_pass(
             SearchOutcome::Blocked { .. } => continue,
         };
         mg.insert_path(&live[c], &p, obs);
-        let routed: Vec<usize> = (0..m)
-            .filter(|&i| i == c || matches!(best.res[i], Res::Ok(_)))
-            .collect();
+        let back = put_back(cx, &mut mg, obs, best, &|i| use_back && i != c);
+        let routed = routed_with(best, &back, Some(c));
         let mut metr = best.metr.clone();
         let mt = metrize(cx, obs, &mg, &routed, &mut metr, &[c]);
         if mt.timed_out {
             break;
         }
-        let all_ok =
-            mt.res.len() == routed.len() && mt.res.iter().all(|(_, r)| matches!(r, Res::Ok(_)));
-        if !all_ok {
+        take_back(&mut mg, obs, &back);
+        if !ok_kept(&mt, &routed, best, Some(c)) {
             continue;
         }
-        let mut res = best.res.clone();
-        for (i, r) in mt.res {
-            res[i] = r;
-        }
+        let (relax_iterations, rounds) = (mt.relax_iterations, mt.rounds);
+        let res = merged_res(best, mt, Some(c));
         let mut paths = best.paths.clone();
         paths[c] = Some(p);
         let (nok, vias, len, outl) = tally(&res);
@@ -2931,8 +3006,8 @@ fn junction_repair_pass(
             .iter()
             .map(|l| (0..l.g.edges.len()).filter(|&e| l.g.overuse(e) > 0.0).count())
             .sum();
-        best.relax_iterations = mt.relax_iterations;
-        best.rounds = mt.rounds;
+        best.relax_iterations = relax_iterations;
+        best.rounds = rounds;
         best.paths = paths;
         best.mg = mg;
         best.metr = metr;
@@ -3036,7 +3111,7 @@ fn weiszfeld_step(p: Vec2, a1: Vec2, a2: Vec2) -> Vec2 {
 /// are skipped. Deterministic: sequential, sorted by site.
 /// Complexity: `O(V_via * steps * metrize(1 conn))` plus one state copy per step; the deadline
 /// and the cancel flag are checked before every step.
-fn via_relaxation_pass(cx: &Ctx, obs: &ObstacleSet, rt: &Route, best: &mut Snap) -> ViaRelax {
+fn via_relaxation_pass(cx: &Ctx, obs: &mut ObstacleSet, rt: &Route, best: &mut Snap) -> ViaRelax {
     let live = cx.conns;
     let m = live.len();
     let mut out = ViaRelax {
@@ -3059,6 +3134,11 @@ fn via_relaxation_pass(cx: &Ctx, obs: &ObstacleSet, rt: &Route, best: &mut Snap)
     }
     vias.sort_unstable();
     out.vias = vias.len();
+    // The graph as the snapshot was metrized (the moves change no path, only `via_at`).
+    let mut mgx = best.mg.clone();
+    mgx.sync_anchors(obs, &rt.net_of());
+    let use_back = !vias.is_empty() && needs_back(cx, obs, rt, best);
+    let back = put_back(cx, &mut mgx, obs, best, &|_| use_back);
     for (s, c, j) in vias {
         let ks = legs_of(&best.mg, c).to_vec();
         let (k1, k2) = (ks[j], ks[j + 1]);
@@ -3077,7 +3157,7 @@ fn via_relaxation_pass(cx: &Ctx, obs: &ObstacleSet, rt: &Route, best: &mut Snap)
         for _ in 0..VIA_RELAX_STEPS {
             if cx.stop() {
                 out.timed_out = true;
-                return out;
+                break;
             }
             let cur = best.metr.via_at.get(&s).copied().unwrap_or(site_at);
             let (Some(Ok(ch1)), Some(Ok(ch2))) =
@@ -3112,18 +3192,15 @@ fn via_relaxation_pass(cx: &Ctx, obs: &ObstacleSet, rt: &Route, best: &mut Snap)
             let Res::Ok(old) = best.res[c].clone() else {
                 break;
             };
-            let routed: Vec<usize> = (0..m)
-                .filter(|&i| matches!(best.res[i], Res::Ok(_)))
-                .collect();
+            let routed = routed_with(best, &back, None);
             let mut metr = best.metr.clone();
             metr.via_at.insert(s, new);
-            let mt = metrize(cx, obs, &best.mg, &routed, &mut metr, &[c]);
+            let mt = metrize(cx, obs, &mgx, &routed, &mut metr, &[c]);
             if mt.timed_out {
                 out.timed_out = true;
-                return out;
+                break;
             }
-            let all_ok =
-                mt.res.len() == routed.len() && mt.res.iter().all(|(_, r)| matches!(r, Res::Ok(_)));
+            let all_ok = ok_kept(&mt, &routed, best, Some(c));
             let gain = mt.res.iter().find_map(|(i, r)| match r {
                 Res::Ok(k) if *i == c && k.out <= old.out => Some(old.len - k.len),
                 _ => None,
@@ -3131,10 +3208,8 @@ fn via_relaxation_pass(cx: &Ctx, obs: &ObstacleSet, rt: &Route, best: &mut Snap)
             if !all_ok || !gain.is_some_and(|g| g >= VIA_RELAX_MIN_GAIN_NM) {
                 break;
             }
-            let mut res = best.res.clone();
-            for (i, r) in mt.res {
-                res[i] = r;
-            }
+            let (relax_iterations, rounds) = (mt.relax_iterations, mt.rounds);
+            let res = merged_res(best, mt, Some(c));
             let (nok, vias_n, len, outl) = tally(&res);
             if nok != best.routed {
                 break;
@@ -3145,14 +3220,18 @@ fn via_relaxation_pass(cx: &Ctx, obs: &ObstacleSet, rt: &Route, best: &mut Snap)
             best.len = len;
             best.out = outl;
             best.res = res;
-            best.relax_iterations = mt.relax_iterations;
-            best.rounds = mt.rounds;
+            best.relax_iterations = relax_iterations;
+            best.rounds = rounds;
             best.metr = metr;
         }
         if moved {
             out.moved += 1;
         }
+        if out.timed_out {
+            break;
+        }
     }
+    best.mg.sync_anchors(obs, &rt.net_of());
     out
 }
 
@@ -3164,6 +3243,66 @@ const SHOVE_STEPS_NM: [f64; 6] = [
 /// Shove rounds per connection: each keeps one via move (a pinch freed, possibly passing the
 /// push on to a neighbour).
 const SHOVE_ROUNDS: usize = 4;
+
+/// Bisection steps between the last shove distance that did not help and the first that did
+/// (the kept move is within `step / 2^SHOVE_BISECT` of the shortest that helps).
+const SHOVE_BISECT: usize = 3;
+
+/// Shove directions, in the order tried: straight away from the pinch partner, then 45° and
+/// 90° to either side (sliding past it). `d` is a unit vector. O(1).
+fn shove_dirs(d: Vec2) -> [Vec2; 5] {
+    let rot = |a: f64| Vec2 {
+        x: d.x * a.cos() - d.y * a.sin(),
+        y: d.x * a.sin() + d.y * a.cos(),
+    };
+    let q = std::f64::consts::FRAC_PI_4;
+    [d, rot(q), rot(-q), rot(2.0 * q), rot(-2.0 * q)]
+}
+
+/// Where a via site (CDT vertex at `home`, now at `cur`) lands when shoved `dist` along `dir`:
+/// clipped into the star of its vertex in every layer graph; `None` when that moves it less
+/// than 1 um or a via of `size` does not fit there. O(layers · deg + q).
+#[allow(clippy::too_many_arguments)]
+fn shove_goal(
+    cx: &Ctx,
+    mg: &MultiGraph,
+    home: Vec2,
+    cur: Vec2,
+    dir: Vec2,
+    dist: f64,
+    size: ViaSize,
+) -> Option<Vec2> {
+    let target = cur + dir * dist;
+    let mut t = 1.0f64;
+    for (li, l) in mg.layers.iter().enumerate() {
+        t = t.min(mg.vertex_of(li, home).map_or(0.0, |v| star_clip(&l.g, v, target)));
+    }
+    let goal = home + (target - home) * t;
+    ((goal - cur).len() >= 1000.0 && cx.checker.via_fits(goal, size)).then_some(goal)
+}
+
+/// Metrize with site `s` moved from `cur` to `goal` (anchors and emitted via), re-tautening
+/// `work`; the anchors are back at `cur` on return. O(metrize).
+#[allow(clippy::too_many_arguments)]
+fn shove_try(
+    cx: &Ctx,
+    obs: &mut ObstacleSet,
+    mg: &MultiGraph,
+    metr: &MetrState,
+    routed: &[usize],
+    work: &[usize],
+    s: usize,
+    cur: Vec2,
+    goal: Vec2,
+) -> (Metrized, MetrState) {
+    obs.move_site(&mg.site_anchor[s], goal);
+    let mut m2 = metr.clone();
+    m2.via_at.insert(s, goal);
+    m2.base = None;
+    let mt = metrize(cx, obs, mg, routed, &mut m2, work);
+    obs.move_site(&mg.site_anchor[s], cur);
+    (mt, m2)
+}
 
 /// Counters of [`via_shove_pass`].
 struct ViaShove {
@@ -3239,14 +3378,15 @@ fn pinch_partner(
 /// path back in it, so every wire keeps its anchor sequence; `c` is skipped when its path no
 /// longer fits back) and metrized. Then up to [`SHOVE_ROUNDS`] rounds: the first pinched
 /// failure (`c` first, then a routed connection a move broke) pushes the via of its pinch away
-/// from the pinch partner by [`SHOVE_STEPS_NM`] (smallest first), clipped into the star of its
-/// site vertex in every layer graph (so every slot path stays valid) and only where
-/// `Checker::via_fits`; the obstacle anchors move with the via ([`ObstacleSet::move_site`]), so
+/// from the pinch partner ([`shove_dirs`]: straight away, then 45° / 90° to either side) by
+/// [`SHOVE_STEPS_NM`] (smallest first, then [`SHOVE_BISECT`] bisections down to the shortest
+/// distance that helps), clipped into the star of its site vertex in every layer graph (so every
+/// slot path stays valid) and only where `Checker::via_fits`; the obstacle anchors move with the via ([`ObstacleSet::move_site`]), so
 /// the other wires see it where it is emitted. A move is kept when fewer connections fail, or
 /// when `c` routes and no more fail. The result is kept only when `c` and every routed
 /// connection metrize (self-checked); else every move is undone. The other failed connections
 /// keep their failure and leave the graph again. Deterministic: candidates by id, failures and
-/// sites in pinch order. Complexity: `O(C · rounds · |steps| · metrize)` for `C` candidates; the
+/// sites in pinch order. Complexity: `O(C · rounds · dirs · (|steps| + bisect) · metrize)` for `C` candidates; the
 /// deadline and the cancel flag are checked before every candidate and step.
 fn via_shove_pass(cx: &Ctx, obs: &mut ObstacleSet, rt: &Route, best: &mut Snap) -> ViaShove {
     let live = cx.conns;
@@ -3280,34 +3420,23 @@ fn via_shove_pass(cx: &Ctx, obs: &mut ObstacleSet, rt: &Route, best: &mut Snap) 
         })
         .collect();
     out.candidates = cands.len();
+    let use_back = !cands.is_empty() && needs_back(cx, obs, rt, best);
     'conn: for &c in &cands {
         if cx.stop() {
             out.timed_out = true;
             break;
         }
-        // The graph as the negotiation metrized the snapshot: the failed connections' planned
-        // paths (and their vias) are back in it, so every wire gets the anchor sequence it had
-        // (without them a routed wire may sketch differently and fail).
+        // The graph as the negotiation metrized the snapshot ([`put_back`]) when that matters,
+        // else the best graph; `c`'s planned path in both.
         let mut mg = best.mg.clone();
         mg.sync_anchors(obs, &net_of);
-        let mut back: Vec<usize> = Vec::new();
-        for (i, conn) in live.iter().enumerate() {
-            let (Res::Fail { perm: false, .. }, Some(Some(p))) = (&best.res[i], best.paths.get(i))
-            else {
-                continue;
-            };
-            if p.sites.iter().any(|&(s, _)| mg.owner.get(s).copied().flatten().is_some()) {
-                continue;
-            }
-            mg.insert_path(conn, p, obs);
-            back.push(i);
-        }
+        let back = put_back(cx, &mut mg, obs, best, &|i| use_back || i == c);
         let Some(p) = back.contains(&c).then(|| best.paths[c].clone()).flatten() else {
             best.mg.sync_anchors(obs, &net_of);
             continue;
         };
         let was_ok = |i: usize| matches!(best.res[i], Res::Ok(_));
-        let routed: Vec<usize> = (0..m).filter(|&i| was_ok(i) || back.contains(&i)).collect();
+        let routed = routed_with(best, &back, None);
         let mut metr = best.metr.clone();
         let mt = metrize(cx, obs, &mg, &routed, &mut metr, &[c]);
         if mt.timed_out {
@@ -3376,45 +3505,59 @@ fn via_shove_pass(cx: &Ctx, obs: &mut ObstacleSet, rt: &Route, best: &mut Snap) 
                     if away.len() == 0.0 {
                         continue;
                     }
-                    let dir = away * (1.0 / away.len());
                     let mut work = vec![c, *f, o];
                     work.sort_unstable();
                     work.dedup();
-                    for step in SHOVE_STEPS_NM {
-                        if cx.stop() {
-                            undo(obs, &mg, &moved);
-                            out.timed_out = true;
-                            break 'conn;
-                        }
-                        let target = cur + dir * step;
-                        let mut t = 1.0f64;
-                        for (li, l) in mg.layers.iter().enumerate() {
-                            t = t.min(mg.vertex_of(li, home).map_or(0.0, |v| star_clip(&l.g, v, target)));
-                        }
-                        let goal = home + (target - home) * t;
-                        if (goal - cur).len() < 1000.0 || !cx.checker.via_fits(goal, size) {
-                            continue;
-                        }
-                        obs.move_site(&mg.site_anchor[s], goal);
-                        let mut m2 = metr.clone();
-                        m2.via_at.insert(s, goal);
-                        m2.base = None;
-                        let mt2 = metrize(cx, obs, &mg, &routed, &mut m2, &work);
-                        if mt2.timed_out {
-                            obs.move_site(&mg.site_anchor[s], cur);
-                            undo(obs, &mg, &moved);
-                            out.timed_out = true;
-                            break 'conn;
-                        }
-                        let after = bad(&mt2);
+                    let helps = |after: &[(usize, String)]| {
                         let c_freed = c_failed && !after.iter().any(|(i, _)| *i == c);
-                        if after.len() < fails.len() || (c_freed && after.len() <= fails.len()) {
+                        after.len() < fails.len() || (c_freed && after.len() <= fails.len())
+                    };
+                    for dir in shove_dirs(away * (1.0 / away.len())) {
+                        // `lo`: the longest distance tried that did not help (or did not fit)
+                        let mut lo = 0.0f64;
+                        for step in SHOVE_STEPS_NM {
+                            if cx.stop() {
+                                undo(obs, &mg, &moved);
+                                out.timed_out = true;
+                                break 'conn;
+                            }
+                            let Some(goal) = shove_goal(cx, &mg, home, cur, dir, step, size)
+                            else {
+                                lo = step;
+                                continue;
+                            };
+                            let (mt2, m2) = shove_try(cx, obs, &mg, &metr, &routed, &work, s, cur, goal);
+                            if mt2.timed_out {
+                                undo(obs, &mg, &moved);
+                                out.timed_out = true;
+                                break 'conn;
+                            }
+                            if !helps(&bad(&mt2)) {
+                                lo = step;
+                                continue;
+                            }
+                            // Bisect down to the shortest distance that still helps.
+                            let (mut hi, mut keep) = (step, (goal, mt2, m2));
+                            for _ in 0..SHOVE_BISECT {
+                                let mid = 0.5 * (lo + hi);
+                                let Some(g) = shove_goal(cx, &mg, home, cur, dir, mid, size) else {
+                                    lo = mid;
+                                    continue;
+                                };
+                                let (mt3, m3) = shove_try(cx, obs, &mg, &metr, &routed, &work, s, cur, g);
+                                if !mt3.timed_out && helps(&bad(&mt3)) {
+                                    hi = mid;
+                                    keep = (g, mt3, m3);
+                                } else {
+                                    lo = mid;
+                                }
+                            }
+                            obs.move_site(&mg.site_anchor[s], keep.0);
                             moved.push((s, cur));
-                            mt = mt2;
-                            metr = m2;
+                            mt = keep.1;
+                            metr = keep.2;
                             continue 'rounds;
                         }
-                        obs.move_site(&mg.site_anchor[s], cur);
                     }
                 }
             }
@@ -3426,21 +3569,16 @@ fn via_shove_pass(cx: &Ctx, obs: &mut ObstacleSet, rt: &Route, best: &mut Snap) 
             continue;
         }
         out.shoved += moved.len();
-        let mut res = best.res.clone();
-        for (i, r) in mt.res {
-            if i == c || was_ok(i) {
-                res[i] = r;
-            }
-        }
+        let (relax_iterations, rounds) = (mt.relax_iterations, mt.rounds);
+        let res = merged_res(best, mt, Some(c));
         let (nok, vias, len, outl) = tally(&res);
         if nok <= best.routed {
             best.mg.sync_anchors(obs, &net_of);
             continue;
         }
         // The snapshot keeps only the routed paths in its graph (as the negotiation does).
-        for &i in back.iter().filter(|&&i| i != c) {
-            mg.remove_conn(i, obs);
-        }
+        let others: Vec<usize> = back.iter().copied().filter(|&i| i != c).collect();
+        take_back(&mut mg, obs, &others);
         let mut paths = best.paths.clone();
         paths[c] = Some(p);
         out.routed += 1;
@@ -3455,8 +3593,8 @@ fn via_shove_pass(cx: &Ctx, obs: &mut ObstacleSet, rt: &Route, best: &mut Snap) 
             .iter()
             .map(|l| (0..l.g.edges.len()).filter(|&e| l.g.overuse(e) > 0.0).count())
             .sum();
-        best.relax_iterations = mt.relax_iterations;
-        best.rounds = mt.rounds;
+        best.relax_iterations = relax_iterations;
+        best.rounds = rounds;
         best.paths = paths;
         best.mg = mg;
         best.metr = metr;
@@ -5190,7 +5328,7 @@ fn route_pass(
                 } else if timed_out {
                     relax_status = "skipped: timeout".into();
                 } else if let Some(b) = best.as_mut() {
-                    let r = via_relaxation_pass(&cx, &obs, &rt, b);
+                    let r = via_relaxation_pass(&cx, &mut obs, &rt, b);
                     relax_status = r.status();
                 }
                 if !timed_out && opts.zero_slack_retry {
