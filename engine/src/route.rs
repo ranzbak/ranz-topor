@@ -46,7 +46,7 @@ use crate::model::{
 use crate::control::RunControl;
 use crate::multigraph::MultiGraph;
 use crate::negotiate::{
-    detect_clinches, overused_conns, BlockInfo, ClinchReport, Negotiator,
+    detect_clinches, overused_conns, BlockInfo, ClinchReport, Negotiator, RipReport,
 };
 use crate::obstacle::{ObstacleSet, TerminalObstacle};
 use crate::pourcheck::{check_pour_reach, with_routed_copper, PourReach};
@@ -162,6 +162,9 @@ pub struct RouteResult {
     pub sites: usize,
     /// Via-reduction pass outcome (Task 10): `not run` until then.
     pub via_reduction: String,
+    /// Rip-up report of the routing loop (A16): rips per connection (as blocker), pairs that
+    /// hit the `ripup_max_per_pair` backstop, total.
+    pub ripup: RipReport,
     pub iterations: u32,
     pub converged: bool,
     pub overuse_edges: usize,
@@ -2640,6 +2643,7 @@ fn route_pass(
     let mut n_sites = 0usize;
     // Detour reference per live connection (M3-R11): the ghost on the empty graph.
     let mut ghost_ref: Vec<Option<f64>> = vec![None; m];
+    let mut ripup = RipReport::default();
     let mut via_status: String = if opts.via_reduction { "not run" } else { "off" }.into();
     let mut zs_status: String = if opts.zero_slack_retry {
         "not run"
@@ -3067,6 +3071,7 @@ fn route_pass(
                         break;
                     }
                 }
+                ripup = neg.rip_report(m);
                 if !opts.via_reduction {
                     via_status = "off".into();
                 } else if timed_out {
@@ -3338,6 +3343,7 @@ fn route_pass(
             .collect(),
         sites: n_sites,
         via_reduction: via_status,
+        ripup,
         iterations,
         converged,
         overuse_edges: best.as_ref().map_or(0, |b| b.overuse_edges),

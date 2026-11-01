@@ -4,7 +4,6 @@ use topor_engine::check::Checker;
 use topor_engine::geom::quant::TrackPrim;
 use topor_engine::geom::{dequantise, Vec2};
 use topor_engine::model::{BoardModel, ExistingCopper, Item, Options};
-use topor_engine::negotiate::RIP_PAIR_CAP;
 use topor_engine::obstacle::ObstacleSet;
 use topor_engine::route::{route, wire_stats, RouteResult};
 use topor_engine::sketch::{
@@ -588,8 +587,15 @@ fn eprom_ripped_two_layers_routes_all_without_zero_slack() {
 /// another way, 26/27 without the corridor.
 #[test]
 fn eprom_ripped_front_only_is_the_m2_result() {
+    // The M2 / M3 situation is the constant rip cost of M3 (`growth 1`, `max_per_pair 3`);
+    // the default escalation is pinned by `eprom_ripped_front_only_default_ripup_routes_all_clean`.
+    let m3_ripup = || Options {
+        ripup_growth: 1.0,
+        ripup_max_per_pair: 3,
+        ..opts()
+    };
     let m = front_only(eprom_ripped());
-    let r = route(&m, &opts());
+    let r = route(&m, &m3_ripup());
     assert_eq!(r.sites, 0);
     assert_eq!(r.routed, 27, "{} routed {:?}", r.routed, r.failed);
     assert!(r.iterations < 50, "{}", r.iterations);
@@ -621,8 +627,24 @@ fn eprom_ripped_front_only_is_the_m2_result() {
         let on_zs = matches!(&r.items[v.item], Item::Track(t) if t.wire == Some(zs_conn));
         assert!(on_zs && v.gap + 1 >= v.required, "{v:?}");
     }
-    let again = route(&m, &opts());
+    let again = route(&m, &m3_ripup());
     assert_eq!(json_no_runtime(&r), json_no_runtime(&again));
+}
+
+/// A16 (escalating rip cost, default `ripup_growth` 2.0): the F.Cu-only eprom board is a
+/// fragile three-way contention (+5V and two others on one corridor). With the escalating cost
+/// the negotiation takes another trajectory than the M3 constant cost: 27/27 and clean at margin
+/// 0, no zero-slack wire, but 92.3 mm outside the pads instead of 67.0 mm (growth 1.75 / 1.9 / 3
+/// lose a connection: 26/27). The real two-layer eprom and wiccon never rip (`ripup.total` 0),
+/// so only this single-layer restriction sees it. Pinned: completion + cleanliness, not length.
+#[test]
+fn eprom_ripped_front_only_default_ripup_routes_all_clean() {
+    let m = front_only(eprom_ripped());
+    let r = route(&m, &opts());
+    assert_eq!((r.routed, r.failed), (27, 0), "{:?}", r.warnings);
+    assert!(r.zero_slack_wires.is_empty());
+    assert!(r.ripup.total > 0 && r.ripup.pairs_at_backstop.is_empty(), "{:?}", r.ripup);
+    clean(&m, &r);
 }
 
 /// `n` two-pad nets (round pads d 1 mm on a 3 mm grid, each pair within 9 mm; the layout of
@@ -1049,29 +1071,32 @@ fn sealed_cross_model() -> BoardModel {
     front_only(BoardModel::from_json(&s).unwrap_or_else(|e| panic!("{e}\n{s}")))
 }
 
-/// F2 damping (RC-A2): a connection rips a given blocker at most `RIP_PAIR_CAP` times per run.
+/// F2 damping (RC-A2), A16 semantics: a connection rips a given blocker at most
+/// `ripup_max_per_pair` times per run (the backstop; the cost of each rip escalates, but on the
+/// sealed cross no price can settle the contest, so the backstop must).
 /// On the sealed cross A and B rip each other out of the only class every iteration (A routes,
 /// B is blocked and rips A; B routes, A is blocked and rips B; ...): the cap ends the exchange
-/// after exactly `2 * RIP_PAIR_CAP` iterations, every later iteration rips nothing, and the loop
+/// after exactly `2 * max_per_pair` iterations, every later iteration rips nothing, and the loop
 /// ends by the stall rule. Without the cap every iteration up to the stall stop rips. One routed,
 /// the other blocked, iteration count pinned, deterministic.
 #[test]
 fn rip_up_ping_pong_is_damped() {
+    const MAX_PER_PAIR: u32 = 3;
     let m = sealed_cross_model();
     let o = Options {
         profile: true,
         // the stop rule's patience of the pre-P1 stall stop (8 iterations): the damping is
         // observed over the iterations after the cap bit
         patience: 8,
-        // the cap of the M3 constant `RIP_PAIR_CAP` (the option defaults to 8 since P1)
-        ripup_max_per_pair: RIP_PAIR_CAP,
+        // the backstop of the M3 damping test (the option defaults to 8)
+        ripup_max_per_pair: MAX_PER_PAIR,
         ..opts()
     };
     let r = route(&m, &o);
     assert_eq!((r.routed, r.failed), (1, 1), "{:?}", pat(&r));
     let p = r.profile.as_ref().unwrap();
     let rips: Vec<usize> = p.iter().map(|it| it.ripped).collect();
-    let n = 2 * RIP_PAIR_CAP as usize;
+    let n = 2 * MAX_PER_PAIR as usize;
     assert!(rips.len() > n, "{rips:?}");
     assert!(rips[..n].iter().all(|&k| k > 0), "{rips:?}");
     assert!(rips[n..].iter().all(|&k| k == 0), "ping-pong not damped: {rips:?}");

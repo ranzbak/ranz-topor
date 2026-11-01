@@ -16,9 +16,12 @@
 //! the graph for the anytime result (ruling Q2). The absurd-detour ghost is
 //! computed in the parallel phase and reused while its own faces are unchanged. A connection
 //! blocked before any search by a static fact of the board (a terminal that cannot be left /
-//! entered, `search::terminal_open`, F3) is never searched again (`dead`). Rip-up is damped (F2, scaling diagnosis RC-A2): a connection rips a given
-//! blocker at most [`RIP_PAIR_CAP`] times per run, so two connections that keep ripping each
-//! other out of a shared class stop after a bounded exchange and the history they left decides.
+//! entered, `search::terminal_open`, F3) is never searched again (`dead`). Rip-up cost escalates
+//! (A16, 46 row 17; F2 damping before): the k-th time connection A rips blocker B leaves
+//! `hist_block * growth^(k-1)` history on B's path, so two connections that keep ripping each
+//! other out of a shared class price the contested class out after a few exchanges; the hard
+//! backstop `ripup_max_per_pair` (default 8) refuses further rips of B by A and only bounds the
+//! runtime (`O(max_per_pair * m^2)` rips per run).
 //! Every decision is a function of the (deterministic) search results, so the outcome does not
 //! depend on the thread count.
 //! No `HashMap` iteration reaches any output; the wall clock is checked before every search.
@@ -47,12 +50,32 @@ pub const PRESENT_OVERUSE: f64 = crate::search::PRESENT_OVERUSE;
 pub const DETOUR_FACTOR: f64 = 2.0;
 /// Most blockers one connection rips per iteration (keeps the churn bounded).
 pub const MAX_RIP: usize = 3;
-/// Damping (F2, scaling diagnosis RC-A2): a connection rips a given blocker at most this many
-/// times per run. One exchange leaves only `HIST_BLOCK` on the blocker's class, too little to
-/// settle a three-way contention (the F.Cu-only eprom board loses +5V with a cap of 1); three
-/// leave `3 * HIST_BLOCK = 1.5`, the scale of one failure (`HIST_FAIL`). Total rips per run are
-/// then bounded by `RIP_PAIR_CAP * m^2` whatever the length comparisons do.
-pub const RIP_PAIR_CAP: u32 = 3;
+/// Largest factor `growth^(k-1)` of one rip's history increment: keeps the history finite for
+/// absurd `growth` / `max_per_pair` combinations (the cost of an edge saturates long before:
+/// design note §6, `h` ~ 10-20 already prices any alternative cheaper).
+pub const RIP_GROWTH_MAX_FACTOR: f64 = 1.0e6;
+
+/// History one rip adds for the `k`-th rip (`k >= 1`) of a blocker by one connection:
+/// `hist_block * growth^(k-1)`, the factor capped at [`RIP_GROWTH_MAX_FACTOR`]; `growth = 1` is
+/// the constant cost of M3. O(1).
+pub fn rip_increment(hist_block: f64, growth: f64, k: u32) -> f64 {
+    let f = growth.powi(k.saturating_sub(1).min(i32::MAX as u32) as i32);
+    hist_block * f.min(RIP_GROWTH_MAX_FACTOR)
+}
+
+/// Rip-up report of a run (A16): who was ripped how often, which pairs hit the backstop.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct RipReport {
+    /// Per connection (index like `conns`): how many times it was ripped out as a blocker.
+    pub rips_per_connection: Vec<u32>,
+    /// `[ripper, blocker]` pairs for which a rip was refused by `ripup_max_per_pair`
+    /// (sorted, no duplicates).
+    pub pairs_at_backstop: Vec<[usize; 2]>,
+    /// Rips performed in total (sum of `rips_per_connection`).
+    pub total: u32,
+    /// Largest rip count of any single `(ripper, blocker)` pair.
+    pub max_pair: u32,
+}
 
 /// Clinches found in a routing: `(conn, edge)` pairs (edges of the layer graphs, all layers).
 #[derive(Clone, Debug, Default, Serialize)]
@@ -114,21 +137,23 @@ pub struct Negotiator {
     /// capacity, strands, owned sites, `along`, history - is excluded), with the reason: blocked
     /// in every later iteration and not searched again.
     dead: BTreeMap<usize, String>,
-    /// Rips per `(ripper, blocker)` pair so far: at most [`RIP_PAIR_CAP`] per run (damping,
-    /// design note §7 amendment).
+    /// Rips per `(ripper, blocker)` pair so far: at most `cfg.rip_pair_cap` per run (backstop).
     rip_pairs: BTreeMap<(usize, usize), u32>,
+    /// Pairs whose next rip was refused by the backstop.
+    rip_refused: BTreeSet<(usize, usize)>,
     cur: Vec<Option<SlotPath>>,
     /// Tunables (history increments, rip cap); the M3 constants until [`Negotiator::configure`].
     cfg: NegCfg,
 }
 
-/// Negotiation tunables taken from `Options` (`expert.*`, `ripup_max_per_pair`).
+/// Negotiation tunables taken from `Options` (`expert.*`, `ripup_growth`, `ripup_max_per_pair`).
 #[derive(Clone, Copy, Debug)]
 struct NegCfg {
     hist_fail: f64,
     hist_block: f64,
     hist_overuse: f64,
     rip_pair_cap: u32,
+    rip_growth: f64,
 }
 
 impl Default for NegCfg {
@@ -137,7 +162,8 @@ impl Default for NegCfg {
             hist_fail: HIST_FAIL,
             hist_block: HIST_BLOCK,
             hist_overuse: HIST_OVERUSE,
-            rip_pair_cap: RIP_PAIR_CAP,
+            rip_pair_cap: 8,
+            rip_growth: 2.0,
         }
     }
 }
@@ -163,6 +189,7 @@ impl Negotiator {
             pending_rip: BTreeSet::new(),
             dead: BTreeMap::new(),
             rip_pairs: BTreeMap::new(),
+            rip_refused: BTreeSet::new(),
             cur: vec![None; conns],
             cfg: NegCfg::default(),
         }
@@ -175,6 +202,7 @@ impl Negotiator {
             hist_block: opts.expert.hist_block,
             hist_overuse: opts.expert.hist_overuse,
             rip_pair_cap: opts.ripup_max_per_pair,
+            rip_growth: opts.ripup_growth,
         };
     }
 
@@ -499,32 +527,66 @@ impl Negotiator {
         }
     }
 
+    /// History a rip adds on the blocker's path for the `k`-th rip (`k >= 1`) of one blocker by
+    /// one connection: `hist_block * growth^(k-1)`, the factor capped at
+    /// [`RIP_GROWTH_MAX_FACTOR`]. O(1).
+    pub fn rip_increment(&self, k: u32) -> f64 {
+        rip_increment(self.cfg.hist_block, self.cfg.rip_growth, k)
+    }
+
     /// Topological rip-up bookkeeping for connection `i` whose ghost path is blocked by the
     /// strands / vias of the connections `blockers`: history on the blockers' leg edges and
-    /// sites, a bump for `i` when `bump` (a blocked connection is bumped by `penalise_blocked`).
+    /// sites ([`Negotiator::rip_increment`], escalating per `(i, blocker)` pair), a bump for
+    /// `i` when `bump` (a blocked connection is bumped by `penalise_blocked`).
     /// `false` (nothing done) when there is no blocker, more than [`MAX_RIP`], or one that `i`
-    /// has already ripped [`RIP_PAIR_CAP`] times in this run (damping: without a bound two
-    /// connections sharing one class rip each other every iteration until the stall stop,
-    /// scaling diagnosis RC-A2; the history they leave behind decides the class for whoever is
-    /// searched next).
+    /// has already ripped `ripup_max_per_pair` times in this run (backstop: the escalating cost
+    /// normally settles two connections sharing one class long before; the history they leave
+    /// decides the class for whoever is searched next; scaling diagnosis RC-A2). Refused pairs
+    /// are recorded for the report. Complexity O(|blockers| * path length * layers).
     fn rip(&mut self, mg: &MultiGraph, i: usize, blockers: &[usize], bump: bool) -> bool {
         let b: Vec<usize> = blockers.iter().copied().filter(|&x| x != i).collect();
-        if b.is_empty()
-            || b.len() > MAX_RIP
-            || b
-                .iter()
-                .any(|&x| self.rip_pairs.get(&(i, x)).is_some_and(|&n| n >= self.cfg.rip_pair_cap))
-        {
+        if b.is_empty() || b.len() > MAX_RIP {
+            return false;
+        }
+        let cap = self.cfg.rip_pair_cap;
+        let refused: Vec<usize> = b
+            .iter()
+            .copied()
+            .filter(|&x| self.rip_pairs.get(&(i, x)).is_some_and(|&n| n >= cap))
+            .collect();
+        if !refused.is_empty() {
+            self.rip_refused.extend(refused.into_iter().map(|x| (i, x)));
             return false;
         }
         for &x in &b {
-            *self.rip_pairs.entry((i, x)).or_insert(0) += 1;
-            self.add_conn_history(mg, x, self.cfg.hist_block, self.cfg.hist_block);
+            let n = self.rip_pairs.entry((i, x)).or_insert(0);
+            *n += 1;
+            let k = *n;
+            let h = self.rip_increment(k);
+            self.add_conn_history(mg, x, h, h);
         }
         if bump {
             self.bumps[i] += 1;
         }
         true
+    }
+
+    /// The run's rip-up report for `conns` connections. O(pairs).
+    pub fn rip_report(&self, conns: usize) -> RipReport {
+        let mut per = vec![0u32; conns];
+        let mut max_pair = 0;
+        for (&(_, x), &n) in &self.rip_pairs {
+            if let Some(c) = per.get_mut(x) {
+                *c += n;
+            }
+            max_pair = max_pair.max(n);
+        }
+        RipReport {
+            total: per.iter().sum(),
+            rips_per_connection: per,
+            pairs_at_backstop: self.rip_refused.iter().map(|&(a, b)| [a, b]).collect(),
+            max_pair,
+        }
     }
 
     /// `edge` history on every edge of `conn`'s legs (per layer) and `site` history on its

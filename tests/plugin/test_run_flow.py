@@ -850,3 +850,14 @@ def test_refill_pours_zone_unfilled_after_refill_reaches_nothing():
     assert empty["pads"] == [] and empty["vias"] == [] and empty["fills"] == model["pours"][0]["fills"]
     assert "warning" in empty
     assert absent == model["pours"][1]
+
+
+def test_ripup_notes_lists_totals_and_backstop_pairs():
+    """A16: the run report names the rip-up totals and the pairs that hit the max_per_pair backstop."""
+    from topor.run import _ripup_notes
+
+    assert _ripup_notes({}) == []
+    assert _ripup_notes({"ripup": {"total": 0, "rips_per_connection": [0, 0], "pairs_at_backstop": []}}) == []
+    rp = {"total": 6, "max_pair": 3, "rips_per_connection": [3, 3, 0], "pairs_at_backstop": [[1, 0]]}
+    (line,) = _ripup_notes({"ripup": rp})
+    assert "6 rips" in line and "2 connections" in line and "max 3 per pair" in line and "1->0" in line
