@@ -287,9 +287,13 @@ unsure about is kept. KiCad's DRC of the result stays the judge.
   [`PCB_FORMAT_OLD`](troubleshoot.md#pcb_format_old)).
 - **Layers.** The engine routes every copper layer whose role is `signal` or `mixed` and uses through vias
   only (no blind, buried or micro vias). Plane layers (`gnd` / `pwr` roles, defaults by copper count in
-  [configuration.md](configuration.md#layers)) are not routed; pads reach them through their zone. In 0.4.0
-  only two-layer boards are benchmarked (eprom-to-kernal 27/27, wiccon-2023 62/62); 4+ layer boards route
-  their signal layers but fan-out vias to planes and inner-layer quality are not tuned yet. Copper counts
+  [configuration.md](configuration.md#layers)) are not routed; through-hole pads reach them through their
+  zone, and an SMD pad of a plane net gets a through via onto the plane at the nearest free via site within
+  `[vias] plane_via_max_mm` (default 1 mm) of the pad, inside the pad when `[vias] via_in_pad` is on
+  (`[vias] plane_vias`, since 0.4.2). A pad with no site that close fails with *no via site within … of the
+  terminal (plane pour)*. Each pad gets its own via: existing stitching vias are not used as plane targets
+  and two pads do not share one. Only two-layer boards are benchmarked (eprom-to-kernal 27/27,
+  wiccon-2023 62/62); 4+ layer boards route their signal layers but inner-layer quality is not tuned yet. Copper counts
   other than 2, 4, 6, 8 need roles in `[layers]` ([`LAYER_ROLES_NEEDED`](troubleshoot.md#layer_roles_needed)).
 - **Groups.** The KiCad API does not expose group membership: grouped items are treated one by one, and
   selecting a group may not select its footprints for the scope (UNVERIFIED) — select the footprints

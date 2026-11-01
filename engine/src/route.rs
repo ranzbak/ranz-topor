@@ -37,7 +37,7 @@ use crate::cdt::Crossing;
 use crate::check::{Checker, ItemIndex};
 use crate::decompose::{decompose, terminal_of, Connection, TermKind, TermRef};
 use crate::geom::quant::{quantise_chain, round_nm, TrackPrim};
-use crate::geom::{dequantise, dist_prim_skeleton, Prim, Seg, Skeleton, Vec2};
+use crate::geom::{dequantise, dist_prim_skeleton, point_skeleton, Prim, Seg, Skeleton, Vec2};
 use crate::graph::{GraphRules, RouteGraph, TerminalInfo};
 use crate::model::{
     flip_track, BoardModel, ExistingCopper, Item, Options, PadAttr, PadRef, Pt, Scope, TrackItem,
@@ -1571,6 +1571,19 @@ fn metrize(
     work: &[usize],
 ) -> Metrized {
     metrize_zs(cx, obs, mg, routed, None, st, work)
+}
+
+/// Distance (nm) from the copper of terminal `t` to a plane via at `at` (math frame): from the
+/// pad's outline for a pad (0 inside it), else from the terminal point. O(pad vertices).
+fn plane_via_gap(model: &BoardModel, t: &TermRef, at: Vec2) -> f64 {
+    match t.kind {
+        TermKind::Pad(pi) => {
+            let pad = &model.pads[pi];
+            let layer = t.layers.first().copied().unwrap_or(0);
+            point_skeleton(at, &model.skeleton(pad, layer)).max(0.0)
+        }
+        _ => (at - t.at).len(),
+    }
 }
 
 /// The via item of site `s` for connection `conn` (KiCad frame).
@@ -4891,10 +4904,45 @@ fn route_pass(
                 if opts.steiner {
                     mg.steiner = Some(Arc::new(steiner_nets(model, opts, &dec, &live, &orig, &mg)));
                 }
+                // Plane pours (fills only on non-routed layers, `Options.plane_vias`): their
+                // sites are those inside a plane fill; reach is judged on the plane layers.
+                let plane_zi: BTreeSet<usize> = live
+                    .iter()
+                    .filter_map(|c| match c.to.kind {
+                        TermKind::Pour(zi) if !c.to.layers.iter().any(|l| routable.contains(l)) => {
+                            Some(zi)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let mut plane_layers: Vec<u32> = plane_zi
+                    .iter()
+                    .flat_map(|&zi| model.pours[zi].fills.iter().map(|f| f.layer))
+                    .collect();
+                plane_layers.sort_unstable();
+                plane_layers.dedup();
+                if !plane_zi.is_empty() {
+                    let extra = MultiGraph::pour_membership(model, &mg.sites, &plane_layers);
+                    for (s, zs) in extra.into_iter().enumerate() {
+                        for zi in zs.into_iter().filter(|zi| plane_zi.contains(zi)) {
+                            if !mg.in_pour[s].contains(&zi) {
+                                mg.in_pour[s].push(zi);
+                            }
+                        }
+                        mg.in_pour[s].sort_unstable();
+                    }
+                }
                 if let Some(reach) = reach {
                     for s in 0..mg.sites.len() {
                         let at = mg.sites[s].at;
-                        mg.in_pour[s].retain(|&zi| reach.site_in_main(zi, &routable, at));
+                        mg.in_pour[s].retain(|&zi| {
+                            let ls = if plane_zi.contains(&zi) {
+                                &plane_layers
+                            } else {
+                                &routable
+                            };
+                            reach.site_in_main(zi, ls, at)
+                        });
                     }
                 }
                 let mut perm: Vec<Option<String>> = vec![None; m];
@@ -4914,15 +4962,28 @@ fn route_pass(
                     let st = vertices(&c.from);
                     let goal = match c.to.kind {
                         TermKind::Pour(zi) => {
+                            let plane = plane_zi.contains(&zi);
                             let pour_sites: Vec<usize> = (0..mg.sites.len())
                                 .filter(|&s| mg.in_pour[s].contains(&zi))
+                                .filter(|&s| {
+                                    !plane
+                                        || plane_via_gap(model, &c.from, mg.sites[s].at)
+                                            <= opts.plane_via_max_nm as f64
+                                })
                                 .collect();
                             // D-6: every listed same-net via is a goal vertex on each of its
                             // routable layers (the path ends on it, no new via).
                             let vertices: Vec<(usize, usize)> =
                                 pour_vias[i].iter().flat_map(&vertices).collect();
                             if pour_sites.is_empty() && vertices.is_empty() {
-                                perm[i] = Some("no via site inside pour".into());
+                                perm[i] = Some(if plane {
+                                    format!(
+                                        "no via site within {:.2} mm of the terminal (plane pour)",
+                                        opts.plane_via_max_nm as f64 * 1e-6
+                                    )
+                                } else {
+                                    "no via site inside pour".into()
+                                });
                             }
                             Goal {
                                 vertices,

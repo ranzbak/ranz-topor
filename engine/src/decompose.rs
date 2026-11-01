@@ -49,7 +49,8 @@ pub struct TermRef {
     #[serde(serialize_with = "ser_vec2")]
     pub at: Vec2,
     /// Routable copper layers (sorted, a subset of the `layers` given to `decompose`) the
-    /// terminal has copper on; for a pour its fill layers.
+    /// terminal has copper on; for a pour its routable fill layers, or its plane fill layers
+    /// when it has none on a routable layer (`Options.plane_vias`).
     pub layers: Vec<u32>,
 }
 
@@ -645,7 +646,10 @@ pub fn decompose(model: &BoardModel, opts: &Options, layers: &[u32]) -> Decompos
                 let mut pl: Vec<u32> = model.pours[zi].fills.iter().map(|f| f.layer).collect();
                 pl.sort_unstable();
                 pl.dedup();
-                pl.retain(|l| layers.contains(l));
+                // A pour only on plane layers keeps them: the router drops a via onto it.
+                if !opts.plane_vias || pl.iter().any(|l| layers.contains(l)) {
+                    pl.retain(|l| layers.contains(l));
+                }
                 out.connections.push(Connection {
                     id,
                     net,

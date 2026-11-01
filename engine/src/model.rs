@@ -860,6 +860,14 @@ pub struct Options {
     pub allowed_drills_nm: Vec<i64>,
     /// Router (A10): allow via sites inside the net's own SMD pads (fab must fill and cap).
     pub via_in_pad: bool,
+    /// Router (0.4.2): a terminal whose pour has fills only on plane (non-routed) layers is
+    /// joined by a through via onto the plane at a via site within `plane_via_max_nm` of its
+    /// copper (with `via_in_pad` the pad's own sites are the nearest). False: such a
+    /// connection fails with "terminal not on any routable layer".
+    pub plane_vias: bool,
+    /// Router (0.4.2): farthest a plane via may be from the terminal's copper (nm); keeps the
+    /// trace to the plane, and so its inductance, short.
+    pub plane_via_max_nm: i64,
     /// Router (A10): a via is removed by the reduction pass when the via-free route is at most
     /// this many percent longer (outside pads).
     pub reduction_len_slack_pct: f64,
@@ -969,6 +977,8 @@ impl Default for Options {
             via_cost_by_code: BTreeMap::new(),
             allowed_drills_nm: Vec::new(),
             via_in_pad: false,
+            plane_vias: true,
+            plane_via_max_nm: 1_000_000,
             reduction_len_slack_pct: 10.0,
             pour_cut_cost_nm: 0,
             layer_direction: BTreeMap::new(),

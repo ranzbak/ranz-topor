@@ -337,7 +337,11 @@ impl MultiGraph {
     /// Pour indices (sorted) whose fill on a routable layer contains the site and keeps the
     /// via annulus (`max_d / 2`) inside it: inside `outer`, outside every hole, and the annulus
     /// clear of the outer ring and of every hole ring. O(S * sum of (|outer| + sum |holes|)).
-    fn pour_membership(model: &BoardModel, sites: &[ViaSite], layers: &[u32]) -> Vec<Vec<usize>> {
+    pub(crate) fn pour_membership(
+        model: &BoardModel,
+        sites: &[ViaSite],
+        layers: &[u32],
+    ) -> Vec<Vec<usize>> {
         type Fill = (Vec<Vec2>, Vec<Vec<Vec2>>);
         let rings: Vec<Vec<Fill>> = model
             .pours
