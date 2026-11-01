@@ -116,6 +116,8 @@ SETTINGS: list[Setting] = [
        kicad="KiCad → File → Board Setup → Design Rules → Net Classes"),
     _s("vias", "via_relaxation", "bool", True, "Let the relaxation pass move vias a bounded distance to shorten traces.", since=V5,
        engine="via_relaxation"),
+    _s("vias", "via_shove", "bool", False, "When a planned trace does not fit at its width because another connection's via is in the way, push that via aside (inside the area around its site, up to 0.8 mm, passing the push on to at most three neighbours) instead of failing the trace.", since=V5,
+       engine="via_shove"),
     # ---- [layers]
     _s("layers", "preferred_direction", "table", {}, "Layer name → \"h\" (along x), \"v\" (along y) or \"none\"; traces running across it pay direction_cost. Layers without an entry are free.",
        kicad="KiCad → File → Board Setup → Board Editor Layers (layer names)"),

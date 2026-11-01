@@ -132,6 +132,13 @@ fn strip(r: &RouteResult) -> String {
     serde_json::to_string(&v).unwrap()
 }
 
+/// [`strip`] without the status field `key`.
+fn without(r: &RouteResult, key: &str) -> String {
+    let mut v: serde_json::Value = serde_json::from_str(&strip(r)).unwrap();
+    v.as_object_mut().unwrap().remove(key);
+    v.to_string()
+}
+
 /// Force balance: the via of a two-anchor connection ends on the segment between its legs'
 /// anchors (the Weiszfeld fixed set), inside the window between the walls, the connection
 /// shrinks to the straight distance, and the result is clean at margin 0. The via was off the
@@ -203,8 +210,7 @@ fn via_relaxation_off_matches_previous() {
     let (a, b) = (route(&free, &opts(false, 1)), route(&free, &opts(true, 1)));
     assert_eq!(a.vias, 0);
     assert_eq!(b.via_relaxation, "moved 0 of 0 vias, -0 um");
-    let norm = |r: &RouteResult| strip(r).replace(&r.via_relaxation, "");
-    assert_eq!(norm(&a), norm(&b));
+    assert_eq!(without(&a, "via_relaxation"), without(&b, "via_relaxation"));
 }
 
 /// Threads 1 / 2 / 4 and repeats: byte-identical results including the moved via.
@@ -219,4 +225,20 @@ fn via_relaxation_threads_byte_identical() {
             assert_eq!(strip(&route(&m, &opts(true, t))), want, "threads {t}");
         }
     }
+}
+
+/// Via shove: off by default (older option JSON too); off reports `off` and gives the same
+/// result as before but for that status; on, a board without a pinch is untouched (no
+/// candidates) and byte-identical but for the status line.
+#[test]
+fn via_shove_off_by_default_and_noop_without_pinch() {
+    assert!(!Options::default().via_shove);
+    assert!(!Options::from_json("{}").unwrap().via_shove);
+    assert!(Options::from_json(r#"{ "via_shove": true }"#).unwrap().via_shove);
+    let m = board((8.0, 20.0), (42.0, 20.0), &[]);
+    let off = route(&m, &opts(true, 1));
+    let on = route(&m, &Options { via_shove: true, ..opts(true, 1) });
+    assert_eq!(off.via_shove, "off");
+    assert_eq!(on.via_shove, "routed 0 of 0 pinched connections, shoved 0 vias");
+    assert_eq!(without(&off, "via_shove"), without(&on, "via_shove"));
 }

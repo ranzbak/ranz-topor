@@ -881,6 +881,10 @@ pub struct Options {
     /// Router (A13): after via reduction, move each via a bounded distance inside the star of
     /// its site towards the straight line between its two legs' last anchors.
     pub via_relaxation: bool,
+    /// Router (via shove): after the zero-slack retry, a connection whose metrization failed on
+    /// a pinch against another connection's via gets its planned path back and that via is pushed away
+    /// from the pinch, inside the star of its site, until the connection fits.
+    pub via_shove: bool,
     /// Diagnostics: emit `RouteResult.profile` (per-iteration timers). Off by default: timings
     /// are run-dependent and must not enter the (thread-count independent) result JSON.
     pub profile: bool,
@@ -972,6 +976,7 @@ impl Default for Options {
             max_vias_per_connection: 4,
             via_reduction: true,
             via_relaxation: true,
+            via_shove: false,
             profile: false,
             net_priority: BTreeMap::new(),
             exclude_nets: Vec::new(),

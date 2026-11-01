@@ -57,6 +57,7 @@ Via cost, count and size policy (each net routes with its KiCad net class via, p
 | `cost_by_priority` | table | `{}` | mm | any | Priority ("1".."3") → via cost in mm, e.g. 5 for high-speed nets. Precedence per net: cost_by_netclass > cost_by_priority > via_cost_mm. |
 | `cost_by_netclass` | table | `{}` | mm | any | Netclass name → via cost in mm, e.g. 0.5 for power. Strongest of the three via cost settings (a composite class such as "Power,Default" takes the first listed class that has an entry). KiCad: KiCad → File → Board Setup → Design Rules → Net Classes. |
 | `via_relaxation` | bool | `true` |  | true\|false | Let the relaxation pass move vias a bounded distance to shorten traces. *Since 0.5.0.* |
+| `via_shove` | bool | `false` |  | true\|false | When a planned trace does not fit at its width because another connection's via is in the way, push that via aside (inside the area around its site, up to 0.8 mm, passing the push on to at most three neighbours) instead of failing the trace. *Since 0.5.0.* |
 
 ## `[layers]`
 

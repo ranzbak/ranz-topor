@@ -558,3 +558,36 @@ fn drc_spot_is_an_obstacle_only_for_its_net() {
     assert!(pat(1).contains('A'), "{}", pat(1));
     assert!(!pat(2).contains('A'), "{}", pat(2));
 }
+
+/// Via shove: `move_site` moves a site's anchors on every layer (grid re-indexed, so a query
+/// at the new place finds them and one at the old place does not); releasing the site
+/// (`set_site(None)`) puts them back home; activating keeps the moved place.
+#[test]
+fn move_site_moves_anchors_and_release_returns_home() {
+    use topor_engine::vias::{SiteOrigin, ViaSite, ViaSize};
+    let m = model(r#""pads": []"#);
+    let mut obs = build(&m);
+    let home = kc(5.0, 5.0);
+    let site = ViaSite { at: home, max_d: 600_000, max_drill: 300_000, origin: SiteOrigin::Face, net: None };
+    let anchors = obs.add_site_anchors(&[site], &[0, 2]);
+    let sa = &anchors[0];
+    let size = ViaSize { d: 600_000, drill: 300_000 };
+    obs.set_site(sa, Some((1, size)));
+    let to = kc(5.4, 5.0);
+    obs.move_site(sa, to);
+    assert_eq!(obs.site_at(sa), Some(to));
+    let at = |p: Vec2| Aabb { min: p, max: p };
+    for (li, l) in [0u32, 2].into_iter().enumerate() {
+        let a = &obs.layer(l).anchors[sa[li]];
+        assert!(a.enabled && near(a.c.x, to.x) && near(a.c.y, to.y));
+        assert!(obs.query_anchors(l, at(to)).contains(&sa[li]), "layer {l}: not found at the new place");
+        assert!(!obs.query_anchors(l, at(home)).contains(&sa[li]), "layer {l}: still found at home");
+    }
+    // a move to the same place is a no-op
+    obs.move_site(sa, to);
+    assert_eq!(obs.site_at(sa), Some(to));
+    obs.set_site(sa, None);
+    assert_eq!(obs.site_at(sa), Some(home));
+    assert!(obs.query_anchors(0, at(home)).contains(&sa[0]));
+    assert!(!obs.layer(0).anchors[sa[0]].enabled);
+}

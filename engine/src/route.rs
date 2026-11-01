@@ -190,6 +190,9 @@ pub struct RouteResult {
     /// Via-relaxation pass outcome (A13): `off`, `not run`, `moved k of n vias, -x um` or
     /// `skipped: timeout ...`.
     pub via_relaxation: String,
+    /// Via-shove pass outcome: `off`, `not run`, `routed k of n pinched connections, shoved v
+    /// vias` or `skipped: timeout ...`.
+    pub via_shove: String,
     /// Rip-up report of the routing loop (A16): rips per connection (as blocker), pairs that
     /// hit the `ripup_max_per_pair` backstop, total.
     pub ripup: RipReport,
@@ -3153,6 +3156,315 @@ fn via_relaxation_pass(cx: &Ctx, obs: &ObstacleSet, rt: &Route, best: &mut Snap)
     out
 }
 
+/// Shove distances tried per pinch (nm), smallest first: the first one that lets the pinched
+/// connection fit is kept, so a via moves no further than it must (to this resolution).
+const SHOVE_STEPS_NM: [f64; 6] = [
+    25_000.0, 50_000.0, 100_000.0, 200_000.0, 400_000.0, 800_000.0,
+];
+/// Shove rounds per connection: each keeps one via move (a pinch freed, possibly passing the
+/// push on to a neighbour).
+const SHOVE_ROUNDS: usize = 4;
+
+/// Counters of [`via_shove_pass`].
+struct ViaShove {
+    /// Failed connections with an `infeasible` pinch against another connection's via.
+    candidates: usize,
+    /// Of those, routed after a shove.
+    routed: usize,
+    /// Vias moved.
+    shoved: usize,
+    timed_out: bool,
+}
+
+impl ViaShove {
+    fn status(&self) -> String {
+        let head = format!(
+            "routed {} of {} pinched connections, shoved {} vias",
+            self.routed, self.candidates, self.shoved
+        );
+        if self.timed_out {
+            format!("skipped: timeout ({head})")
+        } else {
+            head
+        }
+    }
+}
+
+/// The two obstacle labels of an `infeasible: <a> <-> <b>` metrization failure.
+fn pinch_labels(reason: &str) -> Option<(&str, &str)> {
+    reason.strip_prefix("infeasible: ")?.split_once(" <-> ")
+}
+
+/// Site index of a `site:<i>` anchor label.
+fn site_of_label(label: &str) -> Option<usize> {
+    label.strip_prefix("site:")?.parse().ok()
+}
+
+/// Position of the pinch partner `label` nearest to `near`: a site (its current anchor
+/// position), `start` / `goal` (the nearest terminal or own via of connection `c`) or an anchor
+/// of that label on any layer. O(anchors) for a pad label.
+fn pinch_partner(
+    cx: &Ctx,
+    obs: &ObstacleSet,
+    mg: &MultiGraph,
+    c: usize,
+    label: &str,
+    near: Vec2,
+) -> Option<Vec2> {
+    let nearest = |pts: &mut dyn Iterator<Item = Vec2>| {
+        pts.min_by(|a, b| (*a - near).len().total_cmp(&(*b - near).len()))
+    };
+    if let Some(s) = site_of_label(label) {
+        return obs.site_at(mg.site_anchor.get(s)?);
+    }
+    if label == "start" || label == "goal" {
+        let conn = &cx.conns[c];
+        let own = mg.sites_of(c).iter().filter_map(|&s| obs.site_at(&mg.site_anchor[s]));
+        return nearest(&mut [conn.from.at, conn.to.at].into_iter().chain(own));
+    }
+    nearest(&mut cx.layers.iter().flat_map(|&l| {
+        obs.layer(l)
+            .anchors
+            .iter()
+            .filter(|a| a.label == label)
+            .map(|a| a.c)
+    }))
+}
+
+/// Via shove, one pass from the best iteration (after the zero-slack retry): a planned trace
+/// that does not fit at its width pushes the vias in its way aside. Candidates: connections
+/// whose metrization failed with `infeasible: a <-> b` where `a` or `b` is the via site of
+/// another routed connection (not a pour goal, not junction-linked). Per candidate `c` the graph
+/// is rebuilt as the negotiation metrized the snapshot (every failed connection's planned slot
+/// path back in it, so every wire keeps its anchor sequence; `c` is skipped when its path no
+/// longer fits back) and metrized. Then up to [`SHOVE_ROUNDS`] rounds: the first pinched
+/// failure (`c` first, then a routed connection a move broke) pushes the via of its pinch away
+/// from the pinch partner by [`SHOVE_STEPS_NM`] (smallest first), clipped into the star of its
+/// site vertex in every layer graph (so every slot path stays valid) and only where
+/// `Checker::via_fits`; the obstacle anchors move with the via ([`ObstacleSet::move_site`]), so
+/// the other wires see it where it is emitted. A move is kept when fewer connections fail, or
+/// when `c` routes and no more fail. The result is kept only when `c` and every routed
+/// connection metrize (self-checked); else every move is undone. The other failed connections
+/// keep their failure and leave the graph again. Deterministic: candidates by id, failures and
+/// sites in pinch order. Complexity: `O(C · rounds · |steps| · metrize)` for `C` candidates; the
+/// deadline and the cancel flag are checked before every candidate and step.
+fn via_shove_pass(cx: &Ctx, obs: &mut ObstacleSet, rt: &Route, best: &mut Snap) -> ViaShove {
+    let live = cx.conns;
+    let m = live.len();
+    let mut out = ViaShove {
+        candidates: 0,
+        routed: 0,
+        shoved: 0,
+        timed_out: false,
+    };
+    let net_of = rt.net_of();
+    let movable = |b: &Snap, s: usize, c: usize| -> Option<(usize, ViaSize)> {
+        let (o, size) = b.mg.owner.get(s).copied().flatten()?;
+        (o != c
+            && matches!(b.res[o], Res::Ok(_))
+            && rt.goals[o].pour_sites.is_empty()
+            && !b.mg.has_junction_link(o))
+        .then_some((o, size))
+    };
+    let pinched = |b: &Snap, c: usize, reason: &str| -> bool {
+        pinch_labels(reason).is_some_and(|(x, y)| {
+            [x, y]
+                .iter()
+                .filter_map(|l| site_of_label(l))
+                .any(|s| movable(b, s, c).is_some())
+        })
+    };
+    let cands: Vec<usize> = (0..m)
+        .filter(|&i| {
+            matches!(&best.res[i], Res::Fail { reason, perm: false, .. } if pinched(best, i, reason))
+        })
+        .collect();
+    out.candidates = cands.len();
+    'conn: for &c in &cands {
+        if cx.stop() {
+            out.timed_out = true;
+            break;
+        }
+        // The graph as the negotiation metrized the snapshot: the failed connections' planned
+        // paths (and their vias) are back in it, so every wire gets the anchor sequence it had
+        // (without them a routed wire may sketch differently and fail).
+        let mut mg = best.mg.clone();
+        mg.sync_anchors(obs, &net_of);
+        let mut back: Vec<usize> = Vec::new();
+        for (i, conn) in live.iter().enumerate() {
+            let (Res::Fail { perm: false, .. }, Some(Some(p))) = (&best.res[i], best.paths.get(i))
+            else {
+                continue;
+            };
+            if p.sites.iter().any(|&(s, _)| mg.owner.get(s).copied().flatten().is_some()) {
+                continue;
+            }
+            mg.insert_path(conn, p, obs);
+            back.push(i);
+        }
+        let Some(p) = back.contains(&c).then(|| best.paths[c].clone()).flatten() else {
+            best.mg.sync_anchors(obs, &net_of);
+            continue;
+        };
+        let was_ok = |i: usize| matches!(best.res[i], Res::Ok(_));
+        let routed: Vec<usize> = (0..m).filter(|&i| was_ok(i) || back.contains(&i)).collect();
+        let mut metr = best.metr.clone();
+        let mt = metrize(cx, obs, &mg, &routed, &mut metr, &[c]);
+        if mt.timed_out {
+            out.timed_out = true;
+            break;
+        }
+        if mt.res.len() != routed.len() {
+            best.mg.sync_anchors(obs, &net_of);
+            continue;
+        }
+        // Shove rounds: the first pinched failure (`c` first, then a routed connection a move
+        // broke) pushes the via of its pinch; a move is kept when fewer connections fail, or
+        // when `c` routes and no more fail (the next round frees the one it pinched). If `c`
+        // or anything routed still fails after the rounds, every move is undone; the other
+        // failed connections may stay failed.
+        let bad = |mt: &Metrized| -> Vec<(usize, String)> {
+            let mut v: Vec<(usize, String)> = mt
+                .res
+                .iter()
+                .filter_map(|(i, r)| match r {
+                    Res::Fail { reason, .. } if *i == c || was_ok(*i) => Some((*i, reason.clone())),
+                    _ => None,
+                })
+                .collect();
+            v.sort_by_key(|(i, _)| (*i != c, *i));
+            v
+        };
+        let (mut mt, mut metr) = (mt, metr);
+        // (site, position before the move), in move order
+        let mut moved: Vec<(usize, Vec2)> = Vec::new();
+        let undo = |obs: &mut ObstacleSet, mg: &MultiGraph, moved: &[(usize, Vec2)]| {
+            for &(s, p) in moved.iter().rev() {
+                obs.move_site(&mg.site_anchor[s], p);
+            }
+        };
+        'rounds: for _ in 0..SHOVE_ROUNDS {
+            let fails = bad(&mt);
+            if fails.is_empty() {
+                break;
+            }
+            let c_failed = fails.iter().any(|(i, _)| *i == c);
+            for (f, reason) in &fails {
+                let Some((la, lb)) = pinch_labels(reason) else {
+                    continue;
+                };
+                for (me, other) in [(la, lb), (lb, la)] {
+                    let Some(s) = site_of_label(me) else {
+                        continue;
+                    };
+                    let Some((o, size)) = mg.owner.get(s).copied().flatten().filter(|&(o, _)| {
+                        o != *f
+                            && (o == c || was_ok(o))
+                            && rt.goals[o].pour_sites.is_empty()
+                            && !mg.has_junction_link(o)
+                    }) else {
+                        continue;
+                    };
+                    let home = mg.sites[s].at;
+                    let Some(cur) = obs.site_at(&mg.site_anchor[s]) else {
+                        continue;
+                    };
+                    let Some(partner) = pinch_partner(cx, obs, &mg, *f, other, cur) else {
+                        continue;
+                    };
+                    let away = cur - partner;
+                    if away.len() == 0.0 {
+                        continue;
+                    }
+                    let dir = away * (1.0 / away.len());
+                    let mut work = vec![c, *f, o];
+                    work.sort_unstable();
+                    work.dedup();
+                    for step in SHOVE_STEPS_NM {
+                        if cx.stop() {
+                            undo(obs, &mg, &moved);
+                            out.timed_out = true;
+                            break 'conn;
+                        }
+                        let target = cur + dir * step;
+                        let mut t = 1.0f64;
+                        for (li, l) in mg.layers.iter().enumerate() {
+                            t = t.min(mg.vertex_of(li, home).map_or(0.0, |v| star_clip(&l.g, v, target)));
+                        }
+                        let goal = home + (target - home) * t;
+                        if (goal - cur).len() < 1000.0 || !cx.checker.via_fits(goal, size) {
+                            continue;
+                        }
+                        obs.move_site(&mg.site_anchor[s], goal);
+                        let mut m2 = metr.clone();
+                        m2.via_at.insert(s, goal);
+                        m2.base = None;
+                        let mt2 = metrize(cx, obs, &mg, &routed, &mut m2, &work);
+                        if mt2.timed_out {
+                            obs.move_site(&mg.site_anchor[s], cur);
+                            undo(obs, &mg, &moved);
+                            out.timed_out = true;
+                            break 'conn;
+                        }
+                        let after = bad(&mt2);
+                        let c_freed = c_failed && !after.iter().any(|(i, _)| *i == c);
+                        if after.len() < fails.len() || (c_freed && after.len() <= fails.len()) {
+                            moved.push((s, cur));
+                            mt = mt2;
+                            metr = m2;
+                            continue 'rounds;
+                        }
+                        obs.move_site(&mg.site_anchor[s], cur);
+                    }
+                }
+            }
+            break;
+        }
+        if !bad(&mt).is_empty() {
+            undo(obs, &mg, &moved);
+            best.mg.sync_anchors(obs, &net_of);
+            continue;
+        }
+        out.shoved += moved.len();
+        let mut res = best.res.clone();
+        for (i, r) in mt.res {
+            if i == c || was_ok(i) {
+                res[i] = r;
+            }
+        }
+        let (nok, vias, len, outl) = tally(&res);
+        if nok <= best.routed {
+            best.mg.sync_anchors(obs, &net_of);
+            continue;
+        }
+        // The snapshot keeps only the routed paths in its graph (as the negotiation does).
+        for &i in back.iter().filter(|&&i| i != c) {
+            mg.remove_conn(i, obs);
+        }
+        let mut paths = best.paths.clone();
+        paths[c] = Some(p);
+        out.routed += 1;
+        best.clinches = detect_clinches(&mg, live, &paths, rt.starts);
+        best.routed = nok;
+        best.vias = vias;
+        best.len = len;
+        best.out = outl;
+        best.res = res;
+        best.overuse_edges = mg
+            .layers
+            .iter()
+            .map(|l| (0..l.g.edges.len()).filter(|&e| l.g.overuse(e) > 0.0).count())
+            .sum();
+        best.relax_iterations = mt.relax_iterations;
+        best.rounds = mt.rounds;
+        best.paths = paths;
+        best.mg = mg;
+        best.metr = metr;
+    }
+    best.mg.sync_anchors(obs, &net_of);
+    out
+}
+
 /// Zero-slack retry (R6), one pass from the best iteration's graph. The detoured connections
 /// (`est_len > DETOUR_FACTOR × straight`) leave the graph; every routed connection is searched
 /// once at margin 0 (empty history). The candidates (single-leg paths, estimated gain >
@@ -4283,6 +4595,7 @@ fn route_pass(
     let mut feas_ref: Vec<Option<f64>> = vec![None; m];
     let mut ripup = RipReport::default();
     let mut relax_status: String = if opts.via_relaxation { "not run" } else { "off" }.into();
+    let mut shove_status: String = if opts.via_shove { "not run" } else { "off" }.into();
     let mut via_status: String = if opts.via_reduction { "not run" } else { "off" }.into();
     let mut zs_status: String = if opts.zero_slack_retry {
         "not run"
@@ -4896,6 +5209,13 @@ fn route_pass(
                     // The obstacle anchors follow the best iteration (P7).
                     b.mg.sync_anchors(&mut obs, &rt.net_of());
                 }
+                if opts.via_shove {
+                    if timed_out {
+                        shove_status = "skipped: timeout".into();
+                    } else if let Some(b) = best.as_mut() {
+                        shove_status = via_shove_pass(&cx, &mut obs, &rt, b).status();
+                    }
+                }
                 if !timed_out {
                     if let Some(b) = &best {
                         let eps_checker = Checker::new(model, opts);
@@ -5246,6 +5566,7 @@ fn route_pass(
         vias_in_pads: Vec::new(),
         via_reduction: via_status,
         via_relaxation: relax_status,
+        via_shove: shove_status,
         ripup,
         iterations,
         converged,

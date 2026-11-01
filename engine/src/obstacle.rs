@@ -177,6 +177,9 @@ pub struct ObstacleSet {
     site_layers: Vec<u32>,
     /// Dormant core radius (`max_d / 2`) per site.
     site_r: Vec<f64>,
+    /// Home position (the site's CDT vertex) per site; a shoved via's anchors leave it
+    /// ([`ObstacleSet::move_site`]) and return to it on release.
+    site_home: Vec<Vec2>,
 }
 
 /// Obstacle attributes shared by every anchor / wall of one source item.
@@ -384,6 +387,7 @@ impl ObstacleSet {
             clearances,
             site_layers: Vec::new(),
             site_r: Vec::new(),
+            site_home: Vec::new(),
         };
 
         let all = model.all_layer_ids();
@@ -607,6 +611,7 @@ impl ObstacleSet {
     pub fn add_site_anchors(&mut self, sites: &[ViaSite], layers: &[u32]) -> Vec<Vec<usize>> {
         self.site_layers = layers.to_vec();
         self.site_r = sites.iter().map(|s| 0.5 * s.max_d as f64).collect();
+        self.site_home = sites.iter().map(|s| s.at).collect();
         let cell = self.cell;
         let mut out = vec![Vec::with_capacity(layers.len()); sites.len()];
         for &l in layers {
@@ -635,10 +640,19 @@ impl ObstacleSet {
     }
 
     /// Activate (`Some((net, size))`: enabled, `r_core = d / 2`, net, `own_clr` = the net's
-    /// clearance) or release (`None`: disabled, `r_core = max_d / 2`, net 0) the anchors of
-    /// one site; `site_anchors[i]` is the anchor on the i-th layer given to
-    /// `add_site_anchors`. O(layers).
+    /// clearance) or release (`None`: disabled, `r_core = max_d / 2`, net 0, back at its home
+    /// position) the anchors of one site; `site_anchors[i]` is the anchor on the i-th layer
+    /// given to `add_site_anchors`. O(layers).
     pub fn set_site(&mut self, site_anchors: &[usize], active: Option<(i32, ViaSize)>) {
+        if active.is_none() {
+            if let Some(s) = site_anchors
+                .first()
+                .and_then(|&ai| self.layer(self.site_layers[0]).anchors.get(ai))
+                .and_then(|a| a.site)
+            {
+                self.move_site(site_anchors, self.site_home[s]);
+            }
+        }
         for (li, &ai) in site_anchors.iter().enumerate() {
             let l = self.site_layers[li];
             let (own, min) = (active.map_or(0.0, |(n, _)| self.clr(n)), self.min_clearance);
@@ -662,6 +676,33 @@ impl ObstacleSet {
                 }
             }
         }
+    }
+
+    /// Move the anchors of one site (every layer of `site_anchors`, as in [`Self::set_site`])
+    /// to `at` and re-index them: a shoved via. The grid box keeps the dormant radius, so later
+    /// activations need no re-index. O(layers).
+    pub fn move_site(&mut self, site_anchors: &[usize], at: Vec2) {
+        for (li, &ai) in site_anchors.iter().enumerate() {
+            let l = self.site_layers[li];
+            let Some(lo) = self.layers.get_mut(&l) else {
+                continue;
+            };
+            let a = &lo.anchors[ai];
+            let Some(s) = a.site.filter(|_| a.c != at) else {
+                continue;
+            };
+            let r = self.site_r[s];
+            let old = Core::Point(a.c).bbox().grow(r);
+            lo.anchor_grid.remove(old, ai);
+            lo.anchor_grid.insert(Core::Point(at).bbox().grow(r), ai);
+            lo.anchors[ai].c = at;
+        }
+    }
+
+    /// Current position of site `s`'s anchors (its home unless shoved). O(1).
+    pub fn site_at(&self, site_anchors: &[usize]) -> Option<Vec2> {
+        let &ai = site_anchors.first()?;
+        Some(self.layer(*self.site_layers.first()?).anchors.get(ai)?.c)
     }
 
     /// Obstacles of `layer` (empty set for an unknown layer).
