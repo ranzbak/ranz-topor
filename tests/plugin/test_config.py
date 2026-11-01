@@ -93,7 +93,7 @@ def test_engine_options_units(tmp_path):
     assert o["expert"]["hist_fail"] == 1.0
     assert o["expert"]["relax_iter_cap"] == 200
     assert o["drc_loop_cap"] == 5
-    assert o["ripup_growth"] == 2.0 and o["ripup_max_per_pair"] == 8
+    assert o["ripup_growth"] == 1.25 and o["ripup_max_per_pair"] == 8
     assert o["patience"] == 5 and o["min_gain_pct"] == 1.0
     assert o["detour_factor"] == 2.0
     # M4a-only settings are not sent to the engine yet

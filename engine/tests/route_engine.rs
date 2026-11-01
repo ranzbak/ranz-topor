@@ -588,15 +588,9 @@ fn eprom_ripped_two_layers_routes_all_without_zero_slack() {
 /// another way, 26/27 without the corridor.
 #[test]
 fn eprom_ripped_front_only_is_the_m2_result() {
-    // The M2 / M3 situation is the constant rip cost of M3 (`growth 1`, `max_per_pair 3`);
-    // the default escalation is pinned by `eprom_ripped_front_only_default_ripup_routes_all_clean`.
-    let m3_ripup = || Options {
-        ripup_growth: 1.0,
-        ripup_max_per_pair: 3,
-        ..opts()
-    };
+    // Runs with the shipped rip-up defaults (task GR: no option pinned to hide the default).
     let m = front_only(eprom_ripped());
-    let r = route(&m, &m3_ripup());
+    let r = route(&m, &opts());
     assert_eq!(r.sites, 0);
     assert_eq!(r.routed, 27, "{} routed {:?}", r.routed, r.failed);
     assert!(r.iterations < 50, "{}", r.iterations);
@@ -628,24 +622,27 @@ fn eprom_ripped_front_only_is_the_m2_result() {
         let on_zs = matches!(&r.items[v.item], Item::Track(t) if t.wire == Some(zs_conn));
         assert!(on_zs && v.gap + 1 >= v.required, "{v:?}");
     }
-    let again = route(&m, &m3_ripup());
+    let again = route(&m, &opts());
     assert_eq!(json_no_runtime(&r), json_no_runtime(&again));
 }
 
-/// A16 (escalating rip cost, default `ripup_growth` 2.0): the F.Cu-only eprom board is a
-/// fragile three-way contention (+5V and two others on one corridor). With the escalating cost
-/// the negotiation takes another trajectory than the M3 constant cost: 27/27 and clean at margin
-/// 0, no zero-slack wire, but 92.3 mm outside the pads instead of 67.0 mm (growth 1.75 / 1.9 / 3
-/// lose a connection: 26/27). The real two-layer eprom and wiccon never rip (`ripup.total` 0),
-/// so only this single-layer restriction sees it. Pinned: completion + cleanliness, not length.
+/// Task GR (Q1): the F.Cu-only eprom board is a fragile three-way contention (+5V and two others
+/// on one corridor) and the result is chaotic in `ripup_growth`: measured with `max_per_pair 8`,
+/// 1.0 .. 1.75 and 3.0 give 27/27 with the +5V zero-slack wire (67.0 mm), 2.0 gives 27/27 without it
+/// but 92.3 mm. The shipped default 1.25 sits on the 1.0 .. 1.75 plateau; this pins the default
+/// values and that both plateau neighbours reach the same completion, so a default drifting to a
+/// chaotic value is caught here.
 #[test]
-fn eprom_ripped_front_only_default_ripup_routes_all_clean() {
+fn eprom_ripped_front_only_default_ripup_is_on_the_plateau() {
+    let d = Options::default();
+    assert_eq!((d.ripup_growth, d.ripup_max_per_pair), (1.25, 8));
     let m = front_only(eprom_ripped());
-    let r = route(&m, &opts());
-    assert_eq!((r.routed, r.failed), (27, 0), "{:?}", r.warnings);
-    assert!(r.zero_slack_wires.is_empty());
-    assert!(r.ripup.total > 0 && r.ripup.pairs_at_backstop.is_empty(), "{:?}", r.ripup);
-    clean(&m, &r);
+    for g in [1.0, d.ripup_growth, 1.5] {
+        let r = route(&m, &Options { ripup_growth: g, ..opts() });
+        assert_eq!((r.routed, r.failed), (27, 0), "growth {g}: {:?}", r.warnings);
+        assert!(r.length_outside_pads_nm <= 67_800_000, "growth {g}: {}", r.length_outside_pads_nm);
+        assert!(r.ripup.pairs_at_backstop.is_empty(), "growth {g}: {:?}", r.ripup);
+    }
 }
 
 /// `n` two-pad nets (round pads d 1 mm on a 3 mm grid, each pair within 9 mm; the layout of
