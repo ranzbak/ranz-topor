@@ -46,7 +46,7 @@ use crate::model::{
 use crate::control::RunControl;
 use crate::multigraph::MultiGraph;
 use crate::negotiate::{
-    detect_clinches, overused_conns, BlockInfo, ClinchReport, Negotiator,
+    detect_clinches, overused_conns, BlockInfo, ClinchReport, Negotiator, RipReport,
 };
 use crate::obstacle::{ObstacleSet, TerminalObstacle};
 use crate::pourcheck::{check_pour_reach_until, with_routed_copper, PourReach};
@@ -187,6 +187,12 @@ pub struct RouteResult {
     pub vias_in_pads: Vec<[i64; 2]>,
     /// Via-reduction pass outcome (Task 10): `not run` until then.
     pub via_reduction: String,
+    /// Via-relaxation pass outcome (A13): `off`, `not run`, `moved k of n vias, -x um` or
+    /// `skipped: timeout ...`.
+    pub via_relaxation: String,
+    /// Rip-up report of the routing loop (A16): rips per connection (as blocker), pairs that
+    /// hit the `ripup_max_per_pair` backstop, total.
+    pub ripup: RipReport,
     pub iterations: u32,
     pub converged: bool,
     pub overuse_edges: usize,
@@ -603,6 +609,7 @@ fn legs_of(mg: &MultiGraph, conn: usize) -> &[usize] {
 fn leg_terminals(
     cx: &Ctx,
     mg: &MultiGraph,
+    via_at: &BTreeMap<usize, Vec2>,
     conn: usize,
     ord: usize,
     nlegs: usize,
@@ -611,7 +618,7 @@ fn leg_terminals(
     let sites = mg.sites_of(conn);
     let site = |s: usize| Terminal::Site {
         site: s,
-        at: mg.sites[s].at,
+        at: via_at.get(&s).copied().unwrap_or(mg.sites[s].at),
     };
     let jn = mg.junction_of(conn);
     let start = if ord == 0 {
@@ -685,6 +692,9 @@ struct MetrState {
     /// sibling's chain after refinement), and the angle measured at it.
     jat: Vec<Option<Vec2>>,
     jangle: Vec<Option<f64>>,
+    /// Via positions moved off their site by the via-relaxation pass (A13), site -> math frame
+    /// nm; empty during the negotiation.
+    via_at: BTreeMap<usize, Vec2>,
 }
 
 impl MetrState {
@@ -706,6 +716,7 @@ impl MetrState {
             base: None,
             jat: vec![None; cx.conns.len()],
             jangle: vec![None; cx.conns.len()],
+            via_at: BTreeMap::new(),
         }
     }
 
@@ -1447,9 +1458,9 @@ fn metrize(
 }
 
 /// The via item of site `s` for connection `conn` (KiCad frame).
-fn via_item(mg: &MultiGraph, s: usize, net: i32, conn: usize) -> Item {
+fn via_item(mg: &MultiGraph, at: Vec2, s: usize, net: i32, conn: usize) -> Item {
     let size = mg.owner[s].map_or(ViaSize { d: 0, drill: 0 }, |(_, z)| z);
-    let [x, y] = kicad(mg.sites[s].at);
+    let [x, y] = kicad(at);
     Item::Via(ViaItem {
         kind: "via".into(),
         net,
@@ -1524,7 +1535,7 @@ fn metrize_zs(
         for (ord, &k) in ks.iter().enumerate() {
             st.ensure(k);
             let (Some(li), Some((start_t, mut goal_t))) =
-                (mg.leg_layer(k), leg_terminals(cx, mg, i, ord, ks.len()))
+                (mg.leg_layer(k), leg_terminals(cx, mg, &st.via_at, i, ord, ks.len()))
             else {
                 st.drop_leg(k);
                 st.fail[k] = Some(fail("sketch: inconsistent slot path"));
@@ -1676,7 +1687,8 @@ fn metrize_zs(
                     .sum();
                 let ord = st.conn_legs[conn].iter().position(|&x| x == k).unwrap_or(0);
                 if let Some(&s) = mg.sites_of(conn).get(ord) {
-                    items.push(via_item(mg, s, w.net, conn));
+                    let at = st.via_at.get(&s).copied().unwrap_or(mg.sites[s].at);
+                    items.push(via_item(mg, at, s, w.net, conn));
                 }
                 st.ok[k] = Some(LegOk {
                     items,
@@ -1815,7 +1827,10 @@ fn metrize_zs(
                 crossings: legs.iter().map(|o| o.crossings).sum(),
                 vias: sites.len(),
                 layers,
-                via_sites: sites.iter().map(|&s| kicad(mg.sites[s].at)).collect(),
+                via_sites: sites
+                    .iter()
+                    .map(|&s| kicad(st.via_at.get(&s).copied().unwrap_or(mg.sites[s].at)))
+                    .collect(),
                 junction: mg.junction_of(i).map(|_| st.jangle[i].unwrap_or(90.0)),
             })
         };
@@ -2740,6 +2755,220 @@ fn junction_repair_pass(
     }
     best.mg.sync_anchors(obs, &rt.net_of());
     (fixed, cands.len())
+}
+
+/// Via-relaxation steps per via (note §5): Weiszfeld iterations of one via.
+pub const VIA_RELAX_STEPS: usize = 8;
+/// A relaxation step is kept only when the connection's length falls by at least this (nm).
+pub const VIA_RELAX_MIN_GAIN_NM: f64 = 1000.0;
+/// Fraction of the distance from the site vertex to the boundary of its star a via may use:
+/// keeps the moved via off the link edges (the checker has the last word).
+const VIA_STAR_FRACTION: f64 = 0.9;
+
+/// Counters of [`via_relaxation_pass`].
+struct ViaRelax {
+    /// Candidate vias (one per via of a routed connection that is not a pour goal).
+    vias: usize,
+    /// Vias that moved.
+    moved: usize,
+    /// Total length gained, nm.
+    gain_nm: f64,
+    timed_out: bool,
+}
+
+impl ViaRelax {
+    fn status(&self) -> String {
+        let head = format!(
+            "moved {} of {} vias, -{:.0} um",
+            self.moved,
+            self.vias,
+            self.gain_nm / 1000.0
+        );
+        if self.timed_out {
+            format!("skipped: timeout ({head})")
+        } else {
+            head
+        }
+    }
+}
+
+/// Largest `t` in `[0, 1]` such that `v + t * (target - v)` lies in the star of vertex `v` in
+/// layer graph `g` (the union of its incident faces inside the outline) and no further than
+/// [`VIA_STAR_FRACTION`] of the way to the star's boundary; 0 when the direction leaves the
+/// star through a face outside the outline. The star is star-shaped around `v`, so the ray meets
+/// its boundary once: the link edge of the face whose wedge contains the direction.
+/// O(deg v).
+fn star_clip(g: &RouteGraph, v: usize, target: Vec2) -> f64 {
+    let o = g.verts[v].at;
+    let d = target - o;
+    if d.len() == 0.0 {
+        return 0.0;
+    }
+    for &f in g.faces_of_vertex(v) {
+        let face = &g.faces[f];
+        let Some(i) = face.v.iter().position(|&x| x == v) else {
+            continue;
+        };
+        let b = g.verts[face.v[(i + 1) % 3]].at;
+        let c = g.verts[face.v[(i + 2) % 3]].at;
+        // direction inside the (counter-clockwise) wedge o -> b, o -> c
+        if (b - o).cross(d) >= 0.0 && d.cross(c - o) >= 0.0 {
+            if !face.inside {
+                return 0.0;
+            }
+            let bc = c - b;
+            let den = d.cross(bc);
+            if den == 0.0 {
+                return 0.0;
+            }
+            let t = (b - o).cross(bc) / den;
+            return (t * VIA_STAR_FRACTION).clamp(0.0, 1.0);
+        }
+    }
+    0.0
+}
+
+/// Weiszfeld step of the via at `p` between the anchors `a1`, `a2` (the last taut anchor of
+/// each leg before the via; a straight leg: its terminal): the weighted point of `a1 a2`.
+/// O(1).
+fn weiszfeld_step(p: Vec2, a1: Vec2, a2: Vec2) -> Vec2 {
+    let w1 = 1.0 / (p - a1).len().max(1.0);
+    let w2 = 1.0 / (p - a2).len().max(1.0);
+    (a1 * w1 + a2 * w2) * (1.0 / (w1 + w2))
+}
+
+/// Via position relaxation (A13, design note `m4-capacity-steiner-design.md` §5): after the
+/// via reduction, one sweep over the vias in site order. A via joins two legs on layers `L1`,
+/// `L2`; its position is moved by up to [`VIA_RELAX_STEPS`] Weiszfeld steps towards the segment
+/// between the last taut anchors of its two legs, clipped into the star of its site vertex in
+/// both layer graphs (so the slot paths stay valid: only the final faces change, not the
+/// homotopy w.r.t. any obstacle). A step is kept iff the moved via fits
+/// (`Checker::via_fits`: holes, keepouts, clearance, edge), the connection metrizes again with
+/// every other connection still routed, its length falls by at least
+/// [`VIA_RELAX_MIN_GAIN_NM`] and its outside-pad length does not grow; the first rejected step
+/// ends that via. The site vertex keeps its CDT position (fully free placement is backlog);
+/// only the emitted via and its two legs move. Pour-goal connections (their via is the goal)
+/// are skipped. Deterministic: sequential, sorted by site.
+/// Complexity: `O(V_via * steps * metrize(1 conn))` plus one state copy per step; the deadline
+/// and the cancel flag are checked before every step.
+fn via_relaxation_pass(cx: &Ctx, obs: &ObstacleSet, rt: &Route, best: &mut Snap) -> ViaRelax {
+    let live = cx.conns;
+    let m = live.len();
+    let mut out = ViaRelax {
+        vias: 0,
+        moved: 0,
+        gain_nm: 0.0,
+        timed_out: false,
+    };
+    // (site, connection, ordinal of the leg ending at the site)
+    let mut vias: Vec<(usize, usize, usize)> = Vec::new();
+    for c in 0..m {
+        if !matches!(best.res[c], Res::Ok(_)) || !rt.goals[c].pour_sites.is_empty() {
+            continue;
+        }
+        let sites = best.mg.sites_of(c);
+        if legs_of(&best.mg, c).len() != sites.len() + 1 {
+            continue;
+        }
+        vias.extend(sites.iter().enumerate().map(|(j, &s)| (s, c, j)));
+    }
+    vias.sort_unstable();
+    out.vias = vias.len();
+    for (s, c, j) in vias {
+        let ks = legs_of(&best.mg, c).to_vec();
+        let (k1, k2) = (ks[j], ks[j + 1]);
+        let (Some(l1), Some(l2)) = (best.mg.leg_layer(k1), best.mg.leg_layer(k2)) else {
+            continue;
+        };
+        let site_at = best.mg.sites[s].at;
+        let (Some(v1), Some(v2)) = (
+            best.mg.vertex_of(l1, site_at),
+            best.mg.vertex_of(l2, site_at),
+        ) else {
+            continue;
+        };
+        let size = best.mg.owner[s].map_or(ViaSize { d: 0, drill: 0 }, |(_, z)| z);
+        let mut moved = false;
+        for _ in 0..VIA_RELAX_STEPS {
+            if cx.stop() {
+                out.timed_out = true;
+                return out;
+            }
+            let cur = best.metr.via_at.get(&s).copied().unwrap_or(site_at);
+            let (Some(Ok(ch1)), Some(Ok(ch2))) =
+                (best.metr.rx.chains().get(k1), best.metr.rx.chains().get(k2))
+            else {
+                break;
+            };
+            let (Some(last), Some(first)) = (ch1.prims.last(), ch2.prims.first()) else {
+                break;
+            };
+            let a1 = match last {
+                Prim::Seg(sg) => sg.a,
+                Prim::Arc(a) => a.start(),
+            };
+            let a2 = match first {
+                Prim::Seg(sg) => sg.b,
+                Prim::Arc(a) => a.end(),
+            };
+            let target = weiszfeld_step(cur, a1, a2);
+            let t = star_clip(&best.mg.layers[l1].g, v1, target)
+                .min(star_clip(&best.mg.layers[l2].g, v2, target));
+            let goal_p = site_at + (target - site_at) * t;
+            // back off towards the current position until the moved via fits
+            let Some(new) = [1.0, 0.5, 0.25]
+                .iter()
+                .map(|f| cur + (goal_p - cur) * *f)
+                .take_while(|q| (*q - cur).len() >= 1000.0)
+                .find(|q| cx.checker.via_fits(*q, size))
+            else {
+                break;
+            };
+            let Res::Ok(old) = best.res[c].clone() else {
+                break;
+            };
+            let routed: Vec<usize> = (0..m)
+                .filter(|&i| matches!(best.res[i], Res::Ok(_)))
+                .collect();
+            let mut metr = best.metr.clone();
+            metr.via_at.insert(s, new);
+            let mt = metrize(cx, obs, &best.mg, &routed, &mut metr, &[c]);
+            if mt.timed_out {
+                out.timed_out = true;
+                return out;
+            }
+            let all_ok =
+                mt.res.len() == routed.len() && mt.res.iter().all(|(_, r)| matches!(r, Res::Ok(_)));
+            let gain = mt.res.iter().find_map(|(i, r)| match r {
+                Res::Ok(k) if *i == c && k.out <= old.out => Some(old.len - k.len),
+                _ => None,
+            });
+            if !all_ok || !gain.is_some_and(|g| g >= VIA_RELAX_MIN_GAIN_NM) {
+                break;
+            }
+            let mut res = best.res.clone();
+            for (i, r) in mt.res {
+                res[i] = r;
+            }
+            let (nok, vias_n, len, outl) = tally(&res);
+            if nok != best.routed {
+                break;
+            }
+            moved = true;
+            out.gain_nm += gain.unwrap_or(0.0);
+            best.vias = vias_n;
+            best.len = len;
+            best.out = outl;
+            best.res = res;
+            best.relax_iterations = mt.relax_iterations;
+            best.rounds = mt.rounds;
+            best.metr = metr;
+        }
+        if moved {
+            out.moved += 1;
+        }
+    }
+    out
 }
 
 /// Zero-slack retry (R6), one pass from the best iteration's graph. The detoured connections
@@ -3870,6 +4099,8 @@ fn route_pass(
     let mut ghost_cost: Vec<Option<f64>> = vec![None; m];
     // DRC-feasible reference per live connection (M3-R15): (length, is_feasible).
     let mut feas_ref: Vec<Option<f64>> = vec![None; m];
+    let mut ripup = RipReport::default();
+    let mut relax_status: String = if opts.via_relaxation { "not run" } else { "off" }.into();
     let mut via_status: String = if opts.via_reduction { "not run" } else { "off" }.into();
     let mut zs_status: String = if opts.zero_slack_retry {
         "not run"
@@ -4422,6 +4653,7 @@ fn route_pass(
                         }
                     }
                 }
+                ripup = neg.rip_report(m);
                 if !opts.via_reduction {
                     via_status = "off".into();
                 } else if timed_out {
@@ -4440,6 +4672,14 @@ fn route_pass(
                             r.removed, r.candidates
                         )
                     };
+                }
+                if !opts.via_relaxation {
+                    relax_status = "off".into();
+                } else if timed_out {
+                    relax_status = "skipped: timeout".into();
+                } else if let Some(b) = best.as_mut() {
+                    let r = via_relaxation_pass(&cx, &obs, &rt, b);
+                    relax_status = r.status();
                 }
                 if !timed_out && opts.zero_slack_retry {
                     if let Some(b) = &best {
@@ -4805,6 +5045,8 @@ fn route_pass(
         sites: n_sites,
         vias_in_pads: Vec::new(),
         via_reduction: via_status,
+        via_relaxation: relax_status,
+        ripup,
         iterations,
         converged,
         overuse_edges: best.as_ref().map_or(0, |b| b.overuse_edges),

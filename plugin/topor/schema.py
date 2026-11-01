@@ -114,7 +114,8 @@ SETTINGS: list[Setting] = [
     _s("vias", "cost_by_priority", "table", {}, "Priority (\"1\"..\"3\") → via cost in mm, e.g. 5 for high-speed nets. Precedence per net: cost_by_netclass > cost_by_priority > via_cost_mm.", unit="mm"),
     _s("vias", "cost_by_netclass", "table", {}, "Netclass name → via cost in mm, e.g. 0.5 for power. Strongest of the three via cost settings (a composite class such as \"Power,Default\" takes the first listed class that has an entry).", unit="mm",
        kicad="KiCad → File → Board Setup → Design Rules → Net Classes"),
-    _s("vias", "via_relaxation", "bool", True, "Let the relaxation pass move vias a bounded distance to shorten traces.", since=V5),
+    _s("vias", "via_relaxation", "bool", True, "Let the relaxation pass move vias a bounded distance to shorten traces.", since=V5,
+       engine="via_relaxation"),
     # ---- [layers]
     _s("layers", "preferred_direction", "table", {}, "Layer name → \"h\" (along x), \"v\" (along y) or \"none\"; traces running across it pay direction_cost. Layers without an entry are free.",
        kicad="KiCad → File → Board Setup → Board Editor Layers (layer names)"),
