@@ -42,3 +42,16 @@ gate: M2 + M3 dcsgone 60 s info tests drc_new 1 (routing_new must be 0, M3-R13),
 - User rules: "The goal here is to have a robust routing algorithm not to reproduce the hand layout." No per-connection detours where a
   direct path exists. Components are placed by the engineer (placement is a non-goal). Never touch ~/work/kicad/projects (use the
   scratch/boards snapshots). Never `git push`. No subagents.
+
+## Round 2 update (base = main after the round-1 merges: TE, NT, PY, GR, DG + harness DRC-budget fix)
+- Merged: NT net-tie exemption (dcsgone routing_new 0 again), TE steiner/detour-ref/flake fixes, GR `ripup_growth` default 1.25
+  (guards run with the default), PY test fixes, DG profile columns (`route_probe --profile`: fail_classes / blocked_classes) and the
+  round-2 diagnosis: docs/progress/notes/m4-dcsgone-diagnosis.md "Round 2" (R2.0–R2.4) — READ the section of your fix.
+- dcsgone at the round-2 base (wall_clock 0, deterministic): 205/241, failed 36, vias 196, unconnected 38, routing_new 0,
+  detour ref max 4.62, > 1.5: 8–9. `wall_clock_s 0` now also gives the harness DRC loop no budget cut (bench._drc_budget_s), so
+  wall_clock-0 runs give valid routing_new / unconnected too.
+- **Single dcsgone runs are chaotic (DG R2.2 item 6: 13 orderings give 29–46 failed).** Judge a fix on dcsgone over the default order
+  AND the net-order variants v3, v5, v7 of DG's prototype (apply docs/progress/notes/m4-dcsgone-dg-prototypes.patch's
+  `decompose::order_variant` hunk in your worktree for measurement only — `TOPOR_DG_VARIANT=<v>`; never commit it; task VR implements
+  variants for real). Report all four rows; a fix is a gain when the sum over the four improves and the default order does not get worse
+  by more than noise you can explain.

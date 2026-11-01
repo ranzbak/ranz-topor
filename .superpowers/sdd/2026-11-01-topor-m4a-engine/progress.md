@@ -178,3 +178,45 @@ Brief additions for every rotation-2 task: rotation-2-common.md (state, dcsgone 
 - Round 1a dispatched (worktree workers): TE (opus: route_steiner A5⊕A6, route_detour_ref, load flakes), NT (opus: JP1 net-tie short /
   connection_width), PY (sonnet: pytest reds incl. wiccon plugin 63 vs 62), GR (sonnet: ripup growth sweep Q1 + pour_cut sweep),
   DG (opus F: dcsgone diagnosis round 2). Round 1b after TE: VR (variants, A-C10), DO (detour rip-up phase + item 5 hidden detours).
+- Round 1a results (all loaded 14–39: dcsgone measured with wall_clock_s 0; base = head counts deterministic):
+  - NT 09229f3: dcsgone router DRC item = shorting_items JP1.1 (Net-(JP1-A)) ↔ Net-(J3-Pin_22) track; KiCad 10.0.8 rules measured with
+    kicad-cli (tools/net_tie_drc_probe.py, 15 cases): a tied net's track may touch the tie's net-less bridge anywhere and the other tie
+    pad only where the contact lies inside its own tie pad (pads overlap); a gapped tie pad is an ordinary obstacle. Model: tie pad
+    exempt only for its own net + nets of touching/overlapping tie pads of the same footprint, drills never; checker = KiCad's exact
+    rule. dcsgone 205/241 routing_new 1 → 0; eprom/wiccon identical. connection_width never appeared (necks ≥ 0.2 > 0.127 min). → A-C25.
+  - TE d8d90bf/76d945a/3a48fd7: steiner reds = a refined junction point whose leg runs exactly along J1.A7's clearance ring (larger CDT
+    faces since A6) → relaxer wraps 358°, "grazed mid-span", T retried every iteration; fix: refined point whose leg fails to relax falls
+    back to its base point and is pinned. steiner-off digests re-pinned with per-engine evidence (946530c 0xc58d…, A6-only 3cddcc9 =
+    A5-merge steiner-off 0xf913…, A16+A13 6ff3d00 0xeb87…; 6ff3d00 with A16/A13 neutralised = A6-only bit for bit, now asserted).
+    route_stubs::exit_stubs_off_matches_previous (green at base only because the T failed) now also turns off steiner + via relaxation
+    and matches the pre-A6 golden. detour_ref: ghost == slot search on the USB row since A2/A4 (1.220656 mm = 2 × a6→a7 corner), test
+    keeps those assertions and adds a via-wall fixture where they must differ (ghost 10.01 < reference 12.0). Flakes: fixed wall-clock
+    moments fell before any search under load; budgets now from a calibration run / cancel after iteration 1, assertions kept, 3/3 under
+    8 × `yes`. dcsgone unchanged (205/241). → A-C26.
+  - GR 2c8ac24: growth table (ledger copy below: A-C24); pour_cut_cost sweep: no value improves completion without a cost elsewhere
+    (wiccon vias 34 → 41/54/74 at 0.25/0.5/1.0 mm, dcsgone routing_new 3 at 0.5/1.0, detour max 16.8 at 0.25) → A-C15 stands (0.0).
+  - PY 01de2c2/870faf8: no-effect test re-specified (marked set == consumer-less keys, marked keys stay live, md/toml marker counts
+    equal; PARTIAL + detour_reference checks kept); progress caption test follows A7 columns (detour = reference stats). wiccon 63 vs 62
+    = ENGINE: plugin net_priority {+4V,3.3v,4v,GND: 2} reorders → a GND via→pour completion fails `self-check viahole:topor:249 (gap
+    304999 < 350000)` = DG's via drill-hole class (R2.3 (d) 2) → task FG.
+  - DG 1f067ad/18c5f82: note "Round 2" R2.0–R2.4. Key facts: first pass 229 (A-C20 merges); 34/36 failures route alone, 33/36 in at least
+    one of 13 orderings (29–46 failed: single dcsgone runs are ±5 chaotic); A5-vs-A6 loss is in pour-completion passes (USB corner) and
+    the post-pass VETO: the best snapshot does not re-metrize (1 wire fails a null re-metrization) so via reduction/relaxation/zero-slack/
+    junction repair keep nothing (vias 175 → 196). Ranked: FR (idempotent re-metrize + generalised repair, +9), FF (fine-pitch pour-pad
+    bridges / no via before a neighbour's tip, ≈ 5–9), FG (via hole clearance, taut deep wall, sub-margin grazes, ≈ 8), then VR (best of 8
+    orders −7), small (signal-net polygons as terminals; harness DRC budget for wall_clock 0 — fixed by the coordinator, 27a… below).
+    Blake detour rip-up: quality lever, ≤ 3 failures freed.
+- Coordinator: harness bench._drc_budget_s (wall_clock_s 0 → no DRC-loop budget cut, as plugin NO_BUDGET_S) + test → A-C27.
+- Ruling A-C24 (main Q1 / A-C22 closed): `[ripup] growth` default 2.0 → **1.25** (max_per_pair 8). Measured (GR, wall_clock 0, threads 4):
+  dcsgone 205/241 failed 36 at every g ∈ {1.0, 1.25, 1.5, 1.75, 2.0, 3.0} (1.5: 206/242), > 1.5: 8 at 1.0/1.25/3.0, 9 at 1.5/1.75/2.0;
+  eprom/wiccon/nametag (34/34, 3 vias)/wedding (77/89) identical for every g; F.Cu-only guard 27/27 67.034 mm + zero-slack +5V for
+  1.0–1.75, 67.095 at 3.0, **92.29 mm without zero-slack at 2.0 (fails both guards)**. 1.25 = 1.0 in every column, keeps the escalation
+  of row 17, middle of the plateau. Guards now run with Options::default(); new plateau test pins 1.0/1.25/1.5. 46 row 17 + reference
+  updated — cost if wrong: one default (chaotic outside the plateau; a board class where 2.0 helps would need the key set by hand).
+- Ruling A-C25 (NT): net-tie exemption = KiCad 10 semantics measured with kicad-cli (above); overlapping tie pads: the routing model
+  exempts the whole pad, the checker rejects a contact outside the track's own pad (connection fails, never a DRC error; no snapshot
+  board has overlapping tie pads) — cost if wrong: a failed connection on boards with overlapping tie pads.
+- Ruling A-C26 (TE): re-pinned expectations accepted on the evidence above (steiner-off = A6-only behaviour + A16/A13 deltas, verified by
+  neutralising them; exit_stubs_off compares with all post-A6 features off; detour_ref discriminates on a via-wall fixture) — cost if
+  wrong: a pinned digest that hides a later regression of the steiner-off path (the neutralised-equality assertion guards it).
+- Ruling A-C27 (DG concern 1): harness wall_clock_s 0 = no DRC-loop budget cut (the plugin did this already) — cost: none.
