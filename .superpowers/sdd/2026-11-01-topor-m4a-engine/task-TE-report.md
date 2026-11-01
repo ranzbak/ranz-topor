@@ -136,11 +136,11 @@ The engine is right here, so the fix is in the tests: the stop is placed by meas
 
 ## Tests
 
-- **Cargo:** `cargo test --release --no-fail-fast` (head before the route_stubs edit): all suites green except
-  `graph_ownnet::front_only_plus5v_needs_zero_slack_for_failed` (task GR) and
-  `route_stubs::exit_stubs_off_matches_previous`, which is fixed in the same commit and green alone afterwards.
-  The individual suites were re-run: `route_steiner` 6/6, `route_detour_ref` 4/4, `route_stubs` 8/8, and both
-  flake tests.
+- **Cargo (release):** `cargo test --release --no-fail-fast` at head: 46 test targets ok, 1 failed, which is
+  `graph_ownnet::front_only_plus5v_needs_zero_slack_for_failed` (task GR, allowed). The first full run, before
+  the route_stubs edit, also showed `route_stubs::exit_stubs_off_matches_previous` (see §1).
+- **Cargo (debug):** `cargo test -p topor-engine --no-fail-fast`, what `test_scaffold` runs but past the first
+  failure: only `graph_ownnet` fails (1 target). So `test_scaffold` is green once GR fixes that test.
 - **Clippy:** `cargo clippy --all-targets -- -D warnings` is clean.
 - **pytest:** see "pytest" below.
 
