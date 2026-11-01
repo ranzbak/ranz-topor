@@ -18,6 +18,7 @@ pub mod relax;
 pub mod route;
 pub mod search;
 pub mod sketch;
+pub mod steiner;
 pub mod smooth;
 pub mod stubs;
 pub mod taut;

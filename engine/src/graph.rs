@@ -1431,7 +1431,9 @@ impl RouteGraph {
                 self.edges[e].along = Some(conn);
             }
         } else {
-            debug_assert_eq!(faces.len(), crossings.len() + 1);
+            // `faces.len() == crossings.len()`: a junction leg (A5) whose last crossing is the
+            // half crossing next to the sibling it ends on (no face after it).
+            debug_assert!(faces.len() == crossings.len() + 1 || faces.len() == crossings.len());
         }
         // An edge crossed twice: the second slot refers to the state before this call.
         let mut earlier: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -1450,6 +1452,15 @@ impl RouteGraph {
                     k: Some(k),
                 },
             );
+        }
+        if !crossings.is_empty() && faces.len() == crossings.len() {
+            // The junction half crossing overlaps the sibling's copper: zero width and gap, so
+            // it keeps its place in the slot order (Rule T) without taking capacity.
+            if let Some(&(e, i)) = self.occupancy[conn].last() {
+                let x = &mut self.edges[e].cross[i];
+                x.width = 0.0;
+                x.clr = 0.0;
+            }
         }
         let mut touched = self.face_edges(faces);
         if let Some(e) = along {

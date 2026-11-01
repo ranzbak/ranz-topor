@@ -66,6 +66,23 @@ pub struct MultiGraph {
     pub conn_wires: Vec<Vec<usize>>,
     /// Board rules (via sizes of a net for the layered search).
     pub rules: crate::model::Rules,
+    /// Same-net Steiner attachment context (A5); `None` = off (M3: pad / pour goals only).
+    pub steiner: Option<Arc<crate::steiner::SteinerNets>>,
+    /// Per connection: the T-junction its inserted path ends in (A5), `None` otherwise.
+    pub junction: Vec<Option<crate::search::JunctionEnd>>,
+    /// `(connection, sibling)` pairs whose junction the metrization rejected (angle, off the
+    /// sibling copper); `sibling == usize::MAX` = the connection's hand-copper junctions.
+    pub steiner_reject: BTreeSet<(usize, usize)>,
+    /// Connections removed because the sibling they were attached to was removed (A5 cascade),
+    /// in removal order since the last [`MultiGraph::take_cascaded`].
+    cascaded: Vec<usize>,
+    /// Number of `Some` entries of `junction` (the cascade scan is skipped while 0).
+    n_junctions: usize,
+    /// A5, per leg id: where the leg's metrized chain crosses each of its crossed edges (in
+    /// crossing order; `None` where it does not cross the edge's segment), set after each
+    /// metrization and dropped when the leg is removed. The junction goals of later searches
+    /// place their estimate there instead of at the slot fraction.
+    chain_cross: Vec<Vec<Option<Vec2>>>,
     hole_to_hole: f64,
     max_d_all: f64,
     grid: Grid<usize>,
@@ -268,6 +285,12 @@ impl MultiGraph {
             wire_of: Vec::new(),
             conn_wires: Vec::new(),
             rules: model.rules.clone(),
+            steiner: None,
+            junction: Vec::new(),
+            steiner_reject: BTreeSet::new(),
+            cascaded: Vec::new(),
+            n_junctions: 0,
+            chain_cross: Vec::new(),
             hole_to_hole: model.rules.hole_to_hole as f64,
             max_d_all,
             grid,
@@ -547,6 +570,11 @@ impl MultiGraph {
         obs: &mut ObstacleSet,
     ) -> Vec<usize> {
         let ids = self.alloc_legs(conn.id, path.legs.len());
+        for &k in &ids {
+            if let Some(v) = self.chain_cross.get_mut(k) {
+                v.clear();
+            }
+        }
         let (w, clr) = (conn.width as f64, conn.clearance as f64);
         for (leg, &k) in path.legs.iter().zip(&ids) {
             self.layers[leg.layer_idx].g.insert_path_net(
@@ -563,12 +591,78 @@ impl MultiGraph {
         for &(s, size) in &path.sites {
             self.activate(s, conn.id, conn.net, size, clr, obs);
         }
+        if let Some(j) = &path.junction {
+            if self.junction.len() <= conn.id {
+                self.junction.resize(conn.id + 1, None);
+            }
+            if self.junction[conn.id].is_none() {
+                self.n_junctions += 1;
+            }
+            self.junction[conn.id] = Some(j.clone());
+        }
         ids
+    }
+
+    /// A5: record where leg `k`'s metrized chain crosses its edges (see `chain_cross`). O(n).
+    pub fn set_chain_cross(&mut self, k: usize, pts: Vec<Option<Vec2>>) {
+        if self.chain_cross.len() <= k {
+            self.chain_cross.resize(k + 1, Vec::new());
+        }
+        self.chain_cross[k] = pts;
+    }
+
+    /// A5: the metrized crossing points of leg `k` (empty when unknown). O(1).
+    pub fn chain_cross(&self, k: usize) -> &[Option<Vec2>] {
+        self.chain_cross.get(k).map_or(&[], |v| v.as_slice())
+    }
+
+    /// The junction the path of `conn` ends in (A5). O(1).
+    pub fn junction_of(&self, conn: usize) -> Option<&crate::search::JunctionEnd> {
+        self.junction.get(conn).and_then(|j| j.as_ref())
+    }
+
+    /// Connections whose path ends on a junction with `conn`'s copper (sorted). O(m) while any
+    /// junction exists, O(1) otherwise.
+    pub fn dependents(&self, conn: usize) -> Vec<usize> {
+        if self.n_junctions == 0 {
+            return Vec::new();
+        }
+        (0..self.junction.len())
+            .filter(|&d| {
+                self.junction[d]
+                    .as_ref()
+                    .and_then(|j| j.sibling)
+                    .is_some_and(|(s, _)| s == conn)
+            })
+            .collect()
+    }
+
+    /// `conn` ends in a junction or has a connection attached to it. O(m) (see `dependents`).
+    pub fn has_junction_link(&self, conn: usize) -> bool {
+        self.junction_of(conn).is_some() || !self.dependents(conn).is_empty()
+    }
+
+    /// The connections removed by the junction cascade since the last call. O(1) amortised.
+    pub fn take_cascaded(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.cascaded)
     }
 
     /// Remove every leg of `conn` from the layer graphs, release its sites, free its leg ids.
     /// O(legs * layers + path cost + sites).
     pub fn remove_conn(&mut self, conn: usize, obs: &mut ObstacleSet) {
+        // A5 cascade: a junction onto this connection's copper loses its copper with it. The
+        // depth is bounded by the chain of attachments (at most the net's connections).
+        for d in self.dependents(conn) {
+            if self.conn_wires.get(d).is_some_and(|w| !w.is_empty()) {
+                self.cascaded.push(d);
+            }
+            self.remove_conn(d, obs);
+        }
+        if let Some(j) = self.junction.get_mut(conn) {
+            if j.take().is_some() {
+                self.n_junctions -= 1;
+            }
+        }
         for s in self.sites_of(conn).to_vec() {
             self.release(s, obs);
         }
@@ -578,6 +672,9 @@ impl MultiGraph {
             .map(std::mem::take)
             .unwrap_or_default();
         for k in ids {
+            if let Some(v) = self.chain_cross.get_mut(k) {
+                v.clear();
+            }
             for c in &mut self.layers {
                 c.g.remove_conn(k);
             }
@@ -607,6 +704,9 @@ impl MultiGraph {
     /// crossing out), so that [`MultiGraph::insert_path`] reproduces it after a removal.
     /// `est_len` / `cost` are 0. O(legs * path length).
     pub fn take_path(&self, conn: usize) -> Option<SlotPath> {
+        if self.junction_of(conn).is_some() {
+            return None;
+        }
         let ks = self.conn_wires.get(conn)?;
         if ks.is_empty() {
             return None;
@@ -648,6 +748,7 @@ impl MultiGraph {
             cost: 0.0,
             expansions: 0,
             candidates: 0,
+            junction: None,
         })
     }
 

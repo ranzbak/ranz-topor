@@ -701,6 +701,21 @@ pub struct Expert {
     /// to the board edge: the vertex-only edge capacity sees only the outline corner), where
     /// the metrization would report the wall grazed mid-span. `false` = M3.
     pub transit_pinch: bool,
+    /// Steiner T-junctions (A5, `topor.toml [expert] steiner_min_angle_deg`): a same-net
+    /// T-junction is taken only when the joining track meets the sibling at no less than this
+    /// angle (degrees, 0..=90; all three pairwise angles at the junction are then >= it). Below
+    /// 60 the branch forms an acute sliver (acid trap); 90 allows perpendicular joins only.
+    pub steiner_min_angle_deg: f64,
+    /// Steiner T-junctions (A5, `topor.toml [expert] steiner_len_slack`): a junction whose
+    /// metrized connection is longer than this factor times the search's estimate (+ 1 mm) is
+    /// rejected and searched again without it (the sibling's copper lay elsewhere than the
+    /// estimate on a long graph edge).
+    pub steiner_len_slack: f64,
+    /// Steiner T-junctions (A5, `topor.toml [expert] steiner_ghost_factor`): a junction path is
+    /// a goal only while its length plus via cost stays at most this factor times the
+    /// connection's own pad-to-pad ghost on the empty board (1 = only junctions that are
+    /// cheaper than the free pad route; larger also lets junctions dodge congestion).
+    pub steiner_ghost_factor: f64,
 }
 
 impl Default for Expert {
@@ -715,6 +730,9 @@ impl Default for Expert {
             own_net_capacity: true,
             wall_aware_capacity: true,
             transit_pinch: true,
+            steiner_min_angle_deg: 60.0,
+            steiner_len_slack: 1.1,
+            steiner_ghost_factor: 1.0,
         }
     }
 }
@@ -850,6 +868,12 @@ pub struct Options {
     /// possibly only off the centre line, is routed by that one track (`exit_stubs` auto: only
     /// where a pad needs a stub); 0 = off.
     pub pad_bridge_max_nm: i64,
+    /// Router (A5, M4-D3, `topor.toml [search] steiner`): a connection may end on the copper of
+    /// an already routed connection of its own net (or on kept hand copper of its target
+    /// cluster) in a T-junction instead of only at its pad, when that is cheaper; sibling
+    /// connections of one net then share a pad exit instead of each needing its own. Off = M3
+    /// (pad to pad only).
+    pub steiner: bool,
 }
 
 impl Default for Options {
@@ -899,6 +923,7 @@ impl Default for Options {
             neck_to_pad: true,
             neck_max_nm: 0,
             pad_bridge_max_nm: 2_000_000,
+            steiner: true,
         }
     }
 }

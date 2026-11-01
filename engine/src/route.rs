@@ -131,6 +131,11 @@ pub struct ConnReport {
     pub neck_nm: i64,
     /// Narrowest necked stub width, nm; `None` without a neck.
     pub neck_width_nm: Option<i64>,
+    /// A5: the connection ends in a same-net T-junction on another connection's (or kept hand)
+    /// copper instead of at its `to` terminal (`from` for a reversed path).
+    pub junction: bool,
+    /// A5: the junction's angle against the copper it joins (degrees, 0..=90).
+    pub junction_angle_deg: Option<f64>,
 }
 
 /// A connection the zero-slack retry routed with margin 0 against its corridor (R6).
@@ -249,6 +254,8 @@ pub struct IterProfile {
     pub cost_nm: f64,
     /// This iteration became the best so far (`better_than`).
     pub best: bool,
+    /// A5: commit-phase re-searches toward a sibling committed earlier in the iteration.
+    pub steiner_researched: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -317,6 +324,8 @@ struct ConnOk {
     layers: Vec<u32>,
     /// Via positions, KiCad frame nm.
     via_sites: Vec<[i64; 2]>,
+    /// A5: the path ends in a T-junction; its measured angle (degrees, 0..=90).
+    junction: Option<f64>,
 }
 
 /// One metrized leg: its tracks and the via that ends it (if any).
@@ -391,6 +400,9 @@ struct Metrized {
     /// Zero-slack identification pass (`ZsSpec` without corridor): the static obstacles that
     /// pinch the relaxed wire, `(anchors, walls)` (`corridor_obstacles`).
     zs_corridor: Option<(Vec<usize>, Vec<usize>)>,
+    /// A5: `(connection, sibling)` junctions the metrization rejected (angle below
+    /// `steiner_min_angle_deg`, end off the sibling's copper); `usize::MAX` = hand copper.
+    rejects: Vec<(usize, usize)>,
 }
 
 /// Zero-slack corridor of live connection `live` (one leg) for [`metrize_zs`]: margin 0 against
@@ -409,7 +421,8 @@ fn path_crossings(g: &RouteGraph, k: usize) -> Option<Vec<Crossing>> {
     if cross.is_empty() {
         return Some(Vec::new());
     }
-    if faces.len() != cross.len() + 1 {
+    // A junction leg (A5) has no face after its last (half) crossing.
+    if faces.len() != cross.len() + 1 && faces.len() != cross.len() {
         return None;
     }
     Some(
@@ -600,13 +613,22 @@ fn leg_terminals(
         site: s,
         at: mg.sites[s].at,
     };
+    let jn = mg.junction_of(conn);
     let start = if ord == 0 {
-        terminal_of(&c.from)
+        // A5: a reversed junction path runs from the `to` terminal.
+        terminal_of(if jn.is_some_and(|j| j.reversed) {
+            &c.to
+        } else {
+            &c.from
+        })
     } else {
         site(*sites.get(ord - 1)?)
     };
     let pour = matches!(c.to.kind, TermKind::Pour(_));
-    let goal = if ord + 1 == nlegs && !pour {
+    let goal = if let (true, Some(j)) = (ord + 1 == nlegs, jn) {
+        // A5: the junction point (the metrization moves it onto the sibling's chain).
+        Terminal::Junction { at: j.at }
+    } else if ord + 1 == nlegs && !pour {
         terminal_of(&c.to)
     } else if let Some(&s) = sites.get(ord) {
         site(s)
@@ -659,6 +681,10 @@ struct MetrState {
     /// Sketch triangulations of the real obstacles, with the sorted active sites they were
     /// built for (rebuilt when a via is added or released).
     base: Option<(Vec<usize>, Vec<Arc<LayerSketch>>)>,
+    /// A5, per live connection: the junction point its last leg is installed with (on the
+    /// sibling's chain after refinement), and the angle measured at it.
+    jat: Vec<Option<Vec2>>,
+    jangle: Vec<Option<f64>>,
 }
 
 impl MetrState {
@@ -678,6 +704,8 @@ impl MetrState {
             item_ids: Vec::new(),
             check_visited: 0,
             base: None,
+            jat: vec![None; cx.conns.len()],
+            jangle: vec![None; cx.conns.len()],
         }
     }
 
@@ -729,6 +757,679 @@ impl MetrState {
         self.ok[k] = None;
         self.fail[k] = None;
         self.pending[k] = false;
+    }
+}
+
+/// A5: a junction point that moves less than this (nm) is not re-relaxed.
+const JUNCTION_MOVE_TOL_NM: f64 = 1_000.0;
+/// A5: absolute allowance (nm) on top of `expert.steiner_len_slack` times the search estimate
+/// before a junction's metrized length counts as an overshoot.
+const JUNCTION_LEN_ABS_NM: f64 = 1_000_000.0;
+/// A5: least distance (nm) within which a chain that misses an edge's segment still counts as
+/// being at that edge (see `record_chain_cross`; otherwise 3 track pitches of the leg).
+const JUNCTION_NEAR_MIN_NM: f64 = 500_000.0;
+/// A5: junction refinement rounds per metrization (each re-relaxes the moved junction legs).
+const JUNCTION_ROUNDS: usize = 3;
+/// A5: arcs of a chain are sampled at this many points (junction base point, chain crossings).
+const JUNCTION_ARC_SAMPLES: usize = 16;
+/// A5: a sibling track is split at a junction only when both pieces are at least this long (nm;
+/// shorter arc pieces would not survive the integer-nm mid point).
+const JUNCTION_SPLIT_MIN_NM: f64 = 20_000.0;
+
+/// Step 1 of [`metrize_zs`] for leg `k` (layer `li`) of live connection `i`: install its wire
+/// when `install` (fresh, or its junction point moved), sketch it on `ls` and hand a changed
+/// anchor sequence to the relaxer. `false` when the sketch failed (the leg is dropped with the
+/// reason). O(crossings + sleeve).
+#[allow(clippy::too_many_arguments)]
+fn sketch_leg(
+    cx: &Ctx,
+    mg: &MultiGraph,
+    st: &mut MetrState,
+    ls: &LayerSketch,
+    i: usize,
+    k: usize,
+    li: usize,
+    start_t: &Terminal,
+    goal_t: &Terminal,
+    install: bool,
+) -> bool {
+    let c = &cx.conns[i];
+    if install {
+        st.leg_layer[k] = li;
+        st.leg_conn[k] = i;
+        st.rx.replace(
+            k,
+            Wire {
+                id: k,
+                net: c.net,
+                layer: cx.layers[li],
+                width: c.width,
+                hand: vec![start_t.at(), goal_t.at()],
+                hand_len: (goal_t.at() - start_t.at()).len(),
+                start: start_t.clone(),
+                goal: goal_t.clone(),
+                kept_uuids: Vec::new(),
+            },
+        );
+    }
+    let g = &mg.layers[li].g;
+    let Some(path) = leg_crossings(g, k, start_t.at(), goal_t.at(), ls) else {
+        st.drop_leg(k);
+        st.fail[k] = Some(fail("sketch: inconsistent slot path"));
+        return false;
+    };
+    let (start, goal) = (start_t.at(), goal_t.at());
+    if let Some(p) = unanchored_bends(start, goal, &path, ls).first() {
+        st.drop_leg(k);
+        st.fail[k] = Some(fail(format!(
+            "sketch: path bends at a wall split vertex ({}, {})",
+            kicad(*p)[0],
+            kicad(*p)[1]
+        )));
+        return false;
+    }
+    let s = sketch_from_crossings(k, start, goal, path, ls);
+    st.ncross[k] = s.crossings.len();
+    st.bcross[k] = s.crossings.clone();
+    if st.seqs[k].as_ref() != Some(&s.seq) {
+        st.rx.set(k, &s.seq);
+        st.seqs[k] = Some(s.seq);
+        st.unindex(k);
+        st.ok[k] = None;
+        st.fail[k] = None;
+        st.pending[k] = false;
+    }
+    true
+}
+
+/// A5: `(junction leg, sibling leg)` pairs of the routed junction connections whose legs are
+/// both installed. O(routed).
+fn junction_pairs(mg: &MultiGraph, st: &MetrState, routed: &[usize]) -> Vec<(usize, usize)> {
+    routed
+        .iter()
+        .filter_map(|&i| {
+            let (s, ord) = mg.junction_of(i)?.sibling?;
+            let kb = *st.conn_legs[i].last()?;
+            let ka = *st.conn_legs.get(s)?.get(ord)?;
+            (st.seqs.get(kb)?.is_some() && st.seqs.get(ka)?.is_some()).then_some((kb, ka))
+        })
+        .collect()
+}
+
+/// The slot nesting of the present legs on the sketch triangulations; a junction leg and its
+/// sibling are not nested against each other (same net, the junction leg ends on the sibling's
+/// copper, so neither may push the other). O(Σ crossings · log + entries · pairs).
+fn metr_nesting(
+    st: &MetrState,
+    base: &[Arc<LayerSketch>],
+    present: &[usize],
+    pairs: &[(usize, usize)],
+) -> SlotNesting {
+    let mut nesting = SlotNesting::default();
+    for (li, sk) in base.iter().enumerate() {
+        let legs: Vec<(usize, &[Crossing])> = present
+            .iter()
+            .filter(|&&k| st.leg_layer[k] == li)
+            .map(|&k| (k, st.bcross[k].as_slice()))
+            .collect();
+        if !legs.is_empty() {
+            base_nesting(&legs, sk, &mut nesting);
+        }
+    }
+    if !pairs.is_empty() {
+        // Mutation only: the map's iteration order does not reach the result.
+        for ((k, _), lists) in nesting.inner.iter_mut() {
+            for &(kb, ka) in pairs {
+                let other = if *k == kb {
+                    ka
+                } else if *k == ka {
+                    kb
+                } else {
+                    continue;
+                };
+                for l in lists.iter_mut() {
+                    l.retain(|&x| x != other);
+                }
+            }
+        }
+    }
+    nesting
+}
+
+/// Distance from `p` to a primitive. O(1).
+fn point_prim_dist(p: Vec2, prim: &Prim) -> f64 {
+    match prim {
+        Prim::Seg(s) => crate::geom::point_seg(p, s),
+        Prim::Arc(a) => crate::geom::point_arc(p, a),
+    }
+}
+
+/// Parameter interval `[t0, t1]` of segment `a b` inside triangle `tri` (boundary included),
+/// `None` when it misses it. O(1).
+fn clip_seg_tri(a: Vec2, b: Vec2, tri: &[Vec2; 3]) -> Option<(f64, f64)> {
+    let area = (tri[1] - tri[0]).cross(tri[2] - tri[0]);
+    if area.abs() < 1e-9 {
+        return None;
+    }
+    let sg = area.signum();
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for k in 0..3 {
+        let (p, q) = (tri[k], tri[(k + 1) % 3]);
+        let e = q - p;
+        let tol = 1e-6 * e.len();
+        let fa = sg * e.cross(a - p);
+        let fb = sg * e.cross(b - p);
+        if fa < -tol && fb < -tol {
+            return None;
+        }
+        if fa < -tol {
+            t0 = t0.max(fa / (fa - fb));
+        } else if fb < -tol {
+            t1 = t1.min(fa / (fa - fb));
+        }
+    }
+    (t0 <= t1).then_some((t0, t1))
+}
+
+fn closest_on(a: Vec2, b: Vec2, p: Vec2) -> Vec2 {
+    let d = b - a;
+    let l2 = d.len2();
+    if l2 <= 0.0 {
+        return a;
+    }
+    a + d * ((p - a).dot(d) / l2).clamp(0.0, 1.0)
+}
+
+/// A5: what a junction of live connection `i` must end on: the sibling leg's current chain
+/// (and the sibling's width), or the hand track's constraint edge (and `i`'s width). `None`
+/// when the sibling leg has no chain. O(chain).
+fn junction_target(
+    cx: &Ctx,
+    mg: &MultiGraph,
+    st: &MetrState,
+    i: usize,
+    jn: &crate::search::JunctionEnd,
+) -> Option<(Vec<Prim>, f64)> {
+    match jn.sibling {
+        Some((s, ord)) => {
+            let ka = *st.conn_legs.get(s)?.get(ord)?;
+            st.seqs.get(ka)?.as_ref()?;
+            let ch = st.rx.chains().get(ka)?.as_ref().ok()?;
+            Some((ch.prims.clone(), cx.conns[s].width as f64))
+        }
+        None => {
+            let g = &mg.layers.get(jn.layer_idx)?.g;
+            let ge = g.edges.get(jn.edge)?;
+            Some((
+                vec![Prim::Seg(Seg {
+                    a: g.verts[ge.a].at,
+                    b: g.verts[ge.b].at,
+                })],
+                cx.conns[i].width as f64,
+            ))
+        }
+    }
+}
+
+/// Start of the last straight piece of leg `k`'s chain (where the joining wire comes from), or
+/// `start` when it has no chain. O(1).
+fn approach_point(st: &MetrState, k: usize, start: Vec2) -> Vec2 {
+    match st.rx.chains().get(k) {
+        Some(Ok(ch)) => match ch.prims.last() {
+            Some(Prim::Seg(s)) => s.a,
+            Some(Prim::Arc(a)) => a.point_at(1.0),
+            None => start,
+        },
+        _ => start,
+    }
+}
+
+/// The usable parameter interval of a straight target piece `a b` for a junction end of
+/// width `w`: `w` away from both ends (the tangent points where the sibling wraps an obstacle
+/// at exactly its clearance), or the middle of a piece shorter than `2 w`. O(1).
+fn seg_interior(a: Vec2, b: Vec2, w: f64) -> (Vec2, Vec2) {
+    let l = (b - a).len();
+    if l <= 2.0 * w || l <= 0.0 {
+        let m = (a + b) * 0.5;
+        return (m, m);
+    }
+    let u = (b - a) * (1.0 / l);
+    (a + u * w, b - u * w)
+}
+
+/// A5: the junction point of target `tgt` for a wire of width `w` approaching from `pb`: the
+/// point of a straight piece of the target nearest `pb`, kept `w` away from the piece's ends
+/// ([`seg_interior`]: never on an arc or a tangent point, where the sibling runs at exactly
+/// its clearance and an end of the same width would lie on the obstacle's boundary); for a
+/// sibling chain restricted to the two faces of the junction edge (the topology the search
+/// checked). `None` when no straight piece passes through them. O(prims).
+fn junction_point(
+    mg: &MultiGraph,
+    jn: &crate::search::JunctionEnd,
+    tgt: &[Prim],
+    pb: Vec2,
+    w: f64,
+) -> Option<Vec2> {
+    if jn.sibling.is_none() {
+        let Some(Prim::Seg(sg)) = tgt.first() else {
+            return None;
+        };
+        return Some(closest_on(sg.a, sg.b, pb));
+    }
+    let g = &mg.layers.get(jn.layer_idx)?.g;
+    let win: Vec<[Vec2; 3]> = g
+        .edges
+        .get(jn.edge)?
+        .faces
+        .iter()
+        .flatten()
+        .map(|&f| {
+            let v = g.faces[f].v;
+            [g.verts[v[0]].at, g.verts[v[1]].at, g.verts[v[2]].at]
+        })
+        .collect();
+    let mut best: Option<(f64, Vec2)> = None;
+    for prim in tgt {
+        let Prim::Seg(sg) = prim else { continue };
+        let (a, b) = seg_interior(sg.a, sg.b, w);
+        for tri in &win {
+            if let Some((t0, t1)) = clip_seg_tri(a, b, tri) {
+                let d = b - a;
+                let q = closest_on(a + d * t0, a + d * t1, pb);
+                let dq = (q - pb).len();
+                if best.is_none_or(|x| dq < x.0) {
+                    best = Some((dq, q));
+                }
+            }
+        }
+    }
+    best.map(|b| b.1)
+}
+
+/// A5: the point of the target chain nearest `p` (arcs sampled at their exact points).
+/// O(prims · samples).
+fn nearest_on_prims(tgt: &[Prim], p: Vec2) -> Option<Vec2> {
+    let mut best: Option<(f64, Vec2)> = None;
+    for prim in tgt {
+        let mut take = |q: Vec2| {
+            let d = (q - p).len();
+            if best.is_none_or(|b| d < b.0) {
+                best = Some((d, q));
+            }
+        };
+        match prim {
+            Prim::Seg(sg) => take(closest_on(sg.a, sg.b, p)),
+            Prim::Arc(ar) => {
+                for n in 0..=2 * JUNCTION_ARC_SAMPLES {
+                    take(ar.point_at(n as f64 / (2 * JUNCTION_ARC_SAMPLES) as f64));
+                }
+            }
+        }
+    }
+    best.map(|b| b.1)
+}
+
+/// A5: move every routed junction's point onto its target (nearest the joining wire's approach,
+/// see [`junction_point`]); a move of more than [`JUNCTION_MOVE_TOL_NM`] re-installs and
+/// re-sketches the junction leg. Returns the moved legs (sorted by connection).
+/// O(junctions · (chain · samples + sketch)).
+fn refine_junctions(
+    cx: &Ctx,
+    mg: &MultiGraph,
+    st: &mut MetrState,
+    base: &[Arc<LayerSketch>],
+    routed: &[usize],
+) -> Vec<usize> {
+    let mut moved = Vec::new();
+    for &i in routed {
+        let Some(jn) = mg.junction_of(i) else {
+            continue;
+        };
+        let Some(&kb) = st.conn_legs[i].last() else {
+            continue;
+        };
+        if st.seqs.get(kb).is_none_or(|q| q.is_none()) {
+            continue;
+        }
+        let (Some(j0), Some((tgt, _))) = (st.jat[i], junction_target(cx, mg, st, i, jn)) else {
+            continue;
+        };
+        let start_t = st.rx.wires()[kb].start.clone();
+        let pb = approach_point(st, kb, start_t.at());
+        let w = cx.conns[i].width as f64;
+        // The base point: the target's point nearest the search's junction estimate (where the
+        // sibling's copper crosses the junction edge). A straight-piece point nearer the
+        // approach replaces it only when it shortens the approach and stays within the
+        // approach distance of it (no sliding along the sibling past where the search put it).
+        let Some(b0) = nearest_on_prims(&tgt, jn.at) else {
+            continue;
+        };
+        let reach = (pb - b0).len();
+        let j1 = match junction_point(mg, jn, &tgt, pb, w) {
+            Some(c) if (pb - c).len() < reach && (c - b0).len() <= reach.max(2.0 * w) => c,
+            _ => b0,
+        };
+        if (j1 - j0).len() <= JUNCTION_MOVE_TOL_NM {
+            continue;
+        }
+        st.jat[i] = Some(j1);
+        let li = st.leg_layer[kb];
+        st.drop_leg(kb);
+        let goal_t = Terminal::Junction { at: j1 };
+        if sketch_leg(cx, mg, st, &base[li], i, kb, li, &start_t, &goal_t, true) {
+            moved.push(kb);
+        }
+    }
+    moved
+}
+
+/// A5: first point where the chain `prims` crosses segment `s` (arcs sampled), `None` when it
+/// does not. O(prims · samples).
+fn chain_seg_cross(prims: &[Prim], s: &Seg) -> Option<Vec2> {
+    let d = s.b - s.a;
+    let side = |p: Vec2| d.cross(p - s.a);
+    let on_seg = |p: Vec2| {
+        let t = (p - s.a).dot(d) / d.len2().max(1e-12);
+        (-1e-9..=1.0 + 1e-9).contains(&t)
+    };
+    let pieces = |p: &Prim| -> Vec<(Vec2, Vec2)> {
+        match p {
+            Prim::Seg(sg) => vec![(sg.a, sg.b)],
+            Prim::Arc(ar) => (0..JUNCTION_ARC_SAMPLES)
+                .map(|n| {
+                    let f = |k: usize| ar.point_at(k as f64 / JUNCTION_ARC_SAMPLES as f64);
+                    (f(n), f(n + 1))
+                })
+                .collect(),
+        }
+    };
+    for prim in prims {
+        for (a, b) in pieces(prim) {
+            let (fa, fb) = (side(a), side(b));
+            if (fa <= 0.0 && fb >= 0.0) || (fa >= 0.0 && fb <= 0.0) {
+                let t = if fa == fb { 0.0 } else { fa / (fa - fb) };
+                let q = a + (b - a) * t;
+                if on_seg(q) {
+                    return Some(q);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// A5: the chain point nearest segment `s` when it lies within `tol` of it. O(prims · samples).
+fn chain_seg_near(prims: &[Prim], s: &Seg, tol: f64) -> Option<Vec2> {
+    let mut best: Option<(f64, Vec2)> = None;
+    let mut take = |q: Vec2| {
+        let d = crate::geom::point_seg(q, s);
+        if best.is_none_or(|b| d < b.0) {
+            best = Some((d, q));
+        }
+    };
+    for prim in prims {
+        match prim {
+            Prim::Seg(sg) => {
+                take(closest_on(sg.a, sg.b, s.a));
+                take(closest_on(sg.a, sg.b, s.b));
+                take(sg.a);
+                take(sg.b);
+            }
+            Prim::Arc(ar) => {
+                for n in 0..=JUNCTION_ARC_SAMPLES {
+                    take(ar.point_at(n as f64 / JUNCTION_ARC_SAMPLES as f64));
+                }
+            }
+        }
+    }
+    best.filter(|b| b.0 <= tol).map(|b| b.1)
+}
+
+/// A5: after a metrization, record for every routed leg where its chain crosses each edge of its
+/// slot path ([`MultiGraph::set_chain_cross`]), the junction estimate of later searches.
+/// O(Σ crossings · prims).
+fn record_chain_cross(mg: &mut MultiGraph, st: &MetrState, routed: &[usize]) {
+    for &i in routed {
+        for &k in &st.conn_legs[i] {
+            let Some(Ok(ch)) = st.rx.chains().get(k) else {
+                continue;
+            };
+            let Some(li) = mg.leg_layer(k) else {
+                continue;
+            };
+            let g = &mg.layers[li].g;
+            let Some((cross, _, _)) = g.path_of(k) else {
+                continue;
+            };
+            // A chain that passes a dormant-site end of the edge instead of crossing it still
+            // has copper there when it passes within a few track pitches.
+            let c = &st.rx.wires()[k];
+            let near = (3.0 * (c.width as f64 + mg.rules.net_rule(c.net).clearance as f64))
+                .max(JUNCTION_NEAR_MIN_NM);
+            let pts: Vec<Option<Vec2>> = cross
+                .iter()
+                .map(|&(e, _)| {
+                    let ge = &g.edges[e];
+                    let s = Seg {
+                        a: g.verts[ge.a].at,
+                        b: g.verts[ge.b].at,
+                    };
+                    chain_seg_cross(&ch.prims, &s).or_else(|| chain_seg_near(&ch.prims, &s, near))
+                })
+                .collect();
+            mg.set_chain_cross(k, pts);
+        }
+    }
+}
+
+/// Acute angle (degrees, 0..=90) between two directions; 90 when either is degenerate. O(1).
+fn acute_angle(u: Vec2, v: Vec2) -> f64 {
+    let (lu, lv) = (u.len(), v.len());
+    if lu <= 1.0 || lv <= 0.0 {
+        return 90.0;
+    }
+    (u.dot(v) / (lu * lv)).abs().min(1.0).acos().to_degrees()
+}
+
+/// A5: every quantised junction leg must end on its target (within a quarter of the narrower
+/// width, so the end lies inside the sibling's copper) at an angle of at least
+/// `expert.steiner_min_angle_deg` against the target's tangent; otherwise the leg fails and the
+/// pair is recorded in `rejects` (the next search leaves that junction out). O(junctions · chain).
+fn validate_junctions(
+    cx: &Ctx,
+    mg: &MultiGraph,
+    st: &mut MetrState,
+    routed: &[usize],
+    rejects: &mut Vec<(usize, usize)>,
+) {
+    for &i in routed {
+        let Some(jn) = mg.junction_of(i) else {
+            continue;
+        };
+        let Some(&kb) = st.conn_legs[i].last() else {
+            continue;
+        };
+        // An end the relaxation finds inside an obstacle is the junction point's fault, not a
+        // class-independent failure of the connection: retry without that junction.
+        if let Some(Some(Res::Fail { reason, perm, .. })) = st.fail.get_mut(kb) {
+            if *perm {
+                *perm = false;
+                *reason = format!("junction: {reason}");
+                rejects.push((i, jn.sibling.map_or(usize::MAX, |x| x.0)));
+            }
+            continue;
+        }
+        if st.ok.get(kb).is_none_or(|o| o.is_none()) {
+            continue;
+        }
+        let Some(j) = st.jat[i] else { continue };
+        let wb = cx.conns[i].width as f64;
+        let verdict: Option<(String, bool)> = match junction_target(cx, mg, st, i, jn) {
+            None => Some(("junction: sibling not relaxed".into(), false)),
+            Some((tgt, wa)) => {
+                let mut near: Option<(f64, &Prim)> = None;
+                for p in &tgt {
+                    let d = point_prim_dist(j, p);
+                    if near.is_none_or(|n| d < n.0) {
+                        near = Some((d, p));
+                    }
+                }
+                match near {
+                    None => Some(("junction: empty sibling chain".into(), false)),
+                    Some((d, _)) if d > 0.25 * wa.min(wb) => Some((
+                        format!("junction: end {:.1} um off the sibling copper", d * 1e-3),
+                        true,
+                    )),
+                    Some((_, prim)) => {
+                        let tan = match prim {
+                            Prim::Seg(sg) => sg.b - sg.a,
+                            Prim::Arc(ar) => {
+                                let r = j - ar.c;
+                                Vec2 { x: -r.y, y: r.x }
+                            }
+                        };
+                        let start = st.rx.wires()[kb].start.at();
+                        let ang = acute_angle(j - approach_point(st, kb, start), tan);
+                        st.jangle[i] = Some(ang);
+                        let min = cx.opts.expert.steiner_min_angle_deg;
+                        let len: f64 = st.conn_legs[i]
+                            .iter()
+                            .filter_map(|&k| st.ok.get(k).and_then(|o| o.as_ref()).map(|o| o.len))
+                            .sum();
+                        let cap = cx.opts.expert.steiner_len_slack.max(1.0) * jn.est_len
+                            + JUNCTION_LEN_ABS_NM;
+                        if ang + 1e-9 < min {
+                            Some((format!("junction: angle {ang:.1} deg < {min:.0} deg"), true))
+                        } else if len > cap {
+                            Some((
+                                format!(
+                                    "junction: metrized {:.2} mm > {:.2} mm (search estimate {:.2} mm)",
+                                    len * 1e-6,
+                                    cap * 1e-6,
+                                    jn.est_len * 1e-6
+                                ),
+                                true,
+                            ))
+                        } else {
+                            None
+                        }
+                    }
+                }
+            }
+        };
+        if let Some((reason, reject)) = verdict {
+            st.unindex(kb);
+            st.ok[kb] = None;
+            st.fail[kb] = Some(fail(reason));
+            st.pending[kb] = false;
+            if reject {
+                rejects.push((i, jn.sibling.map_or(usize::MAX, |x| x.0)));
+            }
+        }
+    }
+}
+
+/// Split `items`' track on `layer` that passes through `p` (KiCad frame) into two pieces at
+/// `p` (the sibling side of a T-junction), unless `p` is already an end or a piece would be
+/// shorter than [`JUNCTION_SPLIT_MIN_NM`]. O(items).
+fn split_track_at(items: &mut Vec<Item>, layer: u32, p: crate::geom::quant::IVec2) {
+    let pf = p.to_f64();
+    let mut best: Option<(usize, f64)> = None;
+    for (n, it) in items.iter().enumerate() {
+        if let Item::Track(t) = it {
+            if t.layer != layer {
+                continue;
+            }
+            let d = point_prim_dist(pf, &dequantise(&t.prim));
+            if d <= 2.0 && best.is_none_or(|b| d < b.1) {
+                best = Some((n, d));
+            }
+        }
+    }
+    let Some((n, _)) = best else { return };
+    let Item::Track(t) = items[n].clone() else {
+        return;
+    };
+    let (a, b) = (t.prim.start(), t.prim.end());
+    if a == p
+        || b == p
+        || (a.to_f64() - pf).len() < JUNCTION_SPLIT_MIN_NM
+        || (b.to_f64() - pf).len() < JUNCTION_SPLIT_MIN_NM
+    {
+        return;
+    }
+    let pieces = match t.prim {
+        TrackPrim::Seg { a, b } => [TrackPrim::Seg { a, b: p }, TrackPrim::Seg { a: p, b }],
+        TrackPrim::Arc { start, end, .. } => {
+            let Prim::Arc(ar) = dequantise(&t.prim) else {
+                return;
+            };
+            let v = pf - ar.c;
+            let ang = v.y.atan2(v.x);
+            let rel = ((ang - ar.a_start) * ar.sigma.sign()).rem_euclid(std::f64::consts::TAU);
+            if ar.sweep <= 0.0 || rel <= 0.0 || rel >= ar.sweep {
+                return;
+            }
+            let f = rel / ar.sweep;
+            [
+                TrackPrim::Arc {
+                    start,
+                    mid: round_nm(ar.point_at(0.5 * f)),
+                    end: p,
+                },
+                TrackPrim::Arc {
+                    start: p,
+                    mid: round_nm(ar.point_at(0.5 * (1.0 + f))),
+                    end,
+                },
+            ]
+        }
+    };
+    let mk = |prim: TrackPrim| Item::Track(TrackItem { prim, ..t.clone() });
+    items.splice(n..=n, pieces.into_iter().map(mk));
+}
+
+/// A5 epilogue of [`metrize_zs`]: a junction connection whose sibling did not come out `Ok`
+/// fails too (to a fixed point over chains of attachments), and every `Ok` sibling's track is
+/// split at the junction end. O(res · chain depth + junctions · items).
+fn finish_junctions(mg: &MultiGraph, res: &mut [(usize, Res)]) {
+    let idx: BTreeMap<usize, usize> = res.iter().enumerate().map(|(n, (i, _))| (*i, n)).collect();
+    loop {
+        let mut changed = false;
+        for n in 0..res.len() {
+            let i = res[n].0;
+            let Some((s, _)) = mg.junction_of(i).and_then(|j| j.sibling) else {
+                continue;
+            };
+            if !matches!(res[n].1, Res::Ok(_)) {
+                continue;
+            }
+            if !idx.get(&s).is_some_and(|&m| matches!(res[m].1, Res::Ok(_))) {
+                res[n].1 = fail("junction: sibling not routed");
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut splits: Vec<(usize, u32, crate::geom::quant::IVec2)> = Vec::new();
+    for (i, r) in res.iter() {
+        let (Some((s, _)), Res::Ok(b)) = (mg.junction_of(*i).and_then(|j| j.sibling), r) else {
+            continue;
+        };
+        let end = b.items.iter().rev().find_map(|it| match it {
+            Item::Track(t) => Some((t.layer, t.prim.end())),
+            _ => None,
+        });
+        if let (Some(&m), Some((layer, p))) = (idx.get(&s), end) {
+            splits.push((m, layer, p));
+        }
+    }
+    for (m, layer, p) in splits {
+        if let Res::Ok(a) = &mut res[m].1 {
+            split_track_at(&mut a.items, layer, p);
+        }
     }
 }
 
@@ -787,6 +1488,7 @@ fn metrize_zs(
         check_s: 0.0,
         timed_out: false,
         zs_corridor: None,
+        rejects: Vec::new(),
     };
     let m = cx.conns.len();
     let mut in_routed = vec![false; m];
@@ -805,89 +1507,41 @@ fn metrize_zs(
             for k in std::mem::take(&mut st.conn_legs[i]) {
                 st.drop_leg(k);
             }
+            st.jat[i] = None;
+            st.jangle[i] = None;
         }
     }
     // Step 1: re-sketch; a leg whose anchor sequence changed starts from scratch.
     let base = st.base_for(obs, mg);
     for &i in routed {
-        let c = &cx.conns[i];
         let ks = legs_of(mg, i).to_vec();
         let installing = st.conn_legs[i].is_empty();
         if installing {
             st.conn_legs[i] = ks.clone();
         }
+        let jn = mg.junction_of(i);
+        st.jat[i] = jn.map(|j| st.jat[i].unwrap_or(j.at));
         for (ord, &k) in ks.iter().enumerate() {
             st.ensure(k);
-            let (Some(li), Some((start_t, goal_t))) =
+            let (Some(li), Some((start_t, mut goal_t))) =
                 (mg.leg_layer(k), leg_terminals(cx, mg, i, ord, ks.len()))
             else {
                 st.drop_leg(k);
                 st.fail[k] = Some(fail("sketch: inconsistent slot path"));
                 continue;
             };
-            if installing {
-                st.leg_layer[k] = li;
-                st.leg_conn[k] = i;
-                st.rx.replace(
-                    k,
-                    Wire {
-                        id: k,
-                        net: c.net,
-                        layer: cx.layers[li],
-                        width: c.width,
-                        hand: vec![start_t.at(), goal_t.at()],
-                        hand_len: (goal_t.at() - start_t.at()).len(),
-                        start: start_t.clone(),
-                        goal: goal_t.clone(),
-                        kept_uuids: Vec::new(),
-                    },
-                );
+            if let (true, Some(j)) = (ord + 1 == ks.len(), st.jat[i]) {
+                goal_t = Terminal::Junction { at: j };
             }
-            let g = &mg.layers[li].g;
-            let ls = &*base[li];
-            let Some(path) = leg_crossings(g, k, start_t.at(), goal_t.at(), ls) else {
-                st.drop_leg(k);
-                st.fail[k] = Some(fail("sketch: inconsistent slot path"));
-                continue;
-            };
-            let (start, goal) = (start_t.at(), goal_t.at());
-            if let Some(p) = unanchored_bends(start, goal, &path, ls).first() {
-                st.drop_leg(k);
-                st.fail[k] = Some(fail(format!(
-                    "sketch: path bends at a wall split vertex ({}, {})",
-                    kicad(*p)[0],
-                    kicad(*p)[1]
-                )));
-                continue;
-            }
-            let s = sketch_from_crossings(k, start, goal, path, ls);
-            st.ncross[k] = s.crossings.len();
-            st.bcross[k] = s.crossings.clone();
-            if st.seqs[k].as_ref() != Some(&s.seq) {
-                st.rx.set(k, &s.seq);
-                st.seqs[k] = Some(s.seq);
-                st.unindex(k);
-                st.ok[k] = None;
-                st.fail[k] = None;
-                st.pending[k] = false;
-            }
+            sketch_leg(cx, mg, st, &base[li], i, k, li, &start_t, &goal_t, installing);
         }
     }
     let nk = st.seqs.len();
     let present: Vec<usize> = (0..nk).filter(|&k| st.seqs[k].is_some()).collect();
     // Stacks from the nesting of the crossings on the sketch triangulation (Fix-B1 (a)); leg ids (unique
     // across layers, so the per-layer nestings merge without collisions).
-    let mut nesting = SlotNesting::default();
-    for (li, sk) in base.iter().enumerate() {
-        let legs: Vec<(usize, &[Crossing])> = present
-            .iter()
-            .filter(|&&k| st.leg_layer[k] == li)
-            .map(|&k| (k, st.bcross[k].as_slice()))
-            .collect();
-        if !legs.is_empty() {
-            base_nesting(&legs, sk, &mut nesting);
-        }
-    }
+    let jpairs = junction_pairs(mg, st, routed);
+    let nesting = metr_nesting(st, &base, &present, &jpairs);
     st.rx.set_nesting(&nesting);
     let zs_leg = zs.and_then(|z| match legs_of(mg, z.live) {
         [k] if st.seqs.get(*k).is_some_and(|s| s.is_some()) => Some(*k),
@@ -916,6 +1570,39 @@ fn metrize_zs(
     );
     out.relax_iterations = run.sweeps;
     out.timed_out = run.timed_out;
+    let mut run_changed = run.changed.clone();
+    // A5: move every junction point onto its sibling's chain (closest to the joining wire's
+    // approach), re-relax the moved legs; at most JUNCTION_ROUNDS rounds.
+    if !jpairs.is_empty() || routed.iter().any(|&i| mg.junction_of(i).is_some()) {
+        for _ in 0..JUNCTION_ROUNDS {
+            if cx.stop() {
+                break;
+            }
+            let moved = refine_junctions(cx, mg, st, &base, routed);
+            if moved.is_empty() {
+                break;
+            }
+            let present: Vec<usize> = (0..st.seqs.len()).filter(|&k| st.seqs[k].is_some()).collect();
+            let jpairs = junction_pairs(mg, st, routed);
+            let nesting = metr_nesting(st, &base, &present, &jpairs);
+            st.rx.set_nesting(&nesting);
+            let r2 = st.rx.run(
+                &moved,
+                obs,
+                &RunOpts {
+                    opts: cx.opts,
+                    deadline: cx.deadline,
+                    zs: zsw.as_ref(),
+                    anytime: true,
+                },
+            );
+            out.relax_iterations += r2.sweeps;
+            out.timed_out |= r2.timed_out;
+            run_changed.extend(r2.changed.iter().copied());
+        }
+    }
+    let nk = st.seqs.len();
+    let present: Vec<usize> = (0..nk).filter(|&k| st.seqs[k].is_some()).collect();
     if let Some(z) = zsw
         .as_ref()
         .filter(|z| z.anchors.is_none() && z.walls.is_none())
@@ -935,8 +1622,10 @@ fn metrize_zs(
     let zs_wire = zsw.as_ref().map(|z| z.wire);
     // Quantise the legs whose chain changed (or that have no result yet).
     let mut changed = vec![false; nk];
-    for &k in &run.changed {
-        changed[k] = true;
+    for &k in &run_changed {
+        if k < nk {
+            changed[k] = true;
+        }
     }
     for &k in &present {
         if !changed[k] && (st.ok[k].is_some() || st.fail[k].is_some()) {
@@ -1003,6 +1692,9 @@ fn metrize_zs(
             Err(e) => st.fail[k] = Some(taut_reason(e)),
         }
     }
+
+    // A5: a junction leg must end on its sibling's chain at no less than the junction angle.
+    validate_junctions(cx, mg, st, routed, &mut out.rejects);
 
     // Step 3: self-check rounds (fallback granularity = connection) of the pending legs
     // against the checked ones (listed first: a violation is charged to the later item, the
@@ -1124,10 +1816,12 @@ fn metrize_zs(
                 vias: sites.len(),
                 layers,
                 via_sites: sites.iter().map(|&s| kicad(mg.sites[s].at)).collect(),
+                junction: mg.junction_of(i).map(|_| st.jangle[i].unwrap_or(90.0)),
             })
         };
         out.res.push((i, r));
     }
+    finish_junctions(mg, &mut out.res);
     out
 }
 
@@ -1851,9 +2545,16 @@ fn via_reduction_pass(
 ) -> Reduction {
     let live = cx.conns;
     let m = live.len();
+    // A5: a connection with junctions attached keeps its path (removing it would cascade).
     let mut cands: Vec<(usize, usize)> = (0..m)
         .filter_map(|i| match &best.res[i] {
-            Res::Ok(k) if k.vias >= 1 && rt.goals[i].pour_sites.is_empty() => Some((k.vias, i)),
+            Res::Ok(k)
+                if k.vias >= 1
+                    && rt.goals[i].pour_sites.is_empty()
+                    && best.mg.dependents(i).is_empty() =>
+            {
+                Some((k.vias, i))
+            }
             _ => None,
         })
         .collect();
@@ -1949,6 +2650,98 @@ fn via_reduction_pass(
     out
 }
 
+/// A5 junction repair, one pass from the best iteration: a connection whose junction the
+/// metrization rejected (angle, end off the sibling, overshoot) is failed in that iteration
+/// although its pad route (or another junction) is usually free; it is searched once more in the
+/// best graph (the rejected pair excluded, `MultiGraph::steiner_reject`) and kept when every
+/// routed connection still metrizes. Returns `(repaired, candidates)`. Complexity: at most one
+/// search + one incremental metrization per rejected connection; deadline / cancel checked per
+/// candidate.
+fn junction_repair_pass(
+    cx: &Ctx,
+    obs: &mut ObstacleSet,
+    rt: &Route,
+    neg: &Negotiator,
+    best: &mut Snap,
+) -> (usize, usize) {
+    let live = cx.conns;
+    let m = live.len();
+    let cands: Vec<usize> = (0..m)
+        .filter(|&i| {
+            matches!(&best.res[i], Res::Fail { reason, perm: false, .. } if reason.starts_with("junction:"))
+        })
+        .collect();
+    let mut fixed = 0usize;
+    for &c in &cands {
+        if cx.stop() {
+            break;
+        }
+        let mut mg = best.mg.clone();
+        mg.sync_anchors(obs, &rt.net_of());
+        mg.remove_conn(c, obs);
+        if !mg.take_cascaded().is_empty() {
+            continue;
+        }
+        let params = SearchParams {
+            history: &neg.history,
+            site_history: &neg.site_history,
+            weight: tier_weight(live[c].tier),
+            present_overuse: cx.opts.expert.present_overuse,
+            expansion_cap: default_expansion_cap(&mg),
+            deadline: cx.deadline,
+            eps: None,
+            via_cost: cx.opts.via_cost_for(live[c].net) as f64 * via_weight(live[c].tier),
+            max_vias: cx.opts.max_vias_per_connection,
+            strict_unfit_edges: cx.opts.strict_unfit_edges,
+        };
+        let p = match search(&mg, obs, &live[c], &rt.starts[c], &rt.goals[c], &params) {
+            SearchOutcome::Found(p) => p,
+            SearchOutcome::Timeout => break,
+            SearchOutcome::Blocked { .. } => continue,
+        };
+        mg.insert_path(&live[c], &p, obs);
+        let routed: Vec<usize> = (0..m)
+            .filter(|&i| i == c || matches!(best.res[i], Res::Ok(_)))
+            .collect();
+        let mut metr = best.metr.clone();
+        let mt = metrize(cx, obs, &mg, &routed, &mut metr, &[c]);
+        if mt.timed_out {
+            break;
+        }
+        let all_ok =
+            mt.res.len() == routed.len() && mt.res.iter().all(|(_, r)| matches!(r, Res::Ok(_)));
+        if !all_ok {
+            continue;
+        }
+        let mut res = best.res.clone();
+        for (i, r) in mt.res {
+            res[i] = r;
+        }
+        let mut paths = best.paths.clone();
+        paths[c] = Some(p);
+        let (nok, vias, len, outl) = tally(&res);
+        best.clinches = detect_clinches(&mg, live, &paths, rt.starts);
+        best.routed = nok;
+        best.vias = vias;
+        best.len = len;
+        best.out = outl;
+        best.res = res;
+        best.overuse_edges = mg
+            .layers
+            .iter()
+            .map(|l| (0..l.g.edges.len()).filter(|&e| l.g.overuse(e) > 0.0).count())
+            .sum();
+        best.relax_iterations = mt.relax_iterations;
+        best.rounds = mt.rounds;
+        best.paths = paths;
+        best.mg = mg;
+        best.metr = metr;
+        fixed += 1;
+    }
+    best.mg.sync_anchors(obs, &rt.net_of());
+    (fixed, cands.len())
+}
+
 /// Zero-slack retry (R6), one pass from the best iteration's graph. The detoured connections
 /// (`est_len > DETOUR_FACTOR × straight`) leave the graph; every routed connection is searched
 /// once at margin 0 (empty history). The candidates (single-leg paths, estimated gain >
@@ -1971,9 +2764,11 @@ fn zero_slack_pass(
     let mut mg = best.mg.clone();
     mg.sync_anchors(obs, &rt.net_of());
     let ok = |i: usize| matches!(best.res[i], Res::Ok(_));
+    // A5: junction-linked connections keep their paths (a removal would cascade).
     let detoured: Vec<usize> = (0..m)
         .filter(|&i| {
             ok(i)
+                && !mg.has_junction_link(i)
                 && best.paths[i].as_ref().is_some_and(|p| {
                     p.legs.iter().any(|l| !l.crossings.is_empty())
                         && p.est_len > cx.opts.detour_factor * (live[i].from.at - live[i].to.at).len()
@@ -2005,7 +2800,8 @@ fn zero_slack_pass(
     let failed = |i: usize| {
         cx.opts.zero_slack_failed && matches!(best.res[i], Res::Fail { perm: false, .. })
     };
-    for i in (0..m).filter(|&i| ok(i) || failed(i)) {
+    let linked: Vec<bool> = (0..m).map(|i| mg.has_junction_link(i)).collect();
+    for i in (0..m).filter(|&i| (ok(i) || failed(i)) && !linked[i]) {
         let old = match best.paths[i].as_ref() {
             Some(p) if ok(i) => p.est_len,
             _ if !ok(i) => f64::INFINITY,
@@ -2046,7 +2842,11 @@ fn zero_slack_pass(
                 } else {
                     f64::MAX
                 };
-                if gain > ZS_GAIN_MIN_NM && p.legs.len() == 1 && p.sites.is_empty() {
+                if gain > ZS_GAIN_MIN_NM
+                    && p.legs.len() == 1
+                    && p.sites.is_empty()
+                    && p.junction.is_none()
+                {
                     cands.push((gain, i, p));
                 }
             }
@@ -2331,6 +3131,8 @@ fn append_ignored(r: &mut RouteResult, model: &BoardModel, removed: &[usize]) {
             stub_nm: 0,
             neck_nm: 0,
             neck_width_nm: None,
+            junction: false,
+            junction_angle_deg: None,
         });
     }
 }
@@ -2846,6 +3648,113 @@ fn route_inner(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteRes
     r
 }
 
+/// A5: the Steiner context of one pass: per live connection its net, the clusters of its ends
+/// (`Decomposition::conn_clusters`), whether it targets a pour, the vertex owner labels of its
+/// terminals; per cluster the constraint edges of its kept tracks (both ends kept-track vertices
+/// of that cluster or wall split vertices). O(m + Σ_L E_L).
+fn steiner_nets(
+    model: &BoardModel,
+    opts: &Options,
+    dec: &crate::decompose::Decomposition,
+    live: &[Connection],
+    orig: &[usize],
+    mg: &MultiGraph,
+) -> crate::steiner::SteinerNets {
+    use crate::steiner::{owner_labels, SConn, SteinerNets};
+    let conns: Vec<SConn> = live
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            // A connection the decomposition gave no clusters joins nothing (unique ids).
+            let (f, t) = dec
+                .conn_clusters
+                .get(orig[i])
+                .copied()
+                .unwrap_or((usize::MAX - 2 * i, usize::MAX - 2 * i - 1));
+            SConn {
+                net: c.net,
+                from_cl: f,
+                to_cl: t,
+                pour: matches!(c.to.kind, TermKind::Pour(_)),
+                owners: [owner_labels(&c.from), owner_labels(&c.to)],
+            }
+        })
+        .collect();
+    let mut by_net: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
+    for (i, c) in live.iter().enumerate() {
+        by_net.entry(c.net).or_default().push(i);
+    }
+    let kept_cl: BTreeMap<String, usize> = dec
+        .kept_cluster
+        .iter()
+        .filter_map(|(&ki, &cl)| model.kept.get(ki).map(|k| (format!("kept:{}", k.uuid), cl)))
+        .collect();
+    // Pads / vias -> their cluster, by every vertex owner label they appear under (a hand
+    // track that ends at a pad centre shares that vertex with the pad).
+    let mut term_cl: BTreeMap<String, usize> = BTreeMap::new();
+    for (&pi, &cl) in &dec.pad_cluster {
+        let p = &model.pads[pi];
+        term_cl.entry(format!("{}.{}", p.ref_, p.number)).or_insert(cl);
+        term_cl.entry(format!("pad:{}:{}", p.ref_, p.number)).or_insert(cl);
+    }
+    for (&vi, &cl) in &dec.via_cluster {
+        let v = &model.vias[vi];
+        term_cl.entry(v.uuid.clone()).or_insert(cl);
+        term_cl.entry(format!("via:{}", v.uuid)).or_insert(cl);
+    }
+    let mut copper: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
+    for (li, lc) in mg.layers.iter().enumerate() {
+        let g = &lc.g;
+        for (e, ge) in g.edges.iter().enumerate() {
+            if !ge.constraint {
+                continue;
+            }
+            // (cluster, is a kept-track vertex, owner) of an end; `None` = not track copper.
+            let end = |v: usize| -> Option<(Option<usize>, bool, Option<&str>)> {
+                let vi = &g.verts[v];
+                match vi.owner.as_deref() {
+                    Some(o) => match (kept_cl.get(o), term_cl.get(o)) {
+                        (Some(&c), _) => Some((Some(c), true, Some(o))),
+                        (None, Some(&c)) => Some((Some(c), false, Some(o))),
+                        _ => None,
+                    },
+                    None if vi.anchor.is_none() && vi.site.is_none() => Some((None, false, None)),
+                    None => None,
+                }
+            };
+            let (Some((ca, ka, oa)), Some((cb, kb, ob))) = (end(ge.a), end(ge.b)) else {
+                continue;
+            };
+            let cl = match (ca, cb) {
+                (Some(x), Some(y)) if x == y => x,
+                (Some(x), None) | (None, Some(x)) => x,
+                _ => continue,
+            };
+            // A track piece: a kept-track end, or two different terminals (one pad's own
+            // outline is not a track).
+            let key = |o: &str| -> String {
+                if let Some(r) = o.strip_prefix("pad:") {
+                    r.replacen(':', ".", 1)
+                } else {
+                    o.strip_prefix("via:").unwrap_or(o).to_string()
+                }
+            };
+            let track = ka
+                || kb
+                || matches!((oa, ob), (Some(x), Some(y)) if key(x) != key(y));
+            if track {
+                copper.entry(cl).or_default().push((li, e));
+            }
+        }
+    }
+    SteinerNets {
+        min_angle_deg: opts.expert.steiner_min_angle_deg.clamp(0.0, 90.0),
+        conns,
+        by_net,
+        copper,
+    }
+}
+
 /// One routing pass over the unconnected nets of `model` on every routable copper layer, with
 /// through vias at pre-placed sites (M3): decompose, obstacles, via sites, one graph per layer,
 /// PathFinder over layers and sites, per-leg metrization with a self-check, partial stubs,
@@ -2957,6 +3866,8 @@ fn route_pass(
     let mut n_sites = 0usize;
     // Detour reference per live connection (M3-R11): the ghost on the empty graph.
     let mut ghost_ref: Vec<Option<f64>> = vec![None; m];
+    // Ghost cost (`est_len + via_cost * vias`) per live connection: the A5 junction cap.
+    let mut ghost_cost: Vec<Option<f64>> = vec![None; m];
     // DRC-feasible reference per live connection (M3-R15): (length, is_feasible).
     let mut feas_ref: Vec<Option<f64>> = vec![None; m];
     let mut via_status: String = if opts.via_reduction { "not run" } else { "off" }.into();
@@ -3113,6 +4024,9 @@ fn route_pass(
                     transit: opts.expert.transit_pinch,
                 });
                 mg.set_layer_costs(model, opts);
+                if opts.steiner {
+                    mg.steiner = Some(Arc::new(steiner_nets(model, opts, &dec, &live, &orig, &mg)));
+                }
                 if let Some(reach) = reach {
                     for s in 0..mg.sites.len() {
                         let at = mg.sites[s].at;
@@ -3150,12 +4064,14 @@ fn route_pass(
                                 vertices,
                                 pour_layer: routable.iter().position(|l| c.to.layers.contains(l)),
                                 pour_sites,
+                                ..Default::default()
                             }
                         }
                         _ => Goal {
                             vertices: vertices(&c.to),
                             pour_sites: Vec::new(),
                             pour_layer: None,
+                            ..Default::default()
                         },
                     };
                     if perm[i].is_none()
@@ -3180,17 +4096,12 @@ fn route_pass(
                     checker: &checker,
                     deadline,
                 };
-                let rt = Route {
-                    starts: &starts,
-                    goals: &goals,
-                    nets: live.iter().map(|c| c.net).collect(),
-                };
                 // Static ghost per connection on the empty graph, in parallel, index order
                 // (deterministic: the ghost is a pure function of the frozen graph).
                 {
                     let cap = default_expansion_cap(&mg);
                     let (mg_ro, obs_ro) = (&mg, &obs);
-                    ghost_ref = (0..m)
+                    let gh: Vec<Option<(f64, f64)>> = (0..m)
                         .into_par_iter()
                         .map(|i| {
                             if perm[i].is_some() {
@@ -3210,9 +4121,18 @@ fn route_pass(
                                 strict_unfit_edges: opts.strict_unfit_edges,
                             };
                             ghost(mg_ro, obs_ro, c, &starts[i], &goals[i], &params)
-                                .map(|(gp, ..)| gp.est_len)
+                                .map(|(gp, ..)| (gp.est_len, gp.est_len + params.via_cost * gp.vias() as f64))
                         })
                         .collect();
+                    ghost_ref = gh.iter().map(|g| g.map(|x| x.0)).collect();
+                    ghost_cost = gh.iter().map(|g| g.map(|x| x.1)).collect();
+                }
+                // A5: a junction may cost at most `steiner_ghost_factor` times the pad route.
+                if opts.steiner {
+                    let f = opts.expert.steiner_ghost_factor.max(0.0);
+                    for (g, c) in goals.iter_mut().zip(&ghost_cost) {
+                        g.junction_cap = c.map(|c| f * c);
+                    }
                 }
                 // DRC-feasible reference (M3-R15): one slot search per connection on the same
                 // empty graph (fixed copper only), after the ghost, under its own deadline share.
@@ -3256,6 +4176,11 @@ fn route_pass(
                         })
                         .collect();
                 }
+                let rt = Route {
+                    starts: &starts,
+                    goals: &goals,
+                    nets: live.iter().map(|c| c.net).collect(),
+                };
                 let mut neg = Negotiator::new(&mg, m);
                 neg.configure(opts);
                 let mut active: Vec<usize> = (0..m).filter(|&i| perm[i].is_none()).collect();
@@ -3292,9 +4217,15 @@ fn route_pass(
                         .collect();
                     let mut work: Vec<usize> = active.clone();
                     work.extend(out.ripped.iter().copied());
+                    // A5: connections searched because their junction sibling left the graph.
+                    work.extend(out.cascaded.iter().copied());
+                    let _ = mg.take_cascaded();
                     let t_metrize = Instant::now();
                     let mt = metrize(&cx, &obs, &mg, &routed, &mut metr, &work);
                     let metrize_s = t_metrize.elapsed().as_secs_f64();
+                    if mg.steiner.is_some() {
+                        record_chain_cross(&mut mg, &metr, &routed);
+                    }
                     // Anytime: a timed-out metrization still yields what it completed; the
                     // loop ends after this iteration's result is recorded.
                     if mt.timed_out {
@@ -3317,6 +4248,7 @@ fn route_pass(
                             ripped: out.ripped.len(),
                             routed: routed.len(),
                             overuse_edges: out.overuse_edges,
+                            steiner_researched: out.steiner_researched,
                             ..Default::default()
                         });
                     }
@@ -3352,6 +4284,7 @@ fn route_pass(
                             }),
                         })
                         .collect();
+                    mg.steiner_reject.extend(mt.rejects.iter().copied());
                     for (i, r) in mt.res {
                         res[i] = r;
                     }
@@ -3386,6 +4319,8 @@ fn route_pass(
                     for &i in &failed {
                         mg.remove_conn(i, &mut obs);
                     }
+                    // A5: junctions that lost their sibling with these removals route again.
+                    let cascaded = mg.take_cascaded();
                     let overuse = neg.penalise_overuse(&mg);
                     let (nok, vias, len, out_len) = tally(&res);
                     let better = best.as_ref().is_none_or(|b| better_than(nok, vias, len, b));
@@ -3465,6 +4400,7 @@ fn route_pass(
                         break;
                     }
                     let mut next: BTreeSet<usize> = failed.into_iter().collect();
+                    next.extend(cascaded);
                     next.extend(out.blocked.keys().copied());
                     next.extend(out.ripped.iter().copied());
                     next.extend(overused_conns(&mg));
@@ -3473,6 +4409,17 @@ fn route_pass(
                     if active.is_empty() {
                         converged = true;
                         break;
+                    }
+                }
+                if opts.steiner && !timed_out {
+                    if let Some(b) = best.as_mut() {
+                        let (fixed, n) = junction_repair_pass(&cx, &mut obs, &rt, &neg, b);
+                        if n > 0 {
+                            warnings.push(format!(
+                                "junction repair: {fixed} of {n} connection(s) whose junction was \
+                                 rejected routed again"
+                            ));
+                        }
                     }
                 }
                 if !opts.via_reduction {
@@ -3607,6 +4554,8 @@ fn route_pass(
             stub_nm: 0,
             neck_nm: 0,
             neck_width_nm: None,
+            junction: false,
+            junction_angle_deg: None,
         };
         if let Some(&k) = bridged.get(&c.id) {
             // A6 bridge: the connection is the one planned track (checked with the plan).
@@ -3726,6 +4675,8 @@ fn route_pass(
                             rep.pattern = o.pattern.clone();
                             rep.anchors = o.anchors;
                             rep.crossings = o.crossings;
+                            rep.junction = o.junction.is_some();
+                            rep.junction_angle_deg = o.junction;
                             total_len += len;
                             out_total += out;
                         }

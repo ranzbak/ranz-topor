@@ -137,7 +137,8 @@ SETTINGS: list[Setting] = [
        engine="neck_max_nm", since=V5),
     _s("search", "pad_bridge_max_mm", "float", 2.0, "Two pads of one footprint on the same net at most this far apart are joined by one straight track when it fits (possibly off the pad centre line), instead of a searched route; with exit_stubs = auto only where a pad needs a stub. 0 = off.",
        unit="mm", range=(0, 100), engine="pad_bridge_max_nm", since=V5),
-    _s("search", "steiner", "bool", True, "Allow same-net T-junctions in the middle of a track instead of only at pads.", since=V5),
+    _s("search", "steiner", "bool", True, "Allow same-net T-junctions: a connection may end on an already routed track of its own net (or on kept hand copper it connects to) instead of only at a pad, so sibling connections of one net share a pad exit (false = pad to pad only).",
+       engine="steiner", since=V5),
     _s("search", "dangling_ends", "str", "continue", "What to do with existing track ends that connect to nothing: continue them or drop them.",
        choices=("continue", "drop"), since=V5),
     _s("search", "strict_unfit_edges", "bool", False, "Fail a connection when a graph edge is too narrow for its trace even when empty, instead of pricing the crossing as overuse (stricter; may leave tight boards incomplete).",
@@ -172,6 +173,12 @@ SETTINGS: list[Setting] = [
        engine="expert.wall_aware_capacity", since=V5),
     _s("expert", "transit_pinch", "bool", True, "Search: refuse to pass around a pad or via that a wall (board edge, keepout, other copper) pinches below the track's width plus clearances.",
        engine="expert.transit_pinch", since=V5),
+    _s("expert", "steiner_min_angle_deg", "float", 60.0, "Same-net T-junctions: the joining track must meet the track it joins at no less than this angle (all three angles at the T are then at least this); below 60 the branch forms an acute sliver (acid trap).",
+       unit="°", range=(0, 90), engine="expert.steiner_min_angle_deg", since=V5),
+    _s("expert", "steiner_len_slack", "float", 1.1, "Same-net T-junctions: a junction whose final track is longer than this factor times the search's estimate (+ 1 mm) is dropped and the connection routed again without it.",
+       range=(1.0, 10), engine="expert.steiner_len_slack", since=V5),
+    _s("expert", "steiner_ghost_factor", "float", 1.0, "Same-net T-junctions: a junction is taken only while its length plus via cost stays within this factor of the connection's own pad-to-pad estimate on the empty board (1 = only junctions cheaper than the free pad route; larger also lets junctions dodge congestion).",
+       range=(0.0, 10), engine="expert.steiner_ghost_factor", since=V5),
     _s("expert", "drc_loop_cap", "int", 5, "Maximum route / DRC / re-route rounds.", range=(1, 50), engine="drc_loop_cap"),
 ]
 

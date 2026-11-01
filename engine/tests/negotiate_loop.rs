@@ -63,6 +63,7 @@ fn goals_of(v: &Verts) -> Vec<Goal> {
             vertices: vec![(0, t)],
             pour_sites: Vec::new(),
             pour_layer: None,
+            ..Default::default()
         })
         .collect()
 }
@@ -588,6 +589,7 @@ fn negotiate_contention(t: &mut Two) -> (Negotiator, Vec<Option<SlotPath>>, Vec<
             vertices: vec![(1, vertex_on(t, 1, n))],
             pour_sites: Vec::new(),
             pour_layer: None,
+            ..Default::default()
         })
         .collect();
     let mut neg = Negotiator::new(&t.mg, 2);

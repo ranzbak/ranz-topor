@@ -87,7 +87,7 @@ Path search tuning.
 | `neck_to_pad` | bool | `true` |  | true\|false | Necking: an exit stub may be narrower than the net's track width (down to KiCad's minimum track width or the net's custom-rule minimum) where the full width does not fit out of the pad; the rest of the trace keeps its width. The run report lists every necked stub. KiCad: KiCad → File → Board Setup → Design Rules → Constraints → Minimum track width (and custom rules: track_width min). *Since 0.5.0.* |
 | `neck_max_mm` | float | `0.0` | mm | 0 .. 100 | Longest necked stub; 0 = twice the pad's long side. *Since 0.5.0.* |
 | `pad_bridge_max_mm` | float | `2.0` | mm | 0 .. 100 | Two pads of one footprint on the same net at most this far apart are joined by one straight track when it fits (possibly off the pad centre line), instead of a searched route; with exit_stubs = auto only where a pad needs a stub. 0 = off. *Since 0.5.0.* |
-| `steiner` | bool | `true` |  | true\|false | Allow same-net T-junctions in the middle of a track instead of only at pads. *Since 0.5.0.* |
+| `steiner` | bool | `true` |  | true\|false | Allow same-net T-junctions: a connection may end on an already routed track of its own net (or on kept hand copper it connects to) instead of only at a pad, so sibling connections of one net share a pad exit (false = pad to pad only). *Since 0.5.0.* |
 | `dangling_ends` | str | `"continue"` |  | continue\|drop | What to do with existing track ends that connect to nothing: continue them or drop them. *Since 0.5.0.* |
 | `strict_unfit_edges` | bool | `false` |  | true\|false | Fail a connection when a graph edge is too narrow for its trace even when empty, instead of pricing the crossing as overuse (stricter; may leave tight boards incomplete). |
 | `pour_listed_via_goals` | bool | `false` |  | true\|false | A connection to a copper pour may end on a same-net via the pour already lists instead of always placing a new via (saves vias, may lengthen the trace). |
@@ -135,6 +135,9 @@ PathFinder constants; change only when you know the router.
 | `own_net_capacity` | bool | `true` |  | true\|false | Capacity rule: a pad's own edges charge no clearance gap for its own net and give its corner radius back, same-net tracks need no gap between each other (false = the net-blind 0.4.0 rule). *Since 0.5.0.* |
 | `wall_aware_capacity` | bool | `true` |  | true\|false | Capacity rule: on an edge with an own-net end, walls along it that are not its ends (board edge, keepouts, long pad sides) remove the part they block. *Since 0.5.0.* |
 | `transit_pinch` | bool | `true` |  | true\|false | Search: refuse to pass around a pad or via that a wall (board edge, keepout, other copper) pinches below the track's width plus clearances. *Since 0.5.0.* |
+| `steiner_min_angle_deg` | float | `60.0` | ° | 0 .. 90 | Same-net T-junctions: the joining track must meet the track it joins at no less than this angle (all three angles at the T are then at least this); below 60 the branch forms an acute sliver (acid trap). *Since 0.5.0.* |
+| `steiner_len_slack` | float | `1.1` |  | 1 .. 10 | Same-net T-junctions: a junction whose final track is longer than this factor times the search's estimate (+ 1 mm) is dropped and the connection routed again without it. *Since 0.5.0.* |
+| `steiner_ghost_factor` | float | `1.0` |  | 0 .. 10 | Same-net T-junctions: a junction is taken only while its length plus via cost stays within this factor of the connection's own pad-to-pad estimate on the empty board (1 = only junctions cheaper than the free pad route; larger also lets junctions dodge congestion). *Since 0.5.0.* |
 | `drc_loop_cap` | int | `5` |  | 1 .. 50 | Maximum route / DRC / re-route rounds. |
 
 ## Set in KiCad, not in `topor.toml`

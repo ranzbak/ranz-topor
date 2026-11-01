@@ -199,6 +199,7 @@ fn goal(v: &[(usize, usize)]) -> Goal {
         vertices: v.to_vec(),
         pour_sites: Vec::new(),
         pour_layer: None,
+        ..Default::default()
     }
 }
 
@@ -526,6 +527,7 @@ fn pour_goal_reaches_nearest_site_inside_pour() {
         vertices: Vec::new(),
         pour_sites: in_pour.clone(),
         pour_layer: Some(1),
+        ..Default::default()
     };
     let ctx = Ctx::new();
     let path = found(search(&b.mg, &b.obs, &c, &start, &g, &ctx.params()));

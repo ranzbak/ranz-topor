@@ -97,7 +97,16 @@ pub struct IterOutcome {
     pub search_s: f64,
     pub commit_s: f64,
     pub searched: usize,
+    /// A5: connections searched this iteration although not in `active`, because the sibling
+    /// their junction was attached to left the graph (the cascade); sorted.
+    pub cascaded: Vec<usize>,
+    /// A5: commit-phase re-searches toward a sibling committed earlier in this iteration.
+    pub steiner_researched: usize,
 }
+
+/// A5: re-search a committed path toward a sibling committed earlier in the same iteration when
+/// the junction lower bound is below this fraction of the path's cost (10 % potential gain).
+const STEINER_RESEARCH_FACTOR: f64 = 0.9;
 
 /// PathFinder state over the layers and via sites of a [`MultiGraph`] (note §4).
 pub struct Negotiator {
@@ -205,6 +214,29 @@ impl Negotiator {
         for &a in active {
             is_active[a] = true;
         }
+        // A5 cascade: a connection attached to an active one loses its sibling's copper with it,
+        // so it is searched again too (closure over chains of attachments; each round marks at
+        // least one more connection, so at most m rounds of O(m)).
+        let mut cascaded: Vec<usize> = Vec::new();
+        loop {
+            let mut grew = false;
+            for x in 0..conns.len() {
+                if is_active[x] {
+                    continue;
+                }
+                if let Some((s, _)) = mg.junction_of(x).and_then(|j| j.sibling) {
+                    if is_active.get(s).copied().unwrap_or(false) {
+                        is_active[x] = true;
+                        cascaded.push(x);
+                        grew = true;
+                    }
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        cascaded.sort_unstable();
         let cap = default_expansion_cap(mg);
         let mut blocked = BTreeMap::new();
         let mut timed_out = false;
@@ -245,14 +277,18 @@ impl Negotiator {
         let t0_layers: Vec<u64> = mg.layers.iter().map(|c| c.g.clock).collect();
         let t0_sites = mg.clock();
         let mut activated: Vec<(Vec2, f64)> = Vec::new();
+        // A5: connections committed in this loop (their copper was not in the frozen graph).
+        let mut fresh = vec![false; conns.len()];
+        let mut steiner_researched = 0usize;
         for (&i, (mut res, mut pre)) in todo.iter().zip(results) {
             let c = &conns[i];
             if let SearchOutcome::Found(p) = &res {
                 let v = Self::path_valid(mg, c, p, &t0_layers, t0_sites, &activated);
                 if v != Validity::Ok {
                     // Faces changed: the O(k) re-validation (F4); a via near the path changed
-                    // the geometry: search again.
-                    let fast = if v == Validity::Faces {
+                    // the geometry: search again. A junction path is always searched again (its
+                    // sibling's slot is part of the topology).
+                    let fast = if v == Validity::Faces && p.junction.is_none() {
                         revalidate_path(mg, c, p)
                     } else {
                         None
@@ -280,6 +316,34 @@ impl Negotiator {
                             );
                             res = search(mg, obs, c, &starts[i], &goals[i], &params);
                             pre = None;
+                        }
+                    }
+                }
+            }
+            // A5: a sibling committed earlier in this loop may offer a cheaper T-junction than
+            // the frozen-graph path; one sequential re-search, kept when it is a junction path
+            // of lower cost. Bounded: at most one per connection per iteration.
+            if let SearchOutcome::Found(p) = &res {
+                if p.junction.is_none() && mg.steiner.is_some() && !crate::control::expired(deadline)
+                {
+                    let lb = crate::steiner::lower_bound(mg, c, &fresh);
+                    if lb.is_some_and(|lb| lb < STEINER_RESEARCH_FACTOR * p.cost) {
+                        steiner_researched += 1;
+                        let params = params_for(
+                            c,
+                            &self.history,
+                            &self.site_history,
+                            cap,
+                            deadline,
+                            opts,
+                        );
+                        if let SearchOutcome::Found(q) =
+                            search(mg, obs, c, &starts[i], &goals[i], &params)
+                        {
+                            if q.junction.is_some() && q.cost < p.cost {
+                                res = SearchOutcome::Found(q);
+                                pre = None;
+                            }
                         }
                     }
                 }
@@ -323,6 +387,7 @@ impl Negotiator {
                         }
                     }
                     mg.insert_path(c, &p, obs);
+                    fresh[i] = true;
                     activated.extend(
                         p.sites
                             .iter()
@@ -386,6 +451,8 @@ impl Negotiator {
             ripped: ripped.into_iter().collect(),
             resolved_sequentially,
             revalidated,
+            cascaded,
+            steiner_researched,
         }
     }
 
@@ -449,6 +516,12 @@ impl Negotiator {
     ) -> Validity {
         if p.sites.iter().any(|&(s, _)| mg.site_version[s] > t0_sites) {
             return Validity::Sites;
+        }
+        // A5: the sibling a junction path ends on must still be in the graph.
+        if let Some((s, ord)) = p.junction.as_ref().and_then(|j| j.sibling) {
+            if mg.conn_wires.get(s).is_none_or(|w| w.len() <= ord) {
+                return Validity::Sites;
+            }
         }
         let mut faces_changed = false;
         let eps = mg.layers.first().map_or(0.0, |l| l.g.rules.eps);
