@@ -172,3 +172,9 @@ router 600.3 s, runtime 659.8 s, routing_new 0, preexisting 4 (clearance, hand c
   gate (M0–M4b): 18 passed, 3 failed: M2 + M3 dcsgone info tests (60 s): 204/240, failed 36, **drc_new 1** (routing_new must be 0,
   M3-R13 — probably A5's JP1 net-tie short; at 600 s the DRC loop clears it), M4b headless wiccon (total 63 ≠ 62, same as the plugin
   run-flow test). eprom/wiccon M0–M3 gate numbers green (eprom 27/27 64.628 mm 0 vias; wiccon 62/62 34 vias 1363.375 mm 1.49 s).
+
+## Coordinator rotation 2 (2026-11-01 →), base main 789e050
+Brief additions for every rotation-2 task: rotation-2-common.md (state, dcsgone measuring rule under load, acceptance).
+- Round 1a dispatched (worktree workers): TE (opus: route_steiner A5⊕A6, route_detour_ref, load flakes), NT (opus: JP1 net-tie short /
+  connection_width), PY (sonnet: pytest reds incl. wiccon plugin 63 vs 62), GR (sonnet: ripup growth sweep Q1 + pour_cut sweep),
+  DG (opus F: dcsgone diagnosis round 2). Round 1b after TE: VR (variants, A-C10), DO (detour rip-up phase + item 5 hidden detours).
