@@ -903,7 +903,7 @@ pub struct Options {
     pub blame_vias: bool,
     /// Router: after the negotiation, gradual blocker rip-up (`route::blocker_rip_pass`): the
     /// routed connection whose strands / vias block the most failed connections is ripped, its
-    /// victims routed first, then it again; kept only when more connections route.
+    /// victims routed first, then it again; kept on a net gain of routed connections.
     pub rip_pass: bool,
     /// Diagnostics: emit `RouteResult.profile` (per-iteration timers). Off by default: timings
     /// are run-dependent and must not enter the (thread-count independent) result JSON.

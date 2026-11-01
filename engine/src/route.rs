@@ -3358,12 +3358,14 @@ fn rip_order_key(o: usize, n: u32, v: usize) -> u64 {
 /// by `ripup_growth^k` (`k` = its attempts so far, at most [`RIP_PASS_PER_OFFENDER`]) is
 /// ripped with its vias; up to [`RIP_PASS_VICTIMS`] of its victims are searched first (in
 /// [`rip_order_key`] order), then the offender again; the result is metrized as the
-/// negotiation would ([`put_back`]) and kept only when the offender and every routed
-/// connection stay routed and at least one victim routes; else everything is undone. Scores
-/// are recomputed after every attempt; at most [`RIP_PASS_ATTEMPTS`] attempts. Victims that do
-/// not metrize keep their old failure. Deterministic. Complexity per attempt: one ghost per
-/// failed connection + `victims + 1` searches + one metrization; deadline and cancel checked
-/// per attempt and search.
+/// negotiation would ([`put_back`]). Routed connections the new paths broke get one repair
+/// round (searched again on the new graph, metrized again). The attempt is kept when the
+/// victims won outweigh the routed connections lost (tier weights): the lost ones become
+/// failed (`blocked: no path (after rip-up)` or their metrization reason) and later attempts
+/// can win them back; else everything is undone. Scores are recomputed after every attempt;
+/// at most [`RIP_PASS_ATTEMPTS`] attempts. Deterministic. Complexity per attempt: one ghost per
+/// failed connection + `victims + 1 + broken` searches + two metrizations; deadline and cancel
+/// checked per attempt and search.
 fn blocker_rip_pass(
     cx: &Ctx,
     obs: &mut ObstacleSet,
@@ -3473,7 +3475,7 @@ fn blocker_rip_pass(
         let new: Vec<usize> = found.iter().map(|(v, _)| *v).collect();
         let back = put_back(cx, &mut mg, obs, best, &|i| use_back && !new.contains(&i));
         let mut routed = routed_with(best, &back, None);
-        routed.extend(new.iter().copied().filter(|v| *v != o));
+        routed.extend(new.iter().copied());
         routed.sort_unstable();
         routed.dedup();
         let mut metr = best.metr.clone();
@@ -3484,15 +3486,65 @@ fn blocker_rip_pass(
             break;
         }
         let was_ok = |i: usize| matches!(best.res[i], Res::Ok(_));
-        let kept_all = mt.res.len() == routed.len()
-            && mt.res.iter().all(|(i, r)| !was_ok(*i) || matches!(r, Res::Ok(_)));
-        let won: Vec<usize> = mt
+        let broken = |mt: &Metrized| -> Vec<usize> {
+            mt.res
+                .iter()
+                .filter(|(i, r)| was_ok(*i) && !matches!(r, Res::Ok(_)))
+                .map(|(i, _)| *i)
+                .collect()
+        };
+        let (mut mt, mut metr) = (mt, metr);
+        let mut tried: Vec<(usize, SlotPath)> = found;
+        // One repair round: routed connections the new paths broke search again on the new
+        // graph (like a negotiation iteration); the ones that find no path leave it.
+        let hit = broken(&mt);
+        if !hit.is_empty() {
+            for &i in &hit {
+                mg.remove_conn(i, obs);
+            }
+            let _ = mg.take_cascaded();
+            let mut again: Vec<usize> = Vec::new();
+            for &i in &hit {
+                match search(&mg, obs, &live[i], &rt.starts[i], &rt.goals[i], &params(i, &mg)) {
+                    SearchOutcome::Found(p) => {
+                        mg.insert_path(&live[i], &p, obs);
+                        tried.retain(|(v, _)| *v != i);
+                        tried.push((i, p));
+                        again.push(i);
+                    }
+                    SearchOutcome::Timeout => {
+                        stop = true;
+                        break;
+                    }
+                    SearchOutcome::Blocked { .. } => {}
+                }
+            }
+            if stop {
+                out.timed_out = true;
+                best.mg.sync_anchors(obs, &net_of);
+                break;
+            }
+            routed.retain(|i| !hit.contains(i) || again.contains(i));
+            let mt2 = metrize(cx, obs, &mg, &routed, &mut metr, &again);
+            if mt2.timed_out {
+                out.timed_out = true;
+                best.mg.sync_anchors(obs, &net_of);
+                break;
+            }
+            mt = mt2;
+        }
+        let ok_now: BTreeSet<usize> = mt
             .res
             .iter()
-            .filter(|(i, r)| !was_ok(*i) && new.contains(i) && matches!(r, Res::Ok(_)))
+            .filter(|(_, r)| matches!(r, Res::Ok(_)))
             .map(|(i, _)| *i)
             .collect();
-        if !kept_all || won.is_empty() {
+        let won: Vec<usize> = new.iter().copied().filter(|v| !was_ok(*v) && ok_now.contains(v)).collect();
+        let lost: Vec<usize> = (0..live.len()).filter(|&i| was_ok(i) && !ok_now.contains(&i)).collect();
+        let weight = |v: &[usize]| v.iter().map(|&i| tier_weight(live[i].tier)).sum::<f64>();
+        // Keep on a net gain (tier-weighted): what is lost becomes failed and can be won back
+        // by the next attempts.
+        if won.is_empty() || weight(&won) <= weight(&lost) {
             best.mg.sync_anchors(obs, &net_of);
             continue;
         }
@@ -3503,16 +3555,20 @@ fn blocker_rip_pass(
                 res[i] = r;
             }
         }
-        // Victims that did not metrize leave the graph again, like the put-back paths.
-        let lost: Vec<usize> = new.iter().copied().filter(|v| !was_ok(*v) && !won.contains(v)).collect();
-        take_back(&mut mg, obs, &back);
-        take_back(&mut mg, obs, &lost);
+        for &i in &lost {
+            if matches!(res[i], Res::Ok(_)) {
+                res[i] = fail("blocked: no path (after rip-up)");
+            }
+        }
+        // Everything that did not route leaves the graph, like the put-back paths.
+        let out_of_graph: Vec<usize> = (0..live.len())
+            .filter(|&i| !ok_now.contains(&i) && !mg.conn_wires.get(i).is_none_or(|v| v.is_empty()))
+            .collect();
+        take_back(&mut mg, obs, &out_of_graph);
         let (nok, vias, len, outl) = tally(&res);
         let mut paths = best.paths.clone();
-        for (v, p) in found {
-            if v == o || won.contains(&v) {
-                paths[v] = Some(p);
-            }
+        for (v, p) in tried {
+            paths[v] = Some(p);
         }
         out.kept += 1;
         out.gained += nok.saturating_sub(best.routed);

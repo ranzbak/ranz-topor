@@ -1,6 +1,6 @@
 //! Gradual blocker rip-up (`Options::rip_pass`): the routed connection that blocks the most
 //! failed connections is ripped with its vias, its victims are routed first, then it again;
-//! the result is kept only when more connections route.
+//! the result is kept on a net gain of routed connections (tier-weighted).
 //!
 //! Fixture: the dcsgone USB-C crop (`fixtures/dcsgone-usb-crop.json`, see `route_steiner.rs`).
 
@@ -28,8 +28,9 @@ fn strip(r: &RouteResult) -> String {
     serde_json::to_string(&v).unwrap()
 }
 
-/// The pass routes more of the crop than the negotiation alone, every connection routed
-/// without it stays routed, and the result is clean at margin 0.
+/// The pass routes more of the crop than the negotiation alone; on this crop every connection
+/// routed without it also stays routed (the pass may trade a routed connection for a larger
+/// gain in general), and the result is clean at margin 0.
 #[test]
 fn rip_pass_routes_more_and_loses_none() {
     let m = BoardModel::from_json(CROP).unwrap();
