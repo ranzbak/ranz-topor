@@ -773,7 +773,7 @@ fn params_for<'a>(
 /// Connections (sorted, deduplicated) that block the slot-free ghost `gp`: the owners of the
 /// strands it cuts, of every owned site it uses, and of the active neighbours that block a
 /// site it uses. O(strands + ghost sites · neighbours).
-fn site_aware_blockers(mg: &MultiGraph, gp: &SlotPath) -> Vec<usize> {
+pub fn site_aware_blockers(mg: &MultiGraph, gp: &SlotPath) -> Vec<usize> {
     let mut out = mg.conns_of_legs(&strand_blockers(mg, gp));
     for &(s, _) in &gp.sites {
         if let Some((c, _)) = mg.owner[s] {

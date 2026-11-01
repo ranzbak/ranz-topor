@@ -161,6 +161,8 @@ SETTINGS: list[Setting] = [
        range=(1.0, 10), engine="ripup_growth"),
     _s("ripup", "blame_vias", "bool", False, "Experimental: when a trace does not fit at its width, rip the connections whose vias it is squeezed against (with the same escalating cost and cap as other rips), so those vias can move to another site. Off by default: on the benchmarks the extra rips route fewer connections.",
        engine="blame_vias"),
+    _s("ripup", "rip_pass", "bool", True, "After the routing loop, rip the routed connection that blocks the most unrouted ones (traces and vias), route its victims first and then it again; kept only when more connections route, repeated worst offender first (each retry of the same offender ranks it lower by growth).",
+       engine="rip_pass"),
     _s("ripup", "max_per_pair", "int", 8, "Hard backstop on how often one connection may rip the same other connection (bounds the runtime).",
        range=(1, 1000), engine="ripup_max_per_pair"),
     # ---- [iterations]

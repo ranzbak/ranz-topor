@@ -344,8 +344,10 @@ fn front_only_plus5v_needs_zero_slack_for_failed() {
     assert_eq!(r.routed, 27, "{}", r.zero_slack);
     let zs: Vec<&str> = r.zero_slack_wires.iter().map(|z| z.name.as_str()).collect();
     assert_eq!(zs, vec!["+5V"]);
+    // Without the blocker rip pass, which also rescues +5V (it isolates the zero-slack rule).
     let off = Options {
         zero_slack_failed: false,
+        rip_pass: false,
         ..o.clone()
     };
     let r_off = topor_engine::route::route(&m, &off);

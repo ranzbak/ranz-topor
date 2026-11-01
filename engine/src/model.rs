@@ -901,6 +901,10 @@ pub struct Options {
     /// those vias can move to another site. Off by default: on qmtech and the dcsgone USB crop
     /// the extra rips churn the negotiation and fewer connections route.
     pub blame_vias: bool,
+    /// Router: after the negotiation, gradual blocker rip-up (`route::blocker_rip_pass`): the
+    /// routed connection whose strands / vias block the most failed connections is ripped, its
+    /// victims routed first, then it again; kept only when more connections route.
+    pub rip_pass: bool,
     /// Diagnostics: emit `RouteResult.profile` (per-iteration timers). Off by default: timings
     /// are run-dependent and must not enter the (thread-count independent) result JSON.
     pub profile: bool,
@@ -997,6 +1001,7 @@ impl Default for Options {
             via_shove: false,
             plane_via_ring: true,
             blame_vias: false,
+            rip_pass: true,
             profile: false,
             net_priority: BTreeMap::new(),
             exclude_nets: Vec::new(),

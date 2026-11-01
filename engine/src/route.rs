@@ -46,7 +46,8 @@ use crate::model::{
 use crate::control::RunControl;
 use crate::multigraph::MultiGraph;
 use crate::negotiate::{
-    detect_clinches, overused_conns, BlockInfo, ClinchReport, Negotiator, RipReport,
+    detect_clinches, overused_conns, site_aware_blockers, BlockInfo, ClinchReport, Negotiator,
+    RipReport,
 };
 use crate::obstacle::{ObstacleSet, TerminalObstacle};
 use crate::pourcheck::{check_pour_reach_until, with_routed_copper, PourReach};
@@ -193,6 +194,9 @@ pub struct RouteResult {
     /// Via-shove pass outcome: `off`, `not run`, `routed k of n pinched connections, shoved v
     /// vias` or `skipped: timeout ...`.
     pub via_shove: String,
+    /// Blocker rip pass outcome: `off`, `not run`, `routed k more in a of t attempts` or
+    /// `skipped: timeout ...`.
+    pub rip_pass: String,
     /// Rip-up report of the routing loop (A16): rips per connection (as blocker), pairs that
     /// hit the `ripup_max_per_pair` backstop, total.
     pub ripup: RipReport,
@@ -3305,6 +3309,234 @@ const SHOVE_STEPS_NM: [f64; 6] = [
 /// push on to a neighbour).
 const SHOVE_ROUNDS: usize = 4;
 
+/// Offenders tried per [`blocker_rip_pass`] (all attempts together).
+const RIP_PASS_ATTEMPTS: usize = 24;
+/// Attempts per offender in one pass (each costs `ripup_growth` more in its order).
+const RIP_PASS_PER_OFFENDER: u32 = 3;
+/// Victims routed per attempt (the offender's highest-priority victims first, then by the
+/// seeded order).
+const RIP_PASS_VICTIMS: usize = 8;
+
+/// Counters of [`blocker_rip_pass`].
+struct RipPass {
+    attempts: usize,
+    kept: usize,
+    gained: usize,
+    timed_out: bool,
+}
+
+impl RipPass {
+    fn status(&self) -> String {
+        let head = format!(
+            "routed {} more in {} of {} attempts",
+            self.gained, self.kept, self.attempts
+        );
+        if self.timed_out {
+            format!("skipped: timeout ({head})")
+        } else {
+            head
+        }
+    }
+}
+
+/// Deterministic order key of victim `v` for attempt `(o, n)` (splitmix64): the "random" order
+/// of the rip pass, reproducible across runs and thread counts. O(1).
+fn rip_order_key(o: usize, n: u32, v: usize) -> u64 {
+    let mut z = (o as u64)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add((n as u64) << 32)
+        .wrapping_add(v as u64);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Gradual blocker rip-up, one pass from the best iteration (`Options.rip_pass`). Every
+/// failed connection's ghost path (the slot path ignoring occupancy) names the routed
+/// connections whose strands or vias it crosses ([`site_aware_blockers`]); each such blocker
+/// scores the failed connection's tier weight. The offender with the highest score divided
+/// by `ripup_growth^k` (`k` = its attempts so far, at most [`RIP_PASS_PER_OFFENDER`]) is
+/// ripped with its vias; up to [`RIP_PASS_VICTIMS`] of its victims are searched first (in
+/// [`rip_order_key`] order), then the offender again; the result is metrized as the
+/// negotiation would ([`put_back`]) and kept only when the offender and every routed
+/// connection stay routed and at least one victim routes; else everything is undone. Scores
+/// are recomputed after every attempt; at most [`RIP_PASS_ATTEMPTS`] attempts. Victims that do
+/// not metrize keep their old failure. Deterministic. Complexity per attempt: one ghost per
+/// failed connection + `victims + 1` searches + one metrization; deadline and cancel checked
+/// per attempt and search.
+fn blocker_rip_pass(
+    cx: &Ctx,
+    obs: &mut ObstacleSet,
+    rt: &Route,
+    neg: &Negotiator,
+    best: &mut Snap,
+) -> RipPass {
+    let live = cx.conns;
+    let net_of = rt.net_of();
+    let mut out = RipPass {
+        attempts: 0,
+        kept: 0,
+        gained: 0,
+        timed_out: false,
+    };
+    let params = |c: usize, mg: &MultiGraph| SearchParams {
+        history: &neg.history,
+        site_history: &neg.site_history,
+        weight: tier_weight(live[c].tier),
+        present_overuse: cx.opts.expert.present_overuse,
+        expansion_cap: default_expansion_cap(mg),
+        deadline: cx.deadline,
+        eps: None,
+        via_cost: cx.opts.via_cost_for(live[c].net) as f64 * via_weight(live[c].tier),
+        max_vias: cx.opts.max_vias_per_connection,
+        strict_unfit_edges: cx.opts.strict_unfit_edges,
+    };
+    let use_back = needs_back(cx, obs, rt, best);
+    let mut tries: BTreeMap<usize, u32> = BTreeMap::new();
+    while out.attempts < RIP_PASS_ATTEMPTS {
+        if cx.stop() {
+            out.timed_out = true;
+            break;
+        }
+        // Scores of the routed blockers of every failed connection's ghost.
+        best.mg.sync_anchors(obs, &net_of);
+        let mut score: BTreeMap<usize, f64> = BTreeMap::new();
+        let mut victims: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (f, conn) in live.iter().enumerate() {
+            if !matches!(best.res[f], Res::Fail { perm: false, .. }) || best.mg.has_junction_link(f) {
+                continue;
+            }
+            let p = params(f, &best.mg);
+            let Some((gp, ..)) = ghost(&best.mg, obs, conn, &rt.starts[f], &rt.goals[f], &p) else {
+                continue;
+            };
+            for o in site_aware_blockers(&best.mg, &gp) {
+                if o == f
+                    || !matches!(best.res[o], Res::Ok(_))
+                    || best.mg.has_junction_link(o)
+                    || !best.mg.dependents(o).is_empty()
+                {
+                    continue;
+                }
+                *score.entry(o).or_insert(0.0) += tier_weight(conn.tier);
+                victims.entry(o).or_default().push(f);
+            }
+        }
+        let growth = cx.opts.ripup_growth.max(1.0);
+        let pick = score
+            .iter()
+            .filter(|(o, _)| tries.get(o).copied().unwrap_or(0) < RIP_PASS_PER_OFFENDER)
+            .map(|(&o, &sc)| (sc / growth.powi(tries.get(&o).copied().unwrap_or(0) as i32), o))
+            .max_by(|a, b| a.0.total_cmp(&b.0).then(b.1.cmp(&a.1)));
+        let Some((_, o)) = pick else {
+            break;
+        };
+        let n = tries.entry(o).or_insert(0);
+        *n += 1;
+        let n = *n;
+        out.attempts += 1;
+        let mut vs = victims.remove(&o).unwrap_or_default();
+        vs.sort_by_key(|&v| (live[v].tier, rip_order_key(o, n, v)));
+        vs.truncate(RIP_PASS_VICTIMS);
+        // Rip the offender (with its vias), route the victims, then the offender.
+        let mut mg = best.mg.clone();
+        mg.sync_anchors(obs, &net_of);
+        mg.remove_conn(o, obs);
+        if !mg.take_cascaded().is_empty() {
+            best.mg.sync_anchors(obs, &net_of);
+            continue;
+        }
+        let mut found: Vec<(usize, SlotPath)> = Vec::new();
+        let mut stop = false;
+        for &v in vs.iter().chain(std::iter::once(&o)) {
+            match search(&mg, obs, &live[v], &rt.starts[v], &rt.goals[v], &params(v, &mg)) {
+                SearchOutcome::Found(p) => {
+                    mg.insert_path(&live[v], &p, obs);
+                    found.push((v, p));
+                }
+                SearchOutcome::Timeout => {
+                    stop = true;
+                    break;
+                }
+                SearchOutcome::Blocked { .. } => {}
+            }
+        }
+        if stop {
+            out.timed_out = true;
+            best.mg.sync_anchors(obs, &net_of);
+            break;
+        }
+        if !found.iter().any(|(v, _)| *v == o) || found.len() < 2 {
+            best.mg.sync_anchors(obs, &net_of);
+            continue;
+        }
+        let new: Vec<usize> = found.iter().map(|(v, _)| *v).collect();
+        let back = put_back(cx, &mut mg, obs, best, &|i| use_back && !new.contains(&i));
+        let mut routed = routed_with(best, &back, None);
+        routed.extend(new.iter().copied().filter(|v| *v != o));
+        routed.sort_unstable();
+        routed.dedup();
+        let mut metr = best.metr.clone();
+        let mt = metrize(cx, obs, &mg, &routed, &mut metr, &new);
+        if mt.timed_out {
+            out.timed_out = true;
+            best.mg.sync_anchors(obs, &net_of);
+            break;
+        }
+        let was_ok = |i: usize| matches!(best.res[i], Res::Ok(_));
+        let kept_all = mt.res.len() == routed.len()
+            && mt.res.iter().all(|(i, r)| !was_ok(*i) || matches!(r, Res::Ok(_)));
+        let won: Vec<usize> = mt
+            .res
+            .iter()
+            .filter(|(i, r)| !was_ok(*i) && new.contains(i) && matches!(r, Res::Ok(_)))
+            .map(|(i, _)| *i)
+            .collect();
+        if !kept_all || won.is_empty() {
+            best.mg.sync_anchors(obs, &net_of);
+            continue;
+        }
+        let (relax_iterations, rounds) = (mt.relax_iterations, mt.rounds);
+        let mut res = best.res.clone();
+        for (i, r) in mt.res {
+            if was_ok(i) || won.contains(&i) {
+                res[i] = r;
+            }
+        }
+        // Victims that did not metrize leave the graph again, like the put-back paths.
+        let lost: Vec<usize> = new.iter().copied().filter(|v| !was_ok(*v) && !won.contains(v)).collect();
+        take_back(&mut mg, obs, &back);
+        take_back(&mut mg, obs, &lost);
+        let (nok, vias, len, outl) = tally(&res);
+        let mut paths = best.paths.clone();
+        for (v, p) in found {
+            if v == o || won.contains(&v) {
+                paths[v] = Some(p);
+            }
+        }
+        out.kept += 1;
+        out.gained += nok.saturating_sub(best.routed);
+        best.clinches = detect_clinches(&mg, live, &paths, rt.starts);
+        best.routed = nok;
+        best.vias = vias;
+        best.len = len;
+        best.out = outl;
+        best.res = res;
+        best.overuse_edges = mg
+            .layers
+            .iter()
+            .map(|l| (0..l.g.edges.len()).filter(|&e| l.g.overuse(e) > 0.0).count())
+            .sum();
+        best.relax_iterations = relax_iterations;
+        best.rounds = rounds;
+        best.paths = paths;
+        best.mg = mg;
+        best.metr = metr;
+    }
+    best.mg.sync_anchors(obs, &net_of);
+    out
+}
+
 /// Bisection steps between the last shove distance that did not help and the first that did
 /// (the kept move is within `step / 2^SHOVE_BISECT` of the shortest that helps).
 const SHOVE_BISECT: usize = 3;
@@ -4795,6 +5027,7 @@ fn route_pass(
     let mut ripup = RipReport::default();
     let mut relax_status: String = if opts.via_relaxation { "not run" } else { "off" }.into();
     let mut shove_status: String = if opts.via_shove { "not run" } else { "off" }.into();
+    let mut rip_status: String = if opts.rip_pass { "not run" } else { "off" }.into();
     let mut via_status: String = if opts.via_reduction { "not run" } else { "off" }.into();
     let mut zs_status: String = if opts.zero_slack_retry {
         "not run"
@@ -5493,6 +5726,13 @@ fn route_pass(
                     // The obstacle anchors follow the best iteration (P7).
                     b.mg.sync_anchors(&mut obs, &rt.net_of());
                 }
+                if opts.rip_pass {
+                    if timed_out {
+                        rip_status = "skipped: timeout".into();
+                    } else if let Some(b) = best.as_mut() {
+                        rip_status = blocker_rip_pass(&cx, &mut obs, &rt, &neg, b).status();
+                    }
+                }
                 if opts.via_shove {
                     if timed_out {
                         shove_status = "skipped: timeout".into();
@@ -5856,6 +6096,7 @@ fn route_pass(
         via_reduction: via_status,
         via_relaxation: relax_status,
         via_shove: shove_status,
+        rip_pass: rip_status,
         ripup,
         iterations,
         converged,

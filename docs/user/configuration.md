@@ -105,6 +105,7 @@ Rip-up and re-route escalation.
 |---|---|---|---|---|---|
 | `growth` | float | `1.25` |  | 1 .. 10 | Each time a connection rips the same blocker, the history cost left on it is multiplied by this. |
 | `blame_vias` | bool | `false` |  | true\|false | Experimental: when a trace does not fit at its width, rip the connections whose vias it is squeezed against (with the same escalating cost and cap as other rips), so those vias can move to another site. Off by default: on the benchmarks the extra rips route fewer connections. |
+| `rip_pass` | bool | `true` |  | true\|false | After the routing loop, rip the routed connection that blocks the most unrouted ones (traces and vias), route its victims first and then it again; kept only when more connections route, repeated worst offender first (each retry of the same offender ranks it lower by growth). |
 | `max_per_pair` | int | `8` |  | 1 .. 1000 | Hard backstop on how often one connection may rip the same other connection (bounds the runtime). |
 
 ## `[iterations]`
