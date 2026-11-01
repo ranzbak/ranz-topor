@@ -75,6 +75,8 @@ WORDING: dict[str, dict[str, str]] = {
         "existing_fixed": "Keep as obstacles",
         "existing_smooth": "Keep and smooth",
         "existing_rip": "Rip up and re-route",
+        "existing_tip": "Rip up keeps free and stitching vias as obstacles unless topor.toml sets "
+                        "[run] rip_free_vias = true",
         "respect_locked": "Respect locked tracks and vias",
         "partial_routes": "Keep partial routes",
         "timeout_label": "Time limit",
@@ -514,6 +516,7 @@ class PreflightDialog(_Base):
         self.existing = wx.Choice(self, name="existing", choices=[
             W["existing_fixed"], W["existing_smooth"], W["existing_rip"]])
         self.existing.SetSelection(self._existing_keys.index(cfg.get("run", "existing_copper")))
+        self.existing.SetToolTip(W["existing_tip"])
         grid.Add(self.text(self, "preflight", "existing_label"), 0, wx.ALIGN_CENTER_VERTICAL)
         grid.Add(self.existing)
 

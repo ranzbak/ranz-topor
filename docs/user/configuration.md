@@ -18,6 +18,7 @@ What a run does and how long it may take.
 | `existing_copper` | str | `"fixed"` |  | fixed\|smooth\|rip | Policy for existing tracks and vias: fixed = obstacle, smooth = keep topology but smooth, rip = re-route. (smooth is treated as fixed in 0.4.0.) |
 | `respect_locked` | bool | `true` |  | true\|false | Treat locked tracks and vias as fixed obstacles; false lets topor rip or smooth them. KiCad: KiCad → item Properties → Locked. |
 | `keep_unconnected_vias` | bool | `true` |  | true\|false | Never rip a via that no track of its own net touches (stitching vias without KiCad's free flag); false rips them like routing vias. KiCad: KiCad → via Properties → Free. |
+| `rip_free_vias` | bool | `false` |  | true\|false | With existing_copper = rip, also remove the free vias (KiCad's free flag) and the unconnected stitching vias of the nets in scope, so they no longer block routes; overrides keep_unconnected_vias. Locked vias and do_not_touch nets are still kept. KiCad: KiCad → via Properties → Free. |
 | `scope_mode` | str | `"between"` |  | between\|touching | With a footprint selection: between = connections whose pads are all on selected footprints; touching = any connection with a selected pad. KiCad: KiCad → select footprints in the PCB editor. |
 | `unrouted_only` | bool | `false` |  | true\|false | Route only connections that have no copper yet and leave all existing copper untouched. |
 | `fail_on_preexisting` | bool | `false` |  | true\|false | Abort when kept or locked copper already has DRC violations; false only lists them as pre-existing. |

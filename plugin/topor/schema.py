@@ -74,6 +74,8 @@ SETTINGS: list[Setting] = [
        kicad="KiCad → item Properties → Locked"),
     _s("run", "keep_unconnected_vias", "bool", True, "Never rip a via that no track of its own net touches (stitching vias without KiCad's free flag); false rips them like routing vias.",
        kicad="KiCad → via Properties → Free"),
+    _s("run", "rip_free_vias", "bool", False, "With existing_copper = rip, also remove the free vias (KiCad's free flag) and the unconnected stitching vias of the nets in scope, so they no longer block routes; overrides keep_unconnected_vias. Locked vias and do_not_touch nets are still kept.",
+       kicad="KiCad → via Properties → Free"),
     _s("run", "scope_mode", "str", "between", "With a footprint selection: between = connections whose pads are all on selected footprints; touching = any connection with a selected pad.",
        choices=("between", "touching"), kicad="KiCad → select footprints in the PCB editor"),
     _s("run", "unrouted_only", "bool", False, "Route only connections that have no copper yet and leave all existing copper untouched."),

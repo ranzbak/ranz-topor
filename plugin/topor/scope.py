@@ -316,7 +316,8 @@ def rip_plan(model: dict, plan: ScopePlan, cfg: Config) -> RipPlan:
     """Copper to delete for ``run.existing_copper``: ``fixed`` nothing; ``rip`` the tracks and vias of the nets in
     `plan.nets`, except locked ones when ``respect_locked``, ``do_not_touch`` nets, free vias (KiCad's flag) and,
     with ``keep_unconnected_vias`` (default), every via that no same-net ``kept`` track end touches within its
-    radius on a layer of its span (stitching vias without the flag; ruling C24); ``smooth`` nothing is removed
+    radius on a layer of its span (stitching vias without the flag; ruling C24); ``rip_free_vias`` removes those
+    two kinds of via too (it overrides ``keep_unconnected_vias``); ``smooth`` nothing is removed
     and the engine gets ``smooth``. ``unrouted_only`` never removes anything. O(K + V) plus the per-net via
     test of :func:`_touched_vias`."""
     policy = cfg.get("run", "existing_copper")
@@ -330,7 +331,8 @@ def rip_plan(model: dict, plan: ScopePlan, cfg: Config) -> RipPlan:
     names = {n["code"]: n["name"] for n in model.get("nets", [])}
     excluded = do_not_touch_nets(model, cfg)
     keep_locked = cfg.get("run", "respect_locked")
-    touched = _touched_vias(model) if cfg.get("run", "keep_unconnected_vias") else None
+    rip_free = cfg.get("run", "rip_free_vias")
+    touched = _touched_vias(model) if cfg.get("run", "keep_unconnected_vias") and not rip_free else None
     for kind, is_via in (("kept", False), ("vias", True)):
         for it in model.get(kind, []):
             name = names.get(it.get("net"))
@@ -342,7 +344,7 @@ def rip_plan(model: dict, plan: ScopePlan, cfg: Config) -> RipPlan:
                 continue
             elif keep_locked and it.get("locked"):
                 out.kept_locked += 1
-            elif is_via and it.get("free"):
+            elif is_via and it.get("free") and not rip_free:
                 continue
             elif is_via and touched is not None and it["uuid"] not in touched:
                 out.kept_unconnected_vias += 1

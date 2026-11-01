@@ -155,7 +155,8 @@ Tick **Save these options to topor.toml** to keep them (only these `[run]` keys 
 **Keep as obstacles** (default) routes only what is not connected yet and treats existing copper as fixed;
 **Rip up and re-route** removes the tracks and vias of the nets in scope first — except locked ones (with
 *Respect locked*), nets listed in `[nets] do_not_touch`, vias KiCad marks as free, and stitching vias that no
-track of their net touches (`[run] keep_unconnected_vias`). On a fully hand-routed
+track of their net touches (`[run] keep_unconnected_vias`). `[run] rip_free_vias = true` removes those
+free and stitching vias too, when they block routes (locked vias and `do_not_touch` nets stay). On a fully hand-routed
 board *Keep as obstacles* finds nothing to route. **Keep and smooth** is accepted but in 0.4.0 behaves like
 *Keep as obstacles* (see [Limitations](#limitations)).
 
@@ -359,7 +360,7 @@ Measured on six snapshot boards (offline tests against KiCad's own polygons); th
 - **Pads** are exact; custom, trapezoid, chamfered and offset pads become the convex hull of KiCad's
   polygon (larger, never smaller).
 - **Free vias**: KiCad's `free` flag is read from the saved board copy; a via whose flag cannot be read is
-  treated as free, i.e. kept as a fixed obstacle and never ripped.
+  treated as free, i.e. kept as a fixed obstacle and never ripped (unless `[run] rip_free_vias = true`).
 - **Stitching vias** that no track end of their net touches are kept even when ripping
   (`[run] keep_unconnected_vias`, default true); a via a track only passes over is also kept. KiCad's own
   flag is set per via in KiCad → via Properties → Free (exact dialog wording UNVERIFIED, see the GUI checklist).

@@ -159,6 +159,25 @@ def test_rip_plan_keep_unconnected_vias():
     assert "nopos" not in rip_plan(m, whole, cfg(existing_copper="rip")).remove_uuids
 
 
+def test_rip_plan_rip_free_vias():
+    """[run] rip_free_vias: with rip, the free-flagged and the unconnected vias of the nets in scope are removed
+    too (it overrides keep_unconnected_vias); locked vias and do_not_touch nets stay; fixed removes nothing."""
+    m = tiny()
+    m["vias"].append({"uuid": "stitch", "net": 3, "locked": False, "free": False, "at": [40, 40], "d": 2,
+                      "layers": [0, 2]})
+    whole = scope_from_selection(Selection(), m, CFG)
+    off = rip_plan(m, whole, cfg(existing_copper="rip"))
+    assert "v2" not in off.remove_uuids and "stitch" not in off.remove_uuids
+    on = rip_plan(m, whole, cfg(existing_copper="rip", rip_free_vias=True))
+    assert set(on.remove_uuids) == {"t1", "t3", "t4", "v1", "v2", "stitch"}  # locked t2 / v3 still kept
+    assert on.kept_unconnected_vias == 0 and on.kept_locked == 2
+    assert rip_plan(m, whole, cfg(existing_copper="fixed", rip_free_vias=True)).remove_uuids == []
+    dnt = CFG.with_values({("run", "existing_copper"): "rip", ("run", "rip_free_vias"): True,
+                           ("nets", "do_not_touch"): ["N1"]})
+    r = rip_plan(m, scope_from_selection(Selection(), m, dnt), dnt)
+    assert "v2" not in r.remove_uuids and "v1" not in r.remove_uuids
+
+
 # ------------------------------------------------------------------ eprom oracle + real engine
 @pytest.fixture(scope="module")
 def eprom(tmp_path_factory):
