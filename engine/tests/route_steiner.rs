@@ -277,7 +277,15 @@ fn steiner_off_is_m3_behaviour() {
         steiner: false,
         ..opts()
     };
-    let rc = route(&crop(), &off);
+    // The ea1f064 pin was taken at that engine's default `ripup_growth = 2.0` (A-C24 moved the
+    // default to 1.25 afterwards): compare at the growth the pin was taken with.
+    let rc = route(
+        &crop(),
+        &Options {
+            ripup_growth: 2.0,
+            ..off.clone()
+        },
+    );
     assert!(rc.connections.iter().all(|c| !c.junction));
     let re = route(&BoardModel::from_json(EPROM).unwrap(), &off);
     assert!(re.connections.iter().all(|c| !c.junction));
