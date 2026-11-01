@@ -113,10 +113,10 @@ fn main() {
         }
     }
     if let Some(p) = &r.profile {
-        println!("  iter  search_s  commit_s metrize_s  check_s searched re-searched revalid ripped routed overuse");
+        println!("  iter  search_s  commit_s metrize_s  check_s searched re-searched revalid ripped paths overuse     ok blocked mfail   vias   cost_mm best");
         for it in p {
             println!(
-                "  {:>4} {:>9.3} {:>9.3} {:>9.3} {:>8.3} {:>8} {:>11} {:>7} {:>6} {:>6} {:>6}",
+                "  {:>4} {:>9.3} {:>9.3} {:>9.3} {:>8.3} {:>8} {:>11} {:>7} {:>6} {:>5} {:>7} {:>6} {:>7} {:>5} {:>6} {:>9.1} {}",
                 it.iteration,
                 it.search_s,
                 it.commit_s,
@@ -127,7 +127,13 @@ fn main() {
                 it.revalidated,
                 it.ripped,
                 it.routed,
-                it.overuse_edges
+                it.overuse_edges,
+                it.ok,
+                it.blocked,
+                it.metrize_failed,
+                it.vias,
+                it.cost_nm * 1e-6,
+                if it.best { "*" } else { "" }
             );
         }
         let sum = |f: fn(&topor_engine::route::IterProfile) -> f64| {
