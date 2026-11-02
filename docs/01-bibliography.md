@@ -76,6 +76,21 @@ secondary descriptions were available during research (2026-10-30).
   ISBN 978-5-9775-0576-5); Luzin, Lyachek, Polubasov, *Автоматизация проектирования печатных
   плат. Система топологической трассировки TopoR* (SPbGETU LETI 2005).
 - No patents found for TopoR's method (Rospatent not searched directly).
+- Further TopoR papers listed on the Wikipedia page (2026-11-02; titles as given there, venues and contents
+  UNVERIFIED, not seen):
+  - **S. Yu. Luzin, O. B. Polubasov** (1997), on flexible routing ("FreeStyle Route").
+  - ★ **O. B. Polubasov** (2001), "Global minimization of the number of interlayer junctions" — global via
+    minimisation; basis of TopoR's layer separation.
+  - **S. Yu. Luzin, G. S. Petrosyan, O. B. Polubasov** (2008, 2009), BGA routing problems — inside-out escape.
+  - ★ **O. B. Polubasov** (2011), "Routing Concepts of a Topological Router CAD System" — probably the most
+    complete algorithm description after Polubasov 2010.
+  - **A. A. Lysenko, S. Yu. Luzin, O. B. Polubasov** (2011), "Synchronizing Delays in Signal Transmission
+    Lines" — length matching.
+  - **Karabran, Zyrin** (2013), reducing parasitic coupling between conductors (crosstalk).
+- Page claims worth keeping (Wikipedia, partly "citation needed"): routes all connections even when that
+  violates design constraints and corrects violations later; necking near narrow pads and in bottlenecks;
+  minimum and desired clearance per net; several layout variants optimised simultaneously, the worst
+  (length, vias) dropped; lines-only or lines + arcs mode; dedicated BGA strategy.
 
 ## E. Shortest paths (computational geometry)
 
@@ -180,6 +195,73 @@ secondary descriptions were available during research (2026-10-30).
   https://www.researchgate.net/publication/376366184 — triangulation-based PCB global routing,
   close to our routing field (details UNVERIFIED).
 
+## M. Free-space maps with clearance (passages with a width)
+
+The board as a graph of free space whose edges carry a passage width; the basis of the planned exact
+capacity model (plan "TopoR-style core", 2026-11-02).
+
+- ★ **M. Kallmann**, "Shortest Paths with Arbitrary Clearance from Navigation Meshes", *SCA 2010* —
+  Local Clearance Triangulation (LCT): refine a CDT until per-edge clearance tests are exact; paths of
+  any width checked on edges only. The TOG 2014 follow-up (section E) adds dynamic insert/remove.
+- **D. Demyen, M. Buro**, "Efficient Triangulation-Based Pathfinding", *AAAI 2006* (TA\*/TRA\*) —
+  search with a width over triangles; an abstract graph of triangle corridors on top.
+- ★ **R. Geraerts, M. Overmars**, "The Corridor Map Method: a General Framework for Real-Time High-Quality
+  Path Planning", *Computer Animation and Virtual Worlds* 18(2), 2007 (venue UNVERIFIED) — corridors
+  with a clearance radius, built on the generalised Voronoi diagram (medial axis).
+- **R. Geraerts**, "Planning Short Paths with Clearance using Explicit Corridors", *ICRA 2010* —
+  explicit corridor map; nodes = junctions of free space, edges = corridors with their narrowest width
+  (our "corridor graph": capacity ≈ bottleneck width / (width + clearance)).
+- Tile-based gridless routers (rectangular free-space tiles):
+  - **J. K. Ousterhout**, "Corner Stitching: A Data-Structuring Technique for VLSI Layout Tools",
+    *IEEE TCAD* 3(1), 1984.
+  - **A. Margarino, A. Romano, A. De Gloria, F. Curatelli, P. Antognetti**, "A Tile-Expansion Router",
+    *IEEE TCAD* 6(4), 1987 (authors/issue UNVERIFIED).
+  - **J. Dion, L. M. Monier**, "Contour: A Tile-based Gridless Router", DEC WRL Research Report 95/3,
+    1995.
+  - **J. Cong, J. Fang, K.-Y. Khoo**, "DUNE — A Multilayer Gridless Routing System", *IEEE TCAD* 20(5),
+    2001.
+
+## N. Multicommodity flow and global routing (planning without geometry)
+
+Routing as integer multicommodity flow on a capacitated 3-D graph (area × layers × capacity); solved
+fractionally, then rounded and repaired.
+
+- **P. Raghavan, C. D. Thompson**, "Randomized rounding: a technique for provably good algorithms and
+  algorithmic proofs", *Combinatorica* 7(4), 1987 — rounding a fractional flow, overflow bounds.
+- ★ **C. Albrecht**, "Global routing by new approximation algorithms for multicommodity flow", *IEEE TCAD*
+  20(5), 2001.
+- ★ **D. Müller, K. Radke, J. Vygen**, "Faster min–max resource sharing in theory and practice",
+  *Mathematical Programming Computation* 3(1), 2011 — the global-routing core of BonnRoute; min-max
+  objective = no commodity starved.
+- **M. Gester, D. Müller, T. Nieberg, C. Panten, C. Schulte, J. Vygen**, "BonnRoute: Algorithms and data
+  structures for fast and good VLSI routing", *DAC 2012*; journal version *ACM TODAES* 18(2), 2013.
+- **F. Kelly**, proportional fairness (max Σ w·log utility), *European Transactions on
+  Telecommunications* 8(1), 1997 — background for the per-tier weighting (title UNVERIFIED).
+- **OrthoRoute** (GPU, open source, 2025): PathFinder on a fixed 3-D Manhattan lattice in CUDA, a KiCad
+  autorouter by Brian Benchoff (URL/details UNVERIFIED; search "OrthoRoute KiCad"). Reference for GPU
+  parallel negotiation; limited to orthogonal routing.
+
+## O. Octilinear drawing and bend minimisation
+
+For the 45° drawing step (few bends, 90° only when needed, bend placement as an LP).
+
+- ★ **R. Tamassia**, "On embedding a graph in the grid with the minimum number of bends", *SIAM J.
+  Computing* 16(3), 1987 — bend minimisation as min-cost flow.
+- **M. Nöllenburg, A. Wolff**, "Drawing and Labeling High-Quality Metro Maps by Mixed-Integer
+  Programming", *IEEE TVCG* 17(5), 2011 — octilinear layout with bend penalties.
+- Maley's polygonal wiring rules (section A) cover the routability theorem for 45° (octagonal) metrics.
+
+## P. Machine learning for routing (survey 2026-11-02, from memory)
+
+No open model known to route real boards well. For reference only:
+
+- **DeepPCB** (InstaDeep) and **Quilter**: commercial, reinforcement learning, cloud only; no open weights.
+- **Y. He, F. S. Bao**, "Circuit Routing Using Monte Carlo Tree Search and Deep Neural Networks",
+  arXiv 2006.13607, 2020. https://arxiv.org/abs/2006.13607 — small grids.
+- **H. Liao et al.**, deep reinforcement learning for global routing (chips), 2019–2020 (details
+  UNVERIFIED).
+- **RouteNet / CircuitNet**: congestion prediction for chip design (open dataset); prediction, not routing.
+
 ## Reading order for implementers
 
 1. Hama & Etoh 1998 (free; geometry stage almost directly implementable).
@@ -188,3 +270,7 @@ secondary descriptions were available during research (2026-10-30).
 4. Polubasov 2010 (TopoR's search and optimisation strategy).
 5. Topola and gEDA toporouter source code.
 6. Dayan 1997 thesis (purchase) when implementing regions and net ordering.
+
+For the TopoR-style core (plan 2026-11-02): Kallmann 2010/2014 (LCT) → Geraerts 2010 (corridors) →
+Müller–Radke–Vygen 2011 + BonnRoute (flow) → Tamassia 1987 (bends) → Polubasov 2010/2011 and Luzin 2015
+(TopoR internals). Downloaded copies: `docs/literature/` (git-ignored, see its `INDEX.md`).

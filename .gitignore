@@ -7,6 +7,7 @@ scratch/
 *.kicad_pcb-bak
 docs/.ruff_cache/
 docs/benchmarks/
+docs/literature/
 .pytest_cache/
 *.egg-info/
 .claude/
