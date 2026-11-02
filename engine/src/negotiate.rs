@@ -341,6 +341,7 @@ impl Negotiator {
                                 cap,
                                 deadline,
                                 opts,
+                                self.iteration,
                             );
                             res = search(mg, obs, c, &starts[i], &goals[i], &params);
                             pre = None;
@@ -364,6 +365,7 @@ impl Negotiator {
                             cap,
                             deadline,
                             opts,
+                            self.iteration,
                         );
                         if let SearchOutcome::Found(q) =
                             search(mg, obs, c, &starts[i], &goals[i], &params)
@@ -400,6 +402,7 @@ impl Negotiator {
                                     cap,
                                     deadline,
                                     opts,
+                                    self.iteration,
                                 );
                                 ghost(mg, obs, c, &starts[i], &goals[i], &params)
                             }
@@ -513,7 +516,15 @@ impl Negotiator {
                     return (none, None);
                 }
                 let c = &conns[i];
-                let p = params_for(c, &self.history, &self.site_history, cap, deadline, opts);
+                let p = params_for(
+                    c,
+                    &self.history,
+                    &self.site_history,
+                    cap,
+                    deadline,
+                    opts,
+                    self.iteration,
+                );
                 let r = search(mg, obs, c, &starts[i], &goals[i], &p);
                 // The absurd-detour test of the commit needs the ghost: compute it here, in
                 // parallel, and let the commit reuse it while its faces are unchanged.
@@ -707,6 +718,51 @@ impl Negotiator {
         self.bumps[conn] += 1;
     }
 
+    /// Failure pressure (`Options.failed_pressure`), with the paths of the failed connections
+    /// `failed` still in `mg`: every overfull edge such a path crosses gets `hist_overuse`
+    /// history, and every foreign via site at its ends gets `hist_overuse` site history.
+    /// Returns the other connections with a strand on such an edge or a via at its end, sorted:
+    /// they search again, so the occupants of a passage a failed wire could not share move too
+    /// (the failed path leaves the graph before the overuse count). O(Σ path edges · strands).
+    pub fn press_failed(&mut self, mg: &MultiGraph, failed: &[usize]) -> Vec<usize> {
+        let mut legs: BTreeSet<usize> = BTreeSet::new();
+        let mut owners: BTreeSet<usize> = BTreeSet::new();
+        let mut hit: BTreeSet<(usize, usize)> = BTreeSet::new();
+        for &i in failed {
+            let own: Vec<usize> = mg.conn_wires.get(i).cloned().unwrap_or_default();
+            for &k in &own {
+                for (li, c) in mg.layers.iter().enumerate() {
+                    for &(e, _) in c.g.occupancy(k) {
+                        if c.g.overuse(e) <= 0.0 || !hit.insert((li, e)) {
+                            continue;
+                        }
+                        let ge = &c.g.edges[e];
+                        legs.extend(ge.cross.iter().map(|x| x.conn).filter(|x| !own.contains(x)));
+                        for v in [ge.a, ge.b] {
+                            let Some(s) = c.g.verts[v].site else { continue };
+                            if let Some((o, _)) = mg.owner[s] {
+                                if o != i {
+                                    self.site_history[s] += self.cfg.hist_overuse;
+                                    owners.insert(o);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for &(li, e) in &hit {
+            self.history[li][e] += self.cfg.hist_overuse;
+        }
+        let legs: Vec<usize> = legs.into_iter().collect();
+        let mut out: BTreeSet<usize> = mg.conns_of_legs(&legs).into_iter().collect();
+        out.extend(owners);
+        for i in failed {
+            out.remove(i);
+        }
+        out.into_iter().collect()
+    }
+
     /// History on every overused edge (every layer); returns their count.
     pub fn penalise_overuse(&mut self, mg: &MultiGraph) -> usize {
         let mut n = 0;
@@ -747,7 +803,20 @@ fn is_detour(c: &Connection, p: &SlotPath, factor: f64) -> bool {
     p.est_len > factor * straight && p.legs.iter().any(|l| !l.crossings.is_empty())
 }
 
-/// Search parameters of connection `c` over the given histories.
+/// Cap of the present-congestion escalation (`present_growth`), as a multiple of
+/// `present_overuse`.
+const PRESENT_MAX_FACTOR: f64 = 1000.0;
+
+/// Present-congestion factor of negotiation iteration `it` (PathFinder's present factor,
+/// `Options.expert.present_growth`): `present_overuse · growth^(it - 1)`, at most
+/// [`PRESENT_MAX_FACTOR`] times `present_overuse`; growth 1 keeps it constant. O(1).
+pub fn present_at(opts: &Options, it: u32) -> f64 {
+    let g = opts.expert.present_growth.max(1.0);
+    opts.expert.present_overuse * g.powi(it.saturating_sub(1) as i32).min(PRESENT_MAX_FACTOR)
+}
+
+/// Search parameters of connection `c` over the given histories in iteration `it`.
+#[allow(clippy::too_many_arguments)]
 fn params_for<'a>(
     c: &Connection,
     history: &'a [Vec<f64>],
@@ -755,12 +824,13 @@ fn params_for<'a>(
     cap: usize,
     deadline: Instant,
     opts: &Options,
+    it: u32,
 ) -> SearchParams<'a> {
     SearchParams {
         history,
         site_history,
         weight: tier_weight(c.tier),
-        present_overuse: opts.expert.present_overuse,
+        present_overuse: present_at(opts, it),
         expansion_cap: cap,
         deadline,
         eps: None,

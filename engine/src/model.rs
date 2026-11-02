@@ -729,6 +729,11 @@ pub struct Expert {
     pub hist_overuse: f64,
     /// Present-congestion factor of the search cost.
     pub present_overuse: f64,
+    /// Escalation of the present-congestion factor per negotiation iteration (PathFinder):
+    /// iteration `k` searches with `present_overuse · present_growth^(k - 1)` (capped at 1000
+    /// times), so wires that share an overfull edge must give way over the iterations; 1 keeps
+    /// it constant.
+    pub present_growth: f64,
     /// Candidates the zero-slack retry tries.
     pub zero_slack_candidates: usize,
     /// Relaxation sweep cap (single source; see [`Options::relax_cap`]).
@@ -772,6 +777,7 @@ impl Default for Expert {
             hist_block: 0.5,
             hist_overuse: 0.5,
             present_overuse: 4.0,
+            present_growth: 1.0,
             zero_slack_candidates: 4,
             relax_iter_cap: 200,
             own_net_capacity: true,
@@ -909,6 +915,11 @@ pub struct Options {
     /// those vias can move to another site. Off by default: on qmtech and the dcsgone USB crop
     /// the extra rips churn the negotiation and fewer connections route.
     pub blame_vias: bool,
+    /// Negotiation: before a failed path leaves the graph, the overfull edges it crosses get
+    /// history, the foreign vias at their ends site history, and their occupants (strands and
+    /// via owners) search again (`Negotiator::press_failed`), so a passage a failed wire could
+    /// not share is negotiated instead of only the failed wire trying again.
+    pub failed_pressure: bool,
     /// Router: after the negotiation, gradual blocker rip-up (`route::blocker_rip_pass`): the
     /// routed connection whose strands / vias block the most failed connections is ripped, its
     /// victims routed first, then it again; kept on a net gain of routed connections.
@@ -1015,6 +1026,7 @@ impl Default for Options {
             thermal_pad_vias: true,
             plane_via_share_max_nm: 2_000_000,
             blame_vias: false,
+            failed_pressure: false,
             rip_pass: true,
             continue_rounds: 3,
             profile: false,

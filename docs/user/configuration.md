@@ -108,6 +108,7 @@ Rip-up and re-route escalation.
 |---|---|---|---|---|---|
 | `growth` | float | `1.25` |  | 1 .. 10 | Each time a connection rips the same blocker, the history cost left on it is multiplied by this. |
 | `blame_vias` | bool | `false` |  | true\|false | Experimental: when a trace does not fit at its width, rip the connections whose vias it is squeezed against (with the same escalating cost and cap as other rips), so those vias can move to another site. Off by default: on the benchmarks the extra rips route fewer connections. |
+| `failed_pressure` | bool | `false` |  | true\|false | Experimental: when a planned trace does not fit next to the traces and vias already in its passage, those traces and vias are re-planned too (with extra cost on the shared passage), instead of only the failed trace trying again. |
 | `rip_pass` | bool | `true` |  | true\|false | After the routing loop, rip the routed connection that blocks the most unrouted ones (traces and vias), route its victims first and then it again; kept only when more connections route, repeated worst offender first (each retry of the same offender ranks it lower by growth). |
 | `max_per_pair` | int | `8` |  | 1 .. 1000 | Hard backstop on how often one connection may rip the same other connection (bounds the runtime). |
 
@@ -141,6 +142,7 @@ PathFinder constants; change only when you know the router.
 | `hist_block` | float | `0.5` |  | 0 .. 100 | PathFinder history weight added to a face that blocked a connection. |
 | `hist_overuse` | float | `0.5` |  | 0 .. 100 | PathFinder history weight added per unit of face overuse. |
 | `present_overuse` | float | `4.0` |  | 0 .. 100 | PathFinder present-congestion penalty per unit of overuse. |
+| `present_growth` | float | `1.0` |  | 1 .. 10 | Each routing cycle multiplies the present-congestion penalty by this (PathFinder escalation), so traces sharing an overfull passage must give way; 1 keeps it constant. |
 | `zero_slack_candidates` | int | `4` |  | 1 .. 64 | Candidate corridors tried per connection in the zero-slack retry. |
 | `relax_iter_cap` | int | `200` |  | 1 .. 10000 | Iteration cap of the relaxation (smoothing) pass. |
 | `own_net_capacity` | bool | `true` |  | true\|false | Capacity rule: a pad's own edges charge no clearance gap for its own net and give its corner radius back, same-net tracks need no gap between each other (false = the net-blind 0.4.0 rule). *Since 0.5.0.* |

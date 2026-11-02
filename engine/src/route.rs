@@ -5857,6 +5857,13 @@ fn route_pass(
                     for (&i, b) in &out.blocked {
                         neg.penalise_blocked(i, b);
                     }
+                    // Failure pressure (`failed_pressure`): the occupants of the overfull
+                    // edges a failed path crosses search again, before it leaves the graph.
+                    let pressed: Vec<usize> = if opts.failed_pressure {
+                        neg.press_failed(&mg, &failed)
+                    } else {
+                        Vec::new()
+                    };
                     // A failed path's reserved room is not a congestion the others can
                     // resolve: it leaves the graph before the overuse count.
                     for &i in &failed {
@@ -5942,6 +5949,7 @@ fn route_pass(
                     if overuse == 0
                         && out.ripped.is_empty()
                         && blamed.is_empty()
+                        && pressed.is_empty()
                         && last_sig.as_ref() == Some(&sig)
                     {
                         stuck += 1;
@@ -5969,6 +5977,7 @@ fn route_pass(
                     next.extend(out.ripped.iter().copied());
                     next.extend(blamed.iter().copied());
                     next.extend(overused_conns(&mg));
+                    next.extend(pressed.iter().copied());
                     next.retain(|&i| perm[i].is_none());
                     active = next.into_iter().collect();
                     if active.is_empty() {
