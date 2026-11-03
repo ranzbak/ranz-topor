@@ -62,6 +62,7 @@ impl RunControl {
     }
 
     /// Update the progress; counters only ever grow (high-water marks). O(1).
+    #[allow(dead_code)] // progress hook for the routing core (green field)
     pub(crate) fn update(
         &self,
         phase: &str,
@@ -87,6 +88,7 @@ thread_local! {
 }
 
 /// Install (or clear) the cancel flag polled by [`cancelled`] on the current thread.
+#[allow(dead_code)] // cancel hook for the routing core (green field)
 pub(crate) fn install_cancel(flag: Option<Arc<AtomicBool>>) {
     CANCEL.with(|c| *c.borrow_mut() = flag);
 }

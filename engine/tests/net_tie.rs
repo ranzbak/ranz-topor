@@ -30,9 +30,7 @@
 //! Net-(J3-Pin_22) short of the A5 report, concern 3).
 use topor_engine::check::Checker;
 use topor_engine::geom::quant::TrackPrim;
-use topor_engine::geom::{copper_gap_skeleton, dequantise, Track};
-use topor_engine::model::{flip_track, BoardModel, Item, Options, TrackItem};
-use topor_engine::route::route;
+use topor_engine::model::{BoardModel, Item, Options, TrackItem};
 
 const MM: f64 = 1_000_000.0;
 const A: i32 = 1;
@@ -228,79 +226,3 @@ fn tie_pads_closer_than_clearance_are_not_exempt() {
     assert!(against(&m, track(B, (0.35, -4.0), (0.35, 0.0), 0.2)).is_empty());
 }
 
-fn min_gap_to_pad(m: &BoardModel, r: &topor_engine::route::RouteResult, label: &str) -> f64 {
-    let p = m
-        .pads
-        .iter()
-        .find(|p| format!("{}:{}", p.ref_, p.number) == label)
-        .expect("pad");
-    let sk = m.skeleton(p, 0);
-    r.items
-        .iter()
-        .filter_map(|it| match it {
-            Item::Track(t) => Some(copper_gap_skeleton(
-                &Track {
-                    prim: dequantise(&flip_track(t.prim)),
-                    w: t.width as f64,
-                },
-                &sk,
-            )),
-            Item::Via(_) => None,
-        })
-        .fold(f64::INFINITY, f64::min)
-}
-
-fn opts() -> Options {
-    Options {
-        wall_clock_s: 600.0,
-        threads: 1,
-        ..Options::default()
-    }
-}
-
-#[test]
-fn route_of_the_other_tied_net_keeps_clear_of_the_tie_pad() {
-    // dcsgone JP1: net B leaves pad 2 towards a pad beyond pad 1; the straight line crosses pad 1.
-    let m = tie_model(
-        [-1.3, 0.0, 1.3],
-        Some((-0.9, -0.4, -0.3, 0.3)),
-        &[pad("U1", "1", B, (14.0, 20.0), (1.0, 1.0), None)],
-    );
-    let r = route(&m, &opts());
-    assert_eq!(r.routed, 1, "{:?}", r.connections);
-    let clean = Checker::new(
-        &m,
-        &Options {
-            margin_nm: 0,
-            ..Options::default()
-        },
-    )
-    .check_items(&r.items);
-    assert!(clean.violations.is_empty(), "{:?}", clean.violations);
-    let g = min_gap_to_pad(&m, &r, "JP:1");
-    assert!(
-        g >= 200_000.0 - 1.0,
-        "net B copper {g} nm from tie pad JP.1 (net A)"
-    );
-}
-
-#[test]
-fn route_into_an_overlapping_tie_pad_stays_routable() {
-    // Overlapping tie pads (case 24 / 35 legal in KiCad): net B from pad 2 straight up.
-    let m = tie_model(
-        [-0.4, 0.4, 2.0],
-        None,
-        &[pad("U1", "1", B, (20.4, 14.0), (1.0, 1.0), None)],
-    );
-    let r = route(&m, &opts());
-    assert_eq!(r.routed, 1, "{:?}", r.connections);
-    let clean = Checker::new(
-        &m,
-        &Options {
-            margin_nm: 0,
-            ..Options::default()
-        },
-    )
-    .check_items(&r.items);
-    assert!(clean.violations.is_empty(), "{:?}", clean.violations);
-}

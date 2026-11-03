@@ -58,18 +58,6 @@ fn fuzz_items(
     .map_err(PyValueError::new_err)
 }
 
-/// `SmoothResult` JSON: taut smoothing of the hand copper of `model_json` (see `smooth::smooth`).
-#[pyfunction]
-fn smooth(py: Python<'_>, model_json: String, options_json: String) -> PyResult<String> {
-    py.allow_threads(|| {
-        let model = BoardModel::from_json(&model_json)?;
-        let opts = Options::from_json(&options_json)?;
-        let res = crate::smooth::smooth(&model, &opts);
-        serde_json::to_string(&res).map_err(|e| e.to_string())
-    })
-    .map_err(PyValueError::new_err)
-}
-
 /// `RouteResult` JSON: topological routing of the unconnected nets (see `route::route`).
 #[pyfunction]
 fn route(py: Python<'_>, model_json: String, options_json: String) -> PyResult<String> {
@@ -254,7 +242,6 @@ fn topor_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(check_items, m)?)?;
     m.add_function(wrap_pyfunction!(fuzz_items, m)?)?;
-    m.add_function(wrap_pyfunction!(smooth, m)?)?;
     m.add_function(wrap_pyfunction!(route, m)?)?;
     m.add_function(wrap_pyfunction!(route_async, m)?)?;
     m.add_function(wrap_pyfunction!(_route_async_panicking, m)?)?;

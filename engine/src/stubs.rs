@@ -145,7 +145,7 @@ impl ExitStub {
         if let Some(b) = self.bridge {
             sks.push(model.skeleton(&model.pads[b], self.layer));
         }
-        crate::smooth::outside_len(
+        crate::lengths::outside_len(
             &[Prim::Seg(Seg {
                 a: self.start,
                 b: self.end,
