@@ -245,6 +245,11 @@ fn seg_core(a: Vec2, b: Vec2, core: &Core) -> (f64, Vec2, Vec2) {
     }
 }
 
+/// Distance between the segments `a1-b1` and `a2-b2` (0 when they cross).
+pub fn seg_seg_dist(a1: Vec2, b1: Vec2, a2: Vec2, b2: Vec2) -> f64 {
+    seg_seg(a1, b1, a2, b2).0
+}
+
 fn kicad_pt(p: Vec2) -> IVec2 {
     IVec2 { x: p.x.round() as i32, y: (-p.y).round() as i32 }
 }
@@ -313,6 +318,15 @@ pub struct Drawer<'a> {
     pub outline: Vec<(Vec2, Vec2)>,
     /// Extra distance on top of every clearance (nm).
     pub eps: f64,
+    /// Copper-to-board-edge clearance the drawing keeps (nm): the KiCad value, 0 when the check
+    /// `copper_edge_clearance` is set to ignore (a violation is then priced and reported).
+    pub edge_clear: f64,
+    /// Failed runs for the debug dump: `(wire, layer, attempts' polylines, reason)`.
+    pub fails: Vec<(WireId, usize, Vec<Vec<Vec2>>, String)>,
+    /// Position of every pass in its wire's pass list.
+    pass_k: Vec<usize>,
+    /// Nominal polyline (pad centres and pass points) of every wire.
+    polys: Vec<Vec<Vec2>>,
     pub iv: Intervals,
     /// Layer index of every pass (`-1` unpacked).
     pub pass_layer: Vec<i32>,
@@ -335,6 +349,18 @@ impl<'a> Drawer<'a> {
             idx: ItemIndex::new(checker.cell()),
             outline: super::board::outline_segments(model),
             eps: (opts.margin_nm + 2_000) as f64,
+            edge_clear: if model.rules.ignored_checks.iter().any(|c| c == "copper_edge_clearance") { 0.0 } else { b.proj.edge_clear },
+            fails: Vec::new(),
+            pass_k: {
+                let mut v = vec![0; st.passes.len()];
+                for w in st.wires.iter().filter(|w| w.alive) {
+                    for (k, &p) in w.passes.iter().enumerate() {
+                        v[p] = k;
+                    }
+                }
+                v
+            },
+            polys: (0..st.wires.len()).map(|w| if st.wires[w].alive { st.polyline(w) } else { Vec::new() }).collect(),
             iv: Intervals::default(),
             pass_layer: vec![-1; st.passes.len()],
             ents: Vec::new(),
@@ -368,9 +394,11 @@ impl<'a> Drawer<'a> {
         let all = if nl >= 64 { u64::MAX } else { (1u64 << nl) - 1 };
         for ob in &b.proj.obstacles {
             let mask = if ob.drilled { all } else { ob.layers.0 };
-            self.add_ent(Ent { core: Core::Poly(ob.poly.clone()), grow: 0.0, mask, net: ob.net, clear: ob.clear, fixed: ob.bare, live: true });
+            // The polygon of a round shape lies inside the copper (sagitta <= 2 % of the radius).
+            let rad = ob.poly.iter().map(|&p| (p - ob.center).len()).fold(0.0, f64::max);
+            self.add_ent(Ent { core: Core::Poly(ob.poly.clone()), grow: 0.02 * rad, mask, net: ob.net, clear: ob.clear, fixed: ob.bare, live: true });
         }
-        for (o, &pi) in b.pad_of.iter().enumerate() {
+        for (o, &pi) in b.pad_of.iter().enumerate().filter(|(_, &pi)| pi != usize::MAX) {
             let pad = &model.pads[pi];
             if let Some(d) = pad.drill {
                 let ob = &b.proj.obstacles[o];
@@ -386,7 +414,7 @@ impl<'a> Drawer<'a> {
             }
         }
         for &(a, c) in &self.outline.clone() {
-            self.add_ent(Ent { core: Core::Seg(a, c), grow: 0.0, mask: all, net: None, clear: b.proj.edge_clear, fixed: true, live: true });
+            self.add_ent(Ent { core: Core::Seg(a, c), grow: 0.0, mask: all, net: None, clear: self.edge_clear, fixed: true, live: true });
         }
         for sh in &model.copper_shapes {
             let m = lmask(&[sh.layer]);
@@ -524,7 +552,7 @@ impl<'a> Drawer<'a> {
                 hi
             }
             VertKind::Edge => {
-                let req = pr.edge_clear + 0.5 * w + self.eps;
+                let req = self.edge_clear + 0.5 * w + self.eps;
                 let at = |d: f64| pv + (pu - pv) * (d / len.max(1.0));
                 let dist = |p: Vec2| self.outline.iter().map(|&(a, b)| seg_dist(p, a, b)).fold(f64::INFINITY, f64::min);
                 // The outline is not convex: take the last sample that is too close.
@@ -571,9 +599,28 @@ impl<'a> Drawer<'a> {
         let s_of = |pid: PassId| regime.unwrap_or(wi(pid).s);
         let lo: Vec<f64> = items.iter().map(|&pid| self.margin(e, 0, wi(pid).net, wi(pid).w, wi(pid).s, l)).collect();
         let hi: Vec<f64> = items.iter().map(|&pid| len - self.margin(e, 1, wi(pid).net, wi(pid).w, wi(pid).s, l)).collect();
+        // A wire that crosses the edge at the angle `t` needs `1 / sin t` of its perpendicular
+        // spacing along the edge (capped at 2.5): the oblique-chord effect.
+        let (pp, pq) = (self.b.proj.pos[self.b.proj.edges[e][0]], self.b.proj.pos[self.b.proj.edges[e][1]]);
+        let ed = (pq - pp) * (1.0 / (pq - pp).len().max(1.0));
+        let infl: Vec<f64> = items
+            .iter()
+            .map(|&pid| {
+                let (w, k) = (self.st.passes[pid].wire, self.pass_k[pid]);
+                let pl = &self.polys[w];
+                let d = pl[k + 2] - pl[k];
+                let dl = d.len();
+                if dl < 1.0 {
+                    1.0
+                } else {
+                    1.0 / (d.cross(ed).abs() / dl).clamp(0.4, 1.0)
+                }
+            })
+            .collect();
+        let pos_of = |pid: PassId| items.iter().position(|&x| x == pid).unwrap_or(0);
         let req = |a: PassId, b: PassId| {
             let (x, y) = (wi(a), wi(b));
-            0.5 * (x.w + y.w) + if x.net != y.net { s_of(a).max(s_of(b)) + self.eps } else { 0.0 }
+            (0.5 * (x.w + y.w) + if x.net != y.net { s_of(a).max(s_of(b)) + self.eps } else { 0.0 }) * infl[pos_of(a)].max(infl[pos_of(b)])
         };
         let mut lmin = vec![0.0; n];
         let mut rmax = vec![0.0; n];
@@ -699,6 +746,49 @@ impl<'a> Drawer<'a> {
         self.handles.len() - 1
     }
 
+    /// JSON of the drawing state for the debug picture (`TOPO_DUMP`): live dynamic segments,
+    /// static pad polygons, failed runs.
+    pub fn dump(&self) -> String {
+        let pt = |p: Vec2| format!("[{:.0},{:.0}]", p.x, p.y);
+        let mut segs = Vec::new();
+        let mut polys = Vec::new();
+        for e in self.ents.iter().filter(|e| e.live) {
+            match &e.core {
+                Core::Seg(a, b) if e.net.is_some() && !e.fixed => {
+                    segs.push(format!("[{},{},{:.0},{},{}]", pt(*a), pt(*b), 2.0 * e.grow, e.mask, e.net.unwrap_or(0)))
+                }
+                Core::Poly(p) => polys.push(format!("[{},{}]", e.mask, p.iter().map(|&q| pt(q)).collect::<Vec<_>>().join(","))),
+                Core::Pt(c) if e.grow > 0.0 => polys.push(format!(
+                    "[{},{}]",
+                    e.mask,
+                    (0..16)
+                        .map(|i| {
+                            let a = i as f64 * std::f64::consts::PI / 8.0;
+                            pt(*c + Vec2 { x: a.cos() * e.grow, y: a.sin() * e.grow })
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )),
+                _ => {}
+            }
+        }
+        let fails: Vec<String> = self
+            .fails
+            .iter()
+            .map(|(w, l, at, r)| {
+                let wi = &self.st.wires[*w];
+                format!(
+                    "{{\"wire\":{w},\"net\":{},\"w\":{},\"layer\":{l},\"reason\":{:?},\"tries\":[{}]}}",
+                    wi.net,
+                    wi.w,
+                    r,
+                    at.iter().map(|p| format!("[{}]", p.iter().map(|&q| pt(q)).collect::<Vec<_>>().join(","))).collect::<Vec<_>>().join(",")
+                )
+            })
+            .collect();
+        format!("{{\"segs\":[{}],\"polys\":[{}],\"fails\":[{}]}}", segs.join(","), polys.join(","), fails.join(","))
+    }
+
     /// Take the copper of `handle` back out.
     pub fn uncommit(&mut self, handle: usize) {
         let (i, e) = self.handles[handle];
@@ -725,8 +815,10 @@ impl<'a> Drawer<'a> {
             let lid = self.layer_id(layer);
             let mut ok = false;
             let mut last_reason = String::new();
+            let mut tried: Vec<Vec<Vec2>> = Vec::new();
             for attempt in 0..3 {
                 let pts = self.run_polyline(w, k0, k1, s, e, attempt, layer);
+                tried.push(pts.clone());
                 let (ps, pe) = (r == 0, r == plan.layers.len() - 1);
                 let mut items = Self::items_of(wi.net, lid, wi.w, &pts, Some(w));
                 let mut rep = self.checker.check_against(&self.idx, &items, &[]);
@@ -771,6 +863,9 @@ impl<'a> Drawer<'a> {
                 );
             }
             if !ok {
+                if std::env::var("TOPO_DUMP").is_ok() {
+                    self.fails.push((w, layer, tried, last_reason.clone()));
+                }
                 for id in committed {
                     self.uncommit(id);
                 }
@@ -903,13 +998,15 @@ impl<'a> Drawer<'a> {
     /// result is judged by the [`Checker`] anyway. O(rounds x segments x neighbours).
     fn repair(&self, net: i32, w: f64, s: f64, layer: usize, mut pts: Vec<Vec2>) -> Vec<Vec2> {
         let mut bumps: BTreeMap<usize, u32> = BTreeMap::new();
-        for _ in 0..48 {
-            let mut worst: Option<(f64, usize, usize, Vec2, Vec2, f64)> = None;
+        for _ in 0..60 {
+            // The worst violation of every segment: (segment, short, object, nearest point, push, need).
+            let mut fixes: Vec<(usize, usize, Vec2, Vec2, f64)> = Vec::new();
             for i in 0..pts.len() - 1 {
                 let (a, b) = (pts[i], pts[i + 1]);
                 let mut ids = self.grid.query(bbox_of(&[a, b]).grow(self.qgrow));
                 ids.sort_unstable();
                 ids.dedup();
+                let mut worst: Option<(f64, usize, Vec2, Vec2, f64)> = None;
                 for id in ids {
                     let e = &self.ents[id];
                     if !e.live || (e.mask >> layer) & 1 == 0 || e.net == Some(net) {
@@ -925,18 +1022,30 @@ impl<'a> Drawer<'a> {
                             Core::Pt(p) => *p,
                         };
                         let n = if d > 1e-6 { (c - q) * (1.0 / d) } else { (q - centre) * (1.0 / (q - centre).len().max(1e-9)) };
-                        worst = Some((short, i, id, q, n, need));
+                        worst = Some((short, id, q, n, need));
                     }
                 }
+                if let Some((_, id, q, n, need)) = worst {
+                    fixes.push((i, id, q, n, need));
+                }
             }
-            let Some((_, i, id, q, n, need)) = worst else { break };
-            let k = bumps.entry(id).or_insert(0);
-            *k += 1;
-            if *k > 6 {
+            if fixes.is_empty() {
                 break;
             }
-            let o = q + n * ((need + 3_000.0) * (1.0 + 0.12 * f64::from(*k - 1)));
-            pts.insert(i + 1, o);
+            let mut progressed = false;
+            for &(i, id, q, n, need) in fixes.iter().rev() {
+                let k = bumps.entry(id).or_insert(0);
+                *k += 1;
+                if *k > 8 {
+                    continue;
+                }
+                progressed = true;
+                let o = q + n * ((need + 3_000.0) * (1.0 + 0.12 * f64::from(*k - 1)));
+                pts.insert(i + 1, o);
+            }
+            if !progressed {
+                break;
+            }
         }
         pts
     }

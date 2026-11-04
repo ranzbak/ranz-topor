@@ -32,6 +32,18 @@ def _swig_inputs(board) -> tuple[dict, dict, dict, dict]:
         "max_error": mm(ds.m_MaxError),
     }, "via_dimensions": [{"diameter": mm(v.m_Diameter), "drill": mm(v.m_Drill)}
                           for v in ds.m_ViasDimensionsList]}}}
+    # Violation severities live in the project file only (no stable SWIG accessor): read them from it.
+    try:
+        import json
+        from pathlib import Path
+
+        pro_p = Path(str(board.GetFileName())).with_suffix(".kicad_pro")
+        if pro_p.is_file():
+            sev = (json.loads(pro_p.read_text()).get("board", {}).get("design_settings", {}) or {}).get("rule_severities")
+            if sev:
+                pro["board"]["design_settings"]["rule_severities"] = sev
+    except (OSError, ValueError):
+        pass
     classes: dict[str, NetClassVals] = {}
     of: dict[str, str] = {}
     codes: dict[str, int] = {}

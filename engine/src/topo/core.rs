@@ -112,7 +112,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     }
     let (reg, problems) = Registry::from_config(standard_factors(), &opts.factors);
     warnings.extend(problems);
-    let b = match board::build(model, &BuildOpts::default()) {
+    let b = match board::build(model, &BuildOpts { existing_vias: true, ..BuildOpts::default() }) {
         Ok(b) => b,
         Err(e) => return unrouted(model, opts, &format!("projection failed: {e}")),
     };
@@ -120,7 +120,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     let mut out: Vec<Outcome> = vec![Outcome::default(); nconn];
     let diff = diff_pair_nets(model);
     let mut obs_of_pad: BTreeMap<usize, ObsId> = BTreeMap::new();
-    for (o, &p) in b.pad_of.iter().enumerate() {
+    for (o, &p) in b.pad_of.iter().enumerate().filter(|(_, &p)| p != usize::MAX) {
         obs_of_pad.insert(p, o);
     }
     // Sort the connections: pad-to-pad ones into P2, pour ones into the plane stage.
@@ -183,15 +183,22 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     let mut timed_out = false;
     let route_one = |st: &mut State, ci: usize, cap: usize, wire_conn: &mut Vec<usize>| -> bool {
         let c = &conns[ci];
-        let w = weights(c, tier_of(conn_of[ci]), cap);
-        match st.route_conn(c, &w, (c.w + c.s) / ws0) {
-            Some((wid, _)) => {
-                debug_assert_eq!(wid, wire_conn.len());
-                wire_conn.push(ci);
-                true
+        let straight = len_of(c).max(1.0);
+        // A path longer than `detour_factor` x the straight distance is a detour: search again with
+        // cheaper crossings (P3 resolves a crossing with a via; a detour of many times the
+        // connection's length is worse than that), the cheapest last.
+        for (attempt, cross_scale) in [1.0, 0.25, 0.0].into_iter().enumerate() {
+            let mut w = weights(c, tier_of(conn_of[ci]), cap);
+            w.cross_mm *= cross_scale;
+            let Some((wid, _)) = st.route_conn(c, &w, (c.w + c.s) / ws0) else { return false };
+            wire_conn.push(ci);
+            let len: f64 = st.polyline(wid).windows(2).map(|x| (x[1] - x[0]).len()).sum();
+            if opts.detour_factor <= 0.0 || len <= opts.detour_factor * straight || attempt == 2 {
+                return true;
             }
-            None => false,
+            st.remove(wid);
         }
+        true
     };
     let cap = 2_000_000usize;
     for &ci in &order {
@@ -228,7 +235,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     };
     let lr = layers::assign(&st, &|ob| b.smd_layer(ob), &lp);
     // A different-net crossing still on one layer is an error: the lower-tier wire stays unrouted.
-    let wlen: Vec<f64> = (0..st.wires.len()).map(|w| st.polyline(w).windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>()).collect();
+    let wlen: Vec<f64> = (0..st.wires.len()).map(|w| if !st.wires[w].alive { 0.0 } else { st.polyline(w).windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>() }).collect();
     let wire_len = |w: WireId| wlen[w];
     let mut dropped: BTreeSet<WireId> = BTreeSet::new();
     let mut unlayerable_errors = 0usize;
@@ -261,7 +268,19 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     }
     ctl.update("route", 2, 0, nconn, lr.vias, t0.elapsed().as_secs_f64());
     // ---- Drawing ----
-    let checker = Checker::new(model, opts);
+    // An ignored copper-to-edge check is not hard: the checker keeps only "no overlap" there and
+    // the violation is priced and reported afterwards (ignored_rule factor).
+    let edge_ignored = model.rules.ignored_checks.iter().any(|c| c == "copper_edge_clearance");
+    let relaxed;
+    let check_model: &BoardModel = if edge_ignored {
+        let mut m = model.clone();
+        m.rules.edge_clearance = 0;
+        relaxed = m;
+        &relaxed
+    } else {
+        model
+    };
+    let checker = Checker::new(check_model, opts);
     let mut dr = Drawer::new(model, opts, &b, &st, &checker);
     let mut plans: BTreeMap<WireId, Plan> = BTreeMap::new();
     for w in 0..st.wires.len() {
@@ -375,6 +394,9 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     if !plane_done {
         run_planes(&mut dr, &mut out, &mut plane_res);
     }
+    if let Ok(path) = std::env::var("TOPO_DUMP") {
+        let _ = std::fs::write(path, dr.dump());
+    }
     drop(dr);
     let isl = planes::islands(model, &b, &out_vias(&out, &plane_reqs, &dec.connections), &plane_reqs);
     warnings.extend(isl);
@@ -410,7 +432,8 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
             r.stub_nm = o.stub_nm.round() as i64;
             r.neck_nm = o.neck_nm.round() as i64;
             r.neck_width_nm = o.neck_w.map(|x| x.round() as i64);
-            r.ghost_len_nm = Some(o.ghost_nm.round() as i64);
+            // A stub into a plane has no straight-line reference: it is not a detour.
+            r.ghost_len_nm = (o.stub_nm == 0.0).then_some(o.ghost_nm.round() as i64);
             r.pattern = if o.vias.is_empty() { "topo".into() } else { "topo+via".into() };
             tot_len += r.length_nm;
             tot_vias += r.vias;
@@ -467,6 +490,34 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
             }
         })
         .collect();
+    if edge_ignored {
+        let rule = model.rules.edge_clearance as f64;
+        let outline = board::outline_segments(model);
+        let ctx = WireCtx::default();
+        let mut n = 0usize;
+        for it in &items {
+            let Item::Track(t) = it else { continue };
+            let crate::geom::quant::TrackPrim::Seg { a, b } = t.prim else { continue };
+            let (a, b) = (Vec2 { x: f64::from(a.x), y: -f64::from(a.y) }, Vec2 { x: f64::from(b.x), y: -f64::from(b.y) });
+            let near = outline
+                .iter()
+                .map(|&(c, d)| super::draw::seg_seg_dist(a, b, c, d))
+                .fold(f64::INFINITY, f64::min);
+            let gap = near - 0.5 * t.width as f64;
+            if gap < rule - 1.0 {
+                let ev = Event::IgnoredRuleViolated { rule: "copper_edge_clearance".into(), at: (a + b) * 0.5, amount_nm: rule - gap };
+                n += 1;
+                for f in reg.findings(std::slice::from_ref(&ev), &ctx) {
+                    if f.level >= Report::Warning {
+                        warnings.push(f.text);
+                    }
+                }
+            }
+        }
+        if n > 0 {
+            warnings.push(format!("ignored_rule: {n} track segments violate the copper edge clearance (check set to ignore in KiCad); priced by the ignored_rule factor"));
+        }
+    }
     let routed_n = reports.iter().filter(|r| r.status == "routed").count();
     let nets_total = nets.iter().filter(|n| n.connections > 0).count();
     let nets_routed = nets.iter().filter(|n| n.connections > 0 && n.status == "routed").count();
@@ -477,6 +528,78 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     if unlayerable_errors > 0 {
         warnings.push(format!("layering errors: {unlayerable_errors} different-net crossings cannot be layered (not emitted)"));
     }
+    let mut p2r: Vec<f64> = (0..st.wires.len())
+        .filter(|&w| st.wires[w].alive || dropped.contains(&w))
+        .map(|w| wlen[w] / (proj.pos[st.wires[w].b] - proj.pos[st.wires[w].a]).len().max(1.0))
+        .collect();
+    if std::env::var("TOPO_P2DEBUG").is_ok() {
+        let mut v: Vec<(f64, WireId)> = (0..st.wires.len())
+            .filter(|&w| st.wires[w].alive || dropped.contains(&w))
+            .map(|w| (wlen[w] / (proj.pos[st.wires[w].b] - proj.pos[st.wires[w].a]).len().max(1.0), w))
+            .collect();
+        v.sort_by(|a, b| b.0.total_cmp(&a.0));
+        for &(r, w) in v.iter().take(12) {
+            let wi = &st.wires[w];
+            let (pa, pb) = (proj.pos[wi.a], proj.pos[wi.b]);
+            // Other-net obstacles the straight segment crosses, per layer set.
+            let mut single = [0usize; 2];
+            let mut both = 0usize;
+            for ob in proj.obstacles.iter().filter(|o| o.net != Some(wi.net)) {
+                let n = ob.poly.len();
+                let hit = (0..n).any(|i| {
+                    let (a, b) = (ob.poly[i], ob.poly[(i + 1) % n]);
+                    let (d1, d2) = (pb - pa, b - a);
+                    let den = d1.cross(d2);
+                    den.abs() > 1e-9 && {
+                        let t = (a - pa).cross(d2) / den;
+                        let u = (a - pa).cross(d1) / den;
+                        (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)
+                    }
+                });
+                if hit {
+                    if ob.drilled || ob.layers.count() == 2 {
+                        both += 1;
+                    } else if let Some(l) = ob.layers.single() {
+                        single[l] += 1;
+                    }
+                }
+            }
+            {
+                let est = State::new(proj);
+                let c = Conn { net: wi.net, pa: wi.pa, pb: wi.pb, a: wi.a, b: wi.b, w: wi.w, s: wi.s };
+                let wt = weights(&c, 3, 2_000_000);
+                let alone = est.search(&c, &wt, (c.w + c.s) / ws0);
+                if let Some((path, tris)) = alone {
+                    let mut e2 = State::new(proj);
+                    let wire = super::state::Wire { net: c.net, w: c.w, s: c.s, a: c.a, b: c.b, pa: c.pa, pb: c.pb, turns: Vec::new(), passes: Vec::new(), tris: Vec::new(), alive: true };
+                    let id = e2.insert(wire, &path, tris);
+                    let l: f64 = e2.polyline(id).windows(2).map(|x| (x[1] - x[0]).len()).sum();
+                    eprintln!("  alone on an empty state: {:.2} mm, {} passes", l / MM, path.len());
+                }
+            }
+            eprintln!(
+                "P2 outlier {r:.1}: {} -> {} net {} straight {:.2} mm path {:.2} mm crossings {} straight crosses obstacles on both layers {both}, only F {}, only B {}, passes {}",
+                { let p = &model.pads[b.pad_of[wi.pa]]; format!("{}.{} {:?}", p.ref_, p.number, p.center) },
+                { let p = &model.pads[b.pad_of[wi.pb]]; format!("{}.{} {:?}", p.ref_, p.number, p.center) },
+                wi.net,
+                (pb - pa).len() / MM,
+                wlen[w] / MM,
+                st.crossings(w).len(),
+                single[0],
+                single[1],
+                wi.passes.len()
+            );
+        }
+    }
+    p2r.sort_by(f64::total_cmp);
+    let q = |f: f64| p2r.get(((p2r.len() as f64 - 1.0) * f).round() as usize).copied().unwrap_or(1.0);
+    warnings.push(format!(
+        "P2 topology before drawing: path length over straight distance median {:.2}, p90 {:.2}, max {:.2}, {} wires above 3",
+        q(0.5),
+        q(0.9),
+        q(1.0),
+        p2r.iter().filter(|&&r| r > 3.0).count()
+    ));
     warnings.push(format!(
         "topological core S2a: {} wires in P2 ({} double-crossing swaps), P3 vias {}, {} triangles",
         st.wires.iter().filter(|w| w.alive).count() + dropped.len(),

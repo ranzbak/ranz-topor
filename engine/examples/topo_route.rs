@@ -19,6 +19,13 @@ fn main() {
     if let Some(t) = flag("--timeout") {
         o.wall_clock_s = t.parse().expect("--timeout S");
     }
+    for (i, a) in args.iter().enumerate() {
+        if a == "--factor" {
+            let v = args.get(i + 1).expect("--factor NAME=WEIGHT");
+            let (n, w) = v.split_once('=').expect("--factor NAME=WEIGHT");
+            o.factors.weight.insert(n.to_string(), w.parse().expect("weight"));
+        }
+    }
     let r = topor_engine::route::route_with(&m, &o, &RunControl::new());
     println!(
         "{}: connections {} routed {} failed {} vias {} runtime {:.2} s ({})",
@@ -26,7 +33,14 @@ fn main() {
     );
     let mut why: BTreeMap<String, usize> = BTreeMap::new();
     for c in r.connections.iter().filter(|c| c.status != "routed") {
-        let key: String = c.reason.chars().take(70).collect();
+        let key: String = if let Some(i) = c.reason.find(" against ") {
+            let kind: String = c.reason[i + 9..].chars().take_while(|&ch| ch != ':').collect();
+            format!("drawing: clearance against {kind}")
+        } else if c.reason.starts_with("pad ") || c.reason.starts_with("via ") {
+            c.reason.split(':').nth(1).unwrap_or("").chars().take(60).collect::<String>()
+        } else {
+            c.reason.chars().take(70).collect()
+        };
         *why.entry(key).or_default() += 1;
     }
     for (k, v) in &why {
@@ -41,7 +55,24 @@ fn main() {
     ratios.sort_by(f64::total_cmp);
     let q = |f: f64| ratios.get(((ratios.len() as f64 - 1.0) * f).round() as usize).copied().unwrap_or(0.0);
     println!("  detour (vs straight pad distance) median {:.3} p90 {:.3} max {:.3}", q(0.5), q(0.9), q(1.0));
-    for w in r.warnings.iter().take(12) {
+    let mut top: Vec<_> = r.connections.iter().filter(|c| c.status == "routed" && c.ghost_len_nm.unwrap_or(0) > 0).collect();
+    top.sort_by(|a, b| {
+        let f = |c: &&topor_engine::route::ConnReport| c.length_nm as f64 / c.ghost_len_nm.unwrap_or(1) as f64;
+        f(b).total_cmp(&f(a))
+    });
+    for c in top.iter().take(8) {
+        println!(
+            "  top detour {:.2}: {} {} -> {} len {:.2} mm straight {:.2} mm vias {}",
+            c.length_nm as f64 / c.ghost_len_nm.unwrap_or(1) as f64,
+            c.name,
+            c.from.label,
+            c.to.label,
+            c.length_nm as f64 / 1e6,
+            c.ghost_len_nm.unwrap_or(0) as f64 / 1e6,
+            c.vias
+        );
+    }
+    for w in r.warnings.iter().filter(|w| !w.contains("skipped") && !w.contains("island")).take(12) {
         println!("  warning: {w}");
     }
     if let Some(p) = flag("--out") {

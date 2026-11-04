@@ -186,6 +186,12 @@ def rule_values_from_pro(pro: dict) -> dict[str, int]:
     return out
 
 
+def ignored_checks_from_pro(pro: dict) -> list[str]:
+    """KiCad checks whose severity is ``ignore`` (``board.design_settings.rule_severities``), sorted. O(#rules)."""
+    ds = (pro.get("board") or {}).get("design_settings") or {}
+    return sorted(k for k, v in (ds.get("rule_severities") or {}).items() if v == "ignore")
+
+
 # ------------------------------------------------------------------ resolution
 def resolve_rules_from_project(
     pro: dict,
@@ -349,4 +355,5 @@ def resolve_rules_from_project(
         "per_net": per_net,
         "floors_applied": floors_applied,
         "warnings": warnings,
+        "ignored_checks": ignored_checks_from_pro(pro),
     }

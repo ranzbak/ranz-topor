@@ -139,8 +139,8 @@ SETTINGS: list[Setting] = [
     _s("layers", "direction_cost", "float", 0.0, "Extra cost factor for running against a layer's preferred direction: a step of length L at angle a to it costs an extra L * direction_cost * |sin a|; 0 = off.", range=(0, 100), engine="direction_cost"),
     _s("layers", "pour_cut_cost_mm", "float", 0.0, "Extra cost, in mm of trace per mm, of running inside the filled copper of another net's pour on a layer (cutting a pour into islands costs the pour its connectivity); 0 = off. Measured: 1.0 made wiccon 58/61 with 83 vias and eprom 1.2 mm longer, so it is off by default; try 0.1 to 0.5 on boards whose pour islands after routing.", unit="mm", range=(0, 1000), engine="pour_cut_cost_nm"),
     # ---- [search]
-    _s("search", "detour_factor", "float", 2.0, "A connection longer than this multiple of its ghost-line length is treated as a detour and ripped.",
-       range=(1.0, 100), engine="detour_factor"),
+    _s("search", "detour_factor", "float", 2.0, "A connection longer than this multiple of its straight pad-to-pad distance is treated as a detour: the topological core searches it again with cheaper crossings (the layer assignment then resolves a crossing with a via) instead of accepting a wandering path; 0 = off.",
+       range=(0.0, 100), engine="detour_factor"),
     _s("search", "margin_um", "float", 5, "Safety margin added to every clearance during search.", unit="µm", range=(0, 1000), engine="margin_nm"),
     _s("search", "zero_slack_retry", "bool", True, "One extra pass lets a connection use a corridor pinched below the margin but not below the rules.",
        engine="zero_slack_retry"),

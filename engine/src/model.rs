@@ -352,6 +352,12 @@ pub struct Rules {
     /// (`A.intersectsCourtyard('U6')`): inside the polygon the rule's clearance replaces the net
     /// classes' (KiCad: the matching custom rule wins), e.g. a BGA neck-down rule.
     pub clearance_regions: Vec<ClearanceRegion>,
+    /// KiCad checks whose severity in Board Setup -> Violation Severity is `ignore`
+    /// (`rule_severities` of the `.kicad_pro`), by KiCad name (e.g. `copper_edge_clearance`).
+    /// Such a check is not a hard rule: the topological core prices a violation (`ignored_rule`
+    /// factor) and reports it as a warning.
+    #[serde(default)]
+    pub ignored_checks: Vec<String>,
 }
 
 /// A courtyard-bound custom clearance rule.
@@ -394,6 +400,7 @@ impl Default for Rules {
             per_net: HashMap::new(),
             warnings: Vec::new(),
             clearance_regions: Vec::new(),
+            ignored_checks: Vec::new(),
         }
     }
 }

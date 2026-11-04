@@ -475,7 +475,7 @@ pub fn assign(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
     let mut rep = LayerReport::default();
     let mut dom: BTreeMap<(WireId, usize, WireId, usize), usize> = BTreeMap::new();
     let mut unl: BTreeSet<(WireId, usize, WireId, usize)> = BTreeSet::new();
-    let polys: Vec<Vec<Vec2>> = (0..st.wires.len()).map(|w| st.polyline(w)).collect();
+    let polys: Vec<Vec<Vec2>> = (0..st.wires.len()).map(|w| if st.wires[w].alive { st.polyline(w) } else { Vec::new() }).collect();
     let mut events: Vec<Vec<Event>> = Vec::with_capacity(st.wires.len());
     for (w, wi) in st.wires.iter().enumerate() {
         let mut ev = Vec::new();

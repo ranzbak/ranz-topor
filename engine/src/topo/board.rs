@@ -29,11 +29,14 @@ pub struct BuildOpts {
     /// Vertices per full turn of a round pad / rounded corner (see [`skel_poly`]); 16 keeps every
     /// polygon within 1.9 % of the radius of the copper, 8 halves the triangles (7.6 %).
     pub round_steps: usize,
+    /// The vias of the model are drilled obstacles (copper the board keeps; S2a). The gate and
+    /// witness inputs have none.
+    pub existing_vias: bool,
 }
 
 impl Default for BuildOpts {
     fn default() -> Self {
-        BuildOpts { steiner_mm: 2.0, steiner_clear_mm: 0.6, lct_mm: 3.0, lct_eps_mm: 0.01, round_steps: 16 }
+        BuildOpts { steiner_mm: 2.0, steiner_clear_mm: 0.6, lct_mm: 3.0, lct_eps_mm: 0.01, round_steps: 16, existing_vias: false }
     }
 }
 
@@ -195,6 +198,24 @@ pub fn build_with_nodes(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2]) -> Result
                     .max(m.npth_hole_clearance(pad)) as f64
             },
         });
+    }
+    if o.existing_vias {
+        for v in &m.vias {
+            let c = v.at.to_vec2();
+            let poly = skel_poly(&Skeleton::Point { p: c, r: 0.5 * v.d as f64 }, o.round_steps.max(4));
+            // `pad_of` stays index-aligned with the obstacles; `usize::MAX` marks a via.
+            pad_of.push(usize::MAX);
+            obstacles.push(Obstacle {
+                kind: ObsKind::Pad,
+                poly,
+                center: c,
+                layers: LayerMask::all(n),
+                drilled: true,
+                net: (v.net > 0).then_some(v.net),
+                clear: (m.rules.net_rule(v.net).clearance).max(m.rules.min_clearance).max(m.rules.hole_clearance) as f64,
+                bare: false,
+            });
+        }
     }
     // Centres first, so a coincident vertex keeps the terminal kind.
     let mut points: Vec<(Vec2, VertKind)> = Vec::new();

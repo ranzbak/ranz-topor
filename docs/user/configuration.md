@@ -87,7 +87,7 @@ Path search tuning.
 
 | Key | Type | Default | Unit | Range | Description |
 |---|---|---|---|---|---|
-| `detour_factor` | float | `2.0` |  | 1 .. 100 | A connection longer than this multiple of its ghost-line length is treated as a detour and ripped. |
+| `detour_factor` | float | `2.0` |  | 0 .. 100 | A connection longer than this multiple of its straight pad-to-pad distance is treated as a detour: the topological core searches it again with cheaper crossings (the layer assignment then resolves a crossing with a via) instead of accepting a wandering path; 0 = off. |
 | `margin_um` | float | `5` | µm | 0 .. 1000 | Safety margin added to every clearance during search. |
 | `zero_slack_retry` | bool | `true` |  | true\|false | One extra pass lets a connection use a corridor pinched below the margin but not below the rules. |
 | `zero_slack_failed` | bool | `true` |  | true\|false | The zero-slack pass also tries connections that failed, before any length gain of routed ones (a connection whose only corridor is pinched below the margin still gets its attempt). *Since 0.5.0.* |
