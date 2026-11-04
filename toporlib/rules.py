@@ -53,6 +53,7 @@ _RULE_DEFAULTS_NM = {
     "min_hole_clearance": 250_000,
     "min_hole_to_hole": 250_000,
     "min_copper_edge_clearance": 500_000,
+    "min_connection": 0,
     "max_error": 5_000,
 }
 #: KiCad's built-in values of a net class that does not set them (the "Default" class of an empty project).
@@ -246,6 +247,9 @@ def resolve_rules_from_project(
         "hole_to_hole": floored("hole_to_hole", dv["min_hole_to_hole"], profile["hole_to_hole_via"]),
         "edge_clearance": floored("edge_clearance", dv["min_copper_edge_clearance"], profile["edge"]),
         "max_error": _nz(dv["max_error"], 5_000),
+        # Narrowest copper connection KiCad accepts (Board Setup > Constraints > Minimum connection width): a
+        # necked pad exit may not go below it. 0 = unset (no limit).
+        "min_connection": int(dv["min_connection"]),
     }
 
     rules: list[DruRule] = parse_dru(dru_text) if dru_text else []

@@ -84,7 +84,8 @@ def _ladder(result: dict | None):
 
 
 def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, timeout_s: float | None = None,
-                whole_project: bool = False, png: bool = True, name: str | None = None) -> dict:
+                whole_project: bool = False, png: bool = True, name: str | None = None,
+                declared_layers: bool = False) -> dict:
     import topor_engine
     strip = _load_strip()
     from harness.model import export_model, load_board
@@ -108,6 +109,14 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
     ib = load_board(inp)
     rules = resolve_rules(ib, dru_text=dru, widths_before=widths)
     model = export_model(ib, rules, name=name, dru_text=dru)
+    if not declared_layers:
+        # Layer roles as the plugin resolves them (config > KiCad types > defaults by copper count): a
+        # 4-layer board whose layers are all declared "signal" has planes in In1 / In2 (qmtech).
+        from topor.layers import is_routed, resolve_layer_roles_ex
+        roles, _, _ = resolve_layer_roles_ex([(l["name"], l["kind"]) for l in model["layers"]], {})
+        for l in model["layers"]:
+            if l["name"] in roles:
+                l["routable"] = is_routed(roles[l["name"]])
     del hb, ib
 
     cfg = Config.defaults()
@@ -225,10 +234,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="override a topor.toml setting (JSON value), repeatable")
     ap.add_argument("--whole-project", action="store_true", help="copy the entire project directory")
     ap.add_argument("--no-png", action="store_true")
+    ap.add_argument("--declared-layers", action="store_true",
+                    help="route every copper layer the board declares as signal (default: the plugin's layer roles)")
     ap.add_argument("--name", default=None, help="board name in file names (default: key or pcb stem)")
     a = ap.parse_args(argv)
     m = route_board(a.board, a.out_dir, overrides=dict(_kv(s) for s in a.set), timeout_s=a.timeout,
-                    whole_project=a.whole_project, png=not a.no_png, name=a.name)
+                    whole_project=a.whole_project, png=not a.no_png, name=a.name,
+                    declared_layers=a.declared_layers)
     print(summary(m))
     return 0
 

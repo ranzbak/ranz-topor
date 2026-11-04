@@ -330,6 +330,10 @@ pub struct Rules {
     pub hole_clearance: i64,
     pub hole_to_hole: i64,
     pub edge_clearance: i64,
+    /// Narrowest copper connection KiCad's DRC accepts (`min_connection`, nm; 0 = unset): a
+    /// necked pad exit stays at least this wide.
+    #[serde(default)]
+    pub min_connection: i64,
     pub max_error: i64,
     pub profile: String,
     pub drill_list: Vec<i64>,
@@ -387,6 +391,7 @@ impl Default for Rules {
             hole_clearance: 250_000,
             hole_to_hole: 250_000,
             edge_clearance: 500_000,
+            min_connection: 0,
             max_error: 5_000,
             profile: "jlcpcb_1oz".into(),
             drill_list: vec![

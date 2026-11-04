@@ -66,8 +66,8 @@ def test_since_keys_are_commented_out_until_available():
 def _flatten(d):
     out = set()
     for k, v in d.items():
-        if k == "expert" and isinstance(v, dict):
-            out |= {f"expert.{kk}" for kk in v}
+        if k in ("expert", "factors") and isinstance(v, dict):
+            out |= {f"{k}.{kk}" for kk in v}
         else:
             out.add(k)
     return out

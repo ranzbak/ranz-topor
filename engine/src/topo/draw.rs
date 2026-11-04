@@ -182,6 +182,8 @@ struct Ent {
     /// The demanded clearance replaces the wire's own (holes, board edge, keepouts).
     fixed: bool,
     live: bool,
+    /// A copper shape (footprint polygon), not a pad: vias keep their hole clearance to it.
+    shape: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -396,7 +398,7 @@ impl<'a> Drawer<'a> {
             let mask = if ob.drilled { all } else { ob.layers.0 };
             // The polygon of a round shape lies inside the copper (sagitta <= 2 % of the radius).
             let rad = ob.poly.iter().map(|&p| (p - ob.center).len()).fold(0.0, f64::max);
-            self.add_ent(Ent { core: Core::Poly(ob.poly.clone()), grow: 0.02 * rad, mask, net: ob.net, clear: ob.clear, fixed: ob.bare, live: true });
+            self.add_ent(Ent { core: Core::Poly(ob.poly.clone()), grow: 0.02 * rad, mask, net: ob.net, clear: ob.clear, fixed: ob.bare, live: true, shape: false });
         }
         for (o, &pi) in b.pad_of.iter().enumerate().filter(|(_, &pi)| pi != usize::MAX) {
             let pad = &model.pads[pi];
@@ -406,34 +408,35 @@ impl<'a> Drawer<'a> {
                     core: Core::Pt(ob.center),
                     grow: 0.5 * d.w.min(d.h) as f64,
                     mask: all,
-                    net: None,
+                    net: ob.net,
                     clear: model.rules.hole_clearance as f64,
                     fixed: true,
                     live: true,
+                    shape: false,
                 });
             }
         }
         for &(a, c) in &self.outline.clone() {
-            self.add_ent(Ent { core: Core::Seg(a, c), grow: 0.0, mask: all, net: None, clear: self.edge_clear, fixed: true, live: true });
+            self.add_ent(Ent { core: Core::Seg(a, c), grow: 0.0, mask: all, net: None, clear: self.edge_clear, fixed: true, live: true, shape: false });
         }
         for sh in &model.copper_shapes {
             let m = lmask(&[sh.layer]);
             if m != 0 && sh.poly.len() >= 3 {
                 let clear = model.rules.net_rule(sh.net).clearance as f64;
-                self.add_ent(Ent { core: Core::Poly(sh.poly.iter().map(|p| p.to_vec2()).collect()), grow: 0.0, mask: m, net: (sh.net > 0).then_some(sh.net), clear, fixed: false, live: true });
+                self.add_ent(Ent { core: Core::Poly(sh.poly.iter().map(|p| p.to_vec2()).collect()), grow: 0.0, mask: m, net: (sh.net > 0).then_some(sh.net), clear, fixed: false, live: true, shape: true });
             }
         }
         for k in &model.keepouts {
             if k.no_tracks && k.poly.len() >= 3 {
                 let m = if k.layers.is_empty() { all } else { lmask(&k.layers) };
-                self.add_ent(Ent { core: Core::Poly(k.poly.iter().map(|p| p.to_vec2()).collect()), grow: 0.0, mask: m, net: None, clear: 0.0, fixed: true, live: true });
+                self.add_ent(Ent { core: Core::Poly(k.poly.iter().map(|p| p.to_vec2()).collect()), grow: 0.0, mask: m, net: None, clear: 0.0, fixed: true, live: true, shape: false });
             }
         }
         // Existing copper the board keeps: vias and tracks (arcs as chords).
         for v in &model.vias {
             let m = if v.layers.is_empty() { all } else { lmask(&v.layers) | if v.layers.contains(&0) && v.layers.contains(&2) { all } else { 0 } };
             let clear = model.rules.net_rule(v.net).clearance as f64;
-            self.add_ent(Ent { core: Core::Pt(v.at.to_vec2()), grow: 0.5 * v.d as f64, mask: m, net: (v.net > 0).then_some(v.net), clear, fixed: false, live: true });
+            self.add_ent(Ent { core: Core::Pt(v.at.to_vec2()), grow: 0.5 * v.d as f64, mask: m, net: (v.net > 0).then_some(v.net), clear, fixed: false, live: true, shape: false });
         }
         for k in &model.kept {
             let m = lmask(&[k.layer]);
@@ -449,7 +452,7 @@ impl<'a> Drawer<'a> {
                 },
             };
             for (a, c) in segs {
-                self.add_ent(Ent { core: Core::Seg(a, c), grow: 0.5 * k.width as f64, mask: m, net: (k.net > 0).then_some(k.net), clear, fixed: false, live: true });
+                self.add_ent(Ent { core: Core::Seg(a, c), grow: 0.5 * k.width as f64, mask: m, net: (k.net > 0).then_some(k.net), clear, fixed: false, live: true, shape: false });
             }
         }
         let r = &model.rules;
@@ -475,6 +478,7 @@ impl<'a> Drawer<'a> {
                     clear,
                     fixed: false,
                     live: true,
+                    shape: false,
                 })
             }
             Item::Via(v) => {
@@ -488,6 +492,7 @@ impl<'a> Drawer<'a> {
                     clear,
                     fixed: false,
                     live: true,
+                    shape: false,
                 })
             }
         }
@@ -697,7 +702,8 @@ impl<'a> Drawer<'a> {
             let sum = (la + lb + lc).max(1.0);
             let inc = (a * la + b * lb + cc * lc) * (1.0 / sum);
             let cen = (a + b + cc) * (1.0 / 3.0);
-            for p in [inc, cen] {
+            let bary = |u: f64, v: f64| a * u + b * v + cc * (1.0 - u - v);
+            for p in [inc, cen, bary(0.6, 0.2), bary(0.2, 0.6), bary(0.2, 0.2), bary(0.4, 0.4), bary(0.4, 0.1), bary(0.1, 0.4), bary(0.1, 0.1)] {
                 c.push((others, inr < need_r, -inr, k, p));
             }
         }
@@ -717,7 +723,7 @@ impl<'a> Drawer<'a> {
                 let need_r = 0.5 * sz.d as f64 + self.model.rules.net_rule(net).clearance as f64;
                 for (k, p) in self.via_candidates(w, ka, kb.max(ka), need_r) {
                     let item = via_item(net, p, sz, Some(w));
-                    if self.check_ok(&item) {
+                    if self.check_ok(&item) && self.via_hole_ok(p, sz, net) {
                         let id = self.commit(&item);
                         ids.push(id);
                         out.push((k, p, sz));
@@ -736,6 +742,25 @@ impl<'a> Drawer<'a> {
     /// `item` violates nothing on the board and against the indexed copper.
     pub fn check_ok(&self, item: &Item) -> bool {
         self.checker.check_against(&self.idx, std::slice::from_ref(item), &[]).violations.is_empty()
+    }
+
+    /// The drill of a via of `size` at `p` keeps the hole clearance to every foreign copper polygon
+    /// (pads, copper shapes): the checker does not test a drill against a no-net shape.
+    pub fn via_hole_ok(&self, p: Vec2, size: ViaSize, net: i32) -> bool {
+        let hole = 0.5 * size.drill as f64 + self.model.rules.hole_clearance as f64 + self.eps;
+        let mut ids = self.grid.query(bbox_of(&[p]).grow(hole + 0.02e6 * 100.0));
+        ids.sort_unstable();
+        ids.dedup();
+        ids.into_iter().all(|id| {
+            let e = &self.ents[id];
+            if !e.live || e.net == Some(net) {
+                return true;
+            }
+            match &e.core {
+                Core::Poly(_) if e.shape => seg_core(p, p, &e.core).0 >= e.grow + hole,
+                _ => true,
+            }
+        })
     }
 
     /// Index `item` as accepted copper; its handle (for [`Drawer::uncommit`]).
@@ -897,7 +922,7 @@ impl<'a> Drawer<'a> {
     fn neck_run(&self, w: WireId, lid: u32, pts: &[Vec2], ps: bool, pe: bool) -> Option<(f64, Vec<Item>, [f64; 2])> {
         let wi = &self.st.wires[w];
         let rules = &self.model.rules;
-        let min_w = (rules.min_track_width.max(rules.net_rule(wi.net).min_width) as f64).min(wi.w);
+        let min_w = (rules.min_track_width.max(rules.net_rule(wi.net).min_width).max(rules.min_connection) as f64).min(wi.w);
         if min_w >= wi.w {
             return None;
         }
