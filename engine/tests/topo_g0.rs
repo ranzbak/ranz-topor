@@ -1,0 +1,160 @@
+//! G0 flat-plane gate: the domain-graph solver against brute force, and known-answer boards.
+
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
+use topor_engine::model::BoardModel;
+use topor_engine::topo::board::{self, BuildOpts};
+use topor_engine::topo::init::{route_all, InitWeights};
+use topor_engine::topo::layers::{assign, brute_force, edge_cost, DomainGraph, LayerParams, LayerReport};
+use topor_engine::topo::state::State;
+
+const MM: f64 = 1e6;
+
+#[test]
+fn reductions_keep_the_optimum() {
+    let mut rng = ChaCha8Rng::seed_from_u64(7);
+    let mut full = 0;
+    for case in 0..600 {
+        let n = rng.gen_range(2..=12);
+        let m = rng.gen_range(1..=3 * n);
+        let edges: Vec<(usize, usize, f64)> = (0..m)
+            .map(|_| {
+                let w = 25.0 * rng.gen_range(1..=3) as f64 * if rng.gen_bool(0.5) { 1.0 } else { -1.0 };
+                (rng.gen_range(0..n), rng.gen_range(0..n), w)
+            })
+            .collect();
+        let mut g = DomainGraph::new(n);
+        for &(u, v, w) in &edges {
+            g.add_edge(u, v, w);
+        }
+        let mut reduced = g.clone();
+        reduced.reduce();
+        let o = g.solve(0, 1, 1); // exact_max 0: whatever is left goes to local search
+        assert_eq!(o[0], 0, "node 0 is fixed");
+        let got: f64 = edges.iter().map(|&(u, v, w)| edge_cost(w, o[u] != o[v])).sum();
+        let want = brute_force(n, &edges);
+        if reduced.size().edges == 0 {
+            full += 1;
+            assert!((got - want).abs() < 1e-6, "case {case}: {got} != optimum {want}");
+            assert!((reduced.k - want).abs() < 1e-6, "case {case}: K {} != {want}", reduced.k);
+        } else {
+            assert!(got >= want - 1e-6, "case {case}: below the optimum");
+        }
+    }
+    assert!(full > 400, "only {full} of 600 graphs reduce completely");
+}
+
+/// Two-layer board, `outline` (x0, y0, x1, y1) mm, pads (net, x, y, th, size) mm, KiCad frame.
+fn board(outline: (f64, f64, f64, f64), pads: &[(i32, f64, f64, bool, f64)], per_net: &str) -> BoardModel {
+    let p = |v: f64| (v * MM) as i64;
+    let (x0, y0, x1, y1) = outline;
+    let c = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+    let segs: Vec<String> = (0..4)
+        .map(|i| {
+            let (a, b) = (c[i], c[(i + 1) % 4]);
+            format!(r#"{{"kind":"seg","a":[{},{}],"b":[{},{}]}}"#, p(a.0), p(a.1), p(b.0), p(b.1))
+        })
+        .collect();
+    let pads: Vec<String> = pads
+        .iter()
+        .enumerate()
+        .map(|(i, &(net, x, y, th, d))| {
+            let (attr, layers, drill) = if th {
+                ("pth", "[0, 2]", format!(r#"{{"w":{0},"h":{0}}}"#, p(d / 2.0)))
+            } else {
+                ("smd", "[0]", "null".to_string())
+            };
+            let sh = format!(r#"{{"kind":"rect","w":{0},"h":{0}}}"#, p(d));
+            format!(
+                r#"{{"uuid":"p{i}","ref":"U{i}","number":"1","net":{net},"attr":"{attr}",
+                    "center":[{},{}],"rotation_deg":0.0,"layers":{layers},
+                    "shapes":{{"0":{sh},"2":{sh}}},"drill":{drill}}}"#,
+                p(x),
+                p(y)
+            )
+        })
+        .collect();
+    let s = format!(
+        r#"{{"units":"nm","board":"t",
+            "layers":[{{"id":0,"name":"F.Cu","kind":"signal"}},{{"id":2,"name":"B.Cu","kind":"signal"}}],
+            "nets":[{{"code":1,"name":"A"}},{{"code":2,"name":"B"}}],
+            "pads":[{}],"outline":[{}],"rules":{{"per_net":{{{per_net}}}}}}}"#,
+        pads.join(","),
+        segs.join(",")
+    );
+    BoardModel::from_json(&s).unwrap()
+}
+
+/// P2 + P3 on `m`: (crossings after uncrossing, layer report).
+fn g0(m: &BoardModel) -> (usize, LayerReport) {
+    let b = board::build(m, &BuildOpts::default()).unwrap();
+    let conns = b.connections(m);
+    let mut st = State::new(&b.proj);
+    let rep = route_all(&mut st, &conns, &InitWeights::default(), 400_000.0);
+    assert!(rep.failed.is_empty(), "every connection routes");
+    st.check().unwrap();
+    let lr = assign(&st, &|o| b.smd_layer(o), &LayerParams::default());
+    (rep.crossings_after, lr)
+}
+
+/// Net 1 left-right, net 2 top-bottom; every pad 0.1 mm from the edge, so neither wire can
+/// pass around the other's pad.
+fn cross(th: bool) -> BoardModel {
+    board(
+        (0.0, 0.0, 10.0, 10.0),
+        &[(1, 0.5, 5.0, th, 0.8), (1, 9.5, 5.0, th, 0.8), (2, 5.0, 0.5, th, 0.8), (2, 5.0, 9.5, th, 0.8)],
+        "",
+    )
+}
+
+#[test]
+fn crossing_with_through_hole_ends_needs_no_via() {
+    let (crossings, lr) = g0(&cross(true));
+    assert_eq!(crossings, 1);
+    assert_eq!(lr.vias, 0, "a TH end changes layer for free");
+    assert!(lr.unlayerable.is_empty());
+    assert_eq!(lr.same_layer, 0);
+}
+
+#[test]
+fn crossing_with_smd_ends_needs_exactly_two_vias() {
+    let (_, lr) = g0(&cross(false));
+    // All four pads on F: one wire leaves F and comes back.
+    assert_eq!(lr.vias, 2);
+    assert!(lr.unlayerable.is_empty());
+    assert_eq!(lr.same_layer, 0);
+}
+
+#[test]
+fn via_slot_lies_between_its_events() {
+    let (_, lr) = g0(&cross(false));
+    assert_eq!(lr.slots.len(), 2);
+    let le = |a: (usize, f64), b: (usize, f64)| a.0 < b.0 || (a.0 == b.0 && a.1 <= b.1);
+    for s in &lr.slots {
+        assert!(le(s.from, s.at) && le(s.at, s.to) && s.from != s.to, "slot {s:?}");
+    }
+}
+
+/// TopoR black-box case E7b: net 1 runs left-right at y = 2; net 2 (wider, routed first) hangs
+/// from a pad on the top edge down to a pad at y = 2 + `d`. Going around that pad costs about
+/// 2·√(25 + d²) − 10 mm; a crossing costs 20 mm.
+fn e7b(d: f64) -> usize {
+    let rule = r#""2":{"clearance":200000,"width":500000,"via_d":600000,"via_drill":300000,
+                 "netclass":"W","width_source":"netclass","min_width":0}"#;
+    let m = board(
+        (-3.0, 0.0, 13.0, 7.0 + d),
+        &[(1, 0.0, 2.0, true, 1.0), (1, 10.0, 2.0, true, 1.0), (2, 5.0, 0.0, true, 2.0), (2, 5.0, 2.0 + d, true, 1.0)],
+        rule,
+    );
+    g0(&m).0
+}
+
+#[test]
+fn short_detour_beats_a_crossing() {
+    assert_eq!(e7b(4.0), 0, "≈ 2.8 mm detour");
+}
+
+#[test]
+fn long_detour_loses_to_a_crossing() {
+    assert_eq!(e7b(25.0), 1, "≈ 41 mm detour");
+}

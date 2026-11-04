@@ -1,5 +1,6 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod cdt;
 pub mod check;
 pub mod control;
 pub mod decompose;
@@ -12,6 +13,7 @@ pub mod pourcheck;
 mod py;
 pub mod route;
 pub mod stubs;
+pub mod topo;
 pub mod vias;
 pub mod wires;
 
