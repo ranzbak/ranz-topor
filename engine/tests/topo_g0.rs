@@ -179,3 +179,125 @@ fn lct_cut_is_an_edge_of_the_gap() {
     assert!(has_gap_edge(&BuildOpts::default()), "the corner-to-foot cut is an edge");
     assert!(!has_gap_edge(&BuildOpts { lct_mm: 0.0, ..BuildOpts::default() }), "without the refinement it is not");
 }
+
+// ---------------------------------------------------------------- factors
+
+use topor_engine::topo::factors::{events, standard_factors, Event, FactorConfig, Move, Registry, WireCtx};
+use topor_engine::topo::init::route_all_reg;
+use topor_engine::topo::state::{LayerMask, Wire};
+
+fn cfg(weights: &[(&str, f64)]) -> FactorConfig {
+    FactorConfig { weight: weights.iter().map(|&(n, w)| (n.to_string(), w)).collect(), ..FactorConfig::default() }
+}
+
+/// Crossings after P2 on the E7b board with the given factor weights.
+fn e7b_with(d: f64, weights: &[(&str, f64)]) -> usize {
+    let rule = r#""2":{"clearance":200000,"width":500000,"via_d":600000,"via_drill":300000,
+                 "netclass":"W","width_source":"netclass","min_width":0}"#;
+    let m = board(
+        (-3.0, 0.0, 13.0, 7.0 + d),
+        &[(1, 0.0, 2.0, true, 1.0), (1, 10.0, 2.0, true, 1.0), (2, 5.0, 0.0, true, 2.0), (2, 5.0, 2.0 + d, true, 1.0)],
+        rule,
+    );
+    let b = board::build(&m, &BuildOpts::default()).unwrap();
+    let conns = b.connections(&m);
+    let mut st = State::new(&b.proj);
+    let (reg, problems) = Registry::from_config(standard_factors(), &cfg(weights));
+    assert!(problems.is_empty(), "{problems:?}");
+    route_all_reg(&mut st, &conns, &reg, 2_000_000, 400_000.0);
+    st.total_crossings()
+}
+
+#[test]
+fn p2_takes_its_prices_from_the_factors() {
+    // The short detour wins at the default crossing price (20 mm) ...
+    assert_eq!(e7b_with(4.0, &[]), 0);
+    // ... and a free crossing wins over any detour.
+    assert_eq!(e7b_with(4.0, &[("crossing", 0.0)]), 1);
+    // A dear crossing flips the long case: the 41 mm detour beats 100 mm.
+    assert_eq!(e7b_with(25.0, &[("crossing", 100.0)]), 0);
+    // The resolved P2 costs are the factor weights.
+    let (reg, _) = Registry::from_config(standard_factors(), &cfg(&[("crossing", 7.0), ("via", 11.0), ("length", 2.0)]));
+    let w = InitWeights::from_registry(&reg, &WireCtx::default());
+    assert_eq!((w.cross_mm, w.forced_layer_mm, w.smd_over_mm, w.length_mm, w.overflow_mm), (7.0, 11.0, 11.0, 2.0, 50.0));
+}
+
+#[test]
+fn an_insert_move_is_priced_from_its_events() {
+    let m = cross(true);
+    let b = board::build(&m, &BuildOpts::default()).unwrap();
+    let conns = b.connections(&m);
+    let mut st = State::new(&b.proj);
+    let wt = InitWeights::default();
+    let (first, second) = (&conns[0], &conns[1]);
+    st.route_conn(first, &wt, 1.0).unwrap();
+    let (path, tris) = st.search(second, &wt, 1.0).unwrap();
+    let wire = Wire {
+        net: second.net,
+        w: second.w,
+        s: second.s,
+        a: second.a,
+        b: second.b,
+        pa: second.pa,
+        pb: second.pb,
+        turns: Vec::new(),
+        passes: Vec::new(),
+        tris: Vec::new(),
+        alive: true,
+    };
+    let mv = Move::Insert { wire: &wire, path: &path, tris: &tris, scale: 1.0 };
+    let before = st.edge_order.iter().map(Vec::len).sum::<usize>();
+    let evs = events(&st, &mv);
+    let crossings = evs.iter().filter(|e| matches!(e, Event::Crossing { same_net: false, .. })).count();
+    let len_mm: f64 = evs.iter().filter_map(|e| if let Event::Length { mm, .. } = e { Some(*mm) } else { None }).sum();
+    assert_eq!(crossings, 1, "{evs:?}");
+    assert!((len_mm - 9.0).abs() < 1.0, "pad to pad is 9 mm (gap points zigzag a little): {len_mm}");
+    let reg = Registry::standard();
+    let cost = reg.cost(&st, &mv, &WireCtx::default());
+    assert!((cost - (len_mm + 20.0)).abs() < 1e-6, "length + one crossing: {cost}");
+    assert_eq!(before, st.edge_order.iter().map(Vec::len).sum::<usize>(), "evaluation does not touch the state");
+}
+
+#[test]
+fn state_event_queries() {
+    // Net 3 runs top to bottom between a pad of net 1 and a pad of net 2.
+    let m = board((0.0, 0.0, 10.0, 10.0), &[(1, 3.0, 5.0, true, 0.8), (2, 7.0, 5.0, true, 0.8), (3, 5.0, 1.0, true, 0.8), (3, 5.0, 9.0, true, 0.8)], "");
+    let b = board::build(&m, &BuildOpts { steiner_mm: 0.0, lct_mm: 4.0, ..BuildOpts::default() }).unwrap();
+    let conns = b.connections(&m);
+    let mut st = State::new(&b.proj);
+    let wt = InitWeights::default();
+    for c in &conns {
+        st.route_conn(c, &wt, 1.0).unwrap();
+    }
+    let obs_at = |x: f64| b.proj.obstacles.iter().position(|o| (o.center.x - x * MM).abs() < 1.0).unwrap();
+    let (o1, o2) = (obs_at(3.0), obs_at(7.0));
+    let between = st.passes_between(o1, o2);
+    assert!(!between.is_empty() && between.iter().all(|&p| st.wires[st.passes[p].wire].net == 3), "the wire of net 3 runs between the pads: {between:?}");
+    let e = st.passes[between[0]].edge;
+    let all = LayerMask::all(2);
+    assert!(b.proj.room_of(e, 0).is_finite() && st.room(e, 0) == b.proj.room[e][0], "the pair edge is a cut");
+    let d = st.demand(e, all);
+    assert!(d > 0.0 && d >= m.rules.default.width as f64, "{d}");
+    assert_eq!(st.demand(e, LayerMask(0)), 0.0, "no pass is restricted to no layer");
+    // Through-hole ends allow both layers: no pass is restricted to one layer alone.
+    assert_eq!(st.demand(e, LayerMask(1)), 0.0);
+}
+
+#[test]
+fn the_factor_reference_matches_the_schema_text() {
+    // plugin/topor/schema.py [factors] weight lists the factors and defaults; keep both in step.
+    let r = Registry::standard();
+    let got: Vec<(&str, f64)> = r.reference().iter().map(|x| (x.0, x.2)).collect();
+    let want = [
+        ("length", 1.0),
+        ("via", 25.0),
+        ("crossing", 20.0),
+        ("same_net_crossing", 0.0),
+        ("plane_signal", 10.0),
+        ("plane_cut", 25.0),
+        ("necking", 30.0),
+        ("overflow", 50.0),
+        ("ignored_rule", 100.0),
+    ];
+    assert_eq!(got, want);
+}

@@ -121,6 +121,8 @@ pub struct Projection {
     /// Custom courtyard clearance rules `(polygon, clearance nm)`, in file order (the last match
     /// wins); set by the builder.
     pub regions: Vec<(Vec<Vec2>, f64)>,
+    /// [`Projection::regime`] of every edge, filled by [`Projection::set_regions`].
+    pub edge_regime: Vec<Option<f64>>,
 }
 
 pub fn point_in_poly(p: Vec2, poly: &[Vec2]) -> bool {
@@ -257,6 +259,7 @@ impl Projection {
             room,
             edge_clear: 0.0,
             regions: Vec::new(),
+            edge_regime: Vec::new(),
         })
     }
 
@@ -344,13 +347,43 @@ impl Projection {
         self.regions.iter().rev().find(|(poly, _)| point_in_poly(p, poly)).map(|r| r.1)
     }
 
+    /// Set the courtyard clearance rules and precompute the regime of every edge. O(edges ·
+    /// regions).
+    pub fn set_regions(&mut self, regions: Vec<(Vec<Vec2>, f64)>) {
+        self.regions = regions;
+        self.edge_regime = if self.regions.is_empty() {
+            Vec::new()
+        } else {
+            self.edges
+                .iter()
+                .map(|&[p, q]| self.regime_at((self.pos[p] + self.pos[q]) * 0.5))
+                .collect()
+        };
+    }
+
     /// The regime of edge `e` (at its midpoint).
     pub fn regime(&self, e: EdgeId) -> Option<f64> {
-        if self.regions.is_empty() {
-            return None;
-        }
-        let [p, q] = self.edges[e];
-        self.regime_at((self.pos[p] + self.pos[q]) * 0.5)
+        self.edge_regime.get(e).copied().flatten()
+    }
+
+    /// Room of edge `e` on layer `l` (nm; `INFINITY` where the edge is no cut on that layer).
+    pub fn room_of(&self, e: EdgeId, l: usize) -> f64 {
+        self.room[e][l]
+    }
+
+    /// The obstacles' edges between obstacles `o1` and `o2` (CDT edges whose ends lie on the two),
+    /// ascending. O(edges).
+    pub fn edges_between(&self, o1: ObsId, o2: ObsId) -> Vec<EdgeId> {
+        let of = |v: VertId| match self.vkind[v] {
+            VertKind::Outline(o) | VertKind::Centre(o) => Some(o),
+            _ => None,
+        };
+        (0..self.edges.len())
+            .filter(|&e| {
+                let [p, q] = self.edges[e];
+                matches!((of(p), of(q)), (Some(a), Some(b)) if (a, b) == (o1, o2) || (a, b) == (o2, o1))
+            })
+            .collect()
     }
 
     /// Space `items` (ordered from end `p` to end `q`) need across edge `e` on one layer.
@@ -498,9 +531,61 @@ impl<'p> State<'p> {
         self.proj.edge_demand(e, &items)
     }
 
+    /// [`State::edge_need`] with `me` inserted at every gap `0..=passes`, in one go, into `out`
+    /// (`alone` is the need of `me` on an empty edge; `items` is a scratch buffer).
+    /// O(passes²) without allocation per gap.
+    pub fn edge_need_gaps(&self, e: EdgeId, me: Item, alone: f64, items: &mut Vec<Item>, out: &mut Vec<f64>) {
+        out.clear();
+        let ord = &self.edge_order[e];
+        if ord.is_empty() {
+            out.push(alone);
+            return;
+        }
+        items.clear();
+        items.extend(ord.iter().map(|&p| self.item(p)));
+        let (regime, lo, hi) = (self.proj.regime(e), self.proj.bound(self.proj.edges[e][0]), self.proj.bound(self.proj.edges[e][1]));
+        for g in 0..=ord.len() {
+            items.insert(g, me);
+            out.push(need_in(regime, items, lo, hi));
+            items.remove(g);
+        }
+    }
+
     fn order_index(&self, p: PassId) -> usize {
         let e = self.passes[p].edge;
         self.edge_order[e].iter().position(|&x| x == p).expect("pass in its edge order")
+    }
+
+    /// Event query: space (nm, one layer) the passes through `e` that are restricted to the layers
+    /// of `mask` need (the Leiserson-Maley term of the layer subset `mask`): a pass counts when
+    /// the layers both its triangles allow its wire are all in `mask`.
+    pub fn demand(&self, e: EdgeId, mask: LayerMask) -> f64 {
+        let items: Vec<Item> = self.edge_order[e]
+            .iter()
+            .filter(|&&p| {
+                let pa = &self.passes[p];
+                let w = &self.wires[pa.wire];
+                let Some(k) = w.passes.iter().position(|&x| x == p) else { return false };
+                let (t1, t2) = (w.tris[k], w.tris[k + 1]);
+                match (self.proj.allowed(t1, w.net), self.proj.allowed(t2, w.net)) {
+                    (Some(a), Some(b)) => (a.0 & b.0) & !mask.0 == 0,
+                    _ => false,
+                }
+            })
+            .map(|&p| self.item(p))
+            .collect();
+        self.proj.edge_demand(e, &items)
+    }
+
+    /// Event query: room of edge `e` on layer `l` (see [`Projection::room_of`]).
+    pub fn room(&self, e: EdgeId, l: usize) -> f64 {
+        self.proj.room_of(e, l)
+    }
+
+    /// Event query: the passes that run between obstacles `o1` and `o2`, over all cut edges that
+    /// join them, each edge in its order from `p` to `q`.
+    pub fn passes_between(&self, o1: ObsId, o2: ObsId) -> Vec<PassId> {
+        self.proj.edges_between(o1, o2).into_iter().flat_map(|e| self.edge_order[e].iter().copied()).collect()
     }
 
     /// Fraction along the edge (from `p`) of pass `p`, the passes spread evenly.

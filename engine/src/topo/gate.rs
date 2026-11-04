@@ -3,7 +3,7 @@
 //! Output points are in the KiCad frame (Y down, nm), ready for `harness.g0 render`.
 
 use super::board::{self, BuildOpts};
-use super::init::{self, InitWeights};
+use super::factors::{Event, FactorConfig, Registry, WireCtx, standard_factors};
 use super::layers::{self, LayerParams};
 use super::state::State;
 use crate::geom::Vec2;
@@ -75,11 +75,20 @@ fn kicad(p: Vec2) -> [f64; 2] {
     [p.x, -p.y]
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct G0Opts {
     pub build: BuildOpts,
-    pub init: InitWeights,
+    /// Weights, scopes and report levels of the factors (`topor.toml [factors]`).
+    pub factors: FactorConfig,
+    /// Search cap per connection.
+    pub max_expansions: usize,
     pub layers: LayerParams,
+}
+
+impl Default for G0Opts {
+    fn default() -> Self {
+        G0Opts { build: BuildOpts::default(), factors: FactorConfig::default(), max_expansions: 2_000_000, layers: LayerParams::default() }
+    }
 }
 
 /// Run the gate on `input` (tracks and vias removed); `hand` is the untouched board.
@@ -94,11 +103,16 @@ pub fn run(input: &BoardModel, hand: Option<&BoardModel>, o: &G0Opts) -> Result<
     let t1 = Instant::now();
     let mut st = State::new(&b.proj);
     let ws0 = (input.rules.default.width + input.rules.default.clearance) as f64;
-    let rep = init::route_all(&mut st, &conns, &o.init, ws0);
+    let (reg, problems) = Registry::from_config(standard_factors(), &o.factors);
+    if let Some(p) = problems.first() {
+        return Err(p.clone());
+    }
+    let rep = super::init::route_all_reg(&mut st, &conns, &reg, o.max_expansions, ws0);
     st.check()?;
     let p2_s = t1.elapsed().as_secs_f64();
     let t2 = Instant::now();
     let mut lp = o.layers;
+    lp.via_mm = reg.price(&Event::Via { wire: 0, count: 1, at: None }, &WireCtx::default());
     lp.via_site_r = 0.5 * input.rules.default.via_d as f64 + input.rules.default.clearance as f64;
     let lr = layers::assign(&st, &|ob| b.smd_layer(ob), &lp);
     let p3_s = t2.elapsed().as_secs_f64();

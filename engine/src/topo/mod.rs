@@ -6,6 +6,7 @@
 pub mod board;
 pub mod cuts;
 pub mod demand;
+pub mod factors;
 pub mod gate;
 pub mod init;
 pub mod layers;

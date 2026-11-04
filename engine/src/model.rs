@@ -841,6 +841,9 @@ pub struct Options {
     pub ripup_max_per_pair: u32,
     /// Expert knobs (`topor.toml [expert]`).
     pub expert: Expert,
+    /// Social factors (`topor.toml [factors]`): weight, scope and report level per factor name,
+    /// used by the topological core (`topo::factors`).
+    pub factors: crate::topo::factors::FactorConfig,
     pub drc_loop_cap: u32,
     pub seed: u64,
     pub existing_copper: ExistingCopper,
@@ -1018,6 +1021,7 @@ impl Default for Options {
             ripup_growth: 1.25,
             ripup_max_per_pair: 8,
             expert: Expert::default(),
+            factors: Default::default(),
             drc_loop_cap: 5,
             seed: 1,
             existing_copper: ExistingCopper::Fixed,

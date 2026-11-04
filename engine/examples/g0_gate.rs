@@ -1,7 +1,7 @@
 //! G0 flat-plane gate on one board:
 //!
 //!     cargo run --release --example g0_gate -- <input.json> [<hand.json>] [--out g0.json]
-//!         [--cross MM] [--via MM] [--steiner MM] [--round-steps N] [--forced MM] [--smd-over MM]
+//!         [--factor NAME=WEIGHT]... [--steiner MM] [--round-steps N] [--lct MM]
 //!
 //! `input.json` is the board model with tracks and vias removed, `hand.json` the untouched board
 //! (both from `harness.g0 export`). Prints the metrics; `--out` writes the JSON that
@@ -25,10 +25,12 @@ fn main() {
         let val = |i: usize| args.get(i + 1).expect("flag value").clone();
         match args[i].as_str() {
             "--out" => out = Some(val(i)),
-            "--cross" => o.init.cross_mm = val(i).parse().expect("--cross MM"),
-            "--forced" => o.init.forced_layer_mm = val(i).parse().expect("--forced MM"),
-            "--smd-over" => o.init.smd_over_mm = val(i).parse().expect("--smd-over MM"),
-            "--via" => o.layers.via_mm = val(i).parse().expect("--via MM"),
+            "--factor" => {
+                let v = val(i);
+                let (n, w) = v.split_once('=').expect("--factor NAME=WEIGHT");
+                o.factors.weight.insert(n.to_string(), w.parse().expect("--factor NAME=WEIGHT"));
+            }
+            "--lct" => o.build.lct_mm = val(i).parse().expect("--lct MM"),
             "--round-steps" => o.build.round_steps = val(i).parse().expect("--round-steps N"),
             "--steiner" => o.build.steiner_mm = val(i).parse().expect("--steiner MM"),
             a => {

@@ -153,6 +153,16 @@ PathFinder constants; change only when you know the router.
 | `steiner_ghost_factor` | float | `1.0` |  | 0 .. 10 | Same-net T-junctions: a junction is taken only while its length plus via cost stays within this factor of the connection's own pad-to-pad estimate on the empty board (1 = only junctions cheaper than the free pad route; larger also lets junctions dodge congestion). *Since 0.5.0.* |
 | `drc_loop_cap` | int | `5` |  | 1 .. 50 | Maximum route / DRC / re-route rounds. |
 
+## `[factors]`
+
+Price of what a route does (social factors), in mm of copper per unit: weight, scope and report level per factor name (docs/dev/factors.md). Factor code is trusted code: only add factor files you trust.
+
+| Key | Type | Default | Unit | Range | Description |
+|---|---|---|---|---|---|
+| `weight` | table | `{}` | mm | any | Factor name → weight (mm per unit, ≥ 0); absent = the factor's default. Factors and defaults: length 1 per mm (scaled by width + clearance), via 25 per via, crossing 20 per crossing of two nets, same_net_crossing 0, plane_signal 10 per mm on a plane layer, plane_cut 25 per cut of a plane, necking 30 per necked stretch, overflow 50 per pass through an overfull cut, ignored_rule 100 per violation of a KiCad check set to ignore. *Since 0.5.0.* |
+| `scope` | table | `{}` |  | any | Factor name → which wires the factor prices: "all" (default) or "tier:N" (wires of priority tier N only). *Since 0.5.0.* |
+| `report` | table | `{}` |  | any | Factor name → "off", "info" or "warning": events of the factor become lines of that level in the run report. Defaults: necking and ignored_rule warning, the rest off. *Since 0.5.0.* |
+
 ## Set in KiCad, not in `topor.toml`
 
 | Behaviour | Where in KiCad |

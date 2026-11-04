@@ -59,6 +59,7 @@ SECTIONS = {
     "iterations": "Optimisation stop rule.",
     "output": "Result geometry and report location.",
     "expert": "PathFinder constants; change only when you know the router.",
+    "factors": "Price of what a route does (social factors), in mm of copper per unit: weight, scope and report level per factor name (docs/dev/factors.md). Factor code is trusted code: only add factor files you trust.",
 }
 
 SETTINGS: list[Setting] = [
@@ -205,6 +206,13 @@ SETTINGS: list[Setting] = [
        range=(1.0, 10), engine="expert.steiner_len_slack", since=V5),
     _s("expert", "steiner_ghost_factor", "float", 1.0, "Same-net T-junctions: a junction is taken only while its length plus via cost stays within this factor of the connection's own pad-to-pad estimate on the empty board (1 = only junctions cheaper than the free pad route; larger also lets junctions dodge congestion).",
        range=(0.0, 10), engine="expert.steiner_ghost_factor", since=V5),
+    # ---- [factors]
+    _s("factors", "weight", "table", {}, "Factor name → weight (mm per unit, ≥ 0); absent = the factor's default. Factors and defaults: length 1 per mm (scaled by width + clearance), via 25 per via, crossing 20 per crossing of two nets, same_net_crossing 0, plane_signal 10 per mm on a plane layer, plane_cut 25 per cut of a plane, necking 30 per necked stretch, overflow 50 per pass through an overfull cut, ignored_rule 100 per violation of a KiCad check set to ignore.",
+       unit="mm", engine="factors.weight", since=V5),
+    _s("factors", "scope", "table", {}, "Factor name → which wires the factor prices: \"all\" (default) or \"tier:N\" (wires of priority tier N only).",
+       engine="factors.scope", since=V5),
+    _s("factors", "report", "table", {}, "Factor name → \"off\", \"info\" or \"warning\": events of the factor become lines of that level in the run report. Defaults: necking and ignored_rule warning, the rest off.",
+       engine="factors.report", since=V5),
     _s("expert", "drc_loop_cap", "int", 5, "Maximum route / DRC / re-route rounds.", range=(1, 50), engine="drc_loop_cap"),
 ]
 

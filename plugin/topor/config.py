@@ -149,8 +149,9 @@ class Config:
                 v = int(round(v * _ENGINE_SCALE[f]))
             elif s.type == "float":
                 v = float(v)
-            if f.startswith("expert."):
-                out.setdefault("expert", {})[f[len("expert."):]] = v
+            if "." in f:
+                head, tail = f.split(".", 1)
+                out.setdefault(head, {})[tail] = v
             else:
                 out[f] = v
         return out
