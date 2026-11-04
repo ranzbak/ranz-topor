@@ -5,6 +5,7 @@
 //! Complexity: O(pads · hull) for the polygons, O(grid · obstacles) for the Steiner points,
 //! O(k²) per net for the MST.
 
+use super::cuts;
 use super::init::Conn;
 use super::state::{point_in_segments, LayerMask, ObsId, ObsKind, Obstacle, Projection, VertId, VertKind};
 use crate::geom::quant::TrackPrim;
@@ -20,8 +21,11 @@ pub struct BuildOpts {
     pub steiner_mm: f64,
     /// Minimum distance of a Steiner point from any obstacle's bounding box (mm).
     pub steiner_clear_mm: f64,
-    /// Obstacle vertices closer than this to the outline (mm) split it at their foot points.
-    pub edge_feet_mm: f64,
+    /// LCT cuts (see [`super::cuts`]): a vertex facing an obstacle or outline side closer than
+    /// this (mm) gets a cut edge to its foot on that side; 0 = none.
+    pub lct_mm: f64,
+    /// Feet closer than this (mm) to an end of their side or to another foot are skipped.
+    pub lct_eps_mm: f64,
     /// Vertices per full turn of a round pad / rounded corner (see [`skel_poly`]); 16 keeps every
     /// polygon within 1.9 % of the radius of the copper, 8 halves the triangles (7.6 %).
     pub round_steps: usize,
@@ -29,7 +33,7 @@ pub struct BuildOpts {
 
 impl Default for BuildOpts {
     fn default() -> Self {
-        BuildOpts { steiner_mm: 2.0, steiner_clear_mm: 0.6, edge_feet_mm: 3.0, round_steps: 16 }
+        BuildOpts { steiner_mm: 2.0, steiner_clear_mm: 0.6, lct_mm: 3.0, lct_eps_mm: 0.01, round_steps: 16 }
     }
 }
 
@@ -194,36 +198,54 @@ pub fn build(m: &BoardModel, o: &BuildOpts) -> Result<Board, String> {
             points.push((ob.center, VertKind::Centre(i)));
         }
     }
+    // LCT cuts (see `cuts`): the feet of obstacle / outline vertices on facing sides, so that the
+    // nearest copper of every sector is a vertex. Sides: obstacle polygon sides, then the outline.
+    let osegs = outline_segments(m);
+    let mut verts: Vec<cuts::Vertex> = Vec::new();
+    let mut sides: Vec<cuts::Side> = Vec::new();
+    let mut side0 = Vec::with_capacity(obstacles.len());
     for (i, ob) in obstacles.iter().enumerate() {
-        let s = points.len();
+        side0.push(sides.len());
         let k = ob.poly.len();
-        points.extend(ob.poly.iter().map(|&p| (p, VertKind::Outline(i))));
-        cons.extend((0..k).map(|j| (s + j, s + (j + 1) % k)));
+        for j in 0..k {
+            verts.push(cuts::Vertex { p: ob.poly[j], owner: Some(i) });
+            sides.push(cuts::Side { a: ob.poly[j], b: ob.poly[(j + 1) % k], owner: Some(i) });
+        }
     }
-    // Split the outline at the feet of obstacle vertices near it, so every pad-to-edge gap is a
-    // CDT edge (a cut whose room is checked).
+    let out0 = sides.len();
+    for &(a, b) in &osegs {
+        verts.push(cuts::Vertex { p: a, owner: None });
+        verts.push(cuts::Vertex { p: b, owner: None });
+        sides.push(cuts::Side { a, b, owner: None });
+    }
+    let polys: Vec<&[Vec2]> = obstacles.iter().map(|ob| &ob.poly[..]).collect();
+    let mask_of = |o: Option<usize>| o.map_or(u64::MAX, |i| if obstacles[i].drilled { u64::MAX } else { obstacles[i].layers.0 });
+    let feet = cuts::lct_feet(&verts, &sides, &polys, &|a, b| mask_of(a) & mask_of(b) != 0, o.lct_mm * MM, o.lct_eps_mm * MM);
+    // Feet per side, in order along it.
+    let mut on_side: Vec<Vec<(f64, Vec2)>> = vec![Vec::new(); sides.len()];
+    for f in feet.iter().filter(|f| f.t > 0.0 && f.t < 1.0) {
+        on_side[f.side].push((f.t, f.at));
+    }
+    for v in &mut on_side {
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+    }
+    for (i, ob) in obstacles.iter().enumerate() {
+        let k = ob.poly.len();
+        for j in 0..k {
+            let mut chain = vec![ob.poly[j]];
+            chain.extend(on_side[side0[i] + j].iter().map(|x| x.1));
+            chain.push(ob.poly[(j + 1) % k]);
+            let s = points.len();
+            points.extend(chain.iter().map(|&p| (p, VertKind::Outline(i))));
+            cons.extend((0..chain.len() - 1).map(|q| (s + q, s + q + 1)));
+        }
+    }
     let mut segs = Vec::new();
-    for (a, b) in outline_segments(m) {
-        let d = b - a;
-        let l2 = d.len2();
-        let mut ts: Vec<f64> = obstacles
-            .iter()
-            .flat_map(|ob| ob.poly.iter())
-            .filter(|&&q| seg_dist(q, a, b) < o.edge_feet_mm * MM)
-            .map(|&q| if l2 > 0.0 { (q - a).dot(d) / l2 } else { 0.0 })
-            .filter(|&t| t > 0.0 && t < 1.0)
-            .collect();
-        ts.sort_by(f64::total_cmp);
-        let min_dt = 0.05 * MM / l2.sqrt().max(1.0);
+    for (si, &(a, b)) in osegs.iter().enumerate() {
         let mut prev = a;
-        let mut last_t = 0.0;
-        for t in ts {
-            if t - last_t >= min_dt && 1.0 - t >= min_dt {
-                let q = a + d * t;
-                segs.push((prev, q));
-                prev = q;
-                last_t = t;
-            }
+        for &(_, q) in &on_side[out0 + si] {
+            segs.push((prev, q));
+            prev = q;
         }
         segs.push((prev, b));
     }
@@ -231,6 +253,14 @@ pub fn build(m: &BoardModel, o: &BuildOpts) -> Result<Board, String> {
         let s = points.len();
         points.push((a, VertKind::Edge));
         points.push((b, VertKind::Edge));
+        cons.push((s, s + 1));
+    }
+    for f in &feet {
+        let (v, sd) = (&verts[f.v], &sides[f.side]);
+        let kind = |o: Option<usize>| o.map_or(VertKind::Edge, VertKind::Outline);
+        let s = points.len();
+        points.push((v.p, kind(v.owner)));
+        points.push((f.at, kind(sd.owner)));
         cons.push((s, s + 1));
     }
     let inside = |p: Vec2| segs.is_empty() || point_in_segments(p, &segs);

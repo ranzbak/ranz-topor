@@ -85,6 +85,8 @@ pub struct Projection {
     pub obstacles: Vec<Obstacle>,
     pub pos: Vec<Vec2>,
     pub vkind: Vec<VertKind>,
+    /// Vertex ids ordered by x (for [`Projection::vertex_at`]).
+    pub by_x: Vec<VertId>,
     /// Canonical `[p, q]` with `p < q`.
     pub edges: Vec<[VertId; 2]>,
     /// Triangles on either side of each edge (one for a hull edge).
@@ -151,6 +153,8 @@ impl Projection {
             }
         }
         let pos: Vec<Vec2> = (0..nv).map(|v| cdt.vertex_pos(v)).collect();
+        let mut by_x: Vec<VertId> = (0..nv).collect();
+        by_x.sort_by(|&a, &b| pos[a].x.total_cmp(&pos[b].x).then(a.cmp(&b)));
         let topo = cdt.topology();
         let edges: Vec<[VertId; 2]> = topo.edges.iter().map(|&(a, b, _)| [a, b]).collect();
         let edge_id = |a: usize, b: usize| -> EdgeId {
@@ -228,6 +232,7 @@ impl Projection {
             obstacles,
             pos,
             vkind,
+            by_x,
             edges,
             edge_tris,
             tris,
@@ -259,6 +264,16 @@ impl Projection {
             m.0 &= !ob.layers.0;
         }
         (m.0 != 0).then_some(m)
+    }
+
+    /// The vertex within `tol` (nm) of `p`, if any. O(log V + hits).
+    pub fn vertex_at(&self, p: Vec2, tol: f64) -> Option<VertId> {
+        let i = self.by_x.partition_point(|&v| self.pos[v].x < p.x - tol);
+        self.by_x[i..]
+            .iter()
+            .take_while(|&&v| self.pos[v].x <= p.x + tol)
+            .copied()
+            .find(|&v| (self.pos[v] - p).len() <= tol)
     }
 
     /// The other triangle across edge `e` from `t`.

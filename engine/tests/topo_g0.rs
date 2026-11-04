@@ -158,3 +158,24 @@ fn short_detour_beats_a_crossing() {
 fn long_detour_loses_to_a_crossing() {
     assert_eq!(e7b(25.0), 1, "≈ 41 mm detour");
 }
+
+/// LCT cuts: two SMD squares (1 mm) with a 0.6 mm gap, offset by half a side, face each other
+/// with a corner against the other's side. A plain CDT only has the corner-to-corner diagonals
+/// (0.78 mm); the refinement adds the cut edge corner-to-foot of exactly the gap (0.6 mm).
+#[test]
+fn lct_cut_is_an_edge_of_the_gap() {
+    let m = board((0.0, 0.0, 12.0, 12.0), &[(1, 5.0, 5.0, false, 1.0), (2, 5.5, 6.6, false, 1.0)], "");
+    let gap = 0.6 * MM;
+    let has_gap_edge = |o: &BuildOpts| {
+        let b = board::build(&m, o).unwrap();
+        let pr = &b.proj;
+        pr.edges.iter().enumerate().any(|(e, &[p, q])| {
+            let (a, c) = (pr.pos[p], pr.pos[q]);
+            matches!((pr.vkind[p], pr.vkind[q]), (topor_engine::topo::state::VertKind::Outline(x), topor_engine::topo::state::VertKind::Outline(y)) if x != y)
+                && ((a - c).len() - gap).abs() < 100.0
+                && pr.room[e][0].is_finite()
+        })
+    };
+    assert!(has_gap_edge(&BuildOpts::default()), "the corner-to-foot cut is an edge");
+    assert!(!has_gap_edge(&BuildOpts { lct_mm: 0.0, ..BuildOpts::default() }), "without the refinement it is not");
+}

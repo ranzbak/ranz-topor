@@ -752,6 +752,10 @@ pub struct Summary {
     pub edge_cuts_checked: usize,
     pub pair_cuts: usize,
     pub pair_cuts_with_traffic: usize,
+    /// Pair cuts that are a CDT edge (both ends at vertices joined by an edge): the LCT cuts.
+    pub pair_cuts_as_edges: usize,
+    /// Of the other pair cuts: those whose segment runs through a third obstacle (shadowed).
+    pub pair_cuts_shadowed: usize,
     pub tight_passes: usize,
     pub hand_drc_spots: usize,
     pub topo_wires: usize,
@@ -769,6 +773,10 @@ pub struct Summary {
     pub hand_vias: usize,
     pub hand_signal_vias: usize,
     pub g0_pair_violations: Option<usize>,
+    /// Of those, the violated cuts that are CDT edges (P2 sees them) and those with need above
+    /// twice the cut (no distribution over two layers fits).
+    pub g0_pair_violations_on_edges: Option<usize>,
+    pub g0_pair_violations_over_2x: Option<usize>,
     pub g0_pair_cuts_with_traffic: Option<usize>,
     pub build_s: f64,
     pub walk_s: f64,
@@ -786,6 +794,8 @@ pub struct Witness {
     pub wire_of: Vec<Option<usize>>,
     /// Different-net crossings per State wire (index = wire id).
     pub wire_crossings: Vec<usize>,
+    /// Pair-cut violations of the G0 routing (`g0` given), with their passes.
+    pub g0_violations: Vec<Violation>,
     pub board: Board,
 }
 
@@ -1168,6 +1178,33 @@ pub fn pair_cuts(b: &Board, m: &BoardModel, pair_mm: f64) -> Vec<Cut> {
         }
     }
     cuts
+}
+
+/// Whether the pair cut `c` is a CDT edge of the projection: both ends at vertices (1 nm) that an
+/// edge joins.
+pub fn cut_is_edge(b: &Board, c: &Cut) -> bool {
+    let pr = &b.proj;
+    match (pr.vertex_at(c.a, 1.0), pr.vertex_at(c.b, 1.0)) {
+        (Some(x), Some(y)) => pr.edges.binary_search(&[x.min(y), x.max(y)]).is_ok(),
+        _ => false,
+    }
+}
+
+/// Whether the segment of `c` passes through an obstacle other than its two ends.
+pub fn cut_shadowed(b: &Board, c: &Cut) -> bool {
+    let pr = &b.proj;
+    let mid = (c.a + c.b) * 0.5;
+    (0..pr.obstacles.len()).any(|o| {
+        !c.ends.contains(&Some(o)) && {
+            let (lo, hi) = bbox_of(&pr.obstacles[o].poly);
+            let (sl, sh) = bbox_of(&[c.a, c.b]);
+            lo.x <= sh.x && hi.x >= sl.x && lo.y <= sh.y && hi.y >= sl.y && {
+                let poly = &pr.obstacles[o].poly;
+                let n = poly.len();
+                (0..n).any(|i| seg_cross(c.a, c.b - c.a, poly[i], poly[(i + 1) % n] - poly[i]).is_some()) || point_in_poly(mid, poly)
+            }
+        }
+    })
 }
 
 /// One piece of copper for the cut check.
@@ -1702,15 +1739,21 @@ pub fn run(hand: &BoardModel, g0: Option<&G0In>, spots: &Spots, o: &WitnessOpts)
     let mut violations = fit.violations;
     let cuts = pair_cuts(&b, hand, o.pair_mm);
     s.pair_cuts = cuts.len();
+    s.pair_cuts_as_edges = cuts.iter().filter(|c| cut_is_edge(&b, c)).count();
+    s.pair_cuts_shadowed = cuts.iter().filter(|c| !cut_is_edge(&b, c) && cut_shadowed(&b, c)).count();
     let hand_tr = chain_traces(hand, &chs);
     let po = check_cuts(&b, hand, &cuts, &hand_tr, spots, o.drc_mm * MM, violations.len());
     s.pair_cuts_with_traffic = po.with_traffic;
     violations.extend(po.violations);
+    let mut g0_violations = Vec::new();
     if let Some(g) = g0 {
         let (tr, _skipped) = g0_traces(hand, g);
         let go = check_cuts(&b, hand, &cuts, &tr, spots, o.drc_mm * MM, 0);
         s.g0_pair_violations = Some(go.violations.len());
         s.g0_pair_cuts_with_traffic = Some(go.with_traffic);
+        s.g0_pair_violations_on_edges = Some(go.violations.iter().filter(|v| v.cut.is_some_and(|c| cut_is_edge(&b, &cuts[c]))).count());
+        s.g0_pair_violations_over_2x = Some(go.violations.iter().filter(|v| v.need_mm > 2.0 * v.have_mm).count());
+        g0_violations = go.violations;
     }
     s.fit_s = t2.elapsed().as_secs_f64();
     let t3 = Instant::now();
@@ -1754,5 +1797,5 @@ pub fn run(hand: &BoardModel, g0: Option<&G0In>, spots: &Spots, o: &WitnessOpts)
         }
     }
     s.runtime_s = t0.elapsed().as_secs_f64();
-    Ok(Witness { summary: s, violations, chains: chs, walked, wire_of, wire_crossings: pw, board: b })
+    Ok(Witness { summary: s, violations, chains: chs, walked, wire_of, wire_crossings: pw, g0_violations, board: b })
 }

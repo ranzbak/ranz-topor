@@ -105,9 +105,12 @@ fn main() {
         c.edge_fit, c.layer_combo, c.allowed, c.pair_fit, c.same_layer, c.hand_drc, s.hand_drc_spots
     );
     println!(
-        "  {} edges and {} pair cuts ({} with traffic) checked; tight passes {}; G0 under the pair cuts: {:?}",
-        s.edge_cuts_checked, s.pair_cuts, s.pair_cuts_with_traffic, s.tight_passes, s.g0_pair_violations
+        "  {} edges and {} pair cuts ({} with traffic, {} are CDT edges, {} of the others shadowed) checked; tight passes {}; G0 under the pair cuts: {:?}",
+        s.edge_cuts_checked, s.pair_cuts, s.pair_cuts_with_traffic, s.pair_cuts_as_edges, s.pair_cuts_shadowed, s.tight_passes, s.g0_pair_violations
     );
+    if let (Some(e), Some(x)) = (s.g0_pair_violations_on_edges, s.g0_pair_violations_over_2x) {
+        println!("  G0 pair-cut violations: {} on CDT edges, {} with need above twice the cut", e, x);
+    }
     println!(
         "  topology: {} wires ({} excluded), state {}, crossings {} (same-layer {}; {} pairs compared by sub-chord geometry)",
         s.topo_wires, s.topo_excluded, s.state_check, s.crossings, s.same_layer_crossings, s.subchord_pairs
@@ -124,7 +127,7 @@ fn main() {
     );
     if let Some(p) = out {
         let st = stats::collect(&m, &w, g.as_ref());
-        let j = serde_json::json!({ "summary": w.summary, "violations": w.violations, "stats": st });
+        let j = serde_json::json!({ "summary": w.summary, "violations": w.violations, "stats": st, "g0_violations": w.g0_violations });
         std::fs::write(&p, serde_json::to_string(&j).expect("json")).expect("write out");
     }
     let _ = Vec2 { x: 0.0, y: 0.0 };
