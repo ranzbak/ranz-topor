@@ -190,9 +190,10 @@ impl<'p> State<'p> {
         let (a1, a2) = (self.end_bpos(t, x), self.end_bpos(t, y));
         let mut c = 0.0;
         for &(o, ok) in &self.tri_trav[t] {
-            let (b1, b2) = self.chord(o, ok);
-            if interleave(a1, a2, b1, b2) {
-                c += if self.wires[o].net == net { wt.same_net_cross_mm } else { wt.cross_mm };
+            for (b1, b2) in self.chords(o, ok) {
+                if interleave(a1, a2, b1, b2) {
+                    c += if self.wires[o].net == net { wt.same_net_cross_mm } else { wt.cross_mm };
+                }
             }
         }
         c
@@ -288,7 +289,7 @@ impl<'p> State<'p> {
             b: c.b,
             pa: c.pa,
             pb: c.pb,
-            free: [None, None],
+            turns: Vec::new(),
             passes: Vec::new(),
             tris: Vec::new(),
             alive: true,

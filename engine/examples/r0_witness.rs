@@ -112,8 +112,8 @@ fn main() {
         println!("  G0 pair-cut violations: {} on CDT edges, {} with need above twice the cut", e, x);
     }
     println!(
-        "  topology: {} wires ({} excluded), state {}, crossings {} (same-layer {}; {} pairs compared by sub-chord geometry)",
-        s.topo_wires, s.topo_excluded, s.state_check, s.crossings, s.same_layer_crossings, s.subchord_pairs
+        "  topology: {} wires ({} excluded), state {}, crossings {} (same-layer {}; {} pairs left to the geometric fallback; cross-check mismatches {} ({} of them contact within 1 nm; +{} at hand DRC spots), missed same-layer {}; {} nodes, {} turns)",
+        s.topo_wires, s.topo_excluded, s.state_check, s.crossings, s.same_layer_crossings, s.fallback_pairs, s.crosscheck_mismatch, s.crosscheck_mismatch_contact, s.crosscheck_mismatch_at_drc, s.missed_same_layer, s.nodes, s.turns
     );
     if s.p3_ran {
         println!(

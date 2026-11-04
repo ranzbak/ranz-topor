@@ -351,8 +351,12 @@ mod tests {
             }
         }
         let f = lct_feet(&verts, &sides, &polys, &|_, _| true, 3e6, 1e4);
-        // a-b (corner x on side x of the other, both exactly aligned: feet at the ends, skipped)
-        // m-a and m-b feet are interior; a-b pairs are shadowed by m.
-        assert!(f.iter().all(|x| verts[x.v].owner == Some(2) || sides[x.side].owner == Some(2)), "{f:?}");
+        // a and b are aligned: their feet are the ends, i.e. vertex-to-vertex cuts along the free
+        // sides. The interior feet are those of the middle pad m with a and b.
+        assert!(f.iter().filter(|x| x.t > 0.0 && x.t < 1.0).all(|x| verts[x.v].owner == Some(2) || sides[x.side].owner == Some(2)), "{f:?}");
+        assert_eq!(f.iter().filter(|x| x.t > 0.0 && x.t < 1.0).count(), 4, "{f:?}");
+        // The cut through m itself (a's top-left corner to b's bottom-left corner at x = 0) is
+        // free, the one at the middle of the pad is not there.
+        assert!(f.iter().all(|x| !(verts[x.v].owner == Some(0) && sides[x.side].owner == Some(1) && x.t > 0.0 && x.t < 1.0)));
     }
 }

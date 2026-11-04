@@ -142,6 +142,12 @@ fn bbox(pts: &[Vec2]) -> (Vec2, Vec2) {
 }
 
 pub fn build(m: &BoardModel, o: &BuildOpts) -> Result<Board, String> {
+    build_with_nodes(m, o, &[])
+}
+
+/// [`build`] with extra vertices `nodes` (nm) inserted into the triangulation (kind
+/// `VertKind::Node`): the points inside triangles of the State, see the `state` module doc.
+pub fn build_with_nodes(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2]) -> Result<Board, String> {
     let signal_layers: Vec<u32> = m.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
     let n = signal_layers.len();
     let mut obstacles = Vec::new();
@@ -286,6 +292,7 @@ pub fn build(m: &BoardModel, o: &BuildOpts) -> Result<Board, String> {
             y += step;
         }
     }
+    points.extend(nodes.iter().map(|&p| (p, VertKind::Node)));
     let mut proj = Projection::build(n, obstacles, &points, &cons, inside)?;
     proj.edge_clear = m.rules.edge_clearance as f64;
     proj.regions = m.rules.clearance_regions.iter().map(|r| (r.poly.iter().map(|p| p.to_vec2()).collect(), r.clearance as f64)).collect();

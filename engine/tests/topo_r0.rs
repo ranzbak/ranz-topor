@@ -295,7 +295,7 @@ fn a_layer_dip_inside_a_triangle_is_no_same_layer_crossing() {
     let w = witness(&m);
     assert_eq!(w.summary.crossings, 1, "{:?}", w.violations);
     assert_eq!(w.summary.same_layer_crossings, 0, "{:?}", w.violations);
-    assert!(w.summary.subchord_pairs >= 1, "the dip is compared by sub-chord geometry");
+    assert!(w.summary.nodes >= 2 && w.summary.fallback_pairs == 0 && w.summary.crosscheck_mismatch == 0, "the dip is derived from the State: {:?}", w.summary);
 }
 
 /// The same board with the dip on the layer of the other track's copper really short-circuits.

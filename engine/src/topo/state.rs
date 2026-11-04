@@ -2,6 +2,16 @@
 //! obstacles of all layers, the passes of every wire through its edges (ordered per edge) and
 //! the crossings, which are derived from interleaving inside a triangle, never stored.
 //!
+//! Points inside triangles (branch points, vias, free ends): such a point is made a vertex of the
+//! projection (`Projection` built with nodes, `VertKind::Node`), which splits its triangle into a
+//! fan. What is left is plain boundary chords, so the crossing derivation needs no extra rule. A
+//! wire that ends at the node has a corner terminal (like a pad centre); a wire that runs through
+//! it turns at the corner inside one traversal ([`Wire::turns`]: the chords of that traversal are
+//! entry -> corner -> exit) or walks around the fan by zero-length passes at the vertex; every
+//! other wire passes the node on one side by crossing the fan edges, which is exactly how it is
+//! ordered against the point. For S2: P2 and P3 do not create points (vias are intervals between
+//! events, `ViaSlot`); a via is pinned to a vertex only when P4/P6 need it.
+//!
 //! Coordinates are nm (math frame, Y up). Storage is `Vec` with index ids and nothing iterates a
 //! `HashMap`, so every result is deterministic.
 //!
@@ -19,6 +29,8 @@ pub type TriId = usize;
 pub type WireId = usize;
 pub type PassId = usize;
 pub type ObsId = usize;
+/// `Wire::pa` / `pb` of a node terminal (not a pad).
+pub const NO_OBS: ObsId = usize::MAX;
 
 /// One bit per copper (signal) layer index.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -75,6 +87,8 @@ pub enum VertKind {
     Centre(ObsId),
     /// Board edge.
     Edge,
+    /// A point inserted for the State (branch point, via, free end), not an obstacle.
+    Node,
 }
 
 /// The projection: one CDT over all obstacles of all layers, with per-triangle regions and
@@ -409,11 +423,11 @@ pub struct Wire {
     pub b: VertId,
     pub pa: ObsId,
     pub pb: ObsId,
-    /// Free terminals (dead end, junction): position inside the first / last triangle of the wire
-    /// (`pa` / `pb` is `usize::MAX` then; `a` / `b` hold a stand-in corner for the chord
-    /// bookkeeping). The reserved shape of the plan's `Terminal::Branch`: the chord of such a
-    /// traversal ends at this point, not at a corner.
-    pub free: [Option<Vec2>; 2],
+    /// `pa` / `pb` is [`NO_OBS`] for a node terminal (dead end, junction, the plan's
+    /// `Terminal::Branch`): `a` / `b` is then a `VertKind::Node` vertex.
+    /// Corners the wire turns at inside a traversal: `(traversal k, vertex)`, in wire order. The
+    /// chords of traversal `k` are entry -> turn corners -> exit.
+    pub turns: Vec<(usize, VertId)>,
     pub passes: Vec<PassId>,
     /// Triangle of traversal `k` (`0..=passes.len()`): between pass `k-1` and pass `k`.
     pub tris: Vec<TriId>,
@@ -427,6 +441,9 @@ pub struct Crossing {
     pub other: WireId,
     pub other_k: usize,
     pub tri: TriId,
+    /// Which chord of traversal `k` / `other_k` (0 unless the traversal turns at a corner).
+    pub sub: usize,
+    pub other_sub: usize,
 }
 
 /// A via interval (plan `ViaSlot`): the stretch of `wire` between two consecutive events
@@ -537,6 +554,20 @@ impl<'p> State<'p> {
         (a, b)
     }
 
+    /// The chords of traversal `k`: entry -> corners the wire turns at -> exit.
+    pub fn chords(&self, w: WireId, k: usize) -> Vec<(f64, f64)> {
+        let wi = &self.wires[w];
+        let (a, b) = self.chord(w, k);
+        if wi.turns.is_empty() {
+            return vec![(a, b)];
+        }
+        let t = wi.tris[k];
+        let mut pts = vec![a];
+        pts.extend(wi.turns.iter().filter(|x| x.0 == k).map(|x| self.proj.corner_pos(t, x.1)));
+        pts.push(b);
+        pts.windows(2).map(|p| (p[0], p[1])).collect()
+    }
+
     /// Terminal, pass points, terminal.
     pub fn polyline(&self, w: WireId) -> Vec<Vec2> {
         let wi = &self.wires[w];
@@ -547,19 +578,24 @@ impl<'p> State<'p> {
         v
     }
 
-    /// Crossings of `w` with other wires, in `w`'s traversal order.
+    /// Crossings of `w` with other wires, in `w`'s traversal order (one per interleaving pair of
+    /// chords).
     pub fn crossings(&self, w: WireId) -> Vec<Crossing> {
         let wi = &self.wires[w];
         let mut out = Vec::new();
         for (k, &t) in wi.tris.iter().enumerate() {
-            let (a1, a2) = self.chord(w, k);
+            let mine = self.chords(w, k);
             for &(o, ok) in &self.tri_trav[t] {
                 if o == w {
                     continue;
                 }
-                let (b1, b2) = self.chord(o, ok);
-                if interleave(a1, a2, b1, b2) {
-                    out.push(Crossing { k, other: o, other_k: ok, tri: t });
+                let theirs = self.chords(o, ok);
+                for (i, &(a1, a2)) in mine.iter().enumerate() {
+                    for (j, &(b1, b2)) in theirs.iter().enumerate() {
+                        if interleave(a1, a2, b1, b2) {
+                            out.push(Crossing { k, other: o, other_k: ok, tri: t, sub: i, other_sub: j });
+                        }
+                    }
                 }
             }
         }
@@ -571,15 +607,13 @@ impl<'p> State<'p> {
         let tr = &self.tri_trav[t];
         let mut n = 0;
         for i in 0..tr.len() {
-            let (a1, a2) = self.chord(tr[i].0, tr[i].1);
+            let ca = self.chords(tr[i].0, tr[i].1);
             for j in i + 1..tr.len() {
                 if self.wires[tr[i].0].net == self.wires[tr[j].0].net {
                     continue;
                 }
-                let (b1, b2) = self.chord(tr[j].0, tr[j].1);
-                if interleave(a1, a2, b1, b2) {
-                    n += 1;
-                }
+                let cb = self.chords(tr[j].0, tr[j].1);
+                n += ca.iter().flat_map(|&(a1, a2)| cb.iter().map(move |&(b1, b2)| interleave(a1, a2, b1, b2))).filter(|&x| x).count();
             }
         }
         n
