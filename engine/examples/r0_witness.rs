@@ -67,12 +67,18 @@ fn drc_spots(path: &str, m: &BoardModel) -> Spots {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mut hand, mut g0, mut drc, mut out) = (None, None, None, None);
+    let mut metrize = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--g0" => g0 = Some(args[i + 1].clone()),
             "--drc" => drc = Some(args[i + 1].clone()),
             "--out" => out = Some(args[i + 1].clone()),
+            "--metrize" => {
+                metrize = true;
+                i += 1;
+                continue;
+            }
             a => {
                 hand = Some(a.to_string());
                 i += 1;
@@ -86,7 +92,7 @@ fn main() {
     let m = BoardModel::from_json(&s).unwrap_or_else(|e| panic!("{hp}: {e}"));
     let g: Option<G0In> = g0.map(|p| serde_json::from_str(&std::fs::read_to_string(&p).expect("g0 json")).expect("g0 json"));
     let spots = drc.map(|p| drc_spots(&p, &m)).unwrap_or_default();
-    let w = run(&m, g.as_ref(), &spots, &WitnessOpts::default()).unwrap_or_else(|e| panic!("r0: {e}"));
+    let w = run(&m, g.as_ref(), &spots, &WitnessOpts { metrize, ..WitnessOpts::default() }).unwrap_or_else(|e| panic!("r0: {e}"));
     let s = &w.summary;
     for (c, k) in w.chains.iter().zip(&w.walked) {
         if let Some(er) = &k.err {
@@ -121,13 +127,20 @@ fn main() {
             s.p3_vias, s.hand_signal_vias, s.hand_vias, s.p3_unlayerable, s.p3_same_layer
         );
     }
+    if metrize {
+        let m = &s.legs_matrix;
+        println!(
+            "  metrization of {} single-layer hand chains: fits+drawn {}, fits+not drawn {}, no fit+drawn {}, no fit+not drawn {}; agreement {:.1} %",
+            s.legs, m.fit_and_ok, m.fit_not_ok, m.nofit_ok, m.nofit_not_ok, m.agreement_pct()
+        );
+    }
     println!(
         "  build {:.2} s, walk {:.2} s, fit {:.2} s, topology {:.2} s, total {:.2} s",
         s.build_s, s.walk_s, s.fit_s, s.topo_s, s.runtime_s
     );
     if let Some(p) = out {
         let st = stats::collect(&m, &w, g.as_ref());
-        let j = serde_json::json!({ "summary": w.summary, "violations": w.violations, "stats": st, "g0_violations": w.g0_violations });
+        let j = serde_json::json!({ "summary": w.summary, "violations": w.violations, "stats": st, "g0_violations": w.g0_violations, "legs": w.legs });
         std::fs::write(&p, serde_json::to_string(&j).expect("json")).expect("write out");
     }
     let _ = Vec2 { x: 0.0, y: 0.0 };

@@ -13,6 +13,7 @@
 use super::board::{self, Board, BuildOpts};
 use super::demand::{self, Bound, Item};
 use super::layers::{self, LayerParams};
+use super::metrize::{Leg, LegOutcome, Matrix, Metrizer};
 use super::state::{interleave, point_in_poly, EdgeId, ObsId, State, TriId, VertId, Wire, NO_OBS};
 use crate::geom::quant::TrackPrim;
 use crate::geom::{point_skeleton, Arc, Vec2};
@@ -36,11 +37,13 @@ pub struct WitnessOpts {
     pub drc_mm: f64,
     /// A pass with less slack than this is "tight" (mm).
     pub tight_mm: f64,
+    /// Run the metrization gate on the single-layer hand chains (taut + checker per leg).
+    pub metrize: bool,
 }
 
 impl Default for WitnessOpts {
     fn default() -> Self {
-        WitnessOpts { build: BuildOpts::default(), sagitta_mm: 0.05, pair_mm: 3.0, drc_mm: 0.5, tight_mm: 0.2 }
+        WitnessOpts { build: BuildOpts::default(), sagitta_mm: 0.05, pair_mm: 3.0, drc_mm: 0.5, tight_mm: 0.2, metrize: false }
     }
 }
 
@@ -818,6 +821,9 @@ pub struct Summary {
     pub p3_same_layer: usize,
     pub hand_vias: usize,
     pub hand_signal_vias: usize,
+    /// Metrization gate on the hand chains (`WitnessOpts::metrize`).
+    pub legs: usize,
+    pub legs_matrix: Matrix,
     pub g0_pair_violations: Option<usize>,
     /// Of those, the violated cuts that are CDT edges (P2 sees them) and those with need above
     /// twice the cut (no distribution over two layers fits).
@@ -842,6 +848,7 @@ pub struct Witness {
     pub wire_crossings: Vec<usize>,
     /// Pair-cut violations of the G0 routing (`g0` given), with their passes.
     pub g0_violations: Vec<Violation>,
+    pub legs: Vec<LegOutcome>,
     pub board: Board,
 }
 
@@ -1882,5 +1889,33 @@ pub fn run(hand: &BoardModel, g0: Option<&G0In>, spots: &Spots, o: &WitnessOpts)
         }
     }
     s.runtime_s = t0.elapsed().as_secs_f64();
-    Ok(Witness { summary: s, violations, chains: chs, walked, wire_of, wire_crossings: pw, g0_violations, board: b })
+    let mut legs: Vec<LegOutcome> = Vec::new();
+    if o.metrize {
+        let mut stripped = hand.clone();
+        stripped.kept.clear();
+        stripped.vias.clear();
+        let mz = Metrizer::new(&stripped, b.signal_layers.clone());
+        for (ch, wk) in chs.iter().zip(&walked) {
+            let real: BTreeSet<usize> = ch.meta.iter().filter(|m| !m.virt).map(|m| m.layer).collect();
+            if wk.err.is_some() || real.len() != 1 || !wk.turns.is_empty() || b.poured.contains(&ch.net) || wk.tris.iter().any(|&t| b.proj.allowed(t, ch.net).is_none()) {
+                continue;
+            }
+            let r = hand.rules.net_rule(ch.net);
+            let leg = Leg {
+                net: ch.net,
+                w: ch.meta.iter().filter(|m| !m.virt).map(|m| m.width).fold(0.0, f64::max).max(1.0),
+                s: r.clearance as f64,
+                layer: *real.iter().next().expect("one layer"),
+                start: ch.pts[0],
+                goal: ch.pts[ch.pts.len() - 1],
+                tris: wk.tris.clone(),
+                edges: wk.passes.iter().map(|p| p.edge).collect(),
+            };
+            let out = mz.outcome(&b.proj, &leg);
+            s.legs_matrix.add(&out);
+            legs.push(out);
+        }
+        s.legs = legs.len();
+    }
+    Ok(Witness { summary: s, violations, chains: chs, walked, wire_of, wire_crossings: pw, g0_violations, legs, board: b })
 }

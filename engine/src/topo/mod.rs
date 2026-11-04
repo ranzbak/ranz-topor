@@ -10,6 +10,7 @@ pub mod factors;
 pub mod gate;
 pub mod init;
 pub mod layers;
+pub mod metrize;
 pub mod state;
 pub mod stats;
 pub mod witness;

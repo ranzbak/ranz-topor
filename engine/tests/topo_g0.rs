@@ -301,3 +301,40 @@ fn the_factor_reference_matches_the_schema_text() {
     ];
     assert_eq!(got, want);
 }
+
+// ---------------------------------------------------------------- metrization
+
+use topor_engine::topo::metrize::{Leg, Metrizer};
+
+/// A wire between two pads with room to spare fits and is drawn; squeezed between two pads that
+/// leave less than its width plus clearances, P1 says it does not fit and the drawing fails.
+#[test]
+fn metrization_agrees_with_p1_on_a_free_and_a_pinched_passage() {
+    let run = |gap: f64| {
+        // Net 3 runs top to bottom between a pad of net 1 and a pad of net 2 (gap mm apart).
+        let m = board((0.0, 0.0, 10.0, 10.0), &[(1, 5.0 - gap / 2.0 - 0.4, 5.0, false, 0.8), (2, 5.0 + gap / 2.0 + 0.4, 5.0, false, 0.8), (3, 5.0, 1.0, false, 0.8), (3, 5.0, 9.0, false, 0.8)], "");
+        let b = board::build(&m, &BuildOpts { steiner_mm: 0.0, lct_mm: 4.0, ..BuildOpts::default() }).unwrap();
+        let conns = b.connections(&m);
+        let mut st = State::new(&b.proj);
+        // Force the straight path: a sleeve through the passage, found with crossings and detours free.
+        let wt = topor_engine::topo::init::InitWeights { overflow_mm: 0.0, forced_layer_mm: 0.0, smd_over_mm: 0.0, ..InitWeights::default() };
+        st.route_conn(&conns[0], &wt, 1.0).unwrap();
+        let w = &st.wires[0];
+        let leg = Leg {
+            net: w.net,
+            w: w.w,
+            s: w.s,
+            layer: 0,
+            start: b.proj.pos[w.a],
+            goal: b.proj.pos[w.b],
+            tris: w.tris.clone(),
+            edges: w.passes.iter().map(|&p| st.passes[p].edge).collect(),
+        };
+        Metrizer::new(&m, b.signal_layers.clone()).outcome(&b.proj, &leg)
+    };
+    let free = run(3.0);
+    assert!(free.fits && free.taut_ok, "{free:?}");
+    let pinched = run(0.3);
+    assert!(!pinched.fits, "P1: {}", pinched.fit_why);
+    assert!(!pinched.taut_ok, "the passage is too narrow to draw: {pinched:?}");
+}

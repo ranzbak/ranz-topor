@@ -1,7 +1,7 @@
 //! G0 flat-plane gate on one board:
 //!
 //!     cargo run --release --example g0_gate -- <input.json> [<hand.json>] [--out g0.json]
-//!         [--factor NAME=WEIGHT]... [--steiner MM] [--round-steps N] [--lct MM]
+//!         [--factor NAME=WEIGHT]... [--steiner MM] [--round-steps N] [--lct MM] [--metrize]
 //!
 //! `input.json` is the board model with tracks and vias removed, `hand.json` the untouched board
 //! (both from `harness.g0 export`). Prints the metrics; `--out` writes the JSON that
@@ -29,6 +29,11 @@ fn main() {
                 let v = val(i);
                 let (n, w) = v.split_once('=').expect("--factor NAME=WEIGHT");
                 o.factors.weight.insert(n.to_string(), w.parse().expect("--factor NAME=WEIGHT"));
+            }
+            "--metrize" => {
+                o.metrize = true;
+                i += 1;
+                continue;
             }
             "--lct" => o.build.lct_mm = val(i).parse().expect("--lct MM"),
             "--round-steps" => o.build.round_steps = val(i).parse().expect("--round-steps N"),
@@ -66,6 +71,13 @@ fn main() {
         "  {} triangles; build {:.2} s, P2 {:.2} s, P3 {:.2} s, total {:.2} s",
         s.tris, s.build_s, s.p2_s, s.p3_s, s.runtime_s
     );
+    if o.metrize {
+        let m = &s.legs_matrix;
+        println!(
+            "  metrization of {} single-layer wires ({:.1} s): fits+drawn {}, fits+not drawn {}, no fit+drawn {}, no fit+not drawn {}; agreement {:.1} %",
+            s.legs, s.metrize_s, m.fit_and_ok, m.fit_not_ok, m.nofit_ok, m.nofit_not_ok, m.agreement_pct()
+        );
+    }
     if let Some(p) = out {
         std::fs::write(&p, serde_json::to_string(&r).expect("json")).expect("write out");
     }

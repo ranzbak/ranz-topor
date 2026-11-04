@@ -8,10 +8,13 @@ pub mod fuzz;
 pub mod geom;
 pub mod lengths;
 pub mod model;
+pub mod obstacle;
 pub mod pourcheck;
 #[cfg(feature = "python")]
 mod py;
 pub mod route;
+pub mod sketch;
+pub mod taut;
 pub mod stubs;
 pub mod topo;
 pub mod vias;

@@ -5,6 +5,7 @@
 use super::board::{self, BuildOpts};
 use super::factors::{Event, FactorConfig, Registry, WireCtx, standard_factors};
 use super::layers::{self, LayerParams};
+use super::metrize::{Leg, LegOutcome, Matrix, Metrizer};
 use super::state::State;
 use crate::geom::Vec2;
 use crate::model::BoardModel;
@@ -41,6 +42,10 @@ pub struct G0Summary {
     pub detours_over_1_5: usize,
     /// SMD pads of nets poured only on non-signal layers: one stub via each (not wired).
     pub plane_stub_vias: usize,
+    /// Metrization gate (`G0Opts::metrize`): single-layer pad-to-pad wires, and P1 vs taut.
+    pub legs: usize,
+    pub legs_matrix: Matrix,
+    pub metrize_s: f64,
     pub hand_vias: usize,
     /// Hand vias not on a poured net (stitching and plane vias excluded).
     pub hand_signal_vias: usize,
@@ -66,6 +71,7 @@ pub struct G0Wire {
 #[derive(Clone, Debug, Serialize)]
 pub struct G0Result {
     pub summary: G0Summary,
+    pub legs: Vec<LegOutcome>,
     pub wires: Vec<G0Wire>,
     pub vias: Vec<[f64; 2]>,
     pub errors: Vec<[f64; 2]>,
@@ -83,11 +89,13 @@ pub struct G0Opts {
     /// Search cap per connection.
     pub max_expansions: usize,
     pub layers: LayerParams,
+    /// Run the metrization gate on the single-layer wires (slow: taut + checker per leg).
+    pub metrize: bool,
 }
 
 impl Default for G0Opts {
     fn default() -> Self {
-        G0Opts { build: BuildOpts::default(), factors: FactorConfig::default(), max_expansions: 2_000_000, layers: LayerParams::default() }
+        G0Opts { build: BuildOpts::default(), factors: FactorConfig::default(), max_expansions: 2_000_000, layers: LayerParams::default(), metrize: false }
     }
 }
 
@@ -141,7 +149,38 @@ pub fn run(input: &BoardModel, hand: Option<&BoardModel>, o: &G0Opts) -> Result<
         .iter()
         .filter(|ob| !ob.drilled && ob.net.is_some_and(|n| plane_nets.contains(&n)))
         .count();
+    let base_s = t0.elapsed().as_secs_f64();
+    let t3 = Instant::now();
+    let mut legs: Vec<LegOutcome> = Vec::new();
+    let mut matrix = Matrix::default();
+    if o.metrize {
+        let mz = Metrizer::new(input, b.signal_layers.clone());
+        for (w, wi) in st.wires.iter().enumerate().filter(|(_, wi)| wi.alive) {
+            // A wire on one layer from end to end (its pieces between events share the layer).
+            let Some(&(layer, _)) = lr.stretches[w].first() else { continue };
+            if layer < 0 || lr.stretches[w].iter().any(|p| p.0 != layer) {
+                continue;
+            }
+            let leg = Leg {
+                net: wi.net,
+                w: wi.w,
+                s: wi.s,
+                layer: layer as usize,
+                start: b.proj.pos[wi.a],
+                goal: b.proj.pos[wi.b],
+                tris: wi.tris.clone(),
+                edges: wi.passes.iter().map(|&p| st.passes[p].edge).collect(),
+            };
+            let out = mz.outcome(&b.proj, &leg);
+            matrix.add(&out);
+            legs.push(out);
+        }
+    }
+    let metrize_s = t3.elapsed().as_secs_f64();
     let summary = G0Summary {
+        legs: legs.len(),
+        legs_matrix: matrix,
+        metrize_s,
         detour_median: q(0.5),
         detour_p90: q(0.9),
         detour_max: q(1.0),
@@ -173,7 +212,7 @@ pub fn run(input: &BoardModel, hand: Option<&BoardModel>, o: &G0Opts) -> Result<
         build_s,
         p2_s,
         p3_s,
-        runtime_s: t0.elapsed().as_secs_f64(),
+        runtime_s: base_s,
     };
     let wires = st
         .wires
@@ -190,5 +229,5 @@ pub fn run(input: &BoardModel, hand: Option<&BoardModel>, o: &G0Opts) -> Result<
         .collect();
     let mut errors: Vec<[f64; 2]> = lr.unlayerable.iter().map(|&p| kicad(p)).collect();
     errors.extend(rep.failed.iter().map(|&i| kicad(b.proj.pos[conns[i].a])));
-    Ok(G0Result { summary, wires, vias: lr.via_pts.iter().map(|&p| kicad(p)).collect(), errors })
+    Ok(G0Result { summary, legs, wires, vias: lr.via_pts.iter().map(|&p| kicad(p)).collect(), errors })
 }

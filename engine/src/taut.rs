@@ -1,0 +1,779 @@
+//! Single-wire taut chain (21 §2–4, 11 §4, 25 §2): a tangent-arc chain over an anchor sequence,
+//! plus the add/drop fix-up loop. See `docs/progress/notes/m1-taut-design.md` §1–2.
+//!
+//! Every pass is O(k · q) (k anchors, q = one `Grid` query); `TAUT_PASS_CAP` bounds the loop.
+use crate::geom::prim::{Aabb, Arc, Circle, Prim, Seg};
+use crate::geom::{bitangent, dist_prim, point_arc, point_seg, GeomError, Orient, Vec2};
+use crate::obstacle::{Core, LayerObstacles};
+use std::collections::HashSet;
+use std::f64::consts::TAU;
+
+pub const TAUT_PASS_CAP: u32 = 64;
+/// 25 §2 ε-band: drop an anchor only when its slack exceeds this, nm.
+pub const SLACK_BAND_NM: f64 = 10_000.0;
+/// Sleeve length cap (45 §5a).
+pub use crate::cdt::MAX_SLEEVE;
+/// Penetration tolerance, nm.
+const PEN_TOL: f64 = 1.0;
+
+pub use crate::sketch::AnchorRef;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TautError {
+    InsideObstacle(String),
+    Infeasible(String),
+    Cap,
+    Sleeve(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct Chain {
+    /// Alternating `Seg` / `Arc`, G1.
+    pub prims: Vec<Prim>,
+    pub seq: Vec<AnchorRef>,
+    pub length: f64,
+}
+
+impl Chain {
+    /// `"SAS…"`.
+    pub fn pattern(&self) -> String {
+        self.prims
+            .iter()
+            .map(|p| match p {
+                Prim::Seg(_) => 'S',
+                Prim::Arc(_) => 'A',
+            })
+            .collect()
+    }
+}
+
+/// Dynamic obstacle = a primitive of another wire's current chain.
+#[derive(Clone, Debug)]
+pub struct DynObstacle {
+    pub prim: Prim,
+    pub width: f64,
+    pub net: i32,
+    pub wire: usize,
+    /// Arcs: the anchor they wrap.
+    pub anchor: Option<AnchorRef>,
+    /// Segments: the anchors at both ends.
+    pub adjacent: [Option<AnchorRef>; 2],
+}
+
+pub trait Env {
+    fn layer(&self) -> &LayerObstacles;
+    /// This wire's inflation of anchor `a` (static obstacle), incl. stack-independent parts.
+    fn rho_anchor(&self, a: usize) -> f64;
+    fn rho_wall(&self, w: usize) -> f64;
+    fn exempt_anchor(&self, a: usize) -> bool;
+    fn exempt_wall(&self, w: usize) -> bool;
+    /// Other wires' prims (same layer, same net excluded) whose bbox overlaps `bb`.
+    fn dyn_near(&self, bb: Aabb) -> Vec<&DynObstacle>;
+    /// Required centreline distance to `d`: `c(j,k) + ε + w_j/2 + w_k/2`.
+    fn dyn_clearance(&self, d: &DynObstacle) -> f64;
+    /// Radius for this wire at `(anchor, σ)`, ≥ `rho_anchor`.
+    fn stack_radius(&self, a: AnchorRef) -> f64;
+    /// Bound on `rho − r_core` and on every `dyn_clearance` (query pre-grow).
+    fn query_grow(&self) -> f64;
+    /// Side on which this wire's slot path passes anchor `a` (Fix-B1 (c)): an anchor the fix-up
+    /// loop adds takes this σ instead of the geometric guess, which is a coin toss on a tie.
+    fn slot_side(&self, _a: usize) -> Option<Orient> {
+        None
+    }
+    /// G1 rail at the start terminal (A14): the chain leaves `start` along `dir`.
+    fn start_rail(&self) -> Option<Rail> {
+        None
+    }
+    /// G1 rail at the goal terminal (A14): the chain arrives at `goal` travelling along `dir`.
+    fn goal_rail(&self) -> Option<Rail> {
+        None
+    }
+}
+
+/// Tangent rail of a terminal (A14, design note `m4-capacity-steiner-design.md` §4): the chain
+/// touches the terminal tangent to `dir` on a disc of radius `r` (the chain's bend radius at the
+/// centreline, `w/2 + max(c, R_min)`), on the side the chain turns to. Used only when the
+/// straight bitangent would deviate from `dir` by more than [`RAIL_TOL_DEG`].
+#[derive(Clone, Copy, Debug)]
+pub struct Rail {
+    /// Unit travel direction at the terminal.
+    pub dir: Vec2,
+    pub r: f64,
+}
+
+/// A bitangent deviating from a rail's direction by less than this needs no rail disc, deg.
+pub const RAIL_TOL_DEG: f64 = 0.25;
+
+// ---------------------------------------------------------------------------------------------
+// geometry
+
+fn key(p: Vec2) -> (u64, u64) {
+    (p.x.to_bits(), p.y.to_bits())
+}
+
+#[derive(Clone, Copy)]
+struct Node {
+    c: Circle,
+    s: Option<Orient>,
+}
+
+fn node(a: AnchorRef, c: Vec2, r: f64) -> Node {
+    Node {
+        c: Circle { c, r },
+        s: Some(a.sigma),
+    }
+}
+
+fn term(p: Vec2) -> Node {
+    Node {
+        c: Circle { c: p, r: 0.0 },
+        s: None,
+    }
+}
+
+fn bt(a: &Node, b: &Node) -> Result<Seg, GeomError> {
+    let sa = a.s.or(b.s).unwrap_or(Orient::Ccw);
+    let sb = b.s.or(a.s).unwrap_or(Orient::Ccw);
+    bitangent(a.c, sa, b.c, sb)
+}
+
+fn label(l: &LayerObstacles, a: usize) -> String {
+    l.anchors[a].label.clone()
+}
+
+fn push_seg(prims: &mut Vec<Prim>, s: Seg) {
+    if let Some(Prim::Seg(last)) = prims.last_mut() {
+        last.b = s.b;
+    } else {
+        prims.push(Prim::Seg(s));
+    }
+}
+
+fn is_zero_sweep(a: &Arc) -> bool {
+    a.r * a.sweep < 1.0 || a.r * (TAU - a.sweep) < 1.0
+}
+
+/// Geometry of a fixed anchor sequence (21 §2–3). Exempt and concentric anchors are removed.
+pub fn chain_geometry(
+    start: Vec2,
+    goal: Vec2,
+    seq: &[AnchorRef],
+    env: &dyn Env,
+) -> Result<Chain, TautError> {
+    let l = env.layer();
+    let g = env.query_grow();
+    for p in [start, goal] {
+        let bb = Aabb { min: p, max: p }.grow(g);
+        for a in query_anchors(l, bb) {
+            if !env.exempt_anchor(a) && (p - l.anchors[a].c).len() < env.rho_anchor(a) - PEN_TOL {
+                return Err(TautError::InsideObstacle(label(l, a)));
+            }
+        }
+        for w in query_walls(l, bb) {
+            if !env.exempt_wall(w)
+                && core_point_dist(&l.walls[w].core, p) < env.rho_wall(w) - PEN_TOL
+            {
+                return Err(TautError::InsideObstacle(l.walls[w].label.clone()));
+            }
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut kept: Vec<AnchorRef> = Vec::with_capacity(seq.len());
+    for &a in seq {
+        if env.exempt_anchor(a.anchor) || !seen.insert(key(l.anchors[a.anchor].c)) {
+            continue;
+        }
+        kept.push(a);
+    }
+    if kept.len() > MAX_SLEEVE {
+        return Err(TautError::Sleeve(format!("{} anchors", kept.len())));
+    }
+    let mut nodes = Vec::with_capacity(kept.len() + 2);
+    nodes.push(term(start));
+    for &a in &kept {
+        nodes.push(node(a, l.anchors[a.anchor].c, env.stack_radius(a)));
+    }
+    nodes.push(term(goal));
+    let segs_of = |nodes: &[Node]| -> Result<Vec<Seg>, TautError> {
+        let mut segs = Vec::with_capacity(nodes.len() - 1);
+        for i in 0..nodes.len() - 1 {
+            match bt(&nodes[i], &nodes[i + 1]) {
+                Ok(s) => segs.push(s),
+                Err(GeomError::InsideObstacle) => {
+                    let who = if i + 1 < nodes.len() - 1 { i } else { i.saturating_sub(1) };
+                    let who = who.min(kept.len().saturating_sub(1));
+                    return Err(TautError::InsideObstacle(
+                        kept.get(who)
+                            .map(|a| label(l, a.anchor))
+                            .unwrap_or_default(),
+                    ));
+                }
+                Err(_) => {
+                    let n = |j: usize| -> String {
+                        if j == 0 {
+                            "start".into()
+                        } else if j == nodes.len() - 1 {
+                            "goal".into()
+                        } else {
+                            label(l, kept[j - 1].anchor)
+                        }
+                    };
+                    return Err(TautError::Infeasible(format!("{} <-> {}", n(i), n(i + 1))));
+                }
+            }
+        }
+        Ok(segs)
+    };
+    let mut segs = segs_of(&nodes)?;
+    // G1 rails (A14): where the straight bitangent leaves / arrives off the hand direction, the
+    // terminal becomes a tangent disc on the side of the turn and the chain starts / ends with an
+    // arc on it.
+    let n = nodes.len();
+    let mut rails: [Option<(Vec2, Orient)>; 2] = [None, None];
+    if env.start_rail().is_some() || env.goal_rail().is_some() {
+        let tol = RAIL_TOL_DEG.to_radians().cos();
+        let disc = |p: Vec2, t: Vec2, side: Orient, r: f64| -> (Vec2, Node) {
+            let c = p + t.perp() * (side.sign() * r);
+            (
+                c,
+                Node {
+                    c: Circle { c, r },
+                    s: Some(side),
+                },
+            )
+        };
+        if let Some(rl) = env.start_rail() {
+            if let Some(e) = segs[0].dir() {
+                if e.dot(rl.dir) < tol {
+                    let side = if rl.dir.cross(e) >= 0.0 { Orient::Ccw } else { Orient::Cw };
+                    let (c, nd) = disc(start, rl.dir, side, rl.r);
+                    nodes[0] = nd;
+                    rails[0] = Some((c, side));
+                }
+            }
+        }
+        if let Some(rl) = env.goal_rail() {
+            if let Some(e) = segs[n - 2].dir() {
+                if e.dot(rl.dir) < tol {
+                    let side = if e.cross(rl.dir) >= 0.0 { Orient::Ccw } else { Orient::Cw };
+                    let (c, nd) = disc(goal, rl.dir, side, rl.r);
+                    nodes[n - 1] = nd;
+                    rails[1] = Some((c, side));
+                }
+            }
+        }
+        if rails.iter().any(Option::is_some) {
+            segs = segs_of(&nodes).map_err(|e| match e {
+                TautError::InsideObstacle(w) | TautError::Infeasible(w) => {
+                    TautError::Infeasible(format!("g1 rail: {w}"))
+                }
+                e => e,
+            })?;
+        }
+    }
+    let mut prims: Vec<Prim> = Vec::new();
+    if let Some((c, side)) = rails[0] {
+        let arc = Arc::from_tangent_points(c, nodes[0].c.r, side, start, segs[0].a);
+        if !is_zero_sweep(&arc) {
+            prims.push(Prim::Arc(arc));
+        }
+    }
+    push_seg(&mut prims, segs[0]);
+    for (i, a) in kept.iter().enumerate() {
+        let arc = Arc::from_tangent_points(
+            nodes[i + 1].c.c,
+            nodes[i + 1].c.r,
+            a.sigma,
+            segs[i].b,
+            segs[i + 1].a,
+        );
+        if is_zero_sweep(&arc) {
+            // seg ends are already continuous through the next push (merged)
+            push_seg(&mut prims, segs[i + 1]);
+        } else {
+            prims.push(Prim::Arc(arc));
+            prims.push(Prim::Seg(segs[i + 1]));
+        }
+    }
+    if let Some((c, side)) = rails[1] {
+        let arc = Arc::from_tangent_points(c, nodes[n - 1].c.r, side, segs[n - 2].b, goal);
+        if !is_zero_sweep(&arc) {
+            prims.push(Prim::Arc(arc));
+        }
+    }
+    let length = prims.iter().map(|p| p.length()).sum();
+    Ok(Chain {
+        prims,
+        seq: kept,
+        length,
+    })
+}
+
+/// `(prim index, seq index)` for every arc of `chain` (matched by centre and σ in path order).
+pub fn arc_members(chain: &Chain, env: &dyn Env) -> Vec<(usize, usize)> {
+    let l = env.layer();
+    let mut out = Vec::new();
+    let mut cur = 0usize;
+    for (pi, p) in chain.prims.iter().enumerate() {
+        if let Prim::Arc(a) = p {
+            let hit = (cur..chain.seq.len()).find(|&k| {
+                let s = chain.seq[k];
+                s.sigma == a.sigma && key(l.anchors[s.anchor].c) == key(a.c)
+            });
+            if let Some(k) = hit {
+                out.push((pi, k));
+                cur = k + 1;
+            }
+        }
+    }
+    out
+}
+
+/// Zero-slack corridor of a chain tautened at margin 0 (R6): the static obstacles that pinch
+/// it, as sorted, deduplicated `(anchors, walls)`. A primitive is *tight* to an obstacle when it
+/// runs within `band` (= ε) of its inflation. Tightness by construction is ignored: an arc is
+/// always tight to the anchor it wraps, and a tangent segment, at its ends, to the anchors of
+/// its neighbouring arcs and to whatever those arcs are tight to. What remains is a pinch: an
+/// arc tight to a further obstacle (the wrapped anchor and that obstacle), or a segment tight
+/// to an obstacle of its own (that obstacle and the segment's neighbouring anchors, which it
+/// cannot move away from). Exempt obstacles are skipped.
+pub fn corridor_obstacles(chain: &Chain, env: &dyn Env, band: f64) -> (Vec<usize>, Vec<usize>) {
+    let l = env.layer();
+    let n = chain.prims.len();
+    let wrapped: Vec<Option<usize>> = {
+        let arcs = arc_members(chain, env);
+        (0..n)
+            .map(|pi| {
+                arcs.iter()
+                    .find(|&&(p, _)| p == pi)
+                    .map(|&(_, s)| chain.seq[s].anchor)
+            })
+            .collect()
+    };
+    let tight: Vec<(Vec<usize>, Vec<usize>)> = chain
+        .prims
+        .iter()
+        .map(|prim| {
+            let bb = prim.bbox().grow(env.query_grow() + band);
+            let a: Vec<usize> = query_anchors(l, bb)
+                .into_iter()
+                .filter(|&a| {
+                    !env.exempt_anchor(a)
+                        && point_prim(l.anchors[a].c, prim) < env.rho_anchor(a) + band
+                })
+                .collect();
+            let w: Vec<usize> = query_walls(l, bb)
+                .into_iter()
+                .filter(|&w| {
+                    !env.exempt_wall(w)
+                        && core_prim_dist(&l.walls[w].core, prim) < env.rho_wall(w) + band
+                })
+                .collect();
+            (a, w)
+        })
+        .collect();
+    let (mut anchors, mut walls) = (Vec::new(), Vec::new());
+    for (pi, prim) in chain.prims.iter().enumerate() {
+        let (ta, tw) = &tight[pi];
+        // Tight by construction: the wrapped anchor of an arc; for a segment, the neighbouring
+        // arcs' anchors and everything those arcs are tight to.
+        let (mut own_a, mut own_w): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
+        let neighbours: Vec<usize> = match prim {
+            Prim::Arc(_) => vec![pi],
+            Prim::Seg(_) => [pi.checked_sub(1), (pi + 1 < n).then_some(pi + 1)]
+                .into_iter()
+                .flatten()
+                .filter(|&q| matches!(chain.prims[q], Prim::Arc(_)))
+                .collect(),
+        };
+        let mut adjacent: Vec<usize> = Vec::new();
+        for &q in &neighbours {
+            adjacent.extend(wrapped[q]);
+            if matches!(prim, Prim::Seg(_)) {
+                own_a.extend(tight[q].0.iter().copied());
+                own_w.extend(tight[q].1.iter().copied());
+            }
+        }
+        own_a.extend(adjacent.iter().copied());
+        let foreign_a: Vec<usize> = ta.iter().copied().filter(|a| !own_a.contains(a)).collect();
+        let foreign_w: Vec<usize> = tw.iter().copied().filter(|w| !own_w.contains(w)).collect();
+        if foreign_a.is_empty() && foreign_w.is_empty() {
+            continue;
+        }
+        anchors.extend(foreign_a);
+        anchors.extend(adjacent.iter().copied().filter(|a| ta.contains(a)));
+        walls.extend(foreign_w);
+    }
+    anchors.sort_unstable();
+    anchors.dedup();
+    walls.sort_unstable();
+    walls.dedup();
+    (anchors, walls)
+}
+
+// ---------------------------------------------------------------------------------------------
+// obstacle queries
+
+fn query_anchors(l: &LayerObstacles, bb: Aabb) -> Vec<usize> {
+    l.query_anchors(bb)
+}
+
+fn query_walls(l: &LayerObstacles, bb: Aabb) -> Vec<usize> {
+    l.query_walls(bb)
+}
+
+fn core_point_dist(c: &Core, p: Vec2) -> f64 {
+    match c {
+        Core::Point(q) => (p - *q).len(),
+        Core::Seg(s) => point_seg(p, s),
+        Core::Arc(a) => point_arc(p, a),
+    }
+}
+
+fn point_prim(p: Vec2, q: &Prim) -> f64 {
+    match q {
+        Prim::Seg(s) => point_seg(p, s),
+        Prim::Arc(a) => point_arc(p, a),
+    }
+}
+
+fn core_prim_dist(c: &Core, q: &Prim) -> f64 {
+    match c {
+        Core::Point(p) => point_prim(*p, q),
+        Core::Seg(s) => dist_prim(&Prim::Seg(*s), q),
+        Core::Arc(a) => dist_prim(&Prim::Arc(*a), q),
+    }
+}
+
+/// Anchors already in the sequence (by index or bit-equal centre), plus the chain's own
+/// terminals: an anchor centred on `start` or `goal` is never a candidate (Fix-B1 (b)).
+#[derive(Clone)]
+struct Members {
+    idx: HashSet<usize>,
+    centres: HashSet<(u64, u64)>,
+    terms: [(u64, u64); 2],
+}
+
+impl Members {
+    fn new(seq: &[AnchorRef], l: &LayerObstacles, start: Vec2, goal: Vec2) -> Self {
+        Members {
+            idx: seq.iter().map(|a| a.anchor).collect(),
+            centres: seq.iter().map(|a| key(l.anchors[a.anchor].c)).collect(),
+            terms: [key(start), key(goal)],
+        }
+    }
+    fn has(&self, a: usize, l: &LayerObstacles) -> bool {
+        let c = key(l.anchors[a].c);
+        self.idx.contains(&a) || self.centres.contains(&c) || self.terms.contains(&c)
+    }
+}
+
+/// Anchors to add for the non-member obstacles that `prim` penetrates (sorted, deduplicated).
+fn penetrations(prim: &Prim, mem: &Members, env: &dyn Env) -> Result<Vec<usize>, TautError> {
+    let l = env.layer();
+    let bb = prim.bbox().grow(env.query_grow());
+    let mut out: Vec<usize> = Vec::new();
+    for a in query_anchors(l, bb) {
+        if mem.has(a, l) || env.exempt_anchor(a) {
+            continue;
+        }
+        if point_prim(l.anchors[a].c, prim) < env.rho_anchor(a) - PEN_TOL {
+            out.push(a);
+        }
+    }
+    for w in query_walls(l, bb) {
+        if env.exempt_wall(w) {
+            continue;
+        }
+        let wall = &l.walls[w];
+        if core_prim_dist(&wall.core, prim) >= env.rho_wall(w) - PEN_TOL {
+            continue;
+        }
+        let d = |e: usize| point_prim(l.anchors[e].c, prim);
+        let [e0, e1] = wall.ends;
+        let (near, far) = if d(e0) <= d(e1) { (e0, e1) } else { (e1, e0) };
+        for e in [near, far] {
+            if !mem.has(e, l) && !env.exempt_anchor(e) {
+                // The end anchor must cover the penetration point; otherwise the wall is grazed
+                // mid-span and no end anchor can express the detour.
+                if d(e) >= env.rho_anchor(e) + SLACK_BAND_NM {
+                    let depth = env.rho_wall(w) - core_prim_dist(&wall.core, prim);
+                    return Err(TautError::Infeasible(format!(
+                        "wall {} grazed mid-span by {:.0} nm",
+                        wall.label, depth
+                    )));
+                }
+                out.push(e);
+                break;
+            }
+        }
+    }
+    for d in env.dyn_near(bb) {
+        if dist_prim(prim, &d.prim) >= env.dyn_clearance(d) - PEN_TOL {
+            continue;
+        }
+        let cands: Vec<AnchorRef> = match d.prim {
+            Prim::Arc(_) => d.anchor.into_iter().collect(),
+            Prim::Seg(_) => d.adjacent.iter().flatten().copied().collect(),
+        };
+        for a in cands {
+            if mem.has(a.anchor, l) || env.exempt_anchor(a.anchor) {
+                continue;
+            }
+            // A penetrated segment names its end anchors only when the conflict is at one of
+            // them (within this wire's ring there plus the query band); a mid-span crossing is
+            // settled on the other wire's turn, against this wire's arc or near this wire's own
+            // anchors — never by a detour to a far anchor (Fix-B1 (b), M1 F5 fan rule).
+            if matches!(d.prim, Prim::Seg(_)) {
+                let sigma = env.slot_side(a.anchor).unwrap_or(a.sigma);
+                let ring = env.stack_radius(AnchorRef {
+                    anchor: a.anchor,
+                    sigma,
+                });
+                if point_prim(l.anchors[a.anchor].c, prim) >= ring + env.query_grow() {
+                    continue;
+                }
+            }
+            out.push(a.anchor);
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------------------------
+// fix-up loop
+
+fn tri_contains(a: Vec2, b: Vec2, c: Vec2, p: Vec2) -> bool {
+    let o = (b - a).cross(c - a);
+    if o == 0.0 {
+        return false;
+    }
+    let s = o.signum();
+    s * (b - a).cross(p - a) > 0.0
+        && s * (c - b).cross(p - b) > 0.0
+        && s * (a - c).cross(p - c) > 0.0
+}
+
+/// One left-to-right sweep dropping slack anchors; returns whether anything was dropped.
+fn drop_pass(start: Vec2, goal: Vec2, seq: &mut Vec<AnchorRef>, env: &dyn Env) -> bool {
+    let l = env.layer();
+    let n = seq.len();
+    let r: Vec<f64> = seq.iter().map(|a| env.stack_radius(*a)).collect();
+    let ctr = |i: usize| l.anchors[seq[i].anchor].c;
+    let mut mem = Members::new(seq, l, start, goal);
+    let mut kept: Vec<usize> = Vec::with_capacity(n);
+    let mut dropped = false;
+    for i in 0..n {
+        let p = match kept.last() {
+            Some(&k) => node(seq[k], ctr(k), r[k]),
+            None => term(start),
+        };
+        let q = if i + 1 < n {
+            node(seq[i + 1], ctr(i + 1), r[i + 1])
+        } else {
+            term(goal)
+        };
+        let me = node(seq[i], ctr(i), r[i]);
+        if is_slack(&p, &me, &q, r[i], seq[i].sigma, &mem, env) {
+            mem.centres.remove(&key(ctr(i)));
+            mem.idx.remove(&seq[i].anchor);
+            dropped = true;
+        } else {
+            kept.push(i);
+        }
+    }
+    if dropped {
+        *seq = kept.iter().map(|&i| seq[i]).collect();
+    }
+    dropped
+}
+
+fn is_slack(
+    p: &Node,
+    me: &Node,
+    q: &Node,
+    ri: f64,
+    sigma: Orient,
+    mem: &Members,
+    env: &dyn Env,
+) -> bool {
+    let Ok(s) = bt(p, q) else { return false };
+    let Some(t) = s.dir() else { return false };
+    let ci = me.c.c;
+    // (b) side: the shortcut would need a turn of sign σ to wrap the anchor
+    if sigma.sign() * t.cross(ci - s.a) <= 0.0 {
+        return false;
+    }
+    // (c) slack beyond the ε-band
+    if point_seg(ci, &s) < ri + SLACK_BAND_NM {
+        return false;
+    }
+    // After (b) and (c) a wrap of the current arc is < π (a sweep > π would be a negative arc,
+    // 2π minus a small backward wrap, which is exactly what must go), so the swept region lies
+    // inside the centre triangle.
+    let l = env.layer();
+    // (e) no non-exempt core centre strictly inside the centre triangle
+    let (a, b, c) = (p.c.c, ci, q.c.c);
+    let bb = Aabb {
+        min: Vec2 {
+            x: a.x.min(b.x).min(c.x),
+            y: a.y.min(b.y).min(c.y),
+        },
+        max: Vec2 {
+            x: a.x.max(b.x).max(c.x),
+            y: a.y.max(b.y).max(c.y),
+        },
+    };
+    for o in query_anchors(l, bb) {
+        let oc = l.anchors[o].c;
+        if env.exempt_anchor(o) || key(oc) == key(ci) {
+            continue;
+        }
+        if tri_contains(a, b, c, oc) {
+            return false;
+        }
+    }
+    // (f) the shortcut violates nothing (the dropped anchor itself is a non-member now)
+    let mut mem2 = mem.clone();
+    mem2.centres.remove(&key(ci));
+    mem2.idx.retain(|&x| key(l.anchors[x].c) != key(ci));
+    matches!(penetrations(&Prim::Seg(s), &mem2, env), Ok(v) if v.is_empty())
+}
+
+/// Closest point of `prim` to `c`, the travel tangent there, and the fraction along `prim`.
+fn closest(prim: &Prim, c: Vec2) -> (Vec2, Vec2, f64) {
+    match prim {
+        Prim::Seg(s) => {
+            let d = s.b - s.a;
+            let l2 = d.len2();
+            let t = if l2 == 0.0 {
+                0.0
+            } else {
+                ((c - s.a).dot(d) / l2).clamp(0.0, 1.0)
+            };
+            (s.a + d * t, s.dir().unwrap_or(Vec2 { x: 1.0, y: 0.0 }), t)
+        }
+        Prim::Arc(a) => {
+            let (pt, frac) = match (c - a.c).unit() {
+                Some(u) if a.contains_dir(c) => {
+                    let p = a.c + u * a.r;
+                    let off = (a.sigma.sign() * ((p - a.c).angle() - a.a_start)).rem_euclid(TAU);
+                    let f = if a.sweep > 0.0 {
+                        (off / a.sweep).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    (p, f)
+                }
+                _ => {
+                    if (c - a.start()).len() <= (c - a.end()).len() {
+                        (a.start(), 0.0)
+                    } else {
+                        (a.end(), 1.0)
+                    }
+                }
+            };
+            let rad = (pt - a.c).unit().unwrap_or(Vec2 { x: 1.0, y: 0.0 }).perp();
+            let t = if a.sigma == Orient::Ccw { rad } else { -rad };
+            (pt, t, frac)
+        }
+    }
+}
+
+fn sigma_for(prim: &Prim, c: Vec2, p: Vec2, t: Vec2) -> Orient {
+    let mut x = t.cross(c - p);
+    if x == 0.0 {
+        let a = match prim {
+            Prim::Seg(s) => s.a,
+            Prim::Arc(a) => a.start(),
+        };
+        x = t.cross(c - a);
+    }
+    if x < 0.0 {
+        Orient::Cw
+    } else {
+        Orient::Ccw
+    }
+}
+
+/// `(seq position, path key, anchor, σ)` for every penetration of the current chain.
+fn add_pass(
+    chain: &Chain,
+    start: Vec2,
+    goal: Vec2,
+    env: &dyn Env,
+) -> Result<Vec<(usize, f64, usize, Orient)>, TautError> {
+    let l = env.layer();
+    let mem = Members::new(&chain.seq, l, start, goal);
+    let arcs = arc_members(chain, env);
+    let mut out = Vec::new();
+    let mut after = 0usize; // seq entries before the current prim
+    for (pi, prim) in chain.prims.iter().enumerate() {
+        let arc_seq = arcs.iter().find(|(p, _)| *p == pi).map(|&(_, k)| k);
+        for a in penetrations(prim, &mem, env)? {
+            let c = l.anchors[a].c;
+            let (pt, t, frac) = closest(prim, c);
+            let sg = env
+                .slot_side(a)
+                .unwrap_or_else(|| sigma_for(prim, c, pt, t));
+            let pos = match arc_seq {
+                Some(k) => {
+                    if frac < 0.5 {
+                        k
+                    } else {
+                        k + 1
+                    }
+                }
+                None => after,
+            };
+            out.push((pos, pi as f64 + frac, a, sg));
+        }
+        if let Some(k) = arc_seq {
+            after = k + 1;
+        }
+    }
+    out.sort_by(|x, y| x.0.cmp(&y.0).then(x.1.total_cmp(&y.1)).then(x.2.cmp(&y.2)));
+    let mut seen = HashSet::new();
+    out.retain(|x| seen.insert(x.2));
+    Ok(out)
+}
+
+/// Fix-up loop (21 §4, 11 §4, 25 §2 step 3), ≤ `TAUT_PASS_CAP` passes.
+pub fn tauten(
+    start: Vec2,
+    goal: Vec2,
+    seq: Vec<AnchorRef>,
+    env: &dyn Env,
+) -> Result<Chain, TautError> {
+    let mut seq = seq;
+    for _ in 0..TAUT_PASS_CAP {
+        if seq.len() > MAX_SLEEVE {
+            return Err(TautError::Sleeve(format!("{} anchors", seq.len())));
+        }
+        let chain = chain_geometry(start, goal, &seq, env)?;
+        let mut cur = chain.seq.clone();
+        if drop_pass(start, goal, &mut cur, env) {
+            seq = cur;
+            continue;
+        }
+        let adds = add_pass(&chain, start, goal, env)?;
+        if adds.is_empty() {
+            return Ok(chain);
+        }
+        let mut next = Vec::with_capacity(cur.len() + adds.len());
+        for i in 0..=cur.len() {
+            for &(pos, _, a, sigma) in &adds {
+                if pos == i {
+                    next.push(AnchorRef { anchor: a, sigma });
+                }
+            }
+            if i < cur.len() {
+                next.push(cur[i]);
+            }
+        }
+        seq = next;
+    }
+    Err(TautError::Cap)
+}
