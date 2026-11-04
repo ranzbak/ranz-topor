@@ -9,6 +9,7 @@
 //! region labels (bbox prefilter); `crossings(w)` is O(Σ traversals in w's triangles); `insert` and
 //! `remove` are O(passes · edge load).
 
+use super::demand::{need_in, Bound, Item};
 use crate::cdt::Cdt;
 use crate::geom::Vec2;
 
@@ -57,6 +58,11 @@ pub struct Obstacle {
     pub drilled: bool,
     /// `None`: no net, an obstacle for every wire.
     pub net: Option<i32>,
+    /// Clearance the copper itself demands from any other net's track (nm): `max(pad net
+    /// clearance, pad local clearance, board minimum, NPTH hole clearance)`.
+    pub clear: f64,
+    /// A bare hole without copper (NPTH inside its drill): only `clear` applies, not the net's.
+    pub bare: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,6 +100,11 @@ pub struct Projection {
     /// Free length of each edge per layer (nm); `INFINITY` where the edge is not a cut between
     /// two obstacles present on that layer.
     pub room: Vec<Vec<f64>>,
+    /// Copper-to-board-edge clearance (nm); set by the builder.
+    pub edge_clear: f64,
+    /// Custom courtyard clearance rules `(polygon, clearance nm)`, in file order (the last match
+    /// wins); set by the builder.
+    pub regions: Vec<(Vec<Vec2>, f64)>,
 }
 
 pub fn point_in_poly(p: Vec2, poly: &[Vec2]) -> bool {
@@ -225,6 +236,8 @@ impl Projection {
             tri_obs,
             vert_tris,
             room,
+            edge_clear: 0.0,
+            regions: Vec::new(),
         })
     }
 
@@ -284,6 +297,42 @@ impl Projection {
         } else {
             self.room[e][l]
         }
+    }
+
+    /// What bounds a cut at vertex `v`, for the demand model.
+    pub fn bound(&self, v: VertId) -> Bound {
+        match self.vkind[v] {
+            VertKind::Outline(o) if self.obstacles[o].bare => Bound::Hole { clear: self.obstacles[o].clear },
+            VertKind::Outline(o) => Bound::Pad { net: self.obstacles[o].net, clear: self.obstacles[o].clear },
+            VertKind::Edge => Bound::Edge { clear: self.edge_clear },
+            _ => Bound::Open,
+        }
+    }
+
+    /// The custom clearance that replaces the net classes' at point `p`, if a courtyard rule
+    /// covers it.
+    pub fn regime_at(&self, p: Vec2) -> Option<f64> {
+        self.regions.iter().rev().find(|(poly, _)| point_in_poly(p, poly)).map(|r| r.1)
+    }
+
+    /// The regime of edge `e` (at its midpoint).
+    pub fn regime(&self, e: EdgeId) -> Option<f64> {
+        if self.regions.is_empty() {
+            return None;
+        }
+        let [p, q] = self.edges[e];
+        self.regime_at((self.pos[p] + self.pos[q]) * 0.5)
+    }
+
+    /// Space `items` (ordered from end `p` to end `q`) need across edge `e` on one layer.
+    pub fn edge_demand(&self, e: EdgeId, items: &[Item]) -> f64 {
+        let [p, q] = self.edges[e];
+        need_in(self.regime(e), items, self.bound(p), self.bound(q))
+    }
+
+    /// Whether `it` alone fits through edge `e` on layer `l`.
+    pub fn fits_alone(&self, e: EdgeId, l: usize, it: Item) -> bool {
+        self.edge_demand(e, &[it]) <= self.room_for(e, l, it.net)
     }
 
     /// Distance from `p` to the nearest obstacle not of `net` (0 inside one). O(obstacles).
@@ -383,8 +432,6 @@ pub struct State<'p> {
     pub wires: Vec<Wire>,
     /// Per triangle: the traversals `(wire, k)` through it.
     pub tri_trav: Vec<Vec<(WireId, usize)>>,
-    /// Per edge: Σ (w + s) of the passes.
-    pub demand: Vec<f64>,
 }
 
 impl<'p> State<'p> {
@@ -395,8 +442,23 @@ impl<'p> State<'p> {
             edge_order: vec![Vec::new(); proj.edges.len()],
             wires: Vec::new(),
             tri_trav: vec![Vec::new(); proj.tris.len()],
-            demand: vec![0.0; proj.edges.len()],
         }
+    }
+
+    /// The pass `p` as a demand item.
+    pub fn item(&self, p: PassId) -> Item {
+        let w = &self.wires[self.passes[p].wire];
+        Item { net: w.net, w: w.w, s: w.s }
+    }
+
+    /// Space the passes of edge `e` need on one layer, optionally with `extra` inserted at gap
+    /// `g` (before the pass at index `g` of the edge order).
+    pub fn edge_need(&self, e: EdgeId, extra: Option<(usize, Item)>) -> f64 {
+        let mut items: Vec<Item> = self.edge_order[e].iter().map(|&p| self.item(p)).collect();
+        if let Some((g, it)) = extra {
+            items.insert(g.min(items.len()), it);
+        }
+        self.proj.edge_demand(e, &items)
     }
 
     fn order_index(&self, p: PassId) -> usize {
@@ -513,7 +575,6 @@ impl<'p> State<'p> {
     pub fn insert(&mut self, mut wire: Wire, path: &[(EdgeId, usize)], tris: Vec<TriId>) -> WireId {
         assert_eq!(tris.len(), path.len() + 1, "one more triangle than passes");
         let id = self.wires.len();
-        let ws = wire.w + wire.s;
         wire.passes.clear();
         for (j, &(e, g)) in path.iter().enumerate() {
             // Earlier passes of this wire on the same edge shift the gap.
@@ -522,7 +583,6 @@ impl<'p> State<'p> {
             self.passes.push(Pass { wire: id, edge: e });
             let at = (g + shift).min(self.edge_order[e].len());
             self.edge_order[e].insert(at, pid);
-            self.demand[e] += ws;
             wire.passes.push(pid);
         }
         for (k, &t) in tris.iter().enumerate() {
@@ -542,14 +602,12 @@ impl<'p> State<'p> {
         for (mut wire, passes, tris) in items {
             assert_eq!(tris.len(), passes.len() + 1, "one more triangle than passes");
             let id = self.wires.len();
-            let ws = wire.w + wire.s;
             wire.passes.clear();
             for &(e, u) in &passes {
                 let pid = self.passes.len();
                 self.passes.push(Pass { wire: id, edge: e });
                 at[e].push((u, pid));
-                self.demand[e] += ws;
-                wire.passes.push(pid);
+                    wire.passes.push(pid);
             }
             for (k, &t) in tris.iter().enumerate() {
                 self.tri_trav[t].push((id, k));
@@ -565,11 +623,9 @@ impl<'p> State<'p> {
     }
 
     pub fn remove(&mut self, w: WireId) {
-        let ws = self.wires[w].w + self.wires[w].s;
         for &p in &self.wires[w].passes {
             let e = self.passes[p].edge;
             self.edge_order[e].retain(|&x| x != p);
-            self.demand[e] -= ws;
         }
         for &t in &self.wires[w].tris {
             self.tri_trav[t].retain(|&(x, _)| x != w);

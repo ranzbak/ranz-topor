@@ -6,6 +6,7 @@
 //! Complexity: one search is O(S log S) in the gap-graph states S it reaches (bounded by
 //! `max_expansions`); `uncross_all` is O(rounds · Σ crossings²) per wire, small in practice.
 
+use super::demand::Item;
 use super::state::{interleave, EdgeId, ObsId, State, TriId, VertId, Wire, WireId};
 use crate::geom::Vec2;
 use std::cmp::Ordering;
@@ -158,14 +159,17 @@ impl Search<'_, '_> {
             if pr.allowed(nt, c.net).is_none() {
                 continue;
             }
+            let me = Item { net: c.net, w: c.w, s: c.s };
+            let alone = pr.edge_demand(e, &[me]);
             let extra = st.over_cost(nt, c.net, &self.wt)
-                + if st.overflows(e, t, nt, c.net, c.w + c.s, c.s) { self.wt.overflow_mm } else { 0.0 }
-                + if (0..pr.n_layers).any(|l| pr.room_for(e, l, c.net) < c.w + 2.0 * c.s) { self.wt.forced_layer_mm } else { 0.0 };
+                + if (0..pr.n_layers).any(|l| alone > pr.room_for(e, l, c.net)) { self.wt.forced_layer_mm } else { 0.0 };
+            let room = st.room_across(e, t, nt, c.net);
             for g in 0..=st.edge_order[e].len() {
                 let pt = st.gap_point(e, g);
                 let cost = base
                     + (pt - px).len() / MM * self.scale
                     + st.arc_cross(t, x, End::Gap(e, g), c.net, &self.wt)
+                    + if room.is_some_and(|r| r.is_finite() && (if st.edge_order[e].is_empty() { alone } else { st.edge_need(e, Some((g, me))) }) > r) { self.wt.overflow_mm } else { 0.0 }
                     + extra;
                 self.push(Node { e, g, into: nt, from_tri: t, parent, cost, pt });
             }
@@ -203,18 +207,20 @@ impl<'p> State<'p> {
         }
     }
 
-    /// Whether one more pass of width+clearance `ws` (clearance `s`) overflows edge `e` for a
-    /// wire allowed on the layers of both triangles.
-    pub fn overflows(&self, e: EdgeId, t1: TriId, t2: TriId, net: i32, ws: f64, s: f64) -> bool {
-        let (Some(m1), Some(m2)) = (self.proj.allowed(t1, net), self.proj.allowed(t2, net)) else {
-            return false;
-        };
+    /// Room of edge `e` for a wire of `net` allowed on the layers of both triangles: the sum over
+    /// the layers they share (the layers are not assigned yet); `None` when a triangle is a wall.
+    pub fn room_across(&self, e: EdgeId, t1: TriId, t2: TriId, net: i32) -> Option<f64> {
+        let (m1, m2) = (self.proj.allowed(t1, net)?, self.proj.allowed(t2, net)?);
         let m = m1.0 & m2.0;
-        let room: f64 = (0..self.proj.n_layers)
-            .filter(|&l| (m >> l) & 1 == 1)
-            .map(|l| self.proj.room_for(e, l, net))
-            .sum();
-        self.demand[e] + ws + s > room
+        Some((0..self.proj.n_layers).filter(|&l| (m >> l) & 1 == 1).map(|l| self.proj.room_for(e, l, net)).sum())
+    }
+
+    /// Whether one more pass (width `w`, clearance `s`) inserted at gap `g` overflows edge `e`
+    /// for a wire allowed on the layers of both triangles. The demand is that of one layer
+    /// ([`State::edge_need`]), the room the sum over the allowed layers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn overflows(&self, e: EdgeId, g: usize, t1: TriId, t2: TriId, net: i32, w: f64, s: f64) -> bool {
+        self.room_across(e, t1, t2, net).is_some_and(|room| self.edge_need(e, Some((g, Item { net, w, s }))) > room)
     }
 
     /// Cheapest path of `c` in the current state: the gaps `(edge, g)` and the triangles.
@@ -272,7 +278,7 @@ impl<'p> State<'p> {
     pub fn route_conn(&mut self, c: &Conn, wt: &InitWeights, scale: f64) -> Option<(WireId, usize)> {
         let (path, tris) = self.search(c, wt, scale)?;
         let over = (0..path.len())
-            .filter(|&j| self.overflows(path[j].0, tris[j], tris[j + 1], c.net, c.w + c.s, c.s))
+            .filter(|&j| self.overflows(path[j].0, path[j].1, tris[j], tris[j + 1], c.net, c.w, c.s))
             .count();
         let wire = Wire {
             net: c.net,

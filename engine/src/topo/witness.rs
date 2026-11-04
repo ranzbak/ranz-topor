@@ -11,6 +11,7 @@
 //! and O(pieces · cuts per cell) to check.
 
 use super::board::{self, Board, BuildOpts};
+use super::demand::{self, Bound, Item};
 use super::layers::{self, LayerParams};
 use super::state::{interleave, point_in_poly, EdgeId, ObsId, State, TriId, VertId, Wire};
 use crate::geom::quant::TrackPrim;
@@ -683,6 +684,17 @@ fn nearest_corner(b: &Board, t: TriId, p: Vec2) -> VertId {
 
 // ---------------------------------------------------------------- results
 
+/// One pass of a violated cut, for the report.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct PassRec {
+    pub net: i32,
+    pub layer: usize,
+    pub width_mm: f64,
+    pub clear_mm: f64,
+    /// Position across the cut from its first end (mm).
+    pub pos_mm: f64,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Violation {
     pub id: usize,
@@ -701,22 +713,17 @@ pub struct Violation {
     pub hand_drc: bool,
     /// The violated cut (CDT edge or pair cut) in the KiCad frame, nm.
     pub line: Option<[[f64; 2]; 2]>,
-    /// Demand and room under the proposed model (end-specific clearances: pad `required_clearance`,
-    /// board edge `edge_clearance`; room plus the polygon inflation at both ends); `None` for
-    /// checks without that variant.
-    pub fixed: Option<[f64; 2]>,
-    /// The hand copper is closer to an end object than the rule allows (observed gap below
-    /// `required_clearance` / `edge_clearance`): a hand DRC fault that the board's DRC does not
-    /// report (severity ignored or rule exception), not a model error. Deficit in mm.
-    pub hand_below_rule_mm: Option<f64>,
+    /// The passes that make up the demand, ordered across the cut.
+    pub passes: Vec<PassRec>,
+    /// The two ends of the cut (pad `REF.number nNET`, `outline`, `free`).
+    pub ends: [String; 2],
+    /// Cut length minus the distance of both ends' vertices from the true copper (mm): the
+    /// copper-to-copper gap. Equal to `have_mm` unless a vertex lies outside its copper.
+    pub true_gap_mm: f64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct CheckCounts {
-    /// Edge-fit and pair-fit violations (outside hand DRC spots) that remain under the proposed model.
-    pub fit_remaining_after_fix: usize,
-    /// Violations where the hand itself is below the rule (see [`Violation::hand_below_rule_mm`]).
-    pub hand_below_rule: usize,
     pub edge_fit: usize,
     pub layer_combo: usize,
     pub allowed: usize,
@@ -811,104 +818,55 @@ struct FPass {
     at: Vec2,
 }
 
-fn near_drc(spots: &[[f64; 2]], p: Vec2, r: f64) -> bool {
-    spots.iter().any(|s| (Vec2 { x: s[0], y: s[1] } - p).len() <= r)
+/// Where the board's own kicad-cli DRC reports a copper fault (math frame, nm): item positions
+/// (pads, vias, zones) and whole hand tracks (the position of a track item is its start point, the
+/// fault can be anywhere along it).
+#[derive(Clone, Debug, Default)]
+pub struct Spots {
+    pub points: Vec<[f64; 2]>,
+    /// Flagged hand tracks: `(a, b, width)`.
+    pub tracks: Vec<(Vec2, Vec2, f64)>,
 }
 
-/// Clearance a track of any of `nets` needs to the object at `v` (pad: `required_clearance`,
-/// board edge: `edge_clearance`) and how far the polygon vertex lies outside its copper (nm).
-fn end_info(b: &Board, m: &BoardModel, v: VertId, l: usize, nets: &[i32], s_max: f64) -> (f64, f64) {
-    let pr = &b.proj;
-    match pr.vkind[v] {
+impl Spots {
+    pub fn len(&self) -> usize {
+        self.points.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
+    /// A point within `r` of a reported position, or on a flagged track.
+    pub fn near(&self, p: Vec2, r: f64) -> bool {
+        self.points.iter().any(|s| (Vec2 { x: s[0], y: s[1] } - p).len() <= r)
+            || self.tracks.iter().any(|&(a, b, w)| (p - seg_point(p, a, b)).len() <= 0.5 * w + 1.0e3)
+    }
+}
+
+fn near_drc(spots: &Spots, p: Vec2, r: f64) -> bool {
+    spots.near(p, r)
+}
+
+/// Name of the object at CDT vertex `v` for the report.
+fn vert_name(b: &Board, m: &BoardModel, v: VertId) -> String {
+    match b.proj.vkind[v] {
+        super::state::VertKind::Outline(o) | super::state::VertKind::Centre(o) => {
+            let pd = &m.pads[b.pad_of[o]];
+            format!("{}.{} n{}", pd.ref_, pd.number, pd.net)
+        }
+        super::state::VertKind::Edge => "outline".into(),
+        super::state::VertKind::Free => "free".into(),
+    }
+}
+
+/// How far (nm) vertex `v` lies outside the copper of its pad (0 for the outline); the true
+/// copper-to-copper gap of a cut is its length plus this at both ends.
+fn vert_outside(b: &Board, m: &BoardModel, v: VertId, l: usize) -> f64 {
+    match b.proj.vkind[v] {
         super::state::VertKind::Outline(o) => {
             let pad = &m.pads[b.pad_of[o]];
-            let lid = b.signal_layers.get(l).copied().unwrap_or(0);
-            let c = nets.iter().map(|&n| m.required_clearance(n, pad)).fold(0.0, f64::max);
-            (c, point_skeleton(pr.pos[v], &m.skeleton(pad, lid)).max(0.0))
+            point_skeleton(b.proj.pos[v], &m.skeleton(pad, b.signal_layers.get(l).copied().unwrap_or(0)))
         }
-        super::state::VertKind::Edge => (m.rules.edge_clearance as f64, 0.0),
-        _ => (s_max, 0.0),
-    }
-}
-
-/// Demand under the proposed model: the widths, the clearance between neighbours of different
-/// nets, and at each end the end's clearance unless the adjacent pass is of the end's own net.
-/// `items` are `(net, width, clearance)` ordered from end 0 to end 1; an end is `(own net, the
-/// clearance a track of a given net needs to it)`.
-fn fixed_need(items: &[(i32, f64, f64)], e0: (Option<i32>, &dyn Fn(i32) -> f64), e1: (Option<i32>, &dyn Fn(i32) -> f64)) -> f64 {
-    let mut need: f64 = items.iter().map(|x| x.1).sum();
-    for w in items.windows(2) {
-        if w[0].0 != w[1].0 {
-            need += w[0].2.max(w[1].2);
-        }
-    }
-    let (first, last) = (items[0], items[items.len() - 1]);
-    if e0.0 != Some(first.0) {
-        need += (e0.1)(first.0);
-    }
-    if e1.0 != Some(last.0) {
-        need += (e1.1)(last.0);
-    }
-    need
-}
-
-fn dist_outline(p: Vec2, segs: &[(Vec2, Vec2)]) -> f64 {
-    segs.iter().map(|&(a, c)| (p - seg_point(p, a, c)).len()).fold(f64::INFINITY, f64::min)
-}
-
-/// Largest shortfall (nm) of the observed gap between a track (centre `at`, width `w`, net) and
-/// the pad / board edge at `end` against its rule; <= 0 when the hand respects the rule.
-#[allow(clippy::too_many_arguments)]
-fn deficit(b: &Board, m: &BoardModel, end: Option<ObsId>, l: usize, at: Vec2, w: f64, net: i32, outline: &[(Vec2, Vec2)]) -> f64 {
-    match end {
-        Some(o) => {
-            let ob = &b.proj.obstacles[o];
-            if ob.net == Some(net) {
-                return f64::NEG_INFINITY;
-            }
-            let pad = &m.pads[b.pad_of[o]];
-            let g = point_skeleton(at, &m.skeleton(pad, b.signal_layers[l])) - 0.5 * w;
-            m.required_clearance(net, pad) - g
-        }
-        None => m.rules.edge_clearance as f64 - (dist_outline(at, outline) - 0.5 * w),
-    }
-}
-
-/// Cause guess for an edge whose demand exceeds its room.
-fn edge_cause(b: &Board, m: &BoardModel, e: EdgeId, l: usize, shortfall: f64) -> String {
-    let pr = &b.proj;
-    let [p, q] = pr.edges[e];
-    let mut infl = 0.0;
-    let mut outline = false;
-    for v in [p, q] {
-        match pr.vkind[v] {
-            super::state::VertKind::Outline(o) => {
-                let pad = &m.pads[b.pad_of[o]];
-                let lid = b.signal_layers.get(l).copied().unwrap_or(0);
-                infl += point_skeleton(pr.pos[v], &m.skeleton(pad, lid)).max(0.0);
-            }
-            super::state::VertKind::Edge => outline = true,
-            _ => {}
-        }
-    }
-    let s = shortfall / MM;
-    let i = infl / MM;
-    let ends: Vec<String> = [p, q]
-        .iter()
-        .map(|&v| match pr.vkind[v] {
-            super::state::VertKind::Outline(o) => {
-                let pd = &m.pads[b.pad_of[o]];
-                format!("{}.{} n{}", pd.ref_, pd.number, pd.net)
-            }
-            super::state::VertKind::Edge => "outline".into(),
-            _ => "free".into(),
-        })
-        .collect();
-    let tag = format!(" [{} | {}]{}", ends[0], ends[1], if outline { " (board edge end)" } else { "" });
-    if shortfall <= infl + 1.0 {
-        format!("pad polygon size: shortfall {s:.3} mm <= octagon inflation {i:.3} mm{tag}")
-    } else {
-        format!("room definition / clearance source: shortfall {s:.3} mm > octagon inflation {i:.3} mm{tag}")
+        _ => 0.0,
     }
 }
 
@@ -954,34 +912,15 @@ pub fn fit_edges(
     m: &BoardModel,
     chains: &[Chain],
     walked: &[Walked],
-    spots: &[[f64; 2]],
+    spots: &Spots,
     o: &WitnessOpts,
 ) -> FitOut {
     let pr = &b.proj;
     let nl = pr.n_layers;
-    let outline = board::outline_segments(m);
     let mut by_edge: BTreeMap<EdgeId, Vec<FPass>> = BTreeMap::new();
     let mut out = FitOut { violations: Vec::new(), tight: 0, edges_checked: 0 };
     let mut seen_allowed: BTreeSet<(EdgeId, usize, i32)> = BTreeSet::new();
-    let push = |out: &mut FitOut, check: &'static str, edge: Option<usize>, layer: u64, nets: Vec<i32>, need: f64, have: f64, at: Vec2, cause: String, line: Option<[Vec2; 2]>, fixed: Option<[f64; 2]>| {
-        let id = out.violations.len();
-        out.violations.push(Violation {
-            id,
-            check,
-            edge,
-            cut: None,
-            layer,
-            nets,
-            need_mm: need / MM,
-            have_mm: have / MM,
-            at: kicad(at),
-            cause,
-            hand_drc: near_drc(spots, at, o.drc_mm * MM),
-            line: line.map(|l| [kicad(l[0]), kicad(l[1])]),
-            fixed: fixed.map(|f| [f[0] / MM, f[1] / MM]),
-            hand_below_rule_mm: None,
-        });
-    };
+    let ends_of = |e: EdgeId| [vert_name(b, m, pr.edges[e][0]), vert_name(b, m, pr.edges[e][1])];
     for (ch, wk) in chains.iter().zip(walked) {
         if wk.err.is_some() && wk.passes.is_empty() {
             continue;
@@ -1001,7 +940,24 @@ pub fn fit_edges(
             if mask >> p.layer & 1 == 0 && seen_allowed.insert((p.edge, p.layer, ch.net)) {
                 let cause = allowed_cause(b, m, [t1, t2], &f);
                 let e = pr.edges[p.edge];
-                push(&mut out, "allowed", Some(p.edge), p.layer as u64, vec![ch.net], p.width, 0.0, p.at, cause, Some([pr.pos[e[0]], pr.pos[e[1]]]), None);
+                let id = out.violations.len();
+                out.violations.push(Violation {
+                    id,
+                    check: "allowed",
+                    edge: Some(p.edge),
+                    cut: None,
+                    layer: p.layer as u64,
+                    nets: vec![ch.net],
+                    need_mm: p.width / MM,
+                    have_mm: 0.0,
+                    at: kicad(p.at),
+                    cause,
+                    hand_drc: near_drc(spots, p.at, o.drc_mm * MM),
+                    line: Some([kicad(pr.pos[e[0]]), kicad(pr.pos[e[1]])]),
+                    passes: vec![PassRec { net: ch.net, layer: p.layer, width_mm: p.width / MM, clear_mm: clear / MM, pos_mm: p.u * (pr.pos[e[1]] - pr.pos[e[0]]).len() / MM }],
+                    ends: ends_of(p.edge),
+                    true_gap_mm: 0.0,
+                });
             }
             by_edge.entry(p.edge).or_default().push(f);
         }
@@ -1009,7 +965,8 @@ pub fn fit_edges(
     let combos: Vec<u64> = if nl <= 4 { (1u64..(1 << nl)).filter(|s| s.count_ones() >= 2).collect() } else { Vec::new() };
     for (&e, ps) in &mut by_edge {
         out.edges_checked += 1;
-        let len = (pr.pos[pr.edges[e][1]] - pr.pos[pr.edges[e][0]]).len();
+        let [vp, vq] = pr.edges[e];
+        let len = (pr.pos[vq] - pr.pos[vp]).len();
         // Dedupe: same net, same layer, within half a width along the edge.
         ps.sort_by(|a, c| a.layer.cmp(&c.layer).then(a.net.cmp(&c.net)).then(a.u.total_cmp(&c.u)));
         let mut d: Vec<FPass> = Vec::new();
@@ -1022,72 +979,43 @@ pub fn fit_edges(
             }
             d.push(*f);
         }
-        // Room on layer `l` for the passes on it (a pass of a net that owns an end is unlimited).
-        let rooms = |l: usize| {
-            let on = d.iter().filter(|f| f.layer == l);
-            let r = on.map(|f| pr.room_for(e, l, f.net)).fold(f64::INFINITY, f64::min);
-            if r.is_finite() || d.iter().any(|f| f.layer == l) {
-                r
-            } else {
-                pr.room[e][l]
-            }
-        };
-        let at = d[0].at;
-        let line = [pr.pos[pr.edges[e][0]], pr.pos[pr.edges[e][1]]];
+        let line = [pr.pos[vp], pr.pos[vq]];
+                let item = |f: &FPass| Item { net: f.net, w: f.width, s: f.clear };
         for l in 0..nl {
-            let on: Vec<&FPass> = d.iter().filter(|f| f.layer == l).collect();
+            let mut on: Vec<&FPass> = d.iter().filter(|f| f.layer == l).collect();
             if on.is_empty() {
                 continue;
             }
-            let need: f64 = on.iter().map(|f| f.width + f.clear).sum::<f64>() + on.iter().map(|f| f.clear).fold(0.0, f64::max);
-            let have = rooms(l);
-            if have.is_finite() {
-                if have - need < o.tight_mm * MM {
-                    out.tight += on.len();
-                }
-                if need > have + TOL {
-                    let nets: Vec<i32> = on.iter().map(|f| f.net).collect();
-                    let cause = edge_cause(b, m, e, l, need - have);
-                    let s_max = on.iter().map(|f| f.clear).fold(0.0, f64::max);
-                    let (cp, ip) = end_info(b, m, pr.edges[e][0], l, &nets, s_max);
-                    let (cq, iq) = end_info(b, m, pr.edges[e][1], l, &nets, s_max);
-                    let _ = (cp, cq);
-                    let mut ord: Vec<&FPass> = on.clone();
-                    ord.sort_by(|a, c| a.u.total_cmp(&c.u));
-                    let items: Vec<(i32, f64, f64)> = ord.iter().map(|f| (f.net, f.width, f.clear)).collect();
-                    let end = |v: VertId| -> (Option<i32>, Box<dyn Fn(i32) -> f64 + '_>) {
-                        match pr.vkind[v] {
-                            super::state::VertKind::Outline(o) => {
-                                let pad = &m.pads[b.pad_of[o]];
-                                (Some(pad.net), Box::new(move |n| m.required_clearance(n, pad)))
-                            }
-                            super::state::VertKind::Edge => (None, Box::new(|_| m.rules.edge_clearance as f64)),
-                            _ => (None, Box::new(move |_| s_max)),
-                        }
-                    };
-                    let (o0, f0) = end(pr.edges[e][0]);
-                    let (o1, f1) = end(pr.edges[e][1]);
-                    let need_f = fixed_need(&items, (o0, &*f0), (o1, &*f1));
-                    // The worst gap of a pass to either end object against its rule.
-                    let mut worst = f64::NEG_INFINITY;
-                    for f in &on {
-                        for v in pr.edges[e] {
-                            let end = match pr.vkind[v] {
-                                super::state::VertKind::Outline(o) => Some(Some(o)),
-                                super::state::VertKind::Edge => Some(None),
-                                _ => None,
-                            };
-                            if let Some(end) = end {
-                                worst = worst.max(deficit(b, m, end, l, f.at, f.width, f.net, &outline));
-                            }
-                        }
-                    }
-                    push(&mut out, "edge_fit", Some(e), l as u64, nets, need, have, on[0].at, cause, Some(line), Some([need_f, have + ip + iq]));
-                    if worst > 2000.0 {
-                        let v = out.violations.last_mut().expect("just pushed");
-                        v.hand_below_rule_mm = Some(worst / MM);
-                    }
-                }
+            on.sort_by(|a, c| a.u.total_cmp(&c.u));
+            let items: Vec<Item> = on.iter().map(|f| item(f)).collect();
+            let need = pr.edge_demand(e, &items);
+            let have = pr.room[e][l];
+            if !have.is_finite() {
+                continue;
+            }
+            if have - need < o.tight_mm * MM {
+                out.tight += on.len();
+            }
+            if need > have + TOL {
+                let id = out.violations.len();
+                let at = on[0].at;
+                out.violations.push(Violation {
+                    id,
+                    check: "edge_fit",
+                    edge: Some(e),
+                    cut: None,
+                    layer: l as u64,
+                    nets: on.iter().map(|f| f.net).collect(),
+                    need_mm: need / MM,
+                    have_mm: have / MM,
+                    at: kicad(at),
+                    cause: String::new(),
+                    hand_drc: near_drc(spots, at, o.drc_mm * MM) || on.iter().any(|f| near_drc(spots, f.at, o.drc_mm * MM)),
+                    line: Some([kicad(line[0]), kicad(line[1])]),
+                    passes: on.iter().map(|f| PassRec { net: f.net, layer: l, width_mm: f.width / MM, clear_mm: f.clear / MM, pos_mm: f.u * len / MM }).collect(),
+                    ends: ends_of(e),
+                    true_gap_mm: (have + vert_outside(b, m, vp, l) + vert_outside(b, m, vq, l)) / MM,
+                });
             }
         }
         for &s in &combos {
@@ -1095,15 +1023,31 @@ pub fn fit_edges(
             if inn.is_empty() {
                 continue;
             }
-            let have: f64 = (0..nl).filter(|&l| s >> l & 1 == 1).map(&rooms).sum();
-            let need: f64 = inn.iter().map(|f| f.width + f.clear).sum::<f64>() + inn.iter().map(|f| f.clear).fold(0.0, f64::max);
+            let have: f64 = (0..nl).filter(|&l| s >> l & 1 == 1).map(|l| pr.room[e][l]).sum();
+            let items: Vec<Item> = inn.iter().map(|f| item(f)).collect();
+            let need = demand::need_lower(&items, s.count_ones() as usize);
             // A combination that holds the passes of one layer only is the per-layer check.
             let layers_used: BTreeSet<usize> = inn.iter().map(|f| f.layer).collect();
             let multi = layers_used.len() >= 2 || inn.iter().any(|f| f.mask.count_ones() >= 2);
             if multi && have.is_finite() && need > have + TOL {
-                let nets: Vec<i32> = inn.iter().map(|f| f.net).collect();
-                let cause = edge_cause(b, m, e, 0, need - have);
-                push(&mut out, "layer_combo", Some(e), s, nets, need, have, at, cause, Some(line), None);
+                let id = out.violations.len();
+                out.violations.push(Violation {
+                    id,
+                    check: "layer_combo",
+                    edge: Some(e),
+                    cut: None,
+                    layer: s,
+                    nets: inn.iter().map(|f| f.net).collect(),
+                    need_mm: need / MM,
+                    have_mm: have / MM,
+                    at: kicad(d[0].at),
+                    cause: String::new(),
+                    hand_drc: near_drc(spots, d[0].at, o.drc_mm * MM) || inn.iter().any(|f| near_drc(spots, f.at, o.drc_mm * MM)),
+                    line: Some([kicad(line[0]), kicad(line[1])]),
+                    passes: inn.iter().map(|f| PassRec { net: f.net, layer: f.layer, width_mm: f.width / MM, clear_mm: f.clear / MM, pos_mm: f.u * len / MM }).collect(),
+                    ends: ends_of(e),
+                    true_gap_mm: have / MM,
+                });
             }
         }
     }
@@ -1264,7 +1208,7 @@ pub fn check_cuts(
     m: &BoardModel,
     cuts: &[Cut],
     traces: &[Trace],
-    spots: &[[f64; 2]],
+    spots: &Spots,
     drc_r: f64,
     id0: usize,
 ) -> PairOut {
@@ -1330,60 +1274,38 @@ pub fn check_cuts(
             }
             d.push(h);
         }
+        let bound = |k: usize| match c.ends[k] {
+            Some(o) if pr.obstacles[o].bare => Bound::Hole { clear: pr.obstacles[o].clear },
+            Some(o) => Bound::Pad { net: pr.obstacles[o].net, clear: pr.obstacles[o].clear },
+            None => Bound::Edge { clear: pr.edge_clear },
+        };
+        let name = |k: usize| match c.ends[k] {
+            Some(o) => {
+                let pd = &m.pads[b.pad_of[o]];
+                format!("{}.{} n{}", pd.ref_, pd.number, pd.net)
+            }
+            None => "outline".into(),
+        };
         for l in 0..pr.n_layers {
-            let on: Vec<_> = d.iter().filter(|h| h.0 == l).collect();
+            let mut on: Vec<&Hit> = d.iter().filter(|h| h.0 == l).collect();
             if on.is_empty() {
                 continue;
             }
-            // A pass of a net that owns an end is unlimited for itself; the others still compete.
-            let own = |net: i32| c.ends.iter().flatten().any(|&o| pr.obstacles[o].net == Some(net));
-            if on.iter().all(|h| own(h.1)) {
-                continue;
-            }
-            let need: f64 = on.iter().map(|h| h.2 + h.3).sum::<f64>() + on.iter().map(|h| h.3).fold(0.0, f64::max);
+            on.sort_by(|a, c| a.4.total_cmp(&c.4));
+            let items: Vec<Item> = on.iter().map(|h| Item { net: h.1, w: h.2, s: h.3 }).collect();
+            let need = demand::need_in(pr.regime_at((c.a + c.b) * 0.5), &items, bound(0), bound(1));
             if need > len + TOL {
                 let at = on[0].5;
-                let nets: Vec<i32> = on.iter().map(|h| h.1).collect();
-                let s_max = on.iter().map(|h| h.3).fold(0.0, f64::max);
-                let mut ci_sum = 0.0;
-                let mut infl = 0.0;
-                for (k, p) in [c.a, c.b].iter().enumerate() {
-                    match c.ends[k] {
-                        Some(o) => {
-                            let pad = &m.pads[b.pad_of[o]];
-                            ci_sum += nets.iter().map(|&n| m.required_clearance(n, pad)).fold(0.0, f64::max);
-                            infl += point_skeleton(*p, &m.skeleton(pad, b.signal_layers[l])).max(0.0);
-                        }
-                        None => ci_sum += m.rules.edge_clearance as f64,
-                    }
-                }
-                let _ = (ci_sum, s_max);
-                let mut ord: Vec<&&Hit> = on.iter().collect();
-                ord.sort_by(|a, c| a.4.total_cmp(&c.4));
-                let items: Vec<(i32, f64, f64)> = ord.iter().map(|h| (h.1, h.2, h.3)).collect();
-                let end = |k: usize| -> (Option<i32>, Box<dyn Fn(i32) -> f64 + '_>) {
-                    match c.ends[k] {
-                        Some(o) => {
-                            let pad = &m.pads[b.pad_of[o]];
-                            (Some(pad.net), Box::new(move |n| m.required_clearance(n, pad)))
-                        }
-                        None => (None, Box::new(|_| m.rules.edge_clearance as f64)),
-                    }
-                };
-                let (o0, f0) = end(0);
-                let (o1, f1) = end(1);
-                let need_f = fixed_need(&items, (o0, &*f0), (o1, &*f1));
-                let mut worst = f64::NEG_INFINITY;
-                for h in &on {
-                    for (k, end) in c.ends.iter().enumerate() {
-                        let w = match end {
-                            Some(o) => deficit(b, m, Some(*o), l, h.5, h.2, h.1, &[]),
-                            None => m.rules.edge_clearance as f64 - ((h.5 - [c.a, c.b][k]).len() - 0.5 * h.2),
-                        };
-                        worst = worst.max(w);
-                    }
-                }
                 let id = id0 + out.violations.len();
+                let outside: f64 = c
+                    .ends
+                    .iter()
+                    .zip([c.a, c.b])
+                    .map(|(e, p)| match e {
+                        Some(o) => point_skeleton(p, &m.skeleton(&m.pads[b.pad_of[*o]], b.signal_layers[l])),
+                        None => 0.0,
+                    })
+                    .sum();
                 out.violations.push(Violation {
                     id,
                     check: "pair_fit",
@@ -1395,47 +1317,16 @@ pub fn check_cuts(
                     have_mm: len / MM,
                     at: kicad(at),
                     cause: String::new(),
-                    hand_drc: near_drc(spots, at, drc_r),
+                    hand_drc: near_drc(spots, at, drc_r) || on.iter().any(|h| near_drc(spots, h.5, drc_r)),
                     line: Some([kicad(c.a), kicad(c.b)]),
-                    fixed: Some([need_f / MM, (len + infl) / MM]),
-                    hand_below_rule_mm: (worst > 2000.0).then_some(worst / MM),
+                    passes: on.iter().map(|h| PassRec { net: h.1, layer: l, width_mm: h.2 / MM, clear_mm: h.3 / MM, pos_mm: h.4 / MM }).collect(),
+                    ends: [name(0), name(1)],
+                    true_gap_mm: (len + outside) / MM,
                 });
             }
         }
     }
     out
-}
-
-/// Cause guess for a pair-cut violation: the polygon inflation of both ends against the shortfall.
-pub fn pair_cause(b: &Board, m: &BoardModel, c: &Cut, layer: usize, shortfall: f64) -> String {
-    let pr = &b.proj;
-    let mut infl = 0.0;
-    for (k, p) in [c.a, c.b].iter().enumerate() {
-        if let Some(o) = c.ends[k] {
-            let pad = &m.pads[b.pad_of[o]];
-            let lid = b.signal_layers[layer];
-            infl += point_skeleton(*p, &m.skeleton(pad, lid)).max(0.0);
-        }
-    }
-    let _ = pr;
-    let (s, i) = (shortfall / MM, infl / MM);
-    let ends: Vec<String> = c
-        .ends
-        .iter()
-        .map(|e| match e {
-            Some(o) => {
-                let pd = &m.pads[b.pad_of[*o]];
-                format!("{}.{} n{}", pd.ref_, pd.number, pd.net)
-            }
-            None => "outline".into(),
-        })
-        .collect();
-    let tag = format!(" [{} | {}]", ends[0], ends[1]);
-    if shortfall <= infl + 1.0 {
-        format!("pad polygon size: shortfall {s:.3} mm <= polygon inflation at the cut ends {i:.3} mm{tag}")
-    } else {
-        format!("room definition / clearance source: shortfall {s:.3} mm > polygon inflation {i:.3} mm{tag}")
-    }
 }
 
 // ---------------------------------------------------------------- topology
@@ -1537,7 +1428,7 @@ pub fn crossings_report(
     chains: &[Chain],
     walked: &[Walked],
     chain_of: &[usize],
-    spots: &[[f64; 2]],
+    spots: &Spots,
     drc_r: f64,
     vid0: usize,
 ) -> (usize, Vec<Violation>, usize, Vec<usize>, usize) {
@@ -1608,8 +1499,9 @@ pub fn crossings_report(
                             },
                             hand_drc: near_drc(spots, c, drc_r),
                             line: None,
-                            fixed: None,
-                            hand_below_rule_mm: None,
+                            passes: Vec::new(),
+                            ends: [String::new(), String::new()],
+                            true_gap_mm: 0.0,
                         });
                     }
                     (Some(_), Some(_)) => {}
@@ -1710,7 +1602,7 @@ fn g0_traces(m: &BoardModel, g0: &G0In) -> (Vec<Trace>, f64) {
 }
 
 /// The full R0 witness on `hand`. `spots`: hand DRC violations (math frame, nm).
-pub fn run(hand: &BoardModel, g0: Option<&G0In>, spots: &[[f64; 2]], o: &WitnessOpts) -> Result<Witness, String> {
+pub fn run(hand: &BoardModel, g0: Option<&G0In>, spots: &Spots, o: &WitnessOpts) -> Result<Witness, String> {
     let t0 = Instant::now();
     let b = board::build(hand, &o.build)?;
     let loc = Locator::new(&b);
@@ -1736,7 +1628,7 @@ pub fn run(hand: &BoardModel, g0: Option<&G0In>, spots: &[[f64; 2]], o: &Witness
         nonsignal_len_mm: other.into_iter().map(|(k, v)| (k, v / MM)).collect(),
         degenerate: walked.iter().map(|w| w.degenerate).sum(),
         passes: walked.iter().map(|w| w.passes.iter().filter(|p| !p.virt).count()).sum(),
-        hand_drc_spots: spots.len(),
+        hand_drc_spots: spots.points.len(),
         hand_vias: hand.vias.len(),
         hand_signal_vias: hand.vias.iter().filter(|v| !b.poured.contains(&v.net)).count(),
         build_s,
@@ -1751,11 +1643,7 @@ pub fn run(hand: &BoardModel, g0: Option<&G0In>, spots: &[[f64; 2]], o: &Witness
     let cuts = pair_cuts(&b, hand, o.pair_mm);
     s.pair_cuts = cuts.len();
     let hand_tr = chain_traces(hand, &chs);
-    let mut po = check_cuts(&b, hand, &cuts, &hand_tr, spots, o.drc_mm * MM, violations.len());
-    for v in &mut po.violations {
-        let c = &cuts[v.cut.expect("cut")];
-        v.cause = pair_cause(&b, hand, c, v.layer as usize, (v.need_mm - v.have_mm) * MM);
-    }
+    let po = check_cuts(&b, hand, &cuts, &hand_tr, spots, o.drc_mm * MM, violations.len());
     s.pair_cuts_with_traffic = po.with_traffic;
     violations.extend(po.violations);
     if let Some(g) = g0 {
@@ -1797,15 +1685,6 @@ pub fn run(hand: &BoardModel, g0: Option<&G0In>, spots: &[[f64; 2]], o: &Witness
         if v.hand_drc {
             c.hand_drc += 1;
             continue;
-        }
-        if v.hand_below_rule_mm.is_some() {
-            c.hand_below_rule += 1;
-            continue;
-        }
-        if let Some(f) = v.fixed {
-            if f[0] > f[1] + 1e-6 {
-                c.fit_remaining_after_fix += 1;
-            }
         }
         match v.check {
             "edge_fit" => c.edge_fit += 1,

@@ -1,7 +1,7 @@
 //! R0 witness: known-answer tests on tiny synthetic boards (hand traces on a 10 x 10 mm board).
 
 use topor_engine::model::BoardModel;
-use topor_engine::topo::witness::{run, Witness, WitnessOpts};
+use topor_engine::topo::witness::{run, Spots, Witness, WitnessOpts};
 
 const MM: f64 = 1e6;
 
@@ -16,12 +16,19 @@ enum Pad {
     Smd(i32, f64, f64, f64, f64),
     /// SMD convex polygon on F, net, centre, corners.
     Poly(i32, (f64, f64), Vec<(f64, f64)>),
+    /// Bare NPTH hole (no copper beyond the drill), x, y, diameter.
+    Hole(f64, f64, f64),
 }
 
 type Track = (i32, u32, f64, (f64, f64), (f64, f64));
 
 /// Two-layer board; tracks are (net, layer id 0 = F / 2 = B, width, a, b) in mm, KiCad frame.
 fn board(pads: &[Pad], tracks: &[Track]) -> BoardModel {
+    board_rules(pads, tracks, "{}")
+}
+
+/// [`board`] with the `rules` object given as JSON.
+fn board_rules(pads: &[Pad], tracks: &[Track], rules: &str) -> BoardModel {
     let c = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
     let outline: Vec<String> = (0..4)
         .map(|i| {
@@ -51,6 +58,13 @@ fn board(pads: &[Pad], tracks: &[Track]) -> BoardModel {
                 p(*y),
                 p(*w),
                 p(*h)
+            ),
+            Pad::Hole(x, y, d) => format!(
+                r#"{{"uuid":"p{i}","ref":"H{i}","number":"","net":0,"attr":"npth","center":[{},{}],"layers":[0,2],
+                   "shapes":{{"0":{{"kind":"circle","d":{d}}},"2":{{"kind":"circle","d":{d}}}}},"drill":{{"w":{d},"h":{d}}}}}"#,
+                p(*x),
+                p(*y),
+                d = p(*d)
             ),
             Pad::Poly(net, ctr, pts) => {
                 let pts: Vec<String> = pts.iter().map(|q| format!("[{},{}]", p(q.0), p(q.1))).collect();
@@ -82,16 +96,17 @@ fn board(pads: &[Pad], tracks: &[Track]) -> BoardModel {
         r#"{{"units":"nm","board":"t",
             "layers":[{{"id":0,"name":"F.Cu","kind":"signal"}},{{"id":2,"name":"B.Cu","kind":"signal"}}],
             "nets":[{{"code":1,"name":"A"}},{{"code":2,"name":"B"}},{{"code":3,"name":"C"}},{{"code":4,"name":"D"}}],
-            "pads":[{}],"kept":[{}],"outline":[{}],"rules":{{}}}}"#,
+            "pads":[{}],"kept":[{}],"outline":[{}],"rules":{}}}"#,
         pads.join(","),
         kept.join(","),
-        outline.join(",")
+        outline.join(","),
+        rules
     );
     BoardModel::from_json(&s).unwrap()
 }
 
 fn witness(m: &BoardModel) -> Witness {
-    let w = run(m, None, &[], &WitnessOpts::default()).unwrap();
+    let w = run(m, None, &Spots::default(), &WitnessOpts::default()).unwrap();
     assert_eq!(w.summary.chains_failed, 0, "every chain maps");
     assert_eq!(w.summary.state_check, "ok");
     w
@@ -182,4 +197,67 @@ fn a_tee_splits_the_net_into_three_chains() {
         ],
     ));
     assert_eq!(w.chains.len(), 3);
+}
+
+fn count(w: &Witness, check: &str) -> usize {
+    w.violations.iter().filter(|v| v.check == check).count()
+}
+
+/// Two SMD pads of net 1 with a 0.2 mm gap and a 0.8 mm net-1 track laid over both.
+#[test]
+fn a_track_of_the_pads_own_net_may_lie_on_them() {
+    let w = witness(&board(
+        &[
+            Pad::Smd(1, 4.0, 5.0, 1.8, 1.0),
+            Pad::Smd(1, 6.0, 5.0, 1.8, 1.0),
+            Pad::Th(1, 1.0, 5.0, 0.6),
+            Pad::Th(1, 9.0, 5.0, 0.6),
+        ],
+        &[(1, 0, 0.8, (1.0, 5.0), (9.0, 5.0))],
+    ));
+    assert!(w.violations.is_empty(), "{:?}", w.violations);
+}
+
+/// A 0.2 mm track between a bare NPTH hole (hole clearance 0.1) and an SMD pad (clearance 0.2)
+/// needs 0.2 + 0.1 + 0.2 = 0.5 mm, not 0.6 mm (the net class would not charge a copperless hole).
+fn hole_gap(gap: f64) -> BoardModel {
+    let top = 3.5; // hole at y 3, d 1
+    let pad_y = top + gap + 1.0; // 2 mm tall pad
+    // The track sits 0.1 from the hole.
+    board_rules(
+        &[Pad::Hole(5.0, 3.0, 1.0), Pad::Smd(3, 5.0, pad_y, 2.0, 2.0), Pad::Th(1, 1.0, top + 0.2, 0.3), Pad::Th(1, 9.0, top + 0.2, 0.3)],
+        &[(1, 0, 0.2, (1.0, top + 0.2), (9.0, top + 0.2))],
+        r#"{"hole_clearance":100000,"min_clearance":100000,"default":{"clearance":200000,"width":200000}}"#,
+    )
+}
+
+#[test]
+fn a_bare_hole_charges_the_hole_clearance_only() {
+    let ok = witness(&hole_gap(0.55));
+    assert_eq!((count(&ok, "edge_fit"), count(&ok, "pair_fit")), (0, 0), "{:?}", ok.violations);
+    let bad = witness(&hole_gap(0.45));
+    assert_eq!(count(&bad, "pair_fit"), 1, "{:?}", bad.violations);
+}
+
+/// A courtyard rule replaces the clearance inside its polygon: the 0.9 mm gap of
+/// `narrowing_the_gap...` fits with 0.1 mm (0.2 + 0.2 + 0.1 + 0.1 + 0.1), not with 0.2 mm.
+#[test]
+fn a_courtyard_clearance_rule_relaxes_the_demand() {
+    let region = |cl: i64| {
+        format!(
+            r#"{{"clearance_regions":[{{"name":"neck","ref":"U1","clearance":{cl},"poly":[[0,0],[10000000,0],[10000000,10000000],[0,10000000]]}}]}}"#
+        )
+    };
+    let m = gap(0.9);
+    let mk = |cl: i64| {
+        let mut m = m.clone();
+        let r: topor_engine::model::Rules = serde_json::from_str(&region(cl)).unwrap();
+        m.rules.clearance_regions = r.clearance_regions;
+        for r in &mut m.rules.clearance_regions {
+            r.poly.iter_mut().for_each(topor_engine::model::Pt::flip);
+        }
+        m
+    };
+    assert!(witness(&mk(100_000)).violations.is_empty());
+    assert_eq!(count(&witness(&mk(200_000)), "pair_fit"), 1);
 }

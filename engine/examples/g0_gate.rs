@@ -1,7 +1,7 @@
 //! G0 flat-plane gate on one board:
 //!
 //!     cargo run --release --example g0_gate -- <input.json> [<hand.json>] [--out g0.json]
-//!         [--cross MM] [--via MM] [--steiner MM] [--forced MM] [--smd-over MM]
+//!         [--cross MM] [--via MM] [--steiner MM] [--round-steps N] [--forced MM] [--smd-over MM]
 //!
 //! `input.json` is the board model with tracks and vias removed, `hand.json` the untouched board
 //! (both from `harness.g0 export`). Prints the metrics; `--out` writes the JSON that
@@ -29,6 +29,7 @@ fn main() {
             "--forced" => o.init.forced_layer_mm = val(i).parse().expect("--forced MM"),
             "--smd-over" => o.init.smd_over_mm = val(i).parse().expect("--smd-over MM"),
             "--via" => o.layers.via_mm = val(i).parse().expect("--via MM"),
+            "--round-steps" => o.build.round_steps = val(i).parse().expect("--round-steps N"),
             "--steiner" => o.build.steiner_mm = val(i).parse().expect("--steiner MM"),
             a => {
                 pos.push(a.to_string());

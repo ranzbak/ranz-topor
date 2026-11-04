@@ -31,16 +31,23 @@ def export(src: str, out_dir: Path) -> tuple[Path, Path]:
     cp = copy_project(pcb, out_dir / f"{name}-work")
     b = load_board(cp)
     dru = cp.dru.read_text() if cp.dru is not None else None
-    rules = resolve_rules(b, dru_text=dru, widths_before=record_widths(b))
+    widths = record_widths(b)
+    rules = resolve_rules(b, dru_text=dru, widths_before=widths)
     model = export_model(b, rules, name=name, dru_text=dru)
+    # The hand reference carries the board's own rules (netclasses, design settings, .kicad_dru),
+    # NOT raised to the fab profile: the hand copper was DRC-checked against those, so a witness
+    # test against the floored rules would report the profile's capability limit as a model error.
+    hand_rules = resolve_rules(b, dru_text=dru, widths_before=widths, apply_fab_floors=False)
+    hand_model = export_model(b, hand_rules, name=name, dru_text=dru)
     # A copper layer with a pour and no track is a plane (qmtech In1/In2 are declared "signal"
     # in the pcb): not routable, as the plugin's plane detection decides for the real run.
-    tracked = {k["layer"] for k in model["kept"]}
-    poured = {l for p in model["pours"] for l in p["layers"]}
-    for l in model["layers"]:
-        if l["routable"] and l["id"] in poured and l["id"] not in tracked:
-            l["routable"] = False
-    hand = write_model_json(model, out_dir / f"{name}--hand.json")
+    for mdl in (model, hand_model):
+        tracked = {k["layer"] for k in mdl["kept"]}
+        poured = {l for p in mdl["pours"] for l in p["layers"]}
+        for l in mdl["layers"]:
+            if l["routable"] and l["id"] in poured and l["id"] not in tracked:
+                l["routable"] = False
+    hand = write_model_json(hand_model, out_dir / f"{name}--hand.json")
     # The ripped copy: every track and via removed (pcbnew's SWIG objects are unreliable after
     # Remove(), so this is done on the exported model rather than on the board).
     model = {**model, "kept": [], "vias": [], "dangling_ends": []}

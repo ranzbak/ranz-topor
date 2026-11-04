@@ -17,6 +17,7 @@
 //! transform keeps min f unchanged. Complexity: the reductions are O((N + M) · rounds) with
 //! BTreeMap adjacency (deterministic); the remainder search is O(2^R · M) or O(restarts · R · M).
 
+use super::demand::Item;
 use super::state::{State, TriId, ViaSlot, WireId};
 use crate::geom::Vec2;
 use rand::{Rng, SeedableRng};
@@ -515,7 +516,7 @@ pub fn assign(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
             if k < n {
                 let e = st.passes[wi.passes[k]].edge;
                 let fits: Vec<usize> =
-                    (0..pr.n_layers).filter(|&l| pr.room_for(e, l, wi.net) >= wi.w + 2.0 * wi.s).collect();
+                    (0..pr.n_layers).filter(|&l| pr.fits_alone(e, l, Item { net: wi.net, w: wi.w, s: wi.s })).collect();
                 if let [l] = fits[..] {
                     here.push(Event { node: 0, pi: l as u8, k, s: 1.0 });
                 }

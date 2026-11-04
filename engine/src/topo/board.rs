@@ -22,11 +22,14 @@ pub struct BuildOpts {
     pub steiner_clear_mm: f64,
     /// Obstacle vertices closer than this to the outline (mm) split it at their foot points.
     pub edge_feet_mm: f64,
+    /// Vertices per full turn of a round pad / rounded corner (see [`skel_poly`]); 16 keeps every
+    /// polygon within 1.9 % of the radius of the copper, 8 halves the triangles (7.6 %).
+    pub round_steps: usize,
 }
 
 impl Default for BuildOpts {
     fn default() -> Self {
-        BuildOpts { steiner_mm: 2.0, steiner_clear_mm: 0.6, edge_feet_mm: 3.0 }
+        BuildOpts { steiner_mm: 2.0, steiner_clear_mm: 0.6, edge_feet_mm: 3.0, round_steps: 16 }
     }
 }
 
@@ -65,8 +68,13 @@ fn hull(mut p: Vec<Vec2>) -> Vec<Vec2> {
     h
 }
 
-/// Polygon containing the skeleton (radius enlarged so the octagon holds the circle).
-fn skel_poly(sk: &Skeleton) -> Vec<Vec2> {
+/// Vertices on the circle of a round copper shape (`BuildOpts::round_steps` per full turn, default
+/// 16), so the polygon lies inside the true copper (sagitta `r (1 - cos(pi/steps))`, 1.9 % of the
+/// radius) and every CDT cut ends on real copper, not on an inflated hull.
+/// Polygon of the pad copper: the hull of the skeleton's base points, each replaced by a 16-gon
+/// whose vertices lie on the circle of the skeleton radius (a rectangle stays exact, a rounded
+/// corner or a circle is the 16-gon).
+fn skel_poly(sk: &Skeleton, steps: usize) -> Vec<Vec2> {
     let (base, r) = match sk {
         Skeleton::Point { p, r } => (vec![*p], *r),
         Skeleton::Seg { s, r } => (vec![s.a, s.b], *r),
@@ -75,15 +83,25 @@ fn skel_poly(sk: &Skeleton) -> Vec<Vec2> {
     if r <= 0.0 {
         return hull(base);
     }
-    let eighth = std::f64::consts::PI / 8.0;
-    let rr = r / eighth.cos();
-    let oct: Vec<Vec2> = (0..8)
+    let ring: Vec<Vec2> = (0..steps)
         .map(|i| {
-            let a = eighth + i as f64 * 2.0 * eighth;
-            Vec2 { x: rr * a.cos(), y: rr * a.sin() }
+            let a = i as f64 * 2.0 * std::f64::consts::PI / steps as f64;
+            Vec2 { x: r * a.cos(), y: r * a.sin() }
         })
         .collect();
-    hull(base.iter().flat_map(|&b| oct.iter().map(move |&o| b + o)).collect())
+    hull(base.iter().flat_map(|&b| ring.iter().map(move |&o| b + o)).collect())
+}
+
+/// An NPTH pad whose copper shape lies within its drill: a bare hole without copper.
+fn bare_hole(pad: &crate::model::Pad) -> bool {
+    use crate::model::PadShape;
+    let Some(d) = pad.drill.filter(|_| pad.attr == PadAttr::Npth) else { return false };
+    let (dw, dh) = (d.w, d.h);
+    pad.shapes.values().all(|sh| match *sh {
+        PadShape::Circle { d: c } => c <= dw.max(dh) + 1000,
+        PadShape::Rect { w, h } | PadShape::RoundRect { w, h, .. } | PadShape::Oval { w, h } => w <= dw + 1000 && h <= dh + 1000,
+        PadShape::Poly { .. } => false,
+    })
 }
 
 /// The board outline as segments (arcs split to 0.05 mm sagitta).
@@ -137,10 +155,10 @@ pub fn build(m: &BoardModel, o: &BuildOpts) -> Result<Board, String> {
         }
         let c = pad.center.to_vec2();
         let poly = match signal_layers.iter().find(|id| pad.layers.contains(id)) {
-            Some(&l) => skel_poly(&m.skeleton(pad, l)),
+            Some(&l) => skel_poly(&m.skeleton(pad, l), o.round_steps.max(4)),
             None => {
                 let d = pad.drill.map(|d| d.w.max(d.h)).unwrap_or(0) as f64;
-                skel_poly(&Skeleton::Point { p: c, r: 0.5 * d })
+                skel_poly(&Skeleton::Point { p: c, r: 0.5 * d }, o.round_steps.max(4))
             }
         };
         if poly.len() < 3 {
@@ -154,6 +172,18 @@ pub fn build(m: &BoardModel, o: &BuildOpts) -> Result<Board, String> {
             layers: if drilled { LayerMask::all(n) } else { mask },
             drilled,
             net: (pad.net > 0).then_some(pad.net),
+            // `required_clearance` of a pad with the item's own net clearance left out (the
+            // demand model takes the larger of the two).
+            bare: bare_hole(pad),
+            clear: if bare_hole(pad) {
+                // No copper, only a hole: KiCad charges the hole clearance, not the net's.
+                (pad.local_clearance.unwrap_or(0)).max(m.rules.hole_clearance) as f64
+            } else {
+                (m.rules.net_rule(pad.net).clearance)
+                    .max(pad.local_clearance.unwrap_or(0))
+                    .max(m.rules.min_clearance)
+                    .max(m.npth_hole_clearance(pad)) as f64
+            },
         });
     }
     // Centres first, so a coincident vertex keeps the terminal kind.
@@ -226,7 +256,9 @@ pub fn build(m: &BoardModel, o: &BuildOpts) -> Result<Board, String> {
             y += step;
         }
     }
-    let proj = Projection::build(n, obstacles, &points, &cons, inside)?;
+    let mut proj = Projection::build(n, obstacles, &points, &cons, inside)?;
+    proj.edge_clear = m.rules.edge_clearance as f64;
+    proj.regions = m.rules.clearance_regions.iter().map(|r| (r.poly.iter().map(|p| p.to_vec2()).collect(), r.clearance as f64)).collect();
     let mut centre = vec![None; proj.obstacles.len()];
     for (v, k) in proj.vkind.iter().enumerate() {
         if let VertKind::Centre(o) = *k {

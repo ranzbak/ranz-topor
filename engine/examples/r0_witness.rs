@@ -10,24 +10,54 @@
 use topor_engine::geom::Vec2;
 use topor_engine::model::BoardModel;
 use topor_engine::topo::stats;
-use topor_engine::topo::witness::{run, G0In, WitnessOpts};
+use topor_engine::topo::witness::{run, G0In, Spots, WitnessOpts};
 
 const CLEARANCE_TYPES: [&str; 8] = [
     "clearance", "shorting_items", "tracks_crossing", "hole_clearance", "copper_edge_clearance",
     "track_width", "via_diameter", "annular_width",
 ];
 
-/// Positions (math frame, nm) of the copper-geometry violations of a KiCad DRC json.
-fn drc_spots(path: &str) -> Vec<[f64; 2]> {
+/// Length (mm) in a DRC item description such as "Track [GND] on F.Cu, length 3,2500 mm".
+fn desc_length(d: &str) -> Option<f64> {
+    let t = d.split("length ").nth(1)?;
+    t.split(" mm").next()?.replace(',', ".").trim().parse().ok()
+}
+
+/// Positions (math frame, nm) of the copper-geometry violations of a KiCad DRC json. The position
+/// of a track item is its start point, so a track item is expanded to the whole hand track (as segments):
+/// the violation can be anywhere along it.
+fn drc_spots(path: &str, m: &BoardModel) -> Spots {
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).expect("drc json")).expect("drc json");
-    let mut out = Vec::new();
+    let mut out = Spots::default();
     for x in v["violations"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
         if !x["type"].as_str().is_some_and(|t| CLEARANCE_TYPES.contains(&t)) {
             continue;
         }
         for it in x["items"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
-            if let (Some(px), Some(py)) = (it["pos"]["x"].as_f64(), it["pos"]["y"].as_f64()) {
-                out.push([px * 1e6, -py * 1e6]);
+            let (Some(px), Some(py)) = (it["pos"]["x"].as_f64(), it["pos"]["y"].as_f64()) else { continue };
+            let p = Vec2 { x: px * 1e6, y: -py * 1e6 };
+            out.points.push([p.x, p.y]);
+            let desc = it["description"].as_str().unwrap_or("");
+            if !desc.starts_with("Track") {
+                continue;
+            }
+            let len = desc_length(desc).unwrap_or(0.0);
+            for k in &m.kept {
+                if let topor_engine::geom::quant::TrackPrim::Seg { a, b } = k.prim {
+                    let (a, b) = (a.to_f64(), b.to_f64());
+                    if ((a - p).len() < 2e3 || (b - p).len() < 2e3) && ((b - a).len() / 1e6 - len).abs() < 2e-3 {
+                        out.tracks.push((a, b, k.width as f64));
+                    }
+                } else if let topor_engine::geom::quant::TrackPrim::Arc { start, mid, end } = k.prim {
+                    // The arc length is not known from the item: match the arc by its start / end.
+                    if (start.to_f64() - p).len() < 2e3 || (end.to_f64() - p).len() < 2e3 {
+                        if let Some(arc) = topor_engine::geom::Arc::from_three_points(start.to_f64(), mid.to_f64(), end.to_f64()) {
+                            for sg in arc.split_sagitta(0.05e6) {
+                                out.tracks.push((sg.start(), sg.end(), k.width as f64));
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -55,7 +85,7 @@ fn main() {
     let s = std::fs::read_to_string(&hp).unwrap_or_else(|e| panic!("{hp}: {e}"));
     let m = BoardModel::from_json(&s).unwrap_or_else(|e| panic!("{hp}: {e}"));
     let g: Option<G0In> = g0.map(|p| serde_json::from_str(&std::fs::read_to_string(&p).expect("g0 json")).expect("g0 json"));
-    let spots = drc.map(|p| drc_spots(&p)).unwrap_or_default();
+    let spots = drc.map(|p| drc_spots(&p, &m)).unwrap_or_default();
     let w = run(&m, g.as_ref(), &spots, &WitnessOpts::default()).unwrap_or_else(|e| panic!("r0: {e}"));
     let s = &w.summary;
     for (c, k) in w.chains.iter().zip(&w.walked) {
@@ -71,10 +101,9 @@ fn main() {
         s.mapped_pct, s.signal_len_mm, s.in_node_len_mm, s.duplicate_len_mm, s.degenerate, s.nonsignal_len_mm
     );
     println!(
-        "  violations: edge fit {}, layer combo {}, allowed {}, pair fit {}, same-layer crossings {}; hand DRC {} ({} spots), hand below rule {}",
-        c.edge_fit, c.layer_combo, c.allowed, c.pair_fit, c.same_layer, c.hand_drc, s.hand_drc_spots, c.hand_below_rule
+        "  violations: edge fit {}, layer combo {}, allowed {}, pair fit {}, same-layer crossings {}; hand DRC {} ({} spots)",
+        c.edge_fit, c.layer_combo, c.allowed, c.pair_fit, c.same_layer, c.hand_drc, s.hand_drc_spots
     );
-    println!("  fit violations remaining under the proposed model (end clearances, room + inflation): {}", c.fit_remaining_after_fix);
     println!(
         "  {} edges and {} pair cuts ({} with traffic) checked; tight passes {}; G0 under the pair cuts: {:?}",
         s.edge_cuts_checked, s.pair_cuts, s.pair_cuts_with_traffic, s.tight_passes, s.g0_pair_violations

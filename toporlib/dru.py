@@ -150,6 +150,24 @@ def match_condition(cond: str | None, *, net_name: str, netclass: str, ref: str 
 # ------------------------------------------------------------------ resolution
 
 
+# ------------------------------------------------------------------ courtyard clearance rules
+_COURTYARD_TERM = re.compile(r"^\s*[AB]\.(?:intersectsCourtyard|insideCourtyard)\('([^']*)'\)\s*$")
+
+
+def dru_courtyard_clearances(rules: list[DruRule]) -> list[tuple[str, str, int]]:
+    """`(rule name, footprint reference, clearance nm)` of the rules whose whole condition is
+    `A.intersectsCourtyard('REF')` (or `insideCourtyard`) and that set a clearance minimum: a custom
+    rule that replaces the net classes' clearance inside that courtyard (KiCad: the matching rule wins,
+    also when it is smaller). Other conditions are not handled here. O(rules)."""
+    out = []
+    for r in rules:
+        m = _COURTYARD_TERM.match(r.condition or "")
+        cl = r.constraints.get("clearance", {}).get("min")
+        if m and cl is not None and cl >= 0 and r.severity not in ("ignore", "exclude"):
+            out.append((r.name, m.group(1), int(cl)))
+    return out
+
+
 # ------------------------------------------------------------------ disallow -> keepouts
 _AREA_TERM = re.compile(r"^[AB]\.(?:insideArea|intersectsArea)\('([^']*)'\)$")
 _TYPE_TERM = re.compile(r"^[AB]\.Type\s*==\s*'[^']*'$")

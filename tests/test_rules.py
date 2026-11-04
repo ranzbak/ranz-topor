@@ -387,3 +387,17 @@ def test_harness_export_merges_dru_keepouts(tmp_path):
     assert len(dk) == 1 and dk[0]["no_tracks"] and not dk[0]["no_vias"] and dk[0]["poly"] == ant[0]["poly"]
     assert dk[0]["layers"] == ant[0]["layers"] == [0, 2]
     assert [k for k in export_model(b, r, name="x")["keepouts"] if k["name"].startswith("dru:")] == []
+
+
+def test_courtyard_clearance_rule_is_picked_out():
+    """A rule whose whole condition is a courtyard test and that sets a clearance minimum is a region
+    rule (bornhack2026 `neck_down`); other conditions, ignored rules and other constraints are not."""
+    from toporlib.dru import dru_courtyard_clearances, parse_dru
+
+    dru = """(version 1)
+(rule "neck_down" (condition "A.intersectsCourtyard('U6')") (constraint clearance (min 0.1mm)))
+(rule "off" (condition "A.insideCourtyard('U1')") (constraint clearance (min 0.2mm)) (severity ignore))
+(rule "mixed" (condition "A.intersectsCourtyard('U2') && A.NetClass == 'x'") (constraint clearance (min 0.2mm)))
+(rule "width" (condition "A.intersectsCourtyard('U3')") (constraint track_width (min 0.1mm)))
+"""
+    assert dru_courtyard_clearances(parse_dru(dru)) == [("neck_down", "U6", 100_000)]

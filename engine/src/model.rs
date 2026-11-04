@@ -348,6 +348,26 @@ pub struct Rules {
     pub default: NetRule,
     pub per_net: HashMap<i32, NetRule>,
     pub warnings: Vec<String>,
+    /// Custom `.kicad_dru` clearance rules tied to a footprint courtyard
+    /// (`A.intersectsCourtyard('U6')`): inside the polygon the rule's clearance replaces the net
+    /// classes' (KiCad: the matching custom rule wins), e.g. a BGA neck-down rule.
+    pub clearance_regions: Vec<ClearanceRegion>,
+}
+
+/// A courtyard-bound custom clearance rule.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct ClearanceRegion {
+    #[serde(default)]
+    pub name: String,
+    /// Footprint reference whose courtyard it is.
+    #[serde(default, rename = "ref")]
+    pub ref_: String,
+    /// Courtyard outline (a rectangle for most footprints).
+    #[serde(default)]
+    pub poly: Vec<Pt>,
+    /// Clearance (nm) that applies to items touching the polygon.
+    #[serde(default)]
+    pub clearance: i64,
 }
 
 impl Default for Rules {
@@ -373,6 +393,7 @@ impl Default for Rules {
             default: NetRule::default(),
             per_net: HashMap::new(),
             warnings: Vec::new(),
+            clearance_regions: Vec::new(),
         }
     }
 }
@@ -445,6 +466,9 @@ impl BoardModel {
         }
         for k in &mut self.keepouts {
             k.poly.iter_mut().for_each(Pt::flip);
+        }
+        for r in &mut self.rules.clearance_regions {
+            r.poly.iter_mut().for_each(Pt::flip);
         }
         for d in &mut self.dangling_ends {
             d.end.flip();
