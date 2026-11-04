@@ -849,6 +849,8 @@ pub struct Witness {
     /// Pair-cut violations of the G0 routing (`g0` given), with their passes.
     pub g0_violations: Vec<Violation>,
     pub legs: Vec<LegOutcome>,
+    /// See [`FitOut::needs`].
+    pub edge_needs: Vec<(EdgeId, usize, f64)>,
     pub board: Board,
 }
 
@@ -951,6 +953,8 @@ fn allowed_cause(b: &Board, m: &BoardModel, ts: [TriId; 2], f: &FPass) -> String
 }
 
 pub struct FitOut {
+    /// `(edge, layer, need nm)` of every layer of every edge the hand copper crosses.
+    pub needs: Vec<(EdgeId, usize, f64)>,
     pub violations: Vec<Violation>,
     pub tight: usize,
     pub edges_checked: usize,
@@ -969,7 +973,7 @@ pub fn fit_edges(
     let pr = &b.proj;
     let nl = pr.n_layers;
     let mut by_edge: BTreeMap<EdgeId, Vec<FPass>> = BTreeMap::new();
-    let mut out = FitOut { violations: Vec::new(), tight: 0, edges_checked: 0 };
+    let mut out = FitOut { needs: Vec::new(), violations: Vec::new(), tight: 0, edges_checked: 0 };
     let mut seen_allowed: BTreeSet<(EdgeId, usize, i32)> = BTreeSet::new();
     let ends_of = |e: EdgeId| [vert_name(b, m, pr.edges[e][0]), vert_name(b, m, pr.edges[e][1])];
     for (ch, wk) in chains.iter().zip(walked) {
@@ -1040,6 +1044,7 @@ pub fn fit_edges(
             on.sort_by(|a, c| a.u.total_cmp(&c.u));
             let items: Vec<Item> = on.iter().map(|f| item(f)).collect();
             let need = pr.edge_demand(e, &items);
+            out.needs.push((e, l, need));
             let have = pr.room[e][l];
             if !have.is_finite() {
                 continue;
@@ -1821,6 +1826,7 @@ pub fn run(hand: &BoardModel, g0: Option<&G0In>, spots: &Spots, o: &WitnessOpts)
     let fit = fit_edges(&b, hand, &chs, &walked, spots, o);
     s.edge_cuts_checked = fit.edges_checked;
     s.tight_passes = fit.tight;
+    let edge_needs = fit.needs;
     let mut violations = fit.violations;
     let cuts = pair_cuts(&b, hand, o.pair_mm);
     s.pair_cuts = cuts.len();
@@ -1917,5 +1923,35 @@ pub fn run(hand: &BoardModel, g0: Option<&G0In>, spots: &Spots, o: &WitnessOpts)
         }
         s.legs = legs.len();
     }
-    Ok(Witness { summary: s, violations, chains: chs, walked, wire_of, wire_crossings: pw, g0_violations, legs, board: b })
+    Ok(Witness { summary: s, violations, chains: chs, walked, wire_of, wire_crossings: pw, g0_violations, legs, edge_needs, board: b })
+}
+
+/// Projection edges and cuts for the S1 pictures (KiCad frame, nm): every edge, and every edge
+/// with a finite room (a cut) with its room per layer, the hand's need per layer, and whether it
+/// is a constraint joining two obstacles (an LCT cut).
+pub fn s1_export(w: &Witness) -> serde_json::Value {
+    let pr = &w.board.proj;
+    let k = |p: Vec2| [p.x, -p.y];
+    let edges: Vec<[f64; 4]> = pr.edges.iter().map(|&[p, q]| [pr.pos[p].x, -pr.pos[p].y, pr.pos[q].x, -pr.pos[q].y]).collect();
+    let mut need: BTreeMap<EdgeId, Vec<Option<f64>>> = BTreeMap::new();
+    for &(e, l, n) in &w.edge_needs {
+        need.entry(e).or_insert_with(|| vec![None; pr.n_layers])[l] = Some(n);
+    }
+    let cuts: Vec<serde_json::Value> = (0..pr.edges.len())
+        .filter(|&e| pr.room[e].iter().any(|r| r.is_finite()))
+        .map(|e| {
+            let [p, q] = pr.edges[e];
+            let owner = |v: usize| match pr.vkind[v] {
+                super::state::VertKind::Outline(o) | super::state::VertKind::Centre(o) => Some(o),
+                _ => None,
+            };
+            serde_json::json!({
+                "a": k(pr.pos[p]), "b": k(pr.pos[q]),
+                "room": pr.room[e].iter().map(|r| r.is_finite().then_some(*r)).collect::<Vec<_>>(),
+                "need": need.get(&e),
+                "lct": pr.edge_constraint[e] && owner(p).is_some() && owner(q).is_some() && owner(p) != owner(q),
+            })
+        })
+        .collect();
+    serde_json::json!({ "edges": edges, "cuts": cuts })
 }

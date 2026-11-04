@@ -1,7 +1,7 @@
 //! R0 witness test on one board:
 //!
 //!     cargo run --release --example r0_witness -- <hand.json> [--g0 <g0.json>] [--drc <drc.json>]
-//!         [--out r0.json]
+//!         [--out r0.json] [--metrize] [--s1 s1.json]
 //!
 //! `hand.json` is the untouched board from `harness.g0 export`, `g0.json` the G0 result of the
 //! same board, `drc.json` the `kicad-cli pcb drc --format json` report of the hand board.
@@ -68,12 +68,14 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mut hand, mut g0, mut drc, mut out) = (None, None, None, None);
     let mut metrize = false;
+    let mut s1: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--g0" => g0 = Some(args[i + 1].clone()),
             "--drc" => drc = Some(args[i + 1].clone()),
             "--out" => out = Some(args[i + 1].clone()),
+            "--s1" => s1 = Some(args[i + 1].clone()),
             "--metrize" => {
                 metrize = true;
                 i += 1;
@@ -138,6 +140,9 @@ fn main() {
         "  build {:.2} s, walk {:.2} s, fit {:.2} s, topology {:.2} s, total {:.2} s",
         s.build_s, s.walk_s, s.fit_s, s.topo_s, s.runtime_s
     );
+    if let Some(p) = s1 {
+        std::fs::write(&p, serde_json::to_string(&topor_engine::topo::witness::s1_export(&w)).expect("json")).expect("write s1");
+    }
     if let Some(p) = out {
         let st = stats::collect(&m, &w, g.as_ref());
         let j = serde_json::json!({ "summary": w.summary, "violations": w.violations, "stats": st, "g0_violations": w.g0_violations, "legs": w.legs });

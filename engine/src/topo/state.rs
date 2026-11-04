@@ -123,6 +123,9 @@ pub struct Projection {
     pub regions: Vec<(Vec<Vec2>, f64)>,
     /// [`Projection::regime`] of every edge, filled by [`Projection::set_regions`].
     pub edge_regime: Vec<Option<f64>>,
+    /// Whether the edge is a constraint of the triangulation (obstacle outlines, the board edge
+    /// and the LCT cuts).
+    pub edge_constraint: Vec<bool>,
 }
 
 pub fn point_in_poly(p: Vec2, poly: &[Vec2]) -> bool {
@@ -173,6 +176,7 @@ impl Projection {
         by_x.sort_by(|&a, &b| pos[a].x.total_cmp(&pos[b].x).then(a.cmp(&b)));
         let topo = cdt.topology();
         let edges: Vec<[VertId; 2]> = topo.edges.iter().map(|&(a, b, _)| [a, b]).collect();
+        let edge_constraint: Vec<bool> = topo.edges.iter().map(|&(_, _, c)| c).collect();
         let edge_id = |a: usize, b: usize| -> EdgeId {
             let k = [a.min(b), a.max(b)];
             edges.binary_search(&k).expect("triangle side is an edge")
@@ -260,6 +264,7 @@ impl Projection {
             edge_clear: 0.0,
             regions: Vec::new(),
             edge_regime: Vec::new(),
+            edge_constraint,
         })
     }
 
