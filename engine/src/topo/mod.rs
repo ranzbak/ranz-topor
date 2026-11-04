@@ -8,6 +8,7 @@ pub mod core;
 pub mod cuts;
 pub mod demand;
 pub mod draw;
+pub mod exact;
 pub mod factors;
 pub mod gate;
 pub mod init;

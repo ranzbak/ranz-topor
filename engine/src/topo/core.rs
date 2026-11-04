@@ -16,7 +16,7 @@
 //! `max_expansions`) and P3 (reductions linear in the domain graph, local search on the rest).
 
 use super::board::{self, BuildOpts};
-use super::draw::{plan, Drawer, Plan};
+use super::draw::{plan, Diag, Drawer, Plan, WireOut};
 use super::factors::{standard_factors, Event, Finding, Registry, Report, WireCtx};
 use super::init::{Conn, InitWeights};
 use super::layers::{self, LayerParams};
@@ -66,6 +66,23 @@ pub fn diff_pair_nets(model: &BoardModel) -> BTreeSet<i32> {
     by.values().filter_map(|h| h[0].zip(h[1])).flat_map(|(a, b)| [a, b]).collect()
 }
 
+/// Record the drawn wire `wo` as the outcome of connection `ci`.
+fn settle(out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, ci: usize, w: WireId, wo: &WireOut, b: &board::Board, st: &State) {
+    let o = &mut out[ci];
+    o.routed = true;
+    o.reason.clear();
+    o.length_nm = wo.length_nm;
+    o.layers = wo.runs.iter().map(|(l, _)| b.signal_layers[*l]).collect();
+    o.layers.dedup();
+    o.vias = wo.vias.clone();
+    o.items = wo.items.clone();
+    o.neck_nm = wo.necks.iter().map(|n| n.2).sum();
+    o.neck_w = wo.necks.iter().map(|n| n.1).fold(None, |a: Option<f64>, x| Some(a.map_or(x, |y| y.min(x))));
+    for n in &wo.necks {
+        necking.push((ci, Event::Necking { wire: w, from_nm: st.wires[w].w, to_nm: n.1, mm: n.2 / MM }));
+    }
+}
+
 /// What happened to one connection.
 #[derive(Clone, Debug, Default)]
 struct Outcome {
@@ -94,6 +111,58 @@ fn fail(o: &mut [Outcome], i: usize, reason: impl Into<String>) {
 /// Route `model` with the topological core (see the module doc).
 pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteResult {
     let t0 = Instant::now();
+    let (mut best, h0) = route_round(model, opts, ctl, &[]);
+    let budget = if opts.wall_clock_s > 0.0 { opts.wall_clock_s } else { f64::INFINITY };
+    // Feedback to the topology (plan S2c item 4): the rooms the drawing found too small are
+    // lowered by what was missing, and the whole route is made again (at most `MAX_ROUNDS`
+    // rounds in all, while time allows and each round routes more); the best result stays.
+    let mut all: BTreeMap<(usize, usize), f64> = h0.iter().map(|&(e, l, r)| ((e, l), r)).collect();
+    let first = best.routed;
+    let mut round_note = Vec::new();
+    for round in 2..=MAX_ROUNDS {
+        let round_s = t0.elapsed().as_secs_f64() / (round - 1) as f64;
+        if !opts.drawing_feedback || all.is_empty() || best.stop_reason != "converged" || t0.elapsed().as_secs_f64() + 1.3 * round_s > budget {
+            break;
+        }
+        let mut o2 = opts.clone();
+        if opts.wall_clock_s > 0.0 {
+            o2.wall_clock_s = (opts.wall_clock_s - t0.elapsed().as_secs_f64()).max(1.0);
+        }
+        let hv: Hints = all.iter().map(|(&(e, l), &r)| (e, l, r)).collect();
+        let (r2, h2) = route_round(model, &o2, ctl, &hv);
+        round_note.push(format!("round {round}: {} cut rooms lowered, routed {} of {}", hv.len(), r2.routed, r2.connections_total));
+        for (e, l, r) in h2 {
+            let v = all.entry((e, l)).or_insert(r);
+            *v = v.min(r);
+        }
+        if r2.routed > best.routed {
+            best = r2;
+        } else {
+            break;
+        }
+    }
+    if !round_note.is_empty() {
+        best.warnings.push(format!(
+            "topology feedback (rooms lowered by the violation depth, whole route repeated): round 1 routed {} of {}; {}; kept the best: routed {} (rescued {})",
+            first,
+            best.connections_total,
+            round_note.join("; "),
+            best.routed,
+            best.routed - first
+        ));
+        best.runtime_s = t0.elapsed().as_secs_f64();
+    }
+    best
+}
+
+/// Most rounds of the topology feedback (the first one included).
+const MAX_ROUNDS: usize = 3;
+
+/// Lowered rooms `(edge, layer, room nm)` that a second round applies.
+type Hints = Vec<(usize, usize, f64)>;
+
+fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)]) -> (RouteResult, Hints) {
+    let t0 = Instant::now();
     let deadline = (opts.wall_clock_s > 0.0).then(|| t0 + std::time::Duration::from_secs_f64(opts.wall_clock_s));
     let expired = || cancelled() || ctl.is_cancelled() || deadline.is_some_and(|d| Instant::now() >= d);
     let signal: Vec<u32> = model.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
@@ -102,7 +171,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
             "the topological core (S2a) routes boards with two signal layers; this board has {} (S2b: three or more)",
             signal.len()
         );
-        return unrouted(model, opts, &why);
+        return (unrouted(model, opts, &why), Vec::new());
     }
     ctl.update("setup", 0, 0, 0, 0, 0.0);
     let dec = decompose(model, opts, &signal);
@@ -112,10 +181,15 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     }
     let (reg, problems) = Registry::from_config(standard_factors(), &opts.factors);
     warnings.extend(problems);
-    let b = match board::build(model, &BuildOpts { existing_vias: true, ..BuildOpts::default() }) {
+    let mut b = match board::build(model, &BuildOpts { existing_vias: true, ..BuildOpts::default() }) {
         Ok(b) => b,
-        Err(e) => return unrouted(model, opts, &format!("projection failed: {e}")),
+        Err(e) => return (unrouted(model, opts, &format!("projection failed: {e}")), Vec::new()),
     };
+    for &(e, l, room) in hints {
+        if let Some(r) = b.proj.room.get_mut(e).and_then(|r| r.get_mut(l)) {
+            *r = r.min(room);
+        }
+    }
     let nconn = dec.connections.len();
     let mut out: Vec<Outcome> = vec![Outcome::default(); nconn];
     let diff = diff_pair_nets(model);
@@ -354,6 +428,8 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     };
     let mut drawn_ok = 0usize;
     let mut necking: Vec<(usize, Event)> = Vec::new();
+    let mut drawn: BTreeMap<WireId, WireOut> = BTreeMap::new();
+    let mut failed_draw: Vec<WireId> = Vec::new();
     for (pos, &w) in live.iter().enumerate() {
         if pos == wide.min(live.len()) && !plane_done {
             run_planes(&mut dr, &mut out, &mut plane_res);
@@ -369,23 +445,14 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         let wo = dr.draw_wire(w, &plans[&w], &placed[&w], &mut ids);
         if wo.ok {
             drawn_ok += 1;
-            let o = &mut out[ci];
-            o.routed = true;
-            o.length_nm = wo.length_nm;
-            o.layers = wo.runs.iter().map(|(l, _)| b.signal_layers[*l]).collect();
-            o.layers.dedup();
-            o.vias = wo.vias.clone();
-            o.items = wo.items;
-            o.neck_nm = wo.necks.iter().map(|n| n.2).sum();
-            o.neck_w = wo.necks.iter().map(|n| n.1).fold(None, |a: Option<f64>, x| Some(a.map_or(x, |y| y.min(x))));
-            for n in &wo.necks {
-                necking.push((ci, Event::Necking { wire: w, from_nm: st.wires[w].w, to_nm: n.1, mm: n.2 / MM }));
-            }
+            settle(&mut out, &mut necking, ci, w, &wo, &b, &st);
+            drawn.insert(w, wo);
         } else {
             for id in ids {
                 dr.uncommit(id);
             }
             fail(&mut out, ci, wo.reason);
+            failed_draw.push(w);
         }
         if drawn_ok.is_multiple_of(50) {
             ctl.update("route", 3, drawn_ok, nconn, 0, t0.elapsed().as_secs_f64());
@@ -394,8 +461,153 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     if !plane_done {
         run_planes(&mut dr, &mut out, &mut plane_res);
     }
+    // ---- Feedback (plan S2c item 4): a wire the drawing could not fit is drawn before the
+    // wires that block its sleeve, which are then redrawn around it; at most one round per wire.
+    let fb_deadline = (opts.wall_clock_s > 0.0).then(|| t0 + std::time::Duration::from_secs_f64(0.8 * opts.wall_clock_s));
+    let (mut fb_tried, mut fb_rescued) = (0usize, 0usize);
+    if opts.drawing_feedback {
+        let rejected: Vec<Diag> = dr.diag.clone();
+        for &f in &failed_draw {
+            if expired() || fb_deadline.is_some_and(|d| Instant::now() >= d) {
+                break;
+            }
+            let Some(d) = rejected.iter().rev().find(|d| d.wire == f) else { continue };
+            let cf = conn_of[wire_conn[f]];
+            if !out[cf].reason.starts_with("drawing:") {
+                continue;
+            }
+            let blockers = dr.blockers(d, drawn.iter().map(|(&w, wo)| (w, wo)));
+            if blockers.len() > opts.feedback_max_rip {
+                continue;
+            }
+            fb_tried += 1;
+            // Rip the blockers' tracks, draw the rejected wire, then redraw the blockers.
+            for bw in &blockers {
+                for &h in &drawn[bw].handles {
+                    dr.uncommit(h);
+                }
+            }
+            let mut ids: Vec<usize> = placed[&f]
+                .iter()
+                .map(|&(_, p, sz)| dr.commit(&crate::topo::draw::via_item(st.wires[f].net, p, sz, Some(f))))
+                .collect();
+            let wf = dr.draw_wire(f, &plans[&f], &placed[&f], &mut ids);
+            let mut redrawn: Vec<(WireId, WireOut)> = Vec::new();
+            let mut ok = wf.ok;
+            if ok {
+                for &bw in &blockers {
+                    let mut bids = Vec::new();
+                    let wb = dr.draw_wire(bw, &plans[&bw], &placed[&bw], &mut bids);
+                    if !wb.ok {
+                        ok = false;
+                        break;
+                    }
+                    redrawn.push((bw, wb));
+                }
+            }
+            if ok {
+                fb_rescued += 1;
+                drawn_ok += 1;
+                for (bw, wb) in redrawn {
+                    let cb = conn_of[wire_conn[bw]];
+                    necking.retain(|(c, _)| *c != cb);
+                    settle(&mut out, &mut necking, cb, bw, &wb, &b, &st);
+                    drawn.insert(bw, wb);
+                }
+                out[cf].reason.clear();
+                settle(&mut out, &mut necking, cf, f, &wf, &b, &st);
+                drawn.insert(f, wf);
+            } else {
+                // Undo: whatever was drawn in this round goes, the old copper comes back.
+                for &h in &ids {
+                    dr.uncommit(h);
+                }
+                if wf.ok {
+                    for &h in &wf.handles {
+                        dr.uncommit(h);
+                    }
+                }
+                for (_, wb) in &redrawn {
+                    for &h in &wb.handles {
+                        dr.uncommit(h);
+                    }
+                }
+                for bw in &blockers {
+                    let mut hs = Vec::new();
+                    for it in drawn[bw].items.iter().filter(|i| matches!(i, Item::Track(_))) {
+                        hs.push(dr.commit(it));
+                    }
+                    if let Some(x) = drawn.get_mut(bw) {
+                        x.handles = hs;
+                    }
+                }
+            }
+        }
+    }
     if let Ok(path) = std::env::var("TOPO_DUMP") {
         let _ = std::fs::write(path, dr.dump());
+    }
+    let diag = std::mem::take(&mut dr.diag);
+    // Hints for a second round: per cut of a still-failed wire, the room is lowered by the
+    // violation depth (what was really missing) at the cut nearest to the violation.
+    let mut hint_map: BTreeMap<(usize, usize), f64> = BTreeMap::new();
+    for d in &diag {
+        let ci = conn_of[wire_conn[d.wire]];
+        if out[ci].routed || d.passes == 0 {
+            continue;
+        }
+        let wi = &st.wires[d.wire];
+        let short = ((d.req_nm - d.gap_nm).max(0) as f64).max(20_000.0);
+        let best = (d.k0..d.k1)
+            .map(|k| st.passes[wi.passes[k]].edge)
+            .filter(|&e| proj.room[e][d.layer].is_finite())
+            .map(|e| {
+                let [p, q] = proj.edges[e];
+                let (a, c) = (proj.pos[p], proj.pos[q]);
+                let ab = c - a;
+                let t = ((d.at - a).dot(ab) / ab.len2().max(1.0)).clamp(0.0, 1.0);
+                (((a + ab * t) - d.at).len(), e)
+            })
+            .min_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
+        if let Some((_, e)) = best {
+            let v = hint_map.entry((e, d.layer)).or_insert(0.0);
+            *v = v.max(short);
+        }
+    }
+    let new_hints: Hints = hint_map.into_iter().map(|((e, l), sh)| (e, l, (proj.room[e][l] - sh).max(0.0))).collect();
+    {
+        let cnt = |c: &str| diag.iter().filter(|d| d.class == c).count();
+        warnings.push(format!(
+            "drawing yield: {} wires entered drawing, {} drawn ({} lost at the via stage); rejected runs {}: packing {}, repair {}, chord {}, of which infeasible against the static board alone {}; runs accepted by the exact path {}, by the S2a funnel+repair fallback {}, exact path without result {} ({:.1} s in the exact search); feedback tried {}, rescued {}",
+            plans.len(),
+            drawn_ok,
+            plans.len() - live.len(),
+            diag.len(),
+            cnt("packing"),
+            cnt("repair"),
+            cnt("chord"),
+            diag.iter().filter(|d| d.static_infeasible).count(),
+            dr.stats.exact_ok,
+            dr.stats.fallback_ok,
+            dr.stats.exact_none,
+            dr.stats.exact_s,
+            fb_tried,
+            fb_rescued
+        ));
+    }
+    if let Ok(path) = std::env::var("TOPO_DIAG") {
+        let rows: Vec<String> = diag
+            .iter()
+            .map(|d| {
+                let nm = |x: f64| (x / 1e3).round() / 1e3;
+                format!(
+                    "{{\"wire\":{},\"net\":{},\"layer\":{},\"w\":{},\"passes\":{},\"over_passes\":{},\"class\":\"{}\",\"against\":{:?},\"gap\":{},\"req\":{},\"at\":[{},{}],\"from\":[{},{}],\"to\":[{},{}],\"pre_bad\":{:?},\"bumps\":{},\"static_infeasible\":{}}}",
+                    d.wire, d.net, d.layer, nm(d.width_nm), d.passes, d.over_passes, d.class, d.against, d.gap_nm, d.req_nm,
+                    nm(d.at.x), nm(-d.at.y), nm(d.from.x), nm(-d.from.y), nm(d.to.x), nm(-d.to.y), d.pre_bad, d.bumps, d.static_infeasible
+                )
+            })
+            .collect();
+        let _ = std::fs::write(path, format!("[{}]", rows.join(",\n")));
     }
     drop(dr);
     let isl = planes::islands(model, &b, &out_vias(&out, &plane_reqs, &dec.connections), &plane_reqs);
@@ -625,7 +837,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         "converged"
     };
     ctl.update("done", 4, routed_n, nconn, tot_vias, t0.elapsed().as_secs_f64());
-    RouteResult {
+    let result = RouteResult {
         items,
         connections_total: reports.len(),
         routed: routed_n,
@@ -663,7 +875,8 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         profile: None,
         item_conn,
         stubs: Vec::new(),
-    }
+    };
+    (result, new_hints)
 }
 
 /// `(connection id, via centre)` of every routed plane connection (for the island check).

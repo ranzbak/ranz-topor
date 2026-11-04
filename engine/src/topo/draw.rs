@@ -21,7 +21,7 @@
 
 use super::board::Board;
 use super::state::{EdgeId, Obstacle, PassId, State, TriId, VertKind, WireId};
-use crate::check::{CheckReport, Checker, ItemIndex};
+use crate::check::{CheckReport, Checker, ItemIndex, Violation};
 use crate::geom::prim::Aabb;
 use crate::geom::quant::{IVec2, TrackPrim};
 use crate::geom::{Grid, Vec2};
@@ -110,7 +110,7 @@ pub fn funnel(s: Vec2, e: Vec2, portals: &[(Vec2, Vec2)]) -> Vec<Vec2> {
     pts
 }
 
-fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
+pub(super) fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
     let d = b - a;
     let l2 = d.len2();
     let t = if l2 > 0.0 { ((p - a).dot(d) / l2).clamp(0.0, 1.0) } else { 0.0 };
@@ -169,31 +169,31 @@ fn seg_seg(a1: Vec2, b1: Vec2, a2: Vec2, b2: Vec2) -> (f64, Vec2, Vec2) {
 /// A copper object the drawn centre lines must keep away from (static: pads, holes, board edge,
 /// foreign shapes, keepouts; dynamic: copper accepted so far).
 #[derive(Clone, Debug)]
-struct Ent {
-    core: Core,
+pub(super) struct Ent {
+    pub(super) core: Core,
     /// Radius around the core that is copper (half width of a track, radius of a via).
-    grow: f64,
+    pub(super) grow: f64,
     /// Bit per signal layer the object is on.
-    mask: u64,
+    pub(super) mask: u64,
     /// `None`: an obstacle for every net.
-    net: Option<i32>,
+    pub(super) net: Option<i32>,
     /// Clearance the object itself demands (nm).
-    clear: f64,
+    pub(super) clear: f64,
     /// The demanded clearance replaces the wire's own (holes, board edge, keepouts).
-    fixed: bool,
-    live: bool,
+    pub(super) fixed: bool,
+    pub(super) live: bool,
     /// A copper shape (footprint polygon), not a pad: vias keep their hole clearance to it.
-    shape: bool,
+    pub(super) shape: bool,
 }
 
 #[derive(Clone, Debug)]
-enum Core {
+pub(super) enum Core {
     Poly(Vec<Vec2>),
     Seg(Vec2, Vec2),
     Pt(Vec2),
 }
 
-fn bbox_of(pts: &[Vec2]) -> Aabb {
+pub(super) fn bbox_of(pts: &[Vec2]) -> Aabb {
     let (mut lo, mut hi) = (pts[0], pts[0]);
     for p in pts {
         lo = Vec2 { x: lo.x.min(p.x), y: lo.y.min(p.y) };
@@ -208,7 +208,7 @@ fn inside_poly(p: Vec2, poly: &[Vec2]) -> bool {
 }
 
 /// `(distance, closest point on the core, closest point on the segment)` from `a-b` to `core`.
-fn seg_core(a: Vec2, b: Vec2, core: &Core) -> (f64, Vec2, Vec2) {
+pub(super) fn seg_core(a: Vec2, b: Vec2, core: &Core) -> (f64, Vec2, Vec2) {
     match core {
         Core::Pt(p) => {
             let d = b - a;
@@ -292,6 +292,51 @@ pub struct Intervals {
     pub nom: Vec<f64>,
 }
 
+/// Why a run was rejected (drawing-yield diagnosis, plan S2c item 1). `class`:
+/// `packing` (a pass lies on an edge whose demand exceeds its room), `repair` (the funnel
+/// through the intervals was clean, or the violation lies at a vertex the repair inserted),
+/// `chord` (a segment of the funnel itself cuts an obstacle's clearance and the repair did not
+/// fix it).
+#[derive(Clone, Debug, Default)]
+pub struct Diag {
+    pub wire: WireId,
+    pub net: i32,
+    pub layer: usize,
+    pub width_nm: f64,
+    pub passes: usize,
+    /// Passes `k0..k1` of the rejected run.
+    pub k0: usize,
+    pub k1: usize,
+    pub over_passes: usize,
+    pub class: &'static str,
+    pub against: String,
+    pub gap_nm: i64,
+    pub req_nm: i64,
+    /// Midpoint of the violating segment of the last attempt.
+    pub at: Vec2,
+    pub from: Vec2,
+    pub to: Vec2,
+    /// Per attempt: the funnel before the repair violates.
+    pub pre_bad: [bool; 3],
+    pub bumps: usize,
+    /// The exact search also found no path with the drawn copper ignored: the topology does not
+    /// fit the static board (pads, holes, edge, keepouts, existing copper) at this width.
+    pub static_infeasible: bool,
+}
+
+/// Counters of the drawing: which method produced each accepted run.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DrawStats {
+    /// Runs accepted from the exact taut path.
+    pub exact_ok: usize,
+    /// Attempts where the exact search found no path (or hit its cap).
+    pub exact_none: usize,
+    /// Runs accepted only by S2a's funnel + repair fallback.
+    pub fallback_ok: usize,
+    /// Seconds spent in the exact search (successful or not).
+    pub exact_s: f64,
+}
+
 /// One drawn wire.
 #[derive(Clone, Debug, Default)]
 pub struct WireOut {
@@ -305,6 +350,8 @@ pub struct WireOut {
     /// Via centres and sizes, in path order.
     pub vias: Vec<(Vec2, ViaSize)>,
     pub length_nm: f64,
+    /// Handles of the committed track items (for [`Drawer::uncommit`]).
+    pub handles: Vec<usize>,
     /// Necked pad exits: `(pad end position, width nm, length nm)`; the wire's own width is
     /// above that of the neck.
     pub necks: Vec<(Vec2, f64, f64)>,
@@ -327,17 +374,27 @@ pub struct Drawer<'a> {
     pub fails: Vec<(WireId, usize, Vec<Vec<Vec2>>, String)>,
     /// Position of every pass in its wire's pass list.
     pass_k: Vec<usize>,
+    /// Edge x layer (`e * n_layers + l`) whose passes do not fit in the room between the end
+    /// margins (demand over room) when packed.
+    pub over: Vec<bool>,
+    /// One record per run the checker rejected (the drawing-yield diagnosis).
+    pub diag: Vec<Diag>,
+    pub stats: DrawStats,
     /// Nominal polyline (pad centres and pass points) of every wire.
-    polys: Vec<Vec<Vec2>>,
+    pub(super) polys: Vec<Vec<Vec2>>,
     pub iv: Intervals,
     /// Layer index of every pass (`-1` unpacked).
     pub pass_layer: Vec<i32>,
-    ents: Vec<Ent>,
-    grid: Grid<usize>,
+    pub(super) ents: Vec<Ent>,
+    pub(super) grid: Grid<usize>,
     /// `(ItemIndex id, ent id)` per committed item; the handle is the position.
     handles: Vec<(usize, usize)>,
     /// Query distance of the repair (largest clearance + width).
-    qgrow: f64,
+    pub(super) qgrow: f64,
+    /// Number of static objects (they come first in `ents`).
+    pub(super) n_static: usize,
+    /// Diagnosis: ignore the copper drawn so far.
+    pub(super) only_static: std::cell::Cell<bool>,
 }
 
 impl<'a> Drawer<'a> {
@@ -365,10 +422,15 @@ impl<'a> Drawer<'a> {
             polys: (0..st.wires.len()).map(|w| if st.wires[w].alive { st.polyline(w) } else { Vec::new() }).collect(),
             iv: Intervals::default(),
             pass_layer: vec![-1; st.passes.len()],
+            over: vec![false; st.proj.edges.len() * st.proj.n_layers],
+            diag: Vec::new(),
+            stats: DrawStats::default(),
             ents: Vec::new(),
             grid: Grid::new(2.0e6),
             handles: Vec::new(),
             qgrow: 0.0,
+            n_static: 0,
+            only_static: std::cell::Cell::new(false),
         }
         .with_static()
     }
@@ -459,6 +521,7 @@ impl<'a> Drawer<'a> {
         let maxclr = r.per_net.values().map(|n| n.clearance).fold(r.default.clearance.max(r.min_clearance).max(r.hole_clearance).max(r.edge_clearance), i64::max);
         let maxw = r.per_net.values().map(|n| n.width).fold(r.default.width, i64::max);
         self.qgrow = (maxclr + maxw) as f64 + 4.0 * self.eps;
+        self.n_static = self.ents.len();
         self
     }
 
@@ -636,6 +699,7 @@ impl<'a> Drawer<'a> {
             rmax[i] = if i == n - 1 { hi[i] } else { hi[i].min(rmax[i + 1] - req(items[i], items[i + 1])) };
         }
         let fits = (0..n).all(|i| lmin[i] <= rmax[i] + 1e-6);
+        self.over[e * self.b.proj.n_layers + l] = !fits;
         let mut nom = vec![0.0; n];
         let (mut a, mut b) = (lmin.clone(), rmax.clone());
         if fits {
@@ -721,7 +785,11 @@ impl<'a> Drawer<'a> {
             let mut done = false;
             'sizes: for &sz in &sizes {
                 let need_r = 0.5 * sz.d as f64 + self.model.rules.net_rule(net).clearance as f64;
-                for (k, p) in self.via_candidates(w, ka, kb.max(ka), need_r) {
+                let mut sites = self.via_candidates(w, ka, kb.max(ka), need_r);
+                if self.opts.via_offset_sites {
+                    sites.extend(self.via_extra(w, ka, kb.max(ka), sz.d as f64, self.model.rules.net_rule(net).clearance as f64));
+                }
+                for (k, p) in sites {
                     let item = via_item(net, p, sz, Some(w));
                     if self.check_ok(&item) && self.via_hole_ok(p, sz, net) {
                         let id = self.commit(&item);
@@ -733,6 +801,14 @@ impl<'a> Drawer<'a> {
                 }
             }
             if !done {
+                if std::env::var("TOPO_VIADBG").is_ok() {
+                    let wi = &self.st.wires[w];
+                    let pr = &self.b.proj;
+                    let need_r = 0.5 * sizes[0].d as f64 + self.model.rules.net_rule(net).clearance as f64;
+                    let tr: Vec<(f64, bool, usize)> = (ka..=kb.max(ka)).map(|k| { let t = wi.tris[k]; (pr.inradius(t), pr.tri_out[t] || !pr.tri_obs[t].is_empty(), self.st.tri_trav[t].len()) }).collect();
+                    let best = tr.iter().filter(|x| !x.1).map(|x| x.0).fold(0.0, f64::max);
+                    eprintln!("VIADBG wire {w} net {net} ka {ka} kb {kb} tris {} usable {} best inradius {:.0} need_r {:.0} sizes {}", tr.len(), tr.iter().filter(|x| !x.1).count(), best, need_r, sizes.len());
+                }
                 return Err(format!("via {} of {}: no site in its interval (no free disc for a via)", i + 1, plan.vias.len()));
             }
         }
@@ -840,9 +916,26 @@ impl<'a> Drawer<'a> {
             let lid = self.layer_id(layer);
             let mut ok = false;
             let mut last_reason = String::new();
+            let mut last_viol: Option<Violation> = None;
             let mut tried: Vec<Vec<Vec2>> = Vec::new();
-            for attempt in 0..3 {
-                let pts = self.run_polyline(w, k0, k1, s, e, attempt, layer);
+            let neck = self.neck_zones(w, r == 0, r == plan.layers.len() - 1);
+            for attempt in 0..4 {
+                let pts = if attempt == 0 {
+                    // The exact taut path around the funnel's violations (see `exact`).
+                    let base = self.base_polyline(w, k0, k1, s, e, 0);
+                    let t_ex = std::time::Instant::now();
+                    let fixed = self.exact_fix(w, k0, k1, layer, base, neck);
+                    self.stats.exact_s += t_ex.elapsed().as_secs_f64();
+                    match fixed {
+                        Some(p) => p,
+                        None => {
+                            self.stats.exact_none += 1;
+                            continue;
+                        }
+                    }
+                } else {
+                    self.run_polyline(w, k0, k1, s, e, attempt - 1, layer)
+                };
                 tried.push(pts.clone());
                 let (ps, pe) = (r == 0, r == plan.layers.len() - 1);
                 let mut items = Self::items_of(wi.net, lid, wi.w, &pts, Some(w));
@@ -869,12 +962,18 @@ impl<'a> Drawer<'a> {
                             out.necks.push((pts[pts.len() - 1], wn, ls[1]));
                         }
                     }
+                    if attempt == 0 {
+                        self.stats.exact_ok += 1;
+                    } else {
+                        self.stats.fallback_ok += 1;
+                    }
                     out.items.extend(items);
                     out.runs.push((layer, pts));
                     ok = true;
                     break;
                 }
                 let v = &rep.violations[0];
+                last_viol = Some(v.clone());
                 if std::env::var("TOPO_DEBUG").is_ok() {
                     eprintln!("wire {w} net {} layer {layer} attempt {attempt} k {k0}..{k1}: viol {} gap {} req {} pts {:?}", wi.net, v.against, v.gap, v.required, pts.iter().map(|p| (p.x.round() as i64 / 1000, -p.y.round() as i64 / 1000)).collect::<Vec<_>>());
                 }
@@ -888,6 +987,10 @@ impl<'a> Drawer<'a> {
                 );
             }
             if !ok {
+                if let (Some(v), Some(pts)) = (last_viol.as_ref(), tried.last()) {
+                    let pts = pts.clone();
+                    self.diagnose(w, layer, k0, k1, s, e, v, &pts);
+                }
                 if std::env::var("TOPO_DUMP").is_ok() {
                     self.fails.push((w, layer, tried, last_reason.clone()));
                 }
@@ -905,6 +1008,7 @@ impl<'a> Drawer<'a> {
             out.items.push(via_item(wi.net, p, sz, Some(w)));
             out.vias.push((p, sz));
         }
+        out.handles = committed;
         out.length_nm = out.runs.iter().map(|(_, p)| p.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>()).sum();
         out.ok = true;
         out
@@ -913,6 +1017,23 @@ impl<'a> Drawer<'a> {
     /// Track items of the polyline `pts` at width `w`.
     fn items_of(net: i32, lid: u32, w: f64, pts: &[Vec2], wire: Option<usize>) -> Vec<Item> {
         pts.windows(2).filter(|p| (p[1] - p[0]).len2() > 1.0).map(|p| track_item(net, lid, w, p[0], p[1], wire)).collect()
+    }
+
+    /// Neck zones of a run (item 3): where the wire may be narrowed to the net's floor, at the pad
+    /// ends of the run (`ps` start pad, `pe` end pad). `None` without `neck_to_pad` or room to narrow.
+    pub(super) fn neck_zones(&self, w: WireId, ps: bool, pe: bool) -> Option<super::exact::Neck> {
+        let wi = &self.st.wires[w];
+        let rules = &self.model.rules;
+        let min_w = (rules.min_track_width.max(rules.net_rule(wi.net).min_width).max(rules.min_connection) as f64).min(wi.w);
+        if !self.opts.neck_to_pad || min_w >= wi.w || !(ps || pe) {
+            return None;
+        }
+        let pr = &self.b.proj;
+        let ext = |ob: usize| pr.obstacles[ob].poly.iter().map(|&p| (p - pr.obstacles[ob].center).len()).fold(0.0, f64::max);
+        let cap = |ob: usize| if self.opts.neck_max_nm > 0 { self.opts.neck_max_nm as f64 } else { 4.0 * ext(ob) };
+        // Euclidean radius half the neck length: the neck is cut by path length, which is longer.
+        let zone = |ob: usize| (pr.pos[if ob == wi.pa { wi.a } else { wi.b }], 0.5 * cap(ob));
+        Some(super::exact::Neck { min_w, ends: [ps.then(|| zone(wi.pa)), pe.then(|| zone(wi.pb))] })
     }
 
     /// The run with its pad ends narrowed to the widest width the checker accepts (plan item
@@ -990,6 +1111,13 @@ impl<'a> Drawer<'a> {
     /// 0 = full intervals, 1 = intervals halved towards nominal, 2 = nominal points.
     #[allow(clippy::too_many_arguments)]
     fn run_polyline(&self, w: WireId, k0: usize, k1: usize, s: Vec2, e: Vec2, attempt: usize, layer: usize) -> Vec<Vec2> {
+        let wi = &self.st.wires[w];
+        let pre = self.base_polyline(w, k0, k1, s, e, attempt);
+        self.repair(wi.net, wi.w, wi.s, layer, pre)
+    }
+
+    /// The polyline before the repair.
+    fn base_polyline(&self, w: WireId, k0: usize, k1: usize, s: Vec2, e: Vec2, attempt: usize) -> Vec<Vec2> {
         let st = self.st;
         let wi = &st.wires[w];
         let mut portals = Vec::with_capacity(k1 - k0);
@@ -1008,13 +1136,70 @@ impl<'a> Drawer<'a> {
             nominal.push((a + b) * 0.5);
         }
         nominal.push(e);
-        let pts = if attempt >= 2 {
+        if attempt >= 2 {
             nominal.dedup_by(|a, b| (*a - *b).len2() < 1.0);
             nominal
         } else {
             funnel(s, e, &portals)
+        }
+    }
+
+    /// Fill a [`Diag`] for the run `k0..k1` of `w` that was rejected: re-draws the three attempts
+    /// without the repair and with it, and classifies. Only on failure. O(attempts x segments).
+    #[allow(clippy::too_many_arguments)]
+    fn diagnose(&mut self, w: WireId, layer: usize, k0: usize, k1: usize, s: Vec2, e: Vec2, last: &Violation, last_pts: &[Vec2]) {
+        let wi = &self.st.wires[w];
+        let lid = self.layer_id(layer);
+        let mut pre_bad = [false; 3];
+        let mut pre0: Vec<Vec2> = Vec::new();
+        for (a, bad) in pre_bad.iter_mut().enumerate() {
+            let pre = self.base_polyline(w, k0, k1, s, e, a);
+            let items = Self::items_of(wi.net, lid, wi.w, &pre, Some(w));
+            *bad = !self.checker.check_against(&self.idx, &items, &[]).violations.is_empty();
+            if a == 0 {
+                pre0 = pre;
+            }
+        }
+        let neck = self.neck_zones(w, k0 == 0, k1 == wi.passes.len());
+        let pl = self.b.proj.n_layers;
+        let over_passes = (k0..k1).filter(|&k| self.over[self.st.passes[wi.passes[k]].edge * pl + layer]).count();
+        // Segment of the last attempt that violates; is it next to a vertex the repair inserted?
+        let seg = last.item.min(last_pts.len().saturating_sub(2));
+        let (pa, pb) = (last_pts[seg], last_pts[seg + 1]);
+        let inserted = |p: Vec2| !pre0.iter().any(|q| (*q - p).len2() < 1e-6);
+        let repair_vertex = inserted(pa) || inserted(pb);
+        let class = if over_passes > 0 {
+            "packing"
+        } else if !pre_bad[0] || repair_vertex {
+            "repair"
+        } else {
+            "chord"
         };
-        self.repair(wi.net, wi.w, wi.s, layer, pts)
+        let bumps = last_pts.len().saturating_sub(pre0.len());
+        let deep = std::env::var("TOPO_DIAG_DEEP").is_ok();
+        self.only_static.set(deep);
+        let static_infeasible = deep && self.exact_fix(w, k0, k1, layer, pre0.clone(), neck).is_none();
+        self.only_static.set(false);
+        self.diag.push(Diag {
+            wire: w,
+            net: wi.net,
+            layer,
+            width_nm: wi.w,
+            passes: k1 - k0,
+            k0,
+            k1,
+            over_passes,
+            class,
+            against: last.against.clone(),
+            gap_nm: last.gap,
+            req_nm: last.required,
+            at: (pa + pb) * 0.5,
+            from: s,
+            to: e,
+            pre_bad,
+            bumps,
+            static_infeasible,
+        });
     }
 
     /// Bend `pts` around every object it comes closer to than its clearance: a vertex at the

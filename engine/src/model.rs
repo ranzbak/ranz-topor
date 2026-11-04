@@ -1003,6 +1003,16 @@ pub struct Options {
     /// width (down to the effective minimum track width) when the full width does not fit out of
     /// the pad ("necking"); the rest of the connection keeps the net width.
     pub neck_to_pad: bool,
+    /// Topological core (S2c, `topor.toml [search] drawing_feedback`): a wire the drawing cannot
+    /// fit is drawn before the wires that block its sleeve, which are redrawn around it (at most
+    /// one round per wire) instead of being reported failed at once.
+    pub drawing_feedback: bool,
+    /// Topological core (S2c, `topor.toml [vias] offset_sites`): besides the sample points of the
+    /// via interval's triangles, also try the via's offset corners of nearby pads and copper.
+    pub via_offset_sites: bool,
+    /// Topological core (S2c, `topor.toml [search] feedback_max_rip`): most drawn wires one
+    /// feedback round may rip up and redraw.
+    pub feedback_max_rip: usize,
     /// Router (NX, `topor.toml [search] neck_max_mm`): longest necked stub, nm; 0 = twice the
     /// pad's long side.
     pub neck_max_nm: i64,
@@ -1078,6 +1088,9 @@ impl Default for Options {
             detour_reference_budget_pct: 10.0,
             exit_stubs: "auto".into(),
             neck_to_pad: true,
+            drawing_feedback: true,
+            via_offset_sites: true,
+            feedback_max_rip: 8,
             neck_max_nm: 0,
             pad_bridge_max_nm: 2_000_000,
             steiner: true,

@@ -56,9 +56,9 @@ pub fn place(dr: &mut Drawer, rq: &Req) -> Result<Out, String> {
     let rpad = ob.poly.iter().map(|&p| (p - c).len()).fold(0.0, f64::max);
     let sizes = via_sizes(&model.rules, rq.net, dr.opts);
     let step = 0.1e6;
-    let dirs: Vec<Vec2> = (0..16)
+    let dirs: Vec<Vec2> = (0..32)
         .map(|i| {
-            let a = i as f64 * std::f64::consts::PI / 8.0;
+            let a = i as f64 * std::f64::consts::PI / 16.0;
             Vec2 { x: a.cos(), y: a.sin() }
         })
         .collect();
