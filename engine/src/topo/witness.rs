@@ -753,6 +753,8 @@ pub struct Summary {
     pub crossings: usize,
     pub same_layer_crossings: usize,
     pub ambiguous_crossings: usize,
+    /// Crossings seen only through a free-terminal chord (dead end / junction): not counted.
+    pub free_end_crossings: usize,
     pub p3_ran: bool,
     pub p3_vias: usize,
     pub p3_unlayerable: usize,
@@ -775,6 +777,8 @@ pub struct Witness {
     pub walked: Vec<Walked>,
     /// Per chain: index into the State's wires, or None.
     pub wire_of: Vec<Option<usize>>,
+    /// Different-net crossings per State wire (index = wire id).
+    pub wire_crossings: Vec<usize>,
     pub board: Board,
 }
 
@@ -825,6 +829,27 @@ fn end_info(b: &Board, m: &BoardModel, v: VertId, l: usize, nets: &[i32], s_max:
         super::state::VertKind::Edge => (m.rules.edge_clearance as f64, 0.0),
         _ => (s_max, 0.0),
     }
+}
+
+/// Demand under the proposed model: the widths, the clearance between neighbours of different
+/// nets, and at each end the end's clearance unless the adjacent pass is of the end's own net.
+/// `items` are `(net, width, clearance)` ordered from end 0 to end 1; an end is `(own net, the
+/// clearance a track of a given net needs to it)`.
+fn fixed_need(items: &[(i32, f64, f64)], e0: (Option<i32>, &dyn Fn(i32) -> f64), e1: (Option<i32>, &dyn Fn(i32) -> f64)) -> f64 {
+    let mut need: f64 = items.iter().map(|x| x.1).sum();
+    for w in items.windows(2) {
+        if w[0].0 != w[1].0 {
+            need += w[0].2.max(w[1].2);
+        }
+    }
+    let (first, last) = (items[0], items[items.len() - 1]);
+    if e0.0 != Some(first.0) {
+        need += (e0.1)(first.0);
+    }
+    if e1.0 != Some(last.0) {
+        need += (e1.1)(last.0);
+    }
+    need
 }
 
 fn dist_outline(p: Vec2, segs: &[(Vec2, Vec2)]) -> f64 {
@@ -1026,7 +1051,23 @@ pub fn fit_edges(
                     let s_max = on.iter().map(|f| f.clear).fold(0.0, f64::max);
                     let (cp, ip) = end_info(b, m, pr.edges[e][0], l, &nets, s_max);
                     let (cq, iq) = end_info(b, m, pr.edges[e][1], l, &nets, s_max);
-                    let need_f = on.iter().map(|f| f.width).sum::<f64>() + (on.len() - 1) as f64 * s_max + cp + cq;
+                    let _ = (cp, cq);
+                    let mut ord: Vec<&FPass> = on.clone();
+                    ord.sort_by(|a, c| a.u.total_cmp(&c.u));
+                    let items: Vec<(i32, f64, f64)> = ord.iter().map(|f| (f.net, f.width, f.clear)).collect();
+                    let end = |v: VertId| -> (Option<i32>, Box<dyn Fn(i32) -> f64 + '_>) {
+                        match pr.vkind[v] {
+                            super::state::VertKind::Outline(o) => {
+                                let pad = &m.pads[b.pad_of[o]];
+                                (Some(pad.net), Box::new(move |n| m.required_clearance(n, pad)))
+                            }
+                            super::state::VertKind::Edge => (None, Box::new(|_| m.rules.edge_clearance as f64)),
+                            _ => (None, Box::new(move |_| s_max)),
+                        }
+                    };
+                    let (o0, f0) = end(pr.edges[e][0]);
+                    let (o1, f1) = end(pr.edges[e][1]);
+                    let need_f = fixed_need(&items, (o0, &*f0), (o1, &*f1));
                     // The worst gap of a pass to either end object against its rule.
                     let mut worst = f64::NEG_INFINITY;
                     for f in &on {
@@ -1316,7 +1357,22 @@ pub fn check_cuts(
                         None => ci_sum += m.rules.edge_clearance as f64,
                     }
                 }
-                let need_f = on.iter().map(|h| h.2).sum::<f64>() + (on.len() - 1) as f64 * s_max + ci_sum;
+                let _ = (ci_sum, s_max);
+                let mut ord: Vec<&&Hit> = on.iter().collect();
+                ord.sort_by(|a, c| a.4.total_cmp(&c.4));
+                let items: Vec<(i32, f64, f64)> = ord.iter().map(|h| (h.1, h.2, h.3)).collect();
+                let end = |k: usize| -> (Option<i32>, Box<dyn Fn(i32) -> f64 + '_>) {
+                    match c.ends[k] {
+                        Some(o) => {
+                            let pad = &m.pads[b.pad_of[o]];
+                            (Some(pad.net), Box::new(move |n| m.required_clearance(n, pad)))
+                        }
+                        None => (None, Box::new(|_| m.rules.edge_clearance as f64)),
+                    }
+                };
+                let (o0, f0) = end(0);
+                let (o1, f1) = end(1);
+                let need_f = fixed_need(&items, (o0, &*f0), (o1, &*f1));
                 let mut worst = f64::NEG_INFINITY;
                 for h in &on {
                     for (k, end) in c.ends.iter().enumerate() {
@@ -1384,6 +1440,50 @@ pub fn pair_cause(b: &Board, m: &BoardModel, c: &Cut, layer: usize, shortfall: f
 
 // ---------------------------------------------------------------- topology
 
+/// A free terminal (dead end, junction) lies inside its triangle, not on a corner: give it the
+/// corner whose chord crosses the fewest other-net chords of that triangle (nearest on ties),
+/// so the terminal does not invent crossings. O(free ends · traversals in the triangle).
+pub fn settle_free_ends(st: &mut State) {
+    let pr = st.proj;
+    for w in 0..st.wires.len() {
+        for end in [false, true] {
+            let free = if end { st.wires[w].pb == usize::MAX } else { st.wires[w].pa == usize::MAX };
+            if !free {
+                continue;
+            }
+            let k = if end { st.wires[w].passes.len() } else { 0 };
+            let t = st.wires[w].tris[k];
+            let net = st.wires[w].net;
+            let mut best: Option<(usize, VertId)> = None;
+            for &c in &pr.tris[t] {
+                if end {
+                    st.wires[w].b = c;
+                } else {
+                    st.wires[w].a = c;
+                }
+                let (a1, a2) = st.chord(w, k);
+                let n = st.tri_trav[t]
+                    .iter()
+                    .filter(|&&(o, _)| o != w && st.wires[o].net != net)
+                    .filter(|&&(o, ok)| {
+                        let (b1, b2) = st.chord(o, ok);
+                        interleave(a1, a2, b1, b2)
+                    })
+                    .count();
+                if best.is_none_or(|x| n < x.0) {
+                    best = Some((n, c));
+                }
+            }
+            let c = best.expect("corner").1;
+            if end {
+                st.wires[w].b = c;
+            } else {
+                st.wires[w].a = c;
+            }
+        }
+    }
+}
+
 pub fn sub_state<'p>(
     b: &'p Board,
     m: &BoardModel,
@@ -1426,6 +1526,7 @@ pub fn sub_state<'p>(
         items.push((wire, wk.passes.iter().map(|p| (p.edge, p.u)).collect::<Vec<_>>(), wk.tris.clone()));
     }
     st.load_all(items);
+    settle_free_ends(&mut st);
     (st, wire_of, excluded)
 }
 
@@ -1439,10 +1540,11 @@ pub fn crossings_report(
     spots: &[[f64; 2]],
     drc_r: f64,
     vid0: usize,
-) -> (usize, Vec<Violation>, usize, Vec<usize>) {
+) -> (usize, Vec<Violation>, usize, Vec<usize>, usize) {
     let pr = st.proj;
     let mut total = 0;
     let mut amb = 0;
+    let mut free_end = 0;
     let mut viol = Vec::new();
     let mut per_wire = vec![0usize; st.wires.len()];
     for t in 0..pr.tris.len() {
@@ -1463,10 +1565,31 @@ pub fn crossings_report(
                 per_wire[wa] += 1;
                 per_wire[wb] += 1;
                 let (ca, cb) = (chain_of[wa], chain_of[wb]);
+                // A traversal that ends in a free terminal (dead end, junction) has no corner to
+                // end on: its chord is an approximation and may only seem to cross.
+                let free = |c: usize, k: usize| {
+                    (k == 0 && chains[c].start == End::Free) || (k == walked[c].passes.len() && chains[c].end == End::Free)
+                };
+                if free(ca, ka) || free(cb, kb) {
+                    free_end += 1;
+                    continue;
+                }
                 let la = trav_layer(&chains[ca], &walked[ca], ka);
                 let lb = trav_layer(&chains[cb], &walked[cb], kb);
                 match (la, lb) {
                     (Some(x), Some(y)) if x == y => {
+                        let real = chains_intersect(&chains[ca], &chains[cb], x);
+                        if std::env::var("R0_DEBUG").is_ok() {
+                            for (c, k) in [(ca, ka), (cb, kb)] {
+                                let n = walked[c].passes.len();
+                                let ps: Vec<String> = [k.wrapping_sub(1), k]
+                                    .iter()
+                                    .filter(|&&q| q < n)
+                                    .map(|&q| format!("e{} u{:.4} s{:.0} virt{}", walked[c].passes[q].edge, walked[c].passes[q].u, walked[c].passes[q].s, walked[c].passes[q].virt))
+                                    .collect();
+                                eprintln!("same-layer tri {t}: chain {c} net {} {:?}->{:?} k {k}/{n} passes [{}]", chains[c].net, chains[c].start, chains[c].end, ps.join(" | "));
+                            }
+                        }
                         let c = (pr.pos[pr.tris[t][0]] + pr.pos[pr.tris[t][1]] + pr.pos[pr.tris[t][2]]) * (1.0 / 3.0);
                         viol.push(Violation {
                             id: vid0 + viol.len(),
@@ -1478,7 +1601,11 @@ pub fn crossings_report(
                             need_mm: 0.0,
                             have_mm: 0.0,
                             at: kicad(c),
-                            cause: "mapping or interleaving: two different-net hand chains cross inside one triangle on one layer".into(),
+                            cause: if real {
+                                "hand copper really intersects (different nets on one layer: hand short / net tie)".into()
+                            } else {
+                                "mapping or interleaving: the projection says crossing, the hand polylines do not intersect".into()
+                            },
                             hand_drc: near_drc(spots, c, drc_r),
                             line: None,
                             fixed: None,
@@ -1491,7 +1618,35 @@ pub fn crossings_report(
             }
         }
     }
-    (total, viol, amb, per_wire)
+    (total, viol, amb, per_wire, free_end)
+}
+
+/// Whether any real piece of `a` crosses (or touches within the track half-widths) a real piece of
+/// `b` on `layer`.
+fn chains_intersect(a: &Chain, b: &Chain, layer: usize) -> bool {
+    let real = |c: &Chain| -> Vec<(Vec2, Vec2, f64)> {
+        (0..c.meta.len())
+            .filter(|&i| !c.meta[i].virt && c.meta[i].layer == layer)
+            .map(|i| (c.pts[i], c.pts[i + 1], c.meta[i].width))
+            .collect()
+    };
+    let (ra, rb) = (real(a), real(b));
+    for &(p, q, wp) in &ra {
+        for &(r, s, wr) in &rb {
+            if seg_cross(p, q - p, r, s - r).is_some() {
+                return true;
+            }
+            // Overlapping copper: the centre lines closer than the half widths.
+            let d = [(p, r, s), (q, r, s), (r, p, q), (s, p, q)]
+                .iter()
+                .map(|&(x, u, v)| (x - seg_point(x, u, v)).len())
+                .fold(f64::INFINITY, f64::min);
+            if d < 0.5 * (wp + wr) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Run P3 on the hand topology (2 signal layers).
@@ -1518,6 +1673,8 @@ pub struct G0In {
     pub wires: Vec<G0Wire>,
     #[serde(default)]
     pub vias: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub summary: serde_json::Value,
 }
 
 fn chain_traces(m: &BoardModel, chains: &[Chain]) -> Vec<Trace> {
@@ -1619,10 +1776,11 @@ pub fn run(hand: &BoardModel, g0: Option<&G0In>, spots: &[[f64; 2]], o: &Witness
             chain_of[*w] = c;
         }
     }
-    let (total_x, sl, amb, _pw) = crossings_report(&st, &chs, &walked, &chain_of, spots, o.drc_mm * MM, violations.len());
+    let (total_x, sl, amb, pw, free_end) = crossings_report(&st, &chs, &walked, &chain_of, spots, o.drc_mm * MM, violations.len());
     s.crossings = total_x;
     s.same_layer_crossings = sl.len();
     s.ambiguous_crossings = amb;
+    s.free_end_crossings = free_end;
     violations.extend(sl);
     if b.proj.n_layers == 2 && s.state_check == "ok" {
         let r = &hand.rules.default;
@@ -1658,5 +1816,5 @@ pub fn run(hand: &BoardModel, g0: Option<&G0In>, spots: &[[f64; 2]], o: &Witness
         }
     }
     s.runtime_s = t0.elapsed().as_secs_f64();
-    Ok(Witness { summary: s, violations, chains: chs, walked, wire_of, board: b })
+    Ok(Witness { summary: s, violations, chains: chs, walked, wire_of, wire_crossings: pw, board: b })
 }
