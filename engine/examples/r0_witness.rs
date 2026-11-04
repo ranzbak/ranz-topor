@@ -109,8 +109,8 @@ fn main() {
         s.edge_cuts_checked, s.pair_cuts, s.pair_cuts_with_traffic, s.tight_passes, s.g0_pair_violations
     );
     println!(
-        "  topology: {} wires ({} excluded), state {}, crossings {} (same-layer {}, ambiguous {}, free-end artefacts {})",
-        s.topo_wires, s.topo_excluded, s.state_check, s.crossings, s.same_layer_crossings, s.ambiguous_crossings, s.free_end_crossings
+        "  topology: {} wires ({} excluded), state {}, crossings {} (same-layer {}; {} pairs compared by sub-chord geometry)",
+        s.topo_wires, s.topo_excluded, s.state_check, s.crossings, s.same_layer_crossings, s.subchord_pairs
     );
     if s.p3_ran {
         println!(

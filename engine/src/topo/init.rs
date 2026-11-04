@@ -288,6 +288,7 @@ impl<'p> State<'p> {
             b: c.b,
             pa: c.pa,
             pb: c.pb,
+            free: [None, None],
             passes: Vec::new(),
             tris: Vec::new(),
             alive: true,

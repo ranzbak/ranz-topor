@@ -29,6 +29,18 @@ fn board(pads: &[Pad], tracks: &[Track]) -> BoardModel {
 
 /// [`board`] with the `rules` object given as JSON.
 fn board_rules(pads: &[Pad], tracks: &[Track], rules: &str) -> BoardModel {
+    board_vias(pads, tracks, &[], rules)
+}
+
+/// [`board_rules`] with vias `(net, x, y)` (0.45 mm, drill 0.3, through).
+fn board_vias(pads: &[Pad], tracks: &[Track], vias: &[(i32, f64, f64)], rules: &str) -> BoardModel {
+    let vias: Vec<String> = vias
+        .iter()
+        .enumerate()
+        .map(|(i, &(net, x, y))| {
+            format!(r#"{{"uuid":"v{i}","net":{net},"at":[{},{}],"d":450000,"drill":300000,"layers":[0,2]}}"#, p(x), p(y))
+        })
+        .collect();
     let c = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
     let outline: Vec<String> = (0..4)
         .map(|i| {
@@ -96,8 +108,9 @@ fn board_rules(pads: &[Pad], tracks: &[Track], rules: &str) -> BoardModel {
         r#"{{"units":"nm","board":"t",
             "layers":[{{"id":0,"name":"F.Cu","kind":"signal"}},{{"id":2,"name":"B.Cu","kind":"signal"}}],
             "nets":[{{"code":1,"name":"A"}},{{"code":2,"name":"B"}},{{"code":3,"name":"C"}},{{"code":4,"name":"D"}}],
-            "pads":[{}],"kept":[{}],"outline":[{}],"rules":{}}}"#,
+            "pads":[{}],"vias":[{}],"kept":[{}],"outline":[{}],"rules":{}}}"#,
         pads.join(","),
+        vias.join(","),
         kept.join(","),
         outline.join(","),
         rules
@@ -260,4 +273,61 @@ fn a_courtyard_clearance_rule_relaxes_the_demand() {
     };
     assert!(witness(&mk(100_000)).violations.is_empty());
     assert_eq!(count(&witness(&mk(200_000)), "pair_fit"), 1);
+}
+
+/// A track that dips to the other layer and back inside one triangle (two vias) enters and leaves
+/// through the same side, so its chord interleaves with a track of another net crossing that side
+/// between the entry and the exit. On the layer of the entry and the exit the two copper pieces
+/// do not meet: the crossing is not a same-layer one (R0 counted it as one).
+#[test]
+fn a_layer_dip_inside_a_triangle_is_no_same_layer_crossing() {
+    let m = board_vias(
+        &[Pad::Th(1, 1.0, 5.3, 0.6), Pad::Th(1, 9.0, 5.3, 0.6), Pad::Th(2, 4.5, 1.0, 0.6), Pad::Th(2, 4.5, 9.0, 0.6)],
+        &[
+            (1, 0, 0.2, (1.0, 5.3), (3.4, 5.3)),
+            (1, 2, 0.2, (3.4, 5.3), (5.6, 5.3)),
+            (1, 0, 0.2, (5.6, 5.3), (9.0, 5.3)),
+            (2, 0, 0.2, (4.5, 1.0), (4.5, 9.0)),
+        ],
+        &[(1, 3.4, 5.3), (1, 5.6, 5.3)],
+        "{}",
+    );
+    let w = witness(&m);
+    assert_eq!(w.summary.crossings, 1, "{:?}", w.violations);
+    assert_eq!(w.summary.same_layer_crossings, 0, "{:?}", w.violations);
+    assert!(w.summary.subchord_pairs >= 1, "the dip is compared by sub-chord geometry");
+}
+
+/// The same board with the dip on the layer of the other track's copper really short-circuits.
+#[test]
+fn a_track_over_the_dip_on_its_layer_is_a_same_layer_crossing() {
+    let m = board_vias(
+        &[Pad::Th(1, 1.0, 5.3, 0.6), Pad::Th(1, 9.0, 5.3, 0.6), Pad::Th(2, 4.5, 1.0, 0.6), Pad::Th(2, 4.5, 9.0, 0.6)],
+        &[
+            (1, 0, 0.2, (1.0, 5.3), (3.4, 5.3)),
+            (1, 2, 0.2, (3.4, 5.3), (5.6, 5.3)),
+            (1, 0, 0.2, (5.6, 5.3), (9.0, 5.3)),
+            (2, 2, 0.2, (4.5, 1.0), (4.5, 9.0)),
+        ],
+        &[(1, 3.4, 5.3), (1, 5.6, 5.3)],
+        "{}",
+    );
+    let w = witness(&m);
+    assert_eq!(w.summary.same_layer_crossings, 1, "{:?}", w.violations);
+}
+
+/// A dead end between two parallel tracks is a free terminal inside a triangle: it crosses
+/// nothing, and a stub that ends before the other track does not count as a crossing.
+#[test]
+fn a_dead_end_stub_beside_a_track_crosses_nothing() {
+    let m = board(
+        &[Pad::Th(1, 1.0, 3.0, 0.6), Pad::Th(1, 9.0, 3.0, 0.6), Pad::Th(2, 1.0, 7.0, 0.6), Pad::Th(2, 9.0, 7.0, 0.6)],
+        &[
+            (1, 0, 0.2, (1.0, 3.0), (9.0, 3.0)),
+            (2, 0, 0.2, (1.0, 7.0), (9.0, 7.0)),
+            (2, 0, 0.2, (5.0, 7.0), (5.0, 5.5)),
+        ],
+    );
+    let w = witness(&m);
+    assert_eq!(w.summary.crossings, 0, "{:?}", w.violations);
 }

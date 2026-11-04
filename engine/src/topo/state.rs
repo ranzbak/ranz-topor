@@ -394,6 +394,11 @@ pub struct Wire {
     pub b: VertId,
     pub pa: ObsId,
     pub pb: ObsId,
+    /// Free terminals (dead end, junction): position inside the first / last triangle of the wire
+    /// (`pa` / `pb` is `usize::MAX` then; `a` / `b` hold a stand-in corner for the chord
+    /// bookkeeping). The reserved shape of the plan's `Terminal::Branch`: the chord of such a
+    /// traversal ends at this point, not at a corner.
+    pub free: [Option<Vec2>; 2],
     pub passes: Vec<PassId>,
     /// Triangle of traversal `k` (`0..=passes.len()`): between pass `k-1` and pass `k`.
     pub tris: Vec<TriId>,

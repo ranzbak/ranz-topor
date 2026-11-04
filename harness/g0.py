@@ -18,7 +18,7 @@ from pathlib import Path
 MM = 1_000_000
 
 
-def export(src: str, out_dir: Path) -> tuple[Path, Path]:
+def export(src: str, out_dir: Path, keep_planes: bool = False) -> tuple[Path, Path]:
     from harness.copy import copy_project
     from harness.model import export_model, load_board, write_model_json
     from harness.paths import BENCH_BOARDS
@@ -40,8 +40,9 @@ def export(src: str, out_dir: Path) -> tuple[Path, Path]:
     hand_rules = resolve_rules(b, dru_text=dru, widths_before=widths, apply_fab_floors=False)
     hand_model = export_model(b, hand_rules, name=name, dru_text=dru)
     # A copper layer with a pour and no track is a plane (qmtech In1/In2 are declared "signal"
-    # in the pcb): not routable, as the plugin's plane detection decides for the real run.
-    for mdl in (model, hand_model):
+    # in the pcb): not routable, as the plugin's plane detection decides for the real run
+    # (`keep_planes` skips this: eprom-to-kernal's pour-only B.Cu stays a routing layer, as in G0 / R0).
+    for mdl in () if keep_planes else (model, hand_model):
         tracked = {k["layer"] for k in mdl["kept"]}
         poured = {l for p in mdl["pours"] for l in p["layers"]}
         for l in mdl["layers"]:
@@ -138,13 +139,15 @@ def main(argv=None) -> int:
     e = sub.add_parser("export")
     e.add_argument("board")
     e.add_argument("out_dir", type=Path)
+    e.add_argument("--keep-planes", action="store_true",
+                   help="keep every copper layer routable (no pour-only layer is demoted to a plane)")
     r = sub.add_parser("render")
     r.add_argument("hand_json", type=Path)
     r.add_argument("g0_json", type=Path)
     r.add_argument("png", type=Path)
     a = ap.parse_args(argv)
     if a.cmd == "export":
-        for p in export(a.board, a.out_dir):
+        for p in export(a.board, a.out_dir, a.keep_planes):
             print(p)
     else:
         print(render(a.hand_json, a.g0_json, a.png))

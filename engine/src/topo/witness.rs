@@ -759,9 +759,9 @@ pub struct Summary {
     pub state_check: String,
     pub crossings: usize,
     pub same_layer_crossings: usize,
-    pub ambiguous_crossings: usize,
-    /// Crossings seen only through a free-terminal chord (dead end / junction): not counted.
-    pub free_end_crossings: usize,
+    /// Pairs of traversals of a triangle compared by sub-chord geometry because one has a via or
+    /// a free terminal inside the triangle (see [`crossings_report`]); all of them are resolved.
+    pub subchord_pairs: usize,
     pub p3_ran: bool,
     pub p3_vias: usize,
     pub p3_unlayerable: usize,
@@ -1409,6 +1409,7 @@ pub fn sub_state<'p>(
             b: wk.b,
             pa: obs(ch.start),
             pb: obs(ch.end),
+            free: [(ch.start == End::Free).then(|| ch.pts[0]), (ch.end == End::Free).then(|| ch.pts[ch.pts.len() - 1])],
             passes: Vec::new(),
             tris: Vec::new(),
             alive: true,
@@ -1421,8 +1422,46 @@ pub fn sub_state<'p>(
     (st, wire_of, excluded)
 }
 
-/// Crossings of different nets in `st`: (total, same-layer violations, ambiguous). `chain_of`
-/// maps a wire back to its chain.
+/// The hand copper of traversal `k` of a chain inside its triangle as straight pieces
+/// `(from, to, layer)` (the polyline clipped to the arc-length range between pass `k-1` and pass
+/// `k`; connecting hops are no copper), and whether the traversal is *anchored*: a via changes the
+/// layer inside the triangle or a free terminal (dead end, junction) sits in it. `cum[i]` is the
+/// arc length of `pts[i]`.
+/// Copper pieces of a traversal: `(from, to, layer)`.
+type Pieces = Vec<(Vec2, Vec2, usize)>;
+
+fn sub_chords(pr: &super::state::Projection, ch: &Chain, wk: &Walked, k: usize, cum: &[f64]) -> (Pieces, bool) {
+    let n = wk.passes.len();
+    let total = cum[cum.len() - 1];
+    let (s_lo, s_hi) = (if k > 0 { wk.passes[k - 1].s } else { 0.0 }, if k < n { wk.passes[k].s } else { total });
+    let entry = if k > 0 { wk.passes[k - 1].at } else if ch.start == End::Free { ch.pts[0] } else { pr.pos[wk.a] };
+    let exit = if k < n { wk.passes[k].at } else if ch.end == End::Free { ch.pts[ch.pts.len() - 1] } else { pr.pos[wk.b] };
+    let mut out = Vec::new();
+    let mut layers = BTreeSet::new();
+    for j in 0..ch.meta.len() {
+        if ch.meta[j].virt || cum[j + 1] <= s_lo + 1.0 || cum[j] >= s_hi - 1.0 {
+            continue;
+        }
+        let from = if cum[j] < s_lo { entry } else { ch.pts[j] };
+        let to = if cum[j + 1] > s_hi { exit } else { ch.pts[j + 1] };
+        layers.insert(ch.meta[j].layer);
+        if (to - from).len() > 0.0 {
+            out.push((from, to, ch.meta[j].layer));
+        }
+    }
+    let free = (k == 0 && ch.start == End::Free) || (k == n && ch.end == End::Free);
+    (out, layers.len() > 1 || free)
+}
+
+/// Crossings of different nets in `st`: (total, same-layer violations, per wire, sub-chord pairs).
+/// `chain_of` maps a wire back to its chain.
+///
+/// Two traversals of a triangle cross when their chord ends interleave on the boundary. A
+/// traversal with a via or a free terminal (dead end, junction) inside the triangle is no chord
+/// between two boundary points: both traversals are compared as the hand polylines clipped to the
+/// triangle (per piece, each on one layer) by segment intersection. They cross when two pieces do;
+/// they cross on one layer when two pieces of the same layer do. A pair of plain traversals uses the interleaving, with the single layer of
+/// each. No pair is left out.
 pub fn crossings_report(
     st: &State,
     chains: &[Chain],
@@ -1431,86 +1470,107 @@ pub fn crossings_report(
     spots: &Spots,
     drc_r: f64,
     vid0: usize,
-) -> (usize, Vec<Violation>, usize, Vec<usize>, usize) {
+) -> (usize, Vec<Violation>, Vec<usize>, usize) {
     let pr = st.proj;
+    let cums: Vec<Vec<f64>> = chains
+        .iter()
+        .map(|c| {
+            let mut v = vec![0.0];
+            for i in 0..c.pts.len() - 1 {
+                v.push(v[i] + (c.pts[i + 1] - c.pts[i]).len());
+            }
+            v
+        })
+        .collect();
     let mut total = 0;
-    let mut amb = 0;
-    let mut free_end = 0;
+    let mut sub_pairs = 0;
     let mut viol = Vec::new();
     let mut per_wire = vec![0usize; st.wires.len()];
     for t in 0..pr.tris.len() {
         let tr = &st.tri_trav[t];
+        let geo: Vec<(Pieces, bool)> = tr
+            .iter()
+            .map(|&(w, k)| {
+                let c = chain_of[w];
+                sub_chords(pr, &chains[c], &walked[c], k, &cums[c])
+            })
+            .collect();
         for i in 0..tr.len() {
-            let (a1, a2) = st.chord(tr[i].0, tr[i].1);
             for j in i + 1..tr.len() {
                 let (wa, ka) = tr[i];
                 let (wb, kb) = tr[j];
                 if st.wires[wa].net == st.wires[wb].net {
                     continue;
                 }
-                let (b1, b2) = st.chord(wb, kb);
-                if !interleave(a1, a2, b1, b2) {
+                let (ca, cb) = (chain_of[wa], chain_of[wb]);
+                // (crossing at all, crossing on one layer)
+                let (any, same) = if !geo[i].1 && !geo[j].1 {
+                    let (a1, a2) = st.chord(wa, ka);
+                    let (b1, b2) = st.chord(wb, kb);
+                    if !interleave(a1, a2, b1, b2) {
+                        continue;
+                    }
+                    let (la, lb) = (trav_layer(&chains[ca], &walked[ca], ka), trav_layer(&chains[cb], &walked[cb], kb));
+                    (true, la.is_some() && la == lb)
+                } else {
+                    sub_pairs += 1;
+                    let (mut any, mut same) = (false, false);
+                    for &(p, q, lp) in &geo[i].0 {
+                        for &(r, u, lr) in &geo[j].0 {
+                            if let Some((x, y)) = seg_cross(p, q - p, r, u - r) {
+                                if x > 1e-6 && x < 1.0 - 1e-6 && y > 1e-6 && y < 1.0 - 1e-6 {
+                                    any = true;
+                                    same |= lp == lr;
+                                }
+                            }
+                        }
+                    }
+                    (any, same)
+                };
+                if !any {
                     continue;
                 }
                 total += 1;
                 per_wire[wa] += 1;
                 per_wire[wb] += 1;
-                let (ca, cb) = (chain_of[wa], chain_of[wb]);
-                // A traversal that ends in a free terminal (dead end, junction) has no corner to
-                // end on: its chord is an approximation and may only seem to cross.
-                let free = |c: usize, k: usize| {
-                    (k == 0 && chains[c].start == End::Free) || (k == walked[c].passes.len() && chains[c].end == End::Free)
-                };
-                if free(ca, ka) || free(cb, kb) {
-                    free_end += 1;
-                    continue;
+                if std::env::var("R0_DEBUG").is_ok_and(|v| v == "all") {
+                    let f = |g: &Pieces| g.iter().map(|s| format!("({:.3},{:.3})->({:.3},{:.3})L{}", s.0.x / MM, -s.0.y / MM, s.1.x / MM, -s.1.y / MM, s.2)).collect::<Vec<_>>().join(" ");
+                    eprintln!("crossing tri {t} nets {}/{} plain {}/{} same {same} trav layers {:?}/{:?}: A {} | B {}", st.wires[wa].net, st.wires[wb].net, !geo[i].1, !geo[j].1, trav_layer(&chains[ca], &walked[ca], ka), trav_layer(&chains[cb], &walked[cb], kb), f(&geo[i].0), f(&geo[j].0));
                 }
-                let la = trav_layer(&chains[ca], &walked[ca], ka);
-                let lb = trav_layer(&chains[cb], &walked[cb], kb);
-                match (la, lb) {
-                    (Some(x), Some(y)) if x == y => {
-                        let real = chains_intersect(&chains[ca], &chains[cb], x);
-                        if std::env::var("R0_DEBUG").is_ok() {
-                            for (c, k) in [(ca, ka), (cb, kb)] {
-                                let n = walked[c].passes.len();
-                                let ps: Vec<String> = [k.wrapping_sub(1), k]
-                                    .iter()
-                                    .filter(|&&q| q < n)
-                                    .map(|&q| format!("e{} u{:.4} s{:.0} virt{}", walked[c].passes[q].edge, walked[c].passes[q].u, walked[c].passes[q].s, walked[c].passes[q].virt))
-                                    .collect();
-                                eprintln!("same-layer tri {t}: chain {c} net {} {:?}->{:?} k {k}/{n} passes [{}]", chains[c].net, chains[c].start, chains[c].end, ps.join(" | "));
-                            }
-                        }
-                        let c = (pr.pos[pr.tris[t][0]] + pr.pos[pr.tris[t][1]] + pr.pos[pr.tris[t][2]]) * (1.0 / 3.0);
-                        viol.push(Violation {
-                            id: vid0 + viol.len(),
-                            check: "same_layer",
-                            edge: None,
-                            cut: None,
-                            layer: x as u64,
-                            nets: vec![st.wires[wa].net, st.wires[wb].net],
-                            need_mm: 0.0,
-                            have_mm: 0.0,
-                            at: kicad(c),
-                            cause: if real {
-                                "hand copper really intersects (different nets on one layer: hand short / net tie)".into()
-                            } else {
-                                "mapping or interleaving: the projection says crossing, the hand polylines do not intersect".into()
-                            },
-                            hand_drc: near_drc(spots, c, drc_r),
-                            line: None,
-                            passes: Vec::new(),
-                            ends: [String::new(), String::new()],
-                            true_gap_mm: 0.0,
-                        });
+                if same {
+                    let x = geo[i].0.iter().find_map(|s| geo[j].0.iter().find(|u| u.2 == s.2).map(|_| s.2)).unwrap_or(0);
+                    let real = chains_intersect(&chains[ca], &chains[cb], x);
+                    if std::env::var("R0_DEBUG").is_ok() {
+                        let f = |g: &Pieces| g.iter().map(|s| format!("({:.4},{:.4})->({:.4},{:.4})L{}", s.0.x / MM, -s.0.y / MM, s.1.x / MM, -s.1.y / MM, s.2)).collect::<Vec<_>>().join(" ");
+                        eprintln!("same-layer tri {t} chain {ca}/{cb} nets {}/{} k {ka}/{kb} plain {}/{}: A {} | B {}", st.wires[wa].net, st.wires[wb].net, !geo[i].1, !geo[j].1, f(&geo[i].0), f(&geo[j].0));
                     }
-                    (Some(_), Some(_)) => {}
-                    _ => amb += 1,
+                    let c = (pr.pos[pr.tris[t][0]] + pr.pos[pr.tris[t][1]] + pr.pos[pr.tris[t][2]]) * (1.0 / 3.0);
+                    viol.push(Violation {
+                        id: vid0 + viol.len(),
+                        check: "same_layer",
+                        edge: None,
+                        cut: None,
+                        layer: x as u64,
+                        nets: vec![st.wires[wa].net, st.wires[wb].net],
+                        need_mm: 0.0,
+                        have_mm: 0.0,
+                        at: kicad(c),
+                        cause: if real {
+                            "hand copper really intersects (different nets on one layer: hand short / net tie)".into()
+                        } else {
+                            "mapping or interleaving: the projection says crossing, the hand polylines do not intersect".into()
+                        },
+                        hand_drc: near_drc(spots, c, drc_r),
+                        line: None,
+                        passes: Vec::new(),
+                        ends: [String::new(), String::new()],
+                        true_gap_mm: 0.0,
+                    });
                 }
             }
         }
     }
-    (total, viol, amb, per_wire, free_end)
+    (total, viol, per_wire, sub_pairs)
 }
 
 /// Whether any real piece of `a` crosses (or touches within the track half-widths) a real piece of
@@ -1664,11 +1724,10 @@ pub fn run(hand: &BoardModel, g0: Option<&G0In>, spots: &Spots, o: &WitnessOpts)
             chain_of[*w] = c;
         }
     }
-    let (total_x, sl, amb, pw, free_end) = crossings_report(&st, &chs, &walked, &chain_of, spots, o.drc_mm * MM, violations.len());
+    let (total_x, sl, pw, sub_pairs) = crossings_report(&st, &chs, &walked, &chain_of, spots, o.drc_mm * MM, violations.len());
     s.crossings = total_x;
     s.same_layer_crossings = sl.len();
-    s.ambiguous_crossings = amb;
-    s.free_end_crossings = free_end;
+    s.subchord_pairs = sub_pairs;
     violations.extend(sl);
     if b.proj.n_layers == 2 && s.state_check == "ok" {
         let r = &hand.rules.default;
