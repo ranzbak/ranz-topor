@@ -8,7 +8,7 @@ from pathlib import Path
 import pcbnew
 
 from toporlib.dru import dru_courtyard_clearances, merge_dru_keepouts, parse_dru
-from toporlib.geom import find_dangling, hull, track_item
+from toporlib.geom import circle_ring, find_dangling, hull, track_item
 
 _KIND = {
     pcbnew.LT_SIGNAL: "signal",
@@ -287,12 +287,17 @@ def _export_outline(board, max_err: int):
         elif s == pcbnew.SHAPE_T_BEZIER:
             pts = list(item.GetBezierPoints())
             out += [_seg(pts[i], pts[i + 1]) for i in range(len(pts) - 1)]
-        else:  # circle / polygon: flattened outline
-            ps = pcbnew.SHAPE_POLY_SET()
-            item.TransformShapeToPolygon(ps, item.GetLayer(), 0, max_err, pcbnew.ERROR_INSIDE)
+        elif s == pcbnew.SHAPE_T_POLY:
+            # the polygon's own corners; TransformShapeToPolygon would give its stroke outline
+            # (one thin loop per edge) and lose the board edge (an organic gr_poly outline)
+            ps = item.GetPolyShape()
             for i in range(ps.OutlineCount()):
                 pts = _outline_pts(ps, i)
                 out += [{"kind": "seg", "a": pts[j], "b": pts[(j + 1) % len(pts)]} for j in range(len(pts))]
+        elif s == pcbnew.SHAPE_T_CIRCLE:  # one ring on the circle, as the plugin (model_ipc.shape_to_prims)
+            c = item.GetCenter()
+            pts = circle_ring((c.x, c.y), item.GetRadius(), max_err)
+            out += [{"kind": "seg", "a": pts[j], "b": pts[(j + 1) % len(pts)]} for j in range(len(pts))]
     return out
 
 
