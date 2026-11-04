@@ -4,12 +4,15 @@
 //! ([`layers`], P3), measured by [`gate`]. Not wired into `route()`.
 
 pub mod board;
+pub mod core;
 pub mod cuts;
 pub mod demand;
+pub mod draw;
 pub mod factors;
 pub mod gate;
 pub mod init;
 pub mod layers;
+pub mod planes;
 pub mod metrize;
 pub mod state;
 pub mod stats;

@@ -421,6 +421,11 @@ pub struct LayerReport {
     pub same_layer: usize,
     /// Per wire: (layer, points) pieces.
     pub stretches: Vec<Vec<(i32, Vec<Vec2>)>>,
+    /// Per wire: its events as `(traversal k, fraction s, layer label)` in wire order (empty for
+    /// a wire that crosses nothing). Consecutive events with different labels bound a via interval.
+    pub events: Vec<Vec<(usize, f64, i32)>>,
+    /// The wire pairs `(a, b)`, `a < b`, of the different-net crossings left on one layer.
+    pub unlayerable_pairs: Vec<(WireId, WireId)>,
 }
 
 /// Parameters of P3.
@@ -557,6 +562,7 @@ pub fn assign(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
         let wi = &st.wires[w];
         if !wi.alive {
             rep.stretches.push(Vec::new());
+            rep.events.push(Vec::new());
             continue;
         }
         let pts = &polys[w];
@@ -566,6 +572,7 @@ pub fn assign(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
         }
         let n = wi.passes.len();
         let mut pieces: Vec<(i32, Vec<Vec2>)> = Vec::new();
+        rep.events.push(ev.iter().map(|e| (e.k, e.s, lab(e))).collect());
         let Some(first) = ev.first() else {
             // Crosses nothing: the bottom layer (TopoR's default).
             pieces.push((pr.n_layers as i32 - 1, pts.clone()));
@@ -596,8 +603,11 @@ pub fn assign(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
         rep.stretches.push(pieces);
     }
     rep.same_layer = dom_labels.values().filter(|l| l.len() == 2 && l[0] == l[1]).count();
-    for &(w, k, ..) in &unl {
+    for &(w, k, o, _) in &unl {
         rep.unlayerable.push(at(&polys[w], k, 0.5));
+        rep.unlayerable_pairs.push((w, o));
     }
+    rep.unlayerable_pairs.sort_unstable();
+    rep.unlayerable_pairs.dedup();
     rep
 }

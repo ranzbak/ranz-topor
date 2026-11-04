@@ -277,11 +277,50 @@ pub fn wire_stats(model: &BoardModel) -> WireStats {
     }
 }
 
-fn kicad(p: Vec2) -> [i64; 2] {
+impl ConnReport {
+    /// A report with every measure empty; the caller fills what the connection has.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn blank(id: usize, net: i32, name: String, layer: u32, width: i64, status: &str, reason: &str, from: TermOut, to: TermOut) -> ConnReport {
+        ConnReport {
+            id,
+            net,
+            name,
+            layer,
+            width,
+            status: status.into(),
+            reason: reason.into(),
+            vias: 0,
+            layers: Vec::new(),
+            via_sites: Vec::new(),
+            from,
+            to,
+            length_nm: 0,
+            length_outside_pads_nm: 0,
+            pattern: String::new(),
+            anchors: 0,
+            crossings: 0,
+            blocking: None,
+            g1_angle_deg: None,
+            iteration: 0,
+            zero_slack: false,
+            probe_steps: None,
+            ghost_len_nm: None,
+            ref_len_nm: None,
+            ref_kind: "none".into(),
+            stub_nm: 0,
+            neck_nm: 0,
+            neck_width_nm: None,
+            junction: false,
+            junction_angle_deg: None,
+        }
+    }
+}
+
+pub(crate) fn kicad(p: Vec2) -> [i64; 2] {
     [p.x.round() as i64, (-p.y).round() as i64]
 }
 
-fn term_out(t: &TermRef) -> TermOut {
+pub(crate) fn term_out(t: &TermRef) -> TermOut {
     TermOut {
         kind: match t.kind {
             TermKind::Pad(_) | TermKind::Stub { .. } => "pad",
@@ -374,28 +413,27 @@ fn append_ignored(r: &mut RouteResult, model: &BoardModel, removed: &[usize]) {
     }
 }
 
-/// Route `model`. Placeholder: decomposes and reports every connection as failed
-/// ([`NO_ENGINE`]); no copper is produced.
+/// Route `model` with the topological core ([`crate::topo::core`]).
 pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
     route_with(model, opts, &RunControl::default())
 }
 
-/// [`route`] under a [`RunControl`] (the placeholder never runs long enough to poll it).
-pub fn route_with(model: &BoardModel, opts: &Options, _ctl: &RunControl) -> RouteResult {
+/// [`route`] under a [`RunControl`] (cancellation and progress).
+pub fn route_with(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteResult {
     if opts.ignore_pads.is_empty() {
-        return unrouted(model, opts);
+        return crate::topo::core::route_topo(model, opts, ctl);
     }
     let (filtered, ignored) = drop_ignored_pads(model, opts);
-    let mut r = unrouted(&filtered, opts);
+    let mut r = crate::topo::core::route_topo(&filtered, opts, ctl);
     append_ignored(&mut r, model, &ignored);
     r
 }
 
 /// Decompose `model` on its routable layers and report every connection as failed with
 /// [`NO_ENGINE`], nets summarised as the plugin expects. O(decompose + C·N).
-fn unrouted(model: &BoardModel, opts: &Options) -> RouteResult {
+pub(crate) fn unrouted(model: &BoardModel, opts: &Options, reason: &str) -> RouteResult {
     let t0 = Instant::now();
-    let mut warnings: Vec<String> = vec![NO_ENGINE.to_string()];
+    let mut warnings: Vec<String> = vec![reason.to_string()];
     let mut routable: Vec<u32> = model
         .layers
         .iter()
@@ -428,7 +466,7 @@ fn unrouted(model: &BoardModel, opts: &Options) -> RouteResult {
             layer: first_layer,
             width: c.width,
             status: "failed".into(),
-            reason: NO_ENGINE.into(),
+            reason: reason.into(),
             vias: 0,
             layers: Vec::new(),
             via_sites: Vec::new(),

@@ -180,7 +180,7 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
             h = caption(render_png(hand.pcb, out_dir / f"{name}-hand-raw.png"), f"{name}: hand",
                         out_dir / f"{name}-hand.png")
             t = caption(render_png(routed_pcb, out_dir / f"{name}-topor-raw.png"),
-                        f"{name}: topor ({routed}/{total} routed, {m['unconnected']} unconnected)",
+                        f"{name}: {os.environ.get('TOPOR_PNG_LABEL', 'topor')} ({routed}/{total} routed, {m['unconnected']} unconnected)",
                         out_dir / f"{name}-topor.png")
             compose_compare(h, t, out_dir / f"{name}-compare.png")
             m["png"] = str(out_dir / f"{name}-compare.png")
