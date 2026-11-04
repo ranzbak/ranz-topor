@@ -37,6 +37,8 @@ pub struct Board {
     pub signal_layers: Vec<u32>,
     /// Centre vertex of each pad obstacle with a net.
     pub centre: Vec<Option<VertId>>,
+    /// Index into `BoardModel::pads` of each obstacle.
+    pub pad_of: Vec<usize>,
     /// Nets with a copper pour (connected by the pour, not wired in G0).
     pub poured: BTreeSet<i32>,
 }
@@ -85,7 +87,7 @@ fn skel_poly(sk: &Skeleton) -> Vec<Vec2> {
 }
 
 /// The board outline as segments (arcs split to 0.05 mm sagitta).
-fn outline_segments(m: &BoardModel) -> Vec<(Vec2, Vec2)> {
+pub fn outline_segments(m: &BoardModel) -> Vec<(Vec2, Vec2)> {
     let mut segs = Vec::new();
     for p in &m.outline {
         match *p {
@@ -121,7 +123,8 @@ pub fn build(m: &BoardModel, o: &BuildOpts) -> Result<Board, String> {
     let signal_layers: Vec<u32> = m.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
     let n = signal_layers.len();
     let mut obstacles = Vec::new();
-    for pad in &m.pads {
+    let mut pad_of = Vec::new();
+    for (pi, pad) in m.pads.iter().enumerate() {
         let mut mask = LayerMask(0);
         for (li, id) in signal_layers.iter().enumerate() {
             if pad.layers.contains(id) {
@@ -143,6 +146,7 @@ pub fn build(m: &BoardModel, o: &BuildOpts) -> Result<Board, String> {
         if poly.len() < 3 {
             continue;
         }
+        pad_of.push(pi);
         obstacles.push(Obstacle {
             kind: if pad.attr == PadAttr::Npth { ObsKind::Drill } else { ObsKind::Pad },
             poly,
@@ -230,7 +234,7 @@ pub fn build(m: &BoardModel, o: &BuildOpts) -> Result<Board, String> {
         }
     }
     let poured = m.pours.iter().map(|p| p.net).collect();
-    Ok(Board { proj, signal_layers, centre, poured })
+    Ok(Board { proj, signal_layers, centre, pad_of, poured })
 }
 
 impl Board {

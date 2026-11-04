@@ -8,3 +8,5 @@ pub mod gate;
 pub mod init;
 pub mod layers;
 pub mod state;
+pub mod stats;
+pub mod witness;

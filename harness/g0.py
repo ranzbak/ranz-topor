@@ -33,6 +33,13 @@ def export(src: str, out_dir: Path) -> tuple[Path, Path]:
     dru = cp.dru.read_text() if cp.dru is not None else None
     rules = resolve_rules(b, dru_text=dru, widths_before=record_widths(b))
     model = export_model(b, rules, name=name, dru_text=dru)
+    # A copper layer with a pour and no track is a plane (qmtech In1/In2 are declared "signal"
+    # in the pcb): not routable, as the plugin's plane detection decides for the real run.
+    tracked = {k["layer"] for k in model["kept"]}
+    poured = {l for p in model["pours"] for l in p["layers"]}
+    for l in model["layers"]:
+        if l["routable"] and l["id"] in poured and l["id"] not in tracked:
+            l["routable"] = False
     hand = write_model_json(model, out_dir / f"{name}--hand.json")
     # The ripped copy: every track and via removed (pcbnew's SWIG objects are unreliable after
     # Remove(), so this is done on the exported model rather than on the board).

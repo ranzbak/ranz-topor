@@ -96,7 +96,7 @@ pub struct Projection {
     pub room: Vec<Vec<f64>>,
 }
 
-fn point_in_poly(p: Vec2, poly: &[Vec2]) -> bool {
+pub fn point_in_poly(p: Vec2, poly: &[Vec2]) -> bool {
     let n = poly.len();
     let mut inside = false;
     for i in 0..n {
@@ -371,6 +371,9 @@ pub struct ViaSlot {
     pub at: (usize, f64),
 }
 
+/// A wire to load with its passes `(edge, position along the edge)` and triangles.
+pub type LoadItem = (Wire, Vec<(EdgeId, f64)>, Vec<TriId>);
+
 #[derive(Clone, Debug)]
 pub struct State<'p> {
     pub proj: &'p Projection,
@@ -529,6 +532,36 @@ impl<'p> State<'p> {
         wire.alive = true;
         self.wires.push(wire);
         id
+    }
+
+    /// Load complete wires at once (the hand topology of R0): per wire its passes as
+    /// `(edge, position along the edge from p, 0..1)` and its triangles. The per-edge order is
+    /// taken from the positions (ties: load order), so no gap search is needed.
+    pub fn load_all(&mut self, items: Vec<LoadItem>) {
+        let mut at: Vec<Vec<(f64, PassId)>> = vec![Vec::new(); self.edge_order.len()];
+        for (mut wire, passes, tris) in items {
+            assert_eq!(tris.len(), passes.len() + 1, "one more triangle than passes");
+            let id = self.wires.len();
+            let ws = wire.w + wire.s;
+            wire.passes.clear();
+            for &(e, u) in &passes {
+                let pid = self.passes.len();
+                self.passes.push(Pass { wire: id, edge: e });
+                at[e].push((u, pid));
+                self.demand[e] += ws;
+                wire.passes.push(pid);
+            }
+            for (k, &t) in tris.iter().enumerate() {
+                self.tri_trav[t].push((id, k));
+            }
+            wire.tris = tris;
+            wire.alive = true;
+            self.wires.push(wire);
+        }
+        for (e, v) in at.iter_mut().enumerate() {
+            v.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            self.edge_order[e].extend(v.iter().map(|x| x.1));
+        }
     }
 
     pub fn remove(&mut self, w: WireId) {
