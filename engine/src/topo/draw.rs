@@ -1035,6 +1035,31 @@ impl<'a> Drawer<'a> {
         room
     }
 
+    /// Free room (nm) a via of diameter `d` at `p` of `net` leaves to the nearest foreign copper
+    /// indexed so far (static board and committed items, any layer), past the clearance; the
+    /// part of [`Drawer::via_room`] that needs no wire (D6a, plane stub vias). O(objects nearby).
+    pub fn point_room(&self, p: Vec2, d: f64, net: i32) -> f64 {
+        let own = self.model.rules.net_rule(net).clearance as f64;
+        let mut room = f64::INFINITY;
+        let mut ids = self.grid.query(bbox_of(&[p]).grow(2.0e6 + d));
+        ids.sort_unstable();
+        ids.dedup();
+        for id in ids {
+            let e = &self.ents[id];
+            if !e.live || e.net == Some(net) {
+                continue;
+            }
+            let dist = match &e.core {
+                Core::Poly(q) => poly_dist(p, q),
+                Core::Seg(a, b) => seg_dist(p, *a, *b),
+                Core::Pt(q) => (p - *q).len(),
+            };
+            let need = if e.fixed { e.clear } else { e.clear.max(own) };
+            room = room.min(dist - e.grow - 0.5 * d - need);
+        }
+        room
+    }
+
     /// Place the vias of wire `w` (ids of the indexed items in `ids`), or the reason it cannot be.
     pub fn place_vias(&mut self, w: WireId, plan: &Plan, ids: &mut Vec<usize>) -> Result<Vec<(usize, Vec2, ViaSize)>, String> {
         let net = self.st.wires[w].net;
@@ -1346,10 +1371,13 @@ impl<'a> Drawer<'a> {
             return true;
         }
         let r = 0.5 * size.d as f64;
+        // KiCad's pad polygon reaches up to `max_error` past the arcs: a via that clears the
+        // exact copper by less still touches it in a sliver (dcsgonebadge C22.1, D6a: 6 um).
+        let tol = self.model.rules.max_error.max(0) as f64;
         self.model.pads.iter().filter(|pad| pad.net == net).all(|pad| {
             pad.layers.iter().all(|&l| {
                 let d = crate::geom::point_skeleton(p, &self.model.skeleton(pad, l));
-                d >= r || d <= 0.0
+                d >= r + tol || d <= 0.0
             })
         })
     }
@@ -1400,6 +1428,31 @@ impl<'a> Drawer<'a> {
                 d - 0.5 * t.width as f64 >= tol || d <= 0.0
             })
         })
+    }
+
+    /// A plane stub's track does not graze a pad of its net other than its own (`own`, an index
+    /// into `model.pads`) nor an own-net via of `vias` (centre, radius): the sliver connection
+    /// [`Drawer::track_own_pad_ok`] keeps wires from (D6a, dcsgonebadge J3.16: a GND stub to a
+    /// via down-left grazed J3.15, "actual 0.0904 mm" < 0.127 mm). O(pads of the net).
+    pub fn stub_own_ok(&self, stub: &Item, own: usize, vias: &[(Vec2, f64)]) -> bool {
+        let Item::Track(t) = stub else { return true };
+        if self.model.rules.min_connection <= 0 || t.net == 0 {
+            return true;
+        }
+        let TrackPrim::Seg { a, b } = t.prim else { return true };
+        let (a, b) = (Vec2 { x: f64::from(a.x), y: -f64::from(a.y) }, Vec2 { x: f64::from(b.x), y: -f64::from(b.y) });
+        let prim = crate::geom::Prim::Seg(crate::geom::Seg { a, b });
+        let tol = self.model.rules.max_error as f64;
+        let ok = |d: f64| d - 0.5 * t.width as f64 >= tol || d <= 0.0;
+        // Another pad of the net: the stub keeps off it altogether. A centre line that only clips
+        // a corner is still a sliver (J3.16 again: 0.1025 mm), and a stub needs no other pad.
+        let off = |d: f64| d - 0.5 * t.width as f64 >= tol;
+        self.model.pads.iter().enumerate().filter(|&(i, p)| i != own && p.net == t.net && p.layers.contains(&t.layer)).all(|(_, pad)| off(crate::geom::dist::dist_prim_skeleton(&prim, &self.model.skeleton(pad, t.layer))))
+            && vias.iter().all(|&(c, r)| {
+                let ab = b - a;
+                let u = ((c - a).dot(ab) / ab.len2().max(1.0)).clamp(0.0, 1.0);
+                ok((a + ab * u - c).len() - r)
+            })
     }
 
     /// Index `item` as accepted copper; its handle (for [`Drawer::uncommit`]).

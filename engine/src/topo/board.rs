@@ -38,12 +38,29 @@ pub struct BuildOpts {
     /// The non-routable copper layers (planes) follow the routable ones as extra projection
     /// layers, so signal copper can be priced onto them (S2b, `[planes] signals = "costly"`).
     pub plane_layers: bool,
+    /// Copper graphics (`BoardModel::copper_shapes`: gr_* shapes and footprint graphics on a
+    /// copper layer) are obstacles on their layer, with their net (D6a): a wire of another net
+    /// keeps the clearance to them in the topology, not only in the drawing.
+    pub copper_shapes: bool,
 }
 
 impl Default for BuildOpts {
     fn default() -> Self {
-        BuildOpts { steiner_mm: 2.0, steiner_clear_mm: 0.6, lct_mm: 3.0, lct_eps_mm: 0.01, round_steps: 16, existing_vias: false, keepouts: false, plane_layers: false }
+        BuildOpts { steiner_mm: 2.0, steiner_clear_mm: 0.6, lct_mm: 3.0, lct_eps_mm: 0.01, round_steps: 16, existing_vias: false, keepouts: false, plane_layers: false, copper_shapes: false }
     }
+}
+
+/// Copper placed before the topology that the projection must see (D6a: the plane stubs and
+/// their vias). A via is drilled (a wall on every layer for other nets); a track is a
+/// rectangle `a`-`b` of `width` on model layer `layer` (the caller trims it to the part outside
+/// the copper it joins, so the polygons do not overlap). Neither gets a centre vertex: it is no
+/// terminal and no pad left to fan out.
+#[derive(Clone, Debug)]
+pub enum Extra {
+    /// `ring`: extra clearance (nm) other nets keep, so the pour reaches the via (a plane via:
+    /// the zone's minimum width; KiCad's connection width check otherwise flags the neck).
+    Via { net: i32, at: Vec2, d: f64, ring: f64 },
+    Track { net: i32, layer: u32, a: Vec2, b: Vec2, width: f64 },
 }
 
 #[derive(Clone, Debug)]
@@ -162,6 +179,12 @@ pub fn build(m: &BoardModel, o: &BuildOpts) -> Result<Board, String> {
 /// [`build`] with extra vertices `nodes` (nm) inserted into the triangulation (kind
 /// `VertKind::Node`): the points inside triangles of the State, see the `state` module doc.
 pub fn build_with_nodes(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2]) -> Result<Board, String> {
+    build_full(m, o, nodes, &[])
+}
+
+/// [`build_with_nodes`] with the extra copper `extra` as obstacles (after the pads, existing
+/// vias, keepouts and copper shapes, so their obstacle ids do not move).
+pub fn build_full(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: &[Extra]) -> Result<Board, String> {
     let mut signal_layers: Vec<u32> = m.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
     let n_signal = signal_layers.len();
     if o.plane_layers {
@@ -266,10 +289,69 @@ pub fn build_with_nodes(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2]) -> Result
             });
         }
     }
+    // Pads, existing vias and keepouts may carry a centre vertex; copper shapes and the extra
+    // copper are no terminals.
+    let n_centred = obstacles.len();
+    if o.copper_shapes {
+        for sh in m.copper_shapes.iter().filter(|c| c.poly.len() >= 3) {
+            let Some(li) = signal_layers.iter().position(|&id| id == sh.layer) else { continue };
+            let mut poly: Vec<Vec2> = sh.poly.iter().map(|p| p.to_vec2()).collect();
+            poly.dedup();
+            if poly.len() >= 2 && poly[0] == poly[poly.len() - 1] {
+                poly.pop();
+            }
+            if poly.len() < 3 {
+                continue;
+            }
+            let area: f64 = (0..poly.len()).map(|i| poly[i].cross(poly[(i + 1) % poly.len()])).sum();
+            if area < 0.0 {
+                poly.reverse();
+            }
+            let c = poly.iter().fold(Vec2 { x: 0.0, y: 0.0 }, |a, &p| a + p) * (1.0 / poly.len() as f64);
+            pad_of.push(usize::MAX);
+            obstacles.push(Obstacle {
+                kind: ObsKind::Pad,
+                poly,
+                center: c,
+                layers: LayerMask(1 << li),
+                drilled: false,
+                net: (sh.net > 0).then_some(sh.net),
+                // The checker charges a shape the larger of its net's clearance and the other
+                // item's; the demand model takes the larger of `clear` and the wire's.
+                clear: (m.rules.net_rule(sh.net).clearance).max(m.rules.min_clearance) as f64,
+                bare: false,
+                sag: 0.0,
+            });
+        }
+    }
+    for x in extra {
+        let (poly, sag, layers, drilled, net, clear) = match *x {
+            Extra::Via { net, at, d, ring } => {
+                let (poly, sag) = skel_poly_sag(&Skeleton::Point { p: at, r: 0.5 * d }, o.round_steps.max(4));
+                (poly, sag, LayerMask::all(n), true, net, (m.rules.net_rule(net).clearance).max(m.rules.min_clearance).max(m.rules.hole_clearance) as f64 + ring)
+            }
+            Extra::Track { net, layer, a, b, width } => {
+                let Some(li) = signal_layers.iter().position(|&id| id == layer) else { continue };
+                let u = b - a;
+                let l = u.len();
+                if l <= 0.0 {
+                    continue;
+                }
+                let nrm = Vec2 { x: -u.y / l, y: u.x / l } * (0.5 * width);
+                (vec![a - nrm, b - nrm, b + nrm, a + nrm], 0.0, LayerMask(1 << li), false, net, (m.rules.net_rule(net).clearance).max(m.rules.min_clearance) as f64)
+            }
+        };
+        if poly.len() < 3 {
+            continue;
+        }
+        let c = poly.iter().fold(Vec2 { x: 0.0, y: 0.0 }, |acc, &p| acc + p) * (1.0 / poly.len() as f64);
+        pad_of.push(usize::MAX);
+        obstacles.push(Obstacle { kind: ObsKind::Pad, poly, center: c, layers, drilled, net: (net > 0).then_some(net), clear, bare: false, sag });
+    }
     // Centres first, so a coincident vertex keeps the terminal kind.
     let mut points: Vec<(Vec2, VertKind)> = Vec::new();
     let mut cons = Vec::new();
-    for (i, ob) in obstacles.iter().enumerate() {
+    for (i, ob) in obstacles.iter().enumerate().take(n_centred) {
         if ob.net.is_some() {
             points.push((ob.center, VertKind::Centre(i)));
         }
@@ -371,6 +453,9 @@ pub fn build_with_nodes(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2]) -> Result
         proj.edge_clear_ignored = proj.edge_clear;
         proj.edge_clear = 0.0;
     }
+    // Keepouts forbidding vias, on whatever copper layer (a through via spans them all): no
+    // via site may touch one (the P3 site test, the drawing's checker).
+    proj.no_via = m.keepouts.iter().filter(|k| k.no_vias && k.poly.len() >= 3).map(|k| k.poly.iter().map(|p| p.to_vec2()).collect()).collect();
     proj.set_regions(m.rules.clearance_regions.iter().map(|r| (r.poly.iter().map(|p| p.to_vec2()).collect(), r.clearance as f64)).collect());
     let mut centre = vec![None; proj.obstacles.len()];
     for (v, k) in proj.vkind.iter().enumerate() {

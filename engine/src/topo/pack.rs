@@ -332,6 +332,13 @@ impl<'a> Packer<'a> {
                 *f = f.min(d);
             }
         }
+        // A keepout that forbids vias: the disc may not touch it (a hard rule, D6a).
+        for k in &pr.no_via {
+            for (q, f) in pts.iter().zip(free.iter_mut()) {
+                let d = if super::state::point_in_poly(*q, k) { f64::NEG_INFINITY } else { poly_dist(*q, k) - self.eps };
+                *f = f.min(d);
+            }
+        }
         let f = free.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         self.free_cache.borrow_mut().insert(key, f);
         f >= r

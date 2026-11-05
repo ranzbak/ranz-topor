@@ -269,6 +269,15 @@ pub struct Keepout {
     pub no_tracks: bool,
     #[serde(default)]
     pub no_vias: bool,
+    /// The rule area forbids copper pours (zone fills) on its layers (D6a: the pour estimate
+    /// leaves it out).
+    #[serde(default)]
+    pub no_pour: bool,
+    /// Carried from KiCad, not used by the router (pads / footprints are never placed).
+    #[serde(default)]
+    pub no_pads: bool,
+    #[serde(default)]
+    pub no_footprints: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

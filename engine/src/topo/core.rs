@@ -133,7 +133,8 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         }
         arch.offer(Variant { label: format!("round {round}"), crit: ro.crit, payload: ro.result.clone() }, &obj);
     };
-    let (r1, h0, mut mem) = route_round(model, opts, ctl, &[], &Memory::default(), 1);
+    let stubs = place_plane_stubs(model, opts);
+    let (r1, h0, mut mem) = route_round(model, opts, ctl, &[], &Memory::default(), 1, &stubs);
     offer(&mut arch, 1, &r1);
     let mut time_hit = r1.result.timed_out;
     let mut stop_reason = r1.result.stop_reason.clone();
@@ -161,7 +162,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
             o2.wall_clock_s = (opts.wall_clock_s - t0.elapsed().as_secs_f64()).max(1.0);
         }
         let hv: Hints = all.iter().map(|(&(e, l), &r)| (e, l, r)).collect();
-        let (r2, h2, mem2) = route_round(model, &o2, ctl, &hv, &mem, round);
+        let (r2, h2, mem2) = route_round(model, &o2, ctl, &hv, &mem, round, &stubs);
         time_hit |= r2.result.timed_out;
         stop_reason = r2.result.stop_reason.clone();
         mem = mem2;
@@ -289,9 +290,86 @@ struct Memory {
 /// Lowered rooms `(edge, layer, room nm)` that a second round applies.
 type Hints = Vec<(usize, usize, f64)>;
 
+/// The projection options of a route (the same in every round, so edge ids stay comparable).
+fn build_opts(opts: &Options) -> BuildOpts {
+    BuildOpts { existing_vias: true, keepouts: true, plane_layers: opts.plane_signals != "forbidden", copper_shapes: true, ..BuildOpts::default() }
+}
+
+/// The plane stubs of a route, placed once on the static board before any topology (D6a): the
+/// planner sees them as obstacles (`extra`), so it leaves them room and no signal is planned
+/// where a stub goes (wiccon-2023 GPIO0 vs the MODE1.2 GND stub, D5). `res` per plane
+/// connection id, in the plane stage's order.
+#[derive(Default)]
+struct PlaneStubs {
+    res: Vec<(usize, Result<planes::Out, String>)>,
+    extra: Vec<board::Extra>,
+}
+
+/// The pad-to-pour connections of `dec` (the plane stage's requests), as `route_round` sorts them.
+fn plane_requests(model: &BoardModel, b: &board::Board, dec: &crate::decompose::Decomposition) -> Vec<planes::Req> {
+    let diff = diff_pair_nets(model);
+    let mut obs_of_pad: BTreeMap<usize, ObsId> = BTreeMap::new();
+    for (o, &p) in b.pad_of.iter().enumerate().filter(|(_, &p)| p != usize::MAX) {
+        obs_of_pad.insert(p, o);
+    }
+    let mut out = Vec::new();
+    for c in &dec.connections {
+        if diff.contains(&c.net) {
+            continue;
+        }
+        if let (TermKind::Pad(pa), TermKind::Pour(zi)) = (&c.from.kind, &c.to.kind) {
+            if let Some(&oa) = obs_of_pad.get(pa) {
+                out.push(planes::Req { conn: c.id, pad: *pa, obs: oa, net: c.net, w: c.width as f64, pour: *zi });
+            }
+        }
+    }
+    out
+}
+
+/// Place every plane stub on the static board (pads, holes, outline, keepouts, copper shapes,
+/// existing copper; the stubs placed before it), each at its cheapest site ([`planes::place`]).
+fn place_plane_stubs(model: &BoardModel, opts: &Options) -> PlaneStubs {
+    let signal: Vec<u32> = model.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
+    if signal.len() < 2 {
+        return PlaneStubs::default();
+    }
+    let dec = decompose(model, opts, &signal);
+    let Ok(b) = board::build(model, &build_opts(opts)) else { return PlaneStubs::default() };
+    let reqs = plane_requests(model, &b, &dec);
+    if reqs.is_empty() {
+        return PlaneStubs::default();
+    }
+    let (reg, _) = Registry::from_config(standard_factors(), &opts.factors);
+    let edge_ignored = model.rules.ignored_checks.iter().any(|c| c == "copper_edge_clearance");
+    let relaxed;
+    let check_model: &BoardModel = if edge_ignored {
+        let mut m = model.clone();
+        m.rules.edge_clearance = 0;
+        relaxed = m;
+        &relaxed
+    } else {
+        model
+    };
+    let checker = Checker::new(check_model, opts);
+    let st = State::new(&b.proj);
+    let mut dr = Drawer::new(model, opts, &b, &st, &checker);
+    let cost = planes::SiteCost { mm: reg.price(&Event::Length { wire: 0, mm: 1.0, scale: 1.0 }, &WireCtx::default()), reg: &reg };
+    let mut out = PlaneStubs::default();
+    let mut vias: Vec<(Vec2, f64)> = Vec::new();
+    for rq in &reqs {
+        let r = planes::place(&mut dr, rq, &cost, &vias);
+        if let Ok(o) = &r {
+            out.extra.extend(planes::extras(&b, rq, o));
+            vias.push((o.via, 0.5 * o.size.d as f64));
+        }
+        out.res.push((rq.conn, r));
+    }
+    out
+}
+
 /// One whole route. `hist0` is the per-edge over-full history of earlier rounds (empty = none);
 /// the third result is the history at the end of this one.
-fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize) -> (RoundOut, Hints, Memory) {
+fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize, stubs: &PlaneStubs) -> (RoundOut, Hints, Memory) {
     // TOPO_TIMES=1 (debug): phase times on stderr; never part of the result.
     let times = std::env::var_os("TOPO_TIMES").is_some();
     let tlog = |what: &str, t: Instant| {
@@ -316,7 +394,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     let (reg, problems) = Registry::from_config(standard_factors(), &opts.factors);
     warnings.extend(problems);
-    let mut b = match board::build(model, &BuildOpts { existing_vias: true, keepouts: true, plane_layers: opts.plane_signals != "forbidden", ..BuildOpts::default() }) {
+    let mut b = match board::build_full(model, &build_opts(opts), &[], &stubs.extra) {
         Ok(b) => b,
         Err(e) => return (RoundOut::unrouted(unrouted(model, opts, &format!("projection failed: {e}"))), Vec::new(), Memory::default()),
     };
@@ -447,6 +525,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let dst = tree::ends_of(st, &ecx, c.net, &comp, cb, c.w, c.s, [c.a, c.b]);
                 // The branch reward, the SMD assembly cost and the junction angle are priced in the
                 // search (social factors): a sharp or costly branch loses to a separate path.
+                if std::env::var("TOPO_TREEDBG").is_ok() {
+                    // Debug: the cost of every single source end on its own.
+                    for (k, e) in src.iter().enumerate() {
+                        let one = st.search_tree(c, std::slice::from_ref(e), &dst, w, (c.w + c.s) / ws0, None);
+                        eprintln!("TREEDBG net {} src {k} v {} at ({:.3},{:.3}) on {:?} adj {:.2}: {:?}", c.net, e.v, proj.pos[e.v].x / 1e6, -proj.pos[e.v].y / 1e6, e.on, e.adj, one.map(|p| (p.0 .0.len(), p.2)));
+                    }
+                }
                 let ((path, tris), i, j) = st.search_tree(c, &src, &dst, w, (c.w + c.s) / ws0, None)?;
                 let (sa, sb) = (src[i], dst[j]);
                 for e in [sa, sb] {
@@ -856,6 +941,26 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     let checker = Checker::new(check_model, opts);
     let mut dr = Drawer::new(model, opts, &b, &st, &checker);
+    // The plane stubs (placed before the topology, which routed around them) are copper before
+    // anything of the drawing: the wire vias and wires keep their clearance to them.
+    let mut plane_res: Vec<(usize, Result<planes::Out, String>)> = Vec::new();
+    for (conn, r) in &stubs.res {
+        match r {
+            Ok(o) => {
+                for it in &o.items {
+                    dr.commit(it);
+                }
+                out[*conn].routed = true;
+                out[*conn].items = o.items.clone();
+                out[*conn].vias = vec![(o.via, o.size)];
+                out[*conn].layers = vec![o.layer];
+                out[*conn].length_nm = o.stub_nm;
+                out[*conn].stub_nm = o.stub_nm;
+            }
+            Err(e) => fail(&mut out, *conn, e.clone()),
+        }
+        plane_res.push((*conn, r.clone()));
+    }
     // The plan's capacity model: where P3/P4 put each via in its interval (the drawing tries
     // that triangle first) and, after the drawing, which edge-layers it planned over-full.
     let dirs_plan = dirs_of(&st);
@@ -937,8 +1042,6 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         best.map(|b| ((bw, end), b.1))
     };
-    // Plane stubs and vias go right after the wide wires: before the first default-width wire.
-    let wide = draw_order.iter().take_while(|&&w| st.wires[w].w > model.rules.default.width as f64).count();
     // Pass layers as far as the plans fix them (a via interval leaves its passes open): the via
     // side test of `place_vias` reads them; a wire's become exact once its vias are placed.
     let set_layers = |pl: &Plan, vs: Option<&[(usize, Vec2, crate::vias::ViaSize)]>, passes: &[usize], out: &mut Vec<i32>| {
@@ -1056,35 +1159,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             plan_vs_draw.1
         );
     }
-    // Phase 2: plane stubs, then the wires. Plane pads go before the first default-width wire.
-    let mut plane_res: Vec<(usize, Result<planes::Out, String>)> = Vec::new();
-    let mut plane_done = false;
-    let run_planes = |dr: &mut Drawer, out: &mut Vec<Outcome>, plane_res: &mut Vec<(usize, Result<planes::Out, String>)>| {
-        for rq in &plane_reqs {
-            let r = planes::place(dr, rq);
-            if let Ok(o) = &r {
-                out[rq.conn].routed = true;
-                out[rq.conn].items = o.items.clone();
-                out[rq.conn].vias = vec![(o.via, o.size)];
-                out[rq.conn].layers = vec![o.layer];
-                out[rq.conn].length_nm = o.stub_nm;
-                out[rq.conn].stub_nm = o.stub_nm;
-            } else if let Err(e) = &r {
-                fail(out, rq.conn, e.clone());
-            }
-            plane_res.push((rq.conn, r));
-        }
-    };
     let mut drawn_ok = 0usize;
     let mut necking: Vec<(usize, Event)> = Vec::new();
     let mut drawn: BTreeMap<WireId, WireOut> = BTreeMap::new();
     let mut via_h: BTreeMap<WireId, Vec<usize>> = BTreeMap::new();
     let mut failed_draw: Vec<WireId> = Vec::new();
-    for (pos, &w) in live.iter().enumerate() {
-        if pos == wide.min(live.len()) && !plane_done {
-            run_planes(&mut dr, &mut out, &mut plane_res);
-            plane_done = true;
-        }
+    for &w in &live {
         if expired() {
             timed_out = true;
             fail(&mut out, conn_of[wire_conn[w]], "time limit reached before this connection was drawn");
@@ -1112,9 +1192,6 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         if drawn_ok.is_multiple_of(50) {
             ctl.update("route", 3, drawn_ok, nconn, 0, t0.elapsed().as_secs_f64());
         }
-    }
-    if !plane_done {
-        run_planes(&mut dr, &mut out, &mut plane_res);
     }
     // Debug (D0): TOPO_D0AUDIT=<file> writes the neighbour audit of the drawing (packer
     // positions against the drawn crossings and copper gaps, `dwitness::audit`) as JSON.

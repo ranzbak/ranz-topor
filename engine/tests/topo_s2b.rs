@@ -102,6 +102,9 @@ fn a_rule_area_forbidding_tracks_closes_its_layers_in_the_topology() {
         poly: vec![Pt { x: p(4.5), y: p(-9.0) }, Pt { x: p(5.5), y: p(-9.0) }, Pt { x: p(5.5), y: p(-1.5) }, Pt { x: p(4.5), y: p(-1.5) }],
         no_tracks: true,
         no_vias: true,
+        no_pour: false,
+        no_pads: false,
+        no_footprints: false,
     });
     let r = run(&m);
     assert_eq!((r.routed, r.failed), (1, 0), "{:?}", r.connections[0].reason);

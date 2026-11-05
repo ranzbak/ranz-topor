@@ -122,11 +122,14 @@ pub fn stitch(model: &BoardModel, opts: &Options, reg: &Registry, items: &[Item]
     let ok = |idx: &ItemIndex, its: &[Item]| checker.check_against(idx, its, &[]).violations.is_empty();
     // A via stays off the pads of its own net: no via in a pad unless `[vias] via_in_pad` (then
     // centred inside it), and never dipping partly into one (KiCad connection width, D1).
+    // KiCad builds a pad's and a via's polygon up to `max_error` outside their arcs: clear by
+    // that much, or the two touch in a sliver (D6a).
+    let tol = model.rules.max_error.max(0) as f64;
     let own_pad_ok = |p: Vec2, r: f64, net: i32| {
         model.pads.iter().filter(|pad| pad.net == net).all(|pad| {
             pad.layers.iter().all(|&l| {
                 let d = crate::geom::point_skeleton(p, &model.skeleton(pad, l));
-                d >= r || (opts.via_in_pad && d <= 0.0)
+                d >= r + tol || (opts.via_in_pad && d <= 0.0)
             })
         })
     };
@@ -134,7 +137,7 @@ pub fn stitch(model: &BoardModel, opts: &Options, reg: &Registry, items: &[Item]
     // or track is a sliver KiCad flags: dcsgonebadge D4, two GND vias 0.596 mm apart, "actual
     // 0.074 mm"): it keeps a gap to every own-net via and track.
     let own_copper_ok = |all: &[Item], p: Vec2, r: f64, net: i32| {
-        let gap = 1_000.0;
+        let gap = 1_000.0 + 2.0 * tol;
         let q = Vec2 { x: p.x, y: -p.y }; // KiCad frame of the items
         model.vias.iter().filter(|v| v.net == net).all(|v| (v.at.to_vec2() - p).len() >= r + 0.5 * v.d as f64 + gap)
             && all.iter().all(|it| match it {
@@ -168,13 +171,19 @@ pub fn stitch(model: &BoardModel, opts: &Options, reg: &Registry, items: &[Item]
         for c in &reach.cuts {
             let Some(&sz) = via_sizes(&model.rules, c.net, opts).first() else { continue };
             let r = 0.5 * sz.d as f64;
+            // The fill has to reach the via with a ring of at least the zone's minimum width
+            // (thinner fill is removed by KiCad's filler, and what is left meets the via in a
+            // neck KiCad's connection width check flags: dcsgonebadge D5, a GND via at
+            // (126.79, 121.1) mm, 0.1038 mm < 0.127 mm; D6a).
+            let ring = model.pours.iter().filter(|z| z.net == c.net).map(|z| z.min_thickness.max(0) as f64).fold(0.0, f64::max).max(model.rules.min_connection.max(0) as f64);
+            let need = r + ring;
             let targets: Vec<Vec2> = if c.pads.is_empty() { c.vias.clone() } else { c.pads.iter().map(|&p| model.pads[p].center.to_vec2()).collect() };
             // Island via candidates.
             let mut cand: Vec<(f64, Vec2)> = Vec::new();
             for &(zi, l, isl) in &c.islands {
                 let Some(ras) = reach.raster(zi, l) else { continue };
-                for p in ras.island_sites(isl, r, STEP) {
-                    let Some((_, _, d2)) = main_elsewhere(&reach, model, c.net, Some(l), p, r) else { continue };
+                for p in ras.island_sites(isl, need, STEP) {
+                    let Some((_, _, d2)) = main_elsewhere(&reach, model, c.net, Some(l), p, need) else { continue };
                     if !own_pad_ok(p, r, c.net) || !own_copper_ok(&all, p, r, c.net) {
                         continue;
                     }
@@ -220,7 +229,7 @@ pub fn stitch(model: &BoardModel, opts: &Options, reg: &Registry, items: &[Item]
                             let same = model.pours.iter().enumerate().any(|(zi, z)| {
                                 z.net == c.net && reach.raster(zi, sl).is_some_and(|ras| ras.depth_at(p) >= 0.5 * w && reach.island_in_main(zi, sl, ras.island_at(p)))
                             });
-                            let via_ok = !same && main_elsewhere(&reach, model, c.net, None, p, r).is_some() && own_pad_ok(p, r, c.net) && own_copper_ok(&all, p, r, c.net);
+                            let via_ok = !same && main_elsewhere(&reach, model, c.net, None, p, need).is_some() && own_pad_ok(p, r, c.net) && own_copper_ok(&all, p, r, c.net);
                             if !same && !via_ok {
                                 continue;
                             }

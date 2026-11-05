@@ -298,9 +298,10 @@ def test_zone_to_keepouts():
     z.proto.outline.polygons.append(mk_pwh([(20 * MM, 0), (21 * MM, 0), (21 * MM, MM)]))
     ks = M.zone_to_keepouts(z, {0, 2}, 5000)
     assert ks == [
-        {"name": "ant", "layers": [0, 2], "poly": [list(p) for p in SQ], "no_tracks": True, "no_vias": False},
+        {"name": "ant", "layers": [0, 2], "poly": [list(p) for p in SQ], "no_tracks": True, "no_vias": False,
+         "no_pour": False, "no_pads": False, "no_footprints": False},
         {"name": "ant", "layers": [0, 2], "poly": [[20 * MM, 0], [21 * MM, 0], [21 * MM, MM]], "no_tracks": True,
-         "no_vias": False}]
+         "no_vias": False, "no_pour": False, "no_pads": False, "no_footprints": False}]
 
 
 def test_zone_to_pour_fill_reach_and_settings():

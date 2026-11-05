@@ -194,7 +194,7 @@ def dru_keepouts(rules: list[DruRule], areas: list[dict], layer_ids: dict[str, i
 
     `areas`: the rule-area outlines as model keepout dicts (``name, layers, poly``), `layer_ids`: copper
     layer name -> engine id. Each matching outline yields ``{"name": "dru:<rule>", "layers", "poly",
-    "no_tracks", "no_vias"}`` (layers: the rule's ``(layer ...)`` -- a copper name, ``outer`` or ``inner`` --
+    "no_tracks", "no_vias", "no_pour"}`` (layers: the rule's ``(layer ...)`` -- a copper name, ``outer`` or ``inner`` --
     else the area's). Rules that disallow neither track nor via, or are ``ignore``d, give nothing. A rule
     this cannot place (no / unsupported condition, unknown area) gives a ``REFUSE: ...`` warning and no
     keepout. Returns (keepouts, warnings)."""
@@ -205,8 +205,8 @@ def dru_keepouts(rules: list[DruRule], areas: list[dict], layer_ids: dict[str, i
     for r in rules:
         if not r.disallow or r.severity in ("ignore", "exclude"):
             continue
-        no_tracks, no_vias = "track" in r.disallow, "via" in r.disallow
-        if not (no_tracks or no_vias):
+        no_tracks, no_vias, no_pour = "track" in r.disallow, "via" in r.disallow, "zone" in r.disallow
+        if not (no_tracks or no_vias or no_pour):
             continue
         names = _disallow_areas(r.condition)
         if names is None:
@@ -226,7 +226,7 @@ def dru_keepouts(rules: list[DruRule], areas: list[dict], layer_ids: dict[str, i
                 lay = list(a["layers"]) if rule_layers is None else sorted(set(a["layers"]) & rule_layers)
                 if lay:
                     out.append({"name": f"dru:{r.name}", "layers": lay, "poly": a["poly"],
-                                "no_tracks": no_tracks, "no_vias": no_vias})
+                                "no_tracks": no_tracks, "no_vias": no_vias, "no_pour": no_pour})
     return out, warns
 
 

@@ -332,6 +332,9 @@ def _export_keepouts(board):
                     "poly": _outline_pts(ps, i),
                     "no_tracks": bool(z.GetDoNotAllowTracks()),
                     "no_vias": bool(z.GetDoNotAllowVias()),
+                    "no_pour": bool(z.GetDoNotAllowZoneFills()),
+                    "no_pads": bool(z.GetDoNotAllowPads()),
+                    "no_footprints": bool(z.GetDoNotAllowFootprints()),
                 }
             )
     return out

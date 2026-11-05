@@ -6,6 +6,7 @@
 #   TOPOR_VENV          venv with pcbnew + topor_engine (default <repo>/.venv)
 #   TOPOR_ENGINE_SITE   directory holding a `topor_engine` package that wins over the venv's (a wheel
 #                       installed with `pip install --target DIR`); default: the venv's engine
+#   TOPOR_HAND_LABEL    caption of the left PNG panel (default "hand"; the mechanism fixtures say "unrouted input")
 #   TOPOR_TREE          code tree providing plugin/, harness/, toporlib/ (default <repo>); used to run the
 #                       frozen classic reference from a worktree of main @ 64b3979
 set -euo pipefail

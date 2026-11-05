@@ -242,6 +242,7 @@ fn edt_2d(fill: &[bool], nx: usize, ny: usize) -> Vec<f64> {
 /// cells stamped and whether the stamping was cut short. Total `O(nx*ny + stamped cells)`.
 fn build_raster(
     rings: &[&[Vec2]],
+    outs: &[&[Vec2]],
     stamps: &[(Seg, f64)],
     allowance: u64,
     stop: &dyn Fn() -> bool,
@@ -307,6 +308,37 @@ fn build_raster(
             while i <= i1 {
                 fill[j * nx + i as usize] = true;
                 i += 1;
+            }
+        }
+    }
+    // Keepouts that forbid pours on this layer (D6a): no fill inside them. KiCad's refill of the
+    // input already leaves them out; this keeps the estimate right where the fill is not KiCad's
+    // (an unfilled zone's outline). Even-odd per polygon, cells by their centres.
+    for poly in outs {
+        let n = poly.len();
+        let mut xs: Vec<Vec<f64>> = vec![Vec::new(); ny];
+        for k in 0..n {
+            let (a, b) = (poly[k], poly[(k + 1) % n]);
+            if a.y == b.y {
+                continue;
+            }
+            for (j, row) in xs.iter_mut().enumerate() {
+                let yc = y0 + (j as f64 + 0.5) * res;
+                if (a.y > yc) != (b.y > yc) {
+                    row.push(a.x + (yc - a.y) / (b.y - a.y) * (b.x - a.x));
+                }
+            }
+        }
+        for (j, row) in xs.iter_mut().enumerate() {
+            row.sort_by(f64::total_cmp);
+            for pair in row.chunks_exact(2) {
+                let i0 = ((pair[0] - x0) / res - 0.5).ceil().max(0.0) as usize;
+                let i1 = (((pair[1] - x0) / res - 0.5).floor().max(-1.0) as isize).min(nx as isize - 1);
+                let mut i = i0 as isize;
+                while i <= i1 {
+                    fill[j * nx + i as usize] = false;
+                    i += 1;
+                }
             }
         }
     }
@@ -758,7 +790,14 @@ pub fn check_pour_reach_until(
                 {
                     stamps.push((Seg { a: *at, b: *at }, r + dil(*inet)));
                 }
-                let (raster, stamped, cut) = build_raster(&rings, &stamps, allowance, &stop, half_min);
+                let outs_owned: Vec<Vec<Vec2>> = model
+                    .keepouts
+                    .iter()
+                    .filter(|k| k.no_pour && k.poly.len() >= 3 && (k.layers.is_empty() || k.layers.contains(&layer)))
+                    .map(|k| k.poly.iter().map(|p| p.to_vec2()).collect())
+                    .collect();
+                let outs: Vec<&[Vec2]> = outs_owned.iter().map(|r| r.as_slice()).collect();
+                let (raster, stamped, cut) = build_raster(&rings, &outs, &stamps, allowance, &stop, half_min);
                 ((zi, layer), raster, stamped, cut)
             })
             .collect();
@@ -1320,6 +1359,38 @@ mod tests {
                 y: -10.0e6
             }
         ));
+    }
+
+    #[test]
+    fn no_pour_keepout_cuts_the_fill_on_its_layer_only() {
+        // A no-pour keepout across the fill at x 10..14 mm splits U1 (4, 15) off U3 (20, 15) on
+        // B.Cu; the same keepout on F.Cu only changes nothing (D6a).
+        use crate::model::{Keepout, Pt as P};
+        let ko = |layers: Vec<u32>| Keepout {
+            name: "k".into(),
+            layers,
+            // Model frame (the JSON loader flips KiCad's y).
+            poly: vec![P { x: 10 * MM, y: 0 }, P { x: 14 * MM, y: 0 }, P { x: 14 * MM, y: -40 * MM }, P { x: 10 * MM, y: -40 * MM }],
+            no_tracks: false,
+            no_vias: false,
+            no_pour: true,
+            no_pads: false,
+            no_footprints: false,
+        };
+        let (u1, u3) = (Vec2 { x: 4.0e6, y: -15.0e6 }, Vec2 { x: 20.0e6, y: -15.0e6 });
+        let islands = |m: &BoardModel| {
+            let r = check_pour_reach(m, &[], &[]);
+            let ras = r.raster(0, 31).expect("raster");
+            (ras.island_at(u1), ras.island_at(u3), ras.island_at(Vec2 { x: 12.0e6, y: -15.0e6 }))
+        };
+        let mut m = model();
+        m.keepouts.push(ko(vec![0]));
+        let (a, b, k) = islands(&m);
+        assert!(a == b && k == a && a != 0, "F.Cu keepout: one piece, filled under it");
+        let mut m = model();
+        m.keepouts.push(ko(vec![31]));
+        let (a, b, k) = islands(&m);
+        assert!(a != 0 && b != 0 && a != b && k == 0, "B.Cu keepout splits the fill: {a} {b} {k}");
     }
 
     #[test]

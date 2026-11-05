@@ -332,8 +332,8 @@ def test_dru_disallow_rule_becomes_keepout():
     assert rs[0].disallow == ("track", "via")
     ks, warns = dru_keepouts(rs, _AREAS, _LAYERS)
     assert warns == []
-    assert ks == [{"name": "dru:no_ant", "layers": [0, 2], "poly": a["poly"], "no_tracks": True, "no_vias": True}
-                  for a in _AREAS]  # one keepout per outline of the named rule area
+    assert ks == [{"name": "dru:no_ant", "layers": [0, 2], "poly": a["poly"], "no_tracks": True, "no_vias": True,
+                   "no_pour": False} for a in _AREAS]  # one keepout per outline of the named rule area
     # via only, one layer
     rs = parse_dru('(rule v (layer "B.Cu") (condition "B.intersectsArea(\'ant\') && A.Type == \'Via\'")'
                    ' (constraint disallow via))')

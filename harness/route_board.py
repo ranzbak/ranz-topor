@@ -189,7 +189,7 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
             # Blue lines: KiCad's DRC unconnected items after the refill (the open ratsnest).
             hr = render_png(hand.pcb, out_dir / f"{name}-hand-raw.png")
             hr = draw_ratsnest(hr, hr, hand_drc.unconnected, bbox_nm=board_bbox_nm(hand.pcb))
-            h = caption(hr, f"{name}: hand ({m['unconnected_hand']} unconnected, blue)",
+            h = caption(hr, f"{name}: {os.environ.get('TOPOR_HAND_LABEL', 'hand')} ({m['unconnected_hand']} unconnected, blue)",
                         out_dir / f"{name}-hand.png")
             tr = render_png(routed_pcb, out_dir / f"{name}-topor-raw.png")
             tr = draw_ratsnest(tr, tr, routed_drc.unconnected, bbox_nm=board_bbox_nm(routed_pcb))

@@ -120,7 +120,7 @@ fn funnel_bends_only_where_a_portal_forces_it() {
 
 /// A via that dips a few um into a pad of its own net leaves a lens of copper narrower than
 /// KiCad's minimum connection width (dcsgonebadge, BT1 pad 3: 4 um deep, "actual 0.1044 mm" <
-/// 0.127 mm): such a site is refused; clear of the pad or centred in it is fine, and so is any
+/// 0.127 mm): such a site is refused; clear of the pad (by KiCad's max_error) or centred in it is fine, and so is any
 /// site when no minimum connection width is set.
 #[test]
 fn a_via_does_not_dip_into_its_own_pad() {
@@ -139,7 +139,12 @@ fn a_via_does_not_dip_into_its_own_pad() {
     // Pad edge at x = 5.4 mm, via radius 0.3 mm (math frame: y = -5 mm).
     let at = |x: f64| Vec2 { x: x * MM, y: -5.0 * MM };
     assert!(!dr.via_own_pad_ok(at(5.7 - 0.004), sz, 1), "4 um into the pad");
-    assert!(dr.via_own_pad_ok(at(5.7 + 0.001), sz, 1), "clear of the pad");
+    // Clear of KiCad's pad polygon, which reaches max_error past the arcs (D6a).
+    let tol = m.rules.max_error as f64 / MM;
+    assert!(dr.via_own_pad_ok(at(5.7 + tol + 0.001), sz, 1), "clear of the pad");
+    if tol > 0.002 {
+        assert!(!dr.via_own_pad_ok(at(5.7 + 0.001), sz, 1), "within max_error of the pad");
+    }
     assert!(dr.via_own_pad_ok(at(5.0), sz, 1), "centred in the pad");
     assert!(dr.via_own_pad_ok(at(5.7 - 0.004), sz, 2), "another net: the Checker's business");
     let mut m0 = m.clone();

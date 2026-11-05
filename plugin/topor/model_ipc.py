@@ -499,14 +499,17 @@ def text_box_poly(bb, margin: int = 0) -> list[list[int]]:
 
 # ---------------------------------------------------------------- zones
 def zone_to_keepouts(zone, cu_ids: set, max_err: int) -> list[dict]:
-    """Rule-area zone -> one keepout per outline polygon (name, copper layers, poly, no_tracks, no_vias); arc
+    """Rule-area zone -> one keepout per outline polygon (name, copper layers, poly, no_tracks, no_vias, no_pour,
+    no_pads, no_footprints; the last two are carried, unused); arc
     edges are flattened outward (the keepout contains KiCad's area, M4-R8). O(points)."""
     ra = zone.proto.rule_area_settings
     layers = sorted({i for i in (cu_id(bl) for bl in zone.layers) if i is not None and i in cu_ids}, key=_top_down)
     out = []
     for pb in zone.proto.outline.polygons:
         out.append({"name": zone.name, "layers": layers, "poly": ring_pts(PolygonWithHoles(pb).outline, max_err, outward=True),
-                    "no_tracks": bool(ra.keepout_tracks), "no_vias": bool(ra.keepout_vias)})
+                    "no_tracks": bool(ra.keepout_tracks), "no_vias": bool(ra.keepout_vias),
+                    "no_pour": bool(ra.keepout_copper), "no_pads": bool(ra.keepout_pads),
+                    "no_footprints": bool(ra.keepout_footprints)})
     return out
 
 

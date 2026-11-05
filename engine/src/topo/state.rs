@@ -133,6 +133,9 @@ pub struct Projection {
     /// Whether the edge is a constraint of the triangulation (obstacle outlines, the board edge
     /// and the LCT cuts).
     pub edge_constraint: Vec<bool>,
+    /// Keepouts that forbid vias (D6a), on any copper layer: a through via spans every layer,
+    /// so none may touch one. Polygons (nm); set by `board::build`.
+    pub no_via: Vec<Vec<Vec2>>,
 }
 
 pub fn point_in_poly(p: Vec2, poly: &[Vec2]) -> bool {
@@ -273,6 +276,7 @@ impl Projection {
             regions: Vec::new(),
             edge_regime: Vec::new(),
             edge_constraint,
+            no_via: Vec::new(),
         })
     }
 
