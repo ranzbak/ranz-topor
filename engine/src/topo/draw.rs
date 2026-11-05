@@ -1003,6 +1003,41 @@ impl<'a> Drawer<'a> {
         })
     }
 
+    /// No track of `items` (a run of wire `w`) grazes a pad of its own net other than its end
+    /// pads: either it keeps KiCad's `max_error` off the pad (KiCad's minimum connection width
+    /// check builds the pad polygon up to that far outside the arcs) or its centre line runs
+    /// into the pad. A graze is a sliver connection KiCad flags (dcsgonebadge R10.1, D2: a track
+    /// 1.7 um off the corner arc, "actual 0.0023 mm" < 0.127 mm). Without a minimum connection
+    /// width set, anything goes. O(tracks x pads of the net).
+    pub fn track_own_pad_ok(&self, w: WireId, items: &[Item]) -> bool {
+        let wi = &self.st.wires[w];
+        if self.model.rules.min_connection <= 0 || wi.net == 0 {
+            return true;
+        }
+        let pad_of = |o: usize| if o == super::state::NO_OBS { usize::MAX } else { self.b.pad_of[o] };
+        let ends = [pad_of(wi.pa), pad_of(wi.pb)];
+        let tol = self.model.rules.max_error as f64;
+        let pads: Vec<usize> = (0..self.model.pads.len()).filter(|&i| self.model.pads[i].net == wi.net && !ends.contains(&i)).collect();
+        if pads.is_empty() {
+            return true;
+        }
+        items.iter().all(|it| {
+            let Item::Track(t) = it else { return true };
+            let TrackPrim::Seg { a, b } = t.prim else { return true };
+            let (a, b) = (Vec2 { x: f64::from(a.x), y: -f64::from(a.y) }, Vec2 { x: f64::from(b.x), y: -f64::from(b.y) });
+            let prim = crate::geom::Prim::Seg(crate::geom::Seg { a, b });
+            pads.iter().all(|&i| {
+                let pad = &self.model.pads[i];
+                if !pad.layers.contains(&t.layer) {
+                    return true;
+                }
+                let sk = self.model.skeleton(pad, t.layer);
+                let d = crate::geom::dist::dist_prim_skeleton(&prim, &sk);
+                d - 0.5 * t.width as f64 >= tol || d <= 0.0
+            })
+        })
+    }
+
     /// Index `item` as accepted copper; its handle (for [`Drawer::uncommit`]).
     pub fn commit(&mut self, item: &Item) -> usize {
         let i = self.idx.insert(item);
@@ -1175,6 +1210,10 @@ impl<'a> Drawer<'a> {
                         rep = CheckReport::default();
                         neck = Some((wn, ls));
                     }
+                }
+                if rep.violations.is_empty() && !self.track_own_pad_ok(w, &items) {
+                    last_reason = "drawing: a track grazes a pad of its own net (KiCad minimum connection width)".to_string();
+                    continue;
                 }
                 if rep.violations.is_empty() {
                     let first = committed.len();

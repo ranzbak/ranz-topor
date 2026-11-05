@@ -238,7 +238,11 @@ impl Drawer<'_> {
     fn need_of(&self, id: usize, wp: &Wp, w: f64) -> f64 {
         let e = &self.ents[id];
         if e.net == Some(wp.net) {
-            return e.grow + 0.5 * w + self.eps;
+            // A pad of the own net that is not an end: KiCad's minimum connection width check
+            // builds the pad's polygon up to `max_error` outside its arcs, so a track closer than
+            // that reads as a sliver connection (dcsgonebadge R10.1, D2: 1.7 um off the arc,
+            // "actual 0.0023 mm").
+            return e.grow + 0.5 * w + self.eps + self.model.rules.max_error as f64;
         }
         e.grow + if e.fixed { e.clear } else { e.clear.max(wp.s) } + 0.5 * w + self.eps
     }
