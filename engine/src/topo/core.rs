@@ -613,7 +613,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     lr = lr_b;
     if p4_rounds > 0 {
         warnings.push(format!(
-            "P4 negotiated rip-up and reroute: {p4_rounds} rounds, {p4_ripped} wires ripped; objective {:.0} -> {:.0}, over-full edge-layers {} -> {}, vias {} -> {}",
+            "P4 negotiated rip-up and reroute: {p4_rounds} rounds, {p4_ripped} wires ripped; objective {:.0} -> {:.0}, over-full (edge-layers + vias without a site) {} -> {}, vias {} -> {}",
             first_score.0, last_score.0, first_score.1, last_score.1, first_score.2, last_score.2
         ));
     }
@@ -653,7 +653,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let s1 = score(&st2, &lr2);
         let kept = p4_better(&s1, &s0);
         warnings.push(format!(
-            "P4 moves on the topology: {} evaluations; {}; objective {:.0} -> {:.0} ({}); over-full edge-layers {} -> {}, vias {} -> {}",
+            "P4 moves on the topology: {} evaluations; {}; objective {:.0} -> {:.0} ({}); over-full (edge-layers + vias without a site) {} -> {}, vias {} -> {}",
             topo.evals,
             tt.text(),
             s0.0,
@@ -697,7 +697,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         drop(lb);
         layers::relabel(&st, &evl, &lp, &mut lr);
         tally.add(&lt);
-        warnings.push(format!("P4 moves on the layers: {}; vias {} -> {}, over-full edge-layers {} -> {}", lt.text(), v0, lr.vias, o0, o1));
+        warnings.push(format!("P4 moves on the layers: {}; vias {} -> {}, over-full (edge-layers + vias without a site) {} -> {}", lt.text(), v0, lr.vias, o0, o1));
         tlog("P4 moves", t_mv);
     }
     let lr = lr;
@@ -728,6 +728,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         warnings.push(msg.clone());
         fail(&mut out, cv, msg);
         dropped.insert(victim);
+    }
+    if std::env::var("TOPO_VIADBG").is_ok() {
+        let dirs = dirs_of(&st);
+        let cm = CapModel::new(&st, &packer, &dirs, &lr.events, bottom, 1.0);
+        eprintln!("PLANDRAW round {round}: before the unlayerable drops ({} wires): over-full edge-layers {}, vias without a site {}", dropped.len(), cm.overfull_list().len(), cm.nosite());
     }
     for &w in &dropped {
         st.remove(w);
@@ -857,6 +862,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // Planning-time check (D0 item 4): an edge-layer the plan packs without overflow (P3 labels,
     // capacity model) must fit in the drawing's packing too (same packer, pass layers from the
     // placed vias). `.0` counts the violations "planned fits, packer over-full"; `.1` the reverse.
+    // The plan as the drawing gets it (D5: the layers line used to show P3's count, which
+    // includes the vias without a site and the wires dropped as unlayerable afterwards).
+    let (plan_over, plan_nosite, n_dropped) = (cm_plan.overfull_list().len(), cm_plan.nosite(), dropped.len());
     let plan_vs_draw = {
         let planned: BTreeSet<(usize, usize)> = cm_plan.overfull_list().into_iter().collect();
         let nl = proj.n_layers;
@@ -1207,10 +1215,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     {
         let cnt = |c: &str| diag.iter().filter(|d| d.class == c).count();
         warnings.push(format!(
-            "layers: over-full edge-layers (packer model) {} before the capacity refinement, {} after ({} moves); drawing packer over-full {}; plan vs drawing packer: {} edge-layers planned to fit but over-full when drawn, {} planned over-full but fitting when drawn; drawing yield: {} wires entered drawing, {} drawn ({} lost at the via stage); rejected runs {}: packing {}, repair {}, chord {}, of which infeasible against the static board alone {}; runs accepted by the exact path {}, by the S2a funnel+repair fallback {}, exact path without result {} ({:.1} s in the exact search); feedback tried {}, rescued {}",
+            "layers: P3 capacity refinement over-full (edge-layers + vias without a site, on the state before the unlayerable drops) {} before, {} after ({} moves); plan handed to the drawing: {} over-full edge-layers, {} vias without a site ({} wires dropped as unlayerable); drawing packer over-full edge-layers {}; plan vs drawing packer: {} edge-layers planned to fit but over-full when drawn, {} planned over-full but fitting when drawn; drawing yield: {} wires entered drawing, {} drawn ({} lost at the via stage); rejected runs {}: packing {}, repair {}, chord {}, of which infeasible against the static board alone {}; runs accepted by the exact path {}, by the S2a funnel+repair fallback {}, exact path without result {} ({:.1} s in the exact search); feedback tried {}, rescued {}",
             lr.overfull_before,
             lr.overfull_after,
             lr.refine_moves,
+            plan_over,
+            plan_nosite,
+            n_dropped,
             over_n,
             plan_vs_draw.0,
             plan_vs_draw.1,
