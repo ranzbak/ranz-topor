@@ -136,6 +136,18 @@ pub(super) fn crossing(pl: &[Vec2], p: Vec2, q: Vec2, near: f64) -> Option<f64> 
     best
 }
 
+/// The segments `a-b` and `c-d` cross properly (not at an end point, not collinear).
+pub(super) fn seg_proper(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
+    let (d1, d2) = (b - a, d - c);
+    let den = d1.cross(d2);
+    if den.abs() < 1e-9 {
+        return false;
+    }
+    let t = (c - a).cross(d2) / den;
+    let u = (c - a).cross(d1) / den;
+    t > 1e-9 && t < 1.0 - 1e-9 && u > 1e-9 && u < 1.0 - 1e-9
+}
+
 pub(super) fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
     let d = b - a;
     let l2 = d.len2();
@@ -473,6 +485,15 @@ pub struct Drawer<'a> {
     /// crossings of the neighbours drawn so far, instead of the S2 interval around an evenly
     /// spread nominal point. Off: the S2 intervals (a neighbour keeps half the spare room).
     pub tight: bool,
+    /// Layer of every pass as far as the plans fix it before the vias are placed (`-1` where a
+    /// via interval leaves it open or the wire is not drawn); exact for a wire once its vias are
+    /// placed. Empty: no via side test (see [`Drawer::via_side_ok`]).
+    pub prov_layer: Vec<i32>,
+    /// Every via placed: `(wire, traversal, centre, layer before, layer after, handle)`; it
+    /// counts while its copper is committed (see [`Drawer::via_walls`]).
+    via_marks: Vec<(WireId, usize, Vec2, usize, usize, usize)>,
+    /// Wires drawn at least once (their copper, not a via wall, stands for their chords).
+    drawn_once: Vec<bool>,
     /// Per pass of a fitting edge-layer: `(edge, layer, index in the lane, lmin, rmax)` (nm).
     slot: Vec<Option<Slot>>,
     /// Per edge-layer that fits: its passes in edge order (see [`Lane`]).
@@ -541,6 +562,9 @@ impl<'a> Drawer<'a> {
             quiet: false,
             widths: None,
             tight: false,
+            prov_layer: Vec::new(),
+            via_marks: Vec::new(),
+            drawn_once: vec![false; st.wires.len()],
             slot: vec![None; st.passes.len()],
             lanes: BTreeMap::new(),
             drawn_x: vec![None; st.passes.len()],
@@ -871,9 +895,13 @@ impl<'a> Drawer<'a> {
                     sites.extend(self.via_extra(w, ka, kb.max(ka), sz.d as f64, self.model.rules.net_rule(net).clearance as f64));
                 }
                 for (k, p) in sites {
+                    if !self.via_side_ok(w, k, p, plan.layers[i], plan.layers[i + 1]) {
+                        continue;
+                    }
                     let item = via_item(net, p, sz, Some(w));
                     if self.check_ok(&item) && self.via_hole_ok(p, sz, net) && self.via_own_pad_ok(p, sz, net) {
                         let id = self.commit(&item);
+                        self.via_marks.push((w, k, p, plan.layers[i], plan.layers[i + 1], id));
                         ids.push(id);
                         out.push((k, p, sz));
                         done = true;
@@ -958,6 +986,113 @@ impl<'a> Drawer<'a> {
             }
         }
         Ok(out)
+    }
+
+    /// The via site `p` in traversal `k` of wire `w` (run layers `la` before the via, `lb` after)
+    /// lies on the side the topology gives it of every other wire's chord through that triangle
+    /// on `la` or `lb`: the via sits on `w`'s chord, so it is on the side of `w`'s exit point
+    /// (for a chord on `lb`) or entry point (on `la`). Chords are the nominal ones (evenly spread
+    /// pass points and turn corners, [`State::polyline`]); a chord whose layer is still open (a
+    /// via interval of its own) or of the same net is no constraint. A via on the wrong side
+    /// leaves its run on a layer no way to its first pass but across that wire (wiccon MOSI,
+    /// D2). O(traversals of the triangle x chord corners).
+    pub fn via_side_ok(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize) -> bool {
+        if self.prov_layer.is_empty() {
+            return true;
+        }
+        let (st, pr) = (self.st, &self.b.proj);
+        let wi = &st.wires[w];
+        let t = wi.tris[k];
+        let chord_layer = |o: WireId, ok: usize| -> i32 {
+            let ps = &st.wires[o].passes;
+            let a = if ok > 0 { self.prov_layer[ps[ok - 1]] } else { -2 };
+            let b = if ok < ps.len() { self.prov_layer[ps[ok]] } else { -2 };
+            match (a, b) {
+                (-2, x) | (x, -2) => x,
+                (x, y) if x == y => x,
+                _ => -1,
+            }
+        };
+        for &(o, ok) in &st.tri_trav[t] {
+            let oi = &st.wires[o];
+            if o == w || !oi.alive || oi.net == wi.net || self.polys[o].is_empty() {
+                continue;
+            }
+            let lo = chord_layer(o, ok);
+            let r = if lo == lb as i32 {
+                self.polys[w][k + 1]
+            } else if lo == la as i32 {
+                self.polys[w][k]
+            } else {
+                continue;
+            };
+            let mut chord = vec![self.polys[o][ok]];
+            chord.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| pr.pos[x.1]));
+            chord.push(self.polys[o][ok + 1]);
+            let crossings = chord.windows(2).filter(|c| seg_proper(r, p, c[0], c[1])).count();
+            if crossings % 2 == 1 {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Walls that keep a run of wire `w` (traversals `k0..=k1`, on `layer`) on the topology's
+    /// side of the vias placed by other nets in its triangles: the chord of the via's wire on
+    /// `layer`, from the via centre to its pass point (the nominal one of its interval) on the
+    /// edge it leaves through (layer after the via) or enters through (layer before), or to its
+    /// terminal. The run crosses no such chord in the topology; a via is a point, so without the
+    /// wall the run may pass it on either side and take the room its wire needs (wiccon MOSI,
+    /// D2: the 3.3v wire ran between the via and the pad corner the via's wire had to pass).
+    /// Only until the via's wire is drawn. O(vias).
+    pub fn via_walls(&self, w: WireId, k0: usize, k1: usize, layer: usize) -> Vec<(Vec2, Vec2)> {
+        let (st, pr) = (self.st, &self.b.proj);
+        let wi = &st.wires[w];
+        let tris: Vec<TriId> = wi.tris[k0..=k1].to_vec();
+        let mut out = Vec::new();
+        for &(v, k, p, la, lb, h) in &self.via_marks {
+            let vi = &st.wires[v];
+            if v == w || vi.net == wi.net || !tris.contains(&vi.tris[k]) {
+                continue;
+            }
+            let (_, ent) = self.handles[h];
+            if !self.ents.get(ent).is_some_and(|e| e.live) {
+                continue;
+            }
+            // Once the via's wire is drawn its copper is the obstacle (it may run off the
+            // nominal chord); the wall stands for it only until then.
+            if self.drawn_once[v] {
+                continue;
+            }
+            let n = vi.passes.len();
+            let end = if layer == lb {
+                if k < n {
+                    let f = self.iv.nom[vi.passes[k]];
+                    if !f.is_finite() {
+                        continue;
+                    }
+                    self.portal(v, k, f, f).0
+                } else {
+                    pr.pos[vi.b]
+                }
+            } else if layer == la {
+                if k > 0 {
+                    let f = self.iv.nom[vi.passes[k - 1]];
+                    if !f.is_finite() {
+                        continue;
+                    }
+                    self.portal(v, k - 1, f, f).0
+                } else {
+                    pr.pos[vi.a]
+                }
+            } else {
+                continue;
+            };
+            // 10 um past the edge, so a run along the edge through the pass point crosses it.
+            let past = (end - p).unit().map_or(end, |u| end + u * 10_000.0);
+            out.push((p, past));
+        }
+        out
     }
 
     /// `item` violates nothing on the board and against the indexed copper.
@@ -1200,6 +1335,13 @@ impl<'a> Drawer<'a> {
                     self.run_polyline(w, k0, k1, s, e, attempt - 2, layer)
                 };
                 tried.push(pts.clone());
+                if attempt >= 2 {
+                    let walls = self.via_walls(w, k0, k1, layer);
+                    if pts.windows(2).any(|x| walls.iter().any(|&(c, d)| seg_proper(x[0], x[1], c, d))) {
+                        last_reason = "drawing: passes a via of another net on the wrong side (topology)".to_string();
+                        continue;
+                    }
+                }
                 let (ps, pe) = (r == 0, r == plan.layers.len() - 1);
                 let mut items = self.run_items(w, layer, &pts);
                 let mut rep = self.checker.check_against(&self.idx, &items, &[]);
@@ -1290,6 +1432,7 @@ impl<'a> Drawer<'a> {
             out.vias.push((p, sz));
         }
         out.handles = committed;
+        self.drawn_once[w] = true;
         out.length_nm = out.runs.iter().map(|(_, p)| p.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>()).sum();
         out.ok = true;
         out

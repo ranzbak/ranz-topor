@@ -446,18 +446,25 @@ impl Drawer<'_> {
     pub(super) fn exact_fix(&self, w: WireId, k0: usize, k1: usize, layer: usize, mut pts: Vec<Vec2>, neck: Option<Neck>) -> Option<Vec<Vec2>> {
         let wi = &self.st.wires[w];
         let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck };
-        let strip = self.strip(w, k0, k1);
+        let mut strip = self.strip(w, k0, k1);
+        // The chords of other nets' vias in the sleeve are walls too (see `via_walls`); a stretch
+        // that crosses one is repaired like a clearance violation.
+        let n_walls = strip.walls.len();
+        strip.walls.extend(self.via_walls(w, k0, k1, layer));
+        let via_wall = |a: Vec2, b: Vec2| strip.walls[n_walls..].iter().any(|&(c, d)| super::draw::seg_proper(a, b, c, d));
         for _ in 0..24 {
             let mut bad = None;
             for i in 0..pts.len() - 1 {
                 let ents = self.local_ents(&wp, bbox_of(&[pts[i], pts[i + 1]]).grow(self.qgrow));
-                if !self.seg_clear(&ents, &wp, pts[i], pts[i + 1]) {
+                if !self.seg_clear(&ents, &wp, pts[i], pts[i + 1]) || via_wall(pts[i], pts[i + 1]) {
                     bad = Some(i);
                     break;
                 }
             }
             let Some(i) = bad else { return Some(pts) };
-            let (mut l, mut r) = (i, i + 1);
+            // A via wall crossed: the run reached the wrong side of the via before this
+            // segment, so the search starts one vertex earlier.
+            let (mut l, mut r) = (if via_wall(pts[i], pts[i + 1]) { i.saturating_sub(1) } else { i }, i + 1);
             while l > 0 && !self.vertex_ok(&strip, &wp, pts[l]) {
                 l -= 1;
             }

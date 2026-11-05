@@ -168,3 +168,108 @@ fn a_track_does_not_graze_a_pad_of_its_own_net() {
     let dr0 = Drawer::new(&m0, &opts, &b, &st, &checker0);
     assert!(dr0.track_own_pad_ok(0, &track(0.0017)), "no minimum connection width set");
 }
+
+/// A via goes on the side of every other wire's chord through its triangle that the topology
+/// gives it: the side of its own wire's exit point (for a chord on the layer after the via) or
+/// entry point (layer before). wiccon MOSI (D2): its via sat on the far side of the 3.3v wire,
+/// so its F.Cu run had no way to its first pass but across that wire.
+#[test]
+fn a_via_sits_on_its_topological_side_of_the_other_chords() {
+    use topor_engine::check::Checker;
+    use topor_engine::model::Options;
+    use topor_engine::topo::board::{self, BuildOpts};
+    use topor_engine::topo::draw::Drawer;
+    use topor_engine::topo::init::InitWeights;
+    use topor_engine::topo::state::State;
+    // Two parallel wires of different nets 1 mm apart through a 2 mm gap between two big pads
+    // (net 3): they share the gap's triangles.
+    let m = board(
+        (0.0, 0.0, 20.0, 20.0),
+        &[(1, 2.0, 9.5, true, 0.6), (1, 18.0, 9.5, true, 0.6), (2, 2.0, 10.5, true, 0.6), (2, 18.0, 10.5, true, 0.6), (3, 10.0, 6.0, false, 6.0), (3, 10.0, 14.0, false, 6.0)],
+    );
+    let b = board::build(&m, &BuildOpts { steiner_mm: 0.0, ..BuildOpts::default() }).unwrap();
+    let conns = b.connections(&m);
+    let mut st = State::new(&b.proj);
+    for c in conns.iter().filter(|c| c.net != 3) {
+        st.route_conn(c, &InitWeights::default(), (c.w + c.s) / 400_000.0).expect("routes");
+    }
+    let opts = Options::default();
+    let checker = Checker::new(&m, &opts);
+    let mut dr = Drawer::new(&m, &opts, &b, &st, &checker);
+    // A traversal of wire 0 whose triangle wire 1 crosses too.
+    let (k, ok) = (0..st.wires[0].tris.len())
+        .find_map(|k| st.tri_trav[st.wires[0].tris[k]].iter().find(|x| x.0 == 1).map(|x| (k, x.1)))
+        .expect("a shared triangle");
+    let (p0, p1) = (st.polyline(0), st.polyline(1));
+    // Midpoints of the two chords in that triangle.
+    let m0 = (p0[k] + p0[k + 1]) * 0.5;
+    let m1 = (p1[ok] + p1[ok + 1]) * 0.5;
+    let across = m1 + (m1 - m0).unit().unwrap() * 10_000.0;
+    // Without the pass layers the test is off.
+    assert!(dr.via_side_ok(0, k, across, 1, 0));
+    dr.prov_layer = vec![0; st.passes.len()];
+    // Wire 0 on layer 1 before the via, on layer 0 (wire 1's) after it.
+    assert!(dr.via_side_ok(0, k, m0, 1, 0), "on the wire's own chord");
+    assert!(!dr.via_side_ok(0, k, across, 1, 0), "across wire 1's chord");
+    // Wire 1's layer still open: no constraint.
+    dr.prov_layer = vec![-1; st.passes.len()];
+    for &pid in &st.wires[0].passes {
+        dr.prov_layer[pid] = 0;
+    }
+    assert!(dr.via_side_ok(0, k, across, 1, 0));
+}
+
+/// A run of another net keeps a placed via on its topological side: the via's chord on the
+/// run's layer (via centre to its pass point on the edge it leaves through, or enters through
+/// on the layer before) is a wall for the run until the via's wire is drawn (wiccon MOSI, D2:
+/// the 3.3v wire ran between the via and the pad corner the via's wire had to pass).
+#[test]
+fn a_placed_via_walls_off_its_chord_for_other_runs() {
+    use topor_engine::check::Checker;
+    use topor_engine::model::Options;
+    use topor_engine::topo::board::{self, BuildOpts};
+    use topor_engine::topo::draw::{Drawer, Plan};
+    use topor_engine::topo::init::InitWeights;
+    use topor_engine::topo::state::State;
+    let m = board(
+        (0.0, 0.0, 20.0, 20.0),
+        &[(1, 2.0, 9.5, true, 0.6), (1, 18.0, 9.5, true, 0.6), (2, 2.0, 10.5, true, 0.6), (2, 18.0, 10.5, true, 0.6), (3, 10.0, 6.0, false, 4.0), (3, 10.0, 14.0, false, 4.0)],
+    );
+    let b = board::build(&m, &BuildOpts { steiner_mm: 0.0, ..BuildOpts::default() }).unwrap();
+    let conns = b.connections(&m);
+    let mut st = State::new(&b.proj);
+    for c in conns.iter().filter(|c| c.net != 3) {
+        st.route_conn(c, &InitWeights::default(), (c.w + c.s) / 400_000.0).expect("routes");
+    }
+    let opts = Options::default();
+    let checker = Checker::new(&m, &opts);
+    let mut dr = Drawer::new(&m, &opts, &b, &st, &checker);
+    let k = (0..st.wires[0].tris.len()).find(|&k| k > 0 && k < st.wires[0].passes.len() && st.tri_trav[st.wires[0].tris[k]].iter().any(|x| x.0 == 1)).expect("a shared triangle");
+    let n0 = st.wires[0].passes.len();
+    // Wire 0: layer 1 up to its via in traversal k, layer 0 after; wire 1 on layer 0.
+    let plan = Plan { layers: vec![1, 0], vias: vec![(k, k)] };
+    dr.prov_layer = vec![0; st.passes.len()];
+    let mut ids = Vec::new();
+    let vias = dr.place_vias(0, &plan, &mut ids).expect("a via site");
+    for (j, &pid) in st.wires[0].passes.iter().enumerate() {
+        dr.pass_layer[pid] = if j < vias[0].0 { 1 } else { 0 };
+    }
+    for &pid in &st.wires[1].passes {
+        dr.pass_layer[pid] = 0;
+    }
+    dr.compute_intervals();
+    let n1 = st.wires[1].passes.len();
+    let walls = dr.via_walls(1, 0, n1, 0);
+    assert_eq!(walls.len(), 1, "{walls:?}");
+    let (a, e) = walls[0];
+    assert!((a - vias[0].1).len() < 1.0, "the wall starts at the via");
+    // It ends 10 um past wire 0's pass point on the edge its layer-0 run leaves through.
+    let pid = st.wires[0].passes[vias[0].0];
+    let [p, q] = b.proj.edges[st.passes[pid].edge];
+    let on_edge = |x: topor_engine::geom::Vec2| ((b.proj.pos[q] - b.proj.pos[p]).cross(x - b.proj.pos[p]) / (b.proj.pos[q] - b.proj.pos[p]).len()).abs();
+    assert!(on_edge(e) < 10_001.0 && on_edge(e) > 1.0, "end {e:?} just past the edge");
+    // Its own wire, the via's other layer: no wall.
+    assert!(dr.via_walls(0, 0, n0, 0).is_empty());
+    // On layer 1 the wall runs to the entry pass point instead.
+    assert_eq!(dr.via_walls(1, 0, n1, 1).len(), 1);
+}

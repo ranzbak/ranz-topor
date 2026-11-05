@@ -704,6 +704,33 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     });
     // Plane stubs and vias go right after the wide wires: before the first default-width wire.
     let wide = draw_order.iter().take_while(|&&w| st.wires[w].w > model.rules.default.width as f64).count();
+    // Pass layers as far as the plans fix them (a via interval leaves its passes open): the via
+    // side test of `place_vias` reads them; a wire's become exact once its vias are placed.
+    let set_layers = |pl: &Plan, vs: Option<&[(usize, Vec2, crate::vias::ViaSize)]>, passes: &[usize], out: &mut Vec<i32>| {
+        for (k, &pid) in passes.iter().enumerate() {
+            let mut l = pl.layers[0] as i32;
+            for (i, &(ka, kb)) in pl.vias.iter().enumerate() {
+                let kv = vs.map(|v| v[i].0);
+                let after = match kv {
+                    Some(kv) => k >= kv,
+                    None if k >= kb => true,
+                    None if k < ka => false,
+                    None => {
+                        l = -1;
+                        break;
+                    }
+                };
+                if after {
+                    l = pl.layers[i + 1] as i32;
+                }
+            }
+            out[pid] = l;
+        }
+    };
+    dr.prov_layer = vec![-1; st.passes.len()];
+    for (&w, pl) in &plans {
+        set_layers(pl, None, &st.wires[w].passes, &mut dr.prov_layer);
+    }
     // Phase 1: the vias of every wire (they are obstacles for the wires drawn next).
     let mut placed: BTreeMap<WireId, Vec<(usize, Vec2, crate::vias::ViaSize)>> = BTreeMap::new();
     let mut via_ids: BTreeMap<WireId, Vec<usize>> = BTreeMap::new();
@@ -717,11 +744,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let mut ids = Vec::new();
         match dr.place_vias(w, &plans[&w], &mut ids) {
             Ok(v) => {
+                set_layers(&plans[&w], Some(&v), &st.wires[w].passes, &mut dr.prov_layer);
                 placed.insert(w, v);
                 via_ids.insert(w, ids);
                 live.push(w);
             }
             Err(r) => {
+                for &pid in &st.wires[w].passes {
+                    dr.prov_layer[pid] = -1;
+                }
                 for id in ids {
                     dr.uncommit(id);
                 }
