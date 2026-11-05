@@ -159,3 +159,12 @@ def test_via_free_flags_kicad10_and_legacy_forms():
             '\t(segment (start 0 0) (end 1 1) (width 0.2) (layer "F.Cu") (net 1) (uuid "cccc-5"))\n'
             '\t(footprint "x" (uuid "dddd-6") (fp_line (start 0 0) (end 1 0) (free yes)))\n)\n')
     assert pcbfile.via_free_flags(text) == {"aaaa-1": True, "aaaa-2": False, "bbbb-3": True, "bbbb-4": False}
+
+
+def test_items_on_a_layer_with_a_user_name_use_the_canonical_copper_name():
+    """A plane layer shown as `In1.Cu-POWER` is `In1.Cu` in the file (tracks on it must load)."""
+    names = {0: "F.Cu", 4: "In1.Cu-POWER", 8: "In3.Cu", 2: "B.Cu"}
+    seg = {"kind": "seg", "net": 1, "layer": 4, "width": 200000, "prim": {"kind": "seg", "a": [0, 0], "b": [1000000, 0]}}
+    out = pcbfile.append_items("(kicad_pcb\n)\n", [seg], layer_names=names, net_names={1: "N"})
+    assert '(layer "In1.Cu")' in out and "POWER" not in out
+    assert pcbfile.cu_name(8, names) == "In3.Cu" and pcbfile.cu_name(10, names) == "In4.Cu"

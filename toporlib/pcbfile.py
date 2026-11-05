@@ -108,20 +108,33 @@ def _top_down(lid: int) -> tuple:
     return (lid == 2, lid)
 
 
+def cu_name(layer_id: int, layer_names: dict) -> str:
+    """Canonical file name of a copper layer: KiCad's ids are F.Cu 0, B.Cu 2, In<k>.Cu 2k + 2 (k >= 1);
+    a board may *display* another name for it (``In1.Cu-POWER``, the user name), but the file's items
+    must use the canonical one. Other ids keep `layer_names`' name. O(1)."""
+    if layer_id == 0:
+        return "F.Cu"
+    if layer_id == 2:
+        return "B.Cu"
+    if layer_id >= 4 and layer_id % 2 == 0 and layer_id < 64:
+        return f"In{(layer_id - 2) // 2}.Cu"
+    return layer_names[layer_id]
+
+
 def _one(it: dict, layer_names: dict, net_names: dict | None) -> str:
     uid = it.get("uuid") or str(_uuid.uuid4())
     if it.get("kind") == "via":
         # no layers (engine through via): first / last copper layer top-down, i.e. F.Cu / B.Cu as to_kipy_item
         order = sorted(layer_names, key=_top_down)
         la = it.get("layers") or order[:1] + order[-1:]
-        top, bot = layer_names[int(la[0])], layer_names[int(la[-1])]
+        top, bot = cu_name(int(la[0]), layer_names), cu_name(int(la[-1]), layer_names)
         s = (f"\t(via\n\t\t(at {_mm(it['at'][0])} {_mm(it['at'][1])})\n\t\t(size {_mm(it['d'])})\n")
         if it.get("drill"):
             s += f"\t\t(drill {_mm(it['drill'])})\n"
         s += f"\t\t(layers {_q(top)} {_q(bot)})\n" + _net(it, net_names)
         return s + f"\t\t(uuid {_q(uid)})\n\t)\n"
     p = it["prim"]
-    lay = f"\t\t(layer {_q(layer_names[int(it['layer'])])})\n"
+    lay = f"\t\t(layer {_q(cu_name(int(it['layer']), layer_names))})\n"
     w = f"\t\t(width {_mm(it['width'])})\n"
     if p["kind"] == "arc":
         s = (f"\t(arc\n\t\t(start {_mm(p['start'][0])} {_mm(p['start'][1])})\n"
