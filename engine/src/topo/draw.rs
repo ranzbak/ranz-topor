@@ -111,6 +111,31 @@ pub fn funnel(s: Vec2, e: Vec2, portals: &[(Vec2, Vec2)]) -> Vec<Vec2> {
     pts
 }
 
+/// Crossing of the polyline `pl` with the segment `p-q`: the distance from `p` along it; of
+/// several, the one nearest to `near`. O(segments).
+pub(super) fn crossing(pl: &[Vec2], p: Vec2, q: Vec2, near: f64) -> Option<f64> {
+    let d2 = q - p;
+    let len = d2.len().max(1.0);
+    let mut best: Option<f64> = None;
+    for s in pl.windows(2) {
+        let (a, c) = (s[0], s[1]);
+        let d1 = c - a;
+        let den = d1.cross(d2);
+        if den.abs() < 1e-9 {
+            continue;
+        }
+        let t = (p - a).cross(d2) / den;
+        let u = (p - a).cross(d1) / den;
+        if (-1e-9..=1.0 + 1e-9).contains(&t) && (-1e-9..=1.0 + 1e-9).contains(&u) {
+            let x = u * len;
+            if best.is_none_or(|b| (x - near).abs() < (b - near).abs()) {
+                best = Some(x);
+            }
+        }
+    }
+    best
+}
+
 pub(super) fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
     let d = b - a;
     let l2 = d.len2();
@@ -338,6 +363,28 @@ pub struct DrawStats {
     pub exact_s: f64,
 }
 
+/// Per-stretch widths that replace a wire's single width (the drawing witness, variant A: the
+/// hand's own widths, necked where the hand necks). `pass_w` is the width of every pass for the
+/// packing; `seg` the width of a drawn segment `(wire, layer, a, b)`; `min_w` the narrowest width
+/// of each wire (the exact search adds clearance circles for it).
+pub struct Widths<'a> {
+    pub pass_w: Vec<f64>,
+    pub min_w: Vec<f64>,
+    #[allow(clippy::type_complexity)]
+    pub seg: Box<dyn Fn(WireId, usize, Vec2, Vec2) -> f64 + 'a>,
+}
+
+/// Where a pass sits in its packing: `(edge, layer, index in the lane, lmin, rmax)` (nm).
+type Slot = (EdgeId, usize, usize, f64, f64);
+
+/// The passes of one edge-layer that fits, in edge order, with the prefix sums of the required
+/// spacing along the edge (`cum[i]`, pass 0 to pass `i`).
+#[derive(Clone, Debug)]
+struct Lane {
+    pids: Vec<PassId>,
+    cum: Vec<f64>,
+}
+
 /// One drawn wire.
 #[derive(Clone, Debug, Default)]
 pub struct WireOut {
@@ -400,6 +447,20 @@ pub struct Drawer<'a> {
     pub(super) only_static: std::cell::Cell<bool>,
     /// Trial drawing (via reduction): a rejected run is not diagnosed or recorded.
     pub quiet: bool,
+    /// Per-stretch widths (the drawing witness); `None`: every wire has its own single width.
+    pub widths: Option<Widths<'a>>,
+    /// D0 experiment, off by default (the drawing witness sets it with `--tight`): the funnel of
+    /// a pass may use the whole span its packing allows (`lmin ..= rmax`), narrowed by the
+    /// crossings of the neighbours drawn so far, instead of the S2 interval around an evenly
+    /// spread nominal point. Off: the S2 intervals (a neighbour keeps half the spare room).
+    pub tight: bool,
+    /// Per pass of a fitting edge-layer: `(edge, layer, index in the lane, lmin, rmax)` (nm).
+    slot: Vec<Option<Slot>>,
+    /// Per edge-layer that fits: its passes in edge order (see [`Lane`]).
+    lanes: BTreeMap<(EdgeId, usize), Lane>,
+    /// Drawn crossing of every pass: distance along its edge (nm) and the handle of the first
+    /// track of its run (the crossing counts while that copper is committed).
+    drawn_x: Vec<Option<(f64, usize)>>,
 }
 
 impl<'a> Drawer<'a> {
@@ -440,6 +501,11 @@ impl<'a> Drawer<'a> {
             n_static: 0,
             only_static: std::cell::Cell::new(false),
             quiet: false,
+            widths: None,
+            tight: false,
+            slot: vec![None; st.passes.len()],
+            lanes: BTreeMap::new(),
+            drawn_x: vec![None; st.passes.len()],
         }
         .with_static()
     }
@@ -603,7 +669,8 @@ impl<'a> Drawer<'a> {
             .map(|&pid| {
                 let wi = &self.st.wires[self.st.passes[pid].wire];
                 let (w, k) = (self.st.passes[pid].wire, self.pass_k[pid]);
-                PackItem { net: wi.net, w: wi.w, s: wi.s, infl: infl_of(&self.b.proj, e, &self.polys[w], k) }
+                let pw = self.widths.as_ref().map_or(wi.w, |x| x.pass_w[pid]);
+                PackItem { net: wi.net, w: pw, s: wi.s, infl: infl_of(&self.b.proj, e, &self.polys[w], k) }
             })
             .collect();
         let bnd = self.packer.bounds(e, l, &pitems);
@@ -611,6 +678,21 @@ impl<'a> Drawer<'a> {
         let req = |i: usize| bnd.req[i];
         let fits = bnd.fits();
         self.over[e * self.b.proj.n_layers + l] = !fits;
+        for &pid in items {
+            self.slot[pid] = None;
+        }
+        if fits {
+            let mut cum = vec![0.0; n];
+            for i in 1..n {
+                cum[i] = cum[i - 1] + req(i - 1);
+            }
+            for (i, &pid) in items.iter().enumerate() {
+                self.slot[pid] = Some((e, l, i, lmin[i], rmax[i]));
+            }
+            self.lanes.insert((e, l), Lane { pids: items.to_vec(), cum });
+        } else {
+            self.lanes.remove(&(e, l));
+        }
         let mut nom = vec![0.0; n];
         let (mut a, mut b) = (lmin.clone(), rmax.clone());
         if fits {
@@ -639,6 +721,54 @@ impl<'a> Drawer<'a> {
             self.iv.lo[pid] = (a[i] / len).clamp(0.0, 1.0);
             self.iv.hi[pid] = (b[i] / len).clamp(0.0, 1.0);
             self.iv.nom[pid] = (nom[i] / len).clamp(0.0, 1.0);
+        }
+    }
+
+    /// The drawn crossing of pass `pid` (nm along its edge) while its copper is committed.
+    fn live_x(&self, pid: PassId) -> Option<f64> {
+        let (x, h) = self.drawn_x[pid]?;
+        let (_, ent) = self.handles[h];
+        self.ents.get(ent).is_some_and(|en| en.live).then_some(x)
+    }
+
+    /// Span (nm along the edge) pass `pid` may use under tight packing: `lmin ..= rmax` of its
+    /// lane, narrowed by every drawn neighbour plus the required spacing of the passes between.
+    /// `None` without a fitting lane. O(passes of the lane).
+    pub fn tight_span(&self, pid: PassId) -> Option<(f64, f64)> {
+        let (e, l, i, lmin, rmax) = self.slot[pid]?;
+        let Lane { pids, cum, .. } = self.lanes.get(&(e, l))?;
+        let (mut lo, mut hi) = (lmin, rmax);
+        for (j, &q) in pids.iter().enumerate() {
+            if j == i {
+                continue;
+            }
+            if let Some(x) = self.live_x(q) {
+                if j < i {
+                    lo = lo.max(x + cum[i] - cum[j]);
+                } else {
+                    hi = hi.min(x - (cum[j] - cum[i]));
+                }
+            }
+        }
+        if lo > hi {
+            // The drawn neighbours left less than the spacing: the middle; the checker decides.
+            let m = 0.5 * (lo + hi);
+            return Some((m, m));
+        }
+        Some((lo, hi))
+    }
+
+    /// Remember where the accepted run `pts` (passes `k0..k1` of `w`, first track handle `h`)
+    /// crosses its pass edges. O(passes x segments).
+    fn record_crossings(&mut self, w: WireId, k0: usize, k1: usize, pts: &[Vec2], h: usize) {
+        let pr = &self.b.proj;
+        for k in k0..k1 {
+            let pid = self.st.wires[w].passes[k];
+            let [p, q] = pr.edges[self.st.passes[pid].edge];
+            let (pp, pq) = (pr.pos[p], pr.pos[q]);
+            let len = (pq - pp).len().max(1.0);
+            let near = self.iv.nom[pid] * len;
+            self.drawn_x[pid] = crossing(pts, pp, pq, if near.is_finite() { near } else { 0.5 * len }).map(|x| (x, h));
         }
     }
 
@@ -908,7 +1038,7 @@ impl<'a> Drawer<'a> {
                 };
                 tried.push(pts.clone());
                 let (ps, pe) = (r == 0, r == plan.layers.len() - 1);
-                let mut items = Self::items_of(wi.net, lid, wi.w, &pts, Some(w));
+                let mut items = self.run_items(w, layer, &pts);
                 let mut rep = self.checker.check_against(&self.idx, &items, &[]);
                 let mut neck: Option<(f64, [f64; 2])> = None;
                 if !rep.violations.is_empty() && self.opts.neck_to_pad && (ps || pe) {
@@ -919,10 +1049,14 @@ impl<'a> Drawer<'a> {
                     }
                 }
                 if rep.violations.is_empty() {
+                    let first = committed.len();
                     for it in &items {
                         let id = self.commit(it);
                         committed.push(id);
                         ids.push(id);
+                    }
+                    if let Some(&h) = committed.get(first) {
+                        self.record_crossings(w, k0, k1, &pts, h);
                     }
                     if let Some((wn, ls)) = neck {
                         if ps {
@@ -994,6 +1128,25 @@ impl<'a> Drawer<'a> {
         out
     }
 
+    /// Track items of the run polyline `pts` of wire `w` on `layer`: the wire's width, or the
+    /// per-segment width of [`Drawer::widths`].
+    fn run_items(&self, w: WireId, layer: usize, pts: &[Vec2]) -> Vec<Item> {
+        let wi = &self.st.wires[w];
+        let lid = self.layer_id(layer);
+        match &self.widths {
+            None => Self::items_of(wi.net, lid, wi.w, pts, Some(w)),
+            Some(x) => pts.windows(2).filter(|p| (p[1] - p[0]).len2() > 1.0).map(|p| track_item(wi.net, lid, (x.seg)(w, layer, p[0], p[1]), p[0], p[1], Some(w))).collect(),
+        }
+    }
+
+    /// Width of the segment `a-b` of wire `w` on `layer` (see [`Drawer::widths`]); `dflt` without.
+    pub(super) fn seg_width(&self, w: WireId, layer: usize, a: Vec2, b: Vec2, dflt: f64) -> f64 {
+        match &self.widths {
+            Some(x) if layer != usize::MAX => (x.seg)(w, layer, a, b),
+            _ => dflt,
+        }
+    }
+
     /// Track items of the polyline `pts` at width `w`.
     fn items_of(net: i32, lid: u32, w: f64, pts: &[Vec2], wire: Option<usize>) -> Vec<Item> {
         pts.windows(2).filter(|p| (p[1] - p[0]).len2() > 1.0).map(|p| track_item(net, lid, w, p[0], p[1], wire)).collect()
@@ -1011,6 +1164,8 @@ impl<'a> Drawer<'a> {
     /// ends of the run (`ps` start pad, `pe` end pad). `None` without `neck_to_pad` or room to narrow.
     pub(super) fn neck_zones(&self, w: WireId, ps: bool, pe: bool) -> Option<super::exact::Neck> {
         let wi = &self.st.wires[w];
+        // Only a pad end necks (a node terminal, `NO_OBS`, has no pad).
+        let (ps, pe) = (ps && wi.pa != super::state::NO_OBS, pe && wi.pb != super::state::NO_OBS);
         let rules = &self.model.rules;
         let min_w = Self::neck_floor(rules, wi.net, wi.w);
         if !self.opts.neck_to_pad || min_w >= wi.w || !(ps || pe) {
@@ -1030,9 +1185,10 @@ impl<'a> Drawer<'a> {
     /// the rest keeps `w`. `None` when even `min_w` is rejected. Returns `(wn, items, lengths)`.
     fn neck_run(&self, w: WireId, lid: u32, pts: &[Vec2], ps: bool, pe: bool) -> Option<(f64, Vec<Item>, [f64; 2])> {
         let wi = &self.st.wires[w];
+        let (ps, pe) = (ps && wi.pa != super::state::NO_OBS, pe && wi.pb != super::state::NO_OBS);
         let rules = &self.model.rules;
         let min_w = Self::neck_floor(rules, wi.net, wi.w);
-        if min_w >= wi.w {
+        if min_w >= wi.w || !(ps || pe) {
             return None;
         }
         let ext = |ob: usize| self.b.proj.obstacles[ob].poly.iter().map(|&p| (p - self.b.proj.obstacles[ob].center).len()).fold(0.0, f64::max);
@@ -1114,7 +1270,14 @@ impl<'a> Drawer<'a> {
             let pid = wi.passes[k];
             let (lo, hi, nom) = (self.iv.lo[pid], self.iv.hi[pid], self.iv.nom[pid]);
             let (lo, hi) = match attempt {
-                0 => (lo, hi),
+                0 => match self.tight_span(pid).filter(|_| self.tight) {
+                    Some((a, b)) => {
+                        let [p, q] = self.b.proj.edges[st.passes[pid].edge];
+                        let len = (self.b.proj.pos[q] - self.b.proj.pos[p]).len().max(1.0);
+                        ((a / len).clamp(0.0, 1.0), (b / len).clamp(0.0, 1.0))
+                    }
+                    None => (lo, hi),
+                },
                 1 => (nom - 0.5 * (nom - lo), nom + 0.5 * (hi - nom)),
                 _ => (nom, nom),
             };
@@ -1137,12 +1300,11 @@ impl<'a> Drawer<'a> {
     #[allow(clippy::too_many_arguments)]
     fn diagnose(&mut self, w: WireId, layer: usize, k0: usize, k1: usize, s: Vec2, e: Vec2, last: &Violation, last_pts: &[Vec2]) {
         let wi = &self.st.wires[w];
-        let lid = self.layer_id(layer);
         let mut pre_bad = [false; 3];
         let mut pre0: Vec<Vec2> = Vec::new();
         for (a, bad) in pre_bad.iter_mut().enumerate() {
             let pre = self.base_polyline(w, k0, k1, s, e, a);
-            let items = Self::items_of(wi.net, lid, wi.w, &pre, Some(w));
+            let items = self.run_items(w, layer, &pre);
             *bad = !self.checker.check_against(&self.idx, &items, &[]).violations.is_empty();
             if a == 0 {
                 pre0 = pre;
