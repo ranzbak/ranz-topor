@@ -11,6 +11,7 @@ pub mod descent;
 pub mod cuts;
 pub mod demand;
 pub mod draw;
+pub mod dwitness;
 pub mod exact;
 pub mod factors;
 pub mod gate;

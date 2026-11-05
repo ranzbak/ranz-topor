@@ -107,6 +107,7 @@ impl Ord for Open {
 /// Parameters of the wire being repaired.
 #[derive(Clone, Copy)]
 pub(super) struct Wp {
+    pub wire: WireId,
     pub net: i32,
     pub w: f64,
     pub s: f64,
@@ -245,7 +246,7 @@ impl Drawer<'_> {
     /// The segment `a-b` keeps the clearance to every object of `ents`.
     fn seg_clear(&self, ents: &[usize], wp: &Wp, a: Vec2, b: Vec2) -> bool {
         let bb = bbox_of(&[a, b]);
-        let sw = wp.width_on(a, b);
+        let sw = self.seg_width(wp.wire, wp.layer, a, b, wp.width_on(a, b));
         ents.iter().all(|&i| {
             let e = &self.ents[i];
             let need = self.need_of(i, wp, sw);
@@ -269,6 +270,11 @@ impl Drawer<'_> {
         // Nodes carry the full width, plus the narrow one where a neck zone is near.
         let need = self.need_of(id, wp, wp.w);
         let mut needs = vec![need];
+        if let Some(x) = self.widths.as_ref().filter(|_| wp.layer != usize::MAX) {
+            if x.min_w[wp.wire] < wp.w {
+                needs.push(self.need_of(id, wp, x.min_w[wp.wire]));
+            }
+        }
         if let Some(n) = &wp.neck {
             if n.ends.iter().flatten().any(|(c, r)| bb.min.x - r <= c.x && c.x <= bb.max.x + r && bb.min.y - r <= c.y && c.y <= bb.max.y + r) {
                 needs.push(self.need_of(id, wp, n.min_w));
@@ -417,7 +423,7 @@ impl Drawer<'_> {
     /// a stretch cannot be repaired (no path in the sleeve, or the node cap).
     pub(super) fn exact_fix(&self, w: WireId, k0: usize, k1: usize, layer: usize, mut pts: Vec<Vec2>, neck: Option<Neck>) -> Option<Vec<Vec2>> {
         let wi = &self.st.wires[w];
-        let wp = Wp { net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck };
+        let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck };
         let strip = self.strip(w, k0, k1);
         for _ in 0..24 {
             let mut bad = None;
@@ -483,7 +489,7 @@ impl Drawer<'_> {
     /// caller still runs the checker on the via. O(ents near x samples + sleeve triangles).
     pub(super) fn via_extra(&self, w: WireId, ka: usize, kb: usize, d: f64, s: f64) -> Vec<(usize, Vec2)> {
         let wi = &self.st.wires[w];
-        let wp = Wp { net: wi.net, w: d, s, layer: usize::MAX, own: [wi.pa, wi.pb], neck: None };
+        let wp = Wp { wire: w, net: wi.net, w: d, s, layer: usize::MAX, own: [wi.pa, wi.pb], neck: None };
         let strip = self.strip(w, ka, kb.max(ka));
         let mut bb = strip.boxes[0];
         for b in &strip.boxes {
