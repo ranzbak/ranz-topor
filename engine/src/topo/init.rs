@@ -198,7 +198,7 @@ impl Search<'_, '_> {
             let Some(nt) = pr.across(e, t) else { continue };
             let Some(mask_nt) = pr.allowed(nt, c.net) else { continue };
             let alone = pr.edge_demand(e, &[me]);
-            let extra = st.over_cost(nt, c.net, &self.wt)
+            let extra = st.over_cost(t, nt, c.net, &self.wt)
                 + if (0..pr.n_layers).any(|l| alone > pr.room_for(e, l, c.net)) { self.wt.forced_layer_mm } else { 0.0 };
             let room = mask_t.map(|m| {
                 let both = m.0 & mask_nt.0;
@@ -258,9 +258,13 @@ impl<'p> State<'p> {
         c
     }
 
-    fn over_cost(&self, t: TriId, net: i32, wt: &InitWeights) -> f64 {
-        let over = self.proj.tri_obs[t].iter().any(|&o| self.proj.obstacles[o].net != Some(net));
-        if over {
+    /// Price of passing from `t` to `nt` where the layers a wire may use change because of another
+    /// net's SMD pad (entering or leaving the pad's area): the stretch over the pad is fixed to
+    /// one layer, which costs up to one via per end, not one per triangle of the stretch.
+    fn over_cost(&self, t: TriId, nt: TriId, net: i32, wt: &InitWeights) -> f64 {
+        let pr = self.proj;
+        let over = |x: TriId| pr.tri_obs[x].iter().any(|&o| pr.obstacles[o].net != Some(net));
+        if over(nt) != over(t) || (over(t) && pr.allowed(t, net) != pr.allowed(nt, net)) {
             wt.smd_over_mm
         } else {
             0.0
