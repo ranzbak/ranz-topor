@@ -14,6 +14,7 @@ pub mod factors;
 pub mod gate;
 pub mod init;
 pub mod layers;
+pub mod learn;
 pub mod planes;
 pub mod reduce;
 pub mod refine;

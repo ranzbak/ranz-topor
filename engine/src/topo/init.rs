@@ -145,7 +145,13 @@ struct Search<'s, 'p> {
     heap: BinaryHeap<Key>,
     /// (cost, parent node or MAX, last triangle)
     goal: Option<(f64, usize, TriId)>,
+    /// Extra price (mm, >= 0) of a pass of this net through an edge: the loss-augmentation hook
+    /// of the S3b learning loop ([`super::learn`]); `None` in routing.
+    hook: Option<&'s PassHook<'s>>,
 }
+
+/// Extra price (mm, >= 0) of a pass of wire net `net` through edge `e` ([`State::search_hooked`]).
+pub type PassHook<'h> = dyn Fn(i32, EdgeId) -> f64 + 'h;
 
 impl Search<'_, '_> {
     fn h(&self, p: Vec2) -> f64 {
@@ -213,7 +219,8 @@ impl Search<'_, '_> {
             let Some(mask_nt) = pr.allowed(nt, c.net) else { continue };
             let alone = pr.edge_demand(e, &[me]);
             let extra = st.over_cost(t, nt, c.net, &self.wt)
-                + if (0..pr.n_layers).any(|l| alone > pr.room_for(e, l, c.net)) { self.wt.forced_layer_mm } else { 0.0 };
+                + if (0..pr.n_layers).any(|l| alone > pr.room_for(e, l, c.net)) { self.wt.forced_layer_mm } else { 0.0 }
+                + self.hook.map_or(0.0, |h| h(c.net, e));
             let room1 = mask_t.map(|m| {
                 let both = m.0 & mask_nt.0;
                 (0..pr.n_layers).filter(|&l| (both >> l) & 1 == 1).map(|l| pr.room_for(e, l, c.net)).fold(f64::NEG_INFINITY, f64::max)
@@ -322,6 +329,11 @@ impl<'p> State<'p> {
     /// Cheapest path of `c` in the current state: the gaps `(edge, g)` and the triangles.
     /// `scale` = (w+s)/(w₀+s₀), the length factor of this wire.
     pub fn search(&self, c: &Conn, wt: &InitWeights, scale: f64) -> Option<Path> {
+        self.search_hooked(c, wt, scale, None)
+    }
+
+    /// [`State::search`] with an extra price per pass (`hook`, see [`PassHook`]); `None` = `search`.
+    pub fn search_hooked(&self, c: &Conn, wt: &InitWeights, scale: f64, hook: Option<&PassHook>) -> Option<Path> {
         let pr = self.proj;
         let mut off = Vec::with_capacity(pr.edges.len() + 1);
         let mut acc = 0;
@@ -343,6 +355,7 @@ impl<'p> State<'p> {
             items: Vec::new(),
             heap: BinaryHeap::new(),
             goal: None,
+            hook,
         };
         for &t in &pr.vert_tris[c.a] {
             if pr.allowed(t, c.net).is_some() {
@@ -385,7 +398,12 @@ impl<'p> State<'p> {
     /// Route `c` and insert it: the wire and the number of passes over room; `None` when no
     /// path exists.
     pub fn route_conn(&mut self, c: &Conn, wt: &InitWeights, scale: f64) -> Option<(WireId, usize)> {
-        let (path, tris) = self.search(c, wt, scale)?;
+        self.route_conn_hooked(c, wt, scale, None)
+    }
+
+    /// [`State::route_conn`] with an extra price per pass (`hook`, see [`PassHook`]).
+    pub fn route_conn_hooked(&mut self, c: &Conn, wt: &InitWeights, scale: f64, hook: Option<&PassHook>) -> Option<(WireId, usize)> {
+        let (path, tris) = self.search_hooked(c, wt, scale, hook)?;
         let over = (0..path.len())
             .filter(|&j| self.overflows(path[j].0, path[j].1, tris[j], tris[j + 1], c.net, c.w, c.s))
             .count();
