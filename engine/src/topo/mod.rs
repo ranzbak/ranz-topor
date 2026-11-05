@@ -25,5 +25,6 @@ pub mod metrize;
 pub mod moves;
 pub mod pack;
 pub mod state;
+pub mod stitch;
 pub mod stats;
 pub mod witness;

@@ -224,6 +224,11 @@ pub struct Pour {
     /// Pad connection (KiCad `ZONE_CONNECTION`: 0 none, 1 thermal, 2 full, 3 THT thermal).
     #[serde(default = "default_pad_connection")]
     pub pad_connection: i32,
+    /// KiCad island removal mode: 0 always (an island that holds no pad, via or track of the
+    /// net is dropped from the fill), 1 never (every island stays), 2 below `min_island_area`.
+    pub island_removal: i32,
+    /// Smallest kept island with `island_removal` 2, nm².
+    pub min_island_area: f64,
 }
 
 fn default_pad_connection() -> i32 {
@@ -1044,6 +1049,11 @@ pub struct Options {
     /// via-carrying wire with a layer run moved onto the layer of its neighbour run (dropping the
     /// vias between), keep it where the checker accepts the redrawn wire.
     pub via_reduce: bool,
+    /// Topological core (D4, `topor.toml [planes] stitch_islands`): after routing, a piece of a
+    /// pour net's copper that the routed copper cut off from the rest of its pour (an island of
+    /// the estimated refill holding a pad or via of the net, or a pad whose thermal spokes are all
+    /// cut) gets a via into the pour on another layer, or a short stub, near its pad.
+    pub stitch_islands: bool,
     /// Topological core (S3, `topor.toml [optimize] rounds`): most whole-route rounds (the first
     /// included). A work cap, not a time cap: the same board and settings give the same result on
     /// any machine and with any thread count.
@@ -1159,6 +1169,7 @@ impl Default for Options {
             feedback_max_rip: 8,
             reroute_rounds: 6,
             via_reduce: true,
+            stitch_islands: true,
             topo_rounds: 4,
             max_ripped: 5000,
             max_expansions: 2_000_000,

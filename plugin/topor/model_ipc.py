@@ -83,6 +83,9 @@ _HULL_SHAPES = (_PSS.PSS_TRAPEZOID, _PSS.PSS_CHAMFEREDRECT, _PSS.PSS_CUSTOM)
 _ATTR = {bt.PadType.PT_PTH: "pth", bt.PadType.PT_SMD: "smd", bt.PadType.PT_EDGE_CONNECTOR: "conn",
          bt.PadType.PT_NPTH: "npth"}
 _ZCS = bt.ZoneConnectionStyle
+#: kipy island removal mode -> KiCad ISLAND_REMOVAL_MODE (0 always, 1 never, 2 below the minimum area)
+_IRM_TO_KICAD = {bt.IslandRemovalMode.IRM_UNKNOWN: 0, bt.IslandRemovalMode.IRM_ALWAYS: 0,
+                 bt.IslandRemovalMode.IRM_NEVER: 1, bt.IslandRemovalMode.IRM_AREA: 2}
 #: kipy ZoneConnectionStyle -> KiCad ZONE_CONNECTION (INHERITED 0, NONE 1, THERMAL 2, FULL 3, THT_THERMAL 4)
 _ZC_TO_KICAD = {_ZCS.ZCS_UNKNOWN: 0, _ZCS.ZCS_INHERITED: 0, _ZCS.ZCS_NONE: 1, _ZCS.ZCS_THERMAL: 2,
                 _ZCS.ZCS_FULL: 3, _ZCS.ZCS_PTH_THERMAL: 4}
@@ -539,7 +542,8 @@ def zone_to_pour(zone, *, net_codes: dict, cu_ids: set, pads: list, vias: list, 
          "clearance": int(cs.clearance.value_nm), "min_thickness": int(cs.min_thickness.value_nm),
          "thermal_gap": int(th.gap.value_nm) if th.HasField("gap") else _DEFAULT_THERMAL_NM,
          "spoke_width": int(th.width.value_nm) if th.HasField("width") else _DEFAULT_THERMAL_NM,
-         "pad_connection": _ZC_TO_KICAD.get(cs.connection.zone_connection, 0)}
+         "pad_connection": _ZC_TO_KICAD.get(cs.connection.zone_connection, 0),
+         "island_removal": _IRM_TO_KICAD.get(cs.island_mode, 0), "min_island_area": float(cs.min_island_area)}
     if warn:
         d["warning"] = warn
     return d

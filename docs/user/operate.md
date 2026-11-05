@@ -366,6 +366,12 @@ Measured on six snapshot boards (offline tests against KiCad's own polygons); th
   need; KiCad's DRC (unconnected items) is the judge. Custom, trapezoid and chamfered pads are taken as their
   convex hull, so on a strongly concave pad a probe could lie outside the copper (possible over-reach, never
   seen on the test boards).
+- **Pour pieces cut off by the new copper** (topological core, `[planes] stitch_islands`): after routing,
+  topor estimates the refill (the copy's fill minus the new copper of other nets grown by the clearance,
+  minus features thinner than the zone's minimum width, islands dropped or kept as KiCad → zone properties →
+  Remove islands says). A piece of a pour net that is no longer joined to the rest of its pour gets a
+  stitching via inside it near its pad (or a short stub from the pad), into the pour on another layer; the
+  report lists each piece and each stitch, and the pieces it could not join. KiCad's DRC is the judge.
 - **Pads** are exact; custom, trapezoid, chamfered and offset pads become the convex hull of KiCad's
   polygon (larger, never smaller).
 - **Free vias**: KiCad's `free` flag is read from the saved board copy; a via whose flag cannot be read is

@@ -6,9 +6,12 @@
 //! **Fill approximation** per (pour, layer): raster of the pre-route fill polygons (outer rings
 //! minus holes — KiCad's fill of the ripped board, which already carries every knockout of the
 //! pre-existing copper, the thermal holes and spokes of the pour's own pads) minus the router's
-//! foreign-net items dilated by `clearance + min_thickness/2 + cell/√2` (KiCad's clearance
-//! knockout followed by the min-width opening, conservative by half a cell), then 4-connected
-//! islands. Resolution: `max(25 µm, √(bbox area / 4·10⁶))` so a layer is at most ~4 M cells.
+//! foreign-net items dilated by `clearance + cell/4` (KiCad's clearance knockout), opened by
+//! `min_thickness/2` (KiCad deflates the fill by half the minimum width before it drops islands:
+//! an erosion of the raster by an exact Euclidean distance transform, D4), then 4-connected
+//! islands. Checked against KiCad's own refill of wiccon-2023 (D4): the kept islands match one
+//! to one, area IoU 0.995 (F.Cu) / 0.994 (B.Cu) after re-inflating by `min_thickness/2`.
+//! Resolution: `max(25 µm, √(bbox area / 4·10⁶))` so a layer is at most ~4 M cells.
 //!
 //! **Connectivity** of a pour net = union-find over islands, pads, vias and tracks of the net: a
 //! thermal pad joins the island its spoke test points land in (KiCad `buildThermalSpokes`: pad
@@ -17,7 +20,9 @@
 //! via the island under its disc, a track the islands it runs over; tracks join the pads, vias
 //! and tracks they touch (copper gap ≤ 0, as `decompose`). The **main component** of a net holds
 //! the most pour-listed items (ties: largest fill area); every listed item and every pad routed in
-//! this run that is not in it has **lost the pour**.
+//! this run that is not in it has **lost the pour**. Every other component that KiCad keeps
+//! (it holds a listed or routed pad, a via, or an island the zone's island removal mode keeps)
+//! is reported in [`PourReach::cuts`] (D4 pour stitching).
 //!
 //! Cost: O(cells + Σ item stamps + T·(P + V + T)) per net with `T` tracks of the net; rasters
 //! are built in parallel per (pour, layer) and the result is independent of the thread count.
@@ -61,6 +66,9 @@ pub struct Raster {
     area: Vec<f64>,
     /// Island id → in the net's main component (index 0 unused).
     in_main: Vec<bool>,
+    /// Per cell: distance from the cell centre to the edge of the fill after the knockouts and
+    /// before the min-width opening, in 1/8 cells (0 outside the fill; capped at `u16::MAX`).
+    depth: Vec<u16>,
 }
 
 impl Raster {
@@ -118,10 +126,114 @@ impl Raster {
     fn n_islands(&self) -> usize {
         self.area.len() - 1
     }
+
+    /// Distance from `p` to the edge of the fill (knockouts in, before the min-width opening),
+    /// nm; 0 outside the fill or the raster.
+    pub fn depth_at(&self, p: Vec2) -> f64 {
+        self.cell(p).map_or(0.0, |c| self.depth[c] as f64 * self.res / 8.0)
+    }
+
+    /// Island id of the cell containing `p` (0 outside the fill or the raster).
+    pub fn island_at(&self, p: Vec2) -> u32 {
+        self.label_at(p)
+    }
+
+    /// Cell size, nm.
+    pub fn res(&self) -> f64 {
+        self.res
+    }
+
+    /// Centres of the cells of island `l` whose fill depth is at least `min_depth`, on a lattice
+    /// of every `step`-th cell (deterministic, row-major). O(cells).
+    pub fn island_sites(&self, l: u32, min_depth: f64, step: usize) -> Vec<Vec2> {
+        let step = step.max(1);
+        let mut out = Vec::new();
+        for j in (0..self.ny).step_by(step) {
+            for i in (0..self.nx).step_by(step) {
+                let c = j * self.nx + i;
+                if self.label[c] == l && self.depth[c] as f64 * self.res / 8.0 >= min_depth {
+                    out.push(self.centre(i, j));
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Stand-in for an infinite distance in [`edt_1d`] (F&H use a large finite value).
+const EDT_BIG: f64 = 1e20;
+
+/// 1-D squared Euclidean distance transform (Felzenszwalb & Huttenlocher 2012, "Distance
+/// Transforms of Sampled Functions", Theory of Computing 8, p. 419, algorithm DT(f)):
+/// `d[q] = min_p (q-p)^2 + f[p]`, lower envelope of parabolas. O(n).
+fn edt_1d(f: &[f64], d: &mut [f64], v: &mut [usize], z: &mut [f64]) {
+    let n = f.len();
+    if n == 0 {
+        return;
+    }
+    let mut k = 0usize;
+    v[0] = 0;
+    z[0] = f64::NEG_INFINITY;
+    z[1] = f64::INFINITY;
+    let sect = |q: usize, p: usize| ((f[q] + (q * q) as f64) - (f[p] + (p * p) as f64)) / (2.0 * q as f64 - 2.0 * p as f64);
+    for q in 1..n {
+        let mut s = sect(q, v[k]);
+        while s <= z[k] {
+            if k == 0 {
+                break;
+            }
+            k -= 1;
+            s = sect(q, v[k]);
+        }
+        if s <= z[k] {
+            // k == 0 and the new parabola wins everywhere.
+            v[0] = q;
+            z[1] = f64::INFINITY;
+            continue;
+        }
+        k += 1;
+        v[k] = q;
+        z[k] = s;
+        z[k + 1] = f64::INFINITY;
+    }
+    let mut k = 0usize;
+    for (q, dq) in d.iter_mut().enumerate() {
+        while z[k + 1] < q as f64 {
+            k += 1;
+        }
+        let p = v[k];
+        *dq = (q as f64 - p as f64).powi(2) + f[p];
+    }
+}
+
+/// Squared distance (cells²) from every cell to the nearest cell where `fill` is false. O(n).
+fn edt_2d(fill: &[bool], nx: usize, ny: usize) -> Vec<f64> {
+    let mut g: Vec<f64> = fill.iter().map(|&f| if f { EDT_BIG } else { 0.0 }).collect();
+    let n = nx.max(ny);
+    let (mut f, mut d, mut v, mut z) = (vec![0.0; n], vec![0.0; n], vec![0usize; n], vec![0.0; n + 1]);
+    for i in 0..nx {
+        for j in 0..ny {
+            f[j] = g[j * nx + i];
+        }
+        edt_1d(&f[..ny], &mut d[..ny], &mut v[..ny], &mut z[..ny + 1]);
+        for j in 0..ny {
+            g[j * nx + i] = d[j];
+        }
+    }
+    for j in 0..ny {
+        f[..nx].copy_from_slice(&g[j * nx..(j + 1) * nx]);
+        edt_1d(&f[..nx], &mut d[..nx], &mut v[..nx], &mut z[..nx + 1]);
+        g[j * nx..(j + 1) * nx].copy_from_slice(&d[..nx]);
+    }
+    g
 }
 
 /// Build the fill mask of `rings` (even-odd over outer rings and holes), knock out `stamps`
-/// (capsules of radius `r`), label the 4-connected islands.
+/// (capsules of radius `r`), open it by `erode` (KiCad deflates the fill by half the zone's
+/// minimum width before it removes islands and inflates it again: features thinner than the
+/// minimum width vanish, so the islands are those of the deflated fill; ZONE_FILLER::fillCopperZone),
+/// label the 4-connected islands. The fill depth of every cell (distance to the knocked-out
+/// fill's edge, from an exact Euclidean distance transform) is kept for via sites.
 ///
 /// Knockouts run one scanline per raster row: a capsule meets a row in one interval, so a stamp
 /// visits `O(rows spanned + cells covered)` cells (`O(L/res * w/res)` for a track of length `L` and
@@ -133,6 +245,7 @@ fn build_raster(
     stamps: &[(Seg, f64)],
     allowance: u64,
     stop: &dyn Fn() -> bool,
+    erode: f64,
 ) -> (Raster, u64, bool) {
     let mut bb: Option<Aabb> = None;
     for ring in rings {
@@ -160,6 +273,7 @@ fn build_raster(
         label: vec![0; nx * ny],
         area: vec![0.0],
         in_main: vec![false],
+        depth: Vec::new(),
     };
     // Even-odd scanline fill at the cell centres; edges are bucketed by the rows they span.
     let mut rows: Vec<Vec<f64>> = vec![Vec::new(); ny];
@@ -225,6 +339,20 @@ fn build_raster(
             while i <= i1 {
                 fill[j * nx + i as usize] = false;
                 i += 1;
+            }
+        }
+    }
+    // Fill depth and the min-width opening. A cell next to a knocked-out cell has its centre
+    // half a cell inside the edge.
+    let d2 = edt_2d(&fill, nx, ny);
+    r.depth = d2
+        .iter()
+        .map(|&q| ((q.sqrt() - 0.5).max(0.0) * 8.0).min(u16::MAX as f64) as u16)
+        .collect();
+    if erode > 0.0 {
+        for (c, f) in fill.iter_mut().enumerate() {
+            if *f && (r.depth[c] as f64 / 8.0 + 0.25) * res < erode {
+                *f = false;
             }
         }
     }
@@ -429,11 +557,58 @@ pub struct PourReach {
     /// Raster cells knocked out by capsule stamps, all pours (diagnostic; bounded by
     /// [`STAMP_CELL_BUDGET`]).
     pub stamped_cells: u64,
+    /// Copper of a pour net that KiCad keeps but that is not joined to the net's main
+    /// component (each one is a DRC "missing connection"), by net, then smallest pad index.
+    pub cuts: Vec<Cut>,
+}
+
+/// One component of a pour net's copper (islands, pads, vias, tracks) that is cut off from the
+/// net's main component and that KiCad keeps: it holds a pour-listed or routed pad or a via,
+/// or an island that the zone's island removal keeps (an island with a track or pad of the net,
+/// or any island with removal "never", or one of at least the minimum area).
+#[derive(Clone, Debug, Default)]
+pub struct Cut {
+    pub net: i32,
+    /// Model pad indices in the component (sorted).
+    pub pads: Vec<usize>,
+    /// Centres (math frame) of the net's vias in the component.
+    pub vias: Vec<Vec2>,
+    /// Islands `(pour, layer, island id)` in the component.
+    pub islands: Vec<(usize, u32, u32)>,
+    /// Fill area of those islands, nm².
+    pub area: f64,
 }
 
 impl PourReach {
     pub fn is_clean(&self) -> bool {
         self.lost_pads.is_empty() && self.lost_vias.is_empty()
+    }
+
+    /// Debug dump (TOPO_POURDUMP): one text header line per raster `pour layer x0 y0 res nx ny`
+    /// (math frame, nm), then `nx*ny` little-endian u32 island labels, then one byte per island
+    /// (1 = in the main component), per raster in key order.
+    pub fn dump(&self, path: &str) {
+        let mut buf: Vec<u8> = Vec::new();
+        for ((zi, l), r) in &self.rasters {
+            buf.extend(format!("{zi} {l} {} {} {} {} {} {}\n", r.x0, r.y0, r.res, r.nx, r.ny, r.n_islands()).as_bytes());
+            for v in &r.label {
+                buf.extend(v.to_le_bytes());
+            }
+            for &m in &r.in_main[1..] {
+                buf.push(u8::from(m));
+            }
+        }
+        let _ = std::fs::write(path, buf);
+    }
+
+    /// The raster of pour `pour` on `layer`, when there is one.
+    pub fn raster(&self, pour: usize, layer: u32) -> Option<&Raster> {
+        self.rasters.get(&(pour, layer))
+    }
+
+    /// Whether island `l` of the raster of `pour` on `layer` is in its net's main component.
+    pub fn island_in_main(&self, pour: usize, layer: u32, l: u32) -> bool {
+        self.rasters.get(&(pour, layer)).is_some_and(|r| l != 0 && (l as usize) < r.in_main.len() && r.in_main[l as usize])
     }
 
     /// Whether `p` (math frame) lies in the main component of pour `pour` on `layer`; pours and
@@ -460,12 +635,11 @@ impl PourReach {
     }
 }
 
-fn pad_index(model: &BoardModel, label: &str) -> Option<usize> {
-    let r = parse_pour_pad(label)?;
-    model
-        .pads
-        .iter()
-        .position(|p| p.ref_ == r.ref_ && p.number == r.number)
+/// Every pad a pour label `REF.NUM` names (a footprint can have several pads of one number, e.g.
+/// a push button's two pads "2"; the pour list cannot tell them apart, so all of them count).
+fn pad_indices(model: &BoardModel, label: &str) -> Vec<usize> {
+    let Some(r) = parse_pour_pad(label) else { return Vec::new() };
+    (0..model.pads.len()).filter(|&i| model.pads[i].ref_ == r.ref_ && model.pads[i].number == r.number).collect()
 }
 
 /// Check every pour net of `model` against the router `items` (KiCad frame, as emitted by
@@ -568,9 +742,9 @@ pub fn check_pour_reach_until(
                 // Cell size as `build_raster` derives it, for the conservative half-diagonal.
                 let probe = build_cell(&rings);
                 let half_min = 0.5 * z.min_thickness as f64;
-                let dil = |inet: i32| {
-                    (z.clearance as f64).max(clr(net)).max(clr(inet)) + half_min + probe * 0.71
-                };
+                // The knockout by the clearance (a quarter cell conservative); the min-width
+                // opening is the erosion in `build_raster`.
+                let dil = |inet: i32| (z.clearance as f64).max(clr(net)).max(clr(inet)) + probe * 0.25;
                 let mut stamps: Vec<(Seg, f64)> = Vec::new();
                 for (_, _, inet, t) in tracks
                     .iter()
@@ -584,7 +758,7 @@ pub fn check_pour_reach_until(
                 {
                     stamps.push((Seg { a: *at, b: *at }, r + dil(*inet)));
                 }
-                let (raster, stamped, cut) = build_raster(&rings, &stamps, allowance, &stop);
+                let (raster, stamped, cut) = build_raster(&rings, &stamps, allowance, &stop, half_min);
                 ((zi, layer), raster, stamped, cut)
             })
             .collect();
@@ -789,7 +963,7 @@ pub fn check_pour_reach_until(
         for &zi in pours {
             let z = &model.pours[zi];
             for s in &z.pads {
-                if let Some(pi) = pad_index(model, s) {
+                for pi in pad_indices(model, s) {
                     if let Some(a) = pads.iter().position(|&x| x == pi) {
                         if model.pads[pi].layers.iter().any(|l| z.layers.contains(l)) {
                             listed_pads.insert(a);
@@ -876,6 +1050,55 @@ pub fn check_pour_reach_until(
             mv.sort();
             out.main_pads.insert(zi, mp);
             out.main_vias.insert(zi, mv);
+        }
+        // Cut-off components KiCad keeps.
+        {
+            let mut comp: BTreeMap<usize, Cut> = BTreeMap::new();
+            let mut must: BTreeSet<usize> = BTreeSet::new();
+            let mut items: BTreeSet<usize> = BTreeSet::new();
+            for (a, &pi) in pads.iter().enumerate() {
+                let root = dsu.find(pad_base + a);
+                items.insert(root);
+                comp.entry(root).or_default().pads.push(pi);
+                if listed_pads.contains(&a) || routed_pads.contains(&pi) {
+                    must.insert(root);
+                }
+            }
+            for (b, v) in nvias.iter().enumerate() {
+                let root = dsu.find(via_base + b);
+                items.insert(root);
+                must.insert(root);
+                comp.entry(root).or_default().vias.push(v.at);
+            }
+            for k in 0..ntracks.len() {
+                items.insert(dsu.find(track_base + k));
+            }
+            for (k, r) in &rasters {
+                let z = &model.pours[k.0];
+                for l in 1..=r.n_islands() {
+                    let root = dsu.find(island_base[k] + l);
+                    let c = comp.entry(root).or_default();
+                    c.islands.push((k.0, k.1, l as u32));
+                    c.area += r.area[l];
+                    let kept = match z.island_removal {
+                        1 => true,
+                        2 => r.area[l] >= z.min_island_area,
+                        _ => false,
+                    };
+                    if kept {
+                        must.insert(root);
+                    }
+                }
+            }
+            for (root, mut c) in comp {
+                let keep = must.contains(&root) || (items.contains(&root) && !c.islands.is_empty());
+                if root == main || !keep {
+                    continue;
+                }
+                c.net = net;
+                c.pads.sort_unstable();
+                out.cuts.push(c);
+            }
         }
         let islands: usize = rasters.values().map(|r| r.n_islands()).sum();
         let name = model

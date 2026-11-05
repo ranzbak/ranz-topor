@@ -184,6 +184,9 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     }
     let pick = arch.pick(&obj).expect("round 1 is always offered");
     let mut best = arch.items[pick].payload.clone();
+    if opts.stitch_islands {
+        stitch_pours(model, opts, &mut best, (opts.wall_clock_s > 0.0).then(|| t0 + std::time::Duration::from_secs_f64(opts.wall_clock_s)));
+    }
     best.variants = arch.table(Some(pick));
     best.warnings.push(format!("{} ({} offered)", table_text(&best.variants, &obj), arch.offered));
     if !round_note.is_empty() {
@@ -202,6 +205,54 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         best.warnings.push(format!("{TIME_HIT} (run.timeout_s = {:.0} s stopped the run before its work caps)", opts.wall_clock_s));
     }
     best
+}
+
+/// Pour stitching (D4, [`super::stitch`]) on the picked result: the stitches join its items
+/// (`item_conn` = `usize::MAX`: they belong to no connection) and a summary line plus one line
+/// per cut-off piece go to the warnings.
+fn stitch_pours(model: &BoardModel, opts: &Options, best: &mut RouteResult, deadline: Option<Instant>) {
+    let pour_nets: BTreeSet<i32> = model.pours.iter().map(|z| z.net).collect();
+    if pour_nets.is_empty() {
+        return;
+    }
+    // A label can name several pads (a switch with two pads "2"): the one at the terminal.
+    let pad_of = |label: &str, at: [i64; 2]| {
+        let q = Vec2 { x: at[0] as f64, y: -(at[1] as f64) };
+        (0..model.pads.len())
+            .filter(|&i| format!("{}.{}", model.pads[i].ref_, model.pads[i].number) == label)
+            .min_by(|&a, &b| (model.pads[a].center.to_vec2() - q).len().total_cmp(&(model.pads[b].center.to_vec2() - q).len()).then(a.cmp(&b)))
+    };
+    let mut routed_pads: Vec<usize> = Vec::new();
+    for c in best.connections.iter().filter(|c| c.status == "routed" && pour_nets.contains(&c.net)) {
+        for t in [&c.from, &c.to] {
+            if t.kind == "pad" {
+                if let Some(p) = pad_of(&t.label, t.at) {
+                    routed_pads.push(p);
+                }
+            }
+        }
+    }
+    routed_pads.sort_unstable();
+    routed_pads.dedup();
+    let (reg, _) = Registry::from_config(standard_factors(), &opts.factors);
+    let t = Instant::now();
+    let s = super::stitch::stitch(model, opts, &reg, &best.items, &routed_pads, deadline);
+    if s.before == 0 {
+        return;
+    }
+    best.warnings.push(format!(
+        "pour stitching: {} pour pieces cut off by the routed copper before, {} after; {} island vias, {} pad stubs ({:.2} s)",
+        s.before,
+        s.after,
+        s.island_vias,
+        s.pad_stubs,
+        t.elapsed().as_secs_f64()
+    ));
+    best.warnings.extend(s.notes);
+    for it in s.items {
+        best.items.push(it);
+        best.item_conn.push(usize::MAX);
+    }
 }
 
 /// Outcomes and necked stretches of a route at one moment (the variant before the via reduction).

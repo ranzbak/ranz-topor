@@ -409,6 +409,9 @@ def _zone_settings(z) -> dict:
         "thermal_gap": int(z.GetThermalReliefGap()),
         "spoke_width": int(z.GetThermalReliefSpokeWidth()),
         "pad_connection": int(z.GetPadConnection()),
+        # KiCad ISLAND_REMOVAL_MODE: 0 always, 1 never, 2 below the minimum island area (nm^2)
+        "island_removal": int(z.GetIslandRemovalMode()),
+        "min_island_area": float(z.GetMinIslandArea()),
     }
 
 
