@@ -307,6 +307,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         n_signal: b.n_signal,
         plane_mm: reg.price(&Event::PlaneLength { wire: 0, layer: b.n_signal, mm: 1.0 }, &WireCtx::default()),
         plane_cut: reg.price(&Event::PlaneCut { wire: 0, layer: b.n_signal }, &WireCtx::default()),
+        // TOPO_NOCAP=1 (debug): assign layers for vias only, to compare with the capacity refinement.
+        cap_mm: if std::env::var("TOPO_NOCAP").is_ok() { 0.0 } else { reg.price(&Event::Overflow { wire: 0, edge: 0 }, &WireCtx::default()) },
         ..LayerParams::default()
     };
     let sub = super::capacity::subset_check(&st);
@@ -600,7 +602,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     {
         let cnt = |c: &str| diag.iter().filter(|d| d.class == c).count();
         warnings.push(format!(
-            "drawing yield: {} wires entered drawing, {} drawn ({} lost at the via stage); rejected runs {}: packing {}, repair {}, chord {}, of which infeasible against the static board alone {}; runs accepted by the exact path {}, by the S2a funnel+repair fallback {}, exact path without result {} ({:.1} s in the exact search); feedback tried {}, rescued {}",
+            "layers: over-full edge-layers by the demand model {} before the capacity refinement, {} after ({} moves); drawing packer over-full {}; drawing yield: {} wires entered drawing, {} drawn ({} lost at the via stage); rejected runs {}: packing {}, repair {}, chord {}, of which infeasible against the static board alone {}; runs accepted by the exact path {}, by the S2a funnel+repair fallback {}, exact path without result {} ({:.1} s in the exact search); feedback tried {}, rescued {}",
+            lr.overfull_before,
+            lr.overfull_after,
+            lr.refine_moves,
+            over_n,
             plans.len(),
             drawn_ok,
             plans.len() - live.len(),

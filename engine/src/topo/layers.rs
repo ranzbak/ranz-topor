@@ -18,6 +18,7 @@
 //! BTreeMap adjacency (deterministic); the remainder search is O(2^R · M) or O(restarts · R · M).
 
 use super::demand::Item;
+use super::refine::{refine, RefineParams};
 use super::state::{State, TriId, ViaSlot, WireId};
 use crate::geom::Vec2;
 use rand::{Rng, SeedableRng};
@@ -427,6 +428,11 @@ pub struct LayerReport {
     pub events: Vec<Vec<(usize, f64, i32)>>,
     /// The wire pairs `(a, b)`, `a < b`, of the different-net crossings left on one layer.
     pub unlayerable_pairs: Vec<(WireId, WireId)>,
+    /// Over-full edge-layers by the P1 demand model before and after the capacity refinement
+    /// (measured with the same model when the refinement is off), and the moves it kept.
+    pub overfull_before: usize,
+    pub overfull_after: usize,
+    pub refine_moves: usize,
 }
 
 /// Parameters of P3.
@@ -445,11 +451,27 @@ pub struct LayerParams {
     /// Price per cut of a plane (the `plane_cut` factor); a stretch on a plane has two layer
     /// changes, each pays half of it.
     pub plane_cut: f64,
+    /// Price (mm) of an over-full edge-layer in the capacity-aware refinement ([`refine`]; the
+    /// `overflow` factor); 0 = layers are assigned for vias only.
+    pub cap_mm: f64,
+    /// Most move evaluations of the refinement.
+    pub cap_evals: usize,
 }
 
 impl Default for LayerParams {
     fn default() -> Self {
-        LayerParams { via_mm: 25.0, via_site_r: 0.5e6, exact_max: 16, restarts: 64, seed: 1, n_signal: 0, plane_mm: 0.0, plane_cut: 0.0 }
+        LayerParams {
+            via_mm: 25.0,
+            via_site_r: 0.5e6,
+            exact_max: 16,
+            restarts: 64,
+            seed: 1,
+            n_signal: 0,
+            plane_mm: 0.0,
+            plane_cut: 0.0,
+            cap_mm: 0.0,
+            cap_evals: 200_000,
+        }
     }
 }
 
@@ -619,17 +641,47 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
     reduced.reduce();
     rep.after = reduced.size();
     let o = g.solve(p.exact_max, p.restarts, p.seed);
+    let mut evl: Vec<Vec<(usize, f64, i32)>> = Vec::with_capacity(events.len());
+    for ev in events.iter() {
+        evl.push(ev.iter().map(|e| (e.k, e.s, (o[e.node] ^ e.pi) as i32)).collect());
+    }
+    // Capacity-aware refinement: node 0 events are fixed, domain events flip with their partner.
+    let bottom = (if p.n_signal == 0 { pr.n_layers } else { p.n_signal }) as i32 - 1;
+    let mut mask: Vec<Vec<u64>> = Vec::with_capacity(events.len());
+    let mut partner: Vec<Vec<Option<(WireId, usize)>>> = events.iter().map(|ev| vec![None; ev.len()]).collect();
+    let mut by_node: BTreeMap<usize, Vec<(WireId, usize)>> = BTreeMap::new();
+    for (w, ev) in events.iter().enumerate() {
+        mask.push(ev.iter().enumerate().map(|(i, e)| if e.node == 0 { 1u64 << evl[w][i].2 } else { 0b11 }).collect());
+        for (i, e) in ev.iter().enumerate().filter(|(_, e)| e.node > 0) {
+            by_node.entry(e.node).or_default().push((w, i));
+        }
+    }
+    for v in by_node.values().filter(|v| v.len() == 2) {
+        partner[v[0].0][v[0].1] = Some(v[1]);
+        partner[v[1].0][v[1].1] = Some(v[0]);
+    }
+    let via = p.via_mm;
+    let rs = refine(
+        st,
+        &mut evl,
+        &mask,
+        &partner,
+        bottom,
+        &|a, b| if a == b { 0.0 } else { via },
+        &|_, _, _| 0.0,
+        &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals },
+    );
+    rep.overfull_before = rs.before;
+    rep.overfull_after = rs.after;
+    rep.refine_moves = rs.moves;
     // Labels per (domain, wire) for the same-layer check.
     let mut dom_labels: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
-    let mut evl: Vec<Vec<(usize, f64, i32)>> = Vec::with_capacity(events.len());
     for (w, ev) in events.iter().enumerate() {
-        let lab = |e: &Event| (o[e.node] ^ e.pi) as i32;
         if st.wires[w].alive {
-            for e in ev.iter().filter(|e| e.node > 0) {
-                dom_labels.entry(e.node).or_default().push(lab(e) as u8);
+            for (i, e) in ev.iter().enumerate().filter(|(_, e)| e.node > 0) {
+                dom_labels.entry(e.node).or_default().push(evl[w][i].2 as u8);
             }
         }
-        evl.push(ev.iter().map(|e| (e.k, e.s, lab(e))).collect());
     }
     stretches_and_vias(st, &polys, &evl, p, &mut rep);
     rep.same_layer = dom_labels.values().filter(|l| l.len() == 2 && l[0] == l[1]).count();
@@ -937,10 +989,37 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
             break;
         }
     }
-    // Report.
+    // Capacity-aware refinement of the labelling.
     let mut evl: Vec<Vec<(usize, f64, i32)>> = Vec::with_capacity(wev.len());
     for list in &wev {
         evl.push(list.iter().map(|&e| (ev[e].k, ev[e].s, lab[e] as i32)).collect());
+    }
+    let mut at_ev: Vec<(WireId, usize)> = vec![(0, 0); ev.len()];
+    for (w, list) in wev.iter().enumerate() {
+        for (i, &e) in list.iter().enumerate() {
+            at_ev[e] = (w, i);
+        }
+    }
+    let mask: Vec<Vec<u64>> = wev.iter().map(|l| l.iter().map(|&e| ev[e].mask).collect()).collect();
+    let partner: Vec<Vec<Option<(WireId, usize)>>> =
+        wev.iter().map(|l| l.iter().map(|&e| ev[e].partner.map(|q| at_ev[q])).collect()).collect();
+    let rs = refine(
+        st,
+        &mut evl,
+        &mask,
+        &partner,
+        costs.plane_from.min(nl) as i32 - 1,
+        &|a, b| costs.trans(a, b),
+        &|w, i, l| costs.unary(wev[w][i], l),
+        &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals },
+    );
+    rep.overfull_before = rs.before;
+    rep.overfull_after = rs.after;
+    rep.refine_moves = rs.moves;
+    for (w, list) in wev.iter().enumerate() {
+        for (i, &e) in list.iter().enumerate() {
+            lab[e] = evl[w][i].2 as u8;
+        }
     }
     rep.domains = ev.iter().enumerate().filter(|(i, e)| e.partner.is_some_and(|q| q > *i)).count();
     // Crossings left on one layer: forced ones (both fixed to the same layer) and any the
