@@ -12,7 +12,7 @@ What a run does and how long it may take.
 
 | Key | Type | Default | Unit | Range | Description |
 |---|---|---|---|---|---|
-| `timeout_s` | float | `60` | s | 0 .. 86400 | Limit on router time: all routing passes of the run together stop after this long; the pre-flight DRC, the DRC rounds and the kicad-cli refill / preview exports are not counted. 0 or "none" disables it (Cancel is then the only stop). |
+| `timeout_s` | float | `60` | s | 0 .. 86400 | Limit on router time: all routing passes of the run together stop after this long (the topological core stops at its work caps in [optimize]; this limit is then only an emergency stop, and when it fires the report warns that the result may differ between runs); the pre-flight DRC, the DRC rounds and the kicad-cli refill / preview exports are not counted. 0 or "none" disables it (Cancel is then the only stop). |
 | `threads` | int | `0` |  | 0 .. 256 | Worker threads; 0 = all cores but one. |
 | `partial_routes` | bool | `false` |  | true\|false | Keep the connections that did route when others fail, instead of discarding the whole result. |
 | `existing_copper` | str | `"fixed"` |  | fixed\|smooth\|rip | Policy for existing tracks and vias: fixed = obstacle, smooth = keep topology but smooth, rip = re-route. (smooth is treated as fixed in 0.4.0.) |
@@ -135,6 +135,16 @@ Optimisation stop rule.
 | `patience` | int | `5` |  | 1 .. 100 | Stop early when for this many cycles no connection was newly routed and gain stayed below min_gain_pct. |
 | `min_gain_pct` | float | `1.0` | % | 0 .. 100 | Smallest total cost improvement over the patience window that counts as progress. |
 | `continue_rounds` | int | `3` |  | 0 .. 10 | Extra rounds for the connections that are still unrouted: each round routes them again against everything routed so far as fixed copper (they may join any copper of their net) and first tries releasing the routed connections that block them most; the bar for releasing drops each round. Stops when a round routes nothing new; 0 = off. |
+
+## `[optimize]`
+
+Topological core: how much optimisation work a run does (work caps, so a run is reproducible), and which result it keeps.
+
+| Key | Type | Default | Unit | Range | Description |
+|---|---|---|---|---|---|
+| `rounds` | int | `4` |  | 1 .. 20 | Topological core: most whole-route rounds (the first one included). Each repeat routes again with the passages the drawing found too small lowered; every round is a result variant. A work cap, not a time cap: the same board and settings give the same result on any machine, loaded or not, and with any thread count (run.timeout_s is only an emergency stop; when it fires the report warns that the result may differ between runs). *Since 0.5.0.* |
+| `max_ripped` | int | `5000` |  | 0 .. 1000000 | Topological core: most connections one whole-route round may take out and route again (negotiated rip-up-and-reroute, drawing feedback and the P4 moves together). A work cap (see rounds). *Since 0.5.0.* |
+| `max_expansions` | int | `2000000` |  | 1000 .. 1000000000 | Topological core: search cap per connection (expanded search nodes); the one retry of a connection that found no path uses four times this. A work cap (see rounds): a connection that needs more is reported as failed. *Since 0.5.0.* |
 
 ## `[output]`
 

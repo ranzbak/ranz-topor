@@ -1024,6 +1024,17 @@ pub struct Options {
     /// via-carrying wire with a layer run moved onto the layer of its neighbour run (dropping the
     /// vias between), keep it where the checker accepts the redrawn wire.
     pub via_reduce: bool,
+    /// Topological core (S3, `topor.toml [optimize] rounds`): most whole-route rounds (the first
+    /// included). A work cap, not a time cap: the same board and settings give the same result on
+    /// any machine and with any thread count.
+    pub topo_rounds: usize,
+    /// Topological core (S3, `topor.toml [optimize] max_ripped`): most wires one whole route may
+    /// take out and route again (negotiated rip-up-and-reroute, drawing feedback and the P4 moves
+    /// together). A work cap.
+    pub max_ripped: usize,
+    /// Topological core (S3, `topor.toml [optimize] max_expansions`): search cap (expanded search
+    /// nodes) per connection; the one retry of a failed connection uses four times this. A work cap.
+    pub max_expansions: usize,
     /// Router (NX, `topor.toml [search] neck_max_mm`): longest necked stub, nm; 0 = twice the
     /// pad's long side.
     pub neck_max_nm: i64,
@@ -1105,6 +1116,9 @@ impl Default for Options {
             feedback_max_rip: 8,
             reroute_rounds: 6,
             via_reduce: true,
+            topo_rounds: 4,
+            max_ripped: 5000,
+            max_expansions: 2_000_000,
             neck_max_nm: 0,
             pad_bridge_max_nm: 2_000_000,
             steiner: true,

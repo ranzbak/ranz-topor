@@ -111,20 +111,29 @@ fn fail(o: &mut [Outcome], i: usize, reason: impl Into<String>) {
 }
 
 /// Route `model` with the topological core (see the module doc).
+///
+/// Reproducible: every stop that changes the result is a work cap (`topo_rounds`, `max_ripped`,
+/// `max_expansions`, `reroute_rounds`, the move cap of the descent). The time budget
+/// (`wall_clock_s`) is only an emergency stop; when it fires the result says so in a warning
+/// ([`TIME_HIT`]), because then it depends on the machine's speed and load.
 pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteResult {
     let t0 = Instant::now();
     let (mut best, h0, mut mem) = route_round(model, opts, ctl, &[], &Memory::default());
-    let budget = if opts.wall_clock_s > 0.0 { opts.wall_clock_s } else { f64::INFINITY };
+    let mut time_hit = best.timed_out;
+    let over_budget = || opts.wall_clock_s > 0.0 && t0.elapsed().as_secs_f64() >= opts.wall_clock_s;
     // Feedback to the topology (plan S2c item 4): the rooms the drawing found too small are
-    // lowered by what was missing, and the whole route is made again (at most `MAX_ROUNDS`
-    // rounds in all, while time allows and each round routes more); the best result stays.
+    // lowered by what was missing, and the whole route is made again (at most `topo_rounds`
+    // rounds in all, while each round routes more); the best result stays.
     let mut all: BTreeMap<(usize, usize), f64> = h0.iter().map(|&(e, l, r)| ((e, l), r)).collect();
     let first = best.routed;
     let mut round_note = Vec::new();
     let mut stall = 0usize;
-    for round in 2..=MAX_ROUNDS {
-        let round_s = t0.elapsed().as_secs_f64() / (round - 1) as f64;
-        if !opts.drawing_feedback || all.is_empty() || best.stop_reason != "converged" || t0.elapsed().as_secs_f64() + 1.3 * round_s > budget {
+    for round in 2..=opts.topo_rounds.max(1) {
+        if !opts.drawing_feedback || all.is_empty() || best.stop_reason != "converged" {
+            break;
+        }
+        if over_budget() {
+            time_hit = true;
             break;
         }
         let mut o2 = opts.clone();
@@ -133,6 +142,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         }
         let hv: Hints = all.iter().map(|(&(e, l), &r)| (e, l, r)).collect();
         let (r2, h2, mem2) = route_round(model, &o2, ctl, &hv, &mem);
+        time_hit |= r2.timed_out;
         mem = mem2;
         round_note.push(format!("round {round}: {} cut rooms lowered, routed {} of {}", hv.len(), r2.routed, r2.connections_total));
         for (e, l, r) in h2 {
@@ -161,11 +171,14 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         ));
         best.runtime_s = t0.elapsed().as_secs_f64();
     }
+    if time_hit {
+        best.warnings.push(format!("{TIME_HIT} (run.timeout_s = {:.0} s stopped the run before its work caps)", opts.wall_clock_s));
+    }
     best
 }
 
-/// Most rounds of the topology feedback (the first one included).
-const MAX_ROUNDS: usize = 4;
+/// Warning when the time budget, the emergency stop, ended any part of the run.
+pub const TIME_HIT: &str = "time budget hit: result may differ between runs";
 
 /// What a whole route remembers for the next one (negotiated rip-up and reroute across repeats).
 #[derive(Clone, Debug, Default)]
@@ -306,7 +319,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         st.history = saved;
         r
     };
-    let cap = 2_000_000usize;
+    let cap = opts.max_expansions.max(1);
     for &ci in &order {
         if expired() {
             timed_out = true;
@@ -360,7 +373,6 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         r
     };
-    let p4_deadline = (opts.wall_clock_s > 0.0).then(|| t0 + std::time::Duration::from_secs_f64(0.4 * opts.wall_clock_s));
     let score = |st: &State, lr: &layers::LayerReport| {
         let polys = polys_of(st);
         (CapModel::new(st, &packer, &polys, &lr.events, bottom, 1.0).overfull(), lr.vias)
@@ -368,8 +380,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let first_score = score(&st, &lr);
     let mut best_p4 = (st.clone(), wire_conn.clone(), lr.clone(), first_score);
     let (mut p4_rounds, mut p4_stall, mut p4_ripped) = (0usize, 0usize, 0usize);
+    // Wires taken out and routed again in this whole route (the `max_ripped` work cap).
+    let mut ripped_total = 0usize;
     for _round in 0..opts.reroute_rounds {
-        if expired() || p4_deadline.is_some_and(|d| Instant::now() >= d) {
+        if expired() {
+            timed_out = true;
+            break;
+        }
+        if ripped_total >= opts.max_ripped {
             break;
         }
         let polys = polys_of(&st);
@@ -402,12 +420,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let max_rip = (alive / 4).max(10);
         let mut vic: Vec<WireId> = victims.into_iter().collect();
         vic.sort_by_key(|&w| std::cmp::Reverse(rank[wire_conn[w]]));
-        vic.truncate(max_rip);
+        vic.truncate(max_rip.min(opts.max_ripped - ripped_total));
         vic.sort_by_key(|&w| rank[wire_conn[w]]);
         if vic.is_empty() {
             break;
         }
         p4_ripped += vic.len();
+        ripped_total += vic.len();
         let vic_conns: Vec<usize> = vic.iter().map(|&w| wire_conn[w]).collect();
         for &w in &vic {
             st.remove(w);
@@ -416,6 +435,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let mut lost = false;
         for &ci in &vic_conns {
             if expired() || !(route_one(&mut st, ci, cap, &mut wire_conn) || route_one(&mut st, ci, cap * 4, &mut wire_conn)) {
+                timed_out |= expired();
                 lost = true;
                 break;
             }
@@ -608,12 +628,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     // ---- Feedback (plan S2c item 4): a wire the drawing could not fit is drawn before the
     // wires that block its sleeve, which are then redrawn around it; at most one round per wire.
-    let fb_deadline = (opts.wall_clock_s > 0.0).then(|| t0 + std::time::Duration::from_secs_f64(0.8 * opts.wall_clock_s));
     let (mut fb_tried, mut fb_rescued) = (0usize, 0usize);
     if opts.drawing_feedback {
         let rejected: Vec<Diag> = dr.diag.clone();
         for &f in &failed_draw {
-            if expired() || fb_deadline.is_some_and(|d| Instant::now() >= d) {
+            if expired() {
+                timed_out = true;
                 break;
             }
             let Some(d) = rejected.iter().rev().find(|d| d.wire == f) else { continue };
@@ -622,9 +642,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 continue;
             }
             let blockers = dr.blockers(d, drawn.iter().map(|(&w, wo)| (w, wo)));
-            if blockers.len() > opts.feedback_max_rip {
+            if blockers.len() > opts.feedback_max_rip || ripped_total + blockers.len() > opts.max_ripped {
                 continue;
             }
+            ripped_total += blockers.len();
             fb_tried += 1;
             // Rip the blockers' tracks, draw the rejected wire, then redraw the blockers.
             for bw in &blockers {
@@ -748,9 +769,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let causes_before = causes(&plans, &drawn);
     // TOPO_NOREDUCE=1 (debug): leave the vias as drawn, to compare with the reduction.
     if opts.via_reduce && std::env::var("TOPO_NOREDUCE").is_err() {
-        let red_deadline = (opts.wall_clock_s > 0.0).then(|| t0 + std::time::Duration::from_secs_f64(0.9 * opts.wall_clock_s));
         let t_red = Instant::now();
-        let (rs, changed) = super::reduce::reduce_vias(&mut dr, &mut drawn, &mut placed, &mut plans, &mut via_h, &end_fixed, &frozen, b.n_signal, red_deadline);
+        let (rs, changed) = super::reduce::reduce_vias(&mut dr, &mut drawn, &mut placed, &mut plans, &mut via_h, &end_fixed, &frozen, b.n_signal, deadline);
+        timed_out |= rs.timed_out;
         for w in changed {
             let ci = conn_of[wire_conn[w]];
             necking.retain(|(c, _)| *c != ci);
@@ -764,7 +785,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             rs.accepted,
             rs.vias_removed,
             t_red.elapsed().as_secs_f64(),
-            if rs.timed_out { ", stopped by the time limit" } else { "" },
+            if rs.timed_out { ", stopped by the time budget" } else { "" },
             causes_before,
             causes(&plans, &drawn)
         ));

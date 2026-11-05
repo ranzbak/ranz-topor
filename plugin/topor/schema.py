@@ -58,6 +58,7 @@ SECTIONS = {
     "search": "Path search tuning.",
     "ripup": "Rip-up and re-route escalation.",
     "iterations": "Optimisation stop rule.",
+    "optimize": "Topological core: how much optimisation work a run does (work caps, so a run is reproducible), and which result it keeps.",
     "output": "Result geometry and report location.",
     "expert": "PathFinder constants; change only when you know the router.",
     "factors": "Price of what a route does (social factors), in mm of copper per unit: weight, scope and report level per factor name (docs/dev/factors.md). Factor code is trusted code: only add factor files you trust.",
@@ -65,7 +66,7 @@ SECTIONS = {
 
 SETTINGS: list[Setting] = [
     # ---- [run]
-    _s("run", "timeout_s", "float", 60, "Limit on router time: all routing passes of the run together stop after this long; the pre-flight DRC, the DRC rounds and the kicad-cli refill / preview exports are not counted. 0 or \"none\" disables it (Cancel is then the only stop).",
+    _s("run", "timeout_s", "float", 60, "Limit on router time: all routing passes of the run together stop after this long (the topological core stops at its work caps in [optimize]; this limit is then only an emergency stop, and when it fires the report warns that the result may differ between runs); the pre-flight DRC, the DRC rounds and the kicad-cli refill / preview exports are not counted. 0 or \"none\" disables it (Cancel is then the only stop).",
        unit="s", range=(0, 86400), engine="wall_clock_s"),
     _s("run", "threads", "int", 0, "Worker threads; 0 = all cores but one.", range=(0, 256), engine="threads"),
     _s("run", "partial_routes", "bool", False, "Keep the connections that did route when others fail, instead of discarding the whole result.",
@@ -195,6 +196,13 @@ SETTINGS: list[Setting] = [
        unit="%", range=(0, 100), engine="min_gain_pct"),
     _s("iterations", "continue_rounds", "int", 3, "Extra rounds for the connections that are still unrouted: each round routes them again against everything routed so far as fixed copper (they may join any copper of their net) and first tries releasing the routed connections that block them most; the bar for releasing drops each round. Stops when a round routes nothing new; 0 = off.",
        range=(0, 10), engine="continue_rounds"),
+    # ---- [optimize]
+    _s("optimize", "rounds", "int", 4, "Topological core: most whole-route rounds (the first one included). Each repeat routes again with the passages the drawing found too small lowered; every round is a result variant. A work cap, not a time cap: the same board and settings give the same result on any machine, loaded or not, and with any thread count (run.timeout_s is only an emergency stop; when it fires the report warns that the result may differ between runs).",
+       range=(1, 20), engine="topo_rounds", since="0.5.0"),
+    _s("optimize", "max_ripped", "int", 5000, "Topological core: most connections one whole-route round may take out and route again (negotiated rip-up-and-reroute, drawing feedback and the P4 moves together). A work cap (see rounds).",
+       range=(0, 1000000), engine="max_ripped", since="0.5.0"),
+    _s("optimize", "max_expansions", "int", 2000000, "Topological core: search cap per connection (expanded search nodes); the one retry of a connection that found no path uses four times this. A work cap (see rounds): a connection that needs more is reported as failed.",
+       range=(1000, 1000000000), engine="max_expansions", since="0.5.0"),
     # ---- [output]
     _s("output", "geometry", "str", "arcs", "Track geometry: arcs = native KiCad arcs, segments = straight-segment approximation.",
        choices=("arcs", "segments")),
