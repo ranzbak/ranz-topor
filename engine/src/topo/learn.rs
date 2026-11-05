@@ -312,6 +312,7 @@ pub struct Sample {
     /// and the net is of the learned tier.
     pub counted: BTreeSet<i32>,
     pub model: BoardModel,
+    /// Engine options of the lite routing (defaults; `seed` seeds P3's local search).
     pub opts: Options,
     pub hand: HandRef,
     /// Connections dropped from the lite engine (pour terminals, other terminals, diff pairs).
@@ -679,6 +680,7 @@ pub fn route_lite(s: &Sample, reg: &Registry, base: &Registry, tier: Option<u8>,
         plane_mm: p3.price(&Event::PlaneLength { wire: 0, layer: b.n_signal, mm: 1.0 }, &WireCtx::default()),
         plane_cut: p3.price(&Event::PlaneCut { wire: 0, layer: b.n_signal }, &WireCtx::default()),
         cap_mm: p3.price(&Event::Overflow { wire: 0, edge: 0 }, &WireCtx::default()),
+        seed: s.opts.seed,
         ..LayerParams::default()
     };
     let packer = Packer::for_model(&s.model, &s.opts, proj);

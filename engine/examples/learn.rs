@@ -3,14 +3,15 @@
 //!     cargo run --release --example learn -- --board NAME HAND.json INPUT.json [--board ...]
 //!         [--hold-out NAME] [--eta 5] [--lambda 0.001] [--eps 0.05] [--iters 12] [--margin 2]
 //!         [--learn via,crossing,squeeze] [--tier N] [--out learned.json]
-//!         [--toml learned.toml] [--stats stats.json] [--stats-only]
+//!         [--toml learned.toml] [--stats stats.json] [--stats-only] [--seed 1]
 //!
 //! `HAND.json` is the hand board and `INPUT.json` the same board stripped of tracks and vias
 //! (`harness.g0 export`). Trains on every `--board` except `--hold-out`. `--stats` writes, per
 //! board (the held-out one included), the hand's and the engine's (default weights, no loss
 //! augmentation) factor totals, event counts and loss: the input of the candidate-factor list.
 //! The learned weights are written as a `topor.toml [factors]` snippet (`--toml`); they are never
-//! applied by default.
+//! applied by default. `--seed` seeds P3's local search (default 1): the same seed gives the same
+//! learned weights.
 
 use std::collections::BTreeMap;
 use topor_engine::model::BoardModel;
@@ -28,6 +29,7 @@ fn main() {
     let mut o = LearnOpts::default();
     let (mut hold, mut out, mut toml, mut stats) = (None::<String>, None::<String>, None::<String>, None::<String>);
     let mut stats_only = false;
+    let mut seed: Option<u64> = None;
     let mut i = 0;
     let num = |a: &[String], i: usize| -> f64 { a.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or_else(|| panic!("{} needs a number", a[i])) };
     while i < args.len() {
@@ -49,6 +51,7 @@ fn main() {
             "--out" => out = Some(args[i + 1].clone()),
             "--toml" => toml = Some(args[i + 1].clone()),
             "--stats" => stats = Some(args[i + 1].clone()),
+            "--seed" => seed = Some(num(&args, i) as u64),
             "--stats-only" => {
                 stats_only = true;
                 n = 1;
@@ -71,6 +74,12 @@ fn main() {
             .collect();
         hs.into_iter().map(|h| h.join().expect("prepare thread")).collect()
     });
+    let mut samples = samples;
+    for s in samples.iter_mut().flatten() {
+        if let Some(sd) = seed {
+            s.opts.seed = sd;
+        }
+    }
     for s in samples.iter().flatten() {
         let t = &s.hand.totals;
         eprintln!(

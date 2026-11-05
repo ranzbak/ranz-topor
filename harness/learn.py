@@ -35,9 +35,10 @@ BOARDS = {
     "tanmatsu": ("tanmatsu", "tanmatsu"),
     "bornhack2026": ("bornhack2026", "bornhack2026"),
 }
-# Event kinds of examples/learn --stats compared hand vs engine (per hand wire).
+# Event kinds of examples/learn --stats compared hand vs engine, per 100 mm of copper (hand chains and
+# engine connections join pads differently, so a per-wire rate would not compare).
 EVENT_KINDS = ["vias", "layer_forced", "crossings", "same_net_crossings", "squeezes", "overflows",
-               "blocks_pad", "ignored_rule", "excess_length_mm", "length_mm", "passes"]
+               "blocks_pad", "ignored_rule", "excess_length_mm", "passes"]
 
 
 def paths(name: str, r1: Path = R1) -> tuple[Path, Path]:
@@ -183,16 +184,17 @@ def evaluate(out: Path, names: list[str], bins: Path, jobs: int) -> None:
 
 # ---------------------------------------------------------------- candidates
 
-def candidates(st: list[dict], hi: float = 2.0, lo: float = 0.5, floor: float = 0.02) -> dict:
-    """Event kinds whose per-wire rate in the engine is at least `hi` times the hand's (candidate
-    penalties) or at most `lo` times (candidate preferences) on a majority of the boards where
-    either side has a rate >= `floor`. Rates per board are kept for the report."""
+def candidates(st: list[dict], hi: float = 2.0, lo: float = 0.5, floor: float = 0.05) -> dict:
+    """Event kinds whose rate per 100 mm of copper in the engine is at least `hi` times the hand's
+    (candidate penalties) or at most `lo` times (candidate preferences) on a majority of the boards
+    where either side has a rate >= `floor`. Rates per board are kept for the report."""
     rows = []
     for k in EVENT_KINDS:
         per = []
         for b in st:
-            hw, ew = max(b["hand"]["wires"], 1), max(b["engine"]["totals"]["wires"], 1)
-            h, e = b["hand"]["events"].get(k, 0.0) / hw, b["engine"]["totals"]["events"].get(k, 0.0) / ew
+            he, ee = b["hand"]["events"], b["engine"]["totals"]["events"]
+            hl, el = max(he.get("length_mm", 0.0), 1e-9) / 100, max(ee.get("length_mm", 0.0), 1e-9) / 100
+            h, e = he.get(k, 0.0) / hl, ee.get(k, 0.0) / el
             per.append((b["board"], h, e))
         seen = [(n, h, e) for n, h, e in per if max(h, e) >= floor]
         more = sum(1 for _, h, e in seen if e >= hi * h)
@@ -246,7 +248,7 @@ def report(out: Path, names: list[str]) -> str:
     st = out / "stats.json"
     if st.exists():
         c = candidates(json.loads(st.read_text()))
-        lines += ["", "## Candidate factors (hand vs engine event rates per wire; default weights, witness board)", ""]
+        lines += ["", "## Candidate factors (hand vs engine event rates; engine = P2 + P3 at default weights on the witness board)", ""]
         for kind in ("penalties", "preferences"):
             lines.append(f"* candidate {kind}: " + (", ".join(r["event"] for r in c[kind]) or "none"))
         lines += ["", "| event | candidate | " + " | ".join(r["board"] for r in c["all"][0]["rates"]) + " |",
@@ -255,7 +257,7 @@ def report(out: Path, names: list[str]) -> str:
             cells = " | ".join(f"{x['hand']:.3f} / {x['engine']:.3f}" for x in r["rates"])
             lines.append(f"| {r['event']} | {r['candidate'] or '-'} | {cells} |")
         lines.append("")
-        lines.append("Cells: hand / engine, events per wire (length in mm per wire).")
+        lines.append("Cells: hand / engine, events per 100 mm of copper (excess_length_mm: mm per 100 mm, i.e. %).")
     text = "\n".join(lines) + "\n"
     (out / "report.md").write_text(text)
     (out / "learned-avg.toml").write_text(snippet(ev["averaged_weights"], f"averaged over the hold-out folds of {', '.join(names)}"))

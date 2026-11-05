@@ -35,8 +35,9 @@ def test_verdict():
     assert learn.verdict(d, dict(d, routed=12, same_layer=1)).startswith("worse")
 
 
-def _stat(board, hand, engine, hw=10, ew=10):
-    return {"board": board, "hand": {"wires": hw, "events": hand}, "engine": {"totals": {"wires": ew, "events": engine}}}
+def _stat(board, hand, engine):
+    return {"board": board, "hand": {"events": dict(hand, length_mm=1000.0)},
+            "engine": {"totals": {"events": dict(engine, length_mm=1000.0)}}}
 
 
 def test_candidates_split_penalties_and_preferences():
@@ -47,7 +48,7 @@ def test_candidates_split_penalties_and_preferences():
     assert [r["event"] for r in c["penalties"]] == ["crossings"]
     assert [r["event"] for r in c["preferences"]] == ["vias"]
     rates = next(r for r in c["all"] if r["event"] == "crossings")["rates"]
-    assert rates[0] == {"board": "a", "hand": 0.1, "engine": 0.5}
+    assert rates[0] == {"board": "a", "hand": 0.1, "engine": 0.5}  # per 100 mm of 1000 mm
 
 
 def test_snippet_and_factor_args():
