@@ -870,6 +870,46 @@ impl<'p> State<'p> {
         self.wires[w].alive = false;
     }
 
+    /// Take the alive wire `w` out of the edge orders and triangles but keep its record (pass ids,
+    /// triangles): returns its path as `(edge, gap)` in the form [`State::insert`] takes, the gap
+    /// counting only the other wires' passes. [`State::reattach`] puts it back (on the same or on
+    /// changed gaps of the same edges). O(passes x edge load).
+    pub fn detach(&mut self, w: WireId) -> Vec<(EdgeId, usize)> {
+        let path: Vec<(EdgeId, usize)> = self.wires[w]
+            .passes
+            .iter()
+            .map(|&p| {
+                let e = self.passes[p].edge;
+                let g = self.edge_order[e].iter().take_while(|&&x| x != p).filter(|&&x| self.passes[x].wire != w).count();
+                (e, g)
+            })
+            .collect();
+        self.remove(w);
+        path
+    }
+
+    /// Put the detached wire `w` back along `path` (gaps as in [`State::insert`], one per pass of
+    /// `w`, on its own edges): same id, same pass ids, same triangles. O(passes x edge load).
+    pub fn reattach(&mut self, w: WireId, path: &[(EdgeId, usize)]) {
+        assert!(!self.wires[w].alive, "reattach of a wire that is in place");
+        let passes = self.wires[w].passes.clone();
+        assert_eq!(passes.len(), path.len(), "one gap per pass");
+        for (j, &(e, g)) in path.iter().enumerate() {
+            debug_assert_eq!(self.passes[passes[j]].edge, e, "reattach on the wire's own edges");
+            let shift = path[..j].iter().filter(|&&(e0, g0)| e0 == e && g0 <= g).count();
+            let at = (g + shift).min(self.edge_order[e].len());
+            self.edge_order[e].insert(at, passes[j]);
+        }
+        for k in 0..self.wires[w].tris.len() {
+            let t = self.wires[w].tris[k];
+            self.tri_trav[t].push((w, k));
+        }
+        let (a, b) = (self.wires[w].a, self.wires[w].b);
+        self.ends[a] += 1;
+        self.ends[b] += 1;
+        self.wires[w].alive = true;
+    }
+
     /// The passes of `a` and `b` between two of their crossings, paired edge by edge, when
     /// both run through the same edges (the bigon holds no obstacle); `None` otherwise.
     pub fn double_stretch(

@@ -99,9 +99,12 @@ type, default, unit, range and the KiCad place that influences it.
 | `[nets]` | do-not-touch nets, power / ground name patterns, priorities, pads to ignore |
 | `[vias]` | via cost and count, via reduction, fallback via size |
 | `[layers]` | the role of each copper layer (`F.Cu = "signal"`, `In1.Cu = "gnd"`, …) |
+| `[planes]` | whether signal copper may run on plane layers (gnd / pwr roles) and at what price |
 | `[search]` | detour factor, safety margin, zero-slack retry |
 | `[ripup]` | rip-up escalation |
 | `[iterations]` | when the optimiser stops (cap, patience, minimum gain) |
+| `[optimize]` | topological core: work caps that make a run reproducible (`rounds`, `max_ripped`, `max_expansions`, `max_moves`), the P4 moves and fluctuation, the board objective (`objective` = `length_vias` or `area`, `mm_per_via`) and how many result variants are kept (`variants`) |
+| `[factors]` | topological core: weight, scope and report level of each social factor (via, crossing, squeeze, blocks_pad, reroute, …; see the factor table in configuration.md) |
 | `[output]` | arcs or straight segments; report folder |
 | `[expert]` | router constants — leave them alone unless you know the router |
 
@@ -188,7 +191,9 @@ A selection that yields nothing gives [`SCOPE_EMPTY`](troubleshoot.md#scope_empt
 iteration out of `[iterations] max`, the via count and elapsed time against the time limit.
 The run ends by itself when no more progress is made (`[iterations]`), when the router has used the time
 limit (`[run] timeout_s` counts router time only: the pre-flight DRC, the DRC rounds and the kicad-cli
-refill / preview exports come on top), or when you press **Cancel** (or Esc / Enter): the label changes to
+refill / preview exports come on top; the topological core stops at its `[optimize]` work caps, so the same
+board gives the same result on any machine, and the time limit is only an emergency stop there: the report
+then warns "time budget hit: result may differ between runs"), or when you press **Cancel** (or Esc / Enter): the label changes to
 *Cancelling — keeping the best result so far…* and the best result found so far goes on to KiCad DRC and
 the preview. If nothing was routed yet, the run ends with *Cancelled — nothing was changed on the board.*
 Cancel reacts within about a second in every phase: while routing, and also while `kicad-cli` runs (pre-flight

@@ -105,6 +105,8 @@ class RunReport:
             f"Settings: {_na(f.get('non_default'))} non-default, {_na(f.get('defaults_used'))} built-in defaults",
             f"Findings: {sev('error')} errors · {sev('warning')} warnings · {sev('info')} notes",
             f"Outcome: {outcome_text(self.status, self.error_code)}" + self._refill_note(),
+            *(["Warning: time budget hit: result may differ between runs (run.timeout_s stopped the topological core "
+               "before its [optimize] work caps)"] if f.get("time_budget_hit") else []),
             f"Report: {self.dir}",
         ]
         return lines[:SUMMARY_MAX_LINES]
@@ -120,7 +122,25 @@ class RunReport:
             md += [f"## {title}", "", *(body or ["none"]), ""]
         if self.facts.get("notes"):
             md += ["## Notes", "", *[f"- {n}" for n in self.facts["notes"]], ""]
+        if self.facts.get("variants"):
+            md += ["## Variants", "", *self._variants(), ""]
         return "\n".join(md)
+
+    def _variants(self) -> list:
+        """The topological core's Pareto archive ([optimize] objective): one row per kept variant, the pick
+        marked; the routed result is the picked variant. O(variants)."""
+        rows = ["| variant | errors | vias | length mm | shrinkages | warnings | area mm² | mm/via | best on | picked |",
+                "|---|---|---|---|---|---|---|---|---|---|"]
+        for v in self.facts["variants"]:
+            mpv = v.get("mm_per_via")
+            rows.append(f"| {v.get('label')} | {v.get('errors')} | {v.get('vias')} | {v.get('length_mm')} | "
+                        f"{v.get('shrinkages')} | {v.get('warnings')} | {v.get('area_mm2')} | "
+                        f"{'-' if mpv is None else mpv} | {', '.join(v.get('champion') or [])} | "
+                        f"{'yes' if v.get('picked') else ''} |")
+        moves = self.facts.get("moves") or {}
+        if moves:
+            rows += ["", "P4 moves applied (picked variant): " + ", ".join(f"{k} {n}" for k, n in moves.items())]
+        return rows
 
     def _connections(self) -> list:
         f = self.facts
@@ -368,6 +388,8 @@ def build_report(result: dict, drc: dict | None, cfg, findings, scope, before_st
         "fallbacks": list(scope.get("fallbacks") or []),
         "accepted_codes": list(scope.get("accepted_codes") or ()),
         "findings": list(findings or []),
+        "variants": result.get("variants") or None, "moves": result.get("moves") or None,
+        "time_budget_hit": any(str(w).startswith("time budget hit") for w in result.get("warnings") or []) or None,
         "non_defaults": nd, "non_default": len(nd), "defaults_used": len(SETTINGS) - len(nd),
     }
     if cfg is not None:

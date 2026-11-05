@@ -301,6 +301,7 @@ fn the_factor_reference_matches_the_schema_text() {
         ("squeeze", 5.0),
         ("blocks_pad", 30.0),
         ("ignored_rule", 100.0),
+        ("reroute", 5.0),
     ];
     assert_eq!(got, want);
 }

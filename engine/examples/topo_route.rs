@@ -1,6 +1,6 @@
 //! S2a on one exported board model, without Python:
 //!
-//!     cargo run --release --example topo_route -- <input.json> [--out result.json] [--timeout S] [--plane-signals costly|forbidden]
+//!     cargo run --release --example topo_route -- <input.json> [--out result.json] [--timeout S] [--plane-signals costly|forbidden] [--opt NAME=JSON ...]
 //!
 //! `input.json` is the board model with tracks and vias removed (`harness.g0 export`). Prints the
 //! routed count, the failure reasons and the detour ratios; `--out` writes the `RouteResult` JSON.
@@ -27,6 +27,16 @@ fn main() {
             let v = args.get(i + 1).expect("--factor NAME=WEIGHT");
             let (n, w) = v.split_once('=').expect("--factor NAME=WEIGHT");
             o.factors.weight.insert(n.to_string(), w.parse().expect("weight"));
+        }
+    }
+    // --opt NAME=JSON: any engine option (e.g. --opt moves=false --opt fluctuation=0).
+    for (i, a) in args.iter().enumerate() {
+        if a == "--opt" {
+            let v = args.get(i + 1).expect("--opt NAME=JSON");
+            let (n, j) = v.split_once('=').expect("--opt NAME=JSON");
+            let mut val = serde_json::to_value(&o).expect("options json");
+            val[n] = serde_json::from_str(j).unwrap_or_else(|_| serde_json::Value::String(j.to_string()));
+            o = serde_json::from_value(val).expect("option value");
         }
     }
     let r = topor_engine::route::route_with(&m, &o, &RunControl::new());

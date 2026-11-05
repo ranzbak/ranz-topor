@@ -178,6 +178,11 @@ pub struct RouteResult {
     pub item_conn: Vec<usize>,
     /// Pad exit stubs (A6 / NX) planned by the routing passes, in pass and pad order.
     pub stubs: Vec<StubOut>,
+    /// Topological core: the variant table of the Pareto archive (`[optimize] objective`), the
+    /// picked one marked; this result is the picked variant. Empty for other engines.
+    pub variants: Vec<crate::topo::archive::VariantRow>,
+    /// Topological core: P4 moves applied per type (summed over the rounds of the picked variant).
+    pub moves: BTreeMap<String, usize>,
 }
 
 /// One PathFinder iteration's cost (diagnostics, `Options::profile`). Seconds are wall clock.
@@ -562,5 +567,7 @@ pub(crate) fn unrouted(model: &BoardModel, opts: &Options, reason: &str) -> Rout
         profile: None,
         item_conn: Vec::new(),
         stubs: Vec::new(),
+        variants: Vec::new(),
+        moves: BTreeMap::new(),
     }
 }

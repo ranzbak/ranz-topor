@@ -1035,6 +1035,28 @@ pub struct Options {
     /// Topological core (S3, `topor.toml [optimize] max_expansions`): search cap (expanded search
     /// nodes) per connection; the one retry of a failed connection uses four times this. A work cap.
     pub max_expansions: usize,
+    /// Topological core (S3, `topor.toml [optimize] objective`): `"length_vias"` (Pareto archive
+    /// over errors, vias, length and shrinkages; pick: fewest errors, then the least
+    /// `length + mm_per_via x vias`) or `"area"` (fewest errors, then the least occupied area).
+    pub objective: String,
+    /// Topological core (S3, `topor.toml [optimize] mm_per_via`): the via price of the
+    /// `length_vias` pick (TopoR: good results at 25 mm/via), also the P4 round pick.
+    pub mm_per_via: f64,
+    /// Topological core (S3, `topor.toml [optimize] variants`): most result variants the archive
+    /// keeps besides the champions (fewest errors, shortest, fewest vias, fewest shrinkages,
+    /// fewest warnings).
+    pub variants: usize,
+    /// Topological core (S3, `topor.toml [optimize] moves`): the P4 move descent (reroute,
+    /// attachment, merge, channel swap, joint move, double-crossing swap; crossing flip, via
+    /// shift, segment lifting) after the negotiated rip-up-and-reroute.
+    pub moves: bool,
+    /// Topological core (S3, `topor.toml [optimize] max_moves`): most move evaluations of the
+    /// descent per whole route (each label sweep has the same cap). A work cap.
+    pub max_moves: usize,
+    /// Topological core (S3, `topor.toml [optimize] fluctuation`): relative amplitude of the
+    /// seeded perturbation of the factor weights between rounds of the rip-up-and-reroute and
+    /// sweeps of the descent (0 = fixed weights).
+    pub fluctuation: f64,
     /// Router (NX, `topor.toml [search] neck_max_mm`): longest necked stub, nm; 0 = twice the
     /// pad's long side.
     pub neck_max_nm: i64,
@@ -1119,6 +1141,12 @@ impl Default for Options {
             topo_rounds: 4,
             max_ripped: 5000,
             max_expansions: 2_000_000,
+            objective: "length_vias".into(),
+            mm_per_via: 25.0,
+            variants: 8,
+            moves: true,
+            max_moves: 400,
+            fluctuation: 0.0,
             neck_max_nm: 0,
             pad_bridge_max_nm: 2_000_000,
             steiner: true,

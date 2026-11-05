@@ -29,6 +29,7 @@ mod length;
 mod necking;
 mod overflow;
 mod plane_signal;
+mod reroute;
 mod squeeze;
 mod via;
 
@@ -72,6 +73,8 @@ pub enum Event {
     /// A KiCad check set to `ignore` is violated here: `rule` is its KiCad name
     /// (`copper_edge_clearance`, ...), `at` the place, `amount_nm` how far below the rule.
     IgnoredRuleViolated { rule: String, at: Vec2, amount_nm: f64 },
+    /// `wire`'s connection moves once more after `count` earlier reroutes (P4 reroute counter).
+    Rerouted { wire: WireId, count: u32 },
 }
 
 /// How a factor's events appear in the report.
@@ -182,8 +185,9 @@ pub struct Finding {
 }
 
 /// The factors with their resolved weight, scope and report level.
+#[derive(Clone)]
 pub struct Registry {
-    factors: Vec<Box<dyn Factor>>,
+    factors: Vec<std::sync::Arc<dyn Factor>>,
     res: Vec<Resolved>,
 }
 
@@ -202,6 +206,7 @@ pub fn standard_factors() -> Vec<Box<dyn Factor>> {
         Box::new(squeeze::Squeeze),
         Box::new(blocks_pad::BlocksPad),
         Box::new(ignored_rule::IgnoredRule),
+        Box::new(reroute::Reroute),
     ]
 }
 
@@ -254,9 +259,24 @@ impl Registry {
                 Resolved { weight, scope, report }
             })
             .collect();
-        (Registry { factors, res }, problems)
+        (Registry { factors: factors.into_iter().map(std::sync::Arc::from).collect(), res }, problems)
     }
 
+    /// Fluctuating coefficients (plan P4): every weight times `1 + amp x u`, `u` uniform in
+    /// [-1, 1] from a ChaCha8 stream seeded by `seed` (one draw per factor, in registry order).
+    /// `amp` = 0 gives the same weights. Deterministic. O(#factors).
+    pub fn fluctuated(&self, seed: u64, amp: f64) -> Registry {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+        let mut r = self.clone();
+        for x in &mut r.res {
+            let u: f64 = rng.gen_range(-1.0..=1.0);
+            if amp > 0.0 {
+                x.weight *= (1.0 + amp * u).max(0.0);
+            }
+        }
+        r
+    }
     pub fn names(&self) -> Vec<&'static str> {
         self.factors.iter().map(|f| f.name()).collect()
     }
@@ -403,6 +423,18 @@ mod tests {
         assert_eq!(r.price(&Event::PlaneLength { wire: 0, layer: 1, mm: 2.0 }, &w), 20.0);
         assert_eq!(r.price(&Event::PlaneCut { wire: 0, layer: 1 }, &w), 25.0);
         assert_eq!(r.price(&Event::Necking { wire: 0, from_nm: 200e3, to_nm: 150e3, mm: 4.0 }, &w), 30.0);
+    }
+
+    #[test]
+    fn fluctuation_is_seeded_and_bounded() {
+        let r = Registry::standard();
+        let w = WireCtx::default();
+        let via = |g: &Registry| g.price(&Event::Via { wire: 0, count: 1, at: None }, &w);
+        let (a, b, c) = (r.fluctuated(7, 0.2), r.fluctuated(7, 0.2), r.fluctuated(8, 0.2));
+        assert_eq!(via(&a), via(&b), "same seed, same weights");
+        assert_ne!(via(&a), via(&c), "another seed, other weights");
+        assert!((20.0..=30.0).contains(&via(&a)), "{}", via(&a));
+        assert_eq!(via(&r.fluctuated(7, 0.0)), 25.0);
     }
 
     #[test]

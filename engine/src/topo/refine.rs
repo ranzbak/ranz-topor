@@ -143,6 +143,11 @@ impl<'a> CapModel<'a> {
         items.is_empty() || self.packer.bounds(e, l, &items).fits()
     }
 
+    /// Total overflow price of the labelling (mm).
+    pub fn total(&self) -> f64 {
+        self.cost.iter().sum()
+    }
+
     /// Over-full edge-layers.
     pub fn overfull(&self) -> usize {
         self.cost.iter().filter(|&&c| c > 0.0).count()
@@ -226,7 +231,7 @@ pub fn refine(
                             break;
                         }
                         evals += 1;
-                        if try_move(st, &mut cm, evl, &mv, bottom, trans, unary, p.add_vias) {
+                        if try_move(st, &mut cm, evl, &mv, bottom, trans, unary, p.add_vias, false) {
                             stats.moves += 1;
                             improved = true;
                             break;
@@ -243,9 +248,11 @@ pub fn refine(
     stats
 }
 
-/// Apply `mv` (label changes) and keep it when the total price drops, else undo. O(touched edges).
+/// Apply `mv` (label changes) and keep it when the total price drops, else undo. `strict`: also
+/// refuse it when any touched edge-layer gets more over-full (the drawing's capacity test; the P4
+/// label moves). O(touched edges).
 #[allow(clippy::too_many_arguments)]
-fn try_move(
+pub fn try_move(
     st: &State,
     cm: &mut CapModel,
     evl: &mut [Vec<LEv>],
@@ -254,6 +261,7 @@ fn try_move(
     trans: &dyn Fn(usize, usize) -> f64,
     unary: &dyn Fn(WireId, usize, usize) -> f64,
     add_vias: bool,
+    strict: bool,
 ) -> bool {
     let mut wires: Vec<WireId> = mv.iter().map(|x| x.0 .0).collect();
     wires.sort_unstable();
@@ -292,7 +300,8 @@ fn try_move(
     }
     let new: Vec<f64> = touched.iter().map(|&(e, l)| cm.eval(e, l)).collect();
     let new_oc: f64 = new.iter().sum();
-    if (new_wc - old_wc) + (new_oc - old_oc) < -EPS && (add_vias || new_wc <= old_wc + EPS) {
+    let worse_somewhere = strict && touched.iter().zip(&new).any(|(&(e, l), &c)| c > cm.cost[e * nl + l] + EPS);
+    if (new_wc - old_wc) + (new_oc - old_oc) < -EPS && (add_vias || new_wc <= old_wc + EPS) && !worse_somewhere {
         for (&(e, l), &c) in touched.iter().zip(&new) {
             cm.cost[e * nl + l] = c;
         }

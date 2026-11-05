@@ -434,6 +434,10 @@ pub struct LayerReport {
     pub overfull_before: usize,
     pub overfull_after: usize,
     pub refine_moves: usize,
+    /// Per wire, per event: the layers it may take (bit per layer) and the event of the other
+    /// wire of its crossing (the two must differ in layer); for the P4 label moves.
+    pub mask: Vec<Vec<u64>>,
+    pub partner: Vec<Vec<Option<(WireId, usize)>>>,
 }
 
 /// Parameters of P3.
@@ -556,6 +560,19 @@ fn stretches_and_vias(st: &State, polys: &[Vec<Vec2>], evl: &[Vec<(usize, f64, i
         pieces.push((ll, piece(pts, lk, ls, n, 1.0)));
         rep.stretches.push(pieces);
     }
+}
+
+/// Recompute the stretches, via slots and via counts of `rep` from changed labels `evl` (the P4
+/// label moves; the wires and their events are unchanged). O(events + passes).
+pub fn relabel(st: &State, evl: &[Vec<(usize, f64, i32)>], p: &LayerParams, rep: &mut LayerReport) {
+    let polys: Vec<Vec<Vec2>> = (0..st.wires.len()).map(|w| if st.wires[w].alive { st.polyline(w) } else { Vec::new() }).collect();
+    rep.stretches.clear();
+    rep.events.clear();
+    rep.vias = 0;
+    rep.via_pts.clear();
+    rep.slots.clear();
+    rep.vias_no_site = 0;
+    stretches_and_vias(st, &polys, evl, p, rep);
 }
 
 /// Assign layers to the wires of `st`: the exact two-layer Polubasov solve for two signal layers,
@@ -689,6 +706,8 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
     rep.overfull_before = rs.before;
     rep.overfull_after = rs.after;
     rep.refine_moves = rs.moves;
+    rep.mask = mask.clone();
+    rep.partner = partner.clone();
     // Labels per (domain, wire) for the same-layer check.
     let mut dom_labels: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
     for (w, ev) in events.iter().enumerate() {
@@ -1037,6 +1056,8 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
     rep.overfull_before = rs.before;
     rep.overfull_after = rs.after;
     rep.refine_moves = rs.moves;
+    rep.mask = mask.clone();
+    rep.partner = partner.clone();
     for (w, list) in wev.iter().enumerate() {
         for (i, &e) in list.iter().enumerate() {
             lab[e] = evl[w][i].2 as u8;

@@ -15,7 +15,10 @@
 //! Complexity: dominated by P2 (one A* per connection over the gap graph, capped by
 //! `max_expansions`) and P3 (reductions linear in the domain graph, local search on the rest).
 
+use super::archive::{table_text, Archive, Criteria, Objective, Variant};
 use super::board::{self, BuildOpts};
+use super::descent::{descend_labels, descend_topo};
+use super::moves::{Labels, Tally, Topo};
 use super::draw::{plan, Diag, Drawer, Plan, WireOut};
 use super::factors::{standard_factors, Event, Finding, Registry, Report, WireCtx};
 use super::init::{Conn, InitWeights};
@@ -26,7 +29,7 @@ use super::planes;
 use super::state::{ObsId, State, WireId};
 use crate::check::Checker;
 use crate::control::{cancelled, RunControl};
-use crate::decompose::{decompose, Connection, TermKind};
+use crate::decompose::{decompose, Connection, TermKind, TermRef};
 use crate::geom::Vec2;
 use crate::model::{BoardModel, Item, Options};
 use crate::route::{kicad, term_out, unrouted, ConnReport, NetRouteReport, RipReport, RouteResult};
@@ -79,6 +82,7 @@ fn settle(out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, ci: usize, w: 
     o.vias = wo.vias.clone();
     o.items = wo.items.clone();
     o.neck_nm = wo.necks.iter().map(|n| n.2).sum();
+    o.neck_n = wo.necks.len();
     o.neck_w = wo.necks.iter().map(|n| n.1).fold(None, |a: Option<f64>, x| Some(a.map_or(x, |y| y.min(x))));
     for n in &wo.necks {
         necking.push((ci, Event::Necking { wire: w, from_nm: st.wires[w].w, to_nm: n.1, mm: n.2 / MM }));
@@ -98,6 +102,8 @@ struct Outcome {
     /// Necked pad exits: total length (nm) and the narrowest width (nm).
     neck_nm: f64,
     neck_w: Option<f64>,
+    /// Necked stretches (TopoR's shrinkages).
+    neck_n: usize,
     /// Straight pad-to-pad distance (nm), the detour reference.
     ghost_nm: f64,
 }
@@ -118,18 +124,31 @@ fn fail(o: &mut [Outcome], i: usize, reason: impl Into<String>) {
 /// ([`TIME_HIT`]), because then it depends on the machine's speed and load.
 pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteResult {
     let t0 = Instant::now();
-    let (mut best, h0, mut mem) = route_round(model, opts, ctl, &[], &Memory::default());
-    let mut time_hit = best.timed_out;
+    let obj = Objective::parse(&opts.objective, opts.mm_per_via);
+    let mut arch: Archive<RouteResult> = Archive::new(opts.variants);
+    let offer = |arch: &mut Archive<RouteResult>, round: usize, ro: &RoundOut| {
+        if let Some((c, r)) = &ro.pre {
+            arch.offer(Variant { label: format!("round {round} as drawn"), crit: *c, payload: r.clone() }, &obj);
+        }
+        arch.offer(Variant { label: format!("round {round}"), crit: ro.crit, payload: ro.result.clone() }, &obj);
+    };
+    let (r1, h0, mut mem) = route_round(model, opts, ctl, &[], &Memory::default(), 1);
+    offer(&mut arch, 1, &r1);
+    let mut time_hit = r1.result.timed_out;
+    let mut stop_reason = r1.result.stop_reason.clone();
+    let first = r1.result.routed;
+    let mut best_routed = first;
+    let total = r1.result.connections_total;
+    drop(r1);
     let over_budget = || opts.wall_clock_s > 0.0 && t0.elapsed().as_secs_f64() >= opts.wall_clock_s;
     // Feedback to the topology (plan S2c item 4): the rooms the drawing found too small are
     // lowered by what was missing, and the whole route is made again (at most `topo_rounds`
-    // rounds in all, while each round routes more); the best result stays.
+    // rounds in all, while each round routes more). Every round offers its variants.
     let mut all: BTreeMap<(usize, usize), f64> = h0.iter().map(|&(e, l, r)| ((e, l), r)).collect();
-    let first = best.routed;
     let mut round_note = Vec::new();
     let mut stall = 0usize;
     for round in 2..=opts.topo_rounds.max(1) {
-        if !opts.drawing_feedback || all.is_empty() || best.stop_reason != "converged" {
+        if !opts.drawing_feedback || all.is_empty() || stop_reason != "converged" {
             break;
         }
         if over_budget() {
@@ -141,16 +160,19 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
             o2.wall_clock_s = (opts.wall_clock_s - t0.elapsed().as_secs_f64()).max(1.0);
         }
         let hv: Hints = all.iter().map(|(&(e, l), &r)| (e, l, r)).collect();
-        let (r2, h2, mem2) = route_round(model, &o2, ctl, &hv, &mem);
-        time_hit |= r2.timed_out;
+        let (r2, h2, mem2) = route_round(model, &o2, ctl, &hv, &mem, round);
+        time_hit |= r2.result.timed_out;
+        stop_reason = r2.result.stop_reason.clone();
         mem = mem2;
-        round_note.push(format!("round {round}: {} cut rooms lowered, routed {} of {}", hv.len(), r2.routed, r2.connections_total));
+        round_note.push(format!("round {round}: {} cut rooms lowered, routed {} of {}", hv.len(), r2.result.routed, r2.result.connections_total));
         for (e, l, r) in h2 {
             let v = all.entry((e, l)).or_insert(r);
             *v = v.min(r);
         }
-        if r2.routed > best.routed {
-            best = r2;
+        let routed = r2.result.routed;
+        offer(&mut arch, round, &r2);
+        if routed > best_routed {
+            best_routed = routed;
             stall = 0;
         } else {
             // The history stays: a repeat that routes no more can still open the way for the next.
@@ -160,21 +182,43 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
             }
         }
     }
+    let pick = arch.pick(&obj).expect("round 1 is always offered");
+    let mut best = arch.items[pick].payload.clone();
+    best.variants = arch.table(Some(pick));
+    best.warnings.push(format!("{} ({} offered)", table_text(&best.variants, &obj), arch.offered));
     if !round_note.is_empty() {
         best.warnings.push(format!(
-            "topology feedback (rooms lowered by the violation depth, whole route repeated): round 1 routed {} of {}; {}; kept the best: routed {} (rescued {})",
+            "topology feedback (rooms lowered by the violation depth, whole route repeated): round 1 routed {} of {}; {}; picked {} (routed {}, rescued {})",
             first,
-            best.connections_total,
+            total,
             round_note.join("; "),
+            arch.items[pick].label,
             best.routed,
-            best.routed - first
+            best.routed as i64 - first as i64
         ));
-        best.runtime_s = t0.elapsed().as_secs_f64();
     }
+    best.runtime_s = t0.elapsed().as_secs_f64();
     if time_hit {
         best.warnings.push(format!("{TIME_HIT} (run.timeout_s = {:.0} s stopped the run before its work caps)", opts.wall_clock_s));
     }
     best
+}
+
+/// Outcomes and necked stretches of a route at one moment (the variant before the via reduction).
+type Snapshot = (Vec<Outcome>, Vec<(usize, Event)>);
+
+/// One whole route: the final result, the variant before the via reduction (when it ran), and
+/// their criteria.
+struct RoundOut {
+    result: RouteResult,
+    crit: Criteria,
+    pre: Option<(Criteria, RouteResult)>,
+}
+
+impl RoundOut {
+    fn unrouted(r: RouteResult) -> RoundOut {
+        RoundOut { crit: Criteria { errors: r.failed, ..Criteria::default() }, result: r, pre: None }
+    }
 }
 
 /// Warning when the time budget, the emergency stop, ended any part of the run.
@@ -195,7 +239,14 @@ type Hints = Vec<(usize, usize, f64)>;
 
 /// One whole route. `hist0` is the per-edge over-full history of earlier rounds (empty = none);
 /// the third result is the history at the end of this one.
-fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory) -> (RouteResult, Hints, Memory) {
+fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize) -> (RoundOut, Hints, Memory) {
+    // TOPO_TIMES=1 (debug): phase times on stderr; never part of the result.
+    let times = std::env::var_os("TOPO_TIMES").is_some();
+    let tlog = |what: &str, t: Instant| {
+        if times {
+            eprintln!("[topo round {round}] {what}: {:.2} s", t.elapsed().as_secs_f64());
+        }
+    };
     let hist0: &[f64] = &mem.edge;
     let t0 = Instant::now();
     let deadline = (opts.wall_clock_s > 0.0).then(|| t0 + std::time::Duration::from_secs_f64(opts.wall_clock_s));
@@ -203,7 +254,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let signal: Vec<u32> = model.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
     if signal.len() < 2 {
         let why = format!("the topological core routes boards with two or more signal layers; this board has {}", signal.len());
-        return (unrouted(model, opts, &why), Vec::new(), Memory::default());
+        return (RoundOut::unrouted(unrouted(model, opts, &why)), Vec::new(), Memory::default());
     }
     ctl.update("setup", 0, 0, 0, 0, 0.0);
     let dec = decompose(model, opts, &signal);
@@ -215,7 +266,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     warnings.extend(problems);
     let mut b = match board::build(model, &BuildOpts { existing_vias: true, keepouts: true, plane_layers: opts.plane_signals != "forbidden", ..BuildOpts::default() }) {
         Ok(b) => b,
-        Err(e) => return (unrouted(model, opts, &format!("projection failed: {e}")), Vec::new(), Memory::default()),
+        Err(e) => return (RoundOut::unrouted(unrouted(model, opts, &format!("projection failed: {e}"))), Vec::new(), Memory::default()),
     };
     for &(e, l, room) in hints {
         if let Some(r) = b.proj.room.get_mut(e).and_then(|r| r.get_mut(l)) {
@@ -278,7 +329,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut st = State::new(proj);
     let ws0 = (model.rules.default.width + model.rules.default.clearance) as f64;
     let tier_of = |i: usize| dec.connections[i].tier;
-    let weights = |c: &Conn, tier: u8, cap: usize| InitWeights { max_expansions: cap, ..InitWeights::from_registry(&reg, &WireCtx { net: c.net, tier }) };
+    let weights = |rg: &Registry, c: &Conn, tier: u8, cap: usize| InitWeights { max_expansions: cap, ..InitWeights::from_registry(rg, &WireCtx { net: c.net, tier }) };
     let len_of = |c: &Conn| (proj.pos[c.b] - proj.pos[c.a]).len();
     let mut order: Vec<usize> = (0..conns.len()).collect();
     order.sort_by(|&i, &j| {
@@ -287,14 +338,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut wire_conn: Vec<usize> = Vec::new(); // wire id -> index into conns
     let mut p2_failed: Vec<usize> = Vec::new();
     let mut timed_out = false;
-    let route_one_raw = |st: &mut State, ci: usize, cap: usize, wire_conn: &mut Vec<usize>| -> bool {
+    let route_one_raw = |st: &mut State, ci: usize, cap: usize, wire_conn: &mut Vec<usize>, rg: &Registry| -> bool {
         let c = &conns[ci];
         let straight = len_of(c).max(1.0);
         // A path longer than `detour_factor` x the straight distance is a detour: search again with
         // cheaper crossings and layer fixings (P3 resolves a crossing with a via; a detour of many times the
         // connection's length is worse than that), the cheapest last.
         for (attempt, cross_scale) in [1.0, 0.25, 0.0].into_iter().enumerate() {
-            let mut w = weights(c, tier_of(conn_of[ci]), cap);
+            let mut w = weights(rg, c, tier_of(conn_of[ci]), cap);
             w.cross_mm *= cross_scale;
             w.smd_over_mm *= cross_scale;
             w.forced_layer_mm *= cross_scale;
@@ -309,13 +360,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         true
     };
     // A connection whose sleeve the drawing rejected earlier pays a history on its old edges.
-    let route_one = |st: &mut State, ci: usize, cap: usize, wire_conn: &mut Vec<usize>| -> bool {
-        let Some(own) = mem.own.get(&conn_of[ci]) else { return route_one_raw(st, ci, cap, wire_conn) };
+    let route_one = |st: &mut State, ci: usize, cap: usize, wire_conn: &mut Vec<usize>, rg: &Registry| -> bool {
+        let Some(own) = mem.own.get(&conn_of[ci]) else { return route_one_raw(st, ci, cap, wire_conn, rg) };
         let saved = st.history.clone();
         for (&e, &n) in own {
             st.history[e] += n;
         }
-        let r = route_one_raw(st, ci, cap, wire_conn);
+        let r = route_one_raw(st, ci, cap, wire_conn, rg);
         st.history = saved;
         r
     };
@@ -326,7 +377,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             fail(&mut out, conn_of[ci], "time limit reached before this connection was routed");
             continue;
         }
-        if !route_one(&mut st, ci, cap, &mut wire_conn) {
+        if !route_one(&mut st, ci, cap, &mut wire_conn, &reg) {
             p2_failed.push(ci);
         }
     }
@@ -334,7 +385,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // One retry of the failed connections with a larger search cap.
     let mut still: Vec<usize> = Vec::new();
     for &ci in &p2_failed {
-        if expired() || !route_one(&mut st, ci, cap * 4, &mut wire_conn) {
+        if expired() || !route_one(&mut st, ci, cap * 4, &mut wire_conn, &reg) {
             still.push(ci);
         }
     }
@@ -363,6 +414,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let assign = |st: &State| layers::assign_with(st, &|ob| b.smd_layer(ob), &lp, Some(&packer));
     let polys_of = |st: &State| -> Vec<Vec<Vec2>> { (0..st.wires.len()).map(|w| if st.wires[w].alive { st.polyline(w) } else { Vec::new() }).collect() };
     let mut lr = assign(&st);
+    tlog("P2 + P3", t0);
+    let t_p4 = Instant::now();
     // ---- P4: negotiated rip-up and reroute ----
     let mut history: Vec<f64> = (0..proj.edges.len()).map(|e| hist0.get(e).copied().unwrap_or(0.0)).collect();
     let bottom = (if b.n_signal == 0 { proj.n_layers } else { b.n_signal }) as i32 - 1;
@@ -373,10 +426,38 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         r
     };
-    let score = |st: &State, lr: &layers::LayerReport| {
-        let polys = polys_of(st);
-        (CapModel::new(st, &packer, &polys, &lr.events, bottom, 1.0).overfull(), lr.vias)
+    // The P4 pick follows the board objective, violations first: the fewest over-full
+    // edge-layers under the drawing's packer (the predicted violations), then the objective's own
+    // value (`length + mm_per_via x vias`, or the occupied area in mm of default trace) instead
+    // of the bare via count. (Measured: pricing the over-full edge-layers into one sum with the
+    // `overflow` weight routed fewer connections on bornhack2026, so violations stay lexicographic.)
+    let obj = Objective::parse(&opts.objective, opts.mm_per_via);
+    let overflow_mm = reg.price(&Event::Overflow { wire: 0, edge: 0 }, &WireCtx::default()).max(1e-6);
+    let via_area_mm = {
+        let r = 0.5 * model.rules.default.via_d as f64 + model.rules.default.clearance as f64;
+        std::f64::consts::PI * r * r * b.signal_layers.len().max(1) as f64 / ws0 / MM
     };
+    let score = |st: &State, lr: &layers::LayerReport| -> (f64, usize, usize) {
+        let polys = polys_of(st);
+        let cm = CapModel::new(st, &packer, &polys, &lr.events, bottom, overflow_mm);
+        let (mut len_mm, mut area_mm) = (0.0, 0.0);
+        for (w, pl) in polys.iter().enumerate().filter(|(w, _)| st.wires[*w].alive) {
+            let l = pl.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>() / MM;
+            len_mm += l;
+            area_mm += l * (st.wires[w].w + st.wires[w].s) / ws0;
+        }
+        let own = match obj {
+            Objective::LengthVias { mm_per_via } => len_mm + mm_per_via * lr.vias as f64,
+            Objective::Area => area_mm + via_area_mm * lr.vias as f64,
+        };
+        (own, cm.overfull(), lr.vias)
+    };
+    // Lexicographic: over-full edge-layers, then the objective.
+    let p4_better = |a: &(f64, usize, usize), b: &(f64, usize, usize)| a.1 < b.1 || (a.1 == b.1 && a.0 < b.0 - 1e-6);
+    // Reroute counter per connection: the P4 moves pay the `reroute` factor's price for it.
+    // (Measured: ripping the least moved wires first in the negotiated rip-up routed fewer
+    // connections on dcsgonebadge and qmtech, so the rip order stays routed-last first.)
+    let mut reroutes: Vec<u32> = vec![0; conns.len()];
     let first_score = score(&st, &lr);
     let mut best_p4 = (st.clone(), wire_conn.clone(), lr.clone(), first_score);
     let (mut p4_rounds, mut p4_stall, mut p4_ripped) = (0usize, 0usize, 0usize);
@@ -431,10 +512,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         for &w in &vic {
             st.remove(w);
         }
+        for &ci in &vic_conns {
+            reroutes[ci] += 1;
+        }
         st.history = history.clone();
+        // Fluctuating coefficients: this round's searches price with perturbed weights.
+        let reg_r = reg.fluctuated(seed_of(opts.seed, round, 1 + p4_rounds), opts.fluctuation);
         let mut lost = false;
         for &ci in &vic_conns {
-            if expired() || !(route_one(&mut st, ci, cap, &mut wire_conn) || route_one(&mut st, ci, cap * 4, &mut wire_conn)) {
+            if expired() || !(route_one(&mut st, ci, cap, &mut wire_conn, &reg_r) || route_one(&mut st, ci, cap * 4, &mut wire_conn, &reg_r)) {
                 timed_out |= expired();
                 lost = true;
                 break;
@@ -448,7 +534,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         lr = assign(&st);
         p4_rounds += 1;
         let sc = score(&st, &lr);
-        if sc < best_p4.3 {
+        if p4_better(&sc, &best_p4.3) {
             best_p4 = (st.clone(), wire_conn.clone(), lr.clone(), sc);
             p4_stall = 0;
         } else {
@@ -464,11 +550,95 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     lr = lr_b;
     if p4_rounds > 0 {
         warnings.push(format!(
-            "P4 negotiated rip-up and reroute: {p4_rounds} rounds, {p4_ripped} wires ripped; over-full edge-layers {} -> {}, vias {} -> {}",
-            first_score.0, last_score.0, first_score.1, last_score.1
+            "P4 negotiated rip-up and reroute: {p4_rounds} rounds, {p4_ripped} wires ripped; objective {:.0} -> {:.0}, over-full edge-layers {} -> {}, vias {} -> {}",
+            first_score.0, last_score.0, first_score.1, last_score.1, first_score.2, last_score.2
         ));
     }
+    tlog("P4 rip-up and reroute", t_p4);
+    // ---- P4 moves: descent on the topology, then on the layer labels ----
+    let mut tally = Tally::default();
+    let mut term_over: BTreeMap<usize, (TermRef, TermRef)> = BTreeMap::new();
+    if opts.moves && opts.max_moves > 0 && !expired() {
+        let t_mv = Instant::now();
+        let s0 = score(&st, &lr);
+        let mut topo = Topo {
+            reg: reg.clone(),
+            conns: conns.clone(),
+            tiers: (0..conns.len()).map(|ci| tier_of(conn_of[ci])).collect(),
+            wire_conn: wire_conn.clone(),
+            reroutes: reroutes.clone(),
+            ws0,
+            cap,
+            evals: 0,
+            max_evals: opts.max_moves,
+            ripped: ripped_total,
+            max_ripped: opts.max_ripped,
+            tight: {
+                let polys = polys_of(&st);
+                let cm = CapModel::new(&st, &packer, &polys, &lr.events, bottom, overflow_mm);
+                let mut t = vec![false; proj.edges.len()];
+                for (e, _) in cm.overfull_list() {
+                    t[e] = true;
+                }
+                t
+            },
+            tally: Tally::default(),
+        };
+        let mut st2 = st.clone();
+        let tt = descend_topo(&mut st2, &mut topo, &reg, seed_of(opts.seed, round, 1000), opts.fluctuation);
+        let lr2 = assign(&st2);
+        let s1 = score(&st2, &lr2);
+        let kept = p4_better(&s1, &s0);
+        warnings.push(format!(
+            "P4 moves on the topology: {} evaluations; {}; objective {:.0} -> {:.0} ({}); over-full edge-layers {} -> {}, vias {} -> {}",
+            topo.evals,
+            tt.text(),
+            s0.0,
+            s1.0,
+            if kept { "kept" } else { "not better: the state before the moves stays" },
+            s0.1,
+            s1.1,
+            s0.2,
+            s1.2
+        ));
+        if kept {
+            st = st2;
+            lr = lr2;
+            wire_conn = topo.wire_conn.clone();
+            ripped_total = topo.ripped;
+            tally.add(&tt);
+            // Connections now attached to another pad pair of their tree: report the new pads.
+            let tref = |x: ObsId| -> Option<TermRef> {
+                let p = *b.pad_of.get(x)?;
+                dec.connections.iter().flat_map(|c| [&c.from, &c.to]).find(|t| matches!(t.kind, TermKind::Pad(q) if q == p)).cloned()
+            };
+            for (ci, (c0, c1)) in conns.iter().zip(&topo.conns).enumerate() {
+                if (c0.pa, c0.pb) != (c1.pa, c1.pb) {
+                    if let (Some(f), Some(t)) = (tref(c1.pa), tref(c1.pb)) {
+                        out[conn_of[ci]].ghost_nm = (proj.pos[c1.b] - proj.pos[c1.a]).len();
+                        term_over.insert(conn_of[ci], (f, t));
+                    }
+                }
+            }
+        }
+        // Label moves against the drawing's packer: flips, via shifts, segment lifting.
+        let polys = polys_of(&st);
+        let n_sig = if b.n_signal == 0 { proj.n_layers } else { b.n_signal };
+        let cm = CapModel::new(&st, &packer, &polys, &lr.events, bottom, overflow_mm);
+        let (v0, o0) = (lr.vias, cm.overfull());
+        let (mask, partner) = (lr.mask.clone(), lr.partner.clone());
+        let mut lb = Labels { st: &st, cm, evl: lr.events.clone(), mask: &mask, partner: &partner, bottom, via_mm: lp.via_mm, n_signal: n_sig, evals: 0, max_evals: opts.max_moves, tally: Tally::default() };
+        let lt = descend_labels(&mut lb);
+        let o1 = lb.cm.overfull();
+        let evl = std::mem::take(&mut lb.evl);
+        drop(lb);
+        layers::relabel(&st, &evl, &lp, &mut lr);
+        tally.add(&lt);
+        warnings.push(format!("P4 moves on the layers: {}; vias {} -> {}, over-full edge-layers {} -> {}", lt.text(), v0, lr.vias, o0, o1));
+        tlog("P4 moves", t_mv);
+    }
     let lr = lr;
+    let t_draw = Instant::now();
     // A different-net crossing still on one layer is an error: the lower-tier wire stays unrouted.
     let wlen: Vec<f64> = (0..st.wires.len()).map(|w| if !st.wires[w].alive { 0.0 } else { st.polyline(w).windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>() }).collect();
     let wire_len = |w: WireId| wlen[w];
@@ -502,6 +672,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         st.remove(w);
     }
     ctl.update("route", 2, 0, nconn, lr.vias, t0.elapsed().as_secs_f64());
+    let _ = &t_draw;
     // ---- Drawing ----
     // An ignored copper-to-edge check is not hard: the checker keeps only "no overlap" there and
     // the violation is priced and reported afterwards (ignored_rule factor).
@@ -767,9 +938,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         )
     };
     let causes_before = causes(&plans, &drawn);
+    tlog("drawing + feedback", t_draw);
+    let t_red = Instant::now();
+    // The result as drawn is a variant of its own (more vias, maybe shorter).
+    let mut pre_snap: Option<Snapshot> = None;
     // TOPO_NOREDUCE=1 (debug): leave the vias as drawn, to compare with the reduction.
     if opts.via_reduce && std::env::var("TOPO_NOREDUCE").is_err() {
-        let t_red = Instant::now();
+        pre_snap = Some((out.clone(), necking.clone()));
         let (rs, changed) = super::reduce::reduce_vias(&mut dr, &mut drawn, &mut placed, &mut plans, &mut via_h, &end_fixed, &frozen, b.n_signal, deadline);
         timed_out |= rs.timed_out;
         for w in changed {
@@ -802,6 +977,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             hist_out[e] += 1.0;
         }
     }
+    tlog("via reduction", t_red);
     if let Ok(path) = std::env::var("TOPO_DUMP") {
         let _ = std::fs::write(path, dr.dump());
     }
@@ -885,93 +1061,24 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // ---- Assemble the result ----
     let first_layer = signal[0];
     let name_of = |net: i32| model.nets.iter().find(|n| n.code == net).map_or(String::new(), |n| n.name.clone());
-    let layer_name = |id: u32| model.layers.iter().find(|l| l.id == id).map_or(id.to_string(), |l| l.name.clone());
-    let mut items: Vec<Item> = Vec::new();
-    let mut item_conn: Vec<usize> = Vec::new();
-    let mut reports: Vec<ConnReport> = Vec::with_capacity(nconn);
-    let mut length_by_layer: BTreeMap<String, i64> = BTreeMap::new();
-    let (mut tot_len, mut tot_vias) = (0i64, 0usize);
-    for c in &dec.connections {
-        let o = &out[c.id];
-        let mut r = ConnReport::blank(
-            c.id,
-            c.net,
-            name_of(c.net),
-            first_layer,
-            c.width,
-            if o.routed { "routed" } else { "failed" },
-            if o.routed { "" } else { &o.reason },
-            term_out(&c.from),
-            term_out(&c.to),
-        );
-        if o.routed {
-            r.vias = o.vias.len();
-            r.layers = o.layers.iter().map(|&l| layer_name(l)).collect();
-            r.layer = o.layers.first().copied().unwrap_or(first_layer);
-            r.via_sites = o.vias.iter().map(|v| kicad(v.0)).collect();
-            r.length_nm = o.length_nm.round() as i64;
-            r.length_outside_pads_nm = r.length_nm;
-            r.stub_nm = o.stub_nm.round() as i64;
-            r.neck_nm = o.neck_nm.round() as i64;
-            r.neck_width_nm = o.neck_w.map(|x| x.round() as i64);
-            // A stub into a plane has no straight-line reference: it is not a detour.
-            r.ghost_len_nm = (o.stub_nm == 0.0).then_some(o.ghost_nm.round() as i64);
-            r.pattern = if o.vias.is_empty() { "topo".into() } else { "topo+via".into() };
-            tot_len += r.length_nm;
-            tot_vias += r.vias;
-            for it in &o.items {
-                if let Item::Track(t) = it {
-                    let len = match t.prim {
-                        crate::geom::quant::TrackPrim::Seg { a, b } => ((b.x - a.x) as f64).hypot((b.y - a.y) as f64),
-                        _ => 0.0,
-                    };
-                    *length_by_layer.entry(layer_name(t.layer)).or_insert(0) += len.round() as i64;
-                }
-            }
-            for it in &o.items {
-                items.push(it.clone());
-                item_conn.push(c.id);
-            }
-        }
-        reports.push(r);
-    }
-    let nets: Vec<NetRouteReport> = dec
-        .nets
-        .iter()
-        .map(|n| {
-            let count = n.connections.len();
-            let routed = n.connections.iter().filter(|&&i| out[i].routed).count();
-            let vias: usize = n.connections.iter().map(|&i| out[i].vias.len()).sum();
-            let length: i64 = n.connections.iter().map(|&i| reports[i].length_nm).sum();
-            let status = if n.excluded {
-                "excluded"
-            } else if n.pour_served {
-                "pour_served"
-            } else if !n.in_scope {
-                "out_of_scope"
-            } else if count == 0 {
-                "complete"
-            } else if routed == count {
-                "routed"
-            } else if routed == 0 {
-                "failed"
-            } else {
-                "partial"
-            };
-            NetRouteReport {
-                net: n.net,
-                name: n.name.clone(),
-                status: status.into(),
-                connections: count,
-                routed,
-                partial: 0,
-                failed: count - routed,
-                vias,
-                length_nm: length,
-                length_outside_pads_nm: length,
-            }
-        })
-        .collect();
+    let asm = assemble(model, &dec, &out, &term_over, first_layer);
+    // Warning-level factor findings (necking) of a set of necked stretches.
+    let warn_n = |nk: &[(usize, Event)]| -> usize {
+        nk.iter()
+            .map(|(ci, ev)| {
+                let ctx = WireCtx { net: dec.connections[*ci].net, tier: dec.connections[*ci].tier };
+                reg.findings(std::slice::from_ref(ev), &ctx).iter().filter(|f| f.level >= Report::Warning).count()
+            })
+            .sum()
+    };
+    let n_copper = b.signal_layers.len().max(1);
+    let crit_main = criteria(model, &dec, &asm, &out, warn_n(&necking), n_copper);
+    let pre_parts = pre_snap.as_ref().map(|(o, nk)| {
+        let a = assemble(model, &dec, o, &term_over, first_layer);
+        let c = criteria(model, &dec, &a, o, warn_n(nk), n_copper);
+        (c, a)
+    });
+    let Assembled { items, item_conn, reports, nets, length_by_layer, tot_len, tot_vias } = asm;
     if edge_ignored {
         let rule = model.rules.edge_clearance as f64;
         let outline = board::outline_segments(model);
@@ -1049,7 +1156,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             {
                 let est = State::new(proj);
                 let c = Conn { net: wi.net, pa: wi.pa, pb: wi.pb, a: wi.a, b: wi.b, w: wi.w, s: wi.s };
-                let wt = weights(&c, 3, 2_000_000);
+                let wt = weights(&reg, &c, 3, 2_000_000);
                 let alone = est.search(&c, &wt, (c.w + c.s) / ws0);
                 if let Some((path, tris)) = alone {
                     let mut e2 = State::new(proj);
@@ -1165,8 +1272,173 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         profile: None,
         item_conn,
         stubs: Vec::new(),
+        variants: Vec::new(),
+        moves: super::moves::KINDS.iter().map(|&k| (k.name().to_string(), tally.applied_of(k))).collect(),
     };
-    (result, new_hints, Memory { edge: hist_out, own: own_out })
+    let pre = pre_parts.map(|(c, a)| (c, with_parts(&result, a)));
+    (RoundOut { result, crit: crit_main, pre }, new_hints, Memory { edge: hist_out, own: own_out })
+}
+
+/// Seed of a fluctuation stream: the run's seed, the whole-route round and the stage.
+fn seed_of(seed: u64, round: usize, stage: usize) -> u64 {
+    seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ ((round as u64) << 32) ^ stage as u64
+}
+
+/// `r` with the connections, items, nets and totals of `a` (the variant before the via reduction).
+fn with_parts(r: &RouteResult, a: Assembled) -> RouteResult {
+    let routed = a.reports.iter().filter(|c| c.status == "routed").count();
+    RouteResult {
+        items: a.items,
+        item_conn: a.item_conn,
+        connections_total: a.reports.len(),
+        routed,
+        failed: a.reports.len() - routed,
+        connections: a.reports,
+        nets_routed: a.nets.iter().filter(|n| n.connections > 0 && n.status == "routed").count(),
+        nets: a.nets,
+        total_length_nm: a.tot_len,
+        length_outside_pads_nm: a.tot_len,
+        vias: a.tot_vias,
+        length_by_layer_nm: a.length_by_layer,
+        ..r.clone()
+    }
+}
+
+/// The connection reports, items, net reports and totals of the outcomes `out`.
+struct Assembled {
+    items: Vec<Item>,
+    item_conn: Vec<usize>,
+    reports: Vec<ConnReport>,
+    nets: Vec<NetRouteReport>,
+    length_by_layer: BTreeMap<String, i64>,
+    tot_len: i64,
+    tot_vias: usize,
+}
+
+/// Assemble the result parts of `out`; `term_over` replaces the terminals of a connection the
+/// attachment move connected to another pad pair. O(connections + items).
+fn assemble(model: &BoardModel, dec: &crate::decompose::Decomposition, out: &[Outcome], term_over: &BTreeMap<usize, (TermRef, TermRef)>, first_layer: u32) -> Assembled {
+    let name_of = |net: i32| model.nets.iter().find(|n| n.code == net).map_or(String::new(), |n| n.name.clone());
+    let layer_name = |id: u32| model.layers.iter().find(|l| l.id == id).map_or(id.to_string(), |l| l.name.clone());
+    let nconn = dec.connections.len();
+    let mut items: Vec<Item> = Vec::new();
+    let mut item_conn: Vec<usize> = Vec::new();
+    let mut reports: Vec<ConnReport> = Vec::with_capacity(nconn);
+    let mut length_by_layer: BTreeMap<String, i64> = BTreeMap::new();
+    let (mut tot_len, mut tot_vias) = (0i64, 0usize);
+    for c in &dec.connections {
+        let o = &out[c.id];
+        let (from, to) = term_over.get(&c.id).map_or_else(|| (term_out(&c.from), term_out(&c.to)), |(f, t)| (term_out(f), term_out(t)));
+        let mut r = ConnReport::blank(
+            c.id,
+            c.net,
+            name_of(c.net),
+            first_layer,
+            c.width,
+            if o.routed { "routed" } else { "failed" },
+            if o.routed { "" } else { &o.reason },
+            from,
+            to,
+        );
+        if o.routed {
+            r.vias = o.vias.len();
+            r.layers = o.layers.iter().map(|&l| layer_name(l)).collect();
+            r.layer = o.layers.first().copied().unwrap_or(first_layer);
+            r.via_sites = o.vias.iter().map(|v| kicad(v.0)).collect();
+            r.length_nm = o.length_nm.round() as i64;
+            r.length_outside_pads_nm = r.length_nm;
+            r.stub_nm = o.stub_nm.round() as i64;
+            r.neck_nm = o.neck_nm.round() as i64;
+            r.neck_width_nm = o.neck_w.map(|x| x.round() as i64);
+            // A stub into a plane has no straight-line reference: it is not a detour.
+            r.ghost_len_nm = (o.stub_nm == 0.0).then_some(o.ghost_nm.round() as i64);
+            r.pattern = if o.vias.is_empty() { "topo".into() } else { "topo+via".into() };
+            tot_len += r.length_nm;
+            tot_vias += r.vias;
+            for it in &o.items {
+                if let Item::Track(t) = it {
+                    let len = match t.prim {
+                        crate::geom::quant::TrackPrim::Seg { a, b } => ((b.x - a.x) as f64).hypot((b.y - a.y) as f64),
+                        _ => 0.0,
+                    };
+                    *length_by_layer.entry(layer_name(t.layer)).or_insert(0) += len.round() as i64;
+                }
+            }
+            for it in &o.items {
+                items.push(it.clone());
+                item_conn.push(c.id);
+            }
+        }
+        reports.push(r);
+    }
+    let nets: Vec<NetRouteReport> = dec
+        .nets
+        .iter()
+        .map(|n| {
+            let count = n.connections.len();
+            let routed = n.connections.iter().filter(|&&i| out[i].routed).count();
+            let vias: usize = n.connections.iter().map(|&i| out[i].vias.len()).sum();
+            let length: i64 = n.connections.iter().map(|&i| reports[i].length_nm).sum();
+            let status = if n.excluded {
+                "excluded"
+            } else if n.pour_served {
+                "pour_served"
+            } else if !n.in_scope {
+                "out_of_scope"
+            } else if count == 0 {
+                "complete"
+            } else if routed == count {
+                "routed"
+            } else if routed == 0 {
+                "failed"
+            } else {
+                "partial"
+            };
+            NetRouteReport {
+                net: n.net,
+                name: n.name.clone(),
+                status: status.into(),
+                connections: count,
+                routed,
+                partial: 0,
+                failed: count - routed,
+                vias,
+                length_nm: length,
+                length_outside_pads_nm: length,
+            }
+        })
+        .collect();
+    Assembled { items, item_conn, reports, nets, length_by_layer, tot_len, tot_vias }
+}
+
+/// The archive criteria of the assembled result `a` of outcomes `out` (`warnings` = warning-level
+/// factor findings). O(items).
+fn criteria(model: &BoardModel, dec: &crate::decompose::Decomposition, a: &Assembled, out: &[Outcome], warnings: usize, n_layers: usize) -> Criteria {
+    let routed = a.reports.iter().filter(|r| r.status == "routed").count();
+    let mut area = 0.0;
+    for (it, &ci) in a.items.iter().zip(&a.item_conn) {
+        let s = dec.connections[ci].clearance as f64;
+        match it {
+            Item::Track(t) => {
+                if let crate::geom::quant::TrackPrim::Seg { a, b } = t.prim {
+                    area += ((b.x - a.x) as f64).hypot((b.y - a.y) as f64) * (t.width as f64 + s);
+                }
+            }
+            Item::Via(v) => {
+                let r = 0.5 * v.d as f64 + s;
+                area += std::f64::consts::PI * r * r * n_layers as f64;
+            }
+        }
+    }
+    let _ = model;
+    Criteria {
+        errors: a.reports.len() - routed,
+        vias: a.tot_vias,
+        length_mm: a.tot_len as f64 / MM,
+        shrinkages: out.iter().filter(|o| o.routed).map(|o| o.neck_n).sum(),
+        warnings,
+        area_mm2: area / (MM * MM),
+    }
 }
 
 /// `(connection id, via centre)` of every routed plane connection (for the island check).

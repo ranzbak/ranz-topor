@@ -103,6 +103,7 @@ used. Defaults of the rough router (plan "Default weights"):
 | `squeeze` | 5 per fully squeezed pass | a pass between two stretches that leaves the cut less than one track pitch of slack on its roomiest layer (linear) |
 | `blocks_pad` | 30 per pad | a stretch takes the last free entry sector (ring triangle) of another net's pad that has no wire yet |
 | `ignored_rule` | 100 per violation, report warning | a violated KiCad check set to ignore |
+| `reroute` | 5 per earlier reroute | a connection the P4 search moves again after `count` earlier reroutes (reroute counter; also: the negotiated rip-up takes such a wire out last) |
 
 Everything else is 0 until the learning loop fits it. Do not tune a default to make a gate agree.
 
@@ -147,16 +148,63 @@ Two loops use the `overflow` and `congestion` factors (code: `topo/core.rs`, `to
    first refined against capacity (`refine.rs`: a crossing flip or relabel that lowers layer changes plus
    the `overflow` price of the over-full edge-layers; it never adds a via unless `TOPO_CAPVIA=1` is set for
    an experiment). What is still over-full by the drawing's packer (`pack.rs`, the same numbers
-   `Drawer::pack` uses) is ripped up, routed-last wires first until the rest of the edge-layer fits, and
-   routed again with a history (`congestion`, per round an edge was over-full) added to the edges that were
-   over-full; P3 runs again. Stops when nothing is over-full, after two rounds without gain, or at 40 % of
-   the time budget; the round with the fewest over-full edge-layers (then fewest vias) is kept.
-2. **Across routes** (the topology feedback, at most four whole routes). A wire the drawing rejected has
-   its sleeve remembered: the next route makes only that connection pay the history on those edges (it is
-   the one being ripped up and rerouted), and every edge that was over-full under the packer or at the
-   violation gets the shared history. The route with the most connections routed is kept.
+   `Drawer::pack` uses) is ripped up and routed again with a history (`congestion`, per round an edge was
+   over-full) added to the edges that were over-full; P3 runs again. Per over-full edge-layer the wires are
+   taken out least-moved first (the `reroute` factor's price of their reroute count), then routed-last
+   first, until the rest fits. Every round prices its searches with fluctuating coefficients
+   (`optimize.fluctuation`, seeded). Stops when nothing is over-full, after two rounds without gain, at
+   `search.reroute_rounds` or when `optimize.max_ripped` wires were taken out. The kept round is the one
+   with the lowest board objective: the `overflow` price of the labelling plus `length + mm_per_via x vias`
+   (`length_vias`) or the occupied area (`area`).
+2. **Across routes** (the topology feedback, `optimize.rounds` whole routes at most). A wire the drawing
+   rejected has its sleeve remembered: the next route makes only that connection pay the history on those
+   edges (it is the one being ripped up and rerouted), and every edge that was over-full under the packer
+   or at the violation gets the shared history. Every route offers its results to the variant archive
+   (below).
 
 Set `TOPO_NOCAP=1` to switch the capacity refinement off (debug comparison only).
+
+## P4 moves (`topo/moves.rs`, `topo/descent.rs`)
+
+After the negotiated rip-up (`optimize.moves`, at most `optimize.max_moves` evaluations per route) a
+descent tries local moves, each priced through the registry: a wire's price is the price of its insert
+events (`Registry::cost` of `Move::Insert`) with the wire itself taken out (`State::detach` /
+`State::reattach`), so the social factors it causes count. A move is kept only when the price drops (a
+reroute must also beat the `reroute` factor's price of its count).
+
+| move | what it changes |
+|---|---|
+| reroute | the wire is searched again on the current state |
+| attachment | the connection goes to another pad pair across the same cut of its net's tree (up to 3 nearest pairs); the report shows the new pads |
+| merge | a stretch running parallel to a stretch of its own net (two or more shared edges) is put right next to it |
+| channel swap | a crossing slides to the far end of the run of edges the two wires share |
+| joint move | two crossing wires are taken out and routed again in the other order |
+| double-crossing swap | `State::uncross_all`, reused from P2 |
+| crossing flip | the two events of a crossing swap layers (`refine::try_move`, reused) |
+| via shift | a layer change moves over one event along its wire |
+| segment lifting | a stretch between two layer changes goes onto another signal layer |
+
+Capacity test: a topological move may not add passes through cuts that are over-full now (packer) or
+whose passes do not all fit on the narrowest layer; a label move may not make any edge-layer more
+over-full and may not add vias. The topological descent as a whole is kept only when the board objective
+(above) after P3 is lower than before it; otherwise the state before the moves stays. The run report
+lists tried / applied moves per type.
+
+## Result variants (`topo/archive.rs`)
+
+Every whole route offers two variants: as drawn, and after the via reduction. The archive keeps every
+variant no other one beats on all four TopoR criteria (errors = connections not routed, vias, length,
+shrinkages = necked stretches), plus the fewest-warnings variant; at most `optimize.variants`, the
+champions are never pruned. The pick: fewest errors, then `optimize.objective`. The variant table (with
+the mm/via column against the previous row) is in the run report.
+
+## Reproducibility
+
+Every stop that changes the result is a work cap (`optimize.rounds`, `max_ripped`, `max_expansions`,
+`max_moves`, `search.reroute_rounds`, the fixed sweep caps of the descent and the via reduction); the
+randomness is ChaCha8 seeded by `Options::seed`. `run.timeout_s` is only an emergency stop: when it fires
+the result carries the warning "time budget hit: result may differ between runs". `TOPO_TIMES=1` prints
+phase times per route on stderr (never part of the result).
 
 ## Via reduction after drawing (S4, plan P6)
 
@@ -165,7 +213,7 @@ again with one layer run moved onto the layer of an adjacent run (or all runs on
 the vias between them. Runs that touch an SMD pad keep the pad's layer; plane layers are not touched; wires of a net that has a pour stay as they are (a track over the pour may be what joins it). The
 wire is drawn again in its own sleeve (`Drawer::relayer` gives the passes their new layers and packs the
 changed edge-layers again, `draw_wire` draws it); the checker decides, and a rejected try puts the old
-tracks and vias back. At most 6 tries per wire and sweep, 3 sweeps, and the clock is polled between wires.
+tracks and vias back. At most 6 tries per wire and sweep, 3 sweeps; the clock is polled between wires only for the emergency stop.
 The run report has a `via reduction after drawing` line with the vias by cause before and after.
 `TOPO_NOREDUCE=1` switches it off for a comparison. The topological (pre-drawing) variant and the clinch
 fixes of the plan are not implemented.

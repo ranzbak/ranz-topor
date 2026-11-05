@@ -5,7 +5,9 @@
 
 pub mod board;
 pub mod capacity;
+pub mod archive;
 pub mod core;
+pub mod descent;
 pub mod cuts;
 pub mod demand;
 pub mod draw;
@@ -18,6 +20,7 @@ pub mod planes;
 pub mod reduce;
 pub mod refine;
 pub mod metrize;
+pub mod moves;
 pub mod pack;
 pub mod state;
 pub mod stats;

@@ -125,3 +125,25 @@ def test_report_summary_lines_le_20(tmp_path):
     assert len(empty.summary_lines()) <= SUMMARY_MAX_LINES
     rep.write()
     assert (tmp_path / "report.md").read_text().count("\n") > 500
+
+
+def test_report_lists_the_variant_table_and_the_time_budget_warning(tmp_path):
+    """S3: the topological core's Pareto archive goes into report.md (one row per variant, the pick marked),
+    with the moves applied, and a time-budget stop is a summary warning."""
+    res = _result()
+    res["variants"] = [
+        {"label": "round 2", "errors": 1, "vias": 20, "length_mm": 500.0, "shrinkages": 0, "warnings": 0,
+         "area_mm2": 210.0, "mm_per_via": None, "champion": ["fewest errors", "shortest"], "picked": True},
+        {"label": "round 2 as drawn", "errors": 1, "vias": 26, "length_mm": 490.0, "shrinkages": 1, "warnings": 1,
+         "area_mm2": 230.0, "mm_per_via": None, "champion": [], "picked": False}]
+    res["moves"] = {"reroute": 3, "channel swap": 1}
+    res["warnings"] = ["time budget hit: result may differ between runs (run.timeout_s = 5 s ...)"]
+    rep = build_report(res, DRC, Config.defaults(), [], "whole board", None, {"router_s": 1.0}, dir=tmp_path)
+    rep.set_outcome("accepted")
+    rep.write()
+    md = (tmp_path / "report.md").read_text()
+    assert "## Variants\n" in md
+    assert "| round 2 | 1 | 20 | 500.0 | 0 | 0 | 210.0 | - | fewest errors, shortest | yes |" in md
+    assert "| round 2 as drawn |" in md and "reroute 3, channel swap 1" in md
+    assert any("time budget hit" in ln for ln in rep.summary_lines())
+    assert len(rep.summary_lines()) <= SUMMARY_MAX_LINES
