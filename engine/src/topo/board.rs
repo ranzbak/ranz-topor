@@ -26,7 +26,7 @@ pub struct BuildOpts {
     pub lct_mm: f64,
     /// Feet closer than this (mm) to an end of their side or to another foot are skipped.
     pub lct_eps_mm: f64,
-    /// Vertices per full turn of a round pad / rounded corner (see [`skel_poly`]); 16 keeps every
+    /// Vertices per full turn of a round pad / rounded corner (see [`skel_poly_sag`]); 16 keeps every
     /// polygon within 1.9 % of the radius of the copper, 8 halves the triangles (7.6 %).
     pub round_steps: usize,
     /// The vias of the model are drilled obstacles (copper the board keeps; S2a). The gate and
@@ -90,14 +90,16 @@ fn hull(mut p: Vec<Vec2>) -> Vec<Vec2> {
 /// Polygon of the pad copper: the hull of the skeleton's base points, each replaced by a 16-gon
 /// whose vertices lie on the circle of the skeleton radius (a rectangle stays exact, a rounded
 /// corner or a circle is the 16-gon).
-fn skel_poly(sk: &Skeleton, steps: usize) -> Vec<Vec2> {
+/// Returns the polygon and its sagitta (how far the true copper bulges past it, `r (1 -
+/// cos(pi / steps))` for a skeleton of radius `r`, 0 for a rectangle).
+fn skel_poly_sag(sk: &Skeleton, steps: usize) -> (Vec<Vec2>, f64) {
     let (base, r) = match sk {
         Skeleton::Point { p, r } => (vec![*p], *r),
         Skeleton::Seg { s, r } => (vec![s.a, s.b], *r),
         Skeleton::Poly { pts, r } => (pts.clone(), *r),
     };
     if r <= 0.0 {
-        return hull(base);
+        return (hull(base), 0.0);
     }
     let ring: Vec<Vec2> = (0..steps)
         .map(|i| {
@@ -105,7 +107,7 @@ fn skel_poly(sk: &Skeleton, steps: usize) -> Vec<Vec2> {
             Vec2 { x: r * a.cos(), y: r * a.sin() }
         })
         .collect();
-    hull(base.iter().flat_map(|&b| ring.iter().map(move |&o| b + o)).collect())
+    (hull(base.iter().flat_map(|&b| ring.iter().map(move |&o| b + o)).collect()), r * (1.0 - (std::f64::consts::PI / steps as f64).cos()))
 }
 
 /// An NPTH pad whose copper shape lies within its drill: a bare hole without copper.
@@ -180,11 +182,11 @@ pub fn build_with_nodes(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2]) -> Result
             continue;
         }
         let c = pad.center.to_vec2();
-        let poly = match signal_layers.iter().find(|id| pad.layers.contains(id)) {
-            Some(&l) => skel_poly(&m.skeleton(pad, l), o.round_steps.max(4)),
+        let (poly, sag) = match signal_layers.iter().find(|id| pad.layers.contains(id)) {
+            Some(&l) => skel_poly_sag(&m.skeleton(pad, l), o.round_steps.max(4)),
             None => {
                 let d = pad.drill.map(|d| d.w.max(d.h)).unwrap_or(0) as f64;
-                skel_poly(&Skeleton::Point { p: c, r: 0.5 * d }, o.round_steps.max(4))
+                skel_poly_sag(&Skeleton::Point { p: c, r: 0.5 * d }, o.round_steps.max(4))
             }
         };
         if poly.len() < 3 {
@@ -210,12 +212,13 @@ pub fn build_with_nodes(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2]) -> Result
                     .max(m.rules.min_clearance)
                     .max(m.npth_hole_clearance(pad)) as f64
             },
+            sag,
         });
     }
     if o.existing_vias {
         for v in &m.vias {
             let c = v.at.to_vec2();
-            let poly = skel_poly(&Skeleton::Point { p: c, r: 0.5 * v.d as f64 }, o.round_steps.max(4));
+            let (poly, sag) = skel_poly_sag(&Skeleton::Point { p: c, r: 0.5 * v.d as f64 }, o.round_steps.max(4));
             // `pad_of` stays index-aligned with the obstacles; `usize::MAX` marks a via.
             pad_of.push(usize::MAX);
             obstacles.push(Obstacle {
@@ -227,6 +230,7 @@ pub fn build_with_nodes(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2]) -> Result
                 net: (v.net > 0).then_some(v.net),
                 clear: (m.rules.net_rule(v.net).clearance).max(m.rules.min_clearance).max(m.rules.hole_clearance) as f64,
                 bare: false,
+                sag,
             });
         }
     }
@@ -258,6 +262,7 @@ pub fn build_with_nodes(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2]) -> Result
                 net: None,
                 clear: 0.0,
                 bare: false,
+                sag: 0.0,
             });
         }
     }

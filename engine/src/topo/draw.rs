@@ -554,9 +554,11 @@ impl<'a> Drawer<'a> {
         let all = if nl >= 64 { u64::MAX } else { (1u64 << nl) - 1 };
         for ob in &b.proj.obstacles {
             let mask = if ob.drilled { all } else { ob.layers.0 };
-            // The polygon of a round shape lies inside the copper (sagitta <= 2 % of the radius).
-            let rad = ob.poly.iter().map(|&p| (p - ob.center).len()).fold(0.0, f64::max);
-            self.add_ent(Ent { core: Core::Poly(ob.poly.clone()), grow: 0.02 * rad, mask, net: ob.net, clear: ob.clear, fixed: ob.bare, live: true, shape: false });
+            // The polygon of a rounded shape lies inside the copper by its sagitta (`sag`; 0 for a
+            // rectangle). It was 2 % of the circumradius for every shape, 57 um phantom copper
+            // around a 4 x 4 mm test pad (wiccon TP13: the 3.3v wire then found no path past
+            // it, D1).
+            self.add_ent(Ent { core: Core::Poly(ob.poly.clone()), grow: ob.sag, mask, net: ob.net, clear: ob.clear, fixed: ob.bare, live: true, shape: false });
         }
         for (o, &pi) in b.pad_of.iter().enumerate().filter(|(_, &pi)| pi != usize::MAX) {
             let pad = &model.pads[pi];
@@ -1434,6 +1436,43 @@ impl<'a> Drawer<'a> {
         self.only_static.set(deep);
         let static_infeasible = deep && self.exact_fix(w, k0, k1, layer, pre0.clone(), neck).is_none();
         self.only_static.set(false);
+        if std::env::var("TOPO_DEBUG").is_ok() {
+            // Diagnosis (D1): per pass of the run, the room its packed lane promised (`lmin ..
+            // rmax`) and what the neighbours drawn so far left of it (`tight_span`).
+            let pr = &self.b.proj;
+            for k in k0..k1 {
+                let pid = wi.passes[k];
+                let e = self.st.passes[pid].edge;
+                let Some((_, _, i, lmin, rmax)) = self.slot[pid] else {
+                    eprintln!("LANE wire {w} k {k} e{e}: no fitting lane (pass layer {})", self.pass_layer[pid]);
+                    continue;
+                };
+                let (lo, hi) = self.tight_span(pid).unwrap_or((f64::NAN, f64::NAN));
+                let lane = &self.lanes[&(e, layer)];
+                let nb: Vec<String> = lane
+                    .pids
+                    .iter()
+                    .enumerate()
+                    .filter(|&(j, _)| j != i)
+                    .map(|(j, &q)| format!("{}{}@{}", if j < i { "<" } else { ">" }, self.st.passes[q].wire, self.live_x(q).map_or("-".into(), |x| format!("{:.3}", x / 1e6))))
+                    .collect();
+                let [p, q] = pr.edges[e];
+                let mid = (pr.pos[p] + pr.pos[q]) * 0.5;
+                eprintln!(
+                    "LANE wire {w} k {k} e{e} at ({:.3},{:.3}) len {:.3}: slot {i} lmin {:.3} rmax {:.3} spare {:.3}; left by drawn neighbours {:.3}..{:.3}{} | {}",
+                    mid.x / 1e6,
+                    -mid.y / 1e6,
+                    (pr.pos[q] - pr.pos[p]).len() / 1e6,
+                    lmin / 1e6,
+                    rmax / 1e6,
+                    (rmax - lmin) / 1e6,
+                    lo / 1e6,
+                    hi / 1e6,
+                    if lo > hi + 1.0 || (hi - lo).abs() < 1.0 { " SQUEEZED" } else { "" },
+                    nb.join(" ")
+                );
+            }
+        }
         self.diag.push(Diag {
             wire: w,
             net: wi.net,

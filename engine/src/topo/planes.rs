@@ -87,6 +87,32 @@ pub fn place(dr: &mut Drawer, rq: &Req) -> Result<Out, String> {
             d += step;
         }
     }
+    if std::env::var("TOPO_VIADBG").is_ok() {
+        // Diagnosis (D1, report only): would a site be clean on the static board alone (pads,
+        // holes, edge, keepouts, existing copper), i.e. is the pad crowded out by the copper
+        // placed before it (wide wires, other vias and stubs)?
+        let mut static_ok = 0usize;
+        let mut tried = 0usize;
+        for &sz in &sizes {
+            let mut d = rpad + 0.5 * sz.d as f64 * 0.5;
+            while d <= rpad + 3.0e6 {
+                for u in &dirs {
+                    let p = c + *u * d;
+                    if !dr.opts.via_in_pad && point_in_poly(p, &ob.poly) {
+                        continue;
+                    }
+                    tried += 1;
+                    let crowd = via_item(rq.net, p, ViaSize { d: sz.d + 2 * pour.min_thickness.max(0), drill: sz.drill }, None);
+                    let stub = track_item(rq.net, lid, rq.w, c, p, None);
+                    if dr.checker.check_items(&[crowd]).violations.is_empty() && dr.via_hole_ok(p, sz, rq.net) && dr.via_own_pad_ok(p, sz, rq.net) && dr.checker.check_items(&[stub]).violations.is_empty() {
+                        static_ok += 1;
+                    }
+                }
+                d += step;
+            }
+        }
+        eprintln!("PLANEDBG pad {}.{} net {} at ({:.3},{:.3}) sites {tried} clean-on-static-board {static_ok}", pad.ref_, pad.number, rq.net, c.x / 1e6, -c.y / 1e6);
+    }
     Err(format!("pad {}.{}: no via site within 3 mm for a stub into its plane", pad.ref_, pad.number))
 }
 

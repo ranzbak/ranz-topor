@@ -357,6 +357,9 @@ impl Drawer<'_> {
         let mut nodes: Vec<Vec2> = vec![a, b];
         for p in cand {
             if nodes.len() > MAX_NODES {
+                if std::env::var("TOPO_DEBUG").is_ok() {
+                    eprintln!("EXACTWIN wire {} cap: more than {MAX_NODES} nodes in a {:.1} x {:.1} mm window", wp.wire, (bb.max.x - bb.min.x) / 1e6, (bb.max.y - bb.min.y) / 1e6);
+                }
                 return None;
             }
             if p.x < bb.min.x || p.x > bb.max.x || p.y < bb.min.y || p.y > bb.max.y {
@@ -400,6 +403,21 @@ impl Drawer<'_> {
             }
         }
         if !done[1] {
+            if std::env::var("TOPO_DEBUG").is_ok() {
+                let reached: Vec<String> = (0..n).filter(|&i| done[i]).map(|i| format!("({:.3},{:.3})", nodes[i].x / 1e6, -nodes[i].y / 1e6)).collect();
+                eprintln!(
+                    "EXACTWIN wire {} no path: {n} nodes in a {:.1} x {:.1} mm window; from ({:.3},{:.3}) to ({:.3},{:.3}); reached {}: {}",
+                    wp.wire,
+                    (bb.max.x - bb.min.x) / 1e6,
+                    (bb.max.y - bb.min.y) / 1e6,
+                    a.x / 1e6,
+                    -a.y / 1e6,
+                    b.x / 1e6,
+                    -b.y / 1e6,
+                    reached.len(),
+                    reached.join(" ")
+                );
+            }
             return None;
         }
         let mut path = vec![b];
@@ -450,7 +468,27 @@ impl Drawer<'_> {
                     break;
                 }
             }
-            let sub = sub?;
+            let Some(sub) = sub else {
+                if std::env::var("TOPO_DEBUG").is_ok() {
+                    // Diagnosis: what the violating segment hits, and whether the static board
+                    // alone already blocks the stretch.
+                    let ents = self.local_ents(&wp, bbox_of(&[pts[i], pts[i + 1]]).grow(self.qgrow));
+                    let hit: Vec<String> = ents
+                        .iter()
+                        .filter(|&&id| !self.seg_clear(&[id], &wp, pts[i], pts[i + 1]))
+                        .map(|&id| format!("{}{}", if id < self.n_static { "static" } else { "drawn" }, if self.ents[id].grow > 0.0 && matches!(self.ents[id].core, Core::Pt(_)) { "-disc" } else { "" }))
+                        .collect();
+                    eprintln!(
+                        "EXACTNONE wire {w} net {} L{layer} k {k0}..{k1} stretch {l}..{r} of {} at ({:.3},{:.3}) mm hits {:?}",
+                        wi.net,
+                        pts.len(),
+                        0.5 * (pts[i].x + pts[i + 1].x) / 1e6,
+                        -0.5 * (pts[i].y + pts[i + 1].y) / 1e6,
+                        hit
+                    );
+                }
+                return None;
+            };
             let mut np: Vec<Vec2> = pts[..l].to_vec();
             np.extend(sub);
             np.extend_from_slice(&pts[r + 1..]);

@@ -100,7 +100,9 @@ def _pad_shape(pad, layer: int) -> dict:
         return {"kind": "roundrect", "w": w, "h": h, "rc": int(pad.GetRoundRectCornerRadius(layer))}
     if shp == pcbnew.PAD_SHAPE_OVAL:
         return {"kind": "oval", "w": w, "h": h}
-    poly = pad.GetEffectivePolygon(layer)
+    # ERROR_OUTSIDE: the obstacle contains the pad (pcbnew's default ERROR_INSIDE polygon of a
+    # custom solder-jumper pad was up to 3.3 um inside its arcs; dcsgonebadge JP1 pad 3 in D1).
+    poly = pad.GetEffectivePolygon(layer, pcbnew.ERROR_OUTSIDE)
     pts = [p for i in range(poly.OutlineCount()) for p in _outline_pts(poly, i)]
     return {"kind": "poly", "pts": _hull(pts)}
 

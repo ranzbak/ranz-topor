@@ -166,3 +166,21 @@ fn via_clearance_covers_the_hole_clearance() {
     m.rules.via_hole_clearance = 254_000;
     assert!((via_clear(&m, 1, 400_000, 300_000) - 204_000.0).abs() < 1e-6);
 }
+
+/// The drawing's pad obstacles grow only by the sagitta of their rounded parts: a 4 x 4 mm
+/// rectangular test pad is exact (it grew by 2 % of its circumradius, 57 um, so the wiccon 3.3v
+/// wire found no path past TP13 in D1), a round pad grows by `r (1 - cos(pi / 16))`.
+#[test]
+fn pad_obstacles_grow_by_their_sagitta_only() {
+    let m = board((0.0, 0.0, 20.0, 20.0), &[(1, 5.0, 5.0, false, 4.0), (2, 15.0, 15.0, false, 0.4)]);
+    let b = board::build(&m, &BuildOpts::default()).unwrap();
+    let rect = b.proj.obstacles.iter().find(|o| (o.center.x - 5.0 * MM).abs() < 1.0).unwrap();
+    assert_eq!(rect.sag, 0.0, "a rectangle is exact");
+    // The board builder makes square pads; check a round skeleton through a via-sized circle.
+    let mut m2 = m.clone();
+    m2.pads[1].shapes = m2.pads[1].shapes.keys().map(|k| (*k, topor_engine::model::PadShape::Circle { d: 400_000 })).collect();
+    let b2 = board::build(&m2, &BuildOpts::default()).unwrap();
+    let round = b2.proj.obstacles.iter().find(|o| (o.center.x - 15.0 * MM).abs() < 1.0).unwrap();
+    let want = 200_000.0 * (1.0 - (std::f64::consts::PI / 16.0).cos());
+    assert!((round.sag - want).abs() < 1.0, "{} vs {want}", round.sag);
+}

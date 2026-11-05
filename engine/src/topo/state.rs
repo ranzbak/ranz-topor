@@ -75,6 +75,9 @@ pub struct Obstacle {
     pub clear: f64,
     /// A bare hole without copper (NPTH inside its drill): only `clear` applies, not the net's.
     pub bare: bool,
+    /// How far the true copper may lie outside `poly` (nm): the sagitta of the polygon of its
+    /// rounded parts (`r (1 - cos(pi / steps))`), 0 for a straight-sided shape or a keepout.
+    pub sag: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
