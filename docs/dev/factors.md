@@ -166,7 +166,7 @@ Set `TOPO_NOCAP=1` to switch the capacity refinement off (debug comparison only)
 
 ## P4 moves (`topo/moves.rs`, `topo/descent.rs`)
 
-After the negotiated rip-up (`optimize.moves`, at most `optimize.max_moves` evaluations per route) a
+After the negotiated rip-up (`optimize.moves`, off by default, at most `optimize.max_moves` evaluations per route) a
 descent tries local moves, each priced through the registry: a wire's price is the price of its insert
 events (`Registry::cost` of `Move::Insert`) with the wire itself taken out (`State::detach` /
 `State::reattach`), so the social factors it causes count. A move is kept only when the price drops (a

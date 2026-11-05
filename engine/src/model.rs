@@ -1048,7 +1048,8 @@ pub struct Options {
     pub variants: usize,
     /// Topological core (S3, `topor.toml [optimize] moves`): the P4 move descent (reroute,
     /// attachment, merge, channel swap, joint move, double-crossing swap; crossing flip, via
-    /// shift, segment lifting) after the negotiated rip-up-and-reroute.
+    /// shift, segment lifting) after the negotiated rip-up-and-reroute. Off by default: on the
+    /// gate boards it routed more on tanmatsu but fewer on hackerhotel2027 and bornhack2026.
     pub moves: bool,
     /// Topological core (S3, `topor.toml [optimize] max_moves`): most move evaluations of the
     /// descent per whole route (each label sweep has the same cap). A work cap.
@@ -1144,7 +1145,7 @@ impl Default for Options {
             objective: "length_vias".into(),
             mm_per_via: 25.0,
             variants: 8,
-            moves: true,
+            moves: false,
             max_moves: 400,
             fluctuation: 0.0,
             neck_max_nm: 0,
