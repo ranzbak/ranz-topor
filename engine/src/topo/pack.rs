@@ -31,6 +31,17 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+/// The static via candidate points of a triangle `a b c`, in the drawing's order: incentre,
+/// centroid, then seven barycentric points (shared by [`Packer::via_site`] and the drawing's
+/// `via_candidates`, so the planner and the drawing test the same places). O(1).
+pub fn tri_site_points(a: Vec2, b: Vec2, c: Vec2) -> [Vec2; 9] {
+    let (la, lb, lc) = ((b - c).len(), (a - c).len(), (a - b).len());
+    let inc = (a * la + b * lb + c * lc) * (1.0 / (la + lb + lc).max(1.0));
+    let cen = (a + b + c) * (1.0 / 3.0);
+    let bary = |u: f64, v: f64| a * u + b * v + c * (1.0 - u - v);
+    [inc, cen, bary(0.6, 0.2), bary(0.2, 0.6), bary(0.2, 0.2), bary(0.4, 0.4), bary(0.4, 0.1), bary(0.1, 0.4), bary(0.1, 0.1)]
+}
+
 /// Via disc next to a pass, as packed on its edge: the diameter on the side towards end 0 and
 /// towards end 1 of the edge (0: none on that side).
 pub type Disc = [f64; 2];
@@ -297,9 +308,12 @@ impl<'a> Packer<'a> {
     }
 
     /// Whether triangle `t` holds a via of `net` (radius `r`, clearance `s`) against the static
-    /// board: not outside, no obstacle inside, and at its incentre or centroid (the drawing's
-    /// first two candidate points) every other net's obstacle at least `r` plus the larger of
-    /// `s` and the obstacle's clearance away. Cached per (triangle, net, s).
+    /// board: not outside, no obstacle inside, and at one of the drawing's static candidate points
+    /// of the triangle ([`tri_site_points`]: incentre, centroid, seven barycentric points) every
+    /// other net's obstacle at least `r` plus the larger of `s` and the obstacle's clearance away.
+    /// (D4: the incentre and centroid alone said "no site" for 15 planned vias of dcsgonebadge,
+    /// of which the drawing placed 7, and P4 rerouted their wires for it.) Cached per
+    /// (triangle, net, s). O(obstacles) per new key.
     pub fn via_site(&self, t: super::state::TriId, net: i32, r: f64, s: f64) -> bool {
         let pr = self.pr;
         if pr.tri_out[t] || !pr.tri_obs[t].is_empty() {
@@ -310,17 +324,15 @@ impl<'a> Packer<'a> {
             return f >= r;
         }
         let [a, b, c] = pr.tris[t].map(|v| pr.pos[v]);
-        let (la, lb, lc) = ((b - c).len(), (a - c).len(), (a - b).len());
-        let inc = (a * la + b * lb + c * lc) * (1.0 / (la + lb + lc).max(1.0));
-        let cen = (a + b + c) * (1.0 / 3.0);
-        let free = |q: Vec2| -> f64 {
-            pr.obstacles
-                .iter()
-                .filter(|o| o.net != Some(net))
-                .map(|o| if super::state::point_in_poly(q, &o.poly) { f64::NEG_INFINITY } else { poly_dist(q, &o.poly) - o.clear.max(s) - self.eps })
-                .fold(f64::INFINITY, f64::min)
-        };
-        let f = free(inc).max(free(cen));
+        let pts = tri_site_points(a, b, c);
+        let mut free = [f64::INFINITY; 9];
+        for o in pr.obstacles.iter().filter(|o| o.net != Some(net)) {
+            for (q, f) in pts.iter().zip(free.iter_mut()) {
+                let d = if super::state::point_in_poly(*q, &o.poly) { f64::NEG_INFINITY } else { poly_dist(*q, &o.poly) - o.clear.max(s) - self.eps };
+                *f = f.min(d);
+            }
+        }
+        let f = free.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         self.free_cache.borrow_mut().insert(key, f);
         f >= r
     }

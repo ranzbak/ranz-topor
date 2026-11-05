@@ -873,6 +873,29 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         (fits_over, over_fits)
     };
+    if std::env::var("TOPO_VIADBG").is_ok() {
+        // Planning counter per round (D4): planned over-full edge-layers and vias without a static
+        // site against the drawing's packing and its via placement.
+        let (mut ns, mut ns_same, mut ns_other) = (0usize, 0usize, 0usize);
+        for (&w, pl) in &plans {
+            for (i, &k) in pl.at.iter().enumerate() {
+                if cm_plan.rank_of(w, k).0 {
+                    ns += 1;
+                    match placed.get(&w).and_then(|v| v.get(i)) {
+                        Some(&(kk, _, _)) if kk == k => ns_same += 1,
+                        Some(_) => ns_other += 1,
+                        None => {}
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "PLANDRAW round {round}: planned over-full edge-layers {}, vias without a static site {ns} (drawing placed {ns_same} in the planned traversal, {ns_other} in another); drawing over-full {over_n}; planned fits -> drawn over {}, planned over -> drawn fits {}",
+            cm_plan.overfull_list().len(),
+            plan_vs_draw.0,
+            plan_vs_draw.1
+        );
+    }
     // Phase 2: plane stubs, then the wires. Plane pads go before the first default-width wire.
     let mut plane_res: Vec<(usize, Result<planes::Out, String>)> = Vec::new();
     let mut plane_done = false;

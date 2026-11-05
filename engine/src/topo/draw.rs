@@ -915,12 +915,7 @@ impl<'a> Drawer<'a> {
             let others = st.tri_trav[t].iter().filter(|&&(o, _)| o != w).count();
             let [a, b, cc] = pr.tris[t].map(|v| pr.pos[v]);
             let inr = pr.inradius(t);
-            let (la, lb, lc) = ((b - cc).len(), (a - cc).len(), (a - b).len());
-            let sum = (la + lb + lc).max(1.0);
-            let inc = (a * la + b * lb + cc * lc) * (1.0 / sum);
-            let cen = (a + b + cc) * (1.0 / 3.0);
-            let bary = |u: f64, v: f64| a * u + b * v + cc * (1.0 - u - v);
-            for p in [inc, cen, bary(0.6, 0.2), bary(0.2, 0.6), bary(0.2, 0.2), bary(0.4, 0.4), bary(0.4, 0.1), bary(0.1, 0.4), bary(0.1, 0.1)] {
+            for p in super::pack::tri_site_points(a, b, cc) {
                 c.push((Some(k) != at, others, inr < need_r, -inr, k, p));
             }
         }

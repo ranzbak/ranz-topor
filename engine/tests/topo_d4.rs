@@ -101,3 +101,19 @@ fn an_empty_island_counts_only_when_kicad_keeps_it() {
     let s = stitch(&m, &Options::default(), &reg(), &items, &[], None);
     assert_eq!((s.before, s.after, s.island_vias), (1, 0, 1), "{:?}", s.notes);
 }
+
+/// The planner's static via-site test and the drawing look at the same nine points of a
+/// triangle: incentre, centroid and seven barycentric points, all inside it.
+#[test]
+fn via_site_points_are_the_drawings_and_inside_the_triangle() {
+    use topor_engine::geom::Vec2;
+    use topor_engine::topo::pack::tri_site_points;
+    let (a, b, c) = (Vec2 { x: 0.0, y: 0.0 }, Vec2 { x: 4.0e6, y: 0.0 }, Vec2 { x: 0.0, y: 3.0e6 });
+    let pts = tri_site_points(a, b, c);
+    // Incentre of the 3-4-5 triangle: radius 1 mm at (1, 1).
+    assert!((pts[0].x - 1.0e6).abs() < 1.0 && (pts[0].y - 1.0e6).abs() < 1.0, "{:?}", pts[0]);
+    assert!((pts[1].x - 4.0e6 / 3.0).abs() < 1.0 && (pts[1].y - 1.0e6).abs() < 1.0);
+    for p in pts {
+        assert!(p.x > 0.0 && p.y > 0.0 && p.x / 4.0e6 + p.y / 3.0e6 < 1.0, "{p:?}");
+    }
+}
