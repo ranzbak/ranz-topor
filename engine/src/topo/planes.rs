@@ -75,7 +75,9 @@ pub fn place(dr: &mut Drawer, rq: &Req) -> Result<Out, String> {
                 // The pour must flow around the via: keep the pour's minimum width extra clearance.
                 let crowd = via_item(rq.net, p, ViaSize { d: sz.d + 2 * pour.min_thickness.max(0), drill: sz.drill }, None);
                 let stub = track_item(rq.net, lid, rq.w, c, p, None);
-                if !dr.check_ok(&crowd) || !dr.via_hole_ok(p, sz, rq.net) || !dr.check_ok(&stub) {
+                // The via must not dip partly into its own pad either (KiCad connection width;
+                // dcsgonebadge J3 pad 16: a GND stub via 3 um into the 0.3 mm oval pad, 0.09 mm).
+                if !dr.check_ok(&crowd) || !dr.via_hole_ok(p, sz, rq.net) || !dr.via_own_pad_ok(p, sz, rq.net) || !dr.check_ok(&stub) {
                     continue;
                 }
                 dr.commit(&vi);
