@@ -299,6 +299,7 @@ fn the_factor_reference_matches_the_schema_text() {
         ("overflow", 50.0),
         ("congestion", 10.0),
         ("squeeze", 5.0),
+        ("via_squeeze", 5.0),
         ("blocks_pad", 30.0),
         ("ignored_rule", 100.0),
         ("reroute", 5.0),

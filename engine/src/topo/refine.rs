@@ -15,7 +15,8 @@
 //! Complexity: building the model is O(passes); one move evaluation is O(passes of the edges it
 //! touches); the search stops after `max_evals` evaluations.
 
-use super::pack::{infl_dir, PackItem, Packer};
+use super::factors::squeeze_amount;
+use super::pack::{infl_dir, layer_items, wire_discs, Disc, PackItem, Packer};
 use super::state::{State, WireId};
 use crate::geom::Vec2;
 
@@ -46,19 +47,43 @@ pub struct RefineStats {
     pub moves: usize,
 }
 
+/// The via intervals of a wire's events: `(ka, kb)` per layer change (the traversals of the two
+/// events around it). O(events).
+pub fn via_intervals(ev: &[LEv]) -> Vec<(usize, usize)> {
+    ev.windows(2).filter(|x| x[0].2 != x[1].2).map(|x| (x[0].0, x[1].0)).collect()
+}
+
+/// The default traversal of a via in interval `(ka, kb)`: `(ka + kb) / 2` rounded up (at `ka`
+/// when both events are in one traversal).
+pub fn mid_k(ka: usize, kb: usize) -> usize {
+    if kb > ka {
+        (ka + kb).div_ceil(2)
+    } else {
+        ka
+    }
+}
+
 /// Layer of every pass of a wire with `n` passes from its labelled events `ev`; `bottom` when it
 /// has none. A via interval `(ka, kb)` puts the via at traversal `(ka + kb) / 2` rounded up (at
 /// `ka` when both events are in one traversal), as the drawing does. O(events + n).
 pub fn pass_layers(n: usize, ev: &[LEv], bottom: i32) -> Vec<i32> {
+    let ks: Vec<usize> = via_intervals(ev).into_iter().map(|(a, b)| mid_k(a, b)).collect();
+    pass_layers_at(n, ev, bottom, &ks)
+}
+
+/// [`pass_layers`] with via `i` at traversal `ks[i]`: the passes before it are on the layer
+/// before the layer change. O(events + n).
+pub fn pass_layers_at(n: usize, ev: &[LEv], bottom: i32, ks: &[usize]) -> Vec<i32> {
     let Some(&(_, _, first)) = ev.first() else { return vec![bottom; n] };
     let mut out = vec![first; n];
-    let (mut start, mut cur) = (0usize, first);
+    let (mut start, mut cur, mut i) = (0usize, first, 0usize);
     for x in ev.windows(2) {
         let ((ka, _, la), (kb, _, lb)) = (x[0], x[1]);
         if la == lb {
             continue;
         }
-        let km = if kb > ka { (ka + kb).div_ceil(2) } else { ka };
+        let km = ks.get(i).copied().unwrap_or_else(|| mid_k(ka, kb));
+        i += 1;
         let km = km.min(n).max(start);
         out[start..km].fill(cur);
         start = km;
@@ -68,7 +93,24 @@ pub fn pass_layers(n: usize, ev: &[LEv], bottom: i32) -> Vec<i32> {
     out
 }
 
+/// The via intervals and traversals of a wire before a change (kept where unchanged).
+type OldVias<'x> = (&'x [(usize, usize)], &'x [usize]);
+
+/// Order of a via traversal: (no site, overflow + squeeze change in um-mm, other wires in the
+/// triangle, -inradius, traversal).
+type SiteKey = (bool, i64, usize, i64, usize);
+
 /// Per edge-layer overflow price of a labelling, kept incrementally.
+///
+/// A planned via takes room (D3; Popov & Popov 2012 p. 118: vias are round pads, i.e. vertices
+/// of the triangulation, and p. 117: the room of a passage counts the widths and clearances of
+/// what passes it): the via of a wire in traversal `k` (triangle `tris[k]`) sits on the wire's
+/// chord there, so on the two edges of that triangle the wire crosses (its passes `k - 1` and
+/// `k`) it is packed as its disc on every layer ([`layer_items`]), in the wire's place of the
+/// edge order. Where in its interval the via goes is chosen here ("move the via"): the
+/// traversal with a static via site ([`Packer::via_site`]) and the least overflow price, then
+/// the drawing's order (fewest other wires in the triangle, widest triangle, first). A via
+/// whose interval has no site at all pays one overflow price (`nosite`), so P3/P4 act on it.
 pub struct CapModel<'a> {
     st: &'a State<'a>,
     packer: &'a Packer<'a>,
@@ -76,87 +118,290 @@ pub struct CapModel<'a> {
     dirs: &'a [Vec<Vec2>],
     nl: usize,
     price: f64,
+    bottom: i32,
     /// Position of every pass in its wire.
     pass_k: Vec<usize>,
     /// Layer of every pass (-1: wire dead).
     pub pass_layer: Vec<i32>,
+    /// Via disc diameter at every pass next to a via of its wire (0: none).
+    pub pass_disc: Vec<Disc>,
+    /// Per wire: the via intervals of its events and the traversal of each via.
+    pub via_iv: Vec<Vec<(usize, usize)>>,
+    pub via_k: Vec<Vec<usize>>,
+    /// Per wire: its vias without a static site in their interval.
+    nosite: Vec<usize>,
     /// Price of edge `e`, layer `l` at `e * nl + l`.
     cost: Vec<f64>,
+    /// Via squeeze price of edge `e`, layer `l` (the `via_squeeze` factor, [`Packer::via_squeeze`]).
+    sq: Vec<f64>,
+    /// Undo log of `cost` / `sq` entries while a move is tried.
+    log: Option<Vec<(usize, f64, f64)>>,
 }
 
 impl<'a> CapModel<'a> {
-    /// The model of the labelling `evl` (events per wire). O(passes x margin lookups).
+    /// The model of the labelling `evl` (events per wire). O(passes x margin lookups + vias x
+    /// interval length x layers).
     pub fn new(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64) -> Self {
         let nl = st.proj.n_layers;
-        let mut pass_layer = vec![-1; st.passes.len()];
+        let nw = st.wires.len();
         let mut pass_k = vec![0; st.passes.len()];
-        for (w, wi) in st.wires.iter().enumerate().filter(|(_, wi)| wi.alive) {
-            let pl = pass_layers(wi.passes.len(), &evl[w], bottom);
+        for wi in st.wires.iter().filter(|wi| wi.alive) {
             for (k, &p) in wi.passes.iter().enumerate() {
-                pass_layer[p] = pl[k];
                 pass_k[p] = k;
             }
         }
-        let mut m = CapModel { st, packer, dirs, nl, price, pass_k, pass_layer, cost: vec![0.0; st.proj.edges.len() * nl] };
+        let mut m = CapModel {
+            st,
+            packer,
+            dirs,
+            nl,
+            price,
+            bottom,
+            pass_k,
+            pass_layer: vec![-1; st.passes.len()],
+            pass_disc: vec![[0.0; 2]; st.passes.len()],
+            via_iv: vec![Vec::new(); nw],
+            via_k: vec![Vec::new(); nw],
+            nosite: vec![0; nw],
+            cost: vec![0.0; st.proj.edges.len() * nl],
+            sq: vec![0.0; st.proj.edges.len() * nl],
+            log: None,
+        };
+        for (w, ev) in evl.iter().enumerate().take(nw) {
+            if st.wires[w].alive {
+                let iv = via_intervals(ev);
+                let ks = m.default_ks(w, &iv, None);
+                m.via_iv[w] = iv;
+                m.apply(w, ev, ks);
+            }
+        }
         for e in 0..st.proj.edges.len() {
             for l in 0..nl {
-                m.cost[e * nl + l] = m.eval(e, l);
+                (m.cost[e * nl + l], m.sq[e * nl + l]) = m.eval(e, l);
+            }
+        }
+        for (w, ev) in evl.iter().enumerate().take(nw) {
+            if st.wires[w].alive && !m.via_iv[w].is_empty() {
+                let all: Vec<usize> = (0..m.via_iv[w].len()).collect();
+                m.optimise(w, ev, &all);
             }
         }
         m
     }
 
-    /// Price of edge `e` on layer `l` under the current pass layers.
-    fn eval(&self, e: usize, l: usize) -> f64 {
+    /// [`CapModel::rank`] (debug output).
+    pub fn rank_of(&self, w: WireId, k: usize) -> (bool, usize, i64, usize) {
+        self.rank(w, k)
+    }
+
+    /// Via radius plus clearance of wire `w` (0 when the packer has no via sizes).
+    fn need_r(&self, w: WireId) -> f64 {
+        let wi = &self.st.wires[w];
+        let d = self.packer.via_d(wi.net);
+        if d > 0.0 {
+            0.5 * d + wi.s
+        } else {
+            0.0
+        }
+    }
+
+    /// The drawing's preference of traversal `k` of `w` for a via: `(no site, other wires in
+    /// the triangle, -inradius, k)`, smaller first.
+    fn rank(&self, w: WireId, k: usize) -> (bool, usize, i64, usize) {
+        let (st, pr) = (self.st, self.st.proj);
+        let t = st.wires[w].tris[k.min(st.wires[w].tris.len() - 1)];
+        let wi = &st.wires[w];
+        let d = self.packer.via_d(wi.net);
+        let site = d <= 0.0 || self.packer.via_site(t, wi.net, 0.5 * d, wi.s);
+        let others = st.tri_trav[t].iter().filter(|&&(o, _)| o != w).count();
+        (!site, others, -(pr.inradius(t) as i64), k)
+    }
+
+    /// Via traversals by the drawing's preference alone (no room), keeping the traversal of a
+    /// via whose interval is unchanged from `old` (intervals, traversals).
+    fn default_ks(&self, w: WireId, iv: &[(usize, usize)], old: Option<OldVias>) -> Vec<usize> {
+        let n = self.st.wires[w].passes.len();
+        let mut ks: Vec<usize> = Vec::with_capacity(iv.len());
+        for (i, &(ka, kb)) in iv.iter().enumerate() {
+            let lo = ka.max(ks.last().copied().unwrap_or(0)).min(n);
+            let hi = kb.min(n).max(lo);
+            if let Some((oiv, oks)) = old {
+                if oiv.get(i) == Some(&(ka, kb)) && oks.get(i).is_some_and(|&k| (lo..=hi).contains(&k)) {
+                    ks.push(oks[i]);
+                    continue;
+                }
+            }
+            ks.push((lo..=hi).min_by_key(|&k| self.rank(w, k)).unwrap_or(lo));
+        }
+        ks
+    }
+
+    /// Set the pass layers and via discs of `w` for via traversals `ks` (no pricing); returns the
+    /// passes whose layer or disc changed. O(passes of the wire).
+    fn apply(&mut self, w: WireId, ev: &[LEv], ks: Vec<usize>) -> Vec<usize> {
+        let wi = &self.st.wires[w];
+        let n = wi.passes.len();
+        let pl = pass_layers_at(n, ev, self.bottom, &ks);
+        let d = self.packer.via_d(wi.net);
+        let disc = wire_discs(self.st, w, &ks, &vec![d; ks.len()]);
+        let mut changed = Vec::new();
+        for (k, &p) in wi.passes.iter().enumerate() {
+            if self.pass_layer[p] != pl[k] || self.pass_disc[p] != disc[k] {
+                self.pass_layer[p] = pl[k];
+                self.pass_disc[p] = disc[k];
+                changed.push(p);
+            }
+        }
+        let nr = self.need_r(w);
+        self.nosite[w] = if nr > 0.0 { ks.iter().filter(|&&k| self.rank(w, k).0).count() } else { 0 };
+        self.via_k[w] = ks;
+        changed
+    }
+
+    /// Price again the edge-layers of the passes `changed`; returns the change of the total.
+    fn reprice(&mut self, changed: &[usize]) -> f64 {
+        let mut es: Vec<usize> = changed.iter().map(|&p| self.st.passes[p].edge).collect();
+        es.sort_unstable();
+        es.dedup();
+        let mut delta = 0.0;
+        for e in es {
+            for l in 0..self.nl {
+                let i = e * self.nl + l;
+                let (c, q) = self.eval(e, l);
+                if c != self.cost[i] || q != self.sq[i] {
+                    if let Some(log) = self.log.as_mut() {
+                        log.push((i, self.cost[i], self.sq[i]));
+                    }
+                    delta += (c - self.cost[i]) + (q - self.sq[i]);
+                    self.cost[i] = c;
+                    self.sq[i] = q;
+                }
+            }
+        }
+        delta
+    }
+
+    /// Move the vias `which` of `w` through their intervals (one sweep each, in order) to the
+    /// traversal with a site and the least overflow price, ties by the drawing's preference.
+    /// O(vias x interval length x layers x passes of an edge).
+    fn optimise(&mut self, w: WireId, ev: &[LEv], which: &[usize]) {
+        let n = self.st.wires[w].passes.len();
+        for &i in which {
+            let mut ks = self.via_k[w].clone();
+            let (ka, kb) = self.via_iv[w][i];
+            let lo = ka.max(if i > 0 { ks[i - 1] } else { 0 }).min(n);
+            let hi = kb.min(if i + 1 < ks.len() { ks[i + 1] } else { n }).min(n).max(lo);
+            if lo == hi {
+                continue;
+            }
+            let cur = ks[i];
+            let mut run = 0.0;
+            let mut best: Option<(SiteKey, usize)> = None;
+            for k in lo..=hi {
+                ks[i] = k;
+                let ch = self.apply(w, ev, ks.clone());
+                run += self.reprice(&ch);
+                let r = self.rank(w, k);
+                let key = (r.0, (run * 1e3).round() as i64, r.1, r.2, r.3);
+                if best.as_ref().is_none_or(|b| key < b.0) {
+                    best = Some((key, k));
+                }
+            }
+            let k = best.map_or(cur, |b| b.1);
+            ks[i] = k;
+            let ch = self.apply(w, ev, ks);
+            self.reprice(&ch);
+        }
+    }
+
+    /// Lay out wire `w` again after its events changed: vias of unchanged intervals stay, the
+    /// others are placed by the drawing's preference and then moved for room. Every changed
+    /// cost entry goes to the undo log. O(passes of the wire + moved vias x interval).
+    fn relayout(&mut self, w: WireId, ev: &[LEv]) {
+        let iv = via_intervals(ev);
+        let (oiv, oks) = (std::mem::take(&mut self.via_iv[w]), self.via_k[w].clone());
+        let ks = self.default_ks(w, &iv, Some((&oiv, &oks)));
+        let moved: Vec<usize> = (0..iv.len()).filter(|&i| oiv.get(i) != Some(&iv[i])).collect();
+        self.via_iv[w] = iv;
+        let ch = self.apply(w, ev, ks);
+        self.reprice(&ch);
+        self.optimise(w, ev, &moved);
+    }
+
+    /// The pack items of edge `e` on layer `l`, without the wires in `gone`.
+    fn items(&self, e: usize, l: usize, gone: Option<&std::collections::BTreeSet<WireId>>) -> Vec<PackItem> {
         let pr = self.st.proj;
-        let items: Vec<PackItem> = self.st.edge_order[e]
-            .iter()
-            .filter(|&&p| self.pass_layer[p] == l as i32)
-            .map(|&p| {
+        let order: Vec<usize> = match gone {
+            Some(g) => self.st.edge_order[e].iter().copied().filter(|&p| !g.contains(&self.st.passes[p].wire)).collect(),
+            None => self.st.edge_order[e].clone(),
+        };
+        layer_items(
+            &order,
+            l,
+            |p| self.pass_layer[p],
+            |p| self.pass_disc[p],
+            |p| {
                 let w = self.st.passes[p].wire;
                 let wi = &self.st.wires[w];
-                PackItem { net: wi.net, w: wi.w, s: wi.s, infl: infl_dir(pr, e, self.dirs[w][self.pass_k[p]]) }
-            })
-            .collect();
+                PackItem { net: wi.net, w: wi.w, s: wi.s, infl: infl_dir(pr, e, self.dirs[w][self.pass_k[p]]), disc: [0.0; 2] }
+            },
+        )
+        .1
+    }
+
+    /// Overflow price and via squeeze price of edge `e` on layer `l` under the current pass
+    /// layers: every via disc there pays the `via_squeeze` weight times the squeeze of the slack
+    /// the packing leaves (the least `rmax - lmin`) against one via diameter.
+    fn eval(&self, e: usize, l: usize) -> (f64, f64) {
+        let items = self.items(e, l, None);
         if items.is_empty() {
-            return 0.0;
+            return (0.0, 0.0);
         }
         let over = self.packer.bounds(e, l, &items).worst();
+        let sq_w = self.packer.via_squeeze;
+        let sq = if sq_w > 0.0 { sq_w * items.iter().filter(|i| i.dmax() > 0.0).map(|i| squeeze_amount(-over, i.dmax())).sum::<f64>() } else { 0.0 };
         if over <= 1e-6 {
-            return 0.0;
+            return (0.0, sq);
         }
-        let pitch = (items.iter().map(|i| i.w + i.s).sum::<f64>() / items.len() as f64).max(1.0);
-        self.price * (1.0 + over / pitch)
+        let pitch = (items.iter().map(|i| i.w.max(i.dmax()) + i.s).sum::<f64>() / items.len() as f64).max(1.0);
+        (self.price * (1.0 + over / pitch), sq)
     }
 
     /// Whether the passes on edge `e`, layer `l` fit when the wires in `gone` are taken out.
     pub fn fits_without(&self, e: usize, l: usize, gone: &std::collections::BTreeSet<WireId>) -> bool {
-        let pr = self.st.proj;
-        let items: Vec<PackItem> = self.st.edge_order[e]
-            .iter()
-            .filter(|&&p| self.pass_layer[p] == l as i32 && !gone.contains(&self.st.passes[p].wire))
-            .map(|&p| {
-                let w = self.st.passes[p].wire;
-                let wi = &self.st.wires[w];
-                PackItem { net: wi.net, w: wi.w, s: wi.s, infl: infl_dir(pr, e, self.dirs[w][self.pass_k[p]]) }
-            })
-            .collect();
+        let items = self.items(e, l, Some(gone));
         items.is_empty() || self.packer.bounds(e, l, &items).fits()
     }
 
-    /// Total overflow price of the labelling (mm).
+    /// Total overflow price of the labelling (mm), vias without a site and via squeeze
+    /// included.
     pub fn total(&self) -> f64 {
-        self.cost.iter().sum()
+        self.cost.iter().sum::<f64>() + self.sq.iter().sum::<f64>() + self.price * self.nosite.iter().sum::<usize>() as f64
     }
 
-    /// Over-full edge-layers.
+    /// Via squeeze price of the labelling (mm).
+    pub fn squeeze(&self) -> f64 {
+        self.sq.iter().sum()
+    }
+
+    /// Over-full edge-layers plus vias without a site.
     pub fn overfull(&self) -> usize {
-        self.cost.iter().filter(|&&c| c > 0.0).count()
+        self.cost.iter().filter(|&&c| c > 0.0).count() + self.nosite.iter().sum::<usize>()
     }
 
     /// The over-full `(edge, layer)` pairs, ascending.
     pub fn overfull_list(&self) -> Vec<(usize, usize)> {
         (0..self.cost.len()).filter(|&i| self.cost[i] > 0.0).map(|i| (i / self.nl, i % self.nl)).collect()
+    }
+
+    /// Wires with a via that has no site in its interval, ascending.
+    pub fn nosite_wires(&self) -> Vec<WireId> {
+        (0..self.nosite.len()).filter(|&w| self.nosite[w] > 0).collect()
+    }
+
+    /// Vias without a site.
+    pub fn nosite(&self) -> usize {
+        self.nosite.iter().sum()
     }
 }
 
@@ -258,7 +503,7 @@ pub fn try_move(
     cm: &mut CapModel,
     evl: &mut [Vec<LEv>],
     mv: &[((WireId, usize), i32)],
-    bottom: i32,
+    _bottom: i32,
     trans: &dyn Fn(usize, usize) -> f64,
     unary: &dyn Fn(WireId, usize, usize) -> f64,
     add_vias: bool,
@@ -273,43 +518,56 @@ pub fn try_move(
         evl[w][i].2 = l;
     }
     let new_wc: f64 = wires.iter().map(|&w| wire_cost(evl, w, trans, unary)).sum();
-    // Pass layers that change.
-    let mut changed: Vec<(usize, i32, i32)> = Vec::new();
+    // Lay the touched wires out again (pass layers, via traversals and discs), logging every
+    // changed price for the undo.
+    struct Snap {
+        w: WireId,
+        layer: Vec<i32>,
+        disc: Vec<Disc>,
+        iv: Vec<(usize, usize)>,
+        ks: Vec<usize>,
+        nosite: usize,
+    }
+    let snaps: Vec<Snap> = wires
+        .iter()
+        .map(|&w| Snap {
+            w,
+            layer: st.wires[w].passes.iter().map(|&p| cm.pass_layer[p]).collect(),
+            disc: st.wires[w].passes.iter().map(|&p| cm.pass_disc[p]).collect(),
+            iv: cm.via_iv[w].clone(),
+            ks: cm.via_k[w].clone(),
+            nosite: cm.nosite[w],
+        })
+        .collect();
+    let old_ns: usize = wires.iter().map(|&w| cm.nosite[w]).sum();
+    cm.log = Some(Vec::new());
     for &w in &wires {
-        let pl = pass_layers(st.wires[w].passes.len(), &evl[w], bottom);
-        for (k, &p) in st.wires[w].passes.iter().enumerate() {
-            if cm.pass_layer[p] != pl[k] {
-                changed.push((p, cm.pass_layer[p], pl[k]));
-            }
-        }
+        cm.relayout(w, &evl[w]);
     }
-    let mut touched: Vec<(usize, usize)> = Vec::new();
-    for &(p, a, b) in &changed {
-        let e = st.passes[p].edge;
-        for l in [a, b] {
-            if l >= 0 {
-                touched.push((e, l as usize));
-            }
-        }
+    let log = cm.log.take().unwrap_or_default();
+    // First logged value of every entry = its price before the move.
+    let mut before: std::collections::BTreeMap<usize, (f64, f64)> = std::collections::BTreeMap::new();
+    for &(i, c, q) in &log {
+        before.entry(i).or_insert((c, q));
     }
-    touched.sort_unstable();
-    touched.dedup();
-    let nl = cm.nl;
-    let old_oc: f64 = touched.iter().map(|&(e, l)| cm.cost[e * nl + l]).sum();
-    for &(p, _, b) in &changed {
-        cm.pass_layer[p] = b;
-    }
-    let new: Vec<f64> = touched.iter().map(|&(e, l)| cm.eval(e, l)).collect();
-    let new_oc: f64 = new.iter().sum();
-    let worse_somewhere = strict && touched.iter().zip(&new).any(|(&(e, l), &c)| c > cm.cost[e * nl + l] + EPS);
-    if (new_wc - old_wc) + (new_oc - old_oc) < -EPS && (add_vias || new_wc <= old_wc + EPS) && !worse_somewhere {
-        for (&(e, l), &c) in touched.iter().zip(&new) {
-            cm.cost[e * nl + l] = c;
-        }
+    let new_ns: usize = wires.iter().map(|&w| cm.nosite[w]).sum();
+    let d_oc: f64 = before.iter().map(|(&i, &(c, q))| (cm.cost[i] - c) + (cm.sq[i] - q)).sum::<f64>() + cm.price * (new_ns as f64 - old_ns as f64);
+    let worse_somewhere = strict && (new_ns > old_ns || before.iter().any(|(&i, &(c, _))| cm.cost[i] > c + EPS));
+    if (new_wc - old_wc) + d_oc < -EPS && (add_vias || new_wc <= old_wc + EPS) && !worse_somewhere {
         return true;
     }
-    for &(p, a, _) in &changed {
-        cm.pass_layer[p] = a;
+    for (&i, &(c, q)) in &before {
+        cm.cost[i] = c;
+        cm.sq[i] = q;
+    }
+    for s in snaps {
+        for (k, &p) in st.wires[s.w].passes.iter().enumerate() {
+            cm.pass_layer[p] = s.layer[k];
+            cm.pass_disc[p] = s.disc[k];
+        }
+        cm.via_iv[s.w] = s.iv;
+        cm.via_k[s.w] = s.ks;
+        cm.nosite[s.w] = s.nosite;
     }
     for (&((w, i), _), &l) in mv.iter().zip(&old_lab) {
         evl[w][i].2 = l;

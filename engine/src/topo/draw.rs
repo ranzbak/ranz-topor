@@ -20,7 +20,7 @@
 //! checker query per segment (grid candidates). Deterministic (Vec + index ids).
 
 use super::board::Board;
-use super::pack::{infl_dir, PackItem, Packer};
+use super::pack::{infl_dir, layer_items, wire_discs, Disc, PackItem, Packer};
 use super::state::{EdgeId, PassId, State, TriId, WireId};
 use crate::check::{CheckReport, Checker, ItemIndex, Violation};
 use crate::geom::prim::Aabb;
@@ -37,13 +37,16 @@ pub struct Plan {
     pub layers: Vec<usize>,
     /// Between run `i` and `i + 1`: the traversals `(ka, kb)` bounding the via interval.
     pub vias: Vec<(usize, usize)>,
+    /// The traversal P3/P4 planned for each via ([`super::refine::CapModel::via_k`]); the
+    /// drawing tries that triangle first. Empty: no plan (the drawing's own order).
+    pub at: Vec<usize>,
 }
 
 /// The layer runs of a wire from its events `(traversal, fraction, layer)`; a wire without
 /// events lies on the bottom layer. O(events).
 pub fn plan(ev: &[(usize, f64, i32)], n_layers: usize) -> Plan {
     let Some(first) = ev.first() else {
-        return Plan { layers: vec![n_layers - 1], vias: Vec::new() };
+        return Plan { layers: vec![n_layers - 1], vias: Vec::new(), at: Vec::new() };
     };
     let mut layers = vec![first.2 as usize];
     let mut vias = Vec::new();
@@ -53,7 +56,8 @@ pub fn plan(ev: &[(usize, f64, i32)], n_layers: usize) -> Plan {
             layers.push(w[1].2 as usize);
         }
     }
-    Plan { layers, vias }
+    let at = vias.iter().map(|&(a, b)| super::refine::mid_k(a, b)).collect();
+    Plan { layers, vias, at }
 }
 
 /// Funnel (string pulling) from `s` to `e` through `portals` `(left, right)`, seen along the
@@ -455,6 +459,8 @@ pub struct Drawer<'a> {
     /// Edge x layer (`e * n_layers + l`) whose passes do not fit in the room between the end
     /// margins (demand over room) when packed.
     pub over: Vec<bool>,
+    /// Slack of every packed edge-layer: the least `rmax - lmin` (nm; infinite when empty).
+    pub spare: Vec<f64>,
     /// One record per run the checker rejected (the drawing-yield diagnosis).
     pub diag: Vec<Diag>,
     pub stats: DrawStats,
@@ -466,6 +472,9 @@ pub struct Drawer<'a> {
     pub iv: Intervals,
     /// Layer index of every pass (`-1` unpacked).
     pub pass_layer: Vec<i32>,
+    /// Via disc diameter at every pass next to a placed (or planned) via of its wire (0: none):
+    /// the packing gives the via room on every layer ([`layer_items`]), as P3/P4 do.
+    pub pass_disc: Vec<Disc>,
     pub(super) ents: Vec<Ent>,
     pub(super) grid: Grid<usize>,
     /// `(ItemIndex id, ent id)` per committed item; the handle is the position.
@@ -550,7 +559,9 @@ impl<'a> Drawer<'a> {
             dirs,
             iv: Intervals::default(),
             pass_layer: vec![-1; st.passes.len()],
+            pass_disc: vec![[0.0; 2]; st.passes.len()],
             over: vec![false; st.proj.edges.len() * st.proj.n_layers],
+            spare: vec![f64::INFINITY; st.proj.edges.len() * st.proj.n_layers],
             diag: Vec::new(),
             stats: DrawStats::default(),
             ents: Vec::new(),
@@ -709,41 +720,71 @@ impl<'a> Drawer<'a> {
         let pr = &self.b.proj;
         let np = self.st.passes.len();
         self.iv = Intervals { lo: vec![f64::NAN; np], hi: vec![f64::NAN; np], nom: vec![f64::NAN; np] };
+        self.lanes.clear();
         for e in 0..pr.edges.len() {
             if self.st.edge_order[e].is_empty() {
                 continue;
             }
-            let [p, q] = pr.edges[e];
-            let len = (pr.pos[q] - pr.pos[p]).len().max(1.0);
             for l in 0..pr.n_layers {
-                let items: Vec<PassId> =
-                    self.st.edge_order[e].iter().copied().filter(|&pid| self.pass_layer[pid] == l as i32).collect();
-                if items.is_empty() {
-                    continue;
-                }
-                self.pack(e, l, len, &items);
+                self.pack(e, l);
             }
         }
     }
 
-    fn pack(&mut self, e: EdgeId, l: usize, len: f64, items: &[PassId]) {
-        let n = items.len();
-        let pitems: Vec<PackItem> = items
-            .iter()
-            .map(|&pid| {
+    /// Set the pass layers and via discs of wire `w` for its `plan` with vias at the traversals
+    /// `ks` of diameters `ds`. O(passes of the wire).
+    pub fn set_wire_layers(&mut self, w: WireId, plan: &Plan, ks: &[usize], ds: &[f64]) {
+        let n = self.st.wires[w].passes.len();
+        for r in 0..plan.layers.len() {
+            let k0 = if r == 0 { 0 } else { ks[r - 1] };
+            let k1 = if r == plan.layers.len() - 1 { n } else { ks[r] };
+            for k in k0.min(n)..k1.min(n) {
+                self.pass_layer[self.st.wires[w].passes[k]] = plan.layers[r] as i32;
+            }
+        }
+        let disc = wire_discs(self.st, w, ks, ds);
+        for (k, &p) in self.st.wires[w].passes.iter().enumerate() {
+            self.pass_disc[p] = disc[k];
+        }
+    }
+
+    /// Pack edge `e` on layer `l` (see [`Drawer::compute_intervals`]); no-op without items.
+    fn pack(&mut self, e: EdgeId, l: usize) {
+        let [p, q] = self.b.proj.edges[e];
+        let len = (self.b.proj.pos[q] - self.b.proj.pos[p]).len().max(1.0);
+        let (ids, pitems) = layer_items(
+            &self.st.edge_order[e],
+            l,
+            |pid| self.pass_layer[pid],
+            |pid| self.pass_disc[pid],
+            |pid| {
                 let wi = &self.st.wires[self.st.passes[pid].wire];
                 let (w, k) = (self.st.passes[pid].wire, self.pass_k[pid]);
                 let pw = self.widths.as_ref().map_or(wi.w, |x| x.pass_w[pid]);
-                PackItem { net: wi.net, w: pw, s: wi.s, infl: infl_dir(&self.b.proj, e, self.dirs[w][k]) }
-            })
-            .collect();
+                PackItem { net: wi.net, w: pw, s: wi.s, infl: infl_dir(&self.b.proj, e, self.dirs[w][k]), disc: [0.0; 2] }
+            },
+        );
+        if ids.is_empty() {
+            self.lanes.remove(&(e, l));
+            self.over[e * self.b.proj.n_layers + l] = false;
+            self.spare[e * self.b.proj.n_layers + l] = f64::INFINITY;
+            return;
+        }
+        let items: Vec<PassId> = ids.iter().map(|x| x.0).collect();
+        let only_disc: Vec<bool> = ids.iter().map(|x| x.1).collect();
+        let n = items.len();
         let bnd = self.packer.bounds(e, l, &pitems);
         let (lo, hi, lmin, rmax) = (&bnd.lo, &bnd.hi, &bnd.lmin, &bnd.rmax);
         let req = |i: usize| bnd.req[i];
         let fits = bnd.fits();
         self.over[e * self.b.proj.n_layers + l] = !fits;
-        for &pid in items {
-            self.slot[pid] = None;
+        self.spare[e * self.b.proj.n_layers + l] = -bnd.worst();
+        // A disc-only item (the via of a wire on another layer) holds room here; the pass's
+        // slot and interval belong to its own layer.
+        for (i, &pid) in items.iter().enumerate() {
+            if !only_disc[i] {
+                self.slot[pid] = None;
+            }
         }
         if fits {
             let mut cum = vec![0.0; n];
@@ -751,7 +792,9 @@ impl<'a> Drawer<'a> {
                 cum[i] = cum[i - 1] + req(i - 1);
             }
             for (i, &pid) in items.iter().enumerate() {
-                self.slot[pid] = Some((e, l, i, lmin[i], rmax[i]));
+                if !only_disc[i] {
+                    self.slot[pid] = Some((e, l, i, lmin[i], rmax[i]));
+                }
             }
             self.lanes.insert((e, l), Lane { pids: items.to_vec(), cum });
         } else {
@@ -782,6 +825,9 @@ impl<'a> Drawer<'a> {
             }
         }
         for (i, &pid) in items.iter().enumerate() {
+            if only_disc[i] {
+                continue;
+            }
             self.iv.lo[pid] = (a[i] / len).clamp(0.0, 1.0);
             self.iv.hi[pid] = (b[i] / len).clamp(0.0, 1.0);
             self.iv.nom[pid] = (nom[i] / len).clamp(0.0, 1.0);
@@ -854,11 +900,13 @@ impl<'a> Drawer<'a> {
         }
     }
 
-    /// Candidate via sites of a via interval, best first: `(traversal, point)`.
-    fn via_candidates(&self, w: WireId, ka: usize, kb: usize, need_r: f64) -> Vec<(usize, Vec2)> {
+    /// Candidate via sites of a via interval, best first: `(traversal, point)`. The planned
+    /// traversal `at` (P3/P4) goes first, then the triangles no other wire traverses, wide
+    /// enough, widest first.
+    fn via_candidates(&self, w: WireId, ka: usize, kb: usize, need_r: f64, at: Option<usize>) -> Vec<(usize, Vec2)> {
         let (st, pr) = (self.st, &self.b.proj);
         let wi = &st.wires[w];
-        let mut c: Vec<(usize, bool, f64, usize, Vec2)> = Vec::new();
+        let mut c: Vec<(bool, usize, bool, f64, usize, Vec2)> = Vec::new();
         for k in ka..=kb {
             let t = wi.tris[k];
             if pr.tri_out[t] || !pr.tri_obs[t].is_empty() {
@@ -873,11 +921,119 @@ impl<'a> Drawer<'a> {
             let cen = (a + b + cc) * (1.0 / 3.0);
             let bary = |u: f64, v: f64| a * u + b * v + cc * (1.0 - u - v);
             for p in [inc, cen, bary(0.6, 0.2), bary(0.2, 0.6), bary(0.2, 0.2), bary(0.4, 0.4), bary(0.4, 0.1), bary(0.1, 0.4), bary(0.1, 0.1)] {
-                c.push((others, inr < need_r, -inr, k, p));
+                c.push((Some(k) != at, others, inr < need_r, -inr, k, p));
             }
         }
-        c.sort_by(|x, y| x.0.cmp(&y.0).then(x.1.cmp(&y.1)).then(x.2.total_cmp(&y.2)).then(x.3.cmp(&y.3)));
-        c.into_iter().map(|x| (x.3, x.4)).collect()
+        c.sort_by(|x, y| x.0.cmp(&y.0).then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)).then(x.3.total_cmp(&y.3)).then(x.4.cmp(&y.4)));
+        c.into_iter().map(|x| (x.4, x.5)).collect()
+    }
+
+    /// Via sites on the nominal chord of wire `w` in traversal `k` (from its packed crossing of
+    /// the edge it enters by to the one it leaves by, or its terminal; turn corners included),
+    /// its two ends first: where the packing gave the via its room (the disc items of
+    /// [`layer_items`]). Empty when the passes have no packed position yet. O(turns).
+    fn chord_sites(&self, w: WireId, k: usize) -> Vec<(usize, Vec2)> {
+        let (st, pr) = (self.st, &self.b.proj);
+        let wi = &st.wires[w];
+        let n = wi.passes.len();
+        let nom = |j: usize| self.iv.nom.get(wi.passes[j]).copied().filter(|f| f.is_finite());
+        let entry = if k == 0 {
+            Some(pr.pos[wi.a])
+        } else {
+            nom(k - 1).map(|f| self.portal(w, k - 1, f, f).0)
+        };
+        let exit = if k >= n { Some(pr.pos[wi.b]) } else { nom(k).map(|f| self.portal(w, k, f, f).0) };
+        let (Some(a), Some(b)) = (entry, exit) else { return Vec::new() };
+        let mut pl = vec![a];
+        pl.extend(wi.turns.iter().filter(|x| x.0 == k).map(|x| pr.pos[x.1]));
+        pl.push(b);
+        let total: f64 = pl.windows(2).map(|x| (x[1] - x[0]).len()).sum();
+        if total < 1.0 {
+            return vec![(k, a)];
+        }
+        let at = |f: f64| {
+            let mut d = f * total;
+            for x in pl.windows(2) {
+                let l = (x[1] - x[0]).len();
+                if d <= l {
+                    return x[0] + (x[1] - x[0]) * (d / l.max(1e-9));
+                }
+                d -= l;
+            }
+            *pl.last().expect("chord")
+        };
+        // The packed crossings themselves first: there the packing kept the disc off the edge's
+        // end obstacles and its neighbours on that edge.
+        [1.0, 0.0, 0.5, 0.75, 0.25, 0.9, 0.1].iter().map(|&f| (k, at(f))).collect()
+    }
+
+    /// Least slack (nm) the packing leaves on the passage-layers next to a via of wire `w` in
+    /// traversal `k` (the edges of its passes `k - 1` and `k`, every layer); infinite when none.
+    pub fn via_slack(&self, w: WireId, k: usize) -> f64 {
+        let ps = &self.st.wires[w].passes;
+        let nl = self.b.proj.n_layers;
+        [k.checked_sub(1), Some(k)]
+            .into_iter()
+            .flatten()
+            .filter(|&j| j < ps.len())
+            .flat_map(|j| {
+                let e = self.st.passes[ps[j]].edge;
+                (0..nl).map(move |l| e * nl + l)
+            })
+            .map(|i| self.spare[i])
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    /// The packed (nominal) chord of wire `o` in its traversal `k`: from its crossing of the
+    /// edge it enters by (or its terminal) to the one it leaves by. `None` before packing.
+    fn nom_chord(&self, o: WireId, k: usize) -> Option<(Vec2, Vec2)> {
+        let (st, pr) = (self.st, &self.b.proj);
+        let oi = &st.wires[o];
+        let n = oi.passes.len();
+        let nom = |j: usize| self.iv.nom.get(oi.passes[j]).copied().filter(|f| f.is_finite());
+        let a = if k == 0 { Some(pr.pos[oi.a]) } else { nom(k - 1).map(|f| self.portal(o, k - 1, f, f).0) }?;
+        let b = if k >= n { Some(pr.pos[oi.b]) } else { nom(k).map(|f| self.portal(o, k, f, f).0) }?;
+        Some((a, b))
+    }
+
+    /// Free room (nm) around a via of diameter `d` at `p` in traversal `k` of wire `w`: the
+    /// least gap beyond the clearance to the copper indexed so far of other nets (pads, vias,
+    /// drawn tracks, any layer) and to the packed chords of the other nets' wires through that
+    /// triangle. O(objects nearby + traversals of the triangle).
+    pub fn via_room(&self, w: WireId, k: usize, p: Vec2, d: f64) -> f64 {
+        let (st, pr) = (self.st, &self.b.proj);
+        let wi = &st.wires[w];
+        let own = self.model.rules.net_rule(wi.net).clearance as f64;
+        let mut room = f64::INFINITY;
+        let reach = 2.0e6 + d;
+        let mut ids = self.grid.query(bbox_of(&[p]).grow(reach));
+        ids.sort_unstable();
+        ids.dedup();
+        for id in ids {
+            let e = &self.ents[id];
+            if !e.live || e.net == Some(wi.net) {
+                continue;
+            }
+            let dist = match &e.core {
+                Core::Poly(q) => poly_dist(p, q),
+                Core::Seg(a, b) => seg_dist(p, *a, *b),
+                Core::Pt(q) => (p - *q).len(),
+            };
+            let need = if e.fixed { e.clear } else { e.clear.max(own) };
+            room = room.min(dist - e.grow - 0.5 * d - need);
+        }
+        let t = wi.tris[k];
+        for &(o, ok) in &st.tri_trav[t] {
+            let oi = &st.wires[o];
+            if o == w || !oi.alive || oi.net == wi.net {
+                continue;
+            }
+            if let Some((a, b)) = self.nom_chord(o, ok) {
+                room = room.min(seg_dist(p, a, b) - 0.5 * oi.w - 0.5 * d - oi.s.max(wi.s));
+            }
+        }
+        let _ = pr;
+        room
     }
 
     /// Place the vias of wire `w` (ids of the indexed items in `ids`), or the reason it cannot be.
@@ -890,23 +1046,53 @@ impl<'a> Drawer<'a> {
             let mut done = false;
             'sizes: for &sz in &sizes {
                 let need_r = 0.5 * sz.d as f64 + self.model.rules.net_rule(net).clearance as f64;
-                let mut sites = self.via_candidates(w, ka, kb.max(ka), need_r);
+                let at = plan.at.get(i).copied().filter(|&k| (ka..=kb.max(ka)).contains(&k));
+                let mut sites = at.map_or(Vec::new(), |k| self.chord_sites(w, k));
+                sites.extend(self.via_candidates(w, ka, kb.max(ka), need_r, at));
                 if self.opts.via_offset_sites {
                     sites.extend(self.via_extra(w, ka, kb.max(ka), sz.d as f64, self.model.rules.net_rule(net).clearance as f64));
                 }
+                // Of the valid sites (side test, clearance) in the first triangle that has one,
+                // the one with the most free room around it (the `via_squeeze` factor's aim).
+                let mut best: Option<(f64, usize, Vec2)> = None;
+                let dbg = std::env::var("TOPO_VIADBG").is_ok();
+                let (mut n_side, mut n_check) = (0usize, 0usize);
                 for (k, p) in sites {
+                    if best.is_some_and(|b| b.1 != k) {
+                        break;
+                    }
                     if !self.via_side_ok(w, k, p, plan.layers[i], plan.layers[i + 1]) {
+                        n_side += usize::from(Some(k) == at);
+                        if dbg && Some(k) == at && std::env::var("TOPO_VIASIDE").is_ok() {
+                            eprintln!("VIASIDE wire {w} via {i} k {k} at ({:.3},{:.3}) la {} lb {} entry ({:.3},{:.3}) exit ({:.3},{:.3})", p.x / 1e6, -p.y / 1e6, plan.layers[i], plan.layers[i + 1], self.chord_pt(w, k).x / 1e6, -self.chord_pt(w, k).y / 1e6, self.chord_pt(w, k + 1).x / 1e6, -self.chord_pt(w, k + 1).y / 1e6);
+                        }
                         continue;
                     }
                     let item = via_item(net, p, sz, Some(w));
-                    if self.check_ok(&item) && self.via_hole_ok(p, sz, net) && self.via_own_pad_ok(p, sz, net) {
-                        let id = self.commit(&item);
-                        self.via_marks.push((w, k, p, plan.layers[i], plan.layers[i + 1], id));
-                        ids.push(id);
-                        out.push((k, p, sz));
-                        done = true;
-                        break 'sizes;
+                    if dbg && Some(k) == at && !(self.check_ok(&item) && self.via_hole_ok(p, sz, net) && self.via_own_pad_ok(p, sz, net)) {
+                        n_check += 1;
+                        if n_check <= 2 {
+                            let rep = self.checker.check_against(&self.idx, std::slice::from_ref(&item), &[]);
+                            eprintln!("VIAREJ wire {w} via {i} k {k} at ({:.3},{:.3}): {:?} hole {} own {}", p.x / 1e6, -p.y / 1e6, rep.violations.first().map(|v| (v.against.clone(), v.gap, v.required)), self.via_hole_ok(p, sz, net), self.via_own_pad_ok(p, sz, net));
+                        }
                     }
+                    if self.check_ok(&item) && self.via_hole_ok(p, sz, net) && self.via_own_pad_ok(p, sz, net) {
+                        let room = self.via_room(w, k, p, sz.d as f64);
+                        if best.is_none_or(|b| room > b.0 + 1.0) {
+                            best = Some((room, k, p));
+                        }
+                    }
+                }
+                if let Some((room, k, p)) = best {
+                    if dbg {
+                        eprintln!("VIAPICK wire {w} net {net} via {i} ka {ka} kb {kb} planned {at:?} chosen k {k} at ({:.3},{:.3}) room {:.0} size {} (planned triangle: {n_side} wrong side, {n_check} rejected)", p.x / 1e6, -p.y / 1e6, room, sz.d);
+                    }
+                    let id = self.commit(&via_item(net, p, sz, Some(w)));
+                    self.via_marks.push((w, k, p, plan.layers[i], plan.layers[i + 1], id));
+                    ids.push(id);
+                    out.push((k, p, sz));
+                    done = true;
+                    break 'sizes;
                 }
             }
             if !done {
@@ -936,7 +1122,7 @@ impl<'a> Drawer<'a> {
                     let copper_req = r.net_rule(net).clearance.max(r.min_clearance) + self.opts.margin_nm;
                     for &sz in &sizes {
                         let need = 0.5 * sz.d as f64 + r.net_rule(net).clearance as f64;
-                        let mut sites = self.via_candidates(w, ka, kb.max(ka), need);
+                        let mut sites = self.via_candidates(w, ka, kb.max(ka), need, None);
                         if self.opts.via_offset_sites {
                             sites.extend(self.via_extra(w, ka, kb.max(ka), sz.d as f64, r.net_rule(net).clearance as f64));
                         }
@@ -997,6 +1183,29 @@ impl<'a> Drawer<'a> {
     /// leaves its run on a layer no way to its first pass but across that wire (wiccon MOSI,
     /// D2). O(traversals of the triangle x chord corners).
     pub fn via_side_ok(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize) -> bool {
+        self.via_side_ok_(w, k, p, la, lb)
+    }
+
+    /// Point `j` of wire `w`'s chord polyline (0: its start terminal, `n + 1`: its end, else
+    /// the crossing of pass `j - 1`): the packed nominal crossing once the edges are packed
+    /// (where the drawing and the via sites put it, D3), else the evenly spread pass point of
+    /// [`State::polyline`].
+    fn chord_pt(&self, w: WireId, j: usize) -> Vec2 {
+        let wi = &self.st.wires[w];
+        let n = wi.passes.len();
+        if j == 0 {
+            return self.b.proj.pos[wi.a];
+        }
+        if j > n {
+            return self.b.proj.pos[wi.b];
+        }
+        match self.iv.nom.get(wi.passes[j - 1]).copied().filter(|f| f.is_finite()) {
+            Some(f) => self.portal(w, j - 1, f, f).0,
+            None => self.polys[w][j],
+        }
+    }
+
+    fn via_side_ok_(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize) -> bool {
         if self.prov_layer.is_empty() {
             return true;
         }
@@ -1020,15 +1229,15 @@ impl<'a> Drawer<'a> {
             }
             let lo = chord_layer(o, ok);
             let r = if lo == lb as i32 {
-                self.polys[w][k + 1]
+                self.chord_pt(w, k + 1)
             } else if lo == la as i32 {
-                self.polys[w][k]
+                self.chord_pt(w, k)
             } else {
                 continue;
             };
-            let mut chord = vec![self.polys[o][ok]];
+            let mut chord = vec![self.chord_pt(o, ok)];
             chord.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| pr.pos[x.1]));
-            chord.push(self.polys[o][ok + 1]);
+            chord.push(self.chord_pt(o, ok + 1));
             let crossings = chord.windows(2).filter(|c| seg_proper(r, p, c[0], c[1])).count();
             if crossings % 2 == 1 {
                 return false;
@@ -1243,39 +1452,52 @@ impl<'a> Drawer<'a> {
     }
 
     /// Give the passes of wire `w` the layers of `layers` (runs separated at the traversals
-    /// `cuts`) and pack again the edge-layers whose passes changed (via reduction trial).
-    /// Returns the previous layer of every pass of the wire, for [`Drawer::restore_layers`].
-    pub fn relayer(&mut self, w: WireId, layers: &[usize], cuts: &[usize]) -> Vec<i32> {
+    /// `cuts`, the vias kept, their discs too) and pack again the edge-layers whose passes
+    /// changed (via reduction trial). Returns the previous layer and disc of every pass of the
+    /// wire, for [`Drawer::restore_layers`].
+    pub fn relayer(&mut self, w: WireId, layers: &[usize], cuts: &[usize]) -> (Vec<i32>, Vec<Disc>) {
         let st = self.st;
         let ps = &st.wires[w].passes;
-        let old: Vec<i32> = ps.iter().map(|&p| self.pass_layer[p]).collect();
+        let n = ps.len();
+        let old: (Vec<i32>, Vec<Disc>) = (ps.iter().map(|&p| self.pass_layer[p]).collect(), ps.iter().map(|&p| self.pass_disc[p]).collect());
         for r in 0..layers.len() {
             let k0 = if r == 0 { 0 } else { cuts[r - 1] };
-            let k1 = if r == layers.len() - 1 { ps.len() } else { cuts[r] };
-            for &p in &ps[k0..k1] {
+            let k1 = if r == layers.len() - 1 { n } else { cuts[r] };
+            for &p in &ps[k0.min(n)..k1.min(n)] {
                 self.pass_layer[p] = layers[r] as i32;
             }
+        }
+        let dmax = old.1.iter().map(|d| d[0].max(d[1])).fold(0.0, f64::max);
+        let disc = wire_discs(st, w, cuts, &vec![dmax; cuts.len()]);
+        for (k, &p) in ps.iter().enumerate() {
+            self.pass_disc[p] = disc[k];
         }
         self.repack(w, &old);
         old
     }
 
-    /// Put back the pass layers `old` of wire `w`.
-    pub fn restore_layers(&mut self, w: WireId, old: &[i32]) {
-        let cur: Vec<i32> = self.st.wires[w].passes.iter().map(|&p| self.pass_layer[p]).collect();
-        for (k, &p) in self.st.wires[w].passes.iter().enumerate() {
-            self.pass_layer[p] = old[k];
+    /// Put back the pass layers and discs `old` of wire `w`.
+    pub fn restore_layers(&mut self, w: WireId, old: &(Vec<i32>, Vec<Disc>)) {
+        let ps = &self.st.wires[w].passes;
+        let cur: (Vec<i32>, Vec<Disc>) = (ps.iter().map(|&p| self.pass_layer[p]).collect(), ps.iter().map(|&p| self.pass_disc[p]).collect());
+        for (k, &p) in ps.iter().enumerate() {
+            self.pass_layer[p] = old.0[k];
+            self.pass_disc[p] = old.1[k];
         }
         self.repack(w, &cur);
     }
 
-    fn repack(&mut self, w: WireId, was: &[i32]) {
+    fn repack(&mut self, w: WireId, was: &(Vec<i32>, Vec<Disc>)) {
         let st = self.st;
         let nl = self.b.proj.n_layers;
         let mut todo: std::collections::BTreeSet<(EdgeId, usize)> = std::collections::BTreeSet::new();
         for (k, &p) in st.wires[w].passes.iter().enumerate() {
-            if self.pass_layer[p] != was[k] {
-                for l in [was[k], self.pass_layer[p]] {
+            if self.pass_disc[p] != was.1[k] {
+                for l in 0..nl {
+                    todo.insert((st.passes[p].edge, l));
+                }
+            } else if self.pass_layer[p] != was.0[k] {
+                for l in [was.0[k], self.pass_layer[p]] {
                     if l >= 0 && (l as usize) < nl {
                         todo.insert((st.passes[p].edge, l as usize));
                     }
@@ -1283,12 +1505,7 @@ impl<'a> Drawer<'a> {
             }
         }
         for (e, l) in todo {
-            let [p, q] = self.b.proj.edges[e];
-            let len = (self.b.proj.pos[q] - self.b.proj.pos[p]).len().max(1.0);
-            let items: Vec<PassId> = st.edge_order[e].iter().copied().filter(|&pid| self.pass_layer[pid] == l as i32).collect();
-            if !items.is_empty() {
-                self.pack(e, l, len, &items);
-            }
+            self.pack(e, l);
         }
     }
 
@@ -1809,6 +2026,6 @@ mod tests {
         let p = plan(&[(0, 0.0, 0), (2, 0.5, 0), (4, 0.2, 1), (6, 1.0, 1)], 2);
         assert_eq!(p.layers, vec![0, 1]);
         assert_eq!(p.vias, vec![(2, 4)]);
-        assert_eq!(plan(&[], 2), Plan { layers: vec![1], vias: vec![] });
+        assert_eq!(plan(&[], 2), Plan { layers: vec![1], vias: vec![], at: vec![] });
     }
 }

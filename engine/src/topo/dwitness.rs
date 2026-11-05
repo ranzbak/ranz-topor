@@ -284,7 +284,7 @@ fn draw_all(m: &BoardModel, hand: &BoardModel, opts: &Options, b: &Board, st: &S
         // The via point: the chain's layer-change point (it is a node vertex of the projection).
         let vp: Vec<(usize, Vec2)> = changes.iter().enumerate().map(|(i, c)| (c.0, pts.get(i).copied().unwrap_or(b.proj.pos[st.wires[w].a]))).collect();
         hand_vias.insert(w, vp);
-        plans.insert(w, Plan { layers, vias });
+        plans.insert(w, Plan { layers, vias, at: Vec::new() });
     }
     let wlen = |w: WireId| st.polyline(w).windows(2).map(|p| (p[1] - p[0]).len()).sum::<f64>();
     let mut order: Vec<WireId> = (0..nw).collect();
@@ -436,7 +436,7 @@ pub fn audit(dr: &Drawer, drawn: &BTreeMap<WireId, WireOut>) -> Vec<PairAudit> {
                     let w = st.passes[pid].wire;
                     let wi = &st.wires[w];
                     let pw = dr.widths.as_ref().map_or(wi.w, |x| x.pass_w[pid]);
-                    PackItem { net: wi.net, w: pw, s: wi.s, infl: infl_dir(pr, e, dr.dirs[w][kpos[pid]]) }
+                    PackItem { net: wi.net, w: pw, s: wi.s, infl: infl_dir(pr, e, dr.dirs[w][kpos[pid]]), disc: [0.0; 2] }
                 })
                 .collect();
             let bnd = dr.packer.bounds(e, l, &pitems);
@@ -521,7 +521,7 @@ fn over_debug(dr: &Drawer, walked: &[Walked], chain_of: &[usize]) {
                     let w = st.passes[pid].wire;
                     let wi = &st.wires[w];
                     let pw = dr.widths.as_ref().map_or(wi.w, |x| x.pass_w[pid]);
-                    PackItem { net: wi.net, w: pw, s: wi.s, infl: infl_dir(pr, e, dr.dirs[w][kpos[pid]]) }
+                    PackItem { net: wi.net, w: pw, s: wi.s, infl: infl_dir(pr, e, dr.dirs[w][kpos[pid]]), disc: [0.0; 2] }
                 })
                 .collect();
             let bnd = dr.packer.bounds(e, l, &pitems);
@@ -585,7 +585,7 @@ fn infl_stats(dr: &Drawer, walked: &[Walked], chain_of: &[usize]) -> (Vec<(f64, 
             }
             let item = |pid: usize, infl: f64| {
                 let wi = &st.wires[st.passes[pid].wire];
-                PackItem { net: wi.net, w: dr.widths.as_ref().map_or(wi.w, |x| x.pass_w[pid]), s: wi.s, infl }
+                PackItem { net: wi.net, w: dr.widths.as_ref().map_or(wi.w, |x| x.pass_w[pid]), s: wi.s, infl, disc: [0.0; 2] }
             };
             let planned: Vec<f64> = items.iter().map(|&pid| infl_dir(pr, e, dr.dirs[st.passes[pid].wire][kpos[pid]])).collect();
             let hand: Vec<f64> = items.iter().map(|&pid| hand_infl(pid)).collect();

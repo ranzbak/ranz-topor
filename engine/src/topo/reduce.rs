@@ -135,7 +135,7 @@ pub fn reduce_vias(
                     }
                 }
                 let new_placed: Placed = keep.iter().map(|&i| pl[i]).collect();
-                let new_plan = Plan { layers: layers.clone(), vias: keep.iter().map(|&i| plan.vias[i]).collect() };
+                let new_plan = Plan { layers: layers.clone(), vias: keep.iter().map(|&i| plan.vias[i]).collect(), at: keep.iter().filter_map(|&i| plan.at.get(i).copied()).collect() };
                 let cuts: Vec<usize> = new_placed.iter().map(|v| v.0).collect();
                 let old_h = via_h[&w].clone();
                 let old_wo = drawn[&w].clone();

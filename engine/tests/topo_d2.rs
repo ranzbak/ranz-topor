@@ -247,7 +247,7 @@ fn a_placed_via_walls_off_its_chord_for_other_runs() {
     let k = (0..st.wires[0].tris.len()).find(|&k| k > 0 && k < st.wires[0].passes.len() && st.tri_trav[st.wires[0].tris[k]].iter().any(|x| x.0 == 1)).expect("a shared triangle");
     let n0 = st.wires[0].passes.len();
     // Wire 0: layer 1 up to its via in traversal k, layer 0 after; wire 1 on layer 0.
-    let plan = Plan { layers: vec![1, 0], vias: vec![(k, k)] };
+    let plan = Plan { layers: vec![1, 0], vias: vec![(k, k)], at: vec![k] };
     dr.prov_layer = vec![0; st.passes.len()];
     let mut ids = Vec::new();
     let vias = dr.place_vias(0, &plan, &mut ids).expect("a via site");

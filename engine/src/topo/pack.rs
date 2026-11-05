@@ -31,13 +31,97 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-/// One pass to pack: its net, width, clearance and the oblique-chord factor.
-#[derive(Clone, Copy, Debug)]
+/// Via disc next to a pass, as packed on its edge: the diameter on the side towards end 0 and
+/// towards end 1 of the edge (0: none on that side).
+pub type Disc = [f64; 2];
+
+/// One pass to pack: its net, width, clearance and the oblique-chord factor; `disc` is the via
+/// disc of its wire next to the edge (see [`wire_discs`]; zeros: none). A pass whose wire is on
+/// another layer here but has a via next to the edge is packed as the disc alone (`w` 0,
+/// `infl` 1): a through via blocks every layer.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct PackItem {
     pub net: i32,
     pub w: f64,
     pub s: f64,
     pub infl: f64,
+    pub disc: Disc,
+}
+
+impl PackItem {
+    /// The larger via disc diameter of the item (0: none).
+    pub fn dmax(&self) -> f64 {
+        self.disc[0].max(self.disc[1])
+    }
+}
+
+/// Centre distance two neighbours `a`, `b` (`a` nearer end 0) need along the edge, with the
+/// spacing `gap` between their copper (0 for one net): the tracks stretched by the larger
+/// oblique factor, a via disc facing a track by the track's factor (a disc is round), two discs
+/// by none; the largest of the pairs present.
+pub fn pair_req(a: &PackItem, b: &PackItem, gap: f64) -> f64 {
+    let (da, db) = (a.disc[1], b.disc[0]);
+    let mut r = (0.5 * (a.w + b.w) + gap) * a.infl.max(b.infl);
+    if da > 0.0 {
+        r = r.max((0.5 * (da + b.w) + gap) * b.infl);
+    }
+    if db > 0.0 {
+        r = r.max((0.5 * (a.w + db) + gap) * a.infl);
+    }
+    if da > 0.0 && db > 0.0 {
+        r = r.max(0.5 * (da + db) + gap);
+    }
+    r
+}
+
+/// The via discs of the passes of wire `w` with vias at the traversals `ks` (diameters `ds`).
+/// A via in traversal `k` sits on the wire's chord through that triangle, between its crossings
+/// of the edge it enters by (pass `k - 1`) and the edge it leaves by (pass `k`): it is packed as
+/// a full disc on both (Popov & Popov 2012, p. 117-118: a via is a round pad, and the room of a
+/// passage counts what passes it). Measured (D3): a disc on the entry edge's far side only (the
+/// via as a vertex on the exit crossing) lost wiccon 3.3v TP2.1 -> U1.8 again and routed 184
+/// instead of 190 on dcsgonebadge, so both edges count it. O(passes + vias).
+pub fn wire_discs(st: &State, w: WireId, ks: &[usize], ds: &[f64]) -> Vec<Disc> {
+    let n = st.wires[w].passes.len();
+    let mut out: Vec<Disc> = vec![[0.0, 0.0]; n];
+    for (&k, &d) in ks.iter().zip(ds) {
+        if d <= 0.0 {
+            continue;
+        }
+        for j in [k.checked_sub(1), Some(k)].into_iter().flatten().filter(|&j| j < n) {
+            out[j] = [out[j][0].max(d), out[j][1].max(d)];
+        }
+    }
+    out
+}
+
+/// The items of edge-layer `l` from the passes `order` of an edge in edge order (shared by P3/P4
+/// and the drawing): a pass on `l` packs its track (and its via disc, if any); a pass on
+/// another layer whose wire has a via next to the edge packs the disc alone. Returns the pass
+/// ids with a flag "disc only" and the items. O(passes of the edge).
+pub fn layer_items(
+    order: &[usize],
+    l: usize,
+    layer_of: impl Fn(usize) -> i32,
+    disc_of: impl Fn(usize) -> Disc,
+    item_of: impl Fn(usize) -> PackItem,
+) -> (Vec<(usize, bool)>, Vec<PackItem>) {
+    let mut ids = Vec::new();
+    let mut items = Vec::new();
+    for &p in order {
+        let (pl, d) = (layer_of(p), disc_of(p));
+        if pl == l as i32 {
+            let mut it = item_of(p);
+            it.disc = d;
+            ids.push((p, false));
+            items.push(it);
+        } else if pl >= 0 && d[0].max(d[1]) > 0.0 {
+            let it = item_of(p);
+            ids.push((p, true));
+            items.push(PackItem { net: it.net, w: 0.0, s: it.s, infl: 1.0, disc: d });
+        }
+    }
+    (ids, items)
 }
 
 /// The packing numbers of the passes of one edge on one layer.
@@ -97,6 +181,16 @@ pub struct Packer<'a> {
     edge_clear: f64,
     cache: RefCell<HashMap<MarginKey, f64>>,
     taut_cache: RefCell<HashMap<TautKey, Rc<Taut>>>,
+    /// Diameter of the first via size of every net (nm); nets not listed use `via_d0`. 0 = the
+    /// planner gives vias no room (a packer built without a board model).
+    via_d: HashMap<i32, f64>,
+    via_d0: f64,
+    /// Free radius against other nets' obstacles at the incentre / centroid of a triangle, per
+    /// (triangle, net). Cached.
+    free_cache: RefCell<HashMap<(usize, i32), f64>>,
+    /// Price (mm) of a via disc that leaves its passage-layer no slack (the `via_squeeze`
+    /// factor); 0 = off.
+    pub via_squeeze: f64,
 }
 
 /// The oblique-chord factor of a pass through edge `e` crossed in direction `d`: `1 / sin` of
@@ -182,13 +276,63 @@ pub fn funnel(ports: &[(Vec2, Vec2)]) -> Vec<(Vec2, usize)> {
 
 impl<'a> Packer<'a> {
     pub fn new(pr: &'a Projection, outline: Vec<(Vec2, Vec2)>, eps: f64, edge_clear: f64) -> Self {
-        Packer { pr, outline, eps, edge_clear, cache: RefCell::new(HashMap::new()), taut_cache: RefCell::new(HashMap::new()) }
+        Packer {
+            pr,
+            outline,
+            eps,
+            edge_clear,
+            cache: RefCell::new(HashMap::new()),
+            taut_cache: RefCell::new(HashMap::new()),
+            via_d: HashMap::new(),
+            via_d0: 0.0,
+            free_cache: RefCell::new(HashMap::new()),
+            via_squeeze: 0.0,
+        }
+    }
+
+    /// Diameter of the via a wire of `net` gets (its first size; nm). 0 when the packer has no
+    /// via sizes.
+    pub fn via_d(&self, net: i32) -> f64 {
+        self.via_d.get(&net).copied().unwrap_or(self.via_d0)
+    }
+
+    /// Whether triangle `t` holds a via of `net` (radius `r`, clearance `s`) against the static
+    /// board: not outside, no obstacle inside, and at its incentre or centroid (the drawing's
+    /// first two candidate points) every other net's obstacle at least `r` plus the larger of
+    /// `s` and the obstacle's clearance away. Cached per (triangle, net, s).
+    pub fn via_site(&self, t: super::state::TriId, net: i32, r: f64, s: f64) -> bool {
+        let pr = self.pr;
+        if pr.tri_out[t] || !pr.tri_obs[t].is_empty() {
+            return false;
+        }
+        let key = (t, net ^ ((s as i64 as i32) << 8));
+        if let Some(&f) = self.free_cache.borrow().get(&key) {
+            return f >= r;
+        }
+        let [a, b, c] = pr.tris[t].map(|v| pr.pos[v]);
+        let (la, lb, lc) = ((b - c).len(), (a - c).len(), (a - b).len());
+        let inc = (a * la + b * lb + c * lc) * (1.0 / (la + lb + lc).max(1.0));
+        let cen = (a + b + c) * (1.0 / 3.0);
+        let free = |q: Vec2| -> f64 {
+            pr.obstacles
+                .iter()
+                .filter(|o| o.net != Some(net))
+                .map(|o| if super::state::point_in_poly(q, &o.poly) { f64::NEG_INFINITY } else { poly_dist(q, &o.poly) - o.clear.max(s) - self.eps })
+                .fold(f64::INFINITY, f64::min)
+        };
+        let f = free(inc).max(free(cen));
+        self.free_cache.borrow_mut().insert(key, f);
+        f >= r
     }
 
     /// The packer of `model` over the projection `pr`, with the drawing's tolerance and edge rule.
     pub fn for_model(model: &crate::model::BoardModel, opts: &crate::model::Options, pr: &'a Projection) -> Self {
         let edge_clear = if model.rules.ignored_checks.iter().any(|c| c == "copper_edge_clearance") { 0.0 } else { pr.edge_clear.max(pr.edge_clear_ignored) };
-        Packer::new(pr, super::board::outline_segments(model), opts.margin_nm as f64 + DRAW_TOL_NM, edge_clear)
+        let mut p = Packer::new(pr, super::board::outline_segments(model), opts.margin_nm as f64 + DRAW_TOL_NM, edge_clear);
+        let first = |net: i32| crate::vias::via_sizes(&model.rules, net, opts).first().map_or(0.0, |s| s.d as f64);
+        p.via_d0 = first(0);
+        p.via_d = model.nets.iter().map(|n| (n.code, first(n.code))).collect();
+        p
     }
 
     pub fn eps(&self) -> f64 {
@@ -234,6 +378,17 @@ impl<'a> Packer<'a> {
             return m;
         }
         let m = (0..self.pr.n_layers.max(1)).map(|l| self.margin(e, end, net, w, s, l)).fold(f64::INFINITY, f64::min);
+        self.cache.borrow_mut().insert(key, m);
+        m
+    }
+
+    /// [`Packer::margin`] on whichever layer needs the most (a through via's disc). Cached.
+    pub fn margin_all(&self, e: EdgeId, end: usize, net: i32, w: f64, s: f64) -> f64 {
+        let key = (e, end as u8, net, w.to_bits(), s.to_bits(), u8::MAX - 1);
+        if let Some(&m) = self.cache.borrow().get(&key) {
+            return m;
+        }
+        let m = (0..self.pr.n_layers.max(1)).map(|l| self.margin(e, end, net, w, s, l)).fold(0.0, f64::max);
         self.cache.borrow_mut().insert(key, m);
         m
     }
@@ -420,13 +575,22 @@ impl<'a> Packer<'a> {
         let regime = pr.regime(e);
         let s_of = |it: &PackItem| regime.unwrap_or(it.s);
         let n = items.len();
-        let lo: Vec<f64> = items.iter().map(|i| self.margin(e, 0, i.net, i.w, i.s, layer)).collect();
-        let hi: Vec<f64> = items.iter().map(|i| len - self.margin(e, 1, i.net, i.w, i.s, layer)).collect();
+        // A via disc is copper on every layer: its end margins are the largest over the layers.
+        let mar = |i: &PackItem, end: usize| {
+            let m = self.margin(e, end, i.net, i.w, i.s, layer);
+            if i.disc[end] > 0.0 {
+                m.max(self.margin_all(e, end, i.net, i.disc[end], i.s))
+            } else {
+                m
+            }
+        };
+        let lo: Vec<f64> = items.iter().map(|i| mar(i, 0)).collect();
+        let hi: Vec<f64> = items.iter().map(|i| len - mar(i, 1)).collect();
         let req: Vec<f64> = items
             .windows(2)
             .map(|x| {
                 let (a, b) = (&x[0], &x[1]);
-                (0.5 * (a.w + b.w) + if a.net != b.net { s_of(a).max(s_of(b)) + self.eps } else { 0.0 }) * a.infl.max(b.infl)
+                pair_req(a, b, if a.net != b.net { s_of(a).max(s_of(b)) + self.eps } else { 0.0 })
             })
             .collect();
         let mut lmin = vec![0.0; n];

@@ -32,6 +32,7 @@ mod plane_signal;
 mod reroute;
 mod squeeze;
 mod via;
+mod via_squeeze;
 
 pub use squeeze::squeeze_amount;
 
@@ -65,6 +66,9 @@ pub enum Event {
     /// A pass of `wire` through `edge` between two other stretches that leaves `slack_nm` of the
     /// cut free; `pitch_nm` = the wire's width plus clearance.
     Squeeze { wire: WireId, edge: EdgeId, slack_nm: f64, pitch_nm: f64 },
+    /// A via of `wire` at `at` (diameter `via_nm`) next to a passage-layer left with `slack_nm`
+    /// of room (the packer's least `rmax - lmin` there).
+    ViaSqueeze { wire: WireId, at: Vec2, slack_nm: f64, via_nm: f64 },
     /// `wire` runs through `tri`, the last free entry sector of the pad obstacle `pad` of another
     /// net, which has no wire yet.
     BlocksPad { wire: WireId, tri: TriId, pad: ObsId },
@@ -204,6 +208,7 @@ pub fn standard_factors() -> Vec<Box<dyn Factor>> {
         Box::new(overflow::Overflow),
         Box::new(congestion::Congestion),
         Box::new(squeeze::Squeeze),
+        Box::new(via_squeeze::ViaSqueeze),
         Box::new(blocks_pad::BlocksPad),
         Box::new(ignored_rule::IgnoredRule),
         Box::new(reroute::Reroute),

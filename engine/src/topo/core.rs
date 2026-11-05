@@ -410,7 +410,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         ..LayerParams::default()
     };
     let sub = super::capacity::subset_check(&st);
-    let packer = Packer::for_model(model, opts, proj);
+    let mut packer = Packer::for_model(model, opts, proj);
+    packer.via_squeeze = reg.price(&Event::ViaSqueeze { wire: 0, at: Vec2::default(), slack_nm: 0.0, via_nm: 1.0 }, &WireCtx::default());
+    let packer = packer;
     let assign = |st: &State| layers::assign_with(st, &|ob| b.smd_layer(ob), &lp, Some(&packer));
     let polys_of = |st: &State| -> Vec<Vec<Vec2>> { (0..st.wires.len()).map(|w| if st.wires[w].alive { st.polyline(w) } else { Vec::new() }).collect() };
     // Crossing directions for the capacity model's oblique factor: the taut paths (pack.rs).
@@ -477,7 +479,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let dirs = dirs_of(&st);
         let cm = CapModel::new(&st, &packer, &dirs, &lr.events, bottom, 1.0);
         let bad = cm.overfull_list();
-        if bad.is_empty() {
+        let nosite = cm.nosite_wires();
+        if bad.is_empty() && nosite.is_empty() {
             break;
         }
         let mut bad_edges: Vec<usize> = bad.iter().map(|x| x.0).collect();
@@ -486,7 +489,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             history[e] += 1.0;
         }
         // Per over-full edge-layer, rip the wires routed last until the rest fits.
-        let mut victims: BTreeSet<WireId> = BTreeSet::new();
+        // A via without a site in its interval: its wire is rerouted (history on its edges).
+        let mut victims: BTreeSet<WireId> = nosite.iter().copied().collect();
+        for &w in &nosite {
+            for &p in &st.wires[w].passes {
+                history[st.passes[p].edge] += 1.0;
+            }
+        }
         for &(e, l) in &bad {
             let mut on: Vec<usize> = st.edge_order[e].iter().copied().filter(|&p| cm.pass_layer[p] == l as i32).collect();
             on.sort_by_key(|&p| std::cmp::Reverse(rank[wire_conn[st.passes[p].wire]]));
@@ -691,10 +700,28 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     let checker = Checker::new(check_model, opts);
     let mut dr = Drawer::new(model, opts, &b, &st, &checker);
+    // The plan's capacity model: where P3/P4 put each via in its interval (the drawing tries
+    // that triangle first) and, after the drawing, which edge-layers it planned over-full.
+    let dirs_plan = dirs_of(&st);
+    let cm_plan = CapModel::new(&st, &packer, &dirs_plan, &lr.events, bottom, 1.0);
+    if std::env::var("TOPO_VIADBG").is_ok() {
+        eprintln!("VIAPLAN round {round}: over-full {} (no site {}), via squeeze {:.1} mm", cm_plan.overfull(), cm_plan.nosite(), cm_plan.squeeze());
+        for w in 0..st.wires.len() {
+            if st.wires[w].alive && !cm_plan.via_k[w].is_empty() {
+                eprintln!("VIAPLAN wire {w} net {} intervals {:?} at {:?}", st.wires[w].net, cm_plan.via_iv[w], cm_plan.via_k[w]);
+                for &(ka, kb) in &cm_plan.via_iv[w] {
+                    let r: Vec<String> = (ka..=kb.min(st.wires[w].passes.len())).map(|k| format!("{k}:{:?}", cm_plan.rank_of(w, k))).collect();
+                    eprintln!("VIAPLAN   ranks {}", r.join(" "));
+                }
+            }
+        }
+    }
     let mut plans: BTreeMap<WireId, Plan> = BTreeMap::new();
     for w in 0..st.wires.len() {
         if st.wires[w].alive {
-            plans.insert(w, plan(&lr.events[w], b.n_signal));
+            let mut p = plan(&lr.events[w], b.n_signal);
+            p.at = cm_plan.via_k[w].clone();
+            plans.insert(w, p);
         }
     }
     // Draw order: widest first, then shortest.
@@ -731,6 +758,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     for (&w, pl) in &plans {
         set_layers(pl, None, &st.wires[w].passes, &mut dr.prov_layer);
     }
+    // Pack with the planned vias (their discs take room, as in P3/P4), so the vias can be put
+    // where the packing left them room: on their wire's nominal chord.
+    for (&w, pl) in &plans {
+        let d = packer.via_d(st.wires[w].net);
+        dr.set_wire_layers(w, pl, &pl.at, &vec![d; pl.at.len()]);
+    }
+    dr.compute_intervals();
     // Phase 1: the vias of every wire (they are obstacles for the wires drawn next).
     let mut placed: BTreeMap<WireId, Vec<(usize, Vec2, crate::vias::ViaSize)>> = BTreeMap::new();
     let mut via_ids: BTreeMap<WireId, Vec<usize>> = BTreeMap::new();
@@ -760,17 +794,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
         }
     }
-    // Pass layers and intervals from the placed vias.
+    // Pass layers, via discs and intervals from the placed vias.
+    dr.pass_layer = vec![-1; st.passes.len()];
+    dr.pass_disc = vec![[0.0; 2]; st.passes.len()];
     for &w in &live {
         let (pl, vs) = (&plans[&w], &placed[&w]);
-        let n = st.wires[w].passes.len();
-        for r in 0..pl.layers.len() {
-            let k0 = if r == 0 { 0 } else { vs[r - 1].0 };
-            let k1 = if r == pl.layers.len() - 1 { n } else { vs[r].0 };
-            for k in k0..k1 {
-                dr.pass_layer[st.wires[w].passes[k]] = pl.layers[r] as i32;
-            }
-        }
+        let ks: Vec<usize> = vs.iter().map(|v| v.0).collect();
+        let ds: Vec<f64> = vs.iter().map(|v| v.2.d as f64).collect();
+        dr.set_wire_layers(w, pl, &ks, &ds);
     }
     dr.compute_intervals();
     let over_n = dr.over.iter().filter(|&&o| o).count();
@@ -778,9 +809,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // capacity model) must fit in the drawing's packing too (same packer, pass layers from the
     // placed vias). `.0` counts the violations "planned fits, packer over-full"; `.1` the reverse.
     let plan_vs_draw = {
-        let dirs = dirs_of(&st);
-        let cm = CapModel::new(&st, &packer, &dirs, &lr.events, bottom, 1.0);
-        let planned: BTreeSet<(usize, usize)> = cm.overfull_list().into_iter().collect();
+        let planned: BTreeSet<(usize, usize)> = cm_plan.overfull_list().into_iter().collect();
         let nl = proj.n_layers;
         let (mut fits_over, mut over_fits) = (0usize, 0usize);
         for (i, &o) in dr.over.iter().enumerate() {
@@ -1027,6 +1056,30 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         ));
     } else {
         warnings.push(format!("via reduction after drawing: off; {causes_before}"));
+    }
+    // Vias in a narrow pass (the `via_squeeze` factor's report): a drawn wire via whose
+    // passages keep less slack than half its diameter in the drawing's packing.
+    {
+        let (mut n_vias, mut narrow) = (0usize, 0usize);
+        for &w in drawn.keys() {
+            let Some(vs) = placed.get(&w) else { continue };
+            let ci = conn_of[wire_conn[w]];
+            let ctx = WireCtx { net: dec.connections[ci].net, tier: dec.connections[ci].tier };
+            for &(k, p, sz) in vs {
+                n_vias += 1;
+                let slack = dr.via_slack(w, k);
+                if slack < 0.5 * sz.d as f64 {
+                    narrow += 1;
+                    let ev = Event::ViaSqueeze { wire: w, at: p, slack_nm: slack, via_nm: sz.d as f64 };
+                    for f in reg.findings(std::slice::from_ref(&ev), &ctx) {
+                        if f.level >= Report::Warning {
+                            warnings.push(format!("{} ({}): {}", model.nets.iter().find(|n| n.code == ctx.net).map_or("", |n| n.name.as_str()), dec.connections[ci].from.label, f.text));
+                        }
+                    }
+                }
+            }
+        }
+        warnings.push(format!("via_squeeze: {narrow} of {n_vias} wire vias in a narrow pass (less slack than half the via diameter next to them)"));
     }
     // History for the next whole route: every edge that was over-full under the drawing's packer.
     let mut hist_out = history.clone();

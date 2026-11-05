@@ -101,6 +101,7 @@ used. Defaults of the rough router (plan "Default weights"):
 | `overflow` | 50 per pass | a pass through an overfull cut (P2 search penalty) |
 | `congestion` | 10 per pass per round | a pass through a cut that was over-full in earlier P4 rounds (history, PathFinder) |
 | `squeeze` | 5 per fully squeezed pass | a pass between two stretches that leaves the cut less than one track pitch of slack on its roomiest layer (linear) |
+| `via_squeeze` | 5 per fully squeezed passage-layer, report warning | a via whose passage next to it (any layer: a through via blocks all) keeps less slack than one via diameter (linear); P3/P4 put each via where this is least, the drawing takes the valid site with the most room; a drawn via with less than half a diameter of slack is reported ("via in a narrow pass") |
 | `blocks_pad` | 30 per pad | a stretch takes the last free entry sector (ring triangle) of another net's pad that has no wire yet |
 | `ignored_rule` | 100 per violation, report warning | a violated KiCad check set to ignore |
 | `reroute` | 5 per earlier reroute | a connection the P4 search moves again after `count` earlier reroutes (reroute counter; also: the negotiated rip-up takes such a wire out last) |
