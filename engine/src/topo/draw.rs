@@ -837,7 +837,7 @@ impl<'a> Drawer<'a> {
                 }
                 for (k, p) in sites {
                     let item = via_item(net, p, sz, Some(w));
-                    if self.check_ok(&item) && self.via_hole_ok(p, sz, net) {
+                    if self.check_ok(&item) && self.via_hole_ok(p, sz, net) && self.via_own_pad_ok(p, sz, net) {
                         let id = self.commit(&item);
                         ids.push(id);
                         out.push((k, p, sz));
@@ -853,7 +853,31 @@ impl<'a> Drawer<'a> {
                     let need_r = 0.5 * sizes[0].d as f64 + self.model.rules.net_rule(net).clearance as f64;
                     let tr: Vec<(f64, bool, usize)> = (ka..=kb.max(ka)).map(|k| { let t = wi.tris[k]; (pr.inradius(t), pr.tri_out[t] || !pr.tri_obs[t].is_empty(), self.st.tri_trav[t].len()) }).collect();
                     let best = tr.iter().filter(|x| !x.1).map(|x| x.0).fold(0.0, f64::max);
-                    eprintln!("VIADBG wire {w} net {net} ka {ka} kb {kb} tris {} usable {} best inradius {:.0} need_r {:.0} sizes {}", tr.len(), tr.iter().filter(|x| !x.1).count(), best, need_r, sizes.len());
+                    // Report only (D1 via-stage diagnosis): would a via inside one of the wire's
+                    // own-net pads in the interval (via-in-pad, at the pad centre) be clean?
+                    let own: std::collections::BTreeSet<usize> = (ka..=kb.max(ka))
+                        .flat_map(|k| pr.tri_obs[wi.tris[k]].iter().copied())
+                        .filter(|&o| pr.obstacles[o].net == Some(net) && pr.obstacles[o].kind == super::state::ObsKind::Pad)
+                        .collect();
+                    let vip = own.iter().any(|&o| {
+                        let c = pr.obstacles[o].center;
+                        sizes.iter().any(|&sz| self.check_ok(&via_item(net, c, sz, Some(w))) && self.via_hole_ok(c, sz, net))
+                    });
+                    let blocked = tr.iter().filter(|x| !x.1 && x.0 >= need_r).count();
+                    let mid = pr.pos[pr.tris[wi.tris[(ka + kb.max(ka)) / 2]][0]];
+                    eprintln!(
+                        "VIADBG wire {w} net {net} ka {ka} kb {kb} tris {} usable {} wide-enough {} best inradius {:.0} need_r {:.0} sizes {} own-pads {} via-in-pad-ok {} at ({:.3},{:.3})",
+                        tr.len(),
+                        tr.iter().filter(|x| !x.1).count(),
+                        blocked,
+                        best,
+                        need_r,
+                        sizes.len(),
+                        own.len(),
+                        vip,
+                        mid.x / 1e6,
+                        -mid.y / 1e6
+                    );
                 }
                 return Err(format!("via {} of {}: no site in its interval (no free disc for a via)", i + 1, plan.vias.len()));
             }
@@ -882,6 +906,25 @@ impl<'a> Drawer<'a> {
                 Core::Poly(_) if e.shape => seg_core(p, p, &e.core).0 >= e.grow + hole,
                 _ => true,
             }
+        })
+    }
+
+    /// A via of `size` at `p` does not overlap a pad of its own net only partly (D1): the overlap
+    /// of the via disc with the pad copper is a lens whose chord is the narrowest copper between
+    /// them, and KiCad's minimum connection width check flags it (seen on dcsgonebadge: a 0.6 mm
+    /// via 4 um into BT1 pad 3, "actual 0.1044 mm" < 0.127 mm). Clear of the pad (gap >= 0) or
+    /// centred inside it is fine; with no minimum connection width set, anything goes.
+    /// O(pads of the net x pad vertices).
+    pub fn via_own_pad_ok(&self, p: Vec2, size: ViaSize, net: i32) -> bool {
+        if self.model.rules.min_connection <= 0 || net == 0 {
+            return true;
+        }
+        let r = 0.5 * size.d as f64;
+        self.model.pads.iter().filter(|pad| pad.net == net).all(|pad| {
+            pad.layers.iter().all(|&l| {
+                let d = crate::geom::point_skeleton(p, &self.model.skeleton(pad, l));
+                d >= r || d <= 0.0
+            })
         })
     }
 

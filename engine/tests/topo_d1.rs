@@ -117,3 +117,34 @@ fn funnel_bends_only_where_a_portal_forces_it() {
     let straight: Vec<_> = (0..=10).map(|y| if y == 0 || y == 10 { (v(0.0, y as f64), v(0.0, y as f64)) } else { (v(-1.0, y as f64), v(1.0, y as f64)) }).collect();
     assert_eq!(funnel(&straight).len(), 2);
 }
+
+/// A via that dips a few um into a pad of its own net leaves a lens of copper narrower than
+/// KiCad's minimum connection width (dcsgonebadge, BT1 pad 3: 4 um deep, "actual 0.1044 mm" <
+/// 0.127 mm): such a site is refused; clear of the pad or centred in it is fine, and so is any
+/// site when no minimum connection width is set.
+#[test]
+fn a_via_does_not_dip_into_its_own_pad() {
+    use topor_engine::check::Checker;
+    use topor_engine::geom::Vec2;
+    use topor_engine::topo::draw::Drawer;
+    use topor_engine::vias::ViaSize;
+    let mut m = board((0.0, 0.0, 10.0, 10.0), &[(1, 5.0, 5.0, false, 0.8), (1, 2.0, 2.0, false, 0.4)]);
+    m.rules.min_connection = 127_000;
+    let b = board::build(&m, &BuildOpts::default()).unwrap();
+    let st = State::new(&b.proj);
+    let opts = Options::default();
+    let checker = Checker::new(&m, &opts);
+    let dr = Drawer::new(&m, &opts, &b, &st, &checker);
+    let sz = ViaSize { d: 600_000, drill: 300_000 };
+    // Pad edge at x = 5.4 mm, via radius 0.3 mm (math frame: y = -5 mm).
+    let at = |x: f64| Vec2 { x: x * MM, y: -5.0 * MM };
+    assert!(!dr.via_own_pad_ok(at(5.7 - 0.004), sz, 1), "4 um into the pad");
+    assert!(dr.via_own_pad_ok(at(5.7 + 0.001), sz, 1), "clear of the pad");
+    assert!(dr.via_own_pad_ok(at(5.0), sz, 1), "centred in the pad");
+    assert!(dr.via_own_pad_ok(at(5.7 - 0.004), sz, 2), "another net: the Checker's business");
+    let mut m0 = m.clone();
+    m0.rules.min_connection = 0;
+    let checker0 = Checker::new(&m0, &opts);
+    let dr0 = Drawer::new(&m0, &opts, &b, &st, &checker0);
+    assert!(dr0.via_own_pad_ok(at(5.7 - 0.004), sz, 1), "no minimum connection width set");
+}
