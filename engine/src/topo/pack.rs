@@ -64,6 +64,14 @@ impl Bounds {
     }
 }
 
+/// The drawing's numeric tolerance on top of `margin_nm` (nm). The Checker judges the drawn
+/// items after rounding to whole nm with the exact rule (`gap < required` fails), and the exact
+/// path accepts 0.5 nm short ([`super::exact`]), so geometry computed at exactly the clearance
+/// can fail by a fraction of a nm. Measured on the drawing witness A (hand topology, margin 0):
+/// tolerance 0 rejects 116 / 103 runs on tanmatsu / hh2027, 2 nm and 10 nm reject 107 / 58,
+/// 2 um (the S2a value) 115 / 60. 10 nm is far below any fab or DRC resolution.
+pub const DRAW_TOL_NM: f64 = 10.0;
+
 /// Margin cache key: edge, end, net, width bits, clearance bits, layer (`u8::MAX`: any layer).
 type MarginKey = (usize, u8, i32, u64, u64, u8);
 
@@ -175,7 +183,7 @@ impl<'a> Packer<'a> {
     /// The packer of `model` over the projection `pr`, with the drawing's tolerance and edge rule.
     pub fn for_model(model: &crate::model::BoardModel, opts: &crate::model::Options, pr: &'a Projection) -> Self {
         let edge_clear = if model.rules.ignored_checks.iter().any(|c| c == "copper_edge_clearance") { 0.0 } else { pr.edge_clear.max(pr.edge_clear_ignored) };
-        Packer::new(pr, super::board::outline_segments(model), (opts.margin_nm + 2_000) as f64, edge_clear)
+        Packer::new(pr, super::board::outline_segments(model), opts.margin_nm as f64 + DRAW_TOL_NM, edge_clear)
     }
 
     pub fn eps(&self) -> f64 {

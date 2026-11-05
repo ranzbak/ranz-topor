@@ -59,7 +59,7 @@ fn model_with_slotted_hole_parses() {
 #[test]
 fn options_defaults() {
     let o = Options::from_json("{}").unwrap();
-    assert_eq!(o.margin_nm, 5000);
+    assert_eq!(o.margin_nm, 0);
     assert!(!o.partial_routes);
     assert_eq!(o.pathfinder_iter_cap, 30);
     assert_eq!(o.drc_loop_cap, 5);
@@ -115,14 +115,32 @@ fn required_clearance_uses_local_override() {
 fn checker_flags_gap_below_required() {
     let m = circle_model("", "{}");
     let c = Checker::new(&m, &Options::default());
-    let rep = c.check_items(&[seg_item(1, 1_130_000 - 10, 250_000)]);
+    // Default margin 0: the requirement is the clearance itself (200 000 nm).
+    let rep = c.check_items(&[seg_item(1, 1_125_000 - 10, 250_000)]);
     assert_eq!(rep.checked, 1);
     assert_eq!(rep.violations.len(), 1);
     let v = &rep.violations[0];
     assert_eq!(v.against, "pad:U1:3");
-    assert_eq!((v.gap, v.required), (204_990, 205_000));
-    let rep = c.check_items(&[seg_item(1, 1_130_000 + 20, 250_000)]);
+    assert_eq!((v.gap, v.required), (199_990, 200_000));
+    let rep = c.check_items(&[seg_item(1, 1_125_000 + 20, 250_000)]);
     assert!(rep.violations.is_empty());
+}
+
+/// D1: with the default margin (0) a track at exactly the clearance passes the Checker (KiCad's
+/// DRC accepts copper at exactly the clearance); 1 nm closer is a violation. A margin set by the
+/// user still adds to the requirement.
+#[test]
+fn checker_accepts_a_track_at_exactly_the_clearance() {
+    let m = circle_model("", "{}");
+    let c = Checker::new(&m, &Options::default());
+    // Pad radius 800 000 + clearance 200 000 + half width 125 000 = 1 125 000.
+    let exact = c.check_items(&[seg_item(1, 1_125_000, 250_000)]);
+    assert!(exact.violations.is_empty(), "{:?}", exact.violations);
+    let closer = c.check_items(&[seg_item(1, 1_125_000 - 1, 250_000)]);
+    assert_eq!(closer.violations.len(), 1);
+    assert_eq!((closer.violations[0].gap, closer.violations[0].required), (199_999, 200_000));
+    let c5 = Checker::new(&m, &Options { margin_nm: 5_000, ..Options::default() });
+    assert_eq!(c5.check_items(&[seg_item(1, 1_125_000, 250_000)]).violations.len(), 1);
 }
 
 #[test]
@@ -194,14 +212,14 @@ fn checker_flags_via_item() {
     let m = circle_model("", "{}");
     let c = Checker::new(&m, &Options::default());
     let via: Item = serde_json::from_str(
-        r#"{ "kind": "via", "net": 1, "at": [0, 1300000], "d": 600000, "drill": 300000,
+        r#"{ "kind": "via", "net": 1, "at": [0, 1290000], "d": 600000, "drill": 300000,
              "layers": [0, 2], "group": null }"#,
     )
     .unwrap();
     let rep = c.check_items(&[via]);
-    // 1.3 - 0.8 - 0.3 = 0.2 mm gap < 0.2 + margin
+    // 1.29 - 0.8 - 0.3 = 0.19 mm gap < 0.2 (margin 0)
     assert_eq!(rep.violations.len(), 1);
-    assert_eq!(rep.violations[0].gap, 200_000);
+    assert_eq!(rep.violations[0].gap, 190_000);
 }
 
 #[test]

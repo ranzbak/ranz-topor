@@ -829,6 +829,8 @@ impl Default for Expert {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Options {
+    /// Extra distance on top of every clearance during search and drawing (nm); 0 (default) =
+    /// exactly the design rule, which KiCad's DRC accepts.
     pub margin_nm: i64,
     pub threads: usize,
     pub partial_routes: bool,
@@ -1077,7 +1079,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
-            margin_nm: 5_000,
+            margin_nm: 0,
             threads: 0,
             partial_routes: false,
             wall_clock_s: 60.0,

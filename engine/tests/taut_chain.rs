@@ -49,7 +49,8 @@ struct TestEnv {
 impl TestEnv {
     fn new(m: &BoardModel) -> Self {
         TestEnv {
-            set: ObstacleSet::build(m, &Options::default(), &HashSet::new(), &[]),
+            // The classic taut-chain numbers below are worked out with a 5 um margin.
+            set: ObstacleSet::build(m, &Options { margin_nm: 5_000, ..Options::default() }, &HashSet::new(), &[]),
             dyns: Vec::new(),
             stack: None,
             flip: None,

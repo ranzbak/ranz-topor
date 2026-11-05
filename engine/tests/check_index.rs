@@ -109,12 +109,12 @@ fn via_item_in_index_blocks_tracks_on_every_layer_and_drills() {
     let rep = c.check_against(&idx, &[seg(1, 31, 5.35, 0.0, 10.0)], &[]);
     assert_eq!(rep.violations.len(), 1, "{:?}", rep.violations);
     assert_eq!(rep.violations[0].against, "item:0");
-    // hole to hole: 0.4 - 0.3 = 0.1 < 0.255
+    // hole to hole: 0.4 - 0.3 = 0.1 < 0.25 (margin 0)
     let rep = c.check_against(&idx, &[via(1, 5.4, 5.0, 300_000)], &[]);
     assert!(
         rep.violations
             .iter()
-            .any(|v| v.against == "item:0" && v.required == 255_000 && v.gap == 100_000),
+            .any(|v| v.against == "item:0" && v.required == 250_000 && v.gap == 100_000),
         "{:?}",
         rep.violations
     );

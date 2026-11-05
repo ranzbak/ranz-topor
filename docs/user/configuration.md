@@ -98,7 +98,7 @@ Path search tuning.
 | Key | Type | Default | Unit | Range | Description |
 |---|---|---|---|---|---|
 | `detour_factor` | float | `2.0` |  | 0 .. 100 | A connection longer than this multiple of its straight pad-to-pad distance is treated as a detour: the topological core searches it again with cheaper crossings (the layer assignment then resolves a crossing with a via) instead of accepting a wandering path; 0 = off. |
-| `margin_um` | float | `5` | µm | 0 .. 1000 | Safety margin added to every clearance during search. |
+| `margin_um` | float | `0` | µm | 0 .. 1000 | Safety margin added to every clearance during search and drawing; 0 = exactly the design rule (KiCad DRC accepts copper at exactly the clearance, and the routed copper is checked with the exact rule). Raise it only for headroom against later manual edits. |
 | `zero_slack_retry` | bool | `true` |  | true\|false | One extra pass lets a connection use a corridor pinched below the margin but not below the rules. |
 | `zero_slack_failed` | bool | `true` |  | true\|false | The zero-slack pass also tries connections that failed, before any length gain of routed ones (a connection whose only corridor is pinched below the margin still gets its attempt). *Since 0.5.0.* |
 | `exit_stubs` | str | `"auto"` |  | auto\|all\|off | Pad exit stubs: a short straight track that leaves a pad before the routed trace starts. auto = only for pads that cannot be left from their centre at the net width (fine-pitch rows; the stub may start off the pad centre line or be narrower, see neck_to_pad); all = also every SMD pad with a long side; off = traces start at the pad centre. A pad that needs a stub but has no room for one is reported as "stub infeasible". *Since 0.5.0.* |

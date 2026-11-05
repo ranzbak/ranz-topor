@@ -38,7 +38,7 @@ fn track_near_via_copper_ok_but_inside_hole_clearance() {
     assert_eq!(rep.violations.len(), 1, "{:?}", rep.violations);
     assert_eq!(rep.violations[0].against, "viahole:v1");
     assert_eq!(rep.violations[0].gap, 375_000);
-    assert_eq!(rep.violations[0].required, 505_000);
+    assert_eq!(rep.violations[0].required, 500_000);
 }
 
 #[test]
@@ -56,9 +56,9 @@ fn new_via_drill_vs_existing_via_hole_to_hole() {
     let o = Options::default();
     let c = Checker::new(&m, &o);
     let ok = c.check_items(&[via(1, 5_600_000, 5_000_000)]);
-    // Via copper still trips hole_clearance (0.5 mm); only the hole-to-hole rule (255 um) must pass.
+    // Via copper still trips hole_clearance (0.5 mm); only the hole-to-hole rule (250 um) must pass.
     assert!(
-        ok.violations.iter().all(|v| v.required != 255_000),
+        ok.violations.iter().all(|v| v.required != 250_000),
         "{:?}",
         ok.violations
     );
@@ -66,7 +66,7 @@ fn new_via_drill_vs_existing_via_hole_to_hole() {
     assert!(
         bad.violations
             .iter()
-            .any(|v| v.against == "viahole:v1" && v.gap == 200_000 && v.required == 255_000),
+            .any(|v| v.against == "viahole:v1" && v.gap == 200_000 && v.required == 250_000),
         "{:?}",
         bad.violations
     );

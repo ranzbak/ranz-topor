@@ -145,7 +145,7 @@ SETTINGS: list[Setting] = [
     # ---- [search]
     _s("search", "detour_factor", "float", 2.0, "A connection longer than this multiple of its straight pad-to-pad distance is treated as a detour: the topological core searches it again with cheaper crossings (the layer assignment then resolves a crossing with a via) instead of accepting a wandering path; 0 = off.",
        range=(0.0, 100), engine="detour_factor"),
-    _s("search", "margin_um", "float", 5, "Safety margin added to every clearance during search.", unit="µm", range=(0, 1000), engine="margin_nm"),
+    _s("search", "margin_um", "float", 0, "Safety margin added to every clearance during search and drawing; 0 = exactly the design rule (KiCad DRC accepts copper at exactly the clearance, and the routed copper is checked with the exact rule). Raise it only for headroom against later manual edits.", unit="µm", range=(0, 1000), engine="margin_nm"),
     _s("search", "zero_slack_retry", "bool", True, "One extra pass lets a connection use a corridor pinched below the margin but not below the rules.",
        engine="zero_slack_retry"),
     _s("search", "zero_slack_failed", "bool", True, "The zero-slack pass also tries connections that failed, before any length gain of routed ones (a connection whose only corridor is pinched below the margin still gets its attempt).",

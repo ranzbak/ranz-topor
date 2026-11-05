@@ -87,7 +87,7 @@ def test_engine_options_units(tmp_path):
     o = cfg.engine_options()
     assert o["wall_clock_s"] == 60.0
     assert o["via_cost_nm"] == 2_000_000
-    assert o["margin_nm"] == 5000
+    assert o["margin_nm"] == 0
     assert o["pathfinder_iter_cap"] == 30
     assert o["existing_copper"] == "fixed"
     assert o["expert"]["hist_fail"] == 1.0
