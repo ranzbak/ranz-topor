@@ -67,6 +67,14 @@ Via cost, count and size policy (each net routes with its KiCad net class via, p
 | `plane_via_share_max_mm` | float | `2.0` | mm | 0 .. 50 | Largest distance from a pad to a shared plane via (see plane_via_share). |
 | `offset_sites` | bool | `true` |  | true\|false | Topological core: when no sample point of the corridor where a connection changes layer has room for a via, also try positions a via-radius plus clearance away from the corners of nearby pads and copper (and from the traces drawn before), nearest to the connection's path first. More connections get a via site, at the cost of some runtime. *Since 0.5.0.* |
 
+## `[planes]`
+
+Signal copper on plane layers (layers whose role is gnd / pwr, not routed).
+
+| Key | Type | Default | Unit | Range | Description |
+|---|---|---|---|---|---|
+| `signals` | str | `"costly"` |  | costly\|forbidden | Topological core: whether signal copper may use plane layers. costly = yes, at the price of the plane_signal factor (10 per mm on top of the length) plus plane_cut per cut of the plane, so a plane carries a signal only where the signal layers cannot; forbidden = never, plane layers are left to their pour. The run report lists the signal length on plane layers and the cuts. KiCad: KiCad → File → Board Setup → Board Editor Layers (layer roles). |
+
 ## `[layers]`
 
 Stackup roles per copper layer (F.Cu = "signal", In1.Cu = "gnd", ...) and per-layer preferences.

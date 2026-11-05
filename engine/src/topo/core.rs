@@ -1,4 +1,4 @@
-//! The `route()` entry of the topological core, stage S2a ("first copper", two signal layers):
+//! The `route()` entry of the topological core, stage S2a ("first copper"; S2b: any number of signal layers):
 //! BoardModel -> projection (`board`) -> P2 initial routing (`init`, pad to pad, widest first)
 //! -> P3 layer assignment (`layers`, Polubasov) -> minimal drawing (`draw`) -> `RouteResult`.
 //!
@@ -9,7 +9,7 @@
 //!   terminal, a differential pair ("not in the rough version"), time limit;
 //! * never emitted: a different-net crossing on one layer (the lower-tier wire stays unrouted).
 //!
-//! Boards with other than two signal layers (S2b) report every connection failed with a reason.
+//! Boards with fewer than two signal layers report every connection failed with a reason.
 //! Deterministic: no randomness besides the seeded P3 local search, Vec + index ids throughout.
 //!
 //! Complexity: dominated by P2 (one A* per connection over the gap graph, capped by
@@ -166,11 +166,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let deadline = (opts.wall_clock_s > 0.0).then(|| t0 + std::time::Duration::from_secs_f64(opts.wall_clock_s));
     let expired = || cancelled() || ctl.is_cancelled() || deadline.is_some_and(|d| Instant::now() >= d);
     let signal: Vec<u32> = model.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
-    if signal.len() != 2 {
-        let why = format!(
-            "the topological core (S2a) routes boards with two signal layers; this board has {} (S2b: three or more)",
-            signal.len()
-        );
+    if signal.len() < 2 {
+        let why = format!("the topological core routes boards with two or more signal layers; this board has {}", signal.len());
         return (unrouted(model, opts, &why), Vec::new());
     }
     ctl.update("setup", 0, 0, 0, 0, 0.0);
@@ -181,7 +178,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     let (reg, problems) = Registry::from_config(standard_factors(), &opts.factors);
     warnings.extend(problems);
-    let mut b = match board::build(model, &BuildOpts { existing_vias: true, ..BuildOpts::default() }) {
+    let mut b = match board::build(model, &BuildOpts { existing_vias: true, keepouts: true, plane_layers: opts.plane_signals != "forbidden", ..BuildOpts::default() }) {
         Ok(b) => b,
         Err(e) => return (unrouted(model, opts, &format!("projection failed: {e}")), Vec::new()),
     };
@@ -259,11 +256,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let c = &conns[ci];
         let straight = len_of(c).max(1.0);
         // A path longer than `detour_factor` x the straight distance is a detour: search again with
-        // cheaper crossings (P3 resolves a crossing with a via; a detour of many times the
+        // cheaper crossings and layer fixings (P3 resolves a crossing with a via; a detour of many times the
         // connection's length is worse than that), the cheapest last.
         for (attempt, cross_scale) in [1.0, 0.25, 0.0].into_iter().enumerate() {
             let mut w = weights(c, tier_of(conn_of[ci]), cap);
             w.cross_mm *= cross_scale;
+            w.smd_over_mm *= cross_scale;
+            w.forced_layer_mm *= cross_scale;
             let Some((wid, _)) = st.route_conn(c, &w, (c.w + c.s) / ws0) else { return false };
             wire_conn.push(ci);
             let len: f64 = st.polyline(wid).windows(2).map(|x| (x[1] - x[0]).len()).sum();
@@ -305,8 +304,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let lp = LayerParams {
         via_mm: reg.price(&Event::Via { wire: 0, count: 1, at: None }, &WireCtx::default()),
         via_site_r: 0.5 * model.rules.default.via_d as f64 + model.rules.default.clearance as f64,
+        n_signal: b.n_signal,
+        plane_mm: reg.price(&Event::PlaneLength { wire: 0, layer: b.n_signal, mm: 1.0 }, &WireCtx::default()),
+        plane_cut: reg.price(&Event::PlaneCut { wire: 0, layer: b.n_signal }, &WireCtx::default()),
         ..LayerParams::default()
     };
+    let sub = super::capacity::subset_check(&st);
     let lr = layers::assign(&st, &|ob| b.smd_layer(ob), &lp);
     // A different-net crossing still on one layer is an error: the lower-tier wire stays unrouted.
     let wlen: Vec<f64> = (0..st.wires.len()).map(|w| if !st.wires[w].alive { 0.0 } else { st.polyline(w).windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>() }).collect();
@@ -359,7 +362,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut plans: BTreeMap<WireId, Plan> = BTreeMap::new();
     for w in 0..st.wires.len() {
         if st.wires[w].alive {
-            plans.insert(w, plan(&lr.events[w], proj.n_layers));
+            plans.insert(w, plan(&lr.events[w], b.n_signal));
         }
     }
     // Draw order: widest first, then shortest.
@@ -407,6 +410,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
     }
     dr.compute_intervals();
+    let over_n = dr.over.iter().filter(|&&o| o).count();
     // Phase 2: plane stubs, then the wires. Plane pads go before the first default-width wire.
     let mut plane_res: Vec<(usize, Result<planes::Out, String>)> = Vec::new();
     let mut plane_done = false;
@@ -830,6 +834,26 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         q(1.0),
         p2r.iter().filter(|&&r| r > 3.0).count()
     ));
+    warnings.push(format!(
+        "capacity: before P3 {} of {} edges break the layer-subset (Hall) check; after P3 {} edge-layers are overfull when packed (a wire that does not fit is rejected by the checker, never emitted)",
+        sub.violated.iter().map(|v| v.0).collect::<BTreeSet<_>>().len(),
+        sub.edges,
+        over_n
+    ));
+    if b.signal_layers.len() > b.n_signal {
+        let (mut nm, mut cuts) = (0.0, 0usize);
+        for (_, pts) in drawn.values().flat_map(|wo| wo.runs.iter()).filter(|(l, _)| *l >= b.n_signal) {
+            nm += pts.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>();
+            cuts += 1;
+        }
+        warnings.push(format!(
+            "planes ([planes] signals = {}): {:.1} mm of signal copper on plane layers, {} plane cuts (P3 planned {} wires with a plane stretch)",
+            opts.plane_signals,
+            nm / MM,
+            cuts,
+            lr.stretches.iter().filter(|s| s.iter().any(|(l, _)| *l as usize >= b.n_signal)).count()
+        ));
+    }
     warnings.push(format!(
         "topological core S2a: {} wires in P2 ({} double-crossing swaps), P3 vias {}, {} triangles",
         st.wires.iter().filter(|w| w.alive).count() + dropped.len(),

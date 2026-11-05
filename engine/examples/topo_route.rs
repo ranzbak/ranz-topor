@@ -1,6 +1,6 @@
 //! S2a on one exported board model, without Python:
 //!
-//!     cargo run --release --example topo_route -- <input.json> [--out result.json] [--timeout S]
+//!     cargo run --release --example topo_route -- <input.json> [--out result.json] [--timeout S] [--plane-signals costly|forbidden]
 //!
 //! `input.json` is the board model with tracks and vias removed (`harness.g0 export`). Prints the
 //! routed count, the failure reasons and the detour ratios; `--out` writes the `RouteResult` JSON.
@@ -18,6 +18,9 @@ fn main() {
     let mut o = Options::default();
     if let Some(t) = flag("--timeout") {
         o.wall_clock_s = t.parse().expect("--timeout S");
+    }
+    if let Some(v) = flag("--plane-signals") {
+        o.plane_signals = v;
     }
     for (i, a) in args.iter().enumerate() {
         if a == "--factor" {

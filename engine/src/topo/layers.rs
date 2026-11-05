@@ -25,6 +25,7 @@ use rand_chacha::ChaCha8Rng;
 use std::collections::{BTreeMap, BTreeSet};
 
 const EPS: f64 = 1e-9;
+const MM: f64 = 1e6;
 
 #[derive(Clone, Debug)]
 enum Step {
@@ -437,11 +438,18 @@ pub struct LayerParams {
     pub exact_max: usize,
     pub restarts: usize,
     pub seed: u64,
+    /// Layers `0..n_signal` are signal layers, the rest planes; 0 = all are signal layers.
+    pub n_signal: usize,
+    /// Extra price per mm of signal copper on a plane layer (the `plane_signal` factor).
+    pub plane_mm: f64,
+    /// Price per cut of a plane (the `plane_cut` factor); a stretch on a plane has two layer
+    /// changes, each pays half of it.
+    pub plane_cut: f64,
 }
 
 impl Default for LayerParams {
     fn default() -> Self {
-        LayerParams { via_mm: 25.0, via_site_r: 0.5e6, exact_max: 16, restarts: 64, seed: 1 }
+        LayerParams { via_mm: 25.0, via_site_r: 0.5e6, exact_max: 16, restarts: 64, seed: 1, n_signal: 0, plane_mm: 0.0, plane_cut: 0.0 }
     }
 }
 
@@ -468,9 +476,74 @@ fn seg_param(p0: Vec2, p1: Vec2, q0: Vec2, q1: Vec2) -> f64 {
     ((q0 - p0).cross(e) / den).clamp(0.0, 1.0)
 }
 
-/// Assign layers 0/1 to the wires of `st` (two signal layers). `smd_layer(pad)` is the layer of
+/// Stretches, via slots and counts of `rep` from the labelled events `evl[w] = (k, s, layer)` of
+/// every wire (shared by the two-layer and the N-layer assignment). O(events).
+fn stretches_and_vias(st: &State, polys: &[Vec<Vec2>], evl: &[Vec<(usize, f64, i32)>], p: &LayerParams, rep: &mut LayerReport) {
+    let pr = st.proj;
+    // A plausible site: a point of the stretch (pass point or triangle centroid) whose free disc
+    // against other nets' obstacles holds a via pad plus clearance (wire demand ignored).
+    let site = |k1: usize, k2: usize, w: WireId| -> bool {
+        let net = st.wires[w].net;
+        let free = |q: Vec2| pr.free_radius(q, net) >= p.via_site_r;
+        st.wires[w].tris[k1..=k2].iter().any(|&t: &TriId| {
+            let c = pr.tris[t].iter().fold(Vec2 { x: 0.0, y: 0.0 }, |a, &v| a + pr.pos[v]) * (1.0 / 3.0);
+            !pr.tri_out[t] && free(c)
+        }) || (k1 + 1..=k2).any(|k| free(polys[w][k]))
+    };
+    for (w, ev) in evl.iter().enumerate() {
+        let wi = &st.wires[w];
+        if !wi.alive {
+            rep.stretches.push(Vec::new());
+            rep.events.push(Vec::new());
+            continue;
+        }
+        let pts = &polys[w];
+        let n = wi.passes.len();
+        let mut pieces: Vec<(i32, Vec<Vec2>)> = Vec::new();
+        rep.events.push(ev.clone());
+        let Some(&(fk, fs, fl)) = ev.first() else {
+            // Crosses nothing: the bottom layer (TopoR's default).
+            let bottom = if p.n_signal == 0 { pr.n_layers } else { p.n_signal };
+            pieces.push((bottom as i32 - 1, pts.clone()));
+            rep.stretches.push(pieces);
+            continue;
+        };
+        pieces.push((fl, piece(pts, 0, 0.0, fk, fs)));
+        for x in ev.windows(2) {
+            let ((ka, sa, la), (kb, sb, lb)) = (x[0], x[1]);
+            if la == lb {
+                pieces.push((la, piece(pts, ka, sa, kb, sb)));
+                continue;
+            }
+            // The via in the middle of its interval: a pass point when the stretch spans one.
+            let (km, sm) = if kb > ka { ((ka + kb).div_ceil(2), 0.0) } else { (ka, 0.5 * (sa + sb)) };
+            pieces.push((la, piece(pts, ka, sa, km, sm)));
+            pieces.push((lb, piece(pts, km, sm, kb, sb)));
+            rep.vias += 1;
+            rep.via_pts.push(at(pts, km, sm));
+            rep.slots.push(ViaSlot { wire: w, from: (ka, sa), to: (kb, sb), at: (km, sm) });
+            if !site(ka, kb, w) {
+                rep.vias_no_site += 1;
+            }
+        }
+        let &(lk, ls, ll) = ev.last().expect("non-empty");
+        pieces.push((ll, piece(pts, lk, ls, n, 1.0)));
+        rep.stretches.push(pieces);
+    }
+}
+
+/// Assign layers to the wires of `st`: the exact two-layer Polubasov solve for two signal layers,
+/// greedy colouring plus alpha-beta swaps ([`assign_n`]) otherwise. `smd_layer(pad)` is the layer of
 /// a single-layer pad.
 pub fn assign(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams) -> LayerReport {
+    if st.proj.n_layers == 2 {
+        assign_two(st, smd_layer, p)
+    } else {
+        assign_n(st, smd_layer, p)
+    }
+}
+
+fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams) -> LayerReport {
     let pr = st.proj;
     let mut rep = LayerReport::default();
     let mut dom: BTreeMap<(WireId, usize, WireId, usize), usize> = BTreeMap::new();
@@ -546,62 +619,19 @@ pub fn assign(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
     reduced.reduce();
     rep.after = reduced.size();
     let o = g.solve(p.exact_max, p.restarts, p.seed);
-    // A plausible site: a point of the stretch (pass point or triangle centroid) whose free disc
-    // against other nets' obstacles holds a via pad plus clearance (wire demand ignored).
-    let site = |k1: usize, k2: usize, w: WireId| -> bool {
-        let net = st.wires[w].net;
-        let free = |q: Vec2| pr.free_radius(q, net) >= p.via_site_r;
-        st.wires[w].tris[k1..=k2].iter().any(|&t: &TriId| {
-            let c = pr.tris[t].iter().fold(Vec2 { x: 0.0, y: 0.0 }, |a, &v| a + pr.pos[v]) * (1.0 / 3.0);
-            !pr.tri_out[t] && free(c)
-        }) || (k1 + 1..=k2).any(|k| free(polys[w][k]))
-    };
     // Labels per (domain, wire) for the same-layer check.
     let mut dom_labels: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
+    let mut evl: Vec<Vec<(usize, f64, i32)>> = Vec::with_capacity(events.len());
     for (w, ev) in events.iter().enumerate() {
-        let wi = &st.wires[w];
-        if !wi.alive {
-            rep.stretches.push(Vec::new());
-            rep.events.push(Vec::new());
-            continue;
-        }
-        let pts = &polys[w];
         let lab = |e: &Event| (o[e.node] ^ e.pi) as i32;
-        for e in ev.iter().filter(|e| e.node > 0) {
-            dom_labels.entry(e.node).or_default().push(lab(e) as u8);
-        }
-        let n = wi.passes.len();
-        let mut pieces: Vec<(i32, Vec<Vec2>)> = Vec::new();
-        rep.events.push(ev.iter().map(|e| (e.k, e.s, lab(e))).collect());
-        let Some(first) = ev.first() else {
-            // Crosses nothing: the bottom layer (TopoR's default).
-            pieces.push((pr.n_layers as i32 - 1, pts.clone()));
-            rep.stretches.push(pieces);
-            continue;
-        };
-        pieces.push((lab(first), piece(pts, 0, 0.0, first.k, first.s)));
-        for x in ev.windows(2) {
-            let (a, b) = (x[0], x[1]);
-            let (la, lb) = (lab(&a), lab(&b));
-            if la == lb {
-                pieces.push((la, piece(pts, a.k, a.s, b.k, b.s)));
-                continue;
-            }
-            // The via in the middle of its interval: a pass point when the stretch spans one.
-            let (km, sm) = if b.k > a.k { ((a.k + b.k).div_ceil(2), 0.0) } else { (a.k, 0.5 * (a.s + b.s)) };
-            pieces.push((la, piece(pts, a.k, a.s, km, sm)));
-            pieces.push((lb, piece(pts, km, sm, b.k, b.s)));
-            rep.vias += 1;
-            rep.via_pts.push(at(pts, km, sm));
-            rep.slots.push(ViaSlot { wire: w, from: (a.k, a.s), to: (b.k, b.s), at: (km, sm) });
-            if !site(a.k, b.k, w) {
-                rep.vias_no_site += 1;
+        if st.wires[w].alive {
+            for e in ev.iter().filter(|e| e.node > 0) {
+                dom_labels.entry(e.node).or_default().push(lab(e) as u8);
             }
         }
-        let last = ev.last().expect("non-empty");
-        pieces.push((lab(last), piece(pts, last.k, last.s, n, 1.0)));
-        rep.stretches.push(pieces);
+        evl.push(ev.iter().map(|e| (e.k, e.s, lab(e))).collect());
     }
+    stretches_and_vias(st, &polys, &evl, p, &mut rep);
     rep.same_layer = dom_labels.values().filter(|l| l.len() == 2 && l[0] == l[1]).count();
     for &(w, k, o, _) in &unl {
         rep.unlayerable.push(at(&polys[w], k, 0.5));
@@ -609,5 +639,327 @@ pub fn assign(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
     }
     rep.unlayerable_pairs.sort_unstable();
     rep.unlayerable_pairs.dedup();
+    rep
+}
+
+/// A crossing: `(wire, traversal, other wire, other traversal)` with `wire < other`.
+type CrossKey = (WireId, usize, WireId, usize);
+
+/// One event of the N-layer model: a point along a wire whose layer is a variable with the
+/// allowed set `mask` (bit per layer); `partner` is the event of the other wire of a
+/// different-net crossing (the two must take different layers).
+#[derive(Clone, Copy, Debug)]
+struct NEv {
+    k: usize,
+    s: f64,
+    mask: u64,
+    partner: Option<usize>,
+}
+
+/// Prices of the N-layer labelling: `via` per layer change, the plane surcharge per mm (`share`
+/// is the length of copper each event stands for) and half a `cut` per change into or out of a
+/// plane layer.
+struct Costs {
+    via: f64,
+    plane_from: usize,
+    plane_mm: f64,
+    cut: f64,
+    share: Vec<f64>,
+}
+
+impl Costs {
+    fn plane(&self, l: usize) -> bool {
+        l >= self.plane_from
+    }
+
+    fn trans(&self, a: usize, b: usize) -> f64 {
+        if a == b {
+            0.0
+        } else {
+            self.via + 0.5 * self.cut * (self.plane(a) as u8 + self.plane(b) as u8) as f64
+        }
+    }
+
+    fn unary(&self, e: usize, l: usize) -> f64 {
+        if self.plane(l) {
+            self.plane_mm * self.share[e]
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Cost of a labelling: layer changes and plane copper per [`Costs`] plus `CONFLICT` per crossing
+/// on one layer (counted per event pair). O(events).
+fn n_cost(wev: &[Vec<usize>], ev: &[NEv], lab: &[u8], c: &Costs) -> f64 {
+    const CONFLICT: f64 = 1e6;
+    let mut t = 0.0;
+    for list in wev {
+        t += list.windows(2).map(|x| c.trans(lab[x[0]] as usize, lab[x[1]] as usize)).sum::<f64>();
+    }
+    for (i, e) in ev.iter().enumerate() {
+        t += c.unary(i, lab[i] as usize);
+        if e.partner.is_some_and(|p| p > i && lab[p] == lab[i]) {
+            t += CONFLICT;
+        }
+    }
+    t
+}
+
+/// P3 for any number of signal layers (plan "Layer assignment for N signal layers"):
+/// 1. greedy colouring in wire order (a Viterbi pass per wire over its events: layer changes cost
+///    `via`, a layer taken by the crossing partner of an earlier wire costs a large penalty, ties
+///    go to the layer with the fewest events so far);
+/// 2. for every pair (α, β) of layers, the events labelled α or β are re-solved exactly with the
+///    Polubasov reductions ([`DomainGraph`]) while all other labels stay fixed: events whose
+///    allowed set holds only one of α, β, or whose partner is fixed, are fixed-orientation (node
+///    0), the others are domains (a crossing with both ends free) or lone free nodes;
+/// 3. the swap is kept when the total cost drops; repeated until a full sweep improves nothing.
+///
+/// Complexity: O(events · L²) per greedy wire pass; a sweep is L² / 2 domain-graph solves.
+pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams) -> LayerReport {
+    let pr = st.proj;
+    let nl = pr.n_layers;
+    let full: u64 = if nl >= 64 { u64::MAX } else { (1u64 << nl) - 1 };
+    let mut rep = LayerReport::default();
+    let polys: Vec<Vec<Vec2>> = (0..st.wires.len()).map(|w| if st.wires[w].alive { st.polyline(w) } else { Vec::new() }).collect();
+    let mut ev: Vec<NEv> = Vec::new();
+    let mut wev: Vec<Vec<usize>> = vec![Vec::new(); st.wires.len()];
+    let mut open: BTreeMap<CrossKey, usize> = BTreeMap::new();
+    let mut unl: BTreeSet<CrossKey> = BTreeSet::new();
+    for (w, wi) in st.wires.iter().enumerate() {
+        if !wi.alive {
+            continue;
+        }
+        let pts = &polys[w];
+        let n = wi.passes.len();
+        let mut push = |ev: &mut Vec<NEv>, e: NEv| {
+            ev.push(e);
+            wev[w].push(ev.len() - 1);
+            ev.len() - 1
+        };
+        if let Some(l) = smd_layer(wi.pa) {
+            push(&mut ev, NEv { k: 0, s: 0.0, mask: 1 << l, partner: None });
+        }
+        let mut xs = st.crossings(w);
+        xs.retain(|x| st.wires[x.other].net != wi.net);
+        for (k, &t) in wi.tris.iter().enumerate() {
+            let tm = pr.allowed(t, wi.net).expect("wire inside a wall").0;
+            // (s, mask, crossing key) of the events of this triangle, in order along the wire.
+            let mut here: Vec<(f64, u64, Option<CrossKey>)> = Vec::new();
+            if tm != full {
+                here.push((0.0, tm, None));
+            }
+            for x in xs.iter().filter(|x| x.k == k) {
+                let o = x.other;
+                let (q0, q1) = (polys[o][x.other_k], polys[o][x.other_k + 1]);
+                let s = seg_param(pts[k], pts[k + 1], q0, q1);
+                let mo = pr.allowed(x.tri, st.wires[o].net).expect("wire inside a wall").0;
+                let key = if w < o { (w, k, o, x.other_k) } else { (o, x.other_k, w, k) };
+                if tm == mo && tm.count_ones() == 1 {
+                    unl.insert(key);
+                } else {
+                    here.push((s, tm, Some(key)));
+                }
+            }
+            if k < n {
+                let e = st.passes[wi.passes[k]].edge;
+                let fits = (0..nl)
+                    .filter(|&l| pr.fits_alone(e, l, Item { net: wi.net, w: wi.w, s: wi.s }))
+                    .fold(0u64, |m, l| m | 1 << l);
+                if fits != full && fits != 0 {
+                    here.push((1.0, fits, None));
+                }
+            }
+            here.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for (s, mask, key) in here {
+                let id = push(&mut ev, NEv { k, s, mask, partner: None });
+                if let Some(key) = key {
+                    match open.remove(&key) {
+                        Some(q) => {
+                            ev[id].partner = Some(q);
+                            ev[q].partner = Some(id);
+                        }
+                        None => {
+                            open.insert(key, id);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(l) = smd_layer(wi.pb) {
+            push(&mut ev, NEv { k: n, s: 1.0, mask: 1 << l, partner: None });
+        }
+    }
+    // Length of copper each event stands for: half of the way to its neighbours along the wire.
+    let mut share = vec![0.0; ev.len()];
+    for (w, list) in wev.iter().enumerate().filter(|(_, l)| !l.is_empty()) {
+        let pts = &polys[w];
+        let mut cum = vec![0.0; pts.len()];
+        for k in 1..pts.len() {
+            cum[k] = cum[k - 1] + (pts[k] - pts[k - 1]).len();
+        }
+        let total = cum[pts.len() - 1];
+        let pos: Vec<f64> = list.iter().map(|&e| cum[ev[e].k] + ev[e].s * (cum[(ev[e].k + 1).min(pts.len() - 1)] - cum[ev[e].k])).collect();
+        for (i, &e) in list.iter().enumerate() {
+            let lo = if i == 0 { 0.0 } else { 0.5 * (pos[i - 1] + pos[i]) };
+            let hi = if i + 1 == list.len() { total } else { 0.5 * (pos[i] + pos[i + 1]) };
+            share[e] = (hi - lo) / MM;
+        }
+    }
+    let costs = Costs { via: p.via_mm, plane_from: if p.n_signal == 0 { nl } else { p.n_signal }, plane_mm: p.plane_mm, cut: p.plane_cut, share };
+    // 1. Greedy colouring in wire order.
+    const NONE: u8 = u8::MAX;
+    let mut lab = vec![NONE; ev.len()];
+    let mut load = vec![0usize; nl];
+    for list in &wev {
+        let m = list.len();
+        if m == 0 {
+            continue;
+        }
+        // cost[i][l], back[i][l]
+        let mut cost = vec![vec![f64::INFINITY; nl]; m];
+        let mut back = vec![vec![0usize; nl]; m];
+        for (i, &e) in list.iter().enumerate() {
+            for l in 0..nl {
+                if (ev[e].mask >> l) & 1 == 0 {
+                    continue;
+                }
+                let clash = ev[e].partner.is_some_and(|q| lab[q] == l as u8);
+                let here = if clash { 1e6 } else { 0.0 } + load[l] as f64 * 1e-6 + costs.unary(e, l);
+                if i == 0 {
+                    cost[0][l] = here;
+                    continue;
+                }
+                for l0 in 0..nl {
+                    let c = cost[i - 1][l0] + here + costs.trans(l0, l);
+                    if c < cost[i][l] - EPS {
+                        cost[i][l] = c;
+                        back[i][l] = l0;
+                    }
+                }
+            }
+        }
+        let mut l = (0..nl).min_by(|&a, &b| cost[m - 1][a].total_cmp(&cost[m - 1][b])).expect("layer");
+        if !cost[m - 1][l].is_finite() {
+            l = (0..nl).find(|&l| (ev[list[m - 1]].mask >> l) & 1 == 1).unwrap_or(0);
+        }
+        for i in (0..m).rev() {
+            lab[list[i]] = l as u8;
+            load[l] += 1;
+            if i > 0 {
+                l = back[i][l];
+            }
+        }
+    }
+    // 2./3. Alpha-beta swaps.
+    let mut best = n_cost(&wev, &ev, &lab, &costs);
+    for _round in 0..20 {
+        let mut improved = false;
+        for a in 0..nl {
+            for b in a + 1..nl {
+                let ab = (1u64 << a) | (1u64 << b);
+                let active = |e: usize| lab[e] as usize == a || lab[e] as usize == b;
+                let mut g_nodes = 1usize;
+                // node, pi per active event
+                let mut np: Vec<Option<(usize, u8)>> = vec![None; ev.len()];
+                let mut dom: BTreeMap<usize, usize> = BTreeMap::new();
+                for e in 0..ev.len() {
+                    if !active(e) {
+                        continue;
+                    }
+                    let ra = ev[e].mask & ab;
+                    let to_pi = |l: usize| (l == b) as u8;
+                    np[e] = Some(if ra.count_ones() == 1 {
+                        (0, to_pi(ra.trailing_zeros() as usize))
+                    } else {
+                        match ev[e].partner.filter(|&q| active(q)) {
+                            Some(q) => {
+                                let rp = ev[q].mask & ab;
+                                if rp.count_ones() == 1 {
+                                    let f = rp.trailing_zeros() as usize;
+                                    (0, to_pi(if f == a { b } else { a }))
+                                } else {
+                                    let key = e.min(q);
+                                    let next = g_nodes;
+                                    let d = *dom.entry(key).or_insert(next);
+                                    if d == next {
+                                        g_nodes += 1;
+                                    }
+                                    (d, (e > q) as u8)
+                                }
+                            }
+                            None => {
+                                g_nodes += 1;
+                                (g_nodes - 1, 0)
+                            }
+                        }
+                    });
+                }
+                let mut g = DomainGraph::new(g_nodes);
+                let tv = costs.trans(a, b);
+                // Plane surcharge: a free event costs `u(b) - u(a)` more on b than on a.
+                for (e, slot) in np.iter().enumerate() {
+                    if let Some((nd, pi)) = *slot {
+                        let d = costs.unary(e, b) - costs.unary(e, a);
+                        if nd != 0 && d != 0.0 {
+                            // label b iff o[nd] ^ pi = 1.
+                            g.add_term(nd, 0, if pi == 0 { d } else { -d });
+                            if pi == 1 {
+                                g.k += d;
+                            }
+                        }
+                    }
+                }
+                for list in &wev {
+                    for x in list.windows(2) {
+                        if let (Some((n0, p0)), Some((n1, p1))) = (np[x[0]], np[x[1]]) {
+                            g.add_edge(n0, n1, if p0 == p1 { tv } else { -tv });
+                        }
+                    }
+                }
+                let o = g.solve(p.exact_max, p.restarts, p.seed);
+                let mut cand = lab.clone();
+                for e in 0..ev.len() {
+                    if let Some((nd, pi)) = np[e] {
+                        cand[e] = if (o[nd] ^ pi) == 0 { a as u8 } else { b as u8 };
+                    }
+                }
+                let c = n_cost(&wev, &ev, &cand, &costs);
+                if c < best - EPS {
+                    best = c;
+                    lab = cand;
+                    improved = true;
+                }
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+    // Report.
+    let mut evl: Vec<Vec<(usize, f64, i32)>> = Vec::with_capacity(wev.len());
+    for list in &wev {
+        evl.push(list.iter().map(|&e| (ev[e].k, ev[e].s, lab[e] as i32)).collect());
+    }
+    rep.domains = ev.iter().enumerate().filter(|(i, e)| e.partner.is_some_and(|q| q > *i)).count();
+    // Crossings left on one layer: forced ones (both fixed to the same layer) and any the
+    // colouring could not separate; the lower-tier wire of each stays unrouted.
+    let mut pairs: BTreeSet<(WireId, WireId)> = BTreeSet::new();
+    let wire_of = |e: usize| wev.iter().position(|l| l.binary_search(&e).is_ok()).expect("event of a wire");
+    for (i, e) in ev.iter().enumerate() {
+        if let Some(q) = e.partner.filter(|&q| q > i && lab[q] == lab[i]) {
+            let (wa, wb) = (wire_of(i), wire_of(q));
+            pairs.insert((wa.min(wb), wa.max(wb)));
+            rep.same_layer += 1;
+            rep.unlayerable.push(at(&polys[wa], ev[i].k, ev[i].s));
+        }
+    }
+    for &(w, k, o, _) in &unl {
+        rep.unlayerable.push(at(&polys[w], k, 0.5));
+        pairs.insert((w, o));
+    }
+    rep.unlayerable_pairs = pairs.into_iter().collect();
+    stretches_and_vias(st, &polys, &evl, p, &mut rep);
     rep
 }

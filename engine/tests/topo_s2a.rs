@@ -131,5 +131,5 @@ fn a_board_with_one_signal_layer_reports_every_connection_failed_with_a_reason()
     m.layers.truncate(1);
     let r = run(&m);
     assert_eq!((r.routed, r.failed), (0, 1));
-    assert!(r.connections[0].reason.contains("two signal layers"), "{}", r.connections[0].reason);
+    assert!(r.connections[0].reason.contains("two or more signal layers"), "{}", r.connections[0].reason);
 }

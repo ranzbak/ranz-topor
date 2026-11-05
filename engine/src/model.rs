@@ -882,6 +882,10 @@ pub struct Options {
     /// dangling stubs of the nets in scope before the run (the engine then sees none and routes
     /// from the pads; for the engine it behaves like `"fixed"`).
     pub dangling_ends: String,
+    /// Topological core (`topor.toml [planes] signals`): `"costly"` (default) lets signal copper
+    /// use the plane layers at the `plane_signal` / `plane_cut` prices; `"forbidden"` keeps
+    /// signals off them (only the routable layers are signal layers).
+    pub plane_signals: String,
     /// Router (D-1, `topor.toml [search] strict_unfit_edges`): the layered search rejects a
     /// graph edge that is too narrow for the connection's trace even when empty
     /// (`!fits(e)`) instead of pricing it as an overuse crossing. Off by default (the default
@@ -1054,6 +1058,7 @@ impl Default for Options {
             zero_slack_retry: true,
             zero_slack_failed: true,
             dangling_ends: "continue".into(),
+            plane_signals: "costly".into(),
             strict_unfit_edges: false,
             pour_listed_via_goals: false,
             via_cost_nm: 2_000_000,

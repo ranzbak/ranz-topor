@@ -20,6 +20,25 @@ route is a placeholder: every connection fails with `NO_ENGINE`, the tool report
 with the same tool (`TOPOR_TREE` selects the code tree), writes `classic-reference.{md,json}` and removes the worktree.
 The two USB crops are engine models without a `.kicad_pcb`, so they are run engine-only (no KiCad DRC).
 
+## Layers, planes and capacity (S2b)
+
+Any number of signal layers (>= 2) is routed. Two layers keep the exact Polubasov solve of S2a; with three or
+more projection layers `topo/layers.rs::assign_n` colours the wires greedily in wire order and then repeats alpha-beta
+swaps: for every pair of layers the events labelled with one of the two are re-solved exactly (Polubasov reductions,
+every other label fixed) and the swap is kept when the cost drops. A through via blocks every layer.
+
+`[planes] signals = "costly"` (default) appends the plane layers (non-routable copper layers) to the projection
+as layers after the signal layers; a stretch there pays `plane_signal` per mm (on top of length) and half of
+`plane_cut` per change into or out of the plane. `"forbidden"` leaves the planes out. The report carries a
+`planes (...)` warning (signal mm on plane layers, plane cuts of the drawn copper) and a `capacity:` warning: edges that
+fail the layer-subset (Hall) check over the allowed masks before P3, and edge-layers that are overfull when packed
+after P3 (the drawing rejects a wire that does not fit; nothing DRC-violating is emitted).
+
+Rule areas that forbid tracks close their layers in the projection (P1), so P2 routes around them.
+
+`python3 tools/samelayer.py <topo_route --out json>` is an independent count of different-net crossings on
+one layer. `topo_route` takes `--plane-signals costly|forbidden`.
+
 ## Drawing diagnosis (S2c)
 
 The topological core's report carries one `drawing yield:` warning: wires that entered drawing, wires drawn,

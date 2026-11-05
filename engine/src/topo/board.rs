@@ -32,19 +32,28 @@ pub struct BuildOpts {
     /// The vias of the model are drilled obstacles (copper the board keeps; S2a). The gate and
     /// witness inputs have none.
     pub existing_vias: bool,
+    /// Rule areas that forbid tracks are obstacles without a net on their layers (S2b): a wire
+    /// may not enter them, so P1 closes those layers there. Off for the gate and witness inputs.
+    pub keepouts: bool,
+    /// The non-routable copper layers (planes) follow the routable ones as extra projection
+    /// layers, so signal copper can be priced onto them (S2b, `[planes] signals = "costly"`).
+    pub plane_layers: bool,
 }
 
 impl Default for BuildOpts {
     fn default() -> Self {
-        BuildOpts { steiner_mm: 2.0, steiner_clear_mm: 0.6, lct_mm: 3.0, lct_eps_mm: 0.01, round_steps: 16, existing_vias: false }
+        BuildOpts { steiner_mm: 2.0, steiner_clear_mm: 0.6, lct_mm: 3.0, lct_eps_mm: 0.01, round_steps: 16, existing_vias: false, keepouts: false, plane_layers: false }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct Board {
     pub proj: Projection,
-    /// Model layer ids of the signal layers, by layer index.
+    /// Model layer ids of the projection layers by layer index: the routable (signal) layers
+    /// first, then the plane layers when [`BuildOpts::plane_layers`] is set.
     pub signal_layers: Vec<u32>,
+    /// How many of `signal_layers` are routable signal layers (the rest are planes).
+    pub n_signal: usize,
     /// Centre vertex of each pad obstacle with a net.
     pub centre: Vec<Option<VertId>>,
     /// Index into `BoardModel::pads` of each obstacle.
@@ -151,7 +160,11 @@ pub fn build(m: &BoardModel, o: &BuildOpts) -> Result<Board, String> {
 /// [`build`] with extra vertices `nodes` (nm) inserted into the triangulation (kind
 /// `VertKind::Node`): the points inside triangles of the State, see the `state` module doc.
 pub fn build_with_nodes(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2]) -> Result<Board, String> {
-    let signal_layers: Vec<u32> = m.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
+    let mut signal_layers: Vec<u32> = m.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
+    let n_signal = signal_layers.len();
+    if o.plane_layers {
+        signal_layers.extend(m.layers.iter().filter(|l| !l.routable).map(|l| l.id));
+    }
     let n = signal_layers.len();
     let mut obstacles = Vec::new();
     let mut pad_of = Vec::new();
@@ -213,6 +226,37 @@ pub fn build_with_nodes(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2]) -> Result
                 drilled: true,
                 net: (v.net > 0).then_some(v.net),
                 clear: (m.rules.net_rule(v.net).clearance).max(m.rules.min_clearance).max(m.rules.hole_clearance) as f64,
+                bare: false,
+            });
+        }
+    }
+    if o.keepouts {
+        for k in m.keepouts.iter().filter(|k| k.no_tracks && k.poly.len() >= 3) {
+            let mut mask = LayerMask(0);
+            for (li, id) in signal_layers.iter().enumerate() {
+                if k.layers.contains(id) {
+                    mask.0 |= 1 << li;
+                }
+            }
+            if mask.0 == 0 {
+                continue;
+            }
+            let mut poly: Vec<Vec2> = k.poly.iter().map(|p| p.to_vec2()).collect();
+            poly.dedup();
+            let area: f64 = (0..poly.len()).map(|i| poly[i].cross(poly[(i + 1) % poly.len()])).sum();
+            if area < 0.0 {
+                poly.reverse();
+            }
+            let c = poly.iter().fold(Vec2 { x: 0.0, y: 0.0 }, |a, &p| a + p) * (1.0 / poly.len() as f64);
+            pad_of.push(usize::MAX);
+            obstacles.push(Obstacle {
+                kind: ObsKind::Pad,
+                poly,
+                center: c,
+                layers: mask,
+                drilled: false,
+                net: None,
+                clear: 0.0,
                 bare: false,
             });
         }
@@ -324,7 +368,7 @@ pub fn build_with_nodes(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2]) -> Result
         }
     }
     let poured = m.pours.iter().map(|p| p.net).collect();
-    Ok(Board { proj, signal_layers, centre, pad_of, poured })
+    Ok(Board { proj, signal_layers, n_signal, centre, pad_of, poured })
 }
 
 impl Board {
