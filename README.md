@@ -21,6 +21,39 @@ The plugin needs a live GUI test before the 0.4.0 gate closes:
 [docs/user/gui-test-checklist.md](docs/user/gui-test-checklist.md). Known limits:
 [operate.md → Limitations](docs/user/operate.md#limitations).
 
+## Topological core (branch `topor-topo`, in development)
+
+A new engine core, written after TopoR's approach: the board is projected into one triangulation of all pads,
+holes, keepouts, copper graphics and the outline; every connection is searched there as a topological path
+(which side of each obstacle it passes), its net growing as a tree (a connection may end on a pad or a branch
+point of copper it joins, including through-pad junctions); layers are assigned afterwards (Polubasov's via
+minimisation), then rip-up and reroute, via reduction, and finally the drawing pulls each wire taut and checks
+it against KiCad's rules. Plane pads get a stub and a via into their pour before any of this, so the planner
+routes around them; pour pieces the routed copper cuts off are stitched back with island vias or pad stubs.
+
+What works on this branch:
+
+- graded social factors instead of hard thresholds, each with a weight in `topor.toml [factors]` and a line in
+  the run report: via_squeeze, junction_angle, branch, blocks_pad, squeeze, congestion, ignored_rule, and more
+  ([factor reference](docs/dev/factors.md));
+- keepouts: track keepouts per layer, via keepouts on any copper layer (a through via spans them all), pour
+  keepouts in the fill estimate; copper graphics are obstacles on their layer;
+- pour-island stitching after routing, and KiCad's minimum connection width respected by vias and stubs.
+
+The board ladder at commit `7d7f5d5` (headless, `tools/route_board.sh`, judged by `kicad-cli` DRC after a zone
+refill; "unconnected" counts DRC unconnected items, the hand-routed board's own count in brackets):
+
+| Board | Routed | Unconnected (hand) | New routing DRC errors | Vias |
+|---|---|---|---|---|
+| eprom-to-kernal | 27/27 | 0 (0) | 0 | 0 |
+| wiccon-2023 | 60/60 | 0 (0) | 0 | 24 |
+| dcsgonebadge | 187/231 | 47 (4) | 0 | 100 |
+| qmtech | 350/426 | 84 (0) | 0 | 214 |
+
+Known limits: the complex boards (bornhack2026, hackerhotel2027, tanmatsu) are not on the ladder yet;
+differential pairs are not routed; branching is not complete (fusing traces, re-attaching after changes,
+junction relaxation and the tee layer rule are open); pour islands are stitched afterwards, not prevented.
+
 ## Requirements
 
 - Linux (x86_64), **KiCad 10.0** with `kicad-cli` (tested 10.0.8)
@@ -65,6 +98,16 @@ inspect), DRC json files (original, ripped, routed), `<board>--metrics.json` (ro
 detours, DRC) and comparison PNGs (hand vs topor). More tools (engine probes, headless plugin runs,
 reproducing a plugin run): [docs/dev/debug.md](docs/dev/debug.md).
 
+The plugin's own run flow, headless, on a board copy:
+
+```bash
+tools/route_board.sh <board|pcb> <out_dir> [--timeout S] [--set section.key=value]
+```
+
+It strips the copy's tracks, routes it, runs KiCad DRC after a zone refill and writes `<name>--metrics.json` and
+`<name>-compare.png`: the hand-routed board left, topor right, each with its open ratsnest (KiCad's DRC
+unconnected items) drawn in blue. Details: [docs/dev/route-board.md](docs/dev/route-board.md).
+
 ## Development
 
 [CONTRIBUTING.md](CONTRIBUTING.md): layout, build, tests, read-only boards, configuration and message
@@ -72,8 +115,13 @@ catalogues, commit style. Benchmarks and progress images are generated locally i
 (`harness.bench`, `harness.progress`; not in git) — key numbers are quoted in `docs/progress/STATE.md`.
 Design and research library: [docs/](docs/README.md).
 
+Routing mechanisms found on the ladder boards get a tiny synthetic regression layout each
+(`harness/mechfix.py`, one function per mechanism, built with pcbnew in seconds), routed end to end with
+KiCad DRC by `tests/test_mechfix.py`; they carry the `mechfix` marker and are not in the default run.
+
 ```bash
 .venv/bin/pytest                                   # unit + integration (default)
+.venv/bin/pytest tests/test_mechfix.py -m mechfix  # mechanism layouts, end to end (~2 min)
 .venv/bin/pytest tests/gate -m "gate or not gate"  # milestone gates (~10 min)
 .venv/bin/pytest tests/scaling -m scaling          # complexity/scaling budget
 (cd engine && cargo test --release && cargo clippy --all-targets -- -D warnings)
