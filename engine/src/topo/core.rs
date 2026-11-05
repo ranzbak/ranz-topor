@@ -571,6 +571,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut drawn_ok = 0usize;
     let mut necking: Vec<(usize, Event)> = Vec::new();
     let mut drawn: BTreeMap<WireId, WireOut> = BTreeMap::new();
+    let mut via_h: BTreeMap<WireId, Vec<usize>> = BTreeMap::new();
     let mut failed_draw: Vec<WireId> = Vec::new();
     for (pos, &w) in live.iter().enumerate() {
         if pos == wide.min(live.len()) && !plane_done {
@@ -584,8 +585,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         let ci = conn_of[wire_conn[w]];
         let mut ids = via_ids.remove(&w).unwrap_or_default();
+        let vh = ids[..placed[&w].len().min(ids.len())].to_vec();
         let wo = dr.draw_wire(w, &plans[&w], &placed[&w], &mut ids);
         if wo.ok {
+            via_h.insert(w, vh);
             drawn_ok += 1;
             settle(&mut out, &mut necking, ci, w, &wo, &b, &st);
             drawn.insert(w, wo);
@@ -674,6 +677,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     drawn.insert(bw, wb);
                 }
                 out[cf].reason.clear();
+                via_h.insert(f, ids[..vias_f.len().min(ids.len())].to_vec());
                 placed.insert(f, vias_f);
                 settle(&mut out, &mut necking, cf, f, &wf, &b, &st);
                 drawn.insert(f, wf);
@@ -703,6 +707,69 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
             }
         }
+    }
+    // ---- Via reduction (S4, plan P6): measure the vias by cause, then drop the redundant ones ----
+    let end_pads = |w: WireId| [st.wires[w].pa, st.wires[w].pb];
+    let end_fixed = |w: WireId| {
+        let [pa, pb] = end_pads(w);
+        [b.smd_layer(pa).is_some(), b.smd_layer(pb).is_some()]
+    };
+    let frozen = |w: WireId| model.pours.iter().any(|z| z.net == st.wires[w].net);
+    let causes = |plans: &BTreeMap<WireId, Plan>, drawn: &BTreeMap<WireId, WireOut>| -> String {
+        let (mut total, mut pad_forced, mut crossing, mut close, mut one_via, mut pairs_aba) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+        for (w, wo) in drawn {
+            let v = &wo.vias;
+            if v.is_empty() {
+                continue;
+            }
+            let [pa, pb] = end_pads(*w);
+            let forced = match (b.smd_layer(pa), b.smd_layer(pb)) {
+                (Some(x), Some(y)) if x != y => 1,
+                _ => 0,
+            };
+            total += v.len();
+            pad_forced += forced.min(v.len());
+            crossing += v.len() - forced.min(v.len());
+            if v.len() == 1 {
+                one_via += 1;
+            }
+            if let Some(pl) = plans.get(w) {
+                if pl.layers.len() >= 3 && pl.layers.windows(3).any(|x| x[0] == x[2]) {
+                    pairs_aba += 1;
+                }
+            }
+            close += v.windows(2).filter(|x| (x[1].0 - x[0].0).len() < 3.0 * MM).count();
+        }
+        format!(
+            "{total} wire vias: {pad_forced} forced by SMD pads on different layers, {crossing} by crossings or capacity (the capacity refinement relabels, it adds no via), {one_via} wires with one via, {pairs_aba} wires with a layer pair A-B-A, {close} via pairs of one wire closer than 3 mm; {} plane stub vias",
+            plane_res.iter().filter(|(_, r)| r.is_ok()).count()
+        )
+    };
+    let causes_before = causes(&plans, &drawn);
+    // TOPO_NOREDUCE=1 (debug): leave the vias as drawn, to compare with the reduction.
+    if opts.via_reduce && std::env::var("TOPO_NOREDUCE").is_err() {
+        let red_deadline = (opts.wall_clock_s > 0.0).then(|| t0 + std::time::Duration::from_secs_f64(0.9 * opts.wall_clock_s));
+        let t_red = Instant::now();
+        let (rs, changed) = super::reduce::reduce_vias(&mut dr, &mut drawn, &mut placed, &mut plans, &mut via_h, &end_fixed, &frozen, b.n_signal, red_deadline);
+        for w in changed {
+            let ci = conn_of[wire_conn[w]];
+            necking.retain(|(c, _)| *c != ci);
+            settle(&mut out, &mut necking, ci, w, &drawn[&w], &b, &st);
+        }
+        warnings.push(format!(
+            "via reduction after drawing: {} wires with vias, {} relabels tried in {} sweeps, {} accepted, {} vias removed ({:.1} s{}); before: {}; after: {}",
+            rs.wires_with_vias,
+            rs.tried,
+            rs.sweeps,
+            rs.accepted,
+            rs.vias_removed,
+            t_red.elapsed().as_secs_f64(),
+            if rs.timed_out { ", stopped by the time limit" } else { "" },
+            causes_before,
+            causes(&plans, &drawn)
+        ));
+    } else {
+        warnings.push(format!("via reduction after drawing: off; {causes_before}"));
     }
     // History for the next whole route: every edge that was over-full under the drawing's packer.
     let mut hist_out = history.clone();

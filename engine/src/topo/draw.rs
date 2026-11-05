@@ -398,6 +398,8 @@ pub struct Drawer<'a> {
     pub(super) n_static: usize,
     /// Diagnosis: ignore the copper drawn so far.
     pub(super) only_static: std::cell::Cell<bool>,
+    /// Trial drawing (via reduction): a rejected run is not diagnosed or recorded.
+    pub quiet: bool,
 }
 
 impl<'a> Drawer<'a> {
@@ -437,6 +439,7 @@ impl<'a> Drawer<'a> {
             qgrow: 0.0,
             n_static: 0,
             only_static: std::cell::Cell::new(false),
+            quiet: false,
         }
         .with_static()
     }
@@ -811,6 +814,56 @@ impl<'a> Drawer<'a> {
         }
     }
 
+    /// Give the passes of wire `w` the layers of `layers` (runs separated at the traversals
+    /// `cuts`) and pack again the edge-layers whose passes changed (via reduction trial).
+    /// Returns the previous layer of every pass of the wire, for [`Drawer::restore_layers`].
+    pub fn relayer(&mut self, w: WireId, layers: &[usize], cuts: &[usize]) -> Vec<i32> {
+        let st = self.st;
+        let ps = &st.wires[w].passes;
+        let old: Vec<i32> = ps.iter().map(|&p| self.pass_layer[p]).collect();
+        for r in 0..layers.len() {
+            let k0 = if r == 0 { 0 } else { cuts[r - 1] };
+            let k1 = if r == layers.len() - 1 { ps.len() } else { cuts[r] };
+            for &p in &ps[k0..k1] {
+                self.pass_layer[p] = layers[r] as i32;
+            }
+        }
+        self.repack(w, &old);
+        old
+    }
+
+    /// Put back the pass layers `old` of wire `w`.
+    pub fn restore_layers(&mut self, w: WireId, old: &[i32]) {
+        let cur: Vec<i32> = self.st.wires[w].passes.iter().map(|&p| self.pass_layer[p]).collect();
+        for (k, &p) in self.st.wires[w].passes.iter().enumerate() {
+            self.pass_layer[p] = old[k];
+        }
+        self.repack(w, &cur);
+    }
+
+    fn repack(&mut self, w: WireId, was: &[i32]) {
+        let st = self.st;
+        let nl = self.b.proj.n_layers;
+        let mut todo: std::collections::BTreeSet<(EdgeId, usize)> = std::collections::BTreeSet::new();
+        for (k, &p) in st.wires[w].passes.iter().enumerate() {
+            if self.pass_layer[p] != was[k] {
+                for l in [was[k], self.pass_layer[p]] {
+                    if l >= 0 && (l as usize) < nl {
+                        todo.insert((st.passes[p].edge, l as usize));
+                    }
+                }
+            }
+        }
+        for (e, l) in todo {
+            let [p, q] = self.b.proj.edges[e];
+            let len = (self.b.proj.pos[q] - self.b.proj.pos[p]).len().max(1.0);
+            let items: Vec<PassId> = st.edge_order[e].iter().copied().filter(|&pid| self.pass_layer[pid] == l as i32).collect();
+            if !items.is_empty() {
+                self.pack(e, l, len, &items);
+            }
+        }
+    }
+
     /// Draw wire `w` with its `plan` and placed `vias`; on success its copper is indexed.
     /// `ids` collects the indexed item ids for a rollback by the caller.
     pub fn draw_wire(&mut self, w: WireId, plan: &Plan, vias: &[(usize, Vec2, ViaSize)], ids: &mut Vec<usize>) -> WireOut {
@@ -904,6 +957,16 @@ impl<'a> Drawer<'a> {
                 );
             }
             if !ok {
+                if self.quiet {
+                    for id in committed {
+                        self.uncommit(id);
+                    }
+                    out.ok = false;
+                    out.reason = last_reason;
+                    out.items.clear();
+                    out.runs.clear();
+                    return out;
+                }
                 if let (Some(v), Some(pts)) = (last_viol.as_ref(), tried.last()) {
                     let pts = pts.clone();
                     self.diagnose(w, layer, k0, k1, s, e, v, &pts);

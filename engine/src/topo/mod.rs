@@ -15,6 +15,7 @@ pub mod gate;
 pub mod init;
 pub mod layers;
 pub mod planes;
+pub mod reduce;
 pub mod refine;
 pub mod metrize;
 pub mod pack;

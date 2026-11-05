@@ -1020,6 +1020,10 @@ pub struct Options {
     /// Topological core (S3, `topor.toml [search] reroute_rounds`): most rounds of negotiated
     /// rip-up-and-reroute after the first layer assignment (0 = off).
     pub reroute_rounds: usize,
+    /// Topological core (S4, `topor.toml [vias] reduce_after_drawing`): after drawing, try every
+    /// via-carrying wire with a layer run moved onto the layer of its neighbour run (dropping the
+    /// vias between), keep it where the checker accepts the redrawn wire.
+    pub via_reduce: bool,
     /// Router (NX, `topor.toml [search] neck_max_mm`): longest necked stub, nm; 0 = twice the
     /// pad's long side.
     pub neck_max_nm: i64,
@@ -1100,6 +1104,7 @@ impl Default for Options {
             via_offset_sites: true,
             feedback_max_rip: 8,
             reroute_rounds: 6,
+            via_reduce: true,
             neck_max_nm: 0,
             pad_bridge_max_nm: 2_000_000,
             steiner: true,

@@ -66,6 +66,7 @@ Via cost, count and size policy (each net routes with its KiCad net class via, p
 | `plane_via_share` | bool | `true` |  | true\|false | A pad of a plane net may also end on a via of its own net that another pad already drops onto the plane, within plane_via_share_max_mm, instead of needing its own via (fewer vias in crowded spots; pads with no free via site of their own still connect). |
 | `plane_via_share_max_mm` | float | `2.0` | mm | 0 .. 50 | Largest distance from a pad to a shared plane via (see plane_via_share). |
 | `offset_sites` | bool | `true` |  | true\|false | Topological core: when no sample point of the corridor where a connection changes layer has room for a via, also try positions a via-radius plus clearance away from the corners of nearby pads and copper (and from the traces drawn before), nearest to the connection's path first. More connections get a via site, at the cost of some runtime. *Since 0.5.0.* |
+| `reduce_after_drawing` | bool | `true` |  | true\|false | Topological core: after all copper is drawn, each connection with vias is tried again with one stretch between two vias (or between a via and a through-hole pad) moved onto the layer of its neighbouring stretch, which drops the vias between them; the change is kept where the redrawn trace passes every clearance check, else the old copper stays. Fewer vias at the cost of some runtime. *Since 0.5.0.* |
 
 ## `[planes]`
 

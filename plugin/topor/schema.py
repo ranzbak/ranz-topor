@@ -162,6 +162,8 @@ SETTINGS: list[Setting] = [
        range=(0, 100), engine="feedback_max_rip", since="0.5.0"),
     _s("search", "reroute_rounds", "int", 6, "Topological core: most rounds of negotiated rip-up-and-reroute. After the layers are assigned, the connections that run through a passage holding more copper on one layer than fits are taken out and routed again, with a growing price (the congestion factor) on the passages that were over-full, until none is over-full or a round brings no gain; the best round is kept. 0 = off.",
        range=(0, 50), engine="reroute_rounds", since="0.5.0"),
+    _s("vias", "reduce_after_drawing", "bool", True, "Topological core: after all copper is drawn, each connection with vias is tried again with one stretch between two vias (or between a via and a through-hole pad) moved onto the layer of its neighbouring stretch, which drops the vias between them; the change is kept where the redrawn trace passes every clearance check, else the old copper stays. Fewer vias at the cost of some runtime.",
+       engine="via_reduce", since="0.5.0"),
     _s("search", "neck_max_mm", "float", 0.0, "Longest necked stub; 0 = twice the pad's long side.", unit="mm", range=(0, 100),
        engine="neck_max_nm", since=V5),
     _s("search", "pad_bridge_max_mm", "float", 2.0, "Two pads of one footprint on the same net at most this far apart are joined by one straight track when it fits (possibly off the pad centre line), instead of a searched route; with exit_stubs = auto only where a pad needs a stub. 0 = off.",

@@ -157,3 +157,15 @@ Two loops use the `overflow` and `congestion` factors (code: `topo/core.rs`, `to
    violation gets the shared history. The route with the most connections routed is kept.
 
 Set `TOPO_NOCAP=1` to switch the capacity refinement off (debug comparison only).
+
+## Via reduction after drawing (S4, plan P6)
+
+After all copper is drawn (`topo/reduce.rs`, `vias.reduce_after_drawing`), every wire with vias is tried
+again with one layer run moved onto the layer of an adjacent run (or all runs onto one layer), which drops
+the vias between them. Runs that touch an SMD pad keep the pad's layer; plane layers are not touched; wires of a net that has a pour stay as they are (a track over the pour may be what joins it). The
+wire is drawn again in its own sleeve (`Drawer::relayer` gives the passes their new layers and packs the
+changed edge-layers again, `draw_wire` draws it); the checker decides, and a rejected try puts the old
+tracks and vias back. At most 6 tries per wire and sweep, 3 sweeps, and the clock is polled between wires.
+The run report has a `via reduction after drawing` line with the vias by cause before and after.
+`TOPO_NOREDUCE=1` switches it off for a comparison. The topological (pre-drawing) variant and the clinch
+fixes of the plan are not implemented.
