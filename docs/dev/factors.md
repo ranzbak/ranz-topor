@@ -217,3 +217,20 @@ tracks and vias back. At most 6 tries per wire and sweep, 3 sweeps; the clock is
 The run report has a `via reduction after drawing` line with the vias by cause before and after.
 `TOPO_NOREDUCE=1` switches it off for a comparison. The topological (pre-drawing) variant and the clinch
 fixes of the plan are not implemented.
+
+## Learning weights from hand routings (S3b)
+
+`topo/learn.rs` fits factor weights to hand-routed boards by maximum margin planning (Ratliff 2006,
+subgradient method); the module doc defines the factor totals, the loss (hand stretches whose topology
+word the engine does not reproduce) and the loss-augmented P2 (`State::search_hooked`, a price per pass
+through an edge the hand's net uses). Learned weights are output only, never applied by default:
+
+```bash
+cd engine && cargo run --release --example learn -- --board NAME HAND.json INPUT.json [--board ...] \
+    --hold-out NAME --out learned.json --toml learned.toml        # one fold
+.venv/bin/python -m harness.learn all --out scratch/topo-s3b      # hold-out rotation + full-engine evaluation
+```
+
+`harness.learn` writes `report.md` (default vs learned per held-out board, candidate factors from the
+hand vs engine event rates) and `learned-avg.toml`, a `[factors] weight = { ... }` snippet to copy into
+`topor.toml` by hand.
