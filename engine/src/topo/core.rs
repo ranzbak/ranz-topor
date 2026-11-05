@@ -740,6 +740,25 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     dr.compute_intervals();
     let over_n = dr.over.iter().filter(|&&o| o).count();
+    // Planning-time check (D0 item 4): an edge-layer the plan packs without overflow (P3 labels,
+    // capacity model) must fit in the drawing's packing too (same packer, pass layers from the
+    // placed vias). `.0` counts the violations "planned fits, packer over-full"; `.1` the reverse.
+    let plan_vs_draw = {
+        let polys = polys_of(&st);
+        let cm = CapModel::new(&st, &packer, &polys, &lr.events, bottom, 1.0);
+        let planned: BTreeSet<(usize, usize)> = cm.overfull_list().into_iter().collect();
+        let nl = proj.n_layers;
+        let (mut fits_over, mut over_fits) = (0usize, 0usize);
+        for (i, &o) in dr.over.iter().enumerate() {
+            let p = planned.contains(&(i / nl, i % nl));
+            if o && !p {
+                fits_over += 1;
+            } else if p && !o {
+                over_fits += 1;
+            }
+        }
+        (fits_over, over_fits)
+    };
     // Phase 2: plane stubs, then the wires. Plane pads go before the first default-width wire.
     let mut plane_res: Vec<(usize, Result<planes::Out, String>)> = Vec::new();
     let mut plane_done = false;
@@ -796,6 +815,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     if !plane_done {
         run_planes(&mut dr, &mut out, &mut plane_res);
+    }
+    // Debug (D0): TOPO_D0AUDIT=<file> writes the neighbour audit of the drawing (packer
+    // positions against the drawn crossings and copper gaps, `dwitness::audit`) as JSON.
+    if let Ok(path) = std::env::var("TOPO_D0AUDIT") {
+        let a = super::dwitness::audit(&dr, &drawn);
+        if let Ok(j) = serde_json::to_string(&a) {
+            let _ = std::fs::write(&path, j);
+        }
     }
     // ---- Feedback (plan S2c item 4): a wire the drawing could not fit is drawn before the
     // wires that block its sleeve, which are then redrawn around it; at most one round per wire.
@@ -1020,11 +1047,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     {
         let cnt = |c: &str| diag.iter().filter(|d| d.class == c).count();
         warnings.push(format!(
-            "layers: over-full edge-layers (packer model) {} before the capacity refinement, {} after ({} moves); drawing packer over-full {}; drawing yield: {} wires entered drawing, {} drawn ({} lost at the via stage); rejected runs {}: packing {}, repair {}, chord {}, of which infeasible against the static board alone {}; runs accepted by the exact path {}, by the S2a funnel+repair fallback {}, exact path without result {} ({:.1} s in the exact search); feedback tried {}, rescued {}",
+            "layers: over-full edge-layers (packer model) {} before the capacity refinement, {} after ({} moves); drawing packer over-full {}; plan vs drawing packer: {} edge-layers planned to fit but over-full when drawn, {} planned over-full but fitting when drawn; drawing yield: {} wires entered drawing, {} drawn ({} lost at the via stage); rejected runs {}: packing {}, repair {}, chord {}, of which infeasible against the static board alone {}; runs accepted by the exact path {}, by the S2a funnel+repair fallback {}, exact path without result {} ({:.1} s in the exact search); feedback tried {}, rescued {}",
             lr.overfull_before,
             lr.overfull_after,
             lr.refine_moves,
             over_n,
+            plan_vs_draw.0,
+            plan_vs_draw.1,
             plans.len(),
             drawn_ok,
             plans.len() - live.len(),
