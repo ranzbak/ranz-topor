@@ -1647,12 +1647,13 @@ impl<'a> Drawer<'a> {
             for k in k0..k1 {
                 let pid = wi.passes[k];
                 let e = self.st.passes[pid].edge;
-                let Some((_, _, i, lmin, rmax)) = self.slot[pid] else {
+                let Some((_, sl, i, lmin, rmax)) = self.slot[pid] else {
                     eprintln!("LANE wire {w} k {k} e{e}: no fitting lane (pass layer {})", self.pass_layer[pid]);
                     continue;
                 };
                 let (lo, hi) = self.tight_span(pid).unwrap_or((f64::NAN, f64::NAN));
-                let lane = &self.lanes[&(e, layer)];
+                // The lane of the pass's own layer (a feedback redraw may have relabelled it).
+                let Some(lane) = self.lanes.get(&(e, sl)) else { continue };
                 let nb: Vec<String> = lane
                     .pids
                     .iter()
