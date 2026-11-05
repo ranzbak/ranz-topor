@@ -145,8 +145,11 @@ pub fn funnel(ports: &[(Vec2, Vec2)]) -> Vec<(Vec2, usize)> {
                 rp = r;
                 ri = i;
             } else {
-                // Crosses over the left side: the left point is a corner.
-                out.push((lp, li));
+                // Crosses over the left side: the left point is a corner (once: a portal whose
+                // end is the apex itself moves the apex on without a new corner).
+                if lp != apex {
+                    out.push((lp, li));
+                }
                 (apex, ai) = (lp, li);
                 (lp, li, rp, ri) = (apex, ai, apex, ai);
                 i = ai + 1;
@@ -159,7 +162,9 @@ pub fn funnel(ports: &[(Vec2, Vec2)]) -> Vec<(Vec2, usize)> {
                 lp = l;
                 li = i;
             } else {
-                out.push((rp, ri));
+                if rp != apex {
+                    out.push((rp, ri));
+                }
                 (apex, ai) = (rp, ri);
                 (lp, li, rp, ri) = (apex, ai, apex, ai);
                 i = ai + 1;
@@ -295,7 +300,14 @@ impl<'a> Packer<'a> {
         }
         ports.push((pb, pb));
         let path = funnel(&ports);
-        let unit = |d: Vec2| d.unit().unwrap_or_default();
+        if std::env::var("TOPO_TAUTDBG").is_ok_and(|v| v.split(',').any(|x| x == w.to_string())) {
+            eprintln!("TAUTPATH wire {w}: {}", path.iter().map(|(p, i)| format!("({:.3},{:.3})@{i}", p.x / 1e6, -p.y / 1e6)).collect::<Vec<_>>().join(" "));
+            eprintln!("TAUTPORTS wire {w}: {}", ports.iter().enumerate().map(|(i, (l, r))| format!("{i}:({:.3},{:.3})-({:.3},{:.3})", l.x / 1e6, -l.y / 1e6, r.x / 1e6, -r.y / 1e6)).collect::<Vec<_>>().join(" "));
+        }
+        // Corner directions are unit vectors scaled to 1 mm: `infl_dir` reads a direction
+        // shorter than 1 nm as undefined (factor 1), and a unit vector rounds to either side of
+        // 1.0 (D2: every wrapped corner lost its oblique factor about half the time).
+        let unit = |d: Vec2| d.unit().map_or(Vec2::default(), |u| u * 1e6);
         let mut at = Vec::with_capacity(n);
         let mut dir = Vec::with_capacity(n);
         let mut j = 0usize;
