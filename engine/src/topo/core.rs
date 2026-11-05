@@ -707,7 +707,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let wire_len = |w: WireId| wlen[w];
     let mut dropped: BTreeSet<WireId> = BTreeSet::new();
     let mut unlayerable_errors = 0usize;
-    for &(wa, wb) in &lr.unlayerable_pairs {
+    for (pi, &(wa, wb)) in lr.unlayerable_pairs.iter().enumerate() {
         if dropped.contains(&wa) || dropped.contains(&wb) {
             continue;
         }
@@ -718,10 +718,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let other = if victim == wa { wb } else { wa };
         let cv = conn_of[wire_conn[victim]];
         let name = |w: WireId| model.nets.iter().find(|n| n.code == st.wires[w].net).map_or(String::new(), |n| n.name.clone());
-        let at = lr
-            .unlayerable
-            .first()
-            .map_or(String::new(), |p| format!(" near ({:.3}, {:.3}) mm", p.x / MM, -p.y / MM));
+        // The pair's own crossing (D4: every pair used to name the first one's place).
+        let at = lr.unlayerable_at.get(pi).map_or(String::new(), |p| format!(" near ({:.3}, {:.3}) mm", p.x / MM, -p.y / MM));
         let msg = format!(
             "crossing of {} and {}{at} cannot be layered: both stretches are fixed to the same layer (error, not emitted)",
             name(victim),

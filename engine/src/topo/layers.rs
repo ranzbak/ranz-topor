@@ -429,6 +429,8 @@ pub struct LayerReport {
     pub events: Vec<Vec<(usize, f64, i32)>>,
     /// The wire pairs `(a, b)`, `a < b`, of the different-net crossings left on one layer.
     pub unlayerable_pairs: Vec<(WireId, WireId)>,
+    /// Where each pair of `unlayerable_pairs` crosses (its first crossing; same order).
+    pub unlayerable_at: Vec<Vec2>,
     /// Over-full edge-layers by the P1 demand model before and after the capacity refinement
     /// (measured with the same model when the refinement is off), and the moves it kept.
     pub overfull_before: usize,
@@ -719,12 +721,13 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
     }
     stretches_and_vias(st, &polys, &evl, p, &mut rep);
     rep.same_layer = dom_labels.values().filter(|l| l.len() == 2 && l[0] == l[1]).count();
+    let mut pairs: BTreeMap<(WireId, WireId), Vec2> = BTreeMap::new();
     for &(w, k, o, _) in &unl {
-        rep.unlayerable.push(at(&polys[w], k, 0.5));
-        rep.unlayerable_pairs.push((w, o));
+        let p = at(&polys[w], k, 0.5);
+        rep.unlayerable.push(p);
+        pairs.entry((w, o)).or_insert(p);
     }
-    rep.unlayerable_pairs.sort_unstable();
-    rep.unlayerable_pairs.dedup();
+    (rep.unlayerable_pairs, rep.unlayerable_at) = pairs.into_iter().unzip();
     rep
 }
 
@@ -1066,21 +1069,23 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
     rep.domains = ev.iter().enumerate().filter(|(i, e)| e.partner.is_some_and(|q| q > *i)).count();
     // Crossings left on one layer: forced ones (both fixed to the same layer) and any the
     // colouring could not separate; the lower-tier wire of each stays unrouted.
-    let mut pairs: BTreeSet<(WireId, WireId)> = BTreeSet::new();
+    let mut pairs: BTreeMap<(WireId, WireId), Vec2> = BTreeMap::new();
     let wire_of = |e: usize| wev.iter().position(|l| l.binary_search(&e).is_ok()).expect("event of a wire");
     for (i, e) in ev.iter().enumerate() {
         if let Some(q) = e.partner.filter(|&q| q > i && lab[q] == lab[i]) {
             let (wa, wb) = (wire_of(i), wire_of(q));
-            pairs.insert((wa.min(wb), wa.max(wb)));
+            let p = at(&polys[wa], ev[i].k, ev[i].s);
+            pairs.entry((wa.min(wb), wa.max(wb))).or_insert(p);
             rep.same_layer += 1;
-            rep.unlayerable.push(at(&polys[wa], ev[i].k, ev[i].s));
+            rep.unlayerable.push(p);
         }
     }
     for &(w, k, o, _) in &unl {
-        rep.unlayerable.push(at(&polys[w], k, 0.5));
-        pairs.insert((w, o));
+        let p = at(&polys[w], k, 0.5);
+        rep.unlayerable.push(p);
+        pairs.entry((w, o)).or_insert(p);
     }
-    rep.unlayerable_pairs = pairs.into_iter().collect();
+    (rep.unlayerable_pairs, rep.unlayerable_at) = pairs.into_iter().unzip();
     stretches_and_vias(st, &polys, &evl, p, &mut rep);
     rep
 }
