@@ -487,11 +487,28 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     dr.uncommit(h);
                 }
             }
-            let mut ids: Vec<usize> = placed[&f]
-                .iter()
-                .map(|&(_, p, sz)| dr.commit(&crate::topo::draw::via_item(st.wires[f].net, p, sz, Some(f))))
-                .collect();
-            let wf = dr.draw_wire(f, &plans[&f], &placed[&f], &mut ids);
+            // The vias are placed again: copper drawn since the first placement may be in the way.
+            let mut ids: Vec<usize> = Vec::new();
+            let vias_f = match dr.place_vias(f, &plans[&f], &mut ids) {
+                Ok(v) => v,
+                Err(_) => {
+                    for h in ids {
+                        dr.uncommit(h);
+                    }
+                    // Put the ripped blockers' copper back.
+                    for bw in &blockers {
+                        let mut hs = Vec::new();
+                        for it in drawn[bw].items.iter().filter(|i| matches!(i, Item::Track(_))) {
+                            hs.push(dr.commit(it));
+                        }
+                        if let Some(x) = drawn.get_mut(bw) {
+                            x.handles = hs;
+                        }
+                    }
+                    continue;
+                }
+            };
+            let wf = dr.draw_wire(f, &plans[&f], &vias_f, &mut ids);
             let mut redrawn: Vec<(WireId, WireOut)> = Vec::new();
             let mut ok = wf.ok;
             if ok {
@@ -515,6 +532,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     drawn.insert(bw, wb);
                 }
                 out[cf].reason.clear();
+                placed.insert(f, vias_f);
                 settle(&mut out, &mut necking, cf, f, &wf, &b, &st);
                 drawn.insert(f, wf);
             } else {

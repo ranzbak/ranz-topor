@@ -111,6 +111,8 @@ pub(super) struct Wp {
     pub w: f64,
     pub s: f64,
     pub layer: usize,
+    /// The wire's own end pads: the only own-net pads it may overlap.
+    pub own: [usize; 2],
     /// Necking (item 3): within `radius` of an end point the wire is `min_w` wide.
     pub neck: Option<Neck>,
 }
@@ -220,15 +222,23 @@ impl Drawer<'_> {
         let mut ids = self.grid.query(bb);
         ids.sort_unstable();
         ids.dedup();
+        let n_obs = self.b.proj.obstacles.len();
         ids.retain(|&i| {
             let e = &self.ents[i];
-            e.live && (wp.layer == usize::MAX || (e.mask >> wp.layer) & 1 == 1) && e.net != Some(wp.net) && (i < self.n_static || !self.only_static.get())
+            // Foreign objects, and the pads of the wire's own net other than its end pads: a
+            // track grazing one overlaps it by a sliver, which KiCad reports as a connection
+            // narrower than the minimum (they are kept apart without a clearance).
+            let own_pad = e.net == Some(wp.net) && i < n_obs && !wp.own.contains(&i);
+            e.live && (wp.layer == usize::MAX || (e.mask >> wp.layer) & 1 == 1) && (e.net != Some(wp.net) || own_pad) && (i < self.n_static || !self.only_static.get())
         });
         ids
     }
 
     fn need_of(&self, id: usize, wp: &Wp, w: f64) -> f64 {
         let e = &self.ents[id];
+        if e.net == Some(wp.net) {
+            return e.grow + 0.5 * w + self.eps;
+        }
         e.grow + if e.fixed { e.clear } else { e.clear.max(wp.s) } + 0.5 * w + self.eps
     }
 
@@ -407,7 +417,7 @@ impl Drawer<'_> {
     /// a stretch cannot be repaired (no path in the sleeve, or the node cap).
     pub(super) fn exact_fix(&self, w: WireId, k0: usize, k1: usize, layer: usize, mut pts: Vec<Vec2>, neck: Option<Neck>) -> Option<Vec<Vec2>> {
         let wi = &self.st.wires[w];
-        let wp = Wp { net: wi.net, w: wi.w, s: wi.s, layer, neck };
+        let wp = Wp { net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck };
         let strip = self.strip(w, k0, k1);
         for _ in 0..24 {
             let mut bad = None;
@@ -473,7 +483,7 @@ impl Drawer<'_> {
     /// caller still runs the checker on the via. O(ents near x samples + sleeve triangles).
     pub(super) fn via_extra(&self, w: WireId, ka: usize, kb: usize, d: f64, s: f64) -> Vec<(usize, Vec2)> {
         let wi = &self.st.wires[w];
-        let wp = Wp { net: wi.net, w: d, s, layer: usize::MAX, neck: None };
+        let wp = Wp { net: wi.net, w: d, s, layer: usize::MAX, own: [wi.pa, wi.pb], neck: None };
         let strip = self.strip(w, ka, kb.max(ka));
         let mut bb = strip.boxes[0];
         for b in &strip.boxes {

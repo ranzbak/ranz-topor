@@ -19,3 +19,20 @@ route is a placeholder: every connection fails with `NO_ENGINE`, the tool report
 `tools/classic_reference.sh <out_dir>` builds main @ 64b3979 in a temporary worktree, runs it once on the gate boards
 with the same tool (`TOPOR_TREE` selects the code tree), writes `classic-reference.{md,json}` and removes the worktree.
 The two USB crops are engine models without a `.kicad_pcb`, so they are run engine-only (no KiCad DRC).
+
+## Drawing diagnosis (S2c)
+
+The topological core's report carries one `drawing yield:` warning: wires that entered drawing, wires drawn,
+wires lost at the via stage, rejected runs by class (`packing`: a pass lies on an edge whose demand exceeds its
+room, `repair`, `chord`), runs accepted by the exact path (`topo/exact.rs`) or by S2a's funnel+repair fallback,
+and the feedback counts. Environment variables of the engine (debugging only, no effect on the result):
+
+- `TOPO_DIAG=<file>`: one JSON row per rejected run (wire, net, layer, width, passes, class, violated object,
+  gap and requirement in nm, location in mm, endpoints).
+- `TOPO_DIAG_DEEP=1`: also re-run the exact search against the static board alone (`static_infeasible`);
+  slow.
+- `TOPO_DUMP=<file>`: the drawn copper, pad polygons and the failed runs' polylines (for `plotfail`-style plots).
+- `TOPO_VIADBG=1`: why a via interval had no site.
+
+Without Python: `cargo run --release --example topo_route -- <input.json>` on a `harness.g0 export` model.
+Settings that steer it: `[search] drawing_feedback`, `feedback_max_rip`, `[vias] offset_sites`.

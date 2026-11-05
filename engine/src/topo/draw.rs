@@ -893,6 +893,10 @@ impl<'a> Drawer<'a> {
     /// Take the copper of `handle` back out.
     pub fn uncommit(&mut self, handle: usize) {
         let (i, e) = self.handles[handle];
+        // Idempotent: the index reuses freed ids, so a second removal would drop another item.
+        if self.ents.get(e).is_some_and(|en| !en.live) {
+            return;
+        }
         self.idx.remove(i);
         if let Some(en) = self.ents.get_mut(e) {
             en.live = false;
@@ -919,12 +923,17 @@ impl<'a> Drawer<'a> {
             let mut last_viol: Option<Violation> = None;
             let mut tried: Vec<Vec<Vec2>> = Vec::new();
             let neck = self.neck_zones(w, r == 0, r == plan.layers.len() - 1);
-            for attempt in 0..4 {
-                let pts = if attempt == 0 {
-                    // The exact taut path around the funnel's violations (see `exact`).
+            for attempt in 0..5 {
+                // 0: the exact taut path at full width; 1: the same with pad-end neck zones (only
+                // where the first failed: a necked end enters the pad with less copper);
+                // 2..4: S2a's funnel + repair attempts.
+                let pts = if attempt <= 1 {
+                    if attempt == 1 && neck.is_none() {
+                        continue;
+                    }
                     let base = self.base_polyline(w, k0, k1, s, e, 0);
                     let t_ex = std::time::Instant::now();
-                    let fixed = self.exact_fix(w, k0, k1, layer, base, neck);
+                    let fixed = self.exact_fix(w, k0, k1, layer, base, if attempt == 1 { neck } else { None });
                     self.stats.exact_s += t_ex.elapsed().as_secs_f64();
                     match fixed {
                         Some(p) => p,
@@ -934,7 +943,7 @@ impl<'a> Drawer<'a> {
                         }
                     }
                 } else {
-                    self.run_polyline(w, k0, k1, s, e, attempt - 1, layer)
+                    self.run_polyline(w, k0, k1, s, e, attempt - 2, layer)
                 };
                 tried.push(pts.clone());
                 let (ps, pe) = (r == 0, r == plan.layers.len() - 1);
@@ -962,7 +971,7 @@ impl<'a> Drawer<'a> {
                             out.necks.push((pts[pts.len() - 1], wn, ls[1]));
                         }
                     }
-                    if attempt == 0 {
+                    if attempt <= 1 {
                         self.stats.exact_ok += 1;
                     } else {
                         self.stats.fallback_ok += 1;
@@ -1019,12 +1028,20 @@ impl<'a> Drawer<'a> {
         pts.windows(2).filter(|p| (p[1] - p[0]).len2() > 1.0).map(|p| track_item(net, lid, w, p[0], p[1], wire)).collect()
     }
 
+    /// Narrowest width a necked stretch may take (nm): the net's floor (KiCad minimum track width,
+    /// custom-rule minimum) and twice KiCad's minimum connection width, which keeps the copper
+    /// connection at a pad entered obliquely above that rule (KiCad measures the junction, not the
+    /// track); never above the wire's own width.
+    pub(super) fn neck_floor(rules: &crate::model::Rules, net: i32, w: f64) -> f64 {
+        (rules.min_track_width.max(rules.net_rule(net).min_width).max(2 * rules.min_connection) as f64).min(w)
+    }
+
     /// Neck zones of a run (item 3): where the wire may be narrowed to the net's floor, at the pad
     /// ends of the run (`ps` start pad, `pe` end pad). `None` without `neck_to_pad` or room to narrow.
     pub(super) fn neck_zones(&self, w: WireId, ps: bool, pe: bool) -> Option<super::exact::Neck> {
         let wi = &self.st.wires[w];
         let rules = &self.model.rules;
-        let min_w = (rules.min_track_width.max(rules.net_rule(wi.net).min_width).max(rules.min_connection) as f64).min(wi.w);
+        let min_w = Self::neck_floor(rules, wi.net, wi.w);
         if !self.opts.neck_to_pad || min_w >= wi.w || !(ps || pe) {
             return None;
         }
@@ -1043,7 +1060,7 @@ impl<'a> Drawer<'a> {
     fn neck_run(&self, w: WireId, lid: u32, pts: &[Vec2], ps: bool, pe: bool) -> Option<(f64, Vec<Item>, [f64; 2])> {
         let wi = &self.st.wires[w];
         let rules = &self.model.rules;
-        let min_w = (rules.min_track_width.max(rules.net_rule(wi.net).min_width).max(rules.min_connection) as f64).min(wi.w);
+        let min_w = Self::neck_floor(rules, wi.net, wi.w);
         if min_w >= wi.w {
             return None;
         }
