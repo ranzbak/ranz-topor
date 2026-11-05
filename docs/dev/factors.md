@@ -137,3 +137,23 @@ whole path, read-only on the state; use it for move evaluation in P4.
 cd engine && cargo test --release --no-fail-fast && cargo clippy --all-targets -- -D warnings
 cargo run --release --example g0_gate -- input.json hand.json --factor crossing=40
 ```
+
+## Negotiated rip-up and reroute (P4)
+
+Two loops use the `overflow` and `congestion` factors (code: `topo/core.rs`, `topo/refine.rs`,
+`topo/pack.rs`):
+
+1. **Inside a route** (after P2 and P3, `search.reroute_rounds` rounds at most). The layer assignment is
+   first refined against capacity (`refine.rs`: a crossing flip or relabel that lowers layer changes plus
+   the `overflow` price of the over-full edge-layers; it never adds a via unless `TOPO_CAPVIA=1` is set for
+   an experiment). What is still over-full by the drawing's packer (`pack.rs`, the same numbers
+   `Drawer::pack` uses) is ripped up, routed-last wires first until the rest of the edge-layer fits, and
+   routed again with a history (`congestion`, per round an edge was over-full) added to the edges that were
+   over-full; P3 runs again. Stops when nothing is over-full, after two rounds without gain, or at 40 % of
+   the time budget; the round with the fewest over-full edge-layers (then fewest vias) is kept.
+2. **Across routes** (the topology feedback, at most four whole routes). A wire the drawing rejected has
+   its sleeve remembered: the next route makes only that connection pay the history on those edges (it is
+   the one being ripped up and rerouted), and every edge that was over-full under the packer or at the
+   violation gets the shared history. The route with the most connections routed is kept.
+
+Set `TOPO_NOCAP=1` to switch the capacity refinement off (debug comparison only).

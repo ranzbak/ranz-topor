@@ -113,7 +113,7 @@ fn fail(o: &mut [Outcome], i: usize, reason: impl Into<String>) {
 /// Route `model` with the topological core (see the module doc).
 pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteResult {
     let t0 = Instant::now();
-    let (mut best, h0, mut hist_all) = route_round(model, opts, ctl, &[], &[]);
+    let (mut best, h0, mut mem) = route_round(model, opts, ctl, &[], &Memory::default());
     let budget = if opts.wall_clock_s > 0.0 { opts.wall_clock_s } else { f64::INFINITY };
     // Feedback to the topology (plan S2c item 4): the rooms the drawing found too small are
     // lowered by what was missing, and the whole route is made again (at most `MAX_ROUNDS`
@@ -132,8 +132,8 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
             o2.wall_clock_s = (opts.wall_clock_s - t0.elapsed().as_secs_f64()).max(1.0);
         }
         let hv: Hints = all.iter().map(|(&(e, l), &r)| (e, l, r)).collect();
-        let (r2, h2, hist2) = route_round(model, &o2, ctl, &hv, &hist_all);
-        hist_all = hist2;
+        let (r2, h2, mem2) = route_round(model, &o2, ctl, &hv, &mem);
+        mem = mem2;
         round_note.push(format!("round {round}: {} cut rooms lowered, routed {} of {}", hv.len(), r2.routed, r2.connections_total));
         for (e, l, r) in h2 {
             let v = all.entry((e, l)).or_insert(r);
@@ -167,19 +167,30 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
 /// Most rounds of the topology feedback (the first one included).
 const MAX_ROUNDS: usize = 4;
 
+/// What a whole route remembers for the next one (negotiated rip-up and reroute across repeats).
+#[derive(Clone, Debug, Default)]
+struct Memory {
+    /// Per edge: rounds in which it was over-full (the `congestion` history all wires pay).
+    edge: Vec<f64>,
+    /// Per connection id: the edges of the sleeve of its rejected drawing and how often, which
+    /// only that connection pays for (it is the one being ripped up and rerouted).
+    own: BTreeMap<usize, BTreeMap<usize, f64>>,
+}
+
 /// Lowered rooms `(edge, layer, room nm)` that a second round applies.
 type Hints = Vec<(usize, usize, f64)>;
 
 /// One whole route. `hist0` is the per-edge over-full history of earlier rounds (empty = none);
 /// the third result is the history at the end of this one.
-fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], hist0: &[f64]) -> (RouteResult, Hints, Vec<f64>) {
+fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory) -> (RouteResult, Hints, Memory) {
+    let hist0: &[f64] = &mem.edge;
     let t0 = Instant::now();
     let deadline = (opts.wall_clock_s > 0.0).then(|| t0 + std::time::Duration::from_secs_f64(opts.wall_clock_s));
     let expired = || cancelled() || ctl.is_cancelled() || deadline.is_some_and(|d| Instant::now() >= d);
     let signal: Vec<u32> = model.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
     if signal.len() < 2 {
         let why = format!("the topological core routes boards with two or more signal layers; this board has {}", signal.len());
-        return (unrouted(model, opts, &why), Vec::new(), Vec::new());
+        return (unrouted(model, opts, &why), Vec::new(), Memory::default());
     }
     ctl.update("setup", 0, 0, 0, 0, 0.0);
     let dec = decompose(model, opts, &signal);
@@ -191,7 +202,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     warnings.extend(problems);
     let mut b = match board::build(model, &BuildOpts { existing_vias: true, keepouts: true, plane_layers: opts.plane_signals != "forbidden", ..BuildOpts::default() }) {
         Ok(b) => b,
-        Err(e) => return (unrouted(model, opts, &format!("projection failed: {e}")), Vec::new(), Vec::new()),
+        Err(e) => return (unrouted(model, opts, &format!("projection failed: {e}")), Vec::new(), Memory::default()),
     };
     for &(e, l, room) in hints {
         if let Some(r) = b.proj.room.get_mut(e).and_then(|r| r.get_mut(l)) {
@@ -263,7 +274,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut wire_conn: Vec<usize> = Vec::new(); // wire id -> index into conns
     let mut p2_failed: Vec<usize> = Vec::new();
     let mut timed_out = false;
-    let route_one = |st: &mut State, ci: usize, cap: usize, wire_conn: &mut Vec<usize>| -> bool {
+    let route_one_raw = |st: &mut State, ci: usize, cap: usize, wire_conn: &mut Vec<usize>| -> bool {
         let c = &conns[ci];
         let straight = len_of(c).max(1.0);
         // A path longer than `detour_factor` x the straight distance is a detour: search again with
@@ -283,6 +294,17 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             st.remove(wid);
         }
         true
+    };
+    // A connection whose sleeve the drawing rejected earlier pays a history on its old edges.
+    let route_one = |st: &mut State, ci: usize, cap: usize, wire_conn: &mut Vec<usize>| -> bool {
+        let Some(own) = mem.own.get(&conn_of[ci]) else { return route_one_raw(st, ci, cap, wire_conn) };
+        let saved = st.history.clone();
+        for (&e, &n) in own {
+            st.history[e] += n;
+        }
+        let r = route_one_raw(st, ci, cap, wire_conn);
+        st.history = saved;
+        r
     };
     let cap = 2_000_000usize;
     for &ci in &order {
@@ -699,7 +721,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // Hints for a second round: per cut of a still-failed wire, the room is lowered by the
     // violation depth (what was really missing) at the cut nearest to the violation.
     let mut hint_map: BTreeMap<(usize, usize), f64> = BTreeMap::new();
-    let mut sleeve: BTreeSet<usize> = BTreeSet::new();
+    let mut sleeve: BTreeSet<(usize, usize)> = BTreeSet::new();
+    let mut own_out = mem.own.clone();
     for d in &diag {
         let ci = conn_of[wire_conn[d.wire]];
         if out[ci].routed || d.passes == 0 {
@@ -718,10 +741,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 (((a + ab * t) - d.at).len(), e)
             })
             .min_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
-        // The wire's whole sleeve on that layer gets a history: the repeat routes it elsewhere.
+        // The wire's whole sleeve on that layer is remembered: the repeat routes it elsewhere.
         for e in (d.k0..d.k1).map(|k| st.passes[wi.passes[k]].edge) {
-            if sleeve.insert(e) {
-                hist_out[e] += 1.0;
+            if sleeve.insert((ci, e)) {
+                *own_out.entry(ci).or_default().entry(e).or_insert(0.0) += 1.0;
             }
         }
         if let Some((_, e)) = best {
@@ -1055,7 +1078,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         item_conn,
         stubs: Vec::new(),
     };
-    (result, new_hints, hist_out)
+    (result, new_hints, Memory { edge: hist_out, own: own_out })
 }
 
 /// `(connection id, via centre)` of every routed plane connection (for the island check).
