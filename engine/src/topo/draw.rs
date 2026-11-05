@@ -284,16 +284,17 @@ fn kicad_pt(p: Vec2) -> IVec2 {
 
 /// A track item for the segment `a -> b` (math frame in, KiCad frame out).
 /// Clearance a via of `net` (copper diameter `d`, drill `drill`, nm) demands around its copper
-/// disc: the net's copper clearance, or more where KiCad's hole clearance to its drill reaches
-/// further (`drill / 2 + hole_clearance > d / 2 + clearance`, e.g. a 0.4 / 0.3 mm via with
-/// 0.2 mm clearance and 0.254 mm hole clearance). Both are discs about the via centre.
+/// disc: the net's copper clearance, or more where the hole clearance to its drill
+/// ([`crate::model::Rules::via_hole_clear`]) reaches further (`drill / 2 + hole clearance >
+/// d / 2 + clearance`, e.g. a 0.4 / 0.3 mm via with 0.2 mm clearance and 0.254 mm hole
+/// clearance). Both are discs about the via centre.
 pub fn via_clear(model: &BoardModel, net: i32, d: i64, drill: i64) -> f64 {
     let r = &model.rules;
     let copper = r.net_rule(net).clearance as f64;
     if drill <= 0 {
         return copper;
     }
-    copper.max(0.5 * drill as f64 + r.hole_clearance as f64 - 0.5 * d as f64)
+    copper.max(0.5 * drill as f64 + r.via_hole_clear() as f64 - 0.5 * d as f64)
 }
 
 pub fn track_item(net: i32, layer: u32, w: f64, a: Vec2, b: Vec2, wire: Option<usize>) -> Item {
@@ -884,7 +885,7 @@ impl<'a> Drawer<'a> {
                     // other via placed yet), and what rejects it there.
                     let (mut n_sites, mut static_ok, mut hole_only, mut own_only) = (0usize, 0usize, 0usize, 0usize);
                     let r = &self.model.rules;
-                    let hole_req = r.hole_clearance + self.opts.margin_nm;
+                    let hole_req = r.via_hole_clear() + self.opts.margin_nm;
                     let copper_req = r.net_rule(net).clearance.max(r.min_clearance) + self.opts.margin_nm;
                     for &sz in &sizes {
                         let need = 0.5 * sz.d as f64 + r.net_rule(net).clearance as f64;
@@ -948,7 +949,7 @@ impl<'a> Drawer<'a> {
     /// The drill of a via of `size` at `p` keeps the hole clearance to every foreign copper polygon
     /// (pads, copper shapes): the checker does not test a drill against a no-net shape.
     pub fn via_hole_ok(&self, p: Vec2, size: ViaSize, net: i32) -> bool {
-        let hole = 0.5 * size.drill as f64 + self.model.rules.hole_clearance as f64 + self.eps;
+        let hole = 0.5 * size.drill as f64 + self.model.rules.via_hole_clear() as f64 + self.eps;
         let mut ids = self.grid.query(bbox_of(&[p]).grow(hole + 0.02e6 * 100.0));
         ids.sort_unstable();
         ids.dedup();

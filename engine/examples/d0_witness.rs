@@ -1,12 +1,14 @@
 //! D0 drawing witness on one board: the hand topology drawn by our drawing.
 //!
 //!     cargo run --release --example d0_witness -- <hand.json> [--variant A|B|C] [--out d0.json]
-//!         [--audit] [--tight] [--margin <nm>]
+//!         [--audit] [--tight] [--margin <nm>] [--via-hole <nm>]
 //!
 //! `hand.json` is the untouched board from `harness.g0 export`. Prints wires in / drawn /
 //! rejected by reason; `--audit` adds the neighbour audit (packer positions against the drawn
 //! crossings and copper gaps); `--tight` turns on the D0 tight-packing experiment (`Drawer::tight`); `--margin`
-//! sets the drawing's clearance margin (`Options.margin_nm`); `--out` writes the full result.
+//! sets the drawing's clearance margin (`Options.margin_nm`); `--via-hole` the placed vias' drill
+//! clearance (`Rules::via_hole_clearance`, for hand exports without it); `--out` writes the full
+//! result.
 
 use topor_engine::model::BoardModel;
 use topor_engine::topo::dwitness::{run, DwOpts, PairAudit, Variant};
@@ -42,6 +44,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mut hand, mut out, mut variant, mut show_audit, mut tight) = (None, None, Variant::A, false, false);
     let mut margin: Option<i64> = None;
+    let mut via_hole: Option<i64> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -64,13 +67,22 @@ fn main() {
                 margin = Some(args[i + 1].parse::<i64>().expect("margin nm"));
                 i += 1;
             }
+            "--via-hole" => {
+                via_hole = Some(args[i + 1].parse::<i64>().expect("via hole clearance nm"));
+                i += 1;
+            }
             a => hand = Some(a.to_string()),
         }
         i += 1;
     }
     let hp = hand.expect("hand.json");
     let s = std::fs::read_to_string(&hp).unwrap_or_else(|e| panic!("{hp}: {e}"));
-    let m = BoardModel::from_json(&s).unwrap_or_else(|e| panic!("{hp}: {e}"));
+    let mut m = BoardModel::from_json(&s).unwrap_or_else(|e| panic!("{hp}: {e}"));
+    if let Some(v) = via_hole {
+        // Hand exports older than D1 carry no via hole clearance (it then falls back to the PTH
+        // floor in `hole_clearance`): set it as the run would (`toporlib.rules`).
+        m.rules.via_hole_clearance = v;
+    }
     let mut o = DwOpts { variant, tight, ..DwOpts::default() };
     if let Some(m) = margin {
         o.draw.margin_nm = m;

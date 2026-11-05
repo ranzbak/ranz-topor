@@ -160,4 +160,9 @@ fn via_clearance_covers_the_hole_clearance() {
     m.rules.hole_clearance = 254_000;
     assert!((via_clear(&m, 1, 400_000, 300_000) - 204_000.0).abs() < 1e-6);
     assert!((via_clear(&m, 1, 600_000, 300_000) - 200_000.0).abs() < 1e-6);
+    // The fab floor of component holes (0.35 mm in `hole_clearance`) is not the via's: with
+    // `via_hole_clearance` set, that one counts.
+    m.rules.hole_clearance = 350_000;
+    m.rules.via_hole_clearance = 254_000;
+    assert!((via_clear(&m, 1, 400_000, 300_000) - 204_000.0).abs() < 1e-6);
 }

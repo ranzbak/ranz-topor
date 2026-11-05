@@ -328,6 +328,11 @@ pub struct Rules {
     pub min_via_drill: i64,
     pub min_annular: i64,
     pub hole_clearance: i64,
+    /// Clearance from the drill of a via the router places to foreign copper (nm): KiCad's hole
+    /// clearance floored by the fab's via-hole-to-track value (`hole_clearance` carries the PTH
+    /// floor); 0 (unset, older models) = `hole_clearance`. See [`Rules::via_hole_clear`].
+    #[serde(default)]
+    pub via_hole_clearance: i64,
     pub hole_to_hole: i64,
     pub edge_clearance: i64,
     /// Narrowest copper connection KiCad's DRC accepts (`min_connection`, nm; 0 = unset): a
@@ -380,6 +385,18 @@ pub struct ClearanceRegion {
     pub clearance: i64,
 }
 
+impl Rules {
+    /// Clearance from a placed via's drill to foreign copper (nm): `via_hole_clearance`, or
+    /// `hole_clearance` when unset. O(1).
+    pub fn via_hole_clear(&self) -> i64 {
+        if self.via_hole_clearance > 0 {
+            self.via_hole_clearance
+        } else {
+            self.hole_clearance
+        }
+    }
+}
+
 impl Default for Rules {
     fn default() -> Self {
         Rules {
@@ -389,6 +406,7 @@ impl Default for Rules {
             min_via_drill: 300_000,
             min_annular: 50_000,
             hole_clearance: 250_000,
+            via_hole_clearance: 0,
             hole_to_hole: 250_000,
             edge_clearance: 500_000,
             min_connection: 0,

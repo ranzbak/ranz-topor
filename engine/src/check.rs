@@ -182,6 +182,8 @@ fn hole_track(h: &crate::model::Hole) -> Track {
 pub struct Checker {
     rules_min_clearance: f64,
     hole_clearance: f64,
+    /// Clearance of a placed via's drill to foreign copper (`Rules::via_hole_clear`).
+    via_hole_clearance: f64,
     edge_clearance: f64,
     margin: f64,
     clearances: HashMap<i32, f64>,
@@ -231,6 +233,7 @@ impl Checker {
         let mut c = Checker {
             rules_min_clearance: r.min_clearance as f64,
             hole_clearance: r.hole_clearance as f64,
+            via_hole_clearance: r.via_hole_clear() as f64,
             edge_clearance: r.edge_clearance as f64,
             margin,
             clearances: r
@@ -644,15 +647,16 @@ impl Checker {
                 if Self::is_exempt(net, o) {
                     return;
                 }
-                // Hole clearance between foreign copper and a drill: the drill of an indexed via
-                // against this item's copper, and this via's drill against the obstacle's copper
-                // (model vias and holes carry their own `Kind::Hole` obstacle).
+                // Hole clearance between foreign copper and a placed via's drill
+                // (`Rules::via_hole_clear`): the drill of an indexed via against this item's
+                // copper, and this via's drill against the obstacle's copper (model vias and
+                // holes carry their own `Kind::Hole` obstacle with `hole_clearance`).
                 let holes = [
                     o.hole.as_ref().map(|h| copper_gap(&track, h)),
                     drill_track.as_ref().filter(|_| matches!(o.kind, Kind::Pad | Kind::Track | Kind::Via | Kind::Shape)).map(|d| o.gap(d)),
                 ];
                 for gap in holes.into_iter().flatten() {
-                    let req = self.hole_clearance + self.margin;
+                    let req = self.via_hole_clearance + self.margin;
                     if gap < req {
                         let (g, r) = (gap.round() as i64, req.round() as i64);
                         match found.iter_mut().find(|v| v.against == o.label && v.layer == layer && v.required == r) {

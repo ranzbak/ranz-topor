@@ -244,6 +244,10 @@ def resolve_rules_from_project(
         "min_via_drill": floored("min_via_drill", dv["min_through_hole_diameter"], profile["via_drill_min_auto"]),
         "min_annular": floored("min_annular", dv["min_via_annular_width"], annular_floor),
         "hole_clearance": floored("hole_clearance", dv["min_hole_clearance"], profile["pth_hole_to_track"]),
+        # The drill of a via the router places keeps KiCad's hole clearance floored by the fab's VIA hole to
+        # track (JLCPCB 0.2 mm), not its PTH value (0.35 mm, `hole_clearance` above, for component holes).
+        "via_hole_clearance": floored("via_hole_clearance", dv["min_hole_clearance"],
+                                      profile.get("via_hole_to_track", profile["pth_hole_to_track"])),
         "hole_to_hole": floored("hole_to_hole", dv["min_hole_to_hole"], profile["hole_to_hole_via"]),
         "edge_clearance": floored("edge_clearance", dv["min_copper_edge_clearance"], profile["edge"]),
         "max_error": _nz(dv["max_error"], 5_000),
