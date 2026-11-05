@@ -413,6 +413,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let packer = Packer::for_model(model, opts, proj);
     let assign = |st: &State| layers::assign_with(st, &|ob| b.smd_layer(ob), &lp, Some(&packer));
     let polys_of = |st: &State| -> Vec<Vec<Vec2>> { (0..st.wires.len()).map(|w| if st.wires[w].alive { st.polyline(w) } else { Vec::new() }).collect() };
+    // Crossing directions for the capacity model's oblique factor: the taut paths (pack.rs).
+    let dirs_of = |st: &State| -> Vec<Vec<Vec2>> { packer.taut_dirs(st) };
     let mut lr = assign(&st);
     tlog("P2 + P3", t0);
     let t_p4 = Instant::now();
@@ -439,7 +441,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     let score = |st: &State, lr: &layers::LayerReport| -> (f64, usize, usize) {
         let polys = polys_of(st);
-        let cm = CapModel::new(st, &packer, &polys, &lr.events, bottom, overflow_mm);
+        let dirs = dirs_of(st);
+        let cm = CapModel::new(st, &packer, &dirs, &lr.events, bottom, overflow_mm);
         let (mut len_mm, mut area_mm) = (0.0, 0.0);
         for (w, pl) in polys.iter().enumerate().filter(|(w, _)| st.wires[*w].alive) {
             let l = pl.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>() / MM;
@@ -471,8 +474,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         if ripped_total >= opts.max_ripped {
             break;
         }
-        let polys = polys_of(&st);
-        let cm = CapModel::new(&st, &packer, &polys, &lr.events, bottom, 1.0);
+        let dirs = dirs_of(&st);
+        let cm = CapModel::new(&st, &packer, &dirs, &lr.events, bottom, 1.0);
         let bad = cm.overfull_list();
         if bad.is_empty() {
             break;
@@ -574,8 +577,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             ripped: ripped_total,
             max_ripped: opts.max_ripped,
             tight: {
-                let polys = polys_of(&st);
-                let cm = CapModel::new(&st, &packer, &polys, &lr.events, bottom, overflow_mm);
+                let dirs = dirs_of(&st);
+                let cm = CapModel::new(&st, &packer, &dirs, &lr.events, bottom, overflow_mm);
                 let mut t = vec![false; proj.edges.len()];
                 for (e, _) in cm.overfull_list() {
                     t[e] = true;
@@ -622,9 +625,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
         }
         // Label moves against the drawing's packer: flips, via shifts, segment lifting.
-        let polys = polys_of(&st);
+        let dirs = dirs_of(&st);
         let n_sig = if b.n_signal == 0 { proj.n_layers } else { b.n_signal };
-        let cm = CapModel::new(&st, &packer, &polys, &lr.events, bottom, overflow_mm);
+        let cm = CapModel::new(&st, &packer, &dirs, &lr.events, bottom, overflow_mm);
         let (v0, o0) = (lr.vias, cm.overfull());
         let (mask, partner) = (lr.mask.clone(), lr.partner.clone());
         let mut lb = Labels { st: &st, cm, evl: lr.events.clone(), mask: &mask, partner: &partner, bottom, via_mm: lp.via_mm, n_signal: n_sig, evals: 0, max_evals: opts.max_moves, tally: Tally::default() };
@@ -744,8 +747,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // capacity model) must fit in the drawing's packing too (same packer, pass layers from the
     // placed vias). `.0` counts the violations "planned fits, packer over-full"; `.1` the reverse.
     let plan_vs_draw = {
-        let polys = polys_of(&st);
-        let cm = CapModel::new(&st, &packer, &polys, &lr.events, bottom, 1.0);
+        let dirs = dirs_of(&st);
+        let cm = CapModel::new(&st, &packer, &dirs, &lr.events, bottom, 1.0);
         let planned: BTreeSet<(usize, usize)> = cm.overfull_list().into_iter().collect();
         let nl = proj.n_layers;
         let (mut fits_over, mut over_fits) = (0usize, 0usize);

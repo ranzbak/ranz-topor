@@ -692,7 +692,7 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
         refine(
             st,
             pk,
-            &polys,
+            &pk.taut_dirs(st),
             &mut evl,
             &mask,
             &partner,
@@ -1042,7 +1042,7 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
             refine(
                 st,
                 pk,
-                &polys,
+                &pk.taut_dirs(st),
                 &mut evl,
                 &mask,
                 &partner,

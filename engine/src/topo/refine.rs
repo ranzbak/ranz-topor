@@ -15,7 +15,7 @@
 //! Complexity: building the model is O(passes); one move evaluation is O(passes of the edges it
 //! touches); the search stops after `max_evals` evaluations.
 
-use super::pack::{infl_of, PackItem, Packer};
+use super::pack::{infl_dir, PackItem, Packer};
 use super::state::{State, WireId};
 use crate::geom::Vec2;
 
@@ -72,7 +72,8 @@ pub fn pass_layers(n: usize, ev: &[LEv], bottom: i32) -> Vec<i32> {
 pub struct CapModel<'a> {
     st: &'a State<'a>,
     packer: &'a Packer<'a>,
-    polys: &'a [Vec<Vec2>],
+    /// Crossing direction of every pass from its wire's taut path ([`Packer::taut_dirs`]).
+    dirs: &'a [Vec<Vec2>],
     nl: usize,
     price: f64,
     /// Position of every pass in its wire.
@@ -85,7 +86,7 @@ pub struct CapModel<'a> {
 
 impl<'a> CapModel<'a> {
     /// The model of the labelling `evl` (events per wire). O(passes x margin lookups).
-    pub fn new(st: &'a State<'a>, packer: &'a Packer<'a>, polys: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64) -> Self {
+    pub fn new(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64) -> Self {
         let nl = st.proj.n_layers;
         let mut pass_layer = vec![-1; st.passes.len()];
         let mut pass_k = vec![0; st.passes.len()];
@@ -96,7 +97,7 @@ impl<'a> CapModel<'a> {
                 pass_k[p] = k;
             }
         }
-        let mut m = CapModel { st, packer, polys, nl, price, pass_k, pass_layer, cost: vec![0.0; st.proj.edges.len() * nl] };
+        let mut m = CapModel { st, packer, dirs, nl, price, pass_k, pass_layer, cost: vec![0.0; st.proj.edges.len() * nl] };
         for e in 0..st.proj.edges.len() {
             for l in 0..nl {
                 m.cost[e * nl + l] = m.eval(e, l);
@@ -114,7 +115,7 @@ impl<'a> CapModel<'a> {
             .map(|&p| {
                 let w = self.st.passes[p].wire;
                 let wi = &self.st.wires[w];
-                PackItem { net: wi.net, w: wi.w, s: wi.s, infl: infl_of(pr, e, &self.polys[w], self.pass_k[p]) }
+                PackItem { net: wi.net, w: wi.w, s: wi.s, infl: infl_dir(pr, e, self.dirs[w][self.pass_k[p]]) }
             })
             .collect();
         if items.is_empty() {
@@ -137,7 +138,7 @@ impl<'a> CapModel<'a> {
             .map(|&p| {
                 let w = self.st.passes[p].wire;
                 let wi = &self.st.wires[w];
-                PackItem { net: wi.net, w: wi.w, s: wi.s, infl: infl_of(pr, e, &self.polys[w], self.pass_k[p]) }
+                PackItem { net: wi.net, w: wi.w, s: wi.s, infl: infl_dir(pr, e, self.dirs[w][self.pass_k[p]]) }
             })
             .collect();
         items.is_empty() || self.packer.bounds(e, l, &items).fits()
@@ -174,7 +175,7 @@ fn wire_cost(evl: &[Vec<LEv>], w: WireId, trans: &dyn Fn(usize, usize) -> f64, u
 pub fn refine(
     st: &State,
     packer: &Packer,
-    polys: &[Vec<Vec2>],
+    dirs: &[Vec<Vec2>],
     evl: &mut [Vec<LEv>],
     mask: &[Vec<u64>],
     partner: &[Vec<Option<(WireId, usize)>>],
@@ -184,7 +185,7 @@ pub fn refine(
     p: &RefineParams,
 ) -> RefineStats {
     // Switched off: the model is built with a unit price only to count the over-full edge-layers.
-    let mut cm = CapModel::new(st, packer, polys, evl, bottom, if p.overflow_mm > 0.0 { p.overflow_mm } else { 1.0 });
+    let mut cm = CapModel::new(st, packer, dirs, evl, bottom, if p.overflow_mm > 0.0 { p.overflow_mm } else { 1.0 });
     let mut stats = RefineStats { before: cm.overfull(), ..RefineStats::default() };
     if p.overflow_mm <= 0.0 {
         stats.after = stats.before;

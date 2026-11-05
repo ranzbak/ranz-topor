@@ -20,7 +20,7 @@
 //! checker query per segment (grid candidates). Deterministic (Vec + index ids).
 
 use super::board::Board;
-use super::pack::{infl_of, PackItem, Packer};
+use super::pack::{infl_dir, PackItem, Packer};
 use super::state::{EdgeId, PassId, State, TriId, WireId};
 use crate::check::{CheckReport, Checker, ItemIndex, Violation};
 use crate::geom::prim::Aabb;
@@ -432,6 +432,9 @@ pub struct Drawer<'a> {
     pub stats: DrawStats,
     /// Nominal polyline (pad centres and pass points) of every wire.
     pub(super) polys: Vec<Vec<Vec2>>,
+    /// Crossing direction of every pass from its wire's taut path (the oblique factor, shared
+    /// with P3/P4 through [`Packer::taut_dirs`]).
+    pub(super) dirs: Vec<Vec<Vec2>>,
     pub iv: Intervals,
     /// Layer index of every pass (`-1` unpacked).
     pub pass_layer: Vec<i32>,
@@ -467,6 +470,7 @@ impl<'a> Drawer<'a> {
     pub fn new(model: &'a BoardModel, opts: &'a Options, b: &'a Board, st: &'a State<'a>, checker: &'a Checker) -> Self {
         let packer = Packer::for_model(model, opts, &b.proj);
         let (eps, edge_clear, outline) = (packer.eps(), packer.edge_clear(), super::board::outline_segments(model));
+        let dirs = packer.taut_dirs(st);
         Drawer {
             model,
             opts,
@@ -489,6 +493,7 @@ impl<'a> Drawer<'a> {
                 v
             },
             polys: (0..st.wires.len()).map(|w| if st.wires[w].alive { st.polyline(w) } else { Vec::new() }).collect(),
+            dirs,
             iv: Intervals::default(),
             pass_layer: vec![-1; st.passes.len()],
             over: vec![false; st.proj.edges.len() * st.proj.n_layers],
@@ -670,7 +675,7 @@ impl<'a> Drawer<'a> {
                 let wi = &self.st.wires[self.st.passes[pid].wire];
                 let (w, k) = (self.st.passes[pid].wire, self.pass_k[pid]);
                 let pw = self.widths.as_ref().map_or(wi.w, |x| x.pass_w[pid]);
-                PackItem { net: wi.net, w: pw, s: wi.s, infl: infl_of(&self.b.proj, e, &self.polys[w], k) }
+                PackItem { net: wi.net, w: pw, s: wi.s, infl: infl_dir(&self.b.proj, e, self.dirs[w][k]) }
             })
             .collect();
         let bnd = self.packer.bounds(e, l, &pitems);

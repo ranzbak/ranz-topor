@@ -324,8 +324,8 @@ fn labels_case(f: impl FnOnce(&State, &board::Board, &Packer, &[Vec<topor_engine
     let mut st = State::new(&b.proj);
     route(&mut st, &conns, &InitWeights::default());
     let packer = Packer::for_model(&m, &Options::default(), &b.proj);
-    let polys: Vec<_> = (0..st.wires.len()).map(|w| st.polyline(w)).collect();
-    f(&st, &b, &packer, &polys);
+    let dirs = packer.taut_dirs(&st);
+    f(&st, &b, &packer, &dirs);
 }
 
 fn labels<'a>(st: &'a State<'a>, cm: CapModel<'a>, evl: Vec<Vec<(usize, f64, i32)>>, mask: &'a [Vec<u64>], partner: &'a [Vec<Option<(WireId, usize)>>]) -> Labels<'a> {

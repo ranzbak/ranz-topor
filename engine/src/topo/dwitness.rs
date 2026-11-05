@@ -19,7 +19,7 @@
 
 use super::board::{self, Board};
 use super::draw::{crossing, seg_dist, via_item, Drawer, Plan, WireOut, Widths};
-use super::pack::{infl_of, PackItem};
+use super::pack::{infl_dir, infl_of, PackItem};
 use super::state::{EdgeId, State, WireId};
 use super::witness::{chain_nodes, chains, pieces, sub_state, walk, Chain, Dropped, Locator, Walked, WitnessOpts};
 use crate::check::Checker;
@@ -391,8 +391,8 @@ fn draw_all(m: &BoardModel, hand: &BoardModel, opts: &Options, b: &Board, st: &S
         } else if let Some(d) = dr.diag.iter().rev().find(|d| d.wire == w) {
             if std::env::var("TOPO_D0DBG").is_ok() {
                 eprintln!(
-                    "D0 reject wire {w} net {} L{} k {}..{} of {} {} against {} gap {:.3} req {:.3} at ({:.3},{:.3}) static_infeasible {} pre_bad {:?} bumps {}",
-                    d.net, d.layer, d.k0, d.k1, st.wires[w].passes.len(), d.class, d.against, d.gap_nm as f64 / 1e6, d.req_nm as f64 / 1e6, d.at.x / 1e6, -d.at.y / 1e6, d.static_infeasible, d.pre_bad, d.bumps
+                    "D0 reject wire {w} net {} L{} k {}..{} of {} {} against {} gap {:.3} req {:.3} short {} nm at ({:.3},{:.3}) static_infeasible {} pre_bad {:?} bumps {}",
+                    d.net, d.layer, d.k0, d.k1, st.wires[w].passes.len(), d.class, d.against, d.gap_nm as f64 / 1e6, d.req_nm as f64 / 1e6, d.req_nm - d.gap_nm, d.at.x / 1e6, -d.at.y / 1e6, d.static_infeasible, d.pre_bad, d.bumps
                 );
             }
             format!("{}/{}", d.class, kind_of(&d.against))
@@ -436,7 +436,7 @@ pub fn audit(dr: &Drawer, drawn: &BTreeMap<WireId, WireOut>) -> Vec<PairAudit> {
                     let w = st.passes[pid].wire;
                     let wi = &st.wires[w];
                     let pw = dr.widths.as_ref().map_or(wi.w, |x| x.pass_w[pid]);
-                    PackItem { net: wi.net, w: pw, s: wi.s, infl: infl_of(pr, e, &dr.polys[w], kpos[pid]) }
+                    PackItem { net: wi.net, w: pw, s: wi.s, infl: infl_dir(pr, e, dr.dirs[w][kpos[pid]]) }
                 })
                 .collect();
             let bnd = dr.packer.bounds(e, l, &pitems);
@@ -521,7 +521,7 @@ fn over_debug(dr: &Drawer, walked: &[Walked], chain_of: &[usize]) {
                     let w = st.passes[pid].wire;
                     let wi = &st.wires[w];
                     let pw = dr.widths.as_ref().map_or(wi.w, |x| x.pass_w[pid]);
-                    PackItem { net: wi.net, w: pw, s: wi.s, infl: infl_of(pr, e, &dr.polys[w], kpos[pid]) }
+                    PackItem { net: wi.net, w: pw, s: wi.s, infl: infl_dir(pr, e, dr.dirs[w][kpos[pid]]) }
                 })
                 .collect();
             let bnd = dr.packer.bounds(e, l, &pitems);
@@ -587,12 +587,39 @@ fn infl_stats(dr: &Drawer, walked: &[Walked], chain_of: &[usize]) -> (Vec<(f64, 
                 let wi = &st.wires[st.passes[pid].wire];
                 PackItem { net: wi.net, w: dr.widths.as_ref().map_or(wi.w, |x| x.pass_w[pid]), s: wi.s, infl }
             };
-            let planned: Vec<f64> = items.iter().map(|&pid| infl_of(pr, e, &dr.polys[st.passes[pid].wire], kpos[pid])).collect();
+            let planned: Vec<f64> = items.iter().map(|&pid| infl_dir(pr, e, dr.dirs[st.passes[pid].wire][kpos[pid]])).collect();
             let hand: Vec<f64> = items.iter().map(|&pid| hand_infl(pid)).collect();
             let a: Vec<PackItem> = items.iter().zip(&planned).map(|(&p, &f)| item(p, f)).collect();
             let b: Vec<PackItem> = items.iter().zip(&hand).map(|(&p, &f)| item(p, f)).collect();
             if !dr.packer.bounds(e, l, &a).fits() {
                 over += 1;
+                if std::env::var("TOPO_D1DBG").is_ok() && dr.packer.bounds(e, l, &b).fits() {
+                    let [p, q] = pr.edges[e];
+                    let len = (pr.pos[q] - pr.pos[p]).len();
+                    let u = |x: Vec2| ((x - pr.pos[p]).dot(pr.pos[q] - pr.pos[p]) / len / 1e6 * 1e3).round() / 1e3;
+                    let mid = (pr.pos[p] + pr.pos[q]) * 0.5;
+                    let det: Vec<String> = items
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &pid)| {
+                            let w = st.passes[pid].wire;
+                            let t = dr.packer.taut(st, w);
+                            let hp = &walked[chain_of[w]].passes[kpos[pid]];
+                            format!("w{w}/k{}/{}: taut {:.2} at {} hand {:.2} at {}", kpos[pid], st.wires[w].passes.len(), planned[i], u(t.at[kpos[pid]]), hand[i], u(hp.at))
+                        })
+                        .collect();
+                    eprintln!(
+                        "D1 taut-over e{e} L{l} at ({:.3},{:.3}) len {:.3} ends {:?}/{:?} worst {:.3} / hand {:.3}: {}",
+                        mid.x / 1e6,
+                        -mid.y / 1e6,
+                        len / 1e6,
+                        pr.vkind[p],
+                        pr.vkind[q],
+                        dr.packer.bounds(e, l, &a).worst() / 1e6,
+                        dr.packer.bounds(e, l, &b).worst() / 1e6,
+                        det.join("; ")
+                    );
+                }
                 if !dr.packer.bounds(e, l, &b).fits() {
                     over_hand += 1;
                     if b.windows(2).any(|x| x[0].net == x[1].net) {
