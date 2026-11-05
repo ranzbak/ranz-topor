@@ -348,27 +348,22 @@ pub fn routing_events(st: &State, vias: &[u32], ws0: f64, keep: &dyn Fn(WireId) 
             }
         }
         let me = super::demand::Item { net: wi.net, w: wi.w, s: wi.s };
-        for (k, &t) in wi.tris.iter().enumerate() {
+        for &t in &wi.tris {
             for pad in st.blocked_pads(t, wi.net) {
                 out.push(Event::BlocksPad { wire: w, tri: t, pad });
             }
-            // P2's `over_cost`: entering or leaving another net's SMD pad area, or a change of the
-            // allowed layers over it, fixes the layer once.
-            if k > 0 {
-                let t0 = wi.tris[k - 1];
-                let over = |x: usize| pr.tri_obs[x].iter().any(|&o| pr.obstacles[o].net != Some(wi.net));
-                if over(t) != over(t0) || (over(t0) && pr.allowed(t0, wi.net) != pr.allowed(t, wi.net)) {
-                    out.push(Event::LayerForced { wire: w, edge: st.passes[wi.passes[k - 1]].edge });
-                }
-            }
+        }
+        // P2's layer pin: a via implied where a stretch fixed to some layers meets one fixed to
+        // others (or the end pad's layer), once per change.
+        let edges: Vec<usize> = wi.passes.iter().map(|&p| st.passes[p].edge).collect();
+        let end = |v, obs| super::init::TreeEnd { v, obs, on: None, adj: 0.0, arms: [None; 4] };
+        for e in st.forced_edges(wi.net, wi.w, wi.s, &end(wi.a, wi.pa), &end(wi.b, wi.pb), &edges, &wi.tris) {
+            out.push(Event::LayerForced { wire: w, edge: e });
         }
         for (j, &p) in wi.passes.iter().enumerate() {
             let e = st.passes[p].edge;
             let (t0, t1) = (wi.tris[j], wi.tris[j + 1]);
             let alone = pr.edge_demand(e, &[me]);
-            if (0..pr.n_layers).any(|l| alone > pr.room_for(e, l, wi.net)) {
-                out.push(Event::LayerForced { wire: w, edge: e });
-            }
             let need = st.edge_need(e, None);
             if st.room_across(e, t0, t1, wi.net).is_some_and(|room| need > room) {
                 out.push(Event::Overflow { wire: w, edge: e });

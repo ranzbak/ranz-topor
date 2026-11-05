@@ -387,17 +387,15 @@ fn insert_events(st: &State, wire: &Wire, path: &[(EdgeId, usize)], tris: &[TriI
         for pad in st.blocked_pads(t, wire.net) {
             out.push(Event::BlocksPad { wire: id, tri: t, pad });
         }
-        // A triangle over another net's pad fixes the layer.
-        if pr.tri_obs[t].iter().any(|&o| pr.obstacles[o].net != Some(wire.net)) && k > 0 {
-            out.push(Event::LayerForced { wire: id, edge: path[k - 1].0 });
-        }
+    }
+    // The layer pin of P2's search (`State::forced_edges`): a via where the layers run out.
+    let edges: Vec<EdgeId> = path.iter().map(|&(e, _)| e).collect();
+    let end = |v, obs| super::init::TreeEnd { v, obs, on: None, adj: 0.0, arms: [None; 4] };
+    for e in st.forced_edges(wire.net, wire.w, wire.s, &end(wire.a, wire.pa), &end(wire.b, wire.pb), &edges, tris) {
+        out.push(Event::LayerForced { wire: id, edge: e });
     }
     for (j, &(e, g)) in path.iter().enumerate() {
         let (nt0, nt1) = (tris[j], tris[j + 1]);
-        let alone = pr.edge_demand(e, &[me]);
-        if (0..pr.n_layers).any(|l| alone > pr.room_for(e, l, wire.net)) {
-            out.push(Event::LayerForced { wire: id, edge: e });
-        }
         if st.overflows(e, g, nt0, nt1, wire.net, wire.w, wire.s) {
             out.push(Event::Overflow { wire: id, edge: e });
         }

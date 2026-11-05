@@ -128,6 +128,11 @@ struct Node {
     pt: Vec2,
     /// Index of the source end the path starts at ([`State::search_tree`]).
     seed: usize,
+    /// Layers the wire can have been on since its last implied via (D6a): the layers of its
+    /// start pad, narrowed by every pass that fits on some layers only (a narrow gap, another
+    /// net's pad on one layer). A pass that leaves none implies a via (`LayerForced`, priced
+    /// once) and the mask starts again from that pass's layers.
+    pin: u64,
 }
 
 /// One end a tree search may start or stop at (D5 branching, [`State::search_tree`]): a vertex of
@@ -231,8 +236,14 @@ impl Search<'_, '_> {
 
     fn push(&mut self, n: Node) {
         let slot = self.slot(n.e, n.g, n.into);
-        if self.best[slot] != u32::MAX && self.nodes[self.best[slot] as usize].cost <= n.cost {
-            return;
+        if self.best[slot] != u32::MAX {
+            // The node there wins unless the new one is cheaper, or keeps more layers open
+            // (a superset of the pin) for less than the via that saves.
+            let o = &self.nodes[self.best[slot] as usize];
+            let wider = n.pin & o.pin == o.pin && n.pin != o.pin;
+            if o.cost <= n.cost && !(wider && n.cost < o.cost + self.wt.forced_layer_mm) {
+                return;
+            }
         }
         let h = self.h(n.pt);
         let f = n.cost + h;
@@ -249,7 +260,7 @@ impl Search<'_, '_> {
     /// end of the path, `except` a wire whose chords in `t` are not crossed (the trunk a branch
     /// leaves at a junction corner of `t`).
     #[allow(clippy::too_many_arguments)]
-    fn expand(&mut self, t: TriId, x: End, in_e: Option<EdgeId>, px: Vec2, base: f64, parent: usize, seed: usize, except: Option<WireId>) {
+    fn expand(&mut self, t: TriId, x: End, in_e: Option<EdgeId>, px: Vec2, base: f64, parent: usize, seed: usize, except: Option<WireId>, pin: u64) {
         let (st, c) = (self.st, self.c);
         let pr = st.proj;
         // Taking the last free entry sector of another net's pad.
@@ -262,6 +273,7 @@ impl Search<'_, '_> {
                 }
                 let skip = [except, d.on.map(|o| o.0)];
                 let cost = base
+                    + if pin & st.end_mask(&d) == 0 { self.wt.forced_layer_mm } else { 0.0 }
                     + d.adj
                     + self.angle_cost(&d, px)
                     + (pr.pos[d.v] - px).len() / MM * self.scale * self.wt.length_mm
@@ -297,15 +309,18 @@ impl Search<'_, '_> {
             let Some(nt) = pr.across(e, t) else { continue };
             let Some(mask_nt) = pr.allowed(nt, c.net) else { continue };
             let alone = pr.edge_demand(e, &[me]);
-            let extra = st.over_cost(t, nt, c.net, &self.wt)
-                + if (0..pr.n_layers).any(|l| alone > pr.room_for(e, l, c.net)) { self.wt.forced_layer_mm } else { 0.0 }
-                + self.hook.map_or(0.0, |h| h(c.net, e));
+            let (forced, nowhere, pin2) = st.pin_through(pin, e, t, nt, c.net, alone);
+            let extra = if forced { self.wt.forced_layer_mm } else { 0.0 } + if nowhere { self.wt.overflow_mm } else { 0.0 } + self.hook.map_or(0.0, |h| h(c.net, e));
+            // The room of the layers the wire can be on here (its layer pin): a stretch held to
+            // one layer has that layer's room only, not the sum over the layers the triangles
+            // allow (D6a).
+            let pinned = |m: u64| if m & pin2 != 0 { m & pin2 } else { m };
             let room1 = mask_t.map(|m| {
-                let both = m.0 & mask_nt.0;
+                let both = pinned(m.0 & mask_nt.0);
                 (0..pr.n_layers).filter(|&l| (both >> l) & 1 == 1).map(|l| pr.room_for(e, l, c.net)).fold(f64::NEG_INFINITY, f64::max)
             });
             let room = mask_t.map(|m| {
-                let both = m.0 & mask_nt.0;
+                let both = pinned(m.0 & mask_nt.0);
                 (0..pr.n_layers).filter(|&l| (both >> l) & 1 == 1).map(|l| pr.room_for(e, l, c.net)).sum::<f64>()
             });
             self.needs.clear();
@@ -350,7 +365,7 @@ impl Search<'_, '_> {
                     };
                 // Leaving a junction seed: the angle to the arms already there.
                 let cost = if parent == usize::MAX { cost + self.seed_angle(seed, pt) } else { cost };
-                self.push(Node { e, g, into: nt, from_tri: t, parent, cost, pt, seed });
+                self.push(Node { e, g, into: nt, from_tri: t, parent, cost, pt, seed, pin: pin2 });
             }
         }
     }
@@ -382,17 +397,74 @@ impl<'p> State<'p> {
         c
     }
 
-    /// Price of passing from `t` to `nt` where the layers a wire may use change because of another
-    /// net's SMD pad (entering or leaving the pad's area): the stretch over the pad is fixed to
-    /// one layer, which costs up to one via per end, not one per triangle of the stretch.
-    fn over_cost(&self, t: TriId, nt: TriId, net: i32, wt: &InitWeights) -> f64 {
-        let pr = self.proj;
-        let over = |x: TriId| pr.tri_obs[x].iter().any(|&o| pr.obstacles[o].net != Some(net));
-        if over(nt) != over(t) || (over(t) && pr.allowed(t, net) != pr.allowed(nt, net)) {
-            wt.smd_over_mm
-        } else {
-            0.0
+    /// Layers of a tree end (D6a): the pad's copper layers (all for a drilled pad), all for a
+    /// node or a branch point on a trace (its layer is not fixed before P3).
+    pub(crate) fn end_mask(&self, d: &TreeEnd) -> u64 {
+        let all = super::state::LayerMask::all(self.proj.n_layers).0;
+        match self.proj.obstacles.get(d.obs) {
+            Some(ob) if d.on.is_none() && !ob.drilled => ob.layers.0 & all,
+            _ => all,
         }
+    }
+
+    /// The layers a pass of `net` through `e` from `t` into `nt` may take: allowed in both
+    /// triangles (another net's single-layer pad closes its layer) and wide enough for the wire
+    /// alone (`alone`); when it fits on none, the layers both allow (the overflow is priced
+    /// apart).
+    pub(crate) fn pass_mask(&self, e: EdgeId, t: TriId, nt: TriId, net: i32, alone: f64) -> (u64, u64) {
+        let pr = self.proj;
+        let both = pr.allowed(t, net).map_or(0, |m| m.0) & pr.allowed(nt, net).map_or(0, |m| m.0);
+        let fit = (0..pr.n_layers).filter(|&l| (both >> l) & 1 == 1 && alone <= pr.room_for(e, l, net)).fold(0u64, |m, l| m | 1 << l);
+        (fit, both)
+    }
+
+    /// One pass of the layer pin (see `Node::pin`): whether it implies a via, whether the wire
+    /// alone fits on no layer there (an overflow whatever the layers), and the new pin.
+    /// A stretch that has to keep one layer (a narrow gap, under another net's pad) costs no
+    /// via when the wire is on that layer anyway (its own SMD pad's, or the one the stretch
+    /// before already kept); a via is priced once where the layers run out, not per pass.
+    pub(crate) fn pin_through(&self, pin: u64, e: EdgeId, t: TriId, nt: TriId, net: i32, alone: f64) -> (bool, bool, u64) {
+        let (fit, both) = self.pass_mask(e, t, nt, net, alone);
+        if fit == 0 {
+            // Too narrow on every layer: the pin keeps to the layers the triangles allow.
+            let ok = both;
+            return if ok == 0 || pin & ok != 0 { (false, true, if ok == 0 { pin } else { pin & ok }) } else { (true, true, ok) };
+        }
+        if pin & fit != 0 {
+            (false, false, pin & fit)
+        } else {
+            (true, false, fit)
+        }
+    }
+
+    /// The passes of a path (`edges`, triangles `tris`, one more) of `net` from end `a` to end
+    /// `b` where a via is implied (the layer pin of [`State::pin_through`]); a mismatch at the
+    /// end `b` is reported on the last edge. The `LayerForced` events of a routed wire.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forced_edges(&self, net: i32, w: f64, s: f64, a: &TreeEnd, b: &TreeEnd, edges: &[EdgeId], tris: &[TriId]) -> Vec<EdgeId> {
+        let pr = self.proj;
+        let me = Item { net, w, s };
+        let mut out = Vec::new();
+        let m0 = tris.first().and_then(|&t| pr.allowed(t, net)).map_or(0, |m| m.0);
+        let mut pin = if m0 & self.end_mask(a) != 0 { m0 & self.end_mask(a) } else { m0 };
+        if m0 & self.end_mask(a) == 0 {
+            if let Some(&e) = edges.first() {
+                out.push(e);
+            }
+        }
+        for (j, &e) in edges.iter().enumerate() {
+            let (forced, _, p2) = self.pin_through(pin, e, tris[j], tris[j + 1], net, pr.edge_demand(e, &[me]));
+            if forced {
+                out.push(e);
+            }
+            pin = p2;
+        }
+        if pin & self.end_mask(b) == 0 {
+            if let Some(&e) = edges.last() {
+                out.push(e);
+            }
+        }
+        out
     }
 
     /// Room of edge `e` for a wire of `net` allowed on the layers of both triangles: the sum over
@@ -475,7 +547,10 @@ impl<'p> State<'p> {
         };
         for (i, d) in src.iter().enumerate() {
             for t in tris_of(d) {
-                s.expand(t, End::Corner(d.v), None, pr.pos[d.v], d.adj, usize::MAX, i, d.on.map(|o| o.0));
+                // A start pad on layers the triangle does not allow: a via at once.
+                let (m, pm) = (pr.allowed(t, c.net).map_or(0, |m| m.0), self.end_mask(d));
+                let (pin, adj) = if m & pm != 0 { (m & pm, d.adj) } else { (m, d.adj + wt.forced_layer_mm) };
+                s.expand(t, End::Corner(d.v), None, pr.pos[d.v], adj, usize::MAX, i, d.on.map(|o| o.0), pin);
             }
         }
         let mut expansions = 0;
@@ -491,11 +566,14 @@ impl<'p> State<'p> {
             if expansions > wt.max_expansions {
                 break;
             }
-            let (t, e, g, pt, cost, seed) = (n.into, n.e, n.g, n.pt, n.cost, n.seed);
-            s.expand(t, End::Gap(e, g), Some(e), pt, cost, i, seed, None);
+            let (t, e, g, pt, cost, seed, pin) = (n.into, n.e, n.g, n.pt, n.cost, n.seed, n.pin);
+            s.expand(t, End::Gap(e, g), Some(e), pt, cost, i, seed, None, pin);
         }
         if std::env::var("P2_PROF").is_ok() {
             eprintln!("conn {}: expansions {expansions}, nodes {}, cost {:.1}, w {:.2}", c.net, s.nodes.len(), s.goal.map_or(-1.0, |g| g.0), c.w / MM);
+        }
+        if std::env::var("TOPO_TREEDBG").is_ok() {
+            eprintln!("TREEGOAL net {} srcs {} dsts {} cost {:?} expansions {expansions}", c.net, src.len(), dst.len(), s.goal.map(|g| (g.0, g.3, g.4)));
         }
         let (_, mut i, last, seed, j) = s.goal?;
         let mut path = Vec::new();

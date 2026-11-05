@@ -92,7 +92,7 @@ used. Defaults of the rough router (plan "Default weights"):
 | Factor | Default | Prices |
 |---|---|---|
 | `length` | 1 per mm x (w+s)/(w0+s0) | copper length |
-| `via` | 25 per via | a via; a stretch forced onto one layer counts as one |
+| `via` | 25 per via | a via; where the layers a wire can use run out (P2's layer pin: a stretch held to one layer by a narrow gap or another net's pad meets one held to another layer, or its end pad's) counts as one, once per change |
 | `crossing` | 20 per crossing | two nets cross in P2 |
 | `same_net_crossing` | 0 | a net crossing itself (a loop) |
 | `plane_signal` | 10 per mm | signal copper on a plane layer, on top of its length |
