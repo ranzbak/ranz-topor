@@ -185,11 +185,16 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
     }
     if png:
         try:
-            from harness.render import caption, compose_compare, render_png
-            h = caption(render_png(hand.pcb, out_dir / f"{name}-hand-raw.png"), f"{name}: hand",
+            from harness.render import board_bbox_nm, caption, compose_compare, draw_ratsnest, render_png
+            # Blue lines: KiCad's DRC unconnected items after the refill (the open ratsnest).
+            hr = render_png(hand.pcb, out_dir / f"{name}-hand-raw.png")
+            hr = draw_ratsnest(hr, hr, hand_drc.unconnected, bbox_nm=board_bbox_nm(hand.pcb))
+            h = caption(hr, f"{name}: hand ({m['unconnected_hand']} unconnected, blue)",
                         out_dir / f"{name}-hand.png")
-            t = caption(render_png(routed_pcb, out_dir / f"{name}-topor-raw.png"),
-                        f"{name}: {os.environ.get('TOPOR_PNG_LABEL', 'topor')} ({routed}/{total} routed, {m['unconnected']} unconnected)",
+            tr = render_png(routed_pcb, out_dir / f"{name}-topor-raw.png")
+            tr = draw_ratsnest(tr, tr, routed_drc.unconnected, bbox_nm=board_bbox_nm(routed_pcb))
+            t = caption(tr,
+                        f"{name}: {os.environ.get('TOPOR_PNG_LABEL', 'topor')} ({routed}/{total} routed, {m['unconnected']} unconnected, blue)",
                         out_dir / f"{name}-topor.png")
             compose_compare(h, t, out_dir / f"{name}-compare.png")
             m["png"] = str(out_dir / f"{name}-compare.png")

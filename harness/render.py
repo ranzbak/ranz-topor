@@ -138,6 +138,34 @@ def highlight_points(png: Path, out: Path, pairs, *, bbox_nm, radius_px: int = 1
     return out
 
 
+RATSNEST_COLOR = "#0050ff"
+
+
+def draw_ratsnest(png: Path, out: Path, unconnected: list[dict], *, bbox_nm,
+                  color: str = RATSNEST_COLOR, width_px: int = 3, dot_px: int = 6) -> Path:
+    """Draw KiCad DRC `unconnected_items` (the ratsnest left after the zone refill) on `png`.
+
+    Each entry's two item positions (`items[i].pos`, mm in the KiCad frame) are joined by a line
+    of `color` with a dot at each end; `bbox_nm` maps the board to pixels as in `highlight_points`.
+    The positions are KiCad's item anchors (pad centre, track start), not the nearest points, so a
+    line marks which items are apart, not the exact gap. O(U) in the unconnected items.
+    """
+    out = Path(out)
+    x0, y0, x1, y1 = bbox_nm
+    w, h = _png_width(png), _png_height(png)
+    sx, sy = w / (x1 - x0), h / (y1 - y0)
+    cmd = ["convert", str(png), "-stroke", color, "-fill", color, "-strokewidth", str(width_px)]
+    for u in unconnected:
+        pp = [((it["pos"]["x"] * 1e6 - x0) * sx, (it["pos"]["y"] * 1e6 - y0) * sy)
+              for it in u.get("items", []) if "pos" in it]
+        if len(pp) == 2:
+            cmd += ["-draw", f"line {pp[0][0]:.1f},{pp[0][1]:.1f} {pp[1][0]:.1f},{pp[1][1]:.1f}"]
+        for cx, cy in pp:
+            cmd += ["-draw", f"circle {cx:.1f},{cy:.1f} {cx + dot_px:.1f},{cy:.1f}"]
+    subprocess.run(cmd + [str(out)], check=True)
+    return out
+
+
 def compose_compare(left_png: Path, right_png: Path, out_png: Path, *,
                     pad_px: int = COMPARE_PAD_PX) -> Path:
     """Left and right images side by side, each surrounded by `pad_px` of white."""
