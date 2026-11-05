@@ -824,7 +824,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     if let Ok(path) = std::env::var("TOPO_D0AUDIT") {
         let a = super::dwitness::audit(&dr, &drawn);
         if let Ok(j) = serde_json::to_string(&a) {
-            let _ = std::fs::write(&path, j);
+            let _ = std::fs::write(format!("{path}.r{round}"), j);
         }
     }
     // ---- Feedback (plan S2c item 4): a wire the drawing could not fit is drawn before the
@@ -1009,7 +1009,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     tlog("via reduction", t_red);
     if let Ok(path) = std::env::var("TOPO_DUMP") {
-        let _ = std::fs::write(path, dr.dump());
+        // One file per whole-route round, like `TOPO_DIAG`.
+        let _ = std::fs::write(format!("{path}.r{round}"), dr.dump());
     }
     let diag = std::mem::take(&mut dr.diag);
     // Hints for a second round: per cut of a still-failed wire, the room is lowered by the

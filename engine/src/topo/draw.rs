@@ -487,6 +487,23 @@ impl<'a> Drawer<'a> {
         let packer = Packer::for_model(model, opts, &b.proj);
         let (eps, edge_clear, outline) = (packer.eps(), packer.edge_clear(), super::board::outline_segments(model));
         let dirs = packer.taut_dirs(st);
+        if let Ok(v) = std::env::var("TOPO_TAUTDBG") {
+            // Debug: the taut path of the listed wires (crossing point, direction, edge, infl).
+            for w in v.split(',').filter_map(|x| x.parse::<usize>().ok()).filter(|&w| w < st.wires.len() && st.wires[w].alive) {
+                let t = packer.taut(st, w);
+                for (k, &pid) in st.wires[w].passes.iter().enumerate() {
+                    let e = st.passes[pid].edge;
+                    eprintln!(
+                        "TAUT wire {w} k {k} e{e} at ({:.3},{:.3}) dir ({:.3},{:.3}) infl {:.3}",
+                        t.at[k].x / 1e6,
+                        -t.at[k].y / 1e6,
+                        t.dir[k].x / 1e6,
+                        -t.dir[k].y / 1e6,
+                        infl_dir(&b.proj, e, t.dir[k])
+                    );
+                }
+            }
+        }
         Drawer {
             model,
             opts,
@@ -1026,15 +1043,20 @@ impl<'a> Drawer<'a> {
             .map(|(w, l, at, r)| {
                 let wi = &self.st.wires[*w];
                 format!(
-                    "{{\"wire\":{w},\"net\":{},\"w\":{},\"layer\":{l},\"reason\":{:?},\"tries\":[{}]}}",
+                    "{{\"wire\":{w},\"net\":{},\"w\":{},\"layer\":{l},\"reason\":{:?},\"tris\":{:?},\"tries\":[{}]}}",
                     wi.net,
                     wi.w,
                     r,
+                    wi.tris,
                     at.iter().map(|p| format!("[{}]", p.iter().map(|&q| pt(q)).collect::<Vec<_>>().join(","))).collect::<Vec<_>>().join(",")
                 )
             })
             .collect();
-        format!("{{\"segs\":[{}],\"polys\":[{}],\"fails\":[{}]}}", segs.join(","), polys.join(","), fails.join(","))
+        let pr = &self.b.proj;
+        let tris: Vec<String> = pr.tris.iter().map(|t| format!("[{}]", t.iter().map(|&v| pt(pr.pos[v])).collect::<Vec<_>>().join(","))).collect();
+        // Per triangle: the wires traversing it `[wire, net, k]`.
+        let trav: Vec<String> = self.st.tri_trav.iter().map(|v| format!("[{}]", v.iter().map(|&(w, k)| format!("[{w},{},{k}]", self.st.wires[w].net)).collect::<Vec<_>>().join(","))).collect();
+        format!("{{\"segs\":[{}],\"polys\":[{}],\"fails\":[{}],\"tris\":[{}],\"trav\":[{}]}}", segs.join(","), polys.join(","), fails.join(","), tris.join(","), trav.join(","))
     }
 
     /// Take the copper of `handle` back out.
@@ -1454,12 +1476,31 @@ impl<'a> Drawer<'a> {
                     .iter()
                     .enumerate()
                     .filter(|&(j, _)| j != i)
-                    .map(|(j, &q)| format!("{}{}@{}", if j < i { "<" } else { ">" }, self.st.passes[q].wire, self.live_x(q).map_or("-".into(), |x| format!("{:.3}", x / 1e6))))
+                    .map(|(j, &q)| {
+                        let (ql, qr) = self.slot[q].map_or((f64::NAN, f64::NAN), |s| (s.3, s.4));
+                        let elen = (pr.pos[pr.edges[e][1]] - pr.pos[pr.edges[e][0]]).len();
+                        format!(
+                            "{}{}@{}[slot {:.3}..{:.3} iv {:.3}..{:.3}]",
+                            if j < i { "<" } else { ">" },
+                            self.st.passes[q].wire,
+                            self.live_x(q).map_or("-".into(), |x| format!("{:.3}", x / 1e6)),
+                            ql / 1e6,
+                            qr / 1e6,
+                            self.iv.lo[q] * elen / 1e6,
+                            self.iv.hi[q] * elen / 1e6
+                        )
+                    })
                     .collect();
                 let [p, q] = pr.edges[e];
                 let mid = (pr.pos[p] + pr.pos[q]) * 0.5;
                 eprintln!(
-                    "LANE wire {w} k {k} e{e} at ({:.3},{:.3}) len {:.3}: slot {i} lmin {:.3} rmax {:.3} spare {:.3}; left by drawn neighbours {:.3}..{:.3}{} | {}",
+                    "LANE wire {w} k {k} e{e} p ({:.3},{:.3}) {:?} q ({:.3},{:.3}) {:?} at ({:.3},{:.3}) len {:.3}: slot {i} lmin {:.3} rmax {:.3} spare {:.3}; left by drawn neighbours {:.3}..{:.3}{} | {}",
+                    pr.pos[p].x / 1e6,
+                    -pr.pos[p].y / 1e6,
+                    pr.vkind[p],
+                    pr.pos[q].x / 1e6,
+                    -pr.pos[q].y / 1e6,
+                    pr.vkind[q],
                     mid.x / 1e6,
                     -mid.y / 1e6,
                     (pr.pos[q] - pr.pos[p]).len() / 1e6,
