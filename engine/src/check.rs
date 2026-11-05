@@ -644,6 +644,23 @@ impl Checker {
                 if Self::is_exempt(net, o) {
                     return;
                 }
+                // Hole clearance between foreign copper and a drill: the drill of an indexed via
+                // against this item's copper, and this via's drill against the obstacle's copper
+                // (model vias and holes carry their own `Kind::Hole` obstacle).
+                let holes = [
+                    o.hole.as_ref().map(|h| copper_gap(&track, h)),
+                    drill_track.as_ref().filter(|_| matches!(o.kind, Kind::Pad | Kind::Track | Kind::Via | Kind::Shape)).map(|d| o.gap(d)),
+                ];
+                for gap in holes.into_iter().flatten() {
+                    let req = self.hole_clearance + self.margin;
+                    if gap < req {
+                        let (g, r) = (gap.round() as i64, req.round() as i64);
+                        match found.iter_mut().find(|v| v.against == o.label && v.layer == layer && v.required == r) {
+                            Some(v) => v.gap = v.gap.min(g),
+                            None => found.push(Violation { item: i, against: o.label.clone(), layer, gap: g, required: r }),
+                        }
+                    }
+                }
                 let req = self.required(net, o, own_clr);
                 let gap = o.gap(&track);
                 if gap < req && !Self::tie_excluded(o, net, &track) {
@@ -865,6 +882,11 @@ impl ItemIndex {
         self.obstacles[id] = Some((o, keys));
         self.live += 1;
         id
+    }
+
+    /// Whether item `id` is a live via. O(1).
+    pub fn is_via(&self, id: usize) -> bool {
+        matches!(self.obstacles.get(id), Some(Some((o, _))) if o.kind == Kind::Via)
     }
 
     /// Drop item `id` (no-op if absent) and free its slot. O(cells covered).

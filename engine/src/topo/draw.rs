@@ -283,6 +283,19 @@ fn kicad_pt(p: Vec2) -> IVec2 {
 }
 
 /// A track item for the segment `a -> b` (math frame in, KiCad frame out).
+/// Clearance a via of `net` (copper diameter `d`, drill `drill`, nm) demands around its copper
+/// disc: the net's copper clearance, or more where KiCad's hole clearance to its drill reaches
+/// further (`drill / 2 + hole_clearance > d / 2 + clearance`, e.g. a 0.4 / 0.3 mm via with
+/// 0.2 mm clearance and 0.254 mm hole clearance). Both are discs about the via centre.
+pub fn via_clear(model: &BoardModel, net: i32, d: i64, drill: i64) -> f64 {
+    let r = &model.rules;
+    let copper = r.net_rule(net).clearance as f64;
+    if drill <= 0 {
+        return copper;
+    }
+    copper.max(0.5 * drill as f64 + r.hole_clearance as f64 - 0.5 * d as f64)
+}
+
 pub fn track_item(net: i32, layer: u32, w: f64, a: Vec2, b: Vec2, wire: Option<usize>) -> Item {
     Item::Track(TrackItem {
         net,
@@ -348,6 +361,8 @@ pub struct Diag {
     /// The exact search also found no path with the drawn copper ignored: the topology does not
     /// fit the static board (pads, holes, edge, keepouts, existing copper) at this width.
     pub static_infeasible: bool,
+    /// The violated object is a via the router placed (diagnosis: does a wire lose to a via?).
+    pub against_via: bool,
 }
 
 /// Counters of the drawing: which method produced each accepted run.
@@ -577,7 +592,7 @@ impl<'a> Drawer<'a> {
         // Existing copper the board keeps: vias and tracks (arcs as chords).
         for v in &model.vias {
             let m = if v.layers.is_empty() { all } else { lmask(&v.layers) | if v.layers.contains(&0) && v.layers.contains(&2) { all } else { 0 } };
-            let clear = model.rules.net_rule(v.net).clearance as f64;
+            let clear = via_clear(model, v.net, v.d, v.drill);
             self.add_ent(Ent { core: Core::Pt(v.at.to_vec2()), grow: 0.5 * v.d as f64, mask: m, net: (v.net > 0).then_some(v.net), clear, fixed: false, live: true, shape: false });
         }
         for k in &model.kept {
@@ -626,7 +641,7 @@ impl<'a> Drawer<'a> {
             }
             Item::Via(v) => {
                 let nl = b.signal_layers.len();
-                let clear = self.model.rules.net_rule(v.net).clearance as f64;
+                let clear = via_clear(self.model, v.net, v.d, v.drill);
                 self.add_ent(Ent {
                     core: Core::Pt(Vec2 { x: v.at.x as f64, y: -(v.at.y as f64) }),
                     grow: 0.5 * v.d as f64,
@@ -865,14 +880,54 @@ impl<'a> Drawer<'a> {
                     });
                     let blocked = tr.iter().filter(|x| !x.1 && x.0 >= need_r).count();
                     let mid = pr.pos[pr.tris[wi.tris[(ka + kb.max(ka)) / 2]][0]];
+                    // Every candidate site of every size against the static board only (no
+                    // other via placed yet), and what rejects it there.
+                    let (mut n_sites, mut static_ok, mut hole_only, mut own_only) = (0usize, 0usize, 0usize, 0usize);
+                    let r = &self.model.rules;
+                    let hole_req = r.hole_clearance + self.opts.margin_nm;
+                    let copper_req = r.net_rule(net).clearance.max(r.min_clearance) + self.opts.margin_nm;
+                    for &sz in &sizes {
+                        let need = 0.5 * sz.d as f64 + r.net_rule(net).clearance as f64;
+                        let mut sites = self.via_candidates(w, ka, kb.max(ka), need);
+                        if self.opts.via_offset_sites {
+                            sites.extend(self.via_extra(w, ka, kb.max(ka), sz.d as f64, r.net_rule(net).clearance as f64));
+                        }
+                        for (_, p) in sites {
+                            n_sites += 1;
+                            let rep = self.checker.check_items(&[via_item(net, p, sz, Some(w))]);
+                            let hole = self.via_hole_ok(p, sz, net);
+                            let own_ok = self.via_own_pad_ok(p, sz, net);
+                            if rep.violations.is_empty() && hole && own_ok {
+                                static_ok += 1;
+                            } else if rep.violations.is_empty() && hole {
+                                own_only += 1;
+                            } else if hole_req != copper_req && !rep.violations.is_empty() && rep.violations.iter().all(|v| v.required == hole_req) {
+                                hole_only += 1;
+                            }
+                        }
+                    }
+                    // P3's own site test (layers.rs `site`): a triangle centroid of the interval
+                    // with a free disc of the default via plus the default clearance.
+                    let p3_r = 0.5 * r.default.via_d as f64 + r.default.clearance as f64;
+                    let p3_site = (ka..=kb.max(ka)).any(|k| {
+                        let t = wi.tris[k];
+                        let c = pr.tris[t].iter().fold(Vec2 { x: 0.0, y: 0.0 }, |a, &v| a + pr.pos[v]) * (1.0 / 3.0);
+                        !pr.tri_out[t] && pr.free_radius(c, net) >= p3_r
+                    });
                     eprintln!(
-                        "VIADBG wire {w} net {net} ka {ka} kb {kb} tris {} usable {} wide-enough {} best inradius {:.0} need_r {:.0} sizes {} own-pads {} via-in-pad-ok {} at ({:.3},{:.3})",
+                        "VIADBG wire {w} net {net} ka {ka} kb {kb} tris {} usable {} wide-enough {} best inradius {:.0} need_r {:.0} p3_r {:.0} p3-site {} sizes {} sites {} static-ok {} hole-only {} own-pad-only {} own-pads {} via-in-pad-ok {} at ({:.3},{:.3})",
                         tr.len(),
                         tr.iter().filter(|x| !x.1).count(),
                         blocked,
                         best,
                         need_r,
+                        p3_r,
+                        p3_site,
                         sizes.len(),
+                        n_sites,
+                        static_ok,
+                        hole_only,
+                        own_only,
                         own.len(),
                         vip,
                         mid.x / 1e6,
@@ -1397,6 +1452,7 @@ impl<'a> Drawer<'a> {
             pre_bad,
             bumps,
             static_infeasible,
+            against_via: last.against.strip_prefix("item:").and_then(|x| x.parse::<usize>().ok()).is_some_and(|id| self.idx.is_via(id)),
         });
     }
 

@@ -237,8 +237,16 @@ def _graphics(board):
             yield g, ref
 
 
+# Vertex error of the copper graphics' polygons (nm): they are obstacles, so the polygon must
+# CONTAIN KiCad's shape (ERROR_OUTSIDE), at most this much larger (the plugin's IPC exporter keeps
+# <= 0.5 um, model_ipc OBSTACLE_ERR_NM). ERROR_INSIDE at the board's max_error (5 um) let D1's
+# margin-0 drawing put copper 3.3 um inside the clearance of a GND arc on dcsgonebadge.
+SHAPE_ERR_NM = 500
+
+
 def _export_copper_shapes(board, cu: list[int], max_err: int):
     cu_set = set(cu)
+    err = min(max_err, SHAPE_ERR_NM)
     out = []
     for item, owner in _graphics(board):
         layer = int(item.GetLayer())
@@ -247,9 +255,9 @@ def _export_copper_shapes(board, cu: list[int], max_err: int):
         cls = item.GetClass()
         ps = pcbnew.SHAPE_POLY_SET()
         if cls == "PCB_SHAPE":
-            item.TransformShapeToPolygon(ps, item.GetLayer(), 0, max_err, pcbnew.ERROR_INSIDE)
+            item.TransformShapeToPolygon(ps, item.GetLayer(), 0, err, pcbnew.ERROR_OUTSIDE)
         elif cls == "PCB_TEXT":
-            item.TransformTextToPolySet(ps, 0, max_err, pcbnew.ERROR_INSIDE)
+            item.TransformTextToPolySet(ps, 0, err, pcbnew.ERROR_OUTSIDE)
         else:
             continue
         for i in range(ps.OutlineCount()):

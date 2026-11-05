@@ -105,16 +105,20 @@ fn remove_frees_the_slot_and_the_grid() {
 fn via_item_in_index_blocks_tracks_on_every_layer_and_drills() {
     let (c, mut idx) = setup();
     idx.insert(&via(2, 5.0, 5.0, 300_000));
-    // copper: 0.35 - 0.3 - 0.125 < 0.205, on layer 31 (via listed no layer: every layer)
+    // copper: 0.35 - 0.3 - 0.125 < 0.2, on layer 31 (via listed no layer: every layer); the
+    // drill (0.35 - 0.15 - 0.125 = 0.075 < 0.25 hole clearance) is reported too
     let rep = c.check_against(&idx, &[seg(1, 31, 5.35, 0.0, 10.0)], &[]);
-    assert_eq!(rep.violations.len(), 1, "{:?}", rep.violations);
-    assert_eq!(rep.violations[0].against, "item:0");
-    // hole to hole: 0.4 - 0.3 = 0.1 < 0.25 (margin 0)
+    assert_eq!(rep.violations.len(), 2, "{:?}", rep.violations);
+    assert!(rep.violations.iter().all(|v| v.against == "item:0"));
+    assert!(rep.violations.iter().any(|v| v.required == 200_000 && v.gap == -75_000));
+    assert!(rep.violations.iter().any(|v| v.required == 250_000 && v.gap == 75_000));
+    // hole to hole: 0.4 - 0.3 = 0.1 < 0.25 (margin 0); the hole clearance of either drill to the
+    // other via's copper (-0.05 < 0.25, same requirement here) is merged into the same record
     let rep = c.check_against(&idx, &[via(1, 5.4, 5.0, 300_000)], &[]);
     assert!(
         rep.violations
             .iter()
-            .any(|v| v.against == "item:0" && v.required == 250_000 && v.gap == 100_000),
+            .any(|v| v.against == "item:0" && v.required == 250_000 && v.gap <= 100_000),
         "{:?}",
         rep.violations
     );
@@ -157,4 +161,36 @@ fn check_items_equals_check_against_incremental() {
     assert!(!all.violations.is_empty());
     assert_eq!(all.violations, viol);
     assert_eq!(all.candidates_visited, visited);
+}
+
+/// D1: KiCad's hole clearance between a drill and foreign copper also holds for the vias the
+/// router itself indexes (tanmatsu / hh2027 at margin 0: a 0.4 / 0.3 mm via with 0.2 mm copper
+/// clearance leaves 0.25 mm to the drill, under the 0.254 mm hole clearance), in both
+/// directions: a track against an indexed via, and a new via against an indexed track.
+#[test]
+fn indexed_via_drill_keeps_the_hole_clearance() {
+    let mut m = model();
+    m.rules.hole_clearance = 254_000;
+    let c = Checker::new(&m, &Options::default());
+    let small = |net: i32, x: f64, y: f64| {
+        let Item::Via(mut v) = via(net, x, y, 300_000) else { unreachable!() };
+        v.d = 400_000;
+        Item::Via(v)
+    };
+    // Track edge 0.2 mm from the via copper (radius 0.2) = 0.25 mm from the drill (radius 0.15):
+    // centre line at 0.2 + 0.2 + 0.125 = 0.525 mm.
+    let mut idx = ItemIndex::new(c.cell());
+    idx.insert(&small(2, 5.0, 5.0));
+    let rep = c.check_against(&idx, &[seg(1, 0, 5.525, 0.0, 10.0)], &[]);
+    assert_eq!(rep.violations.len(), 1, "{:?}", rep.violations);
+    assert_eq!((rep.violations[0].gap, rep.violations[0].required), (250_000, 254_000));
+    // 0.529 mm: the drill is 0.254 mm away, clean.
+    assert!(c.check_against(&idx, &[seg(1, 0, 5.529, 0.0, 10.0)], &[]).violations.is_empty());
+    // The other direction: a new via next to an indexed track.
+    let mut idx = ItemIndex::new(c.cell());
+    idx.insert(&seg(1, 0, 5.525, 0.0, 10.0));
+    let rep = c.check_against(&idx, &[small(2, 5.0, 5.0)], &[]);
+    assert!(rep.violations.iter().any(|v| v.gap == 250_000 && v.required == 254_000), "{:?}", rep.violations);
+    // Same net: no hole clearance.
+    assert!(c.check_against(&idx, &[small(1, 5.0, 5.0)], &[]).violations.is_empty());
 }

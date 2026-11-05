@@ -1079,13 +1079,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             .map(|d| {
                 let nm = |x: f64| (x / 1e3).round() / 1e3;
                 format!(
-                    "{{\"wire\":{},\"net\":{},\"layer\":{},\"w\":{},\"passes\":{},\"over_passes\":{},\"class\":\"{}\",\"against\":{:?},\"gap\":{},\"req\":{},\"at\":[{},{}],\"from\":[{},{}],\"to\":[{},{}],\"pre_bad\":{:?},\"bumps\":{},\"static_infeasible\":{}}}",
+                    "{{\"wire\":{},\"net\":{},\"layer\":{},\"w\":{},\"passes\":{},\"over_passes\":{},\"class\":\"{}\",\"against\":{:?},\"gap\":{},\"req\":{},\"at\":[{},{}],\"from\":[{},{}],\"to\":[{},{}],\"pre_bad\":{:?},\"bumps\":{},\"static_infeasible\":{},\"against_via\":{}}}",
                     d.wire, d.net, d.layer, nm(d.width_nm), d.passes, d.over_passes, d.class, d.against, d.gap_nm, d.req_nm,
-                    nm(d.at.x), nm(-d.at.y), nm(d.from.x), nm(-d.from.y), nm(d.to.x), nm(-d.to.y), d.pre_bad, d.bumps, d.static_infeasible
+                    nm(d.at.x), nm(-d.at.y), nm(d.from.x), nm(-d.from.y), nm(d.to.x), nm(-d.to.y), d.pre_bad, d.bumps, d.static_infeasible, d.against_via
                 )
             })
             .collect();
-        let _ = std::fs::write(path, format!("[{}]", rows.join(",\n")));
+        // One file per whole-route round (`<path>.r<round>`): the feedback rounds repeat the route.
+        let _ = std::fs::write(format!("{path}.r{round}"), format!("[{}]", rows.join(",\n")));
     }
     drop(dr);
     let isl = planes::islands(model, &b, &out_vias(&out, &plane_reqs, &dec.connections), &plane_reqs);

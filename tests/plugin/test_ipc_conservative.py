@@ -70,7 +70,7 @@ def minus_area(a, b) -> float:
 
 
 def item_poly(item, err: int):
-    """pcbnew's polygon of `item` (ERROR_INSIDE, as the harness exports copper_shapes); see reference_item."""
+    """pcbnew's own polygon of `item` (ERROR_INSIDE, the reference the IPC obstacle must contain); see reference_item."""
     item = reference_item(item)
     ps = pcbnew.SHAPE_POLY_SET()
     item.TransformShapeToPolygon(ps, item.GetLayer(), 0, int(err), pcbnew.ERROR_INSIDE)

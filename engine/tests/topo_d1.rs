@@ -148,3 +148,16 @@ fn a_via_does_not_dip_into_its_own_pad() {
     let dr0 = Drawer::new(&m0, &opts, &b, &st, &checker0);
     assert!(dr0.via_own_pad_ok(at(5.7 - 0.004), sz, 1), "no minimum connection width set");
 }
+
+/// The drawing keeps a via's hole clearance too: a 0.4 / 0.3 mm via with 0.2 mm copper
+/// clearance and 0.254 mm hole clearance needs 0.204 mm around its copper (the drill reaches
+/// further), a 0.6 / 0.3 mm via keeps the copper clearance.
+#[test]
+fn via_clearance_covers_the_hole_clearance() {
+    use topor_engine::topo::draw::via_clear;
+    let mut m = board((0.0, 0.0, 10.0, 10.0), &[(1, 5.0, 5.0, false, 0.8)]);
+    m.rules.default.clearance = 200_000;
+    m.rules.hole_clearance = 254_000;
+    assert!((via_clear(&m, 1, 400_000, 300_000) - 204_000.0).abs() < 1e-6);
+    assert!((via_clear(&m, 1, 600_000, 300_000) - 200_000.0).abs() < 1e-6);
+}
