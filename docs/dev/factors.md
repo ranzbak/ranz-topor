@@ -99,6 +99,9 @@ used. Defaults of the rough router (plan "Default weights"):
 | `plane_cut` | 25 per cut | a signal wire cutting a plane |
 | `necking` | 30 per stretch, report warning | a stretch narrower than the netclass width |
 | `overflow` | 50 per pass | a pass through an overfull cut (P2 search penalty) |
+| `congestion` | 10 per pass per round | a pass through a cut that was over-full in earlier P4 rounds (history, PathFinder) |
+| `squeeze` | 5 per fully squeezed pass | a pass between two stretches that leaves the cut less than one track pitch of slack on its roomiest layer (linear) |
+| `blocks_pad` | 30 per pad | a stretch takes the last free entry sector (ring triangle) of another net's pad that has no wire yet |
 | `ignored_rule` | 100 per violation, report warning | a violated KiCad check set to ignore |
 
 Everything else is 0 until the learning loop fits it. Do not tune a default to make a gate agree.
@@ -109,8 +112,10 @@ When a check is set to `ignore` in KiCad (Board Setup, Violation Severity; for e
 `copper_edge_clearance` in dcsgonebadge), topor does not treat it as a hard rule. A violation of it is an
 `Event::IgnoredRuleViolated { rule, at, amount_nm }`, priced by `ignored_rule` (high by default) and
 reported as a warning at `at`. The rule's value is read from KiCad every run and never written into
-topor. Producing the event inside P2 is stage S2's job; the vocabulary and the factor are in place and
-tested (`ignored_rule.rs`).
+topor. P2 prices it (S3): with the check ignored the projection bounds the cuts at the outline with a
+clearance of 0 (`Projection::edge_clear_ignored` keeps the rule's value), and a pass that fits on a layer
+only without the rule pays `ignored_rule` once per cut. The drawing reports the segments that really
+violate it. Tested in `engine/tests/topo_s3.rs`.
 
 ## Using a factor from P2
 

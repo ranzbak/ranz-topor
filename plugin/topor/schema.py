@@ -160,6 +160,8 @@ SETTINGS: list[Setting] = [
        engine="via_offset_sites", since="0.5.0"),
     _s("search", "feedback_max_rip", "int", 8, "Most already drawn traces one such feedback round may take out and draw again; a larger value rescues more connections and costs more runtime.",
        range=(0, 100), engine="feedback_max_rip", since="0.5.0"),
+    _s("search", "reroute_rounds", "int", 6, "Topological core: most rounds of negotiated rip-up-and-reroute. After the layers are assigned, the connections that run through a passage holding more copper on one layer than fits are taken out and routed again, with a growing price (the congestion factor) on the passages that were over-full, until none is over-full or a round brings no gain; the best round is kept. 0 = off.",
+       range=(0, 50), engine="reroute_rounds", since="0.5.0"),
     _s("search", "neck_max_mm", "float", 0.0, "Longest necked stub; 0 = twice the pad's long side.", unit="mm", range=(0, 100),
        engine="neck_max_nm", since=V5),
     _s("search", "pad_bridge_max_mm", "float", 2.0, "Two pads of one footprint on the same net at most this far apart are joined by one straight track when it fits (possibly off the pad centre line), instead of a searched route; with exit_stubs = auto only where a pad needs a stub. 0 = off.",
@@ -216,7 +218,7 @@ SETTINGS: list[Setting] = [
     _s("expert", "steiner_ghost_factor", "float", 1.0, "Same-net T-junctions: a junction is taken only while its length plus via cost stays within this factor of the connection's own pad-to-pad estimate on the empty board (1 = only junctions cheaper than the free pad route; larger also lets junctions dodge congestion).",
        range=(0.0, 10), engine="expert.steiner_ghost_factor", since=V5),
     # ---- [factors]
-    _s("factors", "weight", "table", {}, "Factor name → weight (mm per unit, ≥ 0); absent = the factor's default. Factors and defaults: length 1 per mm (scaled by width + clearance), via 25 per via, crossing 20 per crossing of two nets, same_net_crossing 0, plane_signal 10 per mm on a plane layer, plane_cut 25 per cut of a plane, necking 30 per necked stretch, overflow 50 per pass through an overfull cut, ignored_rule 100 per violation of a KiCad check set to ignore.",
+    _s("factors", "weight", "table", {}, "Factor name → weight (mm per unit, ≥ 0); absent = the factor's default. Factors and defaults: length 1 per mm (scaled by width + clearance), via 25 per via, crossing 20 per crossing of two nets, same_net_crossing 0, plane_signal 10 per mm on a plane layer, plane_cut 25 per cut of a plane, necking 30 per necked stretch, overflow 50 per pass through an overfull cut, congestion 10 per pass per earlier over-full round of the cut, squeeze 5 per pass that leaves a cut less than a track pitch of slack between two other traces, blocks_pad 30 per trace that takes the last free way out of another net's unrouted pad, ignored_rule 100 per violation of a KiCad check set to ignore.",
        unit="mm", engine="factors.weight", since=V5),
     _s("factors", "scope", "table", {}, "Factor name → which wires the factor prices: \"all\" (default) or \"tier:N\" (wires of priority tier N only).",
        engine="factors.scope", since=V5),

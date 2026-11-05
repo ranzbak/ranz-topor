@@ -20,7 +20,8 @@
 //! checker query per segment (grid candidates). Deterministic (Vec + index ids).
 
 use super::board::Board;
-use super::state::{EdgeId, Obstacle, PassId, State, TriId, VertKind, WireId};
+use super::pack::{infl_of, PackItem, Packer};
+use super::state::{EdgeId, PassId, State, TriId, WireId};
 use crate::check::{CheckReport, Checker, ItemIndex, Violation};
 use crate::geom::prim::Aabb;
 use crate::geom::quant::{IVec2, TrackPrim};
@@ -118,7 +119,7 @@ pub(super) fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
 }
 
 /// Distance from `p` to the convex polygon `poly` (0 inside).
-fn poly_dist(p: Vec2, poly: &[Vec2]) -> f64 {
+pub(super) fn poly_dist(p: Vec2, poly: &[Vec2]) -> f64 {
     let n = poly.len();
     let mut inside = true;
     let mut d = f64::INFINITY;
@@ -370,6 +371,8 @@ pub struct Drawer<'a> {
     /// Copper-to-board-edge clearance the drawing keeps (nm): the KiCad value, 0 when the check
     /// `copper_edge_clearance` is set to ignore (a violation is then priced and reported).
     pub edge_clear: f64,
+    /// The capacity test shared with P3/P4.
+    pub packer: Packer<'a>,
     /// Failed runs for the debug dump: `(wire, layer, attempts' polylines, reason)`.
     pub fails: Vec<(WireId, usize, Vec<Vec<Vec2>>, String)>,
     /// Position of every pass in its wire's pass list.
@@ -399,6 +402,8 @@ pub struct Drawer<'a> {
 
 impl<'a> Drawer<'a> {
     pub fn new(model: &'a BoardModel, opts: &'a Options, b: &'a Board, st: &'a State<'a>, checker: &'a Checker) -> Self {
+        let packer = Packer::for_model(model, opts, &b.proj);
+        let (eps, edge_clear, outline) = (packer.eps(), packer.edge_clear(), super::board::outline_segments(model));
         Drawer {
             model,
             opts,
@@ -406,9 +411,10 @@ impl<'a> Drawer<'a> {
             st,
             checker,
             idx: ItemIndex::new(checker.cell()),
-            outline: super::board::outline_segments(model),
-            eps: (opts.margin_nm + 2_000) as f64,
-            edge_clear: if model.rules.ignored_checks.iter().any(|c| c == "copper_edge_clearance") { 0.0 } else { b.proj.edge_clear },
+            packer,
+            outline,
+            eps,
+            edge_clear,
             fails: Vec::new(),
             pass_k: {
                 let mut v = vec![0; st.passes.len()];
@@ -565,79 +571,6 @@ impl<'a> Drawer<'a> {
         self.b.signal_layers[l]
     }
 
-    /// Clearance a wire `(net, s)` needs to the obstacle `ob` on edge `e` (nm), copper to copper.
-    fn clear_to(&self, ob: &Obstacle, e: EdgeId, s: f64) -> f64 {
-        match self.b.proj.regime(e) {
-            Some(r) if !ob.bare => r,
-            _ => {
-                if ob.bare {
-                    ob.clear
-                } else {
-                    ob.clear.max(s)
-                }
-            }
-        }
-    }
-
-    /// Distance from the vertex `end` of edge `e` along the edge at which a centre line of width
-    /// `w` on `layer` keeps its clearance to the obstacle at that vertex (0 when none). O(16 x 30).
-    fn margin(&self, e: EdgeId, end: usize, net: i32, w: f64, s: f64, layer: usize) -> f64 {
-        let pr = &self.b.proj;
-        let v = pr.edges[e][end];
-        let u = pr.edges[e][1 - end];
-        let (pv, pu) = (pr.pos[v], pr.pos[u]);
-        let len = (pu - pv).len();
-        match pr.vkind[v] {
-            VertKind::Outline(o) => {
-                let ob = &pr.obstacles[o];
-                if ob.net == Some(net) || !(ob.drilled || ob.layers.has(layer)) {
-                    return 0.0;
-                }
-                let req = self.clear_to(ob, e, s) + 0.5 * w + self.eps;
-                let at = |d: f64| pv + (pu - pv) * (d / len.max(1.0));
-                if poly_dist(pu, &ob.poly) < req {
-                    // The far end is closer than required as well: the edge is too narrow.
-                    let (mut lo, mut hi) = (0.0, len);
-                    for _ in 0..30 {
-                        let mid = 0.5 * (lo + hi);
-                        if poly_dist(at(mid), &ob.poly) >= req {
-                            hi = mid;
-                        } else {
-                            lo = mid;
-                        }
-                    }
-                    return hi;
-                }
-                let (mut lo, mut hi) = (0.0, len);
-                for _ in 0..30 {
-                    let mid = 0.5 * (lo + hi);
-                    if poly_dist(at(mid), &ob.poly) >= req {
-                        hi = mid;
-                    } else {
-                        lo = mid;
-                    }
-                }
-                hi
-            }
-            VertKind::Edge => {
-                let req = self.edge_clear + 0.5 * w + self.eps;
-                let at = |d: f64| pv + (pu - pv) * (d / len.max(1.0));
-                let dist = |p: Vec2| self.outline.iter().map(|&(a, b)| seg_dist(p, a, b)).fold(f64::INFINITY, f64::min);
-                // The outline is not convex: take the last sample that is too close.
-                let steps = 24;
-                let mut m = 0.0;
-                for i in 0..=steps {
-                    let d = len * i as f64 / steps as f64;
-                    if dist(at(d)) < req {
-                        m = len * (i + 1).min(steps) as f64 / steps as f64;
-                    }
-                }
-                m
-            }
-            _ => 0.0,
-        }
-    }
-
     /// Pack the passes of every edge per layer (see the module doc) into [`Drawer::iv`]. O(passes).
     pub fn compute_intervals(&mut self) {
         let pr = &self.b.proj;
@@ -662,55 +595,30 @@ impl<'a> Drawer<'a> {
 
     fn pack(&mut self, e: EdgeId, l: usize, len: f64, items: &[PassId]) {
         let n = items.len();
-        let wi = |pid: PassId| &self.st.wires[self.st.passes[pid].wire];
-        let regime = self.b.proj.regime(e);
-        let s_of = |pid: PassId| regime.unwrap_or(wi(pid).s);
-        let lo: Vec<f64> = items.iter().map(|&pid| self.margin(e, 0, wi(pid).net, wi(pid).w, wi(pid).s, l)).collect();
-        let hi: Vec<f64> = items.iter().map(|&pid| len - self.margin(e, 1, wi(pid).net, wi(pid).w, wi(pid).s, l)).collect();
-        // A wire that crosses the edge at the angle `t` needs `1 / sin t` of its perpendicular
-        // spacing along the edge (capped at 2.5): the oblique-chord effect.
-        let (pp, pq) = (self.b.proj.pos[self.b.proj.edges[e][0]], self.b.proj.pos[self.b.proj.edges[e][1]]);
-        let ed = (pq - pp) * (1.0 / (pq - pp).len().max(1.0));
-        let infl: Vec<f64> = items
+        let pitems: Vec<PackItem> = items
             .iter()
             .map(|&pid| {
+                let wi = &self.st.wires[self.st.passes[pid].wire];
                 let (w, k) = (self.st.passes[pid].wire, self.pass_k[pid]);
-                let pl = &self.polys[w];
-                let d = pl[k + 2] - pl[k];
-                let dl = d.len();
-                if dl < 1.0 {
-                    1.0
-                } else {
-                    1.0 / (d.cross(ed).abs() / dl).clamp(0.4, 1.0)
-                }
+                PackItem { net: wi.net, w: wi.w, s: wi.s, infl: infl_of(&self.b.proj, e, &self.polys[w], k) }
             })
             .collect();
-        let pos_of = |pid: PassId| items.iter().position(|&x| x == pid).unwrap_or(0);
-        let req = |a: PassId, b: PassId| {
-            let (x, y) = (wi(a), wi(b));
-            (0.5 * (x.w + y.w) + if x.net != y.net { s_of(a).max(s_of(b)) + self.eps } else { 0.0 }) * infl[pos_of(a)].max(infl[pos_of(b)])
-        };
-        let mut lmin = vec![0.0; n];
-        let mut rmax = vec![0.0; n];
-        for i in 0..n {
-            lmin[i] = if i == 0 { lo[0] } else { lo[i].max(lmin[i - 1] + req(items[i - 1], items[i])) };
-        }
-        for i in (0..n).rev() {
-            rmax[i] = if i == n - 1 { hi[i] } else { hi[i].min(rmax[i + 1] - req(items[i], items[i + 1])) };
-        }
-        let fits = (0..n).all(|i| lmin[i] <= rmax[i] + 1e-6);
+        let bnd = self.packer.bounds(e, l, &pitems);
+        let (lo, hi, lmin, rmax) = (&bnd.lo, &bnd.hi, &bnd.lmin, &bnd.rmax);
+        let req = |i: usize| bnd.req[i];
+        let fits = bnd.fits();
         self.over[e * self.b.proj.n_layers + l] = !fits;
         let mut nom = vec![0.0; n];
         let (mut a, mut b) = (lmin.clone(), rmax.clone());
         if fits {
             for i in 0..n {
                 let target = lmin[i] + (rmax[i] - lmin[i]) * (i + 1) as f64 / (n + 1) as f64;
-                let floor = if i == 0 { lmin[0] } else { lmin[i].max(nom[i - 1] + req(items[i - 1], items[i])) };
+                let floor = if i == 0 { lmin[0] } else { lmin[i].max(nom[i - 1] + req(i - 1)) };
                 nom[i] = target.clamp(floor, rmax[i].max(floor));
             }
             for i in 0..n {
-                a[i] = if i == 0 { lo[0].min(nom[0]) } else { nom[i] - 0.5 * (nom[i] - nom[i - 1] - req(items[i - 1], items[i])).max(0.0) };
-                b[i] = if i == n - 1 { hi[i].max(nom[i]) } else { nom[i] + 0.5 * (nom[i + 1] - nom[i] - req(items[i], items[i + 1])).max(0.0) };
+                a[i] = if i == 0 { lo[0].min(nom[0]) } else { nom[i] - 0.5 * (nom[i] - nom[i - 1] - req(i - 1)).max(0.0) };
+                b[i] = if i == n - 1 { hi[i].max(nom[i]) } else { nom[i] + 0.5 * (nom[i + 1] - nom[i] - req(i)).max(0.0) };
                 a[i] = a[i].min(nom[i]);
                 b[i] = b[i].max(nom[i]);
             }

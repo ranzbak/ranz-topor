@@ -360,6 +360,12 @@ pub fn build_with_nodes(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2]) -> Result
     points.extend(nodes.iter().map(|&p| (p, VertKind::Node)));
     let mut proj = Projection::build(n, obstacles, &points, &cons, inside)?;
     proj.edge_clear = m.rules.edge_clearance as f64;
+    // A copper-to-edge check set to ignore is no hard bound in the topology: the cuts at the
+    // outline bound with 0 and P2 prices a pass that fits only without the rule (ignored_rule).
+    if m.rules.ignored_checks.iter().any(|c| c == "copper_edge_clearance") {
+        proj.edge_clear_ignored = proj.edge_clear;
+        proj.edge_clear = 0.0;
+    }
     proj.set_regions(m.rules.clearance_regions.iter().map(|r| (r.poly.iter().map(|p| p.to_vec2()).collect(), r.clearance as f64)).collect());
     let mut centre = vec![None; proj.obstacles.len()];
     for (v, k) in proj.vkind.iter().enumerate() {

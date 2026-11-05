@@ -4,10 +4,10 @@
 //! layer than fits. This module prices that: from the labelled events of every wire it derives
 //! the layer of each pass (the same rule the drawing uses: a via sits inside its interval, the
 //! passes before it are on the first layer), packs the passes of every edge per layer with the
-//! P1 demand model (`demand.rs`, the model the witness and P2 use and the drawing's packer
-//! approximates) and charges an over-full edge-layer `overflow_mm * (1 + over / pitch)` (mm of
-//! copper, the `overflow` factor of the registry; `pitch` = mean track width + clearance on the
-//! edge). A local search then moves crossings: a *flip* swaps the layers of the two events of a
+//! drawing's own packer ([`Packer`]: end margins, neighbour spacing, oblique-chord factor) and
+//! charges an over-full edge-layer `overflow_mm * (1 + over / pitch)` (mm of copper, the
+//! `overflow` factor of the registry; `over` = how far the leftmost packing exceeds the
+//! rightmost, `pitch` = mean track width + clearance on the edge). A local search then moves crossings: a *flip* swaps the layers of the two events of a
 //! crossing, a *relabel* moves one event to another layer allowed there. A move is kept when
 //! (layer changes priced by the caller + overflow price) drops. Deterministic: moves are tried
 //! in edge, pass, event order.
@@ -15,8 +15,9 @@
 //! Complexity: building the model is O(passes); one move evaluation is O(passes of the edges it
 //! touches); the search stops after `max_evals` evaluations.
 
-use super::demand::Item;
+use super::pack::{infl_of, PackItem, Packer};
 use super::state::{State, WireId};
+use crate::geom::Vec2;
 
 const EPS: f64 = 1e-9;
 
@@ -30,6 +31,9 @@ pub struct RefineParams {
     pub overflow_mm: f64,
     /// Most move evaluations.
     pub max_evals: usize,
+    /// A move may add layer changes (vias) when it removes more overflow than they cost; false =
+    /// only moves that keep or lower the layer-change price (capacity for free).
+    pub add_vias: bool,
 }
 
 /// What the refinement did.
@@ -67,8 +71,12 @@ pub fn pass_layers(n: usize, ev: &[LEv], bottom: i32) -> Vec<i32> {
 /// Per edge-layer overflow price of a labelling, kept incrementally.
 pub struct CapModel<'a> {
     st: &'a State<'a>,
+    packer: &'a Packer<'a>,
+    polys: &'a [Vec<Vec2>],
     nl: usize,
     price: f64,
+    /// Position of every pass in its wire.
+    pass_k: Vec<usize>,
     /// Layer of every pass (-1: wire dead).
     pub pass_layer: Vec<i32>,
     /// Price of edge `e`, layer `l` at `e * nl + l`.
@@ -76,17 +84,19 @@ pub struct CapModel<'a> {
 }
 
 impl<'a> CapModel<'a> {
-    /// The model of the labelling `evl` (events per wire). O(passes).
-    pub fn new(st: &'a State<'a>, evl: &[Vec<LEv>], bottom: i32, price: f64) -> Self {
+    /// The model of the labelling `evl` (events per wire). O(passes x margin lookups).
+    pub fn new(st: &'a State<'a>, packer: &'a Packer<'a>, polys: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64) -> Self {
         let nl = st.proj.n_layers;
         let mut pass_layer = vec![-1; st.passes.len()];
+        let mut pass_k = vec![0; st.passes.len()];
         for (w, wi) in st.wires.iter().enumerate().filter(|(_, wi)| wi.alive) {
             let pl = pass_layers(wi.passes.len(), &evl[w], bottom);
             for (k, &p) in wi.passes.iter().enumerate() {
                 pass_layer[p] = pl[k];
+                pass_k[p] = k;
             }
         }
-        let mut m = CapModel { st, nl, price, pass_layer, cost: vec![0.0; st.proj.edges.len() * nl] };
+        let mut m = CapModel { st, packer, polys, nl, price, pass_k, pass_layer, cost: vec![0.0; st.proj.edges.len() * nl] };
         for e in 0..st.proj.edges.len() {
             for l in 0..nl {
                 m.cost[e * nl + l] = m.eval(e, l);
@@ -98,21 +108,39 @@ impl<'a> CapModel<'a> {
     /// Price of edge `e` on layer `l` under the current pass layers.
     fn eval(&self, e: usize, l: usize) -> f64 {
         let pr = self.st.proj;
-        let room = pr.room_of(e, l);
-        if !room.is_finite() || self.st.edge_order[e].is_empty() {
-            return 0.0;
-        }
-        let items: Vec<Item> =
-            self.st.edge_order[e].iter().filter(|&&p| self.pass_layer[p] == l as i32).map(|&p| self.st.item(p)).collect();
+        let items: Vec<PackItem> = self.st.edge_order[e]
+            .iter()
+            .filter(|&&p| self.pass_layer[p] == l as i32)
+            .map(|&p| {
+                let w = self.st.passes[p].wire;
+                let wi = &self.st.wires[w];
+                PackItem { net: wi.net, w: wi.w, s: wi.s, infl: infl_of(pr, e, &self.polys[w], self.pass_k[p]) }
+            })
+            .collect();
         if items.is_empty() {
             return 0.0;
         }
-        let over = pr.edge_demand(e, &items) - room;
-        if over <= 0.0 {
+        let over = self.packer.bounds(e, l, &items).worst();
+        if over <= 1e-6 {
             return 0.0;
         }
         let pitch = (items.iter().map(|i| i.w + i.s).sum::<f64>() / items.len() as f64).max(1.0);
         self.price * (1.0 + over / pitch)
+    }
+
+    /// Whether the passes on edge `e`, layer `l` fit when the wires in `gone` are taken out.
+    pub fn fits_without(&self, e: usize, l: usize, gone: &std::collections::BTreeSet<WireId>) -> bool {
+        let pr = self.st.proj;
+        let items: Vec<PackItem> = self.st.edge_order[e]
+            .iter()
+            .filter(|&&p| self.pass_layer[p] == l as i32 && !gone.contains(&self.st.passes[p].wire))
+            .map(|&p| {
+                let w = self.st.passes[p].wire;
+                let wi = &self.st.wires[w];
+                PackItem { net: wi.net, w: wi.w, s: wi.s, infl: infl_of(pr, e, &self.polys[w], self.pass_k[p]) }
+            })
+            .collect();
+        items.is_empty() || self.packer.bounds(e, l, &items).fits()
     }
 
     /// Over-full edge-layers.
@@ -140,6 +168,8 @@ fn wire_cost(evl: &[Vec<LEv>], w: WireId, trans: &dyn Fn(usize, usize) -> f64, u
 #[allow(clippy::too_many_arguments)]
 pub fn refine(
     st: &State,
+    packer: &Packer,
+    polys: &[Vec<Vec2>],
     evl: &mut [Vec<LEv>],
     mask: &[Vec<u64>],
     partner: &[Vec<Option<(WireId, usize)>>],
@@ -149,7 +179,7 @@ pub fn refine(
     p: &RefineParams,
 ) -> RefineStats {
     // Switched off: the model is built with a unit price only to count the over-full edge-layers.
-    let mut cm = CapModel::new(st, evl, bottom, if p.overflow_mm > 0.0 { p.overflow_mm } else { 1.0 });
+    let mut cm = CapModel::new(st, packer, polys, evl, bottom, if p.overflow_mm > 0.0 { p.overflow_mm } else { 1.0 });
     let mut stats = RefineStats { before: cm.overfull(), ..RefineStats::default() };
     if p.overflow_mm <= 0.0 {
         stats.after = stats.before;
@@ -196,7 +226,7 @@ pub fn refine(
                             break;
                         }
                         evals += 1;
-                        if try_move(st, &mut cm, evl, &mv, bottom, trans, unary) {
+                        if try_move(st, &mut cm, evl, &mv, bottom, trans, unary, p.add_vias) {
                             stats.moves += 1;
                             improved = true;
                             break;
@@ -214,6 +244,7 @@ pub fn refine(
 }
 
 /// Apply `mv` (label changes) and keep it when the total price drops, else undo. O(touched edges).
+#[allow(clippy::too_many_arguments)]
 fn try_move(
     st: &State,
     cm: &mut CapModel,
@@ -222,6 +253,7 @@ fn try_move(
     bottom: i32,
     trans: &dyn Fn(usize, usize) -> f64,
     unary: &dyn Fn(WireId, usize, usize) -> f64,
+    add_vias: bool,
 ) -> bool {
     let mut wires: Vec<WireId> = mv.iter().map(|x| x.0 .0).collect();
     wires.sort_unstable();
@@ -260,7 +292,7 @@ fn try_move(
     }
     let new: Vec<f64> = touched.iter().map(|&(e, l)| cm.eval(e, l)).collect();
     let new_oc: f64 = new.iter().sum();
-    if (new_wc - old_wc) + (new_oc - old_oc) < -EPS {
+    if (new_wc - old_wc) + (new_oc - old_oc) < -EPS && (add_vias || new_wc <= old_wc + EPS) {
         for (&(e, l), &c) in touched.iter().zip(&new) {
             cm.cost[e * nl + l] = c;
         }

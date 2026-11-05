@@ -19,6 +19,8 @@ use super::board::{self, BuildOpts};
 use super::draw::{plan, Diag, Drawer, Plan, WireOut};
 use super::factors::{standard_factors, Event, Finding, Registry, Report, WireCtx};
 use super::init::{Conn, InitWeights};
+use super::pack::Packer;
+use super::refine::CapModel;
 use super::layers::{self, LayerParams};
 use super::planes;
 use super::state::{ObsId, State, WireId};
@@ -111,7 +113,7 @@ fn fail(o: &mut [Outcome], i: usize, reason: impl Into<String>) {
 /// Route `model` with the topological core (see the module doc).
 pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteResult {
     let t0 = Instant::now();
-    let (mut best, h0) = route_round(model, opts, ctl, &[]);
+    let (mut best, h0, mut hist_all) = route_round(model, opts, ctl, &[], &[]);
     let budget = if opts.wall_clock_s > 0.0 { opts.wall_clock_s } else { f64::INFINITY };
     // Feedback to the topology (plan S2c item 4): the rooms the drawing found too small are
     // lowered by what was missing, and the whole route is made again (at most `MAX_ROUNDS`
@@ -129,7 +131,8 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
             o2.wall_clock_s = (opts.wall_clock_s - t0.elapsed().as_secs_f64()).max(1.0);
         }
         let hv: Hints = all.iter().map(|(&(e, l), &r)| (e, l, r)).collect();
-        let (r2, h2) = route_round(model, &o2, ctl, &hv);
+        let (r2, h2, hist2) = route_round(model, &o2, ctl, &hv, &hist_all);
+        hist_all = hist2;
         round_note.push(format!("round {round}: {} cut rooms lowered, routed {} of {}", hv.len(), r2.routed, r2.connections_total));
         for (e, l, r) in h2 {
             let v = all.entry((e, l)).or_insert(r);
@@ -161,14 +164,16 @@ const MAX_ROUNDS: usize = 3;
 /// Lowered rooms `(edge, layer, room nm)` that a second round applies.
 type Hints = Vec<(usize, usize, f64)>;
 
-fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)]) -> (RouteResult, Hints) {
+/// One whole route. `hist0` is the per-edge over-full history of earlier rounds (empty = none);
+/// the third result is the history at the end of this one.
+fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], hist0: &[f64]) -> (RouteResult, Hints, Vec<f64>) {
     let t0 = Instant::now();
     let deadline = (opts.wall_clock_s > 0.0).then(|| t0 + std::time::Duration::from_secs_f64(opts.wall_clock_s));
     let expired = || cancelled() || ctl.is_cancelled() || deadline.is_some_and(|d| Instant::now() >= d);
     let signal: Vec<u32> = model.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
     if signal.len() < 2 {
         let why = format!("the topological core routes boards with two or more signal layers; this board has {}", signal.len());
-        return (unrouted(model, opts, &why), Vec::new());
+        return (unrouted(model, opts, &why), Vec::new(), Vec::new());
     }
     ctl.update("setup", 0, 0, 0, 0, 0.0);
     let dec = decompose(model, opts, &signal);
@@ -180,7 +185,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     warnings.extend(problems);
     let mut b = match board::build(model, &BuildOpts { existing_vias: true, keepouts: true, plane_layers: opts.plane_signals != "forbidden", ..BuildOpts::default() }) {
         Ok(b) => b,
-        Err(e) => return (unrouted(model, opts, &format!("projection failed: {e}")), Vec::new()),
+        Err(e) => return (unrouted(model, opts, &format!("projection failed: {e}")), Vec::new(), Vec::new()),
     };
     for &(e, l, room) in hints {
         if let Some(r) = b.proj.room.get_mut(e).and_then(|r| r.get_mut(l)) {
@@ -309,10 +314,113 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         plane_cut: reg.price(&Event::PlaneCut { wire: 0, layer: b.n_signal }, &WireCtx::default()),
         // TOPO_NOCAP=1 (debug): assign layers for vias only, to compare with the capacity refinement.
         cap_mm: if std::env::var("TOPO_NOCAP").is_ok() { 0.0 } else { reg.price(&Event::Overflow { wire: 0, edge: 0 }, &WireCtx::default()) },
+        cap_vias: std::env::var("TOPO_CAPVIA").is_ok(),
         ..LayerParams::default()
     };
     let sub = super::capacity::subset_check(&st);
-    let lr = layers::assign(&st, &|ob| b.smd_layer(ob), &lp);
+    let packer = Packer::for_model(model, opts, proj);
+    let assign = |st: &State| layers::assign_with(st, &|ob| b.smd_layer(ob), &lp, Some(&packer));
+    let polys_of = |st: &State| -> Vec<Vec<Vec2>> { (0..st.wires.len()).map(|w| if st.wires[w].alive { st.polyline(w) } else { Vec::new() }).collect() };
+    let mut lr = assign(&st);
+    // ---- P4: negotiated rip-up and reroute ----
+    let mut history: Vec<f64> = (0..proj.edges.len()).map(|e| hist0.get(e).copied().unwrap_or(0.0)).collect();
+    let bottom = (if b.n_signal == 0 { proj.n_layers } else { b.n_signal }) as i32 - 1;
+    let rank: Vec<usize> = {
+        let mut r = vec![0usize; conns.len()];
+        for (pos, &ci) in order.iter().enumerate() {
+            r[ci] = pos;
+        }
+        r
+    };
+    let p4_deadline = (opts.wall_clock_s > 0.0).then(|| t0 + std::time::Duration::from_secs_f64(0.4 * opts.wall_clock_s));
+    let score = |st: &State, lr: &layers::LayerReport| {
+        let polys = polys_of(st);
+        (CapModel::new(st, &packer, &polys, &lr.events, bottom, 1.0).overfull(), lr.vias)
+    };
+    let first_score = score(&st, &lr);
+    let mut best_p4 = (st.clone(), wire_conn.clone(), lr.clone(), first_score);
+    let (mut p4_rounds, mut p4_stall, mut p4_ripped) = (0usize, 0usize, 0usize);
+    for _round in 0..opts.reroute_rounds {
+        if expired() || p4_deadline.is_some_and(|d| Instant::now() >= d) {
+            break;
+        }
+        let polys = polys_of(&st);
+        let cm = CapModel::new(&st, &packer, &polys, &lr.events, bottom, 1.0);
+        let bad = cm.overfull_list();
+        if bad.is_empty() {
+            break;
+        }
+        let mut bad_edges: Vec<usize> = bad.iter().map(|x| x.0).collect();
+        bad_edges.dedup();
+        for &e in &bad_edges {
+            history[e] += 1.0;
+        }
+        // Per over-full edge-layer, rip the wires routed last until the rest fits.
+        let mut victims: BTreeSet<WireId> = BTreeSet::new();
+        for &(e, l) in &bad {
+            let mut on: Vec<usize> = st.edge_order[e].iter().copied().filter(|&p| cm.pass_layer[p] == l as i32).collect();
+            on.sort_by_key(|&p| std::cmp::Reverse(rank[wire_conn[st.passes[p].wire]]));
+            let mut gone: BTreeSet<WireId> = victims.clone();
+            for p in on {
+                if cm.fits_without(e, l, &gone) {
+                    break;
+                }
+                let w = st.passes[p].wire;
+                gone.insert(w);
+                victims.insert(w);
+            }
+        }
+        let alive = st.wires.iter().filter(|w| w.alive).count();
+        let max_rip = (alive / 4).max(10);
+        let mut vic: Vec<WireId> = victims.into_iter().collect();
+        vic.sort_by_key(|&w| std::cmp::Reverse(rank[wire_conn[w]]));
+        vic.truncate(max_rip);
+        vic.sort_by_key(|&w| rank[wire_conn[w]]);
+        if vic.is_empty() {
+            break;
+        }
+        p4_ripped += vic.len();
+        let vic_conns: Vec<usize> = vic.iter().map(|&w| wire_conn[w]).collect();
+        for &w in &vic {
+            st.remove(w);
+        }
+        st.history = history.clone();
+        let mut lost = false;
+        for &ci in &vic_conns {
+            if expired() || !(route_one(&mut st, ci, cap, &mut wire_conn) || route_one(&mut st, ci, cap * 4, &mut wire_conn)) {
+                lost = true;
+                break;
+            }
+        }
+        if lost {
+            // A wire found no path any more: this round is worth nothing, go back to the best.
+            break;
+        }
+        st.uncross_all(50);
+        lr = assign(&st);
+        p4_rounds += 1;
+        let sc = score(&st, &lr);
+        if sc < best_p4.3 {
+            best_p4 = (st.clone(), wire_conn.clone(), lr.clone(), sc);
+            p4_stall = 0;
+        } else {
+            p4_stall += 1;
+            if p4_stall >= 2 {
+                break;
+            }
+        }
+    }
+    let (st_b, wc_b, lr_b, last_score) = best_p4;
+    st = st_b;
+    wire_conn = wc_b;
+    lr = lr_b;
+    if p4_rounds > 0 {
+        warnings.push(format!(
+            "P4 negotiated rip-up and reroute: {p4_rounds} rounds, {p4_ripped} wires ripped; over-full edge-layers {} -> {}, vias {} -> {}",
+            first_score.0, last_score.0, first_score.1, last_score.1
+        ));
+    }
+    let lr = lr;
     // A different-net crossing still on one layer is an error: the lower-tier wire stays unrouted.
     let wlen: Vec<f64> = (0..st.wires.len()).map(|w| if !st.wires[w].alive { 0.0 } else { st.polyline(w).windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>() }).collect();
     let wire_len = |w: WireId| wlen[w];
@@ -568,6 +676,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
         }
     }
+    // History for the next whole route: every edge that was over-full under the drawing's packer.
+    let mut hist_out = history.clone();
+    {
+        let nl = proj.n_layers;
+        let mut over_edges: Vec<usize> = dr.over.iter().enumerate().filter(|(_, &o)| o).map(|(i, _)| i / nl).collect();
+        over_edges.dedup();
+        for e in over_edges {
+            hist_out[e] += 1.0;
+        }
+    }
     if let Ok(path) = std::env::var("TOPO_DUMP") {
         let _ = std::fs::write(path, dr.dump());
     }
@@ -594,6 +712,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             })
             .min_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
         if let Some((_, e)) = best {
+            if hist_out[e] == history[e] {
+                hist_out[e] += 1.0;
+            }
             let v = hint_map.entry((e, d.layer)).or_insert(0.0);
             *v = v.max(short);
         }
@@ -924,7 +1045,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         item_conn,
         stubs: Vec::new(),
     };
-    (result, new_hints)
+    (result, new_hints, hist_out)
 }
 
 /// `(connection id, via centre)` of every routed plane connection (for the island check).

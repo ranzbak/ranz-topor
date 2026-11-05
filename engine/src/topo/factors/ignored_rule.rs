@@ -1,7 +1,7 @@
 //! Ignored rule: a KiCad check whose severity is `ignore` (Board Setup -> Violation Severity) is
 //! not a hard rule for the router. Violating it is priced here (high by default) and reported as a
 //! warning at the place. The rule's value is read from KiCad; nothing about it is stored here.
-//! Wiring the events into P2 is S2's job; this file fixes the vocabulary.
+//! P2 emits the event for a pass that fits only without the copper-to-edge rule (S3).
 
 use super::{Event, Factor, Report};
 

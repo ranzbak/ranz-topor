@@ -17,6 +17,7 @@ pub mod layers;
 pub mod planes;
 pub mod refine;
 pub mod metrize;
+pub mod pack;
 pub mod state;
 pub mod stats;
 pub mod witness;

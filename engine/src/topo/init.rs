@@ -7,7 +7,7 @@
 //! `max_expansions`); `uncross_all` is O(rounds · Σ crossings²) per wire, small in practice.
 
 use super::demand::Item;
-use super::factors::{Event, Registry, WireCtx};
+use super::factors::{squeeze_amount, Event, Registry, WireCtx};
 use super::state::{interleave, EdgeId, ObsId, State, TriId, VertId, Wire, WireId};
 use crate::geom::Vec2;
 use std::cmp::Ordering;
@@ -32,6 +32,14 @@ pub struct InitWeights {
     pub smd_over_mm: f64,
     /// Per pass through an edge whose room is exceeded (`overflow`).
     pub overflow_mm: f64,
+    /// Per pass through an edge, times its over-full history (`congestion`).
+    pub congestion_mm: f64,
+    /// Per fully squeezed pass between two stretches (`squeeze`).
+    pub squeeze_mm: f64,
+    /// Per triangle taking the last free entry sector of another net's unrouted pad (`blocks_pad`).
+    pub blocks_pad_mm: f64,
+    /// Per pass that fits only if a KiCad check set to ignore is violated (`ignored_rule`).
+    pub ignored_mm: f64,
     /// Per pass through a gap too narrow for this wire on some layer (fixes the layer, as above).
     pub forced_layer_mm: f64,
     /// Search cap per connection.
@@ -48,6 +56,10 @@ impl InitWeights {
             same_net_cross_mm: reg.price(&Event::Crossing { a: 0, b: 1, tri: 0, same_net: true }, w),
             smd_over_mm: forced,
             overflow_mm: reg.price(&Event::Overflow { wire: 0, edge: 0 }, w),
+            congestion_mm: reg.price(&Event::Congestion { wire: 0, edge: 0, history: 1.0 }, w),
+            squeeze_mm: reg.price(&Event::Squeeze { wire: 0, edge: 0, slack_nm: 0.0, pitch_nm: 1.0 }, w),
+            blocks_pad_mm: reg.price(&Event::BlocksPad { wire: 0, tri: 0, pad: 0 }, w),
+            ignored_mm: reg.price(&Event::IgnoredRuleViolated { rule: String::new(), at: Vec2 { x: 0.0, y: 0.0 }, amount_nm: 0.0 }, w),
             forced_layer_mm: forced,
             max_expansions: 2_000_000,
         }
@@ -164,6 +176,8 @@ impl Search<'_, '_> {
     fn expand(&mut self, t: TriId, x: End, in_e: Option<EdgeId>, px: Vec2, base: f64, parent: usize) {
         let (st, c) = (self.st, self.c);
         let pr = st.proj;
+        // Taking the last free entry sector of another net's pad.
+        let base = if self.wt.blocks_pad_mm > 0.0 { base + self.wt.blocks_pad_mm * st.blocked_pads(t, c.net).len() as f64 } else { base };
         if pr.tris[t].contains(&c.b) {
             let cost = base
                 + (pr.pos[c.b] - px).len() / MM * self.scale * self.wt.length_mm
@@ -200,6 +214,10 @@ impl Search<'_, '_> {
             let alone = pr.edge_demand(e, &[me]);
             let extra = st.over_cost(t, nt, c.net, &self.wt)
                 + if (0..pr.n_layers).any(|l| alone > pr.room_for(e, l, c.net)) { self.wt.forced_layer_mm } else { 0.0 };
+            let room1 = mask_t.map(|m| {
+                let both = m.0 & mask_nt.0;
+                (0..pr.n_layers).filter(|&l| (both >> l) & 1 == 1).map(|l| pr.room_for(e, l, c.net)).fold(f64::NEG_INFINITY, f64::max)
+            });
             let room = mask_t.map(|m| {
                 let both = m.0 & mask_nt.0;
                 (0..pr.n_layers).filter(|&l| (both >> l) & 1 == 1).map(|l| pr.room_for(e, l, c.net)).sum::<f64>()
@@ -210,6 +228,14 @@ impl Search<'_, '_> {
             }
             // Per-edge geometry of the gaps (see `State::gap_point` / `gap_bpos`), hoisted.
             let n = st.edge_order[e].len();
+            let hist = self.wt.congestion_mm * st.history[e];
+            let ign = if pr.edge_clear_ignored > 0.0 {
+                let both = mask_t.map_or(0, |m| m.0) & mask_nt.0;
+                st.ignored_violation(e, both, c.net, alone).map_or(0.0, |_| self.wt.ignored_mm)
+            } else {
+                0.0
+            };
+            let pitch = c.w + c.s;
             let [ea, eb] = pr.edges[e];
             let (pa, pb) = (pr.pos[ea], pr.pos[eb]);
             let side = pr.side(t, e);
@@ -229,7 +255,13 @@ impl Search<'_, '_> {
                     + (pt - px).len() / MM * self.scale * self.wt.length_mm
                     + cross
                     + if room.is_some_and(|r| r.is_finite() && self.needs[g] > r) { self.wt.overflow_mm } else { 0.0 }
-                    + extra;
+                    + extra
+                    + hist
+                    + ign
+                    + match room1.filter(|r| r.is_finite()) {
+                        Some(r) if g > 0 && g < n => self.wt.squeeze_mm * squeeze_amount(r - self.needs[g], pitch),
+                        _ => 0.0,
+                    };
                 self.push(Node { e, g, into: nt, from_tri: t, parent, cost, pt });
             }
         }

@@ -18,6 +18,7 @@
 //! BTreeMap adjacency (deterministic); the remainder search is O(2^R · M) or O(restarts · R · M).
 
 use super::demand::Item;
+use super::pack::Packer;
 use super::refine::{refine, RefineParams};
 use super::state::{State, TriId, ViaSlot, WireId};
 use crate::geom::Vec2;
@@ -456,6 +457,8 @@ pub struct LayerParams {
     pub cap_mm: f64,
     /// Most move evaluations of the refinement.
     pub cap_evals: usize,
+    /// The refinement may add vias to remove overflow ([`RefineParams::add_vias`]).
+    pub cap_vias: bool,
 }
 
 impl Default for LayerParams {
@@ -471,6 +474,7 @@ impl Default for LayerParams {
             plane_cut: 0.0,
             cap_mm: 0.0,
             cap_evals: 200_000,
+            cap_vias: false,
         }
     }
 }
@@ -558,14 +562,20 @@ fn stretches_and_vias(st: &State, polys: &[Vec<Vec2>], evl: &[Vec<(usize, f64, i
 /// greedy colouring plus alpha-beta swaps ([`assign_n`]) otherwise. `smd_layer(pad)` is the layer of
 /// a single-layer pad.
 pub fn assign(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams) -> LayerReport {
+    assign_with(st, smd_layer, p, None)
+}
+
+/// [`assign`] with the drawing's packer: the labelling is then refined against capacity
+/// ([`refine`]) and the over-full edge-layers are counted.
+pub fn assign_with(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams, packer: Option<&Packer>) -> LayerReport {
     if st.proj.n_layers == 2 {
-        assign_two(st, smd_layer, p)
+        assign_two(st, smd_layer, p, packer)
     } else {
-        assign_n(st, smd_layer, p)
+        assign_n(st, smd_layer, p, packer)
     }
 }
 
-fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams) -> LayerReport {
+fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams, packer: Option<&Packer>) -> LayerReport {
     let pr = st.proj;
     let mut rep = LayerReport::default();
     let mut dom: BTreeMap<(WireId, usize, WireId, usize), usize> = BTreeMap::new();
@@ -661,16 +671,21 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
         partner[v[1].0][v[1].1] = Some(v[0]);
     }
     let via = p.via_mm;
-    let rs = refine(
-        st,
-        &mut evl,
-        &mask,
-        &partner,
-        bottom,
-        &|a, b| if a == b { 0.0 } else { via },
-        &|_, _, _| 0.0,
-        &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals },
-    );
+    let rs = packer.map(|pk| {
+        refine(
+            st,
+            pk,
+            &polys,
+            &mut evl,
+            &mask,
+            &partner,
+            bottom,
+            &|a, b| if a == b { 0.0 } else { via },
+            &|_, _, _| 0.0,
+            &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals, add_vias: p.cap_vias },
+        )
+    });
+    let rs = rs.unwrap_or_default();
     rep.overfull_before = rs.before;
     rep.overfull_after = rs.after;
     rep.refine_moves = rs.moves;
@@ -769,7 +784,7 @@ fn n_cost(wev: &[Vec<usize>], ev: &[NEv], lab: &[u8], c: &Costs) -> f64 {
 /// 3. the swap is kept when the total cost drops; repeated until a full sweep improves nothing.
 ///
 /// Complexity: O(events · L²) per greedy wire pass; a sweep is L² / 2 domain-graph solves.
-pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams) -> LayerReport {
+pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams, packer: Option<&Packer>) -> LayerReport {
     let pr = st.proj;
     let nl = pr.n_layers;
     let full: u64 = if nl >= 64 { u64::MAX } else { (1u64 << nl) - 1 };
@@ -1003,16 +1018,22 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
     let mask: Vec<Vec<u64>> = wev.iter().map(|l| l.iter().map(|&e| ev[e].mask).collect()).collect();
     let partner: Vec<Vec<Option<(WireId, usize)>>> =
         wev.iter().map(|l| l.iter().map(|&e| ev[e].partner.map(|q| at_ev[q])).collect()).collect();
-    let rs = refine(
-        st,
-        &mut evl,
-        &mask,
-        &partner,
-        costs.plane_from.min(nl) as i32 - 1,
-        &|a, b| costs.trans(a, b),
-        &|w, i, l| costs.unary(wev[w][i], l),
-        &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals },
-    );
+    let rs = packer
+        .map(|pk| {
+            refine(
+                st,
+                pk,
+                &polys,
+                &mut evl,
+                &mask,
+                &partner,
+                costs.plane_from.min(nl) as i32 - 1,
+                &|a, b| costs.trans(a, b),
+                &|w, i, l| costs.unary(wev[w][i], l),
+                &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals, add_vias: p.cap_vias },
+            )
+        })
+        .unwrap_or_default();
     rep.overfull_before = rs.before;
     rep.overfull_after = rs.after;
     rep.refine_moves = rs.moves;

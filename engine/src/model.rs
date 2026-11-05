@@ -1017,6 +1017,9 @@ pub struct Options {
     /// Topological core (S2c, `topor.toml [search] feedback_max_rip`): most drawn wires one
     /// feedback round may rip up and redraw.
     pub feedback_max_rip: usize,
+    /// Topological core (S3, `topor.toml [search] reroute_rounds`): most rounds of negotiated
+    /// rip-up-and-reroute after the first layer assignment (0 = off).
+    pub reroute_rounds: usize,
     /// Router (NX, `topor.toml [search] neck_max_mm`): longest necked stub, nm; 0 = twice the
     /// pad's long side.
     pub neck_max_nm: i64,
@@ -1096,6 +1099,7 @@ impl Default for Options {
             drawing_feedback: true,
             via_offset_sites: true,
             feedback_max_rip: 8,
+            reroute_rounds: 6,
             neck_max_nm: 0,
             pad_bridge_max_nm: 2_000_000,
             steiner: true,

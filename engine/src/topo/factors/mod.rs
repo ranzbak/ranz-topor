@@ -21,16 +21,21 @@
 //! Complexity: pricing an event is O(#factors); [`events`] of an insert is O(path x traversals of
 //! the triangles it crosses).
 
+mod blocks_pad;
+mod congestion;
 mod crossing;
 mod ignored_rule;
 mod length;
 mod necking;
 mod overflow;
 mod plane_signal;
+mod squeeze;
 mod via;
 
+pub use squeeze::squeeze_amount;
+
 use super::demand::Item;
-use super::state::{interleave, EdgeId, State, TriId, Wire, WireId};
+use super::state::{interleave, EdgeId, ObsId, State, TriId, Wire, WireId};
 use crate::geom::Vec2;
 use std::collections::BTreeMap;
 
@@ -56,6 +61,14 @@ pub enum Event {
     Necking { wire: WireId, from_nm: f64, to_nm: f64, mm: f64 },
     /// A pass through an edge whose room is exceeded (a violation the search prices).
     Overflow { wire: WireId, edge: EdgeId },
+    /// A pass of `wire` through `edge` between two other stretches that leaves `slack_nm` of the
+    /// cut free; `pitch_nm` = the wire's width plus clearance.
+    Squeeze { wire: WireId, edge: EdgeId, slack_nm: f64, pitch_nm: f64 },
+    /// `wire` runs through `tri`, the last free entry sector of the pad obstacle `pad` of another
+    /// net, which has no wire yet.
+    BlocksPad { wire: WireId, tri: TriId, pad: ObsId },
+    /// A pass of `wire` through `edge`, which was over-full in `history` earlier rounds.
+    Congestion { wire: WireId, edge: EdgeId, history: f64 },
     /// A KiCad check set to `ignore` is violated here: `rule` is its KiCad name
     /// (`copper_edge_clearance`, ...), `at` the place, `amount_nm` how far below the rule.
     IgnoredRuleViolated { rule: String, at: Vec2, amount_nm: f64 },
@@ -185,6 +198,9 @@ pub fn standard_factors() -> Vec<Box<dyn Factor>> {
         Box::new(plane_signal::PlaneCut),
         Box::new(necking::Necking),
         Box::new(overflow::Overflow),
+        Box::new(congestion::Congestion),
+        Box::new(squeeze::Squeeze),
+        Box::new(blocks_pad::BlocksPad),
         Box::new(ignored_rule::IgnoredRule),
     ]
 }
@@ -331,6 +347,9 @@ fn insert_events(st: &State, wire: &Wire, path: &[(EdgeId, usize)], tris: &[TriI
                 }
             }
         }
+        for pad in st.blocked_pads(t, wire.net) {
+            out.push(Event::BlocksPad { wire: id, tri: t, pad });
+        }
         // A triangle over another net's pad fixes the layer.
         if pr.tri_obs[t].iter().any(|&o| pr.obstacles[o].net != Some(wire.net)) && k > 0 {
             out.push(Event::LayerForced { wire: id, edge: path[k - 1].0 });
@@ -344,6 +363,22 @@ fn insert_events(st: &State, wire: &Wire, path: &[(EdgeId, usize)], tris: &[TriI
         }
         if st.overflows(e, g, nt0, nt1, wire.net, wire.w, wire.s) {
             out.push(Event::Overflow { wire: id, edge: e });
+        }
+        if st.history[e] > 0.0 {
+            out.push(Event::Congestion { wire: id, edge: e, history: st.history[e] });
+        }
+        if let (Some(m0), Some(m1)) = (pr.allowed(nt0, wire.net), pr.allowed(nt1, wire.net)) {
+            if let Some(amount_nm) = st.ignored_violation(e, m0.0 & m1.0, wire.net, pr.edge_demand(e, &[me])) {
+                let [p, q] = pr.edges[e];
+                out.push(Event::IgnoredRuleViolated { rule: "copper_edge_clearance".into(), at: (pr.pos[p] + pr.pos[q]) * 0.5, amount_nm });
+            }
+        }
+        if let Some(room) = st.room_best_layer(e, nt0, nt1, wire.net) {
+            let need = st.edge_need(e, Some((g, me)));
+            let n = st.edge_order[e].len();
+            if g > 0 && g < n {
+                out.push(Event::Squeeze { wire: id, edge: e, slack_nm: room - need, pitch_nm: wire.w + wire.s });
+            }
         }
     }
     out

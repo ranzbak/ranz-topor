@@ -118,6 +118,10 @@ pub struct Projection {
     pub room: Vec<Vec<f64>>,
     /// Copper-to-board-edge clearance (nm); set by the builder.
     pub edge_clear: f64,
+    /// The copper-to-edge rule (nm) when the project sets that check to `ignore`: the cuts at the
+    /// outline then bound with `edge_clear` (0) and a pass that fits only without the rule pays
+    /// the `ignored_rule` factor; 0 when the rule is hard.
+    pub edge_clear_ignored: f64,
     /// Custom courtyard clearance rules `(polygon, clearance nm)`, in file order (the last match
     /// wins); set by the builder.
     pub regions: Vec<(Vec<Vec2>, f64)>,
@@ -262,6 +266,7 @@ impl Projection {
             vert_tris,
             room,
             edge_clear: 0.0,
+            edge_clear_ignored: 0.0,
             regions: Vec::new(),
             edge_regime: Vec::new(),
             edge_constraint,
@@ -507,16 +512,45 @@ pub struct State<'p> {
     pub wires: Vec<Wire>,
     /// Per triangle: the traversals `(wire, k)` through it.
     pub tri_trav: Vec<Vec<(WireId, usize)>>,
+    /// Per edge: in how many earlier rounds of the negotiated rip-up-and-reroute it was over-full
+    /// (the `congestion` factor prices a pass through it).
+    pub history: Vec<f64>,
+    /// Per vertex: how many alive wires start or end there.
+    pub ends: Vec<u32>,
+    /// Per obstacle: its centre vertex, if it has one.
+    pub centre: Vec<Option<VertId>>,
+    /// Per obstacle: the triangles of its ring (a corner on its outline, not inside it, not a wall).
+    pub ring: Vec<Vec<TriId>>,
 }
 
 impl<'p> State<'p> {
     pub fn new(proj: &'p Projection) -> Self {
+        let mut centre = vec![None; proj.obstacles.len()];
+        for (v, k) in proj.vkind.iter().enumerate() {
+            if let VertKind::Centre(o) = *k {
+                centre[o] = Some(v);
+            }
+        }
+        let mut ring: Vec<Vec<TriId>> = vec![Vec::new(); proj.obstacles.len()];
+        for (t, vs) in proj.tris.iter().enumerate().filter(|(t, _)| !proj.tri_out[*t]) {
+            for &v in vs {
+                if let VertKind::Outline(o) = proj.vkind[v] {
+                    if !proj.tri_obs[t].contains(&o) && !ring[o].contains(&t) {
+                        ring[o].push(t);
+                    }
+                }
+            }
+        }
         State {
+            centre,
+            ring,
             proj,
             passes: Vec::new(),
             edge_order: vec![Vec::new(); proj.edges.len()],
             wires: Vec::new(),
             tri_trav: vec![Vec::new(); proj.tris.len()],
+            history: vec![0.0; proj.edges.len()],
+            ends: vec![0; proj.pos.len()],
         }
     }
 
@@ -714,6 +748,56 @@ impl<'p> State<'p> {
         (0..self.tri_trav.len()).map(|t| self.tri_crossings(t)).sum()
     }
 
+    /// Room of the roomiest single layer of edge `e` among those both triangles allow a wire of
+    /// `net` (the `squeeze` factor asks how full one layer would be); `None` when a triangle is a
+    /// wall or the edge is no cut.
+    pub fn room_best_layer(&self, e: EdgeId, t1: TriId, t2: TriId, net: i32) -> Option<f64> {
+        let (m1, m2) = (self.proj.allowed(t1, net)?, self.proj.allowed(t2, net)?);
+        let m = m1.0 & m2.0;
+        let r = (0..self.proj.n_layers).filter(|&l| (m >> l) & 1 == 1).map(|l| self.proj.room_for(e, l, net)).fold(f64::NEG_INFINITY, f64::max);
+        (r.is_finite()).then_some(r)
+    }
+
+    /// By how much (nm) a single pass needing `alone` through edge `e` for a wire of `net` allowed
+    /// on the layers of `mask` violates the copper-to-edge rule that the project set to ignore:
+    /// it fits on some layer without the rule and on none with it. `None` when no rule is ignored
+    /// there or the pass is fine. O(layers).
+    pub fn ignored_violation(&self, e: EdgeId, mask: u64, net: i32, alone: f64) -> Option<f64> {
+        let pr = self.proj;
+        let extra = pr.edge_clear_ignored * pr.edges[e].iter().filter(|&&v| matches!(pr.vkind[v], VertKind::Edge)).count() as f64;
+        if extra <= 0.0 {
+            return None;
+        }
+        let rooms: Vec<f64> = (0..pr.n_layers).filter(|&l| (mask >> l) & 1 == 1).map(|l| pr.room_for(e, l, net)).collect();
+        if rooms.iter().any(|&r| alone + extra <= r) || !rooms.iter().any(|&r| alone <= r) {
+            return None;
+        }
+        Some(alone + extra - rooms.iter().cloned().filter(|&r| alone <= r).fold(0.0, f64::max))
+    }
+
+    /// The pads of other nets that have no wire yet and for which triangle `t` is the last free
+    /// entry sector. The sectors of a pad are the triangles of its ring (triangles with a corner
+    /// on the pad's outline, outside the pad); a sector is free when it is no wall and no stretch
+    /// of another net than the pad's runs through it. A wire of `net` taking `t` leaves such a
+    /// pad no way out without crossing it. O(corners x ring).
+    pub fn blocked_pads(&self, t: TriId, net: i32) -> Vec<ObsId> {
+        let pr = self.proj;
+        let mut out = Vec::new();
+        for &v in &pr.tris[t] {
+            let VertKind::Outline(o) = pr.vkind[v] else { continue };
+            let Some(pn) = pr.obstacles[o].net else { continue };
+            let Some(cv) = self.centre[o] else { continue };
+            if pn == net || self.ends[cv] > 0 || out.contains(&o) || pr.tri_obs[t].contains(&o) {
+                continue;
+            }
+            let free = |x: TriId| pr.allowed(x, pn).is_some() && self.tri_trav[x].iter().all(|&(w, _)| self.wires[w].net == pn);
+            if free(t) && self.ring[o].iter().filter(|&&x| free(x)).count() == 1 {
+                out.push(o);
+            }
+        }
+        out
+    }
+
     /// Insert `wire` (its `passes`, `tris` and `alive` are filled here) along `path`: the gaps
     /// `(edge, g)` in the edge orders before this insert, and the traversed triangles.
     pub fn insert(&mut self, mut wire: Wire, path: &[(EdgeId, usize)], tris: Vec<TriId>) -> WireId {
@@ -734,6 +818,8 @@ impl<'p> State<'p> {
         }
         wire.tris = tris;
         wire.alive = true;
+        self.ends[wire.a] += 1;
+        self.ends[wire.b] += 1;
         self.wires.push(wire);
         id
     }
@@ -758,6 +844,8 @@ impl<'p> State<'p> {
             }
             wire.tris = tris;
             wire.alive = true;
+            self.ends[wire.a] += 1;
+            self.ends[wire.b] += 1;
             self.wires.push(wire);
         }
         for (e, v) in at.iter_mut().enumerate() {
@@ -773,6 +861,11 @@ impl<'p> State<'p> {
         }
         for &t in &self.wires[w].tris {
             self.tri_trav[t].retain(|&(x, _)| x != w);
+        }
+        if self.wires[w].alive {
+            let (a, b) = (self.wires[w].a, self.wires[w].b);
+            self.ends[a] -= 1;
+            self.ends[b] -= 1;
         }
         self.wires[w].alive = false;
     }
