@@ -121,6 +121,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     let mut all: BTreeMap<(usize, usize), f64> = h0.iter().map(|&(e, l, r)| ((e, l), r)).collect();
     let first = best.routed;
     let mut round_note = Vec::new();
+    let mut stall = 0usize;
     for round in 2..=MAX_ROUNDS {
         let round_s = t0.elapsed().as_secs_f64() / (round - 1) as f64;
         if !opts.drawing_feedback || all.is_empty() || best.stop_reason != "converged" || t0.elapsed().as_secs_f64() + 1.3 * round_s > budget {
@@ -140,8 +141,13 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         }
         if r2.routed > best.routed {
             best = r2;
+            stall = 0;
         } else {
-            break;
+            // The history stays: a repeat that routes no more can still open the way for the next.
+            stall += 1;
+            if stall >= 2 {
+                break;
+            }
         }
     }
     if !round_note.is_empty() {
@@ -159,7 +165,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
 }
 
 /// Most rounds of the topology feedback (the first one included).
-const MAX_ROUNDS: usize = 3;
+const MAX_ROUNDS: usize = 4;
 
 /// Lowered rooms `(edge, layer, room nm)` that a second round applies.
 type Hints = Vec<(usize, usize, f64)>;
@@ -693,6 +699,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // Hints for a second round: per cut of a still-failed wire, the room is lowered by the
     // violation depth (what was really missing) at the cut nearest to the violation.
     let mut hint_map: BTreeMap<(usize, usize), f64> = BTreeMap::new();
+    let mut sleeve: BTreeSet<usize> = BTreeSet::new();
     for d in &diag {
         let ci = conn_of[wire_conn[d.wire]];
         if out[ci].routed || d.passes == 0 {
@@ -711,10 +718,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 (((a + ab * t) - d.at).len(), e)
             })
             .min_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
-        if let Some((_, e)) = best {
-            if hist_out[e] == history[e] {
+        // The wire's whole sleeve on that layer gets a history: the repeat routes it elsewhere.
+        for e in (d.k0..d.k1).map(|k| st.passes[wi.passes[k]].edge) {
+            if sleeve.insert(e) {
                 hist_out[e] += 1.0;
             }
+        }
+        if let Some((_, e)) = best {
             let v = hint_map.entry((e, d.layer)).or_insert(0.0);
             *v = v.max(short);
         }
@@ -723,7 +733,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     {
         let cnt = |c: &str| diag.iter().filter(|d| d.class == c).count();
         warnings.push(format!(
-            "layers: over-full edge-layers by the demand model {} before the capacity refinement, {} after ({} moves); drawing packer over-full {}; drawing yield: {} wires entered drawing, {} drawn ({} lost at the via stage); rejected runs {}: packing {}, repair {}, chord {}, of which infeasible against the static board alone {}; runs accepted by the exact path {}, by the S2a funnel+repair fallback {}, exact path without result {} ({:.1} s in the exact search); feedback tried {}, rescued {}",
+            "layers: over-full edge-layers (packer model) {} before the capacity refinement, {} after ({} moves); drawing packer over-full {}; drawing yield: {} wires entered drawing, {} drawn ({} lost at the via stage); rejected runs {}: packing {}, repair {}, chord {}, of which infeasible against the static board alone {}; runs accepted by the exact path {}, by the S2a funnel+repair fallback {}, exact path without result {} ({:.1} s in the exact search); feedback tried {}, rescued {}",
             lr.overfull_before,
             lr.overfull_after,
             lr.refine_moves,
