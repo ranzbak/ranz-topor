@@ -34,6 +34,9 @@ pub enum TermKind {
         #[serde(serialize_with = "ser_vec2")]
         start: Vec2,
     },
+    /// A branch point of the net's tree on a routed wire (D5 branching, topological core): the
+    /// connection ends on its own net's copper at `TermRef.at`, not at a pad.
+    Junction,
 }
 
 fn ser_vec2<S: serde::Serializer>(v: &Vec2, s: S) -> Result<S::Ok, S::Error> {
@@ -880,7 +883,7 @@ pub fn terminal_of(t: &TermRef) -> crate::wires::Terminal {
     match &t.kind {
         TermKind::Pad(i) => Terminal::Pad { pad: *i, at: t.at },
         TermKind::Via(i) => Terminal::Via { via: *i, at: t.at },
-        TermKind::Copper(_) => Terminal::Junction { at: t.at },
+        TermKind::Copper(_) | TermKind::Junction => Terminal::Junction { at: t.at },
         TermKind::Dangling(_, dir) => Terminal::Dangling {
             at: t.at,
             direction: dir.map(|d| Vec2 { x: d[0], y: d[1] }),

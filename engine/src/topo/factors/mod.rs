@@ -22,6 +22,7 @@
 //! the triangles it crosses).
 
 mod blocks_pad;
+mod branch;
 mod congestion;
 mod crossing;
 mod ignored_rule;
@@ -34,6 +35,7 @@ mod squeeze;
 mod via;
 mod via_squeeze;
 
+pub use branch::junction_angle_amount;
 pub use squeeze::squeeze_amount;
 
 use super::demand::Item;
@@ -79,6 +81,13 @@ pub enum Event {
     IgnoredRuleViolated { rule: String, at: Vec2, amount_nm: f64 },
     /// `wire`'s connection moves once more after `count` earlier reroutes (P4 reroute counter).
     Rerouted { wire: WireId, count: u32 },
+    /// An end of `wire` joins its net's copper at a branch point on a trace (`on_pad` false) or
+    /// at a pad that already carries a trace (`smd`: a single-layer pad), at `at` (D5 net trees).
+    Branch { wire: WireId, at: Vec2, on_pad: bool, smd: bool },
+    /// A new trace leaves a junction (a branch point on a trace, or a pad that already carries a
+    /// trace of its net) at `deg` degrees to the nearest arm already there; `exp` is the curve's
+    /// shape (`[search] junction_angle_exp`).
+    JunctionAngle { at: Vec2, deg: f64, exp: f64 },
 }
 
 /// How a factor's events appear in the report.
@@ -212,6 +221,9 @@ pub fn standard_factors() -> Vec<Box<dyn Factor>> {
         Box::new(blocks_pad::BlocksPad),
         Box::new(ignored_rule::IgnoredRule),
         Box::new(reroute::Reroute),
+        Box::new(branch::Branch),
+        Box::new(branch::SmdThrough),
+        Box::new(branch::JunctionAngle),
     ]
 }
 

@@ -385,7 +385,8 @@ pub fn build_with_nodes(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2]) -> Result
 impl Board {
     /// The layer of a single-layer (SMD) pad obstacle.
     pub fn smd_layer(&self, o: ObsId) -> Option<usize> {
-        let ob = &self.proj.obstacles[o];
+        // A node terminal (`NO_OBS`, a junction) has no pad.
+        let ob = self.proj.obstacles.get(o)?;
         if ob.drilled {
             None
         } else {

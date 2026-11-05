@@ -331,6 +331,7 @@ pub(crate) fn term_out(t: &TermRef) -> TermOut {
             TermKind::Pad(_) | TermKind::Stub { .. } => "pad",
             TermKind::Via(_) => "via",
             TermKind::Copper(_) => "copper",
+            TermKind::Junction => "junction",
             TermKind::Dangling(..) => "dangling",
             TermKind::Pour(_) => "pour",
         }

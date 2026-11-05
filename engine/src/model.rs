@@ -1054,6 +1054,18 @@ pub struct Options {
     /// the estimated refill holding a pad or via of the net, or a pad whose thermal spokes are all
     /// cut) gets a via into the pour on another layer, or a short stub, near its pad.
     pub stitch_islands: bool,
+    /// Topological core (D5, `topor.toml [search] net_tree`): `"free"` = a connection joins the
+    /// two parts of its net's routed copper it connects, at any pad of them or at a branch point
+    /// (T-junction) on one of their routed traces, so the net's tree follows the routing;
+    /// `"fixed"` = pad to pad as the decomposition planned (no branch points).
+    pub net_tree: String,
+    /// Topological core (D5, `topor.toml [search] junction_angle_exp`): the shape of the
+    /// `junction_angle` factor, `(1 - angle / 120 deg) ^ exp` below 120 degrees.
+    pub junction_angle_exp: f64,
+    /// Topological core (D5, `topor.toml [search] junction_pad_mm`): a branch point on a trace
+    /// closer than this (mm) to a pad of the copper it joins is not used; the pad is the junction.
+    /// 0 (default) = no such distance: the `junction_angle` factor prices a T next to a pad.
+    pub junction_pad_mm: f64,
     /// Topological core (S3, `topor.toml [optimize] rounds`): most whole-route rounds (the first
     /// included). A work cap, not a time cap: the same board and settings give the same result on
     /// any machine and with any thread count.
@@ -1170,6 +1182,9 @@ impl Default for Options {
             reroute_rounds: 6,
             via_reduce: true,
             stitch_islands: true,
+            net_tree: "free".into(),
+            junction_angle_exp: 2.0,
+            junction_pad_mm: 0.0,
             topo_rounds: 4,
             max_ripped: 5000,
             max_expansions: 2_000_000,

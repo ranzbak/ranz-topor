@@ -105,6 +105,9 @@ used. Defaults of the rough router (plan "Default weights"):
 | `blocks_pad` | 30 per pad | a stretch takes the last free entry sector (ring triangle) of another net's pad that has no wire yet |
 | `ignored_rule` | 100 per violation, report warning | a violated KiCad check set to ignore |
 | `reroute` | 5 per earlier reroute | a connection the P4 search moves again after `count` earlier reroutes (reroute counter; also: the negotiated rip-up takes such a wire out last) |
+| `branch` | 1 per branch point or through-pad, **subtracted** (a reward) | a connection end that joins its net's routed copper at a branch point on a trace or at a pad that already carries one trace (D5 net trees, `[search] net_tree = "free"`); a goal-cost adjustment in the multi-source search (A* stays exact), so a separate path still wins when the branch costs more |
+| `smd_through` | 0 per extra trace end on an SMD pad | assembly cost of a through-pad on a single-layer pad (off by default so it does not cancel `branch`) |
+| `junction_angle` | 10 per junction at 0°, × (1 − θ/120°)^`junction_angle_exp` (default 2) below 120° | a new trace that leaves a junction (branch point on a trace: the trunk's two arms; a pad that already carries traces: their directions) at angle θ to the nearest arm; 0 from 120° (Steiner optimum, Popov & Popov EDN 2013) up, no cutoff; priced in the search at the goal (direction from the junction to the last gap point) and when leaving a junction seed |
 
 Everything else is 0 until the learning loop fits it. Do not tune a default to make a gate agree.
 

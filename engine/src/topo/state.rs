@@ -695,6 +695,46 @@ impl<'p> State<'p> {
         pts.windows(2).map(|p| (p[0], p[1])).collect()
     }
 
+    /// Whether wire `w` can turn at corner `v` of its traversal `k` (a junction there, D5
+    /// branching): `v` is a free or node vertex of that triangle, `w` has no turn in it yet, and
+    /// the two new chords (entry -> `v` -> exit) cross no other traversal of the triangle more often
+    /// than the old chord did (no new crossing). O(traversals of the triangle).
+    pub fn junction_ok(&self, w: WireId, k: usize, v: VertId) -> bool {
+        let wi = &self.wires[w];
+        if k >= wi.tris.len() || wi.turns.iter().any(|x| x.0 == k) || v == wi.a || v == wi.b {
+            return false;
+        }
+        let t = wi.tris[k];
+        if !self.proj.tris[t].contains(&v) || !matches!(self.proj.vkind[v], VertKind::Free | VertKind::Node) {
+            return false;
+        }
+        let (e1, e2) = self.chord(w, k);
+        let c = self.proj.corner_pos(t, v);
+        if (c - e1).abs() < 1e-9 || (c - e2).abs() < 1e-9 {
+            return false;
+        }
+        for &(o, ok) in &self.tri_trav[t] {
+            if o == w {
+                continue;
+            }
+            for (b1, b2) in self.chords(o, ok) {
+                let old = usize::from(interleave(e1, e2, b1, b2));
+                let new = usize::from(interleave(e1, c, b1, b2)) + usize::from(interleave(c, e2, b1, b2));
+                if new > old {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Make `w` turn at `v` in its traversal `k` ([`State::junction_ok`] must hold).
+    pub fn add_turn(&mut self, w: WireId, k: usize, v: VertId) {
+        let turns = &mut self.wires[w].turns;
+        turns.push((k, v));
+        turns.sort_by_key(|x| x.0);
+    }
+
     /// Terminal, pass points, terminal.
     pub fn polyline(&self, w: WireId) -> Vec<Vec2> {
         let wi = &self.wires[w];

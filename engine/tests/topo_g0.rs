@@ -303,6 +303,9 @@ fn the_factor_reference_matches_the_schema_text() {
         ("blocks_pad", 30.0),
         ("ignored_rule", 100.0),
         ("reroute", 5.0),
+        ("branch", 1.0),
+        ("smd_through", 0.0),
+        ("junction_angle", 10.0),
     ];
     assert_eq!(got, want);
 }

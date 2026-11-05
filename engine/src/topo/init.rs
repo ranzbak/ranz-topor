@@ -42,6 +42,10 @@ pub struct InitWeights {
     pub ignored_mm: f64,
     /// Per pass through a gap too narrow for this wire on some layer (fixes the layer, as above).
     pub forced_layer_mm: f64,
+    /// Per junction a new trace leaves at 0 degrees to an arm already there (`junction_angle`
+    /// weight), and the curve's exponent (`[search] junction_angle_exp`).
+    pub junction_angle_mm: f64,
+    pub junction_angle_exp: f64,
     /// Search cap per connection.
     pub max_expansions: usize,
 }
@@ -61,6 +65,8 @@ impl InitWeights {
             blocks_pad_mm: reg.price(&Event::BlocksPad { wire: 0, tri: 0, pad: 0 }, w),
             ignored_mm: reg.price(&Event::IgnoredRuleViolated { rule: String::new(), at: Vec2 { x: 0.0, y: 0.0 }, amount_nm: 0.0 }, w),
             forced_layer_mm: forced,
+            junction_angle_mm: reg.price(&Event::JunctionAngle { at: Vec2 { x: 0.0, y: 0.0 }, deg: 0.0, exp: 1.0 }, w),
+            junction_angle_exp: 2.0,
             max_expansions: 2_000_000,
         }
     }
@@ -120,7 +126,34 @@ struct Node {
     parent: usize,
     cost: f64,
     pt: Vec2,
+    /// Index of the source end the path starts at ([`State::search_tree`]).
+    seed: usize,
 }
+
+/// One end a tree search may start or stop at (D5 branching, [`State::search_tree`]): a vertex of
+/// the net's copper. `on: None` is a terminal vertex (pad centre or a node; any triangle around
+/// it); `on: Some((w, k))` is a junction on wire `w` at its traversal `k`, whose triangle has `v`
+/// as a corner: the wire is made to turn at `v` there and the new wire ends at it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TreeEnd {
+    pub v: VertId,
+    /// The pad obstacle of `v`, or [`super::state::NO_OBS`].
+    pub obs: ObsId,
+    pub on: Option<(WireId, usize)>,
+    /// Cost adjustment (mm) of a path that starts or ends here: the `branch` reward is negative,
+    /// the `smd_through` assembly cost positive; 0 for a planned pad.
+    pub adj: f64,
+    /// Unit directions of the arms already at `v` (up to 4: the trunk's two arms at a branch
+    /// point, the traces at a pad); the `junction_angle` factor prices the new trace's angle to
+    /// the nearest of them.
+    pub arms: [Option<Vec2>; 4],
+}
+
+/// A chord `(a, b, net, wire)` of a traversal of a triangle.
+type Chord = (f64, f64, i32, WireId);
+
+/// A tree search result: the path, and the indices of the source and target ends it joins.
+pub type TreePath = (Path, usize, usize);
 
 /// Endpoint of an arc inside a triangle: a corner or a gap.
 #[derive(Clone, Copy)]
@@ -138,13 +171,20 @@ struct Search<'s, 'p> {
     /// Best node per (edge, gap, side of the edge entered): flat table, `off[e]` + 2 g + side.
     best: Vec<u32>,
     off: Vec<usize>,
-    /// Chords `(a, b, net)` of the traversals of a triangle, computed on first use in this search.
-    tc: Vec<Option<Vec<(f64, f64, i32)>>>,
+    /// Chords `(a, b, net, wire)` of the traversals of a triangle, computed on first use in this
+    /// search.
+    tc: Vec<Option<Vec<Chord>>>,
     needs: Vec<f64>,
     items: Vec<Item>,
     heap: BinaryHeap<Key>,
-    /// (cost, parent node or MAX, last triangle)
-    goal: Option<(f64, usize, TriId)>,
+    /// (cost, parent node or MAX, last triangle, source end, target end)
+    goal: Option<(f64, usize, TriId, usize, usize)>,
+    /// The source and target ends and, per triangle, the target ends a path may stop at in it.
+    src: Vec<TreeEnd>,
+    dst: Vec<TreeEnd>,
+    goal_at: std::collections::BTreeMap<TriId, Vec<usize>>,
+    /// Target points and their cost adjustments, for the heuristic.
+    gpts: Vec<(Vec2, f64)>,
     /// Extra price (mm, >= 0) of a pass of this net through an edge: the loss-augmentation hook
     /// of the S3b learning loop ([`super::learn`]); `None` in routing.
     hook: Option<&'s PassHook<'s>>,
@@ -154,8 +194,35 @@ struct Search<'s, 'p> {
 pub type PassHook<'h> = dyn Fn(i32, EdgeId) -> f64 + 'h;
 
 impl Search<'_, '_> {
+    /// Lower bound of the cost from `p` to the cheapest target: per target its straight distance
+    /// priced as length plus its (exact) end adjustment; every other price is >= 0, so the
+    /// minimum over the targets never overestimates and A* stays exact with the branch reward
+    /// (which is a goal-cost adjustment, never a negative edge).
     fn h(&self, p: Vec2) -> f64 {
-        (self.st.proj.pos[self.c.b] - p).len() / MM * self.scale * self.wt.length_mm
+        let k = self.scale * self.wt.length_mm / MM;
+        self.gpts.iter().map(|&(q, a)| (q - p).len() * k + a).fold(f64::INFINITY, f64::min)
+    }
+
+    /// `junction_angle` price of a trace that leaves end `d` towards `toward`.
+    fn angle_cost(&self, d: &TreeEnd, toward: Vec2) -> f64 {
+        if self.wt.junction_angle_mm <= 0.0 || d.arms.iter().all(Option::is_none) {
+            return 0.0;
+        }
+        let dv = toward - self.st.proj.pos[d.v];
+        let l = dv.len();
+        if l < 1.0 {
+            return 0.0;
+        }
+        let u = dv * (1.0 / l);
+        let deg = d.arms.iter().flatten().map(|a| a.dot(u).clamp(-1.0, 1.0).acos().to_degrees()).fold(180.0, f64::min);
+        self.wt.junction_angle_mm * super::factors::junction_angle_amount(deg, self.wt.junction_angle_exp)
+    }
+
+    fn seed_angle(&self, seed: usize, toward: Vec2) -> f64 {
+        match self.src.get(seed) {
+            Some(d) => self.angle_cost(d, toward),
+            None => 0.0,
+        }
     }
 
     fn slot(&self, e: EdgeId, g: usize, into: TriId) -> usize {
@@ -178,27 +245,39 @@ impl Search<'_, '_> {
         self.heap.push(Key(f, h, self.nodes.len() - 1));
     }
 
-    /// Arcs from `x` (point `px`, cost so far `base`) through triangle `t`.
-    fn expand(&mut self, t: TriId, x: End, in_e: Option<EdgeId>, px: Vec2, base: f64, parent: usize) {
+    /// Arcs from `x` (point `px`, cost so far `base`) through triangle `t`; `seed` is the source
+    /// end of the path, `except` a wire whose chords in `t` are not crossed (the trunk a branch
+    /// leaves at a junction corner of `t`).
+    #[allow(clippy::too_many_arguments)]
+    fn expand(&mut self, t: TriId, x: End, in_e: Option<EdgeId>, px: Vec2, base: f64, parent: usize, seed: usize, except: Option<WireId>) {
         let (st, c) = (self.st, self.c);
         let pr = st.proj;
         // Taking the last free entry sector of another net's pad.
         let base = if self.wt.blocks_pad_mm > 0.0 { base + self.wt.blocks_pad_mm * st.blocked_pads(t, c.net).len() as f64 } else { base };
-        if pr.tris[t].contains(&c.b) {
-            let cost = base
-                + (pr.pos[c.b] - px).len() / MM * self.scale * self.wt.length_mm
-                + st.arc_cross(t, x, End::Corner(c.b), c.net, &self.wt);
-            if self.goal.is_none_or(|g| cost < g.0) {
-                self.goal = Some((cost, parent, t));
+        if let Some(js) = self.goal_at.get(&t) {
+            for &j in js {
+                let d = self.dst[j];
+                if matches!(x, End::Corner(v) if v == d.v) {
+                    continue;
+                }
+                let skip = [except, d.on.map(|o| o.0)];
+                let cost = base
+                    + d.adj
+                    + self.angle_cost(&d, px)
+                    + (pr.pos[d.v] - px).len() / MM * self.scale * self.wt.length_mm
+                    + st.arc_cross_except(t, x, End::Corner(d.v), c.net, &self.wt, &skip);
+                if self.goal.is_none_or(|g| cost < g.0) {
+                    self.goal = Some((cost, parent, t, seed, j));
+                }
             }
         }
         // The chords of the traversals of `t` once per expansion, with whether they are of this net.
         if self.tc[t].is_none() {
-            let v: Vec<(f64, f64, i32)> = st.tri_trav[t]
+            let v: Vec<Chord> = st.tri_trav[t]
                 .iter()
                 .flat_map(|&(o, ok)| {
                     let net = st.wires[o].net;
-                    st.chords(o, ok).into_iter().map(move |(b1, b2)| (b1, b2, net))
+                    st.chords(o, ok).into_iter().map(move |(b1, b2)| (b1, b2, net, o))
                 })
                 .collect();
             self.tc[t] = Some(v);
@@ -255,8 +334,8 @@ impl Search<'_, '_> {
                     .as_ref()
                     .expect("filled above")
                     .iter()
-                    .filter(|&&(b1, b2, _)| interleave(xb, yb, b1, b2))
-                    .map(|&(_, _, net)| if net == c.net { self.wt.same_net_cross_mm } else { self.wt.cross_mm })
+                    .filter(|&&(b1, b2, _, o)| Some(o) != except && interleave(xb, yb, b1, b2))
+                    .map(|&(_, _, net, _)| if net == c.net { self.wt.same_net_cross_mm } else { self.wt.cross_mm })
                     .sum();
                 let cost = base
                     + (pt - px).len() / MM * self.scale * self.wt.length_mm
@@ -269,7 +348,9 @@ impl Search<'_, '_> {
                         Some(r) if g > 0 && g < n => self.wt.squeeze_mm * squeeze_amount(r - self.needs[g], pitch),
                         _ => 0.0,
                     };
-                self.push(Node { e, g, into: nt, from_tri: t, parent, cost, pt });
+                // Leaving a junction seed: the angle to the arms already there.
+                let cost = if parent == usize::MAX { cost + self.seed_angle(seed, pt) } else { cost };
+                self.push(Node { e, g, into: nt, from_tri: t, parent, cost, pt, seed });
             }
         }
     }
@@ -283,11 +364,15 @@ impl<'p> State<'p> {
         }
     }
 
-    /// Crossing cost of a new chord `x -> y` in `t` for a wire of `net`.
-    fn arc_cross(&self, t: TriId, x: End, y: End, net: i32, wt: &InitWeights) -> f64 {
+    /// Crossing cost of a new chord `x -> y` in `t` for a wire of `net`, not counting the wires
+    /// in `skip`.
+    fn arc_cross_except(&self, t: TriId, x: End, y: End, net: i32, wt: &InitWeights, skip: &[Option<WireId>]) -> f64 {
         let (a1, a2) = (self.end_bpos(t, x), self.end_bpos(t, y));
         let mut c = 0.0;
         for &(o, ok) in &self.tri_trav[t] {
+            if skip.contains(&Some(o)) {
+                continue;
+            }
             for (b1, b2) in self.chords(o, ok) {
                 if interleave(a1, a2, b1, b2) {
                     c += if self.wires[o].net == net { wt.same_net_cross_mm } else { wt.cross_mm };
@@ -334,6 +419,18 @@ impl<'p> State<'p> {
 
     /// [`State::search`] with an extra price per pass (`hook`, see [`PassHook`]); `None` = `search`.
     pub fn search_hooked(&self, c: &Conn, wt: &InitWeights, scale: f64, hook: Option<&PassHook>) -> Option<Path> {
+        let src = [TreeEnd { v: c.a, obs: c.pa, on: None, adj: 0.0, arms: [None; 4] }];
+        let dst = [TreeEnd { v: c.b, obs: c.pb, on: None, adj: 0.0, arms: [None; 4] }];
+        self.search_tree(c, &src, &dst, wt, scale, hook).map(|x| x.0)
+    }
+
+    /// Cheapest path from any end of `src` to any end of `dst` (multi-source, multi-target A*,
+    /// Takahashi-Matsuyama tree growth as in PathFinder / BonnRoute: D5 branching): the source
+    /// ends are seeded at cost 0, the heuristic is the distance to the nearest target end (a lower
+    /// bound, so A* stays exact). `c` gives the net, width and clearance (its terminals are not
+    /// used). A junction end (`on: Some((w, k))`) is reached only in its triangle, and the chords
+    /// of `w` there are not crossed (the trunk turns at the corner).
+    pub fn search_tree(&self, c: &Conn, src: &[TreeEnd], dst: &[TreeEnd], wt: &InitWeights, scale: f64, hook: Option<&PassHook>) -> Option<TreePath> {
         let pr = self.proj;
         let mut off = Vec::with_capacity(pr.edges.len() + 1);
         let mut acc = 0;
@@ -342,6 +439,21 @@ impl<'p> State<'p> {
             acc += 2 * (self.edge_order[e].len() + 1);
         }
         off.push(acc);
+        let tris_of = |d: &TreeEnd| -> Vec<TriId> {
+            match d.on {
+                Some((w, k)) => vec![self.wires[w].tris[k]],
+                None => pr.vert_tris[d.v].iter().copied().filter(|&t| pr.allowed(t, c.net).is_some()).collect(),
+            }
+        };
+        let mut goal_at: std::collections::BTreeMap<TriId, Vec<usize>> = std::collections::BTreeMap::new();
+        for (j, d) in dst.iter().enumerate() {
+            for t in tris_of(d) {
+                goal_at.entry(t).or_default().push(j);
+            }
+        }
+        let mut gpts: Vec<(Vec2, f64)> = dst.iter().map(|d| (pr.pos[d.v], d.adj)).collect();
+        gpts.sort_by(|a, b| a.0.x.total_cmp(&b.0.x).then(a.0.y.total_cmp(&b.0.y)).then(a.1.total_cmp(&b.1)));
+        gpts.dedup_by(|a, b| (a.0 - b.0).len2() < 1.0);
         let mut s = Search {
             st: self,
             c: *c,
@@ -355,11 +467,15 @@ impl<'p> State<'p> {
             items: Vec::new(),
             heap: BinaryHeap::new(),
             goal: None,
+            src: src.to_vec(),
+            dst: dst.to_vec(),
+            goal_at,
+            gpts,
             hook,
         };
-        for &t in &pr.vert_tris[c.a] {
-            if pr.allowed(t, c.net).is_some() {
-                s.expand(t, End::Corner(c.a), None, pr.pos[c.a], 0.0, usize::MAX);
+        for (i, d) in src.iter().enumerate() {
+            for t in tris_of(d) {
+                s.expand(t, End::Corner(d.v), None, pr.pos[d.v], d.adj, usize::MAX, i, d.on.map(|o| o.0));
             }
         }
         let mut expansions = 0;
@@ -375,13 +491,13 @@ impl<'p> State<'p> {
             if expansions > wt.max_expansions {
                 break;
             }
-            let (t, e, g, pt, cost) = (n.into, n.e, n.g, n.pt, n.cost);
-            s.expand(t, End::Gap(e, g), Some(e), pt, cost, i);
+            let (t, e, g, pt, cost, seed) = (n.into, n.e, n.g, n.pt, n.cost, n.seed);
+            s.expand(t, End::Gap(e, g), Some(e), pt, cost, i, seed, None);
         }
         if std::env::var("P2_PROF").is_ok() {
-            eprintln!("conn {}: expansions {expansions}, nodes {}, dist {:.1} mm, cost {:.1}, w {:.2}", c.net, s.nodes.len(), (self.proj.pos[c.b] - self.proj.pos[c.a]).len() / MM, s.goal.map_or(-1.0, |g| g.0), c.w / MM);
+            eprintln!("conn {}: expansions {expansions}, nodes {}, cost {:.1}, w {:.2}", c.net, s.nodes.len(), s.goal.map_or(-1.0, |g| g.0), c.w / MM);
         }
-        let (_, mut i, last) = s.goal?;
+        let (_, mut i, last, seed, j) = s.goal?;
         let mut path = Vec::new();
         let mut tris = vec![last];
         while i != usize::MAX {
@@ -392,7 +508,7 @@ impl<'p> State<'p> {
         }
         path.reverse();
         tris.reverse();
-        Some((path, tris))
+        Some(((path, tris), seed, j))
     }
 
     /// Route `c` and insert it: the wire and the number of passes over room; `None` when no

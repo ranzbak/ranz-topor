@@ -26,7 +26,8 @@ use super::pack::Packer;
 use super::refine::CapModel;
 use super::layers::{self, LayerParams};
 use super::planes;
-use super::state::{ObsId, State, WireId};
+use super::state::{ObsId, State, VertId, VertKind, WireId, NO_OBS};
+use super::tree;
 use crate::check::Checker;
 use crate::control::{cancelled, RunControl};
 use crate::decompose::{decompose, Connection, TermKind, TermRef};
@@ -380,7 +381,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut st = State::new(proj);
     let ws0 = (model.rules.default.width + model.rules.default.clearance) as f64;
     let tier_of = |i: usize| dec.connections[i].tier;
-    let weights = |rg: &Registry, c: &Conn, tier: u8, cap: usize| InitWeights { max_expansions: cap, ..InitWeights::from_registry(rg, &WireCtx { net: c.net, tier }) };
+    let weights = |rg: &Registry, c: &Conn, tier: u8, cap: usize| InitWeights { max_expansions: cap, junction_angle_exp: opts.junction_angle_exp, ..InitWeights::from_registry(rg, &WireCtx { net: c.net, tier }) };
     let len_of = |c: &Conn| (proj.pos[c.b] - proj.pos[c.a]).len();
     let mut order: Vec<usize> = (0..conns.len()).collect();
     order.sort_by(|&i, &j| {
@@ -389,9 +390,78 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut wire_conn: Vec<usize> = Vec::new(); // wire id -> index into conns
     let mut p2_failed: Vec<usize> = Vec::new();
     let mut timed_out = false;
+    // Net trees that follow the routing (D5, `tree`): the pad centre vertices per net and the free
+    // radius of every free / node vertex (a junction candidate).
+    let tree_free = opts.net_tree != "fixed";
+    let mut pad_verts: BTreeMap<i32, Vec<(VertId, ObsId)>> = BTreeMap::new();
+    for c in &conns {
+        pad_verts.entry(c.net).or_default().extend([(c.a, c.pa), (c.b, c.pb)]);
+    }
+    for v in pad_verts.values_mut() {
+        v.sort_unstable();
+        v.dedup();
+    }
+    // Copper graphics are no obstacles of the projection; a branch point keeps off them too.
+    let shapes: Vec<Vec<Vec2>> = model.copper_shapes.iter().filter(|c| c.poly.len() >= 3).map(|c| c.poly.iter().map(|p| p.to_vec2()).collect()).collect();
+    let shape_dist = |p: Vec2| -> f64 {
+        let mut d = f64::INFINITY;
+        for poly in &shapes {
+            if super::state::point_in_poly(p, poly) {
+                return 0.0;
+            }
+            for i in 0..poly.len() {
+                let (a, c) = (poly[i], poly[(i + 1) % poly.len()]);
+                let e = c - a;
+                let t = ((p - a).dot(e) / e.len2().max(1e-12)).clamp(0.0, 1.0);
+                d = d.min((p - (a + e * t)).len());
+            }
+        }
+        d
+    };
+    let rad: Vec<f64> = if tree_free {
+        (0..proj.pos.len())
+            .map(|v| if matches!(proj.vkind[v], VertKind::Free | VertKind::Node) { proj.free_radius(proj.pos[v], i32::MIN).min(shape_dist(proj.pos[v])) } else { 0.0 })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let smd_obs: Vec<bool> = (0..proj.obstacles.len()).map(|o| b.smd_layer(o).is_some()).collect();
+    let br_reward = reg.price(&Event::Branch { wire: 0, at: Vec2::default(), on_pad: false, smd: false }, &WireCtx::default());
+    let ecx = tree::EndsCtx {
+        pads: &pad_verts,
+        rad: &rad,
+        junctions: tree_free,
+        reward: br_reward,
+        smd_cost: reg.price(&Event::Branch { wire: 0, at: Vec2::default(), on_pad: true, smd: true }, &WireCtx::default()) - br_reward,
+        smd: &smd_obs,
+        pad_nm: opts.junction_pad_mm * MM,
+    };
+    // One connection into the state: with a free net tree it joins the two components of its net
+    // that its pads lie in (any pad or junction of them, multi-source search); else pad to pad.
+    let insert_conn = |st: &mut State, c: &Conn, w: &InitWeights| -> Option<WireId> {
+        if tree_free {
+            let comp = tree::components(st, c.net);
+            let (ca, cb) = (tree::comp_of(&comp, c.a), tree::comp_of(&comp, c.b));
+            if ca != cb {
+                let src = tree::ends_of(st, &ecx, c.net, &comp, ca, c.w, c.s, [c.a, c.b]);
+                let dst = tree::ends_of(st, &ecx, c.net, &comp, cb, c.w, c.s, [c.a, c.b]);
+                // The branch reward, the SMD assembly cost and the junction angle are priced in the
+                // search (social factors): a sharp or costly branch loses to a separate path.
+                let ((path, tris), i, j) = st.search_tree(c, &src, &dst, w, (c.w + c.s) / ws0, None)?;
+                let (sa, sb) = (src[i], dst[j]);
+                for e in [sa, sb] {
+                    if let Some((tw, k)) = e.on {
+                        st.add_turn(tw, k, e.v);
+                    }
+                }
+                let wire = super::state::Wire { net: c.net, w: c.w, s: c.s, a: sa.v, b: sb.v, pa: sa.obs, pb: sb.obs, turns: Vec::new(), passes: Vec::new(), tris: Vec::new(), alive: true };
+                return Some(st.insert(wire, &path, tris));
+            }
+        }
+        st.route_conn(c, w, (c.w + c.s) / ws0).map(|x| x.0)
+    };
     let route_one_raw = |st: &mut State, ci: usize, cap: usize, wire_conn: &mut Vec<usize>, rg: &Registry| -> bool {
         let c = &conns[ci];
-        let straight = len_of(c).max(1.0);
         // A path longer than `detour_factor` x the straight distance is a detour: search again with
         // cheaper crossings and layer fixings (P3 resolves a crossing with a via; a detour of many times the
         // connection's length is worse than that), the cheapest last.
@@ -400,13 +470,17 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             w.cross_mm *= cross_scale;
             w.smd_over_mm *= cross_scale;
             w.forced_layer_mm *= cross_scale;
-            let Some((wid, _)) = st.route_conn(c, &w, (c.w + c.s) / ws0) else { return false };
-            wire_conn.push(ci);
+            let Some(wid) = insert_conn(st, c, &w) else { return false };
+            if wire_conn.len() <= wid {
+                wire_conn.resize(wid + 1, usize::MAX);
+            }
+            wire_conn[wid] = ci;
+            let straight = (proj.pos[st.wires[wid].b] - proj.pos[st.wires[wid].a]).len().max(1.0);
             let len: f64 = st.polyline(wid).windows(2).map(|x| (x[1] - x[0]).len()).sum();
             if opts.detour_factor <= 0.0 || len <= opts.detour_factor * straight || attempt == 2 {
                 return true;
             }
-            st.remove(wid);
+            tree::remove_wire(st, wid);
         }
         true
     };
@@ -464,7 +538,21 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut packer = Packer::for_model(model, opts, proj);
     packer.via_squeeze = reg.price(&Event::ViaSqueeze { wire: 0, at: Vec2::default(), slack_nm: 0.0, via_nm: 1.0 }, &WireCtx::default());
     let packer = packer;
-    let assign = |st: &State| layers::assign_with(st, &|ob| b.smd_layer(ob), &lp, Some(&packer));
+    // P3, then the junctions' tee rule (D5): the trunk keeps one layer through a junction and the
+    // branch ends on it.
+    let assign = |st: &State| {
+        let mut lr = layers::assign_with(st, &|ob| b.smd_layer(ob), &lp, Some(&packer));
+        if tree_free && st.wires.iter().any(|w| w.alive && !w.turns.is_empty()) {
+            let mut evl = lr.events.clone();
+            let bottom_l = (if b.n_signal == 0 { proj.n_layers } else { b.n_signal }) as i32 - 1;
+            evl.resize(st.wires.len(), Vec::new());
+            lr.mask.resize(st.wires.len(), Vec::new());
+            lr.partner.resize(st.wires.len(), Vec::new());
+            tree::fix_layers(st, &mut evl, &mut lr.mask, &mut lr.partner, bottom_l);
+            layers::relabel(st, &evl, &lp, &mut lr);
+        }
+        lr
+    };
     let polys_of = |st: &State| -> Vec<Vec<Vec2>> { (0..st.wires.len()).map(|w| if st.wires[w].alive { st.polyline(w) } else { Vec::new() }).collect() };
     // Crossing directions for the capacity model's oblique factor: the taut paths (pack.rs).
     let dirs_of = |st: &State| -> Vec<Vec<Vec2>> { packer.taut_dirs(st) };
@@ -565,6 +653,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let mut vic: Vec<WireId> = victims.into_iter().collect();
         vic.sort_by_key(|&w| std::cmp::Reverse(rank[wire_conn[w]]));
         vic.truncate(max_rip.min(opts.max_ripped - ripped_total));
+        // A ripped trunk takes the branches that end on its junctions with it (D5 net trees).
+        let vic_set: BTreeSet<WireId> = vic.iter().copied().collect();
+        vic.extend(tree::dependents(&st, &vic_set));
         vic.sort_by_key(|&w| rank[wire_conn[w]]);
         if vic.is_empty() {
             break;
@@ -573,7 +664,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         ripped_total += vic.len();
         let vic_conns: Vec<usize> = vic.iter().map(|&w| wire_conn[w]).collect();
         for &w in &vic {
-            st.remove(w);
+            tree::remove_wire(&mut st, w);
         }
         for &ci in &vic_conns {
             reroutes[ci] += 1;
@@ -621,7 +712,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // ---- P4 moves: descent on the topology, then on the layer labels ----
     let mut tally = Tally::default();
     let mut term_over: BTreeMap<usize, (TermRef, TermRef)> = BTreeMap::new();
-    if opts.moves && opts.max_moves > 0 && !expired() {
+    // The topological moves re-search whole pad-to-pad connections; they do not know branch
+    // points yet (D5), so a state with branch points skips them.
+    let has_junctions = tree_free && st.wires.iter().any(|w| w.alive && !w.turns.is_empty());
+    if opts.moves && has_junctions {
+        warnings.push("P4 moves skipped: the net trees have branch points on traces, which the moves do not handle yet ([search] net_tree = \"fixed\" to use them)".into());
+    }
+    if opts.moves && opts.max_moves > 0 && !expired() && !has_junctions {
         let t_mv = Instant::now();
         let s0 = score(&st, &lr);
         let mut topo = Topo {
@@ -734,8 +831,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let cm = CapModel::new(&st, &packer, &dirs, &lr.events, bottom, 1.0);
         eprintln!("PLANDRAW round {round}: before the unlayerable drops ({} wires): over-full edge-layers {}, vias without a site {}", dropped.len(), cm.overfull_list().len(), cm.nosite());
     }
+    // A dropped trunk takes the branches on its junctions with it (D5 net trees).
+    for w in tree::dependents(&st, &dropped) {
+        fail(&mut out, conn_of[wire_conn[w]], "its branch point lies on a connection dropped as unlayerable (error, not emitted)");
+        dropped.insert(w);
+    }
     for &w in &dropped {
-        st.remove(w);
+        tree::remove_wire(&mut st, w);
     }
     ctl.update("route", 2, 0, nconn, lr.vias, t0.elapsed().as_secs_f64());
     let _ = &t_draw;
@@ -775,6 +877,20 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         if st.wires[w].alive {
             let mut p = plan(&lr.events[w], b.n_signal);
             p.at = cm_plan.via_k[w].clone();
+            // A junction's traversal holds no via of its trunk (the tee keeps one layer there).
+            for &(kt, _) in &st.wires[w].turns {
+                for (i, iv) in p.vias.iter_mut().enumerate() {
+                    if iv.0 == kt && iv.1 > kt {
+                        iv.0 = kt + 1;
+                    }
+                    if iv.1 == kt && iv.0 < kt {
+                        iv.1 = kt - 1;
+                    }
+                    if let Some(a) = p.at.get_mut(i) {
+                        *a = (*a).clamp(iv.0, iv.1);
+                    }
+                }
+            }
             plans.insert(w, p);
         }
     }
@@ -783,6 +899,44 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     draw_order.sort_by(|&x, &y| {
         st.wires[y].w.total_cmp(&st.wires[x].w).then(wire_len(x).total_cmp(&wire_len(y))).then(x.cmp(&y))
     });
+    // A trunk is drawn before the branches on it (D5 net trees: a branch ends on its drawn copper).
+    let tree_js = if tree_free { tree::junctions(&st) } else { Vec::new() };
+    if !tree_js.is_empty() {
+        let mut depth: BTreeMap<WireId, usize> = BTreeMap::new();
+        for _ in 0..tree_js.len() {
+            for &(bw, _, tw, _, _) in &tree_js {
+                let d = depth.get(&tw).copied().unwrap_or(0) + 1;
+                if depth.get(&bw).copied().unwrap_or(0) < d {
+                    depth.insert(bw, d);
+                }
+            }
+        }
+        draw_order.sort_by_key(|w| depth.get(w).copied().unwrap_or(0));
+    }
+    // Where each branch meets its drawn trunk: the trunk run's point nearest the junction vertex,
+    // on the layer the branch ends on.
+    let joint_of = |bw: WireId, drawn: &BTreeMap<WireId, WireOut>, plans: &BTreeMap<WireId, Plan>| -> Option<((WireId, usize), Vec2)> {
+        let &(_, end, tw, _, v) = tree_js.iter().find(|j| j.0 == bw)?;
+        let pl = plans.get(&bw)?;
+        let layer = if end == 0 { *pl.layers.first()? } else { *pl.layers.last()? };
+        let pv = proj.pos[v];
+        let mut best: Option<(f64, Vec2)> = None;
+        for (l, pts) in &drawn.get(&tw)?.runs {
+            if *l != layer {
+                continue;
+            }
+            for x in pts.windows(2) {
+                let ab = x[1] - x[0];
+                let u = ((pv - x[0]).dot(ab) / ab.len2().max(1.0)).clamp(0.0, 1.0);
+                let q = x[0] + ab * u;
+                let d = (q - pv).len();
+                if best.is_none_or(|b| d < b.0) {
+                    best = Some((d, q));
+                }
+            }
+        }
+        best.map(|b| ((bw, end), b.1))
+    };
     // Plane stubs and vias go right after the wide wires: before the first default-width wire.
     let wide = draw_order.iter().take_while(|&&w| st.wires[w].w > model.rules.default.width as f64).count();
     // Pass layers as far as the plans fix them (a via interval leaves its passes open): the via
@@ -939,6 +1093,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let ci = conn_of[wire_conn[w]];
         let mut ids = via_ids.remove(&w).unwrap_or_default();
         let vh = ids[..placed[&w].len().min(ids.len())].to_vec();
+        if let Some((key, q)) = joint_of(w, &drawn, &plans) {
+            dr.end_at.insert(key, q);
+        }
         let wo = dr.draw_wire(w, &plans[&w], &placed[&w], &mut ids);
         if wo.ok {
             via_h.insert(w, vh);
@@ -1015,6 +1172,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     continue;
                 }
             };
+            if let Some((key, q)) = joint_of(f, &drawn, &plans) {
+                dr.end_at.insert(key, q);
+            }
             let wf = dr.draw_wire(f, &plans[&f], &vias_f, &mut ids);
             let mut redrawn: Vec<(WireId, WireOut)> = Vec::new();
             let mut ok = wf.ok;
@@ -1070,13 +1230,125 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
         }
     }
+    // ---- Junctions (D5 net trees): a branch whose trunk was not drawn, or that reaches its
+    // junction on another layer than the trunk passes it, is not connected: its copper goes and
+    // its connection fails (locally; the rest of the tree stays).
+    if tree_free {
+        let js = tree::junctions(&st);
+        let (mut lost_trunk, mut lost_layer) = (0usize, 0usize);
+        let mut gone: BTreeSet<WireId> = BTreeSet::new();
+        loop {
+            let mut more = false;
+            for &(bw, end, tw, _, v) in &js {
+                if gone.contains(&bw) || !drawn.contains_key(&bw) {
+                    continue;
+                }
+                let why = if !drawn.contains_key(&tw) || gone.contains(&tw) {
+                    lost_trunk += 1;
+                    "drawing: its branch point lies on a connection that was not drawn"
+                } else {
+                    let pv = dr.end_at.get(&(bw, end)).copied().unwrap_or(proj.pos[v]);
+                    let on = |pts: &[Vec2]| pts.windows(2).any(|x| {
+                        let ab = x[1] - x[0];
+                        let u = ((pv - x[0]).dot(ab) / ab.len2().max(1.0)).clamp(0.0, 1.0);
+                        (x[0] + ab * u - pv).len() < 2.0
+                    });
+                    let tl = drawn[&tw].runs.iter().find(|(_, pts)| on(pts)).map(|x| x.0);
+                    let bl = if end == 0 { drawn[&bw].runs.first() } else { drawn[&bw].runs.last() }.map(|x| x.0);
+                    if tl.is_some() && tl == bl {
+                        continue;
+                    }
+                    if std::env::var("TOPO_TREEDBG").is_ok() {
+                        eprintln!(
+                            "TREE layer mismatch round {round}: branch {bw} end {end} trunk {tw} at ({:.3}, {:.3}): trunk run layer {tl:?} (runs {:?}, plan {:?}, events {:?}, turns {:?}), branch end layer {bl:?} (runs {:?}, events {:?})",
+                            pv.x / MM,
+                            -pv.y / MM,
+                            drawn[&tw].runs.iter().map(|r| (r.0, r.1.len())).collect::<Vec<_>>(),
+                            plans.get(&tw).map(|p| (p.layers.clone(), p.vias.clone())),
+                            lr.events.get(tw),
+                            st.wires[tw].turns,
+                            drawn[&bw].runs.iter().map(|r| (r.0, r.1.len())).collect::<Vec<_>>(),
+                            lr.events.get(bw)
+                        );
+                    }
+                    lost_layer += 1;
+                    "drawing: it does not meet the trace it branches from (another layer, or the trace was redrawn elsewhere)"
+                };
+                for &h in &drawn[&bw].handles {
+                    dr.uncommit(h);
+                }
+                for h in via_h.remove(&bw).unwrap_or_default() {
+                    dr.uncommit(h);
+                }
+                drawn.remove(&bw);
+                placed.remove(&bw);
+                out[conn_of[wire_conn[bw]]].routed = false;
+                fail(&mut out, conn_of[wire_conn[bw]], why);
+                gone.insert(bw);
+                more = true;
+            }
+            if !more {
+                break;
+            }
+        }
+        let mut junction_note = format!(
+            "net trees ([search] net_tree = free): {} branch points on traces; {} branches lost with an undrawn trunk, {} on another layer than their trunk",
+            js.len(),
+            lost_trunk,
+            lost_layer
+        );
+        // The report names the ends the wires really have (a junction, or another pad of the
+        // tree than the decomposition planned).
+        let pad_term = |o: ObsId| -> Option<TermRef> {
+            let p = *b.pad_of.get(o)?;
+            dec.connections.iter().flat_map(|c| [&c.from, &c.to]).find(|t| matches!(t.kind, TermKind::Pad(q) if q == p)).cloned()
+        };
+        let (mut at_junction, mut other_pad) = (0usize, 0usize);
+        // Per net: connections ending at a branch point, at another pad of the tree, as planned.
+        let mut per_net: BTreeMap<i32, [usize; 3]> = BTreeMap::new();
+        for (w, wi) in st.wires.iter().enumerate().filter(|(_, x)| x.alive) {
+            let Some(&cw) = wire_conn.get(w) else { continue };
+            let ci = conn_of[cw];
+            let term = |o: ObsId, v: VertId| -> Option<TermRef> {
+                if o == NO_OBS {
+                    let p = proj.pos[v];
+                    Some(TermRef { kind: TermKind::Junction, label: format!("branch point ({:.3}, {:.3})", p.x / MM, -p.y / MM), at: p, layers: b.signal_layers.clone() })
+                } else {
+                    pad_term(o)
+                }
+            };
+            let (Some(f), Some(t)) = (term(wi.pa, wi.a), term(wi.pb, wi.b)) else { continue };
+            let c = &dec.connections[ci];
+            let same = (f.label == c.from.label && t.label == c.to.label) || (f.label == c.to.label && t.label == c.from.label);
+            let slot = if wi.pa == NO_OBS || wi.pb == NO_OBS { 0 } else if !same { 1 } else { 2 };
+            per_net.entry(wi.net).or_default()[slot] += 1;
+            if !same {
+                if wi.pa == NO_OBS || wi.pb == NO_OBS {
+                    at_junction += 1;
+                } else {
+                    other_pad += 1;
+                }
+                out[ci].ghost_nm = (proj.pos[wi.b] - proj.pos[wi.a]).len();
+                term_over.insert(ci, (f, t));
+            }
+        }
+        junction_note.push_str(&format!("; {at_junction} connections end at a branch point, {other_pad} at another pad of their net's tree than planned"));
+        warnings.push(junction_note);
+        let name_of = |net: i32| model.nets.iter().find(|n| n.code == net).map_or(String::new(), |n| n.name.clone());
+        let rows: Vec<String> = per_net.iter().filter(|(_, c)| c[0] + c[1] > 0).map(|(&n, c)| format!("{} {}/{}/{}", name_of(n), c[0], c[1], c[2])).collect();
+        if !rows.is_empty() {
+            warnings.push(format!("net trees per net (branch point / another pad of the tree / separate trace to the planned pad): {}", rows.join(", ")));
+        }
+    }
     // ---- Via reduction (S4, plan P6): measure the vias by cause, then drop the redundant ones ----
     let end_pads = |w: WireId| [st.wires[w].pa, st.wires[w].pb];
     let end_fixed = |w: WireId| {
         let [pa, pb] = end_pads(w);
         [b.smd_layer(pa).is_some(), b.smd_layer(pb).is_some()]
     };
-    let frozen = |w: WireId| model.pours.iter().any(|z| z.net == st.wires[w].net);
+    // Wires at a junction keep their layers (the tee rule holds as drawn).
+    let in_tree: BTreeSet<WireId> = if tree_free { tree::junctions(&st).iter().flat_map(|j| [j.0, j.2]).collect() } else { BTreeSet::new() };
+    let frozen = |w: WireId| in_tree.contains(&w) || model.pours.iter().any(|z| z.net == st.wires[w].net);
     let causes = |plans: &BTreeMap<WireId, Plan>, drawn: &BTreeMap<WireId, WireOut>| -> String {
         let (mut total, mut pad_forced, mut crossing, mut close, mut one_via, mut pairs_aba) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
         for (w, wo) in drawn {

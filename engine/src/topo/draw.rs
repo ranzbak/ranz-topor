@@ -510,6 +510,9 @@ pub struct Drawer<'a> {
     /// Drawn crossing of every pass: distance along its edge (nm) and the handle of the first
     /// track of its run (the crossing counts while that copper is committed).
     drawn_x: Vec<Option<(f64, usize)>>,
+    /// Where a branch's end (wire, end 0|1) lies on its trunk's drawn copper (D5 net trees): the
+    /// drawing ends the branch there instead of at its junction vertex.
+    pub end_at: BTreeMap<(WireId, usize), Vec2>,
 }
 
 impl<'a> Drawer<'a> {
@@ -579,6 +582,7 @@ impl<'a> Drawer<'a> {
             slot: vec![None; st.passes.len()],
             lanes: BTreeMap::new(),
             drawn_x: vec![None; st.passes.len()],
+            end_at: BTreeMap::new(),
         }
         .with_static()
     }
@@ -1080,6 +1084,14 @@ impl<'a> Drawer<'a> {
                 }
                 if let Some((room, k, p)) = best {
                     if dbg {
+                        for pad in self.model.pads.iter().filter(|pad| pad.net == net) {
+                            for &l in &pad.layers {
+                                let d = crate::geom::point_skeleton(p, &self.model.skeleton(pad, l));
+                                if d < 0.5 * sz.d as f64 + 1e5 {
+                                    eprintln!("VIAOWN wire {w} via at ({:.3},{:.3}) pad {}.{} layer {l} d {d:.0} r {}", p.x / 1e6, -p.y / 1e6, pad.ref_, pad.number, sz.d / 2);
+                                }
+                            }
+                        }
                         eprintln!("VIAPICK wire {w} net {net} via {i} ka {ka} kb {kb} planned {at:?} chosen k {k} at ({:.3},{:.3}) room {:.0} size {} (planned triangle: {n_side} wrong side, {n_check} rejected)", p.x / 1e6, -p.y / 1e6, room, sz.d);
                     }
                     let id = self.commit(&via_item(net, p, sz, Some(w)));
@@ -1357,7 +1369,15 @@ impl<'a> Drawer<'a> {
         let ends = [pad_of(wi.pa), pad_of(wi.pb)];
         let tol = self.model.rules.max_error as f64;
         let pads: Vec<usize> = (0..self.model.pads.len()).filter(|&i| self.model.pads[i].net == wi.net && !ends.contains(&i)).collect();
-        if pads.is_empty() {
+        // The vias other wires of the net placed (D5: a tree hub pad brings them close): a track
+        // grazing one is the same sliver connection.
+        let vias: Vec<(Vec2, f64)> = self
+            .via_marks
+            .iter()
+            .filter(|m| m.0 != w && self.st.wires[m.0].net == wi.net)
+            .filter_map(|m| self.handles.get(m.5).map(|h| &self.ents[h.1]).filter(|e| e.live).map(|e| (m.2, e.grow)))
+            .collect();
+        if pads.is_empty() && vias.is_empty() {
             return true;
         }
         items.iter().all(|it| {
@@ -1372,6 +1392,11 @@ impl<'a> Drawer<'a> {
                 }
                 let sk = self.model.skeleton(pad, t.layer);
                 let d = crate::geom::dist::dist_prim_skeleton(&prim, &sk);
+                d - 0.5 * t.width as f64 >= tol || d <= 0.0
+            }) && vias.iter().all(|&(c, r)| {
+                let ab = b - a;
+                let u = ((c - a).dot(ab) / ab.len2().max(1.0)).clamp(0.0, 1.0);
+                let d = (a + ab * u - c).len() - r;
                 d - 0.5 * t.width as f64 >= tol || d <= 0.0
             })
         })
@@ -1515,8 +1540,9 @@ impl<'a> Drawer<'a> {
         for r in 0..plan.layers.len() {
             let k0 = if r == 0 { 0 } else { vias[r - 1].0 };
             let k1 = if r == plan.layers.len() - 1 { n } else { vias[r].0 };
-            let s = if r == 0 { pr.pos[wi.a] } else { vias[r - 1].1 };
-            let e = if r == plan.layers.len() - 1 { pr.pos[wi.b] } else { vias[r].1 };
+            // A branch ends on its trunk's drawn copper (D5 net trees, `end_at`), else at its vertex.
+            let s = if r == 0 { self.end_at.get(&(w, 0)).copied().unwrap_or(pr.pos[wi.a]) } else { vias[r - 1].1 };
+            let e = if r == plan.layers.len() - 1 { self.end_at.get(&(w, 1)).copied().unwrap_or(pr.pos[wi.b]) } else { vias[r].1 };
             let layer = plan.layers[r];
             let lid = self.layer_id(layer);
             let mut ok = false;
@@ -1566,7 +1592,7 @@ impl<'a> Drawer<'a> {
                     }
                 }
                 if rep.violations.is_empty() && !self.track_own_pad_ok(w, &items) {
-                    last_reason = "drawing: a track grazes a pad of its own net (KiCad minimum connection width)".to_string();
+                    last_reason = "drawing: a track grazes a pad or via of its own net (KiCad minimum connection width)".to_string();
                     continue;
                 }
                 if rep.violations.is_empty() {
