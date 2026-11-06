@@ -10,7 +10,7 @@ impl Factor for Overflow {
         "overflow"
     }
     fn doc(&self) -> &'static str {
-        "A pass through a cut whose room is exceeded (P2 search penalty; the overflow is counted as a violation)."
+        "A pass through a cut whose room is exceeded, or a crossing of two stretches that no layer assignment can separate (both held to the same single layer in its triangle) (P2 search penalty; counted as a violation)."
     }
     fn unit(&self) -> &'static str {
         "per overflowing pass"

@@ -357,8 +357,20 @@ pub fn routing_events(st: &State, vias: &[u32], ws0: f64, keep: &dyn Fn(WireId) 
         // others (or the end pad's layer), once per change.
         let edges: Vec<usize> = wi.passes.iter().map(|&p| st.passes[p].edge).collect();
         let end = |v, obs| super::init::TreeEnd { v, obs, on: None, adj: 0.0, arms: [None; 4] };
-        for e in st.forced_edges(wi.net, wi.w, wi.s, &end(wi.a, wi.pa), &end(wi.b, wi.pb), &edges, &wi.tris) {
+        // D6b: with the different-net stretches it crosses (their held layers).
+        let mut xl: Vec<Vec<(u64, u64)>> = vec![Vec::new(); wi.tris.len()];
+        for c in st.crossings(w) {
+            let on = st.wires[c.other].net;
+            if on != wi.net {
+                xl[c.k].push((st.stretch_layers(c.other)[c.other_k], pr.allowed(c.tri, on).map_or(0, |m| m.0)));
+            }
+        }
+        let (forced, unl) = st.layer_walk(wi.net, wi.w, wi.s, &end(wi.a, wi.pa), &end(wi.b, wi.pb), &edges, &wi.tris, &|k| xl[k].clone());
+        for e in forced {
             out.push(Event::LayerForced { wire: w, edge: e });
+        }
+        for e in unl {
+            out.push(Event::Overflow { wire: w, edge: e });
         }
         for (j, &p) in wi.passes.iter().enumerate() {
             let e = st.passes[p].edge;

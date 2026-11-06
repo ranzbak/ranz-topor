@@ -11,7 +11,7 @@ impl Factor for Via {
         "via"
     }
     fn doc(&self) -> &'static str {
-        "A through via; also a place where the layers a wire can use run out (a stretch held to one layer by a narrow gap or another net's pad meets one held to another layer, or its end pad's): one via there, not one per pass."
+        "A through via; also a place where the layers a wire can use run out (a stretch held to one layer by a narrow gap or another net's pad meets one held to another layer, or its end pad's), or where it crosses another net's stretch held to the same single layer: one via there, not one per pass."
     }
     fn unit(&self) -> &'static str {
         "per via"

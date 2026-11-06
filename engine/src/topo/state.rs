@@ -528,6 +528,10 @@ pub struct State<'p> {
     pub centre: Vec<Option<VertId>>,
     /// Per obstacle: the triangles of its ring (a corner on its outline, not inside it, not a wall).
     pub ring: Vec<Vec<TriId>>,
+    /// `[search] crossing_vias = "via"` (D6b): P2 prices the via a crossing of two stretches held
+    /// to the same layer implies and narrows the layer pin ([`super::init::cross_pin`]); false
+    /// (default, "crossing"): only crossings no layer assignment separates are priced (overflow).
+    pub cross_vias: bool,
 }
 
 impl<'p> State<'p> {
@@ -558,6 +562,7 @@ impl<'p> State<'p> {
             tri_trav: vec![Vec::new(); proj.tris.len()],
             history: vec![0.0; proj.edges.len()],
             ends: vec![0; proj.pos.len()],
+            cross_vias: false,
         }
     }
 

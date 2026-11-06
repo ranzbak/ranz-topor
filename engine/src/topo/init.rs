@@ -154,8 +154,59 @@ pub struct TreeEnd {
     pub arms: [Option<Vec2>; 4],
 }
 
-/// A chord `(a, b, net, wire)` of a traversal of a triangle.
-type Chord = (f64, f64, i32, WireId);
+/// A chord `(a, b, net, wire, held, allowed)` of a traversal of a triangle: `held` = the layers
+/// that wire's stretch is held to there ([`State::stretch_layers`]), `allowed` = the layers the
+/// triangle allows it.
+type Chord = (f64, f64, i32, WireId, u64, u64);
+
+/// What crossing another net's stretch does to a wire's layers ([`cross_pin`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CrossLayer {
+    /// The two wires keep distinct layers without a via.
+    Free,
+    /// One of them needs a via at the crossing (this wire when its triangle allows another layer,
+    /// else the other).
+    Via,
+    /// Neither can leave the shared layer in that triangle: no layer assignment separates them.
+    Unlayerable,
+}
+
+/// A wire held to layers `pin` (its triangle allows `mine`) crosses another net's stretch held to
+/// `held` (its triangle allows `oall`): the two need distinct layers there (Polubasov 2001 §3:
+/// a crossing joins the two wires' domains with a "different layers" edge; both ends fixed to the
+/// same layer is the case no assignment solves). Returns the effect and this wire's layers after
+/// the crossing: a stretch held to one layer narrows this wire's pin to the others; when none is
+/// left, a via (this wire takes another layer its triangle allows, else the other wire leaves its
+/// layer); when neither triangle allows another layer, unlayerable. With `vias` false
+/// (`[search] crossing_vias = "crossing"`, the default) only the unlayerable case is reported and
+/// the pin is left as it was: the `crossing` price (TopoR: a 13-20 mm detour rather than a via
+/// pair) already stands for the layer change. O(1).
+pub fn cross_pin(pin: u64, mine: u64, held: u64, oall: u64, vias: bool) -> (CrossLayer, u64) {
+    let r = cross_pin_full(pin, mine, held, oall);
+    if vias || r.0 == CrossLayer::Unlayerable {
+        r
+    } else {
+        // `[search] crossing_vias = "crossing"`: the crossing price stands for the via pair.
+        (CrossLayer::Free, pin)
+    }
+}
+
+fn cross_pin_full(pin: u64, mine: u64, held: u64, oall: u64) -> (CrossLayer, u64) {
+    let pin = if pin & mine != 0 { pin & mine } else { pin };
+    if held.count_ones() != 1 {
+        return (CrossLayer::Free, pin);
+    }
+    if pin & !held != 0 {
+        return (CrossLayer::Free, pin & !held);
+    }
+    if mine & !held != 0 {
+        (CrossLayer::Via, mine & !held)
+    } else if oall & !pin != 0 {
+        (CrossLayer::Via, pin)
+    } else {
+        (CrossLayer::Unlayerable, pin)
+    }
+}
 
 /// A tree search result: the path, and the indices of the source and target ends it joins.
 pub type TreePath = (Path, usize, usize);
@@ -179,6 +230,8 @@ struct Search<'s, 'p> {
     /// Chords `(a, b, net, wire)` of the traversals of a triangle, computed on first use in this
     /// search.
     tc: Vec<Option<Vec<Chord>>>,
+    /// Per wire met in this search: its stretch layers per traversal ([`State::stretch_layers`]).
+    held: std::collections::HashMap<WireId, Vec<u64>>,
     needs: Vec<f64>,
     items: Vec<Item>,
     heap: BinaryHeap<Key>,
@@ -230,6 +283,54 @@ impl Search<'_, '_> {
         }
     }
 
+    /// Fill the chords of the traversals of `t` (once per search), with the layers each crossed
+    /// stretch is held to.
+    fn fill_chords(&mut self, t: TriId) {
+        if self.tc[t].is_some() {
+            return;
+        }
+        let st = self.st;
+        let mut v: Vec<Chord> = Vec::new();
+        for &(o, ok) in &st.tri_trav[t] {
+            let net = st.wires[o].net;
+            let held = self.held.entry(o).or_insert_with(|| st.stretch_layers(o))[ok];
+            let oall = st.proj.allowed(t, net).map_or(0, |m| m.0);
+            v.extend(st.chords(o, ok).into_iter().map(|(b1, b2)| (b1, b2, net, o, held, oall)));
+        }
+        self.tc[t] = Some(v);
+    }
+
+    /// Price of a new chord `xb -> yb` across the chords `tc` of a triangle (not those of the
+    /// wires in `skip`) and the wire's layers after it ([`cross_pin`]): per crossing the
+    /// `crossing` price, plus a via where both are held to one layer and one can leave it, or
+    /// the `overflow` price where neither can.
+    #[allow(clippy::too_many_arguments)]
+    fn arc_chords(tc: &[Chord], wt: &InitWeights, net: i32, xb: f64, yb: f64, pin: u64, mine: u64, skip: &[Option<WireId>], vias: bool) -> (f64, u64) {
+        let (mut cross, mut pg) = (0.0, pin);
+        for &(b1, b2, onet, o, held, oall) in tc {
+            if skip.contains(&Some(o)) || !interleave(xb, yb, b1, b2) {
+                continue;
+            }
+            if onet == net {
+                cross += wt.same_net_cross_mm;
+                continue;
+            }
+            let (k, p2) = cross_pin(pg, mine, held, oall, vias);
+            pg = p2;
+            cross += wt.cross_mm
+                + match k {
+                    CrossLayer::Free => 0.0,
+                    CrossLayer::Via => wt.forced_layer_mm,
+                    CrossLayer::Unlayerable => wt.overflow_mm,
+                };
+        }
+        (cross, pg)
+    }
+
+    fn arc(&self, t: TriId, xb: f64, yb: f64, pin: u64, mine: u64, skip: &[Option<WireId>]) -> (f64, u64) {
+        Self::arc_chords(self.tc[t].as_deref().expect("filled"), &self.wt, self.c.net, xb, yb, pin, mine, skip, self.st.cross_vias)
+    }
+
     fn slot(&self, e: EdgeId, g: usize, into: TriId) -> usize {
         self.off[e] + 2 * g + usize::from(self.st.proj.edge_tris[e][0] != Some(into))
     }
@@ -265,36 +366,28 @@ impl Search<'_, '_> {
         let pr = st.proj;
         // Taking the last free entry sector of another net's pad.
         let base = if self.wt.blocks_pad_mm > 0.0 { base + self.wt.blocks_pad_mm * st.blocked_pads(t, c.net).len() as f64 } else { base };
-        if let Some(js) = self.goal_at.get(&t) {
-            for &j in js {
+        self.fill_chords(t);
+        let mine = pr.allowed(t, c.net).map_or(0, |m| m.0);
+        let xb = st.end_bpos(t, x);
+        if let Some(js) = self.goal_at.get(&t).cloned() {
+            for j in js {
                 let d = self.dst[j];
                 if matches!(x, End::Corner(v) if v == d.v) {
                     continue;
                 }
                 let skip = [except, d.on.map(|o| o.0)];
+                let (xc, pin_end) = self.arc(t, xb, pr.corner_pos(t, d.v), pin, mine, &skip);
                 let cost = base
-                    + if pin & st.end_mask(&d) == 0 { self.wt.forced_layer_mm } else { 0.0 }
+                    + if pin_end & st.end_mask(&d) == 0 { self.wt.forced_layer_mm } else { 0.0 }
                     + d.adj
                     + self.angle_cost(&d, px)
                     + (pr.pos[d.v] - px).len() / MM * self.scale * self.wt.length_mm
-                    + st.arc_cross_except(t, x, End::Corner(d.v), c.net, &self.wt, &skip);
+                    + xc;
                 if self.goal.is_none_or(|g| cost < g.0) {
                     self.goal = Some((cost, parent, t, seed, j));
                 }
             }
         }
-        // The chords of the traversals of `t` once per expansion, with whether they are of this net.
-        if self.tc[t].is_none() {
-            let v: Vec<Chord> = st.tri_trav[t]
-                .iter()
-                .flat_map(|&(o, ok)| {
-                    let net = st.wires[o].net;
-                    st.chords(o, ok).into_iter().map(move |(b1, b2)| (b1, b2, net, o))
-                })
-                .collect();
-            self.tc[t] = Some(v);
-        }
-        let xb = st.end_bpos(t, x);
         let mask_t = pr.allowed(t, c.net);
         let me = Item { net: c.net, w: c.w, s: c.s };
         for &e in &pr.tri_edges[t] {
@@ -309,20 +402,22 @@ impl Search<'_, '_> {
             let Some(nt) = pr.across(e, t) else { continue };
             let Some(mask_nt) = pr.allowed(nt, c.net) else { continue };
             let alone = pr.edge_demand(e, &[me]);
-            let (forced, nowhere, pin2) = st.pin_through(pin, e, t, nt, c.net, alone);
-            let extra = if forced { self.wt.forced_layer_mm } else { 0.0 } + if nowhere { self.wt.overflow_mm } else { 0.0 } + self.hook.map_or(0.0, |h| h(c.net, e));
-            // The room of the layers the wire can be on here (its layer pin): a stretch held to
-            // one layer has that layer's room only, not the sum over the layers the triangles
-            // allow (D6a).
-            let pinned = |m: u64| if m & pin2 != 0 { m & pin2 } else { m };
-            let room1 = mask_t.map(|m| {
-                let both = pinned(m.0 & mask_nt.0);
-                (0..pr.n_layers).filter(|&l| (both >> l) & 1 == 1).map(|l| pr.room_for(e, l, c.net)).fold(f64::NEG_INFINITY, f64::max)
-            });
-            let room = mask_t.map(|m| {
-                let both = pinned(m.0 & mask_nt.0);
-                (0..pr.n_layers).filter(|&l| (both >> l) & 1 == 1).map(|l| pr.room_for(e, l, c.net)).sum::<f64>()
-            });
+            // The pass's layer pin, its price and the room of the layers it leaves (a stretch held
+            // to one layer has that layer's room only, not the sum over the layers the triangles
+            // allow, D6a), for the pin the wire has after its crossings in `t` (D6b).
+            let wt = self.wt;
+            let hook = self.hook.map_or(0.0, |h| h(c.net, e));
+            let through = |p: u64| {
+                let (forced, nowhere, pin2) = st.pin_through(p, e, t, nt, c.net, alone);
+                let extra = if forced { wt.forced_layer_mm } else { 0.0 } + if nowhere { wt.overflow_mm } else { 0.0 } + hook;
+                let pinned = |m: u64| if m & pin2 != 0 { m & pin2 } else { m };
+                let layers = mask_t.map(|m| pinned(m.0 & mask_nt.0));
+                let room1 = layers.map(|b| (0..pr.n_layers).filter(|&l| (b >> l) & 1 == 1).map(|l| pr.room_for(e, l, c.net)).fold(f64::NEG_INFINITY, f64::max));
+                let room = layers.map(|b| (0..pr.n_layers).filter(|&l| (b >> l) & 1 == 1).map(|l| pr.room_for(e, l, c.net)).sum::<f64>());
+                (extra, pin2, room1, room)
+            };
+            let base_pass = through(pin);
+            let room = base_pass.3;
             self.needs.clear();
             if room.is_some_and(f64::is_finite) {
                 st.edge_need_gaps(e, me, alone, &mut self.items, &mut self.needs);
@@ -345,22 +440,21 @@ impl Search<'_, '_> {
                 let pt = pa + (pb - pa) * ((g + 1) as f64 / (n + 2) as f64);
                 let f = (2.0 * g as f64 + 1.0) / (2.0 * n as f64 + 2.0);
                 let yb = side as f64 + if fwd { f } else { 1.0 - f };
-                let cross: f64 = self.tc[t]
-                    .as_ref()
-                    .expect("filled above")
-                    .iter()
-                    .filter(|&&(b1, b2, _, o)| Some(o) != except && interleave(xb, yb, b1, b2))
-                    .map(|&(_, _, net, _)| if net == c.net { self.wt.same_net_cross_mm } else { self.wt.cross_mm })
-                    .sum();
+                let (cross, pg) = Self::arc_chords(self.tc[t].as_deref().expect("filled above"), &wt, c.net, xb, yb, pin, mine, &[except], st.cross_vias);
+                let (extra, pin2, room1, room) = if pg == pin { base_pass } else { through(pg) };
+                // A pin narrowed by a crossing may meet a finite room the base pin did not.
+                if self.needs.is_empty() && (room.is_some_and(f64::is_finite) || room1.is_some_and(f64::is_finite)) {
+                    st.edge_need_gaps(e, me, alone, &mut self.items, &mut self.needs);
+                }
                 let cost = base
-                    + (pt - px).len() / MM * self.scale * self.wt.length_mm
+                    + (pt - px).len() / MM * self.scale * wt.length_mm
                     + cross
-                    + if room.is_some_and(|r| r.is_finite() && self.needs[g] > r) { self.wt.overflow_mm } else { 0.0 }
+                    + if room.is_some_and(|r| r.is_finite() && self.needs[g] > r) { wt.overflow_mm } else { 0.0 }
                     + extra
                     + hist
                     + ign
                     + match room1.filter(|r| r.is_finite()) {
-                        Some(r) if g > 0 && g < n => self.wt.squeeze_mm * squeeze_amount(r - self.needs[g], pitch),
+                        Some(r) if g > 0 && g < n => wt.squeeze_mm * squeeze_amount(r - self.needs[g], pitch),
                         _ => 0.0,
                     };
                 // Leaving a junction seed: the angle to the arms already there.
@@ -377,24 +471,6 @@ impl<'p> State<'p> {
             End::Corner(v) => self.proj.corner_pos(t, v),
             End::Gap(e, g) => self.gap_bpos(t, e, g),
         }
-    }
-
-    /// Crossing cost of a new chord `x -> y` in `t` for a wire of `net`, not counting the wires
-    /// in `skip`.
-    fn arc_cross_except(&self, t: TriId, x: End, y: End, net: i32, wt: &InitWeights, skip: &[Option<WireId>]) -> f64 {
-        let (a1, a2) = (self.end_bpos(t, x), self.end_bpos(t, y));
-        let mut c = 0.0;
-        for &(o, ok) in &self.tri_trav[t] {
-            if skip.contains(&Some(o)) {
-                continue;
-            }
-            for (b1, b2) in self.chords(o, ok) {
-                if interleave(a1, a2, b1, b2) {
-                    c += if self.wires[o].net == net { wt.same_net_cross_mm } else { wt.cross_mm };
-                }
-            }
-        }
-        c
     }
 
     /// Layers of a tree end (D6a): the pad's copper layers (all for a drilled pad), all for a
@@ -439,32 +515,83 @@ impl<'p> State<'p> {
 
     /// The passes of a path (`edges`, triangles `tris`, one more) of `net` from end `a` to end
     /// `b` where a via is implied (the layer pin of [`State::pin_through`]); a mismatch at the
-    /// end `b` is reported on the last edge. The `LayerForced` events of a routed wire.
+    /// end `b` is reported on the last edge. The `LayerForced` events of a routed wire, without
+    /// its crossings ([`State::layer_walk`] with them).
     #[allow(clippy::too_many_arguments)]
     pub fn forced_edges(&self, net: i32, w: f64, s: f64, a: &TreeEnd, b: &TreeEnd, edges: &[EdgeId], tris: &[TriId]) -> Vec<EdgeId> {
+        self.layer_walk(net, w, s, a, b, edges, tris, &|_| Vec::new()).0
+    }
+
+    /// [`State::forced_edges`] with the crossings of the path (D6b): `cross(k)` lists the
+    /// different-net stretches the path crosses in its traversal `k`, as `(held, allowed)` layer
+    /// masks ([`cross_pin`]), in path order. Returns the edges of the implied vias (a crossing's
+    /// via is reported on the pass leaving its triangle, or entering it at the last one) and those
+    /// of the crossings no layer assignment separates. O(path · layers).
+    #[allow(clippy::too_many_arguments)]
+    pub fn layer_walk(&self, net: i32, w: f64, s: f64, a: &TreeEnd, b: &TreeEnd, edges: &[EdgeId], tris: &[TriId], cross: &dyn Fn(usize) -> Vec<(u64, u64)>) -> (Vec<EdgeId>, Vec<EdgeId>) {
         let pr = self.proj;
         let me = Item { net, w, s };
-        let mut out = Vec::new();
+        let (mut out, mut unl) = (Vec::new(), Vec::new());
+        let at = |k: usize| edges.get(k).or(edges.last()).copied().unwrap_or_else(|| pr.tri_edges[tris[k]][0]);
         let m0 = tris.first().and_then(|&t| pr.allowed(t, net)).map_or(0, |m| m.0);
         let mut pin = if m0 & self.end_mask(a) != 0 { m0 & self.end_mask(a) } else { m0 };
-        if m0 & self.end_mask(a) == 0 {
-            if let Some(&e) = edges.first() {
-                out.push(e);
+        if m0 & self.end_mask(a) == 0 && !tris.is_empty() {
+            out.push(at(0));
+        }
+        for (k, &t) in tris.iter().enumerate() {
+            let mine = pr.allowed(t, net).map_or(0, |m| m.0);
+            for (held, oall) in cross(k) {
+                let (x, p2) = cross_pin(pin, mine, held, oall, self.cross_vias);
+                pin = p2;
+                match x {
+                    CrossLayer::Free => {}
+                    CrossLayer::Via => out.push(at(k)),
+                    CrossLayer::Unlayerable => unl.push(at(k)),
+                }
+            }
+            if let Some(&e) = edges.get(k) {
+                let (forced, _, p2) = self.pin_through(pin, e, t, tris[k + 1], net, pr.edge_demand(e, &[me]));
+                if forced {
+                    out.push(e);
+                }
+                pin = p2;
             }
         }
-        for (j, &e) in edges.iter().enumerate() {
-            let (forced, _, p2) = self.pin_through(pin, e, tris[j], tris[j + 1], net, pr.edge_demand(e, &[me]));
-            if forced {
-                out.push(e);
-            }
-            pin = p2;
+        if pin & self.end_mask(b) == 0 && !tris.is_empty() {
+            out.push(at(tris.len() - 1));
         }
-        if pin & self.end_mask(b) == 0 {
-            if let Some(&e) = edges.last() {
-                out.push(e);
-            }
+        (out, unl)
+    }
+
+    /// The layers wire `w`'s stretch is held to in each traversal (D6b): the layer pin from its
+    /// end `a` forward and from its end `b` backward ([`State::pin_through`], end pads' layers),
+    /// intersected; where they share none a via lies in between and the stretch may be on either
+    /// (their union). Its own crossings are not counted. O(passes · layers).
+    pub fn stretch_layers(&self, w: WireId) -> Vec<u64> {
+        let pr = self.proj;
+        let wi = &self.wires[w];
+        let me = Item { net: wi.net, w: wi.w, s: wi.s };
+        let n = wi.passes.len();
+        let all = super::state::LayerMask::all(pr.n_layers).0;
+        let start = |t: TriId, v: VertId, obs: ObsId| {
+            let m = pr.allowed(t, wi.net).map_or(all, |m| m.0);
+            let pm = self.end_mask(&TreeEnd { v, obs, on: None, adj: 0.0, arms: [None; 4] });
+            if m & pm != 0 { m & pm } else { m }
+        };
+        let edge = |k: usize| self.passes[wi.passes[k]].edge;
+        let mut fwd = vec![0u64; n + 1];
+        fwd[0] = start(wi.tris[0], wi.a, wi.pa);
+        for k in 0..n {
+            let e = edge(k);
+            fwd[k + 1] = self.pin_through(fwd[k], e, wi.tris[k], wi.tris[k + 1], wi.net, pr.edge_demand(e, &[me])).2;
         }
-        out
+        let mut bwd = vec![0u64; n + 1];
+        bwd[n] = start(wi.tris[n], wi.b, wi.pb);
+        for k in (0..n).rev() {
+            let e = edge(k);
+            bwd[k] = self.pin_through(bwd[k + 1], e, wi.tris[k + 1], wi.tris[k], wi.net, pr.edge_demand(e, &[me])).2;
+        }
+        (0..=n).map(|k| if fwd[k] & bwd[k] != 0 { fwd[k] & bwd[k] } else { fwd[k] | bwd[k] }).collect()
     }
 
     /// Room of edge `e` for a wire of `net` allowed on the layers of both triangles: the sum over
@@ -535,6 +662,7 @@ impl<'p> State<'p> {
             best: vec![u32::MAX; off.last().copied().unwrap_or(0)],
             off: off[..off.len() - 1].to_vec(),
             tc: vec![None; pr.tris.len()],
+            held: std::collections::HashMap::new(),
             needs: Vec::new(),
             items: Vec::new(),
             heap: BinaryHeap::new(),

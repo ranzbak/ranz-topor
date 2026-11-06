@@ -91,5 +91,11 @@ def test_fx_keepout_no_via_inner(tmp_path):
     _clean(_route("fx_keepout_no_via_inner", tmp_path))
 
 
+def test_fx_pinned_crossing(tmp_path):
+    """A and B, both held to F.Cu over the foreign B.Cu pad K, do not cross over K (D6a: they
+    crossed there, "crossing cannot be layered", one dropped)."""
+    _clean(_route("fx_pinned_crossing", tmp_path))
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-m", "mechfix", "-q"]))

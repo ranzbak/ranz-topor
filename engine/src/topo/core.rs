@@ -457,6 +457,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // ---- P2 ----
     let proj = &b.proj;
     let mut st = State::new(proj);
+    st.cross_vias = opts.crossing_vias == "via";
     let ws0 = (model.rules.default.width + model.rules.default.clearance) as f64;
     let tier_of = |i: usize| dec.connections[i].tier;
     let weights = |rg: &Registry, c: &Conn, tier: u8, cap: usize| InitWeights { max_expansions: cap, junction_angle_exp: opts.junction_angle_exp, ..InitWeights::from_registry(rg, &WireCtx { net: c.net, tier }) };

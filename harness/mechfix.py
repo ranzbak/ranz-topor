@@ -223,3 +223,27 @@ def fx_keepout_no_via_inner(d: Path) -> Path:
                  [(12, 2.6), (18, 2.6), (18, 7), (12, 7)], [(12, 13), (18, 13), (18, 17.4), (12, 17.4)]):
         f.keepout([pcbnew.In1_Cu], poly, vias=True)
     return f.save(Path(d) / "fx_keepout_no_via_inner.kicad_pcb")
+
+
+def fx_pinned_crossing(d: Path) -> Path:
+    """Two F.Cu nets that must cross in a cross-shaped corridor whose middle a foreign B.Cu pad
+    covers: under it both wires are held to F.Cu, so they may not cross there (D6a layer pin:
+    dcsgonebadge 8 "crossing ... cannot be layered: both stretches are fixed to the same layer",
+    all inside the fan of a foreign pad on the other side, e.g. I2C_SDA x I2C_SCL over D7.3).
+
+    A (2, 10) - (28, 10) and B (15.3, 2) - (15.3, 18) on F.Cu; walls (both layers, no net) leave a
+    corridor y 7..13 / x 12..18.5 with end caps; K: a 4 x 4 mm B.Cu pad at (15.6, 10.2)."""
+    f = Fx(30, 20, nets=("A", "B", "K"))
+    f.pad("A1", "A", (2.0, 10), (1.0, 1.0))
+    f.pad("A2", "A", (28.0, 10), (1.0, 1.0))
+    f.pad("B1", "B", (15.3, 2.0), (1.0, 1.0))
+    f.pad("B2", "B", (15.3, 18.0), (1.0, 1.0))
+    walls = [(6.25, 3.75, 11.5, 6.5), (24.0, 3.75, 11.0, 6.5), (6.25, 16.25, 11.5, 6.5), (24.0, 16.25, 11.0, 6.5),
+             (15.25, 0.85, 6.5, 0.7), (15.25, 19.15, 6.5, 0.7), (0.85, 10.0, 0.7, 6.0), (29.15, 10.0, 0.7, 6.0)]
+    for i, (x, y, w, h) in enumerate(walls):
+        for layer in (pcbnew.F_Cu, pcbnew.B_Cu):
+            f.pad(f"W{i}{'F' if layer == pcbnew.F_Cu else 'B'}", None, (x, y), (w, h), layer=layer)
+    f.pad("K1", "K", (15.6, 10.2), (4.0, 4.0), layer=pcbnew.B_Cu)
+    f.pad("K2", "K", (25.0, 10.0), (1.0, 1.0), layer=pcbnew.B_Cu)
+    return f.save(Path(d) / "fx_pinned_crossing.kicad_pcb")
+

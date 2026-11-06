@@ -375,12 +375,20 @@ fn insert_events(st: &State, wire: &Wire, path: &[(EdgeId, usize)], tris: &[TriI
         }
     };
     let me = Item { net: wire.net, w: wire.w, s: wire.s };
+    // Per traversal: the layers of the different-net stretches it crosses (D6b, `layer_walk`).
+    let mut held: BTreeMap<WireId, Vec<u64>> = BTreeMap::new();
+    let mut xl: Vec<Vec<(u64, u64)>> = vec![Vec::new(); tris.len()];
     for (k, &t) in tris.iter().enumerate() {
         let (a1, a2) = (end(t, k, true), end(t, k, false));
         for &(o, ok) in &st.tri_trav[t] {
             for (b1, b2) in st.chords(o, ok) {
                 if interleave(a1, a2, b1, b2) {
-                    out.push(Event::Crossing { a: id, b: o, tri: t, same_net: st.wires[o].net == wire.net });
+                    let same_net = st.wires[o].net == wire.net;
+                    out.push(Event::Crossing { a: id, b: o, tri: t, same_net });
+                    if !same_net {
+                        let h = held.entry(o).or_insert_with(|| st.stretch_layers(o))[ok];
+                        xl[k].push((h, pr.allowed(t, st.wires[o].net).map_or(0, |m| m.0)));
+                    }
                 }
             }
         }
@@ -391,8 +399,13 @@ fn insert_events(st: &State, wire: &Wire, path: &[(EdgeId, usize)], tris: &[TriI
     // The layer pin of P2's search (`State::forced_edges`): a via where the layers run out.
     let edges: Vec<EdgeId> = path.iter().map(|&(e, _)| e).collect();
     let end = |v, obs| super::init::TreeEnd { v, obs, on: None, adj: 0.0, arms: [None; 4] };
-    for e in st.forced_edges(wire.net, wire.w, wire.s, &end(wire.a, wire.pa), &end(wire.b, wire.pb), &edges, tris) {
+    let (forced, unl) = st.layer_walk(wire.net, wire.w, wire.s, &end(wire.a, wire.pa), &end(wire.b, wire.pb), &edges, tris, &|k| xl[k].clone());
+    for e in forced {
         out.push(Event::LayerForced { wire: id, edge: e });
+    }
+    // A crossing no layer assignment separates (both held to one layer in its triangle).
+    for e in unl {
+        out.push(Event::Overflow { wire: id, edge: e });
     }
     for (j, &(e, g)) in path.iter().enumerate() {
         let (nt0, nt1) = (tris[j], tris[j + 1]);

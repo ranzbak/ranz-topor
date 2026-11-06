@@ -629,6 +629,11 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
                 match (mask.single(), mo.single()) {
                     (Some(a), Some(b)) => {
                         if a == b {
+                            if std::env::var("TOPO_UNLDBG").is_ok() {
+                                let vs: Vec<String> = pr.tris[x.tri].iter().map(|&v| format!("{:?}@({:.3},{:.3})", pr.vkind[v], pr.pos[v].x / 1e6, -pr.pos[v].y / 1e6)).collect();
+                                let obs: Vec<String> = pr.tri_obs[x.tri].iter().map(|&o| format!("{o}:{:?}:{:?}:({:.2},{:.2})", pr.obstacles[o].net, pr.obstacles[o].layers, pr.obstacles[o].center.x / 1e6, -pr.obstacles[o].center.y / 1e6)).collect();
+                                eprintln!("UNLDBG w {w} net {} k {k}/{} o {o} net {} ok {}/{} tri {} verts {vs:?} obs {obs:?}", wi.net, wi.tris.len(), st.wires[o].net, x.other_k, st.wires[o].tris.len(), x.tri);
+                            }
                             unl.insert(key);
                         }
                     }

@@ -1071,6 +1071,12 @@ pub struct Options {
     /// Topological core (D5, `topor.toml [search] junction_angle_exp`): the shape of the
     /// `junction_angle` factor, `(1 - angle / 120 deg) ^ exp` below 120 degrees.
     pub junction_angle_exp: f64,
+    /// Topological core (D6b, `topor.toml [search] crossing_vias`): `"crossing"` (default) = a
+    /// crossing of two nets costs the `crossing` factor, which stands for the layer change P3
+    /// makes; only a crossing no layer assignment separates (both wires held to one layer in its
+    /// triangle) is priced as a violation (`overflow`); `"via"` = also price the via a crossing of
+    /// two stretches held to the same layer implies, and keep the wire on the other layer after it.
+    pub crossing_vias: String,
     /// Topological core (D5, `topor.toml [search] junction_pad_mm`): a branch point on a trace
     /// closer than this (mm) to a pad of the copper it joins is not used; the pad is the junction.
     /// 0 (default) = no such distance: the `junction_angle` factor prices a T next to a pad.
@@ -1193,6 +1199,7 @@ impl Default for Options {
             stitch_islands: true,
             net_tree: "free".into(),
             junction_angle_exp: 2.0,
+            crossing_vias: "crossing".into(),
             junction_pad_mm: 0.0,
             topo_rounds: 4,
             max_ripped: 5000,
