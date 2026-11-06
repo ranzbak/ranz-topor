@@ -26,6 +26,23 @@ def copper_uuids(text: str) -> list:
     return [s.uuid for s in pcbfile.find_items(text, ("segment", "arc", "via"))]
 
 
+def filled_copy(pcb: Path, dst: Path) -> Path:
+    """A copy of `pcb` (with its .kicad_pro / .kicad_dru, so zone clearances follow the project rules) in `dst`, its
+    zones refilled by kicad-cli DRC `--save-board`. A board saved by KiCad after Accept keeps the fills from before
+    routing until the user refills (B); pictures of it must show the refilled pours. O(one DRC run)."""
+    import shutil
+    from toporlib.drc import run_drc
+    pcb = Path(pcb)
+    dst.mkdir(parents=True, exist_ok=True)
+    for ext in (".kicad_pcb", ".kicad_pro", ".kicad_dru"):
+        src = pcb.with_suffix(ext)
+        if src.is_file():
+            shutil.copy(src, dst / src.name)
+    out = dst / pcb.name
+    run_drc(out, dst / f"{pcb.stem}--drc-fill.json", save_board=True)
+    return out
+
+
 def board_metrics(routed: Path, input_pcb: Path, hand: Path, *, work: Path, report_dir: Path | None = None,
                   png: Path | None = None, name: str = "board") -> dict:
     from toporlib import pcbfile
@@ -55,8 +72,9 @@ def board_metrics(routed: Path, input_pcb: Path, hand: Path, *, work: Path, repo
         from toporlib.drc import ratsnest_caption, ratsnest_marks
         h = caption(hr, f"{name}: hand ({m['unconnected_hand']} unconnected, blue"
                         f"{ratsnest_caption(ratsnest_marks(hand_drc.unconnected))})", work / f"{name}-hand.png")
-        tr = render_png(Path(routed), work / f"{name}-routed-raw.png")
-        tr = draw_ratsnest(tr, tr, routed_drc.unconnected, bbox_nm=board_bbox_nm(Path(routed)))
+        filled = filled_copy(Path(routed), work / "routed-filled")  # the pours as the DRC above saw them
+        tr = render_png(filled, work / f"{name}-routed-raw.png")
+        tr = draw_ratsnest(tr, tr, routed_drc.unconnected, bbox_nm=board_bbox_nm(filled))
         routed_txt = f"{m['routed']}/{m['connections']} routed, " if "routed" in m else ""
         t = caption(tr, f"{name}: topor in KiCad ({routed_txt}{m['unconnected']} unconnected, blue"
                         f"{ratsnest_caption(ratsnest_marks(routed_drc.unconnected))})",
