@@ -1148,6 +1148,11 @@ pub struct Options {
     /// M-B0 (`[optimize] runs`): independent seeded runs; the best by the objective is the result.
     /// They run in parallel on the engine's thread pool (threads are shared, not multiplied).
     pub runs: usize,
+    /// M-B1 (`[optimize] allow_violations`): never drop. A connection the drawing cannot make
+    /// legal is drawn anyway on its best geometry and written to the board; every rule it breaks
+    /// is priced by the `violation` factor and reported with its place, type and cause. false =
+    /// legal copper only (such a connection is reported unrouted, as before M-B1).
+    pub allow_violations: bool,
     /// Router (NX, `topor.toml [search] neck_max_mm`): longest necked stub, nm; 0 = twice the
     /// pad's long side.
     pub neck_max_nm: i64,
@@ -1253,6 +1258,7 @@ impl Default for Options {
             finish_when_stable: true,
             finish_patience: 4,
             runs: 5,
+            allow_violations: true,
             neck_max_nm: 0,
             pad_bridge_max_nm: 2_000_000,
             steiner: true,

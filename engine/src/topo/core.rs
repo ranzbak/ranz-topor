@@ -4,10 +4,14 @@
 //!
 //! Every connection ends in one of three states, none of them silent:
 //! * routed: copper emitted, checked by the [`Checker`] against the board and all earlier copper;
-//! * failed with a reason (P7 wording): no topological path, a crossing that cannot be layered,
-//!   no via site, a drawing the checker rejects, a plane pad without a via site, an unsupported
-//!   terminal, a differential pair ("not in the rough version"), time limit;
-//! * never emitted: a different-net crossing on one layer (the lower-tier wire stays unrouted).
+//! * routed with violations (M-B1 never drop, `[optimize] allow_violations`, the default): a
+//!   crossing that cannot be layered, a via without a legal site, a drawing the checker rejects or
+//!   a branch that meets its trunk on another layer is drawn anyway on its least violating
+//!   geometry; every rule it breaks is priced by the `violation` factor and reported with place,
+//!   type and cause (`RouteResult::violations`). With `allow_violations = false` these fail as
+//!   below (the legal-only output);
+//! * failed with a reason (P7 wording): no topological path, a plane pad without a via site, an
+//!   unsupported terminal, a differential pair ("not in the rough version"), time limit.
 //!
 //! Boards with fewer than two signal layers report every connection failed with a reason.
 //! Deterministic: no randomness besides the seeded P3 local search, Vec + index ids throughout.
@@ -85,6 +89,7 @@ fn settle(out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, ci: usize, w: 
     o.neck_nm = wo.necks.iter().map(|n| n.2).sum();
     o.neck_n = wo.necks.len();
     o.neck_w = wo.necks.iter().map(|n| n.1).fold(None, |a: Option<f64>, x| Some(a.map_or(x, |y| y.min(x))));
+    o.viol = wo.viol.clone();
     for n in &wo.necks {
         necking.push((ci, Event::Necking { wire: w, from_nm: st.wires[w].w, to_nm: n.1, mm: n.2 / MM }));
     }
@@ -107,6 +112,17 @@ struct Outcome {
     neck_n: usize,
     /// Straight pad-to-pad distance (nm), the detour reference.
     ghost_nm: f64,
+    /// Rules its written copper breaks (M-B1 never drop); empty for a legal connection.
+    viol: Vec<draw::Viol>,
+    /// Why its drawing found no legal geometry (the failed attempt's reason), for the report.
+    cause: String,
+}
+
+impl Outcome {
+    /// Routed with legal copper.
+    fn clean(&self) -> bool {
+        self.routed && self.viol.is_empty()
+    }
 }
 
 fn fail(o: &mut [Outcome], i: usize, reason: impl Into<String>) {
@@ -257,6 +273,7 @@ impl<'a> Coord<'a> {
                 p.best_length_mm = c.length_mm;
                 p.best_vias = c.vias;
                 p.best_run = i as u32 + 1;
+                p.best_violations = c.violations;
             }
         });
     }
@@ -349,6 +366,7 @@ impl Run {
         }
         let interrupted = ro.result.timed_out;
         let routed = ro.result.routed;
+        let (mut cyc_err, mut cyc_viol) = (ro.crit.errors, ro.crit.violations);
         let total = ro.result.connections_total;
         self.first.get_or_insert(routed);
         // An interrupted cycle is offered only when nothing else is there: what OK returns is the
@@ -371,11 +389,12 @@ impl Run {
                 self.arch.offer(Variant { label: format!("round {cycle} as drawn"), crit: c, payload: r }, &obj);
             }
             let (r, c) = stitched(result, crit);
+            (cyc_err, cyc_viol) = (c.errors, c.violations);
             self.arch.offer(Variant { label: format!("round {cycle}"), crit: c, payload: r }, &obj);
         }
         let pick = self.arch.pick(&obj).expect("a cycle was offered");
         let pc = self.arch.items[pick].crit;
-        let gained = self.meter.push(super::schedule::Score { incomplete: pc.errors, value: obj.value(&pc) });
+        let gained = self.meter.push(super::schedule::Score { incomplete: pc.errors, value: obj.value(&pc), scale: obj.base(&pc) });
         if gained {
             self.picked_at = cycle;
         }
@@ -385,7 +404,7 @@ impl Run {
         let best_routed = self.arch.items[pick].payload.routed;
         let gain = self.meter.gain_pct();
         self.notes.push(format!(
-            "{cycle}: w {width:.3}, routed {routed}{}{}",
+            "{cycle}: w {width:.3}, routed {routed}, errors {cyc_err} ({cyc_viol} violations){}{}",
             if gained { " (new best)" } else { "" },
             gain.map(|g| format!(", gain {g:.2} %")).unwrap_or_default()
         ));
@@ -560,7 +579,7 @@ struct RoundOut {
 
 impl RoundOut {
     fn unrouted(r: RouteResult) -> RoundOut {
-        RoundOut { crit: Criteria { errors: r.failed, ..Criteria::default() }, result: r, pre: None }
+        RoundOut { crit: Criteria { errors: r.failed, open: r.failed, ..Criteria::default() }, result: r, pre: None }
     }
 }
 
@@ -1237,6 +1256,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             name(victim),
             name(other)
         );
+        if opts.allow_violations {
+            // Never drop (M-B1): both stay; the drawing writes the crossing as a violation.
+            warnings.push(format!("{msg}; drawn anyway ([optimize] allow_violations): the crossing is a violation"));
+            for c in [ca, cb] {
+                if out[c].cause.is_empty() {
+                    out[c].cause = format!("crossing of {} and {}{at} cannot be layered (both stretches fixed to the same layer)", name(wa), name(wb));
+                }
+            }
+            continue;
+        }
         warnings.push(msg.clone());
         fail(&mut out, cv, msg);
         dropped.insert(victim);
@@ -1413,6 +1442,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut placed: BTreeMap<WireId, Vec<(usize, Vec2, crate::vias::ViaSize)>> = BTreeMap::new();
     let mut via_ids: BTreeMap<WireId, Vec<usize>> = BTreeMap::new();
     let mut live: Vec<WireId> = Vec::new();
+    let mut via_forced: Vec<(WireId, String)> = Vec::new();
     for &w in &draw_order {
         if expired() {
             timed_out = true;
@@ -1434,9 +1464,44 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 for id in ids {
                     dr.uncommit(id);
                 }
-                fail(&mut out, conn_of[wire_conn[w]], r);
+                if opts.allow_violations {
+                    via_forced.push((w, r));
+                } else {
+                    fail(&mut out, conn_of[wire_conn[w]], r);
+                }
             }
         }
+    }
+    // Never drop (M-B1): a via without a legal site goes to its least violating site, after every
+    // legal via is placed (so it takes no legal site from another wire).
+    let n_via_forced = via_forced.len();
+    if !via_forced.is_empty() {
+        dr.force = true;
+        for (w, r) in via_forced {
+            let mut ids = Vec::new();
+            match dr.place_vias(w, &plans[&w], &mut ids) {
+                Ok(v) => {
+                    set_layers(&plans[&w], Some(&v), &st.wires[w].passes, &mut dr.prov_layer);
+                    placed.insert(w, v);
+                    via_ids.insert(w, ids);
+                    live.push(w);
+                    let ci = conn_of[wire_conn[w]];
+                    if out[ci].cause.is_empty() {
+                        out[ci].cause = r;
+                    }
+                }
+                Err(e) => {
+                    for id in ids {
+                        dr.uncommit(id);
+                    }
+                    fail(&mut out, conn_of[wire_conn[w]], e);
+                }
+            }
+        }
+        dr.force = false;
+        // Draw order again (the forced ones were appended).
+        let pos: BTreeMap<WireId, usize> = draw_order.iter().enumerate().map(|(i, &w)| (w, i)).collect();
+        live.sort_by_key(|w| pos.get(w).copied().unwrap_or(usize::MAX));
     }
     // Pass layers, via discs and intervals from the placed vias.
     dr.pass_layer = vec![-1; st.passes.len()];
@@ -1640,12 +1705,61 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
         }
     }
+    // ---- Never drop (M-B1): every wire still without copper (its drawing found no legal
+    // geometry, the feedback did not rescue it) is drawn on its best geometry against all copper
+    // drawn so far; the rules it breaks are recorded with it and priced by the `violation` factor.
+    let mut n_forced = 0usize;
+    if opts.allow_violations {
+        dr.force = true;
+        for &w in &live {
+            if drawn.contains_key(&w) || expired() {
+                continue;
+            }
+            let ci = conn_of[wire_conn[w]];
+            if !out[ci].reason.starts_with("drawing:") {
+                continue;
+            }
+            // Its vias went with its failed drawing: placed again (legal sites first).
+            let mut ids: Vec<usize> = Vec::new();
+            dr.via_viol.remove(&w);
+            let vs = match dr.place_vias(w, &plans[&w], &mut ids) {
+                Ok(v) => v,
+                Err(_) => {
+                    for id in ids {
+                        dr.uncommit(id);
+                    }
+                    continue;
+                }
+            };
+            let vh = ids[..vs.len().min(ids.len())].to_vec();
+            if let Some((key, q)) = joint_of(w, &drawn, &plans) {
+                dr.end_at.insert(key, q);
+            }
+            let wo = dr.draw_wire(w, &plans[&w], &vs, &mut ids);
+            if !wo.ok {
+                for id in ids {
+                    dr.uncommit(id);
+                }
+                continue;
+            }
+            n_forced += 1;
+            if out[ci].cause.is_empty() {
+                out[ci].cause = out[ci].reason.clone();
+            }
+            placed.insert(w, vs);
+            via_h.insert(w, vh);
+            settle(&mut out, &mut necking, ci, w, &wo, &b, &st);
+            drawn.insert(w, wo);
+        }
+        dr.force = false;
+    }
     // ---- Junctions (D5 net trees): a branch whose trunk was not drawn, or that reaches its
     // junction on another layer than the trunk passes it, is not connected: its copper goes and
     // its connection fails (locally; the rest of the tree stays).
     if tree_free {
         let js = tree::junctions(&st);
         let (mut lost_trunk, mut lost_layer) = (0usize, 0usize);
+        let mut junction_joins = 0usize;
         let mut gone: BTreeSet<WireId> = BTreeSet::new();
         loop {
             let mut more = false;
@@ -1683,6 +1797,80 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                             lr.events.get(bw)
                         );
                     }
+                    // Never drop (M-B1): the branch is joined to its trunk where they part, by a
+                    // via at the branch end (the trunk passes there on another layer) or a track to
+                    // the trunk's nearest copper (and a via there when that is on another layer).
+                    if opts.allow_violations {
+                        if let Some(bl) = bl {
+                            let net = st.wires[bw].net;
+                            let sz = via_sizes(&model.rules, net, opts)[0];
+                            let mut add: Vec<Item> = Vec::new();
+                            if tl.is_some() {
+                                add.push(draw::via_item(net, pv, sz, Some(bw)));
+                            } else {
+                                let near = |only: Option<usize>| -> Option<(f64, usize, Vec2)> {
+                                    drawn[&tw]
+                                        .runs
+                                        .iter()
+                                        .filter(|(l, _)| only.is_none_or(|o| o == *l))
+                                        .flat_map(|(l, pts)| pts.windows(2).map(move |x| (*l, x[0], x[1])))
+                                        .map(|(l, a, c)| {
+                                            let ab = c - a;
+                                            let u = ((pv - a).dot(ab) / ab.len2().max(1.0)).clamp(0.0, 1.0);
+                                            let q = a + ab * u;
+                                            ((q - pv).len(), l, q)
+                                        })
+                                        .min_by(|x, y| x.0.total_cmp(&y.0))
+                                };
+                                if let Some((_, l, q)) = near(Some(bl)).or_else(|| near(None)) {
+                                    add.push(draw::track_item(net, b.signal_layers[bl], st.wires[bw].w, pv, q, Some(bw)));
+                                    if l != bl {
+                                        add.push(draw::via_item(net, q, sz, Some(bw)));
+                                    }
+                                }
+                            }
+                            if !add.is_empty() {
+                                let rep = dr.checker.check_against(&dr.idx, &add, &[]);
+                                let vs = dr.viols_of(&add, &rep);
+                                let mut wo = drawn.remove(&bw).expect("drawn branch");
+                                for it in &add {
+                                    let h = dr.commit(it);
+                                    match it {
+                                        Item::Via(v) => {
+                                            via_h.entry(bw).or_default().push(h);
+                                            wo.vias.push((Vec2 { x: v.at.x as f64, y: -(v.at.y as f64) }, sz));
+                                        }
+                                        Item::Track(_) => wo.handles.push(h),
+                                    }
+                                }
+                                // Tracks before vias (the fuse step expects a wire's tracks first).
+                                let n_tr = wo.items.iter().filter(|i| matches!(i, Item::Track(_))).count();
+                                for it in add {
+                                    if matches!(it, Item::Track(_)) {
+                                        wo.items.insert(n_tr, it);
+                                    } else {
+                                        wo.items.push(it);
+                                    }
+                                }
+                                wo.length_nm = wo.items.iter().map(|i| match i {
+                                    Item::Track(t) => match t.prim {
+                                        crate::geom::quant::TrackPrim::Seg { a, b } => ((b.x - a.x) as f64).hypot((b.y - a.y) as f64),
+                                        _ => 0.0,
+                                    },
+                                    _ => 0.0,
+                                }).sum();
+                                wo.viol.extend(vs);
+                                let ci = conn_of[wire_conn[bw]];
+                                if out[ci].cause.is_empty() {
+                                    out[ci].cause = "the branch reaches its junction on another layer than its trunk (joined by force)".into();
+                                }
+                                settle(&mut out, &mut necking, ci, bw, &wo, &b, &st);
+                                drawn.insert(bw, wo);
+                                junction_joins += 1;
+                                continue;
+                            }
+                        }
+                    }
                     lost_layer += 1;
                     "drawing: it does not meet the trace it branches from (another layer, or the trace was redrawn elsewhere)"
                 };
@@ -1704,10 +1892,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
         }
         let mut junction_note = format!(
-            "net trees ([search] net_tree = free): {} branch points on traces; {} branches lost with an undrawn trunk, {} on another layer than their trunk",
+            "net trees ([search] net_tree = free): {} branch points on traces; {} branches lost with an undrawn trunk, {} on another layer than their trunk, {} joined to their trunk by force (never drop)",
             js.len(),
             lost_trunk,
-            lost_layer
+            lost_layer,
+            junction_joins
         );
         // The report names the ends the wires really have (a junction, or another pad of the
         // tree than the decomposition planned).
@@ -1952,6 +2141,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let _ = std::fs::write(format!("{path}.r{round}"), dr.dump());
     }
     let diag = std::mem::take(&mut dr.diag);
+    let forced_stats = dr.stats;
     // Hints for a second round: per cut of a still-failed wire, the room is lowered by the
     // violation depth (what was really missing) at the cut nearest to the violation.
     let mut hint_map: BTreeMap<(usize, usize), f64> = BTreeMap::new();
@@ -1959,7 +2149,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut own_out = mem.own.clone();
     for d in &diag {
         let ci = conn_of[wire_conn[d.wire]];
-        if out[ci].routed || d.passes == 0 {
+        // A connection drawn with violations (never drop) feeds back like an unrouted one.
+        if out[ci].clean() || d.passes == 0 {
             continue;
         }
         let wi = &st.wires[d.wire];
@@ -2037,7 +2228,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // ---- Assemble the result ----
     let first_layer = signal[0];
     let name_of = |net: i32| model.nets.iter().find(|n| n.code == net).map_or(String::new(), |n| n.name.clone());
-    let asm = assemble(model, &dec, &out, &term_over, first_layer);
+    let asm = assemble(model, &dec, &out, &term_over, first_layer, &reg);
     // Warning-level factor findings (necking) of a set of necked stretches.
     let warn_n = |nk: &[(usize, Event)]| -> usize {
         nk.iter()
@@ -2048,13 +2239,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             .sum()
     };
     let n_copper = b.signal_layers.len().max(1);
-    let crit_main = criteria(model, &dec, &asm, &out, warn_n(&necking), n_copper);
+    let crit_main = criteria(model, &dec, &asm, &out, warn_n(&necking), n_copper, &reg);
     let pre_parts = pre_snap.as_ref().map(|(o, nk)| {
-        let a = assemble(model, &dec, o, &term_over, first_layer);
-        let c = criteria(model, &dec, &a, o, warn_n(nk), n_copper);
+        let a = assemble(model, &dec, o, &term_over, first_layer, &reg);
+        let c = criteria(model, &dec, &a, o, warn_n(nk), n_copper, &reg);
         (c, a)
     });
-    let Assembled { items, item_conn, reports, nets, length_by_layer, tot_len, tot_vias } = asm;
+    let Assembled { items, item_conn, reports, nets, length_by_layer, tot_len, tot_vias, violations: viol_list } = asm;
     if edge_ignored {
         let rule = model.rules.edge_clearance as f64;
         let outline = board::outline_segments(model);
@@ -2091,7 +2282,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         warnings.push(format!("diff pairs skipped: {diff_failed} connections ({DIFF_PAIR})"));
     }
     if unlayerable_errors > 0 {
-        warnings.push(format!("layering errors: {unlayerable_errors} different-net crossings cannot be layered (not emitted)"));
+        warnings.push(if opts.allow_violations {
+            format!("layering errors: {unlayerable_errors} different-net crossings cannot be layered (drawn anyway: violations, never drop)")
+        } else {
+            format!("layering errors: {unlayerable_errors} different-net crossings cannot be layered (not emitted)")
+        });
     }
     let mut p2r: Vec<f64> = (0..st.wires.len())
         .filter(|&w| st.wires[w].alive || dropped.contains(&w))
@@ -2166,7 +2361,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         p2r.iter().filter(|&&r| r > 3.0).count()
     ));
     warnings.push(format!(
-        "capacity: before P3 {} of {} edges break the layer-subset (Hall) check; after P3 {} edge-layers are overfull when packed (a wire that does not fit is rejected by the checker, never emitted)",
+        "capacity: before P3 {} of {} edges break the layer-subset (Hall) check; after P3 {} edge-layers are overfull when packed (a wire that does not fit is drawn on its best geometry as a violation, or with allow_violations = false not emitted)",
         sub.violated.iter().map(|v| v.0).collect::<BTreeSet<_>>().len(),
         sub.edges,
         over_n
@@ -2201,6 +2396,36 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     for f in findings.iter().filter(|f| f.level >= Report::Warning) {
         warnings.push(f.text.clone());
+    }
+    // Never drop (M-B1): a summary and one line per rule the written copper breaks (place, type,
+    // cause), at the `violation` factor's report level.
+    if opts.allow_violations {
+        let mut by: BTreeMap<&str, usize> = BTreeMap::new();
+        for v in &viol_list {
+            *by.entry(v.kind.as_str()).or_default() += 1;
+        }
+        let conns: BTreeSet<usize> = viol_list.iter().map(|v| v.conn).collect();
+        warnings.push(format!(
+            "never drop ([optimize] allow_violations): {} connections written with {} rule violations ({}); {} wires drawn by force ({} runs: {} on the exact path with the clearance relaxed, {} on a funnel, {} on a normal attempt), {} wires with a via placed by force, {} crossings that cannot be layered kept",
+            conns.len(),
+            viol_list.len(),
+            if by.is_empty() { "none".to_string() } else { by.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", ") },
+            n_forced,
+            forced_stats.forced_relaxed + forced_stats.forced_funnel + forced_stats.forced_attempt,
+            forced_stats.forced_relaxed,
+            forced_stats.forced_funnel,
+            forced_stats.forced_attempt,
+            n_via_forced,
+            unlayerable_errors
+        ));
+        for (ci, ev) in viol_events(model, &dec, &out).into_iter().filter(|(_, e)| matches!(e, Event::Violation { .. })) {
+            let c = &dec.connections[ci];
+            for f in reg.findings(std::slice::from_ref(&ev), &WireCtx { net: c.net, tier: c.tier }) {
+                if f.level >= Report::Warning {
+                    warnings.push(format!("{} ({} -> {}): {}", name_of(c.net), c.from.label, c.to.label, f.text));
+                }
+            }
+        }
     }
     let stop = if cancelled() || ctl.is_cancelled() {
         "cancel"
@@ -2250,6 +2475,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         stubs: Vec::new(),
         variants: Vec::new(),
         moves: super::moves::KINDS.iter().map(|&k| (k.name().to_string(), tally.applied_of(k))).collect(),
+        violations: viol_list,
     };
     let pre = pre_parts.map(|(c, a)| (c, with_parts(&result, a)));
     (RoundOut { result, crit: crit_main, pre }, new_hints, Memory { edge: hist_out, own: own_out })
@@ -2276,6 +2502,7 @@ fn with_parts(r: &RouteResult, a: Assembled) -> RouteResult {
         length_outside_pads_nm: a.tot_len,
         vias: a.tot_vias,
         length_by_layer_nm: a.length_by_layer,
+        violations: a.violations,
         ..r.clone()
     }
 }
@@ -2289,11 +2516,12 @@ struct Assembled {
     length_by_layer: BTreeMap<String, i64>,
     tot_len: i64,
     tot_vias: usize,
+    violations: Vec<crate::route::ViolationReport>,
 }
 
 /// Assemble the result parts of `out`; `term_over` replaces the terminals of a connection the
 /// attachment move connected to another pad pair. O(connections + items).
-fn assemble(model: &BoardModel, dec: &crate::decompose::Decomposition, out: &[Outcome], term_over: &BTreeMap<usize, (TermRef, TermRef)>, first_layer: u32) -> Assembled {
+fn assemble(model: &BoardModel, dec: &crate::decompose::Decomposition, out: &[Outcome], term_over: &BTreeMap<usize, (TermRef, TermRef)>, first_layer: u32, reg: &Registry) -> Assembled {
     let name_of = |net: i32| model.nets.iter().find(|n| n.code == net).map_or(String::new(), |n| n.name.clone());
     let layer_name = |id: u32| model.layers.iter().find(|l| l.id == id).map_or(id.to_string(), |l| l.name.clone());
     let nconn = dec.connections.len();
@@ -2329,6 +2557,7 @@ fn assemble(model: &BoardModel, dec: &crate::decompose::Decomposition, out: &[Ou
             // A stub into a plane has no straight-line reference: it is not a detour.
             r.ghost_len_nm = (o.stub_nm == 0.0).then_some(o.ghost_nm.round() as i64);
             r.pattern = if o.vias.is_empty() { "topo".into() } else { "topo+via".into() };
+            r.violations = o.viol.len();
             tot_len += r.length_nm;
             tot_vias += r.vias;
             for it in &o.items {
@@ -2384,12 +2613,64 @@ fn assemble(model: &BoardModel, dec: &crate::decompose::Decomposition, out: &[Ou
             }
         })
         .collect();
-    Assembled { items, item_conn, reports, nets, length_by_layer, tot_len, tot_vias }
+    let mut violations = Vec::new();
+    for (ci, ev) in viol_events(model, dec, out) {
+        let Event::Violation { kind, at, layer, depth_nm, len_nm, against, cause } = &ev else { continue };
+        let c = &dec.connections[ci];
+        let r = &reports[ci];
+        violations.push(crate::route::ViolationReport {
+            conn: ci,
+            net: c.net,
+            name: name_of(c.net),
+            from: r.from.label.clone(),
+            to: r.to.label.clone(),
+            kind: kind.clone(),
+            layer: layer.clone(),
+            at: kicad(*at),
+            depth_nm: depth_nm.round() as i64,
+            length_nm: len_nm.round() as i64,
+            against: against.clone(),
+            cause: cause.clone(),
+            price_mm: (reg.price(&ev, &WireCtx { net: c.net, tier: c.tier }) * 10.0).round() / 10.0,
+        });
+    }
+    Assembled { items, item_conn, reports, nets, length_by_layer, tot_len, tot_vias, violations }
+}
+
+/// The `violation` factor's events of the outcomes `out`, per connection id: one per rule the
+/// written copper breaks (never drop), and one `Open` per connection without copper (the diff
+/// pairs the core skips by design are no violation: a measurement gap, reported apart).
+fn viol_events(model: &BoardModel, dec: &crate::decompose::Decomposition, out: &[Outcome]) -> Vec<(usize, Event)> {
+    let layer_name = |id: u32| if id == u32::MAX { "all layers".to_string() } else { model.layers.iter().find(|l| l.id == id).map_or(id.to_string(), |l| l.name.clone()) };
+    let mut evs = Vec::new();
+    for c in &dec.connections {
+        let o = &out[c.id];
+        if o.routed {
+            let cause = if o.cause.is_empty() { "no legal geometry in the drawing".to_string() } else { o.cause.clone() };
+            for v in &o.viol {
+                evs.push((
+                    c.id,
+                    Event::Violation {
+                        kind: v.kind.to_string(),
+                        at: v.at,
+                        layer: layer_name(v.layer),
+                        depth_nm: v.depth_nm,
+                        len_nm: v.len_nm,
+                        against: v.against.clone(),
+                        cause: cause.clone(),
+                    },
+                ));
+            }
+        } else if o.reason != DIFF_PAIR {
+            evs.push((c.id, Event::Open { pitch_nm: (c.width + c.clearance) as f64, len_nm: o.ghost_nm, cause: o.reason.clone() }));
+        }
+    }
+    evs
 }
 
 /// The archive criteria of the assembled result `a` of outcomes `out` (`warnings` = warning-level
 /// factor findings). O(items).
-fn criteria(model: &BoardModel, dec: &crate::decompose::Decomposition, a: &Assembled, out: &[Outcome], warnings: usize, n_layers: usize) -> Criteria {
+fn criteria(model: &BoardModel, dec: &crate::decompose::Decomposition, a: &Assembled, out: &[Outcome], warnings: usize, n_layers: usize, reg: &Registry) -> Criteria {
     let routed = a.reports.iter().filter(|r| r.status == "routed").count();
     let mut area = 0.0;
     for (it, &ci) in a.items.iter().zip(&a.item_conn) {
@@ -2406,9 +2687,17 @@ fn criteria(model: &BoardModel, dec: &crate::decompose::Decomposition, a: &Assem
             }
         }
     }
-    let _ = model;
+    let open = a.reports.len() - routed;
+    let violations: usize = out.iter().filter(|o| o.routed).map(|o| o.viol.len()).sum();
+    // Connections not complete: without copper, or with violations (one error per connection,
+    // however many rules it breaks: an open connection never counts less than a drawn one).
+    let violating = out.iter().filter(|o| o.routed && !o.viol.is_empty()).count();
+    let penalty = viol_events(model, dec, out).iter().map(|(ci, ev)| reg.price(ev, &WireCtx { net: dec.connections[*ci].net, tier: dec.connections[*ci].tier })).sum();
     Criteria {
-        errors: a.reports.len() - routed,
+        errors: open + violating,
+        open,
+        violations,
+        penalty,
         vias: a.tot_vias,
         length_mm: a.tot_len as f64 / MM,
         shrinkages: out.iter().filter(|o| o.routed).map(|o| o.neck_n).sum(),

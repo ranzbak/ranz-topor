@@ -86,6 +86,36 @@ pub struct ConnReport {
     pub junction: bool,
     /// A5: the junction's angle against the copper it joins (degrees, 0..=90).
     pub junction_angle_deg: Option<f64>,
+    /// M-B1 never drop: rule violations of the routed connection's copper (listed in
+    /// [`RouteResult::violations`]); 0 for legal copper.
+    pub violations: usize,
+}
+
+/// A rule the written copper breaks (M-B1 never drop: a connection the drawing could not make
+/// legal is drawn anyway on its best geometry). KiCad frame, nm.
+#[derive(Clone, Debug, Serialize, Default, PartialEq)]
+pub struct ViolationReport {
+    /// Connection id ([`ConnReport::id`]), net code and name, terminal labels.
+    pub conn: usize,
+    pub net: i32,
+    pub name: String,
+    pub from: String,
+    pub to: String,
+    /// `clearance`, `short` (copper overlap), `hole_clearance`, `edge_clearance`, `connection_width`.
+    pub kind: String,
+    /// Copper layer name (`all layers` for a through via's hole).
+    pub layer: String,
+    /// Middle of the stretch below the rule.
+    pub at: [i64; 2],
+    /// How far below the rule, and over how long (a via: its diameter).
+    pub depth_nm: i64,
+    pub length_nm: i64,
+    /// What it is too close to (`pad:REF:NUM`, `item:N` = routed copper, `edge`, ...).
+    pub against: String,
+    /// Why the drawing found no legal geometry.
+    pub cause: String,
+    /// Price by the `violation` factor (mm).
+    pub price_mm: f64,
 }
 
 /// A connection the zero-slack retry routed with margin 0 against its corridor (R6).
@@ -183,6 +213,9 @@ pub struct RouteResult {
     pub variants: Vec<crate::topo::archive::VariantRow>,
     /// Topological core: P4 moves applied per type (summed over the rounds of the picked variant).
     pub moves: BTreeMap<String, usize>,
+    /// M-B1 never drop: every rule the written copper breaks, with place, type and cause
+    /// (`[optimize] allow_violations`; empty with legal-only output).
+    pub violations: Vec<ViolationReport>,
 }
 
 /// One PathFinder iteration's cost (diagnostics, `Options::profile`). Seconds are wall clock.
@@ -317,6 +350,7 @@ impl ConnReport {
             neck_width_nm: None,
             junction: false,
             junction_angle_deg: None,
+            violations: 0,
         }
     }
 }
@@ -415,6 +449,7 @@ fn append_ignored(r: &mut RouteResult, model: &BoardModel, removed: &[usize]) {
             neck_width_nm: None,
             junction: false,
             junction_angle_deg: None,
+            violations: 0,
         });
     }
 }
@@ -496,6 +531,7 @@ pub(crate) fn unrouted(model: &BoardModel, opts: &Options, reason: &str) -> Rout
             neck_width_nm: None,
             junction: false,
             junction_angle_deg: None,
+            violations: 0,
         })
         .collect();
     let nets: Vec<NetRouteReport> = dec
@@ -570,5 +606,6 @@ pub(crate) fn unrouted(model: &BoardModel, opts: &Options, reason: &str) -> Rout
         stubs: Vec::new(),
         variants: Vec::new(),
         moves: BTreeMap::new(),
+        violations: Vec::new(),
     }
 }

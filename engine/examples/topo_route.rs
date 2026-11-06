@@ -1,6 +1,6 @@
 //! S2a on one exported board model, without Python:
 //!
-//!     cargo run --release --example topo_route -- <input.json> [--out result.json] [--timeout S] [--plane-signals costly|forbidden] [--opt NAME=JSON ...]
+//!     cargo run --release --example topo_route -- <input.json> [--options options.json] [--out result.json] [--timeout S] [--plane-signals costly|forbidden] [--opt NAME=JSON ...]
 //!
 //! `input.json` is the board model with tracks and vias removed (`harness.g0 export`). Prints the
 //! routed count, the failure reasons and the detour ratios; `--out` writes the `RouteResult` JSON.
@@ -15,7 +15,11 @@ fn main() {
     let flag = |n: &str| args.iter().position(|a| a == n).and_then(|i| args.get(i + 1)).cloned();
     let s = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
     let m = BoardModel::from_json(&s).unwrap_or_else(|e| panic!("{path}: {e}"));
-    let mut o = Options::default();
+    // --options FILE: the engine options as the plugin passes them (TOPOR_DUMP_ENGINE_INPUT).
+    let mut o = match flag("--options") {
+        Some(f) => Options::from_json(&std::fs::read_to_string(&f).unwrap_or_else(|e| panic!("{f}: {e}"))).expect("options json"),
+        None => Options::default(),
+    };
     if let Some(t) = flag("--timeout") {
         o.wall_clock_s = t.parse().expect("--timeout S");
     }

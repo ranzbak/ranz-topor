@@ -23,8 +23,20 @@ use serde::Serialize;
 /// The board-level numbers of one variant.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct Criteria {
-    /// Connections not routed (errors: unrouted wires and the violations refused).
+    /// Errors: connections not complete, i.e. without copper or with rule violations in their
+    /// written copper (M-B1 never drop). TopoR's variant table counts design-rule violations next
+    /// to length and vias, and "a design-rule violation cannot be compensated by any reduction of
+    /// wire length" (Polubasov 2010, «Многовариантная оптимизация»): errors come first in the
+    /// pick. Counted per connection, so an open connection never counts less than one drawn with
+    /// violations; how many rules and how badly is the graded [`Criteria::penalty`].
     pub errors: usize,
+    /// Connections without copper (unrouted: no path, the time limit, legal-only output).
+    pub open: usize,
+    /// Rule violations of the written copper (never drop).
+    pub violations: usize,
+    /// The `violation` factor's price of the violations and the open connections (mm; the graded
+    /// part: how deep and long they are), added to the objective's value.
+    pub penalty: f64,
     pub vias: usize,
     pub length_mm: f64,
     /// Necked stretches (TopoR's "shrinkages").
@@ -36,13 +48,13 @@ pub struct Criteria {
 }
 
 impl Criteria {
-    /// At least as good on all four criteria (errors, vias, length, shrinkages).
+    /// At least as good on all four criteria (errors with their price, vias, length, shrinkages).
     pub fn covers(&self, o: &Criteria) -> bool {
-        self.errors <= o.errors && self.vias <= o.vias && self.length_mm <= o.length_mm + 1e-9 && self.shrinkages <= o.shrinkages
+        self.errors <= o.errors && self.penalty <= o.penalty + 1e-9 && self.vias <= o.vias && self.length_mm <= o.length_mm + 1e-9 && self.shrinkages <= o.shrinkages
     }
     /// Covers `o` and is better on at least one criterion.
     pub fn dominates(&self, o: &Criteria) -> bool {
-        self.covers(o) && (self.errors < o.errors || self.vias < o.vias || self.length_mm < o.length_mm - 1e-9 || self.shrinkages < o.shrinkages)
+        self.covers(o) && (self.errors < o.errors || self.penalty < o.penalty - 1e-9 || self.vias < o.vias || self.length_mm < o.length_mm - 1e-9 || self.shrinkages < o.shrinkages)
     }
 }
 
@@ -64,8 +76,13 @@ impl Objective {
             Objective::LengthVias { mm_per_via }
         }
     }
-    /// The objective's value within one error count (lower is better).
+    /// The objective's value within one error count (lower is better): its own value plus the
+    /// violation price ([`Criteria::penalty`]).
     pub fn value(&self, c: &Criteria) -> f64 {
+        self.base(c) + c.penalty
+    }
+    /// The objective's own value, without the violation price (the scale of a relative gain).
+    pub fn base(&self, c: &Criteria) -> f64 {
         match *self {
             Objective::LengthVias { mm_per_via } => c.length_mm + mm_per_via * c.vias as f64,
             Objective::Area => c.area_mm2,
@@ -92,6 +109,10 @@ pub struct Variant<T> {
 pub struct VariantRow {
     pub label: String,
     pub errors: usize,
+    /// Of `errors`: rule violations of the written copper (never drop).
+    pub violations: usize,
+    /// The `violation` factor's price of the errors (mm).
+    pub penalty_mm: f64,
     pub vias: usize,
     pub length_mm: f64,
     pub shrinkages: usize,
@@ -213,6 +234,8 @@ impl<T> Archive<T> {
             rows.push(VariantRow {
                 label: self.items[i].label.clone(),
                 errors: c.errors,
+                violations: c.violations,
+                penalty_mm: c.penalty.round(),
                 vias: c.vias,
                 length_mm: (c.length_mm * 1000.0).round() / 1000.0,
                 shrinkages: c.shrinkages,
@@ -234,13 +257,14 @@ pub fn table_text(rows: &[VariantRow], obj: &Objective) -> String {
         Objective::LengthVias { mm_per_via } => format!("length_vias, {mm_per_via} mm/via"),
         Objective::Area => "area".to_string(),
     };
-    let mut s = format!("variants ({} kept, objective {objective}; errors / vias / length mm / shrinkages / warnings / area mm2 / mm per via):", rows.len());
+    let mut s = format!("variants ({} kept, objective {objective}; errors (violations) / vias / length mm / shrinkages / warnings / area mm2 / mm per via):", rows.len());
     for r in rows {
         s.push_str(&format!(
-            " [{}{}] {} / {} / {:.1} / {} / {} / {:.1} / {}{};",
+            " [{}{}] {} ({}) / {} / {:.1} / {} / {} / {:.1} / {}{};",
             if r.picked { "PICKED " } else { "" },
             r.label,
             r.errors,
+            r.violations,
             r.vias,
             r.length_mm,
             r.shrinkages,
@@ -258,7 +282,7 @@ mod tests {
     use super::*;
 
     fn c(errors: usize, vias: usize, length_mm: f64, shrinkages: usize, warnings: usize) -> Criteria {
-        Criteria { errors, vias, length_mm, shrinkages, warnings, area_mm2: length_mm * 0.4 + vias as f64 * 2.0 }
+        Criteria { errors, open: errors, vias, length_mm, shrinkages, warnings, area_mm2: length_mm * 0.4 + vias as f64 * 2.0, ..Criteria::default() }
     }
 
     fn arch(cs: &[Criteria]) -> Archive<usize> {
@@ -297,6 +321,24 @@ mod tests {
         assert!(t[3].champion.is_empty(), "fewest vias overall but not within the fewest errors");
         // The area objective picks the least area within the fewest errors.
         assert_eq!(a.items[a.pick(&Objective::Area).unwrap()].label, "v0");
+    }
+
+    #[test]
+    fn violations_count_as_errors_and_their_price_ranks_within_a_count() {
+        // M-B1 never drop: a drawn connection with one violation (price 3000) against the same
+        // connection left open (price 20000, 5 mm shorter): one error each, the drawn one wins.
+        let obj = Objective::LengthVias { mm_per_via: 25.0 };
+        let drawn = Criteria { errors: 1, violations: 1, penalty: 3000.0, vias: 2, length_mm: 105.0, ..Criteria::default() };
+        let open = Criteria { errors: 1, open: 1, penalty: 20000.0, vias: 2, length_mm: 100.0, ..Criteria::default() };
+        let clean = Criteria { errors: 0, vias: 9, length_mm: 400.0, ..Criteria::default() };
+        assert!(obj.better(&drawn, &open));
+        assert!(obj.better(&clean, &drawn), "a violation is not compensated by any length (Polubasov 2010)");
+        assert!(!drawn.covers(&open) && !open.covers(&drawn), "the price is a criterion: neither dominates");
+        assert_eq!(obj.base(&drawn), 155.0);
+        assert_eq!(obj.value(&drawn), 3155.0);
+        let a = arch(&[open, drawn]);
+        let t = a.table(a.pick(&obj));
+        assert!(t.iter().any(|r| r.picked && r.violations == 1 && r.penalty_mm == 3000.0), "{t:?}");
     }
 
     #[test]

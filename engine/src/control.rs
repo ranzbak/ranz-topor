@@ -69,6 +69,9 @@ pub struct Progress {
     pub best_vias: usize,
     #[serde(default)]
     pub best_run: u32,
+    /// M-B1 never drop: rule violations of the best result's written copper.
+    #[serde(default)]
+    pub best_violations: usize,
 }
 
 /// Cancel flag and progress of one run; cheap to clone (shared state).

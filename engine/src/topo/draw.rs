@@ -5,7 +5,11 @@
 //! at each end by its clearance), and a wire is the shortest path (funnel / string pulling)
 //! through the intervals of its sleeve. Every drawn wire is checked by the [`Checker`] against
 //! the board and all copper accepted before it, so each wire is an obstacle for the next; a wire
-//! the checker rejects is reported unrouted with the reason, never emitted.
+//! the checker rejects is reported unrouted with the reason. Never drop (M-B1, [`Drawer::force`]):
+//! after the legal wires, such a wire is drawn anyway on the candidate with the least `violation`
+//! price (its attempts, the exact path with the clearance relaxed by the least amount that gives
+//! one, the funnels before the repair), and a via without a legal site goes to its least violating
+//! site; the violations go with the wire ([`WireOut::viol`]).
 //!
 //! Vias are placed first, per wire, in a triangle of the via interval that no other wire
 //! traverses where possible (a through via blocks every layer), at the incentre (largest free
@@ -473,6 +477,11 @@ pub struct DrawStats {
     pub fallback_ok: usize,
     /// Seconds spent in the exact search (successful or not).
     pub exact_s: f64,
+    /// Never drop (M-B1): runs drawn by force, by the candidate that won: the exact path with the
+    /// clearance relaxed, a funnel before the repair, one of the normal attempts.
+    pub forced_relaxed: usize,
+    pub forced_funnel: usize,
+    pub forced_attempt: usize,
 }
 
 /// Per-stretch widths that replace a wire's single width (the drawing witness, variant A: the
@@ -515,6 +524,69 @@ pub struct WireOut {
     /// Necked pad exits: `(pad end position, width nm, length nm)`; the wire's own width is
     /// above that of the neck.
     pub necks: Vec<(Vec2, f64, f64)>,
+    /// Rules the written copper breaks (M-B1 never drop: a run or via drawn by [`Drawer::force`]
+    /// on its best geometry); empty for a legal wire.
+    pub viol: Vec<Viol>,
+}
+
+/// One violation per object and layer (a via: per object, over all its layers): the stretches of a run's segments below
+/// the rule against the same object are one violation, as deep as the deepest, as long as their
+/// sum, at the deepest place (a run drawn as more segments is not more violations). Order kept.
+pub fn merge_viols(vs: Vec<Viol>) -> Vec<Viol> {
+    let rank = |k: &str| match k {
+        "short" => 3,
+        "hole_clearance" => 2,
+        "connection_width" => 1,
+        _ => 0,
+    };
+    let mut out: Vec<Viol> = Vec::new();
+    for v in vs {
+        // A via's violation is reported per layer by the checker: one per object it is too close to.
+        match out.iter_mut().find(|o| o.via == v.via && o.against == v.against && if v.via { (o.at - v.at).len() < 2.0 } else { o.layer == v.layer }) {
+            Some(o) => {
+                if !v.via {
+                    o.len_nm += v.len_nm;
+                }
+                if v.depth_nm > o.depth_nm {
+                    o.depth_nm = v.depth_nm;
+                    o.at = v.at;
+                }
+                if rank(v.kind) > rank(o.kind) {
+                    o.kind = v.kind;
+                }
+            }
+            None => out.push(v),
+        }
+    }
+    out
+}
+
+/// A rule the written copper of a wire breaks (M-B1 never drop), priced by the `violation`
+/// factor ([`super::factors::violation_amount`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Viol {
+    /// `clearance`, `short` (copper overlap), `hole_clearance`, `edge_clearance`,
+    /// `connection_width` (a sliver against a pad or via of its own net).
+    pub kind: &'static str,
+    /// Middle of the stretch below the rule (math frame).
+    pub at: Vec2,
+    /// KiCad layer id.
+    pub layer: u32,
+    /// How far below the rule (nm); an overlap counts its whole depth.
+    pub depth_nm: f64,
+    /// How long the copper stays below the rule (nm; a via: its diameter).
+    pub len_nm: f64,
+    /// The object it is too close to (checker label: `pad:REF:NUM`, `item:N`, `edge`, ...).
+    pub against: String,
+    /// The violating item is a via.
+    pub via: bool,
+}
+
+impl Viol {
+    /// Units of the `violation` factor.
+    pub fn amount(&self) -> f64 {
+        super::factors::violation_amount(self.depth_nm, self.len_nm)
+    }
 }
 
 pub struct Drawer<'a> {
@@ -593,6 +665,12 @@ pub struct Drawer<'a> {
     /// Where a branch's end (wire, end 0|1) lies on its trunk's drawn copper (D5 net trees): the
     /// drawing ends the branch there instead of at its junction vertex.
     pub end_at: BTreeMap<(WireId, usize), Vec2>,
+    /// M-B1 never drop: a run that no attempt draws legally, or a via without a legal site, is
+    /// placed anyway on the attempt / site with the least `violation` price, and its violations
+    /// are recorded ([`WireOut::viol`], [`Drawer::via_viol`]). Off: such a wire fails.
+    pub force: bool,
+    /// Violations of the vias placed by force, per wire.
+    pub via_viol: BTreeMap<WireId, Vec<Viol>>,
 }
 
 impl<'a> Drawer<'a> {
@@ -663,6 +741,8 @@ impl<'a> Drawer<'a> {
             lanes: BTreeMap::new(),
             drawn_x: vec![None; st.passes.len()],
             end_at: BTreeMap::new(),
+            force: false,
+            via_viol: BTreeMap::new(),
         }
         .with_static()
     }
@@ -1217,6 +1297,17 @@ impl<'a> Drawer<'a> {
                     break 'sizes;
                 }
             }
+            if !done && self.force {
+                // Never drop (M-B1): the site with the least violation price.
+                if let Some((k, p, sz, vs)) = self.force_via(w, plan, i, ka, kb.max(ka), &sizes) {
+                    let id = self.commit(&via_item(net, p, sz, Some(w)));
+                    self.via_marks.push((w, k, p, plan.layers[i], plan.layers[i + 1], id));
+                    ids.push(id);
+                    out.push((k, p, sz));
+                    self.via_viol.entry(w).or_default().extend(vs);
+                    continue;
+                }
+            }
             if !done {
                 if std::env::var("TOPO_VIADBG").is_ok() {
                     let wi = &self.st.wires[w];
@@ -1294,6 +1385,54 @@ impl<'a> Drawer<'a> {
             }
         }
         Ok(out)
+    }
+
+    /// Via `i` of wire `w` by force (M-B1 never drop): of every candidate site in its interval
+    /// `ka..=kb` (the legal search's sites, then every triangle's site points, obstacles or not)
+    /// and every via size, the one with the least `violation` price (a site on the wrong side of
+    /// another wire's chord counts one violation more: its run would cross that wire), ties by
+    /// the most room. Its violations go with it. O(sites x sizes x checker query).
+    fn force_via(&self, w: WireId, plan: &Plan, i: usize, ka: usize, kb: usize, sizes: &[ViaSize]) -> Option<(usize, Vec2, ViaSize, Vec<Viol>)> {
+        let net = self.st.wires[w].net;
+        let (st, pr) = (self.st, &self.b.proj);
+        let wi = &st.wires[w];
+        let turn_at = |k: usize| wi.turns.iter().find(|x| x.0 == k).map(|x| pr.pos[x.1]);
+        let mut best: Option<(f64, f64, usize, Vec2, ViaSize, Vec<Viol>)> = None;
+        for &sz in sizes {
+            let need_r = 0.5 * sz.d as f64 + self.model.rules.net_rule(net).clearance as f64;
+            let at = plan.at.get(i).copied().filter(|&k| (ka..=kb).contains(&k));
+            let mut sites = at.map_or(Vec::new(), |k| self.chord_sites(w, k));
+            sites.extend(self.via_candidates(w, ka, kb, need_r, at));
+            for k in ka..=kb.min(wi.tris.len().saturating_sub(1)) {
+                let t = wi.tris[k];
+                if pr.tri_out[t] {
+                    continue;
+                }
+                let [a, b, c] = pr.tris[t].map(|v| pr.pos[v]);
+                sites.extend(super::pack::tri_site_points(a, b, c).into_iter().map(|p| (k, p)));
+            }
+            for (k, p) in sites {
+                if turn_at(k).is_some_and(|q| (q - p).len() > 1.0) {
+                    continue;
+                }
+                let item = via_item(net, p, sz, Some(w));
+                let rep = self.checker.check_against(&self.idx, std::slice::from_ref(&item), &[]);
+                let mut vs = self.viols_of(std::slice::from_ref(&item), &rep);
+                if !self.via_hole_ok(p, sz, net) {
+                    vs.push(Viol { kind: "hole_clearance", at: p, layer: u32::MAX, depth_nm: self.model.rules.via_hole_clear().max(1) as f64, len_nm: sz.d as f64, against: "copper shape".into(), via: true });
+                }
+                if !self.via_own_pad_ok(p, sz, net) {
+                    vs.push(Viol { kind: "connection_width", at: p, layer: u32::MAX, depth_nm: self.model.rules.min_connection.max(1) as f64, len_nm: sz.d as f64, against: "own-net pad".into(), via: true });
+                }
+                let side = if self.via_side_ok(w, k, p, plan.layers[i], plan.layers[i + 1]) { 0.0 } else { 1.0 };
+                let price = vs.iter().map(Viol::amount).sum::<f64>() + side;
+                let room = self.via_room(w, k, p, sz.d as f64);
+                if best.as_ref().is_none_or(|b| price < b.0 - 1e-9 || (price - b.0).abs() <= 1e-9 && room > b.1 + 1.0) {
+                    best = Some((price, room, k, p, sz, vs));
+                }
+            }
+        }
+        best.map(|b| (b.2, b.3, b.4, b.5))
     }
 
     /// The via site `p` in traversal `k` of wire `w` (run layers `la` before the via, `lb` after)
@@ -1424,6 +1563,128 @@ impl<'a> Drawer<'a> {
             out.push((p, past));
         }
         out
+    }
+
+    /// The violations of `items` (as the checker reported them in `rep`, against the indexed
+    /// copper) as [`Viol`]s: depth = required minus gap, length = the part of the track whose
+    /// copper is below the rule against that object (probed every 0.5 mm, then every 50 um around the hits; a via:
+    /// its diameter). O(violations x samples x checker query).
+    pub fn viols_of(&self, items: &[Item], rep: &CheckReport) -> Vec<Viol> {
+        let r = &self.model.rules;
+        let hole_reqs = [r.hole_to_hole + self.opts.margin_nm, r.via_hole_clear() + self.opts.margin_nm];
+        let mut out = Vec::new();
+        for v in &rep.violations {
+            let Some(item) = items.get(v.item) else { continue };
+            let depth = (v.required - v.gap).max(1) as f64;
+            let kind = |via: bool| -> &'static str {
+                if v.against == "edge" {
+                    "edge_clearance"
+                } else if via && (v.against.starts_with("hole") || hole_reqs.contains(&v.required)) {
+                    "hole_clearance"
+                } else if v.gap < 0 {
+                    "short"
+                } else {
+                    "clearance"
+                }
+            };
+            match item {
+                Item::Via(x) => out.push(Viol {
+                    kind: kind(true),
+                    at: Vec2 { x: x.at.x as f64, y: -(x.at.y as f64) },
+                    layer: v.layer,
+                    depth_nm: depth,
+                    len_nm: x.d as f64,
+                    against: v.against.clone(),
+                    via: true,
+                }),
+                Item::Track(t) => {
+                    let TrackPrim::Seg { a, b } = t.prim else { continue };
+                    let (a, b) = (Vec2 { x: f64::from(a.x), y: -f64::from(a.y) }, Vec2 { x: f64::from(b.x), y: -f64::from(b.y) });
+                    let len = (b - a).len();
+                    // Probes along the segment: which parameters `t` in [0, 1] are below the
+                    // rule against this object. Coarse (every 0.5 mm, at most 48), then every
+                    // 50 um around the coarse hits (or along the whole segment when none hit:
+                    // a violation shorter than the coarse step).
+                    let below = |ts: &[f64]| -> Vec<bool> {
+                        let probes: Vec<Item> = ts.iter().map(|&u| track_item(t.net, t.layer, t.width as f64, a + (b - a) * u, a + (b - a) * u, None)).collect();
+                        let pr = self.checker.check_against(&self.idx, &probes, &[]);
+                        (0..ts.len()).map(|i| pr.violations.iter().any(|x| x.item == i && x.against == v.against && x.layer == v.layer)).collect()
+                    };
+                    let grid = |lo: f64, hi: f64, step: f64, cap: usize| -> Vec<f64> {
+                        let n = (((hi - lo) * len / step).ceil() as usize + 1).clamp(2, cap);
+                        (0..n).map(|i| lo + (hi - lo) * i as f64 / (n - 1) as f64).collect()
+                    };
+                    let coarse = grid(0.0, 1.0, 500_000.0, 48);
+                    let hc = below(&coarse);
+                    let dt = 1.0 / (coarse.len() - 1) as f64;
+                    let mut fine: Vec<f64> = Vec::new();
+                    if hc.iter().any(|&h| h) {
+                        for (i, &h) in hc.iter().enumerate() {
+                            if h {
+                                let (lo, hi) = ((coarse[i] - dt).max(0.0), (coarse[i] + dt).min(1.0));
+                                fine.extend(grid(lo, hi, 50_000.0, 40));
+                            }
+                        }
+                        fine.sort_by(f64::total_cmp);
+                        fine.dedup_by(|x, y| (*x - *y).abs() * len < 1_000.0);
+                    } else {
+                        fine = grid(0.0, 1.0, 50_000.0, 400);
+                    }
+                    let hf = below(&fine);
+                    // Length below the rule: the fine samples that hit, each standing for the
+                    // stretch to its neighbours (half the gap on either side).
+                    let mut blen = 0.0;
+                    let (mut sum, mut nhit) = (Vec2::default(), 0usize);
+                    for i in 0..fine.len() {
+                        if hf[i] {
+                            let l = if i > 0 { 0.5 * (fine[i] - fine[i - 1]) } else { 0.0 };
+                            let r = if i + 1 < fine.len() { 0.5 * (fine[i + 1] - fine[i]) } else { 0.0 };
+                            blen += (l + r) * len;
+                            sum = sum + (a + (b - a) * fine[i]);
+                            nhit += 1;
+                        }
+                    }
+                    let at = if nhit == 0 { (a + b) * 0.5 } else { sum * (1.0 / nhit as f64) };
+                    let tw = t.width as f64;
+                    let blen = blen.max(tw.min(len.max(tw)));
+                    out.push(Viol {
+                        kind: kind(false),
+                        at,
+                        layer: v.layer,
+                        depth_nm: depth,
+                        len_nm: blen,
+                        against: v.against.clone(),
+                        via: false,
+                    });
+                }
+            }
+        }
+        merge_viols(out)
+    }
+
+    /// The sliver connections of a run's `items` against pads and vias of its own net (what
+    /// [`Drawer::track_own_pad_ok`] refuses), as `connection_width` [`Viol`]s: one per track that
+    /// grazes, depth = KiCad's minimum connection width.
+    fn graze_viols(&self, w: WireId, items: &[Item]) -> Vec<Viol> {
+        let vs = items
+            .iter()
+            .filter(|it| matches!(it, Item::Track(_)) && !self.track_own_pad_ok(w, std::slice::from_ref(*it)))
+            .filter_map(|it| {
+                let Item::Track(t) = it else { return None };
+                let TrackPrim::Seg { a, b } = t.prim else { return None };
+                let (a, b) = (Vec2 { x: f64::from(a.x), y: -f64::from(a.y) }, Vec2 { x: f64::from(b.x), y: -f64::from(b.y) });
+                Some(Viol {
+                    kind: "connection_width",
+                    at: (a + b) * 0.5,
+                    layer: t.layer,
+                    depth_nm: self.model.rules.min_connection.max(1) as f64,
+                    len_nm: t.width as f64,
+                    against: "own-net pad or via".into(),
+                    via: false,
+                })
+            })
+            .collect();
+        merge_viols(vs)
     }
 
     /// `item` violates nothing on the board and against the indexed copper.
@@ -1699,6 +1960,9 @@ impl<'a> Drawer<'a> {
             let mut last_reason = String::new();
             let mut last_viol: Option<Violation> = None;
             let mut tried: Vec<Vec<Vec2>> = Vec::new();
+            // Force mode (M-B1): every attempt's copper with its violations, the cheapest wins.
+            #[allow(clippy::type_complexity)]
+            let mut cands: Vec<(f64, Vec<Vec2>, Vec<Item>, Vec<Viol>, Option<(f64, [f64; 2])>, &'static str)> = Vec::new();
             let neck = self.neck_zones(w, r == 0, r == plan.layers.len() - 1);
             for attempt in 0..5 {
                 // 0: the exact taut path at full width; 1: the same with pad-end neck zones (only
@@ -1727,7 +1991,10 @@ impl<'a> Drawer<'a> {
                     let walls = self.via_walls(w, k0, k1, layer);
                     if pts.windows(2).any(|x| walls.iter().any(|&(c, d)| seg_proper(x[0], x[1], c, d))) {
                         last_reason = "drawing: passes a via of another net on the wrong side (topology)".to_string();
-                        continue;
+                        // Force mode: the checker judges the copper (the via's own trace is drawn).
+                        if !self.force {
+                            continue;
+                        }
                     }
                 }
                 let (ps, pe) = (r == 0, r == plan.layers.len() - 1);
@@ -1743,6 +2010,10 @@ impl<'a> Drawer<'a> {
                 }
                 if rep.violations.is_empty() && !self.track_own_pad_ok(w, &items) {
                     last_reason = "drawing: a track grazes a pad or via of its own net (KiCad minimum connection width)".to_string();
+                    if self.force {
+                        let vs = self.graze_viols(w, &items);
+                        cands.push((vs.iter().map(Viol::amount).sum(), pts.clone(), items.clone(), vs, neck, "attempt"));
+                    }
                     continue;
                 }
                 if rep.violations.is_empty() {
@@ -1773,6 +2044,11 @@ impl<'a> Drawer<'a> {
                     ok = true;
                     break;
                 }
+                if self.force {
+                    let mut vs = self.viols_of(&items, &rep);
+                    vs.extend(self.graze_viols(w, &items));
+                    cands.push((vs.iter().map(Viol::amount).sum(), pts.clone(), items.clone(), vs, neck, "attempt"));
+                }
                 let v = &rep.violations[0];
                 last_viol = Some(v.clone());
                 if std::env::var("TOPO_DEBUG").is_ok() {
@@ -1786,6 +2062,91 @@ impl<'a> Drawer<'a> {
                     v.against,
                     self.model.layers.iter().find(|l| l.id == v.layer).map_or(v.layer.to_string(), |l| l.name.clone())
                 );
+            }
+            if !ok && self.force {
+                // Never drop (M-B1): the attempt with the least violation price is written; the
+                // funnels before the repair are candidates too (the repair's bumps can make a
+                // violation worse where no legal path exists, e.g. a gap too narrow for the track).
+                // The exact path with the clearance relaxed by the least amount that gives one
+                // (fractions of clearance + half width, then two bisection steps): the geometry
+                // with the shallowest violation the sleeve allows.
+                let full = self.model.rules.net_rule(wi.net).clearance as f64 + 0.5 * wi.w + self.eps;
+                let base0 = self.base_polyline(w, k0, k1, s, e, 0);
+                let mut try_relax = |f: f64, cands: &mut Vec<_>| -> bool {
+                    let t_ex = std::time::Instant::now();
+                    let got = self.exact_fix_relaxed(w, k0, k1, layer, base0.clone(), None, f * full);
+                    self.stats.exact_s += t_ex.elapsed().as_secs_f64();
+                    let Some(pts) = got else { return false };
+                    let items = self.run_items(w, layer, &pts);
+                    let rep = self.checker.check_against(&self.idx, &items, &[]);
+                    let mut vs = self.viols_of(&items, &rep);
+                    vs.extend(self.graze_viols(w, &items));
+                    cands.push((vs.iter().map(Viol::amount).sum::<f64>(), pts, items, vs, None, "relaxed"));
+                    true
+                };
+                let (mut lo, mut hi) = (0.0, f64::NAN);
+                for f in [0.125, 0.25, 0.5, 1.0] {
+                    if try_relax(f, &mut cands) {
+                        hi = f;
+                        break;
+                    }
+                    lo = f;
+                }
+                if hi.is_finite() {
+                    for _ in 0..2 {
+                        let mid = 0.5 * (lo + hi);
+                        if try_relax(mid, &mut cands) {
+                            hi = mid;
+                        } else {
+                            lo = mid;
+                        }
+                    }
+                }
+                for a in 0..3 {
+                    let pts = self.base_polyline(w, k0, k1, s, e, a);
+                    if pts.len() < 2 || pts.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+                        continue;
+                    }
+                    let items = self.run_items(w, layer, &pts);
+                    let rep = self.checker.check_against(&self.idx, &items, &[]);
+                    let mut vs = self.viols_of(&items, &rep);
+                    vs.extend(self.graze_viols(w, &items));
+                    cands.push((vs.iter().map(Viol::amount).sum(), pts, items, vs, None, "funnel"));
+                }
+                if std::env::var("TOPO_FORCEDBG").is_ok() {
+                    for c in &cands {
+                        eprintln!("FORCED wire {w} layer {layer} k {k0}..{k1}: {} price {:.1}, {} pts, viols {:?}", c.5, c.0, c.1.len(), c.3.iter().map(|v| (v.kind, v.against.clone(), (v.depth_nm / 1e3).round(), (v.len_nm / 1e3).round())).collect::<Vec<_>>());
+                    }
+                }
+                if let Some((_, pts, items, vs, neck, src)) = cands.into_iter().min_by(|a, b| a.0.total_cmp(&b.0)) {
+                    match src {
+                        "relaxed" => self.stats.forced_relaxed += 1,
+                        "funnel" => self.stats.forced_funnel += 1,
+                        _ => self.stats.forced_attempt += 1,
+                    }
+                    let (ps, pe) = (r == 0, r == plan.layers.len() - 1);
+                    let first = committed.len();
+                    for it in &items {
+                        let id = self.commit(it);
+                        committed.push(id);
+                        ids.push(id);
+                    }
+                    if let Some(&h) = committed.get(first) {
+                        self.record_crossings(w, k0, k1, &pts, h);
+                    }
+                    if let Some((wn, ls)) = neck {
+                        if ps {
+                            out.necks.push((pts[0], wn, ls[0]));
+                        }
+                        if pe {
+                            out.necks.push((pts[pts.len() - 1], wn, ls[1]));
+                        }
+                    }
+                    out.items.extend(items);
+                    out.runs.push((layer, pts));
+                    out.viol.extend(vs);
+                    ok = true;
+                }
             }
             if !ok {
                 if self.quiet {
@@ -1819,6 +2180,10 @@ impl<'a> Drawer<'a> {
             out.items.push(via_item(wi.net, p, sz, Some(w)));
             out.vias.push((p, sz));
         }
+        // The violations of its vias placed by force (only those it still has).
+        if let Some(vv) = self.via_viol.get(&w) {
+            out.viol.extend(vv.iter().filter(|x| vias.iter().any(|v| (v.1 - x.at).len() < 2.0)).cloned());
+        }
         out.handles = committed;
         self.drawn_once[w] = true;
         out.length_nm = out.runs.iter().map(|(_, p)| p.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>()).sum();
@@ -1829,13 +2194,14 @@ impl<'a> Drawer<'a> {
     /// Replace run `r` of the drawn wire `wo` by the polyline `pts` (same layer, math frame) when
     /// its tracks pass the checker against everything else drawn and graze no pad of the wire's
     /// own net; else the old tracks stay. Only for wires whose track items are exactly the plain
-    /// [`Drawer::run_items`] of their runs (no necked or split widths): returns `false` for any
-    /// other. O(run segments x checker query).
+    /// [`Drawer::run_items`] of their runs (no necked or split widths) and no violations: returns
+    /// `false` for any other. O(run segments x checker query).
     pub fn refit_run(&mut self, wo: &mut WireOut, r: usize, pts: Vec<Vec2>) -> bool {
         let w = wo.wire;
         let counts: Vec<usize> = wo.runs.iter().map(|(l, p)| self.run_items(w, *l, p).len()).collect();
         let n_tracks = wo.items.iter().filter(|i| matches!(i, Item::Track(_))).count();
-        if r >= wo.runs.len() || counts.iter().sum::<usize>() != n_tracks || n_tracks != wo.handles.len() || !wo.necks.is_empty() || !wo.items[..n_tracks].iter().all(|i| matches!(i, Item::Track(_))) {
+        // A wire drawn with violations (never drop) keeps its copper: its violations belong to it.
+        if r >= wo.runs.len() || !wo.viol.is_empty() || counts.iter().sum::<usize>() != n_tracks || n_tracks != wo.handles.len() || !wo.necks.is_empty() || !wo.items[..n_tracks].iter().all(|i| matches!(i, Item::Track(_))) {
             return false;
         }
         let off: usize = counts[..r].iter().sum();

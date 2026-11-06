@@ -34,9 +34,11 @@ mod reroute;
 mod squeeze;
 mod via;
 mod via_squeeze;
+mod violation;
 
 pub use branch::junction_psi;
 pub use squeeze::squeeze_amount;
+pub use violation::{violation_amount, AREA_REF_MM2};
 
 use super::demand::Item;
 use super::state::{interleave, EdgeId, ObsId, State, TriId, Wire, WireId};
@@ -88,6 +90,13 @@ pub enum Event {
     /// trace of its net) at `deg` degrees to the nearest arm already there; `ws_mm` is the new
     /// trace's width plus clearance (mm), the scale of the wedge it leaves.
     JunctionAngle { at: Vec2, deg: f64, ws_mm: f64 },
+    /// Written copper breaks a KiCad rule (M-B1 never drop): `kind` (`clearance`, `short`,
+    /// `hole_clearance`, `edge_clearance`, `connection_width`), the place, the layer name,
+    /// `depth_nm` below the rule over `len_nm`, the object it is too close to, and the `cause` (why
+    /// the drawing found no legal geometry).
+    Violation { kind: String, at: Vec2, layer: String, depth_nm: f64, len_nm: f64, against: String, cause: String },
+    /// A connection without copper: its pitch (width + clearance) and straight length (nm).
+    Open { pitch_nm: f64, len_nm: f64, cause: String },
 }
 
 /// How a factor's events appear in the report.
@@ -224,6 +233,7 @@ pub fn standard_factors() -> Vec<Box<dyn Factor>> {
         Box::new(branch::Branch),
         Box::new(branch::SmdThrough),
         Box::new(branch::JunctionAngle),
+        Box::new(violation::Violation),
     ]
 }
 

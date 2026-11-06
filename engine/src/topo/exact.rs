@@ -116,6 +116,9 @@ pub(super) struct Wp {
     pub own: [usize; 2],
     /// Necking (item 3): within `radius` of an end point the wire is `min_w` wide.
     pub neck: Option<Neck>,
+    /// Never drop (M-B1): the clearance to foreign objects is kept only up to this much less (nm;
+    /// 0 = the rule): the least violating geometry where no legal one exists.
+    pub relax: f64,
 }
 
 /// Pad-end necking of a run: at most two `(end point, radius nm)` zones, narrow width.
@@ -244,7 +247,7 @@ impl Drawer<'_> {
             // "actual 0.0023 mm").
             return e.grow + 0.5 * w + self.eps + self.model.rules.max_error as f64;
         }
-        e.grow + if e.fixed { e.clear } else { e.clear.max(wp.s) } + 0.5 * w + self.eps
+        (e.grow + if e.fixed { e.clear } else { e.clear.max(wp.s) } + 0.5 * w + self.eps - wp.relax).max(e.grow)
     }
 
     /// The segment `a-b` keeps the clearance to every object of `ents`.
@@ -472,9 +475,16 @@ impl Drawer<'_> {
     /// Repair the polyline `pts` of one run (`passes k0..k1` of `w` on `layer`): every stretch
     /// that violates a clearance is replaced by the exact shortest path around it. `None` when
     /// a stretch cannot be repaired (no path in the sleeve, or the node cap).
-    pub(super) fn exact_fix(&self, w: WireId, k0: usize, k1: usize, layer: usize, mut pts: Vec<Vec2>, neck: Option<Neck>) -> Option<Vec<Vec2>> {
+    pub(super) fn exact_fix(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: Vec<Vec2>, neck: Option<Neck>) -> Option<Vec<Vec2>> {
+        self.exact_fix_relaxed(w, k0, k1, layer, pts, neck, 0.0)
+    }
+
+    /// [`Drawer::exact_fix`] keeping the clearances to foreign objects only up to `relax` nm less
+    /// (never drop, M-B1: the least violating geometry where no legal one exists).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn exact_fix_relaxed(&self, w: WireId, k0: usize, k1: usize, layer: usize, mut pts: Vec<Vec2>, neck: Option<Neck>, relax: f64) -> Option<Vec<Vec2>> {
         let wi = &self.st.wires[w];
-        let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck };
+        let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck, relax };
         let mut strip = self.strip(w, k0, k1);
         // The chords of other nets' vias in the sleeve are walls too (see `via_walls`); a stretch
         // that crosses one is repaired like a clearance violation.
@@ -567,7 +577,7 @@ impl Drawer<'_> {
     /// caller still runs the checker on the via. O(ents near x samples + sleeve triangles).
     pub(super) fn via_extra(&self, w: WireId, ka: usize, kb: usize, d: f64, s: f64) -> Vec<(usize, Vec2)> {
         let wi = &self.st.wires[w];
-        let wp = Wp { wire: w, net: wi.net, w: d, s, layer: usize::MAX, own: [wi.pa, wi.pb], neck: None };
+        let wp = Wp { wire: w, net: wi.net, w: d, s, layer: usize::MAX, own: [wi.pa, wi.pb], neck: None, relax: 0.0 };
         let strip = self.strip(w, ka, kb.max(ka));
         let mut bb = strip.boxes[0];
         for b in &strip.boxes {

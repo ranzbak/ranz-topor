@@ -20,8 +20,10 @@
 //!   needs `window + 1` cycles, 5 with the default window of 4).
 //!
 //! The best result is compared by [`Score`]: lexicographic (incomplete count, objective value).
-//! `incomplete` is the archive's error count (connections not routed) today; M-B1 ("never drop")
-//! makes it the violations that remain, without changing this module.
+//! `incomplete` is the archive's error count: since M-B1 ("never drop") the connections whose
+//! written copper still breaks a rule plus the connections without copper. The value includes the violation price;
+//! its relative gain is measured against the objective's own value (`scale`), so a large
+//! violation price does not hide the gains in length and vias.
 //!
 //! Deterministic: no clock, no randomness (the seeded weights are drawn in `factors`).
 
@@ -29,10 +31,13 @@
 /// better in both).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Score {
-    /// Connections not complete (today: not routed; after M-B1: violations that remain).
+    /// Connections not complete: with rule violations in their copper, or without copper.
     pub incomplete: usize,
-    /// The board objective's value (`length + mm_per_via x vias`, or the area).
+    /// The board objective's value (`length + mm_per_via x vias`, or the area) plus the
+    /// violation price.
     pub value: f64,
+    /// The denominator of a relative gain: the objective's own value (0: `value`).
+    pub scale: f64,
 }
 
 impl Score {
@@ -44,7 +49,8 @@ impl Score {
         } else if self.incomplete > old.incomplete {
             0.0
         } else if old.value > 1e-9 {
-            (100.0 * (old.value - self.value) / old.value).max(0.0)
+            let den = if old.scale > 1e-9 { old.scale } else { old.value };
+            (100.0 * (old.value - self.value) / den).max(0.0)
         } else {
             0.0
         }
@@ -128,7 +134,7 @@ mod tests {
     use super::*;
 
     fn sc(i: usize, v: f64) -> Score {
-        Score { incomplete: i, value: v }
+        Score { incomplete: i, value: v, scale: 0.0 }
     }
 
     #[test]
@@ -136,6 +142,10 @@ mod tests {
         assert_eq!(sc(3, 900.0).gain_pct(&sc(4, 100.0)), 100.0);
         assert!((sc(3, 99.0).gain_pct(&sc(3, 100.0)) - 1.0).abs() < 1e-9);
         assert_eq!(sc(3, 100.0).gain_pct(&sc(3, 100.0)), 0.0);
+        // With a violation price on top, the gain is relative to the objective's own value.
+        let old = Score { incomplete: 3, value: 10_100.0, scale: 100.0 };
+        let new = Score { incomplete: 3, value: 10_099.0, scale: 99.0 };
+        assert!((new.gain_pct(&old) - 1.0).abs() < 1e-9);
     }
 
     #[test]
