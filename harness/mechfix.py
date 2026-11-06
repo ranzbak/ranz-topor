@@ -293,3 +293,21 @@ def fx_coincident_pad_stub(d: Path) -> Path:
     f.pad("Q", "GND", (15.0, 10.0), (1.0, 1.0), layer=pcbnew.B_Cu)
     f.zone("GND", pcbnew.B_Cu, [(6.5, 1), (19, 1), (19, 19), (6.5, 19)])
     return f.save(Path(d) / "fx_coincident_pad_stub.kicad_pcb", rules={"min_connection": 0.127})
+
+
+def fx_corner_wrap(d: Path) -> Path:
+    """A signal that bends around the corners of a field of foreign pads: the drawing's exact
+    path repairs the funnel stretch by stretch, and two repairs that wrap one corner from either
+    side of a funnel vertex left that vertex as an out-and-back spike, a segment and its exact
+    reverse (D6b: wiccon 12, dcsgonebadge 14, qmtech 15, e.g. wiccon SCLK at (127.02, 142.00) B.Cu).
+
+    SIG: (2.5, 3) and (27.5, 17) on F.Cu; K: eight F.Cu pads between them."""
+    f = Fx(30, 20, nets=("SIG", "K"))
+    f.pad("A1", "SIG", (2.5, 3), (1.0, 1.0))
+    f.pad("B1", "SIG", (27.5, 17), (1.0, 1.0))
+    ks = [((23.21, 16.27), (0.92, 0.99)), ((21.04, 13.3), (2.27, 1.48)), ((16.91, 11.5), (2.08, 1.15)),
+          ((13.75, 8.51), (2.39, 2.99)), ((23.09, 10.62), (1.78, 1.39)), ((6.65, 3.38), (1.82, 1.5)),
+          ((12.84, 15.49), (1.96, 2.03)), ((10.25, 3.33), (1.52, 1.1))]
+    for i, (pos, size) in enumerate(ks):
+        f.pad(f"K{i}", "K", pos, size)
+    return f.save(Path(d) / "fx_corner_wrap.kicad_pcb")

@@ -26,7 +26,9 @@ def _route(case: str, tmp_path: Path) -> dict:
     r = subprocess.run([str(ROOT / "tools" / "route_board.sh"), str(src), str(out), "--timeout", "60", "--name", case],
                        env=env, capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-3000:]
-    return json.loads((out / f"{case}--metrics.json").read_text())
+    m = json.loads((out / f"{case}--metrics.json").read_text())
+    m["_out"] = str(out)
+    return m
 
 
 def _clean(m: dict) -> None:
@@ -117,6 +119,22 @@ def test_fx_coincident_pad_stub(tmp_path):
     _clean(m)
     gnd = _conns(m, "GND")
     assert len(gnd) == 1 and gnd[0]["to"]["kind"] == "pour" and gnd[0]["vias"] == 1, gnd
+
+
+def test_fx_corner_wrap(tmp_path):
+    """No out-and-back spike: no track is the exact reverse of another track of its net on its
+    layer (D6b: SIG had one at (11.55, 16.63))."""
+    m = _route("fx_corner_wrap", tmp_path)
+    _clean(m)
+    import pcbnew
+    b = pcbnew.LoadBoard(str(next(Path(m["_out"]).glob("fx_corner_wrap-topor/*.kicad_pcb"))))
+    segs = {}
+    for t in b.GetTracks():
+        if t.Type() != pcbnew.PCB_VIA_T:
+            s, e = t.GetStart(), t.GetEnd()
+            segs[(s.x, s.y, e.x, e.y, t.GetLayer(), t.GetNetCode())] = t
+    spikes = [k for k in segs if (k[2], k[3], k[0], k[1], k[4], k[5]) in segs]
+    assert not spikes, spikes
 
 
 if __name__ == "__main__":

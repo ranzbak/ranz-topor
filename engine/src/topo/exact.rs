@@ -434,6 +434,35 @@ impl Drawer<'_> {
         Some(path)
     }
 
+    /// `pts` without the vertices where it turns back (by more than 90 degrees) and the
+    /// shortcut past the vertex is as legal as a [`Self::local_path`] edge (inside the sleeve,
+    /// no wall crossed, every clearance kept). `exact_fix` repairs the funnel stretch by stretch
+    /// and keeps the funnel vertex between two repairs; when both wrap the same corner, that
+    /// vertex is left behind as an out-and-back spike (a segment and its exact reverse). The
+    /// ends stay. O(vertices x local entities) per sweep, sweeps until nothing drops.
+    fn drop_backtracks(&self, strip: &Strip, wp: &Wp, mut pts: Vec<Vec2>) -> Vec<Vec2> {
+        loop {
+            let mut dropped = false;
+            let mut i = 1;
+            while i + 1 < pts.len() {
+                let (p, q, r) = (pts[i - 1], pts[i], pts[i + 1]);
+                if (q - p).dot(r - q) < 0.0 {
+                    let ents = self.local_ents(wp, bbox_of(&[p, r]).grow(self.qgrow));
+                    if !strip.crosses_wall(p, r) && strip.contains((p + r) * 0.5) && self.seg_clear(&ents, wp, p, r) {
+                        pts.remove(i);
+                        dropped = true;
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+            pts.dedup_by(|a, b| (*a - *b).len2() < 1.0);
+            if !dropped {
+                return pts;
+            }
+        }
+    }
+
     /// `p` keeps every clearance and lies in the sleeve.
     fn vertex_ok(&self, strip: &Strip, wp: &Wp, p: Vec2) -> bool {
         let ents = self.local_ents(wp, bbox_of(&[p]).grow(self.qgrow));
@@ -461,7 +490,7 @@ impl Drawer<'_> {
                     break;
                 }
             }
-            let Some(i) = bad else { return Some(pts) };
+            let Some(i) = bad else { return Some(self.drop_backtracks(&strip, &wp, pts)) };
             // A via wall crossed: the run reached the wrong side of the via before this
             // segment, so the search starts one vertex earlier.
             let (mut l, mut r) = (if via_wall(pts[i], pts[i + 1]) { i.saturating_sub(1) } else { i }, i + 1);
