@@ -757,7 +757,9 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     clearance = float(max(rules.get("min_clearance", 0), (rules.get("default") or {}).get("clearance", 0)))
     loop = drcloop.route_with_drc_loop(
         eng_model, opts, route_fn=route_fn, drc_fn=drc_fn, base_drc=base_drc, orig_drc=orig_drc,
-        budget_s=NO_BUDGET_S if no_budget else budget, loop_cap=int(opts.get("drc_loop_cap", 5)),
+        # The topological core takes no DRC feedback (no pins, no DRC spots): a re-route would repeat the same
+        # result, and since M-B1 (never drop) the violations it reports are written on purpose. One DRC round.
+        budget_s=NO_BUDGET_S if no_budget else budget, loop_cap=0,
         reach_nm=_zone_reach(model), clearance_nm=clearance)
     rr = loop.router_report or {}
     out.items = [{**it, "group": it.get("group") or "topor"} for it in loop.items]

@@ -129,6 +129,7 @@ WORDING: dict[str, dict[str, str]] = {
         "runs_value": "{stable} of {runs} stable",
         "best_label": "Best so far: {routed} / {total} routed, {length} m, {vias} vias",
         "best_run": "(run {run})",
+        "best_violations": ", {n} violations",
         "best_pending": "Best so far: –",
     },
     "preview": {
@@ -804,6 +805,8 @@ class ProgressDialog(_Base):
         if getattr(p, "best_total", 0):
             txt = W["best_label"].format(routed=p.best_routed, total=p.best_total, length=f"{p.best_length_mm / 1000:.2f}",
                                          vias=p.best_vias)
+            if getattr(p, "best_violations", 0):
+                txt += W["best_violations"].format(n=p.best_violations)
             if runs > 1 and p.best_run:
                 txt += " " + W["best_run"].format(run=p.best_run)
             self.best_value.SetLabel(txt)

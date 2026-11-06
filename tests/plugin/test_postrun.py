@@ -63,6 +63,27 @@ def test_route_findings_from_real_engine_lines():
         assert f.fix == MESSAGES[f.code].fix and ("KiCad →" in f.fix or "." in f.fix)
 
 
+def test_violations_finding_lists_place_type_and_cause():
+    """M-B1 never drop: the engine's ``violations`` (engine/tests/topo_mb1.rs shape) become one VIOLATIONS
+    warning, one item per violation."""
+    viol = [{"conn": 0, "net": 1, "name": "SIG", "from": "A1.1", "to": "B1.1", "kind": "clearance", "layer": "F.Cu",
+             "at": [14395833, 9931591], "depth_nm": 193758, "length_nm": 1500000, "against": "pad:WNF:1",
+             "cause": "drawing: clearance gap 0.016 mm < 0.200 mm against pad:WNF:1 on layer F.Cu", "price_mm": 30063.7},
+            {"conn": 3, "net": 2, "name": "SDA", "from": "U1.4", "to": "U2.7", "kind": "hole_clearance",
+             "layer": "all layers", "at": [1000000, 2000000], "depth_nm": 50000, "length_nm": 600000,
+             "against": "pad:U1:3", "cause": "via 1 of 2: no site in its interval (no free disc for a via)",
+             "price_mm": 4000.0}]
+    fs = {f.code: f for f in postrun.route_findings({"connections": [_c("SIG", "routed")], "warnings": [],
+                                                    "violations": viol})}
+    f = fs["VIOLATIONS"]
+    assert f.severity == "warning" and f.message.startswith("2 rule violation(s) in the copper of 2 connection(s)")
+    assert "1 clearance" in f.message and "1 hole_clearance" in f.message
+    assert f.items[0] == ("SIG A1.1 -> B1.1: clearance at (14.396, 9.932) mm on F.Cu, 0.194 mm below the rule over "
+                          "1.500 mm against pad:WNF:1; cause: drawing: clearance gap 0.016 mm < 0.200 mm against "
+                          "pad:WNF:1 on layer F.Cu")
+    assert "VIOLATIONS" in postrun.POSTRUN_CODES and "VIOLATIONS" in MESSAGES
+
+
 def test_route_findings_quiet_on_a_clean_run():
     res = {"connections": [_c("A", "routed")], "warnings": [
         "pour stitching: 0 pour pieces cut off by the routed copper before, 0 after; 0 island vias, 0 pad stubs (0.01 s)",

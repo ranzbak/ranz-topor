@@ -119,6 +119,7 @@ class Progress:
     best_length_mm: float = 0.0
     best_vias: int = 0
     best_run: int = 0
+    best_violations: int = 0  # M-B1 never drop: rule violations of the best result's copper
 
     @staticmethod
     def from_json(d: dict) -> "Progress":
@@ -130,7 +131,8 @@ class Progress:
                         runs=int(d.get("runs", 0) or 0), runs_stable=int(d.get("runs_stable", 0) or 0),
                         best_routed=int(d.get("best_routed", 0) or 0), best_total=int(d.get("best_total", 0) or 0),
                         best_length_mm=float(d.get("best_length_mm", 0.0) or 0.0),
-                        best_vias=int(d.get("best_vias", 0) or 0), best_run=int(d.get("best_run", 0) or 0))
+                        best_vias=int(d.get("best_vias", 0) or 0), best_run=int(d.get("best_run", 0) or 0),
+                        best_violations=int(d.get("best_violations", 0) or 0))
 
 
 @runtime_checkable

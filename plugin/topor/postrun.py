@@ -15,6 +15,8 @@ Codes (catalogued in messages.py, one section each in docs/user/troubleshoot.md)
     VIA_SQUEEZE         vias placed in a narrow pass (the via_squeeze social factor's report)
     NECKED              stretches drawn narrower than the net width to get out of a pad (info)
     IGNORED_RULE        copper that breaks a KiCad check set to "ignore" (priced, not forbidden)
+    VIOLATIONS          never drop: copper written although it breaks a rule (the drawing found no legal
+                        geometry), one item per violation with place, type and cause (``result["violations"]``)
     TIME_BUDGET_HIT     run.timeout_s stopped the topological core before its work caps
 
 The engine's warning lines are parsed by their stable prefixes (the formats are pinned by tests/plugin/
@@ -34,7 +36,7 @@ from .messages import MESSAGES
 
 #: every code route_findings can emit (the preview summary names those present)
 POSTRUN_CODES = ("DIFF_PAIRS_SKIPPED", "POUR_UNJOINED", "UNROUTED", "CONNECTION_WIDTH", "POUR_ISLANDS", "POUR_STITCHED", "PLANE_PAD_SIGNAL",
-                 "PLANE_VIA_OUTSIDE_POUR", "VIA_SQUEEZE", "NECKED", "IGNORED_RULE", "TIME_BUDGET_HIT")
+                 "PLANE_VIA_OUTSIDE_POUR", "VIA_SQUEEZE", "NECKED", "IGNORED_RULE", "VIOLATIONS", "TIME_BUDGET_HIT")
 DIFF_PAIR_REASON = "diff pair: not in the rough version"  # engine/src/topo/core.rs DIFF_PAIR
 _ITEMS = 40  # items kept per finding (the report lists them; result.json keeps all engine lines)
 
@@ -64,6 +66,15 @@ def _reason_class(reason: str) -> str:
 def _label(c: dict) -> str:
     f, t = (c.get("from") or {}).get("label", "?"), (c.get("to") or {}).get("label", "?")
     return f"{c.get('name') or '?'} {f} -> {t}"
+
+
+def _violation_text(v: dict) -> str:
+    """One VIOLATIONS item: connection, type, place, depth and length, what it is too close to, cause."""
+    at = v.get("at") or [0, 0]
+    return (f"{v.get('name') or '?'} {v.get('from', '?')} -> {v.get('to', '?')}: {v.get('kind')} at "
+            f"({at[0] / 1e6:.3f}, {at[1] / 1e6:.3f}) mm on {v.get('layer')}, {int(v.get('depth_nm') or 0) / 1e6:.3f} mm "
+            f"below the rule over {int(v.get('length_nm') or 0) / 1e6:.3f} mm against {v.get('against')}; "
+            f"cause: {v.get('cause')}")
 
 
 def route_findings(result: dict | None) -> list:
@@ -135,6 +146,15 @@ def route_findings(result: dict | None) -> list:
     if nk:
         out.append(_mk("NECKED", f"{len(nk)} stretch(es) are narrower than their net's track width (to get out of "
                        "a pad).", nk))
+    viol = result.get("violations") or []
+    if viol:
+        by = Counter(str(v.get("kind")) for v in viol)
+        nconn = len({v.get("conn") for v in viol})
+        out.append(_mk("VIOLATIONS",
+                       f"{len(viol)} rule violation(s) in the copper of {nconn} connection(s), written on purpose "
+                       "(never drop: the drawing found no legal geometry, so they are drawn on their best one): "
+                       + ", ".join(f"{n} {k}" for k, n in by.most_common()) + ".",
+                       [_violation_text(v) for v in viol]))
     ig = lines("ignored_rule: ")
     if ig:
         out.append(_mk("IGNORED_RULE", ig[0].removeprefix("ignored_rule: ") + ".", ig))

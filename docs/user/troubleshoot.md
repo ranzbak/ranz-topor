@@ -144,8 +144,13 @@ only routes what is not connected yet; on a fully routed board that is nothing
 A difference to KiCad's interactive DRC usually means the board changed after the run, or zones were not
 refilled.
 
+Since never drop ([`VIOLATIONS`](#violations)), the topological core writes a connection it could not draw
+legally on its best geometry; those places break a rule on purpose and the report lists each of them.
+
 **Fix.** Refill zones (KiCad → Edit → Fill All Zones, B), run KiCad → Inspect → Design Rules Checker again,
-and compare with `drc.json` in the report folder. If the router's copper really violates a rule, file a bug.
+and compare with `drc.json` in the report folder. A new error at a place the report lists under VIOLATIONS is
+expected (fix it by hand, or set `[optimize] allow_violations = false` for legal copper only). If the router's
+copper violates a rule anywhere else, file a bug.
 
 ## Findings
 
@@ -572,3 +577,11 @@ and compare with `drc.json` in the report folder. If the router's copper really 
 **Cause.** Some vias stand in a narrow pass: less room than half a via diameter is left next to them (the via_squeeze social factor). They pass KiCad's DRC but leave little room for later edits.
 
 **Fix.** Accept them, or raise the price of narrow passes with factors.weight via_squeeze (topor.toml [factors] weight = { via_squeeze = 10 }) and route again; factors.report via_squeeze = "off" hides the list.
+
+### VIOLATIONS
+
+*Severity: warning.*
+
+**Cause.** Never drop: some connections had no legal geometry when drawn (a gap too narrow, no free site for a via, a crossing that cannot be layered, a branch meeting its trace on another layer); topor kept them and wrote them on their best geometry, so the copper breaks a rule there. Each violation is listed with its place, type (clearance, short, hole_clearance, edge_clearance, connection_width) and cause; KiCad's DRC shows the same places.
+
+**Fix.** Fix each listed place by hand (move the trace or via, or a part), or give the router more room or time (run.timeout_s, [optimize] runs) and route again. [optimize] allow_violations = false writes legal copper only (those connections stay unrouted).
