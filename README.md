@@ -46,24 +46,29 @@ What works on this branch:
   off by default, the crossing factor stands for it);
 - net-tree junctions in the layer assignment (two layers): a T junction is one layer domain (Polubasov's tee
   rule: two arms on one layer, the via on the third), and a via next to a junction stands at the junction;
-  the junction angle price follows the Steiner-tree length bound (`junction_angle`, ψ curve, 0 from 120°).
+  the junction angle price follows the Steiner-tree length bound (`junction_angle`, ψ curve, 0 from 120°);
+- fuse after drawing: a trace that leaves a branch point or a pad right beside another trace of its net
+  starts on that trace's copper where the two part (one copper, a T there), when that is cheaper by length
+  and junction angle and keeps every clearance (`[search] fuse_branches`, on by default);
+- the drawing's exact path has no out-and-back track pieces at its joints any more.
 
-The board ladder at commit `a328ef2` (headless, `tools/route_board.sh`, judged by `kicad-cli` DRC after a zone
+The board ladder at commit `121e3eb` (headless, `tools/route_board.sh`, judged by `kicad-cli` DRC after a zone
 refill; "unconnected" counts DRC unconnected items, the hand-routed board's own count in brackets):
 
 | Board | Routed | Unconnected (hand) | New routing DRC errors | Vias |
 |---|---|---|---|---|
 | eprom-to-kernal | 27/27 | 0 (0) | 0 | 0 |
 | wiccon-2023 | 60/60 | 0 (0) | 0 | 23 |
-| dcsgonebadge | 187/231 | 49 (4) | 0 | 114 |
-| qmtech | 346/426 | 85 (0) | 0 | 196 |
+| dcsgonebadge | 189/231 | 47 (4) | 0 | 116 |
+| qmtech | 346/426 | 85 (0) | 0 | 195 |
 
 Known limits: the complex boards (bornhack2026, hackerhotel2027, tanmatsu) are not on the ladder yet;
-differential pairs are not routed; branching is not complete (fusing side-by-side traces of one net,
-re-attaching after changes, junction relaxation, vias as junctions and new branch points are open; the tee
-rule is two-layer only); pour islands are stitched afterwards, not prevented; the drawing leaves short
-out-and-back track pieces at some joints (harmless copper overlap); results on the larger rungs move by a
-few connections with small changes elsewhere on the board (rip-up order).
+differential pairs are not routed; branching is not complete (the fuse moves copper after drawing but the
+planner still reserves room for both traces; re-attaching after changes, junction relaxation toward the
+Fermat point, vias as junctions and new branch points are open; the tee rule is two-layer only; a few
+side-by-side pairs of one net remain, mostly at adjacent pins of one net and twin plane stubs); pour islands
+are stitched afterwards, not prevented; results on the larger rungs move by a few connections with small
+changes elsewhere on the board (rip-up order).
 
 ## Requirements
 
