@@ -62,6 +62,35 @@ refill; "unconnected" counts DRC unconnected items, the hand-routed board's own 
 | dcsgonebadge | 189/231 | 47 (4) | 0 | 116 |
 | qmtech | 346/426 | 85 (0) | 0 | 195 |
 
+### The topological core inside KiCad (K1)
+
+The **Topor: route** button runs this core in KiCad 10: pre-flight findings (differential pairs announced as
+skipped, pads inside track keepouts), a progress dialog that names the stage and round and shows router time and
+total time (`[run] timeout_s` is now 600 s, an emergency stop; the `[optimize]` work caps end a run), Cancel at any
+time, a preview with the open ratsnest in blue, findings after routing (unrouted connections by reason, pour
+islands and stitches, via squeeze, necking, ignored rules, ...; [operate.md](docs/user/operate.md#findings-after-routing)),
+Accept as one undo step. Every `topor.toml` setting the core reads reaches it (before K1 the `[optimize]`,
+`[factors]` and the other core settings were dropped as "since 0.5.0"); settings of the classic engine say so in
+the [reference](docs/user/configuration.md).
+
+Live test, automated: `tools/gui_e2e.sh <board> <out_dir> --from-hand [--harness <metrics.json>]` drives KiCad 10
+on a nested X display (Xephyr) with a separate KiCad home, never yours, opens a copy of the hand-routed board,
+routes with *Rip up and re-route*, accepts, checks one Ctrl+Z restores the board, saves and judges the result with
+KiCad's DRC ([gui-test-checklist.md](docs/user/gui-test-checklist.md#automated-run)). Plugin in KiCad vs the
+headless harness on the same board (engine at K1):
+
+| Board | Live plugin: routed / unconnected / routing_new / vias | Harness | Same? |
+|---|---|---|---|
+| wiccon-2023 | 60/60 / 0 / 0 / 23 | 60/60 / 0 / 0 / 23 | yes |
+| dcsgonebadge | 184/231 / 52 / 0 / 110 | 189/231 / 47 / 0 / 116 | no: the copper-graphics polygons differ by < 0.5 µm (both contain KiCad's copper); the plugin's engine input with the harness's polygons routes 189/116 |
+| qmtech | 349/426 / 84 / 0 / 206 | 346/426 / 85 / 0 / 195 | no: the net numbering differs (KiCad's API has no net codes, the plugin numbers nets by sorted name); the plugin's engine input renumbered with pcbnew's codes routes 346/195 |
+
+Every other part of the engine input is now identical between the plugin and the harness (rules, widths, net
+classes and priorities, pads, pours, zone connections, keepouts, teardrops); the remaining differences are the
+router's sensitivity to the copper-graphics vertices and to the net numbering, not plugin errors. The ladder above
+is unchanged by K1 (eprom 27/27, wiccon 60/60, dcs 189/231, qmtech 346/426, routing_new 0).
+
+
 Known limits: the complex boards (bornhack2026, hackerhotel2027, tanmatsu) are not on the ladder yet;
 differential pairs are not routed; branching is not complete (the fuse moves copper after drawing but the
 planner still reserves room for both traces; re-attaching after changes, junction relaxation toward the

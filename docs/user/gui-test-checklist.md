@@ -9,6 +9,46 @@ for a fail: what you saw, the report folder path, and the last lines of `log.txt
 Background: [install.md](install.md) · [operate.md](operate.md) · [troubleshoot.md](troubleshoot.md) ·
 wireframes `docs/progress/notes/m4-ui-wireframes.md` (dialog layout, tab order, wording).
 
+## Automated run
+
+`tools/gui_e2e.sh` runs the core of this checklist (Setup, R1, R2, R4, R6, R7, R8 and the parity with the
+headless harness) by itself in a real KiCad 10, on a nested X display, without touching your own KiCad:
+
+```bash
+tools/gui_e2e.sh wiccon-2023 scratch/k1/gui/wiccon --from-hand \
+    --harness <route_board out>/wiccon-2023/wiccon-2023--metrics.json
+tools/gui_e2e.sh dcsgonebadge scratch/k1/gui/dcs --from-hand --cancel-after 30   # Cancel while routing
+```
+
+- **Isolation.** KiCad runs on `Xephyr :6` (started when not running; `--display` picks another) with its own home
+  `<out_dir>/home`: `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `KICAD_CONFIG_HOME`, `TMPDIR`
+  (so the API socket is `<out_dir>/home/tmp/kicad/api.sock`) and a private D-Bus session. The plugin is installed
+  there by `tools/build.sh` (`XDG_DATA_HOME` / `XDG_CACHE_HOME` of the test home; `--wheel` = `TOPOR_WHEEL`, a
+  prebuilt engine wheel). Your `~/.config/kicad`, `~/.local/share/kicad`, `~/.cache/kicad` and `/tmp/kicad` are
+  never written. KiCad's first start in the test home needs network once (`pip install kicad-python`).
+- **Board.** `harness.strip` copies the board (never the original): `boards/<name>-hand/` and the stripped
+  `boards/<name>-input/`. Default: KiCad opens the stripped copy. `--from-hand`: KiCad opens a copy of the
+  hand-routed board and topor runs with `existing_copper = "rip"`, `rip_free_vias = true`,
+  `respect_locked = false`, the input the headless harness (`tools/route_board.sh`) models: track widths from the
+  existing copper, everything ripped. `--toml section.key=value` writes more settings.
+- **Steps and checks** (each a PASS / FAIL line in `<out_dir>/e2e.log`, a screenshot in `<out_dir>/shots/`):
+  KiCad opens the board; KiCad creates the plugin environment; the **Topor: route** button is in the toolbar
+  (found by its icon); first-run notice (default mode); pre-flight dialog → Enter (Route); progress (a
+  screenshot every 10 s; `--cancel-after S` presses Esc after S s and checks the run ends without an error);
+  preview → Enter (Accept); finished notice; over the KiCad API: the copper changed, **one Ctrl+Z** restores the
+  board exactly, **Ctrl+Y** brings the result back; the board is saved and judged by `kicad-cli` DRC
+  (`harness.board_metrics`): status accepted and `routing_new 0`; with `--harness` routed / connections /
+  unconnected / routing_new / vias equal those of the headless run.
+- **Output.** `<out_dir>/<name>-e2e.json` (checks, metrics, comparison), `<out_dir>/<name>-gui-compare.png` (hand
+  left, the KiCad result right, open ratsnest blue), the run's report folder under
+  `<out_dir>/home/.cache/kicad/10.0/topor/`. Exit code 0 when every check passed. KiCad and (when it started
+  it) Xephyr are stopped at the end (`--keep` leaves them running).
+- **Not covered** (still by hand below): R3 Cancel latency per phase, R5 Reject, R7b/R7c refill undo, R9 report
+  folder button, R10 selection scope, R11 Help, R12/R13, the UI acceptance (scaling, themes, tab order).
+  Debugging a failing step: `TOPOR_DUMP_ENGINE_INPUT=<dir>` makes the plugin write the engine's exact input
+  (`model-N.json`, `options-N.json`), comparable with the harness's (see
+  [debug.md](../dev/debug.md#reproducing-a-plugin-run)).
+
 ## Setup
 
 - [ ] **Build and install.** In the repo: `bash tools/build.sh --dev`. Expected: ends with
@@ -37,10 +77,10 @@ wireframes `docs/progress/notes/m4-ui-wireframes.md` (dialog layout, tab order, 
 |---|---|---|
 | R1 | Click **Topor: route**. | **Topor — Settings file created** with the path `scratch/gui/<board>/topor.toml`; the file exists. **Open file** opens it in the text editor and the dialog stays; **Continue** goes on. |
 | R2 | Look at the pre-flight dialog. | Progress *Checking the board (KiCad DRC)* first, then **Topor — Route &lt;board&gt;**. Header: *N connections in scope · nets · 2 copper layers · engine 0.4.0* (N is an estimate: eprom 30, wiccon 84 from the harness model; the routed total later is 27 / 62). Findings: no error; eprom headless reference shows `POWER_BY_NAME` (GND, +5V) — record the list. Selecting a row fills Cause / Fix. Scope radios greyed with *(nothing selected in KiCad)*. |
-| R3 | Choose *Rip up and re-route*; on **wiccon** set *Threads* 1 (slower, so Cancel can be hit); **Route**; press **Cancel** once while *Routing — negotiation pass* is shown. | Progress shows phase, routed/total, iteration of up to 30, vias, elapsed / 1:00. After Cancel the label reads *Cancelling — keeping the best result so far…*, the button greys, the dialog closes by itself, and either the preview opens with the best result (summary *Stopped: cancel*) or *Cancelled — nothing was changed on the board.* (nothing routed yet). Cancel reacts within about a second in every phase, also while kicad-cli runs (pre-flight DRC, DRC rounds, preview export): the dialog repaints and Cancel works — note the longest wait; Cancel during the pre-flight DRC (*Checking the board*) ends the run with nothing changed (on wiccon: press Cancel right after Route). eprom routes in ~0.1 s: Cancel is usually too late — note it and continue. |
-| R4 | Preview (run again without Cancel if R3 ended without one). | **Topor — Preview: &lt;board&gt;**: *Current board* left, *Result* right; new copper highlighted with a halo visible on the panel background; Zoom Fit / 100 % / 200 % and Ctrl+wheel work; Summary pane = the summary block (*Routed 27/27* eprom, *62/62* wiccon; *DRC new 0 · … · unconnected 0*); report folder path shown. |
+| R3 | Choose *Rip up and re-route*; on **wiccon** set *Threads* 1 (slower, so Cancel can be hit); **Route**; press **Cancel** once while *Routing — …* is shown. | Progress shows *Routing — &lt;stage&gt;* (plane stubs, topological search, layer assignment, drawing the traces, via reduction, pour stitching), round of up to 4 (`[optimize] rounds`), routed/total, vias, router time / 10:00 and total time. After Cancel the label reads *Cancelling — keeping the best result so far…*, the button greys, the dialog closes by itself, and either the preview opens with the best result (summary *Stopped: cancel*) or *Cancelled — nothing was changed on the board.* (nothing routed yet). Cancel reacts within about a second in every phase, also while kicad-cli runs (pre-flight DRC, DRC rounds, preview export): the dialog repaints and Cancel works — note the longest wait; Cancel during the pre-flight DRC (*Checking the board*) ends the run with nothing changed (on wiccon: press Cancel right after Route). eprom routes in ~0.1 s: Cancel is usually too late — note it and continue. |
+| R4 | Preview (run again without Cancel if R3 ended without one). | **Topor — Preview: &lt;board&gt;**: *Current board* left, *Result* right; new copper highlighted with a halo visible on the panel background; Zoom Fit / 100 % / 200 % and Ctrl+wheel work; Summary pane = the summary block (*Routed 27/27* eprom, *60/60* wiccon with the topological core; *DRC new 0 · … · unconnected 0*); report folder path shown. |
 | R5 | **Reject**. | **Topor — Finished**: *Nothing was changed on the board.* The board looks exactly as before (same tracks, same ratsnest); **Edit → Undo** is greyed or shows nothing from topor. |
-| R6 | Run again → (no first-run notice) → *Rip up and re-route* → **Route** → **Accept**. | **Topor — Finished**: *Routed 27/27 connections — applied to the board as one undo step (Edit → Undo).* (wiccon 62/62) and *Zones were not refilled: press B (Edit → Fill All Zones) to refill them — a separate undo step.* The board shows the new curved tracks; zones are **not** refilled yet (default `[run] refill_after_accept = false`). |
+| R6 | Run again → (no first-run notice) → *Rip up and re-route* → **Route** → **Accept**. | **Topor — Finished**: *Routed 27/27 connections — applied to the board as one undo step (Edit → Undo).* (wiccon 60/60) and *Zones were not refilled: press B (Edit → Fill All Zones) to refill them — a separate undo step.* The board shows the new curved tracks; zones are **not** refilled yet (default `[run] refill_after_accept = false`). |
 | R7 | Open the **Edit** menu (do not press B first), then press **Ctrl+Z** once. | The top undo entry is topor's commit (*Topor: routed …*, record the exact text); after one Ctrl+Z all topor tracks disappear and the hand routing is back in **one** step; **Edit → Redo** (Ctrl+Shift+Z) brings the result back. |
 | R7b | Redo, press **B** (Edit → Fill All Zones), then **Ctrl+Z** once. | Only the refill is undone (zones look as before B), the topor tracks stay: KiCad's refill is its own undo step. Redo / B again before R8. |
 | R7c | Optional — set `[run] refill_after_accept = true` in `topor.toml`, run again → *Rip up and re-route* → **Accept**. | **Topor — Finished** says *Zones were refilled by topor — a second undo step …*; zones are refilled. Record the top **Edit → Undo** entry: if it is the refill, two Ctrl+Z are needed (refill, then routes); if it is topor's commit, KiCad's IPC refill made no undo entry of its own — note which. |
@@ -67,7 +107,7 @@ Dialogs: first-run, pre-flight, progress, preview, finished, error. Per the wire
 - [ ] **Mnemonics** work and do not collide: pre-flight R A W B T L K S H C; preview A R O; error D O C;
   first-run O C; progress C; finished O C.
 - [ ] **100 % scaling**: every dialog readable, nothing cut off, minimum sizes respected (first-run 440×200,
-  pre-flight 640×480, progress 460×240, preview 800×520, finished 440×220, error 520×320 DIP).
+  pre-flight 640×560, progress 460×240, preview 800×520, finished 440×220, error 520×320 DIP).
 - [ ] **200 % scaling** (GNOME Settings → Displays → Scale 200 %, or start KiCad with `GDK_SCALE=2`): same
   checks; the pre-flight (1280×960 px) and preview (1600×1040 px) fit a 1920×1080 screen; icons sharp or
   dropped (the severity word always shown); preview bitmap crisp at Fit.
@@ -155,7 +195,7 @@ Each is code that could not be exercised without a live KiCad. Tick when the exp
 
 **B9 — visual checks of the dialogs** (`plugin/topor/ui_wx.py`; see UI acceptance)
 
-- [ ] Real sizes at 100 / 200 %; preview opens at about 85 % of the screen, pre-flight at 720×620 DIP clamped to 90 %.
+- [ ] Real sizes at 100 / 200 %; preview opens at about 85 % of the screen, pre-flight at 760×780 DIP clamped to 90 %.
 - [ ] Button order: Cancel left of Route (GTK); Help at the left; status text between them when blocked.
 - [ ] Copy details → clipboard + *Copied* for 2 s (R12).
 - [ ] The preview shows *Fit* correctly right after opening.

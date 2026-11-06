@@ -44,6 +44,12 @@ org.topor.router/
   wheels/      topor_engine-0.4.0-*.whl
 ```
 
+For a KiCad home that is not yours (tests, a second KiCad profile) set `XDG_DATA_HOME` and `XDG_CACHE_HOME` to
+folders inside it: the plugin goes to `$XDG_DATA_HOME/kicad/10.0/plugins/org.topor.router/` and `--dev` updates the
+plugin environment under `$XDG_CACHE_HOME/kicad/10.0/` (or `TOPOR_KICAD_CACHE`). `TOPOR_WHEEL=<file>` installs an
+already built `topor_engine` wheel instead of building one. `tools/gui_e2e.sh` uses exactly this
+([gui-test-checklist.md](gui-test-checklist.md#automated-run)).
+
 `tools/build.sh --dev` additionally re-installs the freshly built wheel into the repo's `.venv` and into
 KiCad's existing plugin environment (`~/.cache/kicad/10.0/python-environments/org.topor.router`), so a
 rebuilt engine of the **same version** is picked up without recreating the environment. It writes to

@@ -102,9 +102,10 @@ TOPOR_REPORT_ROOT=/tmp/topor-reports PYTHONPATH=.:plugin \
 - the preview PNG needs a `wx.App`, so headless runs log `preview failed: preview.render needs a wx.App`
   in `log.txt` and add a `PREVIEW_FAILED` warning — expected; the DRC numbers are unaffected.
 
-Net classes come from the model's own `rules` (headless `FakeBoard` reports only the *Default* class to
-the rule resolver), so a headless run reproduces the engine input of the harness, not every detail of the
-IPC run.
+Net classes come from the model's own `rules`; `topor.app --headless` reports only the *Default* class to the
+rule resolver and the priorities. `tools/route_board.sh` passes KiCad's net classes of the board (read with
+pcbnew, `harness.route_board.board_netclasses`), as the plugin reads them over IPC, so its priorities match a
+plugin run.
 
 ## Reproducing a plugin run
 
@@ -151,6 +152,34 @@ The IPC model and the harness model of the same board are compared by `tests/plu
 (live, see [gui-test-checklist.md](../user/gui-test-checklist.md#ipc-parity)); differences between a plugin
 run and its headless reproduction that go beyond the approximations listed in
 [operate.md](../user/operate.md#limitations) are bugs.
+
+## The engine input of a plugin run (`TOPOR_DUMP_ENGINE_INPUT`)
+
+Start KiCad (or `tools/route_board.sh`, or `tools/gui_e2e.sh`) with `TOPOR_DUMP_ENGINE_INPUT=<dir>` in its
+environment: every engine call of the run flow writes the exact engine input, `<dir>/model-N.json` and
+`<dir>/options-N.json` (N = DRC-loop round), and `log.txt` names the files. Two dumps of the same board (live plugin
+and headless harness) are compared field by field by net name; a difference beyond the conservative approximations
+of [operate.md](../user/operate.md#limitations) is a bug (K1 found three this way: zone connection codes off by
+one, thick copper arcs as dozens of overlapping rings, custom pad arcs flattened inward). The engine alone on a dump:
+
+```bash
+PYTHONPATH=<engine site> python3 -c "import topor_engine; print(topor_engine.route(open('model-1.json').read(), open('options-1.json').read())[:200])"
+```
+
+## A board routed elsewhere, judged like the harness (`harness.board_metrics`)
+
+```bash
+PYTHONPATH=.:plugin .venv/bin/python -m harness.board_metrics <routed.kicad_pcb> --input <stripped input> \
+    --hand <hand copy> [--report-dir <topor report folder>] [--out m.json] [--png compare.png]
+```
+
+The numbers of `tools/route_board.sh` (unconnected, routing_new, vias; routed/total from the run's `result.json`)
+for a board saved by the live plugin, and the hand-vs-result PNG with the open ratsnest in blue.
+
+## Live GUI test (`tools/gui_e2e.sh`)
+
+Drives the real plugin in a real KiCad 10 on Xephyr with a separate KiCad home and checks every step; see
+[gui-test-checklist.md](../user/gui-test-checklist.md#automated-run).
 
 ## Filing a bug
 

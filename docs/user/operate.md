@@ -7,6 +7,7 @@ result is **one undo step** (Edit → Undo). Install it first: [install.md](inst
 Contents: [Quick start](#quick-start) · [Where the settings come from](#where-the-settings-come-from) ·
 [First run](#first-run) · [Pre-flight findings](#pre-flight-findings) · [Options](#options) ·
 [Scope by selection](#scope-by-selection) · [Progress and Cancel](#progress-and-cancel) ·
+[Findings after routing](#findings-after-routing) ·
 [Preview](#preview) · [Accept, Reject and undo](#accept-reject-and-undo) · [Report folder](#report-folder) ·
 [Net priorities](#net-priorities) · [Keyboard](#keyboard) · [Limitations](#limitations)
 
@@ -151,7 +152,7 @@ Tick **Save these options to topor.toml** to keep them (only these `[run]` keys 
 | Existing copper | Keep as obstacles · Keep and smooth · Rip up and re-route | `[run] existing_copper` = `fixed` / `smooth` / `rip` |
 | Respect locked tracks and vias | on: locked copper is never ripped | `[run] respect_locked` |
 | Keep partial routes | on: connections that cannot finish are drawn up to the blocking point (group `topor-partial`) | `[run] partial_routes` |
-| Time limit | seconds of router time, `0` = no limit (Cancel is then the only stop); KiCad's DRC, the refill and the preview export are not counted | `[run] timeout_s` |
+| Time limit | seconds of router time, default 600 (an emergency stop: the topological core ends at its `[optimize]` work caps); `0` = no limit; KiCad's DRC, the refill and the preview export are not counted | `[run] timeout_s` |
 | Threads | `0` = all cores but one | `[run] threads` |
 
 *Existing copper* decides what happens to tracks and vias that are already on the board:
@@ -186,21 +187,29 @@ A selection that yields nothing gives [`SCOPE_EMPTY`](troubleshoot.md#scope_empt
 
 ## Progress and Cancel
 
-**Topor — Routing &lt;board&gt;** shows the phase (*Preparing geometry*, *Routing — negotiation pass*,
-*Routing finished*, *Verifying with KiCad DRC*, *Rendering the preview*), routed/total, the optimisation
-iteration out of `[iterations] max`, the via count and elapsed time against the time limit.
-The run ends by itself when no more progress is made (`[iterations]`), when the router has used the time
-limit (`[run] timeout_s` counts router time only: the pre-flight DRC, the DRC rounds and the kicad-cli
-refill / preview exports come on top; the topological core stops at its `[optimize]` work caps, so the same
-board gives the same result on any machine, and the time limit is only an emergency stop there: the report
-then warns "time budget hit: result may differ between runs"), or when you press **Cancel** (or Esc / Enter): the label changes to
-*Cancelling — keeping the best result so far…* and the best result found so far goes on to KiCad DRC and
-the preview. If nothing was routed yet, the run ends with *Cancelled — nothing was changed on the board.*
-Cancel reacts within about a second in every phase: while routing, and also while `kicad-cli` runs (pre-flight
-DRC with zone refill, the DRC rounds, the preview export) because topor polls the running `kicad-cli` every
-0.25 s and keeps the dialog alive. Cancel during the pre-flight DRC stops `kicad-cli` and ends the run with
-nothing changed; Cancel after the routing started keeps the best result (the DRC and the preview of that result
-still finish). A `kicad-cli` call that runs longer than `[run] kicad_cli_timeout_s` (default 120 s, `0` = no
+**Topor — Routing &lt;board&gt;** shows what runs now: *Preparing geometry* (topor reads the board), *Checking the
+board (KiCad DRC)*, then *Routing — &lt;stage&gt;* with the stage the topological core is in (*plane stubs*, *projection
+of the board*, *topological search*, *layer assignment, rip-up and reroute*, *drawing the traces*, *via reduction and
+fuse*, *pour stitching*), then *Verifying with KiCad DRC* and *Rendering the preview*. Below it: **Round** — the
+whole-route round now running, of up to `[optimize] rounds` (default 4; each round routes the board again with the
+passages the drawing found too small lowered); routed/total; vias; **Router time** against the time limit; **Total
+time** since you pressed Route (KiCad's DRC and the preview included).
+
+How long a run takes (measured on 8 cores with two boards running at once; the router time is about half of the
+total, KiCad's DRC and the preview the rest): eprom-to-kernal and wiccon-2023 a few seconds, dcsgonebadge (231
+connections) about 50 s of router time, qmtech (426 connections, 4 layers) about 150 s. The run ends by itself at
+the topological core's work caps (`[optimize]`): the same board and settings give the same result on any machine.
+`[run] timeout_s` (default 600 s of router time, about 4× the largest measured board) is only an emergency stop:
+when it fires the result is the best so far, may differ between runs, and the findings say so
+([`TIME_BUDGET_HIT`](troubleshoot.md#time_budget_hit)). `0` = no limit.
+
+**Cancel** (or Esc / Enter) works at any time: the label changes to *Cancelling — keeping the best result so
+far…*; while routing, the best result found so far goes on to KiCad DRC and the preview; if nothing was routed yet
+the run ends with *Cancelled — nothing was changed on the board.* topor polls the running `kicad-cli` every 0.25 s,
+so Cancel also works during the pre-flight DRC (the run then ends with nothing changed) and the DRC rounds / preview
+export (the DRC and the preview of the best result still finish). The engine stops at its next check, normally
+within a second; if it does not stop within 30 s the run ends with [ENGINE_UNRESPONSIVE](troubleshoot.md#engine_unresponsive)
+(board unchanged). A `kicad-cli` call that runs longer than `[run] kicad_cli_timeout_s` (default 120 s, `0` = no
 limit) is stopped and the run ends with [KICAD_CLI_TIMEOUT](troubleshoot.md#kicad_cli_timeout) (board unchanged).
 Before the routing starts the progress dialog already shows *Preparing geometry* while topor reads the board.
 
@@ -208,10 +217,34 @@ After routing, the result is written into the board copy and checked with KiCad'
 the router's copper causes violations, topor pins those spots and routes again, up to
 `[expert] drc_loop_cap` rounds.
 
+## Findings after routing
+
+After the routing, the engine's own report is turned into findings with a code, the numbers, the places and a fix;
+the preview summary names the warnings (*After routing, check: …*), report.md lists each with its places
+(*Findings*), and every code has a section in [troubleshoot.md](troubleshoot.md):
+
+| Code | What it means |
+|---|---|
+| [`DIFF_PAIRS_SKIPPED`](troubleshoot.md#diff_pairs_skipped) | differential pairs are not routed by this version; route them by hand (also announced in the pre-flight) |
+| [`UNROUTED`](troubleshoot.md#unrouted) | connections that could not be finished, counted by reason (no room for a via, no room at the clearance when drawn, …) |
+| [`CONNECTION_WIDTH`](troubleshoot.md#connection_width) | traces not drawn because they would graze their own pad or via (KiCad's minimum connection width) |
+| [`POUR_ISLANDS`](troubleshoot.md#pour_islands) / [`POUR_STITCHED`](troubleshoot.md#pour_stitched) | pour pieces the new copper cut off: left over / joined again by stitching vias or pad stubs |
+| [`POUR_UNJOINED`](troubleshoot.md#pour_unjoined) | KiCad's own DRC after the zone refill: pour pieces cut off (counted in the preview legend) and pads not joined to their pour (blue ring in the preview) |
+| [`PLANE_PAD_SIGNAL`](troubleshoot.md#plane_pad_signal) / [`PLANE_VIA_OUTSIDE_POUR`](troubleshoot.md#plane_via_outside_pour) | plane pads joined by a trace instead of a via into their pour / a plane via outside the fill |
+| [`VIA_SQUEEZE`](troubleshoot.md#via_squeeze) | vias in a narrow pass (the via_squeeze social factor) |
+| [`NECKED`](troubleshoot.md#necked) | traces narrower than their net width where they leave a pad |
+| [`IGNORED_RULE`](troubleshoot.md#ignored_rule) | copper that breaks a KiCad check set to *ignore* (priced, not forbidden) |
+| [`TIME_BUDGET_HIT`](troubleshoot.md#time_budget_hit) | the time limit stopped the run before its work caps |
+
+The pre-flight also warns about pads inside a track keepout on all their layers
+([`KEEPOUT_PAD`](troubleshoot.md#keepout_pad)).
+
 ## Preview
 
 **Topor — Preview: &lt;board&gt;** shows *Current board* (left) and *Result* (right) as KiCad renders them
-(F.Cu, B.Cu, outline); new copper is drawn with a highlight halo. **Zoom**: Fit, 100 %, 200 %
+(F.Cu, B.Cu, outline); new copper is drawn with a highlight halo, and the
+open connections (KiCad's DRC *unconnected items* after the zone refill, before and after routing) are drawn as
+blue lines between the items that are still apart. **Zoom**: Fit, 100 %, 200 %
 (Ctrl + mouse wheel steps it). The **Summary** pane is the top of the run report: routed/total,
 partial/failed, vias (vs. current board), length outside pads, *DRC new / pre-existing / unconnected*,
 detours, why the router stopped, scope and policy, settings and findings. The *DRC new* number comes from
@@ -285,6 +318,18 @@ folder, **C**lose.
 What 0.4.0 does not do, or does approximately. Approximations are always on the safe side: an obstacle is
 never smaller than in KiCad, a connection is never assumed that KiCad would not make, a via topor is
 unsure about is kept. KiCad's DRC of the result stays the judge.
+
+### Topological core (the engine of this version)
+
+- **Differential pairs are not routed** (nets ending in `_P`/`_N`, `+`/`-`, `P`/`N`): the pre-flight and the
+  findings after routing say so ([`DIFF_PAIRS_SKIPPED`](troubleshoot.md#diff_pairs_skipped)); route them by hand.
+- Two or more signal layers are needed; through vias only.
+- Not every connection finishes on dense boards (dcsgonebadge 189/231, qmtech 346/426 headless): the open ones are
+  listed with their reason ([`UNROUTED`](troubleshoot.md#unrouted)) and drawn blue in the preview. Small changes
+  elsewhere on the board can move the result by a few connections.
+- Pour islands that the new copper cuts off are stitched afterwards (stitching vias, pad stubs), not prevented.
+- Settings marked *Classic engine only* in [configuration.md](configuration.md) (`[iterations]`, `[ripup]`, the via
+  cost keys, …) do nothing; the `[factors]` weights and the `[optimize]` work caps take their place.
 
 ### Platform and board
 

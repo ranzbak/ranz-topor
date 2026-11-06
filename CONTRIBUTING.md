@@ -47,7 +47,11 @@ KiCad folder instead (that is what `tests/plugin/test_app.py` does). Version bum
 cargo test --release --manifest-path engine/Cargo.toml
 cargo clippy --all-targets --manifest-path engine/Cargo.toml -- -D warnings   # must be clean
 PYTHONPATH=plugin .venv/bin/python -m topor.docs_gen --check                   # configuration.md current
+tools/gui_e2e.sh wiccon-2023 scratch/k1/gui/wiccon --from-hand                  # live KiCad on Xephyr (minutes)
 ```
+
+`tools/gui_e2e.sh` is the live end-to-end test of the plugin in a real KiCad 10 on a nested X display with a separate
+KiCad home (never your own); it is not part of pytest ([gui-test-checklist.md](docs/user/gui-test-checklist.md#automated-run)).
 
 - **TDD**: write the failing test first, see it fail, implement, see it pass. Never weaken, skip or delete a
   test or a bound to make it pass; never relax a budget.
