@@ -1078,6 +1078,11 @@ pub struct Options {
     /// closer than this (mm) to a pad of the copper it joins is not used; the pad is the junction.
     /// 0 (default) = no such distance: the `junction_angle` factor prices a T next to a pad.
     pub junction_pad_mm: f64,
+    /// Topological core (D6b, `topor.toml [search] fuse_branches`): after the drawing, a trace
+    /// that leaves a junction or a pad beside another trace of its net leaves that trace's copper
+    /// where the two part instead (one copper, a T there), when that is cheaper by length and the
+    /// `junction_angle` factor and the new track keeps every clearance. Default on.
+    pub fuse_branches: bool,
     /// Topological core (S3, `topor.toml [optimize] rounds`): most whole-route rounds (the first
     /// included). A work cap, not a time cap: the same board and settings give the same result on
     /// any machine and with any thread count.
@@ -1197,6 +1202,7 @@ impl Default for Options {
             net_tree: "free".into(),
             crossing_vias: "crossing".into(),
             junction_pad_mm: 0.0,
+            fuse_branches: true,
             topo_rounds: 4,
             max_ripped: 5000,
             max_expansions: 2_000_000,

@@ -290,6 +290,86 @@ pub(super) fn seg_core(a: Vec2, b: Vec2, core: &Core) -> (f64, Vec2, Vec2) {
 }
 
 /// Distance between the segments `a1-b1` and `a2-b2` (0 when they cross).
+/// The point of the polylines `trunk` nearest to `p`, with the unit directions of the trunk
+/// leaving it (two inside a segment, one or two at a vertex). `None` without a segment.
+fn trunk_foot(trunk: &[&[Vec2]], p: Vec2) -> Option<(Vec2, Vec<Vec2>)> {
+    let mut best: Option<(f64, Vec2, usize, usize, f64)> = None;
+    for (ri, pts) in trunk.iter().enumerate() {
+        for i in 0..pts.len().saturating_sub(1) {
+            let (a, b) = (pts[i], pts[i + 1]);
+            let ab = b - a;
+            if ab.len2() < 1.0 {
+                continue;
+            }
+            let t = ((p - a).dot(ab) / ab.len2()).clamp(0.0, 1.0);
+            let q = a + ab * t;
+            let d = (q - p).len();
+            if best.is_none_or(|x| d < x.0) {
+                best = Some((d, q, ri, i, t));
+            }
+        }
+    }
+    let (_, q, ri, i, t) = best?;
+    let pts = trunk[ri];
+    let mut arms = Vec::new();
+    let mut push = |d: Vec2| {
+        if let Some(u) = d.unit() {
+            arms.push(u);
+        }
+    };
+    // Away from q along the trunk on either side (a vertex counts as the nearer segment end).
+    let back = if t <= 1e-9 { i.checked_sub(1).map(|j| pts[j]) } else { Some(pts[i]) };
+    let fwd = if t >= 1.0 - 1e-9 { pts.get(i + 2).copied() } else { Some(pts[i + 1]) };
+    if let Some(x) = back {
+        push(x - q);
+    }
+    if let Some(x) = fwd {
+        push(x - q);
+    }
+    Some((q, arms))
+}
+
+/// Shortcuts of a branch run onto its trunk (D6b fuse; TopoR's FreeStyle auto move of T-points,
+/// black-box E8c-E8e): `run` starts on the trunk's copper (`trunk`, the trunk's polylines on the
+/// run's layer, math frame); leaving the trunk at the foot `q` of a later vertex `run[i]`
+/// instead replaces `run[0..=i]` by `q -> run[i]`. Price per candidate (mm): its length plus the
+/// `junction_angle` price `jw x ws_mm x psi(angle to the trunk)`; returns the candidates that are
+/// cheaper than the run as it is, the cheapest first, as `(gain mm, i, new run)`.
+/// O(run vertices x trunk segments).
+pub fn fuse_candidates(run: &[Vec2], trunk: &[&[Vec2]], ws_mm: f64, jw: f64) -> Vec<(f64, usize, Vec<Vec2>)> {
+    let price = |dir: Vec2, arms: &[Vec2]| -> f64 {
+        let Some(u) = dir.unit() else { return 0.0 };
+        if arms.is_empty() || jw <= 0.0 {
+            return 0.0;
+        }
+        let deg = arms.iter().map(|a| a.dot(u).clamp(-1.0, 1.0).acos().to_degrees()).fold(180.0, f64::min);
+        jw * ws_mm * super::factors::junction_psi(deg)
+    };
+    let mut out = Vec::new();
+    if run.len() < 2 {
+        return out;
+    }
+    let Some((_, arms0)) = trunk_foot(trunk, run[0]) else { return out };
+    let mut along = 0.0;
+    let old0 = price(run[1] - run[0], &arms0);
+    for i in 1..run.len() {
+        along += (run[i] - run[i - 1]).len() / 1e6;
+        let Some((q, arms)) = trunk_foot(trunk, run[i]) else { continue };
+        let d = (run[i] - q).len() / 1e6;
+        let gain = along + old0 - d - price(run[i] - q, &arms);
+        if gain > 1e-3 {
+            let mut pts = vec![q];
+            pts.extend_from_slice(&run[i..]);
+            pts.dedup_by(|a, b| (*a - *b).len2() < 1.0);
+            if pts.len() >= 2 {
+                out.push((gain, i, pts));
+            }
+        }
+    }
+    out.sort_by(|a, b| b.0.total_cmp(&a.0));
+    out
+}
+
 pub fn seg_seg_dist(a1: Vec2, b1: Vec2, a2: Vec2, b2: Vec2) -> f64 {
     seg_seg(a1, b1, a2, b2).0
 }
@@ -1746,6 +1826,37 @@ impl<'a> Drawer<'a> {
         out
     }
 
+    /// Replace run `r` of the drawn wire `wo` by the polyline `pts` (same layer, math frame) when
+    /// its tracks pass the checker against everything else drawn and graze no pad of the wire's
+    /// own net; else the old tracks stay. Only for wires whose track items are exactly the plain
+    /// [`Drawer::run_items`] of their runs (no necked or split widths): returns `false` for any
+    /// other. O(run segments x checker query).
+    pub fn refit_run(&mut self, wo: &mut WireOut, r: usize, pts: Vec<Vec2>) -> bool {
+        let w = wo.wire;
+        let counts: Vec<usize> = wo.runs.iter().map(|(l, p)| self.run_items(w, *l, p).len()).collect();
+        let n_tracks = wo.items.iter().filter(|i| matches!(i, Item::Track(_))).count();
+        if r >= wo.runs.len() || counts.iter().sum::<usize>() != n_tracks || n_tracks != wo.handles.len() || !wo.necks.is_empty() || !wo.items[..n_tracks].iter().all(|i| matches!(i, Item::Track(_))) {
+            return false;
+        }
+        let off: usize = counts[..r].iter().sum();
+        let (lo, hi) = (off, off + counts[r]);
+        for &h in &wo.handles[lo..hi] {
+            self.uncommit(h);
+        }
+        let layer = wo.runs[r].0;
+        let new_items = self.run_items(w, layer, &pts);
+        let ok = !new_items.is_empty() && self.checker.check_against(&self.idx, &new_items, &[]).violations.is_empty() && self.track_own_pad_ok(w, &new_items);
+        let keep: Vec<Item> = if ok { new_items } else { wo.items[lo..hi].to_vec() };
+        let hs: Vec<usize> = keep.iter().map(|it| self.commit(it)).collect();
+        wo.handles.splice(lo..hi, hs);
+        if ok {
+            wo.items.splice(lo..hi, keep);
+            wo.runs[r].1 = pts;
+            wo.length_nm = wo.runs.iter().map(|(_, p)| p.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>()).sum();
+        }
+        ok
+    }
+
     /// Track items of the run polyline `pts` of wire `w` on `layer`: the wire's width, or the
     /// per-segment width of [`Drawer::widths`].
     fn run_items(&self, w: WireId, layer: usize, pts: &[Vec2]) -> Vec<Item> {
@@ -2110,6 +2221,27 @@ mod tests {
         let pts = funnel(v(0.0, 0.0), v(20.0, 0.0), &p);
         assert_eq!(pts.len(), 3, "{pts:?}");
         assert!((pts[1] - v(10.0, 10.0)).len() < 1e-9, "{pts:?}");
+    }
+
+    #[test]
+    fn fuse_leaves_the_trunk_where_the_branch_parts() {
+        // A branch that leaves the trunk (y = 0) at x = 0 and runs beside it at 0.5 mm up to
+        // x = 5 before it turns away: the cheapest shortcut leaves the trunk under the last
+        // vertex, (6, 0) -> (6, 3), and the run beside the trunk is gone (D6b fuse).
+        let mm = 1e6;
+        let trunk = [v(-10.0 * mm, 0.0), v(10.0 * mm, 0.0)];
+        let run = [v(0.0, 0.0), v(1.0 * mm, 0.5 * mm), v(5.0 * mm, 0.5 * mm), v(6.0 * mm, 3.0 * mm)];
+        let c = fuse_candidates(&run, &[&trunk], 0.45, 10.0);
+        assert!(!c.is_empty());
+        let (gain, i, pts) = &c[0];
+        assert_eq!(*i, 3);
+        assert_eq!(pts.len(), 2, "{pts:?}");
+        assert!((pts[0] - v(6.0 * mm, 0.0)).len() < 1.0 && (pts[1] - v(6.0 * mm, 3.0 * mm)).len() < 1.0, "{pts:?}");
+        // Length 1.118 + 4 + 2.693 - 3 = 4.81 mm, plus the junction angle 10 x 0.45 x psi:
+        // psi(26.6 deg) = 1.73 before, psi(90 deg) = 0.04 after: 12.39 mm.
+        assert!((*gain - 12.39).abs() < 0.02, "{gain}");
+        // A branch that leaves straight away has nothing to gain.
+        assert!(fuse_candidates(&[v(0.0, 0.0), v(0.0, 3.0 * mm)], &[&trunk], 0.45, 10.0).is_empty());
     }
 
     #[test]

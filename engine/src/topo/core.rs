@@ -19,7 +19,7 @@ use super::archive::{table_text, Archive, Criteria, Objective, Variant};
 use super::board::{self, BuildOpts};
 use super::descent::{descend_labels, descend_topo};
 use super::moves::{Labels, Tally, Topo};
-use super::draw::{plan, Diag, Drawer, Plan, WireOut};
+use super::draw::{self, plan, Diag, Drawer, Plan, WireOut};
 use super::factors::{standard_factors, Event, Finding, Registry, Report, WireCtx};
 use super::init::{Conn, InitWeights};
 use super::pack::Packer;
@@ -1517,6 +1517,96 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         ));
     } else {
         warnings.push(format!("via reduction after drawing: off; {causes_before}"));
+    }
+    // ---- Fuse (D6b): a branch that leaves its junction (or a pad) beside its trunk leaves the
+    // trunk's copper where the two part (TopoR FreeStyle auto move of T-points, black-box E8c-e;
+    // overlap removal, REPORT section 4.C). Geometric, after everything is drawn: the checker sees
+    // all copper. A wire at a pad end fuses only onto a wire not fused there itself (no cycle).
+    if tree_free && opts.fuse_branches {
+        let jw = reg.price(&Event::JunctionAngle { at: Vec2::default(), deg: 60.0, ws_mm: 1.0 / super::factors::junction_psi(60.0) }, &WireCtx::default());
+        let js = tree::junctions(&st);
+        let mut fused_at: BTreeSet<(WireId, usize)> = BTreeSet::new();
+        // Points of a wire's copper that other copper ends on (a branch's junction, a fused
+        // end): a fuse may not take away the stretch they lie on.
+        let mut anchors: BTreeMap<WireId, Vec<Vec2>> = BTreeMap::new();
+        for &(bw, end, tw, _, v) in &js {
+            anchors.entry(tw).or_default().push(dr.end_at.get(&(bw, end)).copied().unwrap_or(proj.pos[v]));
+        }
+        let near_poly = |p: Vec2, pts: &[Vec2]| pts.windows(2).any(|x| {
+            let ab = x[1] - x[0];
+            let u = ((p - x[0]).dot(ab) / ab.len2().max(1.0)).clamp(0.0, 1.0);
+            (x[0] + ab * u - p).len() < 1_000.0
+        });
+        let (mut n_fused, mut gain_mm) = (0usize, 0.0f64);
+        let ids: Vec<WireId> = drawn.keys().copied().collect();
+        let pad_nm = opts.junction_pad_mm * MM;
+        for &w in &ids {
+            for end in 0..2 {
+                let wi = &st.wires[w];
+                let (pad, vert) = if end == 0 { (wi.pa, wi.a) } else { (wi.pb, wi.b) };
+                let trunks: Vec<WireId> = if pad == NO_OBS {
+                    js.iter().filter(|j| j.0 == w && j.1 == end).map(|j| j.2).collect()
+                } else {
+                    ids.iter()
+                        .copied()
+                        .filter(|&u| u != w && st.wires[u].net == wi.net && ((st.wires[u].a == vert && !fused_at.contains(&(u, 0))) || (st.wires[u].b == vert && !fused_at.contains(&(u, 1)))))
+                        .collect()
+                };
+                let Some(wo) = drawn.get(&w) else { continue };
+                if wo.runs.is_empty() {
+                    continue;
+                }
+                let r = if end == 0 { 0 } else { wo.runs.len() - 1 };
+                let (layer, mut run) = wo.runs[r].clone();
+                if end == 1 {
+                    run.reverse();
+                }
+                let ws_mm = (wi.w + wi.s) / MM;
+                let mut done = false;
+                for u in trunks {
+                    let Some(uo) = drawn.get(&u) else { continue };
+                    let tp: Vec<Vec<Vec2>> = uo.runs.iter().filter(|(l, _)| *l == layer).map(|(_, p)| p.clone()).collect();
+                    let tr: Vec<&[Vec2]> = tp.iter().map(|p| p.as_slice()).collect();
+                    for (gain, i, mut pts) in draw::fuse_candidates(&run, &tr, ws_mm, jw).into_iter().take(8) {
+                        let cut = &run[..=i];
+                        if anchors.get(&w).is_some_and(|a| a.iter().any(|&p| (p - run[i]).len() > 1_000.0 && near_poly(p, cut))) {
+                            continue;
+                        }
+                        let q = pts[0];
+                        // `junction_pad_mm`: no T that close to a pad of the net.
+                        if pad_nm > 0.0 && pad_verts.get(&wi.net).is_some_and(|ps| ps.iter().any(|&(v, _)| (proj.pos[v] - q).len() < pad_nm)) {
+                            continue;
+                        }
+                        if end == 1 {
+                            pts.reverse();
+                        }
+                        let mut wo = drawn.remove(&w).expect("drawn wire");
+                        let ok = dr.refit_run(&mut wo, r, pts);
+                        if ok {
+                            let ci = conn_of[wire_conn[w]];
+                            necking.retain(|(c, _)| *c != ci);
+                            settle(&mut out, &mut necking, ci, w, &wo, &b, &st);
+                        }
+                        drawn.insert(w, wo);
+                        if ok {
+                            n_fused += 1;
+                            gain_mm += gain;
+                            fused_at.insert((w, end));
+                            anchors.entry(u).or_default().push(q);
+                            if std::env::var("TOPO_FUSEDBG").is_ok() {
+                                eprintln!("FUSED round {round} wire {w} net {} end {end} onto {u} at ({:.3}, {:.3}) gain {gain:.2} mm", wi.net, q.x / MM, -q.y / MM);
+                            }
+                            done = true;
+                            break;
+                        }
+                    }
+                    if done {
+                        break;
+                    }
+                }
+            }
+        }
+        warnings.push(format!("fuse after drawing: {n_fused} trace ends moved onto their trunk's copper where the two part, {gain_mm:.1} mm cheaper (length and junction angle)"));
     }
     // Vias in a narrow pass (the `via_squeeze` factor's report): a drawn wire via whose
     // passages keep less slack than half its diameter in the drawing's packing.

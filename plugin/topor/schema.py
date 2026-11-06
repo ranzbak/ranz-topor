@@ -153,6 +153,8 @@ SETTINGS: list[Setting] = [
        choices=["crossing", "via"], engine="crossing_vias", since="0.5.0"),
     _s("search", "junction_pad_mm", "float", 0.0, "Topological core, net_tree = \"free\": a branch point on a trace closer than this to a pad of the copper it joins is not used; the pad itself is the junction (the trace runs through the pad centre) instead of a T next to it. 0 = no such distance (default): the junction_angle and branch factors decide between a T next to a pad and the pad itself on price.",
        unit="mm", range=(0, 20), engine="junction_pad_mm", since="0.5.0"),
+    _s("search", "fuse_branches", "bool", True, "Topological core, net_tree = \"free\": after the drawing, a trace that leaves a branch point or a pad right beside another trace of its net leaves that trace's copper where the two part instead: one copper and a T there, no two parallel traces (TopoR moves T-points the same way in its post-optimisation). Done only where it is shorter, the junction_angle factor included, and the new track keeps every clearance.",
+       engine="fuse_branches", since="0.5.0"),
     _s("search", "margin_um", "float", 0, "Safety margin added to every clearance during search and drawing; 0 = exactly the design rule (KiCad DRC accepts copper at exactly the clearance, and the routed copper is checked with the exact rule). Raise it only for headroom against later manual edits.", unit="µm", range=(0, 1000), engine="margin_nm"),
     _s("search", "zero_slack_retry", "bool", True, "One extra pass lets a connection use a corridor pinched below the margin but not below the rules.",
        engine="zero_slack_retry"),
