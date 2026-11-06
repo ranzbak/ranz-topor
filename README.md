@@ -29,7 +29,8 @@ holes, keepouts, copper graphics and the outline; every connection is searched t
 point of copper it joins, including through-pad junctions); layers are assigned afterwards (Polubasov's via
 minimisation), then rip-up and reroute, via reduction, and finally the drawing pulls each wire taut and checks
 it against KiCad's rules. Plane pads get a stub and a via into their pour before any of this, so the planner
-routes around them; pour pieces the routed copper cuts off are stitched back with island vias or pad stubs.
+routes around them; a pad that no via inside the pour's fill can serve is joined to its net's copper by a
+signal connection instead; pour pieces the routed copper cuts off are stitched back with island vias or pad stubs.
 
 What works on this branch:
 
@@ -38,21 +39,26 @@ What works on this branch:
   ([factor reference](docs/dev/factors.md));
 - keepouts: track keepouts per layer, via keepouts on any copper layer (a through via spans them all), pour
   keepouts in the fill estimate; copper graphics are obstacles on their layer;
-- pour-island stitching after routing, and KiCad's minimum connection width respected by vias and stubs.
+- pour-island stitching after routing, and KiCad's minimum connection width respected by vias and stubs;
+- layer-aware crossings: the search knows the layers each crossed trace is held to and does not cross where
+  no layer assignment can separate the two (`[search] crossing_vias = "via"` also prices the implied via;
+  off by default, the crossing factor stands for it).
 
-The board ladder at commit `7d7f5d5` (headless, `tools/route_board.sh`, judged by `kicad-cli` DRC after a zone
+The board ladder at commit `4a0cad3` (headless, `tools/route_board.sh`, judged by `kicad-cli` DRC after a zone
 refill; "unconnected" counts DRC unconnected items, the hand-routed board's own count in brackets):
 
 | Board | Routed | Unconnected (hand) | New routing DRC errors | Vias |
 |---|---|---|---|---|
 | eprom-to-kernal | 27/27 | 0 (0) | 0 | 0 |
 | wiccon-2023 | 60/60 | 0 (0) | 0 | 24 |
-| dcsgonebadge | 187/231 | 47 (4) | 0 | 100 |
-| qmtech | 350/426 | 84 (0) | 0 | 214 |
+| dcsgonebadge | 191/231 | 42 (4) | 1 | 106 |
+| qmtech | 340/426 | 90 (0) | 0 | 191 |
 
 Known limits: the complex boards (bornhack2026, hackerhotel2027, tanmatsu) are not on the ladder yet;
 differential pairs are not routed; branching is not complete (fusing traces, re-attaching after changes,
-junction relaxation and the tee layer rule are open); pour islands are stitched afterwards, not prevented.
+junction relaxation and the tee layer rule are open); pour islands are stitched afterwards, not prevented;
+a trace of a pour net inside its own pour can leave a neck that KiCad's minimum connection width check flags
+(dcsgonebadge, 1).
 
 ## Requirements
 
