@@ -3,12 +3,17 @@
 #   tools/build.sh          wheel -> plugin dir + plugin/wheels
 #   tools/build.sh --dev    additionally pip-reinstall the wheel into the dev venv and the KiCad venv
 # Environment overrides:
+#   TOPOR_WHEEL          an already built engine wheel to install (skips the maturin build)
 #   TOPOR_VENV           venv holding maturin/pip (default: <repo>/.venv)
 #   TOPOR_KICAD_HOME     the versioned KiCad 10.0 user dir to install into (e.g. ~/.local/share/kicad/10.0);
 #                        wins over KICAD_DOCUMENTS_HOME
 #   KICAD_DOCUMENTS_HOME as KiCad reads it: the UNversioned documents root (e.g. ~/.local/share/kicad);
 #                        10.0 is appended
+#   TOPOR_KICAD_CACHE    the versioned KiCad 10.0 cache dir whose plugin environment --dev updates
+#                        (default ${XDG_CACHE_HOME:-~/.cache}/kicad/10.0)
 # Default: ${XDG_DATA_HOME:-~/.local/share}/kicad/10.0. The plugin goes to <that>/plugins/org.topor.router.
+# A separate KiCad home for tests (tools/gui_e2e.sh): set XDG_DATA_HOME and XDG_CACHE_HOME (or the two
+# TOPOR_KICAD_* variables) to folders of that home; the user's own KiCad folders are then never written.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -27,8 +32,13 @@ ID="org.topor.router"
 PLUGIN_DIR="$KICAD_HOME/plugins/$ID"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' engine/Cargo.toml | head -1)"
 
-"$VENV/bin/maturin" build --release --manifest-path engine/Cargo.toml --features python --out target/wheels
-WHEEL="$(ls -t target/wheels/topor_engine-"$VERSION"-*.whl | head -1)"
+if [ -n "${TOPOR_WHEEL:-}" ]; then
+    WHEEL="$TOPOR_WHEEL"
+    case "$(basename "$WHEEL")" in topor_engine-"$VERSION"-*.whl) ;; *) echo "TOPOR_WHEEL is not a topor_engine $VERSION wheel: $WHEEL" >&2; exit 1 ;; esac
+else
+    "$VENV/bin/maturin" build --release --manifest-path engine/Cargo.toml --features python --out target/wheels
+    WHEEL="$(ls -t target/wheels/topor_engine-"$VERSION"-*.whl | head -1)"
+fi
 
 install_into() { # $1 = plugin-layout dir
     local d="$1"
@@ -59,7 +69,7 @@ cp "$PLUGIN_DIR/requirements.txt" "$ROOT/plugin/requirements.txt"
 
 if [ "$DEV" = 1 ]; then
     "$VENV/bin/pip" install --force-reinstall --no-deps "$WHEEL"
-    KV="$HOME/.cache/kicad/10.0/python-environments/$ID"
+    KV="${TOPOR_KICAD_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/kicad/$KICAD_VER}/python-environments/$ID"
     if [ -x "$KV/bin/pip" ]; then
         "$KV/bin/pip" install --force-reinstall --no-deps "$WHEEL"
     fi
