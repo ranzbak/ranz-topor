@@ -12,7 +12,7 @@ use crate::geom::{
 use crate::check::point_in_poly;
 use crate::model::{via_layers, BoardModel, Options, Pad, PadRef, Pour, Pt};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum TermKind {
@@ -281,6 +281,14 @@ type NetItems = (Vec<usize>, Vec<usize>, Vec<usize>);
 /// option lookups (`net_priority`, `exclude_nets`, `pour_served`) add O(log N + |exclude_nets|)
 /// per net.
 pub fn decompose(model: &BoardModel, opts: &Options, layers: &[u32]) -> Decomposition {
+    decompose_with(model, opts, layers, &BTreeSet::new())
+}
+
+/// [`decompose`] where the pads in `signal_pads` (model pad indices) do not join their net's pour
+/// by a plane stub: their clusters are joined to the net's other copper (the pour's pads and the
+/// other such clusters) by signal connections instead (D6b: a pad no stub via inside the pour's
+/// fill can serve, e.g. qmtech 1V8 pads outside a small local F.Cu pour).
+pub fn decompose_with(model: &BoardModel, opts: &Options, layers: &[u32], signal_pads: &BTreeSet<usize>) -> Decomposition {
     let sel = Selector::new(model, opts);
     let all_layers = model.all_layer_ids();
 
@@ -546,7 +554,8 @@ pub fn decompose(model: &BoardModel, opts: &Options, layers: &[u32]) -> Decompos
             // Pour completion: every chosen cluster without a pour attaches to the nearest pour.
             let mut pour_edges: Vec<(usize, usize, usize, Vec2, f64)> = Vec::new();
             let edges: Vec<(usize, usize, usize, usize, f64)> = if net_has_pour {
-                for &a in chosen.iter().filter(|&&a| clusters[a].pours.is_empty()) {
+                let signal_joined = |a: usize| clusters[a].ports.iter().any(|p| matches!(p.kind, PortKind::Pad(pi) if signal_pads.contains(&pi)));
+                for &a in chosen.iter().filter(|&&a| clusters[a].pours.is_empty() && !signal_joined(a)) {
                     let mut best: Option<(usize, usize, Vec2, f64)> = None;
                     for (pi, port) in clusters[a].ports.iter().enumerate() {
                         for zi in clusters.iter().flat_map(|c| c.pours.iter().copied()) {
@@ -567,7 +576,7 @@ pub fn decompose(model: &BoardModel, opts: &Options, layers: &[u32]) -> Decompos
                 let with_pour: Vec<usize> = chosen
                     .iter()
                     .copied()
-                    .filter(|&i| !clusters[i].pours.is_empty() && !clusters[i].ports.is_empty())
+                    .filter(|&i| (!clusters[i].pours.is_empty() || signal_joined(i)) && !clusters[i].ports.is_empty())
                     .collect();
                 if force_pour == Some(true) {
                     Vec::new() // pour islands are served by the pour, not joined by signal copper

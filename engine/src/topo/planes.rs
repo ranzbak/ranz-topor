@@ -63,7 +63,35 @@ impl SiteCost<'_> {
     }
 }
 
-/// Place the stub and via of `rq` (see the module doc); the copper is indexed in `dr`.
+/// Distance from `p` to the segment `a`-`b`.
+fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
+    let ab = b - a;
+    let l2 = ab.dot(ab);
+    let t = if l2 > 0.0 { ((p - a).dot(ab) / l2).clamp(0.0, 1.0) } else { 0.0 };
+    (a + ab * t - p).len()
+}
+
+/// Whether a disc of radius `r` at `p` lies inside the filled copper of `pour` (some fill of it,
+/// outside the fill's holes, at least `r` from every edge): a via there reaches the pour (D6b:
+/// qmtech 1V8 stub vias stood in bare board next to a small local pour). O(fill vertices).
+pub fn in_fill(pour: &crate::model::Pour, p: Vec2, r: f64) -> bool {
+    let ring = |pts: &[crate::model::Pt]| -> Vec<Vec2> { pts.iter().map(|q| q.to_vec2()).collect() };
+    let far = |ps: &[Vec2]| (0..ps.len()).all(|i| seg_dist(p, ps[i], ps[(i + 1) % ps.len()]) >= r);
+    pour.fills.iter().any(|f| {
+        let outer = ring(&f.outer);
+        outer.len() >= 3
+            && point_in_poly(p, &outer)
+            && far(&outer)
+            && f.holes.iter().all(|h| {
+                let h = ring(h);
+                h.len() < 3 || (!point_in_poly(p, &h) && far(&h))
+            })
+    })
+}
+
+/// Place the stub and via of `rq` (see the module doc); the copper is indexed in `dr`. The via
+/// stands inside the pour's fill ([`in_fill`]); a pad with no such site within reach is no
+/// plane pad (the caller joins it by a signal connection instead, D6b).
 ///
 /// Of the sites of the largest via size that has one, the cheapest: the stub's length price plus
 /// the `via_squeeze` price of the room the via leaves (a via in a narrow pass between pads takes
@@ -100,6 +128,9 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)]) -
             for u in &dirs {
                 let p = c + *u * d;
                 if !dr.opts.via_in_pad && point_in_poly(p, &ob.poly) {
+                    continue;
+                }
+                if !in_fill(pour, p, 0.5 * sz.d as f64) {
                     continue;
                 }
                 let price = cost.mm * d / 1e6 + cost.squeeze(dr.point_room(p, sz.d as f64, rq.net), sz.d as f64);
@@ -156,7 +187,7 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)]) -
         }
         eprintln!("PLANEDBG pad {}.{} net {} at ({:.3},{:.3}) sites {tried} clean-on-static-board {static_ok}", pad.ref_, pad.number, rq.net, c.x / 1e6, -c.y / 1e6);
     }
-    Err(format!("pad {}.{}: no via site within 3 mm for a stub into its plane", pad.ref_, pad.number))
+    Err(format!("pad {}.{}: no via site inside the pour's fill within 3 mm for a stub into its plane", pad.ref_, pad.number))
 }
 
 /// Warnings for the pads and vias of plane connections that lie outside the pour's fill.

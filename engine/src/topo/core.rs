@@ -30,7 +30,7 @@ use super::state::{ObsId, State, VertId, VertKind, WireId, NO_OBS};
 use super::tree;
 use crate::check::Checker;
 use crate::control::{cancelled, RunControl};
-use crate::decompose::{decompose, Connection, TermKind, TermRef};
+use crate::decompose::{decompose_with, Connection, TermKind, TermRef};
 use crate::geom::Vec2;
 use crate::model::{BoardModel, Item, Options};
 use crate::route::{kicad, term_out, unrouted, ConnReport, NetRouteReport, RipReport, RouteResult};
@@ -303,6 +303,11 @@ fn build_opts(opts: &Options) -> BuildOpts {
 struct PlaneStubs {
     res: Vec<(usize, Result<planes::Out, String>)>,
     extra: Vec<board::Extra>,
+    /// Pads of pour nets that no stub via inside the pour's fill serves: the decomposition joins
+    /// them by signal connections ([`crate::decompose::decompose_with`], D6b).
+    signal_pads: BTreeSet<usize>,
+    /// One report line per such pad.
+    notes: Vec<String>,
 }
 
 /// The pad-to-pour connections of `dec` (the plane stage's requests), as `route_round` sorts them.
@@ -333,12 +338,7 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options) -> PlaneStubs {
     if signal.len() < 2 {
         return PlaneStubs::default();
     }
-    let dec = decompose(model, opts, &signal);
     let Ok(b) = board::build(model, &build_opts(opts)) else { return PlaneStubs::default() };
-    let reqs = plane_requests(model, &b, &dec);
-    if reqs.is_empty() {
-        return PlaneStubs::default();
-    }
     let (reg, _) = Registry::from_config(standard_factors(), &opts.factors);
     let edge_ignored = model.rules.ignored_checks.iter().any(|c| c == "copper_edge_clearance");
     let relaxed;
@@ -351,20 +351,43 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options) -> PlaneStubs {
         model
     };
     let checker = Checker::new(check_model, opts);
-    let st = State::new(&b.proj);
-    let mut dr = Drawer::new(model, opts, &b, &st, &checker);
     let cost = planes::SiteCost { mm: reg.price(&Event::Length { wire: 0, mm: 1.0, scale: 1.0 }, &WireCtx::default()), reg: &reg };
-    let mut out = PlaneStubs::default();
-    let mut vias: Vec<(Vec2, f64)> = Vec::new();
-    for rq in &reqs {
-        let r = planes::place(&mut dr, rq, &cost, &vias);
-        if let Ok(o) = &r {
-            out.extra.extend(planes::extras(&b, rq, o));
-            vias.push((o.via, 0.5 * o.size.d as f64));
+    // A pad whose stub finds no via site inside the pour's fill is joined by a signal connection
+    // instead; the decomposition then changes (connection ids), so place again until no new pad
+    // drops out (each pass drops at least one pad, so at most one pass per plane pad).
+    let mut signal_pads: BTreeSet<usize> = BTreeSet::new();
+    let mut notes: Vec<String> = Vec::new();
+    loop {
+        let dec = decompose_with(model, opts, &signal, &signal_pads);
+        let reqs = plane_requests(model, &b, &dec);
+        let st = State::new(&b.proj);
+        let mut dr = Drawer::new(model, opts, &b, &st, &checker);
+        let mut out = PlaneStubs::default();
+        let mut vias: Vec<(Vec2, f64)> = Vec::new();
+        let mut dropped = false;
+        for rq in &reqs {
+            let r = planes::place(&mut dr, rq, &cost, &vias);
+            match &r {
+                Ok(o) => {
+                    out.extra.extend(planes::extras(&b, rq, o));
+                    vias.push((o.via, 0.5 * o.size.d as f64));
+                }
+                // No clean via site inside the pour's fill near the pad: a signal connection
+                // joins it to its net's copper instead.
+                Err(e) => {
+                    notes.push(format!("{e}: joined to its net's copper by a signal connection instead"));
+                    signal_pads.insert(rq.pad);
+                    dropped = true;
+                }
+            }
+            out.res.push((rq.conn, r));
         }
-        out.res.push((rq.conn, r));
+        if !dropped {
+            out.signal_pads = signal_pads;
+            out.notes = notes;
+            return out;
+        }
     }
-    out
 }
 
 /// One whole route. `hist0` is the per-edge over-full history of earlier rounds (empty = none);
@@ -387,8 +410,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         return (RoundOut::unrouted(unrouted(model, opts, &why)), Vec::new(), Memory::default());
     }
     ctl.update("setup", 0, 0, 0, 0, 0.0);
-    let dec = decompose(model, opts, &signal);
+    let dec = decompose_with(model, opts, &signal, &stubs.signal_pads);
     let mut warnings: Vec<String> = dec.warnings.clone();
+    warnings.extend(stubs.notes.iter().cloned());
     for (net, r) in &dec.skipped {
         warnings.push(format!("net {net} skipped: {r}"));
     }

@@ -97,5 +97,11 @@ def test_fx_pinned_crossing(tmp_path):
     _clean(_route("fx_pinned_crossing", tmp_path))
 
 
+def test_fx_local_pour_far_pads(tmp_path):
+    """Every pad of P is joined to the pour's copper: the far pads by traces, no via standing
+    outside the pour (D6a: 4 stub vias in bare board, 4 unconnected)."""
+    _clean(_route("fx_local_pour_far_pads", tmp_path))
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-m", "mechfix", "-q"]))

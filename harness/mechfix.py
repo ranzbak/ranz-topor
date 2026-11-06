@@ -247,3 +247,18 @@ def fx_pinned_crossing(d: Path) -> Path:
     f.pad("K2", "K", (25.0, 10.0), (1.0, 1.0), layer=pcbnew.B_Cu)
     return f.save(Path(d) / "fx_pinned_crossing.kicad_pcb")
 
+
+def fx_local_pour_far_pads(d: Path) -> Path:
+    """A small local pour around one pad and a row of same-net pads outside it (qmtech
+    /HDMI transmitter/1V8, D6a: a 6 x 6 mm F.Cu-only pour around U8; C7.1 and L1..L4.2 outside
+    it each got a plane stub and a via that reaches no 1V8 copper on any layer: 5 open pads).
+
+    P: U1 (8, 10) inside an F.Cu pour of P (5..11 x 7..13); C1 (8, 14.5) just below the pour;
+    L1..L3 (18, 15), (22, 15), (26, 15) far from it. All pads SMD on F.Cu."""
+    f = Fx(32, 20, nets=("P",))
+    f.pad("U1", "P", (8, 10), (1.0, 1.0))
+    f.pad("C1", "P", (8, 14.5), (1.0, 1.0))
+    for i, x in enumerate((18, 22, 26)):
+        f.pad(f"L{i + 1}", "P", (x, 15), (1.0, 1.0))
+    f.zone("P", pcbnew.F_Cu, [(5, 7), (11, 7), (11, 13), (5, 13)])
+    return f.save(Path(d) / "fx_local_pour_far_pads.kicad_pcb")

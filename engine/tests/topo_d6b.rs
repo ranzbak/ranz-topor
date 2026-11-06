@@ -126,3 +126,22 @@ fn cross_pin_cases() {
     assert_eq!(cross_pin(both, both, f, both, false), (CrossLayer::Free, both));
     assert_eq!(cross_pin(f, f, f, f, false), (CrossLayer::Unlayerable, f));
 }
+
+#[test]
+fn a_plane_via_site_must_stand_inside_the_pour_fill() {
+    use topor_engine::geom::Vec2;
+    use topor_engine::model::{Pour, PourFill, Pt};
+    use topor_engine::topo::planes::in_fill;
+    let sq = |x0: i64, y0: i64, x1: i64, y1: i64| vec![Pt { x: x0, y: y0 }, Pt { x: x1, y: y0 }, Pt { x: x1, y: y1 }, Pt { x: x0, y: y1 }];
+    let mm = 1_000_000;
+    let fill = PourFill { layer: 0, outer: sq(0, 0, 6 * mm, 6 * mm), holes: vec![sq(2 * mm, 2 * mm, 4 * mm, 4 * mm)] };
+    let mut pour: Pour = serde_json::from_str(r#"{"uuid":"z","net":1,"layers":[0],"pads":[],"vias":[],"fills":[]}"#).unwrap();
+    pour.fills.push(fill);
+    let p = |x: f64, y: f64| Vec2 { x: x * 1e6, y: y * 1e6 };
+    let r = 0.3e6;
+    assert!(in_fill(&pour, p(1.0, 1.0), r), "inside, clear of the edges");
+    assert!(!in_fill(&pour, p(8.0, 1.0), r), "outside the pour (qmtech 1V8 L pads)");
+    assert!(!in_fill(&pour, p(0.2, 1.0), r), "the via disc pokes out of the fill");
+    assert!(!in_fill(&pour, p(3.0, 3.0), r), "in a hole of the fill");
+    assert!(!in_fill(&pour, p(1.8, 3.0), r), "too near a hole");
+}
