@@ -961,9 +961,13 @@ impl<'a> Drawer<'a> {
             }
             *pl.last().expect("chord")
         };
-        // The packed crossings themselves first: there the packing kept the disc off the edge's
-        // end obstacles and its neighbours on that edge.
-        [1.0, 0.0, 0.5, 0.75, 0.25, 0.9, 0.1].iter().map(|&f| (k, at(f))).collect()
+        // A junction of the wire in this traversal first (D6b): a via there is the tee itself
+        // (its arms meet on both layers, Polubasov 2001 §5 p. 9: the via leaves the branch point
+        // for an arm only when the point cannot hold it). Then the packed crossings themselves:
+        // there the packing kept the disc off the edge's end obstacles and its neighbours on that
+        // edge.
+        let turns = wi.turns.iter().filter(|x| x.0 == k).map(|x| (k, pr.pos[x.1]));
+        turns.chain([1.0, 0.0, 0.5, 0.75, 0.25, 0.9, 0.1].iter().map(|&f| (k, at(f)))).collect()
     }
 
     /// Least slack (nm) the packing leaves on the passage-layers next to a via of wire `w` in
@@ -1081,9 +1085,15 @@ impl<'a> Drawer<'a> {
                 let mut best: Option<(f64, usize, Vec2)> = None;
                 let dbg = std::env::var("TOPO_VIADBG").is_ok();
                 let (mut n_side, mut n_check) = (0usize, 0usize);
+                // In a traversal where the wire turns at a junction, only the junction itself:
+                // elsewhere in it the via could stand on the wrong side of the tee (D6b).
+                let turn_at = |k: usize| self.st.wires[w].turns.iter().find(|x| x.0 == k).map(|x| self.b.proj.pos[x.1]);
                 for (k, p) in sites {
                     if best.is_some_and(|b| b.1 != k) {
                         break;
+                    }
+                    if turn_at(k).is_some_and(|q| (q - p).len() > 1.0) {
+                        continue;
                     }
                     if !self.via_side_ok(w, k, p, plan.layers[i], plan.layers[i + 1]) {
                         n_side += usize::from(Some(k) == at);

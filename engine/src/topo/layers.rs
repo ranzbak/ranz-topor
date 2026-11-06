@@ -508,6 +508,30 @@ fn seg_param(p0: Vec2, p1: Vec2, q0: Vec2, q1: Vec2) -> f64 {
     ((q0 - p0).cross(e) / den).clamp(0.0, 1.0)
 }
 
+/// Where crossing `x` lies along traversal `x.k` of wire `w` (fraction `s`, D6b): a traversal
+/// with a turn (a junction, D5) runs entry -> turn vertex -> exit, so a crossing on its first
+/// sub-chord lies in [0, 0.5), on its second in (0.5, 1], on the right side of the tee event at
+/// 0.5 (measured on the straight entry-exit line it could sort to the wrong side and put the via
+/// of the tee beyond the crossing: wiccon-2023 3.3v trunk against CS0, D6b). O(turns).
+fn cross_s(st: &State, polys: &[Vec<Vec2>], w: WireId, x: &super::state::Crossing) -> f64 {
+    let seg = |w: WireId, k: usize, sub: usize| -> (Vec2, Vec2, Option<usize>) {
+        let pts = &polys[w];
+        match st.wires[w].turns.iter().find(|t| t.0 == k) {
+            Some(&(_, v)) if sub == 0 => (pts[k], st.proj.pos[v], Some(0)),
+            Some(&(_, v)) => (st.proj.pos[v], pts[k + 1], Some(1)),
+            None => (pts[k], pts[k + 1], None),
+        }
+    };
+    let (p0, p1, half) = seg(w, x.k, x.sub);
+    let (q0, q1, _) = seg(x.other, x.other_k, x.other_sub);
+    let s = seg_param(p0, p1, q0, q1);
+    match half {
+        Some(0) => 0.5 * s.min(0.998),
+        Some(_) => 0.5 + 0.5 * s.max(0.002),
+        None => s,
+    }
+}
+
 /// Stretches, via slots and counts of `rep` from the labelled events `evl[w] = (k, s, layer)` of
 /// every wire (shared by the two-layer and the N-layer assignment). O(events).
 fn stretches_and_vias(st: &State, polys: &[Vec<Vec2>], evl: &[Vec<(usize, f64, i32)>], p: &LayerParams, rep: &mut LayerReport) {
@@ -600,6 +624,20 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
     let mut dom: BTreeMap<(WireId, usize, WireId, usize), usize> = BTreeMap::new();
     let mut unl: BTreeSet<(WireId, usize, WireId, usize)> = BTreeSet::new();
     let polys: Vec<Vec<Vec2>> = (0..st.wires.len()).map(|w| if st.wires[w].alive { st.polyline(w) } else { Vec::new() }).collect();
+    // The tee rule (Polubasov 2001 §5 p. 9): a degree-3 junction has at least two arms on one
+    // layer and the via on the remaining arm, and the tee is one domain (flipping it moves the
+    // tee to the other layer). Each junction (D5 net trees: a branch ends where its trunk turns)
+    // is a node of its own, nodes 1..=nt: an event on the trunk at its turn and one at the
+    // branch's end, both with parity 0, so the solver puts the trunk's two arms and the branch on
+    // one layer there and pays a via on whichever arm must leave it.
+    let tees = super::tree::junctions(st);
+    let nt = tees.len();
+    let mut tee_trunk: BTreeMap<(WireId, usize), Vec<usize>> = BTreeMap::new();
+    let mut tee_branch: BTreeMap<(WireId, usize), usize> = BTreeMap::new();
+    for (i, &(bw, end, tw, k, _)) in tees.iter().enumerate() {
+        tee_trunk.entry((tw, k)).or_default().push(i + 1);
+        tee_branch.insert((bw, end), i + 1);
+    }
     let mut events: Vec<Vec<Event>> = Vec::with_capacity(st.wires.len());
     for (w, wi) in st.wires.iter().enumerate() {
         let mut ev = Vec::new();
@@ -607,10 +645,12 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
             events.push(ev);
             continue;
         }
-        let pts = &polys[w];
         let n = wi.passes.len();
         if let Some(l) = smd_layer(wi.pa) {
             ev.push(Event { node: 0, pi: l as u8, k: 0, s: 0.0 });
+        }
+        if let Some(&d) = tee_branch.get(&(w, 0)) {
+            ev.push(Event { node: d, pi: 0, k: 0, s: 0.0 });
         }
         let mut xs = st.crossings(w);
         xs.retain(|x| st.wires[x.other].net != wi.net);
@@ -622,8 +662,7 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
             }
             for x in xs.iter().filter(|x| x.k == k) {
                 let o = x.other;
-                let (q0, q1) = (polys[o][x.other_k], polys[o][x.other_k + 1]);
-                let s = seg_param(pts[k], pts[k + 1], q0, q1);
+                let s = cross_s(st, &polys, w, x);
                 let mo = pr.allowed(x.tri, st.wires[o].net).expect("wire inside a wall");
                 let key = if w < o { (w, k, o, x.other_k) } else { (o, x.other_k, w, k) };
                 match (mask.single(), mo.single()) {
@@ -640,11 +679,14 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
                     (Some(a), None) => here.push(Event { node: 0, pi: a as u8, k, s }),
                     (None, Some(b)) => here.push(Event { node: 0, pi: 1 - b as u8, k, s }),
                     (None, None) => {
-                        let next = dom.len() + 1;
+                        let next = dom.len() + 1 + nt;
                         let d = *dom.entry(key).or_insert(next);
                         here.push(Event { node: d, pi: (w > o) as u8, k, s });
                     }
                 }
+            }
+            for &d in tee_trunk.get(&(w, k)).into_iter().flatten() {
+                here.push(Event { node: d, pi: 0, k, s: 0.5 });
             }
             // A pass through a gap too narrow on some layer for this wire alone excludes it.
             if k < n {
@@ -658,13 +700,16 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
             here.sort_by(|a, b| a.s.total_cmp(&b.s));
             ev.extend(here);
         }
+        if let Some(&d) = tee_branch.get(&(w, 1)) {
+            ev.push(Event { node: d, pi: 0, k: n, s: 1.0 });
+        }
         if let Some(l) = smd_layer(wi.pb) {
             ev.push(Event { node: 0, pi: l as u8, k: n, s: 1.0 });
         }
         events.push(ev);
     }
-    rep.domains = dom.len();
-    let mut g = DomainGraph::new(dom.len() + 1);
+    rep.domains = dom.len() + nt;
+    let mut g = DomainGraph::new(dom.len() + 1 + nt);
     for ev in &events {
         for x in ev.windows(2) {
             g.add_edge(x[0].node, x[1].node, if x[0].pi == x[1].pi { p.via_mm } else { -p.via_mm });
@@ -675,6 +720,16 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
     reduced.reduce();
     rep.after = reduced.size();
     let o = g.solve(p.exact_max, p.restarts, p.seed);
+    if std::env::var("TOPO_TEEDBG").is_ok() {
+        for &(bw, end, tw, k, v) in &tees {
+            eprintln!("TEEDBG tee branch {bw} end {end} trunk {tw} k {k} v ({:.3},{:.3}) node {}", pr.pos[v].x / 1e6, -pr.pos[v].y / 1e6, tee_branch[&(bw, end)]);
+            for w in [tw, bw] {
+                let ev: Vec<String> = events[w].iter().map(|e| format!("(k{} s{:.2} n{} pi{} -> {})", e.k, e.s, e.node, e.pi, o[e.node] ^ e.pi)).collect();
+                let pts: Vec<String> = polys[w].iter().map(|q| format!("({:.2},{:.2})", q.x / 1e6, -q.y / 1e6)).collect();
+                eprintln!("TEEDBG   wire {w} net {} turns {:?} events {}\n          pts {}", st.wires[w].net, st.wires[w].turns, ev.join(" "), pts.join(" "));
+            }
+        }
+    }
     let mut evl: Vec<Vec<(usize, f64, i32)>> = Vec::with_capacity(events.len());
     for ev in events.iter() {
         evl.push(ev.iter().map(|e| (e.k, e.s, (o[e.node] ^ e.pi) as i32)).collect());
@@ -684,9 +739,10 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
     let mut mask: Vec<Vec<u64>> = Vec::with_capacity(events.len());
     let mut partner: Vec<Vec<Option<(WireId, usize)>>> = events.iter().map(|ev| vec![None; ev.len()]).collect();
     let mut by_node: BTreeMap<usize, Vec<(WireId, usize)>> = BTreeMap::new();
+    // A tee's events keep their labels in the refinement (its arms move together or not at all).
     for (w, ev) in events.iter().enumerate() {
-        mask.push(ev.iter().enumerate().map(|(i, e)| if e.node == 0 { 1u64 << evl[w][i].2 } else { 0b11 }).collect());
-        for (i, e) in ev.iter().enumerate().filter(|(_, e)| e.node > 0) {
+        mask.push(ev.iter().enumerate().map(|(i, e)| if e.node <= nt { 1u64 << evl[w][i].2 } else { 0b11 }).collect());
+        for (i, e) in ev.iter().enumerate().filter(|(_, e)| e.node > nt) {
             by_node.entry(e.node).or_default().push((w, i));
         }
     }
@@ -719,7 +775,7 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
     let mut dom_labels: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
     for (w, ev) in events.iter().enumerate() {
         if st.wires[w].alive {
-            for (i, e) in ev.iter().enumerate().filter(|(_, e)| e.node > 0) {
+            for (i, e) in ev.iter().enumerate().filter(|(_, e)| e.node > nt) {
                 dom_labels.entry(e.node).or_default().push(evl[w][i].2 as u8);
             }
         }
@@ -825,7 +881,6 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
         if !wi.alive {
             continue;
         }
-        let pts = &polys[w];
         let n = wi.passes.len();
         let mut push = |ev: &mut Vec<NEv>, e: NEv| {
             ev.push(e);
@@ -846,8 +901,7 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
             }
             for x in xs.iter().filter(|x| x.k == k) {
                 let o = x.other;
-                let (q0, q1) = (polys[o][x.other_k], polys[o][x.other_k + 1]);
-                let s = seg_param(pts[k], pts[k + 1], q0, q1);
+                let s = cross_s(st, &polys, w, x);
                 let mo = pr.allowed(x.tri, st.wires[o].net).expect("wire inside a wall").0;
                 let key = if w < o { (w, k, o, x.other_k) } else { (o, x.other_k, w, k) };
                 if tm == mo && tm.count_ones() == 1 {

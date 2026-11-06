@@ -145,3 +145,72 @@ fn a_plane_via_site_must_stand_inside_the_pour_fill() {
     assert!(!in_fill(&pour, p(3.0, 3.0), r), "in a hole of the fill");
     assert!(!in_fill(&pour, p(1.8, 3.0), r), "too near a hole");
 }
+
+/// Route `c` as the core does with `net_tree = "free"` (component to component, any pad or branch
+/// point; topo_d5.rs); returns the new wire.
+fn tree_route(st: &mut State, b: &Board, c: &Conn) -> usize {
+    use std::collections::BTreeMap;
+    use topor_engine::topo::init::TreeEnd;
+    use topor_engine::topo::state::{VertId, Wire};
+    use topor_engine::topo::tree::{self, EndsCtx};
+    let rad: Vec<f64> = (0..b.proj.pos.len()).map(|v| b.proj.free_radius(b.proj.pos[v], i32::MIN)).collect();
+    let mut pads: BTreeMap<i32, Vec<(VertId, usize)>> = BTreeMap::new();
+    for (o, ob) in b.proj.obstacles.iter().enumerate() {
+        if let (Some(net), Some(v)) = (ob.net, b.centre[o]) {
+            pads.entry(net).or_default().push((v, o));
+        }
+    }
+    let smd: Vec<bool> = (0..b.proj.obstacles.len()).map(|o| b.smd_layer(o).is_some()).collect();
+    let cx = EndsCtx { pads: &pads, rad: &rad, junctions: true, reward: 1.0, smd_cost: 0.0, smd: &smd, pad_nm: 1.0 * MM };
+    let comp = tree::components(st, c.net);
+    let (ca, cb) = (tree::comp_of(&comp, c.a), tree::comp_of(&comp, c.b));
+    let src = tree::ends_of(st, &cx, c.net, &comp, ca, c.w, c.s, [c.a, c.b]);
+    let dst = tree::ends_of(st, &cx, c.net, &comp, cb, c.w, c.s, [c.a, c.b]);
+    let ((path, tris), i, j) = st.search_tree(c, &src, &dst, &InitWeights::default(), 1.0, None).expect("a path");
+    let (sa, sb): (TreeEnd, TreeEnd) = (src[i], dst[j]);
+    for e in [sa, sb] {
+        if let Some((w, k)) = e.on {
+            st.add_turn(w, k, e.v);
+        }
+    }
+    let wire = Wire { net: c.net, w: c.w, s: c.s, a: sa.v, b: sb.v, pa: sa.obs, pb: sb.obs, turns: Vec::new(), passes: Vec::new(), tris: Vec::new(), alive: true };
+    st.insert(wire, &path, tris)
+}
+
+/// The layer label of wire `w` at traversal `k`, fraction `s` (its last event at or before that
+/// point, else its first event, else `bottom`): what the drawing does with P3's events.
+fn label_at(ev: &[(usize, f64, i32)], k: usize, s: f64, bottom: i32) -> i32 {
+    let mut l = ev.first().map_or(bottom, |e| e.2);
+    for e in ev {
+        if (e.0, e.1) <= (k, s) {
+            l = e.2;
+        }
+    }
+    l
+}
+
+/// D6b item 2a (Polubasov 2001 §5 p. 9 tee rule inside P3): a trunk between two pads free on both
+/// layers and a branch from an F.Cu SMD pad that ends on it at a branch point. The tee is one
+/// layer domain, so P3 puts the trunk on F.Cu at the junction and the whole tree needs no via
+/// (D5: P3 labelled the trunk without the junction, the post-P3 fix-up then forced the branch
+/// onto the trunk's B.Cu and a via next to the junction).
+#[test]
+fn the_tee_is_one_layer_domain_in_p3() {
+    let m = board(60.0, 40.0, 1, &[("T1", 1, 5.0, 10.0, 1.5, 1.5, 99), ("T2", 1, 55.0, 10.0, 1.5, 1.5, 99), ("C", 1, 30.0, 32.0, 1.0, 1.0, 0)]);
+    let b = board::build(&m, &opts()).unwrap();
+    let mut st = State::new(&b.proj);
+    let trunk = tree_route(&mut st, &b, &conn(&m, &b, 1, "T1", "T2"));
+    let br = tree_route(&mut st, &b, &conn(&m, &b, 1, "C", "T1"));
+    let js = topor_engine::topo::tree::junctions(&st);
+    assert_eq!(js.len(), 1, "the branch ends on the trunk at a branch point");
+    let (bw, end, tw, k, _) = js[0];
+    assert_eq!((bw, tw), (br, trunk));
+    let rep = layers::assign(&st, &|o| b.smd_layer(o), &LayerParams::default());
+    let n = st.wires[br].passes.len();
+    let (bk, bs) = if end == 0 { (0, 0.0) } else { (n, 1.0) };
+    let lt = label_at(&rep.events[trunk], k, 0.5, 1);
+    let lb = label_at(&rep.events[br], bk, bs, 1);
+    assert_eq!(lt, lb, "trunk and branch meet on one layer at the junction: {:?} / {:?}", rep.events[trunk], rep.events[br]);
+    assert_eq!(lb, 0, "on the branch pad's F.Cu");
+    assert_eq!(rep.vias, 0);
+}

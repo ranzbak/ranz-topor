@@ -650,11 +650,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut packer = Packer::for_model(model, opts, proj);
     packer.via_squeeze = reg.price(&Event::ViaSqueeze { wire: 0, at: Vec2::default(), slack_nm: 0.0, via_nm: 1.0 }, &WireCtx::default());
     let packer = packer;
-    // P3, then the junctions' tee rule (D5): the trunk keeps one layer through a junction and the
-    // branch ends on it.
+    // P3 with the junctions' tee rule: the trunk keeps one layer through a junction and the
+    // branch ends on it. Two layers: inside P3, a tee is one layer domain (D6b); more layers: a
+    // fix-up after P3 (D5).
     let assign = |st: &State| {
         let mut lr = layers::assign_with(st, &|ob| b.smd_layer(ob), &lp, Some(&packer));
-        if tree_free && st.wires.iter().any(|w| w.alive && !w.turns.is_empty()) {
+        if tree_free && proj.n_layers != 2 && st.wires.iter().any(|w| w.alive && !w.turns.is_empty()) {
             let mut evl = lr.events.clone();
             let bottom_l = (if b.n_signal == 0 { proj.n_layers } else { b.n_signal }) as i32 - 1;
             evl.resize(st.wires.len(), Vec::new());
@@ -1009,8 +1010,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         if st.wires[w].alive {
             let mut p = plan(&lr.events[w], b.n_signal);
             p.at = cm_plan.via_k[w].clone();
-            // A junction's traversal holds no via of its trunk (the tee keeps one layer there).
-            for &(kt, _) in &st.wires[w].turns {
+            // A junction's traversal holds no via of its trunk (the tee keeps one layer there),
+            // except at the junction itself on two layers, where P3 makes the tee one domain and
+            // the via may stand at the tee (D6b; the drawing tries only the turn vertex there).
+            for &(kt, _) in st.wires[w].turns.iter().filter(|_| proj.n_layers != 2) {
                 for (i, iv) in p.vias.iter_mut().enumerate() {
                     if iv.0 == kt && iv.1 > kt {
                         iv.0 = kt + 1;
@@ -1359,7 +1362,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     });
                     let tl = drawn[&tw].runs.iter().find(|(_, pts)| on(pts)).map(|x| x.0);
                     let bl = if end == 0 { drawn[&bw].runs.first() } else { drawn[&bw].runs.last() }.map(|x| x.0);
-                    if tl.is_some() && tl == bl {
+                    // Any trunk run there on the branch's layer (a via at the junction ends one
+                    // run and starts the next on the other layer, D6b).
+                    if bl.is_some() && drawn[&tw].runs.iter().any(|(l, pts)| Some(*l) == bl && on(pts)) {
                         continue;
                     }
                     if std::env::var("TOPO_TREEDBG").is_ok() {
