@@ -44,7 +44,7 @@ def test_unknown_key_warns_not_ignored(tmp_path):
     assert len(unknown) == 2
     assert all(f.severity == "warning" for f in unknown)
     assert any("run.timeut_s" in f.message for f in unknown)
-    assert cfg.get("run", "timeout_s") == 60
+    assert cfg.get("run", "timeout_s") == 600
 
 
 def test_value_out_of_range_finding(tmp_path):
@@ -56,7 +56,7 @@ def test_value_out_of_range_finding(tmp_path):
     assert codes(findings).count("CFG_VALUE") == 3
     assert "CFG_VALUE_BACKLOG" in codes(findings)
     # invalid values fall back to the default
-    assert cfg.get("run", "timeout_s") == 60
+    assert cfg.get("run", "timeout_s") == 600
     assert cfg.get("run", "existing_copper") == "fixed"
     assert cfg.get("output", "geometry") == "arcs"
     assert all(f.fix for f in findings)
@@ -85,7 +85,7 @@ def test_timeout_none_means_disabled(tmp_path):
 def test_engine_options_units(tmp_path):
     cfg, _ = load_config(tmp_path)
     o = cfg.engine_options()
-    assert o["wall_clock_s"] == 60.0
+    assert o["wall_clock_s"] == 600.0
     assert o["via_cost_nm"] == 2_000_000
     assert o["margin_nm"] == 0
     assert o["pathfinder_iter_cap"] == 30
@@ -173,3 +173,25 @@ def test_render_toml_each_key_preceded_by_doc():
         idx = [i for i, ln in enumerate(lines) if ln.lstrip("# ").startswith(f"{s.key} =")]
         assert idx, s.key
         assert lines[idx[0] - 1].startswith("# ") and "default" in lines[idx[0] - 1], s.key
+
+
+def test_topological_core_settings_reach_the_engine():
+    """K1: every setting of the topological core was marked since 0.5.0 while the plugin is 0.4.0, so
+    engine_options() dropped them: [optimize], [factors], net_tree, fuse_branches, stitch_islands ... set in
+    topor.toml never reached the engine. They are available now (their defaults equal the engine's)."""
+    from topor.schema import SETTINGS, available
+    cfg = Config.defaults().with_values({("optimize", "rounds"): 2, ("search", "fuse_branches"): False,
+                                         ("factors", "weight"): {"via": 30.0}, ("planes", "stitch_islands"): False})
+    o = cfg.engine_options()
+    assert o["topo_rounds"] == 2 and o["fuse_branches"] is False and o["stitch_islands"] is False
+    assert o["factors"]["weight"] == {"via": 30.0}
+    for key in ("rounds", "max_ripped", "objective", "mm_per_via", "variants", "moves", "fluctuation"):
+        s = next(x for x in SETTINGS if x.section == "optimize" and x.key == key)
+        assert available(s), key
+
+
+def test_classic_only_settings_say_so():
+    from topor.schema import CLASSIC_NOTE, CLASSIC_ONLY, SETTINGS_BY_KEY
+    for k in CLASSIC_ONLY:
+        assert SETTINGS_BY_KEY[k].doc.endswith(CLASSIC_NOTE), k
+    assert "topological core does not use" in render_toml(Config.defaults())

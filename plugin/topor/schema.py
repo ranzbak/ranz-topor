@@ -6,7 +6,7 @@ Complexity: module-level constants; iteration O(#settings); SETTINGS_BY_KEY look
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 CONFIG_VERSION = 1
@@ -66,7 +66,7 @@ SECTIONS = {
 
 SETTINGS: list[Setting] = [
     # ---- [run]
-    _s("run", "timeout_s", "float", 60, "Limit on router time: all routing passes of the run together stop after this long (the topological core stops at its work caps in [optimize]; this limit is then only an emergency stop, and when it fires the report warns that the result may differ between runs); the pre-flight DRC, the DRC rounds and the kicad-cli refill / preview exports are not counted. 0 or \"none\" disables it (Cancel is then the only stop).",
+    _s("run", "timeout_s", "float", 600, "Limit on router time: all routing passes of the run together stop after this long. The topological core ends at its work caps in [optimize], so this limit is only an emergency stop: when it fires the report warns (TIME_BUDGET_HIT) that the result may differ between runs. Measured router times (8 cores, two boards at once): eprom-to-kernal 0.2 s, wiccon-2023 1 s, dcsgonebadge about 50 s, qmtech about 150 s; the default leaves 4x room above the largest. The pre-flight DRC, the DRC rounds and the kicad-cli refill / preview exports are not counted. 0 or \"none\" disables it (Cancel always works and keeps the best result so far).",
        unit="s", range=(0, 86400), engine="wall_clock_s"),
     _s("run", "threads", "int", 0, "Worker threads; 0 = all cores but one.", range=(0, 256), engine="threads"),
     _s("run", "partial_routes", "bool", False, "Keep the connections that did route when others fail, instead of discarding the whole result.",
@@ -108,7 +108,7 @@ SETTINGS: list[Setting] = [
     _s("planes", "signals", "str", "costly", "Topological core: whether signal copper may use plane layers. costly = yes, at the price of the plane_signal factor (10 per mm on top of the length) plus plane_cut per cut of the plane, so a plane carries a signal only where the signal layers cannot; forbidden = never, plane layers are left to their pour. The run report lists the signal length on plane layers and the cuts.",
        choices=("costly", "forbidden"), kicad="KiCad → File → Board Setup → Board Editor Layers (layer roles)", engine="plane_signals"),
     _s("planes", "stitch_islands", "bool", True, "Topological core: after routing, the refilled pours are estimated (the fill of the ripped board, minus the routed copper of other nets grown by the clearance, minus features thinner than the zone's minimum width; islands kept or dropped as the zone's island removal setting says). A piece of a pour net's copper that the routed copper cut off from the rest of its pour (an island holding a pad or via of the net, or a pad whose thermal spokes are all cut) gets a through via inside that island near its pad, joining it to the pour on another layer where that pour is solid, or a short stub from the pad; the via sites prefer room (the via_squeeze factor). The run report lists every piece cut off and every stitch. false = the pieces are only reported; KiCad's DRC then lists them as missing connections.",
-       kicad="KiCad → zone properties (Clearance, Minimum width, Remove islands)", engine="stitch_islands", since="0.5.0"),
+       kicad="KiCad → zone properties (Clearance, Minimum width, Remove islands)", engine="stitch_islands"),
     _s("vias", "reduction", "bool", True, "After convergence remove vias whose via-free route is not much longer.", engine="via_reduction"),
     _s("vias", "reduction_len_slack_pct", "float", 10, "A via is removed when the via-free route is at most this much longer.",
        unit="%", range=(0, 1000), engine="reduction_len_slack_pct"),
@@ -148,13 +148,13 @@ SETTINGS: list[Setting] = [
     _s("search", "detour_factor", "float", 2.0, "A connection longer than this multiple of its straight pad-to-pad distance is treated as a detour: the topological core searches it again with cheaper crossings (the layer assignment then resolves a crossing with a via) instead of accepting a wandering path; 0 = off.",
        range=(0.0, 100), engine="detour_factor"),
     _s("search", "net_tree", "str", "free", "Topological core: how a net's connections form its tree. \"free\" = the tree follows the routing: each connection of the net joins the two parts of the net's routed copper its pads lie in, at whichever of their pads, or at a branch point (T-junction) on one of their routed traces, gives the cheapest path; a branch ends on its trunk's trace, one layer through the branch point (a via goes on the branch). \"fixed\" = pad to pad as planned before routing (the shortest straight-line tree), no branch points.",
-       choices=["free", "fixed"], engine="net_tree", since="0.5.0"),
+       choices=["free", "fixed"], engine="net_tree"),
     _s("search", "crossing_vias", "str", "crossing", "Topological core: how the search prices a crossing of two nets. \"crossing\" (default) = the crossing factor ([factors] crossing, 20 mm: TopoR takes a 13-20 mm detour rather than a via pair) stands for the layer change the layer assignment makes; only a crossing that no layer assignment can separate (both traces held to the same single layer where they cross, e.g. over another net's pad on the other side) is priced as a violation (the overflow factor). \"via\" = also price, with the via factor, the via that a crossing of two traces held to the same layer implies, and keep the trace on the other layer after it (measured D6b: on qmtech 16 fewer connections, more vias; on dcsgonebadge the same).",
-       choices=["crossing", "via"], engine="crossing_vias", since="0.5.0"),
+       choices=["crossing", "via"], engine="crossing_vias"),
     _s("search", "junction_pad_mm", "float", 0.0, "Topological core, net_tree = \"free\": a branch point on a trace closer than this to a pad of the copper it joins is not used; the pad itself is the junction (the trace runs through the pad centre) instead of a T next to it. 0 = no such distance (default): the junction_angle and branch factors decide between a T next to a pad and the pad itself on price.",
-       unit="mm", range=(0, 20), engine="junction_pad_mm", since="0.5.0"),
+       unit="mm", range=(0, 20), engine="junction_pad_mm"),
     _s("search", "fuse_branches", "bool", True, "Topological core, net_tree = \"free\": after the drawing, a trace that leaves a branch point or a pad right beside another trace of its net leaves that trace's copper where the two part instead: one copper and a T there, no two parallel traces (TopoR moves T-points the same way in its post-optimisation). Done only where it is shorter, the junction_angle factor included, and the new track keeps every clearance.",
-       engine="fuse_branches", since="0.5.0"),
+       engine="fuse_branches"),
     _s("search", "margin_um", "float", 0, "Safety margin added to every clearance during search and drawing; 0 = exactly the design rule (KiCad DRC accepts copper at exactly the clearance, and the routed copper is checked with the exact rule). Raise it only for headroom against later manual edits.", unit="µm", range=(0, 1000), engine="margin_nm"),
     _s("search", "zero_slack_retry", "bool", True, "One extra pass lets a connection use a corridor pinched below the margin but not below the rules.",
        engine="zero_slack_retry"),
@@ -164,19 +164,19 @@ SETTINGS: list[Setting] = [
        choices=("auto", "all", "off"), engine="exit_stubs", since=V5),
     _s("search", "neck_to_pad", "bool", True, "Necking: an exit stub may be narrower than the net's track width (down to KiCad's minimum track width or the net's custom-rule minimum) where the full width does not fit out of the pad; the rest of the trace keeps its width. The run report lists every necked stub.",
        kicad="KiCad → File → Board Setup → Design Rules → Constraints → Minimum track width (and custom rules: track_width min)",
-       engine="neck_to_pad", since=V5),
+       engine="neck_to_pad"),
     _s("search", "drawing_feedback", "bool", True, "Topological core: a connection whose copper the drawing step could not fit (a clearance to a pad or to a trace drawn earlier would be violated) is drawn first and the traces that block its corridor are drawn again around it, once per connection, instead of being reported failed at once.",
-       engine="drawing_feedback", since="0.5.0"),
+       engine="drawing_feedback"),
     _s("vias", "offset_sites", "bool", True, "Topological core: when no sample point of the corridor where a connection changes layer has room for a via, also try positions a via-radius plus clearance away from the corners of nearby pads and copper (and from the traces drawn before), nearest to the connection's path first. More connections get a via site, at the cost of some runtime.",
-       engine="via_offset_sites", since="0.5.0"),
+       engine="via_offset_sites"),
     _s("search", "feedback_max_rip", "int", 8, "Most already drawn traces one such feedback round may take out and draw again; a larger value rescues more connections and costs more runtime.",
-       range=(0, 100), engine="feedback_max_rip", since="0.5.0"),
+       range=(0, 100), engine="feedback_max_rip"),
     _s("search", "reroute_rounds", "int", 6, "Topological core: most rounds of negotiated rip-up-and-reroute. After the layers are assigned, the connections that run through a passage holding more copper on one layer than fits are taken out and routed again, with a growing price (the congestion factor) on the passages that were over-full, until none is over-full or a round brings no gain; the best round is kept. 0 = off.",
-       range=(0, 50), engine="reroute_rounds", since="0.5.0"),
+       range=(0, 50), engine="reroute_rounds"),
     _s("vias", "reduce_after_drawing", "bool", True, "Topological core: after all copper is drawn, each connection with vias is tried again with one stretch between two vias (or between a via and a through-hole pad) moved onto the layer of its neighbouring stretch, which drops the vias between them; the change is kept where the redrawn trace passes every clearance check, else the old copper stays. Fewer vias at the cost of some runtime.",
-       engine="via_reduce", since="0.5.0"),
+       engine="via_reduce"),
     _s("search", "neck_max_mm", "float", 0.0, "Longest necked stub; 0 = twice the pad's long side.", unit="mm", range=(0, 100),
-       engine="neck_max_nm", since=V5),
+       engine="neck_max_nm"),
     _s("search", "pad_bridge_max_mm", "float", 2.0, "Two pads of one footprint on the same net at most this far apart are joined by one straight track when it fits (possibly off the pad centre line), instead of a searched route; with exit_stubs = auto only where a pad needs a stub. 0 = off.",
        unit="mm", range=(0, 100), engine="pad_bridge_max_nm", since=V5),
     _s("search", "steiner", "bool", True, "Allow same-net T-junctions: a connection may end on an already routed track of its own net (or on kept hand copper it connects to) instead of only at a pad, so sibling connections of one net share a pad exit (false = pad to pad only).",
@@ -208,23 +208,23 @@ SETTINGS: list[Setting] = [
        range=(0, 10), engine="continue_rounds"),
     # ---- [optimize]
     _s("optimize", "rounds", "int", 4, "Topological core: most whole-route rounds (the first one included). Each repeat routes again with the passages the drawing found too small lowered; every round is a result variant. A work cap, not a time cap: the same board and settings give the same result on any machine, loaded or not, and with any thread count (run.timeout_s is only an emergency stop; when it fires the report warns that the result may differ between runs).",
-       range=(1, 20), engine="topo_rounds", since="0.5.0"),
+       range=(1, 20), engine="topo_rounds"),
     _s("optimize", "max_ripped", "int", 5000, "Topological core: most connections one whole-route round may take out and route again (negotiated rip-up-and-reroute, drawing feedback and the P4 moves together). A work cap (see rounds).",
-       range=(0, 1000000), engine="max_ripped", since="0.5.0"),
+       range=(0, 1000000), engine="max_ripped"),
     _s("optimize", "max_expansions", "int", 2000000, "Topological core: search cap per connection (expanded search nodes); the one retry of a connection that found no path uses four times this. A work cap (see rounds): a connection that needs more is reported as failed.",
-       range=(1000, 1000000000), engine="max_expansions", since="0.5.0"),
+       range=(1000, 1000000000), engine="max_expansions"),
     _s("optimize", "objective", "str", "length_vias", "Topological core: how the result variants are judged. Every whole-route round gives two variants (as drawn, and after the via reduction); the archive keeps every variant no other beats on all four TopoR criteria (errors = connections not routed, vias, total length, shrinkages = necked stretches). length_vias = fewest errors first, then the least length + mm_per_via x vias (a step to fewer vias is taken while it costs at most mm_per_via of length per via removed); area = fewest errors first, then the least occupied area (a trace counts length x (width + clearance), a via its pad-plus-clearance disc on every layer). The run report lists the variant table and marks the pick; the picked variant goes to KiCad.",
-       choices=("length_vias", "area"), engine="objective", since="0.5.0"),
+       choices=("length_vias", "area"), engine="objective"),
     _s("optimize", "mm_per_via", "float", 25.0, "Via price of objective = length_vias, in mm of trace per via (TopoR: good results at 25 mm/via); also the price the rip-up-and-reroute uses to pick its best round.",
-       unit="mm", range=(0, 1000), engine="mm_per_via", since="0.5.0"),
+       unit="mm", range=(0, 1000), engine="mm_per_via"),
     _s("optimize", "variants", "int", 8, "Most result variants the archive keeps (population size); the best variant on each criterion (fewest errors, shortest, fewest vias, fewest shrinkages, fewest warnings) is always kept on top.",
-       range=(1, 100), engine="variants", since="0.5.0"),
+       range=(1, 100), engine="variants"),
     _s("optimize", "moves", "bool", False, "Topological core: after the rip-up-and-reroute, a descent of local moves, each kept only when it lowers the price of the social factors ([factors]): reroute a connection, connect it to another pad of its net, put it next to a parallel trace of its net, slide a crossing along a shared channel, reroute two crossing connections in the other order, remove double crossings; then on the layers: swap the layers of a crossing, shift a via along its trace, lift a stretch onto another layer. The descent is kept only when the board objective after the layer assignment improves. Off by default: measured on the gate boards it routed 6 more connections on tanmatsu but 7 fewer on hackerhotel2027 and 1 fewer on bornhack2026 (the drawing does not always follow the topological objective); try it per board.",
-       engine="moves", since="0.5.0"),
+       engine="moves"),
     _s("optimize", "max_moves", "int", 400, "Most move evaluations of that descent per whole-route round (the layer moves have the same cap). A work cap (see rounds).",
-       range=(0, 1000000), engine="max_moves", since="0.5.0"),
+       range=(0, 1000000), engine="max_moves"),
     _s("optimize", "fluctuation", "float", 0.0, "Fluctuating coefficients: every factor weight is multiplied by a seeded random factor between 1 - fluctuation and 1 + fluctuation, new for every rip-up-and-reroute round and every descent sweep, so the search can leave local optima; the seed is fixed, so runs stay reproducible. 0 = fixed weights (the default: 0.1 routed 16 fewer connections on hackerhotel2027 in one measurement; try it per board).",
-       range=(0, 0.9), engine="fluctuation", since="0.5.0"),
+       range=(0, 0.9), engine="fluctuation"),
     # ---- [output]
     _s("output", "geometry", "str", "arcs", "Track geometry: arcs = native KiCad arcs, segments = straight-segment approximation.",
        choices=("arcs", "segments")),
@@ -251,13 +251,33 @@ SETTINGS: list[Setting] = [
        range=(0.0, 10), engine="expert.steiner_ghost_factor", since=V5),
     # ---- [factors]
     _s("factors", "weight", "table", {}, "Factor name → weight (mm per unit, ≥ 0); absent = the factor's default. Factors and defaults: length 1 per mm (scaled by width + clearance), via 25 per via, crossing 20 per crossing of two nets, same_net_crossing 0, plane_signal 10 per mm on a plane layer, plane_cut 25 per cut of a plane, necking 30 per necked stretch, overflow 50 per pass through an overfull cut, congestion 10 per pass per earlier over-full round of the cut, squeeze 5 per pass that leaves a cut less than a track pitch of slack between two other traces, via_squeeze 5 per passage-layer next to a via left with no slack (linear from one via diameter of slack, free, to none; the planner puts a via where the passages around it keep the most room), blocks_pad 30 per trace that takes the last free way out of another net's unrouted pad, ignored_rule 100 per violation of a KiCad check set to ignore, reroute 5 per earlier reroute of a connection that the P4 search moves again, branch 1 per branch point on a trace or through-pad (a reward: subtracted; net_tree = \"free\" lets a connection end on its net's routed copper there instead of a separate trace to the planned pad, and a separate path still wins when it is cheaper; 0 = only where the branch is cheaper on length alone), smd_through 0 per second trace ending on an SMD pad (assembly cost of a through-pad; off by default so it does not cancel branch), junction_angle 10 per mm of width + clearance per unit of psi(a) for a new trace that leaves a junction (a branch point, or a pad that already carries a trace of its net) at angle a to the nearest arm already there, psi(a) = (sec(60° - a/2) - 1) x sin 60° / sin(a/2) below 120° (0 from 120°, the Steiner optimum, up; 90° 0.04, 60° 0.27, 48° 0.5, 30° 1.4, 15° 4.3: shallow T splits and traces leaving a pad side by side get ever more expensive, with no cutoff).",
-       unit="mm", engine="factors.weight", since=V5),
+       unit="mm", engine="factors.weight"),
     _s("factors", "scope", "table", {}, "Factor name → which wires the factor prices: \"all\" (default) or \"tier:N\" (wires of priority tier N only).",
-       engine="factors.scope", since=V5),
+       engine="factors.scope"),
     _s("factors", "report", "table", {}, "Factor name → \"off\", \"info\" or \"warning\": events of the factor become lines of that level in the run report. Defaults: necking, ignored_rule and via_squeeze warning (via_squeeze: one line per drawn via with less slack than half its diameter next to it, \"via in a narrow pass\"), the rest off.",
-       engine="factors.report", since=V5),
+       engine="factors.report"),
     _s("expert", "drc_loop_cap", "int", 5, "Maximum route / DRC / re-route rounds.", range=(1, 50), engine="drc_loop_cap"),
 ]
+
+#: Settings of the classic engine that the topological core (the engine of this branch) does not read (K1: checked
+#: against engine/src/topo by grep); their docs say so, so nobody tunes a key that does nothing. The factors in
+#: [factors] (via, crossing, squeeze, ...) and the [optimize] work caps take their place.
+CLASSIC_ONLY = {
+    ("run", "detour_reference"), ("vias", "via_cost_mm"), ("vias", "max_per_connection"), ("vias", "reduction"),
+    ("vias", "reduction_len_slack_pct"), ("vias", "plane_via_max_mm"), ("vias", "cost_by_priority"),
+    ("vias", "cost_by_netclass"), ("vias", "via_shove"), ("vias", "plane_via_ring"), ("vias", "thermal_pad_vias"),
+    ("vias", "plane_via_share"), ("vias", "plane_via_share_max_mm"), ("layers", "preferred_direction"),
+    ("layers", "direction_cost"), ("layers", "pour_cut_cost_mm"), ("search", "zero_slack_retry"),
+    ("search", "strict_unfit_edges"), ("search", "pour_listed_via_goals"),
+    ("ripup", "growth"), ("ripup", "blame_vias"), ("ripup", "failed_pressure"), ("ripup", "rip_pass"),
+    ("ripup", "max_per_pair"), ("iterations", "max"), ("iterations", "patience"), ("iterations", "min_gain_pct"),
+    ("iterations", "continue_rounds"), ("expert", "hist_fail"), ("expert", "hist_block"), ("expert", "hist_overuse"),
+    ("expert", "present_overuse"), ("expert", "present_growth"), ("expert", "zero_slack_candidates"),
+    ("expert", "relax_iter_cap"),
+}
+CLASSIC_NOTE = (" Classic engine only: the topological core does not use this setting (it prices vias, crossings and "
+                "detours with the [factors] weights and stops at the [optimize] work caps).")
+SETTINGS = [replace(s, doc=s.doc + CLASSIC_NOTE) if (s.section, s.key) in CLASSIC_ONLY else s for s in SETTINGS]
 
 SETTINGS_BY_KEY = {(s.section, s.key): s for s in SETTINGS}
 
