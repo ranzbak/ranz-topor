@@ -225,6 +225,8 @@ SETTINGS: list[Setting] = [
        range=(0, 1000000), engine="max_moves"),
     _s("optimize", "fluctuation", "float", 0.0, "Fluctuating coefficients: every factor weight is multiplied by a seeded random factor between 1 - fluctuation and 1 + fluctuation, new for every rip-up-and-reroute round and every descent sweep, so the search can leave local optima; the seed is fixed, so runs stay reproducible. 0 = fixed weights (the default: 0.1 routed 16 fewer connections on hackerhotel2027 in one measurement; try it per board).",
        range=(0, 0.9), engine="fluctuation"),
+    _s("optimize", "seed", "int", 0, "Seed of the fluctuating coefficients (no effect while fluctuation = 0). The same seed gives the same result; other seeds give other, equally valid variants (used to measure the spread of results over several runs).",
+       range=(0, 1000000), engine="seed"),
     # ---- [output]
     _s("output", "geometry", "str", "arcs", "Track geometry: arcs = native KiCad arcs, segments = straight-segment approximation.",
        choices=("arcs", "segments")),
@@ -290,7 +292,6 @@ ENGINE_INTERNAL = {
     "drc_spots": "set by the DRC loop from KiCad's own violations, not a user choice",
     "skip_self_check": "test-only switch that disables the engine's self check",
     "profile": "diagnostics only; timings must not enter the deterministic result",
-    "seed": "fixed for byte-identical, reproducible results",
     "scope": "built per run from the KiCad selection and scope_mode, not stored",
     "net_priority": "built per run from @N markers, netclasses and [nets] priority",
     "exclude_nets": "built per run from [nets] do_not_touch (patterns expanded against the board's net names)",

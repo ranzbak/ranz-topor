@@ -86,7 +86,7 @@ def test_every_engine_option_is_a_setting_or_internal(engine):
 
 
 def test_engine_internal_has_reasons():
-    assert set(schema.ENGINE_INTERNAL) >= {"pinned", "drc_spots", "skip_self_check", "profile", "seed", "scope",
+    assert set(schema.ENGINE_INTERNAL) >= {"pinned", "drc_spots", "skip_self_check", "profile", "scope",
                                            "net_priority", "via_cost_by_net", "detour_reference_budget_pct"}
     assert all(r.strip() for r in schema.ENGINE_INTERNAL.values())
 
