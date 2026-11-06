@@ -107,12 +107,30 @@ class Progress:
     round: int = 0  # engine: whole-route round now running, 0 = unknown
     rounds: int = 0  # engine: most rounds ([optimize] rounds)
     wall_s: float = 0.0  # plugin: wall time since the run started (KiCad DRC and preview included)
+    # M-B0 (iterations like TopoR): "Routes stable" (the gain of the best result over the last
+    # [optimize] stable_window rounds is below stable_gain_pct in every run), that gain (None before a
+    # full window), the best of N runs and the best result so far (what OK / Cancel keeps).
+    stable: bool = False
+    gain_pct: float | None = None
+    runs: int = 0
+    runs_stable: int = 0
+    best_routed: int = 0
+    best_total: int = 0
+    best_length_mm: float = 0.0
+    best_vias: int = 0
+    best_run: int = 0
 
     @staticmethod
     def from_json(d: dict) -> "Progress":
+        g = d.get("gain_pct")
         return Progress(str(d.get("phase", "")), int(d.get("iteration", 0)), int(d.get("routed", 0)),
                         int(d.get("total", 0)), int(d.get("vias", 0)), float(d.get("elapsed_s", 0.0)),
-                        str(d.get("stage", "") or ""), int(d.get("round", 0) or 0), int(d.get("rounds", 0) or 0))
+                        str(d.get("stage", "") or ""), int(d.get("round", 0) or 0), int(d.get("rounds", 0) or 0),
+                        stable=bool(d.get("stable", False)), gain_pct=None if g is None else float(g),
+                        runs=int(d.get("runs", 0) or 0), runs_stable=int(d.get("runs_stable", 0) or 0),
+                        best_routed=int(d.get("best_routed", 0) or 0), best_total=int(d.get("best_total", 0) or 0),
+                        best_length_mm=float(d.get("best_length_mm", 0.0) or 0.0),
+                        best_vias=int(d.get("best_vias", 0) or 0), best_run=int(d.get("best_run", 0) or 0))
 
 
 @runtime_checkable

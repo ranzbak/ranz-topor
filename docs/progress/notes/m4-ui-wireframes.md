@@ -486,8 +486,21 @@ title/label/button/checkbox/choice/heading/text).
 | progress | elapsed_value | text | {elapsed} / {limit} |
 | progress | elapsed_nolimit | text | {elapsed} / no limit |
 | progress | total_label | label | Total time |
-| progress | cancel_hint | label | Cancel keeps the best result so far. The time limit counts router time only and is an emergency stop; KiCad's DRC and the preview come on top. |
+| progress | cancel_hint | label | Cancel keeps the best result so far. Once the routes are stable the button reads OK: the same action, and the best result shown is exactly the board you get; waiting longer may still find small gains. The time limit counts router time only and is an emergency stop; KiCad's DRC and the preview come on top. |
 | progress | cancel | button | Cancel |
+| progress | ok | text | OK |
+| progress | phase_stable | text | Routes stable |
+| progress | title_stable | text | Topor — Routing {board} — Routes stable |
+| progress | phase_finishing | text | Finishing — keeping the stable result… |
+| progress | round_value | text | {round} |
+| progress | gain_label | label | Gain |
+| progress | gain_value | text | {gain} % / {window} rounds |
+| progress | gain_pending | text | – |
+| progress | runs_label | label | Runs |
+| progress | runs_value | text | {stable} of {runs} stable |
+| progress | best_label | text | Best so far: {routed} / {total} routed, {length} m, {vias} vias |
+| progress | best_run | text | (run {run}) |
+| progress | best_pending | text | Best so far: – |
 
 ### preview
 

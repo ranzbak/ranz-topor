@@ -36,7 +36,7 @@ import tempfile
 import time
 import traceback
 import uuid as _uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -520,9 +520,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
              "rounds": 0, "router_s": 0.0}  # router_s: router time of the finished jobs (progress dialog)
 
     def emit(phase: str) -> None:
-        p = state["last"]
-        q = Progress(phase, p.iteration, p.routed, p.total, p.vias, state["router_s"], p.stage, p.round, p.rounds,
-                     time.monotonic() - t0)
+        q = replace(state["last"], phase=phase, elapsed_s=state["router_s"], wall_s=time.monotonic() - t0)
         if ui.progress(q) is False:
             state["cancel"] = True
 
@@ -672,6 +670,10 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
 
     # 4. route + DRC loop
     opts = build_options(cfg, engine, plan=plan, rip=rip, model=model, priorities=priorities)
+    if getattr(ui, "waits_for_ok", False) and "stop_when_stable" in json.loads(engine.default_options()):
+        # M-B0: with the progress dialog the user ends the run (OK once the routes are stable); headless runs
+        # (harness, MCP) stop at "Routes stable" + [optimize] stable_patience by themselves.
+        opts["stop_when_stable"] = False
     budget = float(opts.get("wall_clock_s", 60.0))
     no_budget = budget <= 0
     geometry = cfg.get("output", "geometry")
@@ -714,6 +716,10 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                 if state["cancel"] and cancelled_at is None:
                     cancelled_at = now
                     job.cancel()
+                    if p.stable:  # M-B0: OK after "Routes stable": the best so far is the board the user gets
+                        state["ok_stable"] = True
+                        log.line(f"OK at Routes stable: best so far {p.best_routed}/{p.best_total} routed, "
+                                 f"{p.best_length_mm / 1000:.3f} m, {p.best_vias} vias (run {p.best_run} of {p.runs})")
             if done:
                 break
             if cancelled_at is not None and now - cancelled_at > CANCEL_GRACE_S:
@@ -757,7 +763,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     out.items = [{**it, "group": it.get("group") or "topor"} for it in loop.items]
     out.routed, out.total = int(rr.get("routed", 0)), int(rr.get("connections_total", 0))
     out.stop_reason = rr.get("stop_reason")
-    out.cancelled = bool(state["cancel"] or out.stop_reason == "cancel")
+    # M-B0: OK after "Routes stable" is not a cancel (stop_reason "stable"): the user took the stable result.
+    out.cancelled = bool((state["cancel"] and not state.get("ok_stable")) or out.stop_reason == "cancel")
     out.rounds, out.router_s = loop.rounds, loop.router_s
     # K1: the engine's report lines that need the user's attention become findings (postrun.py); a post-run
     # finding replaces a pre-flight one of the same code (e.g. DIFF_PAIRS_SKIPPED: "will not" -> "were not").

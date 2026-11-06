@@ -111,9 +111,25 @@ WORDING: dict[str, dict[str, str]] = {
         "elapsed_value": "{elapsed} / {limit}",
         "elapsed_nolimit": "{elapsed} / no limit",
         "total_label": "Total time",
-        "cancel_hint": "Cancel keeps the best result so far. The time limit counts router time only and is an "
-                       "emergency stop; KiCad's DRC and the preview come on top.",
+        "cancel_hint": "Cancel keeps the best result so far. Once the routes are stable the button reads OK: the "
+                       "same action, and the best result shown is exactly the board you get; waiting longer may "
+                       "still find small gains. The time limit counts router time only and is an emergency stop; "
+                       "KiCad's DRC and the preview come on top.",
         "cancel": "Cancel",
+        # M-B0: iterations like TopoR ("Routes stable", Cancel -> OK, best of N runs)
+        "ok": "OK",
+        "phase_stable": "Routes stable",
+        "title_stable": "Topor — Routing {board} — Routes stable",
+        "phase_finishing": "Finishing — keeping the stable result…",
+        "round_value": "{round}",
+        "gain_label": "Gain",
+        "gain_value": "{gain} % / {window} rounds",
+        "gain_pending": "–",
+        "runs_label": "Runs",
+        "runs_value": "{stable} of {runs} stable",
+        "best_label": "Best so far: {routed} / {total} routed, {length} m, {vias} vias",
+        "best_run": "(run {run})",
+        "best_pending": "Best so far: –",
     },
     "preview": {
         "title": "Topor — Preview: {board}",
@@ -661,8 +677,9 @@ class ProgressDialog(_Base):
     _wk = "progress"
     TAB_ORDER = ("cancel",)
 
-    def __init__(self, board: str, timeout_s: float = 0.0, iteration_cap: int | None = None):
+    def __init__(self, board: str, timeout_s: float = 0.0, iteration_cap: int | None = None, stable_window: int = 4):
         super().__init__(WORDING["progress"]["title"].format(board=board))
+        self.board = board
         self.timeout_s = float(timeout_s or 0)
         self.iteration_cap = iteration_cap
         self._round, self._round_from_engine = (0, iteration_cap), False
@@ -685,12 +702,20 @@ class ProgressDialog(_Base):
         self.vias_value = self._num("vias_value", 110)
         self.elapsed_value = self._num("elapsed_value", 140)
         self.total_value = self._num("total_value", 140)
+        self.gain_value = self._num("gain_now", 140)
+        self.runs_value = self._num("runs_now", 110)
         for lab, val in (("iteration_label", self.iteration_value), ("routed_label", self.routed_value),
                          ("vias_label", self.vias_value), ("elapsed_label", self.elapsed_value),
-                         ("total_label", self.total_value)):
+                         ("runs_label", self.runs_value), ("total_label", self.total_value),
+                         ("gain_label", self.gain_value)):
             grid.Add(self.text(self, "progress", lab), 0)
             grid.Add(val, 0, wx.ALIGN_RIGHT)
         self.root.Add(grid, 0, wx.BOTTOM, self.group)
+        # M-B0: the best result so far (what OK / Cancel keeps), over all runs
+        self.best_value = self.text(self, "progress", "best_pending", name="best_value")
+        self.root.Add(self.best_value, 0, wx.BOTTOM, self.group)
+        self.stable = False
+        self.stable_window = stable_window
         self.root.Add(self.text(self, "progress", "cancel_hint", wrap_dip=420), 0, wx.BOTTOM, self.group)
         self.root.Add(self.button_row(("cancel", "cancel", "c"), ok_id=wx.ID_CANCEL), 0, wx.EXPAND)
         self.cancel_button = self.buttons["cancel"]
@@ -698,7 +723,7 @@ class ProgressDialog(_Base):
         self.Bind(wx.EVT_CLOSE, self._on_cancel)
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
         self.set_phase("")
-        self.finish((460, 240))
+        self.finish((460, 300))
         self.cancel_button.SetFocus()
 
     def _num(self, name: str, width_dip: int) -> wx.StaticText:
@@ -709,6 +734,9 @@ class ProgressDialog(_Base):
 
     def set_phase(self, phase: str, stage: str = "") -> None:
         if self.cancelled:
+            return
+        if self.stable and phase in ("setup", "route", "done"):  # M-B0: the user's cue that OK is fine now
+            self.phase.SetLabel(WORDING["progress"]["phase_stable"])
             return
         if phase in ("setup", "route", "done") and stage:  # the topological core names its stage (K1)
             self.phase.SetLabel(WORDING["progress"]["phase_route_stage"].format(stage=stage))
@@ -731,12 +759,23 @@ class ProgressDialog(_Base):
         if self.cancelled:
             return
         self.cancelled = True
-        self.phase.SetLabel(WORDING["progress"]["phase_cancelling"])
+        self.phase.SetLabel(WORDING["progress"]["phase_finishing" if self.stable else "phase_cancelling"])
         self.cancel_button.Disable()
         self.gauge.Pulse()
 
+    def set_stable(self, stable: bool) -> None:
+        """M-B0: once the routes are stable the Cancel button reads OK (same id, same action: stop and keep the
+        best result so far, which is exactly the board the user gets). Stable never goes back within a run."""
+        if stable and not self.stable:
+            self.stable = True
+            self.SetTitle(WORDING["progress"]["title_stable"].format(board=self.board))
+            self.cancel_button.SetLabel(_mn(WORDING["progress"]["ok"], "o"))
+            self.cancel_button.SetDefault()
+            self.Layout()
+
     def update(self, p: Progress) -> None:
         W = WORDING["progress"]
+        self.set_stable(bool(getattr(p, "stable", False)))
         self.set_phase(p.phase, getattr(p, "stage", ""))
         if self.cancelled or not (p.phase == "route" and p.total > 0):
             self.gauge.Pulse()
@@ -752,7 +791,22 @@ class ProgressDialog(_Base):
             self._round = (p.iteration, self.iteration_cap)  # an engine without rounds: its iteration
         self._round_from_engine = self._round_from_engine or bool(getattr(p, "rounds", 0))
         rnd, cap = self._round
-        self.iteration_value.SetLabel(W["iteration_value"].format(iteration=rnd, cap=cap) if cap else str(rnd))
+        if self._round_from_engine:  # M-B0: [optimize] rounds is only a safety cap; the run ends at "stable"
+            self.iteration_value.SetLabel(W["round_value"].format(round=rnd))
+        else:
+            self.iteration_value.SetLabel(W["iteration_value"].format(iteration=rnd, cap=cap) if cap else str(rnd))
+        g = getattr(p, "gain_pct", None)
+        self.gain_value.SetLabel(W["gain_value"].format(gain=f"{g:.1f}", window=self.stable_window) if g is not None
+                                 else W["gain_pending"])
+        runs = int(getattr(p, "runs", 0) or 0)
+        self.runs_value.SetLabel(W["runs_value"].format(stable=getattr(p, "runs_stable", 0), runs=runs) if runs
+                                 else W["gain_pending"])
+        if getattr(p, "best_total", 0):
+            txt = W["best_label"].format(routed=p.best_routed, total=p.best_total, length=f"{p.best_length_mm / 1000:.2f}",
+                                         vias=p.best_vias)
+            if runs > 1 and p.best_run:
+                txt += " " + W["best_run"].format(run=p.best_run)
+            self.best_value.SetLabel(txt)
         if p.iteration == 0 and p.routed == 0:
             self.routed_value.SetLabel(W["routed_pending"].format(total=p.total))
         else:
@@ -1080,7 +1134,12 @@ class WxUi:
         self._cancelled = False
         self._timeout_s = float(Config.defaults().get("run", "timeout_s"))
         self._iter_cap = int(Config.defaults().get("optimize", "rounds"))
+        self._stable_window = int(Config.defaults().get("optimize", "stable_window"))
         self._last_progress: Progress | None = None
+
+    #: M-B0: the progress dialog lets the user end the run (OK at "Routes stable"); the run flow then does not
+    #: stop the engine at stable by itself.
+    waits_for_ok = True
 
     def set_context(self, board: str | None = None, report_dir=None, log_path=None, versions=None) -> None:
         """B5: board name (progress / preview titles), report folder, log.txt and version strings for dialog 6."""
@@ -1130,12 +1189,13 @@ class WxUi:
         if d.proceed:  # progress needs the effective limit / cap
             self._timeout_s = float(d.overrides.get("timeout_s", cfg.get("run", "timeout_s")))
         self._iter_cap = int(cfg.get("optimize", "rounds"))  # the topological core's whole-route rounds
+        self._stable_window = int(cfg.get("optimize", "stable_window"))
         return d
 
     def progress(self, p: Progress) -> bool:
         self._last_progress = p
         if self._progress is None:
-            self._progress = ProgressDialog(self.ctx.board, self._timeout_s, self._iter_cap)
+            self._progress = ProgressDialog(self.ctx.board, self._timeout_s, self._iter_cap, self._stable_window)
             self._present(self._progress)
         dlg = self._progress
         dlg.update(p)

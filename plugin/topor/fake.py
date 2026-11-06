@@ -125,13 +125,17 @@ class ScriptedUi:
     decisions: one Decision (returned every time), a list (consumed in order, the last one repeats) or None
     (proceed with defaults). accept: the `preview` answer (bool, or a list consumed in order, last repeats).
     cancel_at_iteration: `progress` returns False once ``p.iteration >= cancel_at_iteration`` (None = never).
+    ok_at_stable (M-B0): act like the progress dialog (``waits_for_ok``: the engine does not stop at "Routes
+    stable" by itself) and press OK as soon as a progress says stable.
     Every call is appended to `calls` as ``(method, args)``.
     """
 
-    def __init__(self, decisions=None, accept=True, cancel_at_iteration: int | None = None):
+    def __init__(self, decisions=None, accept=True, cancel_at_iteration: int | None = None, ok_at_stable: bool = False):
         self._decisions = decisions
         self._accept = accept
         self.cancel_at_iteration = cancel_at_iteration
+        self.ok_at_stable = ok_at_stable
+        self.waits_for_ok = ok_at_stable
         self.calls: list = []
 
     @staticmethod
@@ -156,6 +160,8 @@ class ScriptedUi:
 
     def progress(self, p: Progress) -> bool:
         self.calls.append(("progress", (p,)))
+        if self.ok_at_stable and getattr(p, "stable", False):
+            return False
         return not (self.cancel_at_iteration is not None and p.iteration >= self.cancel_at_iteration)
 
     def preview(self, png: Path, report) -> bool:

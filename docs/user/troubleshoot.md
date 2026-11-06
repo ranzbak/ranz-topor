@@ -529,9 +529,9 @@ and compare with `drc.json` in the report folder. If the router's copper really 
 
 *Severity: warning.*
 
-**Cause.** The time limit stopped the topological core before its work caps ([optimize]); the result is the best so far and may differ between runs and machines.
+**Cause.** The time limit (or a Cancel) stopped the topological core before its routes were stable ([optimize] stable_window / stable_gain_pct); the result is the best so far and may differ between runs and machines.
 
-**Fix.** Raise run.timeout_s (0 = no limit; Cancel always works) and route again; the [optimize] work caps then end the run with a reproducible result.
+**Fix.** Raise run.timeout_s (0 = no limit; Cancel always works) and route again, or lower [optimize] runs (best of N runs share the threads); wait for "Routes stable" and press OK for a reproducible result.
 
 ### TRACK_ANGLE_RULE
 

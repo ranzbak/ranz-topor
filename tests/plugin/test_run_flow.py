@@ -317,7 +317,7 @@ def test_run_cancel_keeps_best_result_and_previews(app, eprom, tmp_path, reports
     assert eng.jobs[0].cancelled  # progress() returned False -> job.cancel()
     assert out.status == "rejected" and out.routed > 0  # preview was shown after the cancelled route
     assert "preview" in ui.names() and board.commits == []
-    assert out.report.stop_reason in ("cancel", "converged")  # the job had finished by itself in this double
+    assert out.report.stop_reason in ("cancel", "stable")  # the job had finished by itself in this double
     assert out.cancelled is True
 
 
@@ -938,3 +938,34 @@ def test_via_relax_notes_only_when_the_pass_ran():
     assert _via_relax_notes({"via_relaxation": "not run"}) == []
     assert _via_relax_notes({"via_relaxation": "moved 8 of 30 vias, -2004 um"}) == [
         "via relaxation: moved 8 of 30 vias, -2004 um"]
+
+
+# ------------------------------------------------------------------ M-B0: OK at "Routes stable"
+def test_run_ok_at_routes_stable_is_not_a_cancel(app, eprom, tmp_path, reports):
+    """With the dialog the engine does not stop at stable by itself (``stop_when_stable`` false); the user's OK
+    once the progress says stable ends it: the result is "stable", not cancelled, and is previewed and accepted
+    like a finished run."""
+    ui = ScriptedUi(accept=True, ok_at_stable=True)
+    cfg = CFG.with_values({("optimize", "finish_when_stable"): False})  # else eprom may finish before the OK poll
+    board, ui, out = do_run(eprom, tmp_path, ui=ui, engine=_RealCancelEngine(), cfg=cfg)
+    assert out.status == "accepted" and out.routed == 27
+    assert out.stop_reason == "stable" and out.cancelled is False
+    stable = [c[1][0] for c in ui.calls if c[0] == "progress" and c[1][0].stable]
+    assert stable and stable[0].best_total == 27 and stable[0].runs == 5
+    log = (out.report_dir / "log.txt").read_text()
+    assert "OK at Routes stable: best so far 27/27 routed" in log
+
+
+class _RealCancelEngine:
+    """The real engine; records the options the run passes (M-B0: stop_when_stable off with the dialog)."""
+
+    def __init__(self):
+        self.options = []
+
+    def __getattr__(self, name):
+        return getattr(topor_engine, name)
+
+    def route_async(self, m, o):
+        self.options.append(json.loads(o))
+        assert self.options[-1]["stop_when_stable"] is False
+        return topor_engine.route_async(m, o)

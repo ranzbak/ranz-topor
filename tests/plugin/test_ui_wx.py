@@ -204,7 +204,7 @@ def test_progress_returns_false_after_cancel(app):
     assert ui.progress(Progress("route", 3, 12, 27, 4, 12.0)) is True
     dlg = ui._progress
     assert dlg.routed_value.GetLabel() == "12 / 27" and dlg.elapsed_value.GetLabel() == "0:12 / 10:00"
-    assert dlg.iteration_value.GetLabel() == "3 of up to 4"  # no round from the engine: [optimize] rounds as cap
+    assert dlg.iteration_value.GetLabel() == "3 of up to 30"  # no round from the engine: [optimize] rounds as cap
     assert dlg.gauge.GetValue() == 12
     evt = wx.CommandEvent(wx.wxEVT_BUTTON, wx.ID_CANCEL)
     evt.SetEventObject(dlg.cancel_button)
@@ -403,10 +403,41 @@ def test_progress_names_the_engine_stage_round_and_times(app):
     try:
         dlg.update(Progress("route", 2, 120, 426, 30, 75.0, "drawing the traces", 2, 4, 90.0))
         assert dlg.phase.GetLabel() == "Routing — drawing the traces"
-        assert dlg.iteration_value.GetLabel() == "2 of up to 4"
+        assert dlg.iteration_value.GetLabel() == "2"  # M-B0: [optimize] rounds is only a safety cap
         assert dlg.elapsed_value.GetLabel() == "1:15 / 10:00" and dlg.total_value.GetLabel() == "1:30"
         dlg.update(Progress("drc", 4, 346, 426, 187, 150.0, "", 0, 0, 170.0))
         assert dlg.phase.GetLabel() == ui_wx.WORDING["progress"]["phase_drc"]
-        assert dlg.iteration_value.GetLabel() == "2 of up to 4"
+        assert dlg.iteration_value.GetLabel() == "2"
     finally:
         dlg.Destroy()
+
+
+def test_progress_routes_stable_turns_cancel_into_ok(app):
+    """M-B0 (user 2026-11-06): when the gain is below the threshold the dialog shows "Routes stable" and the
+    Cancel button reads OK; same action (stop, keep the best result so far, which the dialog shows)."""
+    ui = _QuietUi()
+    p = Progress("route", 1, 300, 426, 150, 40.0, "drawing the traces", 3, 30, 45.0, gain_pct=2.5, runs=5,
+                 runs_stable=2, best_routed=341, best_total=426, best_length_mm=2310.0, best_vias=180, best_run=3)
+    assert ui.progress(p) is True
+    dlg = ui._progress
+    W = ui_wx.WORDING["progress"]
+    assert dlg.phase.GetLabel() == "Routing — drawing the traces"
+    assert dlg.cancel_button.GetLabel().replace("&", "") == "Cancel"
+    assert dlg.gain_value.GetLabel() == "2.5 % / 4 rounds"
+    assert dlg.runs_value.GetLabel() == "2 of 5 stable"
+    assert dlg.best_value.GetLabel() == "Best so far: 341 / 426 routed, 2.31 m, 180 vias (run 3)"
+    q = Progress("route", 1, 300, 426, 150, 60.0, "topological search", 7, 30, 65.0, stable=True, gain_pct=0.1,
+                 runs=5, runs_stable=5, best_routed=346, best_total=426, best_length_mm=2300.0, best_vias=181,
+                 best_run=1)
+    assert ui.progress(q) is True
+    assert dlg.phase.GetLabel() == W["phase_stable"] == "Routes stable"
+    assert dlg.cancel_button.GetLabel().replace("&", "") == "OK"
+    assert dlg.GetTitle().endswith("— Routes stable")  # also in the window list (the live test waits for it)
+    assert dlg.cancel_button.GetId() == wx.ID_CANCEL  # same button, same action
+    assert dlg.best_value.GetLabel() == "Best so far: 346 / 426 routed, 2.30 m, 181 vias (run 1)"
+    evt = wx.CommandEvent(wx.wxEVT_BUTTON, wx.ID_CANCEL)
+    evt.SetEventObject(dlg.cancel_button)
+    dlg.cancel_button.GetEventHandler().ProcessEvent(evt)
+    assert dlg.phase.GetLabel() == W["phase_finishing"]
+    assert ui.progress(q) is False
+    ui._close_progress()
