@@ -91,6 +91,34 @@ router's sensitivity to the copper-graphics vertices and to the net numbering, n
 is unchanged by K1 (eprom 27/27, wiccon 60/60, dcs 189/231, qmtech 346/426, routing_new 0).
 
 
+
+### Iterations like TopoR: "Routes stable", OK, best of N runs (M-B0)
+
+A run no longer stops after a fixed four rounds. Like TopoR it keeps iterating whole-route cycles: every cycle
+routes the board again with the passages the drawing found too small lowered and with fluctuating factor weights
+(Polubasov 2010) whose width starts wide, narrows every cycle and widens again when the run is stuck with
+connections still open (annealing with reheating; `[optimize] fluctuation`, `fluctuation_narrowing`,
+`fluctuation_stuck`, `fluctuation_reheat`). Every cycle's variants are pour-stitched and judged (a pour piece left
+cut off counts as an error). When the best result gains less than `stable_gain_pct` over `stable_window` cycles the
+routes are *stable* (TopoR 6.3 manual p. 73: "Autorouting may be stopped"; not before level 5–10): the progress
+dialog says **Routes stable** and its Cancel button reads **OK** — the same action, the best result shown is exactly
+the board you get. Waiting is fine; the run then finishes by itself after `finish_patience` cycles without gain
+(`finish_when_stable`), and headless runs stop at stable. `[optimize] runs` (default 5) seeded runs go on in
+parallel on the engine's threads and the best by the objective is offered; `[optimize] rounds` (30) is only a
+safety cap and `[run] timeout_s` (now 1800 s) the emergency stop.
+
+Scorecard (KiCad DRC after a refill; connected % of KiCad's own input count, default run and median [range] of
+seeds 1–5; `harness/scorecard.py`):
+
+| Board | Before (fixed 4 rounds) | M-B0 (best of 5, until stable) | Router time before → after |
+|---|---|---|---|
+| eprom-to-kernal | 100 / 100 | 100 / 100 | 0.3 s → 2 s |
+| wiccon-2023 | 100 / 100 [98.2–100] | 100 / 100 [100–100] | 1 s → 27 s |
+| dcsgonebadge | 77.6 / 76.2 [74.3–78.6] | 80.5 / 79.5 [77.1–80.5] | 53 s → 442 s |
+| qmtech | 79.6 / 78.9 [77.5–79.9] | 81.5 / 81.5 [80.6–83.2] | 174 s → 1014 s |
+
+The defaults are provisional: they are re-measured once violations replace dropped connections (M-B1).
+
 Known limits: the complex boards (bornhack2026, hackerhotel2027, tanmatsu) are not on the ladder yet;
 differential pairs are not routed; branching is not complete (the fuse moves copper after drawing but the
 planner still reserves room for both traces; re-attaching after changes, junction relaxation toward the

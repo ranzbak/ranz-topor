@@ -203,7 +203,7 @@ def test_progress_returns_false_after_cancel(app):
     ui = _QuietUi()
     assert ui.progress(Progress("route", 3, 12, 27, 4, 12.0)) is True
     dlg = ui._progress
-    assert dlg.routed_value.GetLabel() == "12 / 27" and dlg.elapsed_value.GetLabel() == "0:12 / 10:00"
+    assert dlg.routed_value.GetLabel() == "12 / 27" and dlg.elapsed_value.GetLabel() == "0:12 / 30:00"
     assert dlg.iteration_value.GetLabel() == "3 of up to 30"  # no round from the engine: [optimize] rounds as cap
     assert dlg.gauge.GetValue() == 12
     evt = wx.CommandEvent(wx.wxEVT_BUTTON, wx.ID_CANCEL)

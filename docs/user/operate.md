@@ -104,7 +104,7 @@ type, default, unit, range and the KiCad place that influences it.
 | `[search]` | detour factor, safety margin, zero-slack retry |
 | `[ripup]` | rip-up escalation |
 | `[iterations]` | when the optimiser stops (cap, patience, minimum gain) |
-| `[optimize]` | topological core: work caps that make a run reproducible (`rounds`, `max_ripped`, `max_expansions`, `max_moves`), the P4 moves and fluctuation, the board objective (`objective` = `length_vias` or `area`, `mm_per_via`) and how many result variants are kept (`variants`) |
+| `[optimize]` | topological core: how a run iterates (fluctuation schedule, *Routes stable*, best of N `runs`), the safety and work caps that make a run reproducible (`rounds`, `max_ripped`, `max_expansions`, `max_moves`), the P4 moves, the board objective (`objective` = `length_vias` or `area`, `mm_per_via`) and how many result variants are kept (`variants`) |
 | `[factors]` | topological core: weight, scope and report level of each social factor (via, crossing, squeeze, blocks_pad, reroute, …; see the factor table in configuration.md) |
 | `[output]` | arcs or straight segments; report folder |
 | `[expert]` | router constants — leave them alone unless you know the router |
@@ -152,7 +152,7 @@ Tick **Save these options to topor.toml** to keep them (only these `[run]` keys 
 | Existing copper | Keep as obstacles · Keep and smooth · Rip up and re-route | `[run] existing_copper` = `fixed` / `smooth` / `rip` |
 | Respect locked tracks and vias | on: locked copper is never ripped | `[run] respect_locked` |
 | Keep partial routes | on: connections that cannot finish are drawn up to the blocking point (group `topor-partial`) | `[run] partial_routes` |
-| Time limit | seconds of router time, default 600 (an emergency stop: the topological core ends at its `[optimize]` work caps); `0` = no limit; KiCad's DRC, the refill and the preview export are not counted | `[run] timeout_s` |
+| Time limit | seconds of router time, default 1800 (an emergency stop: the topological core ends at *Routes stable* or your OK); `0` = no limit; KiCad's DRC, the refill and the preview export are not counted | `[run] timeout_s` |
 | Threads | `0` = all cores but one | `[run] threads` |
 
 *Existing copper* decides what happens to tracks and vias that are already on the board:
@@ -191,20 +191,44 @@ A selection that yields nothing gives [`SCOPE_EMPTY`](troubleshoot.md#scope_empt
 board (KiCad DRC)*, then *Routing — &lt;stage&gt;* with the stage the topological core is in (*plane stubs*, *projection
 of the board*, *topological search*, *layer assignment, rip-up and reroute*, *drawing the traces*, *via reduction and
 fuse*, *pour stitching*), then *Verifying with KiCad DRC* and *Rendering the preview*. Below it: **Round** — the
-whole-route round now running, of up to `[optimize] rounds` (default 4; each round routes the board again with the
-passages the drawing found too small lowered); routed/total; vias; **Router time** against the time limit; **Total
-time** since you pressed Route (KiCad's DRC and the preview included).
+whole-route round (cycle) now running; **Gain** — how much the best result improved over the last
+`[optimize] stable_window` rounds; **Runs** — how many of the `[optimize] runs` seeded runs are stable; routed/total;
+vias; **Router time** against the time limit; **Total time** since you pressed Route (KiCad's DRC and the preview
+included); and **Best so far** — routed, length and vias of the best result over all runs, which is what OK or Cancel
+keeps.
 
-How long a run takes (measured on 8 cores with two boards running at once; the router time is about half of the
-total, KiCad's DRC and the preview the rest): eprom-to-kernal and wiccon-2023 a few seconds, dcsgonebadge (231
-connections) about 50 s of router time, qmtech (426 connections, 4 layers) about 150 s. The run ends by itself at
-the topological core's work caps (`[optimize]`): the same board and settings give the same result on any machine.
-`[run] timeout_s` (default 600 s of router time, about 4× the largest measured board) is only an emergency stop:
-when it fires the result is the best so far, may differ between runs, and the findings say so
+### Routes stable and OK
+
+The topological core iterates like TopoR: there is no fixed number of rounds. Every round routes the whole board
+again — with the passages the drawing found too small lowered, and with its factor weights shaken by a seeded
+*fluctuation* that starts wide, narrows every round and widens again when the run is stuck (no better result for
+`fluctuation_stuck` rounds while connections are still open) — and offers its result to the variant table. Several
+independent runs (`[optimize] runs`, default 5, each with its own seed) go on at once on the CPU's threads; the best
+result over all of them is the one you get.
+
+When the best result has gained less than `[optimize] stable_gain_pct` (0.5 %) over the last `stable_window` (4)
+rounds in every run, the dialog says **Routes stable** (also in its window title) and the **Cancel** button reads
+**OK**. It is the same button with the same action: stop and keep the best result so far — exactly the board shown
+under *Best so far*, which then goes to KiCad's DRC and the preview. You may also wait: the runs keep looking for
+small gains, and the run finishes by itself, like a normal finish, once the best has not improved for
+`finish_patience` (4) more rounds (`finish_when_stable = false`: it keeps going until OK, Cancel, the safety cap
+`[optimize] rounds` or the time limit, the TopoR way). Pressing OK at *Routes stable* is not a cancel: the summary
+says *Stopped: stable*. Headless runs (harness, MCP) stop at *Routes stable* by themselves (plus `stable_patience`
+rounds). The first round of the first run always uses the plain weights, and every run is reproducible: the same
+board and settings give the same result.
+
+How long a run takes with the default best of 5 runs (measured headless with 4 threads and two boards at once; the
+router time is most of the total): eprom-to-kernal 2 s, wiccon-2023 about 25 s, dcsgonebadge (231 connections)
+about 450 s of router time (320–710 s over six seeds), qmtech (426 connections, 4 layers) about 1000 s (680–1300 s).
+That is 5–8 times the fixed four rounds of earlier versions; in exchange dcsgonebadge connects 80.5 % instead of
+77.6 % and qmtech 81.5 % instead of 79.6 % (KiCad DRC). `[optimize] runs = 1` takes roughly a quarter to a half of the
+time for a smaller gain; *Routes stable* and OK let you stop as soon as the result is good enough.
+`[run] timeout_s` (default 1800 s of router time) is only an emergency stop: when it fires before the routes are
+stable the result is the best so far, may differ between runs, and the findings say so
 ([`TIME_BUDGET_HIT`](troubleshoot.md#time_budget_hit)). `0` = no limit.
 
-**Cancel** (or Esc / Enter) works at any time: the label changes to *Cancelling — keeping the best result so
-far…*; while routing, the best result found so far goes on to KiCad DRC and the preview; if nothing was routed yet
+**Cancel** (or Esc / Enter; **OK** after *Routes stable*) works at any time: the label changes to *Cancelling —
+keeping the best result so far…* (after *Routes stable*: *Finishing — keeping the stable result…*); while routing, the best result found so far goes on to KiCad DRC and the preview; if nothing was routed yet
 the run ends with *Cancelled — nothing was changed on the board.* topor polls the running `kicad-cli` every 0.25 s,
 so Cancel also works during the pre-flight DRC (the run then ends with nothing changed) and the DRC rounds / preview
 export (the DRC and the preview of the best result still finish). The engine stops at its next check, normally
@@ -324,12 +348,12 @@ unsure about is kept. KiCad's DRC of the result stays the judge.
 - **Differential pairs are not routed** (nets ending in `_P`/`_N`, `+`/`-`, `P`/`N`): the pre-flight and the
   findings after routing say so ([`DIFF_PAIRS_SKIPPED`](troubleshoot.md#diff_pairs_skipped)); route them by hand.
 - Two or more signal layers are needed; through vias only.
-- Not every connection finishes on dense boards (dcsgonebadge 189/231, qmtech 346/426 headless): the open ones are
+- Not every connection finishes on dense boards (dcsgonebadge about 193/231, qmtech about 354/426 headless): the open ones are
   listed with their reason ([`UNROUTED`](troubleshoot.md#unrouted)) and drawn blue in the preview. Small changes
   elsewhere on the board can move the result by a few connections.
 - Pour islands that the new copper cuts off are stitched afterwards (stitching vias, pad stubs), not prevented.
 - Settings marked *Classic engine only* in [configuration.md](configuration.md) (`[iterations]`, `[ripup]`, the via
-  cost keys, …) do nothing; the `[factors]` weights and the `[optimize]` work caps take their place.
+  cost keys, …) do nothing; the `[factors]` weights, the `[optimize]` stable test and work caps take their place.
 
 ### Platform and board
 

@@ -44,7 +44,7 @@ def test_unknown_key_warns_not_ignored(tmp_path):
     assert len(unknown) == 2
     assert all(f.severity == "warning" for f in unknown)
     assert any("run.timeut_s" in f.message for f in unknown)
-    assert cfg.get("run", "timeout_s") == 600
+    assert cfg.get("run", "timeout_s") == 1800
 
 
 def test_value_out_of_range_finding(tmp_path):
@@ -56,7 +56,7 @@ def test_value_out_of_range_finding(tmp_path):
     assert codes(findings).count("CFG_VALUE") == 3
     assert "CFG_VALUE_BACKLOG" in codes(findings)
     # invalid values fall back to the default
-    assert cfg.get("run", "timeout_s") == 600
+    assert cfg.get("run", "timeout_s") == 1800
     assert cfg.get("run", "existing_copper") == "fixed"
     assert cfg.get("output", "geometry") == "arcs"
     assert all(f.fix for f in findings)
@@ -85,7 +85,7 @@ def test_timeout_none_means_disabled(tmp_path):
 def test_engine_options_units(tmp_path):
     cfg, _ = load_config(tmp_path)
     o = cfg.engine_options()
-    assert o["wall_clock_s"] == 600.0
+    assert o["wall_clock_s"] == 1800.0
     assert o["via_cost_nm"] == 2_000_000
     assert o["margin_nm"] == 0
     assert o["pathfinder_iter_cap"] == 30
