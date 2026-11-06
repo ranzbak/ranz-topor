@@ -262,3 +262,34 @@ def fx_local_pour_far_pads(d: Path) -> Path:
         f.pad(f"L{i + 1}", "P", (x, 15), (1.0, 1.0))
     f.zone("P", pcbnew.F_Cu, [(5, 7), (11, 7), (11, 13), (5, 13)])
     return f.save(Path(d) / "fx_local_pour_far_pads.kicad_pcb")
+
+
+def fx_same_layer_pour_stub(d: Path) -> Path:
+    """A B.Cu pad of a pour net next to (not in) that net's B.Cu pour, with no via site anywhere
+    (a no-via keepout over the board): a track on B.Cu from the pad into the fill joins it
+    (dcsgonebadge J1.A1, D6b: no via site inside the fill, so a signal connection D11.3 -> J1.A1,
+    16.4 mm with a via, ran on F.Cu inside the GND pour along J1.S1 and left a 0.096 mm neck).
+
+    GND: P (3, 10) 0.6 x 1.4 mm on B.Cu; Q (15, 10) inside a B.Cu GND pour 4.5..19 x 1..19."""
+    f = Fx(20, 20, nets=("GND",))
+    f.pad("P", "GND", (3.0, 10.0), (0.6, 1.4), layer=pcbnew.B_Cu)
+    f.pad("Q", "GND", (15.0, 10.0), (1.0, 1.0), layer=pcbnew.B_Cu)
+    f.zone("GND", pcbnew.B_Cu, [(4.5, 1), (19, 1), (19, 19), (4.5, 19)])
+    f.keepout([pcbnew.F_Cu, pcbnew.B_Cu], [(0.2, 0.2), (19.8, 0.2), (19.8, 19.8), (0.2, 19.8)], vias=True)
+    return f.save(Path(d) / "fx_same_layer_pour_stub.kicad_pcb")
+
+
+def fx_coincident_pad_stub(d: Path) -> Path:
+    """Two GND pads drawn on top of each other (a USB-C GND pin pair, dcsgonebadge J1.A1/J1.B12)
+    outside the B.Cu GND pour: the plane stub and via of one starts inside the other, which is
+    the same copper (D6b: every stub was refused as grazing another pad of its net, so J1.A1 became
+    a 16 mm signal connection that ran inside the F.Cu pour and left a 0.096 mm neck).
+
+    GND: P1 and P2 0.6 x 1.4 mm on F.Cu at (5, 10); Q (15, 10) on B.Cu inside a B.Cu GND pour
+    9..19 x 1..19 (its edge 3.7 mm from the pads: the via site is inside the pour)."""
+    f = Fx(20, 20, nets=("GND",))
+    f.pad("P1", "GND", (5.0, 10.0), (0.6, 1.4))
+    f.pad("P2", "GND", (5.0, 10.0), (0.6, 1.4))
+    f.pad("Q", "GND", (15.0, 10.0), (1.0, 1.0), layer=pcbnew.B_Cu)
+    f.zone("GND", pcbnew.B_Cu, [(6.5, 1), (19, 1), (19, 19), (6.5, 19)])
+    return f.save(Path(d) / "fx_coincident_pad_stub.kicad_pcb", rules={"min_connection": 0.127})

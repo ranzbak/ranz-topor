@@ -1,6 +1,7 @@
 //! Plane nets (plan "Capacity for N layers", plane nets): the pads of a net that has a pour are
-//! not wired to each other; a pad that the pour does not reach gets a short stub and a through
-//! via into the pour's layer, at a via site (a spot where [`Checker::via_fits`]-style tests pass:
+//! not wired to each other; a pad that the pour does not reach gets a short stub: a track alone
+//! into the fill where the pour fills a layer the pad has copper on (D6b), else a track and a
+//! through via into the pour's layer, at a via site (a spot where [`Checker::via_fits`]-style tests pass:
 //! the via checked as a foreign item against the board and all copper accepted so far). They are
 //! placed once per route on the static board, before any topology (D6a), and enter the
 //! projection as obstacles ([`extras`]): the planner routes around them instead of the drawing
@@ -39,12 +40,15 @@ pub struct Req {
     pub pour: usize,
 }
 
-/// A placed stub and via.
+/// A placed stub and via, or a track-only stub into a fill on the pad's own layer (`via` None:
+/// `size` is unused then).
 #[derive(Clone, Debug)]
 pub struct Out {
     pub items: Vec<Item>,
-    pub via: Vec2,
+    pub via: Option<Vec2>,
     pub size: ViaSize,
+    /// The stub's far end (the via centre, or the track's end inside the fill).
+    pub end: Vec2,
     /// Model layer id of the stub.
     pub layer: u32,
     pub stub_nm: f64,
@@ -58,6 +62,10 @@ pub struct SiteCost<'r> {
 }
 
 impl SiteCost<'_> {
+    /// The `via` factor's price of one via (a via site against a track-only stub).
+    fn via(&self) -> f64 {
+        self.reg.price(&Event::Via { wire: 0, count: 1, at: None }, &WireCtx::default())
+    }
     fn squeeze(&self, slack: f64, d: f64) -> f64 {
         self.reg.price(&Event::ViaSqueeze { wire: 0, at: Vec2::default(), slack_nm: slack, via_nm: d }, &WireCtx::default())
     }
@@ -75,9 +83,14 @@ fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
 /// outside the fill's holes, at least `r` from every edge): a via there reaches the pour (D6b:
 /// qmtech 1V8 stub vias stood in bare board next to a small local pour). O(fill vertices).
 pub fn in_fill(pour: &crate::model::Pour, p: Vec2, r: f64) -> bool {
+    in_fill_on(pour, None, p, r)
+}
+
+/// [`in_fill`] restricted to the fills on model layer `layer` (`None`: any layer).
+pub fn in_fill_on(pour: &crate::model::Pour, layer: Option<u32>, p: Vec2, r: f64) -> bool {
     let ring = |pts: &[crate::model::Pt]| -> Vec<Vec2> { pts.iter().map(|q| q.to_vec2()).collect() };
     let far = |ps: &[Vec2]| (0..ps.len()).all(|i| seg_dist(p, ps[i], ps[(i + 1) % ps.len()]) >= r);
-    pour.fills.iter().any(|f| {
+    pour.fills.iter().filter(|f| layer.is_none_or(|l| f.layer == l)).any(|f| {
         let outer = ring(&f.outer);
         outer.len() >= 3
             && point_in_poly(p, &outer)
@@ -117,6 +130,40 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)]) -
             Vec2 { x: a.cos(), y: a.sin() }
         })
         .collect();
+    // A track alone (D6b): where the pour has a fill on a layer the pad has copper on, a stub on
+    // that layer ending inside the fill joins the pad with no via (qmtech C7.1 beside the F.Cu-only
+    // 1V8 pour). Priced by length only; a via site pays the `via` factor on top.
+    let mut best_track: Option<(f64, Vec2, u32)> = None;
+    for l in (0..b.signal_layers.len()).filter(|&l| ob.layers.has(l)) {
+        let tl = b.signal_layers[l];
+        if !pour.fills.iter().any(|f| f.layer == tl) {
+            continue;
+        }
+        let mut d = step;
+        while d <= rpad + 3.0e6 {
+            if best_track.is_some_and(|(bc, ..)| cost.mm * d / 1e6 >= bc) {
+                break;
+            }
+            for u in &dirs {
+                let p = c + *u * d;
+                if point_in_poly(p, &ob.poly) || !in_fill_on(pour, Some(tl), p, 0.5 * rq.w) {
+                    continue;
+                }
+                let price = cost.mm * d / 1e6;
+                if best_track.is_some_and(|(bc, ..)| price >= bc) {
+                    continue;
+                }
+                let stub = track_item(rq.net, tl, rq.w, c, p, None);
+                if !dr.check_ok(&stub) || !dr.stub_own_ok(&stub, rq.pad, vias) {
+                    continue;
+                }
+                best_track = Some((price, p, tl));
+            }
+            d += step;
+        }
+    }
+    let via_price = cost.via();
+    let mut best_via: Option<(f64, Vec2, ViaSize)> = None;
     for &sz in &sizes {
         let mut d = rpad + 0.5 * sz.d as f64 * 0.5;
         let dmax = rpad + 3.0e6;
@@ -153,13 +200,37 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)]) -
             }
             d += step;
         }
-        if let Some((_, p)) = best {
+        if let Some((price, p)) = best {
+            best_via = Some((price + via_price, p, sz));
+            break;
+        }
+    }
+    // A via reaches every layer the pour fills; a track only the fill on its own layer, which the
+    // signals routed later on that layer can cut off (dcsgonebadge, D6b: with tracks preferred
+    // wherever cheaper, 35 of 35 GND stubs became F.Cu tracks, 16 pour pieces were cut off
+    // instead of 6, 12 connections fewer). So where the pour also fills a layer the pad has no
+    // copper on, a via site wins and a track is the fallback; where it fills only the pad's own
+    // layers, the via adds no access and the cheaper of the two wins.
+    let other_layers = pour.fills.iter().any(|f| !b.signal_layers.iter().enumerate().any(|(l, &id)| id == f.layer && ob.layers.has(l)));
+    let take_track = match (best_track, best_via) {
+        (Some(_), None) => true,
+        (Some((bt, ..)), Some((bv, ..))) => !other_layers && bt <= bv,
+        _ => false,
+    };
+    match (best_track, best_via) {
+        (Some((_, p, tl)), _) if take_track => {
+            let stub = track_item(rq.net, tl, rq.w, c, p, None);
+            dr.commit(&stub);
+            return Ok(Out { items: vec![stub], via: None, size: sizes.first().copied().unwrap_or(ViaSize { d: 0, drill: 0 }), end: p, layer: tl, stub_nm: (p - c).len() });
+        }
+        (_, Some((_, p, sz))) => {
             let vi = via_item(rq.net, p, sz, None);
             let stub = track_item(rq.net, lid, rq.w, c, p, None);
             dr.commit(&vi);
             dr.commit(&stub);
-            return Ok(Out { items: vec![stub, vi], via: p, size: sz, layer: lid, stub_nm: (p - c).len() });
+            return Ok(Out { items: vec![stub, vi], via: Some(p), size: sz, end: p, layer: lid, stub_nm: (p - c).len() });
         }
+        _ => {}
     }
     if std::env::var("TOPO_VIADBG").is_ok() {
         // Diagnosis (D1, report only): would a site be clean on the static board alone (pads,
@@ -187,7 +258,7 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)]) -
         }
         eprintln!("PLANEDBG pad {}.{} net {} at ({:.3},{:.3}) sites {tried} clean-on-static-board {static_ok}", pad.ref_, pad.number, rq.net, c.x / 1e6, -c.y / 1e6);
     }
-    Err(format!("pad {}.{}: no via site inside the pour's fill within 3 mm for a stub into its plane", pad.ref_, pad.number))
+    Err(format!("pad {}.{}: no via site inside the pour's fill and no track into a fill on its own layer within 3 mm for a stub into its plane", pad.ref_, pad.number))
 }
 
 /// Warnings for the pads and vias of plane connections that lie outside the pour's fill.
@@ -226,9 +297,12 @@ pub fn islands(model: &BoardModel, b: &Board, vias: &[(usize, Vec2)], reqs: &[Re
 /// one side only, which wants a graded factor, not a ring.
 pub fn extras(b: &Board, rq: &Req, o: &Out) -> Vec<Extra> {
     let ob = &b.proj.obstacles[rq.obs];
-    let (c, p) = (ob.center, o.via);
-    let r = 0.5 * o.size.d as f64;
-    let mut out = vec![Extra::Via { net: rq.net, at: p, d: o.size.d as f64, ring: 0.0 }];
+    let c = ob.center;
+    // A track-only stub (no via) runs from the pad to its end inside the fill.
+    let (p, r, mut out) = match o.via {
+        Some(p) => (p, 0.5 * o.size.d as f64, vec![Extra::Via { net: rq.net, at: p, d: o.size.d as f64, ring: 0.0 }]),
+        None => (o.end, 0.0, Vec::new()),
+    };
     let l = (p - c).len();
     if l <= r {
         return out;

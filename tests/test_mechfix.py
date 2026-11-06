@@ -103,5 +103,21 @@ def test_fx_local_pour_far_pads(tmp_path):
     _clean(_route("fx_local_pour_far_pads", tmp_path))
 
 
+def test_fx_same_layer_pour_stub(tmp_path):
+    """P joins the B.Cu pour by a B.Cu track alone (no via, no signal connection to Q)."""
+    m = _route("fx_same_layer_pour_stub", tmp_path)
+    _clean(m)
+    gnd = _conns(m, "GND")
+    assert len(gnd) == 1 and gnd[0]["to"]["kind"] == "pour" and gnd[0]["vias"] == 0, gnd
+
+
+def test_fx_coincident_pad_stub(tmp_path):
+    """The pad pair joins the B.Cu pour by one stub and via (no signal connection to Q)."""
+    m = _route("fx_coincident_pad_stub", tmp_path)
+    _clean(m)
+    gnd = _conns(m, "GND")
+    assert len(gnd) == 1 and gnd[0]["to"]["kind"] == "pour" and gnd[0]["vias"] == 1, gnd
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-m", "mechfix", "-q"]))

@@ -1446,8 +1446,15 @@ impl<'a> Drawer<'a> {
         let ok = |d: f64| d - 0.5 * t.width as f64 >= tol || d <= 0.0;
         // Another pad of the net: the stub keeps off it altogether. A centre line that only clips
         // a corner is still a sliver (J3.16 again: 0.1025 mm), and a stub needs no other pad.
+        // A pad the stub starts inside is the own pad's copper (D6b: dcsgonebadge USB-C J1.A1 and
+        // J1.B12 are one GND pad drawn twice; every stub of J1.A1 started inside J1.B12 and was
+        // refused, so J1.A1 became a 16 mm signal connection).
         let off = |d: f64| d - 0.5 * t.width as f64 >= tol;
-        self.model.pads.iter().enumerate().filter(|&(i, p)| i != own && p.net == t.net && p.layers.contains(&t.layer)).all(|(_, pad)| off(crate::geom::dist::dist_prim_skeleton(&prim, &self.model.skeleton(pad, t.layer))))
+        let root = crate::geom::Prim::Seg(crate::geom::Seg { a, b: a });
+        self.model.pads.iter().enumerate().filter(|&(i, p)| i != own && p.net == t.net && p.layers.contains(&t.layer)).all(|(_, pad)| {
+            let sk = self.model.skeleton(pad, t.layer);
+            crate::geom::dist::dist_prim_skeleton(&root, &sk) <= 0.0 || off(crate::geom::dist::dist_prim_skeleton(&prim, &sk))
+        })
             && vias.iter().all(|&(c, r)| {
                 let ab = b - a;
                 let u = ((c - a).dot(ab) / ab.len2().max(1.0)).clamp(0.0, 1.0);

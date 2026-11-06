@@ -370,7 +370,9 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options) -> PlaneStubs {
             match &r {
                 Ok(o) => {
                     out.extra.extend(planes::extras(&b, rq, o));
-                    vias.push((o.via, 0.5 * o.size.d as f64));
+                    if let Some(v) = o.via {
+                        vias.push((v, 0.5 * o.size.d as f64));
+                    }
                 }
                 // No clean via site inside the pour's fill near the pad: a signal connection
                 // joins it to its net's copper instead.
@@ -977,7 +979,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
                 out[*conn].routed = true;
                 out[*conn].items = o.items.clone();
-                out[*conn].vias = vec![(o.via, o.size)];
+                out[*conn].vias = o.via.map(|v| (v, o.size)).into_iter().collect();
                 out[*conn].layers = vec![o.layer];
                 out[*conn].length_nm = o.stub_nm;
                 out[*conn].stub_nm = o.stub_nm;
@@ -1478,7 +1480,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         format!(
             "{total} wire vias: {pad_forced} forced by SMD pads on different layers, {crossing} by crossings or capacity (the capacity refinement relabels, it adds no via), {one_via} wires with one via, {pairs_aba} wires with a layer pair A-B-A, {close} via pairs of one wire closer than 3 mm; {} plane stub vias",
-            plane_res.iter().filter(|(_, r)| r.is_ok()).count()
+            plane_res.iter().filter(|(_, r)| r.as_ref().is_ok_and(|o| o.via.is_some())).count()
         )
     };
     let causes_before = causes(&plans, &drawn);
