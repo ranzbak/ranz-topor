@@ -180,7 +180,7 @@ def test_default_options_lists_every_field(engine, root):
     m = _model_with_track()
     m["kept"] = []
     out = json.loads(engine.route(json.dumps(m), json.dumps({**d, "wall_clock_s": 10.0})))
-    assert out["routed"] == 1 and out["stop_reason"] == "converged"
+    assert out["routed"] == 1 and out["stop_reason"] == "stable"  # M-B0: a headless run ends at "Routes stable"
 
 
 def _strip(r):

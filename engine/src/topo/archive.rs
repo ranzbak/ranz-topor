@@ -72,7 +72,7 @@ impl Objective {
         }
     }
     /// Lexicographic key: errors, objective value, shrinkages.
-    fn better(&self, a: &Criteria, b: &Criteria) -> bool {
+    pub fn better(&self, a: &Criteria, b: &Criteria) -> bool {
         a.errors < b.errors
             || a.errors == b.errors
                 && (self.value(a) < self.value(b) - 1e-9 || (self.value(a) - self.value(b)).abs() <= 1e-9 && a.shrinkages < b.shrinkages)

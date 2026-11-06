@@ -119,97 +119,372 @@ fn fail(o: &mut [Outcome], i: usize, reason: impl Into<String>) {
 
 /// Route `model` with the topological core (see the module doc).
 ///
-/// Reproducible: every stop that changes the result is a work cap (`topo_rounds`, `max_ripped`,
-/// `max_expansions`, `reroute_rounds`, the move cap of the descent). The time budget
-/// (`wall_clock_s`) is only an emergency stop; when it fires the result says so in a warning
-/// ([`TIME_HIT`]), because then it depends on the machine's speed and load.
+/// Iterations like TopoR (M-B0, [`super::schedule`]): `[optimize] runs` independent seeded runs
+/// (in parallel on the engine's thread pool), each a sequence of whole-route cycles with a
+/// fluctuation width that narrows and reheats, until its routes are stable (headless: then it
+/// ends) or the user's OK / Cancel, the safety cap `topo_rounds` or the emergency stop
+/// `wall_clock_s`. The best result by the objective over all runs is returned.
+///
+/// Reproducible: every stop that changes the result is a work cap or the stable test, which
+/// count cycles, never time. The time budget (`wall_clock_s`) is only an emergency stop; when
+/// it fires the result says so in a warning ([`TIME_HIT`]), because then it depends on the
+/// machine's speed and load. The user's OK after "Routes stable" ends a run on purpose.
 pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteResult {
     let t0 = Instant::now();
+    let n = opts.runs.max(1);
     let obj = Objective::parse(&opts.objective, opts.mm_per_via);
-    let mut arch: Archive<RouteResult> = Archive::new(opts.variants);
-    let offer = |arch: &mut Archive<RouteResult>, round: usize, ro: &RoundOut| {
-        if let Some((c, r)) = &ro.pre {
-            arch.offer(Variant { label: format!("round {round} as drawn"), crit: *c, payload: r.clone() }, &obj);
-        }
-        arch.offer(Variant { label: format!("round {round}"), crit: ro.crit, payload: ro.result.clone() }, &obj);
-    };
     ctl.update("setup", 0, 0, 0, 0, 0.0);
+    ctl.with_progress(|p| {
+        p.runs = n as u32;
+        p.rounds = opts.topo_rounds.max(1) as u32;
+    });
     ctl.stage(1, opts.topo_rounds.max(1) as u32, "plane stubs (pads of plane nets onto their pour)");
-    let stubs = place_plane_stubs(model, opts, ctl, (opts.wall_clock_s > 0.0).then(|| t0 + std::time::Duration::from_secs_f64(opts.wall_clock_s)));
-    let (r1, h0, mut mem) = route_round(model, opts, ctl, &[], &Memory::default(), 1, &stubs);
-    offer(&mut arch, 1, &r1);
-    let mut time_hit = r1.result.timed_out;
-    let mut stop_reason = r1.result.stop_reason.clone();
-    let first = r1.result.routed;
-    let mut best_routed = first;
-    let total = r1.result.connections_total;
-    drop(r1);
-    let over_budget = || opts.wall_clock_s > 0.0 && t0.elapsed().as_secs_f64() >= opts.wall_clock_s;
-    // Feedback to the topology (plan S2c item 4): the rooms the drawing found too small are
-    // lowered by what was missing, and the whole route is made again (at most `topo_rounds`
-    // rounds in all, while each round routes more). Every round offers its variants.
-    let mut all: BTreeMap<(usize, usize), f64> = h0.iter().map(|&(e, l, r)| ((e, l), r)).collect();
-    let mut round_note = Vec::new();
-    let mut stall = 0usize;
-    for round in 2..=opts.topo_rounds.max(1) {
-        if !opts.drawing_feedback || all.is_empty() || stop_reason != "converged" {
-            break;
+    let deadline = (opts.wall_clock_s > 0.0).then(|| t0 + std::time::Duration::from_secs_f64(opts.wall_clock_s));
+    let stubs = place_plane_stubs(model, opts, ctl, deadline);
+    let coord = Coord::new(ctl, n, obj);
+    let mut outs: Vec<RunOut> = run_all(model, opts, ctl, &coord, &stubs, t0, n);
+    // The best run: fewest errors, then the objective, then shrinkages; ties: the lower run.
+    let mut pick = 0;
+    for k in 1..outs.len() {
+        if obj.better(&outs[k].crit, &outs[pick].crit) {
+            pick = k;
         }
-        if over_budget() {
-            time_hit = true;
-            break;
+    }
+    let lines: Vec<String> = outs.iter().map(|o| o.line.clone()).collect();
+    let cycle_lines: Vec<String> = outs.iter().map(|o| o.cycles_line.clone()).collect();
+    let stable_all = outs.iter().all(|o| o.stable_at.is_some());
+    let cancel = ctl.is_cancelled();
+    let time_hit = outs.iter().any(|o| o.time_hit);
+    let mut best = outs.swap_remove(pick).result;
+    if opts.stitch_islands {
+        ctl.stage(0, opts.topo_rounds.max(1) as u32, "pour stitching");
+        stitch_pours(model, opts, &mut best, deadline);
+    }
+    best.warnings.extend(cycle_lines);
+    if n > 1 {
+        best.warnings.push(format!("best of {n} seeded runs ([optimize] runs): run {} picked; {}", pick + 1, lines.join("; ")));
+    }
+    best.stop_reason = if cancel {
+        if stable_all { "stable" } else { "cancel" }
+    } else if time_hit {
+        "timeout"
+    } else if stable_all {
+        "stable"
+    } else {
+        "round cap"
+    }
+    .into();
+    best.timed_out = time_hit && !(cancel && stable_all);
+    best.converged = !best.timed_out;
+    best.runtime_s = t0.elapsed().as_secs_f64();
+    if best.timed_out {
+        let why = if cancel { "Cancel stopped the run before its routes were stable".to_string() } else { format!("run.timeout_s = {:.0} s stopped the run before its routes were stable", opts.wall_clock_s) };
+        best.warnings.push(format!("{TIME_HIT} ({why})"));
+    }
+    best
+}
+
+/// One run of a best-of-N call, as [`route_topo`] needs it back.
+struct RunOut {
+    result: RouteResult,
+    crit: Criteria,
+    /// The cycle after which its routes were first stable.
+    stable_at: Option<usize>,
+    /// Cancel or the time budget ended it before its routes were stable.
+    time_hit: bool,
+    /// Its summary for the report, and its cycle by cycle line.
+    line: String,
+    cycles_line: String,
+}
+
+/// The coordinator of the runs of one call: the progress fields of M-B0 over all runs.
+struct Coord<'a> {
+    ctl: &'a RunControl,
+    obj: Objective,
+    st: std::sync::Mutex<Vec<RunState>>,
+}
+
+#[derive(Clone, Default)]
+struct RunState {
+    cycle: usize,
+    stable: bool,
+    done: bool,
+    gain: Option<f64>,
+    /// Best so far: criteria, routed, total.
+    best: Option<(Criteria, usize, usize)>,
+}
+
+impl<'a> Coord<'a> {
+    fn new(ctl: &'a RunControl, n: usize, obj: Objective) -> Coord<'a> {
+        Coord { ctl, obj, st: std::sync::Mutex::new(vec![RunState::default(); n]) }
+    }
+
+    /// Run `k` starts cycle `cycle` with fluctuation `width`.
+    fn begin(&self, k: usize, cycle: usize, width: f64) {
+        let Ok(mut s) = self.st.lock() else { return };
+        s[k].cycle = cycle;
+        let round = s.iter().map(|r| r.cycle).max().unwrap_or(cycle) as u32;
+        self.ctl.with_progress(|p| {
+            p.round = round;
+            p.width = width;
+        });
+    }
+
+    /// Run `k` ended a cycle (or the run, `done`); publish the M-B0 progress over all runs.
+    fn report(&self, k: usize, upd: impl FnOnce(&mut RunState)) {
+        let Ok(mut s) = self.st.lock() else { return };
+        upd(&mut s[k]);
+        let n = s.len();
+        let stable_n = s.iter().filter(|r| r.stable).count();
+        let settled = s.iter().all(|r| r.stable || r.done);
+        let gain = s.iter().filter(|r| !r.done).map(|r| r.gain).try_fold(None::<f64>, |acc, g| g.map(|g| Some(acc.map_or(g, |a: f64| a.max(g)))));
+        let mut bi: Option<usize> = None;
+        for (i, r) in s.iter().enumerate() {
+            if let Some((c, _, _)) = &r.best {
+                if bi.is_none_or(|j| self.obj.better(c, &s[j].best.as_ref().expect("best").0)) {
+                    bi = Some(i);
+                }
+            }
         }
+        self.ctl.with_progress(|p| {
+            p.runs = n as u32;
+            p.runs_stable = stable_n as u32;
+            p.runs_done = s.iter().filter(|r| r.done).count() as u32;
+            p.stable = settled && stable_n > 0;
+            p.gain_pct = gain.flatten();
+            if let Some(i) = bi {
+                let (c, routed, total) = s[i].best.expect("best");
+                p.best_routed = routed;
+                p.best_total = total;
+                p.best_length_mm = c.length_mm;
+                p.best_vias = c.vias;
+                p.best_run = i as u32 + 1;
+            }
+        });
+    }
+}
+
+/// Seed of run `k` of a best-of-N call: run 0 keeps the configured seed.
+fn run_seed(seed: u64, k: usize) -> u64 {
+    if k == 0 {
+        seed
+    } else {
+        seed.wrapping_add(0x9E37_79B9_7F4A_7C15u64.wrapping_mul(k as u64)).rotate_left(17) ^ 0xD1B5_4A32_D192_ED03
+    }
+}
+
+/// One run of a best-of-N call while it iterates: its archive, schedule, stable meter, drawing
+/// feedback and negotiation memory. A cycle ([`Run::step`]) depends only on this state, so the
+/// run's result does not depend on how the cycles of the runs are interleaved on the threads.
+struct Run {
+    k: usize,
+    seed: u64,
+    arch: Archive<RouteResult>,
+    sched: super::schedule::Schedule,
+    meter: super::schedule::Meter,
+    /// Drawing feedback (plan S2c item 4): the rooms the drawing found too small, lowered by what
+    /// was missing, in every later cycle.
+    all: BTreeMap<(usize, usize), f64>,
+    mem: Memory,
+    notes: Vec<String>,
+    time_hit: bool,
+    stable_at: Option<usize>,
+    first: Option<usize>,
+    cycles: usize,
+    picked_at: usize,
+    /// Router time of its cycles (s).
+    busy_s: f64,
+    done: bool,
+}
+
+impl Run {
+    fn new(opts: &Options, k: usize) -> Run {
+        Run {
+            k,
+            seed: run_seed(opts.seed, k),
+            arch: Archive::new(opts.variants),
+            sched: super::schedule::Schedule::new(opts.fluctuation, opts.fluctuation_narrowing, opts.fluctuation_stuck, opts.fluctuation_reheat),
+            meter: super::schedule::Meter::new(opts.stable_window, opts.stable_gain_pct),
+            all: BTreeMap::new(),
+            mem: Memory::default(),
+            notes: Vec::new(),
+            time_hit: false,
+            stable_at: None,
+            first: None,
+            cycles: 0,
+            picked_at: 0,
+            busy_s: 0.0,
+            done: false,
+        }
+    }
+
+    /// One whole-route cycle; sets `done` when the run ends (stable for a run that stops by
+    /// itself, the safety cap, Cancel / OK, the time budget).
+    #[allow(clippy::too_many_arguments)]
+    fn step(&mut self, model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, stubs: &PlaneStubs, t_call: Instant) {
+        let t = Instant::now();
+        let obj = coord.obj;
+        let cycle = self.cycles + 1;
+        let over_budget = opts.wall_clock_s > 0.0 && t_call.elapsed().as_secs_f64() >= opts.wall_clock_s;
+        if cycle > opts.topo_rounds.max(1) || (cycle > 1 && (ctl.is_cancelled() || cancelled() || over_budget)) {
+            self.time_hit = cycle <= opts.topo_rounds.max(1) && self.stable_at.is_none();
+            self.done = true;
+            return;
+        }
+        // The first cycle of the first run routes with the plain weights (the reference).
+        let reference = self.k == 0 && cycle == 1;
+        let width = if reference { 0.0 } else { self.sched.width };
+        coord.begin(self.k, cycle, width);
         let mut o2 = opts.clone();
+        o2.seed = self.seed;
+        o2.fluctuation = width;
         if opts.wall_clock_s > 0.0 {
-            o2.wall_clock_s = (opts.wall_clock_s - t0.elapsed().as_secs_f64()).max(1.0);
+            o2.wall_clock_s = (opts.wall_clock_s - t_call.elapsed().as_secs_f64()).max(1.0);
         }
-        let hv: Hints = all.iter().map(|(&(e, l), &r)| (e, l, r)).collect();
-        let (r2, h2, mem2) = route_round(model, &o2, ctl, &hv, &mem, round, &stubs);
-        time_hit |= r2.result.timed_out;
-        stop_reason = r2.result.stop_reason.clone();
-        mem = mem2;
-        round_note.push(format!("round {round}: {} cut rooms lowered, routed {} of {}", hv.len(), r2.result.routed, r2.result.connections_total));
+        let hv: Hints = if opts.drawing_feedback { self.all.iter().map(|(&(e, l), &r)| (e, l, r)).collect() } else { Vec::new() };
+        let (ro, h2, mem2) = route_round(model, &o2, ctl, &hv, &self.mem, cycle, stubs);
+        self.cycles = cycle;
+        self.mem = mem2;
         for (e, l, r) in h2 {
-            let v = all.entry((e, l)).or_insert(r);
+            let v = self.all.entry((e, l)).or_insert(r);
             *v = v.min(r);
         }
-        let routed = r2.result.routed;
-        offer(&mut arch, round, &r2);
-        if routed > best_routed {
-            best_routed = routed;
-            stall = 0;
-        } else {
-            // The history stays: a repeat that routes no more can still open the way for the next.
-            stall += 1;
-            if stall >= 2 {
-                break;
+        let interrupted = ro.result.timed_out;
+        let routed = ro.result.routed;
+        let total = ro.result.connections_total;
+        self.first.get_or_insert(routed);
+        // An interrupted cycle is offered only when nothing else is there: what OK returns is the
+        // best of the cycles that finished.
+        if !interrupted || self.arch.items.is_empty() {
+            if let Some((c, r)) = &ro.pre {
+                self.arch.offer(Variant { label: format!("round {cycle} as drawn"), crit: *c, payload: r.clone() }, &obj);
+            }
+            self.arch.offer(Variant { label: format!("round {cycle}"), crit: ro.crit, payload: ro.result.clone() }, &obj);
+        }
+        drop(ro);
+        let pick = self.arch.pick(&obj).expect("a cycle was offered");
+        let pc = self.arch.items[pick].crit;
+        let gained = self.meter.push(super::schedule::Score { incomplete: pc.errors, value: obj.value(&pc) });
+        if gained {
+            self.picked_at = cycle;
+        }
+        if self.meter.stable() && self.stable_at.is_none() {
+            self.stable_at = Some(cycle);
+        }
+        let best_routed = self.arch.items[pick].payload.routed;
+        let gain = self.meter.gain_pct();
+        self.notes.push(format!(
+            "{cycle}: w {width:.3}, routed {routed}{}{}",
+            if gained { " (new best)" } else { "" },
+            gain.map(|g| format!(", gain {g:.2} %")).unwrap_or_default()
+        ));
+        let stable = self.stable_at.is_some();
+        coord.report(self.k, |r| {
+            r.stable = stable;
+            r.gain = gain;
+            r.best = Some((pc, best_routed, total));
+        });
+        self.busy_s += t.elapsed().as_secs_f64();
+        if interrupted {
+            self.time_hit = self.stable_at.is_none();
+            self.done = true;
+            return;
+        }
+        if !reference && self.sched.after_cycle(gained, pc.errors > 0) {
+            self.notes.push(format!("{cycle}: stuck {} cycles, reheat to {:.3}", opts.fluctuation_stuck, self.sched.width));
+        }
+        if let Some(s) = self.stable_at {
+            // Headless: stop at stable (+ patience). With the dialog: OK, or finish by itself when the
+            // best has not improved for `finish_patience` cycles after stable.
+            if opts.stop_when_stable && cycle >= s + opts.stable_patience
+                || !opts.stop_when_stable && opts.finish_when_stable && cycle >= s.max(self.picked_at) + opts.finish_patience
+            {
+                self.done = true;
             }
         }
     }
-    let pick = arch.pick(&obj).expect("round 1 is always offered");
-    let mut best = arch.items[pick].payload.clone();
-    if opts.stitch_islands {
-        ctl.stage(0, opts.topo_rounds.max(1) as u32, "pour stitching");
-        stitch_pours(model, opts, &mut best, (opts.wall_clock_s > 0.0).then(|| t0 + std::time::Duration::from_secs_f64(opts.wall_clock_s)));
-    }
-    best.variants = arch.table(Some(pick));
-    best.warnings.push(format!("{} ({} offered)", table_text(&best.variants, &obj), arch.offered));
-    if !round_note.is_empty() {
-        best.warnings.push(format!(
-            "topology feedback (rooms lowered by the violation depth, whole route repeated): round 1 routed {} of {}; {}; picked {} (routed {}, rescued {})",
-            first,
-            total,
-            round_note.join("; "),
-            arch.items[pick].label,
+
+    /// The run's result: its archive's pick, with the variant table and its cycle line.
+    fn finish(self, opts: &Options, coord: &Coord) -> RunOut {
+        let obj = coord.obj;
+        let pick = self.arch.pick(&obj).expect("round 1 is always offered");
+        let crit = self.arch.items[pick].crit;
+        let mut best = self.arch.items[pick].payload.clone();
+        best.variants = self.arch.table(Some(pick));
+        best.warnings.push(format!("{} ({} offered)", table_text(&best.variants, &obj), self.arch.offered));
+        let run = if opts.runs.max(1) == 1 { String::new() } else { format!("run {} ", self.k + 1) };
+        let stable_txt = match self.stable_at {
+            Some(s) => format!("stable after cycle {s}"),
+            None => "not stable".into(),
+        };
+        let cycles = self.cycles;
+        let cycles_line = format!(
+            "{run}cycles (fluctuation schedule {:.2} x {:.2}/cycle, reheat {:.2} after {} without gain; stable below {:.2} % over {} cycles): {cycles} cycles, {stable_txt}, {} reheats; first cycle routed {} of {}, picked {} (routed {}); {}",
+            opts.fluctuation,
+            opts.fluctuation_narrowing,
+            opts.fluctuation_reheat,
+            opts.fluctuation_stuck,
+            opts.stable_gain_pct,
+            opts.stable_window,
+            self.sched.reheats,
+            self.first.unwrap_or(0),
+            best.connections_total,
+            self.arch.items[pick].label,
             best.routed,
-            best.routed as i64 - first as i64
-        ));
+            self.notes.join("; ")
+        );
+        coord.report(self.k, |r| r.done = true);
+        let line = format!(
+            "run {} (seed {}): routed {} of {}, objective {:.0}, {cycles} cycles, {stable_txt}, best at cycle {}, {:.0} s",
+            self.k + 1,
+            self.seed,
+            best.routed,
+            best.connections_total,
+            obj.value(&crit),
+            self.picked_at,
+            self.busy_s
+        );
+        RunOut { result: best, crit, stable_at: self.stable_at, time_hit: self.time_hit, line, cycles_line }
     }
-    best.runtime_s = t0.elapsed().as_secs_f64();
-    if time_hit {
-        best.warnings.push(format!("{TIME_HIT} (run.timeout_s = {:.0} s stopped the run before its work caps)", opts.wall_clock_s));
+}
+
+/// The runs' cycles on `workers` threads: a free thread takes the run with the fewest cycles
+/// that no other thread is stepping (so every run progresses, also when there are more runs than
+/// threads, and "Routes stable" can come from all of them). The threads are the engine's share
+/// for the runs (`min(runs, rayon threads)`), the checks inside a cycle use the rayon pool.
+fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, stubs: &PlaneStubs, t_call: Instant, n: usize) -> Vec<RunOut> {
+    use std::sync::Mutex;
+    let runs: Vec<Mutex<Run>> = (0..n).map(|k| Mutex::new(Run::new(opts, k))).collect();
+    let taken: Mutex<Vec<bool>> = Mutex::new(vec![false; n]);
+    let cycles: Mutex<Vec<(usize, bool)>> = Mutex::new(vec![(0, false); n]);
+    let worker = || loop {
+        let k = {
+            let (Ok(mut tk), Ok(cy)) = (taken.lock(), cycles.lock()) else { return };
+            let Some(k) = (0..n).filter(|&k| !tk[k] && !cy[k].1).min_by_key(|&k| (cy[k].0, k)) else { return };
+            tk[k] = true;
+            k
+        };
+        let Ok(mut r) = runs[k].lock() else { return };
+        let c = if n == 1 { ctl.clone() } else { ctl.for_run(k as u32 + 1) };
+        r.step(model, opts, &c, coord, stubs, t_call);
+        let st = (r.cycles, r.done);
+        drop(r);
+        if let (Ok(mut tk), Ok(mut cy)) = (taken.lock(), cycles.lock()) {
+            tk[k] = false;
+            cy[k] = st;
+        }
+    };
+    let workers = n.min(rayon::current_num_threads()).max(1);
+    if workers == 1 {
+        worker();
+    } else {
+        std::thread::scope(|s| {
+            for _ in 0..workers {
+                s.spawn(worker);
+            }
+        });
     }
-    best
+    runs.into_iter().map(|m| m.into_inner().expect("run state").finish(opts, coord)).collect()
 }
 
 /// Pour stitching (D4, [`super::stitch`]) on the picked result: the stitches join its items
@@ -620,13 +895,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         r
     };
     let cap = opts.max_expansions.max(1);
+    // Fluctuating coefficients of this cycle (M-B0 schedule) also in the initial search.
+    let reg_p2 = if opts.fluctuation > 0.0 { reg.fluctuated(seed_of(opts.seed, round, 0), opts.fluctuation) } else { reg.clone() };
     for &ci in &order {
         if expired() {
             timed_out = true;
             fail(&mut out, conn_of[ci], "time limit reached before this connection was routed");
             continue;
         }
-        if !route_one(&mut st, ci, cap, &mut wire_conn, &reg) {
+        if !route_one(&mut st, ci, cap, &mut wire_conn, &reg_p2) {
             p2_failed.push(ci);
         }
     }
@@ -634,7 +911,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // One retry of the failed connections with a larger search cap.
     let mut still: Vec<usize> = Vec::new();
     for &ci in &p2_failed {
-        if expired() || !route_one(&mut st, ci, cap * 4, &mut wire_conn, &reg) {
+        if expired() || !route_one(&mut st, ci, cap * 4, &mut wire_conn, &reg_p2) {
             still.push(ci);
         }
     }

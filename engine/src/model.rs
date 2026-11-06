@@ -1083,9 +1083,10 @@ pub struct Options {
     /// where the two part instead (one copper, a T there), when that is cheaper by length and the
     /// `junction_angle` factor and the new track keeps every clearance. Default on.
     pub fuse_branches: bool,
-    /// Topological core (S3, `topor.toml [optimize] rounds`): most whole-route rounds (the first
-    /// included). A work cap, not a time cap: the same board and settings give the same result on
-    /// any machine and with any thread count.
+    /// Topological core (S3, `topor.toml [optimize] rounds`): most whole-route cycles per run (the
+    /// first included). Since M-B0 a safety cap: a run ends at "Routes stable" (`stable_*`) or at
+    /// the user's OK; the cap ends a run that never settles. A work cap, not a time cap: the same
+    /// board and settings give the same result on any machine and with any thread count.
     pub topo_rounds: usize,
     /// Topological core (S3, `topor.toml [optimize] max_ripped`): most wires one whole route may
     /// take out and route again (negotiated rip-up-and-reroute, drawing feedback and the P4 moves
@@ -1113,10 +1114,40 @@ pub struct Options {
     /// Topological core (S3, `topor.toml [optimize] max_moves`): most move evaluations of the
     /// descent per whole route (each label sweep has the same cap). A work cap.
     pub max_moves: usize,
-    /// Topological core (S3, `topor.toml [optimize] fluctuation`): relative amplitude of the
-    /// seeded perturbation of the factor weights between rounds of the rip-up-and-reroute and
-    /// sweeps of the descent (0 = fixed weights).
+    /// Topological core (S3 / M-B0, `topor.toml [optimize] fluctuation`): start width of the
+    /// fluctuation schedule (`topo::schedule`): the factor weights of a whole-route cycle are
+    /// multiplied by seeded factors in `[1 - width, 1 + width]` (search, rip-up-and-reroute, descent);
+    /// the first cycle of the first run uses the plain weights (0 = fixed weights throughout).
     pub fluctuation: f64,
+    /// M-B0 (`[optimize] fluctuation_narrowing`): the width is multiplied by this after every cycle.
+    pub fluctuation_narrowing: f64,
+    /// M-B0 (`[optimize] fluctuation_stuck`): cycles without a gain of the best result, while it is
+    /// still incomplete, after which the width is set back to `fluctuation_reheat` (0 = never).
+    pub fluctuation_stuck: usize,
+    /// M-B0 (`[optimize] fluctuation_reheat`): width after a reheat (then it narrows again).
+    pub fluctuation_reheat: f64,
+    /// M-B0 (`[optimize] stable_window`): cycles over which the gain of the best result is measured.
+    pub stable_window: usize,
+    /// M-B0 (`[optimize] stable_gain_pct`): gain (%) over `stable_window` cycles below which the
+    /// routes count as stable ("Routes stable" in the progress dialog).
+    pub stable_gain_pct: f64,
+    /// M-B0: a run ends by itself when its routes are stable (+ `stable_patience` cycles); the
+    /// KiCad plugin's dialog sets it false (the user's OK ends the run). Not in topor.toml.
+    pub stop_when_stable: bool,
+    /// M-B0 (`[optimize] stable_patience`): cycles a run that stops by itself keeps going after
+    /// "stable" before it ends.
+    pub stable_patience: usize,
+    /// M-B0 (`[optimize] finish_when_stable`): a run that does not stop at "stable" by itself (the
+    /// plugin's dialog) still finishes on its own once its best result has not improved for
+    /// `finish_patience` more cycles after "stable" (a normal finish, no time warning); false =
+    /// keep iterating until OK / Cancel / the safety cap / `wall_clock_s` (the TopoR way).
+    pub finish_when_stable: bool,
+    /// M-B0 (`[optimize] finish_patience`): cycles without a better result after "stable" before
+    /// such a run finishes by itself.
+    pub finish_patience: usize,
+    /// M-B0 (`[optimize] runs`): independent seeded runs; the best by the objective is the result.
+    /// They run in parallel on the engine's thread pool (threads are shared, not multiplied).
+    pub runs: usize,
     /// Router (NX, `topor.toml [search] neck_max_mm`): longest necked stub, nm; 0 = twice the
     /// pad's long side.
     pub neck_max_nm: i64,
@@ -1203,7 +1234,7 @@ impl Default for Options {
             crossing_vias: "crossing".into(),
             junction_pad_mm: 0.0,
             fuse_branches: true,
-            topo_rounds: 4,
+            topo_rounds: 30,
             max_ripped: 5000,
             max_expansions: 2_000_000,
             objective: "length_vias".into(),
@@ -1211,7 +1242,17 @@ impl Default for Options {
             variants: 8,
             moves: false,
             max_moves: 400,
-            fluctuation: 0.0,
+            fluctuation: 0.2,
+            fluctuation_narrowing: 0.7,
+            fluctuation_stuck: 2,
+            fluctuation_reheat: 0.2,
+            stable_window: 4,
+            stable_gain_pct: 0.5,
+            stop_when_stable: true,
+            stable_patience: 0,
+            finish_when_stable: true,
+            finish_patience: 4,
+            runs: 5,
             neck_max_nm: 0,
             pad_bridge_max_nm: 2_000_000,
             steiner: true,

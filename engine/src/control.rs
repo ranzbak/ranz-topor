@@ -39,6 +39,36 @@ pub struct Progress {
     pub round: u32,
     #[serde(default)]
     pub rounds: u32,
+    /// M-B0: the best result has gained less than `[optimize] stable_gain_pct` over the last
+    /// `stable_window` cycles in every run ("Routes stable"; the plugin's Cancel then reads OK).
+    #[serde(default)]
+    pub stable: bool,
+    /// M-B0: gain (%) of the best result over the last `stable_window` cycles (the largest over
+    /// the runs still going); `None` before a full window.
+    #[serde(default)]
+    pub gain_pct: Option<f64>,
+    /// M-B0: fluctuation width of the cycle that started last.
+    #[serde(default)]
+    pub width: f64,
+    /// M-B0 best of N: runs in all (`[optimize] runs`), how many are stable, how many ended.
+    #[serde(default)]
+    pub runs: u32,
+    #[serde(default)]
+    pub runs_stable: u32,
+    #[serde(default)]
+    pub runs_done: u32,
+    /// M-B0: the best result so far over all runs (what OK / Cancel returns): routed of total,
+    /// length (mm), vias and its run (1-based; 0 = none yet).
+    #[serde(default)]
+    pub best_routed: usize,
+    #[serde(default)]
+    pub best_total: usize,
+    #[serde(default)]
+    pub best_length_mm: f64,
+    #[serde(default)]
+    pub best_vias: usize,
+    #[serde(default)]
+    pub best_run: u32,
 }
 
 /// Cancel flag and progress of one run; cheap to clone (shared state).
@@ -46,6 +76,9 @@ pub struct Progress {
 pub struct RunControl {
     pub cancel: Arc<AtomicBool>,
     pub progress: Arc<Mutex<Progress>>,
+    /// M-B0: 0 = the only run; k >= 1 = run k of a best-of-N call (its stage text is prefixed
+    /// with the run, and the round is the coordinator's).
+    pub run: u32,
 }
 
 impl RunControl {
@@ -73,9 +106,25 @@ impl RunControl {
     /// Name the current stage and round (progress dialog wording); leaves the counters alone. O(1).
     pub(crate) fn stage(&self, round: u32, rounds: u32, stage: &str) {
         if let Ok(mut p) = self.progress.lock() {
+            if self.run > 0 && p.runs > 1 {
+                p.stage = if stage.is_empty() { String::new() } else { format!("run {}: {stage}", self.run) };
+                return;
+            }
             p.stage = stage.to_string();
             p.round = round;
             p.rounds = rounds;
+        }
+    }
+
+    /// The same cancel flag and progress, as run `run` (1-based) of a best-of-N call. O(1).
+    pub(crate) fn for_run(&self, run: u32) -> RunControl {
+        RunControl { cancel: self.cancel.clone(), progress: self.progress.clone(), run }
+    }
+
+    /// Change the progress under the lock (the M-B0 coordinator's fields). O(1) + `f`.
+    pub(crate) fn with_progress(&self, f: impl FnOnce(&mut Progress)) {
+        if let Ok(mut p) = self.progress.lock() {
+            f(&mut p);
         }
     }
 
