@@ -86,9 +86,13 @@ _ZCS = bt.ZoneConnectionStyle
 #: kipy island removal mode -> KiCad ISLAND_REMOVAL_MODE (0 always, 1 never, 2 below the minimum area)
 _IRM_TO_KICAD = {bt.IslandRemovalMode.IRM_UNKNOWN: 0, bt.IslandRemovalMode.IRM_ALWAYS: 0,
                  bt.IslandRemovalMode.IRM_NEVER: 1, bt.IslandRemovalMode.IRM_AREA: 2}
-#: kipy ZoneConnectionStyle -> KiCad ZONE_CONNECTION (INHERITED 0, NONE 1, THERMAL 2, FULL 3, THT_THERMAL 4)
-_ZC_TO_KICAD = {_ZCS.ZCS_UNKNOWN: 0, _ZCS.ZCS_INHERITED: 0, _ZCS.ZCS_NONE: 1, _ZCS.ZCS_THERMAL: 2,
-                _ZCS.ZCS_FULL: 3, _ZCS.ZCS_PTH_THERMAL: 4}
+#: kipy ZoneConnectionStyle -> the model's zone connection, pcbnew's ZONE_CONNECTION values as the harness exports
+#: them and the engine reads them (engine/src/pourcheck.rs CONN_*: NONE 0, THERMAL 1, FULL 2, THT_THERMAL 3);
+#: inherited / unknown -> None (no override). K1: this table was off by one (INHERITED 0, NONE 1, ...), so over
+#: IPC a thermal zone read as full and a pad set to "none" as thermal (dcsgonebadge JP1, U4.21).
+_ZC_TO_KICAD = {_ZCS.ZCS_UNKNOWN: None, _ZCS.ZCS_INHERITED: None, _ZCS.ZCS_NONE: 0, _ZCS.ZCS_THERMAL: 1,
+                _ZCS.ZCS_FULL: 2, _ZCS.ZCS_PTH_THERMAL: 3}
+_ZONE_DEFAULT_CONN = 1  # a zone without a setting: KiCad's default, thermal reliefs
 _DEFAULT_THERMAL_NM = 500_000  # KiCad ZONE_SETTINGS default (gap and spoke width)
 
 
@@ -236,11 +240,24 @@ def pad_shape(pad, bl, poly_fn) -> dict:
     return {"kind": "poly", "pts": _hull_of(rings)}
 
 
-def pad_from_kipy(pad, *, ref: str, net_codes: dict, cu_ids: set, poly_fn=None, fp_zone_connection: int = 0,
+def pad_polygon_rings(pwh, max_err: int) -> list:
+    """KiCad's polygon of a custom / trapezoid / chamfered / offset pad (``PolygonWithHoles``) as obstacle rings that
+    CONTAIN the copper. KiCad hands the pad's curves already flattened (plain points ON the curve, its own polygon at
+    the board's max error), so the ring is grown outward by `max_err` (``geom.grow_ring_outward``, as pcbnew's
+    ERROR_OUTSIDE polygon of the harness is), and arc nodes, if any, are flattened outward first. K1 (live
+    dcsgonebadge): the chords of solder-jumper pad JP1.3's two r = 0.5 mm circles lay up to 5 um inside KiCad's
+    copper and seven routed tracks came 1 - 4 um too close to it (KiCad DRC clearance). Excess <= max_err +
+    OBSTACLE_ERR_NM. O(points^2) (simplicity check of the grown ring; pads have few points)."""
+    err = min(int(max_err), OBSTACLE_ERR_NM)
+    ring = ring_pts(pwh.outline, err, outward=True)
+    return [geom.grow_ring_outward(ring, float(max_err), err) or ring]
+
+
+def pad_from_kipy(pad, *, ref: str, net_codes: dict, cu_ids: set, poly_fn=None, fp_zone_connection: int | None = None,
                   tie_group: int | None = None) -> tuple[dict, dict | None]:
     """One footprint pad -> (model pad dict, hole dict or None). `net_codes`: net name -> code (``""`` -> 0);
-    `cu_ids`: enabled engine copper ids; `fp_zone_connection`: the footprint's KiCad ZONE_CONNECTION override
-    (0 = inherited); `tie_group`: index of the net-tie group containing this pad number. O(layers)."""
+    `cu_ids`: enabled engine copper ids; `fp_zone_connection`: the footprint's zone connection override (pcbnew
+    ZONE_CONNECTION value, None = inherited); `tie_group`: index of the net-tie group containing this pad number. O(layers)."""
     ps = pad.padstack
     layers = []
     shapes = {}
@@ -271,9 +288,11 @@ def pad_from_kipy(pad, *, ref: str, net_codes: dict, cu_ids: set, poly_fn=None, 
         "net_tie_group": tie_group,
     }
     zs = ps.zone_settings.proto
-    conn = _ZC_TO_KICAD.get(zs.zone_connection, 0) or int(fp_zone_connection)
-    if conn:
-        out["zone_connection"] = conn
+    conn = _ZC_TO_KICAD.get(zs.zone_connection)
+    if conn is None:
+        conn = fp_zone_connection
+    if conn is not None:
+        out["zone_connection"] = int(conn)
     if zs.thermal_spokes.HasField("gap") and zs.thermal_spokes.gap.value_nm > 0:
         out["thermal_gap"] = int(zs.thermal_spokes.gap.value_nm)
     if zs.thermal_spokes.HasField("angle"):
@@ -461,6 +480,14 @@ def shape_to_polys(shape, max_err: int) -> list[list[list[int]]]:
                 continue
             if filled:
                 ring = ring_pts(poly.outline, err, outward=True)
+                if w > 0 and len(ring) >= 3 and all(pc[0] == "pt" for pc in pieces):
+                    # K1: ONE ring (the polygon grown by half the stroke, as pcbnew exports it), not the polygon
+                    # plus a capsule per edge: overlapping rings of one shape crashed the engine's triangulation
+                    # on dcsgonebadge (an "E"-shaped filled IR_RX polygon)
+                    grown = geom.grow_ring_outward(ring, w / 2.0, err)
+                    if grown is not None:
+                        out.append(grown)
+                        continue
                 if len(ring) >= 3:
                     out.append(ring)
             if w > 0 or not filled:
@@ -545,7 +572,8 @@ def zone_to_pour(zone, *, net_codes: dict, cu_ids: set, pads: list, vias: list, 
          "clearance": int(cs.clearance.value_nm), "min_thickness": int(cs.min_thickness.value_nm),
          "thermal_gap": int(th.gap.value_nm) if th.HasField("gap") else _DEFAULT_THERMAL_NM,
          "spoke_width": int(th.width.value_nm) if th.HasField("width") else _DEFAULT_THERMAL_NM,
-         "pad_connection": _ZC_TO_KICAD.get(cs.connection.zone_connection, 0),
+         "pad_connection": (_ZONE_DEFAULT_CONN if _ZC_TO_KICAD.get(cs.connection.zone_connection) is None
+                            else _ZC_TO_KICAD[cs.connection.zone_connection]),
          "island_removal": _IRM_TO_KICAD.get(cs.island_mode, 0), "min_island_area": float(cs.min_island_area)}
     if warn:
         d["warning"] = warn
@@ -598,9 +626,9 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
     codes = dict(net_codes) if net_codes is not None else net_codes_by_name([n.name for n in board.get_nets()])
     nets = [{"code": c, "name": n} for n, c in sorted(codes.items(), key=lambda kv: kv[1])]
 
-    def poly_fn(pad, bl):  # UNVERIFIED: Board.get_pad_shapes_as_polygons
+    def poly_fn(pad, bl):  # Board.get_pad_shapes_as_polygons (verified live, K1)
         pwh = board.get_pad_shapes_as_polygons(pad, bl)
-        return [ring_pts(pwh.outline, max_err)] if pwh is not None else None
+        return pad_polygon_rings(pwh, max_err) if pwh is not None else None
 
     footprints = list(board.get_footprints())
     pads, holes, net_ties, fp_shapes, fp_zones, fp_texts = [], [], [], [], [], []
@@ -611,7 +639,7 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
         for gi, g in enumerate(groups):
             for n in g:
                 by_num.setdefault(n, gi)
-        fpc = _ZC_TO_KICAD.get(fp.overrides.zone_connection, 0)
+        fpc = _ZC_TO_KICAD.get(fp.overrides.zone_connection)
         fpads = [it for it in fp.definition.items if isinstance(it, Pad)]
         for pad in fpads:
             pd, hole = pad_from_kipy(pad, ref=ref, net_codes=codes, cu_ids=cu_ids, poly_fn=poly_fn,
@@ -687,6 +715,10 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
         "keepouts": keepouts,
         "net_ties": net_ties,
         "pours": pours,
+        # KiCad's teardrop zones (generated copper hanging off pads / track ends): the rip removes those of
+        # the nets it rips (K1; they would stay as floating copper), the engine ignores the key
+        "teardrops": sorted(({"uuid": z.id.value, "net": int(codes.get(z.net.name, 0)) if z.net and z.net.name else 0}
+                             for z in zones if z.type == bt.ZoneType.ZT_TEARDROP), key=lambda d: d["uuid"]),
         "dangling_ends": dangling,
         "rules": rules,
     }
@@ -694,4 +726,4 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
 
 __all__ = ["export_model_ipc", "layer_plan", "pad_from_kipy", "pad_shape", "pad_contains", "shape_to_prims",
            "shape_to_polys", "zone_to_keepouts", "zone_to_pour", "track_to_kept", "via_to_model", "via_free", "ring_pts",
-           "cu_id", "text_box_poly", "text_margin", "pour_reach", "pad_sample_points", "dangling_ends"]
+           "cu_id", "pad_polygon_rings", "text_box_poly", "text_margin", "pour_reach", "pad_sample_points", "dangling_ends"]

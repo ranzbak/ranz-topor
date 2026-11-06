@@ -263,3 +263,22 @@ def test_dangling_drop_removes_only_the_dead_end_stub():
     assert sorted(rip_plan(m3, whole, drop).remove_uuids) == ["s1", "s2"]
     m3["kept"].pop(-2)
     assert rip_plan(m3, whole, drop).remove_uuids == ["s2"]
+
+
+def test_rip_plan_removes_the_teardrops_of_ripped_nets():
+    """K1 (live parity): KiCad's teardrop zones of ripped tracks stayed on the board as floating copper (qmtech has
+    hundreds); the harness strip removes them. Now the rip removes the teardrops of every net it rips tracks of."""
+    m = tiny()
+    m["teardrops"] = [{"uuid": "td1", "net": 1}, {"uuid": "td9", "net": 99}]
+    whole = scope_from_selection(Selection(), m, CFG)
+    assert "td1" in rip_plan(m, whole, cfg(existing_copper="rip")).remove_uuids
+    assert "td9" not in rip_plan(m, whole, cfg(existing_copper="rip")).remove_uuids
+    assert rip_plan(m, whole, cfg(existing_copper="fixed")).remove_uuids == []
+
+
+def test_pcbfile_remove_items_removes_zones_by_uuid():
+    from toporlib import pcbfile
+    text = ('(kicad_pcb\n\t(segment (start 0 0) (end 1 1) (uuid "s1"))\n\t(zone (net 1) (uuid "z1") '
+            '(attr (teardrop (type padvia))) (polygon (pts (xy 0 0) (xy 1 0) (xy 1 1))))\n\t(zone (net 2) (uuid "z2"))\n)')
+    out = pcbfile.remove_items(text, ["z1", "s1"])
+    assert '"z1"' not in out and '"s1"' not in out and '"z2"' in out

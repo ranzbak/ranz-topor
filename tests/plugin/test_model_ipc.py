@@ -108,9 +108,16 @@ def test_pad_zone_settings_and_net_tie_group():
     zs.thermal_spokes.gap.value_nm = 400_000
     zs.thermal_spokes.angle.value_degrees = 45.0
     pd, _ = conv(p, tie_group=2)
-    assert (pd["zone_connection"], pd["thermal_gap"], pd["spoke_angle_deg"], pd["net_tie_group"]) == (3, 400_000, 45.0, 2)
-    pd, _ = conv(mk_pad(), fp_zone_connection=1)  # inherited from the pad -> the footprint's NONE
-    assert pd["zone_connection"] == 1 and "thermal_gap" not in pd and "spoke_angle_deg" not in pd
+    # pcbnew's ZONE_CONNECTION values, as the harness exports them and the engine reads them (pourcheck.rs CONN_*):
+    # NONE 0, THERMAL 1, FULL 2, THT_THERMAL 3 (K1: the table was off by one, FULL read as THT_THERMAL)
+    assert (pd["zone_connection"], pd["thermal_gap"], pd["spoke_angle_deg"], pd["net_tie_group"]) == (2, 400_000, 45.0, 2)
+    for style, want in ((bt.ZoneConnectionStyle.ZCS_NONE, 0), (bt.ZoneConnectionStyle.ZCS_THERMAL, 1),
+                        (bt.ZoneConnectionStyle.ZCS_PTH_THERMAL, 3)):
+        q = mk_pad()
+        q.padstack.proto.zone_settings.zone_connection = style
+        assert conv(q)[0]["zone_connection"] == want, style
+    pd, _ = conv(mk_pad(), fp_zone_connection=0)  # inherited from the pad -> the footprint's NONE
+    assert pd["zone_connection"] == 0 and "thermal_gap" not in pd and "spoke_angle_deg" not in pd
     pd, _ = conv(mk_pad())
     assert "zone_connection" not in pd
 
@@ -330,7 +337,7 @@ def test_zone_to_pour_fill_reach_and_settings():
     assert d["fills"] == [{"layer": 0, "outer": [list(p) for p in SQ],
                            "holes": [[[4 * MM, 4 * MM], [6 * MM, 4 * MM], [6 * MM, 6 * MM], [4 * MM, 6 * MM]]]}]
     assert (d["clearance"], d["min_thickness"], d["thermal_gap"], d["spoke_width"], d["pad_connection"]) == (
-        300_000, 250_000, 400_000, 350_000, 2)
+        300_000, 250_000, 400_000, 350_000, 1)  # THERMAL = 1 (pcbnew / engine), K1
     assert "warning" not in d
     unfilled = mk_zone(bt.ZoneType.ZT_COPPER, [FCU], net="GND")
     d = M.zone_to_pour(unfilled, net_codes=CODES, cu_ids={0, 2}, pads=pads, vias=vias, max_err=5000)
@@ -447,7 +454,8 @@ def test_export_model_ipc_end_to_end_and_engine_loads_it(engine):
         '(6 "In2.Cu" signal) ', "").replace('(4 "In1.Cu" signal) ', ""), rules, name="stub.kicad_pcb",
         layer_roles={}, dru_text=dru)
     assert list(m) == ["units", "board", "layers", "nets", "pads", "vias", "kept", "copper_shapes", "holes",
-                       "outline", "keepouts", "net_ties", "pours", "dangling_ends", "rules"]
+                       "outline", "keepouts", "net_ties", "pours", "teardrops", "dangling_ends", "rules"]
+    assert m["teardrops"] == []
     assert [(g["id"], g["name"], g["kind"], g["routable"]) for g in m["layers"]] == [
         (0, "F.Cu", "signal", True), (2, "B.Cu", "signal", True)]
     assert m["nets"] == [{"code": 1, "name": "GND"}, {"code": 2, "name": "VCC"}]
@@ -498,3 +506,78 @@ def test_export_model_ipc_via_free_is_the_kicad_flag():
                        ('(via (at 30 8) (size 0.8) (layers "F.Cu" "B.Cu") (net "GND") (uuid "other"))', True)):
         m = M.export_model_ipc(board, StubProject(), base + tail + "\n)\n", rules, name="x.kicad_pcb", dru_text="")
         assert m["vias"][0]["free"] is want, tail
+
+
+def test_thick_arc_is_one_obstacle_ring_containing_its_stroke():
+    """K1 (live dcsgonebadge): a 2 mm wide GND arc of radius 1 mm became 44 capsule rings (44 planner obstacles)
+    over IPC, one polygon in the harness; now one ring that still contains the stroke."""
+    import math as _m
+    from toporlib import geom
+    s, mid, e = (62_625_000, 53_000_000), (62_917_893, 52_292_893), (63_625_000, 52_000_000)
+    rings = geom.arc_stroke_rings(s, mid, e, 2 * MM, 500)
+    assert len(rings) == 1
+    c, r, a0, sw = geom.arc_geometry(s, mid, e)
+    for i in range(41):  # samples of the true stroke: the arc's points with discs of radius w/2 around them
+        a = a0 + sw * i / 40
+        px, py = c[0] + r * _m.cos(a), c[1] + r * _m.sin(a)
+        for k in range(16):
+            q = (px + 0.999 * MM * _m.cos(k * _m.pi / 8), py + 0.999 * MM * _m.sin(k * _m.pi / 8))
+            assert geom.point_in_ring(q, rings[0]), (i, k)
+
+
+def test_filled_stroked_concave_polygon_is_one_ring():
+    """K1 (live dcsgonebadge): an "E"-shaped filled gr_poly with a 0.2 mm stroke became the polygon plus 12 edge
+    capsules (13 overlapping obstacle rings; the engine's triangulation panicked on that model); now one ring,
+    the polygon grown by half the stroke, which contains every edge capsule."""
+    from toporlib import geom
+    e = [(67302355, 58798981), (71149731, 58798981), (71149731, 59431728), (68314410, 59431728),
+         (68314410, 61643783), (70485944, 61643783), (70485944, 62229118), (68314410, 62229118),
+         (68314410, 64474364), (71149731, 64474364), (71149731, 65107111), (67302355, 65107111)]
+    g = geom.grow_ring_outward(e, 100_000, 500)
+    assert g is not None and geom.ring_is_simple(g)
+    for cap in geom.polyline_stroke_rings(e, 200_000, 500, closed=True):
+        for p in cap:
+            q = (p[0], p[1])
+            assert geom.point_in_ring(q, g) or min(geom.dist_pt_seg(q, g[i], g[(i + 1) % len(g)])
+                                                   for i in range(len(g))) <= 600, p
+    assert geom.grow_ring_outward([(0, 0), (10, 0), (10, 10), (0, 10)], 0, 500) is None
+
+
+def test_custom_pad_polygon_arcs_are_flattened_outward():
+    """K1 (live dcsgonebadge, 7 KiCad clearance violations at JP1.3): the arc side of a custom pad's polygon was
+    flattened with vertices on the arc, up to max_error inside KiCad's copper. Now every point of the true arc lies
+    inside the obstacle ring."""
+    import math as _m
+    from kipy.geometry import PolygonWithHoles
+    from toporlib import geom
+    p = bp.PolygonWithHoles()
+    for x, y in ((0, 0), (MM, 0)):
+        v2(p.outline.nodes.add().point, x, y)
+    a = p.outline.nodes.add().arc  # D shape: half circle of radius 0.5 mm from (1, 0) via (1.5, 0.5) to (1, 1) mm
+    v2(a.start, MM, 0), v2(a.mid, int(1.5 * MM), MM // 2), v2(a.end, MM, MM)
+    v2(p.outline.nodes.add().point, 0, MM)
+    p.outline.closed = True
+    ring = M.pad_polygon_rings(PolygonWithHoles(p), 5000)[0]
+    for k in range(1, 40):
+        t = -_m.pi / 2 + _m.pi * k / 40
+        q = (MM + 0.5 * MM * _m.cos(t) - 1, MM / 2 + 0.5 * MM * _m.sin(t))
+        assert geom.point_in_ring(q, ring), k
+
+
+def test_custom_pad_polygon_of_flattened_circles_is_grown_by_max_error():
+    """K1: KiCad's pad polygon arrives as points ON the circles (chords inside the copper); the obstacle is grown by
+    the board's max error so it contains the true circle (dcsgonebadge JP1.3: two filled r = 0.5 mm circles)."""
+    import math as _m
+    from kipy.geometry import PolygonWithHoles
+    from toporlib import geom
+    r, err = MM // 2, 5000
+    n = int(_m.ceil(_m.pi / _m.acos(1 - err / r)))  # chord error = max_err, as KiCad flattens
+    p = bp.PolygonWithHoles()
+    for k in range(n):
+        v2(p.outline.nodes.add().point, int(r * _m.cos(2 * _m.pi * k / n)), int(r * _m.sin(2 * _m.pi * k / n)))
+    p.outline.closed = True
+    ring = M.pad_polygon_rings(PolygonWithHoles(p), err)[0]
+    for k in range(720):
+        q = (r * _m.cos(_m.pi * k / 360), r * _m.sin(_m.pi * k / 360))
+        assert geom.point_in_ring(q, ring), k
+    assert max(_m.hypot(*q) for q in ring) <= r + err + 600

@@ -333,6 +333,7 @@ def rip_plan(model: dict, plan: ScopePlan, cfg: Config) -> RipPlan:
     keep_locked = cfg.get("run", "respect_locked")
     rip_free = cfg.get("run", "rip_free_vias")
     touched = _touched_vias(model) if cfg.get("run", "keep_unconnected_vias") and not rip_free else None
+    ripped_nets: set = set()
     for kind, is_via in (("kept", False), ("vias", True)):
         for it in model.get(kind, []):
             name = names.get(it.get("net"))
@@ -350,4 +351,9 @@ def rip_plan(model: dict, plan: ScopePlan, cfg: Config) -> RipPlan:
                 out.kept_unconnected_vias += 1
             else:
                 out.remove_uuids.append(it["uuid"])
+                if not is_via:
+                    ripped_nets.add(it.get("net"))
+    # K1: KiCad's teardrop zones of the ripped tracks would stay as floating copper (the engine does not see
+    # them, KiCad's DRC does); they go with the tracks (KiCad → Edit → Edit Teardrops makes new ones)
+    out.remove_uuids += [z["uuid"] for z in model.get("teardrops", []) if z.get("net") in ripped_nets]
     return out

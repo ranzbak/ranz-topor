@@ -83,6 +83,19 @@ def _ladder(result: dict | None):
     return None
 
 
+def board_netclasses(pc) -> tuple:
+    """(class name -> NetClassValues, net name -> effective class name) of the project copy `pc`, read with pcbnew:
+    what the plugin's ``IpcBoard.netclasses`` returns for the same board. K1: without it FakeBoard reported every net
+    in *Default*, so the harness took net priorities from the power-name guess (qmtech: GND, VIN5VPS21 tier 2)
+    while the plugin used KiCad's classes (1V8, ADV_AVDD, USB_VBUS ...). O(nets)."""
+    from harness.model import load_board
+    from harness.rules import _swig_inputs
+    from topor.ports import NetClassValues
+    _, ncls, nc_of, _ = _swig_inputs(load_board(pc))
+    return ({k: NetClassValues(v.name, v.clearance, v.track_width, v.via_diameter, v.via_drill) for k, v in ncls.items()},
+            {n: c for n, c in nc_of.items() if n})
+
+
 def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, timeout_s: float | None = None,
                 whole_project: bool = False, png: bool = True, name: str | None = None,
                 declared_layers: bool = False) -> dict:
@@ -135,7 +148,7 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
 
     os.environ.setdefault("TOPOR_REPORT_ROOT", str(out_dir / "reports"))
     eng = _CapturingEngine(topor_engine)
-    fb = FakeBoard(inp.pcb, model, project_dir=inp.pcb.parent)
+    fb = FakeBoard(inp.pcb, model, project_dir=inp.pcb.parent, netclasses=board_netclasses(inp))
     t_run = time.monotonic()
     outcome = run_mod.run(fb, ScriptedUi(accept=True), cfg, eng, tmp_root=out_dir / "work")
     run_s = time.monotonic() - t_run
@@ -189,12 +202,15 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
             # Blue lines: KiCad's DRC unconnected items after the refill (the open ratsnest).
             hr = render_png(hand.pcb, out_dir / f"{name}-hand-raw.png")
             hr = draw_ratsnest(hr, hr, hand_drc.unconnected, bbox_nm=board_bbox_nm(hand.pcb))
-            h = caption(hr, f"{name}: {os.environ.get('TOPOR_HAND_LABEL', 'hand')} ({m['unconnected_hand']} unconnected, blue)",
+            from toporlib.drc import ratsnest_caption, ratsnest_marks
+            h = caption(hr, f"{name}: {os.environ.get('TOPOR_HAND_LABEL', 'hand')} ({m['unconnected_hand']} unconnected, blue"
+                            f"{ratsnest_caption(ratsnest_marks(hand_drc.unconnected))})",
                         out_dir / f"{name}-hand.png")
             tr = render_png(routed_pcb, out_dir / f"{name}-topor-raw.png")
             tr = draw_ratsnest(tr, tr, routed_drc.unconnected, bbox_nm=board_bbox_nm(routed_pcb))
             t = caption(tr,
-                        f"{name}: {os.environ.get('TOPOR_PNG_LABEL', 'topor')} ({routed}/{total} routed, {m['unconnected']} unconnected, blue)",
+                        f"{name}: {os.environ.get('TOPOR_PNG_LABEL', 'topor')} ({routed}/{total} routed, {m['unconnected']} unconnected, blue"
+                        f"{ratsnest_caption(ratsnest_marks(routed_drc.unconnected))})",
                         out_dir / f"{name}-topor.png")
             compose_compare(h, t, out_dir / f"{name}-compare.png")
             m["png"] = str(out_dir / f"{name}-compare.png")

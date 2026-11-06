@@ -52,13 +52,14 @@ def find_items(text: str, kinds: tuple = ("segment", "arc", "via")) -> list[Item
 
 
 def remove_items(text: str, uuids) -> str:
-    """Delete the top-level items whose uuid is in `uuids`, with their indentation and line break
-    (everything else stays byte-identical). O(len(text))."""
+    """Delete the top-level items (segment, arc, via, zone: e.g. KiCad's teardrop zones of ripped tracks) whose
+    uuid is in `uuids`, with their indentation and line break (everything else stays byte-identical).
+    O(len(text))."""
     want = set(uuids)
     if not want:
         return text
     cuts = []
-    for s in find_items(text):
+    for s in find_items(text, ("segment", "arc", "via", "zone")):
         if s.uuid in want:
             a = s.start
             while a > 0 and text[a - 1] in " \t":

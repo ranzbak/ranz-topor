@@ -256,6 +256,11 @@ def arc_stroke_rings(s, m, e, w: float, max_err: int) -> list[list[list[int]]]:
     c, r, a0, sw = g
     if r - hw <= max_err or abs(sw) >= TAU - 1e-9:
         e3 = max(int(max_err) // 3, 1)
+        if r - hw <= max_err and abs(sw) < TAU - 1e-9:
+            # The stroke covers (almost) the centre: ONE ring, the union of the wedge and the two end discs (K1:
+            # the capsule chain below gave dcsgonebadge's 2 mm wide GND arcs of radius 1 mm 44 overlapping rings
+            # each, 704 planner obstacles instead of 16; the harness exports one polygon per shape).
+            return [star_stroke_ring(c, r, a0, sw, max(hw, r), max_err)]
         return polyline_stroke_rings(chord_arc_pts(c, r, a0, sw, e3), w, e3, grow=e3)
     sg = 1.0 if sw > 0 else -1.0
     a1 = a0 + sw
@@ -266,6 +271,123 @@ def arc_stroke_rings(s, m, e, w: float, max_err: int) -> list[list[list[int]]]:
     inner = chord_arc_pts(c, r - hw - 1.0, a1, -sw, max_err)
     cap_s = tangent_arc_pts(p_start, hw, a0 + sg * math.pi, sg * math.pi, max_err)
     return [outer + cap_e[1:-1] + inner + cap_s[1:-1]]
+
+
+def star_stroke_ring(c, r: float, a0: float, sw: float, hw: float, max_err: int) -> list[list[int]]:
+    """One ring CONTAINING the stroke (half width `hw` >= `r`, round caps) of the arc of circle (`c`, `r`) from
+    angle `a0` over `sw` (|sw| < 2 pi). With hw >= r the stroke is the union of the wedge {angle in the sweep,
+    |p - c| <= r + hw} and the discs of radius hw at the two arc ends (a point outside the wedge is nearest to an
+    end point; one inside is within max(hw, r) of the arc radially), a set star-shaped from `c` (every part
+    contains `c`). Its boundary, walked by angle around `c`, is made of arcs of three circles (the outer circle
+    and the two end-disc circles); the switch angles are found by sampling and bisection, and each piece is
+    flattened by the tangent construction (outside its circle by <= max_err + 1 nm). O(N) for N = 2048 samples."""
+    if sw < 0:
+        a0, sw = a0 + sw, -sw
+    R = r + hw
+    ends = [(c[0] + r * math.cos(a), c[1] + r * math.sin(a)) for a in (a0, a0 + sw)]
+
+    def rho(k, phi):  # radial extent of part k (0 wedge, 1 start disc, 2 end disc) in direction phi
+        if k == 0:
+            return R if (phi - a0) % TAU <= sw + 1e-12 else 0.0
+        dx, dy = ends[k - 1][0] - c[0], ends[k - 1][1] - c[1]
+        ud = math.cos(phi) * dx + math.sin(phi) * dy
+        return ud + math.sqrt(max(hw * hw - (dx * dx + dy * dy) + ud * ud, 0.0))
+
+    def best(phi):
+        v = [rho(k, phi) for k in range(3)]
+        return max(range(3), key=lambda k: (v[k] - (1e-6 if k else 0.0), -k))
+
+    n = 2048
+    phis = [a0 + TAU * i / n for i in range(n + 1)]
+    labels = [best(p) for p in phis]
+    cuts = [a0]
+    for i in range(n):
+        if labels[i] != labels[i + 1]:
+            lo, hi = phis[i], phis[i + 1]
+            for _ in range(50):
+                mid = 0.5 * (lo + hi)
+                lo, hi = (mid, hi) if best(mid) == labels[i] else (lo, mid)
+            cuts.append(0.5 * (lo + hi))
+    cuts.append(a0 + TAU)
+    circles = [(c, R), (ends[0], hw), (ends[1], hw)]
+    out: list[list[int]] = []
+    for p0, p1 in zip(cuts, cuts[1:]):
+        k = best(0.5 * (p0 + p1))
+        (qx, qy), rad = circles[k]
+        ext = (lambda p: R) if k == 0 else (lambda p, k=k: rho(k, p))  # the cut may sit just outside the wedge
+        a_s, a_e = (math.atan2(c[1] + ext(p) * math.sin(p) - qy, c[0] + ext(p) * math.cos(p) - qx)
+                    for p in (p0, p1))
+        own = (a_e - a_s) % TAU
+        for q in tangent_arc_pts((qx, qy), rad, a_s, own, max_err):
+            pt = [int(round(q[0])), int(round(q[1]))]
+            if not out or out[-1] != pt:
+                out.append(pt)
+    if len(out) > 1 and out[0] == out[-1]:
+        out.pop()
+    return out
+
+
+def _segs_cross(a, b, c, d) -> bool:
+    """Proper crossing of segments ab and cd (shared end points do not count). O(1)."""
+    def o(p, q, r):
+        v = (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+        return (v > 0) - (v < 0)
+    return o(a, b, c) * o(a, b, d) < 0 and o(c, d, a) * o(c, d, b) < 0
+
+
+def ring_is_simple(ring) -> bool:
+    """No two non-adjacent edges of the closed ring cross. O(n^2) (copper graphics have few vertices)."""
+    n = len(ring)
+    for i in range(n):
+        a, b = ring[i], ring[(i + 1) % n]
+        for j in range(i + 2, n):
+            if i == 0 and j == n - 1:
+                continue
+            if _segs_cross(a, b, ring[j], ring[(j + 1) % n]):
+                return False
+    return True
+
+
+def grow_ring_outward(pts, r: float, max_err: int) -> list[list[int]] | None:
+    """The simple polygon `pts` grown by `r` (its Minkowski sum with a disc: a filled polygon with a stroke of
+    width 2r) as ONE ring that CONTAINS it: every edge shifted outward by r (+ 1 nm), a tangent arc around each
+    convex corner, the intersection of the two shifted edges at each reflex corner (exact there). Outward excess
+    <= max_err + 1 nm. None when the grown outline is not simple (features narrower than 2r: the caller keeps its
+    capsules). O(n^2) for the simplicity check."""
+    q = [(float(x), float(y)) for x, y in pts]
+    q = [p for i, p in enumerate(q) if p != q[i - 1]]
+    n = len(q)
+    if n < 3 or r <= 0:
+        return None
+    area = sum(q[i][0] * q[(i + 1) % n][1] - q[(i + 1) % n][0] * q[i][1] for i in range(n))
+    sg = 1.0 if area > 0 else -1.0  # outward normal of edge (dx, dy) is sg * (dy, -dx) / len
+    rr = r + 1.0
+    normals = []
+    for i in range(n):
+        dx, dy = q[(i + 1) % n][0] - q[i][0], q[(i + 1) % n][1] - q[i][1]
+        ln = math.hypot(dx, dy)
+        normals.append((sg * dy / ln, -sg * dx / ln))
+    out: list[list[int]] = []
+    for i in range(n):
+        p, n0, n1 = q[i], normals[i - 1], normals[i]  # corner i joins edge i-1 and edge i
+        d_in = (q[i][0] - q[i - 1][0], q[i][1] - q[i - 1][1])
+        d_out = (q[(i + 1) % n][0] - q[i][0], q[(i + 1) % n][1] - q[i][1])
+        turn = sg * (d_in[0] * d_out[1] - d_in[1] * d_out[0])
+        if turn >= 0:  # convex corner (or straight): tangent arc from n0 to n1
+            a0 = math.atan2(n0[1], n0[0])
+            sweep = (math.atan2(n1[1], n1[0]) - a0 + math.pi) % TAU - math.pi
+            pts_ = tangent_arc_pts(p, r, a0, sweep, max_err) if abs(sweep) > 1e-12 else [
+                [p[0] + rr * n0[0], p[1] + rr * n0[1]]]
+        else:  # reflex corner: the two shifted edges meet at p + rr * (n0 + n1) / (1 + n0 . n1)
+            k = rr / (1.0 + n0[0] * n1[0] + n0[1] * n1[1])
+            pts_ = [[p[0] + k * (n0[0] + n1[0]), p[1] + k * (n0[1] + n1[1])]]
+        for v in pts_:
+            iv = [int(round(v[0])), int(round(v[1]))]
+            if not out or out[-1] != iv:
+                out.append(iv)
+    if len(out) > 1 and out[0] == out[-1]:
+        out.pop()
+    return out if len(out) >= 3 and ring_is_simple(out) else None
 
 
 def polyline_stroke_rings(pts, w: float, max_err: int, *, grow: float = 0.0, closed: bool = False) -> list:

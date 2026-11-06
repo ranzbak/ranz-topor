@@ -144,7 +144,9 @@ def _export_pads(board, cu: list[int], tie_groups: dict):
             for n in g:
                 by_num.setdefault(n, gi)
         for pad in fp.Pads():
-            layers = [int(l) for l in pad.GetLayerSet().Seq() if int(l) in cu_set]
+            # top -> bottom (F.Cu, In1.Cu, ..., B.Cu), the order the plugin's IPC exporter writes (K1 parity)
+            layers = sorted((int(l) for l in pad.GetLayerSet().Seq() if int(l) in cu_set),
+                            key=lambda i: (0, 0) if i == 0 else (2, 0) if i == 2 else (1, i))
             attr = _ATTR.get(pad.GetAttribute(), "smd")
             ds = pad.GetDrillSize()
             drill = {"w": int(ds.x), "h": int(ds.y)} if ds.x > 0 and ds.y > 0 else None
@@ -502,6 +504,8 @@ def export_model(board, rules: dict, *, name: str, dru_text: str | None = None) 
         "keepouts": keepouts,
         "net_ties": net_ties,
         "pours": _export_pours(board, cu),
+        "teardrops": sorted(({"uuid": _uuid(z), "net": int(z.GetNetCode())} for z in board.Zones()
+                             if z.IsTeardropArea()), key=lambda d: d["uuid"]),
         "dangling_ends": find_dangling_ends(board),
         "rules": rules,
     }
