@@ -486,7 +486,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     st.cross_vias = opts.crossing_vias == "via";
     let ws0 = (model.rules.default.width + model.rules.default.clearance) as f64;
     let tier_of = |i: usize| dec.connections[i].tier;
-    let weights = |rg: &Registry, c: &Conn, tier: u8, cap: usize| InitWeights { max_expansions: cap, junction_angle_exp: opts.junction_angle_exp, ..InitWeights::from_registry(rg, &WireCtx { net: c.net, tier }) };
+    let weights = |rg: &Registry, c: &Conn, tier: u8, cap: usize| InitWeights { max_expansions: cap, ..InitWeights::from_registry(rg, &WireCtx { net: c.net, tier }) };
     let len_of = |c: &Conn| (proj.pos[c.b] - proj.pos[c.a]).len();
     let mut order: Vec<usize> = (0..conns.len()).collect();
     order.sort_by(|&i, &j| {

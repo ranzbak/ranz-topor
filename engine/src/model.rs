@@ -1068,9 +1068,6 @@ pub struct Options {
     /// (T-junction) on one of their routed traces, so the net's tree follows the routing;
     /// `"fixed"` = pad to pad as the decomposition planned (no branch points).
     pub net_tree: String,
-    /// Topological core (D5, `topor.toml [search] junction_angle_exp`): the shape of the
-    /// `junction_angle` factor, `(1 - angle / 120 deg) ^ exp` below 120 degrees.
-    pub junction_angle_exp: f64,
     /// Topological core (D6b, `topor.toml [search] crossing_vias`): `"crossing"` (default) = a
     /// crossing of two nets costs the `crossing` factor, which stands for the layer change P3
     /// makes; only a crossing no layer assignment separates (both wires held to one layer in its
@@ -1198,7 +1195,6 @@ impl Default for Options {
             via_reduce: true,
             stitch_islands: true,
             net_tree: "free".into(),
-            junction_angle_exp: 2.0,
             crossing_vias: "crossing".into(),
             junction_pad_mm: 0.0,
             topo_rounds: 4,

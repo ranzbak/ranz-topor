@@ -74,21 +74,28 @@ impl Factor for SmdThrough {
     }
 }
 
-/// Junction angle (D5): a new trace that leaves a junction close to an arm already there runs
-/// side by side with it (two traces of one net through one passage) and leaves an acid trap.
-/// The Steiner optimum has 120 degrees between the arms at a branch point (Popov & Popov, EDN
-/// 2013); the price is 0 from 120 degrees up and rises smoothly and ever steeper below:
-/// `(1 - angle / 120)^exp` per junction, 1 at 0 degrees. No cutoff: a sharp junction is only
-/// expensive, so a separate path or another junction (a pad) wins on price.
+/// Junction angle (D5, curve D6b): a new trace that leaves a junction close to an arm already
+/// there runs side by side with it (two traces of one net through one passage) and leaves an
+/// acid trap. A Steiner tree has every angle >= 120 degrees, exactly 120 at a Steiner point (Ras,
+/// Swanepoel & Thomas, arXiv 1605.01172 p. 1); with smallest angle `a` the worst relative length
+/// excess over the optimum is `sec(60 - a/2) - 1` (Prop. 7.3 p. 12, sharp), and the wedge between
+/// the two arms keeps an edge gap below one clearance out to `(w + s) / (2 sin(a/2))` from the
+/// junction. The price is `weight x (w + s) x psi(a)` with
+/// `psi(a) = (sec(60 - a/2) - 1) x sin 60 / sin(a/2)` below 120 degrees, 0 from 120 up: 0 and
+/// smooth at 120, monotone, growing like 1 / a towards 0 (psi 110 deg 0.004, 90 deg 0.043,
+/// 60 deg 0.27, 48 deg 0.50, 35 deg 1.03, 30 deg 1.39, 15 deg 4.26). No cutoff: a sharp junction is only
+/// expensive, so a separate path or another junction (a pad) wins on price. The same price at a
+/// pad that already carries traces of the net (user decision, D6b).
 pub struct JunctionAngle;
 
-/// The curve of [`JunctionAngle`]: 0 at or above 120 degrees, 1 at 0.
-pub fn junction_angle_amount(deg: f64, exp: f64) -> f64 {
+/// The shape `psi` of [`JunctionAngle`] at `deg` degrees (see there): 0 at or above 120.
+pub fn junction_psi(deg: f64) -> f64 {
     if deg >= 120.0 {
-        0.0
-    } else {
-        (1.0 - deg.max(0.0) / 120.0).powf(exp.max(0.0))
+        return 0.0;
     }
+    let h = (0.5 * deg.max(1e-3)).to_radians();
+    let sec = 1.0 / (std::f64::consts::FRAC_PI_3 - h).cos();
+    (sec - 1.0) * std::f64::consts::FRAC_PI_3.sin() / h.sin()
 }
 
 impl Factor for JunctionAngle {
@@ -96,10 +103,10 @@ impl Factor for JunctionAngle {
         "junction_angle"
     }
     fn doc(&self) -> &'static str {
-        "A trace that leaves a junction (a branch point, or a pad that already carries a trace of its net) at a small angle to an arm already there: (1 - angle/120°)^exp, 0 from 120° (the Steiner optimum) up, the full weight at 0°."
+        "A trace that leaves a junction (a branch point, or a pad that already carries a trace of its net) at a small angle a to an arm already there: weight x (width + clearance) x psi(a), psi(a) = (sec(60° - a/2) - 1) x sin 60° / sin(a/2) below 120° (the Steiner optimum; Ras, Swanepoel & Thomas 2016 Prop. 7.3), 0 from 120° up, growing like 1/a towards 0 (psi: 90° 0.04, 60° 0.27, 48° 0.5, 35° 1.0, 30° 1.4, 15° 4.3)."
     }
     fn unit(&self) -> &'static str {
-        "per junction at 0°, (1 - angle/120°)^exp below 120°"
+        "per mm of width + clearance at psi = 1 (about 35°)"
     }
     fn default_weight(&self) -> f64 {
         10.0
@@ -109,7 +116,7 @@ impl Factor for JunctionAngle {
     }
     fn amount(&self, ev: &Event) -> f64 {
         match *ev {
-            Event::JunctionAngle { deg, exp, .. } => junction_angle_amount(deg, exp),
+            Event::JunctionAngle { deg, ws_mm, .. } => ws_mm * junction_psi(deg),
             _ => 0.0,
         }
     }
@@ -117,6 +124,29 @@ impl Factor for JunctionAngle {
         match *ev {
             Event::JunctionAngle { at, deg, .. } => format!("trace leaves a junction at {deg:.0}° to another arm at ({:.3}, {:.3}) mm", at.x / 1e6, -at.y / 1e6),
             _ => String::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::junction_psi;
+
+    /// psi (D6b item 2d): 0 and flat at 120 degrees, monotone below, the values of REPORT2 §4
+    /// (Ras, Swanepoel & Thomas Prop. 7.3 times the wedge factor).
+    #[test]
+    fn psi_curve() {
+        assert_eq!(junction_psi(120.0), 0.0);
+        assert_eq!(junction_psi(150.0), 0.0);
+        assert!(junction_psi(119.0) < 1e-4);
+        for (d, v) in [(110.0, 0.0040), (90.0, 0.0432), (60.0, 0.2679), (48.0, 0.5026), (30.0, 1.386), (15.0, 4.2641)] {
+            assert!((junction_psi(d) - v).abs() < 1e-3, "psi({d}) = {}", junction_psi(d));
+        }
+        let mut last = 0.0;
+        for d in (1..120).rev() {
+            let p = junction_psi(d as f64);
+            assert!(p > last, "monotone at {d}");
+            last = p;
         }
     }
 }

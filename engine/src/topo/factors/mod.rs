@@ -35,7 +35,7 @@ mod squeeze;
 mod via;
 mod via_squeeze;
 
-pub use branch::junction_angle_amount;
+pub use branch::junction_psi;
 pub use squeeze::squeeze_amount;
 
 use super::demand::Item;
@@ -85,9 +85,9 @@ pub enum Event {
     /// at a pad that already carries a trace (`smd`: a single-layer pad), at `at` (D5 net trees).
     Branch { wire: WireId, at: Vec2, on_pad: bool, smd: bool },
     /// A new trace leaves a junction (a branch point on a trace, or a pad that already carries a
-    /// trace of its net) at `deg` degrees to the nearest arm already there; `exp` is the curve's
-    /// shape (`[search] junction_angle_exp`).
-    JunctionAngle { at: Vec2, deg: f64, exp: f64 },
+    /// trace of its net) at `deg` degrees to the nearest arm already there; `ws_mm` is the new
+    /// trace's width plus clearance (mm), the scale of the wedge it leaves.
+    JunctionAngle { at: Vec2, deg: f64, ws_mm: f64 },
 }
 
 /// How a factor's events appear in the report.

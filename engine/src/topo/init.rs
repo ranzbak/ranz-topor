@@ -42,10 +42,8 @@ pub struct InitWeights {
     pub ignored_mm: f64,
     /// Per pass through a gap too narrow for this wire on some layer (fixes the layer, as above).
     pub forced_layer_mm: f64,
-    /// Per junction a new trace leaves at 0 degrees to an arm already there (`junction_angle`
-    /// weight), and the curve's exponent (`[search] junction_angle_exp`).
+    /// `junction_angle` price per mm of width + clearance at `psi` = 1 (the factor's weight).
     pub junction_angle_mm: f64,
-    pub junction_angle_exp: f64,
     /// Search cap per connection.
     pub max_expansions: usize,
 }
@@ -65,8 +63,7 @@ impl InitWeights {
             blocks_pad_mm: reg.price(&Event::BlocksPad { wire: 0, tri: 0, pad: 0 }, w),
             ignored_mm: reg.price(&Event::IgnoredRuleViolated { rule: String::new(), at: Vec2 { x: 0.0, y: 0.0 }, amount_nm: 0.0 }, w),
             forced_layer_mm: forced,
-            junction_angle_mm: reg.price(&Event::JunctionAngle { at: Vec2 { x: 0.0, y: 0.0 }, deg: 0.0, exp: 1.0 }, w),
-            junction_angle_exp: 2.0,
+            junction_angle_mm: reg.price(&Event::JunctionAngle { at: Vec2 { x: 0.0, y: 0.0 }, deg: 60.0, ws_mm: 1.0 / super::factors::junction_psi(60.0) }, w),
             max_expansions: 2_000_000,
         }
     }
@@ -273,7 +270,7 @@ impl Search<'_, '_> {
         }
         let u = dv * (1.0 / l);
         let deg = d.arms.iter().flatten().map(|a| a.dot(u).clamp(-1.0, 1.0).acos().to_degrees()).fold(180.0, f64::min);
-        self.wt.junction_angle_mm * super::factors::junction_angle_amount(deg, self.wt.junction_angle_exp)
+        self.wt.junction_angle_mm * (self.c.w + self.c.s) / MM * super::factors::junction_psi(deg)
     }
 
     fn seed_angle(&self, seed: usize, toward: Vec2) -> f64 {
