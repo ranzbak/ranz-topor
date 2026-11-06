@@ -7,6 +7,9 @@ use spade::{
     Triangulation,
 };
 
+/// Grid (nm) of the last fallback in [`Cdt::build`].
+pub const SNAP_NM: f64 = 128.0;
+
 /// Maximum number of triangulation-edge crossings per polyline (45 §5a).
 pub const MAX_SLEEVE: usize = 2000;
 
@@ -67,21 +70,57 @@ fn fh(i: usize) -> FixedVertexHandle {
 
 impl Cdt {
     /// Points are deduplicated (coincident inputs share a vertex). Constraints
-    /// are index pairs; crossing ones are split (never an error). `Err` only for non-finite points.
+    /// are index pairs; crossing ones are split. `Err` for non-finite points, and when spade's
+    /// constraint splitting fails on every attempt below.
+    ///
+    /// spade 2.15's `add_constraint_and_split` can panic (`!previous_region.is_empty() || from ==
+    /// final_vertex`) where two constraints cross at a nearly degenerate position (K1: copper
+    /// graphics of dcsgonebadge as KiCad's IPC API exports them, overlapping arcs and segments). The
+    /// build then runs again with the constraints in reverse order (same geometry), then with the
+    /// points snapped to a [`SNAP_NM`] grid (the projection only; the drawing checks the exact
+    /// copper). The first attempt that succeeds is used, so boards that never hit the panic get the
+    /// same triangulation as before. O(attempts * spade build).
     pub fn build(points: &[Vec2], constraints: &[(usize, usize)]) -> Result<Cdt, String> {
+        if let Some(i) = points.iter().position(|p| !p.x.is_finite() || !p.y.is_finite()) {
+            return Err(format!("point {i} is not finite"));
+        }
+        let mut last = String::new();
+        for attempt in 0..3 {
+            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Self::build_once(points, constraints, attempt == 1, attempt == 2)
+            }));
+            match run {
+                Ok(r) => return r,
+                Err(e) => {
+                    last = e
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| e.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "panic".into());
+                }
+            }
+        }
+        Err(format!("triangulation failed on degenerate crossing constraints: {last}"))
+    }
+
+    fn build_once(points: &[Vec2], constraints: &[(usize, usize)], reverse: bool, snap: bool) -> Result<Cdt, String> {
         let mut tri = Tri::new();
         let mut map = Vec::with_capacity(points.len());
         for (i, p) in points.iter().enumerate() {
-            if !p.x.is_finite() || !p.y.is_finite() {
-                return Err(format!("point {i} is not finite"));
-            }
+            let p = if snap {
+                Vec2 { x: (p.x / SNAP_NM).round() * SNAP_NM, y: (p.y / SNAP_NM).round() * SNAP_NM }
+            } else {
+                *p
+            };
             let h = tri
-                .insert(V { pos: p2(*p) })
+                .insert(V { pos: p2(p) })
                 .map_err(|e| format!("insert point {i}: {e:?}"))?;
             map.push(h.index());
         }
         let n_inputs = tri.num_vertices();
-        for &(a, b) in constraints {
+        let order: Box<dyn Iterator<Item = &(usize, usize)>> =
+            if reverse { Box::new(constraints.iter().rev()) } else { Box::new(constraints.iter()) };
+        for &(a, b) in order {
             let ca = *map
                 .get(a)
                 .ok_or_else(|| format!("constraint index {a} out of range"))?;
