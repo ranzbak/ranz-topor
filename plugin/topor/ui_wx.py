@@ -93,23 +93,26 @@ WORDING: dict[str, dict[str, str]] = {
     "progress": {
         "title": "Topor — Routing {board}",
         "phase_setup": "Preparing geometry",
-        "phase_route": "Routing — negotiation pass",
+        "phase_route": "Routing",
+        "phase_route_stage": "Routing — {stage}",
         "phase_done": "Routing finished",
         "phase_preflight_drc": "Checking the board (KiCad DRC)",
         "phase_drc": "Verifying with KiCad DRC",
         "phase_preview": "Rendering the preview",
         "phase_cancelling": "Cancelling — keeping the best result so far…",
         "gauge_value": "{routed} / {total}",
-        "iteration_label": "Iteration",
+        "iteration_label": "Round",
         "iteration_value": "{iteration} of up to {cap}",
         "routed_label": "Routed",
         "routed_value": "{routed} / {total}",
         "routed_pending": "– / {total}",
         "vias_label": "Vias",
-        "elapsed_label": "Elapsed",
+        "elapsed_label": "Router time",
         "elapsed_value": "{elapsed} / {limit}",
         "elapsed_nolimit": "{elapsed} / no limit",
-        "cancel_hint": "Cancel keeps the best result so far.",
+        "total_label": "Total time",
+        "cancel_hint": "Cancel keeps the best result so far. The time limit counts router time only and is an "
+                       "emergency stop; KiCad's DRC and the preview come on top.",
         "cancel": "Cancel",
     },
     "preview": {
@@ -288,7 +291,8 @@ class _Base(wx.Dialog):
         def make(wid, spec):
             name, key, mn = spec
             b = wx.Button(self, wid, _mn(WORDING[wk][key], mn), name=name)
-            b.SetMinSize(wx.Size(self.FromDIP(88), -1))
+            # never narrower than the label (a fixed 88 DIP cut "Open report folder" to "pen report fold")
+            b.SetMinSize(wx.Size(max(self.FromDIP(88), b.GetBestSize().width), -1))
             self.buttons[name] = b
             return b
 
@@ -333,6 +337,18 @@ class _Base(wx.Dialog):
         self.SetSize(wx.Size(max(size.width, mn.width), max(size.height, mn.height)))
         self._register()
         self.CentreOnScreen()
+        # GTK knows the height of wrapped text only once the window exists: grow to the best size then, else the
+        # last lines are cut off (seen live: the first-run notice lost "widths and via sizes ..." at 200 px).
+        wx.CallAfter(self._grow_to_best)
+
+    def _grow_to_best(self) -> None:
+        if not self:
+            return
+        self.Layout()
+        best, cur = self.GetBestSize(), self.GetSize()
+        if best.width > cur.width or best.height > cur.height:
+            self.SetSize(wx.Size(max(best.width, cur.width), max(best.height, cur.height)))
+            self.Layout()
 
     def _register(self) -> None:
         """Collect every named descendant into ``ids``; controls that carry no text of their own get
@@ -423,13 +439,13 @@ class PreflightDialog(_Base):
             self.list.InsertItem(i, W[_SEV_WORD[f.severity]], self._icon[f.severity])
             self.list.SetItem(i, 1, f.code)
             self.list.SetItem(i, 2, f.message)
-        self.list.SetMinSize(self.FromDIP(wx.Size(-1, 110)))
+        self.list.SetMinSize(self.FromDIP(wx.Size(-1, 150)))  # >= 5 rows (live test: 110 showed 1.5 rows)
         self.list.SetToolTip(W["findings_heading"].format(errors=self.n_err, warnings=n_warn, notes=n_info))
         self.root.Add(self.list, 1, wx.EXPAND | wx.BOTTOM, self.row)
 
         self.cause = wx.TextCtrl(self, name="cause",
                                  style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_BESTWRAP)
-        self.cause.SetMinSize(wx.Size(-1, self.cause.GetCharHeight() * 3 + self.FromDIP(12)))
+        self.cause.SetMinSize(wx.Size(-1, self.cause.GetCharHeight() * 4 + self.FromDIP(12)))
         self.cause.SetToolTip(f"{W['cause_label']} / {W['fix_label']}")
         self.root.Add(self.cause, 0, wx.EXPAND | wx.BOTTOM, self.row)
 
@@ -474,7 +490,7 @@ class PreflightDialog(_Base):
         self.A11Y = {"findings": W["findings_heading"].format(errors=self.n_err, warnings=n_warn, notes=n_info),
                      "cause": f"{W['cause_label']} / {W['fix_label']}", "existing": W["existing_label"],
                      "timeout": W["timeout_label"], "threads": W["threads_label"]}
-        self.finish((640, 480), (720, 620))
+        self.finish((640, 560), (760, 780))
         self.list.SetFocus()
 
     def _build_options(self, summary: RunSummary, cfg: Config) -> None:
@@ -649,6 +665,7 @@ class ProgressDialog(_Base):
         super().__init__(WORDING["progress"]["title"].format(board=board))
         self.timeout_s = float(timeout_s or 0)
         self.iteration_cap = iteration_cap
+        self._round, self._round_from_engine = (0, iteration_cap), False
         self.cancelled = False
         W = WORDING["progress"]
 
@@ -667,8 +684,10 @@ class ProgressDialog(_Base):
         self.routed_value = self._num("routed_value", 90)
         self.vias_value = self._num("vias_value", 110)
         self.elapsed_value = self._num("elapsed_value", 140)
+        self.total_value = self._num("total_value", 140)
         for lab, val in (("iteration_label", self.iteration_value), ("routed_label", self.routed_value),
-                         ("vias_label", self.vias_value), ("elapsed_label", self.elapsed_value)):
+                         ("vias_label", self.vias_value), ("elapsed_label", self.elapsed_value),
+                         ("total_label", self.total_value)):
             grid.Add(self.text(self, "progress", lab), 0)
             grid.Add(val, 0, wx.ALIGN_RIGHT)
         self.root.Add(grid, 0, wx.BOTTOM, self.group)
@@ -688,8 +707,11 @@ class ProgressDialog(_Base):
         st.SetMinSize(wx.Size(self.FromDIP(width_dip), -1))
         return st
 
-    def set_phase(self, phase: str) -> None:
+    def set_phase(self, phase: str, stage: str = "") -> None:
         if self.cancelled:
+            return
+        if phase in ("setup", "route", "done") and stage:  # the topological core names its stage (K1)
+            self.phase.SetLabel(WORDING["progress"]["phase_route_stage"].format(stage=stage))
             return
         key = PHASE_KEYS.get(phase)
         self.phase.SetLabel(WORDING["progress"][key] if key else phase)
@@ -715,7 +737,7 @@ class ProgressDialog(_Base):
 
     def update(self, p: Progress) -> None:
         W = WORDING["progress"]
-        self.set_phase(p.phase)
+        self.set_phase(p.phase, getattr(p, "stage", ""))
         if self.cancelled or not (p.phase == "route" and p.total > 0):
             self.gauge.Pulse()
             self.gauge_value.SetLabel("")
@@ -723,9 +745,14 @@ class ProgressDialog(_Base):
             self.gauge.SetRange(p.total)
             self.gauge.SetValue(max(0, min(p.routed, p.total)))
             self.gauge_value.SetLabel(W["gauge_value"].format(routed=p.routed, total=p.total))
-        cap = self.iteration_cap
-        self.iteration_value.SetLabel(W["iteration_value"].format(iteration=p.iteration, cap=cap)
-                                      if cap else str(p.iteration))
+        if getattr(p, "rounds", 0):  # the engine names its round; the plugin's own phases keep the last one
+            if p.round:
+                self._round = (p.round, p.rounds)
+        elif not self._round_from_engine:
+            self._round = (p.iteration, self.iteration_cap)  # an engine without rounds: its iteration
+        self._round_from_engine = self._round_from_engine or bool(getattr(p, "rounds", 0))
+        rnd, cap = self._round
+        self.iteration_value.SetLabel(W["iteration_value"].format(iteration=rnd, cap=cap) if cap else str(rnd))
         if p.iteration == 0 and p.routed == 0:
             self.routed_value.SetLabel(W["routed_pending"].format(total=p.total))
         else:
@@ -734,6 +761,7 @@ class ProgressDialog(_Base):
         el = _fmt_time(p.elapsed_s)
         self.elapsed_value.SetLabel(W["elapsed_value"].format(elapsed=el, limit=_fmt_time(self.timeout_s))
                                     if self.timeout_s > 0 else W["elapsed_nolimit"].format(elapsed=el))
+        self.total_value.SetLabel(_fmt_time(max(getattr(p, "wall_s", 0.0), p.elapsed_s)))
 
 
 # --------------------------------------------------------------------------------------------- (4) preview
@@ -832,6 +860,17 @@ class PreviewDialog(_Base):
         self.CentreOnScreen()
         self._render()
         self.zoom.SetFocus()
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook)
+
+    def _on_char_hook(self, evt) -> None:
+        """Enter = Accept wherever the focus is (GTK: the focused Zoom choice would open its list instead, and the
+        image / summary panes swallow the key), except on a button, which activates itself. Found in the live test
+        (tools/gui_e2e.sh): Enter did nothing while the Zoom choice had the focus."""
+        if evt.GetKeyCode() in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER) and not evt.HasAnyModifiers() \
+                and not isinstance(wx.Window.FindFocus(), wx.Button):
+            self.EndModal(wx.ID_OK)
+            return
+        evt.Skip()
 
     @staticmethod
     def _load(png) -> "wx.Image | None":
@@ -1040,7 +1079,7 @@ class WxUi:
         self._progress: ProgressDialog | None = None
         self._cancelled = False
         self._timeout_s = float(Config.defaults().get("run", "timeout_s"))
-        self._iter_cap = int(Config.defaults().get("iterations", "max"))
+        self._iter_cap = int(Config.defaults().get("optimize", "rounds"))
         self._last_progress: Progress | None = None
 
     def set_context(self, board: str | None = None, report_dir=None, log_path=None, versions=None) -> None:
@@ -1090,7 +1129,7 @@ class WxUi:
             dlg.Destroy()
         if d.proceed:  # progress needs the effective limit / cap
             self._timeout_s = float(d.overrides.get("timeout_s", cfg.get("run", "timeout_s")))
-        self._iter_cap = int(cfg.get("iterations", "max"))
+        self._iter_cap = int(cfg.get("optimize", "rounds"))  # the topological core's whole-route rounds
         return d
 
     def progress(self, p: Progress) -> bool:

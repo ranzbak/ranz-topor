@@ -29,6 +29,7 @@ round (pcbfile edits, JSON). Progress polling is O(run time / 0.25 s).
 from __future__ import annotations
 
 import json
+import os
 import re
 import statistics
 import tempfile
@@ -47,6 +48,7 @@ from toporlib.kicad_cli import KicadCliCancelled, KicadCliTimeout
 
 from . import messages
 from . import preflight as preflight_mod
+from . import postrun
 from . import preview as preview_mod
 from .config import CONFIG_NAME, Config, load_config, update_config
 from .findings import Finding
@@ -515,11 +517,12 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     findings = out.findings
     report_dir = out.report_dir
     state = {"cancel": False, "last": Progress(), "judged_key": None, "judged": None, "last_result": None,
-             "rounds": 0}
+             "rounds": 0, "router_s": 0.0}  # router_s: router time of the finished jobs (progress dialog)
 
     def emit(phase: str) -> None:
         p = state["last"]
-        q = Progress(phase, p.iteration, p.routed, p.total, p.vias, time.monotonic() - t0)
+        q = Progress(phase, p.iteration, p.routed, p.total, p.vias, state["router_s"], p.stage, p.round, p.rounds,
+                     time.monotonic() - t0)
         if ui.progress(q) is False:
             state["cancel"] = True
 
@@ -682,7 +685,17 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
             return state["last_result"]  # cancelled: no further rounds, the best result stays
         if no_budget:
             o = {**o, "wall_clock_s": 0.0}
-        job = engine.route_async(json.dumps(m), json.dumps(o))
+        mj, oj = json.dumps(m), json.dumps(o)
+        dump = os.environ.get("TOPOR_DUMP_ENGINE_INPUT")  # debugging (docs/dev/debug.md): the engine's exact input
+        if dump:
+            d = Path(dump)
+            d.mkdir(parents=True, exist_ok=True)
+            n = len(list(d.glob("model-*.json"))) + 1
+            (d / f"model-{n}.json").write_text(mj)
+            (d / f"options-{n}.json").write_text(oj)
+            log.line(f"engine input written to {d}/model-{n}.json, options-{n}.json (TOPOR_DUMP_ENGINE_INPUT)")
+        job = engine.route_async(mj, oj)
+        job_t0, router_before = time.monotonic(), state["router_s"]
         last_poll, cancelled_at = -1e9, None
         while True:  # ends when the job is done (also after an engine panic: B-1) or CANCEL_GRACE_S after Cancel
             done = job.done()
@@ -690,6 +703,11 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
             if done or now - last_poll >= POLL_S:
                 last_poll = now
                 p = Progress.from_json(json.loads(job.progress()))
+                # honest times (K1): router time over all jobs (what run.timeout_s limits) and the wall time of
+                # the whole run; the engine's own elapsed_s restarts with every whole-route round
+                p.elapsed_s = router_before + (now - job_t0)
+                p.wall_s = now - t0
+                state["router_s"] = p.elapsed_s
                 state["last"] = p
                 if ui.progress(p) is False:
                     state["cancel"] = True
@@ -741,6 +759,15 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     out.stop_reason = rr.get("stop_reason")
     out.cancelled = bool(state["cancel"] or out.stop_reason == "cancel")
     out.rounds, out.router_s = loop.rounds, loop.router_s
+    # K1: the engine's report lines that need the user's attention become findings (postrun.py); a post-run
+    # finding replaces a pre-flight one of the same code (e.g. DIFF_PAIRS_SKIPPED: "will not" -> "were not").
+    post = postrun.route_findings(rr)
+    if loop.routed_drc is not None:  # KiCad's own view of the pours after the refill (K1)
+        post += postrun.drc_pour_findings(loop.routed_drc.unconnected)
+    post_codes = {f.code for f in post}
+    findings[:] = [f for f in findings if f.code not in post_codes] + post
+    for f in post:
+        log.line(f"after routing: {f.code} ({f.severity}): {f.message}")
     classified = classify(loop.routed_drc, base_drc, loop.created, unconnected_baseline=orig_drc)
     out.drc = classified
     inc = classified["incomplete"]
@@ -777,6 +804,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         _, notes = preview_mod.render_ex(
             pcb_copy, out.routed_pcb, png, caption, new_items=out.items, outline=model.get("outline"),
             layer_names=[l["name"] for l in model.get("layers", []) if l.get("routable", True)] or None,
+            unconnected_before=(orig_drc.unconnected if orig_drc is not None else None),
+            unconnected_after=(loop.routed_drc.unconnected if loop.routed_drc is not None else None),
             **cli_kw("preview", cancellable=False))
         report.facts["notes"] = report.facts["notes"] + notes
     except KicadCliTimeout as e:  # the numbers still allow a decision; the timeout is named in the findings

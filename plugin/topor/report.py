@@ -20,7 +20,10 @@ from pathlib import Path
 
 from toporlib.detour import detour_line, detour_stats
 
+from .postrun import POSTRUN_CODES
+
 SUMMARY_MAX_LINES = 20
+_FINDING_ITEMS = 25  # places listed per post-run finding in report.md
 MM = 1_000_000
 
 #: RunOutcome.status -> wording of the ``Outcome:`` line (wireframe section 5).
@@ -104,6 +107,9 @@ class RunReport:
             f"locked {_na(f.get('respect_locked'))}",
             f"Settings: {_na(f.get('non_default'))} non-default, {_na(f.get('defaults_used'))} built-in defaults",
             f"Findings: {sev('error')} errors · {sev('warning')} warnings · {sev('info')} notes",
+            *([f"After routing, check: {', '.join(post)} (report.md → Findings)"] if (post := [
+                f"{x.code} ({len(x.items)})" if x.items else x.code for x in fnd
+                if x.code in POSTRUN_CODES and x.severity != "info"]) else []),
             f"Outcome: {outcome_text(self.status, self.error_code)}" + self._refill_note(),
             *(["Warning: time budget hit: result may differ between runs (run.timeout_s stopped the topological core "
                "before its [optimize] work caps)"] if f.get("time_budget_hit") else []),
@@ -208,8 +214,15 @@ class RunReport:
 
     def _findings(self) -> list:
         acc = set(self.facts.get("accepted_codes") or ())
-        return [f"- **{x.code}** ({x.severity}{', accepted' if x.code in acc else ''}): {x.message}"
-                + (f" Fix: {x.fix}" if x.fix else "") for x in (self.facts.get("findings") or [])]
+        out = []
+        for x in self.facts.get("findings") or []:
+            out.append(f"- **{x.code}** ({x.severity}{', accepted' if x.code in acc else ''}): {x.message}"
+                       + (f" Fix: {x.fix}" if x.fix else ""))
+            if x.code in POSTRUN_CODES:  # K1: the places themselves (pre-flight items are uuids / pad refs)
+                out += [f"  - {i}" for i in list(x.items)[:_FINDING_ITEMS]]
+                if len(x.items) > _FINDING_ITEMS:
+                    out.append(f"  - ... {len(x.items) - _FINDING_ITEMS} more in result.json")
+        return out
 
     def _settings(self) -> list:
         f = self.facts

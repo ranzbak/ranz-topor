@@ -100,7 +100,7 @@ def test_wx_ui_dialogs_construct_headless(app, tmp_path):
         "report": ["report_dir", "open_report_folder", "close"],
         "error": ["details", "copy_details", "open_report_folder", "close"],
     }
-    mins = {"first_run": (440, 200), "preflight": (640, 480), "progress": (460, 240), "preview": (800, 520),
+    mins = {"first_run": (440, 200), "preflight": (640, 560), "progress": (460, 240), "preview": (800, 520),
             "report": (440, 220), "error": (520, 320)}
     default = {"first_run": wx.ID_OK, "preflight": wx.ID_OK, "progress": wx.ID_CANCEL, "preview": wx.ID_OK,
                "report": wx.ID_OK, "error": wx.ID_OK}
@@ -203,8 +203,8 @@ def test_progress_returns_false_after_cancel(app):
     ui = _QuietUi()
     assert ui.progress(Progress("route", 3, 12, 27, 4, 12.0)) is True
     dlg = ui._progress
-    assert dlg.routed_value.GetLabel() == "12 / 27" and dlg.elapsed_value.GetLabel() == "0:12 / 1:00"
-    assert dlg.iteration_value.GetLabel() == "3 of up to 30"
+    assert dlg.routed_value.GetLabel() == "12 / 27" and dlg.elapsed_value.GetLabel() == "0:12 / 10:00"
+    assert dlg.iteration_value.GetLabel() == "3 of up to 4"  # no round from the engine: [optimize] rounds as cap
     assert dlg.gauge.GetValue() == 12
     evt = wx.CommandEvent(wx.wxEVT_BUTTON, wx.ID_CANCEL)
     evt.SetEventObject(dlg.cancel_button)
@@ -344,3 +344,69 @@ def test_done_dialog_refill_hint_and_post_commit_warning(app, tmp_path):
 
 def test_elapsed_format_hours():
     assert ui_wx._fmt_time(72) == "1:12" and ui_wx._fmt_time(3725) == "1:02:05"
+
+
+class _Key:
+    """Minimal wx.KeyEvent stand-in for the char hooks."""
+
+    def __init__(self, code, mods=False):
+        self.code, self.mods, self.skipped = code, mods, False
+
+    def GetKeyCode(self):
+        return self.code
+
+    def HasAnyModifiers(self):
+        return self.mods
+
+    def Skip(self):
+        self.skipped = True
+
+
+def test_preview_enter_accepts_while_zoom_has_focus(app, tmp_path, monkeypatch):
+    """Live test (tools/gui_e2e.sh, K1): Enter in the preview did nothing while the Zoom choice had the focus."""
+    d = _build_all(tmp_path)
+    try:
+        p = d["preview"]
+        monkeypatch.setattr(wx.Window, "FindFocus", staticmethod(lambda: p.zoom))
+        ended = []
+        p.EndModal = ended.append
+        p._on_char_hook(_Key(wx.WXK_RETURN))
+        assert ended == [wx.ID_OK]
+        ev = _Key(wx.WXK_ESCAPE)
+        p._on_char_hook(ev)
+        assert ev.skipped and ended == [wx.ID_OK]
+        monkeypatch.setattr(wx.Window, "FindFocus", staticmethod(lambda: p.buttons["reject"]))
+        ev = _Key(wx.WXK_RETURN)
+        p._on_char_hook(ev)  # a focused button activates itself
+        assert ev.skipped and ended == [wx.ID_OK]
+    finally:
+        for x in d.values():
+            x.Destroy()
+
+
+def test_buttons_never_narrower_than_their_label(app, tmp_path):
+    """Live test (K1): a fixed 88 DIP width cut "Open report folder" to "pen report fold"."""
+    d = _build_all(tmp_path)
+    try:
+        for name in ("preview", "report", "error"):
+            for b in d[name].buttons.values():
+                assert b.GetMinSize().width >= b.GetBestSize().width, (name, b.GetLabel())
+    finally:
+        for x in d.values():
+            x.Destroy()
+
+
+def test_progress_names_the_engine_stage_round_and_times(app):
+    """K1 (honest about long runs): the topological core's stage and round, router time against the limit and
+    the total wall time are shown; the round stays while the plugin's own DRC phase runs."""
+    dlg = ui_wx.ProgressDialog("qmtech", 600.0, 4)
+    try:
+        dlg.update(Progress("route", 2, 120, 426, 30, 75.0, "drawing the traces", 2, 4, 90.0))
+        assert dlg.phase.GetLabel() == "Routing — drawing the traces"
+        assert dlg.iteration_value.GetLabel() == "2 of up to 4"
+        assert dlg.elapsed_value.GetLabel() == "1:15 / 10:00" and dlg.total_value.GetLabel() == "1:30"
+        dlg.update(Progress("drc", 4, 346, 426, 187, 150.0, "", 0, 0, 170.0))
+        assert dlg.phase.GetLabel() == ui_wx.WORDING["progress"]["phase_drc"]
+        assert dlg.iteration_value.GetLabel() == "2 of up to 4"
+    finally:
+        dlg.Destroy()

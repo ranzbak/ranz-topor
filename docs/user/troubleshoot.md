@@ -221,6 +221,14 @@ and compare with `drc.json` in the report folder. If the router's copper really 
 
 **Fix.** Finish the partial connections by hand, then run KiCad → Tools → Cleanup Tracks & Vias yourself (run.kicad_cleanup).
 
+### CONNECTION_WIDTH
+
+*Severity: warning.*
+
+**Cause.** A trace would run so close past a pad or via of its own net that the copper between them gets thinner than KiCad's minimum connection width, so the trace was not drawn.
+
+**Fix.** Route these connections by hand, or check the minimum in KiCad → File → Board Setup → Design Rules → Constraints → Minimum connection width.
+
 ### DANGLING_ENDS
 
 *Severity: info.*
@@ -236,6 +244,14 @@ and compare with `drc.json` in the report folder. If the router's copper really 
 **Cause.** Some values were not set in KiCad, so topor's built-in defaults were used (e.g. the default track width for nets without a netclass, existing copper or setting).
 
 **Fix.** Set the values in KiCad → File → Board Setup → Design Rules → Net Classes / Pre-defined Sizes.
+
+### DIFF_PAIRS_SKIPPED
+
+*Severity: warning.*
+
+**Cause.** Differential pairs (two nets whose names end in _P/_N, +/- or P/N) are not routed by this version of topor; their connections stay unrouted.
+
+**Fix.** Route these pairs by hand with KiCad's differential-pair router (KiCad → Route → Differential Pair, hotkey 6); diff-pair routing comes in a later version of topor. To keep topor off them completely, list them in nets.do_not_touch.
 
 ### DO_NOT_TOUCH
 
@@ -277,6 +293,14 @@ and compare with `drc.json` in the report folder. If the router's copper really 
 
 **Fix.** Select the footprints themselves, or ungroup first (KiCad → Edit → Ungroup).
 
+### IGNORED_RULE
+
+*Severity: warning.*
+
+**Cause.** Some copper breaks a KiCad check whose severity is set to ignore; topor prices such places (the ignored_rule social factor) instead of forbidding them, as KiCad's own DRC would not complain.
+
+**Fix.** Set the check's severity in KiCad → File → Board Setup → Design Rules → Violation Severity to error to make topor keep away from it, or raise factors.weight ignored_rule.
+
 ### INTERNAL
 
 *Severity: error.*
@@ -284,6 +308,14 @@ and compare with `drc.json` in the report folder. If the router's copper really 
 **Cause.** An unexpected internal error stopped the run. The board was not changed.
 
 **Fix.** Run again; if it recurs, file a bug with log.txt and result.json from the report folder (Open report folder in the dialog) and a copy of the project folder saved with KiCad → File → Save (docs/dev/debug.md).
+
+### KEEPOUT_PAD
+
+*Severity: warning.*
+
+**Cause.** A pad of a net that needs routing lies inside a rule area that forbids tracks on every copper layer of the pad, so no trace can reach it.
+
+**Fix.** Move the pad's footprint or change the rule area in KiCad (select the rule area → Properties: untick Tracks), or route that connection by hand.
 
 ### KICAD_API_CONNECT
 
@@ -357,6 +389,14 @@ and compare with `drc.json` in the report folder. If the router's copper really 
 
 **Fix.** Give both nets the same marker (KiCad → Schematic → net label) or set nets.priority.
 
+### NECKED
+
+*Severity: info.*
+
+**Cause.** Some traces leave their pad narrower than the net's track width (necking) because the full width does not fit out of the pad; the rest of the trace keeps its width.
+
+**Fix.** Accept them, or forbid it with search.neck_to_pad = false; the narrowest allowed width is KiCad → File → Board Setup → Design Rules → Constraints → Minimum track width.
+
 ### NON_DEFAULTS
 
 *Severity: info.*
@@ -397,6 +437,22 @@ and compare with `drc.json` in the report folder. If the router's copper really 
 
 **Fix.** Add a zone on that layer with a ground/power net covering the board outline (KiCad → Place → Add Filled Zone), then refill zones (KiCad → Edit → Fill All Zones, B), or change the role in topor.toml [layers].
 
+### PLANE_PAD_SIGNAL
+
+*Severity: info.*
+
+**Cause.** A pad of a plane net (a net whose pour is on a plane layer) had no room for a short stub and via into its pour, so it is joined to its net's copper by an ordinary trace instead.
+
+**Fix.** Nothing to do if the trace is acceptable; otherwise make room next to the pad or allow vias closer to it (vias.plane_via_max_mm, vias.via_in_pad).
+
+### PLANE_VIA_OUTSIDE_POUR
+
+*Severity: warning.*
+
+**Cause.** A via that should drop a pad onto its plane ended outside the filled copper of that plane, so it does not connect there.
+
+**Fix.** Refill the zones (KiCad → Edit → Fill All Zones, B) and check the via; move it into the pour by hand or enlarge the zone (KiCad → zone properties).
+
 ### POST_COMMIT_STEP_FAILED
 
 *Severity: warning.*
@@ -404,6 +460,30 @@ and compare with `drc.json` in the report folder. If the router's copper really 
 **Cause.** The routes were committed to the board, then a later step failed (zone refill, a KiCad cleanup / teardrop action, writing the report or showing the done notice); the routes stay on the board.
 
 **Fix.** Ctrl+Z (Edit → Undo) removes the routes; or keep them and do the failed step yourself: refill zones with B (KiCad → Edit → Fill All Zones), run KiCad → Tools → Cleanup Tracks & Vias, or check the report folder (output.report_dir).
+
+### POUR_ISLANDS
+
+*Severity: warning.*
+
+**Cause.** The new copper cuts pieces of a copper pour off from the rest of the pour, and topor found no place for a stitching via or pad stub to join them back; after a zone refill KiCad either removes those pieces or lists them as unconnected.
+
+**Fix.** Refill the zones (KiCad → Edit → Fill All Zones, B), look at the listed places and add a via by hand (KiCad → Place → Via) or move a trace; planes.stitch_islands controls topor's own stitching.
+
+### POUR_STITCHED
+
+*Severity: info.*
+
+**Cause.** The new copper cut pieces off a copper pour; topor joined them back with stitching vias inside the pieces or short stubs from their pads (each one is listed).
+
+**Fix.** Nothing to do; check them after a zone refill (KiCad → Edit → Fill All Zones, B). planes.stitch_islands = false only reports the pieces.
+
+### POUR_UNJOINED
+
+*Severity: warning.*
+
+**Cause.** KiCad's DRC of the routed copy, after a zone refill, reports pieces of a copper pour cut off from the rest of the pour, or pads / vias that the pour no longer reaches. In preview.png such a pad has a blue ring; a cut-off piece is only counted in the legend (KiCad gives no position for it).
+
+**Fix.** Refill the zones (KiCad → Edit → Fill All Zones, B), run KiCad → Inspect → Design Rules Checker to see each one, then add a stitching via (KiCad → Place → Via) or move the trace that cuts the pour; planes.stitch_islands lets topor stitch what it can.
 
 ### POWER_BY_NAME
 
@@ -445,6 +525,14 @@ and compare with `drc.json` in the report folder. If the router's copper really 
 
 **Fix.** Select other footprints in the PCB editor, change run.scope_mode, or check that nets are assigned (KiCad → Tools → Update PCB from Schematic).
 
+### TIME_BUDGET_HIT
+
+*Severity: warning.*
+
+**Cause.** The time limit stopped the topological core before its work caps ([optimize]); the result is the best so far and may differ between runs and machines.
+
+**Fix.** Raise run.timeout_s (0 = no limit; Cancel always works) and route again; the [optimize] work caps then end the run with a reproducible result.
+
 ### TRACK_ANGLE_RULE
 
 *Severity: error.*
@@ -452,6 +540,14 @@ and compare with `drc.json` in the report folder. If the router's copper really 
 **Cause.** A custom rule restricts track angle or segment length; topor routes curved traces and cannot honour it, so the result would violate your rule.
 
 **Fix.** Remove or scope the rule in KiCad → File → Board Setup → Design Rules → Custom Rules, or route that area by hand.
+
+### UNROUTED
+
+*Severity: warning.*
+
+**Cause.** Some connections could not be finished; the report's Connections table names each one with its reason (no room for a via, no room at the clearance when the trace was drawn, ...). The open connections are drawn blue in preview.png.
+
+**Fix.** Route the remaining connections by hand (KiCad → Inspect → Design Rules Checker lists them as unconnected items), or make room: smaller vias in KiCad → File → Board Setup → Design Rules → Net Classes, fewer obstacles, or another layer; then run topor again with run.existing_copper = "fixed" to keep the result.
 
 ### VIA_IN_PAD_UNPROTECTED
 
@@ -468,3 +564,11 @@ and compare with `drc.json` in the report folder. If the router's copper really 
 **Cause.** KiCad has no via sizes set up (no pre-defined via, and every net class via is KiCad's factory 0.8 / 0.4 mm), so every net with that via is routed with vias.fallback_diameter_mm / vias.fallback_drill_mm (0.8 / 0.4 mm by default) and, where space requires, smaller vias from topor's fab profile (a drill of 0.25, 0.3, 0.4 or 0.5 mm below the fallback drill, never below the board's minimum via drill and annular ring).
 
 **Fix.** Set the via size and hole of the net classes in KiCad → File → Board Setup → Design Rules → Net Classes (topor routes each net with its net class via), or set vias.fallback_diameter_mm and vias.fallback_drill_mm. A via in KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias also clears this finding: topor routes with the net class via and uses the smaller pre-defined vias where space requires.
+
+### VIA_SQUEEZE
+
+*Severity: warning.*
+
+**Cause.** Some vias stand in a narrow pass: less room than half a via diameter is left next to them (the via_squeeze social factor). They pass KiCad's DRC but leave little room for later edits.
+
+**Fix.** Accept them, or raise the price of narrow passes with factors.weight via_squeeze (topor.toml [factors] weight = { via_squeeze = 10 }) and route again; factors.report via_squeeze = "off" hides the list.

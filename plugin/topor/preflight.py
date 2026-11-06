@@ -345,6 +345,57 @@ def _info_findings(model: dict, rules: dict, cfg) -> list:
     return out
 
 
+def _diff_pairs(model: dict, cfg) -> list:
+    """DIFF_PAIRS_SKIPPED (K1): nets that pair by name (``priority._pair_key``, the rule the engine's
+    ``diff_pair_nets`` follows) with both halves having two or more pads: the topological core leaves their
+    connections unrouted. do_not_touch nets are left out (they are not routed anyway). O(N + pads)."""
+    from .priority import _pair_key  # noqa: PLC0415
+    from .scope import do_not_touch_nets  # noqa: PLC0415
+
+    pads: dict = {}
+    for p in model.get("pads", []):
+        if p.get("net"):
+            pads[p["net"]] = pads.get(p["net"], 0) + 1
+    skip = do_not_touch_nets(model, cfg)
+    halves: dict = {}
+    for n in model.get("nets", []):
+        k = _pair_key(n["name"])
+        if k and pads.get(n["code"], 0) >= 2 and n["name"] not in skip:
+            halves.setdefault(k[0], {})[k[1]] = n["name"]
+    nets = sorted(x for h in halves.values() if len(h) == 2 for x in h.values())
+    if not nets:
+        return []
+    return [_mk("DIFF_PAIRS_SKIPPED",
+                f"{len(nets) // 2} differential pair(s) will not be routed by this version: {', '.join(nets[:10])}"
+                + (" ..." if len(nets) > 10 else "") + ". Route them by hand; diff-pair routing comes in a later "
+                "version.", nets)]
+
+
+def _keepout_pads(model: dict) -> list:
+    """KEEPOUT_PAD: a pad of a net with two or more pads whose centre lies inside track keepouts on every copper
+    layer of the pad. O(pads * keepouts * points)."""
+    kos = [k for k in model.get("keepouts", []) if k.get("no_tracks") and len(k.get("poly") or []) >= 3]
+    if not kos:
+        return []
+    count: dict = {}
+    for p in model.get("pads", []):
+        if p.get("net"):
+            count[p["net"]] = count.get(p["net"], 0) + 1
+    hit = []
+    for p in model.get("pads", []):
+        if count.get(p.get("net"), 0) < 2 or not p.get("layers"):
+            continue
+        c = p["center"]
+        blocked = [l for l in p["layers"] if any(l in (k.get("layers") or []) and geom.point_in_ring(c, k["poly"])
+                                                  for k in kos)]
+        if len(blocked) == len(p["layers"]):
+            hit.append(f"{p['ref']}.{p['number']}")
+    if not hit:
+        return []
+    return [_mk("KEEPOUT_PAD", f"{len(hit)} pad(s) lie inside a track keepout on all their copper layers: "
+                + ", ".join(hit[:10]) + (" ..." if len(hit) > 10 else "") + ".", hit)]
+
+
 def _groups(pcb_text: str | None) -> list:
     if not pcb_text:
         return []
@@ -381,6 +432,8 @@ def preflight(model: dict, rules: dict, cfg, sel, orig_drc, cfg_findings, *, pcb
     out += _rule_findings(rules)
     out += _copper_findings(model, cfg)
     out += _do_not_touch(model, cfg)
+    out += _diff_pairs(model, cfg)
+    out += _keepout_pads(model)
     conns, _ = connection_count(model)
     if conns == 0:
         out.append(_mk("SCOPE_EMPTY", "There is no connection to route: no net has two or more pads in scope."))

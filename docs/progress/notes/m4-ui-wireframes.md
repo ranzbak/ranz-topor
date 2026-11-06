@@ -179,12 +179,16 @@ dialog never blocks: `WxUi.progress` updates the widgets, calls `wx.YieldIfNeede
 `not self._cancelled`.
 
 - Phase label text = `Progress.phase` mapped through a table (B9). Engine phases (`control.rs`,
-  exactly these): `setup` → `Preparing geometry`, `route` → `Routing — negotiation pass`, `done` →
+  exactly these): `setup` → `Preparing geometry`, `route` → `Routing` (K1: `Routing — {stage}` when the topological core names
+  its stage in `Progress.stage`: projection, topological search, layer assignment, drawing, via reduction, pour
+  stitching), `done` →
   `Routing finished`. Plugin phases (B5 sets them on its own `Progress` copies): `preflight_drc` →
   `Checking the board (KiCad DRC)`, `drc` → `Verifying with KiCad DRC`, `preview` →
   `Rendering the preview`. Anything else → the raw phase string. Gauge: determinate `routed/total`
   only when phase is `route` and `total > 0`; otherwise `Pulse()` (indeterminate) every call.
-  Iteration cap `{cap}` = `[iterations] max` (default 30).
+  Row *Round* = the engine's whole-route round `{round} of up to {rounds}` (`[optimize] rounds`, K1; before
+  K1 the iteration of up to `[iterations] max`). Row *Router time* = router time over all DRC-loop rounds
+  against `run.timeout_s`; row *Total time* = wall time since the run started (KiCad DRC, preview included).
 - Numbers right-aligned in fixed-width labels. Elapsed and limit both `m:ss` (`h:mm:ss` from one
   hour); limit shown as `/ {limit}` or `/ no limit` when `timeout_s == 0` (then Cancel is the only
   stop — the hint line says so).
@@ -464,23 +468,25 @@ title/label/button/checkbox/choice/heading/text).
 |---|---|---|---|
 | progress | title | title | Topor — Routing {board} |
 | progress | phase_setup | text | Preparing geometry |
-| progress | phase_route | text | Routing — negotiation pass |
+| progress | phase_route | text | Routing |
+| progress | phase_route_stage | text | Routing — {stage} |
 | progress | phase_done | text | Routing finished |
 | progress | phase_preflight_drc | text | Checking the board (KiCad DRC) |
 | progress | phase_drc | text | Verifying with KiCad DRC |
 | progress | phase_preview | text | Rendering the preview |
 | progress | phase_cancelling | text | Cancelling — keeping the best result so far… |
 | progress | gauge_value | text | {routed} / {total} |
-| progress | iteration_label | label | Iteration |
+| progress | iteration_label | label | Round |
 | progress | iteration_value | text | {iteration} of up to {cap} |
 | progress | routed_label | label | Routed |
 | progress | routed_value | text | {routed} / {total} |
 | progress | routed_pending | text | – / {total} |
 | progress | vias_label | label | Vias |
-| progress | elapsed_label | label | Elapsed |
+| progress | elapsed_label | label | Router time |
 | progress | elapsed_value | text | {elapsed} / {limit} |
 | progress | elapsed_nolimit | text | {elapsed} / no limit |
-| progress | cancel_hint | label | Cancel keeps the best result so far. |
+| progress | total_label | label | Total time |
+| progress | cancel_hint | label | Cancel keeps the best result so far. The time limit counts router time only and is an emergency stop; KiCad's DRC and the preview come on top. |
 | progress | cancel | button | Cancel |
 
 ### preview

@@ -3,6 +3,8 @@
 run_drc is O(kicad-cli); classify/split/summarise are O(V + U) in violations + unconnected items."""
 from __future__ import annotations
 
+import re
+
 import json
 import time
 from collections import Counter
@@ -218,3 +220,48 @@ def summarise(board: str, report: DrcReport, baseline: DrcReport | None = None,
     for k, v in (extra or {}).items():
         lines.append(f"  {k}: {v}")
     return "\n".join(lines[:SUMMARY_MAX_LINES])
+
+
+_BRACKET = re.compile(r"\[([^\]]*)\]")
+
+
+def _net_of(desc: str) -> str:
+    m = _BRACKET.search(desc or "")
+    return m.group(1) if m else "?"
+
+
+def ratsnest_marks(unconnected) -> dict:
+    """KiCad DRC ``unconnected_items`` sorted for drawing (K1). A zone item's ``pos`` is the zone outline's anchor
+    point, not the place of the break, so a zone end is never drawn there:
+
+    * ``lines``: ``[(x0, y0, x1, y1)]`` mm, two non-zone items that are apart;
+    * ``rings``: ``[(x, y, desc)]`` mm, the non-zone end of an item <-> zone pair (a pad, via or track not joined to
+      its pour);
+    * ``islands``: ``{net: n}``, zone <-> zone pairs: pieces of a pour cut off from the rest (no place to draw);
+    * ``unjoined``: ``[desc]`` of the ring items.
+
+    O(U)."""
+    out = {"lines": [], "rings": [], "islands": {}, "unjoined": []}
+    for u in unconnected or ():
+        its = [i for i in u.get("items", []) if "pos" in i]
+        zone = [str(i.get("description", "")).startswith("Zone") for i in its]
+        if len(its) == 2 and all(zone):
+            n = _net_of(its[0].get("description", ""))
+            out["islands"][n] = out["islands"].get(n, 0) + 1
+        elif any(zone):
+            for i, z in zip(its, zone):
+                if not z:
+                    out["rings"].append((float(i["pos"]["x"]), float(i["pos"]["y"]), str(i.get("description", ""))))
+                    out["unjoined"].append(str(i.get("description", "")))
+        elif len(its) == 2:
+            a, b = its
+            out["lines"].append((float(a["pos"]["x"]), float(a["pos"]["y"]), float(b["pos"]["x"]), float(b["pos"]["y"])))
+    return out
+
+
+def ratsnest_caption(marks: dict) -> str:
+    """Caption tail such as ' · 3 GND pour pieces cut off, 2 not joined to their pour (rings)', or ''. O(nets)."""
+    parts = [f"{n} {net} pour piece{'s' if n != 1 else ''} cut off" for net, n in sorted(marks["islands"].items())]
+    if marks["rings"]:
+        parts.append(f"{len(marks['rings'])} not joined to their pour (rings)")
+    return (" · " + ", ".join(parts)) if parts else ""

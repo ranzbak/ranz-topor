@@ -155,13 +155,19 @@ def draw_ratsnest(png: Path, out: Path, unconnected: list[dict], *, bbox_nm,
     w, h = _png_width(png), _png_height(png)
     sx, sy = w / (x1 - x0), h / (y1 - y0)
     cmd = ["convert", str(png), "-stroke", color, "-fill", color, "-strokewidth", str(width_px)]
-    for u in unconnected:
-        pp = [((it["pos"]["x"] * 1e6 - x0) * sx, (it["pos"]["y"] * 1e6 - y0) * sy)
-              for it in u.get("items", []) if "pos" in it]
-        if len(pp) == 2:
-            cmd += ["-draw", f"line {pp[0][0]:.1f},{pp[0][1]:.1f} {pp[1][0]:.1f},{pp[1][1]:.1f}"]
-        for cx, cy in pp:
+    from toporlib.drc import ratsnest_marks
+    mk = ratsnest_marks(unconnected)
+    px = lambda x, y: ((x * 1e6 - x0) * sx, (y * 1e6 - y0) * sy)  # noqa: E731
+    for xa, ya, xb, yb in mk["lines"]:
+        (ax, ay), (bx, by) = px(xa, ya), px(xb, yb)
+        cmd += ["-draw", f"line {ax:.1f},{ay:.1f} {bx:.1f},{by:.1f}"]
+        for cx, cy in ((ax, ay), (bx, by)):
             cmd += ["-draw", f"circle {cx:.1f},{cy:.1f} {cx + dot_px:.1f},{cy:.1f}"]
+    # a zone's pos is the zone outline's anchor, not the break (K1): ring at the other end; zone <-> zone pairs (pour
+    # pieces cut off) have no place to draw: ratsnest_caption counts them for the caption
+    for x, y, _ in mk["rings"]:
+        cx, cy = px(x, y)
+        cmd += ["-fill", "none", "-draw", f"circle {cx:.1f},{cy:.1f} {cx + 3 * dot_px:.1f},{cy:.1f}", "-fill", color]
     subprocess.run(cmd + [str(out)], check=True)
     return out
 

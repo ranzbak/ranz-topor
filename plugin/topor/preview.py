@@ -33,6 +33,8 @@ from toporlib import geom
 from toporlib.kicad_cli import kicad_cli, run_cli
 
 PREVIEW_HIGHLIGHT_RGB = (0, 139, 139)
+#: open connections (KiCad DRC unconnected items after the zone refill), as the harness PNGs draw them
+RATSNEST_RGB = (0, 80, 255)
 PREVIEW_HIGHLIGHT_FALLBACK_RGB = (208, 64, 208)
 MIN_CONTRAST = 3.0  # WCAG graphics
 
@@ -139,6 +141,32 @@ def overlay_svg(svg_text: str, items: list, origin_nm: tuple, tint, *, layer_rgb
     return svg_text[:i] + extra + svg_text[i:] if i >= 0 else svg_text
 
 
+def ratsnest_svg(svg_text: str, unconnected: list, origin_nm: tuple, *, width_mm: float = 0.25) -> str:
+    """Append KiCad's DRC ``unconnected_items`` (each: two item anchors ``items[i].pos`` in mm, KiCad frame) as
+    blue lines with a dot at each end, the open ratsnest after the zone refill (K1: the report's preview shows
+    what is still open, as the harness compare PNGs do). The anchors are KiCad's item positions (pad centre,
+    track start), so a line says which items are apart, not the exact gap. O(U)."""
+    from toporlib.drc import ratsnest_marks  # noqa: PLC0415
+
+    ox, oy = origin_nm[0] / MM, origin_nm[1] / MM
+    mk = ratsnest_marks(unconnected)
+    parts = []
+    for x0, y0, x1, y1 in mk["lines"]:
+        a, b = (x0 - ox, y0 - oy), (x1 - ox, y1 - oy)
+        parts.append(f'<line x1="{a[0]:.4f}" y1="{a[1]:.4f}" x2="{b[0]:.4f}" y2="{b[1]:.4f}" />')
+        parts += [f'<circle cx="{x:.4f}" cy="{y:.4f}" r="{1.6 * width_mm:.4f}" style="fill:{_hex(RATSNEST_RGB)}" />'
+                  for x, y in (a, b)]
+    # a zone's pos is its outline anchor, not the break: the other end gets a ring ("not joined to its pour"); a
+    # zone <-> zone pair (a pour piece cut off) is only counted in the legend
+    parts += [f'<circle cx="{x - ox:.4f}" cy="{y - oy:.4f}" r="{4 * width_mm:.4f}" />' for x, y, _ in mk["rings"]]
+    if not parts:
+        return svg_text
+    extra = (f'<g fill="none" stroke="{_hex(RATSNEST_RGB)}" stroke-width="{width_mm:.4f}" stroke-linecap="round">'
+             + "".join(parts) + "</g>\n")
+    i = svg_text.rfind("</svg>")
+    return svg_text[:i] + extra + svg_text[i:] if i >= 0 else svg_text
+
+
 # ---------------------------------------------------------------- kicad-cli
 def export_svg(pcb: Path, out_svg: Path, layers=SVG_LAYERS, *, timeout_s: float | None = None,
                on_poll=None) -> Path:
@@ -199,10 +227,13 @@ def render(before_pcb: Path, after_pcb: Path, out_png: Path, caption, *, new_ite
 
 def render_ex(before_pcb: Path, after_pcb: Path, out_png: Path, caption, *, new_items: list | None = None,
               outline: list | None = None, layer_names: list | None = None,
-              panel_px: tuple = (700, 760), timeout_s: float | None = None, on_poll=None) -> tuple:
+              panel_px: tuple = (700, 760), timeout_s: float | None = None, on_poll=None,
+              unconnected_before: list | None = None, unconnected_after: list | None = None) -> tuple:
     """Export both boards, draw them side by side with `caption` (str or list of lines) above, the panel titles
     ``Current board`` / ``Result`` and a legend below; write `out_png`. Returns ``(out_png, notes)``; `notes`
-    are report lines about what the render could not do (e.g. highlight skipped). Needs a ``wx.App``."""
+    are report lines about what the render could not do (e.g. highlight skipped). `unconnected_before` /
+    `unconnected_after`: KiCad DRC unconnected items of the two boards, drawn blue (:func:`ratsnest_svg`). Needs a
+    ``wx.App``."""
     import wx
     import wx.svg
 
@@ -232,6 +263,18 @@ def render_ex(before_pcb: Path, after_pcb: Path, out_png: Path, caption, *, new_
             svg_a_draw = work / "after-highlight.svg"
             svg_a_draw.write_text(overlay_svg(text, new_items, (org[0], org[1]), tint, layer_rgb=lay_rgb))
     notes.append("existing copper is not dimmed in the Result panel (needs a re-styled export)")
+    org = outline_origin(outline)
+    if org is not None and (unconnected_before or unconnected_after):
+        for name, unc in (("before", unconnected_before), ("after", unconnected_after)):
+            if not unc:
+                continue
+            src = svg_b if name == "before" else svg_a_draw
+            dst = work / f"{name}-ratsnest.svg"
+            dst.write_text(ratsnest_svg(Path(src).read_text(), unc, (org[0], org[1])))
+            if name == "before":
+                svg_b = dst
+            else:
+                svg_a_draw = dst
 
     probe = wx.svg.SVGimage.CreateFromFile(str(svg_b))
     pw, ph = float(probe.width) or 1.0, float(probe.height) or 1.0
@@ -276,7 +319,13 @@ def render_ex(before_pcb: Path, after_pcb: Path, out_png: Path, caption, *, new_
     x = m
     dc.DrawText("Legend:", x, y)
     x += dc.GetTextExtent("Legend:")[0] + 10
-    for label, rgb in (("F.Cu", lay_rgb.get(0)), ("B.Cu", lay_rgb.get(2)), ("new copper (highlighted)", tint)):
+    legend = [("F.Cu", lay_rgb.get(0)), ("B.Cu", lay_rgb.get(2)), ("new copper (highlighted)", tint)]
+    if unconnected_before or unconnected_after:
+        from toporlib.drc import ratsnest_caption, ratsnest_marks  # noqa: PLC0415
+        legend.append((f"open connection (KiCad DRC unconnected: {len(unconnected_before or [])} before, "
+                       f"{len(unconnected_after or [])} after"
+                       f"{ratsnest_caption(ratsnest_marks(unconnected_after))})", RATSNEST_RGB))
+    for label, rgb in legend:
         if rgb is not None:
             dc.SetBrush(wx.Brush(wx.Colour(*rgb)))
             dc.SetPen(wx.Pen(wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT), 1))

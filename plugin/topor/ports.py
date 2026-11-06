@@ -102,12 +102,17 @@ class Progress:
     routed: int = 0
     total: int = 0
     vias: int = 0
-    elapsed_s: float = 0.0
+    elapsed_s: float = 0.0  # router time so far (what run.timeout_s limits); the run flow fills it in
+    stage: str = ""  # engine: what the topological core does now ("drawing the traces", ...)
+    round: int = 0  # engine: whole-route round now running, 0 = unknown
+    rounds: int = 0  # engine: most rounds ([optimize] rounds)
+    wall_s: float = 0.0  # plugin: wall time since the run started (KiCad DRC and preview included)
 
     @staticmethod
     def from_json(d: dict) -> "Progress":
         return Progress(str(d.get("phase", "")), int(d.get("iteration", 0)), int(d.get("routed", 0)),
-                        int(d.get("total", 0)), int(d.get("vias", 0)), float(d.get("elapsed_s", 0.0)))
+                        int(d.get("total", 0)), int(d.get("vias", 0)), float(d.get("elapsed_s", 0.0)),
+                        str(d.get("stage", "") or ""), int(d.get("round", 0) or 0), int(d.get("rounds", 0) or 0))
 
 
 @runtime_checkable
