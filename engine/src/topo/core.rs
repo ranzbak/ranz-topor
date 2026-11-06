@@ -133,7 +133,9 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         }
         arch.offer(Variant { label: format!("round {round}"), crit: ro.crit, payload: ro.result.clone() }, &obj);
     };
-    let stubs = place_plane_stubs(model, opts);
+    ctl.update("setup", 0, 0, 0, 0, 0.0);
+    ctl.stage(1, opts.topo_rounds.max(1) as u32, "plane stubs (pads of plane nets onto their pour)");
+    let stubs = place_plane_stubs(model, opts, ctl, (opts.wall_clock_s > 0.0).then(|| t0 + std::time::Duration::from_secs_f64(opts.wall_clock_s)));
     let (r1, h0, mut mem) = route_round(model, opts, ctl, &[], &Memory::default(), 1, &stubs);
     offer(&mut arch, 1, &r1);
     let mut time_hit = r1.result.timed_out;
@@ -187,6 +189,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     let pick = arch.pick(&obj).expect("round 1 is always offered");
     let mut best = arch.items[pick].payload.clone();
     if opts.stitch_islands {
+        ctl.stage(0, opts.topo_rounds.max(1) as u32, "pour stitching");
         stitch_pours(model, opts, &mut best, (opts.wall_clock_s > 0.0).then(|| t0 + std::time::Duration::from_secs_f64(opts.wall_clock_s)));
     }
     best.variants = arch.table(Some(pick));
@@ -333,7 +336,10 @@ fn plane_requests(model: &BoardModel, b: &board::Board, dec: &crate::decompose::
 
 /// Place every plane stub on the static board (pads, holes, outline, keepouts, copper shapes,
 /// existing copper; the stubs placed before it), each at its cheapest site ([`planes::place`]).
-fn place_plane_stubs(model: &BoardModel, opts: &Options) -> PlaneStubs {
+fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl, deadline: Option<Instant>) -> PlaneStubs {
+    // Cancel / the time limit end the placement at once (K1: Cancel was ignored here on a live run); the
+    // route that follows sees the same stop and returns the best result so far.
+    let stop = || cancelled() || ctl.is_cancelled() || deadline.is_some_and(|d| Instant::now() >= d);
     let signal: Vec<u32> = model.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
     if signal.len() < 2 {
         return PlaneStubs::default();
@@ -366,6 +372,9 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options) -> PlaneStubs {
         let mut vias: Vec<(Vec2, f64)> = Vec::new();
         let mut dropped = false;
         for rq in &reqs {
+            if stop() {
+                return PlaneStubs::default();
+            }
             let r = planes::place(&mut dr, rq, &cost, &vias);
             match &r {
                 Ok(o) => {
@@ -411,7 +420,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let why = format!("the topological core routes boards with two or more signal layers; this board has {}", signal.len());
         return (RoundOut::unrouted(unrouted(model, opts, &why)), Vec::new(), Memory::default());
     }
+    let (rnd, rnds) = (round as u32, opts.topo_rounds.max(1) as u32);
     ctl.update("setup", 0, 0, 0, 0, 0.0);
+    ctl.stage(rnd, rnds, "projection of the board");
     let dec = decompose_with(model, opts, &signal, &stubs.signal_pads);
     let mut warnings: Vec<String> = dec.warnings.clone();
     warnings.extend(stubs.notes.iter().cloned());
@@ -480,6 +491,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
     }
     ctl.update("route", 0, 0, nconn, 0, t0.elapsed().as_secs_f64());
+    ctl.stage(rnd, rnds, "topological search");
     // ---- P2 ----
     let proj = &b.proj;
     let mut st = State::new(proj);
@@ -634,6 +646,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     debug_assert!(st.check().is_ok(), "{:?}", st.check());
     ctl.update("route", 1, 0, nconn, 0, t0.elapsed().as_secs_f64());
+    ctl.stage(rnd, rnds, "layer assignment, rip-up and reroute");
     // ---- P3 ----
     let lp = LayerParams {
         via_mm: reg.price(&Event::Via { wire: 0, count: 1, at: None }, &WireCtx::default()),
@@ -953,6 +966,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         tree::remove_wire(&mut st, w);
     }
     ctl.update("route", 2, 0, nconn, lr.vias, t0.elapsed().as_secs_f64());
+    ctl.stage(rnd, rnds, "drawing the traces");
     let _ = &t_draw;
     // ---- Drawing ----
     // An ignored copper-to-edge check is not hard: the checker keeps only "no overlap" there and
@@ -1490,6 +1504,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     let causes_before = causes(&plans, &drawn);
     tlog("drawing + feedback", t_draw);
+    ctl.stage(rnd, rnds, "via reduction and fuse");
     let t_red = Instant::now();
     // The result as drawn is a variant of its own (more vias, maybe shorter).
     let mut pre_snap: Option<Snapshot> = None;

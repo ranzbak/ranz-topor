@@ -30,6 +30,15 @@ pub struct Progress {
     pub total: usize,
     pub vias: usize,
     pub elapsed_s: f64,
+    /// What the run does now, in words for the progress dialog (topological core: "topological search",
+    /// "layer assignment", "drawing", ...); "" when the core does not say. Not a high-water mark.
+    #[serde(default)]
+    pub stage: String,
+    /// Whole-route round now running (1-based) and the most rounds ([optimize] rounds); 0 = unknown.
+    #[serde(default)]
+    pub round: u32,
+    #[serde(default)]
+    pub rounds: u32,
 }
 
 /// Cancel flag and progress of one run; cheap to clone (shared state).
@@ -59,6 +68,15 @@ impl RunControl {
             .lock()
             .map(|p| p.clone())
             .unwrap_or_default()
+    }
+
+    /// Name the current stage and round (progress dialog wording); leaves the counters alone. O(1).
+    pub(crate) fn stage(&self, round: u32, rounds: u32, stage: &str) {
+        if let Ok(mut p) = self.progress.lock() {
+            p.stage = stage.to_string();
+            p.round = round;
+            p.rounds = rounds;
+        }
     }
 
     /// Update the progress; counters only ever grow (high-water marks). O(1).
