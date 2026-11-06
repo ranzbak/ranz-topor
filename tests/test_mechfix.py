@@ -19,11 +19,11 @@ ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.mechfix
 
 
-def _route(case: str, tmp_path: Path) -> dict:
+def _route(case: str, tmp_path: Path, *extra: str, tag: str = "") -> dict:
     src = getattr(mechfix, case)(tmp_path / "src")
-    out = Path(os.environ["TOPOR_FX_OUT"]) / case if os.environ.get("TOPOR_FX_OUT") else tmp_path / "out"
+    out = Path(os.environ["TOPOR_FX_OUT"]) / (case + tag) if os.environ.get("TOPOR_FX_OUT") else tmp_path / ("out" + tag)
     env = {**os.environ, "RAYON_NUM_THREADS": os.environ.get("RAYON_NUM_THREADS", "2"), "TOPOR_HAND_LABEL": "unrouted input"}
-    r = subprocess.run([str(ROOT / "tools" / "route_board.sh"), str(src), str(out), "--timeout", "60", "--name", case],
+    r = subprocess.run([str(ROOT / "tools" / "route_board.sh"), str(src), str(out), "--timeout", "60", "--name", case, *extra],
                        env=env, capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-3000:]
     m = json.loads((out / f"{case}--metrics.json").read_text())
@@ -135,6 +135,26 @@ def test_fx_corner_wrap(tmp_path):
             segs[(s.x, s.y, e.x, e.y, t.GetLayer(), t.GetNetCode())] = t
     spikes = [k for k in segs if (k[2], k[3], k[0], k[1], k[4], k[5]) in segs]
     assert not spikes, spikes
+
+
+def test_fx_narrow_gap_forced(tmp_path):
+    """Never drop (M-B1): the only way is a gap too narrow for the track. The connection is drawn
+    through it anyway; KiCad's DRC sees it connected, with the clearance violations the engine
+    reports (place, type, cause). With [optimize] allow_violations = false it stays unrouted and
+    nothing breaks a rule (the old legal-only output)."""
+    m = _route("fx_narrow_gap_forced", tmp_path)
+    assert m["routed"] == m["connections"] == 1, m
+    assert m["unconnected"] == 0, m
+    assert m["routing_new"] >= 1 and set(m["drc_by_type_new"]) <= {"clearance"}, m
+    viol = _result(m)["violations"]
+    assert viol and all(v["kind"] == "clearance" and v["cause"] for v in viol), viol
+    assert all(abs(v["at"][0] / 1e6 - 15.0) < 1.0 and abs(v["at"][1] / 1e6 - 10.0) < 1.0 for v in viol), viol
+    # The least violating geometry: no copper overlap (a clearance violation, not a short); the
+    # pick counts violations first (one against one wall pad beats one against each).
+    assert all(0 < v["depth_nm"] < 200_000 for v in viol), viol
+    legal = _route("fx_narrow_gap_forced", tmp_path, "--set", "optimize.allow_violations=false", tag="-legal")
+    assert legal["routed"] == 0 and legal["routing_new"] == 0, legal
+    assert not _result(legal)["violations"], _result(legal)["violations"]
 
 
 if __name__ == "__main__":

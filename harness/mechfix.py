@@ -311,3 +311,21 @@ def fx_corner_wrap(d: Path) -> Path:
     for i, (pos, size) in enumerate(ks):
         f.pad(f"K{i}", "K", pos, size)
     return f.save(Path(d) / "fx_corner_wrap.kicad_pcb")
+
+
+def fx_narrow_gap_forced(d: Path) -> Path:
+    """Never drop (M-B1): a signal whose only way is a gap narrower than its track plus the two
+    clearances, on both layers. The drawing finds no legal geometry; the connection is drawn
+    anyway through the gap, its two clearance violations (one per wall pad) priced and reported
+    (before M-B1 it was dropped: "drawing: clearance gap ... against pad:W..").
+
+    SIG: A (3, 10) and B (27, 10) SMD on F.Cu; walls of unconnected pads on F.Cu and B.Cu across
+    the board at x = 15 (1 mm wide, from the board edge to y 9.75 and from y 10.25 to the edge):
+    a 0.5 mm gap where the 0.25 mm track needs 0.65 mm (0.2 mm clearance each side)."""
+    f = Fx(30, 20, nets=("SIG",))
+    f.pad("A1", "SIG", (3.0, 10.0), (1.0, 1.0))
+    f.pad("B1", "SIG", (27.0, 10.0), (1.0, 1.0))
+    for layer, t in ((pcbnew.F_Cu, "F"), (pcbnew.B_Cu, "B")):
+        f.pad(f"WN{t}", None, (15.0, 4.875), (1.0, 9.75), layer=layer)
+        f.pad(f"WS{t}", None, (15.0, 15.125), (1.0, 9.75), layer=layer)
+    return f.save(Path(d) / "fx_narrow_gap_forced.kicad_pcb")
