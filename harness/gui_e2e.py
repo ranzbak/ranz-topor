@@ -17,7 +17,8 @@ What it does (every step leaves a screenshot in <out_dir>/shots/ and a line in <
   3. Xephyr on --display (started if not running), metacity, `pcbnew <input copy>`; waits until KiCad created the
      plugin environment (first start: pip from PyPI) and the board is loaded.
   4. Clicks the Topor button (found in the toolbar by its icon), then: first-run notice -> Continue (only without
-     a topor.toml), pre-flight -> Route, progress (screenshots; with --cancel-after S presses Cancel after S seconds), preview -> Accept,
+     a topor.toml), pre-flight -> Route, progress (screenshots; with --cancel-after S presses Cancel after S seconds; with
+     --ok-at-stable presses OK when the dialog says "Routes stable" and checks the board is the best result shown), preview -> Accept,
      finished -> Close.
   5. Over the KiCad API (an external kipy client in the plugin environment): counts the tracks / vias after
      Accept, presses Ctrl+Z (one undo step must remove them all), Ctrl+Shift+Z (back), saves the board.
@@ -396,6 +397,17 @@ def run(a) -> int:
             if prog and dt - state["last"] >= 10:
                 state["last"] = dt
                 e.shot(f"progress-{int(dt):04d}s", prog[1])
+            if prog and a.ok_at_stable and not state["cancelled"] and "Routes stable" in prog[0]:
+                # M-B0: the dialog says "Routes stable" and its Cancel button reads OK; press it (Enter)
+                time.sleep(1.0)  # let the label repaint for the screenshot
+                e.shot("routes-stable", prog[1])
+                e.key(prog[1], "Return")
+                state["cancelled"] = True
+                state["cancel_t"] = dt
+                state["ok"] = True
+                time.sleep(0.3)
+                e.shot("ok-pressed", prog[1])
+                e.log(f"Routes stable at {dt:.1f} s: OK pressed")
             if prog and a.cancel_after is not None and not state["cancelled"] and dt >= a.cancel_after:
                 e.shot("before-cancel", prog[1])
                 e.key(prog[1], "Escape")
@@ -417,6 +429,8 @@ def run(a) -> int:
                 break
             time.sleep(0.5)
         result["route_wall_s"] = round(time.monotonic() - t_route, 1)
+        if a.ok_at_stable:
+            e.check("progress dialog showed Routes stable (Cancel reads OK)", bool(state.get("ok")))
         if state["cancelled"]:
             result["cancel_reaction_s"] = round(time.monotonic() - t_route - state["cancel_t"], 1)
             e.check("Cancel ends the routing (best result or nothing, no error)", bool(nxt) and not nxt[0].startswith("Topor — Error"), f"{result['cancel_reaction_s']} s after Cancel")
@@ -468,6 +482,17 @@ def run(a) -> int:
         m = board_metrics(live, orig_input, hand.pcb, work=out / f"{name}-metrics-work", report_dir=report_dir,
                           png=out / f"{name}-gui-compare.png", name=name)
         result["metrics"] = m
+        if a.ok_at_stable and report_dir is not None:
+            # the board is the best result the dialog showed at OK (run.py logs it), and OK is not a cancel
+            import re as _re
+            log_txt = (report_dir / "log.txt").read_text() if (report_dir / "log.txt").is_file() else ""
+            mo = _re.search(r"OK at Routes stable: best so far (\d+)/(\d+) routed", log_txt)
+            res = json.loads(rds[-1].read_text())
+            e.check("OK keeps the best result shown (stop: stable, not cancelled)",
+                    bool(mo) and int(mo.group(1)) == res.get("routed") and res.get("stop_reason") == "stable"
+                    and not res.get("cancelled"),
+                    f"shown {mo.group(0) if mo else None}; result routed {res.get('routed')}, stop {res.get('stop_reason')}, "
+                    f"cancelled {res.get('cancelled')}")
         e.check("result accepted, routing_new 0", m.get("status") == "accepted" and m["routing_new"] == 0,
                 f"routed {m.get('routed')}/{m.get('connections')}, unconnected {m['unconnected']} "
                 f"(hand {m['unconnected_hand']}), routing_new {m['routing_new']}, vias {m['vias']}")
@@ -495,6 +520,8 @@ def main(argv=None) -> int:
     ap.add_argument("--display", default=":6")
     ap.add_argument("--wheel", default=None, help="prebuilt topor_engine wheel (default: tools/build.sh builds one)")
     ap.add_argument("--cancel-after", type=float, default=None, help="press Cancel this many seconds after Route")
+    ap.add_argument("--ok-at-stable", action="store_true",
+                    help="press OK as soon as the progress dialog says Routes stable (M-B0) and check the result")
     ap.add_argument("--max-wait", type=float, default=1800, help="longest wait for the preview after Route (s)")
     ap.add_argument("--harness", default=None, help="route_board metrics JSON of the same board to compare with")
     ap.add_argument("--from-hand", action="store_true",
