@@ -155,11 +155,9 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     let stable_all = outs.iter().all(|o| o.stable_at.is_some());
     let cancel = ctl.is_cancelled();
     let time_hit = outs.iter().any(|o| o.time_hit);
+    // Every cycle's variants were stitched before they were judged (pour pieces still cut off
+    // count as errors), so the picked board is the one the progress showed.
     let mut best = outs.swap_remove(pick).result;
-    if opts.stitch_islands {
-        ctl.stage(0, opts.topo_rounds.max(1) as u32, "pour stitching");
-        stitch_pours(model, opts, &mut best, deadline);
-    }
     best.warnings.extend(cycle_lines);
     if n > 1 {
         best.warnings.push(format!("best of {n} seeded runs ([optimize] runs): run {} picked; {}", pick + 1, lines.join("; ")));
@@ -356,12 +354,25 @@ impl Run {
         // An interrupted cycle is offered only when nothing else is there: what OK returns is the
         // best of the cycles that finished.
         if !interrupted || self.arch.items.is_empty() {
-            if let Some((c, r)) = &ro.pre {
-                self.arch.offer(Variant { label: format!("round {cycle} as drawn"), crit: *c, payload: r.clone() }, &obj);
+            // Pour stitching (D4) on each variant before it is judged: a pour piece the copper cut
+            // off that no stitch joins back is an open connection in KiCad's DRC, so it counts as an
+            // error of the variant (else the pick prefers short copper that islands a pour).
+            let deadline = (opts.wall_clock_s > 0.0).then(|| t_call + std::time::Duration::from_secs_f64(opts.wall_clock_s));
+            let stitched = |mut r: RouteResult, mut c: Criteria| -> (RouteResult, Criteria) {
+                if opts.stitch_islands {
+                    ctl.stage(cycle as u32, opts.topo_rounds.max(1) as u32, "pour stitching");
+                    c.errors += stitch_pours(model, opts, &mut r, deadline);
+                }
+                (r, c)
+            };
+            let RoundOut { result, crit, pre } = ro;
+            if let Some((c, r)) = pre {
+                let (r, c) = stitched(r, c);
+                self.arch.offer(Variant { label: format!("round {cycle} as drawn"), crit: c, payload: r }, &obj);
             }
-            self.arch.offer(Variant { label: format!("round {cycle}"), crit: ro.crit, payload: ro.result.clone() }, &obj);
+            let (r, c) = stitched(result, crit);
+            self.arch.offer(Variant { label: format!("round {cycle}"), crit: c, payload: r }, &obj);
         }
-        drop(ro);
         let pick = self.arch.pick(&obj).expect("a cycle was offered");
         let pc = self.arch.items[pick].crit;
         let gained = self.meter.push(super::schedule::Score { incomplete: pc.errors, value: obj.value(&pc) });
@@ -489,11 +500,11 @@ fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, 
 
 /// Pour stitching (D4, [`super::stitch`]) on the picked result: the stitches join its items
 /// (`item_conn` = `usize::MAX`: they belong to no connection) and a summary line plus one line
-/// per cut-off piece go to the warnings.
-fn stitch_pours(model: &BoardModel, opts: &Options, best: &mut RouteResult, deadline: Option<Instant>) {
+/// per cut-off piece go to the warnings. Returns the pieces still cut off afterwards.
+fn stitch_pours(model: &BoardModel, opts: &Options, best: &mut RouteResult, deadline: Option<Instant>) -> usize {
     let pour_nets: BTreeSet<i32> = model.pours.iter().map(|z| z.net).collect();
     if pour_nets.is_empty() {
-        return;
+        return 0;
     }
     // A label can name several pads (a switch with two pads "2"): the one at the terminal.
     let pad_of = |label: &str, at: [i64; 2]| {
@@ -518,7 +529,7 @@ fn stitch_pours(model: &BoardModel, opts: &Options, best: &mut RouteResult, dead
     let t = Instant::now();
     let s = super::stitch::stitch(model, opts, &reg, &best.items, &routed_pads, deadline);
     if s.before == 0 {
-        return;
+        return 0;
     }
     best.warnings.push(format!(
         "pour stitching: {} pour pieces cut off by the routed copper before, {} after; {} island vias, {} pad stubs ({:.2} s)",
@@ -533,6 +544,7 @@ fn stitch_pours(model: &BoardModel, opts: &Options, best: &mut RouteResult, dead
         best.items.push(it);
         best.item_conn.push(usize::MAX);
     }
+    s.after
 }
 
 /// Outcomes and necked stretches of a route at one moment (the variant before the via reduction).
