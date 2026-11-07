@@ -994,3 +994,59 @@ def test_drawing_style_override_reaches_the_drawing_section_and_toml(tmp_path):
     update_config(toml, {f"{where[k][0]}.{where[k][1]}": v for k, v in over.items()})
     text = toml.read_text()
     assert "[drawing]" in text and 'style = "smooth"' in text
+
+
+# ------------------------------------------------------------------ run lock (one run per project)
+class _NestedStartUi(ScriptedUi):
+    """On the first progress call a second run starts for the same project (a second click on the button)."""
+
+    def __init__(self, second):
+        super().__init__()
+        self.second, self.second_out, self.second_ui = second, None, ScriptedUi()
+
+    def progress(self, p):
+        if self.second_out is None:
+            self.second_out = self.second(self.second_ui)
+        return super().progress(p)
+
+
+def test_second_concurrent_run_aborts_at_preflight_first_finishes(eprom, tmp_path):
+    board2 = make_board(eprom)
+    ui = _NestedStartUi(lambda ui2: run_mod.run(board2, ui2, CFG, ExplodingEngine(), tmp_root=tmp_path / "work2"))
+    board, ui, out = do_run(eprom, tmp_path, ui=ui, cfg=CFG.with_values({("run", "timeout_s"): 10.0}))
+    assert out.status in ("accepted", "rejected")
+    o2 = ui.second_out
+    assert o2.status == "aborted_preflight" and o2.error.code == "RUN_ALREADY_RUNNING"
+    assert "already running for this project" in o2.error.message and "process" in o2.error.message
+    assert [c[1][0] for c in ui.second_ui.calls if c[0] == "error"] == [o2.error]
+    assert "aborted at pre-flight" in (o2.report_dir / "log.txt").read_text()
+    assert "aborted at pre-flight" in (o2.report_dir / "report.md").read_text()
+    assert board2.commits == [] and not any(c[0] == "save_copy" for c in board2.calls)
+    # the lock is free again after the first run: a third run is not blocked
+    from topor import runlock
+    from topor.config import cache_root
+    runlock.acquire(eprom.pcb.parent, "eprom-to-kernal", cache_root()).release()
+
+
+def test_single_instance_off_takes_no_lock(eprom, tmp_path):
+    from topor import runlock
+    from topor.config import cache_root
+    held = runlock.acquire(eprom.pcb.parent, eprom.pcb.stem, cache_root())
+    try:
+        board = make_board(eprom)
+        out = run_mod.run(board, ScriptedUi(), CFG.with_values({("run", "single_instance"): False}),
+                          ExplodingEngine(), tmp_root=tmp_path / "work")
+        assert out.error is None or out.error.code != "RUN_ALREADY_RUNNING"
+    finally:
+        held.release()
+
+
+def test_run_lock_unwritable_warns_and_goes_on(eprom, tmp_path, monkeypatch):
+    from topor import runlock
+
+    def boom(*a, **k):
+        raise runlock.RunLockUnavailable(tmp_path / "x.lock", PermissionError("read-only"))
+    monkeypatch.setattr(runlock, "acquire", boom)
+    out = run_mod.run(make_board(eprom), ScriptedUi(), CFG, ExplodingEngine(), tmp_root=tmp_path / "work")
+    assert any(f.code == "RUN_LOCK_UNAVAILABLE" and f.severity == "warning" for f in out.findings)
+    assert out.status != "aborted_preflight" or out.error is None

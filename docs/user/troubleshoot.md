@@ -522,6 +522,22 @@ copper violates a rule anywhere else, file a bug.
 
 **Fix.** Point output.report_dir in topor.toml at a folder you can write (e.g. "topor-reports" inside the project folder), or fix the permissions / free disk space for the folder named in the message.
 
+### RUN_ALREADY_RUNNING
+
+*Severity: error.*
+
+**Cause.** Topor is already running for this project (another KiCad window or an earlier run that has not ended), so this start was cancelled before it touched the board. One run per project avoids two routers writing to the same board.
+
+**Fix.** Finish or cancel the other run first (its progress window shows OK / Cancel), then press the Topor button again. A crashed run frees the lock by itself. To allow parallel runs set run.single_instance = false in topor.toml.
+
+### RUN_LOCK_UNAVAILABLE
+
+*Severity: warning.*
+
+**Cause.** The run lock file in the topor cache folder could not be created or locked (read-only folder or a file system without locks), so this run goes ahead without protection against a second start for the same project.
+
+**Fix.** Make the cache folder named in the message writable (or set TOPOR_REPORT_ROOT to a folder you own), or set run.single_instance = false in topor.toml to stop checking.
+
 ### SCOPE_EMPTY
 
 *Severity: warning.*

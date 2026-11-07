@@ -49,9 +49,9 @@ from toporlib.kicad_cli import KicadCliCancelled, KicadCliTimeout
 
 from . import messages
 from . import preflight as preflight_mod
-from . import postrun
+from . import postrun, runlock
 from . import preview as preview_mod
-from .config import CONFIG_NAME, Config, load_config, update_config
+from .config import CONFIG_NAME, Config, cache_root, load_config, update_config
 from .findings import Finding
 from .layers import resolve_layer_roles
 from .pourreach import dangling_ends, pour_reach
@@ -474,6 +474,23 @@ def run(port: BoardPort, ui: UiPort, cfg: Config | None = None, engine=None, *, 
     def ctx() -> None:
         ui.set_context(board=board_name, report_dir=report_dir, log_path=report_dir / "log.txt", versions=ver)
 
+    lock = None
+    if cfg.get("run", "single_instance"):
+        try:
+            lock = runlock.acquire(project_dir, board_name, cache_root(), report_dir=report_dir)
+            if lock is None:
+                log.line("run lock skipped: fcntl is not available on this platform")
+            else:
+                log.line(f"run lock taken: {lock.path}")
+        except runlock.RunLockBusy as busy:
+            return _abort_locked(busy, ui, out, report, log, ctx, t0)
+        except runlock.RunLockUnavailable as e:  # never fatal: the run goes ahead unprotected, with a warning
+            w = Finding("RUN_LOCK_UNAVAILABLE", "warning",
+                        f"The run lock {e.path} could not be taken ({type(e.cause).__name__}: {e.cause}); "
+                        "this run is not protected against a second start for the same project.",
+                        messages.fix_for("RUN_LOCK_UNAVAILABLE"), (str(e.path),))
+            findings.append(w)
+            log.line("run lock unavailable: " + w.message)
     try:
         ctx()
         return _run(port, ui, cfg, engine, out, report, log, ctx, Path(tmp_root), project_dir, board_name, ts, t0)
@@ -513,6 +530,34 @@ def run(port: BoardPort, ui: UiPort, cfg: Config | None = None, engine=None, *, 
         ctx()
         ui.error(out.error)
         return out
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def _abort_locked(busy, ui, out: "RunOutcome", report, log, ctx, t0) -> "RunOutcome":
+    """Second start for the same project: no board access, outcome "aborted at pre-flight" in log and report,
+    the RUN_ALREADY_RUNNING message through ``ui.error``."""
+    f = Finding("RUN_ALREADY_RUNNING", "error",
+                f"Topor is already running for this project ({runlock.holder_text(busy.holder)}). "
+                "Finish or cancel that run first.",
+                messages.fix_for("RUN_ALREADY_RUNNING"), (str(busy.path),))
+    out.findings.append(f)
+    out.error = f
+    log.line("aborted at pre-flight: " + f.message)
+    if busy.holder:
+        log.line(f"lock holder: {busy.holder}")
+    report.facts["findings"] = out.findings
+    out.status = "aborted_preflight"
+    out.wall_s = time.monotonic() - t0
+    report.set_outcome("aborted_preflight")
+    try:
+        report.write(result=_facts_result("aborted_preflight", out, None))
+    except Exception:  # noqa: BLE001
+        log.exc()
+    ctx()
+    ui.error(f)
+    return out
 
 
 def post_commit_finding(step: str, e: BaseException) -> Finding:

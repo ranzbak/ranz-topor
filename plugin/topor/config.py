@@ -111,6 +111,16 @@ def toml_value(v) -> str:
 
 # ---------------------------------------------------------------- Config
 
+def cache_root() -> Path:
+    """The topor cache folder: ``${TOPOR_REPORT_ROOT:-${XDG_CACHE_HOME:-~/.cache}/kicad/10.0/topor}`` (reports
+    and the run lock)."""
+    root = os.environ.get("TOPOR_REPORT_ROOT")
+    if root:
+        return Path(root)
+    cache = os.environ.get("XDG_CACHE_HOME") or str(Path(os.path.expanduser("~")) / ".cache")
+    return Path(cache) / "kicad" / "10.0" / "topor"
+
+
 @dataclass(frozen=True)
 class Config:
     values: dict = field(default_factory=dict)  # (section, key) -> value, always complete
@@ -160,13 +170,7 @@ class Config:
         """Report folder of one run (ruling C1)."""
         rd = self.values[("output", "report_dir")]
         if not rd:
-            root = os.environ.get("TOPOR_REPORT_ROOT")
-            if root:
-                base = Path(root)
-            else:
-                cache = os.environ.get("XDG_CACHE_HOME") or str(Path(os.path.expanduser("~")) / ".cache")
-                base = Path(cache) / "kicad" / "10.0" / "topor"
-            return base / project_name / timestamp
+            return cache_root() / project_name / timestamp
         p = Path(rd)
         if p.is_absolute():
             return p / timestamp
