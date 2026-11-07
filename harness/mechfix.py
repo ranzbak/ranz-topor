@@ -364,3 +364,43 @@ def fx_terminal_clinch_no_via(d: Path) -> Path:
             f.pad(f"W{i}{t}", None, (x, 4.7), (5.9, 8.4), layer=layer)
     f.keepout([pcbnew.F_Cu, pcbnew.B_Cu], [(5.5, 3.5), (14.5, 3.5), (14.5, 12.5), (5.5, 12.5)], vias=True)
     return f.save(Path(d) / "fx_terminal_clinch_no_via.kicad_pcb")
+
+
+def fx_neck_bottleneck(d: Path) -> Path:
+    """Width in P2 (M-C item 1): a wide net (0.4 mm track, 0.2 mm clearance, board minimum track
+    0.2 mm) whose only way is a 0.7 mm gap between wall pads (both layers) at x = 15: 0.8 mm at
+    the nominal width, 0.6 mm necked. The plan necks the stretch from the nearest pad end to the
+    gap (TopoR 6.3 manual p. 56: the minimum width in bottlenecks; user rule: a neck starts at the
+    footprint) and the drawing draws it so; before M-C the planner counted the full width, the
+    drawing necked only the pad ends and the connection was drawn through the gap as a violation.
+
+    WIDE: A (3, 10) and B (27, 10), SMD on F.Cu; the walls on F.Cu, B.Cu closed to tracks by a
+    keepout over the whole board (coincident F and B wall pads would share CDT vertices)."""
+    f = Fx(30, 20, nets=("WIDE",))
+    f.pad("A1", "WIDE", (3.0, 10.0), (1.0, 1.0))
+    f.pad("B1", "WIDE", (27.0, 10.0), (1.0, 1.0))
+    f.pad("WN", None, (15.0, 4.825), (1.0, 9.65))
+    f.pad("WS", None, (15.0, 15.175), (1.0, 9.65))
+    f.keepout([pcbnew.B_Cu], [(0.2, 0.2), (29.8, 0.2), (29.8, 19.8), (0.2, 19.8)], tracks=True, vias=True)
+    classes = [{"name": "Default", "clearance": 0.2, "track_width": 0.4, "via_diameter": 0.6, "via_drill": 0.3,
+                "priority": 2147483647}]
+    return f.save(Path(d) / "fx_neck_bottleneck.kicad_pcb", classes=classes)
+
+
+def fx_fine_pitch_exit(d: Path) -> Path:
+    """Pad exits on fine pitch (M-C item 2; qmtech ADV7511 pins 62-68 -> header U4): a row of
+    seven 0.3 x 1.6 mm pads at 0.5 mm pitch (long axis along x, like a QFP's left side), the
+    middle five connected to a header column up and to the left. A 0.25 mm track with 0.2 mm
+    clearance cannot leave a pad through the 0.2 mm gap to its neighbour (it needs 0.125 + 0.2
+    there): it has to leave through the pad's tip. Before M-C P2 counted no room at all for a
+    wire next to its own pad, planned exits through the side gaps, and the drawing clipped the
+    neighbour pads (or found no path from the pad and forced one)."""
+    nets = tuple(f"D{i}" for i in range(5))
+    f = Fx(16, 16, nets=nets)
+    for i in range(7):
+        y = 9.5 + 0.5 * i
+        net = nets[i - 1] if 1 <= i <= 5 else None
+        f.pad(f"U{i}", net, (11.0, y), (1.6, 0.3), shape=pcbnew.PAD_SHAPE_ROUNDRECT)
+    for i, net in enumerate(nets):
+        f.pad(f"H{i}", net, (3.0, 2.0 + 1.27 * i), (1.0, 1.0))
+    return f.save(Path(d) / "fx_fine_pitch_exit.kicad_pcb")

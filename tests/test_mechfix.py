@@ -175,5 +175,32 @@ def test_fx_terminal_clinch_no_via(tmp_path):
     assert not _result(m)["violations"], _result(m)["violations"]
 
 
+
+def test_fx_neck_bottleneck(tmp_path):
+    """Width in P2 (M-C): the plan necks the wide net from a pad end through the 0.7 mm gap, the
+    drawing realises it: legal copper, one necked stretch reported (before M-C: drawn through the
+    gap at full width as a clearance violation)."""
+    m = _route("fx_neck_bottleneck", tmp_path)
+    _clean(m)
+    r = _result(m)
+    assert not r["violations"], r["violations"]
+    c = r["connections"][0]
+    assert c["neck_nm"] > 0 and 200_000 <= c["neck_width_nm"] < 400_000, c
+    assert m["detour"]["max"] <= 1.05, m["detour"]
+
+
+@pytest.mark.xfail(strict=False, reason="open (M-C): wires from neighbouring 0.5 mm pins that turn to 45 degrees "
+                   "right at the row's tips run 0.354 mm apart where 0.45 mm is needed; the planner's packer "
+                   "compares passes edge by edge and does not see it (pin access / fanout angle); the pre-M-C "
+                   "wheel routed this board legally with two vias by chance, the model fix alone not")
+def test_fx_fine_pitch_exit(tmp_path):
+    """Pad exits on fine pitch (M-C): every wire leaves its pad through the tip, no neighbour pad
+    clipped, no forced copper. The P2 side of it (no exit through a side gap) is the engine test
+    `topo_mc::a_wire_leaves_a_fine_pitch_pad_through_its_tip`."""
+    m = _route("fx_fine_pitch_exit", tmp_path)
+    _clean(m)
+    assert not _result(m)["violations"], _result(m)["violations"]
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-m", "mechfix", "-q"]))
