@@ -663,7 +663,7 @@ Re-run the lower ladder rungs per fix (memory board-ladder-testing).
      2026-11-07. The coordinator should update those lines.
    - The code already negotiates (`core.rs:1077`), so the plan was out of date before this design.
 2. **The plan calls the per-edge check "exact per layer"** (§"Capacity for N layers": "After P3, exact per layer:
-   `Σ (w+s) of the wires labelled ℓ through e ≤ room[ℓ](e)`").
+   Σ (w+s) of the wires labelled ℓ through e ≤ `room[ℓ](e)`").
    - It is not exact, for the reasons in §3.2 items 1–3.
    - The plan's "room[ℓ] … only obstacles present on ℓ count" is also not what `state.rs:247-263` does: it gives INF,
      not the free length to the next layer-ℓ obstacle.

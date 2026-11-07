@@ -1224,6 +1224,21 @@ pub struct Options {
     /// connections of one net then share a pad exit instead of each needing its own. Off = M3
     /// (pad to pad only).
     pub steiner: bool,
+    /// Inflated sketch U0 (`topor.toml [capacity] mixed_clearance`): how the per-layer cut test
+    /// (`topo::sheet`, `topo::cutflow`) spaces neighbours of different nets on a cut:
+    /// `"conservative"` (default; every gap at the largest clearance of the cut's items, the
+    /// additive territory model of Maley 1987 p. 29) or `"pairwise"` (KiCad's max of the two).
+    /// Read only by the measurement (U1) so far.
+    pub mixed_clearance: String,
+    /// Inflated sketch U0 (`[capacity] cut_radius_mm`): the per-layer cut set keeps only cuts at
+    /// most this long (mm); 0 = off, the exact critical-cut set (with it on, the report says
+    /// "routability not proven", Maley p. 53). Read only by the measurement so far.
+    pub cut_radius_mm: f64,
+    /// Inflated sketch U1 (`[capacity] cut_report`, debug): a directory; when set, the topological
+    /// core builds the per-layer sheets and cut flows after P3, after every P4 round and for the
+    /// plan handed to the drawing, and writes them there as JSON (`run<k>/cycle<c>.json`). Empty
+    /// (default): off. Never changes the routing.
+    pub cut_report: String,
 }
 
 impl Default for Options {
@@ -1332,6 +1347,9 @@ impl Default for Options {
             reserve_via_sites: true,
             pad_bridge_max_nm: 2_000_000,
             steiner: true,
+            mixed_clearance: "conservative".into(),
+            cut_radius_mm: 0.0,
+            cut_report: String::new(),
         }
     }
 }

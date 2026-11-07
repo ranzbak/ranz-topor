@@ -105,6 +105,7 @@ type, default, unit, range and the KiCad place that influences it.
 | `[ripup]` | rip-up escalation |
 | `[iterations]` | when the optimiser stops (cap, patience, minimum gain) |
 | `[optimize]` | topological core: how a run iterates (fluctuation schedule, *Routes stable*, best of N `runs`), the safety and work caps that make a run reproducible (`rounds`, `max_ripped`, `max_expansions`, `max_moves`), the P4 moves, the board objective (`objective` = `length_vias` or `area`, `mm_per_via`) and how many result variants are kept (`variants`) |
+| `[capacity]` | topological core: the per-layer cut test (`mixed_clearance`, `cut_radius_mm`) and its debug report (`cut_report`: a folder that gets the cut test of every routing cycle, for `harness/cutclass.py`); it only measures so far, the routing does not use it |
 | `[factors]` | topological core: weight, scope and report level of each social factor (via, crossing, squeeze, blocks_pad, reroute, …; see the factor table in configuration.md) |
 | `[output]` | arcs or straight segments; report folder |
 | `[expert]` | router constants — leave them alone unless you know the router |

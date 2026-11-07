@@ -347,3 +347,72 @@ def test_fx_octi_no_fit(tmp_path):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-m", "mechfix", "-q"]))
+
+
+# ---- Inflated sketch U1 (docs/dev/inflated-sketch.md §6.2): what the per-layer cut test sees on the boardlets.
+
+def _cuts(case: str, tmp_path: Path) -> tuple[dict, dict]:
+    """Route `case` with the cut report on; the report's plan handed to the drawing (picked run and cycle)."""
+    from harness.cutclass import picked
+    rep_dir = tmp_path / "cuts"
+    m = _route(case, tmp_path, "--set", f"capacity.cut_report={rep_dir}", "--set", "optimize.runs=1")
+    res = json.loads((Path(m["report_dir"]) / "result.json").read_text())
+    k, c = picked(res)
+    rep = json.loads((rep_dir / f"run{k}" / f"cycle{c}.json").read_text())
+    return m, rep["final"]
+
+
+def _layer(fin: dict, name: str) -> list:
+    return next(L["cuts"] for L in fin["layers"] if L["layer"] == name)
+
+
+def _near(pt, xy, tol=0.02) -> bool:
+    return abs(pt[0] - xy[0]) <= tol and abs(pt[1] - xy[1]) <= tol
+
+
+def _cut(cuts: list, a, b) -> list:
+    return [c for c in cuts if (_near(c["p"], a) and _near(c["q"], b)) or (_near(c["p"], b) and _near(c["q"], a))]
+
+
+def test_fx_b1a_corner_bundle_exact_fit(tmp_path):
+    """B1a: four tracks through a passage exactly as wide as they need: the cut between the wall
+    corners holds all four with slack 0, and no F.Cu cut is over-full."""
+    _, fin = _cuts("fx_b1_corner_bundle", tmp_path)
+    f = _layer(fin, "F.Cu")
+    gap = _cut(f, (15.0, 10.0), (15.0, 8.0))
+    assert gap and len(gap[0]["items"]) == 4 and abs(gap[0]["slack"]) <= 0.001, gap
+    assert not [c for c in f if c["slack"] < -0.0005], [c for c in f if c["slack"] < -0.0005]
+
+
+def test_fx_b1b_corner_bundle_one_um_short(tmp_path):
+    """B1b: the passage 1 um narrower: exactly one over-full cut, the wall corners', by 1 um."""
+    _, fin = _cuts("fx_b1b_corner_bundle", tmp_path)
+    f = _layer(fin, "F.Cu")
+    over = [c for c in f if c["slack"] < -0.0005]
+    assert len(over) == 1 and _cut(over, (15.0, 10.0), (15.0, 8.001)) and -0.0015 <= over[0]["slack"], over
+
+
+def test_fx_b2_non_neighbour_squeeze(tmp_path):
+    """B2: AB, AD, BC and CD fit (slack 0.023 mm), AC (the wall ends, 2.85 mm) holds all six tracks and
+    overflows by 0.05 mm. The per-edge model is not asserted (measured U1, it varies by run): it flags
+    the diagonal edges AD / BC as over-full through its oblique-crossing factor, and in some runs an
+    edge A-C as well."""
+    _, fin = _cuts("fx_b2_squeeze", tmp_path)
+    f = _layer(fin, "F.Cu")
+    ac = [c for c in f if c["p"][0] in (13.575, 16.425) and c["q"][0] in (13.575, 16.425) and abs(c["p"][0] - c["q"][0]) > 2.8]
+    assert ac and all(len(c["items"]) == 6 and abs(c["slack"] + 0.05) <= 0.002 for c in ac), ac
+    sides = [c for c in f if min(abs(c["p"][0] - 15.0), abs(c["q"][0] - 15.0)) <= 0.06 and abs(c["p"][1] - c["q"][1]) > 0.3]
+    assert sides and all(c["slack"] >= -0.0005 for c in sides if len(c["items"]) == 3), sides
+
+
+def test_fx_b5_other_layer_pad(tmp_path):
+    """B5: the F.Cu sheet has the cut between the two F.Cu wall ends across the B.Cu pad, 1.0 mm,
+    with the three tracks on it, over-full by 0.55 mm. The projection's edges there end on the B.Cu
+    pad, so the per-edge model has no edge between the wall ends; it flags the B.Cu pad's own sides
+    (0.4 mm) as over-full F.Cu edge-layers instead (measured U1: the right place, the wrong cut)."""
+    _, fin = _cuts("fx_b5_other_layer_pad", tmp_path)
+    f = _layer(fin, "F.Cu")
+    gap = _cut(f, (14.5, 9.9), (15.5, 9.9)) + _cut(f, (14.5, 10.1), (15.5, 10.1))
+    assert gap and all(len(c["items"]) == 3 and abs(c["slack"] + 0.55) <= 0.01 for c in gap), gap
+    walls = (14.5, 15.5)
+    assert not [e for e in fin["edge_over"] if e["a"][0] in walls and e["b"][0] in walls], fin["edge_over"]

@@ -61,6 +61,7 @@ SECTIONS = {
     "optimize": "Topological core: how a run iterates (whole-route cycles with a fluctuation schedule until the routes are stable, like TopoR; best of N seeded runs), its safety caps (work caps, so a run is reproducible), and which result it keeps.",
     "drawing": "Topological core: how the routed topology is drawn as copper (drawing style and its prices).",
     "output": "Result geometry and report location.",
+    "capacity": "Topological core: the per-layer cut test (inflated sketch; docs/dev/inflated-sketch.md). A cut is a straight segment between two pieces of copper on one layer; the traces that must cross it need their widths and clearances along it. These settings shape that test. In this version it only measures (cut_report); the planner and the drawing do not use it yet.",
     "expert": "PathFinder constants; change only when you know the router.",
     "factors": "Price of what a route does (social factors), in mm of copper per unit: weight, scope and report level per factor name (docs/dev/factors.md). Factor code is trusted code: only add factor files you trust.",
 }
@@ -281,6 +282,14 @@ SETTINGS: list[Setting] = [
     _s("output", "geometry", "str", "arcs", "Track geometry: arcs = native KiCad arcs, segments = straight-segment approximation.",
        choices=("arcs", "segments")),
     _s("output", "report_dir", "str", "", "Report folder: \"\" = ${TOPOR_REPORT_ROOT:-${XDG_CACHE_HOME:-~/.cache}/kicad/10.0/topor}/<project>/<YYYYmmdd-HHMMSS>/; relative = <project dir>/<report_dir>/<timestamp>/; absolute = <report_dir>/<timestamp>/."),
+    # ---- [capacity]
+    _s("capacity", "mixed_clearance", "str", "conservative", "Topological core, per-layer cut test: how two neighbouring traces of different nets with different clearances are spaced along a cut. conservative = every gap on the cut at the largest clearance of the traces crossing it (the cut test's own model, safe when net classes differ; costs room next to high-clearance nets); pairwise = the larger of the two neighbours' clearances, as KiCad's DRC checks it (more room, but the test is then no longer exact where clearances differ). Both values are written to the cut report; this one is the cut's need.",
+       choices=("conservative", "pairwise"), engine="mixed_clearance",
+       kicad="KiCad → File → Board Setup → Design Rules → Net Classes (Clearance column) and Custom Rules (clearance)"),
+    _s("capacity", "cut_radius_mm", "float", 0.0, "Topological core, per-layer cut test: only cuts up to this long are checked (mm); 0 = off, every critical cut of the layer whatever its length (the exact test). Faster on large boards, but a squeeze between two pads further apart than this goes unseen, so the cut report then says routability is not proven.",
+       unit="mm", range=(0, 1000), engine="cut_radius_mm"),
+    _s("capacity", "cut_report", "str", "", "Debug: a directory. When set, every routing cycle writes its per-layer cut test there (run<k>/cycle<c>.json: the cut counts after the layer assignment and after every rip-up round, and for the plan handed to the drawing every cut that traces cross, with its room, its need and its slack). Slower; never changes the routing. Empty = off (default). harness/cutclass.py classifies a run's violations with it.",
+       engine="cut_report"),
     # ---- [expert]
     _s("expert", "hist_fail", "float", 1.0, "PathFinder history weight added to a face where a connection failed.", range=(0, 100), engine="expert.hist_fail"),
     _s("expert", "hist_block", "float", 0.5, "PathFinder history weight added to a face that blocked a connection.", range=(0, 100), engine="expert.hist_block"),

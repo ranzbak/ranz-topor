@@ -54,11 +54,14 @@ def limits(clock: str, timeout_s: float, threads: int, jobs: int, seeds: int, bo
             "started": time.strftime("%Y-%m-%d %H:%M:%S")}
 
 
-def run_command(board: str, out_dir: Path, seed: int, *, clock: str, timeout_s: float, png: bool = True) -> list:
-    """The route_board command of one run (seed 0 = defaults)."""
+def run_command(board: str, out_dir: Path, seed: int, *, clock: str, timeout_s: float, png: bool = True,
+                sets: tuple = ()) -> list:
+    """The route_board command of one run (seed 0 = defaults); `sets` are extra `section.key=value` settings."""
     cmd = [str(ROOT / "tools" / "route_board.sh"), board, str(out_dir), "--clock", clock, "--timeout", f"{timeout_s:g}"]
     if seed:
         cmd += ["--set", f"optimize.seed={seed}"]
+    for kv in sets:
+        cmd += ["--set", kv]
     if not png:
         cmd.append("--no-png")
     return cmd
@@ -75,10 +78,14 @@ def main(argv: list | None = None) -> int:
     ap.add_argument("--threads", type=int, default=THREADS, help=f"RAYON_NUM_THREADS (default {THREADS})")
     ap.add_argument("--no-png", action="store_true")
     ap.add_argument("--dry-run", action="store_true", help="print the commands and write limits.json only")
+    ap.add_argument("--set", action="append", default=[], metavar="SECTION.KEY=VALUE",
+                    help="extra setting for every run (debug dumps such as capacity.cut_report=DIR; recorded in "
+                         "limits.json). A {board} and {k} in the value become the board name and run number.")
     a = ap.parse_args(argv)
     runs = [int(x) for x in a.only.split(",")] if a.only else list(range(0, a.seeds + 1))
     a.root.mkdir(parents=True, exist_ok=True)
     lim = limits(a.clock, a.timeout, a.threads, JOBS, a.seeds, a.boards)
+    lim["sets"] = list(a.set)
     lf = a.root / "limits.json"
     lf.write_text(json.dumps(lim, indent=1))
     env = {**os.environ, "RAYON_NUM_THREADS": str(a.threads)}
@@ -88,7 +95,8 @@ def main(argv: list | None = None) -> int:
             name = Path(b).stem if b.endswith(".kicad_pcb") else b
             for k in runs:
                 out = a.root / name / f"s{k}"
-                cmd = run_command(b, out, k, clock=a.clock, timeout_s=a.timeout, png=not a.no_png)
+                sets = tuple(kv.replace("{board}", name).replace("{k}", str(k)) for kv in a.set)
+                cmd = run_command(b, out, k, clock=a.clock, timeout_s=a.timeout, png=not a.no_png, sets=sets)
                 print(" ".join(cmd), flush=True)
                 if a.dry_run:
                     continue
