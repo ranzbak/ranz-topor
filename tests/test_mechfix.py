@@ -157,5 +157,23 @@ def test_fx_narrow_gap_forced(tmp_path):
     assert not _result(legal)["violations"], _result(legal)["violations"]
 
 
+def test_fx_terminal_clinch(tmp_path):
+    """Crossing rules (M-B2): B no longer wraps A's terminal A1: A runs straight to A2 and B
+    passes A1 on the south (before: A went around B's pad B2, detour 1.55, Luzin & Popov 2012
+    Fig. 3a)."""
+    m = _route("fx_terminal_clinch", tmp_path)
+    _clean(m)
+    assert m["vias"] == 0, m
+    assert m["detour"]["max"] <= 1.35, m["detour"]
+
+
+def test_fx_terminal_clinch_no_via(tmp_path):
+    """The clinch where A cannot go around B and no via site anywhere near: legal copper, no
+    violation (before: A crossed B on one layer, drawn through it as a short, never drop)."""
+    m = _route("fx_terminal_clinch_no_via", tmp_path)
+    _clean(m)
+    assert not _result(m)["violations"], _result(m)["violations"]
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-m", "mechfix", "-q"]))

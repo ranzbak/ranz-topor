@@ -329,3 +329,38 @@ def fx_narrow_gap_forced(d: Path) -> Path:
         f.pad(f"WN{t}", None, (15.0, 4.875), (1.0, 9.75), layer=layer)
         f.pad(f"WS{t}", None, (15.0, 15.125), (1.0, 9.75), layer=layer)
     return f.save(Path(d) / "fx_narrow_gap_forced.kicad_pcb")
+
+
+def _terminal_clinch(f: Fx) -> None:
+    """B's straight line passes between A's terminal A1 and A's other end A2 (A1 sits 1 mm south
+    of B's line): B, the shorter connection, is routed first and wraps A1 on the north, so A has
+    to cross it right at its terminal (Luzin & Popov 2012 sign 1, an ordinary clinch; the
+    half-loop around a header pin of qmtech ADV_D -> U4). All four pads SMD on F.Cu."""
+    f.pad("A1", "A", (10.0, 9.2), (1.0, 1.0))
+    f.pad("A2", "A", (10.0, 2.0), (1.0, 1.0))
+    f.pad("B1", "B", (7.5, 8.2), (1.0, 1.0))
+    f.pad("B2", "B", (12.5, 8.2), (1.0, 1.0))
+
+
+def fx_terminal_clinch(d: Path) -> Path:
+    """Clinch at a terminal (M-B2 crossing rules): routed in P2's order, A crosses B next to A1
+    and one of them takes a via pair; the rule routes A first and lays B on the other (south)
+    side of A1: no crossing, no via (Luzin & Popov 2012, p. 118, ordinary clinch removal)."""
+    f = Fx(20, 14, nets=("A", "B"))
+    _terminal_clinch(f)
+    return f.save(Path(d) / "fx_terminal_clinch.kicad_pcb")
+
+
+def fx_terminal_clinch_no_via(d: Path) -> Path:
+    """fx_terminal_clinch where A cannot go around B: walls of unconnected pads (both layers)
+    beside B1 and B2 from the top edge down to y 8.9 leave A's only way north across B's line,
+    and a no-via keepout (both layers) over the whole area leaves the crossing no via site. Before
+    the crossing rules A crosses B on one layer and is drawn through it (never drop: a short);
+    with them B passes A1 on the south and nothing crosses."""
+    f = Fx(20, 14, nets=("A", "B"))
+    _terminal_clinch(f)
+    for i, x in enumerate((3.45, 16.55)):
+        for layer, t in ((pcbnew.F_Cu, "F"), (pcbnew.B_Cu, "B")):
+            f.pad(f"W{i}{t}", None, (x, 4.7), (5.9, 8.4), layer=layer)
+    f.keepout([pcbnew.F_Cu, pcbnew.B_Cu], [(5.5, 3.5), (14.5, 3.5), (14.5, 12.5), (5.5, 12.5)], vias=True)
+    return f.save(Path(d) / "fx_terminal_clinch_no_via.kicad_pcb")
