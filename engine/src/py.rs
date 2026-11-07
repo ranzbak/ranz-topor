@@ -92,7 +92,9 @@ fn via_sizes(rules_json: String, net: i32, options_json: String) -> PyResult<Str
 }
 
 /// A routing run on its own thread: `progress()` (JSON of `control::Progress`), `cancel()`,
-/// `done()`, `wait()` (blocks with the GIL released; the `RouteResult` JSON, idempotent).
+/// `set_time_limit(seconds)` / `time_limit()` (the live wall-clock limit, seconds since the job
+/// started, `0` / `None` = no limit; `control::TimeLimit`), `done()`, `wait()` (blocks with the GIL
+/// released; the `RouteResult` JSON, idempotent).
 /// `done()` is also true after the routing thread panicked (gate review B-1, ruling C31); `wait()`
 /// then raises `RuntimeError("routing thread panicked: <message>")`; a failed run (result not
 /// serialisable) raises `ValueError`. Complexity of every method except `wait`: O(1).
@@ -111,6 +113,18 @@ impl RouteJob {
 
     fn cancel(&self) {
         self.ctl.request_cancel();
+    }
+
+    /// Change the wall-clock limit while the job runs: seconds since the job started (`0` = no
+    /// limit; below the time spent = stop at the next check, keeping the best result, with the
+    /// stop reason of the time limit). The interactive plugin's progress window only.
+    fn set_time_limit(&self, seconds: f64) {
+        self.ctl.set_time_limit(seconds);
+    }
+
+    /// The wall-clock limit now (seconds since the job started); `None` = no limit.
+    fn time_limit(&self) -> Option<f64> {
+        self.ctl.limit.seconds()
     }
 
     fn done(&self) -> bool {
@@ -134,6 +148,7 @@ fn route_async(model_json: String, options_json: String) -> PyResult<RouteJob> {
     let model = BoardModel::from_json(&model_json).map_err(PyValueError::new_err)?;
     let opts = Options::from_json(&options_json).map_err(PyValueError::new_err)?;
     let ctl = RunControl::default();
+    ctl.limit.init(opts.wall_clock_s); // the clock starts with the job; set_time_limit may change it
     let c2 = ctl.clone();
     let job = Job::spawn(move || {
         let res = crate::route::route_with(&model, &opts, &c2);
