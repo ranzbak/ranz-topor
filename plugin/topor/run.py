@@ -29,6 +29,7 @@ round (pcbfile edits, JSON). Progress polling is O(run time / 0.25 s).
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import statistics
@@ -56,7 +57,7 @@ from .layers import resolve_layer_roles
 from .pourreach import dangling_ends, pour_reach
 from .priority import net_priorities
 from .ports import BoardPort, CommitRequest, CommitResult, Decision, Progress, RunSummary, Selection, UiPort
-from .report import RunReport, before_stats_from_model, build_report
+from .report import RunReport, before_stats_from_model, build_report, limit_text, time_limit_text
 from .schema import CURRENT_VERSION
 from .scope import connections_by_scope, do_not_touch_nets, rip_plan, scope_from_selection
 
@@ -110,6 +111,9 @@ class RunOutcome:
     ripped_pcb: Path | None = None
     routed_pcb: Path | None = None
     via_fallback: dict | None = None  # apply_via_fallback info when VIA_NOT_SET_UP patched the engine rules
+    #: the time limit of the routing: {"clock": wall|cpu, "start_s", "final_s" (0 = none), "changes": [{"at_s",
+    #: "limit_s"}]}; changes are the user's, made in the progress dialog while the router ran (time_limit_text)
+    time_limit: dict | None = None
 
 
 class _Log:
@@ -419,6 +423,7 @@ def _facts_result(status: str, out: RunOutcome, report: dict | None) -> dict:
             "cancelled": out.cancelled, "rounds": out.rounds, "router_s": round(out.router_s, 3), "router_cpu_s": round(out.router_cpu_s, 3),
             "wall_s": round(out.wall_s, 3), "items": len(out.items), "ripped": len(out.ripped), "drc": out.drc,
             "findings": [asdict(f) for f in out.findings], "route": slim, "via_fallback": out.via_fallback,
+            "time_limit": out.time_limit,
             "pcb_copy": str(out.pcb_copy) if out.pcb_copy else None}
 
 
@@ -526,9 +531,38 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
 
     def emit(phase: str) -> None:
         q = replace(state["last"], phase=phase, elapsed_s=state["router_s"], cpu_s=state["router_cpu_s"],
-                    wall_s=time.monotonic() - t0)
+                    wall_s=time.monotonic() - t0, limit_s=state.get("limit"))
         if ui.progress(q) is False:
             state["cancel"] = True
+        if state["last_result"] is None:  # a change before the engine job starts applies to it
+            take_limit()
+
+    def take_limit() -> bool:
+        """A time limit the user set in the progress dialog (``ui.time_limit_request``, interactive runs only:
+        headless UIs have no such method, so their limit stays fixed): applied to ``state["limit"]``, logged and
+        recorded in ``out.time_limit``. <= 0 = no limit; a limit below the router time spent becomes the time spent
+        (the run stops at its next check and keeps the best result). True when the limit changed. O(1)."""
+        req = getattr(ui, "time_limit_request", None)
+        if "limit" not in state or not callable(req):  # before the routing's limit exists: left for later
+            return False
+        new = req()
+        if new is None:
+            return False
+        clock = out.time_limit["clock"]
+        spent = state["router_cpu_s"] if clock == "cpu" else state["router_s"]
+        new = float(new)
+        new = 0.0 if not math.isfinite(new) or new <= 0 else max(new, spent)
+        old = state["limit"]
+        if new == old:
+            return False
+        state["limit"] = new
+        out.time_limit["changes"].append({"at_s": round(spent, 3), "limit_s": round(new, 3)})
+        out.time_limit["final_s"] = new
+        how = ("removed by the user (no limit)" if new <= 0 else "set by the user" if old <= 0
+               else "extended by the user" if new > old else "lowered by the user")
+        log.line(f"time limit {how} at {spent:.1f} s router time ({clock} clock): {limit_text(old)} -> "
+                 f"{limit_text(new)}" + (" = the time spent: the run stops at its next check" if 0 < new <= spent else ""))
+        return True
 
     def finish(status: str, *, error_code: str = "") -> RunOutcome:
         out.status = status
@@ -684,20 +718,31 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     budget = float(opts.get("wall_clock_s", 60.0))
     # run.timeout_clock = "cpu": timeout_s counts CPU seconds of the engine jobs (time.process_time deltas, all
     # threads summed); the plugin cancels the job when it is reached and the engine's own wall limit is off.
-    cpu_clock = cfg.get("run", "timeout_clock") == "cpu" and budget > 0
-    cpu_limit = budget if cpu_clock else 0.0
+    # The limit is live (state["limit"], 0 = none): the progress dialog may change it while the router runs
+    # (take_limit); on the wall clock the engine job gets the change (RouteJob.set_time_limit), on the CPU clock the
+    # poll loop below compares against it.
+    cpu_clock = cfg.get("run", "timeout_clock") == "cpu"
     no_budget = budget <= 0 or cpu_clock
+    state["limit"] = max(0.0, budget)
+    out.time_limit = {"clock": "cpu" if cpu_clock else "wall", "start_s": state["limit"], "final_s": state["limit"],
+                      "changes": []}
     geometry = cfg.get("output", "geometry")
     max_err = int(rules.get("max_error") or 5000)
     layer_names = {int(l["id"]): l["name"] for l in model.get("layers", [])}
     net_names = {int(n["code"]): n["name"] for n in model.get("nets", [])}
     routed_dir = work / "routed"
 
+    def engine_limit(router_before: float) -> float:
+        """The engine job's wall limit: seconds since the job started (its clock starts with the job), 0 = none
+        (also on the CPU clock, which the plugin enforces). A limit already spent gives the job a moment: it stops
+        at its first check. O(1)."""
+        lim = state["limit"]
+        return 0.0 if cpu_clock or lim <= 0 else max(1e-3, lim - router_before)
+
     def route_fn(m, o):
         if (state["cancel"] or state["limit_hit"]) and state["last_result"] is not None:
             return state["last_result"]  # cancelled: no further rounds, the best result stays
-        if no_budget:
-            o = {**o, "wall_clock_s": 0.0}
+        o = {**o, "wall_clock_s": engine_limit(state["router_s"])}
         mj, oj = json.dumps(m), json.dumps(o)
         dump = os.environ.get("TOPOR_DUMP_ENGINE_INPUT")  # debugging (docs/dev/debug.md): the engine's exact input
         if dump:
@@ -724,11 +769,18 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                 state["router_s"] = p.elapsed_s
                 p.cpu_s = state["router_cpu_s"] = cpu_before + (time.process_time() - cpu_t0)
                 state["last"] = p
-                if cpu_clock and p.cpu_s >= cpu_limit and not state["limit_hit"] and not done:
+                if (cpu_clock and 0 < state["limit"] <= p.cpu_s and not state["limit_hit"] and not done):
                     state["limit_hit"] = "cpu"
-                    log.line(f"CPU-time limit reached: {p.cpu_s:.1f} s of {cpu_limit:.0f} s (router wall {p.elapsed_s:.1f} s)")
+                    log.line(f"CPU-time limit reached: {p.cpu_s:.1f} s of {state['limit']:.0f} s (router wall {p.elapsed_s:.1f} s)")
+                p.limit_s = state["limit"]
                 if ui.progress(p) is False:
                     state["cancel"] = True
+                if take_limit() and not done and not cpu_clock:
+                    setter = getattr(job, "set_time_limit", None)  # the engine reads its limit live
+                    if callable(setter):
+                        setter(engine_limit(router_before))
+                    else:
+                        log.line("this engine cannot change its time limit during a run; the change is ignored")
                 if state["limit_hit"] and cancelled_at is None:
                     cancelled_at = now
                     job.cancel()
@@ -788,9 +840,11 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     if state["limit_hit"] == "cpu" and out.stop_reason != "stable":
         # the plugin's own cancel: the engine says "cancel", the clock that fired is "cpu"
         out.stop_reason = "timeout_cpu"
+        changed = (f"; changed during the run, run.timeout_s = {limit_text(out.time_limit['start_s'])}"
+                   if out.time_limit["changes"] else "")
         rr = {**rr, "stop_reason": "timeout_cpu", "timed_out": True, "warnings": list(rr.get("warnings") or []) + [
-            f"time budget hit: CPU-time limit of {cpu_limit:.0f} s reached ({out.router_cpu_s:.0f} CPU s of router "
-            f"work, {state['router_s']:.0f} s on the clock, run.timeout_clock = cpu): result may differ between runs"]}
+            f"time budget hit: CPU-time limit of {state['limit']:.0f} s reached ({out.router_cpu_s:.0f} CPU s of router "
+            f"work, {state['router_s']:.0f} s on the clock, run.timeout_clock = cpu{changed}): result may differ between runs"]}
     elif out.stop_reason == "timeout":
         out.stop_reason = "timeout_wall"
         rr = {**rr, "stop_reason": "timeout_wall"}
@@ -817,10 +871,11 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     build_report({**rr, "items": out.items}, classified, cfg, findings, scope_info, before_stats,
                  {"router_s": out.router_s, "router_cpu_s": out.router_cpu_s, "drc_rounds": loop.rounds}, report=report,
                  facts={"layers": report.facts.get("layers"), "versions": report.facts.get("versions"),
+                        "time_limit": out.time_limit,
                         "notes": [f"geometry: {geometry}", f"DRC rounds: {loop.rounds}"] + _ripup_notes(rr) + _via_relax_notes(rr) + (
                             ["time budget exhausted"] if loop.budget_exhausted else [])})
     log.line(f"routed {out.routed}/{out.total}, stop {out.stop_reason}, router {out.router_s:.1f} s, CPU {out.router_cpu_s:.1f} s, rounds {loop.rounds}, "
-             f"routing_new {classified['routing_new']}, unconnected_new {inc['unconnected_new']}")
+             f"routing_new {classified['routing_new']}, unconnected_new {inc['unconnected_new']}, {time_limit_text(out.time_limit)}")
     drc_src = routed_dir / "drc-routed.json"
     if not out.items:  # nothing to show or apply (cancelled early, or the router discarded everything)
         if out.routed == 0 and not out.cancelled:

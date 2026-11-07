@@ -205,6 +205,23 @@ def test_route_async_roundtrip_fixture(engine):
         engine.route_async("{", "{}")
 
 
+def test_route_async_time_limit_is_live(engine):
+    """RouteJob.set_time_limit / time_limit: the job's wall-clock limit (seconds since it started) set from
+    wall_clock_s at the start and changeable while it runs (the plugin's progress dialog); 0 = no limit."""
+    m = _model_with_track()
+    m["kept"] = []
+    m["layers"][0]["routable"] = True
+    mj = json.dumps(m)
+    job = engine.route_async(mj, json.dumps({"wall_clock_s": 10.0, "threads": 2}))
+    assert job.time_limit() == pytest.approx(10.0)
+    job.set_time_limit(300.0)
+    assert job.time_limit() == pytest.approx(300.0)
+    job.set_time_limit(0.0)
+    assert job.time_limit() is None
+    json.loads(job.wait())
+    assert engine.route_async(mj, json.dumps({"wall_clock_s": 0.0, "threads": 2})).time_limit() is None
+
+
 def test_route_async_cancel_returns_anytime_result(engine):
     """Cancel after 2 s of a board that routes for >= 5 s: anytime result, no panic (ruling C10)."""
     import time

@@ -108,6 +108,7 @@ class Progress:
     rounds: int = 0  # engine: most rounds ([optimize] rounds)
     wall_s: float = 0.0  # plugin: wall time since the run started (KiCad DRC and preview included)
     cpu_s: float = 0.0  # plugin: CPU seconds of the engine jobs so far, all threads summed (what timeout_clock = cpu limits)
+    limit_s: float | None = None  # plugin: the time limit in force (seconds on the run's clock, 0 = none); None = unknown
     # M-B0 (iterations like TopoR): "Routes stable" (the gain of the best result over the last
     # [optimize] stable_window rounds is below stable_gain_pct in every run), that gain (None before a
     # full window), the best of N runs and the best result so far (what OK / Cancel keeps).
@@ -181,6 +182,11 @@ class UiPort(Protocol):
 
     def progress(self, p: Progress) -> bool:
         """Called every ~0.25 s; return False to cancel the run."""
+
+    # Optional (the interactive progress dialog only; headless UIs leave it out, so their limit stays fixed):
+    #   def time_limit_request(self) -> float | None:
+    #       """A new time limit the user set during the run (seconds on the run's clock, 0 = no limit), or None.
+    #       The run flow polls it after every ``progress`` call, applies it and reports it in ``Progress.limit_s``."""
 
     def preview(self, png: Path, report: Any) -> bool:
         """Show the result; True = Accept (apply to the board), False = Reject."""

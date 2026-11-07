@@ -189,7 +189,7 @@ MESSAGES: dict[str, Msg] = {
         "Fix each listed place by hand (move the trace or via, or a part), or give the router more room or time (run.timeout_s, [optimize] runs) and route again. [optimize] allow_violations = false writes legal copper only (those connections stay unrouted)."),
     "TIME_BUDGET_HIT": Msg("warning",
         "The time limit (or a Cancel) stopped the topological core before its routes were stable ([optimize] stable_window / stable_gain_pct); the result is the best so far and may differ between runs and machines. The stop reason says which clock fired: timeout_wall (seconds on the clock) or timeout_cpu (CPU seconds summed over all threads, run.timeout_clock = cpu).",
-        "Raise run.timeout_s (0 = no limit; Cancel always works; run.timeout_clock chooses wall or cpu seconds) and route again, or lower [optimize] runs (best of N runs share the threads); wait for \"Routes stable\" and press OK for a reproducible result."),
+        "Raise run.timeout_s (0 = no limit; Cancel always works; run.timeout_clock chooses wall or cpu seconds) and route again, or add time while the router runs (progress dialog: +5 min / +15 min or a new Time limit), or lower [optimize] runs (best of N runs share the threads); wait for \"Routes stable\" and press OK for a reproducible result."),
     "KEEPOUT_PAD": Msg("warning",
         "A pad of a net that needs routing lies inside a rule area that forbids tracks on every copper layer of the pad, so no trace can reach it.",
         "Move the pad's footprint or change the rule area in KiCad (select the rule area → Properties: untick Tracks), or route that connection by hand."),
