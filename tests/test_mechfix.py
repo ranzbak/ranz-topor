@@ -189,17 +189,160 @@ def test_fx_neck_bottleneck(tmp_path):
     assert m["detour"]["max"] <= 1.05, m["detour"]
 
 
-@pytest.mark.xfail(strict=False, reason="open (M-C): wires from neighbouring 0.5 mm pins that turn to 45 degrees "
-                   "right at the row's tips run 0.354 mm apart where 0.45 mm is needed; the planner's packer "
-                   "compares passes edge by edge and does not see it (pin access / fanout angle); the pre-M-C "
-                   "wheel routed this board legally with two vias by chance, the model fix alone not")
 def test_fx_fine_pitch_exit(tmp_path):
-    """Pad exits on fine pitch (M-C): every wire leaves its pad through the tip, no neighbour pad
-    clipped, no forced copper. The P2 side of it (no exit through a side gap) is the engine test
-    `topo_mc::a_wire_leaves_a_fine_pitch_pad_through_its_tip`."""
+    """Pad exits on fine pitch (M-C, M-45): every wire leaves its pad through the tip along the
+    pad's axis, no neighbour pad clipped, no forced copper, every segment at 0/45/90 degrees. The
+    P2 side of it (no exit through a side gap) is the engine test
+    `topo_mc::a_wire_leaves_a_fine_pitch_pad_through_its_tip`. Open since M-C: the taut chords of
+    neighbouring 0.5 mm pins turning at the row's tips ran 0.354 mm apart where 0.45 mm is needed;
+    the octilinear drawing leaves along the axis and staggers the bends (each wire hugs the one
+    drawn before it at the clearance)."""
     m = _route("fx_fine_pitch_exit", tmp_path)
     _clean(m)
     assert not _result(m)["violations"], _result(m)["violations"]
+    tr = _tracks(m, "fx_fine_pitch_exit")
+    assert all(_off45(t) < 1e-3 for t in tr), [t for t in tr if _off45(t) >= 1e-3]
+    # The segment at each connected pin's centre runs along the pin (horizontal) past its tip.
+    for i in range(1, 6):
+        y = 9.5 + 0.5 * i
+        first = [t for t in tr if any(abs(p[0] - 11.0) < 1e-3 and abs(p[1] - y) < 1e-3 for p in (t[2], t[3]))]
+        assert first, (i, tr)
+        for t in first:
+            assert abs(t[2][1] - t[3][1]) < 1e-4, t
+            assert min(t[2][0], t[3][0]) <= 10.2 + 1e-3 or max(t[2][0], t[3][0]) >= 11.8 - 1e-3, t
+
+
+def _tracks(m: dict, case: str) -> list:
+    """Straight tracks of the routed board: `(net, layer, (x, y) a, (x, y) b, width)` in mm."""
+    import pcbnew
+
+    b = pcbnew.LoadBoard(str(Path(m["_out"]) / f"{case}-topor" / f"{case}.kicad_pcb"))
+    out = []
+    for t in b.GetTracks():
+        if t.GetClass() == "PCB_TRACK":
+            a, c = t.GetStart(), t.GetEnd()
+            out.append((t.GetNetname(), t.GetLayer(), (a.x / 1e6, a.y / 1e6), (c.x / 1e6, c.y / 1e6), t.GetWidth() / 1e6))
+    return out
+
+
+def _off45(t) -> float:
+    """Perpendicular deviation (mm) of a track's far end from the nearest 0/45/90 degree line
+    through its start."""
+    import math
+
+    dx, dy = t[3][0] - t[2][0], t[3][1] - t[2][1]
+    best = float("inf")
+    for k in range(8):
+        a = k * math.pi / 4
+        best = min(best, abs(dx * math.sin(a) - dy * math.cos(a)))
+    return best
+
+
+def _turns(tr: list, net: str) -> list:
+    """Turn angles (degrees) along the chain of `net`'s tracks, in path order (one chain)."""
+    import math
+
+    segs = [(t[2], t[3]) for t in tr if t[0] == net and math.dist(t[2], t[3]) > 1e-4]
+    key = lambda p: (round(p[0], 4), round(p[1], 4))  # noqa: E731
+    deg: dict = {}
+    for a, b in segs:
+        deg[key(a)] = deg.get(key(a), 0) + 1
+        deg[key(b)] = deg.get(key(b), 0) + 1
+    start = next(p for s in segs for p in s if deg[key(p)] == 1)
+    chain, cur, left = [], start, list(segs)
+    while left:
+        s = next((s for s in left if key(s[0]) == key(cur) or key(s[1]) == key(cur)), None)
+        if s is None:
+            break
+        left.remove(s)
+        nxt = s[1] if key(s[0]) == key(cur) else s[0]
+        chain.append((cur, nxt))
+        cur = nxt
+    out = []
+    for (a, b), (_, c) in zip(chain, chain[1:]):
+        u, v = (b[0] - a[0], b[1] - a[1]), (c[0] - b[0], c[1] - b[1])
+        cos = (u[0] * v[0] + u[1] * v[1]) / (math.hypot(*u) * math.hypot(*v))
+        t = math.degrees(math.acos(max(-1.0, min(1.0, cos))))
+        if t > 0.05:
+            out.append(t)
+    return out
+
+
+def _len(tr: list, net: str) -> float:
+    import math
+
+    return sum(math.dist(t[2], t[3]) for t in tr if t[0] == net)
+
+
+def test_fx_octi_straight(tmp_path):
+    """Octilinear (M-45): a nearly straight run stays straight with one short 45 degree jog, no
+    longer than 1 % over the straight distance (before: one segment at 1.4 degrees)."""
+    m = _route("fx_octi_straight", tmp_path)
+    _clean(m)
+    tr = _tracks(m, "fx_octi_straight")
+    assert all(_off45(t) < 1e-3 for t in tr), tr
+    # The elbow: 23.4 mm straight + 0.6 sqrt(2) mm at 45 degrees (the shortest octilinear path).
+    assert _len(tr, "SIG") <= 23.4 + 0.6 * 2 ** 0.5 + 0.01, _len(tr, "SIG")
+    assert len(_turns(tr, "SIG")) <= 2, _turns(tr, "SIG")
+
+
+def test_fx_octi_bend(tmp_path):
+    """Octilinear (M-45): on a free board the run is an elbow, one 45 degree bend, 10 + 7 sqrt(2)
+    mm long (before: one segment at 22.4 degrees)."""
+    m = _route("fx_octi_bend", tmp_path)
+    _clean(m)
+    tr = _tracks(m, "fx_octi_bend")
+    assert all(_off45(t) < 1e-3 for t in tr), tr
+    t = _turns(tr, "SIG")
+    assert len(t) == 1 and abs(t[0] - 45.0) < 0.05, t
+    assert abs(_len(tr, "SIG") - (10.0 + 7.0 * 2 ** 0.5)) < 0.05, _len(tr, "SIG")
+
+
+def test_fx_octi_bundle(tmp_path):
+    """Octilinear (M-45): wires around a block keep a constant pitch through their bends: every
+    wire at 0/45/90 degrees, each of the inner wires follows the one inside it at the clearance
+    (`[drawing] bundle_pull`), so their 45 degree stretches are parallel at width + clearance, and
+    the report counts the bends taken together with their skew (before M-45: taut chords at any
+    angle; with the octilinear drawing but no pull, each wire took its own shortest staircase and
+    the diagonals were 0.5 to 2 mm apart)."""
+    import math
+
+    m = _route("fx_octi_bundle", tmp_path)
+    _clean(m)
+    assert not _result(m)["violations"], _result(m)["violations"]
+    tr = _tracks(m, "fx_octi_bundle")
+    assert all(_off45(t) < 1e-3 for t in tr), [t for t in tr if _off45(t) >= 1e-3]
+
+    def diag_offset(net):
+        # Distance from the origin of the 45-degree line (lower left to upper right) of the wire's
+        # bend around the block's corner (12, 12): its 45-degree segment nearest that corner.
+        ds = [t for t in tr if t[0] == net and abs(abs(t[3][0] - t[2][0]) - abs(t[3][1] - t[2][1])) < 1e-3
+              and (t[3][0] - t[2][0]) * (t[3][1] - t[2][1]) < 0]
+        assert ds, (net, [t for t in tr if t[0] == net])
+        d = min(ds, key=lambda t: math.dist(((t[2][0] + t[3][0]) / 2, (t[2][1] + t[3][1]) / 2), (12.0, 12.0)))
+        return (d[2][0] + d[2][1]) / math.sqrt(2)
+
+    # The inner three follow each other at the clearance (0.25 mm track + 0.2 mm: 0.45 mm centre
+    # to centre); the outer one may keep its own lane (the plan spreads it over a wide passage).
+    offs = [diag_offset(f"B{i}") for i in range(3)]
+    gaps = [abs(b - a) for a, b in zip(offs, offs[1:])]
+    assert all(abs(g - 0.45) < 0.01 for g in gaps), (offs, gaps)
+    bundles = [w for w in _result(m)["warnings"] if w.startswith("bundles (octilinear)")]
+    assert bundles and int(bundles[0].split(": ")[1].split()[0]) >= 3, bundles
+
+
+def test_fx_octi_no_fit(tmp_path):
+    """Octilinear (M-45) where 45 degrees cannot fit: through the 30 degree channel the stretch
+    stays any-angle and is reported (any_angle warning with its place and angle); the connection
+    is routed without a violation."""
+    m = _route("fx_octi_no_fit", tmp_path)
+    _clean(m)
+    r = _result(m)
+    assert not r["violations"], r["violations"]
+    assert any("any_angle" in w or "not at 0/45/90 degrees (" in w for w in r["warnings"]), r["warnings"]
+    tr = _tracks(m, "fx_octi_no_fit")
+    off = [t for t in tr if _off45(t) >= 1e-3]
+    assert off and all(5.9 <= min(t[2][0], t[3][0]) and max(t[2][0], t[3][0]) <= 24.1 for t in off), off
 
 
 if __name__ == "__main__":

@@ -404,3 +404,72 @@ def fx_fine_pitch_exit(d: Path) -> Path:
     for i, net in enumerate(nets):
         f.pad(f"H{i}", net, (3.0, 2.0 + 1.27 * i), (1.0, 1.0))
     return f.save(Path(d) / "fx_fine_pitch_exit.kicad_pcb")
+
+
+def fx_octi_straight(d: Path) -> Path:
+    """Octilinear drawing (M-45): a straight run between two pads 0.6 mm apart across 24 mm. The
+    taut path is one segment at 1.4 degrees; the octilinear drawing keeps it straight with one
+    short 45 degree jog (before M-45: the slanted segment).
+
+    SIG: A1 (3, 10) and B1 (27, 10.6), SMD on F.Cu."""
+    f = Fx(30, 20, nets=("SIG",))
+    f.pad("A1", "SIG", (3.0, 10.0), (1.0, 1.0))
+    f.pad("B1", "SIG", (27.0, 10.6), (1.0, 1.0))
+    return f.save(Path(d) / "fx_octi_straight.kicad_pcb")
+
+
+def fx_octi_bend(d: Path) -> Path:
+    """Octilinear drawing (M-45): free board, the pads 17 mm apart in x and 7 mm in y. The
+    octilinear path is an elbow: 10 mm straight and 7 sqrt(2) mm at 45 degrees, one 45 degree
+    bend (before M-45: one segment at 22.4 degrees).
+
+    SIG: A1 (3, 3) and B1 (20, 10), SMD on F.Cu."""
+    f = Fx(24, 14, nets=("SIG",))
+    f.pad("A1", "SIG", (3.0, 3.0), (1.0, 1.0))
+    f.pad("B1", "SIG", (20.0, 10.0), (1.0, 1.0))
+    return f.save(Path(d) / "fx_octi_bend.kicad_pcb")
+
+
+def fx_octi_bundle(d: Path) -> Path:
+    """Octilinear drawing (M-45): a bundle of four nets turning 90 degrees around a block. The
+    nets leave a column of pads on the left (0.5 mm pitch) and end at a row of pads at the top
+    right (0.5 mm pitch); an 11.5 x 11.5 mm unconnected pad (on F.Cu and B.Cu) fills the board's
+    top left corner, the inside of the turn. Each wire hugs the wire inside it at the clearance, so the bundle keeps its pitch
+    through the bend (hand style; before M-45 the taut chords fanned out at any angle).
+
+    B0..B3: L<i> (3, 14 + 0.5 i) to T<i> (14 + 0.5 i, 3), SMD 0.3 x 0.3 mm on F.Cu; the block
+    from (0.5, 0.5) to (12, 12)."""
+    nets = tuple(f"B{i}" for i in range(4))
+    f = Fx(20, 20, nets=nets)
+    for i, net in enumerate(nets):
+        f.pad(f"L{i}", net, (3.0, 14.0 + 0.5 * i), (0.3, 0.3))
+        f.pad(f"T{i}", net, (14.0 + 0.5 * i, 3.0), (0.3, 0.3))
+    f.pad("KF", None, (6.25, 6.25), (11.5, 11.5))
+    f.pad("KB", None, (6.25, 6.25), (11.5, 11.5), layer=pcbnew.B_Cu)
+    return f.save(Path(d) / "fx_octi_bundle.kicad_pcb")
+
+
+def fx_octi_no_fit(d: Path) -> Path:
+    """Octilinear drawing (M-45), where 45 degrees cannot fit: the only way is a channel at 30
+    degrees, 0.70 mm wide between copper walls (no net, on F.Cu and B.Cu), where the 0.25 mm track
+    with 0.2 mm clearance needs 0.65 mm. A staircase of 0/45/90 degree pieces does not fit
+    there: that stretch stays at 30 degrees and is reported (any_angle), the connection is routed
+    without a violation (never an open wire or a new violation because of the style).
+
+    SIG: A1 (3, 16) and B1 (27, 16 - 24 tan 30), SMD on F.Cu; the walls cover the board between
+    x 6 and 24 except the channel band."""
+    import math
+
+    f = Fx(30, 20, nets=("SIG",))
+    t = math.tan(math.radians(30.0))
+    y0 = 16.0
+    a, b = (3.0, y0), (27.0, y0 - 24.0 * t)
+    f.pad("A1", "SIG", a, (1.0, 1.0))
+    f.pad("B1", "SIG", b, (1.0, 1.0))
+    half = 0.35 / math.cos(math.radians(30.0))  # vertical half height of a 0.70 mm band at 30 deg
+    yc = lambda x: y0 - (x - 3.0) * t  # noqa: E731
+    for layer in (pcbnew.F_Cu, pcbnew.B_Cu):
+        # Above the band (smaller y in KiCad's frame) and below it.
+        f.shape(layer, [(6.0, 0.3), (24.0, 0.3), (24.0, yc(24.0) - half), (6.0, yc(6.0) - half)])
+        f.shape(layer, [(6.0, yc(6.0) + half), (24.0, yc(24.0) + half), (24.0, 19.7), (6.0, 19.7)])
+    return f.save(Path(d) / "fx_octi_no_fit.kicad_pcb")
