@@ -10,6 +10,7 @@ pub mod core;
 pub mod descent;
 pub mod cuts;
 pub mod demand;
+pub mod diffpair;
 pub mod draw;
 pub mod dwitness;
 pub mod exact;

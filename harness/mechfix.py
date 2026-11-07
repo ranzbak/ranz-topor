@@ -125,13 +125,13 @@ class Fx:
         self.b.Add(z)
         return z
 
-    def save(self, path: Path, *, rules: dict | None = None, classes=()) -> Path:
+    def save(self, path: Path, *, rules: dict | None = None, classes=(), patterns=()) -> Path:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         if any(True for _ in self.b.Zones()):
             pcbnew.ZONE_FILLER(self.b).Fill(self.b.Zones())
         pcbnew.SaveBoard(str(path), self.b)
-        write_project_file(path, rules=rules or {}, classes=list(classes))
+        write_project_file(path, rules=rules or {}, classes=list(classes), patterns=patterns)
         return path
 
 
@@ -473,3 +473,117 @@ def fx_octi_no_fit(d: Path) -> Path:
         f.shape(layer, [(6.0, 0.3), (24.0, 0.3), (24.0, yc(24.0) - half), (6.0, yc(6.0) - half)])
         f.shape(layer, [(6.0, yc(6.0) + half), (24.0, yc(24.0) + half), (24.0, 19.7), (6.0, 19.7)])
     return f.save(Path(d) / "fx_octi_no_fit.kicad_pcb")
+
+
+# ---------------------------------------------------------------- D7 differential pairs
+#: Default class of the pair fixtures: 0.25 mm tracks at 0.2 mm clearance, pairs 0.2 mm wide at a 0.2 mm gap
+#: (centre pitch 0.4 mm), 0.6 / 0.3 mm vias (via pair pitch 0.6 + 0.2 = 0.8 mm).
+DP_CLASS = {"name": "Default", "clearance": 0.2, "track_width": 0.25, "via_diameter": 0.6, "via_drill": 0.3,
+            "diff_pair_width": 0.2, "diff_pair_gap": 0.2, "diff_pair_via_gap": 0.25, "priority": 2147483647}
+
+
+def _dp_pads(f: Fx, ref: str, p_net: str, n_net: str, at, *, pitch=0.5, axis="y", size=(0.8, 0.3)):
+    """A two-pad footprint-like pair of SMD pads: P at `at`, N `pitch` further along `axis` (KiCad frame)."""
+    x, y = at
+    q = (x, y + pitch) if axis == "y" else (x + pitch, y)
+    f.pad(ref + "P", p_net, (x, y), size, shape=pcbnew.PAD_SHAPE_ROUNDRECT)
+    f.pad(ref + "N", n_net, q, size, shape=pcbnew.PAD_SHAPE_ROUNDRECT)
+
+
+def fx_dp_straight(d: Path) -> Path:
+    """D7: a straight pair. DP+ / DP- leave two pads 0.5 mm apart at x = 3 and run 24 mm to two pads at x = 27
+    (same rows): one coupled pair at the 0.2 mm gap, P above N at both ends (no polarity cross), skew 0, the two
+    tracks joined to their pads by short fan-out stubs (the pad pitch 0.5 differs from the pair pitch 0.4)."""
+    f = Fx(30, 20, nets=("DP+", "DP-"))
+    _dp_pads(f, "A", "DP+", "DP-", (3.0, 9.75))
+    _dp_pads(f, "B", "DP+", "DP-", (27.0, 9.75))
+    return f.save(Path(d) / "fx_dp_straight.kicad_pcb", classes=[DP_CLASS])
+
+
+def fx_dp_bend(d: Path) -> Path:
+    """D7: a pair with one 45 degree bend: from pads at (3, 4) / (3, 4.5) to pads at (20, 11) / (20, 11.5); the
+    octilinear elbow has one 45 degree bend, which makes the outer track 2 x pitch x tan 22.5 = 0.33 mm longer
+    (skew reported, estimate and actual agree)."""
+    f = Fx(24, 16, nets=("CLK_P", "CLK_N"))
+    _dp_pads(f, "A", "CLK_P", "CLK_N", (3.0, 4.0))
+    _dp_pads(f, "B", "CLK_P", "CLK_N", (20.0, 11.0))
+    return f.save(Path(d) / "fx_dp_bend.kicad_pcb", classes=[DP_CLASS])
+
+
+def fx_dp_via(d: Path) -> Path:
+    """D7: a pair that must change layer: a copper wall (no net) across the whole board on F.Cu between x = 12 and
+    18; the pads are on F.Cu at both ends. The pair goes down and up with a via pair each time: two vias side by
+    side (pitch 0.6 + 0.2 = 0.8 mm), P and N vias on their own sides, no unpaired via."""
+    f = Fx(30, 20, nets=("D0P", "D0N"))
+    _dp_pads(f, "A", "D0P", "D0N", (3.0, 9.75))
+    _dp_pads(f, "B", "D0P", "D0N", (27.0, 9.75))
+    f.shape(pcbnew.F_Cu, [(12.0, 0.3), (18.0, 0.3), (18.0, 19.7), (12.0, 19.7)])
+    return f.save(Path(d) / "fx_dp_via.kicad_pcb", classes=[DP_CLASS])
+
+
+def fx_dp_qfn_fanout(d: Path) -> Path:
+    """D7: fan-out from 0.5 mm pitch QFN-like pins into a coupled pair: a row of eight 0.8 x 0.25 mm pads at
+    0.5 mm pitch (long axis along x, like a QFN's left side) at x = 12; the middle two are USB_D+ / USB_D-, their
+    neighbours are pins of other nets (A0..A5, each going to its own test pad on the left). The pair leaves through
+    the pad tips, zips at the gap once past the pins and runs to a connector at x = 26. The 0.2 mm tracks with
+    0.2 mm clearance cannot leave between the pins: the fan-out is the uncoupled stretch at the pads."""
+    others = tuple(f"A{i}" for i in range(6))
+    f = Fx(30, 20, nets=("USB_D+", "USB_D-") + others)
+    k = 0
+    for i in range(8):
+        y = 8.25 + 0.5 * i
+        if i == 3:
+            net = "USB_D+"
+        elif i == 4:
+            net = "USB_D-"
+        else:
+            net = others[k]
+            k += 1
+        f.pad(f"U{i}", net, (12.0, y), (0.8, 0.25), shape=pcbnew.PAD_SHAPE_ROUNDRECT)
+    for i, net in enumerate(others):
+        f.pad(f"T{i}", net, (3.0, 5.0 + 2.0 * i), (1.0, 1.0))
+    _dp_pads(f, "J", "USB_D+", "USB_D-", (26.0, 9.5), pitch=1.0, size=(1.2, 0.6))
+    return f.save(Path(d) / "fx_dp_qfn_fanout.kicad_pcb", classes=[DP_CLASS])
+
+
+def fx_dp_narrow(d: Path) -> Path:
+    """D7: a pair through a passage too narrow for the coupled pair: copper walls (no net) on F.Cu and B.Cu across
+    the board leave one 0.85 mm channel; the coupled pair needs 0.2 + 0.2 + 0.2 + 2 x 0.2 clearance = 1.0 mm.
+    Never drop (M-B1): both halves are routed through it with the shortfall priced and reported as violations,
+    nothing is left open."""
+    f = Fx(30, 20, nets=("TX+", "TX-"))
+    _dp_pads(f, "A", "TX+", "TX-", (3.0, 9.75))
+    _dp_pads(f, "B", "TX+", "TX-", (27.0, 9.75))
+    for layer in (pcbnew.F_Cu, pcbnew.B_Cu):
+        f.shape(layer, [(12.0, 0.3), (18.0, 0.3), (18.0, 9.575), (12.0, 9.575)])
+        f.shape(layer, [(12.0, 10.425), (18.0, 10.425), (18.0, 19.7), (12.0, 19.7)])
+    return f.save(Path(d) / "fx_dp_narrow.kicad_pcb", classes=[DP_CLASS])
+
+
+def fx_dp_two_pairs(d: Path) -> Path:
+    """D7: two pairs side by side through a bend around a block (like fx_octi_bundle): pairs TX0 and TX1 leave a
+    column of pads on the left (0.5 mm pitch, TX0 above TX1) and end at a row of pads at the top right; an
+    11.5 x 11.5 mm unconnected pad fills the top left corner. Both pairs stay coupled through their bends and keep
+    their clearance to each other."""
+    nets = ("TX0+", "TX0-", "TX1+", "TX1-")
+    f = Fx(22, 22, nets=nets)
+    for i, net in enumerate(nets):
+        f.pad(f"L{i}", net, (3.0, 14.5 + 0.6 * i + (0.6 if i >= 2 else 0.0)), (0.8, 0.3), shape=pcbnew.PAD_SHAPE_ROUNDRECT)
+    for i, net in enumerate(nets):
+        f.pad(f"T{i}", net, (14.5 + 0.6 * i + (0.6 if i >= 2 else 0.0), 3.0), (0.3, 0.8), shape=pcbnew.PAD_SHAPE_ROUNDRECT)
+    f.pad("KF", None, (6.25, 6.25), (11.5, 11.5))
+    f.pad("KB", None, (6.25, 6.25), (11.5, 11.5), layer=pcbnew.B_Cu)
+    return f.save(Path(d) / "fx_dp_two_pairs.kicad_pcb", classes=[DP_CLASS])
+
+
+def fx_dp_no_partner(d: Path) -> Path:
+    """D7: names that end like a pair half but have no partner (EN, SIG_P1) are routed as normal nets; RX_P1 /
+    RX_N1 (digits after the polarity, KiCad's rule) are a pair."""
+    f = Fx(30, 20, nets=("EN", "SIG_P1", "RX_P1", "RX_N1"))
+    f.pad("A1", "EN", (3.0, 4.0), (1.0, 1.0))
+    f.pad("B1", "EN", (27.0, 4.0), (1.0, 1.0))
+    f.pad("A2", "SIG_P1", (3.0, 16.0), (1.0, 1.0))
+    f.pad("B2", "SIG_P1", (27.0, 16.0), (1.0, 1.0))
+    _dp_pads(f, "R", "RX_P1", "RX_N1", (3.0, 9.75))
+    _dp_pads(f, "S", "RX_P1", "RX_N1", (27.0, 9.75))
+    return f.save(Path(d) / "fx_dp_no_partner.kicad_pcb", classes=[DP_CLASS])

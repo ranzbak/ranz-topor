@@ -595,6 +595,9 @@ impl Viol {
 }
 
 pub struct Drawer<'a> {
+    /// D7: per pair lead net, the distance from the wire's own end pads inside which a via pair
+    /// is placed only when no site farther away is valid (the fan-out zone needs that room).
+    pub pair_keep: BTreeMap<i32, f64>,
     pub model: &'a BoardModel,
     pub opts: &'a Options,
     pub b: &'a Board,
@@ -703,6 +706,7 @@ impl<'a> Drawer<'a> {
             }
         }
         Drawer {
+            pair_keep: BTreeMap::new(),
             model,
             opts,
             b,
@@ -1258,6 +1262,15 @@ impl<'a> Drawer<'a> {
                 if self.opts.via_offset_sites {
                     sites.extend(self.via_extra(w, ka, kb.max(ka), sz.d as f64, self.model.rules.net_rule(net).clearance as f64));
                 }
+                // D7: a via pair keeps out of its pads' fan-out zone where a site farther away exists
+                // (sites near the pads go last, in their order).
+                if let Some(&keep) = self.pair_keep.get(&net) {
+                    let wi = &self.st.wires[w];
+                    let (ea, eb) = (self.b.proj.pos[wi.a], self.b.proj.pos[wi.b]);
+                    let near = |p: Vec2| (p - ea).len().min((p - eb).len()) < keep;
+                    let (far, close): (Vec<_>, Vec<_>) = sites.into_iter().partition(|&(_, p)| !near(p));
+                    sites = far.into_iter().chain(close).collect();
+                }
                 // Of the valid sites (side test, clearance) in the first triangle that has one,
                 // the one with the most free room around it (the `via_squeeze` factor's aim).
                 let mut best: Option<(f64, usize, Vec2)> = None;
@@ -1588,20 +1601,28 @@ impl<'a> Drawer<'a> {
     /// copper is below the rule against that object (probed every 0.5 mm, then every 50 um around the hits; a via:
     /// its diameter). O(violations x samples x checker query).
     pub fn viols_of(&self, items: &[Item], rep: &CheckReport) -> Vec<Viol> {
-        let r = &self.model.rules;
+        viols_with(self.model, self.opts, self.checker, &self.idx, items, rep)
+    }
+}
+
+/// [`Drawer::viols_of`] for any checker and index of accepted copper (D7: the realised diff-pair
+/// tracks are checked against the real model, not the drawing's alias model).
+pub fn viols_with(model: &BoardModel, opts: &Options, checker: &Checker, idx: &ItemIndex, items: &[Item], rep: &CheckReport) -> Vec<Viol> {
+    {
+        let r = &model.rules;
         // Routed copper (`item:N`) is named by its net: "track of SIG (item:12)".
         let name = |against: &str| -> String {
             let Some(id) = against.strip_prefix("item:").and_then(|x| x.parse::<usize>().ok()) else { return against.to_string() };
-            match self.idx.net_of(id) {
+            match idx.net_of(id) {
                 Some((net, via)) => format!(
                     "{} of {} ({against})",
                     if via { "via" } else { "track" },
-                    self.model.nets.iter().find(|n| n.code == net).map_or(net.to_string(), |n| n.name.clone())
+                    model.nets.iter().find(|n| n.code == net).map_or(net.to_string(), |n| n.name.clone())
                 ),
                 None => against.to_string(),
             }
         };
-        let hole_reqs = [r.hole_to_hole + self.opts.margin_nm, r.via_hole_clear() + self.opts.margin_nm];
+        let hole_reqs = [r.hole_to_hole + opts.margin_nm, r.via_hole_clear() + opts.margin_nm];
         let mut out = Vec::new();
         for v in &rep.violations {
             let Some(item) = items.get(v.item) else { continue };
@@ -1637,7 +1658,7 @@ impl<'a> Drawer<'a> {
                     // a violation shorter than the coarse step).
                     let below = |ts: &[f64]| -> Vec<bool> {
                         let probes: Vec<Item> = ts.iter().map(|&u| track_item(t.net, t.layer, t.width as f64, a + (b - a) * u, a + (b - a) * u, None)).collect();
-                        let pr = self.checker.check_against(&self.idx, &probes, &[]);
+                        let pr = checker.check_against(idx, &probes, &[]);
                         (0..ts.len()).map(|i| pr.violations.iter().any(|x| x.item == i && x.against == v.against && x.layer == v.layer)).collect()
                     };
                     let grid = |lo: f64, hi: f64, step: f64, cap: usize| -> Vec<f64> {
@@ -1691,7 +1712,9 @@ impl<'a> Drawer<'a> {
         }
         merge_viols(out)
     }
+}
 
+impl<'a> Drawer<'a> {
     /// The sliver connections of a run's `items` against pads and vias of its own net (what
     /// [`Drawer::track_own_pad_ok`] refuses), as `connection_width` [`Viol`]s: one per track that
     /// grazes, depth = KiCad's minimum connection width.

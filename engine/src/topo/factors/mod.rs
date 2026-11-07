@@ -25,6 +25,7 @@ mod blocks_pad;
 mod branch;
 mod congestion;
 mod crossing;
+mod diffpair;
 mod ignored_rule;
 mod length;
 mod necking;
@@ -104,6 +105,17 @@ pub enum Event {
     AnyAngle { wire: WireId, at: Vec2, deg: f64, mm: f64 },
     /// A bend of `wire` sharper than 90 degrees: interior angle `interior_deg`, at `at`.
     AcuteBend { wire: WireId, at: Vec2, interior_deg: f64 },
+    /// D7: `mm` of a pair connection not coupled at the gap; `max_mm` the custom rule's maximum
+    /// uncoupled length (0 = none).
+    DpUncoupled { mm: f64, max_mm: f64 },
+    /// D7: length difference P - N of a pair connection (mm); `max_mm` the rule's maximum (0 = none).
+    DpSkew { mm: f64, max_mm: f64 },
+    /// D7: `mm` of parallel pair tracks at a gap up to `dev_mm` off the target (tolerance `tol_mm`).
+    DpGapDeviation { mm: f64, dev_mm: f64, tol_mm: f64 },
+    /// D7: vias on one track of a pair connection without a partner on the other.
+    DpViaUnpaired { count: u32 },
+    /// D7: P and N of a pair connection swap sides between the ends (they cross near `at`).
+    DpPolarityCross { at: Vec2 },
 }
 
 /// How a factor's events appear in the report.
@@ -243,6 +255,11 @@ pub fn standard_factors() -> Vec<Box<dyn Factor>> {
         Box::new(style::AnyAngle),
         Box::new(style::AcuteBend),
         Box::new(violation::Violation),
+        Box::new(diffpair::Uncoupled),
+        Box::new(diffpair::Skew),
+        Box::new(diffpair::GapDeviation),
+        Box::new(diffpair::ViaUnpaired),
+        Box::new(diffpair::PolarityCross),
     ]
 }
 

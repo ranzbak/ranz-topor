@@ -309,6 +309,11 @@ fn the_factor_reference_matches_the_schema_text() {
         ("any_angle", 15.0),
         ("acute_bend", 50.0),
         ("violation", 1000.0),
+        ("dp_uncoupled", 1.0),
+        ("dp_skew", 10.0),
+        ("dp_gap_deviation", 5.0),
+        ("dp_via_unpaired", 25.0),
+        ("dp_polarity_cross", 1000.0),
     ];
     assert_eq!(got, want);
 }

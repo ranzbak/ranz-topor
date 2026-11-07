@@ -345,5 +345,76 @@ def test_fx_octi_no_fit(tmp_path):
     assert off and all(5.9 <= min(t[2][0], t[3][0]) and max(t[2][0], t[3][0]) <= 24.1 for t in off), off
 
 
+# ---------------------------------------------------------------- D7 differential pairs
+def _dp(m: dict) -> list:
+    return _result(m).get("diff_pairs") or []
+
+
+def _dp_clean(m: dict, n_pairs: int, coupled_min: float) -> list:
+    _clean(m)
+    r = _result(m)
+    assert not r["violations"], r["violations"]
+    dps = _dp(m)
+    assert len(dps) == n_pairs, dps
+    for d in dps:
+        assert d["coupled_pct"] >= coupled_min and not d["polarity_cross"], d
+    return dps
+
+
+def test_fx_dp_straight(tmp_path):
+    """D7: a straight pair is drawn as two coupled tracks at the gap, symmetric about the pad pair (skew 0), with
+    short fan-out stubs (before D7: DIFF_PAIRS_SKIPPED, both connections unrouted)."""
+    m = _route("fx_dp_straight", tmp_path)
+    (d,) = _dp_clean(m, 1, 95.0)
+    assert d["gap_held"] and abs(d["skew_nm"]) <= 10_000, d
+    assert max(d["uncoupled_start_nm"] + d["uncoupled_end_nm"]) <= 500_000, d
+
+
+def test_fx_dp_bend(tmp_path):
+    """D7: a pair through a 45 degree elbow stays coupled; the measured skew is the bend estimate (2 p tan 22.5 per
+    bend, opposite bends cancel)."""
+    m = _route("fx_dp_bend", tmp_path)
+    (d,) = _dp_clean(m, 1, 90.0)
+    assert abs(d["skew_nm"] - d["skew_estimate_nm"]) <= 50_000, d
+
+
+def test_fx_dp_via(tmp_path):
+    """D7: a pair that must change layer does so with via pairs (two vias side by side each time, one per half),
+    no unpaired via, no violation."""
+    m = _route("fx_dp_via", tmp_path)
+    (d,) = _dp_clean(m, 1, 70.0)
+    assert d["vias_p"] == d["vias_n"] == 2 and m["vias"] == 4, (d, m["vias"])
+
+
+def test_fx_dp_qfn_fanout(tmp_path):
+    """D7: a pair leaving 0.5 mm pitch QFN pins fans out through the pad tips (the uncoupled stretch at the pads)
+    and zips at the gap past the pins; the neighbour pins' nets are routed too, nothing violates."""
+    m = _route("fx_dp_qfn_fanout", tmp_path)
+    (d,) = _dp_clean(m, 1, 70.0)
+    assert max(d["uncoupled_start_nm"]) <= 2_500_000, d
+
+
+def test_fx_dp_narrow(tmp_path):
+    """D7, never drop: a pair through a passage too narrow for it is routed (both halves have copper); what does not
+    fit is priced and reported, not left open."""
+    m = _route("fx_dp_narrow", tmp_path)
+    assert m["routed"] == m["connections"] == 2 and m["unconnected"] == 0, m
+    assert len(_dp(m)) == 1
+
+
+def test_fx_dp_two_pairs(tmp_path):
+    """D7: two pairs side by side through a bend around a block: both coupled, polarity kept, clear of each other."""
+    m = _route("fx_dp_two_pairs", tmp_path)
+    _dp_clean(m, 2, 80.0)
+
+
+def test_fx_dp_no_partner(tmp_path):
+    """D7: KiCad's name rule: EN and SIG_P1 have no partner net and route as normal nets; RX_P1 / RX_N1 (digits after
+    the polarity) are one pair."""
+    m = _route("fx_dp_no_partner", tmp_path)
+    (d,) = _dp_clean(m, 1, 95.0)
+    assert (d["p_name"], d["n_name"]) == ("RX_P1", "RX_N1"), d
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-m", "mechfix", "-q"]))

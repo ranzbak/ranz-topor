@@ -251,6 +251,35 @@ pub struct RouteResult {
     /// M-B1 never drop: every rule the written copper breaks, with place, type and cause
     /// (`[optimize] allow_violations`; empty with legal-only output).
     pub violations: Vec<ViolationReport>,
+    /// D7: one entry per routed differential-pair connection (topological core): lengths, skew,
+    /// coupled share at the gap, uncoupled length at each end, vias.
+    pub diff_pairs: Vec<DiffPairReport>,
+}
+
+/// A routed differential-pair connection (D7), nm. `from` / `to` are the P connection's pads.
+#[derive(Clone, Debug, Serialize, Default, PartialEq)]
+pub struct DiffPairReport {
+    pub conn_p: usize,
+    pub conn_n: usize,
+    pub p_name: String,
+    pub n_name: String,
+    pub from: String,
+    pub to: String,
+    pub length_p_nm: i64,
+    pub length_n_nm: i64,
+    pub skew_nm: i64,
+    pub skew_estimate_nm: i64,
+    pub coupled_nm: i64,
+    pub coupled_pct: f64,
+    pub gap_nm: i64,
+    pub gap_held: bool,
+    pub gap_dev_nm: i64,
+    pub uncoupled_start_nm: [i64; 2],
+    pub uncoupled_end_nm: [i64; 2],
+    pub uncoupled_vias_nm: i64,
+    pub vias_p: usize,
+    pub vias_n: usize,
+    pub polarity_cross: bool,
 }
 
 /// One PathFinder iteration's cost (diagnostics, `Options::profile`). Seconds are wall clock.
@@ -642,6 +671,7 @@ pub(crate) fn unrouted(model: &BoardModel, opts: &Options, reason: &str) -> Rout
         variants: Vec::new(),
         moves: BTreeMap::new(),
         violations: Vec::new(),
+        diff_pairs: Vec::new(),
     }
 }
 
