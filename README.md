@@ -198,6 +198,40 @@ pieces), not signal connections: the engine routes 222 of 231 in every run. On q
 is at pad exits (M-C). Still open: the crossing rules leave traces of net trees with branch points alone, and a
 trace drawn by force can still run over other copper for a millimetre or two.
 
+### Widths, pad exits and via room decided in the plan (M-C)
+
+The planner now decides what the drawing used to find out the hard way (TopoR's way: decide while change is cheap):
+
+- **Pad exits.** A trace next to its own pad needs half its width plus the clearance to the next pin (the drawing's
+  packer model); before, the one-plane routing counted no room at all there and planned exits through the 0.2 mm
+  gap between fine-pitch pins, which the drawing then clipped (engine test `topo_mc`).
+- **Width in the one-plane routing.** Every pass carries a width: the net width, or the minimum width (KiCad minimum
+  track width / custom-rule minimum) where the passage is a bottleneck or the pad exit is too tight (TopoR 6.3
+  manual p. 56: the minimum width "in bottlenecks unless a different path is available or near pads that are
+  narrower than the wire"). A narrowed stretch runs from the nearest pad up to the bottleneck (`[search]
+  neck_from_pad`), the search pays the graded *necking* factor once per stretch (TopoR 6.3 pp. 72–73: shrinkages
+  are a criterion), and the layer assignment, rip-up and drawing pack the planned widths. The drawing draws the
+  full width where it fits and the planned minimum only inside the planned stretches; it no longer narrows on its
+  own (`[search] neck_in_drawing`).
+- **Via room.** A via the plan puts at a layer change takes its spot: another net's via planned in the same small
+  triangle has no site, so layer assignment and rip-up move it or reroute its trace (`[vias] reserve_sites`;
+  Polubasov 2001 via intervals).
+
+Scorecard (same setup as M-B2; default / median [range] of seeds 1–5; violations = the engine's report):
+
+| Board | Connected % M-B2 | Connected % M-C | Connections with violations M-B2 → M-C | at a pad exit (connections) | KiCad DRC new | Runs cut at 600 s |
+|---|---|---|---|---|---|---|
+| eprom-to-kernal | 100 / 100 | 100 / 100 | 0 → 0 | 0 → 0 | 0 | 0 / 6 |
+| wiccon-2023 | 100 / 100 | 100 / 100 | 0 → 0 | 0 → 0 | 0 | 0 / 6 |
+| dcsgonebadge | 90.0 / 91.0 [90.5–92.4] | 90.5 / 90.0 [89.0–91.0] | 21–25 → 19–23 | 12–15 → 6–14 | 250–525 → 228–596 | 0 → 1 / 6 |
+| qmtech | 91.8 / 91.8 [91.1–92.6] | 91.4 / 91.8 [91.4–92.1] | 32–40 → 13–23 | 23–33 → 7–15 | 516–817 → 149–496 | 6 → 6 / 6 |
+
+On qmtech the ADV7511 → FPGA header traces now leave their pins straight out (pins 57–68 without a clip in the
+default run). Still open: traces from neighbouring 0.5 mm pins that all turn to 45° right at the row's tips run
+closer than their clearance allows (the planner compares passes edge by edge; mechfix `fx_fine_pitch_exit`, xfail),
+a via inside a pin ring (qmtech ADV_DVDD → C22 under the chip) is not preferred yet (the connection routes legally
+with its via outside the ring), and dcsgonebadge's GND pour joins after the refill still vary with the copper.
+
 ## Requirements
 
 - Linux (x86_64), **KiCad 10.0** with `kicad-cli` (tested 10.0.8)

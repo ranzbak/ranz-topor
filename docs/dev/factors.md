@@ -97,7 +97,7 @@ used. Defaults of the rough router (plan "Default weights"):
 | `same_net_crossing` | 0 | a net crossing itself (a loop) |
 | `plane_signal` | 10 per mm | signal copper on a plane layer, on top of its length |
 | `plane_cut` | 25 per cut | a signal wire cutting a plane |
-| `necking` | 30 per stretch, report warning | a stretch narrower than the netclass width |
+| `necking` | 30 per stretch x (1 + depth / width), report warning | a stretch narrower than the netclass width; P2 prices it where a stretch starts to neck (M-C: the plan decides the widths, TopoR 6.3 manual p. 56, pp. 72-73) |
 | `overflow` | 50 per pass | a pass through an overfull cut (P2 search penalty) |
 | `congestion` | 10 per pass per round | a pass through a cut that was over-full in earlier P4 rounds (history, PathFinder) |
 | `squeeze` | 5 per fully squeezed pass | a pass between two stretches that leaves the cut less than one track pitch of slack on its roomiest layer (linear) |

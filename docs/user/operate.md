@@ -273,6 +273,18 @@ in the other order, and kept when the plan gets better. The `VIOLATIONS` finding
 violations *at a pad exit* (a neighbour pin of the connection's own part) are not crossings: the trace does not get
 out of its pad at full width, which a later version plans (pad exits and necking in the planner).
 
+**Widths, pad exits and via room in the plan (M-C).** The planner decides the width of every stretch while it still
+untangles the traces in one plane: where a trace's net width does not fit a passage (a bottleneck, or the way out
+of a fine-pitch pad), it plans the trace at the minimum width (KiCad → Board Setup → Design Rules → Constraints →
+Minimum track width, or the net's custom-rule minimum) from the nearest pad of the connection up to that passage
+(`[search] neck_from_pad`), and pays the *necking* factor once per narrowed stretch, more the deeper it narrows.
+A trace leaving its own pad needs half its width plus the clearance to the next pin, so the planner no longer plans
+exits through the gap between two fine-pitch pins. The drawing step draws the planned widths: the full width where
+it fits, the minimum only inside the planned stretches; it no longer narrows a trace on its own
+(`[search] neck_in_drawing = true` brings that back). Every narrowed stretch is a warning in the report with its
+width and length. A via the plan puts at a layer change takes its spot: another net's via planned in the same
+small spot is moved or its trace rerouted before the drawing (`[vias] reserve_sites`).
+
 ## Findings after routing
 
 After the routing, the engine's own report is turned into findings with a code, the numbers, the places and a fix;
