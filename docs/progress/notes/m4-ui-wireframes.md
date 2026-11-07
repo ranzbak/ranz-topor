@@ -37,6 +37,10 @@ verbatim; B5's flow calls it: `first_run_notice` → `progress`(pre-flight DRC) 
   `ART_ERROR / ART_WARNING / ART_INFORMATION`, `FromDIP(16)`, via a `wx.ImageList` in the list;
   if GTK renders the icons poorly at 200 % the icon is dropped and the word stays — the word is
   mandatory), never by colour alone. The single exception is the preview's new-copper highlight (§4).
+- **Window icon.** Every dialog (`_Base`) carries the topor icon in its title bar / task switcher: a
+  `wx.IconBundle` of `icons/topor-{light,dark}-{24,64}.png` (the toolbar button's images, plugin.json),
+  the dark pair when `wx.SystemSettings.GetAppearance().IsDark()`. A missing or unreadable file is skipped
+  silently; without any the dialog opens without an icon.
 - **Text.** Default GUI font; paths and details in a read-only `wx.TextCtrl` (selectable, copyable,
   `wx.FONTFAMILY_TELETYPE`), `wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_BESTWRAP` for prose. Long
   messages wrap; nothing truncates silently. Every finding/error shows **code, cause, fix** (46 §1.1);
@@ -165,6 +169,10 @@ the display client area; the findings list takes the extra height. Default `Rout
 | Iteration   3 of up to 30        Routed    12 / 27        |
 | Vias        4                    Elapsed   0:12 / 1:00    |
 |                                                           |
+| Time limit  [   60 ] s wall time  [Set limit] [+5 min] [+15 min] |
+| 0 = no limit. A limit below the time spent stops the run  |
+| now, keeping the best result.                             |
+|                                                           |
 | Cancel keeps the best result so far.                      |
 |                                                           |
 |                                              [ Cancel ]   |
@@ -198,7 +206,23 @@ dialog never blocks: `WxUi.progress` updates the widgets, calls `wx.YieldIfNeede
   routed, else ends with outcome `cancelled` (§5).
 - **Empty:** before the first engine iteration `routed/total` shows `– / {total}`. **Busy:** is the
   normal state. **Error:** none; an exception closes this dialog and opens dialog 6.
-- Keys: Esc/Enter/Alt+C = Cancel; Tab stays on Cancel.
+- **Time limit during the run** (user 2026-11-07: "make the max run time editable during the run, so you don't
+  lose progress when a run takes longer"): row *Time limit* = a number field (seconds on the run's clock,
+  `run.timeout_clock`: unit `s wall time` or `s CPU time`), **Set limit**, **+5 min**, **+15 min**, and the hint
+  below. +5 / +15 add to the limit in force; the field takes any value: raised, lowered down to the router time
+  already spent (a lower value becomes the time spent: the run stops at its next check and keeps the best result,
+  as when the limit fires), or 0 = no limit (then the + buttons are disabled: nothing to add to). The row is
+  enabled only in the routing run after the pre-flight (`WxUi` passes `limit_editable`), and disabled after
+  Cancel / OK, once the limit is reached and in the DRC / preview phases (the limit counts router time only). The
+  change waits in `ProgressDialog.limit_request` until the run flow takes it (`WxUi.time_limit_request`, polled
+  after every `progress` call); the run flow applies it (wall clock: the engine job's live limit,
+  `RouteJob.set_time_limit`; CPU clock: its own poll loop), logs it ("time limit extended by the user …"), records
+  start, every change and the final limit in `result.json` (`time_limit`) and the report (Stopped line, Settings,
+  the time-budget warning), and reports the limit in force back in `Progress.limit_s`, which the elapsed line and
+  the field show. Headless runs (harness, MCP) have no such control: their limit stays fixed.
+- Keys: Esc/Alt+C = Cancel; Enter = Cancel, except in the limit field (Enter = Set limit) and on a focused limit
+  button (that button). Tab order: limit field, Set limit, +5 min, +15 min, Cancel; Cancel has the focus at the
+  start. Mnemonics: Alt+L Set limit, Alt+5 / Alt+1 the + buttons.
 
 ## 4. Preview — `UiPort.preview(png, report) -> bool`
 
@@ -490,6 +514,13 @@ title/label/button/checkbox/choice/heading/text).
 | progress | elapsed_cpu_value | text | {elapsed} · CPU {cpu} / {limit} |
 | progress | elapsed_nolimit | text | {elapsed} · CPU {cpu} / no limit |
 | progress | total_label | label | Total time |
+| progress | limit_label | label | Time limit |
+| progress | limit_unit_wall | text | s wall time |
+| progress | limit_unit_cpu | text | s CPU time |
+| progress | limit_set | button | Set limit |
+| progress | limit_add5 | button | +5 min |
+| progress | limit_add15 | button | +15 min |
+| progress | limit_hint | text | 0 = no limit. A limit below the time spent stops the run now, keeping the best result. |
 | progress | cancel_hint | label | Cancel keeps the best result so far. Once the routes are stable the button reads OK: the same action, and the best result shown is exactly the board you get; waiting longer may still find small gains. The time limit counts router time only and is an emergency stop; KiCad's DRC and the preview come on top. |
 | progress | cancel | button | Cancel |
 | progress | ok | text | OK |

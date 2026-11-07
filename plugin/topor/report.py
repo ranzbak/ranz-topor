@@ -22,6 +22,27 @@ from toporlib.detour import detour_line, detour_stats
 
 from .postrun import POSTRUN_CODES
 
+
+def limit_text(seconds) -> str:
+    """``600 s`` / ``no limit`` for a time limit in seconds (0 / None = none). O(1)."""
+    if not seconds or seconds <= 0:
+        return "no limit"
+    return f"{seconds:.0f} s" if seconds >= 10 else f"{seconds:.3g} s"
+
+
+def time_limit_text(tl: dict | None) -> str:
+    """The run's time limit in one phrase (log and report): the final limit and its clock, and how the user changed
+    it during the run (from which start value, how many changes). '' without a record. O(1)."""
+    if not tl:
+        return ""
+    final, start, n = tl.get("final_s") or 0.0, tl.get("start_s") or 0.0, len(tl.get("changes") or [])
+    txt = f"limit {limit_text(final)} {tl.get('clock', 'wall')}" if final > 0 else "no time limit"
+    if n:
+        how = ("removed" if final <= 0 else "set" if start <= 0 else "raised" if final > start
+               else "lowered" if final < start else "changed")
+        txt += f" ({how} during the run from {limit_text(start)}, {n} change{'s' if n > 1 else ''})"
+    return txt
+
 SUMMARY_MAX_LINES = 20
 _FINDING_ITEMS = 25  # places listed per post-run finding in report.md
 MM = 1_000_000
@@ -100,10 +121,12 @@ class RunReport:
             lines.append(f"Detours {f['detour_line']}")
         if f.get("detour_ghost_line"):
             lines.append(f"Detours vs ghost line {f['detour_ghost_line']}")
+        tl = f.get("time_limit")
         lines += [
             f"Stopped: {_na(f.get('stop_reason'))} after {_na(f.get('iterations'))} iterations, "
             f"{_na(f.get('elapsed_s'))} s, {_na(f.get('threads'))} threads"
-            + (f", CPU {_na(f.get('router_cpu_s'))} s" if f.get("router_cpu_s") is not None else ""),
+            + (f", CPU {_na(f.get('router_cpu_s'))} s" if f.get("router_cpu_s") is not None else "")
+            + (f" · {time_limit_text(tl)}" if tl else ""),
             f"Scope {f.get('scope', 'whole board')} · existing copper {_na(f.get('existing_copper'))} · "
             f"locked {_na(f.get('respect_locked'))}",
             f"Settings: {_na(f.get('non_default'))} non-default, {_na(f.get('defaults_used'))} built-in defaults",
@@ -112,8 +135,11 @@ class RunReport:
                 f"{x.code} ({len(x.items)})" if x.items else x.code for x in fnd
                 if x.code in POSTRUN_CODES and x.severity != "info"]) else []),
             f"Outcome: {outcome_text(self.status, self.error_code)}" + self._refill_note(),
-            *(["Warning: time budget hit: result may differ between runs (run.timeout_s, clock "
-               f"{f.get('timeout_clock') or 'wall'}, stopped the topological core before its [optimize] work caps)"] if f.get("time_budget_hit") else []),
+            *(["Warning: time budget hit: result may differ between runs ("
+               + (f"time limit {limit_text(tl.get('final_s'))}" + (" set during the run, " if tl.get("changes") else ", ")
+                  if tl else "")
+               + f"run.timeout_s, clock {f.get('timeout_clock') or 'wall'}, stopped the topological core before its "
+               "[optimize] work caps)"] if f.get("time_budget_hit") else []),
             f"Report: {self.dir}",
         ]
         return lines[:SUMMARY_MAX_LINES]
@@ -235,6 +261,11 @@ class RunReport:
             fl = f["floors_applied"] or []
             out.append("Fab floors raised (JLCPCB 1 oz profile): " + (", ".join(
                 f"{x['name']} {x['design'] / MM:g} → {x['floor'] / MM:g} mm" for x in fl) if fl else "none"))
+        tl = f.get("time_limit")
+        if tl:  # the start limit, every change the user made during the run, the final limit
+            out.append(f"Time limit ({tl.get('clock', 'wall')} clock): {limit_text(tl.get('start_s'))} at the start"
+                       + "".join(f"; at {c['at_s']:g} s set to {limit_text(c['limit_s'])}" for c in tl.get("changes") or [])
+                       + (f"; final {limit_text(tl.get('final_s'))}" if tl.get("changes") else ""))
         if f.get("toml_path"):
             out.append(f"Config file: {f['toml_path']}")
         return out

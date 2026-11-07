@@ -127,15 +127,22 @@ class ScriptedUi:
     cancel_at_iteration: `progress` returns False once ``p.iteration >= cancel_at_iteration`` (None = never).
     ok_at_stable (M-B0): act like the progress dialog (``waits_for_ok``: the engine does not stop at "Routes
     stable" by itself) and press OK as soon as a progress says stable.
+    limit_changes: the progress dialog's time-limit control, scripted: ``[(when, seconds), ...]`` in order; `when` is
+    a predicate on the ``Progress`` or an int (the n-th ``progress`` call, 1-based); once it holds, the next
+    ``time_limit_request`` returns `seconds` (0 = no limit). None (the harness): the limit never changes.
     Every call is appended to `calls` as ``(method, args)``.
     """
 
-    def __init__(self, decisions=None, accept=True, cancel_at_iteration: int | None = None, ok_at_stable: bool = False):
+    def __init__(self, decisions=None, accept=True, cancel_at_iteration: int | None = None, ok_at_stable: bool = False,
+                 limit_changes=None):
         self._decisions = decisions
         self._accept = accept
         self.cancel_at_iteration = cancel_at_iteration
         self.ok_at_stable = ok_at_stable
         self.waits_for_ok = ok_at_stable
+        self.limit_changes = list(limit_changes or [])
+        self._progress_n = 0
+        self._limit_pending = None
         self.calls: list = []
 
     @staticmethod
@@ -160,9 +167,22 @@ class ScriptedUi:
 
     def progress(self, p: Progress) -> bool:
         self.calls.append(("progress", (p,)))
+        self._progress_n += 1
+        if self.limit_changes:
+            when, seconds = self.limit_changes[0]
+            if (self._progress_n >= when) if isinstance(when, int) else when(p):
+                self.limit_changes.pop(0)
+                self._limit_pending = seconds
         if self.ok_at_stable and getattr(p, "stable", False):
             return False
         return not (self.cancel_at_iteration is not None and p.iteration >= self.cancel_at_iteration)
+
+    def time_limit_request(self):
+        """The scripted time-limit change (``limit_changes``), once; else None."""
+        req, self._limit_pending = self._limit_pending, None
+        if req is not None:
+            self.calls.append(("time_limit_request", (req,)))
+        return req
 
     def preview(self, png: Path, report) -> bool:
         self.calls.append(("preview", (png, report)))

@@ -11,13 +11,19 @@
 //! of the run's private rayon pool ([`install_cancel`]), so concurrent runs in one process never
 //! cancel each other.
 //!
+//! The wall-clock time limit is live ([`TimeLimit`]): the caller may raise or lower it while the run
+//! goes on (the plugin's progress window), and every deadline check of the core reads it through
+//! [`RunControl::over_limit`] / [`RunControl::deadline`]. Passes that take a plain `Instant`
+//! deadline get the limit as it stands when they start.
+//!
 //! Complexity: [`expired`] and [`cancelled`] are O(1) (one clock read, one thread-local access,
-//! one relaxed atomic load); [`RunControl::update`] is O(1) under an uncontended mutex.
+//! one relaxed atomic load); the [`TimeLimit`] reads and writes are O(1) and lock-free (one atomic);
+//! [`RunControl::update`] is O(1) under an uncontended mutex.
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Progress snapshot of a run. Monotone over a run: `iteration` is cumulative over the
 /// pour-completion passes, `routed` / `total` / `elapsed_s` never decrease (high-water marks).
@@ -74,11 +80,96 @@ pub struct Progress {
     pub best_violations: usize,
 }
 
-/// Cancel flag and progress of one run; cheap to clone (shared state).
+/// The wall-clock time limit of a run, changeable while it runs: nanoseconds since `start` in one
+/// atomic, so a check costs one clock read and one relaxed load, without a lock. `start` is when the
+/// control was made (the job's start for `route_async`); the limit is seconds since then.
+///
+/// States: unset (the run sets it from `Options::wall_clock_s` at its start, [`TimeLimit::init`]),
+/// none (no limit: `0` or a negative / non-finite value), or a limit. A limit below the time
+/// already spent stops the run at its next check, like the limit firing.
+#[derive(Debug)]
+pub struct TimeLimit {
+    start: Instant,
+    ns: AtomicU64,
+    /// Set by [`TimeLimit::set`] (the caller changed the limit during the run): the report says so.
+    changed: AtomicBool,
+}
+
+const LIMIT_UNSET: u64 = u64::MAX;
+const LIMIT_NONE: u64 = u64::MAX - 1;
+
+impl Default for TimeLimit {
+    fn default() -> TimeLimit {
+        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false) }
+    }
+}
+
+impl TimeLimit {
+    /// Seconds -> stored value: none for `<= 0` / non-finite, else nanoseconds (saturating below
+    /// the two sentinels). O(1).
+    fn encode(seconds: f64) -> u64 {
+        if !seconds.is_finite() || seconds <= 0.0 {
+            return LIMIT_NONE;
+        }
+        let ns = seconds * 1e9;
+        if ns >= (LIMIT_NONE - 1) as f64 { LIMIT_NONE - 1 } else { (ns as u64).max(1) }
+    }
+
+    /// The run's own limit (`Options::wall_clock_s`, 0 = none), only when nobody set one yet. O(1).
+    pub fn init(&self, seconds: f64) {
+        let _ = self.ns.compare_exchange(LIMIT_UNSET, Self::encode(seconds), Ordering::Relaxed, Ordering::Relaxed);
+    }
+
+    /// Change the limit (seconds since the start; `0` = no limit). O(1), any thread.
+    pub fn set(&self, seconds: f64) {
+        self.ns.store(Self::encode(seconds), Ordering::Relaxed);
+        self.changed.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether [`TimeLimit::set`] was called. O(1).
+    pub fn changed(&self) -> bool {
+        self.changed.load(Ordering::Relaxed)
+    }
+
+    /// The limit in seconds since the start; `None` = no limit (or not set yet). O(1).
+    pub fn seconds(&self) -> Option<f64> {
+        match self.ns.load(Ordering::Relaxed) {
+            LIMIT_UNSET | LIMIT_NONE => None,
+            ns => Some(ns as f64 * 1e-9),
+        }
+    }
+
+    /// The limit as an instant (a snapshot: a later change does not move it). O(1).
+    pub fn deadline(&self) -> Option<Instant> {
+        match self.ns.load(Ordering::Relaxed) {
+            LIMIT_UNSET | LIMIT_NONE => None,
+            ns => Some(self.start + Duration::from_nanos(ns)),
+        }
+    }
+
+    /// Seconds spent since the start. O(1).
+    pub fn elapsed_s(&self) -> f64 {
+        self.start.elapsed().as_secs_f64()
+    }
+
+    /// Seconds left before the limit (0 when it passed); `None` = no limit. O(1).
+    pub fn remaining_s(&self) -> Option<f64> {
+        self.seconds().map(|l| (l - self.elapsed_s()).max(0.0))
+    }
+
+    /// The limit has passed (as it stands now). O(1).
+    pub fn passed(&self) -> bool {
+        self.deadline().is_some_and(|d| Instant::now() >= d)
+    }
+}
+
+/// Cancel flag, time limit and progress of one run; cheap to clone (shared state).
 #[derive(Clone, Debug, Default)]
 pub struct RunControl {
     pub cancel: Arc<AtomicBool>,
     pub progress: Arc<Mutex<Progress>>,
+    /// The live wall-clock limit ([`TimeLimit`]), shared by every run of a best-of-N call.
+    pub limit: Arc<TimeLimit>,
     /// M-B0: 0 = the only run; k >= 1 = run k of a best-of-N call (its stage text is prefixed
     /// with the run, and the round is the coordinator's).
     pub run: u32,
@@ -96,6 +187,21 @@ impl RunControl {
 
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// Change the run's wall-clock limit while it runs (seconds since the start, `0` = none). O(1).
+    pub fn set_time_limit(&self, seconds: f64) {
+        self.limit.set(seconds);
+    }
+
+    /// The run's limit as an instant, as it stands now (`None` = no limit). O(1).
+    pub fn deadline(&self) -> Option<Instant> {
+        self.limit.deadline()
+    }
+
+    /// The run's wall-clock limit has passed (read live at every check). O(1).
+    pub fn over_limit(&self) -> bool {
+        self.limit.passed()
     }
 
     /// Copy of the current progress. O(1).
@@ -121,7 +227,7 @@ impl RunControl {
 
     /// The same cancel flag and progress, as run `run` (1-based) of a best-of-N call. O(1).
     pub(crate) fn for_run(&self, run: u32) -> RunControl {
-        RunControl { cancel: self.cancel.clone(), progress: self.progress.clone(), run }
+        RunControl { cancel: self.cancel.clone(), progress: self.progress.clone(), limit: self.limit.clone(), run }
     }
 
     /// Change the progress under the lock (the M-B0 coordinator's fields). O(1) + `f`.
@@ -267,5 +373,90 @@ impl Job {
         }
         res.clone()
             .unwrap_or_else(|| Err(JobError::Failed("no result".into())))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_run_sets_its_own_limit_only_when_nobody_did() {
+        let t = TimeLimit::default();
+        assert_eq!(t.seconds(), None);
+        t.init(600.0);
+        assert!((t.seconds().unwrap() - 600.0).abs() < 1e-6);
+        t.init(5.0); // a second init (the core's own) never overrides
+        assert!((t.seconds().unwrap() - 600.0).abs() < 1e-6);
+        assert!(!t.changed());
+        let u = TimeLimit::default();
+        u.set(42.0); // the caller was first: the run's init keeps it
+        u.init(600.0);
+        assert!((u.seconds().unwrap() - 42.0).abs() < 1e-6);
+        assert!(u.changed());
+    }
+
+    #[test]
+    fn raise_and_lower_move_the_deadline() {
+        let ctl = RunControl::new();
+        ctl.limit.init(100.0);
+        let d0 = ctl.deadline().expect("a limit");
+        ctl.set_time_limit(400.0);
+        let d1 = ctl.deadline().expect("a limit");
+        assert!((d1 - d0).as_secs_f64() > 299.9);
+        assert!(!ctl.over_limit());
+        ctl.set_time_limit(50.0);
+        assert!(ctl.deadline().unwrap() < d0);
+        assert!(!ctl.over_limit());
+        assert!(ctl.limit.remaining_s().unwrap() <= 50.0);
+    }
+
+    #[test]
+    fn zero_or_negative_means_no_limit() {
+        let ctl = RunControl::new();
+        ctl.limit.init(0.0);
+        assert_eq!(ctl.limit.seconds(), None);
+        assert_eq!(ctl.deadline(), None);
+        ctl.set_time_limit(10.0);
+        assert!(ctl.limit.seconds().is_some());
+        ctl.set_time_limit(0.0);
+        assert_eq!(ctl.limit.seconds(), None);
+        assert!(!ctl.over_limit());
+        ctl.set_time_limit(-3.0);
+        assert_eq!(ctl.limit.remaining_s(), None);
+        ctl.set_time_limit(f64::NAN);
+        assert_eq!(ctl.deadline(), None);
+    }
+
+    #[test]
+    fn lowering_below_the_time_spent_stops_at_the_next_check() {
+        let ctl = RunControl::new();
+        ctl.limit.init(600.0);
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(!ctl.over_limit());
+        ctl.set_time_limit(0.001); // below the 5 ms already spent
+        assert!(ctl.over_limit());
+        assert_eq!(ctl.limit.remaining_s(), Some(0.0));
+        assert!(!ctl.is_cancelled(), "the limit is not a Cancel: the stop reason stays the time limit");
+    }
+
+    #[test]
+    fn every_run_of_a_best_of_n_call_sees_the_same_limit() {
+        let ctl = RunControl::new();
+        ctl.limit.init(600.0);
+        let r2 = ctl.for_run(2);
+        let other = std::thread::spawn(move || {
+            r2.set_time_limit(1e-6);
+        });
+        other.join().expect("thread");
+        assert!(ctl.over_limit());
+    }
+
+    #[test]
+    fn huge_limits_saturate() {
+        let t = TimeLimit::default();
+        t.set(1e30);
+        assert!(t.seconds().unwrap() > 1e9);
+        assert!(!t.passed());
     }
 }

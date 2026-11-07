@@ -169,8 +169,8 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         p.rounds = opts.topo_rounds.max(1) as u32;
     });
     ctl.stage(1, opts.topo_rounds.max(1) as u32, "plane stubs (pads of plane nets onto their pour)");
-    let deadline = (opts.wall_clock_s > 0.0).then(|| t0 + std::time::Duration::from_secs_f64(opts.wall_clock_s));
-    let stubs = place_plane_stubs(model, opts, ctl, deadline);
+    ctl.limit.init(opts.wall_clock_s); // live limit (control::TimeLimit): the caller may change it during the run
+    let stubs = place_plane_stubs(model, opts, ctl);
     let coord = Coord::new(ctl, n, obj);
     let mut outs: Vec<RunOut> = run_all(model, opts, ctl, &coord, &stubs, t0, n);
     // The best run: fewest errors, then the objective, then shrinkages; ties: the lower run.
@@ -206,7 +206,8 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     best.converged = !best.timed_out;
     best.runtime_s = t0.elapsed().as_secs_f64();
     if best.timed_out {
-        let why = if cancel { "Cancel stopped the run before its routes were stable".to_string() } else { format!("run.timeout_s = {:.0} s stopped the run before its routes were stable", opts.wall_clock_s) };
+        let limit = ctl.limit.seconds().unwrap_or(opts.wall_clock_s);
+        let why = if cancel { "Cancel stopped the run before its routes were stable".to_string() } else if ctl.limit.changed() { format!("the time limit of {limit:.0} s (changed during the run; run.timeout_s = {:.0} s) stopped the run before its routes were stable", opts.wall_clock_s) } else { format!("run.timeout_s = {limit:.0} s stopped the run before its routes were stable") };
         best.warnings.push(format!("{TIME_HIT} ({why})"));
     }
     best
@@ -350,11 +351,11 @@ impl Run {
     /// One whole-route cycle; sets `done` when the run ends (stable for a run that stops by
     /// itself, the safety cap, Cancel / OK, the time budget).
     #[allow(clippy::too_many_arguments)]
-    fn step(&mut self, model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, stubs: &PlaneStubs, t_call: Instant) {
+    fn step(&mut self, model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, stubs: &PlaneStubs, _t_call: Instant) {
         let t = Instant::now();
         let obj = coord.obj;
         let cycle = self.cycles + 1;
-        let over_budget = opts.wall_clock_s > 0.0 && t_call.elapsed().as_secs_f64() >= opts.wall_clock_s;
+        let over_budget = ctl.over_limit();
         if cycle > opts.topo_rounds.max(1) || (cycle > 1 && (ctl.is_cancelled() || cancelled() || over_budget)) {
             self.time_hit = cycle <= opts.topo_rounds.max(1) && self.stable_at.is_none();
             self.done = true;
@@ -367,9 +368,7 @@ impl Run {
         let mut o2 = opts.clone();
         o2.seed = self.seed;
         o2.fluctuation = width;
-        if opts.wall_clock_s > 0.0 {
-            o2.wall_clock_s = (opts.wall_clock_s - t_call.elapsed().as_secs_f64()).max(1.0);
-        }
+        o2.wall_clock_s = ctl.limit.remaining_s().map_or(0.0, |r| r.max(1.0));
         let hv: Hints = if opts.drawing_feedback { self.all.iter().map(|(&(e, l), &r)| (e, l, r)).collect() } else { Vec::new() };
         let (ro, h2, mem2) = route_round(model, &o2, ctl, &hv, &self.mem, cycle, stubs);
         self.cycles = cycle;
@@ -391,7 +390,7 @@ impl Run {
             // Pour stitching (D4) on each variant before it is judged: a pour piece the copper cut
             // off that no stitch joins back is an open connection in KiCad's DRC, so it counts as an
             // error of the variant (else the pick prefers short copper that islands a pour).
-            let deadline = (opts.wall_clock_s > 0.0).then(|| t_call + std::time::Duration::from_secs_f64(opts.wall_clock_s));
+            let deadline = ctl.deadline();
             let stitched = |mut r: RouteResult, mut c: Criteria| -> (RouteResult, Criteria) {
                 if opts.stitch_islands {
                     ctl.stage(cycle as u32, opts.topo_rounds.max(1) as u32, "pour stitching");
@@ -707,10 +706,10 @@ fn plane_requests(model: &BoardModel, b: &board::Board, dec: &crate::decompose::
 
 /// Place every plane stub on the static board (pads, holes, outline, keepouts, copper shapes,
 /// existing copper; the stubs placed before it), each at its cheapest site ([`planes::place`]).
-fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl, deadline: Option<Instant>) -> PlaneStubs {
+fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> PlaneStubs {
     // Cancel / the time limit end the placement at once (K1: Cancel was ignored here on a live run); the
     // route that follows sees the same stop and returns the best result so far.
-    let stop = || cancelled() || ctl.is_cancelled() || deadline.is_some_and(|d| Instant::now() >= d);
+    let stop = || cancelled() || ctl.is_cancelled() || ctl.over_limit();
     let signal: Vec<u32> = model.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
     if signal.len() < 2 {
         return PlaneStubs::default();
@@ -784,8 +783,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     let hist0: &[f64] = &mem.edge;
     let t0 = Instant::now();
-    let deadline = (opts.wall_clock_s > 0.0).then(|| t0 + std::time::Duration::from_secs_f64(opts.wall_clock_s));
-    let expired = || cancelled() || ctl.is_cancelled() || deadline.is_some_and(|d| Instant::now() >= d);
+    let floor = t0 + std::time::Duration::from_secs(1); // a round gets at least 1 s, also past the limit
+    let expired = || cancelled() || ctl.is_cancelled() || ctl.deadline().is_some_and(|d| Instant::now() >= d.max(floor));
     let signal: Vec<u32> = model.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
     if signal.len() < 2 {
         let why = format!("the topological core routes boards with two or more signal layers; this board has {}", signal.len());
@@ -2227,7 +2226,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // TOPO_NOREDUCE=1 (debug): leave the vias as drawn, to compare with the reduction.
     if opts.via_reduce && std::env::var("TOPO_NOREDUCE").is_err() {
         pre_snap = Some((out.clone(), necking.clone()));
-        let (rs, changed) = super::reduce::reduce_vias(&mut dr, &mut drawn, &mut placed, &mut plans, &mut via_h, &end_fixed, &frozen, b.n_signal, deadline);
+        let (rs, changed) = super::reduce::reduce_vias(&mut dr, &mut drawn, &mut placed, &mut plans, &mut via_h, &end_fixed, &frozen, b.n_signal, ctl.deadline().map(|d| d.max(floor)));
         timed_out |= rs.timed_out;
         for w in changed {
             let ci = conn_of[wire_conn[w]];

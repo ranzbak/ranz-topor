@@ -536,7 +536,7 @@ copper violates a rule anywhere else, file a bug.
 
 **Cause.** The time limit (or a Cancel) stopped the topological core before its routes were stable ([optimize] stable_window / stable_gain_pct); the result is the best so far and may differ between runs and machines. The stop reason says which clock fired: timeout_wall (seconds on the clock) or timeout_cpu (CPU seconds summed over all threads, run.timeout_clock = cpu).
 
-**Fix.** Raise run.timeout_s (0 = no limit; Cancel always works; run.timeout_clock chooses wall or cpu seconds) and route again, or lower [optimize] runs (best of N runs share the threads); wait for "Routes stable" and press OK for a reproducible result.
+**Fix.** Raise run.timeout_s (0 = no limit; Cancel always works; run.timeout_clock chooses wall or cpu seconds) and route again, or add time while the router runs (progress dialog: +5 min / +15 min or a new Time limit), or lower [optimize] runs (best of N runs share the threads); wait for "Routes stable" and press OK for a reproducible result.
 
 ### TRACK_ANGLE_RULE
 
