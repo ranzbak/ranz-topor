@@ -969,3 +969,20 @@ class _RealCancelEngine:
         self.options.append(json.loads(o))
         assert self.options[-1]["stop_when_stable"] is False
         return topor_engine.route_async(m, o)
+
+
+def test_drawing_style_override_reaches_the_drawing_section_and_toml(tmp_path):
+    """The pre-flight trace-shape choice is a [drawing] style override (not a [run] key): the run's config and, with
+    Save, topor.toml get `[drawing] style` (user 2026-11-07: "make it kicad accessible")."""
+    from topor import run as run_mod
+    from topor.config import Config, update_config
+    over = {"drawing_style": "smooth", "threads": 2}
+    where = {k: run_mod._OVERRIDE_KEY.get(k, ("run", k)) for k in over}
+    cfg = Config.defaults().with_values({where[k]: v for k, v in over.items()})
+    assert cfg.get("drawing", "style") == "smooth" and cfg.get("run", "threads") == 2
+    assert "drawing_style" in run_mod._ROUTE_OVERRIDES
+    toml = tmp_path / "topor.toml"
+    toml.write_text("")
+    update_config(toml, {f"{where[k][0]}.{where[k][1]}": v for k, v in over.items()})
+    text = toml.read_text()
+    assert "[drawing]" in text and 'style = "smooth"' in text

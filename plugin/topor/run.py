@@ -67,7 +67,10 @@ NO_BUDGET_S = 1.0e9  # timeout_s = 0: the DRC loop gets no budget cut; drc_loop_
 #: After the user's Cancel the engine gets this long to reach a stop check and end its thread; then the run ends
 #: with ENGINE_UNRESPONSIVE instead of polling for ever (gate review B-1, ruling C31). Internal, not a toml key.
 CANCEL_GRACE_S = 30
-_ROUTE_OVERRIDES = ("scope_mode", "existing_copper", "respect_locked", "partial_routes", "timeout_s", "timeout_clock", "threads")
+_ROUTE_OVERRIDES = ("scope_mode", "existing_copper", "respect_locked", "partial_routes", "timeout_s", "timeout_clock", "threads",
+                    "drawing_style")
+#: pre-flight override -> (section, key) in topor.toml; the others are [run] keys of the same name
+_OVERRIDE_KEY = {"drawing_style": ("drawing", "style")}
 
 
 class EngineUnresponsive(RuntimeError):
@@ -640,9 +643,10 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     cfg = apply_accepted_findings(decision, findings, cfg, toml)
     over = {k: v for k, v in decision.overrides.items() if k in _ROUTE_OVERRIDES}
     if over:
-        cfg = cfg.with_values({("run", k): v for k, v in over.items()})
+        where = {k: _OVERRIDE_KEY.get(k, ("run", k)) for k in over}
+        cfg = cfg.with_values({where[k]: v for k, v in over.items()})
         if decision.save_to_toml and toml.is_file():
-            update_config(toml, {f"run.{k}": v for k, v in over.items()})
+            update_config(toml, {f"{where[k][0]}.{where[k][1]}": v for k, v in over.items()})
     # `scope_whole` (dialog: whole board although a selection exists) ignores the selection; never written to topor.toml.
     plan = scope_from_selection(sel, model, cfg, whole=bool(decision.overrides.get("scope_whole")))
     log.line(f"decision: overrides {decision.overrides}, accepted {decision.accepted_codes}")

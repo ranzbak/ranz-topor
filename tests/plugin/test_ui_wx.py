@@ -93,7 +93,7 @@ def test_wx_ui_dialogs_construct_headless(app, tmp_path):
     expected_tab = {
         "first_run": ["toml_path", "open_file", "continue"],
         "preflight": ["findings", "cause", "accept", "scope_whole", "scope_between",
-                      "scope_touching", "existing", "respect_locked", "partial_routes", "timeout", "timeout_clock", "threads",
+                      "scope_touching", "existing", "respect_locked", "partial_routes", "drawing_style", "timeout", "timeout_clock", "threads",
                       "save_toml", "help", "cancel", "route"],
         "progress": ["cancel"],
         "preview": ["zoom", "image", "summary", "report_dir", "open_report_folder", "reject", "accept"],
@@ -143,6 +143,10 @@ def test_wx_ui_dialogs_construct_headless(app, tmp_path):
         p.save_toml.SetValue(True)
         d1 = p.decision(True)
         assert d1.accepted_codes == ("PAD_OUTSIDE_BOARD",) and d1.overrides["threads"] == 4 and d1.save_to_toml
+        # trace shape (user 2026-11-07: "make it kicad accessible"): default octilinear, smooth is an override
+        assert p.drawing_style.GetSelection() == 0 and "drawing_style" not in d1.overrides
+        p.drawing_style.SetSelection(1)
+        assert p.decision(True).overrides["drawing_style"] == "smooth"
     finally:
         for d in dlgs.values():
             d.Destroy()

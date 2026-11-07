@@ -451,6 +451,9 @@ title/label/button/checkbox/choice/heading/text).
 | preflight | existing_rip | choice | Rip up and re-route |
 | preflight | respect_locked | checkbox | Respect locked tracks and vias |
 | preflight | partial_routes | checkbox | Keep partial routes |
+| preflight | drawing_style_label | label | Trace shape |
+| preflight | drawing_style_octilinear | choice | 45° (octilinear) |
+| preflight | drawing_style_smooth | choice | Any angle (smooth) |
 | preflight | timeout_label | label | Time limit |
 | preflight | timeout_unit | label | s |
 | preflight | timeout_hint | label | 0 = no limit |

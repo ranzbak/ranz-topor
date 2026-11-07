@@ -87,7 +87,7 @@ class RunSummary:
 @dataclass
 class Decision:
     """Pre-flight answer. ``overrides`` holds any of ``scope_mode, existing_copper, respect_locked,
-    partial_routes, timeout_s, timeout_clock, threads`` (config key -> value); ``save_to_toml`` persists them."""
+    partial_routes, timeout_s, timeout_clock, threads`` ([run] key -> value) and ``drawing_style`` ([drawing] style); ``save_to_toml`` persists them."""
     proceed: bool
     accepted_codes: tuple = ()
     overrides: dict = field(default_factory=dict)

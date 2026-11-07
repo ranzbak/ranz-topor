@@ -82,6 +82,12 @@ WORDING: dict[str, dict[str, str]] = {
         "timeout_label": "Time limit",
         "timeout_unit": "s",
         "timeout_hint": "0 = no limit",
+        "drawing_style_label": "Trace shape",
+        "drawing_style_octilinear": "45° (octilinear)",
+        "drawing_style_smooth": "Any angle (smooth)",
+        "drawing_style_tip": "45°: straight and 45 degree segments, few bends, 90 degree bends only where needed; where "
+                             "45 degrees does not fit a stretch goes any-angle at a price (warned per stretch). Any "
+                             "angle: the taut, curved-looking drawing. Set in topor.toml as [drawing] style.",
         "timeout_clock_label": "Count",
         "timeout_clock_wall": "Wall time (what you wait)",
         "timeout_clock_cpu": "CPU time (all threads)",
@@ -430,8 +436,8 @@ class PreflightDialog(_Base):
     _wk = "preflight"
     #: tab order from the note §2 (one Accept checkbox, relabelled per selected code)
     TAB_ORDER = ("findings", "cause", "accept", "scope_whole", "scope_between",
-                 "scope_touching", "existing", "respect_locked", "partial_routes", "timeout", "timeout_clock", "threads",
-                 "save_toml", "help", "cancel", "route")
+                 "scope_touching", "existing", "respect_locked", "partial_routes", "drawing_style", "timeout", "timeout_clock",
+                 "threads", "save_toml", "help", "cancel", "route")
 
     def __init__(self, findings: list, summary: RunSummary, cfg: Config):
         super().__init__(WORDING["preflight"]["title"].format(board=summary.board), resizable=True)
@@ -514,7 +520,8 @@ class PreflightDialog(_Base):
         self._show_finding(0 if self.findings else None)
         self.A11Y = {"findings": W["findings_heading"].format(errors=self.n_err, warnings=n_warn, notes=n_info),
                      "cause": f"{W['cause_label']} / {W['fix_label']}", "existing": W["existing_label"],
-                     "timeout": W["timeout_label"], "timeout_clock": W["timeout_clock_label"],
+                     "drawing_style": W["drawing_style_label"], "timeout": W["timeout_label"],
+                     "timeout_clock": W["timeout_clock_label"],
                      "threads": W["threads_label"]}
         self.finish((640, 560), (760, 780))
         self.list.SetFocus()
@@ -570,6 +577,16 @@ class PreflightDialog(_Base):
         grid.Add(self.respect_locked)
         grid.AddSpacer(0)
         grid.Add(self.partial_routes)
+
+        # trace shape ([drawing] style, user 2026-11-07: "make it kicad accessible")
+        self._style_keys = ("octilinear", "smooth")
+        self.drawing_style = wx.Choice(self, name="drawing_style", choices=[
+            W["drawing_style_octilinear"], W["drawing_style_smooth"]])
+        style = cfg.get("drawing", "style")
+        self.drawing_style.SetSelection(self._style_keys.index(style) if style in self._style_keys else 0)
+        self.drawing_style.SetToolTip(W["drawing_style_tip"])
+        grid.Add(self.text(self, "preflight", "drawing_style_label"), 0, wx.ALIGN_CENTER_VERTICAL)
+        grid.Add(self.drawing_style)
 
         # time limit / threads (reached by Tab; spin controls carry a preceding label)
         self.timeout = wx.SpinCtrlDouble(self, name="timeout", min=0, max=86400, inc=10,
@@ -683,6 +700,9 @@ class PreflightDialog(_Base):
         put("existing_copper", self._existing_keys[self.existing.GetSelection()])
         put("respect_locked", self.respect_locked.GetValue())
         put("partial_routes", self.partial_routes.GetValue())
+        style = self._style_keys[self.drawing_style.GetSelection()]
+        if style != cfg.get("drawing", "style"):
+            ov["drawing_style"] = style
         put("timeout_s", float(self.timeout.GetValue()))
         put("timeout_clock", self._clock_keys[self.timeout_clock.GetSelection()])
         put("threads", int(self.threads.GetValue()))
