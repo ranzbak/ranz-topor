@@ -385,14 +385,24 @@ impl Run {
                 }
                 (r, c)
             };
+            // A variant whose stitching the time budget cut short has its cut-off pour pieces
+            // uncounted, so it would look better than it is: offered only when nothing else is
+            // there, like an interrupted cycle (M-B2: measurement runs cut at 600 s picked such
+            // variants and KiCad found the GND pieces open).
+            let cut = || deadline.is_some_and(|d| Instant::now() >= d);
+            let empty = self.arch.items.is_empty();
             let RoundOut { result, crit, pre } = ro;
             if let Some((c, r)) = pre {
                 let (r, c) = stitched(r, c);
-                self.arch.offer(Variant { label: format!("round {cycle} as drawn"), crit: c, payload: r }, &obj);
+                if !cut() || empty {
+                    self.arch.offer(Variant { label: format!("round {cycle} as drawn"), crit: c, payload: r }, &obj);
+                }
             }
             let (r, c) = stitched(result, crit);
             (cyc_err, cyc_viol) = (c.errors, c.violations);
-            self.arch.offer(Variant { label: format!("round {cycle}"), crit: c, payload: r }, &obj);
+            if !cut() || self.arch.items.is_empty() {
+                self.arch.offer(Variant { label: format!("round {cycle}"), crit: c, payload: r }, &obj);
+            }
         }
         let pick = self.arch.pick(&obj).expect("a cycle was offered");
         let pc = self.arch.items[pick].crit;
