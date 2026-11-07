@@ -159,6 +159,45 @@ drawing still realises a plan whose passages are too narrow or whose crossings a
 where they arise — the drawing failure fed back to the planner as a local cut, the crossing rules applied in the
 topology — is the next stage (M-B2).
 
+### Failures feed back locally; crossing rules in the planner (M-B2)
+
+A cycle now feeds what went wrong back to the next one *where it happened*, and the planner removes the
+crossing patterns that force violations while change is still cheap:
+
+- **Local, fading history.** A violation puts history (a price for that connection only) on the passes of its
+  trace near the place, weighted by the distance (1 on it, falling smoothly), not on the whole trace (Dr. CU,
+  IEEE TCAD 2020, §IV-C: history only on "the intervals with violations"); a via without a site prices only the
+  passages around its interval. Everything carried over fades by `[optimize] history_fade` (0.5) per cycle, and the
+  present price of an over-full passage is kept level with the largest history so history cannot dominate
+  (BoxRouter 2.0, p. 32:8–9). A passage the drawing found too narrow gets a lowered room (a cut, Haas 2026
+  §VI-E); when a cycle comes out worse than the best, the cuts turn into a price (`[optimize] soft_cuts`). The
+  drawing's rescue rips blocking traces by a graded price instead of a count, and the traces whose via count rose
+  are rerouted first (Polubasov 2010).
+- **Crossing rules** (`[optimize] crossing_rules`; `engine/src/topo/xrules.rs`): a trace of another net that wraps
+  around a connection's terminal pad (a clinch or half-loop at a terminal, Luzin & Popov 2012 pp. 116–118 — the
+  user's qmtech ADV7511 → U4 header case), two traces crossing twice (Luzin 2013 Fig. 16) and a crossing whose
+  stretches are both held to one layer (Polubasov 2001) are re-planned pairwise — the terminal's trace first, the
+  other one laid on the other side — before and after the rip-up, kept when the plan scores better. The planner's
+  score counts crossings that cannot be layered as predicted violations.
+- The `VIOLATIONS` finding groups what is left by origin: *pad exit* (a neighbour pin of the connection's own part —
+  necking and pad exits, planned in M-C), via without a site, crossing, other copper in a narrow passage, static.
+
+Scorecard (same setup as M-B1: best of 5 runs, cut at 600 s of router time; default / median [range] of seeds 1–5):
+
+| Board | Connected % M-B1 | Connected % M-B2 | Engine violations M-B1 → M-B2 (connections) | shorts | Runs cut at 600 s |
+|---|---|---|---|---|---|
+| eprom-to-kernal | 100 / 100 | 100 / 100 | 0 → 0 | 0 | 0 / 6 |
+| wiccon-2023 | 100 / 100 | 100 / 100 [100–100] | 0 → 0 | 0 | 0 / 6 |
+| dcsgonebadge | 92.4 / 91.0 [90.0–91.4] | 90.0 / 91.0 [90.5–92.4] | 236–385 (29–38) → 95–176 (21–25) | 108–177 → 25–74 | 6 → 0 / 6 |
+| qmtech | 91.4 / 91.6 [90.9–93.3] | 91.8 / 91.8 [91.1–92.6] | 445–911 (49–58) → 139–280 (32–40) | 234–613 → 35–154 | 6 → 6 / 6 |
+
+Per cycle the errors now fall over the first cycles (median over all runs, dcsgonebadge 56.5 → 49 → 47.5 → 45;
+qmtech 94 → 77.5 → 80.5 → 77 → 75); before, the violations of the later cycles grew (dcsgonebadge median 240 → 446).
+On dcsgonebadge the default run's 5 more unconnected items are GND pour joins after the refill (stub and zone
+pieces), not signal connections: the engine routes 222 of 231 in every run. On qmtech about 40 % of what is left
+is at pad exits (M-C). Still open: the crossing rules leave traces of net trees with branch points alone, and a
+trace drawn by force can still run over other copper for a millimetre or two.
+
 ## Requirements
 
 - Linux (x86_64), **KiCad 10.0** with `kicad-cli` (tested 10.0.8)

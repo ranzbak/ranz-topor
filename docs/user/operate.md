@@ -261,6 +261,18 @@ close to and the cause; KiCad's DRC shows the same places, and the progress dial
 result under *Best so far*. `[optimize] allow_violations = false` writes legal copper only: such connections are
 reported unrouted and nothing of them is written (the behaviour before).
 
+**How the cycles remove violations (M-B2).** Each cycle feeds what went wrong back to the next one *locally*:
+the history (a price) goes only on the stretch of the trace where its copper broke a rule, weighted by the
+distance to the place, and on the passages that were over-full; a passage the drawing found too narrow gets a
+lowered room (a cut). Old findings fade every cycle (`[optimize] history_fade`, default 0.5), and when a cycle
+comes out worse than the best so far the cuts turn into a price instead of a hard limit (`[optimize]
+soft_cuts`). Before the drawing, the planner applies the crossing rules (`[optimize] crossing_rules`): a trace of
+another net that wraps around a connection's terminal pad (so the connection has to cross it or go around it), two
+traces crossing twice, and a crossing that cannot be put on two layers are re-planned, the two traces routed again
+in the other order, and kept when the plan gets better. The `VIOLATIONS` finding groups what is left by origin;
+violations *at a pad exit* (a neighbour pin of the connection's own part) are not crossings: the trace does not get
+out of its pad at full width, which a later version plans (pad exits and necking in the planner).
+
 ## Findings after routing
 
 After the routing, the engine's own report is turned into findings with a code, the numbers, the places and a fix;

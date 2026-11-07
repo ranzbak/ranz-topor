@@ -161,11 +161,29 @@ Two loops use the `overflow` and `congestion` factors (code: `topo/core.rs`, `to
    `search.reroute_rounds` or when `optimize.max_ripped` wires were taken out. The kept round is the one
    with the lowest board objective: the `overflow` price of the labelling plus `length + mm_per_via x vias`
    (`length_vias`) or the occupied area (`area`).
-2. **Across routes** (the topology feedback, `optimize.rounds` whole routes at most). A wire the drawing
-   rejected has its sleeve remembered: the next route makes only that connection pay the history on those
-   edges (it is the one being ripped up and rerouted), and every edge that was over-full under the packer
-   or at the violation gets the shared history. Every route offers its results to the variant archive
-   (below).
+   A via without a site in its interval puts the history on the edges that bound that interval only (M-B2;
+   before: on all edges of its wire). In the first round the wires whose planned via count rose against
+   the cycle before are taken out first (Polubasov 2010, «Оптимизация расслоения»). The present `overflow`
+   price is kept level with the largest history (`max(overflow, congestion x max history)`, BoxRouter 2.0,
+   Cho et al. 2009, p. 32:8–9: else history dominates and the negotiation "spins out of control"). The score
+   counts the crossings that cannot be layered as predicted violations next to the over-full edge-layers.
+2. **Across routes** (the topology feedback, the cycles of `optimize.rounds` at most), local and fading
+   (M-B2; Dr. CU, IEEE TCAD 2020, §IV-C; Haas 2026 §VI-E). Where a connection's copper breaks a rule (or its
+   drawing was rejected), the passes of its wire near the place get a history that only that connection pays,
+   weighted by their distance to the violation (1 on it, `1 / (1 + (d / r)²)` around it, r = half the
+   violation's length or one pitch), not its whole sleeve. Every edge that was over-full under the packer gets
+   the shared history, and the cut nearest to a failure gets a lowered room. Everything carried over fades by
+   `optimize.history_fade` (0.5) per cycle. When a cycle comes out worse than the best so far, the lowered
+   rooms turn soft: their passages get a history (a price) instead (`optimize.soft_cuts`). Every route offers
+   its results to the variant archive (below).
+3. **Crossing rules** (`topo/xrules.rs`, `optimize.crossing_rules`), before and after loop 1: the patterns
+   that force a crossing near a terminal or twice — a wire of another net in the ring of a terminal pad that
+   crosses the terminal's wire or its straight line (a clinch at a terminal, Luzin & Popov 2012 sign 1,
+   including the detour of their Fig. 3a), two wires of different nets crossing twice (a half-loop, Luzin
+   2013 Fig. 16), a crossing that cannot be layered — are re-planned pairwise: both wires out, the rule's
+   first wire routed first (`Topo::try_joint`), kept when the pair's price drops by more than their `reroute`
+   prices; the pass is kept when the board score gets better. Wires of a net tree with branch points keep
+   their place.
 
 Set `TOPO_NOCAP=1` to switch the capacity refinement off (debug comparison only).
 
