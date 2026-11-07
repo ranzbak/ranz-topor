@@ -14,8 +14,8 @@
 //!    around it); every segment that meets a hot pixel is re-routed through its centre;
 //! 4. the pieces between consecutive hot pixels of a segment are the output.
 //!
-//! The rounded arrangement has no proper crossings (Guibas & Marimont, Lemma 3.1; Hobby §3):
-//! two pieces meet only at hot-pixel centres or overlap. All predicates are exact (`i128`
+//! The rounded arrangement has no proper crossings (the topological guarantee of snap rounding
+//! proved by Guibas & Marimont and by Hobby): two pieces meet only at hot-pixel centres or overlap. All predicates are exact (`i128`
 //! orientation tests on integer coordinates), so the result does not depend on rounding.
 //! The pieces are checked once more for crossings; a crossing found there (none expected) adds
 //! its pixel and the rounding runs again, up to [`MAX_ROUNDS`] times.

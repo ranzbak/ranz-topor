@@ -51,6 +51,7 @@ from . import messages
 from . import preflight as preflight_mod
 from . import postrun, runlock
 from . import preview as preview_mod
+from . import probe as probe_mod
 from .config import CONFIG_NAME, Config, cache_root, load_config, update_config
 from .findings import Finding
 from .layers import resolve_layer_roles
@@ -678,6 +679,26 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
              f"{len(model.get('vias', []))} vias, {len(model.get('nets', []))} nets")
     if out.via_fallback:
         log.line(via_fallback_text(out.via_fallback))
+    # fail fast (robust-cdt): a board the engine cannot read stops here, before the pre-flight DRC and the dialog
+    pr = probe_mod.probe_board(engine, model, build_options(cfg, engine, model=model), on_poll=lambda: emit("setup"))
+    if pr is not None:
+        report.facts["probe"] = {k: pr.get(k) for k in ("ok", "path", "seconds", "error", "places", "notes")}
+        log.line(f"engine probe: {'ok' if pr.get('ok') else 'FAILED'}, {float(pr.get('seconds') or 0):.1f} s"
+                 + (f", triangulation {pr['path']}" if pr.get("path") else ""))
+        for n in pr.get("notes") or []:
+            log.line(f"engine probe: {n}")
+        if not pr.get("ok"):
+            err = probe_mod.unreadable_finding(pr)
+            log.line(f"aborted: the engine could not read this board: {pr.get('error')}")
+            out.error = err
+            findings.append(err)
+            report.facts["findings"] = findings
+            report.set_outcome("error", err.code)
+            out.wall_s = time.monotonic() - t0
+            report.write(result=_facts_result("error", out, None))
+            ctx()
+            ui.error(err)
+            return finish("error", error_code=err.code)
 
     # 2. pre-flight
     sel = port.selection()
@@ -922,6 +943,19 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     log.line(f"routed {out.routed}/{out.total}, stop {out.stop_reason}, router {out.router_s:.1f} s, CPU {out.router_cpu_s:.1f} s, rounds {loop.rounds}, "
              f"routing_new {classified['routing_new']}, unconnected_new {inc['unconnected_new']}, {time_limit_text(out.time_limit)}")
     drc_src = routed_dir / "drc-routed.json"
+    engine_err = probe_mod.engine_failure(rr)  # robust-cdt: an engine error is loud, never a quiet empty run
+    if engine_err is not None and not out.items and not out.cancelled:
+        log.line(f"error: {engine_err.message}")
+        out.error = engine_err
+        findings.append(engine_err)
+        report.facts["findings"] = findings
+        report.set_outcome("error", engine_err.code)
+        report.write(result=_facts_result("error", out, rr), drc_src=drc_src)
+        ctx()
+        ui.error(engine_err)
+        return finish("error", error_code=engine_err.code)
+    if engine_err is not None:  # most connections failed on it, some copper exists: listed as an error finding
+        findings.append(engine_err)
     if not out.items:  # nothing to show or apply (cancelled early, or the router discarded everything)
         if out.routed == 0 and not out.cancelled:
             findings.append(Finding("NOTHING_ROUTED", "warning", "The router produced no copper.",

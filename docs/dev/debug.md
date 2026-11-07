@@ -166,6 +166,26 @@ one, thick copper arcs as dozens of overlapping rings, custom pad arcs flattened
 PYTHONPATH=<engine site> python3 -c "import topor_engine; print(topor_engine.route(open('model-1.json').read(), open('options-1.json').read())[:200])"
 ```
 
+## The engine's reading of a board (fail-fast probe, `TOPOR_CDT_NODING`)
+
+Right after the board is read the plugin calls `topor_engine.probe_board(model, options)`
+(`engine/src/topo/core.rs` `probe`): the projection a route builds first (one constrained Delaunay
+triangulation of every obstacle of all layers), without routing. `log.txt` has the line
+`engine probe: ok, <s> s, triangulation <path>`; a failed probe is the `ENGINE_BOARD_UNREADABLE` error and its
+`places` name the constraint the triangulation failed on and the nearest copper (owner, layer, net, uuid, KiCad
+mm). On a dump:
+
+```bash
+cargo run --release --manifest-path engine/Cargo.toml --example probe -- model-1.json --options options-1.json
+```
+
+The triangulation (`engine/src/cdt.rs` `Cdt::build_reported`) tries spade's own constraint splitting first; when
+spade panics on near-degenerate crossings it nodes the constraints itself (`engine/src/noding.rs`: snap rounding
+on a 1 nm grid, exact predicates) and inserts them without crossings; the old reversed-order and 128 nm snap
+retries are the last fallback. The path taken and any constraint left out are report lines (`projection: …`).
+`TOPOR_CDT_NODING=always` takes the noded path on every board (A/B checks), `TOPOR_CDT_NODING=never` skips it
+(the behaviour before it: e.g. to see the fail-fast dialog on `engine/tests/fixtures/bh-nfc-coil-ae1.json`).
+
 ## A board routed elsewhere, judged like the harness (`harness.board_metrics`)
 
 ```bash
