@@ -150,10 +150,13 @@ def route_findings(result: dict | None) -> list:
     if viol:
         by = Counter(str(v.get("kind")) for v in viol)
         nconn = len({v.get("conn") for v in viol})
+        cls = Counter(str(v.get("class")) for v in viol if v.get("class"))
         out.append(_mk("VIOLATIONS",
                        f"{len(viol)} rule violation(s) in the copper of {nconn} connection(s), written on purpose "
                        "(never drop: the drawing found no legal geometry, so they are drawn on their best one): "
-                       + ", ".join(f"{n} {k}" for k, n in by.most_common()) + ".",
+                       + ", ".join(f"{n} {k}" for k, n in by.most_common()) + "."
+                       + (" By origin: " + ", ".join(f"{n} {_VIOL_CLASS.get(k, k)}" for k, n in cls.most_common()) + "."
+                          if cls else ""),
                        [_violation_text(v) for v in viol]))
     ig = lines("ignored_rule: ")
     if ig:
@@ -162,6 +165,16 @@ def route_findings(result: dict | None) -> list:
     if tb:
         out.append(_mk("TIME_BUDGET_HIT", tb[0] + ".", tb))
     return out
+
+
+#: Origin classes of a violation (engine ``violation_class``, M-B2).
+_VIOL_CLASS = {
+    "pad_exit": "at a pad exit (a neighbour pin of its own part; necking and pad exits are planned later)",
+    "via_site": "from a via without a legal site",
+    "crossing": "at a crossing with another net",
+    "foreign_copper": "against other routed copper in a narrow passage",
+    "static": "against other pads, holes or the board edge",
+}
 
 
 def drc_pour_findings(unconnected) -> list:
