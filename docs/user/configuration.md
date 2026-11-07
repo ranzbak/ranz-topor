@@ -198,6 +198,15 @@ Result geometry and report location.
 | `geometry` | str | `"arcs"` |  | arcs\|segments | Track geometry: arcs = native KiCad arcs, segments = straight-segment approximation. |
 | `report_dir` | str | `""` |  | any | Report folder: "" = ${TOPOR_REPORT_ROOT:-${XDG_CACHE_HOME:-~/.cache}/kicad/10.0/topor}/<project>/<YYYYmmdd-HHMMSS>/; relative = <project dir>/<report_dir>/<timestamp>/; absolute = <report_dir>/<timestamp>/. |
 
+## `[capacity]`
+
+Topological core: the per-layer cut test (inflated sketch; docs/dev/inflated-sketch.md). A cut is a straight segment between two pieces of copper on one layer; the traces that must cross it need their widths and clearances along it. These settings shape that test. In this version nothing reads them yet (the measurement comes next); the planner and the drawing do not use the test.
+
+| Key | Type | Default | Unit | Range | Description |
+|---|---|---|---|---|---|
+| `mixed_clearance` | str | `"conservative"` |  | conservative\|pairwise | Topological core, per-layer cut test: how two neighbouring traces of different nets with different clearances are spaced along a cut. conservative = every gap on the cut at the largest clearance of the traces crossing it (the cut test's own model, safe when net classes differ; costs room next to high-clearance nets); pairwise = the larger of the two neighbours' clearances, as KiCad's DRC checks it (more room, but the test is then no longer exact where clearances differ). Both values are written to the cut report; this one is the cut's need. KiCad: KiCad → File → Board Setup → Design Rules → Net Classes (Clearance column) and Custom Rules (clearance). |
+| `cut_radius_mm` | float | `0.0` | mm | 0 .. 1000 | Topological core, per-layer cut test: only cuts up to this long are checked (mm); 0 = off, every critical cut of the layer whatever its length (the exact test). Faster on large boards, but a squeeze between two pads further apart than this goes unseen, so the cut report then says routability is not proven. |
+
 ## `[expert]`
 
 PathFinder constants; change only when you know the router.
