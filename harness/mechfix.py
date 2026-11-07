@@ -473,3 +473,74 @@ def fx_octi_no_fit(d: Path) -> Path:
         f.shape(layer, [(6.0, 0.3), (24.0, 0.3), (24.0, yc(24.0) - half), (6.0, yc(6.0) - half)])
         f.shape(layer, [(6.0, yc(6.0) + half), (24.0, yc(24.0) + half), (24.0, 19.7), (6.0, 19.7)])
     return f.save(Path(d) / "fx_octi_no_fit.kicad_pcb")
+
+
+# ---- Inflated sketch boardlets (docs/dev/inflated-sketch.md §6.2): the per-layer cut test (U1 measures them).
+# B.Cu is closed by a keepout (tracks and vias) beyond the board edge, so every connection runs on F.Cu through the
+# one passage; the walls of unconnected pads reach 0.5 mm past the board edge (a gap at the edge, even one too narrow
+# for a track, was taken by the plan at an overflow price: the cut test sees it, the per-edge model did not). The
+# minimum track width is the net width, so the plan does not neck (the need is at the nominal width).
+
+def _close_back(f: Fx) -> None:
+    f.keepout([pcbnew.B_Cu], [(-1, -1), (f.w + 1, -1), (f.w + 1, f.h + 1), (-1, f.h + 1)], tracks=True, vias=True)
+
+
+def fx_b1_corner_bundle(d: Path, gap: float = 2.0) -> Path:
+    """B1 corner bundle: four nets from a column of pads on the left to one on the right through a
+    Z-shaped passage between two walls of unconnected pads: the lower wall's top-right corner
+    (15, 10) faces the upper wall's bottom-left corner (15, 10 - gap), the only cut of that length.
+    Four 0.25 mm tracks at 0.2 mm clearance need 4 x 0.25 + 3 x 0.2 + 2 x 0.2 = 2.0 mm there.
+
+    gap = 2.0 (variant a, exactly the need): no over-full cut; gap = 1.999 (variant b): exactly one,
+    by 1 um. S1..S4: (3, 7 / 8.5 / 10 / 11.5) -> (27, same y), SMD on F.Cu."""
+    f = Fx(30, 20, nets=("S1", "S2", "S3", "S4"))
+    _close_back(f)
+    f.pad("WL", None, (14.5, 15.25), (1.0, 10.5))
+    top = 10 - gap
+    f.pad("WU", None, (15.5, (top - 0.5) / 2), (1.0, top + 0.5))
+    for i, y in enumerate((7.0, 8.5, 10.0, 11.5)):
+        f.pad(f"A{i + 1}", f"S{i + 1}", (3.0, y), (0.6, 0.6))
+        f.pad(f"B{i + 1}", f"S{i + 1}", (27.0, y), (0.6, 0.6))
+    return f.save(Path(d) / f"fx_b1_corner_bundle_{'a' if gap >= 2.0 else 'b'}.kicad_pcb", rules={"min_track_width": 0.25})
+
+
+def fx_b1b_corner_bundle(d: Path) -> Path:
+    """B1 variant b: the passage 1 um narrower than the four tracks need."""
+    return fx_b1_corner_bundle(d, gap=1.999)
+
+
+def fx_b2_squeeze(d: Path) -> Path:
+    """B2 non-neighbour squeeze: a wall along y = 10 with a 2.85 mm gap between its ends A (x 13.575)
+    and C (x 16.425); small pads B and D at (15, 10 -/+ 0.95) above and below the gap (BD 1.8 mm is
+    shorter than AC, so the projection keeps the cut BD and drops AC, which crosses it). Three
+    vertical nets pass between A and the B-D column, three between the column and C; 0.25 mm tracks
+    at 0.2 mm clearance: AB, AD, BC and CD each hold three (need 1.55 mm, room 1.573 in the
+    octagonal norm), AC holds all six (need 2.9 mm, room 2.85): it overflows by 0.05 mm, which no
+    projection edge sees. L1..L3 at x 12/13/14, R1..R3 at x 16/17/18, from y 3 to y 17."""
+    f = Fx(30, 20, nets=("L1", "L2", "L3", "R1", "R2", "R3"))
+    _close_back(f)
+    f.pad("WA", None, ((13.575 - 0.5) / 2, 10.0), (14.075, 0.1))
+    f.pad("WC", None, ((16.425 + 30.5) / 2, 10.0), (30.5 - 16.425, 0.1))
+    f.pad("B", None, (15.0, 9.05), (0.1, 0.1))
+    f.pad("D", None, (15.0, 10.95), (0.1, 0.1))
+    for name, x in (("L1", 12.0), ("L2", 13.0), ("L3", 14.0), ("R1", 16.0), ("R2", 17.0), ("R3", 18.0)):
+        f.pad(f"{name}a", name, (x, 3.0), (0.4, 0.4))
+        f.pad(f"{name}b", name, (x, 17.0), (0.4, 0.4))
+    return f.save(Path(d) / "fx_b2_squeeze.kicad_pcb", rules={"min_track_width": 0.25})
+
+
+def fx_b5_other_layer_pad(d: Path) -> Path:
+    """B5 other-layer pad: a wall of F.Cu pads along y = 10 with a 1.0 mm gap (x 14.5 to 15.5) and
+    a B.Cu-only pad (0.4 mm) in the middle of the gap. The projection's edges across the gap end on
+    the B.Cu pad, so on F.Cu they are no cut (room unlimited); the F.Cu sheet has the cut between the
+    two F.Cu wall ends, 1.0 mm, which the three nets S1..S3 (x 14 / 15 / 16, y 3 -> 17) need
+    3 x 0.25 + 2 x 0.2 + 2 x 0.2 = 1.55 mm of: over-full by 0.55 mm."""
+    f = Fx(30, 20, nets=("S1", "S2", "S3"))
+    _close_back(f)
+    f.pad("WL", None, ((14.5 - 0.5) / 2, 10.0), (15.0, 0.2))
+    f.pad("WR", None, ((15.5 + 30.5) / 2, 10.0), (30.5 - 15.5, 0.2))
+    f.pad("M", None, (15.0, 10.0), (0.4, 0.4), layer=pcbnew.B_Cu)
+    for i, x in enumerate((14.0, 15.0, 16.0)):
+        f.pad(f"A{i + 1}", f"S{i + 1}", (x, 3.0), (0.6, 0.6))
+        f.pad(f"B{i + 1}", f"S{i + 1}", (x, 17.0), (0.6, 0.6))
+    return f.save(Path(d) / "fx_b5_other_layer_pad.kicad_pcb", rules={"min_track_width": 0.25})
