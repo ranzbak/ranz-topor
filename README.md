@@ -233,6 +233,56 @@ closer than their clearance allows (the planner compares passes edge by edge; me
 a via inside a pin ring (qmtech ADV_DVDD → C22 under the chip) is not preferred yet (the connection routes legally
 with its via outside the ring), and dcsgonebadge's GND pour joins after the refill still vary with the copper.
 
+### Octilinear drawing: straight and 45 degrees (M-45)
+
+The drawing now has a style (`[drawing] style`, default `"octilinear"`; `"smooth"` keeps the taut any-angle path):
+
+- **Octilinear shape in the wire's corridor** (`engine/src/topo/octi.rs`). The legal taut path (TopoR's minimum-length
+  wire, Popov & Popov 2012 pp. 117–122) is redrawn with 0/45/90 degree segments by a shortest path over nodes with 8
+  ports and a price per bend that grows with its angle (Bast, Brosi & Storandt 2020, §2.1 p. 3: bend costs per angle,
+  §4 p. 6: paths routed one after another, earlier ones are obstacles). The nodes are the taut path's vertices and the
+  vertices of the *octagons* around nearby corners (the clearance circle's circumscribed octagon, edges at 0/45/90),
+  so a trace that passes a pad or another trace runs parallel to it at the clearance. Few bends (`bend_mm` per 45
+  degrees, a short piece between two bends pays more: `bend_spacing_mm`), an elongated pad is left along its axis
+  until past its tip, and a trace follows a trace drawn beside it (`bundle_pull`), so bundles keep their pitch
+  through their bends (the report's *bundles* line gives the skew: 2 × distance × tan 22.5° = 0.83 × pitch per 45°
+  bend). The trace stays in its own lane on every passage it crosses (the room the plan gave the traces not drawn
+  yet is kept) and the checker has the last word; else the taut run stays.
+- **45 degrees is a cost, not a law.** Where 0/45/90 does not fit (a passage at another angle, just wide enough),
+  that piece of the taut path keeps its angle and pays the `any_angle` factor (15 mm per stretch + 2 per mm), a bend
+  sharper than 90 degrees pays `acute_bend` (50 mm, up to twice); each is a warning with place and angle
+  (`[drawing] any_angle` / `acute` = `"forbidden"` to refuse them). The style never opens a connection or adds a
+  violation: a trace drawn by force (never drop) keeps its least violating shape unless an octilinear one costs no
+  more.
+- **The planner knows the style** (`[drawing] octilinear_room`): the packer that P3/P4 and the drawing share counts
+  the room an octilinear trace takes in a passage (`demand::octi_stretch`: the octagon around a wrapped corner, up
+  to 1/cos 22.5° = 1.08 of the arc; the 0 and 45 degree legs of a slanted stretch at their own crossing angles).
+- TopoR itself routes at any angle in automatic mode and offers 45 degrees only as a snap in manual editing (TopoR
+  6.3 manual, PDF p. 238 FAQ and pp. 124–125); its "calculate wire shapes" step chooses arcs or straight lines
+  (PDF p. 83).
+
+Mechanism fixtures (`harness/mechfix.py`, all failing on the M-C engine): `fx_octi_straight`, `fx_octi_bend`,
+`fx_octi_bundle`, `fx_octi_no_fit`, and `fx_fine_pitch_exit` (open since M-C: neighbouring 0.5 mm pins turning at
+the row's tips; now they leave along the pin axis and stagger their bends).
+
+Measurement with the standard runner (`harness/score_runs.py`: CPU-time limit 2400 s, 4 threads, one run at a time,
+default run + seeds 1–5, M-C and M-45 interleaved; `scratch/ab-cpu/`). Default / median [range] of seeds 1–5; new DRC
+= KiCad DRC violations in the new copper, per run:
+
+| Board | Connected % M-C | Connected % M-45 | New DRC M-C | New DRC M-45 | Unconnected M-C → M-45 | CPU s (median) M-C → M-45 |
+|---|---|---|---|---|---|---|
+| eprom-to-kernal | 100 / 100 | 100 / 100 | 0 | 0 | 0 → 0 | 6 → 7 |
+| wiccon-2023 | 100 / 100 | 100 / 100 | 0 | 0 | 0 → 0 | 62 → 93 |
+| dcsgonebadge | 90.5 / 90.0 [89.0–91.0] | 93.8 / 91.0 [91.0–92.4] | 228–596 (median 327) | 90–380 (median 193) | 19–23 → 13–19 | 1405 → 1490 |
+| qmtech | 91.4 / 91.6 [91.1–91.8] | 91.6 / 91.8 [91.6–92.1] | 149–496 (median 286) | 263–440 (median 327) | 34–37 → 33–35 | 2423 → 2426 (limit hit 5 of 6 → 6 of 6) |
+
+dcsgonebadge gains (fewer violations and open connections). qmtech hits the CPU limit on every run, and octilinear
+drawing costs about 50 % more CPU (wiccon), so fewer optimisation cycles fit in the budget; its violations against
+other routed copper rose (`foreign_copper` 10–59 → 48–87 per run): the octilinear shapes take more of the passages
+than the taut chords did. The structural answer (exact per-layer cut test and inflation, `docs/dev/inflated-sketch.md`)
+is the next stage. The last qmtech runs of both sides ran under a load average of 10–16 (other work on the machine),
+which costs work per CPU second.
+
 ## Requirements
 
 - Linux (x86_64), **KiCad 10.0** with `kicad-cli` (tested 10.0.8)
