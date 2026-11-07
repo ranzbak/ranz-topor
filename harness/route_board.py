@@ -198,19 +198,25 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
     }
     if png:
         try:
-            from harness.render import board_bbox_nm, caption, compose_compare, draw_ratsnest, render_png
+            from harness.render import (board_bbox_nm, caption, compose_compare, draw_ratsnest, draw_violations,
+                                        render_png, violation_marks_of)
+            from toporlib.drc import new_routing, ratsnest_caption, ratsnest_marks
             # Blue lines: KiCad's DRC unconnected items after the refill (the open ratsnest).
+            # Yellow rings: routing violations not in the input (user 2026-11-07), the hand board's own on the left.
+            hv = violation_marks_of(hand.pcb, new_routing(hand_drc, base))
             hr = render_png(hand.pcb, out_dir / f"{name}-hand-raw.png")
             hr = draw_ratsnest(hr, hr, hand_drc.unconnected, bbox_nm=board_bbox_nm(hand.pcb))
-            from toporlib.drc import ratsnest_caption, ratsnest_marks
+            hr = draw_violations(hr, hr, hv, bbox_nm=board_bbox_nm(hand.pcb))
             h = caption(hr, f"{name}: {os.environ.get('TOPOR_HAND_LABEL', 'hand')} ({m['unconnected_hand']} unconnected, blue"
-                            f"{ratsnest_caption(ratsnest_marks(hand_drc.unconnected))})",
+                            f"{ratsnest_caption(ratsnest_marks(hand_drc.unconnected))} · {len(hv)} violations, yellow)",
                         out_dir / f"{name}-hand.png")
+            tv = violation_marks_of(routed_pcb, new_routing(routed_drc, base, created))
             tr = render_png(routed_pcb, out_dir / f"{name}-topor-raw.png")
             tr = draw_ratsnest(tr, tr, routed_drc.unconnected, bbox_nm=board_bbox_nm(routed_pcb))
+            tr = draw_violations(tr, tr, tv, bbox_nm=board_bbox_nm(routed_pcb))
             t = caption(tr,
                         f"{name}: {os.environ.get('TOPOR_PNG_LABEL', 'topor')} ({routed}/{total} routed, {m['unconnected']} unconnected, blue"
-                        f"{ratsnest_caption(ratsnest_marks(routed_drc.unconnected))})",
+                        f"{ratsnest_caption(ratsnest_marks(routed_drc.unconnected))} · {len(tv)} violations, yellow)",
                         out_dir / f"{name}-topor.png")
             compose_compare(h, t, out_dir / f"{name}-compare.png")
             m["png"] = str(out_dir / f"{name}-compare.png")

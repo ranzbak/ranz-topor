@@ -172,6 +172,37 @@ def draw_ratsnest(png: Path, out: Path, unconnected: list[dict], *, bbox_nm,
     return out
 
 
+VIOLATION_COLOR = "#ffd400"  # yellow (user 2026-11-07: "mark the violations with yellow in the images")
+
+
+def violation_marks_of(pcb: Path, violations) -> list:
+    """`toporlib.drc.violation_marks` with the track geometry of `pcb` (the board the DRC checked). O(len(pcb))."""
+    from toporlib.drc import violation_marks
+    from toporlib.pcbfile import track_lines
+    return violation_marks(violations, track_lines(Path(pcb).read_text()))
+
+
+def draw_violations(png: Path, out: Path, marks, *, bbox_nm, color: str = VIOLATION_COLOR,
+                    radius_px: int = 9, width_px: int = 4) -> Path:
+    """Ring every DRC violation marker ``(x, y, type)`` mm (`violation_marks_of`) on `png` in yellow, with a thin dark
+    edge so the ring shows on white and on copper. O(V)."""
+    out = Path(out)
+    if not marks:
+        if Path(png) != out:
+            subprocess.run(["convert", str(png), str(out)], check=True)
+        return out
+    x0, y0, x1, y1 = bbox_nm
+    w, h = _png_width(png), _png_height(png)
+    sx, sy = w / (x1 - x0), h / (y1 - y0)
+    pts = [((x * 1e6 - x0) * sx, (y * 1e6 - y0) * sy) for x, y, _ in marks]
+    cmd = ["convert", str(png), "-fill", "none", "-stroke", "#5a4600", "-strokewidth", str(width_px + 2)]
+    cmd += [a for cx, cy in pts for a in ("-draw", f"circle {cx:.1f},{cy:.1f} {cx + radius_px:.1f},{cy:.1f}")]
+    cmd += ["-stroke", color, "-strokewidth", str(width_px)]
+    cmd += [a for cx, cy in pts for a in ("-draw", f"circle {cx:.1f},{cy:.1f} {cx + radius_px:.1f},{cy:.1f}")]
+    subprocess.run(cmd + [str(out)], check=True)
+    return out
+
+
 def compose_compare(left_png: Path, right_png: Path, out_png: Path, *,
                     pad_px: int = COMPARE_PAD_PX) -> Path:
     """Left and right images side by side, each surrounded by `pad_px` of white."""

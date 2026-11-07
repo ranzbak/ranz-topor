@@ -51,6 +51,25 @@ def find_items(text: str, kinds: tuple = ("segment", "arc", "via")) -> list[Item
     return out
 
 
+_TRACK_XY = {k: re.compile(r"\(" + k + r"\s+(-?[\d.]+)\s+(-?[\d.]+)") for k in ("start", "mid", "end", "at")}
+
+
+def track_lines(text: str) -> dict[str, list[tuple[float, float, float, float]]]:
+    """uuid -> straight pieces ``(x0, y0, x1, y1)`` mm of every top-level segment, arc (start-mid, mid-end) and via
+    (a point: x0 = x1, y0 = y1). For placing DRC markers between the items a violation names. O(len(text))."""
+    out: dict[str, list[tuple[float, float, float, float]]] = {}
+    for s in find_items(text, ("segment", "arc", "via")):
+        body = text[s.start:s.end]
+        p = {k: r.search(body) for k, r in _TRACK_XY.items()}
+        xy = {k: (float(m.group(1)), float(m.group(2))) for k, m in p.items() if m}
+        if s.kind == "via" and "at" in xy:
+            out[s.uuid] = [(*xy["at"], *xy["at"])]
+        elif "start" in xy and "end" in xy:
+            pts = [xy["start"], xy["mid"], xy["end"]] if s.kind == "arc" and "mid" in xy else [xy["start"], xy["end"]]
+            out[s.uuid] = [(*a, *b) for a, b in zip(pts, pts[1:])]
+    return out
+
+
 def remove_items(text: str, uuids) -> str:
     """Delete the top-level items (segment, arc, via, zone: e.g. KiCad's teardrop zones of ripped tracks) whose
     uuid is in `uuids`, with their indentation and line break (everything else stays byte-identical).

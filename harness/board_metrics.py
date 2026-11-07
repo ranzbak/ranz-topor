@@ -66,18 +66,25 @@ def board_metrics(routed: Path, input_pcb: Path, hand: Path, *, work: Path, repo
         m.update(routed=r.get("routed"), connections=r.get("total"), status=r.get("status"),
                  stop_reason=r.get("stop_reason"), router_s=r.get("router_s"), report_dir=str(report_dir))
     if png is not None:
-        from harness.render import board_bbox_nm, caption, compose_compare, draw_ratsnest, render_png
+        from harness.render import (board_bbox_nm, caption, compose_compare, draw_ratsnest, draw_violations,
+                                    render_png, violation_marks_of)
+        from toporlib.drc import new_routing, ratsnest_caption, ratsnest_marks
+        # yellow rings: routing violations not in the input (user 2026-11-07), the hand board's own on the left
+        hv = violation_marks_of(Path(hand), new_routing(hand_drc, base))
         hr = render_png(Path(hand), work / f"{name}-hand-raw.png")
         hr = draw_ratsnest(hr, hr, hand_drc.unconnected, bbox_nm=board_bbox_nm(Path(hand)))
-        from toporlib.drc import ratsnest_caption, ratsnest_marks
+        hr = draw_violations(hr, hr, hv, bbox_nm=board_bbox_nm(Path(hand)))
         h = caption(hr, f"{name}: hand ({m['unconnected_hand']} unconnected, blue"
-                        f"{ratsnest_caption(ratsnest_marks(hand_drc.unconnected))})", work / f"{name}-hand.png")
+                        f"{ratsnest_caption(ratsnest_marks(hand_drc.unconnected))} · {len(hv)} violations, yellow)",
+                    work / f"{name}-hand.png")
         filled = filled_copy(Path(routed), work / "routed-filled")  # the pours as the DRC above saw them
+        tv = violation_marks_of(Path(routed), new_routing(routed_drc, base, created))
         tr = render_png(filled, work / f"{name}-routed-raw.png")
         tr = draw_ratsnest(tr, tr, routed_drc.unconnected, bbox_nm=board_bbox_nm(filled))
+        tr = draw_violations(tr, tr, tv, bbox_nm=board_bbox_nm(filled))
         routed_txt = f"{m['routed']}/{m['connections']} routed, " if "routed" in m else ""
         t = caption(tr, f"{name}: topor in KiCad ({routed_txt}{m['unconnected']} unconnected, blue"
-                        f"{ratsnest_caption(ratsnest_marks(routed_drc.unconnected))})",
+                        f"{ratsnest_caption(ratsnest_marks(routed_drc.unconnected))} · {len(tv)} violations, yellow)",
                     work / f"{name}-routed.png")
         compose_compare(h, t, Path(png))
         m["png"] = str(png)

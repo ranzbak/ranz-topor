@@ -259,6 +259,60 @@ def ratsnest_marks(unconnected) -> dict:
     return out
 
 
+def _seg_closest(a, b):
+    """(squared distance, p on a, q on b): closest points of two pieces ``(x0, y0, x1, y1)`` (a point when both
+    ends are equal)."""
+    def on(s, t):
+        return (s[0] + (s[2] - s[0]) * t, s[1] + (s[3] - s[1]) * t)
+
+    def proj(s, p):
+        dx, dy = s[2] - s[0], s[3] - s[1]
+        L = dx * dx + dy * dy
+        return 0.0 if L == 0 else min(1.0, max(0.0, ((p[0] - s[0]) * dx + (p[1] - s[1]) * dy) / L))
+
+    cands = [(on(a, proj(a, (b[0], b[1]))), (b[0], b[1])), (on(a, proj(a, (b[2], b[3]))), (b[2], b[3])),
+             ((a[0], a[1]), on(b, proj(b, (a[0], a[1])))), ((a[2], a[3]), on(b, proj(b, (a[2], a[3]))))]
+    # proper crossing: the closest points coincide at the intersection
+    d1x, d1y, d2x, d2y = a[2] - a[0], a[3] - a[1], b[2] - b[0], b[3] - b[1]
+    den = d1x * d2y - d1y * d2x
+    if den:
+        t = ((b[0] - a[0]) * d2y - (b[1] - a[1]) * d2x) / den
+        u = ((b[0] - a[0]) * d1y - (b[1] - a[1]) * d1x) / den
+        if 0 <= t <= 1 and 0 <= u <= 1:
+            cands.append((on(a, t), on(a, t)))
+    return min((((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2, p, q) for p, q in cands), key=lambda r: r[0])
+
+
+def violation_marks(violations, tracks: dict | None = None) -> list[tuple[float, float, str]]:
+    """One marker ``(x, y, type)`` mm per DRC violation, for drawing (user 2026-11-07: violations in yellow).
+
+    KiCad's JSON gives only each item's anchor (a track's start, a pad's centre, a zone's outline anchor), not the
+    place of the violation. With ``tracks`` (``pcbfile.track_lines`` of the checked board: uuid -> pieces) a track /
+    arc / via item uses its real geometry, and the marker sits halfway between the closest points of the two items.
+    A zone item has no usable place, so the other item alone gives the marker. O(V x pieces per item)."""
+    tracks = tracks or {}
+    out = []
+    for v in violations or ():
+        d = v if isinstance(v, dict) else {"items": v.items, "type": v.type}
+        its = [i for i in d.get("items", []) if "pos" in i]
+        typ = d.get("type", "")
+        geo = []
+        for i in its:
+            if str(i.get("description", "")).startswith("Zone"):
+                continue
+            x, y = float(i["pos"]["x"]), float(i["pos"]["y"])
+            geo.append(tracks.get(i.get("uuid", "")) or [(x, y, x, y)])
+        if not geo:
+            continue
+        if len(geo) == 1:
+            s = geo[0][0]
+            out.append(((s[0] + s[2]) / 2, (s[1] + s[3]) / 2, typ))
+            continue
+        _, p, q = min((_seg_closest(a, b) for a in geo[0] for b in geo[1]), key=lambda r: r[0])
+        out.append(((p[0] + q[0]) / 2, (p[1] + q[1]) / 2, typ))
+    return out
+
+
 def ratsnest_caption(marks: dict) -> str:
     """Caption tail such as ' · 3 GND pour pieces cut off, 2 not joined to their pour (rings)', or ''. O(nets)."""
     parts = [f"{n} {net} pour piece{'s' if n != 1 else ''} cut off" for net, n in sorted(marks["islands"].items())]
