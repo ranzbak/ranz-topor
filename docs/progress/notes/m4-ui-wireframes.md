@@ -37,6 +37,10 @@ verbatim; B5's flow calls it: `first_run_notice` → `progress`(pre-flight DRC) 
   `ART_ERROR / ART_WARNING / ART_INFORMATION`, `FromDIP(16)`, via a `wx.ImageList` in the list;
   if GTK renders the icons poorly at 200 % the icon is dropped and the word stays — the word is
   mandatory), never by colour alone. The single exception is the preview's new-copper highlight (§4).
+- **Window icon.** Every dialog (`_Base`) carries the topor icon in its title bar / task switcher: a
+  `wx.IconBundle` of `icons/topor-{light,dark}-{24,64}.png` (the toolbar button's images, plugin.json),
+  the dark pair when `wx.SystemSettings.GetAppearance().IsDark()`. A missing or unreadable file is skipped
+  silently; without any the dialog opens without an icon.
 - **Text.** Default GUI font; paths and details in a read-only `wx.TextCtrl` (selectable, copyable,
   `wx.FONTFAMILY_TELETYPE`), `wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_BESTWRAP` for prose. Long
   messages wrap; nothing truncates silently. Every finding/error shows **code, cause, fix** (46 §1.1);

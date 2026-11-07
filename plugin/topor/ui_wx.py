@@ -220,6 +220,41 @@ def find_help_doc(module_file) -> Path | None:
 
 
 HELP_DOC = find_help_doc(__file__)
+#: window icons: ``plugin/icons`` in the repo, ``org.topor.router/icons`` installed (tools/build.sh); both are the
+#: parent of the ``topor`` package
+ICON_DIR = Path(__file__).resolve().parents[1] / "icons"
+ICON_SIZES = (24, 64)
+
+
+def icon_files(dark: bool, icon_dir: Path = ICON_DIR) -> list:
+    """The topor icons that exist for the theme (``topor-{light,dark}-{24,64}.png``), small first. O(1)."""
+    theme = "dark" if dark else "light"
+    return [p for p in (Path(icon_dir) / f"topor-{theme}-{n}.png" for n in ICON_SIZES) if p.is_file()]
+
+
+def system_is_dark() -> bool:
+    """The desktop uses a dark appearance (``wx.SystemSettings.GetAppearance``; False where wx cannot tell)."""
+    try:
+        return bool(wx.SystemSettings.GetAppearance().IsDark())
+    except Exception:  # noqa: BLE001 - older wx: no appearance API
+        return False
+
+
+def window_icons(icon_dir: Path = ICON_DIR, dark: bool | None = None) -> "wx.IconBundle | None":
+    """``wx.IconBundle`` of the topor icons for the system appearance (both sizes); None when no file loads. A
+    missing or broken file is skipped silently (``wx.LogNull``): the dialog never depends on it. O(1)."""
+    bundle = wx.IconBundle()
+    with wx.LogNull():
+        for f in icon_files(system_is_dark() if dark is None else dark, icon_dir):
+            try:
+                ic = wx.Icon(str(f), wx.BITMAP_TYPE_PNG)
+            except Exception:  # noqa: BLE001
+                continue
+            if ic.IsOk():
+                bundle.AddIcon(ic)
+    return None if bundle.IsEmpty() else bundle
+
+
 _SEV_ORDER = {"error": 0, "warning": 1, "info": 2}
 _SEV_WORD = {"error": "sev_error", "warning": "sev_warn", "info": "sev_info"}
 _SEV_ART = {"error": wx.ART_ERROR, "warning": wx.ART_WARNING, "info": wx.ART_INFORMATION}
@@ -275,6 +310,9 @@ class _Base(wx.Dialog):
         style = wx.DEFAULT_DIALOG_STYLE | (wx.RESIZE_BORDER if resizable else 0)
         super().__init__(None, title=title, style=style)
         self.SetName("dialog")
+        icons = window_icons()  # the topor icon in the title bar / task switcher (light or dark theme)
+        if icons is not None:
+            self.SetIcons(icons)
         self.root = wx.BoxSizer(wx.VERTICAL)
         self.buttons: dict[str, wx.Button] = {}
         self.ids: dict[str, wx.Window] = {}  # wording id -> widget (filled by finish())

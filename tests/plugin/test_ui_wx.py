@@ -235,6 +235,31 @@ def test_progress_phase_pending_and_nolimit(app):
     ui._close_progress()
 
 
+def test_window_icons(app, tmp_path, monkeypatch):
+    light, dark = ui_wx.icon_files(False), ui_wx.icon_files(True)
+    assert [p.name for p in light] == ["topor-light-24.png", "topor-light-64.png"]
+    assert [p.name for p in dark] == ["topor-dark-24.png", "topor-dark-64.png"]
+    b = ui_wx.window_icons(dark=False)
+    assert b is not None and b.GetIconCount() == 2
+    d = ui_wx.FirstRunDialog(tmp_path / "topor.toml")
+    try:
+        assert d.GetIcons().GetIconCount() == 2  # every dialog (_Base) carries the bundle
+    finally:
+        d.Destroy()
+    # missing or broken files never break a dialog
+    (tmp_path / "icons").mkdir()
+    (tmp_path / "icons" / "topor-light-24.png").write_bytes(b"not a png")
+    assert ui_wx.window_icons(tmp_path / "icons", dark=False) is None
+    assert ui_wx.window_icons(tmp_path / "nowhere") is None
+    monkeypatch.setattr(ui_wx, "ICON_DIR", tmp_path / "nowhere")
+    monkeypatch.setattr(ui_wx, "window_icons", lambda icon_dir=None, dark=None: None)
+    d = ui_wx.ProgressDialog("eprom", 60.0, 30)
+    try:
+        assert d.GetIcons().GetIconCount() == 0
+    finally:
+        d.Destroy()
+
+
 def test_preflight_error_disables_route(app):
     err = Finding("CFG_BAD", "error", "bad value", "fix it")
     d = ui_wx.PreflightDialog([err, FINDINGS[0]], RunSummary(board="b"), Config.defaults())
