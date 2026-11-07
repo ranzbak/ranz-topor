@@ -202,6 +202,10 @@ pub struct Packer<'a> {
     /// Price (mm) of a via disc that leaves its passage-layer no slack (the `via_squeeze`
     /// factor); 0 = off.
     pub via_squeeze: f64,
+    /// M-C via room (`[vias] reserve_sites`): a via planned in a triangle takes its site, so
+    /// another net's via planned in the same triangle has none there unless the triangle holds
+    /// two discs ([`super::refine::CapModel`]).
+    pub reserve_sites: bool,
 }
 
 /// The oblique-chord factor of a pass through edge `e` crossed in direction `d`: `1 / sin` of
@@ -298,6 +302,7 @@ impl<'a> Packer<'a> {
             via_d0: 0.0,
             free_cache: RefCell::new(HashMap::new()),
             via_squeeze: 0.0,
+            reserve_sites: false,
         }
     }
 
@@ -351,6 +356,7 @@ impl<'a> Packer<'a> {
         let first = |net: i32| crate::vias::via_sizes(&model.rules, net, opts).first().map_or(0.0, |s| s.d as f64);
         p.via_d0 = first(0);
         p.via_d = model.nets.iter().map(|n| (n.code, first(n.code))).collect();
+        p.reserve_sites = opts.reserve_via_sites;
         p
     }
 

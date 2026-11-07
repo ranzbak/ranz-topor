@@ -1183,6 +1183,10 @@ pub struct Options {
     /// kept at full width when the full-width copper is rejected (the behaviour before M-C).
     /// False (default): the drawing necks only where the plan necked.
     pub neck_in_drawing: bool,
+    /// M-C (`topor.toml [vias] reserve_sites`): a via the plan puts in a triangle takes its site
+    /// there; another net's via planned in the same small triangle counts as a via without a site,
+    /// so P3/P4 move it or reroute its wire before the drawing (true, default).
+    pub reserve_via_sites: bool,
     /// Router (A6, `topor.toml [search] pad_bridge_max_mm`): a connection between two pads of
     /// one footprint at most this far apart (centre to centre, nm) whose straight line is clean,
     /// possibly only off the centre line, is routed by that one track (`exit_stubs` auto: only
@@ -1292,6 +1296,7 @@ impl Default for Options {
             neck_max_nm: 0,
             neck_from_pad: true,
             neck_in_drawing: false,
+            reserve_via_sites: true,
             pad_bridge_max_nm: 2_000_000,
             steiner: true,
         }

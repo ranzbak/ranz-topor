@@ -212,9 +212,23 @@ impl<'a> CapModel<'a> {
         let t = st.wires[w].tris[k.min(st.wires[w].tris.len() - 1)];
         let wi = &st.wires[w];
         let d = self.packer.via_d(wi.net);
-        let site = d <= 0.0 || self.packer.via_site(t, wi.net, 0.5 * d, wi.s);
+        let site = d <= 0.0 || (self.packer.via_site(t, wi.net, 0.5 * d, wi.s) && !self.site_taken(w, t));
         let others = st.tri_trav[t].iter().filter(|&&(o, _)| o != w).count();
         (!site, others, -(pr.inradius(t) as i64), k)
+    }
+
+    /// Whether triangle `t` is taken for a via of `w` (M-C via room, Polubasov 2001 pp. 3-9: a via
+    /// lies in its interval, at a site of its own): another net's wire already has a planned via
+    /// in `t` and `t` cannot hold two discs (inradius below twice the via radius plus clearance).
+    /// Derived from `via_k` alone, so the undo of a move restores it. O(traversals of `t`).
+    fn site_taken(&self, w: WireId, t: super::state::TriId) -> bool {
+        if !self.packer.reserve_sites {
+            return false;
+        }
+        let st = self.st;
+        let net = st.wires[w].net;
+        st.tri_trav[t].iter().any(|&(o, ko)| o != w && st.wires[o].net != net && self.via_k.get(o).is_some_and(|ks| ks.contains(&ko)))
+            && st.proj.inradius(t) < 2.0 * self.need_r(w)
     }
 
     /// Via traversals by the drawing's preference alone (no room), keeping the traversal of a
