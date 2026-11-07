@@ -1234,6 +1234,11 @@ pub struct Options {
     /// most this long (mm); 0 = off, the exact critical-cut set (with it on, the report says
     /// "routability not proven", Maley p. 53). Read only by the measurement so far.
     pub cut_radius_mm: f64,
+    /// Inflated sketch U1 (`[capacity] cut_report`, debug): a directory; when set, the topological
+    /// core builds the per-layer sheets and cut flows after P3, after every P4 round and for the
+    /// plan handed to the drawing, and writes them there as JSON (`run<k>/cycle<c>.json`). Empty
+    /// (default): off. Never changes the routing.
+    pub cut_report: String,
 }
 
 impl Default for Options {
@@ -1344,6 +1349,7 @@ impl Default for Options {
             steiner: true,
             mixed_clearance: "conservative".into(),
             cut_radius_mm: 0.0,
+            cut_report: String::new(),
         }
     }
 }

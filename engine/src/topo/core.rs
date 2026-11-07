@@ -365,6 +365,9 @@ impl Run {
         let width = if reference { 0.0 } else { self.sched.width };
         coord.begin(self.k, cycle, width);
         let mut o2 = opts.clone();
+        if !opts.cut_report.is_empty() {
+            o2.cut_report = format!("{}/run{}", opts.cut_report, self.k + 1);
+        }
         o2.seed = self.seed;
         o2.fluctuation = width;
         if opts.wall_clock_s > 0.0 {
@@ -864,6 +867,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     ctl.update("route", 0, 0, nconn, 0, t0.elapsed().as_secs_f64());
     ctl.stage(rnd, rnds, "topological search");
     // ---- P2 ----
+    let t_p2 = Instant::now();
+    // `[capacity] cut_report` (debug, inflated sketch U0/U1): measures, never changes the routing.
+    let mut crep = super::cutflow::Recorder::new(model, opts, &b.signal_layers, b.n_signal, round);
     let proj = &b.proj;
     let mut st = State::new(proj);
     st.cross_vias = opts.crossing_vias == "via";
@@ -1036,6 +1042,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     debug_assert!(st.check().is_ok(), "{:?}", st.check());
     ctl.update("route", 1, 0, nconn, 0, t0.elapsed().as_secs_f64());
     ctl.stage(rnd, rnds, "layer assignment, rip-up and reroute");
+    let p2_s = t_p2.elapsed().as_secs_f64();
     // ---- P3 ----
     let lp = LayerParams {
         via_mm: reg.price(&Event::Via { wire: 0, count: 1, at: None }, &WireCtx::default()),
@@ -1072,6 +1079,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // Crossing directions for the capacity model's oblique factor: the taut paths (pack.rs).
     let dirs_of = |st: &State| -> Vec<Vec<Vec2>> { packer.taut_dirs(st) };
     let mut lr = assign(&st);
+    if let Some(r) = crep.as_mut() {
+        r.static_sheets(proj, p2_s);
+        let bottom_l = (if b.n_signal == 0 { proj.n_layers } else { b.n_signal }) as i32 - 1;
+        r.stage("after P3", &st, &lr.events, &packer, bottom_l, &|w| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]));
+    }
     tlog("P2 + P3", t0);
     let t_p4 = Instant::now();
     // ---- P4: negotiated rip-up and reroute ----
@@ -1317,6 +1329,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         st.uncross_all(50);
         lr = assign(&st);
         p4_rounds += 1;
+        if let Some(r) = crep.as_mut() {
+            r.stage(&format!("after P4 round {p4_rounds}"), &st, &lr.events, &packer, bottom, &|w| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]));
+        }
         let sc = score(&st, &lr);
         if p4_better(&sc, &best_p4.3) {
             best_p4 = (st.clone(), wire_conn.clone(), lr.clone(), sc);
@@ -1528,6 +1543,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // that triangle first) and, after the drawing, which edge-layers it planned over-full.
     let dirs_plan = dirs_of(&st);
     let cm_plan = CapModel::new(&st, &packer, &dirs_plan, &lr.events, bottom, 1.0);
+    if let Some(r) = crep.as_mut() {
+        r.final_plan(&st, &lr.events, &cm_plan.via_k, &packer, bottom, &|w| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]), &cm_plan.overfull_list());
+        if let Some(e) = r.write() {
+            eprintln!("{e}");
+        }
+    }
     if std::env::var("TOPO_VIADBG").is_ok() {
         eprintln!("VIAPLAN round {round}: over-full {} (no site {}), via squeeze {:.1} mm", cm_plan.overfull(), cm_plan.nosite(), cm_plan.squeeze());
         for w in 0..st.wires.len() {
