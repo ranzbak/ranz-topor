@@ -209,10 +209,10 @@ result over all of them is the one you get.
 When the best result has gained less than `[optimize] stable_gain_pct` (0.5 %) over the last `stable_window` (4)
 rounds in every run, the dialog says **Routes stable** (also in its window title) and the **Cancel** button reads
 **OK**. It is the same button with the same action: stop and keep the best result so far — exactly the board shown
-under *Best so far*, which then goes to KiCad's DRC and the preview. You may also wait: the runs keep looking for
-small gains, and the run finishes by itself, like a normal finish, once the best has not improved for
-`finish_patience` (4) more rounds (`finish_when_stable = false`: it keeps going until OK, Cancel, the safety cap
-`[optimize] rounds` or the time limit, the TopoR way). Pressing OK at *Routes stable* is not a cancel: the summary
+under *Best so far*, which then goes to KiCad's DRC and the preview. By default the run also stops there by itself,
+like a normal finish (each run stops at the round in which it becomes stable; `[optimize] finish_patience` > 0 lets
+it look for small gains that many more rounds first). `finish_when_stable = false` keeps it going after *Routes
+stable* for marginal gains until OK, Cancel, the safety cap `[optimize] rounds` or the time limit (the TopoR way). Pressing OK at *Routes stable* is not a cancel: the summary
 says *Stopped: stable*. Headless runs (harness, MCP) stop at *Routes stable* by themselves (plus `stable_patience`
 rounds). The first round of the first run always uses the plain weights, and every run is reproducible: the same
 board and settings give the same result.
@@ -237,9 +237,29 @@ within a second; if it does not stop within 30 s the run ends with [ENGINE_UNRES
 limit) is stopped and the run ends with [KICAD_CLI_TIMEOUT](troubleshoot.md#kicad_cli_timeout) (board unchanged).
 Before the routing starts the progress dialog already shows *Preparing geometry* while topor reads the board.
 
-After routing, the result is written into the board copy and checked with KiCad's DRC (`kicad-cli`). If
-the router's copper causes violations, topor pins those spots and routes again, up to
-`[expert] drc_loop_cap` rounds.
+After routing, the result is written into the board copy and checked with KiCad's DRC (`kicad-cli`), once: the
+topological core takes no DRC feedback (a second route would give the same result), and the rule violations it
+writes on purpose are its own report's (see *Never drop* below).
+
+### Never drop: violations instead of open connections
+
+Like TopoR, the topological core does not drop a connection whose drawing finds no legal geometry — a gap that is
+too narrow when drawn, a via without a free site, a crossing that cannot be put on two layers, a branch that meets
+its trace on another layer. The connection stays in the router and is drawn anyway on its best geometry: the
+drawing tries its normal attempts, the exact path with the clearance relaxed by the least amount that gives one,
+and the funnel through the passages, and keeps the one whose violations cost least. Every rule it breaks is priced
+very high by the `violation` factor (1000 mm per violation plus 1000 mm per 0.01 mm² of depth × length, `[factors]
+weight violation`), so the next rounds work to remove it; the best result counts errors first (errors =
+connections with violations plus connections without copper; "a design-rule violation cannot be compensated by any reduction of
+wire length", Polubasov 2010), then the objective. A complete route with a violation can still be fixed by hand or
+improved; a dropped one connects nothing.
+
+The violating copper is written to the board. The findings list every violation
+([`VIOLATIONS`](troubleshoot.md#violations)) with the connection, its type (`clearance`, `short` = copper overlap,
+`hole_clearance`, `edge_clearance`, `connection_width`), the place, how deep and how long it is, what it is too
+close to and the cause; KiCad's DRC shows the same places, and the progress dialog shows the violations of the best
+result under *Best so far*. `[optimize] allow_violations = false` writes legal copper only: such connections are
+reported unrouted and nothing of them is written (the behaviour before).
 
 ## Findings after routing
 
@@ -258,6 +278,7 @@ the preview summary names the warnings (*After routing, check: …*), report.md 
 | [`VIA_SQUEEZE`](troubleshoot.md#via_squeeze) | vias in a narrow pass (the via_squeeze social factor) |
 | [`NECKED`](troubleshoot.md#necked) | traces narrower than their net width where they leave a pad |
 | [`IGNORED_RULE`](troubleshoot.md#ignored_rule) | copper that breaks a KiCad check set to *ignore* (priced, not forbidden) |
+| [`VIOLATIONS`](troubleshoot.md#violations) | never drop: copper written although it breaks a rule (no legal geometry was found); each violation with place, type and cause |
 | [`TIME_BUDGET_HIT`](troubleshoot.md#time_budget_hit) | the time limit stopped the run before its work caps |
 
 The pre-flight also warns about pads inside a track keepout on all their layers
@@ -348,9 +369,13 @@ unsure about is kept. KiCad's DRC of the result stays the judge.
 - **Differential pairs are not routed** (nets ending in `_P`/`_N`, `+`/`-`, `P`/`N`): the pre-flight and the
   findings after routing say so ([`DIFF_PAIRS_SKIPPED`](troubleshoot.md#diff_pairs_skipped)); route them by hand.
 - Two or more signal layers are needed; through vias only.
-- Not every connection finishes on dense boards (dcsgonebadge about 193/231, qmtech about 354/426 headless): the open ones are
-  listed with their reason ([`UNROUTED`](troubleshoot.md#unrouted)) and drawn blue in the preview. Small changes
-  elsewhere on the board can move the result by a few connections.
+- Not every connection finishes legally on dense boards. Never drop draws them anyway (dcsgonebadge 222/231
+  connections drawn, about 35 of them with violations; qmtech 400/426, about 50 with violations; measured headless,
+  cut at 600 s): every violation is listed ([`VIOLATIONS`](troubleshoot.md#violations)) and needs a fix by hand,
+  and there are many on these boards (hundreds, about half of them copper over a foreign pad or trace).
+  `[optimize] allow_violations = false` leaves those connections open instead
+  ([`UNROUTED`](troubleshoot.md#unrouted), drawn blue in the preview). Small changes elsewhere on the board can
+  move the result by a few connections.
 - Pour islands that the new copper cuts off are stitched afterwards (stitching vias, pad stubs), not prevented.
 - Settings marked *Classic engine only* in [configuration.md](configuration.md) (`[iterations]`, `[ripup]`, the via
   cost keys, …) do nothing; the `[factors]` weights, the `[optimize]` stable test and work caps take their place.

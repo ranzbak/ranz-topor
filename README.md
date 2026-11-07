@@ -102,8 +102,9 @@ connections still open (annealing with reheating; `[optimize] fluctuation`, `flu
 cut off counts as an error). When the best result gains less than `stable_gain_pct` over `stable_window` cycles the
 routes are *stable* (TopoR 6.3 manual p. 73: "Autorouting may be stopped"; not before level 5–10): the progress
 dialog says **Routes stable** and its Cancel button reads **OK** — the same action, the best result shown is exactly
-the board you get. Waiting is fine; the run then finishes by itself after `finish_patience` cycles without gain
-(`finish_when_stable`), and headless runs stop at stable. `[optimize] runs` (default 5) seeded runs go on in
+the board you get. The run also stops there by itself (`finish_when_stable`, `finish_patience` = 0 since M-B1, user
+2026-11-07: "When route stable appears it should stop indeed"; `finish_when_stable = false` keeps iterating for
+marginal gains until OK), and headless runs stop at stable. `[optimize] runs` (default 5) seeded runs go on in
 parallel on the engine's threads and the best by the objective is offered; `[optimize] rounds` (30) is only a
 safety cap and `[run] timeout_s` (now 1800 s) the emergency stop.
 
@@ -117,7 +118,8 @@ seeds 1–5; `harness/scorecard.py`):
 | dcsgonebadge | 77.6 / 76.2 [74.3–78.6] | 80.5 / 79.5 [77.1–80.5] | 53 s → 442 s |
 | qmtech | 79.6 / 78.9 [77.5–79.9] | 81.5 / 81.5 [80.6–83.2] | 174 s → 1014 s |
 
-The defaults are provisional: they are re-measured once violations replace dropped connections (M-B1).
+The defaults are provisional; their re-measurement with the M-B1 objective was skipped (user 2026-11-07: next
+stage first).
 
 Known limits: the complex boards (bornhack2026, hackerhotel2027, tanmatsu) are not on the ladder yet;
 differential pairs are not routed; branching is not complete (the fuse moves copper after drawing but the
@@ -126,6 +128,36 @@ Fermat point, vias as junctions and new branch points are open; the tee rule is 
 side-by-side pairs of one net remain, mostly at adjacent pins of one net and twin plane stubs); pour islands
 are stitched afterwards, not prevented; results on the larger rungs move by a few connections with small
 changes elsewhere on the board (rip-up order).
+
+### Never drop (M-B1): violations instead of open connections
+
+Like TopoR, a connection is no longer dropped when its drawing finds no legal geometry (a gap too narrow when
+drawn, a via without a free site, a crossing that cannot be layered, a branch meeting its trace on another layer).
+It stays in the router and is drawn anyway on its least violating geometry (the drawing's attempts, the exact path
+with the clearance relaxed by the least amount that gives one, the funnels before the repair; a via goes to its
+least violating site). Every rule it breaks is priced very high by the graded `violation` factor (1000 mm per
+violation plus 1000 mm per 0.01 mm² of depth × length) and reported with its place, type and cause
+(`VIOLATIONS` finding, `violations` in result.json). The best result counts errors first — connections with
+violations plus connections without copper ("a design-rule violation cannot be compensated by any reduction of
+wire length", Polubasov 2010) — then the objective with the violation price; "Routes stable" and the best of N see
+the same count. The violating copper is written to the board; `[optimize] allow_violations = false` keeps the
+legal-only output (such connections stay unrouted, as before). The topological core takes no DRC feedback, so the
+plugin judges the result with one DRC round.
+
+Scorecard at the defaults (best of 5 runs, measurement runs cut at 600 s of router time; default run and median
+[range] of seeds 1–5; `harness/scorecard.py`, KiCad DRC after a refill):
+
+| Board | Connected % M-B0 | Connected % M-B1 | Total length % of hand | Engine violations (connections) | Router time |
+|---|---|---|---|---|---|
+| eprom-to-kernal | 100 / 100 | 100 / 100 | 95 | 0 | 2 s |
+| wiccon-2023 | 100 / 100 | 100 / 100 [100–100] | 89 / 88 | 0 | 24 s |
+| dcsgonebadge | 80.5 / 79.5 [77.1–80.5] | 92.4 / 91.0 [90.0–91.4] | 62 / 63 | 236–385 (33–41) | 600 s (cut, all 6) |
+| qmtech | 81.5 / 81.5 [80.6–83.2] | 91.4 / 91.6 [90.9–93.3] | 96 / 96 | 445–911 (47–58) | 600 s (cut, all 6) |
+
+The violations are many and some are bad (copper over foreign pads and traces, `short` about half of them): the
+drawing still realises a plan whose passages are too narrow or whose crossings are on one layer. Removing them
+where they arise — the drawing failure fed back to the planner as a local cut, the crossing rules applied in the
+topology — is the next stage (M-B2).
 
 ## Requirements
 
