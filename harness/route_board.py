@@ -1,6 +1,6 @@
 """Headless route of one board through the plugin's real run flow, with metrics and a hand-vs-topor PNG.
 
-    tools/route_board.sh <board|pcb> <out_dir> [--timeout S] [--set section.key=value ...] [--whole-project]
+    tools/route_board.sh <board|pcb> <out_dir> [--timeout S] [--clock wall|cpu] [--set section.key=value ...] [--whole-project]
 
 What it does:
   1. `harness.strip.prepare`: copies the project twice under <out_dir>: `<name>-hand/` (untouched, the
@@ -97,7 +97,7 @@ def board_netclasses(pc) -> tuple:
 
 
 def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, timeout_s: float | None = None,
-                whole_project: bool = False, png: bool = True, name: str | None = None,
+                clock: str | None = None, whole_project: bool = False, png: bool = True, name: str | None = None,
                 declared_layers: bool = False) -> dict:
     import topor_engine
     strip = _load_strip()
@@ -136,6 +136,8 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
     ch = dict(overrides or {})
     if timeout_s is not None:
         ch[("run", "timeout_s")] = float(timeout_s)
+    if clock is not None:
+        ch[("run", "timeout_clock")] = clock
     if ch:
         cfg = cfg.with_values(ch)
 
@@ -194,6 +196,10 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
         "runtime_s": round(time.monotonic() - t_start, 2),
         "run_flow_s": round(run_s, 2),
         "router_s": round(float(outcome.router_s or 0.0), 2),
+        "router_cpu_s": round(float(outcome.router_cpu_s or 0.0), 2),
+        "timeout_clock": cfg.get("run", "timeout_clock"),
+        "timeout_s": cfg.get("run", "timeout_s"),
+        "rayon_threads": os.environ.get("RAYON_NUM_THREADS"),
         "report_dir": str(outcome.report_dir) if outcome.report_dir else None,
     }
     if png:
@@ -236,7 +242,7 @@ def summary(m: dict) -> str:
         f"  DRC unconnected {m['unconnected']} (hand {m['unconnected_hand']}, input {m['unconnected_input']}), "
         f"routing_new {m['routing_new']}",
         f"  vias {m['vias']} (hand {m['vias_hand']}), detour {dl}, ladder warnings {m['ladder_warnings']}",
-        f"  runtime {m['runtime_s']} s (run flow {m['run_flow_s']} s, router {m['router_s']} s)",
+        f"  runtime {m['runtime_s']} s (run flow {m['run_flow_s']} s, router {m['router_s']} s, CPU {m['router_cpu_s']} s; limit {m['timeout_s']} {m['timeout_clock']})",
         f"  stop: {m['stop_reason']}; findings: {', '.join(m['findings']) or 'none'}",
         f"  png: {m.get('png')}",
     ])
@@ -257,6 +263,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("board", help="BENCH_BOARDS key or .kicad_pcb path")
     ap.add_argument("out_dir", type=Path)
     ap.add_argument("--timeout", type=float, default=None, help="run.timeout_s (router time limit)")
+    ap.add_argument("--clock", choices=("wall", "cpu"), default=None,
+                    help="which clock --timeout counts: wall (default) or cpu (CPU seconds of router work, all "
+                         "threads summed; comparable across machine load: use it for comparisons)")
     ap.add_argument("--set", action="append", default=[], metavar="SECTION.KEY=VALUE",
                     help="override a topor.toml setting (JSON value), repeatable")
     ap.add_argument("--whole-project", action="store_true", help="copy the entire project directory")
@@ -265,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="route every copper layer the board declares as signal (default: the plugin's layer roles)")
     ap.add_argument("--name", default=None, help="board name in file names (default: key or pcb stem)")
     a = ap.parse_args(argv)
-    m = route_board(a.board, a.out_dir, overrides=dict(_kv(s) for s in a.set), timeout_s=a.timeout,
+    m = route_board(a.board, a.out_dir, overrides=dict(_kv(s) for s in a.set), timeout_s=a.timeout, clock=a.clock,
                     whole_project=a.whole_project, png=not a.no_png, name=a.name,
                     declared_layers=a.declared_layers)
     print(summary(m))

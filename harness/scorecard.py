@@ -1,6 +1,6 @@
 """Engine-neutral scorecard over several runs per board, in % (the method in the plan, "Measure").
 
-    .venv/bin/python -m harness.scorecard <root> [--json out.json]
+    .venv/bin/python -m harness.scorecard <root> [--json out.json] [--compare <other root> [--force]]
 
 `<root>/<board>/s<k>/` are `tools/route_board.sh` outputs of one board with seed k (s0 = the default run,
 fluctuation 0; s1.. = fluctuating weights with that seed). Every number is judged by KiCad's DRC only and is relative
@@ -14,6 +14,11 @@ engine shares (engines count "connections" differently):
 The table is kept simple on purpose (user 2026-11-06: "connected, total length, and visual inspection"; compare
 against hand routed only). Vias, new DRC and detour stay in the --json rows. Seeds s1.. give the spread: median and
 min–max. Known blind spots are listed under the table.
+`<root>/limits.json` (written by `harness.score_runs`) holds the clock (wall | cpu), the limit, the thread count, the
+git hash, the engine path and the load average of the runs. The table header shows it and the table has a CPU s column
+and a "limit hits" count (runs whose stop reason is timeout_cpu / timeout_wall). `--compare` prints the two scorecards
+side by side per board and REFUSES when the roots differ in clock, limit or threads (or one has no limits.json),
+unless `--force`: numbers from different budgets do not compare (user 2026-11-07).
 Complexity: O(runs x board text).
 """
 from __future__ import annotations
@@ -23,6 +28,7 @@ import json
 import math
 import re
 import statistics
+import sys
 from pathlib import Path
 
 _AT = re.compile(r"\(at\s+([-\d.]+)\s+([-\d.]+)")
@@ -112,6 +118,8 @@ def run_row(d: Path, board: str) -> dict | None:
             "sig": 100 * sig / n, "stitch": 100 * stitch / n, "hand_sig": 100 * hsig / n,
             "hand_stitch": 100 * hstitch / n, "drc": 100 * m["routing_new"] / n,
             "det90": (m.get("detour") or {}).get("p90"), "router_s": m.get("router_s"),
+            "cpu_s": m.get("router_cpu_s"), "stop": m.get("stop_reason"),
+            "hit": str(m.get("stop_reason") or "").startswith("timeout"),
             "unconnected": m["unconnected"], "routed": m.get("routed"), "connections": m.get("connections")}
 
 
@@ -125,9 +133,40 @@ def _spread(xs: list, fmt: str = ".1f") -> str:
     return f"{statistics.median(xs):{fmt}} [{min(xs):{fmt}}–{max(xs):{fmt}}]"
 
 
+COMPARE_KEYS = ("clock", "limit_s", "threads")
+
+
+def read_limits(root: Path) -> dict | None:
+    """`<root>/limits.json`, or None when the root has none (runs made before the CPU limit existed)."""
+    f = Path(root) / "limits.json"
+    return json.loads(f.read_text()) if f.is_file() else None
+
+
+def limits_line(lim: dict | None) -> str:
+    if not lim:
+        return "Limits: none recorded (no limits.json; runs of an older runner)"
+    la = lim.get("load_avg_start") or []
+    lb = lim.get("load_avg_end") or []
+    return (f"Limits: clock {lim.get('clock')}, limit {lim.get('limit_s')} s, threads {lim.get('threads')}, "
+            f"jobs {lim.get('jobs')}, git {lim.get('git_hash')}, engine {lim.get('engine')}, load average "
+            f"{la[0]:.1f} -> {lb[0]:.1f}" if la and lb else
+            f"Limits: clock {lim.get('clock')}, limit {lim.get('limit_s')} s, threads {lim.get('threads')}, "
+            f"jobs {lim.get('jobs')}, git {lim.get('git_hash')}, engine {lim.get('engine')}")
+
+
+def limits_mismatch(a: dict | None, b: dict | None) -> list:
+    """Human-readable differences in clock / limit / threads between two roots' limits ([] = comparable)."""
+    if a is None or b is None:
+        return ["limits.json missing in " + ("both roots" if a is None and b is None else
+                                              "the first root" if a is None else "the second root")]
+    return [f"{k}: {a.get(k)!r} vs {b.get(k)!r}" for k in COMPARE_KEYS if a.get(k) != b.get(k)]
+
+
 def scorecard(root: Path) -> tuple[str, dict]:
     """The markdown table and the raw rows per board."""
     root = Path(root)
+    lim = read_limits(root)
+    clock_cell = f"{lim['clock']} {lim['limit_s']} s" if lim else "–"
     rows: dict = {}
     for bd in sorted(p for p in root.iterdir() if p.is_dir()):
         runs = {}
@@ -138,8 +177,9 @@ def scorecard(root: Path) -> tuple[str, dict]:
         if runs:
             rows[bd.name] = runs
     head = ("| board | input | connected % default | connected % seeds 1–5 | hand connected % | "
-            "total length m default (% of hand) | total length % of hand, seeds | PNG (default run) |\n"
-            "|---|---|---|---|---|---|---|---|\n")
+            "total length m default (% of hand) | total length % of hand, seeds | limit | CPU s default | "
+            "CPU s seeds | limit hits | PNG (default run) |\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|---|\n")
     lines = []
     for b, runs in rows.items():
         s0 = runs.get(0)
@@ -150,20 +190,60 @@ def scorecard(root: Path) -> tuple[str, dict]:
                        if s0 and s0["length_m"] is not None and s0["length_pct"] is not None else "–")
         lines.append(
             f"| {b} | {any_r['n']} | {default_done} | {_spread([r['done'] for r in sk])} | {any_r['hand_done']:.1f} | "
-            f"{default_len} | {_spread([r['length_pct'] for r in sk], '.0f')} | {(s0 or {}).get('png') or '–'} |")
+            f"{default_len} | {_spread([r['length_pct'] for r in sk], '.0f')} | {clock_cell} | "
+            f"{_spread([(s0 or {}).get('cpu_s')], '.0f')} | {_spread([r['cpu_s'] for r in sk], '.0f')} | "
+            f"{sum(1 for r in runs.values() if r['hit'])} of {len(runs)} | {(s0 or {}).get('png') or '–'} |")
     blind = ("\nBlind spots (judged by KiCad DRC, which sees only what it checks): pad-to-pad violations inside a "
              "footprint count as new when routing connects those pads; diff pairs are skipped by the topological "
              "core and count as unconnected; zone fills are judged after kicad-cli's refill, not as saved; total "
              "length compares routing styles too: a hand board that routes a pour net (GND) with tracks is longer "
              "than topor's pour + stubs (dcsgonebadge hand: 1.5 m of GND track).\n")
-    return head + "\n".join(lines) + "\n" + blind, rows
+    return limits_line(lim) + "\n\n" + head + "\n".join(lines) + "\n" + blind, rows
+
+
+def compare(root_a: Path, root_b: Path, *, force: bool = False) -> tuple[str, int]:
+    """Per board: connected % (default / seeds median), length % of hand and CPU s of two roots side by side.
+    Returns (text, exit code); 2 and a refusal when the limits differ and not `force`."""
+    la, lb = read_limits(root_a), read_limits(root_b)
+    diff = limits_mismatch(la, lb)
+    if diff and not force:
+        return ("REFUSED: the two roots were run under different limits (" + "; ".join(diff) + "). Results from "
+                "different budgets do not compare. Re-run one root with the same clock / limit / threads, or pass "
+                "--force to compare anyway.", 2)
+    _, ra = scorecard(root_a)
+    _, rb = scorecard(root_b)
+    out = [f"A = {root_a}: {limits_line(la)}", f"B = {root_b}: {limits_line(lb)}"]
+    if diff:
+        out.append("WARNING (--force): limits differ: " + "; ".join(diff))
+
+    def med(runs, key):
+        return _spread([r[key] for k, r in runs.items() if k > 0] or [runs[0][key]], ".1f")
+
+    out += ["", "| board | connected % default A | B | connected % seeds A | B | length % seeds A | B | CPU s seeds A | B | "
+            "limit hits A | B |", "|---|---|---|---|---|---|---|---|---|---|---|"]
+    for b in sorted(set(ra) | set(rb)):
+        x, y = ra.get(b), rb.get(b)
+        d = lambda r, k: f"{r[0][k]:.1f}" if r and 0 in r and r[0].get(k) is not None else "–"  # noqa: E731
+        m = lambda r, k: med(r, k) if r else "–"  # noqa: E731
+        h = lambda r: f"{sum(1 for v in r.values() if v['hit'])} of {len(r)}" if r else "–"  # noqa: E731
+        out.append(f"| {b} | {d(x, 'done')} | {d(y, 'done')} | {m(x, 'done')} | {m(y, 'done')} | "
+                   f"{m(x, 'length_pct')} | {m(y, 'length_pct')} | {_spread([r['cpu_s'] for r in (x or {}).values()], '.0f')} | "
+                   f"{_spread([r['cpu_s'] for r in (y or {}).values()], '.0f')} | {h(x)} | {h(y)} |")
+    return "\n".join(out), 0
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("root", type=Path)
     ap.add_argument("--json", type=Path, default=None)
+    ap.add_argument("--compare", type=Path, default=None, metavar="OTHER_ROOT",
+                    help="compare with another root; refuses when clock / limit / threads differ")
+    ap.add_argument("--force", action="store_true", help="--compare although the limits differ")
     a = ap.parse_args(argv)
+    if a.compare:
+        text, rc = compare(a.root, a.compare, force=a.force)
+        print(text, file=sys.stderr if rc else sys.stdout)
+        return rc
     md, rows = scorecard(a.root)
     print(md)
     if a.json:
