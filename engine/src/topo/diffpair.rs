@@ -231,6 +231,36 @@ pub fn alias(model: &BoardModel, pairs: &Pairs) -> BoardModel {
                 x.net = p;
             }
         }
+        // The room between two partner pads belongs to the pair (its fan-out): where another net's
+        // track would fit between them, a copper bridge of the P net joins their centres (as thick as
+        // the pads' narrow side), so no other net is planned between them (the N stub could not cross
+        // it; dcsgonebadge U1.13 / U1.14 at 1.27 mm). Closer pads need none.
+        let other = (model.rules.min_track_width + 2 * model.rules.default.clearance.max(model.rules.min_clearance)) as f64;
+        for (&a, &b) in cp.partner.iter().filter(|(a, b)| model.pads[**a].net == p && !cp.keep.contains(*b)) {
+            let (pa, pb) = (&model.pads[a], &model.pads[b]);
+            for &l in pa.layers.iter().filter(|l| pb.layers.contains(l) && model.layers.iter().any(|x| x.id == **l)) {
+                let gap = crate::geom::skeleton_gap(&model.skeleton(pa, l), &model.skeleton(pb, l));
+                if gap < other {
+                    continue;
+                }
+                let (ca, cb) = (pa.center.to_vec2(), pb.center.to_vec2());
+                let narrow = |q: &crate::model::Pad| {
+                    let c = pad_corners(q, l);
+                    if c.len() < 4 { 0.0 } else { (c[1] - c[0]).len().min((c[2] - c[1]).len()) }
+                };
+                let t = 0.5 * narrow(pa).min(narrow(pb));
+                let Some(u) = (cb - ca).unit() else { continue };
+                let n = u.perp() * t;
+                let poly = [ca - n, cb - n, cb + n, ca + n];
+                m.copper_shapes.push(crate::model::CopperShape {
+                    uuid: format!("dp-bridge-{a}-{b}-{l}"),
+                    net: p,
+                    layer: l,
+                    poly: poly.iter().map(|q| crate::model::Pt { x: q.x.round() as i64, y: q.y.round() as i64 }).collect(),
+                    owner_ref: None,
+                });
+            }
+        }
         let (rp, rn) = (model.rules.net_rule(p).clone(), model.rules.net_rule(n).clone());
         let mut nr = rp.clone();
         nr.width = cp.envelope().round() as i64;
@@ -243,6 +273,22 @@ pub fn alias(model: &BoardModel, pairs: &Pairs) -> BoardModel {
         m.rules.per_net.insert(p, nr);
     }
     m
+}
+
+/// The outline corners of `pad` on `layer` (math frame): its rectangle (a circle's square, a
+/// polygon's points). O(points).
+fn pad_corners(pad: &crate::model::Pad, layer: u32) -> Vec<Vec2> {
+    use crate::model::PadShape;
+    let c = pad.center.to_vec2();
+    let rot = pad.rotation_deg.to_radians();
+    let shape = pad.shapes.get(&layer).or_else(|| pad.shapes.values().next());
+    let (w, h) = match shape {
+        Some(PadShape::Circle { d }) => (*d as f64, *d as f64),
+        Some(PadShape::Rect { w, h } | PadShape::RoundRect { w, h, .. } | PadShape::Oval { w, h }) => (*w as f64, *h as f64),
+        Some(PadShape::Poly { pts }) => return pts.iter().map(|q| q.to_vec2()).collect(),
+        None => return vec![c],
+    };
+    [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].iter().map(|&(sx, sy)| c + Vec2 { x: sx * 0.5 * w, y: sy * 0.5 * h }.rot(rot)).collect()
 }
 
 /// The via size of a pair's vias: the rule's (the P net's class via), else the P net's.
@@ -466,7 +512,7 @@ pub fn skew_estimate(pts: &[Vec2], s: f64, p: f64) -> f64 {
     let mut sk = 0.0;
     for w in pts.windows(3) {
         let (d0, d1) = (unit(w[1] - w[0]), unit(w[2] - w[1]));
-        let th = d0.cross(d1).atan2(d0.dot(d1));
+        let th = d0.cross(d1).atan2(d0.dot(d1)).clamp(-3.0, 3.0);
         sk += 2.0 * s * p * (0.5 * th).tan();
     }
     sk
@@ -773,7 +819,7 @@ fn pick_zip(ctx: &Ctx, idx: &ItemIndex, anchor: Vec2, pair: Ends, line: &[Vec2],
         Some(u) => {
             let g = u.perp();
             let d = axis.len();
-            [0.5, 1.0, 1.5, 2.0, 3.0].iter().flat_map(|&k| [(g, k * d), (-g, k * d)]).collect()
+            [0.5, 1.0, 2.0].iter().flat_map(|&k| [(g, k * d), (-g, k * d)]).collect()
         }
         None => Vec::new(),
     };
@@ -808,7 +854,10 @@ fn pick_zip(ctx: &Ctx, idx: &ItemIndex, anchor: Vec2, pair: Ends, line: &[Vec2],
                 }
             }
             for stub in cands {
-                if gentle && stub.windows(2).any(|sg| (sg[1] - sg[0]).len() > 1_000.0 && unit(sg[1] - sg[0]).dot(dir) < 0.70) {
+                let steep = stub.windows(2).any(|sg| (sg[1] - sg[0]).len() > 1_000.0 && unit(sg[1] - sg[0]).dot(dir) < 0.70);
+                // The gentle pass takes the stubs that turn at most 45 degrees into the line, the second
+                // only the others (in the octilinear style).
+                if ctx.octi && gentle == steep {
                     continue;
                 }
                 let mut its = tracks(net, layer, w, &stub);
