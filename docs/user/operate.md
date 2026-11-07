@@ -124,8 +124,13 @@ open), **Continue** goes on. If the folder is not writable you get
 
 ## Pre-flight findings
 
-Before anything is routed, topor saves a copy of the live board, reads it, runs KiCad's DRC on the copy
-(progress: *Checking the board (KiCad DRC)*) and opens **Topor — Route &lt;board&gt;**:
+Before anything is routed, topor saves a copy of the live board, reads it, lets the engine build its map of
+the board (a few seconds, no routing), runs KiCad's DRC on the copy (progress: *Checking the board (KiCad
+DRC)*) and opens **Topor — Route &lt;board&gt;**:
+
+- If the engine cannot read the board, topor stops right there, before the DRC and this dialog, with the
+  [`ENGINE_BOARD_UNREADABLE`](troubleshoot.md#engine_board_unreadable) error: it names the copper where the
+  engine failed (footprint, layer, net, coordinates) and what to do. The board is not changed.
 
 - The first line counts the connections in scope, the nets, the copper layers and the engine version.
 - **Findings** lists everything topor is about to assume about your board, sorted Error → Warn → Note.
@@ -348,6 +353,7 @@ the preview summary names the warnings (*After routing, check: …*), report.md 
 | [`IGNORED_RULE`](troubleshoot.md#ignored_rule) | copper that breaks a KiCad check set to *ignore* (priced, not forbidden) |
 | [`VIOLATIONS`](troubleshoot.md#violations) | never drop: copper written although it breaks a rule (no legal geometry was found); each violation with place, type and cause |
 | [`TIME_BUDGET_HIT`](troubleshoot.md#time_budget_hit) | the time limit stopped the run before its work caps |
+| [`ENGINE_FAILED`](troubleshoot.md#engine_failed) | error: all or most connections failed with the same engine error (e.g. the board's projection could not be built); with nothing routed the run ends in an error dialog naming the cause, never as a normal run that routed nothing |
 
 The pre-flight also warns about pads inside a track keepout on all their layers
 ([`KEEPOUT_PAD`](troubleshoot.md#keepout_pad)).

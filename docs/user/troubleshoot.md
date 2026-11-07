@@ -106,7 +106,9 @@ routes are on the board, a later step such as the zone refill failed).
 ([REPORT_DIR_UNWRITABLE](#report_dir_unwritable)), the engine did not stop after Cancel
 ([ENGINE_UNRESPONSIVE](#engine_unresponsive)), a kicad-cli call ran out of time
 ([KICAD_CLI_TIMEOUT](#kicad_cli_timeout)), the board was edited during the run
-([BOARD_CHANGED_DURING_RUN](#board_changed_during_run)), or an unexpected exception or engine panic happened
+([BOARD_CHANGED_DURING_RUN](#board_changed_during_run)), the engine could not read the board
+([ENGINE_BOARD_UNREADABLE](#engine_board_unreadable)) or failed every connection with the same error
+([ENGINE_FAILED](#engine_failed)), or an unexpected exception or engine panic happened
 ([INTERNAL](#internal)). The board is not changed in any of these cases.
 
 **Fix.** Read the last entry of `~/.cache/kicad/10.0/topor/topor-crash.log` (and `log.txt` in the report
@@ -129,6 +131,21 @@ on a very large board; a negative number is the signal.
 threads (`[run] threads`); file a bug with the board if it recurs.
 
 ## Results
+
+### Topor stops right after the start with "the engine could not read this board"
+
+**Cause.** Right after reading the board (a few seconds, before the pre-flight DRC and the settings dialog)
+topor lets the engine build its map of the board: one triangulation of every pad, via, rule area, copper
+graphic and the board outline, on all layers at once. When that fails, every connection would fail, so the
+run stops at once with [ENGINE_BOARD_UNREADABLE](#engine_board_unreadable) instead of after the DRC, the dialog
+and the router. The message names the copper where it failed (footprint, layer, net, uuid and coordinates in
+mm, as KiCad shows them). Since the robust triangulation (the constraints are noded on a 1 nm grid when the
+triangulation library's own splitting fails), this should not happen; the report's `log.txt` shows the
+check as `engine probe: ok, … s` and names any copper the engine had to work around.
+
+**Fix.** Find the named copper (KiCad → Edit → Find, by the footprint reference) and look for outlines that lie
+almost exactly on top of each other on different layers; move one slightly or delete a duplicate, save, and run
+Topor again. Please file the board as a bug ([debug.md](../dev/debug.md#filing-a-bug)).
 
 ### Nothing to route on a routed board
 
@@ -273,6 +290,22 @@ copper violates a rule anywhere else, file a bug.
 **Cause.** A via drill that the board uses is not in the fab drill filter, so the router could place a drill your fab filter forbids.
 
 **Fix.** Add the drill to vias.allowed_drills_mm (accepting the finding does it) or change the via sizes in KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias.
+
+### ENGINE_BOARD_UNREADABLE
+
+*Severity: error.*
+
+**Cause.** The routing engine could not read this board: building its map of the board (one triangulation of every pad, via, rule area, copper graphic and the outline, on all layers at once) failed, so every connection would fail. Topor checks this right after reading the board and stopped before the pre-flight DRC and the settings dialog. The board was not changed. The message names the copper where it failed, with its layer, net and place.
+
+**Fix.** Look at the named copper (KiCad → Edit → Find by its footprint reference, or go to the coordinates): copper graphics, vias or rule areas whose outlines lie almost exactly on top of each other on different layers (e.g. a footprint's copper arcs and lines that meet end to end on two layers) are the usual cause. Move one by a few µm or merge the duplicates, save, and press the Topor button again. Please report the board (docs/dev/debug.md, TOPOR_DUMP_ENGINE_INPUT) so the engine can read it as it is.
+
+### ENGINE_FAILED
+
+*Severity: error.*
+
+**Cause.** All or most connections failed with the same routing-engine error (e.g. the board's projection could not be built), so this is not a normal run that happened to route nothing. No copper was written; the board was not changed.
+
+**Fix.** Read the engine message in the details; for a projection error look at the named copper as for ENGINE_BOARD_UNREADABLE (KiCad → Edit → Find by its footprint reference). Run again; if it recurs, file a bug with log.txt and result.json from the report folder (docs/dev/debug.md).
 
 ### ENGINE_UNRESPONSIVE
 
