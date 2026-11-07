@@ -124,6 +124,15 @@ WORDING: dict[str, dict[str, str]] = {
         "elapsed_cpu_value": "{elapsed} · CPU {cpu} / {limit}",
         "elapsed_nolimit": "{elapsed} · CPU {cpu} / no limit",
         "total_label": "Total time",
+        # the time limit can be changed while the router runs (user 2026-11-07: "make the max run time editable
+        # during the run"); in seconds on the run's clock (run.timeout_clock)
+        "limit_label": "Time limit",
+        "limit_unit_wall": "s wall time",
+        "limit_unit_cpu": "s CPU time",
+        "limit_set": "Set limit",
+        "limit_add5": "+5 min",
+        "limit_add15": "+15 min",
+        "limit_hint": "0 = no limit. A limit below the time spent stops the run now, keeping the best result.",
         "cancel_hint": "Cancel keeps the best result so far. Once the routes are stable the button reads OK: the "
                        "same action, and the best result shown is exactly the board you get; waiting longer may "
                        "still find small gains. The time limit counts router time only and is an emergency stop; "
@@ -749,15 +758,24 @@ class PreflightDialog(_Base):
 
 # --------------------------------------------------------------------------------------------- (3) progress
 class ProgressDialog(_Base):
+    """Progress of the run (note §3). With ``limit_editable`` (the routing run after the pre-flight answer) the user
+    can change the time limit while the router runs: +5 min / +15 min, or a new value in the field (seconds on the
+    run's clock; 0 = no limit; below the time spent = stop now). A change is kept in ``limit_request`` until the run
+    flow takes it (``WxUi.time_limit_request``); the run reports the limit it applies back in ``Progress.limit_s``."""
     _wk = "progress"
-    TAB_ORDER = ("cancel",)
+    TAB_ORDER = ("limit", "limit_set", "limit_add5", "limit_add15", "cancel")
+    LIMIT_MAX_S = 86400.0  # schema range of run.timeout_s
 
     def __init__(self, board: str, timeout_s: float = 0.0, iteration_cap: int | None = None, stable_window: int = 4,
-                 timeout_clock: str = "wall"):
+                 timeout_clock: str = "wall", limit_editable: bool = True):
         super().__init__(WORDING["progress"]["title"].format(board=board))
         self.board = board
         self.timeout_s = float(timeout_s or 0)
         self.timeout_clock = timeout_clock
+        self.limit_editable = limit_editable
+        self.limit_request: float | None = None  # a change the run flow has not taken yet
+        self._spent = 0.0  # router time on the run's clock at the last update
+        self._phase = ""
         self.iteration_cap = iteration_cap
         self._round, self._round_from_engine = (0, iteration_cap), False
         self.cancelled = False
@@ -793,6 +811,7 @@ class ProgressDialog(_Base):
         self.root.Add(self.best_value, 0, wx.BOTTOM, self.group)
         self.stable = False
         self.stable_window = stable_window
+        self._build_limit_row()
         self.root.Add(self.text(self, "progress", "cancel_hint", wrap_dip=420), 0, wx.BOTTOM, self.group)
         self.root.Add(self.button_row(("cancel", "cancel", "c"), ok_id=wx.ID_CANCEL), 0, wx.EXPAND)
         self.cancel_button = self.buttons["cancel"]
@@ -800,8 +819,74 @@ class ProgressDialog(_Base):
         self.Bind(wx.EVT_CLOSE, self._on_cancel)
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
         self.set_phase("")
+        self.A11Y = {"limit": f"{W['limit_label']} ({W[self._unit_key]})"}
         self.finish((460, 300))
+        self._sync_limit_controls()
         self.cancel_button.SetFocus()
+
+    @property
+    def _unit_key(self) -> str:
+        return "limit_unit_cpu" if self.timeout_clock == "cpu" else "limit_unit_wall"
+
+    def _build_limit_row(self) -> None:
+        """Time limit [field] s wall time [Set limit] [+5 min] [+15 min] / hint. Created in tab order."""
+        W = WORDING["progress"]
+        self.limit = wx.SpinCtrlDouble(self, name="limit", min=0, max=self.LIMIT_MAX_S, inc=60,
+                                       initial=min(self.LIMIT_MAX_S, self.timeout_s), style=wx.SP_ARROW_KEYS
+                                       | wx.TE_PROCESS_ENTER)
+        self.limit.SetDigits(0)
+        self.limit.Bind(wx.EVT_TEXT_ENTER, lambda _e: self.apply_field())
+        self.limit_set = wx.Button(self, label=_mn(W["limit_set"], "l"), name="limit_set")
+        self.limit_add5 = wx.Button(self, label=_mn(W["limit_add5"], "5"), name="limit_add5")
+        self.limit_add15 = wx.Button(self, label=_mn(W["limit_add15"], "1"), name="limit_add15")
+        self.limit_set.Bind(wx.EVT_BUTTON, lambda _e: self.apply_field())
+        self.limit_add5.Bind(wx.EVT_BUTTON, lambda _e: self.add_minutes(5))
+        self.limit_add15.Bind(wx.EVT_BUTTON, lambda _e: self.add_minutes(15))
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        row.Add(self.text(self, "progress", "limit_label"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.group)
+        row.Add(self.limit, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.row)
+        row.Add(self.text(self, "progress", self._unit_key), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.group)
+        for b in (self.limit_set, self.limit_add5, self.limit_add15):
+            row.Add(b, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.row)
+        self.root.Add(row, 0, wx.BOTTOM, self.row)
+        self.limit_hint = self.text(self, "progress", "limit_hint", wrap_dip=420)
+        self.limit_hint.SetForegroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT))
+        self.root.Add(self.limit_hint, 0, wx.BOTTOM, self.group)
+
+    # -- the time limit during the run
+    def limit_open(self) -> bool:
+        """The limit can still be changed: routing run, not cancelled, the limit not reached, not in the DRC /
+        preview after the routing (the limit counts router time only)."""
+        reached = 0 < self.timeout_s <= self._spent
+        return (self.limit_editable and not self.cancelled and not reached
+                and self._phase not in ("drc", "preview"))
+
+    def _sync_limit_controls(self) -> None:
+        open_ = self.limit_open()
+        for w in (self.limit, self.limit_set):
+            w.Enable(open_)
+        for b in (self.limit_add5, self.limit_add15):  # nothing to add to "no limit"
+            b.Enable(open_ and self.timeout_s > 0)
+
+    def request_limit(self, seconds: float) -> float:
+        """Ask for a new limit (seconds on the run's clock; <= 0 = no limit). A limit below the time spent becomes
+        the time spent (stop at the next check, keeping the best result). Returns the value asked for. O(1)."""
+        s = float(seconds)
+        s = 0.0 if not math.isfinite(s) or s <= 0 else min(self.LIMIT_MAX_S, max(s, self._spent))
+        self.timeout_s = s
+        self.limit_request = s
+        self.limit.SetValue(s)
+        self._show_times()
+        self._sync_limit_controls()
+        return s
+
+    def add_minutes(self, minutes: int) -> None:
+        if self.limit_open() and self.timeout_s > 0:
+            self.request_limit(self.timeout_s + 60.0 * minutes)
+
+    def apply_field(self) -> None:
+        if self.limit_open():
+            self.request_limit(self.limit.GetValue())
 
     def _num(self, name: str, width_dip: int) -> wx.StaticText:
         """Right-aligned label of fixed minimum width: digits changing never shifts the layout."""
@@ -827,7 +912,14 @@ class ProgressDialog(_Base):
         self.cancel()
 
     def _on_key(self, evt) -> None:
-        if evt.GetKeyCode() in (wx.WXK_ESCAPE, wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+        key = evt.GetKeyCode()
+        enter = key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER)
+        focus = wx.Window.FindFocus()
+        if enter and focus is not None and (focus is self.limit or focus.GetParent() is self.limit):
+            self.apply_field()  # Enter in the limit field sets the limit; it never cancels the run
+        elif enter and focus in (self.limit_set, self.limit_add5, self.limit_add15):
+            evt.Skip()  # the focused limit button acts
+        elif key == wx.WXK_ESCAPE or enter:
             self.cancel()
         else:
             evt.Skip()
@@ -838,6 +930,7 @@ class ProgressDialog(_Base):
         self.cancelled = True
         self.phase.SetLabel(WORDING["progress"]["phase_finishing" if self.stable else "phase_cancelling"])
         self.cancel_button.Disable()
+        self._sync_limit_controls()
         self.gauge.Pulse()
 
     def set_stable(self, stable: bool) -> None:
@@ -891,6 +984,24 @@ class ProgressDialog(_Base):
         else:
             self.routed_value.SetLabel(W["routed_value"].format(routed=p.routed, total=p.total))
         self.vias_value.SetLabel(str(p.vias))
+        self._phase = p.phase
+        self._spent = float(getattr(p, "cpu_s", 0.0) if self.timeout_clock == "cpu" else p.elapsed_s)
+        limit = getattr(p, "limit_s", None)
+        if limit is not None and self.limit_request is None and float(limit) != self.timeout_s:
+            # the limit the run applies (after a change the run took); the field follows unless being edited
+            self.timeout_s = float(limit)
+            if wx.Window.FindFocus() is not self.limit:
+                self.limit.SetValue(min(self.LIMIT_MAX_S, self.timeout_s))
+        self._last = p
+        self._show_times()
+        self._sync_limit_controls()
+        self.total_value.SetLabel(_fmt_time(max(getattr(p, "wall_s", 0.0), p.elapsed_s)))
+
+    def _show_times(self) -> None:
+        p = getattr(self, "_last", None)
+        if p is None:
+            return
+        W = WORDING["progress"]
         el = _fmt_time(p.elapsed_s)
         cpu = _fmt_time(getattr(p, "cpu_s", 0.0))
         if self.timeout_s <= 0:
@@ -899,7 +1010,6 @@ class ProgressDialog(_Base):
             key = "elapsed_cpu_value" if self.timeout_clock == "cpu" else "elapsed_value"
             txt = W[key].format(elapsed=el, cpu=cpu, limit=_fmt_time(self.timeout_s))
         self.elapsed_value.SetLabel(txt)
-        self.total_value.SetLabel(_fmt_time(max(getattr(p, "wall_s", 0.0), p.elapsed_s)))
 
 
 # --------------------------------------------------------------------------------------------- (4) preview
@@ -1225,6 +1335,7 @@ class WxUi:
         self._iter_cap = int(Config.defaults().get("optimize", "rounds"))
         self._stable_window = int(Config.defaults().get("optimize", "stable_window"))
         self._last_progress: Progress | None = None
+        self._limit_editable = False  # True once the pre-flight was answered with Route (the routing run)
 
     #: M-B0: the progress dialog lets the user end the run (OK at "Routes stable"); the run flow then does not
     #: stop the engine at stable by itself.
@@ -1278,6 +1389,7 @@ class WxUi:
         if d.proceed:  # progress needs the effective limit / cap
             self._timeout_s = float(d.overrides.get("timeout_s", cfg.get("run", "timeout_s")))
             self._timeout_clock = str(d.overrides.get("timeout_clock", cfg.get("run", "timeout_clock")))
+            self._limit_editable = True
         self._iter_cap = int(cfg.get("optimize", "rounds"))  # the topological core's whole-route rounds
         self._stable_window = int(cfg.get("optimize", "stable_window"))
         return d
@@ -1286,7 +1398,7 @@ class WxUi:
         self._last_progress = p
         if self._progress is None:
             self._progress = ProgressDialog(self.ctx.board, self._timeout_s, self._iter_cap, self._stable_window,
-                                           self._timeout_clock)
+                                           self._timeout_clock, limit_editable=self._limit_editable)
             self._present(self._progress)
         dlg = self._progress
         dlg.update(p)
@@ -1294,6 +1406,15 @@ class WxUi:
         if dlg.cancelled:
             self._cancelled = True
         return not self._cancelled
+
+    def time_limit_request(self) -> float | None:
+        """The time limit the user set in the progress dialog since the last call (seconds on the run's clock,
+        0 = no limit), or None. The run flow polls it after every ``progress`` call. O(1)."""
+        dlg = self._progress
+        if dlg is None or dlg.limit_request is None:
+            return None
+        req, dlg.limit_request = dlg.limit_request, None
+        return req
 
     def preview(self, png: Path, report) -> bool:
         return self._run_modal(PreviewDialog(png, report, self.ctx.board)) == wx.ID_OK

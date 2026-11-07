@@ -95,7 +95,7 @@ def test_wx_ui_dialogs_construct_headless(app, tmp_path):
         "preflight": ["findings", "cause", "accept", "scope_whole", "scope_between",
                       "scope_touching", "existing", "respect_locked", "partial_routes", "drawing_style", "timeout", "timeout_clock", "threads",
                       "save_toml", "help", "cancel", "route"],
-        "progress": ["cancel"],
+        "progress": ["limit", "limit_set", "limit_add5", "limit_add15", "cancel"],
         "preview": ["zoom", "image", "summary", "report_dir", "open_report_folder", "reject", "accept"],
         "report": ["report_dir", "open_report_folder", "close"],
         "error": ["details", "copy_details", "open_report_folder", "close"],
@@ -233,6 +233,92 @@ def test_progress_phase_pending_and_nolimit(app):
     ui.progress(Progress("weird", 1, 1, 27, 0, 2.0))
     assert d.phase.GetLabel() == "weird"
     ui._close_progress()
+
+
+def _press(btn):
+    evt = wx.CommandEvent(wx.wxEVT_BUTTON, btn.GetId())
+    evt.SetEventObject(btn)
+    btn.GetEventHandler().ProcessEvent(evt)
+
+
+def test_progress_time_limit_buttons_and_field(app):
+    """User 2026-11-07: the time limit can be changed while the router runs (+5 / +15 min, a new value, 0 = none,
+    lower down to the time spent = stop now); the request waits until the run flow takes it."""
+    ui = _QuietUi()
+    ui._limit_editable = True
+    ui._timeout_s = 600.0
+    assert ui.progress(Progress("route", 3, 12, 27, 4, 75.0)) is True
+    d = ui._progress
+    assert d.limit.GetValue() == 600 and d.limit_open()
+    assert ui.time_limit_request() is None  # nothing asked yet
+    _press(d.limit_add5)
+    assert d.timeout_s == 900 and d.limit.GetValue() == 900
+    assert d.elapsed_value.GetLabel() == "1:15 / 15:00 · CPU 0:00"  # the elapsed line shows the new limit at once
+    _press(d.limit_add15)
+    assert d.timeout_s == 1800
+    assert ui.time_limit_request() == 1800 and ui.time_limit_request() is None  # taken once
+    # the run flow reports the limit it applies; the field follows
+    ui.progress(Progress("route", 3, 12, 27, 4, 76.0, limit_s=1800.0))
+    assert d.timeout_s == 1800 and d.elapsed_value.GetLabel() == "1:16 / 30:00 · CPU 0:00"
+    # a value in the field: Set limit (Enter in the field does the same)
+    d.limit.SetValue(1200)
+    _press(d.limit_set)
+    assert ui.time_limit_request() == 1200
+    # lowered below the time spent: the time spent (stop at the next check, best result kept)
+    d.limit.SetValue(30)
+    d.apply_field()
+    assert ui.time_limit_request() == pytest.approx(76.0)
+    assert not d.limit_open() and not d.limit_add5.IsEnabled() and not d.limit_set.IsEnabled()  # limit reached
+    ui._close_progress()
+
+
+def test_progress_time_limit_zero_none_and_disabled_states(app):
+    ui = _QuietUi()
+    ui._limit_editable = True
+    ui._timeout_s = 600.0
+    ui.progress(Progress("route", 1, 1, 27, 0, 10.0))
+    d = ui._progress
+    d.limit.SetValue(0)
+    d.apply_field()
+    assert ui.time_limit_request() == 0.0 and d.timeout_s == 0
+    assert d.elapsed_value.GetLabel() == "0:10 · CPU 0:00 / no limit"
+    assert d.limit_set.IsEnabled() and not d.limit_add5.IsEnabled() and not d.limit_add15.IsEnabled()
+    d.add_minutes(5)  # nothing to add to "no limit"
+    assert ui.time_limit_request() is None
+    d.request_limit(1e9)  # capped at the run.timeout_s range
+    assert d.timeout_s == d.LIMIT_MAX_S
+    # the DRC / preview after the routing: the limit counts router time only
+    ui.progress(Progress("drc", 1, 1, 27, 0, 12.0, limit_s=d.LIMIT_MAX_S))
+    assert not d.limit_open() and not d.limit.IsEnabled()
+    ui._close_progress()
+    # after Cancel nothing can be changed
+    ui.progress(Progress("route", 1, 1, 27, 0, 10.0))
+    d = ui._progress
+    d.cancel()
+    assert not d.limit_open() and not d.limit_add15.IsEnabled()
+    d.add_minutes(15)
+    assert ui.time_limit_request() is None
+    ui._close_progress()
+
+
+def test_progress_time_limit_cpu_clock_and_not_before_preflight(app):
+    ui = _QuietUi()  # before the pre-flight answer (the pre-flight DRC): no limit to change yet
+    ui.progress(Progress("preflight_drc", 0, 0, 0, 0, 0.0))
+    d = ui._progress
+    assert not d.limit_open() and not d.limit.IsEnabled() and not d.limit_add5.IsEnabled()
+    ui._close_progress()
+    d = ui_wx.ProgressDialog("eprom", 2400.0, 30, timeout_clock="cpu")
+    try:
+        assert d.widget("limit_unit_cpu") is not None and d.widget("limit_unit_wall") is None
+        assert d.limit.GetName() == "Time limit (s CPU time)"  # accessible name of the field
+        p = Progress("route", 1, 1, 27, 0, 100.0)
+        p.cpu_s = 2000.0
+        d.update(p)
+        d.limit.SetValue(1000)
+        d.apply_field()
+        assert d.limit_request == 2000.0  # clamped to the CPU time spent, the run's clock
+    finally:
+        d.Destroy()
 
 
 def test_window_icons(app, tmp_path, monkeypatch):

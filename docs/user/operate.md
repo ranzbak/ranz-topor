@@ -241,7 +241,20 @@ idle machine. When the limit fires, the best result so far is kept either way an
 *Stopped: timeout_wall* or *Stopped: timeout_cpu*. The progress dialog, the report summary (*CPU ... s*), `result.json`
 (`router_cpu_s`) and the finished dialog show the CPU time in both modes.
 
-**Cancel** (or Esc / Enter; **OK** after *Routes stable*) works at any time: the label changes to *Cancelling —
+**Changing the time limit while the router runs.** A run that takes longer than you planned need not lose its
+progress: the progress dialog has a **Time limit** row with the limit in force (seconds on the run's clock, *s wall
+time* or *s CPU time*). **+5 min** and **+15 min** add to it; or type a new value and press **Set limit** (or Enter
+in the field). You can raise it, lower it down to the router time already spent (a value below that becomes the time
+spent: the run stops at its next check and keeps the best result so far, exactly as when the limit fires — not a
+Cancel), or set `0` for no limit (then only OK / Cancel end the run, and the + buttons are off: there is nothing to add
+to). The row works while the router runs; it is off after Cancel / OK, once the limit is reached, and during the
+DRC and the preview (the limit counts router time only). The change applies to this run only: `topor.toml` keeps
+`[run] timeout_s`. The log says *time limit extended by the user …* (or lowered / set / removed), and the report and
+`result.json` (`time_limit`: clock, start, every change with the router time it was made at, final) record it; the
+summary's *Stopped* line names the final limit (e.g. *limit 900 s wall (raised during the run from 600 s, 1 change)*),
+and so does the time-budget warning. Headless runs (harness, MCP) have no such control, so their limit stays fixed.
+
+**Cancel** (or Esc / Enter outside the time-limit field; **OK** after *Routes stable*) works at any time: the label changes to *Cancelling —
 keeping the best result so far…* (after *Routes stable*: *Finishing — keeping the stable result…*); while routing, the best result found so far goes on to KiCad DRC and the preview; if nothing was routed yet
 the run ends with *Cancelled — nothing was changed on the board.* topor polls the running `kicad-cli` every 0.25 s,
 so Cancel also works during the pre-flight DRC (the run then ends with nothing changed) and the DRC rounds / preview
@@ -409,8 +422,8 @@ gives it the cheapest search weight (and the highest via cost); nets without a p
 Every dialog: **Enter** = the default button (Route / Accept / Continue / Close), **Esc** = Cancel / Reject /
 Close, **Tab** follows the reading order. Mnemonics (Alt + letter): pre-flight **R**oute, **A**ccept,
 **W**hole board, **B**etween, **T**ouching, respect **L**ocked, **K**eep partial, **S**ave, **H**elp,
-**C**ancel; preview **A**ccept, **R**eject, **O**pen report folder; error Copy **d**etails, **O**pen report
-folder, **C**lose.
+**C**ancel; progress Set **l**imit, +**5** min, +**1**5 min, **C**ancel (Enter in the time-limit field = Set limit);
+preview **A**ccept, **R**eject, **O**pen report folder; error Copy **d**etails, **O**pen report folder, **C**lose.
 
 ## Limitations
 
