@@ -323,7 +323,8 @@ the preview summary names the warnings (*After routing, check: …*), report.md 
 
 | Code | What it means |
 |---|---|
-| [`DIFF_PAIRS_SKIPPED`](troubleshoot.md#diff_pairs_skipped) | differential pairs are not routed by this version; route them by hand (also announced in the pre-flight) |
+| [`DIFF_PAIRS`](troubleshoot.md#diff_pairs) | (info) differential pairs routed coupled: one line per pair connection with lengths, skew, coupled share, uncoupled ends and vias |
+| [`DIFF_PAIRS_SKIPPED`](troubleshoot.md#diff_pairs_skipped) | differential pairs left unrouted because `[diffpair] enabled = false` (also announced in the pre-flight); see [Differential pairs](#differential-pairs) |
 | [`UNROUTED`](troubleshoot.md#unrouted) | connections that could not be finished, counted by reason (no room for a via, no room at the clearance when drawn, …) |
 | [`CONNECTION_WIDTH`](troubleshoot.md#connection_width) | traces not drawn because they would graze their own pad or via (KiCad's minimum connection width) |
 | [`POUR_ISLANDS`](troubleshoot.md#pour_islands) / [`POUR_STITCHED`](troubleshoot.md#pour_stitched) | pour pieces the new copper cut off: left over / joined again by stitching vias or pad stubs |
@@ -389,6 +390,40 @@ Default location: `~/.cache/kicad/10.0/topor/<board file name>/<YYYYmmdd-HHMMSS>
 redirects it: a relative path is inside the project folder (`<project>/<report_dir>/<timestamp>/`), an
 absolute path is used as is. Fatal errors of the plugin process go to `~/.cache/kicad/10.0/topor/topor-crash.log`.
 
+## Differential pairs
+
+Topor routes differential pairs as coupled pairs (`[diffpair] enabled = true`, the default; see
+[configuration.md](configuration.md)).
+
+- **Which nets.** KiCad's own rule, on the full net name: trailing digits and `_` are skipped, then the name must
+  end in `+`/`-` or upper-case `P`/`N`, and the net with that character swapped must exist (`CLK_N1` pairs with
+  `CLK_P1`, `USB+` with `USB-`, `USB+` with `USB_N` does not). Extra pairs: `[diffpair] pairs`. The pairs, with
+  their width and gap and where those came from, are listed in the run log.
+- **Sizes.** Width = the net class's DP width (KiCad → File → Board Setup → Design Rules → Net Classes), gap = its
+  DP gap or a custom rule `diff_pair_gap (opt ..)`, both raised to the board minimums (topor's, after the fab
+  floors: see Fab minimums). Between the two tracks of a pair the gap is the clearance, as in KiCad. Via pairs:
+  two vias side by side, edge gap = the pair gap raised to the hole-to-hole and copper-to-hole rules.
+- **How.** A pair connection is planned as one wire as wide as both tracks and the gap: it is placed early (by its
+  width), crosses other wires once and changes layer with one via pair, whose site is checked as the disc around
+  both vias. It is drawn as two tracks at the gap about that wire's centre line, 45 degree corners in the
+  octilinear style, and joined to the pads by short fan-out stubs: each stub leaves square to the line through
+  its two pads (KiCad's pad "gateways") or turns into the pair at 45 degrees, and the two tracks meet at the
+  nearest point where every clearance holds (`[diffpair] zip_max_mm`). Where nothing legal fits, the least
+  violating fan-out is drawn and reported (never drop).
+- **Polarity.** P and N never cross in a coupled pair. A connection whose pads swap sides between its ends (the A
+  and B rows of a USB-C connector, or a part placed mirrored) is routed as two single tracks at the pair width,
+  and the run log says so; such a pair needs a via on one track, as in KiCad.
+- **Report.** One line per pair connection in the engine notes (report.md and result.json `diff_pairs`): length of
+  P and N, skew (and the 45 degree bend estimate, 0.83 x pitch per bend; opposite bends cancel), the coupled share
+  at the gap, the uncoupled length at each end, vias. KiCad's own violation texts ("Differential uncoupled length
+  too long", "Skew between tracks out of range", "Differential pair gap out of range") appear only when a custom
+  rule sets that limit; without rules KiCad's DRC checks nothing about pairs, and topor prices uncoupled length
+  and skew with graded factors (`dp_uncoupled`, `dp_skew`, ..., [docs/dev/factors.md](../dev/factors.md)).
+- **Where KiCad sets them:** KiCad → File → Board Setup → Design Rules → Custom Rules diff_pair_uncoupled; KiCad → File → Board Setup → Design Rules → Custom Rules skew; KiCad → File → Board Setup → Design Rules → Net Classes → DP Gap, Custom Rules diff_pair_gap; KiCad → File → Board Setup → Design Rules → Net Classes → DP Via Gap; KiCad → File → Board Setup → Design Rules → Net Classes → DP Width; KiCad → File → Board Setup → Net Classes; KiCad → net names ending in +/- or P/N.
+- **Not yet.** Length and skew tuning (meanders) and pair-to-pair length matching; splitting a pair around an
+  obstacle; a P/N swap with a via pair. `[diffpair] enabled = false` leaves pairs unrouted
+  ([`DIFF_PAIRS_SKIPPED`](troubleshoot.md#diff_pairs_skipped)).
+
 ## Net priorities
 
 A priority 1..3 (1 = routed first) comes from, strongest first:
@@ -420,8 +455,9 @@ unsure about is kept. KiCad's DRC of the result stays the judge.
 
 ### Topological core (the engine of this version)
 
-- **Differential pairs are not routed** (nets ending in `_P`/`_N`, `+`/`-`, `P`/`N`): the pre-flight and the
-  findings after routing say so ([`DIFF_PAIRS_SKIPPED`](troubleshoot.md#diff_pairs_skipped)); route them by hand.
+- **Differential pairs** are routed coupled but not tuned: no meanders for length or skew, no pair-to-pair length
+  matching, no P/N swap with vias (a connection whose pads swap sides is routed as two single tracks); the
+  fan-out at pads can leave a skew of up to about a millimetre ([Differential pairs](#differential-pairs)).
 - Two or more signal layers are needed; through vias only.
 - Not every connection finishes legally on dense boards. Never drop draws them anyway (dcsgonebadge 222/231
   connections drawn, about 35 of them with violations; qmtech 400/426, about 50 with violations; measured headless,
