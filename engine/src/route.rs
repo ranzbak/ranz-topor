@@ -525,12 +525,24 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
 
 /// [`route`] under a [`RunControl`] (cancellation and progress).
 pub fn route_with(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteResult {
-    if opts.ignore_pads.is_empty() {
-        return crate::topo::core::route_topo(model, opts, ctl);
+    let mut r = if opts.ignore_pads.is_empty() {
+        crate::topo::core::route_topo(model, opts, ctl)
+    } else {
+        let (filtered, ignored) = drop_ignored_pads(model, opts);
+        let mut r = crate::topo::core::route_topo(&filtered, opts, ctl);
+        append_ignored(&mut r, model, &ignored);
+        r
+    };
+    if opts.cleanup_safe {
+        // the copper as written must survive KiCad's Cleanup Tracks & Vias unchanged
+        if r.item_conn.len() != r.items.len() {
+            r.item_conn.resize(r.items.len(), usize::MAX);
+        }
+        let st = crate::topo::tidy::tidy(model, &mut r.items, &mut r.item_conn);
+        if st.changed() {
+            r.warnings.push(st.line());
+        }
     }
-    let (filtered, ignored) = drop_ignored_pads(model, opts);
-    let mut r = crate::topo::core::route_topo(&filtered, opts, ctl);
-    append_ignored(&mut r, model, &ignored);
     r
 }
 

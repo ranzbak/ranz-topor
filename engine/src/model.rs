@@ -1120,6 +1120,10 @@ pub struct Options {
     /// the estimated refill holding a pad or via of the net, or a pad whose thermal spokes are all
     /// cut) gets a via into the pour on another layer, or a short stub, near its pad.
     pub stitch_islands: bool,
+    /// `topor.toml [output] cleanup_safe`: the written copper is made stable under KiCad's Edit ->
+    /// Cleanup Tracks & Vias ([`crate::topo::tidy`]): no null, duplicate or in-pad segments, T
+    /// junctions as exact vertices, collinear segments merged.
+    pub cleanup_safe: bool,
     /// Topological core (D5, `topor.toml [search] net_tree`): `"free"` = a connection joins the
     /// two parts of its net's routed copper it connects, at any pad of them or at a branch point
     /// (T-junction) on one of their routed traces, so the net's tree follows the routing;
@@ -1361,6 +1365,7 @@ impl Default for Options {
             reroute_rounds: 6,
             via_reduce: true,
             stitch_islands: true,
+            cleanup_safe: true,
             net_tree: "free".into(),
             crossing_vias: "crossing".into(),
             junction_pad_mm: 0.0,
