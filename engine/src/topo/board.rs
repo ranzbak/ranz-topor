@@ -77,6 +77,133 @@ pub struct Board {
     pub pad_of: Vec<usize>,
     /// Nets with a copper pour (connected by the pour, not wired in G0).
     pub poured: BTreeSet<i32>,
+    /// Report lines of the build: the triangulation needed its noded path, and the constraints
+    /// (obstacle sides, cuts) it left out, with their owners and places ([`cdt_notes`]).
+    pub notes: Vec<String>,
+}
+
+/// Where an obstacle of the projection comes from (for the report).
+#[derive(Clone, Copy, Debug)]
+enum Src {
+    Pad(usize),
+    Via(usize),
+    Keepout(usize),
+    Shape(usize),
+    Extra(usize),
+}
+
+/// A point in the KiCad frame (y down), mm.
+fn kicad_mm(p: Vec2) -> String {
+    format!("({:.4}, {:.4}) mm", p.x / MM, -p.y / MM)
+}
+
+fn net_name(m: &BoardModel, net: i32) -> String {
+    m.nets.iter().find(|n| n.code == net).map_or_else(|| if net > 0 { format!("net {net}") } else { "no net".into() }, |n| n.name.clone())
+}
+
+fn layer_name(m: &BoardModel, id: u32) -> String {
+    m.layers.iter().find(|l| l.id == id).map_or_else(|| format!("layer {id}"), |l| l.name.clone())
+}
+
+/// The copper (or outline) a projection vertex belongs to, in words.
+fn owner_text(m: &BoardModel, src: &[Src], k: VertKind) -> String {
+    let o = match k {
+        VertKind::Outline(o) | VertKind::Centre(o) => o,
+        VertKind::Edge => return "the board outline (Edge.Cuts)".into(),
+        VertKind::Free | VertKind::Node => return "a free point".into(),
+    };
+    match src.get(o) {
+        Some(&Src::Pad(i)) => {
+            let p = &m.pads[i];
+            format!("pad {}.{} [{}] at {}", p.ref_, p.number, net_name(m, p.net), kicad_mm(p.center.to_vec2()))
+        }
+        Some(&Src::Via(i)) => {
+            let v = &m.vias[i];
+            format!("via [{}] at {}{}", net_name(m, v.net), kicad_mm(v.at.to_vec2()), if v.locked { " (locked)" } else { "" })
+        }
+        Some(&Src::Keepout(i)) => format!("rule area '{}'", m.keepouts[i].name),
+        Some(&Src::Shape(i)) => {
+            let c = &m.copper_shapes[i];
+            let fp = c.owner_ref.as_deref().map_or(String::new(), |r| format!(" of footprint {r}"));
+            format!("copper graphic{fp} on {} [{}] (uuid {})", layer_name(m, c.layer), net_name(m, c.net), c.uuid)
+        }
+        Some(&Src::Extra(i)) => format!("plane stub {i} (a via or track placed before routing)"),
+        None => format!("obstacle {o}"),
+    }
+}
+
+/// Input constraint `k` of the projection in words: an obstacle side or the board edge between
+/// two points, or an LCT cut joining two owners.
+fn constraint_text(m: &BoardModel, src: &[Src], points: &[(Vec2, VertKind)], cons: &[(usize, usize)], k: usize) -> String {
+    let (a, b) = cons[k];
+    let ((pa, ka), (pb, kb)) = (points[a], points[b]);
+    let (oa, ob) = (owner_text(m, src, ka), owner_text(m, src, kb));
+    if oa == ob {
+        format!("a side of {oa} from {} to {}", kicad_mm(pa), kicad_mm(pb))
+    } else {
+        format!("a cut from {oa} to {ob}, {} to {}", kicad_mm(pa), kicad_mm(pb))
+    }
+}
+
+/// Distance between segments `a b` and `c d` (0 when they cross). O(1).
+fn seg_seg_dist(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> f64 {
+    let o = |p: Vec2, q: Vec2, r: Vec2| (q - p).cross(r - p);
+    let (d1, d2, d3, d4) = (o(a, b, c), o(a, b, d), o(c, d, a), o(c, d, b));
+    if d1 * d2 < 0.0 && d3 * d4 < 0.0 {
+        return 0.0;
+    }
+    seg_dist(a, c, d).min(seg_dist(b, c, d)).min(seg_dist(c, a, b)).min(seg_dist(d, a, b))
+}
+
+/// The constraints closest to constraint `k` (other owners, within 1 µm), nearest first: the
+/// partners of a degenerate crossing. O(constraints).
+fn near_constraints(points: &[(Vec2, VertKind)], cons: &[(usize, usize)], k: usize) -> Vec<usize> {
+    let (a, b) = (points[cons[k].0].0, points[cons[k].1].0);
+    let mut near: Vec<(f64, usize)> = cons
+        .iter()
+        .enumerate()
+        .filter(|&(j, _)| j != k)
+        .map(|(j, &(c, d))| (seg_seg_dist(a, b, points[c].0, points[d].0), j))
+        .filter(|&(dist, j)| {
+            let (c, d) = (points[cons[j].0].0, points[cons[j].1].0);
+            dist <= 1000.0 && ![c, d].iter().any(|p| *p == a || *p == b)
+        })
+        .collect();
+    near.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
+    near.into_iter().take(4).map(|x| x.1).collect()
+}
+
+/// The report lines of a triangulation that needed more than spade's own splitting.
+fn cdt_notes(m: &BoardModel, src: &[Src], points: &[(Vec2, VertKind)], cons: &[(usize, usize)], r: &crate::cdt::CdtReport) -> Vec<String> {
+    use crate::cdt::CdtPath;
+    if r.path == CdtPath::Direct {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let at = r.panic_at.map(|k| {
+        let near: Vec<String> = near_constraints(points, cons, k).iter().map(|&j| constraint_text(m, src, points, cons, j)).collect();
+        let with = if near.is_empty() { String::new() } else { format!("; nearest copper: {}", near.join("; ")) };
+        format!(" at {}{with}", constraint_text(m, src, points, cons, k))
+    });
+    let counts = if r.path == CdtPath::Noded {
+        format!(" ({} crossings noded, {} points merged on the {} nm grid)", r.crossings, r.merged, crate::cdt::NODE_GRID_NM)
+    } else {
+        format!(" (the noded path failed: {})", r.noded_error.as_deref().unwrap_or("?"))
+    };
+    out.push(format!(
+        "projection: the triangulation's own splitting of crossing constraints failed ({}){}; built by the {} path instead{counts}",
+        r.panic.as_deref().unwrap_or("skipped"),
+        at.unwrap_or_default(),
+        r.path.name(),
+    ));
+    const MAX: usize = 10;
+    for &k in r.dropped.iter().take(MAX) {
+        out.push(format!("projection: left out {} (it still crossed other copper after the noding); the drawing checks the exact copper there", constraint_text(m, src, points, cons, k)));
+    }
+    if r.dropped.len() > MAX {
+        out.push(format!("projection: {} more constraint(s) left out", r.dropped.len() - MAX));
+    }
+    out
 }
 
 /// Convex hull, counter-clockwise (monotone chain).
@@ -182,9 +309,39 @@ pub fn build_with_nodes(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2]) -> Result
     build_full(m, o, nodes, &[])
 }
 
+/// A failed board build: the error and the copper where it happened (owners and places in
+/// words, KiCad frame, mm), for the plugin's fail-fast probe.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BuildFailure {
+    pub error: String,
+    /// The constraint the triangulation failed on, then the nearest other copper.
+    pub places: Vec<String>,
+}
+
+impl BuildFailure {
+    /// One line: the error, then the places.
+    pub fn text(&self) -> String {
+        match self.places.split_first() {
+            None => self.error.clone(),
+            Some((at, [])) => format!("{} at {at}", self.error),
+            Some((at, near)) => format!("{} at {at}; nearest copper: {}", self.error, near.join("; ")),
+        }
+    }
+}
+
+/// [`build`] with the failure's places ([`BuildFailure`]).
+pub fn build_checked(m: &BoardModel, o: &BuildOpts) -> Result<Board, BuildFailure> {
+    build_full_checked(m, o, &[], &[])
+}
+
 /// [`build_with_nodes`] with the extra copper `extra` as obstacles (after the pads, existing
 /// vias, keepouts and copper shapes, so their obstacle ids do not move).
 pub fn build_full(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: &[Extra]) -> Result<Board, String> {
+    build_full_checked(m, o, nodes, extra).map_err(|f| f.text())
+}
+
+/// [`build_full`] with the failure's places.
+pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: &[Extra]) -> Result<Board, BuildFailure> {
     let mut signal_layers: Vec<u32> = m.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
     let n_signal = signal_layers.len();
     if o.plane_layers {
@@ -193,6 +350,7 @@ pub fn build_full(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: &[Extra]
     let n = signal_layers.len();
     let mut obstacles = Vec::new();
     let mut pad_of = Vec::new();
+    let mut src: Vec<Src> = Vec::new();
     for (pi, pad) in m.pads.iter().enumerate() {
         let mut mask = LayerMask(0);
         for (li, id) in signal_layers.iter().enumerate() {
@@ -216,6 +374,7 @@ pub fn build_full(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: &[Extra]
             continue;
         }
         pad_of.push(pi);
+        src.push(Src::Pad(pi));
         obstacles.push(Obstacle {
             kind: if pad.attr == PadAttr::Npth { ObsKind::Drill } else { ObsKind::Pad },
             poly,
@@ -239,7 +398,8 @@ pub fn build_full(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: &[Extra]
         });
     }
     if o.existing_vias {
-        for v in &m.vias {
+        for (vi, v) in m.vias.iter().enumerate() {
+            src.push(Src::Via(vi));
             let c = v.at.to_vec2();
             let (poly, sag) = skel_poly_sag(&Skeleton::Point { p: c, r: 0.5 * v.d as f64 }, o.round_steps.max(4));
             // `pad_of` stays index-aligned with the obstacles; `usize::MAX` marks a via.
@@ -258,7 +418,7 @@ pub fn build_full(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: &[Extra]
         }
     }
     if o.keepouts {
-        for k in m.keepouts.iter().filter(|k| k.no_tracks && k.poly.len() >= 3) {
+        for (ki, k) in m.keepouts.iter().enumerate().filter(|(_, k)| k.no_tracks && k.poly.len() >= 3) {
             let mut mask = LayerMask(0);
             for (li, id) in signal_layers.iter().enumerate() {
                 if k.layers.contains(id) {
@@ -276,6 +436,7 @@ pub fn build_full(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: &[Extra]
             }
             let c = poly.iter().fold(Vec2 { x: 0.0, y: 0.0 }, |a, &p| a + p) * (1.0 / poly.len() as f64);
             pad_of.push(usize::MAX);
+            src.push(Src::Keepout(ki));
             obstacles.push(Obstacle {
                 kind: ObsKind::Pad,
                 poly,
@@ -293,7 +454,7 @@ pub fn build_full(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: &[Extra]
     // copper are no terminals.
     let n_centred = obstacles.len();
     if o.copper_shapes {
-        for sh in m.copper_shapes.iter().filter(|c| c.poly.len() >= 3) {
+        for (si, sh) in m.copper_shapes.iter().enumerate().filter(|(_, c)| c.poly.len() >= 3) {
             let Some(li) = signal_layers.iter().position(|&id| id == sh.layer) else { continue };
             let mut poly: Vec<Vec2> = sh.poly.iter().map(|p| p.to_vec2()).collect();
             poly.dedup();
@@ -309,6 +470,7 @@ pub fn build_full(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: &[Extra]
             }
             let c = poly.iter().fold(Vec2 { x: 0.0, y: 0.0 }, |a, &p| a + p) * (1.0 / poly.len() as f64);
             pad_of.push(usize::MAX);
+            src.push(Src::Shape(si));
             obstacles.push(Obstacle {
                 kind: ObsKind::Pad,
                 poly,
@@ -324,7 +486,7 @@ pub fn build_full(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: &[Extra]
             });
         }
     }
-    for x in extra {
+    for (xi, x) in extra.iter().enumerate() {
         let (poly, sag, layers, drilled, net, clear) = match *x {
             Extra::Via { net, at, d, ring } => {
                 let (poly, sag) = skel_poly_sag(&Skeleton::Point { p: at, r: 0.5 * d }, o.round_steps.max(4));
@@ -346,6 +508,7 @@ pub fn build_full(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: &[Extra]
         }
         let c = poly.iter().fold(Vec2 { x: 0.0, y: 0.0 }, |acc, &p| acc + p) * (1.0 / poly.len() as f64);
         pad_of.push(usize::MAX);
+        src.push(Src::Extra(xi));
         obstacles.push(Obstacle { kind: ObsKind::Pad, poly, center: c, layers, drilled, net: (net > 0).then_some(net), clear, bare: false, sag });
     }
     // Centres first, so a coincident vertex keeps the terminal kind.
@@ -445,7 +608,20 @@ pub fn build_full(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: &[Extra]
         }
     }
     points.extend(nodes.iter().map(|&p| (p, VertKind::Node)));
-    let mut proj = Projection::build(n, obstacles, &points, &cons, inside)?;
+    let mut proj = match Projection::build_reported(n, obstacles, &points, &cons, inside) {
+        Ok(p) => p,
+        Err(f) => {
+            let (error, r) = *f;
+            // Name the copper where the triangulation failed (the plugin's probe shows it).
+            let mut places = Vec::new();
+            if let Some(k) = r.panic_at {
+                places.push(constraint_text(m, &src, &points, &cons, k));
+                places.extend(near_constraints(&points, &cons, k).iter().map(|&j| constraint_text(m, &src, &points, &cons, j)));
+            }
+            return Err(BuildFailure { error, places });
+        }
+    };
+    let notes = cdt_notes(m, &src, &points, &cons, &proj.cdt);
     proj.edge_clear = m.rules.edge_clearance as f64;
     // A copper-to-edge check set to ignore is no hard bound in the topology: the cuts at the
     // outline bound with 0 and P2 prices a pass that fits only without the rule (ignored_rule).
@@ -464,7 +640,7 @@ pub fn build_full(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: &[Extra]
         }
     }
     let poured = m.pours.iter().map(|p| p.net).collect();
-    Ok(Board { proj, signal_layers, n_signal, centre, pad_of, poured })
+    Ok(Board { proj, signal_layers, n_signal, centre, pad_of, poured, notes })
 }
 
 impl Board {

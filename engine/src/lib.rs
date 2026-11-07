@@ -8,6 +8,7 @@ pub mod fuzz;
 pub mod geom;
 pub mod lengths;
 pub mod model;
+pub mod noding;
 pub mod obstacle;
 pub mod pourcheck;
 #[cfg(feature = "python")]

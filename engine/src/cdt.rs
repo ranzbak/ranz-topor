@@ -68,42 +68,172 @@ fn fh(i: usize) -> FixedVertexHandle {
     FixedVertexHandle::from_index(i)
 }
 
-impl Cdt {
-    /// Points are deduplicated (coincident inputs share a vertex). Constraints
-    /// are index pairs; crossing ones are split. `Err` for non-finite points, and when spade's
-    /// constraint splitting fails on every attempt below.
-    ///
-    /// spade 2.15's `add_constraint_and_split` can panic (`!previous_region.is_empty() || from ==
-    /// final_vertex`) where two constraints cross at a nearly degenerate position (K1: copper
-    /// graphics of dcsgonebadge as KiCad's IPC API exports them, overlapping arcs and segments). The
-    /// build then runs again with the constraints in reverse order (same geometry), then with the
-    /// points snapped to a [`SNAP_NM`] grid (the projection only; the drawing checks the exact
-    /// copper). The first attempt that succeeds is used, so boards that never hit the panic get the
-    /// same triangulation as before. O(attempts * spade build).
-    pub fn build(points: &[Vec2], constraints: &[(usize, usize)]) -> Result<Cdt, String> {
-        if let Some(i) = points.iter().position(|p| !p.x.is_finite() || !p.y.is_finite()) {
-            return Err(format!("point {i} is not finite"));
+/// Grid (nm) of the noded path of [`Cdt::build`]: KiCad's internal unit. Board items are
+/// stored in integer nm, so the grid moves no coordinate of the board file; it moves only computed
+/// points (arc and circle approximations, LCT feet, crossings) by at most 0.71 nm, far below any
+/// clearance (and below the [`SNAP_NM`] last fallback). Points closer than this merge.
+pub const NODE_GRID_NM: f64 = 1.0;
+
+/// How [`Cdt::build`] got its triangulation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CdtPath {
+    /// spade's own constraint splitting (`add_constraint_and_split`) on the input as given.
+    #[default]
+    Direct,
+    /// The constraints noded first ([`crate::noding`], snap rounding on [`NODE_GRID_NM`]), then
+    /// inserted without crossings.
+    Noded,
+    /// Last fallback: spade's splitting with the constraints in reverse order.
+    Reversed,
+    /// Last fallback: spade's splitting on points snapped to [`SNAP_NM`].
+    Snapped,
+}
+
+impl CdtPath {
+    pub fn name(self) -> &'static str {
+        match self {
+            CdtPath::Direct => "direct",
+            CdtPath::Noded => "noded",
+            CdtPath::Reversed => "reversed order",
+            CdtPath::Snapped => "snapped to 128 nm",
         }
-        let mut last = String::new();
-        for attempt in 0..3 {
-            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Self::build_once(points, constraints, attempt == 1, attempt == 2)
-            }));
-            match run {
-                Ok(r) => return r,
+    }
+}
+
+/// A failed [`Cdt::build_reported`]: the error and the report (which constraint spade failed on).
+pub type CdtFailure = Box<(String, CdtReport)>;
+
+/// What [`Cdt::build_reported`] did besides the triangulation.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CdtReport {
+    pub path: CdtPath,
+    /// spade's panic message of the direct attempt (None when it succeeded or was skipped).
+    pub panic: Option<String>,
+    /// The input constraint spade was inserting when it panicked.
+    pub panic_at: Option<usize>,
+    /// Why the noded attempt failed, when it did.
+    pub noded_error: Option<String>,
+    /// Input constraints left out (noded path): a piece of each still crossed a constraint
+    /// after the noding. Sorted, distinct.
+    pub dropped: Vec<usize>,
+    /// Proper crossings among the input constraints (noded path).
+    pub crossings: usize,
+    /// Distinct input points merged into one vertex by the noding grid.
+    pub merged: usize,
+}
+
+/// Debugging switch `TOPOR_CDT_NODING` (docs/dev/debug.md): `always` skips the direct attempt
+/// (the noded path on every input), `never` skips the noded path (the behaviour before it, e.g.
+/// to see the plugin's fail-fast dialog on a board that needs it). Unset: both, in order.
+fn noding_env() -> Option<String> {
+    std::env::var("TOPOR_CDT_NODING").ok()
+}
+
+fn panic_text(e: Box<dyn std::any::Any + Send>) -> String {
+    e.downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| e.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic".into())
+}
+
+impl Cdt {
+    /// [`Cdt::build_reported`] without the report.
+    pub fn build(points: &[Vec2], constraints: &[(usize, usize)]) -> Result<Cdt, String> {
+        Self::build_reported(points, constraints).map(|r| r.0).map_err(|e| e.0)
+    }
+
+    /// Points are deduplicated (coincident inputs share a vertex). Constraints are index pairs;
+    /// crossing ones are split (the split vertices get the canonical ids `>= num_inputs()`).
+    /// `Err` for non-finite points and out-of-range indices, and when every attempt below fails.
+    ///
+    /// 1. **Direct**: spade's `add_constraint_and_split` on the input as given. Boards that
+    ///    never hit spade's panic keep exactly this triangulation.
+    /// 2. **Noded** (after spade panicked): spade 2.15's splitting can panic (`!previous_region.
+    ///    is_empty() || from == final_vertex`) where constraints cross at a nearly degenerate
+    ///    position (K1: copper graphics of dcsgonebadge; bornhack2026 2026-11-07: see
+    ///    `engine/tests/topo_cdt_noding.rs`). The arrangement is then computed here: the points
+    ///    snapped to [`NODE_GRID_NM`], the constraints noded by snap rounding
+    ///    ([`crate::noding`]), and the crossing-free pieces inserted with `try_add_constraint`.
+    ///    A piece that still meets a constraint is left out and its input constraint listed in
+    ///    [`CdtReport::dropped`] (the caller names it); the build never fails on one segment.
+    /// 3. **Reversed**, then **Snapped**: the old retries (constraints in reverse order; points on
+    ///    a [`SNAP_NM`] grid), kept as the last fallback.
+    ///
+    /// The projection only: the drawing checks the exact copper. O(attempts · spade build); the
+    /// noding is O((n + k) · c) (see [`crate::noding`]).
+    pub fn build_reported(points: &[Vec2], constraints: &[(usize, usize)]) -> Result<(Cdt, CdtReport), CdtFailure> {
+        let mut rep = CdtReport::default();
+        if let Some(i) = points.iter().position(|p| !p.x.is_finite() || !p.y.is_finite()) {
+            return Err(Box::new((format!("point {i} is not finite"), rep)));
+        }
+        if let Some(&(a, b)) = constraints.iter().find(|c| c.0 >= points.len() || c.1 >= points.len()) {
+            return Err(Box::new((format!("constraint index {} out of range", a.max(b)), rep)));
+        }
+        let env = noding_env();
+        if env.as_deref() != Some("always") {
+            let at = std::cell::Cell::new(None);
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Self::build_once(points, constraints, false, false, &at))) {
+                Ok(r) => return r.map(|c| (c, rep.clone())).map_err(|e| Box::new((e, rep.clone()))),
                 Err(e) => {
-                    last = e
-                        .downcast_ref::<&str>()
-                        .map(|s| s.to_string())
-                        .or_else(|| e.downcast_ref::<String>().cloned())
-                        .unwrap_or_else(|| "panic".into());
+                    rep.panic = Some(panic_text(e));
+                    rep.panic_at = at.get();
                 }
             }
         }
-        Err(format!("triangulation failed on degenerate crossing constraints: {last}"))
+        if env.as_deref() == Some("never") {
+            rep.noded_error = Some("skipped (TOPOR_CDT_NODING=never)".into());
+        } else {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Self::build_noded(points, constraints, &mut rep))) {
+                Ok(Ok(c)) => {
+                    rep.path = CdtPath::Noded;
+                    return Ok((c, rep));
+                }
+                Ok(Err(e)) => rep.noded_error = Some(e),
+                Err(e) => rep.noded_error = Some(format!("panic: {}", panic_text(e))),
+            }
+        }
+        rep.dropped.clear();
+        let mut last = rep.panic.clone().unwrap_or_default();
+        for (path, reverse, snap) in [(CdtPath::Reversed, true, false), (CdtPath::Snapped, false, true)] {
+            let at = std::cell::Cell::new(None);
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Self::build_once(points, constraints, reverse, snap, &at))) {
+                Ok(Ok(c)) => {
+                    rep.path = path;
+                    return Ok((c, rep));
+                }
+                Ok(Err(e)) => return Err(Box::new((e, rep))),
+                Err(e) => last = panic_text(e),
+            }
+        }
+        let noded = rep.noded_error.clone().unwrap_or_default();
+        Err(Box::new((format!("triangulation failed on degenerate crossing constraints: {last} (noded attempt: {noded})"), rep)))
     }
 
-    fn build_once(points: &[Vec2], constraints: &[(usize, usize)], reverse: bool, snap: bool) -> Result<Cdt, String> {
+    /// One path of [`Cdt::build_reported`] only, without the fallbacks (tests, debugging). A panic
+    /// of spade is an `Err`.
+    pub fn build_forced(points: &[Vec2], constraints: &[(usize, usize)], path: CdtPath) -> Result<(Cdt, CdtReport), String> {
+        if let Some(i) = points.iter().position(|p| !p.x.is_finite() || !p.y.is_finite()) {
+            return Err(format!("point {i} is not finite"));
+        }
+        if let Some(&(a, b)) = constraints.iter().find(|c| c.0 >= points.len() || c.1 >= points.len()) {
+            return Err(format!("constraint index {} out of range", a.max(b)));
+        }
+        let mut rep = CdtReport { path, ..CdtReport::default() };
+        let at = std::cell::Cell::new(None);
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match path {
+            CdtPath::Direct => Self::build_once(points, constraints, false, false, &at),
+            CdtPath::Reversed => Self::build_once(points, constraints, true, false, &at),
+            CdtPath::Snapped => Self::build_once(points, constraints, false, true, &at),
+            CdtPath::Noded => Self::build_noded(points, constraints, &mut rep),
+        }));
+        match run {
+            Ok(r) => r.map(|c| (c, rep)),
+            Err(e) => Err(format!("panic: {}", panic_text(e))),
+        }
+    }
+
+    /// spade's own splitting; `at` = the input constraint being inserted (for the report).
+    fn build_once(points: &[Vec2], constraints: &[(usize, usize)], reverse: bool, snap: bool, at: &std::cell::Cell<Option<usize>>) -> Result<Cdt, String> {
         let mut tri = Tri::new();
         let mut map = Vec::with_capacity(points.len());
         for (i, p) in points.iter().enumerate() {
@@ -118,22 +248,91 @@ impl Cdt {
             map.push(h.index());
         }
         let n_inputs = tri.num_vertices();
-        let order: Box<dyn Iterator<Item = &(usize, usize)>> =
-            if reverse { Box::new(constraints.iter().rev()) } else { Box::new(constraints.iter()) };
-        for &(a, b) in order {
-            let ca = *map
-                .get(a)
-                .ok_or_else(|| format!("constraint index {a} out of range"))?;
-            let cb = *map
-                .get(b)
-                .ok_or_else(|| format!("constraint index {b} out of range"))?;
+        let order: Box<dyn Iterator<Item = (usize, &(usize, usize))>> =
+            if reverse { Box::new(constraints.iter().enumerate().rev()) } else { Box::new(constraints.iter().enumerate()) };
+        for (k, &(a, b)) in order {
+            let (ca, cb) = (map[a], map[b]);
             if ca == cb {
                 continue;
             }
+            at.set(Some(k));
             // Crossing constraints are split at the intersection; overlapping and duplicate
             // constraints reuse the existing constraint edges.
             tri.add_constraint_and_split(fh(ca), fh(cb), |p| V { pos: p });
         }
+        at.set(None);
+        Ok(Cdt { tri, map, n_inputs })
+    }
+
+    /// The noded path (see [`Cdt::build_reported`]). `Err` when a coordinate exceeds the
+    /// noding range ([`crate::noding::MAX_COORD`] grid units).
+    fn build_noded(points: &[Vec2], constraints: &[(usize, usize)], rep: &mut CdtReport) -> Result<Cdt, String> {
+        use crate::noding::{snap_round, IPt, MAX_COORD};
+        let lim = MAX_COORD as f64;
+        let mut q: Vec<IPt> = Vec::with_capacity(points.len());
+        for p in points {
+            let (x, y) = ((p.x / NODE_GRID_NM).round(), (p.y / NODE_GRID_NM).round());
+            if x.abs() > lim || y.abs() > lim {
+                return Err(format!("a point at ({:.0}, {:.0}) nm is outside the noding range", p.x, p.y));
+            }
+            q.push([x as i64, y as i64]);
+        }
+        let mut tri = Tri::new();
+        let mut map = Vec::with_capacity(points.len());
+        for (i, p) in q.iter().enumerate() {
+            let pos = Point2::new(p[0] as f64 * NODE_GRID_NM, p[1] as f64 * NODE_GRID_NM);
+            let h = tri.insert(V { pos }).map_err(|e| format!("insert point {i}: {e:?}"))?;
+            map.push(h.index());
+        }
+        let n_inputs = tri.num_vertices();
+        // Distinct input positions that share a vertex only after the snapping.
+        let mut first: Vec<Option<Vec2>> = vec![None; n_inputs];
+        for (i, &c) in map.iter().enumerate() {
+            match first[c] {
+                None => first[c] = Some(points[i]),
+                Some(p) if p != points[i] => rep.merged += 1,
+                _ => {}
+            }
+        }
+        let mut vpos: Vec<IPt> = vec![[0, 0]; n_inputs];
+        for (i, &c) in map.iter().enumerate() {
+            vpos[c] = q[i];
+        }
+        // Distinct non-degenerate segments, with the first input constraint of each.
+        let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+        let (mut segs, mut origin) = (Vec::new(), Vec::new());
+        for (k, &(a, b)) in constraints.iter().enumerate() {
+            let (ca, cb) = (map[a], map[b]);
+            if ca != cb && seen.insert((ca.min(cb), ca.max(cb))) {
+                segs.push((ca, cb));
+                origin.push(k);
+            }
+        }
+        let nd = snap_round(&vpos, &segs);
+        rep.crossings = nd.crossings;
+        for (j, p) in nd.new_pts.iter().enumerate() {
+            let h = tri
+                .insert(V { pos: Point2::new(p[0] as f64 * NODE_GRID_NM, p[1] as f64 * NODE_GRID_NM) })
+                .map_err(|e| format!("insert crossing {j}: {e:?}"))?;
+            if h.index() != n_inputs + j {
+                return Err(format!("crossing {j} coincides with vertex {}", h.index()));
+            }
+        }
+        let mut dropped = Vec::new();
+        for (s, chain) in nd.chains.iter().enumerate() {
+            for w in chain.windows(2) {
+                let (a, b) = (fh(w[0]), fh(w[1]));
+                if tri.exists_constraint(a, b) {
+                    continue;
+                }
+                if tri.try_add_constraint(a, b).is_empty() {
+                    dropped.push(origin[s]);
+                }
+            }
+        }
+        dropped.sort_unstable();
+        dropped.dedup();
+        rep.dropped = dropped;
         Ok(Cdt { tri, map, n_inputs })
     }
 

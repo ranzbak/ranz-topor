@@ -70,6 +70,18 @@ fn route(py: Python<'_>, model_json: String, options_json: String) -> PyResult<S
     .map_err(PyValueError::new_err)
 }
 
+/// The fail-fast probe ([`crate::topo::core::probe`]): the board projection a route builds first,
+/// without routing. Returns its JSON (`ok`, `error`, `notes`, `path`, `seconds`, ...).
+#[pyfunction]
+fn probe_board(py: Python<'_>, model_json: String, options_json: String) -> PyResult<String> {
+    py.allow_threads(|| {
+        let model = BoardModel::from_json(&model_json)?;
+        let opts = Options::from_json(&options_json)?;
+        serde_json::to_string(&crate::topo::core::probe(&model, &opts)).map_err(|e| e.to_string())
+    })
+    .map_err(PyValueError::new_err)
+}
+
 /// Options of the engine as JSON: `Options::default()` (every field, nested `expert` included).
 #[pyfunction]
 fn default_options() -> PyResult<String> {
@@ -259,6 +271,7 @@ fn topor_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fuzz_items, m)?)?;
     m.add_function(wrap_pyfunction!(route, m)?)?;
     m.add_function(wrap_pyfunction!(route_async, m)?)?;
+    m.add_function(wrap_pyfunction!(probe_board, m)?)?;
     m.add_function(wrap_pyfunction!(_route_async_panicking, m)?)?;
     m.add_function(wrap_pyfunction!(default_options, m)?)?;
     m.add_function(wrap_pyfunction!(via_sizes, m)?)?;

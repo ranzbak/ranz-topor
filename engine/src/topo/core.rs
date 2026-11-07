@@ -667,6 +667,53 @@ const HIST_EPS: f64 = 0.02;
 type Hints = Vec<(usize, usize, f64)>;
 
 /// The projection options of a route (the same in every round, so edge ids stay comparable).
+/// The engine's reading of a board without routing (the plugin's fail-fast probe, run right
+/// after the board is read): the checks that would fail every connection of a route, i.e. the
+/// signal layer count and the projection ([`board::build`] with the options a route uses).
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct Probe {
+    pub ok: bool,
+    /// Why a route of this board would fail every connection (one line, places included).
+    pub error: Option<String>,
+    /// The copper where the projection failed, in words (KiCad frame, mm): the constraint the
+    /// triangulation failed on, then the nearest other copper.
+    pub places: Vec<String>,
+    /// Report lines of the build (a triangulation that needed the noded path, constraints left
+    /// out).
+    pub notes: Vec<String>,
+    /// How the triangulation was built (`direct`, `noded`, ...); empty when it was not built.
+    pub path: String,
+    pub vertices: usize,
+    pub obstacles: usize,
+    pub seconds: f64,
+}
+
+/// See [`Probe`]. O(projection build): seconds on the largest benchmark boards.
+pub fn probe(model: &BoardModel, opts: &Options) -> Probe {
+    let t0 = Instant::now();
+    let mut out = Probe::default();
+    let signal = model.layers.iter().filter(|l| l.routable).count();
+    if signal < 2 {
+        out.error = Some(format!("the topological core routes boards with two or more signal layers; this board has {signal}"));
+    } else {
+        match board::build_checked(model, &build_opts(opts)) {
+            Ok(b) => {
+                out.ok = true;
+                out.notes = b.notes;
+                out.path = b.proj.cdt.path.name().to_string();
+                out.vertices = b.proj.pos.len();
+                out.obstacles = b.proj.obstacles.len();
+            }
+            Err(f) => {
+                out.error = Some(format!("projection failed: {}", f.text()));
+                out.places = f.places;
+            }
+        }
+    }
+    out.seconds = t0.elapsed().as_secs_f64();
+    out
+}
+
 fn build_opts(opts: &Options) -> BuildOpts {
     BuildOpts { existing_vias: true, keepouts: true, plane_layers: opts.plane_signals != "forbidden", copper_shapes: true, ..BuildOpts::default() }
 }
@@ -808,6 +855,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         Ok(b) => b,
         Err(e) => return (RoundOut::unrouted(unrouted(model, opts, &format!("projection failed: {e}"))), Vec::new(), Memory::default()),
     };
+    warnings.extend(b.notes.iter().cloned());
     for &(e, l, room) in hints {
         if let Some(r) = b.proj.room.get_mut(e).and_then(|r| r.get_mut(l)) {
             *r = r.min(room);
