@@ -172,6 +172,8 @@ SETTINGS: list[Setting] = [
        engine="neck_in_drawing"),
     _s("search", "drawing_feedback", "bool", True, "Topological core: a connection whose copper the drawing step could not fit (a clearance to a pad or to a trace drawn earlier would be violated) is drawn first and the traces that block its corridor are drawn again around it, once per connection, instead of being reported failed at once.",
        engine="drawing_feedback"),
+    _s("vias", "reserve_sites", "bool", True, "Topological core: a via the plan puts at a layer change takes its site; another net's via planned in the same small spot (too small for two vias) counts as a via without a site, so layer assignment and rip-up move it or reroute its trace before the drawing step instead of finding no room for it there.",
+       engine="reserve_via_sites"),
     _s("vias", "offset_sites", "bool", True, "Topological core: when no sample point of the corridor where a connection changes layer has room for a via, also try positions a via-radius plus clearance away from the corners of nearby pads and copper (and from the traces drawn before), nearest to the connection's path first. More connections get a via site, at the cost of some runtime.",
        engine="via_offset_sites"),
     _s("search", "feedback_max_rip", "int", 8, "Work cap: most already drawn traces one such feedback round may take out and draw again (a larger value rescues more connections and costs more runtime). Whether they are taken out at all is a graded price, not this count: the reroute factor's price per blocking trace (more for one redrawn before in the same round) against the violation factor's price of drawing the rejected connection through them; the cheapest rescues go first.",
