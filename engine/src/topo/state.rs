@@ -20,7 +20,7 @@
 //! `remove` are O(passes · edge load).
 
 use super::demand::{need_in, Bound, Item};
-use crate::cdt::Cdt;
+use crate::cdt::{Cdt, CdtFailure, CdtReport};
 use crate::geom::Vec2;
 
 pub type VertId = usize;
@@ -140,6 +140,9 @@ pub struct Projection {
     /// Keepouts that forbid vias (D6a), on any copper layer: a through via spans every layer,
     /// so none may touch one. Polygons (nm); set by `board::build`.
     pub no_via: Vec<Vec<Vec2>>,
+    /// How the triangulation was built ([`Cdt::build_reported`]): the path, and the input
+    /// constraints left out (the board builder names them).
+    pub cdt: CdtReport,
 }
 
 pub fn point_in_poly(p: Vec2, poly: &[Vec2]) -> bool {
@@ -175,8 +178,20 @@ impl Projection {
         constraints: &[(usize, usize)],
         inside: impl Fn(Vec2) -> bool,
     ) -> Result<Projection, String> {
+        Self::build_reported(n_layers, obstacles, points, constraints, inside).map_err(|e| e.0)
+    }
+
+    /// [`Projection::build`]; a failed triangulation also returns its [`CdtReport`] (the
+    /// constraint spade failed on), so the caller can name the copper involved.
+    pub fn build_reported(
+        n_layers: usize,
+        obstacles: Vec<Obstacle>,
+        points: &[(Vec2, VertKind)],
+        constraints: &[(usize, usize)],
+        inside: impl Fn(Vec2) -> bool,
+    ) -> Result<Projection, CdtFailure> {
         let pts: Vec<Vec2> = points.iter().map(|p| p.0).collect();
-        let cdt = Cdt::build(&pts, constraints)?;
+        let (cdt, cdt_report) = Cdt::build_reported(&pts, constraints)?;
         let nv = cdt.num_vertices();
         let mut vkind = vec![VertKind::Free; nv];
         for (i, &(_, k)) in points.iter().enumerate() {
@@ -281,6 +296,7 @@ impl Projection {
             edge_regime: Vec::new(),
             edge_constraint,
             no_via: Vec::new(),
+            cdt: cdt_report,
         })
     }
 

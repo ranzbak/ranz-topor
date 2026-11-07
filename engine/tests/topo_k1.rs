@@ -17,3 +17,19 @@ fn degenerate_crossing_constraints_do_not_panic() {
     let r = topor_engine::route::route(&model, &opts);
     assert_eq!(r.connections_total, 0, "the fixture has no pads");
 }
+
+/// robust-cdt: the same fixture through the plugin's fail-fast probe. spade's own splitting still
+/// panics on it; the noded path builds the projection (no constraint left out) and the note names
+/// the copper graphic where spade failed, with its layer, net, uuid and place.
+#[test]
+fn degenerate_crossing_constraints_take_the_noded_path() {
+    let model = BoardModel::from_json(include_str!("fixtures/cdt-degenerate-copper-shapes.json")).expect("fixture parses");
+    let p = topor_engine::topo::core::probe(&model, &Options::default());
+    assert!(p.ok, "{:?}", p.error);
+    assert_eq!(p.path, "noded");
+    assert_eq!(p.notes.len(), 1, "{:?}", p.notes);
+    let n = &p.notes[0];
+    assert!(n.contains("copper graphic on B.Cu [GND] (uuid 671c67bf-4fe3-4d9d-a2a8-c45279f5fdf4)"), "{n}");
+    assert!(n.contains("(64.1708, 51.1086) mm"), "{n}");
+    assert!(n.contains("built by the noded path"), "{n}");
+}
