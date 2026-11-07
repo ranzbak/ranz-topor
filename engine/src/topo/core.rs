@@ -23,6 +23,7 @@ use super::archive::{table_text, Archive, Criteria, Objective, Variant};
 use super::board::{self, BuildOpts};
 use super::descent::{descend_labels, descend_topo};
 use super::moves::{Labels, Tally, Topo};
+use super::diffpair::{self, Pairs};
 use super::draw::{self, plan, Diag, Drawer, Plan, WireOut};
 use super::factors::{standard_factors, Event, Finding, Registry, Report, WireCtx};
 use super::init::{Conn, InitWeights};
@@ -47,33 +48,11 @@ const MM: f64 = 1e6;
 /// Failure reason of a differential pair (counted separately in the gate).
 pub const DIFF_PAIR: &str = "diff pair: not in the rough version";
 
-/// Nets that are halves of a differential pair by name (`_P`/`_N`, `+`/`-`, `P`/`N` suffix; both
-/// halves present): the plugin's own rule (`priority._pair_key`). O(N log N).
+/// Nets that are halves of a differential pair (D7): the pairs the plugin put into the model
+/// (`rules.diff_pairs`, KiCad's `MatchDpSuffix` on the full net name in `toporlib.diffpair`, the one
+/// definition). O(P log P).
 pub fn diff_pair_nets(model: &BoardModel) -> BTreeSet<i32> {
-    let key = |name: &str| -> Option<(String, u8)> {
-        let seg = name.rsplit('/').next().unwrap_or(name);
-        let mut s = seg.to_string();
-        if let Some(at) = s.find('@') {
-            let digits = s[at + 1..].chars().take_while(char::is_ascii_digit).count();
-            s.replace_range(at..at + 1 + digits, "");
-        }
-        for (pos, neg) in [("_P", "_N"), ("+", "-"), ("P", "N")] {
-            if let Some(k) = s.strip_suffix(pos) {
-                return Some((k.to_string(), 0));
-            }
-            if let Some(k) = s.strip_suffix(neg) {
-                return Some((k.to_string(), 1));
-            }
-        }
-        None
-    };
-    let mut by: BTreeMap<String, [Option<i32>; 2]> = BTreeMap::new();
-    for n in &model.nets {
-        if let Some((k, side)) = key(&n.name) {
-            by.entry(k).or_default()[side as usize] = Some(n.code);
-        }
-    }
-    by.values().filter_map(|h| h[0].zip(h[1])).flat_map(|(a, b)| [a, b]).collect()
+    model.rules.diff_pairs.iter().filter(|p| p.p != p.n).flat_map(|p| [p.p, p.n]).collect()
 }
 
 /// Record the drawn wire `wo` as the outcome of connection `ci`.
@@ -93,6 +72,9 @@ fn settle(octi: bool, out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, ci
     o.neck_n = wo.necks.len();
     o.neck_w = wo.necks.iter().map(|n| n.1).fold(None, |a: Option<f64>, x| Some(a.map_or(x, |y| y.min(x))));
     o.viol = wo.viol.clone();
+    o.runs = wo.runs.iter().map(|(l, p)| (b.signal_layers[*l], p.clone())).collect();
+    let pad = |ob: ObsId| if ob == super::state::NO_OBS { usize::MAX } else { b.pad_of.get(ob).copied().unwrap_or(usize::MAX) };
+    o.ends = (pad(st.wires[w].pa), pad(st.wires[w].pb));
     for n in &wo.necks {
         necking.push((ci, Event::Necking { wire: w, from_nm: st.wires[w].w, to_nm: n.1, mm: n.2 / MM }));
     }
@@ -128,6 +110,14 @@ struct Outcome {
     ghost_nm: f64,
     /// Rules its written copper breaks (M-B1 never drop); empty for a legal connection.
     viol: Vec<draw::Viol>,
+    /// The drawn centre line per run `(layer id, polyline)` and the model pads at the wire's two
+    /// ends (`usize::MAX`: no pad), for the D7 pair realisation.
+    runs: Vec<(u32, Vec<Vec2>)>,
+    ends: (usize, usize),
+    /// D7: statistics of a realised pair connection (on the P connection) and the pair factors'
+    /// events (priced in the result's penalty).
+    dp: Option<diffpair::ConnStats>,
+    dp_events: Vec<Event>,
     /// Why its drawing found no legal geometry (the failed attempt's reason), for the report.
     cause: String,
 }
@@ -843,8 +833,21 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let (rnd, rnds) = (round as u32, opts.topo_rounds.max(1) as u32);
     ctl.update("setup", 0, 0, 0, 0, 0.0);
     ctl.stage(rnd, rnds, "projection of the board");
-    let dec = decompose_with(model, opts, &signal, &stubs.signal_pads);
+    let mut dec = decompose_with(model, opts, &signal, &stubs.signal_pads);
+    // D7: the pair connections paired up (the N tree mirrors the P tree) and the planning model in
+    // which the N half carries the P net (the pair is one wire, the lead).
+    let pairs: Pairs = if opts.diffpair_route { diffpair::plan(model, &mut dec) } else { Pairs::default() };
+    let model_real = model;
+    let model_alias;
+    let model: &BoardModel = if pairs.coupled.is_empty() {
+        model
+    } else {
+        model_alias = diffpair::alias(model, &pairs);
+        &model_alias
+    };
+    let dec = dec;
     let mut warnings: Vec<String> = dec.warnings.clone();
+    warnings.extend(pairs.notes.iter().cloned());
     warnings.extend(stubs.notes.iter().cloned());
     for (net, r) in &dec.skipped {
         warnings.push(format!("net {net} skipped: {r}"));
@@ -876,8 +879,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let i = c.id;
         let (ta, tb) = (&c.from.kind, &c.to.kind);
         out[i].ghost_nm = (c.from.at - c.to.at).len();
-        if diff.contains(&c.net) {
+        if diff.contains(&c.net) && !opts.diffpair_route {
             fail(&mut out, i, DIFF_PAIR);
+            continue;
+        }
+        // D7: the N connection of a coupled pair is drawn with its lead (the P connection).
+        if pairs.carried.contains_key(&i) {
+            fail(&mut out, i, "diff pair: carried by its P connection");
             continue;
         }
         match (ta, tb) {
@@ -891,7 +899,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     continue;
                 };
                 conn_of.push(i);
-                conns.push(Conn { net: c.net, pa: oa, pb: ob, a: va, b: vb, w: c.width as f64, s: c.clearance as f64 });
+                // D7: a pair's lead is one wire as wide as the pair (envelope), at the larger
+                // clearance of the two halves (the alias model's rule).
+                let (w, s) = match pairs.of_lead(i) {
+                    Some(cp) => (cp.envelope(), model.rules.net_rule(c.net).clearance as f64),
+                    None => (c.width as f64, c.clearance as f64),
+                };
+                conns.push(Conn { net: c.net, pa: oa, pb: ob, a: va, b: vb, w, s });
             }
             (TermKind::Pad(pa), TermKind::Pour(zi)) => match obs_of_pad.get(pa) {
                 Some(&oa) => plane_reqs.push(planes::Req {
@@ -991,7 +1005,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // One connection into the state: with a free net tree it joins the two components of its net
     // that its pads lie in (any pad or junction of them, multi-source search); else pad to pad.
     let insert_conn = |st: &mut State, c: &Conn, w: &InitWeights| -> Option<WireId> {
-        if tree_free {
+        // D7: a pair's wire runs pad pair to pad pair (no branch onto the pair's own copper).
+        if tree_free && !pairs.width.contains_key(&c.net) {
             let comp = tree::components(st, c.net);
             let (ca, cb) = (tree::comp_of(&comp, c.a), tree::comp_of(&comp, c.b));
             if ca != cb {
@@ -1566,6 +1581,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     let checker = Checker::new(check_model, opts);
     let mut dr = Drawer::new(model, opts, &b, &st, &checker);
+    for cp in &pairs.coupled {
+        let r = &cp.rule;
+        let (d, _) = diffpair::via_of(model_real, r);
+        dr.pair_keep.insert(r.p, 3.0 * (2 * r.width + r.gap) as f64 + 0.5 * (d + r.via_gap) as f64);
+    }
     // The plane stubs (placed before the topology, which routed around them) are copper before
     // anything of the drawing: the wire vias and wires keep their clearance to them.
     let mut plane_res: Vec<(usize, Result<planes::Out, String>)> = Vec::new();
@@ -2340,6 +2360,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let ids: Vec<WireId> = drawn.keys().copied().collect();
         let pad_nm = opts.junction_pad_mm * MM;
         for &w in &ids {
+            if pairs.width.contains_key(&st.wires[w].net) {
+                continue;
+            }
             for end in 0..2 {
                 let wi = &st.wires[w];
                 let (pad, vert) = if end == 0 { (wi.pa, wi.a) } else { (wi.pb, wi.b) };
@@ -2607,6 +2630,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let _ = std::fs::write(format!("{path}.r{round}"), format!("[{}]", rows.join(",\n")));
     }
     drop(dr);
+    // ---- D7: the pairs' wires become two coupled tracks each ----
+    if !pairs.coupled.is_empty() || !pairs.single.is_empty() {
+        let t_dp = Instant::now();
+        let real_checker = Checker::new(model_real, opts);
+        warnings.extend(realise_pairs(model_real, opts, &pairs, &mut out, &mut necking, octi_on, &real_checker, &dec, &reg));
+        tlog("diff pairs", t_dp);
+        if let Some((o, nk)) = pre_snap.as_mut() {
+            let _ = realise_pairs(model_real, opts, &pairs, o, nk, octi_on, &real_checker, &dec, &reg);
+        }
+    }
     let isl = planes::islands(model, &b, &out_vias(&out, &plane_reqs, &dec.connections), &plane_reqs);
     warnings.extend(isl);
     // ---- Assemble the result ----
@@ -2629,7 +2662,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let c = criteria(model, &dec, &a, o, warn_n(nk), n_copper, &reg);
         (c, a)
     });
-    let Assembled { items, item_conn, reports, nets, length_by_layer, tot_len, tot_vias, violations: viol_list } = asm;
+    let Assembled { items, item_conn, reports, nets, length_by_layer, tot_len, tot_vias, violations: viol_list, diff_pairs: dp_list } = asm;
     if edge_ignored {
         let rule = model.rules.edge_clearance as f64;
         let outline = board::outline_segments(model);
@@ -2889,10 +2922,182 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         variants: Vec::new(),
         moves: super::moves::KINDS.iter().map(|&k| (k.name().to_string(), tally.applied_of(k))).collect(),
         violations: viol_list,
+        diff_pairs: dp_list,
     };
     let pre = pre_parts.map(|(c, a)| (c, with_parts(&result, a)));
     let vias_out: BTreeMap<usize, usize> = plans.iter().map(|(&w, pl)| (conn_of[wire_conn[w]], pl.vias.len())).collect();
     (RoundOut { result, crit: crit_main, pre }, new_hints, Memory { edge: hist_out, own: own_out, vias: vias_out })
+}
+
+/// D7: realise every coupled pair connection of `out`: the lead's drawn centre line becomes the P
+/// and N tracks ([`diffpair::realise`]), checked against the real model and all other copper; the N
+/// connection gets its copper, both get their violations, the lead its statistics and the pair
+/// factors' events (also pushed to `necking`, the report's factor findings). The lead's own
+/// necking events (the envelope narrowed at its pads: the fan-out zone) are dropped. Returns the
+/// report lines. O(pair connections x zip candidates x checker queries).
+#[allow(clippy::too_many_arguments)]
+fn realise_pairs(model: &BoardModel, opts: &Options, pairs: &Pairs, out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, octi: bool, checker: &Checker, dec: &crate::decompose::Decomposition, reg: &Registry) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut idx = crate::check::ItemIndex::new(checker.cell());
+    for (ci, o) in out.iter().enumerate() {
+        if o.routed && !pairs.lead.contains_key(&ci) && !pairs.carried.contains_key(&ci) {
+            for it in &o.items {
+                idx.insert(it);
+            }
+        }
+    }
+    necking.retain(|(ci, ev)| !(pairs.lead.contains_key(ci) && matches!(ev, Event::Necking { .. })));
+    let ctx = diffpair::Ctx { model, opts, checker, octi };
+    let label = |p: usize| model.pads.get(p).map_or("?".to_string(), |x| format!("{}.{}", x.ref_, x.number));
+    for (&cp_ci, &(k, cn)) in &pairs.lead {
+        let cp = &pairs.coupled[k];
+        let r = &cp.rule;
+        if !out[cp_ci].routed {
+            let why = out[cp_ci].reason.clone();
+            fail(out, cn, format!("diff pair: its {} connection is not routed ({why})", r.p_name));
+            continue;
+        }
+        let (mut pa, mut pb) = out[cp_ci].ends;
+        let runs = out[cp_ci].runs.clone();
+        // The runs go from the wire's first end; the connection report keeps its own order.
+        if let (Some(f), Some(pbp)) = (runs.first().and_then(|r| r.1.first()), model.pads.get(pb)) {
+            if model.pads.get(pa).is_some_and(|x| (x.center.to_vec2() - *f).len() > (pbp.center.to_vec2() - *f).len()) {
+                std::mem::swap(&mut pa, &mut pb);
+            }
+        }
+        let (Some(&na), Some(&nb)) = (cp.partner.get(&pa), cp.partner.get(&pb)) else {
+            fail(out, cn, format!("diff pair: the {} wire does not end at the pair's pads", r.p_name));
+            out[cp_ci].routed = false;
+            out[cp_ci].reason = "diff pair: the pair's wire does not end at its pads".into();
+            out[cp_ci].items.clear();
+            continue;
+        };
+        let pt = |p: usize| model.pads[p].center.to_vec2();
+        let long = |a: usize, b: usize| diffpair::pad_long(&model.pads[a]).max(diffpair::pad_long(&model.pads[b]));
+        let (ea, eb) = (diffpair::Ends { p: pt(pa), n: pt(na), long: long(pa, na) }, diffpair::Ends { p: pt(pb), n: pt(nb), long: long(pb, nb) });
+        // Centred on the pad pairs first; the centre line as drawn when that breaks more rules.
+        let score = |rz: &diffpair::Realised| {
+            let (a, x) = diffpair::viol_count(&ctx, &idx, &rz.p_items, None);
+            let (b, y) = diffpair::viol_count(&ctx, &idx, &rz.n_items, Some(&diffpair::index_of(&ctx, &rz.p_items)));
+            (a + b, x + y)
+        };
+        let rc = diffpair::realise(&ctx, cp, &runs, ea, eb, &idx, true);
+        let sc = score(&rc);
+        let rz = if sc.0 == 0 {
+            rc
+        } else {
+            let ru = diffpair::realise(&ctx, cp, &runs, ea, eb, &idx, false);
+            let su = score(&ru);
+            if su.0 < sc.0 || (su.0 == sc.0 && su.1 < sc.1) { ru } else { rc }
+        };
+        let vp = diffpair::check(&ctx, &idx, &rz.p_items);
+        for it in &rz.p_items {
+            idx.insert(it);
+        }
+        let vn = diffpair::check(&ctx, &idx, &rz.n_items);
+        for it in &rz.n_items {
+            idx.insert(it);
+        }
+        let st = &rz.stats;
+        let layers = out[cp_ci].layers.clone();
+        {
+            let o = &mut out[cp_ci];
+            o.items = rz.p_items.clone();
+            o.vias = rz.p_vias.clone();
+            o.length_nm = st.length_p;
+            o.viol = vp;
+            o.neck_nm = 0.0;
+            o.neck_n = 0;
+            o.neck_w = None;
+        }
+        {
+            let ghost = out[cn].ghost_nm;
+            let o = &mut out[cn];
+            o.routed = true;
+            o.reason.clear();
+            o.items = rz.n_items.clone();
+            o.vias = rz.n_vias.clone();
+            o.length_nm = st.length_n;
+            o.layers = layers;
+            o.viol = vn;
+            o.ghost_nm = ghost;
+        }
+        // Pair factors (graded) and the report.
+        let len = st.length_p.max(st.length_n);
+        let unc = (len - st.coupled).max(0.0);
+        let mut evs = vec![
+            Event::DpUncoupled { mm: unc / MM, max_mm: r.max_uncoupled as f64 / MM },
+            Event::DpSkew { mm: st.skew / MM, max_mm: r.max_skew as f64 / MM },
+        ];
+        if st.gap_dev_len > 0.0 {
+            evs.push(Event::DpGapDeviation { mm: st.gap_dev_len / MM, dev_mm: st.gap_dev_max / MM, tol_mm: r.tolerance as f64 / MM });
+        }
+        if st.polarity_cross {
+            evs.push(Event::DpPolarityCross { at: pt(pb) });
+        }
+        for ev in &evs {
+            necking.push((cp_ci, ev.clone()));
+        }
+        out[cp_ci].dp_events = evs;
+        out[cp_ci].dp = Some(diffpair::ConnStats { conn_n: cn, ..st.clone() });
+        let c = &dec.connections[cp_ci];
+        let _ = (c, reg);
+        lines.push(format!(
+            "diff pair {} / {} {} -> {}: length P {:.3} mm, N {:.3} mm, skew {:+.3} mm (bend estimate {:+.3}), coupled {:.1} % ({:.3} mm) at gap {:.3} mm{}, uncoupled at {} P {:.3} / N {:.3} mm, at {} P {:.3} / N {:.3} mm{}, vias {} / {}{}",
+            r.p_name,
+            r.n_name,
+            label(pa),
+            label(pb),
+            st.length_p / MM,
+            st.length_n / MM,
+            st.skew / MM,
+            st.skew_estimate / MM,
+            st.coupled_pct,
+            st.coupled / MM,
+            r.gap as f64 / MM,
+            if st.gap_dev_len > 0.0 { format!(" ({:.3} mm parallel at a gap up to {:.3} mm off)", st.gap_dev_len / MM, st.gap_dev_max / MM) } else { " (gap held)".into() },
+            label(pa),
+            st.fan_start[0] / MM,
+            st.fan_start[1] / MM,
+            label(pb),
+            st.fan_end[0] / MM,
+            st.fan_end[1] / MM,
+            if st.fan_vias > 0.0 { format!(", at via pairs {:.3} mm", st.fan_vias / MM) } else { String::new() },
+            st.vias_p,
+            st.vias_n,
+            if st.polarity_cross { "; POLARITY: P and N swap sides between the ends" } else { "" },
+        ));
+        // KiCad's own wording, only where a matching custom rule exists (doc section 6.4).
+        if r.max_uncoupled > 0 && unc > r.max_uncoupled as f64 {
+            lines.push(format!("Differential uncoupled length too long ({} maximum uncoupled length {:.4} mm; actual {:.4} mm): {} / {} {} -> {}", r.rule_uncoupled, r.max_uncoupled as f64 / MM, unc / MM, r.p_name, r.n_name, label(pa), label(pb)));
+        }
+        if r.max_skew > 0 && st.skew.abs() > r.max_skew as f64 {
+            lines.push(format!("Skew between tracks out of range (rule '{}' max skew {:.4} mm; actual {:.4} mm): {} / {} {} -> {}", r.rule_skew, r.max_skew as f64 / MM, st.skew.abs() / MM, r.p_name, r.n_name, label(pa), label(pb)));
+        }
+        if !r.rule_gap.is_empty() && st.gap_dev_len > 0.0 {
+            let actual = r.gap as f64 + st.gap_dev_max;
+            if r.gap_max > 0 && actual > r.gap_max as f64 {
+                lines.push(format!("Differential pair gap out of range ({} maximum gap {:.4} mm; actual {:.4} mm): {} / {}", r.rule_gap, r.gap_max as f64 / MM, actual / MM, r.p_name, r.n_name));
+            }
+        }
+    }
+    // Connection pairs routed as two single tracks (P and N swap sides): their vias are unpaired.
+    for &(ip, jn, ri) in &pairs.single {
+        let r = &model.rules.diff_pairs[ri];
+        let (vp, vn) = (out[ip].vias.len(), out[jn].vias.len());
+        if out[ip].routed && out[jn].routed {
+            lines.push(format!(
+                "diff pair {} / {} {} -> {}: routed as two single tracks (P and N swap sides between the ends), length P {:.3} mm, N {:.3} mm, skew {:+.3} mm, vias {vp} / {vn}",
+                r.p_name, r.n_name, dec.connections[ip].from.label, dec.connections[ip].to.label, out[ip].length_nm / MM, out[jn].length_nm / MM, (out[ip].length_nm - out[jn].length_nm) / MM
+            ));
+            let ev = Event::DpViaUnpaired { count: vp.abs_diff(vn) as u32 };
+            if vp != vn {
+                necking.push((ip, ev.clone()));
+                out[ip].dp_events.push(ev);
+            }
+        }
+    }
+    lines
 }
 
 /// Seed of a fluctuation stream: the run's seed, the whole-route round and the stage.
@@ -2917,6 +3122,7 @@ fn with_parts(r: &RouteResult, a: Assembled) -> RouteResult {
         vias: a.tot_vias,
         length_by_layer_nm: a.length_by_layer,
         violations: a.violations,
+        diff_pairs: a.diff_pairs,
         ..r.clone()
     }
 }
@@ -2931,6 +3137,7 @@ struct Assembled {
     tot_len: i64,
     tot_vias: usize,
     violations: Vec<crate::route::ViolationReport>,
+    diff_pairs: Vec<crate::route::DiffPairReport>,
 }
 
 /// Assemble the result parts of `out`; `term_over` replaces the terminals of a connection the
@@ -3049,7 +3256,38 @@ fn assemble(model: &BoardModel, dec: &crate::decompose::Decomposition, out: &[Ou
             class: crate::route::violation_class(against, cause, &r.from.label, &r.to.label).into(),
         });
     }
-    Assembled { items, item_conn, reports, nets, length_by_layer, tot_len, tot_vias, violations }
+    let mut diff_pairs = Vec::new();
+    for dp in &model.rules.diff_pairs {
+        for c in dec.connections.iter().filter(|c| c.net == dp.p) {
+            let Some(st) = &out[c.id].dp else { continue };
+            let cn = st.conn_n;
+            let r = |x: f64| x.round() as i64;
+            diff_pairs.push(crate::route::DiffPairReport {
+                conn_p: c.id,
+                conn_n: cn,
+                p_name: dp.p_name.clone(),
+                n_name: dp.n_name.clone(),
+                from: reports[c.id].from.label.clone(),
+                to: reports[c.id].to.label.clone(),
+                length_p_nm: r(st.length_p),
+                length_n_nm: r(st.length_n),
+                skew_nm: r(st.skew),
+                skew_estimate_nm: r(st.skew_estimate),
+                coupled_nm: r(st.coupled),
+                coupled_pct: (st.coupled_pct * 10.0).round() / 10.0,
+                gap_nm: dp.gap,
+                gap_held: st.gap_dev_len <= 0.0,
+                gap_dev_nm: r(st.gap_dev_max),
+                uncoupled_start_nm: [r(st.fan_start[0]), r(st.fan_start[1])],
+                uncoupled_end_nm: [r(st.fan_end[0]), r(st.fan_end[1])],
+                uncoupled_vias_nm: r(st.fan_vias),
+                vias_p: st.vias_p,
+                vias_n: st.vias_n,
+                polarity_cross: st.polarity_cross,
+            });
+        }
+    }
+    Assembled { items, item_conn, reports, nets, length_by_layer, tot_len, tot_vias, violations, diff_pairs }
 }
 
 /// The `violation` factor's events of the outcomes `out`, per connection id: one per rule the
@@ -3107,7 +3345,8 @@ fn criteria(model: &BoardModel, dec: &crate::decompose::Decomposition, a: &Assem
     // Connections not complete: without copper, or with violations (one error per connection,
     // however many rules it breaks: an open connection never counts less than a drawn one).
     let violating = out.iter().filter(|o| o.routed && !o.viol.is_empty()).count();
-    let penalty = viol_events(model, dec, out).iter().map(|(ci, ev)| reg.price(ev, &WireCtx { net: dec.connections[*ci].net, tier: dec.connections[*ci].tier })).sum();
+    let penalty = viol_events(model, dec, out).iter().map(|(ci, ev)| reg.price(ev, &WireCtx { net: dec.connections[*ci].net, tier: dec.connections[*ci].tier })).sum::<f64>()
+        + dec.connections.iter().flat_map(|c| out[c.id].dp_events.iter().map(move |ev| (c, ev))).map(|(c, ev)| reg.price(ev, &WireCtx { net: c.net, tier: c.tier })).sum::<f64>();
     Criteria {
         errors: open + violating,
         open,
@@ -3137,12 +3376,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn diff_pair_halves_by_name() {
+    fn diff_pair_halves_from_the_model() {
+        // D7: the pairs come from the model (the plugin's KiCad rule), not from a second rule here.
         let mut m = BoardModel::default();
         for (i, n) in ["USB_D+", "USB_D-", "CLK_P", "CLK_N", "VCC", "ONLY_P"].iter().enumerate() {
             m.nets.push(serde_json::from_value(serde_json::json!({"code": i as i32 + 1, "name": n})).expect("net"));
         }
-        let d = diff_pair_nets(&m);
-        assert_eq!(d.into_iter().collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+        assert!(diff_pair_nets(&m).is_empty());
+        m.rules.diff_pairs.push(crate::model::DiffPairRule { p: 1, n: 2, ..Default::default() });
+        m.rules.diff_pairs.push(crate::model::DiffPairRule { p: 3, n: 4, ..Default::default() });
+        assert_eq!(diff_pair_nets(&m).into_iter().collect::<Vec<_>>(), vec![1, 2, 3, 4]);
     }
 }

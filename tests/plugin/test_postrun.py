@@ -112,7 +112,8 @@ def test_preflight_diff_pairs_and_keepout_pads():
              "pads": [_pad("U1", "1", 1), _pad("J1", "1", 1), _pad("U1", "2", 2), _pad("J1", "2", 2),
                       _pad("U1", "3", 3), _pad("U2", "3", 3), _pad("D1", "1", 4, (5, 5)), _pad("R1", "1", 4, (50, 50))],
              "keepouts": [{"layers": [0], "no_tracks": True, "poly": [[0, 0], [10, 0], [10, 10], [0, 10]]}]}
-    cfg = Config.defaults()
+    assert _diff_pairs(model, Config.defaults()) == []  # D7: pairs are routed by default
+    cfg = Config.defaults().with_values({("diffpair", "enabled"): False})
     d = _diff_pairs(model, cfg)
     assert len(d) == 1 and d[0].items == ("/USB/D+", "/USB/D-") and d[0].message.startswith("1 differential pair")
     assert _diff_pairs(model, cfg.with_values({("nets", "do_not_touch"): ["/USB/*"]})) == []

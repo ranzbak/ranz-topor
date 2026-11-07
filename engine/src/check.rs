@@ -194,6 +194,10 @@ pub struct Checker {
     grids: HashMap<u32, Grid<usize>>,
     regions: Vec<Region>,
     region_grids: HashMap<u32, Grid<usize>>,
+    /// D7, KiCad's coupled-pair clearance (`drc_engine.cpp:346-362`, `isCoupledDiffPair`): between
+    /// the two halves of a differential pair whose gap is below their clearance, the gap is the
+    /// clearance. `(net, net)` both orders -> clearance (nm).
+    coupled: HashMap<(i32, i32), f64>,
 }
 
 impl Checker {
@@ -248,7 +252,15 @@ impl Checker {
             grids: HashMap::new(),
             regions: Vec::new(),
             region_grids: HashMap::new(),
+            coupled: HashMap::new(),
         };
+        for dp in &r.diff_pairs {
+            let g = (dp.gap.max(r.min_clearance)) as f64;
+            if g < c.clr(dp.p).max(c.clr(dp.n)) {
+                c.coupled.insert((dp.p, dp.n), g);
+                c.coupled.insert((dp.n, dp.p), g);
+            }
+        }
         for l in &all {
             c.grids.insert(*l, Grid::new(cell));
         }
@@ -494,10 +506,10 @@ impl Checker {
         let base = match o.kind {
             Kind::Hole => self.hole_clearance,
             Kind::Edge => self.edge_clearance,
-            _ => self
-                .clr(item_net)
-                .max(own_clr)
-                .max(self.rules_min_clearance),
+            _ => match self.coupled.get(&(item_net, o.net)) {
+                Some(&g) => g,
+                None => self.clr(item_net).max(own_clr).max(self.rules_min_clearance),
+            },
         };
         base + self.margin
     }

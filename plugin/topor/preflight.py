@@ -346,29 +346,31 @@ def _info_findings(model: dict, rules: dict, cfg) -> list:
 
 
 def _diff_pairs(model: dict, cfg) -> list:
-    """DIFF_PAIRS_SKIPPED (K1): nets that pair by name (``priority._pair_key``, the rule the engine's
-    ``diff_pair_nets`` follows) with both halves having two or more pads: the topological core leaves their
-    connections unrouted. do_not_touch nets are left out (they are not routed anyway). O(N + pads)."""
-    from .priority import _pair_key  # noqa: PLC0415
+    """DIFF_PAIRS_SKIPPED (K1, D7): with ``[diffpair] enabled = false`` the topological core leaves the connections of
+    the board's differential pairs (``model["rules"]["diff_pairs"]``, KiCad's name rule in ``toporlib.diffpair``;
+    without that list the same rule on the net names) unrouted: the pairs whose halves have two or more pads.
+    do_not_touch nets are left out (they are not routed anyway). With pairs enabled: nothing. O(N + pads)."""
+    from toporlib.diffpair import detect_pairs  # noqa: PLC0415
+
     from .scope import do_not_touch_nets  # noqa: PLC0415
 
+    if cfg.get("diffpair", "enabled"):
+        return []
     pads: dict = {}
     for p in model.get("pads", []):
         if p.get("net"):
             pads[p["net"]] = pads.get(p["net"], 0) + 1
     skip = do_not_touch_nets(model, cfg)
-    halves: dict = {}
-    for n in model.get("nets", []):
-        k = _pair_key(n["name"])
-        if k and pads.get(n["code"], 0) >= 2 and n["name"] not in skip:
-            halves.setdefault(k[0], {})[k[1]] = n["name"]
-    nets = sorted(x for h in halves.values() if len(h) == 2 for x in h.values())
+    code = {n["name"]: n["code"] for n in model.get("nets", [])}
+    listed = (model.get("rules") or {}).get("diff_pairs")
+    pairs = [(d["p_name"], d["n_name"]) for d in listed] if listed is not None else detect_pairs(code)
+    nets = sorted(x for pr in pairs if all(pads.get(code.get(h), 0) >= 2 and h not in skip for h in pr) for x in pr)
     if not nets:
         return []
     return [_mk("DIFF_PAIRS_SKIPPED",
-                f"{len(nets) // 2} differential pair(s) will not be routed by this version: {', '.join(nets[:10])}"
-                + (" ..." if len(nets) > 10 else "") + ". Route them by hand; diff-pair routing comes in a later "
-                "version.", nets)]
+                f"{len(nets) // 2} differential pair(s) will not be routed ([diffpair] enabled = false): "
+                f"{', '.join(nets[:10])}" + (" ..." if len(nets) > 10 else "") + ". Route them by hand, or set "
+                "[diffpair] enabled = true.", nets)]
 
 
 def _keepout_pads(model: dict) -> list:

@@ -64,8 +64,7 @@ refill; "unconnected" counts DRC unconnected items, the hand-routed board's own 
 
 ### The topological core inside KiCad (K1)
 
-The **Topor: route** button runs this core in KiCad 10: pre-flight findings (differential pairs announced as
-skipped, pads inside track keepouts), a progress dialog that names the stage and round and shows router time and
+The **Topor: route** button runs this core in KiCad 10: pre-flight findings (pads inside track keepouts), a progress dialog that names the stage and round and shows router time and
 total time (`[run] timeout_s` is now 600 s, an emergency stop; the `[optimize]` work caps end a run), Cancel at any
 time, a preview with the open ratsnest in blue, findings after routing (unrouted connections by reason, pour
 islands and stitches, via squeeze, necking, ignored rules, ...; [operate.md](docs/user/operate.md#findings-after-routing)),
@@ -123,7 +122,7 @@ The defaults are provisional; their re-measurement with the M-B1 objective was s
 stage first).
 
 Known limits: the complex boards (bornhack2026, hackerhotel2027, tanmatsu) are not on the ladder yet;
-differential pairs are not routed; branching is not complete (the fuse moves copper after drawing but the
+differential pairs are routed coupled but not length- or skew-tuned (D7, below); branching is not complete (the fuse moves copper after drawing but the
 planner still reserves room for both traces; re-attaching after changes, junction relaxation toward the
 Fermat point, vias as junctions and new branch points are open; the tee rule is two-layer only; a few
 side-by-side pairs of one net remain, mostly at adjacent pins of one net and twin plane stubs); pour islands
@@ -282,6 +281,51 @@ other routed copper rose (`foreign_copper` 10–59 → 48–87 per run): the oct
 than the taut chords did. The structural answer (exact per-layer cut test and inflation, `docs/dev/inflated-sketch.md`)
 is the next stage. The last qmtech runs of both sides ran under a load average of 10–16 (other work on the machine),
 which costs work per CPU second.
+
+### Differential pairs (D7)
+
+Pairs are found by KiCad's own rule (`MatchDpSuffix` on the full net name, `toporlib/diffpair.py`, the one definition
+the plugin hands to the engine) with KiCad's sizes: net class DP width / gap or a custom rule `diff_pair_gap`, floored
+by the board minimums; via gap as KiCad's `EffectiveDiffPairViaGap`. Reference: [docs/dev/kicad-diff-pairs.md](docs/dev/kicad-diff-pairs.md).
+
+- **Planned as one wide wire** (plan "Diff pairs = a wide wire"): the P connection carries the N connection, width
+  `w + p / cos 22.5` (`p = w + gap`: both tracks, the gap and the room of a 45-degree mitre), so the demand model, the
+  crossing graph, the layer assignment and the order (by width, early) see one wire; the N tree mirrors the P tree
+  on partner pads. The planner works on an alias board in which the N copper carries the P net; partner pads with
+  room between them get a P-net bridge there. The wire may neck to the single width at its pads: that is the
+  fan-out zone (TopoR's movable split, 6.3 manual p. 171), priced by `necking`. A layer change is one via pair,
+  checked as the disc around both vias.
+- **Drawn as two tracks** at `+-p/2` about the drawn centre line (end legs moved onto the pad pairs' middle; 45-degree
+  mitres in the octilinear style, mitred chords in smooth: there are no arcs in this core), joined to the pads by
+  fan-out stubs that leave square to the pad pair first where needed (KiCad's pad gateways); each track zips at the
+  nearest legal point, else the least violating one (never drop). P against N is checked against the pair gap
+  (KiCad's `isCoupledDiffPair` clearance).
+- **Polarity**: a connection pair whose pads swap sides is routed as two single tracks (qmtech USB_C_D, dcsgonebadge
+  USB-C A/B rows); a coupled wire that arrives at its end pad pair from the side that swaps P and N is drawn and
+  priced (`dp_polarity_cross`, the checker's violations): the planner does not choose the approach side yet.
+- **Report and factors**: one line per pair connection (lengths, skew and the bend estimate, coupled share at the gap,
+  uncoupled length at each end, vias), `result.json` `diff_pairs`, finding `DIFF_PAIRS`; graded factors
+  `dp_uncoupled`, `dp_skew`, `dp_gap_deviation`, `dp_via_unpaired`, `dp_polarity_cross`; KiCad's violation wording
+  only where a custom rule sets the limit. Settings: `[diffpair]` ([configuration.md](docs/user/configuration.md)).
+
+Scorecard (`harness.score_runs`: cpu 2400 s, 4 threads, default run + seeds 1–5; KiCad DRC after refill; A = D7
+@ a98d813, B = M-45 baseline `scratch/ab-cpu/m45`; `scratch/d7/score`):
+
+| Board | Connected % default A / B | seeds A | seeds B | Routed by the engine A / B | Connections with violations A / B | CPU-limit hits A / B |
+|---|---|---|---|---|---|---|
+| eprom-to-kernal | 100 / 100 | 100 | 100 | 27 / 27 | 0 / 0 | 0 / 0 of 6 |
+| wiccon-2023 | 100 / 100 | 100 | 100 | 60 / 60 | 0 / 0 | 0 / 0 of 6 |
+| dcsgonebadge | 96.7 / 93.8 | 94.8 [91.9–96.7] | 91.0 [91.0–92.4] | 230 / 222 of 231 | 24–32 / 19–21 | 2 / 0 of 6 |
+| qmtech | 95.7 / 91.6 | 95.7 [95.2–95.9] | 91.8 [91.6–92.1] | 426 / 400 of 426 | 29–37 / 22–26 | 6 / 6 of 6 |
+
+All 26 qmtech and 8 dcsgonebadge pair connections are routed (before: skipped). qmtech HDMI pairs: coupled at the
+gap 14–56 % per connection (median about 35 %), |skew| up to 1.25 mm (the fan-outs at U3 and the HDMI connector are
+not symmetric; no tuning yet), no via; USB_C_D (pads swap sides) as two single tracks. 4–7 pair connections per run
+carry violations, mostly at the HDMI connector, where a shield pin sits between P and N and the N fan-out crosses it,
+and at dcsgonebadge U1 (pads 1.27 mm apart: the fan-out centred on the pad pair leaves the planned corridor) and U7
+(the wire arrives from the side that swaps P and N: the planner does not choose the approach side yet). One qmtech
+run (seed 4, first attempt) ended ENGINE_UNRESPONSIVE at the CPU limit under heavy machine load; its rerun is in the
+table. eprom and wiccon have no pairs; their higher CPU seconds (11 vs 7, 142 vs 93) come from the busier machine.
 
 ## Requirements
 

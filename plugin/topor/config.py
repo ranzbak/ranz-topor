@@ -26,7 +26,8 @@ DOCS_HINT = "see docs/user/configuration.md"
 # engine_field -> multiplier from the config unit to the engine unit (mm -> nm, µm -> nm)
 _ENGINE_SCALE = {"via_cost_nm": 1_000_000, "margin_nm": 1000, "allowed_drills_nm": 1_000_000,
                  "pour_cut_cost_nm": 1_000_000, "neck_max_nm": 1_000_000, "pad_bridge_max_nm": 1_000_000,
-                 "plane_via_max_nm": 1_000_000, "plane_via_share_max_nm": 1_000_000}
+                 "plane_via_max_nm": 1_000_000, "plane_via_share_max_nm": 1_000_000,
+                 "diffpair_zip_max_nm": 1_000_000}
 
 
 # ---------------------------------------------------------------- value handling

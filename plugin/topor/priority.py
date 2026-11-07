@@ -19,7 +19,6 @@ from .findings import Finding
 _OVERBAR = re.compile(r"~\{([^}]*)\}")
 _AT = re.compile(r"@(\d+)")
 _NETCLASS_P = re.compile(r"^topor_p([1-3])$")
-_PAIR_SUFFIXES = (("_P", "_N"), ("+", "-"), ("P", "N"))
 
 
 def _segment(net_name: str) -> str:
@@ -63,14 +62,17 @@ def _toml_priority(name: str, table: dict) -> int | None:
 
 
 def _pair_key(name: str):
-    """(key, side) when the name ends like a diff-pair half, else None. KiCad matches the last characters."""
-    name = _AT.sub("", name, count=1)  # halves that differ only in the marker still pair (that is the warning)
-    for pos, neg in _PAIR_SUFFIXES:
-        if name.endswith(pos):
-            return name[:-len(pos)], 0
-        if name.endswith(neg):
-            return name[:-len(neg)], 1
-    return None
+    """(key, side) when the name is a diff-pair half by KiCad's rule (``toporlib.diffpair.match_dp_suffix``: full
+    name, trailing digits / ``_`` skipped, then ``+``/``-`` or ``P``/``N``), else None; side 0 = positive. The key
+    is the name without its polarity character, so the two halves share it. The ``@N`` marker is removed first
+    (halves that differ only in the marker still pair: that is the MARKER_PAIR warning)."""
+    from toporlib.diffpair import match_dp_suffix  # noqa: PLC0415
+
+    name = _AT.sub("", name, count=1)
+    m = match_dp_suffix(name)
+    if m is None:
+        return None
+    return name[:m[2]] + name[m[2] + 1:], 0 if m[0] > 0 else 1
 
 
 def net_priorities(nets, netclass_of: dict, cfg: Config) -> tuple:
