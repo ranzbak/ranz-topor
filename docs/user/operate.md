@@ -152,7 +152,7 @@ Tick **Save these options to topor.toml** to keep them (only these `[run]` keys 
 | Existing copper | Keep as obstacles · Keep and smooth · Rip up and re-route | `[run] existing_copper` = `fixed` / `smooth` / `rip` |
 | Respect locked tracks and vias | on: locked copper is never ripped | `[run] respect_locked` |
 | Keep partial routes | on: connections that cannot finish are drawn up to the blocking point (group `topor-partial`) | `[run] partial_routes` |
-| Time limit | seconds of router time, default 1800 (an emergency stop: the topological core ends at *Routes stable* or your OK); `0` = no limit; KiCad's DRC, the refill and the preview export are not counted | `[run] timeout_s` |
+| Time limit | seconds of router time, default 600 (an emergency stop: the topological core ends at *Routes stable* or your OK); `0` = no limit; KiCad's DRC, the refill and the preview export are not counted | `[run] timeout_s` |
 | Threads | `0` = all cores but one | `[run] threads` |
 
 *Existing copper* decides what happens to tracks and vias that are already on the board:
@@ -223,9 +223,10 @@ about 450 s of router time (320–710 s over six seeds), qmtech (426 connections
 That is 5–8 times the fixed four rounds of earlier versions; in exchange dcsgonebadge connects 80.5 % instead of
 77.6 % and qmtech 81.5 % instead of 79.6 % (KiCad DRC). `[optimize] runs = 1` takes roughly a quarter to a half of the
 time for a smaller gain; *Routes stable* and OK let you stop as soon as the result is good enough.
-`[run] timeout_s` (default 1800 s of router time) is only an emergency stop: when it fires before the routes are
+`[run] timeout_s` (default 600 s of router time) is only an emergency stop: when it fires before the routes are
 stable the result is the best so far, may differ between runs, and the findings say so
-([`TIME_BUDGET_HIT`](troubleshoot.md#time_budget_hit)). `0` = no limit.
+([`TIME_BUDGET_HIT`](troubleshoot.md#time_budget_hit)). Runs on large boards (dcsgonebadge, qmtech with the default
+best of 5 runs) may hit it and keep the best result so far. `0` = no limit.
 
 **Cancel** (or Esc / Enter; **OK** after *Routes stable*) works at any time: the label changes to *Cancelling —
 keeping the best result so far…* (after *Routes stable*: *Finishing — keeping the stable result…*); while routing, the best result found so far goes on to KiCad DRC and the preview; if nothing was routed yet

@@ -106,7 +106,8 @@ the board you get. The run also stops there by itself (`finish_when_stable`, `fi
 2026-11-07: "When route stable appears it should stop indeed"; `finish_when_stable = false` keeps iterating for
 marginal gains until OK), and headless runs stop at stable. `[optimize] runs` (default 5) seeded runs go on in
 parallel on the engine's threads and the best by the objective is offered; `[optimize] rounds` (30) is only a
-safety cap and `[run] timeout_s` (now 1800 s) the emergency stop.
+safety cap and `[run] timeout_s` (600 s) the emergency stop: runs on large boards (dcsgonebadge, qmtech with runs = 5) may hit it
+and keep the best result so far (`TIME_BUDGET_HIT`).
 
 Scorecard (KiCad DRC after a refill; connected % of KiCad's own input count, default run and median [range] of
 seeds 1–5; `harness/scorecard.py`):
