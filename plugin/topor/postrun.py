@@ -4,7 +4,8 @@ so they reach the pre-flight-style findings list of report.md and the preview su
 result.json.
 
 Codes (catalogued in messages.py, one section each in docs/user/troubleshoot.md):
-    DIFF_PAIRS_SKIPPED  connections of differential pairs, not routed by this version (route them by hand)
+    DIFF_PAIRS          differential-pair connections routed (info): per pair connection lengths, skew, coupled %
+    DIFF_PAIRS_SKIPPED  connections of differential pairs left unrouted because [diffpair] enabled = false
     UNROUTED            connections the router could not finish, grouped by reason
     CONNECTION_WIDTH    connections dropped because a track would graze its own pad / via (KiCad's minimum
                         connection width check)
@@ -35,7 +36,7 @@ from .findings import Finding
 from .messages import MESSAGES
 
 #: every code route_findings can emit (the preview summary names those present)
-POSTRUN_CODES = ("DIFF_PAIRS_SKIPPED", "POUR_UNJOINED", "UNROUTED", "CONNECTION_WIDTH", "POUR_ISLANDS", "POUR_STITCHED", "PLANE_PAD_SIGNAL",
+POSTRUN_CODES = ("DIFF_PAIRS", "DIFF_PAIRS_SKIPPED", "POUR_UNJOINED", "UNROUTED", "CONNECTION_WIDTH", "POUR_ISLANDS", "POUR_STITCHED", "PLANE_PAD_SIGNAL",
                  "PLANE_VIA_OUTSIDE_POUR", "VIA_SQUEEZE", "NECKED", "IGNORED_RULE", "VIOLATIONS", "TIME_BUDGET_HIT")
 DIFF_PAIR_REASON = "diff pair: not in the rough version"  # engine/src/topo/core.rs DIFF_PAIR
 _ITEMS = 40  # items kept per finding (the report lists them; result.json keeps all engine lines)
@@ -89,8 +90,17 @@ def route_findings(result: dict | None) -> list:
         nets = sorted({c.get("name") or "?" for c in diff})
         out.append(_mk("DIFF_PAIRS_SKIPPED",
                        f"{len(diff)} connection(s) of {len(nets)} differential-pair net(s) were not routed: "
-                       f"{', '.join(nets[:10])}{' ...' if len(nets) > 10 else ''}. Route these by hand; "
-                       "diff-pair routing comes in a later version.", nets))
+                       f"{', '.join(nets[:10])}{' ...' if len(nets) > 10 else ''} ([diffpair] enabled = false). "
+                       "Route these by hand, or set [diffpair] enabled = true.", nets))
+    dps = result.get("diff_pairs") or []
+    if dps:
+        lines = [str(x) for x in result.get("warnings") or [] if str(x).startswith("diff pair ")]
+        worst = max(abs(int(d.get("skew_nm") or 0)) for d in dps) / 1e6
+        cpl = sorted(float(d.get("coupled_pct") or 0) for d in dps)
+        out.append(_mk("DIFF_PAIRS",
+                       f"{len(dps)} differential-pair connection(s) routed as coupled pairs: coupled at the gap "
+                       f"{cpl[0]:.0f}-{cpl[-1]:.0f} % (median {cpl[len(cpl) // 2]:.0f} %), largest skew {worst:.3f} mm.",
+                       lines))
     width = [c for c in failed if c not in diff and "minimum connection width" in (c.get("reason") or "")]
     if width:
         out.append(_mk("CONNECTION_WIDTH",

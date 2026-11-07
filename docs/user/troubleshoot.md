@@ -250,13 +250,21 @@ copper violates a rule anywhere else, file a bug.
 
 **Fix.** Set the values in KiCad → File → Board Setup → Design Rules → Net Classes / Pre-defined Sizes.
 
+### DIFF_PAIRS
+
+*Severity: info.*
+
+**Cause.** Differential pairs were routed as coupled pairs: two tracks at the pair gap from a fan-out stub at each pad pair. Each line gives one pair connection: the lengths of P and N, their skew, the share coupled at the gap, the uncoupled length at each end and the vias. KiCad's DRC checks pairs only against custom rules (diff_pair_gap, diff_pair_uncoupled, skew); without them these numbers are information.
+
+**Fix.** Check the pairs in the preview. To make KiCad's DRC hold them to limits, add custom rules in KiCad → File → Board Setup → Design Rules → Custom Rules (diff_pair_uncoupled, skew within_diff_pairs); topor then prices uncoupled length and skew more steeply past those limits. Tune skew by hand with KiCad's skew tuner (topor does not meander yet).
+
 ### DIFF_PAIRS_SKIPPED
 
 *Severity: warning.*
 
-**Cause.** Differential pairs (two nets whose names end in _P/_N, +/- or P/N) are not routed by this version of topor; their connections stay unrouted.
+**Cause.** Differential pairs (two nets whose names end in +/- or P/N, KiCad's rule) are not routed because diff-pair routing is switched off ([diffpair] enabled = false), or their pair connection could not be routed; their connections stay unrouted.
 
-**Fix.** Route these pairs by hand with KiCad's differential-pair router (KiCad → Route → Differential Pair, hotkey 6); diff-pair routing comes in a later version of topor. To keep topor off them completely, list them in nets.do_not_touch.
+**Fix.** Set [diffpair] enabled = true in topor.toml to route them as coupled pairs, or route them by hand with KiCad's differential-pair router (KiCad → Route → Differential Pair, hotkey 6). To keep topor off them completely, list them in nets.do_not_touch.
 
 ### DO_NOT_TOUCH
 
