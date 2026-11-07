@@ -265,6 +265,14 @@ within a second; if it does not stop within 30 s the run ends with [ENGINE_UNRES
 limit) is stopped and the run ends with [KICAD_CLI_TIMEOUT](troubleshoot.md#kicad_cli_timeout) (board unchanged).
 Before the routing starts the progress dialog already shows *Preparing geometry* while topor reads the board.
 
+**One run per project.** Topor cannot be started twice for the same KiCad project: a second start shows
+[RUN_ALREADY_RUNNING](troubleshoot.md#run_already_running) ("Topor is already running for this project (started
+20:31, process 12345). Finish or cancel that run first.") and ends at pre-flight without touching the board; its
+report folder says so. Other projects are not affected. The lock is an operating-system file lock on
+`run-<hash>.lock` in `~/.cache/kicad/10.0/topor/<project>/` (not in your project folder); it is released when the
+run ends (OK, Cancel, error) and by the system when topor crashes, so it never goes stale. `[run] single_instance =
+false` turns it off.
+
 After routing, the result is written into the board copy and checked with KiCad's DRC (`kicad-cli`), once: the
 topological core takes no DRC feedback (a second route would give the same result), and the rule violations it
 writes on purpose are its own report's (see *Never drop* below).

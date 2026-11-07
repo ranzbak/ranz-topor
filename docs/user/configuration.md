@@ -23,6 +23,7 @@ What a run does and how long it may take.
 | `scope_mode` | str | `"between"` |  | between\|touching | With a footprint selection: between = connections whose pads are all on selected footprints; touching = any connection with a selected pad. KiCad: KiCad → select footprints in the PCB editor. |
 | `unrouted_only` | bool | `false` |  | true\|false | Route only connections that have no copper yet and leave all existing copper untouched. |
 | `fail_on_preexisting` | bool | `false` |  | true\|false | Abort when kept or locked copper already has DRC violations; false only lists them as pre-existing. |
+| `single_instance` | bool | `true` |  | true\|false | Run lock: topor cannot be started twice for the same KiCad project. A second start shows a message (who started when) and ends at pre-flight; the lock is released when the run ends, also after an error or a crash. The lock file is run-<hash>.lock in the report root (not in the project folder). false = no lock. |
 | `kicad_cleanup` | bool | `false` |  | true\|false | After Accept, open KiCad's own Cleanup Tracks and Vias dialog (you confirm it there). |
 | `kicad_teardrops` | bool | `false` |  | true\|false | After Accept, open KiCad's teardrop dialog (you confirm it there). |
 | `kicad_cli_timeout_s` | float | `120` | s | 0 .. 86400 | Limit for each kicad-cli call (DRC with zone refill, preview export): a call that runs longer is killed and the run ends with KICAD_CLI_TIMEOUT, board unchanged. Raise it for very large boards. 0 disables the limit (Cancel still works). |
