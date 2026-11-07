@@ -570,6 +570,28 @@ pub struct Ctx<'a> {
 pub struct Ends {
     pub p: Vec2,
     pub n: Vec2,
+    /// The longer side of the anchors' pads (0 for vias): KiCad's fan-out runs 1.5 x that straight
+    /// out before it turns.
+    pub long: f64,
+}
+
+/// The longer side of `pad` (its first shape). O(1).
+pub fn pad_long(pad: &crate::model::Pad) -> f64 {
+    use crate::model::PadShape;
+    match pad.shapes.values().next() {
+        Some(PadShape::Circle { d }) => *d as f64,
+        Some(PadShape::Rect { w, h } | PadShape::RoundRect { w, h, .. } | PadShape::Oval { w, h }) => (*w).max(*h) as f64,
+        Some(PadShape::Poly { pts }) => {
+            let (mut lo, mut hi) = (Vec2 { x: f64::INFINITY, y: f64::INFINITY }, Vec2 { x: f64::NEG_INFINITY, y: f64::NEG_INFINITY });
+            for q in pts {
+                let v = q.to_vec2();
+                lo = Vec2 { x: lo.x.min(v.x), y: lo.y.min(v.y) };
+                hi = Vec2 { x: hi.x.max(v.x), y: hi.y.max(v.y) };
+            }
+            (hi.x - lo.x).max(hi.y - lo.y).max(0.0)
+        }
+        None => 0.0,
+    }
 }
 
 /// Statistics of one realised pair connection (nm).
@@ -682,7 +704,7 @@ pub fn realise(ctx: &Ctx, cp: &Coupled, runs: &[(u32, Vec<Vec2>)], start: Ends, 
             let (vp, vn) = via_pair(v, din, dout, s, pv, &ctx.opts.diffpair_via_axes);
             p_vias.push((vp, vsize));
             n_vias.push((vn, vsize));
-            Ends { p: vp, n: vn }
+            Ends { p: vp, n: vn, long: 0.0 }
         };
         anchors.push((a0, e));
         a0 = e;
@@ -819,7 +841,14 @@ fn pick_zip(ctx: &Ctx, idx: &ItemIndex, anchor: Vec2, pair: Ends, line: &[Vec2],
         Some(u) => {
             let g = u.perp();
             let d = axis.len();
-            [0.5, 1.0, 2.0].iter().flat_map(|&k| [(g, k * d), (-g, k * d)]).collect()
+            // Multiples of the pad spacing, and KiCad's straight run out of the pad
+            // (`DP_GATEWAYS::BuildFromPrimitivePair`, pns_diff_pair.cpp @ 86a7a3f: 1.5 x (pad long side + 1)):
+            // between connector pins with a shield pin in the middle the turn must come past the pin tips.
+            let mut ls: Vec<f64> = [0.5, 1.0, 2.0].iter().map(|&k| k * d).collect();
+            if pair.long > 0.0 {
+                ls.extend([0.5 * pair.long + p, 1.5 * pair.long]);
+            }
+            ls.iter().flat_map(|&l| [(g, l), (-g, l)]).collect()
         }
         None => Vec::new(),
     };

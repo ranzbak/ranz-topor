@@ -2905,7 +2905,8 @@ fn realise_pairs(model: &BoardModel, opts: &Options, pairs: &Pairs, out: &mut [O
             continue;
         };
         let pt = |p: usize| model.pads[p].center.to_vec2();
-        let (ea, eb) = (diffpair::Ends { p: pt(pa), n: pt(na) }, diffpair::Ends { p: pt(pb), n: pt(nb) });
+        let long = |a: usize, b: usize| diffpair::pad_long(&model.pads[a]).max(diffpair::pad_long(&model.pads[b]));
+        let (ea, eb) = (diffpair::Ends { p: pt(pa), n: pt(na), long: long(pa, na) }, diffpair::Ends { p: pt(pb), n: pt(nb), long: long(pb, nb) });
         // Centred on the pad pairs first; the centre line as drawn when that breaks more rules.
         let score = |rz: &diffpair::Realised| {
             let (a, x) = diffpair::viol_count(&ctx, &idx, &rz.p_items, None);
