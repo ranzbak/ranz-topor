@@ -365,6 +365,25 @@ def resolve_rules(port: BoardPort, pcb_copy: Path, copy_text: str) -> dict:
                                                 net_codes=codes)
 
 
+def attach_diff_pairs(model: dict, rules: dict, pcb_copy: Path, pro: dict, cfg: Config, netclass_of: dict) -> tuple:
+    """D7: the board's differential pairs (``toporlib.diffpair``: KiCad's ``MatchDpSuffix`` plus ``[diffpair] pairs``)
+    with their width, gap, via gap and rule limits, put into ``model["rules"]["diff_pairs"]`` for the engine.
+    Returns (model, report lines). O(N x L + P x R)."""
+    from toporlib import diffpair  # noqa: PLC0415
+
+    dru_p = pcb_copy.with_suffix(".kicad_dru")
+    dru = dru_p.read_text() if dru_p.is_file() else None
+    codes = {n["name"]: int(n["code"]) for n in model.get("nets", []) if n.get("name") and int(n.get("code") or 0)}
+    settings = {k: cfg.get("diffpair", k) for k in ("detect", "width_source", "gap_mm", "via_gap_mm",
+                                                       "gap_tolerance_mm", "max_uncoupled_mm", "skew_max_mm", "pairs")}
+    mr = model.get("rules") or rules
+    pairs, notes = diffpair.resolve_pairs(codes, pro=pro, dru_text=dru, netclass_of=netclass_of, rules=mr,
+                                          settings=settings)
+    if not pairs and not mr.get("diff_pairs"):
+        return model, notes  # no pair: the model stays as read
+    return {**model, "rules": {**mr, "diff_pairs": pairs}}, notes
+
+
 def _variant(src_pcb: Path, text: str, out_dir: Path) -> Path:
     """`text` as `out_dir/<name>.kicad_pcb` next to copies of the project files (so kicad-cli DRC applies the
     copied .kicad_pro / .kicad_dru)."""
@@ -594,6 +613,10 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         # reported info is the one of the engine's input.
         mr, out.via_fallback = apply_via_fallback(model["rules"], cfg)
         model = {**model, "rules": mr}
+    model, dp_notes = attach_diff_pairs(model, rules, pcb_copy, pro, cfg, port.netclasses()[1])
+    for line in dp_notes:
+        log.line(line)
+    report.facts["diff_pairs"] = dp_notes
     out.model = model
     log.line(f"model: {len(model.get('pads', []))} pads, {len(model.get('kept', []))} tracks, "
              f"{len(model.get('vias', []))} vias, {len(model.get('nets', []))} nets")

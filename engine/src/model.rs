@@ -381,6 +381,45 @@ pub struct Rules {
     /// factor) and reports it as a warning.
     #[serde(default)]
     pub ignored_checks: Vec<String>,
+    /// D7: the board's differential pairs with their resolved dimensions (the plugin's
+    /// `toporlib.diffpair`, KiCad's `MatchDpSuffix` on the full net name; one definition). Empty:
+    /// no pairs (an older model, or `[diffpair] detect = "off"`).
+    #[serde(default)]
+    pub diff_pairs: Vec<DiffPairRule>,
+}
+
+/// One differential pair (D7) as the plugin resolved it (nm; 0 = not set). KiCad sources:
+/// width = netclass `diff_pair_width`, gap = netclass `diff_pair_gap` or a custom rule
+/// `diff_pair_gap (opt)`, both floored by the board minimums; via gap =
+/// `EffectiveDiffPairViaGap`; `gap_min` / `gap_max`, `max_uncoupled`, `max_skew` only from custom
+/// rules (KiCad raises no pair violation without them).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct DiffPairRule {
+    /// Net code of the positive (`+` / `P`) and negative half.
+    pub p: i32,
+    pub n: i32,
+    pub p_name: String,
+    pub n_name: String,
+    pub netclass: String,
+    /// Track width of each half and the edge-to-edge gap between them.
+    pub width: i64,
+    pub gap: i64,
+    /// Edge-to-edge gap of a via pair; the via size of the pair (the P net's class via).
+    pub via_gap: i64,
+    pub via_d: i64,
+    pub via_drill: i64,
+    pub gap_min: i64,
+    pub gap_max: i64,
+    /// "Coupled" band around the gap (KiCad `RANGED_NUM(gap, 10000, 10000)`).
+    pub tolerance: i64,
+    pub max_uncoupled: i64,
+    pub max_skew: i64,
+    /// Names of the custom rules behind `gap_min`/`gap_max`, `max_uncoupled`, `max_skew`
+    /// (KiCad's violation texts quote them).
+    pub rule_gap: String,
+    pub rule_uncoupled: String,
+    pub rule_skew: String,
 }
 
 /// A courtyard-bound custom clearance rule.
@@ -438,6 +477,7 @@ impl Default for Rules {
             warnings: Vec::new(),
             clearance_regions: Vec::new(),
             ignored_checks: Vec::new(),
+            diff_pairs: Vec::new(),
         }
     }
 }
@@ -1224,6 +1264,17 @@ pub struct Options {
     /// connections of one net then share a pad exit instead of each needing its own. Off = M3
     /// (pad to pad only).
     pub steiner: bool,
+    /// D7 (`topor.toml [diffpair] enabled`): route the pairs of `rules.diff_pairs` as coupled
+    /// pairs (true, default); false leaves their connections unrouted with the reason
+    /// "diff pair: not in the rough version" (the behaviour before D7).
+    pub diffpair_route: bool,
+    /// D7 (`[diffpair] zip_max_mm`): how far from a pad (or via) along the pair's centre line the
+    /// two halves may stay apart before they zip at the pair gap (the fan-out zone, TopoR's movable
+    /// split; the drawing tries the nearest legal zip point first). nm.
+    pub diffpair_zip_max_nm: i64,
+    /// D7 (`[diffpair] via_pair_axes`): allowed directions (degrees) of the line through the two
+    /// vias of a via pair.
+    pub diffpair_via_axes: Vec<f64>,
 }
 
 impl Default for Options {
@@ -1332,6 +1383,9 @@ impl Default for Options {
             reserve_via_sites: true,
             pad_bridge_max_nm: 2_000_000,
             steiner: true,
+            diffpair_route: true,
+            diffpair_zip_max_nm: 3_000_000,
+            diffpair_via_axes: vec![0.0, 45.0, 90.0, 135.0],
         }
     }
 }
