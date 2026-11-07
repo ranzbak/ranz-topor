@@ -673,7 +673,7 @@ type Hints = Vec<(usize, usize, f64)>;
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Probe {
     pub ok: bool,
-    /// Why a route of this board would fail every connection (one line, places included).
+    /// Why a route of this board would fail every connection (the places are in `places`).
     pub error: Option<String>,
     /// The copper where the projection failed, in words (KiCad frame, mm): the constraint the
     /// triangulation failed on, then the nearest other copper.
@@ -705,7 +705,7 @@ pub fn probe(model: &BoardModel, opts: &Options) -> Probe {
                 out.obstacles = b.proj.obstacles.len();
             }
             Err(f) => {
-                out.error = Some(format!("projection failed: {}", f.text()));
+                out.error = Some(format!("projection failed: {}", f.error));
                 out.places = f.places;
             }
         }
