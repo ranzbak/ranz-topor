@@ -82,6 +82,12 @@ WORDING: dict[str, dict[str, str]] = {
         "timeout_label": "Time limit",
         "timeout_unit": "s",
         "timeout_hint": "0 = no limit",
+        "timeout_clock_label": "Count",
+        "timeout_clock_wall": "Wall time (what you wait)",
+        "timeout_clock_cpu": "CPU time (all threads)",
+        "timeout_clock_tip": "Wall: seconds on the clock. CPU: CPU seconds of router work summed over all threads; "
+                             "comparable across machine load and thread count, so a 4-thread run uses it up about "
+                             "4 times as fast. Set in topor.toml as [run] timeout_clock.",
         "threads_label": "Threads",
         "threads_hint": "0 = all cores but one",
         "save_toml": "Save these options to topor.toml",
@@ -108,8 +114,9 @@ WORDING: dict[str, dict[str, str]] = {
         "routed_pending": "– / {total}",
         "vias_label": "Vias",
         "elapsed_label": "Router time",
-        "elapsed_value": "{elapsed} / {limit}",
-        "elapsed_nolimit": "{elapsed} / no limit",
+        "elapsed_value": "{elapsed} / {limit} · CPU {cpu}",
+        "elapsed_cpu_value": "{elapsed} · CPU {cpu} / {limit}",
+        "elapsed_nolimit": "{elapsed} · CPU {cpu} / no limit",
         "total_label": "Total time",
         "cancel_hint": "Cancel keeps the best result so far. Once the routes are stable the button reads OK: the "
                        "same action, and the best result shown is exactly the board you get; waiting longer may "
@@ -162,6 +169,7 @@ WORDING: dict[str, dict[str, str]] = {
         "done_refilled": "Zones were refilled by topor — a second undo step: the first Edit → Undo reverts the refill, "
                          "the next one the routes.",
         "done_post_commit": "{message} {fix}",
+        "done_times": "Router time {router}, CPU time {cpu} (all threads).",
         "report_dir_label": "Report folder",
         "report_dir": "{report_dir}",
         "open_report_folder": "Open report folder",
@@ -422,7 +430,7 @@ class PreflightDialog(_Base):
     _wk = "preflight"
     #: tab order from the note §2 (one Accept checkbox, relabelled per selected code)
     TAB_ORDER = ("findings", "cause", "accept", "scope_whole", "scope_between",
-                 "scope_touching", "existing", "respect_locked", "partial_routes", "timeout", "threads",
+                 "scope_touching", "existing", "respect_locked", "partial_routes", "timeout", "timeout_clock", "threads",
                  "save_toml", "help", "cancel", "route")
 
     def __init__(self, findings: list, summary: RunSummary, cfg: Config):
@@ -506,7 +514,8 @@ class PreflightDialog(_Base):
         self._show_finding(0 if self.findings else None)
         self.A11Y = {"findings": W["findings_heading"].format(errors=self.n_err, warnings=n_warn, notes=n_info),
                      "cause": f"{W['cause_label']} / {W['fix_label']}", "existing": W["existing_label"],
-                     "timeout": W["timeout_label"], "threads": W["threads_label"]}
+                     "timeout": W["timeout_label"], "timeout_clock": W["timeout_clock_label"],
+                     "threads": W["threads_label"]}
         self.finish((640, 560), (760, 780))
         self.list.SetFocus()
 
@@ -570,7 +579,13 @@ class PreflightDialog(_Base):
         tr = wx.BoxSizer(wx.HORIZONTAL)
         tr.Add(self.timeout, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.row)
         tr.Add(self.text(self, "preflight", "timeout_unit"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.group)
-        tr.Add(self.text(self, "preflight", "timeout_hint"), 0, wx.ALIGN_CENTER_VERTICAL)
+        tr.Add(self.text(self, "preflight", "timeout_hint"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.group)
+        self._clock_keys = ("wall", "cpu")
+        self.timeout_clock = wx.Choice(self, name="timeout_clock", choices=[
+            W["timeout_clock_wall"], W["timeout_clock_cpu"]])
+        self.timeout_clock.SetSelection(self._clock_keys.index(cfg.get("run", "timeout_clock")))
+        self.timeout_clock.SetToolTip(W["timeout_clock_tip"])
+        tr.Add(self.timeout_clock, 0, wx.ALIGN_CENTER_VERTICAL)
         grid.Add(self.text(self, "preflight", "timeout_label"), 0, wx.ALIGN_CENTER_VERTICAL)
         grid.Add(tr)
         self.threads = wx.SpinCtrl(self, name="threads", min=0, max=256, initial=int(cfg.get("run", "threads")))
@@ -669,6 +684,7 @@ class PreflightDialog(_Base):
         put("respect_locked", self.respect_locked.GetValue())
         put("partial_routes", self.partial_routes.GetValue())
         put("timeout_s", float(self.timeout.GetValue()))
+        put("timeout_clock", self._clock_keys[self.timeout_clock.GetSelection()])
         put("threads", int(self.threads.GetValue()))
         return Decision(True, accepted, ov, self.save_toml.GetValue())
 
@@ -678,10 +694,12 @@ class ProgressDialog(_Base):
     _wk = "progress"
     TAB_ORDER = ("cancel",)
 
-    def __init__(self, board: str, timeout_s: float = 0.0, iteration_cap: int | None = None, stable_window: int = 4):
+    def __init__(self, board: str, timeout_s: float = 0.0, iteration_cap: int | None = None, stable_window: int = 4,
+                 timeout_clock: str = "wall"):
         super().__init__(WORDING["progress"]["title"].format(board=board))
         self.board = board
         self.timeout_s = float(timeout_s or 0)
+        self.timeout_clock = timeout_clock
         self.iteration_cap = iteration_cap
         self._round, self._round_from_engine = (0, iteration_cap), False
         self.cancelled = False
@@ -701,7 +719,7 @@ class ProgressDialog(_Base):
         self.iteration_value = self._num("iteration_value", 110)
         self.routed_value = self._num("routed_value", 90)
         self.vias_value = self._num("vias_value", 110)
-        self.elapsed_value = self._num("elapsed_value", 140)
+        self.elapsed_value = self._num("elapsed_value", 250)
         self.total_value = self._num("total_value", 140)
         self.gain_value = self._num("gain_now", 140)
         self.runs_value = self._num("runs_now", 110)
@@ -816,8 +834,13 @@ class ProgressDialog(_Base):
             self.routed_value.SetLabel(W["routed_value"].format(routed=p.routed, total=p.total))
         self.vias_value.SetLabel(str(p.vias))
         el = _fmt_time(p.elapsed_s)
-        self.elapsed_value.SetLabel(W["elapsed_value"].format(elapsed=el, limit=_fmt_time(self.timeout_s))
-                                    if self.timeout_s > 0 else W["elapsed_nolimit"].format(elapsed=el))
+        cpu = _fmt_time(getattr(p, "cpu_s", 0.0))
+        if self.timeout_s <= 0:
+            txt = W["elapsed_nolimit"].format(elapsed=el, cpu=cpu)
+        else:
+            key = "elapsed_cpu_value" if self.timeout_clock == "cpu" else "elapsed_value"
+            txt = W[key].format(elapsed=el, cpu=cpu, limit=_fmt_time(self.timeout_s))
+        self.elapsed_value.SetLabel(txt)
         self.total_value.SetLabel(_fmt_time(max(getattr(p, "wall_s", 0.0), p.elapsed_s)))
 
 
@@ -1002,6 +1025,10 @@ class DoneDialog(_Base):
         icon.SetToolTip("Information")
         body = wx.BoxSizer(wx.VERTICAL)
         body.Add(self.text(self, "report", name, text=msg, wrap_dip=420), 0, wx.BOTTOM, self.group)
+        facts0 = getattr(report, "facts", None) or {}
+        if facts0.get("router_cpu_s") is not None and facts0.get("elapsed_s") is not None:
+            body.Add(self.text(self, "report", "done_times", wrap_dip=420, text=W["done_times"].format(
+                router=_fmt_time(facts0["elapsed_s"]), cpu=_fmt_time(facts0["router_cpu_s"]))), 0, wx.BOTTOM, self.group)
         if outcome == "accepted":
             facts = getattr(report, "facts", None) or {}
             if "zones_refilled" in facts:  # ruling C28
@@ -1136,6 +1163,7 @@ class WxUi:
         self._progress: ProgressDialog | None = None
         self._cancelled = False
         self._timeout_s = float(Config.defaults().get("run", "timeout_s"))
+        self._timeout_clock = str(Config.defaults().get("run", "timeout_clock"))
         self._iter_cap = int(Config.defaults().get("optimize", "rounds"))
         self._stable_window = int(Config.defaults().get("optimize", "stable_window"))
         self._last_progress: Progress | None = None
@@ -1191,6 +1219,7 @@ class WxUi:
             dlg.Destroy()
         if d.proceed:  # progress needs the effective limit / cap
             self._timeout_s = float(d.overrides.get("timeout_s", cfg.get("run", "timeout_s")))
+            self._timeout_clock = str(d.overrides.get("timeout_clock", cfg.get("run", "timeout_clock")))
         self._iter_cap = int(cfg.get("optimize", "rounds"))  # the topological core's whole-route rounds
         self._stable_window = int(cfg.get("optimize", "stable_window"))
         return d
@@ -1198,7 +1227,8 @@ class WxUi:
     def progress(self, p: Progress) -> bool:
         self._last_progress = p
         if self._progress is None:
-            self._progress = ProgressDialog(self.ctx.board, self._timeout_s, self._iter_cap, self._stable_window)
+            self._progress = ProgressDialog(self.ctx.board, self._timeout_s, self._iter_cap, self._stable_window,
+                                           self._timeout_clock)
             self._present(self._progress)
         dlg = self._progress
         dlg.update(p)

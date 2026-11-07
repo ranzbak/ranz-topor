@@ -87,7 +87,7 @@ class RunSummary:
 @dataclass
 class Decision:
     """Pre-flight answer. ``overrides`` holds any of ``scope_mode, existing_copper, respect_locked,
-    partial_routes, timeout_s, threads`` (config key -> value); ``save_to_toml`` persists them."""
+    partial_routes, timeout_s, timeout_clock, threads`` (config key -> value); ``save_to_toml`` persists them."""
     proceed: bool
     accepted_codes: tuple = ()
     overrides: dict = field(default_factory=dict)
@@ -107,6 +107,7 @@ class Progress:
     round: int = 0  # engine: whole-route round now running, 0 = unknown
     rounds: int = 0  # engine: most rounds ([optimize] rounds)
     wall_s: float = 0.0  # plugin: wall time since the run started (KiCad DRC and preview included)
+    cpu_s: float = 0.0  # plugin: CPU seconds of the engine jobs so far, all threads summed (what timeout_clock = cpu limits)
     # M-B0 (iterations like TopoR): "Routes stable" (the gain of the best result over the last
     # [optimize] stable_window rounds is below stable_gain_pct in every run), that gain (None before a
     # full window), the best of N runs and the best result so far (what OK / Cancel keeps).

@@ -67,7 +67,7 @@ NO_BUDGET_S = 1.0e9  # timeout_s = 0: the DRC loop gets no budget cut; drc_loop_
 #: After the user's Cancel the engine gets this long to reach a stop check and end its thread; then the run ends
 #: with ENGINE_UNRESPONSIVE instead of polling for ever (gate review B-1, ruling C31). Internal, not a toml key.
 CANCEL_GRACE_S = 30
-_ROUTE_OVERRIDES = ("scope_mode", "existing_copper", "respect_locked", "partial_routes", "timeout_s", "threads")
+_ROUTE_OVERRIDES = ("scope_mode", "existing_copper", "respect_locked", "partial_routes", "timeout_s", "timeout_clock", "threads")
 
 
 class EngineUnresponsive(RuntimeError):
@@ -99,6 +99,7 @@ class RunOutcome:
     orig_drc: object = None  # DrcReport of the untouched copy
     rounds: int = 0
     router_s: float = 0.0
+    router_cpu_s: float = 0.0  # CPU seconds of this process during the engine jobs, all threads summed
     wall_s: float = 0.0
     work_dir: Path | None = None
     pcb_copy: Path | None = None
@@ -412,7 +413,7 @@ def _via_relax_notes(rr: dict) -> list:
 def _facts_result(status: str, out: RunOutcome, report: dict | None) -> dict:
     slim = {k: v for k, v in (report or {}).items() if k != "items"}
     return {"status": status, "routed": out.routed, "total": out.total, "stop_reason": out.stop_reason,
-            "cancelled": out.cancelled, "rounds": out.rounds, "router_s": round(out.router_s, 3),
+            "cancelled": out.cancelled, "rounds": out.rounds, "router_s": round(out.router_s, 3), "router_cpu_s": round(out.router_cpu_s, 3),
             "wall_s": round(out.wall_s, 3), "items": len(out.items), "ripped": len(out.ripped), "drc": out.drc,
             "findings": [asdict(f) for f in out.findings], "route": slim, "via_fallback": out.via_fallback,
             "pcb_copy": str(out.pcb_copy) if out.pcb_copy else None}
@@ -517,10 +518,12 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     findings = out.findings
     report_dir = out.report_dir
     state = {"cancel": False, "last": Progress(), "judged_key": None, "judged": None, "last_result": None,
-             "rounds": 0, "router_s": 0.0}  # router_s: router time of the finished jobs (progress dialog)
+             "rounds": 0, "router_s": 0.0, "router_cpu_s": 0.0,  # router time / CPU time of the engine jobs (progress dialog)
+             "limit_hit": None}  # "cpu": the CPU limit fired and the plugin cancelled the job
 
     def emit(phase: str) -> None:
-        q = replace(state["last"], phase=phase, elapsed_s=state["router_s"], wall_s=time.monotonic() - t0)
+        q = replace(state["last"], phase=phase, elapsed_s=state["router_s"], cpu_s=state["router_cpu_s"],
+                    wall_s=time.monotonic() - t0)
         if ui.progress(q) is False:
             state["cancel"] = True
 
@@ -675,7 +678,11 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         # (harness, MCP) stop at "Routes stable" + [optimize] stable_patience by themselves.
         opts["stop_when_stable"] = False
     budget = float(opts.get("wall_clock_s", 60.0))
-    no_budget = budget <= 0
+    # run.timeout_clock = "cpu": timeout_s counts CPU seconds of the engine jobs (time.process_time deltas, all
+    # threads summed); the plugin cancels the job when it is reached and the engine's own wall limit is off.
+    cpu_clock = cfg.get("run", "timeout_clock") == "cpu" and budget > 0
+    cpu_limit = budget if cpu_clock else 0.0
+    no_budget = budget <= 0 or cpu_clock
     geometry = cfg.get("output", "geometry")
     max_err = int(rules.get("max_error") or 5000)
     layer_names = {int(l["id"]): l["name"] for l in model.get("layers", [])}
@@ -683,7 +690,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     routed_dir = work / "routed"
 
     def route_fn(m, o):
-        if state["cancel"] and state["last_result"] is not None:
+        if (state["cancel"] or state["limit_hit"]) and state["last_result"] is not None:
             return state["last_result"]  # cancelled: no further rounds, the best result stays
         if no_budget:
             o = {**o, "wall_clock_s": 0.0}
@@ -698,6 +705,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
             log.line(f"engine input written to {d}/model-{n}.json, options-{n}.json (TOPOR_DUMP_ENGINE_INPUT)")
         job = engine.route_async(mj, oj)
         job_t0, router_before = time.monotonic(), state["router_s"]
+        cpu_t0, cpu_before = time.process_time(), state["router_cpu_s"]
         last_poll, cancelled_at = -1e9, None
         while True:  # ends when the job is done (also after an engine panic: B-1) or CANCEL_GRACE_S after Cancel
             done = job.done()
@@ -710,9 +718,16 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                 p.elapsed_s = router_before + (now - job_t0)
                 p.wall_s = now - t0
                 state["router_s"] = p.elapsed_s
+                p.cpu_s = state["router_cpu_s"] = cpu_before + (time.process_time() - cpu_t0)
                 state["last"] = p
+                if cpu_clock and p.cpu_s >= cpu_limit and not state["limit_hit"] and not done:
+                    state["limit_hit"] = "cpu"
+                    log.line(f"CPU-time limit reached: {p.cpu_s:.1f} s of {cpu_limit:.0f} s (router wall {p.elapsed_s:.1f} s)")
                 if ui.progress(p) is False:
                     state["cancel"] = True
+                if state["limit_hit"] and cancelled_at is None:
+                    cancelled_at = now
+                    job.cancel()
                 if state["cancel"] and cancelled_at is None:
                     cancelled_at = now
                     job.cancel()
@@ -765,6 +780,16 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     out.items = [{**it, "group": it.get("group") or "topor"} for it in loop.items]
     out.routed, out.total = int(rr.get("routed", 0)), int(rr.get("connections_total", 0))
     out.stop_reason = rr.get("stop_reason")
+    out.router_cpu_s = state["router_cpu_s"]
+    if state["limit_hit"] == "cpu" and out.stop_reason != "stable":
+        # the plugin's own cancel: the engine says "cancel", the clock that fired is "cpu"
+        out.stop_reason = "timeout_cpu"
+        rr = {**rr, "stop_reason": "timeout_cpu", "timed_out": True, "warnings": list(rr.get("warnings") or []) + [
+            f"time budget hit: CPU-time limit of {cpu_limit:.0f} s reached ({out.router_cpu_s:.0f} CPU s of router "
+            f"work, {out.router_s:.0f} s on the clock, run.timeout_clock = cpu): result may differ between runs"]}
+    elif out.stop_reason == "timeout":
+        out.stop_reason = "timeout_wall"
+        rr = {**rr, "stop_reason": "timeout_wall"}
     # M-B0: OK after "Routes stable" is not a cancel (stop_reason "stable"): the user took the stable result.
     out.cancelled = bool((state["cancel"] and not state.get("ok_stable")) or out.stop_reason == "cancel")
     out.rounds, out.router_s = loop.rounds, loop.router_s
@@ -786,11 +811,11 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                   "accepted_codes": list(decision.accepted_codes),
                   "fallbacks": [via_fallback_text(out.via_fallback)] if out.via_fallback else []}
     build_report({**rr, "items": out.items}, classified, cfg, findings, scope_info, before_stats,
-                 {"router_s": out.router_s, "drc_rounds": loop.rounds}, report=report,
+                 {"router_s": out.router_s, "router_cpu_s": out.router_cpu_s, "drc_rounds": loop.rounds}, report=report,
                  facts={"layers": report.facts.get("layers"), "versions": report.facts.get("versions"),
                         "notes": [f"geometry: {geometry}", f"DRC rounds: {loop.rounds}"] + _ripup_notes(rr) + _via_relax_notes(rr) + (
                             ["time budget exhausted"] if loop.budget_exhausted else [])})
-    log.line(f"routed {out.routed}/{out.total}, stop {out.stop_reason}, rounds {loop.rounds}, "
+    log.line(f"routed {out.routed}/{out.total}, stop {out.stop_reason}, router {out.router_s:.1f} s, CPU {out.router_cpu_s:.1f} s, rounds {loop.rounds}, "
              f"routing_new {classified['routing_new']}, unconnected_new {inc['unconnected_new']}")
     drc_src = routed_dir / "drc-routed.json"
     if not out.items:  # nothing to show or apply (cancelled early, or the router discarded everything)

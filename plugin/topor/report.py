@@ -102,7 +102,8 @@ class RunReport:
             lines.append(f"Detours vs ghost line {f['detour_ghost_line']}")
         lines += [
             f"Stopped: {_na(f.get('stop_reason'))} after {_na(f.get('iterations'))} iterations, "
-            f"{_na(f.get('elapsed_s'))} s, {_na(f.get('threads'))} threads",
+            f"{_na(f.get('elapsed_s'))} s, {_na(f.get('threads'))} threads"
+            + (f", CPU {_na(f.get('router_cpu_s'))} s" if f.get("router_cpu_s") is not None else ""),
             f"Scope {f.get('scope', 'whole board')} · existing copper {_na(f.get('existing_copper'))} · "
             f"locked {_na(f.get('respect_locked'))}",
             f"Settings: {_na(f.get('non_default'))} non-default, {_na(f.get('defaults_used'))} built-in defaults",
@@ -111,8 +112,8 @@ class RunReport:
                 f"{x.code} ({len(x.items)})" if x.items else x.code for x in fnd
                 if x.code in POSTRUN_CODES and x.severity != "info"]) else []),
             f"Outcome: {outcome_text(self.status, self.error_code)}" + self._refill_note(),
-            *(["Warning: time budget hit: result may differ between runs (run.timeout_s stopped the topological core "
-               "before its [optimize] work caps)"] if f.get("time_budget_hit") else []),
+            *(["Warning: time budget hit: result may differ between runs (run.timeout_s, clock "
+               f"{f.get('timeout_clock') or 'wall'}, stopped the topological core before its [optimize] work caps)"] if f.get("time_budget_hit") else []),
             f"Report: {self.dir}",
         ]
         return lines[:SUMMARY_MAX_LINES]
@@ -389,6 +390,8 @@ def build_report(result: dict, drc: dict | None, cfg, findings, scope, before_st
         "detour_ghost_line": detour_line(ghost_stats) if stats is not ghost_stats else None,
         "stop_reason": result.get("stop_reason"), "iterations": result.get("iterations"),
         "elapsed_s": None if el is None else round(el, 1), "threads": result.get("threads_used"),
+        "router_cpu_s": None if timing.get("router_cpu_s") is None else round(timing["router_cpu_s"], 1),
+        "timeout_clock": str(cfg.get("run", "timeout_clock")) if cfg is not None else None,
         "scope": scope.get("mode"),
         "connection_rows": rows, "net_rows": net_rows,
         "partial_routes": [r["net"] for r in rows if r["status"] == "partial"],

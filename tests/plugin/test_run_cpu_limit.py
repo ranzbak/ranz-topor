@@ -1,0 +1,88 @@
+"""run.timeout_clock: the CPU-time limit (plugin-side cancel), the unchanged wall limit, router_cpu_s reported.
+
+Real engine for the routed result (like test_run_flow.py), wrapped in a job double that stays "running" for a few
+polls; ``time.process_time`` is replaced by a counter (+1 CPU second per call) so the test needs no real load.
+"""
+import json
+import time
+
+import pytest
+
+pytest.importorskip("wx")
+pytest.importorskip("topor_engine")
+
+from test_run_flow import (CFG, ProxyEngine, app, do_run, eprom, reports, _report_root)  # noqa: E402,F401
+from topor.fake import ScriptedUi  # noqa: E402
+
+
+def _as(stop_reason, **extra):
+    def patch(out_json):
+        d = json.loads(out_json)
+        d.update(stop_reason=stop_reason, **extra)
+        return json.dumps(d)
+    return patch
+
+
+class RecordingEngine(ProxyEngine):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.options = []
+
+    def route_async(self, m, o):
+        self.options.append(json.loads(o))
+        return super().route_async(m, o)
+
+
+@pytest.fixture
+def cpu_counter(monkeypatch):
+    n = {"t": 0.0}
+
+    def fake():
+        n["t"] += 1.0
+        return n["t"]
+
+    monkeypatch.setattr(time, "process_time", fake)
+    return n
+
+
+def _result_json(out):
+    return json.loads((out.report_dir / "result.json").read_text())
+
+
+def test_cpu_clock_cancels_the_job_and_keeps_the_best(app, eprom, tmp_path, reports, cpu_counter):
+    cfg = CFG.with_values({("run", "timeout_clock"): "cpu", ("run", "timeout_s"): 3.0})
+    eng = RecordingEngine(hold=12, patch=_as("cancel", timed_out=True))
+    ui = ScriptedUi(accept=False)
+    _, _, out = do_run(eprom, tmp_path, ui=ui, cfg=cfg, engine=eng)
+    assert eng.jobs[0].cancelled  # the plugin cancelled the job when the CPU limit was reached
+    assert eng.options[0]["wall_clock_s"] == 0.0  # the engine's own wall limit is off in cpu mode
+    assert out.stop_reason == "timeout_cpu" and out.cancelled is False
+    assert out.items, "the best result so far is kept"
+    assert out.router_cpu_s >= 3.0
+    f = {x.code: x for x in out.findings}
+    assert "TIME_BUDGET_HIT" in f and "CPU-time limit" in f["TIME_BUDGET_HIT"].message
+    assert any("timeout_cpu" in line for line in out.report.summary_lines())
+    res = _result_json(out)
+    assert res["router_cpu_s"] == pytest.approx(out.router_cpu_s, abs=0.01) and res["stop_reason"] == "timeout_cpu"
+    assert "CPU" in " ".join(out.report.summary_lines())
+
+
+def test_cpu_clock_below_the_limit_does_not_fire(app, eprom, tmp_path, reports, cpu_counter):
+    cfg = CFG.with_values({("run", "timeout_clock"): "cpu", ("run", "timeout_s"): 1.0e6})
+    eng = RecordingEngine(hold=3)
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=cfg, engine=eng)
+    assert not eng.jobs[0].cancelled
+    assert out.stop_reason != "timeout_cpu" and out.router_cpu_s > 0
+    assert "TIME_BUDGET_HIT" not in {x.code for x in out.findings}
+
+
+def test_wall_clock_is_unchanged_and_cpu_time_is_still_reported(app, eprom, tmp_path, reports, cpu_counter):
+    cfg = CFG.with_values({("run", "timeout_s"): 60.0})  # timeout_clock stays "wall"
+    eng = RecordingEngine(hold=6, patch=_as("timeout", timed_out=True,
+                                             warnings=["time budget hit: result may differ between runs"]))
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=cfg, engine=eng)
+    assert not eng.jobs[0].cancelled  # the plugin never cancels on the wall clock: the engine's deadline does
+    assert eng.options[0]["wall_clock_s"] == 60.0
+    assert out.stop_reason == "timeout_wall"
+    assert "TIME_BUDGET_HIT" in {x.code for x in out.findings}
+    assert out.router_cpu_s >= 5.0 and _result_json(out)["router_cpu_s"] >= 5.0

@@ -153,6 +153,7 @@ Tick **Save these options to topor.toml** to keep them (only these `[run]` keys 
 | Respect locked tracks and vias | on: locked copper is never ripped | `[run] respect_locked` |
 | Keep partial routes | on: connections that cannot finish are drawn up to the blocking point (group `topor-partial`) | `[run] partial_routes` |
 | Time limit | seconds of router time, default 600 (an emergency stop: the topological core ends at *Routes stable* or your OK); `0` = no limit; KiCad's DRC, the refill and the preview export are not counted | `[run] timeout_s` |
+| Time limit clock | *wall* (default, seconds on the clock: what you wait) or *cpu* (CPU seconds of router work summed over all threads; comparable across machine load and thread count) | `[run] timeout_clock` |
 | Threads | `0` = all cores but one | `[run] threads` |
 
 *Existing copper* decides what happens to tracks and vias that are already on the board:
@@ -193,7 +194,7 @@ of the board*, *topological search*, *layer assignment, rip-up and reroute*, *dr
 fuse*, *pour stitching*), then *Verifying with KiCad DRC* and *Rendering the preview*. Below it: **Round** — the
 whole-route round (cycle) now running; **Gain** — how much the best result improved over the last
 `[optimize] stable_window` rounds; **Runs** — how many of the `[optimize] runs` seeded runs are stable; routed/total;
-vias; **Router time** against the time limit; **Total time** since you pressed Route (KiCad's DRC and the preview
+vias; **Router time** and, next to it, the **CPU time** the run has used so far (all threads summed), against the time limit (on the clock you chose); **Total time** since you pressed Route (KiCad's DRC and the preview
 included); and **Best so far** — routed, length and vias of the best result over all runs, which is what OK or Cancel
 keeps.
 
@@ -227,6 +228,17 @@ time for a smaller gain; *Routes stable* and OK let you stop as soon as the resu
 stable the result is the best so far, may differ between runs, and the findings say so
 ([`TIME_BUDGET_HIT`](troubleshoot.md#time_budget_hit)). Runs on large boards (dcsgonebadge, qmtech with the default
 best of 5 runs) may hit it and keep the best result so far. `0` = no limit.
+
+**Wall or CPU time.** `[run] timeout_clock` (also a choice next to the limit in the pre-flight dialog) says what
+`timeout_s` counts. `wall` (the default) is seconds on the clock, what you wait for. `cpu` is CPU seconds of router
+work summed over all threads of the run (`time.process_time` over the engine jobs): a 4-thread run uses it up about 4
+times as fast, so the limit means the same amount of work on a busy machine as on an idle one and with any thread
+count, and more threads do not buy a better result. Use `cpu` to compare settings or versions (the benchmark runner
+`harness/score_runs.py` uses `cpu` with 2400 s, the old 600 s wall x 4 threads). One caveat: on a laptop with two
+hardware threads per core and turbo clocks, a CPU-second under heavy load still does somewhat less work than on an
+idle machine. When the limit fires, the best result so far is kept either way and the summary says which clock:
+*Stopped: timeout_wall* or *Stopped: timeout_cpu*. The progress dialog, the report summary (*CPU ... s*), `result.json`
+(`router_cpu_s`) and the finished dialog show the CPU time in both modes.
 
 **Cancel** (or Esc / Enter; **OK** after *Routes stable*) works at any time: the label changes to *Cancelling —
 keeping the best result so far…* (after *Routes stable*: *Finishing — keeping the stable result…*); while routing, the best result found so far goes on to KiCad DRC and the preview; if nothing was routed yet

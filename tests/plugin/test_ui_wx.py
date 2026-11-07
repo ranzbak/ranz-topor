@@ -93,7 +93,7 @@ def test_wx_ui_dialogs_construct_headless(app, tmp_path):
     expected_tab = {
         "first_run": ["toml_path", "open_file", "continue"],
         "preflight": ["findings", "cause", "accept", "scope_whole", "scope_between",
-                      "scope_touching", "existing", "respect_locked", "partial_routes", "timeout", "threads",
+                      "scope_touching", "existing", "respect_locked", "partial_routes", "timeout", "timeout_clock", "threads",
                       "save_toml", "help", "cancel", "route"],
         "progress": ["cancel"],
         "preview": ["zoom", "image", "summary", "report_dir", "open_report_folder", "reject", "accept"],
@@ -203,7 +203,7 @@ def test_progress_returns_false_after_cancel(app):
     ui = _QuietUi()
     assert ui.progress(Progress("route", 3, 12, 27, 4, 12.0)) is True
     dlg = ui._progress
-    assert dlg.routed_value.GetLabel() == "12 / 27" and dlg.elapsed_value.GetLabel() == "0:12 / 30:00"
+    assert dlg.routed_value.GetLabel() == "12 / 27" and dlg.elapsed_value.GetLabel() == "0:12 / 30:00 · CPU 0:00"
     assert dlg.iteration_value.GetLabel() == "3 of up to 30"  # no round from the engine: [optimize] rounds as cap
     assert dlg.gauge.GetValue() == 12
     evt = wx.CommandEvent(wx.wxEVT_BUTTON, wx.ID_CANCEL)
@@ -225,7 +225,7 @@ def test_progress_phase_pending_and_nolimit(app):
     d = ui._progress
     assert d.phase.GetLabel() == "Preparing geometry"
     assert d.routed_value.GetLabel() == "– / 27"
-    assert d.elapsed_value.GetLabel() == "0:01 / no limit"
+    assert d.elapsed_value.GetLabel() == "0:01 · CPU 0:00 / no limit"
     ui.progress(Progress("weird", 1, 1, 27, 0, 2.0))
     assert d.phase.GetLabel() == "weird"
     ui._close_progress()
@@ -404,7 +404,7 @@ def test_progress_names_the_engine_stage_round_and_times(app):
         dlg.update(Progress("route", 2, 120, 426, 30, 75.0, "drawing the traces", 2, 4, 90.0))
         assert dlg.phase.GetLabel() == "Routing — drawing the traces"
         assert dlg.iteration_value.GetLabel() == "2"  # M-B0: [optimize] rounds is only a safety cap
-        assert dlg.elapsed_value.GetLabel() == "1:15 / 10:00" and dlg.total_value.GetLabel() == "1:30"
+        assert dlg.elapsed_value.GetLabel() == "1:15 / 10:00 · CPU 0:00" and dlg.total_value.GetLabel() == "1:30"
         dlg.update(Progress("drc", 4, 346, 426, 187, 150.0, "", 0, 0, 170.0))
         assert dlg.phase.GetLabel() == ui_wx.WORDING["progress"]["phase_drc"]
         assert dlg.iteration_value.GetLabel() == "2"
@@ -441,3 +441,18 @@ def test_progress_routes_stable_turns_cancel_into_ok(app):
     assert dlg.phase.GetLabel() == W["phase_finishing"]
     assert ui.progress(q) is False
     ui._close_progress()
+
+
+def test_progress_shows_cpu_time_next_to_router_time(app):
+    """Router time and the CPU time of the run (all threads) side by side; the limit sits on the clock it counts."""
+    wall = ui_wx.ProgressDialog("qmtech", 600.0, 4)
+    cpu = ui_wx.ProgressDialog("qmtech", 2400.0, 4, timeout_clock="cpu")
+    try:
+        p = Progress("route", 2, 120, 426, 30, 130.0, "", 2, 4, 150.0, cpu_s=465.0)
+        wall.update(p)
+        cpu.update(p)
+        assert wall.elapsed_value.GetLabel() == "2:10 / 10:00 · CPU 7:45"
+        assert cpu.elapsed_value.GetLabel() == "2:10 · CPU 7:45 / 40:00"
+    finally:
+        wall.Destroy()
+        cpu.Destroy()

@@ -483,8 +483,9 @@ title/label/button/checkbox/choice/heading/text).
 | progress | routed_pending | text | – / {total} |
 | progress | vias_label | label | Vias |
 | progress | elapsed_label | label | Router time |
-| progress | elapsed_value | text | {elapsed} / {limit} |
-| progress | elapsed_nolimit | text | {elapsed} / no limit |
+| progress | elapsed_value | text | {elapsed} / {limit} · CPU {cpu} |
+| progress | elapsed_cpu_value | text | {elapsed} · CPU {cpu} / {limit} |
+| progress | elapsed_nolimit | text | {elapsed} · CPU {cpu} / no limit |
 | progress | total_label | label | Total time |
 | progress | cancel_hint | label | Cancel keeps the best result so far. Once the routes are stable the button reads OK: the same action, and the best result shown is exactly the board you get; waiting longer may still find small gains. The time limit counts router time only and is an emergency stop; KiCad's DRC and the preview come on top. |
 | progress | cancel | button | Cancel |
