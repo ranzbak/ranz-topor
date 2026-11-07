@@ -786,7 +786,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         out.stop_reason = "timeout_cpu"
         rr = {**rr, "stop_reason": "timeout_cpu", "timed_out": True, "warnings": list(rr.get("warnings") or []) + [
             f"time budget hit: CPU-time limit of {cpu_limit:.0f} s reached ({out.router_cpu_s:.0f} CPU s of router "
-            f"work, {out.router_s:.0f} s on the clock, run.timeout_clock = cpu): result may differ between runs"]}
+            f"work, {state['router_s']:.0f} s on the clock, run.timeout_clock = cpu): result may differ between runs"]}
     elif out.stop_reason == "timeout":
         out.stop_reason = "timeout_wall"
         rr = {**rr, "stop_reason": "timeout_wall"}
