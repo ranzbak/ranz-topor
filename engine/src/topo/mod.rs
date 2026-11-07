@@ -29,4 +29,5 @@ pub mod state;
 pub mod stitch;
 pub mod stats;
 pub mod tree;
+pub mod xrules;
 pub mod witness;

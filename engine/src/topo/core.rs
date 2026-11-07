@@ -371,6 +371,8 @@ impl Run {
         self.first.get_or_insert(routed);
         // An interrupted cycle is offered only when nothing else is there: what OK returns is the
         // best of the cycles that finished.
+        // Errors of the best result before this cycle (for the soft cuts below).
+        let best_before = self.arch.pick(&obj).map(|i| self.arch.items[i].crit.errors);
         if !interrupted || self.arch.items.is_empty() {
             // Pour stitching (D4) on each variant before it is judged: a pour piece the copper cut
             // off that no stitch joins back is an open connection in KiCad's DRC, so it counts as an
@@ -394,6 +396,20 @@ impl Run {
         }
         let pick = self.arch.pick(&obj).expect("a cycle was offered");
         let pc = self.arch.items[pick].crit;
+        // Soft cuts (M-B2, Haas 2026 §VI-E: "every hard cut so far becomes a soft cost"): a cycle
+        // worse than the best so far turns the lowered rooms into a price on their passages (edge
+        // history, which fades like the rest), so they no longer forbid what the plan needs.
+        if opts.soft_cuts && !self.all.is_empty() && best_before.is_some_and(|b| cyc_err > b) {
+            let n = self.all.len();
+            for &(e, _) in self.all.keys() {
+                if self.mem.edge.len() <= e {
+                    self.mem.edge.resize(e + 1, 0.0);
+                }
+                self.mem.edge[e] += 1.0;
+            }
+            self.all.clear();
+            self.notes.push(format!("{cycle}: worse than the best ({cyc_err} > {} errors): {n} lowered rooms turned soft", best_before.unwrap_or(0)));
+        }
         let gained = self.meter.push(super::schedule::Score { incomplete: pc.errors, value: obj.value(&pc), scale: obj.base(&pc) });
         if gained {
             self.picked_at = cycle;
@@ -587,14 +603,39 @@ impl RoundOut {
 pub const TIME_HIT: &str = "time budget hit: result may differ between runs";
 
 /// What a whole route remembers for the next one (negotiated rip-up and reroute across repeats).
+/// Everything here fades by `[optimize] history_fade` per cycle (M-B2, Dr. CU §IV-C).
 #[derive(Clone, Debug, Default)]
 struct Memory {
-    /// Per edge: rounds in which it was over-full (the `congestion` history all wires pay).
+    /// Per edge: rounds in which it was over-full (the `congestion` history all wires pay), plus
+    /// the soft cuts (lowered rooms turned into a price, Haas 2026 §VI-E).
     edge: Vec<f64>,
-    /// Per connection id: the edges of the sleeve of its rejected drawing and how often, which
-    /// only that connection pays for (it is the one being ripped up and rerouted).
+    /// Per connection id: the edges of the stretch where its drawing broke a rule (or was
+    /// rejected), weighted by how near they are to the violation, which only that connection pays
+    /// for (it is the one being ripped up and rerouted). M-B2: the violating stretch only, not
+    /// the whole sleeve.
     own: BTreeMap<usize, BTreeMap<usize, f64>>,
+    /// Per connection id: its planned via count in the cycle before (Polubasov 2010: the wires
+    /// whose via count rose after the layer assignment are rerouted first).
+    vias: BTreeMap<usize, usize>,
 }
+
+/// Weight of a pass at distance `d` from a violation whose stretch has the radius `r` (nm):
+/// 1 on the stretch, falling smoothly with the distance (no cutoff; M-B2 local history).
+fn near_weight(d: f64, r: f64) -> f64 {
+    let x = d / r.max(1.0);
+    1.0 / (1.0 + x * x)
+}
+
+/// Distance from `p` to the segment `a`-`b`.
+fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
+    let ab = b - a;
+    let t = ((p - a).dot(ab) / ab.len2().max(1.0)).clamp(0.0, 1.0);
+    (a + ab * t - p).len()
+}
+
+/// Smallest local history a cycle keeps (a pass weighted below it, or faded below it, is
+/// forgotten: memory size, not a judgement on the copper).
+const HIST_EPS: f64 = 0.02;
 
 /// Lowered rooms `(edge, layer, room nm)` that a second round applies.
 type Hints = Vec<(usize, usize, f64)>;
@@ -895,8 +936,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // A path longer than `detour_factor` x the straight distance is a detour: search again with
         // cheaper crossings and layer fixings (P3 resolves a crossing with a via; a detour of many times the
         // connection's length is worse than that), the cheapest last.
+        // Present cost kept level with the history (BoxRouter 2.0, Cho et al. 2009, §4.2 eq. 4,
+        // p. 32:8-9: alpha = max history / present weight each round), so a passage over-full
+        // now never gets cheaper than one that was over-full before (M-B2).
+        let h_max = st.history.iter().copied().fold(0.0, f64::max);
         for (attempt, cross_scale) in [1.0, 0.25, 0.0].into_iter().enumerate() {
             let mut w = weights(rg, c, tier_of(conn_of[ci]), cap);
+            w.overflow_mm = w.overflow_mm.max(w.congestion_mm * h_max);
             w.cross_mm *= cross_scale;
             w.smd_over_mm *= cross_scale;
             w.forced_layer_mm *= cross_scale;
@@ -1028,7 +1074,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             Objective::LengthVias { mm_per_via } => len_mm + mm_per_via * lr.vias as f64,
             Objective::Area => area_mm + via_area_mm * lr.vias as f64,
         };
-        (own, cm.overfull(), lr.vias)
+        // Predicted violations: over-full edge-layers, vias without a site and (M-B2) crossings
+        // that cannot be layered (both stretches held to one layer: a short when drawn).
+        (own, cm.overfull() + lr.unlayerable.len(), lr.vias)
     };
     // Lexicographic: over-full edge-layers, then the objective.
     let p4_better = |a: &(f64, usize, usize), b: &(f64, usize, usize)| a.1 < b.1 || (a.1 == b.1 && a.0 < b.0 - 1e-6);
@@ -1036,11 +1084,106 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // (Measured: ripping the least moved wires first in the negotiated rip-up routed fewer
     // connections on dcsgonebadge and qmtech, so the rip order stays routed-last first.)
     let mut reroutes: Vec<u32> = vec![0; conns.len()];
+    // Wires taken out and routed again in this whole route (the `max_ripped` work cap).
+    let mut ripped_total = 0usize;
+    let plan_vias = |st: &State, lr: &layers::LayerReport| -> Vec<(WireId, usize)> {
+        (0..st.wires.len()).filter(|&w| st.wires[w].alive && w < lr.events.len()).map(|w| (w, plan(&lr.events[w], b.n_signal).vias.len())).collect()
+    };
+    // Wires whose planned via count rose against the cycle before (wire, conns index).
+    let via_rose: Vec<(WireId, usize)> = plan_vias(&st, &lr)
+        .into_iter()
+        .filter(|&(w, n)| mem.vias.get(&conn_of[wire_conn[w]]).is_some_and(|&n0| n > n0))
+        .map(|(w, _)| (w, wire_conn[w]))
+        .collect();
+    // ---- Crossing rules (M-B2, [`super::xrules`]): clinches at terminals, double crossings that
+    // enclose an obstacle and crossings that cannot be layered are re-planned locally: the pair
+    // is taken out and routed again in the rule's order (`Topo::try_joint`, kept when the pair's
+    // social-factor price drops); the whole pass is kept when the plan's score gets better.
+    let tree_wires: BTreeSet<WireId> = if tree_free { tree::junctions(&st).iter().flat_map(|j| [j.0, j.2]).collect() } else { BTreeSet::new() };
+    let mut xstats = [0usize; 4]; // found, tried, resolved, passes kept
+    let mut crossing_pass = |st: &mut State, wire_conn: &mut Vec<usize>, reroutes: &mut Vec<u32>, lr: &mut layers::LayerReport, ripped_total: &mut usize, stage: usize| {
+        if !opts.crossing_rules || expired() {
+            return;
+        }
+        let tree_now: BTreeSet<WireId> = if tree_free { tree::junctions(st).iter().flat_map(|j| [j.0, j.2]).chain(tree_wires.iter().copied()).collect() } else { BTreeSet::new() };
+        // Only plain pad-to-pad wires of their own connection are re-planned (a wire of a net
+        // tree, or one that ends at another pad of its tree, keeps its place).
+        let plain = |st: &State, wc: &[usize], w: WireId| {
+            let wi = &st.wires[w];
+            let Some(&ci) = wc.get(w) else { return false };
+            wi.alive && ci != usize::MAX && wi.turns.is_empty() && wi.pa != NO_OBS && wi.pb != NO_OBS && !tree_now.contains(&w) && {
+                let c = &conns[ci];
+                (wi.a, wi.b) == (c.a, c.b) || (wi.a, wi.b) == (c.b, c.a)
+            }
+        };
+        let mut pairs: Vec<super::xrules::Pair> = super::xrules::terminal_clinches(st);
+        pairs.extend(super::xrules::double_crossings(st));
+        for &(a, b) in &lr.unlayerable_pairs {
+            pairs.push(super::xrules::Pair { first: a.min(b), second: a.max(b), kind: super::xrules::Kind::Unlayerable });
+        }
+        xstats[0] += pairs.len();
+        let pairs: Vec<_> = pairs.into_iter().filter(|p| plain(st, wire_conn, p.first) && plain(st, wire_conn, p.second)).collect();
+        if pairs.is_empty() {
+            return;
+        }
+        let before = score(st, lr);
+        let saved = (st.clone(), wire_conn.clone(), reroutes.clone(), lr.clone(), *ripped_total);
+        let mut topo = Topo {
+            reg: if opts.fluctuation > 0.0 { reg.fluctuated(seed_of(opts.seed, round, 2000 + stage), opts.fluctuation) } else { reg.clone() },
+            conns: conns.clone(),
+            tiers: (0..conns.len()).map(|ci| tier_of(conn_of[ci])).collect(),
+            wire_conn: wire_conn.clone(),
+            reroutes: reroutes.clone(),
+            ws0,
+            cap,
+            evals: 0,
+            max_evals: opts.max_moves.max(1),
+            ripped: *ripped_total,
+            max_ripped: opts.max_ripped,
+            tight: Vec::new(),
+            tally: Tally::default(),
+        };
+        let mut resolved = 0usize;
+        let mut gone: BTreeSet<WireId> = BTreeSet::new();
+        for p in &pairs {
+            if expired() {
+                break;
+            }
+            if gone.contains(&p.first) || gone.contains(&p.second) || !st.wires[p.first].alive || !st.wires[p.second].alive {
+                continue;
+            }
+            xstats[1] += 1;
+            // Route the rule's first wire first, the interfering one after it (try_joint routes
+            // its second argument first).
+            if topo.try_joint(st, p.second, p.first).is_some() {
+                gone.extend([p.first, p.second]);
+                resolved += 1;
+            } else if topo.try_reroute(st, p.second).is_some() {
+                gone.insert(p.second);
+                resolved += 1;
+            }
+        }
+        if resolved == 0 {
+            return;
+        }
+        st.uncross_all(50);
+        let lr2 = assign(st);
+        let after = score(st, &lr2);
+        if p4_better(&after, &before) {
+            *wire_conn = topo.wire_conn;
+            *reroutes = topo.reroutes;
+            *ripped_total = topo.ripped;
+            *lr = lr2;
+            xstats[2] += resolved;
+            xstats[3] += 1;
+        } else {
+            (*st, *wire_conn, *reroutes, *lr, *ripped_total) = saved;
+        }
+    };
+    crossing_pass(&mut st, &mut wire_conn, &mut reroutes, &mut lr, &mut ripped_total, 0);
     let first_score = score(&st, &lr);
     let mut best_p4 = (st.clone(), wire_conn.clone(), lr.clone(), first_score);
     let (mut p4_rounds, mut p4_stall, mut p4_ripped) = (0usize, 0usize, 0usize);
-    // Wires taken out and routed again in this whole route (the `max_ripped` work cap).
-    let mut ripped_total = 0usize;
     for _round in 0..opts.reroute_rounds {
         if expired() {
             timed_out = true;
@@ -1062,11 +1205,28 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             history[e] += 1.0;
         }
         // Per over-full edge-layer, rip the wires routed last until the rest fits.
-        // A via without a site in its interval: its wire is rerouted (history on its edges).
+        // A via without a site in its interval: its wire is rerouted, with history on the edges
+        // that bound that interval only (M-B2; before: all edges of the wire).
         let mut victims: BTreeSet<WireId> = nosite.iter().copied().collect();
         for &w in &nosite {
-            for &p in &st.wires[w].passes {
-                history[st.passes[p].edge] += 1.0;
+            let n = st.wires[w].passes.len();
+            for (i, &(ka, kb)) in cm.via_iv[w].iter().enumerate() {
+                let Some(&k) = cm.via_k[w].get(i) else { continue };
+                if !cm.rank_of(w, k).0 {
+                    continue;
+                }
+                for kk in ka.saturating_sub(1)..(kb + 1).min(n) {
+                    history[st.passes[st.wires[w].passes[kk]].edge] += 1.0;
+                }
+            }
+        }
+        // First P4 round: the wires whose planned via count rose against the cycle before are
+        // rerouted first (Polubasov 2010, «Оптимизация расслоения»), once per cycle.
+        if p4_rounds == 0 {
+            for (w, ci) in via_rose.iter().copied() {
+                if st.wires[w].alive && reroutes[ci] == 0 {
+                    victims.insert(w);
+                }
             }
         }
         for &(e, l) in &bad {
@@ -1085,7 +1245,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let alive = st.wires.iter().filter(|w| w.alive).count();
         let max_rip = (alive / 4).max(10);
         let mut vic: Vec<WireId> = victims.into_iter().collect();
-        vic.sort_by_key(|&w| std::cmp::Reverse(rank[wire_conn[w]]));
+        let rose: BTreeSet<WireId> = if p4_rounds == 0 { via_rose.iter().map(|x| x.0).collect() } else { BTreeSet::new() };
+        vic.sort_by_key(|&w| (!rose.contains(&w), std::cmp::Reverse(rank[wire_conn[w]])));
         vic.truncate(max_rip.min(opts.max_ripped - ripped_total));
         // A ripped trunk takes the branches that end on its junctions with it (D5 net trees).
         let vic_set: BTreeSet<WireId> = vic.iter().copied().collect();
@@ -1140,6 +1301,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         warnings.push(format!(
             "P4 negotiated rip-up and reroute: {p4_rounds} rounds, {p4_ripped} wires ripped; objective {:.0} -> {:.0}, over-full (edge-layers + vias without a site) {} -> {}, vias {} -> {}",
             first_score.0, last_score.0, first_score.1, last_score.1, first_score.2, last_score.2
+        ));
+    }
+    crossing_pass(&mut st, &mut wire_conn, &mut reroutes, &mut lr, &mut ripped_total, 1);
+    if opts.crossing_rules {
+        warnings.push(format!(
+            "crossing rules (clinch at a terminal, double crossing, crossing that cannot be layered; Luzin & Popov 2012, Polubasov 2010): {} patterns found, {} pairs re-planned, {} resolved in {} kept passes",
+            xstats[0], xstats[1], xstats[2], xstats[3]
         ));
     }
     tlog("P4 rip-up and reroute", t_p4);
@@ -1604,19 +1772,52 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let (mut fb_tried, mut fb_rescued) = (0usize, 0usize);
     if opts.drawing_feedback {
         let rejected: Vec<Diag> = dr.diag.clone();
+        // M-B2: whether the blockers are ripped is a graded price, not a count cutoff: ripping
+        // costs the `reroute` price per blocker (more for one redrawn before in this cycle);
+        // keeping the rejected wire costs the `violation` price it would be drawn with (or left
+        // open with). The cheapest rescues go first; `feedback_max_rip` and `max_ripped` remain
+        // as work caps.
+        let rr = |n: u32| reg.price(&Event::Rerouted { wire: 0, count: n }, &WireCtx::default());
+        let mut redrawn_n: BTreeMap<WireId, u32> = BTreeMap::new();
+        let mut cand: Vec<(f64, f64, WireId, Vec<WireId>)> = Vec::new();
         for &f in &failed_draw {
-            if expired() {
-                timed_out = true;
-                break;
-            }
             let Some(d) = rejected.iter().rev().find(|d| d.wire == f) else { continue };
             let cf = conn_of[wire_conn[f]];
             if !out[cf].reason.starts_with("drawing:") {
                 continue;
             }
             let blockers = dr.blockers(d, drawn.iter().map(|(&w, wo)| (w, wo)));
-            if blockers.len() > opts.feedback_max_rip || ripped_total + blockers.len() > opts.max_ripped {
+            let keep = reg.price(
+                &Event::Violation {
+                    kind: "clearance".into(),
+                    at: d.at,
+                    layer: String::new(),
+                    depth_nm: (d.req_nm - d.gap_nm).max(1) as f64,
+                    len_nm: (d.to - d.from).len(),
+                    against: d.against.clone(),
+                    cause: String::new(),
+                },
+                &WireCtx { net: d.net, tier: tier_of(cf) },
+            );
+            let rip: f64 = blockers.iter().map(|_| rr(1)).sum();
+            if rip < keep {
+                cand.push((rip / keep.max(1e-9), keep, f, blockers));
+            }
+        }
+        cand.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.2.cmp(&b.2)));
+        for (_, keep, f, blockers) in cand {
+            if expired() {
+                timed_out = true;
+                break;
+            }
+            let cf = conn_of[wire_conn[f]];
+            // The blockers' price grows with each earlier redraw of them in this cycle.
+            let rip: f64 = blockers.iter().map(|b| rr(1 + redrawn_n.get(b).copied().unwrap_or(0))).sum();
+            if rip >= keep || blockers.len() > opts.feedback_max_rip || ripped_total + blockers.len() > opts.max_ripped {
                 continue;
+            }
+            for b in &blockers {
+                *redrawn_n.entry(*b).or_insert(0) += 1;
             }
             ripped_total += blockers.len();
             fb_tried += 1;
@@ -2125,8 +2326,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         warnings.push(format!("via_squeeze: {narrow} of {n_vias} wire vias in a narrow pass (less slack than half the via diameter next to them)"));
     }
-    // History for the next whole route: every edge that was over-full under the drawing's packer.
-    let mut hist_out = history.clone();
+    // History for the next whole route (M-B2: fading, Dr. CU §IV-C): what came in fades by
+    // `history_fade`, this cycle's P4 increments and every edge that was over-full under the
+    // drawing's packer are added in full.
+    let fade = opts.history_fade.clamp(0.0, 1.0);
+    let mut hist_out: Vec<f64> = history.iter().enumerate().map(|(e, &h)| {
+        let h0 = hist0.get(e).copied().unwrap_or(0.0);
+        let v = fade * h0 + (h - h0);
+        if v < HIST_EPS { 0.0 } else { v }
+    }).collect();
     {
         let nl = proj.n_layers;
         let mut over_edges: Vec<usize> = dr.over.iter().enumerate().filter(|(_, &o)| o).map(|(i, _)| i / nl).collect();
@@ -2145,8 +2353,48 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // Hints for a second round: per cut of a still-failed wire, the room is lowered by the
     // violation depth (what was really missing) at the cut nearest to the violation.
     let mut hint_map: BTreeMap<(usize, usize), f64> = BTreeMap::new();
-    let mut sleeve: BTreeSet<(usize, usize)> = BTreeSet::new();
-    let mut own_out = mem.own.clone();
+    // M-B2: the carried stretch history fades; this cycle's goes on the violating stretch only
+    // (Dr. CU §IV-C: "the intervals with violations"), each pass weighted by its distance to the
+    // nearest violation (1 on it, falling smoothly; at most 1 per pass and cycle).
+    let mut own_out: BTreeMap<usize, BTreeMap<usize, f64>> = BTreeMap::new();
+    for (&ci, m) in &mem.own {
+        let m2: BTreeMap<usize, f64> = m.iter().map(|(&e, &h)| (e, h * fade)).filter(|&(_, h)| h >= HIST_EPS).collect();
+        if !m2.is_empty() {
+            own_out.insert(ci, m2);
+        }
+    }
+    // Per connection: the places (point, radius) where its copper breaks a rule or its drawing
+    // was rejected.
+    let mut spots: BTreeMap<WireId, Vec<(Vec2, f64)>> = BTreeMap::new();
+    for (w, wo) in &drawn {
+        let pitch = st.wires[*w].w + st.wires[*w].s;
+        for v in &wo.viol {
+            spots.entry(*w).or_default().push((v.at, (0.5 * v.len_nm).max(pitch)));
+        }
+    }
+    for d in &diag {
+        let ci = conn_of[wire_conn[d.wire]];
+        if !out[ci].clean() && d.passes > 0 && !drawn.contains_key(&d.wire) {
+            let pitch = st.wires[d.wire].w + st.wires[d.wire].s;
+            spots.entry(d.wire).or_default().push((d.at, (0.5 * (d.to - d.from).len()).max(pitch)));
+        }
+    }
+    for (&w, sp) in &spots {
+        let ci = conn_of[wire_conn[w]];
+        let wi = &st.wires[w];
+        let m = own_out.entry(ci).or_default();
+        for &p in &wi.passes {
+            let e = st.passes[p].edge;
+            let [a, c] = proj.edges[e];
+            let (pa, pc) = (proj.pos[a], proj.pos[c]);
+            let miss: f64 = sp.iter().map(|&(at, r)| 1.0 - near_weight(seg_dist(at, pa, pc), r)).product();
+            let wgt = 1.0 - miss;
+            if wgt >= HIST_EPS {
+                *m.entry(e).or_insert(0.0) += wgt;
+            }
+        }
+    }
+    own_out.retain(|_, m| !m.is_empty());
     for d in &diag {
         let ci = conn_of[wire_conn[d.wire]];
         // A connection drawn with violations (never drop) feeds back like an unrouted one.
@@ -2166,12 +2414,6 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 (((a + ab * t) - d.at).len(), e)
             })
             .min_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
-        // The wire's whole sleeve on that layer is remembered: the repeat routes it elsewhere.
-        for e in (d.k0..d.k1).map(|k| st.passes[wi.passes[k]].edge) {
-            if sleeve.insert((ci, e)) {
-                *own_out.entry(ci).or_default().entry(e).or_insert(0.0) += 1.0;
-            }
-        }
         if let Some((_, e)) = best {
             let v = hint_map.entry((e, d.layer)).or_insert(0.0);
             *v = v.max(short);
@@ -2405,6 +2647,18 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             *by.entry(v.kind.as_str()).or_default() += 1;
         }
         let conns: BTreeSet<usize> = viol_list.iter().map(|v| v.conn).collect();
+        let mut by_class: BTreeMap<&str, (usize, BTreeSet<usize>)> = BTreeMap::new();
+        for v in &viol_list {
+            let e = by_class.entry(v.class.as_str()).or_default();
+            e.0 += 1;
+            e.1.insert(v.conn);
+        }
+        if !by_class.is_empty() {
+            warnings.push(format!(
+                "violation classes (M-B2): {} (pad_exit = a neighbour pin of its own terminal: pad exit / necking, M-C)",
+                by_class.iter().map(|(k, (n, c))| format!("{k} {n} on {} connections", c.len())).collect::<Vec<_>>().join(", ")
+            ));
+        }
         warnings.push(format!(
             "never drop ([optimize] allow_violations): {} connections written with {} rule violations ({}); {} wires drawn by force ({} runs: {} on the exact path with the clearance relaxed, {} on a funnel, {} on a normal attempt), {} wires with a via placed by force, {} crossings that cannot be layered kept",
             conns.len(),
@@ -2478,7 +2732,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         violations: viol_list,
     };
     let pre = pre_parts.map(|(c, a)| (c, with_parts(&result, a)));
-    (RoundOut { result, crit: crit_main, pre }, new_hints, Memory { edge: hist_out, own: own_out })
+    let vias_out: BTreeMap<usize, usize> = plans.iter().map(|(&w, pl)| (conn_of[wire_conn[w]], pl.vias.len())).collect();
+    (RoundOut { result, crit: crit_main, pre }, new_hints, Memory { edge: hist_out, own: own_out, vias: vias_out })
 }
 
 /// Seed of a fluctuation stream: the run's seed, the whole-route round and the stage.
@@ -2632,6 +2887,7 @@ fn assemble(model: &BoardModel, dec: &crate::decompose::Decomposition, out: &[Ou
             against: against.clone(),
             cause: cause.clone(),
             price_mm: (reg.price(&ev, &WireCtx { net: c.net, tier: c.tier }) * 10.0).round() / 10.0,
+            class: crate::route::violation_class(against, cause, &r.from.label, &r.to.label).into(),
         });
     }
     Assembled { items, item_conn, reports, nets, length_by_layer, tot_len, tot_vias, violations }

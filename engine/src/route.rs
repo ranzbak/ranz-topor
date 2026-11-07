@@ -116,6 +116,41 @@ pub struct ViolationReport {
     pub cause: String,
     /// Price by the `violation` factor (mm).
     pub price_mm: f64,
+    /// Where it comes from (M-B2, [`violation_class`]): `pad_exit` (a neighbour pad of its own
+    /// terminal's footprint: pad exit / necking, planned in M-C), `via_site` (a via without a legal
+    /// site), `crossing` (other-net copper it crosses or passes on the wrong side in the plan),
+    /// `foreign_copper` (other routed copper in a passage too narrow), `static` (other pads,
+    /// holes, the board edge).
+    pub class: String,
+}
+
+/// The class of a violation (see [`ViolationReport::class`]) from what it is against, its cause
+/// and the connection's terminal labels (`REF.NUM`).
+pub fn violation_class(against: &str, cause: &str, from: &str, to: &str) -> &'static str {
+    let ref_of = |l: &str| l.rsplit_once('.').map(|x| x.0.to_string()).unwrap_or_default();
+    let own = [ref_of(from), ref_of(to)];
+    // Against a neighbour pin of its own terminal's part, or forced because its drawing first
+    // failed there (the logged cause names the first check that failed).
+    let own_pad = |t: &str| {
+        t.split("pad:").skip(1).any(|rest| {
+            let r = rest.split(':').next().unwrap_or("");
+            !r.is_empty() && own.iter().any(|o| o == r)
+        })
+    };
+    if against.starts_with("pad:") && own_pad(against) || cause.starts_with("drawing:") && own_pad(cause) {
+        return "pad_exit";
+    }
+    if cause.contains("no site") {
+        "via_site"
+    } else if against.starts_with("track of") || against.starts_with("via of") || against.starts_with("item:") {
+        if cause.contains("wrong side") || cause.contains("cannot be layered") || cause.contains("crossing") {
+            "crossing"
+        } else {
+            "foreign_copper"
+        }
+    } else {
+        "static"
+    }
 }
 
 /// A connection the zero-slack retry routed with margin 0 against its corridor (R6).
@@ -607,5 +642,21 @@ pub(crate) fn unrouted(model: &BoardModel, opts: &Options, reason: &str) -> Rout
         variants: Vec::new(),
         moves: BTreeMap::new(),
         violations: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::violation_class;
+
+    #[test]
+    fn violation_classes() {
+        // A neighbour pin of its own part, directly or as the first failed check (M-C).
+        assert_eq!(violation_class("pad:U1:58", "drawing: clearance gap", "U1.57", "U4.U444"), "pad_exit");
+        assert_eq!(violation_class("track of D10 (item:3)", "drawing: clearance gap 0.097 mm < 0.150 mm against pad:U1:58 on layer F.Cu", "U1.57", "U4.U444"), "pad_exit");
+        assert_eq!(violation_class("track of X (item:3)", "via 1 of 2: no site in its interval", "U1.5", "J1.2"), "via_site");
+        assert_eq!(violation_class("via of X (item:3)", "drawing: passes a via of another net on the wrong side (topology)", "U1.5", "J1.2"), "crossing");
+        assert_eq!(violation_class("track of X (item:3)", "drawing: clearance gap 0.1 mm against item:9", "U1.5", "J1.2"), "foreign_copper");
+        assert_eq!(violation_class("pad:R3:1", "drawing: clearance gap 0.1 mm against pad:R3:1", "U1.5", "J1.2"), "static");
     }
 }

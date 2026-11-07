@@ -1048,9 +1048,26 @@ pub struct Options {
     /// Topological core (S2c, `topor.toml [vias] offset_sites`): besides the sample points of the
     /// via interval's triangles, also try the via's offset corners of nearby pads and copper.
     pub via_offset_sites: bool,
-    /// Topological core (S2c, `topor.toml [search] feedback_max_rip`): most drawn wires one
-    /// feedback round may rip up and redraw.
+    /// Topological core (S2c, `topor.toml [search] feedback_max_rip`): work cap, most drawn
+    /// wires one feedback round may rip up and redraw. Whether a rejected wire's blockers are
+    /// ripped at all is a graded price (M-B2: their reroute price against the violation the
+    /// rejected wire would otherwise be drawn with), not this count.
     pub feedback_max_rip: usize,
+    /// M-B2 (`[optimize] history_fade`): what a cycle carries over to the next one (the edge
+    /// history of over-full passages, the history on the violating stretches, soft cuts) is
+    /// multiplied by this before the cycle's own findings are added (Dr. CU §IV-C: history fades).
+    /// 1 = never fades (before M-B2), 0 = no memory between cycles.
+    pub history_fade: f64,
+    /// M-B2 (`[optimize] soft_cuts`): the lowered rooms the drawing asked for (cuts, Haas 2026
+    /// §VI-E) turn into a soft price on their passage when a cycle comes out worse than the best
+    /// so far; false = they stay hard for the whole run (before M-B2).
+    pub soft_cuts: bool,
+    /// M-B2 (`[optimize] crossing_rules`): the planner looks for the crossing patterns that force
+    /// vias and over-full passages (a trace wrapped around another net's terminal = ordinary
+    /// clinch / half-loop, a crossing that cannot be layered, a pair crossing twice) and re-plans
+    /// the two traces locally in the other order (Luzin & Popov 2012; Polubasov 2010), kept when
+    /// the plan gets better.
+    pub crossing_rules: bool,
     /// Topological core (S3, `topor.toml [search] reroute_rounds`): most rounds of negotiated
     /// rip-up-and-reroute after the first layer assignment (0 = off).
     pub reroute_rounds: usize,
@@ -1233,6 +1250,9 @@ impl Default for Options {
             drawing_feedback: true,
             via_offset_sites: true,
             feedback_max_rip: 8,
+            history_fade: 0.5,
+            soft_cuts: true,
+            crossing_rules: true,
             reroute_rounds: 6,
             via_reduce: true,
             stitch_islands: true,
