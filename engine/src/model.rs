@@ -1143,7 +1143,8 @@ pub struct Options {
     /// keep iterating until OK / Cancel / the safety cap / `wall_clock_s` (the TopoR way).
     pub finish_when_stable: bool,
     /// M-B0 (`[optimize] finish_patience`): cycles without a better result after "stable" before
-    /// such a run finishes by itself.
+    /// such a run finishes by itself; 0 (default, user 2026-11-07: "When route stable appears it
+    /// should stop indeed") = it stops at the cycle that becomes stable.
     pub finish_patience: usize,
     /// M-B0 (`[optimize] runs`): independent seeded runs; the best by the objective is the result.
     /// They run in parallel on the engine's thread pool (threads are shared, not multiplied).
@@ -1256,7 +1257,7 @@ impl Default for Options {
             stop_when_stable: true,
             stable_patience: 0,
             finish_when_stable: true,
-            finish_patience: 4,
+            finish_patience: 0,
             runs: 5,
             allow_violations: true,
             neck_max_nm: 0,

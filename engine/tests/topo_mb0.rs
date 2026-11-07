@@ -88,6 +88,21 @@ fn ok_after_stable_returns_the_best_so_far() {
     assert_eq!(r.routed, after.best_routed);
 }
 
+/// With the dialog and the defaults (`finish_when_stable`, `finish_patience` = 0) a run stops at
+/// the cycle that becomes stable (user 2026-11-07: "When route stable appears it should stop
+/// indeed"), as a normal finish.
+#[test]
+fn a_dialog_run_stops_at_stable_by_default() {
+    let o = opts(r#"{"runs": 1, "wall_clock_s": 300.0, "stop_when_stable": false, "topo_rounds": 1000}"#);
+    assert!(o.finish_when_stable && o.finish_patience == 0);
+    let r = route(&eprom(), &o);
+    assert_eq!(r.stop_reason, "stable");
+    assert!(!r.timed_out);
+    let line = cycles_line(&r);
+    let n: usize = line.split(": ").nth(1).and_then(|s| s.split(' ').next()).and_then(|s| s.parse().ok()).expect("cycle count");
+    assert!(line.contains(&format!("{n} cycles, stable after cycle {n},")), "stops at the stable cycle, not later: {line}");
+}
+
 /// With the dialog and `finish_when_stable` (default) a run also finishes by itself once the
 /// best has not improved for `finish_patience` cycles after stable: a normal finish ("stable",
 /// no time warning), without OK and long before the safety cap or the time budget.
