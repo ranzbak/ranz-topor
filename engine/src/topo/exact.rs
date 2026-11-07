@@ -38,14 +38,14 @@ const POCKET_DEPTH: usize = 2;
 
 /// The sleeve of a run: its triangles and the walls (sides never crossed by the wire).
 pub(super) struct Strip {
-    tris: Vec<[Vec2; 3]>,
-    boxes: Vec<Aabb>,
-    walls: Vec<(Vec2, Vec2)>,
+    pub(super) tris: Vec<[Vec2; 3]>,
+    pub(super) boxes: Vec<Aabb>,
+    pub(super) walls: Vec<(Vec2, Vec2)>,
 }
 
 impl Strip {
     /// `p` lies in (or on the boundary of) a triangle of the sleeve.
-    fn contains(&self, p: Vec2) -> bool {
+    pub(super) fn contains(&self, p: Vec2) -> bool {
         self.tris.iter().zip(&self.boxes).any(|(t, bb)| {
             if p.x < bb.min.x - 1.0 || p.x > bb.max.x + 1.0 || p.y < bb.min.y - 1.0 || p.y > bb.max.y + 1.0 {
                 return false;
@@ -63,7 +63,7 @@ impl Strip {
     }
 
     /// The segment `a-b` properly crosses a wall.
-    fn crosses_wall(&self, a: Vec2, b: Vec2) -> bool {
+    pub(super) fn crosses_wall(&self, a: Vec2, b: Vec2) -> bool {
         let bb = bbox_of(&[a, b]);
         self.walls.iter().any(|&(c, d)| {
             let wb = bbox_of(&[c, d]);
@@ -253,7 +253,7 @@ impl Drawer<'_> {
     }
 
     /// Objects the wire must clear that may reach into `bb`.
-    fn local_ents(&self, wp: &Wp, bb: Aabb) -> Vec<usize> {
+    pub(super) fn local_ents(&self, wp: &Wp, bb: Aabb) -> Vec<usize> {
         let mut ids = self.grid.query(bb);
         ids.sort_unstable();
         ids.dedup();
@@ -269,7 +269,7 @@ impl Drawer<'_> {
         ids
     }
 
-    fn need_of(&self, id: usize, wp: &Wp, w: f64) -> f64 {
+    pub(super) fn need_of(&self, id: usize, wp: &Wp, w: f64) -> f64 {
         let e = &self.ents[id];
         if e.net == Some(wp.net) {
             // A pad of the own net that is not an end: KiCad's minimum connection width check
@@ -282,7 +282,7 @@ impl Drawer<'_> {
     }
 
     /// The segment `a-b` keeps the clearance to every object of `ents`.
-    fn seg_clear(&self, ents: &[usize], wp: &Wp, a: Vec2, b: Vec2) -> bool {
+    pub(super) fn seg_clear(&self, ents: &[usize], wp: &Wp, a: Vec2, b: Vec2) -> bool {
         if wp.neck.is_some() {
             return wp.pieces(a, b).into_iter().all(|(u, v, w)| self.seg_clear_w(ents, wp, u, v, self.seg_width(wp.wire, wp.layer, u, v, w)));
         }

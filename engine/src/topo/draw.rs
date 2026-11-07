@@ -482,6 +482,11 @@ pub struct DrawStats {
     pub forced_relaxed: usize,
     pub forced_funnel: usize,
     pub forced_attempt: usize,
+    /// M-45: runs redrawn octilinear; octilinear runs the checker rejected (the taut run kept);
+    /// seconds in the octilinear search.
+    pub octi_ok: usize,
+    pub octi_rejected: usize,
+    pub octi_s: f64,
 }
 
 /// Per-stretch widths that replace a wire's single width (the drawing witness, variant A: the
@@ -671,6 +676,8 @@ pub struct Drawer<'a> {
     pub force: bool,
     /// Violations of the vias placed by force, per wire.
     pub via_viol: BTreeMap<WireId, Vec<Viol>>,
+    /// Octilinear drawing (M-45, [`super::octi`]): style switch and prices.
+    pub octi: super::octi::OctiCfg,
 }
 
 impl<'a> Drawer<'a> {
@@ -743,6 +750,7 @@ impl<'a> Drawer<'a> {
             end_at: BTreeMap::new(),
             force: false,
             via_viol: BTreeMap::new(),
+            octi: super::octi::OctiCfg::from_opts(opts),
         }
         .with_static()
     }
@@ -1000,7 +1008,7 @@ impl<'a> Drawer<'a> {
     }
 
     /// The drawn crossing of pass `pid` (nm along its edge) while its copper is committed.
-    fn live_x(&self, pid: PassId) -> Option<f64> {
+    pub(super) fn live_x(&self, pid: PassId) -> Option<f64> {
         let (x, h) = self.drawn_x[pid]?;
         let (_, ent) = self.handles[h];
         self.ents.get(ent).is_some_and(|en| en.live).then_some(x)
@@ -1031,6 +1039,15 @@ impl<'a> Drawer<'a> {
             return Some((m, m));
         }
         Some((lo, hi))
+    }
+
+    /// Whether pass `pid` has another pass of its edge and layer before it / after it in its
+    /// packed lane (both `true` when it is not packed in a fitting lane).
+    pub(super) fn lane_sides(&self, pid: PassId) -> (bool, bool) {
+        match self.slot[pid].and_then(|(e, l, i, _, _)| self.lanes.get(&(e, l)).map(|ln| (i, ln.pids.len()))) {
+            Some((i, n)) => (i > 0, i + 1 < n),
+            None => (true, true),
+        }
     }
 
     /// Remember where the accepted run `pts` (passes `k0..k1` of `w`, first track handle `h`)
@@ -2054,6 +2071,57 @@ impl<'a> Drawer<'a> {
                     continue;
                 }
                 if rep.violations.is_empty() {
+                    // M-45: the legal taut run redrawn octilinear where that keeps every rule
+                    // (`super::octi`); else the taut run stays (its any-angle stretches priced).
+                    let (mut pts, mut items, mut pneck_out) = (pts, items, pneck_out);
+                    if self.octi.on && neck.is_none() && pts.len() >= 2 {
+                        let t_o = std::time::Instant::now();
+                        let wneck = if pneck_out.is_some() || attempt == 1 { pneck } else { None };
+                        let exits = [if ps { self.pad_exit(w, 0, pts[1]) } else { None }, if pe { self.pad_exit(w, 1, pts[pts.len() - 2]) } else { None }];
+                        let got = self.octilinear(w, k0, k1, layer, &pts, wneck, exits, 0.0);
+                        let dbg = std::env::var("TOPO_OCTIDBG").is_ok();
+                        let tag = match got {
+                            Some(o) => match self.realise(w, layer, lid, &o.pts, &pneck) {
+                                Some((its, pn)) => {
+                                    pts = o.pts;
+                                    items = its;
+                                    pneck_out = pn;
+                                    self.stats.octi_ok += 1;
+                                    "ok"
+                                }
+                                None => {
+                                    if dbg {
+                                        eprintln!("OCTIREJ wire {w} pts {:?}", o.pts.iter().map(|p| (p.x / 1e6, -p.y / 1e6)).collect::<Vec<_>>());
+                                    }
+                                    self.stats.octi_rejected += 1;
+                                    "rejected"
+                                }
+                            },
+                            None => "none",
+                        };
+                        if dbg {
+                            let (any, _) = super::octi::breaks(&pts);
+                            eprintln!(
+                                "OCTI wire {w} net {} L{layer} attempt {attempt} {tag}: {} pts, any-angle {} stretches {:.3} mm, from ({:.3},{:.3}) to ({:.3},{:.3})",
+                                wi.net,
+                                pts.len(),
+                                any.len(),
+                                any.iter().map(|a| a.2).sum::<f64>() / 1e6,
+                                pts[0].x / 1e6,
+                                -pts[0].y / 1e6,
+                                pts[pts.len() - 1].x / 1e6,
+                                -pts[pts.len() - 1].y / 1e6
+                            );
+                        }
+                        self.stats.octi_s += t_o.elapsed().as_secs_f64();
+                        if self.octi.any_forbidden && !super::octi::breaks(&pts).0.is_empty() {
+                            last_reason = "drawing: no octilinear geometry for this run ([drawing] any_angle = \"forbidden\")".to_string();
+                            if self.force {
+                                cands.push((0.0, pts.clone(), items.clone(), Vec::new(), None, "attempt"));
+                            }
+                            continue;
+                        }
+                    }
                     let first = committed.len();
                     for it in &items {
                         let id = self.commit(it);
@@ -2170,7 +2238,39 @@ impl<'a> Drawer<'a> {
                         eprintln!("FORCED wire {w} layer {layer} k {k0}..{k1}: {} price {:.1}, {} pts, viols {:?}", c.5, c.0, c.1.len(), c.3.iter().map(|v| (v.kind, v.against.clone(), (v.depth_nm / 1e3).round(), (v.len_nm / 1e3).round())).collect::<Vec<_>>());
                     }
                 }
-                if let Some((_, pts, items, vs, neck, src)) = cands.into_iter().min_by(|a, b| a.0.total_cmp(&b.0)) {
+                if let Some((price, pts, items, vs, neck, src)) = cands.into_iter().min_by(|a, b| a.0.total_cmp(&b.0)) {
+                    // M-45: the forced run octilinear too, where that breaks no rule deeper than
+                    // the run itself and costs no more violation price.
+                    let (mut pts, mut items, mut vs) = (pts, items, vs);
+                    if self.octi.on && neck.is_none() && pts.len() >= 2 {
+                        let t_o = std::time::Instant::now();
+                        let relax = vs.iter().filter(|v| !v.via).map(|v| v.depth_nm).fold(0.0, f64::max) + 1.0;
+                        let (ps, pe) = (r == 0, r == plan.layers.len() - 1);
+                        let exits = [if ps { self.pad_exit(w, 0, pts[1]) } else { None }, if pe { self.pad_exit(w, 1, pts[pts.len() - 2]) } else { None }];
+                        if let Some(o) = self.octilinear(w, k0, k1, layer, &pts, pneck, exits, relax) {
+                            let its = match &pneck {
+                                Some(pn) => self.neck_items(w, lid, &o.pts, pn, pn.min_w).0,
+                                None => self.run_items(w, layer, &o.pts),
+                            };
+                            let rep = self.checker.check_against(&self.idx, &its, &[]);
+                            let mut v2 = self.viols_of(&its, &rep);
+                            v2.extend(self.graze_viols(w, &its));
+                            if v2.iter().map(Viol::amount).sum::<f64>() <= price + 1e-9 {
+                                pts = o.pts;
+                                items = its;
+                                vs = v2;
+                                self.stats.octi_ok += 1;
+                            } else {
+                                if std::env::var("TOPO_OCTIDBG").is_ok() {
+                                    eprintln!("OCTIFORCE wire {w} rejected: price {price:.1} -> {:.1}, viols {} -> {}", v2.iter().map(Viol::amount).sum::<f64>(), vs.len(), v2.len());
+                                }
+                                self.stats.octi_rejected += 1;
+                            }
+                        } else if std::env::var("TOPO_OCTIDBG").is_ok() {
+                            eprintln!("OCTIFORCE wire {w} none (relax {relax:.0})");
+                        }
+                        self.stats.octi_s += t_o.elapsed().as_secs_f64();
+                    }
                     match src {
                         "relaxed" => self.stats.forced_relaxed += 1,
                         "funnel" => self.stats.forced_funnel += 1,
@@ -2273,6 +2373,21 @@ impl<'a> Drawer<'a> {
             wo.length_nm = wo.runs.iter().map(|(_, p)| p.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>()).sum();
         }
         ok
+    }
+
+    /// The tracks of the run `pts` of wire `w` when they pass the checker as the drawing's attempts
+    /// do: at the nominal width, else with the plan's necks (`pneck`, M-C) at the widest width
+    /// that passes; and no own-net pad grazed. `(items, plan neck width and lengths)`.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn realise(&self, w: WireId, layer: usize, lid: u32, pts: &[Vec2], pneck: &Option<super::exact::Neck>) -> Option<(Vec<Item>, Option<(f64, [f64; super::exact::NECK_ZONES])>)> {
+        let items = self.run_items(w, layer, pts);
+        let (items, pn) = if self.checker.check_against(&self.idx, &items, &[]).violations.is_empty() {
+            (items, None)
+        } else {
+            let (wn, its, ls) = self.plan_neck_run(w, lid, pts, pneck.as_ref()?)?;
+            (its, Some((wn, ls)))
+        };
+        self.track_own_pad_ok(w, &items).then_some((items, pn))
     }
 
     /// Track items of the run polyline `pts` of wire `w` on `layer`: the wire's width, or the

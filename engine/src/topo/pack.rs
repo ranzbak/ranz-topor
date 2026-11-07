@@ -206,6 +206,9 @@ pub struct Packer<'a> {
     /// another net's via planned in the same triangle has none there unless the triangle holds
     /// two discs ([`super::refine::CapModel`]).
     pub reserve_sites: bool,
+    /// M-45: the drawing is octilinear; a pass's oblique factor is the octilinear one
+    /// ([`super::demand::octi_stretch`]).
+    pub octi: bool,
 }
 
 /// The oblique-chord factor of a pass through edge `e` crossed in direction `d`: `1 / sin` of
@@ -303,6 +306,7 @@ impl<'a> Packer<'a> {
             free_cache: RefCell::new(HashMap::new()),
             via_squeeze: 0.0,
             reserve_sites: false,
+            octi: false,
         }
     }
 
@@ -357,6 +361,7 @@ impl<'a> Packer<'a> {
         p.via_d0 = first(0);
         p.via_d = model.nets.iter().map(|n| (n.code, first(n.code))).collect();
         p.reserve_sites = opts.reserve_via_sites;
+        p.octi = opts.draw_style == "octilinear" && opts.octi_room;
         p
     }
 
@@ -490,8 +495,10 @@ impl<'a> Packer<'a> {
         let unit = |d: Vec2| d.unit().map_or(Vec2::default(), |u| u * 1e6);
         let mut at = Vec::with_capacity(n);
         let mut dir = Vec::with_capacity(n);
+        let mut wrapped = Vec::with_capacity(n);
         let mut j = 0usize;
         for (k, &i) in pass_port.iter().enumerate() {
+            wrapped.push(false);
             while j + 1 < path.len() && path[j + 1].1 <= i {
                 j += 1;
             }
@@ -523,6 +530,7 @@ impl<'a> Packer<'a> {
                     } else if d_out.dot(u) > 0.0 {
                         d_out
                     } else {
+                        wrapped[k] = true;
                         u.perp()
                     });
                 }
@@ -541,6 +549,19 @@ impl<'a> Packer<'a> {
                     at.push(x);
                     dir.push(d);
                 }
+            }
+        }
+        if self.octi {
+            // M-45: the octilinear drawing's room (`demand::octi_stretch`), as the direction whose
+            // oblique factor it is (`infl_dir` reads `1 / sin` of the crossing angle).
+            for (k, d) in dir.iter_mut().enumerate() {
+                let [p, q] = pr.edges[st.passes[wi.passes[k]].edge];
+                let ed = pr.pos[q] - pr.pos[p];
+                let Some(eu) = ed.unit() else { continue };
+                let f = super::demand::octi_stretch(ed, *d, wrapped[k]).max(1.0);
+                let sin = (1.0 / f).clamp(0.4, 1.0);
+                let cos = (1.0 - sin * sin).max(0.0).sqrt();
+                *d = (eu * cos + eu.perp() * sin) * 1e6;
             }
         }
         Taut { at, dir }

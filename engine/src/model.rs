@@ -1187,6 +1187,32 @@ pub struct Options {
     /// there; another net's via planned in the same small triangle counts as a via without a site,
     /// so P3/P4 move it or reroute its wire before the drawing (true, default).
     pub reserve_via_sites: bool,
+    /// M-45 (`topor.toml [drawing] style`): `"octilinear"` (default; straight and 45 degree
+    /// segments, the hand boards' style; a stretch where 45 degrees does not fit stays any-angle
+    /// and pays the `any_angle` factor) or `"smooth"` (the taut any-angle drawing).
+    pub draw_style: String,
+    /// M-45 (`[drawing] any_angle`): `"costly"` (default: a stretch that is not at 0/45/90
+    /// degrees pays the `any_angle` factor and is reported) or `"forbidden"` (such a run counts
+    /// as a drawing failure; never drop still writes it on the last resort).
+    pub any_angle: String,
+    /// M-45 (`[drawing] acute`): `"costly"` (default: a bend sharper than 90 degrees pays the
+    /// `acute_bend` factor and is reported) or `"forbidden"` (the octilinear drawing never makes one).
+    pub acute: String,
+    /// M-45 (`[drawing] bend_mm`): price of one 45 degree bend of the octilinear drawing, in mm of
+    /// length (90 degrees: twice); fewer bends where the length allows.
+    pub bend_mm: f64,
+    /// M-45 (`[drawing] bend_spacing_mm`): preferred least length between two bends (`L_pref`); a
+    /// shorter leg pays more the shorter it is (jog penalty), down to `min(L_pref, 2 (w + s))`.
+    pub bend_spacing_mm: f64,
+    /// M-45 (`[drawing] octilinear_room`): with the octilinear style, the planner (P3 / P4) and
+    /// the drawing's packing count the room an octilinear wire takes in a passage (the octagon
+    /// around a wrapped corner, the 0/45 degree legs of a slanted stretch; `demand::octi_stretch`)
+    /// instead of the any-angle room.
+    pub octi_room: bool,
+    /// M-45 (`[drawing] bundle_pull`): with the octilinear style, the share of a segment's length
+    /// taken off its price where it runs beside a drawn trace of another net at the clearance, so
+    /// a trace follows its neighbour and a bundle keeps its pitch through its bends (0 = off).
+    pub bundle_pull: f64,
     /// Router (A6, `topor.toml [search] pad_bridge_max_mm`): a connection between two pads of
     /// one footprint at most this far apart (centre to centre, nm) whose straight line is clean,
     /// possibly only off the centre line, is routed by that one track (`exit_stubs` auto: only
@@ -1296,6 +1322,13 @@ impl Default for Options {
             neck_max_nm: 0,
             neck_from_pad: true,
             neck_in_drawing: false,
+            draw_style: "octilinear".into(),
+            any_angle: "costly".into(),
+            acute: "costly".into(),
+            bend_mm: 0.25,
+            bend_spacing_mm: 0.5,
+            octi_room: true,
+            bundle_pull: 0.3,
             reserve_via_sites: true,
             pad_bridge_max_nm: 2_000_000,
             steiner: true,

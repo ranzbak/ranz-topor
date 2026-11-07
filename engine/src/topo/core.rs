@@ -77,7 +77,10 @@ pub fn diff_pair_nets(model: &BoardModel) -> BTreeSet<i32> {
 }
 
 /// Record the drawn wire `wo` as the outcome of connection `ci`.
-fn settle(out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, ci: usize, w: WireId, wo: &WireOut, b: &board::Board, st: &State) {
+/// `octi`: the octilinear style is on; every stretch not at 0/45/90 degrees and every acute bend
+/// of the drawn runs is an event (`any_angle`, `acute_bend`, M-45) next to the necked stretches.
+#[allow(clippy::too_many_arguments)]
+fn settle(octi: bool, out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, ci: usize, w: WireId, wo: &WireOut, b: &board::Board, st: &State) {
     let o = &mut out[ci];
     o.routed = true;
     o.reason.clear();
@@ -92,6 +95,17 @@ fn settle(out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, ci: usize, w: 
     o.viol = wo.viol.clone();
     for n in &wo.necks {
         necking.push((ci, Event::Necking { wire: w, from_nm: st.wires[w].w, to_nm: n.1, mm: n.2 / MM }));
+    }
+    if octi {
+        for (_, pts) in &wo.runs {
+            let (any, acute) = super::octi::breaks(pts);
+            for (at, deg, len) in any {
+                necking.push((ci, Event::AnyAngle { wire: w, at, deg, mm: len / MM }));
+            }
+            for (at, interior_deg) in acute {
+                necking.push((ci, Event::AcuteBend { wire: w, at, interior_deg }));
+            }
+        }
     }
 }
 
@@ -1747,7 +1761,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         );
     }
     let mut drawn_ok = 0usize;
+    // Necked stretches and (M-45) the octilinear style's breaks, per connection.
     let mut necking: Vec<(usize, Event)> = Vec::new();
+    let octi_on = dr.octi.on;
     let mut drawn: BTreeMap<WireId, WireOut> = BTreeMap::new();
     let mut via_h: BTreeMap<WireId, Vec<usize>> = BTreeMap::new();
     let mut failed_draw: Vec<WireId> = Vec::new();
@@ -1767,7 +1783,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         if wo.ok {
             via_h.insert(w, vh);
             drawn_ok += 1;
-            settle(&mut out, &mut necking, ci, w, &wo, &b, &st);
+            settle(octi_on, &mut out, &mut necking, ci, w, &wo, &b, &st);
             drawn.insert(w, wo);
         } else {
             for id in ids {
@@ -1892,13 +1908,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 for (bw, wb) in redrawn {
                     let cb = conn_of[wire_conn[bw]];
                     necking.retain(|(c, _)| *c != cb);
-                    settle(&mut out, &mut necking, cb, bw, &wb, &b, &st);
+                    settle(octi_on, &mut out, &mut necking, cb, bw, &wb, &b, &st);
                     drawn.insert(bw, wb);
                 }
                 out[cf].reason.clear();
                 via_h.insert(f, ids[..vias_f.len().min(ids.len())].to_vec());
                 placed.insert(f, vias_f);
-                settle(&mut out, &mut necking, cf, f, &wf, &b, &st);
+                settle(octi_on, &mut out, &mut necking, cf, f, &wf, &b, &st);
                 drawn.insert(f, wf);
             } else {
                 // Undo: whatever was drawn in this round goes, the old copper comes back.
@@ -1970,7 +1986,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
             placed.insert(w, vs);
             via_h.insert(w, vh);
-            settle(&mut out, &mut necking, ci, w, &wo, &b, &st);
+            settle(octi_on, &mut out, &mut necking, ci, w, &wo, &b, &st);
             drawn.insert(w, wo);
         }
         dr.force = false;
@@ -2086,7 +2102,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                                 if out[ci].cause.is_empty() {
                                     out[ci].cause = "the branch reaches its junction on another layer than its trunk (joined by force)".into();
                                 }
-                                settle(&mut out, &mut necking, ci, bw, &wo, &b, &st);
+                                settle(octi_on, &mut out, &mut necking, ci, bw, &wo, &b, &st);
                                 drawn.insert(bw, wo);
                                 junction_joins += 1;
                                 continue;
@@ -2216,7 +2232,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         for w in changed {
             let ci = conn_of[wire_conn[w]];
             necking.retain(|(c, _)| *c != ci);
-            settle(&mut out, &mut necking, ci, w, &drawn[&w], &b, &st);
+            settle(octi_on, &mut out, &mut necking, ci, w, &drawn[&w], &b, &st);
         }
         warnings.push(format!(
             "via reduction after drawing: {} wires with vias, {} relabels tried in {} sweeps, {} accepted, {} vias removed ({:.1} s{}); before: {}; after: {}",
@@ -2300,7 +2316,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         if ok {
                             let ci = conn_of[wire_conn[w]];
                             necking.retain(|(c, _)| *c != ci);
-                            settle(&mut out, &mut necking, ci, w, &wo, &b, &st);
+                            settle(octi_on, &mut out, &mut necking, ci, w, &wo, &b, &st);
                         }
                         drawn.insert(w, wo);
                         if ok {
@@ -2322,6 +2338,43 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
         }
         warnings.push(format!("fuse after drawing: {n_fused} trace ends moved onto their trunk's copper where the two part, {gain_mm:.1} mm cheaper (length and junction angle)"));
+    }
+    // M-45: what the steps after the drawing left not at 0/45/90 degrees (a fused branch end)
+    // becomes an elbow or Z where the checker accepts it.
+    if octi_on {
+        let ids: Vec<WireId> = drawn.keys().copied().collect();
+        let mut n_pol = 0usize;
+        for w in ids {
+            let mut wo = drawn.remove(&w).expect("drawn wire");
+            let k = dr.octi_polish(&mut wo);
+            if k > 0 {
+                n_pol += k;
+                let ci = conn_of[wire_conn[w]];
+                necking.retain(|(c, _)| *c != ci);
+                settle(octi_on, &mut out, &mut necking, ci, w, &wo, &b, &st);
+            }
+            drawn.insert(w, wo);
+        }
+        warnings.push(format!("octilinear polish after drawing: {n_pol} segments not at 0/45/90 degrees (fused branch ends) redrawn as an elbow or Z"));
+        // Bundles (M-45 item 4): bends a wire takes together with a parallel neighbour, and the
+        // skew each such bend gives the outer wire (2 d tan(a/2): 0.83 x pitch per 45 degrees).
+        let wires = &st.wires;
+        let runs: Vec<(usize, i32, usize, &[Vec2])> = drawn.iter().flat_map(|(&w, wo)| wo.runs.iter().map(move |(l, p)| (w, wires[w].net, *l, p.as_slice()))).collect();
+        let bb = super::octi::bundle_bends(&runs, &|w| st.wires[w].w + st.wires[w].s);
+        if !bb.is_empty() {
+            let med = |mut v: Vec<f64>| {
+                v.sort_by(f64::total_cmp);
+                v[v.len() / 2]
+            };
+            let d_med = med(bb.iter().map(|x| x.d_nm).collect()) / MM;
+            let per45 = med(bb.iter().map(|x| x.skew_nm / (x.deg / 45.0)).collect()) / MM;
+            let n45 = bb.iter().filter(|x| (x.deg - 45.0).abs() < 1.0).count();
+            warnings.push(format!(
+                "bundles (octilinear): {} bends taken together with a parallel neighbour ({n45} of 45 degrees), centre distance median {d_med:.3} mm; skew of the outer wire per bend {:.3} mm total, per 45 degrees median {per45:.3} mm (2 x distance x tan 22.5 = 0.83 x pitch)",
+                bb.len(),
+                bb.iter().map(|x| x.skew_nm).sum::<f64>() / MM
+            ));
+        }
     }
     // Vias in a narrow pass (the `via_squeeze` factor's report): a drawn wire via whose
     // passages keep less slack than half its diameter in the drawing's packing.
@@ -2659,6 +2712,23 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     for f in findings.iter().filter(|f| f.level >= Report::Warning) {
         warnings.push(f.text.clone());
+    }
+    if octi_on {
+        let (mut n_any, mut mm_any, mut n_acute) = (0usize, 0.0f64, 0usize);
+        for (_, ev) in &necking {
+            match ev {
+                Event::AnyAngle { mm, .. } => {
+                    n_any += 1;
+                    mm_any += mm;
+                }
+                Event::AcuteBend { .. } => n_acute += 1,
+                _ => {}
+            }
+        }
+        warnings.push(format!(
+            "octilinear drawing ([drawing] style): {} runs redrawn at 0/45/90 degrees, {} octilinear runs rejected by the clearance check (taut run kept), {:.1} s; {n_any} stretches not at 0/45/90 degrees ({mm_any:.1} mm, any_angle), {n_acute} acute bends (acute_bend)",
+            forced_stats.octi_ok, forced_stats.octi_rejected, forced_stats.octi_s
+        ));
     }
     // Never drop (M-B1): a summary and one line per rule the written copper breaks (place, type,
     // cause), at the `violation` factor's report level.

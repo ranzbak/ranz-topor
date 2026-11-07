@@ -114,6 +114,37 @@ pub fn need_lower(items: &[Item], k: usize) -> f64 {
     w + if s.is_finite() { s * gaps.min(diff) as f64 } else { 0.0 }
 }
 
+/// Octilinear drawing style (M-45): how much more of a cut one pass takes than at a square
+/// crossing (the packer's oblique factor, `>= 1`), when the drawing is octilinear. `ed`: the cut's
+/// direction; `d`: the wire's taut crossing direction. A pass where the taut path wraps a corner
+/// at the cut's end (`wrapped`, the cut radial from that corner) runs around the corner's
+/// octagon, not its circle: the octagon's support along the cut is `1 / cos(delta)`, `delta` the
+/// angle between the cut and the nearest octagon edge normal (a multiple of 45 degrees), so up to
+/// `1 / cos(22.5) = 1.082` where the any-angle drawing needs 1. A straight pass is drawn with the
+/// two octilinear directions that bracket `d` (an elbow `d = a D0 + b D1`); its factor is the
+/// two directions' oblique factors weighted by their share `a : b` (exact for an octilinear `d`).
+/// The planner (P3 / P4, through the packer) and the drawing count the room this way. O(1).
+pub fn octi_stretch(ed: crate::geom::Vec2, d: crate::geom::Vec2, wrapped: bool) -> f64 {
+    use std::f64::consts::FRAC_PI_4;
+    let (Some(e), Some(u)) = (ed.unit(), d.unit()) else { return 1.0 };
+    let obl = |v: crate::geom::Vec2| 1.0 / v.cross(e).abs().clamp(0.4, 1.0);
+    if wrapped {
+        let a = e.y.atan2(e.x).rem_euclid(FRAC_PI_4);
+        let delta = a.min(FRAC_PI_4 - a);
+        return 1.0 / delta.cos();
+    }
+    let ang = u.y.atan2(u.x).rem_euclid(std::f64::consts::TAU);
+    let k0 = (ang / FRAC_PI_4).floor();
+    let (a0, a1) = (k0 * FRAC_PI_4, (k0 + 1.0) * FRAC_PI_4);
+    let (d0, d1) = (crate::geom::Vec2 { x: a0.cos(), y: a0.sin() }, crate::geom::Vec2 { x: a1.cos(), y: a1.sin() });
+    let den = d0.cross(d1);
+    let (al, be) = ((u.cross(d1) / den).max(0.0), (d0.cross(u) / den).max(0.0));
+    if al + be <= 0.0 {
+        return obl(u);
+    }
+    (al * obl(d0) + be * obl(d1)) / (al + be)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +174,23 @@ mod tests {
         assert_eq!(need(&[it(1, 100.0, 200.0), it(2, 100.0, 200.0)], own, edge), 50.0 + 200.0 + 100.0 + 300.0);
         assert_eq!(need(&[it(1, 900.0, 200.0)], own, edge), 750.0);
         assert_eq!(need(&[it(2, 100.0, 200.0)], Bound::Open, Bound::Open), 100.0);
+    }
+
+    #[test]
+    fn octilinear_room_factor() {
+        use crate::geom::Vec2;
+        let v = |x: f64, y: f64| Vec2 { x, y };
+        // A square crossing at 0 or 45 degrees: 1.
+        assert!((octi_stretch(v(0.0, 1.0), v(1.0, 0.0), false) - 1.0).abs() < 1e-12);
+        assert!((octi_stretch(v(-1.0, 1.0), v(1.0, 1.0), false) - 1.0).abs() < 1e-12);
+        // A taut chord at 22.5 degrees across a vertical cut: the elbow's legs at 0 (factor 1) and
+        // 45 degrees (sqrt 2) in equal shares; the any-angle factor would be 1 / cos 22.5.
+        let f = octi_stretch(v(0.0, 1.0), v(1.0, (22.5f64).to_radians().tan()), false);
+        assert!(f > 1.0 / (22.5f64).to_radians().cos() && f < 2f64.sqrt(), "{f}");
+        // Around a wrapped corner: a cut at 22.5 degrees meets the octagon at its vertex.
+        let g = octi_stretch(v(1.0, (22.5f64).to_radians().tan()), v(0.0, 1.0), true);
+        assert!((g - 1.0 / (22.5f64).to_radians().cos()).abs() < 1e-9, "{g}");
+        assert!((octi_stretch(v(1.0, 1.0), v(0.0, 1.0), true) - 1.0).abs() < 1e-9);
     }
 
     #[test]

@@ -32,6 +32,7 @@ mod overflow;
 mod plane_signal;
 mod reroute;
 mod squeeze;
+mod style;
 mod via;
 mod via_squeeze;
 mod violation;
@@ -98,6 +99,11 @@ pub enum Event {
     Violation { kind: String, at: Vec2, layer: String, depth_nm: f64, len_nm: f64, against: String, cause: String },
     /// A connection without copper: its pitch (width + clearance) and straight length (nm).
     Open { pitch_nm: f64, len_nm: f64, cause: String },
+    /// Octilinear drawing (M-45): a stretch of `wire` that is not at 0/45/90 degrees, `mm` long,
+    /// at `deg` (0 .. 180, of its longest segment), its middle at `at`.
+    AnyAngle { wire: WireId, at: Vec2, deg: f64, mm: f64 },
+    /// A bend of `wire` sharper than 90 degrees: interior angle `interior_deg`, at `at`.
+    AcuteBend { wire: WireId, at: Vec2, interior_deg: f64 },
 }
 
 /// How a factor's events appear in the report.
@@ -234,6 +240,8 @@ pub fn standard_factors() -> Vec<Box<dyn Factor>> {
         Box::new(branch::Branch),
         Box::new(branch::SmdThrough),
         Box::new(branch::JunctionAngle),
+        Box::new(style::AnyAngle),
+        Box::new(style::AcuteBend),
         Box::new(violation::Violation),
     ]
 }
