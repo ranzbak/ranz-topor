@@ -286,6 +286,22 @@ it fits, the minimum only inside the planned stretches; it no longer narrows a t
 width and length. A via the plan puts at a layer change takes its spot: another net's via planned in the same
 small spot is moved or its trace rerouted before the drawing (`[vias] reserve_sites`).
 
+**Octilinear drawing (M-45).** By default the traces are drawn with straight and 45 degree segments, as most
+boards are routed by hand (`[drawing] style = "octilinear"`; `"smooth"` keeps the shortest any-angle path). Every
+trace is first found as the shortest path its topology allows, then redrawn with 0/45/90 degree segments inside its
+own lane (the room the plan gave it in each passage, so it takes no room planned for a trace drawn later): few
+bends (`[drawing] bend_mm` per 45 degrees of bend, a short piece between two bends pays more,
+`bend_spacing_mm`), 90 degrees only where needed, an elongated pad left along its long axis until past its tip. A
+trace that passes a pad or another trace runs parallel to it at the clearance, and it follows a trace drawn beside
+it (`[drawing] bundle_pull`), so a bundle keeps its pitch through its bends; each such bend makes the outer trace
+0.83 x pitch longer (the report's *bundles* line). The layer assignment and rip-up count the room an octilinear
+trace takes (`[drawing] octilinear_room`). Where 45 degrees does not fit (a passage at another angle, just wide
+enough), that stretch keeps its angle: it costs the *any_angle* factor and is a warning with its place and angle, so
+you can review it (`[drawing] any_angle = "forbidden"` sends such a trace back to the router instead); a bend
+sharper than 90 degrees costs *acute_bend* and is a warning too (`[drawing] acute`). The style never leaves a
+connection open or adds a violation: a trace drawn by force (never drop) keeps its least violating shape, which is
+usually not octilinear.
+
 ## Findings after routing
 
 After the routing, the engine's own report is turned into findings with a code, the numbers, the places and a fix;
