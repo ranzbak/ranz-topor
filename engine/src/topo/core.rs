@@ -853,6 +853,17 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let proj = &b.proj;
     let mut st = State::new(proj);
     st.cross_vias = opts.crossing_vias == "via";
+    // M-C: the plan necks a wire where its nominal width does not fit (width in P2).
+    if opts.neck_to_pad {
+        for c in &conns {
+            let f = draw::Drawer::neck_floor(&model.rules, c.net, c.w);
+            if f < c.w {
+                let e = st.floors.entry(c.net).or_insert(f);
+                *e = e.min(f);
+            }
+        }
+    }
+    st.neck_from_pad = opts.neck_from_pad;
     let ws0 = (model.rules.default.width + model.rules.default.clearance) as f64;
     let tier_of = |i: usize| dec.connections[i].tier;
     let weights = |rg: &Registry, c: &Conn, tier: u8, cap: usize| InitWeights { max_expansions: cap, ..InitWeights::from_registry(rg, &WireCtx { net: c.net, tier }) };

@@ -121,24 +121,55 @@ pub(super) struct Wp {
     pub relax: f64,
 }
 
-/// Pad-end necking of a run: at most two `(end point, radius nm)` zones, narrow width.
+/// Necking of a run: `(centre, radius nm)` zones inside which the wire is `min_w` wide: the
+/// pad-end zones of the drawing's own necks, or (M-C) the necked stretches of the plan (from a
+/// pad end, or in between; up to [`NECK_ZONES`]).
 #[derive(Clone, Copy)]
 pub(super) struct Neck {
     pub min_w: f64,
-    pub ends: [Option<(Vec2, f64)>; 2],
+    pub ends: [Option<(Vec2, f64)>; NECK_ZONES],
 }
 
+/// Most neck zones of one wire: its two pad ends and up to four necked stretches in between.
+pub(super) const NECK_ZONES: usize = 6;
+
+
 impl Wp {
-    /// Width the wire has on the segment `a-b`: narrow when the whole segment lies in a neck zone.
-    fn width_on(&self, a: Vec2, b: Vec2) -> f64 {
-        if let Some(n) = &self.neck {
+    /// The segment `a-b` cut where it crosses a neck zone's circle, each piece with the width the
+    /// wire has there: narrow inside a zone, full outside (the same cut as the drawing's
+    /// `Drawer::neck_items`, M-C: a necked stretch ends inside a segment, not at a node).
+    fn pieces(&self, a: Vec2, b: Vec2) -> Vec<(Vec2, Vec2, f64)> {
+        let Some(n) = &self.neck else { return vec![(a, b, self.w)] };
+        let d = b - a;
+        let l2 = d.len2();
+        let mut cuts = vec![0.0, 1.0];
+        if l2 > 1.0 {
             for (c, r) in n.ends.iter().flatten() {
-                if (a - *c).len() <= *r && (b - *c).len() <= *r {
-                    return n.min_w;
+                if !r.is_finite() {
+                    continue;
+                }
+                let f = a - *c;
+                let (qb, qc) = (f.dot(d), f.len2() - r * r);
+                let disc = qb * qb - l2 * qc;
+                if disc > 0.0 {
+                    let sq = disc.sqrt();
+                    for t in [(-qb - sq) / l2, (-qb + sq) / l2] {
+                        if t > 0.0 && t < 1.0 {
+                            cuts.push(t);
+                        }
+                    }
                 }
             }
         }
-        self.w
+        cuts.sort_by(f64::total_cmp);
+        cuts.windows(2)
+            .map(|c| {
+                let (u, v) = (a + d * c[0], a + d * c[1]);
+                let m = (u + v) * 0.5;
+                let inside = n.ends.iter().flatten().any(|(cc, r)| (m - *cc).len() <= *r);
+                (u, v, if inside { n.min_w } else { self.w })
+            })
+            .collect()
     }
 }
 
@@ -252,8 +283,15 @@ impl Drawer<'_> {
 
     /// The segment `a-b` keeps the clearance to every object of `ents`.
     fn seg_clear(&self, ents: &[usize], wp: &Wp, a: Vec2, b: Vec2) -> bool {
+        if wp.neck.is_some() {
+            return wp.pieces(a, b).into_iter().all(|(u, v, w)| self.seg_clear_w(ents, wp, u, v, self.seg_width(wp.wire, wp.layer, u, v, w)));
+        }
+        self.seg_clear_w(ents, wp, a, b, self.seg_width(wp.wire, wp.layer, a, b, wp.w))
+    }
+
+    /// [`Drawer::seg_clear`] of one piece at width `sw`.
+    fn seg_clear_w(&self, ents: &[usize], wp: &Wp, a: Vec2, b: Vec2, sw: f64) -> bool {
         let bb = bbox_of(&[a, b]);
-        let sw = self.seg_width(wp.wire, wp.layer, a, b, wp.width_on(a, b));
         ents.iter().all(|&i| {
             let e = &self.ents[i];
             let need = self.need_of(i, wp, sw);

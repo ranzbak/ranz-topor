@@ -51,23 +51,40 @@ impl Bound {
 }
 
 /// Space the `items` (ordered across the cut from end `lo` to end `hi`) need on one layer.
+///
+/// A run of passes of the end pad's own net next to that end may lie on the pad's copper, but
+/// its centre lines cross the cut: at best on the end vertex itself, so the run reaches half its
+/// widest width into the cut (M-C, the same as the drawing's packer, `Packer::margin`: margin 0
+/// at an own-net end, `clearance + w/2` at the other). Before M-C the run took no space, so P2
+/// planned pad exits between fine-pitch neighbours that the packer and the drawing reject
+/// (Dayan 1997 pp. 15-16: a cut must hold the widths of the wires that cross it).
 pub fn need(items: &[Item], lo: Bound, hi: Bound) -> f64 {
-    // Passes of the end pad's own net next to the end sit on the pad.
     let own = |b: &Bound, it: &Item| matches!(*b, Bound::Pad { net: Some(n), .. } if n == it.net);
+    // The run of own-net passes at an end as one item of half the widest width.
+    let half = |run: &[Item]| -> Option<Item> {
+        let f = run.first()?;
+        Some(Item { net: f.net, w: 0.5 * run.iter().map(|x| x.w).fold(0.0, f64::max), s: run.iter().map(|x| x.s).fold(0.0, f64::max) })
+    };
     let skip_lo = items.iter().take_while(|x| own(&lo, x)).count();
+    let run_lo = half(&items[..skip_lo]);
     let items = &items[skip_lo..];
     let skip_hi = items.iter().rev().take_while(|x| own(&hi, x)).count();
+    let run_hi = half(&items[items.len() - skip_hi..]);
     let items = &items[..items.len() - skip_hi];
-    let Some((first, last)) = items.first().zip(items.last()) else {
+    let all: Vec<Item> = run_lo.into_iter().chain(items.iter().copied()).chain(run_hi).collect();
+    let Some((first, last)) = all.first().zip(all.last()) else {
         return 0.0;
     };
-    let mut n: f64 = items.iter().map(|x| x.w).sum();
-    for p in items.windows(2) {
+    let mut n: f64 = all.iter().map(|x| x.w).sum();
+    for p in all.windows(2) {
         if p[0].net != p[1].net {
             n += p[0].s.max(p[1].s);
         }
     }
-    n + lo.clearance(first) + hi.clearance(last)
+    // An own run at an end needs no clearance to it (its copper may touch the pad).
+    let lo_c = if run_lo.is_some() { 0.0 } else { lo.clearance(first) };
+    let hi_c = if run_hi.is_some() { 0.0 } else { hi.clearance(last) };
+    n + lo_c + hi_c
 }
 
 /// [`need`] where a custom courtyard rule replaces the clearances (`regime`, nm): between passes
@@ -118,11 +135,26 @@ mod tests {
     fn own_net_end_needs_no_clearance() {
         let own = Bound::Pad { net: Some(1), clear: 200.0 };
         let edge = Bound::Edge { clear: 300.0 };
-        assert_eq!(need(&[it(1, 100.0, 200.0)], own, edge), 0.0);
+        // An own-net pass next to its pad: centre on the end vertex, half its width in the cut,
+        // then the far end's clearance.
+        assert_eq!(need(&[it(1, 100.0, 200.0)], own, edge), 350.0);
         assert_eq!(need(&[it(2, 100.0, 200.0)], own, edge), 600.0);
-        // The own-net pass next to the pad lies on it: only the other net's pass is left.
-        assert_eq!(need(&[it(1, 100.0, 200.0), it(2, 100.0, 200.0)], own, edge), 600.0);
-        assert_eq!(need(&[it(1, 900.0, 200.0)], own, edge), 0.0);
+        // Own run (half width) + gap + the other net's pass + its clearance to the edge.
+        assert_eq!(need(&[it(1, 100.0, 200.0), it(2, 100.0, 200.0)], own, edge), 50.0 + 200.0 + 100.0 + 300.0);
+        assert_eq!(need(&[it(1, 900.0, 200.0)], own, edge), 750.0);
         assert_eq!(need(&[it(2, 100.0, 200.0)], Bound::Open, Bound::Open), 100.0);
+    }
+
+    #[test]
+    fn pad_exit_between_fine_pitch_neighbours() {
+        // M-C: a 0.25 mm wire leaving its pad through the 0.2 mm gap to a neighbour pad (clearance
+        // 0.15 mm) needs 0.125 + 0.15 = 0.275 mm there: more than the gap (the old model: 0).
+        let own = Bound::Pad { net: Some(1), clear: 150_000.0 };
+        let nb = Bound::Pad { net: Some(2), clear: 150_000.0 };
+        let n = need(&[it(1, 250_000.0, 150_000.0)], own, nb);
+        assert_eq!(n, 275_000.0);
+        assert!(n > 200_000.0);
+        // Both ends of the wire's own net: it lies on copper all the way.
+        assert_eq!(need(&[it(1, 250_000.0, 150_000.0)], own, own), 125_000.0);
     }
 }

@@ -691,8 +691,9 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
             // A pass through a gap too narrow on some layer for this wire alone excludes it.
             if k < n {
                 let e = st.passes[wi.passes[k]].edge;
+                let pw = st.pass_w.get(wi.passes[k]).copied().unwrap_or(wi.w);
                 let fits: Vec<usize> =
-                    (0..pr.n_layers).filter(|&l| pr.fits_alone(e, l, Item { net: wi.net, w: wi.w, s: wi.s })).collect();
+                    (0..pr.n_layers).filter(|&l| pr.fits_alone(e, l, Item { net: wi.net, w: pw, s: wi.s })).collect();
                 if let [l] = fits[..] {
                     here.push(Event { node: 0, pi: l as u8, k, s: 1.0 });
                 }
@@ -912,8 +913,9 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
             }
             if k < n {
                 let e = st.passes[wi.passes[k]].edge;
+                let pw = st.pass_w.get(wi.passes[k]).copied().unwrap_or(wi.w);
                 let fits = (0..nl)
-                    .filter(|&l| pr.fits_alone(e, l, Item { net: wi.net, w: wi.w, s: wi.s }))
+                    .filter(|&l| pr.fits_alone(e, l, Item { net: wi.net, w: pw, s: wi.s }))
                     .fold(0u64, |m, l| m | 1 << l);
                 if fits != full && fits != 0 {
                     here.push((1.0, fits, None));

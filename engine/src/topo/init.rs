@@ -44,6 +44,9 @@ pub struct InitWeights {
     pub forced_layer_mm: f64,
     /// `junction_angle` price per mm of width + clearance at `psi` = 1 (the factor's weight).
     pub junction_angle_mm: f64,
+    /// `necking` price of one necked stretch at amount 1 (M-C: a pass that fits only at the
+    /// wire's neck floor starts a necked stretch; the amount grows with the depth of the neck).
+    pub neck_mm: f64,
     /// Search cap per connection.
     pub max_expansions: usize,
 }
@@ -64,6 +67,7 @@ impl InitWeights {
             ignored_mm: reg.price(&Event::IgnoredRuleViolated { rule: String::new(), at: Vec2 { x: 0.0, y: 0.0 }, amount_nm: 0.0 }, w),
             forced_layer_mm: forced,
             junction_angle_mm: reg.price(&Event::JunctionAngle { at: Vec2 { x: 0.0, y: 0.0 }, deg: 60.0, ws_mm: 1.0 / super::factors::junction_psi(60.0) }, w),
+            neck_mm: reg.price(&Event::Necking { wire: 0, from_nm: 1.0, to_nm: 1.0, mm: 0.0 }, w),
             max_expansions: 2_000_000,
         }
     }
@@ -130,6 +134,8 @@ struct Node {
     /// net's pad on one layer). A pass that leaves none implies a via (`LayerForced`, priced
     /// once) and the mask starts again from that pass's layers.
     pin: u64,
+    /// The pass fits only at the wire's neck floor (M-C): it lies in a necked stretch.
+    nk: bool,
 }
 
 /// One end a tree search may start or stop at (D5 branching, [`State::search_tree`]): a vertex of
@@ -230,6 +236,8 @@ struct Search<'s, 'p> {
     /// Per wire met in this search: its stretch layers per traversal ([`State::stretch_layers`]).
     held: std::collections::HashMap<WireId, Vec<u64>>,
     needs: Vec<f64>,
+    /// [`Search::needs`] with every pass (this one too) at its neck floor (M-C).
+    needs_n: Vec<f64>,
     items: Vec<Item>,
     heap: BinaryHeap<Key>,
     /// (cost, parent node or MAX, last triangle, source end, target end)
@@ -387,6 +395,13 @@ impl Search<'_, '_> {
         }
         let mask_t = pr.allowed(t, c.net);
         let me = Item { net: c.net, w: c.w, s: c.s };
+        // M-C: the wire's neck floor; a pass that fits only necked pays the `necking` price once
+        // per necked stretch (where the stretch starts) instead of the `overflow` price.
+        let wn = st.w_min(c.net, c.w);
+        let can_neck = wn < c.w;
+        let me_n = Item { w: wn, ..me };
+        let parent_nk = parent != usize::MAX && self.nodes[parent].nk;
+        let neck_cost = if can_neck { self.wt.neck_mm * super::factors::necking_amount(c.w, wn) } else { 0.0 };
         for &e in &pr.tri_edges[t] {
             // From a corner, only the opposite side; from a gap, not back.
             let skip = match x {
@@ -399,13 +414,15 @@ impl Search<'_, '_> {
             let Some(nt) = pr.across(e, t) else { continue };
             let Some(mask_nt) = pr.allowed(nt, c.net) else { continue };
             let alone = pr.edge_demand(e, &[me]);
+            // The layers a pass fits on count the wire necked (it may neck there, priced below).
+            let alone_pin = if can_neck { pr.edge_demand(e, &[me_n]) } else { alone };
             // The pass's layer pin, its price and the room of the layers it leaves (a stretch held
             // to one layer has that layer's room only, not the sum over the layers the triangles
             // allow, D6a), for the pin the wire has after its crossings in `t` (D6b).
             let wt = self.wt;
             let hook = self.hook.map_or(0.0, |h| h(c.net, e));
             let through = |p: u64| {
-                let (forced, nowhere, pin2) = st.pin_through(p, e, t, nt, c.net, alone);
+                let (forced, nowhere, pin2) = st.pin_through(p, e, t, nt, c.net, alone_pin);
                 let extra = if forced { wt.forced_layer_mm } else { 0.0 } + if nowhere { wt.overflow_mm } else { 0.0 } + hook;
                 let pinned = |m: u64| if m & pin2 != 0 { m & pin2 } else { m };
                 let layers = mask_t.map(|m| pinned(m.0 & mask_nt.0));
@@ -416,6 +433,7 @@ impl Search<'_, '_> {
             let base_pass = through(pin);
             let room = base_pass.3;
             self.needs.clear();
+            self.needs_n.clear();
             if room.is_some_and(f64::is_finite) {
                 st.edge_need_gaps(e, me, alone, &mut self.items, &mut self.needs);
             }
@@ -443,10 +461,22 @@ impl Search<'_, '_> {
                 if self.needs.is_empty() && (room.is_some_and(f64::is_finite) || room1.is_some_and(f64::is_finite)) {
                     st.edge_need_gaps(e, me, alone, &mut self.items, &mut self.needs);
                 }
+                // Over the room at the nominal width: necked, or an overflow when even the neck
+                // floor of every pass there does not fit (TopoR 6.3 manual p. 56).
+                let over_nom = room.is_some_and(|r| r.is_finite() && self.needs[g] > r);
+                let (nk, over) = if over_nom && can_neck {
+                    if self.needs_n.is_empty() {
+                        st.edge_need_gaps_floor(e, me_n, &mut self.items, &mut self.needs_n);
+                    }
+                    (true, room.is_some_and(|r| self.needs_n[g] > r))
+                } else {
+                    (false, over_nom)
+                };
                 let cost = base
                     + (pt - px).len() / MM * self.scale * wt.length_mm
                     + cross
-                    + if room.is_some_and(|r| r.is_finite() && self.needs[g] > r) { wt.overflow_mm } else { 0.0 }
+                    + if over { wt.overflow_mm } else { 0.0 }
+                    + if nk && !parent_nk { neck_cost } else { 0.0 }
                     + extra
                     + hist
                     + ign
@@ -456,7 +486,7 @@ impl Search<'_, '_> {
                     };
                 // Leaving a junction seed: the angle to the arms already there.
                 let cost = if parent == usize::MAX { cost + self.seed_angle(seed, pt) } else { cost };
-                self.push(Node { e, g, into: nt, from_tri: t, parent, cost, pt, seed, pin: pin2 });
+                self.push(Node { e, g, into: nt, from_tri: t, parent, cost, pt, seed, pin: pin2, nk });
             }
         }
     }
@@ -527,7 +557,8 @@ impl<'p> State<'p> {
     #[allow(clippy::too_many_arguments)]
     pub fn layer_walk(&self, net: i32, w: f64, s: f64, a: &TreeEnd, b: &TreeEnd, edges: &[EdgeId], tris: &[TriId], cross: &dyn Fn(usize) -> Vec<(u64, u64)>) -> (Vec<EdgeId>, Vec<EdgeId>) {
         let pr = self.proj;
-        let me = Item { net, w, s };
+        // The layers a pass fits on count the wire at its neck floor (M-C: P2 necks there).
+        let me = Item { net, w: self.w_min(net, w), s };
         let (mut out, mut unl) = (Vec::new(), Vec::new());
         let at = |k: usize| edges.get(k).or(edges.last()).copied().unwrap_or_else(|| pr.tri_edges[tris[k]][0]);
         let m0 = tris.first().and_then(|&t| pr.allowed(t, net)).map_or(0, |m| m.0);
@@ -567,7 +598,7 @@ impl<'p> State<'p> {
     pub fn stretch_layers(&self, w: WireId) -> Vec<u64> {
         let pr = self.proj;
         let wi = &self.wires[w];
-        let me = Item { net: wi.net, w: wi.w, s: wi.s };
+        let me = Item { net: wi.net, w: self.w_min(wi.net, wi.w), s: wi.s };
         let n = wi.passes.len();
         let all = super::state::LayerMask::all(pr.n_layers).0;
         let start = |t: TriId, v: VertId, obs: ObsId| {
@@ -661,6 +692,7 @@ impl<'p> State<'p> {
             tc: vec![None; pr.tris.len()],
             held: std::collections::HashMap::new(),
             needs: Vec::new(),
+            needs_n: Vec::new(),
             items: Vec::new(),
             heap: BinaryHeap::new(),
             goal: None,

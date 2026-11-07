@@ -32,6 +32,10 @@ pub type ObsId = usize;
 /// `Wire::pa` / `pb` of a node terminal (not a pad).
 pub const NO_OBS: ObsId = usize::MAX;
 
+/// Bottleneck passes of one wire at most this many full-width passes apart form one necked
+/// passage (M-C, [`State::refit_wire`]).
+const NECK_JOIN: usize = 2;
+
 /// One bit per copper (signal) layer index.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LayerMask(pub u64);
@@ -336,12 +340,15 @@ impl Projection {
         self.tris[t].iter().position(|&x| x == v).expect("corner of triangle") as f64
     }
 
-    /// Room of edge `e` on layer `l` for a wire of `net`: an end on the wire's own net's
-    /// obstacle is no limit, so the edge is no cut for it.
+    /// Room of edge `e` on layer `l` for a wire of `net`: an edge between two obstacles of the
+    /// wire's own net is no cut for it (it lies on copper all the way). With one end of its own
+    /// net the edge is a cut (M-C pad exits): the wire's centre may sit on that end, so it needs
+    /// half its width plus the far end's clearance ([`super::demand::need`]); before M-C such an
+    /// edge was no cut either, and P2 planned exits between fine-pitch neighbours.
     pub fn room_for(&self, e: EdgeId, l: usize, net: i32) -> f64 {
         let own = |v: VertId| matches!(self.vkind[v], VertKind::Outline(o) if self.obstacles[o].net == Some(net));
         let [p, q] = self.edges[e];
-        if own(p) || own(q) {
+        if own(p) && own(q) {
             f64::INFINITY
         } else {
             self.room[e][l]
@@ -532,6 +539,16 @@ pub struct State<'p> {
     /// to the same layer implies and narrows the layer pin ([`super::init::cross_pin`]); false
     /// (default, "crossing"): only crossings no layer assignment separates are priced (overflow).
     pub cross_vias: bool,
+    /// Width of each pass (nm, parallel to `passes`; M-C width in P2): its wire's nominal width,
+    /// or the wire's neck floor where the pass lies in a necked stretch ([`State::refit_wire`]).
+    pub pass_w: Vec<f64>,
+    /// Neck floor per net (nm; M-C): the narrowest a necked stretch of the net may be (KiCad
+    /// minimum track width, custom-rule minimum). Empty: no wire is ever necked in the plan.
+    pub floors: std::collections::HashMap<i32, f64>,
+    /// A necked stretch runs from the wire's nearest pad end to the bottleneck (user rule: a neck
+    /// starts at the footprint and may reach further back; never a neck in the middle of a
+    /// full-width run). False: only the bottleneck passes are necked.
+    pub neck_from_pad: bool,
 }
 
 impl<'p> State<'p> {
@@ -563,13 +580,208 @@ impl<'p> State<'p> {
             history: vec![0.0; proj.edges.len()],
             ends: vec![0; proj.pos.len()],
             cross_vias: false,
+            pass_w: Vec::new(),
+            floors: std::collections::HashMap::new(),
+            neck_from_pad: true,
         }
     }
+
+    /// The narrowest width a wire of `net` with nominal width `w` may neck to (`w`: none).
+    pub fn w_min(&self, net: i32, w: f64) -> f64 {
+        self.floors.get(&net).map_or(w, |&f| f.min(w))
+    }
+
+    /// Whether pass `p` lies in a necked stretch of its wire.
+    pub fn necked(&self, p: PassId) -> bool {
+        self.pass_w[p] < self.wires[self.passes[p].wire].w - 0.5
+    }
+
+    /// The necked stretches of wire `w` as counts of passes: from end `a`, from end `b`, and the
+    /// necked passes in between that belong to neither (only without `neck_from_pad`).
+    pub fn neck_runs(&self, w: WireId) -> (usize, usize, Vec<usize>) {
+        let ps = &self.wires[w].passes;
+        let n = ps.len();
+        let na = ps.iter().take_while(|&&p| self.necked(p)).count();
+        if na == n {
+            return (n, 0, Vec::new());
+        }
+        let nb = ps.iter().rev().take_while(|&&p| self.necked(p)).count();
+        let mid = (na..n - nb).filter(|&k| self.necked(ps[k])).collect();
+        (na, nb, mid)
+    }
+
+    /// Space the passes of edge `e` need on one layer with every pass at its wire's nominal
+    /// width (`floor`: at its neck floor instead), optionally with `extra` at gap `g`.
+    pub fn edge_need_at(&self, e: EdgeId, floor: bool, extra: Option<(usize, Item)>) -> f64 {
+        let mut items: Vec<Item> = self.edge_order[e]
+            .iter()
+            .map(|&p| {
+                let w = &self.wires[self.passes[p].wire];
+                Item { net: w.net, w: if floor { self.w_min(w.net, w.w) } else { w.w }, s: w.s }
+            })
+            .collect();
+        if let Some((g, it)) = extra {
+            items.insert(g.min(items.len()), it);
+        }
+        self.proj.edge_demand(e, &items)
+    }
+
+    /// Decide the width of every pass of wire `w` (M-C, width in P2; TopoR 6.3 manual p. 56: the
+    /// minimum width "in bottlenecks unless a different path is available or near pads that are
+    /// narrower than the wire"): a pass is a bottleneck when the passes of its edge at their
+    /// nominal widths need more than the room of the layers its stretch is held to (the room
+    /// the P2 search prices, [`State::stretch_layers`]); a bottleneck pass takes the neck floor,
+    /// and with `neck_from_pad` so does the stretch from the nearest pad end up to it (a neck
+    /// that frees room on the way costs no extra capacity: the narrowest part sets it anyway).
+    /// A deterministic function of the topology. O(passes x edge load).
+    pub fn refit_wire(&mut self, w: WireId) {
+        let (net, wn) = (self.wires[w].net, self.wires[w].w);
+        let ws = self.w_min(net, wn);
+        let n = self.wires[w].passes.len();
+        if !self.wires[w].alive || ws >= wn {
+            for k in 0..n {
+                let p = self.wires[w].passes[k];
+                self.pass_w[p] = wn;
+            }
+            return;
+        }
+        let held = self.stretch_layers(w);
+        let pr = self.proj;
+        let mut neck = vec![false; n];
+        for (k, nk) in neck.iter_mut().enumerate() {
+            let p = self.wires[w].passes[k];
+            let e = self.passes[p].edge;
+            let (t1, t2) = (self.wires[w].tris[k], self.wires[w].tris[k + 1]);
+            let both = pr.allowed(t1, net).map_or(0, |m| m.0) & pr.allowed(t2, net).map_or(0, |m| m.0);
+            let h = held[k] & held[k + 1];
+            let h = if h != 0 { h } else { held[k] | held[k + 1] };
+            let m = if both & h != 0 { both & h } else { both };
+            let room: f64 = (0..pr.n_layers).filter(|&l| (m >> l) & 1 == 1).map(|l| pr.room_for(e, l, net)).sum();
+            if room.is_finite() && self.edge_need_at(e, false, None) > room + 1.0 {
+                *nk = true;
+            }
+            if std::env::var("TOPO_NECKDBG").is_ok() {
+                eprintln!("NECKDBG wire {w} k {k} e {e} mask {m:b} held {:b}/{:b} both {both:b} room {room:.0} need {:.0}", held[k], held[k + 1], self.edge_need_at(e, false, None));
+            }
+        }
+        // Pad exits (M-C item 2; TopoR 6.3 manual p. 56: the minimum width "near pads that are
+        // narrower than the wire"): an end whose first stretch passes another net's copper closer
+        // than half the width plus the clearance necks its first two passes.
+        let exit = [n > 0 && self.exit_tight(w, 0), n > 0 && self.exit_tight(w, 1)];
+        if self.neck_from_pad {
+            let (pa, pb) = (self.wires[w].pa != NO_OBS, self.wires[w].pb != NO_OBS);
+            let (mut na, mut nb) = (if exit[0] { n.min(2) } else { 0 }, if exit[1] { n.min(2) } else { 0 });
+            // Bottleneck passes in clusters (at most NECK_JOIN full-width passes between two of
+            // them: one passage, e.g. the triangles of a slot); a cluster necks from the pad end
+            // that gives the shorter stretch (ties: `a`), so no full-width piece is left inside.
+            let ks: Vec<usize> = (0..n).filter(|&k| neck[k]).collect();
+            let mut i = 0;
+            while i < ks.len() {
+                let mut j = i;
+                while j + 1 < ks.len() && ks[j + 1] - ks[j] <= NECK_JOIN + 1 {
+                    j += 1;
+                }
+                let (lo, hi) = (ks[i], ks[j]);
+                let (from_a, from_b) = (hi + 1, n - lo);
+                if pa && (!pb || from_a <= from_b) {
+                    na = na.max(from_a);
+                } else if pb {
+                    nb = nb.max(from_b);
+                }
+                i = j + 1;
+            }
+            for (k, nk) in neck.iter_mut().enumerate() {
+                *nk = *nk || k < na || k + nb >= n;
+            }
+        } else {
+            for (end, &x) in exit.iter().enumerate() {
+                if x {
+                    for j in 0..n.min(2) {
+                        neck[if end == 0 { j } else { n - 1 - j }] = true;
+                    }
+                }
+            }
+        }
+        for (k, &nk) in neck.iter().enumerate() {
+            let p = self.wires[w].passes[k];
+            self.pass_w[p] = if nk { ws } else { wn };
+        }
+    }
+
+    /// Whether the exit of wire `w` from its pad at `end` (0 = `a`, 1 = `b`) is too narrow for its
+    /// nominal width (M-C pad exits, pin access): the stretch from the pad centre through its
+    /// first two passes (the pass points) comes closer than `w/2 + clearance` to the copper of an
+    /// obstacle of another net next to the pad or to those passes' edges (CDT neighbours only).
+    /// O(neighbourhood x outline).
+    pub fn exit_tight(&self, w: WireId, end: usize) -> bool {
+        let pr = self.proj;
+        let wi = &self.wires[w];
+        let n = wi.passes.len();
+        let (pad, v) = if end == 0 { (wi.pa, wi.a) } else { (wi.pb, wi.b) };
+        if pad == NO_OBS || n == 0 {
+            return false;
+        }
+        let ks: Vec<usize> = if end == 0 { (0..n.min(2)).collect() } else { (0..n.min(2)).map(|j| n - 1 - j).collect() };
+        let mut pts = vec![pr.pos[v]];
+        pts.extend(ks.iter().map(|&k| self.pass_point(wi.passes[k])));
+        // Candidate obstacles: those with a vertex next to the pad's outline or to the edges.
+        let mut verts: Vec<VertId> = ks.iter().flat_map(|&k| pr.edges[self.passes[wi.passes[k]].edge]).collect();
+        verts.extend(pr.obstacles[pad].poly.iter().filter_map(|&q| pr.vertex_at(q, 2.0)));
+        let mut obs: Vec<ObsId> = Vec::new();
+        for &u in &verts {
+            for &t in &pr.vert_tris[u] {
+                for &x in &pr.tris[t] {
+                    if let VertKind::Outline(o) = pr.vkind[x] {
+                        if o != pad && !obs.contains(&o) {
+                            obs.push(o);
+                        }
+                    }
+                }
+            }
+        }
+        let me = &pr.obstacles[pad];
+        for o in obs {
+            let ob = &pr.obstacles[o];
+            if ob.net == Some(wi.net) || !(ob.drilled || ob.layers.0 & me.layers.0 != 0) {
+                continue;
+            }
+            let need = 0.5 * wi.w + if ob.bare { ob.clear } else { ob.clear.max(wi.s) } - 1.0;
+            let m = ob.poly.len();
+            for sgm in pts.windows(2) {
+                for i in 0..m {
+                    if seg_seg_dist(sgm[0], sgm[1], ob.poly[i], ob.poly[(i + 1) % m]) < need {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// [`State::refit_wire`] for `w` and every alive wire that shares an edge with it (its
+    /// passes change their bottlenecks). No-op without neck floors.
+    pub fn refit_around(&mut self, w: WireId) {
+        if self.floors.is_empty() {
+            return;
+        }
+        let mut ws: Vec<WireId> = vec![w];
+        for &p in &self.wires[w].passes {
+            ws.extend(self.edge_order[self.passes[p].edge].iter().map(|&q| self.passes[q].wire));
+        }
+        ws.sort_unstable();
+        ws.dedup();
+        for x in ws {
+            if self.wires[x].alive {
+                self.refit_wire(x);
+            }
+        }
+    }
+
 
     /// The pass `p` as a demand item.
     pub fn item(&self, p: PassId) -> Item {
         let w = &self.wires[self.passes[p].wire];
-        Item { net: w.net, w: w.w, s: w.s }
+        Item { net: w.net, w: self.pass_w[p], s: w.s }
     }
 
     /// Space the passes of edge `e` need on one layer, optionally with `extra` inserted at gap
@@ -596,6 +808,23 @@ impl<'p> State<'p> {
         items.extend(ord.iter().map(|&p| self.item(p)));
         let (regime, lo, hi) = (self.proj.regime(e), self.proj.bound(self.proj.edges[e][0]), self.proj.bound(self.proj.edges[e][1]));
         for g in 0..=ord.len() {
+            items.insert(g, me);
+            out.push(need_in(regime, items, lo, hi));
+            items.remove(g);
+        }
+    }
+
+    /// [`State::edge_need_gaps`] with every pass of the edge at its wire's neck floor and `me`
+    /// as given (M-C: whether the gap fits when everything there necks). O(passes²).
+    pub fn edge_need_gaps_floor(&self, e: EdgeId, me: Item, items: &mut Vec<Item>, out: &mut Vec<f64>) {
+        out.clear();
+        items.clear();
+        items.extend(self.edge_order[e].iter().map(|&p| {
+            let w = &self.wires[self.passes[p].wire];
+            Item { net: w.net, w: self.w_min(w.net, w.w), s: w.s }
+        }));
+        let (regime, lo, hi) = (self.proj.regime(e), self.proj.bound(self.proj.edges[e][0]), self.proj.bound(self.proj.edges[e][1]));
+        for g in 0..=items.len() {
             items.insert(g, me);
             out.push(need_in(regime, items, lo, hi));
             items.remove(g);
@@ -861,6 +1090,7 @@ impl<'p> State<'p> {
             let shift = path[..j].iter().filter(|&&(e0, g0)| e0 == e && g0 <= g).count();
             let pid = self.passes.len();
             self.passes.push(Pass { wire: id, edge: e });
+            self.pass_w.push(wire.w);
             let at = (g + shift).min(self.edge_order[e].len());
             self.edge_order[e].insert(at, pid);
             wire.passes.push(pid);
@@ -873,6 +1103,7 @@ impl<'p> State<'p> {
         self.ends[wire.a] += 1;
         self.ends[wire.b] += 1;
         self.wires.push(wire);
+        self.refit_around(id);
         id
     }
 
@@ -888,6 +1119,7 @@ impl<'p> State<'p> {
             for &(e, u) in &passes {
                 let pid = self.passes.len();
                 self.passes.push(Pass { wire: id, edge: e });
+                self.pass_w.push(wire.w);
                 at[e].push((u, pid));
                     wire.passes.push(pid);
             }
@@ -907,6 +1139,22 @@ impl<'p> State<'p> {
     }
 
     pub fn remove(&mut self, w: WireId) {
+        self.remove_quiet(w);
+        // The wires that shared an edge with it may widen again.
+        if !self.floors.is_empty() {
+            let mut ws: Vec<WireId> = self.wires[w].passes.iter().flat_map(|&p| self.edge_order[self.passes[p].edge].iter().map(|&q| self.passes[q].wire)).collect();
+            ws.sort_unstable();
+            ws.dedup();
+            for x in ws {
+                if self.wires[x].alive {
+                    self.refit_wire(x);
+                }
+            }
+        }
+    }
+
+    /// [`State::remove`] without refitting the widths of the wires around it.
+    fn remove_quiet(&mut self, w: WireId) {
         for &p in &self.wires[w].passes {
             let e = self.passes[p].edge;
             self.edge_order[e].retain(|&x| x != p);
@@ -960,6 +1208,7 @@ impl<'p> State<'p> {
         self.ends[a] += 1;
         self.ends[b] += 1;
         self.wires[w].alive = true;
+        self.refit_around(w);
     }
 
     /// The passes of `a` and `b` between two of their crossings, paired edge by edge, when
@@ -1037,4 +1286,25 @@ impl<'p> State<'p> {
         }
         Ok(())
     }
+}
+
+/// Distance between the segments `a-b` and `c-d`.
+fn seg_seg_dist(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> f64 {
+    let pt = |p: Vec2, u: Vec2, v: Vec2| {
+        let e = v - u;
+        let l2 = e.len2();
+        let t = if l2 > 0.0 { ((p - u).dot(e) / l2).clamp(0.0, 1.0) } else { 0.0 };
+        (u + e * t - p).len()
+    };
+    if interleave_seg(a, b, c, d) {
+        return 0.0;
+    }
+    pt(a, c, d).min(pt(b, c, d)).min(pt(c, a, b)).min(pt(d, a, b))
+}
+
+/// Whether the segments `a-b` and `c-d` cross properly.
+fn interleave_seg(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
+    let o = |p: Vec2, q: Vec2, r: Vec2| (q - p).cross(r - p);
+    let (d1, d2, d3, d4) = (o(c, d, a), o(c, d, b), o(a, b, c), o(a, b, d));
+    (d1 > 0.0) != (d2 > 0.0) && (d3 > 0.0) != (d4 > 0.0) && d1 != 0.0 && d2 != 0.0 && d3 != 0.0 && d4 != 0.0
 }

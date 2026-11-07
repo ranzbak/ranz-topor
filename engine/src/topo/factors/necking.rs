@@ -1,5 +1,16 @@
 //! Necking: 30 mm per necked stretch (a wire narrowed below its netclass width, down to the
-//! floor from `topor.toml`, never below the fab minimum read from KiCad). Reported as a warning.
+//! floor from `topor.toml`, never below the fab minimum read from KiCad), graded by the depth of
+//! the neck (M-C): amount `1 + (nominal - necked) / nominal`, so a deeper neck costs more and a
+//! neck never costs less than one stretch (TopoR 6.3 manual pp. 72-73: shrinkages are a
+//! criterion of their own). P2 prices it where a stretch starts to neck. Reported as a warning.
+
+/// Amount of one necked stretch from width `from` to `to` (nm): `1 + (from - to) / from`.
+pub fn necking_amount(from: f64, to: f64) -> f64 {
+    if from <= 0.0 {
+        return 1.0;
+    }
+    1.0 + ((from - to) / from).clamp(0.0, 1.0)
+}
 
 use super::{Event, Factor, Report};
 
@@ -10,7 +21,7 @@ impl Factor for Necking {
         "necking"
     }
     fn doc(&self) -> &'static str {
-        "A stretch narrowed below the netclass width (not below the fab minimum)."
+        "A stretch narrowed below the netclass width (not below the fab minimum); more the deeper the neck (1 + depth / width)."
     }
     fn unit(&self) -> &'static str {
         "per necked stretch"
@@ -23,7 +34,7 @@ impl Factor for Necking {
     }
     fn amount(&self, ev: &Event) -> f64 {
         match *ev {
-            Event::Necking { .. } => 1.0,
+            Event::Necking { from_nm, to_nm, .. } => necking_amount(from_nm, to_nm),
             _ => 0.0,
         }
     }

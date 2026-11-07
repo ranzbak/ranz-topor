@@ -343,7 +343,7 @@ impl<'a> CapModel<'a> {
             |p| {
                 let w = self.st.passes[p].wire;
                 let wi = &self.st.wires[w];
-                PackItem { net: wi.net, w: wi.w, s: wi.s, infl: infl_dir(pr, e, self.dirs[w][self.pass_k[p]]), disc: [0.0; 2] }
+                PackItem { net: wi.net, w: self.st.pass_w.get(p).copied().unwrap_or(wi.w), s: wi.s, infl: infl_dir(pr, e, self.dirs[w][self.pass_k[p]]), disc: [0.0; 2] }
             },
         )
         .1

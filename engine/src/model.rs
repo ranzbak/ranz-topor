@@ -1174,6 +1174,15 @@ pub struct Options {
     /// Router (NX, `topor.toml [search] neck_max_mm`): longest necked stub, nm; 0 = twice the
     /// pad's long side.
     pub neck_max_nm: i64,
+    /// M-C (`topor.toml [search] neck_from_pad`): a necked stretch the plan decides runs from the
+    /// wire's nearest pad end to the bottleneck (user rule 2026-11-05: a neck starts at the
+    /// footprint and may reach further back to free room for others; never a neck in the middle
+    /// of a full-width run). False: only the bottleneck passes themselves are necked.
+    pub neck_from_pad: bool,
+    /// M-C (`topor.toml [search] neck_in_drawing`): the drawing may also neck a pad end the plan
+    /// kept at full width when the full-width copper is rejected (the behaviour before M-C).
+    /// False (default): the drawing necks only where the plan necked.
+    pub neck_in_drawing: bool,
     /// Router (A6, `topor.toml [search] pad_bridge_max_mm`): a connection between two pads of
     /// one footprint at most this far apart (centre to centre, nm) whose straight line is clean,
     /// possibly only off the centre line, is routed by that one track (`exit_stubs` auto: only
@@ -1281,6 +1290,8 @@ impl Default for Options {
             runs: 5,
             allow_violations: true,
             neck_max_nm: 0,
+            neck_from_pad: true,
+            neck_in_drawing: false,
             pad_bridge_max_nm: 2_000_000,
             steiner: true,
         }

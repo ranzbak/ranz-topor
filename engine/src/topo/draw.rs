@@ -924,7 +924,8 @@ impl<'a> Drawer<'a> {
             |pid| {
                 let wi = &self.st.wires[self.st.passes[pid].wire];
                 let (w, k) = (self.st.passes[pid].wire, self.pass_k[pid]);
-                let pw = self.widths.as_ref().map_or(wi.w, |x| x.pass_w[pid]);
+                // The plan's width of the pass (M-C: necked where P2 necked it).
+                let pw = self.widths.as_ref().map_or(self.st.pass_w.get(pid).copied().unwrap_or(wi.w), |x| x.pass_w[pid]);
                 PackItem { net: wi.net, w: pw, s: wi.s, infl: infl_dir(&self.b.proj, e, self.dirs[w][k]), disc: [0.0; 2] }
             },
         );
@@ -1976,17 +1977,25 @@ impl<'a> Drawer<'a> {
             #[allow(clippy::type_complexity)]
             let mut cands: Vec<(f64, Vec<Vec2>, Vec<Item>, Vec<Viol>, Option<(f64, [f64; 2])>, &'static str)> = Vec::new();
             let neck = self.neck_zones(w, r == 0, r == plan.layers.len() - 1);
-            for attempt in 0..5 {
-                // 0: the exact taut path at full width; 1: the same with pad-end neck zones (only
-                // where the first failed: a necked end enters the pad with less copper);
-                // 2..4: S2a's funnel + repair attempts.
-                let pts = if attempt <= 1 {
-                    if attempt == 1 && neck.is_none() {
+            // M-C: the plan's necked stretches (width in P2); the drawing realises them.
+            let pneck = self.plan_neck(w);
+            for attempt in 0..6 {
+                // 0: the exact taut path at the nominal width; 1: the same with the plan's necked
+                // stretches (M-C; TopoR 6.3 manual p. 56: the minimum width only where no other
+                // path is available), only when the plan necks the wire; 2 (only with
+                // `neck_in_drawing`, the behaviour before M-C): pad-end neck zones of the drawing's
+                // own; 3..5: S2a's funnel + repair attempts.
+                let pts = if attempt <= 2 {
+                    if (attempt == 1 && pneck.is_none()) || (attempt == 2 && (neck.is_none() || !self.opts.neck_in_drawing)) {
                         continue;
                     }
                     let base = self.base_polyline(w, k0, k1, s, e, 0);
                     let t_ex = std::time::Instant::now();
-                    let fixed = self.exact_fix(w, k0, k1, layer, base, if attempt == 1 { neck } else { None });
+                    let fixed = self.exact_fix(w, k0, k1, layer, base, match attempt {
+                        1 => pneck,
+                        2 => neck,
+                        _ => None,
+                    });
                     self.stats.exact_s += t_ex.elapsed().as_secs_f64();
                     match fixed {
                         Some(p) => p,
@@ -1996,10 +2005,10 @@ impl<'a> Drawer<'a> {
                         }
                     }
                 } else {
-                    self.run_polyline(w, k0, k1, s, e, attempt - 2, layer)
+                    self.run_polyline(w, k0, k1, s, e, attempt - 3, layer)
                 };
                 tried.push(pts.clone());
-                if attempt >= 2 {
+                if attempt >= 3 {
                     let walls = self.via_walls(w, k0, k1, layer);
                     if pts.windows(2).any(|x| walls.iter().any(|&(c, d)| seg_proper(x[0], x[1], c, d))) {
                         last_reason = "drawing: passes a via of another net on the wrong side (topology)".to_string();
@@ -2011,9 +2020,25 @@ impl<'a> Drawer<'a> {
                 }
                 let (ps, pe) = (r == 0, r == plan.layers.len() - 1);
                 let mut items = self.run_items(w, layer, &pts);
-                let mut rep = self.checker.check_against(&self.idx, &items, &[]);
+                let mut pneck_out: Option<(f64, [f64; super::exact::NECK_ZONES])> = None;
+                let full = self.checker.check_against(&self.idx, &items, &[]);
+                let mut rep = match &pneck {
+                    _ if full.violations.is_empty() => full,
+                    Some(pn) => match self.plan_neck_run(w, lid, &pts, pn) {
+                        Some((wn, its, ls)) => {
+                            items = its;
+                            pneck_out = Some((wn, ls));
+                            CheckReport::default()
+                        }
+                        None => {
+                            items = self.neck_items(w, lid, &pts, pn, pn.min_w).0;
+                            self.checker.check_against(&self.idx, &items, &[])
+                        }
+                    },
+                    None => full,
+                };
                 let mut neck: Option<(f64, [f64; 2])> = None;
-                if !rep.violations.is_empty() && self.opts.neck_to_pad && (ps || pe) {
+                if !rep.violations.is_empty() && self.opts.neck_in_drawing && self.opts.neck_to_pad && (ps || pe) {
                     if let Some((wn, its, ls)) = self.neck_run(w, lid, &pts, ps, pe) {
                         items = its;
                         rep = CheckReport::default();
@@ -2046,7 +2071,16 @@ impl<'a> Drawer<'a> {
                             out.necks.push((pts[pts.len() - 1], wn, ls[1]));
                         }
                     }
-                    if attempt <= 1 {
+                    if let (Some((wn, ls)), Some(pn)) = (pneck_out, &pneck) {
+                        if wn < wi.w {
+                            for (z, l) in pn.ends.iter().zip(ls) {
+                                if let (Some((c, _)), true) = (z, l > 0.0) {
+                                    out.necks.push((*c, wn, l));
+                                }
+                            }
+                        }
+                    }
+                    if attempt <= 2 {
                         self.stats.exact_ok += 1;
                     } else {
                         self.stats.fallback_ok += 1;
@@ -2086,10 +2120,13 @@ impl<'a> Drawer<'a> {
                 let base0 = self.base_polyline(w, k0, k1, s, e, 0);
                 let mut try_relax = |f: f64, cands: &mut Vec<_>| -> bool {
                     let t_ex = std::time::Instant::now();
-                    let got = self.exact_fix_relaxed(w, k0, k1, layer, base0.clone(), None, f * full);
+                    let got = self.exact_fix_relaxed(w, k0, k1, layer, base0.clone(), pneck, f * full);
                     self.stats.exact_s += t_ex.elapsed().as_secs_f64();
                     let Some(pts) = got else { return false };
-                    let items = self.run_items(w, layer, &pts);
+                    let items = match &pneck {
+                        Some(pn) => self.neck_items(w, lid, &pts, pn, pn.min_w).0,
+                        None => self.run_items(w, layer, &pts),
+                    };
                     let rep = self.checker.check_against(&self.idx, &items, &[]);
                     let mut vs = self.viols_of(&items, &rep);
                     vs.extend(self.graze_viols(w, &items));
@@ -2119,7 +2156,10 @@ impl<'a> Drawer<'a> {
                     if pts.len() < 2 || pts.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
                         continue;
                     }
-                    let items = self.run_items(w, layer, &pts);
+                    let items = match &pneck {
+                        Some(pn) => self.neck_items(w, lid, &pts, pn, pn.min_w).0,
+                        None => self.run_items(w, layer, &pts),
+                    };
                     let rep = self.checker.check_against(&self.idx, &items, &[]);
                     let mut vs = self.viols_of(&items, &rep);
                     vs.extend(self.graze_viols(w, &items));
@@ -2283,7 +2323,146 @@ impl<'a> Drawer<'a> {
         let cap = |ob: usize| if self.opts.neck_max_nm > 0 { self.opts.neck_max_nm as f64 } else { 4.0 * ext(ob) };
         // Euclidean radius half the neck length: the neck is cut by path length, which is longer.
         let zone = |ob: usize| (pr.pos[if ob == wi.pa { wi.a } else { wi.b }], 0.5 * cap(ob));
-        Some(super::exact::Neck { min_w, ends: [ps.then(|| zone(wi.pa)), pe.then(|| zone(wi.pb))] })
+        let mut ends = [None; super::exact::NECK_ZONES];
+        ends[0] = ps.then(|| zone(wi.pa));
+        ends[1] = pe.then(|| zone(wi.pb));
+        Some(super::exact::Neck { min_w, ends })
+    }
+
+    /// The necked stretches of wire `w` as the plan decided them (M-C, [`State::refit_wire`]):
+    /// a zone around a pad end reaching the far side of the last necked pass's edge (the drawn
+    /// crossing lies somewhere on it), the whole board when the wire is necked end to end, and a
+    /// zone around each run of necked passes in between (its edges' extent). `None`: the plan
+    /// keeps the wire at its nominal width.
+    pub(super) fn plan_neck(&self, w: WireId) -> Option<super::exact::Neck> {
+        let st = self.st;
+        let wi = &st.wires[w];
+        let (na, nb, mid) = st.neck_runs(w);
+        if std::env::var("TOPO_NECKDBG").is_ok() {
+            eprintln!("PLANNECK wire {w} n {} na {na} nb {nb} mid {mid:?} widths {:?}", wi.passes.len(), wi.passes.iter().map(|&p| st.pass_w[p]).collect::<Vec<_>>());
+        }
+        if na == 0 && nb == 0 && mid.is_empty() {
+            return None;
+        }
+        let pr = &self.b.proj;
+        let n = wi.passes.len();
+        let min_w = st.w_min(wi.net, wi.w);
+        // The zone reaches one pitch (width + clearance) past the farthest point of the last
+        // necked pass's edge: the full-width wire beyond it keeps its clearance to the obstacles
+        // that make the bottleneck.
+        let far = |k: usize, c: Vec2| -> f64 {
+            let [p, q] = pr.edges[st.passes[wi.passes[k]].edge];
+            (pr.pos[p] - c).len().max((pr.pos[q] - c).len()) + wi.w + wi.s
+        };
+        let mut ends = [None; super::exact::NECK_ZONES];
+        if na == n {
+            let c = pr.pos[wi.a];
+            ends[0] = Some((c, f64::INFINITY));
+            return Some(super::exact::Neck { min_w, ends });
+        }
+        if na > 0 {
+            let c = pr.pos[wi.a];
+            ends[0] = Some((c, (0..na).map(|k| far(k, c)).fold(0.0, f64::max)));
+        }
+        if nb > 0 {
+            let c = pr.pos[wi.b];
+            ends[1] = Some((c, (n - nb..n).map(|k| far(k, c)).fold(0.0, f64::max)));
+        }
+        // Runs of necked passes in between (without `neck_from_pad`): one zone each.
+        let mut z = 2;
+        let mut i = 0;
+        while i < mid.len() && z < super::exact::NECK_ZONES {
+            let mut j = i;
+            while j + 1 < mid.len() && mid[j + 1] == mid[j] + 1 {
+                j += 1;
+            }
+            let pts: Vec<Vec2> = (mid[i]..=mid[j]).flat_map(|k| pr.edges[st.passes[wi.passes[k]].edge].map(|v| pr.pos[v])).collect();
+            let c = pts.iter().fold(Vec2::default(), |a, &p| a + p) * (1.0 / pts.len() as f64);
+            ends[z] = Some((c, pts.iter().map(|&p| (p - c).len()).fold(0.0, f64::max) + wi.w + wi.s));
+            z += 1;
+            i = j + 1;
+        }
+        Some(super::exact::Neck { min_w, ends })
+    }
+
+    /// Track items of the polyline `pts` with the parts inside the zones of `neck` at width
+    /// `wn` (each segment cut where it crosses a zone's circle) and the rest at the wire's width;
+    /// with the necked length per zone. O(segments x zones).
+    fn neck_items(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> (Vec<Item>, [f64; super::exact::NECK_ZONES]) {
+        let wi = &self.st.wires[w];
+        let mut items = Vec::new();
+        let mut lens = [0.0; super::exact::NECK_ZONES];
+        for p in pts.windows(2) {
+            let (a, b) = (p[0], p[1]);
+            let d = b - a;
+            let l2 = d.len2();
+            if l2 <= 1.0 {
+                continue;
+            }
+            let mut cuts = vec![0.0, 1.0];
+            for (c, r) in neck.ends.iter().flatten() {
+                if !r.is_finite() {
+                    continue;
+                }
+                // |a + t d - c| = r
+                let f = a - *c;
+                let (qb, qc) = (f.dot(d), f.len2() - r * r);
+                let disc = qb * qb - l2 * qc;
+                if disc > 0.0 {
+                    let sq = disc.sqrt();
+                    for t in [(-qb - sq) / l2, (-qb + sq) / l2] {
+                        if t > 0.0 && t < 1.0 {
+                            cuts.push(t);
+                        }
+                    }
+                }
+            }
+            cuts.sort_by(f64::total_cmp);
+            for c in cuts.windows(2) {
+                let (u, v) = (a + d * c[0], a + d * c[1]);
+                if (v - u).len2() <= 1.0 {
+                    continue;
+                }
+                let m = (u + v) * 0.5;
+                let zone = neck.ends.iter().position(|z| z.is_some_and(|(cc, r)| (m - cc).len() <= r));
+                if let Some(zi) = zone {
+                    lens[zi] += (v - u).len();
+                }
+                items.push(track_item(wi.net, lid, if zone.is_some() { wn } else { wi.w }, u, v, Some(w)));
+            }
+        }
+        (items, lens)
+    }
+
+    /// The run drawn with the plan's necks (M-C) at the widest width in `[floor, nominal]` the
+    /// checker accepts (TopoR 6.3 manual p. 56: the minimum width only where needed); `None`
+    /// when even the floor is rejected. Returns `(width, items, necked length per zone)`.
+    #[allow(clippy::type_complexity)]
+    fn plan_neck_run(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck) -> Option<(f64, Vec<Item>, [f64; super::exact::NECK_ZONES])> {
+        let wi = &self.st.wires[w];
+        let ok = |wn: f64| {
+            let its = self.neck_items(w, lid, pts, neck, wn).0;
+            self.checker.check_against(&self.idx, &its, &[]).violations.is_empty()
+        };
+        if ok(wi.w) {
+            let (items, lens) = self.neck_items(w, lid, pts, neck, wi.w);
+            return Some((wi.w, items, lens));
+        }
+        if !ok(neck.min_w) {
+            return None;
+        }
+        let (mut lo, mut hi) = (neck.min_w, wi.w);
+        for _ in 0..12 {
+            let mid = 0.5 * (lo + hi);
+            if ok(mid) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let wn = lo.floor().max(neck.min_w);
+        let (items, lens) = self.neck_items(w, lid, pts, neck, wn);
+        Some((wn, items, lens))
     }
 
     /// The run with its pad ends narrowed to the widest width the checker accepts (plan item

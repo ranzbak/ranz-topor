@@ -37,6 +37,7 @@ mod via_squeeze;
 mod violation;
 
 pub use branch::junction_psi;
+pub use necking::necking_amount;
 pub use squeeze::squeeze_amount;
 pub use violation::{violation_amount, AREA_REF_MM2};
 
@@ -460,7 +461,7 @@ mod tests {
         assert_eq!(r.price(&Event::Crossing { a: 0, b: 1, tri: 0, same_net: true }, &w), 0.0);
         assert_eq!(r.price(&Event::PlaneLength { wire: 0, layer: 1, mm: 2.0 }, &w), 20.0);
         assert_eq!(r.price(&Event::PlaneCut { wire: 0, layer: 1 }, &w), 25.0);
-        assert_eq!(r.price(&Event::Necking { wire: 0, from_nm: 200e3, to_nm: 150e3, mm: 4.0 }, &w), 30.0);
+        assert_eq!(r.price(&Event::Necking { wire: 0, from_nm: 200e3, to_nm: 150e3, mm: 4.0 }, &w), 37.5);
     }
 
     #[test]
