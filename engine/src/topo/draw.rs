@@ -1571,6 +1571,18 @@ impl<'a> Drawer<'a> {
     /// its diameter). O(violations x samples x checker query).
     pub fn viols_of(&self, items: &[Item], rep: &CheckReport) -> Vec<Viol> {
         let r = &self.model.rules;
+        // Routed copper (`item:N`) is named by its net: "track of SIG (item:12)".
+        let name = |against: &str| -> String {
+            let Some(id) = against.strip_prefix("item:").and_then(|x| x.parse::<usize>().ok()) else { return against.to_string() };
+            match self.idx.net_of(id) {
+                Some((net, via)) => format!(
+                    "{} of {} ({against})",
+                    if via { "via" } else { "track" },
+                    self.model.nets.iter().find(|n| n.code == net).map_or(net.to_string(), |n| n.name.clone())
+                ),
+                None => against.to_string(),
+            }
+        };
         let hole_reqs = [r.hole_to_hole + self.opts.margin_nm, r.via_hole_clear() + self.opts.margin_nm];
         let mut out = Vec::new();
         for v in &rep.violations {
@@ -1594,7 +1606,7 @@ impl<'a> Drawer<'a> {
                     layer: v.layer,
                     depth_nm: depth,
                     len_nm: x.d as f64,
-                    against: v.against.clone(),
+                    against: name(&v.against),
                     via: true,
                 }),
                 Item::Track(t) => {
@@ -1653,7 +1665,7 @@ impl<'a> Drawer<'a> {
                         layer: v.layer,
                         depth_nm: depth,
                         len_nm: blen,
-                        against: v.against.clone(),
+                        against: name(&v.against),
                         via: false,
                     });
                 }

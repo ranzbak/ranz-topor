@@ -840,6 +840,11 @@ impl ItemIndex {
     }
 
     /// Index `item`; returns its id (label `item:<id>`). O(cells covered).
+    /// Net of the indexed item `id` and whether it is a via; `None` when `id` is not live.
+    pub fn net_of(&self, id: usize) -> Option<(i32, bool)> {
+        self.obstacles.get(id)?.as_ref().map(|(o, _)| (o.net, o.kind == Kind::Via))
+    }
+
     pub fn insert(&mut self, item: &Item) -> usize {
         let (net, track) = item_track(item);
         let id = match self.free.pop() {
