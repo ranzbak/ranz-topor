@@ -422,8 +422,11 @@ topor does for that (each item is a rule of KiCad's cleaner, `pcbnew/tracks_clea
 
 The run report has one line `cleanup-safe output (...)` with what was dropped, split or merged. A trace topor
 writes **with a rule violation** (never drop) is the one exception: when it shorts another net, the cleanup's
-"Delete tracks connecting different nets" removes it, and the rest of that trace then counts as unconnected at one
-end and goes too. Fix such violations first (Inspect → Design Rules Checker), then run the cleanup.
+"Delete tracks connecting different nets" removes it (and "Delete tracks fully inside pads" a piece lying inside the
+other net's pad), and the rest of that trace then counts as unconnected at one end and goes too. Fix such violations
+first (Inspect → Design Rules Checker), then run the cleanup. With "Refill zones before and after cleanup" checked,
+KiCad may still ask "Zone fills are out-of-date. Refill?" on large boards (qmtech: two of five zones differed by a
+few of 39 000 outline points from a live refill); refilling changes nothing the cleanup does.
 
 ## Report folder
 
