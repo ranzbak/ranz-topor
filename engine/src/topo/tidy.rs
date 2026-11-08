@@ -8,10 +8,14 @@
 //! * **null segment** (`TRACKS_CLEANER::cleanup`, `IsNull`): a segment with start == end is dropped;
 //! * **duplicate segment** (`cleanup`, both ends on the other's ends, same width and layer): the
 //!   second copy is dropped;
-//! * **track fully inside a pad** (`TRACKS_CLEANER::deleteTracksInPads`: both ends inside one
-//!   connected pad and nothing of the track outside it): dropped when the pad is of the track's
-//!   net. Everything that met the dropped segment met it inside that pad, so it still touches the
-//!   pad: the connection is unchanged, as KiCad's cleaner would leave it;
+//! * **track a pad makes redundant**: wholly inside one pad of its net
+//!   (`TRACKS_CLEANER::deleteTracksInPads`), or with both ends within reach of that pad, one end free
+//!   (the terminal) and the other, the joint to the rest of the trace, at least as near to the
+//!   pad's anchor: `TestTrackEndpointDangling` counts a pad that reaches both ends of a track once,
+//!   for the end nearer to the pad's anchor, so the terminal end counts as unconnected (qmtech
+//!   ADV_TX2- at USB1.3, an 86 µm piece). Such a segment is dropped (repeated until none is left);
+//!   everything that met it met it within reach of that pad, so the connection is unchanged. A
+//!   piece from the pad's anchor out to its edge (anchor = the terminal, nearer) stays;
 //! * **T junction** (`CONNECTIVITY_DATA::TestTrackEndpointDangling`,
 //!   `pcbnew/connectivity/connectivity_data.cpp`: an end is connected when it lies within width/2
 //!   of a connected item, but an item that reaches *both* ends of a track counts once, for the end
@@ -32,15 +36,16 @@
 //! T search), O(S · P_net) for the pad test.
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+/// KiCad's `ERROR_INSIDE` polygon approximation of pads and track ends (default board maximum
+/// error 5 µm): a segment within this of lying wholly inside a pad is treated as inside, as the
+/// cleaner's polygon test may.
+const PAD_TOL_NM: f64 = 5_000.0;
+
 use crate::geom::dist::Skeleton;
 use crate::geom::quant::{IVec2, TrackPrim};
 use crate::geom::Vec2;
 use crate::model::{BoardModel, Item, TrackItem};
 
-/// KiCad's `ERROR_INSIDE` polygon approximation of pads and track ends (default board maximum
-/// error 5 µm): a segment within this of lying fully inside a pad is treated as inside, as the
-/// cleaner's polygon test may.
-const PAD_TOL_NM: f64 = 5_000.0;
 
 /// What [`tidy`] changed, for the run report.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -61,7 +66,7 @@ impl TidyStats {
     /// One report line.
     pub fn line(&self) -> String {
         format!(
-            "cleanup-safe output (KiCad's Cleanup Tracks & Vias leaves it unchanged): {} null and {} duplicate segments dropped, {} segments fully inside a pad of their net dropped, {} T junctions made exact vertices ({} track ends moved onto the trunk), {} collinear segments merged",
+            "cleanup-safe output (KiCad's Cleanup Tracks & Vias leaves it unchanged): {} null and {} duplicate segments dropped, {} segments a pad of their net makes redundant dropped, {} T junctions made exact vertices ({} track ends moved onto the trunk), {} collinear segments merged",
             self.null, self.duplicate, self.in_pad, self.t_split, self.t_moved, self.merged
         )
     }
@@ -198,24 +203,76 @@ pub fn tidy(model: &BoardModel, items: &mut Vec<Item>, conn: &mut Vec<usize>) ->
         }
     }
 
-    // 2. segments fully inside a pad of their net
-    for (i, it) in items.iter().enumerate() {
-        if !keep[i] {
-            continue;
-        }
-        let (Some((a, b)), Item::Track(t)) = (seg_of(it), it) else { continue };
-        let need = 0.5 * t.width as f64 - PAD_TOL_NM;
-        let Some(pads) = pads_of.get(&t.net) else { continue };
-        for &pi in pads {
-            if !pad_on(pi, t.layer) {
+    // 2. segments a pad makes redundant, repeated until none is left: (a) wholly inside a pad of
+    // their net (deleteTracksInPads); (b) both ends within reach of such a pad, one end free (the
+    // terminal) and the other, the joint to the rest of the trace, at least as near to the pad's
+    // anchor: TestTrackEndpointDangling counts the pad for that joint end only, so the terminal
+    // end counts as unconnected
+    let via_at: HashSet<(i32, P)> = items
+        .iter()
+        .filter_map(|it| if let Item::Via(v) = it { Some((v.net, (v.at.x, v.at.y))) } else { None })
+        .chain(model.vias.iter().map(|v| (v.net, (v.at.x, -v.at.y))))
+        .collect();
+    loop {
+        let mut ends: HashMap<(i32, u32, P), usize> = HashMap::new();
+        for (i, it) in items.iter().enumerate() {
+            if !keep[i] {
                 continue;
             }
-            let sk = pad_sk(pi, t.layer);
-            if depth(&sk, math(a)) >= need && depth(&sk, math(b)) >= need {
-                keep[i] = false;
-                st.in_pad += 1;
-                break;
+            if let Item::Track(t) = it {
+                let (a, b) = match t.prim {
+                    TrackPrim::Seg { a, b } => (a, b),
+                    TrackPrim::Arc { start, end, .. } => (start, end),
+                };
+                for p in [p_of(a), p_of(b)] {
+                    *ends.entry((t.net, t.layer, p)).or_insert(0) += 1;
+                }
             }
+        }
+        for k in &model.kept {
+            let (a, b) = match k.prim {
+                TrackPrim::Seg { a, b } => (a, b),
+                TrackPrim::Arc { start, end, .. } => (start, end),
+            };
+            for p in [a, b] {
+                *ends.entry((k.net, k.layer, (i64::from(p.x), -i64::from(p.y)))).or_insert(0) += 1;
+            }
+        }
+        let mut dropped = 0;
+        for (i, it) in items.iter().enumerate() {
+            if !keep[i] {
+                continue;
+            }
+            let (Some((a, b)), Item::Track(t)) = (seg_of(it), it) else { continue };
+            let Some(pads) = pads_of.get(&t.net) else { continue };
+            let half = 0.5 * t.width as f64;
+            let free = |q: P| ends.get(&(t.net, t.layer, q)).copied().unwrap_or(0) <= 1 && !via_at.contains(&(t.net, q));
+            for &pi in pads {
+                if !pad_on(pi, t.layer) {
+                    continue;
+                }
+                let sk = pad_sk(pi, t.layer);
+                let (da, db) = (depth(&sk, math(a)), depth(&sk, math(b)));
+                let inside = da >= half - PAD_TOL_NM && db >= half - PAD_TOL_NM;
+                let redundant = da >= -half && db >= -half && {
+                    let c = model.pads[pi].center;
+                    let d = |q: P| ((q.0 - c.x) as f64).hypot((q.1 + c.y) as f64);
+                    match (free(a), free(b)) {
+                        (true, false) => d(b) <= d(a),
+                        (false, true) => d(a) <= d(b),
+                        _ => false,
+                    }
+                };
+                if inside || redundant {
+                    keep[i] = false;
+                    st.in_pad += 1;
+                    dropped += 1;
+                    break;
+                }
+            }
+        }
+        if dropped == 0 {
+            break;
         }
     }
     let mut pairs: Vec<(Item, usize)> = std::mem::take(items).into_iter().zip(std::mem::take(conn)).zip(keep).filter_map(|(x, k)| k.then_some(x)).collect();
@@ -284,6 +341,13 @@ pub fn tidy(model: &BoardModel, items: &mut Vec<Item>, conn: &mut Vec<usize>) ->
                 for &j in &idx {
                     if j == i {
                         continue;
+                    }
+                    // a neighbour sharing an end with this segment is no trunk to join (its foot
+                    // would be that shared end)
+                    if let (Some((ia, ib)), Some((ja, jb))) = (seg_of(&pairs[i].0), seg_of(&pairs[j].0)) {
+                        if ia == ja || ia == jb || ib == ja || ib == jb {
+                            continue;
+                        }
                     }
                     let (Some((sa, sb)), Item::Track(tj)) = (seg_of(&pairs[j].0), &pairs[j].0) else { continue };
                     let (fa, fb, fe) = (Vec2 { x: sa.0 as f64, y: sa.1 as f64 }, Vec2 { x: sb.0 as f64, y: sb.1 as f64 }, Vec2 { x: e.0 as f64, y: e.1 as f64 });
@@ -477,6 +541,41 @@ mod tests {
         let s = segs(&out);
         assert!(s.contains(&((126_927_000, 84_608_107), (126_927_000, 84_000_000))) || s.contains(&((126_927_000, 74_369_074), (126_927_000, 84_000_000))) || s.iter().filter(|(a, b)| *a == (126_927_000, 84_000_000) || *b == (126_927_000, 84_000_000)).count() == 3);
         assert_eq!(s.iter().filter(|(a, b)| *a == (126_927_000, 84_000_000) || *b == (126_927_000, 84_000_000)).count(), 3, "{s:?}");
+    }
+
+    #[test]
+    fn piece_from_the_pad_anchor_to_its_edge_stays() {
+        // fine-pitch exit: centre -> tip of a 1.6 x 0.3 mm pad, then out; the terminal (centre) is
+        // the end nearer to the anchor, so KiCad counts the pad for it: stable, kept
+        let m = model_with_pad(1, (11_000_000, 10_000_000), 1_600_000, 300_000);
+        let (out, st) = run(&m, vec![seg(1, (11_000_000, 10_000_000), (10_200_000, 10_000_000)), seg(1, (10_200_000, 10_000_000), (8_000_000, 12_200_000))]);
+        assert_eq!(st.in_pad, 0);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn short_segment_with_both_ends_in_a_pad_is_dropped() {
+        // qmtech ADV_TX2- at USB1.3 (0.3 x 2.6 mm): 86 µm, its capsule pokes out of the pad's side
+        let m = model_with_pad(1, (131_227_000, 55_100_000), 300_000, 2_600_000);
+        let w = |a: P, b: P| Item::Track(TrackItem { net: 1, layer: 0, width: 200_000, prim: TrackPrim::Seg { a: iv(a), b: iv(b) }, group: None, wire: None });
+        let (out, st) = run(&m, vec![w((130_309_862, 55_539_471), (131_166_471, 55_539_471)), w((131_166_471, 55_539_471), (131_227_000, 55_600_000))]);
+        assert_eq!(st.in_pad, 1);
+        assert_eq!(segs(&out), vec![((130_309_862, 55_539_471), (131_166_471, 55_539_471))]);
+    }
+
+    #[test]
+    fn t_end_next_to_its_own_neighbour_joins_the_trunk() {
+        // dcsgonebadge VCC: a 0.22 mm stub (0.5 mm wide) ends 0.243 mm off a vertical trunk; its own
+        // neighbour's shared end is nearer, but is no trunk
+        let m = BoardModel::default();
+        let w = |a: P, b: P| Item::Track(TrackItem { net: 1, layer: 0, width: 500_000, prim: TrackPrim::Seg { a: iv(a), b: iv(b) }, group: None, wire: None });
+        let (out, st) = run(
+            &m,
+            vec![w((120_848_259, 122_648_259), (120_848_259, 107_301_741)), w((120_937_500, 108_062_500), (119_937_500, 108_062_500)), w((120_937_500, 108_062_500), (121_091_091, 108_216_091))],
+        );
+        assert_eq!((st.t_split, st.t_moved), (1, 1));
+        let foot = (120_848_259, 108_216_091);
+        assert_eq!(segs(&out).iter().filter(|(a, b)| *a == foot || *b == foot).count(), 3, "{:?}", segs(&out));
     }
 
     #[test]
