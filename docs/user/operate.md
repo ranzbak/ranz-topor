@@ -384,10 +384,13 @@ KiCad's DRC of the routed copy — it is the number to decide on. If the image c
 - **Accept** (Enter) applies the result as **one** KiCad commit: the ripped tracks/vias are removed and the
   new ones created. That is **one undo step**: one **Edit → Undo** (Ctrl+Z) reverts all of it. New tracks
   are put in a group `topor` (`topor-partial` for partial routes) when KiCad allows it.
-- **Zones are not refilled** by default (`[run] refill_after_accept = false`): press **B**
-  (KiCad → Edit → Fill All Zones) yourself; KiCad's DRC also refills when you run it. That refill is its own
-  undo step. With `refill_after_accept = true` topor refills the zones right after the commit — a
-  **second** undo step: the first Ctrl+Z reverts the refill, the next one the routes.
+- **Zones come back filled for the new copper** (`[run] commit_fills = true`, the default): the fill that KiCad's
+  own filler made for the routed result (kicad-cli, on the copy the preview's DRC judged) is written into the zones
+  in the **same** commit, so the one undo step reverts copper and fills together. With `commit_fills = false` the
+  zones keep the fill they had before the run: press **B** (KiCad → Edit → Fill All Zones) yourself; KiCad's DRC
+  also refills when you run it. That refill is its own undo step. With `refill_after_accept = true` topor also
+  refills the zones live right after the commit — a **second** undo step: the first Ctrl+Z reverts the refill,
+  the next one the routes.
 - After Accept, `[run] kicad_cleanup = true` / `kicad_teardrops = true` open KiCad's own *Cleanup Tracks
   and Vias* / teardrop dialogs (you confirm them there); each is a **separate** undo step after the
   routes. They are skipped when the result has partial routes
@@ -396,9 +399,31 @@ KiCad's DRC of the routed copy — it is the number to decide on. If the image c
   the board and the run still counts as accepted, with the warning
   [`POST_COMMIT_STEP_FAILED`](troubleshoot.md#post_commit_step_failed); Ctrl+Z removes the routes.
 - **Reject** (Esc) writes nothing; the board is exactly as before and Undo has nothing new.
+- **topor's copper survives Cleanup Tracks & Vias.** KiCad → Edit → Cleanup Tracks & Vias, with every option
+  on, removes and changes nothing of what topor wrote ([below](#topors-copper-survives-cleanup-tracks--vias)).
 - **Topor — Finished** confirms what happened, says whether the zones were refilled (press B when not) and
   shows the report folder.
 - Then run **Inspect → Design Rules Checker** in KiCad.
+
+### topor's copper survives Cleanup Tracks & Vias
+
+KiCad's **Edit → Cleanup Tracks & Vias** is the yardstick for the copper topor writes (`[output] cleanup_safe =
+true`, the default): with every option on, it finds nothing to remove or merge in topor's traces and vias. What
+topor does for that (each item is a rule of KiCad's cleaner, `pcbnew/tracks_cleaner.cpp` in KiCad 10):
+
+| Cleanup option | What KiCad removes or changes | What topor writes instead |
+|---|---|---|
+| Merge co-linear tracks | null segments, duplicate segments, two same-width segments on one line whose joint touches nothing else | no null or duplicate segments; such segments are already one |
+| Delete tracks fully inside pads | a segment with both ends inside one pad and nothing outside it | no such segment: the trace starts where it leaves the pad's copper, inside that pad |
+| Delete tracks unconnected at one end | a track end that is not on connected copper; a short segment whose both ends are reached by the same neighbour counts as connected at one end only | every junction is an exact shared vertex: a branch (T) that joins a trace in its middle splits that trace there |
+| Delete vias connected on only one layer | a via whose other layers reach nothing, e.g. a plane via in a zone whose fill is out of date | the zones come back filled for the new copper (`[run] commit_fills`, above) |
+| Delete tracks connecting different nets | a track that touches copper of another net | nothing to add here: this is a DRC short (the report lists it as a violation; [Never drop](#never-drop-violations-instead-of-open-connections)) |
+| Delete redundant vias | two vias at one place, a via on a through-hole pad | not produced |
+
+The run report has one line `cleanup-safe output (...)` with what was dropped, split or merged. A trace topor
+writes **with a rule violation** (never drop) is the one exception: when it shorts another net, the cleanup's
+"Delete tracks connecting different nets" removes it, and the rest of that trace then counts as unconnected at one
+end and goes too. Fix such violations first (Inspect → Design Rules Checker), then run the cleanup.
 
 ## Report folder
 
