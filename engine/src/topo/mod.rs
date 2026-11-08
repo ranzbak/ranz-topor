@@ -31,6 +31,7 @@ pub mod octi;
 pub mod pack;
 pub mod state;
 pub mod stitch;
+pub mod tidy;
 pub mod stats;
 pub mod tree;
 pub mod xrules;

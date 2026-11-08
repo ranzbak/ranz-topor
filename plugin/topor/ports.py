@@ -61,6 +61,9 @@ class CommitRequest:
     items: list = field(default_factory=list)
     message: str = "Topor: route"
     group: bool = True
+    #: zone uuid -> filled polygons KiCad's filler made for the routed copy (``toporlib.pcbfile.parse_zone_fills``
+    #: shape), written into the zones in the same undo step (``run.commit_fills``); empty = fills untouched
+    zone_fills: dict = field(default_factory=dict)
 
 
 @dataclass

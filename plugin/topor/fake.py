@@ -100,7 +100,8 @@ class FakeBoard:
         layer_names = {int(l["id"]): l["name"] for l in self.model.get("layers", [])}
         net_names = {int(n["code"]): n["name"] for n in self.model.get("nets", [])}
         text = pcbfile.remove_items(self.text, removed)
-        self.text = pcbfile.append_items(text, items, layer_names=layer_names, net_names=net_names)
+        text = pcbfile.append_items(text, items, layer_names=layer_names, net_names=net_names)
+        self.text = pcbfile.replace_zone_fills(text, req.zone_fills)
         ids = [it["uuid"] for it in items]
         grouped = False
         if req.group:

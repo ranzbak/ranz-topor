@@ -286,7 +286,12 @@ def test_run_accept_single_commit(accepted, tmp_path):
     assert req.group is True and {it["group"] for it in req.items} == {"topor"}
     assert board.refills == 0  # ruling C28: run.refill_after_accept defaults to false -> Accept = one undo step
     assert out.report.facts["zones_refilled"] is False
-    assert "press B (Edit → Fill All Zones)" in (out.report_dir / "report.md").read_text()
+    # run.commit_fills (default): the zones get the fill of the refilled routed copy in the same commit
+    from toporlib import pcbfile
+    zones = pcbfile.parse_zone_fills(out.routed_pcb.read_text())
+    assert req.zone_fills and set(req.zone_fills) <= set(zones) and out.report.facts["zone_fills_committed"] >= 1
+    assert pcbfile.parse_zone_fills(board.text) == {**pcbfile.parse_zone_fills(board.text), **req.zone_fills}
+    assert "same undo step" in (out.report_dir / "report.md").read_text()
     assert board.actions == ["pcbnew.GlobalEdit.cleanupTracksAndVias", "pcbnew.GlobalEdit.editTeardrops"]
     names = ui.names()
     assert names.index("preview") < names.index("done")

@@ -10,6 +10,9 @@ engine shares (engines count "connections" differently):
 - connected %    = 1 - unconnected / unconnected_input (after the refill)
 - total length   = all tracks and arcs in m, and as % of the hand board's
 - PNG            = the default run's hand-vs-topor picture, for visual inspection
+- cleanup-unstable items = what KiCad's Edit -> Cleanup Tracks & Vias (every option on) would remove or change in
+                   topor's copper, replayed by harness.cleanup_check on the routed copy as the plugin hands it back
+                   (route_board metric `cleanup_unstable`); 0 is the target
 
 The table is kept simple on purpose (user 2026-11-06: "connected, total length, and visual inspection"; compare
 against hand routed only). Vias, new DRC and detour stay in the --json rows. Seeds s1.. give the spread: median and
@@ -120,7 +123,8 @@ def run_row(d: Path, board: str) -> dict | None:
             "det90": (m.get("detour") or {}).get("p90"), "router_s": m.get("router_s"),
             "cpu_s": m.get("router_cpu_s"), "stop": m.get("stop_reason"),
             "hit": str(m.get("stop_reason") or "").startswith("timeout"),
-            "unconnected": m["unconnected"], "routed": m.get("routed"), "connections": m.get("connections")}
+            "unconnected": m["unconnected"], "routed": m.get("routed"), "connections": m.get("connections"),
+            "cleanup": m.get("cleanup_unstable")}
 
 
 def _spread(xs: list, fmt: str = ".1f") -> str:
@@ -162,6 +166,15 @@ def limits_mismatch(a: dict | None, b: dict | None) -> list:
     return [f"{k}: {a.get(k)!r} vs {b.get(k)!r}" for k in COMPARE_KEYS if a.get(k) != b.get(k)]
 
 
+def _cleanup_cell(s0: dict | None, sk: list) -> str:
+    """Cleanup-unstable items (harness.cleanup_check, 0 = KiCad's Cleanup Tracks & Vias changes nothing) of the default
+    run, the seeds' spread in brackets; – for runs made before the check existed."""
+    d = (s0 or {}).get("cleanup")
+    seeds = [r.get("cleanup") for r in sk if r is not s0 and r.get("cleanup") is not None]
+    cell = "–" if d is None else str(d)
+    return cell + (f" ({_spread(seeds, '.0f')})" if seeds else "")
+
+
 def scorecard(root: Path) -> tuple[str, dict]:
     """The markdown table and the raw rows per board."""
     root = Path(root)
@@ -178,8 +191,8 @@ def scorecard(root: Path) -> tuple[str, dict]:
             rows[bd.name] = runs
     head = ("| board | input | connected % default | connected % seeds 1–5 | hand connected % | "
             "total length m default (% of hand) | total length % of hand, seeds | limit | CPU s default | "
-            "CPU s seeds | limit hits | PNG (default run) |\n"
-            "|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+            "CPU s seeds | limit hits | cleanup-unstable items default (seeds) | PNG (default run) |\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
     lines = []
     for b, runs in rows.items():
         s0 = runs.get(0)
@@ -192,7 +205,8 @@ def scorecard(root: Path) -> tuple[str, dict]:
             f"| {b} | {any_r['n']} | {default_done} | {_spread([r['done'] for r in sk])} | {any_r['hand_done']:.1f} | "
             f"{default_len} | {_spread([r['length_pct'] for r in sk], '.0f')} | {clock_cell} | "
             f"{_spread([(s0 or {}).get('cpu_s')], '.0f')} | {_spread([r['cpu_s'] for r in sk], '.0f')} | "
-            f"{sum(1 for r in runs.values() if r['hit'])} of {len(runs)} | {(s0 or {}).get('png') or '–'} |")
+            f"{sum(1 for r in runs.values() if r['hit'])} of {len(runs)} | "
+            f"{_cleanup_cell(s0, sk)} | {(s0 or {}).get('png') or '–'} |")
     blind = ("\nBlind spots (judged by KiCad DRC, which sees only what it checks): pad-to-pad violations inside a "
              "footprint count as new when routing connects those pads; diff pairs are skipped by the topological "
              "core and count as unconnected; zone fills are judged after kicad-cli's refill, not as saved; total "

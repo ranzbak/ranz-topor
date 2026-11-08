@@ -196,6 +196,32 @@ PYTHONPATH=.:plugin .venv/bin/python -m harness.board_metrics <routed.kicad_pcb>
 The numbers of `tools/route_board.sh` (unconnected, routing_new, vias; routed/total from the run's `result.json`)
 for a board saved by the live plugin, and the hand-vs-result PNG with the open ratsnest in blue.
 
+## KiCad's Cleanup Tracks & Vias replayed (`harness.cleanup_check`)
+
+```bash
+.venv/bin/python -m harness.cleanup_check <routed.kicad_pcb> [--only-new <input.kicad_pcb>] [--refill] \
+    [--json out.json] [--list N] [--no-per-option]
+```
+
+topor's copper must survive KiCad's **Edit → Cleanup Tracks & Vias** with every option on
+([operate.md](../user/operate.md#topors-copper-survives-cleanup-tracks--vias)). KiCad's cleaner
+(`TRACKS_CLEANER`, `pcbnew/tracks_cleaner.cpp`) is not in its Python API, so this module replays
+`TRACKS_CLEANER::CleanupBoard` step by step on an in-memory copy with KiCad's own connectivity and geometry calls:
+redundant vias, null and duplicate segments, `mergeCollinearSegments` (including its bounding-box merge rule),
+`removeShortingTrackSegments`, `deleteTracksInPads`, then `deleteDanglingTracks` with
+`CONNECTIVITY_DATA::TestTrackEndpointDangling` until nothing dangles, applying each change as KiCad does so
+cascades count. Every item it would remove or change is one **cleanup-unstable item** (0 is the target); each
+names its rule and KiCad function. It also runs every dialog option alone (`per_option`), which separates root
+causes from the cascade of the full run. Without `--refill` the zones are judged with the fill stored in the file
+(the dialog's default); `--only-new` counts only copper whose uuid is not in the input (topor's).
+
+Checked against the real dialog on qmtech (the plugin's own run, KiCad on Xephyr): the replay's counts per option
+match the dialog's within 2 of 105 to 622 items. `tools/route_board.sh` runs it on every routed copy (metrics
+`cleanup_unstable`, `cleanup_by_rule`, `cleanup_per_option`, `<name>--cleanup.json`) and `harness.scorecard` shows
+the column "cleanup-unstable items". The engine side is `engine/src/topo/tidy.rs` (`[output] cleanup_safe`), the
+plugin side `run.commit_fills` (the zones get the fills of the refilled routed copy in the Accept commit); the
+mechanism fixtures `fx_cleanup_*` (`tests/test_mechfix.py`) route each class as drawn and with the defaults.
+
 ## Live GUI test (`tools/gui_e2e.sh`)
 
 Drives the real plugin in a real KiCad 10 on Xephyr with a separate KiCad home and checks every step; see

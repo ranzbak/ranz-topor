@@ -425,7 +425,8 @@ def test_done_dialog_refill_hint_and_post_commit_warning(app, tmp_path):
     """Ruling C28: after Accept the done notice says whether zones were refilled (press B when not); ruling C30:
     a step that failed after the commit is shown there too."""
     W = ui_wx.WORDING["report"]
-    cases = (({"zones_refilled": False}, "done_refill_hint"), ({"zones_refilled": True}, "done_refilled"))
+    cases = (({"zones_refilled": False}, "done_refill_hint"), ({"zones_refilled": True}, "done_refilled"),
+             ({"zones_refilled": False, "zone_fills_committed": 3}, "done_fills_committed"))
     for facts, wid in cases:
         rep = FakeReport(tmp_path)
         rep.facts = facts
@@ -434,8 +435,8 @@ def test_done_dialog_refill_hint_and_post_commit_warning(app, tmp_path):
             w = dd.widget(wid)
             assert w is not None, wid
             assert re.sub(r"\s+", " ", w.GetLabel()) == W[wid]
-            other = "done_refilled" if wid == "done_refill_hint" else "done_refill_hint"
-            assert dd.widget(other) is None
+            for other in {"done_refilled", "done_refill_hint", "done_fills_committed"} - {wid}:
+                assert dd.widget(other) is None
         finally:
             dd.Destroy()
     assert "press B (Edit → Fill All Zones)" in W["done_refill_hint"]

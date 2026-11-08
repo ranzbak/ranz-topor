@@ -487,3 +487,75 @@ def test_fx_b5_other_layer_pad(tmp_path):
     assert gap and all(len(c["items"]) == 3 and abs(c["slack"] + 0.55) <= 0.01 for c in gap), gap
     walls = (14.5, 15.5)
     assert not [e for e in fin["edge_over"] if e["a"][0] in walls and e["b"][0] in walls], fin["edge_over"]
+
+
+# ---------------------------------------------------------------- cleanup-safe output (KiCad's Cleanup Tracks & Vias)
+#: the copper as drawn and the zones as they were: what topor wrote before the cleanup-safe stage
+_AS_DRAWN = ("--set", "output.cleanup_safe=false", "--set", "run.commit_fills=false")
+
+
+def _cleanup_before_after(case: str, tmp_path: Path) -> tuple:
+    """The case routed as drawn (old output) and with the defaults; the defaults must leave KiCad's cleanup nothing
+    to do (harness.cleanup_check, every option on) and route as cleanly as before."""
+    before = _route(case, tmp_path, *_AS_DRAWN, tag="-as-drawn")
+    after = _route(case, tmp_path)
+    _clean(after)
+    assert after["cleanup_unstable"] == 0, after.get("cleanup_summary")
+    assert after["routed"] == before["routed"] and after["unconnected"] == before["unconnected"], (before, after)
+    return before, after
+
+
+def _tees_off_vertex(m: dict) -> int:
+    """Track ends that stop on the middle of another track of their net and layer (a T that is no shared vertex)."""
+    import pcbnew
+    pcb = next(iter(sorted((Path(m["_out"]) / f"{m['board']}-topor").glob("*.kicad_pcb"))))
+    b = pcbnew.LoadBoard(str(pcb))
+    segs = [(t.GetNetCode(), t.GetLayer(), (t.GetStart().x, t.GetStart().y), (t.GetEnd().x, t.GetEnd().y))
+            for t in b.GetTracks() if t.Type() == pcbnew.PCB_TRACE_T]
+    ends = {}
+    for n, l, a, e in segs:
+        for p in (a, e):
+            ends[(n, l, p)] = ends.get((n, l, p), 0) + 1
+    off = 0
+    for (n, l, p), k in ends.items():
+        if k > 1:
+            continue
+        for n2, l2, a, e in segs:
+            if (n2, l2) != (n, l) or p in (a, e):
+                continue
+            dx, dy = e[0] - a[0], e[1] - a[1]
+            cross = abs(dx * (p[1] - a[1]) - dy * (p[0] - a[0]))
+            dot = (p[0] - a[0]) * dx + (p[1] - a[1]) * dy
+            if cross <= 2 * max(abs(dx), abs(dy)) and 0 < dot < dx * dx + dy * dy:
+                off += 1
+                break
+    return off
+
+
+def test_fx_cleanup_in_pad(tmp_path):
+    """The 0.17 mm jog inside the round pad (the octilinear diagonal ends short of the centre) is not written: as
+    drawn, KiCad's "Delete tracks fully inside pads" removes it; now the trace ends inside the pad (eprom U2)."""
+    before, after = _cleanup_before_after("fx_cleanup_in_pad", tmp_path)
+    assert before["cleanup_by_rule"].get("track_in_pad", 0) >= 1, before["cleanup_summary"]
+
+
+def test_fx_cleanup_tee(tmp_path):
+    """C joins the A-B trace at (5, 10): as drawn its end stops on the trunk's middle (and the trunk keeps
+    collinear pieces KiCad merges); now the trunk is split there, one exact vertex of three track ends."""
+    before, after = _cleanup_before_after("fx_cleanup_tee", tmp_path)
+    assert _tees_off_vertex(before) >= 1 and before["cleanup_unstable"] >= 1, before["cleanup_summary"]
+    assert _tees_off_vertex(after) == 0
+
+
+def test_fx_cleanup_collinear(tmp_path):
+    """The trace along the pad row: as drawn, a vertex at every pad (1 nm apart in y from its neighbours, so
+    KiCad's bounding-box merge takes only some of them); now one straight segment along the row."""
+    before, after = _cleanup_before_after("fx_cleanup_collinear", tmp_path)
+    assert before["cleanup_by_rule"].get("merge_collinear", 0) >= 1, before["cleanup_summary"]
+
+
+def test_fx_cleanup_stale_fill(tmp_path):
+    """The board's stored B.Cu fill is out of date: as drawn (zones untouched), KiCad's cleanup removes the GND
+    stub's via (connected on one layer) and then the stub; now Accept writes the refilled zones with the copper."""
+    before, after = _cleanup_before_after("fx_cleanup_stale_fill", tmp_path)
+    assert before["cleanup_by_rule"].get("dangling_via", 0) >= 1, before["cleanup_summary"]

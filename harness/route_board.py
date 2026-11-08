@@ -15,7 +15,10 @@ What it does:
 Metrics (all measured on the routed copy by `kicad-cli pcb drc --refill-zones`, never from engine claims):
   routed / total connections (the run's own count), unconnected (DRC unconnected_items), routing_new
   (DRC violations of routing types that the stripped input does not have), vias, detour ratio (engine
-  report, when the engine emits it), runtime, ladder warnings (when the engine report has them).
+  report, when the engine emits it), runtime, ladder warnings (when the engine report has them), and
+  `cleanup_unstable`: what KiCad's Edit -> Cleanup Tracks & Vias would remove or change in topor's copper
+  (`harness.cleanup_check` on the routed copy as saved, i.e. with the zone fills the plugin commits; details in
+  `<name>--cleanup.json`).
 `TOPOR_TREE` / `TOPOR_ENGINE_SITE` (see tools/route_board.sh) select the code tree and engine wheel, which is
 how the frozen classic reference is run from a worktree of main @ 64b3979.
 """
@@ -202,6 +205,19 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
         "rayon_threads": os.environ.get("RAYON_NUM_THREADS"),
         "report_dir": str(outcome.report_dir) if outcome.report_dir else None,
     }
+    # KiCad's Cleanup Tracks & Vias replayed on the routed copy as the plugin hands it back (0 = nothing changes)
+    try:
+        from harness.cleanup_check import check as cleanup_check
+        from harness.cleanup_check import summary as cleanup_summary
+        cc = cleanup_check(routed_pcb, input_pcb=inp.pcb)
+        (out_dir / f"{name}--cleanup.json").write_text(json.dumps(cc, indent=1))
+        m["cleanup_unstable"] = cc["count"]
+        m["cleanup_by_rule"] = cc["by_rule"]
+        m["cleanup_per_option"] = {k: v["count"] for k, v in (cc.get("per_option") or {}).items()}
+        m["cleanup_summary"] = cleanup_summary(cc)
+    except Exception as e:  # noqa: BLE001 - a metric, never a failed run
+        m["cleanup_unstable"] = None
+        m["cleanup_error"] = f"{type(e).__name__}: {e}"
     if png:
         try:
             from harness.render import (board_bbox_nm, caption, compose_compare, draw_ratsnest, draw_violations,
@@ -244,6 +260,7 @@ def summary(m: dict) -> str:
         f"  vias {m['vias']} (hand {m['vias_hand']}), detour {dl}, ladder warnings {m['ladder_warnings']}",
         f"  runtime {m['runtime_s']} s (run flow {m['run_flow_s']} s, router {m['router_s']} s, CPU {m['router_cpu_s']} s; limit {m['timeout_s']} {m['timeout_clock']})",
         f"  stop: {m['stop_reason']}; findings: {', '.join(m['findings']) or 'none'}",
+        f"  cleanup-unstable items: {m.get('cleanup_unstable')} ({m.get('cleanup_by_rule') or m.get('cleanup_error') or 'none'})",
         f"  png: {m.get('png')}",
     ])
 

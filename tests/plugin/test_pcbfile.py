@@ -168,3 +168,20 @@ def test_items_on_a_layer_with_a_user_name_use_the_canonical_copper_name():
     out = pcbfile.append_items("(kicad_pcb\n)\n", [seg], layer_names=names, net_names={1: "N"})
     assert '(layer "In1.Cu")' in out and "POWER" not in out
     assert pcbfile.cu_name(8, names) == "In3.Cu" and pcbfile.cu_name(10, names) == "In4.Cu"
+
+
+def test_replace_zone_fills_round_trip_and_clear(eprom):
+    """run.commit_fills: a board text takes over the fills of another copy, zone by zone (by uuid); KiCad reads the
+    result with the new fill."""
+    _, text = eprom
+    fills = pcbfile.parse_zone_fills(text)
+    assert fills
+    assert pcbfile.parse_zone_fills(pcbfile.replace_zone_fills(text, fills)) == fills
+    assert pcbfile.replace_zone_fills(text, {}) == text
+    k = next(u for u in fills if not u.startswith("#"))  # "#<i>": a zone without uuid, not addressable
+    square = [{"layer": fills[k][0]["layer"], "pts": [[0, 0], [MM, 0], [MM, MM], [0, MM]]}]
+    t2 = pcbfile.replace_zone_fills(text, {k: square})
+    got = pcbfile.parse_zone_fills(t2)
+    assert got[k] == square and all(got[u] == v for u, v in fills.items() if u != k)
+    assert pcbfile.parse_zone_fills(pcbfile.replace_zone_fills(text, {k: []}))[k] == []
+    assert len(pcbfile.find_items(t2, ("segment", "via", "zone"))) == len(pcbfile.find_items(text, ("segment", "via", "zone")))
