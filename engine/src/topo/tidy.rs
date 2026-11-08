@@ -472,6 +472,23 @@ pub fn tidy(model: &BoardModel, items: &mut Vec<Item>, conn: &mut Vec<usize>) ->
         pairs = pairs.into_iter().zip(dead).filter_map(|(x, d)| (!d).then_some(x)).collect();
     }
 
+    // 5. a moved end or a split can make a segment null or equal to another one: drop those too
+    let mut seen: HashSet<(i32, u32, i64, P, P)> = HashSet::new();
+    pairs.retain(|(it, _)| {
+        let (Some((a, b)), Item::Track(t)) = (seg_of(it), it) else { return true };
+        if a == b {
+            st.null += 1;
+            return false;
+        }
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        if seen.insert((t.net, t.layer, t.width, lo, hi)) {
+            true
+        } else {
+            st.duplicate += 1;
+            false
+        }
+    });
+
     let (it, cn): (Vec<Item>, Vec<usize>) = pairs.into_iter().unzip();
     *items = it;
     *conn = cn;
@@ -591,6 +608,21 @@ mod tests {
         // a bend is no merge
         let (_, st) = run(&m, vec![seg(1, (0, 0), (1_000_000, 0)), seg(1, (1_000_000, 0), (2_000_000, 1_000_000))]);
         assert_eq!(st.merged, 0);
+    }
+
+    #[test]
+    fn a_split_that_repeats_a_segment_leaves_one_copy() {
+        // dcsgonebadge I2C_SDA (90 s run): a free end moved onto a trunk whose new half is the same
+        // segment as an existing one
+        let m = BoardModel::default();
+        let (out, st) = run(
+            &m,
+            vec![seg(1, (0, 0), (2_000_000, 0)), seg(1, (1_000_000, 0), (2_000_000, 0)), seg(1, (1_000_000, 50_000), (1_000_000, 1_000_000))],
+        );
+        let s = segs(&out);
+        let mut d = s.clone();
+        d.dedup();
+        assert_eq!(s, d, "{st:?}");
     }
 
     #[test]
