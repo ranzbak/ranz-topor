@@ -141,10 +141,6 @@ def run_gui(shipped_version: str | None, engine=None, *, ui=None, connect=None) 
     ruling C32) shows an error dialog and gives exit 1. `ui` / `connect` are test seams (a recording UI instead of
     WxUi, no wx.App is created then; a function returning the BoardPort). UNVERIFIED without a running KiCad (GUI
     checklist)."""
-    from . import messages
-    from .ipc import IpcBoard
-    from .run import run
-
     if ui is None:
         import wx  # noqa: PLC0415
 
@@ -152,17 +148,30 @@ def run_gui(shipped_version: str | None, engine=None, *, ui=None, connect=None) 
 
         wx.App(False)  # KiCad runs the plugin as its own process: we own the wx.App
         ui = WxUi()
+    # The splash first (user 2026-11-08): the imports, the KiCad connection, the board read and the engine
+    # probe below take a few seconds; the first real window closes it. A UI without a splash skips it.
+    splash = getattr(ui, "splash", None)
+    if not callable(splash):
+        def splash(*_a, **_kw):
+            return None
+    splash("Starting the router…", shipped_version)
+    from . import messages
+    from .ipc import IpcBoard
+    from .run import run
+
     bad = handshake(shipped_version, engine)
     if bad is not None:
         return _fatal(ui, bad)
     if connect is None:
         def connect():
             return IpcBoard.connect(os.environ.get("KICAD_API_SOCKET"), os.environ.get("KICAD_API_TOKEN"))
+    splash("Connecting to KiCad…")
     try:
         board = connect()
     except Exception as e:  # noqa: BLE001 - API off, KiCad still starting, no board open (kipy errors)
         return _fatal(ui, Finding("KICAD_API_CONNECT", "error", f"Cannot connect to KiCad: {type(e).__name__}: {e}",
                                   messages.fix_for("KICAD_API_CONNECT")))
+    splash("Reading the board…")
     tmp = Path(tempfile.mkdtemp(prefix="topor-"))
     try:
         out = run(board, ui, None, engine, tmp_root=tmp)

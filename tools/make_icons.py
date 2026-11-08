@@ -1,4 +1,5 @@
-"""Draw the plugin's toolbar icons (plugin/icons/topor-{light,dark}-{24,64}.png).
+"""Draw the plugin's icons: toolbar / window (plugin/icons/topor-{light,dark}-{24,64}.png) and the start-up
+splash logo (topor-{light,dark}-128.png).
 
 A smooth copper trace between two round pads, the router's signature output. Drawn at 8x and
 downsampled for anti-aliasing. Run: python3 tools/make_icons.py (needs Pillow).
@@ -44,6 +45,6 @@ def draw(size: int, theme: str) -> Image.Image:
 if __name__ == "__main__":
     OUT.mkdir(parents=True, exist_ok=True)
     for theme in ("light", "dark"):
-        for size in (24, 64):
+        for size in (24, 64, 128):
             draw(size, theme).save(OUT / f"topor-{theme}-{size}.png")
     print("icons written to", OUT)
