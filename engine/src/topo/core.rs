@@ -874,6 +874,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // Sort the connections: pad-to-pad ones into P2, pour ones into the plane stage.
     let mut conns: Vec<Conn> = Vec::new();
     let mut conn_of: Vec<usize> = Vec::new();
+    // Width that ranks a connection in the routing and drawing order (widest first). A single
+    // track: its width. A coupled pair (D7, user 2026-11-08): the whole band it occupies,
+    // space + track + gap + track + space ([`diffpair::Coupled::priority_width`]).
+    let mut prio_w: Vec<f64> = Vec::new();
     let mut plane_reqs: Vec<planes::Req> = Vec::new();
     for c in &dec.connections {
         let i = c.id;
@@ -901,11 +905,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 conn_of.push(i);
                 // D7: a pair's lead is one wire as wide as the pair (envelope), at the larger
                 // clearance of the two halves (the alias model's rule).
-                let (w, s) = match pairs.of_lead(i) {
-                    Some(cp) => (cp.envelope(), model.rules.net_rule(c.net).clearance as f64),
-                    None => (c.width as f64, c.clearance as f64),
+                let (w, s, pw) = match pairs.of_lead(i) {
+                    Some(cp) => {
+                        let s = model.rules.net_rule(c.net).clearance as f64;
+                        (cp.envelope(), s, cp.priority_width(s))
+                    }
+                    None => (c.width as f64, c.clearance as f64, c.width as f64),
                 };
                 conns.push(Conn { net: c.net, pa: oa, pb: ob, a: va, b: vb, w, s });
+                prio_w.push(pw);
             }
             (TermKind::Pad(pa), TermKind::Pour(zi)) => match obs_of_pad.get(pa) {
                 Some(&oa) => plane_reqs.push(planes::Req {
@@ -951,7 +959,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let len_of = |c: &Conn| (proj.pos[c.b] - proj.pos[c.a]).len();
     let mut order: Vec<usize> = (0..conns.len()).collect();
     order.sort_by(|&i, &j| {
-        conns[j].w.total_cmp(&conns[i].w).then(len_of(&conns[i]).total_cmp(&len_of(&conns[j]))).then(i.cmp(&j))
+        prio_w[j].total_cmp(&prio_w[i]).then(len_of(&conns[i]).total_cmp(&len_of(&conns[j]))).then(i.cmp(&j))
     });
     let mut wire_conn: Vec<usize> = Vec::new(); // wire id -> index into conns
     let mut p2_failed: Vec<usize> = Vec::new();
@@ -1652,10 +1660,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             plans.insert(w, p);
         }
     }
-    // Draw order: widest first, then shortest.
+    // Draw order: widest first (a pair by its whole band, `prio_w`), then shortest.
+    let wire_pw = |w: WireId| wire_conn.get(w).and_then(|&ci| prio_w.get(ci)).copied().unwrap_or(st.wires[w].w);
     let mut draw_order: Vec<WireId> = plans.keys().copied().collect();
     draw_order.sort_by(|&x, &y| {
-        st.wires[y].w.total_cmp(&st.wires[x].w).then(wire_len(x).total_cmp(&wire_len(y))).then(x.cmp(&y))
+        wire_pw(y).total_cmp(&wire_pw(x)).then(wire_len(x).total_cmp(&wire_len(y))).then(x.cmp(&y))
     });
     // A trunk is drawn before the branches on it (D5 net trees: a branch ends on its drawn copper).
     let tree_js = if tree_free { tree::junctions(&st) } else { Vec::new() };

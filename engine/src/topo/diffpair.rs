@@ -70,6 +70,11 @@ impl Coupled {
     pub fn envelope(&self) -> f64 {
         self.pitch() / COS225 + self.rule.width as f64
     }
+    /// Width that ranks the pair in the routing and drawing order (user 2026-11-08): the band the
+    /// pair occupies, space + track + gap + track + space, with `clear` the pair's clearance.
+    pub fn priority_width(&self, clear: f64) -> f64 {
+        2.0 * clear + 2.0 * self.rule.width as f64 + self.rule.gap as f64
+    }
 }
 
 /// The pairs of one route.
@@ -916,6 +921,15 @@ mod tests {
 
     fn v(x: f64, y: f64) -> Vec2 {
         Vec2 { x: x * MM, y: y * MM }
+    }
+
+    #[test]
+    fn priority_width_is_the_whole_band_of_the_pair() {
+        // 0.2 mm tracks, 0.15 mm gap, 0.2 mm clearance: 0.2 + 0.2 + 0.15 + 0.2 + 0.2 = 0.95 mm, wider
+        // than a 0.5 mm power track (routed after the pair) and narrower than a 1 mm one.
+        let rule = DiffPairRule { width: (0.2 * MM) as i64, gap: (0.15 * MM) as i64, ..Default::default() };
+        let cp = Coupled { rule, conns: Vec::new(), partner: BTreeMap::new(), keep: BTreeSet::new() };
+        assert!((cp.priority_width(0.2 * MM) - 0.95 * MM).abs() < 1.0);
     }
 
     #[test]
