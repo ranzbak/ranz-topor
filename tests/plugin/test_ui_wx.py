@@ -572,3 +572,37 @@ def test_progress_shows_cpu_time_next_to_router_time(app):
     finally:
         wall.Destroy()
         cpu.Destroy()
+
+
+def test_splash_shows_name_logo_version_and_status_and_closes_at_the_first_window(app):
+    """User 2026-11-08: the router shows a splash at once (start-up takes a few seconds): logo, "Ranz Topor",
+    version, a status line; one window, its status updated in place; closed when the progress dialog opens."""
+    ui = _QuietUi()
+    ui.splash("Starting the router…", "0.4.0")
+    sp = ui._splash
+    assert sp is not None and ui.shown == 1
+    assert sp.FindWindowByName("title").GetLabel() == "Ranz Topor"
+    assert sp.FindWindowByName("subtitle").GetLabel() == "Topological router 0.4.0"
+    assert sp.FindWindowByName("logo") is not None  # plugin/icons/topor-*-128.png
+    assert sp.status.GetLabel() == "Starting the router…"
+    ui.splash("Connecting to KiCad…")
+    assert ui._splash is sp and ui.shown == 1 and sp.status.GetLabel() == "Connecting to KiCad…"
+    ui.progress(Progress("setup", 0, 0, 27, 0, 0.0))
+    assert ui._splash is None and ui._progress is not None
+    ui._close_progress()
+
+
+def test_splash_closes_before_a_modal_window(app):
+    ui = _QuietUi()
+    ui.splash("Reading the board…")
+    ui._close_progress()  # what preflight / first_run_notice / error / preview / done do before ShowModal
+    assert ui._splash is None
+
+
+def test_logo_file_falls_back_to_the_largest_window_icon(tmp_path):
+    (tmp_path / "topor-light-24.png").write_bytes(b"x")
+    (tmp_path / "topor-light-64.png").write_bytes(b"x")
+    assert ui_wx.logo_file(False, tmp_path).name == "topor-light-64.png"
+    (tmp_path / "topor-light-128.png").write_bytes(b"x")
+    assert ui_wx.logo_file(False, tmp_path).name == "topor-light-128.png"
+    assert ui_wx.logo_file(True, tmp_path) is None

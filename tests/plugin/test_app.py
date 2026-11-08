@@ -106,6 +106,19 @@ def test_run_gui_connect_seam_failure(tmp_path):
     assert [e.code for e in errs] == ["KICAD_API_CONNECT"] and "Connection refused" in errs[0].message
 
 
+def test_run_gui_shows_the_splash_first(tmp_path):
+    """User 2026-11-08: the splash is the first thing run_gui does (before the handshake and the connection)."""
+    def boom():
+        raise ConnectionError("no KiCad")
+
+    ui = RecordingUi()
+    app.run_gui("0.4.0", _Eng("0.4.0"), ui=ui, connect=boom)
+    names = [c[0] for c in ui.calls]
+    assert names[0] == "splash" and ui.calls[0][1] == ("Starting the router…", "0.4.0")
+    assert ("splash", ("Connecting to KiCad…",)) in ui.calls
+    assert names.index("error") > names.index("splash")
+
+
 def test_main_headless_report_dir_unwritable_exits_1(tmp_path, monkeypatch, capsys):
     """Ruling C32: a report root that cannot be created -> REPORT_DIR_UNWRITABLE (ui.error), exit 1."""
     blocker = tmp_path / "file-not-dir"

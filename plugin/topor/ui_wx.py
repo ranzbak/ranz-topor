@@ -266,6 +266,73 @@ def window_icons(icon_dir: Path = ICON_DIR, dark: bool | None = None) -> "wx.Ico
     return None if bundle.IsEmpty() else bundle
 
 
+#: the name on the start-up splash (user 2026-11-08)
+SPLASH_NAME = "Ranz Topor"
+#: logo size on the splash (``topor-{light,dark}-128.png``, tools/make_icons.py)
+LOGO_SIZE = 128
+
+
+def logo_file(dark: bool, icon_dir: Path = ICON_DIR) -> Path | None:
+    """The splash logo for the theme: the 128 px icon, else the largest window icon that exists. O(1)."""
+    big = Path(icon_dir) / f"topor-{'dark' if dark else 'light'}-{LOGO_SIZE}.png"
+    if big.is_file():
+        return big
+    small = icon_files(dark, icon_dir)
+    return small[-1] if small else None
+
+
+class SplashWindow(wx.Frame):
+    """Shown the moment the plugin starts (before the KiCad connection, the board read and the engine probe,
+    which take a few seconds), so the user sees at once that the router launched: the logo, ``SPLASH_NAME``,
+    the version and a status line. Borderless, centred, on top, not in the task bar; system colours only.
+    ``WxUi`` closes it when the first real window (progress, pre-flight, a notice or an error) opens."""
+
+    def __init__(self, version: str | None, status: str):
+        super().__init__(None, title=SPLASH_NAME, name="splash",
+                         style=wx.FRAME_NO_TASKBAR | wx.STAY_ON_TOP | wx.BORDER_SIMPLE)
+        icons = window_icons()
+        if icons is not None:
+            self.SetIcons(icons)
+        panel = wx.Panel(self)
+        panel.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW))
+        fg = wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOWTEXT)
+        col = wx.BoxSizer(wx.VERTICAL)
+        logo = logo_file(system_is_dark())
+        if logo is not None:
+            with wx.LogNull():
+                img = wx.Image(str(logo), wx.BITMAP_TYPE_PNG)
+            if img.IsOk():
+                n = self.FromDIP(LOGO_SIZE)
+                if img.GetWidth() != n:
+                    img = img.Scale(n, n, wx.IMAGE_QUALITY_HIGH)
+                col.Add(wx.StaticBitmap(panel, bitmap=wx.Bitmap(img), name="logo"), 0, wx.ALIGN_CENTER)
+                col.AddSpacer(self.FromDIP(12))
+        title = wx.StaticText(panel, label=SPLASH_NAME, name="title")
+        title.SetFont(self.GetFont().Bold().Scaled(2.2))
+        title.SetForegroundColour(fg)
+        col.Add(title, 0, wx.ALIGN_CENTER)
+        sub = wx.StaticText(panel, label="Topological router" + (f" {version}" if version else ""), name="subtitle")
+        sub.SetForegroundColour(fg)
+        col.Add(sub, 0, wx.ALIGN_CENTER | wx.TOP, self.FromDIP(4))
+        col.AddSpacer(self.FromDIP(16))
+        self.status = wx.StaticText(panel, label=status, name="status", style=wx.ST_NO_AUTORESIZE | wx.ALIGN_CENTER_HORIZONTAL)
+        self.status.SetForegroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT))
+        col.Add(self.status, 0, wx.EXPAND)
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.Add(col, 1, wx.EXPAND | wx.ALL, self.FromDIP(28))
+        panel.SetSizer(outer)
+        frame = wx.BoxSizer(wx.VERTICAL)
+        frame.Add(panel, 1, wx.EXPAND)
+        self.SetSizer(frame)
+        self.SetMinClientSize(self.FromDIP(wx.Size(340, -1)))
+        self.Fit()
+        self.CentreOnScreen()
+
+    def set_status(self, text: str) -> None:
+        self.status.SetLabel(text)
+        self.Layout()
+
+
 _SEV_ORDER = {"error": 0, "warning": 1, "info": 2}
 _SEV_WORD = {"error": "sev_error", "warning": "sev_warn", "info": "sev_info"}
 _SEV_ART = {"error": wx.ART_ERROR, "warning": wx.ART_WARNING, "info": wx.ART_INFORMATION}
@@ -1339,6 +1406,7 @@ class WxUi:
         self._stable_window = int(Config.defaults().get("optimize", "stable_window"))
         self._last_progress: Progress | None = None
         self._limit_editable = False  # True once the pre-flight was answered with Route (the routing run)
+        self._splash: SplashWindow | None = None
 
     #: M-B0: the progress dialog lets the user end the run (OK at "Routes stable"); the run flow then does not
     #: stop the engine at stable by itself.
@@ -1369,13 +1437,30 @@ class WxUi:
         finally:
             dlg.Destroy()
 
+    def _close_splash(self) -> None:
+        if self._splash is not None:
+            self._splash.Destroy()
+            self._splash = None
+
     def _close_progress(self) -> None:
+        self._close_splash()
         if self._progress is not None:
             self._progress.Destroy()
             self._progress = None
         self._cancelled = False
 
     # -- UiPort
+    def splash(self, status: str, version: str | None = None) -> None:
+        """The start-up splash (``SplashWindow``): opened by the first call, later calls only change its status
+        line. Painted at once (``Update`` + one event pump), so it shows while the start-up work blocks. O(1)."""
+        if self._splash is None:
+            self._splash = SplashWindow(version, status)
+            self._present(self._splash)
+        else:
+            self._splash.set_status(status)
+        self._splash.Update()
+        self._pump()
+
     def first_run_notice(self, toml_path: Path) -> None:
         self._run_modal(FirstRunDialog(toml_path))
 
@@ -1400,6 +1485,7 @@ class WxUi:
     def progress(self, p: Progress) -> bool:
         self._last_progress = p
         if self._progress is None:
+            self._close_splash()
             self._progress = ProgressDialog(self.ctx.board, self._timeout_s, self._iter_cap, self._stable_window,
                                            self._timeout_clock, limit_editable=self._limit_editable)
             self._present(self._progress)

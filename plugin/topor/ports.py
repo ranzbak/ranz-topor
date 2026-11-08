@@ -186,6 +186,11 @@ class UiPort(Protocol):
     def progress(self, p: Progress) -> bool:
         """Called every ~0.25 s; return False to cancel the run."""
 
+    # Optional (the wx UI only; run_gui calls it before the KiCad connection, the first real window closes it):
+    #   def splash(self, status: str, version: str | None = None) -> None:
+    #       """The start-up splash (logo, name, version, status line): opened by the first call, later calls
+    #       change the status line."""
+
     # Optional (the interactive progress dialog only; headless UIs leave it out, so their limit stays fixed):
     #   def time_limit_request(self) -> float | None:
     #       """A new time limit the user set during the run (seconds on the run's clock, 0 = no limit), or None.
