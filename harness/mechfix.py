@@ -125,10 +125,11 @@ class Fx:
         self.b.Add(z)
         return z
 
-    def save(self, path: Path, *, rules: dict | None = None, classes=(), patterns=()) -> Path:
+    def save(self, path: Path, *, rules: dict | None = None, classes=(), patterns=(), fill: bool = True) -> Path:
+        """Write the board (zones filled unless `fill` is false: then they keep whatever fill they have)."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        if any(True for _ in self.b.Zones()):
+        if fill and any(True for _ in self.b.Zones()):
             pcbnew.ZONE_FILLER(self.b).Fill(self.b.Zones())
         pcbnew.SaveBoard(str(path), self.b)
         write_project_file(path, rules=rules or {}, classes=list(classes), patterns=patterns)
@@ -656,3 +657,78 @@ def fx_dp_no_partner(d: Path) -> Path:
     _dp_pads(f, "R", "RX_P1", "RX_N1", (3.0, 9.75))
     _dp_pads(f, "S", "RX_P1", "RX_N1", (27.0, 9.75))
     return f.save(Path(d) / "fx_dp_no_partner.kicad_pcb", classes=[DP_CLASS])
+
+
+# ---------------------------------------------------------------- cleanup-safe output (KiCad's Cleanup Tracks & Vias)
+
+
+def fx_cleanup_in_pad(d: Path) -> Path:
+    """Cleanup-safe output, segments wholly inside a pad: the octilinear drawing reaches a big pad on a 45 degree
+    diagonal that ends 0.17 mm short of the pad centre and adds a 0.17 mm jog inside the pad (eprom-to-kernal U2
+    pins 3..12, 1.6 mm round pads: 20 such jogs). KiCad's "Delete tracks fully inside pads"
+    (tracks_cleaner.cpp:TRACKS_CLEANER::deleteTracksInPads @ 86a7a3f) removes the jog.
+
+    SIG: A1 (3, 3) and B1 (13, 12.83), 1.6 mm round, on F.Cu."""
+    f = Fx(16, 16, nets=("SIG",))
+    f.pad("A1", "SIG", (3.0, 3.0), (1.6, 1.6), shape=pcbnew.PAD_SHAPE_CIRCLE)
+    f.pad("B1", "SIG", (13.0, 12.83), (1.6, 1.6), shape=pcbnew.PAD_SHAPE_CIRCLE)
+    return f.save(Path(d) / "fx_cleanup_in_pad.kicad_pcb")
+
+
+def fx_cleanup_tee(d: Path) -> Path:
+    """Cleanup-safe output, T junctions: a three-pad net whose third pad joins the trace between the other two
+    (net_tree "free": a branch point on a routed trace). KiCad judges a track end on the middle of another track as
+    connected only through that track's shape (connectivity_data.cpp:CONNECTIVITY_DATA::TestTrackEndpointDangling
+    @ 86a7a3f: an item that reaches both ends of a short segment counts once), so the junction must be an exact
+    vertex shared by three track ends (qmtech ADV_DVDD, ADV_CEC: a 43 / 114 µm segment next to a T was removed with
+    the rest of its trace).
+
+    SIG: A (5, 3), B (5, 17), C (15, 10), 1 x 1 mm on F.Cu (a T at (5, 10) is 10 mm, C to a pad 12.2 mm); a no-via
+    keepout keeps it on F.Cu."""
+    f = Fx(20, 20, nets=("SIG",))
+    f.pad("A1", "SIG", (5.0, 3.0), (1.0, 1.0))
+    f.pad("B1", "SIG", (5.0, 17.0), (1.0, 1.0))
+    f.pad("C1", "SIG", (15.0, 10.0), (1.0, 1.0))
+    f.keepout([pcbnew.F_Cu, pcbnew.B_Cu], [(0.2, 0.2), (19.8, 0.2), (19.8, 19.8), (0.2, 19.8)], vias=True)
+    return f.save(Path(d) / "fx_cleanup_tee.kicad_pcb")
+
+
+def fx_cleanup_collinear(d: Path) -> Path:
+    """Cleanup-safe output, collinear segments: a trace that runs along a row of foreign pads touches each of them on
+    one straight line, and the drawing keeps a vertex at every touching point (qmtech JS2_6 along a header row:
+    0.55 / 1.45 mm pieces on y 128.55). KiCad's "Merge co-linear tracks"
+    (tracks_cleaner.cpp:TRACKS_CLEANER::mergeCollinearSegments @ 86a7a3f) merges every such pair, so the output must
+    already be one segment there.
+
+    SIG: A1 (3, 12) to B1 (27, 12); K<i> (6 + 3 i, 12), i = 0..6, 1 x 1 mm, no net, on F.Cu, on the line between
+    them; a no-via keepout keeps SIG on F.Cu."""
+    f = Fx(30, 20, nets=("SIG",))
+    f.pad("A1", "SIG", (3.0, 12.0), (1.0, 1.0))
+    f.pad("B1", "SIG", (27.0, 12.0), (1.0, 1.0))
+    for i in range(7):
+        f.pad(f"K{i}", None, (6.0 + 3.0 * i, 12.0), (1.0, 1.0))
+    f.keepout([pcbnew.F_Cu, pcbnew.B_Cu], [(0.2, 0.2), (29.8, 0.2), (29.8, 19.8), (0.2, 19.8)], vias=True)
+    return f.save(Path(d) / "fx_cleanup_collinear.kicad_pcb")
+
+
+def fx_cleanup_stale_fill(d: Path) -> Path:
+    """Cleanup-safe output, zone fills: the board's stored B.Cu GND fill is out of date (it covers only the right
+    end of the zone, as a fill made before the outline grew), the user's state after Accept when the plugin does
+    not refill. The plugin refills a copy for the engine, so the GND pad's stub and via go into the real pour; KiCad's
+    cleanup judges them by the stored fill (connectivity_data.cpp:CONNECTIVITY_DATA::TestTrackEndpointDangling
+    @ 86a7a3f: a via connected on one layer only, a track end only in a zone) and removes them unless Accept writes
+    the refilled zones too (run.commit_fills; qmtech: a 2.4 mm GND stub).
+
+    GND: G (5, 10) on F.Cu; B.Cu GND zone over the board, its stored fill only x 16..19.5."""
+    f = Fx(20, 20, nets=("GND",))
+    f.pad("G1", "GND", (5.0, 10.0), (1.0, 1.0))
+    f.pad("G2", "GND", (18.0, 10.0), (1.0, 1.0), layer=pcbnew.B_Cu)
+    z = f.zone("GND", pcbnew.B_Cu, [(16, 0.5), (19.5, 0.5), (19.5, 19.5), (16, 19.5)])
+    pcbnew.ZONE_FILLER(f.b).Fill(f.b.Zones())
+    ol = pcbnew.SHAPE_LINE_CHAIN()
+    for x, y in [(0.5, 0.5), (19.5, 0.5), (19.5, 19.5), (0.5, 19.5)]:
+        ol.Append(_v(x, y))
+    ol.SetClosed(True)
+    z.Outline().RemoveAllContours()
+    z.Outline().AddOutline(ol)
+    return f.save(Path(d) / "fx_cleanup_stale_fill.kicad_pcb", fill=False)
