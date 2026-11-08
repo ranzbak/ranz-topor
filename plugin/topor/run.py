@@ -162,6 +162,22 @@ def filter_model(model: dict, ripped) -> dict:
             "pours": [{**p, "vias": [u for u in p.get("vias", []) if u not in gone]} for p in model.get("pours", [])]}
 
 
+def _routed_fills(cfg, out, state: dict, log) -> dict:
+    """``run.commit_fills``: the zone fills of the kicad-cli refilled routed copy (the DRC round that judged exactly
+    the items being committed), keyed by zone uuid, for the Accept commit. Empty when off, when the judged copy
+    is missing or when it was judged for other items. O(len(board text))."""
+    if not cfg.get("run", "commit_fills") or out.routed_pcb is None or not Path(out.routed_pcb).is_file():
+        return {}
+    judged = state.get("judged_items")
+    if judged is not None and [{k: v for k, v in it.items() if k != "group"} for it in judged] != \
+            [{k: v for k, v in it.items() if k != "group"} for it in out.items]:
+        log.line("zone fills not committed: the refilled copy was judged for other items")
+        return {}
+    fills = {u: p for u, p in pcbfile.parse_zone_fills(Path(out.routed_pcb).read_text()).items() if not u.startswith("#")}
+    log.line(f"zone fills of the refilled routed copy committed with the copper: {len(fills)} zones")
+    return fills
+
+
 def refill_pours(model: dict, refilled_text: str) -> dict:
     """The model with pour fills, pour reach (pads / vias) and dangling ends recomputed from a kicad-cli REFILLED
     copy: the ripped copy (harness order rip -> refill -> export, ruling C20) or, when nothing is ripped, the
@@ -911,7 +927,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         log.line(f"DRC round {state['rounds']}: {len(rep.violations)} violations, {len(rep.unconnected)} unconnected, "
                  f"{rep.seconds:.1f}s")
         j = DrcJudgement(rep, {w["uuid"]: orig for w, orig in zip(with_ids, items)})
-        state["judged_key"], state["judged"] = key, j
+        state["judged_key"], state["judged"], state["judged_items"] = key, j, list(items)
         return j
 
     clearance = float(max(rules.get("min_clearance", 0), (rules.get("default") or {}).get("clearance", 0)))
@@ -1035,7 +1051,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     # run.refill_after_accept; cleanup / teardrops opt-in) and a failure there keeps "accepted" (ruling C30).
     n_partial = sum(1 for it in out.items if it.get("group") == "topor-partial")
     req = CommitRequest(remove_uuids=list(ripped), items=out.items,
-                        message=f"Topor: routed {out.routed}/{out.total}", group=True)
+                        message=f"Topor: routed {out.routed}/{out.total}", group=True,
+                        zone_fills=_routed_fills(cfg, out, state, log))
     out.commit = port.commit(req)
     status = "accepted"
     out.status = status
@@ -1056,6 +1073,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
             return False
 
     report.facts["zones_refilled"] = False
+    report.facts["zone_fills_committed"] = len(req.zone_fills)
     if cfg.get("run", "refill_after_accept"):
         report.facts["zones_refilled"] = after_commit("zone refill", port.refill_zones)
     skipped = []

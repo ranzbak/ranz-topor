@@ -99,6 +99,8 @@ class RunReport:
             return ""
         if self.facts["zones_refilled"]:
             return " · zones refilled by topor (a second undo step)"
+        if self.facts.get("zone_fills_committed"):
+            return " · zones filled for the new copper in the same undo step (run.commit_fills)"
         return " · zones not refilled: press B (Edit → Fill All Zones), a separate undo step"
 
     # ---- summary block (wireframe section 5); fixed line set, so <= 20 lines whatever the board

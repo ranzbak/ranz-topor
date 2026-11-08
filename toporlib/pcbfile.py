@@ -278,6 +278,64 @@ def parse_zone_fills(text: str) -> dict:
     return out
 
 
+def replace_zone_fills(text: str, fills: dict) -> str:
+    """`text` with the filled polygons of every top-level zone whose uuid is a key of `fills` replaced by
+    ``fills[uuid]`` (the shape :func:`parse_zone_fills` returns: rings ``{"layer": name, "pts": [[x_nm, y_nm], ...]}``).
+    Zones not in `fills` are unchanged; a zone in `fills` with an empty list ends up unfilled. Used where a board
+    text takes over the fills KiCad's filler made for another copy (the plugin's Accept, ``run.commit_fills``).
+    O(len(text) + size of `fills`)."""
+    if not fills:
+        return text
+    out, pos = [], 0
+    depth, zstart = 0, -1
+    for m in _TOKEN.finditer(text):
+        c = m.group()
+        if c == "(":
+            if depth == 1:
+                w = _WORD.match(text, m.end())
+                if w and w.group() == "zone":
+                    zstart = m.start()
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 1 and zstart >= 0:
+                zend = m.end()
+                chunk = text[zstart:zend]
+                zstart_ = zstart
+                zstart = -1
+                heads = [h.start() for h in _FILLED.finditer(chunk)]
+                u = _Z_UUID.search(chunk[: heads[0]] if heads else chunk)
+                if not u or u.group(1) not in fills:
+                    continue
+                # drop the old filled_polygon blocks (balanced s-expressions inside the zone)
+                keep, cut = [], 0
+                for h in heads:
+                    d, i = 0, h
+                    for t in _TOKEN.finditer(chunk, h):
+                        if t.group() == "(":
+                            d += 1
+                        elif t.group() == ")":
+                            d -= 1
+                            if d == 0:
+                                i = t.end()
+                                break
+                    a = chunk.rfind("\n", 0, h)
+                    keep.append(chunk[cut:a + 1 if a >= cut else h])
+                    cut = i
+                body = "".join(keep) + chunk[cut:]
+                close = body.rstrip().rfind(")")
+                new = "".join(
+                    f'\n\t\t(filled_polygon\n\t\t\t(layer {_q(p["layer"])})\n\t\t\t(pts\n\t\t\t\t'
+                    + " ".join(f"(xy {_mm(x)} {_mm(y)})" for x, y in p["pts"]) + "\n\t\t\t)\n\t\t)"
+                    for p in fills[u.group(1)] if len(p.get("pts") or ()) >= 3)
+                body = body[:close].rstrip() + new + "\n\t" + body[close:]
+                out.append(text[pos:zstart_])
+                out.append(body)
+                pos = zend
+    out.append(text[pos:])
+    return "".join(out)
+
+
 _FREE = re.compile(r"\(\s*free(?:\s+(yes|no|true|false))?\s*\)")
 _VIA_ID = re.compile(r'\(\s*(?:uuid|tstamp)\s+"?([0-9A-Za-z\-]+)"?\s*\)')
 
