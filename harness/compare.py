@@ -445,10 +445,9 @@ def main(argv: list | None = None) -> int:
     dirs: dict = {}
     with BoardLock(None if a.no_lock else LOCK), cf.ThreadPoolExecutor(max_workers=JOBS) as ex:
         fut = {}
+        hit = {k for k in seeds if cached(cache_dir(ihash, shash, k))}
         for side, k in jobs:
             if side == "baseline":
-                if cached(cache_dir(ihash, shash, k)):
-                    print(f"  baseline s{k}: cached {cache_dir(ihash, shash, k)}", flush=True)
                 fut[ex.submit(run_baseline, pcb, k, a.set, ihash=ihash, shash=shash, name=name)] = (side, k)
             else:
                 fut[ex.submit(run_candidate, pcb, k, a.set, ihash=ihash, shash=shash, name=name,
@@ -458,7 +457,8 @@ def main(argv: list | None = None) -> int:
             side, k = fut[f]
             try:
                 dirs[(side, k)] = f.result()
-                print(f"  {side} s{k}: {dirs[(side, k)]}", flush=True)
+                how = "cached" if side == "baseline" and k in hit else "ran"
+                print(f"  {side} s{k} ({how}): {dirs[(side, k)]}", flush=True)
             except Exception as e:  # noqa: BLE001
                 print(f"  {side} s{k}: {e}", file=sys.stderr, flush=True)
                 rc = 1

@@ -298,7 +298,7 @@ def crop(src: Path, window_mm: Rect, out_dir: Path, name: str, *, split_nets: bo
                 tracks_kept += 1
                 continue
             b.Delete(t)
-            arcs_split += 1
+            arcs_split += int(inner.overlaps(bb))
             segs = list(zip(pts[:-1], pts[1:]))
         else:
             s, e = t.GetStart(), t.GetEnd()
@@ -329,6 +329,7 @@ def crop(src: Path, window_mm: Rect, out_dir: Path, name: str, *, split_nets: bo
     inside_pad = lambda tm: any(  # noqa: E731
         pd.IsOnLayer(tm["layer_id"]) and pd.GetEffectivePolygon(tm["layer_id"], pcbnew.ERROR_INSIDE).Contains(
             pcbnew.VECTOR2I(int(tm["at_nm"][0]), int(tm["at_nm"][1]))) for pd in pads_by.get(tm["net"], []))
+    leaving = {tm["net"] for tm in uniq.values() if tm["net"]}
     terminals = [tm for tm in uniq.values() if not inside_pad(tm)]
     for n, tm in enumerate(terminals, 1):
         fp = _add_terminal(pcbnew, b, n, tm["netcode"], tm["layer_id"], tm["at_nm"], tm["width_nm"])
@@ -342,22 +343,25 @@ def crop(src: Path, window_mm: Rect, out_dir: Path, name: str, *, split_nets: bo
     ref_pcb.parent.mkdir(parents=True)
     prob_pcb.parent.mkdir(parents=True)
     pcbnew.SaveBoard(str(ref_pcb), b)
-    splits = _split_nets(pcbnew, ref_pcb, {tm["net"] for tm in terminals} - pour_nets) if split_nets else []
+    for ext in (".kicad_pro", ".kicad_dru"):
+        f = src.with_suffix(ext)
+        if f.is_file():
+            for d in (ref_pcb, prob_pcb):
+                shutil.copyfile(f, d.with_suffix(ext))
+    # zone fills by KiCad itself (pcbnew's ZONE_FILLER crashes on the edited board): the split sees the pours through
+    # them, and the model export reads them
+    from toporlib.drc import run_drc
+    fill = lambda d: run_drc(d, d.with_name(f"{d.stem}--drc.json"), save_board=True)  # noqa: E731
+    fill(ref_pcb)
+    splits = _split_nets(pcbnew, ref_pcb, leaving) if split_nets else []
     renamed = {pad: s["new"] for s in splits for pad in s["pads"]}
     for tm in terminals:
         tm["net"] = renamed.get(f"{tm['ref']}.1", tm["net"])
     from harness.strip import strip_text
     text, _ = strip_text(ref_pcb.read_text())
     prob_pcb.write_text(text)
-    for ext in (".kicad_pro", ".kicad_dru"):
-        f = src.with_suffix(ext)
-        if f.is_file():
-            for d in (ref_pcb, prob_pcb):
-                shutil.copyfile(f, d.with_suffix(ext))
-    # zone fills by KiCad itself (pcbnew's ZONE_FILLER crashes on the edited board): the model export reads them
-    from toporlib.drc import run_drc
     for d in (ref_pcb, prob_pcb):
-        run_drc(d, d.with_name(f"{d.stem}--drc.json"), save_board=True)
+        fill(d)
     meta = {
         "name": name, "source": str(src), "note": note,
         "window_requested_mm": window_mm.as_list(), "window_mm": w.as_list(MM), "outline_mm": outline.as_list(MM),
@@ -375,9 +379,9 @@ def crop(src: Path, window_mm: Rect, out_dir: Path, name: str, *, split_nets: bo
 
 
 def _split_nets(pcbnew, pcb: Path, nets) -> list[dict]:
-    """Split each of `nets` on the saved board `pcb` by KiCad's own connectivity of its pads, tracks and vias: the
-    piece with the most pads keeps the name, every other piece (pads and the copper joined to them) becomes
-    `NET__crop<k>`. Rewrites `pcb` when something was split. On a freshly loaded board: no item was deleted on it."""
+    """Split each of `nets` on the saved (filled) board `pcb` by KiCad's own connectivity of its pads, tracks, vias and
+    zone fills: the piece with the most pads keeps the name, every other piece (pads and the copper joined to them)
+    becomes `NET__crop<k>`; pieces on a pour island all keep the name (a zone is not split). Rewrites `pcb` when something was split. On a freshly loaded board: no item was deleted on it."""
     b = pcbnew.LoadBoard(str(pcb))
     b.BuildConnectivity()
     conn = b.GetConnectivity()
@@ -392,8 +396,11 @@ def _split_nets(pcbnew, pcb: Path, nets) -> list[dict]:
             if p.m_Uuid.AsString() in seen:
                 continue
             items = [p] + [i for i in conn.GetConnectedItems(p) if i.GetNetname() == n]
-            grp = {"pads": [], "copper": []}
+            grp = {"pads": [], "copper": [], "zone": False}
             for i in items:
+                if i.GetClass() == "ZONE":  # one zone object on several islands: flag every piece on it
+                    grp["zone"] = True
+                    continue
                 u = i.m_Uuid.AsString()
                 if u in seen:
                     continue
@@ -402,12 +409,14 @@ def _split_nets(pcbnew, pcb: Path, nets) -> list[dict]:
                     grp["pads"].append(i.Cast())
                 elif i.GetClass() in ("PCB_TRACK", "PCB_ARC", "PCB_VIA"):
                     grp["copper"].append(i.Cast())
+
             groups.append(grp)
         if len(groups) < 2:
             continue
         name = lambda q: f"{q.GetParentFootprint().GetReference()}.{q.GetNumber()}"  # noqa: E731
-        groups.sort(key=lambda g: (-len(g["pads"]), min(name(q) for q in g["pads"])))
-        for k, g in enumerate(groups[1:], 1):
+        # a piece on a pour island keeps the name (the zone cannot be split); the largest piece keeps it otherwise
+        groups.sort(key=lambda g: (not g["zone"], -len(g["pads"]), min(name(q) for q in g["pads"])))
+        for k, g in enumerate([g for g in groups[1:] if not g["zone"]], 1):
             nn = pcbnew.NETINFO_ITEM(b, f"{n}__crop{k}")
             b.Add(nn)
             for i in g["pads"] + g["copper"]:
@@ -428,19 +437,59 @@ def _rect_polyset(pcbnew, r: Rect):
 
 
 # ---------------------------------------------------------------- checks and picture
-def reference_drc(meta: dict, out: Path | None = None) -> dict:
-    """KiCad's DRC (with zone refill) of the reference against the crop: routing violations by type, unconnected."""
+def _drc_key(v) -> tuple:
+    return (v.get("type"), tuple(sorted((round(it["pos"]["x"], 2), round(it["pos"]["y"], 2)) for it in v.get("items", []))))
+
+
+def hand_drc(src: Path, cache: Path) -> Path:
+    """KiCad's DRC of the source board copy (with refill), cached per source content under `cache`."""
+    import hashlib
+    from toporlib.drc import run_drc
+    h = hashlib.sha256(Path(src).read_bytes()).hexdigest()[:12]
+    out = Path(cache) / f"{Path(src).stem}-{h}--drc.json"
+    if not out.is_file():
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.parent / f"tmp-{h}"
+        tmp.mkdir(exist_ok=True)
+        for ext in (".kicad_pcb", ".kicad_pro", ".kicad_dru"):  # DRC on a copy: the source is never written
+            if Path(src).with_suffix(ext).is_file():
+                shutil.copyfile(Path(src).with_suffix(ext), tmp / f"{Path(src).stem}{ext}")
+        run_drc(tmp / Path(src).name, out)
+        shutil.rmtree(tmp)
+    return out
+
+
+def reference_drc(meta: dict, out: Path | None = None, hand: Path | None = None) -> dict:
+    """KiCad's DRC (with zone refill) of the reference against the crop: routing violations by type, those the hand
+    board has itself (same type at the same item positions in `hand`, its DRC JSON), the new ones, and the
+    unconnected items: the hand board's own, pour pieces (every item on a pour net: pieces of the clipped pour, or
+    copper on two of its islands, that the hand layout joins outside the window), and the new ones."""
     from toporlib.drc import run_drc
     from harness.cutclass import ROUTING_DRC
     ref = Path(meta["reference_pcb"])
     out = out or ref.with_name(f"{ref.stem}--drc.json")
-    rep = run_drc(ref, out)
+    run_drc(ref, out)
     raw = json.loads(Path(out).read_text())
-    by = {}
+    own_keys, own_unc = set(), set()
+    if hand is not None and Path(hand).is_file():
+        hd = json.loads(Path(hand).read_text())
+        own_keys = {_drc_key(v) for v in hd.get("violations", [])}
+        own_unc = {_drc_key(v) for v in hd.get("unconnected_items", [])}
+    by, own = {}, 0
     for v in raw.get("violations", []):
         if v.get("type") in ROUTING_DRC:
             by[v["type"]] = by.get(v["type"], 0) + 1
-    return {"routing": by, "routing_total": sum(by.values()), "unconnected": len(rep.unconnected)}
+            own += _drc_key(v) in own_keys
+    import re
+    pour = set(meta.get("pour_nets") or [])
+    net_of = lambda it: (re.search(r"\[([^\]]*)\]", it["description"]) or [None, None])[1]  # noqa: E731
+    unc = raw.get("unconnected_items", [])
+    u_own = sum(1 for u in unc if _drc_key(u) in own_unc)
+    u_pour = sum(1 for u in unc if _drc_key(u) not in own_unc and all(net_of(it) in pour for it in u.get("items", [])))
+    total = sum(by.values())
+    return {"routing": by, "routing_total": total, "routing_hand_own": own, "routing_new": total - own,
+            "unconnected": len(unc), "unconnected_hand_own": u_own, "unconnected_pour": u_pour,
+            "unconnected_new": len(unc) - u_own - u_pour}
 
 
 def render(meta: dict, drc: dict | None, out_png: Path) -> Path:
@@ -450,17 +499,26 @@ def render(meta: dict, drc: dict | None, out_png: Path) -> Path:
     tmp = out_png.parent / "png-parts"
     tmp.mkdir(parents=True, exist_ok=True)
     term = [[tm["at_nm"]] for tm in meta["terminals"]]
-    marks = [(m["at_mm"][0], m["at_mm"][1], m.get("what", "")) for m in meta["marks"]]
+    marks = [(m["at_mm"][0], m["at_mm"][1], m.get("what", "")) for m in meta["marks"] if m.get("what") != "extra point"]
+    extra = [[[m["at_mm"][0] * MM, m["at_mm"][1] * MM]] for m in meta["marks"] if m.get("what") == "extra point"]
     panels = []
     for label, pcb in (("problem", prob), ("reference (hand copper in the window)", ref)):
         raw = render_png(pcb, tmp / f"{label.split()[0]}-raw.png", height=900)
         bbox = board_bbox_nm(pcb)
         p = highlight_points(raw, tmp / f"{label.split()[0]}-t.png", term, bbox_nm=bbox, radius_px=8, width_px=3) if term else raw
         p = draw_violations(p, tmp / f"{label.split()[0]}-v.png", marks, bbox_nm=bbox, radius_px=11, width_px=3)
+        if extra:
+            p = highlight_points(p, tmp / f"{label.split()[0]}-x.png", extra, bbox_nm=bbox, radius_px=15, width_px=2,
+                                 color="#d62728")
         if label == "problem":
-            text = f"{meta['name']}: problem ({len(meta['terminals'])} boundary terminals magenta; yellow = {meta.get('note') or 'marks'})"
+            text = (f"{meta['name']}: problem ({len(meta['terminals'])} boundary terminals magenta; yellow = {meta.get('note') or 'marks'}"
+                    + (f"; red = {next((m.get('note') for m in meta['marks'] if m.get('note')), '') or 'extra points'}" if extra else "") + ")")
         else:
-            d = "" if drc is None else f"; KiCad DRC: {drc['routing_total']} routing violations, {drc['unconnected']} unconnected"
+            d = "" if drc is None else (f"; KiCad DRC: {drc['routing_new']} routing violations"
+                                        + (f" (+{drc['routing_hand_own']} of the hand board's own)" if drc["routing_hand_own"] else "")
+                                        + f", {drc['unconnected_new']} unconnected"
+                                        + (f" (+{drc['unconnected_pour']} pour pieces joined outside)" if drc["unconnected_pour"] else "")
+                                        + (f" (+{drc['unconnected_hand_own']} of the hand board's own)" if drc["unconnected_hand_own"] else ""))
             text = f"reference: {meta['reference']['tracks']} tracks, {meta['reference']['vias']} vias{d}"
         panels.append(caption(p, text, tmp / f"{label.split()[0]}.png"))
     compose_compare(panels[0], panels[1], out_png)
@@ -477,7 +535,8 @@ def main(argv=None) -> int:
     ap.add_argument("--add", action="append", default=[], metavar="X,Y", help="extra point (mm) for the window")
     ap.add_argument("--margin", type=float, default=2.0, help="mm around the ids / points (default 2)")
     ap.add_argument("--out", type=Path, default=None, help="default <main tree>/scratch/crops")
-    ap.add_argument("--note", default="", help="what the marks are (PNG caption)")
+    ap.add_argument("--note", default="", help="what the yellow marks (the class-report rows) are, for the PNG caption")
+    ap.add_argument("--extra-note", default="", help="what the red marks (--add points) are, for the PNG caption")
     ap.add_argument("--no-split", action="store_true", help="keep the nets whole (no __crop<k> pieces)")
     ap.add_argument("--no-png", action="store_true")
     a = ap.parse_args(argv)
@@ -492,12 +551,12 @@ def main(argv=None) -> int:
         win = Rect(*a.window)
     else:
         ap.error("--window or --classes/--ids")
-    marks += [{"at_mm": list(p), "what": "extra point"} for p in extra]
+    marks += [{"at_mm": list(p), "what": "extra point", "note": a.extra_note} for p in extra]
     if a.out is None:
         from harness.compare import MAIN
         a.out = MAIN / "scratch" / "crops"
     meta = crop(src, win, a.out, a.name, split_nets=not a.no_split, marks=marks, note=a.note)
-    drc = reference_drc(meta)
+    drc = reference_drc(meta, hand=hand_drc(src, a.out / ".hand-drc"))
     meta["reference_drc"] = drc
     if not a.no_png:
         meta["png"] = str(render(meta, drc, Path(meta["problem"]).parent.parent / f"{a.name}-crop.png"))

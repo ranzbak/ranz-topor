@@ -82,7 +82,7 @@ def test_net_split_by_the_hand_connectivity_inside_the_window(crop):
 
 def test_reference_is_drc_clean_against_the_crop(crop):
     drc = crop["reference_drc"]
-    assert drc == {"routing": {}, "routing_total": 0, "unconnected": 0}, drc
+    assert (drc["routing_total"], drc["routing_new"], drc["unconnected"], drc["unconnected_new"]) == (0, 0, 0, 0), drc
     b = pcbnew.LoadBoard(crop["reference_pcb"])
     assert len(list(b.GetTracks())) == 3  # SIG one piece, N2 two pieces (the part outside is cut away)
     meta = json.loads((Path(crop["problem"]).parent.parent / "crop.json").read_text())
