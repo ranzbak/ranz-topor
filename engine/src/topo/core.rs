@@ -192,6 +192,9 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         "round cap"
     }
     .into();
+    if opts.stop_after == "plan" {
+        best.stop_reason = "stop_after plan".into();
+    }
     best.timed_out = time_hit && !(cancel && stable_all);
     best.converged = !best.timed_out;
     best.runtime_s = t0.elapsed().as_secs_f64();
@@ -346,8 +349,10 @@ impl Run {
         let obj = coord.obj;
         let cycle = self.cycles + 1;
         let over_budget = ctl.over_limit();
-        if cycle > opts.topo_rounds.max(1) || (cycle > 1 && (ctl.is_cancelled() || cancelled() || over_budget)) {
-            self.time_hit = cycle <= opts.topo_rounds.max(1) && self.stable_at.is_none();
+        // C0: `[run] stop_after = "plan"` plans one cycle (the next would need the drawing's feedback).
+        let plan_only = cycle > 1 && opts.stop_after == "plan";
+        if plan_only || cycle > opts.topo_rounds.max(1) || (cycle > 1 && (ctl.is_cancelled() || cancelled() || over_budget)) {
+            self.time_hit = !plan_only && cycle <= opts.topo_rounds.max(1) && self.stable_at.is_none();
             self.done = true;
             return;
         }
@@ -1622,6 +1627,31 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         r.final_plan(&st, &lr.events, &cm_plan.via_k, &packer, bottom, &|w| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]), &cm_plan.overfull_list());
         if let Some(e) = r.write() {
             eprintln!("{e}");
+        }
+    }
+    // C0: the plan handed to the drawing, as one machine-readable line (every cycle), and
+    // `[run] stop_after = "plan"`: the round ends here, before any copper is drawn.
+    {
+        let alive: Vec<WireId> = (0..st.wires.len()).filter(|&w| st.wires[w].alive).collect();
+        let crossings: usize = alive.iter().map(|&w| st.crossings(w).iter().filter(|c| st.wires[c.other].net != st.wires[w].net).count()).sum::<usize>() / 2;
+        let topo_len: f64 = alive.iter().map(|&w| st.polyline(w).windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>()).sum();
+        let vias: usize = alive.iter().map(|&w| cm_plan.via_k[w].len()).sum();
+        let m = serde_json::json!({
+            "round": round,
+            "wires": alive.len(),
+            "crossings": crossings,
+            "vias": vias,
+            "vias_without_site": cm_plan.nosite(),
+            "overfull_edge_layers": cm_plan.overfull_list().len(),
+            "unlayerable_crossings": unlayerable_errors,
+            "dropped_unlayerable": dropped.len(),
+            "topo_length_mm": (topo_len / MM * 1e3).round() / 1e3,
+        });
+        warnings.push(format!("plan metrics: {m}"));
+        if opts.stop_after == "plan" {
+            let mut r = unrouted(model_real, opts, "not drawn: [run] stop_after = \"plan\" ends each run after the plan of its first cycle");
+            r.warnings.extend(warnings);
+            return (RoundOut::unrouted(r), Vec::new(), mem.clone());
         }
     }
     if std::env::var("TOPO_VIADBG").is_ok() {

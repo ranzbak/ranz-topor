@@ -1283,6 +1283,11 @@ pub struct Options {
     /// plan handed to the drawing, and writes them there as JSON (`run<k>/cycle<c>.json`). Empty
     /// (default): off. Never changes the routing.
     pub cut_report: String,
+    /// C0 (`[run] stop_after`, measurement): `"plan"` ends every run of the topological core
+    /// after the plan of its first cycle (later cycles need the drawing's feedback), before the
+    /// drawing; the result has no copper and its warnings carry the plan metrics line. `""`
+    /// (default): the full run.
+    pub stop_after: String,
     /// D7 (`topor.toml [diffpair] enabled`): route the pairs of `rules.diff_pairs` as coupled
     /// pairs (true, default); false leaves their connections unrouted with the reason
     /// "diff pair: not in the rough version" (the behaviour before D7).
@@ -1406,6 +1411,7 @@ impl Default for Options {
             mixed_clearance: "conservative".into(),
             cut_radius_mm: 0.0,
             cut_report: String::new(),
+            stop_after: String::new(),
             diffpair_route: true,
             diffpair_zip_max_nm: 3_000_000,
             diffpair_via_axes: vec![0.0, 45.0, 90.0, 135.0],
