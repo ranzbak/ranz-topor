@@ -1,6 +1,7 @@
 """C0 compare tool: the frozen baseline engine and the candidate engine on the same input, plan first.
 
     .venv/bin/python -m harness.compare <board key | .kicad_pcb> [--seeds 0,1,..] [--set SECTION.KEY=VALUE ...]
+                                        [--cand-set SECTION.KEY=VALUE ...]
                                         [--plan-only] [--baseline-only] [--out DIR] [--json FILE]
 
 - **Baseline** = the detached worktree `scratch/baseline-wt` (tag baseline-2026-11-09) with its own engine
@@ -422,6 +423,9 @@ def main(argv: list | None = None) -> int:
     ap.add_argument("--seeds", default="0", help="comma list of seeds (0 = the default run; k = optimize.seed=k)")
     ap.add_argument("--set", action="append", default=[], metavar="SECTION.KEY=VALUE",
                     help="setting for both engines (part of the cache key)")
+    ap.add_argument("--cand-set", action="append", default=[], metavar="SECTION.KEY=VALUE",
+                    help="setting for the candidate only (a setting the baseline does not know, e.g. a new option "
+                         "under test); not part of the baseline cache key")
     ap.add_argument("--plan-only", action="store_true",
                     help="compare the plans only (candidate: run.stop_after=plan; baseline: the plan of its cached full run)")
     ap.add_argument("--baseline-only", action="store_true", help="run / read the baseline only (fills the cache)")
@@ -434,9 +438,13 @@ def main(argv: list | None = None) -> int:
     clock, timeout_s, threads = _limits()
     ihash = input_hash(pcb)
     shash = settings_hash(a.set, clock=clock, timeout_s=timeout_s, threads=threads, baseline=baseline_commit())
+    # The candidate's run directory also keys its own settings.
+    cshash = shash if not a.cand_set else settings_hash(a.set + a.cand_set, clock=clock, timeout_s=timeout_s,
+                                                          threads=threads, baseline=baseline_commit())
     which = "first" if a.plan_only else "picked"
     print(f"compare {pcb} (input {ihash}, settings {shash}{', ' + ' '.join(norm_sets(a.set)) if a.set else ''}); "
-          f"limits {clock} {timeout_s:g} s, {threads} threads, {JOBS} runs at once", flush=True)
+          f"limits {clock} {timeout_s:g} s, {threads} threads, {JOBS} runs at once"
+          + (f"; candidate only: {' '.join(norm_sets(a.cand_set))}" if a.cand_set else ""), flush=True)
     jobs = []
     for k in seeds:
         jobs.append(("baseline", k))
@@ -450,7 +458,7 @@ def main(argv: list | None = None) -> int:
             if side == "baseline":
                 fut[ex.submit(run_baseline, pcb, k, a.set, ihash=ihash, shash=shash, name=name)] = (side, k)
             else:
-                fut[ex.submit(run_candidate, pcb, k, a.set, ihash=ihash, shash=shash, name=name,
+                fut[ex.submit(run_candidate, pcb, k, a.set + a.cand_set, ihash=ihash, shash=cshash, name=name,
                               plan_only=a.plan_only)] = (side, k)
         rc = 0
         for f in cf.as_completed(fut):
@@ -463,6 +471,7 @@ def main(argv: list | None = None) -> int:
                 print(f"  {side} s{k}: {e}", file=sys.stderr, flush=True)
                 rc = 1
     report = {"input": str(pcb), "input_hash": ihash, "settings_hash": shash, "sets": norm_sets(a.set),
+              "candidate_sets": norm_sets(a.cand_set),
               "plan_only": a.plan_only, "plan": which, "seeds": {}}
     for k in seeds:
         sides = {}
