@@ -814,108 +814,18 @@ pub struct DrcSpot {
     pub net: i32,
 }
 
-/// Expert knobs of the negotiation (`topor.toml [expert]`); defaults are the M3 constants.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Expert {
-    /// History added to the edges of a connection that failed relax / self-check.
-    pub hist_fail: f64,
-    /// History added to the edges / sites that block a connection.
-    pub hist_block: f64,
-    /// History added to every overused edge per iteration.
-    pub hist_overuse: f64,
-    /// Present-congestion factor of the search cost.
-    pub present_overuse: f64,
-    /// Escalation of the present-congestion factor per negotiation iteration (PathFinder):
-    /// iteration `k` searches with `present_overuse · present_growth^(k - 1)` (capped at 1000
-    /// times), so wires that share an overfull edge must give way over the iterations; 1 keeps
-    /// it constant.
-    pub present_growth: f64,
-    /// Candidates the zero-slack retry tries.
-    pub zero_slack_candidates: usize,
-    /// Relaxation sweep cap of the classic router (unused).
-    pub relax_iter_cap: u32,
-    /// Capacity rule (M4-D1, `topor.toml [expert] own_net_capacity`): a pad's own edges charge
-    /// no clearance gap for its own net and give the corner radius back, same-net strands
-    /// charge no gap between each other. `false` = the net-blind M3 rule (identity
-    /// experiments only).
-    pub own_net_capacity: bool,
-    /// Capacity rule (M4-D1, `topor.toml [expert] wall_aware_capacity`): with an own end,
-    /// foreign walls along the edge that are not its ends (outline, keepouts, long pad sides)
-    /// remove the blocked part of the edge. `false` = F6 behaviour (outline-wall corridors
-    /// accepted that the metrization then rejects).
-    pub wall_aware_capacity: bool,
-    /// Search (A4, `topor.toml [expert] transit_pinch`): the slot search refuses a face
-    /// transit around a vertex that a foreign wall pinches below the strand's need (a via next
-    /// to the board edge: the vertex-only edge capacity sees only the outline corner), where
-    /// the metrization would report the wall grazed mid-span. `false` = M3.
-    pub transit_pinch: bool,
-    /// Steiner T-junctions (A5, `topor.toml [expert] steiner_min_angle_deg`): a same-net
-    /// T-junction is taken only when the joining track meets the sibling at no less than this
-    /// angle (degrees, 0..=90; all three pairwise angles at the junction are then >= it). Below
-    /// 60 the branch forms an acute sliver (acid trap); 90 allows perpendicular joins only.
-    pub steiner_min_angle_deg: f64,
-    /// Steiner T-junctions (A5, `topor.toml [expert] steiner_len_slack`): a junction whose
-    /// metrized connection is longer than this factor times the search's estimate (+ 1 mm) is
-    /// rejected and searched again without it (the sibling's copper lay elsewhere than the
-    /// estimate on a long graph edge).
-    pub steiner_len_slack: f64,
-    /// Steiner T-junctions (A5, `topor.toml [expert] steiner_ghost_factor`): a junction path is
-    /// a goal only while its length plus via cost stays at most this factor times the
-    /// connection's own pad-to-pad ghost on the empty board (1 = only junctions that are
-    /// cheaper than the free pad route; larger also lets junctions dodge congestion).
-    pub steiner_ghost_factor: f64,
-}
-
-impl Default for Expert {
-    fn default() -> Self {
-        Expert {
-            hist_fail: 1.0,
-            hist_block: 0.5,
-            hist_overuse: 0.5,
-            present_overuse: 4.0,
-            present_growth: 1.0,
-            zero_slack_candidates: 4,
-            relax_iter_cap: 200,
-            own_net_capacity: true,
-            wall_aware_capacity: true,
-            transit_pinch: true,
-            steiner_min_angle_deg: 60.0,
-            steiner_len_slack: 1.1,
-            steiner_ghost_factor: 1.0,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Options {
     /// Extra distance on top of every clearance during search and drawing (nm); 0 (default) =
     /// exactly the design rule, which KiCad's DRC accepts.
     pub margin_nm: i64,
-    pub threads: usize,
-    pub partial_routes: bool,
     /// Wall-clock budget of the run in seconds; `0.0` disables the timeout (the stop rule and
     /// the iteration cap still end the run).
     pub wall_clock_s: f64,
-    /// Most PathFinder iterations of one pass (`topor.toml [routing] pathfinder_iter_cap`).
-    pub pathfinder_iter_cap: u32,
-    /// Stop rule: the pass ends when over the last `patience` iterations no connection was
-    /// newly routed and the best cost improved by less than `min_gain_pct` in total.
-    pub patience: u32,
-    /// Stop rule: total best-cost gain (percent) over `patience` iterations below which the
-    /// run counts as converged-by-no-gain.
-    pub min_gain_pct: f64,
     /// An accepted path longer than this factor times its slot-free ghost counts as an absurd
     /// detour and triggers rip-up of the blockers.
     pub detour_factor: f64,
-    /// Rip-up cost growth per repeated rip of one `(ripper, blocker)` pair (default 1.25, by measurement: see
-    /// task GR, the F.Cu-only eprom guards hold on the plateau 1.0 .. 1.75 but not at 2.0).
-    pub ripup_growth: f64,
-    /// Rips per `(ripper, blocker)` pair and run (damping cap).
-    pub ripup_max_per_pair: u32,
-    /// Expert knobs (`topor.toml [expert]`).
-    pub expert: Expert,
     /// Social factors (`topor.toml [factors]`): weight, scope and report level per factor name,
     /// used by the topological core (`topo::factors`).
     pub factors: crate::topo::factors::FactorConfig,
@@ -924,20 +834,8 @@ pub struct Options {
     pub existing_copper: ExistingCopper,
     pub scope: Scope,
     pub skip_self_check: bool,
-    /// Smoother: kept uuid -> reason. A wire containing a pinned item keeps its hand copper
-    /// (fallback "pinned: <reason>"); the harness DRC loop pins items KiCad flagged.
-    pub pinned: BTreeMap<String, String>,
     /// Router: per-net circular obstacles from the harness DRC loop.
     pub drc_spots: Vec<DrcSpot>,
-    /// Router (R6): after negotiation, one retry pass in which a connection may take a corridor
-    /// that is pinched below the margin ε (but not below the rules) with margin 0 against that
-    /// corridor only; kept when it shortens the routing. The harness DRC is the final judge.
-    pub zero_slack_retry: bool,
-    /// Router (A4, `topor.toml [search] zero_slack_failed`): the zero-slack retry also tries
-    /// the connections that failed (not permanently), ahead of the length gains of routed
-    /// ones: a connection whose only corridor is pinched below ε gets its margin-0 attempt even
-    /// when the negotiation never routed it at ε. Off = M3 (routed connections only).
-    pub zero_slack_failed: bool,
     /// Router (A14, `topor.toml [search] dangling_ends`): what a connection that starts at the free
     /// end of a hand-started track does. `"continue"` (default): the new copper leaves the end
     /// along the hand direction (G1, `g1_angle_deg <= 1`); `"fixed"`: M3 behaviour, the end is
@@ -949,24 +847,6 @@ pub struct Options {
     /// use the plane layers at the `plane_signal` / `plane_cut` prices; `"forbidden"` keeps
     /// signals off them (only the routable layers are signal layers).
     pub plane_signals: String,
-    /// Router (D-1, `topor.toml [search] strict_unfit_edges`): the layered search rejects a
-    /// graph edge that is too narrow for the connection's trace even when empty
-    /// (`!fits(e)`) instead of pricing it as an overuse crossing. Off by default (the default
-    /// keeps boards such as `eprom-to-kernal` routable through one pinched edge).
-    pub strict_unfit_edges: bool,
-    /// Router (D-6, `topor.toml [search] pour_listed_via_goals`): a connection to a pour may end
-    /// on a same-net via the pour already lists (no new via) instead of always placing one.
-    /// Off by default: on wiccon-2023 it saves one via but lengthens the GND connection (outside
-    /// pads 1381.4 mm, over the 1380 mm M3 bound), so it is the user's trade-off.
-    pub pour_listed_via_goals: bool,
-    /// Router (M3): cost of one via in nm of wire length.
-    pub via_cost_nm: i64,
-    /// Router (A10): per-net via cost in nm by net name; overrides `via_cost_nm` (the plugin
-    /// resolves `[vias] cost_by_netclass` > `cost_by_priority` > `via_cost_mm` into it).
-    pub via_cost_by_net: BTreeMap<String, i64>,
-    /// Run-time form of `via_cost_by_net` by net code: filled by `route` from the model's net
-    /// names (anything passed in is replaced when `via_cost_by_net` is not empty). Internal.
-    pub via_cost_by_code: BTreeMap<i32, i64>,
     /// Router (A10): when non-empty only these drills (nm) are used for the *alternative* via
     /// sizes (predefined and profile vias); the net's own class via is never dropped.
     pub allowed_drills_nm: Vec<i64>,
@@ -977,65 +857,6 @@ pub struct Options {
     /// copper (with `via_in_pad` the pad's own sites are the nearest). False: such a
     /// connection fails with "terminal not on any routable layer".
     pub plane_vias: bool,
-    /// Router (0.4.2): farthest a plane via may be from the terminal's copper (nm); keeps the
-    /// trace to the plane, and so its inductance, short.
-    pub plane_via_max_nm: i64,
-    /// Router (A10): a via is removed by the reduction pass when the via-free route is at most
-    /// this many percent longer (outside pads).
-    pub reduction_len_slack_pct: f64,
-    /// Router (A11): extra cost in nm of cost per mm of track inside a foreign-net copper pour
-    /// (the fill of a zone of another net on that layer), charged per step; 0 disables. Default 0
-    /// (measured: 1 000 000 = 1 mm per mm makes wiccon 58/61 with 83 vias and eprom 65.9 mm
-    /// outside pads instead of 62/62, 37 vias and 64.6 mm, so it is opt-in).
-    pub pour_cut_cost_nm: i64,
-    /// Router (A11): preferred routing direction per layer name, in degrees (0 = along x,
-    /// 90 = along y); see `direction_cost`.
-    pub layer_direction: BTreeMap<String, f64>,
-    /// Router (A11): a step of length `L` at angle `a` to its layer's preferred direction costs
-    /// an extra `L * direction_cost * |sin a|`; 0 disables (layers without an entry are free).
-    pub direction_cost: f64,
-    /// Router (M3): maximum vias on one connection.
-    pub max_vias_per_connection: u32,
-    /// Router (M3-R2): after convergence, one via-reduction pass (TopoR lifting).
-    pub via_reduction: bool,
-    /// Router (A13): after via reduction, move each via a bounded distance inside the star of
-    /// its site towards the straight line between its two legs' last anchors.
-    pub via_relaxation: bool,
-    /// Router (via shove): after the zero-slack retry, a connection whose metrization failed on
-    /// a pinch against another connection's via gets its planned path back and that via is pushed away
-    /// from the pinch, inside the star of its site, until the connection fits.
-    pub via_shove: bool,
-    /// Via sites (plane vias): the SMD pads of plane-pour connections get a ring of candidate
-    /// sites all around them (`vias::via_sites_ring`), not only the four axis escape sites.
-    pub plane_via_ring: bool,
-    /// Plane vias: an SMD pad of a plane-pour connection may also end on a via of its own net
-    /// that another connection drops onto the plane, within `plane_via_share_max_nm` of the pad.
-    pub plane_via_share: bool,
-    /// Via sites: the exposed (thermal) centre pad of a QFN / DFN-like footprint gets a grid of
-    /// in-pad sites of its own net (`vias::exposed_pads`), independent of `via_in_pad`.
-    pub thermal_pad_vias: bool,
-    /// Largest pad-to-via distance for a shared plane via (nm).
-    pub plane_via_share_max_nm: i64,
-    /// Negotiation: a connection that fails its metrization rips the connections whose vias
-    /// its failure names or that sit next to the pad / wall it names (escalating rip cost), so
-    /// those vias can move to another site. Off by default: on qmtech and the dcsgone USB crop
-    /// the extra rips churn the negotiation and fewer connections route.
-    pub blame_vias: bool,
-    /// Negotiation: before a failed path leaves the graph, the overfull edges it crosses get
-    /// history, the foreign vias at their ends site history, and their occupants (strands and
-    /// via owners) search again (`Negotiator::press_failed`), so a passage a failed wire could
-    /// not share is negotiated instead of only the failed wire trying again.
-    pub failed_pressure: bool,
-    /// Router: after the negotiation, gradual blocker rip-up (`route::blocker_rip_pass`): the
-    /// routed connection whose strands / vias block the most failed connections is ripped, its
-    /// victims routed first, then it again; kept on a net gain of routed connections.
-    pub rip_pass: bool,
-    /// Continuation rounds (`route::continue_rounds`): at most this many extra passes route the
-    /// still-failed connections against everything routed so far as fixed copper; 0 = off.
-    pub continue_rounds: u32,
-    /// Diagnostics: emit `RouteResult.profile` (per-iteration timers). Off by default: timings
-    /// are run-dependent and must not enter the (thread-count independent) result JSON.
-    pub profile: bool,
     /// Net name -> priority tier `1..=4` (1 routed first and cheapest per length, 4 last; see
     /// `search::tier_weight` / `via_weight`). Overrides the inferred tier (wide net 2, else 3).
     /// The plugin builds it from `@N` marker > `topor_pN` netclass > `[nets] priority` (1..3) and
@@ -1053,19 +874,6 @@ pub struct Options {
     /// to its pour; pour-less / fill-less nets get no connections), `false` = route it as a
     /// signal net even if it has a pour (the pour is not used to join pads). Absent = automatic.
     pub pour_served: BTreeMap<String, bool>,
-    /// Offline / report only (M3-R15): also search every connection once on the fixed copper
-    /// alone with full clearance and width (a DRC-feasible shortest path) and report it as
-    /// `ConnReport::ref_len_nm`. Never changes the routing. Off by default (costs one search per
-    /// connection).
-    pub detour_reference: bool,
-    /// Share (percent, 0..=100) of the remaining wall-clock budget the reference searches may
-    /// use; connections not finished in time fall back to the ghost (`ref_kind = "ghost"`).
-    pub detour_reference_budget_pct: f64,
-    /// Router (A6, `topor.toml [search] exit_stubs`): pad exit stubs (`crate::stubs`). `"auto"`:
-    /// a straight stub out of a pad whose centre exit at the net width violates the clearance
-    /// (fine-pitch rows; off-centre or necked when needed); `"all"`: also every SMD terminal pad
-    /// with a long axis; `"off"`: M3 (attach at the pad centre).
-    pub exit_stubs: String,
     /// Router (NX, `topor.toml [search] neck_to_pad`): an exit stub may be narrower than the net
     /// width (down to the effective minimum track width) when the full width does not fit out of
     /// the pad ("necking"); the rest of the connection keeps the net width.
@@ -1246,17 +1054,6 @@ pub struct Options {
     /// taken off its price where it runs beside a drawn trace of another net at the clearance, so
     /// a trace follows its neighbour and a bundle keeps its pitch through its bends (0 = off).
     pub bundle_pull: f64,
-    /// Router (A6, `topor.toml [search] pad_bridge_max_mm`): a connection between two pads of
-    /// one footprint at most this far apart (centre to centre, nm) whose straight line is clean,
-    /// possibly only off the centre line, is routed by that one track (`exit_stubs` auto: only
-    /// where a pad needs a stub); 0 = off.
-    pub pad_bridge_max_nm: i64,
-    /// Router (A5, M4-D3, `topor.toml [search] steiner`): a connection may end on the copper of
-    /// an already routed connection of its own net (or on kept hand copper of its target
-    /// cluster) in a T-junction instead of only at its pad, when that is cheaper; sibling
-    /// connections of one net then share a pad exit instead of each needing its own. Off = M3
-    /// (pad to pad only).
-    pub steiner: bool,
     /// Inflated sketch U0 (`topor.toml [capacity] mixed_clearance`): how the per-layer cut test
     /// (`topo::sheet`, `topo::cutflow`) spaces neighbours of different nets on a cut:
     /// `"conservative"` (default; every gap at the largest clearance of the cut's items, the
@@ -1294,61 +1091,24 @@ impl Default for Options {
     fn default() -> Self {
         Options {
             margin_nm: 0,
-            threads: 0,
-            partial_routes: false,
             wall_clock_s: 60.0,
-            pathfinder_iter_cap: 30,
-            patience: 5,
-            min_gain_pct: 1.0,
             detour_factor: 2.0,
-            ripup_growth: 1.25,
-            ripup_max_per_pair: 8,
-            expert: Expert::default(),
             factors: Default::default(),
             drc_loop_cap: 5,
             seed: 1,
             existing_copper: ExistingCopper::Fixed,
             scope: Scope::default(),
             skip_self_check: false,
-            pinned: BTreeMap::new(),
             drc_spots: Vec::new(),
-            zero_slack_retry: true,
-            zero_slack_failed: true,
             dangling_ends: "continue".into(),
             plane_signals: "costly".into(),
-            strict_unfit_edges: false,
-            pour_listed_via_goals: false,
-            via_cost_nm: 2_000_000,
-            via_cost_by_net: BTreeMap::new(),
-            via_cost_by_code: BTreeMap::new(),
             allowed_drills_nm: Vec::new(),
             via_in_pad: false,
             plane_vias: true,
-            plane_via_max_nm: 1_000_000,
-            reduction_len_slack_pct: 10.0,
-            pour_cut_cost_nm: 0,
-            layer_direction: BTreeMap::new(),
-            direction_cost: 0.0,
-            max_vias_per_connection: 4,
-            via_reduction: true,
-            via_relaxation: true,
-            via_shove: false,
-            plane_via_ring: true,
-            plane_via_share: true,
-            thermal_pad_vias: true,
-            plane_via_share_max_nm: 2_000_000,
-            blame_vias: false,
-            failed_pressure: false,
-            rip_pass: true,
-            continue_rounds: 3,
-            profile: false,
             net_priority: BTreeMap::new(),
             exclude_nets: Vec::new(),
             ignore_pads: Vec::new(),
             pour_served: BTreeMap::new(),
-            detour_reference: false,
-            detour_reference_budget_pct: 10.0,
-            exit_stubs: "auto".into(),
             neck_to_pad: true,
             drawing_feedback: true,
             via_offset_sites: true,
@@ -1395,8 +1155,6 @@ impl Default for Options {
             octi_room: true,
             bundle_pull: 0.3,
             reserve_via_sites: true,
-            pad_bridge_max_nm: 2_000_000,
-            steiner: true,
             mixed_clearance: "conservative".into(),
             cut_radius_mm: 0.0,
             cut_report: String::new(),
@@ -1413,32 +1171,9 @@ impl Options {
         if s.trim().is_empty() {
             return Ok(Options::default());
         }
-        let mut v: serde_json::Value =
-            serde_json::from_str(s).map_err(|e| format!("options json: {e}"))?;
-        // Legacy input key: a top-level `relax_iter_cap` (before 0.5.0) is the single source
-        // `expert.relax_iter_cap`; an explicit `expert.relax_iter_cap` wins.
-        if let Some(obj) = v.as_object_mut() {
-            if let Some(cap) = obj.remove("relax_iter_cap") {
-                let ex = obj
-                    .entry("expert")
-                    .or_insert_with(|| serde_json::Value::Object(Default::default()));
-                if let Some(ex) = ex.as_object_mut() {
-                    ex.entry("relax_iter_cap").or_insert(cap);
-                }
-            }
-        }
-        serde_json::from_value(v).map_err(|e| format!("options json: {e}"))
-    }
-
-    /// `threads`, or `available_parallelism() - 1` (min 1) when 0.
-    pub fn effective_threads(&self) -> usize {
-        if self.threads > 0 {
-            return self.threads;
-        }
-        std::thread::available_parallelism()
-            .map(|n| n.get().saturating_sub(1))
-            .unwrap_or(1)
-            .max(1)
+        // Keys this engine does not know (options of the classic router removed in the CL cleanup,
+        // e.g. `expert`, `threads`, `rip_pass`) are ignored, so old callers keep working.
+        serde_json::from_str(s).map_err(|e| format!("options json: {e}"))
     }
 }
 

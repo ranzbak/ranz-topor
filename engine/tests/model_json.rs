@@ -60,8 +60,6 @@ fn model_with_slotted_hole_parses() {
 fn options_defaults() {
     let o = Options::from_json("{}").unwrap();
     assert_eq!(o.margin_nm, 0);
-    assert!(!o.partial_routes);
-    assert_eq!(o.pathfinder_iter_cap, 30);
     assert_eq!(o.drc_loop_cap, 5);
     assert_eq!(o.wall_clock_s, 60.0);
     assert_eq!(
@@ -69,7 +67,13 @@ fn options_defaults() {
         topor_engine::model::ExistingCopper::Fixed
     );
     assert!(o.scope.is_whole_board());
-    assert!(o.effective_threads() >= 1);
+    // Options of the classic router removed in the CL cleanup are ignored, never an error.
+    let old = Options::from_json(
+        r#"{ "threads": 4, "partial_routes": true, "rip_pass": true, "relax_iter_cap": 9,
+             "expert": { "hist_fail": 2.0 }, "via_cost_nm": 1 }"#,
+    )
+    .unwrap();
+    assert_eq!(old, o);
 }
 
 #[test]
@@ -416,7 +420,4 @@ fn pour_fills_and_via_options_round_trip() {
     assert_eq!(f.outer.len(), 3);
     assert_eq!((f.outer[0].x, f.outer[0].y), (1000, -2000));
     assert_eq!((f.outer[1].x, f.outer[1].y), (3000, 4000));
-    let o = Options::from_json("{}").unwrap();
-    assert_eq!(o.via_cost_nm, 2_000_000);
-    assert_eq!(o.max_vias_per_connection, 4);
 }
