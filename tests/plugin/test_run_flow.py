@@ -378,7 +378,7 @@ def test_run_segments_geometry_has_no_arcs(app, eprom, tmp_path, reports):
 
 
 def test_run_partial_routes_group(app, eprom, tmp_path, reports):
-    cfg = CFG.with_values({("run", "kicad_cleanup"): True, ("run", "partial_routes"): True})
+    cfg = CFG.with_values({("run", "kicad_cleanup"): True})
     board, ui, out = do_run(eprom, tmp_path, cfg=cfg, engine=ProxyEngine(hold=1, patch=_mark_partial))
     assert out.status == "accepted"
     req = board.commits[0]
@@ -989,10 +989,10 @@ def test_drawing_style_override_reaches_the_drawing_section_and_toml(tmp_path):
     Save, topor.toml get `[drawing] style` (user 2026-11-07: "make it kicad accessible")."""
     from topor import run as run_mod
     from topor.config import Config, update_config
-    over = {"drawing_style": "smooth", "threads": 2}
+    over = {"drawing_style": "smooth", "timeout_s": 30.0}
     where = {k: run_mod._OVERRIDE_KEY.get(k, ("run", k)) for k in over}
     cfg = Config.defaults().with_values({where[k]: v for k, v in over.items()})
-    assert cfg.get("drawing", "style") == "smooth" and cfg.get("run", "threads") == 2
+    assert cfg.get("drawing", "style") == "smooth" and cfg.get("run", "timeout_s") == 30.0
     assert "drawing_style" in run_mod._ROUTE_OVERRIDES
     toml = tmp_path / "topor.toml"
     toml.write_text("")

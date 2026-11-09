@@ -93,7 +93,7 @@ def test_wx_ui_dialogs_construct_headless(app, tmp_path):
     expected_tab = {
         "first_run": ["toml_path", "open_file", "continue"],
         "preflight": ["findings", "cause", "accept", "scope_whole", "scope_between",
-                      "scope_touching", "existing", "respect_locked", "partial_routes", "drawing_style", "timeout", "timeout_clock", "threads",
+                      "scope_touching", "existing", "respect_locked", "drawing_style", "timeout", "timeout_clock",
                       "save_toml", "help", "cancel", "route"],
         "progress": ["limit", "limit_set", "limit_add5", "limit_add15", "cancel"],
         "preview": ["zoom", "image", "summary", "report_dir", "open_report_folder", "reject", "accept"],
@@ -139,10 +139,10 @@ def test_wx_ui_dialogs_construct_headless(app, tmp_path):
         assert d0.proceed and d0.accepted_codes == () and d0.overrides == {"scope_whole": False}
         p.accept_cb.SetValue(True)
         p._on_accept(None)
-        p.threads.SetValue(4)
+        p.timeout.SetValue(30)
         p.save_toml.SetValue(True)
         d1 = p.decision(True)
-        assert d1.accepted_codes == ("PAD_OUTSIDE_BOARD",) and d1.overrides["threads"] == 4 and d1.save_to_toml
+        assert d1.accepted_codes == ("PAD_OUTSIDE_BOARD",) and d1.overrides["timeout_s"] == 30.0 and d1.save_to_toml
         # trace shape (user 2026-11-07: "make it kicad accessible"): default octilinear, smooth is an override
         assert p.drawing_style.GetSelection() == 0 and "drawing_style" not in d1.overrides
         p.drawing_style.SetSelection(1)

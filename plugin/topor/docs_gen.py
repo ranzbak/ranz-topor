@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from .config import _range_text, toml_value
-from .schema import KICAD_ONLY, SECTIONS, SETTINGS
+from .schema import KICAD_ONLY, REMOVED, REMOVED_IN, SECTIONS, SETTINGS
 
 REFERENCE = Path(__file__).resolve().parents[2] / "docs" / "user" / "configuration.md"
 
@@ -30,14 +30,16 @@ def render_reference_md(settings=SETTINGS) -> str:
         "`topor.toml` lives next to the `.kicad_pro` file. It is created with every key and its documentation on the",
         "first run. Unknown keys give a warning; an invalid value gives a warning and the default is used.",
         "Keys marked *since 0.5.0* are accepted but written commented-out until that engine feature is available.",
+        "Keys that were removed (listed at the end) are ignored with the warning `CFG_REMOVED_KEY`.",
         "",
     ]
     for sec, sec_doc in SECTIONS.items():
         rows = [s for s in settings if s.section == sec]
-        if not rows:
+        if not rows and sec != "layers":  # [layers] also holds the per-layer roles
             continue
-        out += [f"## `[{sec}]`", "", sec_doc, "",
-                "| Key | Type | Default | Unit | Range | Description |", "|---|---|---|---|---|---|"]
+        out += [f"## `[{sec}]`", "", sec_doc, ""]
+        if rows:
+            out += ["| Key | Type | Default | Unit | Range | Description |", "|---|---|---|---|---|---|"]
         for s in rows:
             doc = s.doc
             if s.kicad_place:
@@ -45,7 +47,8 @@ def render_reference_md(settings=SETTINGS) -> str:
             if s.since:
                 doc += f" *Since {s.since}.*"
             out.append(f"| `{s.key}` | {s.type} | `{_cell(toml_value(s.default))}` | {s.unit} | {_cell(_range_text(s))} | {_cell(doc)} |")
-        out.append("")
+        if rows:
+            out.append("")
         if sec == "layers":
             out += ["Per-layer roles are written as keys in this section, e.g. `F.Cu = \"signal\"`, `In1.Cu = \"gnd\"`.",
                     "Roles: `signal`, `mixed`, `gnd`, `pwr`, `jumper`; a layer is routed iff `signal` or `mixed`.",
@@ -53,6 +56,10 @@ def render_reference_md(settings=SETTINGS) -> str:
                     "(2: S,S; 4: S,GND,PWR,S; 6: S,GND,PWR,S,GND,S; 8: S,GND,S,PWR,GND,S,GND,S). Other counts need roles here.", ""]
     out += ["## Set in KiCad, not in `topor.toml`", "", "| Behaviour | Where in KiCad |", "|---|---|"]
     out += [f"| {n} | {_cell(p)} |" for n, p in KICAD_ONLY]
+    out += ["", "## Removed keys", "", f"Removed in {REMOVED_IN}: the topological core never read them. A `topor.toml` that "
+            "still sets one keeps working; the key is ignored with the warning `CFG_REMOVED_KEY`.", "",
+            "| Key | Why |", "|---|---|"]
+    out += [f"| `{s}.{k}` | {_cell(why)} |" for (s, k), why in REMOVED.items()]
     out.append("")
     return "\n".join(out)
 

@@ -103,9 +103,7 @@ error state: if the file could not be written B5 raises → dialog 6 (`CFG_CREAT
 |                     ( ) Touching selected footprints                       |
 |   Existing copper   [ Keep as obstacles               v ]                  |
 |   [x] Respect locked tracks and vias                                       |
-|   [ ] Keep partial routes                                                  |
 |   Time limit  [  60 ]^ s   0 = no limit                                    |
-|   Threads     [   0 ]^     0 = all cores but one                           |
 |   [ ] Save these options to topor.toml                                     |
 |                                                                            |
 | [ Help ]                                           [ Cancel ]  [ Route ]   |
@@ -136,9 +134,9 @@ the display client area; the findings list takes the extra height. Default `Rout
   selection radios are disabled and `Whole board` is checked, with the grey hint
   `(nothing selected in KiCad)` after it. Initial value = `cfg.scope_mode` if a selection exists.
 - Existing copper `wx.Choice`: `Keep as obstacles` (`fixed`), `Keep and smooth` (`smooth`),
-  `Rip up and re-route` (`rip`). Respect locked = `respect_locked`; partial routes =
-  `partial_routes`; Time limit = `timeout_s` (`SpinCtrl` 0…86 400, step 10); Threads = `threads`
-  (0…256). `Save these options to topor.toml` → `Decision.save_to_toml` (B1 `update_config`,
+  `Rip up and re-route` (`rip`). Respect locked = `respect_locked`; Time limit = `timeout_s`
+  (`SpinCtrl` 0…86 400, step 10). (Keep partial routes and Threads were removed in the CL cleanup,
+  2026-11-09: the topological core never read `partial_routes` or `threads`.) `Save these options to topor.toml` → `Decision.save_to_toml` (B1 `update_config`,
   comments kept). Initial values = `cfg`. Every other `topor.toml` key (`unrouted_only`,
   `[iterations]`, `[vias]`, …) is file-only and never gets a dialog control.
 - Returns `Decision(proceed, accepted_codes, overrides)`; Cancel/Esc → `proceed=False`, nothing
@@ -148,10 +146,10 @@ the display client area; the findings list takes the extra height. Default `Rout
   pre-flight (incl. the kicad-cli DRC on the copy) runs *before* this dialog under dialog 3 with phase
   `Checking the board (KiCad DRC)`. **Error:** see "Error present".
 - Keys: Tab list → Cause pane → Accept → Scope radios (arrows) → Existing copper → Respect locked →
-  Keep partial → Time limit → Threads → Save → Help → Cancel → Route. Enter = Route; inside the
+  Time limit → Save → Help → Cancel → Route. Enter = Route; inside the
   GTK list Enter raises `EVT_LIST_ITEM_ACTIVATED`, which B9 binds to the Route handler (no-op while
   disabled). Esc = Cancel. Mnemonics: Alt+R Route, Alt+A Accept, Alt+W Whole board, Alt+B Between,
-  Alt+T Touching, Alt+L Respect locked, Alt+K Keep partial, Alt+S Save, Alt+H Help (opens
+  Alt+T Touching, Alt+L Respect locked, Alt+S Save, Alt+H Help (opens
   `docs/user/operate.md#options` via the default browser), Alt+C Cancel. Mnemonics only on
   buttons/checkboxes/radios (GTK `wx.StaticText` mnemonics do not move focus); `Choice` and spin
   controls are reached by Tab.
@@ -474,15 +472,12 @@ title/label/button/checkbox/choice/heading/text).
 | preflight | existing_smooth | choice | Keep and smooth |
 | preflight | existing_rip | choice | Rip up and re-route |
 | preflight | respect_locked | checkbox | Respect locked tracks and vias |
-| preflight | partial_routes | checkbox | Keep partial routes |
 | preflight | drawing_style_label | label | Trace shape |
 | preflight | drawing_style_octilinear | choice | 45° (octilinear) |
 | preflight | drawing_style_smooth | choice | Any angle (smooth) |
 | preflight | timeout_label | label | Time limit |
 | preflight | timeout_unit | label | s |
 | preflight | timeout_hint | label | 0 = no limit |
-| preflight | threads_label | label | Threads |
-| preflight | threads_hint | label | 0 = all cores but one |
 | preflight | save_toml | checkbox | Save these options to topor.toml |
 | preflight | blocked_status | label | Cannot route: {n} error(s) — see Fix above. |
 | preflight | help | button | Help |

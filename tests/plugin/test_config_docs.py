@@ -86,8 +86,7 @@ def test_every_engine_option_is_a_setting_or_internal(engine):
 
 
 def test_engine_internal_has_reasons():
-    assert set(schema.ENGINE_INTERNAL) >= {"pinned", "drc_spots", "skip_self_check", "profile", "scope",
-                                           "net_priority", "via_cost_by_net", "detour_reference_budget_pct"}
+    assert set(schema.ENGINE_INTERNAL) >= {"drc_spots", "skip_self_check", "scope", "net_priority"}
     assert all(r.strip() for r in schema.ENGINE_INTERNAL.values())
 
 
@@ -133,7 +132,7 @@ def test_keys_without_effect_say_so():
     md = (ROOT / "docs/user/configuration.md").read_text()
     text = render_toml(Config.defaults())
     assert md.count(NO_EFFECT) == len(marked) and text.count(NO_EFFECT) == len(marked)
-    assert "detour_reference" in md and "No effect in 0.4.0; applied from 0.5.0.) |" not in md.split("`detour_reference`")[1].split("\n")[0]
+    assert "| `run.detour_reference` |" in md  # removed in the CL cleanup: listed under Removed keys
 
 
 def test_live_plugin_keys_have_a_consumer_or_the_marker():

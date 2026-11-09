@@ -69,8 +69,7 @@ NO_BUDGET_S = 1.0e9  # timeout_s = 0: the DRC loop gets no budget cut; drc_loop_
 #: After the user's Cancel the engine gets this long to reach a stop check and end its thread; then the run ends
 #: with ENGINE_UNRESPONSIVE instead of polling for ever (gate review B-1, ruling C31). Internal, not a toml key.
 CANCEL_GRACE_S = 30
-_ROUTE_OVERRIDES = ("scope_mode", "existing_copper", "respect_locked", "partial_routes", "timeout_s", "timeout_clock", "threads",
-                    "drawing_style")
+_ROUTE_OVERRIDES = ("scope_mode", "existing_copper", "respect_locked", "timeout_s", "timeout_clock", "drawing_style")
 #: pre-flight override -> (section, key) in topor.toml; the others are [run] keys of the same name
 _OVERRIDE_KEY = {"drawing_style": ("drawing", "style")}
 
@@ -207,43 +206,7 @@ def refill_pours(model: dict, refilled_text: str) -> dict:
             "dangling_ends": dangling_ends(model["kept"], model["vias"], model["pads"], cu)}
 
 
-#: share of the remaining time budget the detour reference searches may use (engine-internal, not a setting)
-DETOUR_REFERENCE_BUDGET_PCT = 10.0
-
-
-def via_costs_by_net(cfg: Config, model: dict, priorities: dict | None) -> dict:
-    """``Options.via_cost_by_net`` (net name -> via cost nm) from ``[vias] cost_by_netclass`` and
-    ``cost_by_priority``; precedence per net: by netclass > by priority > ``via_cost_mm`` (nets without an entry are
-    left out and use the global cost). A composite class (``"Power,Default"``) takes the first listed class that has
-    an entry. Non-numeric entries are skipped. O(#nets * classes per net)."""
-    by_class = {str(k): v for k, v in dict(cfg.get("vias", "cost_by_netclass")).items()}
-    by_prio = {str(k): v for k, v in dict(cfg.get("vias", "cost_by_priority")).items()}
-    if not by_class and not by_prio:
-        return {}
-
-    def nm(v):
-        return int(round(float(v) * 1_000_000)) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
-
-    per_net = (model.get("rules") or {}).get("per_net") or {}
-    out: dict = {}
-    for n in model.get("nets", []):
-        name = n.get("name")
-        if not name:
-            continue
-        cost = None
-        for c in str((per_net.get(str(n.get("code"))) or {}).get("netclass") or "").split(","):
-            if c in by_class and nm(by_class[c]) is not None:
-                cost = nm(by_class[c])
-                break
-        if cost is None and priorities and name in priorities:
-            cost = nm(by_prio.get(str(priorities[name])))
-        if cost is not None:
-            out[name] = cost
-    return out
-
-
-def build_options(cfg: Config, engine, threads_override=None, *, plan=None, rip=None, model=None,
-                  priorities=None) -> dict:
+def build_options(cfg: Config, engine, *, plan=None, rip=None, model=None, priorities=None) -> dict:
     """Engine options: ``cfg.engine_options()`` restricted to keys the engine knows, plus the plugin's own
     additions: ``scope`` (``plan.engine_scope``, scope.py), ``existing_copper`` (``rip.engine_existing_copper``:
     the plugin does the ripping, so only ``smooth`` is passed on), and, when the engine knows the key,
@@ -267,20 +230,6 @@ def build_options(cfg: Config, engine, threads_override=None, *, plan=None, rip=
                                       if isinstance(v, bool)})):
         if key in known and val:
             opts[key] = val
-    if opts.get("detour_reference") and "detour_reference_budget_pct" in known:
-        opts["detour_reference_budget_pct"] = DETOUR_REFERENCE_BUDGET_PCT
-    if "layer_direction" in known:
-        angle = {"h": 0.0, "v": 90.0}
-        dirs = {str(k): angle[str(v).lower()] for k, v in dict(cfg.get("layers", "preferred_direction")).items()
-                if str(v).lower() in angle}
-        if dirs:
-            opts["layer_direction"] = dirs
-    if "via_cost_by_net" in known and model is not None:
-        costs = via_costs_by_net(cfg, model, priorities)
-        if costs:
-            opts["via_cost_by_net"] = costs
-    if threads_override is not None:
-        opts["threads"] = int(threads_override)
     return opts
 
 

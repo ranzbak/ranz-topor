@@ -17,16 +17,14 @@ from pathlib import Path
 
 from .findings import Finding
 from .layers import ROLES
-from .schema import (BACKLOG_VALUES, CONFIG_VERSION, CURRENT_VERSION, KICAD_ONLY, SECTIONS, SETTINGS,
-                     SETTINGS_BY_KEY, Setting, available)
+from .schema import (BACKLOG_VALUES, CONFIG_VERSION, CURRENT_VERSION, KICAD_ONLY, REMOVED, REMOVED_IN, SECTIONS,
+                     SETTINGS, SETTINGS_BY_KEY, Setting, available)
 
 CONFIG_NAME = "topor.toml"
 DOCS_HINT = "see docs/user/configuration.md"
 
 # engine_field -> multiplier from the config unit to the engine unit (mm -> nm, µm -> nm)
-_ENGINE_SCALE = {"via_cost_nm": 1_000_000, "margin_nm": 1000, "allowed_drills_nm": 1_000_000,
-                 "pour_cut_cost_nm": 1_000_000, "neck_max_nm": 1_000_000, "pad_bridge_max_nm": 1_000_000,
-                 "plane_via_max_nm": 1_000_000, "plane_via_share_max_nm": 1_000_000,
+_ENGINE_SCALE = {"margin_nm": 1000, "allowed_drills_nm": 1_000_000, "neck_max_nm": 1_000_000,
                  "diffpair_zip_max_nm": 1_000_000}
 
 
@@ -247,8 +245,9 @@ def _atomic_write(path: Path, text: str) -> None:
 def load_config(project_dir: Path) -> tuple[Config, list[Finding]]:
     """Load ``<project_dir>/topor.toml``; create it with all defaults when missing (CFG_CREATED).
 
-    Findings: CFG_CREATED (info), CFG_PARSE, CFG_VERSION, CFG_UNKNOWN_KEY, CFG_VALUE, CFG_VALUE_BACKLOG
-    (warnings; the default is used for the offending value) and CFG_WRITE (could not create the file).
+    Findings: CFG_CREATED (info), CFG_PARSE, CFG_VERSION, CFG_UNKNOWN_KEY, CFG_REMOVED_KEY (a key removed in
+    the CL cleanup: ignored), CFG_VALUE, CFG_VALUE_BACKLOG (warnings; the default is used for the offending value)
+    and CFG_WRITE (could not create the file).
     """
     path = Path(project_dir) / CONFIG_NAME
     findings: list[Finding] = []
@@ -275,6 +274,10 @@ def load_config(project_dir: Path) -> tuple[Config, list[Finding]]:
         findings.append(Finding("CFG_VERSION", "warning", f"{CONFIG_NAME} has version = {ver!r}; this plugin reads version {CONFIG_VERSION}.",
                                 f"Set version = {CONFIG_VERSION} after checking the keys against {DOCS_HINT}.", ("version",)))
     for sec, table in data.items():
+        if sec not in SECTIONS and isinstance(table, dict) and table and all((sec, k) in REMOVED for k in table):
+            for key in table:
+                findings.append(_removed(sec, key))
+            continue
         if sec not in SECTIONS or not isinstance(table, dict):
             findings.append(Finding("CFG_UNKNOWN_KEY", "warning", f"Unknown section or key '{sec}' in {CONFIG_NAME} is ignored.",
                                     f"Check the spelling; valid sections are {', '.join(SECTIONS)} ({DOCS_HINT}).", (sec,)))
@@ -299,6 +302,9 @@ def load_config(project_dir: Path) -> tuple[Config, list[Finding]]:
         for key, raw in items:
             s = SETTINGS_BY_KEY.get((sec, key))
             full = f"{sec}.{key}"
+            if s is None and (sec, key) in REMOVED:
+                findings.append(_removed(sec, key))
+                continue
             if s is None:
                 findings.append(Finding("CFG_UNKNOWN_KEY", "warning", f"Unknown key '{full}' in {CONFIG_NAME} is ignored.",
                                         f"Check the spelling against {DOCS_HINT}.", (full,)))
@@ -313,6 +319,14 @@ def load_config(project_dir: Path) -> tuple[Config, list[Finding]]:
                                         f"Correct {full} in {CONFIG_NAME} (allowed: {_range_text(s)}).", (full,)))
             values[(sec, key)] = v
     return Config(values, layer_roles), findings
+
+
+def _removed(sec: str, key: str) -> Finding:
+    """CFG_REMOVED_KEY for a key of ``schema.REMOVED``: ignored, with why, never an error. O(1)."""
+    full = f"{sec}.{key}"
+    return Finding("CFG_REMOVED_KEY", "warning",
+                   f"'{full}' in {CONFIG_NAME} is ignored: removed in {REMOVED_IN} ({REMOVED[(sec, key)]}).",
+                   f"Delete the line from {CONFIG_NAME}; {DOCS_HINT}.", (full,))
 
 
 def _flatten_layer(key, raw):

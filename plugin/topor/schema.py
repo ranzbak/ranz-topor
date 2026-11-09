@@ -6,7 +6,7 @@ Complexity: module-level constants; iteration O(#settings); SETTINGS_BY_KEY look
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 CONFIG_VERSION = 1
@@ -54,16 +54,14 @@ SECTIONS = {
     "nets": "Which nets are touched, how they are classified and prioritised.",
     "vias": "Via cost, count and size policy (each net routes with its KiCad net class via, plus smaller fab-profile vias where space requires; see operate.md, Fab minimums).",
     "planes": "Signal copper on plane layers (layers whose role is gnd / pwr, not routed).",
-    "layers": "Stackup roles per copper layer (F.Cu = \"signal\", In1.Cu = \"gnd\", ...) and per-layer preferences.",
+    "layers": "Stackup roles per copper layer (F.Cu = \"signal\", In1.Cu = \"gnd\", ...).",
     "search": "Path search tuning.",
-    "ripup": "Rip-up and re-route escalation.",
-    "iterations": "Optimisation stop rule.",
     "optimize": "Topological core: how a run iterates (whole-route cycles with a fluctuation schedule until the routes are stable, like TopoR; best of N seeded runs), its safety caps (work caps, so a run is reproducible), and which result it keeps.",
     "drawing": "Topological core: how the routed topology is drawn as copper (drawing style and its prices).",
     "diffpair": "Differential pairs (topological core): which nets pair up (KiCad's own name rule), their width, gap and via gap (from KiCad's net classes and custom rules unless set here), and how the pair is drawn. A pair is planned as one wide wire and drawn as two coupled tracks (docs/dev/kicad-diff-pairs.md).",
     "output": "Result geometry and report location.",
     "capacity": "Topological core: the per-layer cut test (inflated sketch; docs/dev/inflated-sketch.md). A cut is a straight segment between two pieces of copper on one layer; the traces that must cross it need their widths and clearances along it. These settings shape that test. In this version it only measures (cut_report); the planner and the drawing do not use it yet.",
-    "expert": "PathFinder constants; change only when you know the router.",
+    "expert": "Settings of the harness's DRC loop; the plugin and the topological core do not read them.",
     "factors": "Price of what a route does (social factors), in mm of copper per unit: weight, scope and report level per factor name (docs/dev/factors.md). Factor code is trusted code: only add factor files you trust.",
 }
 
@@ -75,9 +73,6 @@ SETTINGS: list[Setting] = [
        choices=("wall", "cpu")),
     _s("run", "stop_after", "str", "", "Measurement: plan = end every run of the topological core after the plan of its first cycle (projection, topology, layers, vias), before any copper is drawn. The run writes no copper; result.json gets the plan metrics (a warning line starting with \"plan metrics:\") and, with [capacity] cut_report, the cut report of that plan. For comparing planners on a board or a crop (harness/compare.py --plan-only). Empty = the full run (default).",
        choices=("", "plan"), engine="stop_after"),
-    _s("run", "threads", "int", 0, "Worker threads; 0 = all cores but one.", range=(0, 256), engine="threads"),
-    _s("run", "partial_routes", "bool", False, "Keep the connections that did route when others fail, instead of discarding the whole result.",
-       engine="partial_routes"),
     _s("run", "existing_copper", "str", "fixed", "Policy for existing tracks and vias: fixed = obstacle, smooth = keep topology but smooth, rip = re-route. (smooth is treated as fixed in 0.4.0.)",
        choices=("fixed", "smooth", "rip"), engine="existing_copper"),
     _s("run", "respect_locked", "bool", True, "Treat locked tracks and vias as fixed obstacles; false lets topor rip or smooth them.",
@@ -99,7 +94,6 @@ SETTINGS: list[Setting] = [
        kicad="KiCad → Edit → Fill All Zones (B); Edit → Cleanup Tracks & Vias"),
     _s("run", "refill_after_accept", "bool", False, "After Accept, refill all zones from topor (a second undo step in KiCad). false = Accept is exactly one undo step; press B (Edit → Fill All Zones) yourself.",
        kicad="KiCad → Edit → Fill All Zones (B)"),
-    _s("run", "detour_reference", "bool", True, "Compare every routed connection with a DRC-feasible direct path (one extra search per connection, 10 % of the remaining time budget at most) and report detours against it in the run report; false = the report compares with the topological ghost line only.", engine="detour_reference"),
     # ---- [nets]
     _s("nets", "do_not_touch", "list", [], "Net names or glob patterns whose copper is a fixed obstacle and never routed, ripped or smoothed.",
        elem="str"),
@@ -112,48 +106,20 @@ SETTINGS: list[Setting] = [
     _s("nets", "ignore_pads", "list", [], "Pads (REF.PAD, e.g. \"U1.3\") skipped as terminals, typically pads outside the board; written by the pre-flight dialog. Their connections are reported as ignored; they are neither terminals nor obstacles.",
        elem="str"),
     # ---- [vias]
-    _s("vias", "via_cost_mm", "float", 2.0, "Search cost of one via in mm of extra trace: the router accepts up to this much longer to avoid a via. Overridden per net by cost_by_netclass (strongest) and cost_by_priority; this value is used for every other net.",
-       unit="mm", range=(0, 1000), engine="via_cost_nm"),
-    _s("vias", "max_per_connection", "int", 4, "Maximum vias on one connection.", range=(0, 32), engine="max_vias_per_connection"),
     _s("planes", "signals", "str", "costly", "Topological core: whether signal copper may use plane layers. costly = yes, at the price of the plane_signal factor (10 per mm on top of the length) plus plane_cut per cut of the plane, so a plane carries a signal only where the signal layers cannot; forbidden = never, plane layers are left to their pour. The run report lists the signal length on plane layers and the cuts.",
        choices=("costly", "forbidden"), kicad="KiCad → File → Board Setup → Board Editor Layers (layer roles)", engine="plane_signals"),
     _s("planes", "stitch_islands", "bool", True, "Topological core: after routing, the refilled pours are estimated (the fill of the ripped board, minus the routed copper of other nets grown by the clearance, minus features thinner than the zone's minimum width; islands kept or dropped as the zone's island removal setting says). A piece of a pour net's copper that the routed copper cut off from the rest of its pour (an island holding a pad or via of the net, or a pad whose thermal spokes are all cut) gets a through via inside that island near its pad, joining it to the pour on another layer where that pour is solid, or a short stub from the pad; the via sites prefer room (the via_squeeze factor). The run report lists every piece cut off and every stitch. false = the pieces are only reported; KiCad's DRC then lists them as missing connections.",
        kicad="KiCad → zone properties (Clearance, Minimum width, Remove islands)", engine="stitch_islands"),
-    _s("vias", "reduction", "bool", True, "After convergence remove vias whose via-free route is not much longer.", engine="via_reduction"),
-    _s("vias", "reduction_len_slack_pct", "float", 10, "A via is removed when the via-free route is at most this much longer.",
-       unit="%", range=(0, 1000), engine="reduction_len_slack_pct"),
     _s("vias", "via_in_pad", "bool", False, "Allow vias inside the net's own SMD pads (two extra via sites per pad, on its long axis); the run report lists every via placed in a pad. Pre-flight warns when KiCad's via protection is not filled and capped.",
        kicad="KiCad → File → Board Setup → Board Stackup → Board Finish → Via protection", engine="via_in_pad"),
     _s("vias", "plane_vias", "bool", True, "A pad whose net's pour lies only on plane layers (role gnd / pwr, not routed) gets a through via onto the plane at the nearest via site within plane_via_max_mm of the pad (inside the pad when via_in_pad is on); false reports such pads as 'terminal not on any routable layer'.",
        kicad="KiCad → File → Board Setup → Board Editor Layers (layer roles)", engine="plane_vias"),
-    _s("vias", "plane_via_max_mm", "float", 1.0, "Farthest a plane via may be from its pad's copper; keeps the trace to the plane (and its inductance) short. A pad with no free via site that close fails with 'no via site within … of the terminal (plane pour)'.",
-       unit="mm", range=(0, 50), engine="plane_via_max_nm"),
     _s("vias", "allowed_drills_mm", "list", [], "Optional fab filter: of the smaller alternative vias (KiCad's pre-defined vias and the fab profile) only these drill diameters may be used; empty = no filter. A net class via is always used as set in KiCad (the pre-flight warns when its drill is not listed).",
        unit="mm", elem="float", engine="allowed_drills_nm"),
     _s("vias", "fallback_drill_mm", "float", 0.4, "Drill used when KiCad has no via sizes set up (no pre-defined via and every net class at KiCad's factory 0.8 / 0.4 mm). The plugin writes it into the engine rules; the engine's via rule (engine/src/vias.rs) is the single place that applies it.", unit="mm", range=(0.05, 10),
        kicad="KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias"),
     _s("vias", "fallback_diameter_mm", "float", 0.8, "Via diameter used when KiCad has no via sizes set up.", unit="mm", range=(0.1, 20),
        kicad="KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias"),
-    _s("vias", "cost_by_priority", "table", {}, "Priority (\"1\"..\"3\") → via cost in mm, e.g. 5 for high-speed nets. Precedence per net: cost_by_netclass > cost_by_priority > via_cost_mm.", unit="mm"),
-    _s("vias", "cost_by_netclass", "table", {}, "Netclass name → via cost in mm, e.g. 0.5 for power. Strongest of the three via cost settings (a composite class such as \"Power,Default\" takes the first listed class that has an entry).", unit="mm",
-       kicad="KiCad → File → Board Setup → Design Rules → Net Classes"),
-    _s("vias", "via_relaxation", "bool", True, "Let the relaxation pass move vias a bounded distance to shorten traces.", since=V5,
-       engine="via_relaxation"),
-    _s("vias", "via_shove", "bool", False, "When a planned trace does not fit at its width because another connection's via is in the way, push that via aside (inside the area around its site, up to 0.8 mm, passing the push on to at most three neighbours) instead of failing the trace.",
-       engine="via_shove"),
-    _s("vias", "plane_via_ring", "bool", True, "Offer plane vias candidate positions all around their SMD pad (two rings of 16), not only on the pad's four axes, so the via can go to whichever side is free.",
-       engine="plane_via_ring"),
-    _s("vias", "thermal_pad_vias", "bool", True, "Allow vias inside the exposed (thermal) centre pad of QFN / DFN-like packages (the largest pad of a footprint, at least 4x its other pads), even when via_in_pad is off: thermal vias there are standard.",
-       engine="thermal_pad_vias"),
-    _s("vias", "plane_via_share", "bool", True, "A pad of a plane net may also end on a via of its own net that another pad already drops onto the plane, within plane_via_share_max_mm, instead of needing its own via (fewer vias in crowded spots; pads with no free via site of their own still connect).",
-       engine="plane_via_share"),
-    _s("vias", "plane_via_share_max_mm", "float", 2.0, "Largest distance from a pad to a shared plane via (see plane_via_share).", unit="mm", range=(0, 50),
-       engine="plane_via_share_max_nm"),
-    # ---- [layers]
-    _s("layers", "preferred_direction", "table", {}, "Layer name → \"h\" (along x), \"v\" (along y) or \"none\"; traces running across it pay direction_cost. Layers without an entry are free.",
-       kicad="KiCad → File → Board Setup → Board Editor Layers (layer names)"),
-    _s("layers", "direction_cost", "float", 0.0, "Extra cost factor for running against a layer's preferred direction: a step of length L at angle a to it costs an extra L * direction_cost * |sin a|; 0 = off.", range=(0, 100), engine="direction_cost"),
-    _s("layers", "pour_cut_cost_mm", "float", 0.0, "Extra cost, in mm of trace per mm, of running inside the filled copper of another net's pour on a layer (cutting a pour into islands costs the pour its connectivity); 0 = off. Measured: 1.0 made wiccon 58/61 with 83 vias and eprom 1.2 mm longer, so it is off by default; try 0.1 to 0.5 on boards whose pour islands after routing.", unit="mm", range=(0, 1000), engine="pour_cut_cost_nm"),
     # ---- [search]
     _s("search", "detour_factor", "float", 2.0, "A connection longer than this multiple of its straight pad-to-pad distance is treated as a detour: the topological core searches it again with cheaper crossings (the layer assignment then resolves a crossing with a via) instead of accepting a wandering path; 0 = off.",
        range=(0.0, 100), engine="detour_factor"),
@@ -166,12 +132,6 @@ SETTINGS: list[Setting] = [
     _s("search", "fuse_branches", "bool", True, "Topological core, net_tree = \"free\": after the drawing, a trace that leaves a branch point or a pad right beside another trace of its net leaves that trace's copper where the two part instead: one copper and a T there, no two parallel traces (TopoR moves T-points the same way in its post-optimisation). Done only where it is shorter, the junction_angle factor included, and the new track keeps every clearance.",
        engine="fuse_branches"),
     _s("search", "margin_um", "float", 0, "Safety margin added to every clearance during search and drawing; 0 = exactly the design rule (KiCad DRC accepts copper at exactly the clearance, and the routed copper is checked with the exact rule). Raise it only for headroom against later manual edits.", unit="µm", range=(0, 1000), engine="margin_nm"),
-    _s("search", "zero_slack_retry", "bool", True, "One extra pass lets a connection use a corridor pinched below the margin but not below the rules.",
-       engine="zero_slack_retry"),
-    _s("search", "zero_slack_failed", "bool", True, "The zero-slack pass also tries connections that failed, before any length gain of routed ones (a connection whose only corridor is pinched below the margin still gets its attempt).",
-       engine="zero_slack_failed", since=V5),
-    _s("search", "exit_stubs", "str", "auto", "Pad exit stubs: a short straight track that leaves a pad before the routed trace starts. auto = only for pads that cannot be left from their centre at the net width (fine-pitch rows; the stub may start off the pad centre line or be narrower, see neck_to_pad); all = also every SMD pad with a long side; off = traces start at the pad centre. A pad that needs a stub but has no room for one is reported as \"stub infeasible\".",
-       choices=("auto", "all", "off"), engine="exit_stubs", since=V5),
     _s("search", "neck_to_pad", "bool", True, "Necking: an exit stub may be narrower than the net's track width (down to KiCad's minimum track width or the net's custom-rule minimum) where the full width does not fit out of the pad; the rest of the trace keeps its width. The run report lists every necked stub.",
        kicad="KiCad → File → Board Setup → Design Rules → Constraints → Minimum track width (and custom rules: track_width min)",
        engine="neck_to_pad"),
@@ -231,35 +191,8 @@ SETTINGS: list[Setting] = [
        engine="via_reduce"),
     _s("search", "neck_max_mm", "float", 0.0, "Longest necked stub; 0 = twice the pad's long side.", unit="mm", range=(0, 100),
        engine="neck_max_nm"),
-    _s("search", "pad_bridge_max_mm", "float", 2.0, "Two pads of one footprint on the same net at most this far apart are joined by one straight track when it fits (possibly off the pad centre line), instead of a searched route; with exit_stubs = auto only where a pad needs a stub. 0 = off.",
-       unit="mm", range=(0, 100), engine="pad_bridge_max_nm", since=V5),
-    _s("search", "steiner", "bool", True, "Allow same-net T-junctions: a connection may end on an already routed track of its own net (or on kept hand copper it connects to) instead of only at a pad, so sibling connections of one net share a pad exit (false = pad to pad only).",
-       engine="steiner", since=V5),
     _s("search", "dangling_ends", "str", "continue", "What to do with an existing track that ends at nothing (a hand-started trace): continue = the new copper leaves its end along the same direction (smooth, same width and layer); fixed = the end stays a fixed point and the new copper may leave at an angle; drop = remove that track and route from the pad.",
        choices=("continue", "fixed", "drop"), engine="dangling_ends", since=V5),
-    _s("search", "strict_unfit_edges", "bool", False, "Fail a connection when a graph edge is too narrow for its trace even when empty, instead of pricing the crossing as overuse (stricter; may leave tight boards incomplete).",
-       engine="strict_unfit_edges"),
-    _s("search", "pour_listed_via_goals", "bool", False, "A connection to a copper pour may end on a same-net via the pour already lists instead of always placing a new via (saves vias, may lengthen the trace).",
-       engine="pour_listed_via_goals"),
-    # ---- [ripup]
-    _s("ripup", "growth", "float", 1.25, "Each time a connection rips the same blocker, the history cost left on it is multiplied by this.",
-       range=(1.0, 10), engine="ripup_growth"),
-    _s("ripup", "blame_vias", "bool", False, "Experimental: when a trace does not fit at its width, rip the connections whose vias it is squeezed against (with the same escalating cost and cap as other rips), so those vias can move to another site. Off by default: on the benchmarks the extra rips route fewer connections.",
-       engine="blame_vias"),
-    _s("ripup", "failed_pressure", "bool", False, "Experimental: when a planned trace does not fit next to the traces and vias already in its passage, those traces and vias are re-planned too (with extra cost on the shared passage), instead of only the failed trace trying again.",
-       engine="failed_pressure"),
-    _s("ripup", "rip_pass", "bool", True, "After the routing loop, rip the routed connection that blocks the most unrouted ones (traces and vias), route its victims first and then it again; kept only when more connections route, repeated worst offender first (each retry of the same offender ranks it lower by growth).",
-       engine="rip_pass"),
-    _s("ripup", "max_per_pair", "int", 8, "Hard backstop on how often one connection may rip the same other connection (bounds the runtime).",
-       range=(1, 1000), engine="ripup_max_per_pair"),
-    # ---- [iterations]
-    _s("iterations", "max", "int", 30, "Hard cap on optimisation cycles.", range=(1, 1000), engine="pathfinder_iter_cap"),
-    _s("iterations", "patience", "int", 5, "Stop early when for this many cycles no connection was newly routed and gain stayed below min_gain_pct.",
-       range=(1, 100), engine="patience"),
-    _s("iterations", "min_gain_pct", "float", 1.0, "Smallest total cost improvement over the patience window that counts as progress.",
-       unit="%", range=(0, 100), engine="min_gain_pct"),
-    _s("iterations", "continue_rounds", "int", 3, "Extra rounds for the connections that are still unrouted: each round routes them again against everything routed so far as fixed copper (they may join any copper of their net) and first tries releasing the routed connections that block them most; the bar for releasing drops each round. Stops when a round routes nothing new; 0 = off.",
-       range=(0, 10), engine="continue_rounds"),
     # ---- [optimize]
     _s("optimize", "rounds", "int", 30, "Topological core: safety cap on whole-route cycles per run (the first one included). A run does not stop at a fixed count: like TopoR it keeps iterating (every cycle routes again with the passages the drawing found too small lowered and with freshly fluctuated weights, and offers its result variants) until its routes are stable (see stable_window), the user presses OK / Cancel, or run.timeout_s fires; this cap only ends a run that never settles. A work cap, not a time cap: the same board and settings give the same result on any machine, loaded or not, and with any thread count.",
        range=(1, 1000), engine="topo_rounds"),
@@ -321,26 +254,6 @@ SETTINGS: list[Setting] = [
        unit="mm", range=(0, 1000), engine="cut_radius_mm"),
     _s("capacity", "cut_report", "str", "", "Debug: a directory. When set, every routing cycle writes its per-layer cut test there (run<k>/cycle<c>.json: the cut counts after the layer assignment and after every rip-up round, and for the plan handed to the drawing every cut that traces cross, with its room, its need and its slack). Slower; never changes the routing. Empty = off (default). harness/cutclass.py classifies a run's violations with it.",
        engine="cut_report"),
-    # ---- [expert]
-    _s("expert", "hist_fail", "float", 1.0, "PathFinder history weight added to a face where a connection failed.", range=(0, 100), engine="expert.hist_fail"),
-    _s("expert", "hist_block", "float", 0.5, "PathFinder history weight added to a face that blocked a connection.", range=(0, 100), engine="expert.hist_block"),
-    _s("expert", "hist_overuse", "float", 0.5, "PathFinder history weight added per unit of face overuse.", range=(0, 100), engine="expert.hist_overuse"),
-    _s("expert", "present_overuse", "float", 4.0, "PathFinder present-congestion penalty per unit of overuse.", range=(0, 100), engine="expert.present_overuse"),
-    _s("expert", "present_growth", "float", 1.0, "Each routing cycle multiplies the present-congestion penalty by this (PathFinder escalation), so traces sharing an overfull passage must give way; 1 keeps it constant.", range=(1.0, 10), engine="expert.present_growth"),
-    _s("expert", "zero_slack_candidates", "int", 4, "Candidate corridors tried per connection in the zero-slack retry.", range=(1, 64), engine="expert.zero_slack_candidates"),
-    _s("expert", "relax_iter_cap", "int", 200, "Iteration cap of the relaxation (smoothing) pass.", range=(1, 10000), engine="expert.relax_iter_cap"),
-    _s("expert", "own_net_capacity", "bool", True, "Capacity rule: a pad's own edges charge no clearance gap for its own net and give its corner radius back, same-net tracks need no gap between each other (false = the net-blind 0.4.0 rule).",
-       engine="expert.own_net_capacity", since=V5),
-    _s("expert", "wall_aware_capacity", "bool", True, "Capacity rule: on an edge with an own-net end, walls along it that are not its ends (board edge, keepouts, long pad sides) remove the part they block.",
-       engine="expert.wall_aware_capacity", since=V5),
-    _s("expert", "transit_pinch", "bool", True, "Search: refuse to pass around a pad or via that a wall (board edge, keepout, other copper) pinches below the track's width plus clearances.",
-       engine="expert.transit_pinch", since=V5),
-    _s("expert", "steiner_min_angle_deg", "float", 60.0, "Same-net T-junctions: the joining track must meet the track it joins at no less than this angle (all three angles at the T are then at least this); below 60 the branch forms an acute sliver (acid trap).",
-       unit="°", range=(0, 90), engine="expert.steiner_min_angle_deg", since=V5),
-    _s("expert", "steiner_len_slack", "float", 1.1, "Same-net T-junctions: a junction whose final track is longer than this factor times the search's estimate (+ 1 mm) is dropped and the connection routed again without it.",
-       range=(1.0, 10), engine="expert.steiner_len_slack", since=V5),
-    _s("expert", "steiner_ghost_factor", "float", 1.0, "Same-net T-junctions: a junction is taken only while its length plus via cost stays within this factor of the connection's own pad-to-pad estimate on the empty board (1 = only junctions cheaper than the free pad route; larger also lets junctions dodge congestion).",
-       range=(0.0, 10), engine="expert.steiner_ghost_factor", since=V5),
     # ---- [factors]
     _s("factors", "weight", "table", {}, "Factor name → weight (mm per unit, ≥ 0); absent = the factor's default. Factors and defaults: length 1 per mm (scaled by width + clearance), via 25 per via, crossing 20 per crossing of two nets, same_net_crossing 0, plane_signal 10 per mm on a plane layer, plane_cut 25 per cut of a plane, necking 30 per necked stretch, overflow 50 per pass through an overfull cut, congestion 10 per pass per earlier over-full round of the cut, squeeze 5 per pass that leaves a cut less than a track pitch of slack between two other traces, via_squeeze 5 per passage-layer next to a via left with no slack (linear from one via diameter of slack, free, to none; the planner puts a via where the passages around it keep the most room), blocks_pad 30 per trace that takes the last free way out of another net's unrouted pad, ignored_rule 100 per violation of a KiCad check set to ignore, reroute 5 per earlier reroute of a connection that the P4 search moves again, branch 1 per branch point on a trace or through-pad (a reward: subtracted; net_tree = \"free\" lets a connection end on its net's routed copper there instead of a separate trace to the planned pad, and a separate path still wins when it is cheaper; 0 = only where the branch is cheaper on length alone), smd_through 0 per second trace ending on an SMD pad (assembly cost of a through-pad; off by default so it does not cancel branch), junction_angle 10 per mm of width + clearance per unit of psi(a) for a new trace that leaves a junction (a branch point, or a pad that already carries a trace of its net) at angle a to the nearest arm already there, psi(a) = (sec(60° - a/2) - 1) x sin 60° / sin(a/2) below 120° (0 from 120°, the Steiner optimum, up; 90° 0.04, 60° 0.27, 48° 0.5, 30° 1.4, 15° 4.3: shallow T splits and traces leaving a pad side by side get ever more expensive, with no cutoff), any_angle 15 per stretch of an octilinear drawing that is not at 0/45/90 degrees plus 2 per mm of it ([drawing] style, any_angle), acute_bend 50 per bend sharper than 90 degrees, up to twice that as the angle closes ([drawing] acute), violation 1000 per rule the written copper breaks plus per 0.01 mm² of its depth x length, and a connection without copper as its width + clearance over its straight length (never drop, [optimize] allow_violations: very high, so the cycles work to remove it; the best result counts the connections with violations first); differential pairs ([diffpair]): dp_uncoupled 1 per mm of a pair connection not coupled at the gap plus 4 per mm past a diff_pair_uncoupled rule's maximum, dp_skew 10 per mm of length difference between the two tracks plus 4 per mm past a skew rule's maximum, dp_gap_deviation 5 per mm of parallel pair track at a gap off the target by more than the tolerance (weighted by deviation / (deviation + tolerance)), dp_via_unpaired 25 per via on one track without a partner via, dp_polarity_cross 1000 per pair connection whose two tracks swap sides (effectively prohibitive).",
        unit="mm", engine="factors.weight"),
@@ -351,25 +264,31 @@ SETTINGS: list[Setting] = [
     _s("expert", "drc_loop_cap", "int", 5, "Maximum route / DRC / re-route rounds. Not used by the topological core: it takes no DRC feedback, so the result is judged by one DRC round (a re-route would repeat it).", range=(1, 50), engine="drc_loop_cap"),
 ]
 
-#: Settings of the classic engine that the topological core (the engine of this branch) does not read (K1: checked
-#: against engine/src/topo by grep); their docs say so, so nobody tunes a key that does nothing. The factors in
-#: [factors] (via, crossing, squeeze, ...) and the [optimize] work caps take their place.
-CLASSIC_ONLY = {
-    ("run", "detour_reference"), ("vias", "via_cost_mm"), ("vias", "max_per_connection"), ("vias", "reduction"),
-    ("vias", "reduction_len_slack_pct"), ("vias", "plane_via_max_mm"), ("vias", "cost_by_priority"),
-    ("vias", "cost_by_netclass"), ("vias", "via_shove"), ("vias", "plane_via_ring"), ("vias", "thermal_pad_vias"),
-    ("vias", "plane_via_share"), ("vias", "plane_via_share_max_mm"), ("layers", "preferred_direction"),
-    ("layers", "direction_cost"), ("layers", "pour_cut_cost_mm"), ("search", "zero_slack_retry"),
-    ("search", "strict_unfit_edges"), ("search", "pour_listed_via_goals"),
-    ("ripup", "growth"), ("ripup", "blame_vias"), ("ripup", "failed_pressure"), ("ripup", "rip_pass"),
-    ("ripup", "max_per_pair"), ("iterations", "max"), ("iterations", "patience"), ("iterations", "min_gain_pct"),
-    ("iterations", "continue_rounds"), ("expert", "hist_fail"), ("expert", "hist_block"), ("expert", "hist_overuse"),
-    ("expert", "present_overuse"), ("expert", "present_growth"), ("expert", "zero_slack_candidates"),
-    ("expert", "relax_iter_cap"),
+#: Settings removed in the CL cleanup (2026-11-09): the topological core never read them (most were settings of
+#: the classic router, removed in the green field 2f1430a). An old topor.toml that still sets one gets the warning
+#: CFG_REMOVED_KEY ("ignored, removed in ..."), never an error. (section, key) -> what replaced it, if anything.
+REMOVED_IN = "the CL cleanup of 2026-11-09"
+_CLASSIC = "a setting of the classic router; the topological core prices vias, crossings and detours with the [factors] weights and stops at the [optimize] work caps"
+REMOVED = {
+    **{k: _CLASSIC for k in (
+        ("run", "detour_reference"), ("vias", "via_cost_mm"), ("vias", "max_per_connection"), ("vias", "reduction"),
+        ("vias", "reduction_len_slack_pct"), ("vias", "plane_via_max_mm"), ("vias", "cost_by_priority"),
+        ("vias", "cost_by_netclass"), ("vias", "via_shove"), ("vias", "plane_via_ring"), ("vias", "thermal_pad_vias"),
+        ("vias", "plane_via_share"), ("vias", "plane_via_share_max_mm"), ("vias", "via_relaxation"),
+        ("layers", "preferred_direction"), ("layers", "direction_cost"), ("layers", "pour_cut_cost_mm"),
+        ("search", "zero_slack_retry"), ("search", "zero_slack_failed"), ("search", "strict_unfit_edges"),
+        ("search", "pour_listed_via_goals"), ("search", "steiner"), ("search", "exit_stubs"),
+        ("search", "pad_bridge_max_mm"),
+        ("ripup", "growth"), ("ripup", "blame_vias"), ("ripup", "failed_pressure"), ("ripup", "rip_pass"),
+        ("ripup", "max_per_pair"), ("iterations", "max"), ("iterations", "patience"), ("iterations", "min_gain_pct"),
+        ("iterations", "continue_rounds"), ("expert", "hist_fail"), ("expert", "hist_block"),
+        ("expert", "hist_overuse"), ("expert", "present_overuse"), ("expert", "present_growth"),
+        ("expert", "zero_slack_candidates"), ("expert", "relax_iter_cap"), ("expert", "own_net_capacity"),
+        ("expert", "wall_aware_capacity"), ("expert", "transit_pinch"), ("expert", "steiner_min_angle_deg"),
+        ("expert", "steiner_len_slack"), ("expert", "steiner_ghost_factor"))},
+    ("run", "threads"): "the engine's thread count comes from its thread pool (RAYON_NUM_THREADS), [optimize] runs sets how many runs share it",
+    ("run", "partial_routes"): "the topological core always keeps every routed connection (never drop: [optimize] allow_violations)",
 }
-CLASSIC_NOTE = (" Classic engine only: the topological core does not use this setting (it prices vias, crossings and "
-                "detours with the [factors] weights and stops at the [optimize] work caps).")
-SETTINGS = [replace(s, doc=s.doc + CLASSIC_NOTE) if (s.section, s.key) in CLASSIC_ONLY else s for s in SETTINGS]
 
 SETTINGS_BY_KEY = {(s.section, s.key): s for s in SETTINGS}
 
@@ -379,19 +298,13 @@ BACKLOG_VALUES = {("output", "geometry"): ("45deg",)}
 # Engine Options fields the plugin deliberately does not expose, with the reason.
 ENGINE_INTERNAL = {
     "stop_when_stable": "set per run by the plugin: false with the progress dialog (OK / finish_when_stable end it), true headless",
-    "pinned": "set by the DRC loop from KiCad's own violations, not a user choice",
     "drc_spots": "set by the DRC loop from KiCad's own violations, not a user choice",
     "skip_self_check": "test-only switch that disables the engine's self check",
-    "profile": "diagnostics only; timings must not enter the deterministic result",
     "scope": "built per run from the KiCad selection and scope_mode, not stored",
     "net_priority": "built per run from @N markers, netclasses and [nets] priority",
     "exclude_nets": "built per run from [nets] do_not_touch (patterns expanded against the board's net names)",
     "ignore_pads": "passed through from [nets] ignore_pads (REF.PAD strings) by run.build_options",
     "pour_served": "passed through from [nets] pour_served (boolean entries only) by run.build_options",
-    "via_cost_by_net": "built per run from [vias] cost_by_priority / cost_by_netclass (net name -> nm)",
-    "layer_direction": "built per run from [layers] preferred_direction (\"h\" -> 0, \"v\" -> 90 degrees)",
-    "via_cost_by_code": "run-time form of via_cost_by_net by net code, filled by the engine",
-    "detour_reference_budget_pct": "internal: the run passes 10 (percent of the remaining budget) whenever run.detour_reference is on",
 }
 
 # KiCad-owned behaviours, written as comment-only entries: (name, place)

@@ -128,7 +128,7 @@ folder if the run got that far); it names the cause. If it is not one of the sec
 on a very large board; a negative number is the signal.
 
 **Fix.** Route a selection instead of the whole board, set a time limit (`[run] timeout_s`), or fewer
-threads (`[run] threads`); file a bug with the board if it recurs.
+threads (environment variable `RAYON_NUM_THREADS` before starting KiCad); file a bug with the board if it recurs.
 
 ## Results
 
@@ -194,6 +194,14 @@ copper violates a rule anywhere else, file a bug.
 **Cause.** topor.toml is not valid TOML, so the whole file is ignored and the built-in defaults are used.
 
 **Fix.** Fix the syntax at the reported line, or delete topor.toml to get a fresh commented one on the next run (run.timeout_s is the first key).
+
+### CFG_REMOVED_KEY
+
+*Severity: warning.*
+
+**Cause.** topor.toml sets a key that was removed (a setting the topological core never read, most of them from the classic router); it is ignored.
+
+**Fix.** Delete the line from topor.toml; the finding names what takes its place, and docs/user/configuration.md lists the current keys (e.g. optimize.runs).
 
 ### CFG_UNKNOWN_KEY
 
@@ -457,7 +465,7 @@ copper violates a rule anywhere else, file a bug.
 
 **Cause.** The router produced no copper.
 
-**Fix.** See the connection reasons in the report; relax a setting (run.timeout_s, vias.max_per_connection) or route by hand.
+**Fix.** See the connection reasons in the report; relax a setting (run.timeout_s, optimize.rounds) or route by hand.
 
 ### PAD_OUTSIDE_BOARD
 
@@ -489,7 +497,7 @@ copper violates a rule anywhere else, file a bug.
 
 **Cause.** A pad of a plane net (a net whose pour is on a plane layer) had no room for a short stub and via into its pour, so it is joined to its net's copper by an ordinary trace instead.
 
-**Fix.** Nothing to do if the trace is acceptable; otherwise make room next to the pad or allow vias closer to it (vias.plane_via_max_mm, vias.via_in_pad).
+**Fix.** Nothing to do if the trace is acceptable; otherwise make room next to the pad or allow vias in pads (vias.via_in_pad).
 
 ### PLANE_VIA_OUTSIDE_POUR
 

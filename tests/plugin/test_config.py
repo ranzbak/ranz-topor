@@ -49,7 +49,7 @@ def test_unknown_key_warns_not_ignored(tmp_path):
 
 def test_value_out_of_range_finding(tmp_path):
     (tmp_path / "topor.toml").write_text(
-        'version = 1\n[run]\ntimeout_s = -3\nexisting_copper = "melt"\nthreads = "x"\n'
+        'version = 1\n[run]\ntimeout_s = -3\nexisting_copper = "melt"\nkicad_cli_timeout_s = "x"\n'
         '[output]\ngeometry = "45deg"\n'
     )
     cfg, findings = load_config(tmp_path)
@@ -86,24 +86,20 @@ def test_engine_options_units(tmp_path):
     cfg, _ = load_config(tmp_path)
     o = cfg.engine_options()
     assert o["wall_clock_s"] == 600.0
-    assert o["via_cost_nm"] == 2_000_000
     assert o["margin_nm"] == 0
-    assert o["pathfinder_iter_cap"] == 30
     assert o["existing_copper"] == "fixed"
-    assert o["expert"]["hist_fail"] == 1.0
-    assert o["expert"]["relax_iter_cap"] == 200
     assert o["drc_loop_cap"] == 5
-    assert o["ripup_growth"] == 1.25 and o["ripup_max_per_pair"] == 8
-    assert o["plane_vias"] is True and o["plane_via_max_nm"] == 1_000_000
+    assert o["plane_vias"] is True
     # every engine length field (…_nm) gets an int: the engine's serde refuses a float for an i64
     for s in schema.SETTINGS:
         if s.engine_field and s.engine_field.endswith("_nm") and s.engine_field in o:
             v = o[s.engine_field]
             assert all(isinstance(x, int) for x in v) if isinstance(v, list) else isinstance(v, int), s.key
-    assert o["patience"] == 5 and o["min_gain_pct"] == 1.0
     assert o["detour_factor"] == 2.0
-    # M4a-only settings are not sent to the engine yet
-    assert "exit_stubs" not in o and "steiner" not in o
+    # settings not available yet are not sent; removed ones (CL cleanup) are gone
+    assert "dangling_ends" not in o
+    assert not {"expert", "threads", "partial_routes", "pathfinder_iter_cap", "patience", "min_gain_pct",
+                "via_cost_nm", "rip_pass", "continue_rounds", "steiner", "exit_stubs"} & set(o)
     c0 = cfg.with_values({("run", "timeout_s"): 0})
     assert c0.engine_options()["wall_clock_s"] == 0.0
     assert isinstance(c0.engine_options()["wall_clock_s"], float)
@@ -126,10 +122,10 @@ def test_update_config_keeps_comments(tmp_path):
     assert cfg2.non_defaults() == {"run.timeout_s": 120, "vias.allowed_drills_mm": [0.3, 0.4],
                                    "nets.do_not_touch": ["GND", "/a b"]}
     # user comment and unrelated user edits survive
-    path.write_text("# my note\n" + after.replace("threads = 0", "threads = 3  # mine"))
+    path.write_text("# my note\n" + after.replace("respect_locked = true", "respect_locked = true  # mine"))
     update_config(path, {"run.timeout_s": 90})
     t = path.read_text()
-    assert "# my note" in t and "threads = 3  # mine" in t
+    assert "# my note" in t and "respect_locked = true  # mine" in t
     assert load_config(tmp_path)[0].get("run", "timeout_s") == 90
 
 
@@ -144,8 +140,8 @@ def test_update_config_rejects_bad_change(tmp_path):
 def test_update_config_since_key_uncomments(tmp_path):
     load_config(tmp_path)
     p = tmp_path / "topor.toml"
-    update_config(p, {"search.steiner": False})
-    assert load_config(tmp_path)[0].get("search", "steiner") is False
+    update_config(p, {"search.dangling_ends": "fixed"})
+    assert load_config(tmp_path)[0].get("search", "dangling_ends") == "fixed"
 
 
 def test_report_dir_for(tmp_path, monkeypatch):
@@ -190,8 +186,22 @@ def test_topological_core_settings_reach_the_engine():
         assert available(s), key
 
 
-def test_classic_only_settings_say_so():
-    from topor.schema import CLASSIC_NOTE, CLASSIC_ONLY, SETTINGS_BY_KEY
-    for k in CLASSIC_ONLY:
-        assert SETTINGS_BY_KEY[k].doc.endswith(CLASSIC_NOTE), k
-    assert "topological core does not use" in render_toml(Config.defaults())
+def test_removed_keys_are_ignored_with_a_warning(tmp_path):
+    """CL cleanup: an old topor.toml that sets removed keys (also whole removed sections) still loads; each such
+    key gives CFG_REMOVED_KEY ("ignored, removed in ...") and nothing else changes."""
+    from topor.schema import REMOVED, SETTINGS_BY_KEY
+    assert not set(REMOVED) & set(SETTINGS_BY_KEY)
+    (tmp_path / "topor.toml").write_text(
+        "version = 1\n[run]\nthreads = 4\npartial_routes = true\ntimeout_s = 30\n"
+        "[vias]\nreduction = false\n[ripup]\nrip_pass = false\ngrowth = 2.0\n"
+        "[iterations]\ncontinue_rounds = 0\n[expert]\nhist_fail = 2.0\ndrc_loop_cap = 3\n")
+    cfg, findings = load_config(tmp_path)
+    removed = sorted(f.items[0] for f in findings if f.code == "CFG_REMOVED_KEY")
+    assert removed == sorted(["run.threads", "run.partial_routes", "vias.reduction", "ripup.rip_pass", "ripup.growth",
+                              "iterations.continue_rounds", "expert.hist_fail"])
+    assert all("ignored: removed in" in f.message and f.severity == "warning"
+               for f in findings if f.code == "CFG_REMOVED_KEY")
+    assert [f.code for f in findings if f.code != "CFG_REMOVED_KEY"] == []
+    assert cfg.get("run", "timeout_s") == 30.0 and cfg.get("expert", "drc_loop_cap") == 3
+    text = render_toml(Config.defaults())
+    assert "[ripup]" not in text and "[iterations]" not in text and "threads =" not in text

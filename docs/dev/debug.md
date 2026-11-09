@@ -46,7 +46,7 @@ cargo run --release --manifest-path engine/Cargo.toml --example route_probe -- \
 
 Runs the engine's `route()` on a model JSON (no Python, no KiCad) and prints routed/total, vias, length,
 iterations, `converged` / `timed_out`. Options: `--options '<Options JSON>'` (e.g.
-`'{"threads": 1, "partial_routes": true}'`; the keys are those of `topor_engine.default_options()`),
+`'{"runs": 1, "seed": 3}'`; the keys are those of `topor_engine.default_options()`),
 `--iters N` (iteration cap), `--margin NM`, `--dump out.json` (the result JSON without `runtime_s` /
 `threads_used` — diff two dumps to check determinism across thread counts), `--quiet` (no per-connection
 lines). **`--profile`** (or `"profile": true` in the options) adds the per-iteration table (search / commit /

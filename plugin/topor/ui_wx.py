@@ -78,7 +78,6 @@ WORDING: dict[str, dict[str, str]] = {
         "existing_tip": "Rip up keeps free and stitching vias as obstacles unless topor.toml sets "
                         "[run] rip_free_vias = true",
         "respect_locked": "Respect locked tracks and vias",
-        "partial_routes": "Keep partial routes",
         "timeout_label": "Time limit",
         "timeout_unit": "s",
         "timeout_hint": "0 = no limit",
@@ -94,8 +93,6 @@ WORDING: dict[str, dict[str, str]] = {
         "timeout_clock_tip": "Wall: seconds on the clock. CPU: CPU seconds of router work summed over all threads; "
                              "comparable across machine load and thread count, so a 4-thread run uses it up about "
                              "4 times as fast. Set in topor.toml as [run] timeout_clock.",
-        "threads_label": "Threads",
-        "threads_hint": "0 = all cores but one",
         "save_toml": "Save these options to topor.toml",
         "blocked_status": "Cannot route: {n} error(s) — see Fix above.",
         "help": "Help",
@@ -552,8 +549,8 @@ class PreflightDialog(_Base):
     _wk = "preflight"
     #: tab order from the note §2 (one Accept checkbox, relabelled per selected code)
     TAB_ORDER = ("findings", "cause", "accept", "scope_whole", "scope_between",
-                 "scope_touching", "existing", "respect_locked", "partial_routes", "drawing_style", "timeout", "timeout_clock",
-                 "threads", "save_toml", "help", "cancel", "route")
+                 "scope_touching", "existing", "respect_locked", "drawing_style", "timeout", "timeout_clock",
+                 "save_toml", "help", "cancel", "route")
 
     def __init__(self, findings: list, summary: RunSummary, cfg: Config):
         super().__init__(WORDING["preflight"]["title"].format(board=summary.board), resizable=True)
@@ -637,8 +634,7 @@ class PreflightDialog(_Base):
         self.A11Y = {"findings": W["findings_heading"].format(errors=self.n_err, warnings=n_warn, notes=n_info),
                      "cause": f"{W['cause_label']} / {W['fix_label']}", "existing": W["existing_label"],
                      "drawing_style": W["drawing_style_label"], "timeout": W["timeout_label"],
-                     "timeout_clock": W["timeout_clock_label"],
-                     "threads": W["threads_label"]}
+                     "timeout_clock": W["timeout_clock_label"]}
         self.finish((640, 560), (760, 780))
         self.list.SetFocus()
 
@@ -687,12 +683,8 @@ class PreflightDialog(_Base):
 
         self.respect_locked = wx.CheckBox(self, label=_mn(W["respect_locked"], "l"), name="respect_locked")
         self.respect_locked.SetValue(bool(cfg.get("run", "respect_locked")))
-        self.partial_routes = wx.CheckBox(self, label=_mn(W["partial_routes"], "k"), name="partial_routes")
-        self.partial_routes.SetValue(bool(cfg.get("run", "partial_routes")))
         grid.AddSpacer(0)
         grid.Add(self.respect_locked)
-        grid.AddSpacer(0)
-        grid.Add(self.partial_routes)
 
         # trace shape ([drawing] style, user 2026-11-07: "make it kicad accessible")
         self._style_keys = ("octilinear", "smooth")
@@ -704,7 +696,7 @@ class PreflightDialog(_Base):
         grid.Add(self.text(self, "preflight", "drawing_style_label"), 0, wx.ALIGN_CENTER_VERTICAL)
         grid.Add(self.drawing_style)
 
-        # time limit / threads (reached by Tab; spin controls carry a preceding label)
+        # time limit (reached by Tab; spin controls carry a preceding label)
         self.timeout = wx.SpinCtrlDouble(self, name="timeout", min=0, max=86400, inc=10,
                                          initial=min(86400.0, float(cfg.get("run", "timeout_s"))))
         self.timeout.SetDigits(0)
@@ -721,13 +713,6 @@ class PreflightDialog(_Base):
         tr.Add(self.timeout_clock, 0, wx.ALIGN_CENTER_VERTICAL)
         grid.Add(self.text(self, "preflight", "timeout_label"), 0, wx.ALIGN_CENTER_VERTICAL)
         grid.Add(tr)
-        self.threads = wx.SpinCtrl(self, name="threads", min=0, max=256, initial=int(cfg.get("run", "threads")))
-        self.threads.SetToolTip(W["threads_label"])
-        thr = wx.BoxSizer(wx.HORIZONTAL)
-        thr.Add(self.threads, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.group)
-        thr.Add(self.text(self, "preflight", "threads_hint"), 0, wx.ALIGN_CENTER_VERTICAL)
-        grid.Add(self.text(self, "preflight", "threads_label"), 0, wx.ALIGN_CENTER_VERTICAL)
-        grid.Add(thr)
 
         self.save_toml = wx.CheckBox(self, label=_mn(W["save_toml"], "s"), name="save_toml")
         grid.AddSpacer(0)
@@ -815,13 +800,11 @@ class PreflightDialog(_Base):
             ov["scope_whole"] = self.scope_whole.GetValue()
         put("existing_copper", self._existing_keys[self.existing.GetSelection()])
         put("respect_locked", self.respect_locked.GetValue())
-        put("partial_routes", self.partial_routes.GetValue())
         style = self._style_keys[self.drawing_style.GetSelection()]
         if style != cfg.get("drawing", "style"):
             ov["drawing_style"] = style
         put("timeout_s", float(self.timeout.GetValue()))
         put("timeout_clock", self._clock_keys[self.timeout_clock.GetSelection()])
-        put("threads", int(self.threads.GetValue()))
         return Decision(True, accepted, ov, self.save_toml.GetValue())
 
 

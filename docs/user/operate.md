@@ -157,11 +157,9 @@ Tick **Save these options to topor.toml** to keep them (only these `[run]` keys 
 | Scope | Whole board · Between selected footprints · Touching selected footprints | `[run] scope_mode` (between / touching); see [Scope by selection](#scope-by-selection) |
 | Existing copper | Keep as obstacles · Keep and smooth · Rip up and re-route | `[run] existing_copper` = `fixed` / `smooth` / `rip` |
 | Respect locked tracks and vias | on: locked copper is never ripped | `[run] respect_locked` |
-| Keep partial routes | on: connections that cannot finish are drawn up to the blocking point (group `topor-partial`) | `[run] partial_routes` |
 | Trace shape | *45° (octilinear)* (default: straight and 45° segments, 90° bends only where needed) or *Any angle (smooth)* | `[drawing] style` |
 | Time limit | seconds of router time, default 600 (an emergency stop: the topological core ends at *Routes stable* or your OK); `0` = no limit; KiCad's DRC, the refill and the preview export are not counted | `[run] timeout_s` |
 | Time limit clock | *wall* (default, seconds on the clock: what you wait) or *cpu* (CPU seconds of router work summed over all threads; comparable across machine load and thread count) | `[run] timeout_clock` |
-| Threads | `0` = all cores but one | `[run] threads` |
 
 *Existing copper* decides what happens to tracks and vias that are already on the board:
 **Keep as obstacles** (default) routes only what is not connected yet and treats existing copper as fixed;
@@ -523,8 +521,10 @@ unsure about is kept. KiCad's DRC of the result stays the judge.
   ([`UNROUTED`](troubleshoot.md#unrouted), drawn blue in the preview). Small changes elsewhere on the board can
   move the result by a few connections.
 - Pour islands that the new copper cuts off are stitched afterwards (stitching vias, pad stubs), not prevented.
-- Settings marked *Classic engine only* in [configuration.md](configuration.md) (`[iterations]`, `[ripup]`, the via
-  cost keys, …) do nothing; the `[factors]` weights, the `[optimize]` stable test and work caps take their place.
+- The settings of the classic router (`[iterations]`, `[ripup]`, the via cost keys, `[run] threads`, …) were removed
+  in the CL cleanup (2026-11-09; list in [configuration.md](configuration.md#removed-keys)): an old `topor.toml`
+  that still sets one gets [`CFG_REMOVED_KEY`](troubleshoot.md#cfg_removed_key) and the key is ignored. The
+  `[factors]` weights, the `[optimize]` stable test and work caps take their place.
 
 ### Platform and board
 
@@ -533,9 +533,8 @@ unsure about is kept. KiCad's DRC of the result stays the judge.
 - **Layers.** The engine routes every copper layer whose role is `signal` or `mixed` and uses through vias
   only (no blind, buried or micro vias). Plane layers (`gnd` / `pwr` roles, defaults by copper count in
   [configuration.md](configuration.md#layers)) are not routed; through-hole pads reach them through their
-  zone, and an SMD pad of a plane net gets a through via onto the plane at the nearest free via site within
-  `[vias] plane_via_max_mm` (default 1 mm) of the pad, inside the pad when `[vias] via_in_pad` is on
-  (`[vias] plane_vias`, since 0.4.2). A pad with no site that close fails with *no via site within … of the
+  zone, and an SMD pad of a plane net gets a through via onto the plane at the cheapest free via site near
+  the pad, inside the pad when `[vias] via_in_pad` is on (`[vias] plane_vias`, since 0.4.2). A pad with no site that close fails with *no via site within … of the
   terminal (plane pour)*. Each pad gets its own via: existing stitching vias are not used as plane targets
   and two pads do not share one. Only two-layer boards are benchmarked (eprom-to-kernal 27/27,
   wiccon-2023 62/62); 4+ layer boards route their signal layers but inner-layer quality is not tuned yet. Copper counts
@@ -558,19 +557,10 @@ unsure about is kept. KiCad's DRC of the result stays the judge.
   outside board` (they are not counted in the connection total); `pour_served = true` makes the net's
   connections only pour connections, `false` routes it pad to pad although it has a pour.
 - **Existing copper `smooth`**: the engine treats it as `fixed` and says so in the report.
-- **`[run] detour_reference`** (default on, 0.5.0): the report's detour ratio is the routed length divided by the
-  length of a DRC-feasible reference path, one extra search per connection on the fixed copper only (full
-  clearance and width, same layers and via rules; at most 10 % of the remaining time budget). A connection whose
-  reference search fails or runs out of time falls back to its topological ghost path (the shortest path on the
-  empty board that may squeeze through foreign pads) and is counted as a "ghost fallback"; the report also lists
-  the ratio against the ghost line (`detour_ghost`). Off = ghost line only (`toporlib/detour.py`).
-- **Pad exit stubs and necking** (`[search] exit_stubs`, `neck_to_pad`, `neck_max_mm`, `pad_bridge_max_mm`,
-  0.5.0): a pad that cannot be left from its centre at the net's track width (fine-pitch rows) gets a short
-  straight stub out of the pad row, if needed starting off the pad's centre line or narrower than the net width
-  (never below KiCad's minimum track width, KiCad → File → Board Setup → Design Rules → Constraints → Minimum track width, or a custom-rule `track_width` minimum); two close pads of one
-  footprint on the same net may be joined by one straight track. Every stub is checked against the clearance
-  rules before routing; the report lists the stubs and the necked ones. A pad with no room for a stub is
-  reported as `stub infeasible: <pad>` in the warnings and keeps the pad-centre start.
+- **Detour ratio**: the report's detour ratio is the routed length over the connection's topological ghost path
+  (`toporlib/detour.py`). The DRC-feasible reference search (`[run] detour_reference`) and the pad exit stubs
+  (`[search] exit_stubs`, `pad_bridge_max_mm`) of the classic router were removed in the CL cleanup; necking at
+  pads is `[search] neck_to_pad` / `neck_max_mm` of the topological core.
 - Keys marked *since 0.5.0* in [configuration.md](configuration.md) are written commented-out.
 
 ### While topor runs
