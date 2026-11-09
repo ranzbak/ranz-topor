@@ -1,6 +1,12 @@
-//! The `route()` entry of the topological core, stage S2a ("first copper"; S2b: any number of signal layers):
-//! BoardModel -> projection (`board`) -> P2 initial routing (`init`, pad to pad, widest first)
-//! -> P3 layer assignment (`layers`, Polubasov) -> minimal drawing (`draw`) -> `RouteResult`.
+//! The `route()` entry of the topological core (two or more signal layers): plane stubs placed once
+//! on the static board, then `[optimize] runs` seeded runs of whole-route cycles ([`route_round`]):
+//! decomposition (diff pairs planned as one wire) -> projection (`board`) -> P2 initial routing
+//! (`init`, net trees, widest first) -> P3 layer assignment (`layers`, Polubasov, capacity
+//! refinement) -> crossing rules and P4 negotiated rip-up and reroute (optional moves) -> drawing
+//! (`draw`: vias, then wires; feedback redraw; never drop) -> via reduction, fuse, octilinear polish
+//! -> diff pair realisation -> `RouteResult`. Each cycle's result is pour-stitched and offered to the
+//! run's archive; the drawing feeds back into the next cycle. `[run] stop_after = "plan"` ends a run
+//! after the plan of its first cycle.
 //!
 //! Every connection ends in one of three states, none of them silent:
 //! * routed: copper emitted, checked by the [`Checker`] against the board and all earlier copper;
@@ -11,10 +17,12 @@
 //!   type and cause (`RouteResult::violations`). With `allow_violations = false` these fail as
 //!   below (the legal-only output);
 //! * failed with a reason (P7 wording): no topological path, a plane pad without a via site, an
-//!   unsupported terminal, a differential pair ("not in the rough version"), time limit.
+//!   unsupported terminal, a differential pair with `[diffpair] enabled = false` ("not in the rough
+//!   version"), time limit.
 //!
 //! Boards with fewer than two signal layers report every connection failed with a reason.
-//! Deterministic: no randomness besides the seeded P3 local search, Vec + index ids throughout.
+//! Deterministic: no randomness besides the seeded P3 local search and the seeded fluctuation of
+//! the factor weights per cycle, Vec + index ids throughout.
 //!
 //! Complexity: dominated by P2 (one A* per connection over the gap graph, capped by
 //! `max_expansions`) and P3 (reductions linear in the domain graph, local search on the rest).

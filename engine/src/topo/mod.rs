@@ -1,7 +1,14 @@
-//! TopoR-style topological core (plan "Pipeline of the new core"). Stage G0, the flat-plane
-//! gate: the projection and topology state ([`state`], [`board`]), initial routing in one plane
-//! with crossings allowed ([`init`], P2-lite) and the two-layer assignment of Polubasov 2001
-//! ([`layers`], P3), measured by [`gate`]. Not wired into `route()`.
+//! TopoR-style topological core: the router behind `route()` ([`core::route_topo`]).
+//!
+//! Fixed board: the projection ([`board`], [`cdt`](crate::cdt) on the fixed copper) and the plane
+//! stubs ([`planes`]). Topology: initial routing in one plane with crossings allowed and net trees
+//! ([`init`], [`state`], [`tree`]), layer assignment after Polubasov 2001 with the capacity
+//! refinement ([`layers`], [`refine`], [`pack`]), crossing rules and negotiated rip-up and reroute
+//! ([`xrules`], [`moves`], [`descent`]), priced by the social factors ([`factors`]). Drawing:
+//! [`draw`] (with [`exact`], [`octi`]), then the steps after the drawing ([`reduce`], fuse,
+//! [`stitch`], [`tidy`]). Iteration: whole-route cycles with a fluctuation schedule ([`schedule`])
+//! and an archive of variants ([`archive`]). Measurement only: [`cutflow`] / [`sheet`] (the
+//! per-layer cut test), [`gate`], [`witness`], [`dwitness`], [`learn`], [`stats`].
 
 pub mod board;
 pub mod capacity;

@@ -1,10 +1,8 @@
 //! `route()` entry point and the result contract with the plugin (`RouteResult`).
 //!
-//! Green field (2026-11-03): the classic routing loop (PathFinder negotiation, slot search,
-//! multigraph, metrization, late passes) has been removed to make room for the TopoR-style core
-//! (plan: projection-first initial routing, layer assignment, social-factor optimization).
-//! Until that core exists, [`route`] decomposes the board and reports every connection as
-//! failed with [`NO_ENGINE`], so the plugin, scope, report and DRC paths keep working.
+//! [`route_with`] drops the ignored pads, runs the topological core ([`crate::topo::core`]) and
+//! makes the written copper cleanup-safe ([`crate::topo::tidy`]); [`unrouted`] is the result of a
+//! board the core cannot route at all (every connection failed with one reason).
 
 use crate::control::RunControl;
 use crate::decompose::{decompose, TermKind, TermRef};
@@ -547,7 +545,7 @@ pub fn route_with(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
 }
 
 /// Decompose `model` on its routable layers and report every connection as failed with
-/// [`NO_ENGINE`], nets summarised as the plugin expects. O(decompose + C·N).
+/// `reason`, nets summarised as the plugin expects. O(decompose + C·N).
 pub(crate) fn unrouted(model: &BoardModel, opts: &Options, reason: &str) -> RouteResult {
     let t0 = Instant::now();
     let mut warnings: Vec<String> = vec![reason.to_string()];
