@@ -1069,6 +1069,20 @@ pub struct Options {
     /// plan handed to the drawing, and writes them there as JSON (`run<k>/cycle<c>.json`). Empty
     /// (default): off. Never changes the routing.
     pub cut_report: String,
+    /// P1a fit authority (`[capacity] model`, shopping list 2.2): which capacity model prices the
+    /// layer assignment (P3), the P4 label moves and the P4 pick of the best round. `"edges"`
+    /// (default): the per-edge packer of the shared projection (`topo::refine::CapModel`).
+    /// `"cuts"`: the per-layer cut test (`topo::cutmodel`, the critical cuts of each layer's sheet
+    /// in the planning norm) with the graded over-full price `overflow x phi` per cut.
+    pub capacity_model: String,
+    /// `[capacity] overflow_softness` (model = "cuts"): the softness `tau` of the graded over-full
+    /// price, in track pitches: the price of a cut rises smoothly from almost 0 at a slack of a few
+    /// `tau` pitches through about 0.57 x `overflow` at zero slack to `overflow x (1 + overflow in
+    /// pitches)` (`topo::cutmodel::phi`).
+    pub overflow_softness: f64,
+    /// `[capacity] cut_vias` (model = "cuts"): the layer refinement may add vias where they remove
+    /// more cut overflow price than the vias cost (false: only moves that keep the via price).
+    pub cut_vias: bool,
     /// C0 (`[run] stop_after`, measurement): `"plan"` ends every run of the topological core
     /// after the plan of its first cycle (later cycles need the drawing's feedback), before the
     /// drawing; the result has no copper and its warnings carry the plan metrics line. `""`
@@ -1158,6 +1172,9 @@ impl Default for Options {
             mixed_clearance: "conservative".into(),
             cut_radius_mm: 0.0,
             cut_report: String::new(),
+            capacity_model: "edges".into(),
+            overflow_softness: 0.1,
+            cut_vias: true,
             stop_after: String::new(),
             diffpair_route: true,
             diffpair_zip_max_nm: 3_000_000,

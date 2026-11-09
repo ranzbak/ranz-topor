@@ -86,10 +86,14 @@ pub struct Stretch {
     pub w_floor: f64,
     /// The projection curve: terminal, pass points, terminal.
     pub curve: Vec<Vec2>,
+    /// Traversal of every point of `curve` (a pass point: its pass; a via or turn: its event).
+    pub curve_k: Vec<usize>,
     /// Width of each pass point of `curve[1..len-1]`.
     pub pass_w: Vec<f64>,
     /// Ends at a via without a static site.
     pub nosite: bool,
+    /// Whether the start / the end of `curve` is one of the wire's own vias.
+    pub via_ends: [bool; 2],
     /// The rubber band in the layer's sheet (corners), empty when the walk failed.
     pub band: Vec<Vec2>,
     /// Per band corner: the sheet vertex it wraps and whether the vertex lies left of the band.
@@ -158,7 +162,7 @@ pub struct Measure {
 
 /// The static site point of a via of `net` (radius `r`, clearance `s`) in triangle `t`: the first
 /// candidate point with room, else the freest one (`false`). Same test as `Packer::via_site`.
-fn via_point(pr: &Projection, packer: &Packer, t: usize, net: i32, r: f64, s: f64) -> (Vec2, bool) {
+pub fn via_point(pr: &Projection, packer: &Packer, t: usize, net: i32, r: f64, s: f64) -> (Vec2, bool) {
     let [a, b, c] = pr.tris[t].map(|v| pr.pos[v]);
     let pts = tri_site_points(a, b, c);
     let mut best = (f64::NEG_INFINITY, pts[0]);
@@ -186,11 +190,20 @@ fn via_point(pr: &Projection, packer: &Packer, t: usize, net: i32, r: f64, s: f6
 /// junction points and the terminal points.
 type Planned = (Vec<Stretch>, Vec<(WireId, ViaFeat, bool)>, Vec<JunctionFeat>, Vec<Vec2>);
 
+/// The per-layer runs of one wire ([`wire_stretches`]).
+pub struct WireRuns {
+    pub runs: Vec<Stretch>,
+    /// Its planned vias: the disc and whether it has a static site.
+    pub vias: Vec<(ViaFeat, bool)>,
+    /// Its junction points (ends at a node or without an obstacle, and its turns), by vertex.
+    pub junc: Vec<(VertId, JunctionFeat)>,
+    /// Its terminal points (pad ends and via points), in order.
+    pub terms: Vec<Vec2>,
+}
+
 /// The stretches of the plan, and the planned vias and junction points. O(passes).
-#[allow(clippy::needless_range_loop)]
 fn stretches(plan: &Plan) -> Planned {
     let st = plan.st;
-    let pr = st.proj;
     let mut out = Vec::new();
     let mut vias = Vec::new();
     let mut junc: BTreeMap<VertId, JunctionFeat> = BTreeMap::new();
@@ -199,97 +212,128 @@ fn stretches(plan: &Plan) -> Planned {
         if !wi.alive || w >= plan.events.len() {
             continue;
         }
-        let ev = &plan.events[w];
-        let n = wi.passes.len();
-        let mut ks: Vec<usize> = plan.via_k.get(w).cloned().unwrap_or_default();
-        // Every layer change has its via traversal (the drawing's default where the plan has none).
-        let iv = via_intervals(ev);
-        ks.truncate(iv.len());
-        for &(ka, kb) in &iv[ks.len()..] {
-            ks.push(mid_k(ka, kb));
+        let ks: Vec<usize> = plan.via_k.get(w).cloned().unwrap_or_default();
+        let site = |t: usize, net: i32, r: f64, s: f64| via_point(st.proj, plan.packer, t, net, r, s);
+        let r = wire_stretches(st, plan.packer, w, &plan.events[w], &ks, plan.bottom, (plan.conn)(w), &site);
+        out.extend(r.runs);
+        vias.extend(r.vias.into_iter().map(|(v, ok)| (w, v, ok)));
+        for (v, j) in r.junc {
+            junc.entry(v).or_insert(j);
         }
-        let lay = pass_layers_at(n, ev, plan.bottom, &ks);
-        // Layer before / after every layer change.
-        let changes: Vec<(i32, i32)> = ev.windows(2).filter(|x| x[0].2 != x[1].2).map(|x| (x[0].2, x[1].2)).collect();
-        let first = ev.first().map_or(plan.bottom, |e| e.2);
-        let w_floor = st.w_min(wi.net, wi.w);
-        let r = 0.5 * plan.packer.via_d(wi.net);
-        for (end, v, o) in [(0, wi.a, wi.pa), (1, wi.b, wi.pb)] {
-            let _ = end;
-            if o == NO_OBS || matches!(pr.vkind[v], VertKind::Node) {
-                junc.entry(v).or_insert(JunctionFeat { at: pr.pos[v], net: wi.net, clear: wi.s });
-            } else {
-                terms.push(pr.pos[v]);
-            }
-        }
-        for &(_, v) in &wi.turns {
-            junc.entry(v).or_insert(JunctionFeat { at: pr.pos[v], net: wi.net, clear: wi.s });
-        }
-        // Events in traversal order: (traversal, 0 = turn / 1 = via, point, via index).
-        let mut evs: Vec<(usize, u8, Vec2, usize)> = wi.turns.iter().map(|&(k, v)| (k, 0u8, pr.pos[v], 0)).collect();
-        for (i, &k) in ks.iter().enumerate() {
-            let k = k.min(n);
-            let (pt, ok) = via_point(pr, plan.packer, wi.tris[k], wi.net, r, wi.s);
-            vias.push((w, ViaFeat { at: pt, r, net: wi.net, clear: wi.s }, ok));
-            terms.push(pt);
-            evs.push((k, 1, pt, i));
-        }
-        evs.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-        let mut cur_layer = first;
-        let mut curve = vec![pr.pos[wi.a]];
-        let mut pw: Vec<f64> = Vec::new();
-        let mut layer_of_cur: Option<i32> = None;
-        let mut nosite_cur = false;
-        let mut ei = 0;
-        let mut flush = |curve: &mut Vec<Vec2>, pw: &mut Vec<f64>, layer: i32, end: Vec2, nosite: bool| {
-            curve.push(end);
-            if layer >= 0 {
-                out.push(Stretch {
-                    wire: w,
-                    conn: (plan.conn)(w),
-                    net: wi.net,
-                    layer: layer as usize,
-                    s: wi.s,
-                    w: wi.w,
-                    w_floor,
-                    curve: std::mem::take(curve),
-                    pass_w: std::mem::take(pw),
-                    nosite,
-                    band: Vec::new(),
-                    wraps: Vec::new(),
-                });
-            }
-        };
-        for k in 0..=n {
-            while ei < evs.len() && evs[ei].0 == k {
-                let (_, kind, pt, vi) = evs[ei];
-                let layer = layer_of_cur.unwrap_or(cur_layer);
-                let ns = kind == 1 && !vias[vias.len() - ks.len() + vi].2;
-                flush(&mut curve, &mut pw, layer, pt, ns || nosite_cur);
-                nosite_cur = ns;
-                curve.push(pt);
-                if kind == 1 {
-                    cur_layer = changes.get(vi).map_or(cur_layer, |c| c.1);
-                }
-                layer_of_cur = None;
-                ei += 1;
-            }
-            if k < n {
-                let p = wi.passes[k];
-                curve.push(st.pass_point(p));
-                pw.push(st.pass_w.get(p).copied().unwrap_or(wi.w));
-                layer_of_cur = Some(lay[k]);
-            }
-        }
-        let layer = layer_of_cur.unwrap_or(cur_layer);
-        flush(&mut curve, &mut pw, layer, pr.pos[wi.b], nosite_cur);
+        terms.extend(r.terms);
     }
     (out, vias, junc.into_values().collect(), terms)
 }
 
+/// The per-layer runs of wire `w` under its labelled events `ev` with its planned via
+/// traversals `via_k` (a layer change without one gets the drawing's default traversal): the
+/// wire is cut at every via and at every junction corner it turns at. O(passes of the wire).
+#[allow(clippy::needless_range_loop)]
+/// `site(triangle, net, r, s)` gives a via's point and whether it is a static site ([`via_point`]).
+#[allow(clippy::too_many_arguments)]
+pub fn wire_stretches(st: &State, packer: &Packer, w: WireId, ev: &[LEv], via_k: &[usize], bottom: i32, conn: Option<usize>, site: &dyn Fn(usize, i32, f64, f64) -> (Vec2, bool)) -> WireRuns {
+    let pr = st.proj;
+    let wi = &st.wires[w];
+    let mut out = Vec::new();
+    let mut vias: Vec<(ViaFeat, bool)> = Vec::new();
+    let mut junc: Vec<(VertId, JunctionFeat)> = Vec::new();
+    let mut terms: Vec<Vec2> = Vec::new();
+    let n = wi.passes.len();
+    let mut ks: Vec<usize> = via_k.to_vec();
+    // Every layer change has its via traversal (the drawing's default where the plan has none).
+    let iv = via_intervals(ev);
+    ks.truncate(iv.len());
+    for &(ka, kb) in &iv[ks.len()..] {
+        ks.push(mid_k(ka, kb));
+    }
+    let lay = pass_layers_at(n, ev, bottom, &ks);
+    // Layer before / after every layer change.
+    let changes: Vec<(i32, i32)> = ev.windows(2).filter(|x| x[0].2 != x[1].2).map(|x| (x[0].2, x[1].2)).collect();
+    let first = ev.first().map_or(bottom, |e| e.2);
+    let w_floor = st.w_min(wi.net, wi.w);
+    let r = 0.5 * packer.via_d(wi.net);
+    for (v, o) in [(wi.a, wi.pa), (wi.b, wi.pb)] {
+        if o == NO_OBS || matches!(pr.vkind[v], VertKind::Node) {
+            junc.push((v, JunctionFeat { at: pr.pos[v], net: wi.net, clear: wi.s }));
+        } else {
+            terms.push(pr.pos[v]);
+        }
+    }
+    for &(_, v) in &wi.turns {
+        junc.push((v, JunctionFeat { at: pr.pos[v], net: wi.net, clear: wi.s }));
+    }
+    // Events in traversal order: (traversal, 0 = turn / 1 = via, point, via index).
+    let mut evs: Vec<(usize, u8, Vec2, usize)> = wi.turns.iter().map(|&(k, v)| (k, 0u8, pr.pos[v], 0)).collect();
+    for (i, &k) in ks.iter().enumerate() {
+        let k = k.min(n);
+        let (pt, ok) = site(wi.tris[k], wi.net, r, wi.s);
+        vias.push((ViaFeat { at: pt, r, net: wi.net, clear: wi.s }, ok));
+        terms.push(pt);
+        evs.push((k, 1, pt, i));
+    }
+    evs.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut cur_layer = first;
+    let mut curve = vec![pr.pos[wi.a]];
+    let mut ck: Vec<usize> = vec![0];
+    let mut pw: Vec<f64> = Vec::new();
+    let mut layer_of_cur: Option<i32> = None;
+    let mut nosite_cur = false;
+    let mut ends_via = [false, false];
+    let mut ei = 0;
+    let mut flush = |curve: &mut Vec<Vec2>, ck: &mut Vec<usize>, pw: &mut Vec<f64>, layer: i32, end: Vec2, k_end: usize, nosite: bool, via_ends: [bool; 2]| {
+        curve.push(end);
+        ck.push(k_end);
+        if layer >= 0 {
+            out.push(Stretch {
+                wire: w,
+                conn,
+                net: wi.net,
+                layer: layer as usize,
+                s: wi.s,
+                w: wi.w,
+                w_floor,
+                curve: std::mem::take(curve),
+                curve_k: std::mem::take(ck),
+                pass_w: std::mem::take(pw),
+                nosite,
+                via_ends,
+                band: Vec::new(),
+                wraps: Vec::new(),
+            });
+        }
+    };
+    for k in 0..=n {
+        while ei < evs.len() && evs[ei].0 == k {
+            let (_, kind, pt, vi) = evs[ei];
+            let layer = layer_of_cur.unwrap_or(cur_layer);
+            let ns = kind == 1 && !vias[vi].1;
+            flush(&mut curve, &mut ck, &mut pw, layer, pt, k, ns || nosite_cur, [ends_via[0], kind == 1]);
+            nosite_cur = ns;
+            ends_via = [kind == 1, false];
+            curve.push(pt);
+            ck.push(k);
+            if kind == 1 {
+                cur_layer = changes.get(vi).map_or(cur_layer, |c| c.1);
+            }
+            layer_of_cur = None;
+            ei += 1;
+        }
+        if k < n {
+            let p = wi.passes[k];
+            curve.push(st.pass_point(p));
+            ck.push(k);
+            pw.push(st.pass_w.get(p).copied().unwrap_or(wi.w));
+            layer_of_cur = Some(lay[k]);
+        }
+    }
+    let layer = layer_of_cur.unwrap_or(cur_layer);
+    flush(&mut curve, &mut ck, &mut pw, layer, pr.pos[wi.b], n, nosite_cur, [ends_via[0], false]);
+    WireRuns { runs: out, vias, junc, terms }
+}
+
 /// The band of a curve in a sheet: corners and wrapped vertices. `Err` when the walk fails.
 #[allow(clippy::type_complexity)]
-fn band(sh: &LayerSheet, curve: &[Vec2]) -> Result<(Vec<Vec2>, Vec<Option<(usize, bool)>>), String> {
+pub fn band(sh: &LayerSheet, curve: &[Vec2]) -> Result<(Vec<Vec2>, Vec<Option<(usize, bool)>>), String> {
     let mut c = curve.to_vec();
     c.dedup();
     if c.len() < 2 {
@@ -444,6 +488,29 @@ fn half_at(sh: &LayerSheet, f: usize, sts: &[Stretch], mine: &[usize]) -> f64 {
 
 fn flows(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], pr: &Projection, st: &State, o: &MeasureOpts) -> Vec<CutFlow> {
     let _ = st;
+    let per = flow_items(sh, sts, mine, 0.0);
+    let mut out = Vec::with_capacity(per.len());
+    for (ci, mut items) in per {
+        items.sort_by(|a, b| a.t.total_cmp(&b.t).then(a.stretch.cmp(&b.stretch)));
+        let c = &sh.cuts[ci];
+        let (bp, bq) = (sh.bound(c.fp), sh.bound(c.fq));
+        let regime = pr.regime_at((c.p + c.q) * 0.5);
+        let cap = c.cap - half_at(sh, c.fp, sts, mine) - half_at(sh, c.fq, sts, mine);
+        let its: Vec<Item> = items.iter().map(|x| Item { net: sts[x.stretch].net, w: x.w, s: sts[x.stretch].s }).collect();
+        let floors: Vec<f64> = items.iter().map(|x| sts[x.stretch].w_floor).collect();
+        let n = needs(regime, &its, &floors, bp, bq, o.pairwise);
+        let alone: Vec<f64> = its.iter().map(|it| cap - need_in(regime, std::slice::from_ref(it), bp, bq)).collect();
+        out.push(CutFlow { cut: ci, items, cap, need: n.need, need_other: n.other, need_floor: n.floor, slack: cap - n.need, alone });
+    }
+    out
+}
+
+/// The flow items of the stretches `mine` on the cuts of sheet `sh` (by cut, unsorted): every
+/// crossing of a cut's open segment by a band, and every wrap of a cut end inside the band's
+/// wrapped wedge. `via_r` > 0: a crossing within `via_r` of a band end that is one of the wire's
+/// own vias is skipped (the via disc, an item of its own, covers it). O(band segments x cuts in
+/// their grid cells + wraps x cuts at the wrapped vertex).
+pub fn flow_items(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], via_r: f64) -> BTreeMap<usize, Vec<FlowItem>> {
     let mut per: BTreeMap<usize, Vec<FlowItem>> = BTreeMap::new();
     let mut buf: Vec<u32> = Vec::new();
     for &si in mine {
@@ -451,6 +518,7 @@ fn flows(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], pr: &Projection, st: 
         if s.band.len() < 2 {
             continue;
         }
+        let ends = [s.band[0], s.band[s.band.len() - 1]];
         for k in 0..s.band.len() - 1 {
             let (a, b) = (s.band[k], s.band[k + 1]);
             let lo = Vec2 { x: a.x.min(b.x), y: a.y.min(b.y) };
@@ -473,6 +541,9 @@ fn flows(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], pr: &Projection, st: 
                     continue;
                 }
                 let x = a + d * sp;
+                if via_r > 0.0 && (0..2).any(|i| s.via_ends[i] && (x - ends[i]).len() < via_r) {
+                    continue;
+                }
                 per.entry(ci as usize).or_default().push(FlowItem { stretch: si, t: tc, kind: 0, w: s.width_at(x) });
             }
         }
@@ -490,29 +561,33 @@ fn flows(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], pr: &Projection, st: 
             }
         }
     }
-    let mut out = Vec::with_capacity(per.len());
-    for (ci, mut items) in per {
-        items.sort_by(|a, b| a.t.total_cmp(&b.t).then(a.stretch.cmp(&b.stretch)));
-        let c = &sh.cuts[ci];
-        let (bp, bq) = (sh.bound(c.fp), sh.bound(c.fq));
-        let regime = pr.regime_at((c.p + c.q) * 0.5);
-        let cap = c.cap - half_at(sh, c.fp, sts, mine) - half_at(sh, c.fq, sts, mine);
-        let its: Vec<Item> = items.iter().map(|x| Item { net: sts[x.stretch].net, w: x.w, s: sts[x.stretch].s }).collect();
-        let smax = its.iter().map(|x| x.s).fold(0.0, f64::max);
-        let cons: Vec<Item> = its.iter().map(|x| Item { s: smax, ..*x }).collect();
-        let pw = need_in(regime, &its, bp, bq);
-        let cv = need_in(regime, &cons, bp, bq);
-        let floor: Vec<Item> = if o.pairwise { its.clone() } else { cons.clone() }
-            .into_iter()
-            .zip(items.iter())
-            .map(|(it, x)| Item { w: it.w.min(sts[x.stretch].w_floor), ..it })
-            .collect();
-        let nf = need_in(regime, &floor, bp, bq);
-        let (need, need_other) = if o.pairwise { (pw, cv) } else { (cv, pw) };
-        let alone: Vec<f64> = its.iter().map(|it| cap - need_in(regime, std::slice::from_ref(it), bp, bq)).collect();
-        out.push(CutFlow { cut: ci, items, cap, need, need_other, need_floor: nf, slack: cap - need, alone });
-    }
-    out
+    per
+}
+
+/// Need of a cut's items (ordered from `p` to `q`) under both mixed-clearance rules and at the
+/// neck floors `floors` (one per item).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Needs {
+    /// With the selected rule (`pairwise` or conservative).
+    pub need: f64,
+    /// With the other rule.
+    pub other: f64,
+    /// With the selected rule, every item at its floor width.
+    pub floor: f64,
+}
+
+/// [`Needs`] of `its` on a cut with ends `bp`, `bq` (and the courtyard `regime`): pairwise is
+/// KiCad's max of the two neighbours' clearances, conservative every different-net gap at the
+/// largest clearance on the cut (the additive territory model). O(items).
+pub fn needs(regime: Option<f64>, its: &[Item], floors: &[f64], bp: Bound, bq: Bound, pairwise: bool) -> Needs {
+    let smax = its.iter().map(|x| x.s).fold(0.0, f64::max);
+    let cons: Vec<Item> = its.iter().map(|x| Item { s: smax, ..*x }).collect();
+    let pw = need_in(regime, its, bp, bq);
+    let cv = need_in(regime, &cons, bp, bq);
+    let floor: Vec<Item> = if pairwise { its.to_vec() } else { cons.clone() }.into_iter().zip(floors.iter()).map(|(it, &f)| Item { w: it.w.min(f), ..it }).collect();
+    let nf = need_in(regime, &floor, bp, bq);
+    let (need, other) = if pairwise { (pw, cv) } else { (cv, pw) };
+    Needs { need, other, floor: nf }
 }
 
 fn bound_txt(b: Bound) -> Value {
