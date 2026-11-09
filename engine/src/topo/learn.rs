@@ -319,12 +319,6 @@ pub struct Sample {
     pub skipped: usize,
 }
 
-impl Sample {
-    pub fn tier(&self, net: i32) -> u8 {
-        self.tier_of_net.get(&net).copied().unwrap_or(3)
-    }
-}
-
 /// The events of every alive wire of a complete `st` that `keep` accepts (see the module doc).
 /// `vias[w]` = vias of wire `w`. O(passes x traversals per triangle).
 pub fn routing_events(st: &State, vias: &[u32], ws0: f64, keep: &dyn Fn(WireId) -> bool) -> Vec<Event> {

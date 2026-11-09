@@ -81,8 +81,6 @@ pub struct LayerObstacles {
     pub walls: Vec<Wall>,
     anchor_grid: Grid<usize>,
     wall_grid: Grid<usize>,
-    /// [`ObstacleSet::query_grow`] of the set this layer belongs to.
-    cell: f64,
 }
 
 impl LayerObstacles {
@@ -100,14 +98,7 @@ impl LayerObstacles {
             walls,
             anchor_grid,
             wall_grid,
-            cell,
         }
-    }
-
-    /// Bound on `rho - r_core` of any obstacle of this layer for any connection (the set's
-    /// [`ObstacleSet::query_grow`]). O(1).
-    pub fn query_grow(&self) -> f64 {
-        self.cell
     }
 }
 
@@ -579,11 +570,6 @@ impl ObstacleSet {
         self.cell
     }
 
-    /// Layer ids present, ascending.
-    pub fn layers(&self) -> Vec<u32> {
-        self.layers.keys().copied().collect()
-    }
-
 
 
     /// Obstacles of `layer` (empty set for an unknown layer).
@@ -624,16 +610,5 @@ impl ObstacleSet {
     pub fn rho_wall(&self, layer: u32, idx: usize, net: i32, width: f64) -> f64 {
         let w = &self.layer(layer).walls[idx];
         w.r_core + self.clearance(net, w.kind, w.net, w.own_clr) + 0.5 * width + self.margin
-    }
-
-    /// Anchors whose core circle (`r_core`) overlaps `bb`; grow `bb` by the largest `rho`
-    /// of interest. Sorted, deduplicated.
-    pub fn query_anchors(&self, layer: u32, bb: Aabb) -> Vec<usize> {
-        self.layer(layer).query_anchors(bb)
-    }
-
-    /// Walls whose core (grown by `r_core`) overlaps `bb`. Sorted, deduplicated.
-    pub fn query_walls(&self, layer: u32, bb: Aabb) -> Vec<usize> {
-        self.layer(layer).query_walls(bb)
     }
 }

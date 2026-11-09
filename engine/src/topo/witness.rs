@@ -882,12 +882,6 @@ pub struct Spots {
 }
 
 impl Spots {
-    pub fn len(&self) -> usize {
-        self.points.len()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.points.is_empty()
-    }
     /// A point within `r` of a reported position, or on a flagged track.
     pub fn near(&self, p: Vec2, r: f64) -> bool {
         self.points.iter().any(|s| (Vec2 { x: s[0], y: s[1] } - p).len() <= r)

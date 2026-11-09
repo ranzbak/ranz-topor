@@ -22,16 +22,10 @@ pub fn via_fallback_used(rules: &Rules, net: i32) -> bool {
         && rules.via_fallback != FACTORY_VIA
 }
 
-/// Via sizes for `net`, largest first, never empty (see [`via_sizes_baked`]); `opts.allowed_drills_nm`
+/// Via sizes for `net`, largest first, never empty (see `sizes_for`); `opts.allowed_drills_nm`
 /// is the drill filter. O(|predefined| + |routing_vias|) plus the sort.
 pub fn via_sizes(rules: &Rules, net: i32, opts: &Options) -> Vec<ViaSize> {
     sizes_for(rules, net, &opts.allowed_drills_nm)
-}
-
-/// [`via_sizes`] with the drill filter baked into `rules.allowed_drills` by `route` (the search
-/// has the rules but not the options).
-pub fn via_sizes_baked(rules: &Rules, net: i32) -> Vec<ViaSize> {
-    sizes_for(rules, net, &rules.allowed_drills)
 }
 
 /// Via sizes for `net`, largest first, never empty, single place of truth (46 row 2):

@@ -99,10 +99,4 @@ impl Orient {
             Orient::Cw => -1.0,
         }
     }
-    pub fn flip(self) -> Orient {
-        match self {
-            Orient::Ccw => Orient::Cw,
-            Orient::Cw => Orient::Ccw,
-        }
-    }
 }

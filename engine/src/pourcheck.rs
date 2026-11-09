@@ -42,8 +42,6 @@ pub const CELL_BUDGET: f64 = 4.0e6;
 /// Stamped-cell budget of one `check_pour_reach` run (all pours): once spent, further capsule
 /// knockouts are skipped (the check turns optimistic and says so in `notes`).
 pub const STAMP_CELL_BUDGET: u64 = 16_000_000;
-/// KiCad `ZONE_CONNECTION` values.
-pub const CONN_NONE: i32 = 0;
 pub const CONN_THERMAL: i32 = 1;
 pub const CONN_FULL: i32 = 2;
 pub const CONN_THT_THERMAL: i32 = 3;
@@ -136,11 +134,6 @@ impl Raster {
     /// Island id of the cell containing `p` (0 outside the fill or the raster).
     pub fn island_at(&self, p: Vec2) -> u32 {
         self.label_at(p)
-    }
-
-    /// Cell size, nm.
-    pub fn res(&self) -> f64 {
-        self.res
     }
 
     /// Centres of the cells of island `l` whose fill depth is at least `min_depth`, on a lattice

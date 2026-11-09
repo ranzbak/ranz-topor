@@ -6,10 +6,9 @@
 //! `stop_reason == "cancel"`. `progress` is a snapshot the run overwrites per iteration and per
 //! pass.
 //!
-//! The low-level searches and relaxations receive a plain `Instant` deadline; to keep their
-//! signatures the cancel flag of the current run is installed in a thread-local on every thread
-//! of the run's private rayon pool ([`install_cancel`]), so concurrent runs in one process never
-//! cancel each other.
+//! Passes that take a plain `Instant` deadline also poll [`cancelled`], a thread-local cancel flag;
+//! nothing installs that flag any more (its installer went with the classic router), so it reads
+//! false and Cancel reaches the core through [`RunControl::is_cancelled`].
 //!
 //! The wall-clock time limit is live ([`TimeLimit`]): the caller may raise or lower it while the run
 //! goes on (the plugin's progress window), and every deadline check of the core reads it through
@@ -238,7 +237,6 @@ impl RunControl {
     }
 
     /// Update the progress; counters only ever grow (high-water marks). O(1).
-    #[allow(dead_code)] // progress hook for the routing core (green field)
     pub(crate) fn update(
         &self,
         phase: &str,
@@ -261,12 +259,6 @@ impl RunControl {
 
 thread_local! {
     static CANCEL: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
-}
-
-/// Install (or clear) the cancel flag polled by [`cancelled`] on the current thread.
-#[allow(dead_code)] // cancel hook for the routing core (green field)
-pub(crate) fn install_cancel(flag: Option<Arc<AtomicBool>>) {
-    CANCEL.with(|c| *c.borrow_mut() = flag);
 }
 
 /// Whether the run of the current thread was cancelled. O(1).

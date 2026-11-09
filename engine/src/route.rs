@@ -1,7 +1,7 @@
 //! `route()` entry point and the result contract with the plugin (`RouteResult`).
 //!
 //! [`route_with`] drops the ignored pads, runs the topological core ([`crate::topo::core`]) and
-//! makes the written copper cleanup-safe ([`crate::topo::tidy`]); [`unrouted`] is the result of a
+//! makes the written copper cleanup-safe ([`crate::topo::tidy`]); `unrouted` is the result of a
 //! board the core cannot route at all (every connection failed with one reason).
 
 use crate::control::RunControl;
@@ -14,9 +14,6 @@ use crate::wires::extract_wires;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
-
-/// Failure reason of every connection while the new core is being built.
-pub const NO_ENGINE: &str = "no routing engine (green field: the TopoR-style core is being rebuilt)";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TermOut {
@@ -424,7 +421,7 @@ pub(crate) fn kicad(p: Vec2) -> [i64; 2] {
 pub(crate) fn term_out(t: &TermRef) -> TermOut {
     TermOut {
         kind: match t.kind {
-            TermKind::Pad(_) | TermKind::Stub { .. } => "pad",
+            TermKind::Pad(_) => "pad",
             TermKind::Via(_) => "via",
             TermKind::Copper(_) => "copper",
             TermKind::Junction => "junction",

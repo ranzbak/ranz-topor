@@ -649,17 +649,6 @@ impl BoardModel {
             .collect()
     }
 
-    /// Nets of the net-tie group the pad belongs to (empty if none).
-    pub fn pad_group_nets(&self, p: &Pad) -> Vec<i32> {
-        let (Some(g), Some(t)) = (
-            p.net_tie_group,
-            self.net_ties.iter().find(|t| t.ref_ == p.ref_),
-        ) else {
-            return Vec::new();
-        };
-        t.nets.get(g).cloned().unwrap_or_default()
-    }
-
     /// The other pads of pad `pi`'s footprint that belong to a net-tie group, when that
     /// footprint is a net tie (KiCad `FOOTPRINT::MapPadNumbersToNetTieGroups` ≥ 0), as indices
     /// into `pads`. Empty for every pad of an ordinary footprint. O(T) for an ordinary
@@ -844,7 +833,7 @@ pub struct Expert {
     pub present_growth: f64,
     /// Candidates the zero-slack retry tries.
     pub zero_slack_candidates: usize,
-    /// Relaxation sweep cap (single source; see [`Options::relax_cap`]).
+    /// Relaxation sweep cap of the classic router (unused).
     pub relax_iter_cap: u32,
     /// Capacity rule (M4-D1, `topor.toml [expert] own_net_capacity`): a pad's own edges charge
     /// no clearance gap for its own net and give the corner radius back, same-net strands
@@ -1439,25 +1428,6 @@ impl Options {
             }
         }
         serde_json::from_value(v).map_err(|e| format!("options json: {e}"))
-    }
-
-    /// Effective relaxation sweep cap: `expert.relax_iter_cap` (the one source of truth; the
-    /// pre-0.5.0 top-level JSON key is folded into it by [`Options::from_json`]). O(1).
-    pub fn relax_cap(&self) -> u32 {
-        self.expert.relax_iter_cap
-    }
-
-    /// Via cost in nm of a via on net `code`: the per-net override, else `via_cost_nm`. O(log n).
-    pub fn via_cost_for(&self, code: i32) -> i64 {
-        self.via_cost_by_code
-            .get(&code)
-            .copied()
-            .unwrap_or(self.via_cost_nm)
-    }
-
-    /// Length factor of the via-reduction acceptance: `1 + reduction_len_slack_pct / 100`.
-    pub fn reduction_len_slack(&self) -> f64 {
-        1.0 + self.reduction_len_slack_pct.max(0.0) / 100.0
     }
 
     /// `threads`, or `available_parallelism() - 1` (min 1) when 0.

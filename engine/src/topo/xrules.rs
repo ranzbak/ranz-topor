@@ -47,16 +47,6 @@ pub enum Kind {
     Unlayerable,
 }
 
-impl Kind {
-    pub fn name(self) -> &'static str {
-        match self {
-            Kind::TerminalClinch => "clinch at a terminal",
-            Kind::DoubleCrossing => "double crossing",
-            Kind::Unlayerable => "crossing that cannot be layered",
-        }
-    }
-}
-
 /// Clinches at terminals (sign 1, generalised to the detour form of Fig. 3a): a wire `w2` of
 /// another net passes through the ring of a terminal pad of `w1` (a triangle touching the pad,
 /// not ending there) and stands in `w1`'s way: it crosses `w1`, or its path cuts `w1`'s straight

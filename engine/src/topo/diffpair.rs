@@ -96,9 +96,6 @@ pub struct Pairs {
 }
 
 impl Pairs {
-    pub fn is_empty(&self) -> bool {
-        self.width.is_empty()
-    }
     pub fn of_lead(&self, ci: usize) -> Option<&Coupled> {
         self.lead.get(&ci).map(|&(k, _)| &self.coupled[k])
     }

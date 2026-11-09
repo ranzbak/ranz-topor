@@ -27,13 +27,6 @@ pub enum TermKind {
     Dangling(String, Option<[f64; 2]>),
     /// Pour-completion target: index into `model.pours`.
     Pour(usize),
-    /// Pad exit stub (A6, [`crate::stubs`]): the connection attaches at the stub end
-    /// (`TermRef.at`, outside the pad) of the stub that starts at `start` inside pad `pad`.
-    Stub {
-        pad: usize,
-        #[serde(serialize_with = "ser_vec2")]
-        start: Vec2,
-    },
     /// A branch point of the net's tree on a routed wire (D5 branching, topological core): the
     /// connection ends on its own net's copper at `TermRef.at`, not at a pad.
     Junction,
@@ -896,11 +889,6 @@ pub fn terminal_of(t: &TermRef) -> crate::wires::Terminal {
         TermKind::Dangling(_, dir) => Terminal::Dangling {
             at: t.at,
             direction: dir.map(|d| Vec2 { x: d[0], y: d[1] }),
-        },
-        TermKind::Stub { start, .. } => Terminal::Stub {
-            pad: *start,
-            end: t.at,
-            layer: t.layers.first().copied().unwrap_or(0),
         },
         // The via lands in the pour: a router via site, assigned by the search (P6).
         TermKind::Pour(_) => Terminal::Site {

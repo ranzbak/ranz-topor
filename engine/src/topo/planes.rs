@@ -1,7 +1,7 @@
 //! Plane nets (plan "Capacity for N layers", plane nets): the pads of a net that has a pour are
 //! not wired to each other; a pad that the pour does not reach gets a short stub: a track alone
 //! into the fill where the pour fills a layer the pad has copper on (D6b), else a track and a
-//! through via into the pour's layer, at a via site (a spot where [`Checker::via_fits`]-style tests pass:
+//! through via into the pour's layer, at a via site (a spot where via-fit tests of the [`crate::check::Checker`] pass:
 //! the via checked as a foreign item against the board and all copper accepted so far). They are
 //! placed once per route on the static board, before any topology (D6a), and enter the
 //! projection as obstacles ([`extras`]): the planner routes around them instead of the drawing

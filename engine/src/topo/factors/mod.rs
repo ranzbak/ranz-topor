@@ -41,7 +41,7 @@ mod violation;
 pub use branch::junction_psi;
 pub use necking::necking_amount;
 pub use squeeze::squeeze_amount;
-pub use violation::{violation_amount, AREA_REF_MM2};
+pub use violation::violation_amount;
 
 use super::demand::Item;
 use super::state::{interleave, EdgeId, ObsId, State, TriId, Wire, WireId};

@@ -1,5 +1,5 @@
 //! The `route()` entry of the topological core (two or more signal layers): plane stubs placed once
-//! on the static board, then `[optimize] runs` seeded runs of whole-route cycles ([`route_round`]):
+//! on the static board, then `[optimize] runs` seeded runs of whole-route cycles (`route_round`):
 //! decomposition (diff pairs planned as one wire) -> projection (`board`) -> P2 initial routing
 //! (`init`, net trees, widest first) -> P3 layer assignment (`layers`, Polubasov, capacity
 //! refinement) -> crossing rules and P4 negotiated rip-up and reroute (optional moves) -> drawing
@@ -3410,12 +3410,6 @@ fn criteria(model: &BoardModel, dec: &crate::decompose::Decomposition, a: &Assem
 /// `(connection id, via centre)` of every routed plane connection (for the island check).
 fn out_vias(out: &[Outcome], reqs: &[planes::Req], _conns: &[Connection]) -> Vec<(usize, Vec2)> {
     reqs.iter().filter(|r| out[r.conn].routed).filter_map(|r| out[r.conn].vias.first().map(|v| (r.conn, v.0))).collect()
-}
-
-/// Unused import guard for the via size lookup used by the plane stage.
-#[allow(dead_code)]
-fn _sizes(model: &BoardModel, opts: &Options, net: i32) -> Vec<crate::vias::ViaSize> {
-    via_sizes(&model.rules, net, opts)
 }
 
 #[cfg(test)]
