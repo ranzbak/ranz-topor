@@ -17,6 +17,7 @@
 
 use super::factors::squeeze_amount;
 use super::pack::{infl_dir, layer_items, wire_discs, Disc, PackItem, Packer};
+use super::cutmodel::CutPrice;
 use super::state::{State, WireId};
 use crate::geom::Vec2;
 
@@ -136,12 +137,31 @@ pub struct CapModel<'a> {
     sq: Vec<f64>,
     /// Undo log of `cost` / `sq` entries while a move is tried.
     log: Option<Vec<(usize, f64, f64)>>,
+    /// P1a (`[capacity] model = "cuts"`, [`super::cutmodel`]): the over-full price of the
+    /// per-layer cuts replaces the per-edge price `cost` (still kept, for the reports and the P4
+    /// rip-up); `None` = the per-edge model.
+    pub cut: Option<CutPrice<'a>>,
+    /// Cut model: the events of every wire as last applied, and the wires applied since the
+    /// last repricing.
+    evs: Vec<Vec<LEv>>,
+    pending: Vec<WireId>,
 }
 
 impl<'a> CapModel<'a> {
     /// The model of the labelling `evl` (events per wire). O(passes x margin lookups + vias x
     /// interval length x layers).
     pub fn new(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64) -> Self {
+        Self::build(st, packer, dirs, evl, bottom, price, false)
+    }
+
+    /// As [`CapModel::new`], priced by the per-layer cuts when `[capacity] model = "cuts"`
+    /// ([`Packer::cuts`]; the P3 refinement). A sheet build that fails is recorded in
+    /// [`super::cutmodel::CutCtx::problems`] and the model stays per-edge.
+    pub fn new_cut(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64) -> Self {
+        Self::build(st, packer, dirs, evl, bottom, price, true)
+    }
+
+    fn build(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64, cuts: bool) -> Self {
         let nl = st.proj.n_layers;
         let nw = st.wires.len();
         let mut pass_k = vec![0; st.passes.len()];
@@ -166,7 +186,19 @@ impl<'a> CapModel<'a> {
             cost: vec![0.0; st.proj.edges.len() * nl],
             sq: vec![0.0; st.proj.edges.len() * nl],
             log: None,
+            cut: None,
+            evs: Vec::new(),
+            pending: Vec::new(),
         };
+        if let Some(ctx) = packer.cuts.as_ref().filter(|_| cuts) {
+            match ctx.sheets(st) {
+                Ok(sh) => {
+                    m.cut = Some(CutPrice::new(st.proj, sh, ctx.o, price, nw));
+                    m.evs = vec![Vec::new(); nw];
+                }
+                Err(e) => ctx.problems.borrow_mut().push(e),
+            }
+        }
         for (w, ev) in evl.iter().enumerate().take(nw) {
             if st.wires[w].alive {
                 let iv = via_intervals(ev);
@@ -180,6 +212,7 @@ impl<'a> CapModel<'a> {
                 (m.cost[e * nl + l], m.sq[e * nl + l]) = m.eval(e, l);
             }
         }
+        m.flush();
         for (w, ev) in evl.iter().enumerate().take(nw) {
             if st.wires[w].alive && !m.via_iv[w].is_empty() {
                 let all: Vec<usize> = (0..m.via_iv[w].len()).collect();
@@ -269,7 +302,37 @@ impl<'a> CapModel<'a> {
         let nr = self.need_r(w);
         self.nosite[w] = if nr > 0.0 { ks.iter().filter(|&&k| self.rank(w, k).0).count() } else { 0 };
         self.via_k[w] = ks;
+        if self.cut.is_some() {
+            self.evs[w] = ev.to_vec();
+            self.pending.push(w);
+        }
         changed
+    }
+
+    /// Weight of the per-edge overflow price in the total: 0 when the cut model prices (the
+    /// per-edge cost is then only kept for the reports).
+    fn edge_w(&self) -> f64 {
+        if self.cut.is_some() {
+            0.0
+        } else {
+            1.0
+        }
+    }
+
+    /// Cut model: price the wires applied since the last call again; returns the change of the
+    /// cut price. O(runs of those wires, see [`CutPrice::set_wire`]).
+    fn flush(&mut self) -> f64 {
+        let Some(mut cut) = self.cut.take() else { return 0.0 };
+        let mut ws = std::mem::take(&mut self.pending);
+        ws.sort_unstable();
+        ws.dedup();
+        let mut d = 0.0;
+        for w in ws {
+            let (mut runs, vias) = cut.runs_of(self.st, self.packer, w, &self.evs[w], &self.via_k[w], self.bottom);
+            d += cut.set_wire(w, &mut runs, &vias);
+        }
+        self.cut = Some(cut);
+        d
     }
 
     /// Price again the edge-layers of the passes `changed`; returns the change of the total.
@@ -286,13 +349,13 @@ impl<'a> CapModel<'a> {
                     if let Some(log) = self.log.as_mut() {
                         log.push((i, self.cost[i], self.sq[i]));
                     }
-                    delta += (c - self.cost[i]) + (q - self.sq[i]);
+                    delta += self.edge_w() * (c - self.cost[i]) + (q - self.sq[i]);
                     self.cost[i] = c;
                     self.sq[i] = q;
                 }
             }
         }
-        delta
+        delta + self.flush()
     }
 
     /// Move the vias `which` of `w` through their intervals (one sweep each, in order) to the
@@ -390,7 +453,8 @@ impl<'a> CapModel<'a> {
     /// Total overflow price of the labelling (mm), vias without a site and via squeeze
     /// included.
     pub fn total(&self) -> f64 {
-        self.cost.iter().sum::<f64>() + self.sq.iter().sum::<f64>() + self.price * self.nosite.iter().sum::<usize>() as f64
+        let cut = self.cut.as_ref().map_or(0.0, |c| c.total());
+        self.edge_w() * self.cost.iter().sum::<f64>() + self.sq.iter().sum::<f64>() + self.price * self.nosite.iter().sum::<usize>() as f64 + cut
     }
 
     /// Via squeeze price of the labelling (mm).
@@ -398,9 +462,13 @@ impl<'a> CapModel<'a> {
         self.sq.iter().sum()
     }
 
-    /// Over-full edge-layers plus vias without a site.
+    /// Over-full edge-layers (cut model: over-full cuts) plus vias without a site.
     pub fn overfull(&self) -> usize {
-        self.cost.iter().filter(|&&c| c > 0.0).count() + self.nosite.iter().sum::<usize>()
+        let over = match self.cut.as_ref() {
+            Some(c) => c.overfull(),
+            None => self.cost.iter().filter(|&&c| c > 0.0).count(),
+        };
+        over + self.nosite.iter().sum::<usize>()
     }
 
     /// The over-full `(edge, layer)` pairs, ascending.
@@ -444,59 +512,47 @@ pub fn refine(
     p: &RefineParams,
 ) -> RefineStats {
     // Switched off: the model is built with a unit price only to count the over-full edge-layers.
-    let mut cm = CapModel::new(st, packer, dirs, evl, bottom, if p.overflow_mm > 0.0 { p.overflow_mm } else { 1.0 });
+    let mut cm = CapModel::new_cut(st, packer, dirs, evl, bottom, if p.overflow_mm > 0.0 { p.overflow_mm } else { 1.0 });
     let mut stats = RefineStats { before: cm.overfull(), ..RefineStats::default() };
     if p.overflow_mm <= 0.0 {
         stats.after = stats.before;
         return stats;
     }
+    // The cut model may add vias when its setting says so (`[capacity] cut_vias`).
+    let add_vias = p.add_vias || (cm.cut.is_some() && packer.cuts.as_ref().is_some_and(|c| c.add_vias));
     let mut evals = 0usize;
+    let ctx = Around { st, mask, partner, bottom, trans, unary, add_vias, max_evals: p.max_evals };
     for _sweep in 0..8 {
         let mut improved = false;
-        for (e, l) in cm.overfull_list() {
-            if cm.cost[e * cm.nl + l] <= 0.0 {
-                continue;
-            }
-            let passes: Vec<usize> = st.edge_order[e].iter().copied().filter(|&q| cm.pass_layer[q] == l as i32).collect();
-            for pid in passes {
-                if evals >= p.max_evals || cm.cost[e * cm.nl + l] <= 0.0 {
-                    break;
+        if cm.cut.is_some() {
+            // Cut model: the wires of every over-full cut, most over-full first.
+            let list = cm.cut.as_ref().map(|c| c.overfull_list()).unwrap_or_default();
+            for (l, ci, _) in list {
+                let mut seen = std::collections::BTreeSet::new();
+                let its: Vec<(WireId, usize)> = cm.cut.as_ref().map(|c| c.items_at(l, ci)).unwrap_or_default().into_iter().filter(|x| seen.insert(*x)).collect();
+                for (w, k) in its {
+                    if evals >= p.max_evals || !cm.cut.as_ref().is_some_and(|c| c.is_over(l, ci)) {
+                        break;
+                    }
+                    if !st.wires[w].alive {
+                        continue;
+                    }
+                    improved |= ctx.moves_around(&mut cm, evl, w, k, &mut evals, &mut stats);
                 }
-                let w = st.passes[pid].wire;
-                let k = st.wires[w].passes.iter().position(|&x| x == pid).expect("pass of its wire");
-                // The events around the pass (position (k, 1.0)): two before, two after.
-                let j1 = evl[w].iter().take_while(|x| x.0 < k || (x.0 == k && x.1 <= 1.0)).count();
-                let lo = j1.saturating_sub(2);
-                let hi = (j1 + 2).min(evl[w].len());
-                for i in lo..hi {
-                    let cur = evl[w][i].2;
-                    let mut moves: Vec<Vec<((WireId, usize), i32)>> = Vec::new();
-                    if let Some((w2, i2)) = partner[w][i] {
-                        let c2 = evl[w2][i2].2;
-                        if c2 != cur && (mask[w][i] >> c2) & 1 == 1 && (mask[w2][i2] >> cur) & 1 == 1 {
-                            moves.push(vec![((w, i), c2), ((w2, i2), cur)]);
-                        }
+            }
+        } else {
+            for (e, l) in cm.overfull_list() {
+                if cm.cost[e * cm.nl + l] <= 0.0 {
+                    continue;
+                }
+                let passes: Vec<usize> = st.edge_order[e].iter().copied().filter(|&q| cm.pass_layer[q] == l as i32).collect();
+                for pid in passes {
+                    if evals >= p.max_evals || cm.cost[e * cm.nl + l] <= 0.0 {
+                        break;
                     }
-                    for nl in 0..cm.nl as i32 {
-                        if nl == cur || (mask[w][i] >> nl) & 1 == 0 {
-                            continue;
-                        }
-                        if partner[w][i].is_some_and(|(w2, i2)| evl[w2][i2].2 == nl) {
-                            continue;
-                        }
-                        moves.push(vec![((w, i), nl)]);
-                    }
-                    for mv in moves {
-                        if evals >= p.max_evals {
-                            break;
-                        }
-                        evals += 1;
-                        if try_move(st, &mut cm, evl, &mv, bottom, trans, unary, p.add_vias, false) {
-                            stats.moves += 1;
-                            improved = true;
-                            break;
-                        }
-                    }
+                    let w = st.passes[pid].wire;
+                    let k = st.wires[w].passes.iter().position(|&x| x == pid).expect("pass of its wire");
+                    improved |= ctx.moves_around(&mut cm, evl, w, k, &mut evals, &mut stats);
                 }
             }
         }
@@ -506,6 +562,63 @@ pub fn refine(
     }
     stats.after = cm.overfull();
     stats
+}
+
+/// The fixed inputs of the P3 moves around one pass.
+struct Around<'r> {
+    st: &'r State<'r>,
+    mask: &'r [Vec<u64>],
+    partner: &'r [Vec<Option<(WireId, usize)>>],
+    bottom: i32,
+    trans: &'r dyn Fn(usize, usize) -> f64,
+    unary: &'r dyn Fn(WireId, usize, usize) -> f64,
+    add_vias: bool,
+    max_evals: usize,
+}
+
+impl Around<'_> {
+    /// Try the label moves of the events around traversal `k` of wire `w` (two before, two
+    /// after): the swap with the crossing partner and every other allowed layer; the first move
+    /// that lowers the price is kept per event. Returns whether one was kept.
+    fn moves_around(&self, cm: &mut CapModel, evl: &mut [Vec<LEv>], w: WireId, k: usize, evals: &mut usize, stats: &mut RefineStats) -> bool {
+        let (mask, partner) = (self.mask, self.partner);
+        let mut improved = false;
+        // The events around the pass (position (k, 1.0)): two before, two after.
+        let j1 = evl[w].iter().take_while(|x| x.0 < k || (x.0 == k && x.1 <= 1.0)).count();
+        let lo = j1.saturating_sub(2);
+        let hi = (j1 + 2).min(evl[w].len());
+        for i in lo..hi {
+            let cur = evl[w][i].2;
+            let mut moves: Vec<Vec<((WireId, usize), i32)>> = Vec::new();
+            if let Some((w2, i2)) = partner[w][i] {
+                let c2 = evl[w2][i2].2;
+                if c2 != cur && (mask[w][i] >> c2) & 1 == 1 && (mask[w2][i2] >> cur) & 1 == 1 {
+                    moves.push(vec![((w, i), c2), ((w2, i2), cur)]);
+                }
+            }
+            for nl in 0..cm.nl as i32 {
+                if nl == cur || (mask[w][i] >> nl) & 1 == 0 {
+                    continue;
+                }
+                if partner[w][i].is_some_and(|(w2, i2)| evl[w2][i2].2 == nl) {
+                    continue;
+                }
+                moves.push(vec![((w, i), nl)]);
+            }
+            for mv in moves {
+                if *evals >= self.max_evals {
+                    break;
+                }
+                *evals += 1;
+                if try_move(self.st, cm, evl, &mv, self.bottom, self.trans, self.unary, self.add_vias, false) {
+                    stats.moves += 1;
+                    improved = true;
+                    break;
+                }
+            }
+        }
+        improved
+    }
 }
 
 /// Apply `mv` (label changes) and keep it when the total price drops, else undo. `strict`: also
@@ -554,6 +667,11 @@ pub fn try_move(
         })
         .collect();
     let old_ns: usize = wires.iter().map(|&w| cm.nosite[w]).sum();
+    let old_evs: Vec<Vec<LEv>> = if cm.cut.is_some() { wires.iter().map(|&w| cm.evs[w].clone()).collect() } else { Vec::new() };
+    let cut0 = cm.cut.as_mut().map(|c| {
+        c.begin();
+        c.total()
+    });
     cm.log = Some(Vec::new());
     for &w in &wires {
         cm.relayout(w, &evl[w]);
@@ -565,10 +683,28 @@ pub fn try_move(
         before.entry(i).or_insert((c, q));
     }
     let new_ns: usize = wires.iter().map(|&w| cm.nosite[w]).sum();
-    let d_oc: f64 = before.iter().map(|(&i, &(c, q))| (cm.cost[i] - c) + (cm.sq[i] - q)).sum::<f64>() + cm.price * (new_ns as f64 - old_ns as f64);
-    let worse_somewhere = strict && (new_ns > old_ns || before.iter().any(|(&i, &(c, _))| cm.cost[i] > c + EPS));
+    let ew = cm.edge_w();
+    let d_cut = match (cm.cut.as_ref(), cut0) {
+        (Some(c), Some(t0)) => c.total() - t0,
+        _ => 0.0,
+    };
+    let d_oc: f64 = before.iter().map(|(&i, &(c, q))| ew * (cm.cost[i] - c) + (cm.sq[i] - q)).sum::<f64>() + cm.price * (new_ns as f64 - old_ns as f64) + d_cut;
+    let worse_edge = match cm.cut.as_ref() {
+        Some(c) => c.worse_somewhere(),
+        None => before.iter().any(|(&i, &(c, _))| cm.cost[i] > c + EPS),
+    };
+    let worse_somewhere = strict && (new_ns > old_ns || worse_edge);
     if (new_wc - old_wc) + d_oc < -EPS && (add_vias || new_wc <= old_wc + EPS) && !worse_somewhere {
+        if let Some(c) = cm.cut.as_mut() {
+            c.commit();
+        }
         return true;
+    }
+    if let Some(c) = cm.cut.as_mut() {
+        c.rollback();
+        for (&w, e) in wires.iter().zip(old_evs) {
+            cm.evs[w] = e;
+        }
     }
     for (&i, &(c, q)) in &before {
         cm.cost[i] = c;

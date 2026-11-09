@@ -357,11 +357,13 @@ pub struct CutCtx {
     cache: RefCell<SheetCache>,
     /// Sheet builds and cache hits (report).
     pub builds: RefCell<(usize, usize)>,
+    /// Sheet builds that failed (the capacity model of that plan fell back to the per-edge one).
+    pub problems: RefCell<Vec<String>>,
 }
 
 impl CutCtx {
     pub fn new(o: CutOpts, add_vias: bool, outline: Vec<(Vec2, Vec2)>) -> CutCtx {
-        CutCtx { o, add_vias, outline, cache: RefCell::new(None), builds: RefCell::new((0, 0)) }
+        CutCtx { o, add_vias, outline, cache: RefCell::new(None), builds: RefCell::new((0, 0)), problems: RefCell::new(Vec::new()) }
     }
 
     /// The static sheets of `st` (cached while its junction points stay).
@@ -428,6 +430,18 @@ pub struct CutPrice<'a> {
     buf: Vec<u32>,
     /// Via site points per (triangle, net, r, s) ([`super::cutflow::via_point`]).
     sites: RefCell<SiteCache>,
+}
+
+/// One row of [`CutPrice::report`].
+#[derive(Clone, Debug)]
+pub struct CutRow {
+    pub layer: usize,
+    pub p: Vec2,
+    pub q: Vec2,
+    pub cap: f64,
+    pub need: f64,
+    pub slack: f64,
+    pub wires: Vec<WireId>,
 }
 
 impl<'a> CutPrice<'a> {
@@ -652,6 +666,23 @@ impl<'a> CutPrice<'a> {
     /// The (wire, traversal) of every item of cut `ci` on layer `l` (vias and runs).
     pub fn items_at(&self, l: usize, ci: usize) -> Vec<(WireId, usize)> {
         self.cuts[l][ci].items.iter().map(|x| (x.wire, x.k)).collect()
+    }
+
+    /// Every cut that carries items: `(layer, p, q, capacity, need, slack, wires)` (nm, engine
+    /// frame), most over-full first (the plan report and the review pictures).
+    pub fn report(&self) -> Vec<CutRow> {
+        let mut v: Vec<CutRow> = Vec::new();
+        for (l, cs) in self.cuts.iter().enumerate() {
+            for (ci, c) in cs.iter().enumerate().filter(|(_, c)| !c.items.is_empty()) {
+                let cut = &self.sheets[l].cuts[ci];
+                let mut ws: Vec<WireId> = c.items.iter().map(|x| x.wire).collect();
+                ws.sort_unstable();
+                ws.dedup();
+                v.push(CutRow { layer: l, p: cut.p, q: cut.q, cap: c.cap, need: c.need, slack: c.slack, wires: ws });
+            }
+        }
+        v.sort_by(|a, b| a.slack.total_cmp(&b.slack).then(a.layer.cmp(&b.layer)));
+        v
     }
 
     /// Capacity, need and slack of a cut (nm).

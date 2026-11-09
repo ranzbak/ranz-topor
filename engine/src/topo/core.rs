@@ -1655,6 +1655,35 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             "dropped_unlayerable": dropped.len(),
             "topo_length_mm": (topo_len / MM * 1e3).round() / 1e3,
         });
+        let mut m = m;
+        // `[capacity] model = "cuts"`: the per-layer cuts of the plan (the authority there).
+        if packer.cuts.is_some() {
+            let cmc = CapModel::new_cut(&st, &packer, &dirs_plan, &lr.events, bottom, 1.0);
+            if let Some(c) = cmc.cut.as_ref() {
+                let rows = c.report();
+                let over: Vec<&super::cutmodel::CutRow> = rows.iter().filter(|r| r.slack < -super::cutmodel::OVER_TOL).collect();
+                m["overfull_cuts"] = serde_json::json!(over.len());
+                m["cut_overflow_mm"] = serde_json::json!((over.iter().map(|r| -r.slack).sum::<f64>() / MM * 1e4).round() / 1e4);
+                if let Ok(path) = std::env::var("TOPO_CUTS") {
+                    let nm = |x: f64| (x / MM * 1e4).round() / 1e4;
+                    let js: Vec<serde_json::Value> = rows
+                        .iter()
+                        .map(|r| {
+                            let nets: Vec<i32> = r.wires.iter().map(|&w| st.wires[w].net).collect();
+                            serde_json::json!({"layer": r.layer, "p": [nm(r.p.x), nm(-r.p.y)], "q": [nm(r.q.x), nm(-r.q.y)], "cap": nm(r.cap), "need": nm(r.need), "slack": nm(r.slack), "nets": nets})
+                        })
+                        .collect();
+                    let _ = std::fs::write(format!("{path}.r{round}.json"), serde_json::to_string(&js).unwrap_or_default());
+                }
+            }
+            if let Some(ctx) = packer.cuts.as_ref() {
+                let (b, h) = *ctx.builds.borrow();
+                m["cut_sheets"] = serde_json::json!({"builds": b, "hits": h, "problems": ctx.problems.borrow().len()});
+                for e in ctx.problems.borrow().iter().take(3) {
+                    warnings.push(format!("capacity model \"cuts\": a sheet build failed, that plan was priced per edge: {e}"));
+                }
+            }
+        }
         warnings.push(format!("plan metrics: {m}"));
         if opts.stop_after == "plan" {
             let mut r = unrouted(model_real, opts, "not drawn: [run] stop_after = \"plan\" ends each run after the plan of its first cycle");

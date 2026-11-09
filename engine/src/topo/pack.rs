@@ -209,6 +209,9 @@ pub struct Packer<'a> {
     /// M-45: the drawing is octilinear; a pass's oblique factor is the octilinear one
     /// ([`super::demand::octi_stretch`]).
     pub octi: bool,
+    /// P1a (`[capacity] model = "cuts"`): the planner's capacity price is the per-layer cut
+    /// test ([`super::cutmodel`]) instead of this packer's per-edge packing.
+    pub cuts: Option<super::cutmodel::CutCtx>,
 }
 
 /// The oblique-chord factor of a pass through edge `e` crossed in direction `d`: `1 / sin` of
@@ -307,6 +310,7 @@ impl<'a> Packer<'a> {
             via_squeeze: 0.0,
             reserve_sites: false,
             octi: false,
+            cuts: None,
         }
     }
 
@@ -362,6 +366,9 @@ impl<'a> Packer<'a> {
         p.via_d = model.nets.iter().map(|n| (n.code, first(n.code))).collect();
         p.reserve_sites = opts.reserve_via_sites;
         p.octi = opts.draw_style == "octilinear" && opts.octi_room;
+        if opts.capacity_model == "cuts" {
+            p.cuts = Some(super::cutmodel::CutCtx::new(super::cutmodel::CutOpts::from_options(opts), opts.cut_vias, p.outline.clone()));
+        }
         p
     }
 
