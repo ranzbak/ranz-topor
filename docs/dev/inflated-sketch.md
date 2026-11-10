@@ -330,7 +330,8 @@ Duncan et al. "fat edges".
 3. **Flow is projection passes, not rubber-band crossings.** `edge_order` counts every pass of the projection path
    (`state.rs:524-525`).
    - A stretch on layer l that winds around another layer's vertex (or a free Steiner vertex, `board.rs:425-430`,
-     `steiner_mm = 2.0`) crosses cuts it would not cross as a per-layer rubber band.
+     `steiner_mm = 2.0`; since shopping list 4.2 the router's projection has the grid only with
+     `[search] steiner = true`) crosses cuts it would not cross as a per-layer rubber band.
    - Maley's entanglement is the *minimum* crossing number (p. 32). The rubber band achieves it (inferred: geodesics
      in the universal cover of the plane minus the features meet a straight cut at most once per lift; Maley
      computes congestion from the RBE for this reason, p. 40).

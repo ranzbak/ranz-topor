@@ -174,7 +174,7 @@ def test_default_options_lists_every_field(engine, root):
                            "zero_slack_candidates": 4, "relax_iter_cap": 200,
                            "own_net_capacity": True, "wall_aware_capacity": True, "transit_pinch": True,
                            "steiner_min_angle_deg": 60.0, "steiner_len_slack": 1.1, "steiner_ghost_factor": 1.0}
-    assert d["steiner"] is True
+    assert d["steiner"] is False  # 4.2: the Steiner grid of the projection, default off
     assert d["zero_slack_failed"] is True
     # every key parses back as options (round trip)
     m = _model_with_track()

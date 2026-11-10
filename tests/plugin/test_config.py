@@ -99,7 +99,8 @@ def test_engine_options_units(tmp_path):
     # settings not available yet are not sent; removed ones (CL cleanup) are gone
     assert "dangling_ends" not in o
     assert not {"expert", "threads", "partial_routes", "pathfinder_iter_cap", "patience", "min_gain_pct",
-                "via_cost_nm", "rip_pass", "continue_rounds", "steiner", "exit_stubs"} & set(o)
+                "via_cost_nm", "rip_pass", "continue_rounds", "exit_stubs"} & set(o)
+    assert o["steiner"] is False  # 4.2: the Steiner grid is an option again, default off
     c0 = cfg.with_values({("run", "timeout_s"): 0})
     assert c0.engine_options()["wall_clock_s"] == 0.0
     assert isinstance(c0.engine_options()["wall_clock_s"], float)

@@ -2,6 +2,10 @@
 //! for other nets), the board outline, Steiner points in open areas (so gap midpoints are a fair
 //! length estimate), and the pad-to-pad connections (MST per net on pad centres).
 //!
+//! The router's projection (`core`, shopping list 4.2) is built once per call from the fixed
+//! items and has no Steiner grid unless `[search] steiner` is on (`BuildOpts::steiner_mm` = 0);
+//! the R0 gate and the witnesses keep the default grid.
+//!
 //! Complexity: O(pads · hull) for the polygons, O(grid · obstacles) for the Steiner points,
 //! O(k²) per net for the MST.
 

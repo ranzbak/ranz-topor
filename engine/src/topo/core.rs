@@ -747,8 +747,10 @@ pub fn probe(model: &BoardModel, opts: &Options) -> Probe {
     out
 }
 
+/// The projection's build options of a route: `[search] steiner` adds the Steiner grid (4.2).
 fn build_opts(opts: &Options) -> BuildOpts {
-    BuildOpts { existing_vias: true, keepouts: true, plane_layers: opts.plane_signals != "forbidden", copper_shapes: true, ..BuildOpts::default() }
+    let d = BuildOpts::default();
+    BuildOpts { steiner_mm: if opts.steiner { d.steiner_mm } else { 0.0 }, existing_vias: true, keepouts: true, plane_layers: opts.plane_signals != "forbidden", copper_shapes: true, ..d }
 }
 
 /// The plane stubs of a route, placed once on the static board before any topology (D6a): the
@@ -3619,8 +3621,8 @@ mod tests {
         // cycle can change it). Building it again gives exactly the same projection and
         // decomposition: one build per call gives each cycle what a rebuild per cycle gave.
         let m = eprom();
-        for cap in ["edges", "cuts"] {
-            let opts = Options { capacity_model: cap.into(), ..Options::default() };
+        for (cap, steiner) in [("edges", false), ("cuts", false), ("edges", true), ("cuts", true)] {
+            let opts = Options { capacity_model: cap.into(), steiner, ..Options::default() };
             let stubs = PlaneStubs::default();
             let (a, b) = (Fixed::build(&m, &opts, &stubs), Fixed::build(&m, &opts, &stubs));
             assert!(a.board.is_ok(), "{cap}: {:?}", a.board.as_ref().err());
@@ -3628,6 +3630,23 @@ mod tests {
             assert_eq!(format!("{:?}", a.dec), format!("{:?}", b.dec), "{cap}");
             assert_eq!(a.notes, b.notes, "{cap}");
         }
+    }
+
+    #[test]
+    fn steiner_grid_is_an_option_default_off() {
+        // 4.2: by default the projection's vertices are the fixed items (TopoR, Polubasov 2010);
+        // `[search] steiner` adds the free grid points (junction candidates of a Y).
+        assert!(!Options::default().steiner);
+        let m = eprom();
+        let free = |steiner: bool| {
+            let fx = Fixed::build(&m, &Options { steiner, ..Options::default() }, &PlaneStubs::default());
+            let b = fx.board.expect("projection");
+            (b.proj.vkind.iter().filter(|k| matches!(k, VertKind::Free)).count(), b.proj.pos.len())
+        };
+        let ((f_off, n_off), (f_on, n_on)) = (free(false), free(true));
+        assert!(f_on > f_off + 50 && n_on - n_off == f_on - f_off, "grid on {f_on}/{n_on}, off {f_off}/{n_off}");
+        assert_eq!(build_opts(&Options::default()).steiner_mm, 0.0);
+        assert_eq!(build_opts(&Options { steiner: true, ..Options::default() }).steiner_mm, BuildOpts::default().steiner_mm);
     }
 
     #[test]

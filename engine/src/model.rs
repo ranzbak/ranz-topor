@@ -926,6 +926,14 @@ pub struct Options {
     /// (T-junction) on one of their routed traces, so the net's tree follows the routing;
     /// `"fixed"` = pad to pad as the decomposition planned (no branch points).
     pub net_tree: String,
+    /// Topological core (shopping list 4.2, `topor.toml [search] steiner`): free points on a 2 mm
+    /// grid in the open areas of the projection (Steiner points: junction candidates for a branch
+    /// point on a trace, and extra triangulation vertices). `false` (default) = the projection's
+    /// vertices are the fixed items only (pads, vias, keepouts, copper graphics, outline, cuts), as
+    /// TopoR builds it (Polubasov 2010); a net's tree then joins pad to pad or through a pad
+    /// already on a trace of its net (TopoR 5.0 black-box E3b: pad-to-pad trees, no free Steiner
+    /// points).
+    pub steiner: bool,
     /// Topological core (D6b, `topor.toml [search] crossing_vias`): `"crossing"` (default) = a
     /// crossing of two nets costs the `crossing` factor, which stands for the layer change P3
     /// makes; only a crossing no layer assignment separates (both wires held to one layer in its
@@ -1140,6 +1148,7 @@ impl Default for Options {
             stitch_islands: true,
             cleanup_safe: true,
             net_tree: "free".into(),
+            steiner: false,
             crossing_vias: "crossing".into(),
             junction_pad_mm: 0.0,
             fuse_branches: true,
