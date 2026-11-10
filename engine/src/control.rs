@@ -77,6 +77,74 @@ pub struct Progress {
     /// M-B1 never drop: rule violations of the best result's written copper.
     #[serde(default)]
     pub best_violations: usize,
+    /// Score of the best result in the pick order (`[optimize] pick`, `Objective::better`): errors
+    /// (open connections plus connections with violations), open connections, shrinkages, and the
+    /// round (cycle, 1-based) of its run it came from. The best is exactly what the final pick
+    /// takes now: the best over the runs' picks, ties to the lower run.
+    #[serde(default)]
+    pub best_errors: usize,
+    #[serde(default)]
+    pub best_open: usize,
+    #[serde(default)]
+    pub best_shrinkages: usize,
+    #[serde(default)]
+    pub best_round: u32,
+    /// The round judged last (any run): run and round (1-based; 0 = none yet) and the criteria the
+    /// variant table judges it by (the better of its variants, as drawn and after the via
+    /// reduction, with the pour stitching counted).
+    #[serde(default)]
+    pub last_run: u32,
+    #[serde(default)]
+    pub last_round: u32,
+    #[serde(default)]
+    pub last_errors: usize,
+    #[serde(default)]
+    pub last_open: usize,
+    #[serde(default)]
+    pub last_violations: usize,
+    #[serde(default)]
+    pub last_vias: usize,
+    #[serde(default)]
+    pub last_length_mm: f64,
+    #[serde(default)]
+    pub last_shrinkages: usize,
+    #[serde(default)]
+    pub last_routed: usize,
+    /// The last round against the best: `"new best"` (it is the best now; `last_decider` /
+    /// `last_delta` against the best before it, none for the first), `"tie"` (the same score as the
+    /// best before it, and the best now: ties go to the lower run, as in the final pick), `"worse"`,
+    /// `"same"` (the same score: the earlier result stays) or `"better"` (better, but the variant
+    /// table did not keep it); `""` before the first round.
+    #[serde(default)]
+    pub last_vs_best: String,
+    /// The criterion that decides (`Objective::decider`: `"errors"`, `"open"`, `"vias"`,
+    /// `"length"`, `"shrinkages"`, `"score"`, `"area"`; `""` = none) and last minus best on it
+    /// (count, mm or mm²).
+    #[serde(default)]
+    pub last_decider: String,
+    #[serde(default)]
+    pub last_delta: f64,
+    /// Rounds that ended so far over all runs (judged or not), and the log lines of the last
+    /// [`ROUND_LINES`] of them (line `i` is round number `rounds_ended - len + i + 1`): the run
+    /// flow writes each one once to log.txt.
+    #[serde(default)]
+    pub rounds_ended: u32,
+    #[serde(default)]
+    pub round_lines: Vec<String>,
+}
+
+/// Round lines [`Progress`] keeps (the run flow polls every 0.25 s; a round takes longer).
+pub const ROUND_LINES: usize = 32;
+
+impl Progress {
+    /// Note an ended round's log line (the last [`ROUND_LINES`] stay). O(ROUND_LINES).
+    pub(crate) fn push_round_line(&mut self, line: String) {
+        self.rounds_ended += 1;
+        if self.round_lines.len() >= ROUND_LINES {
+            self.round_lines.remove(0);
+        }
+        self.round_lines.push(line);
+    }
 }
 
 /// The wall-clock time limit of a run, changeable while it runs: nanoseconds since `start` in one

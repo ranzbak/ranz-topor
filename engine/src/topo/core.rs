@@ -361,8 +361,34 @@ struct RunState {
     stable: bool,
     done: bool,
     gain: Option<f64>,
-    /// Best so far: criteria, routed, total.
-    best: Option<(Criteria, usize, usize)>,
+    /// Best so far: criteria, routed, total and the round (cycle) it came from.
+    best: Option<RunBest>,
+}
+
+/// The pick of a run's variant table so far ([`RunState::best`]).
+#[derive(Clone, Copy, Debug)]
+struct RunBest {
+    crit: Criteria,
+    routed: usize,
+    total: usize,
+    cycle: usize,
+}
+
+/// A round as the variant table judged it: the better of its variants (as drawn, after the via
+/// reduction), with the pour stitching counted; `as_drawn`: that one is the variant as drawn.
+#[derive(Clone, Copy, Debug)]
+struct Judged {
+    crit: Criteria,
+    routed: usize,
+    total: usize,
+    as_drawn: bool,
+}
+
+/// How a round ended for the score display and the per-round log line ([`Coord::ended`]).
+enum RoundEnd<'s> {
+    Judged(Judged),
+    /// Not judged, why (cut short, Cancel / OK came first, ...).
+    NotJudged(&'s str),
 }
 
 impl<'a> Coord<'a> {
@@ -425,36 +451,122 @@ impl<'a> Coord<'a> {
         });
     }
 
+    /// The run whose pick is the call's best now: the best by the objective over the runs' picks,
+    /// ties to the lower run (what [`route_topo`] picks at the end). O(runs).
+    fn best_of(&self, s: &[RunState]) -> Option<usize> {
+        let mut bi: Option<usize> = None;
+        for (i, r) in s.iter().enumerate() {
+            if let Some(b) = &r.best {
+                if bi.is_none_or(|j| self.obj.better(&b.crit, &s[j].best.as_ref().expect("best").crit)) {
+                    bi = Some(i);
+                }
+            }
+        }
+        bi
+    }
+
     /// Run `k` ended a cycle (or the run, `done`); publish the M-B0 progress over all runs.
     fn report(&self, k: usize, upd: impl FnOnce(&mut RunState)) {
+        self.ended(k, upd, None);
+    }
+
+    /// [`Coord::report`], and for `round = Some((cycle, end))` run `k`'s round `cycle` ended: its
+    /// score against the best goes to the progress (`last_*`) and its line to the round log
+    /// ([`Progress::push_round_line`]). One lock for both, so the best it is compared with is the
+    /// best before and after this very round. O(runs) + the line.
+    fn ended(&self, k: usize, upd: impl FnOnce(&mut RunState), round: Option<(usize, RoundEnd)>) {
         let Ok(mut s) = self.st.lock() else { return };
+        let before = self.best_of(&s).map(|i| (i, s[i].best.expect("best")));
         upd(&mut s[k]);
         let n = s.len();
         let stable_n = s.iter().filter(|r| r.stable).count();
         let settled = s.iter().all(|r| r.stable || r.done);
         let gain = s.iter().filter(|r| !r.done).map(|r| r.gain).try_fold(None::<f64>, |acc, g| g.map(|g| Some(acc.map_or(g, |a: f64| a.max(g)))));
-        let mut bi: Option<usize> = None;
-        for (i, r) in s.iter().enumerate() {
-            if let Some((c, _, _)) = &r.best {
-                if bi.is_none_or(|j| self.obj.better(c, &s[j].best.as_ref().expect("best").0)) {
-                    bi = Some(i);
-                }
+        let bi = self.best_of(&s).map(|i| (i, s[i].best.expect("best")));
+        let at = |i: usize, cycle: usize| format!("run {}, round {cycle}", i + 1);
+        // The round against the best: (verdict, decider and delta, the best compared with).
+        let round = round.map(|(cycle, end)| match end {
+            RoundEnd::NotJudged(why) => (cycle, None, format!("{}: not judged ({why})", at(k, cycle))),
+            RoundEnd::Judged(j) => {
+                let is_best = bi.is_some_and(|(i, b)| i == k && b.cycle == cycle);
+                let reference = if is_best { before } else { bi };
+                let dec = reference.and_then(|(_, b)| self.obj.decider(&j.crit, &b.crit));
+                let vs = if is_best && reference.is_some() && dec.is_none() {
+                    "tie"
+                } else if is_best {
+                    "new best"
+                } else if dec.is_none() {
+                    "same"
+                } else if dec.is_some_and(|(_, d)| d < 0.0) {
+                    "better"
+                } else {
+                    "worse"
+                };
+                let c = &j.crit;
+                let delta = |(name, d): (&str, f64)| match name {
+                    "length" => format!("length {:+.3} m", d / 1000.0),
+                    "score" => format!("weighted score {d:+.1} mm"),
+                    "area" => format!("area {d:+.1} mm²"),
+                    _ => format!("{name} {d:+.0}"),
+                };
+                let against = match (reference, dec) {
+                    (None, _) => "new best (the first result)".to_string(),
+                    (Some((i, b)), None) if is_best => format!("the best now: the same score as {}, and ties go to the lower run", at(i, b.cycle)),
+                    (Some((i, b)), None) => format!("same score as the best ({}): the earlier one stays", at(i, b.cycle)),
+                    (Some((i, b)), Some(d)) if is_best => format!("new best: {} against {}", delta(d), at(i, b.cycle)),
+                    (Some((i, b)), Some(d)) if vs == "better" => format!("better than the best ({}): {}, but the variant table did not keep it", at(i, b.cycle), delta(d)),
+                    (Some((i, b)), Some(d)) => format!("worse than the best ({}): {}", at(i, b.cycle), delta(d)),
+                };
+                let line = format!(
+                    "{}: errors {}, open {}, vias {}, length {:.3} m, shrinkages {}; rule violations {}, routed {} of {}{}: {against}",
+                    at(k, cycle),
+                    c.errors,
+                    c.open,
+                    c.vias,
+                    c.length_mm / 1000.0,
+                    c.shrinkages,
+                    c.violations,
+                    j.routed,
+                    j.total,
+                    if j.as_drawn { " (as drawn, before the via reduction)" } else { "" },
+                );
+                (cycle, Some((j, vs, dec)), line)
             }
-        }
+        });
         self.ctl.with_progress(|p| {
             p.runs = n as u32;
             p.runs_stable = stable_n as u32;
             p.runs_done = s.iter().filter(|r| r.done).count() as u32;
             p.stable = settled && stable_n > 0;
             p.gain_pct = gain.flatten();
-            if let Some(i) = bi {
-                let (c, routed, total) = s[i].best.expect("best");
-                p.best_routed = routed;
-                p.best_total = total;
-                p.best_length_mm = c.length_mm;
-                p.best_vias = c.vias;
+            if let Some((i, b)) = bi {
+                p.best_routed = b.routed;
+                p.best_total = b.total;
+                p.best_length_mm = b.crit.length_mm;
+                p.best_vias = b.crit.vias;
                 p.best_run = i as u32 + 1;
-                p.best_violations = c.violations;
+                p.best_violations = b.crit.violations;
+                p.best_errors = b.crit.errors;
+                p.best_open = b.crit.open;
+                p.best_shrinkages = b.crit.shrinkages;
+                p.best_round = b.cycle as u32;
+            }
+            if let Some((cycle, judged, line)) = round {
+                if let Some((j, vs, dec)) = judged {
+                    p.last_run = k as u32 + 1;
+                    p.last_round = cycle as u32;
+                    p.last_errors = j.crit.errors;
+                    p.last_open = j.crit.open;
+                    p.last_violations = j.crit.violations;
+                    p.last_vias = j.crit.vias;
+                    p.last_length_mm = j.crit.length_mm;
+                    p.last_shrinkages = j.crit.shrinkages;
+                    p.last_routed = j.routed;
+                    p.last_vs_best = vs.to_string();
+                    p.last_decider = dec.map_or(String::new(), |d| d.0.to_string());
+                    p.last_delta = dec.map_or(0.0, |d| d.1);
+                }
+                p.push_round_line(line);
             }
         });
     }
@@ -469,13 +581,20 @@ fn run_seed(seed: u64, k: usize) -> u64 {
     }
 }
 
+/// A drawn result in a run's variant table, with the round (cycle) it came from.
+#[derive(Clone, Debug)]
+struct Drawn {
+    cycle: usize,
+    result: RouteResult,
+}
+
 /// One run of a best-of-N call while it iterates: its archive, schedule, stable meter, drawing
 /// feedback and negotiation memory. A cycle ([`Run::step`]) depends only on this state, so the
 /// run's result does not depend on how the cycles of the runs are interleaved on the threads.
 struct Run {
     k: usize,
     seed: u64,
-    arch: Archive<RouteResult>,
+    arch: Archive<Drawn>,
     sched: super::schedule::Schedule,
     meter: super::schedule::Meter,
     /// Drawing feedback (plan S2c item 4): the rooms the drawing found too small, lowered by what
@@ -576,11 +695,12 @@ impl Run {
         // cycles that finished before; the stitching of a big board takes seconds.
         let judged_elsewhere = if interrupted { !self.arch.items.is_empty() || coord.has_result(false) } else { coord.has_result(true) };
         if ro.skipped || ctl.is_cancelled() && judged_elsewhere {
+            let why = if ro.skipped { "its TopoR loop pick not drawn: another run's is" } else { "Cancel / OK came first" };
             self.notes.push(if ro.skipped { format!("{cycle}: its TopoR loop pick not drawn (another run's is)") } else { format!("{cycle}: not judged (Cancel / OK came first)") });
             self.time_hit = self.stable_at.is_none();
             self.done = true;
             self.busy_s += t.elapsed().as_secs_f64();
-            coord.report(self.k, |r| r.done = true);
+            coord.ended(self.k, |r| r.done = true, Some((cycle, RoundEnd::NotJudged(why))));
             return;
         }
         // cancel-fix: after Cancel / OK the cut-short cycles of the runs are stitched one at a time
@@ -594,7 +714,7 @@ impl Run {
                 self.time_hit = self.stable_at.is_none();
                 self.done = true;
                 self.busy_s += t.elapsed().as_secs_f64();
-                coord.report(self.k, |r| r.done = true);
+                coord.ended(self.k, |r| r.done = true, Some((cycle, RoundEnd::NotJudged("cut short by Cancel / OK, not better than a round another run judged"))));
                 return;
             }
             if let Some(j) = g.as_mut() {
@@ -603,6 +723,13 @@ impl Run {
             g
         } else {
             None
+        };
+        // The round's score: the better of the variants it offered (`None`: none offered).
+        let mut judged: Option<Judged> = None;
+        let mut note_judged = |crit: Criteria, routed: usize, as_drawn: bool| {
+            if judged.is_none_or(|j| obj.better(&crit, &j.crit)) {
+                judged = Some(Judged { crit, routed, total, as_drawn });
+            }
         };
         if !interrupted || self.arch.items.is_empty() {
             // Pour stitching (D4) on each variant before it is judged: a pour piece the copper cut
@@ -626,18 +753,20 @@ impl Run {
             if let Some((c, r)) = pre.filter(|_| !cancel_cut) {
                 let (r, c) = stitched(r, c);
                 if !cut() || empty {
-                    self.arch.offer(Variant { label: format!("round {cycle} as drawn"), crit: c, payload: r }, &obj);
+                    note_judged(c, r.routed, true);
+                    self.arch.offer(Variant { label: format!("round {cycle} as drawn"), crit: c, payload: Drawn { cycle, result: r } }, &obj);
                 }
             }
             let (r, c) = stitched(result, crit);
             (cyc_err, cyc_viol) = (c.errors, c.violations);
             if !cut() || self.arch.items.is_empty() {
-                self.arch.offer(Variant { label: format!("round {cycle}"), crit: c, payload: r }, &obj);
+                note_judged(c, r.routed, false);
+                self.arch.offer(Variant { label: format!("round {cycle}"), crit: c, payload: Drawn { cycle, result: r } }, &obj);
             }
         }
         let pick = self.arch.pick(&obj).expect("a cycle was offered");
         let pc = self.arch.items[pick].crit;
-        coord.publish(pc, !self.arch.items[pick].payload.timed_out);
+        coord.publish(pc, !self.arch.items[pick].payload.result.timed_out);
         // Soft cuts (M-B2, Haas 2026 §VI-E: "every hard cut so far becomes a soft cost"): a cycle
         // worse than the best so far turns the lowered rooms into a price on their passages (edge
         // history, which fades like the rest), so they no longer forbid what the plan needs.
@@ -659,7 +788,7 @@ impl Run {
         if self.meter.stable() && self.stable_at.is_none() {
             self.stable_at = Some(cycle);
         }
-        let best_routed = self.arch.items[pick].payload.routed;
+        let (best_routed, best_cycle) = (self.arch.items[pick].payload.result.routed, self.arch.items[pick].payload.cycle);
         let gain = self.meter.gain_pct();
         self.notes.push(format!(
             "{cycle}: w {width:.3}, routed {routed}, errors {cyc_err} ({cyc_viol} violations){}{}",
@@ -667,11 +796,20 @@ impl Run {
             gain.map(|g| format!(", gain {g:.2} %")).unwrap_or_default()
         ));
         let stable = self.stable_at.is_some();
-        coord.report(self.k, |r| {
-            r.stable = stable;
-            r.gain = gain;
-            r.best = Some((pc, best_routed, total));
-        });
+        let end = match judged {
+            Some(j) => RoundEnd::Judged(j),
+            None if interrupted => RoundEnd::NotJudged("cut short by the time limit or Cancel / OK"),
+            None => RoundEnd::NotJudged("its pour stitching was cut short by the time limit"),
+        };
+        coord.ended(
+            self.k,
+            |r| {
+                r.stable = stable;
+                r.gain = gain;
+                r.best = Some(RunBest { crit: pc, routed: best_routed, total, cycle: best_cycle });
+            },
+            Some((cycle, end)),
+        );
         self.busy_s += t.elapsed().as_secs_f64();
         if std::env::var_os("TOPO_TIMES").is_some() {
             eprintln!("[topo run {} cycle {cycle}] cycle: {:.3} s", self.k + 1, t.elapsed().as_secs_f64());
@@ -718,7 +856,7 @@ impl Run {
             return Err((self.k, self.notes.join("; ")));
         };
         let crit = self.arch.items[pick].crit;
-        let mut best = self.arch.items[pick].payload.clone();
+        let mut best = self.arch.items[pick].payload.result.clone();
         best.variants = self.arch.table(Some(pick));
         best.warnings.push(format!("{} ({} offered)", table_text(&best.variants, &obj), self.arch.offered));
         let run = if opts.runs.max(1) == 1 { String::new() } else { format!("run {} ", self.k + 1) };
@@ -4533,5 +4671,72 @@ mod tests {
         m.rules.diff_pairs.push(crate::model::DiffPairRule { p: 1, n: 2, ..Default::default() });
         m.rules.diff_pairs.push(crate::model::DiffPairRule { p: 3, n: 4, ..Default::default() });
         assert_eq!(diff_pair_nets(&m).into_iter().collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+    }
+
+    /// The score display: every ended round publishes its criteria (`last_*`) against the best,
+    /// and the best (`best_*`) is the pick of [`Objective::better`] over the runs' picks, ties to
+    /// the lower run, exactly what [`route_topo`] picks at the end.
+    #[test]
+    fn progress_carries_the_last_round_and_the_best_in_the_pick_order() {
+        let ctl = RunControl::new();
+        let obj = Objective::from_options("length_vias", 25.0, "errors_vias_length");
+        let coord = Coord::new(&ctl, 2, obj);
+        let crit = |errors: usize, open: usize, vias: usize, length_mm: f64| Criteria { errors, open, violations: errors - open, vias, length_mm, shrinkages: 1, ..Criteria::default() };
+        let round = |k: usize, cycle: usize, c: Criteria, best: Criteria, best_cycle: usize| {
+            let j = Judged { crit: c, routed: 20 - c.open, total: 20, as_drawn: false };
+            coord.ended(k, |r| r.best = Some(RunBest { crit: best, routed: 20 - best.open, total: 20, cycle: best_cycle }), Some((cycle, RoundEnd::Judged(j))));
+            ctl.snapshot()
+        };
+        // Run 1, round 1: the first result is the best.
+        let a = crit(3, 0, 166, 7380.0);
+        let p = round(0, 1, a, a, 1);
+        assert_eq!((p.last_run, p.last_round, p.last_errors, p.last_open, p.last_vias, p.last_shrinkages), (1, 1, 3, 0, 166, 1));
+        assert_eq!(p.last_vs_best, "new best");
+        assert_eq!((p.last_decider.as_str(), p.last_delta), ("", 0.0), "the first result has nothing to beat");
+        assert_eq!((p.best_run, p.best_round, p.best_errors, p.best_open, p.best_vias, p.best_violations), (1, 1, 3, 0, 166, 3));
+        // Run 2, round 1: fewer vias but more errors: worse, on errors (the first criterion).
+        let b = crit(5, 0, 150, 7000.0);
+        let p = round(1, 1, b, b, 1);
+        assert_eq!((p.last_run, p.last_round, p.last_vs_best.as_str(), p.last_decider.as_str(), p.last_delta), (2, 1, "worse", "errors", 2.0));
+        assert_eq!((p.best_run, p.best_round, p.best_errors), (1, 1, 3), "fewer vias do not outweigh errors");
+        // Run 1, round 2: worse on vias; its run keeps round 1.
+        let p = round(0, 2, crit(3, 0, 168, 7300.0), a, 1);
+        assert_eq!((p.last_vs_best.as_str(), p.last_decider.as_str(), p.last_delta), ("worse", "vias", 2.0));
+        assert_eq!((p.best_run, p.best_round), (1, 1));
+        // Run 2, round 2: the same score as run 1's best: the lower run stays the best.
+        let p = round(1, 2, a, a, 2);
+        assert_eq!((p.last_vs_best.as_str(), p.last_decider.as_str()), ("same", ""));
+        assert_eq!((p.best_run, p.best_round), (1, 1), "ties go to the lower run");
+        // Run 2, round 3: shorter at the same errors, open and vias: the new best, against run 1.
+        let c = crit(3, 0, 166, 7350.0);
+        let p = round(1, 3, c, c, 3);
+        assert_eq!((p.last_vs_best.as_str(), p.last_decider.as_str()), ("new best", "length"));
+        assert!((p.last_delta + 30.0).abs() < 1e-9, "{}", p.last_delta);
+        assert_eq!((p.best_run, p.best_round, p.best_length_mm), (2, 3, 7350.0));
+        // A round not judged: a line, the last judged round stays on show.
+        coord.ended(0, |r| r.done = true, Some((3, RoundEnd::NotJudged("cut short by the time limit or Cancel / OK"))));
+        let p = ctl.snapshot();
+        assert_eq!((p.last_run, p.last_round), (2, 3));
+        assert_eq!(p.rounds_ended, 6);
+        assert_eq!(p.round_lines.len(), 6);
+        assert_eq!(p.round_lines[0], "run 1, round 1: errors 3, open 0, vias 166, length 7.380 m, shrinkages 1; rule violations 3, routed 20 of 20: new best (the first result)");
+        assert!(p.round_lines[1].ends_with(": worse than the best (run 1, round 1): errors +2"), "{}", p.round_lines[1]);
+        assert!(p.round_lines[2].ends_with(": worse than the best (run 1, round 1): vias +2"), "{}", p.round_lines[2]);
+        assert!(p.round_lines[3].ends_with(": same score as the best (run 1, round 1): the earlier one stays"), "{}", p.round_lines[3]);
+        assert!(p.round_lines[4].ends_with(": new best: length -0.030 m against run 1, round 1"), "{}", p.round_lines[4]);
+        assert_eq!(p.round_lines[5], "run 1, round 3: not judged (cut short by the time limit or Cancel / OK)");
+        // Only the last ROUND_LINES lines stay; the count goes on.
+        for i in 0..crate::control::ROUND_LINES {
+            coord.ended(1, |_| {}, Some((10 + i, RoundEnd::NotJudged("test"))));
+        }
+        let p = ctl.snapshot();
+        assert_eq!((p.rounds_ended as usize, p.round_lines.len()), (6 + crate::control::ROUND_LINES, crate::control::ROUND_LINES));
+        assert!(p.round_lines[0].starts_with("run 2, round 10:"), "{}", p.round_lines[0]);
+        // Run 1, round 4: the same score as the best of run 2: run 1 is the best now (ties go to the
+        // lower run, as in the final pick), which the verdict says.
+        let p = round(0, 4, c, c, 4);
+        assert_eq!((p.last_vs_best.as_str(), p.last_decider.as_str()), ("tie", ""));
+        assert_eq!((p.best_run, p.best_round), (1, 4));
+        assert!(p.round_lines.last().expect("line").ends_with(": the best now: the same score as run 2, round 3, and ties go to the lower run"), "{:?}", p.round_lines.last());
     }
 }

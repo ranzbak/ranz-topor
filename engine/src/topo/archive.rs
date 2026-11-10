@@ -131,6 +131,35 @@ impl Objective {
             || a.errors == b.errors
                 && (self.value(a) < self.value(b) - 1e-9 || (self.value(a) - self.value(b)).abs() <= 1e-9 && a.shrinkages < b.shrinkages)
     }
+    /// The criterion on which [`Objective::better`] decides between `a` and `b`, in the pick
+    /// order, with `a` minus `b` on it (`a` is better exactly when that is negative); `None` when
+    /// they score the same. Names: `"errors"`, `"open"`, `"vias"`, `"length"` (mm),
+    /// `"shrinkages"`, and for the other picks `"score"` (`errors_weighted`: length +
+    /// mm_per_via x vias + the violation price, mm) or `"area"` (mm² + the violation price).
+    /// The progress dialog and the per-round log line say with it why a round is not the best. O(1).
+    pub fn decider(&self, a: &Criteria, b: &Criteria) -> Option<(&'static str, f64)> {
+        let d = |x: usize, y: usize| x as f64 - y as f64;
+        if a.errors != b.errors {
+            return Some(("errors", d(a.errors, b.errors)));
+        }
+        if let Objective::ErrorsViasLength { .. } = self {
+            if a.open != b.open {
+                return Some(("open", d(a.open, b.open)));
+            }
+            if a.vias != b.vias {
+                return Some(("vias", d(a.vias, b.vias)));
+            }
+            if (a.length_mm - b.length_mm).abs() > 1e-9 {
+                return Some(("length", a.length_mm - b.length_mm));
+            }
+        } else {
+            let dv = self.value(a) - self.value(b);
+            if dv.abs() > 1e-9 {
+                return Some((if matches!(self, Objective::Area) { "area" } else { "score" }, dv));
+            }
+        }
+        (a.shrinkages != b.shrinkages).then(|| ("shrinkages", d(a.shrinkages, b.shrinkages)))
+    }
 }
 
 /// One archived variant: a label, its criteria and the result it stands for.
@@ -431,5 +460,43 @@ mod tests {
         assert_eq!(a2.items.len(), 5);
         assert_eq!(a2.items[a2.pick(&n).unwrap()].label, "v3", "fewest vias within the fewest errors");
         assert_eq!(a2.items[a2.pick(&w).unwrap()].label, "v1", "old pick: least length + 25 mm per via");
+    }
+
+    #[test]
+    fn decider_names_the_criterion_better_decides_on() {
+        let n = Objective::from_options("length_vias", 25.0, "errors_vias_length");
+        let w = Objective::from_options("length_vias", 25.0, "errors_weighted");
+        let base = Criteria { errors: 3, open: 1, violations: 2, vias: 166, length_mm: 7380.0, shrinkages: 4, ..Criteria::default() };
+        assert_eq!(n.decider(&base, &base), None, "the same score: no decider");
+        let worse = Criteria { errors: 5, open: 0, vias: 160, ..base };
+        assert_eq!(n.decider(&worse, &base), Some(("errors", 2.0)));
+        assert_eq!(n.decider(&Criteria { open: 0, violations: 3, ..base }, &base), Some(("open", -1.0)));
+        assert_eq!(n.decider(&Criteria { vias: 168, length_mm: 1.0, ..base }, &base), Some(("vias", 2.0)));
+        let (dn, dl) = n.decider(&Criteria { length_mm: 7410.0, ..base }, &base).expect("length differs");
+        assert!(dn == "length" && (dl - 30.0).abs() < 1e-9);
+        assert_eq!(n.decider(&Criteria { shrinkages: 1, ..base }, &base), Some(("shrinkages", -3.0)));
+        assert_eq!(w.decider(&Criteria { vias: 167, ..base }, &base), Some(("score", 25.0)));
+        assert_eq!(Objective::Area.decider(&Criteria { area_mm2: 2.0, ..base }, &base), Some(("area", 2.0)));
+        // The sign of the decider agrees with `better` for every pick, on a grid of criteria.
+        let mut grid = Vec::new();
+        for errors in 0..3 {
+            for open in 0..=errors.min(1) {
+                for vias in [10, 11] {
+                    for length_mm in [100.0, 100.0 + 1e-12, 125.0] {
+                        for shrinkages in 0..2 {
+                            grid.push(Criteria { errors, open, vias, length_mm, shrinkages, area_mm2: length_mm * 0.4, ..Criteria::default() });
+                        }
+                    }
+                }
+            }
+        }
+        for obj in [n, w, Objective::Area] {
+            for a in &grid {
+                for b in &grid {
+                    assert_eq!(obj.better(a, b), obj.decider(a, b).is_some_and(|(_, d)| d < 0.0), "{obj:?} {a:?} {b:?}");
+                    assert_eq!(obj.decider(a, b).is_none(), !obj.better(a, b) && !obj.better(b, a), "{obj:?} {a:?} {b:?}");
+                }
+            }
+        }
     }
 }

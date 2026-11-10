@@ -116,3 +116,34 @@ fn a_dialog_run_finishes_by_itself_after_stable() {
     let n: usize = line.split(": ").nth(1).and_then(|s| s.split(' ').next()).and_then(|s| s.parse().ok()).expect("cycle count");
     assert!(n < 100, "finished by itself, not at the cap: {line}");
 }
+
+/// The score display (user 2026-11-11: "see the current score, and the best score in the UI"):
+/// every round of every run ends with a line and its criteria in the progress, and the progress's
+/// best at the end is the board the call returns; in the cycles mode and in the TopoR loop.
+#[test]
+fn progress_scores_every_round_and_its_best_is_the_result() {
+    for (mode, extra) in [("cycles", ""), ("topor", r#", "opt_loop": "topor", "topo_rounds": 3"#)] {
+        let m = eprom();
+        let o = opts(&format!(r#"{{"runs": 2, "wall_clock_s": 120.0{extra}}}"#));
+        let ctl = RunControl::new();
+        let r = route_with(&m, &o, &ctl);
+        let p = ctl.snapshot();
+        assert!(p.rounds_ended >= 2, "{mode}: {p:?}");
+        assert_eq!(p.round_lines.len(), p.rounds_ended as usize, "{mode}: every line kept (fewer than ROUND_LINES)");
+        for run in 1..=2 {
+            let n = p.round_lines.iter().filter(|l| l.starts_with(&format!("run {run}, round "))).count();
+            assert!(n >= 1, "{mode}: run {run} has round lines: {:?}", p.round_lines);
+            if mode == "topor" {
+                assert_eq!(n, 1, "{mode}: one round per run: {:?}", p.round_lines);
+            }
+        }
+        assert!(p.round_lines[0].contains("new best (the first result)"), "{mode}: {}", p.round_lines[0]);
+        assert!(p.last_run >= 1 && p.last_round >= 1 && !p.last_vs_best.is_empty(), "{mode}: {p:?}");
+        // The best shown is the board returned.
+        assert!(p.best_run >= 1 && p.best_round >= 1, "{mode}: {p:?}");
+        assert_eq!((p.best_routed, p.best_vias), (r.routed, r.vias), "{mode}");
+        assert_eq!(p.best_open, r.connections_total - r.routed, "{mode}");
+        let picked = r.warnings.iter().find(|w| w.starts_with("best of 2 seeded runs")).expect("best-of line");
+        assert!(picked.contains(&format!("run {} picked", p.best_run)), "{mode}: {picked}");
+    }
+}
