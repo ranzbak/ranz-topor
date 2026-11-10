@@ -46,7 +46,7 @@ use super::demand::{Bound, Item};
 use super::pack::Packer;
 use super::refine::LEv;
 use super::sheet::{FeatKind, JunctionFeat, LayerSheet, Norm, SheetInput, SheetOpts};
-use super::state::{Projection, State, VertId, VertKind, WireId, NO_OBS};
+use super::state::{point_in_poly, Projection, State, VertId, VertKind, WireId, NO_OBS};
 use crate::geom::Vec2;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -324,6 +324,139 @@ pub fn static_sheets(st: &State, outline: &[(Vec2, Vec2)], o: &CutOpts) -> Resul
     (0..pr.n_layers)
         .map(|l| {
             let inp = SheetInput { proj: pr, outline, vias: &[], junctions: &jl, terminals: &terms };
+            LayerSheet::build(&inp, l, &o.sheet)
+        })
+        .collect()
+}
+
+/// Shopping list 2.3 (P1b in P2 and the per-edge layer masks, `[capacity] model = "cuts"`): the
+/// per-layer room of the projection edges that the shared projection leaves unbounded, from the
+/// layer's sheet. Returns `(edge, layer, room)` for every edge-layer whose room changes.
+///
+/// The per-edge model (`state.rs` `Projection::build`) gives an edge the length between its
+/// ends on a layer where both ends are copper or a wall, and *no bound* where an end is another
+/// layer's obstacle, a free (Steiner) vertex or a node (design §3.2 item 1). Here such an end
+/// does not bound the gap on layer `l`: the edge's line goes on past it to the first side of a
+/// layer-`l` feature (pad, drilled wall, keepout, board edge; [`LayerSheet::ray_hit`]), so the
+/// edge stands for the layer-`l` gap `p' q'` between the features `F1`, `F2` it meets. Its room is
+/// the smaller of `|p' q'|` (Euclidean, as the per-edge room of two blocking ends) and the
+/// capacity of every critical cut of the sheet that joins the same two features and crosses
+/// `p' q'` (the same gap measured where it is narrowest: a wire through `p' q'` that does not end
+/// inside the region between the two must cross such a cut too; Maley 1987 p. 40). A cut that
+/// only touches an end of `p' q'` is not counted: it leaves sideways and bounds another gap. Where the gap
+/// runs inside a keepout of the layer (a feature without a net), the layer is closed: room 0.
+/// Edges with both ends blocking, along one obstacle, or ending at a pad centre (inside its own
+/// pad) keep their room. A ray that meets nothing (no outline) keeps the edge unbounded.
+///
+/// O(edges x layers x (ray march + cuts in the gap's box)).
+pub fn sheet_room(pr: &Projection, sheets: &[LayerSheet]) -> Vec<(usize, usize, f64)> {
+    let mut out = Vec::new();
+    let mut buf: Vec<u32> = Vec::new();
+    for sh in sheets {
+        let l = sh.l;
+        let of_obs: HashMap<usize, usize> = sh.feats.iter().enumerate().filter_map(|(i, f)| if let FeatKind::Obstacle(o) = f.kind { Some((o, i)) } else { None }).collect();
+        // Keepouts of the layer (features without a net): a gap inside one is closed.
+        let keep: Vec<usize> = sh.feats.iter().enumerate().filter(|(_, f)| matches!(f.kind, FeatKind::Obstacle(o) if pr.obstacles[o].net.is_none() && !pr.obstacles[o].drilled)).map(|(i, _)| i).collect();
+        let (mut lo, mut hi) = (Vec2 { x: f64::INFINITY, y: f64::INFINITY }, Vec2 { x: f64::NEG_INFINITY, y: f64::NEG_INFINITY });
+        for &p in &pr.pos {
+            lo = Vec2 { x: lo.x.min(p.x), y: lo.y.min(p.y) };
+            hi = Vec2 { x: hi.x.max(p.x), y: hi.y.max(p.y) };
+        }
+        for (a, b) in &sh.outline {
+            for p in [a, b] {
+                lo = Vec2 { x: lo.x.min(p.x), y: lo.y.min(p.y) };
+                hi = Vec2 { x: hi.x.max(p.x), y: hi.y.max(p.y) };
+            }
+        }
+        let reach = (hi - lo).len() + 1.0;
+        // Some(Some(f)): the end blocks on the layer as feature f; Some(None): it does not
+        // block; None: a pad centre, or a blocking end without a feature (left alone).
+        let feat_of = |v: VertId| -> Option<Option<usize>> {
+            match pr.vkind[v] {
+                VertKind::Outline(o) if pr.obstacles[o].drilled || pr.obstacles[o].layers.has(l) => of_obs.get(&o).map(|&f| Some(f)),
+                VertKind::Edge => sh.edge_feat.map(Some),
+                VertKind::Centre(_) => None,
+                _ => Some(None),
+            }
+        };
+        for (e, &[p, q]) in pr.edges.iter().enumerate() {
+            if !pr.room[e][l].is_infinite() {
+                continue;
+            }
+            if matches!((pr.vkind[p], pr.vkind[q]), (VertKind::Outline(a), VertKind::Outline(b)) if a == b) {
+                continue;
+            }
+            let (Some(fp), Some(fq)) = (feat_of(p), feat_of(q)) else { continue };
+            let (pp, pq) = (pr.pos[p], pr.pos[q]);
+            let len = (pq - pp).len();
+            if len <= 0.0 {
+                continue;
+            }
+            let dir = (pq - pp) * (1.0 / len);
+            let mut end = |at: Vec2, f: Option<usize>, d: Vec2| -> Option<(Vec2, Option<usize>)> {
+                match f {
+                    Some(f) => Some((at, Some(f))),
+                    None => sh.ray_hit(at, d, reach, &mut buf).map(|(t, f)| (at + d * t, Some(f))),
+                }
+            };
+            let (Some((a, f1)), Some((b, f2))) = (end(pp, fp, dir * -1.0), end(pq, fq, dir)) else { continue };
+            let mid = (a + b) * 0.5;
+            let closed = keep.iter().any(|&k| point_in_poly(mid, &sh.feats[k].poly));
+            let mut room = if closed { 0.0 } else { (b - a).len() };
+            if let (Some(f1), Some(f2), false) = (f1, f2, closed) {
+                if f1 != f2 {
+                    let lo = Vec2 { x: a.x.min(b.x), y: a.y.min(b.y) };
+                    let hi = Vec2 { x: a.x.max(b.x), y: a.y.max(b.y) };
+                    sh.cut_grid.query(lo, hi, &mut buf);
+                    for &ci in buf.iter() {
+                        let c = &sh.cuts[ci as usize];
+                        if ((c.fp, c.fq) == (f1, f2) || (c.fp, c.fq) == (f2, f1)) && cut_meets_gap(c.p, c.q, a, b) {
+                            room = room.min(c.cap);
+                        }
+                    }
+                }
+            }
+            out.push((e, l, room));
+        }
+    }
+    out
+}
+
+/// Whether the cut `c d` meets the gap `a b` away from the gap's ends: it crosses it, or lies
+/// along it (a cut that only touches an end of the gap leaves it sideways and bounds another
+/// gap). 1 nm tolerance. O(1).
+fn cut_meets_gap(c: Vec2, d: Vec2, a: Vec2, b: Vec2) -> bool {
+    const TOL: f64 = 1.0;
+    let u = b - a;
+    let len = u.len();
+    if len <= TOL {
+        return false;
+    }
+    let v = d - c;
+    let den = u.cross(v);
+    let (dc, dd) = (u.cross(c - a) / len, u.cross(d - a) / len);
+    if dc.abs() <= TOL && dd.abs() <= TOL {
+        // Along the gap: an overlap longer than the tolerance.
+        let (t1, t2) = ((c - a).dot(u) / len, (d - a).dot(u) / len);
+        return t1.max(t2).min(len) - t1.min(t2).max(0.0) > TOL;
+    }
+    if den.abs() <= 1e-12 * len * v.len().max(1.0) {
+        return false;
+    }
+    // a + t u = c + s v.
+    let t = (c - a).cross(v) / den;
+    let s = (c - a).cross(u) / den;
+    let vl = v.len().max(1e-9);
+    s >= -TOL / vl && s <= 1.0 + TOL / vl && t * len > TOL && (1.0 - t) * len > TOL
+}
+
+/// The static sheets of a projection without any wire (no junctions): the sheets of the P2 room
+/// ([`sheet_room`]). O(layers x U0 sheet build).
+pub fn bare_sheets(pr: &Projection, outline: &[(Vec2, Vec2)], o: &CutOpts) -> Result<Vec<LayerSheet>, String> {
+    let terms: Vec<Vec2> = pr.obstacles.iter().filter(|ob| ob.net.is_some()).map(|ob| ob.center).collect();
+    (0..pr.n_layers)
+        .map(|l| {
+            let inp = SheetInput { proj: pr, outline, vias: &[], junctions: &[], terminals: &terms };
             LayerSheet::build(&inp, l, &o.sheet)
         })
         .collect()

@@ -1096,6 +1096,51 @@ impl LayerSheet {
     pub fn bound(&self, f: usize) -> Bound {
         self.feats[f].bound
     }
+
+    /// The first feature side (point features left out) that the ray from `a` along the unit
+    /// direction `d` meets at a distance in `[-1 nm, max]`: `(distance, feature)`, ties by the
+    /// lower feature. A ray that starts on a side meets it at 0. Marches the side grid in
+    /// growing boxes: O(sides in the cells along the ray up to the hit).
+    pub fn ray_hit(&self, a: Vec2, d: Vec2, max: f64, buf: &mut Vec<u32>) -> Option<(f64, usize)> {
+        let step0 = (2.0 * self.side_grid.cell).max(1.0);
+        let mut from = 0.0f64;
+        let mut len = step0;
+        loop {
+            let to = (from + len).min(max);
+            let (x0, x1) = (a + d * (from - 1.0), a + d * to);
+            let lo = Vec2 { x: x0.x.min(x1.x), y: x0.y.min(x1.y) };
+            let hi = Vec2 { x: x0.x.max(x1.x), y: x0.y.max(x1.y) };
+            self.side_grid.query(lo, hi, buf);
+            let mut best: Option<(f64, usize)> = None;
+            for &i in buf.iter() {
+                let (x, y, f) = self.sides[i as usize];
+                if (y - x).len2() <= 0.0 {
+                    continue;
+                }
+                let e = y - x;
+                let den = d.cross(e);
+                if den.abs() <= 1e-12 * e.len() {
+                    continue;
+                }
+                let t = (x - a).cross(e) / den;
+                let u = (x - a).cross(d) / den;
+                if t < -1.0 || t > to || !(-1e-9..=1.0 + 1e-9).contains(&u) {
+                    continue;
+                }
+                if best.is_none_or(|b| t < b.0 - 1e-6 || (t <= b.0 + 1e-6 && f < b.1)) {
+                    best = Some((t, f));
+                }
+            }
+            if let Some(b) = best {
+                return Some((b.0.max(0.0), b.1));
+            }
+            if to >= max {
+                return None;
+            }
+            from = to;
+            len *= 2.0;
+        }
+    }
 }
 
 fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {

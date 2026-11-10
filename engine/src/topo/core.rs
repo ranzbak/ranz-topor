@@ -872,6 +872,19 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         Err(e) => return (RoundOut::unrouted(unrouted(model, opts, &format!("projection failed: {e}"))), Vec::new(), Memory::default()),
     };
     warnings.extend(b.notes.iter().cloned());
+    // `[capacity] model = "cuts"` (shopping list 2.3): the per-layer room of the edges the shared
+    // projection leaves unbounded comes from the layer's sheet (P2 and the per-edge layer masks).
+    if opts.capacity_model == "cuts" {
+        let co = super::cutmodel::CutOpts::from_options(opts);
+        match super::cutmodel::bare_sheets(&b.proj, &board::outline_segments(model), &co) {
+            Ok(sh) => {
+                for (e, l, room) in super::cutmodel::sheet_room(&b.proj, &sh) {
+                    b.proj.room[e][l] = room;
+                }
+            }
+            Err(e) => warnings.push(format!("capacity model \"cuts\": the sheets of the P2 room failed, P2 keeps the per-edge room: {e}")),
+        }
+    }
     for &(e, l, room) in hints {
         if let Some(r) = b.proj.room.get_mut(e).and_then(|r| r.get_mut(l)) {
             *r = r.min(room);

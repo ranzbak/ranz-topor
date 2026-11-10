@@ -19,7 +19,7 @@ use topor_engine::geom::Vec2;
 use topor_engine::model::{BoardModel, Options};
 use topor_engine::topo::board::{build_full, outline_segments, Board, BuildOpts};
 use topor_engine::topo::cutflow::Stretch;
-use topor_engine::topo::cutmodel::{flow, CutOpts, Flow, ViaItem};
+use topor_engine::topo::cutmodel::{bare_sheets, flow, sheet_room, CutOpts, Flow, ViaItem};
 use topor_engine::topo::sheet::{FeatKind, LayerSheet, Norm, SheetInput};
 
 const MM: f64 = 1e6;
@@ -324,4 +324,126 @@ fn inner_layer_holds_three_wires_drill_to_drill() {
     let tp1_obs = fx.b.pad_of.iter().position(|&p| p == tp1).expect("TP1 obstacle");
     assert!(sh.feats.iter().all(|f| f.kind != FeatKind::Obstacle(tp1_obs)), "TP1 is a feature of In1");
     assert!(overfull(&per).is_empty(), "{:?}", overfull(&per));
+}
+
+// ---------------------------------------------------------------- 2.3: the P2 room per layer
+
+/// The projection's room per (edge, layer) after [`sheet_room`] (the `[capacity] model = "cuts"`
+/// build), and the changed edge-layers.
+type Rooms = (Vec<Vec<f64>>, Vec<(usize, usize, f64)>);
+
+fn sheet_rooms(fx: &Fx) -> Rooms {
+    let pr = &fx.b.proj;
+    let sh = bare_sheets(pr, &outline_segments(&fx.m), &opts(Norm::Octagonal)).expect("sheets");
+    let ch = sheet_room(pr, &sh);
+    let mut room = pr.room.clone();
+    for &(e, l, r) in &ch {
+        assert!(pr.room[e][l].is_infinite(), "edge {e} layer {l}: a bounded room was changed");
+        room[e][l] = r;
+    }
+    (room, ch)
+}
+
+fn pad_obs(fx: &Fx, r: &str, n: &str) -> usize {
+    let pi = fx.m.pads.iter().position(|p| p.ref_ == r && p.number == n).unwrap_or_else(|| panic!("pad {r}.{n}"));
+    fx.b.pad_of.iter().position(|&p| p == pi).expect("pad obstacle")
+}
+
+/// Every edge-layer that is no edge along one obstacle and has no pad centre end is bounded
+/// (the board has an outline).
+fn all_bounded(fx: &Fx, room: &[Vec<f64>]) {
+    use topor_engine::topo::state::VertKind;
+    let pr = &fx.b.proj;
+    for (e, &[p, q]) in pr.edges.iter().enumerate() {
+        let same = matches!((pr.vkind[p], pr.vkind[q]), (VertKind::Outline(a), VertKind::Outline(b)) if a == b);
+        let centre = matches!(pr.vkind[p], VertKind::Centre(_)) || matches!(pr.vkind[q], VertKind::Centre(_));
+        if same || centre {
+            continue;
+        }
+        for (l, r) in room[e].iter().enumerate() {
+            assert!(r.is_finite(), "edge {e} layer {l} unbounded");
+        }
+    }
+}
+
+#[test]
+fn p2_room_row_end_is_the_pad_to_edge_gap_not_unbounded() {
+    // channel_fit: the projection edges from the last U2 pad to the B.Cu keepout's corners (on the
+    // board edge) were unbounded on F.Cu (the keepout is not on F.Cu); the F.Cu gap there is the
+    // pad-to-edge 0.50 mm, which P2 must see (the S3 plan went round the row end).
+    for name in ["channel_fit", "model_gap_cut"] {
+        let fx = load(name);
+        let pr = &fx.b.proj;
+        let (room, ch) = sheet_rooms(&fx);
+        all_bounded(&fx, &room);
+        let f_cu = layer_idx(&fx, "F.Cu");
+        // The rightmost pad of the right row.
+        let last = (0..pr.obstacles.len()).filter(|&o| pr.obstacles[o].layers.has(f_cu) && !pr.obstacles[o].drilled && pr.obstacles[o].poly.len() == 4 && (pr.obstacles[o].center.y.abs() - 6.0 * MM).abs() < 3.0 * MM).max_by(|&a, &b| pr.obstacles[a].center.x.total_cmp(&pr.obstacles[b].center.x)).expect("row pad");
+        let right = pr.obstacles[last].poly.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+        let mut gap = f64::INFINITY;
+        for &(e, l, r) in ch.iter().filter(|x| x.1 == f_cu) {
+            let [p, q] = pr.edges[e];
+            let on = |v: usize| matches!(pr.vkind[v], topor_engine::topo::state::VertKind::Outline(o) if o == last);
+            if (on(p) || on(q)) && pr.pos[p].x.max(pr.pos[q].x) > right + 1.0 {
+                eprintln!("{name}: row-end edge {e} layer {l} room {:.4}", r / MM);
+                gap = gap.min(r);
+            }
+        }
+        assert!((gap / MM - 0.50).abs() < 1e-3, "{name}: row-end gap {:.4}", gap / MM);
+    }
+}
+
+#[test]
+fn p2_room_is_zero_inside_a_keepout_of_the_layer() {
+    // channel_fit: B.Cu is closed over the rows by a rule area: an edge whose gap runs inside it
+    // has no room on B.Cu (it had none on F.Cu's terms: unbounded).
+    let fx = load("channel_fit");
+    let pr = &fx.b.proj;
+    let (room, ch) = sheet_rooms(&fx);
+    let b_cu = layer_idx(&fx, "B.Cu");
+    let keep: Vec<usize> = (0..pr.obstacles.len()).filter(|&o| pr.obstacles[o].net.is_none() && pr.obstacles[o].layers.has(b_cu) && !pr.obstacles[o].drilled).collect();
+    assert!(!keep.is_empty());
+    let mut n = 0;
+    for &(e, l, _) in ch.iter().filter(|x| x.1 == b_cu) {
+        let [p, q] = pr.edges[e];
+        let mid = (pr.pos[p] + pr.pos[q]) * 0.5;
+        if keep.iter().any(|&k| topor_engine::topo::state::point_in_poly(mid, &pr.obstacles[k].poly)) {
+            assert_eq!(room[e][l], 0.0, "edge {e} inside the keepout");
+            n += 1;
+        }
+    }
+    assert!(n > 20, "{n} edges inside the keepout");
+}
+
+#[test]
+fn p2_room_on_in1_is_pin_to_pin_not_the_tp1_sub_gaps() {
+    // inner_layer_room: TP1 (F.Cu only) splits the pin gap into two 0.70 mm sub-gaps on F.Cu; on
+    // In1 the edges that end at TP1 stand for the 1.80 mm pin-to-pin gap (I1).
+    let fx = load("inner_layer_room");
+    let pr = &fx.b.proj;
+    let (room, _) = sheet_rooms(&fx);
+    all_bounded(&fx, &room);
+    let in1 = layer_idx(&fx, "In1.Cu");
+    let f_cu = layer_idx(&fx, "F.Cu");
+    let tp1 = pad_obs(&fx, "TP1", "1");
+    let (j1, j2) = (pad_obs(&fx, "J1", "1"), pad_obs(&fx, "J1", "2"));
+    let sag = pr.obstacles[j1].sag + pr.obstacles[j2].sag;
+    let (mut n, mut f_min) = (0, f64::INFINITY);
+    for (e, &[p, q]) in pr.edges.iter().enumerate() {
+        let of = |v: usize| match pr.vkind[v] {
+            topor_engine::topo::state::VertKind::Outline(o) => Some(o),
+            _ => None,
+        };
+        let ends = [of(p), of(q)];
+        if ends.contains(&Some(tp1)) && (ends.contains(&Some(j1)) || ends.contains(&Some(j2))) {
+            n += 1;
+            eprintln!("edge {e}: F.Cu {:.4} In1 {:.4}", room[e][f_cu] / MM, room[e][in1] / MM);
+            f_min = f_min.min(room[e][f_cu]);
+            assert!(room[e][in1] >= 1.80 * MM - 1.1 * sag - 60.0 && room[e][in1].is_finite(), "In1 {:.4}", room[e][in1] / MM);
+        }
+    }
+    assert!(n >= 2, "{n} pin-TP1 edges");
+    // F.Cu keeps the shared-edge reading of TP1's sub-gaps (both ends block there: unchanged;
+    // the 0.70 critical cut itself is no projection edge, so the shortest edge is a little longer).
+    assert!(f_min < 0.80 * MM, "F.Cu sub-gap {:.4}", f_min / MM);
 }

@@ -1073,7 +1073,9 @@ pub struct Options {
     /// layer assignment (P3), the P4 label moves and the P4 pick of the best round. `"edges"`
     /// (default): the per-edge packer of the shared projection (`topo::refine::CapModel`).
     /// `"cuts"`: the per-layer cut test (`topo::cutmodel`, the critical cuts of each layer's sheet
-    /// in the planning norm) with the graded over-full price `overflow x phi` per cut.
+    /// in the planning norm) with the graded over-full price `overflow x phi` per cut; P2's
+    /// per-edge room of an edge with an end that is no copper on a layer then comes from that
+    /// layer's sheet (`topo::cutmodel::sheet_room`, shopping list 2.3).
     pub capacity_model: String,
     /// `[capacity] overflow_softness` (model = "cuts"): the softness `tau` of the graded over-full
     /// price, in track pitches: the price of a cut rises smoothly from almost 0 at a slack of a few
