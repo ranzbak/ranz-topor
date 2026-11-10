@@ -231,7 +231,8 @@ fn via_pair_slide_two_vias() {
         let mut v = vias(&r.items);
         v.sort_by(|a, b| a.0.total_cmp(&b.0));
         assert_eq!(v.len(), 2, "{lp}: {v:?}");
-        assert!((2.825..=7.175).contains(&v[0].0) && (14.825..=19.175).contains(&v[1].0), "{lp}: {v:?}");
+        // Centred between the own pad and the wall (equal push), 5.0 and 17.0.
+        assert!((v[0].0 - 5.0).abs() <= 0.25 && (v[1].0 - 17.0).abs() <= 0.25, "{lp}: {v:?}");
         clean(&m, &r.items);
     }
 }

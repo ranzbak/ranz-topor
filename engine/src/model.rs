@@ -1188,6 +1188,8 @@ pub struct Options {
     /// the forces of the copper around it balance (Dayan & Dai 1991; TopoR FreeStyle "Shift
     /// vias", 6.3 manual p. 179; Luzin-Popov 2013 p. 3), equal clearance between two neighbours,
     /// and the drawing takes that site first. A move never raises the predicted violations.
+    /// Own pads push too (force only, no rule). Needs `search_length == "taut"` (skipped with a
+    /// warning otherwise: the "even" corridor is no wire path).
     pub via_relocate: bool,
     /// 5.4 (`[search] branch_relocate`): the plan moves each free junction (T-point) of a net
     /// tree to the point of least length of its three arms (the Fermat / Steiner point, all

@@ -7,13 +7,14 @@
 //!   differ, on the wire's taut path, so the length does not change) where the copper around it
 //!   pushes equally: the largest clearance gap to the nearest copper (obstacles of other nets on
 //!   every layer, other nets' wires, other vias, the board edge), ties broken by the least
-//!   repulsion potential `Σ 1/gap` (Dayan & Dai 1991, UCSC-CRL-91-40 pp. 2-3: a movable point
+//!   repulsion potential `Σ 1/gap`; the via's own pads push too, as copper, but are no rule (Dayan & Dai 1991, UCSC-CRL-91-40 pp. 2-3: a movable point
 //!   moves along the combined force of fixed-force springs until it balances; p. 5 obstacles
 //!   push, p. 6 multi-layer vias feel the copper of every layer they touch, p. 6 the force law is
 //!   a choice; Luzin, Popov & Popov 2013 p. 3: "afterwards the via positions are corrected by a
 //!   force algorithm"; TopoR 6.3 manual p. 179 "Shift vias"). Between two neighbours that is the
 //!   point of equal clearance (pattern `via_force_relocate`). A via is never moved to a point
-//!   with a smaller gap than its old one, so the predicted violations never rise.
+//!   with a clearance violation to other copper that its old site did not have (smaller gap
+//!   below 0), so the predicted violations never rise.
 //! * **Branch-point relocation** ([`relocate_junctions`], `[search] branch_relocate`): the
 //!   junction of three arms goes to their Fermat point when every angle of the arm ends is below
 //!   120 degrees (Weber point by the same force iteration, Dayan & Dai 1991 pp. 2-4; Popov &
@@ -235,35 +236,41 @@ struct Near {
     wires: Vec<WireId>,
 }
 
-/// Smallest clearance gap (nm) and repulsion potential of a via of `net` (radius `rv`, clearance
-/// `c`) at `p`: against the obstacles of other nets (every layer: a through via), the board edge,
-/// the other nets' wires (their tracks) and the other vias in `sites` (other nets: clearance;
-/// the same wire: no overlap). O(near items).
+/// Gaps of a via of `net` (radius `rv`, clearance `c`) at `p`: `(rule, force, potential)`.
+/// `rule` = the smallest clearance gap (nm) to the copper of other nets (their obstacles on every
+/// layer: a through via; their wires' tracks; their vias in `sites`), the board edge and the
+/// wire's own other vias (no overlap): negative = a predicted violation. `force` = the same
+/// minimum with the own net's pads and wires of other connections taken in as well, at the same
+/// clearance: the copper that pushes the via in the force balance (a via between its own pad and
+/// a strip of another net sits in the middle, pattern `via_pair_slide`: "recommended = middle of
+/// the free interval"); it is no rule (a via may touch its own pad). `potential` =
+/// `sum(1 / g - 1 / POT_RANGE)` over the force gaps below `POT_RANGE`. O(near items).
 #[allow(clippy::too_many_arguments)]
-fn gap_at(cx: &ViaCtx, tracks: &[Track], near: &Near, sites: &[Site], me: (WireId, usize), net: i32, rv: f64, c: f64, p: Vec2) -> (f64, f64) {
+fn gap_at(cx: &ViaCtx, tracks: &[Track], near: &Near, sites: &[Site], me: (WireId, usize), net: i32, rv: f64, c: f64, p: Vec2) -> (f64, f64, f64) {
     let st = cx.st;
-    let mut gmin = f64::INFINITY;
+    let mut grule = f64::INFINITY;
+    let mut gforce = f64::INFINITY;
     let mut pot = 0.0;
-    let mut add = |g: f64| {
-        gmin = gmin.min(g);
+    let mut add = |g: f64, rule: bool| {
+        if rule {
+            grule = grule.min(g);
+        }
+        gforce = gforce.min(g);
         if g < POT_RANGE {
             pot += 1.0 / g.max(1e3) - 1.0 / POT_RANGE;
         }
     };
     for &o in &near.obs {
         let ob = &st.proj.obstacles[o];
-        if ob.net == Some(net) {
-            continue;
-        }
         let req = rv + if ob.bare { ob.clear } else { c.max(ob.clear) };
-        add(dist_poly(p, &ob.poly) - req);
+        add(dist_poly(p, &ob.poly) - req, ob.net != Some(net));
     }
     for &(a, b) in cx.outline {
-        add(seg_point(p, a, b).0 - rv - cx.edge_clear);
+        add(seg_point(p, a, b).0 - rv - cx.edge_clear, true);
     }
     for &u in &near.wires {
         let wu = &st.wires[u];
-        add(dist_polyline(p, &tracks[u].pts) - rv - 0.5 * wu.w - c.max(wu.s));
+        add(dist_polyline(p, &tracks[u].pts) - rv - 0.5 * wu.w - c.max(wu.s), true);
     }
     for s in sites {
         if (s.wire, s.i) == me {
@@ -272,12 +279,12 @@ fn gap_at(cx: &ViaCtx, tracks: &[Track], near: &Near, sites: &[Site], me: (WireI
         let nu = st.wires[s.wire].net;
         let ru = (cx.via_r)(nu);
         if nu != net {
-            add((p - s.p).len() - rv - ru - c.max((cx.clear)(nu)));
+            add((p - s.p).len() - rv - ru - c.max((cx.clear)(nu)), true);
         } else if s.wire == me.0 {
-            add((p - s.p).len() - rv - ru);
+            add((p - s.p).len() - rv - ru, true);
         }
     }
-    (gmin, pot)
+    (grule, gforce, pot)
 }
 
 /// The planned via sites: `(wire, via index)` -> `(traversal, point)`.
@@ -350,18 +357,20 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
             let tr = &tracks[v.w];
             let turn_k: Vec<usize> = st.wires[v.w].turns.iter().map(|t| t.0).collect();
             let ok_k = |k: usize| k >= v.ka && k <= v.kb && !turn_k.contains(&k) && !st.proj.tri_out[st.wires[v.w].tris[k.min(st.wires[v.w].tris.len() - 1)]];
+            let cur = sites[vi];
+            let (rc, gc, pc) = gap_at(cx, &tracks, &v.near, &sites, (v.w, v.i), net, rv, c, cur.p);
+            // A site is allowed when it predicts no violation, or none worse than the old site.
+            let rule_ok = |r: f64| r >= 0.0 || r >= rc;
             let eval = |s: f64, sites: &[Site]| -> Option<(f64, f64, usize, Vec2)> {
                 let k = tr.trav(s);
                 if !ok_k(k) {
                     return None;
                 }
                 let p = tr.at(s);
-                let (g, pot) = gap_at(cx, &tracks, &v.near, sites, (v.w, v.i), net, rv, c, p);
-                Some((g, pot, k, p))
+                let (r, g, pot) = gap_at(cx, &tracks, &v.near, sites, (v.w, v.i), net, rv, c, p);
+                rule_ok(r).then_some((g, pot, k, p))
             };
             let better = |a: &(f64, f64, usize, Vec2), b: &(f64, f64, usize, Vec2)| a.0 > b.0 + 1.0 || (a.0 > b.0 - 1.0 && a.1 < b.1 - 1e-12);
-            let cur = sites[vi];
-            let (gc, pc) = gap_at(cx, &tracks, &v.near, &sites, (v.w, v.i), net, rv, c, cur.p);
             let mut best = (gc, pc, cur.k, cur.p);
             let span = v.hi - v.lo;
             let mut best_s = None;
@@ -400,8 +409,8 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
         let s = sites[vi];
         let net = st.wires[v.w].net;
         let (rv, c) = ((cx.via_r)(net), (cx.clear)(net));
-        let (g0, _) = gap_at(cx, &tracks, &v.near, &start, (v.w, v.i), net, rv, c, start[vi].p);
-        let (g1, _) = gap_at(cx, &tracks, &v.near, &sites, (v.w, v.i), net, rv, c, s.p);
+        let (g0, _, _) = gap_at(cx, &tracks, &v.near, &start, (v.w, v.i), net, rv, c, start[vi].p);
+        let (g1, _, _) = gap_at(cx, &tracks, &v.near, &sites, (v.w, v.i), net, rv, c, s.p);
         if (s.p - start[vi].p).len() > 1.0 {
             rep.moved += 1;
             rep.gap_gain += g1 - g0;

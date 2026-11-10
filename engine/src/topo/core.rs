@@ -2751,8 +2751,18 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     // 5.4 `[vias] relocate`: every via of the plan at the force balance of its free interval
     // (equal clearance between its neighbours; [`super::viaopt::relocate_vias`]); the drawing
-    // takes that site first.
-    if opts.via_relocate {
+    // takes that site first. The interval is sampled on the plan's taut path, which is the
+    // wire's path only when the search priced the length taut (`[search] length = "taut"`):
+    // with "even" the corridor can run round obstacles the drawing then crosses on the other
+    // layer (measured 5.4: via_pair_slide, the corridor round the wall ends; relocated vias
+    // pulled the drawn wire 0.55 mm longer), so relocation is skipped there, with a warning.
+    if opts.via_relocate && opts.search_length != "taut" {
+        warnings.push(format!(
+            "via relocation ([vias] relocate) skipped: it needs [search] length = \"taut\" (the plan's path); [search] length = \"{}\" plans corridors that are no wire path",
+            opts.search_length
+        ));
+    }
+    if opts.via_relocate && opts.search_length == "taut" {
         let t_vr = Instant::now();
         let outline = super::board::outline_segments(model);
         let via_r = |net: i32| 0.5 * crate::vias::via_sizes(&model.rules, net, opts).first().map_or(0.0, |s| s.d as f64);
@@ -3786,7 +3796,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             fb_rescued
         ));
     }
-    if opts.via_relocate {
+    if opts.via_relocate && opts.search_length == "taut" {
         warnings.push(format!(
             "via relocation in the drawing ([vias] relocate): {} vias at their planned site, {} planned sites not free (drawn at the usual search's site)",
             dr.stats.planned_sites, dr.stats.planned_sites_missed
