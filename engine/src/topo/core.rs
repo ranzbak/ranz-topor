@@ -172,12 +172,29 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     let stubs = place_plane_stubs(model, opts, ctl);
     ctl.stage(1, opts.topo_rounds.max(1) as u32, "projection of the board");
     let t_fx = Instant::now();
-    let fx = Fixed::build(model, opts, &stubs);
+    // Cancel / OK during the projection (cancel-fix; the cut room of `[capacity] model = "cuts"`
+    // took 150-200 s on qmtech and did not look at Cancel): the sheets stop at once and no run begins.
+    let fx = crate::control::with_cancel(ctl.cancel.clone(), || Fixed::build(model, opts, &stubs));
     if std::env::var_os("TOPO_TIMES").is_some() {
         eprintln!("[topo call] projection built once (decomposition, triangulation, cut room): {:.3} s", t_fx.elapsed().as_secs_f64());
     }
+    if ctl.is_cancelled() && opts.capacity_model == "cuts" {
+        let mut r = unrouted(model, opts, "Cancel / OK came during the projection of the board (the cut room of [capacity] model = \"cuts\"), before any run began");
+        r.stop_reason = "cancel".into();
+        r.timed_out = true;
+        r.converged = false;
+        r.runtime_s = t0.elapsed().as_secs_f64();
+        return r;
+    }
     let coord = Coord::new(ctl, n, obj);
-    let mut outs: Vec<RunOut> = run_all(model, opts, ctl, &coord, &stubs, &fx, t0, n);
+    let (mut outs, skipped) = run_all(model, opts, ctl, &coord, &stubs, &fx, t0, n);
+    if outs.is_empty() {
+        // cannot happen (the first run to begin always ends with a result); never a panic
+        let mut r = unrouted(model, opts, "no run of the call began a cycle");
+        r.stop_reason = if ctl.is_cancelled() { "cancel" } else { "timeout" }.into();
+        r.timed_out = true;
+        return r;
+    }
     // The best run: fewest errors, then the objective, then shrinkages; ties: the lower run.
     let mut pick = 0;
     for k in 1..outs.len() {
@@ -192,10 +209,16 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     let time_hit = outs.iter().any(|o| o.time_hit);
     // Every cycle's variants were stitched before they were judged (pour pieces still cut off
     // count as errors), so the picked board is the one the progress showed.
+    let pick_k = outs[pick].k;
     let mut best = outs.swap_remove(pick).result;
     best.warnings.extend(cycle_lines);
     if n > 1 {
-        best.warnings.push(format!("best of {n} seeded runs ([optimize] runs): run {} picked; {}", pick + 1, lines.join("; ")));
+        let skipped_txt = if skipped.is_empty() {
+            String::new()
+        } else {
+            format!("; without a result of their own (Cancel / OK / the time limit came first): {}", skipped.iter().map(|(k, why)| format!("run {} ({why})", k + 1)).collect::<Vec<_>>().join(", "))
+        };
+        best.warnings.push(format!("best of {n} seeded runs ([optimize] runs): run {} picked; {}{skipped_txt}", pick_k + 1, lines.join("; ")));
     }
     best.stop_reason = if cancel {
         if stable_all { "stable" } else { "cancel" }
@@ -223,6 +246,8 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
 
 /// One run of a best-of-N call, as [`route_topo`] needs it back.
 struct RunOut {
+    /// The run (0-based).
+    k: usize,
     result: RouteResult,
     crit: Criteria,
     /// The cycle after which its routes were first stable.
@@ -239,10 +264,99 @@ struct Coord<'a> {
     ctl: &'a RunControl,
     obj: Objective,
     st: std::sync::Mutex<Vec<RunState>>,
+    /// cancel-fix: criteria of the call's best pick so far ([`Coord::publish`]) and whether it is
+    /// of a complete cycle (not cut short).
+    snap: std::sync::Mutex<Option<(Criteria, bool)>>,
+    /// cancel-fix: after Cancel / OK only one TopoR loop pick of the call is drawn.
+    gate: DrawGate,
+    /// cancel-fix: after Cancel / OK the cut-short cycles of the runs are stitched and judged one at
+    /// a time, and only one that beats the cut-short cycles judged before it (their criteria before
+    /// the stitching, held here) while no complete result is published ([`Coord::worth_judging`]):
+    /// on qmtech four runs stitched their cut-short cycles side by side (1.5-2 s each).
+    judge: std::sync::Mutex<Option<Criteria>>,
+}
+
+/// cancel-fix, `[optimize] loop = "topor"`: after Cancel / OK the loops of the runs end at their
+/// next stop check, and only one of their picks is drawn (the drawing of a big board takes many
+/// seconds, the plan is all the loop changes): the best by its predicted criteria among the runs
+/// whose loops ended within [`DrawGate::WAIT`] of each other; ties: the lower run. A loop that
+/// ends by itself (stable, cycle cap, time limit) is drawn as before.
+#[derive(Default)]
+struct DrawGate {
+    st: std::sync::Mutex<GateState>,
+    cv: std::sync::Condvar,
+    /// A complete result of the call is published already ([`Coord::publish`]): after Cancel no
+    /// loop pick needs drawing.
+    complete: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Default)]
+struct GateState {
+    in_loop: BTreeSet<usize>,
+    offered: BTreeMap<usize, Criteria>,
+    decided: Option<usize>,
+}
+
+impl DrawGate {
+    /// The longest wait for the other runs' loops to end after Cancel.
+    const WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+    /// Run `k` enters its loop. O(log runs).
+    fn enter(&self, k: usize) {
+        if let Ok(mut g) = self.st.lock() {
+            g.in_loop.insert(k);
+        }
+    }
+
+    /// Run `k`'s loop ended by itself (it draws its pick as before). O(log runs).
+    fn leave(&self, k: usize) {
+        if let Ok(mut g) = self.st.lock() {
+            g.in_loop.remove(&k);
+        }
+        self.cv.notify_all();
+    }
+
+    /// Run `k`'s loop ended by Cancel with a pick of predicted criteria `crit`: does run `k` draw?
+    /// Waits (at most [`DrawGate::WAIT`]) until no other loop runs, then the best offer draws; an
+    /// offer after the decision never does, nor any once a complete result is published. O(runs) + the wait.
+    fn offer(&self, k: usize, crit: Criteria, obj: &Objective) -> bool {
+        let Ok(mut g) = self.st.lock() else { return true };
+        if self.complete.load(std::sync::atomic::Ordering::Relaxed) {
+            g.in_loop.remove(&k);
+            self.cv.notify_all();
+            return false;
+        }
+        g.in_loop.remove(&k);
+        g.offered.insert(k, crit);
+        self.cv.notify_all();
+        let t = Instant::now();
+        while g.decided.is_none() && !g.in_loop.is_empty() {
+            let left = Self::WAIT.saturating_sub(t.elapsed());
+            if left.is_zero() {
+                break;
+            }
+            g = match self.cv.wait_timeout(g, left) {
+                Ok((g, _)) => g,
+                Err(_) => return true,
+            };
+        }
+        if g.decided.is_none() {
+            let mut best: Option<(usize, Criteria)> = None;
+            for (&j, c) in &g.offered {
+                if best.as_ref().is_none_or(|(_, b)| obj.better(c, b)) {
+                    best = Some((j, *c));
+                }
+            }
+            g.decided = best.map(|b| b.0);
+        }
+        g.decided == Some(k)
+    }
 }
 
 #[derive(Clone, Default)]
 struct RunState {
+    /// cancel-fix: the run has begun its first cycle ([`Coord::claim_first`]).
+    started: bool,
     cycle: usize,
     stable: bool,
     done: bool,
@@ -253,7 +367,51 @@ struct RunState {
 
 impl<'a> Coord<'a> {
     fn new(ctl: &'a RunControl, n: usize, obj: Objective) -> Coord<'a> {
-        Coord { ctl, obj, st: std::sync::Mutex::new(vec![RunState::default(); n]) }
+        Coord { ctl, obj, st: std::sync::Mutex::new(vec![RunState::default(); n]), snap: std::sync::Mutex::new(None), gate: DrawGate::default(), judge: std::sync::Mutex::new(None) }
+    }
+
+    /// cancel-fix: note a run's pick with criteria `crit` (`complete`: of a cycle not cut short)
+    /// as the call's best so far when nothing was noted yet or it beats the one noted (a complete
+    /// one beats one cut short). After Cancel / OK the other runs read only whether there is one
+    /// ([`Coord::has_result`]) and the TopoR loops whether a complete one is there. O(1).
+    fn publish(&self, crit: Criteria, complete: bool) {
+        let Ok(mut s) = self.snap.lock() else { return };
+        if let Some((c, done)) = s.as_ref() {
+            if (*done && !complete) || (*done == complete && !self.obj.better(&crit, c)) {
+                return;
+            }
+        }
+        *s = Some((crit, complete));
+        if complete {
+            self.gate.complete.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// cancel-fix: may run `k` begin its first cycle? Not after Cancel / the time limit (`stopping`)
+    /// when another run has begun one already: that run's result is what the call returns, and a
+    /// first cycle cannot be cut short as cheaply as later ones (it is offered even when
+    /// interrupted, and its stitching runs). Marks `k` as begun when it may. O(runs) under the lock.
+    fn claim_first(&self, k: usize, stopping: bool) -> bool {
+        let Ok(mut s) = self.st.lock() else { return true };
+        if stopping && s.iter().enumerate().any(|(j, r)| j != k && r.started) {
+            return false;
+        }
+        s[k].started = true;
+        true
+    }
+
+    /// cancel-fix: some run has published a result ([`Coord::publish`]); `complete`: one of a
+    /// cycle not cut short. O(1).
+    /// cancel-fix: is a cut-short cycle with criteria `crit` (before its stitching) worth stitching
+    /// and judging after Cancel / OK? Not when a complete result is published, nor when a cut-short
+    /// cycle judged before (`judged`: its criteria before the stitching) is at least as good. O(1).
+    fn worth_judging(&self, crit: &Criteria, judged: &Option<Criteria>) -> bool {
+        let complete = self.snap.lock().is_ok_and(|s| s.as_ref().is_some_and(|(_, done)| *done));
+        !complete && judged.as_ref().is_none_or(|j| self.obj.better(crit, j))
+    }
+
+    fn has_result(&self, complete: bool) -> bool {
+        self.snap.lock().is_ok_and(|s| s.as_ref().is_some_and(|(_, done)| *done || !complete))
     }
 
     /// Run `k` starts cycle `cycle` with fluctuation `width`.
@@ -371,6 +529,13 @@ impl Run {
             self.done = true;
             return;
         }
+        if cycle == 1 && !coord.claim_first(self.k, ctl.is_cancelled() || cancelled() || over_budget) {
+            // Cancel / the time limit before this run began, while another run routes: no result of its own.
+            self.notes.push("not begun".into());
+            self.time_hit = true;
+            self.done = true;
+            return;
+        }
         // The first cycle of the first run routes with the plain weights (the reference).
         let reference = self.k == 0 && cycle == 1;
         let width = if reference { 0.0 } else { self.sched.width };
@@ -389,7 +554,7 @@ impl Run {
             o2.initial = "once".into();
         }
         let hv: Hints = if opts.drawing_feedback { self.all.iter().map(|(&(e, l), &r)| (e, l, r)).collect() } else { Vec::new() };
-        let (ro, h2, mem2) = route_round(model, &o2, ctl, &hv, &self.mem, cycle, stubs, fx, opts.fluctuation);
+        let (ro, h2, mem2) = route_round(model, &o2, ctl, &hv, &self.mem, cycle, stubs, fx, opts.fluctuation, (self.k, &coord.gate, &obj));
         self.cycles = cycle;
         self.mem = mem2;
         for (e, l, r) in h2 {
@@ -406,6 +571,39 @@ impl Run {
         // best of the cycles that finished.
         // Errors of the best result before this cycle (for the soft cuts below).
         let best_before = self.arch.pick(&obj).map(|i| self.arch.items[i].crit.errors);
+        // cancel-fix: after Cancel / OK a cycle is not stitched and judged any more when there is a
+        // result already (this run's, or another run's): what OK / Cancel returns is the best of the
+        // cycles that finished before; the stitching of a big board takes seconds.
+        let judged_elsewhere = if interrupted { !self.arch.items.is_empty() || coord.has_result(false) } else { coord.has_result(true) };
+        if ro.skipped || ctl.is_cancelled() && judged_elsewhere {
+            self.notes.push(if ro.skipped { format!("{cycle}: its TopoR loop pick not drawn (another run's is)") } else { format!("{cycle}: not judged (Cancel / OK came first)") });
+            self.time_hit = self.stable_at.is_none();
+            self.done = true;
+            self.busy_s += t.elapsed().as_secs_f64();
+            coord.report(self.k, |r| r.done = true);
+            return;
+        }
+        // cancel-fix: after Cancel / OK the cut-short cycles of the runs are stitched one at a time
+        // (the lock is held up to publish), only one that beats those judged before it, and only
+        // as routed (not also its "as drawn" variant: each stitching takes seconds on a big board).
+        let cancel_cut = interrupted && ctl.is_cancelled() && self.arch.items.is_empty();
+        let _judging = if cancel_cut {
+            let mut g = coord.judge.lock().ok();
+            if !g.as_ref().is_none_or(|j| coord.worth_judging(&ro.crit, j)) {
+                self.notes.push(format!("{cycle}: cut short by Cancel / OK and not better than the cycle another run judged: not judged"));
+                self.time_hit = self.stable_at.is_none();
+                self.done = true;
+                self.busy_s += t.elapsed().as_secs_f64();
+                coord.report(self.k, |r| r.done = true);
+                return;
+            }
+            if let Some(j) = g.as_mut() {
+                **j = Some(ro.crit);
+            }
+            g
+        } else {
+            None
+        };
         if !interrupted || self.arch.items.is_empty() {
             // Pour stitching (D4) on each variant before it is judged: a pour piece the copper cut
             // off that no stitch joins back is an open connection in KiCad's DRC, so it counts as an
@@ -414,7 +612,7 @@ impl Run {
             let stitched = |mut r: RouteResult, mut c: Criteria| -> (RouteResult, Criteria) {
                 if opts.stitch_islands {
                     ctl.stage(cycle as u32, opts.topo_rounds.max(1) as u32, "pour stitching");
-                    c.errors += stitch_pours(model, opts, &mut r, deadline);
+                    c.errors += stitch_pours(model, opts, &mut r, deadline, &|| ctl.is_cancelled());
                 }
                 (r, c)
             };
@@ -425,7 +623,7 @@ impl Run {
             let cut = || deadline.is_some_and(|d| Instant::now() >= d);
             let empty = self.arch.items.is_empty();
             let RoundOut { result, crit, pre, .. } = ro;
-            if let Some((c, r)) = pre {
+            if let Some((c, r)) = pre.filter(|_| !cancel_cut) {
                 let (r, c) = stitched(r, c);
                 if !cut() || empty {
                     self.arch.offer(Variant { label: format!("round {cycle} as drawn"), crit: c, payload: r }, &obj);
@@ -439,6 +637,7 @@ impl Run {
         }
         let pick = self.arch.pick(&obj).expect("a cycle was offered");
         let pc = self.arch.items[pick].crit;
+        coord.publish(pc, !self.arch.items[pick].payload.timed_out);
         // Soft cuts (M-B2, Haas 2026 §VI-E: "every hard cut so far becomes a soft cost"): a cycle
         // worse than the best so far turns the lowered rooms into a price on their passages (edge
         // history, which fades like the rest), so they no longer forbid what the plan needs.
@@ -510,10 +709,14 @@ impl Run {
         }
     }
 
-    /// The run's result: its archive's pick, with the variant table and its cycle line.
-    fn finish(self, opts: &Options, coord: &Coord) -> RunOut {
+    /// The run's result: its archive's pick, with the variant table and its cycle line; for a run
+    /// that Cancel / the time limit ended before it had a result (cancel-fix), why.
+    fn finish(self, opts: &Options, coord: &Coord) -> Result<RunOut, (usize, String)> {
         let obj = coord.obj;
-        let pick = self.arch.pick(&obj).expect("round 1 is always offered");
+        let Some(pick) = self.arch.pick(&obj) else {
+            coord.report(self.k, |r| r.done = true);
+            return Err((self.k, self.notes.join("; ")));
+        };
         let crit = self.arch.items[pick].crit;
         let mut best = self.arch.items[pick].payload.clone();
         best.variants = self.arch.table(Some(pick));
@@ -550,7 +753,7 @@ impl Run {
             self.picked_at,
             self.busy_s
         );
-        RunOut { result: best, crit, stable_at: self.stable_at, time_hit: self.time_hit, line, cycles_line }
+        Ok(RunOut { k: self.k, result: best, crit, stable_at: self.stable_at, time_hit: self.time_hit, line, cycles_line })
     }
 }
 
@@ -559,7 +762,7 @@ impl Run {
 /// threads, and "Routes stable" can come from all of them). The threads are the engine's share
 /// for the runs (`min(runs, rayon threads)`), the checks inside a cycle use the rayon pool.
 #[allow(clippy::too_many_arguments)]
-fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, stubs: &PlaneStubs, fx: &Fixed, t_call: Instant, n: usize) -> Vec<RunOut> {
+fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, stubs: &PlaneStubs, fx: &Fixed, t_call: Instant, n: usize) -> (Vec<RunOut>, Vec<(usize, String)>) {
     use std::sync::Mutex;
     let runs: Vec<Mutex<Run>> = (0..n).map(|k| Mutex::new(Run::new(opts, k))).collect();
     let taken: Mutex<Vec<bool>> = Mutex::new(vec![false; n]);
@@ -591,13 +794,21 @@ fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, 
             }
         });
     }
-    runs.into_iter().map(|m| m.into_inner().expect("run state").finish(opts, coord)).collect()
+    let (mut outs, mut none) = (Vec::new(), Vec::new());
+    for m in runs {
+        match m.into_inner().expect("run state").finish(opts, coord) {
+            Ok(o) => outs.push(o),
+            Err(e) => none.push(e),
+        }
+    }
+    (outs, none)
 }
 
 /// Pour stitching (D4, [`super::stitch`]) on the picked result: the stitches join its items
 /// (`item_conn` = `usize::MAX`: they belong to no connection) and a summary line plus one line
-/// per cut-off piece go to the warnings. Returns the pieces still cut off afterwards.
-fn stitch_pours(model: &BoardModel, opts: &Options, best: &mut RouteResult, deadline: Option<Instant>) -> usize {
+/// per cut-off piece go to the warnings. Returns the pieces still cut off afterwards. `stop`
+/// (Cancel) ends the stitching after the pass in progress ([`super::stitch::stitch_until`]).
+fn stitch_pours(model: &BoardModel, opts: &Options, best: &mut RouteResult, deadline: Option<Instant>, stop: &dyn Fn() -> bool) -> usize {
     let pour_nets: BTreeSet<i32> = model.pours.iter().map(|z| z.net).collect();
     if pour_nets.is_empty() {
         return 0;
@@ -623,7 +834,7 @@ fn stitch_pours(model: &BoardModel, opts: &Options, best: &mut RouteResult, dead
     routed_pads.dedup();
     let (reg, _) = Registry::from_config(standard_factors(), &opts.factors);
     let t = Instant::now();
-    let s = super::stitch::stitch(model, opts, &reg, &best.items, &routed_pads, deadline);
+    let s = super::stitch::stitch_until(model, opts, &reg, &best.items, &routed_pads, deadline, stop);
     if s.before == 0 {
         return 0;
     }
@@ -654,6 +865,9 @@ struct RoundOut {
     pre: Option<(Criteria, RouteResult)>,
     /// `[optimize] loop = "topor"`: how the loop ended.
     lp: Option<LoopEnd>,
+    /// cancel-fix: the loop ended by Cancel and another run's pick is drawn ([`DrawGate`]): no
+    /// result of this run.
+    skipped: bool,
 }
 
 /// How the TopoR loop of a round ended (`[optimize] loop = "topor"`).
@@ -665,7 +879,7 @@ struct LoopEnd {
 
 impl RoundOut {
     fn unrouted(r: RouteResult) -> RoundOut {
-        RoundOut { crit: Criteria { errors: r.failed, open: r.failed, ..Criteria::default() }, result: r, pre: None, lp: None }
+        RoundOut { crit: Criteria { errors: r.failed, open: r.failed, ..Criteria::default() }, result: r, pre: None, lp: None, skipped: false }
     }
 }
 
@@ -970,7 +1184,9 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
 /// `fluct0`: the call's configured fluctuation (the TopoR loop's coefficient schedule starts there;
 /// `opts.fluctuation` is this cycle's width).
 #[allow(clippy::too_many_arguments)]
-fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize, stubs: &PlaneStubs, fx: &Fixed, fluct0: f64) -> (RoundOut, Hints, Memory) {
+/// `gate`: the run (0-based), the call's [`DrawGate`] and objective (cancel-fix: after Cancel only
+/// one TopoR loop pick of the call is drawn).
+fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize, stubs: &PlaneStubs, fx: &Fixed, fluct0: f64, gate: (usize, &DrawGate, &Objective)) -> (RoundOut, Hints, Memory) {
     // TOPO_TIMES=1 (debug): phase times on stderr; never part of the result.
     let times = std::env::var_os("TOPO_TIMES").is_some();
     let tlog = |what: &str, t: Instant| {
@@ -984,6 +1200,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // `[optimize] loop = "topor"`: after the loop the one drawing runs through an OK / Cancel (only
     // the time limit cuts it), so the loop's picked variant always reaches the copper.
     let draw_through = std::cell::Cell::new(false);
+    // cancel-fix: the loop ended by Cancel and another run's pick is drawn ([`DrawGate`]).
+    let mut skip_draw = false;
     let expired = || (!draw_through.get() && (cancelled() || ctl.is_cancelled())) || ctl.deadline().is_some_and(|d| Instant::now() >= d.max(floor));
     let signal: Vec<u32> = model.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
     if signal.len() < 2 {
@@ -2232,8 +2450,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let mut arch: Archive<Gen<LoopVar>> = Archive::new(opts.variants);
         let mut stop = || cancelled() || ctl.is_cancelled() || ctl.deadline().is_some_and(|d| Instant::now() >= d) || loop_deadline.is_some_and(|d| Instant::now() >= d);
         let clock = || t_loop.elapsed().as_secs_f64();
+        gate.1.enter(gate.0);
         let rep = optimise(&mut sp, &mut arch, &params, &mut stop, &clock);
         let pick = arch.pick(&obj).expect("the initial plan is always archived");
+        if ctl.is_cancelled() {
+            skip_draw = !gate.1.offer(gate.0, arch.items[pick].crit, gate.2);
+        } else {
+            gate.1.leave(gate.0);
+        }
         sp.restore(&arch.items[pick].payload.var);
         drop(sp);
         let loop_s = t_loop.elapsed().as_secs_f64();
@@ -2295,8 +2519,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             r.stage("after the TopoR loop", &st, &lr.events, &packer, bottom, &|w| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]));
         }
         tlog("TopoR loop", t_loop);
-        // The one drawing of the loop's pick runs to its end (only the time limit cuts it).
-        draw_through.set(true);
+        // The one drawing of the loop's pick runs to its end (only the time limit cuts it); after
+        // Cancel only the pick of one run is drawn (cancel-fix), the others stop here.
+        if skip_draw {
+            warnings.push("TopoR loop: Cancel / OK ended the loop; another run's pick is drawn".into());
+        } else {
+            draw_through.set(true);
+        }
     }
     let lr = lr;
     let t_draw = Instant::now();
@@ -3196,8 +3425,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // TOPO_NOREDUCE=1 (debug): leave the vias as drawn, to compare with the reduction.
     if opts.via_reduce && std::env::var("TOPO_NOREDUCE").is_err() {
         pre_snap = Some((out.clone(), necking.clone()));
-        let (rs, changed) = super::reduce::reduce_vias(&mut dr, &mut drawn, &mut placed, &mut plans, &mut via_h, &end_fixed, &frozen, b.n_signal, ctl.deadline().map(|d| d.max(floor)));
-        timed_out |= rs.timed_out;
+        let (rs, changed) = super::reduce::reduce_vias(&mut dr, &mut drawn, &mut placed, &mut plans, &mut via_h, &end_fixed, &frozen, b.n_signal, ctl.deadline().map(|d| d.max(floor)), &|| ctl.is_cancelled());
+        // Cancel / OK ends the via reduction (cancel-fix; anytime: every relabel accepted so far
+        // stays; measured on qmtech it took 12-22 s for 0-10 of ~110 vias). In the TopoR loop pick's
+        // one drawing that keeps the result complete; only the time limit makes it a cut-short one.
+        let limit_cut = rs.timed_out && ctl.deadline().is_some_and(|d| Instant::now() >= d.max(floor));
+        let cancel_cut = rs.timed_out && !limit_cut;
+        timed_out |= limit_cut || cancel_cut && !draw_through.get();
         for w in changed {
             let ci = conn_of[wire_conn[w]];
             necking.retain(|(c, _)| *c != ci);
@@ -3211,7 +3445,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             rs.accepted,
             rs.vias_removed,
             t_red.elapsed().as_secs_f64(),
-            if rs.timed_out { ", stopped by the time budget" } else { "" },
+            if limit_cut { ", stopped by the time budget" } else if cancel_cut { ", stopped by Cancel / OK" } else { "" },
             causes_before,
             causes(&plans, &drawn)
         ));
@@ -3807,7 +4041,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     let pre = pre_parts.map(|(c, a)| (c, with_parts(&result, a)));
     let vias_out: BTreeMap<usize, usize> = plans.iter().map(|(&w, pl)| (conn_of[wire_conn[w]], pl.vias.len())).collect();
-    (RoundOut { result, crit: crit_main, pre, lp: loop_end }, new_hints, Memory { edge: hist_out, own: own_out, vias: vias_out, plan: plan_carry })
+    (RoundOut { result, crit: crit_main, pre, lp: loop_end, skipped: skip_draw }, new_hints, Memory { edge: hist_out, own: own_out, vias: vias_out, plan: plan_carry })
 }
 
 /// D7: realise every coupled pair connection of `out`: the lead's drawn centre line becomes the P

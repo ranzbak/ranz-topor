@@ -270,6 +270,21 @@ pub fn cancelled() -> bool {
     })
 }
 
+/// Runs `f` with `flag` as the current thread's cancel flag (what [`cancelled`] reads); the flag
+/// before comes back after `f`, also when it panics. cancel-fix: the projection of the board
+/// (`[capacity] model = "cuts"`: minutes on a large board) has no `RunControl` to ask. O(1) + `f`.
+pub fn with_cancel<R>(flag: Arc<AtomicBool>, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<Arc<AtomicBool>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let prev = self.0.take();
+            CANCEL.with(|c| *c.borrow_mut() = prev);
+        }
+    }
+    let _restore = Restore(CANCEL.with(|c| c.replace(Some(flag))));
+    f()
+}
+
 /// Deadline passed or run cancelled: the single stop test of every deadline site. O(1).
 pub fn expired(deadline: Instant) -> bool {
     Instant::now() >= deadline || cancelled()
@@ -371,6 +386,24 @@ impl Job {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_cancel_installs_the_flag_for_its_scope_only() {
+        assert!(!cancelled());
+        let flag = Arc::new(AtomicBool::new(false));
+        with_cancel(flag.clone(), || {
+            assert!(!cancelled());
+            flag.store(true, Ordering::Relaxed);
+            assert!(cancelled());
+            // nested: the inner flag wins, the outer one comes back after
+            with_cancel(Arc::new(AtomicBool::new(false)), || assert!(!cancelled()));
+            assert!(cancelled());
+        });
+        assert!(!cancelled());
+        let caught = std::panic::catch_unwind(|| with_cancel(flag.clone(), || panic!("boom")));
+        assert!(caught.is_err());
+        assert!(!cancelled(), "a panic restores the flag before");
+    }
 
     #[test]
     fn the_run_sets_its_own_limit_only_when_nobody_did() {

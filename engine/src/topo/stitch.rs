@@ -108,6 +108,13 @@ fn main_elsewhere(reach: &PourReach, model: &BoardModel, net: i32, layer: Option
 /// Stitch the cut-off pour components of `items` (the routed copper, KiCad frame).
 /// `routed_pads` = model pad indices at the ends of routed connections of pour nets.
 pub fn stitch(model: &BoardModel, opts: &Options, reg: &Registry, items: &[Item], routed_pads: &[usize], deadline: Option<std::time::Instant>) -> StitchOut {
+    stitch_until(model, opts, reg, items, routed_pads, deadline, &|| false)
+}
+
+/// [`stitch`] that also ends after the pass in progress once `stop()` holds (cancel-fix: the run's
+/// Cancel). Every pass starts with a complete pour-reach check, so the pieces still cut off
+/// (`after`) are counted correctly also when it stops early.
+pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &[Item], routed_pads: &[usize], deadline: Option<std::time::Instant>, stop: &dyn Fn() -> bool) -> StitchOut {
     let mut out = StitchOut::default();
     if model.pours.iter().all(|z| z.fills.is_empty()) {
         return out;
@@ -118,7 +125,7 @@ pub fn stitch(model: &BoardModel, opts: &Options, reg: &Registry, items: &[Item]
         idx.insert(it);
     }
     let mut all: Vec<Item> = items.to_vec();
-    let expired = || deadline.is_some_and(|d| std::time::Instant::now() >= d) || crate::control::cancelled();
+    let expired = || deadline.is_some_and(|d| std::time::Instant::now() >= d) || crate::control::cancelled() || stop();
     let ok = |idx: &ItemIndex, its: &[Item]| checker.check_against(idx, its, &[]).violations.is_empty();
     // A via stays off the pads of its own net: no via in a pad unless `[vias] via_in_pad` (then
     // centred inside it), and never dipping partly into one (KiCad connection width, D1).

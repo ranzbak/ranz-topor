@@ -393,6 +393,9 @@ pub fn sheet_room(pr: &Projection, sheets: &[LayerSheet]) -> Vec<(usize, usize, 
             }
         };
         for (e, &[p, q]) in pr.edges.iter().enumerate() {
+            if crate::control::cancelled() {
+                return out; // cancel-fix: Cancel / OK during the projection; the room is not used
+            }
             if !pr.room[e][l].is_infinite() {
                 continue;
             }
@@ -468,6 +471,7 @@ fn cut_meets_gap(c: Vec2, d: Vec2, a: Vec2, b: Vec2) -> bool {
 pub fn bare_sheets(pr: &Projection, outline: &[(Vec2, Vec2)], o: &CutOpts) -> Result<Vec<LayerSheet>, String> {
     let terms: Vec<Vec2> = pr.obstacles.iter().filter(|ob| ob.net.is_some()).map(|ob| ob.center).collect();
     (0..pr.n_layers)
+        .take_while(|_| !crate::control::cancelled()) // cancel-fix: the sheets are not used then
         .map(|l| {
             let inp = SheetInput { proj: pr, outline, vias: &[], junctions: &[], terminals: &terms };
             LayerSheet::build(&inp, l, &o.sheet)

@@ -55,6 +55,7 @@ pub fn reduce_vias(
     frozen: &dyn Fn(WireId) -> bool,
     n_signal: usize,
     deadline: Option<Instant>,
+    stop: &dyn Fn() -> bool,
 ) -> (ReduceStats, BTreeSet<WireId>) {
     let mut stats = ReduceStats::default();
     let mut changed: BTreeSet<WireId> = BTreeSet::new();
@@ -66,7 +67,8 @@ pub fn reduce_vias(
         let mut progress = false;
         let ws: Vec<WireId> = placed.iter().filter(|(w, v)| !v.is_empty() && drawn.contains_key(w) && !frozen(**w)).map(|(&w, _)| w).collect();
         for w in ws {
-            if deadline.is_some_and(|d| Instant::now() >= d) {
+            // The time limit or (cancel-fix) a Cancel: every relabel accepted so far stays (anytime).
+            if deadline.is_some_and(|d| Instant::now() >= d) || stop() {
                 stats.timed_out = true;
                 break 'sweeps;
             }
