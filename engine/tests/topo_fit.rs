@@ -370,13 +370,17 @@ fn all_bounded(fx: &Fx, room: &[Vec<f64>]) {
 fn p2_room_row_end_is_the_pad_to_edge_gap_not_unbounded() {
     // channel_fit: the projection edges from the last U2 pad to the B.Cu keepout's corners (on the
     // board edge) were unbounded on F.Cu (the keepout is not on F.Cu); the F.Cu gap there is the
-    // pad-to-edge 0.50 mm, which P2 must see (the S3 plan went round the row end).
+    // pad-to-edge 0.50 mm, which P2 must see (the S3 plan went round the row end). Since Q14a the
+    // projection itself has that cut (the keepout's corners on the outline are the board edge, the
+    // pad's foot on the edge is kept), so the gap is in the per-edge room before the sheet fill
+    // (`[capacity] model = "cuts"`) as well as after it.
     for name in ["channel_fit", "model_gap_cut"] {
         let fx = load(name);
         let pr = &fx.b.proj;
-        let (room, ch) = sheet_rooms(&fx);
+        let (room, _) = sheet_rooms(&fx);
         all_bounded(&fx, &room);
         let f_cu = layer_idx(&fx, "F.Cu");
+        let ch: Vec<(usize, usize, f64)> = (0..pr.edges.len()).map(|e| (e, f_cu, room[e][f_cu])).collect();
         // The rightmost pad of the right row.
         let last = (0..pr.obstacles.len()).filter(|&o| pr.obstacles[o].layers.has(f_cu) && !pr.obstacles[o].drilled && pr.obstacles[o].poly.len() == 4 && (pr.obstacles[o].center.y.abs() - 6.0 * MM).abs() < 3.0 * MM).max_by(|&a, &b| pr.obstacles[a].center.x.total_cmp(&pr.obstacles[b].center.x)).expect("row pad");
         let right = pr.obstacles[last].poly.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);

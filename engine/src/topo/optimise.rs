@@ -342,6 +342,10 @@ impl Predicted {
         let n = unlayerable + forced;
         Predicted { count: cap.0 + n, graded: cap.1 + n as f64 }
     }
+    /// Plus the traversals through foreign copper `(count, graded)` ([`foreign_copper`]). O(1).
+    pub fn with_foreign(self, f: (usize, f64)) -> Predicted {
+        Predicted { count: self.count + f.0, graded: self.graded + f.1 }
+    }
     /// What the violations cost a move (mm): the `violation` weight `viol_mm` x the graded amount,
     /// so one more predicted violation costs at least `viol_mm` and one fewer gains as much.
     pub fn price(&self, viol_mm: f64) -> f64 {
@@ -352,6 +356,62 @@ impl Predicted {
     pub fn penalty(&self, viol_mm: f64) -> f64 {
         viol_mm * (self.graded - self.count as f64).max(0.0)
     }
+}
+
+/// Planned traversals through foreign copper (Q14b): a wire whose traversal of a triangle can
+/// lie on no layer that copper of another net (a pad, an existing via, a copper shape; or a
+/// no-tracks rule area) leaves free there, under the layering `layers` ([`layers_now`]: the layer
+/// of the run, both layers inside a via interval, so a via that can still go on the free side is
+/// no violation). In the drawing such a wire is a short (KiCad `shorting_items`), so the plan
+/// counts it as a violation like an over-full cut: costly, not failed (the wire stays placed and
+/// the loop's moves can take it out). One per wire and object it runs through; graded like the
+/// `violation` factor (`factors/violation.rs`: 1 + depth x length per 0.01 mm²) with the wire's
+/// pitch (width + clearance, the whole overlap) as the depth over the length of its traversals
+/// inside the object (straight chords between its passes). Returns `(count, graded)`.
+/// Polubasov 2010 («Многовариантная оптимизация»): "a design-rule violation cannot be compensated
+/// by any reduction of wire length". O(traversals x obstacles per triangle).
+pub fn foreign_copper(st: &State, layers: &[Vec<u64>]) -> (usize, f64) {
+    let pr = st.proj;
+    let all = if pr.n_layers >= 64 { u64::MAX } else { (1u64 << pr.n_layers) - 1 };
+    let (mut count, mut graded) = (0usize, 0.0f64);
+    for (w, wi) in st.wires.iter().enumerate() {
+        if !wi.alive || wi.tris.is_empty() {
+            continue;
+        }
+        let Some(lw) = layers.get(w).filter(|l| l.len() == wi.tris.len()) else { continue };
+        let n = wi.passes.len();
+        // Per object the length (nm) of this wire's traversals inside it.
+        let mut inside: Vec<(usize, f64)> = Vec::new();
+        for (k, &t) in wi.tris.iter().enumerate() {
+            let on = lw[k] & all;
+            if on == 0 {
+                continue;
+            }
+            let block = |o: usize| {
+                let ob = &pr.obstacles[o];
+                if ob.drilled { all } else { ob.layers.0 & all }
+            };
+            let foreign: Vec<usize> = pr.tri_obs[t].iter().copied().filter(|&o| pr.obstacles[o].net != Some(wi.net)).collect();
+            let blocked = foreign.iter().fold(0u64, |m, &o| m | block(o));
+            if on & !blocked != 0 {
+                continue;
+            }
+            let from = if k == 0 { pr.pos[wi.a] } else { st.pass_point(wi.passes[k - 1]) };
+            let to = if k == n { pr.pos[wi.b] } else { st.pass_point(wi.passes[k]) };
+            let len = (to - from).len();
+            for o in foreign.into_iter().filter(|&o| block(o) & on != 0) {
+                match inside.iter_mut().find(|x| x.0 == o) {
+                    Some(x) => x.1 += len,
+                    None => inside.push((o, len)),
+                }
+            }
+        }
+        for (_, len) in inside {
+            count += 1;
+            graded += super::factors::violation_amount(wi.w + wi.s, len);
+        }
+    }
+    (count, graded)
 }
 
 /// The loop's criteria of one topology (what the archive keeps): errors = violations = the

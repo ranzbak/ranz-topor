@@ -545,7 +545,7 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
     }
     let polys: Vec<&[Vec2]> = obstacles.iter().map(|ob| &ob.poly[..]).collect();
     let mask_of = |o: Option<usize>| o.map_or(u64::MAX, |i| if obstacles[i].drilled { u64::MAX } else { obstacles[i].layers.0 });
-    let feet = cuts::lct_feet(&verts, &sides, &polys, &|a, b| mask_of(a) & mask_of(b) != 0, o.lct_mm * MM, o.lct_eps_mm * MM);
+    let feet = cuts::lct_feet(&verts, &sides, &polys, &mask_of, o.lct_mm * MM, o.lct_eps_mm * MM);
     // Feet per side, in order along it.
     let mut on_side: Vec<Vec<(f64, Vec2)>> = vec![Vec::new(); sides.len()];
     for f in feet.iter().filter(|f| f.t > 0.0 && f.t < 1.0) {
@@ -612,6 +612,25 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
         }
     }
     points.extend(nodes.iter().map(|&p| (p, VertKind::Node)));
+    // Q14a: a rule area's corner (or foot) on the board outline is the board edge for copper: it
+    // bounds every layer with the copper-to-edge clearance. As the rule area's own vertex (the
+    // first kind of a coincident point wins) a cut from a pad to it had no room on the layers
+    // the rule area leaves open, so the planner sent wires between a pad and the edge where the
+    // edge clearance leaves no room (planned_crossing_window, double_cross_bait: B.Cu closed by a
+    // rule area along the outline). TopoR 6.3 manual (`docs/literature/eremex2017-topor63-user-
+    // manual.pdf` p. 57, «Board Edge Clearance»): one clearance "between wires and the board
+    // edge", whatever else covers the edge. Copper obstacles on the outline (castellated pads)
+    // keep their own kind (pad exits).
+    if !segs.is_empty() {
+        let keepout: Vec<bool> = src.iter().map(|s| matches!(s, Src::Keepout(_))).collect();
+        for p in points.iter_mut() {
+            if let VertKind::Outline(ob) = p.1 {
+                if keepout.get(ob).copied().unwrap_or(false) && segs.iter().any(|&(a, b)| seg_dist(p.0, a, b) < 1.0) {
+                    p.1 = VertKind::Edge;
+                }
+            }
+        }
+    }
     let mut proj = match Projection::build_reported(n, obstacles, &points, &cons, inside) {
         Ok(p) => p,
         Err(f) => {

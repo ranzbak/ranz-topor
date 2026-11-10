@@ -1463,10 +1463,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             Objective::LengthVias { mm_per_via } => len_mm + mm_per_via * lr.vias as f64,
             Objective::Area => area_mm + via_area_mm * lr.vias as f64,
         };
-        // Predicted violations: over-full edge-layers, vias without a site and (M-B2) crossings
-        // that cannot be layered (both stretches held to one layer: a short when drawn).
-        let graded = if cuts_on { cm.total() + overflow_mm * lr.unlayerable.len() as f64 } else { 0.0 };
-        (own, cm.overfull() + lr.unlayerable.len(), lr.vias, graded)
+        // Predicted violations: over-full edge-layers, vias without a site, (M-B2) crossings
+        // that cannot be layered (both stretches held to one layer: a short when drawn) and
+        // (Q14b) traversals through foreign copper (a short when drawn).
+        let fc = super::optimise::foreign_copper(st, &super::optimise::layers_now(st, &lr.events, bottom));
+        let graded = if cuts_on { cm.total() + overflow_mm * (lr.unlayerable.len() as f64 + fc.1) } else { 0.0 };
+        (own, cm.overfull() + lr.unlayerable.len() + fc.0, lr.vias, graded)
     };
     // Lexicographic: over-full edge-layers, then the objective (cut model: one graded sum).
     let p4_better = |a: &Score, b: &Score| if cuts_on { a.0 + a.3 < b.0 + b.3 - 1e-6 } else { a.1 < b.1 || (a.1 == b.1 && a.0 < b.0 - 1e-6) };
@@ -1862,7 +1864,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut loop_end: Option<LoopEnd> = None;
     let mut loop_json: Option<serde_json::Value> = None;
     if opts.opt_loop == "topor" && !expired() {
-        use super::optimise::{criteria_of, evaluation, k_osc, layers_now, optimise, reroute_set, wire_amp, CycleCtx, CycleStats, Emphasis, Gen, LoopParams, Predicted, Rerouter, Space, VIA_FACTORS};
+        use super::optimise::{criteria_of, evaluation, foreign_copper, k_osc, layers_now, optimise, reroute_set, wire_amp, CycleCtx, CycleStats, Emphasis, Gen, LoopParams, Predicted, Rerouter, Space, VIA_FACTORS};
         let t_loop = Instant::now();
         // The loop's own emergency stop: a share of the time left (the rest is the drawing's).
         let loop_deadline = ctl.deadline().map(|d| {
@@ -1875,11 +1877,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // measure the archive counts (errors) and every loop move pays at the `violation` weight
         // ([`Predicted`]): the capacity model's over-full edge-layers (cut model: over-full cuts)
         // and vias without a site, graded by how far over; the crossings no layer separates; the
-        // connections placed without a legal path.
+        // connections placed without a legal path; the traversals through foreign copper (Q14b,
+        // [`foreign_copper`]: a short when drawn).
         let measure = |st: &State, lr: &layers::LayerReport| -> Predicted {
             let dirs = dirs_of(st);
             let cm = if cuts_on { CapModel::new_cut(st, &packer, &dirs, &lr.events, bottom, overflow_mm) } else { CapModel::new(st, &packer, &dirs, &lr.events, bottom, overflow_mm) };
-            Predicted::of(cm.violations(), lr.unlayerable.len(), forced.borrow().len())
+            Predicted::of(cm.violations(), lr.unlayerable.len(), forced.borrow().len()).with_foreign(foreign_copper(st, &layers_now(st, &lr.events, bottom)))
         };
         /// One topological variant: the routed state, the wire -> connection map, the layering,
         /// the connections placed without a legal path, the reroute counters and the predicted
@@ -2513,6 +2516,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         fail(&mut out, cv, msg);
         dropped.insert(victim);
     }
+    // Q14b: the plan handed to the drawing, its traversals through foreign copper (each a
+    // violation in the loop's measure and the P4 pick; a short if the drawing cannot avoid it).
+    let fc_plan = super::optimise::foreign_copper(&st, &super::optimise::layers_now(&st, &lr.events, bottom));
+    warnings.push(format!(
+        "foreign copper (Q14b): the plan handed to the drawing runs {} times through copper of another net or a no-tracks rule area (graded {:.2}; each a violation in the plan's measure, a short if the drawing cannot avoid it)",
+        fc_plan.0, fc_plan.1
+    ));
     if std::env::var("TOPO_VIADBG").is_ok() {
         let dirs = dirs_of(&st);
         let cm = CapModel::new(&st, &packer, &dirs, &lr.events, bottom, 1.0);
@@ -3894,6 +3904,26 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             n_via_forced,
             unlayerable_errors
         ));
+        // Q14b: a trace whose copper overlaps copper of another net (a pad, an existing via, a
+        // copper shape, a routed track or via) or runs inside a no-tracks rule area is a short
+        // the optimiser could not take out; like a crossing on one layer (above), the user sees it
+        // loudly, once per trace and object, with the layer and place (costly, not failed: the
+        // trace stays drawn).
+        let mut seen: BTreeSet<(usize, &str)> = BTreeSet::new();
+        for v in viol_list.iter().filter(|v| v.kind == "short") {
+            if seen.insert((v.conn, v.against.as_str())) {
+                warnings.push(format!(
+                    "CRITICAL: trace {} ({} -> {}) runs through {} on {} at ({:.3}, {:.3}) mm: the optimiser could not take it out; it is drawn and the overlap is a violation (a short) to fix by hand",
+                    v.name,
+                    v.from,
+                    v.to,
+                    v.against,
+                    v.layer,
+                    v.at[0] as f64 / MM,
+                    v.at[1] as f64 / MM
+                ));
+            }
+        }
         for (ci, ev) in viol_events(model, dec, &out).into_iter().filter(|(_, e)| matches!(e, Event::Violation { .. })) {
             let c = &dec.connections[ci];
             for f in reg.findings(std::slice::from_ref(&ev), &WireCtx { net: c.net, tier: c.tier }) {
