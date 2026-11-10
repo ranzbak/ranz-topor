@@ -762,6 +762,11 @@ impl LayerSheet {
         let mut hit_ab: [Vec<(f64, f64, f64, f64)>; 8] = Default::default();
         let mut shadowed_n = 0usize;
         for p in 0..nv {
+            // cancel-fix: Cancel / OK during the projection (`control::with_cancel`); the sheet is
+            // then dropped unused (core.rs `route_topo`).
+            if crate::control::cancelled() {
+                break;
+            }
             let Some(fp) = self.vfeat[p] else { continue };
             if !self.free_vertex(p) {
                 continue;
