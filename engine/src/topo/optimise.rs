@@ -140,6 +140,11 @@ pub struct CycleStats {
     pub undone: usize,
     /// The cycle's time (s; report only).
     pub busy_s: f64,
+    /// 5.4 `[vias] pair_min`: via pairs removed by the pair lift (Luzin-Popov 2013), and wires
+    /// with a via pair laid again round what they dived under / kept.
+    pub pair_lifts: usize,
+    pub pair_relaid: usize,
+    pub pair_relaid_kept: usize,
 }
 
 impl CycleStats {
@@ -155,6 +160,9 @@ impl CycleStats {
         self.cross_kept += o.cross_kept;
         self.undone += o.undone;
         self.busy_s += o.busy_s;
+        self.pair_lifts += o.pair_lifts;
+        self.pair_relaid += o.pair_relaid;
+        self.pair_relaid_kept += o.pair_relaid_kept;
     }
 }
 

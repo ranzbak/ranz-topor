@@ -1160,6 +1160,42 @@ pub struct Options {
     /// D7 (`[diffpair] via_pair_axes`): allowed directions (degrees) of the line through the two
     /// vias of a via pair.
     pub diffpair_via_axes: Vec<f64>,
+    /// 5.4 (`topor.toml [vias] size`): which via the router puts at a layer change, in the plan
+    /// (room, via sites) and in the drawing. `"net_class"` (default, the behaviour before 5.4) =
+    /// the net class via first, then the smaller pre-defined / fab-profile vias for tight spots
+    /// ([`crate::vias::via_sizes`]). `"board_min"` = the smallest via the Board Setup minimums
+    /// allow (min via diameter, min through-hole drill, min annular ring: the supplier's
+    /// capability) that still carries the trace's current: drill = the smallest with
+    /// pi x drill >= the track width (a diff pair: its `diff_pair_width`), rounded up to
+    /// `via_drill_grid_nm`; diameter = max(min via diameter, drill + 2 x min annular ring)
+    /// (user rule 2026-11-10, memory power-via-rules rule 0; [`crate::vias::rule_size`]).
+    pub via_size: String,
+    /// 5.4 (`[vias] drill_grid_mm`): with `via_size = "board_min"` the drill is rounded up to a
+    /// multiple of this (nm; default 0.01 mm; a fab usually offers 0.05 mm steps). 0 = no rounding.
+    pub via_drill_grid_nm: i64,
+    /// 5.4 (`[vias] pair_min`): local via-pair minimisation in the topology (Luzin, Popov & Popov
+    /// 2013 p. 2 steps 1-10, [`crate::topo::viaopt`]): a via pair whose stretch could stay on the
+    /// layer of its neighbours (by re-laying it round what it dives under, or by moving the
+    /// stretch between two adjacent vias to the other layer) is removed when that is cheaper by
+    /// the plan's price (mm + via price); a priced move, never a gate. Runs in the TopoR loop
+    /// (`loop = "topor"`, every cycle) and once before the drawing in the `cycles` loop.
+    pub via_pair_min: bool,
+    /// 5.4 (`[vias] pair_max_mm`): the via-pair minimisation looks at pairs of vias joined by a
+    /// stretch at most this long (mm; Luzin-Popov 2013 p. 2: "shorter than a given length, e.g.
+    /// 10 mm").
+    pub via_pair_max_mm: f64,
+    /// 5.4 (`[vias] relocate`): the plan puts every via at the point of its free interval where
+    /// the forces of the copper around it balance (Dayan & Dai 1991; TopoR FreeStyle "Shift
+    /// vias", 6.3 manual p. 179; Luzin-Popov 2013 p. 3), equal clearance between two neighbours,
+    /// and the drawing takes that site first. A move never raises the predicted violations.
+    pub via_relocate: bool,
+    /// 5.4 (`[search] branch_relocate`): the plan moves each free junction (T-point) of a net
+    /// tree to the point of least length of its three arms (the Fermat / Steiner point, all
+    /// angles < 120 degrees), and pulls a junction out of a pad when the two arms at the pad meet
+    /// at less than 120 degrees; a junction whose arms meet at >= 120 degrees at a pad goes into
+    /// that pad (Popov & Popov EDN 2013; Dayan & Dai 1991 pp. 2-5). Any-angle point; with the
+    /// octilinear drawing style the point of least octilinear length (`viaopt::fermat_octi`).
+    pub branch_relocate: bool,
 }
 
 impl Default for Options {
@@ -1250,6 +1286,12 @@ impl Default for Options {
             diffpair_route: true,
             diffpair_zip_max_nm: 3_000_000,
             diffpair_via_axes: vec![0.0, 45.0, 90.0, 135.0],
+            via_size: "net_class".into(),
+            via_drill_grid_nm: 10_000,
+            via_pair_min: false,
+            via_pair_max_mm: 10.0,
+            via_relocate: false,
+            branch_relocate: false,
         }
     }
 }

@@ -487,6 +487,9 @@ pub struct DrawStats {
     pub octi_ok: usize,
     pub octi_rejected: usize,
     pub octi_s: f64,
+    /// 5.4: vias placed at the plan's own site / planned sites that broke a rule there (searched).
+    pub planned_sites: usize,
+    pub planned_sites_missed: usize,
 }
 
 /// Per-stretch widths that replace a wire's single width (the drawing witness, variant A: the
@@ -673,6 +676,14 @@ pub struct Drawer<'a> {
     /// Where a branch's end (wire, end 0|1) lies on its trunk's drawn copper (D5 net trees): the
     /// drawing ends the branch there instead of at its junction vertex.
     pub end_at: BTreeMap<(WireId, usize), Vec2>,
+    /// 5.4 `[vias] relocate`: the site the plan decided for via `i` of wire `w`, `(traversal,
+    /// point)` ([`super::viaopt::relocate_vias`]); [`Drawer::place_vias`] takes it when it is
+    /// legal there, else searches as before. Empty: no planned sites.
+    pub via_site: BTreeMap<(WireId, usize), (usize, Vec2)>,
+    /// 5.4 `[search] branch_relocate`: a junction point the plan moved, per wire and traversal:
+    /// the wire's run is split there (drawn through it), like at a via without a layer change
+    /// ([`super::viaopt::relocate_junctions`]). Empty: none.
+    pub split_at: BTreeMap<WireId, Vec<(usize, Vec2)>>,
     /// M-B1 never drop: a run that no attempt draws legally, or a via without a legal site, is
     /// placed anyway on the attempt / site with the least `violation` price, and its violations
     /// are recorded ([`WireOut::viol`], [`Drawer::via_viol`]). Off: such a wire fails.
@@ -752,6 +763,8 @@ impl<'a> Drawer<'a> {
             lanes: BTreeMap::new(),
             drawn_x: vec![None; st.passes.len()],
             end_at: BTreeMap::new(),
+            via_site: BTreeMap::new(),
+            split_at: BTreeMap::new(),
             force: false,
             via_viol: BTreeMap::new(),
             octi: super::octi::OctiCfg::from_opts(opts),
@@ -1254,6 +1267,25 @@ impl<'a> Drawer<'a> {
         for (i, &(ka, kb)) in plan.vias.iter().enumerate() {
             let ka = out.last().map_or(ka, |l| ka.max(l.0));
             let mut done = false;
+            // 5.4: the plan's site first, as it is, when every rule holds there.
+            if let Some(&(k, p)) = self.via_site.get(&(w, i)).filter(|s| (ka..=kb.max(ka)).contains(&s.0)) {
+                for &sz in &sizes {
+                    let item = via_item(net, p, sz, Some(w));
+                    if self.via_side_ok(w, k, p, plan.layers[i], plan.layers[i + 1]) && self.check_ok(&item) && self.via_hole_ok(p, sz, net) && self.via_own_pad_ok(p, sz, net) {
+                        let id = self.commit(&item);
+                        self.via_marks.push((w, k, p, plan.layers[i], plan.layers[i + 1], id));
+                        ids.push(id);
+                        out.push((k, p, sz));
+                        self.stats.planned_sites += 1;
+                        done = true;
+                        break;
+                    }
+                }
+                if done {
+                    continue;
+                }
+                self.stats.planned_sites_missed += 1;
+            }
             'sizes: for &sz in &sizes {
                 let need_r = 0.5 * sz.d as f64 + self.model.rules.net_rule(net).clearance as f64;
                 let at = plan.at.get(i).copied().filter(|&k| (ka..=kb.max(ka)).contains(&k));
@@ -1996,6 +2028,33 @@ impl<'a> Drawer<'a> {
     /// Draw wire `w` with its `plan` and placed `vias`; on success its copper is indexed.
     /// `ids` collects the indexed item ids for a rollback by the caller.
     pub fn draw_wire(&mut self, w: WireId, plan: &Plan, vias: &[(usize, Vec2, ViaSize)], ids: &mut Vec<usize>) -> WireOut {
+        // 5.4 `[search] branch_relocate`: a junction point the plan moved splits the run it lies
+        // in, like a via that keeps the layer (a zero-size via, never emitted).
+        let split = self.split_at.get(&w).filter(|v| !v.is_empty()).cloned();
+        let (plan_s, vias_s);
+        let (plan, vias) = match split {
+            None => (plan, vias),
+            Some(sp) => {
+                let mut ev: Vec<(usize, Vec2, ViaSize, Option<usize>)> = vias.iter().enumerate().map(|(i, v)| (v.0, v.1, v.2, Some(i))).collect();
+                for &(k, p) in &sp {
+                    if !vias.iter().any(|v| v.0 == k) {
+                        ev.push((k, p, ViaSize { d: 0, drill: 0 }, None));
+                    }
+                }
+                ev.sort_by_key(|e| (e.0, e.3.is_some()));
+                let mut layers = vec![plan.layers[0]];
+                for e in &ev {
+                    let l = match e.3 {
+                        Some(i) => plan.layers[i + 1],
+                        None => *layers.last().expect("one layer"),
+                    };
+                    layers.push(l);
+                }
+                plan_s = Plan { layers, vias: ev.iter().map(|e| (e.0, e.0)).collect(), at: ev.iter().map(|e| e.0).collect() };
+                vias_s = ev.iter().map(|e| (e.0, e.1, e.2)).collect::<Vec<_>>();
+                (&plan_s, &vias_s[..])
+            }
+        };
         let (st, pr) = (self.st, &self.b.proj);
         let wi = &st.wires[w];
         let n = wi.passes.len();
@@ -2351,7 +2410,7 @@ impl<'a> Drawer<'a> {
                 return out;
             }
         }
-        for &(_, p, sz) in vias {
+        for &(_, p, sz) in vias.iter().filter(|v| v.2.d > 0) {
             out.items.push(via_item(wi.net, p, sz, Some(w)));
             out.vias.push((p, sz));
         }
