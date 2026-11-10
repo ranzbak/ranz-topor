@@ -1198,6 +1198,15 @@ pub struct Options {
     /// that pad (Popov & Popov EDN 2013; Dayan & Dai 1991 pp. 2-5). Any-angle point; with the
     /// octilinear drawing style the point of least octilinear length (`viaopt::fermat_octi`).
     pub branch_relocate: bool,
+    /// 5.4 (`[vias] between_crossings`): a via sits strictly between the two events of its
+    /// interval (crossings, tees, one-layer triangles, narrow passes), never in a crossing's own
+    /// triangle (Polubasov 2001 p. 4: a layer change lies on the wire piece between two vertices
+    /// of the domain graph, the crossings). The plan (layer refinement, via sites, the TopoR
+    /// loop's price) counts an interval without a triangle there as a via without a site; the
+    /// drawing searches only those triangles. false = the interval includes the triangles of its
+    /// events (before 5.4; Q15: wiccon, a via planned in the crossing's triangle cannot be drawn
+    /// and the wire is forced across other nets).
+    pub via_between: bool,
 }
 
 impl Default for Options {
@@ -1294,6 +1303,7 @@ impl Default for Options {
             via_pair_max_mm: 10.0,
             via_relocate: false,
             branch_relocate: false,
+            via_between: false,
         }
     }
 }

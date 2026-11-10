@@ -344,6 +344,9 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
             let obs: Vec<usize> = (0..st.proj.obstacles.len()).filter(|&o| st.proj.obstacles[o].poly.iter().any(|&q| inb(q)) || inb(st.proj.obstacles[o].center)).collect();
             let net = st.wires[w].net;
             let wires: Vec<WireId> = alive.iter().copied().filter(|&u| st.wires[u].net != net && (tracks[u].pts.iter().any(|&q| inb(q)) || tracks[u].pts.windows(2).any(|x| inb((x[0] + x[1]) * 0.5)))).collect();
+            // The traversals the via may take: the plan's range (with [vias] between_crossings
+            // strictly between the events, never a crossing's triangle).
+            let (ka, kb) = pl.vias.get(i).map_or((ka, kb), |&(a, b)| (a, b.max(a)));
             vs.push(V { w, i, lo, hi, ka, kb, near: Near { obs, wires } });
             sites.push(Site { wire: w, i, k, p });
         }

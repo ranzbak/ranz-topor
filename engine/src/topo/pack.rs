@@ -206,6 +206,9 @@ pub struct Packer<'a> {
     /// another net's via planned in the same triangle has none there unless the triangle holds
     /// two discs ([`super::refine::CapModel`]).
     pub reserve_sites: bool,
+    /// 5.4 `[vias] between_crossings`: via intervals exclude the triangles of their events
+    /// ([`super::refine::via_ranges`]).
+    pub via_between: bool,
     /// M-45: the drawing is octilinear; a pass's oblique factor is the octilinear one
     /// ([`super::demand::octi_stretch`]).
     pub octi: bool,
@@ -309,6 +312,7 @@ impl<'a> Packer<'a> {
             free_cache: RefCell::new(HashMap::new()),
             via_squeeze: 0.0,
             reserve_sites: false,
+            via_between: false,
             octi: false,
             cuts: None,
         }
@@ -365,6 +369,7 @@ impl<'a> Packer<'a> {
         p.via_d0 = first(0);
         p.via_d = model.nets.iter().map(|n| (n.code, first(n.code))).collect();
         p.reserve_sites = opts.reserve_via_sites;
+        p.via_between = opts.via_between;
         p.octi = opts.draw_style == "octilinear" && opts.octi_room;
         if opts.capacity_model == "cuts" {
             p.cuts = Some(super::cutmodel::CutCtx::new(super::cutmodel::CutOpts::from_options(opts), opts.cut_vias, p.outline.clone()));

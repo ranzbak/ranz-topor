@@ -1388,6 +1388,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // TOPO_NOCAP=1 (debug): assign layers for vias only, to compare with the capacity refinement.
         cap_mm: if std::env::var("TOPO_NOCAP").is_ok() { 0.0 } else { reg.price(&Event::Overflow { wire: 0, edge: 0 }, &WireCtx::default()) },
         cap_vias: std::env::var("TOPO_CAPVIA").is_ok(),
+        via_between: opts.via_between,
         ..LayerParams::default()
     };
     let sub = super::capacity::subset_check(&st);
@@ -2730,6 +2731,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         if st.wires[w].alive {
             let mut p = plan(&lr.events[w], b.n_signal);
             p.at = cm_plan.via_k[w].clone();
+            // 5.4 `[vias] between_crossings`: the drawing searches the traversals strictly
+            // between the events (the plan's ranges), never a crossing's own triangle.
+            if opts.via_between && cm_plan.via_iv[w].len() == p.vias.len() {
+                p.vias = cm_plan.via_iv[w].clone();
+            }
             // A junction's traversal holds no via of its trunk (the tee keeps one layer there),
             // except at the junction itself on two layers, where P3 makes the tee one domain and
             // the via may stand at the tee (D6b; the drawing tries only the turn vertex there).
