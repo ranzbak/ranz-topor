@@ -655,6 +655,25 @@ fn near_weight(d: f64, r: f64) -> f64 {
     1.0 / (1.0 + x * x)
 }
 
+/// The P4 score of a plan: (objective, predicted violations, vias, graded over-full price of the
+/// cut model, 0 for the per-edge model).
+type Score = (f64, usize, usize, f64);
+
+/// The projection edges of the passes nearest to cut items `(wire, traversal)` (where a wire
+/// crosses or wraps the cut), ascending.
+fn item_edges(st: &State, items: &[(WireId, usize)]) -> Vec<usize> {
+    let mut v: Vec<usize> = items
+        .iter()
+        .filter_map(|&(w, k)| {
+            let wi = st.wires.get(w).filter(|wi| wi.alive && !wi.passes.is_empty())?;
+            Some(st.passes[wi.passes[k.min(wi.passes.len() - 1)]].edge)
+        })
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
 /// Distance from `p` to the segment `a`-`b`.
 fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
     let ab = b - a;
@@ -1203,10 +1222,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let r = 0.5 * model.rules.default.via_d as f64 + model.rules.default.clearance as f64;
         std::f64::consts::PI * r * r * b.signal_layers.len().max(1) as f64 / ws0 / MM
     };
-    let score = |st: &State, lr: &layers::LayerReport| -> (f64, usize, usize) {
+    // `[capacity] model = "cuts"` (shopping list 3.2): P4 is priced by the per-layer cuts: the
+    // round's victims come from the over-full cuts, the moves keep their changes on price alone
+    // (no hard capacity tests) and the pick of the best round is one graded sum (the objective
+    // plus the over-full price of the cuts, vias without a site and unlayerable crossings at the
+    // `overflow` weight; design docs/dev/inflated-sketch.md §4.4). The count stays in the report.
+    let cuts_on = packer.cuts.is_some();
+    let score = |st: &State, lr: &layers::LayerReport| -> Score {
         let polys = polys_of(st);
         let dirs = dirs_of(st);
-        let cm = CapModel::new(st, &packer, &dirs, &lr.events, bottom, overflow_mm);
+        let cm = if cuts_on { CapModel::new_cut(st, &packer, &dirs, &lr.events, bottom, overflow_mm) } else { CapModel::new(st, &packer, &dirs, &lr.events, bottom, overflow_mm) };
         let (mut len_mm, mut area_mm) = (0.0, 0.0);
         for (w, pl) in polys.iter().enumerate().filter(|(w, _)| st.wires[*w].alive) {
             let l = pl.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>() / MM;
@@ -1219,10 +1244,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         };
         // Predicted violations: over-full edge-layers, vias without a site and (M-B2) crossings
         // that cannot be layered (both stretches held to one layer: a short when drawn).
-        (own, cm.overfull() + lr.unlayerable.len(), lr.vias)
+        let graded = if cuts_on { cm.total() + overflow_mm * lr.unlayerable.len() as f64 } else { 0.0 };
+        (own, cm.overfull() + lr.unlayerable.len(), lr.vias, graded)
     };
-    // Lexicographic: over-full edge-layers, then the objective.
-    let p4_better = |a: &(f64, usize, usize), b: &(f64, usize, usize)| a.1 < b.1 || (a.1 == b.1 && a.0 < b.0 - 1e-6);
+    // Lexicographic: over-full edge-layers, then the objective (cut model: one graded sum).
+    let p4_better = |a: &Score, b: &Score| if cuts_on { a.0 + a.3 < b.0 + b.3 - 1e-6 } else { a.1 < b.1 || (a.1 == b.1 && a.0 < b.0 - 1e-6) };
     // Reroute counter per connection: the P4 moves pay the `reroute` factor's price for it.
     // (Measured: ripping the least moved wires first in the negotiated rip-up routed fewer
     // connections on dcsgonebadge and qmtech, so the rip order stays routed-last first.)
@@ -1284,6 +1310,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             ripped: *ripped_total,
             max_ripped: opts.max_ripped,
             tight: Vec::new(),
+            over_mm: cuts_on.then_some(overflow_mm),
             tally: Tally::default(),
         };
         let mut resolved = 0usize;
@@ -1336,13 +1363,22 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             break;
         }
         let dirs = dirs_of(&st);
-        let cm = CapModel::new(&st, &packer, &dirs, &lr.events, bottom, 1.0);
-        let bad = cm.overfull_list();
+        let cm = if cuts_on { CapModel::new_cut(&st, &packer, &dirs, &lr.events, bottom, 1.0) } else { CapModel::new(&st, &packer, &dirs, &lr.events, bottom, 1.0) };
+        // Cut model: the over-full cuts (most over-full first) and the projection edges where
+        // their wires cross them; per-edge model: the over-full edge-layers.
+        let bad_cuts: Vec<(usize, usize, f64)> = cm.cut.as_ref().map(|c| c.overfull_list()).unwrap_or_default();
+        let bad = if cm.cut.is_some() { Vec::new() } else { cm.overfull_list() };
         let nosite = cm.nosite_wires();
-        if bad.is_empty() && nosite.is_empty() {
+        if bad.is_empty() && bad_cuts.is_empty() && nosite.is_empty() {
             break;
         }
         let mut bad_edges: Vec<usize> = bad.iter().map(|x| x.0).collect();
+        if let Some(c) = cm.cut.as_ref() {
+            for &(l, ci, _) in &bad_cuts {
+                bad_edges.extend(item_edges(&st, &c.items_at(l, ci)));
+            }
+            bad_edges.sort_unstable();
+        }
         bad_edges.dedup();
         for &e in &bad_edges {
             history[e] += 1.0;
@@ -1383,6 +1419,23 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let w = st.passes[p].wire;
                 gone.insert(w);
                 victims.insert(w);
+            }
+        }
+        // Cut model: per over-full cut, its wires routed last first until the rest fits.
+        if let Some(c) = cm.cut.as_ref() {
+            for &(l, ci, _) in &bad_cuts {
+                let mut on: Vec<WireId> = c.items_at(l, ci).into_iter().map(|x| x.0).filter(|&w| st.wires[w].alive && wire_conn.get(w).is_some_and(|&x| x != usize::MAX)).collect();
+                on.sort_unstable();
+                on.dedup();
+                on.sort_by_key(|&w| (std::cmp::Reverse(rank[wire_conn[w]]), w));
+                let mut gone: BTreeSet<WireId> = victims.clone();
+                for w in on {
+                    if c.fits_without(l, ci, &gone) {
+                        break;
+                    }
+                    gone.insert(w);
+                    victims.insert(w);
+                }
             }
         }
         let alive = st.wires.iter().filter(|w| w.alive).count();
@@ -1483,13 +1536,26 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             max_ripped: opts.max_ripped,
             tight: {
                 let dirs = dirs_of(&st);
-                let cm = CapModel::new(&st, &packer, &dirs, &lr.events, bottom, overflow_mm);
                 let mut t = vec![false; proj.edges.len()];
-                for (e, _) in cm.overfull_list() {
-                    t[e] = true;
+                if cuts_on {
+                    // The projection edges where the wires of an over-full cut cross it.
+                    let cm = CapModel::new_cut(&st, &packer, &dirs, &lr.events, bottom, overflow_mm);
+                    if let Some(c) = cm.cut.as_ref() {
+                        for (l, ci, _) in c.overfull_list() {
+                            for e in item_edges(&st, &c.items_at(l, ci)) {
+                                t[e] = true;
+                            }
+                        }
+                    }
+                } else {
+                    let cm = CapModel::new(&st, &packer, &dirs, &lr.events, bottom, overflow_mm);
+                    for (e, _) in cm.overfull_list() {
+                        t[e] = true;
+                    }
                 }
                 t
             },
+            over_mm: cuts_on.then_some(overflow_mm),
             tally: Tally::default(),
         };
         let mut st2 = st.clone();
@@ -1532,10 +1598,24 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // Label moves against the drawing's packer: flips, via shifts, segment lifting.
         let dirs = dirs_of(&st);
         let n_sig = if b.n_signal == 0 { proj.n_layers } else { b.n_signal };
-        let cm = CapModel::new(&st, &packer, &dirs, &lr.events, bottom, overflow_mm);
+        let cm = if cuts_on { CapModel::new_cut(&st, &packer, &dirs, &lr.events, bottom, overflow_mm) } else { CapModel::new(&st, &packer, &dirs, &lr.events, bottom, overflow_mm) };
         let (v0, o0) = (lr.vias, cm.overfull());
         let (mask, partner) = (lr.mask.clone(), lr.partner.clone());
-        let mut lb = Labels { st: &st, cm, evl: lr.events.clone(), mask: &mask, partner: &partner, bottom, via_mm: lp.via_mm, n_signal: n_sig, evals: 0, max_evals: opts.max_moves, tally: Tally::default() };
+        let mut lb = Labels {
+            st: &st,
+            cm,
+            evl: lr.events.clone(),
+            mask: &mask,
+            partner: &partner,
+            bottom,
+            via_mm: lp.via_mm,
+            n_signal: n_sig,
+            evals: 0,
+            max_evals: opts.max_moves,
+            strict: !cuts_on,
+            add_vias: cuts_on && opts.cut_vias,
+            tally: Tally::default(),
+        };
         let lt = descend_labels(&mut lb);
         let o1 = lb.cm.overfull();
         let evl = std::mem::take(&mut lb.evl);

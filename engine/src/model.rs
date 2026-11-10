@@ -1075,7 +1075,10 @@ pub struct Options {
     /// `"cuts"`: the per-layer cut test (`topo::cutmodel`, the critical cuts of each layer's sheet
     /// in the planning norm) with the graded over-full price `overflow x phi` per cut; P2's
     /// per-edge room of an edge with an end that is no copper on a layer then comes from that
-    /// layer's sheet (`topo::cutmodel::sheet_room`, shopping list 2.3).
+    /// layer's sheet (`topo::cutmodel::sheet_room`, shopping list 2.3), and P4 is priced by the
+    /// cuts (shopping list 3.2): victims of the negotiated rounds are the wires of over-full cuts,
+    /// the topology and label moves keep a change by its graded total (no hard capacity test) and
+    /// the pick of the best round is objective + over-full price.
     pub capacity_model: String,
     /// `[capacity] overflow_softness` (model = "cuts"): the softness `tau` of the graded over-full
     /// price, in track pitches: the price of a cut rises smoothly from almost 0 at a slack of a few

@@ -28,6 +28,12 @@
 //! over-full edge-layer) drops, the via count does not rise and no edge-layer they touch gets
 //! more over-full (the drawing's capacity test, [`pack`](super::pack)).
 //!
+//! `[capacity] model = "cuts"` (shopping list 3.2; design `docs/dev/inflated-sketch.md` §4.4):
+//! the hard tests become prices. A topological move pays the `overflow` weight per over-room or
+//! unsafe pass instead of being refused for more of them ([`Topo::over_mm`]); a label move is
+//! priced by the per-layer cuts ([`super::cutmodel::CutPrice`], the change of the graded
+//! over-full price) plus the via price, and kept on that price alone ([`Labels::strict`]).
+//!
 //! Deterministic: candidates in wire, event and edge order; Vec + index ids.
 //!
 //! Complexity: a wire's price is O(path x traversals per triangle); a reroute adds one search
@@ -119,6 +125,10 @@ pub struct Topo {
     /// Edges that are over-full on some layer under the current labelling (the drawing's packer):
     /// a move may not add passes through them (empty = no such test).
     pub tight: Vec<bool>,
+    /// Shopping list 3.2 (`[capacity] model = "cuts"`): the price of one over-room or unsafe pass
+    /// (the `overflow` weight); a move is then kept on its price alone, these passes priced in.
+    /// `None`: the hard test (a move with more such passes is refused whatever its price).
+    pub over_mm: Option<f64>,
     pub tally: Tally,
 }
 
@@ -199,6 +209,22 @@ impl Topo {
         id
     }
 
+    /// Whether a change from price `oc` with `oo` over-room / unsafe passes to `nc` with `no`
+    /// (plus `extra`, the `reroute` price) is kept: cheaper and not over more passes (hard
+    /// test), or with [`Topo::over_mm`] cheaper with those passes priced in.
+    fn keeps(&self, nc: f64, no: usize, oc: f64, oo: usize, extra: f64) -> bool {
+        match self.over_mm {
+            None => no <= oo && nc + extra < oc - EPS,
+            Some(p) => nc + p * no as f64 + extra < oc + p * oo as f64 - EPS,
+        }
+    }
+
+    /// The price of a candidate path for the choice among several: its price, plus its
+    /// over-room passes when they are priced.
+    fn rank_of(&self, cost: f64, over: usize) -> f64 {
+        cost + self.over_mm.map_or(0.0, |p| p * over as f64)
+    }
+
     /// Route `w` again on the current state; kept when its price drops by more than the
     /// `reroute` price of its connection. Returns the new wire.
     pub fn try_reroute(&mut self, st: &mut State, w: WireId) -> Option<WireId> {
@@ -214,7 +240,7 @@ impl Topo {
         if let Some((path, tris)) = found {
             if path != old_path || tris != old.tris {
                 let (nc, no) = self.path_cost(st, &Self::wire_of(&self.conns[ci]), &path, &tris, ci);
-                if no <= oo && nc + self.reroute_price(ci) < oc - EPS {
+                if self.keeps(nc, no, oc, oo, self.reroute_price(ci)) {
                     self.tally.applied[Kind::Reroute as usize] += 1;
                     return Some(self.insert_new(st, ci, (path, tris)));
                 }
@@ -281,7 +307,7 @@ impl Topo {
         let old_path = st.detach(w);
         let old = st.wires[w].clone();
         let (oc, oo) = self.path_cost(st, &old, &old_path, &old.tris, ci);
-        let mut best: Option<(f64, Conn, Path)> = None;
+        let mut best: Option<(f64, Conn, Path, usize)> = None;
         for &(_, x, y) in &cands {
             if !self.budget() {
                 break;
@@ -294,12 +320,13 @@ impl Topo {
             self.conns[ci] = c;
             let Some((path, tris)) = found else { continue };
             let (cost, over) = self.path_cost(st, &Self::wire_of(&nc), &path, &tris, ci);
-            if over <= oo && best.as_ref().is_none_or(|b| cost < b.0 - EPS) {
-                best = Some((cost, nc, (path, tris)));
+            let ok = self.over_mm.is_some() || over <= oo;
+            if ok && best.as_ref().is_none_or(|b| self.rank_of(cost, over) < self.rank_of(b.0, b.3) - EPS) {
+                best = Some((cost, nc, (path, tris), over));
             }
         }
-        if let Some((cost, nc, p)) = best {
-            if cost + self.reroute_price(ci) < oc - EPS {
+        if let Some((cost, nc, p, over)) = best {
+            if self.keeps(cost, over, oc, oo, self.reroute_price(ci)) {
                 self.conns[ci] = nc;
                 self.tally.applied[Kind::Attach as usize] += 1;
                 return Some(self.insert_new(st, ci, p));
@@ -317,7 +344,7 @@ impl Topo {
         let ci = self.wire_conn[w];
         let (oc, oo) = self.path_cost(st, &wire, old, &wire.tris, ci);
         let (nc, no) = self.path_cost(st, &wire, new, &wire.tris, ci);
-        if no <= oo && nc < oc - EPS {
+        if self.keeps(nc, no, oc, oo, 0.0) {
             st.reattach(w, new);
             self.tally.applied[kind as usize] += 1;
             true
@@ -479,7 +506,7 @@ impl Topo {
         st.remove(wb);
         restore(st);
         let old_over = over(self, st, a) + over(self, st, b);
-        if new_over <= old_over && new + self.reroute_price(ca) + self.reroute_price(cb) < old - EPS {
+        if self.keeps(new, new_over, old, old_over, self.reroute_price(ca) + self.reroute_price(cb)) {
             st.remove(a);
             st.remove(b);
             let wb2 = self.insert_new(st, cb, nb);
@@ -505,6 +532,12 @@ pub struct Labels<'a> {
     pub n_signal: usize,
     pub evals: usize,
     pub max_evals: usize,
+    /// The hard test of the per-edge model: a move that makes a touched edge-layer more over-full
+    /// is refused, and no move may add a via. Shopping list 3.2 (`[capacity] model = "cuts"`):
+    /// false, a move is kept on its price alone (cut overflow price change + via price), and
+    /// `add_vias` says whether it may add vias (`[capacity] cut_vias`).
+    pub strict: bool,
+    pub add_vias: bool,
     pub tally: Tally,
 }
 
@@ -526,7 +559,7 @@ impl<'a> Labels<'a> {
         self.evals += 1;
         self.tally.tried[kind as usize] += 1;
         let via = self.via_mm;
-        let ok = try_move(self.st, &mut self.cm, &mut self.evl, mv, self.bottom, &|a, b| if a == b { 0.0 } else { via }, &|_, _, _| 0.0, false, true);
+        let ok = try_move(self.st, &mut self.cm, &mut self.evl, mv, self.bottom, &|a, b| if a == b { 0.0 } else { via }, &|_, _, _| 0.0, self.add_vias, self.strict);
         if ok {
             self.tally.applied[kind as usize] += 1;
         }
@@ -603,5 +636,44 @@ impl<'a> Labels<'a> {
     /// Wires with a layer change on signal layers only, in id order.
     pub fn candidates(&self) -> Vec<WireId> {
         (0..self.evl.len()).filter(|&w| self.st.wires[w].alive && self.signal_only(w) && self.evl[w].windows(2).any(|x| x[0].2 != x[1].2)).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn topo(over_mm: Option<f64>) -> Topo {
+        Topo {
+            reg: Registry::standard(),
+            conns: Vec::new(),
+            tiers: Vec::new(),
+            wire_conn: Vec::new(),
+            reroutes: Vec::new(),
+            ws0: 1.0,
+            cap: 1,
+            evals: 0,
+            max_evals: 0,
+            ripped: 0,
+            max_ripped: 0,
+            tight: Vec::new(),
+            over_mm,
+            tally: Tally::default(),
+        }
+    }
+
+    #[test]
+    fn the_capacity_test_of_a_move_is_a_price_with_the_cut_model() {
+        // 10 mm cheaper with one more over-room pass: refused by the hard test, kept when a pass
+        // costs 5, refused when it costs 20; one pass fewer at 3 mm dearer: refused by the hard
+        // test's price rule, kept when a pass costs 5.
+        let (hard, cheap, dear) = (topo(None), topo(Some(5.0)), topo(Some(20.0)));
+        assert!(!hard.keeps(90.0, 2, 100.0, 1, 0.0));
+        assert!(cheap.keeps(90.0, 2, 100.0, 1, 0.0));
+        assert!(!dear.keeps(90.0, 2, 100.0, 1, 0.0));
+        assert!(!hard.keeps(103.0, 0, 100.0, 1, 0.0));
+        assert!(cheap.keeps(103.0, 0, 100.0, 1, 0.0));
+        // The reroute price counts in both.
+        assert!(!cheap.keeps(99.0, 1, 100.0, 1, 2.0) && !hard.keeps(99.0, 1, 100.0, 1, 2.0));
     }
 }

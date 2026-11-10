@@ -65,6 +65,7 @@ fn topo(conns: Vec<Conn>, wire_conn: Vec<usize>) -> Topo {
         ripped: 0,
         max_ripped: 1000,
         tight: Vec::new(),
+        over_mm: None,
         tally: Tally::default(),
     }
 }
@@ -329,7 +330,7 @@ fn labels_case(f: impl FnOnce(&State, &board::Board, &Packer, &[Vec<topor_engine
 }
 
 fn labels<'a>(st: &'a State<'a>, cm: CapModel<'a>, evl: Vec<Vec<(usize, f64, i32)>>, mask: &'a [Vec<u64>], partner: &'a [Vec<Option<(WireId, usize)>>]) -> Labels<'a> {
-    Labels { st, cm, evl, mask, partner, bottom: 1, via_mm: 25.0, n_signal: 2, evals: 0, max_evals: 100, tally: Tally::default() }
+    Labels { st, cm, evl, mask, partner, bottom: 1, via_mm: 25.0, n_signal: 2, evals: 0, max_evals: 100, strict: true, add_vias: false, tally: Tally::default() }
 }
 
 #[test]
@@ -410,6 +411,42 @@ fn a_label_move_that_overfills_the_door_is_refused() {
         let _ = before;
         assert!(lb.cm.total() <= before + 1e-9, "never more over-full");
     });
+}
+
+#[test]
+fn cut_model_label_moves_are_kept_on_price_alone() {
+    // Shopping list 3.2: with [capacity] model = "cuts" the label moves have no hard capacity
+    // test. The lift of a_label_move_that_overfills_the_door_is_refused drops two vias (2 x 25)
+    // and over-fills the door on layer 1 (one track too many): at a dear overflow price the cut
+    // price refuses it, at a cheap one the move pays and is kept. (The strict test of the cut
+    // path has a 1 mm slack tolerance, so it would let this one-track over-fill through too.)
+    let m = door();
+    let b = board::build(&m, &BuildOpts::default()).unwrap();
+    let conns = b.connections(&m);
+    let mut st = State::new(&b.proj);
+    route(&mut st, &conns, &InitWeights::default());
+    let opts = Options { capacity_model: "cuts".into(), ..Options::default() };
+    let packer = Packer::for_model(&m, &opts, &b.proj);
+    let polys = packer.taut_dirs(&st);
+    let n = st.wires[0].passes.len();
+    let evl = vec![vec![(0, 0.5, 1), (1, 0.5, 0), (n, 0.5, 1)], vec![(0, 0.5, 1)]];
+    // The ends stay on layer 1 (their pads' layer here); only the middle stretch may move.
+    let (mask, partner) = (vec![vec![0b10, 0b11, 0b10], vec![0b10]], vec![vec![None; 3], vec![None]]);
+    let vias = |lb: &Labels| lb.evl[0].windows(2).filter(|x| x[0].2 != x[1].2).count();
+    for (price, strict, kept) in [(200.0, false, false), (2.0, false, true)] {
+        let cm = CapModel::new_cut(&st, &packer, &polys, &evl, 1, price);
+        assert!(cm.cut.is_some(), "priced by the cuts");
+        let before = cm.total();
+        let mut lb = Labels { strict, add_vias: false, ..labels(&st, cm, evl.clone(), &mask, &partner) };
+        let lifted = lb.lifts(0);
+        let after = lb.cm.total();
+        eprintln!("overflow price {price} strict {strict}: lifted {lifted}, vias {}, cut price {before:.3} -> {after:.3}", vias(&lb));
+        assert_eq!(lifted >= 1, kept, "price {price} strict {strict}");
+        if kept {
+            assert!(after > before, "the door is over-full after the kept lift");
+            assert!(after - before < 50.0, "the overflow costs less than the two vias saved");
+        }
+    }
 }
 
 // ---------------------------------------------------------------- blocks_pad in the search
