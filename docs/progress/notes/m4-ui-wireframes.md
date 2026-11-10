@@ -199,7 +199,8 @@ dialog never blocks: `WxUi.progress` updates the widgets, calls `wx.YieldIfNeede
   hour); limit shown as `/ {limit}` or `/ no limit` when `timeout_s == 0` (then Cancel is the only
   stop — the hint line says so).
 - **Cancel** (default and escape; Enter also triggers it): label becomes
-  `Cancelling — keeping the best result so far…`, button disabled, gauge pulses; the method returns
+  `Cancel pressed: finishing the current stage (<stage>)… N s` (N counts up until the engine
+  returns; the DRC and preview that follow keep their labels), button disabled, gauge pulses; the method returns
   `False` from then on; B5 calls `job.cancel()` and continues with DRC + preview when anything was
   routed, else ends with outcome `cancelled` (§5).
 - **Empty:** before the first engine iteration `routed/total` shows `– / {total}`. **Busy:** is the
@@ -496,7 +497,7 @@ title/label/button/checkbox/choice/heading/text).
 | progress | phase_preflight_drc | text | Checking the board (KiCad DRC) |
 | progress | phase_drc | text | Verifying with KiCad DRC |
 | progress | phase_preview | text | Rendering the preview |
-| progress | phase_cancelling | text | Cancelling — keeping the best result so far… |
+| progress | phase_cancelling | text | Cancel pressed: finishing the current stage{stage}… {s} s |
 | progress | gauge_value | text | {routed} / {total} |
 | progress | iteration_label | label | Round |
 | progress | iteration_value | text | {iteration} of up to {cap} |
@@ -521,7 +522,7 @@ title/label/button/checkbox/choice/heading/text).
 | progress | ok | text | OK |
 | progress | phase_stable | text | Routes stable |
 | progress | title_stable | text | Topor — Routing {board} — Routes stable |
-| progress | phase_finishing | text | Finishing — keeping the stable result… |
+| progress | phase_finishing | text | OK pressed: finishing the current stage{stage}… {s} s |
 | progress | round_value | text | {round} |
 | progress | gain_label | label | Gain |
 | progress | gain_value | text | {gain} % / {window} rounds |
