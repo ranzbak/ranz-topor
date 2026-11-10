@@ -66,16 +66,9 @@ ACTION_CLEANUP = "pcbnew.GlobalEdit.cleanupTracksAndVias"
 ACTION_TEARDROPS = "pcbnew.GlobalEdit.editTeardrops"
 POLL_S = 0.25
 NO_BUDGET_S = 1.0e9  # timeout_s = 0: the DRC loop gets no budget cut; drc_loop_cap still bounds it
-#: After the user's Cancel the engine gets this long to reach a stop check and end its thread; then the run ends
-#: with ENGINE_UNRESPONSIVE instead of polling for ever (gate review B-1, ruling C31). Internal, not a toml key.
-CANCEL_GRACE_S = 30
 _ROUTE_OVERRIDES = ("scope_mode", "existing_copper", "respect_locked", "timeout_s", "timeout_clock", "drawing_style")
 #: pre-flight override -> (section, key) in topor.toml; the others are [run] keys of the same name
 _OVERRIDE_KEY = {"drawing_style": ("drawing", "style")}
-
-
-class EngineUnresponsive(RuntimeError):
-    """The engine did not finish within CANCEL_GRACE_S after Cancel (-> ENGINE_UNRESPONSIVE)."""
 
 
 class BoardChanged(RuntimeError):
@@ -419,8 +412,7 @@ def run(port: BoardPort, ui: UiPort, cfg: Config | None = None, engine=None, *, 
     project directory (first run: ``ui.first_run_notice``); `engine` defaults to ``topor_engine``.
 
     Returns a :class:`RunOutcome`; exceptions (not BaseException: the PyO3 panic is caught by ``app.main``) are
-    shown with ``ui.error`` and give ``status == "error"`` (INTERNAL; ENGINE_UNRESPONSIVE when the engine ignored
-    Cancel), except after a successful commit: then the status stays ``accepted`` with the POST_COMMIT_STEP_FAILED
+    shown with ``ui.error`` and give ``status == "error"`` (INTERNAL), except after a successful commit: then the status stays ``accepted`` with the POST_COMMIT_STEP_FAILED
     warning (ruling C30). A report folder that cannot be created / written is the REPORT_DIR_UNWRITABLE error
     before the board is read (ruling C32)."""
     t0 = time.monotonic()
@@ -496,9 +488,7 @@ def run(port: BoardPort, ui: UiPort, cfg: Config | None = None, engine=None, *, 
             ui.error(w)
             return out
         out.status = "error"
-        if isinstance(e, EngineUnresponsive):
-            out.error = Finding("ENGINE_UNRESPONSIVE", "error", str(e), messages.fix_for("ENGINE_UNRESPONSIVE"))
-        elif isinstance(e, KicadCliTimeout):  # MINOR 10: kicad-cli killed after run.kicad_cli_timeout_s
+        if isinstance(e, KicadCliTimeout):  # MINOR 10: kicad-cli killed after run.kicad_cli_timeout_s
             out.error = Finding("KICAD_CLI_TIMEOUT", "error", str(e), messages.fix_for("KICAD_CLI_TIMEOUT"))
         elif isinstance(e, BoardChanged):  # MINOR 11: nothing was committed
             out.error = Finding("BOARD_CHANGED_DURING_RUN", "error", str(e), messages.fix_for("BOARD_CHANGED_DURING_RUN"))
@@ -810,7 +800,10 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         job_t0, router_before = time.monotonic(), state["router_s"]
         cpu_t0, cpu_before = time.process_time(), state["router_cpu_s"]
         last_poll, cancelled_at = -1e9, None
-        while True:  # ends when the job is done (also after an engine panic: B-1) or CANCEL_GRACE_S after Cancel
+        # Ends when the job is done (also after an engine panic: B-1). After Cancel / OK / the CPU limit the engine
+        # finishes the stage it is in and returns its best result so far; that can take a while on a big board, so
+        # the flow waits for it (the progress dialog says so) instead of giving up and losing the result.
+        while True:
             done = job.done()
             now = time.monotonic()
             if done or now - last_poll >= POLL_S:
@@ -838,19 +831,20 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                 if state["limit_hit"] and cancelled_at is None:
                     cancelled_at = now
                     job.cancel()
+                    log.line("time limit: waiting for the engine to finish its current stage")
                 if state["cancel"] and cancelled_at is None:
                     cancelled_at = now
                     job.cancel()
+                    log.line("Cancel / OK: waiting for the engine to finish its current stage")
                     if p.stable:  # M-B0: OK after "Routes stable": the best so far is the board the user gets
                         state["ok_stable"] = True
                         log.line(f"OK at Routes stable: best so far {p.best_routed}/{p.best_total} routed, "
                                  f"{p.best_length_mm / 1000:.3f} m, {p.best_vias} vias (run {p.best_run} of {p.runs})")
             if done:
                 break
-            if cancelled_at is not None and now - cancelled_at > CANCEL_GRACE_S:
-                log.line(f"engine did not stop within {CANCEL_GRACE_S} s after Cancel")
-                raise EngineUnresponsive(f"The routing engine did not stop within {CANCEL_GRACE_S} s after Cancel.")
             time.sleep(0.02)
+        if cancelled_at is not None:
+            log.line(f"engine stopped {time.monotonic() - cancelled_at:.1f} s after the stop request")
         res = json.loads(job.wait())  # a panicked job raises RuntimeError("routing thread panicked: ...")
         items = res.get("items") or []
         if geometry == "segments":

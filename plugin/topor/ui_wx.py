@@ -108,7 +108,8 @@ WORDING: dict[str, dict[str, str]] = {
         "phase_preflight_drc": "Checking the board (KiCad DRC)",
         "phase_drc": "Verifying with KiCad DRC",
         "phase_preview": "Rendering the preview",
-        "phase_cancelling": "Cancelling — keeping the best result so far…",
+        # after Cancel the engine finishes the stage it is in; {stage} = " (drawing the traces)" or "", {s} = seconds
+        "phase_cancelling": "Cancel pressed: finishing the current stage{stage}… {s} s",
         "gauge_value": "{routed} / {total}",
         "iteration_label": "Round",
         "iteration_value": "{iteration} of up to {cap}",
@@ -139,7 +140,7 @@ WORDING: dict[str, dict[str, str]] = {
         "ok": "OK",
         "phase_stable": "Routes stable",
         "title_stable": "Topor — Routing {board} — Routes stable",
-        "phase_finishing": "Finishing — keeping the stable result…",
+        "phase_finishing": "OK pressed: finishing the current stage{stage}… {s} s",
         "round_value": "{round}",
         "gain_label": "Gain",
         "gain_value": "{gain} % / {window} rounds",
@@ -831,6 +832,7 @@ class ProgressDialog(_Base):
         self.iteration_cap = iteration_cap
         self._round, self._round_from_engine = (0, iteration_cap), False
         self.cancelled = False
+        self.cancelled_at: float | None = None
         W = WORDING["progress"]
 
         self.phase = self.text(self, "progress", "phase_route", name="phase", text="", bold=True)
@@ -948,6 +950,13 @@ class ProgressDialog(_Base):
 
     def set_phase(self, phase: str, stage: str = "") -> None:
         if self.cancelled:
+            # The engine finishes the stage it is in after Cancel / OK: say so, with the seconds since the click; the
+            # DRC and the preview of the result that follow keep their own labels.
+            if phase in ("setup", "route", "done"):
+                self._set_stopping_label(stage)
+                return
+            key = PHASE_KEYS.get(phase)
+            self.phase.SetLabel(WORDING["progress"][key] if key else phase)
             return
         if self.stable and phase in ("setup", "route", "done"):  # M-B0: the user's cue that OK is fine now
             self.phase.SetLabel(WORDING["progress"]["phase_stable"])
@@ -976,11 +985,17 @@ class ProgressDialog(_Base):
         else:
             evt.Skip()
 
+    def _set_stopping_label(self, stage: str = "") -> None:
+        W = WORDING["progress"]
+        s = int(time.monotonic() - (self.cancelled_at or time.monotonic()))
+        self.phase.SetLabel(W["phase_finishing" if self.stable else "phase_cancelling"].format(stage=f" ({stage})" if stage else "", s=s))
+
     def cancel(self) -> None:
         if self.cancelled:
             return
         self.cancelled = True
-        self.phase.SetLabel(WORDING["progress"]["phase_finishing" if self.stable else "phase_cancelling"])
+        self.cancelled_at = time.monotonic()
+        self._set_stopping_label()
         self.cancel_button.Disable()
         self._sync_limit_controls()
         self.gauge.Pulse()

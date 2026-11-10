@@ -188,34 +188,6 @@ class RealPanicEngine(ExplodingEngine):
         return topor_engine._route_async_panicking("index out of bounds in the test hook")
 
 
-class HangJob:
-    """A job whose thread never ends (an engine stuck outside its deadline checks): done() stays False."""
-
-    def __init__(self):
-        self.cancelled = False
-
-    def progress(self):
-        return json.dumps({"phase": "route", "iteration": 1, "routed": 0, "total": 27, "vias": 0, "elapsed_s": 0.1})
-
-    def done(self):
-        return False
-
-    def cancel(self):
-        self.cancelled = True
-
-    def wait(self):
-        raise AssertionError("wait() on a job that never finishes would block for ever")
-
-
-class HangEngine(ExplodingEngine):
-    def __init__(self):
-        self.jobs = []
-
-    def route_async(self, m, o):
-        self.jobs.append(HangJob())
-        return self.jobs[-1]
-
-
 def _mark_partial(out_json):
     d = json.loads(out_json)
     d["partial"] = 1
@@ -413,26 +385,62 @@ def test_run_engine_panic_reported_not_crashed(app, eprom, tmp_path, reports, en
     assert ctx and ctx[-1][1][1] == out.report_dir  # error dialog can open the report folder
 
 
-def test_cancel_grace_default_is_30_s():
-    assert run_mod.CANCEL_GRACE_S == 30
+class SlowStopClock:
+    """Stand-in for ``run.time``: monotonic() runs ahead by what the slow job adds (no real 45 s wait)."""
+
+    def __init__(self):
+        self.ahead = 0.0
+        self.sleep, self.process_time = time.sleep, time.process_time
+
+    def monotonic(self):
+        return time.monotonic() + self.ahead
 
 
-def test_run_engine_unresponsive_after_cancel(app, eprom, tmp_path, reports, monkeypatch):
-    """Ruling C31: after Cancel the flow waits at most CANCEL_GRACE_S for done(), then ends with the
-    ENGINE_UNRESPONSIVE error (never an endless poll)."""
-    monkeypatch.setattr(run_mod, "CANCEL_GRACE_S", 0.5)
-    eng = HangEngine()
-    ui = ScriptedUi(accept=True, cancel_at_iteration=1)
-    t0 = time.monotonic()
-    board, ui, out = do_run(eprom, tmp_path, ui=ui, engine=eng, strict=False)
-    assert time.monotonic() - t0 < 120
-    assert len(eng.jobs) == 1 and eng.jobs[0].cancelled
-    assert out.status == "error" and board.commits == [] and board.refills == 0
-    errs = [c[1][0] for c in ui.calls if c[0] == "error"]
-    assert len(errs) == 1 and errs[0].code == "ENGINE_UNRESPONSIVE" and errs[0].severity == "error"
-    assert out.error is errs[0] and "0.5 s" in errs[0].message
-    assert "done" not in ui.names() and "preview" not in ui.names()
-    assert json.loads((out.report_dir / "result.json").read_text())["status"] == "error"
+class SlowStopJob(ProxyJob):
+    """A real RouteJob that honours Cancel only `after_s` (plugin clock) after it: an engine finishing a long
+    stage on a big board. Every poll after Cancel moves the plugin's clock 2 s ahead."""
+
+    def __init__(self, real, clock, after_s):
+        super().__init__(real, hold=2)
+        self.clock, self.after_s, self.cancelled_at = clock, after_s, None
+
+    def cancel(self):
+        super().cancel()
+        self.cancelled_at = self.clock.monotonic()
+
+    def done(self):
+        if self.cancelled_at is None:
+            return False
+        self.clock.ahead += 2.0
+        return self.clock.monotonic() - self.cancelled_at >= self.after_s and self.real.done()
+
+
+class SlowStopEngine(ProxyEngine):
+    def __init__(self, clock, after_s):
+        super().__init__()
+        self.clock, self.after_s = clock, after_s
+
+    def route_async(self, m, o):
+        j = SlowStopJob(topor_engine.route_async(m, o), self.clock, self.after_s)
+        self.jobs.append(j)
+        return j
+
+
+def test_run_waits_for_the_engine_after_cancel_however_long_it_takes(app, eprom, tmp_path, reports, monkeypatch):
+    """User report: Cancel waited 30 s and then produced nothing. After Cancel the flow waits until the engine
+    has finished its current stage (here 45 s on the plugin's clock) and previews the result it returns."""
+    clock = SlowStopClock()
+    monkeypatch.setattr(run_mod, "time", clock)
+    eng = SlowStopEngine(clock, after_s=45.0)
+    ui = ScriptedUi(accept=False, cancel_at_iteration=1)
+    board, ui, out = do_run(eprom, tmp_path, ui=ui, engine=eng)
+    job = eng.jobs[0]
+    assert job.cancelled and clock.monotonic() - job.cancelled_at >= 45.0
+    assert not [c for c in ui.calls if c[0] == "error"]
+    assert out.status == "rejected" and out.routed > 0 and out.cancelled is True
+    assert "preview" in ui.names() and board.commits == []
+    log = (out.report_dir / "log.txt").read_text()
+    assert "waiting for the engine to finish its current stage" in log and "engine stopped" in log
 
 
 class FailingBoard(FakeBoard):

@@ -213,10 +213,15 @@ def test_progress_returns_false_after_cancel(app):
     evt = wx.CommandEvent(wx.wxEVT_BUTTON, wx.ID_CANCEL)
     evt.SetEventObject(dlg.cancel_button)
     dlg.cancel_button.GetEventHandler().ProcessEvent(evt)
-    assert dlg.phase.GetLabel() == ui_wx.WORDING["progress"]["phase_cancelling"]
+    assert dlg.phase.GetLabel() == "Cancel pressed: finishing the current stage… 0 s"
     assert not dlg.cancel_button.IsEnabled()
+    # the engine finishes its stage: the label names it and counts the seconds since Cancel
+    dlg.cancelled_at -= 12.4
+    assert ui.progress(Progress("route", 4, 13, 27, 4, 13.0, "drawing the traces")) is False
+    assert dlg.phase.GetLabel() == "Cancel pressed: finishing the current stage (drawing the traces)… 12 s"
     assert ui.progress(Progress("route", 4, 13, 27, 4, 13.0)) is False
     assert ui.progress(Progress("drc", 0, 13, 27, 4, 14.0)) is False
+    assert dlg.phase.GetLabel() == ui_wx.WORDING["progress"]["phase_drc"]  # the DRC of the result keeps its label
     assert ui.shown == 1  # one dialog, shown once
     ui._close_progress()
     assert ui._progress is None
@@ -554,7 +559,7 @@ def test_progress_routes_stable_turns_cancel_into_ok(app):
     evt = wx.CommandEvent(wx.wxEVT_BUTTON, wx.ID_CANCEL)
     evt.SetEventObject(dlg.cancel_button)
     dlg.cancel_button.GetEventHandler().ProcessEvent(evt)
-    assert dlg.phase.GetLabel() == W["phase_finishing"]
+    assert dlg.phase.GetLabel() == "OK pressed: finishing the current stage… 0 s"
     assert ui.progress(q) is False
     ui._close_progress()
 

@@ -18,8 +18,7 @@ with ``PYTHONPATH`` containing the repo root and ``plugin/``.
 Exit codes: 0 = accepted (also when a step after the commit failed: POST_COMMIT_STEP_FAILED) / rejected /
 cancelled / aborted at pre-flight; 1 = error, shown in an error dialog in GUI mode: ENGINE_VERSION,
 KICAD_API_CONNECT, REPORT_DIR_UNWRITABLE, INTERNAL (an exception, or a panic of the engine's routing thread, which
-``RouteJob.wait`` raises as ``RuntimeError``), ENGINE_UNRESPONSIVE (the engine ignored Cancel for
-``run.CANCEL_GRACE_S``). Every other ``BaseException`` (incl. PyO3 ``PanicException``) goes to stderr + the crash
+``RouteJob.wait`` raises as ``RuntimeError``). Every other ``BaseException`` (incl. PyO3 ``PanicException``) goes to stderr + the crash
 log and gives exit 1 (31 section 6). Needs no pcbnew (M4-R1); kipy only behind ``topor.ipc``.
 
 Complexity: O(1) glue around one ``run`` call.

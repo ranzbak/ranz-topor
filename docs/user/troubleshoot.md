@@ -103,8 +103,7 @@ routes are on the board, a later step such as the zone refill failed).
 **Cause.** An error, shown in a *Topor — Error* dialog: the engine version check failed
 ([ENGINE_VERSION](#engine_version)), a module is missing (sections above), KiCad could not be reached
 ([KICAD_API_CONNECT](#kicad_api_connect)), the report folder could not be written
-([REPORT_DIR_UNWRITABLE](#report_dir_unwritable)), the engine did not stop after Cancel
-([ENGINE_UNRESPONSIVE](#engine_unresponsive)), a kicad-cli call ran out of time
+([REPORT_DIR_UNWRITABLE](#report_dir_unwritable)), a kicad-cli call ran out of time
 ([KICAD_CLI_TIMEOUT](#kicad_cli_timeout)), the board was edited during the run
 ([BOARD_CHANGED_DURING_RUN](#board_changed_during_run)), the engine could not read the board
 ([ENGINE_BOARD_UNREADABLE](#engine_board_unreadable)) or failed every connection with the same error
@@ -322,14 +321,6 @@ copper violates a rule anywhere else, file a bug.
 **Cause.** All or most connections failed with the same routing-engine error (e.g. the board's projection could not be built), so this is not a normal run that happened to route nothing. No copper was written; the board was not changed.
 
 **Fix.** Read the engine message in the details; for a projection error look at the named copper as for ENGINE_BOARD_UNREADABLE (KiCad → Edit → Find by its footprint reference). Run again; if it recurs, file a bug with log.txt and result.json from the report folder (docs/dev/debug.md).
-
-### ENGINE_UNRESPONSIVE
-
-*Severity: error.*
-
-**Cause.** After Cancel the routing engine did not stop within the grace period (it is stuck outside its stop checks), so the run was ended without a result. The board was not changed.
-
-**Fix.** Run again with a shorter run.timeout_s; if it recurs, file a bug with log.txt and result.json from the report folder (docs/dev/debug.md). If KiCad stays slow, save and restart it (KiCad → File → Exit).
 
 ### ENGINE_VERSION
 
