@@ -143,6 +143,9 @@ type WireItems = (Vec<(usize, Itm)>, Vec<(usize, f64)>);
 /// Cached static sheets and the junction points they were built with.
 type SheetCache = Option<(Vec<(i64, i64, i32)>, Rc<Vec<LayerSheet>>)>;
 
+/// Per junction feature of a layer: (wire, part, half width) of the runs ending there.
+type JHalf = BTreeMap<usize, Vec<(WireId, u32, f64)>>;
+
 /// Via site points per (triangle, net, r, s).
 type SiteCache = HashMap<(usize, i32, i64, i64), (Vec2, bool)>;
 
@@ -158,6 +161,8 @@ pub struct Itm {
     pub floor: f64,
     /// Traversal of the wire nearest to the item (the place a layer move acts on).
     pub k: usize,
+    /// The run or via of the wire that put it there ([`CutPrice`] bookkeeping; 0 in [`flow`]).
+    pub src: u32,
 }
 
 /// The flow of one nonempty cut.
@@ -204,8 +209,21 @@ fn nearest_k(s: &Stretch, x: Vec2) -> usize {
 /// The items one wire adds to a sheet: its runs on the sheet's layer (`runs` with bands) and its
 /// vias. `(cut, item)`, and the junction features its runs end at with the half width.
 fn wire_items(sh: &LayerSheet, jf: &HashMap<(i64, i64), usize>, runs: &[Stretch], vias: &[ViaItem], buf: &mut Vec<u32>) -> WireItems {
-    let mine: Vec<usize> = (0..runs.len()).filter(|&i| runs[i].layer == sh.l).collect();
     let via_r = vias.iter().map(|v| v.r).fold(0.0, f64::max);
+    let (mut out, jends) = run_items(sh, jf, runs, via_r);
+    for v in vias {
+        for (ci, t, w) in via_hits(sh, v, buf) {
+            out.push((ci, Itm { wire: v.wire, t, kind: 3, it: Item { net: v.net, w, s: v.s }, floor: w, k: v.k, src: 0 }));
+        }
+    }
+    (out, jends)
+}
+
+/// The items of the runs `runs` on the sheet's layer (bands pulled) for a wire whose vias have
+/// radius `via_r`, and the junction features they end at with the half width. Each run's
+/// items depend on that run alone. O(band segments x cuts in their grid cells + wraps).
+fn run_items(sh: &LayerSheet, jf: &HashMap<(i64, i64), usize>, runs: &[Stretch], via_r: f64) -> WireItems {
+    let mine: Vec<usize> = (0..runs.len()).filter(|&i| runs[i].layer == sh.l).collect();
     let per = flow_items(sh, runs, &mine, via_r);
     let mut out = Vec::new();
     for (ci, items) in per {
@@ -217,12 +235,7 @@ fn wire_items(sh: &LayerSheet, jf: &HashMap<(i64, i64), usize>, runs: &[Stretch]
                 2 => c.q,
                 _ => c.p + (c.q - c.p) * x.t,
             };
-            out.push((ci, Itm { wire: s.wire, t: x.t, kind: x.kind, it: Item { net: s.net, w: x.w, s: s.s }, floor: s.w_floor, k: nearest_k(s, at) }));
-        }
-    }
-    for v in vias {
-        for (ci, t, w) in via_hits(sh, v, buf) {
-            out.push((ci, Itm { wire: v.wire, t, kind: 3, it: Item { net: v.net, w, s: v.s }, floor: w, k: v.k }));
+            out.push((ci, Itm { wire: s.wire, t: x.t, kind: x.kind, it: Item { net: s.net, w: x.w, s: s.s }, floor: s.w_floor, k: nearest_k(s, at), src: 0 }));
         }
     }
     let mut jends = Vec::new();
@@ -524,13 +537,63 @@ struct CutSt {
     slack: f64,
     /// `price x phi`.
     cost: f64,
+    /// Whether it held items when it was last priced (`slack` and `cost` are of that state; the
+    /// items may have changed since, until the next pricing).
+    live: bool,
 }
 
-/// What one wire contributes: `(layer, cut, item)` and the junction ends `(layer, feature, half)`.
+/// What one run or one via of a wire contributes: `(layer, cut, item)` and the junction ends
+/// `(layer, feature, half width)`, under the id `src` its items carry.
 #[derive(Clone, Debug, Default)]
-struct WireSt {
+struct Part {
+    src: u32,
     items: Vec<(usize, usize, Itm)>,
     jends: Vec<(usize, usize, f64)>,
+}
+
+/// What a run's items depend on (besides the static sheet): equal keys give equal items.
+#[derive(Clone, Debug, PartialEq)]
+struct RunKey {
+    layer: usize,
+    net: i32,
+    s: f64,
+    w: f64,
+    w_floor: f64,
+    curve: Vec<Vec2>,
+    curve_k: Vec<usize>,
+    pass_w: Vec<f64>,
+    via_ends: [bool; 2],
+    /// The wire's via radius (a crossing next to an own via end is the via's, [`flow_items`]).
+    via_r: f64,
+}
+
+impl RunKey {
+    fn of(s: &Stretch, via_r: f64) -> RunKey {
+        RunKey { layer: s.layer, net: s.net, s: s.s, w: s.w, w_floor: s.w_floor, curve: s.curve.clone(), curve_k: s.curve_k.clone(), pass_w: s.pass_w.clone(), via_ends: s.via_ends, via_r }
+    }
+}
+
+/// What one via's items depend on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ViaKey {
+    at: Vec2,
+    r: f64,
+    s: f64,
+    net: i32,
+    k: usize,
+}
+
+/// What one wire contributes: its runs and its vias, each a [`Part`] with its key.
+#[derive(Clone, Debug, Default)]
+struct WireSt {
+    runs: Vec<(RunKey, Part)>,
+    vias: Vec<(ViaKey, Part)>,
+}
+
+impl WireSt {
+    fn parts(&self) -> impl Iterator<Item = &Part> {
+        self.runs.iter().map(|x| &x.1).chain(self.vias.iter().map(|x| &x.1))
+    }
 }
 
 /// An open move (the first state of every wire and cut it touched).
@@ -555,8 +618,16 @@ pub struct CutPrice<'a> {
     regime: Vec<Vec<Option<Option<f64>>>>,
     cuts: Vec<Vec<CutSt>>,
     wires: Vec<WireSt>,
-    /// Per layer: junction feature -> (wire, half width) of the runs ending there.
-    jhalf: Vec<BTreeMap<usize, Vec<(WireId, f64)>>>,
+    /// Per layer: junction feature -> (wire, part, half width) of the runs ending there.
+    jhalf: Vec<JHalf>,
+    /// Next part id.
+    next_src: u32,
+    /// Shopping list 3.1: an edit reprices only the runs and vias that changed (true, the
+    /// default); false = the whole wire every time (the measurement's reference, debug
+    /// `TOPO_CUT_FULL=1`). Both give the same prices.
+    pub incremental: bool,
+    /// Runs and vias whose items were computed / reused (report).
+    pub parts: (usize, usize),
     total: f64,
     over: usize,
     txn: Option<Txn>,
@@ -598,6 +669,9 @@ impl<'a> CutPrice<'a> {
             cuts,
             wires: vec![WireSt::default(); n_wires],
             jhalf: vec![BTreeMap::new(); nl],
+            next_src: 1,
+            incremental: std::env::var("TOPO_CUT_FULL").is_err(),
+            parts: (0, 0),
             total: 0.0,
             over: 0,
             txn: None,
@@ -640,14 +714,16 @@ impl<'a> CutPrice<'a> {
     }
 
     fn reprice(&mut self, l: usize, ci: usize) {
+        super::refine::meter::CUTS_PRICED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let regime = self.regime(l, ci);
         let sh = self.sheets.clone();
         let jh = &self.jhalf[l];
-        let half = |f: usize| jh.get(&f).filter(|v| !v.is_empty()).map(|v| v.iter().map(|x| x.1).fold(0.0, f64::max));
+        let half = |f: usize| jh.get(&f).filter(|v| !v.is_empty()).map(|v| v.iter().map(|x| x.2).fold(0.0, f64::max));
         let cs = &mut self.cuts[l][ci];
-        let old = (cs.cost, cs.slack < -OVER_TOL && !cs.items.is_empty());
+        // The state as last priced (the items have changed since).
+        let old = (cs.cost, cs.live && cs.slack < -OVER_TOL);
         if let Some(t) = self.txn.as_mut() {
-            t.slack.entry((l, ci)).or_insert(if cs.items.is_empty() { f64::INFINITY } else { cs.slack });
+            t.slack.entry((l, ci)).or_insert(if cs.live { cs.slack } else { f64::INFINITY });
         }
         if cs.items.is_empty() {
             *cs = CutSt::default();
@@ -657,46 +733,55 @@ impl<'a> CutPrice<'a> {
             cs.need = n.need;
             cs.slack = cap - n.need;
             cs.cost = self.price * phi(cs.slack, pitch_of(&cs.items), self.o.tau);
+            cs.live = true;
         }
-        let new = (cs.cost, cs.slack < -OVER_TOL && !cs.items.is_empty());
+        let new = (cs.cost, cs.live && cs.slack < -OVER_TOL);
         self.total += new.0 - old.0;
         self.over = (self.over as isize + new.1 as isize - old.1 as isize) as usize;
     }
 
-    /// Put wire `w`'s contribution `ws` in place of its current one; returns the change of the
-    /// total price. O(items of both x their cuts' items).
-    fn replace(&mut self, w: WireId, ws: WireSt) -> f64 {
+    /// Put wire `w`'s contribution `ws` in place of its current one: the parts (runs, vias) of
+    /// the old one that `ws` does not hold leave their cuts, the new ones enter, the parts both
+    /// hold stay; only the cuts they touch are priced again. Returns the change of the total.
+    /// O(items of the changed parts x their cuts' items).
+    fn install(&mut self, w: WireId, ws: WireSt) -> f64 {
         let t0 = self.total;
         if w >= self.wires.len() {
             self.wires.resize(w + 1, WireSt::default());
         }
-        let old = std::mem::replace(&mut self.wires[w], ws.clone());
+        let old = std::mem::replace(&mut self.wires[w], ws);
         if let Some(t) = self.txn.as_mut() {
             t.wires.entry(w).or_insert_with(|| old.clone());
         }
+        let keep_new: BTreeSet<u32> = self.wires[w].parts().map(|p| p.src).collect();
+        let keep_old: BTreeSet<u32> = old.parts().map(|p| p.src).collect();
         let mut dirty: BTreeSet<(usize, usize)> = BTreeSet::new();
-        for &(l, ci, _) in &old.items {
-            dirty.insert((l, ci));
-        }
-        let mut touched: BTreeSet<(usize, usize)> = BTreeSet::new();
-        for &(l, ci, _) in &old.items {
-            if touched.insert((l, ci)) {
-                self.cuts[l][ci].items.retain(|x| x.wire != w);
+        for part in old.parts().filter(|p| !keep_new.contains(&p.src)) {
+            let src = part.src;
+            let mut seen: BTreeSet<(usize, usize)> = BTreeSet::new();
+            for &(l, ci, _) in &part.items {
+                if seen.insert((l, ci)) {
+                    self.cuts[l][ci].items.retain(|x| !(x.wire == w && x.src == src));
+                    dirty.insert((l, ci));
+                }
+            }
+            for &(l, f, _) in &part.jends {
+                if let Some(v) = self.jhalf[l].get_mut(&f) {
+                    v.retain(|x| !(x.0 == w && x.1 == src));
+                }
+                dirty.extend(self.junction_cuts(l, f));
             }
         }
-        for &(l, f, _) in &old.jends {
-            if let Some(v) = self.jhalf[l].get_mut(&f) {
-                v.retain(|x| x.0 != w);
+        let added: Vec<Part> = self.wires[w].parts().filter(|p| !keep_old.contains(&p.src)).cloned().collect();
+        for part in added {
+            for (l, ci, it) in part.items {
+                self.cuts[l][ci].items.push(it);
+                dirty.insert((l, ci));
             }
-            dirty.extend(self.junction_cuts(l, f));
-        }
-        for &(l, ci, it) in &ws.items {
-            self.cuts[l][ci].items.push(it);
-            dirty.insert((l, ci));
-        }
-        for &(l, f, h) in &ws.jends {
-            self.jhalf[l].entry(f).or_default().push((w, h));
-            dirty.extend(self.junction_cuts(l, f));
+            for (l, f, h) in part.jends {
+                self.jhalf[l].entry(f).or_default().push((w, part.src, h));
+                dirty.extend(self.junction_cuts(l, f));
+            }
         }
         for (l, ci) in dirty {
             self.reprice(l, ci);
@@ -709,29 +794,95 @@ impl<'a> CutPrice<'a> {
         self.sheets[l].vcuts[v].iter().map(|&ci| (l, ci)).collect()
     }
 
-    /// Set wire `w` to the runs `runs` (bands are pulled here) and the vias `vias`; returns the
-    /// change of the total price. A run whose walk fails adds nothing (counted by the caller's
-    /// report through [`CutPrice::walk_failed`]).
-    pub fn set_wire(&mut self, w: WireId, runs: &mut [Stretch], vias: &[ViaItem]) -> f64 {
-        let mut ws = WireSt::default();
+    /// The items of one run of wire `w` (its band is pulled here) under the id `src`.
+    fn run_part(&mut self, run: &mut Stretch, via_r: f64, src: u32) -> Part {
+        let t0 = std::time::Instant::now();
+        let part = self.run_part_in(run, via_r, src);
+        super::refine::meter::add(&super::refine::meter::PART_NS, &super::refine::meter::PARTS, t0);
+        part
+    }
+
+    fn run_part_in(&mut self, run: &mut Stretch, via_r: f64, src: u32) -> Part {
+        let l = run.layer;
+        let mut part = Part { src, ..Part::default() };
+        let sheets = self.sheets.clone();
+        let Some(sh) = sheets.get(l) else { return part };
+        if let Ok((b, wr)) = band(sh, &run.curve) {
+            run.band = b;
+            run.wraps = wr;
+        }
+        let (items, jends) = run_items(sh, &self.jf[l], std::slice::from_ref(run), via_r);
+        part.items = items.into_iter().map(|(ci, mut it)| {
+            it.src = src;
+            (l, ci, it)
+        }).collect();
+        part.jends = jends.into_iter().map(|(f, h)| (l, f, h)).collect();
+        part
+    }
+
+    /// The items of one via on every layer under the id `src`.
+    fn via_part(&mut self, v: &ViaItem, src: u32) -> Part {
+        let t0 = std::time::Instant::now();
+        let part = self.via_part_in(v, src);
+        super::refine::meter::add(&super::refine::meter::PART_NS, &super::refine::meter::PARTS, t0);
+        part
+    }
+
+    fn via_part_in(&mut self, v: &ViaItem, src: u32) -> Part {
+        let mut part = Part { src, ..Part::default() };
         let sheets = self.sheets.clone();
         for (l, sh) in sheets.iter().enumerate() {
-            for s in runs.iter_mut().filter(|s| s.layer == l) {
-                if let Ok((b, wr)) = band(sh, &s.curve) {
-                    s.band = b;
-                    s.wraps = wr;
-                }
+            for (ci, t, wv) in via_hits(sh, v, &mut self.buf) {
+                part.items.push((l, ci, Itm { wire: v.wire, t, kind: 3, it: Item { net: v.net, w: wv, s: v.s }, floor: wv, k: v.k, src }));
             }
-            let (items, jends) = wire_items(sh, &self.jf[l], runs, vias, &mut self.buf);
-            ws.items.extend(items.into_iter().map(|(ci, it)| (l, ci, it)));
-            ws.jends.extend(jends.into_iter().map(|(f, h)| (l, f, h)));
         }
-        self.replace(w, ws)
+        part
+    }
+
+    /// Set wire `w` to the runs `runs` (bands are pulled here) and the vias `vias`; returns the
+    /// change of the total price. Incremental (shopping list 3.1): a run or via equal to one the
+    /// wire has now (same layer, curve, widths, ends; same point and size) keeps its items, so an
+    /// edit costs the walks of the runs it changes, not of the whole wire. A run whose walk
+    /// fails adds nothing.
+    pub fn set_wire(&mut self, w: WireId, runs: &mut [Stretch], vias: &[ViaItem]) -> f64 {
+        let via_r = vias.iter().map(|v| v.r).fold(0.0, f64::max);
+        let mut old = if self.incremental { self.wires.get(w).cloned().unwrap_or_default() } else { WireSt::default() };
+        let mut ws = WireSt::default();
+        for run in runs.iter_mut() {
+            let key = RunKey::of(run, via_r);
+            if let Some(j) = old.runs.iter().position(|x| x.0 == key) {
+                ws.runs.push(old.runs.swap_remove(j));
+                self.parts.1 += 1;
+                continue;
+            }
+            let src = self.next_src;
+            self.next_src += 1;
+            let part = self.run_part(run, via_r, src);
+            self.parts.0 += 1;
+            ws.runs.push((key, part));
+        }
+        for v in vias {
+            let key = ViaKey { at: v.at, r: v.r, s: v.s, net: v.net, k: v.k };
+            if let Some(j) = old.vias.iter().position(|x| x.0 == key) {
+                ws.vias.push(old.vias.swap_remove(j));
+                self.parts.1 += 1;
+                continue;
+            }
+            let src = self.next_src;
+            self.next_src += 1;
+            let part = self.via_part(v, src);
+            self.parts.0 += 1;
+            ws.vias.push((key, part));
+        }
+        let t0 = std::time::Instant::now();
+        let d = self.install(w, ws);
+        super::refine::meter::INSTALL_NS.fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        d
     }
 
     /// Take wire `w` out (a dead wire); returns the change of the total.
     pub fn clear_wire(&mut self, w: WireId) -> f64 {
-        self.replace(w, WireSt::default())
+        self.install(w, WireSt::default())
     }
 
     /// Open a move: every later change can be undone by [`CutPrice::rollback`].
@@ -748,7 +899,7 @@ impl<'a> CutPrice<'a> {
     pub fn rollback(&mut self) {
         let Some(t) = self.txn.take() else { return };
         for (w, ws) in t.wires {
-            self.replace(w, ws);
+            self.install(w, ws);
         }
         // The prices are recomputed from the same items, so they come back exactly; the sums are
         // restored to avoid float drift.
@@ -794,6 +945,26 @@ impl<'a> CutPrice<'a> {
     pub fn is_over(&self, l: usize, ci: usize) -> bool {
         let c = &self.cuts[l][ci];
         !c.items.is_empty() && c.slack < -OVER_TOL
+    }
+
+    /// Whether cut `ci` of layer `l` is not over-full with the wires `gone` taken out (the P4
+    /// rip-up's stop test, the per-edge `fits_without` of the cut model). O(items log items).
+    pub fn fits_without(&self, l: usize, ci: usize, gone: &BTreeSet<WireId>) -> bool {
+        let c = &self.cuts[l][ci];
+        let mut items: Vec<Itm> = c.items.iter().copied().filter(|x| !gone.contains(&x.wire)).collect();
+        if items.is_empty() {
+            return true;
+        }
+        let jh = &self.jhalf[l];
+        let half = |f: usize| {
+            jh.get(&f).map(|v| v.iter().filter(|x| !gone.contains(&x.0)).map(|x| x.2).fold(f64::NEG_INFINITY, f64::max)).filter(|h| h.is_finite())
+        };
+        let regime = self.regime[l][ci].unwrap_or_else(|| {
+            let cut = &self.sheets[l].cuts[ci];
+            self.pr.regime_at((cut.p + cut.q) * 0.5)
+        });
+        let (cap, n) = evaluate(&self.sheets[l], ci, &mut items, regime, &half, &self.o);
+        cap - n.need >= -OVER_TOL
     }
 
     /// The (wire, traversal) of every item of cut `ci` on layer `l` (vias and runs).

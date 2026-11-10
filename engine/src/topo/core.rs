@@ -1697,6 +1697,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
             }
         }
+        // Cost per move (shopping list 3.1 measurement; process-wide sums so far).
+        let (mv_n, mv_us, vp_n, vp_us) = super::refine::meter::read();
+        m["move_cost"] = serde_json::json!({"moves": mv_n, "us_per_move": (mv_us * 10.0).round() / 10.0, "via_positions": vp_n, "us_per_via_position": (vp_us * 10.0).round() / 10.0});
+        let (fl, st_ms, np, p_ms, nc, i_ms) = super::refine::meter::read_split();
+        m["cut_split"] = serde_json::json!({"flushes": fl, "ms_stretches": st_ms.round(), "parts": np, "ms_parts": p_ms.round(), "cuts_priced": nc, "ms_install": i_ms.round()});
         warnings.push(format!("plan metrics: {m}"));
         if opts.stop_after == "plan" {
             let mut r = unrouted(model_real, opts, "not drawn: [run] stop_after = \"plan\" ends each run after the plan of its first cycle");

@@ -19,7 +19,7 @@ use topor_engine::geom::Vec2;
 use topor_engine::model::{BoardModel, Options};
 use topor_engine::topo::board::{build_full, outline_segments, Board, BuildOpts};
 use topor_engine::topo::cutflow::Stretch;
-use topor_engine::topo::cutmodel::{bare_sheets, flow, sheet_room, CutOpts, Flow, ViaItem};
+use topor_engine::topo::cutmodel::{bare_sheets, flow, sheet_room, CutOpts, CutPrice, Flow, ViaItem};
 use topor_engine::topo::sheet::{FeatKind, LayerSheet, Norm, SheetInput};
 
 const MM: f64 = 1e6;
@@ -446,4 +446,206 @@ fn p2_room_on_in1_is_pin_to_pin_not_the_tp1_sub_gaps() {
     // F.Cu keeps the shared-edge reading of TP1's sub-gaps (both ends block there: unchanged;
     // the 0.70 critical cut itself is no projection edge, so the shortest edge is a little longer).
     assert!(f_min < 0.80 * MM, "F.Cu sub-gap {:.4}", f_min / MM);
+}
+
+// ---------------------------------------------------------------- 3.1: incremental edits
+
+/// A small deterministic generator (xorshift64*).
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+    fn unit(&mut self) -> f64 {
+        (self.next() >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+/// One wire of the edit test: its witness polyline, the via points on it (as `(segment,
+/// fraction)`, in order) and the layer of every piece between them.
+#[derive(Clone)]
+struct EditWire {
+    poly: Vec<Vec2>,
+    net: i32,
+    w: f64,
+    s: f64,
+    splits: Vec<(usize, f64)>,
+    layers: Vec<usize>,
+    alive: bool,
+}
+
+impl EditWire {
+    fn at(&self, (i, f): (usize, f64)) -> Vec2 {
+        self.poly[i] + (self.poly[i + 1] - self.poly[i]) * f
+    }
+    /// Its runs (one per piece) and vias.
+    fn runs(&self, wire: usize, via_r: f64) -> (Vec<Stretch>, Vec<ViaItem>) {
+        let mut cuts: Vec<(usize, f64)> = vec![(0, 0.0)];
+        cuts.extend(self.splits.iter().copied());
+        cuts.push((self.poly.len() - 2, 1.0));
+        let mut runs = Vec::new();
+        for j in 0..cuts.len() - 1 {
+            let (a, b) = (cuts[j], cuts[j + 1]);
+            let mut curve = vec![self.at(a)];
+            for k in a.0 + 1..=b.0 {
+                curve.push(self.poly[k]);
+            }
+            curve.push(self.at(b));
+            curve.dedup();
+            let n = curve.len();
+            runs.push(Stretch {
+                wire,
+                conn: None,
+                net: self.net,
+                layer: self.layers[j],
+                s: self.s,
+                w: self.w,
+                w_floor: self.w,
+                curve_k: (0..n).map(|i| a.0 + i).collect(),
+                pass_w: vec![self.w; n.saturating_sub(2)],
+                curve,
+                nosite: false,
+                via_ends: [j > 0, j + 1 < cuts.len() - 1],
+                band: Vec::new(),
+                wraps: Vec::new(),
+            });
+        }
+        let vias = self.splits.iter().enumerate().map(|(i, &x)| ViaItem { wire, at: self.at(x), r: via_r, s: self.s, net: self.net, k: x.0 + i }).collect();
+        (runs, vias)
+    }
+}
+
+/// A cut with items: (layer, ends in nm, capacity, need, slack).
+type CutKey = (usize, i64, i64, i64, i64, f64, f64, f64);
+
+/// The totals of a fresh model holding `ws` (the full recompute): total, over-full count and
+/// every cut's (capacity, need, slack) by its ends.
+fn full_price(pr: &topor_engine::topo::state::Projection, sh: &std::rc::Rc<Vec<LayerSheet>>, o: CutOpts, ws: &[EditWire], via_r: f64) -> (f64, usize, Vec<CutKey>) {
+    let mut cp = CutPrice::new(pr, sh.clone(), o, 1.0, ws.len());
+    for (w, x) in ws.iter().enumerate().filter(|(_, x)| x.alive) {
+        let (mut r, v) = x.runs(w, via_r);
+        cp.set_wire(w, &mut r, &v);
+    }
+    let mut rows: Vec<_> = cp.report().into_iter().map(|r| (r.layer, r.p.x as i64, r.p.y as i64, r.q.x as i64, r.q.y as i64, r.cap, r.need, r.slack)).collect();
+    rows.sort_by_key(|a| (a.0, a.1, a.2, a.3, a.4));
+    (cp.total(), cp.overfull(), rows)
+}
+
+#[test]
+fn incremental_edits_price_as_a_full_recompute() {
+    // Random edit sequences (insert, remove, relabel a piece, move / add / remove a via) on the
+    // wires of inner_layer_room (four layers, a pin gap that over-fills easily): after every
+    // edit the incremental model's total, over-full count and every cut's need and slack equal
+    // a model built from scratch, and the returned change equals the change of the full totals.
+    let fx = load("inner_layer_room");
+    let pr = &fx.b.proj;
+    let o = opts(Norm::Octagonal);
+    let sh = std::rc::Rc::new(bare_sheets(pr, &outline_segments(&fx.m), &o).expect("sheets"));
+    let layers = [layer_idx(&fx, "F.Cu"), layer_idx(&fx, "In1.Cu"), layer_idx(&fx, "B.Cu")];
+    let via_r = 0.5 * fx.m.rules.default.via_d as f64;
+    let base: Vec<EditWire> = fx.doc["wires"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| EditWire {
+            poly: w["witness"].as_array().unwrap().iter().map(pt).collect(),
+            net: net_code(&fx, w["net"].as_str().unwrap()),
+            w: w["width"].as_f64().unwrap() * MM,
+            s: w["clearance"].as_f64().unwrap() * MM,
+            splits: Vec::new(),
+            layers: vec![layer_idx(&fx, w["witness_layer"].as_str().unwrap())],
+            alive: false,
+        })
+        .collect();
+    let (mut checked, mut reused, mut computed) = (0, 0, 0);
+    for seed in 1..=6u64 {
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ seed);
+        let mut ws = base.clone();
+        let mut cp = CutPrice::new(pr, sh.clone(), o, 1.0, ws.len());
+        let mut prev = 0.0;
+        for step in 0..60 {
+            let w = rng.below(ws.len());
+            let mut x = ws[w].clone();
+            let undo = rng.below(5) == 0;
+            match if x.alive { rng.below(6) } else { 6 } {
+                0 => x.alive = false,
+                1 | 2 => {
+                    let j = rng.below(x.layers.len());
+                    x.layers[j] = layers[rng.below(layers.len())];
+                }
+                3 if !x.splits.is_empty() => {
+                    // Via move: along its segment, or to the next one.
+                    let j = rng.below(x.splits.len());
+                    let (i, _) = x.splits[j];
+                    let lo = if j > 0 { x.splits[j - 1] } else { (0, 0.0) };
+                    let hi = if j + 1 < x.splits.len() { x.splits[j + 1] } else { (x.poly.len() - 2, 1.0) };
+                    let ni = (i + rng.below(3)).saturating_sub(1).clamp(lo.0, hi.0);
+                    let nf = 0.15 + 0.7 * rng.unit();
+                    if (ni, nf) > lo && (ni, nf) < hi {
+                        x.splits[j] = (ni, nf);
+                    }
+                }
+                4 => {
+                    // A new via (and piece) on a free segment.
+                    let i = rng.below(x.poly.len() - 1);
+                    let f = 0.15 + 0.7 * rng.unit();
+                    let at = x.splits.partition_point(|&s| s < (i, f));
+                    x.splits.insert(at, (i, f));
+                    x.layers.insert(at + 1, layers[rng.below(layers.len())]);
+                }
+                5 if !x.splits.is_empty() => {
+                    let j = rng.below(x.splits.len());
+                    x.splits.remove(j);
+                    x.layers.remove(j + 1);
+                }
+                6 => x.alive = true,
+                _ => {}
+            }
+            if undo {
+                cp.begin();
+            }
+            let d = if x.alive {
+                let (mut r, v) = x.runs(w, via_r);
+                cp.set_wire(w, &mut r, &v)
+            } else {
+                cp.clear_wire(w)
+            };
+            let mut after = ws.clone();
+            after[w] = x;
+            let (t_full, over_full, rows) = full_price(pr, &sh, o, &after, via_r);
+            let tol = 1e-6 * t_full.abs().max(1.0);
+            assert!((cp.total() - t_full).abs() <= tol, "seed {seed} step {step}: total {} vs full {}", cp.total(), t_full);
+            assert!((d - (t_full - prev)).abs() <= tol, "seed {seed} step {step}: change {d} vs {}", t_full - prev);
+            assert_eq!(cp.overfull(), over_full, "seed {seed} step {step}");
+            let mut mine: Vec<_> = cp.report().into_iter().map(|r| (r.layer, r.p.x as i64, r.p.y as i64, r.q.x as i64, r.q.y as i64, r.cap, r.need, r.slack)).collect();
+                    mine.sort_by_key(|a| (a.0, a.1, a.2, a.3, a.4));
+            assert_eq!(mine.len(), rows.len(), "seed {seed} step {step}: cuts with items");
+            for (a, b) in mine.iter().zip(&rows) {
+                assert_eq!((a.0, a.1, a.2, a.3, a.4), (b.0, b.1, b.2, b.3, b.4));
+                assert!((a.6 - b.6).abs() < 1e-6 && (a.7 - b.7).abs() < 1e-6, "seed {seed} step {step}: cut need/slack {a:?} vs {b:?}");
+            }
+            checked += 1;
+            if undo {
+                cp.rollback();
+                let (t0, o0, _) = full_price(pr, &sh, o, &ws, via_r);
+                assert!((cp.total() - t0).abs() <= 1e-6 * t0.abs().max(1.0) && cp.overfull() == o0, "seed {seed} step {step}: rollback");
+                prev = t0;
+            } else {
+                ws = after;
+                prev = t_full;
+            }
+        }
+        reused += cp.parts.1;
+        computed += cp.parts.0;
+    }
+    eprintln!("incremental edits: {checked} edits checked; parts computed {computed}, reused {reused}");
+    // Inserts compute every piece; relabels and via moves keep the pieces they do not touch.
+    assert!(reused * 4 > computed, "the edits reused almost nothing: {reused} of {}", reused + computed);
 }

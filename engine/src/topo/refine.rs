@@ -97,6 +97,41 @@ pub fn pass_layers_at(n: usize, ev: &[LEv], bottom: i32, ks: &[usize]) -> Vec<i3
 /// The via intervals and traversals of a wire before a change (kept where unchanged).
 type OldVias<'x> = (&'x [(usize, usize)], &'x [usize]);
 
+/// Measurement of the cost per move (shopping list 3.1): process-wide sums of the wall time and
+/// count of [`try_move`] calls (one label move: relayout, via placement, pricing, keep or undo)
+/// and of the via-position evaluations inside them (one traversal tried for one via). Read by the
+/// plan metrics; never change the routing.
+pub mod meter {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    pub static MOVE_NS: AtomicU64 = AtomicU64::new(0);
+    pub static MOVES: AtomicU64 = AtomicU64::new(0);
+    pub static VIAPOS_NS: AtomicU64 = AtomicU64::new(0);
+    pub static VIAPOS: AtomicU64 = AtomicU64::new(0);
+    /// Cut model split of the time: the wire's stretches (`runs_of`), the walks of the changed
+    /// parts, and putting them in (repricing the dirty cuts); counts: parts walked, cuts priced.
+    pub static STRETCH_NS: AtomicU64 = AtomicU64::new(0);
+    pub static FLUSHES: AtomicU64 = AtomicU64::new(0);
+    pub static PART_NS: AtomicU64 = AtomicU64::new(0);
+    pub static PARTS: AtomicU64 = AtomicU64::new(0);
+    pub static INSTALL_NS: AtomicU64 = AtomicU64::new(0);
+    pub static CUTS_PRICED: AtomicU64 = AtomicU64::new(0);
+    pub fn add(ns: &AtomicU64, n: &AtomicU64, t: std::time::Instant) {
+        ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        n.fetch_add(1, Ordering::Relaxed);
+    }
+    /// `(moves, us per move, via positions, us per via position)`.
+    pub fn read() -> (u64, f64, u64, f64) {
+        let (mn, m) = (MOVE_NS.load(Ordering::Relaxed), MOVES.load(Ordering::Relaxed));
+        let (vn, v) = (VIAPOS_NS.load(Ordering::Relaxed), VIAPOS.load(Ordering::Relaxed));
+        (m, mn as f64 / 1e3 / m.max(1) as f64, v, vn as f64 / 1e3 / v.max(1) as f64)
+    }
+    /// Cut model split: `(wire flushes, ms stretches, parts walked, ms walks, cuts priced, ms install)`.
+    pub fn read_split() -> (u64, f64, u64, f64, u64, f64) {
+        let ms = |a: &AtomicU64| a.load(Ordering::Relaxed) as f64 / 1e6;
+        (FLUSHES.load(Ordering::Relaxed), ms(&STRETCH_NS), PARTS.load(Ordering::Relaxed), ms(&PART_NS), CUTS_PRICED.load(Ordering::Relaxed), ms(&INSTALL_NS))
+    }
+}
+
 /// Order of a via traversal: (no site, overflow + squeeze change in um-mm, other wires in the
 /// triangle, -inradius, traversal).
 type SiteKey = (bool, i64, usize, i64, usize);
@@ -328,7 +363,9 @@ impl<'a> CapModel<'a> {
         ws.dedup();
         let mut d = 0.0;
         for w in ws {
+            let t0 = std::time::Instant::now();
             let (mut runs, vias) = cut.runs_of(self.st, self.packer, w, &self.evs[w], &self.via_k[w], self.bottom);
+            meter::add(&meter::STRETCH_NS, &meter::FLUSHES, t0);
             d += cut.set_wire(w, &mut runs, &vias);
         }
         self.cut = Some(cut);
@@ -375,9 +412,11 @@ impl<'a> CapModel<'a> {
             let mut run = 0.0;
             let mut best: Option<(SiteKey, usize)> = None;
             for k in lo..=hi {
+                let t0 = std::time::Instant::now();
                 ks[i] = k;
                 let ch = self.apply(w, ev, ks.clone());
                 run += self.reprice(&ch);
+                meter::add(&meter::VIAPOS_NS, &meter::VIAPOS, t0);
                 let r = self.rank(w, k);
                 let key = (r.0, (run * 1e3).round() as i64, r.1, r.2, r.3);
                 if best.as_ref().is_none_or(|b| key < b.0) {
@@ -631,6 +670,23 @@ pub fn try_move(
     evl: &mut [Vec<LEv>],
     mv: &[((WireId, usize), i32)],
     _bottom: i32,
+    trans: &dyn Fn(usize, usize) -> f64,
+    unary: &dyn Fn(WireId, usize, usize) -> f64,
+    add_vias: bool,
+    strict: bool,
+) -> bool {
+    let t0 = std::time::Instant::now();
+    let r = try_move_in(st, cm, evl, mv, trans, unary, add_vias, strict);
+    meter::add(&meter::MOVE_NS, &meter::MOVES, t0);
+    r
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_move_in(
+    st: &State,
+    cm: &mut CapModel,
+    evl: &mut [Vec<LEv>],
+    mv: &[((WireId, usize), i32)],
     trans: &dyn Fn(usize, usize) -> f64,
     unary: &dyn Fn(WireId, usize, usize) -> f64,
     add_vias: bool,
