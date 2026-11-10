@@ -200,8 +200,18 @@ fuse*, *pour stitching*), then *Verifying with KiCad DRC* and *Rendering the pre
 whole-route round (cycle) now running; **Gain** — how much the best result improved over the last
 `[optimize] stable_window` rounds; **Runs** — how many of the `[optimize] runs` seeded runs are stable; routed/total;
 vias; **Router time** and, next to it, the **CPU time** the run has used so far (all threads summed), against the time limit (on the clock you chose); **Total time** since you pressed Route (KiCad's DRC and the preview
-included); and **Best so far** — routed, length and vias of the best result over all runs, which is what OK or Cancel
-keeps.
+included); and the **score** of the **Last round** and of the **Best so far**.
+
+The score rows show run, round, **Errors** (connections open or drawn with rule violations), **Open** (connections
+without copper), **Vias** and **Length** — the order in which topor judges results (`[optimize] pick`, default
+`errors_vias_length`: fewest errors, then fewest open, fewest vias, the shortest length, then fewest shrinkages).
+*Last round* is the round any run finished last; *Best so far* is the best result over all runs, exactly the board OK
+or Cancel keeps. The line below says how the last round compares, on the first criterion that differs: *Last round is
+worse than the best: errors +2.* (more errors decide before fewer vias), *Last round is the new best: length -0.030
+m.*, or *… scores the same as the best; the earlier result stays.* When *Best so far* stays at an early round, the
+later rounds were worse on that criterion — log.txt in the report folder has one `round ended:` line per round with
+its score and the verdict, e.g. `round ended: run 3, round 2: errors 5, open 0, vias 168, length 7.412 m, shrinkages
+4; rule violations 5, routed 426 of 426: worse than the best (run 1, round 1): errors +2`.
 
 ### Routes stable and OK
 

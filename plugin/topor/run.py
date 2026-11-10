@@ -126,6 +126,17 @@ class _Log:
             f.write(traceback.format_exc())
 
 
+def round_log_lines(p: Progress, seen: int) -> list[str]:
+    """log.txt lines of the rounds the engine ended since round number `seen` (``Progress.round_lines`` keeps the
+    last few: one line per round, its score in the pick order and why it is or is not the best); a gap the
+    engine's list no longer covers is said once. O(len(round_lines))."""
+    lines = list(p.round_lines)
+    first = p.rounds_ended - len(lines) + 1  # round number of lines[0]
+    out = [f"round log: {first - seen - 1} round lines missed"] if first > seen + 1 else []
+    out += [f"round ended: {ln}" for i, ln in enumerate(lines) if first + i > seen]
+    return out
+
+
 # ---------------------------------------------------------------- seams
 def preflight_findings(cfg: Config, config_findings, copy_text: str, *, model=None, rules=None, sel=None,
                        pro=None, orig_drc=None) -> list:
@@ -800,6 +811,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         job_t0, router_before = time.monotonic(), state["router_s"]
         cpu_t0, cpu_before = time.process_time(), state["router_cpu_s"]
         last_poll, cancelled_at = -1e9, None
+        rounds_seen = 0  # round lines of this job written to log.txt (round_log_lines)
         # Ends when the job is done (also after an engine panic: B-1). After Cancel / OK / the CPU limit the engine
         # finishes the stage it is in and returns its best result so far; that can take a while on a big board, so
         # the flow waits for it (the progress dialog says so) instead of giving up and losing the result.
@@ -816,6 +828,9 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                 state["router_s"] = p.elapsed_s
                 p.cpu_s = state["router_cpu_s"] = cpu_before + (time.process_time() - cpu_t0)
                 state["last"] = p
+                for line in round_log_lines(p, rounds_seen):
+                    log.line(line)
+                rounds_seen = max(rounds_seen, p.rounds_ended)
                 if (cpu_clock and 0 < state["limit"] <= p.cpu_s and not state["limit_hit"] and not done):
                     state["limit_hit"] = "cpu"
                     log.line(f"CPU-time limit reached: {p.cpu_s:.1f} s of {state['limit']:.0f} s (router wall {p.elapsed_s:.1f} s)")

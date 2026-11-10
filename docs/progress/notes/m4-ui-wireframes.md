@@ -167,6 +167,11 @@ the display client area; the findings list takes the extra height. Default `Rout
 | Iteration   3 of up to 30        Routed    12 / 27        |
 | Vias        4                    Elapsed   0:12 / 1:00    |
 |                                                           |
+|              Run Round Errors Open Vias    Length         |
+| Last round     3     2      5    0  168   7.412 m         |
+| Best so far    1     1      3    0  166   7.384 m         |
+| Last round is worse than the best: errors +2.             |
+|                                                           |
 | Time limit  [   60 ] s wall time  [Set limit] [+5 min] [+15 min] |
 | 0 = no limit. A limit below the time spent stops the run  |
 | now, keeping the best result.                             |
@@ -195,6 +200,15 @@ dialog never blocks: `WxUi.progress` updates the widgets, calls `wx.YieldIfNeede
   Row *Round* = the engine's whole-route round `{round} of up to {rounds}` (`[optimize] rounds`, K1; before
   K1 the iteration of up to `[iterations] max`). Row *Router time* = router time over all DRC-loop rounds
   against `run.timeout_s`; row *Total time* = wall time since the run started (KiCad DRC, preview included).
+- **Score** (user 2026-11-11: "It would help if I can see the current score, and the best score in the UI"): rows
+  *Last round* (the round any run judged last) and *Best so far* (the best over all runs: exactly the board OK /
+  Cancel keeps and the final pick takes) with run, round, errors, open, vias, length — the columns are the pick
+  order (`[optimize] pick`, default `errors_vias_length`: fewest errors, then open, vias, length, shrinkages). `–`
+  until the first round ends. The line below says how the last round compares, on the first criterion that differs
+  (`Progress.last_vs_best` / `last_decider` / `last_delta`): *Last round is worse than the best: errors +2.*, *… the
+  new best: length -0.030 m.*, *The first result is the best so far.*, *… scores the same as the best; the earlier
+  result stays.* or, from a lower run, *… and is the best now (ties go to the lower run).* The run flow writes one line per ended round to log.txt (`round ended: run 3, round 2: errors 5
+  …: worse than the best (run 1, round 1): errors +2`).
 - Numbers right-aligned in fixed-width labels. Elapsed and limit both `m:ss` (`h:mm:ss` from one
   hour); limit shown as `/ {limit}` or `/ no limit` when `timeout_s == 0` (then Cancel is the only
   stop — the hint line says so).
@@ -529,9 +543,30 @@ title/label/button/checkbox/choice/heading/text).
 | progress | gain_pending | text | – |
 | progress | runs_label | label | Runs |
 | progress | runs_value | text | {stable} of {runs} stable |
-| progress | best_label | text | Best so far: {routed} / {total} routed, {length} m, {vias} vias |
-| progress | best_run | text | (run {run}) |
-| progress | best_pending | text | Best so far: – |
+| progress | score_head_run | label | Run |
+| progress | score_head_round | label | Round |
+| progress | score_head_errors | label | Errors |
+| progress | score_head_open | label | Open |
+| progress | score_head_vias | label | Vias |
+| progress | score_head_length | label | Length |
+| progress | score_last | label | Last round |
+| progress | score_best | label | Best so far |
+| progress | score_length | text | {length} m |
+| progress | score_pending | text | – |
+| progress | score_hint | text | Scores compare in the pick order: fewest errors (open connections and connections with rule violations), then fewest open, fewest vias, the shortest length ([optimize] pick). The best so far is the board OK or Cancel keeps. |
+| progress | vs_first | text | The first result is the best so far. |
+| progress | vs_new_best | text | Last round is the new best: {delta}. |
+| progress | vs_worse | text | Last round is worse than the best: {delta}. |
+| progress | vs_same | text | Last round scores the same as the best; the earlier result stays. |
+| progress | vs_tie | text | Last round scores the same as the best and is the best now (ties go to the lower run). |
+| progress | vs_better | text | Last round is better ({delta}), but the variant table kept the best. |
+| progress | delta_errors | text | errors {d} |
+| progress | delta_open | text | open {d} |
+| progress | delta_vias | text | vias {d} |
+| progress | delta_length | text | length {d} m |
+| progress | delta_shrinkages | text | shrinkages {d} |
+| progress | delta_score | text | weighted score {d} mm |
+| progress | delta_area | text | area {d} mm² |
 
 ### preview
 

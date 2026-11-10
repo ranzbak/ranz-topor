@@ -147,10 +147,35 @@ WORDING: dict[str, dict[str, str]] = {
         "gain_pending": "–",
         "runs_label": "Runs",
         "runs_value": "{stable} of {runs} stable",
-        "best_label": "Best so far: {routed} / {total} routed, {length} m, {vias} vias",
-        "best_run": "(run {run})",
-        "best_violations": ", {n} violations",
-        "best_pending": "Best so far: –",
+        # the score of the last round and of the best so far (user 2026-11-11: "It would help if I can see the
+        # current score, and the best score in the UI"): the columns are the pick order ([optimize] pick), the line
+        # below says how the last round compares with the best and on which criterion
+        "score_head_run": "Run",
+        "score_head_round": "Round",
+        "score_head_errors": "Errors",
+        "score_head_open": "Open",
+        "score_head_vias": "Vias",
+        "score_head_length": "Length",
+        "score_last": "Last round",
+        "score_best": "Best so far",
+        "score_length": "{length} m",
+        "score_pending": "–",
+        "score_hint": "Scores compare in the pick order: fewest errors (open connections and connections with rule "
+                      "violations), then fewest open, fewest vias, the shortest length ([optimize] pick). The best "
+                      "so far is the board OK or Cancel keeps.",
+        "vs_first": "The first result is the best so far.",
+        "vs_new_best": "Last round is the new best: {delta}.",
+        "vs_worse": "Last round is worse than the best: {delta}.",
+        "vs_same": "Last round scores the same as the best; the earlier result stays.",
+        "vs_tie": "Last round scores the same as the best and is the best now (ties go to the lower run).",
+        "vs_better": "Last round is better ({delta}), but the variant table kept the best.",
+        "delta_errors": "errors {d}",
+        "delta_open": "open {d}",
+        "delta_vias": "vias {d}",
+        "delta_length": "length {d} m",
+        "delta_shrinkages": "shrinkages {d}",
+        "delta_score": "weighted score {d} mm",
+        "delta_area": "area {d} mm²",
     },
     "preview": {
         "title": "Topor — Preview: {board}",
@@ -361,6 +386,51 @@ def open_path(path) -> bool:
         return True
     except OSError:
         return False
+
+
+def score_delta(decider: str, delta: float) -> str:
+    """The deciding criterion and last minus best on it, in the units the rows show ("errors +2", "length
+    -0.030 m"); "" for no decider. O(1)."""
+    W = WORDING["progress"]
+    if not decider:
+        return ""
+    if decider == "length":
+        return W["delta_length"].format(d=f"{delta / 1000:+.3f}")
+    if decider in ("score", "area"):
+        return W[f"delta_{decider}"].format(d=f"{delta:+.1f}")
+    key = f"delta_{decider}"
+    return W[key].format(d=f"{delta:+.0f}") if key in W else f"{decider} {delta:+g}"
+
+
+def score_rows(p: Progress) -> tuple[dict, str]:
+    """Cells of the "Last round" / "Best so far" rows (``None`` = nothing yet: the rows keep "–") and the verdict
+    line: how the last round compares with the best and on which criterion, in the pick order (the engine's
+    ``Progress.last_vs_best`` / ``last_decider`` / ``last_delta``). O(1)."""
+    W = WORDING["progress"]
+
+    def cells(run, rnd, errors, open_, vias, length_mm):
+        return {"run": str(run), "round": str(rnd), "errors": str(errors), "open": str(open_), "vias": str(vias),
+                "length": W["score_length"].format(length=f"{length_mm / 1000:.3f}")}
+
+    last = (cells(p.last_run, p.last_round, p.last_errors, p.last_open, p.last_vias, p.last_length_mm)
+            if getattr(p, "last_round", 0) else None)
+    best = (cells(p.best_run, p.best_round, p.best_errors, p.best_open, p.best_vias, p.best_length_mm)
+            if getattr(p, "best_round", 0) else None)
+    vs = getattr(p, "last_vs_best", "")
+    delta = score_delta(getattr(p, "last_decider", ""), getattr(p, "last_delta", 0.0))
+    if last is None or not vs:
+        verdict = ""
+    elif vs == "new best":
+        verdict = W["vs_new_best"].format(delta=delta) if delta else W["vs_first"]
+    elif vs == "worse":
+        verdict = W["vs_worse"].format(delta=delta)
+    elif vs == "better":
+        verdict = W["vs_better"].format(delta=delta)
+    elif vs == "tie":
+        verdict = W["vs_tie"]
+    else:
+        verdict = W["vs_same"]
+    return {"last": last, "best": best}, verdict
 
 
 def _fmt_time(seconds: float) -> str:
@@ -860,9 +930,8 @@ class ProgressDialog(_Base):
             grid.Add(self.text(self, "progress", lab), 0)
             grid.Add(val, 0, wx.ALIGN_RIGHT)
         self.root.Add(grid, 0, wx.BOTTOM, self.group)
-        # M-B0: the best result so far (what OK / Cancel keeps), over all runs
-        self.best_value = self.text(self, "progress", "best_pending", name="best_value")
-        self.root.Add(self.best_value, 0, wx.BOTTOM, self.group)
+        # the score of the last round and of the best so far (what OK / Cancel keeps), over all runs
+        self._build_score_rows()
         self.stable = False
         self.stable_window = stable_window
         self._build_limit_row()
@@ -877,6 +946,47 @@ class ProgressDialog(_Base):
         self.finish((460, 300))
         self._sync_limit_controls()
         self.cancel_button.SetFocus()
+
+    SCORE_COLS = (("run", 30), ("round", 40), ("errors", 44), ("open", 40), ("vias", 40), ("length", 70))
+
+    def _build_score_rows(self) -> None:
+        """Header + "Last round" / "Best so far" rows (run, round, errors, open, vias, length: the pick order) and
+        the verdict line below. Fixed-width right-aligned cells: changing digits never shift the layout."""
+        W = WORDING["progress"]
+        grid = wx.FlexGridSizer(1 + len(self.SCORE_COLS), self.row // 2, self.group)
+        grid.Add((0, 0))
+        for col, _w in self.SCORE_COLS:
+            grid.Add(self.text(self, "progress", f"score_head_{col}", style=wx.ALIGN_RIGHT), 0, wx.ALIGN_RIGHT)
+        self.score_cells: dict[str, dict[str, wx.StaticText]] = {}
+        for row in ("last", "best"):
+            name = self.text(self, "progress", f"score_{row}")
+            name.SetToolTip(W["score_hint"])
+            grid.Add(name, 0)
+            self.score_cells[row] = {}
+            for col, width in self.SCORE_COLS:
+                cell = self._num(f"{row}_{col}", width)
+                cell.SetLabel(W["score_pending"])
+                self.score_cells[row][col] = cell
+                grid.Add(cell, 0, wx.ALIGN_RIGHT)
+        self.root.Add(grid, 0, wx.BOTTOM, self.row)
+        self.score_verdict = wx.StaticText(self, label=" ", name="score_verdict")  # one line kept free
+        self.root.Add(self.score_verdict, 0, wx.BOTTOM, self.group)
+        self._verdict = " "
+
+    def _set_score(self, p: Progress) -> None:
+        """Fill the score rows from the engine's progress (``score_rows``)."""
+        rows, verdict = score_rows(p)
+        for row, cells in rows.items():
+            if cells is None:
+                continue
+            for col, val in cells.items():
+                self.score_cells[row][col].SetLabel(val)
+        verdict = verdict or " "
+        if verdict != self._verdict:
+            self._verdict = verdict
+            self.score_verdict.SetLabel(verdict)
+            self.score_verdict.Wrap(self.FromDIP(430))
+            self._grow_to_best()  # a verdict that wraps to two lines makes room for itself
 
     @property
     def _unit_key(self) -> str:
@@ -1038,14 +1148,7 @@ class ProgressDialog(_Base):
         runs = int(getattr(p, "runs", 0) or 0)
         self.runs_value.SetLabel(W["runs_value"].format(stable=getattr(p, "runs_stable", 0), runs=runs) if runs
                                  else W["gain_pending"])
-        if getattr(p, "best_total", 0):
-            txt = W["best_label"].format(routed=p.best_routed, total=p.best_total, length=f"{p.best_length_mm / 1000:.2f}",
-                                         vias=p.best_vias)
-            if getattr(p, "best_violations", 0):
-                txt += W["best_violations"].format(n=p.best_violations)
-            if runs > 1 and p.best_run:
-                txt += " " + W["best_run"].format(run=p.best_run)
-            self.best_value.SetLabel(txt)
+        self._set_score(p)
         if p.iteration == 0 and p.routed == 0:
             self.routed_value.SetLabel(W["routed_pending"].format(total=p.total))
         else:

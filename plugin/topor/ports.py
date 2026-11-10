@@ -125,6 +125,34 @@ class Progress:
     best_vias: int = 0
     best_run: int = 0
     best_violations: int = 0  # M-B1 never drop: rule violations of the best result's copper
+    # Score display (user 2026-11-11): the best's score in the pick order ([optimize] pick: errors, open, vias,
+    # length, shrinkages) and its round; the round judged last (any run) with the same criteria, how it compares
+    # with the best ("new best" | "tie" (same score, the best now: ties go to the lower run) | "worse" | "same" |
+    # "better"; "" = none yet), the criterion that decides
+    # ("errors" | "open" | "vias" | "length" | "shrinkages" | "score" | "area"; "" = none) and last minus best on
+    # it (count, mm or mm²); the rounds ended so far and the log lines of the last ones (round_lines[i] is round
+    # number rounds_ended - len(round_lines) + i + 1), which the run flow writes to log.txt once each.
+    best_errors: int = 0
+    best_open: int = 0
+    best_shrinkages: int = 0
+    best_round: int = 0
+    last_run: int = 0
+    last_round: int = 0
+    last_errors: int = 0
+    last_open: int = 0
+    last_violations: int = 0
+    last_vias: int = 0
+    last_length_mm: float = 0.0
+    last_shrinkages: int = 0
+    last_routed: int = 0
+    last_vs_best: str = ""
+    last_decider: str = ""
+    last_delta: float = 0.0
+    rounds_ended: int = 0
+    round_lines: list = field(default_factory=list)
+
+    _INT = ("best_errors", "best_open", "best_shrinkages", "best_round", "last_run", "last_round", "last_errors",
+            "last_open", "last_violations", "last_vias", "last_shrinkages", "last_routed", "rounds_ended")
 
     @staticmethod
     def from_json(d: dict) -> "Progress":
@@ -137,7 +165,13 @@ class Progress:
                         best_routed=int(d.get("best_routed", 0) or 0), best_total=int(d.get("best_total", 0) or 0),
                         best_length_mm=float(d.get("best_length_mm", 0.0) or 0.0),
                         best_vias=int(d.get("best_vias", 0) or 0), best_run=int(d.get("best_run", 0) or 0),
-                        best_violations=int(d.get("best_violations", 0) or 0))
+                        best_violations=int(d.get("best_violations", 0) or 0),
+                        last_length_mm=float(d.get("last_length_mm", 0.0) or 0.0),
+                        last_vs_best=str(d.get("last_vs_best", "") or ""),
+                        last_decider=str(d.get("last_decider", "") or ""),
+                        last_delta=float(d.get("last_delta", 0.0) or 0.0),
+                        round_lines=[str(x) for x in (d.get("round_lines") or [])],
+                        **{k: int(d.get(k, 0) or 0) for k in Progress._INT})
 
 
 @runtime_checkable
