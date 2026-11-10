@@ -533,6 +533,19 @@ pub struct ViaSlot {
 /// A wire to load with its passes `(edge, position along the edge)` and triangles.
 pub type LoadItem = (Wire, Vec<(EdgeId, f64)>, Vec<TriId>);
 
+/// The routed part of a [`State`] without its projection (4.3, `[optimize] initial = "once"`):
+/// what one cycle hands to the next so that it improves the plan instead of routing it again. The
+/// projection is the call's (built once, 4.2), so the ids stay valid.
+#[derive(Clone, Debug, Default)]
+pub struct Topology {
+    passes: Vec<Pass>,
+    edge_order: Vec<Vec<PassId>>,
+    wires: Vec<Wire>,
+    tri_trav: Vec<Vec<(WireId, usize)>>,
+    ends: Vec<u32>,
+    pass_w: Vec<f64>,
+}
+
 #[derive(Clone, Debug)]
 pub struct State<'p> {
     pub proj: &'p Projection,
@@ -565,6 +578,12 @@ pub struct State<'p> {
     /// starts at the footprint and may reach further back; never a neck in the middle of a
     /// full-width run). False: only the bottleneck passes are necked.
     pub neck_from_pad: bool,
+    /// `[search] length = "taut"` (shopping list 4.3): the search prices a wire's length as the
+    /// shortest path through its sleeve that keeps the clearances ([`State::gap_spans`],
+    /// [`super::init`] funnel step; Polubasov 2010, «Начальная трассировка»: «кратчайший путь по
+    /// триангуляции с учетом необходимых зазоров»). False ("even", today's default): between
+    /// evenly spaced points on each crossed edge ([`State::gap_point`]).
+    pub taut_len: bool,
 }
 
 impl<'p> State<'p> {
@@ -599,7 +618,19 @@ impl<'p> State<'p> {
             pass_w: Vec::new(),
             floors: std::collections::HashMap::new(),
             neck_from_pad: true,
+            taut_len: false,
         }
+    }
+
+    /// The routed part of the state ([`Topology`]).
+    pub fn topology(&self) -> Topology {
+        Topology { passes: self.passes.clone(), edge_order: self.edge_order.clone(), wires: self.wires.clone(), tri_trav: self.tri_trav.clone(), ends: self.ends.clone(), pass_w: self.pass_w.clone() }
+    }
+
+    /// Put a [`Topology`] of the same projection back (the wires, their passes in edge order).
+    pub fn restore(&mut self, t: Topology) {
+        assert_eq!(t.edge_order.len(), self.edge_order.len(), "a topology of the same projection");
+        (self.passes, self.edge_order, self.wires, self.tri_trav, self.ends, self.pass_w) = (t.passes, t.edge_order, t.wires, t.tri_trav, t.ends, t.pass_w);
     }
 
     /// The narrowest width a wire of `net` with nominal width `w` may neck to (`w`: none).
@@ -845,6 +876,158 @@ impl<'p> State<'p> {
             out.push(need_in(regime, items, lo, hi));
             items.remove(g);
         }
+    }
+
+    /// What bounds the end vertex `v` of a cut for a pass that may run on the layers `both`: a
+    /// pad on only some of those layers does not bound it (the pass may run on another layer
+    /// under or beside it), anything else as [`Projection::bound`].
+    fn bound_on(&self, v: VertId, both: u64) -> Bound {
+        let pr = self.proj;
+        match pr.vkind[v] {
+            VertKind::Outline(o) if !pr.obstacles[o].drilled && both != 0 && pr.obstacles[o].layers.0 & both != both => Bound::Open,
+            _ => pr.bound(v),
+        }
+    }
+
+    /// Where the centre line of `me` may cross edge `e` at gap `g` keeping its clearances (4.3,
+    /// "the shortest path ... keeping the clearances", Polubasov 2010): the interval `(lo, hi)`
+    /// in nm along the edge from its end `p`, with the passes before the gap packed towards `p`
+    /// and those after it towards `q` at the demand model's spacing ([`super::demand::need`]: the
+    /// end object's clearance, the widths, the larger clearance between different nets; a run of
+    /// the end pad's own net may lie on the pad). `skip`: a pass of the edge left out (the wire
+    /// whose own span this is). Where the gap is over-full (`lo > hi`) the interval collapses to
+    /// the middle of the two (the overflow is priced apart). `both`: the layers the pass may take
+    /// ([`State::bound_on`]). O(passes²) for all gaps.
+    pub fn gap_spans(&self, e: EdgeId, me: Item, both: u64, skip: Option<PassId>, out: &mut Vec<(f64, f64)>) {
+        out.clear();
+        let pr = self.proj;
+        let [vp, vq] = pr.edges[e];
+        let len = (pr.pos[vq] - pr.pos[vp]).len();
+        let (bp, bq) = (self.bound_on(vp, both), self.bound_on(vq, both));
+        let regime = pr.regime(e);
+        let items: Vec<Item> = self.edge_order[e].iter().filter(|&&p| Some(p) != skip).map(|&p| self.item(p)).collect();
+        let own = |b: &Bound, it: &Item| matches!(*b, Bound::Pad { net: Some(n), .. } if n == it.net);
+        let sp = |a: &Item, b: &Item| if a.net == b.net { 0.0 } else { regime.unwrap_or(a.s.max(b.s)) };
+        // A courtyard rule replaces the clearances to pads and between passes (`need_in`).
+        let end_c = |b: Bound| match (regime, b) {
+            (Some(r), Bound::Pad { net, .. }) => Bound::Pad { net, clear: r }.clearance(&Item { s: r, ..me }),
+            _ => b.clearance(&me),
+        };
+        // Centre of `me` from one end, with `before` packed against that end (nearest first). At
+        // an open end (a free point: nothing to keep clear of) the first centre line may lie on
+        // the vertex itself.
+        let from_end = |b: Bound, before: &[Item]| -> f64 {
+            if own(&b, &me) && before.iter().all(|x| own(&b, x)) {
+                return 0.0;
+            }
+            let open = matches!(b, Bound::Open);
+            match (before.first(), before.last()) {
+                (None, _) | (_, None) => if open { 0.0 } else { end_c(b) + 0.5 * me.w },
+                (Some(first), Some(last)) => need_in(regime, before, b, Bound::Open) - if open { 0.5 * first.w } else { 0.0 } + sp(last, &me) + 0.5 * me.w,
+            }
+        };
+        let mut rev: Vec<Item> = Vec::with_capacity(items.len());
+        for g in 0..=items.len() {
+            let lo = from_end(bp, &items[..g]);
+            rev.clear();
+            rev.extend(items[g..].iter().rev().copied());
+            let hi = len - from_end(bq, &rev);
+            out.push(if lo <= hi {
+                (lo, hi)
+            } else {
+                let m = (0.5 * (lo + hi)).clamp(0.0, len);
+                (m, m)
+            });
+        }
+    }
+
+    /// The span of pass `p` on its edge ([`State::gap_spans`] of its gap with the pass itself
+    /// left out), as two points from end `p` to end `q` of the edge. O(passes²) of the edge.
+    pub fn pass_span(&self, p: PassId, both: u64) -> (Vec2, Vec2) {
+        let e = self.passes[p].edge;
+        let g = self.order_index(p);
+        let mut sp = Vec::new();
+        let it = self.item(p);
+        self.gap_spans(e, it, both, Some(p), &mut sp);
+        let [vp, vq] = self.proj.edges[e];
+        let (a, b) = (self.proj.pos[vp], self.proj.pos[vq]);
+        let len = (b - a).len().max(1.0);
+        let (lo, hi) = sp[g];
+        (a + (b - a) * (lo / len), a + (b - a) * (hi / len))
+    }
+
+    /// Length (nm) of wire `w` as the search prices it: with `taut_len`, the shortest path from
+    /// terminal to terminal through the spans of its passes and the corners it turns at
+    /// ([`State::pass_span`], [`super::pack::funnel`]); else the polyline through the evenly
+    /// spaced pass points ([`State::polyline`]). O(passes · edge load²).
+    pub fn wire_len(&self, w: WireId) -> f64 {
+        if !self.taut_len {
+            return self.polyline(w).windows(2).map(|x| (x[1] - x[0]).len()).sum();
+        }
+        self.taut_points(w).windows(2).map(|x| (x[1] - x[0]).len()).sum()
+    }
+
+    /// [`State::wire_len`] with `taut_len` of a path not inserted yet: `wire` (its terminals,
+    /// net, width, clearance) through the gaps `path` of the triangles `tris` (one more), each
+    /// gap's span as it is now ([`State::gap_spans`]). O(path · edge load²).
+    pub fn path_len_taut(&self, wire: &Wire, path: &[(EdgeId, usize)], tris: &[TriId]) -> f64 {
+        let pr = self.proj;
+        let me = Item { net: wire.net, w: wire.w, s: wire.s };
+        let (pa, pb) = (pr.pos[wire.a], pr.pos[wire.b]);
+        let mut ports: Vec<(Vec2, Vec2)> = Vec::with_capacity(path.len() + 2);
+        ports.push((pa, pa));
+        let mut sp = Vec::new();
+        for (k, &(e, g)) in path.iter().enumerate() {
+            let (t1, t2) = (tris[k], tris[k + 1]);
+            let both = pr.allowed(t1, wire.net).map_or(0, |m| m.0) & pr.allowed(t2, wire.net).map_or(0, |m| m.0);
+            self.gap_spans(e, me, both, None, &mut sp);
+            let [vp, vq] = pr.edges[e];
+            let (a, b) = (pr.pos[vp], pr.pos[vq]);
+            let len = (b - a).len().max(1.0);
+            let (lo, hi) = sp[g.min(sp.len() - 1)];
+            let (x, y) = (a + (b - a) * (lo / len), a + (b - a) * (hi / len));
+            let t = pr.tris[t1];
+            let c = (pr.pos[t[0]] + pr.pos[t[1]] + pr.pos[t[2]]) * (1.0 / 3.0);
+            let left_is_q = (b - a).cross(c - a) > 0.0;
+            ports.push(if left_is_q { (y, x) } else { (x, y) });
+        }
+        ports.push((pb, pb));
+        super::pack::funnel(&ports).windows(2).map(|x| (x[1].0 - x[0].0).len()).sum()
+    }
+
+    /// The corners of the taut path of wire `w` ([`State::wire_len`] with `taut_len`): terminal,
+    /// the span ends and turn corners it bends at, terminal.
+    pub fn taut_points(&self, w: WireId) -> Vec<Vec2> {
+        let pr = self.proj;
+        let wi = &self.wires[w];
+        let n = wi.passes.len();
+        let mut ports: Vec<(Vec2, Vec2)> = Vec::with_capacity(n + wi.turns.len() + 2);
+        let (pa, pb) = (pr.pos[wi.a], pr.pos[wi.b]);
+        ports.push((pa, pa));
+        let mut ti = 0;
+        for k in 0..=n {
+            while ti < wi.turns.len() && wi.turns[ti].0 == k {
+                let v = pr.pos[wi.turns[ti].1];
+                ports.push((v, v));
+                ti += 1;
+            }
+            if k == n {
+                break;
+            }
+            let p = wi.passes[k];
+            let e = self.passes[p].edge;
+            let (t1, t2) = (wi.tris[k], wi.tris[k + 1]);
+            let both = pr.allowed(t1, wi.net).map_or(0, |m| m.0) & pr.allowed(t2, wi.net).map_or(0, |m| m.0);
+            let (x, y) = self.pass_span(p, both);
+            // Left and right as seen coming from the triangle of traversal `k`.
+            let [vp, vq] = pr.edges[e];
+            let t = pr.tris[t1];
+            let c = (pr.pos[t[0]] + pr.pos[t[1]] + pr.pos[t[2]]) * (1.0 / 3.0);
+            let left_is_q = (pr.pos[vq] - pr.pos[vp]).cross(c - pr.pos[vp]) > 0.0;
+            ports.push(if left_is_q { (y, x) } else { (x, y) });
+        }
+        ports.push((pb, pb));
+        super::pack::funnel(&ports).into_iter().map(|c| c.0).collect()
     }
 
     fn order_index(&self, p: PassId) -> usize {

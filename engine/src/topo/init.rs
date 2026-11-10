@@ -47,6 +47,16 @@ pub struct InitWeights {
     /// `necking` price of one necked stretch at amount 1 (M-C: a pass that fits only at the
     /// wire's neck floor starts a necked stretch; the amount grows with the depth of the neck).
     pub neck_mm: f64,
+    /// Per crossing of two stretches that no layer assignment separates (a crossing on one
+    /// layer: a short when drawn). Today the `overflow` price; with `[optimize] initial = "once"`
+    /// (4.3) the `violation` price: very high, so the optimiser works it away, but the wire is
+    /// still made (user 2026-11-10: "costly traces made can be optimized for, traces that just
+    /// failed cannot be optimized for").
+    pub same_layer_mm: f64,
+    /// Per triangle entered that is a wall for this net (inside another net's drilled obstacle,
+    /// or no layer left); 0 = walls closed (the normal search). The never-fail fallback of 4.3
+    /// opens them at the `violation` price, so a wire with no legal path is still placed.
+    pub wall_mm: f64,
     /// Search cap per connection.
     pub max_expansions: usize,
 }
@@ -68,6 +78,8 @@ impl InitWeights {
             forced_layer_mm: forced,
             junction_angle_mm: reg.price(&Event::JunctionAngle { at: Vec2 { x: 0.0, y: 0.0 }, deg: 60.0, ws_mm: 1.0 / super::factors::junction_psi(60.0) }, w),
             neck_mm: reg.price(&Event::Necking { wire: 0, from_nm: 1.0, to_nm: 1.0, mm: 0.0 }, w),
+            same_layer_mm: reg.price(&Event::Overflow { wire: 0, edge: 0 }, w),
+            wall_mm: 0.0,
             max_expansions: 2_000_000,
         }
     }
@@ -101,6 +113,9 @@ pub struct InitReport {
     pub crossings_before: usize,
     pub crossings_after: usize,
     pub swaps: usize,
+    /// Connections placed without a legal path (4.3 never fail: through walls at the `violation`
+    /// price, or [`State::any_path`]).
+    pub forced: Vec<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -136,6 +151,104 @@ struct Node {
     pin: u64,
     /// The pass fits only at the wire's neck floor (M-C): it lies in a necked stretch.
     nk: bool,
+    /// Taut length (4.3, `State::taut_len`): the last corner of the shortest path so far (the
+    /// funnel's apex), the part of this gap's span visible from it, and the cost with the length
+    /// up to the apex only (`cost` adds the distance from the apex to the span: a lower bound
+    /// of reaching it). Even spacing: `root = iv = pt`, `croot = cost`.
+    root: Vec2,
+    iv: (Vec2, Vec2),
+    croot: f64,
+}
+
+/// Where a search step starts: the point (`px`, even spacing), the funnel apex and the visible
+/// span (taut length), the cost so far and the cost up to the apex.
+#[derive(Clone, Copy)]
+struct From {
+    px: Vec2,
+    root: Vec2,
+    iv: (Vec2, Vec2),
+    base: f64,
+    base_root: f64,
+}
+
+/// One step of the funnel (4.3): the span `(c, d)` of the next gap seen from apex `r` through the
+/// span `(a, b)` of this one (Lee-Preparata / Polyanya: the visible part keeps the apex; a span
+/// wholly outside the cone is reached by bending at the span end it lies beyond, which sees the
+/// whole of it, both spans being sides of one triangle).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Step {
+    Vis(Vec2, Vec2),
+    Bend(Vec2),
+}
+
+/// [`Step`] of apex `r` through `(a, b)` onto `(c, d)`. O(1).
+pub fn funnel_step(r: Vec2, a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> Step {
+    const EPS: f64 = 1.0; // nm
+    if (a - b).len() < EPS {
+        return if (r - a).len() < EPS { Step::Vis(c, d) } else { Step::Bend(a) };
+    }
+    let (da, db) = (a - r, b - r);
+    let o = da.cross(db);
+    if o.abs() <= 1e-9 * da.len() * db.len() {
+        // The apex on the line of the span: bend at the nearer end (a zero-length bend where the
+        // apex is that end).
+        return Step::Bend(if (a - r).len2() <= (b - r).len2() { a } else { b });
+    }
+    let sg = o.signum();
+    // Inside the cone: cross(da, x - r) and cross(x - r, db) both of the sign of `o`; each is
+    // linear along c -> d.
+    let fa = |x: Vec2| da.cross(x - r) * sg;
+    let fb = |x: Vec2| (x - r).cross(db) * sg;
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for (f0, f1) in [(fa(c), fa(d)), (fb(c), fb(d))] {
+        if f0 < 0.0 && f1 < 0.0 {
+            t0 = 2.0;
+            break;
+        }
+        if f0 < 0.0 || f1 < 0.0 {
+            let t = f0 / (f0 - f1);
+            if f0 < 0.0 {
+                t0 = t0.max(t);
+            } else {
+                t1 = t1.min(t);
+            }
+        }
+    }
+    if t0 <= t1 {
+        return Step::Vis(c + (d - c) * t0, c + (d - c) * t1);
+    }
+    let m = (c + d) * 0.5;
+    Step::Bend(if fa(m) < 0.0 { a } else { b })
+}
+
+/// Shortest length from `r` through the segment `(a, b)` to `q`, and the point where it crosses
+/// the segment (the reflection of `q` when both lie on one side: then it is the lower bound of
+/// any path that touches the segment). O(1).
+pub fn via_seg(r: Vec2, a: Vec2, b: Vec2, q: Vec2) -> (f64, Vec2) {
+    let f = |x: Vec2| (x - r).len() + (q - x).len();
+    let ab = b - a;
+    if ab.len2() < 1.0 {
+        return (f(a), a);
+    }
+    let (sr, sq) = (ab.cross(r - a), ab.cross(q - a));
+    let q2 = if sr * sq > 0.0 {
+        // Mirror q across the line of the segment.
+        let t = (q - a).dot(ab) / ab.len2();
+        let foot = a + ab * t;
+        foot * 2.0 - q
+    } else {
+        q
+    };
+    let den = ab.cross(q2 - r);
+    let mut best = if f(a) <= f(b) { (f(a), a) } else { (f(b), b) };
+    if den.abs() > 1e-12 {
+        let t = ((r - a).cross(q2 - r) / den).clamp(0.0, 1.0);
+        let x = a + ab * t;
+        if f(x) < best.0 {
+            best = (f(x), x);
+        }
+    }
+    best
 }
 
 /// One end a tree search may start or stop at (D5 branching, [`State::search_tree`]): a vertex of
@@ -238,6 +351,8 @@ struct Search<'s, 'p> {
     needs: Vec<f64>,
     /// [`Search::needs`] with every pass (this one too) at its neck floor (M-C).
     needs_n: Vec<f64>,
+    /// The clearance-keeping spans of the gaps of an edge (taut length, [`State::gap_spans`]).
+    spans: Vec<(f64, f64)>,
     items: Vec<Item>,
     heap: BinaryHeap<Key>,
     /// (cost, parent node or MAX, last triangle, source end, target end)
@@ -264,6 +379,14 @@ impl Search<'_, '_> {
     fn h(&self, p: Vec2) -> f64 {
         let k = self.scale * self.wt.length_mm / MM;
         self.gpts.iter().map(|&(q, a)| (q - p).len() * k + a).fold(f64::INFINITY, f64::min)
+    }
+
+    /// [`Search::h`] of a taut-length node (4.3): from its apex through its visible span to the
+    /// nearest target ([`via_seg`]), less the apex-to-span distance its cost already holds.
+    fn h_taut(&self, root: Vec2, iv: (Vec2, Vec2)) -> f64 {
+        let k = self.scale * self.wt.length_mm / MM;
+        let held = super::draw::seg_dist(root, iv.0, iv.1);
+        self.gpts.iter().map(|&(q, a)| (via_seg(root, iv.0, iv.1, q).0 - held) * k + a).fold(f64::INFINITY, f64::min)
     }
 
     /// `junction_angle` price of a trace that leaves end `d` towards `toward`.
@@ -326,7 +449,7 @@ impl Search<'_, '_> {
                 + match k {
                     CrossLayer::Free => 0.0,
                     CrossLayer::Via => wt.forced_layer_mm,
-                    CrossLayer::Unlayerable => wt.overflow_mm,
+                    CrossLayer::Unlayerable => wt.same_layer_mm,
                 };
         }
         (cross, pg)
@@ -351,7 +474,7 @@ impl Search<'_, '_> {
                 return;
             }
         }
-        let h = self.h(n.pt);
+        let h = if self.st.taut_len { self.h_taut(n.root, n.iv) } else { self.h(n.pt) };
         let f = n.cost + h;
         // Behind the best goal found so far: never popped.
         if self.goal.is_some_and(|g| f >= g.0) {
@@ -366,11 +489,15 @@ impl Search<'_, '_> {
     /// end of the path, `except` a wire whose chords in `t` are not crossed (the trunk a branch
     /// leaves at a junction corner of `t`).
     #[allow(clippy::too_many_arguments)]
-    fn expand(&mut self, t: TriId, x: End, in_e: Option<EdgeId>, px: Vec2, base: f64, parent: usize, seed: usize, except: Option<WireId>, pin: u64) {
+    fn expand(&mut self, t: TriId, x: End, in_e: Option<EdgeId>, fr: From, parent: usize, seed: usize, except: Option<WireId>, pin: u64) {
         let (st, c) = (self.st, self.c);
         let pr = st.proj;
+        let taut = st.taut_len;
+        let k_len = self.scale * self.wt.length_mm / MM;
+        let px = fr.px;
         // Taking the last free entry sector of another net's pad.
-        let base = if self.wt.blocks_pad_mm > 0.0 { base + self.wt.blocks_pad_mm * st.blocked_pads(t, c.net).len() as f64 } else { base };
+        let bp = if self.wt.blocks_pad_mm > 0.0 { self.wt.blocks_pad_mm * st.blocked_pads(t, c.net).len() as f64 } else { 0.0 };
+        let (base, base_root) = if bp > 0.0 { (fr.base + bp, fr.base_root + bp) } else { (fr.base, fr.base_root) };
         self.fill_chords(t);
         let mine = pr.allowed(t, c.net).map_or(0, |m| m.0);
         let xb = st.end_bpos(t, x);
@@ -382,11 +509,21 @@ impl Search<'_, '_> {
                 }
                 let skip = [except, d.on.map(|o| o.0)];
                 let (xc, pin_end) = self.arc(t, xb, pr.corner_pos(t, d.v), pin, mine, &skip);
-                let cost = base
+                // Taut: from the apex through the visible span to the target (the corner the
+                // path arrives from is the span end it bends at, else the apex).
+                let q = pr.pos[d.v];
+                let (len, from_pt, b0) = if taut {
+                    let (l, xpt) = via_seg(fr.root, fr.iv.0, fr.iv.1, q);
+                    let bent = l > (q - fr.root).len() + 1.0;
+                    (l, if bent { xpt } else { fr.root }, base_root)
+                } else {
+                    ((q - px).len(), px, base)
+                };
+                let cost = b0
                     + if pin_end & st.end_mask(&d) == 0 { self.wt.forced_layer_mm } else { 0.0 }
                     + d.adj
-                    + self.angle_cost(&d, px)
-                    + (pr.pos[d.v] - px).len() / MM * self.scale * self.wt.length_mm
+                    + self.angle_cost(&d, from_pt)
+                    + len / MM * self.scale * self.wt.length_mm
                     + xc;
                 if self.goal.is_none_or(|g| cost < g.0) {
                     self.goal = Some((cost, parent, t, seed, j));
@@ -412,7 +549,12 @@ impl Search<'_, '_> {
                 continue;
             }
             let Some(nt) = pr.across(e, t) else { continue };
-            let Some(mask_nt) = pr.allowed(nt, c.net) else { continue };
+            // A wall: closed, or (never-fail fallback, 4.3) entered at the `violation` price.
+            let (mask_nt, wall) = match pr.allowed(nt, c.net) {
+                Some(m) => (m, 0.0),
+                None if self.wt.wall_mm > 0.0 && !pr.tri_out[nt] => (super::state::LayerMask::all(pr.n_layers), self.wt.wall_mm),
+                None => continue,
+            };
             let alone = pr.edge_demand(e, &[me]);
             // The layers a pass fits on count the wire necked (it may neck there, priced below).
             let alone_pin = if can_neck { pr.edge_demand(e, &[me_n]) } else { alone };
@@ -451,8 +593,25 @@ impl Search<'_, '_> {
             let (pa, pb) = (pr.pos[ea], pr.pos[eb]);
             let side = pr.side(t, e);
             let fwd = pr.tris[t][side] == ea;
+            if taut {
+                let both = mask_t.map_or(0, |m| m.0) & mask_nt.0;
+                st.gap_spans(e, me, both, None, &mut self.spans);
+            }
+            let elen = (pb - pa).len().max(1.0);
             for g in 0..=n {
                 let pt = pa + (pb - pa) * ((g + 1) as f64 / (n + 2) as f64);
+                // Taut length (4.3): the funnel step onto this gap's span.
+                let (len_add, root, iv) = if taut {
+                    let (lo, hi) = self.spans[g];
+                    let (sc, sd) = (pa + (pb - pa) * (lo / elen), pa + (pb - pa) * (hi / elen));
+                    match funnel_step(fr.root, fr.iv.0, fr.iv.1, sc, sd) {
+                        Step::Vis(u, v) => (0.0, fr.root, (u, v)),
+                        Step::Bend(a) => ((a - fr.root).len(), a, (sc, sd)),
+                    }
+                } else {
+                    ((pt - px).len(), pt, (pt, pt))
+                };
+                let b0 = if taut { base_root } else { base };
                 let f = (2.0 * g as f64 + 1.0) / (2.0 * n as f64 + 2.0);
                 let yb = side as f64 + if fwd { f } else { 1.0 - f };
                 let (cross, pg) = Self::arc_chords(self.tc[t].as_deref().expect("filled above"), &wt, c.net, xb, yb, pin, mine, &[except], st.cross_vias);
@@ -472,21 +631,23 @@ impl Search<'_, '_> {
                 } else {
                     (false, over_nom)
                 };
-                let cost = base
-                    + (pt - px).len() / MM * self.scale * wt.length_mm
+                let cost = b0
+                    + len_add / MM * self.scale * wt.length_mm
                     + cross
                     + if over { wt.overflow_mm } else { 0.0 }
                     + if nk && !parent_nk { neck_cost } else { 0.0 }
                     + extra
                     + hist
                     + ign
+                    + wall
                     + match room1.filter(|r| r.is_finite()) {
                         Some(r) if g > 0 && g < n => wt.squeeze_mm * squeeze_amount(r - self.needs[g], pitch),
                         _ => 0.0,
                     };
                 // Leaving a junction seed: the angle to the arms already there.
-                let cost = if parent == usize::MAX { cost + self.seed_angle(seed, pt) } else { cost };
-                self.push(Node { e, g, into: nt, from_tri: t, parent, cost, pt, seed, pin: pin2, nk });
+                let cost = if parent == usize::MAX { cost + self.seed_angle(seed, if taut { (iv.0 + iv.1) * 0.5 } else { pt }) } else { cost };
+                let (croot, cost) = if taut { (cost, cost + super::draw::seg_dist(root, iv.0, iv.1) * k_len) } else { (cost, cost) };
+                self.push(Node { e, g, into: nt, from_tri: t, parent, cost, pt, seed, pin: pin2, nk, root, iv, croot });
             }
         }
     }
@@ -693,6 +854,7 @@ impl<'p> State<'p> {
             held: std::collections::HashMap::new(),
             needs: Vec::new(),
             needs_n: Vec::new(),
+            spans: Vec::new(),
             items: Vec::new(),
             heap: BinaryHeap::new(),
             goal: None,
@@ -707,7 +869,8 @@ impl<'p> State<'p> {
                 // A start pad on layers the triangle does not allow: a via at once.
                 let (m, pm) = (pr.allowed(t, c.net).map_or(0, |m| m.0), self.end_mask(d));
                 let (pin, adj) = if m & pm != 0 { (m & pm, d.adj) } else { (m, d.adj + wt.forced_layer_mm) };
-                s.expand(t, End::Corner(d.v), None, pr.pos[d.v], adj, usize::MAX, i, d.on.map(|o| o.0), pin);
+                let p0 = pr.pos[d.v];
+                s.expand(t, End::Corner(d.v), None, From { px: p0, root: p0, iv: (p0, p0), base: adj, base_root: adj }, usize::MAX, i, d.on.map(|o| o.0), pin);
             }
         }
         let mut expansions = 0;
@@ -723,8 +886,9 @@ impl<'p> State<'p> {
             if expansions > wt.max_expansions {
                 break;
             }
-            let (t, e, g, pt, cost, seed, pin) = (n.into, n.e, n.g, n.pt, n.cost, n.seed, n.pin);
-            s.expand(t, End::Gap(e, g), Some(e), pt, cost, i, seed, None, pin);
+            let (t, e, g, seed, pin) = (n.into, n.e, n.g, n.seed, n.pin);
+            let fr = From { px: n.pt, root: n.root, iv: n.iv, base: n.cost, base_root: n.croot };
+            s.expand(t, End::Gap(e, g), Some(e), fr, i, seed, None, pin);
         }
         if std::env::var("P2_PROF").is_ok() {
             eprintln!("conn {}: expansions {expansions}, nodes {}, cost {:.1}, w {:.2}", c.net, s.nodes.len(), s.goal.map_or(-1.0, |g| g.0), c.w / MM);
@@ -818,6 +982,99 @@ impl<'p> State<'p> {
     }
 }
 
+impl State<'_> {
+    /// Remove the double crossings of wire `w` (4.3, after every wire: Polubasov 2010, «Начальная
+    /// трассировка»: "поиск устраняемых пересечений целесообразно проводить не однократно по
+    /// завершении начальной трассировки, а после прокладки каждого очередного проводника"; and
+    /// "при устранении одного двойного пересечения могут появиться новые, которые также подлежат
+    /// устранению"): the pairs of crossings of `w` with one other-net wire whose stretches between
+    /// them run through the same edges are swapped as in [`State::uncross_all`] (kept when the
+    /// different-net crossings of the triangles touched drop); a wire whose stretch moved is
+    /// checked in turn. Stops after `max_swaps`. O(swaps · crossings² of the wires checked).
+    pub fn uncross_from(&mut self, w: WireId, max_swaps: usize) -> usize {
+        let mut swaps = 0;
+        let mut todo: Vec<WireId> = vec![w];
+        while let Some(a) = todo.pop() {
+            if swaps >= max_swaps {
+                break;
+            }
+            if !self.wires[a].alive {
+                continue;
+            }
+            let mut changed = true;
+            while changed && swaps < max_swaps {
+                changed = false;
+                let xs = self.crossings(a);
+                'pairs: for i in 0..xs.len() {
+                    for j in i + 1..xs.len() {
+                        let (x, y) = (xs[i], xs[j]);
+                        if x.other != y.other || self.wires[x.other].net == self.wires[a].net {
+                            continue;
+                        }
+                        let Some(pairs) = self.double_stretch(a, (x.k, y.k), x.other, (x.other_k, y.other_k)) else { continue };
+                        let touched: Vec<TriId> = self.wires[a].tris[x.k..=y.k].to_vec();
+                        let before: usize = touched.iter().map(|&t| self.tri_crossings(t)).sum();
+                        self.uncross_double(&pairs);
+                        let after: usize = touched.iter().map(|&t| self.tri_crossings(t)).sum();
+                        if after < before {
+                            swaps += 1;
+                            changed = true;
+                            if !todo.contains(&x.other) {
+                                todo.push(x.other);
+                            }
+                            break 'pairs;
+                        }
+                        self.uncross_double(&pairs);
+                    }
+                }
+            }
+        }
+        swaps
+    }
+
+    /// Last resort of the never-fail initial routing (4.3): any sequence of triangles from a
+    /// triangle at `c.a` to one at `c.b` that stays on the board (walls of other nets included;
+    /// their price is the caller's report), by breadth-first search, through the first gap of
+    /// each edge. `None` only when the two lie in parts of the board no edge joins. O(triangles).
+    pub fn any_path(&self, c: &Conn) -> Option<Path> {
+        let pr = self.proj;
+        let ok = |t: TriId| !pr.tri_out[t];
+        let starts: Vec<TriId> = pr.vert_tris[c.a].iter().copied().filter(|&t| ok(t)).collect();
+        let goals: std::collections::BTreeSet<TriId> = pr.vert_tris[c.b].iter().copied().filter(|&t| ok(t)).collect();
+        let mut prev: Vec<Option<(TriId, EdgeId)>> = vec![None; pr.tris.len()];
+        let mut seen = vec![false; pr.tris.len()];
+        let mut q = std::collections::VecDeque::new();
+        for &t in &starts {
+            seen[t] = true;
+            q.push_back(t);
+        }
+        let mut end = None;
+        while let Some(t) = q.pop_front() {
+            if goals.contains(&t) {
+                end = Some(t);
+                break;
+            }
+            for &e in &pr.tri_edges[t] {
+                if let Some(nt) = pr.across(e, t).filter(|&nt| ok(nt) && !seen[nt]) {
+                    seen[nt] = true;
+                    prev[nt] = Some((t, e));
+                    q.push_back(nt);
+                }
+            }
+        }
+        let mut t = end?;
+        let (mut gaps, mut tris) = (Vec::new(), vec![t]);
+        while let Some((pt, e)) = prev[t] {
+            gaps.push((e, 0));
+            tris.push(pt);
+            t = pt;
+        }
+        gaps.reverse();
+        tris.reverse();
+        Some((gaps, tris))
+    }
+}
+
 /// Route all connections (widest first, then shortest), then remove double crossings, with the
 /// same prices for every wire. `ws0` = w0 + s0 of the default net class (the length unit).
 pub fn route_all(st: &mut State, conns: &[Conn], wt: &InitWeights, ws0: f64) -> InitReport {
@@ -827,6 +1084,48 @@ pub fn route_all(st: &mut State, conns: &[Conn], wt: &InitWeights, ws0: f64) -> 
 /// [`route_all`] with the prices of every connection from the factor registry (scope, tier).
 pub fn route_all_reg(st: &mut State, conns: &[Conn], reg: &Registry, max_expansions: usize, ws0: f64) -> InitReport {
     route_all_with(st, conns, &|c| InitWeights { max_expansions, ..InitWeights::from_registry(reg, &WireCtx { net: c.net, tier: 3 }) }, ws0)
+}
+
+/// [`route_all_reg`] the 4.3 way (`[optimize] initial = "once"`): double crossings removed after
+/// every wire ([`State::uncross_from`]), a crossing on one layer priced as a `violation`, and a
+/// wire without a legal path placed anyway (walls at the `violation` price, then
+/// [`State::any_path`]); `failed` stays empty unless two pads lie in parts of the board no edge
+/// joins.
+pub fn route_all_once(st: &mut State, conns: &[Conn], reg: &Registry, max_expansions: usize, ws0: f64) -> InitReport {
+    let viol = reg.price(&Event::Violation { kind: String::new(), at: Vec2::default(), layer: String::new(), depth_nm: 0.0, len_nm: 0.0, against: String::new(), cause: String::new() }, &WireCtx::default());
+    let wt = |c: &Conn| InitWeights { max_expansions, same_layer_mm: viol, ..InitWeights::from_registry(reg, &WireCtx { net: c.net, tier: 3 }) };
+    let order = route_order(st, conns);
+    let mut rep = InitReport::default();
+    for i in order {
+        let c = &conns[i];
+        let w = wt(c);
+        let scale = (c.w + c.s) / ws0;
+        let placed = st.route_conn(c, &w, scale).map(|x| x.0).or_else(|| {
+            let (path, tris) = st.search(c, &InitWeights { wall_mm: viol, ..w }, scale).or_else(|| st.any_path(c))?;
+            rep.forced.push(i);
+            let wire = Wire { net: c.net, w: c.w, s: c.s, a: c.a, b: c.b, pa: c.pa, pb: c.pb, turns: Vec::new(), passes: Vec::new(), tris: Vec::new(), alive: true };
+            Some(st.insert(wire, &path, tris))
+        });
+        match placed {
+            Some(wid) => {
+                rep.routed += 1;
+                rep.swaps += st.uncross_from(wid, 1000);
+            }
+            None => rep.failed.push(i),
+        }
+    }
+    rep.crossings_before = st.total_crossings();
+    rep.crossings_after = rep.crossings_before;
+    rep
+}
+
+/// The initial routing order (Polubasov 2010: the wider first, among them the shorter): width
+/// descending, then pad-to-pad distance ascending, then input order.
+fn route_order(st: &State, conns: &[Conn]) -> Vec<usize> {
+    let len = |c: &Conn| (st.proj.pos[c.b] - st.proj.pos[c.a]).len();
+    let mut order: Vec<usize> = (0..conns.len()).collect();
+    order.sort_by(|&i, &j| conns[j].w.total_cmp(&conns[i].w).then(len(&conns[i]).total_cmp(&len(&conns[j]))).then(i.cmp(&j)));
+    order
 }
 
 fn route_all_with(st: &mut State, conns: &[Conn], weights: &dyn Fn(&Conn) -> InitWeights, ws0: f64) -> InitReport {

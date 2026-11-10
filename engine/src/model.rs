@@ -934,6 +934,21 @@ pub struct Options {
     /// already on a trace of its net (TopoR 5.0 black-box E3b: pad-to-pad trees, no free Steiner
     /// points).
     pub steiner: bool,
+    /// Topological core (shopping list 4.3, `topor.toml [search] length`): how the search prices a
+    /// wire's length. `"taut"` = the shortest path through the wire's sleeve that keeps the
+    /// clearances (to the pads at the ends of each crossed edge and to the passes already there),
+    /// as TopoR's initial routing takes "the shortest path on the triangulation with the clearances
+    /// needed" (Polubasov 2010, «Начальная трассировка»); `"even"` (default until 4.3 is accepted)
+    /// = between evenly spaced points on each crossed edge, a poor estimate on long edges (the
+    /// projection without the Steiner grid).
+    pub search_length: String,
+    /// Topological core (shopping list 4.3, `topor.toml [optimize] initial`): `"once"` = the
+    /// initial routing runs once per run (first cycle): every wire placed (never "no topological
+    /// path": a wire without a legal path goes through at the `violation` price), double crossings
+    /// removed after every wire, a crossing that no layer assignment separates priced as a
+    /// violation; later cycles start from the previous cycle's plan and improve it.
+    /// `"per_cycle"` (default until 4.3 is accepted) = every cycle routes from scratch (before 4.3).
+    pub initial: String,
     /// Topological core (D6b, `topor.toml [search] crossing_vias`): `"crossing"` (default) = a
     /// crossing of two nets costs the `crossing` factor, which stands for the layer change P3
     /// makes; only a crossing no layer assignment separates (both wires held to one layer in its
@@ -1149,6 +1164,8 @@ impl Default for Options {
             cleanup_safe: true,
             net_tree: "free".into(),
             steiner: false,
+            search_length: "even".into(),
+            initial: "per_cycle".into(),
             crossing_vias: "crossing".into(),
             junction_pad_mm: 0.0,
             fuse_branches: true,

@@ -393,7 +393,8 @@ fn insert_events(st: &State, wire: &Wire, path: &[(EdgeId, usize)], tris: &[TriI
     let mut pts: Vec<Vec2> = vec![pr.pos[wire.a]];
     pts.extend(path.iter().map(|&(e, g)| st.gap_point(e, g)));
     pts.push(pr.pos[wire.b]);
-    let mm: f64 = pts.windows(2).map(|p| (p[1] - p[0]).len()).sum::<f64>() / MM;
+    // 4.3 `[search] length = "taut"`: the shortest path through the gaps' clearance spans.
+    let mm: f64 = if st.taut_len { st.path_len_taut(wire, path, tris) / MM } else { pts.windows(2).map(|p| (p[1] - p[0]).len()).sum::<f64>() / MM };
     out.push(Event::Length { wire: id, mm, scale });
     // Boundary coordinates of the ends of traversal k: the new wire has no passes yet, so its own
     // earlier passes on the same edge are ignored (a path crosses an edge once in practice).

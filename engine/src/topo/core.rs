@@ -657,6 +657,21 @@ struct Memory {
     /// Per connection id: its planned via count in the cycle before (Polubasov 2010: the wires
     /// whose via count rose after the layer assignment are rerouted first).
     vias: BTreeMap<usize, usize>,
+    /// `[optimize] initial = "once"` (4.3): the plan of the cycle before (its topology before the
+    /// drawing), which the next cycle starts from instead of routing again. Never fades.
+    plan: Option<PlanCarry>,
+}
+
+/// The plan one cycle hands to the next with `[optimize] initial = "once"` (4.3): the topology
+/// (wires, their passes in edge order), the wire -> connection map, the connections' pad pairs
+/// (the P4 moves may attach a connection to another pad pair of its tree) and the terminals the
+/// report gives such a connection.
+#[derive(Clone, Debug)]
+struct PlanCarry {
+    topo: super::state::Topology,
+    wire_conn: Vec<usize>,
+    conns: Vec<Conn>,
+    term_over: BTreeMap<usize, (TermRef, TermRef)>,
 }
 
 /// Weight of a pass at distance `d` from a violation whose stretch has the radius `r` (nm):
@@ -1044,6 +1059,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             ),
         }
     }
+    // 4.3 `initial = "once"`: the connections' pad pairs as the plan of the cycle before left them.
+    if let Some(pl) = mem.plan.as_ref().filter(|_| opts.initial == "once") {
+        if pl.conns.len() == conns.len() {
+            conns.clone_from(&pl.conns);
+        }
+    }
     ctl.update("route", 0, 0, nconn, 0, t0.elapsed().as_secs_f64());
     ctl.stage(rnd, rnds, "topological search");
     // ---- P2 ----
@@ -1053,6 +1074,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let proj = &b.proj;
     let mut st = State::new(proj);
     st.cross_vias = opts.crossing_vias == "via";
+    // 4.3: the length the search prices (`[search] length`).
+    st.taut_len = opts.search_length == "taut";
     // M-C: the plan necks a wire where its nominal width does not fit (width in P2).
     if opts.neck_to_pad {
         for c in &conns {
@@ -1066,7 +1089,18 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     st.neck_from_pad = opts.neck_from_pad;
     let ws0 = (model.rules.default.width + model.rules.default.clearance) as f64;
     let tier_of = |i: usize| dec.connections[i].tier;
-    let weights = |rg: &Registry, c: &Conn, tier: u8, cap: usize| InitWeights { max_expansions: cap, ..InitWeights::from_registry(rg, &WireCtx { net: c.net, tier }) };
+    // 4.3 `[optimize] initial = "once"`: a crossing on one layer is a violation (very high price,
+    // the wire is still made), and a wire with no legal path is placed anyway (walls at that price).
+    let once = opts.initial == "once";
+    let viol_mm = reg.price(&Event::Violation { kind: String::new(), at: Vec2::default(), layer: String::new(), depth_nm: 0.0, len_nm: 0.0, against: String::new(), cause: String::new() }, &WireCtx::default());
+    let weights = |rg: &Registry, c: &Conn, tier: u8, cap: usize| {
+        let w = InitWeights { max_expansions: cap, ..InitWeights::from_registry(rg, &WireCtx { net: c.net, tier }) };
+        if once {
+            InitWeights { same_layer_mm: viol_mm, ..w }
+        } else {
+            w
+        }
+    };
     let len_of = |c: &Conn| (proj.pos[c.b] - proj.pos[c.a]).len();
     let mut order: Vec<usize> = (0..conns.len()).collect();
     order.sort_by(|&i, &j| {
@@ -1155,7 +1189,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         st.route_conn(c, w, (c.w + c.s) / ws0).map(|x| x.0)
     };
-    let route_one_raw = |st: &mut State, ci: usize, cap: usize, wire_conn: &mut Vec<usize>, rg: &Registry| -> bool {
+    let route_one_raw = |st: &mut State, ci: usize, cap: usize, wire_conn: &mut Vec<usize>, rg: &Registry, wall: f64| -> bool {
         let c = &conns[ci];
         // A path longer than `detour_factor` x the straight distance is a detour: search again with
         // cheaper crossings and layer fixings (P3 resolves a crossing with a via; a detour of many times the
@@ -1170,13 +1204,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             w.cross_mm *= cross_scale;
             w.smd_over_mm *= cross_scale;
             w.forced_layer_mm *= cross_scale;
+            w.wall_mm = wall;
             let Some(wid) = insert_conn(st, c, &w) else { return false };
             if wire_conn.len() <= wid {
                 wire_conn.resize(wid + 1, usize::MAX);
             }
             wire_conn[wid] = ci;
             let straight = (proj.pos[st.wires[wid].b] - proj.pos[st.wires[wid].a]).len().max(1.0);
-            let len: f64 = st.polyline(wid).windows(2).map(|x| (x[1] - x[0]).len()).sum();
+            let len: f64 = st.wire_len(wid);
             if opts.detour_factor <= 0.0 || len <= opts.detour_factor * straight || attempt == 2 {
                 return true;
             }
@@ -1185,27 +1220,108 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         true
     };
     // A connection whose sleeve the drawing rejected earlier pays a history on its old edges.
-    let route_one = |st: &mut State, ci: usize, cap: usize, wire_conn: &mut Vec<usize>, rg: &Registry| -> bool {
-        let Some(own) = mem.own.get(&conn_of[ci]) else { return route_one_raw(st, ci, cap, wire_conn, rg) };
+    let route_one_w = |st: &mut State, ci: usize, cap: usize, wire_conn: &mut Vec<usize>, rg: &Registry, wall: f64| -> bool {
+        let Some(own) = mem.own.get(&conn_of[ci]) else { return route_one_raw(st, ci, cap, wire_conn, rg, wall) };
         let saved = st.history.clone();
         for (&e, &n) in own {
             st.history[e] += n;
         }
-        let r = route_one_raw(st, ci, cap, wire_conn, rg);
+        let r = route_one_raw(st, ci, cap, wire_conn, rg, wall);
         st.history = saved;
         r
+    };
+    let route_one = |st: &mut State, ci: usize, cap: usize, wire_conn: &mut Vec<usize>, rg: &Registry| -> bool { route_one_w(st, ci, cap, wire_conn, rg, 0.0) };
+    // 4.3 never fail (`initial = "once"`): the search, the search with four times the cap, the
+    // search through walls at the `violation` price, then any sequence of triangles; the wire is
+    // always made (it is the optimiser's to improve). Each connection placed without a legal
+    // path is listed in `forced` (reported). Then its double crossings are removed (Polubasov
+    // 2010: after every wire). False only when the two pads lie in parts of the board no edge
+    // joins.
+    let forced: std::cell::RefCell<BTreeSet<usize>> = std::cell::RefCell::new(BTreeSet::new());
+    let place = |st: &mut State, ci: usize, cap: usize, wire_conn: &mut Vec<usize>, rg: &Registry| -> bool {
+        let n0 = st.wires.len();
+        let ok = route_one(st, ci, cap, wire_conn, rg) || route_one(st, ci, cap * 4, wire_conn, rg) || {
+            let r = route_one_w(st, ci, cap * 4, wire_conn, rg, viol_mm) || {
+                let c = &conns[ci];
+                match st.any_path(c) {
+                    Some((path, tris)) => {
+                        let wire = super::state::Wire { net: c.net, w: c.w, s: c.s, a: c.a, b: c.b, pa: c.pa, pb: c.pb, turns: Vec::new(), passes: Vec::new(), tris: Vec::new(), alive: true };
+                        let wid = st.insert(wire, &path, tris);
+                        if wire_conn.len() <= wid {
+                            wire_conn.resize(wid + 1, usize::MAX);
+                        }
+                        wire_conn[wid] = ci;
+                        true
+                    }
+                    None => false,
+                }
+            };
+            if r {
+                forced.borrow_mut().insert(conn_of[ci]);
+            }
+            r
+        };
+        if ok && st.wires.len() > n0 {
+            st.uncross_from(st.wires.len() - 1, 1000);
+        }
+        ok
     };
     let cap = opts.max_expansions.max(1);
     // Fluctuating coefficients of this cycle (M-B0 schedule) also in the initial search.
     let reg_p2 = if opts.fluctuation > 0.0 { reg.fluctuated(seed_of(opts.seed, round, 0), opts.fluctuation) } else { reg.clone() };
-    for &ci in &order {
-        if expired() {
-            timed_out = true;
-            fail(&mut out, conn_of[ci], "time limit reached before this connection was routed");
-            continue;
+    // 4.3 `initial = "once"`: a later cycle starts from the plan of the cycle before and
+    // improves it: the connections whose drawing broke a rule (their stretch's history,
+    // `Memory::own`) and the wires through a passage the drawing found too narrow (a lowered
+    // room, `hints`) are taken out and placed again, the rest stays.
+    let carried = once && mem.plan.is_some();
+    let mut p2_replaced = 0usize;
+    if let Some(pl) = mem.plan.as_ref().filter(|_| once) {
+        st.restore(pl.topo.clone());
+        wire_conn = pl.wire_conn.clone();
+        let mut vic: BTreeSet<WireId> = BTreeSet::new();
+        for (w, wi) in st.wires.iter().enumerate().filter(|(_, wi)| wi.alive) {
+            let Some(&ci) = wire_conn.get(w).filter(|&&c| c != usize::MAX) else { continue };
+            if mem.own.contains_key(&conn_of[ci]) {
+                vic.insert(w);
+                continue;
+            }
+            let narrow = wi.passes.iter().any(|&p| {
+                let e = st.passes[p].edge;
+                hints.iter().any(|&(he, _, r)| he == e && st.edge_need(e, None) > r)
+            });
+            if narrow {
+                vic.insert(w);
+            }
         }
-        if !route_one(&mut st, ci, cap, &mut wire_conn, &reg_p2) {
-            p2_failed.push(ci);
+        let deps = tree::dependents(&st, &vic);
+        vic.extend(deps);
+        let mut vic_conns: Vec<usize> = vic.iter().map(|&w| wire_conn[w]).collect();
+        vic_conns.sort_by_key(|&ci| order.iter().position(|&x| x == ci));
+        for &w in &vic {
+            tree::remove_wire(&mut st, w);
+        }
+        p2_replaced = vic_conns.len();
+        for ci in vic_conns {
+            if expired() {
+                timed_out = true;
+                fail(&mut out, conn_of[ci], "time limit reached before this connection was routed again");
+                continue;
+            }
+            if !place(&mut st, ci, cap, &mut wire_conn, &reg_p2) {
+                p2_failed.push(ci);
+            }
+        }
+    } else {
+        for &ci in &order {
+            if expired() {
+                timed_out = true;
+                fail(&mut out, conn_of[ci], "time limit reached before this connection was routed");
+                continue;
+            }
+            let ok = if once { place(&mut st, ci, cap, &mut wire_conn, &reg_p2) } else { route_one(&mut st, ci, cap, &mut wire_conn, &reg_p2) };
+            if !ok {
+                p2_failed.push(ci);
+            }
         }
     }
     let swaps = st.uncross_all(50);
@@ -1220,7 +1336,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         st.uncross_all(50);
     }
     for &ci in &still {
-        fail(&mut out, conn_of[ci], "no topological path between the pads (search exhausted); the pad is enclosed or the retry cap was reached");
+        let why = if once { "no topological path between the pads: they lie in parts of the board no edge of the projection joins" } else { "no topological path between the pads (search exhausted); the pad is enclosed or the retry cap was reached" };
+        fail(&mut out, conn_of[ci], why);
     }
     debug_assert!(st.check().is_ok(), "{:?}", st.check());
     ctl.update("route", 1, 0, nconn, 0, t0.elapsed().as_secs_f64());
@@ -1258,7 +1375,6 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         lr
     };
-    let polys_of = |st: &State| -> Vec<Vec<Vec2>> { (0..st.wires.len()).map(|w| if st.wires[w].alive { st.polyline(w) } else { Vec::new() }).collect() };
     // Crossing directions for the capacity model's oblique factor: the taut paths (pack.rs).
     let dirs_of = |st: &State| -> Vec<Vec<Vec2>> { packer.taut_dirs(st) };
     let mut lr = assign(&st);
@@ -1297,12 +1413,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // `overflow` weight; design docs/dev/inflated-sketch.md §4.4). The count stays in the report.
     let cuts_on = packer.cuts.is_some();
     let score = |st: &State, lr: &layers::LayerReport| -> Score {
-        let polys = polys_of(st);
         let dirs = dirs_of(st);
         let cm = if cuts_on { CapModel::new_cut(st, &packer, &dirs, &lr.events, bottom, overflow_mm) } else { CapModel::new(st, &packer, &dirs, &lr.events, bottom, overflow_mm) };
         let (mut len_mm, mut area_mm) = (0.0, 0.0);
-        for (w, pl) in polys.iter().enumerate().filter(|(w, _)| st.wires[*w].alive) {
-            let l = pl.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>() / MM;
+        for w in (0..st.wires.len()).filter(|&w| st.wires[w].alive) {
+            let l = st.wire_len(w) / MM;
             len_mm += l;
             area_mm += l * (st.wires[w].w + st.wires[w].s) / ws0;
         }
@@ -1533,7 +1648,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let reg_r = reg.fluctuated(seed_of(opts.seed, round, 1 + p4_rounds), opts.fluctuation);
         let mut lost = false;
         for &ci in &vic_conns {
-            if expired() || !(route_one(&mut st, ci, cap, &mut wire_conn, &reg_r) || route_one(&mut st, ci, cap * 4, &mut wire_conn, &reg_r)) {
+            let ok = !expired() && if once { place(&mut st, ci, cap, &mut wire_conn, &reg_r) } else { route_one(&mut st, ci, cap, &mut wire_conn, &reg_r) || route_one(&mut st, ci, cap * 4, &mut wire_conn, &reg_r) };
+            if !ok {
                 timed_out |= expired();
                 lost = true;
                 break;
@@ -1580,7 +1696,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     tlog("P4 rip-up and reroute", t_p4);
     // ---- P4 moves: descent on the topology, then on the layer labels ----
     let mut tally = Tally::default();
-    let mut term_over: BTreeMap<usize, (TermRef, TermRef)> = BTreeMap::new();
+    let mut term_over: BTreeMap<usize, (TermRef, TermRef)> = mem.plan.as_ref().filter(|_| once).map(|p| p.term_over.clone()).unwrap_or_default();
     // The topological moves re-search whole pad-to-pad connections; they do not know branch
     // points yet (D5), so a state with branch points skips them.
     let has_junctions = tree_free && st.wires.iter().any(|w| w.alive && !w.turns.is_empty());
@@ -1695,8 +1811,25 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     let lr = lr;
     let t_draw = Instant::now();
+    // 4.3 `initial = "once"`: the plan handed to the next cycle (before anything is dropped).
+    let plan_carry = once.then(|| PlanCarry { topo: st.topology(), wire_conn: wire_conn.clone(), conns: conns.clone(), term_over: term_over.clone() });
+    if once {
+        let f = forced.borrow();
+        if !f.is_empty() {
+            warnings.push(format!(
+                "initial routing (once): {} connection(s) had no legal topological path and were placed anyway through other copper, priced as violations so the optimiser works them away: {}",
+                f.len(),
+                f.iter().map(|&ci| { let net = dec.connections[ci].net; model.nets.iter().find(|n| n.code == net).map_or(net.to_string(), |n| n.name.clone()) }).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        warnings.push(if carried {
+            format!("initial routing (once): this cycle started from the plan of the cycle before; {} connection(s) placed again", p2_replaced)
+        } else {
+            format!("initial routing (once): {} connections laid one at a time, double crossings removed after every wire", conns.len())
+        });
+    }
     // A different-net crossing still on one layer is an error: the lower-tier wire stays unrouted.
-    let wlen: Vec<f64> = (0..st.wires.len()).map(|w| if !st.wires[w].alive { 0.0 } else { st.polyline(w).windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>() }).collect();
+    let wlen: Vec<f64> = (0..st.wires.len()).map(|w| if !st.wires[w].alive { 0.0 } else { st.wire_len(w) }).collect();
     let wire_len = |w: WireId| wlen[w];
     let mut dropped: BTreeSet<WireId> = BTreeSet::new();
     let mut unlayerable_errors = 0usize;
@@ -1720,6 +1853,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         );
         if opts.allow_violations {
             // Never drop (M-B1): both stay; the drawing writes the crossing as a violation.
+            if once {
+                // 4.3: a crossing on one layer the optimiser could not remove is the user's to
+                // see, loudly, with the layer it lies on.
+                let p = lr.unlayerable_at.get(pi).copied();
+                let layer = p.and_then(|p| {
+                    lr.stretches.get(wa)?.iter().map(|(l, pts)| (pts.iter().map(|q| (*q - p).len()).fold(f64::INFINITY, f64::min), *l)).min_by(|a, b| a.0.total_cmp(&b.0)).map(|x| x.1)
+                });
+                let lname = layer.and_then(|l| b.signal_layers.get(l.max(0) as usize)).and_then(|&id| model.layers.iter().find(|x| x.id == id)).map_or("one layer".to_string(), |x| x.name.clone());
+                warnings.push(format!("CRITICAL: traces {} and {} cross on layer {lname}{at}: the optimiser could not separate them; both are drawn and the crossing is a violation (a short) to fix by hand", name(wa), name(wb)));
+            }
             warnings.push(format!("{msg}; drawn anyway ([optimize] allow_violations): the crossing is a violation"));
             for c in [ca, cb] {
                 if out[c].cause.is_empty() {
@@ -1803,7 +1946,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     {
         let alive: Vec<WireId> = (0..st.wires.len()).filter(|&w| st.wires[w].alive).collect();
         let crossings: usize = alive.iter().map(|&w| st.crossings(w).iter().filter(|c| st.wires[c.other].net != st.wires[w].net).count()).sum::<usize>() / 2;
+        // Polyline through the evenly spaced pass points (comparable across `[search] length`);
+        // `taut_length_mm`: the clearance-keeping shortest paths through the sleeves (4.3).
         let topo_len: f64 = alive.iter().map(|&w| st.polyline(w).windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>()).sum();
+        let taut_len: f64 = alive.iter().map(|&w| st.taut_points(w).windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>()).sum();
         let vias: usize = alive.iter().map(|&w| cm_plan.via_k[w].len()).sum();
         let m = serde_json::json!({
             "round": round,
@@ -1815,6 +1961,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             "unlayerable_crossings": unlayerable_errors,
             "dropped_unlayerable": dropped.len(),
             "topo_length_mm": (topo_len / MM * 1e3).round() / 1e3,
+            "taut_length_mm": (taut_len / MM * 1e3).round() / 1e3,
         });
         let mut m = m;
         // `[capacity] model = "cuts"`: the per-layer cuts of the plan (the authority there).
@@ -3168,7 +3315,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     let pre = pre_parts.map(|(c, a)| (c, with_parts(&result, a)));
     let vias_out: BTreeMap<usize, usize> = plans.iter().map(|(&w, pl)| (conn_of[wire_conn[w]], pl.vias.len())).collect();
-    (RoundOut { result, crit: crit_main, pre }, new_hints, Memory { edge: hist_out, own: own_out, vias: vias_out })
+    (RoundOut { result, crit: crit_main, pre }, new_hints, Memory { edge: hist_out, own: own_out, vias: vias_out, plan: plan_carry })
 }
 
 /// D7: realise every coupled pair connection of `out`: the lead's drawn centre line becomes the P
