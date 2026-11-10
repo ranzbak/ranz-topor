@@ -258,13 +258,14 @@ DRC and the preview (the limit counts router time only). The change applies to t
 summary's *Stopped* line names the final limit (e.g. *limit 900 s wall (raised during the run from 600 s, 1 change)*),
 and so does the time-budget warning. Headless runs (harness, MCP) have no such control, so their limit stays fixed.
 
-**Cancel** (or Esc / Enter outside the time-limit field; **OK** after *Routes stable*) works at any time: the label changes to *Cancelling —
-keeping the best result so far…* (after *Routes stable*: *Finishing — keeping the stable result…*); while routing, the best result found so far goes on to KiCad DRC and the preview; if nothing was routed yet
+**Cancel** (or Esc / Enter outside the time-limit field; **OK** after *Routes stable*) works at any time: the label changes to *Cancel pressed:
+finishing the current stage…* (after *Routes stable*: *OK pressed: finishing the current stage…*); while routing, the best result found so far goes on to KiCad DRC and the preview; if nothing was routed yet
 the run ends with *Cancelled — nothing was changed on the board.* topor polls the running `kicad-cli` every 0.25 s,
 so Cancel also works during the pre-flight DRC (the run then ends with nothing changed) and the DRC rounds / preview
-export (the DRC and the preview of the best result still finish). The engine stops at its next check, normally
-within a second; if it does not stop within 30 s the run ends with [ENGINE_UNRESPONSIVE](troubleshoot.md#engine_unresponsive)
-(board unchanged). A `kicad-cli` call that runs longer than `[run] kicad_cli_timeout_s` (default 120 s, `0` = no
+export (the DRC and the preview of the best result still finish). The engine finishes the stage it is in and then
+returns its best result so far: normally within a second or two, on a large board sometimes longer. Meanwhile the
+label reads *Cancel pressed: finishing the current stage (…)* with the seconds since Cancel; topor waits for the
+engine and never drops the result it is finishing. A `kicad-cli` call that runs longer than `[run] kicad_cli_timeout_s` (default 120 s, `0` = no
 limit) is stopped and the run ends with [KICAD_CLI_TIMEOUT](troubleshoot.md#kicad_cli_timeout) (board unchanged).
 Before the routing starts the progress dialog already shows *Preparing geometry* while topor reads the board.
 
