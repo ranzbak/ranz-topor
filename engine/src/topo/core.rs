@@ -460,6 +460,9 @@ impl Run {
             r.best = Some((pc, best_routed, total));
         });
         self.busy_s += t.elapsed().as_secs_f64();
+        if std::env::var_os("TOPO_TIMES").is_some() {
+            eprintln!("[topo run {} cycle {cycle}] cycle: {:.3} s", self.k + 1, t.elapsed().as_secs_f64());
+        }
         if interrupted {
             self.time_hit = self.stable_at.is_none();
             self.done = true;
@@ -886,6 +889,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     let (reg, problems) = Registry::from_config(standard_factors(), &opts.factors);
     warnings.extend(problems);
+    let t_proj = Instant::now();
     let mut b = match board::build_full(model, &build_opts(opts), &[], &stubs.extra) {
         Ok(b) => b,
         Err(e) => return (RoundOut::unrouted(unrouted(model, opts, &format!("projection failed: {e}"))), Vec::new(), Memory::default()),
@@ -909,6 +913,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             *r = r.min(room);
         }
     }
+    tlog("projection (decomposition, triangulation, cut room)", t0);
+    tlog("projection: board build + cut room", t_proj);
     let nconn = dec.connections.len();
     let mut out: Vec<Outcome> = vec![Outcome::default(); nconn];
     let diff = diff_pair_nets(model);
