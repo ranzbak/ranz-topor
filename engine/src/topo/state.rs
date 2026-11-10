@@ -584,6 +584,13 @@ pub struct State<'p> {
     /// триангуляции с учетом необходимых зазоров»). False ("even", today's default): between
     /// evenly spaced points on each crossed edge ([`State::gap_point`]).
     pub taut_len: bool,
+    /// The TopoR loop's layer-aware reroute (shopping list 5.2, `[optimize] loop = "topor"`): per
+    /// wire, the layers of each traversal under the loop's current layer assignment (bit per
+    /// layer, both layers of a via interval; [`super::optimise::layers_now`]). A crossing is then
+    /// priced by the via it implies against the crossed stretch's present layer
+    /// ([`State::held_layers`]). Empty (default, every other caller): the stretch's own held
+    /// layers only, as before.
+    pub layers_now: Vec<Vec<u64>>,
 }
 
 impl<'p> State<'p> {
@@ -619,6 +626,7 @@ impl<'p> State<'p> {
             floors: std::collections::HashMap::new(),
             neck_from_pad: true,
             taut_len: false,
+            layers_now: Vec::new(),
         }
     }
 

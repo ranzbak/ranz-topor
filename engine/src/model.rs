@@ -975,6 +975,13 @@ pub struct Options {
     /// `[optimize] loop_time_share` (`loop = "topor"`): the share of the time left that the loop may
     /// use at most (an emergency stop, like the time limit; the rest is the drawing's).
     pub loop_time_share: f64,
+    /// `[optimize] loop_crossing` (5.2, `loop = "topor"`): the share of the `crossing` factor's
+    /// weight the loop's layer-aware reroute keeps for a crossing itself. The loop prices the via
+    /// a crossing implies against the crossed stretch's present layer as a via (Polubasov 2010
+    /// «Оптимизация разводки»: before the optimisation every stretch gets a layer; a crossing of a
+    /// stretch with a via is penalised, fig. 4), so a crossing the wire can take on another layer
+    /// costs this share only, one that forces a via pair costs two vias on top.
+    pub loop_crossing: f64,
     /// Topological core (D6b, `topor.toml [search] crossing_vias`): `"crossing"` (default) = a
     /// crossing of two nets costs the `crossing` factor, which stands for the layer change P3
     /// makes; only a crossing no layer assignment separates (both wires held to one layer in its
@@ -1198,6 +1205,7 @@ impl Default for Options {
             loop_via_start: 0.5,
             loop_via_end: 1.5,
             loop_time_share: 0.5,
+            loop_crossing: 0.25,
             crossing_vias: "crossing".into(),
             junction_pad_mm: 0.0,
             fuse_branches: true,

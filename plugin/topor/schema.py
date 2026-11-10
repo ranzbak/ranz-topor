@@ -214,6 +214,8 @@ SETTINGS: list[Setting] = [
        range=(0.0, 10.0), engine="loop_via_end"),
     _s("optimize", "loop_time_share", "float", 0.5, "Topological core, loop = \"topor\": the share of the time left (run.timeout_s) that the loop may use at most; the rest is kept for the one drawing. An emergency stop like the time limit (the loop normally ends when its plan is stable); when it fires the result says so.",
        range=(0.05, 1.0), engine="loop_time_share"),
+    _s("optimize", "loop_crossing", "float", 0.25, "Topological core, loop = \"topor\": share of the crossing factor's weight ([factors] crossing) that a crossing of two nets keeps in the loop's reroutes. The loop lays each trace into the present layering: a crossing the trace can take on another layer than the crossed stretch costs this share only, a crossing that forces the trace to change layer costs the via (and the via back, where it has to return to its pad's layer) at the via weight on top (TopoR: before the optimisation every stretch gets a layer, and a crossing of a stretch with a via is penalised, Polubasov 2010). 1 = the full crossing price on top of the vias; 0 = only the vias.",
+       range=(0.0, 1.0), engine="loop_crossing"),
     _s("optimize", "max_ripped", "int", 5000, "Topological core: most connections one whole-route round may take out and route again (negotiated rip-up-and-reroute, drawing feedback and the P4 moves together). A work cap (see rounds).",
        range=(0, 1000000), engine="max_ripped"),
     _s("optimize", "max_expansions", "int", 2000000, "Topological core: search cap per connection (expanded search nodes); the one retry of a connection that found no path uses four times this. A work cap (see rounds): a connection that needs more is reported as failed.",

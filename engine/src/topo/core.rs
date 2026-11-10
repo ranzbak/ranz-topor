@@ -1862,7 +1862,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut loop_end: Option<LoopEnd> = None;
     let mut loop_json: Option<serde_json::Value> = None;
     if opts.opt_loop == "topor" && !expired() {
-        use super::optimise::{k_osc, optimise, reroute_set, wire_amp, CycleCtx, CycleStats, Emphasis, Gen, LoopParams, Rerouter, Space, VIA_FACTORS};
+        use super::optimise::{criteria_of, evaluation, k_osc, layers_now, optimise, reroute_set, wire_amp, CycleCtx, CycleStats, Emphasis, Gen, LoopParams, Predicted, Rerouter, Space, VIA_FACTORS};
         let t_loop = Instant::now();
         // The loop's own emergency stop: a share of the time left (the rest is the drawing's).
         let loop_deadline = ctl.deadline().map(|d| {
@@ -1871,21 +1871,38 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         });
         let n_sig = if b.n_signal == 0 { proj.n_layers } else { b.n_signal };
         let tiers: Vec<u8> = (0..conns.len()).map(|ci| tier_of(conn_of[ci])).collect();
-        /// One topological variant: the routed state, the wire -> connection map, the layering and
-        /// the connections placed without a legal path.
+        // 5.2 (price = criterion): the predicted violations of a state with its layering, the one
+        // measure the archive counts (errors) and every loop move pays at the `violation` weight
+        // ([`Predicted`]): the capacity model's over-full edge-layers (cut model: over-full cuts)
+        // and vias without a site, graded by how far over; the crossings no layer separates; the
+        // connections placed without a legal path.
+        let measure = |st: &State, lr: &layers::LayerReport| -> Predicted {
+            let dirs = dirs_of(st);
+            let cm = if cuts_on { CapModel::new_cut(st, &packer, &dirs, &lr.events, bottom, overflow_mm) } else { CapModel::new(st, &packer, &dirs, &lr.events, bottom, overflow_mm) };
+            Predicted::of(cm.violations(), lr.unlayerable.len(), forced.borrow().len())
+        };
+        /// One topological variant: the routed state, the wire -> connection map, the layering,
+        /// the connections placed without a legal path, the reroute counters and the predicted
+        /// violations of the layering.
         #[derive(Clone)]
         struct LoopVar {
             topo: super::state::Topology,
             wire_conn: Vec<usize>,
             lr: layers::LayerReport,
             forced: BTreeSet<usize>,
+            reroutes: Vec<u32>,
+            pred: Predicted,
         }
         type PlaceFn<'f, 'p> = &'f dyn Fn(&mut State<'p>, usize, usize, &mut Vec<usize>, &Registry) -> bool;
         type CrossFn<'f, 'p> = &'f dyn Fn(&mut State<'p>, &mut Vec<usize>, &mut Vec<u32>, &mut layers::LayerReport, &mut usize, usize);
+        type MeasureFn<'f, 'p> = &'f dyn Fn(&State<'p>, &layers::LayerReport) -> Predicted;
+        type AssignFn<'f, 'p> = &'f dyn Fn(&State<'p>, u64) -> layers::LayerReport;
         /// The single-wire move's price and placement ([`Rerouter`]).
         struct Rr<'a, 'p> {
             topo: &'a Topo,
-            over_mm: f64,
+            /// The try's price registry: its coefficients with the `overflow` factor at 0 (the
+            /// predicted violations are priced by the board's own measure, [`Rerouter::violations`]).
+            price_reg: &'a Registry,
             wire_conn: &'a mut Vec<usize>,
             place: PlaceFn<'a, 'p>,
             reg: &'a Registry,
@@ -1894,15 +1911,23 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             forced: &'a std::cell::RefCell<BTreeSet<usize>>,
             conn_of: &'a [usize],
             saved: Option<BTreeSet<usize>>,
+            viol_mm: f64,
+            /// The predicted violations' price of the state before the try.
+            viol_old: f64,
+            assign_t: AssignFn<'a, 'p>,
+            ties: u64,
+            measure: MeasureFn<'a, 'p>,
+            /// The layering and predicted violations of the state after the try.
+            pending: Option<(layers::LayerReport, Predicted)>,
         }
         impl<'p> Rerouter<'p> for Rr<'_, 'p> {
             fn price(&mut self, st: &mut State<'p>, w: WireId) -> f64 {
                 let ci = self.wire_conn[w];
                 let path = st.detach(w);
                 let wire = st.wires[w].clone();
-                let (c, o) = self.topo.path_cost(st, &wire, &path, &wire.tris, ci);
+                let c = self.topo.path_price(st, &wire, &path, &wire.tris, ci, self.price_reg);
                 st.reattach(w, &path);
-                c + self.over_mm * o as f64
+                c
             }
             fn place(&mut self, st: &mut State<'p>, gone: &[WireId]) -> Option<Vec<WireId>> {
                 let mut cis: Vec<usize> = gone.iter().map(|&g| self.wire_conn[g]).collect();
@@ -1920,10 +1945,22 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
                 Some((n0..st.wires.len()).filter(|&w| st.wires[w].alive).collect())
             }
+            fn violations(&mut self, st: &mut State<'p>, after: bool) -> f64 {
+                if !after {
+                    return self.viol_old;
+                }
+                // The new state is layered as the loop layers it (the current tie seed) and judged
+                // by the archive's measure.
+                let lr = (self.assign_t)(st, self.ties);
+                let p = (self.measure)(st, &lr);
+                self.pending = Some((lr, p));
+                p.price(self.viol_mm)
+            }
             fn undo(&mut self) {
                 if let Some(f) = self.saved.take() {
                     *self.forced.borrow_mut() = f;
                 }
+                self.pending = None;
             }
         }
         /// The real topology of this route as the loop's [`Space`].
@@ -1947,17 +1984,23 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             overflow_mm: f64,
             viol_mm: f64,
             cuts_on: bool,
-            area: bool,
+            obj: Objective,
+            via_area_mm: f64,
+            crossing_share: f64,
             max_ripped: usize,
             max_moves: usize,
             cut_vias: bool,
             packer: &'a Packer<'p>,
             forced: &'a std::cell::RefCell<BTreeSet<usize>>,
             place: PlaceFn<'a, 'p>,
-            assign_t: &'a dyn Fn(&State<'p>, u64) -> layers::LayerReport,
-            score: &'a dyn Fn(&State<'p>, &layers::LayerReport) -> Score,
+            assign_t: AssignFn<'a, 'p>,
+            measure: MeasureFn<'a, 'p>,
             cross: CrossFn<'a, 'p>,
             xkept: &'a dyn Fn() -> usize,
+            /// The tie seed the current layering came from (0 = the first optimum).
+            ties: u64,
+            /// The predicted violations of the current state and layering.
+            pred: Predicted,
         }
         impl<'p> Sp<'_, 'p> {
             fn via_counts(&self) -> BTreeMap<usize, usize> {
@@ -1969,25 +2012,36 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
                 m
             }
-            fn tight(&self) -> Vec<bool> {
-                let dirs = self.packer.taut_dirs(self.st);
-                let mut t = vec![false; self.st.proj.edges.len()];
-                if self.cuts_on {
-                    let cm = CapModel::new_cut(self.st, self.packer, &dirs, &self.lr.events, self.bottom, self.overflow_mm);
-                    if let Some(c) = cm.cut.as_ref() {
-                        for (l, ci, _) in c.overfull_list() {
-                            for e in item_edges(self.st, &c.items_at(l, ci)) {
-                                t[e] = true;
-                            }
-                        }
-                    }
+            /// Make `lr` the current layering: the stretches' present layers for the layer-aware
+            /// reroute ([`State::layers_now`]) and its predicted violations (`p`, or measured).
+            fn set_lr(&mut self, lr: layers::LayerReport, p: Option<Predicted>) {
+                *self.lr = lr;
+                self.st.layers_now = layers_now(self.st, &self.lr.events, self.bottom);
+                self.pred = p.unwrap_or_else(|| (self.measure)(self.st, self.lr));
+            }
+            /// The evaluation of the current topology every whole-board move is judged by
+            /// ([`evaluation`]: the archive's objective value plus the violation weight per
+            /// predicted violation).
+            fn eval_now(&mut self) -> f64 {
+                let c = self.criteria();
+                evaluation(&self.obj, &c, self.viol_mm)
+            }
+            /// A whole-board layering move (layer re-optimisation, floating up): `lr` becomes the
+            /// layering when the evaluation does not rise (Polubasov 2010: the layer
+            /// re-optimisation "never worsens the quality of the routing"; among equal ones the new
+            /// one is taken, so the random choice among equal layerings stays), else the one before
+            /// comes back. Whether it was taken.
+            fn try_layers(&mut self, lr: layers::LayerReport, ties: u64) -> bool {
+                let e0 = self.eval_now();
+                let (lr0, p0) = (self.lr.clone(), self.pred);
+                self.set_lr(lr, None);
+                if self.eval_now() <= e0 + 1e-6 {
+                    self.ties = ties;
+                    true
                 } else {
-                    let cm = CapModel::new(self.st, self.packer, &dirs, &self.lr.events, self.bottom, self.overflow_mm);
-                    for (e, _) in cm.overfull_list() {
-                        t[e] = true;
-                    }
+                    self.set_lr(lr0, Some(p0));
+                    false
                 }
-                t
             }
             /// One single-wire rip-up and reroute of `w` (and the branches on its junctions) with the
             /// wire's oscillating coefficients and the via weight `via_w`; whether it was kept.
@@ -1995,13 +2049,19 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let ci = self.wire_conn[w];
                 let id = self.conn_of[ci];
                 let (amp_i, visit) = (wire_amp(amp, self.stuck[ci]), self.tries[ci]);
-                // A pass over the room of its passage is a predicted violation of the board's
-                // evaluation (errors first), so the loop's search and price take it at the
-                // `violation` weight, not the `overflow` one: "the errors have the highest weight;
-                // once gone they are very unlikely to come back" (Luzin & Polubasov 2006 p. 75).
+                // The search: a pass over the room of its passage (on all layers together) is a
+                // likely violation, so the search steers away from it at the `violation` weight
+                // ("the errors have the highest weight; once gone they are very unlikely to come
+                // back", Luzin & Polubasov 2006 p. 75). A crossing is layer-aware (5.2b): the via
+                // it implies against the crossed stretch's present layer is priced as a via
+                // ([`State::held_layers`], `cross_vias`), so only `crossing_share` of the
+                // `crossing` factor stays for the crossing itself.
                 let over_k = (self.viol_mm / self.overflow_mm).max(1.0);
+                let share = self.crossing_share;
                 let reg_w = self.reg.scaled(|i, name| {
-                    let e = if VIA_FACTORS.contains(&name) {
+                    let e = if name == "crossing" {
+                        via_w * share
+                    } else if VIA_FACTORS.contains(&name) {
                         via_w
                     } else if name == "overflow" {
                         over_k
@@ -2010,6 +2070,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     };
                     k_osc(seed, id, i, visit, amp_i) * e
                 });
+                // The price the move is kept by (5.2a): the same coefficients without the search's
+                // own over-room count; the board's predicted violations are priced by the
+                // archive's measure instead ([`Rerouter::violations`]).
+                let reg_price = reg_w.scaled(|_, name| if name == "overflow" { 0.0 } else { 1.0 });
                 let gone: BTreeSet<WireId> = std::iter::once(w).collect();
                 let mut set: Vec<WireId> = std::iter::once(w).chain(tree::dependents(self.st, &gone)).collect();
                 set.sort_by_key(|&x| (self.rank[self.wire_conn[x]], x));
@@ -2020,10 +2084,31 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 topo.reg = reg_w;
                 let cis: Vec<usize> = set.iter().map(|&x| self.wire_conn[x]).collect();
                 let reg_place = topo.reg.clone();
-                let mut rr = Rr { topo, over_mm: self.viol_mm.max(self.overflow_mm), wire_conn: self.wire_conn, place: self.place, reg: &reg_place, rank: self.rank, cap: self.cap, forced: self.forced, conn_of: self.conn_of, saved: None };
+                let mut rr = Rr {
+                    topo,
+                    price_reg: &reg_price,
+                    wire_conn: self.wire_conn,
+                    place: self.place,
+                    reg: &reg_place,
+                    rank: self.rank,
+                    cap: self.cap,
+                    forced: self.forced,
+                    conn_of: self.conn_of,
+                    saved: None,
+                    viol_mm: self.viol_mm,
+                    viol_old: self.pred.price(self.viol_mm),
+                    assign_t: self.assign_t,
+                    ties: self.ties,
+                    measure: self.measure,
+                    pending: None,
+                };
                 let out = reroute_set(self.st, &set, &mut rr, extra);
+                let pending = rr.pending.take();
+                drop(rr);
                 self.tries[ci] += 1;
                 if out.kept {
+                    let (lr, p) = pending.expect("a kept reroute was measured");
+                    self.set_lr(lr, Some(p));
                     for c in cis {
                         self.reroutes[c] += 1;
                     }
@@ -2037,36 +2122,27 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         impl<'p> Space for Sp<'_, 'p> {
             type Var = LoopVar;
             fn criteria(&mut self) -> Criteria {
-                let s = (self.score)(self.st, self.lr);
-                let (mut len_mm, mut shr) = (0.0, 0usize);
+                let (mut len_mm, mut area_mm, mut shr) = (0.0, 0.0, 0usize);
                 for w in (0..self.st.wires.len()).filter(|&w| self.st.wires[w].alive) {
-                    len_mm += self.st.wire_len(w) / MM;
+                    let l = self.st.wire_len(w) / MM;
+                    len_mm += l;
+                    area_mm += l * (self.st.wires[w].w + self.st.wires[w].s) / self.ws0;
                     let (na, nb, mid) = self.st.neck_runs(w);
                     shr += usize::from(na > 0) + usize::from(nb > 0) + mid.iter().enumerate().filter(|&(i, &k)| i == 0 || mid[i - 1] + 1 != k).count();
                 }
-                // Predicted violations: over-full passages, vias without a site, crossings no layer
-                // separates (P4's count) and the connections placed without a legal path.
-                let violations = s.1 + self.forced.borrow().len();
-                Criteria {
-                    errors: violations,
-                    open: 0,
-                    violations,
-                    penalty: if self.cuts_on { s.3 } else { 0.0 },
-                    vias: s.2,
-                    length_mm: len_mm,
-                    shrinkages: shr,
-                    warnings: 0,
-                    area_mm2: if self.area { s.0 } else { 0.0 },
-                }
+                let area = if matches!(self.obj, Objective::Area) { area_mm + self.via_area_mm * self.lr.vias as f64 } else { 0.0 };
+                // The predicted violations (5.2a): the same measure the moves paid for.
+                criteria_of(self.pred, self.viol_mm, self.lr.vias, len_mm, shr, area)
             }
             fn snapshot(&mut self) -> LoopVar {
-                LoopVar { topo: self.st.topology(), wire_conn: self.wire_conn.clone(), lr: self.lr.clone(), forced: self.forced.borrow().clone() }
+                LoopVar { topo: self.st.topology(), wire_conn: self.wire_conn.clone(), lr: self.lr.clone(), forced: self.forced.borrow().clone(), reroutes: self.reroutes.clone(), pred: self.pred }
             }
             fn restore(&mut self, v: &LoopVar) {
                 self.st.restore(v.topo.clone());
                 self.wire_conn.clone_from(&v.wire_conn);
-                self.lr.clone_from(&v.lr);
+                self.reroutes.clone_from(&v.reroutes);
                 *self.forced.borrow_mut() = v.forced.clone();
+                self.set_lr(v.lr.clone(), Some(v.pred));
             }
             fn cycle(&mut self, c: &CycleCtx, stop: &mut dyn FnMut() -> bool) -> CycleStats {
                 let t0 = Instant::now();
@@ -2084,7 +2160,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     max_evals: usize::MAX,
                     ripped: 0,
                     max_ripped: usize::MAX,
-                    tight: self.tight(),
+                    // Only the price is read here (the sweep order); the predicted violations are
+                    // the board measure's.
+                    tight: Vec::new(),
                     over_mm: Some(self.overflow_mm),
                     tally: Tally::default(),
                 };
@@ -2109,10 +2187,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         cs.kept += 1;
                     }
                 }
-                self.st.uncross_all(50);
-                // Layer re-optimisation, a random one of the equal layerings (Polubasov 2010).
+                if self.st.uncross_all(50) > 0 {
+                    let lr = (self.assign_t)(self.st, self.ties);
+                    self.set_lr(lr, None);
+                }
+                // Layer re-optimisation, a random one of the equal layerings (Polubasov 2010),
+                // taken when the board's evaluation does not rise.
                 let tl = Instant::now();
-                *self.lr = (self.assign_t)(self.st, c.seed | 1);
+                let lr = (self.assign_t)(self.st, c.seed | 1);
+                cs.layer_kept += usize::from(self.try_layers(lr, c.seed | 1));
                 cs.layer_runs += 1;
                 cs.layer_s += tl.elapsed().as_secs_f64();
                 // The wires whose via count rose are laid again, at the end-of-cycle via weight.
@@ -2134,14 +2217,20 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     }
                 }
                 if cs.relaid_kept > 0 {
-                    self.st.uncross_all(50);
+                    if self.st.uncross_all(50) > 0 {
+                        let lr = (self.assign_t)(self.st, self.ties);
+                        self.set_lr(lr, None);
+                    }
                     let tl = Instant::now();
-                    *self.lr = (self.assign_t)(self.st, (c.seed ^ 0x5A5A) | 1);
+                    let t = (c.seed ^ 0x5A5A) | 1;
+                    let lr = (self.assign_t)(self.st, t);
+                    cs.layer_kept += usize::from(self.try_layers(lr, t));
                     cs.layer_runs += 1;
                     cs.layer_s += tl.elapsed().as_secs_f64();
                 }
                 // Floating up (Polubasov 2010 «всплытие»): the label moves (crossing flips, via
-                // shifts, segment lifting), each kept when the price drops.
+                // shifts, segment lifting), each kept when the price drops; the new labelling is
+                // taken when the board's evaluation does not rise.
                 {
                     let dirs = self.packer.taut_dirs(self.st);
                     let cm = if self.cuts_on { CapModel::new_cut(self.st, self.packer, &dirs, &self.lr.events, self.bottom, self.overflow_mm) } else { CapModel::new(self.st, self.packer, &dirs, &self.lr.events, self.bottom, self.overflow_mm) };
@@ -2164,25 +2253,50 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     let lt = descend_labels(&mut lb);
                     let evl = std::mem::take(&mut lb.evl);
                     drop(lb);
-                    cs.float_kept = lt.applied.iter().sum();
-                    if cs.float_kept > 0 {
-                        layers::relabel(self.st, &evl, &self.lp, self.lr);
+                    let moved: usize = lt.applied.iter().sum();
+                    if moved > 0 {
+                        let mut lr = self.lr.clone();
+                        layers::relabel(self.st, &evl, &self.lp, &mut lr);
+                        if self.try_layers(lr, self.ties) {
+                            cs.float_kept = moved;
+                        } else {
+                            cs.undone += 1;
+                        }
                     }
                 }
-                // The crossing rules (clinches, double crossings, crossings no layer separates).
+                // The crossing rules (clinches, double crossings, crossings no layer separates),
+                // taken when the board's evaluation does not rise.
                 let x0 = (self.xkept)();
+                let before = self.snapshot();
+                let e0 = self.eval_now();
                 let mut rip = 0usize;
                 (self.cross)(self.st, self.wire_conn, self.reroutes, self.lr, &mut rip, 100 + c.cycle);
-                cs.cross_kept = (self.xkept)() - x0;
+                if (self.xkept)() > x0 {
+                    let lr = self.lr.clone();
+                    self.set_lr(lr, None);
+                    if self.eval_now() <= e0 + 1e-6 {
+                        cs.cross_kept = (self.xkept)() - x0;
+                        self.ties = 0;
+                    } else {
+                        self.restore(&before);
+                        cs.undone += 1;
+                    }
+                }
                 cs.busy_s = t0.elapsed().as_secs_f64();
                 cs
             }
         }
         let place_ref = &place;
         let assign_ref = &assign_t;
-        let score_ref = &score;
+        let measure_ref = &measure;
         let cross_ref = &crossing_pass;
         let xkept = || xstats.get()[3];
+        // The loop's search is layer-aware (5.2b): the crossings price the via they imply against
+        // the stretches' present layers; both are put back after the loop.
+        let cross_vias0 = st.cross_vias;
+        st.cross_vias = true;
+        st.layers_now = layers_now(&st, &lr.events, bottom);
+        let pred0 = measure(&st, &lr);
         let mut sp = Sp {
             st: &mut st,
             wire_conn: &mut wire_conn,
@@ -2203,7 +2317,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             overflow_mm,
             viol_mm,
             cuts_on,
-            area: matches!(obj, Objective::Area),
+            obj,
+            via_area_mm,
+            crossing_share: opts.loop_crossing.max(0.0),
             max_ripped: opts.max_ripped,
             max_moves: opts.max_moves,
             cut_vias: opts.cut_vias,
@@ -2211,9 +2327,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             forced: &forced,
             place: place_ref,
             assign_t: assign_ref,
-            score: score_ref,
+            measure: measure_ref,
             cross: cross_ref,
             xkept: &xkept,
+            ties: 0,
+            pred: pred0,
         };
         let params = LoopParams {
             cycles: opts.topo_rounds.max(1),
@@ -2236,13 +2354,36 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let pick = arch.pick(&obj).expect("the initial plan is always archived");
         sp.restore(&arch.items[pick].payload.var);
         drop(sp);
+        if std::env::var_os("TOPO_P5DBG").is_some() {
+            // Debug: the different-net crossings of the pick whose two stretches share one layer
+            // there (by the layering's events, and by the pass layers with the planned vias).
+            let dirs = dirs_of(&st);
+            let cm = CapModel::new(&st, &packer, &dirs, &lr.events, bottom, overflow_mm);
+            let pl = |w: WireId, k: usize| -> Vec<i32> {
+                let ps = &st.wires[w].passes;
+                [k.checked_sub(1), Some(k)].into_iter().flatten().filter_map(|i| ps.get(i)).map(|&p| cm.pass_layer[p]).collect()
+            };
+            for w in (0..st.wires.len()).filter(|&w| st.wires[w].alive) {
+                for x in st.crossings(w).into_iter().filter(|x| x.other > w && st.wires[x.other].net != st.wires[w].net) {
+                    let (a, b) = (st.layers_now[w].get(x.k).copied().unwrap_or(0), st.layers_now[x.other].get(x.other_k).copied().unwrap_or(0));
+                    let (pa, pb) = (pl(w, x.k), pl(x.other, x.other_k));
+                    let same_mask = a == b && a.count_ones() == 1;
+                    let same_pass = pa.iter().any(|l| pb.contains(l));
+                    if same_mask || same_pass {
+                        eprintln!("P5DBG same-layer? wires {w} (net {}) k {} mask {a:b} passes {pa:?} / {} (net {}) k {} mask {b:b} passes {pb:?} at ({:.3},{:.3}) ev {:?} / {:?}", st.wires[w].net, x.k, x.other, st.wires[x.other].net, x.other_k, proj.tris[x.tri].iter().map(|&v| proj.pos[v].x).sum::<f64>() / 3.0 / MM, -proj.tris[x.tri].iter().map(|&v| proj.pos[v].y).sum::<f64>() / 3.0 / MM, lr.events.get(w), lr.events.get(x.other));
+                    }
+                }
+            }
+        }
+        st.cross_vias = cross_vias0;
+        st.layers_now.clear();
         let loop_s = t_loop.elapsed().as_secs_f64();
         let time_hit = rep.stop == "time limit";
         loop_end = Some(LoopEnd { stable: rep.stable_at.is_some(), time_hit });
         let pc = arch.items[pick].crit;
         let table = table_text(&arch.table(Some(pick)), &obj);
         warnings.push(format!(
-            "TopoR loop ([optimize] loop = \"topor\"; Polubasov 2010): {} cycles in {loop_s:.1} s, ended by {}{}; {} restarts from the archive{}; {} variants offered, {} archived, first loop variant after {}; picked {} (gen {}): predicted {} violations, {} vias, {:.1} mm, {} shrinkages; reroutes kept {}/{}, via-rose laid again {}/{}, floating-up moves {}, crossing passes kept {}, layer re-optimisation {} runs ({:.0} % of the loop's time); per cycle: {}",
+            "TopoR loop ([optimize] loop = \"topor\"; Polubasov 2010): {} cycles in {loop_s:.1} s, ended by {}{}; {} restarts from the archive{}; {} variants offered, {} archived, first loop variant after {}; picked {} (gen {}): predicted {} violations, {} vias, {:.1} mm, {} shrinkages; reroutes kept {}/{}, via-rose laid again {}/{}, floating-up moves {}, crossing passes kept {}, whole-board moves undone {}, layer re-optimisation {} runs, {} taken ({:.0} % of the loop's time); every move priced with the archive's predicted violations at the violation weight ({:.0} mm each), crossings layer-aware ({:.2} of the crossing factor kept); per cycle: {}",
             rep.cycles,
             rep.stop,
             rep.stable_at.map(|s| format!(" (stable after cycle {s})")).unwrap_or_default(),
@@ -2263,8 +2404,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             rep.stats.relaid,
             rep.stats.float_kept,
             rep.stats.cross_kept,
+            rep.stats.undone,
             rep.stats.layer_runs,
+            rep.stats.layer_kept,
             100.0 * rep.stats.layer_s / loop_s.max(1e-9),
+            viol_mm,
+            opts.loop_crossing,
             rep.lines.join("; ")
         ));
         warnings.push(format!("TopoR loop {table}"));
@@ -2289,6 +2434,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             "via_rose": [rep.stats.relaid_kept, rep.stats.relaid],
             "floating_up": rep.stats.float_kept,
             "crossing_passes": rep.stats.cross_kept,
+            "undone": rep.stats.undone,
+            "layerings": [rep.stats.layer_kept, rep.stats.layer_runs],
+            "crossing_share": opts.loop_crossing,
+            "variants_table": arch.items.iter().map(|v| serde_json::json!({"label": v.label, "gen": v.payload.gen, "cycle": v.payload.cycle, "errors": v.crit.errors, "penalty": (v.crit.penalty * 1e3).round() / 1e3, "vias": v.crit.vias, "length_mm": (v.crit.length_mm * 1e3).round() / 1e3, "shrinkages": v.crit.shrinkages})).collect::<Vec<_>>(),
             "layer_share_pct": (1000.0 * rep.stats.layer_s / loop_s.max(1e-9)).round() / 10.0,
         }));
         if let Some(r) = crep.as_mut() {
