@@ -182,7 +182,7 @@ def test_topological_core_settings_reach_the_engine():
     o = cfg.engine_options()
     assert o["topo_rounds"] == 2 and o["fuse_branches"] is False and o["stitch_islands"] is False
     assert o["factors"]["weight"] == {"via": 30.0}
-    for key in ("rounds", "max_ripped", "objective", "mm_per_via", "variants", "moves", "fluctuation"):
+    for key in ("rounds", "max_ripped", "objective", "mm_per_via", "pick", "variants", "moves", "fluctuation"):
         s = next(x for x in SETTINGS if x.section == "optimize" and x.key == key)
         assert available(s), key
 

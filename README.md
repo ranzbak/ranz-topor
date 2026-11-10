@@ -104,7 +104,7 @@ dialog says **Routes stable** and its Cancel button reads **OK** — the same ac
 the board you get. The run also stops there by itself (`finish_when_stable`, `finish_patience` = 0 since M-B1, user
 2026-11-07: "When route stable appears it should stop indeed"; `finish_when_stable = false` keeps iterating for
 marginal gains until OK), and headless runs stop at stable. `[optimize] runs` (default 5) seeded runs go on in
-parallel on the engine's threads and the best by the objective is offered; `[optimize] rounds` (30) is only a
+parallel on the engine's threads and the best by the pick (errors, vias, length) is offered; `[optimize] rounds` (30) is only a
 safety cap and `[run] timeout_s` (600 s) the emergency stop: runs on large boards (dcsgonebadge, qmtech with runs = 5) may hit it
 and keep the best result so far (`TIME_BUDGET_HIT`).
 
@@ -139,7 +139,7 @@ least violating site). Every rule it breaks is priced very high by the graded `v
 violation plus 1000 mm per 0.01 mm² of depth × length) and reported with its place, type and cause
 (`VIOLATIONS` finding, `violations` in result.json). The best result counts errors first — connections with
 violations plus connections without copper ("a design-rule violation cannot be compensated by any reduction of
-wire length", Polubasov 2010) — then the objective with the violation price; "Routes stable" and the best of N see
+wire length", Polubasov 2010) — then fewest vias, then the shortest length (`[optimize] pick`; `errors_weighted` = the old length + 25 mm per via); "Routes stable" and the best of N see
 the same count. The violating copper is written to the board; `[optimize] allow_violations = false` keeps the
 legal-only output (such connections stay unrouted, as before). The topological core takes no DRC feedback, so the
 plugin judges the result with one DRC round.

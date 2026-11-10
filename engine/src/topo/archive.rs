@@ -10,11 +10,14 @@
 //!   are a column, not a fifth dimension). When the archive is over its cap the variant worst by
 //!   the objective goes first; the champions (fewest errors, shortest, fewest vias, fewest
 //!   shrinkages, fewest warnings) are never pruned.
-//! * The pick: fewest errors first (lexicographic), then by `objective`: `length_vias` = least
-//!   `length + mm_per_via x vias` (the 25 mm/via rule of the TopoR manual: a step to fewer vias is
-//!   taken while it costs at most `mm_per_via` of length per via removed); `area` = least occupied
-//!   area (a trace counts `L x (w + s)`, a via its disc of pad plus clearance on every layer it
-//!   spans). Ties: fewer shrinkages, then the earlier variant.
+//! * The pick: fewest errors first (lexicographic), then by `objective` and `[optimize] pick`:
+//!   `length_vias` with `pick = "errors_vias_length"` (default) = fewest vias, then the shortest
+//!   length; with `pick = "errors_weighted"` = least `length + mm_per_via x vias` (the 25 mm/via
+//!   rule of the TopoR manual: a step to fewer vias is taken while it costs at most `mm_per_via`
+//!   of length per via removed); `area` = least occupied area (a trace counts `L x (w + s)`, a via
+//!   its disc of pad plus clearance on every layer). Ties: fewer shrinkages, then the earlier
+//!   variant. Only the pick differs: the archive membership (Pareto) and every internal price
+//!   (`mm_per_via` in the rip-up rounds and in the cap pruning) are the same in both modes.
 //!
 //! Deterministic: Vec in offer order, no hashing. Complexity: an offer is O(archive size).
 
@@ -63,17 +66,32 @@ impl Criteria {
 pub enum Objective {
     /// Pareto archive pick: fewest errors, then least `length + mm_per_via x vias`.
     LengthVias { mm_per_via: f64 },
+    /// The final pick strictly lexicographic: fewest errors, then fewest vias, then the shortest
+    /// length, then fewest shrinkages. `mm_per_via` is kept for the internal prices
+    /// ([`Objective::value`]: archive cap pruning, the P4 round pick, the stable meter), which
+    /// stay the graded `length + mm_per_via x vias`.
+    ErrorsViasLength { mm_per_via: f64 },
     /// Fewest errors, then least occupied area.
     Area,
 }
 
 impl Objective {
-    /// `"length_vias"` | `"area"`; anything else is `length_vias`.
+    /// `"length_vias"` | `"area"`; anything else is `length_vias` with the weighted pick (the
+    /// internal prices use this one).
     pub fn parse(s: &str, mm_per_via: f64) -> Objective {
         if s == "area" {
             Objective::Area
         } else {
             Objective::LengthVias { mm_per_via }
+        }
+    }
+    /// The objective of a run: [`Objective::parse`] with the final pick `[optimize] pick`:
+    /// `"errors_weighted"` = errors, then `length + mm_per_via x vias`, then shrinkages; anything
+    /// else = `errors_vias_length` (errors, vias, length, shrinkages). `area` ignores `pick`.
+    pub fn from_options(objective: &str, mm_per_via: f64, pick: &str) -> Objective {
+        match Objective::parse(objective, mm_per_via) {
+            Objective::LengthVias { mm_per_via } if pick != "errors_weighted" => Objective::ErrorsViasLength { mm_per_via },
+            o => o,
         }
     }
     /// The objective's value within one error count (lower is better): its own value plus the
@@ -84,12 +102,25 @@ impl Objective {
     /// The objective's own value, without the violation price (the scale of a relative gain).
     pub fn base(&self, c: &Criteria) -> f64 {
         match *self {
-            Objective::LengthVias { mm_per_via } => c.length_mm + mm_per_via * c.vias as f64,
+            Objective::LengthVias { mm_per_via } | Objective::ErrorsViasLength { mm_per_via } => c.length_mm + mm_per_via * c.vias as f64,
             Objective::Area => c.area_mm2,
         }
     }
-    /// Lexicographic key: errors, objective value, shrinkages.
+    /// Lexicographic key: errors, objective value, shrinkages (`ErrorsViasLength`: errors, vias,
+    /// length, shrinkages; lengths within 1e-9 mm are equal).
     pub fn better(&self, a: &Criteria, b: &Criteria) -> bool {
+        if let Objective::ErrorsViasLength { .. } = self {
+            if a.errors != b.errors {
+                return a.errors < b.errors;
+            }
+            if a.vias != b.vias {
+                return a.vias < b.vias;
+            }
+            if (a.length_mm - b.length_mm).abs() > 1e-9 {
+                return a.length_mm < b.length_mm;
+            }
+            return a.shrinkages < b.shrinkages;
+        }
         a.errors < b.errors
             || a.errors == b.errors
                 && (self.value(a) < self.value(b) - 1e-9 || (self.value(a) - self.value(b)).abs() <= 1e-9 && a.shrinkages < b.shrinkages)
@@ -254,7 +285,8 @@ impl<T> Archive<T> {
 /// The variant table as report lines (one per variant).
 pub fn table_text(rows: &[VariantRow], obj: &Objective) -> String {
     let objective = match obj {
-        Objective::LengthVias { mm_per_via } => format!("length_vias, {mm_per_via} mm/via"),
+        Objective::LengthVias { mm_per_via } => format!("length_vias, pick errors_weighted, {mm_per_via} mm/via"),
+        Objective::ErrorsViasLength { .. } => "length_vias, pick errors_vias_length (errors, vias, length)".to_string(),
         Objective::Area => "area".to_string(),
     };
     let mut s = format!("variants ({} kept, objective {objective}; errors (violations) / vias / length mm / shrinkages / warnings / area mm2 / mm per via):", rows.len());
@@ -361,5 +393,33 @@ mod tests {
         // objective (365), v2 (400) is the worst non-champion.
         let labels: Vec<&str> = a.items.iter().map(|v| v.label.as_str()).collect();
         assert_eq!(labels, vec!["v0", "v1", "v3"]);
+    }
+
+    #[test]
+    fn errors_vias_length_pick_order() {
+        let w = Objective::from_options("length_vias", 25.0, "errors_weighted");
+        let n = Objective::from_options("length_vias", 25.0, "errors_vias_length");
+        assert_eq!(w, Objective::LengthVias { mm_per_via: 25.0 });
+        assert_eq!(n, Objective::ErrorsViasLength { mm_per_via: 25.0 });
+        assert_eq!(Objective::from_options("length_vias", 25.0, "anything"), n, "unknown pick = the default");
+        assert_eq!(Objective::from_options("area", 25.0, "errors_vias_length"), Objective::Area, "area ignores pick");
+        // (1 error, 0 vias, short) loses to (0 errors, 9 vias, long): errors first, in both modes.
+        let (e1, e0) = (c(1, 0, 10.0, 0, 0), c(0, 9, 900.0, 0, 0));
+        assert!(n.better(&e0, &e1) && w.better(&e0, &e1));
+        // (0 errors, 2 vias, 200 mm) beats (0 errors, 3 vias, 100 mm): vias before length. The old
+        // weighted order prefers the second (200 + 50 = 250 vs 100 + 75 = 175 -> the second is lower).
+        let (a, b) = (c(0, 2, 200.0, 0, 0), c(0, 3, 100.0, 0, 0));
+        assert!(n.better(&a, &b) && !n.better(&b, &a));
+        assert!(w.better(&b, &a) && !w.better(&a, &b), "the old mode reproduces the old order");
+        // Length breaks a via tie; shrinkages break a length tie.
+        let (s, l) = (c(0, 3, 100.0, 0, 0), c(0, 3, 101.0, 0, 0));
+        assert!(n.better(&s, &l) && !n.better(&l, &s));
+        let (z0, z1) = (c(0, 3, 100.0, 0, 0), c(0, 3, 100.0, 2, 0));
+        assert!(n.better(&z0, &z1) && !n.better(&z1, &z0));
+        // The pick over an archive (Pareto membership is the same in both modes).
+        let a2 = arch(&[c(0, 20, 500.0, 0, 0), c(0, 18, 540.0, 0, 0), c(0, 16, 600.0, 0, 0), c(0, 14, 900.0, 0, 0), c(3, 1, 300.0, 0, 0)]);
+        assert_eq!(a2.items.len(), 5);
+        assert_eq!(a2.items[a2.pick(&n).unwrap()].label, "v3", "fewest vias within the fewest errors");
+        assert_eq!(a2.items[a2.pick(&w).unwrap()].label, "v1", "old pick: least length + 25 mm per via");
     }
 }

@@ -225,7 +225,7 @@ lists tried / applied moves per type.
 Every whole route offers two variants: as drawn, and after the via reduction. The archive keeps every
 variant no other one beats on all four TopoR criteria (errors = connections not routed, vias, length,
 shrinkages = necked stretches), plus the fewest-warnings variant; at most `optimize.variants`, the
-champions are never pruned. The pick: fewest errors, then `optimize.objective`. The variant table (with
+champions are never pruned. The pick (`optimize.pick`): fewest errors, then fewest vias, then the shortest length, then fewest shrinkages (`errors_vias_length`, default since 2026-11-10); `errors_weighted` = fewest errors, then `length + mm_per_via x vias` (the earlier rule), `objective = area` = fewest errors, then the least area. Only the pick differs, not the archive's membership. The variant table (with
 the mm/via column against the previous row) is in the run report.
 
 ## Reproducibility

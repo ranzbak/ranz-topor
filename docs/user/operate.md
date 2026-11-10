@@ -290,7 +290,7 @@ and the funnel through the passages, and keeps the one whose violations cost lea
 very high by the `violation` factor (1000 mm per violation plus 1000 mm per 0.01 mm² of depth × length, `[factors]
 weight violation`), so the next rounds work to remove it; the best result counts errors first (errors =
 connections with violations plus connections without copper; "a design-rule violation cannot be compensated by any reduction of
-wire length", Polubasov 2010), then the objective. A complete route with a violation can still be fixed by hand or
+wire length", Polubasov 2010), then fewest vias, then the shortest length (`[optimize] pick`). A complete route with a violation can still be fixed by hand or
 improved; a dropped one connects nothing.
 
 The violating copper is written to the board. The findings list every violation

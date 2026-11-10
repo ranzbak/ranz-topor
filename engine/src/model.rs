@@ -1003,12 +1003,20 @@ pub struct Options {
     /// nodes) per connection; the one retry of a failed connection uses four times this. A work cap.
     pub max_expansions: usize,
     /// Topological core (S3, `topor.toml [optimize] objective`): `"length_vias"` (Pareto archive
-    /// over errors, vias, length and shrinkages; pick: fewest errors, then the least
-    /// `length + mm_per_via x vias`) or `"area"` (fewest errors, then the least occupied area).
+    /// over errors, vias, length and shrinkages; the final pick is set by `pick`) or `"area"` (fewest errors, then the least
+    /// occupied area).
     pub objective: String,
     /// Topological core (S3, `topor.toml [optimize] mm_per_via`): the via price of the
-    /// `length_vias` pick (TopoR: good results at 25 mm/via), also the P4 round pick.
+    /// `errors_weighted` pick (TopoR: good results at 25 mm/via), also the P4 round pick and the
+    /// archive's cap pruning.
     pub mm_per_via: f64,
+    /// Topological core (`topor.toml [optimize] pick`): the final choice between complete results
+    /// (archive variants, seeded runs) for `objective = "length_vias"`: `"errors_vias_length"`
+    /// (default; strictly: fewest errors, then fewest vias, then the shortest length, then fewest
+    /// shrinkages) or `"errors_weighted"` (errors, then the least `length + mm_per_via x vias`,
+    /// then shrinkages; the order before 2026-11-10). Only the final pick: the archive's Pareto
+    /// membership and the internal search prices do not change. `objective = "area"` ignores it.
+    pub pick: String,
     /// Topological core (S3, `topor.toml [optimize] variants`): most result variants the archive
     /// keeps besides the champions (fewest errors, shortest, fewest vias, fewest shrinkages,
     /// fewest warnings).
@@ -1206,6 +1214,7 @@ impl Default for Options {
             max_expansions: 2_000_000,
             objective: "length_vias".into(),
             mm_per_via: 25.0,
+            pick: "errors_vias_length".into(),
             variants: 8,
             moves: false,
             max_moves: 400,

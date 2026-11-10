@@ -161,7 +161,7 @@ fn fail(o: &mut [Outcome], i: usize, reason: impl Into<String>) {
 pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteResult {
     let t0 = Instant::now();
     let n = opts.runs.max(1);
-    let obj = Objective::parse(&opts.objective, opts.mm_per_via);
+    let obj = Objective::from_options(&opts.objective, opts.mm_per_via, &opts.pick);
     ctl.update("setup", 0, 0, 0, 0, 0.0);
     ctl.with_progress(|p| {
         p.runs = n as u32;
@@ -1438,7 +1438,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // value (`length + mm_per_via x vias`, or the occupied area in mm of default trace) instead
     // of the bare via count. (Measured: pricing the over-full edge-layers into one sum with the
     // `overflow` weight routed fewer connections on bornhack2026, so violations stay lexicographic.)
-    let obj = Objective::parse(&opts.objective, opts.mm_per_via);
+    let obj = Objective::from_options(&opts.objective, opts.mm_per_via, &opts.pick);
     let overflow_mm = reg.price(&Event::Overflow { wire: 0, edge: 0 }, &WireCtx::default()).max(1e-6);
     let via_area_mm = {
         let r = 0.5 * model.rules.default.via_d as f64 + model.rules.default.clearance as f64;
@@ -1460,7 +1460,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             area_mm += l * (st.wires[w].w + st.wires[w].s) / ws0;
         }
         let own = match obj {
-            Objective::LengthVias { mm_per_via } => len_mm + mm_per_via * lr.vias as f64,
+            Objective::LengthVias { mm_per_via } | Objective::ErrorsViasLength { mm_per_via } => len_mm + mm_per_via * lr.vias as f64,
             Objective::Area => area_mm + via_area_mm * lr.vias as f64,
         };
         // Predicted violations: over-full edge-layers, vias without a site and (M-B2) crossings
