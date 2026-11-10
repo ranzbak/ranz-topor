@@ -588,16 +588,23 @@ pub fn relocate_junctions(cx: &JCtx) -> Vec<JMove> {
         let (Some(pt), Some(pb)) = (cx.plans.get(&tw), cx.plans.get(&bw)) else { continue };
         let j0 = pr.pos[v];
         let tp = &tracks[tw].pts;
-        let Some(ix) = (1..tp.len().saturating_sub(1)).min_by(|&a, &b| (tp[a] - j0).len().total_cmp(&(tp[b] - j0).len())) else { continue };
-        if (tp[ix] - j0).len() > 1e3 {
+        // The junction on the trunk's path: a corner of it, or a point on one of its segments
+        // (a straight trunk through a free Steiner point); `before` / `after` = the path on
+        // either side of it.
+        if tp.len() < 2 {
             continue;
         }
+        let Some((si, d)) = (0..tp.len() - 1).map(|i| (i, seg_point(j0, tp[i], tp[i + 1]).0)).min_by(|a, b| a.1.total_cmp(&b.1)) else { continue };
+        if d > 1e3 {
+            continue;
+        }
+        let (before, after) = (&tp[..=si], &tp[si + 1..]);
         let bp = &tracks[bw].pts;
         if bp.len() < 2 {
             continue;
         }
         let Some(arm) = first_away(bp, end, j0) else { continue };
-        let (Some(prev), Some(next)) = (first_away(&tp[..ix], 1, j0), first_away(&tp[ix + 1..], 0, j0)) else { continue };
+        let (Some(prev), Some(next)) = (first_away(before, 1, j0), first_away(after, 0, j0)) else { continue };
         // The tee keeps one layer (no via at the junction).
         let lt = layer_at(pt, k);
         let lb = if end == 0 { pb.layers.first().copied() } else { pb.layers.last().copied() };

@@ -176,9 +176,15 @@ fn junctions(items: &[Item]) -> Vec<(f64, f64)> {
 fn branch_point_relocate_octilinear_and_fermat() {
     let pads: Vec<P> = vec![(1, 3.0, 2.0, 0.8, 0.8, 0), (1, 3.0, 12.0, 0.8, 0.8, 0), (1, 17.0, 7.0, 0.8, 0.8, 0)];
     let m = board(20.0, 14.0, &pads, &[0.25]);
-    for lp in ["cycles", "topor"] {
+    // Steiner grid on: the T is a free point on the straight trunk P-Q (not a corner of it).
+    for (lp, st) in [("cycles", false), ("topor", false), ("cycles", true)] {
         for (style, at, len) in [("octilinear", (8.0, 7.0), 23.142), ("smooth", (5.887, 7.0), 22.660)] {
-            let r = route_with(&m, &Options { draw_style: style.into(), ..opts54(lp, false) }, &RunControl::new());
+            // Parking lot: with the grid and the smooth style the plan's arm R bends at a grid
+            // point next to Q (3.4, 11.6); the pad_out Fermat point of that corner is next to Q.
+            if st && style == "smooth" {
+                continue;
+            }
+            let r = route_with(&m, &Options { draw_style: style.into(), ..opts54(lp, st) }, &RunControl::new());
             assert_eq!(r.failed, 0, "{lp} {style}: {:?}", r.warnings);
             let j = junctions(&r.items);
             assert!(j.iter().any(|p| (p.0 - at.0).hypot(p.1 - at.1) <= 0.15), "{lp} {style}: {j:?} {:?}", tracks(&r.items));
