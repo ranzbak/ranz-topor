@@ -47,3 +47,13 @@ def test_kicad_drc(name, generated):
     for k in ("reference", "careless"):
         r = vp.drc_of(g[k])
         assert r["violations"] == 0 and r["unconnected"] == 0
+
+
+def test_topor_session_parser():
+    from harness.via_patterns_topor import parse_session
+
+    txt = ('(routes (library_out (padstack "PS2" (shape (circ signal 80000 0 0)))) (network_out (Net "A"\n'
+           '(wire (path "F.Cu" 25000 100000 -200000 300000 -200000))\n(via "PS2" 300000 -200000)\n)\n(Net "B"\n)\n))')
+    tr, vi = parse_session(txt)
+    assert tr[0].net == "A" and tr[0].pts == [(1.0, 2.0), (3.0, 2.0)] and tr[0].width == 0.25
+    assert vi[0].pos == (3.0, 2.0) and vi[0].dia == 0.8
