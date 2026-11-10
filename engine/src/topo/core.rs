@@ -4,9 +4,10 @@
 //! (`init`, net trees, widest first) -> P3 layer assignment (`layers`, Polubasov, capacity
 //! refinement) -> crossing rules and P4 negotiated rip-up and reroute (optional moves) -> drawing
 //! (`draw`: vias, then wires; feedback redraw; never drop) -> via reduction, fuse, octilinear polish
-//! -> diff pair realisation -> `RouteResult`. Each cycle's result is pour-stitched and offered to the
-//! run's archive; the drawing feeds back into the next cycle. `[run] stop_after = "plan"` ends a run
-//! after the plan of its first cycle.
+//! -> diff pair realisation -> `RouteResult`. The decomposition and the projection depend only on
+//! the fixed items: built once per call ([`Fixed`], shopping list 4.2) and read by every cycle.
+//! Each cycle's result is pour-stitched and offered to the run's archive; the drawing feeds back
+//! into the next cycle. `[run] stop_after = "plan"` ends a run after the plan of its first cycle.
 //!
 //! Every connection ends in one of three states, none of them silent:
 //! * routed: copper emitted, checked by the [`Checker`] against the board and all earlier copper;
@@ -169,8 +170,14 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     ctl.stage(1, opts.topo_rounds.max(1) as u32, "plane stubs (pads of plane nets onto their pour)");
     ctl.limit.init(opts.wall_clock_s); // live limit (control::TimeLimit): the caller may change it during the run
     let stubs = place_plane_stubs(model, opts, ctl);
+    ctl.stage(1, opts.topo_rounds.max(1) as u32, "projection of the board");
+    let t_fx = Instant::now();
+    let fx = Fixed::build(model, opts, &stubs);
+    if std::env::var_os("TOPO_TIMES").is_some() {
+        eprintln!("[topo call] projection built once (decomposition, triangulation, cut room): {:.3} s", t_fx.elapsed().as_secs_f64());
+    }
     let coord = Coord::new(ctl, n, obj);
-    let mut outs: Vec<RunOut> = run_all(model, opts, ctl, &coord, &stubs, t0, n);
+    let mut outs: Vec<RunOut> = run_all(model, opts, ctl, &coord, &stubs, &fx, t0, n);
     // The best run: fewest errors, then the objective, then shrinkages; ties: the lower run.
     let mut pick = 0;
     for k in 1..outs.len() {
@@ -352,7 +359,7 @@ impl Run {
     /// One whole-route cycle; sets `done` when the run ends (stable for a run that stops by
     /// itself, the safety cap, Cancel / OK, the time budget).
     #[allow(clippy::too_many_arguments)]
-    fn step(&mut self, model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, stubs: &PlaneStubs, _t_call: Instant) {
+    fn step(&mut self, model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, stubs: &PlaneStubs, fx: &Fixed, _t_call: Instant) {
         let t = Instant::now();
         let obj = coord.obj;
         let cycle = self.cycles + 1;
@@ -376,7 +383,7 @@ impl Run {
         o2.fluctuation = width;
         o2.wall_clock_s = ctl.limit.remaining_s().map_or(0.0, |r| r.max(1.0));
         let hv: Hints = if opts.drawing_feedback { self.all.iter().map(|(&(e, l), &r)| (e, l, r)).collect() } else { Vec::new() };
-        let (ro, h2, mem2) = route_round(model, &o2, ctl, &hv, &self.mem, cycle, stubs);
+        let (ro, h2, mem2) = route_round(model, &o2, ctl, &hv, &self.mem, cycle, stubs, fx);
         self.cycles = cycle;
         self.mem = mem2;
         for (e, l, r) in h2 {
@@ -530,7 +537,8 @@ impl Run {
 /// that no other thread is stepping (so every run progresses, also when there are more runs than
 /// threads, and "Routes stable" can come from all of them). The threads are the engine's share
 /// for the runs (`min(runs, rayon threads)`), the checks inside a cycle use the rayon pool.
-fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, stubs: &PlaneStubs, t_call: Instant, n: usize) -> Vec<RunOut> {
+#[allow(clippy::too_many_arguments)]
+fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, stubs: &PlaneStubs, fx: &Fixed, t_call: Instant, n: usize) -> Vec<RunOut> {
     use std::sync::Mutex;
     let runs: Vec<Mutex<Run>> = (0..n).map(|k| Mutex::new(Run::new(opts, k))).collect();
     let taken: Mutex<Vec<bool>> = Mutex::new(vec![false; n]);
@@ -544,7 +552,7 @@ fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, 
         };
         let Ok(mut r) = runs[k].lock() else { return };
         let c = if n == 1 { ctl.clone() } else { ctl.for_run(k as u32 + 1) };
-        r.step(model, opts, &c, coord, stubs, t_call);
+        r.step(model, opts, &c, coord, stubs, fx, t_call);
         let st = (r.cycles, r.done);
         drop(r);
         if let (Ok(mut tk), Ok(mut cy)) = (taken.lock(), cycles.lock()) {
@@ -758,6 +766,70 @@ struct PlaneStubs {
     notes: Vec<String>,
 }
 
+/// The projection of one route call (shopping list 4.2, roadmap box 1 "triangulation on fixed
+/// items only"): everything a cycle needs that depends only on the fixed items, built **once** by
+/// [`Fixed::build`] in [`route_topo`] after the plane stubs and read by every cycle of every run
+/// ([`route_round`]). TopoR builds one triangulation for all layers once, from the pads, vias,
+/// keepouts and outline, and routes every pass on it (Polubasov 2010, "взгляд изнутри",
+/// `docs/literature/INDEX.md`).
+///
+/// Holds:
+/// * `dec`, `pairs`, `alias`: the decomposition of the nets into connections (pads of pour nets
+///   that no stub serves joined by signal connections), the diff pairs paired up (D7) and the
+///   planning model in which the N half of a coupled pair carries the P net (`None` = the model);
+/// * `board`: the projection of that model with the plane stubs as obstacles: the constrained
+///   triangulation (pads, existing vias, keepouts, copper graphics, outline), the LCT cuts, the
+///   Steiner grid when `[search] steiner` is on, and with `[capacity] model = "cuts"` the
+///   per-layer room of the edges from the layer's sheet; `Err` = the build failed (every cycle
+///   reports it as the reason, as before);
+/// * `notes`: report lines of the build that are not the board's own (the sheet room failing).
+///
+/// Never in it (per cycle, in [`route_round`]): the drawing feedback rooms (`hints`, applied on a
+/// copy of the board), the over-full history (`Memory`), the seed and fluctuation of the weights,
+/// and everything that depends on routed wires (the `State`). Deterministic: the same inputs give
+/// the same `Fixed`, so building it once gives the cycles exactly what a rebuild per cycle gave.
+struct Fixed {
+    dec: crate::decompose::Decomposition,
+    pairs: Pairs,
+    alias: Option<BoardModel>,
+    board: Result<board::Board, String>,
+    notes: Vec<String>,
+}
+
+impl Fixed {
+    /// O(projection build): the CDT over the obstacles (+ grid points), the cuts, the sheets.
+    fn build(model: &BoardModel, opts: &Options, stubs: &PlaneStubs) -> Fixed {
+        let signal: Vec<u32> = model.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
+        let mut dec = decompose_with(model, opts, &signal, &stubs.signal_pads);
+        let pairs: Pairs = if opts.diffpair_route { diffpair::plan(model, &mut dec) } else { Pairs::default() };
+        let alias = (!pairs.coupled.is_empty()).then(|| diffpair::alias(model, &pairs));
+        let mut notes = Vec::new();
+        let board = if signal.len() < 2 {
+            Err(format!("{} signal layer(s)", signal.len()))
+        } else {
+            let pm: &BoardModel = alias.as_ref().unwrap_or(model);
+            board::build_full(pm, &build_opts(opts), &[], &stubs.extra).map(|mut b| {
+                // `[capacity] model = "cuts"` (shopping list 2.3): the per-layer room of the edges the
+                // shared projection leaves unbounded comes from the layer's sheet (P2 and the per-edge
+                // layer masks).
+                if opts.capacity_model == "cuts" {
+                    let co = super::cutmodel::CutOpts::from_options(opts);
+                    match super::cutmodel::bare_sheets(&b.proj, &board::outline_segments(pm), &co) {
+                        Ok(sh) => {
+                            for (e, l, room) in super::cutmodel::sheet_room(&b.proj, &sh) {
+                                b.proj.room[e][l] = room;
+                            }
+                        }
+                        Err(e) => notes.push(format!("capacity model \"cuts\": the sheets of the P2 room failed, P2 keeps the per-edge room: {e}")),
+                    }
+                }
+                b
+            })
+        };
+        Fixed { dec, pairs, alias, board, notes }
+    }
+}
+
 /// The pad-to-pour connections of `dec` (the plane stage's requests), as `route_round` sorts them.
 fn plane_requests(model: &BoardModel, b: &board::Board, dec: &crate::decompose::Decomposition) -> Vec<planes::Req> {
     let diff = diff_pair_nets(model);
@@ -848,7 +920,8 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
 
 /// One whole route. `hist0` is the per-edge over-full history of earlier rounds (empty = none);
 /// the third result is the history at the end of this one.
-fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize, stubs: &PlaneStubs) -> (RoundOut, Hints, Memory) {
+#[allow(clippy::too_many_arguments)]
+fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize, stubs: &PlaneStubs, fx: &Fixed) -> (RoundOut, Hints, Memory) {
     // TOPO_TIMES=1 (debug): phase times on stderr; never part of the result.
     let times = std::env::var_os("TOPO_TIMES").is_some();
     let tlog = |what: &str, t: Instant| {
@@ -868,19 +941,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let (rnd, rnds) = (round as u32, opts.topo_rounds.max(1) as u32);
     ctl.update("setup", 0, 0, 0, 0, 0.0);
     ctl.stage(rnd, rnds, "projection of the board");
-    let mut dec = decompose_with(model, opts, &signal, &stubs.signal_pads);
-    // D7: the pair connections paired up (the N tree mirrors the P tree) and the planning model in
-    // which the N half carries the P net (the pair is one wire, the lead).
-    let pairs: Pairs = if opts.diffpair_route { diffpair::plan(model, &mut dec) } else { Pairs::default() };
+    // The projection of the call (4.2): built once from the fixed items, read here.
+    let dec = &fx.dec;
+    let pairs: &Pairs = &fx.pairs;
     let model_real = model;
-    let model_alias;
-    let model: &BoardModel = if pairs.coupled.is_empty() {
-        model
-    } else {
-        model_alias = diffpair::alias(model, &pairs);
-        &model_alias
-    };
-    let dec = dec;
+    let model: &BoardModel = fx.alias.as_ref().unwrap_or(model);
     let mut warnings: Vec<String> = dec.warnings.clone();
     warnings.extend(pairs.notes.iter().cloned());
     warnings.extend(stubs.notes.iter().cloned());
@@ -889,32 +954,25 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     let (reg, problems) = Registry::from_config(standard_factors(), &opts.factors);
     warnings.extend(problems);
-    let t_proj = Instant::now();
-    let mut b = match board::build_full(model, &build_opts(opts), &[], &stubs.extra) {
+    let base = match &fx.board {
         Ok(b) => b,
         Err(e) => return (RoundOut::unrouted(unrouted(model, opts, &format!("projection failed: {e}"))), Vec::new(), Memory::default()),
     };
-    warnings.extend(b.notes.iter().cloned());
-    // `[capacity] model = "cuts"` (shopping list 2.3): the per-layer room of the edges the shared
-    // projection leaves unbounded comes from the layer's sheet (P2 and the per-edge layer masks).
-    if opts.capacity_model == "cuts" {
-        let co = super::cutmodel::CutOpts::from_options(opts);
-        match super::cutmodel::bare_sheets(&b.proj, &board::outline_segments(model), &co) {
-            Ok(sh) => {
-                for (e, l, room) in super::cutmodel::sheet_room(&b.proj, &sh) {
-                    b.proj.room[e][l] = room;
-                }
+    warnings.extend(base.notes.iter().cloned());
+    warnings.extend(fx.notes.iter().cloned());
+    // Drawing feedback (`[optimize] drawing_feedback`) lowers rooms for this cycle only: on a copy
+    // of the projection, so nothing that depends on routed wires leaks into the shared one.
+    let mut b: std::borrow::Cow<board::Board> = std::borrow::Cow::Borrowed(base);
+    if !hints.is_empty() {
+        let bm = b.to_mut();
+        for &(e, l, room) in hints {
+            if let Some(r) = bm.proj.room.get_mut(e).and_then(|r| r.get_mut(l)) {
+                *r = r.min(room);
             }
-            Err(e) => warnings.push(format!("capacity model \"cuts\": the sheets of the P2 room failed, P2 keeps the per-edge room: {e}")),
         }
     }
-    for &(e, l, room) in hints {
-        if let Some(r) = b.proj.room.get_mut(e).and_then(|r| r.get_mut(l)) {
-            *r = r.min(room);
-        }
-    }
-    tlog("projection (decomposition, triangulation, cut room)", t0);
-    tlog("projection: board build + cut room", t_proj);
+    let b: &board::Board = &b;
+    tlog("projection (shared, built once per call; feedback rooms applied)", t0);
     let nconn = dec.connections.len();
     let mut out: Vec<Outcome> = vec![Outcome::default(); nconn];
     let diff = diff_pair_nets(model);
@@ -1043,6 +1101,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         d
     };
+    let t_rad = Instant::now();
     let rad: Vec<f64> = if tree_free {
         (0..proj.pos.len())
             .map(|v| if matches!(proj.vkind[v], VertKind::Free | VertKind::Node) { proj.free_radius(proj.pos[v], i32::MIN).min(shape_dist(proj.pos[v])) } else { 0.0 })
@@ -1050,6 +1109,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     } else {
         Vec::new()
     };
+    tlog("free radius of the junction candidates", t_rad);
     let smd_obs: Vec<bool> = (0..proj.obstacles.len()).map(|o| b.smd_layer(o).is_some()).collect();
     let br_reward = reg.price(&Event::Branch { wire: 0, at: Vec2::default(), on_pad: false, smd: false }, &WireCtx::default());
     let ecx = tree::EndsCtx {
@@ -1700,7 +1760,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         model
     };
     let checker = Checker::new(check_model, opts);
-    let mut dr = Drawer::new(model, opts, &b, &st, &checker);
+    let mut dr = Drawer::new(model, opts, b, &st, &checker);
     for cp in &pairs.coupled {
         let r = &cp.rule;
         let (d, _) = diffpair::via_of(model_real, r);
@@ -2051,7 +2111,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         if wo.ok {
             via_h.insert(w, vh);
             drawn_ok += 1;
-            settle(octi_on, &mut out, &mut necking, ci, w, &wo, &b, &st);
+            settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st);
             drawn.insert(w, wo);
         } else {
             for id in ids {
@@ -2176,13 +2236,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 for (bw, wb) in redrawn {
                     let cb = conn_of[wire_conn[bw]];
                     necking.retain(|(c, _)| *c != cb);
-                    settle(octi_on, &mut out, &mut necking, cb, bw, &wb, &b, &st);
+                    settle(octi_on, &mut out, &mut necking, cb, bw, &wb, b, &st);
                     drawn.insert(bw, wb);
                 }
                 out[cf].reason.clear();
                 via_h.insert(f, ids[..vias_f.len().min(ids.len())].to_vec());
                 placed.insert(f, vias_f);
-                settle(octi_on, &mut out, &mut necking, cf, f, &wf, &b, &st);
+                settle(octi_on, &mut out, &mut necking, cf, f, &wf, b, &st);
                 drawn.insert(f, wf);
             } else {
                 // Undo: whatever was drawn in this round goes, the old copper comes back.
@@ -2254,7 +2314,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
             placed.insert(w, vs);
             via_h.insert(w, vh);
-            settle(octi_on, &mut out, &mut necking, ci, w, &wo, &b, &st);
+            settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st);
             drawn.insert(w, wo);
         }
         dr.force = false;
@@ -2370,7 +2430,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                                 if out[ci].cause.is_empty() {
                                     out[ci].cause = "the branch reaches its junction on another layer than its trunk (joined by force)".into();
                                 }
-                                settle(octi_on, &mut out, &mut necking, ci, bw, &wo, &b, &st);
+                                settle(octi_on, &mut out, &mut necking, ci, bw, &wo, b, &st);
                                 drawn.insert(bw, wo);
                                 junction_joins += 1;
                                 continue;
@@ -2500,7 +2560,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         for w in changed {
             let ci = conn_of[wire_conn[w]];
             necking.retain(|(c, _)| *c != ci);
-            settle(octi_on, &mut out, &mut necking, ci, w, &drawn[&w], &b, &st);
+            settle(octi_on, &mut out, &mut necking, ci, w, &drawn[&w], b, &st);
         }
         warnings.push(format!(
             "via reduction after drawing: {} wires with vias, {} relabels tried in {} sweeps, {} accepted, {} vias removed ({:.1} s{}); before: {}; after: {}",
@@ -2587,7 +2647,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         if ok {
                             let ci = conn_of[wire_conn[w]];
                             necking.retain(|(c, _)| *c != ci);
-                            settle(octi_on, &mut out, &mut necking, ci, w, &wo, &b, &st);
+                            settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st);
                         }
                         drawn.insert(w, wo);
                         if ok {
@@ -2622,7 +2682,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 n_pol += k;
                 let ci = conn_of[wire_conn[w]];
                 necking.retain(|(c, _)| *c != ci);
-                settle(octi_on, &mut out, &mut necking, ci, w, &wo, &b, &st);
+                settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st);
             }
             drawn.insert(w, wo);
         }
@@ -2814,18 +2874,18 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     if !pairs.coupled.is_empty() || !pairs.single.is_empty() {
         let t_dp = Instant::now();
         let real_checker = Checker::new(model_real, opts);
-        warnings.extend(realise_pairs(model_real, opts, &pairs, &mut out, &mut necking, octi_on, &real_checker, &dec, &reg));
+        warnings.extend(realise_pairs(model_real, opts, pairs, &mut out, &mut necking, octi_on, &real_checker, dec, &reg));
         tlog("diff pairs", t_dp);
         if let Some((o, nk)) = pre_snap.as_mut() {
-            let _ = realise_pairs(model_real, opts, &pairs, o, nk, octi_on, &real_checker, &dec, &reg);
+            let _ = realise_pairs(model_real, opts, pairs, o, nk, octi_on, &real_checker, dec, &reg);
         }
     }
-    let isl = planes::islands(model, &b, &out_vias(&out, &plane_reqs, &dec.connections), &plane_reqs);
+    let isl = planes::islands(model, b, &out_vias(&out, &plane_reqs, &dec.connections), &plane_reqs);
     warnings.extend(isl);
     // ---- Assemble the result ----
     let first_layer = signal[0];
     let name_of = |net: i32| model.nets.iter().find(|n| n.code == net).map_or(String::new(), |n| n.name.clone());
-    let asm = assemble(model, &dec, &out, &term_over, first_layer, &reg);
+    let asm = assemble(model, dec, &out, &term_over, first_layer, &reg);
     // Warning-level factor findings (necking) of a set of necked stretches.
     let warn_n = |nk: &[(usize, Event)]| -> usize {
         nk.iter()
@@ -2836,10 +2896,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             .sum()
     };
     let n_copper = b.signal_layers.len().max(1);
-    let crit_main = criteria(model, &dec, &asm, &out, warn_n(&necking), n_copper, &reg);
+    let crit_main = criteria(model, dec, &asm, &out, warn_n(&necking), n_copper, &reg);
     let pre_parts = pre_snap.as_ref().map(|(o, nk)| {
-        let a = assemble(model, &dec, o, &term_over, first_layer, &reg);
-        let c = criteria(model, &dec, &a, o, warn_n(nk), n_copper, &reg);
+        let a = assemble(model, dec, o, &term_over, first_layer, &reg);
+        let c = criteria(model, dec, &a, o, warn_n(nk), n_copper, &reg);
         (c, a)
     });
     let Assembled { items, item_conn, reports, nets, length_by_layer, tot_len, tot_vias, violations: viol_list, diff_pairs: dp_list } = asm;
@@ -3044,7 +3104,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             n_via_forced,
             unlayerable_errors
         ));
-        for (ci, ev) in viol_events(model, &dec, &out).into_iter().filter(|(_, e)| matches!(e, Event::Violation { .. })) {
+        for (ci, ev) in viol_events(model, dec, &out).into_iter().filter(|(_, e)| matches!(e, Event::Violation { .. })) {
             let c = &dec.connections[ci];
             for f in reg.findings(std::slice::from_ref(&ev), &WireCtx { net: c.net, tier: c.tier }) {
                 if f.level >= Report::Warning {
@@ -3548,6 +3608,27 @@ fn out_vias(out: &[Outcome], reqs: &[planes::Req], _conns: &[Connection]) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn eprom() -> BoardModel {
+        BoardModel::from_json(include_str!("../../tests/fixtures/eprom-to-kernal-ripped.json")).expect("fixture parses")
+    }
+
+    #[test]
+    fn projection_is_deterministic_so_one_build_serves_every_cycle() {
+        // 4.2: the cycles read the call's `Fixed` (a shared reference, no interior mutability, so no
+        // cycle can change it). Building it again gives exactly the same projection and
+        // decomposition: one build per call gives each cycle what a rebuild per cycle gave.
+        let m = eprom();
+        for cap in ["edges", "cuts"] {
+            let opts = Options { capacity_model: cap.into(), ..Options::default() };
+            let stubs = PlaneStubs::default();
+            let (a, b) = (Fixed::build(&m, &opts, &stubs), Fixed::build(&m, &opts, &stubs));
+            assert!(a.board.is_ok(), "{cap}: {:?}", a.board.as_ref().err());
+            assert_eq!(format!("{:?}", a.board), format!("{:?}", b.board), "{cap}");
+            assert_eq!(format!("{:?}", a.dec), format!("{:?}", b.dec), "{cap}");
+            assert_eq!(a.notes, b.notes, "{cap}");
+        }
+    }
 
     #[test]
     fn diff_pair_halves_from_the_model() {
