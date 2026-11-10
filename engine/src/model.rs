@@ -1012,7 +1012,7 @@ pub struct Options {
     pub mm_per_via: f64,
     /// Topological core (`topor.toml [optimize] pick`): the final choice between complete results
     /// (archive variants, seeded runs) for `objective = "length_vias"`: `"errors_vias_length"`
-    /// (default; strictly: fewest errors, then fewest vias, then the shortest length, then fewest
+    /// (default; strictly: fewest errors, then fewest open connections, then fewest vias, then the shortest length, then fewest
     /// shrinkages) or `"errors_weighted"` (errors, then the least `length + mm_per_via x vias`,
     /// then shrinkages; the order before 2026-11-10). Only the final pick: the archive's Pareto
     /// membership and the internal search prices do not change. `objective = "area"` ignores it.

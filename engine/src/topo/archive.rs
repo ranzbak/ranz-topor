@@ -106,12 +106,18 @@ impl Objective {
             Objective::Area => c.area_mm2,
         }
     }
-    /// Lexicographic key: errors, objective value, shrinkages (`ErrorsViasLength`: errors, vias,
-    /// length, shrinkages; lengths within 1e-9 mm are equal).
+    /// Lexicographic key: errors, objective value, shrinkages (`ErrorsViasLength`: errors, open
+    /// connections, vias, length, shrinkages; lengths within 1e-9 mm are equal).
     pub fn better(&self, a: &Criteria, b: &Criteria) -> bool {
         if let Objective::ErrorsViasLength { .. } = self {
             if a.errors != b.errors {
                 return a.errors < b.errors;
+            }
+            // Within the same error count, a connection drawn with a violation beats one left open:
+            // drawn copper can still be optimised, a dropped trace cannot (user 2026-11-10, "costly
+            // traces made can be optimized for, traces that just failed cannot").
+            if a.open != b.open {
+                return a.open < b.open;
             }
             if a.vias != b.vias {
                 return a.vias < b.vias;
@@ -416,6 +422,10 @@ mod tests {
         assert!(n.better(&s, &l) && !n.better(&l, &s));
         let (z0, z1) = (c(0, 3, 100.0, 0, 0), c(0, 3, 100.0, 2, 0));
         assert!(n.better(&z0, &z1) && !n.better(&z1, &z0));
+        // Same error count: drawn with a violation (open 0) beats left open, even with more vias.
+        let open = c(1, 0, 10.0, 0, 0);
+        let drawn = Criteria { open: 0, violations: 1, ..c(1, 4, 50.0, 0, 0) };
+        assert!(n.better(&drawn, &open) && !n.better(&open, &drawn));
         // The pick over an archive (Pareto membership is the same in both modes).
         let a2 = arch(&[c(0, 20, 500.0, 0, 0), c(0, 18, 540.0, 0, 0), c(0, 16, 600.0, 0, 0), c(0, 14, 900.0, 0, 0), c(3, 1, 300.0, 0, 0)]);
         assert_eq!(a2.items.len(), 5);
