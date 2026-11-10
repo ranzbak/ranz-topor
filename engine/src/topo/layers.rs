@@ -356,15 +356,32 @@ impl DomainGraph {
 
     /// Reduce, solve the remainder, run the backward pass: the orientation of every node.
     pub fn solve(&mut self, exact_max: usize, restarts: usize, seed: u64) -> Vec<u8> {
+        self.solve_ties(exact_max, restarts, seed, 0)
+    }
+
+    /// [`DomainGraph::solve`] with the ties of the backward pass broken at random when `ties` != 0
+    /// (a ChaCha8 stream seeded by `ties`): an eliminated domain whose two orientations cost the
+    /// same (an isolated part of the crossing graph, or a balanced neighbourhood) takes either.
+    /// The result is an optimum all the same; which of the equal optima differs. Polubasov 2010
+    /// («Оптимизация расслоения»): "layerings with the same number of vias are unexpectedly many
+    /// ... the layering should be chosen at random, to get varied topological situations" (shopping
+    /// list 5.2, the TopoR loop's layer re-optimisation). `ties` = 0: the first optimum
+    /// (orientation 0 on a tie), as [`DomainGraph::solve`] always did.
+    pub fn solve_ties(&mut self, exact_max: usize, restarts: usize, seed: u64, ties: u64) -> Vec<u8> {
         self.reduce();
         let mut o = vec![0u8; self.adj.len()];
         self.solve_rest(&mut o, exact_max, restarts, seed);
+        let mut tie_rng = (ties != 0).then(|| ChaCha8Rng::seed_from_u64(ties));
         for step in self.stack.iter().rev() {
             match step {
                 &Step::Merge { a, into, flip } => o[a] = o[into] ^ flip as u8,
                 Step::Elim { d, nbrs } => {
                     let cost = |t: u8| -> f64 { nbrs.iter().filter(|&&(x, _)| o[x] != t).map(|p| p.1).sum() };
-                    o[*d] = (cost(1) < cost(0) - EPS) as u8;
+                    let (c0, c1) = (cost(0), cost(1));
+                    o[*d] = match tie_rng.as_mut() {
+                        Some(r) if (c1 - c0).abs() <= EPS => r.gen_range(0..2u8),
+                        _ => (c1 < c0 - EPS) as u8,
+                    };
                 }
                 &Step::Flip { v } => o[v] ^= 1,
                 &Step::Promise { c, a, b } => {
@@ -465,6 +482,10 @@ pub struct LayerParams {
     pub cap_evals: usize,
     /// The refinement may add vias to remove overflow ([`RefineParams::add_vias`]).
     pub cap_vias: bool,
+    /// Seed of the random choice among layerings with the same price ([`DomainGraph::solve_ties`];
+    /// the TopoR loop's layer re-optimisation, shopping list 5.2); 0 = the first optimum, as
+    /// before.
+    pub ties: u64,
 }
 
 impl Default for LayerParams {
@@ -481,6 +502,7 @@ impl Default for LayerParams {
             cap_mm: 0.0,
             cap_evals: 200_000,
             cap_vias: false,
+            ties: 0,
         }
     }
 }
@@ -720,7 +742,7 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
     let mut reduced = g.clone();
     reduced.reduce();
     rep.after = reduced.size();
-    let o = g.solve(p.exact_max, p.restarts, p.seed);
+    let o = g.solve_ties(p.exact_max, p.restarts, p.seed, p.ties);
     if std::env::var("TOPO_TEEDBG").is_ok() {
         for &(bw, end, tw, k, v) in &tees {
             eprintln!("TEEDBG tee branch {bw} end {end} trunk {tw} k {k} v ({:.3},{:.3}) node {}", pr.pos[v].x / 1e6, -pr.pos[v].y / 1e6, tee_branch[&(bw, end)]);
@@ -1068,7 +1090,7 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
                         }
                     }
                 }
-                let o = g.solve(p.exact_max, p.restarts, p.seed);
+                let o = g.solve_ties(p.exact_max, p.restarts, p.seed, if p.ties == 0 { 0 } else { p.ties ^ ((a as u64) << 8 | b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) });
                 let mut cand = lab.clone();
                 for e in 0..ev.len() {
                     if let Some((nd, pi)) = np[e] {

@@ -330,6 +330,16 @@ impl Registry {
         }
         r
     }
+    /// Every weight times `k(index, name)` (clamped at 0): the per-wire coefficients and the
+    /// cycle's emphasis of the TopoR loop ([`super::optimise`], shopping list 5.2 / 5.3). O(#factors).
+    pub fn scaled(&self, k: impl Fn(usize, &str) -> f64) -> Registry {
+        let mut r = self.clone();
+        for (i, (x, f)) in r.res.iter_mut().zip(&self.factors).enumerate() {
+            x.weight *= k(i, f.name()).max(0.0);
+        }
+        r
+    }
+
     pub fn names(&self) -> Vec<&'static str> {
         self.factors.iter().map(|f| f.name()).collect()
     }

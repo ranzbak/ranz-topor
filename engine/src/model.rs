@@ -949,6 +949,32 @@ pub struct Options {
     /// violation; later cycles start from the previous cycle's plan and improve it.
     /// `"per_cycle"` (default until 4.3 is accepted) = every cycle routes from scratch (before 4.3).
     pub initial: String,
+    /// Topological core (shopping list 5.1, `topor.toml [optimize] loop`): how a run iterates.
+    /// `"cycles"` (default) = whole-route cycles, each planned and drawn, the drawing feeding back
+    /// into the next plan (before 5.1). `"topor"` = TopoR's loop (Polubasov 2010 «Оптимизация
+    /// разводки»): the initial routing once (as `initial = "once"`), then cycles on the topology
+    /// only: single-wire rip-up and reroute with per-wire oscillating coefficients, the layer
+    /// re-optimisation with a random choice among equal layerings, the wires whose vias rose laid
+    /// again, floating up (the label moves) and the crossing rules; every cycle's plan is judged by
+    /// its predicted criteria (violations, vias, length, shrinkages) and kept in an archive of
+    /// topological variants, with restarts from the archive; the picked variant is drawn once.
+    pub opt_loop: String,
+    /// `[optimize] loop_restart` (5.5, `loop = "topor"`): cycles without a gain of the picked
+    /// variant after which the loop goes on from a variant of the archive drawn at random (seeded;
+    /// Polubasov 2010 «Многовариантная оптимизация»); 0 = never.
+    pub loop_restart: usize,
+    /// `[optimize] loop_stable_window` (`loop = "topor"`): the loop's plan is stable when its pick
+    /// gained less than `stable_gain_pct` % over this many loop cycles (a loop cycle costs no
+    /// drawing, so the window is longer than the drawn cycles' `stable_window`).
+    pub loop_stable_window: usize,
+    /// `[optimize] loop_via_start` / `loop_via_end` (5.3, `loop = "topor"`): the weight of the
+    /// via-standing factors (via, crossing) at the start and the end of every cycle's reroute sweep,
+    /// graded in between (Luzin & Polubasov 2006 p. 75: length first, vias later in each cycle).
+    pub loop_via_start: f64,
+    pub loop_via_end: f64,
+    /// `[optimize] loop_time_share` (`loop = "topor"`): the share of the time left that the loop may
+    /// use at most (an emergency stop, like the time limit; the rest is the drawing's).
+    pub loop_time_share: f64,
     /// Topological core (D6b, `topor.toml [search] crossing_vias`): `"crossing"` (default) = a
     /// crossing of two nets costs the `crossing` factor, which stands for the layer change P3
     /// makes; only a crossing no layer assignment separates (both wires held to one layer in its
@@ -1166,6 +1192,12 @@ impl Default for Options {
             steiner: false,
             search_length: "even".into(),
             initial: "per_cycle".into(),
+            opt_loop: "cycles".into(),
+            loop_restart: 2,
+            loop_stable_window: 8,
+            loop_via_start: 0.5,
+            loop_via_end: 1.5,
+            loop_time_share: 0.5,
             crossing_vias: "crossing".into(),
             junction_pad_mm: 0.0,
             fuse_branches: true,

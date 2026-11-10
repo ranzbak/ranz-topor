@@ -382,8 +382,14 @@ impl Run {
         o2.seed = self.seed;
         o2.fluctuation = width;
         o2.wall_clock_s = ctl.limit.remaining_s().map_or(0.0, |r| r.max(1.0));
+        // 5.1 `[optimize] loop = "topor"`: one cycle per run: the initial routing once, the TopoR
+        // loop on the topology, the picked variant drawn once.
+        let topor = opts.opt_loop == "topor";
+        if topor {
+            o2.initial = "once".into();
+        }
         let hv: Hints = if opts.drawing_feedback { self.all.iter().map(|(&(e, l), &r)| (e, l, r)).collect() } else { Vec::new() };
-        let (ro, h2, mem2) = route_round(model, &o2, ctl, &hv, &self.mem, cycle, stubs, fx);
+        let (ro, h2, mem2) = route_round(model, &o2, ctl, &hv, &self.mem, cycle, stubs, fx, opts.fluctuation);
         self.cycles = cycle;
         self.mem = mem2;
         for (e, l, r) in h2 {
@@ -391,6 +397,7 @@ impl Run {
             *v = v.min(r);
         }
         let interrupted = ro.result.timed_out;
+        let loop_end = ro.lp;
         let routed = ro.result.routed;
         let (mut cyc_err, mut cyc_viol) = (ro.crit.errors, ro.crit.violations);
         let total = ro.result.connections_total;
@@ -417,7 +424,7 @@ impl Run {
             // variants and KiCad found the GND pieces open).
             let cut = || deadline.is_some_and(|d| Instant::now() >= d);
             let empty = self.arch.items.is_empty();
-            let RoundOut { result, crit, pre } = ro;
+            let RoundOut { result, crit, pre, .. } = ro;
             if let Some((c, r)) = pre {
                 let (r, c) = stitched(r, c);
                 if !cut() || empty {
@@ -469,6 +476,20 @@ impl Run {
         self.busy_s += t.elapsed().as_secs_f64();
         if std::env::var_os("TOPO_TIMES").is_some() {
             eprintln!("[topo run {} cycle {cycle}] cycle: {:.3} s", self.k + 1, t.elapsed().as_secs_f64());
+        }
+        if topor {
+            // The loop's own end says whether the run was stable or the time limit cut it.
+            if let Some(e) = loop_end {
+                if e.stable {
+                    self.stable_at.get_or_insert(cycle);
+                }
+                self.time_hit = e.time_hit || interrupted;
+            } else {
+                self.time_hit = interrupted;
+            }
+            self.done = true;
+            coord.report(self.k, |r| r.stable = loop_end.is_some_and(|e| e.stable));
+            return;
         }
         if interrupted {
             self.time_hit = self.stable_at.is_none();
@@ -631,11 +652,20 @@ struct RoundOut {
     result: RouteResult,
     crit: Criteria,
     pre: Option<(Criteria, RouteResult)>,
+    /// `[optimize] loop = "topor"`: how the loop ended.
+    lp: Option<LoopEnd>,
+}
+
+/// How the TopoR loop of a round ended (`[optimize] loop = "topor"`).
+#[derive(Clone, Copy, Debug, Default)]
+struct LoopEnd {
+    stable: bool,
+    time_hit: bool,
 }
 
 impl RoundOut {
     fn unrouted(r: RouteResult) -> RoundOut {
-        RoundOut { crit: Criteria { errors: r.failed, open: r.failed, ..Criteria::default() }, result: r, pre: None }
+        RoundOut { crit: Criteria { errors: r.failed, open: r.failed, ..Criteria::default() }, result: r, pre: None, lp: None }
     }
 }
 
@@ -937,8 +967,10 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
 
 /// One whole route. `hist0` is the per-edge over-full history of earlier rounds (empty = none);
 /// the third result is the history at the end of this one.
+/// `fluct0`: the call's configured fluctuation (the TopoR loop's coefficient schedule starts there;
+/// `opts.fluctuation` is this cycle's width).
 #[allow(clippy::too_many_arguments)]
-fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize, stubs: &PlaneStubs, fx: &Fixed) -> (RoundOut, Hints, Memory) {
+fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize, stubs: &PlaneStubs, fx: &Fixed, fluct0: f64) -> (RoundOut, Hints, Memory) {
     // TOPO_TIMES=1 (debug): phase times on stderr; never part of the result.
     let times = std::env::var_os("TOPO_TIMES").is_some();
     let tlog = |what: &str, t: Instant| {
@@ -949,7 +981,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let hist0: &[f64] = &mem.edge;
     let t0 = Instant::now();
     let floor = t0 + std::time::Duration::from_secs(1); // a round gets at least 1 s, also past the limit
-    let expired = || cancelled() || ctl.is_cancelled() || ctl.deadline().is_some_and(|d| Instant::now() >= d.max(floor));
+    // `[optimize] loop = "topor"`: after the loop the one drawing runs through an OK / Cancel (only
+    // the time limit cuts it), so the loop's picked variant always reaches the copper.
+    let draw_through = std::cell::Cell::new(false);
+    let expired = || (!draw_through.get() && (cancelled() || ctl.is_cancelled())) || ctl.deadline().is_some_and(|d| Instant::now() >= d.max(floor));
     let signal: Vec<u32> = model.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
     if signal.len() < 2 {
         let why = format!("the topological core routes boards with two or more signal layers; this board has {}", signal.len());
@@ -1362,7 +1397,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // P3 with the junctions' tee rule: the trunk keeps one layer through a junction and the
     // branch ends on it. Two layers: inside P3, a tee is one layer domain (D6b); more layers: a
     // fix-up after P3 (D5).
-    let assign = |st: &State| {
+    // `ties` != 0: a random choice among the equal layerings (the TopoR loop, 5.2); 0 = as before.
+    let assign_t = |st: &State, ties: u64| {
+        let lp = LayerParams { ties, ..lp };
         let mut lr = layers::assign_with(st, &|ob| b.smd_layer(ob), &lp, Some(&packer));
         if tree_free && proj.n_layers != 2 && st.wires.iter().any(|w| w.alive && !w.turns.is_empty()) {
             let mut evl = lr.events.clone();
@@ -1375,6 +1412,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         lr
     };
+    let assign = |st: &State| assign_t(st, 0);
     // Crossing directions for the capacity model's oblique factor: the taut paths (pack.rs).
     let dirs_of = |st: &State| -> Vec<Vec<Vec2>> { packer.taut_dirs(st) };
     let mut lr = assign(&st);
@@ -1452,8 +1490,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // is taken out and routed again in the rule's order (`Topo::try_joint`, kept when the pair's
     // social-factor price drops); the whole pass is kept when the plan's score gets better.
     let tree_wires: BTreeSet<WireId> = if tree_free { tree::junctions(&st).iter().flat_map(|j| [j.0, j.2]).collect() } else { BTreeSet::new() };
-    let mut xstats = [0usize; 4]; // found, tried, resolved, passes kept
-    let mut crossing_pass = |st: &mut State, wire_conn: &mut Vec<usize>, reroutes: &mut Vec<u32>, lr: &mut layers::LayerReport, ripped_total: &mut usize, stage: usize| {
+    let xstats = std::cell::Cell::new([0usize; 4]); // found, tried, resolved, passes kept
+    let xadd = |i: usize, n: usize| {
+        let mut x = xstats.get();
+        x[i] += n;
+        xstats.set(x);
+    };
+    let crossing_pass = |st: &mut State, wire_conn: &mut Vec<usize>, reroutes: &mut Vec<u32>, lr: &mut layers::LayerReport, ripped_total: &mut usize, stage: usize| {
         if !opts.crossing_rules || expired() {
             return;
         }
@@ -1473,7 +1516,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         for &(a, b) in &lr.unlayerable_pairs {
             pairs.push(super::xrules::Pair { first: a.min(b), second: a.max(b), kind: super::xrules::Kind::Unlayerable });
         }
-        xstats[0] += pairs.len();
+        xadd(0, pairs.len());
         let pairs: Vec<_> = pairs.into_iter().filter(|p| plain(st, wire_conn, p.first) && plain(st, wire_conn, p.second)).collect();
         if pairs.is_empty() {
             return;
@@ -1505,7 +1548,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             if gone.contains(&p.first) || gone.contains(&p.second) || !st.wires[p.first].alive || !st.wires[p.second].alive {
                 continue;
             }
-            xstats[1] += 1;
+            xadd(1, 1);
             // Route the rule's first wire first, the interfering one after it (try_joint routes
             // its second argument first).
             if topo.try_joint(st, p.second, p.first).is_some() {
@@ -1527,8 +1570,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             *reroutes = topo.reroutes;
             *ripped_total = topo.ripped;
             *lr = lr2;
-            xstats[2] += resolved;
-            xstats[3] += 1;
+            xadd(2, resolved);
+            xadd(3, 1);
         } else {
             (*st, *wire_conn, *reroutes, *lr, *ripped_total) = saved;
         }
@@ -1690,7 +1733,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     if opts.crossing_rules {
         warnings.push(format!(
             "crossing rules (clinch at a terminal, double crossing, crossing that cannot be layered; Luzin & Popov 2012, Polubasov 2010): {} patterns found, {} pairs re-planned, {} resolved in {} kept passes",
-            xstats[0], xstats[1], xstats[2], xstats[3]
+            xstats.get()[0], xstats.get()[1], xstats.get()[2], xstats.get()[3]
         ));
     }
     tlog("P4 rip-up and reroute", t_p4);
@@ -1808,6 +1851,452 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         tally.add(&lt);
         warnings.push(format!("P4 moves on the layers: {}; vias {} -> {}, over-full (edge-layers + vias without a site) {} -> {}", lt.text(), v0, lr.vias, o0, o1));
         tlog("P4 moves", t_mv);
+    }
+    // ---- 5.1 `[optimize] loop = "topor"`: the TopoR loop on the topology (shopping list 5.1–5.3,
+    // 5.5; [`super::optimise`]). After the initial routing (once) and its rip-up rounds: cycles
+    // that change only the topology (single-wire reroutes with per-wire coefficients, layer
+    // re-optimisation with a random choice among equal layerings, the wires whose vias rose laid
+    // again, floating up, the crossing rules), every cycle's plan judged by its predicted criteria
+    // and kept in an archive of topological variants with restarts from it; the pick goes on to
+    // the one drawing below. No drawing inside the loop, nothing fed back from a drawing.
+    let mut loop_end: Option<LoopEnd> = None;
+    let mut loop_json: Option<serde_json::Value> = None;
+    if opts.opt_loop == "topor" && !expired() {
+        use super::optimise::{k_osc, optimise, reroute_set, wire_amp, CycleCtx, CycleStats, Emphasis, Gen, LoopParams, Rerouter, Space, VIA_FACTORS};
+        let t_loop = Instant::now();
+        // The loop's own emergency stop: a share of the time left (the rest is the drawing's).
+        let loop_deadline = ctl.deadline().map(|d| {
+            let now = Instant::now();
+            now + d.saturating_duration_since(now).mul_f64(opts.loop_time_share.clamp(0.05, 1.0))
+        });
+        let n_sig = if b.n_signal == 0 { proj.n_layers } else { b.n_signal };
+        let tiers: Vec<u8> = (0..conns.len()).map(|ci| tier_of(conn_of[ci])).collect();
+        /// One topological variant: the routed state, the wire -> connection map, the layering and
+        /// the connections placed without a legal path.
+        #[derive(Clone)]
+        struct LoopVar {
+            topo: super::state::Topology,
+            wire_conn: Vec<usize>,
+            lr: layers::LayerReport,
+            forced: BTreeSet<usize>,
+        }
+        type PlaceFn<'f, 'p> = &'f dyn Fn(&mut State<'p>, usize, usize, &mut Vec<usize>, &Registry) -> bool;
+        type CrossFn<'f, 'p> = &'f dyn Fn(&mut State<'p>, &mut Vec<usize>, &mut Vec<u32>, &mut layers::LayerReport, &mut usize, usize);
+        /// The single-wire move's price and placement ([`Rerouter`]).
+        struct Rr<'a, 'p> {
+            topo: &'a Topo,
+            over_mm: f64,
+            wire_conn: &'a mut Vec<usize>,
+            place: PlaceFn<'a, 'p>,
+            reg: &'a Registry,
+            rank: &'a [usize],
+            cap: usize,
+            forced: &'a std::cell::RefCell<BTreeSet<usize>>,
+            conn_of: &'a [usize],
+            saved: Option<BTreeSet<usize>>,
+        }
+        impl<'p> Rerouter<'p> for Rr<'_, 'p> {
+            fn price(&mut self, st: &mut State<'p>, w: WireId) -> f64 {
+                let ci = self.wire_conn[w];
+                let path = st.detach(w);
+                let wire = st.wires[w].clone();
+                let (c, o) = self.topo.path_cost(st, &wire, &path, &wire.tris, ci);
+                st.reattach(w, &path);
+                c + self.over_mm * o as f64
+            }
+            fn place(&mut self, st: &mut State<'p>, gone: &[WireId]) -> Option<Vec<WireId>> {
+                let mut cis: Vec<usize> = gone.iter().map(|&g| self.wire_conn[g]).collect();
+                cis.sort_by_key(|&ci| self.rank[ci]);
+                cis.dedup();
+                self.saved = Some(self.forced.borrow().clone());
+                for &ci in &cis {
+                    self.forced.borrow_mut().remove(&self.conn_of[ci]);
+                }
+                let n0 = st.wires.len();
+                for ci in cis {
+                    if !(self.place)(st, ci, self.cap, self.wire_conn, self.reg) {
+                        return None;
+                    }
+                }
+                Some((n0..st.wires.len()).filter(|&w| st.wires[w].alive).collect())
+            }
+            fn undo(&mut self) {
+                if let Some(f) = self.saved.take() {
+                    *self.forced.borrow_mut() = f;
+                }
+            }
+        }
+        /// The real topology of this route as the loop's [`Space`].
+        struct Sp<'a, 'p> {
+            st: &'a mut State<'p>,
+            wire_conn: &'a mut Vec<usize>,
+            lr: &'a mut layers::LayerReport,
+            reroutes: &'a mut Vec<u32>,
+            stuck: Vec<u32>,
+            tries: Vec<u32>,
+            conns: &'a [Conn],
+            conn_of: &'a [usize],
+            tiers: &'a [u8],
+            rank: &'a [usize],
+            reg: &'a Registry,
+            lp: LayerParams,
+            n_sig: usize,
+            bottom: i32,
+            cap: usize,
+            ws0: f64,
+            overflow_mm: f64,
+            viol_mm: f64,
+            cuts_on: bool,
+            area: bool,
+            max_ripped: usize,
+            max_moves: usize,
+            cut_vias: bool,
+            packer: &'a Packer<'p>,
+            forced: &'a std::cell::RefCell<BTreeSet<usize>>,
+            place: PlaceFn<'a, 'p>,
+            assign_t: &'a dyn Fn(&State<'p>, u64) -> layers::LayerReport,
+            score: &'a dyn Fn(&State<'p>, &layers::LayerReport) -> Score,
+            cross: CrossFn<'a, 'p>,
+            xkept: &'a dyn Fn() -> usize,
+        }
+        impl<'p> Sp<'_, 'p> {
+            fn via_counts(&self) -> BTreeMap<usize, usize> {
+                let mut m = BTreeMap::new();
+                for w in (0..self.st.wires.len()).filter(|&w| self.st.wires[w].alive && w < self.lr.events.len()) {
+                    if let Some(&ci) = self.wire_conn.get(w).filter(|&&c| c != usize::MAX) {
+                        *m.entry(ci).or_insert(0) += plan(&self.lr.events[w], self.n_sig).vias.len();
+                    }
+                }
+                m
+            }
+            fn tight(&self) -> Vec<bool> {
+                let dirs = self.packer.taut_dirs(self.st);
+                let mut t = vec![false; self.st.proj.edges.len()];
+                if self.cuts_on {
+                    let cm = CapModel::new_cut(self.st, self.packer, &dirs, &self.lr.events, self.bottom, self.overflow_mm);
+                    if let Some(c) = cm.cut.as_ref() {
+                        for (l, ci, _) in c.overfull_list() {
+                            for e in item_edges(self.st, &c.items_at(l, ci)) {
+                                t[e] = true;
+                            }
+                        }
+                    }
+                } else {
+                    let cm = CapModel::new(self.st, self.packer, &dirs, &self.lr.events, self.bottom, self.overflow_mm);
+                    for (e, _) in cm.overfull_list() {
+                        t[e] = true;
+                    }
+                }
+                t
+            }
+            /// One single-wire rip-up and reroute of `w` (and the branches on its junctions) with the
+            /// wire's oscillating coefficients and the via weight `via_w`; whether it was kept.
+            fn reroute(&mut self, topo: &mut Topo, w: WireId, seed: u64, amp: f64, via_w: f64) -> bool {
+                let ci = self.wire_conn[w];
+                let id = self.conn_of[ci];
+                let (amp_i, visit) = (wire_amp(amp, self.stuck[ci]), self.tries[ci]);
+                // A pass over the room of its passage is a predicted violation of the board's
+                // evaluation (errors first), so the loop's search and price take it at the
+                // `violation` weight, not the `overflow` one: "the errors have the highest weight;
+                // once gone they are very unlikely to come back" (Luzin & Polubasov 2006 p. 75).
+                let over_k = (self.viol_mm / self.overflow_mm).max(1.0);
+                let reg_w = self.reg.scaled(|i, name| {
+                    let e = if VIA_FACTORS.contains(&name) {
+                        via_w
+                    } else if name == "overflow" {
+                        over_k
+                    } else {
+                        1.0
+                    };
+                    k_osc(seed, id, i, visit, amp_i) * e
+                });
+                let gone: BTreeSet<WireId> = std::iter::once(w).collect();
+                let mut set: Vec<WireId> = std::iter::once(w).chain(tree::dependents(self.st, &gone)).collect();
+                set.sort_by_key(|&x| (self.rank[self.wire_conn[x]], x));
+                let extra: f64 = set.iter().map(|&x| {
+                    let c = self.wire_conn[x];
+                    reg_w.price(&Event::Rerouted { wire: x, count: self.reroutes[c] }, &WireCtx { net: self.conns[c].net, tier: self.tiers[c] })
+                }).sum();
+                topo.reg = reg_w;
+                let cis: Vec<usize> = set.iter().map(|&x| self.wire_conn[x]).collect();
+                let reg_place = topo.reg.clone();
+                let mut rr = Rr { topo, over_mm: self.viol_mm.max(self.overflow_mm), wire_conn: self.wire_conn, place: self.place, reg: &reg_place, rank: self.rank, cap: self.cap, forced: self.forced, conn_of: self.conn_of, saved: None };
+                let out = reroute_set(self.st, &set, &mut rr, extra);
+                self.tries[ci] += 1;
+                if out.kept {
+                    for c in cis {
+                        self.reroutes[c] += 1;
+                    }
+                    self.stuck[ci] = 0;
+                } else {
+                    self.stuck[ci] += 1;
+                }
+                out.kept
+            }
+        }
+        impl<'p> Space for Sp<'_, 'p> {
+            type Var = LoopVar;
+            fn criteria(&mut self) -> Criteria {
+                let s = (self.score)(self.st, self.lr);
+                let (mut len_mm, mut shr) = (0.0, 0usize);
+                for w in (0..self.st.wires.len()).filter(|&w| self.st.wires[w].alive) {
+                    len_mm += self.st.wire_len(w) / MM;
+                    let (na, nb, mid) = self.st.neck_runs(w);
+                    shr += usize::from(na > 0) + usize::from(nb > 0) + mid.iter().enumerate().filter(|&(i, &k)| i == 0 || mid[i - 1] + 1 != k).count();
+                }
+                // Predicted violations: over-full passages, vias without a site, crossings no layer
+                // separates (P4's count) and the connections placed without a legal path.
+                let violations = s.1 + self.forced.borrow().len();
+                Criteria {
+                    errors: violations,
+                    open: 0,
+                    violations,
+                    penalty: if self.cuts_on { s.3 } else { 0.0 },
+                    vias: s.2,
+                    length_mm: len_mm,
+                    shrinkages: shr,
+                    warnings: 0,
+                    area_mm2: if self.area { s.0 } else { 0.0 },
+                }
+            }
+            fn snapshot(&mut self) -> LoopVar {
+                LoopVar { topo: self.st.topology(), wire_conn: self.wire_conn.clone(), lr: self.lr.clone(), forced: self.forced.borrow().clone() }
+            }
+            fn restore(&mut self, v: &LoopVar) {
+                self.st.restore(v.topo.clone());
+                self.wire_conn.clone_from(&v.wire_conn);
+                self.lr.clone_from(&v.lr);
+                *self.forced.borrow_mut() = v.forced.clone();
+            }
+            fn cycle(&mut self, c: &CycleCtx, stop: &mut dyn FnMut() -> bool) -> CycleStats {
+                let t0 = Instant::now();
+                let mut cs = CycleStats::default();
+                let vias0 = self.via_counts();
+                let mut topo = Topo {
+                    reg: self.reg.clone(),
+                    conns: self.conns.to_vec(),
+                    tiers: self.tiers.to_vec(),
+                    wire_conn: self.wire_conn.clone(),
+                    reroutes: self.reroutes.clone(),
+                    ws0: self.ws0,
+                    cap: self.cap,
+                    evals: 0,
+                    max_evals: usize::MAX,
+                    ripped: 0,
+                    max_ripped: usize::MAX,
+                    tight: self.tight(),
+                    over_mm: Some(self.overflow_mm),
+                    tally: Tally::default(),
+                };
+                // The sweep: every wire once, the most to gain first (its price minus the price of its
+                // straight length); the via weight rises from the cycle's start to its end (5.3).
+                let ids: Vec<WireId> = (0..self.st.wires.len()).filter(|&w| self.st.wires[w].alive && self.wire_conn.get(w).is_some_and(|&ci| ci != usize::MAX)).collect();
+                let mut ws: Vec<(f64, WireId)> = ids.into_iter().map(|w| (topo.potential(self.st, w), w)).collect();
+                ws.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+                let n = ws.len().max(1);
+                let mut ripped = 0usize;
+                for (j, &(_, w)) in ws.iter().enumerate() {
+                    if ripped >= self.max_ripped || stop() {
+                        break;
+                    }
+                    if !self.st.wires[w].alive {
+                        continue;
+                    }
+                    let via_w = c.emphasis.via_at(j as f64 / n as f64);
+                    cs.tried += 1;
+                    ripped += 1;
+                    if self.reroute(&mut topo, w, c.seed, c.amp, via_w) {
+                        cs.kept += 1;
+                    }
+                }
+                self.st.uncross_all(50);
+                // Layer re-optimisation, a random one of the equal layerings (Polubasov 2010).
+                let tl = Instant::now();
+                *self.lr = (self.assign_t)(self.st, c.seed | 1);
+                cs.layer_runs += 1;
+                cs.layer_s += tl.elapsed().as_secs_f64();
+                // The wires whose via count rose are laid again, at the end-of-cycle via weight.
+                let vias1 = self.via_counts();
+                let rose: Vec<WireId> = (0..self.st.wires.len())
+                    .filter(|&w| self.st.wires[w].alive && self.wire_conn.get(w).is_some_and(|&ci| ci != usize::MAX && vias1.get(&ci).copied().unwrap_or(0) > vias0.get(&ci).copied().unwrap_or(0)))
+                    .collect();
+                for w in rose {
+                    if ripped >= self.max_ripped || stop() {
+                        break;
+                    }
+                    if !self.st.wires[w].alive {
+                        continue;
+                    }
+                    cs.relaid += 1;
+                    ripped += 1;
+                    if self.reroute(&mut topo, w, c.seed ^ 0xA5A5, c.amp, c.emphasis.via_at(1.0)) {
+                        cs.relaid_kept += 1;
+                    }
+                }
+                if cs.relaid_kept > 0 {
+                    self.st.uncross_all(50);
+                    let tl = Instant::now();
+                    *self.lr = (self.assign_t)(self.st, (c.seed ^ 0x5A5A) | 1);
+                    cs.layer_runs += 1;
+                    cs.layer_s += tl.elapsed().as_secs_f64();
+                }
+                // Floating up (Polubasov 2010 «всплытие»): the label moves (crossing flips, via
+                // shifts, segment lifting), each kept when the price drops.
+                {
+                    let dirs = self.packer.taut_dirs(self.st);
+                    let cm = if self.cuts_on { CapModel::new_cut(self.st, self.packer, &dirs, &self.lr.events, self.bottom, self.overflow_mm) } else { CapModel::new(self.st, self.packer, &dirs, &self.lr.events, self.bottom, self.overflow_mm) };
+                    let (mask, partner) = (self.lr.mask.clone(), self.lr.partner.clone());
+                    let mut lb = Labels {
+                        st: self.st,
+                        cm,
+                        evl: self.lr.events.clone(),
+                        mask: &mask,
+                        partner: &partner,
+                        bottom: self.bottom,
+                        via_mm: self.lp.via_mm,
+                        n_signal: self.n_sig,
+                        evals: 0,
+                        max_evals: self.max_moves,
+                        strict: !self.cuts_on,
+                        add_vias: self.cuts_on && self.cut_vias,
+                        tally: Tally::default(),
+                    };
+                    let lt = descend_labels(&mut lb);
+                    let evl = std::mem::take(&mut lb.evl);
+                    drop(lb);
+                    cs.float_kept = lt.applied.iter().sum();
+                    if cs.float_kept > 0 {
+                        layers::relabel(self.st, &evl, &self.lp, self.lr);
+                    }
+                }
+                // The crossing rules (clinches, double crossings, crossings no layer separates).
+                let x0 = (self.xkept)();
+                let mut rip = 0usize;
+                (self.cross)(self.st, self.wire_conn, self.reroutes, self.lr, &mut rip, 100 + c.cycle);
+                cs.cross_kept = (self.xkept)() - x0;
+                cs.busy_s = t0.elapsed().as_secs_f64();
+                cs
+            }
+        }
+        let place_ref = &place;
+        let assign_ref = &assign_t;
+        let score_ref = &score;
+        let cross_ref = &crossing_pass;
+        let xkept = || xstats.get()[3];
+        let mut sp = Sp {
+            st: &mut st,
+            wire_conn: &mut wire_conn,
+            lr: &mut lr,
+            reroutes: &mut reroutes,
+            stuck: vec![0; conns.len()],
+            tries: vec![0; conns.len()],
+            conns: &conns,
+            conn_of: &conn_of,
+            tiers: &tiers,
+            rank: &rank,
+            reg: &reg,
+            lp,
+            n_sig,
+            bottom,
+            cap,
+            ws0,
+            overflow_mm,
+            viol_mm,
+            cuts_on,
+            area: matches!(obj, Objective::Area),
+            max_ripped: opts.max_ripped,
+            max_moves: opts.max_moves,
+            cut_vias: opts.cut_vias,
+            packer: &packer,
+            forced: &forced,
+            place: place_ref,
+            assign_t: assign_ref,
+            score: score_ref,
+            cross: cross_ref,
+            xkept: &xkept,
+        };
+        let params = LoopParams {
+            cycles: opts.topo_rounds.max(1),
+            restart_after: opts.loop_restart,
+            seed: seed_of(opts.seed, round, 5000),
+            fluctuation: fluct0,
+            narrowing: opts.fluctuation_narrowing,
+            stuck: opts.fluctuation_stuck,
+            reheat: opts.fluctuation_reheat,
+            stable_window: opts.loop_stable_window.max(1),
+            stable_gain_pct: opts.stable_gain_pct,
+            stable_patience: opts.stable_patience,
+            emphasis: Emphasis { via_start: opts.loop_via_start, via_end: opts.loop_via_end },
+            obj,
+        };
+        let mut arch: Archive<Gen<LoopVar>> = Archive::new(opts.variants);
+        let mut stop = || cancelled() || ctl.is_cancelled() || ctl.deadline().is_some_and(|d| Instant::now() >= d) || loop_deadline.is_some_and(|d| Instant::now() >= d);
+        let clock = || t_loop.elapsed().as_secs_f64();
+        let rep = optimise(&mut sp, &mut arch, &params, &mut stop, &clock);
+        let pick = arch.pick(&obj).expect("the initial plan is always archived");
+        sp.restore(&arch.items[pick].payload.var);
+        drop(sp);
+        let loop_s = t_loop.elapsed().as_secs_f64();
+        let time_hit = rep.stop == "time limit";
+        loop_end = Some(LoopEnd { stable: rep.stable_at.is_some(), time_hit });
+        let pc = arch.items[pick].crit;
+        let table = table_text(&arch.table(Some(pick)), &obj);
+        warnings.push(format!(
+            "TopoR loop ([optimize] loop = \"topor\"; Polubasov 2010): {} cycles in {loop_s:.1} s, ended by {}{}; {} restarts from the archive{}; {} variants offered, {} archived, first loop variant after {}; picked {} (gen {}): predicted {} violations, {} vias, {:.1} mm, {} shrinkages; reroutes kept {}/{}, via-rose laid again {}/{}, floating-up moves {}, crossing passes kept {}, layer re-optimisation {} runs ({:.0} % of the loop's time); per cycle: {}",
+            rep.cycles,
+            rep.stop,
+            rep.stable_at.map(|s| format!(" (stable after cycle {s})")).unwrap_or_default(),
+            rep.restarts.len(),
+            if rep.restarts.is_empty() { String::new() } else { format!(" ({})", rep.restarts.iter().map(|(c, l)| format!("cycle {c} from {l}")).collect::<Vec<_>>().join(", ")) },
+            rep.offered,
+            rep.archived,
+            rep.first_variant_s.map_or("-".to_string(), |s| format!("{s:.2} s")),
+            arch.items[pick].label,
+            arch.items[pick].payload.gen,
+            pc.violations,
+            pc.vias,
+            pc.length_mm,
+            pc.shrinkages,
+            rep.stats.kept,
+            rep.stats.tried,
+            rep.stats.relaid_kept,
+            rep.stats.relaid,
+            rep.stats.float_kept,
+            rep.stats.cross_kept,
+            rep.stats.layer_runs,
+            100.0 * rep.stats.layer_s / loop_s.max(1e-9),
+            rep.lines.join("; ")
+        ));
+        warnings.push(format!("TopoR loop {table}"));
+        if time_hit {
+            warnings.push(format!("TopoR loop: the time limit ended the loop before its plan was stable ({TIME_HIT})"));
+        }
+        loop_json = Some(serde_json::json!({
+            "cycles": rep.cycles,
+            "stop": rep.stop,
+            "stable_at": rep.stable_at,
+            "restarts": rep.restarts.len(),
+            "offered": rep.offered,
+            "archived": rep.archived,
+            "variants": arch.items.len(),
+            "first_variant_s": rep.first_variant_s.map(|s| (s * 1e3).round() / 1e3),
+            "loop_s": (loop_s * 1e3).round() / 1e3,
+            "picked": arch.items[pick].label,
+            "picked_gen": arch.items[pick].payload.gen,
+            "predicted": {"violations": pc.violations, "vias": pc.vias, "length_mm": (pc.length_mm * 1e3).round() / 1e3, "shrinkages": pc.shrinkages},
+            "initial": arch.items.iter().find(|v| v.payload.cycle == 0).map(|v| serde_json::json!({"violations": v.crit.violations, "vias": v.crit.vias, "length_mm": (v.crit.length_mm * 1e3).round() / 1e3})),
+            "reroutes": [rep.stats.kept, rep.stats.tried],
+            "via_rose": [rep.stats.relaid_kept, rep.stats.relaid],
+            "floating_up": rep.stats.float_kept,
+            "crossing_passes": rep.stats.cross_kept,
+            "layer_share_pct": (1000.0 * rep.stats.layer_s / loop_s.max(1e-9)).round() / 10.0,
+        }));
+        if let Some(r) = crep.as_mut() {
+            r.stage("after the TopoR loop", &st, &lr.events, &packer, bottom, &|w| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]));
+        }
+        tlog("TopoR loop", t_loop);
+        // The one drawing of the loop's pick runs to its end (only the time limit cuts it).
+        draw_through.set(true);
     }
     let lr = lr;
     let t_draw = Instant::now();
@@ -1964,6 +2453,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             "taut_length_mm": (taut_len / MM * 1e3).round() / 1e3,
         });
         let mut m = m;
+        if let Some(lj) = loop_json.take() {
+            m["loop"] = lj;
+        }
         // `[capacity] model = "cuts"`: the per-layer cuts of the plan (the authority there).
         if packer.cuts.is_some() {
             let cmc = CapModel::new_cut(&st, &packer, &dirs_plan, &lr.events, bottom, 1.0);
@@ -3315,7 +3807,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     let pre = pre_parts.map(|(c, a)| (c, with_parts(&result, a)));
     let vias_out: BTreeMap<usize, usize> = plans.iter().map(|(&w, pl)| (conn_of[wire_conn[w]], pl.vias.len())).collect();
-    (RoundOut { result, crit: crit_main, pre }, new_hints, Memory { edge: hist_out, own: own_out, vias: vias_out, plan: plan_carry })
+    (RoundOut { result, crit: crit_main, pre, lp: loop_end }, new_hints, Memory { edge: hist_out, own: own_out, vias: vias_out, plan: plan_carry })
 }
 
 /// D7: realise every coupled pair connection of `out`: the lead's drawn centre line becomes the P

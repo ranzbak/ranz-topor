@@ -36,6 +36,7 @@ pub mod refine;
 pub mod metrize;
 pub mod moves;
 pub mod octi;
+pub mod optimise;
 pub mod pack;
 pub mod state;
 pub mod stitch;
