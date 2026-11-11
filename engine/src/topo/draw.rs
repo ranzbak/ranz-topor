@@ -1054,6 +1054,65 @@ impl<'a> Drawer<'a> {
         }
     }
 
+    /// Whether the pass next to `pid` in its packed lane before it / after it is drawn already
+    /// (`false` without a fitting lane or without that neighbour). O(1).
+    pub(super) fn lane_next_drawn(&self, pid: PassId) -> (bool, bool) {
+        let Some((e, l, i, _, _)) = self.slot[pid] else { return (false, false) };
+        let Some(ln) = self.lanes.get(&(e, l)) else { return (false, false) };
+        let drawn = |j: usize| ln.pids.get(j).is_some_and(|&q| self.live_x(q).is_some());
+        (i > 0 && drawn(i - 1), drawn(i + 1))
+    }
+
+    /// [`Self::tight_span`] with room kept for the neighbours of `pid` in its lane that are not
+    /// drawn yet: towards each side, beyond the spacing the tight span already leaves the `n`
+    /// undrawn passes up to the next drawn one (or the lane end), the same spacing once more, at
+    /// most their fair share (`n / (m + n + 1)`, `m` undrawn on the other side) of the slack. With
+    /// the tight span alone the wire drawn first may take every bit of slack on that side and the
+    /// undrawn neighbours must then be drawn at exactly the clearance along its whole shape (wiccon
+    /// 3.3v J1.1 -> U1.3, drawn after ADC and GPIO16 on both sides: no legal geometry left).
+    /// O(passes of the lane).
+    pub(super) fn reserved_span(&self, pid: PassId) -> Option<(f64, f64)> {
+        let (a, b) = self.tight_span(pid)?;
+        let (e, l, i, _, _) = self.slot[pid]?;
+        let Lane { pids, cum } = self.lanes.get(&(e, l))?;
+        let undrawn = |j: usize| self.live_x(pids[j]).is_none();
+        let m = (0..i).rev().take_while(|&j| undrawn(j)).count();
+        let n = (i + 1..pids.len()).take_while(|&j| undrawn(j)).count();
+        let slack = (b - a).max(0.0);
+        let share = |k: usize| slack * k as f64 / (m + n + 1) as f64;
+        let lo = a + (cum[i] - cum[i - m]).min(share(m));
+        let hi = b - (cum[i + n] - cum[i]).min(share(n));
+        Some((lo, hi.max(lo)))
+    }
+
+    pub(super) fn lane_dbg(&self, pid: PassId) -> String {
+        let Some((e, l, i, lmin, rmax)) = self.slot[pid] else { return "none".into() };
+        let Some(ln) = self.lanes.get(&(e, l)) else { return "nolane".into() };
+        let v: Vec<String> = ln.pids.iter().enumerate().map(|(j, &q)| format!("{}{}w{}n{}@{:.3}{}", if j == i { "*" } else { "" }, j, self.st.passes[q].wire, self.st.wires[self.st.passes[q].wire].net, ln.cum[j] / 1e6, self.live_x(q).map(|x| format!("D{:.3}", x / 1e6)).unwrap_or_default())).collect();
+        format!("l{l} [{:.3},{:.3}] {}", lmin / 1e6, rmax / 1e6, v.join(" "))
+    }
+
+    /// The bound (nm along the edge from its first end) the plan keeps for the neighbour of
+    /// `pid` in its packed lane, before it (`after` false) or after it: the neighbour's planned
+    /// crossing (its taut path, [`Packer::taut`]) less the spacing the lane needs between the two.
+    /// `None` without a fitting lane or without that neighbour. O(lane) plus the cached taut.
+    pub(super) fn neighbour_bound(&self, pid: PassId, after: bool) -> Option<f64> {
+        let (e, l, i, _, _) = self.slot[pid]?;
+        let ln = self.lanes.get(&(e, l))?;
+        let j = if after { i + 1 } else { i.checked_sub(1)? };
+        let q = *ln.pids.get(j)?;
+        let at = *self.packer.taut(self.st, self.st.passes[q].wire).at.get(self.pass_k[q])?;
+        let [p, r] = self.b.proj.edges[e];
+        let (pp, pr) = (self.b.proj.pos[p], self.b.proj.pos[r]);
+        let len = (pr - pp).len();
+        if len < 1.0 {
+            return None;
+        }
+        let x = (at - pp).dot((pr - pp) * (1.0 / len));
+        let gap = (ln.cum[i.max(j)] - ln.cum[i.min(j)]).abs();
+        Some(if after { x - gap } else { x + gap })
+    }
+
     /// Remember where the accepted run `pts` (passes `k0..k1` of `w`, first track handle `h`)
     /// crosses its pass edges. O(passes x segments).
     fn record_crossings(&mut self, w: WireId, k0: usize, k1: usize, pts: &[Vec2], h: usize) {
@@ -2694,11 +2753,25 @@ impl<'a> Drawer<'a> {
             let pid = wi.passes[k];
             let (lo, hi, nom) = (self.iv.lo[pid], self.iv.hi[pid], self.iv.nom[pid]);
             let (lo, hi) = match attempt {
-                0 => match self.tight_span(pid).filter(|_| self.tight) {
+                0 => match self.tight_span(pid) {
                     Some((a, b)) => {
                         let [p, q] = self.b.proj.edges[st.passes[pid].edge];
                         let len = (self.b.proj.pos[q] - self.b.proj.pos[p]).len().max(1.0);
-                        ((a / len).clamp(0.0, 1.0), (b / len).clamp(0.0, 1.0))
+                        let (a, b) = ((a / len).clamp(0.0, 1.0), (b / len).clamp(0.0, 1.0));
+                        if self.tight {
+                            (a, b)
+                        } else if lo.max(a) <= hi.min(b) {
+                            // The S2 interval, narrowed to what the drawn neighbours left (the
+                            // same interval while they keep to theirs).
+                            (lo.max(a), hi.min(b))
+                        } else {
+                            // A neighbour drawn outside its own interval (its exact or
+                            // octilinear run) took this one: the room it left, in the order of
+                            // the lane, instead of a portal through its copper (wiccon 3.3v
+                            // J1.1 -> U1.3: the S2 portals at the U1 end lay inside the bundle
+                            // drawn hugging the pads, the run had no legal geometry).
+                            (a, b)
+                        }
                     }
                     None => (lo, hi),
                 },

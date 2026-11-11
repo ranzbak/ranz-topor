@@ -241,11 +241,15 @@ impl Drawer<'_> {
         strip.walls.extend(self.via_walls(w, k0, k1, layer));
         // The wire's own lane on every edge it crosses (Bast et al.: the grid restricted to the
         // line's corridor): the parts of the edge outside the span its packing leaves it (the
-        // interval, widened to the tight span the drawn neighbours leave and to where the taut
-        // run crosses) are walls, so the octilinear shape takes no room planned for a wire not
+        // interval, widened to the tight span the drawn neighbours leave less the room kept for
+        // the undrawn ones, `reserved_span`, and to where the taut run crosses) are walls, so the octilinear shape takes no room planned for a wire not
         // drawn yet.
         {
             let (st, pr) = (self.st, &self.b.proj);
+            // Per pass of the run: the lane bound on its left / right (seen along the wire) where
+            // the neighbour on that side is not drawn yet; consecutive bounds on one side are
+            // joined across their triangle (below).
+            let mut guard: Vec<(usize, [Option<Vec2>; 2])> = Vec::new();
             for k in k0..k1 {
                 let pid = wi.passes[k];
                 let [p, q] = pr.edges[st.passes[pid].edge];
@@ -259,16 +263,25 @@ impl Drawer<'_> {
                 if !lo.is_finite() || !hi.is_finite() {
                     continue;
                 }
-                if let Some((a, b)) = self.tight_span(pid) {
-                    lo = lo.min(a);
-                    hi = hi.max(b);
+                // Never past the tight span: a neighbour drawn outside its own interval may
+                // have taken part of this one, and the room for the undrawn passes between the
+                // two stays (wiccon: GPIO16's interval reached to 0.2 mm of the drawn ADC trace,
+                // where 3.3v, drawn later, is planned between them).
+                if let (Some((a, b)), Some((ra, rb))) = (self.tight_span(pid), self.reserved_span(pid)) {
+                    lo = lo.min(ra).max(a);
+                    hi = hi.max(rb).min(b);
                 }
                 let nom = self.iv.nom.get(pid).copied().filter(|x| x.is_finite()).unwrap_or(0.5) * len;
-                if let Some(x) = super::draw::crossing(&taut, pp, pq, nom) {
+                let own = super::draw::crossing(&taut, pp, pq, nom);
+                if let Some(x) = own {
                     lo = lo.min(x - 1.0);
                     hi = hi.max(x + 1.0);
                 }
                 let (lo, hi) = (lo.max(0.0), hi.min(len));
+                if std::env::var("TOPO_LANEDBG").is_ok() {
+                    let lane = self.lane_dbg(pid);
+                    eprintln!("LANE wire {w} k {k} edge {} ({:.3},{:.3})-({:.3},{:.3}) len {:.3} iv {:.3}..{:.3} tight {:?} res {:?} lohi {:.3}..{:.3} lane {lane}", st.passes[pid].edge, pp.x/1e6, -pp.y/1e6, pq.x/1e6, -pq.y/1e6, len/1e6, self.iv.lo[pid]*len/1e6, self.iv.hi[pid]*len/1e6, self.tight_span(pid).map(|(a,b)| (a/1e6,b/1e6)), self.reserved_span(pid).map(|(a,b)| (a/1e6,b/1e6)), lo/1e6, hi/1e6);
+                }
                 // Only towards a neighbour pass of the same edge and layer: on a side without
                 // one the room is the obstacle's, which the clearance check guards.
                 let (before, after) = self.lane_sides(pid);
@@ -277,6 +290,52 @@ impl Drawer<'_> {
                 }
                 if after && hi < len - 1.0 {
                     strip.walls.push((pp + u * hi, pq));
+                }
+                // Which end of the edge lies on the wire's left, coming from the triangle before
+                // the pass.
+                let t = pr.tris[wi.tris[k]];
+                let c = (pr.pos[t[0]] + pr.pos[t[1]] + pr.pos[t[2]]) * (1.0 / 3.0);
+                let mid = (pp + pq) * 0.5;
+                let p_left = (mid - c).cross(pp - mid) > 0.0;
+                let (prev_drawn, next_drawn) = self.lane_next_drawn(pid);
+                // Inside the triangles the bound follows the undrawn neighbour's planned path: its
+                // taut crossing less the spacing between the two (never past this wire's own run).
+                let g_lo = if before && !prev_drawn {
+                    let x = self.neighbour_bound(pid, false).map_or(lo, |nb| nb.max(lo));
+                    let x = own.map_or(x, |o| x.min(o - 1.0));
+                    (x > 1.0).then(|| pp + u * x)
+                } else {
+                    None
+                };
+                let g_hi = if after && !next_drawn {
+                    let x = self.neighbour_bound(pid, true).map_or(hi, |nb| nb.min(hi));
+                    let x = own.map_or(x, |o| x.max(o + 1.0));
+                    (x < len - 1.0).then(|| pp + u * x)
+                } else {
+                    None
+                };
+                guard.push((k, if p_left { [g_lo, g_hi] } else { [g_hi, g_lo] }));
+            }
+            // The lane walls of two consecutive passes on one side, joined across the triangle
+            // between them, where the neighbour on that side is not drawn yet. The edge walls
+            // keep the room the lane packing reserves for the passes not drawn yet (their
+            // spacing, from the next drawn pass or the lane end) only on the edges; inside a
+            // long triangle a leg could run into that room and out again (wiccon 3.3v J1.1 ->
+            // U1.3: GPIO16 drawn along the ADC trace at the clearance, no room left between them
+            // for 3.3v, drawn later, which the plan routes there). The straight wall between two
+            // points on two sides of the triangle cuts it into two convex parts, the room of the
+            // undrawn neighbour in the other one: the capacity the plan counted is kept for the
+            // wires drawn later, not a position (Dayan 1997 pp. 15-16: spacing for every wire;
+            // Bast et al. 2020 section 4.3: room kept for the lines routed later).
+            for g in guard.windows(2) {
+                let ((ka, sa), (kb, sb)) = (g[0], g[1]);
+                if kb != ka + 1 {
+                    continue;
+                }
+                for side in 0..2 {
+                    if let (Some(a), Some(b)) = (sa[side], sb[side]) {
+                        strip.walls.push((a, b));
+                    }
                 }
             }
         }
