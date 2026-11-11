@@ -209,7 +209,7 @@ pub fn plan(model: &BoardModel, dec: &mut Decomposition) -> Pairs {
 /// The planning model: the N half of every coupled pair carries the P net (pads, vias, kept copper,
 /// copper shapes), the P net's rule gets the envelope width, the larger clearance of the two halves,
 /// the single track width as its neck floor, and the via-pair disc as its via. O(model).
-pub fn alias(model: &BoardModel, pairs: &Pairs) -> BoardModel {
+pub fn alias(model: &BoardModel, pairs: &Pairs, opts: &Options) -> BoardModel {
     let mut m = model.clone();
     for cp in &pairs.coupled {
         let (p, n) = (cp.rule.p, cp.rule.n);
@@ -268,7 +268,7 @@ pub fn alias(model: &BoardModel, pairs: &Pairs) -> BoardModel {
         nr.width = cp.envelope().round() as i64;
         nr.clearance = rp.clearance.max(rn.clearance);
         nr.min_width = cp.rule.width;
-        let (d, drill) = via_of(model, &cp.rule);
+        let (d, drill) = via_of(model, &cp.rule, opts);
         let pv = (d + cp.rule.via_gap) as f64;
         nr.via_d = (pv + d as f64).round() as i64;
         nr.via_drill = (pv + drill as f64).round() as i64;
@@ -294,7 +294,15 @@ fn pad_corners(pad: &crate::model::Pad, layer: u32) -> Vec<Vec2> {
 }
 
 /// The via size of a pair's vias: the rule's (the P net's class via), else the P net's.
-pub fn via_of(model: &BoardModel, r: &DiffPairRule) -> (i64, i64) {
+///
+/// With `[vias] size = "board_min"` (5.4): the smallest Board Setup via that carries the pair's
+/// `diff_pair_width` ([`crate::vias::rule_size`]).
+pub fn via_of(model: &BoardModel, r: &DiffPairRule, opts: &Options) -> (i64, i64) {
+    if opts.via_size == "board_min" {
+        let w = if r.width > 0 { r.width } else { model.rules.net_rule(r.p).width };
+        let s = crate::vias::rule_size(&model.rules, w, opts.via_drill_grid_nm, &opts.allowed_drills_nm);
+        return (s.d, s.drill);
+    }
     if r.via_d > 0 && r.via_drill > 0 {
         (r.via_d, r.via_drill)
     } else {
@@ -688,7 +696,7 @@ pub fn realise(ctx: &Ctx, cp: &Coupled, runs: &[(u32, Vec<Vec2>)], start: Ends, 
     // 2 nm over half the pitch: the 45-degree offsets round to whole nm and must not end 1 nm inside
     // the gap.
     let (o_p, o_n) = (-s * (0.5 * p + 2.0), s * (0.5 * p + 2.0));
-    let (vd, vdr) = via_of(ctx.model, r);
+    let (vd, vdr) = via_of(ctx.model, r, ctx.opts);
     let vsize = ViaSize { d: vd, drill: vdr };
     let pv = (vd + r.via_gap) as f64;
     // Anchors per run end.

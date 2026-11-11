@@ -54,6 +54,43 @@ pub fn via_intervals(ev: &[LEv]) -> Vec<(usize, usize)> {
     ev.windows(2).filter(|x| x[0].2 != x[1].2).map(|x| (x[0].0, x[1].0)).collect()
 }
 
+/// 5.4 (`[vias] between_crossings`): the traversals a via of each interval may take, and whether
+/// the interval has one. `strict` = false: the interval `(ka, kb)` itself (as before). `strict`:
+/// a via sits on the stretch strictly between its two events, never in the triangle of a
+/// crossing, a tee or a one-layer triangle (Polubasov 2001 p. 4: the domain graph's vertices are
+/// the crossings; a layer change lies on the wire piece between two of them); only the start of
+/// the wire (`k = 0, s = 0`: its terminal) keeps its own triangle, and an event at `s = 1` (a
+/// pass too narrow on the other layer, at the triangle's exit edge, or the end terminal) keeps
+/// the triangle before it. So `lo = ka + 1` (`ka` at the start) and `hi = kb - 1` (`kb` when
+/// `sb = 1`). An interval with `lo > hi` has no traversal between its events: it keeps
+/// `(ka, kb)` for the drawing (which still tries, costly not failed) and reports `false`, a via
+/// without a site for the plan. O(events).
+pub fn via_ranges(ev: &[LEv], strict: bool) -> (Vec<(usize, usize)>, Vec<bool>) {
+    let mut iv = Vec::new();
+    let mut ok = Vec::new();
+    for x in ev.windows(2).filter(|x| x[0].2 != x[1].2) {
+        let ((ka, sa, _), (kb, sb, _)) = (x[0], x[1]);
+        if !strict {
+            iv.push((ka, kb));
+            ok.push(true);
+            continue;
+        }
+        let lo = if ka == 0 && sa <= 0.0 { 0 } else { ka + 1 };
+        let hi = if sb >= 1.0 { Some(kb) } else { kb.checked_sub(1) };
+        match hi.filter(|&h| h >= lo) {
+            Some(h) => {
+                iv.push((lo, h));
+                ok.push(true);
+            }
+            None => {
+                iv.push((ka, kb));
+                ok.push(false);
+            }
+        }
+    }
+    (iv, ok)
+}
+
 /// The default traversal of a via in interval `(ka, kb)`: `(ka + kb) / 2` rounded up (at `ka`
 /// when both events are in one traversal).
 pub fn mid_k(ka: usize, kb: usize) -> usize {
@@ -236,7 +273,7 @@ impl<'a> CapModel<'a> {
         }
         for (w, ev) in evl.iter().enumerate().take(nw) {
             if st.wires[w].alive {
-                let iv = via_intervals(ev);
+                let iv = via_ranges(ev, packer.via_between).0;
                 let ks = m.default_ks(w, &iv, None);
                 m.via_iv[w] = iv;
                 m.apply(w, ev, ks);
@@ -335,7 +372,10 @@ impl<'a> CapModel<'a> {
             }
         }
         let nr = self.need_r(w);
-        self.nosite[w] = if nr > 0.0 { ks.iter().filter(|&&k| self.rank(w, k).0).count() } else { 0 };
+        // 5.4 `[vias] between_crossings`: an interval with no traversal between its events is a
+        // via without a site as well.
+        let no_between = if self.packer.via_between { via_ranges(ev, true).1.iter().filter(|&&f| !f).count() } else { 0 };
+        self.nosite[w] = if nr > 0.0 { ks.iter().filter(|&&k| self.rank(w, k).0).count() + no_between } else { 0 };
         self.via_k[w] = ks;
         if self.cut.is_some() {
             self.evs[w] = ev.to_vec();
@@ -434,7 +474,7 @@ impl<'a> CapModel<'a> {
     /// others are placed by the drawing's preference and then moved for room. Every changed
     /// cost entry goes to the undo log. O(passes of the wire + moved vias x interval).
     fn relayout(&mut self, w: WireId, ev: &[LEv]) {
-        let iv = via_intervals(ev);
+        let iv = via_ranges(ev, self.packer.via_between).0;
         let (oiv, oks) = (std::mem::take(&mut self.via_iv[w]), self.via_k[w].clone());
         let ks = self.default_ks(w, &iv, Some((&oiv, &oks)));
         let moved: Vec<usize> = (0..iv.len()).filter(|&i| oiv.get(i) != Some(&iv[i])).collect();
@@ -801,6 +841,32 @@ fn try_move_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn via_ranges_exclude_the_triangles_of_the_events() {
+        // Old rule: the interval itself.
+        let ev = [(0, 0.0, 0), (3, 0.4, 0), (5, 0.6, 1), (9, 1.0, 1)];
+        assert_eq!(via_ranges(&ev, false), (vec![(3, 5)], vec![true]));
+        // Between two crossings at traversals 3 and 5: only traversal 4.
+        assert_eq!(via_ranges(&ev, true), (vec![(4, 4)], vec![true]));
+        // Q15: crossings in neighbouring triangles (3, 4): no traversal between them, a via
+        // without a site; the drawing keeps (3, 4) to try.
+        let ev = [(3, 0.4, 0), (4, 0.6, 1)];
+        assert_eq!(via_ranges(&ev, true), (vec![(3, 4)], vec![false]));
+        // Two crossings in one triangle: no site either.
+        let ev = [(3, 0.2, 0), (3, 0.7, 1)];
+        assert_eq!(via_ranges(&ev, true).1, vec![false]);
+        // The start terminal keeps its triangle; a crossing in triangle 1 bounds the range to 0.
+        let ev = [(0, 0.0, 1), (1, 0.5, 0)];
+        assert_eq!(via_ranges(&ev, true), (vec![(0, 0)], vec![true]));
+        // An event at s = 1 (narrow pass at the exit edge, or the end terminal) keeps the
+        // triangle before it; as the first event of an interval it starts after its pass.
+        let ev = [(2, 0.5, 0), (4, 1.0, 1), (7, 1.0, 0)];
+        assert_eq!(via_ranges(&ev, true), (vec![(3, 4), (5, 7)], vec![true, true]));
+        // A one-layer triangle (s = 0) bounds like a crossing.
+        let ev = [(2, 0.0, 0), (6, 0.0, 1)];
+        assert_eq!(via_ranges(&ev, true), (vec![(3, 5)], vec![true]));
+    }
 
     #[test]
     fn pass_layers_put_the_via_in_the_middle_of_its_interval() {

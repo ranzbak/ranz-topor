@@ -1201,7 +1201,7 @@ impl Fixed {
         let signal: Vec<u32> = model.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
         let mut dec = decompose_with(model, opts, &signal, &stubs.signal_pads);
         let pairs: Pairs = if opts.diffpair_route { diffpair::plan(model, &mut dec) } else { Pairs::default() };
-        let alias = (!pairs.coupled.is_empty()).then(|| diffpair::alias(model, &pairs));
+        let alias = (!pairs.coupled.is_empty()).then(|| diffpair::alias(model, &pairs, opts));
         let mut notes = Vec::new();
         let board = if signal.len() < 2 {
             Err(format!("{} signal layer(s)", signal.len()))
@@ -1737,13 +1737,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // ---- P3 ----
     let lp = LayerParams {
         via_mm: reg.price(&Event::Via { wire: 0, count: 1, at: None }, &WireCtx::default()),
-        via_site_r: 0.5 * model.rules.default.via_d as f64 + model.rules.default.clearance as f64,
+        via_site_r: 0.5 * crate::vias::plan_via_d(&model.rules, opts) + model.rules.default.clearance as f64,
         n_signal: b.n_signal,
         plane_mm: reg.price(&Event::PlaneLength { wire: 0, layer: b.n_signal, mm: 1.0 }, &WireCtx::default()),
         plane_cut: reg.price(&Event::PlaneCut { wire: 0, layer: b.n_signal }, &WireCtx::default()),
         // TOPO_NOCAP=1 (debug): assign layers for vias only, to compare with the capacity refinement.
         cap_mm: if std::env::var("TOPO_NOCAP").is_ok() { 0.0 } else { reg.price(&Event::Overflow { wire: 0, edge: 0 }, &WireCtx::default()) },
         cap_vias: std::env::var("TOPO_CAPVIA").is_ok(),
+        via_between: opts.via_between,
         ..LayerParams::default()
     };
     let sub = super::capacity::subset_check(&st);
@@ -1797,7 +1798,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let obj = Objective::from_options(&opts.objective, opts.mm_per_via, &opts.pick);
     let overflow_mm = reg.price(&Event::Overflow { wire: 0, edge: 0 }, &WireCtx::default()).max(1e-6);
     let via_area_mm = {
-        let r = 0.5 * model.rules.default.via_d as f64 + model.rules.default.clearance as f64;
+        let r = 0.5 * crate::vias::plan_via_d(&model.rules, opts) + model.rules.default.clearance as f64;
         std::f64::consts::PI * r * r * b.signal_layers.len().max(1) as f64 / ws0 / MM
     };
     // `[capacity] model = "cuts"` (shopping list 3.2): P4 is priced by the per-layer cuts: the
@@ -2202,10 +2203,26 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             tally: Tally::default(),
         };
         let lt = descend_labels(&mut lb);
+        // 5.4 `[vias] pair_min`: the local via-pair minimisation (Luzin-Popov 2013) after the
+        // label descent.
+        let pairs_removed = if opts.via_pair_min {
+            let max_len = opts.via_pair_max_mm.max(0.0) * MM;
+            let mut n = 0;
+            for w in lb.candidates() {
+                let ev = lb.evl[w].clone();
+                n += lb.pair_lifts(w, max_len, &|w2, i, j| super::viaopt::stretch_len(&st, w2, if w2 == w { &ev } else { &lr.events[w2] }, i, j));
+            }
+            Some(n)
+        } else {
+            None
+        };
         let o1 = lb.cm.overfull();
         let evl = std::mem::take(&mut lb.evl);
         drop(lb);
         layers::relabel(&st, &evl, &lp, &mut lr);
+        if let Some(n) = pairs_removed {
+            warnings.push(format!("local via-pair minimisation ([vias] pair_min; Luzin, Popov & Popov 2013): {n} via pair(s) removed by moving the stretch between them onto its neighbours' layer"));
+        }
         tally.add(&lt);
         warnings.push(format!("P4 moves on the layers: {}; vias {} -> {}, over-full (edge-layers + vias without a site) {} -> {}", lt.text(), v0, lr.vias, o0, o1));
         tlog("P4 moves", t_mv);
@@ -2360,6 +2377,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             ties: u64,
             /// The predicted violations of the current state and layering.
             pred: Predicted,
+            /// 5.4 `[vias] pair_min`: the longest stretch (nm) between a via pair the loop tries
+            /// to remove; `None` = off.
+            pair_max: Option<f64>,
         }
         impl<'p> Sp<'_, 'p> {
             fn via_counts(&self) -> BTreeMap<usize, usize> {
@@ -2610,14 +2630,23 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         tally: Tally::default(),
                     };
                     let lt = descend_labels(&mut lb);
+                    // 5.4: the local via-pair minimisation's lift (Luzin-Popov 2013 steps 4-10).
+                    let mut lifted = 0usize;
+                    if let Some(max_len) = self.pair_max {
+                        let ev0 = lb.evl.clone();
+                        for w in lb.candidates() {
+                            lifted += lb.pair_lifts(w, max_len, &|w2, i, j| super::viaopt::stretch_len(lb.st, w2, &ev0[w2], i, j));
+                        }
+                    }
                     let evl = std::mem::take(&mut lb.evl);
                     drop(lb);
-                    let moved: usize = lt.applied.iter().sum();
+                    let moved: usize = lt.applied.iter().sum::<usize>() + lifted;
                     if moved > 0 {
                         let mut lr = self.lr.clone();
                         layers::relabel(self.st, &evl, &self.lp, &mut lr);
                         if self.try_layers(lr, self.ties) {
-                            cs.float_kept = moved;
+                            cs.float_kept = moved - lifted;
+                            cs.pair_lifts = lifted;
                         } else {
                             cs.undone += 1;
                         }
@@ -2639,6 +2668,39 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     } else {
                         self.restore(&before);
                         cs.undone += 1;
+                    }
+                }
+                // 5.4 `[vias] pair_min`, the re-lay half (Luzin-Popov 2013 step 8.1, here for the
+                // wire itself): a wire that dives to another layer and comes back over a short
+                // stretch is laid again at the end-of-cycle via weight, so a way round on its own
+                // layer that costs less than the two vias wins (kept by the move's price).
+                if let Some(max_len) = self.pair_max {
+                    let mut pw: Vec<WireId> = Vec::new();
+                    for w in (0..self.st.wires.len()).filter(|&w| self.st.wires[w].alive && w < self.lr.events.len()) {
+                        let ev = &self.lr.events[w];
+                        let mut i = 1;
+                        while i < ev.len() {
+                            let l = ev[i].2;
+                            let mut j = i;
+                            while j + 1 < ev.len() && ev[j + 1].2 == l {
+                                j += 1;
+                            }
+                            if ev[i - 1].2 != l && ev.get(j + 1).is_some_and(|e| e.2 == ev[i - 1].2) && super::viaopt::stretch_len(self.st, w, ev, i - 1, j + 1) <= max_len {
+                                pw.push(w);
+                                break;
+                            }
+                            i = j + 1;
+                        }
+                    }
+                    for w in pw {
+                        if ripped >= self.max_ripped || stop() || !self.st.wires[w].alive || self.wire_conn.get(w).is_none_or(|&ci| ci == usize::MAX) {
+                            continue;
+                        }
+                        cs.pair_relaid += 1;
+                        ripped += 1;
+                        if self.reroute(&mut topo, w, c.seed ^ 0x7A7A, c.amp, c.emphasis.via_at(1.0)) {
+                            cs.pair_relaid_kept += 1;
+                        }
                     }
                 }
                 cs.busy_s = t0.elapsed().as_secs_f64();
@@ -2691,6 +2753,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             xkept: &xkept,
             ties: 0,
             pred: pred0,
+            pair_max: opts.via_pair_min.then(|| opts.via_pair_max_mm.max(0.0) * MM),
         };
         let params = LoopParams {
             cycles: opts.topo_rounds.max(1),
@@ -2805,6 +2868,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             "variants_table": arch.items.iter().map(|v| serde_json::json!({"label": v.label, "gen": v.payload.gen, "cycle": v.payload.cycle, "errors": v.crit.errors, "penalty": (v.crit.penalty * 1e3).round() / 1e3, "vias": v.crit.vias, "length_mm": (v.crit.length_mm * 1e3).round() / 1e3, "shrinkages": v.crit.shrinkages})).collect::<Vec<_>>(),
             "layer_share_pct": (1000.0 * rep.stats.layer_s / loop_s.max(1e-9)).round() / 10.0,
         }));
+        if opts.via_pair_min {
+            warnings.push(format!(
+                "TopoR loop, local via-pair minimisation ([vias] pair_min; Luzin, Popov & Popov 2013): {} via pair(s) lifted onto their neighbours' layer, {} of {} wires with a via pair laid again kept",
+                rep.stats.pair_lifts, rep.stats.pair_relaid_kept, rep.stats.pair_relaid
+            ));
+        }
         if let Some(r) = crep.as_mut() {
             r.stage("after the TopoR loop", &st, &lr.events, &packer, bottom, &|w| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]));
         }
@@ -2946,7 +3015,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut dr = Drawer::new(model, opts, b, &st, &checker);
     for cp in &pairs.coupled {
         let r = &cp.rule;
-        let (d, _) = diffpair::via_of(model_real, r);
+        let (d, _) = diffpair::via_of(model_real, r, opts);
         dr.pair_keep.insert(r.p, 3.0 * (2 * r.width + r.gap) as f64 + 0.5 * (d + r.via_gap) as f64);
     }
     // The plane stubs (placed before the topology, which routed around them) are copper before
@@ -3062,6 +3131,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         if st.wires[w].alive {
             let mut p = plan(&lr.events[w], b.n_signal);
             p.at = cm_plan.via_k[w].clone();
+            // 5.4 `[vias] between_crossings`: the drawing searches the traversals strictly
+            // between the events (the plan's ranges), never a crossing's own triangle.
+            if opts.via_between && cm_plan.via_iv[w].len() == p.vias.len() {
+                p.vias = cm_plan.via_iv[w].clone();
+            }
             // A junction's traversal holds no via of its trunk (the tee keeps one layer there),
             // except at the junction itself on two layers, where P3 makes the tee one domain and
             // the via may stand at the tee (D6b; the drawing tries only the turn vertex there).
@@ -3080,6 +3154,86 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
             plans.insert(w, p);
         }
+    }
+    // 5.4 `[vias] relocate`: every via of the plan at the force balance of its free interval
+    // (equal clearance between its neighbours; [`super::viaopt::relocate_vias`]); the drawing
+    // takes that site first. The interval is sampled on the plan's taut path, which is the
+    // wire's path only when the search priced the length taut (`[search] length = "taut"`):
+    // with "even" the corridor can run round obstacles the drawing then crosses on the other
+    // layer (measured 5.4: via_pair_slide, the corridor round the wall ends; relocated vias
+    // pulled the drawn wire 0.55 mm longer), so relocation is skipped there, with a warning.
+    if opts.via_relocate && opts.search_length != "taut" {
+        warnings.push(format!(
+            "via relocation ([vias] relocate) skipped: it needs [search] length = \"taut\" (the plan's path); [search] length = \"{}\" plans corridors that are no wire path",
+            opts.search_length
+        ));
+    }
+    if opts.via_relocate && opts.search_length == "taut" {
+        let t_vr = Instant::now();
+        let outline = super::board::outline_segments(model);
+        let via_r = |net: i32| 0.5 * crate::vias::via_sizes(&model.rules, net, opts).first().map_or(0.0, |s| s.d as f64);
+        let clear = |net: i32| model.rules.net_rule(net).clearance.max(model.rules.min_clearance) as f64;
+        let cx = super::viaopt::ViaCtx { st: &st, outline: &outline, edge_clear: proj.edge_clear, via_r: &via_r, clear: &clear };
+        let (sites, rr) = super::viaopt::relocate_vias(&cx, &mut plans, &lr.events);
+        dr.via_site = sites;
+        warnings.push(format!(
+            "via relocation ([vias] relocate; Dayan & Dai 1991, force balance): {} vias, {} moved in their free interval to the most clearance, smallest gap {:+.3} mm in total",
+            rr.vias,
+            rr.moved,
+            rr.gap_gain / MM
+        ));
+        if std::env::var("TOPO_VIAREL").is_ok() {
+            for &(w, i, a, b, g0, g1) in &rr.moves {
+                eprintln!("VIAREL wire {w} via {i} ({:.3},{:.3}) -> ({:.3},{:.3}) gap {:.3} -> {:.3} mm", a.x / MM, -a.y / MM, b.x / MM, -b.y / MM, g0 / MM, g1 / MM);
+            }
+        }
+        tlog("via relocation", t_vr);
+    }
+    // 5.4 `[search] branch_relocate`: the junctions of the net trees to the Fermat point of their
+    // arms, out of a pad (< 120 degrees there) or into it (>= 120 degrees;
+    // [`super::viaopt::relocate_junctions`]). The drawing splits the wire through the point and
+    // ends the other wire there.
+    let mut jpos: BTreeMap<usize, Vec2> = BTreeMap::new();
+    // The wires whose junction the plan moved: the fuse after the drawing leaves them alone (the
+    // plan decided where they meet).
+    let mut jmoved: BTreeSet<WireId> = BTreeSet::new();
+    if opts.branch_relocate {
+        let t_j = Instant::now();
+        let clear = |net: i32| model.rules.net_rule(net).clearance.max(model.rules.min_clearance) as f64;
+        let jc = super::viaopt::JCtx { st: &st, clear: &clear, plans: &plans, octi: dr.octi.on };
+        let mv = super::viaopt::relocate_junctions(&jc);
+        let mut by: BTreeMap<&str, (usize, f64)> = BTreeMap::new();
+        for m in &mv {
+            let e = by.entry(m.kind).or_default();
+            e.0 += 1;
+            e.1 += m.gain;
+            match m.kind {
+                "free" => {
+                    jpos.insert(m.vertex, m.at);
+                }
+                "pad_out" => {
+                    dr.end_at.insert(m.branch, m.at);
+                }
+                _ => {
+                    jpos.insert(m.vertex, m.at);
+                }
+            }
+            if let Some((tw, k)) = m.trunk {
+                dr.split_at.entry(tw).or_default().push((k, m.at));
+                jmoved.insert(tw);
+            }
+            jmoved.insert(m.branch.0);
+            if std::env::var("TOPO_JREL").is_ok() {
+                eprintln!("JREL {} trunk {:?} branch {:?} ({:.4},{:.4}) -> ({:.4},{:.4}) t {:.3} gain {:.4} mm", m.kind, m.trunk, m.branch, m.from.x / MM, -m.from.y / MM, m.at.x / MM, -m.at.y / MM, m.t, m.gain / MM);
+            }
+        }
+        warnings.push(format!(
+            "branch points ([search] branch_relocate; Popov & Popov 2013, Dayan & Dai 1991): {} moved ({}), {:.3} mm shorter in the plan",
+            mv.len(),
+            by.iter().map(|(k, (n, g))| format!("{k} {n}: {:.3} mm", g / MM)).collect::<Vec<_>>().join(", "),
+            mv.iter().map(|m| m.gain).sum::<f64>() / MM
+        ));
+        tlog("branch relocation", t_j);
     }
     // Draw order: widest first (a pair by its whole band, `prio_w`), then shortest.
     let wire_pw = |w: WireId| wire_conn.get(w).and_then(|&ci| prio_w.get(ci)).copied().unwrap_or(st.wires[w].w);
@@ -3107,7 +3261,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let &(_, end, tw, _, v) = tree_js.iter().find(|j| j.0 == bw)?;
         let pl = plans.get(&bw)?;
         let layer = if end == 0 { *pl.layers.first()? } else { *pl.layers.last()? };
-        let pv = proj.pos[v];
+        let pv = jpos.get(&v).copied().unwrap_or(proj.pos[v]);
         let mut best: Option<(f64, Vec2)> = None;
         for (l, pts) in &drawn.get(&tw)?.runs {
             if *l != layer {
@@ -3297,7 +3451,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         if let Some((key, q)) = joint_of(w, &drawn, &plans) {
             dr.end_at.insert(key, q);
         }
-        let wo = dr.draw_wire(w, &plans[&w], &placed[&w], &mut ids);
+        let mut wo = dr.draw_wire(w, &plans[&w], &placed[&w], &mut ids);
+        if !wo.ok && dr.split_at.remove(&w).is_some() {
+            // 5.4: the moved junction did not draw; the wire as before.
+            wo = dr.draw_wire(w, &plans[&w], &placed[&w], &mut ids);
+        }
         if wo.ok {
             via_h.insert(w, vh);
             drawn_ok += 1;
@@ -3795,7 +3953,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let ids: Vec<WireId> = drawn.keys().copied().collect();
         let pad_nm = opts.junction_pad_mm * MM;
         for &w in &ids {
-            if pairs.width.contains_key(&st.wires[w].net) {
+            if pairs.width.contains_key(&st.wires[w].net) || jmoved.contains(&w) {
                 continue;
             }
             for end in 0..2 {
@@ -3806,7 +3964,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 } else {
                     ids.iter()
                         .copied()
-                        .filter(|&u| u != w && st.wires[u].net == wi.net && ((st.wires[u].a == vert && !fused_at.contains(&(u, 0))) || (st.wires[u].b == vert && !fused_at.contains(&(u, 1)))))
+                        .filter(|&u| u != w && !jmoved.contains(&u) && st.wires[u].net == wi.net && ((st.wires[u].a == vert && !fused_at.contains(&(u, 0))) || (st.wires[u].b == vert && !fused_at.contains(&(u, 1)))))
                         .collect()
                 };
                 let Some(wo) = drawn.get(&w) else { continue };
@@ -4047,6 +4205,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             dr.stats.exact_s,
             fb_tried,
             fb_rescued
+        ));
+    }
+    if opts.via_relocate && opts.search_length == "taut" {
+        warnings.push(format!(
+            "via relocation in the drawing ([vias] relocate): {} vias at their planned site, {} planned sites not free (drawn at the usual search's site)",
+            dr.stats.planned_sites, dr.stats.planned_sites_missed
         ));
     }
     if let Ok(path) = std::env::var("TOPO_DIAG") {

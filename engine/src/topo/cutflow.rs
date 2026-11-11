@@ -33,7 +33,7 @@
 use super::demand::{need_in, Bound, Item};
 use super::draw::poly_dist;
 use super::pack::{funnel, tri_site_points, Packer};
-use super::refine::{mid_k, pass_layers_at, via_intervals, LEv};
+use super::refine::{mid_k, pass_layers_at, LEv};
 use super::sheet::{JunctionFeat, LayerSheet, Norm, SheetInput, SheetOpts, SheetStats, ViaFeat};
 use super::state::{point_in_poly, Projection, State, VertId, VertKind, WireId, NO_OBS};
 use crate::geom::Vec2;
@@ -241,7 +241,7 @@ pub fn wire_stretches(st: &State, packer: &Packer, w: WireId, ev: &[LEv], via_k:
     let n = wi.passes.len();
     let mut ks: Vec<usize> = via_k.to_vec();
     // Every layer change has its via traversal (the drawing's default where the plan has none).
-    let iv = via_intervals(ev);
+    let iv = super::refine::via_ranges(ev, packer.via_between).0;
     ks.truncate(iv.len());
     for &(ka, kb) in &iv[ks.len()..] {
         ks.push(mid_k(ka, kb));

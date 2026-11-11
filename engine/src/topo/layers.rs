@@ -486,6 +486,9 @@ pub struct LayerParams {
     /// the TopoR loop's layer re-optimisation, shopping list 5.2); 0 = the first optimum, as
     /// before.
     pub ties: u64,
+    /// 5.4 `[vias] between_crossings`: a via sits strictly between its two events
+    /// ([`super::refine::via_ranges`]); an interval without a traversal there has no site.
+    pub via_between: bool,
 }
 
 impl Default for LayerParams {
@@ -503,6 +506,7 @@ impl Default for LayerParams {
             cap_evals: 200_000,
             cap_vias: false,
             ties: 0,
+            via_between: false,
         }
     }
 }
@@ -587,6 +591,8 @@ fn stretches_and_vias(st: &State, polys: &[Vec<Vec2>], evl: &[Vec<(usize, f64, i
             continue;
         };
         pieces.push((fl, piece(pts, 0, 0.0, fk, fs)));
+        let (ranges, between) = super::refine::via_ranges(ev, p.via_between);
+        let mut vi = 0usize;
         for x in ev.windows(2) {
             let ((ka, sa, la), (kb, sb, lb)) = (x[0], x[1]);
             if la == lb {
@@ -594,13 +600,23 @@ fn stretches_and_vias(st: &State, polys: &[Vec<Vec2>], evl: &[Vec<(usize, f64, i
                 continue;
             }
             // The via in the middle of its interval: a pass point when the stretch spans one.
-            let (km, sm) = if kb > ka { ((ka + kb).div_ceil(2), 0.0) } else { (ka, 0.5 * (sa + sb)) };
+            // With [vias] between_crossings the middle of the traversals strictly between the
+            // two events (`ranges`), and no site when there are none.
+            let (r, has) = (ranges[vi], between[vi]);
+            vi += 1;
+            let (km, sm) = if p.via_between && has {
+                ((r.0 + r.1).div_ceil(2), 0.0)
+            } else if kb > ka {
+                ((ka + kb).div_ceil(2), 0.0)
+            } else {
+                (ka, 0.5 * (sa + sb))
+            };
             pieces.push((la, piece(pts, ka, sa, km, sm)));
             pieces.push((lb, piece(pts, km, sm, kb, sb)));
             rep.vias += 1;
             rep.via_pts.push(at(pts, km, sm));
             rep.slots.push(ViaSlot { wire: w, from: (ka, sa), to: (kb, sb), at: (km, sm) });
-            if !site(ka, kb, w) {
+            if !has || !site(r.0, r.1, w) {
                 rep.vias_no_site += 1;
             }
         }
