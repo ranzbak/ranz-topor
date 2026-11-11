@@ -214,6 +214,8 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
         m["cleanup_unstable"] = cc["count"]
         m["cleanup_by_rule"] = cc["by_rule"]
         m["cleanup_per_option"] = {k: v["count"] for k, v in (cc.get("per_option") or {}).items()}
+        ds = cc.get("dangling_split") or {}
+        m["cleanup_dangling"] = {k: ds[k] for k in ("independent", "cascade", "cascade_after") if k in ds}
         m["cleanup_summary"] = cleanup_summary(cc)
     except Exception as e:  # noqa: BLE001 - a metric, never a failed run
         m["cleanup_unstable"] = None
@@ -260,7 +262,10 @@ def summary(m: dict) -> str:
         f"  vias {m['vias']} (hand {m['vias_hand']}), detour {dl}, ladder warnings {m['ladder_warnings']}",
         f"  runtime {m['runtime_s']} s (run flow {m['run_flow_s']} s, router {m['router_s']} s, CPU {m['router_cpu_s']} s; limit {m['timeout_s']} {m['timeout_clock']})",
         f"  stop: {m['stop_reason']}; findings: {', '.join(m['findings']) or 'none'}",
-        f"  cleanup-unstable items: {m.get('cleanup_unstable')} ({m.get('cleanup_by_rule') or m.get('cleanup_error') or 'none'})",
+        f"  cleanup-unstable items: {m.get('cleanup_unstable')} ({m.get('cleanup_by_rule') or m.get('cleanup_error') or 'none'})"
+        + (f"; dangling removals {m['cleanup_dangling'].get('independent')} independent, "
+           f"{m['cleanup_dangling'].get('cascade')} cascade after {m['cleanup_dangling'].get('cascade_after')}"
+           if m.get("cleanup_dangling") else ""),
         f"  png: {m.get('png')}",
     ])
 

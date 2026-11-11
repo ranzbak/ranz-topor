@@ -82,6 +82,22 @@ def test_violations_finding_lists_place_type_and_cause():
                           "1.500 mm against pad:WNF:1; cause: drawing: clearance gap 0.016 mm < 0.200 mm against "
                           "pad:WNF:1 on layer F.Cu")
     assert "VIOLATIONS" in postrun.POSTRUN_CODES and "VIOLATIONS" in MESSAGES
+    assert "Cleanup Tracks" not in f.message, "no short, no cleanup note"
+
+
+def test_violations_finding_says_what_kicad_cleanup_does_to_a_short():
+    """qmtech 2026-11-11: KiCad's Cleanup Tracks & Vias removed the shorting tracks and then the rest of their
+    connections as "unconnected at one end"; the finding names the nets with a short and says so."""
+    viol = [{"conn": 0, "net": 7, "name": "SDRAM_A7", "from": "U4.U244", "to": "U2.3", "kind": "short",
+             "layer": "B.Cu", "at": [1000000, 2000000], "depth_nm": 200000, "length_nm": 400000,
+             "against": "track:SDRAM_A6", "cause": "drawing: crossing", "price_mm": 4000.0},
+            {"conn": 1, "net": 8, "name": "SDRAM_A6", "from": "U4.U243", "to": "U2.4", "kind": "short",
+             "layer": "B.Cu", "at": [1000000, 2000000], "depth_nm": 200000, "length_nm": 400000,
+             "against": "track:SDRAM_A7", "cause": "drawing: crossing", "price_mm": 4000.0}]
+    f = {f.code: f for f in postrun.route_findings({"connections": [_c("SDRAM_A7", "routed")], "warnings": [],
+                                                   "violations": viol})}["VIOLATIONS"]
+    assert "The 2 net(s) with a short (SDRAM_A6, SDRAM_A7)" in f.message
+    assert "Delete tracks connecting different nets" in f.message and "unconnected at one end" in f.message
 
 
 def test_route_findings_quiet_on_a_clean_run():

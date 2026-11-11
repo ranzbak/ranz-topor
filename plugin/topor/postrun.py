@@ -166,7 +166,8 @@ def route_findings(result: dict | None) -> list:
                        "(never drop: the drawing found no legal geometry, so they are drawn on their best one): "
                        + ", ".join(f"{n} {k}" for k, n in by.most_common()) + "."
                        + (" By origin: " + ", ".join(f"{n} {_VIOL_CLASS.get(k, k)}" for k, n in cls.most_common()) + "."
-                          if cls else ""),
+                          if cls else "")
+                       + _short_cleanup_note(viol),
                        [_violation_text(v) for v in viol]))
     ig = lines("ignored_rule: ")
     if ig:
@@ -175,6 +176,19 @@ def route_findings(result: dict | None) -> list:
     if tb:
         out.append(_mk("TIME_BUDGET_HIT", tb[0] + ".", tb))
     return out
+
+
+def _short_cleanup_note(viol: list) -> str:
+    """What KiCad's Edit -> Cleanup Tracks & Vias does to the connections with a short (qmtech 2026-11-11: the user's
+    cleanup removed 107 shorting tracks, then 290 tracks and vias of the same 28 nets as unconnected at one end;
+    "Delete tracks unconnected at one end" alone removes nothing). Empty without shorts. O(violations)."""
+    nets = sorted({str(v.get("name") or v.get("net")) for v in viol if v.get("kind") == "short"})
+    if not nets:
+        return ""
+    return (f" The {len(nets)} net(s) with a short ({', '.join(nets[:6])}{' ...' if len(nets) > 6 else ''}) lose "
+            "their routed copper in KiCad → Edit → Cleanup Tracks & Vias: \"Delete tracks connecting different nets\" "
+            "removes the shorting tracks, then \"Delete tracks unconnected at one end\" the rest of those traces up to "
+            "their pads; fix the shorts first (Inspect → Design Rules Checker), then run the cleanup.")
 
 
 #: Origin classes of a violation (engine ``violation_class``, M-B2).

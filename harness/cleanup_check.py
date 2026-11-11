@@ -381,16 +381,42 @@ def check(pcb: Path, *, refill: bool = False, input_pcb: Path | None = None, per
          "preexisting": [i for i in items if i["uuid"] in pre]}
     if per_option:
         r["per_option"] = {}
+        alone_dangling: set = set()
         for k in OPTIONS:
             one = _ours(cleanup_items(Path(pcb), refill=refill, opts={o: o == k for o in OPTIONS}), pre)
             r["per_option"][k] = {"count": len(one), "by_rule": _by_rule(one)}
+            if k in ("unconnected", "dangling_vias"):
+                alone_dangling |= {i["uuid"] for i in one if i["rule"] in DANGLING}
+        r["dangling_split"] = dangling_split(ours, alone_dangling)
     return r
+
+
+#: the rules of deleteDanglingTracks
+DANGLING = ("dangling_track", "dangling_via")
+
+
+def dangling_split(items: list, alone: set) -> dict:
+    """Root cause of every dangling removal of the full replay `items`: **independent** when the track or via
+    also dangles with "Delete tracks unconnected at one end" / "Delete vias connected on only one layer" alone
+    (uuids `alone`; KiCad's own end rule, TestTrackEndpointDangling, fails for it on the board as written), else
+    a **cascade**: it dangles only after an earlier step removed copper it was joined to (``cascade_after``: those
+    earlier removals by rule, e.g. ``shorting`` = "Delete tracks connecting different nets"). O(items)."""
+    d = [i for i in items if i["rule"] in DANGLING]
+    ind = [i for i in d if i["uuid"] in alone]
+    return {"independent": len(ind), "cascade": len(d) - len(ind),
+            "independent_items": ind,
+            "cascade_after": _by_rule([i for i in items if i["rule"] not in DANGLING])}
 
 
 def summary(r: dict) -> str:
     rules = ", ".join(f"{k} {v}" for k, v in sorted(r["by_rule"].items())) or "none"
     out = (f"cleanup-unstable items {r['count']} (all options, zones {'refilled' if r['refill'] else 'as stored'}): "
            f"{rules}")
+    ds = r.get("dangling_split")
+    if ds and (ds["independent"] or ds["cascade"]):
+        after = ", ".join(f"{k} {v}" for k, v in sorted(ds["cascade_after"].items())) or "none"
+        out += (f"\n  dangling removals: {ds['independent']} independent (KiCad's end rule fails on the board as "
+                f"written), {ds['cascade']} cascade (dangle only after the earlier removals: {after})")
     for k, v in (r.get("per_option") or {}).items():
         out += f"\n  alone: {OPTIONS[k]}: {v['count']}" + (f" ({', '.join(f'{a} {b}' for a, b in sorted(v['by_rule'].items()))})"
                                                           if v["by_rule"] else "")
