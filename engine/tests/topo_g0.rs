@@ -308,6 +308,7 @@ fn the_factor_reference_matches_the_schema_text() {
         ("junction_angle", 10.0),
         ("any_angle", 15.0),
         ("acute_bend", 50.0),
+        ("planned_room", 5.0),
         ("violation", 1000.0),
         ("dp_uncoupled", 1.0),
         ("dp_skew", 10.0),

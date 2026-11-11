@@ -254,6 +254,7 @@ pub fn standard_factors() -> Vec<Box<dyn Factor>> {
         Box::new(branch::JunctionAngle),
         Box::new(style::AnyAngle),
         Box::new(style::AcuteBend),
+        Box::new(style::PlannedRoom),
         Box::new(violation::Violation),
         Box::new(diffpair::Uncoupled),
         Box::new(diffpair::Skew),

@@ -1063,28 +1063,6 @@ impl<'a> Drawer<'a> {
         (i > 0 && drawn(i - 1), drawn(i + 1))
     }
 
-    /// [`Self::tight_span`] with room kept for the neighbours of `pid` in its lane that are not
-    /// drawn yet: towards each side, beyond the spacing the tight span already leaves the `n`
-    /// undrawn passes up to the next drawn one (or the lane end), the same spacing once more, at
-    /// most their fair share (`n / (m + n + 1)`, `m` undrawn on the other side) of the slack. With
-    /// the tight span alone the wire drawn first may take every bit of slack on that side and the
-    /// undrawn neighbours must then be drawn at exactly the clearance along its whole shape (wiccon
-    /// 3.3v J1.1 -> U1.3, drawn after ADC and GPIO16 on both sides: no legal geometry left).
-    /// O(passes of the lane).
-    pub(super) fn reserved_span(&self, pid: PassId) -> Option<(f64, f64)> {
-        let (a, b) = self.tight_span(pid)?;
-        let (e, l, i, _, _) = self.slot[pid]?;
-        let Lane { pids, cum } = self.lanes.get(&(e, l))?;
-        let undrawn = |j: usize| self.live_x(pids[j]).is_none();
-        let m = (0..i).rev().take_while(|&j| undrawn(j)).count();
-        let n = (i + 1..pids.len()).take_while(|&j| undrawn(j)).count();
-        let slack = (b - a).max(0.0);
-        let share = |k: usize| slack * k as f64 / (m + n + 1) as f64;
-        let lo = a + (cum[i] - cum[i - m]).min(share(m));
-        let hi = b - (cum[i + n] - cum[i]).min(share(n));
-        Some((lo, hi.max(lo)))
-    }
-
     pub(super) fn lane_dbg(&self, pid: PassId) -> String {
         let Some((e, l, i, lmin, rmax)) = self.slot[pid] else { return "none".into() };
         let Some(ln) = self.lanes.get(&(e, l)) else { return "nolane".into() };
