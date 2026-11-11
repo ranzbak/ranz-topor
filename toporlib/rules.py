@@ -313,8 +313,8 @@ def resolve_rules_from_project(
                     base_via=(via_d, via_drill), diff_base=_diff_base(net_name)) if cr else None
         if cu is not None and cu.clearance is not None:
             if cu.clearance < floors["min_clearance"]:
-                warnings.append(f"floor: custom clearance of net {net_name or '(default)'} "
-                                f"{cu.clearance / 1e6:g} -> {floors['min_clearance'] / 1e6:g} mm")
+                cr.notes.add(f"floor: custom clearance {cu.clearance / 1e6:g} -> {floors['min_clearance'] / 1e6:g} mm "
+                             f"(fab minimum, [fab] profile)", net_name)
             clearance = max(cu.clearance, floors["min_clearance"])
         custom_w = cu.width if cu is not None else None
         custom_min_w = cu.min_width if cu is not None else 0
@@ -335,6 +335,9 @@ def resolve_rules_from_project(
                 width, src = cu.min_width, "custom_rule"
             if cu.max_width is not None and width > cu.max_width:
                 width, src = max(cu.max_width, cu.min_width), "custom_rule"
+        if cu is not None and src == "custom_rule" and width < floors["min_track_width"]:
+            cr.notes.add(f"floor: custom track width {width / 1e6:g} -> {floors['min_track_width'] / 1e6:g} mm "
+                         f"(fab minimum, [fab] profile)", net_name)
         width = max(width, floors["min_track_width"])
         if src == "default" and net_name and _POWER_RE.match(net_name):
             warnings.append(f"POWER?: {net_name} uses Default width")

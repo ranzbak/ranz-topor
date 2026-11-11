@@ -160,6 +160,17 @@ def open_bornhack_dru() -> str:
 """
 
 
+def test_fab_floor_raises_a_custom_width_with_one_note():
+    """Zynq SoM ``(layer inner)`` DDR width opt 0.135 mm under the JLCPCB 0.2 mm floor: raised, one note naming the nets."""
+    dru = '(rule w (layer inner) (condition "A.NetClass == \'DDR\'") (constraint track_width (opt 0.135mm)))'
+    r = resolve_rules_from_project({}, dru, netclass_of={"": "Default", "A": "DDR", "B": "DDR", "C": "Default"},
+                                   classes={"Default": NetClassVals("Default", 200_000), "DDR": NetClassVals("DDR", 200_000)},
+                                   widths_before={}, copper_layer_count=6)
+    assert r["per_net"]["1"]["width"] == r["min_track_width"] == 200_000
+    notes = [w for w in r["warnings"] if w.startswith("floor: custom track width")]
+    assert notes == ["floor: custom track width 0.135 -> 0.2 mm (fab minimum, [fab] profile) [2 net(s): A, B]"], notes
+
+
 def test_net_dependent_area_rule_is_no_region():
     r = resolve_rules_from_project({}, '(rule c (condition "A.intersectsCourtyard(\'U1\') && A.NetName == \'A\'") '
                                        '(constraint clearance (min 0.4mm)))',
