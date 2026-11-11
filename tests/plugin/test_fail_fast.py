@@ -132,3 +132,30 @@ def test_engine_failed_run_is_an_error_not_a_quiet_reject(app, eprom, tmp_path, 
     res = json.loads((out.report_dir / "result.json").read_text())
     assert res["status"] == "error" and any(f["code"] == "ENGINE_FAILED" for f in res["findings"])
     assert "Outcome: error" in (out.report_dir / "report.md").read_text()
+
+
+def test_rules_read_wrong_is_a_loud_error_after_the_drc(app, eprom, tmp_path, reports):
+    """Self-check (user 2026-11-11, the eprom case: the engine got 0.2 mm where KiCad requires 0.25 mm): the engine
+    is given a smaller clearance than KiCad's rules, KiCad's DRC of the result finds the clearance violations, and the
+    run stops with RULES_MISMATCH (nets and both values) before the preview; nothing is committed."""
+    import copy
+
+    from test_run_flow import make_board
+
+    model = copy.deepcopy(eprom.model)
+    rules = model["rules"]
+    for r in [rules["default"], *rules["per_net"].values()]:
+        r["clearance"] = 100_000  # KiCad's rules for eprom: 0.2 mm and more
+    rules["min_clearance"] = 100_000
+    board = make_board(eprom)
+    board.model = model
+    board, ui, out = do_run(eprom, tmp_path, board=board, strict=False)
+    errs = [c[1][0] for c in ui.calls if c[0] == "error"]
+    assert out.status == "error" and board.commits == [], (out.status, errs)
+    assert len(errs) == 1 and errs[0].code == "RULES_MISMATCH" and errs[0].severity == "error"
+    assert "topor read the design rules wrong — please report this" in errs[0].message
+    assert "topor routed with 0.1000 mm" in errs[0].message
+    assert "preview" not in ui.names() and "done" not in ui.names()
+    res = json.loads((out.report_dir / "result.json").read_text())
+    codes = {f["code"] for f in res["findings"]}
+    assert {"RULES_MISMATCH", "DRC_NEW_VIOLATIONS"} <= codes

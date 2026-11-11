@@ -298,6 +298,14 @@ copper violates a rule anywhere else, file a bug.
 
 **Fix.** Check the pattern spelling in nets.do_not_touch against the net names (KiCad → View → Panels → Net Inspector lists them).
 
+### DRC_NEW_VIOLATIONS
+
+*Severity: warning.*
+
+**Cause.** KiCad's DRC of the routed copy finds rule violations in the new copper that the board did not have before (clearance, short, hole clearance, edge clearance, ...). The finding counts them by type and names the first places with their nets and position. The result can still be accepted: the violations then stay on the board until you fix them.
+
+**Fix.** After Accept, run KiCad → Inspect → Design Rules Checker to see each one; fix them by hand or route again (Reject, then give the router more room or time: run.timeout_s, [optimize] runs).
+
 ### DRILL_OUTSIDE_FILTER
 
 *Severity: warning.*
@@ -561,6 +569,14 @@ copper violates a rule anywhere else, file a bug.
 **Cause.** The run's report folder could not be created or written (read-only folder, full disk, or a file where the folder should be), so topor stopped before reading the board. The board was not changed.
 
 **Fix.** Point output.report_dir in topor.toml at a folder you can write (e.g. "topor-reports" inside the project folder), or fix the permissions / free disk space for the folder named in the message.
+
+### RULES_MISMATCH
+
+*Severity: error.*
+
+**Cause.** Self-check after routing: KiCad's DRC requires a larger clearance between two nets than the clearance topor gave the router for them. topor read the design rules wrong, so the whole result was routed to the wrong rule; nothing is applied to the board. The finding names the nets and both values.
+
+**Fix.** Please report this at https://github.com/ranzbak/ranz-topor/issues with the report folder (report.md, drc.json, log.txt); meanwhile check the net classes and custom rules in KiCad → File → Board Setup → Design Rules.
 
 ### RUN_ALREADY_RUNNING
 

@@ -154,3 +154,86 @@ def test_preview_ratsnest_to_a_zone_is_a_ring_not_a_line_to_its_anchor():
                       {"description": "Zone [GND] on F.Cu and B.Cu, priority 0", "pos": {"x": 50.0, "y": 50.0}}]}]
     out = ratsnest_svg("<svg></svg>", unc, (50_000_000, 50_000_000))
     assert "<line" not in out and '<circle cx="5.5000" cy="47.2500"' in out
+
+
+# ------------------------------------------------------------------------- KiCad DRC of the result (user 2026-11-11)
+# Real entries of KiCad's DRC of the eprom run where the engine was given the Default clearance 0.2 mm while KiCad
+# required 0.25 mm (kicad-cli in a locale with a decimal comma; ec-runs/before, 20261111-124631/drc.json).
+EPROM_DRC = [
+    {"description": "Clearance violation ( clearance 0,2500 mm; actual 0,2163 mm)", "severity": "error",
+     "type": "clearance", "items": [
+         {"description": "Track [+5V] on B.Cu, length 4,3821 mm", "pos": {"x": 198.36347, "y": 62.558657},
+          "uuid": "9833f7ab"},
+         {"description": "PTH pad 3 [A13] of J1", "pos": {"x": 195.33, "y": 63.75}, "uuid": "9eb57d86"}]},
+    {"description": "Clearance violation ( clearance 0,2500 mm; actual 0,2000 mm)", "severity": "error",
+     "type": "clearance", "items": [
+         {"description": "Track [A14] on B.Cu, length 4,7659 mm", "pos": {"x": 201.24, "y": 69.79}, "uuid": "f2d5b17c"},
+         {"description": "Track [A13] on B.Cu, length 1,9036 mm", "pos": {"x": 199.4618, "y": 70.5518},
+          "uuid": "f451990a"}]},
+    {"description": "Clearance violation ( clearance 0,2500 mm; actual 0,2000 mm)", "severity": "error",
+     "type": "clearance", "items": [
+         {"description": "Track [A13] on B.Cu, length 5,8432 mm", "pos": {"x": 199.4618, "y": 68.648211},
+          "uuid": "5b57d279"},
+         {"description": "Track [A14] on B.Cu, length 4,7659 mm", "pos": {"x": 201.24, "y": 69.79}, "uuid": "f2d5b17c"}]},
+]
+
+
+def _eprom_model(clearance_nm):
+    names = ["+5V", "A13", "A14"]
+    return {"nets": [{"code": i + 1, "name": n} for i, n in enumerate(names)],
+            "rules": {"default": {"clearance": clearance_nm},
+                      "per_net": {str(i + 1): {"clearance": clearance_nm} for i in range(len(names))}},
+            "pads": [], "pours": []}
+
+
+def test_required_clearance_parses_decimal_comma_point_and_units():
+    assert postrun.required_clearance_nm("Clearance violation ( clearance 0,2500 mm; actual 0,2163 mm)") == \
+        (250_000, 216_300)
+    assert postrun.required_clearance_nm("Clearance violation (netclass 'X' clearance 0.2000 mm; actual 0.1500 mm)") \
+        == (200_000, 150_000)
+    assert postrun.required_clearance_nm("Clearance violation ( clearance 10,0000 mils; actual 8,0000 mils)") == \
+        (254_000, 203_200)
+    assert postrun.required_clearance_nm("Track has unconnected end") is None
+
+
+def test_rules_mismatch_eprom_engine_0_2_kicad_0_25():
+    """The eprom case: the engine got 0.2 mm for +5V / A13 / A14, KiCad's DRC required 0.25 mm -> a loud error that
+    names the nets and both values."""
+    f = postrun.rules_mismatch(EPROM_DRC, _eprom_model(200_000))
+    assert f is not None and f.code == "RULES_MISMATCH" and f.severity == "error"
+    assert "topor read the design rules wrong — please report this" in f.message
+    assert "+5V – A13: KiCad requires 0.2500 mm, topor routed with 0.2000 mm" in f.message
+    assert "A13 – A14: KiCad requires 0.2500 mm, topor routed with 0.2000 mm (actual 0.2000 mm)" in f.message
+    assert len(f.items) == 2  # one row per net pair, the worst violation of each
+    # the engine had KiCad's value: a violation of the rule it knew is not a mismatch (DRC_NEW_VIOLATIONS covers it)
+    assert postrun.rules_mismatch(EPROM_DRC, _eprom_model(250_000)) is None
+    # a pad's own clearance override or a stricter net counts as what the engine was given
+    m = _eprom_model(200_000)
+    m["rules"]["per_net"]["2"]["clearance"] = 250_000  # A13
+    assert postrun.rules_mismatch(EPROM_DRC, m) is None
+    # the two nets of a differential pair: their gap is the clearance between them by design
+    m = _eprom_model(200_000)
+    m["rules"]["diff_pairs"] = [{"p_name": "A13", "n_name": "A14"}]
+    f = postrun.rules_mismatch(EPROM_DRC, m)
+    assert f is not None and [r.split(":")[0] for r in f.items] == ["+5V – A13"]
+    # only clearance violations are checked
+    assert postrun.rules_mismatch([{**EPROM_DRC[1], "type": "shorting_items"}], _eprom_model(200_000)) is None
+
+
+def test_drc_new_violations_counts_types_and_places():
+    """Costly, not failed: a warning with counts by type and the first places (nets, position in mm), whatever the
+    reason; [] without new violations."""
+    viol = EPROM_DRC + [{"description": "Items shorting two nets (nets A13 and A14)", "type": "shorting_items",
+                         "severity": "error", "items": [
+                             {"description": "Via [A13] on F.Cu - B.Cu", "pos": {"x": 1.0, "y": 2.0}, "uuid": "v1"},
+                             {"description": "Track [A14] on F.Cu", "pos": {"x": 1.0, "y": 3.0}, "uuid": "t1"}]}]
+    tracks = {"f2d5b17c": [(201.24, 69.79, 201.24, 75.0)], "f451990a": [(199.4618, 70.5518, 200.84, 70.5518)]}
+    fs = postrun.drc_new_findings(viol, tracks)
+    assert [f.code for f in fs] == ["DRC_NEW_VIOLATIONS"] and fs[0].severity == "warning"
+    f = fs[0]
+    assert f.message.startswith("KiCad's DRC finds 4 new violations in the result (clearance 3, shorting_items 1): ")
+    assert "+5V – A13 at (196.847, 63.154) mm on B.Cu: clearance 0.2500 mm; actual 0.2163 mm" in f.message
+    assert "… and 1 more" in f.message and len(f.items) == 4
+    assert f.items[1].startswith("clearance A14 – A13 at (201.040, 70.552) mm on B.Cu")  # between the two tracks
+    assert "Inspect → Design Rules Checker" in f.fix
+    assert postrun.drc_new_findings([]) == [] and postrun.drc_new_findings(None) == []

@@ -371,6 +371,8 @@ the preview summary names the warnings (*After routing, check: …*), report.md 
 | [`IGNORED_RULE`](troubleshoot.md#ignored_rule) | copper that breaks a KiCad check set to *ignore* (priced, not forbidden) |
 | [`VIOLATIONS`](troubleshoot.md#violations) | never drop: copper written although it breaks a rule (no legal geometry was found); each violation with place, type and cause |
 | [`TIME_BUDGET_HIT`](troubleshoot.md#time_budget_hit) | the time limit stopped the run before its work caps |
+| [`DRC_NEW_VIOLATIONS`](troubleshoot.md#drc_new_violations) | KiCad's DRC of the routed copy finds new violations: counted by type, the first places with nets and position (mm); a warning only — Accept still works (costly, not failed), then fix them in KiCad → Inspect → Design Rules Checker |
+| [`RULES_MISMATCH`](troubleshoot.md#rules_mismatch) | error, self-check: KiCad's DRC required a larger clearance between two nets than topor gave the router (topor read the design rules wrong); the run stops before the preview with an error dialog naming the nets and both values, nothing is applied — please report it |
 | [`ENGINE_FAILED`](troubleshoot.md#engine_failed) | error: all or most connections failed with the same engine error (e.g. the board's projection could not be built); with nothing routed the run ends in an error dialog naming the cause, never as a normal run that routed nothing |
 
 The pre-flight also warns about pads inside a track keepout on all their layers

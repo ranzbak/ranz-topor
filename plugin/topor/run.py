@@ -43,7 +43,7 @@ from pathlib import Path
 
 from toporlib import drcloop, pcbfile
 from toporlib import rules as rules_mod
-from toporlib.drc import classify, run_drc
+from toporlib.drc import classify, new_routing, run_drc
 from toporlib.drcloop import DrcJudgement
 from toporlib.kicad_cli import KicadCliCancelled, KicadCliTimeout
 
@@ -917,8 +917,19 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     # K1: the engine's report lines that need the user's attention become findings (postrun.py); a post-run
     # finding replaces a pre-flight one of the same code (e.g. DIFF_PAIRS_SKIPPED: "will not" -> "were not").
     post = postrun.route_findings(rr)
+    mismatch = None
     if loop.routed_drc is not None:  # KiCad's own view of the pours after the refill (K1)
         post += postrun.drc_pour_findings(loop.routed_drc.unconnected)
+        # KiCad's new violations: a warning with counts and places (never blocks Accept), and the self-check that
+        # the clearances KiCad required are the ones the engine was given (RULES_MISMATCH, a loud error below)
+        new_v = new_routing(loop.routed_drc, base_drc, loop.created)
+        if new_v:
+            try:
+                tracks = pcbfile.track_lines(Path(out.routed_pcb).read_text()) if out.routed_pcb else None
+            except OSError:
+                tracks = None
+            post += postrun.drc_new_findings(new_v, tracks)
+            mismatch = postrun.rules_mismatch(new_v, eng_model)
     post_codes = {f.code for f in post}
     findings[:] = [f for f in findings if f.code not in post_codes] + post
     for f in post:
@@ -940,6 +951,19 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     log.line(f"routed {out.routed}/{out.total}, stop {out.stop_reason}, router {out.router_s:.1f} s, CPU {out.router_cpu_s:.1f} s, rounds {loop.rounds}, "
              f"routing_new {classified['routing_new']}, unconnected_new {inc['unconnected_new']}, {time_limit_text(out.time_limit)}")
     drc_src = routed_dir / "drc-routed.json"
+    if mismatch is not None and out.items:
+        # fail fast: the result was routed to rules KiCad does not agree with; nothing is applied, the error dialog
+        # names the nets and both clearances (the report keeps the result and KiCad's DRC)
+        log.line(f"error: {mismatch.message}")
+        out.error = mismatch
+        findings.append(mismatch)
+        report.facts["findings"] = findings
+        report.set_outcome("error", mismatch.code)
+        out.wall_s = time.monotonic() - t0
+        report.write(result=_facts_result("error", out, rr), drc_src=drc_src)
+        ctx()
+        ui.error(mismatch)
+        return finish("error", error_code=mismatch.code)
     engine_err = probe_mod.engine_failure(rr)  # robust-cdt: an engine error is loud, never a quiet empty run
     if engine_err is not None and not out.items and not out.cancelled:
         log.line(f"error: {engine_err.message}")
