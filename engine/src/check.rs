@@ -52,6 +52,53 @@ enum RegionKind {
     Keepout { tracks: bool, vias: bool },
 }
 
+/// A custom clearance region (`Rules::clearance_regions`): a copper pair of which either item
+/// matches it (touches the polygon, or lies wholly inside for `enclosed`) needs `clearance`
+/// instead of the nets' clearances; a later region wins.
+struct CRegion {
+    poly: Vec<Vec2>,
+    bbox: Aabb,
+    clearance: f64,
+    enclosed: bool,
+    layers: Vec<u32>,
+}
+
+impl CRegion {
+    /// Does copper `geo` (bounding box `bb`) match the region? O(polygon edges).
+    fn matches(&self, geo: &Geo, bb: &Aabb) -> bool {
+        if !self.bbox.overlaps(bb) {
+            return false;
+        }
+        let n = self.poly.len();
+        let touches = (0..n).any(|i| {
+            let edge = Track {
+                prim: Prim::Seg(Seg { a: self.poly[i], b: self.poly[(i + 1) % n] }),
+                w: 0.0,
+            };
+            let g = match geo {
+                Geo::Track(t) => copper_gap(t, &edge),
+                Geo::Skel(sk) => copper_gap_skeleton(&edge, sk),
+            };
+            g <= 0.0
+        });
+        let p = match geo {
+            Geo::Track(t) => match &t.prim {
+                Prim::Seg(s) => s.a,
+                Prim::Arc(a) => a.start(),
+            },
+            Geo::Skel(Skeleton::Point { p, .. }) => *p,
+            Geo::Skel(Skeleton::Seg { s, .. }) => s.a,
+            Geo::Skel(Skeleton::Poly { pts, .. }) => pts.first().copied().unwrap_or_default(),
+        };
+        let inside = point_in_poly(p, &self.poly);
+        if self.enclosed {
+            !touches && inside
+        } else {
+            touches || inside
+        }
+    }
+}
+
 /// A polygon area: foreign copper shape or keepout.
 struct Region {
     poly: Vec<Vec2>,
@@ -194,6 +241,8 @@ pub struct Checker {
     grids: HashMap<u32, Grid<usize>>,
     regions: Vec<Region>,
     region_grids: HashMap<u32, Grid<usize>>,
+    /// Custom clearance regions, in rule order (empty for a board without such rules).
+    cregions: Vec<CRegion>,
     /// D7, KiCad's coupled-pair clearance (`drc_engine.cpp:346-362`, `isCoupledDiffPair`): between
     /// the two halves of a differential pair whose gap is below their clearance, the gap is the
     /// clearance. `(net, net)` both orders -> clearance (nm).
@@ -252,6 +301,21 @@ impl Checker {
             grids: HashMap::new(),
             regions: Vec::new(),
             region_grids: HashMap::new(),
+            cregions: r
+                .clearance_regions
+                .iter()
+                .filter(|cr| cr.poly.len() >= 3)
+                .map(|cr| {
+                    let poly: Vec<Vec2> = cr.poly.iter().map(|p| p.to_vec2()).collect();
+                    CRegion {
+                        bbox: pts_bbox(poly.iter().copied(), 0.0),
+                        poly,
+                        clearance: cr.clearance as f64,
+                        enclosed: cr.enclosed,
+                        layers: cr.layers.clone(),
+                    }
+                })
+                .collect(),
             coupled: HashMap::new(),
         };
         for dp in &r.diff_pairs {
@@ -502,16 +566,47 @@ impl Checker {
         point_in_poly(start, &r.poly).then_some(0.0)
     }
 
-    fn required(&self, item_net: i32, o: &Obstacle, own_clr: f64) -> f64 {
+    fn required(&self, item_net: i32, item_regs: &[usize], layer: u32, o: &Obstacle, own_clr: f64) -> f64 {
         let base = match o.kind {
             Kind::Hole => self.hole_clearance,
             Kind::Edge => self.edge_clearance,
             _ => match self.coupled.get(&(item_net, o.net)) {
                 Some(&g) => g,
-                None => self.clr(item_net).max(own_clr).max(self.rules_min_clearance),
+                None => match self.regime(item_regs, o, layer) {
+                    Some(c) => c,
+                    None => self.clr(item_net).max(own_clr).max(self.rules_min_clearance),
+                },
             },
         };
         base + self.margin
+    }
+
+    /// Custom clearance regions copper `geo` (box `bb`) matches, ascending. O(regions); empty and
+    /// free without regions.
+    fn region_hits(&self, geo: &Geo, bb: &Aabb) -> Vec<usize> {
+        if self.cregions.is_empty() {
+            return Vec::new();
+        }
+        (0..self.cregions.len()).filter(|&k| self.cregions[k].matches(geo, bb)).collect()
+    }
+
+    /// Clearance of a copper pair under the custom regions: the last region (rule order) on `layer`
+    /// that the item (`item_regs`) or the obstacle `o` matches. O(regions).
+    fn regime(&self, item_regs: &[usize], o: &Obstacle, layer: u32) -> Option<f64> {
+        if self.cregions.is_empty() {
+            return None;
+        }
+        let on = |k: &usize| {
+            let l = &self.cregions[*k].layers;
+            l.is_empty() || l.contains(&layer)
+        };
+        let oh = self.region_hits(&o.geo, &o.bbox());
+        item_regs
+            .iter()
+            .chain(oh.iter())
+            .filter(|k| on(k))
+            .max()
+            .map(|&k| self.cregions[k].clearance)
     }
 
     /// KiCad's net-tie exclusion for a pad `o` of a net-tie footprint against an item of `net`
@@ -608,6 +703,7 @@ impl Checker {
             _ => None,
         };
         let is_via = matches!(item, Item::Via(_));
+        let item_regs = self.region_hits(&Geo::Track(track), &bb);
         for &layer in &layers {
             let mut test = |o: &Obstacle, own_clr: f64| {
                 if let Some(d) = &drill_track {
@@ -656,7 +752,7 @@ impl Checker {
                         }
                     }
                 }
-                let req = self.required(net, o, own_clr);
+                let req = self.required(net, &item_regs, layer, o, own_clr);
                 let gap = o.gap(&track);
                 if gap < req && !Self::tie_excluded(o, net, &track) {
                     let (g, r) = (gap.round() as i64, req.round() as i64);

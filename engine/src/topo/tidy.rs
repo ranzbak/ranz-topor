@@ -163,6 +163,121 @@ fn via_on(layers: &[u32], layer: u32, all: &[u32]) -> bool {
     a.min(b) <= r && r <= a.max(b)
 }
 
+/// One piece of a track end pulled back inside its pad ([`pad_ends_off_edge`]), KiCad frame:
+/// net, layer, the cut-away stretch `from`-`to` and the track width.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EdgeTrim {
+    pub net: i32,
+    pub layer: u32,
+    pub from: (i64, i64),
+    pub to: (i64, i64),
+    pub width: i64,
+}
+
+/// Track ends at the centre of a pad that itself lies within the board-edge clearance
+/// (`rules.edge_clearance`; a `.kicad_dru` `edge_clearance` rule raises it): the end is moved
+/// along its segment, still inside the pad, to the first point where the track keeps the edge
+/// clearance. KiCad connects a track end anywhere inside the pad
+/// (`CONNECTIVITY_DATA::TestTrackEndpointDangling`) and its DRC measures the track, not the pad
+/// it enters (`DRC_TEST_PROVIDER_EDGE_CLEARANCE`), so the stub from the centre to the pad's
+/// inner side would be a violation of its own while the pad's is pre-existing.
+///
+/// Conservative: the new end keeps the whole track end disc inside the pad (depth ≥ width/2, so
+/// the copper and the connection width are unchanged), the rest of the segment must keep the
+/// clearance, the segment is only ever shortened (no new clearance to anything), a via at the
+/// end keeps it, and a board whose edge check is `ignore`d is left alone. Returns the cut-away
+/// stretches. O(T · (P_net + E)) for T tracks, E outline segments.
+pub fn pad_ends_off_edge(model: &BoardModel, items: &mut [Item]) -> Vec<EdgeTrim> {
+    let mut out = Vec::new();
+    let ec = model.rules.edge_clearance as f64;
+    if ec <= 0.0 || model.outline.is_empty() || model.rules.ignored_checks.iter().any(|c| c == "copper_edge_clearance") {
+        return out;
+    }
+    let outline = super::board::outline_segments(model);
+    let d_edge = |q: Vec2| outline.iter().map(|&(a, b)| super::draw::seg_dist(q, a, b)).fold(f64::INFINITY, f64::min);
+    let seg_edge = |p: Vec2, q: Vec2| outline.iter().map(|&(a, b)| super::draw::seg_seg_dist(p, q, a, b)).fold(f64::INFINITY, f64::min);
+    let via_at: HashSet<(i32, P)> = items
+        .iter()
+        .filter_map(|it| if let Item::Via(v) = it { Some((v.net, (v.at.x, v.at.y))) } else { None })
+        .chain(model.vias.iter().map(|v| (v.net, (v.at.x, -v.at.y))))
+        .collect();
+    let mut pads_of: HashMap<i32, Vec<usize>> = HashMap::new();
+    for (i, p) in model.pads.iter().enumerate() {
+        if p.net != 0 {
+            pads_of.entry(p.net).or_default().push(i);
+        }
+    }
+    // a margin above the 1 nm grid rounding and KiCad's polygon error
+    const MARGIN: f64 = 2_000.0;
+    for it in items.iter_mut() {
+        let (Some((a, b)), Item::Track(t)) = (seg_of(it), &*it) else { continue };
+        let (net, layer, width) = (t.net, t.layer, t.width);
+        let half = 0.5 * width as f64;
+        let req = ec + half + MARGIN;
+        let Some(pads) = pads_of.get(&net) else { continue };
+        let mut new = (a, b);
+        let mut cut = Vec::new();
+        for (end, other) in [(a, b), (b, a)] {
+            if via_at.contains(&(net, end)) {
+                continue;
+            }
+            let (pe, po) = (math(end), math(other));
+            if d_edge(pe) >= req {
+                continue;
+            }
+            let Some(pi) = pads.iter().copied().find(|&pi| {
+                let p = &model.pads[pi];
+                (p.layers.is_empty() || p.layers.contains(&layer)) && (p.center.x as i64, -(p.center.y as i64)) == end
+            }) else {
+                continue;
+            };
+            let sk = model.skeleton(&model.pads[pi], layer);
+            let len = (po - pe).len();
+            if len < 1.0 {
+                continue;
+            }
+            let u = (po - pe) * (1.0 / len);
+            // first point along the segment that keeps the clearance (10 µm steps, then halving)
+            let step = 10_000.0;
+            let mut hi = None;
+            let mut s = step;
+            while s < len {
+                if d_edge(pe + u * s) >= req {
+                    hi = Some(s);
+                    break;
+                }
+                s += step;
+            }
+            let Some(mut hi) = hi else { continue };
+            let mut lo = hi - step;
+            for _ in 0..12 {
+                let m = 0.5 * (lo + hi);
+                if d_edge(pe + u * m) >= req {
+                    hi = m;
+                } else {
+                    lo = m;
+                }
+            }
+            let q = pe + u * hi;
+            let qk: P = (q.x.round() as i64, (-q.y).round() as i64);
+            if depth(&sk, math(qk)) < half || d_edge(math(qk)) < ec + half || seg_edge(math(qk), po) < ec + half {
+                continue;
+            }
+            if end == a {
+                new.0 = qk;
+            } else {
+                new.1 = qk;
+            }
+            cut.push(EdgeTrim { net, layer, from: end, to: qk, width });
+        }
+        if new != (a, b) && new.0 != new.1 {
+            set_seg(it, new.0, new.1);
+            out.extend(cut);
+        }
+    }
+    out
+}
+
 /// Make `items` (KiCad frame, with `conn[i]` the connection of item `i`) stable under KiCad's
 /// Cleanup Tracks & Vias (module doc). O(see module).
 pub fn tidy(model: &BoardModel, items: &mut Vec<Item>, conn: &mut Vec<usize>) -> TidyStats {
@@ -527,6 +642,57 @@ mod tests {
         let st = tidy(m, &mut items, &mut c);
         assert_eq!(items.len(), c.len());
         (items, st)
+    }
+
+    fn edge_model(edge_clear: i64, ignored: bool) -> BoardModel {
+        // round 1.6 mm pad of net 1 at (2.74, 0) mm; board edge the vertical line x = 4 mm
+        let j = serde_json::json!({
+            "layers": [{"id": 0, "name": "F.Cu"}],
+            "pads": [{"net": 1, "center": [2_740_000, 0], "layers": [0], "shapes": {"0": {"kind": "circle", "d": 1_600_000}}}],
+            "outline": [{"kind": "seg", "a": [4_000_000, -10_000_000], "b": [4_000_000, 10_000_000]}],
+        });
+        let mut base = serde_json::to_value(BoardModel::default()).expect("model json");
+        for (k, v) in j.as_object().expect("object") {
+            base[k] = v.clone();
+        }
+        let mut m = BoardModel::from_json(&base.to_string()).expect("model");
+        m.rules.edge_clearance = edge_clear;
+        if ignored {
+            m.rules.ignored_checks.push("copper_edge_clearance".into());
+        }
+        m
+    }
+
+    #[test]
+    fn pad_end_in_the_edge_band_moves_inside_the_pad_to_the_clearance() {
+        // eprom-edge: 1.5 mm edge clearance, the pad centre 1.26 mm from the edge
+        let m = edge_model(1_500_000, false);
+        let mut items = vec![seg(1, (2_740_000, 0), (0, 0))];
+        let cut = pad_ends_off_edge(&m, &mut items);
+        assert_eq!(cut.len(), 1);
+        let (a, b) = seg_of(&items[0]).expect("seg");
+        assert_eq!(b, (0, 0), "the far end stays");
+        // edge 4 mm - 1.5 mm - 0.125 mm half width - margin; inside the pad (left rim 1.94 mm)
+        assert!(a.0 <= 2_375_000 - 2_000 && a.0 > 2_300_000 && a.1 == 0, "{a:?}");
+    }
+
+    #[test]
+    fn pad_end_stays_when_the_edge_is_kept_ignored_or_a_via_holds_it() {
+        // already clear (0.8 mm rule), the check ignored, or the band reaching past the pad
+        for (ec, ign) in [(800_000, false), (1_500_000, true), (2_700_000, false)] {
+            let m = edge_model(ec, ign);
+            let mut items = vec![seg(1, (2_740_000, 0), (0, 0))];
+            assert!(pad_ends_off_edge(&m, &mut items).is_empty(), "{ec} {ign}");
+            assert_eq!(seg_of(&items[0]), Some(((2_740_000, 0), (0, 0))));
+        }
+        // a via in the pad: the track end is its connection
+        let m = edge_model(1_500_000, false);
+        let via = Item::Via(crate::model::ViaItem { kind: "via".into(), net: 1, at: crate::model::Pt { x: 2_740_000, y: 0 }, d: 600_000, drill: 300_000, layers: Vec::new(), group: None, wire: None });
+        let mut items = vec![seg(1, (2_740_000, 0), (0, 0)), via];
+        assert!(pad_ends_off_edge(&m, &mut items).is_empty());
+        // another net's track: not its pad
+        let mut items = vec![seg(2, (2_740_000, 0), (0, 0))];
+        assert!(pad_ends_off_edge(&m, &mut items).is_empty());
     }
 
     #[test]

@@ -422,7 +422,11 @@ pub struct DiffPairRule {
     pub rule_skew: String,
 }
 
-/// A courtyard-bound custom clearance rule.
+/// A position-bound custom clearance rule (`.kicad_dru` `A.intersectsCourtyard('U6')`,
+/// `A.intersectsArea('x')`, `A.enclosedByArea('x')`; `toporlib.custom_rules`): for a pair of
+/// copper items of which either one touches the polygon (`enclosed`: lies wholly inside it) the
+/// rule's clearance replaces the nets' (KiCad: the matching custom rule wins, also when it is
+/// smaller). A later region of the list wins over an earlier one (KiCad's last matching rule).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct ClearanceRegion {
     #[serde(default)]
@@ -436,6 +440,12 @@ pub struct ClearanceRegion {
     /// Clearance (nm) that applies to items touching the polygon.
     #[serde(default)]
     pub clearance: i64,
+    /// Only items wholly inside the polygon match (`enclosedByArea`).
+    #[serde(default)]
+    pub enclosed: bool,
+    /// Copper layer ids the rule applies on (`(layer ...)`); empty = every layer.
+    #[serde(default)]
+    pub layers: Vec<u32>,
 }
 
 impl Rules {

@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pcbnew
 
-from toporlib.dru import dru_courtyard_clearances, merge_dru_keepouts, parse_dru
+from toporlib.custom_rules import apply_to_model
+from toporlib.dru import merge_dru_keepouts
 from toporlib.geom import circle_ring, find_dangling, hull, track_item
 
 _KIND = {
@@ -451,24 +452,19 @@ def _export_pours(board, cu: list[int]) -> list[dict]:
     return out
 
 
-def _courtyard_regions(board, dru_text: str | None) -> list[dict]:
-    """The courtyard-bound custom clearance rules of the .kicad_dru with the courtyard polygons."""
-    if not dru_text:
-        return []
-
-    want = dru_courtyard_clearances(parse_dru(dru_text))
-    out = []
-    for name, ref, cl in want:
-        for fp in board.GetFootprints():
-            if fp.GetReference() != ref:
-                continue
-            lay = pcbnew.F_CrtYd if fp.GetLayer() == pcbnew.F_Cu else pcbnew.B_CrtYd
+def _courtyards(board) -> dict:
+    """Footprint reference -> ``{"F"|"B": [poly]}``: the courtyard polygons pcbnew builds from the
+    F.CrtYd / B.CrtYd outlines (KiCad frame, nm), for the custom rules' courtyard tests."""
+    out: dict = {}
+    for fp in board.GetFootprints():
+        fp.BuildCourtyardCaches()
+        for side, lay in (("F", pcbnew.F_CrtYd), ("B", pcbnew.B_CrtYd)):
             ps = fp.GetCourtyard(lay)
             for i in range(ps.OutlineCount()):
                 o = ps.Outline(i)
                 poly = [[int(o.CPoint(k).x), int(o.CPoint(k).y)] for k in range(o.PointCount())]
                 if len(poly) >= 3:
-                    out.append({"name": name, "ref": ref, "poly": poly, "clearance": cl})
+                    out.setdefault(str(fp.GetReference()), {}).setdefault(side, []).append(poly)
     return out
 
 
@@ -487,10 +483,10 @@ def export_model(board, rules: dict, *, name: str, dru_text: str | None = None) 
     tie_groups = {fp.GetReference(): _net_tie_groups(fp) for fp in board.GetFootprints() if fp.IsNetTie()}
     pads, holes, net_ties = _export_pads(board, cu, tie_groups)
     kept, vias = _export_copper(board)
-    rules = {**rules, "clearance_regions": _courtyard_regions(board, dru_text)}
+    rules = {**rules, "clearance_regions": []}
     keepouts, rules = merge_dru_keepouts(_export_keepouts(board), rules, dru_text,
                                          {l["name"]: l["id"] for l in layers})
-    return {
+    model = {
         "units": "nm",
         "board": name,
         "layers": layers,
@@ -509,6 +505,7 @@ def export_model(board, rules: dict, *, name: str, dru_text: str | None = None) 
         "dangling_ends": find_dangling_ends(board),
         "rules": rules,
     }
+    return apply_to_model(model, dru_text, courtyards=_courtyards(board) if dru_text else {})
 
 
 def write_model_json(model: dict, path) -> Path:

@@ -528,6 +528,31 @@ pub fn route_with(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         append_ignored(&mut r, model, &ignored);
         r
     };
+    // track ends in pads that sit within the board-edge clearance: off the pad centre, so the
+    // track keeps the clearance KiCad's DRC measures for it
+    let trims = crate::topo::tidy::pad_ends_off_edge(model, &mut r.items);
+    if !trims.is_empty() {
+        let on_cut = |v: &ViolationReport| {
+            v.kind == "edge_clearance"
+                && trims.iter().any(|t| {
+                    let f = |p: (i64, i64)| crate::geom::Vec2 { x: p.0 as f64, y: p.1 as f64 };
+                    let at = crate::geom::Vec2 { x: v.at[0] as f64, y: v.at[1] as f64 };
+                    t.net == v.net && crate::topo::draw::seg_seg_dist(at, at, f(t.from), f(t.to)) <= 0.5 * t.width as f64 + 50_000.0
+                })
+        };
+        let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut r.violations).into_iter().partition(|v| on_cut(v));
+        r.violations = kept;
+        for v in &gone {
+            if let Some(c) = r.connections.iter_mut().find(|c| c.id == v.conn) {
+                c.violations = c.violations.saturating_sub(1);
+            }
+        }
+        r.warnings.push(format!(
+            "{} track ends in pads within the board-edge clearance moved off the pad centre (still inside the pad) so the track keeps the edge clearance; {} edge-clearance violations gone",
+            trims.len(),
+            gone.len()
+        ));
+    }
     if opts.cleanup_safe {
         // the copper as written must survive KiCad's Cleanup Tracks & Vias unchanged
         if r.item_conn.len() != r.items.len() {

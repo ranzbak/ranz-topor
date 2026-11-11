@@ -16,7 +16,8 @@ import fnmatch
 import re
 from dataclasses import dataclass
 
-from .dru import DruRule, _disallow_areas, match_condition, parse_dru
+from .custom_rules import CustomRules, canonical_layers, canonical_name
+from .dru import DruRule, _disallow_areas, parse_dru
 
 JLCPCB_1OZ: dict = {
     "width": 200_000,
@@ -193,6 +194,13 @@ def ignored_checks_from_pro(pro: dict) -> list[str]:
     return sorted(k for k, v in (ds.get("rule_severities") or {}).items() if v == "ignore")
 
 
+def _diff_base(net: str) -> str | None:
+    """Base name of a differential-pair net (``inDiffPair('...')``), None for a net without a pair suffix."""
+    from .diffpair import base_name, match_dp_suffix  # noqa: PLC0415
+
+    return base_name(net) if net and match_dp_suffix(net) is not None else None
+
+
 # ------------------------------------------------------------------ resolution
 def resolve_rules_from_project(
     pro: dict,
@@ -206,8 +214,13 @@ def resolve_rules_from_project(
     apply_fab_floors: bool = True,
     copper_layer_count: int = 2,
     net_codes: dict[str, int] | None = None,
+    layer_names: dict[int, str] | None = None,
 ) -> dict:
     """Resolve design rules; manufacturer minimums (the profile) are FLOORS.
+
+    Custom rules (`dru_text`) are applied as :mod:`toporlib.custom_rules` describes (per-net values, board-wide
+    edge / hole clearance, a region plan in ``custom_regions``, a report in ``custom_rules``); `layer_names`:
+    copper layer id -> the board's (user) layer name, so a rule's ``(layer "<user name>")`` matches.
 
     `pro`: parsed .kicad_pro (design-rule floors). `netclass_of`: net name -> effective class name (``""``
     optional -> Default; a composite ``"Power,Default"`` is resolved from `classes` unless it is itself a
@@ -223,6 +236,15 @@ def resolve_rules_from_project(
     """
     settings_table = settings_table or {}
     dv = rule_values_from_pro(pro)
+    codes = net_codes if net_codes is not None else net_codes_by_name(netclass_of)
+    cr = CustomRules(parse_dru(dru_text) if dru_text else [], canonical_layers(copper_layer_count),
+                     {v: canonical_name(k) for k, v in (layer_names or {}).items()})
+    cr_nets = [(n, netclass_of.get(n, "Default"), _diff_base(n)) for n in [""] + sorted(codes)] if cr else []
+    if cr:
+        # Board-wide custom values replace the Board Setup ones before the fab floors (KiCad: the matching
+        # custom rule wins over the implicit board rule).
+        dv["min_copper_edge_clearance"] = cr.board("edge_clearance", dv["min_copper_edge_clearance"], cr_nets)
+        dv["min_hole_clearance"] = cr.board("hole_clearance", dv["min_hole_clearance"], cr_nets)
     warnings: list[str] = []
     floors_applied: list[dict] = []
     annular_floor = profile["annular_2l"] if copper_layer_count <= 2 else profile["annular_4l"]
@@ -268,36 +290,6 @@ def resolve_rules_from_project(
             warnings.append(f"REFUSE: rule {r.name} disallows {' '.join(r.disallow)} without a supported "
                             "area condition (A.insideArea('name'))")
 
-    unparsed: set[str] = set()
-
-    def apply_dru(net_name: str, netclass: str, clearance: int) -> tuple[int, int | None, int]:
-        """Return (clearance, custom width or None, custom minimum width or 0) after applying matching
-        custom rules; the minimum is the largest `track_width` min of the matching rules (the floor a
-        necked exit stub may not go below, engine NetRule.min_width)."""
-        width = None
-        min_w = 0
-        for r in rules:
-            if r.severity in ("ignore", "exclude"):
-                continue
-            m = match_condition(r.condition, net_name=net_name, netclass=netclass, ref=None)
-            cl = r.constraints.get("clearance", {}).get("min")
-            if m is None:
-                if (cl is not None and cl > 0) or "track_width" in r.constraints:
-                    unparsed.add(r.name)
-                if cl is not None and cl > clearance:
-                    clearance = cl  # strictest fallback
-            elif m:
-                if cl is not None and cl > clearance:
-                    clearance = cl
-                tw = r.constraints.get("track_width", {})
-                if "min" in tw:
-                    min_w = max(min_w, int(tw["min"]))
-                if "opt" in tw:
-                    width = tw["opt"]  # last matching rule wins
-                elif "min" in tw:
-                    width = max(width or 0, tw["min"])
-        return clearance, width, min_w
-
     def eff(ncname: str, field: str) -> int:
         """First class of the (composite) name that sets `field`, else Default, else KiCad's built-in."""
         parts = [ncname] if ncname in classes else ncname.split(",")
@@ -308,11 +300,24 @@ def resolve_rules_from_project(
                 return int(v)
         return _CLASS_DEFAULTS_NM[field]
 
+    def base_clearance(net_name: str) -> int:
+        return max(eff(netclass_of.get(net_name, "Default"), "clearance"), floors["min_clearance"])
+
     def net_rule(net_name: str) -> dict:
         ncname = netclass_of.get(net_name, "Default")
-        clearance = max(eff(ncname, "clearance"), floors["min_clearance"])
-        clearance, custom_w, custom_min_w = apply_dru(net_name, ncname, clearance)
+        clearance = base_clearance(net_name)
         class_w = eff(ncname, "track_width")
+        via_d = max(_nz(eff(ncname, "via_diameter"), profile["via_d"]), floors["min_via_diameter"])
+        via_drill = max(_nz(eff(ncname, "via_drill"), profile["via_drill"]), floors["min_via_drill"])
+        cu = cr.net(net=net_name, netclass=ncname, base_clearance=clearance, base_width=class_w,
+                    base_via=(via_d, via_drill), diff_base=_diff_base(net_name)) if cr else None
+        if cu is not None and cu.clearance is not None:
+            if cu.clearance < floors["min_clearance"]:
+                cr.notes.add(f"floor: custom clearance {cu.clearance / 1e6:g} -> {floors['min_clearance'] / 1e6:g} mm "
+                             f"(fab minimum, [fab] profile)", net_name)
+            clearance = max(cu.clearance, floors["min_clearance"])
+        custom_w = cu.width if cu is not None else None
+        custom_min_w = cu.min_width if cu is not None else 0
         non_default = any(p != "Default" for p in ncname.split(","))
         if custom_w is not None:
             width, src = custom_w, "custom_rule"
@@ -324,30 +329,46 @@ def resolve_rules_from_project(
             width, src = int(settings_table[net_name]), "settings_table"
         else:
             width, src = class_w if class_w > 0 else profile["width"], "default"
+        if cu is not None and src != "custom_rule":
+            # a custom min / max still bounds a width from elsewhere
+            if cu.min_width and width < cu.min_width:
+                width, src = cu.min_width, "custom_rule"
+            if cu.max_width is not None and width > cu.max_width:
+                width, src = max(cu.max_width, cu.min_width), "custom_rule"
+        if cu is not None and src == "custom_rule" and width < floors["min_track_width"]:
+            cr.notes.add(f"floor: custom track width {width / 1e6:g} -> {floors['min_track_width'] / 1e6:g} mm "
+                         f"(fab minimum, [fab] profile)", net_name)
         width = max(width, floors["min_track_width"])
         if src == "default" and net_name and _POWER_RE.match(net_name):
             warnings.append(f"POWER?: {net_name} uses Default width")
+        if cu is not None and cu.via_d is not None:
+            via_d = max(cu.via_d, floors["min_via_diameter"])
+        if cu is not None and cu.via_drill is not None:
+            via_drill = max(cu.via_drill, floors["min_via_drill"])
         return {
             "clearance": clearance,
             "width": width,
-            "via_d": max(_nz(eff(ncname, "via_diameter"), profile["via_d"]), floors["min_via_diameter"]),
-            "via_drill": max(_nz(eff(ncname, "via_drill"), profile["via_drill"]), floors["min_via_drill"]),
+            "via_d": via_d,
+            "via_drill": via_drill,
             "netclass": ncname,
             "width_source": src,
             "min_width": custom_min_w,
         }
 
+    if cr:
+        cr.plan_regions(cr_nets, {n: base_clearance(n) for n, _c, _d in cr_nets}, floors["min_clearance"])
     default = net_rule("")
     default["width_source"] = "default"
-    codes = net_codes if net_codes is not None else net_codes_by_name(netclass_of)
     per_net: dict[str, dict] = {}
     for name, code in sorted(codes.items(), key=lambda kv: kv[1]):
         if int(code) == 0:
             continue
         per_net[str(int(code))] = net_rule(name)
 
-    for name in sorted(unparsed):
-        warnings.append(f"unparsed condition in rule {name}: using strictest fallback")
+    if cr:
+        custom_notes = cr.rule_warnings(skip=_REFUSE) + cr.notes.items
+        warnings.extend(cr.rule_warnings(skip=_REFUSE))
+        warnings.extend(cr.notes.items)
 
     predefined = predefined_vias_from_pro(pro)
     if via_setup_missing_from(predefined, classes):
@@ -364,4 +385,7 @@ def resolve_rules_from_project(
         "floors_applied": floors_applied,
         "warnings": warnings,
         "ignored_checks": ignored_checks_from_pro(pro),
+        # How each custom rule is used (report) and the courtyard / rule-area regions the model export turns
+        # into ``clearance_regions`` (it has the polygons). Absent without a .kicad_dru rule.
+        **({"custom_rules": cr.classify(), "custom_regions": cr.regions, "custom_notes": custom_notes} if cr else {}),
     }

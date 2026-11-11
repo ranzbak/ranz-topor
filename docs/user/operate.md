@@ -40,7 +40,7 @@ router may add smaller fab-profile vias ([Fab minimums and via sizes](#fab-minim
 | Track widths | KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Track Widths and netclass track width |
 | Via sizes | KiCad → File → Board Setup → Design Rules → Net Classes (via size / hole): each net routes with its net class via, plus smaller [fab-profile vias](#fab-minimums-and-via-sizes) where space requires. Pre-defined Sizes → Vias are **not** routed with in 0.4.0; they only stop [`VIA_NOT_SET_UP`](troubleshoot.md#via_not_set_up), which uses `[vias] fallback_diameter_mm` / `fallback_drill_mm` when nothing is set up |
 | Net classes and net assignments; power net classes; `topor_p1`..`topor_p3` priority classes | KiCad → File → Board Setup → Design Rules → Net Classes |
-| Custom rules (`.kicad_dru`; `disallow track/via` areas become keepouts, track-angle rules are refused) | KiCad → File → Board Setup → Design Rules → Custom Rules |
+| Custom rules (`.kicad_dru`): clearance, edge / hole clearance, track width, via size; `disallow track/via` areas become keepouts, track-angle rules are refused ([Custom design rules](#custom-design-rules)) | KiCad → File → Board Setup → Design Rules → Custom Rules |
 | Layer types (signal / power / mixed / jumper) → plane or routed layer | KiCad → File → Board Setup → Board Editor Layers |
 | Via protection (filled + capped), needed for vias in pads | KiCad → File → Board Setup → Board Stackup → Board Finish → Via protection |
 | Locked tracks and vias | KiCad → item Properties → Locked |
@@ -114,6 +114,51 @@ Keys marked *since 0.5.0* in the reference are written commented-out: they are a
 feature behind them arrives in 0.5.0. Unknown keys give [`CFG_UNKNOWN_KEY`](troubleshoot.md#cfg_unknown_key);
 a wrong value gives [`CFG_VALUE`](troubleshoot.md#cfg_value) and the default is used. The file is read on
 every run; edit it with any text editor (comments are kept when topor writes to it).
+
+### Custom design rules
+
+KiCad 10 keeps custom rules in `<board>.kicad_dru` (KiCad → File → Board Setup → Design Rules → Custom
+Rules). Neither the IPC API of KiCad 10 nor its Python module can evaluate them for the plugin, so topor
+reads the file itself (`toporlib/druexpr.py`, `toporlib/custom_rules.py`) and follows KiCad's own resolution:
+rules are tried in file order, a condition is tried for (A, B) and (B, A), and the **last matching rule wins**,
+also when its value is smaller than the net class's. The test suite checks this against KiCad's DRC engine
+(`tests/test_custom_rules.py`).
+
+Honoured constraints and how the router uses them:
+
+| Constraint | Used as |
+|---|---|
+| `clearance` | per-net clearance (net / net class / layer conditions); a **clearance region** for `A.intersectsCourtyard('REF')`, `A.insideCourtyard('REF')`, `A.intersectsArea('name')`, `A.insideArea('name')`, `A.enclosedByArea('name')` (inside, the rule's value replaces both nets' clearances); a **pad clearance** for pad conditions (`A.Pad_Type == 'SMD'`, `A.memberOfFootprint('REF')`, `A.Type == 'Pad'`, `A.isPlated()`) |
+| `edge_clearance`, `hole_clearance` | board-wide copper-to-edge / hole clearance (the largest value any routed net gets); a track into a pad that itself lies within the edge clearance ends inside that pad off its centre, where the track keeps the clearance (the pad's own violation is pre-existing) |
+| `track_width` | per-net width: `opt` is the target, `min` / `max` bound it (`min` is also the floor a necked pad exit may not go below) |
+| `via_diameter`, `hole_size` | per-net via size (`opt`, raised to `min`) |
+| `disallow track` / `via` with `A.insideArea('name')` | keepout ([Fab minimums and via sizes](#fab-minimums-and-via-sizes) floors do not apply) |
+| `diff_pair_gap`, `diff_pair_uncoupled`, `skew` | [Differential pairs](#differential-pairs) |
+
+Conditions topor evaluates: `A.NetClass` / `A.NetName` (`==`, `!=`, wildcards, case-insensitive, composite
+classes), `A.hasNetclass()`, `A.Type`, `A.Pad_Type`, `A.Layer`, `A.memberOfFootprint()`, `A.inDiffPair()`,
+`A.isPlated()`, the courtyard and area tests above, `B.` versions of all of them, `&&`, `||`, `!` and `(layer
+outer | inner | <name>)`.
+
+Where topor's model is coarser than the rule, it errs on the safe side and says so in the pre-flight finding
+[`CUSTOM_RULE_LIMITED`](troubleshoot.md#custom_rule_limited), naming the rule:
+
+- a condition that depends on the other item (`A.NetClass == 'x' && B.NetClass == 'y'`) or that topor cannot
+  read (`A.getField()`, `A.Position_X`, `A.fromTo()`, ...): a **stricter** value is applied to every net it may
+  concern, a **looser** one is not used;
+- one clearance and one track width per net: a value that differs per layer (`(layer inner)`) or between
+  tracks and vias is applied as the largest clearance; the width is the one most layers share, clamped into
+  every layer's min / max (a board with layer-specific impedance widths gets a warning per rule);
+- a pad clearance can only add clearance: a looser rule for some pads is not used;
+- a courtyard / area rule whose value inside depends on the net is not a region (handled as above);
+- `length`, `via_count`, `track_angle`, `physical_clearance` and other constraints are not honoured (named
+  warning; KiCad's DRC still checks them).
+
+Rules with `(severity ignore)` are skipped: KiCad does not check them, so topor keeps the net class values.
+Rules for silkscreen, courtyards, mask, paste and zone fills (`B.Type == 'Zone'`) do not change the routing.
+The [fab floors](#fab-minimums-and-via-sizes) apply to custom values too: a 0.1 mm rule below the JLCPCB
+0.15 mm floor is raised to it (the finding says so). [`CUSTOM_RULES`](troubleshoot.md#custom_rules) lists
+which rule is used how.
 
 ## First run
 

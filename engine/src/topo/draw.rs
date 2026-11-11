@@ -759,7 +759,48 @@ impl<'a> Drawer<'a> {
         .with_static()
     }
 
-    fn add_ent(&mut self, e: Ent) -> usize {
+    /// The clearance of the last custom clearance region (`Rules::clearance_regions`, rule order)
+    /// copper object `e` matches on one of its layers: it touches the polygon (or, `enclosed`, lies
+    /// wholly inside), so every pair with it needs that clearance (KiCad: the matching custom rule
+    /// wins over both nets' clearances). None without regions. O(regions x polygon edges).
+    fn region_clear(&self, e: &Ent) -> Option<f64> {
+        let regions = &self.model.rules.clearance_regions;
+        if regions.is_empty() || e.fixed {
+            return None;
+        }
+        let pts: Vec<Vec2> = match &e.core {
+            Core::Poly(p) => p.clone(),
+            Core::Seg(a, b) => vec![*a, *b],
+            Core::Pt(p) => vec![*p],
+        };
+        let mut out = None;
+        for r in regions {
+            if r.poly.len() < 3 {
+                continue;
+            }
+            if !r.layers.is_empty() {
+                let m = self.b.signal_layers.iter().enumerate().filter(|(_, id)| r.layers.contains(id)).fold(0u64, |m, (i, _)| m | 1 << i);
+                if m & e.mask == 0 {
+                    continue;
+                }
+            }
+            let poly: Vec<Vec2> = r.poly.iter().map(|p| p.to_vec2()).collect();
+            let n = poly.len();
+            let touches = (0..n).any(|i| seg_core(poly[i], poly[(i + 1) % n], &e.core).0 <= e.grow);
+            let inside = pts.first().is_some_and(|&p| inside_poly(p, &poly));
+            if if r.enclosed { !touches && inside } else { touches || inside } {
+                out = Some(r.clearance as f64);
+            }
+        }
+        out
+    }
+
+    fn add_ent(&mut self, mut e: Ent) -> usize {
+        if let Some(c) = self.region_clear(&e) {
+            // the region's clearance replaces both the object's and the wire's own
+            e.clear = c;
+            e.fixed = true;
+        }
         let core_box = match &e.core {
             Core::Poly(p) => bbox_of(p),
             Core::Seg(a, b) => bbox_of(&[*a, *b]),
