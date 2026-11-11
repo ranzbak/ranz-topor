@@ -498,9 +498,12 @@ class _Base(wx.Dialog):
 
     def button_row(self, ok: tuple[str, str, str], cancel: tuple[str, str, str] | None = None,
                    help_: tuple[str, str, str] | None = None, extras: tuple = (),
-                   ok_id: int = wx.ID_OK, middle: "wx.Sizer | None" = None) -> wx.Sizer:
+                   ok_id: int = wx.ID_OK, middle: "wx.Sizer | None" = None, primary: bool = False) -> wx.Sizer:
         """Bottom line. Each tuple = (name, wording key, mnemonic letter). Creation order = tab order:
-        extras, help, cancel, ok. Esc = Cancel (or the single affirmative button), Enter = ok."""
+        extras, help, cancel, ok. Esc = Cancel (or the single affirmative button), Enter = ok. Layout: extras (and
+        Help) on the left, `middle` after them, then a stretch, then the ``wx.StdDialogButtonSizer`` (cancel + ok in
+        the platform's order) on the right. `primary`: the ok button is the visually primary one (bold label; user
+        2026-11-11, GTK draws no suggested-action colour for a wx button)."""
         wk = self._wk
 
         def make(wid, spec):
@@ -515,6 +518,9 @@ class _Base(wx.Dialog):
         hb = make(wx.ID_HELP, help_) if help_ else None
         cb = make(wx.ID_CANCEL, cancel) if cancel else None
         okb = make(ok_id, ok)
+        if primary:
+            okb.SetFont(okb.GetFont().Bold())
+            okb.SetMinSize(wx.Size(max(self.FromDIP(88), okb.GetBestSize().width), -1))
         okb.SetDefault()
         self.SetAffirmativeId(ok_id)
         self.SetEscapeId(wx.ID_CANCEL if cancel else ok_id)
@@ -529,10 +535,11 @@ class _Base(wx.Dialog):
         for b in extra_btns:
             row.Add(b, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.row)
         if middle is not None:  # e.g. the "Cannot route" status between Help and Cancel
-            row.Add(middle, 1, wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.RIGHT, self.row)
-            row.Add(std, 0, wx.EXPAND)
-        else:
-            row.Add(std, 1, wx.EXPAND)
+            row.Add(middle, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.RIGHT, self.row)
+        # a stretch of its own: a sizer whose children are all hidden (the status without errors) takes no
+        # stretch, which left Cancel / Route next to Help (live screenshot 2026-11-11)
+        row.AddStretchSpacer(1)
+        row.Add(std, 0, wx.EXPAND)
         self.ok_button = okb
         return row
 
@@ -689,7 +696,7 @@ class PreflightDialog(_Base):
         self.status_icon.Show(self.n_err > 0)
         # bottom line: [Help] (x) Cannot route ... [Cancel] [Route]
         self.root.Add(self.button_row(("route", "route", "r"), ("cancel", "cancel", "c"),
-                                      extras=(("help", "help", "h", wx.ID_HELP),), middle=status_row),
+                                      extras=(("help", "help", "h", wx.ID_HELP),), middle=status_row, primary=True),
                       0, wx.EXPAND | wx.TOP, self.row)
         self.route = self.buttons["route"]
         self.route.Enable(self.n_err == 0)  # visible reason: self.status
