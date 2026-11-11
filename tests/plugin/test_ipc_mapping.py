@@ -266,7 +266,8 @@ class _NetBoard(_StubBoard):
 
     def get_netclass_for_nets(self, nets):
         class NC:
-            name = "Default"
+            name, constituents = "Default", None
+            clearance = track_width = via_diameter = via_drill = None
         return {n.name: NC() for n in nets if n.name in self.classed}
 
 
@@ -323,3 +324,75 @@ def test_ipc_live_smoke(tmp_path):
     from toporlib import pcbfile
     assert text.lstrip().startswith("(kicad_pcb") and isinstance(pcbfile.find_items(text), list)
     assert isinstance(ib.selection().empty, bool)
+
+
+def _kipy_netclass(name, *, clearance=None, width=None, via_d=None, via_drill=None, constituents=(), priority=0):
+    """A kipy NetClass as KiCad's API serialises it (NETCLASS::Serialize): a composite effective class keeps its
+    internal name "Effective for net: <net>", is NCT_IMPLICIT and lists its constituents in priority order."""
+    from kipy.project_types import NetClass
+    from kipy.proto.common.types import project_settings_pb2 as ps
+
+    p = ps.NetClass(name=name, priority=priority,
+                    type=ps.NetClassType.NCT_IMPLICIT if len(constituents) > 1 else ps.NetClassType.NCT_EXPLICIT)
+    p.constituents.extend(constituents)
+    if clearance is not None:
+        p.board.clearance.value_nm = clearance
+    if width is not None:
+        p.board.track_width.value_nm = width
+    if via_d is not None:
+        p.board.via_stack.copper_layers.add().size.x_nm = via_d
+    if via_drill is not None:
+        p.board.via_stack.drill.diameter.x_nm = via_drill
+    return NetClass(p)
+
+
+def test_effective_netclasses_composites_from_patterns():
+    """eprom-to-kernal (netclass_patterns only): KiCad answers A11 / +5V with composite classes named
+    "Effective for net: ..." (Signal / power set no diff-pair values, so Default completes them). Before the fix
+    the plugin looked those names up among the project classes, found nothing and used Default (0.2 mm clearance,
+    0.25 mm tracks): 9 clearance violations at 0.25 mm in the GUI run. The effective name is KiCad's GetName()
+    ("Signal,Default"), the values the ones KiCad composed, so the rules match the pcbnew harness."""
+    from toporlib.rules import resolve_rules_from_project
+
+    project = [_kipy_netclass("Default", clearance=200_000, width=250_000, via_d=800_000, via_drill=400_000),
+               _kipy_netclass("Signal", clearance=250_000, width=250_000, via_d=600_000, via_drill=300_000),
+               _kipy_netclass("power", clearance=250_000, width=400_000, via_d=800_000, via_drill=400_000)]
+    per_net = {
+        "A11": _kipy_netclass("Effective for net: A11", clearance=250_000, width=250_000, via_d=600_000,
+                              via_drill=300_000, constituents=("Signal", "Default")),
+        "+5V": _kipy_netclass("Effective for net: +5V", clearance=250_000, width=400_000, via_d=800_000,
+                              via_drill=400_000, constituents=("power", "Default")),
+        "NC1": _kipy_netclass("Default", clearance=200_000, width=250_000, via_d=800_000, via_drill=400_000),
+        "X": _kipy_netclass("Fast", clearance=300_000, width=150_000, via_d=600_000, via_drill=300_000),
+    }
+    assert ipc.effective_netclass_name(per_net["A11"]) == "Signal,Default"
+    assert ipc.effective_netclass_name(per_net["NC1"]) == "Default"
+    classes, of = ipc.effective_netclasses(project, per_net)
+    assert of == {"A11": "Signal,Default", "+5V": "power,Default", "NC1": "Default", "X": "Fast"}
+    assert classes["Signal,Default"].clearance == 250_000 and classes["Signal,Default"].name == "Signal,Default"
+    assert classes["power,Default"].track_width == 400_000
+    assert classes["Fast"].clearance == 300_000  # a class only KiCad's answer names (implicit from a pattern)
+    assert classes["Default"].clearance == 200_000 and classes["Signal"].via_drill == 300_000
+    r = resolve_rules_from_project({}, None, netclass_of=of, classes=classes, widths_before={},
+                                   net_codes={"+5V": 1, "A11": 2, "NC1": 3, "X": 4})["per_net"]
+    assert (r["1"]["clearance"], r["1"]["width"], r["1"]["netclass"]) == (250_000, 400_000, "power,Default")
+    assert (r["2"]["clearance"], r["2"]["width"]) == (250_000, 250_000)
+    assert r["3"]["clearance"] == 200_000 and r["4"]["clearance"] == 300_000
+
+
+def test_ipcboard_netclasses_uses_kicads_effective_class(tmp_path):
+    """IpcBoard.netclasses maps every net to KiCad's effective class (get_netclass_for_nets), composites by name."""
+    sig = _kipy_netclass("Signal", clearance=250_000, width=250_000)
+
+    class B(_NetBoard):
+        def get_net_classes(self):
+            return [_kipy_netclass("Default", clearance=200_000, width=250_000), sig]
+
+        def get_netclass_for_nets(self, nets):
+            return {n.name: (_kipy_netclass(f"Effective for net: {n.name}", clearance=250_000, width=250_000,
+                                            constituents=("Signal", "Default")) if n.name.startswith("A") else sig)
+                    for n in nets}
+
+    classes, of = ipc.IpcBoard(_StubKiCad(), B(tmp_path, ["A1", "OE"], classed=set())).netclasses()
+    assert of == {"A1": "Signal,Default", "OE": "Signal"}
+    assert classes["Signal,Default"].clearance == 250_000 and "Effective for net: A1" not in classes

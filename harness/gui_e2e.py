@@ -54,6 +54,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ICON = ROOT / "plugin" / "icons" / "topor-light-24.png"
 PLUGIN_ID = "org.topor.router"
+# Net name -> the effective netclass KiCad's API returns for it (get_netclass_for_nets): name, type, constituents and
+# the board values (nm; None = unset), written to <out_dir>/netclasses-ipc.json before the plugin runs.
+NETCLASS_DUMP = (
+    "nets = list(board.get_nets())\n"
+    "for n, nc in board.get_netclass_for_nets(nets).items():\n"
+    "    out[n] = {'name': nc.name, 'type': int(nc.type), 'constituents': nc.constituents,"
+    " 'clearance': nc.clearance, 'track_width': nc.track_width, 'via_diameter': nc.via_diameter,"
+    " 'via_drill': nc.via_drill}\n")
 
 
 class E2E:
@@ -742,6 +750,12 @@ def run(a) -> int:
             time.sleep(2)
         time.sleep(5)  # KiCad marks the environment ready after pip returns
         e.check("plugin environment created by KiCad", e.env_ready(), str(e.env_dir()))
+        try:  # what KiCad's API reports as each net's effective netclass (the plugin's rule input)
+            ncs = e.ipc_retry(NETCLASS_DUMP, tries=60, connect=True)
+            (e.out / "netclasses-ipc.json").write_text(json.dumps(ncs, indent=1, sort_keys=True))
+            e.log(f"netclasses over the API: {len(ncs)} nets -> {e.out / 'netclasses-ipc.json'}")
+        except RuntimeError as ex:
+            e.log(f"netclass dump failed: {str(ex).strip().splitlines()[-1]}")
         main = e.wait(f"{stem} — PCB Editor", 10)
         e.x("xdotool", "windowactivate", "--sync", main[1])
         time.sleep(1)

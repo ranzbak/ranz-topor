@@ -135,8 +135,33 @@ def selection_from_kipy(items, fp_ref_by_id: dict | None = None) -> Selection:
     return s
 
 
-def netclass_values(nc) -> NetClassValues:
-    return NetClassValues(nc.name, nc.clearance, nc.track_width, nc.via_diameter, nc.via_drill)
+def netclass_values(nc, name: str | None = None) -> NetClassValues:
+    return NetClassValues(nc.name if name is None else name, nc.clearance, nc.track_width, nc.via_diameter,
+                          nc.via_drill)
+
+
+def effective_netclass_name(nc) -> str:
+    """KiCad's name of an effective net class (``NETCLASS::GetName``): the constituent names joined by ``,`` in
+    priority order (``"Signal,Default"``) for a composite, else its own name. The API serialises a composite with
+    its internal name ``"Effective for net: <net>"`` (``NETCLASS::Serialize``) and the constituents beside it. O(k)."""
+    parts = getattr(nc, "constituents", None) or []
+    return ",".join(parts) if len(parts) >= 2 else nc.name
+
+
+def effective_netclasses(project_classes, per_net: dict) -> tuple:
+    """(class name -> NetClassValues, net name -> effective class name) from the project's explicit classes and
+    KiCad's per-net answer (``Board.get_netclass_for_nets``: the class KiCad itself resolved for the net from
+    explicit assignments, ``netclass_patterns`` and the schematic). A composite is registered under
+    :func:`effective_netclass_name` with the values KiCad composed for it (the pcbnew front end,
+    ``harness.rules._swig_inputs``, does the same with ``GetEffectiveNetClass``). O(C + N)."""
+    classes = {nc.name: netclass_values(nc) for nc in project_classes}
+    of: dict = {}
+    for net, nc in per_net.items():
+        name = effective_netclass_name(nc)
+        of[net] = name
+        if name != nc.name or name not in classes:
+            classes[name] = netclass_values(nc, name)
+    return classes, of
 
 
 # ---------------------------------------------------------------- fingerprint
@@ -295,9 +320,10 @@ class IpcBoard:
         return net_codes_by_name([n.name for n in self._net_list()])
 
     def netclasses(self) -> tuple:
-        classes = {nc.name: netclass_values(nc) for nc in self.board.get_project().get_net_classes()}
-        of = {name: nc.name for name, nc in self.board.get_netclass_for_nets(self._net_list()).items()}
-        return classes, of
+        """(class name -> NetClassValues, net name -> effective class name): :func:`effective_netclasses` of the
+        project's classes and KiCad's effective class per net. Two IPC round trips."""
+        return effective_netclasses(self.board.get_project().get_net_classes(),
+                                    self.board.get_netclass_for_nets(self._net_list()))
 
     def fingerprint(self) -> str:
         """:func:`board_fingerprint` of the live board: three IPC round trips (get_tracks, get_vias,
@@ -391,4 +417,4 @@ class IpcBoard:
 
 
 __all__ = ["IpcBoard", "to_kipy_item", "selection_from_kipy", "pcbnew_to_kipy_layer", "kipy_to_pcbnew_layer",
-           "netclass_values", "board_fingerprint"]
+           "netclass_values", "effective_netclass_name", "effective_netclasses", "board_fingerprint"]
