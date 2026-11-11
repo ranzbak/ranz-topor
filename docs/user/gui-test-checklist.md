@@ -39,6 +39,22 @@ tools/gui_e2e.sh dcsgonebadge scratch/k1/gui/dcs --from-hand --cancel-after 30  
   board exactly, **Ctrl+Y** brings the result back; the board is saved and judged by `kicad-cli` DRC
   (`harness.board_metrics`): status accepted and `routing_new 0`; with `--harness` routed / connections /
   unconnected / routing_new / vias equal those of the headless run.
+- **Cleanup Tracks & Vias** (`--cleanup` after the run, or `--existing` on an already routed board: KiCad opens a
+  copy, nothing is routed, the plugin is not installed). The real dialog (Tools → Cleanup Tracks & Vias, opened by
+  a hotkey written into the test home) runs with `--cleanup-opts`: `all` (default: every action on, zones
+  refilled), `user` (the boxes as you last left them in your own KiCad; KiCad 10 keeps them in
+  `kicad_common.json` → `dialog.controls` → "Cleanup Tracks and Vias", only read), `pcbnew-json` (the KiCad 9
+  `pcbnew.json` "cleanup" section, which KiCad 10 no longer reads) or a list such as `refill,short,merge`.
+  Build Changes (a "Zone fills are out-of-date" question is answered Refill) → screenshot of the change list →
+  Update PCB. The removed / changed tracks and vias are found by uuid over the API, the board is saved, kicad-cli
+  DRC runs on copies from before and after (`cleanup/drc-{before,after}.json`), and `harness.cleanup_check`
+  replays the same options on the copy from before: the check passes when the replay removes exactly the items
+  the dialog removed (`cleanup/cleanup.json`: per-rule counts, `only_dialog`, `only_replay`).
+
+  ```bash
+  tools/gui_e2e.sh <routed.kicad_pcb> scratch/k1/gui/cl --existing --name myboard
+  tools/gui_e2e.sh eprom-to-kernal scratch/k1/gui/eprom --from-hand --cleanup
+  ```
 - **Output.** `<out_dir>/<name>-e2e.json` (checks, metrics, comparison), `<out_dir>/<name>-gui-compare.png` (hand
   left, the KiCad result right, open ratsnest blue), the run's report folder under
   `<out_dir>/home/.cache/kicad/10.0/topor/`. Exit code 0 when every check passed. KiCad and (when it started
