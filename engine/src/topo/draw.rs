@@ -1358,79 +1358,6 @@ impl<'a> Drawer<'a> {
         room * tot
     }
 
-    /// Layer of wire `o`'s chord in its traversal `ok` as the plans fix it (`-1`: open or a via
-    /// there; see [`Drawer::prov_layer`]).
-    fn chord_layer(&self, o: WireId, ok: usize) -> i32 {
-        if self.prov_layer.is_empty() {
-            return -1;
-        }
-        let ps = &self.st.wires[o].passes;
-        let a = if ok > 0 { self.prov_layer[ps[ok - 1]] } else { -2 };
-        let b = if ok < ps.len() { self.prov_layer[ps[ok]] } else { -2 };
-        match (a, b) {
-            (-2, x) | (x, -2) => x,
-            (x, y) if x == y => x,
-            _ => -1,
-        }
-    }
-
-    /// P6: may a via of wire `w` (layers `la` before, `lb` after) stand at `p` in traversal `k`
-    /// instead of its planned traversal `at`? Every crossing of `w` with another net's wire
-    /// from `at` to `k` must keep the two wires on different layers: before the via `w` is on
-    /// `la`, after it on `lb`. In `k` itself "before" is measured along the taut chords of
-    /// both wires (where they intersect); a crossing there whose place cannot be measured
-    /// refuses the site. The topology's own rule (a crossing on one layer is a short), not a
-    /// threshold. O(crossings x turns).
-    fn via_order_ok(&self, w: WireId, xs: &[super::state::Crossing], at: usize, k: usize, p: Vec2, la: usize, lb: usize) -> bool {
-        let (lo, hi) = (at.min(k), at.max(k));
-        let mine = self.taut_chord(w, k);
-        let along = |q: Vec2| -> f64 {
-            // Arc length of the point of `mine` nearest to `q`.
-            let (mut best, mut acc, mut s) = (f64::INFINITY, 0.0, 0.0);
-            for x in mine.windows(2) {
-                let d = x[1] - x[0];
-                let l = d.len().max(1e-9);
-                let u = ((q - x[0]).dot(d) / (l * l)).clamp(0.0, 1.0);
-                let dist = (x[0] + d * u - q).len();
-                if dist < best {
-                    best = dist;
-                    s = acc + u * l;
-                }
-                acc += l;
-            }
-            s
-        };
-        for x in xs.iter().filter(|x| (lo..=hi).contains(&x.k)) {
-            let ol = self.chord_layer(x.other, x.other_k);
-            if ol < 0 {
-                continue;
-            }
-            let before = if x.k != k {
-                x.k < k
-            } else {
-                let theirs = self.taut_chord(x.other, x.other_k);
-                let hit = mine.windows(2).find_map(|a| {
-                    theirs.windows(2).find_map(|b| {
-                        let (d1, d2) = (a[1] - a[0], b[1] - b[0]);
-                        let den = d1.cross(d2);
-                        if den.abs() < 1e-9 {
-                            return None;
-                        }
-                        let t = (b[0] - a[0]).cross(d2) / den;
-                        let u = (b[0] - a[0]).cross(d1) / den;
-                        ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)).then(|| a[0] + d1 * t)
-                    })
-                });
-                let Some(c) = hit else { return false };
-                along(c) < along(p)
-            };
-            if (if before { la } else { lb }) as i32 == ol {
-                return false;
-            }
-        }
-        true
-    }
-
     /// P6: price of the room a via pair keeps for the wires the plan crosses between its two
     /// vias. With the wire's previous via at `prev` (traversal, centre, size), a via of diameter
     /// `d` at `p` in traversal `k` leaves the wires of `xs` that cross the wire in traversals
@@ -1497,12 +1424,11 @@ impl<'a> Drawer<'a> {
         let mut out: Vec<(usize, Vec2, ViaSize)> = Vec::new();
         // P6: the other nets' wires the plan crosses this wire with (their traversal here), for
         // the room a via pair keeps between its two vias.
-        let xall: Vec<super::state::Crossing> = if self.octi.room > 0.0 {
-            self.st.crossings(w).into_iter().filter(|x| self.st.wires[x.other].net != net).collect()
+        let xs: Vec<(usize, WireId)> = if self.octi.room > 0.0 {
+            self.st.crossings(w).iter().filter(|x| self.st.wires[x.other].net != net).map(|x| (x.k, x.other)).collect()
         } else {
             Vec::new()
         };
-        let xs: Vec<(usize, WireId)> = xall.iter().map(|x| (x.k, x.other)).collect();
         for (i, &(ka, kb)) in plan.vias.iter().enumerate() {
             let ka = out.last().map_or(ka, |l| ka.max(l.0));
             let mut done = false;
@@ -1545,14 +1471,16 @@ impl<'a> Drawer<'a> {
                     let (far, close): (Vec<_>, Vec<_>) = sites.into_iter().partition(|&(_, p)| !near(p));
                     sites = far.into_iter().chain(close).collect();
                 }
-                // Of the valid sites (side test, clearance), the one that takes the least of the
-                // room planned for the wires not drawn yet (P6, [`Drawer::via_plan_price`] and
-                // [`Drawer::via_pair_price`]); at the same price the first triangle that has one
-                // (the planned one first), there the one with the most free room around it (the
-                // `via_squeeze` factor's aim). A site outside the planned triangle competes on
-                // price only where it keeps every crossing between on two layers
-                // ([`Drawer::via_order_ok`]); later triangles are looked at only while the best
-                // site so far takes planned room (none can then beat a free one).
+                // Of the valid sites (side test, clearance) in the first triangle that has one
+                // (the planned one first: the plan fixed which crossings lie on which side of
+                // the via, and its packing kept the disc's room there), the one that takes the
+                // least of the room planned for the wires not drawn yet (P6,
+                // [`Drawer::via_plan_price`], [`Drawer::via_pair_price`]) plus the same price on
+                // free room short of one via diameter around it (the `via_squeeze` measure); at
+                // the same price the one with the most free room. Measured: letting a cheaper site
+                // in a later triangle win (with a crossing-order check) moved vias out of the
+                // packed bus on qmtech (round 1: 49 -> 55 connections with violations); kept in
+                // the first triangle it is 47.
                 let mut best: Option<(f64, usize, Vec2)> = None;
                 let mut best_price = f64::INFINITY;
                 let dbg = std::env::var("TOPO_VIADBG").is_ok();
@@ -1561,11 +1489,8 @@ impl<'a> Drawer<'a> {
                 // elsewhere in it the via could stand on the wrong side of the tee (D6b).
                 let turn_at = |k: usize| self.st.wires[w].turns.iter().find(|x| x.0 == k).map(|x| self.b.proj.pos[x.1]);
                 for (k, p) in sites {
-                    if best.is_some_and(|b| b.1 != k) && (best_price <= 1.0 || at.is_none()) {
+                    if best.is_some_and(|b| b.1 != k) {
                         break;
-                    }
-                    if best.is_some_and(|b| b.1 != k) && at.is_some_and(|a| a != k && !self.via_order_ok(w, &xall, a, k, p, plan.layers[i], plan.layers[i + 1])) {
-                        continue;
                     }
                     if turn_at(k).is_some_and(|q| (q - p).len() > 1.0) {
                         continue;
@@ -1587,11 +1512,18 @@ impl<'a> Drawer<'a> {
                     }
                     if self.check_ok(&item) && self.via_hole_ok(p, sz, net) && self.via_own_pad_ok(p, sz, net) {
                         let room = self.via_room(w, k, p, sz.d as f64);
-                        let price = self.via_plan_price(w, ka, kb.max(ka), p, sz.d as f64) + self.via_pair_price(w, out.last().copied(), &xs, k, p, sz.d as f64);
+                        // The room around the via is priced the same way (short of one via
+                        // diameter of free room, the `via_squeeze` measure), so a site free of the
+                        // planned corridors does not win when it squeezes the via against other
+                        // copper; where nothing is planned this orders the sites by room as before.
+                        let dv = (sz.d as f64).max(1.0);
+                        let xq = (dv - room).max(0.0) / dv;
+                        let squeeze = self.octi.room * dv * (xq + xq * xq);
+                        let price = self.via_plan_price(w, ka, kb.max(ka), p, sz.d as f64) + self.via_pair_price(w, out.last().copied(), &xs, k, p, sz.d as f64) + squeeze;
                         if dbg {
                             eprintln!("VIACAND wire {w} via {i} k {k} at ({:.3},{:.3}) room {:.0} price {:.0}", p.x / 1e6, -p.y / 1e6, room, price);
                         }
-                        if best.is_none_or(|b| price < best_price - 1.0 || (price <= best_price + 1.0 && b.1 == k && room > b.0 + 1.0)) {
+                        if best.is_none_or(|b| price < best_price - 1.0 || (price <= best_price + 1.0 && room > b.0 + 1.0)) {
                             best = Some((room, k, p));
                             best_price = price;
                         }

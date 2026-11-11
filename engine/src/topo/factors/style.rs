@@ -19,8 +19,9 @@
 //!   one fails): a via disc reaching into the planned corridor of another net's wire not drawn
 //!   yet (its taut and its packed chord), and a via pair whose two discs leave less than the
 //!   wires the plan crosses between them need, cost `pitch x (x + x^2)`, `x = depth / pitch`;
-//!   in the via's first triangle with a valid site the drawing takes the least price, then the
-//!   most room (Dayan & Dai 1991 §6-§8 p. 6).
+//!   free room short of one via diameter pays the same; in the via's first triangle with a
+//!   valid site the drawing takes the least price, then the most room (Dayan & Dai 1991 §6-§8
+//!   p. 6).
 
 use super::{Event, Factor, Report};
 use crate::topo::octi::{acute_amount, any_angle_amount};
