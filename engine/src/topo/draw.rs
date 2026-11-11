@@ -1271,6 +1271,200 @@ impl<'a> Drawer<'a> {
         room
     }
 
+    /// The plan's (taut) chord of wire `o` in its traversal `k`: its taut crossing of the edge it
+    /// enters by (or its terminal), the turn corners there, its taut crossing of the edge it
+    /// leaves by (or its terminal). O(turns) after the cached taut path.
+    fn taut_chord(&self, o: WireId, k: usize) -> Vec<Vec2> {
+        let (st, pr) = (self.st, &self.b.proj);
+        let oi = &st.wires[o];
+        let n = oi.passes.len();
+        let t = self.packer.taut(st, o);
+        let at = |j: usize| t.at.get(j).copied();
+        let a = if k == 0 { Some(pr.pos[oi.a]) } else { at(k - 1) };
+        let b = if k >= n { Some(pr.pos[oi.b]) } else { at(k) };
+        let (Some(a), Some(b)) = (a, b) else { return Vec::new() };
+        let mut pl = vec![a];
+        pl.extend(oi.turns.iter().filter(|x| x.0 == k).map(|x| pr.pos[x.1]));
+        pl.push(b);
+        pl
+    }
+
+    /// Via sites on wire `w`'s own taut chord in traversal `k` (where the plan's path runs, so
+    /// the crossings with the other wires keep the plan's order along it): its middle first,
+    /// then towards both ends. O(turns).
+    fn taut_sites(&self, w: WireId, k: usize) -> Vec<(usize, Vec2)> {
+        let pl = self.taut_chord(w, k);
+        let total: f64 = pl.windows(2).map(|x| (x[1] - x[0]).len()).sum();
+        if pl.len() < 2 || total < 1.0 {
+            return Vec::new();
+        }
+        let at = |f: f64| {
+            let mut d = f * total;
+            for x in pl.windows(2) {
+                let l = (x[1] - x[0]).len();
+                if d <= l {
+                    return x[0] + (x[1] - x[0]) * (d / l.max(1e-9));
+                }
+                d -= l;
+            }
+            *pl.last().expect("chord")
+        };
+        [0.5, 0.375, 0.625, 0.25, 0.75, 0.125, 0.875].iter().map(|&f| (k, at(f))).collect()
+    }
+
+    /// P6: price of a via of wire `w` (diameter `d`) at `p` for the room the plan keeps for the
+    /// other nets' wires not drawn yet through the triangles of its interval `k0..=k1`: per such
+    /// wire, the depth by which the via disc plus the clearance reaches into the corridor of the
+    /// wire's planned path (its taut chord and its packed nominal chord there; half its width
+    /// plus the clearance either side), priced like the
+    /// octilinear `planned_room` factor, `room x pitch x (x + x^2)` with `x = depth / pitch` and
+    /// `pitch = width + clearance`: graded, no wall; 0 when the via keeps every planned corridor
+    /// free. Earlier-drawn copper keeps the room the plan gives later wires (Dayan & Dai 1991,
+    /// UCSC-CRL-91-40 §6 p. 6: for each net the other nets act as obstacles on its movable
+    /// points, vias included §7; §8 p. 6: a non-linear force function bounds a quantity without
+    /// a hard limit). O(traversals of the interval's triangles x turns).
+    pub fn via_plan_price(&self, w: WireId, k0: usize, k1: usize, p: Vec2, d: f64) -> f64 {
+        let room = self.octi.room;
+        if room <= 0.0 {
+            return 0.0;
+        }
+        let st = self.st;
+        let wi = &st.wires[w];
+        let mut seen: Vec<(WireId, usize)> = Vec::new();
+        let mut tot = 0.0;
+        for k in k0..=k1.min(wi.tris.len().saturating_sub(1)) {
+            for &(o, ok) in &st.tri_trav[wi.tris[k]] {
+                let oi = &st.wires[o];
+                if o == w || !oi.alive || oi.net == wi.net || self.drawn_once[o] || seen.contains(&(o, ok)) {
+                    continue;
+                }
+                seen.push((o, ok));
+                // Both views of where the plan puts the wire: its taut chord (where the drawing
+                // pulls it) and its packed nominal chord (the side test's and the via walls').
+                let mut nom = vec![self.chord_pt(o, ok)];
+                nom.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| self.b.proj.pos[x.1]));
+                nom.push(self.chord_pt(o, ok + 1));
+                let taut = self.taut_chord(o, ok);
+                let Some(dist) = taut.windows(2).chain(nom.windows(2)).map(|x| seg_dist(p, x[0], x[1])).reduce(f64::min) else { continue };
+                let s = oi.s.max(wi.s);
+                let pitch = (oi.w + s).max(1.0);
+                let depth = 0.5 * d + s + 0.5 * oi.w - dist;
+                if depth > 0.0 {
+                    let x = depth / pitch;
+                    tot += pitch * (x + x * x);
+                }
+            }
+        }
+        room * tot
+    }
+
+    /// Layer of wire `o`'s chord in its traversal `ok` as the plans fix it (`-1`: open or a via
+    /// there; see [`Drawer::prov_layer`]).
+    fn chord_layer(&self, o: WireId, ok: usize) -> i32 {
+        if self.prov_layer.is_empty() {
+            return -1;
+        }
+        let ps = &self.st.wires[o].passes;
+        let a = if ok > 0 { self.prov_layer[ps[ok - 1]] } else { -2 };
+        let b = if ok < ps.len() { self.prov_layer[ps[ok]] } else { -2 };
+        match (a, b) {
+            (-2, x) | (x, -2) => x,
+            (x, y) if x == y => x,
+            _ => -1,
+        }
+    }
+
+    /// P6: may a via of wire `w` (layers `la` before, `lb` after) stand at `p` in traversal `k`
+    /// instead of its planned traversal `at`? Every crossing of `w` with another net's wire
+    /// from `at` to `k` must keep the two wires on different layers: before the via `w` is on
+    /// `la`, after it on `lb`. In `k` itself "before" is measured along the taut chords of
+    /// both wires (where they intersect); a crossing there whose place cannot be measured
+    /// refuses the site. The topology's own rule (a crossing on one layer is a short), not a
+    /// threshold. O(crossings x turns).
+    fn via_order_ok(&self, w: WireId, xs: &[super::state::Crossing], at: usize, k: usize, p: Vec2, la: usize, lb: usize) -> bool {
+        let (lo, hi) = (at.min(k), at.max(k));
+        let mine = self.taut_chord(w, k);
+        let along = |q: Vec2| -> f64 {
+            // Arc length of the point of `mine` nearest to `q`.
+            let (mut best, mut acc, mut s) = (f64::INFINITY, 0.0, 0.0);
+            for x in mine.windows(2) {
+                let d = x[1] - x[0];
+                let l = d.len().max(1e-9);
+                let u = ((q - x[0]).dot(d) / (l * l)).clamp(0.0, 1.0);
+                let dist = (x[0] + d * u - q).len();
+                if dist < best {
+                    best = dist;
+                    s = acc + u * l;
+                }
+                acc += l;
+            }
+            s
+        };
+        for x in xs.iter().filter(|x| (lo..=hi).contains(&x.k)) {
+            let ol = self.chord_layer(x.other, x.other_k);
+            if ol < 0 {
+                continue;
+            }
+            let before = if x.k != k {
+                x.k < k
+            } else {
+                let theirs = self.taut_chord(x.other, x.other_k);
+                let hit = mine.windows(2).find_map(|a| {
+                    theirs.windows(2).find_map(|b| {
+                        let (d1, d2) = (a[1] - a[0], b[1] - b[0]);
+                        let den = d1.cross(d2);
+                        if den.abs() < 1e-9 {
+                            return None;
+                        }
+                        let t = (b[0] - a[0]).cross(d2) / den;
+                        let u = (b[0] - a[0]).cross(d1) / den;
+                        ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)).then(|| a[0] + d1 * t)
+                    })
+                });
+                let Some(c) = hit else { return false };
+                along(c) < along(p)
+            };
+            if (if before { la } else { lb }) as i32 == ol {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// P6: price of the room a via pair keeps for the wires the plan crosses between its two
+    /// vias. With the wire's previous via at `prev` (traversal, centre, size), a via of diameter
+    /// `d` at `p` in traversal `k` leaves the wires of `xs` that cross the wire in traversals
+    /// `prev.k..=k` (and are not drawn yet) the gap between the two discs; they need half of each
+    /// via, their widths and a clearance either side. Short of that by `depth`, the price is
+    /// `room x pitch x (x + x^2)` with `x = depth / pitch` and `pitch` the widths plus clearances
+    /// of those wires: graded, no wall, like [`Drawer::via_plan_price`]. 0 without a previous via
+    /// or a wire crossing between. O(crossings).
+    fn via_pair_price(&self, w: WireId, prev: Option<(usize, Vec2, ViaSize)>, xs: &[(usize, WireId)], k: usize, p: Vec2, d: f64) -> f64 {
+        let Some((k0, q, sq)) = prev else { return 0.0 };
+        let wi = &self.st.wires[w];
+        let (lo, hi) = (k0.min(k), k0.max(k));
+        let mut seen: Vec<WireId> = Vec::new();
+        let mut pitch = 0.0;
+        for &(xk, o) in xs {
+            if xk < lo || xk > hi || self.drawn_once[o] || seen.contains(&o) {
+                continue;
+            }
+            seen.push(o);
+            let oi = &self.st.wires[o];
+            pitch += oi.w + oi.s.max(wi.s);
+        }
+        if pitch <= 0.0 {
+            return 0.0;
+        }
+        let need = 0.5 * (sq.d as f64 + d) + wi.s + pitch;
+        let depth = need - (p - q).len();
+        if depth <= 0.0 {
+            return 0.0;
+        }
+        let x = depth / pitch;
+        self.octi.room * pitch * (x + x * x)
+    }
+
     /// Free room (nm) a via of diameter `d` at `p` of `net` leaves to the nearest foreign copper
     /// indexed so far (static board and committed items, any layer), past the clearance; the
     /// part of [`Drawer::via_room`] that needs no wire (D6a, plane stub vias). O(objects nearby).
@@ -1301,6 +1495,14 @@ impl<'a> Drawer<'a> {
         let net = self.st.wires[w].net;
         let sizes = via_sizes(&self.model.rules, net, self.opts);
         let mut out: Vec<(usize, Vec2, ViaSize)> = Vec::new();
+        // P6: the other nets' wires the plan crosses this wire with (their traversal here), for
+        // the room a via pair keeps between its two vias.
+        let xall: Vec<super::state::Crossing> = if self.octi.room > 0.0 {
+            self.st.crossings(w).into_iter().filter(|x| self.st.wires[x.other].net != net).collect()
+        } else {
+            Vec::new()
+        };
+        let xs: Vec<(usize, WireId)> = xall.iter().map(|x| (x.k, x.other)).collect();
         for (i, &(ka, kb)) in plan.vias.iter().enumerate() {
             let ka = out.last().map_or(ka, |l| ka.max(l.0));
             let mut done = false;
@@ -1327,6 +1529,9 @@ impl<'a> Drawer<'a> {
                 let need_r = 0.5 * sz.d as f64 + self.model.rules.net_rule(net).clearance as f64;
                 let at = plan.at.get(i).copied().filter(|&k| (ka..=kb.max(ka)).contains(&k));
                 let mut sites = at.map_or(Vec::new(), |k| self.chord_sites(w, k));
+                if let Some(k) = at {
+                    sites.extend(self.taut_sites(w, k));
+                }
                 sites.extend(self.via_candidates(w, ka, kb.max(ka), need_r, at));
                 if self.opts.via_offset_sites {
                     sites.extend(self.via_extra(w, ka, kb.max(ka), sz.d as f64, self.model.rules.net_rule(net).clearance as f64));
@@ -1340,17 +1545,27 @@ impl<'a> Drawer<'a> {
                     let (far, close): (Vec<_>, Vec<_>) = sites.into_iter().partition(|&(_, p)| !near(p));
                     sites = far.into_iter().chain(close).collect();
                 }
-                // Of the valid sites (side test, clearance) in the first triangle that has one,
-                // the one with the most free room around it (the `via_squeeze` factor's aim).
+                // Of the valid sites (side test, clearance), the one that takes the least of the
+                // room planned for the wires not drawn yet (P6, [`Drawer::via_plan_price`] and
+                // [`Drawer::via_pair_price`]); at the same price the first triangle that has one
+                // (the planned one first), there the one with the most free room around it (the
+                // `via_squeeze` factor's aim). A site outside the planned triangle competes on
+                // price only where it keeps every crossing between on two layers
+                // ([`Drawer::via_order_ok`]); later triangles are looked at only while the best
+                // site so far takes planned room (none can then beat a free one).
                 let mut best: Option<(f64, usize, Vec2)> = None;
+                let mut best_price = f64::INFINITY;
                 let dbg = std::env::var("TOPO_VIADBG").is_ok();
                 let (mut n_side, mut n_check) = (0usize, 0usize);
                 // In a traversal where the wire turns at a junction, only the junction itself:
                 // elsewhere in it the via could stand on the wrong side of the tee (D6b).
                 let turn_at = |k: usize| self.st.wires[w].turns.iter().find(|x| x.0 == k).map(|x| self.b.proj.pos[x.1]);
                 for (k, p) in sites {
-                    if best.is_some_and(|b| b.1 != k) {
+                    if best.is_some_and(|b| b.1 != k) && (best_price <= 1.0 || at.is_none()) {
                         break;
+                    }
+                    if best.is_some_and(|b| b.1 != k) && at.is_some_and(|a| a != k && !self.via_order_ok(w, &xall, a, k, p, plan.layers[i], plan.layers[i + 1])) {
+                        continue;
                     }
                     if turn_at(k).is_some_and(|q| (q - p).len() > 1.0) {
                         continue;
@@ -1372,8 +1587,13 @@ impl<'a> Drawer<'a> {
                     }
                     if self.check_ok(&item) && self.via_hole_ok(p, sz, net) && self.via_own_pad_ok(p, sz, net) {
                         let room = self.via_room(w, k, p, sz.d as f64);
-                        if best.is_none_or(|b| room > b.0 + 1.0) {
+                        let price = self.via_plan_price(w, ka, kb.max(ka), p, sz.d as f64) + self.via_pair_price(w, out.last().copied(), &xs, k, p, sz.d as f64);
+                        if dbg {
+                            eprintln!("VIACAND wire {w} via {i} k {k} at ({:.3},{:.3}) room {:.0} price {:.0}", p.x / 1e6, -p.y / 1e6, room, price);
+                        }
+                        if best.is_none_or(|b| price < best_price - 1.0 || (price <= best_price + 1.0 && b.1 == k && room > b.0 + 1.0)) {
                             best = Some((room, k, p));
+                            best_price = price;
                         }
                     }
                 }
