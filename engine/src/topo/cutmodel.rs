@@ -931,6 +931,20 @@ impl<'a> CutPrice<'a> {
         self.over
     }
 
+    /// The graded amount of the over-full cuts (the TopoR loop's predicted violations, shopping
+    /// list 5.2): every cut [`CutPrice::overfull`] counts gives 1 plus how far it is over, in
+    /// pitches of its items (`-slack / pitch`, the `u` of [`phi`]): the `violation` factor's own
+    /// amount, 1 per violation plus its depth. At least [`CutPrice::overfull`]. O(cuts).
+    pub fn over_amount(&self) -> f64 {
+        let mut a = 0.0;
+        for cs in &self.cuts {
+            for c in cs.iter().filter(|c| c.live && !c.items.is_empty() && c.slack < -OVER_TOL) {
+                a += 1.0 + -c.slack / pitch_of(&c.items).max(1.0);
+            }
+        }
+        a
+    }
+
     /// The over-full cuts `(layer, cut, slack)`, most over-full first, ties by layer and cut.
     pub fn overfull_list(&self) -> Vec<(usize, usize, f64)> {
         let mut v: Vec<(usize, usize, f64)> = Vec::new();

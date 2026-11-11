@@ -510,6 +510,23 @@ impl<'a> CapModel<'a> {
         over + self.nosite.iter().sum::<usize>()
     }
 
+    /// The predicted violations of this labelling as the TopoR loop's archive and every loop move
+    /// judge them (shopping list 5.2): `(count, graded)`. The count is [`CapModel::overfull`]
+    /// (over-full edge-layers, or over-full cuts with `[capacity] model = "cuts"`, plus vias
+    /// without a site); the graded amount gives each of them 1 plus how far it is over, as the
+    /// `violation` factor does (1 per violation plus its depth): an edge-layer its price factor
+    /// `1 + over / pitch` (the per-edge price, `CapModel::eval`), a cut `1 - slack / pitch`
+    /// ([`CutPrice::over_amount`]), a via without a site 1. So `graded >= count`, and one more
+    /// over-full item always adds at least 1. O(edges x layers + cuts).
+    pub fn violations(&self) -> (usize, f64) {
+        let nosite = self.nosite.iter().sum::<usize>();
+        let over = match self.cut.as_ref() {
+            Some(c) => c.over_amount(),
+            None => self.cost.iter().filter(|&&c| c > 0.0).map(|&c| c / self.price).sum(),
+        };
+        (self.overfull(), over + nosite as f64)
+    }
+
     /// The over-full `(edge, layer)` pairs, ascending.
     pub fn overfull_list(&self) -> Vec<(usize, usize)> {
         (0..self.cost.len()).filter(|&i| self.cost[i] > 0.0).map(|i| (i / self.nl, i % self.nl)).collect()

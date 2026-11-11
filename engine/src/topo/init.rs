@@ -421,7 +421,7 @@ impl Search<'_, '_> {
         let mut v: Vec<Chord> = Vec::new();
         for &(o, ok) in &st.tri_trav[t] {
             let net = st.wires[o].net;
-            let held = self.held.entry(o).or_insert_with(|| st.stretch_layers(o))[ok];
+            let held = self.held.entry(o).or_insert_with(|| st.held_layers(o))[ok];
             let oall = st.proj.allowed(t, net).map_or(0, |m| m.0);
             v.extend(st.chords(o, ok).into_iter().map(|(b1, b2)| (b1, b2, net, o, held, oall)));
         }
@@ -781,6 +781,21 @@ impl<'p> State<'p> {
             bwd[k] = self.pin_through(bwd[k + 1], e, wi.tris[k + 1], wi.tris[k], wi.net, pr.edge_demand(e, &[me])).2;
         }
         (0..=n).map(|k| if fwd[k] & bwd[k] != 0 { fwd[k] & bwd[k] } else { fwd[k] | bwd[k] }).collect()
+    }
+
+    /// The layers wire `w`'s stretch is on in each traversal as a crossing sees it: its own held
+    /// layers ([`State::stretch_layers`]) narrowed to its present layers in the TopoR loop's
+    /// current assignment ([`State::layers_now`], shopping list 5.2: Polubasov 2010 «Оптимизация
+    /// разводки»: "before the optimisation every stretch is assigned a layer, so that crossing
+    /// stretches lie in different layers"; the reroute then lays a wire into that layering).
+    /// Without `layers_now` for `w` (or for a wire placed since) the held layers alone. O(passes ·
+    /// layers).
+    pub fn held_layers(&self, w: WireId) -> Vec<u64> {
+        let held = self.stretch_layers(w);
+        match self.layers_now.get(w).filter(|now| now.len() == held.len()) {
+            Some(now) => held.iter().zip(now).map(|(&h, &n)| if h & n != 0 { h & n } else { h }).collect(),
+            None => held,
+        }
     }
 
     /// Room of edge `e` for a wire of `net` allowed on the layers of both triangles: the sum over

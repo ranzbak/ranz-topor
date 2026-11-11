@@ -123,17 +123,22 @@ impl Grid {
 }
 
 /// The cuts of `verts` against `sides`: feet within `max_d` (nm), at least `eps` from a side's
-/// ends and from each other. `polys[o]` is the polygon of obstacle `o`; `shares(a, b)` says
-/// whether the two owners (`None` = outline) have a copper layer in common (otherwise no wire is
-/// squeezed between them). Deterministic: candidates in vertex order, nearest first.
+/// ends and from each other. `polys[o]` is the polygon of obstacle `o`; `mask(o)` the copper
+/// layers owner `o` (`None` = outline, every layer) blocks: two owners with no layer in common get
+/// no cut (no wire is squeezed between them), and an owner with no layer in common with a cut
+/// does not block it (Q14a: a B.Cu rule area along the board edge does not hide the cut from an
+/// F.Cu pad to that edge; TopoR 6.3 manual, `docs/literature/eremex2017-topor63-user-manual.pdf`
+/// p. 57 «Board Edge Clearance»: "the clearance ... between wires and the board edge").
+/// Deterministic: candidates in vertex order, nearest first.
 pub fn lct_feet(
     verts: &[Vertex],
     sides: &[Side],
     polys: &[&[Vec2]],
-    shares: &dyn Fn(Option<usize>, Option<usize>) -> bool,
+    mask: &dyn Fn(Option<usize>) -> u64,
     max_d: f64,
     eps: f64,
 ) -> Vec<Foot> {
+    let shares = |a: Option<usize>, b: Option<usize>| mask(a) & mask(b) != 0;
     if max_d <= 0.0 || sides.is_empty() {
         return Vec::new();
     }
@@ -234,12 +239,21 @@ pub fn lct_feet(
             continue;
         }
         // Free: no other side touches the segment (sides incident to `v` meet it only there).
+        // The layers the cut bounds: those both its ends block.
+        let cut_mask = mask(ovn) & mask(s.owner);
         let mid = (vp + f) * 0.5;
         let (sl, sh) = (Vec2 { x: vp.x.min(f.x), y: vp.y.min(f.y) }, Vec2 { x: vp.x.max(f.x), y: vp.y.max(f.y) });
         let mut free = true;
         for &si in grid.near(mid) {
             let o = &sides[si as usize];
             if si as usize == c.side {
+                continue;
+            }
+            // A side of copper on none of the cut's layers that only meets the cut at an end
+            // (a rule area side along the outline through the foot) leaves it free: the
+            // triangulation splits that side at the foot. One that crosses it inside still
+            // splits the cut, so it blocks as before.
+            if mask(o.owner) & cut_mask == 0 && (seg_dist(f, o.a, o.b) < 1.0 || seg_dist(vp, o.a, o.b) < 1.0) {
                 continue;
             }
             if o.a.x.min(o.b.x) > sh.x + 1.0 || o.a.x.max(o.b.x) < sl.x - 1.0 || o.a.y.min(o.b.y) > sh.y + 1.0 || o.a.y.max(o.b.y) < sl.y - 1.0 {
@@ -265,6 +279,10 @@ pub fn lct_feet(
                     continue;
                 }
                 last_owner = o;
+                // Copper on none of the cut's layers: the cut runs over it, not through it.
+                if mask(Some(o)) & cut_mask == 0 {
+                    continue;
+                }
                 let (lo, hi) = obox[o];
                 let pin = |q: Vec2| q.x >= lo.x && q.x <= hi.x && q.y >= lo.y && q.y <= hi.y && point_in_poly(q, polys[o]);
                 if pin(mid) || pin(f) && Some(o) != s.owner {
@@ -328,7 +346,7 @@ mod tests {
                 sides.push(Side { a: p[i], b: p[(i + 1) % 4], owner: Some(o) });
             }
         }
-        let f = lct_feet(&verts, &sides, &polys, &|_, _| true, 3e6, 1e4);
+        let f = lct_feet(&verts, &sides, &polys, &|_| u64::MAX, 3e6, 1e4);
         // a's (1,1) corner onto b's bottom side is not interior (it is at x=1 inside 0.5..1.5):
         // yes interior; b's (0.5,1.5) onto a's top side (x=0.5 inside 0..1): interior.
         assert_eq!(f.len(), 2, "{f:?}");
@@ -350,7 +368,7 @@ mod tests {
                 sides.push(Side { a: p[i], b: p[(i + 1) % 4], owner: Some(o) });
             }
         }
-        let f = lct_feet(&verts, &sides, &polys, &|_, _| true, 3e6, 1e4);
+        let f = lct_feet(&verts, &sides, &polys, &|_| u64::MAX, 3e6, 1e4);
         // a and b are aligned: their feet are the ends, i.e. vertex-to-vertex cuts along the free
         // sides. The interior feet are those of the middle pad m with a and b.
         assert!(f.iter().filter(|x| x.t > 0.0 && x.t < 1.0).all(|x| verts[x.v].owner == Some(2) || sides[x.side].owner == Some(2)), "{f:?}");

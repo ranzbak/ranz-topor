@@ -433,7 +433,7 @@ fn insert_events(st: &State, wire: &Wire, path: &[(EdgeId, usize)], tris: &[TriI
                     let same_net = st.wires[o].net == wire.net;
                     out.push(Event::Crossing { a: id, b: o, tri: t, same_net });
                     if !same_net {
-                        let h = held.entry(o).or_insert_with(|| st.stretch_layers(o))[ok];
+                        let h = held.entry(o).or_insert_with(|| st.held_layers(o))[ok];
                         xl[k].push((h, pr.allowed(t, st.wires[o].net).map_or(0, |m| m.0)));
                     }
                 }

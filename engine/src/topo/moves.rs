@@ -176,6 +176,14 @@ impl Topo {
         let ctx = self.ctx(ci);
         (evs.iter().map(|e| self.reg.price(e, &ctx)).sum(), over)
     }
+    /// Price (mm) of `wire` inserted along `path` into `st` (which must not hold it) under the
+    /// registry `reg` instead of [`Topo::reg`] (the TopoR loop prices its reroutes with the
+    /// try's own coefficients, shopping list 5.2). O(path x traversals).
+    pub fn path_price(&self, st: &State, wire: &Wire, path: &[(EdgeId, usize)], tris: &[TriId], ci: usize, reg: &Registry) -> f64 {
+        let mv = Move::Insert { wire, path, tris, scale: self.scale(ci) };
+        let ctx = self.ctx(ci);
+        super::factors::events(st, &mv).iter().map(|e| reg.price(e, &ctx)).sum()
+    }
     /// What `w` could gain at most by moving: its price minus the price of its straight pad-to-pad
     /// length (the length factor alone). O(path x traversals).
     pub fn potential(&self, st: &mut State, w: WireId) -> f64 {

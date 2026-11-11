@@ -126,13 +126,18 @@ pub struct CycleStats {
     /// Wires whose via count rose in the layer re-optimisation, rerouted again / kept.
     pub relaid: usize,
     pub relaid_kept: usize,
-    /// Layer re-optimisations and their time (s; report only).
+    /// Layer re-optimisations, those taken (the board's evaluation did not rise) and their time
+    /// (s; report only).
     pub layer_runs: usize,
+    pub layer_kept: usize,
     pub layer_s: f64,
     /// Floating-up (label) moves kept.
     pub float_kept: usize,
     /// Crossing-rule passes kept (clinches, double crossings, unlayerable crossings).
     pub cross_kept: usize,
+    /// Whole-board moves (floating up, crossing passes) undone because the board's evaluation
+    /// rose ([`evaluation`]).
+    pub undone: usize,
     /// The cycle's time (s; report only).
     pub busy_s: f64,
 }
@@ -144,9 +149,11 @@ impl CycleStats {
         self.relaid += o.relaid;
         self.relaid_kept += o.relaid_kept;
         self.layer_runs += o.layer_runs;
+        self.layer_kept += o.layer_kept;
         self.layer_s += o.layer_s;
         self.float_kept += o.float_kept;
         self.cross_kept += o.cross_kept;
+        self.undone += o.undone;
         self.busy_s += o.busy_s;
     }
 }
@@ -288,14 +295,17 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
             rep.stable_at = Some(cycle);
         }
         rep.lines.push(format!(
-            "{cycle}: amp {:.3}, reroutes {}/{}, via-rose {}/{}, floating up {}, crossing passes {}, {}{}, best {:.1}{}",
+            "{cycle}: amp {:.3}, reroutes {}/{}, via-rose {}/{}, layerings {}/{}, floating up {}, crossing passes {}, undone {}, {}{}, best {:.1}{}",
             ctx.amp,
             cs.kept,
             cs.tried,
             cs.relaid_kept,
             cs.relaid,
+            cs.layer_kept,
+            cs.layer_runs,
             cs.float_kept,
             cs.cross_kept,
+            cs.undone,
             if kept { "archived" } else { "not archived" },
             rep.restarts.last().filter(|r| r.0 == cycle).map(|r| format!(" (restart from {})", r.1)).unwrap_or_default(),
             v,
@@ -309,50 +319,217 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
     rep
 }
 
+/// The predicted violations of a topology with its layering, as the loop's archive counts them
+/// and as every loop move pays for them (shopping list 5.2: the price of a move and the criterion
+/// of the archive are one measure). `count` = the archive's errors: over-full edge-layers (cut
+/// model: over-full cuts) and vias without a site ([`super::refine::CapModel::violations`]),
+/// crossings no layer separates, connections placed without a legal path. `graded` >= `count`:
+/// each of them 1 plus how far it is over (an unlayerable crossing and a forced connection 1),
+/// the `violation` factor's own amount (1 per violation plus its depth, `factors/violation.rs`).
+/// Polubasov 2010 («Пространство решений»): the evaluation of a whole topology uses "only the
+/// factors obvious to the designer ... with constant coefficients"; the violations are the first
+/// of them, so their weight here never oscillates.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Predicted {
+    pub count: usize,
+    pub graded: f64,
+}
+
+impl Predicted {
+    /// From the capacity model's `(count, graded)`, the unlayerable crossings and the forced
+    /// connections. O(1).
+    pub fn of(cap: (usize, f64), unlayerable: usize, forced: usize) -> Predicted {
+        let n = unlayerable + forced;
+        Predicted { count: cap.0 + n, graded: cap.1 + n as f64 }
+    }
+    /// Plus the traversals through foreign copper `(count, graded)` ([`foreign_copper`]). O(1).
+    pub fn with_foreign(self, f: (usize, f64)) -> Predicted {
+        Predicted { count: self.count + f.0, graded: self.graded + f.1 }
+    }
+    /// What the violations cost a move (mm): the `violation` weight `viol_mm` x the graded amount,
+    /// so one more predicted violation costs at least `viol_mm` and one fewer gains as much.
+    pub fn price(&self, viol_mm: f64) -> f64 {
+        viol_mm * self.graded
+    }
+    /// The archive's graded part ([`Criteria::penalty`]): the amount beyond 1 per violation at the
+    /// `violation` weight (the count itself is [`Criteria::errors`]).
+    pub fn penalty(&self, viol_mm: f64) -> f64 {
+        viol_mm * (self.graded - self.count as f64).max(0.0)
+    }
+}
+
+/// Planned traversals through foreign copper (Q14b): a wire whose traversal of a triangle can
+/// lie on no layer that copper of another net (a pad, an existing via, a copper shape; or a
+/// no-tracks rule area) leaves free there, under the layering `layers` ([`layers_now`]: the layer
+/// of the run, both layers inside a via interval, so a via that can still go on the free side is
+/// no violation). In the drawing such a wire is a short (KiCad `shorting_items`), so the plan
+/// counts it as a violation like an over-full cut: costly, not failed (the wire stays placed and
+/// the loop's moves can take it out). One per wire and object it runs through; graded like the
+/// `violation` factor (`factors/violation.rs`: 1 + depth x length per 0.01 mm²) with the wire's
+/// pitch (width + clearance, the whole overlap) as the depth over the length of its traversals
+/// inside the object (straight chords between its passes). Returns `(count, graded)`.
+/// Polubasov 2010 («Многовариантная оптимизация»): "a design-rule violation cannot be compensated
+/// by any reduction of wire length". O(traversals x obstacles per triangle).
+pub fn foreign_copper(st: &State, layers: &[Vec<u64>]) -> (usize, f64) {
+    let pr = st.proj;
+    let all = if pr.n_layers >= 64 { u64::MAX } else { (1u64 << pr.n_layers) - 1 };
+    let (mut count, mut graded) = (0usize, 0.0f64);
+    for (w, wi) in st.wires.iter().enumerate() {
+        if !wi.alive || wi.tris.is_empty() {
+            continue;
+        }
+        let Some(lw) = layers.get(w).filter(|l| l.len() == wi.tris.len()) else { continue };
+        let n = wi.passes.len();
+        // Per object the length (nm) of this wire's traversals inside it.
+        let mut inside: Vec<(usize, f64)> = Vec::new();
+        for (k, &t) in wi.tris.iter().enumerate() {
+            let on = lw[k] & all;
+            if on == 0 {
+                continue;
+            }
+            let block = |o: usize| {
+                let ob = &pr.obstacles[o];
+                if ob.drilled { all } else { ob.layers.0 & all }
+            };
+            let foreign: Vec<usize> = pr.tri_obs[t].iter().copied().filter(|&o| pr.obstacles[o].net != Some(wi.net)).collect();
+            let blocked = foreign.iter().fold(0u64, |m, &o| m | block(o));
+            if on & !blocked != 0 {
+                continue;
+            }
+            let from = if k == 0 { pr.pos[wi.a] } else { st.pass_point(wi.passes[k - 1]) };
+            let to = if k == n { pr.pos[wi.b] } else { st.pass_point(wi.passes[k]) };
+            let len = (to - from).len();
+            for o in foreign.into_iter().filter(|&o| block(o) & on != 0) {
+                match inside.iter_mut().find(|x| x.0 == o) {
+                    Some(x) => x.1 += len,
+                    None => inside.push((o, len)),
+                }
+            }
+        }
+        for (_, len) in inside {
+            count += 1;
+            graded += super::factors::violation_amount(wi.w + wi.s, len);
+        }
+    }
+    (count, graded)
+}
+
+/// The loop's criteria of one topology (what the archive keeps): errors = violations = the
+/// predicted count, penalty = its graded part ([`Predicted::penalty`]). O(1).
+pub fn criteria_of(p: Predicted, viol_mm: f64, vias: usize, length_mm: f64, shrinkages: usize, area_mm2: f64) -> Criteria {
+    Criteria { errors: p.count, open: 0, violations: p.count, penalty: p.penalty(viol_mm), vias, length_mm, shrinkages, warnings: 0, area_mm2 }
+}
+
+/// The evaluation of a whole topology that every whole-board loop move (layer re-optimisation,
+/// floating up, crossing passes) is judged by: the archive's objective value plus the `violation`
+/// weight per predicted violation, `base + viol_mm x graded` ([`Predicted::price`]). Lower is
+/// better. O(1).
+pub fn evaluation(obj: &Objective, c: &Criteria, viol_mm: f64) -> f64 {
+    obj.value(c) + viol_mm * c.errors as f64
+}
+
+/// The layers of every traversal of every alive wire under the layering `events` (`(traversal,
+/// fraction, layer)` per wire, as [`super::layers::LayerReport::events`]): the layer of the run
+/// it lies in, both layers inside a via interval (the via may sit anywhere between its two events:
+/// Polubasov 2001 p. 4, "if the ends of a stretch between two neighbouring crossings belong to
+/// different layers, the stretch needs a via"); a wire without events lies on `bottom`
+/// ([`super::draw::plan`]). Bit `l` = layer `l`. O(traversals + events).
+pub fn layers_now(st: &State, events: &[Vec<(usize, f64, i32)>], bottom: i32) -> Vec<Vec<u64>> {
+    let bit = |l: i32| 1u64 << l.clamp(0, 63);
+    (0..st.wires.len())
+        .map(|w| {
+            let wi = &st.wires[w];
+            let n = wi.tris.len();
+            if !wi.alive || n == 0 {
+                return Vec::new();
+            }
+            let ev = events.get(w).map_or(&[][..], |e| &e[..]);
+            let (Some(first), Some(last)) = (ev.first(), ev.last()) else { return vec![bit(bottom); n] };
+            let at = |k: usize| k.min(n - 1);
+            let mut m = vec![0u64; n];
+            for x in &mut m[..=at(first.0)] {
+                *x |= bit(first.2);
+            }
+            for x in &mut m[at(last.0)..] {
+                *x |= bit(last.2);
+            }
+            for p in ev.windows(2) {
+                for x in &mut m[at(p[0].0)..=at(p[1].0).max(at(p[0].0))] {
+                    *x |= bit(p[0].2) | bit(p[1].2);
+                }
+            }
+            m
+        })
+        .collect()
+}
+
 /// One single-wire rip-up and reroute ([`reroute_set`]): how the price of a wire is read and how
 /// the removed connections are placed again.
 pub trait Rerouter<'p> {
-    /// The price of wire `w` where it lies (in the state), with this try's coefficients.
+    /// The price of wire `w` where it lies (in the state), with this try's coefficients: the
+    /// wire's own and social factors (Polubasov 2010: `S = Σ kᵢ xᵢ`), without the predicted
+    /// violations of the board ([`Rerouter::violations`]).
     fn price(&mut self, st: &mut State<'p>, w: WireId) -> f64;
     /// Place the connections of the removed wires `gone` again; the new wires, or `None` when one
     /// of them could not be placed at all (its pads lie in parts no edge joins).
     fn place(&mut self, st: &mut State<'p>, gone: &[WireId]) -> Option<Vec<WireId>>;
+    /// The price (mm) of the predicted violations of the whole state, the archive's own measure
+    /// at the `violation` weight ([`Predicted::price`]): `after` false = the state before the try
+    /// (the caller's cached value), true = the state now, with the new wires placed. 0 = no
+    /// violations priced (a rerouter that has no board measure).
+    fn violations(&mut self, _st: &mut State<'p>, _after: bool) -> f64 {
+        0.0
+    }
     /// The try was undone (the state is back as before): undo the bookkeeping of `place`.
     fn undo(&mut self);
+    /// The try was kept (adopt what `violations(after)` computed for the new state).
+    fn keep(&mut self) {}
 }
 
 /// Result of [`reroute_set`]: kept or not, the price before and after (`new` is infinite when a
-/// connection could not be placed again).
+/// connection could not be placed again), each with the predicted violations' price in it
+/// (`viol_old`, `viol_new`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RerouteOut {
     pub kept: bool,
     pub old: f64,
     pub new: f64,
+    pub viol_old: f64,
+    pub viol_new: f64,
 }
 
 /// Single-wire rip-up and reroute (Polubasov 2010: "removing the wires one at a time and laying
 /// them again along cheaper paths"): the wires of `set` (a wire and the branches that end on its
 /// junctions) are taken out and placed again; the change is kept when the price of the new wires
-/// plus `extra` (the `reroute` price of moving them once more) is below the price of the old ones.
-/// Otherwise the state before comes back exactly (every wire, pass and order). A price, not a
-/// gate: nothing is refused by a threshold, only by the price comparison. O(state) for the copy
-/// plus the searches of `place`.
+/// plus `extra` (the `reroute` price of moving them once more) plus the predicted violations of
+/// the board after it is below the price of the old wires plus the violations before. The
+/// violations are the archive's own measure ([`Rerouter::violations`], shopping list 5.2), so a
+/// kept move never adds a violation the archive counts without paying the `violation` weight for
+/// it, and a move that removes one gains as much. Otherwise the state before comes back exactly
+/// (every wire, pass and order). A price, not a gate: nothing is refused by a threshold, only by
+/// the price comparison. O(state) for the copy plus the searches of `place` and the measure.
 pub fn reroute_set<'p>(st: &mut State<'p>, set: &[WireId], r: &mut dyn Rerouter<'p>, extra: f64) -> RerouteOut {
     let saved = st.topology();
-    let old: f64 = set.iter().map(|&w| r.price(st, w)).sum();
+    let viol_old = r.violations(st, false);
+    let old: f64 = set.iter().map(|&w| r.price(st, w)).sum::<f64>() + viol_old;
     for &w in set {
         super::tree::remove_wire(st, w);
     }
-    let new = match r.place(st, set) {
-        Some(ws) => ws.iter().map(|&w| r.price(st, w)).sum(),
-        None => f64::INFINITY,
+    let (new, viol_new) = match r.place(st, set) {
+        Some(ws) => {
+            let local: f64 = ws.iter().map(|&w| r.price(st, w)).sum();
+            let v = r.violations(st, true);
+            (local + v, v)
+        }
+        None => (f64::INFINITY, f64::INFINITY),
     };
     if new + extra < old - EPS {
-        return RerouteOut { kept: true, old, new };
+        r.keep();
+        return RerouteOut { kept: true, old, new, viol_old, viol_new };
     }
     st.restore(saved);
     r.undo();
-    RerouteOut { kept: false, old, new }
+    RerouteOut { kept: false, old, new, viol_old, viol_new }
 }
 
 #[cfg(test)]
