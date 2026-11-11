@@ -2890,6 +2890,29 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         "foreign copper (Q14b): the plan handed to the drawing runs {} times through copper of another net or a no-tracks rule area (graded {:.2}; each a violation in the plan's measure, a short if the drawing cannot avoid it)",
         fc_plan.0, fc_plan.1
     ));
+    if let Ok(path) = std::env::var("TOPO_PLANDUMP") {
+        // Debug: the plan handed to the drawing, per wire: net, connection, taut points, the
+        // layering's stretches, the passes (edge ends, room per layer, need) and crossings.
+        let pt = |p: Vec2| serde_json::json!([(p.x / MM * 1e3).round() / 1e3, (-p.y / MM * 1e3).round() / 1e3]);
+        let lnow = super::optimise::layers_now(&st, &lr.events, bottom);
+        let wires: Vec<serde_json::Value> = (0..st.wires.len()).filter(|&w| st.wires[w].alive).map(|w| {
+            let wi = &st.wires[w];
+            let ci = wire_conn.get(w).copied().filter(|&c| c != usize::MAX).map(|c| conn_of[c]);
+            let passes: Vec<serde_json::Value> = wi.passes.iter().enumerate().map(|(k, &p)| {
+                let e = st.passes[p].edge;
+                let [a, c] = proj.edges[e];
+                serde_json::json!({"k": k, "edge": e, "a": pt(proj.pos[a]), "b": pt(proj.pos[c]), "len": ((proj.pos[c] - proj.pos[a]).len() / MM * 1e3).round() / 1e3,
+                    "room": (0..proj.n_layers).map(|l| { let r = st.room(e, l); if r.is_finite() { (r / MM * 1e3).round() / 1e3 } else { -1.0 } }).collect::<Vec<_>>(),
+                    "need": (st.edge_need(e, None) / MM * 1e3).round() / 1e3, "n": st.edge_order[e].len(), "at": pt(st.pass_point(p))})
+            }).collect();
+            let xs: Vec<serde_json::Value> = st.crossings(w).iter().map(|x| serde_json::json!({"k": x.k, "other": x.other, "other_net": st.wires[x.other].net})).collect();
+            serde_json::json!({"wire": w, "net": wi.net, "conn": ci, "w": wi.w / MM, "s": wi.s / MM, "a": pt(proj.pos[wi.a]), "b": pt(proj.pos[wi.b]),
+                "taut": st.taut_points(w).into_iter().map(pt).collect::<Vec<_>>(),
+                "stretches": lr.stretches.get(w).map(|v| v.iter().map(|(l, ps)| serde_json::json!([l, ps.iter().map(|&q| pt(q)).collect::<Vec<_>>()])).collect::<Vec<_>>()).unwrap_or_default(),
+                "events": lr.events.get(w).cloned().unwrap_or_default(), "layers_now": lnow.get(w).cloned().unwrap_or_default(), "passes": passes, "crossings": xs})
+        }).collect();
+        let _ = std::fs::write(format!("{path}.r{round}"), serde_json::json!({"wires": wires, "foreign": fc_plan.0}).to_string());
+    }
     if std::env::var("TOPO_VIADBG").is_ok() {
         let dirs = dirs_of(&st);
         let cm = CapModel::new(&st, &packer, &dirs, &lr.events, bottom, 1.0);
