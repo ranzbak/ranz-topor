@@ -25,6 +25,7 @@ O(pixels).
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from pathlib import Path
@@ -209,6 +210,24 @@ def _svg_mm(text: str) -> tuple | None:
 
 
 # ---------------------------------------------------------------- render
+#: the separate board images are rasterised at this multiple of the composite's scale (sharp up to 200 % zoom)
+PANEL_HIRES = 2
+
+
+def panel_paths(out_png) -> dict:
+    """``{"before": <stem>-before.png, "after": <stem>-after.png}`` next to the composite preview PNG: the two boards
+    as separate images (the preview dialog shows one pane each). O(1)."""
+    p = Path(out_png)
+    return {k: p.with_name(f"{p.stem}-{k}.png") for k in ("before", "after")}
+
+
+def legend_path(out_png) -> Path:
+    """``<stem>-legend.json`` next to the composite: ``[{"label", "rgb"}]`` of the legend drawn under it, for the
+    dialog's own legend row (the separate images carry none). O(1)."""
+    p = Path(out_png)
+    return p.with_name(f"{p.stem}-legend.json")
+
+
 def _rasterise(svg: Path, scale: float):
     import wx.svg
 
@@ -282,6 +301,12 @@ def render_ex(before_pcb: Path, after_pcb: Path, out_png: Path, caption, *, new_
     scale = max(0.5, scale)
     bmp_b, _ = _rasterise(svg_b, scale)
     bmp_a, _ = _rasterise(svg_a_draw, scale)
+    # the two boards as separate images for the preview dialog (one pane each, scaled to its pane), rasterised at
+    # PANEL_HIRES x the composite's scale so a large pane stays sharp
+    for key, dst in panel_paths(out_png).items():
+        hi, _ = _rasterise(svg_b if key == "before" else svg_a_draw, scale * PANEL_HIRES)
+        if not hi.SaveFile(str(dst), wx.BITMAP_TYPE_PNG):
+            raise RuntimeError(f"could not write {dst}")
 
     lines = [caption] if isinstance(caption, str) else list(caption)
     m, gap, lh = 16, 16, 20
@@ -325,6 +350,8 @@ def render_ex(before_pcb: Path, after_pcb: Path, out_png: Path, caption, *, new_
         legend.append((f"open connection (KiCad DRC unconnected: {len(unconnected_before or [])} before, "
                        f"{len(unconnected_after or [])} after"
                        f"{ratsnest_caption(ratsnest_marks(unconnected_after))})", RATSNEST_RGB))
+    legend_path(out_png).write_text(json.dumps(
+        [{"label": label, "rgb": list(rgb) if rgb is not None else None} for label, rgb in legend]))
     for label, rgb in legend:
         if rgb is not None:
             dc.SetBrush(wx.Brush(wx.Colour(*rgb)))

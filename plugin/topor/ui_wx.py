@@ -17,6 +17,7 @@ zoom change. No pcbnew (M4-R1).
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import subprocess
@@ -62,6 +63,9 @@ WORDING: dict[str, dict[str, str]] = {
         "cause_label": "Cause",
         "fix_label": "Fix",
         "no_findings": "No findings. The board setup covers everything Topor needs.",
+        # 0 errors and 0 warnings (user 2026-11-11: "No problems found" instead of a count of zeros)
+        "no_problems": "No problems found",
+        "no_problems_notes": "No problems found ({notes} notes)",
         "items_more": "… and {n} more (all in the report)",
         "accept_pads": "Accept: skip these pads (saved to topor.toml ignore_pads)",
         "accept_drills": "Accept: add these drills to topor.toml allowed_drills_mm",
@@ -131,10 +135,13 @@ WORDING: dict[str, dict[str, str]] = {
         "limit_add5": "+5 min",
         "limit_add15": "+15 min",
         "limit_hint": "0 = no limit. A limit below the time spent stops the run now, keeping the best result.",
-        "cancel_hint": "Cancel keeps the best result so far. Once the routes are stable the button reads OK: the "
-                       "same action, and the best result shown is exactly the board you get; waiting longer may "
-                       "still find small gains. The time limit counts router time only and is an emergency stop; "
-                       "KiCad's DRC and the preview come on top.",
+        # one short line; the full text is its tooltip (user 2026-11-11)
+        "cancel_hint": "Cancel keeps the best result so far.",
+        "cancel_hint_tip": "Cancel keeps the best result so far. Once the routes are stable the button reads OK: the "
+                           "same action, and the best result shown is exactly the board you get; waiting longer may "
+                           "still find small gains. The time limit counts router time only and is an emergency stop; "
+                           "KiCad's DRC and the preview come on top.",
+        "score_waiting": "Waiting for round 1…",
         "cancel": "Cancel",
         # M-B0: iterations like TopoR ("Routes stable", Cancel -> OK, best of N runs)
         "ok": "OK",
@@ -187,6 +194,8 @@ WORDING: dict[str, dict[str, str]] = {
         "before_heading": "Current board",
         "after_heading": "Result",
         "summary_heading": "Summary",
+        # top line of the summary when KiCad's DRC finds new violations (red, bold)
+        "drc_alert": "⚠ DRC new {n} ({types}) — see findings",
         "no_image": "Preview could not be rendered (see log.txt in the report folder)",
         "report_dir_label": "Report folder",
         "report_dir": "{report_dir}",
@@ -210,6 +219,7 @@ WORDING: dict[str, dict[str, str]] = {
                          "the next one the routes.",
         "done_post_commit": "{message} {fix}",
         "done_times": "Router time {router}, CPU time {cpu} (all threads).",
+        "done_drc_new": "⚠ {n} new DRC violations ({types}) — run Inspect → Design Rules Checker",
         "report_dir_label": "Report folder",
         "report_dir": "{report_dir}",
         "open_report_folder": "Open report folder",
@@ -287,6 +297,60 @@ def window_icons(icon_dir: Path = ICON_DIR, dark: bool | None = None) -> "wx.Ico
             if ic.IsOk():
                 bundle.AddIcon(ic)
     return None if bundle.IsEmpty() else bundle
+
+
+#: text colours by tone (user 2026-11-11: "problems visible at a glance"): (light theme, dark theme). Always next to
+#: an icon or a word (never colour alone); each has a contrast >= 4.5 on GTK's default light / dark window colour.
+TONE_RGB = {"error": ((192, 28, 40), (255, 123, 114)), "warning": ((154, 103, 0), (227, 179, 65)),
+            "ok": ((26, 127, 55), (87, 199, 106))}
+
+
+def window_is_dark() -> bool:
+    """The window background (lists, text fields) is dark: its luminance, which follows the GTK theme even where
+    ``GetAppearance`` cannot tell. O(1)."""
+    c = wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW)
+    return 0.2126 * c.Red() + 0.7152 * c.Green() + 0.0722 * c.Blue() < 128
+
+
+def tone_colour(tone: str) -> "wx.Colour":
+    """Text colour of a tone: ``error`` red, ``warning`` amber, ``ok`` green (light / dark pair of TONE_RGB),
+    ``info`` the system's grey text, anything else the normal text colour. O(1)."""
+    if tone in TONE_RGB:
+        return wx.Colour(*TONE_RGB[tone][1 if window_is_dark() else 0])
+    return wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT if tone == "info" else wx.SYS_COLOUR_WINDOWTEXT)
+
+
+def drc_new(report) -> tuple[int, str]:
+    """(new DRC violations, "clearance 9, short 1") of a run report (``facts["routing_new"]`` and
+    ``drc_by_type_new``); (0, "") when unknown. O(types)."""
+    f = getattr(report, "facts", None) or {}
+    try:
+        n = int(f.get("routing_new") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    by = f.get("drc_by_type_new") or {}
+    types = ", ".join(f"{t} {c}" for t, c in sorted(by.items(), key=lambda kv: (-kv[1], kv[0])))
+    return n, types
+
+
+#: summary lines shown bold at the top of the preview's Summary (the facts to decide on), by their first word
+SUMMARY_KEY_PREFIXES = ("Routed ", "DRC new ", "Vias ", "Length ")
+
+
+def summary_parts(report) -> tuple[str, list, list]:
+    """The preview Summary in its hierarchy: (alert line or "", key lines, other lines). The alert is the red line
+    for new DRC violations; the key lines are routed, DRC new, vias and length (``SUMMARY_KEY_PREFIXES``, in that
+    order); the rest keeps the report's order without the report path (the field below shows it). O(lines)."""
+    lines = list(report.summary_lines())
+    key = [ln for p in SUMMARY_KEY_PREFIXES for ln in lines if ln.startswith(p)]
+    rest = [ln for ln in lines if ln not in key and not ln.startswith("Report: ")]
+    n, types = drc_new(report)
+    if not n:
+        m = next((re.match(r"DRC new (\d+)", ln) for ln in key if ln.startswith("DRC new ")), None)
+        n = int(m.group(1)) if m else 0
+    tmpl = WORDING["preview"]["drc_alert"]
+    alert = "" if not n else tmpl.format(n=n, types=types) if types else tmpl.replace(" ({types})", "").format(n=n)
+    return alert, key, rest
 
 
 #: the name on the start-up splash (user 2026-11-08)
@@ -433,6 +497,20 @@ def score_rows(p: Progress) -> tuple[dict, str]:
     return {"last": last, "best": best}, verdict
 
 
+def verdict_tone(p: Progress) -> str:
+    """Colour of the verdict line (user 2026-11-11): ``ok`` (green) when the last round beat the best (a new best
+    with a margin, or better but not kept), ``warning`` (amber) when it is worse, "" otherwise (the first result,
+    ties, the same score). O(1)."""
+    vs = getattr(p, "last_vs_best", "")
+    if not getattr(p, "last_round", 0):
+        return ""
+    if vs == "worse":
+        return "warning"
+    if vs == "better" or (vs == "new best" and getattr(p, "last_decider", "")):
+        return "ok"
+    return ""
+
+
 def _fmt_time(seconds: float) -> str:
     s = max(0, int(seconds))
     if s >= 3600:
@@ -559,17 +637,29 @@ class _Base(wx.Dialog):
         self.SetSize(wx.Size(max(size.width, mn.width), max(size.height, mn.height)))
         self._register()
         self.CentreOnScreen()
-        # GTK knows the height of wrapped text only once the window exists: grow to the best size then, else the
-        # last lines are cut off (seen live: the first-run notice lost "widths and via sizes ..." at 200 px).
+        # GTK knows the height of wrapped text and of the title bar only once the window exists: grow to the best
+        # size then, else the last lines are cut off (seen live: the first-run notice lost "widths and via sizes
+        # ..." at 200 px; the fitted pre-flight lost its buttons). Once at the first idle, once when shown.
         wx.CallAfter(self._grow_to_best)
+        self.Bind(wx.EVT_SHOW, self._on_show_grow)
+
+    def _on_show_grow(self, evt) -> None:
+        evt.Skip()
+        if evt.IsShown():
+            wx.CallLater(50, self._grow_to_best)
 
     def _grow_to_best(self) -> None:
+        """Grow the CLIENT area to what the sizer needs. Compared on client sizes: GTK learns the title bar's height
+        only once the window is mapped and then takes it out of a size set before, so a dialog opened at its fitted
+        size lost its button row (live screenshot 2026-11-11, pre-flight without an opening size)."""
         if not self:
             return
         self.Layout()
-        best, cur = self.GetBestSize(), self.GetSize()
-        if best.width > cur.width or best.height > cur.height:
-            self.SetSize(wx.Size(max(best.width, cur.width), max(best.height, cur.height)))
+        sizer = self.GetSizer()
+        need = sizer.CalcMin() if sizer is not None else self.GetBestSize()
+        cur = self.GetClientSize()
+        if need.width > cur.width or need.height > cur.height:
+            self.SetClientSize(wx.Size(max(need.width, cur.width), max(need.height, cur.height)))
             self.Layout()
 
     def _register(self) -> None:
@@ -622,31 +712,28 @@ class FirstRunDialog(_Base):
         self.ok_button.SetFocus()
 
 
-# --------------------------------------------------------------------------------------------- (2) pre-flight
-class PreflightDialog(_Base):
-    _wk = "preflight"
-    #: tab order from the note §2 (one Accept checkbox, relabelled per selected code)
-    TAB_ORDER = ("findings", "cause", "accept", "scope_whole", "scope_between",
-                 "scope_touching", "existing", "respect_locked", "drawing_style", "timeout", "timeout_clock",
-                 "save_toml", "help", "cancel", "route")
+# --------------------------------------------------------------------------------------------- findings list
+class _FindingsMixin:
+    """The findings list of the pre-flight and the preview (one widget, user 2026-11-11): severity icon + word in
+    column 1 and the row's text in the severity's colour (error red, warning amber, note grey; ``tone_colour``),
+    sorted errors first, its height fitting the rows (at most ``LIST_ROWS_MAX`` before it scrolls), a heading that
+    reads "No problems found" without errors and warnings, and the Cause / Fix pane of the selected row. The wording
+    is the pre-flight's (``WORDING["preflight"]``). Construction O(#findings)."""
+    LIST_ROWS_MAX = 8
 
-    def __init__(self, findings: list, summary: RunSummary, cfg: Config):
-        super().__init__(WORDING["preflight"]["title"].format(board=summary.board), resizable=True)
-        self.cfg = cfg
+    def build_findings(self, findings: list, max_rows: int | None = None) -> None:
+        W = WORDING["preflight"]
         self.findings = sorted(findings, key=lambda f: (_SEV_ORDER[f.severity], f.code))
         self.n_err = sum(f.severity == "error" for f in self.findings)
-        n_warn = sum(f.severity == "warning" for f in self.findings)
-        n_info = sum(f.severity == "info" for f in self.findings)
-        W = WORDING["preflight"]
-        g = self.group
+        self.n_warn = sum(f.severity == "warning" for f in self.findings)
+        self.n_info = sum(f.severity == "info" for f in self.findings)
+        counts = W["findings_heading"].format(errors=self.n_err, warnings=self.n_warn, notes=self.n_info)
+        ok = not self.n_err and not self.n_warn
+        head = (W["no_problems_notes"].format(notes=self.n_info) if self.n_info else W["no_problems"]) if ok else counts
+        self.findings_heading = self.text(self, "preflight", "findings_heading", bold=True, text=head)
+        if ok:
+            self.findings_heading.SetForegroundColour(tone_colour("ok"))
 
-        self.summary = summary
-        self.summary_label = self.text(self, "preflight", "summary_line", text=self._summary_text(summary.connections))
-        self.root.Add(self.summary_label, 0, wx.BOTTOM, g)
-        self.root.Add(self.text(self, "preflight", "findings_heading", bold=True, text=W[
-            "findings_heading"].format(errors=self.n_err, warnings=n_warn, notes=n_info)), 0, wx.BOTTOM, self.row)
-
-        # findings list (report mode, icon + word in column 1)
         self.list = wx.ListCtrl(self, name="findings", style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.BORDER_THEME)
         sz = self.FromDIP(16)
         il = wx.ImageList(sz, sz)
@@ -661,14 +748,92 @@ class PreflightDialog(_Base):
             self.list.InsertItem(i, W[_SEV_WORD[f.severity]], self._icon[f.severity])
             self.list.SetItem(i, 1, f.code)
             self.list.SetItem(i, 2, f.message)
-        self.list.SetMinSize(self.FromDIP(wx.Size(-1, 150)))  # >= 5 rows (live test: 110 showed 1.5 rows)
-        self.list.SetToolTip(W["findings_heading"].format(errors=self.n_err, warnings=n_warn, notes=n_info))
-        self.root.Add(self.list, 1, wx.EXPAND | wx.BOTTOM, self.row)
+            self.list.SetItemTextColour(i, tone_colour(f.severity))
+        rows = min(len(self.findings), max_rows or self.LIST_ROWS_MAX)
+        self.list.SetMinSize(wx.Size(-1, self.list_height(max(1, rows))))
+        self.list.SetToolTip(counts)
+        self.list_grows = len(self.findings) > rows  # more rows than shown: the list takes the spare height
 
-        self.cause = wx.TextCtrl(self, name="cause",
-                                 style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_BESTWRAP)
-        self.cause.SetMinSize(wx.Size(-1, self.cause.GetCharHeight() * 4 + self.FromDIP(12)))
+        self.cause = wx.TextCtrl(self, name="cause", style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_BESTWRAP)
         self.cause.SetToolTip(f"{W['cause_label']} / {W['fix_label']}")
+        self.list.Show(bool(self.findings))
+        self.cause.Show(bool(self.findings))
+        self.list.Bind(wx.EVT_LIST_ITEM_SELECTED, self._on_select)
+        self.list.Bind(wx.EVT_SIZE, self._on_list_size)
+
+    def list_height(self, rows: int) -> int:
+        """Pixel height of the list showing `rows` rows and its header: the row height of the generic list (the
+        larger of the 16 DIP icon and the text, plus its line spacing), the header one text line with padding. O(1)."""
+        ch = self.list.GetCharHeight()
+        row = max(self.FromDIP(16), ch) + self.FromDIP(6)
+        if self.findings:
+            r = self.list.GetItemRect(0)
+            if r.height > 0:
+                row = r.height
+        header = ch + self.FromDIP(14)
+        return header + rows * row + self.FromDIP(6)
+
+    def cause_text(self, f: Finding) -> str:
+        W = WORDING["preflight"]
+        items = [str(i) for i in f.items]
+        txt = f.message
+        if items:
+            txt += ": " + ", ".join(items[:_ITEMS_PREFLIGHT])
+            if len(items) > _ITEMS_PREFLIGHT:
+                txt += ", " + W["items_more"].format(n=len(items) - _ITEMS_PREFLIGHT)
+        return f"{W['cause_label']}  {txt}\n{W['fix_label']}    {f.fix}"
+
+    def show_cause(self, idx) -> "Finding | None":
+        """Fill the Cause / Fix pane for row `idx` (None / out of range: "No findings" or empty). O(items)."""
+        if idx is None or not (0 <= idx < len(self.findings)):
+            self.cause.SetValue(WORDING["preflight"]["no_findings"] if not self.findings else "")
+            return None
+        f = self.findings[idx]
+        self.cause.SetValue(self.cause_text(f))
+        return f
+
+    def _on_select(self, evt) -> None:
+        self._show_finding(evt.GetIndex())
+
+    def _show_finding(self, idx) -> None:
+        self.show_cause(idx)
+
+    def _on_list_size(self, evt) -> None:
+        evt.Skip()
+        w = self.list.GetClientSize().width - self.list.GetColumnWidth(0) - self.list.GetColumnWidth(1)
+        if w > self.FromDIP(200):
+            self.list.SetColumnWidth(2, w)
+
+    def select_first(self) -> None:
+        if self.findings:
+            self.list.Select(0)
+            self.list.Focus(0)
+        self._show_finding(0 if self.findings else None)
+
+
+# --------------------------------------------------------------------------------------------- (2) pre-flight
+class PreflightDialog(_FindingsMixin, _Base):
+    _wk = "preflight"
+    #: tab order from the note §2 (one Accept checkbox, relabelled per selected code)
+    TAB_ORDER = ("findings", "cause", "accept", "scope_whole", "scope_between",
+                 "scope_touching", "existing", "respect_locked", "drawing_style", "timeout", "timeout_clock",
+                 "save_toml", "help", "cancel", "route")
+
+    def __init__(self, findings: list, summary: RunSummary, cfg: Config):
+        super().__init__(WORDING["preflight"]["title"].format(board=summary.board), resizable=True)
+        self.cfg = cfg
+        W = WORDING["preflight"]
+        g = self.group
+
+        self.summary = summary
+        self.summary_label = self.text(self, "preflight", "summary_line", text=self._summary_text(summary.connections))
+        self.root.Add(self.summary_label, 0, wx.BOTTOM, g)
+        # findings list (icon + word + colour per row, height fitting the rows) and the Cause / Fix pane
+        self.build_findings(findings)
+        n_warn, n_info = self.n_warn, self.n_info
+        self.root.Add(self.findings_heading, 0, wx.BOTTOM, self.row)
+        self.root.Add(self.list, 1 if self.list_grows else 0, wx.EXPAND | wx.BOTTOM, self.row)
+        self.cause.SetMinSize(wx.Size(-1, self.cause.GetCharHeight() * 4 + self.FromDIP(12)))
         self.root.Add(self.cause, 0, wx.EXPAND | wx.BOTTOM, self.row)
 
         # ONE Accept checkbox, relabelled per selected code; its state is kept per code
@@ -702,19 +867,14 @@ class PreflightDialog(_Base):
         self.route.Enable(self.n_err == 0)  # visible reason: self.status
         self.buttons["help"].Bind(wx.EVT_BUTTON, self._on_help)
 
-        self.list.Bind(wx.EVT_LIST_ITEM_SELECTED, self._on_select)
         self.list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_activate)  # Enter in the list = Route
-        self.list.Bind(wx.EVT_SIZE, self._on_list_size)
-        if self.findings:
-            self.list.Select(0)
-            self.list.Focus(0)
-        self._show_finding(0 if self.findings else None)
+        self.select_first()
         self.A11Y = {"findings": W["findings_heading"].format(errors=self.n_err, warnings=n_warn, notes=n_info),
                      "cause": f"{W['cause_label']} / {W['fix_label']}", "existing": W["existing_label"],
                      "drawing_style": W["drawing_style_label"], "timeout": W["timeout_label"],
                      "timeout_clock": W["timeout_clock_label"]}
-        self.finish((640, 560), (760, 780))
-        self.list.SetFocus()
+        self.finish((640, 420))  # opens at its fitted size: the findings list is as tall as its rows
+        (self.list if self.findings else self.route).SetFocus()
 
     def _build_options(self, summary: RunSummary, cfg: Config) -> None:
         W = WORDING["preflight"]
@@ -782,7 +942,6 @@ class PreflightDialog(_Base):
         tr = wx.BoxSizer(wx.HORIZONTAL)
         tr.Add(self.timeout, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.row)
         tr.Add(self.text(self, "preflight", "timeout_unit"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.group)
-        tr.Add(self.text(self, "preflight", "timeout_hint"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.group)
         self._clock_keys = ("wall", "cpu")
         self.timeout_clock = wx.Choice(self, name="timeout_clock", choices=[
             W["timeout_clock_wall"], W["timeout_clock_cpu"]])
@@ -791,6 +950,11 @@ class PreflightDialog(_Base):
         tr.Add(self.timeout_clock, 0, wx.ALIGN_CENTER_VERTICAL)
         grid.Add(self.text(self, "preflight", "timeout_label"), 0, wx.ALIGN_CENTER_VERTICAL)
         grid.Add(tr)
+        # the hint as grey text under the field (user 2026-11-11)
+        hint_t = self.text(self, "preflight", "timeout_hint")
+        hint_t.SetForegroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT))
+        grid.AddSpacer(0)
+        grid.Add(hint_t, 0)
 
         self.save_toml = wx.CheckBox(self, label=_mn(W["save_toml"], "s"), name="save_toml")
         grid.AddSpacer(0)
@@ -798,24 +962,9 @@ class PreflightDialog(_Base):
         self.root.Add(grid, 0, wx.EXPAND | wx.BOTTOM, self.row)
 
     # -- behaviour
-    def cause_text(self, f: Finding) -> str:
-        W = WORDING["preflight"]
-        items = [str(i) for i in f.items]
-        txt = f.message
-        if items:
-            txt += ": " + ", ".join(items[:_ITEMS_PREFLIGHT])
-            if len(items) > _ITEMS_PREFLIGHT:
-                txt += ", " + W["items_more"].format(n=len(items) - _ITEMS_PREFLIGHT)
-        return f"{W['cause_label']}  {txt}\n{W['fix_label']}    {f.fix}"
-
     def _show_finding(self, idx) -> None:
-        if idx is None or not (0 <= idx < len(self.findings)):
-            self.cause.SetValue(WORDING["preflight"]["no_findings"] if not self.findings else "")
-            code = None
-        else:
-            f = self.findings[idx]
-            self.cause.SetValue(self.cause_text(f))
-            code = f.code
+        f = self.show_cause(idx)
+        code = f.code if f is not None else None
         self.accept_code = code if code in ACCEPT_CODES else None
         if self.accept_code:
             self.accept_cb.SetLabel(_mn(WORDING["preflight"][ACCEPT_CODES[code]], "a"))
@@ -841,18 +990,9 @@ class PreflightDialog(_Base):
         n = self.summary.connections_by_scope.get(self.scope_mode_selected(), self.summary.connections)
         self.summary_label.SetLabel(self._summary_text(n))
 
-    def _on_select(self, evt) -> None:
-        self._show_finding(evt.GetIndex())
-
     def _on_activate(self, _evt) -> None:
         if self.route.IsEnabled():
             self.EndModal(wx.ID_OK)
-
-    def _on_list_size(self, evt) -> None:
-        evt.Skip()
-        w = self.list.GetClientSize().width - self.list.GetColumnWidth(0) - self.list.GetColumnWidth(1)
-        if w > self.FromDIP(200):
-            self.list.SetColumnWidth(2, w)
 
     def _on_help(self, _evt) -> None:
         if HELP_DOC is not None and HELP_DOC.exists():
@@ -912,24 +1052,31 @@ class ProgressDialog(_Base):
         self.cancelled_at: float | None = None
         W = WORDING["progress"]
 
-        self.phase = self.text(self, "progress", "phase_route", name="phase", text="", bold=True)
+        # the phase never widens the dialog: a fixed width, a long stage name ends in "…" (full text: tooltip)
+        self.phase = wx.StaticText(self, label="", name="phase",
+                                   style=wx.ST_NO_AUTORESIZE | wx.ST_ELLIPSIZE_END)
+        self.phase.SetFont(self.phase.GetFont().Bold())
+        self.phase.SetMinSize(wx.Size(self.FromDIP(self.TEXT_WIDTH), -1))
         self.root.Add(self.phase, 0, wx.BOTTOM, self.group)
         gr = wx.BoxSizer(wx.HORIZONTAL)
         self.gauge = wx.Gauge(self, range=1, name="gauge", style=wx.GA_HORIZONTAL)
         self.gauge.SetMinSize(self.FromDIP(wx.Size(260, 16)))
-        self.gauge_value = self._num("gauge_value", 80)
+        self.gauge_value = self._num("gauge_value", 80, "8888 / 8888")
         gr.Add(self.gauge, 1, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.row)
         gr.Add(self.gauge_value, 0, wx.ALIGN_CENTER_VERTICAL)
         self.root.Add(gr, 0, wx.EXPAND | wx.BOTTOM, self.group)
 
+        # value widths from the widest text each can show (digits are tabular in the UI font): changing numbers
+        # never move or widen anything (user 2026-11-11)
         grid = wx.FlexGridSizer(4, self.row, self.group)
-        self.iteration_value = self._num("iteration_value", 110)
-        self.routed_value = self._num("routed_value", 90)
-        self.vias_value = self._num("vias_value", 110)
-        self.elapsed_value = self._num("elapsed_value", 250)
-        self.total_value = self._num("total_value", 140)
-        self.gain_value = self._num("gain_now", 140)
-        self.runs_value = self._num("runs_now", 110)
+        self.iteration_value = self._num("iteration_value", 110, "8888 of up to 8888")
+        self.routed_value = self._num("routed_value", 90, "88888 / 88888")
+        self.vias_value = self._num("vias_value", 110, "888888")
+        self.elapsed_value = self._num("elapsed_value", 250, "88:88:88 / 88:88:88 · CPU 88:88:88",
+                                       "88:88:88 · CPU 88:88:88 / no limit")
+        self.total_value = self._num("total_value", 140, "88:88:88")
+        self.gain_value = self._num("gain_now", 140, "-888.8 % / 88 rounds")
+        self.runs_value = self._num("runs_now", 110, "888 of 888 stable")
         for lab, val in (("iteration_label", self.iteration_value), ("routed_label", self.routed_value),
                          ("vias_label", self.vias_value), ("elapsed_label", self.elapsed_value),
                          ("runs_label", self.runs_value), ("total_label", self.total_value),
@@ -942,7 +1089,9 @@ class ProgressDialog(_Base):
         self.stable = False
         self.stable_window = stable_window
         self._build_limit_row()
-        self.root.Add(self.text(self, "progress", "cancel_hint", wrap_dip=420), 0, wx.BOTTOM, self.group)
+        hint = self.text(self, "progress", "cancel_hint")  # one short line; the full text is its tooltip
+        hint.SetToolTip(W["cancel_hint_tip"])
+        self.root.Add(hint, 0, wx.BOTTOM, self.group)
         self.root.Add(self.button_row(("cancel", "cancel", "c"), ok_id=wx.ID_CANCEL), 0, wx.EXPAND)
         self.cancel_button = self.buttons["cancel"]
         self.cancel_button.Bind(wx.EVT_BUTTON, self._on_cancel)
@@ -954,15 +1103,19 @@ class ProgressDialog(_Base):
         self._sync_limit_controls()
         self.cancel_button.SetFocus()
 
-    SCORE_COLS = (("run", 30), ("round", 40), ("errors", 44), ("open", 40), ("vias", 40), ("length", 70))
+    SCORE_COLS = (("run", 30, "888"), ("round", 40, "8888"), ("errors", 44, "88888"), ("open", 40, "88888"),
+                  ("vias", 40, "888888"), ("length", 70, "888.888 m"))
+    #: width of the phase and verdict lines (DIP); longer text ends in "…" / wraps inside it
+    TEXT_WIDTH = 430
 
     def _build_score_rows(self) -> None:
         """Header + "Last round" / "Best so far" rows (run, round, errors, open, vias, length: the pick order) and
-        the verdict line below. Fixed-width right-aligned cells: changing digits never shift the layout."""
+        the verdict line below. Fixed-width right-aligned cells: changing digits never shift the layout. Before the
+        first round the table's place shows "Waiting for round 1…" (same height, so nothing moves when it comes)."""
         W = WORDING["progress"]
         grid = wx.FlexGridSizer(1 + len(self.SCORE_COLS), self.row // 2, self.group)
         grid.Add((0, 0))
-        for col, _w in self.SCORE_COLS:
+        for col, _w, _s in self.SCORE_COLS:
             grid.Add(self.text(self, "progress", f"score_head_{col}", style=wx.ALIGN_RIGHT), 0, wx.ALIGN_RIGHT)
         self.score_cells: dict[str, dict[str, wx.StaticText]] = {}
         for row in ("last", "best"):
@@ -970,30 +1123,53 @@ class ProgressDialog(_Base):
             name.SetToolTip(W["score_hint"])
             grid.Add(name, 0)
             self.score_cells[row] = {}
-            for col, width in self.SCORE_COLS:
-                cell = self._num(f"{row}_{col}", width)
+            for col, width, sample in self.SCORE_COLS:
+                cell = self._num(f"{row}_{col}", width, sample)
                 cell.SetLabel(W["score_pending"])
                 self.score_cells[row][col] = cell
                 grid.Add(cell, 0, wx.ALIGN_RIGHT)
-        self.root.Add(grid, 0, wx.BOTTOM, self.row)
-        self.score_verdict = wx.StaticText(self, label=" ", name="score_verdict")  # one line kept free
+        self.score_grid = grid
+        self.score_waiting = self.text(self, "progress", "score_waiting")
+        self.score_waiting.SetForegroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT))
+        self.score_box = wx.BoxSizer(wx.VERTICAL)
+        self.score_box.Add(grid, 0)
+        self.score_box.Add(self.score_waiting, 0, wx.TOP, self.row)
+        self.score_box.SetMinSize(grid.CalcMin())  # the slot keeps the table's size either way
+        self.root.Add(self.score_box, 0, wx.BOTTOM, self.row)
+        self._show_scores(False)
+        # the verdict: a fixed box of two lines (a wrapped verdict never resizes the dialog)
+        self.score_verdict = wx.StaticText(self, label=" ", name="score_verdict", style=wx.ST_NO_AUTORESIZE)
+        self.score_verdict.SetMinSize(wx.Size(self.FromDIP(self.TEXT_WIDTH),
+                                              2 * self.score_verdict.GetCharHeight() + self.FromDIP(2)))
         self.root.Add(self.score_verdict, 0, wx.BOTTOM, self.group)
         self._verdict = " "
+        self._verdict_tone = ""
+
+    def _show_scores(self, show: bool) -> None:
+        self.scores_shown = show
+        self.score_box.Show(self.score_grid, show, recursive=True)
+        self.score_waiting.Show(not show)
+        self.Layout()
 
     def _set_score(self, p: Progress) -> None:
-        """Fill the score rows from the engine's progress (``score_rows``)."""
+        """Fill the score rows from the engine's progress (``score_rows``); the verdict in its tone's colour (green:
+        the last round beat the best, amber: worse; ``verdict_tone``)."""
         rows, verdict = score_rows(p)
+        if (rows["last"] is not None or rows["best"] is not None) != self.scores_shown:
+            self._show_scores(not self.scores_shown)
         for row, cells in rows.items():
             if cells is None:
                 continue
             for col, val in cells.items():
                 self.score_cells[row][col].SetLabel(val)
         verdict = verdict or " "
-        if verdict != self._verdict:
-            self._verdict = verdict
+        tone = verdict_tone(p)
+        if verdict != self._verdict or tone != self._verdict_tone:
+            self._verdict, self._verdict_tone = verdict, tone
+            self.score_verdict.SetForegroundColour(tone_colour(tone))
             self.score_verdict.SetLabel(verdict)
-            self.score_verdict.Wrap(self.FromDIP(430))
-            self._grow_to_best()  # a verdict that wraps to two lines makes room for itself
+            self.score_verdict.Wrap(self.FromDIP(self.TEXT_WIDTH))
+            self.score_verdict.Refresh()
 
     @property
     def _unit_key(self) -> str:
@@ -1059,10 +1235,13 @@ class ProgressDialog(_Base):
         if self.limit_open():
             self.request_limit(self.limit.GetValue())
 
-    def _num(self, name: str, width_dip: int) -> wx.StaticText:
-        """Right-aligned label of fixed minimum width: digits changing never shifts the layout."""
+    def _num(self, name: str, width_dip: int, *samples: str) -> wx.StaticText:
+        """Right-aligned label of fixed width: at least `width_dip`, and as wide as the widest of `samples` (the
+        longest text it can show, digits as 8) in the label's font. Changing digits never shift or widen the
+        layout. O(len(samples))."""
         st = wx.StaticText(self, label="", style=wx.ALIGN_RIGHT | wx.ST_NO_AUTORESIZE, name=name)
-        st.SetMinSize(wx.Size(self.FromDIP(width_dip), -1))
+        w = max([self.FromDIP(width_dip)] + [st.GetTextExtent(x).width + self.FromDIP(4) for x in samples])
+        st.SetMinSize(wx.Size(w, -1))
         return st
 
     def set_phase(self, phase: str, stage: str = "") -> None:
@@ -1073,16 +1252,21 @@ class ProgressDialog(_Base):
                 self._set_stopping_label(stage)
                 return
             key = PHASE_KEYS.get(phase)
-            self.phase.SetLabel(WORDING["progress"][key] if key else phase)
+            self._phase_label(WORDING["progress"][key] if key else phase)
             return
         if self.stable and phase in ("setup", "route", "done"):  # M-B0: the user's cue that OK is fine now
-            self.phase.SetLabel(WORDING["progress"]["phase_stable"])
+            self._phase_label(WORDING["progress"]["phase_stable"])
             return
         if phase in ("setup", "route", "done") and stage:  # the topological core names its stage (K1)
-            self.phase.SetLabel(WORDING["progress"]["phase_route_stage"].format(stage=stage))
+            self._phase_label(WORDING["progress"]["phase_route_stage"].format(stage=stage))
             return
         key = PHASE_KEYS.get(phase)
-        self.phase.SetLabel(WORDING["progress"][key] if key else phase)
+        self._phase_label(WORDING["progress"][key] if key else phase)
+
+    def _phase_label(self, text: str) -> None:
+        if text != self.phase.GetLabel():
+            self.phase.SetLabel(text)
+            self.phase.SetToolTip(text)
 
     def _on_cancel(self, evt) -> None:
         if isinstance(evt, wx.CloseEvent) and evt.CanVeto():
@@ -1105,7 +1289,7 @@ class ProgressDialog(_Base):
     def _set_stopping_label(self, stage: str = "") -> None:
         W = WORDING["progress"]
         s = int(time.monotonic() - (self.cancelled_at or time.monotonic()))
-        self.phase.SetLabel(W["phase_finishing" if self.stable else "phase_cancelling"].format(stage=f" ({stage})" if stage else "", s=s))
+        self._phase_label(W["phase_finishing" if self.stable else "phase_cancelling"].format(stage=f" ({stage})" if stage else "", s=s))
 
     def cancel(self) -> None:
         if self.cancelled:
@@ -1190,17 +1374,27 @@ class ProgressDialog(_Base):
 
 
 # --------------------------------------------------------------------------------------------- (4) preview
-class PreviewDialog(_Base):
+class PreviewDialog(_FindingsMixin, _Base):
+    """Preview (note §4; user 2026-11-11): the current board and the result as two images, each under its own
+    heading and scaled to its own pane (``preview.panel_paths``; an older report folder with only the composite
+    ``preview.png`` shows that in the first pane), the Summary in its hierarchy (``summary_parts``: the red line for
+    new DRC violations, the key facts bold, the rest smaller), the findings list of the run (the pre-flight's
+    widget) and the report folder once (the field). The two panes scroll together."""
     _wk = "preview"
-    TAB_ORDER = ("zoom", "image", "summary", "report_dir", "open_report_folder", "reject", "accept")
-    FOCUS_ALIAS = {"image_frame": "image"}
+    TAB_ORDER = ("zoom", "image_before", "image_after", "summary", "findings", "cause", "report_dir",
+                 "open_report_folder", "reject", "accept")
+    FOCUS_ALIAS = {"frame_before": "image_before", "frame_after": "image_after"}
+    #: findings rows shown before the list scrolls (the images keep the height)
+    FINDINGS_ROWS = 5
 
     def __init__(self, png: Path, report, board: str = ""):
         super().__init__(WORDING["preview"]["title"].format(board=board), resizable=True)
         W = WORDING["preview"]
         self.report = report
         self.report_dir = Path(report.dir) if getattr(report, "dir", None) else None
-        self.image = self._load(png)
+        before, after = self._load_pair(png)
+        self.images = {"before": before, "after": after}
+        self.image = before  # the first pane's image (the composite for an older report folder)
         g, r = self.group, self.row
 
         # row: Zoom + legend
@@ -1211,81 +1405,148 @@ class PreviewDialog(_Base):
         self.zoom.SetToolTip(W["zoom_label"])
         top.Add(self.zoom, 0, wx.ALIGN_CENTER_VERTICAL)
         top.AddStretchSpacer()
-        top.Add(self.text(self, "preview", "legend_label"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, r)
-        # the single fixed colour of the UI: the preview highlight (note §4)
-        self.swatch = wx.Panel(self, name="legend_swatch", size=self.FromDIP(wx.Size(16, 16)))
-        self.swatch.SetBackgroundColour(wx.Colour(*PREVIEW_HIGHLIGHT_RGB))
-        self.swatch.SetMinSize(self.FromDIP(wx.Size(16, 16)))
-        self.swatch.SetToolTip(W["legend_label"])
-        top.Add(self.swatch, 0, wx.ALIGN_CENTER_VERTICAL)
+        top.Add(self._legend_row(png), 0, wx.ALIGN_CENTER_VERTICAL)
         self.root.Add(top, 0, wx.EXPAND | wx.BOTTOM, r)
 
-        # headings (screen readers get what the PNG caption shows) + image scroller + summary
+        # the two panes, each under its heading, and the Summary
         main = wx.BoxSizer(wx.HORIZONTAL)
-        left = wx.BoxSizer(wx.VERTICAL)
-        heads = wx.BoxSizer(wx.HORIZONTAL)
-        heads.Add(self.text(self, "preview", "before_heading", bold=True, style=wx.ALIGN_CENTRE_HORIZONTAL), 1)
-        heads.Add(self.text(self, "preview", "after_heading", bold=True, style=wx.ALIGN_CENTRE_HORIZONTAL), 1)
-        left.Add(heads, 0, wx.EXPAND | wx.BOTTOM, r)
-        # 1 px SYS_COLOUR_GRAYTEXT outline so the image does not blur into the surface
-        frame = wx.Panel(self, name="image_frame")
-        frame.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT))
-        self.scroller = wx.ScrolledWindow(frame, name="image", style=wx.HSCROLL | wx.VSCROLL | wx.WANTS_CHARS)
-        self.scroller.SetCanFocus(True)
-        self.scroller.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW))
-        self.scroller.SetScrollRate(self.FromDIP(10), self.FromDIP(10))
-        fs = wx.BoxSizer(wx.VERTICAL)
-        fs.Add(self.scroller, 1, wx.EXPAND | wx.ALL, 1)
-        frame.SetSizer(fs)
-        ssz = wx.BoxSizer(wx.VERTICAL)
-        if self.image is None:
-            self.bitmap = None
-            ssz.Add(self.text(self.scroller, "preview", "no_image", wrap_dip=420), 1, wx.ALL, g)
-        else:
-            self.bitmap = wx.StaticBitmap(self.scroller, name="bitmap")
-            ssz.Add(self.bitmap, 0)
-        self.scroller.SetSizer(ssz)
-        left.Add(frame, 1, wx.EXPAND)
-        main.Add(left, 1, wx.EXPAND | wx.RIGHT, g)
+        self.scrollers: dict[str, wx.ScrolledWindow] = {}
+        self.bitmaps: dict[str, "wx.StaticBitmap | None"] = {}
+        two = after is not None
+        for key, head in (("before", "before_heading"), ("after", "after_heading")):
+            col = wx.BoxSizer(wx.VERTICAL)
+            col.Add(self.text(self, "preview", head, bold=True), 0, wx.BOTTOM, r)
+            # 1 px SYS_COLOUR_GRAYTEXT outline so the image does not blur into the surface
+            frame = wx.Panel(self, name=f"frame_{key}")
+            frame.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT))
+            sc = wx.ScrolledWindow(frame, name=f"image_{key}", style=wx.HSCROLL | wx.VSCROLL | wx.WANTS_CHARS)
+            sc.SetCanFocus(True)
+            sc.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW))
+            sc.SetScrollRate(self.FromDIP(10), self.FromDIP(10))
+            fs = wx.BoxSizer(wx.VERTICAL)
+            fs.Add(sc, 1, wx.EXPAND | wx.ALL, 1)
+            frame.SetSizer(fs)
+            ssz = wx.BoxSizer(wx.VERTICAL)
+            if self.images[key] is None:
+                self.bitmaps[key] = None
+                if key == "before":
+                    ssz.Add(self.text(sc, "preview", "no_image", wrap_dip=300), 1, wx.ALL, g)
+            else:  # centred in its pane while smaller than it (Fit)
+                self.bitmaps[key] = wx.StaticBitmap(sc, name=f"bitmap_{key}")
+                ssz.AddStretchSpacer()
+                ssz.Add(self.bitmaps[key], 0, wx.ALIGN_CENTER_HORIZONTAL)
+                ssz.AddStretchSpacer()
+            sc.SetSizer(ssz)
+            col.Add(frame, 1, wx.EXPAND)
+            self.scrollers[key] = sc
+            main.Add(col, 1, wx.EXPAND | wx.RIGHT, g)
+            if key == "after" and not two:  # one image (or none): the first pane takes the room
+                main.Hide(col, recursive=True)
+        self.scroller, self.bitmap = self.scrollers["before"], self.bitmaps["before"]  # first pane (tests, older code)
 
         right = wx.BoxSizer(wx.VERTICAL)
         right.Add(self.text(self, "preview", "summary_heading", bold=True), 0, wx.BOTTOM, r)
-        self.summary = wx.TextCtrl(self, name="summary", value="\n".join(report.summary_lines()),
-                                   style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_BESTWRAP)
-        self.summary.SetMinSize(self.FromDIP(wx.Size(260, 200)))
+        alert, key_lines, rest = summary_parts(report)
+        self.drc_alert = None
+        if alert:  # new DRC violations: the first thing to read (red, bold)
+            self.drc_alert = self.text(self, "preview", "drc_alert", text=alert, bold=True, wrap_dip=300)
+            self.drc_alert.SetForegroundColour(tone_colour("error"))
+            right.Add(self.drc_alert, 0, wx.BOTTOM, r)
+        self.key_facts = []
+        for ln in key_lines:  # routed, DRC new, vias, length: bold
+            st = self.text(self, "preview", "key_fact", text=ln, bold=True, wrap_dip=300)
+            self.key_facts.append(st)
+            right.Add(st, 0, wx.BOTTOM, r // 2)
+        self.summary = wx.TextCtrl(self, name="summary", value="\n".join(rest),
+                                   style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_BESTWRAP | wx.BORDER_NONE)
+        self.summary.SetFont(self.summary.GetFont().Scaled(0.9))
+        self.summary.SetBackgroundColour(self.GetBackgroundColour())
+        self.summary.SetMinSize(self.FromDIP(wx.Size(300, 160)))
         self.summary.SetToolTip(W["summary_heading"])
-        right.Add(self.summary, 1, wx.EXPAND)
+        right.Add(self.summary, 1, wx.EXPAND | wx.TOP, r)
         main.Add(right, 0, wx.EXPAND)
         self.root.Add(main, 1, wx.EXPAND | wx.BOTTOM, g)
 
-        # report folder
+        # the run's findings: the pre-flight's list (left) and the Cause / Fix of the selected row (right)
+        facts = getattr(report, "facts", None) or {}
+        self.build_findings(list(facts.get("findings") or []), max_rows=self.FINDINGS_ROWS)
+        self.root.Add(self.findings_heading, 0, wx.BOTTOM, r)
+        fr = wx.BoxSizer(wx.HORIZONTAL)
+        fr.Add(self.list, 3, wx.EXPAND | wx.RIGHT, r)
+        fr.Add(self.cause, 2, wx.EXPAND)
+        self.root.Add(fr, 0, wx.EXPAND | wx.BOTTOM, g)
+
+        # report folder (shown once: here, not in the Summary)
         rd = wx.BoxSizer(wx.HORIZONTAL)
         rd.Add(self.text(self, "preview", "report_dir_label"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, r)
-        self.dir_field = self.mono_field(self, "report_dir", str(self.report_dir or ""), 600)
+        # one line (selectable, copyable; a long path scrolls): the images keep the height
+        self.dir_field = wx.TextCtrl(self, value=str(self.report_dir or ""), name="report_dir", style=wx.TE_READONLY)
+        self.dir_field.SetFont(wx.Font(wx.FontInfo().Family(wx.FONTFAMILY_TELETYPE)))
+        self.dir_field.SetToolTip(str(self.report_dir or ""))
         rd.Add(self.dir_field, 1, wx.ALIGN_CENTER_VERTICAL)
         self.root.Add(rd, 0, wx.EXPAND | wx.BOTTOM, g)
         self.root.Add(self.button_row(("accept", "accept", "a"), ("reject", "reject", "r"),
-                                      extras=(("open_report_folder", "open_report_folder", "o"),)),
+                                      extras=(("open_report_folder", "open_report_folder", "o"),), primary=True),
                       0, wx.EXPAND)
         self.open_btn = self.buttons["open_report_folder"]
         self.open_btn.Bind(wx.EVT_BUTTON, lambda _e: self.report_dir and open_path(self.report_dir))
 
         self.zoom.Bind(wx.EVT_CHOICE, lambda _e: self._render())
-        self.scroller.Bind(wx.EVT_SIZE, self._on_size)
-        for w in (self.scroller, self.bitmap):
-            if w is not None:
-                w.Bind(wx.EVT_MOUSEWHEEL, self._on_wheel)
+        for key, sc in self.scrollers.items():
+            sc.Bind(wx.EVT_SIZE, self._on_size)
+            other = self.scrollers["after" if key == "before" else "before"]
+            sc.Bind(wx.EVT_SCROLLWIN, lambda e, a=sc, b=other: self._on_scroll(e, a, b))
+            for w in (sc, self.bitmaps[key]):
+                if w is not None:
+                    w.Bind(wx.EVT_MOUSEWHEEL, self._on_wheel)
+        self.select_first()
 
         disp = wx.Display(0).GetClientArea() if wx.Display.GetCount() else wx.Rect(0, 0, 1280, 800)
-        self.A11Y = {"zoom": W["zoom_label"], "image": f"{W['before_heading']} / {W['after_heading']}",
-                     "summary": W["summary_heading"], "report_dir": W["report_dir_label"]}
-        self.finish((800, 520))
+        self.A11Y = {"zoom": W["zoom_label"], "image_before": W["before_heading"], "image_after": W["after_heading"],
+                     "summary": W["summary_heading"], "report_dir": W["report_dir_label"],
+                     "findings": self.findings_heading.GetLabel(),
+                     "cause": f"{WORDING['preflight']['cause_label']} / {WORDING['preflight']['fix_label']}"}
+        self.finish((800, 560))
         mn = self.GetMinSize()
         self.SetSize(wx.Size(max(int(disp.width * 0.85), mn.width), max(int(disp.height * 0.85), mn.height)))
         self.CentreOnScreen()
         self._render()
         self.zoom.SetFocus()
         self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook)
+
+    def _legend_row(self, png) -> wx.Sizer:
+        """Legend: one swatch per entry of ``preview-legend.json`` (layer colours, the new-copper highlight, the
+        open connections), else the fixed line with the highlight swatch. System colours apart from the swatches
+        (note §0). O(entries)."""
+        W = WORDING["preview"]
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        entries = []
+        try:
+            from .preview import legend_path  # noqa: PLC0415
+            lp = legend_path(png) if png is not None else None
+            if lp is not None and lp.is_file():
+                entries = [(str(e["label"]), e.get("rgb")) for e in json.loads(lp.read_text())]
+        except Exception:  # noqa: BLE001 - an unreadable legend file: the fixed line
+            entries = []
+        if not entries:
+            row.Add(self.text(self, "preview", "legend_label"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.row)
+            entries = [("", PREVIEW_HIGHLIGHT_RGB)]
+        else:
+            row.Add(self.text(self, "preview", "legend_head", text="Legend:"), 0,
+                    wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.row)
+        self.swatch = None
+        for label, rgb in entries:
+            if rgb:
+                sw = wx.Panel(self, name="legend_swatch", size=self.FromDIP(wx.Size(14, 14)))
+                sw.SetBackgroundColour(wx.Colour(*rgb))
+                sw.SetMinSize(self.FromDIP(wx.Size(14, 14)))
+                sw.SetToolTip(label or W["legend_label"])
+                self.swatch = self.swatch or sw
+                row.Add(sw, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.row // 2)
+            if label:
+                row.Add(self.text(self, "preview", "legend_entry", text=label), 0,
+                        wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.group)
+        return row
 
     def _on_char_hook(self, evt) -> None:
         """Enter = Accept wherever the focus is (GTK: the focused Zoom choice would open its list instead, and the
@@ -1302,30 +1563,49 @@ class PreviewDialog(_Base):
         try:
             if png is None or not Path(png).is_file():
                 return None
-            img = wx.Image(str(png))
+            with wx.LogNull():
+                img = wx.Image(str(png))
             return img if img.IsOk() else None
         except Exception:  # noqa: BLE001 - unreadable image -> "no_image" state
             return None
+
+    @classmethod
+    def _load_pair(cls, png) -> tuple:
+        """(current board, result) images: the two separate PNGs next to `png` (``preview.panel_paths``), else
+        (the composite `png`, None), else (None, None). O(pixels)."""
+        if png is not None:
+            from .preview import panel_paths  # noqa: PLC0415
+            paths = panel_paths(png)
+            b, a = cls._load(paths["before"]), cls._load(paths["after"])
+            if b is not None and a is not None:
+                return b, a
+        return cls._load(png), None
 
     def zoom_factor(self):
         """None = Fit, else 1.0 / 2.0."""
         return (None, 1.0, 2.0)[self.zoom.GetSelection()]
 
     def _render(self) -> None:
-        if self.image is None or self.bitmap is None:
-            return
+        """Scale each image to its pane (Fit: the largest size that shows it whole) or to the zoom (100 % = the
+        composite's pixel per DIP; the separate images are PANEL_HIRES x larger). O(pixels)."""
+        from .preview import PANEL_HIRES  # noqa: PLC0415
         f = self.zoom_factor()
-        iw, ih = self.image.GetSize()
-        if f is None:
-            cw, ch = self.scroller.GetClientSize()
-            s = min(max(cw, 1) / iw, max(ch, 1) / ih)
-        else:
-            s = f * self.FromDIP(1)  # 100 % = one PNG pixel per DIP (x2 physical at 200 % scaling)
-        w, h = max(1, int(iw * s)), max(1, int(ih * s))
-        img = self.image if (w, h) == (iw, ih) else self.image.Scale(w, h, wx.IMAGE_QUALITY_HIGH)
-        self.bitmap.SetBitmap(wx.Bitmap(img))
-        self.scroller.SetVirtualSize(w, h)
-        self.scroller.Layout()
+        hires = PANEL_HIRES if self.images["after"] is not None else 1
+        for key, img in self.images.items():
+            bmp, sc = self.bitmaps.get(key), self.scrollers[key]
+            if img is None or bmp is None:
+                continue
+            iw, ih = img.GetSize()
+            if f is None:
+                cw, ch = sc.GetClientSize()
+                s = min(max(cw, 1) / iw, max(ch, 1) / ih)
+            else:
+                s = f * self.FromDIP(1) / hires  # 100 % = one composite pixel per DIP
+            w, h = max(1, int(iw * s)), max(1, int(ih * s))
+            out = img if (w, h) == (iw, ih) else img.Scale(w, h, wx.IMAGE_QUALITY_HIGH)
+            bmp.SetBitmap(wx.Bitmap(out))
+            sc.SetVirtualSize(w, h)
+            sc.Layout()
 
     def _on_size(self, evt) -> None:
         evt.Skip()
@@ -1336,6 +1616,11 @@ class PreviewDialog(_Base):
         if self:  # not destroyed meanwhile
             self._render()
 
+    def _on_scroll(self, evt, src, dst) -> None:
+        """The other pane follows (same place on both boards). O(1)."""
+        evt.Skip()
+        wx.CallAfter(lambda: self and dst.Scroll(*src.GetViewStart()))
+
     def _on_wheel(self, evt) -> None:
         if evt.ControlDown():
             step = 1 if evt.GetWheelRotation() > 0 else -1
@@ -1344,6 +1629,11 @@ class PreviewDialog(_Base):
             self._render()
         else:
             evt.Skip()
+            src = evt.GetEventObject()
+            src = src if isinstance(src, wx.ScrolledWindow) else src.GetParent()
+            for sc in self.scrollers.values():
+                if sc is not src:
+                    wx.CallAfter(lambda a=src, b=sc: self and b.Scroll(*a.GetViewStart()))
 
 
 # --------------------------------------------------------------------------------------------- (5) done
@@ -1365,10 +1655,20 @@ class DoneDialog(_Base):
             msg, name = W["done_cancelled"], "done_cancelled"
         else:
             msg, name = W["done_rejected"], "done_rejected"
+        # new DRC violations on the board after Accept: a warning icon and one line naming them (user 2026-11-11)
+        n_drc, types = drc_new(report) if outcome == "accepted" else (0, "")
+        warn = n_drc > 0
         icon = wx.StaticBitmap(self, bitmap=wx.ArtProvider.GetBitmap(
-            wx.ART_INFORMATION, wx.ART_MESSAGE_BOX, self.FromDIP(wx.Size(32, 32))), name="icon")
-        icon.SetToolTip("Information")
+            wx.ART_WARNING if warn else wx.ART_INFORMATION, wx.ART_MESSAGE_BOX, self.FromDIP(wx.Size(32, 32))),
+            name="icon")
+        icon.SetToolTip("Warning" if warn else "Information")
         body = wx.BoxSizer(wx.VERTICAL)
+        if warn:
+            tmpl = W["done_drc_new"]
+            line = tmpl.format(n=n_drc, types=types) if types else tmpl.replace(" ({types})", "").format(n=n_drc)
+            self.drc_line = self.text(self, "report", "done_drc_new", text=line, wrap_dip=420, bold=True)
+            self.drc_line.SetForegroundColour(tone_colour("warning"))
+            body.Add(self.drc_line, 0, wx.BOTTOM, self.group)
         body.Add(self.text(self, "report", name, text=msg, wrap_dip=420), 0, wx.BOTTOM, self.group)
         facts0 = getattr(report, "facts", None) or {}
         if facts0.get("router_cpu_s") is not None and facts0.get("elapsed_s") is not None:

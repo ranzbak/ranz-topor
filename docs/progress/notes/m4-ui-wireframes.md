@@ -20,7 +20,10 @@ verbatim; B5's flow calls it: `first_run_notice` → `progress`(pre-flight DRC) 
   details`, `Help`) sit in a left-aligned row of the same bottom line (`wx.ID_HELP` goes in the
   std sizer). `SetAffirmativeId(wx.ID_OK)`, `SetEscapeId(wx.ID_CANCEL)` → **Enter = default,
   Esc = Cancel** on every dialog; the window-manager close box = Esc. `AddButton` takes stock ids
-  only, so the bottom line is `wx.BoxSizer(HORIZONTAL)`: extra buttons, stretch spacer, std sizer.
+  only, so the bottom line is `wx.BoxSizer(HORIZONTAL)`: extra buttons, stretch spacer, std sizer (the stretch is a
+  spacer of its own: a status sizer whose children are hidden takes no stretch). The primary action of the
+  pre-flight (`Route`) and the preview (`Accept`) is also visually primary: a bold label (wx/GTK draws no
+  suggested-action colour on a `wx.Button`).
   Mnemonics (`&Route`) are set on every button, checkbox and radio; each dialog lists its set below
   and no letter repeats within a dialog (`Cancel`/`Close` always own `C`); the Wording tables list
   `GetLabelText()` (mnemonic stripped).
@@ -36,7 +39,11 @@ verbatim; B5's flow calls it: `first_run_notice` → `progress`(pre-flight DRC) 
   .IsDark()` only for the preview tint check). Severity is shown by **icon + word** (`wx.ArtProvider`
   `ART_ERROR / ART_WARNING / ART_INFORMATION`, `FromDIP(16)`, via a `wx.ImageList` in the list;
   if GTK renders the icons poorly at 200 % the icon is dropped and the word stays — the word is
-  mandatory), never by colour alone. The single exception is the preview's new-copper highlight (§4).
+  mandatory), never by colour alone. On top of icon + word (user 2026-11-11, "problems visible at a glance") the
+  text of a finding row, the preview's DRC line, the done notice's DRC line and the progress verdict carry a
+  tone colour: error red, warning amber, ok green, note `SYS_COLOUR_GRAYTEXT` (`ui_wx.TONE_RGB`, one light and
+  one dark value each, chosen by the luminance of `SYS_COLOUR_WINDOW`; contrast >= 4.5:1 on GTK's default light /
+  dark window). The other fixed colours are the preview's new-copper highlight and legend swatches (§4).
 - **Window icon.** Every dialog (`_Base`) carries the topor icon in its title bar / task switcher: a
   `wx.IconBundle` of `icons/topor-{light,dark}-{24,64}.png` (the toolbar button's images, plugin.json),
   the dark pair when `wx.SystemSettings.GetAppearance().IsDark()`. A missing or unreadable file is skipped
@@ -103,7 +110,8 @@ error state: if the file could not be written B5 raises → dialog 6 (`CFG_CREAT
 |                     ( ) Touching selected footprints                       |
 |   Existing copper   [ Keep as obstacles               v ]                  |
 |   [x] Respect locked tracks and vias                                       |
-|   Time limit  [  60 ]^ s   0 = no limit                                    |
+|   Time limit  [  60 ]^ s  [ Wall time (what you wait) v ]                  |
+|               0 = no limit                                (grey)          |
 |   [ ] Save these options to topor.toml                                     |
 |                                                                            |
 | [ Help ]                                           [ Cancel ]  [ Route ]   |
@@ -112,8 +120,10 @@ error state: if the file could not be written B5 raises → dialog 6 (`CFG_CREAT
 | [ Help ]  (x) Cannot route: 1 error — see Fix above.  [ Cancel ]  [ Route ]|  (Route disabled)
 ```
 
-Resizable, min 640×480 (list ≥ 4 rows, Cause pane 3 lines), opens at 720×620 clamped to 90 % of
-the display client area; the findings list takes the extra height. Default `Route`.
+Resizable, min 640×420, opens at its fitted size clamped to 90 % of the display client area: the findings
+list is as tall as its rows (up to 8, then it scrolls and takes the extra height; user 2026-11-11), the Cause pane
+3 lines. Without errors and warnings the heading reads `No problems found` (with the note count; green); without
+any finding the list and the Cause pane are hidden. Default `Route`.
 
 **Behaviour.**
 
@@ -170,7 +180,7 @@ the display client area; the findings list takes the extra height. Default `Rout
 |              Run Round Errors Open Vias    Length         |
 | Last round     3     2      5    0  168   7.412 m         |
 | Best so far    1     1      3    0  166   7.384 m         |
-| Last round is worse than the best: errors +2.             |
+| Last round is worse than the best: errors +2.  (amber)    |
 |                                                           |
 | Time limit  [   60 ] s wall time  [Set limit] [+5 min] [+15 min] |
 | 0 = no limit. A limit below the time spent stops the run  |
@@ -203,14 +213,18 @@ dialog never blocks: `WxUi.progress` updates the widgets, calls `wx.YieldIfNeede
 - **Score** (user 2026-11-11: "It would help if I can see the current score, and the best score in the UI"): rows
   *Last round* (the round any run judged last) and *Best so far* (the best over all runs: exactly the board OK /
   Cancel keeps and the final pick takes) with run, round, errors, open, vias, length — the columns are the pick
-  order (`[optimize] pick`, default `errors_vias_length`: fewest errors, then open, vias, length, shrinkages). `–`
-  until the first round ends. The line below says how the last round compares, on the first criterion that differs
+  order (`[optimize] pick`, default `errors_vias_length`: fewest errors, then open, vias, length, shrinkages).
+  Until the first round ends the table's place reads `Waiting for round 1…` (grey; the slot keeps the table's
+  size). The verdict is green when the last round beat the best (`ui_wx.verdict_tone`), amber when it is worse. The line below says how the last round compares, on the first criterion that differs
   (`Progress.last_vs_best` / `last_decider` / `last_delta`): *Last round is worse than the best: errors +2.*, *… the
   new best: length -0.030 m.*, *The first result is the best so far.*, *… scores the same as the best; the earlier
   result stays.* or, from a lower run, *… and is the best now (ties go to the lower run).* The run flow writes one line per ended round to log.txt (`round ended: run 3, round 2: errors 5
   …: worse than the best (run 1, round 1): errors +2`).
-- Numbers right-aligned in fixed-width labels. Elapsed and limit both `m:ss` (`h:mm:ss` from one
-  hour); limit shown as `/ {limit}` or `/ no limit` when `timeout_s == 0` (then Cancel is the only
+- Numbers right-aligned in fixed-width labels, each as wide as the widest text it can show (digits as 8, in the
+  UI font: its digits are tabular); the phase line has a fixed width and ends in `…` (full text in its tooltip);
+  the verdict is a fixed box of two lines — nothing in the dialog moves or resizes while it runs. The hint under
+  the buttons is one line, `Cancel keeps the best result so far.`, the full explanation its tooltip. Elapsed and
+  limit both `m:ss` (`h:mm:ss` from one hour); limit shown as `/ {limit}` or `/ no limit` when `timeout_s == 0` (then Cancel is the only
   stop — the hint line says so).
 - **Cancel** (default and escape; Enter also triggers it): label becomes
   `Cancel pressed: finishing the current stage (<stage>)… N s` (N counts up until the engine
@@ -243,34 +257,35 @@ dialog never blocks: `WxUi.progress` updates the widgets, calls `wx.YieldIfNeede
 +--------------------------------------------------------------------------------------+
 | Topor — Preview: eprom-to-kernal                                                 [x] |
 +--------------------------------------------------------------------------------------+
-| Zoom [ Fit v ]            Legend: F.Cu · B.Cu · ■ new copper (highlighted)            |
-| +----------------------------------+ +----------------------------------+            |
-| |         Current board            | |            Result                | | Summary   |
-| |                                  | |                                  | |-----------|
-| |   (kicad-cli SVG export,         | |   (same export of the routed     | | Routed    |
-| |    KiCad theme colours,          | |    copy; new copper drawn with   | | 27/27 …   |
-| |    F.Cu + B.Cu + Edge.Cuts)      | |    a highlight halo)             | | ≤ 20 lines|
-| |                                  | |                                  | | read-only |
-| +----------------------------------+ +----------------------------------+ | TextCtrl  |
-|                                                                           +-----------+
-| Report folder [ ~/.cache/kicad/10.0/topor/eprom-to-kernal/20261101-101530 ]           |
+| Zoom [ Fit v ]                      Legend: ■ F.Cu  ■ B.Cu  ■ new copper (highlighted) |
+| Current board                       Result                              Summary          |
+| +--------------------------------+ +--------------------------------+ ⚠ DRC new 9 (red) |
+| |  (kicad-cli SVG export,        | |  (same export of the routed    | Routed 27/27 …   |
+| |   KiCad theme colours,         | |   copy; new copper drawn with  | DRC new 9 · …    |
+| |   F.Cu + B.Cu + Edge.Cuts;     | |   a highlight halo); scrolls   | Vias 0 …   (bold)|
+| |   own image, Fit to its pane)  | |   together with the left pane  | Length …         |
+| +--------------------------------+ +--------------------------------+ the rest, smaller|
+| Findings — 0 errors, 1 warnings, 1 notes                                               |
+| [ Severity | Code | Message  (the pre-flight's list) ]  [ Cause / Fix of the row ]     |
+| Report folder [ ~/.cache/kicad/10.0/topor/eprom-to-kernal/20261101-101530 ]  (1 line)  |
 |                                                                                      |
 | [ Open report folder ]                                        [ Reject ]  [ Accept ] |
 +--------------------------------------------------------------------------------------+
 ```
 
-Resizable, min 800×520 (the image area scrolls, so the minimum is set by the summary pane and the
+Resizable, min 800×560 (the image area scrolls, so the minimum is set by the summary pane and the
 buttons), opens at 85 % of the display (`wx.Display.GetClientArea()`), remembers its size per
 session only. Default `Accept`, Esc = `Reject`. Accept = one KiCad commit (one undo step
 `Edit → Undo`), Reject = nothing written (B5).
 
-- Image: the one PNG B5 renders (both panels + caption lines) in a `wx.ScrolledWindow`
-  (`wx.WANTS_CHARS`, `SetCanFocus(True)`, 1 px `SYS_COLOUR_GRAYTEXT` border) with a
-  `wx.StaticBitmap`; `Zoom` choice `Fit` (default, fits the DIP client area, keeps aspect) /
-  `100 %` (one PNG pixel per DIP, i.e. ×2 physical at 200 %) / `200 %`; mouse wheel scrolls,
-  Ctrl+wheel steps the zoom. The titles `Current board` / `Result` and the legend are part of the
-  PNG caption (B5) **and** repeated as dialog labels (text; only the new-copper swatch is drawn),
-  so a screen reader gets them.
+- Images (user 2026-11-11): the two boards as separate PNGs B5 writes next to the composite
+  (`preview-before.png` / `preview-after.png`, `preview.panel_paths`, rasterised at `PANEL_HIRES` = 2 x the
+  composite's scale), each in its own `wx.ScrolledWindow` (`wx.WANTS_CHARS`, `SetCanFocus(True)`, 1 px
+  `SYS_COLOUR_GRAYTEXT` border) under its own heading (`Current board` / `Result`), the `wx.StaticBitmap` centred;
+  `Zoom` choice `Fit` (default: each image fits its own pane, keeps aspect) / `100 %` (one composite pixel per DIP)
+  / `200 %`; the panes scroll together; mouse wheel scrolls, Ctrl+wheel steps the zoom. The legend row draws one
+  swatch per entry of `preview-legend.json` (the composite's legend). An older report folder with only the
+  composite `preview.png` shows that in the first pane and hides the second.
 - **Highlight (the one hard-coded colour).** New copper is drawn in its layer colour with a halo
   `2 × width` underneath in `PREVIEW_HIGHLIGHT_RGB = (0, 139, 139)` (#008B8B). Contrast: white
   #FFFFFF 4.15:1, KiCad dark board #001023 4.61:1, dark window #2D2D2D 3.32:1, but Adwaita-dark
@@ -284,15 +299,19 @@ session only. Default `Accept`, Esc = `Reject`. Accept = one KiCad commit (one u
   Panel background = KiCad theme `board.background` when the export carries it (**UNVERIFIED** for
   `kicad-cli pcb export svg`; GUI checklist item), else `SYS_COLOUR_WINDOW`. Both constants live in
   `plugin/topor/preview.py` (B5); B9 imports them for the legend swatch.
-- Summary pane: `report.summary_lines()` (≤ 20, §5) in a read-only `TextCtrl`, min width 260.
-  Report folder: read-only monospace field with the full path; `Open report folder` →
+- Summary pane (`ui_wx.summary_parts`): with new DRC violations a red bold first line `⚠ DRC new {n} ({types}) —
+  see findings`; then the key facts bold (the summary lines *Routed*, *DRC new*, *Vias*, *Length*); then the other
+  summary lines (≤ 20, §5) smaller in a borderless read-only `TextCtrl` (selectable), without the `Report:` line.
+  Findings: the run's findings (`report.facts["findings"]`, after-routing ones included) in the pre-flight's list
+  widget (`_FindingsMixin`: icon, word, colour; up to 5 rows before it scrolls) with the Cause / Fix pane beside it.
+  Report folder: read-only one-line monospace field with the full path (shown once); `Open report folder` →
   `wx.LaunchDefaultApplication(dir)`, always enabled: B5 writes `report.md` and `preview.png` into
   the folder *before* calling `preview()` and rewrites the `Outcome:` line afterwards.
 - **Empty:** image missing/unreadable → the image area shows `Preview could not be rendered
   (see log.txt in the report folder)`; Accept stays enabled (the DRC numbers in the summary are the
   decision basis). **Busy:** none. **Error:** none (exceptions → dialog 6).
-- Keys: Tab Zoom → image (arrows/PgUp/PgDn scroll) → Summary → Report folder → Open report folder →
-  Reject → Accept. Enter = Accept, Esc = Reject. Mnemonics: Alt+O Open report folder, Alt+A Accept,
+- Keys: Tab Zoom → Current board image → Result image (arrows/PgUp/PgDn scroll) → Summary → findings list →
+  Cause / Fix → Report folder → Open report folder → Reject → Accept. Enter = Accept, Esc = Reject. Mnemonics: Alt+O Open report folder, Alt+A Accept,
   Alt+R Reject.
 
 ## 5. Run report (`report.md`, B8) and done notice — `UiPort.done(outcome: str, report, report_dir: Path) -> None`
@@ -356,7 +375,10 @@ Text by `outcome`: `accepted` → `done_accepted` (prefixed "Stopped early by Ca
 `cancelled` → `done_cancelled`. After `accepted` only (FX1, rulings C28 / C30): `done_refill_hint`
 when `[run] refill_after_accept = false` (the default; report fact `zones_refilled` false) or
 `done_refilled` when topor refilled the zones after the commit; one `done_post_commit` line per
-POST_COMMIT_STEP_FAILED finding (report fact `post_commit_failed`). Focus `Close` (default); Enter/Esc = Close; mnemonics Alt+O Open
+POST_COMMIT_STEP_FAILED finding (report fact `post_commit_failed`). After `accepted` with new DRC violations
+(report facts `routing_new` > 0, `drc_by_type_new`; user 2026-11-11) the icon is `ART_WARNING` instead of the
+information icon and the first line is `done_drc_new` (amber, bold): `⚠ {n} new DRC violations ({types}) — run
+Inspect → Design Rules Checker`. Focus `Close` (default); Enter/Esc = Close; mnemonics Alt+O Open
 report folder, Alt+C Close. No empty/busy/error state.
 
 ## 6. Error — `UiPort.error(finding)`
@@ -473,6 +495,8 @@ title/label/button/checkbox/choice/heading/text).
 | preflight | cause_label | label | Cause |
 | preflight | fix_label | label | Fix |
 | preflight | no_findings | text | No findings. The board setup covers everything Topor needs. |
+| preflight | no_problems | heading | No problems found |
+| preflight | no_problems_notes | heading | No problems found ({notes} notes) |
 | preflight | items_more | text | … and {n} more (all in the report) |
 | preflight | accept_pads | checkbox | Accept: skip these pads (saved to topor.toml ignore_pads) |
 | preflight | accept_drills | checkbox | Accept: add these drills to topor.toml allowed_drills_mm |
@@ -531,7 +555,8 @@ title/label/button/checkbox/choice/heading/text).
 | progress | limit_add5 | button | +5 min |
 | progress | limit_add15 | button | +15 min |
 | progress | limit_hint | text | 0 = no limit. A limit below the time spent stops the run now, keeping the best result. |
-| progress | cancel_hint | label | Cancel keeps the best result so far. Once the routes are stable the button reads OK: the same action, and the best result shown is exactly the board you get; waiting longer may still find small gains. The time limit counts router time only and is an emergency stop; KiCad's DRC and the preview come on top. |
+| progress | cancel_hint | label | Cancel keeps the best result so far. |
+| progress | cancel_hint_tip | text | Cancel keeps the best result so far. Once the routes are stable the button reads OK: the same action, and the best result shown is exactly the board you get; waiting longer may still find small gains. The time limit counts router time only and is an emergency stop; KiCad's DRC and the preview come on top. |
 | progress | cancel | button | Cancel |
 | progress | ok | text | OK |
 | progress | phase_stable | text | Routes stable |
@@ -553,6 +578,7 @@ title/label/button/checkbox/choice/heading/text).
 | progress | score_best | label | Best so far |
 | progress | score_length | text | {length} m |
 | progress | score_pending | text | – |
+| progress | score_waiting | text | Waiting for round 1… |
 | progress | score_hint | text | Scores compare in the pick order: fewest errors (open connections and connections with rule violations), then fewest open, fewest vias, the shortest length ([optimize] pick). The best so far is the board OK or Cancel keeps. |
 | progress | vs_first | text | The first result is the best so far. |
 | progress | vs_new_best | text | Last round is the new best: {delta}. |
@@ -581,6 +607,7 @@ title/label/button/checkbox/choice/heading/text).
 | preview | before_heading | heading | Current board |
 | preview | after_heading | heading | Result |
 | preview | summary_heading | heading | Summary |
+| preview | drc_alert | text | ⚠ DRC new {n} ({types}) — see findings |
 | preview | no_image | text | Preview could not be rendered (see log.txt in the report folder) |
 | preview | report_dir_label | label | Report folder |
 | preview | report_dir | text | {report_dir} |
@@ -600,6 +627,7 @@ title/label/button/checkbox/choice/heading/text).
 | report | done_refill_hint | text | Zones were not refilled: press B (Edit → Fill All Zones) to refill them — a separate undo step. |
 | report | done_refilled | text | Zones were refilled by topor — a second undo step: the first Edit → Undo reverts the refill, the next one the routes. |
 | report | done_post_commit | text | {message} {fix} |
+| report | done_drc_new | text | ⚠ {n} new DRC violations ({types}) — run Inspect → Design Rules Checker |
 | report | report_dir_label | label | Report folder |
 | report | report_dir | text | {report_dir} |
 | report | open_report_folder | button | Open report folder |

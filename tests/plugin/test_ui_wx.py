@@ -96,11 +96,12 @@ def test_wx_ui_dialogs_construct_headless(app, tmp_path):
                       "scope_touching", "existing", "respect_locked", "drawing_style", "timeout", "timeout_clock",
                       "save_toml", "help", "cancel", "route"],
         "progress": ["limit", "limit_set", "limit_add5", "limit_add15", "cancel"],
-        "preview": ["zoom", "image", "summary", "report_dir", "open_report_folder", "reject", "accept"],
+        "preview": ["zoom", "image_before", "image_after", "summary", "findings", "cause", "report_dir",
+                    "open_report_folder", "reject", "accept"],
         "report": ["report_dir", "open_report_folder", "close"],
         "error": ["details", "copy_details", "open_report_folder", "close"],
     }
-    mins = {"first_run": (440, 200), "preflight": (640, 560), "progress": (460, 240), "preview": (800, 520),
+    mins = {"first_run": (440, 200), "preflight": (640, 420), "progress": (460, 240), "preview": (800, 560),
             "report": (440, 220), "error": (520, 320)}
     default = {"first_run": wx.ID_OK, "preflight": wx.ID_OK, "progress": wx.ID_CANCEL, "preview": wx.ID_OK,
                "report": wx.ID_OK, "error": wx.ID_OK}
@@ -567,7 +568,7 @@ def test_progress_routes_stable_turns_cancel_into_ok(app):
 
 
 def _row(dlg, row):
-    return [dlg.score_cells[row][c].GetLabel() for c, _w in dlg.SCORE_COLS]
+    return [dlg.score_cells[row][c].GetLabel() for c, *_ in dlg.SCORE_COLS]
 
 
 def _scored(**kw):
@@ -625,7 +626,7 @@ def test_progress_dialog_shows_the_score_rows_at_its_size(app):
         dlg._grow_to_best()
         assert dlg.GetSize() == size, "the score fits the dialog's size"
         for row in ("last", "best"):  # every cell is shown in full (fixed widths hold the widest values)
-            for c, _w in dlg.SCORE_COLS:
+            for c, *_ in dlg.SCORE_COLS:
                 cell = dlg.score_cells[row][c]
                 assert cell.GetSize().width >= cell.GetTextExtent(cell.GetLabel()).width, (row, c)
     finally:
@@ -679,3 +680,173 @@ def test_logo_file_falls_back_to_the_largest_window_icon(tmp_path):
     (tmp_path / "topor-light-128.png").write_bytes(b"x")
     assert ui_wx.logo_file(False, tmp_path).name == "topor-light-128.png"
     assert ui_wx.logo_file(True, tmp_path) is None
+
+
+# ------------------------------------------------------------------ UI polish (user 2026-11-11: "implement all 4")
+def _drc_report(tmp_path, n=9, findings=()):
+    from topor.report import RunReport
+    facts = dict(version="0.4.0", board="eprom", timestamp="t", routed=27, total=27, nets=25, layers=2, partial=0,
+                 failed=0, vias=0, vias_before=17, length_mm=113.4, length_before_mm=112.9, routing_new=n,
+                 preexisting=0, unconnected=0, drc_by_type_new={"clearance": n - 1, "shorting_items": 1} if n else {},
+                 findings=list(findings))
+    return RunReport(tmp_path, facts)
+
+
+def test_findings_rows_carry_their_severity_colour_and_the_list_fits_its_rows(app):
+    """Problems visible at a glance: error red, warning amber, note grey (light / dark pair), icon + word kept; the
+    list is as tall as its rows; no errors and no warnings read "No problems found"."""
+    err = Finding("CFG_VALUE", "error", "bad", "fix")
+    d = ui_wx.PreflightDialog(FINDINGS + [err], SUMMARY, Config.defaults())
+    one = ui_wx.PreflightDialog([FINDINGS[0]], SUMMARY, Config.defaults())
+    none = ui_wx.PreflightDialog([], SUMMARY, Config.defaults())
+    try:
+        for i, f in enumerate(d.findings):
+            assert d.list.GetItemTextColour(i) == ui_wx.tone_colour(f.severity), f.code
+        assert [f.severity for f in d.findings] == ["error", "warning", "warning", "info"]
+        assert ui_wx.tone_colour("error") != ui_wx.tone_colour("warning") != ui_wx.tone_colour("info")
+        assert d.findings_heading.GetLabel() == "Findings — 1 errors, 2 warnings, 1 notes"
+        assert one.list.GetMinSize().height < d.list.GetMinSize().height  # 1 row vs 4 rows
+        assert one.findings_heading.GetLabel() == "No problems found (1 notes)"
+        assert one.findings_heading.GetForegroundColour() == ui_wx.tone_colour("ok")
+        assert none.findings_heading.GetLabel() == "No problems found"
+        assert not none.list.IsShown() and not none.cause.IsShown()
+    finally:
+        for x in (d, one, none):
+            x.Destroy()
+
+
+def test_tone_colours_follow_the_theme(monkeypatch):
+    monkeypatch.setattr(ui_wx, "window_is_dark", lambda: False)
+    light = {t: ui_wx.tone_colour(t).Get()[:3] for t in ui_wx.TONE_RGB}
+    monkeypatch.setattr(ui_wx, "window_is_dark", lambda: True)
+    dark = {t: ui_wx.tone_colour(t).Get()[:3] for t in ui_wx.TONE_RGB}
+    assert light == {t: v[0] for t, v in ui_wx.TONE_RGB.items()} and dark == {t: v[1] for t, v in ui_wx.TONE_RGB.items()}
+    from topor.preview import contrast
+    for t, (lt, dk) in ui_wx.TONE_RGB.items():  # readable on GTK's default light / dark window colour
+        assert contrast(lt, (255, 255, 255)) >= 4.5 and contrast(dk, (36, 36, 36)) >= 4.5, t
+
+
+def test_preflight_buttons_help_left_cancel_route_right_route_primary(app):
+    d = ui_wx.PreflightDialog([FINDINGS[0]], SUMMARY, Config.defaults())
+    try:
+        d.SetSize(d.FromDIP(wx.Size(900, 700)))
+        d.Layout()
+        h, c, r = (d.buttons[n].GetPosition().x for n in ("help", "cancel", "route"))
+        assert h < d.GetClientSize().width / 2 < c < r  # Help left; Cancel, Route right (GTK order)
+        assert d.GetDefaultItem() is d.route  # Enter = Route
+        assert d.route.GetFont().GetWeight() == wx.FONTWEIGHT_BOLD
+        assert d.buttons["cancel"].GetFont().GetWeight() != wx.FONTWEIGHT_BOLD
+        hint = d.widget("timeout_hint")
+        assert hint.GetForegroundColour() == wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT)
+        assert hint.GetPosition().y > d.timeout.GetPosition().y  # under the field
+    finally:
+        d.Destroy()
+
+
+def test_summary_parts_key_facts_first_alert_and_no_report_path(tmp_path):
+    alert, key, rest = ui_wx.summary_parts(_drc_report(tmp_path))
+    assert alert == "⚠ DRC new 9 (clearance 8, shorting_items 1) — see findings"
+    assert [k.split()[0] for k in key] == ["Routed", "DRC", "Vias", "Length"]
+    assert not any(ln.startswith("Report: ") for ln in rest + key)
+    assert rest[0].startswith("Topor 0.4.0")
+    assert ui_wx.summary_parts(_drc_report(tmp_path, n=0))[0] == ""
+    assert ui_wx.summary_parts(FakeReport(tmp_path))[0] == ""  # no facts: no alert
+
+
+def _panels(tmp_path):
+    from topor import preview as pv
+    png = tmp_path / "preview.png"
+    wx.Image(80, 40).SaveFile(str(png), wx.BITMAP_TYPE_PNG)
+    for k, p in pv.panel_paths(png).items():
+        wx.Image(60, 120).SaveFile(str(p), wx.BITMAP_TYPE_PNG)
+    pv.legend_path(png).write_text('[{"label": "F.Cu", "rgb": [200, 52, 52]}, {"label": "B.Cu", "rgb": [77, 127, 196]}]')
+    return png
+
+
+def test_preview_two_images_summary_hierarchy_and_findings(app, tmp_path):
+    """Two board images under their own headings, each scaled to its pane; the Summary with the red DRC line and
+    the key facts first (bold); the findings list of the run; the report path once (the field)."""
+    png = _panels(tmp_path)
+    f = Finding("DRC_NEW_VIOLATIONS", "warning", "KiCad's DRC finds 9 new violations", "Inspect → Design Rules Checker")
+    d = ui_wx.PreviewDialog(png, _drc_report(tmp_path, findings=[FINDINGS[0], f]), "eprom")
+    try:
+        assert d.images["before"] is not None and d.images["after"] is not None
+        assert d.bitmaps["before"] is not None and d.bitmaps["after"] is not None
+        assert d.widget("before_heading") is not None and d.widget("after_heading") is not None
+        d.SetSize(d.FromDIP(wx.Size(1400, 900)))
+        d.Layout()
+        d._render()
+        for k in ("before", "after"):  # Fit: the image fills its pane (height-bound here: a tall board)
+            assert d.bitmaps[k].GetBitmap().GetHeight() >= d.scrollers[k].GetClientSize().height - 2, k
+        assert d.drc_alert is not None and d.drc_alert.GetLabel().startswith("⚠ DRC new 9")
+        assert d.drc_alert.GetForegroundColour() == ui_wx.tone_colour("error")
+        assert [k.GetLabel().split()[0] for k in d.key_facts] == ["Routed", "DRC", "Vias", "Length"]
+        assert all(k.GetFont().GetWeight() == wx.FONTWEIGHT_BOLD for k in d.key_facts)
+        assert "Report:" not in d.summary.GetValue() and str(tmp_path) == d.dir_field.GetValue()
+        assert [x.code for x in d.findings] == ["DRC_NEW_VIOLATIONS", "DEFAULTS_USED"]
+        assert d.list.GetItemCount() == 2 and "Inspect → Design Rules Checker" in d.cause.GetValue()
+        assert d.GetDefaultItem() is d.ok_button and d.ok_button.GetFont().GetWeight() == wx.FONTWEIGHT_BOLD
+        assert [w.GetToolTipText() for w in d.GetChildren() if w.GetName() == "legend_swatch"] == ["F.Cu", "B.Cu"]
+    finally:
+        d.Destroy()
+    # an older report folder (only the composite preview.png): the composite in the first pane, no second pane
+    (tmp_path / "preview-before.png").unlink()
+    d = ui_wx.PreviewDialog(png, FakeReport(tmp_path), "eprom")
+    try:
+        assert d.images["before"] is not None and d.images["after"] is None and d.drc_alert is None
+        assert d.bitmaps["after"] is None and not d.scrollers["after"].GetParent().IsShown()
+    finally:
+        d.Destroy()
+
+
+def test_done_dialog_names_new_drc_violations_with_a_warning_icon(app, tmp_path):
+    rep = _drc_report(tmp_path)
+    rep.facts.update(zones_refilled=False, zone_fills_committed=1)
+    d = ui_wx.DoneDialog("accepted", rep, tmp_path)
+    try:
+        w = d.widget("done_drc_new")
+        assert w is not None and re.sub(r"\s+", " ", w.GetLabel()) == \
+            "⚠ 9 new DRC violations (clearance 8, shorting_items 1) — run Inspect → Design Rules Checker"
+        assert d.widget("icon").GetToolTipText() == "Warning"
+    finally:
+        d.Destroy()
+    for outcome, n in (("accepted", 0), ("rejected", 9)):  # nothing new, or nothing applied: the info notice
+        d = ui_wx.DoneDialog(outcome, _drc_report(tmp_path, n=n), tmp_path)
+        try:
+            assert d.widget("done_drc_new") is None and d.widget("icon").GetToolTipText() == "Information"
+        finally:
+            d.Destroy()
+
+
+def test_progress_waits_for_round_1_colours_the_verdict_and_never_changes_size(app):
+    dlg = ui_wx.ProgressDialog("qmtech", 600.0, 4)
+    try:
+        size = dlg.GetSize()
+        assert dlg.score_waiting.IsShown() and not dlg.scores_shown  # no dash rows before round 1
+        assert dlg.score_waiting.GetLabel() == "Waiting for round 1…"
+        dlg.update(Progress("route", 1, 10, 426, 3, 5.0, "a very long stage name that would widen the dialog " * 3))
+        assert not dlg.scores_shown
+        dlg.update(_scored(elapsed_s=36000.0, wall_s=36500.0, cpu_s=99999.0, vias=123456))
+        assert dlg.scores_shown and not dlg.score_waiting.IsShown()
+        assert dlg.score_verdict.GetForegroundColour() == ui_wx.tone_colour("warning")  # worse: amber
+        dlg.update(_scored(last_vs_best="new best", last_decider="length", last_delta=-30.0))
+        assert dlg.score_verdict.GetForegroundColour() == ui_wx.tone_colour("ok")  # better: green
+        dlg.update(_scored(last_vs_best="same", last_decider=""))
+        assert dlg.score_verdict.GetForegroundColour() == ui_wx.tone_colour("")
+        dlg._grow_to_best()
+        assert dlg.GetSize() == size, "numbers, stage names and verdicts never resize the dialog"
+        for st in (dlg.elapsed_value, dlg.total_value, dlg.vias_value):
+            assert st.GetSize().width >= st.GetTextExtent(st.GetLabel()).width, st.GetName()
+        assert dlg.widget("cancel_hint").GetLabel() == "Cancel keeps the best result so far."
+        assert dlg.widget("cancel_hint").GetToolTipText() == ui_wx.WORDING["progress"]["cancel_hint_tip"]
+    finally:
+        dlg.Destroy()
+
+
+def test_verdict_tone():
+    assert ui_wx.verdict_tone(_scored()) == "warning"
+    assert ui_wx.verdict_tone(_scored(last_vs_best="better", last_decider="open", last_delta=-1.0)) == "ok"
+    assert ui_wx.verdict_tone(_scored(last_vs_best="new best", last_decider="vias", last_delta=-1.0)) == "ok"
+    assert ui_wx.verdict_tone(_scored(last_vs_best="new best", last_decider="", last_delta=0.0)) == ""  # the first
+    assert ui_wx.verdict_tone(_scored(last_vs_best="tie", last_decider="")) == ""
+    assert ui_wx.verdict_tone(_scored(last_round=0)) == ""
