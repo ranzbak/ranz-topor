@@ -69,6 +69,7 @@ from kipy.geometry import PolygonWithHoles
 from kipy.proto.board import board_types_pb2 as bt
 
 from toporlib import geom
+from toporlib.custom_rules import apply_to_model, courtyard_rings
 from toporlib.dru import merge_dru_keepouts
 from toporlib.pcbfile import parse_layers, via_free_flags
 from toporlib.rules import net_codes_by_name
@@ -632,6 +633,7 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
 
     footprints = list(board.get_footprints())
     pads, holes, net_ties, fp_shapes, fp_zones, fp_texts = [], [], [], [], [], []
+    courtyards: dict = {}  # reference -> {"F"|"B": [ring]} for the custom rules' courtyard tests
     for fp in footprints:
         ref = fp.reference_field.text.value
         groups = _net_tie_groups(fp)
@@ -661,6 +663,11 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
         fp_zones += [it for it in fp.definition.items if isinstance(it, Zone)]
         fp_texts += [(it, ref) for it in fp.definition.items if isinstance(it, BoardText)]
         fp_shapes += [(sh, ref) for sh in fp.definition.shapes]
+        for side, bl in (("F", BoardLayer.BL_F_CrtYd), ("B", BoardLayer.BL_B_CrtYd)):
+            prims = [p for sh in fp.definition.shapes if sh.layer == bl for p in shape_to_prims(sh, max_err)]
+            rings = courtyard_rings(prims) if prims else []
+            if rings:
+                courtyards.setdefault(ref, {}).setdefault(side, []).extend(rings)
 
     tracks = list(board.get_tracks())
     kept = [track_to_kept(t, codes) for t in tracks if cu_id(t.layer) is not None]
@@ -694,14 +701,15 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
         if z.is_rule_area():
             keepouts += zone_to_keepouts(z, cu_ids, max_err)
     layer_ids = {g["name"]: g["id"] for g in plan}
-    keepouts, rules = merge_dru_keepouts(keepouts, rules, _dru_text(project, name, dru_text), layer_ids)
+    dru = _dru_text(project, name, dru_text)
+    keepouts, rules = merge_dru_keepouts(keepouts, rules, dru, layer_ids)
     pours = sorted((zone_to_pour(z, net_codes=codes, cu_ids=cu_ids, pads=pads, vias=vias, max_err=max_err)
                     for z in zones if _is_copper_pour(z)), key=lambda d: d["uuid"])
 
     # dangling ends
     dangling = dangling_ends(kept, vias, pads, cu_order)
 
-    return {
+    model = {
         "units": "nm",
         "board": name,
         "layers": plan,
@@ -722,6 +730,8 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
         "dangling_ends": dangling,
         "rules": rules,
     }
+    # custom rules: courtyard / rule-area clearance regions and pad clearance overrides (toporlib.custom_rules)
+    return apply_to_model(model, dru, courtyards=courtyards)
 
 
 __all__ = ["export_model_ipc", "layer_plan", "pad_from_kipy", "pad_shape", "pad_contains", "shape_to_prims",

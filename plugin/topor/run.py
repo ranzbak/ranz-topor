@@ -333,10 +333,11 @@ def resolve_rules(port: BoardPort, pcb_copy: Path, copy_text: str) -> dict:
     dru = dru_p.read_text() if dru_p.is_file() else None
     classes, of = port.netclasses()
     codes = port.net_codes() if hasattr(port, "net_codes") else None
-    n_cu = max(2, len(pcbfile.parse_layers(copy_text)))
+    cu = pcbfile.parse_layers(copy_text)
+    n_cu = max(2, len(cu))
     return rules_mod.resolve_rules_from_project(pro, dru, netclass_of=of, classes=classes,
                                                 widths_before=widths_before(copy_text), copper_layer_count=n_cu,
-                                                net_codes=codes)
+                                                net_codes=codes, layer_names={l["id"]: l["name"] for l in cu})
 
 
 def attach_diff_pairs(model: dict, rules: dict, pcb_copy: Path, pro: dict, cfg: Config, netclass_of: dict) -> tuple:

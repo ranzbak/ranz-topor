@@ -108,15 +108,30 @@ def test_custom_rule_track_width_min_is_the_net_min_width(tmp_path):
 
 
 def test_unknown_condition_is_strictest_with_warning(tmp_path):
+    """A condition topor cannot read: its clearance applies where stricter (every net), with a warning that
+    names the rule."""
+    b = _board(tmp_path)
+    r = resolve_rules(
+        b,
+        dru_text='(rule c (condition "A.getField(\'x\') == \'y\'") (constraint clearance (min 0.35mm)))',
+        widths_before={},
+    )
+    assert r["default"]["clearance"] == 350_000
+    assert all(v["clearance"] == 350_000 for v in r["per_net"].values())
+    assert any("custom rule 'c'" in w and "not understood" in w for w in r["warnings"])
+
+
+def test_courtyard_rule_is_a_region_not_a_net_value(tmp_path):
+    """A courtyard-only clearance rule leaves the per-net clearances alone and becomes a region plan."""
     b = _board(tmp_path)
     r = resolve_rules(
         b,
         dru_text='(rule c (condition "A.intersectsCourtyard(\'U1\')") (constraint clearance (min 0.35mm)))',
         widths_before={},
     )
-    assert r["default"]["clearance"] == 350_000
-    assert all(v["clearance"] == 350_000 for v in r["per_net"].values())
-    assert any("unparsed" in w for w in r["warnings"])
+    assert r["default"]["clearance"] == 200_000
+    assert r["custom_regions"] == [{"rule": "c", "fn": "intersectscourtyard", "arg": "U1", "clearance": 350_000,
+                                    "enclosed": False, "layers": []}]
 
 
 def test_ignored_rule_has_no_effect(tmp_path):

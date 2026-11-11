@@ -77,4 +77,5 @@ def resolve_rules(
     return resolve_rules_from_project(
         pro, dru_text, netclass_of=of, classes=classes, widths_before=widths_before,
         settings_table=settings_table, profile=profile, apply_fab_floors=apply_fab_floors,
-        copper_layer_count=int(board.GetCopperLayerCount()), net_codes=codes)
+        copper_layer_count=int(board.GetCopperLayerCount()), net_codes=codes,
+        layer_names={int(l): str(board.GetLayerName(l)) for l in board.GetEnabledLayers().CuStack()})
