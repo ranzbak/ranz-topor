@@ -133,8 +133,9 @@ DRC)*) and opens **Topor — Route &lt;board&gt;**:
   engine failed (footprint, layer, net, coordinates) and what to do. The board is not changed.
 
 - The first line counts the connections in scope, the nets, the copper layers and the engine version.
-- **Findings** lists everything topor is about to assume about your board, sorted Error → Warn → Note.
-  Select a row: **Cause** says what topor found, **Fix** says where to change it (a KiCad menu path or a
+- **Findings** lists everything topor is about to assume about your board, sorted Error → Warn → Note; each row
+  carries its severity's icon, word and colour (error red, warning amber, note grey), and the list is as tall as its
+  rows. Without errors and warnings the heading reads *No problems found*. Select a row: **Cause** says what topor found, **Fix** says where to change it (a KiCad menu path or a
   `topor.toml` key). Every code has a section in [troubleshoot.md](troubleshoot.md).
 - **Error** findings block the run: **Route** is disabled and the line next to the buttons says
   *Cannot route: n error(s) — see Fix above.* Warnings and notes never block.
@@ -145,7 +146,8 @@ DRC)*) and opens **Topor — Route &lt;board&gt;**:
 - [`PREEXISTING_DRC`](troubleshoot.md#preexisting_drc) lists what KiCad's DRC already reports before
   routing; those are not blamed on topor. `[run] fail_on_preexisting = true` makes it an error.
 
-**Cancel** (or Esc) closes the dialog; nothing is written, not even accepted findings.
+**Route** (Enter, the bold button on the right) starts the run; **Cancel** (or Esc) closes the dialog; nothing is
+written, not even accepted findings. **Help** (left) opens this guide.
 
 ## Options
 
@@ -206,9 +208,11 @@ The score rows show run, round, **Errors** (connections open or drawn with rule 
 without copper), **Vias** and **Length** — the order in which topor judges results (`[optimize] pick`, default
 `errors_vias_length`: fewest errors, then fewest open, fewest vias, the shortest length, then fewest shrinkages).
 *Last round* is the round any run finished last; *Best so far* is the best result over all runs, exactly the board OK
-or Cancel keeps. The line below says how the last round compares, on the first criterion that differs: *Last round is
-worse than the best: errors +2.* (more errors decide before fewer vias), *Last round is the new best: length -0.030
-m.*, or *… scores the same as the best; the earlier result stays.* When *Best so far* stays at an early round, the
+or Cancel keeps; until the first round ends their place reads *Waiting for round 1…*. The line below says how the
+last round compares, on the first criterion that differs: *Last round is worse than the best: errors +2.* (amber; more
+errors decide before fewer vias), *Last round is the new best: length -0.030 m.* (green), or *… scores the same as the
+best; the earlier result stays.* The numbers change in place: nothing in the dialog moves or widens while it runs.
+Hover *Cancel keeps the best result so far.* for what Cancel and OK do exactly. When *Best so far* stays at an early round, the
 later rounds were worse on that criterion — log.txt in the report folder has one `round ended:` line per round with
 its score and the verdict, e.g. `round ended: run 3, round 2: errors 5, open 0, vias 168, length 7.412 m, shrinkages
 4; rule violations 5, routed 426 of 426: worse than the best (run 1, round 1): errors +2`.
@@ -381,14 +385,25 @@ The pre-flight also warns about pads inside a track keepout on all their layers
 ## Preview
 
 **Topor — Preview: &lt;board&gt;** shows *Current board* (left) and *Result* (right) as KiCad renders them
-(F.Cu, B.Cu, outline); new copper is drawn with a highlight halo, and the
+(F.Cu, B.Cu, outline), each as its own image under its own heading, scaled to fill its pane; the two panes scroll
+together. New copper is drawn with a highlight halo, and the
 open connections (KiCad's DRC *unconnected items* after the zone refill, before and after routing) are drawn as
-blue lines between the items that are still apart. **Zoom**: Fit, 100 %, 200 %
-(Ctrl + mouse wheel steps it). The **Summary** pane is the top of the run report: routed/total,
-partial/failed, vias (vs. current board), length outside pads, *DRC new / pre-existing / unconnected*,
-detours, why the router stopped, scope and policy, settings and findings. The *DRC new* number comes from
-KiCad's DRC of the routed copy — it is the number to decide on. If the image could not be rendered you get
-[`PREVIEW_FAILED`](troubleshoot.md#preview_failed); the numbers are still valid and Accept still works.
+blue lines between the items that are still apart; the legend swatches sit top right. **Zoom**: Fit, 100 %, 200 %
+(Ctrl + mouse wheel steps it). The **Summary** pane is the top of the run report, the facts to decide on first and
+bold — routed/total, *DRC new / pre-existing / unconnected*, vias (vs. current board), length outside pads — and
+the rest smaller below: partial/failed, detours, why the router stopped, scope and policy, settings and findings.
+The *DRC new* number comes from KiCad's DRC of the routed copy — it is the number to decide on: when it is above 0
+the Summary starts with a red line *⚠ DRC new N (types) — see findings*, and the findings list below the images
+(the pre-flight's list, now with the findings after routing) has
+[`DRC_NEW_VIOLATIONS`](troubleshoot.md#drc_new_violations) with the first places (nets, position in mm). New
+violations never block **Accept** (costly, not failed): accept and fix them by hand in KiCad → Inspect → Design
+Rules Checker, or Reject and route again. The report folder is the field under the findings. If the image could not
+be rendered you get [`PREVIEW_FAILED`](troubleshoot.md#preview_failed); the numbers are still valid and Accept still
+works.
+
+If KiCad's DRC requires a larger clearance between two nets than topor gave the router, topor read the design rules
+wrong: the run stops before the preview with the error [`RULES_MISMATCH`](troubleshoot.md#rules_mismatch), naming
+the nets and both values, and nothing is applied. Please report it.
 
 ## Accept, Reject and undo
 
@@ -413,7 +428,8 @@ KiCad's DRC of the routed copy — it is the number to decide on. If the image c
 - **topor's copper survives Cleanup Tracks & Vias.** KiCad → Edit → Cleanup Tracks & Vias, with every option
   on, removes and changes nothing of what topor wrote ([below](#topors-copper-survives-cleanup-tracks--vias)).
 - **Topor — Finished** confirms what happened, says whether the zones were refilled (press B when not) and
-  shows the report folder.
+  shows the report folder. With new DRC violations on the board it shows a warning icon and starts with
+  *⚠ N new DRC violations (types) — run Inspect → Design Rules Checker*.
 - Then run **Inspect → Design Rules Checker** in KiCad.
 
 ### topor's copper survives Cleanup Tracks & Vias
@@ -447,7 +463,8 @@ the error dialog, with **Open report folder**:
 | File | Content |
 |---|---|
 | `report.md` | the summary block, connections, vias, lengths, DRC, findings, settings, files, versions |
-| `preview.png` | the before/after image of the preview |
+| `preview.png` | the before/after image of the preview (composite, with caption and legend) |
+| `preview-before.png`, `preview-after.png`, `preview-legend.json` | the two boards as separate images and the legend entries, which the preview dialog shows |
 | `result.json` | machine-readable result: status, routed/total, stop reason, DRC classification, findings |
 | `drc.json` | KiCad's DRC report of the routed copy |
 | `log.txt` | every step with timings; the first thing to attach to a bug report |
