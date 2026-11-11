@@ -414,20 +414,20 @@ KiCad DRC by `tests/test_mechfix.py`; they carry the `mechfix` marker and are no
 
 ## License
 
-topor is free software, licensed under the **GNU General Public License, version 2 or (at your
-option) any later version** (SPDX: `GPL-2.0-or-later`); see [LICENSE](LICENSE).
-Copyright (C) 2026 Paul Honig and contributors. This license allows reusing code from other GPL
-routers such as the gEDA PCB toporouter (GPL-2.0-or-later); keep their copyright notices when doing so.
+topor is free software, licensed under the **GNU General Public License, version 3 only**
+(SPDX: `GPL-3.0-only`); see [LICENSE](LICENSE).
+Copyright (C) 2026 Paul Honig and contributors. Code from other GPL routers that allow "version 3 or
+later", such as the gEDA PCB toporouter (GPL-2.0-or-later), may be reused under this license; keep their
+copyright notices when doing so. GPL-2.0-only code cannot be combined with it.
 
 ### No warranty
 
 This program is free software; you can redistribute it and/or modify it under the terms of the GNU
-General Public License as published by the Free Software Foundation; either version 2 of the License,
-or (at your option) any later version.
+General Public License version 3 as published by the Free Software Foundation.
 
 This program is distributed in the hope that it will be useful, but **WITHOUT ANY WARRANTY**; without
 even the implied warranty of **MERCHANTABILITY** or **FITNESS FOR A PARTICULAR PURPOSE**. See the GNU
-General Public License for more details (sections 11 and 12 of [LICENSE](LICENSE)).
+General Public License for more details (sections 15 and 16 of [LICENSE](LICENSE)).
 
 You should have received a copy of the GNU General Public License along with this program; if not, see
 <https://www.gnu.org/licenses/>.

@@ -658,8 +658,8 @@ def test_splash_shows_name_logo_version_and_status_and_closes_at_the_first_windo
     assert sp.FindWindowByName("title").GetLabel() == "Ranz Topor"
     assert sp.FindWindowByName("subtitle").GetLabel() == "Topological router 0.4.0"
     assert sp.FindWindowByName("logo") is not None  # plugin/icons/topor-*-128.png
-    notice = sp.FindWindowByName("notice").GetLabel()  # GPL-2.0 start-up notice
-    assert "GPL-2.0-or-later" in notice and "ABSOLUTELY NO WARRANTY" in notice
+    notice = sp.FindWindowByName("notice").GetLabel()  # GPL-3.0 start-up notice
+    assert "GPL-3.0-only" in notice and "ABSOLUTELY NO WARRANTY" in notice
     assert sp.status.GetLabel() == "Starting the router…"
     ui.splash("Connecting to KiCad…")
     assert ui._splash is sp and ui.shown == 1 and sp.status.GetLabel() == "Connecting to KiCad…"

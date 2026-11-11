@@ -706,8 +706,8 @@ as UNVERIFIED in [gui-test-checklist.md](gui-test-checklist.md) until that check
 
 ## License and warranty
 
-topor is free software under the GNU General Public License, version 2 or (at your option) any later
-version ([LICENSE](../../LICENSE)). It is distributed in the hope that it will be useful, but **WITHOUT ANY
+topor is free software under the GNU General Public License, version 3 only
+([LICENSE](../../LICENSE)). It is distributed in the hope that it will be useful, but **WITHOUT ANY
 WARRANTY**; without even the implied warranty of **MERCHANTABILITY** or **FITNESS FOR A PARTICULAR PURPOSE**
-(sections 11 and 12 of the license). The copper topor draws is not guaranteed to be correct, complete or
+(sections 15 and 16 of the license). The copper topor draws is not guaranteed to be correct, complete or
 manufacturable: run KiCad's DRC and review the board yourself before you order it.
