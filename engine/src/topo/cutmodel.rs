@@ -698,7 +698,7 @@ impl<'a> CutPrice<'a> {
         let r = wire_stretches(st, packer, w, ev, ks, bottom, None, &site);
         let n = st.wires[w].passes.len();
         let mut ks2: Vec<usize> = ks.to_vec();
-        let iv = super::refine::via_intervals(ev);
+        let iv = super::refine::via_ranges(ev, packer.via_between).0;
         ks2.truncate(iv.len());
         for &(ka, kb) in &iv[ks2.len()..] {
             ks2.push(super::refine::mid_k(ka, kb));

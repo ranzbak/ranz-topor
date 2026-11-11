@@ -9,6 +9,19 @@
 //!   from another wire, the clearance check and that wire's prices already see it.
 //! * `acute_bend`: 50 mm per bend with an interior angle under 90 degrees, rising to twice that
 //!   as the angle closes (amount `1 + (90 - interior) / 90`): acid traps and impedance.
+//! * `planned_room`: the drawing is greedy in wire order, so a wire drawn early can take the
+//!   corridor the plan keeps for a neighbour drawn later (its lane on the edges and the strip
+//!   between its planned crossings inside the triangles). Entering it costs, per mm of the drawn
+//!   shape, `depth / pitch + (depth / pitch)^2` (depth past the neighbour's planned path less the
+//!   lane spacing, pitch = the wire's width + clearance): smooth and growing, no cutoff
+//!   (Bast, Brosi & Storandt 2020 section 4.3: room is kept for the lines routed later).
+//!   The same weight prices the vias the drawing places itself (no planned site, or the planned
+//!   one fails): a via disc reaching into the planned corridor of another net's wire not drawn
+//!   yet (its taut and its packed chord), and a via pair whose two discs leave less than the
+//!   wires the plan crosses between them need, cost `pitch x (x + x^2)`, `x = depth / pitch`;
+//!   free room short of one via diameter pays the same; in the via's first triangle with a
+//!   valid site the drawing takes the least price, then the most room (Dayan & Dai 1991 §6-§8
+//!   p. 6).
 
 use super::{Event, Factor, Report};
 use crate::topo::octi::{acute_amount, any_angle_amount};
@@ -74,5 +87,28 @@ impl Factor for AcuteBend {
             Event::AcuteBend { at, interior_deg, .. } => format!("acute bend ({interior_deg:.1} deg inside) at ({:.3}, {:.3}) mm", at.x / 1e6, -at.y / 1e6),
             _ => String::new(),
         }
+    }
+}
+
+pub struct PlannedRoom;
+
+impl Factor for PlannedRoom {
+    fn name(&self) -> &'static str {
+        "planned_room"
+    }
+    fn doc(&self) -> &'static str {
+        "Drawing: a drawn shape in the corridor the plan keeps for a neighbour not drawn yet; per mm, depth / pitch + (depth / pitch)^2 (depth past the neighbour's planned path less the lane spacing)."
+    }
+    fn unit(&self) -> &'static str {
+        "per mm inside a later wire's planned room, times (d/p + (d/p)^2)"
+    }
+    fn default_weight(&self) -> f64 {
+        5.0
+    }
+    fn default_report(&self) -> Report {
+        Report::Off
+    }
+    fn amount(&self, _ev: &Event) -> f64 {
+        0.0
     }
 }

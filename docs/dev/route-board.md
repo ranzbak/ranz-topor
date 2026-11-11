@@ -52,6 +52,14 @@ and the feedback counts. Environment variables of the engine (debugging only, no
   slow.
 - `TOPO_DUMP=<file>`: the drawn copper, pad polygons and the failed runs' polylines (for `plotfail`-style plots).
 - `TOPO_VIADBG=1`: why a via interval had no site.
+- `TOPO_PLANDUMP=<file>`: the plan handed to the drawing (`<file>.r<round>`, JSON): per wire its net,
+  connection, taut points, the layering's stretches and events, its passes (edge ends, room per layer, need)
+  and crossings, in KiCad mm. Compare with `TOPO_DUMP` to tell a plan error from a drawing error. Note: the
+  `[optimize] runs` seeded runs write the same files (the last one wins), so set `--set optimize.runs=1`
+  to read one run's plan and drawing together; join wires by net and end points.
+- `TOPO_LANEDBG=1`: per pass of every octilinear redraw, the edge, the S2 interval, the tight span,
+  the bounds used, the planned-room bounds of the undrawn neighbours (`planned_room` factor) and the
+  lane (wires, spacing, drawn crossings).
 
 Without Python: `cargo run --release --example topo_route -- <input.json>` on a `harness.g0 export` model.
 Settings that steer it: `[search] drawing_feedback`, `feedback_max_rip`, `[vias] offset_sites`.

@@ -68,6 +68,9 @@ pub struct OctiCfg {
     /// runs parallel to a drawn wire of another net at that wire's clearance (it follows its
     /// neighbour, so a bundle keeps its pitch through its bends).
     pub pull: f64,
+    /// `planned_room` factor weight: price per nm of drawn shape inside the room the plan keeps
+    /// for a lane neighbour not drawn yet, times `x + x^2` (`x` = depth over the pitch).
+    pub room: f64,
 }
 
 impl OctiCfg {
@@ -84,13 +87,14 @@ impl OctiCfg {
             acute_nm: reg.weight("acute_bend").unwrap_or(50.0) * MM,
             acute_forbidden: o.acute == "forbidden",
             pull: o.bundle_pull.clamp(0.0, 0.9),
+            room: reg.weight("planned_room").unwrap_or(5.0).max(0.0),
         }
     }
 }
 
 impl Default for OctiCfg {
     fn default() -> Self {
-        OctiCfg { on: false, bend_nm: 0.25 * MM, spacing_nm: 0.5 * MM, any_nm: 15.0 * MM, any_forbidden: false, acute_nm: 50.0 * MM, acute_forbidden: false, pull: 0.3 }
+        OctiCfg { on: false, bend_nm: 0.25 * MM, spacing_nm: 0.5 * MM, any_nm: 15.0 * MM, any_forbidden: false, acute_nm: 50.0 * MM, acute_forbidden: false, pull: 0.3, room: 5.0 }
     }
 }
 
@@ -240,12 +244,27 @@ impl Drawer<'_> {
         let mut strip: Strip = self.open_strip(w, k0, k1, layer);
         strip.walls.extend(self.via_walls(w, k0, k1, layer));
         // The wire's own lane on every edge it crosses (Bast et al.: the grid restricted to the
-        // line's corridor): the parts of the edge outside the span its packing leaves it (the
-        // interval, widened to the tight span the drawn neighbours leave and to where the taut
-        // run crosses) are walls, so the octilinear shape takes no room planned for a wire not
-        // drawn yet.
+        // line's corridor): the parts of the edge outside the span its packing leaves it are
+        // walls, so the octilinear shape takes no room a wire not drawn yet needs to fit. That
+        // span is the tight span (the drawn neighbours plus the spacing of every undrawn pass
+        // between, or the lane end less it), widened to where the taut run crosses; the S2
+        // interval only where there is no lane. The planned room of an undrawn neighbour beyond
+        // that is not a wall but a price (`planned_room`, below).
+        //
+        // Per pass, towards a lane neighbour not drawn yet: the bound the plan keeps for it, its
+        // planned (taut) crossing less the lane spacing between the two. Two consecutive bounds
+        // on one side are joined across their triangle: the strip beyond that line is the
+        // neighbour's planned room inside the triangle (wiccon 3.3v J1.1 -> U1.3: the ADC trace
+        // drawn first bulged into it, GPIO16 then followed ADC at the clearance, and 3.3v, drawn
+        // last, had no legal geometry left). A leg pays for its length in that strip, graded by
+        // depth (Bast, Brosi & Storandt 2020 section 4.3, p. 7: keep room for the lines routed
+        // later; Dayan 1997 pp. 15-16: spacing for every wire).
+        // (a, b, sign): the room lies where `sign * (b - a) x (p - a) > 0`.
+        let mut zones: Vec<(Vec2, Vec2, f64)> = Vec::new();
         {
             let (st, pr) = (self.st, &self.b.proj);
+            let mut guard: Vec<(usize, [Option<Vec2>; 2])> = Vec::new();
+            let dbg = std::env::var("TOPO_LANEDBG").is_ok();
             for k in k0..k1 {
                 let pid = wi.passes[k];
                 let [p, q] = pr.edges[st.passes[pid].edge];
@@ -260,8 +279,7 @@ impl Drawer<'_> {
                     continue;
                 }
                 if let Some((a, b)) = self.tight_span(pid) {
-                    lo = lo.min(a);
-                    hi = hi.max(b);
+                    (lo, hi) = (a, b);
                 }
                 let nom = self.iv.nom.get(pid).copied().filter(|x| x.is_finite()).unwrap_or(0.5) * len;
                 if let Some(x) = super::draw::crossing(&taut, pp, pq, nom) {
@@ -277,6 +295,48 @@ impl Drawer<'_> {
                 }
                 if after && hi < len - 1.0 {
                     strip.walls.push((pp + u * hi, pq));
+                }
+                // Which end of the edge lies on the wire's left, coming from the triangle before
+                // the pass.
+                let t = pr.tris[wi.tris[k]];
+                let c = (pr.pos[t[0]] + pr.pos[t[1]] + pr.pos[t[2]]) * (1.0 / 3.0);
+                let mid = (pp + pq) * 0.5;
+                let p_left = (mid - c).cross(pp - mid) > 0.0;
+                let (prev_drawn, next_drawn) = self.lane_next_drawn(pid);
+                let g_lo = (before && !prev_drawn).then(|| self.neighbour_bound(pid, false)).flatten().map(|x| pp + u * x.clamp(0.0, len));
+                let g_hi = (after && !next_drawn).then(|| self.neighbour_bound(pid, true)).flatten().map(|x| pp + u * x.clamp(0.0, len));
+                if dbg {
+                    eprintln!(
+                        "LANE wire {w} k {k} edge {} ({:.3},{:.3})-({:.3},{:.3}) len {:.3} iv {:.3}..{:.3} tight {:?} lohi {:.3}..{:.3} room {:?} {:?} lane {}",
+                        st.passes[pid].edge,
+                        pp.x / 1e6,
+                        -pp.y / 1e6,
+                        pq.x / 1e6,
+                        -pq.y / 1e6,
+                        len / 1e6,
+                        self.iv.lo[pid] * len / 1e6,
+                        self.iv.hi[pid] * len / 1e6,
+                        self.tight_span(pid).map(|(a, b)| (a / 1e6, b / 1e6)),
+                        lo / 1e6,
+                        hi / 1e6,
+                        self.neighbour_bound(pid, false).map(|x| x / 1e6),
+                        self.neighbour_bound(pid, true).map(|x| x / 1e6),
+                        self.lane_dbg(pid)
+                    );
+                }
+                guard.push((k, if p_left { [g_lo, g_hi] } else { [g_hi, g_lo] }));
+            }
+            for g in guard.windows(2) {
+                let ((ka, sa), (kb, sb)) = (g[0], g[1]);
+                if kb != ka + 1 {
+                    continue;
+                }
+                for (side, sign) in [(0, 1.0), (1, -1.0)] {
+                    if let (Some(a), Some(b)) = (sa[side], sb[side]) {
+                        if (b - a).len2() >= 1.0 {
+                            zones.push((a, b, sign));
+                        }
+                    }
                 }
             }
         }
@@ -396,6 +456,49 @@ impl Drawer<'_> {
             }
             follow_cache.insert(key, best);
             best
+        };
+        // `planned_room` price of the leg `a-b`: its length inside the planned room of an undrawn
+        // lane neighbour (`zones`), each piece weighted by `x + x^2`, `x` = depth over the pitch
+        // (midpoint rule, pieces of at most a quarter pitch or 1/24 of the leg).
+        let mut room_cache: HashMap<[u64; 4], f64> = HashMap::new();
+        let mut room = |a: Vec2, b: Vec2| -> f64 {
+            if zones.is_empty() || cfg.room <= 0.0 {
+                return 0.0;
+            }
+            let key = [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()];
+            if let Some(&v) = room_cache.get(&key) {
+                return v;
+            }
+            let l = (b - a).len();
+            let mut tot = 0.0;
+            if l >= 1.0 {
+                for &(za, zb, sign) in &zones {
+                    let zl = (zb - za).len();
+                    let zu = (zb - za) * (1.0 / zl);
+                    let d0 = sign * zu.cross(a - za);
+                    let d1 = sign * zu.cross(b - za);
+                    if d0 <= 0.0 && d1 <= 0.0 {
+                        continue;
+                    }
+                    let (t0, t1) = ((a - za).dot(zu), (b - za).dot(zu));
+                    if (t0 < 0.0 && t1 < 0.0) || (t0 > zl && t1 > zl) {
+                        continue;
+                    }
+                    let n = ((l / (0.25 * pitch)).ceil() as usize).clamp(2, 24);
+                    let ds = l / n as f64;
+                    for i in 0..n {
+                        let f = (i as f64 + 0.5) / n as f64;
+                        let (d, t) = (d0 + (d1 - d0) * f, t0 + (t1 - t0) * f);
+                        if d > 0.0 && (0.0..=zl).contains(&t) {
+                            let x = d / pitch;
+                            tot += ds * (x + x * x);
+                        }
+                    }
+                }
+            }
+            let v = cfg.room * tot;
+            room_cache.insert(key, v);
+            v
         };
         let mut legal_cache: HashMap<[u64; 4], bool> = HashMap::new();
         let mut legal = |a: Vec2, b: Vec2| -> bool {
@@ -529,7 +632,7 @@ impl Drawer<'_> {
                                 ok = false;
                                 break;
                             }
-                            c += len + b;
+                            c += len + b + room(from, e);
                             if let (Some(kk), true) = (dk, cfg.pull > 0.0 && !side.is_empty()) {
                                 c -= cfg.pull * follow(from, e, kk);
                             }

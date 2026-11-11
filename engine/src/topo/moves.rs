@@ -641,6 +641,53 @@ impl<'a> Labels<'a> {
         n
     }
 
+    /// 5.4 local via-pair minimisation (Luzin, Popov & Popov 2013 p. 2, steps 1-10, for one
+    /// pair of adjacent vias `v`, `u` joined by a stretch shorter than `max_len` nm): the stretch
+    /// between the two layer changes is copied onto the layer `T` of the wire on both sides of it
+    /// (`Lv = Lu = {T}`), and every wire crossing the stretch on `T` (the paper's `Lcross ∩ Lv`,
+    /// step 8.1) is moved off `T` at that crossing (onto the stretch's old layer), so both vias
+    /// go (steps 9-10). One move, kept by the label moves' own price (vias, capacity) when it is
+    /// cheaper; a fixed event (an SMD pad's layer) or a crossing wire that may not take the old
+    /// layer rules the pair out (step 3/5). `len(w, i, j)` is the stretch length of events
+    /// `i..=j`. Returns the pairs removed.
+    pub fn pair_lifts(&mut self, w: WireId, max_len: f64, len: &dyn Fn(WireId, usize, usize) -> f64) -> usize {
+        let mut n = 0;
+        let mut i = 1;
+        while i < self.evl[w].len() {
+            let l = self.evl[w][i].2;
+            let mut j = i;
+            while j + 1 < self.evl[w].len() && self.evl[w][j + 1].2 == l {
+                j += 1;
+            }
+            let (t, after) = (self.evl[w][i - 1].2, self.evl[w].get(j + 1).map(|e| e.2));
+            if after == Some(t) && t != l && (t as usize) < self.n_signal && (l as usize) < self.n_signal && len(w, i, j) <= max_len {
+                let mut mv: Vec<((WireId, usize), i32)> = Vec::new();
+                let mut ok = true;
+                for k in i..=j {
+                    if (self.mask[w][k] >> t) & 1 == 0 {
+                        ok = false;
+                        break;
+                    }
+                    mv.push(((w, k), t));
+                    if let Some((w2, i2)) = self.partner[w][k] {
+                        if self.evl[w2][i2].2 == t {
+                            if (self.mask[w2][i2] >> l) & 1 == 0 || !self.signal_only(w2) {
+                                ok = false;
+                                break;
+                            }
+                            mv.push(((w2, i2), l));
+                        }
+                    }
+                }
+                if ok && self.apply(&mv, Kind::Lift) {
+                    n += 1;
+                }
+            }
+            i = j + 1;
+        }
+        n
+    }
+
     /// Wires with a layer change on signal layers only, in id order.
     pub fn candidates(&self) -> Vec<WireId> {
         (0..self.evl.len()).filter(|&w| self.st.wires[w].alive && self.signal_only(w) && self.evl[w].windows(2).any(|x| x[0].2 != x[1].2)).collect()
