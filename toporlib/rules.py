@@ -363,6 +363,7 @@ def resolve_rules_from_project(
         per_net[str(int(code))] = net_rule(name)
 
     if cr:
+        custom_notes = cr.rule_warnings(skip=_REFUSE) + cr.notes.items
         warnings.extend(cr.rule_warnings(skip=_REFUSE))
         warnings.extend(cr.notes.items)
 
@@ -383,5 +384,5 @@ def resolve_rules_from_project(
         "ignored_checks": ignored_checks_from_pro(pro),
         # How each custom rule is used (report) and the courtyard / rule-area regions the model export turns
         # into ``clearance_regions`` (it has the polygons). Absent without a .kicad_dru rule.
-        **({"custom_rules": cr.classify(), "custom_regions": cr.regions} if cr else {}),
+        **({"custom_rules": cr.classify(), "custom_regions": cr.regions, "custom_notes": custom_notes} if cr else {}),
     }

@@ -276,6 +276,25 @@ def _rule_findings(rules: dict) -> list:
                 names)]
 
 
+def _custom_rule_findings(rules: dict) -> list:
+    """CUSTOM_RULES (how each .kicad_dru rule is used) and CUSTOM_RULE_LIMITED (the rules topor applies only
+    conservatively or not at all, each named). O(rules)."""
+    rows = rules.get("custom_rules") or []
+    if not rows:
+        return []
+    used = [r for r in rows if r.get("use") in ("net", "net+pad", "pad", "region", "board", "net (precaution)")]
+    out = []
+    if used:
+        txt = "; ".join(f"{r['rule']}: {r['constraint']} -> {r['use']}" for r in used[:12])
+        out.append(_mk("CUSTOM_RULES", f"{len(used)} custom rule constraint(s) applied ({txt}"
+                       + (" ..." if len(used) > 12 else "") + ").", sorted({r["rule"] for r in used})))
+    notes = list(rules.get("custom_notes") or [])
+    if notes:
+        out.append(_mk("CUSTOM_RULE_LIMITED", f"{len(notes)} custom-rule note(s): " + " | ".join(notes[:6])
+                       + (" ..." if len(notes) > 6 else ""), notes[:20]))
+    return out
+
+
 def _copper_findings(model: dict, cfg) -> list:
     out = []
     locked = [k["uuid"] for k in model.get("kept", []) if k.get("locked")] + \
@@ -432,6 +451,7 @@ def preflight(model: dict, rules: dict, cfg, sel, orig_drc, cfg_findings, *, pcb
     out += _via_findings(model, rules, cfg, pcb_text, pro)
     out += _pad_findings(model, cfg)
     out += _rule_findings(rules)
+    out += _custom_rule_findings(model.get("rules") or rules)
     out += _copper_findings(model, cfg)
     out += _do_not_touch(model, cfg)
     out += _diff_pairs(model, cfg)

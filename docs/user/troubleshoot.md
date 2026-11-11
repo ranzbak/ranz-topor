@@ -258,6 +258,22 @@ copper violates a rule anywhere else, file a bug.
 
 **Fix.** Route these connections by hand, or check the minimum in KiCad → File → Board Setup → Design Rules → Constraints → Minimum connection width.
 
+### CUSTOM_RULES
+
+*Severity: info.*
+
+**Cause.** The board's custom design rules (.kicad_dru) were read: each rule that restricts routing is applied as a per-net value, a board-wide edge / hole clearance, a clearance region (courtyard / rule area) or a pad clearance; the line names each rule and how it is used. Rules for silkscreen, courtyards, mask, zone fills and rules with severity ignore do not change the routing.
+
+**Fix.** Nothing to do; to change a rule edit it in KiCad → File → Board Setup → Design Rules → Custom Rules (docs/user/operate.md, Custom design rules).
+
+### CUSTOM_RULE_LIMITED
+
+*Severity: warning.*
+
+**Cause.** A custom rule could not be used exactly: its condition depends on the other item or uses a function topor does not evaluate (its value is then applied only where it is stricter, never where it is looser), its values differ per layer where topor has one width / clearance per net, or the constraint is not honoured at all (e.g. length, via_count).
+
+**Fix.** Check the named rules after routing with KiCad → Inspect → Design Rules Checker; simplify the condition (A.NetClass, A.NetName, A.intersectsCourtyard('REF'), A.intersectsArea('name'), A.Pad_Type) or route that part by hand. See docs/user/operate.md, Custom design rules.
+
 ### DANGLING_ENDS
 
 *Severity: info.*

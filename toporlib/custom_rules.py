@@ -609,6 +609,8 @@ def apply_to_model(model: dict, dru_text: str | None, *, courtyards: dict, areas
         pads[i]["local_clearance"] = int(v)
     have = list(rules.get("warnings") or [])
     rules["warnings"] = have + [w for w in cr.notes.items if w not in have]
+    notes = list(rules.get("custom_notes") or [])
+    rules["custom_notes"] = notes + [w for w in cr.notes.items if w not in notes]
     rules["clearance_regions"] = regions
     return {**model, "pads": pads, "rules": rules}
 
