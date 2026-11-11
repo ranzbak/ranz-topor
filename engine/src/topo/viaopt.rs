@@ -603,8 +603,12 @@ pub fn relocate_junctions(cx: &JCtx) -> Vec<JMove> {
         if bp.len() < 2 {
             continue;
         }
-        let Some(arm) = first_away(bp, end, j0) else { continue };
-        let (Some(prev), Some(next)) = (first_away(before, 1, j0), first_away(after, 0, j0)) else { continue };
+        // Corners within the trunk's own clearance ring round the junction vertex (the taut path
+        // turns round it, measured 5.4 with the Steiner grid: a corner 0.25 mm from the T) are
+        // no arm ends: 2 x (width + clearance) of the trunk.
+        let ring = 2.0 * (st.wires[tw].w + st.wires[tw].s).max(1e3);
+        let Some(arm) = first_away(bp, end, j0, ring) else { continue };
+        let (Some(prev), Some(next)) = (first_away(before, 1, j0, ring), first_away(after, 0, j0, ring)) else { continue };
         // The tee keeps one layer (no via at the junction).
         let lt = layer_at(pt, k);
         let lb = if end == 0 { pb.layers.first().copied() } else { pb.layers.last().copied() };
@@ -672,7 +676,7 @@ pub fn relocate_junctions(cx: &JCtx) -> Vec<JMove> {
             continue;
         }
         // The arm's first corner away from the pad (a taut path can repeat its end point).
-        let (Some(c1), Some(c2)) = (first_away(t1, e1, q), first_away(t2, e2, q)) else { continue };
+        let (Some(c1), Some(c2)) = (first_away(t1, e1, q, 1e3), first_away(t2, e2, q, 1e3)) else { continue };
         let f = if cx.octi { fermat_octi(&[q, c1, c2]) } else { fermat(&[q, c1, c2]) };
         if (f - q).len() < 1.0 || (f - c1).len() < 1.0 || (f - c2).len() < 1.0 {
             continue;
@@ -705,10 +709,11 @@ pub fn relocate_junctions(cx: &JCtx) -> Vec<JMove> {
     out
 }
 
-/// The first point of `t` from its start (`end == 0`) or from its end (else) farther than 1 um
-/// from `q`: an arm's first corner away from its junction (a taut path can repeat a point).
-fn first_away(t: &[Vec2], end: usize, q: Vec2) -> Option<Vec2> {
-    let far = |p: &&Vec2| (**p - q).len() > 1e3;
+/// The first point of `t` from its start (`end == 0`) or from its end (else) farther than `r`
+/// (nm) from `q`: an arm's first corner away from its junction (a taut path can repeat a point,
+/// and turns round the junction's own vertex at the clearance).
+fn first_away(t: &[Vec2], end: usize, q: Vec2, r: f64) -> Option<Vec2> {
+    let far = |p: &&Vec2| (**p - q).len() > r;
     if end == 0 {
         t.iter().find(far).copied()
     } else {
