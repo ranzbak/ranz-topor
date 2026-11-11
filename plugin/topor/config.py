@@ -28,6 +28,13 @@ _ENGINE_SCALE = {"margin_nm": 1000, "allowed_drills_nm": 1_000_000, "neck_max_nm
                  "diffpair_zip_max_nm": 1_000_000, "via_drill_grid_nm": 1_000_000}
 
 
+def _topor_loop_taut(values: dict) -> bool:
+    return values[("optimize", "loop")] == "topor" and values[("search", "length")] == "taut"
+
+
+# engine_field of an auto / on / off setting -> what "auto" means for the current values (the engine gets a bool)
+_ENGINE_AUTO = {"via_relocate": _topor_loop_taut, "via_between": _topor_loop_taut}
+
 # ---------------------------------------------------------------- value handling
 
 def _is_num(v):
@@ -54,6 +61,8 @@ def coerce(s: Setting, raw):
             if (lo is not None and v < lo) or (hi is not None and v > hi):
                 err = f"must be in {_range_text(s)}"
     elif s.type == "str":
+        if isinstance(raw, bool) and s.choices and "on" in s.choices and "off" in s.choices:
+            v = raw = "on" if raw else "off"  # an auto / on / off setting also takes true / false
         if not isinstance(raw, str):
             err = "must be a string"
         elif s.choices and raw not in s.choices:
@@ -152,6 +161,8 @@ class Config:
                 continue
             v = self.values[(s.section, s.key)]
             f = s.engine_field
+            if f in _ENGINE_AUTO:
+                v = v if isinstance(v, bool) else _ENGINE_AUTO[f](self.values) if v == "auto" else v == "on"
             if f in _ENGINE_SCALE and isinstance(v, (list, tuple)):
                 v = [int(round(x * _ENGINE_SCALE[f])) for x in v]
             elif f in _ENGINE_SCALE:

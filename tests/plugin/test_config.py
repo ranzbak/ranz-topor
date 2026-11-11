@@ -187,6 +187,24 @@ def test_topological_core_settings_reach_the_engine():
         assert available(s), key
 
 
+
+def test_via_auto_settings_follow_the_loop(tmp_path):
+    """5.4 defaults: [vias] relocate / between_crossings = "auto" are on with the TopoR loop (+ taut length),
+    off with the default cycles loop; "on" / "off" / true / false force them (toml and --set)."""
+    keys = ("via_relocate", "via_between")
+    pick = lambda c: tuple(c.engine_options()[k] for k in keys)
+    d = Config.defaults()
+    assert pick(d) == (False, False)
+    tl = d.with_values({("optimize", "loop"): "topor", ("search", "length"): "taut"})
+    assert pick(tl) == (True, True)
+    assert pick(d.with_values({("optimize", "loop"): "topor"})) == (False, False)  # relocate needs taut
+    assert pick(tl.with_values({("vias", "relocate"): "off", ("vias", "between_crossings"): False})) == (False, False)
+    assert pick(d.with_values({("vias", "relocate"): "on", ("vias", "between_crossings"): True})) == (True, True)
+    (tmp_path / "topor.toml").write_text("version = 1\n[vias]\nrelocate = true\nbetween_crossings = \"off\"\n")
+    cfg, findings = load_config(tmp_path)
+    assert pick(cfg) == (True, False)
+    assert not [f for f in findings if f.code == "CFG_VALUE"]
+
 def test_removed_keys_are_ignored_with_a_warning(tmp_path):
     """CL cleanup: an old topor.toml that sets removed keys (also whole removed sections) still loads; each such
     key gives CFG_REMOVED_KEY ("ignored, removed in ...") and nothing else changes."""
