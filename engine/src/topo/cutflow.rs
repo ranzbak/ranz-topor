@@ -102,16 +102,82 @@ pub struct Stretch {
 }
 
 impl Stretch {
-    /// Width at a point of the band: the width of the nearest pass point (nominal at the ends).
-    fn width_at(&self, x: Vec2) -> f64 {
-        let mut best = (f64::INFINITY, self.w);
-        for (i, &w) in self.pass_w.iter().enumerate() {
-            let d = (self.curve[i + 1] - x).len2();
-            if d < best.0 {
-                best = (d, w);
+    /// Width at a point of the band: the width of the nearest pass point (the first of equally
+    /// near ones; nominal without pass points), through the index of the pass points
+    /// ([`Stretch::pass_index`]).
+    pub fn width_at_idx(&self, idx: &NearIdx, x: Vec2) -> f64 {
+        match idx.nearest(|i| self.curve[i + 1], x) {
+            Some(i) => self.pass_w[i],
+            None => self.w,
+        }
+    }
+
+    /// The index of the pass points `curve[1..=pass_w.len()]` ([`Stretch::width_at_idx`]).
+    pub fn pass_index(&self) -> NearIdx {
+        NearIdx::new(self.pass_w.len(), |i| self.curve[i + 1])
+    }
+}
+
+/// The nearest of a fixed point set to a query point, exactly as a scan with a strict `<`
+/// (the lowest index among equal squared distances), without scanning every point (shopping
+/// list 3.1: a band crosses hundreds of cuts and every crossing asks for its nearest pass point).
+/// The points are sorted along the axis of their larger extent; a query walks outward from its
+/// coordinate and stops at the first point whose axis gap squared exceeds the best squared
+/// distance. That gap is the first term of the squared distance as `Vec2::len2` computes it, so
+/// the bound holds in floating point too (adding a nonnegative term never rounds below it), and
+/// it grows monotonically along each side. O(m log m) to build, O(log m + points within the
+/// best distance's slab) per query.
+#[derive(Clone, Debug, Default)]
+pub struct NearIdx {
+    use_y: bool,
+    ord: Vec<(f64, u32)>,
+}
+
+impl NearIdx {
+    /// The index over `n` points `pt(0..n)`.
+    pub fn new(n: usize, pt: impl Fn(usize) -> Vec2) -> NearIdx {
+        let (mut lo, mut hi) = (Vec2 { x: f64::INFINITY, y: f64::INFINITY }, Vec2 { x: f64::NEG_INFINITY, y: f64::NEG_INFINITY });
+        for i in 0..n {
+            let p = pt(i);
+            lo = Vec2 { x: lo.x.min(p.x), y: lo.y.min(p.y) };
+            hi = Vec2 { x: hi.x.max(p.x), y: hi.y.max(p.y) };
+        }
+        let use_y = hi.y - lo.y > hi.x - lo.x;
+        let mut ord: Vec<(f64, u32)> = (0..n).map(|i| (if use_y { pt(i).y } else { pt(i).x }, i as u32)).collect();
+        ord.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        NearIdx { use_y, ord }
+    }
+
+    /// The index `i` minimising `(pt(i) - q).len2()`, the lowest among equal ones; `None` for no
+    /// points.
+    pub fn nearest(&self, pt: impl Fn(usize) -> Vec2, q: Vec2) -> Option<usize> {
+        let qc = if self.use_y { q.y } else { q.x };
+        let pos = self.ord.partition_point(|e| e.0 < qc);
+        // As the scan: the best starts at an infinite distance and only a smaller one replaces
+        // it (here also an equal one of a lower index, the scan's earlier point).
+        let (mut bd, mut bi) = (f64::INFINITY, None::<usize>);
+        let mut visit = |c: f64, i: usize| -> bool {
+            let g = c - qc;
+            if g * g > bd {
+                return false;
+            }
+            let d = (pt(i) - q).len2();
+            if d < bd || (d == bd && bi.is_some_and(|b| i < b)) {
+                (bd, bi) = (d, Some(i));
+            }
+            true
+        };
+        for &(c, i) in &self.ord[pos..] {
+            if !visit(c, i as usize) {
+                break;
             }
         }
-        best.1
+        for &(c, i) in self.ord[..pos].iter().rev() {
+            if !visit(c, i as usize) {
+                break;
+            }
+        }
+        bi
     }
 }
 
@@ -532,6 +598,7 @@ pub fn flow_items_into(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], via_r: 
             continue;
         }
         let ends = [s.band[0], s.band[s.band.len() - 1]];
+        let near = s.pass_index();
         for k in 0..s.band.len() - 1 {
             let (a, b) = (s.band[k], s.band[k + 1]);
             // A segment crosses a cut at most once, so the order of the candidates does not
@@ -566,7 +633,7 @@ pub fn flow_items_into(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], via_r: 
                 if via_r > 0.0 && (0..2).any(|i| s.via_ends[i] && (x - ends[i]).len() < via_r) {
                     continue;
                 }
-                out.push((ci as usize, FlowItem { stretch: si, t: tc, kind: 0, w: s.width_at(x) }));
+                out.push((ci as usize, FlowItem { stretch: si, t: tc, kind: 0, w: s.width_at_idx(&near, x) }));
             }
         }
         // Wraps at the band's interior corners.
@@ -578,7 +645,7 @@ pub fn flow_items_into(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], via_r: 
                 let at_p = c.vp == v;
                 let u = if at_p { c.q - c.p } else { c.p - c.q };
                 if in_wedge(din, dout, left, u) {
-                    out.push((ci, FlowItem { stretch: si, t: if at_p { 0.0 } else { 1.0 }, kind: if at_p { 1 } else { 2 }, w: s.width_at(s.band[k]) }));
+                    out.push((ci, FlowItem { stretch: si, t: if at_p { 0.0 } else { 1.0 }, kind: if at_p { 1 } else { 2 }, w: s.width_at_idx(&near, s.band[k]) }));
                 }
             }
         }
@@ -885,6 +952,45 @@ impl Recorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Shopping list 3.1: the nearest-point index answers as the scan with a strict `<` does
+    /// (the lowest index among equal distances), on random points, on lattice points with many
+    /// ties and duplicates, and on a vertical row (the y axis chosen).
+    #[test]
+    fn near_index_equals_the_scan() {
+        let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut rnd = move || {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            (x.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let scan = |pts: &[Vec2], q: Vec2| -> Option<usize> {
+            let mut best = (f64::INFINITY, None);
+            for (i, &p) in pts.iter().enumerate() {
+                let d = (p - q).len2();
+                if d < best.0 {
+                    best = (d, Some(i));
+                }
+            }
+            best.1
+        };
+        for case in 0..300 {
+            let n = case % 23;
+            let pts: Vec<Vec2> = (0..n)
+                .map(|_| match case % 3 {
+                    0 => Vec2 { x: rnd() * 2e7, y: rnd() * 1e7 },
+                    1 => Vec2 { x: (rnd() * 4.0).round() * 1e6, y: (rnd() * 4.0).round() * 1e6 },
+                    _ => Vec2 { x: 5e6 + (rnd() * 2.0).round(), y: rnd() * 3e7 },
+                })
+                .collect();
+            let idx = NearIdx::new(n, |i| pts[i]);
+            for _ in 0..40 {
+                let q = if case % 3 == 1 { Vec2 { x: (rnd() * 8.0).round() * 0.5e6, y: (rnd() * 8.0).round() * 0.5e6 } } else { Vec2 { x: rnd() * 2e7, y: rnd() * 3e7 } };
+                assert_eq!(idx.nearest(|i| pts[i], q), scan(&pts, q), "case {case} q {q:?}");
+            }
+        }
+    }
 
     #[test]
     fn wedge_left_turn() {

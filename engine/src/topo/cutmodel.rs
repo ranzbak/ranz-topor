@@ -41,7 +41,7 @@
 //! Complexity: building the sheets is U0's; a wire costs a walk and a funnel per run plus a grid
 //! query per band segment and per via; repricing a cut is O(items log items).
 
-use super::cutflow::{band, flow_items_into, needs, wire_stretches, FlowItem, Stretch};
+use super::cutflow::{band, flow_items_into, needs, wire_stretches, FlowItem, NearIdx, Stretch};
 use super::demand::{need_in_by, Bound, Item};
 use super::pack::Packer;
 use super::refine::LEv;
@@ -206,6 +206,12 @@ fn nearest_k(s: &Stretch, x: Vec2) -> usize {
     best.1
 }
 
+/// [`nearest_k`] through an index of the curve points: the same traversal.
+fn nearest_k_idx(s: &Stretch, idx: Option<&NearIdx>, x: Vec2) -> usize {
+    let Some(idx) = idx else { return nearest_k(s, x) };
+    idx.nearest(|i| s.curve[i], x).map_or(0, |i| s.curve_k.get(i).copied().unwrap_or(0))
+}
+
 /// The items one wire adds to a sheet: its runs on the sheet's layer (`runs` with bands) and its
 /// vias. `(cut, item)`, and the junction features its runs end at with the half width.
 fn wire_items(sh: &LayerSheet, jf: &HashMap<(i64, i64), usize>, runs: &[Stretch], vias: &[ViaItem], buf: &mut Vec<u32>) -> WireItems {
@@ -231,6 +237,7 @@ fn run_items_with(sh: &LayerSheet, jf: &HashMap<(i64, i64), usize>, runs: &[Stre
     let mine: Vec<usize> = (0..runs.len()).filter(|&i| runs[i].layer == sh.l).collect();
     flow_items_into(sh, runs, &mine, via_r, sc, per);
     let mut out = Vec::with_capacity(per.len());
+    let near: Vec<Option<NearIdx>> = (0..runs.len()).map(|i| mine.contains(&i).then(|| NearIdx::new(runs[i].curve.len(), |j| runs[i].curve[j]))).collect();
     for &(ci, x) in per.iter() {
         let c = &sh.cuts[ci];
         let s = &runs[x.stretch];
@@ -239,7 +246,7 @@ fn run_items_with(sh: &LayerSheet, jf: &HashMap<(i64, i64), usize>, runs: &[Stre
             2 => c.q,
             _ => c.p + (c.q - c.p) * x.t,
         };
-        out.push((ci, Itm { wire: s.wire, t: x.t, kind: x.kind, it: Item { net: s.net, w: x.w, s: s.s }, floor: s.w_floor, k: nearest_k(s, at), src: 0 }));
+        out.push((ci, Itm { wire: s.wire, t: x.t, kind: x.kind, it: Item { net: s.net, w: x.w, s: s.s }, floor: s.w_floor, k: nearest_k_idx(s, near[x.stretch].as_ref(), at), src: 0 }));
     }
     let mut jends = Vec::new();
     for &i in &mine {
