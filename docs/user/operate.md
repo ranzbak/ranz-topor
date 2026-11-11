@@ -129,7 +129,7 @@ Honoured constraints and how the router uses them:
 | Constraint | Used as |
 |---|---|
 | `clearance` | per-net clearance (net / net class / layer conditions); a **clearance region** for `A.intersectsCourtyard('REF')`, `A.insideCourtyard('REF')`, `A.intersectsArea('name')`, `A.insideArea('name')`, `A.enclosedByArea('name')` (inside, the rule's value replaces both nets' clearances); a **pad clearance** for pad conditions (`A.Pad_Type == 'SMD'`, `A.memberOfFootprint('REF')`, `A.Type == 'Pad'`, `A.isPlated()`) |
-| `edge_clearance`, `hole_clearance` | board-wide copper-to-edge / hole clearance (the largest value any routed net gets) |
+| `edge_clearance`, `hole_clearance` | board-wide copper-to-edge / hole clearance (the largest value any routed net gets); a track into a pad that itself lies within the edge clearance ends inside that pad off its centre, where the track keeps the clearance (the pad's own violation is pre-existing) |
 | `track_width` | per-net width: `opt` is the target, `min` / `max` bound it (`min` is also the floor a necked pad exit may not go below) |
 | `via_diameter`, `hole_size` | per-net via size (`opt`, raised to `min`) |
 | `disallow track` / `via` with `A.insideArea('name')` | keepout ([Fab minimums and via sizes](#fab-minimums-and-via-sizes) floors do not apply) |
