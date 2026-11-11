@@ -655,7 +655,9 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
     // Keepouts forbidding vias, on whatever copper layer (a through via spans them all): no
     // via site may touch one (the P3 site test, the drawing's checker).
     proj.no_via = m.keepouts.iter().filter(|k| k.no_vias && k.poly.len() >= 3).map(|k| k.poly.iter().map(|p| p.to_vec2()).collect()).collect();
-    proj.set_regions(m.rules.clearance_regions.iter().map(|r| (r.poly.iter().map(|p| p.to_vec2()).collect(), r.clearance as f64)).collect());
+    // The projection is one CDT over every layer: a region bound to some layers only is left to
+    // the drawing and its checker (which see layers).
+    proj.set_regions(m.rules.clearance_regions.iter().filter(|r| r.layers.is_empty()).map(|r| (r.poly.iter().map(|p| p.to_vec2()).collect(), r.clearance as f64)).collect());
     let mut centre = vec![None; proj.obstacles.len()];
     for (v, k) in proj.vkind.iter().enumerate() {
         if let VertKind::Centre(o) = *k {
