@@ -167,15 +167,7 @@ pub fn via_point(pr: &Projection, packer: &Packer, t: usize, net: i32, r: f64, s
     let pts = tri_site_points(a, b, c);
     let mut best = (f64::NEG_INFINITY, pts[0]);
     for q in pts {
-        let mut f = f64::INFINITY;
-        for o in pr.obstacles.iter().filter(|o| o.net != Some(net)) {
-            let d = if point_in_poly(q, &o.poly) { f64::NEG_INFINITY } else { poly_dist(q, &o.poly) - o.clear.max(s) - packer.eps() };
-            f = f.min(d);
-        }
-        for k in &pr.no_via {
-            let d = if point_in_poly(q, k) { f64::NEG_INFINITY } else { poly_dist(q, k) - packer.eps() };
-            f = f.min(d);
-        }
+        let f = point_free(pr, packer, q, net, s);
         if f >= r {
             return (q, true);
         }
@@ -184,6 +176,23 @@ pub fn via_point(pr: &Projection, packer: &Packer, t: usize, net: i32, r: f64, s
         }
     }
     (best.1, false)
+}
+
+/// The free radius (nm) of a via centre `q` of `net` at clearance `s` against the static board,
+/// as [`via_point`] measures it: every other net's obstacle at the larger of `s` and its own
+/// clearance, every keepout that forbids vias touching (negative infinity inside either).
+/// O(obstacles).
+pub fn point_free(pr: &Projection, packer: &Packer, q: Vec2, net: i32, s: f64) -> f64 {
+    let mut f = f64::INFINITY;
+    for o in pr.obstacles.iter().filter(|o| o.net != Some(net)) {
+        let d = if point_in_poly(q, &o.poly) { f64::NEG_INFINITY } else { poly_dist(q, &o.poly) - o.clear.max(s) - packer.eps() };
+        f = f.min(d);
+    }
+    for k in &pr.no_via {
+        let d = if point_in_poly(q, k) { f64::NEG_INFINITY } else { poly_dist(q, k) - packer.eps() };
+        f = f.min(d);
+    }
+    f
 }
 
 /// What [`stretches`] returns: the stretches, the planned vias (wire, disc, has a site), the
@@ -264,9 +273,22 @@ pub fn wire_stretches(st: &State, packer: &Packer, w: WireId, ev: &[LEv], via_k:
     }
     // Events in traversal order: (traversal, 0 = turn / 1 = via, point, via index).
     let mut evs: Vec<(usize, u8, Vec2, usize)> = wi.turns.iter().map(|&(k, v)| (k, 0u8, pr.pos[v], 0)).collect();
+    // 5.2: a via of an interval with no traversal strictly between its events (`[vias]
+    // between_crossings`) stands at its end site, on its own side of the event
+    // ([`super::refine::end_site`]), when it has one in its traversal.
+    let between = if packer.via_between { super::refine::via_ranges(ev, true).1 } else { Vec::new() };
+    let changes_ev: Vec<(LEv, LEv)> = ev.windows(2).filter(|x| x[0].2 != x[1].2).map(|x| (x[0], x[1])).collect();
     for (i, &k) in ks.iter().enumerate() {
         let k = k.min(n);
-        let (pt, ok) = site(wi.tris[k], wi.net, r, wi.s);
+        let end = (between.get(i) == Some(&false) && r > 0.0)
+            .then(|| changes_ev.get(i))
+            .flatten()
+            .and_then(|&(a, b)| super::refine::end_site(st, w, a, b, &|t, q| pr.inradius(t) >= r + wi.s && point_free(pr, packer, q, wi.net, wi.s) >= r))
+            .filter(|&(ke, _)| ke == k);
+        let (pt, ok) = match end {
+            Some((_, c)) => (c, true),
+            None => site(wi.tris[k], wi.net, r, wi.s),
+        };
         vias.push((ViaFeat { at: pt, r, net: wi.net, clear: wi.s }, ok));
         terms.push(pt);
         evs.push((k, 1, pt, i));

@@ -184,6 +184,21 @@ impl Topo {
         let ctx = self.ctx(ci);
         super::factors::events(st, &mv).iter().map(|e| reg.price(e, &ctx)).sum()
     }
+    /// Debug: [`Topo::path_price`] per factor of the alive wire `w` where it lies, summed by name.
+    pub fn wire_price_by(&self, st: &mut State, w: WireId, ci: usize, reg: &Registry) -> std::collections::BTreeMap<&'static str, f64> {
+        let path = st.detach(w);
+        let wire = st.wires[w].clone();
+        let mv = Move::Insert { wire: &wire, path: &path, tris: &wire.tris, scale: self.scale(ci) };
+        let ctx = self.ctx(ci);
+        let mut m = std::collections::BTreeMap::new();
+        for e in super::factors::events(st, &mv) {
+            for (n, v) in reg.price_by(&e, &ctx) {
+                *m.entry(n).or_insert(0.0) += v;
+            }
+        }
+        st.reattach(w, &path);
+        m
+    }
     /// What `w` could gain at most by moving: its price minus the price of its straight pad-to-pad
     /// length (the length factor alone). O(path x traversals).
     pub fn potential(&self, st: &mut State, w: WireId) -> f64 {
