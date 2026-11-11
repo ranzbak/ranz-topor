@@ -63,6 +63,25 @@ def test_short_cascades_into_dangling(tmp_path):
     assert [i["rule"] for i in r] == ["shorting", "shorting", "dangling_track"], r
     alone = cleanup_check.cleanup_items(pcb, opts={k: k == "unconnected" for k in cleanup_check.OPTIONS})
     assert alone == []
+    ds = cleanup_check.check(pcb)["dangling_split"]
+    assert (ds["independent"], ds["cascade"], ds["cascade_after"]) == (0, 1, {"shorting": 2}), ds
+
+
+@pytest.mark.parametrize("end, dangles", [
+    ((27.0, 10.0), False),    # the pad centre (anchor)
+    ((26.7, 10.3), False),    # off-centre, inside the pad
+    ((26.4, 10.0), False),    # 0.1 mm beyond the pad's left edge (x 26.5) < width/2 0.125 mm: copper overlap counts
+    ((26.2, 10.0), True),     # 0.3 mm beyond the edge > width/2: the copper does not touch the pad
+])
+def test_pad_end_rule_is_copper_reach_not_the_anchor(tmp_path, end, dangles):
+    """KiCad's end rule (CONNECTIVITY_DATA::TestTrackEndpointDangling, KiCad 10.0 @ 86a7a3f): a track end is joined
+    to a pad when the pad's copper lies within width/2 of the end point; the pad's anchor (centre) plays no part,
+    except that an item reaching *both* ends of one track counts for the end nearer to it. So a track ending off the
+    pad centre is not what "Delete tracks unconnected at one end" removes (qmtech, 2026-11-11). Pad B1 of the base
+    board: 1.0 x 1.0 mm at (27, 10)."""
+    pcb = _board(tmp_path, lambda f: (_track(f, "SIG", (3, 10), (20, 10)), _track(f, "SIG", (20, 10), end)))
+    alone = cleanup_check.cleanup_items(pcb, opts={k: k == "unconnected" for k in cleanup_check.OPTIONS})
+    assert bool(alone) == dangles, alone
 
 
 def test_short_segment_next_to_a_tee_dangles(tmp_path):
