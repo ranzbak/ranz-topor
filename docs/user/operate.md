@@ -9,7 +9,8 @@ Contents: [Quick start](#quick-start) · [Where the settings come from](#where-t
 [Scope by selection](#scope-by-selection) · [Progress and Cancel](#progress-and-cancel) ·
 [Findings after routing](#findings-after-routing) ·
 [Preview](#preview) · [Accept, Reject and undo](#accept-reject-and-undo) · [Report folder](#report-folder) ·
-[Net priorities](#net-priorities) · [Keyboard](#keyboard) · [Limitations](#limitations)
+[Net priorities](#net-priorities) · [Keyboard](#keyboard) · [Limitations](#limitations) ·
+[License and warranty](#license-and-warranty)
 
 ## Quick start
 
@@ -702,3 +703,11 @@ Measured on six snapshot boards (offline tests against KiCad's own polygons); th
 **Not yet**: same-net T-junctions, via relaxation and per-layer costs
 (0.5.0); free via placement and the 45° mode (backlog). Plugin calls that need a running KiCad are listed
 as UNVERIFIED in [gui-test-checklist.md](gui-test-checklist.md) until that checklist has been run.
+
+## License and warranty
+
+topor is free software under the GNU General Public License, version 2 or (at your option) any later
+version ([LICENSE](../../LICENSE)). It is distributed in the hope that it will be useful, but **WITHOUT ANY
+WARRANTY**; without even the implied warranty of **MERCHANTABILITY** or **FITNESS FOR A PARTICULAR PURPOSE**
+(sections 11 and 12 of the license). The copper topor draws is not guaranteed to be correct, complete or
+manufacturable: run KiCad's DRC and review the board yourself before you order it.

@@ -418,3 +418,19 @@ topor is free software, licensed under the **GNU General Public License, version
 option) any later version** (SPDX: `GPL-2.0-or-later`); see [LICENSE](LICENSE).
 Copyright (C) 2026 Paul Honig and contributors. This license allows reusing code from other GPL
 routers such as the gEDA PCB toporouter (GPL-2.0-or-later); keep their copyright notices when doing so.
+
+### No warranty
+
+This program is free software; you can redistribute it and/or modify it under the terms of the GNU
+General Public License as published by the Free Software Foundation; either version 2 of the License,
+or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful, but **WITHOUT ANY WARRANTY**; without
+even the implied warranty of **MERCHANTABILITY** or **FITNESS FOR A PARTICULAR PURPOSE**. See the GNU
+General Public License for more details (sections 11 and 12 of [LICENSE](LICENSE)).
+
+You should have received a copy of the GNU General Public License along with this program; if not, see
+<https://www.gnu.org/licenses/>.
+
+In particular: the copper topor produces is not guaranteed to be correct, complete or manufacturable.
+Check every routed board with KiCad's DRC and your own review before you send it to a fab.

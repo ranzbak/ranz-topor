@@ -355,6 +355,9 @@ def summary_parts(report) -> tuple[str, list, list]:
 
 #: the name on the start-up splash (user 2026-11-08)
 SPLASH_NAME = "Ranz Topor"
+#: the short notice GPL-2.0 ("How to Apply", interactive programs) asks for at start-up
+SPLASH_NOTICE = ("Copyright (C) 2026 Paul Honig and contributors\n"
+                 "Free software under GPL-2.0-or-later; comes with ABSOLUTELY NO WARRANTY")
 #: logo size on the splash (``topor-{light,dark}-128.png``, tools/make_icons.py)
 LOGO_SIZE = 128
 
@@ -405,6 +408,11 @@ class SplashWindow(wx.Frame):
         self.status = wx.StaticText(panel, label=status, name="status", style=wx.ST_NO_AUTORESIZE | wx.ALIGN_CENTER_HORIZONTAL)
         self.status.SetForegroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT))
         col.Add(self.status, 0, wx.EXPAND)
+        col.AddSpacer(self.FromDIP(16))
+        notice = wx.StaticText(panel, label=SPLASH_NOTICE, name="notice", style=wx.ALIGN_CENTER_HORIZONTAL)
+        notice.SetFont(self.GetFont().Scaled(0.85))
+        notice.SetForegroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT))
+        col.Add(notice, 0, wx.ALIGN_CENTER)
         outer = wx.BoxSizer(wx.VERTICAL)
         outer.Add(col, 1, wx.EXPAND | wx.ALL, self.FromDIP(28))
         panel.SetSizer(outer)
