@@ -34,6 +34,7 @@ use super::demand::{need_in, Bound, Item};
 use super::draw::poly_dist;
 use super::pack::{funnel, tri_site_points, Packer};
 use super::refine::{mid_k, pass_layers_at, LEv};
+use super::sheet::SegScratch;
 use super::sheet::{JunctionFeat, LayerSheet, Norm, SheetInput, SheetOpts, SheetStats, ViaFeat};
 use super::state::{point_in_poly, Projection, State, VertId, VertKind, WireId, NO_OBS};
 use crate::geom::Vec2;
@@ -511,8 +512,20 @@ fn flows(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], pr: &Projection, st: 
 /// own vias is skipped (the via disc, an item of its own, covers it). O(band segments x cuts in
 /// their grid cells + wraps x cuts at the wrapped vertex).
 pub fn flow_items(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], via_r: f64) -> BTreeMap<usize, Vec<FlowItem>> {
+    let mut out = Vec::new();
+    flow_items_into(sh, sts, mine, via_r, &mut SegScratch::default(), &mut out);
     let mut per: BTreeMap<usize, Vec<FlowItem>> = BTreeMap::new();
-    let mut buf: Vec<u32> = Vec::new();
+    for (ci, x) in out {
+        per.entry(ci).or_default().push(x);
+    }
+    per
+}
+
+/// [`flow_items`] as `(cut, item)` pairs by ascending cut, the items of one cut in the order
+/// [`flow_items`] gives them (stretch, band segment, then wraps), with the caller's scratch: the
+/// planner's per-edit walk (shopping list 3.1). O(band segments x cuts along them + wraps).
+pub fn flow_items_into(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], via_r: f64, sc: &mut SegScratch, out: &mut Vec<(usize, FlowItem)>) {
+    out.clear();
     for &si in mine {
         let s = &sts[si];
         if s.band.len() < 2 {
@@ -521,30 +534,39 @@ pub fn flow_items(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], via_r: f64) 
         let ends = [s.band[0], s.band[s.band.len() - 1]];
         for k in 0..s.band.len() - 1 {
             let (a, b) = (s.band[k], s.band[k + 1]);
-            let lo = Vec2 { x: a.x.min(b.x), y: a.y.min(b.y) };
-            let hi = Vec2 { x: a.x.max(b.x), y: a.y.max(b.y) };
-            sh.cut_grid.query(lo, hi, &mut buf);
+            // A segment crosses a cut at most once, so the order of the candidates does not
+            // matter here (the stable sort below groups them by cut).
+            sc.candidates(&sh.cut_grid, sh.cuts.len(), a, b);
             let d = b - a;
-            for &ci in buf.iter() {
+            let dl = d.len();
+            for &ci in sc.out.iter() {
                 let c = &sh.cuts[ci as usize];
                 let e = c.q - c.p;
                 let den = d.cross(e);
-                if den.abs() < 1e-9 * d.len() * e.len() {
-                    continue;
-                }
-                // a + s d = p + t e
+                // a + s d = p + t e. The tests of `flow_items` in a cheaper order (the ones
+                // without a square root first); the same ones, so the same outcome.
                 let w0 = c.p - a;
                 let sp = w0.cross(e) / den;
+                if !(0.0..=1.0).contains(&sp) {
+                    continue;
+                }
                 let tc = w0.cross(d) / den;
-                let tol = 1.0 / e.len().max(1.0);
-                if !(0.0..=1.0).contains(&sp) || tc <= tol || tc >= 1.0 - tol {
+                if !(tc > 0.0 && tc < 1.0) {
+                    continue;
+                }
+                let el = e.len();
+                if den.abs() < 1e-9 * dl * el {
+                    continue;
+                }
+                let tol = 1.0 / el.max(1.0);
+                if tc <= tol || tc >= 1.0 - tol {
                     continue;
                 }
                 let x = a + d * sp;
                 if via_r > 0.0 && (0..2).any(|i| s.via_ends[i] && (x - ends[i]).len() < via_r) {
                     continue;
                 }
-                per.entry(ci as usize).or_default().push(FlowItem { stretch: si, t: tc, kind: 0, w: s.width_at(x) });
+                out.push((ci as usize, FlowItem { stretch: si, t: tc, kind: 0, w: s.width_at(x) }));
             }
         }
         // Wraps at the band's interior corners.
@@ -556,12 +578,12 @@ pub fn flow_items(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], via_r: f64) 
                 let at_p = c.vp == v;
                 let u = if at_p { c.q - c.p } else { c.p - c.q };
                 if in_wedge(din, dout, left, u) {
-                    per.entry(ci).or_default().push(FlowItem { stretch: si, t: if at_p { 0.0 } else { 1.0 }, kind: if at_p { 1 } else { 2 }, w: s.width_at(s.band[k]) });
+                    out.push((ci, FlowItem { stretch: si, t: if at_p { 0.0 } else { 1.0 }, kind: if at_p { 1 } else { 2 }, w: s.width_at(s.band[k]) }));
                 }
             }
         }
     }
-    per
+    out.sort_by_key(|x| x.0);
 }
 
 /// Need of a cut's items (ordered from `p` to `q`) under both mixed-clearance rules and at the

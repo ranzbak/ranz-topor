@@ -529,9 +529,28 @@ impl EditWire {
 /// A cut with items: (layer, ends in nm, capacity, need, slack).
 type CutKey = (usize, i64, i64, i64, i64, f64, f64, f64);
 
+/// One item of a cut, bit for bit: (wire, traversal, kind, net, position, width, clearance,
+/// floor).
+type ItemBits = (usize, usize, u8, i32, u64, u64, u64, u64);
+
+/// Every cut's items as (layer, cut, items in their order along the cut).
+fn all_items(cp: &CutPrice, sh: &[LayerSheet]) -> Vec<(usize, usize, Vec<ItemBits>)> {
+    let mut out = Vec::new();
+    for (l, s) in sh.iter().enumerate() {
+        for ci in 0..s.cuts.len() {
+            let v: Vec<ItemBits> = cp.cut_items(l, ci).iter().map(|x| (x.wire, x.k, x.kind, x.it.net, x.t.to_bits(), x.it.w.to_bits(), x.it.s.to_bits(), x.floor.to_bits())).collect();
+            if !v.is_empty() {
+                out.push((l, ci, v));
+            }
+        }
+    }
+    out
+}
+
 /// The totals of a fresh model holding `ws` (the full recompute): total, over-full count and
 /// every cut's (capacity, need, slack) by its ends.
-fn full_price(pr: &topor_engine::topo::state::Projection, sh: &std::rc::Rc<Vec<LayerSheet>>, o: CutOpts, ws: &[EditWire], via_r: f64) -> (f64, usize, Vec<CutKey>) {
+#[allow(clippy::type_complexity)]
+fn full_price(pr: &topor_engine::topo::state::Projection, sh: &std::rc::Rc<Vec<LayerSheet>>, o: CutOpts, ws: &[EditWire], via_r: f64) -> (f64, usize, Vec<CutKey>, Vec<(usize, usize, Vec<ItemBits>)>) {
     let mut cp = CutPrice::new(pr, sh.clone(), o, 1.0, ws.len());
     for (w, x) in ws.iter().enumerate().filter(|(_, x)| x.alive) {
         let (mut r, v) = x.runs(w, via_r);
@@ -539,7 +558,7 @@ fn full_price(pr: &topor_engine::topo::state::Projection, sh: &std::rc::Rc<Vec<L
     }
     let mut rows: Vec<_> = cp.report().into_iter().map(|r| (r.layer, r.p.x as i64, r.p.y as i64, r.q.x as i64, r.q.y as i64, r.cap, r.need, r.slack)).collect();
     rows.sort_by_key(|a| (a.0, a.1, a.2, a.3, a.4));
-    (cp.total(), cp.overfull(), rows)
+    (cp.total(), cp.overfull(), rows, all_items(&cp, sh))
 }
 
 #[test]
@@ -568,12 +587,13 @@ fn incremental_edits_price_as_a_full_recompute() {
             alive: false,
         })
         .collect();
-    let (mut checked, mut reused, mut computed) = (0, 0, 0);
+    let (mut checked, mut reused, mut computed, mut skipped) = (0, 0, 0, 0);
     for seed in 1..=6u64 {
         let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ seed);
         let mut ws = base.clone();
         let mut cp = CutPrice::new(pr, sh.clone(), o, 1.0, ws.len());
         let mut prev = 0.0;
+        let mut prev_rows: Vec<CutKey> = Vec::new();
         for step in 0..60 {
             let w = rng.below(ws.len());
             let mut x = ws[w].clone();
@@ -623,7 +643,7 @@ fn incremental_edits_price_as_a_full_recompute() {
             };
             let mut after = ws.clone();
             after[w] = x;
-            let (t_full, over_full, rows) = full_price(pr, &sh, o, &after, via_r);
+            let (t_full, over_full, rows, items_full) = full_price(pr, &sh, o, &after, via_r);
             let tol = 1e-6 * t_full.abs().max(1.0);
             assert!((cp.total() - t_full).abs() <= tol, "seed {seed} step {step}: total {} vs full {}", cp.total(), t_full);
             assert!((d - (t_full - prev)).abs() <= tol, "seed {seed} step {step}: change {d} vs {}", t_full - prev);
@@ -635,21 +655,34 @@ fn incremental_edits_price_as_a_full_recompute() {
                 assert_eq!((a.0, a.1, a.2, a.3, a.4), (b.0, b.1, b.2, b.3, b.4));
                 assert!((a.6 - b.6).abs() < 1e-6 && (a.7 - b.7).abs() < 1e-6, "seed {seed} step {step}: cut need/slack {a:?} vs {b:?}");
             }
+            // The items themselves (wire, traversal) per cut, and the strict worse test of the
+            // move against the slacks before it.
+            assert!(all_items(&cp, &sh) == items_full, "seed {seed} step {step}: cut items differ");
+            if undo {
+                let before: std::collections::HashMap<(usize, i64, i64, i64, i64), f64> = prev_rows.iter().map(|r| ((r.0, r.1, r.2, r.3, r.4), r.7)).collect();
+                let worse = rows.iter().any(|r| r.7 < -1.0 && r.7 < before.get(&(r.0, r.1, r.2, r.3, r.4)).copied().unwrap_or(f64::INFINITY) - 1.0);
+                assert_eq!(cp.worse_somewhere(), worse, "seed {seed} step {step}: worse_somewhere");
+            }
             checked += 1;
             if undo {
                 cp.rollback();
-                let (t0, o0, _) = full_price(pr, &sh, o, &ws, via_r);
+                let (t0, o0, _, it0) = full_price(pr, &sh, o, &ws, via_r);
                 assert!((cp.total() - t0).abs() <= 1e-6 * t0.abs().max(1.0) && cp.overfull() == o0, "seed {seed} step {step}: rollback");
+                assert!(all_items(&cp, &sh) == it0, "seed {seed} step {step}: rollback items");
                 prev = t0;
             } else {
                 ws = after;
                 prev = t_full;
+                prev_rows = rows;
             }
         }
         reused += cp.parts.1;
         computed += cp.parts.0;
+        skipped += cp.skipped;
     }
-    eprintln!("incremental edits: {checked} edits checked; parts computed {computed}, reused {reused}");
+    eprintln!("incremental edits: {checked} edits checked; parts computed {computed}, reused {reused}; cut pricings skipped {skipped}");
+    // Via moves re-pull bands whose crossings mostly keep their place: the shortcut is taken.
+    assert!(skipped > 0, "no cut pricing was skipped");
     // Inserts compute every piece; relabels and via moves keep the pieces they do not touch.
     assert!(reused * 4 > computed, "the edits reused almost nothing: {reused} of {}", reused + computed);
 }
