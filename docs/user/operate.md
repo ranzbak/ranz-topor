@@ -28,18 +28,18 @@ Contents: [Quick start](#quick-start) · [Where the settings come from](#where-t
 
 Three sources, in this order (46 §1): **KiCad's board setup** for everything KiCad already knows
 (rules, widths, via sizes, net classes, layer types, locks) → **`topor.toml`** next to the `.kicad_pro`
-for topor's own choices → topor's built-in defaults. Every finding names the place to change. One thing is
-not yours to set in 0.4.0: KiCad's design-rule minimums below topor's fab profile are raised to it, and the
-router may add smaller fab-profile vias ([Fab minimums and via sizes](#fab-minimums-and-via-sizes)).
+for topor's own choices → topor's built-in defaults. Every finding names the place to change. The design rules
+are your board's own ([Design rules and via sizes](#design-rules-and-via-sizes)); a value the board does not set
+takes a reported fallback.
 
 ### Settings topor reads from KiCad
 
 | What | Where in KiCad |
 |---|---|
-| Clearance; minimum via, hole and annular ring | KiCad → File → Board Setup → Design Rules → Constraints (values below the [fab floors](#fab-minimums-and-via-sizes) are raised unless `[rules] fab_profile = "board"`) |
+| Clearance; minimum via, hole and annular ring | KiCad → File → Board Setup → Design Rules → Constraints (used as set; a missing value takes a reported [fallback](#design-rules-and-via-sizes)) |
 | Copper-to-edge clearance | KiCad → File → Board Setup → Design Rules → Constraints → Copper to Edge Clearance |
 | Track widths | KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Track Widths and netclass track width |
-| Via sizes | KiCad → File → Board Setup → Design Rules → Net Classes (via size / hole): each net routes with its net class via, plus smaller [fab-profile vias](#fab-minimums-and-via-sizes) where space requires. Pre-defined Sizes → Vias are **not** routed with in 0.4.0; they only stop [`VIA_NOT_SET_UP`](troubleshoot.md#via_not_set_up), which uses `[vias] fallback_diameter_mm` / `fallback_drill_mm` when nothing is set up |
+| Via sizes | KiCad → File → Board Setup → Design Rules → Net Classes (via size / hole): each net routes with its net class via, plus the smaller [pre-defined vias](#design-rules-and-via-sizes) (KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias) where space requires; with none of them set up [`VIA_NOT_SET_UP`](troubleshoot.md#via_not_set_up) uses `[vias] fallback_diameter_mm` / `fallback_drill_mm` |
 | Net classes and net assignments; power net classes; `topor_p1`..`topor_p3` priority classes | KiCad → File → Board Setup → Design Rules → Net Classes |
 | Custom rules (`.kicad_dru`): clearance, edge / hole clearance, track width, via size; `disallow track/via` areas become keepouts, track-angle rules are refused ([Custom design rules](#custom-design-rules)) | KiCad → File → Board Setup → Design Rules → Custom Rules |
 | Layer types (signal / power / mixed / jumper) → plane or routed layer | KiCad → File → Board Setup → Board Editor Layers |
@@ -52,50 +52,63 @@ router may add smaller fab-profile vias ([Fab minimums and via sizes](#fab-minim
 Everything is read from a copy of the board as it is in the editor **right now**, including unsaved
 edits (topor saves that copy itself; your file on disk is not touched).
 
-### Fab minimums and via sizes
+### Design rules and via sizes
 
-topor's rule resolver (`toporlib/rules.py`) treats a built-in fab profile, **JLCPCB 1 oz** (`JLCPCB_1OZ`), as
-**floors**: every KiCad design-rule minimum below the profile's value is raised to it; values above it are used
-as they are. This is the default, `[rules] fab_profile = "jlcpcb_1oz"`. **`[rules] fab_profile = "board"`**
-turns the profile off: Board Setup, the net classes and the custom rules are then the only authority, exactly as
-KiCad's DRC judges them (a minimum of 0 means no minimum, a custom rule's clearance or width is used as given,
-also below the Board Setup minimum and inside a courtyard / rule area, and only the net class vias and KiCad's
-pre-defined vias are used, not the profile's drill list below). Use it when your fab makes finer copper than the
-profile and your Board Setup says so (e.g. a BGA neck-down rule with 0.1 mm clearance). KiCad's DRC judges the
-result with your own rules either way, so with the default the floors only make topor more conservative than your
-board needs.
+**Your board's KiCad configuration is the authority** (`toporlib/rules.py`, default `[rules] fab_profile =
+"board"`): Board Setup → Design Rules → Constraints, the net classes, the pre-defined vias and track widths and
+the custom rules (`.kicad_dru`) are used exactly as KiCad's DRC uses them. A value the board sets is never
+raised: a minimum of 0 means no minimum (as in KiCad), and a custom rule's clearance or width is used as given,
+also below the Board Setup minimum and inside a courtyard / rule area (KiCad: the matching custom rule wins over
+the board minimum). KiCad writes every Board Setup value into the `.kicad_pro` when you save, so on a board saved
+by KiCad 7 or later nothing below applies.
 
-| KiCad rule (`.kicad_pro` `board.design_settings.rules`) | topor floor |
-|---|---|
-| Minimum clearance (`min_clearance`) | 0.15 mm |
-| Minimum track width (`min_track_width`) | 0.2 mm |
-| Minimum via diameter (`min_via_diameter`) | 0.45 mm |
-| Minimum through hole (`min_through_hole_diameter`) → minimum via drill | 0.25 mm |
-| Minimum annular width (`min_via_annular_width`) | 0.1 mm (2 copper layers), 0.075 mm (4 or more) |
-| Copper to hole clearance (`min_hole_clearance`) | 0.35 mm |
-| Hole to hole clearance (`min_hole_to_hole`) | 0.25 mm |
-| Copper to edge clearance (`min_copper_edge_clearance`) | 0.2 mm |
+**Rule fallbacks.** Only a value the board does not provide at all — a key missing from the `.kicad_pro`
+(a project written by an older KiCad or by a script, or no `.kicad_pro`), or a net class Default without a track
+width / via size — takes a fallback: the JLCPCB 1 oz value, raised to KiCad's own value for the missing setting
+where that is stricter (KiCad's DRC judges the result with its own value). Every fallback used is a
+[`RULE_FALLBACK`](troubleshoot.md#rule_fallback) finding and a line in **report.md → Settings → Rule fallbacks**
+naming the value used and the KiCad setting to fill in; set it there and save, and the fallback is gone.
 
-- A rule left at 0 (unset) silently takes the floor; a rule set below the floor is raised and listed. The
-  raised ones are in the run report: **report.md → Settings → Fab floors raised** (`name design → floor mm`).
-  A custom rule's value below the floor (a net's width or clearance, the clearance inside a courtyard / rule
-  area) is raised too and named in [`CUSTOM_RULE_LIMITED`](troubleshoot.md#custom_rule_limited).
-- Per net, the clearance and the track width are at least these minimums (a net class clearance or width below
-  them is raised too), and the net's via is its net class *Via Size* / *Via Hole* (a class without them: the
-  Default class, else KiCad's built-in 0.6 / 0.3 mm), raised to the minimum via diameter / drill.
-- **Via sizes the router uses** (`engine/src/vias.rs`, `via_sizes`): for each net first its own via, then,
-  where space requires, smaller vias from the profile's drill list **0.25, 0.3, 0.4, 0.5 mm**: every such drill
-  that is at least the (floored) minimum via drill and smaller than the net's drill, with diameter = drill +
-  2 × minimum annular width (at least the minimum via diameter), kept only when that diameter is smaller than
-  the net's via. Example: wiccon-2023 (factory 0.8 / 0.4 mm net class, minimum via drill 0.3 mm, annular
-  0.1 mm) may get 0.8 / 0.4 and 0.5 / 0.3 mm vias.
-- KiCad's **pre-defined vias** (KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias,
-  `via_dimensions` in the `.kicad_pro`) **are used** for routing: with `[vias] size = "net_class"` the net's
-  class via comes first, then every pre-defined via (and every profile via above) that is smaller than it and
-  meets the minimums, largest first (`engine/src/vias.rs` `sizes_for`). They also decide whether
+| Missing setting (`.kicad_pro` key) | JLCPCB 1 oz | KiCad's own value | fallback used | set it in KiCad → File → Board Setup → Design Rules → |
+|---|---|---|---|---|
+| Minimum clearance (`min_clearance`) | 0.15 mm | 0 (none) | 0.15 mm | Constraints → Minimum clearance |
+| Minimum track width (`min_track_width`) | 0.2 mm | 0.2 mm | 0.2 mm | Constraints → Minimum track width |
+| Minimum via diameter (`min_via_diameter`) | 0.45 mm | 0.5 mm | 0.5 mm | Constraints → Minimum via diameter |
+| Minimum through hole (`min_through_hole_diameter`) | 0.25 mm | 0.3 mm | 0.3 mm | Constraints → Minimum through hole |
+| Minimum annular width (`min_via_annular_width`) | 0.1 mm | 0.1 mm | 0.1 mm | Constraints → Minimum annular width |
+| Hole clearance (`min_hole_clearance`) | 0.35 mm (component holes), 0.2 mm (vias) | 0.25 mm | 0.35 mm, 0.25 mm for the router's vias | Constraints → Hole clearance |
+| Hole to hole (`min_hole_to_hole`) | 0.25 mm | 0.25 mm | 0.25 mm | Constraints → Hole to hole clearance |
+| Copper to edge (`min_copper_edge_clearance`) | 0.2 mm | 0.5 mm | 0.5 mm | Constraints → Copper to edge clearance |
+| Minimum connection width (`min_connection`) | — | 0 (none) | 0 (none) | Constraints → Minimum connection width |
+| Arc approximation (`max_error`) | — | 0.005 mm | 0.005 mm | Constraints → Maximum allowed deviation |
+| Net class Default clearance | 0.15 mm | 0.2 mm | 0.2 mm | Net Classes → Default → Clearance |
+| Net class Default track width (missing or 0) | 0.2 mm | 0.2 mm | 0.2 mm | Net Classes → Default → Track Width |
+| Net class Default via size / hole (missing or 0) | 0.6 / 0.3 mm | 0.6 / 0.3 mm | 0.6 / 0.3 mm | Net Classes → Default → Via Size / Via Hole |
+
+"KiCad's own value" is what KiCad itself uses when the key is missing (the Board Setup built-ins of
+`board_design_settings.cpp`, the net class built-ins of `netclass.cpp`). A net class other than Default that
+leaves a value empty takes it from the next class of the net, then from Default, as KiCad composes net
+classes — that is not a fallback.
+
+**Opt-in floor mode**, `[rules] fab_profile = "jlcpcb_1oz"` (off by default): the same rules, but every value
+below the JLCPCB 1 oz manufacturing minimum is raised to it — minimum clearance 0.15 mm, track width 0.2 mm,
+via diameter 0.45 mm, via drill 0.25 mm, annular width 0.1 mm (2 copper layers) / 0.075 mm (4 or more), hole
+clearance 0.35 mm (0.2 mm for the router's vias), hole to hole 0.25 mm, copper to edge 0.2 mm, also a custom
+rule's width or clearance (named in [`CUSTOM_RULE_LIMITED`](troubleshoot.md#custom_rule_limited)). The raised
+values are in **report.md → Settings → Fab floors raised** (`name design → floor mm`). Use it only when your
+Board Setup is looser than what you will order; KiCad's DRC still judges the result with your board's rules.
+
+- Per net, the clearance and the track width are the net class values (at least the Board Setup minimums), and
+  the net's via is its net class *Via Size* / *Via Hole* (a class without them: the next class, then Default),
+  at least the minimum via diameter / drill.
+- **Via sizes the router uses** (`engine/src/vias.rs`, `via_sizes`): KiCad's **pre-defined vias** (KiCad →
+  File → Board Setup → Design Rules → Pre-defined Sizes → Vias, `via_dimensions` in the `.kicad_pro`) **are
+  used** for routing: with `[vias] size = "net_class"` the net's class via comes first, then every pre-defined
+  via that is smaller than it and meets the minimums, largest first (`sizes_for`). There is no other via list:
+  topor never places a via size your board does not define. The pre-defined vias also decide whether
   [`VIA_NOT_SET_UP`](troubleshoot.md#via_not_set_up) fires: no pre-defined via and only KiCad's factory
   0.8 / 0.4 mm net class via → the nets with that via get `[vias] fallback_diameter_mm` /
-  `fallback_drill_mm` (0.8 / 0.4 mm by default) as their own via, plus the smaller profile vias above.
+  `fallback_drill_mm` (0.8 / 0.4 mm by default) as their own via.
 
 ### topor.toml
 
@@ -107,7 +120,7 @@ type, default, unit, range and the KiCad place that influences it.
 |---|---|
 | `[run]` | time limit, threads, partial routes, existing-copper policy, locked items, selection mode, unrouted-only, pre-existing DRC, KiCad cleanup / teardrops after Accept |
 | `[nets]` | do-not-touch nets, power / ground name patterns, priorities, pads to ignore |
-| `[rules]` | design-rule authority: KiCad's rules with the JLCPCB 1 oz minimums as floors (default) or exactly the board's own rules (`fab_profile = "board"`) |
+| `[rules]` | design-rule authority: exactly the board's own KiCad rules (default, `fab_profile = "board"`) or, opt-in, with the JLCPCB 1 oz minimums as floors (`fab_profile = "jlcpcb_1oz"`) |
 | `[vias]` | via cost and count, via reduction, fallback via size |
 | `[layers]` | the role of each copper layer (`F.Cu = "signal"`, `In1.Cu = "gnd"`, …) |
 | `[planes]` | whether signal copper may run on plane layers (gnd / pwr roles) and at what price |
@@ -142,7 +155,7 @@ Honoured constraints and how the router uses them:
 | `edge_clearance`, `hole_clearance` | board-wide copper-to-edge / hole clearance (the largest value any routed net gets); a track into a pad that itself lies within the edge clearance ends inside that pad off its centre, where the track keeps the clearance (the pad's own violation is pre-existing) |
 | `track_width` | per-net width: `opt` is the target, `min` / `max` bound it (`min` is also the floor a necked pad exit may not go below) |
 | `via_diameter`, `hole_size` | per-net via size (`opt`, raised to `min`) |
-| `disallow track` / `via` with `A.insideArea('name')` | keepout ([Fab minimums and via sizes](#fab-minimums-and-via-sizes) floors do not apply) |
+| `disallow track` / `via` with `A.insideArea('name')` | keepout (the opt-in [fab floors](#design-rules-and-via-sizes) do not apply) |
 | `diff_pair_gap`, `diff_pair_uncoupled`, `skew` | [Differential pairs](#differential-pairs) |
 
 Conditions topor evaluates: `A.NetClass` / `A.NetName` (`==`, `!=`, wildcards, case-insensitive, composite
@@ -166,8 +179,8 @@ Where topor's model is coarser than the rule, it errs on the safe side and says 
 
 Rules with `(severity ignore)` are skipped: KiCad does not check them, so topor keeps the net class values.
 Rules for silkscreen, courtyards, mask, paste and zone fills (`B.Type == 'Zone'`) do not change the routing.
-The [fab floors](#fab-minimums-and-via-sizes) apply to custom values too: a 0.1 mm rule below the JLCPCB
-0.15 mm floor is raised to it (the finding says so). [`CUSTOM_RULES`](troubleshoot.md#custom_rules) lists
+A custom value is used as given, also below the Board Setup minimum; only the opt-in
+[fab floors](#design-rules-and-via-sizes) raise it (a 0.1 mm rule below the JLCPCB 0.15 mm floor, the finding says so). [`CUSTOM_RULES`](troubleshoot.md#custom_rules) lists
 which rule is used how.
 
 ## First run
@@ -590,8 +603,7 @@ Topor routes differential pairs as coupled pairs (`[diffpair] enabled = true`, t
   `CLK_P1`, `USB+` with `USB-`, `USB+` with `USB_N` does not). Extra pairs: `[diffpair] pairs`. The pairs, with
   their width and gap and where those came from, are listed in the run log.
 - **Sizes.** Width = the net class's DP width (KiCad → File → Board Setup → Design Rules → Net Classes), gap = its
-  DP gap or a custom rule `diff_pair_gap (opt ..)`, both raised to the board minimums (topor's, after the fab
-  floors: see Fab minimums). Between the two tracks of a pair the gap is the clearance, as in KiCad. Via pairs:
+  DP gap or a custom rule `diff_pair_gap (opt ..)`, both raised to the board minimums (see Design rules and via sizes). Between the two tracks of a pair the gap is the clearance, as in KiCad. Via pairs:
   two vias side by side, edge gap = the pair gap raised to the hole-to-hole and copper-to-hole rules.
 - **How.** A pair connection is planned as one wire as wide as both tracks and the gap: it is placed early (by its
   width), crosses other wires once and changes layer with one via pair, whose site is checked as the disc around
@@ -764,8 +776,7 @@ Measured on six snapshot boards (offline tests against KiCad's own polygons); th
 - **Via sizes**: when KiCad has no via sizes set up ([`VIA_NOT_SET_UP`](troubleshoot.md#via_not_set_up)),
   topor uses `[vias] fallback_diameter_mm` / `[vias] fallback_drill_mm` (0.8 / 0.4 mm) for every net whose
   via size is KiCad's factory default. Smaller KiCad pre-defined vias are used where the class via does not
-  fit, and so are smaller fab-profile vias unless `[rules] fab_profile = "board"`
-  ([Fab minimums and via sizes](#fab-minimums-and-via-sizes)).
+  fit ([Design rules and via sizes](#design-rules-and-via-sizes)); no other via size is placed.
 
 **Not yet**: same-net T-junctions, via relaxation and per-layer costs
 (0.5.0); free via placement and the 45° mode (backlog). Plugin calls that need a running KiCad are listed

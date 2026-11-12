@@ -746,7 +746,7 @@ def _via_sizes(rules):
 
 
 def test_via_not_set_up_applies_fallback_to_engine_rules(app, eprom, factory_eprom, tmp_path, reports):
-    # a class without via fields resolves to toporlib's class default 0.6 / 0.3 (_CLASS_DEFAULTS_NM): the
+    # a class without via fields resolves to KiCad's class default 0.6 / 0.3 (toporlib KICAD_CLASS_ABSENT_NM): the
     # "nothing set up" size every net carries here, which the fallback must replace
     src = Eprom()
     src.pcb, src.text = factory_eprom.pcb, factory_eprom.text

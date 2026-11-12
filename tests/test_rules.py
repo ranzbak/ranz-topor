@@ -30,7 +30,8 @@ def _code(b, name):
 
 def test_profile_values():
     assert JLCPCB_1OZ["width"] == 200_000 and JLCPCB_1OZ["clearance"] == 150_000 and JLCPCB_1OZ["via_d"] == 600_000 and JLCPCB_1OZ["via_drill"] == 300_000
-    assert JLCPCB_1OZ["drill_list"] == [200_000, 250_000, 300_000, 400_000, 500_000, 800_000, 1_000_000] and JLCPCB_1OZ["routing_vias"] == [250_000, 300_000, 400_000, 500_000]
+    # 2026-11-12: no fab-profile via / drill list any more (the engine holds no profile; vias = the board's own)
+    assert "drill_list" not in JLCPCB_1OZ and "routing_vias" not in JLCPCB_1OZ
     assert JLCPCB_1OZ["edge"] == 200_000 and JLCPCB_1OZ["pth_hole_to_track"] == 350_000 and JLCPCB_1OZ["npth_to_track"] == 250_000
     for k in ("via_d_min_auto", "via_drill_min_auto", "via_hole_to_track", "hole_to_hole_via", "hole_to_hole_pad",
               "vcut", "annular_2l", "annular_4l"):
@@ -60,10 +61,13 @@ def test_rules_fixture_with_project(tmp_path):
     b = _board(tmp_path)
     r = resolve_rules(b, dru_text=None, widths_before={})
     vcc, sig = _code(b, "VCC"), _code(b, "SIG")
-    assert r["edge_clearance"] == 500_000 and r["min_track_width"] == 200_000 and r["hole_clearance"] == 350_000  # 0.25 design, raised to the PTH floor
+    # the board's own values as is (2026-11-12): hole clearance 0.25 mm, no longer raised to the 0.35 PTH floor
+    assert r["edge_clearance"] == 500_000 and r["min_track_width"] == 200_000 and r["hole_clearance"] == 250_000
     assert r["per_net"][vcc]["width"] == 400_000 and r["per_net"][vcc]["width_source"] == "netclass"
     assert r["per_net"][sig]["width"] == 250_000 and r["per_net"][sig]["width_source"] == "default"
-    assert r["default"]["clearance"] == 200_000 and r["profile"] == "jlcpcb_1oz"
+    assert r["default"]["clearance"] == 200_000 and r["profile"] == "board"
+    assert r["fallbacks"] == [] and r["floors_applied"] == []  # the fixture's .kicad_pro sets every constraint
+    assert "routing_vias" not in r and "drill_list" not in r
 
 
 def test_width_from_existing_copper_beats_default(tmp_path):
@@ -179,10 +183,42 @@ def test_pad_local_clearance_override_wins(tmp_path, engine):
     assert len(violations(m)) == before + 1  # netclass 0.2 + 5 um margin passes; local 0.3 mm does not
 
 
-def test_profile_fills_zero_floors(tmp_path):
+def test_zero_minimums_are_board_values(tmp_path):
+    """A 0 the board sets is KiCad's "no minimum" and is used as is (2026-11-12; before: filled from the profile)."""
     b = _board(tmp_path, rules={"min_clearance": 0, "min_via_diameter": 0})
     r = resolve_rules(b, dru_text=None, widths_before={})
-    assert r["min_clearance"] == 150_000 and r["min_via_diameter"] == 450_000
+    assert r["min_clearance"] == 0 and r["min_via_diameter"] == 0 and r["fallbacks"] == []
+    # the opt-in floor mode raises them (and lists them)
+    f = resolve_rules(b, dru_text=None, widths_before={}, fab_profile="jlcpcb_1oz")
+    assert f["min_clearance"] == 150_000 and f["min_via_diameter"] == 450_000
+    assert {"min_clearance", "min_via_diameter"} <= {x["name"] for x in f["floors_applied"]}
+
+
+def test_missing_keys_take_the_reported_fallback(tmp_path):
+    """Only a key the .kicad_pro does not carry takes RULE_FALLBACK (JLCPCB 1 oz, raised to KiCad's own value
+    for the missing key), one ``fallbacks`` row and one ``rule fallback:`` warning per field naming the KiCad
+    setting; the SWIG front end sees the same absence as the plugin."""
+    import json as _json
+
+    from toporlib.rules import RULE_FALLBACK, VIA_HOLE_FALLBACK, fallback_text
+
+    b = _board(tmp_path)
+    pro_p = tmp_path / "w" / "f.kicad_pro"
+    doc = _json.loads(pro_p.read_text())
+    for k in ("min_clearance", "min_hole_clearance", "min_copper_edge_clearance", "min_connection"):
+        doc["board"]["design_settings"]["rules"].pop(k)
+    pro_p.write_text(_json.dumps(doc))
+    r = resolve_rules(b, dru_text=None, widths_before={})
+    assert [x["field"] for x in r["fallbacks"]] == ["min_clearance", "min_hole_clearance",
+                                                    "min_copper_edge_clearance", "min_connection"]
+    assert r["min_clearance"] == RULE_FALLBACK["min_clearance"]["value"] == 150_000  # JLCPCB (KiCad: 0)
+    assert r["hole_clearance"] == 350_000 and r["via_hole_clearance"] == VIA_HOLE_FALLBACK == 250_000
+    assert r["edge_clearance"] == 500_000  # KiCad's own 0.5 mm, stricter than JLCPCB's 0.2 mm
+    assert r["min_connection"] == 0
+    for row in r["fallbacks"]:
+        assert fallback_text(row) in r["warnings"] and "KiCad → File → Board Setup" in fallback_text(row)
+    # the keys it carries are used as is (min_track_width 0.2, hole to hole 0.25)
+    assert r["min_track_width"] == 200_000 and r["hole_to_hole"] == 250_000
 
 
 def test_output_parses_with_engine_rules(tmp_path, engine):
@@ -194,11 +230,12 @@ def test_output_parses_with_engine_rules(tmp_path, engine):
 
 
 def test_fab_floors_raise_and_report(tmp_path):
-    """Fab minimums are floors by default: raised and reported; values above are used as-is."""
+    """Opt-in floor mode ([rules] fab_profile = "jlcpcb_1oz"; the default before 2026-11-12): fab minimums are
+    floors, raised and reported; values above are used as-is."""
     b = _board(tmp_path / "a", rules={"min_copper_edge_clearance": 0.025, "min_clearance": 0.1,
                                       "min_track_width": 0.1, "min_hole_clearance": 0.2,
                                       "min_hole_to_hole": 0.1})
-    r = resolve_rules(b, dru_text=None, widths_before={})
+    r = resolve_rules(b, dru_text=None, widths_before={}, fab_profile="jlcpcb_1oz")
     assert r["edge_clearance"] == JLCPCB_1OZ["edge"] == 200_000
     assert r["min_clearance"] == 150_000 and r["min_track_width"] == 200_000
     assert r["hole_clearance"] == 350_000 and r["hole_to_hole"] == 250_000
@@ -206,14 +243,14 @@ def test_fab_floors_raise_and_report(tmp_path):
     assert got["edge_clearance"] == (25_000, 200_000) and got["min_clearance"] == (100_000, 150_000)
     assert "floor: edge_clearance 0.025 -> 0.2 mm" in r["warnings"]
     b2 = _board(tmp_path / "b", rules={"min_copper_edge_clearance": 0.5})  # above the floor: as-is
-    r2 = resolve_rules(b2, dru_text=None, widths_before={})
+    r2 = resolve_rules(b2, dru_text=None, widths_before={}, fab_profile="jlcpcb_1oz")
     assert r2["edge_clearance"] == 500_000
     assert "edge_clearance" not in {f["name"] for f in r2["floors_applied"]}
 
 
-def test_fab_floors_opt_out(tmp_path):
+def test_board_values_below_the_fab_minimums_are_used_by_default(tmp_path):
     b = _board(tmp_path, rules={"min_copper_edge_clearance": 0.025, "min_clearance": 0.1})
-    r = resolve_rules(b, dru_text=None, widths_before={}, apply_fab_floors=False)
+    r = resolve_rules(b, dru_text=None, widths_before={})
     assert r["edge_clearance"] == 25_000 and r["min_clearance"] == 100_000
     assert r["floors_applied"] == [] and not any(w.startswith("floor:") for w in r["warnings"])
 
@@ -240,13 +277,14 @@ def test_rules_eprom_kicad10_project(tmp_path):
     b = load_board(pc)
     widths = record_widths(b)
     r = resolve_rules(b, dru_text=None, widths_before=widths)
-    assert r["edge_clearance"] == 250_000  # board setup 0.25 mm, above the 0.2 mm fab floor
-    assert r["min_clearance"] == 150_000
-    assert {(f["name"], f["design"], f["floor"]) for f in r["floors_applied"]} == {
+    # the board's own Board Setup (default since 2026-11-12): nothing raised, nothing missing
+    assert r["edge_clearance"] == 250_000 and r["min_clearance"] == 150_000
+    assert r["min_track_width"] == 150_000 and r["hole_clearance"] == 250_000
+    assert r["floors_applied"] == [] and r["fallbacks"] == []
+    fl = resolve_rules(b, dru_text=None, widths_before=widths, fab_profile="jlcpcb_1oz")  # opt-in floors
+    assert {(f["name"], f["design"], f["floor"]) for f in fl["floors_applied"]} == {
         ("min_track_width", 150_000, 200_000), ("hole_clearance", 250_000, 350_000)}
-    assert "floor: min_track_width 0.15 -> 0.2 mm" in r["warnings"]
-    assert resolve_rules(b, dru_text=None, widths_before=widths,
-                         apply_fab_floors=False)["edge_clearance"] == 250_000
+    assert "floor: min_track_width 0.15 -> 0.2 mm" in fl["warnings"] and fl["edge_clearance"] == 250_000
     assert r["default"]["width"] == 250_000 and r["default"]["clearance"] == 200_000
     codes = {str(n.GetNetname()): str(int(c)) for c, n in b.GetNetsByNetcode().items()}
     # pattern / regex assignments (A3, D7, OE -> Signal; +5V, GND -> power), via the effective class

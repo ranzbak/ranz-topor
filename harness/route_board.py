@@ -21,7 +21,7 @@ Metrics (all measured on the routed copy by `kicad-cli pcb drc --refill-zones`, 
   `<name>--cleanup.json`).
 Validity first (M0v, `harness.validity`): the engine-input rules of the run are compared with the rules the expected
 answer assumes (a pattern's expected.json ``rules_assumed``, else the board's own files under ``[rules] fab_profile =
-"board"``); a difference makes the run INVALID (`<name>--validity.json`, metrics ``valid``, the summary's first line):
+"board"``, the default; a rule fallback for a field the board lacks is reported); a difference makes the run INVALID (`<name>--validity.json`, metrics ``valid``, the summary's first line):
 its faults are then not router faults.
 `TOPOR_TREE` / `TOPOR_ENGINE_SITE` (see tools/route_board.sh) select the code tree and engine wheel, which is
 how the frozen classic reference is run from a worktree of main @ 64b3979.

@@ -354,9 +354,9 @@ pub struct Rules {
     #[serde(default)]
     pub min_connection: i64,
     pub max_error: i64,
-    pub profile: String,
-    pub drill_list: Vec<i64>,
-    pub routing_vias: Vec<i64>,
+    // No fab profile here (user decision 2026-11-12): every rule comes from the board's KiCad
+    // configuration as the plugin resolved it (`toporlib.rules`). Older models' `profile`,
+    // `drill_list` and `routing_vias` keys are ignored when read (serde skips unknown fields).
     /// KiCad's pre-defined via list (`board.design_settings.via_dimensions`, entries with a
     /// diameter > 0), `[diameter, drill]` nm. The smaller ones are alternatives for tight spots
     /// (`vias::via_sizes`).
@@ -460,6 +460,11 @@ impl Rules {
     }
 }
 
+/// Values for a model without `rules` (unit tests, hand-made JSON). The plugin always writes every
+/// field it resolved from the board, so a routed board never runs on these: they are neutral
+/// placeholders close to KiCad's own Board Setup defaults (board_design_settings.h DEFAULT_*), no
+/// fab profile and no extra via sizes; `via_fallback` is KiCad's factory 0.8 / 0.4 via, i.e. no
+/// fallback at all ([`crate::vias::via_fallback_used`] is false for it).
 impl Default for Rules {
     fn default() -> Self {
         Rules {
@@ -474,11 +479,6 @@ impl Default for Rules {
             edge_clearance: 500_000,
             min_connection: 0,
             max_error: 5_000,
-            profile: "jlcpcb_1oz".into(),
-            drill_list: vec![
-                200_000, 250_000, 300_000, 400_000, 500_000, 800_000, 1_000_000,
-            ],
-            routing_vias: vec![250_000, 300_000, 400_000, 500_000],
             predefined_vias: Vec::new(),
             via_fallback: [800_000, 400_000],
             allowed_drills: Vec::new(),
@@ -858,7 +858,7 @@ pub struct Options {
     /// signals off them (only the routable layers are signal layers).
     pub plane_signals: String,
     /// Router (A10): when non-empty only these drills (nm) are used for the *alternative* via
-    /// sizes (predefined and profile vias); the net's own class via is never dropped.
+    /// sizes (the pre-defined vias); the net's own class via is never dropped.
     pub allowed_drills_nm: Vec<i64>,
     /// Router (A10): allow via sites inside the net's own SMD pads (fab must fill and cap).
     pub via_in_pad: bool,
@@ -1242,7 +1242,7 @@ pub struct Options {
     pub diffpair_via_axes: Vec<f64>,
     /// 5.4 (`topor.toml [vias] size`): which via the router puts at a layer change, in the plan
     /// (room, via sites) and in the drawing. `"net_class"` (default, the behaviour before 5.4) =
-    /// the net class via first, then the smaller pre-defined / fab-profile vias for tight spots
+    /// the net class via first, then the smaller pre-defined vias for tight spots
     /// ([`crate::vias::via_sizes`]). `"board_min"` = the smallest via the Board Setup minimums
     /// allow (min via diameter, min through-hole drill, min annular ring: the supplier's
     /// capability) that still carries the trace's current: drill = the smallest with

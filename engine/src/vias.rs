@@ -23,7 +23,7 @@ pub fn via_fallback_used(rules: &Rules, net: i32) -> bool {
 }
 
 /// Via sizes for `net`, largest first, never empty (see `sizes_for`); `opts.allowed_drills_nm`
-/// is the drill filter. O(|predefined| + |routing_vias|) plus the sort.
+/// is the drill filter. O(|predefined|) plus the sort.
 pub fn via_sizes(rules: &Rules, net: i32, opts: &Options) -> Vec<ViaSize> {
     if opts.via_size == "board_min" && !rules.diff_pairs.iter().any(|p| p.p == net || p.n == net) {
         return vec![rule_size(rules, carried_width(rules, net), opts.via_drill_grid_nm, &opts.allowed_drills_nm)];
@@ -147,13 +147,13 @@ pub fn rule_size(rules: &Rules, width: i64, grid: i64, allowed: &[i64]) -> ViaSi
 /// 1. the net's own `(via_d, via_drill)` (netclass or default) -- or, only when the board sets
 ///    no via up (`predefined_vias` empty and the class at the factory 0.8 / 0.4), `via_fallback`
 ///    clamped to the board minimums ([`via_fallback_used`]);
-/// 2. then the smaller alternatives: every `predefined_vias` entry and every `routing_vias`
-///    (fab profile) drill with `d = max(drill + 2 * min_annular, min_via_diameter)`, kept when
+/// 2. then the smaller alternatives: every `predefined_vias` entry (KiCad's pre-defined vias,
+///    Board Setup -> Pre-defined Sizes; no fab-profile list, user decision 2026-11-12), kept when
 ///    `drill >= min_via_drill`, `d >= min_via_diameter`, `(d - drill) / 2 >= min_annular`,
 ///    `d < first.d`, `drill < first.drill` and (when `allowed` is not empty) `drill` in `allowed`.
 ///    The list is sorted by `(d, drill)` descending and deduplicated.
 ///
-/// Never a drill outside the predefined / profile lists. O(P log P) for P candidate sizes.
+/// Never a size the board does not define. O(P log P) for P pre-defined vias.
 fn sizes_for(rules: &Rules, net: i32, allowed: &[i64]) -> Vec<ViaSize> {
     let nr = rules.net_rule(net);
     let first = if via_fallback_used(rules, net) {
@@ -167,16 +167,10 @@ fn sizes_for(rules: &Rules, net: i32, allowed: &[i64]) -> Vec<ViaSize> {
             drill: nr.via_drill,
         }
     };
-    let profile = rules.routing_vias.iter().map(|&dr| ViaSize {
-        d: (dr + 2 * rules.min_annular).max(rules.min_via_diameter),
-        drill: dr,
-    });
-    let predefined = rules
+    let mut rest: Vec<ViaSize> = rules
         .predefined_vias
         .iter()
-        .map(|&[d, drill]| ViaSize { d, drill });
-    let mut rest: Vec<ViaSize> = predefined
-        .chain(profile)
+        .map(|&[d, drill]| ViaSize { d, drill })
         .filter(|s| {
             s.drill >= rules.min_via_drill
                 && s.d >= rules.min_via_diameter

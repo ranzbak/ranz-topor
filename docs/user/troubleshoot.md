@@ -270,7 +270,7 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: warning.*
 
-**Cause.** A custom rule could not be used exactly: its condition depends on the other item or uses a function topor does not evaluate (its value is then applied only where it is stricter, never where it is looser), its values differ per layer where topor has one width / clearance per net, a value below the fab profile's minimum was raised to it (a note starting with "floor:"; [rules] fab_profile = "board" uses custom values as given), or the constraint is not honoured at all (e.g. length, via_count).
+**Cause.** A custom rule could not be used exactly: its condition depends on the other item or uses a function topor does not evaluate (its value is then applied only where it is stricter, never where it is looser), its values differ per layer where topor has one width / clearance per net, a value below the fab profile's minimum was raised to it (a note starting with "floor:", only with the opt-in [rules] fab_profile = "jlcpcb_1oz"; the default "board" uses custom values as given), or the constraint is not honoured at all (e.g. length, via_count).
 
 **Fix.** Check the named rules after routing with KiCad → Inspect → Design Rules Checker; simplify the condition (A.NetClass, A.NetName, A.intersectsCourtyard('REF'), A.intersectsArea('name'), A.Pad_Type) or route that part by hand. See docs/user/operate.md, Custom design rules.
 
@@ -594,6 +594,14 @@ copper violates a rule anywhere else, file a bug.
 
 **Fix.** Please report this at https://github.com/ranzbak/ranz-topor/issues with the report folder (report.md, drc.json, log.txt); meanwhile check the net classes and custom rules in KiCad → File → Board Setup → Design Rules.
 
+### RULE_FALLBACK
+
+*Severity: warning.*
+
+**Cause.** A design rule the router needs is not set in the board's KiCad configuration (a key missing from the .kicad_pro, e.g. a project written by an older KiCad or by a script, or no .kicad_pro at all; or a net class Default without a track width / via size), so topor used a fallback: the JLCPCB 1 oz value, raised to KiCad's own value for the missing setting where that is stricter. Values the board does set are always used as they are, a 0 included.
+
+**Fix.** Set each named value in KiCad → File → Board Setup → Design Rules → Constraints (or → Net Classes → Default) and save the board; KiCad then writes it to the .kicad_pro and the finding goes away. The fallback table is in docs/user/operate.md, Design rules.
+
 ### RUN_ALREADY_RUNNING
 
 *Severity: error.*
@@ -654,7 +662,7 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: warning.*
 
-**Cause.** KiCad has no via sizes set up (no pre-defined via, and every net class via is KiCad's factory 0.8 / 0.4 mm), so every net with that via is routed with vias.fallback_diameter_mm / vias.fallback_drill_mm (0.8 / 0.4 mm by default) and, where space requires, smaller vias from topor's fab profile (a drill of 0.25, 0.3, 0.4 or 0.5 mm below the fallback drill, never below the board's minimum via drill and annular ring).
+**Cause.** KiCad has no via sizes set up (no pre-defined via, and every net class via is KiCad's factory 0.8 / 0.4 mm), so every net with that via is routed with vias.fallback_diameter_mm / vias.fallback_drill_mm (0.8 / 0.4 mm by default) and, where space requires, the smaller pre-defined vias of the board (none here, since the board has no pre-defined via).
 
 **Fix.** Set the via size and hole of the net classes in KiCad → File → Board Setup → Design Rules → Net Classes (topor routes each net with its net class via), or set vias.fallback_diameter_mm and vias.fallback_drill_mm. A via in KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias also clears this finding: topor routes with the net class via and uses the smaller pre-defined vias where space requires.
 

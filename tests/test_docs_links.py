@@ -122,20 +122,28 @@ def test_operate_md_reaches_every_kicad_setting_and_toml_key():
 
 
 def test_operate_md_fab_floors_match_the_profile():
-    """F I-4: operate.md documents the fab floors with the values of toporlib.rules.JLCPCB_1OZ, the extra via
-    drills (routing_vias), where the report lists them, that pre-defined vias are used (vias.rs sizes_for) and that
-    ``[rules] fab_profile = "board"`` turns the floors off (M0v)."""
+    """operate.md documents the board as the rule authority (2026-11-12), the fallback table with the values of
+    toporlib.rules.RULE_FALLBACK (one row per field, the KiCad setting), the opt-in floor mode with the values of
+    JLCPCB_1OZ, where the report lists both, and that only pre-defined vias are used (vias.rs sizes_for)."""
     from toporlib.rules import JLCPCB_1OZ as P
+    from toporlib.rules import RULE_FALLBACK, VIA_HOLE_FALLBACK
 
     text = (USER / "operate.md").read_text(encoding="utf-8")
-    sec = text.split("### Fab minimums and via sizes", 1)[1].split("\n### ", 1)[0]
+    sec = text.split("### Design rules and via sizes", 1)[1].split("\n### ", 1)[0]
     mm = lambda nm: f"{nm / 1e6:g} mm"  # noqa: E731
     for k in ("clearance", "width", "via_d_min_auto", "via_drill_min_auto", "annular_2l", "annular_4l",
               "pth_hole_to_track", "hole_to_hole_via", "edge"):
         assert mm(P[k]) in sec, (k, mm(P[k]))
-    assert ", ".join(f"{d / 1e6:g}" for d in P["routing_vias"]) + " mm" in sec
-    for words in ("JLCPCB", "Fab floors raised", '`[rules] fab_profile = "board"`', "**are used**", "sizes_for",
-                  "VIA_NOT_SET_UP"):
+    table = [ln for ln in sec.splitlines() if ln.startswith("| ")]
+    named = {"clearance": "| Net class Default clearance", "track_width": "| Net class Default track width",
+             "via_diameter": "| Net class Default via size", "via_drill": "| Net class Default via size"}
+    for f, row in RULE_FALLBACK.items():
+        line = next(ln for ln in table if (f"(`{f}`)" in ln if f not in named else ln.startswith(named[f])))
+        assert f"{row['value'] / 1e6:g}" in line.split("|")[4], (f, line)  # the "fallback used" column
+    assert mm(VIA_HOLE_FALLBACK) + " for the router's vias" in sec
+    for words in ("JLCPCB", "Fab floors raised", "Rule fallbacks", "RULE_FALLBACK", '`[rules] fab_profile =\n"board"`',
+                  '`[rules] fab_profile = "jlcpcb_1oz"`', "off by default", "**are\n  used**", "sizes_for",
+                  "VIA_NOT_SET_UP", "is never\nraised"):
         assert words in sec, words
     for words in ("are **not read**", "arrives in 0.5.0"):  # M0v review: the engine uses them (vias.rs sizes_for)
         assert words not in sec, words

@@ -131,7 +131,7 @@ def test_region_plan_and_bornhack_classification():
     pro = {"board": {"design_settings": {"rules": {"min_clearance": 0.09}}}}
     r = resolve_rules_from_project(pro, dru, netclass_of={"": "Default", "A": "Default", "R": "BT-RF,Default"},
                                    classes={"Default": NetClassVals("Default", 127_000), "BT-RF": NetClassVals("BT-RF", 200_000)},
-                                   widths_before={}, apply_fab_floors=False, copper_layer_count=4)
+                                   widths_before={}, copper_layer_count=4)
     assert r["custom_regions"] == [{"rule": "neck_down", "fn": "intersectscourtyard", "arg": "U6", "clearance": 100_000,
                                     "enclosed": False, "layers": []}]
     uses = {(row["rule"], row["constraint"]): row["use"] for row in r["custom_rules"]}
@@ -161,11 +161,14 @@ def open_bornhack_dru() -> str:
 
 
 def test_fab_floor_raises_a_custom_width_with_one_note():
-    """Zynq SoM ``(layer inner)`` DDR width opt 0.135 mm under the JLCPCB 0.2 mm floor: raised, one note naming the nets."""
+    """Opt-in floor mode: Zynq SoM ``(layer inner)`` DDR width opt 0.135 mm under the JLCPCB 0.2 mm floor: raised, one
+    note naming the nets (the default, the board's authority, uses the 0.135 mm as given)."""
     dru = '(rule w (layer inner) (condition "A.NetClass == \'DDR\'") (constraint track_width (opt 0.135mm)))'
-    r = resolve_rules_from_project({}, dru, netclass_of={"": "Default", "A": "DDR", "B": "DDR", "C": "Default"},
-                                   classes={"Default": NetClassVals("Default", 200_000), "DDR": NetClassVals("DDR", 200_000)},
-                                   widths_before={}, copper_layer_count=6)
+    kw = dict(netclass_of={"": "Default", "A": "DDR", "B": "DDR", "C": "Default"},
+              classes={"Default": NetClassVals("Default", 200_000), "DDR": NetClassVals("DDR", 200_000)},
+              widths_before={}, copper_layer_count=6)
+    assert resolve_rules_from_project({}, dru, **kw)["per_net"]["1"]["width"] == 135_000
+    r = resolve_rules_from_project({}, dru, fab_profile="jlcpcb_1oz", **kw)
     assert r["per_net"]["1"]["width"] == r["min_track_width"] == 200_000
     notes = [w for w in r["warnings"] if w.startswith("floor: custom track width")]
     assert notes == ["floor: custom track width 0.135 -> 0.2 mm (fab minimum, [rules] fab_profile) [2 net(s): A, B]"], notes
@@ -175,8 +178,7 @@ def test_net_dependent_area_rule_is_no_region():
     r = resolve_rules_from_project({}, '(rule c (condition "A.intersectsCourtyard(\'U1\') && A.NetName == \'A\'") '
                                        '(constraint clearance (min 0.4mm)))',
                                    netclass_of={"": "Default", "A": "Default", "B": "Default"},
-                                   classes={"Default": NetClassVals("Default", 200_000)}, widths_before={},
-                                   apply_fab_floors=False)
+                                   classes={"Default": NetClassVals("Default", 200_000)}, widths_before={})
     assert r["custom_regions"] == []
     assert r["per_net"]["1"]["clearance"] == 400_000 and r["per_net"]["2"]["clearance"] == 200_000
     assert any("depends on the net" in w for w in r["warnings"])

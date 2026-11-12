@@ -36,7 +36,7 @@ def test_default_profile_floors_board_and_region():
     assert r["per_net"]["1"]["width"] == 200_000 and r["per_net"]["1"]["via_d"] == 450_000
     assert r["custom_regions"][0]["clearance"] == 150_000  # floored at the fab clearance
     assert any(n.startswith("floor: custom rule 'BGA neckdown' clearance 0.1 mm -> 0.15 mm") for n in r["custom_notes"])
-    assert r["routing_vias"] and r["floors_applied"]
+    assert r["floors_applied"] and "routing_vias" not in r  # no fab-profile via list since 2026-11-12
 
 
 def test_board_authority_uses_board_setup_and_custom_rules_as_given():
@@ -50,7 +50,8 @@ def test_board_authority_uses_board_setup_and_custom_rules_as_given():
     # KiCad: the matching custom rule wins, also below the Board Setup minimum clearance (0.15)
     assert r["custom_regions"][0]["clearance"] == 100_000
     assert not any(str(n).startswith("floor:") for n in r.get("custom_notes") or [])
-    assert r["routing_vias"] == [] and r["drill_list"] == []
+    assert "routing_vias" not in r and "drill_list" not in r and r["fallbacks"] == []
+    assert va.rule_set(r, {1: "A1", 2: "B2"})["fallbacks"] == []
 
 
 def test_board_authority_keeps_zero_minimums_and_custom_values_below_board_minimums():
@@ -61,6 +62,31 @@ def test_board_authority_keeps_zero_minimums_and_custom_values_below_board_minim
     assert r["min_clearance"] == 0
     assert r["per_net"]["1"]["width"] == 120_000 and r["per_net"]["1"]["clearance"] == 90_000
     assert r["per_net"]["2"]["width"] == 200_000 and r["per_net"]["2"]["clearance"] == 200_000
+
+
+def test_board_authority_is_the_default():
+    r = resolve_rules_from_project(PRO, NECKDOWN, netclass_of=OF, classes=CLASSES, widths_before={},
+                                   copper_layer_count=4)
+    assert r == _resolve("board")
+
+
+def test_gate_reports_fallbacks():
+    """A field the board files lack: a note when the fallback is KiCad's own value (min_connection 0), INVALID when
+    it is stricter than what KiCad's DRC used (min_clearance 0.15 vs KiCad's 0)."""
+    pro = json.loads(json.dumps(PRO))
+    rs = va.rule_set(resolve_rules_from_project(pro, None, netclass_of=OF, classes=CLASSES, widths_before={}),
+                     {1: "A1", 2: "B2"})
+    assert [f["field"] for f in rs["fallbacks"]] == ["min_connection", "max_error"]
+    v = va.judge(None, rs, rs)
+    assert v["valid"], v["invalid"]
+    assert any("rule fallback min_connection = 0 mm" in n for n in v["notes"])
+    del pro["board"]["design_settings"]["rules"]["min_clearance"]
+    rs2 = va.rule_set(resolve_rules_from_project(pro, None, netclass_of=OF, classes=CLASSES, widths_before={}),
+                      {1: "A1", 2: "B2"})
+    v2 = va.judge(None, rs2, rs2)
+    assert not v2["valid"]
+    d = next(x for x in v2["invalid"] if x["rule"] == "fallback min_clearance")
+    assert d["expected"] == 0 and d["effective"] == 0.15
 
 
 def test_unknown_profile_is_an_error():
@@ -124,7 +150,7 @@ def test_margin_counts_as_a_rule_difference():
 
 
 @pytest.mark.parametrize("via_size,want", [
-    ("net_class", [[0.6, 0.3], [0.45, 0.25]]),  # net class via, then the fab-profile 0.25 drill (vias.rs sizes_for)
+    ("net_class", [[0.6, 0.3]]),  # the net class via only: no pre-defined via, no fab-profile list (vias.rs sizes_for)
     ("board_min", [[0.45, 0.25]]),             # a 0.25 trace: pi x 0.25 -> drill 0.08, floored to 0.25 (rule_size)
 ])
 def test_via_list_is_the_engines(via_size, want):

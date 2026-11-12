@@ -13,7 +13,6 @@ fn rules() -> Rules {
         min_via_drill: 250_000,
         min_annular: 100_000,
         min_via_diameter: 400_000,
-        routing_vias: Vec::new(),
         default: NetRule {
             via_d: 800_000,
             via_drill: 400_000,
@@ -51,13 +50,30 @@ fn via_sizes_prefer_netclass_then_predefined_smaller() {
         via_sizes(&r, 5, &o),
         vec![sz(600_000, 300_000), sz(450_000, 250_000)]
     );
-    // the fab profile list still contributes when the board sets nothing smaller up
-    let mut p = rules();
-    p.routing_vias = vec![250_000, 300_000];
+}
+
+#[test]
+fn no_fab_profile_vias_only_the_boards_own() {
+    // User decision 2026-11-12: the engine holds no fab profile. An older model still carrying
+    // `profile` / `drill_list` / `routing_vias` reads fine, and those keys add no via size: a
+    // board without pre-defined vias routes with its net class via only.
+    let old = r#"{"min_via_drill": 250000, "min_annular": 100000, "min_via_diameter": 400000,
+        "profile": "jlcpcb_1oz", "drill_list": [200000, 250000, 300000],
+        "routing_vias": [250000, 300000, 400000, 500000],
+        "default": {"via_d": 800000, "via_drill": 400000}}"#;
+    let r: Rules = serde_json::from_str(old).expect("an old model's rules still deserialize");
+    let o = Options::default();
+    assert_eq!(via_sizes(&r, 0, &o), vec![sz(800_000, 400_000)]);
+    // the board's pre-defined vias are the alternatives
+    let mut p = r.clone();
+    p.predefined_vias = vec![[500_000, 300_000], [450_000, 250_000]];
     assert_eq!(
         via_sizes(&p, 0, &o),
         vec![sz(800_000, 400_000), sz(500_000, 300_000), sz(450_000, 250_000)]
     );
+    // and the rules serialize without any profile key
+    let js = serde_json::to_string(&r).unwrap();
+    assert!(!js.contains("routing_vias") && !js.contains("drill_list") && !js.contains("\"profile\""), "{js}");
 }
 
 #[test]
@@ -75,13 +91,6 @@ fn allowed_drills_filters_predefined() {
         ..Options::default()
     };
     assert_eq!(via_sizes(&r, 0, &none), vec![sz(800_000, 400_000)]);
-    // the profile list is filtered too
-    let mut p = rules();
-    p.routing_vias = vec![250_000, 300_000];
-    assert_eq!(
-        via_sizes(&p, 0, &o),
-        vec![sz(800_000, 400_000), sz(450_000, 250_000)]
-    );
 }
 
 #[test]
