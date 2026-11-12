@@ -2588,6 +2588,40 @@ impl<'a> Drawer<'a> {
                         "funnel" => self.stats.forced_funnel += 1,
                         _ => self.stats.forced_attempt += 1,
                     }
+                    // The plan's necks on the forced run (its candidates draw the necked zones at
+                    // the floor): a run that came out legal takes the widest width the checker
+                    // accepts, each zone trimmed to the stretch this geometry needs (the forced
+                    // geometry is not the plan's, so the zones measured on the plan's edges do not
+                    // describe it; TopoR 6.3 manual p. 56: the minimum width only where needed);
+                    // the narrowed stretches are recorded either way (p. 72: shrinkages).
+                    let mut fnecks: Vec<(Vec2, f64, f64)> = Vec::new();
+                    if let (Some(pn), None) = (&pneck, &neck) {
+                        let narrow = items.iter().filter_map(|i| match i {
+                            Item::Track(t) if (t.width as f64) < wi.w - 0.5 => Some(t.width as f64),
+                            _ => None,
+                        }).fold(None, |a: Option<f64>, x| Some(a.map_or(x, |y| y.min(x))));
+                        if let Some(wmin) = narrow {
+                            let mut zones = (*pn, wmin, self.neck_items(w, lid, &pts, pn, pn.min_w).1);
+                            if vs.is_empty() {
+                                if let Some((wn, _, _)) = self.plan_neck_run(w, lid, &pts, pn) {
+                                    let tz = self.trim_neck(w, lid, &pts, pn, wn);
+                                    let (its, ls) = self.neck_items(w, lid, &pts, &tz, wn);
+                                    if self.track_own_pad_ok(w, &its) {
+                                        items = its;
+                                        zones = (tz, wn, ls);
+                                    }
+                                }
+                            }
+                            let (z, wn, ls) = zones;
+                            if wn < wi.w - 0.5 {
+                                for (e, l) in z.ends.iter().zip(ls) {
+                                    if let (Some((c, _)), true) = (e, l > 0.0) {
+                                        fnecks.push((*c, wn, l));
+                                    }
+                                }
+                            }
+                        }
+                    }
                     let (ps, pe) = (r == 0, r == plan.layers.len() - 1);
                     let first = committed.len();
                     for it in &items {
@@ -2606,6 +2640,7 @@ impl<'a> Drawer<'a> {
                             out.necks.push((pts[pts.len() - 1], wn, ls[1]));
                         }
                     }
+                    out.necks.extend(fnecks);
                     out.items.extend(items);
                     out.runs.push((layer, pts));
                     out.viol.extend(vs);
@@ -2890,6 +2925,39 @@ impl<'a> Drawer<'a> {
         let wn = lo.floor().max(neck.min_w);
         let (items, lens) = self.neck_items(w, lid, pts, neck, wn);
         Some((wn, items, lens))
+    }
+
+    /// `neck` with each zone shrunk to the smallest radius at which the run `pts` necked to `wn`
+    /// still passes the checker (zone by zone, bisection; a zone the run does not need is
+    /// dropped; an unbounded zone starts at the run's extent from its centre). For runs whose
+    /// geometry is not the plan's (the forced ones), whose plan zones can reach far past the
+    /// bottleneck. O(zones x 13 checks of the run).
+    fn trim_neck(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> super::exact::Neck {
+        let mut nk = *neck;
+        let ok = |n: &super::exact::Neck| {
+            let its = self.neck_items(w, lid, pts, n, wn).0;
+            self.checker.check_against(&self.idx, &its, &[]).violations.is_empty()
+        };
+        for i in 0..super::exact::NECK_ZONES {
+            let Some((c, r)) = nk.ends[i] else { continue };
+            let r = if r.is_finite() { r } else { pts.iter().map(|&p| (p - c).len()).fold(0.0, f64::max) + 1.0 };
+            nk.ends[i] = None;
+            if ok(&nk) {
+                continue;
+            }
+            let (mut lo, mut hi) = (0.0, r);
+            for _ in 0..12 {
+                let mid = 0.5 * (lo + hi);
+                nk.ends[i] = Some((c, mid));
+                if ok(&nk) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            nk.ends[i] = Some((c, hi));
+        }
+        nk
     }
 
     /// The run with its pad ends narrowed to the widest width the checker accepts (plan item
