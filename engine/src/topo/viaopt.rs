@@ -191,6 +191,50 @@ pub fn stretch_len(st: &State, w: WireId, ev: &[(usize, f64, i32)], i: usize, j:
     l + (at(kb, sb) - pts[kb.min(pts.len() - 1)]).len()
 }
 
+/// Length (nm) of wire `w`'s stretch from event `i` to event `j` (`i <= j`) measured where it
+/// really meets the wires it crosses (5.8), on the plan's taut paths ([`Track`]): an event with a
+/// crossing partner (`partner[k] = (w2, k2)`, `events` of every wire as
+/// [`super::layers::LayerReport::events`]) sits at the intersection of `w`'s taut path with the
+/// partner's that lies nearest the event's own arc position ([`Track::sigma`]); an event without
+/// a partner, or paths that do not meet, sit at that arc position. Neither the event fraction nor
+/// the pass-point polyline is a position: in a large triangle (no Steiner grid) two crossings
+/// 1.2 mm apart measured 18 mm with [`stretch_len`]. O(corners of `w` x corners of the partners).
+pub fn crossing_stretch_len(st: &State, w: WireId, events: &[Vec<(usize, f64, i32)>], partner: &[Option<(WireId, usize)>], i: usize, j: usize) -> f64 {
+    let ev = &events[w];
+    if i > j || j >= ev.len() {
+        return 0.0;
+    }
+    let me = Track::of(st, w);
+    if me.pts.len() < 2 {
+        return 0.0;
+    }
+    let pos = |e: usize| -> f64 {
+        let s0 = me.sigma(ev[e].0, ev[e].1);
+        let Some((w2, _)) = partner.get(e).copied().flatten() else { return s0 };
+        let other = Track::of(st, w2);
+        let mut best: Option<f64> = None;
+        for a in 0..me.pts.len() - 1 {
+            let (p, r) = (me.pts[a], me.pts[a + 1] - me.pts[a]);
+            for c in 0..other.pts.len().saturating_sub(1) {
+                let (q, s2) = (other.pts[c], other.pts[c + 1] - other.pts[c]);
+                let den = r.cross(s2);
+                if den.abs() < 1e-9 {
+                    continue;
+                }
+                let (t, u) = ((q - p).cross(s2) / den, (q - p).cross(r) / den);
+                if (-1e-9..=1.0 + 1e-9).contains(&t) && (-1e-9..=1.0 + 1e-9).contains(&u) {
+                    let sx = me.cum[a] + t.clamp(0.0, 1.0) * r.len();
+                    if best.is_none_or(|b| (sx - s0).abs() < (b - s0).abs()) {
+                        best = Some(sx);
+                    }
+                }
+            }
+        }
+        best.unwrap_or(s0)
+    };
+    (pos(j) - pos(i)).abs()
+}
+
 /// What the via relocation needs of the board beyond the state.
 pub struct ViaCtx<'a> {
     pub st: &'a State<'a>,
