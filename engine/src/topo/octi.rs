@@ -71,6 +71,9 @@ pub struct OctiCfg {
     /// `planned_room` factor weight: price per nm of drawn shape inside the room the plan keeps
     /// for a lane neighbour not drawn yet, times `x + x^2` (`x` = depth over the pitch).
     pub room: f64,
+    /// P6 (b) (`[drawing] lane_walls = "price"`): the lane slot outside the span the packing and
+    /// the drawn neighbours leave a run is priced like the planned room, not walled.
+    pub lane_price: bool,
 }
 
 impl OctiCfg {
@@ -88,13 +91,14 @@ impl OctiCfg {
             acute_forbidden: o.acute == "forbidden",
             pull: o.bundle_pull.clamp(0.0, 0.9),
             room: reg.weight("planned_room").unwrap_or(5.0).max(0.0),
+            lane_price: o.lane_walls == "price",
         }
     }
 }
 
 impl Default for OctiCfg {
     fn default() -> Self {
-        OctiCfg { on: false, bend_nm: 0.25 * MM, spacing_nm: 0.5 * MM, any_nm: 15.0 * MM, any_forbidden: false, acute_nm: 50.0 * MM, acute_forbidden: false, pull: 0.3, room: 5.0 }
+        OctiCfg { on: false, bend_nm: 0.25 * MM, spacing_nm: 0.5 * MM, any_nm: 15.0 * MM, any_forbidden: false, acute_nm: 50.0 * MM, acute_forbidden: false, pull: 0.3, room: 5.0, lane_price: true }
     }
 }
 
@@ -261,6 +265,9 @@ impl Drawer<'_> {
         // later; Dayan 1997 pp. 15-16: spacing for every wire).
         // (a, b, sign): the room lies where `sign * (b - a) x (p - a) > 0`.
         let mut zones: Vec<(Vec2, Vec2, f64)> = Vec::new();
+        // P6 (b): per crossed edge (first end, unit direction, length, span lo, span hi): the
+        // lane slot outside `lo..hi` is priced (see below).
+        let mut gates: Vec<(Vec2, Vec2, f64, f64, f64)> = Vec::new();
         {
             let (st, pr) = (self.st, &self.b.proj);
             let mut guard: Vec<(usize, [Option<Vec2>; 2])> = Vec::new();
@@ -290,11 +297,21 @@ impl Drawer<'_> {
                 // Only towards a neighbour pass of the same edge and layer: on a side without
                 // one the room is the obstacle's, which the clearance check guards.
                 let (before, after) = self.lane_sides(pid);
-                if before && lo > 1.0 {
-                    strip.walls.push((pp, pp + u * lo));
-                }
-                if after && hi < len - 1.0 {
-                    strip.walls.push((pp + u * hi, pq));
+                // P6 (b): the lane slot outside the span is a graded price, not a wall (walls
+                // stay for drawn copper, fixed obstacles and the undrawn wires' via chords): a
+                // leg crossing the edge `depth` beyond the span pays `room x pitch x (x + x^2)`,
+                // `x = depth / pitch` (Bast, Brosi & Storandt 2020 section 4.3, p. 7: room for
+                // the lines routed later as a cost). With `[drawing] lane_walls = "hard"` the
+                // walls of before.
+                if cfg.lane_price {
+                    gates.push((pp, u, len, if before && lo > 1.0 { lo } else { f64::NEG_INFINITY }, if after && hi < len - 1.0 { hi } else { f64::INFINITY }));
+                } else {
+                    if before && lo > 1.0 {
+                        strip.walls.push((pp, pp + u * lo));
+                    }
+                    if after && hi < len - 1.0 {
+                        strip.walls.push((pp + u * hi, pq));
+                    }
                 }
                 // Which end of the edge lies on the wire's left, coming from the triangle before
                 // the pass.
@@ -462,7 +479,7 @@ impl Drawer<'_> {
         // (midpoint rule, pieces of at most a quarter pitch or 1/24 of the leg).
         let mut room_cache: HashMap<[u64; 4], f64> = HashMap::new();
         let mut room = |a: Vec2, b: Vec2| -> f64 {
-            if zones.is_empty() || cfg.room <= 0.0 {
+            if (zones.is_empty() && gates.is_empty()) || cfg.room <= 0.0 {
                 return 0.0;
             }
             let key = [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()];
@@ -494,6 +511,24 @@ impl Drawer<'_> {
                             tot += ds * (x + x * x);
                         }
                     }
+                }
+            }
+            // The lane slots beyond the span (P6 b): the depth of the crossing past it.
+            for &(gp, gu, glen, glo, ghi) in &gates {
+                let gq = gp + gu * glen;
+                if !super::draw::seg_proper(a, b, gp, gq) {
+                    continue;
+                }
+                let (d1, d2) = (b - a, gq - gp);
+                let den = d1.cross(d2);
+                if den.abs() < 1e-9 {
+                    continue;
+                }
+                let t = (gp - a).cross(d1) / den * glen;
+                let depth = (glo - t).max(t - ghi).max(0.0);
+                if depth > 0.0 {
+                    let x = depth / pitch;
+                    tot += pitch * (x + x * x);
                 }
             }
             let v = cfg.room * tot;

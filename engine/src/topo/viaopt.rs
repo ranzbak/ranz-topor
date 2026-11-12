@@ -197,10 +197,15 @@ pub struct ViaCtx<'a> {
     /// Board outline segments and the copper-to-edge clearance (nm).
     pub outline: &'a [(Vec2, Vec2)],
     pub edge_clear: f64,
-    /// Via radius (nm) of a net's via ([`crate::vias::via_sizes`] first).
+    /// Via reach (nm) of a net's via ([`crate::vias::via_sizes`] first; [`crate::vias::via_reach`]:
+    /// its radius, or more where the drill's hole clearance reaches further than the disc's
+    /// clearance).
     pub via_r: &'a dyn Fn(i32) -> f64,
-    /// Clearance (nm) of a net.
+    /// Clearance (nm) of a net (plus `[search] margin_um`).
     pub clear: &'a dyn Fn(i32) -> f64,
+    /// Centre distance (nm) the vias of two nets need ([`crate::vias::via_via_need`]: copper,
+    /// hole clearance and hole to hole; the same net: hole to hole only).
+    pub via_via: &'a dyn Fn(i32, i32) -> f64,
 }
 
 /// One via of the plan as the relocation sees it.
@@ -223,6 +228,10 @@ pub struct RelocReport {
     pub gap_gain: f64,
     /// Per moved via: wire, index, from, to, smallest gap before / after (nm).
     pub moves: Vec<(WireId, usize, Vec2, Vec2, f64, f64)>,
+    /// The vias whose final site still predicts a violation (smallest rule gap below 0): the
+    /// plan's geometry has no legal room there, so the drawing may not take the site on the
+    /// plan's word alone (P6).
+    pub tight: Vec<(WireId, usize)>,
 }
 
 /// The via intervals `(ka, sa, kb, sb)` of `events` (consecutive events whose labels differ), in
@@ -277,14 +286,73 @@ fn gap_at(cx: &ViaCtx, tracks: &[Track], near: &Near, sites: &[Site], me: (WireI
             continue;
         }
         let nu = st.wires[s.wire].net;
-        let ru = (cx.via_r)(nu);
-        if nu != net {
-            add((p - s.p).len() - rv - ru - c.max((cx.clear)(nu)), true);
-        } else if s.wire == me.0 {
-            add((p - s.p).len() - rv - ru, true);
+        // 5.4 task 1: the real via-to-via rule (copper, hole clearance, and hole to hole between
+        // any two drills, own net included); the wire's own vias also keep their discs apart.
+        let mut need = (cx.via_via)(net, nu);
+        if s.wire == me.0 {
+            need = need.max(rv + (cx.via_r)(nu));
         }
+        add((p - s.p).len() - need, true);
     }
     (grule, gforce, pot)
+}
+
+/// Where crossing `x` lies along traversal `x.k` of wire `w` on its pass polyline `poly`
+/// ([`State::polyline`]): the fraction the layering's events carry (the same formula as the
+/// layering's `cross_s`: a traversal with a turn runs entry -> turn -> exit, its first sub-chord
+/// in [0, 0.5), its second in (0.5, 1]). O(turns).
+fn event_s(st: &State, poly: &[Vec2], opoly: &[Vec2], w: WireId, x: &super::state::Crossing) -> f64 {
+    let seg = |pts: &[Vec2], w: WireId, k: usize, sub: usize| -> (Vec2, Vec2, Option<usize>) {
+        let (a, b) = (pts.get(k).copied().unwrap_or_default(), pts.get(k + 1).copied().unwrap_or_default());
+        match st.wires[w].turns.iter().find(|t| t.0 == k) {
+            Some(&(_, v)) if sub == 0 => (a, st.proj.pos[v], Some(0)),
+            Some(&(_, v)) => (st.proj.pos[v], b, Some(1)),
+            None => (a, b, None),
+        }
+    };
+    let (p0, p1, half) = seg(poly, w, x.k, x.sub);
+    let (q0, q1, _) = seg(opoly, x.other, x.other_k, x.other_sub);
+    let (d, e) = (p1 - p0, q1 - q0);
+    let den = d.cross(e);
+    let s = if den.abs() < 1e-12 { 0.5 } else { ((q0 - p0).cross(e) / den).clamp(0.0, 1.0) };
+    match half {
+        Some(0) => 0.5 * s.min(0.998),
+        Some(_) => 0.5 + 0.5 * s.max(0.002),
+        None => s,
+    }
+}
+
+/// Arc length on `tw` (wire `w`'s track) of its crossing with the track `to`: of the points
+/// where the two tracks cross, the one nearest the arc range `lo..=hi` (the traversal of the
+/// crossing in the topology; the taut tracks may cross a little outside it). `None` when the
+/// tracks do not cross. O(corners^2).
+fn track_crossing(tw: &Track, to: &Track, lo: f64, hi: f64) -> Option<f64> {
+    let mut best: Option<(f64, f64)> = None;
+    for i in 0..tw.pts.len().saturating_sub(1) {
+        let (a, b) = (tw.pts[i], tw.pts[i + 1]);
+        let l = (b - a).len();
+        if l < 1.0 {
+            continue;
+        }
+        for j in 0..to.pts.len().saturating_sub(1) {
+            let (c, d) = (to.pts[j], to.pts[j + 1]);
+            let (u, v) = (b - a, d - c);
+            let den = u.cross(v);
+            if den.abs() <= 1e-9 {
+                continue;
+            }
+            let t = (c - a).cross(v) / den;
+            let r = (c - a).cross(u) / den;
+            if (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&r) {
+                let arc = tw.cum[i] + t * l;
+                let off = (lo - arc).max(arc - hi).max(0.0);
+                if best.is_none_or(|x| off < x.0) {
+                    best = Some((off, arc));
+                }
+            }
+        }
+    }
+    best.map(|x| x.1)
 }
 
 /// The planned via sites: `(wire, via index)` -> `(traversal, point)`.
@@ -311,6 +379,7 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
         ka: usize,
         kb: usize,
         near: Near,
+        pinched: bool,
     }
     let mut vs: Vec<V> = Vec::new();
     let mut sites: Vec<Site> = Vec::new();
@@ -323,9 +392,56 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
             continue;
         }
         let tr = &tracks[w];
+        let poly = st.polyline(w);
+        let wnet = st.wires[w].net;
+        let xs: Vec<super::state::Crossing> = st.crossings(w).into_iter().filter(|x| st.wires[x.other].net != wnet).collect();
         for (i, &(ka, sa, kb, sb)) in ivs.iter().enumerate() {
             let (lo, hi) = (tr.sigma(ka, sa), tr.sigma(kb, sb));
-            let (lo, hi) = (lo.min(hi), lo.max(hi));
+            let (mut lo, mut hi) = (lo.min(hi), lo.max(hi));
+            // P6: the interval ends at the crossings themselves, where the taut tracks cross
+            // (Polubasov 2001, printed p. 4: a via lies between the two crossing points whose
+            // layers differ), not at the event's fraction of the traversal mapped onto the
+            // track: in a long traversal the two differ by millimetres (planned_crossing_window:
+            // the VCC via pair was balanced east of SDA's crossing, so VCC crossed SDA on its own
+            // layer). The crossings of the start traversal at or before the start event bound
+            // the interval below, those of the end traversal at or after the end event above.
+            // When the event itself is one of these crossings its mapped fraction gives way to the
+            // crossing's own point (it may lie on either side of it).
+            let (mut lo_x, mut hi_x): (Option<f64>, Option<f64>) = (None, None);
+            let (mut lo_is_x, mut hi_is_x) = (false, false);
+            for x in xs.iter().filter(|x| x.k == ka || x.k == kb) {
+                let opoly = st.polyline(x.other);
+                let es = event_s(st, &poly, &opoly, w, x);
+                let (a, b) = (tr.sigma(x.k, 0.0), tr.sigma(x.k, 1.0));
+                let Some(arc) = track_crossing(tr, &tracks[x.other], a, b) else { continue };
+                if std::env::var_os("TOPO_VIAREL").is_some() {
+                    eprintln!("VIACLAMP w{w} v{i} ka{ka} sa{sa:.3} kb{kb} sb{sb:.3} x.k{} other{} es{es:.3} arc{:.3} trav[{:.3},{:.3}]", x.k, x.other, arc / 1e6, a / 1e6, b / 1e6);
+                }
+                if x.k == ka && es <= sa + 1e-9 {
+                    lo_x = Some(lo_x.map_or(arc, |v: f64| v.max(arc)));
+                    lo_is_x |= (es - sa).abs() <= 1e-9;
+                }
+                if x.k == kb && es >= sb - 1e-9 {
+                    hi_x = Some(hi_x.map_or(arc, |v: f64| v.min(arc)));
+                    hi_is_x |= (es - sb).abs() <= 1e-9;
+                }
+            }
+            if let Some(v) = lo_x {
+                lo = if lo_is_x { v } else { lo.max(v) };
+            }
+            if let Some(v) = hi_x {
+                hi = if hi_is_x { v } else { hi.min(v) };
+            }
+            let pinched = lo > hi;
+            if std::env::var_os("TOPO_VIAREL").is_some() {
+                eprintln!("VIACLAMP w{w} v{i} -> lo {:.3} hi {:.3} mm pinched {pinched}", lo / 1e6, hi / 1e6);
+            }
+            if pinched {
+                // The two crossings meet (no stretch between them on the taut tracks): the old
+                // interval; the site is marked tight (the drawing does not take it on the plan's
+                // geometry alone).
+                (lo, hi) = (tr.sigma(ka, sa).min(tr.sigma(kb, sb)), tr.sigma(ka, sa).max(tr.sigma(kb, sb)));
+            }
             // The drawing's own first choice: the middle of the planned traversal.
             let k = pl.at.get(i).copied().unwrap_or((ka + kb).div_ceil(2));
             let (a, b) = (tr.sigma(k, 0.0).max(lo), tr.sigma(k, 1.0).min(hi));
@@ -347,7 +463,7 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
             // The traversals the via may take: the plan's range (with [vias] between_crossings
             // strictly between the events, never a crossing's triangle).
             let (ka, kb) = pl.vias.get(i).map_or((ka, kb), |&(a, b)| (a, b.max(a)));
-            vs.push(V { w, i, lo, hi, ka, kb, near: Near { obs, wires } });
+            vs.push(V { w, i, lo, hi, ka, kb, near: Near { obs, wires }, pinched });
             sites.push(Site { wire: w, i, k, p });
         }
     }
@@ -423,6 +539,9 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
             if let Some(a) = pl.at.get_mut(v.i) {
                 *a = s.k;
             }
+        }
+        if g1 < 0.0 || v.pinched {
+            rep.tight.push((v.w, v.i));
         }
         out.insert((v.w, v.i), (s.k, s.p));
     }

@@ -1130,6 +1130,13 @@ pub struct Options {
     /// around a wrapped corner, the 0/45 degree legs of a slanted stretch; `demand::octi_stretch`)
     /// instead of the any-angle room.
     pub octi_room: bool,
+    /// P6 (c) (`[drawing] pull_taut`): every drawn run is pulled taut inside its corridor (a
+    /// vertex goes where the straight leg keeps every rule and the side of every wire not drawn
+    /// yet; `draw::Drawer::pull_taut`).
+    pub draw_pull_taut: bool,
+    /// P6 (b) (`[drawing] lane_walls`): "price" = the lane slot outside a run's span is a graded
+    /// price in the octilinear drawing; "hard" = a wall (before P6).
+    pub lane_walls: String,
     /// M-45 (`[drawing] bundle_pull`): with the octilinear style, the share of a segment's length
     /// taken off its price where it runs beside a drawn trace of another net at the clearance, so
     /// a trace follows its neighbour and a bundle keeps its pitch through its bends (0 = off).
@@ -1311,6 +1318,8 @@ impl Default for Options {
             bend_mm: 0.25,
             bend_spacing_mm: 0.5,
             octi_room: true,
+            draw_pull_taut: true,
+            lane_walls: "price".into(),
             bundle_pull: 0.3,
             reserve_via_sites: true,
             mixed_clearance: "conservative".into(),

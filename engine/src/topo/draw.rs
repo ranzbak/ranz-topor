@@ -388,13 +388,9 @@ fn kicad_pt(p: Vec2) -> IVec2 {
 /// ([`crate::model::Rules::via_hole_clear`]) reaches further (`drill / 2 + hole clearance >
 /// d / 2 + clearance`, e.g. a 0.4 / 0.3 mm via with 0.2 mm clearance and 0.254 mm hole
 /// clearance). Both are discs about the via centre.
+/// The same rule as the plan's ([`crate::vias::via_need_copper`], 5.4 task 1: one function).
 pub fn via_clear(model: &BoardModel, net: i32, d: i64, drill: i64) -> f64 {
-    let r = &model.rules;
-    let copper = r.net_rule(net).clearance as f64;
-    if drill <= 0 {
-        return copper;
-    }
-    copper.max(0.5 * drill as f64 + r.via_hole_clear() as f64 - 0.5 * d as f64)
+    crate::vias::via_need_copper(&model.rules, net, ViaSize { d, drill }, 0.0, 0.0) - 0.5 * d as f64
 }
 
 pub fn track_item(net: i32, layer: u32, w: f64, a: Vec2, b: Vec2, wire: Option<usize>) -> Item {
@@ -490,6 +486,18 @@ pub struct DrawStats {
     /// 5.4: vias placed at the plan's own site / planned sites that broke a rule there (searched).
     pub planned_sites: usize,
     pub planned_sites_missed: usize,
+    /// 5.4 task 2 (plan vs drawn vias): vias of the plan placed by the drawing's own site search
+    /// (no planned site, or the planned one not free), and by force (never drop, M-B1), per
+    /// committed via (a wire drawn again counts again; the summary uses the final wires).
+    pub via_searched: usize,
+    pub via_forced: usize,
+    /// P6 (a): crossing partners whose nominal chord was moved to follow a via ([`Drawer::follow_vias`]).
+    pub partners_moved: usize,
+    /// P6 (a): crossing partners neither their packed nor their taut crossing keeps on a placed
+    /// via's planned side ([`Drawer::follow_vias`]).
+    pub partners_unfixed: usize,
+    /// P6 (c): vertices the taut pull removed from drawn runs ([`Drawer::pull_taut`]).
+    pub pulled: usize,
 }
 
 /// Per-stretch widths that replace a wire's single width (the drawing witness, variant A: the
@@ -597,6 +605,19 @@ impl Viol {
     }
 }
 
+/// The severity key of a forced run's violations: `(short amount, total amount)`. A short
+/// (copper overlap, KiCad's `shorting_items`; Cleanup removes the track) is no graded judgement
+/// call: a run with less short amount wins whatever its clearance amount, and a change that adds
+/// or deepens a short is never taken (KiCad tools are the spec).
+pub fn viol_key(vs: &[Viol]) -> (f64, f64) {
+    (vs.iter().filter(|v| v.kind == "short").map(Viol::amount).sum(), vs.iter().map(Viol::amount).sum())
+}
+
+/// `a` is no worse than `b` on [`viol_key`]: no more short amount, and no more total amount.
+fn key_le(a: (f64, f64), b: (f64, f64)) -> bool {
+    a.0 <= b.0 + 1e-9 && a.1 <= b.1 + 1e-9
+}
+
 pub struct Drawer<'a> {
     /// D7: per pair lead net, the distance from the wire's own end pads inside which a via pair
     /// is placed only when no site farther away is valid (the fan-out zone needs that room).
@@ -680,6 +701,9 @@ pub struct Drawer<'a> {
     /// point)` ([`super::viaopt::relocate_vias`]); [`Drawer::place_vias`] takes it when it is
     /// legal there, else searches as before. Empty: no planned sites.
     pub via_site: BTreeMap<(WireId, usize), (usize, Vec2)>,
+    /// The planned sites whose relocation still predicts a violation ([`super::viaopt::RelocReport::tight`]):
+    /// they pass only the side test on the drawing's nominal chords, not the one on the plan's taut geometry.
+    pub via_site_tight: std::collections::BTreeSet<(WireId, usize)>,
     /// 5.4 `[search] branch_relocate`: a junction point the plan moved, per wire and traversal:
     /// the wire's run is split there (drawn through it), like at a via without a layer change
     /// ([`super::viaopt::relocate_junctions`]). Empty: none.
@@ -764,6 +788,7 @@ impl<'a> Drawer<'a> {
             drawn_x: vec![None; st.passes.len()],
             end_at: BTreeMap::new(),
             via_site: BTreeMap::new(),
+            via_site_tight: Default::default(),
             split_at: BTreeMap::new(),
             force: false,
             via_viol: BTreeMap::new(),
@@ -1353,7 +1378,8 @@ impl<'a> Drawer<'a> {
         [0.5, 0.375, 0.625, 0.25, 0.75, 0.125, 0.875].iter().map(|&f| (k, at(f))).collect()
     }
 
-    /// P6: price of a via of wire `w` (diameter `d`) at `p` for the room the plan keeps for the
+    /// P6: price of a via of wire `w` (reach diameter `d`, [`crate::vias::via_reach`] x 2: the
+    /// disc or the drill's hole clearance, whichever reaches further) at `p` for the room the plan keeps for the
     /// other nets' wires not drawn yet through the triangles of its interval `k0..=k1`: per such
     /// wire, the depth by which the via disc plus the clearance reaches into the corridor of the
     /// wire's planned path (its taut chord and its packed nominal chord there; half its width
@@ -1400,14 +1426,14 @@ impl<'a> Drawer<'a> {
     }
 
     /// P6: price of the room a via pair keeps for the wires the plan crosses between its two
-    /// vias. With the wire's previous via at `prev` (traversal, centre, size), a via of diameter
-    /// `d` at `p` in traversal `k` leaves the wires of `xs` that cross the wire in traversals
-    /// `prev.k..=k` (and are not drawn yet) the gap between the two discs; they need half of each
-    /// via, their widths and a clearance either side. Short of that by `depth`, the price is
+    /// vias. With the wire's previous via at `prev` (traversal, centre, size), a via of size
+    /// `sz` at `p` in traversal `k` leaves the wires of `xs` that cross the wire in traversals
+    /// `prev.k..=k` (and are not drawn yet) the gap between the two discs; they need the reach of
+    /// each via ([`crate::vias::via_reach`], 5.4 task 1), their widths and a clearance either side. Short of that by `depth`, the price is
     /// `room x pitch x (x + x^2)` with `x = depth / pitch` and `pitch` the widths plus clearances
     /// of those wires: graded, no wall, like [`Drawer::via_plan_price`]. 0 without a previous via
     /// or a wire crossing between. O(crossings).
-    fn via_pair_price(&self, w: WireId, prev: Option<(usize, Vec2, ViaSize)>, xs: &[(usize, WireId)], k: usize, p: Vec2, d: f64) -> f64 {
+    fn via_pair_price(&self, w: WireId, prev: Option<(usize, Vec2, ViaSize)>, xs: &[(usize, WireId)], k: usize, p: Vec2, sz: ViaSize) -> f64 {
         let Some((k0, q, sq)) = prev else { return 0.0 };
         let wi = &self.st.wires[w];
         let (lo, hi) = (k0.min(k), k0.max(k));
@@ -1424,7 +1450,10 @@ impl<'a> Drawer<'a> {
         if pitch <= 0.0 {
             return 0.0;
         }
-        let need = 0.5 * (sq.d as f64 + d) + wi.s + pitch;
+        // Each via as its reach (5.4 task 1: the hole clearance of a small via's drill reaches
+        // past its disc's clearance), then the crossing wires and their clearances.
+        let r = &self.model.rules;
+        let need = crate::vias::via_reach(r, wi.net, sq) + crate::vias::via_reach(r, wi.net, sz) + wi.s + pitch;
         let depth = need - (p - q).len();
         if depth <= 0.0 {
             return 0.0;
@@ -1473,11 +1502,22 @@ impl<'a> Drawer<'a> {
         for (i, &(ka, kb)) in plan.vias.iter().enumerate() {
             let ka = out.last().map_or(ka, |l| ka.max(l.0));
             let mut done = false;
+            // P6 (d): the planned site when it is not free: the search then starts next to it.
+            let mut missed: Option<Vec2> = None;
             // 5.4: the plan's site first, as it is, when every rule holds there.
             if let Some(&(k, p)) = self.via_site.get(&(w, i)).filter(|s| (ka..=kb.max(ka)).contains(&s.0)) {
                 for &sz in &sizes {
                     let item = via_item(net, p, sz, Some(w));
-                    if self.via_side_ok(w, k, p, plan.layers[i], plan.layers[i + 1]) && self.check_ok(&item) && self.via_hole_ok(p, sz, net) && self.via_own_pad_ok(p, sz, net) {
+                    // The side test on the drawing's nominal chords, or on the plan's taut
+                    // geometry the relocation balanced the via on (P6 a: the partners then
+                    // follow the via, [`Drawer::follow_vias`]).
+                    let (la, lb) = (plan.layers[i], plan.layers[i + 1]);
+                    let taut_ok = || !self.via_site_tight.contains(&(w, i)) && self.via_side_ok_taut(w, k, p, la, lb);
+                    // P6 (d): with the previous via as drawn (the plan's site of that one may not
+                    // have been free), the pair still leaves the wires that cross between them
+                    // their room ([`Drawer::via_pair_price`] 0); else the search prices the site.
+                    let pair_ok = || self.via_pair_price(w, out.last().copied(), &xs, k, p, sz) <= 0.0;
+                    if (self.via_side_ok(w, k, p, la, lb) || taut_ok()) && pair_ok() && self.check_ok(&item) && self.via_hole_ok(p, sz, net) && self.via_own_pad_ok(p, sz, net) {
                         let id = self.commit(&item);
                         self.via_marks.push((w, k, p, plan.layers[i], plan.layers[i + 1], id));
                         ids.push(id);
@@ -1491,9 +1531,15 @@ impl<'a> Drawer<'a> {
                     continue;
                 }
                 self.stats.planned_sites_missed += 1;
+                // A site the relocation marked tight (no legal room on the plan's geometry,
+                // planned_crossing_window: the taut crossing lies outside the via window) tells
+                // nothing about where the next-best site is: the search runs as without a plan.
+                if !self.via_site_tight.contains(&(w, i)) {
+                    missed = Some(p);
+                }
             }
             'sizes: for &sz in &sizes {
-                let need_r = 0.5 * sz.d as f64 + self.model.rules.net_rule(net).clearance as f64;
+                let need_r = crate::vias::via_need_copper(&self.model.rules, net, sz, 0.0, self.opts.margin_nm.max(0) as f64);
                 let at = plan.at.get(i).copied().filter(|&k| (ka..=kb.max(ka)).contains(&k));
                 let mut sites = at.map_or(Vec::new(), |k| self.chord_sites(w, k));
                 if let Some(k) = at {
@@ -1502,6 +1548,22 @@ impl<'a> Drawer<'a> {
                 sites.extend(self.via_candidates(w, ka, kb.max(ka), need_r, at));
                 if self.opts.via_offset_sites {
                     sites.extend(self.via_extra(w, ka, kb.max(ka), sz.d as f64, self.model.rules.net_rule(net).clearance as f64));
+                }
+                // P6 (d): a planned site that was not free: the next-best site is the nearest one
+                // to it on the plan's taut path (the force balance put it there; the plan's
+                // crossings keep their order along that path), so those come first, nearest
+                // first, and the distance is priced (below). Polubasov 2001, printed p. 4.
+                if let Some(p0) = missed {
+                    let mut near: Vec<(usize, Vec2)> = Vec::new();
+                    for k in ka..=kb.max(ka) {
+                        let pl = self.taut_chord(w, k);
+                        for x in pl.windows(2) {
+                            near.extend((0..=16).map(|j| (k, x[0] + (x[1] - x[0]) * (j as f64 / 16.0))));
+                        }
+                    }
+                    near.sort_by(|a, b| (a.1 - p0).len2().total_cmp(&(b.1 - p0).len2()));
+                    near.extend(sites);
+                    sites = near;
                 }
                 // D7: a via pair keeps out of its pads' fan-out zone where a site farther away exists
                 // (sites near the pads go last, in their order).
@@ -1560,7 +1622,12 @@ impl<'a> Drawer<'a> {
                         let dv = (sz.d as f64).max(1.0);
                         let xq = (dv - room).max(0.0) / dv;
                         let squeeze = self.octi.room * dv * (xq + xq * xq);
-                        let price = self.via_plan_price(w, ka, kb.max(ka), p, sz.d as f64) + self.via_pair_price(w, out.last().copied(), &xs, k, p, sz.d as f64) + squeeze;
+                        // P6 (d): away from a planned site that was not free, graded.
+                        let xm = missed.map_or(0.0, |p0| (p - p0).len() / dv);
+                        let squeeze = squeeze + self.octi.room * dv * (xm + xm * xm);
+                        // 5.4 task 1: the via as its reach disc (the hole rule included).
+                        let dr = 2.0 * crate::vias::via_reach(&self.model.rules, net, sz);
+                        let price = self.via_plan_price(w, ka, kb.max(ka), p, dr) + self.via_pair_price(w, out.last().copied(), &xs, k, p, sz) + squeeze;
                         if dbg {
                             eprintln!("VIACAND wire {w} via {i} k {k} at ({:.3},{:.3}) room {:.0} price {:.0}", p.x / 1e6, -p.y / 1e6, room, price);
                         }
@@ -1586,6 +1653,7 @@ impl<'a> Drawer<'a> {
                     self.via_marks.push((w, k, p, plan.layers[i], plan.layers[i + 1], id));
                     ids.push(id);
                     out.push((k, p, sz));
+                    self.stats.via_searched += 1;
                     done = true;
                     break 'sizes;
                 }
@@ -1598,6 +1666,7 @@ impl<'a> Drawer<'a> {
                     ids.push(id);
                     out.push((k, p, sz));
                     self.via_viol.entry(w).or_default().extend(vs);
+                    self.stats.via_forced += 1;
                     continue;
                 }
             }
@@ -1692,7 +1761,7 @@ impl<'a> Drawer<'a> {
         let turn_at = |k: usize| wi.turns.iter().find(|x| x.0 == k).map(|x| pr.pos[x.1]);
         let mut best: Option<(f64, f64, usize, Vec2, ViaSize, Vec<Viol>)> = None;
         for &sz in sizes {
-            let need_r = 0.5 * sz.d as f64 + self.model.rules.net_rule(net).clearance as f64;
+            let need_r = crate::vias::via_need_copper(&self.model.rules, net, sz, 0.0, self.opts.margin_nm.max(0) as f64);
             let at = plan.at.get(i).copied().filter(|&k| (ka..=kb).contains(&k));
             let mut sites = at.map_or(Vec::new(), |k| self.chord_sites(w, k));
             sites.extend(self.via_candidates(w, ka, kb, need_r, at));
@@ -1737,7 +1806,118 @@ impl<'a> Drawer<'a> {
     /// leaves its run on a layer no way to its first pass but across that wire (wiccon MOSI,
     /// D2). O(traversals of the triangle x chord corners).
     pub fn via_side_ok(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize) -> bool {
-        self.via_side_ok_(w, k, p, la, lb)
+        self.via_side_ok_(w, k, p, la, lb, false)
+    }
+
+    /// [`Drawer::via_side_ok`] on the plan's taut geometry (every wire's chord the taut path
+    /// [`Packer::taut`] that the via relocation balanced the via on), not the drawing's packed
+    /// nominal chords. A planned site that holds here keeps the plan's crossing order; the
+    /// partners' nominal chords then follow the via ([`Drawer::follow_vias`]).
+    pub fn via_side_ok_taut(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize) -> bool {
+        self.via_side_ok_(w, k, p, la, lb, true)
+    }
+
+    /// Fraction along pass `pid`'s edge (from its first end) of the point `x` on it.
+    fn edge_frac(&self, pid: PassId, x: Vec2) -> f64 {
+        let pr = &self.b.proj;
+        let [p, q] = pr.edges[self.st.passes[pid].edge];
+        let (pp, pq) = (pr.pos[p], pr.pos[q]);
+        ((x - pp).dot(pq - pp) / (pq - pp).len2().max(1.0)).clamp(0.0, 1.0)
+    }
+
+    /// P6 (a), partners follow the via: after the vias are placed and the edges packed, a wire
+    /// not drawn yet whose packed nominal chord in the triangle of another net's via runs on the
+    /// wrong side of it (it would cross the via wire's part on its own layer, [`Drawer::via_side_ok`])
+    /// takes its crossing points of the plan's taut path on the two edges of that triangle
+    /// instead (its nominal and interval widened to them), when that keeps it on the via's right
+    /// side. The plan decided which part of the via wire the partner crosses (Polubasov 2001,
+    /// printed p. 4: a via between the two crossings); the drawing then re-reads the partner's
+    /// crossing from the via it drew, so the lane walls, the planned room and the run's portals
+    /// all lead the partner past the via on the planned side. Returns the partners moved.
+    /// O(vias x traversals of their triangle).
+    pub fn follow_vias(&mut self) -> usize {
+        if self.prov_layer.is_empty() {
+            return 0;
+        }
+        let marks: Vec<(WireId, usize, Vec2, usize, usize)> = self.via_marks.iter().map(|m| (m.0, m.1, m.2, m.3, m.4)).collect();
+        let mut moved = 0usize;
+        for (w, k, p, la, lb) in marks {
+            let st = self.st;
+            let wi = &st.wires[w];
+            let Some(&t) = wi.tris.get(k) else { continue };
+            for &(o, ok) in &st.tri_trav[t] {
+                let oi = &st.wires[o];
+                if o == w || !oi.alive || oi.net == wi.net || self.polys[o].is_empty() {
+                    continue;
+                }
+                if self.partner_side_ok(w, k, p, la, lb, o, ok, None) {
+                    continue;
+                }
+                let taut = self.taut_chord(o, ok);
+                if taut.len() < 2 {
+                    continue;
+                }
+                let n = oi.passes.len();
+                let ends = [(ok.checked_sub(1), taut[0]), ((ok < n).then_some(ok), *taut.last().expect("chord"))];
+                let fr: Vec<(PassId, f64)> = ends.iter().filter_map(|&(j, x)| j.map(|j| (oi.passes[j], self.edge_frac(oi.passes[j], x)))).collect();
+                if fr.is_empty() || !self.partner_side_ok(w, k, p, la, lb, o, ok, Some(&fr)) {
+                    // Neither the packed nor the taut crossing keeps this partner on the via's
+                    // planned side: it may cross the via wire's part on its own layer (counted and
+                    // reported; the drawing's checker then decides).
+                    self.stats.partners_unfixed += 1;
+                    if std::env::var("TOPO_VIAREL").is_ok() {
+                        eprintln!("FOLLOW wire {o} trav {ok} cannot follow via of wire {w} at ({:.3},{:.3})", p.x / 1e6, -p.y / 1e6);
+                    }
+                    continue;
+                }
+                for &(pid, f) in &fr {
+                    self.iv.nom[pid] = f;
+                    if self.iv.lo[pid].is_finite() {
+                        self.iv.lo[pid] = self.iv.lo[pid].min(f);
+                        self.iv.hi[pid] = self.iv.hi[pid].max(f);
+                    }
+                }
+                moved += 1;
+            }
+        }
+        self.stats.partners_moved += moved;
+        moved
+    }
+
+    /// The side test of one partner `(o, ok)` against the via `p` of wire `w` (traversal `k`,
+    /// layers `la` -> `lb`), with the partner's nominal fractions replaced by `over` (pass,
+    /// fraction) where given. `true` when the partner's chord does not cross the via wire's
+    /// part on the partner's layer.
+    #[allow(clippy::too_many_arguments)]
+    fn partner_side_ok(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize, o: WireId, ok: usize, over: Option<&[(PassId, f64)]>) -> bool {
+        let (st, pr) = (self.st, &self.b.proj);
+        let oi = &st.wires[o];
+        let ps = &oi.passes;
+        let a = if ok > 0 { self.prov_layer[ps[ok - 1]] } else { -2 };
+        let b = if ok < ps.len() { self.prov_layer[ps[ok]] } else { -2 };
+        let lo = match (a, b) {
+            (-2, x) | (x, -2) => x,
+            (x, y) if x == y => x,
+            _ => -1,
+        };
+        let r = if lo == lb as i32 {
+            self.chord_pt(w, k + 1)
+        } else if lo == la as i32 {
+            self.chord_pt(w, k)
+        } else {
+            return true;
+        };
+        let pt = |j: usize| -> Vec2 {
+            if let Some(f) = (j >= 1 && j <= ps.len()).then(|| over.and_then(|v| v.iter().find(|x| x.0 == ps[j - 1]).map(|x| x.1))).flatten() {
+                self.portal(o, j - 1, f, f).0
+            } else {
+                self.chord_pt(o, j)
+            }
+        };
+        let mut chord = vec![pt(ok)];
+        chord.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| pr.pos[x.1]));
+        chord.push(pt(ok + 1));
+        chord.windows(2).filter(|c| seg_proper(r, p, c[0], c[1])).count() % 2 == 0
     }
 
     /// Point `j` of wire `w`'s chord polyline (0: its start terminal, `n + 1`: its end, else
@@ -1759,7 +1939,7 @@ impl<'a> Drawer<'a> {
         }
     }
 
-    fn via_side_ok_(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize) -> bool {
+    fn via_side_ok_(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize, taut: bool) -> bool {
         if self.prov_layer.is_empty() {
             return true;
         }
@@ -1782,16 +1962,22 @@ impl<'a> Drawer<'a> {
                 continue;
             }
             let lo = chord_layer(o, ok);
+            let own = if taut { self.taut_chord(w, k) } else { Vec::new() };
             let r = if lo == lb as i32 {
-                self.chord_pt(w, k + 1)
+                own.last().copied().unwrap_or_else(|| self.chord_pt(w, k + 1))
             } else if lo == la as i32 {
-                self.chord_pt(w, k)
+                own.first().copied().unwrap_or_else(|| self.chord_pt(w, k))
             } else {
                 continue;
             };
-            let mut chord = vec![self.chord_pt(o, ok)];
-            chord.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| pr.pos[x.1]));
-            chord.push(self.chord_pt(o, ok + 1));
+            let chord = if taut && self.taut_chord(o, ok).len() >= 2 {
+                self.taut_chord(o, ok)
+            } else {
+                let mut c = vec![self.chord_pt(o, ok)];
+                c.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| pr.pos[x.1]));
+                c.push(self.chord_pt(o, ok + 1));
+                c
+            };
             let crossings = chord.windows(2).filter(|c| seg_proper(r, p, c[0], c[1])).count();
             if crossings % 2 == 1 {
                 return false;
@@ -2434,6 +2620,15 @@ impl<'a> Drawer<'a> {
                             continue;
                         }
                     }
+                    // P6 (c): pulled taut in its corridor (no bumps, no spikes).
+                    if self.opts.draw_pull_taut && neck.is_none() {
+                        if let Some((p2, its2, pn2)) = self.pull_taut(w, k0, k1, layer, lid, &pts, &pneck) {
+                            self.stats.pulled += pts.len() - p2.len();
+                            pts = p2;
+                            items = its2;
+                            pneck_out = pn2;
+                        }
+                    }
                     let first = committed.len();
                     for it in &items {
                         let id = self.commit(it);
@@ -2550,7 +2745,12 @@ impl<'a> Drawer<'a> {
                         eprintln!("FORCED wire {w} layer {layer} k {k0}..{k1}: {} price {:.1}, {} pts, viols {:?}", c.5, c.0, c.1.len(), c.3.iter().map(|v| (v.kind, v.against.clone(), (v.depth_nm / 1e3).round(), (v.len_nm / 1e3).round())).collect::<Vec<_>>());
                     }
                 }
-                if let Some((price, pts, items, vs, neck, src)) = cands.into_iter().min_by(|a, b| a.0.total_cmp(&b.0)) {
+                // Shorts first, then the total violation price (a funnel run through a via must
+                // not beat a relaxed run that only grazes clearances).
+                if let Some((price, pts, items, vs, neck, src)) = cands.into_iter().min_by(|a, b| {
+                    let (ka, kb) = (viol_key(&a.3), viol_key(&b.3));
+                    ka.0.total_cmp(&kb.0).then(ka.1.total_cmp(&kb.1)).then(a.0.total_cmp(&b.0))
+                }) {
                     // M-45: the forced run octilinear too, where that breaks no rule deeper than
                     // the run itself and costs no more violation price.
                     let (mut pts, mut items, mut vs) = (pts, items, vs);
@@ -2567,7 +2767,7 @@ impl<'a> Drawer<'a> {
                             let rep = self.checker.check_against(&self.idx, &its, &[]);
                             let mut v2 = self.viols_of(&its, &rep);
                             v2.extend(self.graze_viols(w, &its));
-                            if v2.iter().map(Viol::amount).sum::<f64>() <= price + 1e-9 {
+                            if v2.iter().map(Viol::amount).sum::<f64>() <= price + 1e-9 && key_le(viol_key(&v2), viol_key(&vs)) {
                                 pts = o.pts;
                                 items = its;
                                 vs = v2;
@@ -2582,6 +2782,21 @@ impl<'a> Drawer<'a> {
                             eprintln!("OCTIFORCE wire {w} none (relax {relax:.0})");
                         }
                         self.stats.octi_s += t_o.elapsed().as_secs_f64();
+                    }
+                    // P6 (c): the forced run pulled taut too, where its violation price does not rise.
+                    if self.opts.draw_pull_taut && neck.is_none() && pneck.is_none() {
+                        if let Some(p2) = self.pull_pts(w, k0, k1, layer, &pts, Some(viol_key(&vs))) {
+                            let its = self.run_items(w, layer, &p2);
+                            let rep = self.checker.check_against(&self.idx, &its, &[]);
+                            let mut v2 = self.viols_of(&its, &rep);
+                            v2.extend(self.graze_viols(w, &its));
+                            if key_le(viol_key(&v2), viol_key(&vs)) {
+                                self.stats.pulled += pts.len() - p2.len();
+                                pts = p2;
+                                items = its;
+                                vs = v2;
+                            }
+                        }
                     }
                     match src {
                         "relaxed" => self.stats.forced_relaxed += 1,
@@ -2720,6 +2935,145 @@ impl<'a> Drawer<'a> {
             wo.length_nm = wo.runs.iter().map(|(_, p)| p.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>()).sum();
         }
         ok
+    }
+
+    /// P6 (c): the drawn run `pts` of wire `w` (traversals `k0..=k1`, on `layer`) pulled taut
+    /// inside its own corridor: a vertex goes where the straight leg between its neighbours keeps
+    /// every rule (the checker against all copper accepted so far), keeps the wire on the same
+    /// side of every wire not drawn yet (the parity of its crossings with their nominal chords on
+    /// this layer in the run's triangles, and with the walls of their vias, [`Drawer::via_walls`],
+    /// is unchanged: the homotopy class stays) and, in the octilinear style, makes no 0/45/90
+    /// degree run any-angle. Repeated until nothing changes. A rubber band has no bumps: the
+    /// drawn wire is the shortest path of its homotopy class (Dayan 1997, pp. 15-16 and 22, the
+    /// spokes keep the spacing; Popov & Popov 2012, TopoR's minimum-length wire path under the
+    /// design rules), so the +-0.03 mm bumps and the spikes the lane walls left (P6 evidence,
+    /// interleaved_boundary) cannot survive, and KiCad's Cleanup finds nothing to merge there.
+    /// `None` when no vertex goes. O(passes x vertices x checker query).
+    #[allow(clippy::type_complexity)]
+    pub(super) fn pull_taut(&self, w: WireId, k0: usize, k1: usize, layer: usize, lid: u32, pts: &[Vec2], pneck: &Option<super::exact::Neck>) -> Option<(Vec<Vec2>, Vec<Item>, Option<(f64, [f64; super::exact::NECK_ZONES])>)> {
+        let cur = self.pull_pts(w, k0, k1, layer, pts, None)?;
+        self.realise(w, layer, lid, &cur, pneck).map(|(its, pn)| (cur, its, pn))
+    }
+
+    /// The vertex removal of [`Drawer::pull_taut`]; with `forced = Some(price)` (a run drawn by
+    /// force, never drop) a leg is taken when the whole run's violation price stays at most
+    /// `price` (then lowered to the new one) instead of when the leg is legal.
+    fn pull_pts(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], mut forced: Option<(f64, f64)>) -> Option<Vec<Vec2>> {
+        if pts.len() < 3 {
+            return None;
+        }
+        let (st, pr) = (self.st, &self.b.proj);
+        let wi = &st.wires[w];
+        // The guards: undrawn wires' chords on this layer and their via walls.
+        let mut guards: Vec<(Vec2, Vec2)> = self.via_walls(w, k0, k1.min(wi.tris.len().saturating_sub(1)), layer);
+        let lay = |o: WireId, j: usize| -> i32 { st.wires[o].passes.get(j).map_or(-2, |&q| self.prov_layer.get(q).copied().unwrap_or(-2)) };
+        for k in k0..=k1.min(wi.tris.len().saturating_sub(1)) {
+            for &(o, ok) in &st.tri_trav[wi.tris[k]] {
+                let oi = &st.wires[o];
+                if o == w || !oi.alive || oi.net == wi.net || self.drawn_once[o] || self.polys[o].is_empty() {
+                    continue;
+                }
+                let (a, b) = (if ok > 0 { lay(o, ok - 1) } else { -2 }, lay(o, ok));
+                let on = |x: i32| x == layer as i32;
+                if !(on(a) || on(b)) {
+                    continue;
+                }
+                let mut c = vec![self.chord_pt(o, ok)];
+                c.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| pr.pos[x.1]));
+                c.push(self.chord_pt(o, ok + 1));
+                guards.extend(c.windows(2).map(|x| (x[0], x[1])));
+            }
+        }
+        let cross = |poly: &[Vec2], g: &(Vec2, Vec2)| poly.windows(2).filter(|x| seg_proper(x[0], x[1], g.0, g.1)).count() % 2;
+        // The planned room of those wires (reserve planned room): a shortcut that reaches deeper
+        // into the corridor of an undrawn wire's planned path (its taut and packed chords, half
+        // its width plus the clearance either side) than the two legs it replaces is not taken.
+        // Priced like `planned_room` (`pitch x (x + x^2)`, `x = depth / pitch`), compared, no wall.
+        // Not in a forced run: there a shortcut is taken only when it lowers or keeps the run's
+        // violations and adds or deepens no short ([`viol_key`]); measured on qmtech, the room
+        // test there kept forced runs on their violations (new DRC 177 -> 658, shorts 62 -> 241),
+        // without it 245 / 45 (main 434 / 104), planned_crossing_window cycles stays short-free.
+        let mut corr: Vec<(Vec<Vec2>, f64, f64)> = Vec::new();
+        let (ka, kb) = (k0.saturating_sub(1), (k1 + 1).min(wi.tris.len().saturating_sub(1)));
+        for k in ka..=kb {
+            for &(o, ok) in &st.tri_trav[wi.tris[k]] {
+                let oi = &st.wires[o];
+                if o == w || !oi.alive || oi.net == wi.net || self.drawn_once[o] || self.polys[o].is_empty() {
+                    continue;
+                }
+                let (a, b) = (if ok > 0 { lay(o, ok - 1) } else { -2 }, lay(o, ok));
+                if !(a == layer as i32 || b == layer as i32) {
+                    continue;
+                }
+                let s = oi.s.max(wi.s);
+                let reach = 0.5 * wi.w + s + 0.5 * oi.w;
+                let pitch = (oi.w + s).max(1.0);
+                let mut nom = vec![self.chord_pt(o, ok)];
+                nom.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| pr.pos[x.1]));
+                nom.push(self.chord_pt(o, ok + 1));
+                corr.push((nom, reach, pitch));
+                let taut = self.taut_chord(o, ok);
+                if taut.len() >= 2 {
+                    corr.push((taut, reach, pitch));
+                }
+            }
+        }
+        let room_price = |legs: &[Vec2]| -> f64 {
+            let mut tot = 0.0;
+            for (c, reach, pitch) in &corr {
+                let d = legs.windows(2).flat_map(|l| c.windows(2).map(move |x| seg_seg_dist(l[0], l[1], x[0], x[1]))).fold(f64::INFINITY, f64::min);
+                let depth = reach - d;
+                if depth > 0.0 {
+                    let x = depth / pitch;
+                    tot += pitch * (x + x * x);
+                }
+            }
+            tot
+        };
+        let octi = self.octi.on;
+        let mut cur = pts.to_vec();
+        let mut changed = false;
+        for _pass in 0..8 {
+            let mut any = false;
+            let mut i = 1;
+            while i + 1 < cur.len() {
+                let (a, b, c) = (cur[i - 1], cur[i], cur[i + 1]);
+                let keep_octi = octi && super::octi::octi_dir(c - a).is_none() && super::octi::octi_dir(b - a).is_some() && super::octi::octi_dir(c - b).is_some();
+                if keep_octi || (c - a).len2() < 1.0 || guards.iter().any(|g| cross(&[a, b, c], g) != cross(&[a, c], g)) || (forced.is_none() && room_price(&[a, c]) > room_price(&[a, b, c]) + 1.0) {
+                    i += 1;
+                    continue;
+                }
+                let ok = match forced {
+                    None => self.checker.check_against(&self.idx, &self.run_items(w, layer, &[a, c]), &[]).violations.is_empty(),
+                    Some(price) => {
+                        let mut cand = cur.clone();
+                        cand.remove(i);
+                        let its = self.run_items(w, layer, &cand);
+                        let rep = self.checker.check_against(&self.idx, &its, &[]);
+                        let mut vs = self.viols_of(&its, &rep);
+                        vs.extend(self.graze_viols(w, &its));
+                        let k2 = viol_key(&vs);
+                        if key_le(k2, price) {
+                            forced = Some(k2);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                };
+                if ok {
+                    cur.remove(i);
+                    any = true;
+                    changed = true;
+                } else {
+                    i += 1;
+                }
+            }
+            if !any {
+                break;
+            }
+        }
+        changed.then_some(cur)
     }
 
     /// The tracks of the run `pts` of wire `w` when they pass the checker as the drawing's attempts
