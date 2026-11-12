@@ -13,6 +13,8 @@ engine shares (engines count "connections" differently):
 - cleanup-unstable items = what KiCad's Edit -> Cleanup Tracks & Vias (every option on) would remove or change in
                    topor's copper, replayed by harness.cleanup_check on the routed copy as the plugin hands it back
                    (route_board metric `cleanup_unstable`); 0 is the target
+- validity       = runs whose router rules differ from the hand board's own files (route_board metric `valid`,
+                   harness.validity: fab floors raised, custom rules floored, ...) are listed under the table
 
 The table is kept simple on purpose (user 2026-11-06: "connected, total length, and visual inspection"; compare
 against hand routed only). Vias, new DRC and detour stay in the --json rows. Seeds s1.. give the spread: median and
@@ -124,7 +126,9 @@ def run_row(d: Path, board: str) -> dict | None:
             "cpu_s": m.get("router_cpu_s"), "stop": m.get("stop_reason"),
             "hit": str(m.get("stop_reason") or "").startswith("timeout"),
             "unconnected": m["unconnected"], "routed": m.get("routed"), "connections": m.get("connections"),
-            "cleanup": m.get("cleanup_unstable")}
+            "cleanup": m.get("cleanup_unstable"),
+            # M0v validity gate (harness.validity): did the router work to the reference's own rules?
+            "valid": m.get("valid"), "invalid": (m.get("validity") or {}).get("invalid") or []}
 
 
 def _spread(xs: list, fmt: str = ".1f") -> str:
@@ -212,7 +216,17 @@ def scorecard(root: Path) -> tuple[str, dict]:
              "core and count as unconnected; zone fills are judged after kicad-cli's refill, not as saved; total "
              "length compares routing styles too: a hand board that routes a pour net (GND) with tracks is longer "
              "than topor's pour + stubs (dcsgonebadge hand: 1.5 m of GND track).\n")
-    return limits_line(lim) + "\n\n" + head + "\n".join(lines) + "\n" + blind, rows
+    inval = []
+    for b, runs in rows.items():
+        bad = sorted(k for k, r in runs.items() if r.get("valid") is False)
+        if bad:
+            r0 = runs[bad[0]]
+            inval.append(f"- {b} (runs {', '.join(f's{k}' for k in bad)}): " + "; ".join(r0["invalid"][:4])
+                         + (" ..." if len(r0["invalid"]) > 4 else ""))
+    valid_txt = ("\nValidity (harness.validity): these runs worked to other rules than the reference (hand) board's own "
+                 "files, so their comparison with the hand board is not like for like:\n" + "\n".join(inval) + "\n"
+                 if inval else "")
+    return limits_line(lim) + "\n\n" + head + "\n".join(lines) + "\n" + valid_txt + blind, rows
 
 
 def compare(root_a: Path, root_b: Path, *, force: bool = False) -> tuple[str, int]:

@@ -9,7 +9,7 @@ from toporlib.dru import (  # noqa: F401  (re-export)
     _UNITS, DruRule, _match_term, _parse_sexp, _tokenize, _value_nm, match_condition, parse_dru,
 )
 from toporlib.rules import (  # noqa: F401  (re-export)
-    JLCPCB_1OZ, NetClassVals, _POWER_RE, _REFUSE, _nz, resolve_rules_from_project,
+    DEFAULT_FAB_PROFILE, JLCPCB_1OZ, NetClassVals, _POWER_RE, _REFUSE, _nz, resolve_rules_from_project,
 )
 
 
@@ -70,12 +70,14 @@ def resolve_rules(
     settings_table: dict[str, int] | None = None,
     profile: dict = JLCPCB_1OZ,
     apply_fab_floors: bool = True,
+    fab_profile: str = DEFAULT_FAB_PROFILE,
 ) -> dict:
     """Resolve design rules; manufacturer minimums (the profile) are FLOORS. See
-    `toporlib.rules.resolve_rules_from_project` for the semantics (floors, `floors_applied`, warnings)."""
+    `toporlib.rules.resolve_rules_from_project` for the semantics (floors, `floors_applied`, warnings;
+    `fab_profile` = ``[rules] fab_profile``, ``"board"`` = no profile)."""
     pro, classes, of, codes = _swig_inputs(board)
     return resolve_rules_from_project(
         pro, dru_text, netclass_of=of, classes=classes, widths_before=widths_before,
-        settings_table=settings_table, profile=profile, apply_fab_floors=apply_fab_floors,
+        settings_table=settings_table, profile=profile, apply_fab_floors=apply_fab_floors, fab_profile=fab_profile,
         copper_layer_count=int(board.GetCopperLayerCount()), net_codes=codes,
         layer_names={int(l): str(board.GetLayerName(l)) for l in board.GetEnabledLayers().CuStack()})

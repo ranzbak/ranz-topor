@@ -4,7 +4,8 @@
 
 For every pattern under PATTERNS_DIR (default `scratch/fit-patterns`, written by `harness.fit_patterns`) the
 problem board is exported as the engine's BoardModel (`harness.model.export_model`, rules from
-`harness.rules.resolve_rules`, layer roles as the plugin resolves them, the same steps as `harness.route_board`)
+`harness.rules.resolve_rules` with ``[rules] fab_profile = "board"``: the hand numbers use the board's own rules, see
+`harness.validity`; layer roles as the plugin resolves them, the same steps as `harness.route_board`)
 and written with the cut and wire data of its `expected.json` to OUT_DIR/<name>.json (default
 `engine/tests/fixtures/fit`). `engine/tests/topo_fit.rs` feeds the expected wires (their witness polylines) to the
 cut model on these boards and checks the predicted capacity, demand and slack per cut against the hand numbers.
@@ -37,7 +38,7 @@ def export_one(pdir: Path) -> dict:
         cp = copy_project(pdir / "problem" / f"{name}.kicad_pcb", Path(tmp) / name)
         b = load_board(cp)
         dru = cp.dru.read_text() if cp.dru is not None else None
-        rules = resolve_rules(b, dru_text=dru, widths_before=record_widths(b))
+        rules = resolve_rules(b, dru_text=dru, widths_before=record_widths(b), fab_profile="board")
         model = export_model(b, rules, name=name, dru_text=dru)
         del b
     roles, _, _ = resolve_layer_roles_ex([(l["name"], l["kind"]) for l in model["layers"]], {})

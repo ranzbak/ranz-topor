@@ -47,6 +47,10 @@ VIA_CLASS = (0.80, 0.40)  # net class via: NEVER the expected one
 MIN_ANNULAR, MIN_DRILL, MIN_VIA_D = 0.10, 0.25, 0.45
 VIA_PRICE = 25.0
 SQ2 = math.sqrt(2.0)
+#: The rules every expected answer here is built for (harness.validity ``rules_assumed``): the board's own Board
+#: Setup and net classes (no fab profile: route with ``[rules] fab_profile = "board"``) and the via rule of the
+#: answers, ``[vias] size = "board_min"`` (the smallest Board Setup via with pi x drill >= the trace width).
+RULES_ASSUMED = {"authority": "board", "margin": 0.0, "options": {"vias.size": "board_min"}}
 RULES_VP = dict(RULES, min_track_width=0.20, min_via_diameter=MIN_VIA_D, min_through_hole_diameter=MIN_DRILL,
                 min_via_annular_width=MIN_ANNULAR, min_hole_to_hole=0.25, min_hole_clearance=HOLE_CLEAR,
                 min_clearance=CLEAR)
@@ -808,7 +812,7 @@ def generate(name: str, out: Path, *, png: bool = True, drc: bool = True) -> dic
                                      "copper_to_edge": EDGE}, "via_price_mm": VIA_PRICE},
            "pins": pins, "connections": [{"net": n, "from": a, "to": b} for n, a, b in pat.connections],
            "expected": pat.expected, "reference": sol_doc(pat.ref), "careless": sol_doc(pat.careless), "kicad": kicad,
-           "topor": "see topor50/ (filled by the TopoR run, if any)"}
+           "topor": "see topor50/ (filled by the TopoR run, if any)", "rules_assumed": RULES_ASSUMED}
     (d / "expected.json").write_text(json.dumps(doc, indent=2) + "\n")
     paths["expected"] = d / "expected.json"
     if png:

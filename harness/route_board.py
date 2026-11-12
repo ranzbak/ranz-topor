@@ -19,6 +19,10 @@ Metrics (all measured on the routed copy by `kicad-cli pcb drc --refill-zones`, 
   `cleanup_unstable`: what KiCad's Edit -> Cleanup Tracks & Vias would remove or change in topor's copper
   (`harness.cleanup_check` on the routed copy as saved, i.e. with the zone fills the plugin commits; details in
   `<name>--cleanup.json`).
+Validity first (M0v, `harness.validity`): the engine-input rules of the run are compared with the rules the expected
+answer assumes (a pattern's expected.json ``rules_assumed``, else the board's own files under ``[rules] fab_profile =
+"board"``); a difference makes the run INVALID (`<name>--validity.json`, metrics ``valid``, the summary's first line):
+its faults are then not router faults.
 `TOPOR_TREE` / `TOPOR_ENGINE_SITE` (see tools/route_board.sh) select the code tree and engine wheel, which is
 how the frozen classic reference is run from a worktree of main @ 64b3979.
 """
@@ -101,7 +105,7 @@ def board_netclasses(pc) -> tuple:
 
 def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, timeout_s: float | None = None,
                 clock: str | None = None, whole_project: bool = False, png: bool = True, name: str | None = None,
-                declared_layers: bool = False) -> dict:
+                declared_layers: bool = False, expected: Path | None = None) -> dict:
     import topor_engine
     strip = _load_strip()
     from harness.model import export_model, load_board
@@ -123,7 +127,15 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
     widths = record_widths(hb)
     dru = inp.dru.read_text() if inp.dru is not None else None
     ib = load_board(inp)
-    rules = resolve_rules(ib, dru_text=dru, widths_before=widths)
+    cfg = Config.defaults()
+    ch = dict(overrides or {})
+    if timeout_s is not None:
+        ch[("run", "timeout_s")] = float(timeout_s)
+    if clock is not None:
+        ch[("run", "timeout_clock")] = clock
+    if ch:
+        cfg = cfg.with_values(ch)
+    rules = resolve_rules(ib, dru_text=dru, widths_before=widths, fab_profile=str(cfg.get("rules", "fab_profile")))
     model = export_model(ib, rules, name=name, dru_text=dru)
     if not declared_layers:
         # Layer roles as the plugin resolves them (config > KiCad types > defaults by copper count): a
@@ -134,15 +146,6 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
             if l["name"] in roles:
                 l["routable"] = is_routed(roles[l["name"]])
     del hb, ib
-
-    cfg = Config.defaults()
-    ch = dict(overrides or {})
-    if timeout_s is not None:
-        ch[("run", "timeout_s")] = float(timeout_s)
-    if clock is not None:
-        ch[("run", "timeout_clock")] = clock
-    if ch:
-        cfg = cfg.with_values(ch)
 
     app = None
     try:  # the run flow renders its preview with wx; without a display it degrades to a warning
@@ -247,14 +250,42 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
         except Exception as e:  # noqa: BLE001
             m["png"] = None
             m["png_error"] = f"{type(e).__name__}: {e}"
+    m.update(_validity(board, hand, inp, cfg, outcome, out_dir, name, expected))
     (out_dir / f"{name}--metrics.json").write_text(json.dumps(m, indent=1))
     return m
+
+
+def _validity(board: str, hand, inp, cfg, outcome, out_dir: Path, name: str, expected: Path | None) -> dict:
+    """M0v validity gate (harness.validity): the engine-input rules of this run against the rules the expected
+    answer assumes (`expected` / the pattern's expected.json ``rules_assumed``, else the board's own files).
+    Writes `<name>--validity.json`; returns the metrics fields ``valid`` and ``validity``. Never fails the run."""
+    from harness import validity as va
+    try:
+        exp = expected if expected is not None else va.find_expected(Path(board))
+        decl = va.declared_of(exp)
+        if outcome.model is None:
+            return {"valid": None, "validity": {"error": "the run built no model"}}
+        eff = va.model_rule_set(outcome.model, cfg)
+        brd = va.board_rule_set(inp, hand, cfg)
+        # a pattern's reference board (the hand copy) is its expected copper: it must use only what the router may
+        v = va.judge(decl, eff, brd, cfg=cfg, expected_path=exp if decl is not None else None,
+                     reference_text=Path(hand.pcb).read_text() if exp is not None else None)
+        (out_dir / f"{name}--validity.json").write_text(json.dumps(
+            {"verdict": v, "declared": decl, "board_files": brd, "effective": eff,
+             "expected_json": str(exp) if exp else None}, indent=1))
+        return {"valid": v["valid"], "validity": {"source": v["source"], "profile": v["profile"],
+                                                  "invalid": [va.diff_text(d) for d in v["invalid"]],
+                                                  "notes": v["notes"], "line": va.verdict_line(v)}}
+    except Exception as e:  # noqa: BLE001 - a gate failure is reported, never a failed run
+        return {"valid": None, "validity": {"error": f"{type(e).__name__}: {e}"}}
 
 
 def summary(m: dict) -> str:
     d = m["detour"]
     dl = f"median {d['median']} p90 {d['p90']} max {d['max']} (n={d['n']})" if d else "n/a"
+    va = m.get("validity") or {}
     return "\n".join([
+        va.get("line") or f"VALIDITY: not checked ({va.get('error', 'no data')})",
         f"route_board {m['board']}: status {m['status']}, engine {m['engine_version']}",
         f"  routed {m['routed']}/{m['connections']} ({m['routed_pct']} %)",
         f"  DRC unconnected {m['unconnected']} (hand {m['unconnected_hand']}, input {m['unconnected_input']}), "
@@ -295,10 +326,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--declared-layers", action="store_true",
                     help="route every copper layer the board declares as signal (default: the plugin's layer roles)")
     ap.add_argument("--name", default=None, help="board name in file names (default: key or pcb stem)")
+    ap.add_argument("--expected", type=Path, default=None,
+                    help="expected.json whose rules_assumed the validity gate uses (default: the pattern's own, "
+                         "next to or one level above the board; none: the board's own files)")
     a = ap.parse_args(argv)
     m = route_board(a.board, a.out_dir, overrides=dict(_kv(s) for s in a.set), timeout_s=a.timeout, clock=a.clock,
                     whole_project=a.whole_project, png=not a.no_png, name=a.name,
-                    declared_layers=a.declared_layers)
+                    declared_layers=a.declared_layers, expected=a.expected)
     print(summary(m))
     return 0
 
