@@ -91,6 +91,96 @@ pub fn via_ranges(ev: &[LEv], strict: bool) -> (Vec<(usize, usize)>, Vec<bool>) 
     (iv, ok)
 }
 
+/// Cache of [`end_site`] per (wire, end events as (traversal, fraction bits) pairs).
+type EndSites = std::collections::HashMap<(WireId, usize, u64, usize, u64), Option<(usize, Vec2)>>;
+
+/// 5.2 (`[vias] between_crossings`): a site for the via of the interval between the events `a`
+/// and `b` of wire `w` inside an end traversal, on the via's own side of the event, for an
+/// interval that has no traversal strictly between its events ([`via_ranges`] `false`).
+/// Polubasov 2001 (`polubasov2001-global-via-minimization.pdf`, printed p. 4): the layer change
+/// lies on the wire piece between two neighbouring crossings, and that piece includes the part
+/// of a crossing's triangle before (after) the crossing point; the triangle is only the
+/// triangulation's unit, so leaving it out says "no site" where the drawing finds one
+/// (`planned_crossing_window`: VCC's via between the closed B.Cu area and its crossing with SDA,
+/// drawn at (12.28, 7.9) with SDA moved aside). An end event inside its traversal (`0 < s < 1`:
+/// a crossing or a tee) gives that traversal; an event at `s = 0` holds its whole triangle to
+/// one layer and gives nothing. The traversal is a site when a candidate centre (the triangle's
+/// static candidate points, [`tri_site_points`](super::pack::tri_site_points), a barycentric
+/// grid of the triangle and points of the wire's chord on the via's side of the event) passes
+/// `free` (the static board, as the plan's other via sites; the callers also ask the triangle
+/// to hold the via's disc with its clearance, inradius >= via radius + clearance: the via
+/// stands between two events in that one triangle, and a thinner one is no site, e.g. two
+/// crossings in neighbouring slivers, `interleaved_boundary`). The centre returned lies furthest
+/// on the via's side of the wires crossed in that traversal (the side of the piece's far end
+/// of their present chords; graded, the least of those signed distances), then nearest the far
+/// end. Whether the crossed wire still passes the disc is room, priced by the capacity model
+/// like every planned via's disc, not a site test. A traversal that turns at a junction is
+/// left out (its chord is not one segment). Returns the traversal and the centre.
+/// O(candidates x (crossings + cost of `free`)).
+pub fn end_site(st: &State, w: WireId, a: LEv, b: LEv, free: &dyn Fn(usize, Vec2) -> bool) -> Option<(usize, Vec2)> {
+    const SAMPLES: usize = 8;
+    const GRID: usize = 8;
+    let wi = &st.wires[w];
+    let pts = st.polyline(w);
+    let at = |k: usize, s: f64| {
+        let j = (k + 1).min(pts.len() - 1);
+        pts[k] + (pts[j] - pts[k]) * s
+    };
+    let inside = |s: f64| s > 1e-9 && s < 1.0 - 1e-9;
+    // Pieces (traversal, far end, event point): the via lies between the far end and the event.
+    let mut pieces: Vec<(usize, Vec2, Vec2)> = Vec::new();
+    if a.0 == b.0 && b.1 > a.1 {
+        pieces.push((a.0, at(a.0, a.1), at(b.0, b.1)));
+    } else {
+        if inside(b.1) {
+            pieces.push((b.0, at(b.0, 0.0), at(b.0, b.1)));
+        }
+        if inside(a.1) {
+            pieces.push((a.0, at(a.0, 1.0), at(a.0, a.1)));
+        }
+    }
+    let pr = st.proj;
+    // (side clearance, -distance to the far end, traversal, centre): larger first.
+    let mut best: Option<(f64, f64, usize, Vec2)> = None;
+    for (k, far, ev) in pieces {
+        if k >= wi.tris.len() || wi.turns.iter().any(|t| t.0 == k) {
+            continue;
+        }
+        let t = wi.tris[k];
+        if pr.tri_out[t] {
+            continue;
+        }
+        // The present chords of the other nets' wires crossed in this traversal, oriented so
+        // that the far end's side is positive.
+        let chords: Vec<(Vec2, Vec2, f64)> = st
+            .crossings(w)
+            .into_iter()
+            .filter(|x| x.k == k && st.wires[x.other].net != wi.net)
+            .filter_map(|x| {
+                let po = st.polyline(x.other);
+                let (a0, a1) = (po[x.other_k], po[(x.other_k + 1).min(po.len() - 1)]);
+                let d = a1 - a0;
+                let l = d.len();
+                (l > 0.0).then(|| (a0, d * (1.0 / l), if d.cross(far - a0) >= 0.0 { 1.0 } else { -1.0 }))
+            })
+            .collect();
+        let side = |c: Vec2| chords.iter().map(|&(a0, u, sg)| sg * u.cross(c - a0)).fold(f64::INFINITY, f64::min);
+        let [p, q, r] = pr.tris[t].map(|v| pr.pos[v]);
+        let grid = (0..GRID).flat_map(|i| (0..GRID - i).map(move |j| (i, j))).map(|(i, j)| {
+            let (u, v) = ((i as f64 + 0.5) / GRID as f64, (j as f64 + 0.5) / GRID as f64);
+            p * u + q * v + r * (1.0 - u - v)
+        });
+        let cands = super::pack::tri_site_points(p, q, r).into_iter().chain(grid).chain((0..SAMPLES).map(|i| far + (ev - far) * (i as f64 / SAMPLES as f64)));
+        for c in cands {
+            let key = (side(c), -(c - far).len());
+            if best.is_none_or(|b| key.0 > b.0 + 1.0 || ((key.0 - b.0).abs() <= 1.0 && key.1 > b.1)) && free(t, c) {
+                best = Some((key.0, key.1, k, c));
+            }
+        }
+    }
+    best.map(|b| (b.2, b.3))
+}
+
 /// The default traversal of a via in interval `(ka, kb)`: `(ka + kb) / 2` rounded up (at `ka`
 /// when both events are in one traversal).
 pub fn mid_k(ka: usize, kb: usize) -> usize {
@@ -203,6 +293,10 @@ pub struct CapModel<'a> {
     pub via_k: Vec<Vec<usize>>,
     /// Per wire: its vias without a static site in their interval.
     nosite: Vec<usize>,
+    /// 5.2: the site in an end traversal ([`end_site`]) of an interval without a traversal
+    /// strictly between its events, per (wire, event a, event b) (`f64` fractions as bits); the
+    /// state is borrowed for the model's life, so the geometry is fixed.
+    end_sites: std::cell::RefCell<EndSites>,
     /// Price of edge `e`, layer `l` at `e * nl + l`.
     cost: Vec<f64>,
     /// Via squeeze price of edge `e`, layer `l` (the `via_squeeze` factor, [`Packer::via_squeeze`]).
@@ -255,6 +349,7 @@ impl<'a> CapModel<'a> {
             via_iv: vec![Vec::new(); nw],
             via_k: vec![Vec::new(); nw],
             nosite: vec![0; nw],
+            end_sites: std::cell::RefCell::new(std::collections::HashMap::new()),
             cost: vec![0.0; st.proj.edges.len() * nl],
             sq: vec![0.0; st.proj.edges.len() * nl],
             log: None,
@@ -274,7 +369,7 @@ impl<'a> CapModel<'a> {
         for (w, ev) in evl.iter().enumerate().take(nw) {
             if st.wires[w].alive {
                 let iv = via_ranges(ev, packer.via_between).0;
-                let ks = m.default_ks(w, &iv, None);
+                let ks = m.default_ks(w, ev, &iv, None);
                 m.via_iv[w] = iv;
                 m.apply(w, ev, ks);
             }
@@ -336,14 +431,44 @@ impl<'a> CapModel<'a> {
             && st.proj.inradius(t) < 2.0 * self.need_r(w)
     }
 
+    /// 5.2: the end-traversal site ([`end_site`]) of via interval `i` of `w` under events `ev`
+    /// when the interval has no traversal strictly between its events (`[vias]
+    /// between_crossings`); `None` otherwise or when there is none. Cached.
+    fn end_site_of(&self, w: WireId, ev: &[LEv], i: usize) -> Option<(usize, Vec2)> {
+        if !self.packer.via_between {
+            return None;
+        }
+        let (a, b) = ev.windows(2).filter(|x| x[0].2 != x[1].2).nth(i).map(|x| (x[0], x[1]))?;
+        let key = (w, a.0, a.1.to_bits(), b.0, b.1.to_bits());
+        if let Some(&x) = self.end_sites.borrow().get(&key) {
+            return x;
+        }
+        let wi = &self.st.wires[w];
+        let d = self.packer.via_d(wi.net);
+        let (pr, packer, net, s) = (self.st.proj, self.packer, wi.net, wi.s);
+        let need = self.need_r(w);
+        let x = end_site(self.st, w, a, b, &|t, q| pr.inradius(t) >= need && !self.site_taken(w, t) && super::cutflow::point_free(pr, packer, q, net, s) >= 0.5 * d);
+        self.end_sites.borrow_mut().insert(key, x);
+        x
+    }
+
     /// Via traversals by the drawing's preference alone (no room), keeping the traversal of a
-    /// via whose interval is unchanged from `old` (intervals, traversals).
-    fn default_ks(&self, w: WireId, iv: &[(usize, usize)], old: Option<OldVias>) -> Vec<usize> {
+    /// via whose interval is unchanged from `old` (intervals, traversals); a via of an interval
+    /// with no traversal strictly between its events takes the traversal of its end site
+    /// ([`CapModel::end_site_of`]) when it has one.
+    fn default_ks(&self, w: WireId, ev: &[LEv], iv: &[(usize, usize)], old: Option<OldVias>) -> Vec<usize> {
         let n = self.st.wires[w].passes.len();
+        let between = if self.packer.via_between { via_ranges(ev, true).1 } else { Vec::new() };
         let mut ks: Vec<usize> = Vec::with_capacity(iv.len());
         for (i, &(ka, kb)) in iv.iter().enumerate() {
             let lo = ka.max(ks.last().copied().unwrap_or(0)).min(n);
             let hi = kb.min(n).max(lo);
+            if between.get(i) == Some(&false) {
+                if let Some((k, _)) = self.end_site_of(w, ev, i).filter(|&(k, _)| (lo..=hi).contains(&k)) {
+                    ks.push(k);
+                    continue;
+                }
+            }
             if let Some((oiv, oks)) = old {
                 if oiv.get(i) == Some(&(ka, kb)) && oks.get(i).is_some_and(|&k| (lo..=hi).contains(&k)) {
                     ks.push(oks[i]);
@@ -372,10 +497,15 @@ impl<'a> CapModel<'a> {
             }
         }
         let nr = self.need_r(w);
-        // 5.4 `[vias] between_crossings`: an interval with no traversal between its events is a
-        // via without a site as well.
-        let no_between = if self.packer.via_between { via_ranges(ev, true).1.iter().filter(|&&f| !f).count() } else { 0 };
-        self.nosite[w] = if nr > 0.0 { ks.iter().filter(|&&k| self.rank(w, k).0).count() + no_between } else { 0 };
+        // 5.4 `[vias] between_crossings`: a via of an interval with no traversal between its
+        // events has a site only on its own side of an end event ([`end_site`], 5.2); the others
+        // have one when their traversal does.
+        let between = if self.packer.via_between { via_ranges(ev, true).1 } else { Vec::new() };
+        self.nosite[w] = if nr > 0.0 {
+            ks.iter().enumerate().filter(|&(i, &k)| if between.get(i) == Some(&false) { self.end_site_of(w, ev, i).is_none() } else { self.rank(w, k).0 }).count()
+        } else {
+            0
+        };
         self.via_k[w] = ks;
         if self.cut.is_some() {
             self.evs[w] = ev.to_vec();
@@ -476,7 +606,7 @@ impl<'a> CapModel<'a> {
     fn relayout(&mut self, w: WireId, ev: &[LEv]) {
         let iv = via_ranges(ev, self.packer.via_between).0;
         let (oiv, oks) = (std::mem::take(&mut self.via_iv[w]), self.via_k[w].clone());
-        let ks = self.default_ks(w, &iv, Some((&oiv, &oks)));
+        let ks = self.default_ks(w, ev, &iv, Some((&oiv, &oks)));
         let moved: Vec<usize> = (0..iv.len()).filter(|&i| oiv.get(i) != Some(&iv[i])).collect();
         self.via_iv[w] = iv;
         let ch = self.apply(w, ev, ks);
@@ -588,6 +718,26 @@ impl<'a> CapModel<'a> {
     /// Wires with a via that has no site in its interval, ascending.
     pub fn nosite_wires(&self) -> Vec<WireId> {
         (0..self.nosite.len()).filter(|&w| self.nosite[w] > 0).collect()
+    }
+
+    /// Debug (`TOPO_LOOPDBG`): the vias of wire `w` under events `ev`, each with its interval, its
+    /// traversal and per traversal of the interval the triangle, whether it has a static site,
+    /// whether it is taken, its inradius and the free radius against the static board (mm).
+    pub fn nosite_debug(&self, w: WireId, ev: &[LEv]) -> String {
+        let wi = &self.st.wires[w];
+        let d = self.packer.via_d(wi.net);
+        let (iv, ok) = via_ranges(ev, self.packer.via_between);
+        let mut out = format!("wire {w} net {} via_d {:.3} need_r {:.3} nosite {} ev {:?}:", wi.net, d / 1e6, self.need_r(w) / 1e6, self.nosite[w], ev);
+        for (i, &(ka, kb)) in iv.iter().enumerate() {
+            out += &format!(" [via {i} iv ({ka},{kb}) between_ok {} end_site {:?} k {:?}:", ok[i], self.end_site_of(w, ev, i).map(|(k, c)| (k, (c.x / 1e6 * 1e3).round() / 1e3, (-c.y / 1e6 * 1e3).round() / 1e3)), self.via_k[w].get(i));
+            for k in ka..=kb.min(wi.tris.len().saturating_sub(1)) {
+                let t = wi.tris[k];
+                let site = d <= 0.0 || self.packer.via_site(t, wi.net, 0.5 * d, wi.s);
+                out += &format!(" k{k} t{t} site {site} taken {} inr {:.3} out {} obs {};", self.site_taken(w, t), self.st.proj.inradius(t) / 1e6, self.st.proj.tri_out[t], self.st.proj.tri_obs[t].len());
+            }
+            out += "]";
+        }
+        out
     }
 
     /// Vias without a site.

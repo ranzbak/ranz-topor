@@ -376,6 +376,11 @@ impl Registry {
             .sum()
     }
 
+    /// Debug: [`Registry::price`] per factor (name, `weight x amount`), the factors in scope only.
+    pub fn price_by(&self, ev: &Event, w: &WireCtx) -> Vec<(&'static str, f64)> {
+        self.factors.iter().zip(&self.res).filter(|(_, r)| r.scope.covers(w)).map(|(f, r)| (f.name(), r.weight * f.amount(ev))).filter(|x| x.1 != 0.0).collect()
+    }
+
     /// Per-move evaluation: the events of `mv` in `st` priced for the wire `w`. Read-only.
     pub fn cost(&self, st: &State, mv: &Move, w: &WireCtx) -> f64 {
         events(st, mv).iter().map(|e| self.price(e, w)).sum()

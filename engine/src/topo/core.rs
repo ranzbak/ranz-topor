@@ -2447,8 +2447,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         /// The single-wire move's price and placement ([`Rerouter`]).
         struct Rr<'a, 'p> {
             topo: &'a Topo,
-            /// The try's price registry: its coefficients with the `overflow` factor at 0 (the
-            /// predicted violations are priced by the board's own measure, [`Rerouter::violations`]).
+            /// The try's price registry: its coefficients with the `overflow` and `via` factors at
+            /// 0 (the predicted violations and the vias are priced by the board's own measure,
+            /// [`Rerouter::violations`]).
             price_reg: &'a Registry,
             wire_conn: &'a mut Vec<usize>,
             place: PlaceFn<'a, 'p>,
@@ -2461,6 +2462,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             viol_mm: f64,
             /// The predicted violations' price of the state before the try.
             viol_old: f64,
+            /// The try's price of one via (the `via` factor's weight with the wire's coefficient
+            /// and the cycle's emphasis) and the board's vias before the try (its layering).
+            via_mm: f64,
+            vias_old: usize,
             assign_t: AssignFn<'a, 'p>,
             ties: u64,
             measure: MeasureFn<'a, 'p>,
@@ -2494,14 +2499,17 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
             fn violations(&mut self, st: &mut State<'p>, after: bool) -> f64 {
                 if !after {
-                    return self.viol_old;
+                    return self.viol_old + self.via_mm * self.vias_old as f64;
                 }
                 // The new state is layered as the loop layers it (the current tie seed) and judged
-                // by the archive's measure.
+                // by the archive's measure: its predicted violations and its vias (5.2c: the vias
+                // the reroute adds or removes on the whole board, also on the wires it crosses,
+                // not the wire's own estimate against the present layers).
                 let lr = (self.assign_t)(st, self.ties);
                 let p = (self.measure)(st, &lr);
+                let v = p.price(self.viol_mm) + self.via_mm * lr.vias as f64;
                 self.pending = Some((lr, p));
-                p.price(self.viol_mm)
+                v
             }
             fn undo(&mut self) {
                 if let Some(f) = self.saved.take() {
@@ -2551,8 +2559,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// 5.4 `[vias] pair_min`: the longest stretch (nm) between a via pair the loop tries
             /// to remove; `None` = off.
             pair_max: Option<f64>,
+            /// Debug (`TOPO_LOOPDBG`): one line per reroute and per cycle stage.
+            dbg: bool,
+            dbg_tag: u64,
         }
         impl<'p> Sp<'_, 'p> {
+            /// Debug: the criteria now as one short text.
+            fn dbg_crit(&mut self) -> String {
+                let c = self.criteria();
+                format!("viol {} (graded {:.3}) vias {} len {:.3} shr {} eval {:.3}", c.errors, self.pred.graded, c.vias, c.length_mm, c.shrinkages, evaluation(&self.obj, &c, self.viol_mm))
+            }
             fn via_counts(&self) -> BTreeMap<usize, usize> {
                 let mut m = BTreeMap::new();
                 for w in (0..self.st.wires.len()).filter(|&w| self.st.wires[w].alive && w < self.lr.events.len()) {
@@ -2622,8 +2638,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 });
                 // The price the move is kept by (5.2a): the same coefficients without the search's
                 // own over-room count; the board's predicted violations are priced by the
-                // archive's measure instead ([`Rerouter::violations`]).
-                let reg_price = reg_w.scaled(|_, name| if name == "overflow" { 0.0 } else { 1.0 });
+                // archive's measure instead ([`Rerouter::violations`]). 5.2c: likewise the vias:
+                // the search estimates a path's vias against the stretches' present layers (the
+                // `via` factor, layer-aware crossings), but whether the board gains or loses a via
+                // is decided by the layering of the whole state after the move (Polubasov 2010
+                // «Оптимизация расслоения»: the layering is global; figs 4-5: a wire's detour pays
+                // off when another wire then passes without a via). So the kept price counts the
+                // board's vias of the layering after the move (the archive's count) at the wire's
+                // via coefficient, and not the wire's own estimate.
+                let reg_price = reg_w.scaled(|_, name| if name == "overflow" || name == "via" { 0.0 } else { 1.0 });
+                let via_mm = reg_w.weight("via").unwrap_or(0.0);
                 let gone: BTreeSet<WireId> = std::iter::once(w).collect();
                 let mut set: Vec<WireId> = std::iter::once(w).chain(tree::dependents(self.st, &gone)).collect();
                 set.sort_by_key(|&x| (self.rank[self.wire_conn[x]], x));
@@ -2634,8 +2658,22 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 topo.reg = reg_w;
                 let cis: Vec<usize> = set.iter().map(|&x| self.wire_conn[x]).collect();
                 let reg_place = topo.reg.clone();
+                let by_old = if self.dbg {
+                    let mut m: BTreeMap<&'static str, f64> = BTreeMap::new();
+                    for &x in &set {
+                        for (k, v) in topo.wire_price_by(self.st, x, self.wire_conn[x], &reg_price) {
+                            *m.entry(k).or_insert(0.0) += v;
+                        }
+                    }
+                    m
+                } else {
+                    BTreeMap::new()
+                };
+                let vias_before = self.lr.vias;
+                let vc_before = if self.dbg { self.via_counts() } else { BTreeMap::new() };
+                let len_before: f64 = set.iter().map(|&x| self.st.wire_len(x) / MM).sum();
                 let mut rr = Rr {
-                    topo,
+                    topo: &*topo,
                     price_reg: &reg_price,
                     wire_conn: self.wire_conn,
                     place: self.place,
@@ -2647,6 +2685,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     saved: None,
                     viol_mm: self.viol_mm,
                     viol_old: self.pred.price(self.viol_mm),
+                    via_mm,
+                    vias_old: self.lr.vias,
                     assign_t: self.assign_t,
                     ties: self.ties,
                     measure: self.measure,
@@ -2655,6 +2695,36 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let out = reroute_set(self.st, &set, &mut rr, extra);
                 let pending = rr.pending.take();
                 drop(rr);
+                if self.dbg && out.kept {
+                    let neww: Vec<WireId> = (0..self.st.wires.len()).filter(|&x| self.st.wires[x].alive && self.wire_conn.get(x).is_some_and(|c| cis.contains(c))).collect();
+                    let mut m: BTreeMap<&'static str, f64> = BTreeMap::new();
+                    for &x in &neww {
+                        for (k, v) in topo.wire_price_by(self.st, x, self.wire_conn[x], &reg_price) {
+                            *m.entry(k).or_insert(0.0) += v;
+                        }
+                    }
+                    let len_after: f64 = neww.iter().map(|&x| self.st.wire_len(x) / MM).sum();
+                    let keys: BTreeSet<&str> = by_old.keys().chain(m.keys()).copied().collect();
+                    let diff: Vec<String> = keys.iter().map(|k| format!("{k} {:.2}->{:.2}", by_old.get(k).copied().unwrap_or(0.0), m.get(k).copied().unwrap_or(0.0))).collect();
+                    let vc_after = {
+                        let mut m = BTreeMap::new();
+                        if let Some((lr2, _)) = pending.as_ref() {
+                            for x in (0..self.st.wires.len()).filter(|&x| self.st.wires[x].alive && x < lr2.events.len()) {
+                                if let Some(&c) = self.wire_conn.get(x).filter(|&&c| c != usize::MAX) {
+                                    *m.entry(c).or_insert(0usize) += plan(&lr2.events[x], self.n_sig).vias.len();
+                                }
+                            }
+                        }
+                        m
+                    };
+                    let ks: BTreeSet<usize> = vc_before.keys().chain(vc_after.keys()).copied().collect();
+                    let dv: Vec<String> = ks.into_iter().filter(|c| vc_before.get(c) != vc_after.get(c)).map(|c| format!("c{c}:{}->{}", vc_before.get(&c).copied().unwrap_or(0), vc_after.get(&c).copied().unwrap_or(0))).collect();
+                    eprintln!("LOOPDBG[{}] kept wire {w} conn {ci} (net {}): len {len_before:.3}->{len_after:.3} board vias {vias_before}->{} (per conn {}) factors {}", self.dbg_tag, self.conns[ci].net, pending.as_ref().map_or(0, |p| p.0.vias), dv.join(" "), diff.join(", "));
+                }
+                if self.dbg {
+                    let pn = pending.as_ref().map(|p| format!("pred {} graded {:.3} vias {}", p.1.count, p.1.graded, p.0.vias)).unwrap_or_default();
+                    eprintln!("LOOPDBG[{}] reroute wire {w} conn {ci} set {set:?} via_w {via_w:.3} amp {amp_i:.3} old {:.3} (viol {:.3}) new {:.3} (viol {:.3}) extra {:.3} kept {} {pn}", self.dbg_tag, out.old, out.viol_old, out.new, out.viol_new, extra, out.kept);
+                }
                 self.tries[ci] += 1;
                 if out.kept {
                     let (lr, p) = pending.expect("a kept reroute was measured");
@@ -2698,7 +2768,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             fn cycle(&mut self, c: &CycleCtx, stop: &mut dyn FnMut() -> bool) -> CycleStats {
                 let t0 = Instant::now();
                 let mut cs = CycleStats::default();
-                let vias0 = self.via_counts();
+                if self.dbg {
+                    let t = self.dbg_crit();
+                    eprintln!("LOOPDBG[{}] cycle {} start (amp {:.3}): {t}", self.dbg_tag, c.cycle, c.amp);
+                }
                 let mut topo = Topo {
                     reg: self.reg.clone(),
                     conns: self.conns.to_vec(),
@@ -2738,15 +2811,36 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         cs.kept += 1;
                     }
                 }
+                if self.dbg {
+                    let t = self.dbg_crit();
+                    eprintln!("LOOPDBG[{}] cycle {} after sweep ({}/{} kept): {t}", self.dbg_tag, c.cycle, cs.kept, cs.tried);
+                }
                 if self.st.uncross_all(50) > 0 {
                     let lr = (self.assign_t)(self.st, self.ties);
                     self.set_lr(lr, None);
+                    if self.dbg {
+                        let t = self.dbg_crit();
+                        eprintln!("LOOPDBG[{}] cycle {} after uncross: {t}", self.dbg_tag, c.cycle);
+                    }
                 }
                 // Layer re-optimisation, a random one of the equal layerings (Polubasov 2010),
-                // taken when the board's evaluation does not rise.
+                // taken when the board's evaluation does not rise. The via counts before it are the
+                // baseline of the via-rose relay below: the candidates are the wires whose via count
+                // rose in the re-layering (Polubasov 2010, «Оптимизация расслоения»: «Хорошими
+                // кандидатами на перекладку выступают те проводники, на которых увеличилось число
+                // переходов», fig. 9a), not the ones that paid a via in the sweep.
+                let vias0 = self.via_counts();
                 let tl = Instant::now();
                 let lr = (self.assign_t)(self.st, c.seed | 1);
+                if self.dbg {
+                    let p = (self.measure)(self.st, &lr);
+                    eprintln!("LOOPDBG[{}] cycle {} layer re-opt candidate: vias {} pred {} graded {:.3}", self.dbg_tag, c.cycle, lr.vias, p.count, p.graded);
+                }
                 cs.layer_kept += usize::from(self.try_layers(lr, c.seed | 1));
+                if self.dbg {
+                    let t = self.dbg_crit();
+                    eprintln!("LOOPDBG[{}] cycle {} after layer re-opt (taken {}): {t}", self.dbg_tag, c.cycle, cs.layer_kept);
+                }
                 cs.layer_runs += 1;
                 cs.layer_s += tl.elapsed().as_secs_f64();
                 // The wires whose via count rose are laid again, at the end-of-cycle via weight.
@@ -2766,6 +2860,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     if self.reroute(&mut topo, w, c.seed ^ 0xA5A5, c.amp, c.emphasis.via_at(1.0)) {
                         cs.relaid_kept += 1;
                     }
+                }
+                if self.dbg {
+                    let t = self.dbg_crit();
+                    eprintln!("LOOPDBG[{}] cycle {} after via-rose relay ({}/{} kept): {t}", self.dbg_tag, c.cycle, cs.relaid_kept, cs.relaid);
                 }
                 if cs.relaid_kept > 0 {
                     if self.st.uncross_all(50) > 0 {
@@ -2824,6 +2922,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         }
                     }
                 }
+                if self.dbg {
+                    let t = self.dbg_crit();
+                    eprintln!("LOOPDBG[{}] cycle {} after floating up (kept {}, undone {}): {t}", self.dbg_tag, c.cycle, cs.float_kept, cs.undone);
+                }
                 // The crossing rules (clinches, double crossings, crossings no layer separates),
                 // taken when the board's evaluation does not rise.
                 let x0 = (self.xkept)();
@@ -2876,6 +2978,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     }
                 }
                 cs.busy_s = t0.elapsed().as_secs_f64();
+                if self.dbg {
+                    let t = self.dbg_crit();
+                    eprintln!("LOOPDBG[{}] cycle {} end (crossing passes {}, undone {}): {t}", self.dbg_tag, c.cycle, cs.cross_kept, cs.undone);
+                }
                 cs
             }
         }
@@ -2926,6 +3032,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             ties: 0,
             pred: pred0,
             pair_max: opts.via_pair_min.then(|| opts.via_pair_max_mm.max(0.0) * MM),
+            dbg: std::env::var_os("TOPO_LOOPDBG").is_some(),
+            dbg_tag: opts.seed,
         };
         let params = LoopParams {
             cycles: opts.topo_rounds.max(1),
@@ -2954,6 +3062,22 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         sp.restore(&arch.items[pick].payload.var);
         drop(sp);
+        if std::env::var_os("TOPO_LOOPDBG").is_some() {
+            let dirs = dirs_of(&st);
+            let cm = if cuts_on { CapModel::new_cut(&st, &packer, &dirs, &lr.events, bottom, overflow_mm) } else { CapModel::new(&st, &packer, &dirs, &lr.events, bottom, overflow_mm) };
+            eprintln!("LOOPDBG[{}] pick: violations {:?} nosite {} overfull {} unlayerable {} forced {}", opts.seed, cm.violations(), cm.nosite(), cm.overfull(), lr.unlayerable.len(), forced.borrow().len());
+            for w in (0..st.wires.len()).filter(|&w| st.wires[w].alive && w < lr.events.len() && !lr.events[w].is_empty()) {
+                eprintln!("LOOPDBG[{}] pick via {}", opts.seed, cm.nosite_debug(w, &lr.events[w]));
+            }
+            if let Some(c) = cm.cut.as_ref() {
+                for r in c.report().iter().filter(|r| r.slack < 0.0) {
+                    eprintln!("LOOPDBG[{}] pick over-full cut layer {} ({:.3},{:.3})-({:.3},{:.3}) cap {:.3} need {:.3} slack {:.3} wires {:?}", opts.seed, r.layer, r.p.x / MM, -r.p.y / MM, r.q.x / MM, -r.q.y / MM, r.cap / MM, r.need / MM, r.slack / MM, r.wires);
+                }
+            }
+            for (e, l) in cm.overfull_list() {
+                eprintln!("LOOPDBG[{}] pick over-full edge {e} layer {l}", opts.seed);
+            }
+        }
         if std::env::var_os("TOPO_P5DBG").is_some() {
             // Debug: the different-net crossings of the pick whose two stretches share one layer
             // there (by the layering's events, and by the pass layers with the planned vias).
