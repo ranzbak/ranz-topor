@@ -18,17 +18,19 @@ inside the fill (the far-terminal margin of 4.4):
    nearest the pad (behind the row, about 22.7 mm).
 3. Island (GND): pad R1.2 next to a GND island on F.Cu (x 7.5..10, no pad in it, zone "remove islands: never");
    the GND copper of the net is the B.Cu pour along the bottom (y >= 20), which holds the mounting pad H1.1. The
-   island is no terminal (it is not connected to the rest of the net): R1.2 is wired to the B.Cu pour (one via).
-   Careless: a 1.6 mm stub into the island, 0 vias, R1.2 left floating (KiCad: unconnected).
+   island is no terminal (it is not connected to the rest of the net): R1.2 is wired to the B.Cu pour (one via),
+   and the island is joined to R1.2 by a short stub, so it is no longer isolated copper (user 2026-11-12: "connecting
+   the gnd island to the GND pad would be even better"). Careless: only the 1.6 mm stub into the island, 0 vias,
+   R1.2 and the island left floating (KiCad: unconnected).
 
 Same conventions as `harness/plane_terminal_pattern.py`: solvable by construction (the reference copper is drawn
-first; KiCad DRC of the reference with the zones refilled must show 0 unconnected and no violation except the
-island's own `isolated_copper` warning, which the problem board already has: question 3 is about that island),
-deterministic.
+first; KiCad DRC of the reference with the zones refilled must show 0 violations and 0 unconnected: the island's
+`isolated_copper` warning of the problem board is gone because the reference joins it to R1.2), deterministic.
 Coordinates in mm, KiCad frame (y down). `python -m harness.pour_zero_pattern OUT` writes
 OUT/pour_zero/{problem,reference,careless}/, expected.json and pour_zero.png.
 
-Needs user approval before it joins the test suite (shopping list rules).
+Approved by the user 2026-11-12 ("pour_zero.png looks good, connecting the gnd island to the GND pad would be even
+better"; Q3 updated accordingly).
 """
 from __future__ import annotations
 
@@ -60,6 +62,7 @@ AROUND = ROW_X1 + ROW_PAD[0] / 2 + W_SIG / 2 + 0.2 + 0.05
 J3_END = (VCC_POUR[2] - MARGIN, VCC_POUR[3] - MARGIN)
 J3_NEAREST = (J3[0], VCC_POUR[3] - MARGIN)
 R1_VIA = (R1_2[0], GND_BAND[1] + 0.9)
+ISLAND_STUB = (ISLAND[0] + 1.1, R1_2[1])  # a short stub from R1.2 into the cut-off island joins it to the net
 VIA_MM = 25.0
 
 
@@ -97,12 +100,13 @@ def pour_zero() -> PZPattern:
         Track("VCC", "F.Cu", W_SIG, [J2, (VCC_POUR[2] - MARGIN, J2[1])]),
         Track("VCC", "F.Cu", W_SIG, j3_path),
         Track("GND", "F.Cu", W_SIG, [R1_2, R1_VIA]),
+        Track("GND", "F.Cu", W_SIG, [R1_2, ISLAND_STUB]),
     ]
     careless_tracks = [
         Track("VCC", "F.Cu", W_SIG, [J1, C1_1]),
         Track("VCC", "F.Cu", W_SIG, [J2, (C1_2[0] + 1.3, 8.2), (C1_1[0], 8.2), C1_1]),
         Track("VCC", "F.Cu", W_SIG, [J3, (AROUND, ROW_Y + 0.9), (AROUND, ROW_Y - 0.9), J3_NEAREST]),
-        Track("GND", "F.Cu", W_SIG, [R1_2, (ISLAND[0] + 1.1, R1_2[1])]),
+        Track("GND", "F.Cu", W_SIG, [R1_2, ISLAND_STUB]),
     ]
     return PZPattern("pour_zero", (W, H), 2, ["GND", "VCC"], fps, ref_tracks, [Via("GND", R1_VIA)],
                      careless_tracks, [])
@@ -175,7 +179,8 @@ def expected_doc(pat: PZPattern) -> dict:
             "VCC J1.1 + J2.1": f"each ends on the VCC pour's near edge: {_len(r[0].pts):.2f} + {_len(r[1].pts):.2f} mm, "
                                "no copper over the pour",
             "VCC J3.1": f"round the connector row's right end to the pour's lower right corner: {_len(r[2].pts):.2f} mm",
-            "GND R1.2": f"to the B.Cu GND pour (via at {R1_VIA}), not into the F.Cu island",
+            "GND R1.2": f"to the B.Cu GND pour (via at {R1_VIA}); the F.Cu island joined to R1.2 by a stub "
+                        f"({_len(r[4].pts):.2f} mm), so it is no longer isolated",
             "vias": len(pat.ref_vias),
             "unconnected": 0,
             "length_mm": round(lr, 3),
@@ -184,7 +189,7 @@ def expected_doc(pat: PZPattern) -> dict:
         "careless": {
             "VCC J1.1 + J2.1": f"pads only, to C1.1 through the pour: {_len(c[0].pts):.2f} + {_len(c[1].pts):.2f} mm",
             "VCC J3.1": f"to the pour point nearest the pad, behind the row: {_len(c[2].pts):.2f} mm",
-            "GND R1.2": "stub into the island: R1.2 floats (KiCad: unconnected)",
+            "GND R1.2": "only a stub into the island: R1.2 and the island float (KiCad: unconnected)",
             "vias": len(pat.careless_vias),
             "unconnected": 1,
             "length_mm": round(lc, 3),
