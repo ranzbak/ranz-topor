@@ -2268,10 +2268,19 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // and vias without a site, graded by how far over; the crossings no layer separates; the
         // connections placed without a legal path; the traversals through foreign copper (Q14b,
         // [`foreign_copper`]: a short when drawn).
+        // 2.4 (cut model): a cut that fits only necked is a shrinkage, no violation; its price
+        // (`[factors] shrinkage`) is part of what a move pays, and the necked stretches its necks
+        // add count as the archive's shrinkages (TopoR 6.3 manual pp. 72-73).
         let measure = |st: &State, lr: &layers::LayerReport| -> Predicted {
             let dirs = dirs_of(st);
             let cm = if cuts_on { CapModel::new_cut(st, &packer, &dirs, &lr.events, bottom, overflow_mm) } else { CapModel::new(st, &packer, &dirs, &lr.events, bottom, overflow_mm) };
-            Predicted::of(cm.violations(), lr.unlayerable.len(), forced.borrow().len()).with_foreign(foreign_copper(st, &layers_now(st, &lr.events, bottom)))
+            let p = Predicted::of(cm.violations(), lr.unlayerable.len(), forced.borrow().len()).with_foreign(foreign_copper(st, &layers_now(st, &lr.events, bottom)));
+            if !cuts_on {
+                return p;
+            }
+            let necks = st.cut_neck_widths(&cm.cut_necks());
+            let added: usize = (0..st.wires.len()).filter(|&w| st.wires[w].alive).map(|w| st.neck_stretches_with(w, &necks).saturating_sub(st.neck_stretches_with(w, &BTreeMap::new()))).sum();
+            p.with_shrink(added, cm.shrinkage().2)
         };
         /// One topological variant: the routed state, the wire -> connection map, the layering,
         /// the connections placed without a legal path, the reroute counters and the predicted
@@ -2526,8 +2535,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     shr += usize::from(na > 0) + usize::from(nb > 0) + mid.iter().enumerate().filter(|&(i, &k)| i == 0 || mid[i - 1] + 1 != k).count();
                 }
                 let area = if matches!(self.obj, Objective::Area) { area_mm + self.via_area_mm * self.lr.vias as f64 } else { 0.0 };
-                // The predicted violations (5.2a): the same measure the moves paid for.
-                criteria_of(self.pred, self.viol_mm, self.lr.vias, len_mm, shr, area)
+                // The predicted violations (5.2a): the same measure the moves paid for; the cut
+                // model's necks are shrinkages too (2.4).
+                criteria_of(self.pred, self.viol_mm, self.lr.vias, len_mm, shr + self.pred.shrink_n, area)
             }
             fn snapshot(&mut self) -> LoopVar {
                 LoopVar { topo: self.st.topology(), wire_conn: self.wire_conn.clone(), lr: self.lr.clone(), forced: self.forced.borrow().clone(), reroutes: self.reroutes.clone(), pred: self.pred }
@@ -3011,6 +3021,24 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     for &w in &dropped {
         tree::remove_wire(&mut st, w);
     }
+    // 2.4 (cut model): the necks the plan priced at the cut level (the cuts that fit only
+    // necked) become the plan's pass widths, laid out by the neck rule (`State::cut_neck_widths`),
+    // so the drawing necks there (the plan's neck zones, at the widest width its checker accepts)
+    // and only there, and the variant's shrinkages count them. The carried plan (`once`) keeps
+    // its own widths: the next cycle prices its cuts again.
+    if cuts_on {
+        let dirs = dirs_of(&st);
+        let cm = CapModel::new_cut(&st, &packer, &dirs, &lr.events, bottom, overflow_mm);
+        let (n_cut, amount, price) = cm.shrinkage();
+        let necks = st.cut_neck_widths(&cm.cut_necks());
+        let wires: BTreeSet<WireId> = necks.keys().map(|&p| st.passes[p].wire).collect();
+        st.apply_neck_widths(&necks);
+        warnings.push(format!(
+            "cut shrinkages (2.4): {n_cut} cuts fit only with their traces necked below the netclass width (graded {amount:.2} pitches, {price:.1} mm at [factors] shrinkage); {} passes of {} connections necked for them in the plan",
+            necks.len(),
+            wires.len()
+        ));
+    }
     ctl.update("route", 2, 0, nconn, lr.vias, t0.elapsed().as_secs_f64());
     ctl.stage(rnd, rnds, "drawing the traces");
     let _ = &t_draw;
@@ -3098,13 +3126,17 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let over: Vec<&super::cutmodel::CutRow> = rows.iter().filter(|r| r.slack < -super::cutmodel::OVER_TOL).collect();
                 m["overfull_cuts"] = serde_json::json!(over.len());
                 m["cut_overflow_mm"] = serde_json::json!((over.iter().map(|r| -r.slack).sum::<f64>() / MM * 1e4).round() / 1e4);
+                // 2.4: the cuts that fit only necked (over-full counts only beyond the floors).
+                let (sn, sa, _) = c.shrinkage();
+                m["shrink_cuts"] = serde_json::json!(sn);
+                m["cut_shrink_pitches"] = serde_json::json!((sa * 1e3).round() / 1e3);
                 if let Ok(path) = std::env::var("TOPO_CUTS") {
                     let nm = |x: f64| (x / MM * 1e4).round() / 1e4;
                     let js: Vec<serde_json::Value> = rows
                         .iter()
                         .map(|r| {
                             let nets: Vec<i32> = r.wires.iter().map(|&w| st.wires[w].net).collect();
-                            serde_json::json!({"layer": r.layer, "p": [nm(r.p.x), nm(-r.p.y)], "q": [nm(r.q.x), nm(-r.q.y)], "cap": nm(r.cap), "need": nm(r.need), "slack": nm(r.slack), "nets": nets})
+                            serde_json::json!({"layer": r.layer, "p": [nm(r.p.x), nm(-r.p.y)], "q": [nm(r.q.x), nm(-r.q.y)], "cap": nm(r.cap), "need": nm(r.need), "need_floor": nm(r.need_floor), "slack": nm(r.slack), "shrink": nm(r.shrink), "nets": nets})
                         })
                         .collect();
                     let _ = std::fs::write(format!("{path}.r{round}.json"), serde_json::to_string(&js).unwrap_or_default());
