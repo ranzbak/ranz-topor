@@ -1,7 +1,7 @@
 """BGA fan-out test patterns (user 2026-11-12): small 4-layer boards with one 6 x 6 BGA and a row of through-hole
 destination pads on each side, so every ball has somewhere to go. Each pattern has a known optimal fan-out.
 
-Three patterns, all 4 layers, stackup F.Cu signal / In1.Cu GND plane / In2.Cu power plane / B.Cu signal (topor's
+Four patterns, all 4 layers, stackup F.Cu signal / In1.Cu GND plane / In2.Cu power plane / B.Cu signal (topor's
 default roles for 4 copper layers, `plugin/topor/layers.py` DEFAULTS_BY_COUNT; KiCad layer types left "signal"):
 
   bga_one_layer   1.0 mm pitch, 0.50 mm pads, 0.15 track / 0.15 clearance: ONE track fits between two balls. A 6 x 6
@@ -11,9 +11,16 @@ default roles for 4 copper layers, `plugin/topor/layers.py` DEFAULTS_BY_COUNT; K
                   on In1.Cu and a VCC plane on In2.Cu. Every plane ball gets its own via in the cell next to it (one
                   stub, the plane is the terminal, no trace on the plane layer); the 28 signal balls escape on F.Cu.
   bga_dogbone     0.8 mm pitch, 0.40 mm pads, 0.15 / 0.15: NO track fits between two balls (0.40 < 0.45), so ring 0
-                  escapes on F.Cu and each of the 16 inner balls dives through its own via at a cell centre (dog-bone)
-                  and escapes on B.Cu. No track fits between two vias at one pitch either, so each side keeps one
-                  outer cell free for the ring-2 ball behind it.
+                  escapes on F.Cu and each of the 16 inner balls dives through its own via at the open-space centre on
+                  its outward diagonal (dog-bone) and escapes on B.Cu. No track fits between two vias at one pitch
+                  either, so each quadrant's innermost via leaves through the free centre cross of cells.
+  bga_neckdown    bga_dogbone's board plus a .kicad_dru 'BGA neckdown' rule (clearance 0.10 inside U1's courtyard):
+                  one track per channel again, so everything escapes on F.Cu with 0 vias.
+
+The user's BGA rules (2026-11-12, `RULES_TEXT`): R1 no trace through / near another ball's via, R2 dog-bone via at
+the open-space centre, R3 dog-bones point outward per quadrant, R4 one via per plane ball, R5 via-in-pad only as an
+option, R6 courtyard custom rules (neckdown), R7 no signal on the plane layers. `rule_faults()` checks them on any
+copper; every expected answer has none (asserted), a routed board's faults are drawn and listed by rule.
 
 Every board is SOLVABLE BY CONSTRUCTION: the reference copper is built first from centre lines, `check()` verifies it
 with shapely (clearance per layer, hole clearance, copper to edge, connectivity), then KiCad DRC measures it.
@@ -51,6 +58,8 @@ SQ2 = math.sqrt(2.0)
 EDGE = 0.5
 LAYERS4 = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
 VIA_PRICE = 25.0
+STAGGER = 0.10  # mm between the 45-degree turns of neighbouring fan-out wires (side_routes)
+VIA_CENTRE_TOL = 0.05  # mm: rule R2 -- a BGA via further than this from the open-space (cell) centre is "off centre"
 DEST_PITCH, DEST_PAD, DEST_DRILL = 1.0, 0.6, 0.3
 ROWS = "ABCDEFGH"
 LAYER_COL = {"F.Cu": "#c83434", "B.Cu": "#2f5fd0", "In1.Cu": "#5f8f2a", "In2.Cu": "#a050c0"}
@@ -79,6 +88,9 @@ LIT = {
                "(same rules as 5.0) and p. 65 (nets to internal plane layers get fanouts only)",
     "haas2026": "Haas 2026, BGA memory bus (docs/literature/haas2026-bga-memory-bus.pdf) PDF p. 2: the fanout engine offers "
                 "every ball a stub on its layer or a dog-bone via to the other layer",
+    "kicad_dru": "KiCad 10 PCB Editor manual, 'Custom design rules' (Board Setup -> Design Rules -> Custom Rules; "
+                 "the neck-down example uses A.intersectsCourtyard('<ref>') with track_width / clearance constraints); "
+                 "conditions are tried for (A, B) and (B, A) (pcbnew/drc/drc_rule_condition.cpp EvaluateFor)",
     "planes": "memory planes-are-terminals: an own-net plane is a terminal like a pad, vias on it are always allowed",
     "power_via": "memory power-via-rules: smallest Board Setup via with pi x drill >= trace width",
 }
@@ -161,6 +173,7 @@ class Item:
     cell: tuple[float, float] | None = None  # cell centre index, e.g. (0.5, 0.5)
     layer: str = "F.Cu"  # escape layer (dogbone)
     net: str | None = None  # plane net (GND / VCC); signal nets are the ball names
+    bpath: tuple = ()  # dogbone: cell-index waypoints on the escape layer after the via, before it turns outward
 
 
 @dataclass
@@ -174,6 +187,9 @@ class BPat:
     alt_top: list[Item] | None = None
     alt_label: str = ""
     alt_why: str = ""
+    alt_rules: str = ""  # which of the user's BGA rules the alternative breaks
+    dru: str = ""  # .kicad_dru text (custom rules), "" = none
+    region_clear: float | None = None  # clearance inside U1's courtyard (the .kicad_dru neckdown rule)
     answer: str = ""
     why: str = ""
     judgement: list[str] = field(default_factory=list)
@@ -216,6 +232,26 @@ class BPat:
         x1, y1 = self.ball_xy(self.n - 1, self.n - 1)
         h = self.rules.pitch / 2
         return (x0 - h, y0 - h, x1 + h, y1 + h)
+
+    def channel(self) -> dict:
+        """Rules.channel() with the courtyard rule's clearance inside the BGA (bga_neckdown), else the net class."""
+        if self.region_clear is None:
+            return self.rules.channel()
+        r = Rules(self.rules.pitch, self.rules.pad, self.rules.track, self.region_clear, self.rules.via)
+        return dict(r.channel(), courtyard_clearance=self.region_clear)
+
+    def courtyard(self):
+        """U1's courtyard (F.CrtYd rectangle): the BGA box (half a pitch around the outer ball centres)."""
+        return box(*self.bga_box())
+
+    def clear_for(self, g1, g2=None) -> float:
+        """Required clearance between two copper shapes: the courtyard rule's value when either touches U1's
+        courtyard (KiCad tries a custom rule's condition for (A, B) and (B, A)), else the net class value."""
+        if self.region_clear is not None:
+            cy = self.courtyard()
+            if g1.intersects(cy) or (g2 is not None and g2.intersects(cy)):
+                return self.region_clear
+        return self.rules.clear
 
 
 class _View:
@@ -265,7 +301,9 @@ def side_routes(pat: BPat, items: list[Item]):
         if it.kind == "channel":
             routes.append([it, [["F.Cu", [b, cpos, (cpos[0], y_s)]]], [], ("F.Cu", cpos[0])])
         elif it.kind == "dogbone":
-            routes.append([it, [["F.Cu", [b, cpos]], [it.layer, [cpos, (cpos[0], y_s)]]], [cpos], (it.layer, cpos[0])])
+            way = [pat.cell_xy(*q) for q in it.bpath]
+            xe = way[-1][0] if way else cpos[0]
+            routes.append([it, [["F.Cu", [b, cpos]], [it.layer, [cpos, *way, (xe, y_s)]]], [cpos], (it.layer, xe)])
         elif it.kind == "plane":
             routes.append([it, [["F.Cu", [b, cpos]]], [cpos], None])
         else:
@@ -275,14 +313,26 @@ def side_routes(pat: BPat, items: list[Item]):
     mid = (min(xs) + max(xs)) / 2
     m = len(esc)
     dx = [mid + (k - (m - 1) / 2) * DEST_PITCH for k in range(m)]
-    dmax = max(abs(a - b) for a, b in zip(dx, xs))
-    y_d = r4(y_s - dmax - DEST_PAD / 2 - R.clear - 0.45)
+    # staggered 45-degree turns: of the wires of one layer that move the same way, the one moving furthest turns
+    # first and each next one STAGGER later, so neighbours at half a pitch (0.40 mm at 0.8 mm pitch) are
+    # 0.40 + STAGGER apart when both run at 45 degrees (perpendicular gap (0.40 + 0.10) / sqrt 2 - track >=
+    # clearance); the length of every wire is unchanged (the turn only moves along its own line)
+    y_turn = [y_s] * m
+    hmin = (R.track + R.clear) * SQ2 + 0.005  # horizontal offset two parallel 45-degree wires need
+    for ly in {rt[3][0] for rt in esc}:
+        for sgn in (-1, 1):
+            grp = [k for k in range(m) if esc[k][3][0] == ly and (dx[k] - xs[k]) * sgn > 1e-9]
+            grp.sort(key=lambda k: -abs(dx[k] - xs[k]))
+            for p_, k in zip(grp, grp[1:]):
+                h = abs(xs[k] - xs[p_])
+                y_turn[k] = r4(y_turn[p_] - (max(STAGGER, hmin - h) if h < hmin - 1e-9 else 0.0))
+    y_d = r4(min(y_turn[k] - abs(dx[k] - xs[k]) for k in range(m)) - DEST_PAD / 2 - R.clear - 0.45)
     pads = []
     for k, rt in enumerate(esc):
         x_e = rt[3][1]
         x_d = dx[k]
         seg = rt[1][-1]
-        seg[1] = dedup(seg[1] + [(x_d, y_s - abs(x_d - x_e)), (x_d, y_d)])
+        seg[1] = dedup(seg[1] + [(x_e, y_turn[k]), (x_d, y_turn[k] - abs(x_d - x_e)), (x_d, y_d)])
         pads.append((x_d, y_d))
         rt.append(k)
     return routes, pads, y_d
@@ -376,8 +426,9 @@ def copper(pat: BPat, sol: Sol | None):
             for ly in _pad_layers(p):
                 out.append((p.net, ly, g, "pad", f"{f.ref}.{p.num}"))
     if sol:
-        for t in sol.tracks:
-            out.append((t.net, t.layer, LineString(t.pts).buffer(t.width / 2, quad_segs=16), "track", None))
+        for t in sol.tracks:  # one item per segment, as in KiCad (the courtyard rule is decided per item)
+            for a, c in zip(t.pts, t.pts[1:]):
+                out.append((t.net, t.layer, LineString([a, c]).buffer(t.width / 2, quad_segs=16), "track", None))
         for v in sol.vias:
             g = Point(v.pos).buffer(v.dia / 2, quad_segs=24)
             for ly in LAYERS4:
@@ -406,7 +457,7 @@ def check_sol(pat: BPat, sol: Sol) -> dict:
                     continue
                 d = g1.distance(g2)
                 worst = min(worst, d)
-                if d < R.clear - 1e-6:
+                if d < pat.clear_for(g1, g2) - 1e-6:
                     bad.append((n1, n2, ly, k1, k2, round(d, 4)))
     hc = R.kicad()["min_hole_clearance"]
     hworst = 9e9
@@ -463,6 +514,175 @@ def check(pat: BPat) -> dict:
     return out
 
 
+# ----------------------------------------------------------------------------------------------- the user's BGA rules
+#: The user's BGA fan-out rules (2026-11-12), as the checker numbers them.
+RULES_TEXT = {
+    "R1": "no trace passes through or over another ball's via (real widths; DRC clearance and drawn overlap)",
+    "R2": "a dog-bone via sits at the centre of the open space between 4 balls (max clearance), never near the pad",
+    "R3": "dog-bones point outward from the package centre per quadrant (top-left quadrant -> up-left, ...)",
+    "R4": "one via per plane ball (GND / PWR), no shared vias",
+    "R5": "via style is a production option: dog-bone by default, via-in-pad only with option via_in_pad",
+    "R6": "a .kicad_dru courtyard rule (neckdown) may relax width / clearance inside the BGA",
+    "R7": "signals on the plane layers (In1 / In2 of a 4-layer board) are allowed but very costly: expected answers "
+          "never use them",
+    "short": "copper of two nets touching (shapely overlap on one layer, or KiCad DRC shorting_items)",
+}
+PLANE_LAYERS = ("In1.Cu", "In2.Cu")  # topor's default 4-layer roles: In1 gnd, In2 pwr
+
+
+def outward_dirs(pat: BPat, c: int, r: int) -> set:
+    """Allowed dog-bone directions (sx, sy) of ball (c, r), screen frame (y down): away from the package centre per
+    quadrant. A ball on the centre column / row of an odd array may take either sign on that axis (the expected
+    answers use the clockwise pinwheel: top centre -> up-right, right -> down-right, bottom -> down-left, left ->
+    up-left, centre ball -> up-left); the 6 x 6 patterns have no such ball."""
+    o = (pat.n - 1) / 2
+    sx = [int(math.copysign(1, c - o))] if c != o else [-1, 1]
+    sy = [int(math.copysign(1, r - o))] if r != o else [-1, 1]
+    return {(a, b) for a in sx for b in sy}
+
+
+def _dir_name(sx, sy):
+    return ("up" if sy < 0 else "down") + "-" + ("left" if sx < 0 else "right")
+
+
+def rule_faults(pat: BPat, sol: Sol, drc: dict | None = None) -> list[dict]:
+    """The user's BGA rules R1-R4, R5 (via-in-pad without the option), R7 and shorts, checked on copper `sol` with
+    real widths. Each fault: rule, pos (x, y), ball (or None), text. `drc`: a kicad-cli DRC json of the same board
+    (its shorting_items are added with KiCad's positions). O(T x V + I^2) per layer."""
+    R = pat.rules
+    out = []
+    balls = []  # (name, net, (x, y), (c, r))
+    for r in range(pat.n):
+        for c in range(pat.n):
+            name = pat.ball_name(c, r)
+            balls.append((name, pat.expect[name]["net"], pat.ball_xy(c, r), (c, r)))
+    x0, y0, x1, y1 = pat.bga_box()
+    cells = [pat.cell_xy(cx + 0.5, cy + 0.5) for cy in range(pat.n - 1) for cx in range(pat.n - 1)]
+    planes = {n for n, _ in pat.zones} | {"GND", "VCC"}
+    vgeo = [(v, Point(v.pos).buffer(v.dia / 2, quad_segs=24)) for v in sol.vias]
+    segs = [(t, LineString([a, b]), LineString([a, b]).buffer(t.width / 2, quad_segs=16))
+            for t in sol.tracks for a, b in zip(t.pts, t.pts[1:]) if math.dist(a, b) > 1e-9]
+    ball_of_net = {}
+    for name, net, pos, cr in balls:
+        ball_of_net.setdefault(net, []).append((name, pos, cr))
+
+    def owner(v):  # the BGA ball a via serves: the nearest ball of its net within one pitch
+        cand = [(math.dist(v.pos, pos), name, pos, cr) for name, pos, cr in ball_of_net.get(v.net, [])]
+        cand = [q for q in cand if q[0] <= R.pitch + 1e-6]
+        return min(cand) if cand else None
+
+    # R1: a track of one net within clearance of (or over) a via of another net -- vias are on every layer
+    seen = set()
+    for t, line, g in segs:
+        for v, vg in vgeo:
+            if v.net == t.net:
+                continue
+            d = g.distance(vg)
+            need = pat.clear_for(g, vg)
+            if d < need - 1e-4:
+                key = (t.net, v.net, round(v.pos[0], 2), round(v.pos[1], 2))
+                if key in seen:
+                    continue
+                seen.add(key)
+                q = line.interpolate(line.project(Point(v.pos)))
+                ow = owner(v)
+                what = "over" if d <= 1e-6 else f"{d:.3f} mm from"
+                out.append({"rule": "R1", "pos": (r4(q.x), r4(q.y)), "ball": t.net if t.net in pat.expect else None,
+                            "short": d <= 1e-6, "dist": r4(d),
+                            "text": f"{t.net} {t.layer.replace('.Cu', '')} track {what} the via of "
+                                    f"{ow[1] if ow else v.net} at ({v.pos[0]:.2f}, {v.pos[1]:.2f})"})
+    # R2 / R3 / R5: every via inside the BGA box that serves a ball
+    for v, vg in vgeo:
+        if not (x0 <= v.pos[0] <= x1 and y0 <= v.pos[1] <= y1):
+            continue
+        ow = owner(v)
+        if ow is None:
+            continue
+        dball, name, bpos, (c, r) = ow
+        if dball <= VIA_CENTRE_TOL:
+            out.append({"rule": "R5", "pos": v.pos, "ball": name, "text": f"{name}: via-in-pad (option via_in_pad off)"})
+            continue
+        off = min(math.dist(v.pos, q) for q in cells)
+        if off > VIA_CENTRE_TOL:
+            gap = min(math.dist(v.pos, pos) - R.pad / 2 - v.dia / 2 for _, _, pos, _ in balls)
+            out.append({"rule": "R2", "pos": v.pos, "ball": name, "dist": r4(off),
+                        "text": f"{name}: via {off:.2f} mm off the open-space centre (gap to the nearest ball {gap:.3f})"})
+        sx = int(math.copysign(1, v.pos[0] - bpos[0])) if abs(v.pos[0] - bpos[0]) > 1e-6 else 0
+        sy = int(math.copysign(1, v.pos[1] - bpos[1])) if abs(v.pos[1] - bpos[1]) > 1e-6 else 0
+        allowed = outward_dirs(pat, c, r)
+        if (sx, sy) not in allowed:
+            got = _dir_name(sx or 1, sy or 1) if sx and sy else ("up" if sy < 0 else "down" if sy > 0 else
+                                                                 "left" if sx < 0 else "right")
+            exp = " or ".join(sorted(_dir_name(*a) for a in allowed))
+            out.append({"rule": "R3", "pos": v.pos, "ball": name,
+                        "text": f"{name}: dog-bone points {got} (expected {exp})"})
+    # R4: one own via per plane ball
+    for name, net, pos, cr in balls:
+        if net not in planes:
+            continue
+        own = [v for v, _ in vgeo if v.net == net and (ow := owner(v)) is not None and ow[1] == name]
+        if not own:
+            out.append({"rule": "R4", "pos": pos, "ball": name, "text": f"{name}: plane ball without its own via"})
+    for v, _ in vgeo:
+        if v.net not in planes:
+            continue
+        near = [name for name, pos, _ in ball_of_net.get(v.net, []) if math.dist(v.pos, pos) <= R.pitch / SQ2 + 0.05]
+        tied = [name for name in near if not any(
+            w.net == v.net and w is not v and (ow := owner(w)) is not None and ow[1] == name for w, _ in vgeo)]
+        if len(tied) > 1:
+            out.append({"rule": "R4", "pos": v.pos, "ball": tied[0],
+                        "text": f"via at ({v.pos[0]:.2f}, {v.pos[1]:.2f}) shared by plane balls {', '.join(tied)}"})
+    # R7: signal copper on a plane layer
+    for t, line, g in segs:
+        if t.layer in PLANE_LAYERS and t.net not in planes:
+            c = line.interpolate(0.5, normalized=True)
+            out.append({"rule": "R7", "pos": (r4(c.x), r4(c.y)), "ball": t.net if t.net in pat.expect else None,
+                        "text": f"{t.net}: signal on {t.layer}"})
+    # shorts: two nets' copper touching on one layer (track-track, track-pad, via-pad, via-via); track-via is R1
+    items = []
+    board_pads = getattr(sol, "pads", None) or [(p.net, _pad_layers(p), p, f.ref) for f in pat.fps for p in f.pads]
+    for net, lys, p, ref in board_pads:
+        g = Point(p.pos).buffer(p.size[0] / 2, quad_segs=24)
+        for ly in lys:
+            items.append((net, ly, g, f"pad {ref}.{p.num}"))
+    for t, line, g in segs:
+        items.append((t.net, t.layer, g, f"{t.layer.replace('.Cu', '')} track {t.net}"))
+    for v, vg in vgeo:
+        for ly in LAYERS4:
+            items.append((v.net, ly, vg, f"via {v.net}"))
+    seen = set()
+    for i, (n1, l1, g1, w1) in enumerate(items):
+        for n2, l2, g2, w2 in items[i + 1:]:
+            if n1 == n2 or l1 != l2 or ("track" in w1 and "via" in w2) or ("via" in w1 and "track" in w2):
+                continue
+            if g1.intersects(g2):
+                q = g1.intersection(g2).representative_point()
+                key = tuple(sorted((w1, w2)))
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append({"rule": "short", "pos": (r4(q.x), r4(q.y)), "ball": n1 if n1 in pat.expect else None,
+                            "text": f"{w1} touches {w2} on {l1} at ({q.x:.2f}, {q.y:.2f})"})
+    if drc:
+        for v in drc.get("violations", []):
+            if v.get("type") != "shorting_items":
+                continue
+            its = v.get("items", [])
+            p0 = its[0]["pos"] if its else {"x": 0, "y": 0}
+            out.append({"rule": "short", "pos": (r4(p0["x"]), r4(p0["y"])), "ball": None, "drc": True,
+                        "text": "KiCad DRC: " + v.get("description", "") + " -- " +
+                                "; ".join(f"{it['description']} @ ({it['pos']['x']:.2f}, {it['pos']['y']:.2f})"
+                                          for it in its)})
+    return out
+
+
+def faults_by_rule(faults: list[dict]) -> dict:
+    out = {}
+    for f in faults:
+        out.setdefault(f["rule"], []).append(f)
+    return out
+
+
 def net_lengths(sol: Sol) -> dict:
     out = {}
     for t in sol.tracks:
@@ -501,14 +721,15 @@ def p_one_layer() -> BPat:
                 alt_top=alt, alt_label="outside-in practice: 4 centre balls dog-bone to B.Cu (4 vias)",
                 alt_why="the 'outer two rows on top, inner balls via' habit of big BGAs; here it adds 4 vias (+100 mm price) "
                         "and no length: the 4 centre balls have free channels on F.Cu",
+                alt_rules="none (R1-R7 hold), but 4 vias more than needed",
                 judgement=[
-                    "the user's suggested (a) (outer two rows on F.Cu, inner balls dog-bone) is not the optimum for a 6 x 6 with "
-                    "one track per channel: Luzin p. 1 shows it escapes on one layer; it is drawn as the alternative (4 vias, "
-                    "+100 mm). Luzin p. 4 / TopoR's BGA mode asks 'every ball except the outer rows its own via': read here as "
-                    "a fallback when channels run out, not as a rule that adds vias where the channels are free",
-                    "each side: 5 ring-0 balls straight out, 3 ring-1 balls through the channel at their outward-diagonal "
-                    "cell, 1 centre ball through the remaining channel; the 4 sides are rotations, so any rotation or mirror "
-                    "of the assignment is equally optimal",
+                    "rules R1-R5 hold trivially (no via); R7: nothing on In1 / In2. 0 vias by price: Luzin p. 1 shows a "
+                    "6 x 6 with one track per channel escapes on one layer; the outer-two-rows-on-top habit is drawn as the "
+                    "alternative (4 vias, +100 mm). TopoR's 'every ball except the outer rows its own via' (Luzin p. 4) is "
+                    "read as a fallback when channels run out",
+                    "each side: 5 ring-0 balls straight out, 3 ring-1 balls through the channel at a cell next to them, 1 "
+                    "centre ball through the remaining channel; the 4 sides are rotations, so any rotation or mirror of the "
+                    "assignment is equally optimal (a channel wire is not a dog-bone: R3 does not apply to it)",
                     "destination PTH rows (0.6 / 0.3 at 1.0 mm) connect on every layer, so a router may choose B.Cu at a cost "
                     "of 1 via per wire; the pad row never forces a via"],
                 literature=[LIT["luzin_p1"], LIT["luzin_p2"], LIT["luzin_p4"], LIT["topor50"]])
@@ -523,41 +744,100 @@ def p_plane_balls() -> BPat:
     pat = BPat("bga_plane_balls", "Plane balls: one via per ball into its plane, no trace; signals on F.Cu", R_1MM, n, top,
                zones=[("GND", "In1.Cu"), ("VCC", "In2.Cu")],
                alt_top=alt, alt_label="shared GND via: the 4 centre balls on one via in the centre cell",
-               alt_why="1 GND via instead of 4 (-75 mm price), but four balls hang on one barrel: Luzin p. 4 asks every "
-                       "ball its own via and no jumpers between neighbouring balls",
+               alt_why="1 GND via instead of 4 (-75 mm price), but four balls hang on one barrel (rule R4: one via per "
+                       "plane ball; Luzin p. 4: every ball its own via, no jumpers between neighbouring balls)",
+               alt_rules="R4 (shared via); its stubs also point into the package centre (R3)",
                judgement=[
-                   "own via per plane ball (Luzin p. 4) rather than the cheapest count; the shared-via alternative is drawn "
-                   "(1 GND via, 4 stubs, KiCad DRC clean). Make it an option? (default: own via)",
-                   "dog-bone (stub to the cell centre, via there) rather than via-in-pad: Board Setup has no via-in-pad / "
-                   "filled-via capability flag; the hand boards split: HaasoscopePro, ButterStick U4, Glasgow use via-in-pad, "
-                   "ULX3S, ThunderScope, Zynq U2 dog-bone. Via-in-pad would be 0 stub length",
-                   "each plane via sits in the cell on the ball's outward diagonal (away from the package centre), as in "
-                   "most ULX3S dog-bones; the cell must not take a channel a signal needs (here none does)",
-                   "VCC on the 4 ring-1 corners shows a plane via in ring 1 next to signal channels; the plane nets are "
-                   "power nets only by name (same 0.15 mm stub as the signals, net class Default)"],
+                   "R4: one own via per plane ball (user rule 2026-11-12, BGAs are power hungry: short paths to the plane); "
+                   "the shared-via alternative is drawn as ruled out",
+                   "R2: every plane via at the centre of the open space between its 4 balls (0.257 mm to each ball at 1.0 / "
+                   "0.50 / 0.40), never next to the pad (solder wicking)",
+                   "R3: every plane stub points away from the package centre per quadrant: the 4 GND balls of the centre "
+                   "into the 4 diagonal cells around the centre cell, the 4 VCC ring-1 corners to the cells at the array "
+                   "corners",
+                   "R5: dog-bone (default); with option via_in_pad the stub would be 0 (via in the ball)",
+                   "R7: no signal on In1 / In2 (the planes); the signal balls keep the bga_one_layer channels on F.Cu",
+                   "the plane nets are power nets only by name (same 0.15 mm stub as the signals, net class Default)"],
                literature=[LIT["luzin_p2"], LIT["luzin_p3"], LIT["luzin_p4"], LIT["topor63"], LIT["planes"], LIT["power_via"]])
     return pat
 
 
+def _dogbone_top(n):
+    """Top side of the dog-bone patterns (rule R3): each inner ball's via in the open space on its outward diagonal,
+    so the 4 inner vias of a quadrant fill the 2 x 2 cells at its corner and the centre cross of cells stays free.
+    The quadrant's innermost via (C3 for the top-left) is boxed in on B.Cu by its two neighbours (no track passes
+    between two vias one pitch apart), so it leaves through the centre cross: right along the lane between ball
+    rows B and C, then up the free column between columns 3 and 4 (the B.Cu wire stays in the lanes between balls)."""
+    return _ring0_top(n) + [Item((1, 1), "dogbone", (0.5, 0.5), "B.Cu"), Item((2, 1), "dogbone", (1.5, 0.5), "B.Cu"),
+                            Item((3, 1), "dogbone", (3.5, 0.5), "B.Cu"),
+                            Item((2, 2), "dogbone", (1.5, 1.5), "B.Cu", bpath=((2.1, 1.5), (2.5, 1.1)))]
+
+
 def p_dogbone() -> BPat:
     n = 6
-    top = _ring0_top(n) + [Item((1, 1), "dogbone", (0.5, 0.5), "B.Cu"), Item((2, 1), "dogbone", (2.5, 0.5), "B.Cu"),
-                           Item((3, 1), "dogbone", (3.5, 0.5), "B.Cu"), Item((2, 2), "dogbone", (1.5, 1.5), "B.Cu")]
-    return BPat("bga_dogbone", "6 x 6, 0.8 mm, no track between balls: ring 0 on F.Cu, 16 dog-bones to B.Cu", R_08, n, top,
+    return BPat("bga_dogbone", "6 x 6, 0.8 mm, no track between balls: ring 0 on F.Cu, 16 dog-bones to B.Cu", R_08, n,
+                _dogbone_top(n),
                 judgement=[
-                    "In1.Cu / In2.Cu are planes by topor's default 4-layer roles (signal / gnd / pwr / signal), so the inner "
-                    "balls escape on B.Cu; with all four layers routable, In1 or In2 would be equally good",
-                    "via cells: ring-1 balls on their outward-diagonal outer cell, the ring-2 ball one cell further in; on "
-                    "B.Cu no track passes between two vias one pitch apart (0.40 < 0.45), so each side keeps one outer cell "
-                    "free for the ring-2 wire. Other free-cell choices (rotations, mirrors) are equally optimal",
-                    "0.15 / 0.15 rules with 0.40 pads at 0.8 mm is the zero-channel case (6-mil fab); with the 0.127 / 0.127 "
-                    "the survey boards use, one track fits and the 6 x 6 escapes on F.Cu like bga_one_layer",
-                    "stub = ball centre to cell centre at 45 degrees (0.566 mm); Luzin p. 4: keep it short so it blocks "
-                    "no neighbour"],
+                    "R3 fixes every via: each inner ball takes the open space on its outward diagonal, so a quadrant's 4 "
+                    "inner vias fill the 2 x 2 cells at its corner and the centre cross of cells stays free. Changed from "
+                    "ef43e25: B3, C5, E4, D2 (ring 1 next to the centre column / row) had their via up-right of the ball, "
+                    "i.e. toward the neighbouring quadrant",
+                    "R2: every via at an open-space centre: 0.166 mm to each of its 4 balls (0.40 via, 0.40 pads, 0.8 pitch "
+                    "-- the only spot where it fits at all)",
+                    "on B.Cu no track passes between two vias one pitch apart (0.40 < 0.45), so each quadrant's innermost "
+                    "via (C3, C4, D4, D3) is boxed in on two sides and leaves through one arm of the free centre cross. "
+                    "Expected path for C3: right along the lane between rows B and C, then up between columns 3 and 4 "
+                    "(1.77 pitch); the straight 45-degree line under ball B3 is 0.28 mm shorter and also legal (B.Cu under "
+                    "an F.Cu ball): the checker accepts both (detour bound reference + 1 mm). Your choice?",
+                    "R7: In1.Cu / In2.Cu are planes by topor's default 4-layer roles, so the inner balls escape on B.Cu",
+                    "R5: a via-in-pad variant (option via_in_pad) is NOT built: at these rules it is infeasible -- the 12 "
+                    "ring-1 vias in their balls form a closed fence (0.40 gap < 0.45 for one track) on every layer of a "
+                    "through via, so the 4 ring-2 balls cannot escape without blind / micro vias; and with the neckdown "
+                    "rule F.Cu alone escapes everything (bga_neckdown, 0 vias). A meaningful via_in_pad case needs a "
+                    "bigger array (7 x 7 / 8 x 8, not built yet)",
+                    "0.15 / 0.15 rules with 0.40 pads at 0.8 mm is the zero-channel case (6-mil fab, no custom rule); with "
+                    "the BGA neckdown rule one track fits (bga_neckdown)"],
                 literature=[LIT["luzin_p1"], LIT["luzin_p4"], LIT["topor50"], LIT["haas2026"], LIT["power_via"]])
 
 
-BUILDERS = {"bga_one_layer": p_one_layer, "bga_plane_balls": p_plane_balls, "bga_dogbone": p_dogbone}
+NECKDOWN_DRU = """(version 1)
+(rule "BGA neckdown"
+  (condition "A.intersectsCourtyard('U1')")
+  (constraint track_width (min 0.1mm) (opt 0.15mm))
+  (constraint clearance (min 0.1mm)))
+"""
+
+
+def p_neckdown() -> BPat:
+    n = 6
+    # the channel cells follow the dog-bone cells of bga_dogbone, so both answers have the same escape order (and the
+    # same destination pads): B3 through the cell up-left of it, C3 up-right and through the column between 3 and 4
+    top = _ring0_top(n) + [Item((1, 1), "channel", (0.5, 0.5)), Item((2, 1), "channel", (1.5, 0.5)),
+                           Item((3, 1), "channel", (3.5, 0.5)), Item((2, 2), "channel", (2.5, 1.5))]
+    alt = _dogbone_top(n)
+    return BPat("bga_neckdown", "bga_dogbone + a .kicad_dru BGA neckdown rule: one track per channel, everything on F.Cu, "
+                                "0 vias", R_08, n, top, dru=NECKDOWN_DRU, region_clear=0.10,
+                alt_top=alt, alt_label="bga_dogbone's answer (16 dog-bones): what a router that ignores the courtyard rule "
+                                       "has to do",
+                alt_why="DRC clean and obeys R1-R5, but 16 vias (+400 mm price) where the courtyard rule lets one track "
+                        "pass between two balls",
+                alt_rules="none (R1-R7 hold), but 16 vias more than needed",
+                judgement=[
+                    "R6: the board is bga_dogbone's (0.8 / 0.40 pads, net class 0.15 / 0.15) plus a .kicad_dru: rule 'BGA "
+                    "neckdown' (condition A.intersectsCourtyard('U1'): track_width min 0.10 opt 0.15, clearance min 0.10); "
+                    "U1 has an F.CrtYd rectangle half a pitch around the outer balls. kicad-cli DRC reads it (reference "
+                    "0 / 0; the same copper without the .kicad_dru: clearance violations between balls and wires)",
+                    "inside the courtyard a 0.15 track passes between two balls with 0.125 mm each side >= 0.10: one track "
+                    "per channel, so the 6 x 6 escapes like bga_one_layer: 0 vias, all on F.Cu. No neck is needed (the "
+                    "rule's opt width 0.15 fits); a 0.10 neck would be equally legal",
+                    "outside the courtyard the net class 0.15 clearance holds again: the wires leave at 0.40 mm spacing, "
+                    "turn 45 degrees one after the other (0.10 mm stagger) so neighbours stay 0.20 mm apart",
+                    "R1-R5 hold trivially (no via); R7: nothing on In1 / In2"],
+                literature=[LIT["luzin_p1"], LIT["luzin_p2"], LIT["kicad_dru"]])
+
+
+BUILDERS = {"bga_one_layer": p_one_layer, "bga_plane_balls": p_plane_balls, "bga_dogbone": p_dogbone,
+            "bga_neckdown": p_neckdown}
 NAMES = list(BUILDERS)
 
 
@@ -597,13 +877,32 @@ def add_zones(b, pat: BPat):
         pcbnew.ZONE_FILLER(b).Fill(b.Zones())
 
 
-def write_pat(pat: BPat, sol: Sol | None, path: Path) -> Path:
+def add_courtyard(b, pat: BPat):
+    """U1's courtyard: an F.CrtYd rectangle on the BGA box (needed by intersectsCourtyard('U1'))."""
+    fp = b.FindFootprintByReference("U1")
+    x0, y0, x1, y1 = pat.bga_box()
+    sh = pcbnew.PCB_SHAPE(fp)
+    sh.SetShape(pcbnew.SHAPE_T_RECT)
+    sh.SetLayer(pcbnew.F_CrtYd)
+    sh.SetWidth(int(0.05 * MM))
+    sh.SetStart(pcbnew.VECTOR2I(int(round(x0 * MM)), int(round(y0 * MM))))
+    sh.SetEnd(pcbnew.VECTOR2I(int(round(x1 * MM)), int(round(y1 * MM))))
+    fp.Add(sh)
+
+
+def write_pat(pat: BPat, sol: Sol | None, path: Path, *, dru: bool = True) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     b = build_board(_View(pat, sol), copper=sol is not None)
+    add_courtyard(b, pat)
     add_zones(b, pat)
     pcbnew.SaveBoard(str(path), b)
     write_project_file(path, rules=pat.rules.kicad(), classes=pat.rules.classes())
+    d = path.with_suffix(".kicad_dru")
+    if pat.dru and dru:
+        d.write_text(pat.dru)
+    elif d.exists():
+        d.unlink()
     return path
 
 
@@ -627,7 +926,7 @@ def _patch_poly(ax, geom, **kw):
 
 
 def draw(ax, pat: BPat, sol: Sol | None, *, window=None, ratsnest=False, title="", marks=None, cells=False,
-         labels="auto"):
+         labels="auto", spots=None):
     from matplotlib.patches import Circle, Rectangle
 
     W, H = pat.size
@@ -656,7 +955,8 @@ def draw(ax, pat: BPat, sol: Sol | None, *, window=None, ratsnest=False, title="
                 fc = ROLE_COL.get(role, "#cccccc")
                 ax.add_patch(Circle(p.pos, p.size[0] / 2, fc=fc, ec="#5a1010", lw=0.5, alpha=0.9, zorder=2))
                 if show_lab:
-                    ax.text(p.pos[0], p.pos[1], p.num, fontsize=4.6, ha="center", va="center", color="k", zorder=7)
+                    ax.text(p.pos[0], p.pos[1], p.num, fontsize=4.6, ha="center", va="center", color="k", zorder=7,
+                            clip_on=True)
     if sol is not None:
         order = ["In2.Cu", "In1.Cu", "B.Cu", "F.Cu"]
         for layer in order:
@@ -681,6 +981,16 @@ def draw(ax, pat: BPat, sol: Sol | None, *, window=None, ratsnest=False, title="
                 ax.plot([q[0]], [q[1]], marker="v", ms=4, color=ROLE_COL[e["net"]], zorder=8)
     for mk in marks or []:
         ax.add_patch(Circle(mk["pos"], mk.get("r", 0.45), fc="none", ec=mk.get("color", BAD), lw=1.2, zorder=9))
+    for k, sp in enumerate(spots or []):
+        if sp["rule"] in ("R1", "short"):
+            ax.plot([sp["pos"][0]], [sp["pos"][1]], marker="x", ms=7 if zoom else 4, mew=1.6 if zoom else 1.0, color=BAD,
+                    zorder=10)
+        else:  # R2 / R3: a small square around the via
+            ax.plot([sp["pos"][0]], [sp["pos"][1]], marker="s", ms=8 if zoom else 4, mfc="none", mec=BAD,
+                    mew=1.0, zorder=10)
+        if zoom and sp.get("label"):
+            ax.text(sp["pos"][0] + 0.08, sp["pos"][1] - 0.08, sp["label"], fontsize=5.5, color=BAD, zorder=11,
+                    fontweight="bold", clip_on=True)
     if window:
         ax.set_xlim(window[0], window[2])
         ax.set_ylim(window[3], window[1])
@@ -741,7 +1051,7 @@ def render(pat: BPat, doc: dict, out: Path) -> Path:
                    f"{k['alternative_drc'].get('unconnected')}): {pa['vias']} vias, price {pa['price']:.1f}\n{pat.alt_label}")
     else:
         axs[3].axis("off")
-        ch = pat.rules.channel()
+        ch = pat.channel()
         txt = [f"Rules: pitch {pat.rules.pitch}, pad {pat.rules.pad}, track {pat.rules.track}, clearance {pat.rules.clear}, "
                f"via {pat.rules.via[0]}/{pat.rules.via[1]}",
                f"between two balls: gap {ch['ball_gap']} vs one track {ch['one_track_needs']} -> {ch['tracks_between_balls']} "
@@ -764,7 +1074,7 @@ def render(pat: BPat, doc: dict, out: Path) -> Path:
 
 # ----------------------------------------------------------------------------------------------- generate
 def answer_text(pat: BPat, exp: dict) -> str:
-    ch = pat.rules.channel()
+    ch = pat.channel()
     parts = []
     for key, d in exp["per_ring"].items():
         esc = ", ".join(f"{v} {k}" for k, v in d["escape"].items())
@@ -783,14 +1093,20 @@ WHY = {
                      "side up the one free channel between ring 1 and through ring 0. Every channel holds one wire, no wire "
                      "crosses, no via is needed, so any via would only add 25 mm price.",
     "bga_plane_balls": "The plane is the terminal (planes-are-terminals): a plane ball needs exactly one via into its plane "
-                       "and no trace beyond it. Each plane ball gets its own via in the cell on its outward diagonal (Luzin "
-                       "p. 4: own via per ball, no jumpers between neighbours, short stub). The signal balls keep the "
-                       "bga_one_layer channels (the centre is power now, Luzin p. 3 fig. 7), so they stay on F.Cu with 0 vias.",
+                       "and no trace beyond it. Each plane ball gets its own via (R4) at the centre of the open space on its "
+                       "outward diagonal (R2, R3; Luzin p. 4: own via per ball, no jumpers between neighbours, short stub). "
+                       "The signal balls keep the bga_one_layer channels (the centre is power now, Luzin p. 3 fig. 7), so "
+                       "they stay on F.Cu with 0 vias; no wire passes within clearance of a foreign via (R1).",
     "bga_dogbone": "No track fits between two balls (gap 0.40 < 0.45): ring 0 encloses every inner ball on F.Cu, so each "
-                   "of the 16 inner balls needs one via (proved minimum), and a via must sit in a cell next to its ball "
-                   "(the 0.40 via fits a cell with 0.166 mm to the balls). On B.Cu only vias are in the way and no track "
-                   "passes between two vias one pitch apart, so the ring-1 vias of a side take 3 of the 5 outer cells and "
-                   "leave the one in front of the ring-2 ball free; every wire then runs straight out to the pad row.",
+                   "of the 16 inner balls needs one via (proved minimum). R2 + R3 fix each via: the open-space centre on the "
+                   "ball's outward diagonal (the only spot a 0.40 via fits, 0.166 mm to the balls). A quadrant's 4 vias fill "
+                   "its 2 x 2 corner cells; on B.Cu no track passes between two vias one pitch apart, so 3 of them run "
+                   "straight out and the innermost one leaves through the free centre cross of cells. Every B.Cu wire stays "
+                   "in the lanes between balls and keeps clearance from every foreign via (R1).",
+    "bga_neckdown": "The .kicad_dru courtyard rule lowers the clearance inside U1's courtyard to 0.10 mm (R6): a 0.15 "
+                    "track then passes between two 0.40 balls at 0.8 mm (0.125 mm each side), one track per channel, and "
+                    "a 6 x 6 escapes on one layer (Luzin p. 1: 4(n-1) >= (n-2)^2 up to n = 6). Same channel assignment "
+                    "as bga_one_layer: 0 vias; every via would only add 25 mm price.",
 }
 
 
@@ -805,10 +1121,17 @@ def generate(name: str, out: Path, *, png: bool = True, drc: bool = True) -> dic
              "reference": write_pat(pat, pat.ref, d / "reference" / f"{name}.kicad_pcb")}
     if pat.alt is not None:
         paths["alternative"] = write_pat(pat, pat.alt, d / "alternative" / f"{name}.kicad_pcb")
+    if pat.dru:  # control: the same expected copper without the .kicad_dru must fail KiCad DRC (the rule is read)
+        paths["reference_without_dru"] = write_pat(pat, pat.ref, d / "reference_without_dru" / f"{name}.kicad_pcb",
+                                                   dru=False)
     kicad = {}
-    for key in ("problem", "reference", "alternative"):
+    for key in ("problem", "reference", "alternative", "reference_without_dru"):
         if key in paths:
             kicad[f"{key}_drc"] = drc_of(paths[key]) if drc else {}
+    # the user's BGA rules on the expected copper: none may fail; the alternative's faults are its reason
+    ref_faults = rule_faults(pat, pat.ref)
+    assert not ref_faults, (name, ref_faults[:5])
+    alt_faults = rule_faults(pat, pat.alt) if pat.alt else []
     pins = {f"{f.ref}.{p.num}": {"net": p.net, "pos": rp(p.pos), "size": list(p.size), "drill": p.drill}
             for f in pat.fps for p in f.pads}
 
@@ -826,12 +1149,16 @@ def generate(name: str, out: Path, *, png: bool = True, drc: bool = True) -> dic
                      "bga_box": [r4(v) for v in pat.bga_box()]},
            "rules": {"pitch": pat.rules.pitch, "pad": pat.rules.pad, "track": pat.rules.track, "clearance": pat.rules.clear,
                      "via": list(pat.rules.via), "board_setup": pat.rules.kicad(), "source": pat.rules.source,
-                     "channel": pat.rules.channel(), "via_price_mm": VIA_PRICE},
+                     "channel": pat.channel(), "via_price_mm": VIA_PRICE},
            "balls": pat.expect, "pins": pins,
            "connections": [{"net": n, "from": a, "to": b} for n, a, b in pat.connections],
            "expected": exp, "built_check": built, "judgement_calls": pat.judgement, "literature": pat.literature,
            "alternative_label": pat.alt_label, "alternative_why": pat.alt_why,
-           "reference": sol_doc(pat.ref), "alternative": sol_doc(pat.alt), "kicad": kicad}
+           "reference": sol_doc(pat.ref), "alternative": sol_doc(pat.alt), "kicad": kicad,
+           "bga_rules": RULES_TEXT, "reference_rule_faults": [],
+           "alternative_rule_faults": {k: len(v) for k, v in faults_by_rule(alt_faults).items()},
+           "alternative_rules": pat.alt_rules, "kicad_dru": pat.dru or None,
+           "courtyard_clearance": pat.region_clear}
     d.mkdir(parents=True, exist_ok=True)
     (d / "expected.json").write_text(json.dumps(doc, indent=1) + "\n")
     paths["expected"] = d / "expected.json"
@@ -857,18 +1184,59 @@ what these patterns teach. Measured by `scratchpad/bga/survey.py` on read-only c
 array edge; "dog-bone" = a via 0.3-0.75 mm from the ball centre)."""
 
 
-TOPOR_NOTES = {  # what the one topor run (main 0f36b1e engine, 2026-11-12) did, read off the PNGs and KiCad DRC
-    "bga_one_layer": "Every one of the 16 inner balls gets a via and escapes on B.Cu (expected: 0 vias, all on F.Cu "
-                     "through the free channels). The vias sit next to the balls, 0.1-0.5 mm off the cell centres, and "
-                     "4 of them short against B.Cu wires of the neighbouring ball (shorting_items 4, clearance 8, "
-                     "hole_clearance 4). C4 detours (x1.34). Engine finding VIA_SQUEEZE.",
-    "bga_plane_balls": "DRC clean. The 8 ring-1 signal balls get a via each and escape on B.Cu (expected F.Cu, 0 vias): "
-                       "16 vias instead of 8 (price 492.5 vs 297.1). Plane vias: one per ball, but not in the cell "
-                       "centres (the GND ones drift toward the package centre).",
-    "bga_dogbone": "Topology right: ring 0 on F.Cu, 16 vias, inner balls on B.Cu, the same 181.6 mm. Via placement wrong: "
-                   "every via 0.1-0.43 mm off its cell centre (a 0.40 via has 0.016 mm slack in a 0.8 mm cell), so vias "
-                   "touch foreign balls and B.Cu wires: 13 new DRC violations (shorting_items 7, clearance 4, "
-                   "hole_clearance 2). Engine finding VIA_SQUEEZE.",
+R1_FORENSICS = """Measured on the routed copies of the ef43e25 gallery (main 0f36b1e engine; topor's tracks 0.20 wide, vias
+0.45 / 0.25 after its fab floors). Copper gap = track edge to via edge; hole gap = track edge to drill edge.
+
+| board | spot | track (net, B.Cu, KiCad uuid) | foreign via (uuid, centre) | copper gap | hole gap | KiCad DRC |
+|---|---|---|---|---|---|---|
+| bga_one_layer | (7.0, 6.6): diagonal past B3's via toward C3 | C3 (6.927, 5.927)-(7.519, 6.654) 9fedad9a, (7.519, 6.654)-(7.680, 7.368) 00396b31 | B3 e2f426b0, (7.780, 6.506) | -0.025 (overlap) | 0.075 | shorting_items, hole_clearance |
+| bga_one_layer | (9.8-10.1, 7.0-7.7): converging C4 stubs | C4 (10.079, 7.043)-(9.981, 7.654) 4773e1e2, (9.981, 7.654)-(10.070, 7.100) 90e5e725 | C5 e7959002, (9.940, 7.911) | -0.065 (overlap) | 0.035 | shorting_items, hole_clearance |
+| bga_dogbone | (7.1, 6.6) | C3 (7.406, 6.292)-(7.142, 6.556) ebdc6486, (7.142, 6.556)-(7.142, 7.088) b2526b50 | B2 7b7ab353 (6.667, 6.650); B3 4ea261fd (7.756, 6.643) | 0.150 / 0.171 | 0.25 / 0.27 | none (exactly at clearance) |
+| bga_dogbone | (9.3, 7.1) | C4 (9.073, 7.081)-(13.494, 7.081) 7836ea6c | B5 114f6a6c, (9.345, 6.655) | 0.100 | 0.200 | clearance |
+| bga_dogbone | (6.7, 8.5) | D3 (6.048, 9.010)-(6.723, 8.585) 3247cbc5, (6.723, 8.585)-(7.372, 8.451) a0f2496f | D2 9e203ea1, (6.647, 8.270) | -0.001 (overlap) | 0.099 | shorting_items, hole_clearance |
+
+The two spots the user marked ((7.0, 6.6) and the converging stubs at (9.9-10.1, 7.0-7.4) through C5's via) match the
+bga_one_layer run exactly; in the bga_dogbone run the C3 wire at (7.1, 6.6) only touches the clearance line (0.150) and
+the C4 wire passes B5's via at 0.100 (a clearance violation, no overlap). The expected answers of ef43e25 had no R1
+fault (copper gap >= clearance everywhere); their only rule break was R3 in bga_dogbone (B3, C5, E4, D2 up-right /
+toward the next quadrant)."""
+
+RULE_HOW = {
+    "R1": "Every track segment (real width) against every via of another net (vias are on all layers): copper gap < "
+          "the clearance that applies (net class, or the courtyard rule) = fault; gap <= 0 = drawn overlap (a short).",
+    "R2": f"A via inside the BGA box that serves a ball (nearest ball of its net within one pitch) must be within "
+          f"{VIA_CENTRE_TOL} mm (VIA_CENTRE_TOL) of an open-space centre.",
+    "R3": "The sign of (via - ball) on both axes must equal the sign of (ball - package centre) (outward_dirs()).",
+    "R4": "Every plane ball needs a via of its own (nearest plane ball of that via); a via within reach of two plane "
+          "balls that have no other via = shared.",
+    "R5": "A via within VIA_CENTRE_TOL of its ball centre is via-in-pad: a fault while the option via_in_pad is off "
+          "(default).",
+    "R6": "bga_neckdown carries the rule; the checker uses its clearance for every pair of which one item touches U1's "
+          "courtyard, as KiCad does; kicad-cli DRC is the judge.",
+    "R7": "A track of a non-plane net on In1.Cu / In2.Cu (topor's default 4-layer plane roles).",
+    "short": "Two nets' copper touching on one layer (shapely: track-track, track-pad, via-pad, via-via; track-via is "
+             "R1), plus every KiCad DRC shorting_items of the routed board.",
+}
+
+TOPOR_NOTES = {  # what the topor run (main 0f36b1e engine, defaults + loop = topor, 2026-11-12) did, read off the PNGs,
+    # rule_faults() and KiCad DRC. topor raises the boards' rules to its JLCPCB 1 oz fab floors (track 0.15 -> 0.20,
+    # via 0.40 / 0.20 -> 0.45 / 0.25, hole clearance 0.20 -> 0.35, the courtyard clearance 0.10 -> 0.15)
+    "bga_one_layer": "Same as the ef43e25 run: every one of the 16 inner balls gets a via and escapes on B.Cu (expected 0 "
+                     "vias). R2: all 16 vias 0.35-0.54 mm off the open-space centre, overlapping their own ball pad; R3: "
+                     "B3, C5, E4, D2 point toward the next quadrant; R1: the C3 B.Cu track runs over B3's via at (7.78, "
+                     "6.51) and the C4 B.Cu spike (10.08, 7.04) -> (9.98, 7.65) -> (10.07, 7.10) over C5's via at "
+                     "(9.94, 7.91): KiCad shorting_items + hole_clearance. C4 detours x1.34.",
+    "bga_plane_balls": "DRC clean, R4 holds (one via per plane ball). 8 ring-1 signals take a via each (16 vias, "
+                       "expected 8); R2: all 16 vias 0.35-0.54 off centre; R3: 12 vias point the wrong way (GND vias "
+                       "toward the package centre, VCC vias up-right everywhere).",
+    "bga_dogbone": "Topology right (ring 0 on F.Cu, 16 vias, inner balls on B.Cu, 182.5 mm). R2: every via 0.35-0.43 "
+                   "mm off its open-space centre and overlapping its own ball pad (the floored 0.45 via does not fit a "
+                   "cell centre: 0.566 - 0.20 - 0.225 = 0.141 < 0.15); R3: C3, C4, D3, D4 point wrong; R1: C3 B.Cu track "
+                   "over B3's via at (7.47, 6.65) (shorting_items), D4 B.Cu track 0.070 mm from E4's via at (8.53, "
+                   "9.35) (clearance + hole_clearance). KiCad DRC 10 new.",
+    "bga_neckdown": "topor reads the rule (CUSTOM_RULES: track_width -> net, clearance -> region) but floors the region "
+                    "clearance 0.10 -> 0.15 (CUSTOM_RULE_LIMITED), so the channels stay closed and it routes "
+                    "bga_dogbone's way: 16 vias (expected 0), the same R1 / R2 / R3 faults and 8 new DRC violations.",
 }
 
 
@@ -887,7 +1255,22 @@ def readme(out: Path, docs: dict) -> Path:
          "- The unrouted problem of bga_plane_balls shows 2 isolated_copper (the planes before any via reaches them).",
          "- Net class Default = Board Setup minimums (no necking, no via-size trap): see each pattern.",
          "- Destinations: PTH pads 0.6 / 0.3 at 1.0 mm in a row on each side, ordered like the escape lines (no forced "
-         "crossing, no forced via). Price = mm + 25 mm per via. Copper to edge 0.50, hole clearance 0.20.", ""]
+         "crossing, no forced via). Price = mm + 25 mm per via. Copper to edge 0.50, hole clearance 0.20.",
+         "- U1 has an F.CrtYd rectangle half a pitch around the outer ball centres; only bga_neckdown has a .kicad_dru.", "",
+         "## The user's BGA rules (2026-11-12) and how `rule_faults()` checks them", "",
+         "Every expected answer has 0 faults (asserted when generating); the PNG of a routed board marks each fault in "
+         "magenta (circle = ball, x = R1 / short spot, square = R2 / R3 via) and lists them by rule in the footer.", ""]
+    L += [f"- **{k}** {v}. " + RULE_HOW[k] for k, v in RULES_TEXT.items()]
+    L += ["", "**Odd arrays (R3, centre row / column):** a ball on the centre column of an odd array takes the outward "
+          "diagonal of a clockwise pinwheel (top half -> up-right, right half of the centre row -> down-right, bottom "
+          "half -> down-left, left half -> up-left, the centre ball up-left); the checker accepts either outward diagonal "
+          "for such balls. The 6 x 6 patterns have no centre row / column.", "",
+          "**Not built yet (user question):** a 7 x 7 / 8 x 8 array is the first size where one layer cannot escape "
+          "everything even with one track per channel (Luzin p. 1: 4(n-1) channels vs (n-2)^2 inner balls: 24 < 25 at "
+          "n = 7, 28 < 36 at n = 8), so 'outer two rings on top, the rest dog-bone' becomes the optimum and the first "
+          "interesting via_in_pad case; 0.5 / 0.65 mm pitch is the fine-pitch case (eMMC / LPDDR, Zynq U7) where no "
+          "0.40 via fits between four balls at all (0.5 x sqrt 2 = 0.71 mm diagonal), so only via-in-pad or micro vias "
+          "work -- i.e. a pattern whose expected answer depends on the via_in_pad option.", ""]
     judg = []
     for n, d in docs.items():
         k = d["kicad"]
@@ -903,10 +1286,13 @@ def readme(out: Path, docs: dict) -> Path:
         for key, pr in d["expected"]["per_ring"].items():
             L.append(f"| {key} | {pr['balls']} | {', '.join(f'{v} x {k_}' for k_, v in pr['escape'].items())} | {pr['vias']} |")
         L += ["", f"**Why.** {d['why']}", ""]
+        if d.get("kicad_dru"):
+            L += ["**.kicad_dru** (next to the .kicad_pro):", "", "```", d["kicad_dru"].rstrip(), "```", ""]
         if d.get("alternative"):
             a = d["expected"]["alternative"]
             L += [f"**Alternative (ruled out).** {d['alternative_label']}: {a['vias']} vias, {a['length_mm']:.1f} mm, price "
-                  f"{a['price']:.1f}. {d['alternative_why']}.", ""]
+                  f"{a['price']:.1f}. {d['alternative_why']}. Rules it breaks: {d.get('alternative_rules') or '-'} "
+                  f"(checker: {d.get('alternative_rule_faults') or 'no fault'}).", ""]
         L += ["**KiCad DRC.** " + ", ".join(f"{kk.replace('_drc', '')} {vv.get('violations')} / {vv.get('unconnected')}"
                                              for kk, vv in k.items()), ""]
         tp = Path(out) / n / "topor" / "result.json"
@@ -917,7 +1303,8 @@ def readme(out: Path, docs: dict) -> Path:
                   f"KiCad render: `{n}/topor/{n}-compare.png` (yellow = new DRC violations).", ""]
         for j in d["judgement_calls"]:
             judg.append(f"- {n}: {j}")
-    L += ["## Judgement calls needing the user", ""] + judg + ["", "## Literature", ""]
+    L += ["## Rule 1 in the ef43e25 runs (\"traces through vias of other pads\")", "", R1_FORENSICS, "",
+          "## Judgement calls needing the user", ""] + judg + ["", "## Literature", ""]
     seen = []
     for d in docs.values():
         for x in d["literature"]:
@@ -931,8 +1318,18 @@ def readme(out: Path, docs: dict) -> Path:
 
 # ----------------------------------------------------------------------------------------------- analyse a routed board
 def load_copper(pcb: Path) -> Sol:
+    """Tracks and vias of a routed board, plus its pads (`sol.pads`: [(net, layers, Pad, ref)]) so the rule checker
+    sees the board's own destination pads."""
     b = pcbnew.LoadBoard(str(pcb))
     tracks, vias = [], []
+    pads = []
+    for fp in b.GetFootprints():
+        for p in fp.Pads():
+            pos = (p.GetPosition().x / MM, p.GetPosition().y / MM)
+            drill = p.GetDrillSize().x / MM if p.GetAttribute() == pcbnew.PAD_ATTRIB_PTH else None
+            ly = LAYERS4 if drill else [b.GetLayerName(l) for l in p.GetLayerSet().CuStack()]
+            pads.append((p.GetNetname(), ly, Pad(p.GetNumber(), p.GetNetname(), pos, (p.GetSize().x / MM,) * 2,
+                                                  shape="circle", drill=drill), fp.GetReference()))
     for t in b.GetTracks():
         if t.GetClass() == "PCB_VIA":
             vias.append(Via(t.GetNetname(), (t.GetPosition().x / MM, t.GetPosition().y / MM), t.GetWidth(pcbnew.F_Cu) / MM,
@@ -944,10 +1341,12 @@ def load_copper(pcb: Path) -> Sol:
         else:
             tracks.append(Track(t.GetNetname(), b.GetLayerName(t.GetLayer()), t.GetWidth() / MM,
                                 [(t.GetStart().x / MM, t.GetStart().y / MM), (t.GetEnd().x / MM, t.GetEnd().y / MM)]))
-    return Sol("routed", tracks, vias)
+    sol = Sol("routed", tracks, vias)
+    sol.pads = pads
+    return sol
 
 
-def compare(pat: BPat, sol: Sol) -> dict:
+def compare(pat: BPat, sol: Sol, drc: dict | None = None) -> dict:
     """Per ball: escape layer(s) through the BGA box edge, vias of its net (count, nearest cell centre), length vs
     reference; plane nets: vias per ball and plane-layer traces."""
     x0, y0, x1, y1 = pat.bga_box()
@@ -955,9 +1354,10 @@ def compare(pat: BPat, sol: Sol) -> dict:
     ref_len = net_lengths(pat.ref)
     got_len = net_lengths(sol)
     cells = [pat.cell_xy(cx + 0.5, cy + 0.5) for cy in range(pat.n - 1) for cx in range(pat.n - 1)]
-    ch = pat.rules.channel()
+    ch = pat.channel()
     slack = r4(max(0.0, ch["via_in_cell_gap"] - pat.rules.clear) + 0.01)  # how far a via may leave the cell centre
     rows, marks = [], []
+    why_of: dict = {}
     for name, e in pat.expect.items():
         net = e["net"]
         c, r = int(name[1:]) - 1, ROWS.index(name[0])
@@ -966,12 +1366,9 @@ def compare(pat: BPat, sol: Sol) -> dict:
             vs = [v for v in sol.vias if v.net == net and math.dist(v.pos, bpos) < 1.5 * pat.rules.pitch]
             own = [v for v in vs if math.dist(v.pos, bpos) <= pat.rules.pitch / SQ2 + 0.05]
             off = [r4(min(math.dist(v.pos, q) for q in cells)) for v in own]
-            ok_cell = bool(off) and min(off) <= slack
+            ok_cell = bool(off) and min(off) <= VIA_CENTRE_TOL
             rows.append({"ball": name, "net": net, "expected": "own via in a cell", "vias_near": len(own),
                          "via_cell_offset": off, "ok": len(own) >= 1 and ok_cell})
-            if not rows[-1]["ok"]:
-                marks.append({"pos": bpos, "text": f"{name}: " + (f"via {min(off):.2f} off the cell centre" if own else
-                                                                  "no own via"), "r": pat.rules.pitch * 0.45})
             continue
         layers = sorted({t.layer for t in sol.tracks if t.net == net and LineString(t.pts).intersects(edge)})
         nv = [v for v in sol.vias if v.net == net]
@@ -985,7 +1382,7 @@ def compare(pat: BPat, sol: Sol) -> dict:
         rows.append({"ball": name, "net": net, "ring": e["ring"], "expected_layer": e["layer"], "escape_layers": layers,
                      "expected_vias": e["vias"], "vias": len(nv), "via_cell_offset": cell_off, "length": r4(L),
                      "reference": Lr, "ratio": r4(L / Lr) if Lr else None, "detour": detour,
-                     "via_off_cell": bool(off_cell), "ok": ok_layer and ok_vias and not detour and not off_cell})
+                     "via_off_cell": bool(off_cell), "ok": ok_layer and ok_vias and not detour})
         why = []
         if not ok_layer:
             why.append(f"{'/'.join(l.replace('.Cu', '') for l in layers) or '-'} (exp {e['layer'].replace('.Cu', '')})")
@@ -993,10 +1390,23 @@ def compare(pat: BPat, sol: Sol) -> dict:
             why.append(f"{len(nv)} via (exp {e['vias']})")
         if detour:
             why.append(f"x{L / Lr:.2f}")
-        if off_cell:
-            why.append(f"via {max(off_cell):.2f} off the cell centre")
+        why_of[name] = why
+    # the user's rules: faults per ball (R1 by the track's ball, R2 / R3 / R4 / R5 by the via's ball) and at their spot
+    faults = rule_faults(pat, sol, drc)
+    for f in faults:
+        if f.get("ball") in pat.expect:
+            tag = {"R1": "R1 over a foreign via", "R2": "R2 via off centre", "R3": "R3 dog-bone direction",
+                   "R4": "R4 plane via", "R5": "R5 via-in-pad", "R7": "R7 plane layer", "short": "short"}[f["rule"]]
+            if tag not in why_of.setdefault(f["ball"], []):
+                why_of[f["ball"]].append(tag)
+    for row in rows:
+        if why_of.get(row["ball"]):
+            row["ok"] = False
+    for name, why in why_of.items():
         if why:
-            marks.append({"pos": bpos, "text": f"{name}: " + ", ".join(why), "r": pat.rules.pitch * 0.45})
+            c, r = int(name[1:]) - 1, ROWS.index(name[0])
+            marks.append({"pos": pat.ball_xy(c, r), "text": f"{name}: " + ", ".join(why), "r": pat.rules.pitch * 0.45})
+    spots = [{"pos": f["pos"], "rule": f["rule"], "text": f["text"]} for f in faults if f["rule"] in ("R1", "short", "R2", "R3")]
     sig = [r for r in rows if "escape_layers" in r]
     summ = {"vias": len(sol.vias), "expected_vias": len(pat.ref.vias),
             "balls_as_expected": sum(1 for r in rows if r["ok"]), "balls": len(rows),
@@ -1009,8 +1419,9 @@ def compare(pat: BPat, sol: Sol) -> dict:
             "via_cell_slack_mm": slack,
             "length_mm": r4(sum(got_len.values())), "reference_mm": r4(sum(ref_len.values())),
             "max_via_cell_offset": max([o for r in sig for o in r["via_cell_offset"]], default=None),
-            "plane_layer_tracks": sum(1 for t in sol.tracks if t.layer in ("In1.Cu", "In2.Cu"))}
-    return {"summary": summ, "balls": rows, "marks": marks}
+            "plane_layer_tracks": sum(1 for t in sol.tracks if t.layer in ("In1.Cu", "In2.Cu")),
+            "faults_by_rule": {k: len(v) for k, v in sorted(faults_by_rule(faults).items())}}
+    return {"summary": summ, "balls": rows, "marks": marks, "faults": faults, "spots": spots}
 
 
 def render_compare(pat: BPat, sol: Sol, cmp: dict, out: Path, label: str) -> Path:
@@ -1019,39 +1430,47 @@ def render_compare(pat: BPat, sol: Sol, cmp: dict, out: Path, label: str) -> Pat
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig = plt.figure(figsize=(13.5, 14.2))
-    axs = [fig.add_axes([0.04, 0.53, 0.44, 0.40]), fig.add_axes([0.53, 0.53, 0.44, 0.40]),
-           fig.add_axes([0.04, 0.13, 0.44, 0.38]), fig.add_axes([0.53, 0.13, 0.44, 0.38])]
+    fig = plt.figure(figsize=(13.5, 15.4))
+    axs = [fig.add_axes([0.04, 0.565, 0.44, 0.375]), fig.add_axes([0.53, 0.565, 0.44, 0.375]),
+           fig.add_axes([0.04, 0.185, 0.44, 0.355]), fig.add_axes([0.53, 0.185, 0.44, 0.355])]
     x0, y0, x1, y1 = pat.bga_box()
     m = 1.2
     win = (x0 - m, y0 - m, x1 + m, y1 + m)
     s = cmp["summary"]
     pr = price(pat.ref)
-    draw(axs[0], pat, pat.ref, title=f"EXPECTED: {pr['vias']} vias, {pr['length_mm']:.1f} mm")
-    draw(axs[1], pat, sol, marks=cmp["marks"],
-         title=f"{label}: {s['vias']} vias, {s['length_mm']:.1f} mm; magenta = ball not as expected")
+    spots = [dict(sp, label={"R1": "R1", "short": "S"}.get(sp["rule"])) for sp in cmp.get("spots", [])]
+    draw(axs[0], pat, pat.ref, title=f"EXPECTED: {pr['vias']} vias, {pr['length_mm']:.1f} mm (rules R1-R7: 0 faults)")
+    draw(axs[1], pat, sol, marks=cmp["marks"], spots=spots,
+         title=f"{label}: {s['vias']} vias, {s['length_mm']:.1f} mm; magenta = ball not as expected / rule fault")
     draw(axs[2], pat, pat.ref, window=win, cells=True, title="EXPECTED, BGA zoom")
-    draw(axs[3], pat, sol, window=win, cells=True, marks=cmp["marks"], title=f"{label}, BGA zoom (magenta: why)")
-    legend(fig, pat, y=0.075)
+    draw(axs[3], pat, sol, window=win, cells=True, marks=cmp["marks"], spots=spots,
+         title=f"{label}, BGA zoom (circle: ball, x: R1 track over a foreign via / S short, square: R2 / R3 via)")
+    legend(fig, pat, y=0.15)
     fig.suptitle(f"{pat.name}: expected vs {label}", fontsize=12, y=0.985)
+    fb = faults_by_rule(cmp.get("faults", []))
     lines = [f"balls as expected {s['balls_as_expected']}/{s['balls']}; vias {s['vias']} (expected {s['expected_vias']}); "
              f"escape layer differs: {len(s['escape_layer_mismatch'])} {s['escape_layer_mismatch'][:12]}; via count differs: "
              f"{len(s['via_count_mismatch'])}; detours (> ref + 1 mm / x1.15): {len(s['detours'])} {s['detours'][:8]}; "
-             f"plane balls without own via: {s['plane_balls_without_own_via']}; vias off their cell centre (> "
-             f"{s['via_cell_slack_mm']} mm): {len(s['vias_off_cell'])}; max via offset from a cell centre "
-             f"{s['max_via_cell_offset']} mm; tracks on plane layers {s['plane_layer_tracks']}"]
+             f"max via offset from an open-space centre {s['max_via_cell_offset']} mm; tracks on plane layers "
+             f"{s['plane_layer_tracks']}",
+             "faults by rule: " + (", ".join(f"{k} {len(v)}" for k, v in sorted(fb.items())) or "none")]
+    for k in ("R1", "short", "R2", "R3", "R4", "R5", "R7"):
+        if k in fb:
+            lines.append(f"{k} ({RULES_TEXT[k].split(' (')[0]}): " + "; ".join(f["text"] for f in fb[k][:10])
+                         + (f"; ... {len(fb[k]) - 10} more" if len(fb[k]) > 10 else ""))
     lines.append("magenta balls: " + "; ".join(mk["text"] for mk in cmp["marks"]))
-    txt = [w for ln in lines for w in textwrap.wrap(ln, 210)]
-    fig.text(0.02, 0.005, "\n".join(txt[:7]), fontsize=6.6, ha="left", va="bottom")
+    txt = [w for ln in lines for w in textwrap.wrap(ln, 230)]
+    fig.text(0.015, 0.004, "\n".join(txt[:22]), fontsize=6.0, ha="left", va="bottom")
     fig.savefig(out, dpi=110)
     plt.close(fig)
     return out
 
 
-def analyse(name: str, routed: Path, out_png: Path, label: str = "topor") -> dict:
+def analyse(name: str, routed: Path, out_png: Path, label: str = "topor", drc_json: Path | None = None) -> dict:
     pat = build(BUILDERS[name]())
     sol = load_copper(Path(routed))
-    cmp = compare(pat, sol)
+    drc = json.loads(Path(drc_json).read_text()) if drc_json and Path(drc_json).exists() else None
+    cmp = compare(pat, sol, drc)
     render_compare(pat, sol, cmp, Path(out_png), label)
     return cmp
 
@@ -1059,7 +1478,8 @@ def analyse(name: str, routed: Path, out_png: Path, label: str = "topor") -> dic
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "analyse":
-        cmp = analyse(argv[1], Path(argv[2]), Path(argv[3]), *(argv[4:5] or []))
+        drc_json = Path(argv[3]).parent / f"{argv[1]}--drc-routed.json"
+        cmp = analyse(argv[1], Path(argv[2]), Path(argv[3]), *(argv[4:5] or []), drc_json=drc_json)
         out = Path(argv[3]).with_suffix(".json")
         out.write_text(json.dumps(cmp, indent=1))
         mf = Path(argv[3]).parent / f"{argv[1]}--metrics.json"
@@ -1076,10 +1496,10 @@ def main(argv: list[str] | None = None) -> int:
                    + (f" {s['detours'][:6]}" if s["detours"] else "")
                    + (f", plane balls without own via {s['plane_balls_without_own_via']}" if s["plane_balls_without_own_via"]
                       else "")
-                   + f", vias off their cell centre {len(s['vias_off_cell'])}"
+                   + "; faults by rule " + (", ".join(f"{k} {v}" for k, v in s["faults_by_rule"].items()) or "none")
                    + f"; {s['length_mm']:.1f} mm (expected {s['reference_mm']:.1f}); router {m['router_s']} s")
             res = {"settings": "defaults + [optimize] loop = \"topor\"", "summary": txt, "metrics": {k: m.get(k) for k in keep},
-                   "analysis": s}
+                   "analysis": s, "faults": cmp["faults"]}
             (Path(argv[3]).parent / "result.json").write_text(json.dumps(res, indent=1) + "\n")
             print(txt)
         print(json.dumps(cmp["summary"], indent=1))
