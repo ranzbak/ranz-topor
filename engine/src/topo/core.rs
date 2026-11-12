@@ -3206,7 +3206,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // The wires whose junction the plan moved: the fuse after the drawing leaves them alone (the
     // plan decided where they meet).
     let mut jmoved: BTreeSet<WireId> = BTreeSet::new();
-    if opts.branch_relocate {
+    // The point is computed on the plan's taut paths: with `[search] length = "even"` those are
+    // corridors, no wire path (the same caveat as the via relocation): skipped, with a warning.
+    if opts.branch_relocate && opts.search_length != "taut" {
+        warnings.push(format!(
+            "branch point relocation ([search] branch_relocate) skipped: it needs [search] length = \"taut\" (the plan's path); [search] length = \"{}\" plans corridors that are no wire path",
+            opts.search_length
+        ));
+    }
+    if opts.branch_relocate && opts.search_length == "taut" {
         let t_j = Instant::now();
         let clear = |net: i32| model.rules.net_rule(net).clearance.max(model.rules.min_clearance) as f64;
         let jc = super::viaopt::JCtx { st: &st, clear: &clear, plans: &plans, octi: dr.octi.on };
@@ -3237,10 +3245,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
         }
         warnings.push(format!(
-            "branch points ([search] branch_relocate; Popov & Popov 2013, Dayan & Dai 1991): {} moved ({}), {:.3} mm shorter in the plan",
+            "branch points ([search] branch_relocate; Popov & Popov 2013, Dayan & Dai 1991): {} moved ({}), {:.3} mm shorter in the plan; {} of them stopped part way by the clearance of the arms",
             mv.len(),
             by.iter().map(|(k, (n, g))| format!("{k} {n}: {:.3} mm", g / MM)).collect::<Vec<_>>().join(", "),
-            mv.iter().map(|m| m.gain).sum::<f64>() / MM
+            mv.iter().map(|m| m.gain).sum::<f64>() / MM,
+            mv.iter().filter(|m| m.t < 1.0 - 1e-9).count()
         ));
         tlog("branch relocation", t_j);
     }

@@ -127,3 +127,23 @@ def test_detour_stats_uses_reference_and_reports_ghost():
     assert "fallbacks" not in detour_line(ghost)
     # old engine: no ref field at all
     assert detour_stats([_c(1, 5, 5)], field="ref_len_nm") is None
+
+
+def test_tree_net_is_one_row_against_the_mst_of_its_pads():
+    # GPIO0-like tree: three pads on a line 0 - 4 - 10 mm, two connections; the drawn tree may end a
+    # connection at another pad of its tree than labelled (per connection 9 mm against a 4 mm ghost).
+    mm = 1_000_000
+    pad = lambda x: {"kind": "pad", "at": [x * mm, 0]}
+    conns = [
+        {"id": 1, "net": 7, "name": "T", "status": "routed", "length_nm": 9 * mm, "ghost_len_nm": 4 * mm,
+         "from": pad(0), "to": pad(4)},
+        {"id": 2, "net": 7, "name": "T", "status": "routed", "length_nm": 2 * mm, "ghost_len_nm": 6 * mm,
+         "from": pad(4), "to": pad(10)},
+        {"id": 3, "net": 8, "name": "S", "status": "routed", "length_nm": 3 * mm, "ghost_len_nm": 2 * mm,
+         "from": pad(0), "to": pad(2)},
+    ]
+    s = detour_stats(conns)
+    assert s["n"] == 2 and s["tree_nets"] == 1
+    t = next(r for r in s["top10"] if r.get("tree"))
+    assert t["ratio"] == 1.1 and t["pads"] == 3 and t["connections"] == 2
+    assert s["max"] == 1.5
