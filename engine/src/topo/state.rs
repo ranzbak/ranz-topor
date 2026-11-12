@@ -584,6 +584,8 @@ pub struct State<'p> {
     /// триангуляции с учетом необходимых зазоров»). False ("even", today's default): between
     /// evenly spaced points on each crossed edge ([`State::gap_point`]).
     pub taut_len: bool,
+    /// Lay the wires of a double-crossing removal anew ([`State::relay`], 4.3c; `initial = "once"`).
+    pub relay_after_uncross: bool,
     /// The TopoR loop's layer-aware reroute (shopping list 5.2, `[optimize] loop = "topor"`): per
     /// wire, the layers of each traversal under the loop's current layer assignment (bit per
     /// layer, both layers of a via interval; [`super::optimise::layers_now`]). A crossing is then
@@ -626,6 +628,7 @@ impl<'p> State<'p> {
             floors: std::collections::HashMap::new(),
             neck_from_pad: true,
             taut_len: false,
+            relay_after_uncross: true,
             layers_now: Vec::new(),
         }
     }
