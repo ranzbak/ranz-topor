@@ -22,6 +22,7 @@
 use super::demand::{need_in, Bound, Item};
 use crate::cdt::{Cdt, CdtFailure, CdtReport};
 use crate::geom::Vec2;
+use std::collections::BTreeMap;
 
 pub type VertId = usize;
 pub type EdgeId = usize;
@@ -584,6 +585,8 @@ pub struct State<'p> {
     /// триангуляции с учетом необходимых зазоров»). False ("even", today's default): between
     /// evenly spaced points on each crossed edge ([`State::gap_point`]).
     pub taut_len: bool,
+    /// Lay the wires of a double-crossing removal anew ([`State::relay`], 4.3c; `initial = "once"`).
+    pub relay_after_uncross: bool,
     /// The TopoR loop's layer-aware reroute (shopping list 5.2, `[optimize] loop = "topor"`): per
     /// wire, the layers of each traversal under the loop's current layer assignment (bit per
     /// layer, both layers of a via interval; [`super::optimise::layers_now`]). A crossing is then
@@ -626,6 +629,7 @@ impl<'p> State<'p> {
             floors: std::collections::HashMap::new(),
             neck_from_pad: true,
             taut_len: false,
+            relay_after_uncross: true,
             layers_now: Vec::new(),
         }
     }
@@ -832,6 +836,95 @@ impl<'p> State<'p> {
         }
     }
 
+    /// Shopping list 2.4: the pass widths the cut model's necks ask for (`(wire, traversal,
+    /// width)`, `CutPrice::necks`), laid out by the plan's neck rule ([`State::refit_wire`]): each
+    /// neck at the pass of its traversal (traversal `n` = the last pass); with `neck_from_pad`, the
+    /// necks of one cluster (at most `NECK_JOIN` passes apart) reach to the pad end that gives the
+    /// shorter stretch (ties `a`; a wire without a pad end: the nearer end, its T split), each pass
+    /// at the narrowest width of the cluster's necks at or beyond it, so the neck narrows from the
+    /// bottleneck to the pad and is never wide in between (route-order-and-neck-rule). Only passes
+    /// that become narrower than they are now: `pass -> width`. Deterministic. O(necks + passes
+    /// of the necked wires).
+    pub fn cut_neck_widths(&self, necks: &[(WireId, usize, f64)]) -> BTreeMap<PassId, f64> {
+        let mut by_w: BTreeMap<WireId, BTreeMap<usize, f64>> = BTreeMap::new();
+        for &(w, k, wn) in necks {
+            let Some(wi) = self.wires.get(w).filter(|wi| wi.alive && !wi.passes.is_empty()) else { continue };
+            if wn >= wi.w - 0.5 {
+                continue;
+            }
+            let k = k.min(wi.passes.len() - 1);
+            let e = by_w.entry(w).or_default().entry(k).or_insert(wn);
+            *e = e.min(wn);
+        }
+        let mut out = BTreeMap::new();
+        for (w, ks) in by_w {
+            let wi = &self.wires[w];
+            let n = wi.passes.len();
+            let mut pw = vec![f64::INFINITY; n];
+            let ks: Vec<(usize, f64)> = ks.into_iter().collect();
+            if !self.neck_from_pad {
+                for &(k, wn) in &ks {
+                    pw[k] = pw[k].min(wn);
+                }
+            } else {
+                let (pa, pb) = (wi.pa != NO_OBS, wi.pb != NO_OBS);
+                let mut i = 0;
+                while i < ks.len() {
+                    let mut j = i;
+                    while j + 1 < ks.len() && ks[j + 1].0 - ks[j].0 <= NECK_JOIN + 1 {
+                        j += 1;
+                    }
+                    let (lo, hi) = (ks[i].0, ks[j].0);
+                    let (from_a, from_b) = (hi + 1, n - lo);
+                    let to_a = if pa != pb { pa } else { from_a <= from_b };
+                    let cl = &ks[i..=j];
+                    if to_a {
+                        // Pass m takes the narrowest neck at or beyond it (towards the bottleneck).
+                        for (m, x) in pw.iter_mut().enumerate().take(hi + 1) {
+                            let wn = cl.iter().filter(|c| c.0 >= m).map(|c| c.1).fold(f64::INFINITY, f64::min);
+                            *x = x.min(wn);
+                        }
+                    } else {
+                        for (m, x) in pw.iter_mut().enumerate().skip(lo) {
+                            let wn = cl.iter().filter(|c| c.0 <= m).map(|c| c.1).fold(f64::INFINITY, f64::min);
+                            *x = x.min(wn);
+                        }
+                    }
+                    i = j + 1;
+                }
+            }
+            for (k, &wn) in pw.iter().enumerate() {
+                let p = wi.passes[k];
+                if wn < self.pass_w[p] - 0.5 {
+                    out.insert(p, wn);
+                }
+            }
+        }
+        out
+    }
+
+    /// Write the widths of [`State::cut_neck_widths`] into the pass widths (narrower only).
+    pub fn apply_neck_widths(&mut self, m: &BTreeMap<PassId, f64>) {
+        for (&p, &wn) in m {
+            self.pass_w[p] = self.pass_w[p].min(wn);
+        }
+    }
+
+    /// The necked stretches of wire `w` (the archive's shrinkages, counted as the TopoR loop counts
+    /// them from [`State::neck_runs`]: one per necked end run, one per run of necked passes in
+    /// between) with the passes of `extra` necked too. O(passes).
+    pub fn neck_stretches_with(&self, w: WireId, extra: &BTreeMap<PassId, f64>) -> usize {
+        let ps = &self.wires[w].passes;
+        let n = ps.len();
+        let nk = |p: PassId| self.necked(p) || extra.contains_key(&p);
+        let na = ps.iter().take_while(|&&p| nk(p)).count();
+        if na == n {
+            return usize::from(n > 0);
+        }
+        let nb = ps.iter().rev().take_while(|&&p| nk(p)).count();
+        let mid: Vec<usize> = (na..n - nb).filter(|&k| nk(ps[k])).collect();
+        usize::from(na > 0) + usize::from(nb > 0) + mid.iter().enumerate().filter(|&(i, &k)| i == 0 || mid[i - 1] + 1 != k).count()
+    }
 
     /// The pass `p` as a demand item.
     pub fn item(&self, p: PassId) -> Item {

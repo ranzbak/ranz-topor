@@ -52,6 +52,40 @@ pub struct Out {
     /// Model layer id of the stub.
     pub layer: u32,
     pub stub_nm: f64,
+    /// 4.4: the stub ends on own-net copper already on the plane (index into the
+    /// [`PlaneVia`] list passed to [`place`]): no via of its own (`via` None, `end` = that via's
+    /// centre).
+    pub shared: Option<usize>,
+    /// The [`Drawer::commit`] handles of `items` (for re-siting a shared via, [`resite`]).
+    pub handles: Vec<usize>,
+}
+
+/// Own-net copper on a plane that a plane pad's stub may end on (4.4, planes as terminals, user
+/// rule 2026-11-10: a plane is a terminal of its net like a pad, and it may carry vias): a stub
+/// via placed for another pad of the net, or an existing via of the board standing in the fill.
+#[derive(Clone, Debug)]
+pub struct PlaneVia {
+    pub at: Vec2,
+    pub size: ViaSize,
+    pub net: i32,
+    /// Sum of the widths of the stubs ending on it (nm): a via carries their current when
+    /// pi * drill >= that sum (the user's power-via rule); past it the share is priced
+    /// ([`load_price`]).
+    pub load: f64,
+    /// The request (index in the stage's order) whose own via it is; `None`: an existing via.
+    pub owner: Option<usize>,
+    /// The requests whose stubs end on it (besides `owner`).
+    pub users: Vec<usize>,
+    /// Given up: its owner's stub now ends on another via ([`place`] skips it).
+    pub dead: bool,
+}
+
+/// Graded price of one more stub of width `w` on via `v` (4.4): 0 while pi * drill covers the
+/// widths it carries, then the `via` price per drill circumference of excess (a second via is
+/// what the excess asks for, so at 100 % excess sharing costs as much as a via of its own).
+pub fn load_price(v: &PlaneVia, w: f64, via_price: f64) -> f64 {
+    let cap = std::f64::consts::PI * v.size.drill.max(1) as f64;
+    via_price * ((v.load + w - cap).max(0.0) / cap)
 }
 
 /// Prices of a stub site (D6a): `mm` per mm of stub (the `length` factor) and the
@@ -113,7 +147,12 @@ pub fn in_fill_on(pour: &crate::model::Pour, layer: Option<u32>, p: Vec2, r: f64
 /// `vias`: the stub vias placed before (centre, radius); a stub keeps off them and off the
 /// other pads of its net (no sliver connection, [`Drawer::stub_own_ok`]), its via keeps a gap
 /// to them (or KiCad's minimum connection width check flags the lens between the two discs).
-pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)]) -> Result<Out, String> {
+///
+/// `shared` (4.4, `[planes] terminals`; empty = off): own-net copper already on the plane. A
+/// stub may end on one of them instead of a via of its own, within the same reach, priced by
+/// its length and the via's current load ([`load_price`]); it competes with an own via (which
+/// pays the `via` price) as the via-like option.
+pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)], shared: &[PlaneVia]) -> Result<Out, String> {
     let (model, b) = (dr.model, dr.b);
     let pad = &model.pads[rq.pad];
     let ob = &b.proj.obstacles[rq.obs];
@@ -205,6 +244,30 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)]) -
             break;
         }
     }
+    // 4.4: own-net copper already on the plane within the same reach. The stub ends on that via's
+    // centre (no sliver); it pays its length and the via's load, not a via.
+    let mut best_share: Option<(f64, usize)> = None;
+    for (k, v) in shared.iter().enumerate() {
+        let len = (v.at - c).len();
+        if v.dead || v.net != rq.net || len > rpad + 3.0e6 || !in_fill(pour, v.at, 0.5 * v.size.d as f64) {
+            continue;
+        }
+        let price = cost.mm * len / 1e6 + load_price(v, rq.w, via_price);
+        if best_share.is_some_and(|(bc, _)| price >= bc) {
+            continue;
+        }
+        let stub = track_item(rq.net, lid, rq.w, c, v.at, None);
+        if !dr.check_ok(&stub) || !dr.stub_own_ok(&stub, rq.pad, vias) {
+            continue;
+        }
+        best_share = Some((price, k));
+    }
+    // The via-like option (reaches every layer the pour fills): the cheaper of an own via and a
+    // share.
+    let share_wins = best_share.is_some_and(|(ps, _)| best_via.is_none_or(|(pv, ..)| ps < pv));
+    if let (true, Some((ps, k))) = (share_wins, best_share) {
+        best_via = Some((ps, shared[k].at, shared[k].size));
+    }
     // A via reaches every layer the pour fills; a track only the fill on its own layer, which the
     // signals routed later on that layer can cut off (dcsgonebadge, D6b: with tracks preferred
     // wherever cheaper, 35 of 35 GND stubs became F.Cu tracks, 16 pour pieces were cut off
@@ -220,15 +283,20 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)]) -
     match (best_track, best_via) {
         (Some((_, p, tl)), _) if take_track => {
             let stub = track_item(rq.net, tl, rq.w, c, p, None);
-            dr.commit(&stub);
-            return Ok(Out { items: vec![stub], via: None, size: sizes.first().copied().unwrap_or(ViaSize { d: 0, drill: 0 }), end: p, layer: tl, stub_nm: (p - c).len() });
+            let h = dr.commit(&stub);
+            return Ok(Out { items: vec![stub], via: None, size: sizes.first().copied().unwrap_or(ViaSize { d: 0, drill: 0 }), end: p, layer: tl, stub_nm: (p - c).len(), shared: None, handles: vec![h] });
+        }
+        (_, Some((_, p, sz))) if share_wins => {
+            let stub = track_item(rq.net, lid, rq.w, c, p, None);
+            let h = dr.commit(&stub);
+            return Ok(Out { items: vec![stub], via: None, size: sz, end: p, layer: lid, stub_nm: (p - c).len(), shared: best_share.map(|(_, k)| k), handles: vec![h] });
         }
         (_, Some((_, p, sz))) => {
             let vi = via_item(rq.net, p, sz, None);
             let stub = track_item(rq.net, lid, rq.w, c, p, None);
-            dr.commit(&vi);
-            dr.commit(&stub);
-            return Ok(Out { items: vec![stub, vi], via: Some(p), size: sz, end: p, layer: lid, stub_nm: (p - c).len() });
+            let hv = dr.commit(&vi);
+            let hs = dr.commit(&stub);
+            return Ok(Out { items: vec![stub, vi], via: Some(p), size: sz, end: p, layer: lid, stub_nm: (p - c).len(), shared: None, handles: vec![hs, hv] });
         }
         _ => {}
     }
@@ -259,6 +327,190 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)]) -
         eprintln!("PLANEDBG pad {}.{} net {} at ({:.3},{:.3}) sites {tried} clean-on-static-board {static_ok}", pad.ref_, pad.number, rq.net, c.x / 1e6, -c.y / 1e6);
     }
     Err(format!("pad {}.{}: no via site inside the pour's fill and no track into a fill on its own layer within 3 mm for a stub into its plane", pad.ref_, pad.number))
+}
+
+/// Where a wire from a plane pad that no stub serves ends on its pour (4.4, planes as terminals):
+/// the pour is a terminal of the net like a pad, so the pad is wired to the pour's nearest
+/// filled copper instead of to another pad of the net (user rule 2026-11-10).
+#[derive(Clone, Debug)]
+pub struct FarTerm {
+    pub conn: usize,
+    pub at: Vec2,
+    /// Model layers where the fill covers the end (the wire may end on any of them).
+    pub layers: Vec<u32>,
+    /// Side of the terminal square (the wire's width).
+    pub size: f64,
+}
+
+/// The end of `rq`'s wire on its pour when no stub serves it (4.4). The region used is the
+/// board's existing fill of the pour (`model.pours[..].fills`, the copper KiCad filled before the
+/// run), kept clear by a margin: the track end's disc of radius w/2 + the zone's minimum width +
+/// the net clearance lies inside one fill, outside its holes. Of the fills on every layer, the
+/// point nearest the pad (its nearest boundary point, stepped inward along the pad-to-boundary
+/// direction until the disc fits), priced by distance plus the `via` price where the pad has no
+/// copper on that layer. `None`: no such point (the caller joins the pad by a signal connection
+/// as before). O(fill vertices).
+pub fn far_terminal(dr: &Drawer, rq: &Req, cost: &SiteCost) -> Option<FarTerm> {
+    let (model, b) = (dr.model, dr.b);
+    let pour = &model.pours[rq.pour];
+    let ob = &b.proj.obstacles[rq.obs];
+    let c = ob.center;
+    let margin = 0.5 * rq.w + pour.min_thickness.max(0) as f64 + model.rules.net_rule(rq.net).clearance as f64;
+    let via_price = cost.via();
+    let mut best: Option<(f64, Vec2)> = None;
+    for f in pour.fills.iter().filter(|f| b.signal_layers.contains(&f.layer)) {
+        let li = b.signal_layers.iter().position(|&l| l == f.layer).unwrap_or(0);
+        let extra = if ob.layers.has(li) { 0.0 } else { via_price };
+        for ring in std::iter::once(&f.outer).chain(f.holes.iter()) {
+            let pts: Vec<Vec2> = ring.iter().map(|q| q.to_vec2()).collect();
+            if pts.len() < 3 {
+                continue;
+            }
+            for i in 0..pts.len() {
+                let (a, e) = (pts[i], pts[(i + 1) % pts.len()]);
+                let ab = e - a;
+                let t = ((c - a).dot(ab) / ab.len2().max(1.0)).clamp(0.0, 1.0);
+                let q = a + ab * t;
+                let d0 = (q - c).len();
+                if best.is_some_and(|(bp, _)| cost.mm * d0 / 1e6 + extra >= bp) {
+                    continue;
+                }
+                // Into the fill: away from the pad past the boundary point (the pad lies outside the
+                // fill or in a hole of it), or across the side where the pad sits on it.
+                let u = if d0 > 1.0 { (q - c) * (1.0 / d0) } else { Vec2 { x: -ab.y, y: ab.x } * (1.0 / ab.len().max(1.0)) };
+                let mut s = margin;
+                while s <= 4.0 * margin + 0.5e6 {
+                    let p = q + u * s;
+                    if in_fill_on(pour, Some(f.layer), p, margin) {
+                        let price = cost.mm * (p - c).len() / 1e6 + extra;
+                        if best.is_none_or(|(bp, _)| price < bp) {
+                            best = Some((price, p));
+                        }
+                        break;
+                    }
+                    s += 0.25 * margin;
+                }
+            }
+        }
+    }
+    let (_, at) = best?;
+    let layers: Vec<u32> = pour.fills.iter().filter(|f| b.signal_layers.contains(&f.layer) && in_fill_on(pour, Some(f.layer), at, margin)).map(|f| f.layer).collect::<std::collections::BTreeSet<u32>>().into_iter().collect();
+    (!layers.is_empty()).then_some(FarTerm { conn: rq.conn, at, layers, size: rq.w })
+}
+
+/// Geometric median of `pts` (Weiszfeld's iteration, 50 steps from the centroid): the point
+/// whose summed distance to them is least. O(50 · |pts|).
+pub fn weber(pts: &[Vec2]) -> Vec2 {
+    let n = pts.len().max(1) as f64;
+    let mut x = pts.iter().fold(Vec2::default(), |a, &p| a + p) * (1.0 / n);
+    for _ in 0..50 {
+        let (mut num, mut den) = (Vec2::default(), 0.0);
+        for &p in pts {
+            let d = (p - x).len();
+            if d < 1.0 {
+                return p; // on a point: the median for 3+ points spread round it, or near enough
+            }
+            num = num + p * (1.0 / d);
+            den += 1.0 / d;
+        }
+        x = num * (1.0 / den);
+    }
+    x
+}
+
+/// Re-site the own via of request `owner` once other pads' stubs share it (4.4): the via moves
+/// to the legal site where the stubs of all its pads are shortest together (search outward from
+/// their geometric median, [`weber`]) plus the `via_squeeze` price there; kept where it was when
+/// no site is cheaper. Every stub stays within the reach of [`place`] (3 mm past its pad) and
+/// passes the same checks as there. `outs` (per request, in the stage's order) and `v` are
+/// updated; `vias` = every stub via's (centre, radius) for the keep-off checks (this one's own
+/// entry is skipped). Returns whether the via moved.
+#[allow(clippy::too_many_arguments)]
+pub fn resite(dr: &mut Drawer, reqs: &[Req], outs: &mut [Option<Out>], v: &mut PlaneVia, cost: &SiteCost, vias: &[(Vec2, f64)]) -> bool {
+    let Some(owner) = v.owner else { return false };
+    if v.users.is_empty() {
+        return false;
+    }
+    let (model, b) = (dr.model, dr.b);
+    let members: Vec<usize> = std::iter::once(owner).chain(v.users.iter().copied()).collect();
+    if members.iter().any(|&i| outs[i].is_none()) {
+        return false;
+    }
+    let pour = &model.pours[reqs[owner].pour];
+    let sz = v.size;
+    let r = 0.5 * sz.d as f64;
+    let ctr = |i: usize| b.proj.obstacles[reqs[i].obs].center;
+    let rpad = |i: usize| {
+        let ob = &b.proj.obstacles[reqs[i].obs];
+        ob.poly.iter().map(|&p| (p - ob.center).len()).fold(0.0, f64::max)
+    };
+    let lid = |i: usize| b.signal_layers[b.smd_layer(reqs[i].obs).unwrap_or(0)];
+    for &i in &members {
+        for &h in &outs[i].as_ref().expect("member placed").handles {
+            dr.uncommit(h);
+        }
+    }
+    let others: Vec<(Vec2, f64)> = vias.iter().copied().filter(|&(q, _)| (q - v.at).len() > 1.0).collect();
+    let price_at = |dr: &Drawer, p: Vec2| -> f64 { members.iter().map(|&i| cost.mm * (ctr(i) - p).len() / 1e6).sum::<f64>() + cost.squeeze(dr.point_room(p, sz.d as f64, v.net), sz.d as f64) };
+    let legal = |dr: &Drawer, p: Vec2| -> bool {
+        if members.iter().any(|&i| (ctr(i) - p).len() > rpad(i) + 3.0e6 || (!dr.opts.via_in_pad && point_in_poly(p, &b.proj.obstacles[reqs[i].obs].poly))) {
+            return false;
+        }
+        if !in_fill(pour, p, r) || others.iter().any(|&(q, rq2)| (q - p).len() < r + rq2 + 1_000.0) {
+            return false;
+        }
+        let crowd = via_item(v.net, p, ViaSize { d: sz.d + 2 * pour.min_thickness.max(0), drill: sz.drill }, None);
+        if !dr.check_ok(&crowd) || !dr.via_hole_ok(p, sz, v.net) || !dr.via_own_pad_ok(p, sz, v.net) {
+            return false;
+        }
+        members.iter().all(|&i| {
+            let stub = track_item(v.net, lid(i), reqs[i].w, ctr(i), p, None);
+            dr.check_ok(&stub) && dr.stub_own_ok(&stub, reqs[i].pad, &others)
+        })
+    };
+    let now = price_at(dr, v.at);
+    let pts: Vec<Vec2> = members.iter().map(|&i| ctr(i)).collect();
+    let w = weber(&pts);
+    let rmax = pts.iter().map(|&p| (p - w).len()).fold(0.0, f64::max);
+    let mut best: Option<(f64, Vec2)> = None;
+    let step = 0.05e6;
+    let mut d = 0.0;
+    while d <= rmax {
+        let n = if d == 0.0 { 1 } else { 32 };
+        for k in 0..n {
+            let a = k as f64 * std::f64::consts::PI / 16.0;
+            let p = w + Vec2 { x: a.cos(), y: a.sin() } * d;
+            let price = price_at(dr, p);
+            if price >= now - 1e-6 || best.is_some_and(|(bp, _)| price >= bp) || !legal(dr, p) {
+                continue;
+            }
+            best = Some((price, p));
+        }
+        d += step;
+    }
+    let at = best.map_or(v.at, |(_, p)| p);
+    for &i in &members {
+        let o = outs[i].as_mut().expect("member placed");
+        let c = ctr(i);
+        let stub = track_item(v.net, lid(i), reqs[i].w, c, at, None);
+        if i == owner {
+            let vi = via_item(v.net, at, sz, None);
+            let hv = dr.commit(&vi);
+            let hs = dr.commit(&stub);
+            o.items = vec![stub, vi];
+            o.via = Some(at);
+            o.handles = vec![hs, hv];
+        } else {
+            let hs = dr.commit(&stub);
+            o.items = vec![stub];
+            o.handles = vec![hs];
+        }
+        o.end = at;
+        o.stub_nm = (at - c).len();
+    }
+    let moved = (at - v.at).len() > 1.0;
+    v.at = at;
+    moved
 }
 
 /// Warnings for the pads and vias of plane connections that lie outside the pour's fill.
@@ -299,8 +551,10 @@ pub fn extras(b: &Board, rq: &Req, o: &Out) -> Vec<Extra> {
     let ob = &b.proj.obstacles[rq.obs];
     let c = ob.center;
     // A track-only stub (no via) runs from the pad to its end inside the fill.
+    // A stub onto a shared via (4.4) ends at that via, whose obstacle its owner already gave.
     let (p, r, mut out) = match o.via {
         Some(p) => (p, 0.5 * o.size.d as f64, vec![Extra::Via { net: rq.net, at: p, d: o.size.d as f64, ring: 0.0 }]),
+        None if o.shared.is_some() => (o.end, 0.5 * o.size.d as f64, Vec::new()),
         None => (o.end, 0.0, Vec::new()),
     };
     let l = (p - c).len();
@@ -321,4 +575,32 @@ pub fn extras(b: &Board, rq: &Req, o: &Out) -> Vec<Extra> {
         out.push(Extra::Track { net: rq.net, layer: o.layer, a: c + u * t, b: c + u * t1, width: rq.w });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn weber_point_of_three_points_at_120_degrees_is_their_centre() {
+        let c = Vec2 { x: 12e6, y: 12e6 };
+        let pts: Vec<Vec2> = [-90.0f64, 30.0, 150.0].iter().map(|d| c + Vec2 { x: d.to_radians().cos(), y: d.to_radians().sin() } * 1.5e6).collect();
+        assert!((weber(&pts) - c).len() < 1_000.0);
+        // Two points: anywhere between them; Weiszfeld from the centroid stays at the midpoint.
+        let m = weber(&[Vec2 { x: 0.0, y: 0.0 }, Vec2 { x: 2e6, y: 0.0 }]);
+        assert!((m - Vec2 { x: 1e6, y: 0.0 }).len() < 1_000.0);
+    }
+
+    #[test]
+    fn load_price_is_zero_within_pi_drill_and_grows_past_it() {
+        let v = PlaneVia { at: Vec2::default(), size: ViaSize { d: 600_000, drill: 300_000 }, net: 1, load: 500_000.0, owner: Some(0), users: vec![], dead: false };
+        // pi * 0.3 mm = 0.942 mm >= 0.5 + 0.25 mm.
+        assert_eq!(load_price(&v, 250_000.0, 25.0), 0.0);
+        let full = PlaneVia { load: 942_477.8, ..v.clone() };
+        let p1 = load_price(&full, 250_000.0, 25.0);
+        let p2 = load_price(&full, 500_000.0, 25.0);
+        assert!(p1 > 0.0 && p2 > p1, "{p1} {p2}");
+        // 100 % excess costs one via.
+        assert!((load_price(&PlaneVia { load: 0.0, ..v }, 2.0 * 942_477.8, 25.0) - 25.0).abs() < 1e-3);
+    }
 }

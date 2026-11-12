@@ -219,6 +219,9 @@ pub struct SegGrid {
     nx: usize,
     ny: usize,
     cells: Vec<Vec<u32>>,
+    /// The cells cover `lo..hi` (the 4096-cell cap did not cut the grid short): every segment
+    /// inside is registered along its whole walk ([`SegGrid::query_seg`] relies on it).
+    whole: bool,
 }
 
 impl SegGrid {
@@ -252,11 +255,23 @@ impl SegGrid {
         let cell = (area / (n.max(1) as f64)).sqrt().max(50_000.0) * 1.5;
         let nx = (((hi.x - lo.x) / cell) as usize + 1).min(4096);
         let ny = (((hi.y - lo.y) / cell) as usize + 1).min(4096);
-        SegGrid { lo, cell, nx, ny, cells: vec![Vec::new(); nx * ny] }
+        let whole = nx as f64 * cell > hi.x - lo.x && ny as f64 * cell > hi.y - lo.y;
+        SegGrid { lo, cell, nx, ny, cells: vec![Vec::new(); nx * ny], whole }
     }
 
     /// Visit the cells segment `a b` passes through (Amanatides & Woo), each once.
     fn walk(&mut self, a: Vec2, b: Vec2, mut f: impl FnMut(&mut Vec<u32>)) {
+        let nx = self.nx;
+        let mut idx: Vec<usize> = Vec::new();
+        self.cells_along(a, b, |cx, cy| idx.push(cy * nx + cx));
+        for i in idx {
+            f(&mut self.cells[i]);
+        }
+    }
+
+    /// The cells `(x, y)` segment `a b` passes through, in order (Amanatides & Woo 1987); returns
+    /// whether the walk reached the cell of `b` (false: it left the grid or hit the guard).
+    fn cells_along(&self, a: Vec2, b: Vec2, mut f: impl FnMut(usize, usize)) -> bool {
         let (mut cx, mut cy) = self.at(a);
         let (ex, ey) = self.at(b);
         let d = b - a;
@@ -270,30 +285,38 @@ impl SegGrid {
         let mut tmy = if dyc.abs() > 1e-15 { (next_y - fy) / dyc } else { f64::INFINITY };
         let tdx = if dxc.abs() > 1e-15 { (1.0 / dxc).abs() } else { f64::INFINITY };
         let tdy = if dyc.abs() > 1e-15 { (1.0 / dyc).abs() } else { f64::INFINITY };
-        let nx = self.nx;
         let mut guard = self.nx + self.ny + 4;
         loop {
-            f(&mut self.cells[cy * nx + cx]);
-            if (cx, cy) == (ex, ey) || guard == 0 {
-                break;
+            f(cx, cy);
+            if (cx, cy) == (ex, ey) {
+                return true;
+            }
+            if guard == 0 {
+                return false;
             }
             guard -= 1;
             if tmx < tmy {
                 let n = cx as i64 + sx;
                 if n < 0 || n >= self.nx as i64 {
-                    break;
+                    return false;
                 }
                 cx = n as usize;
                 tmx += tdx;
             } else {
                 let n = cy as i64 + sy;
                 if n < 0 || n >= self.ny as i64 {
-                    break;
+                    return false;
                 }
                 cy = n as usize;
                 tmy += tdy;
             }
         }
+    }
+
+    /// Whether `p` lies inside the grid's cells (not clamped to the border).
+    fn inside(&self, p: Vec2) -> bool {
+        let (x, y) = ((p.x - self.lo.x) / self.cell, (p.y - self.lo.y) / self.cell);
+        x >= 0.0 && y >= 0.0 && x < self.nx as f64 && y < self.ny as f64
     }
 
     fn at(&self, p: Vec2) -> (usize, usize) {
@@ -314,6 +337,102 @@ impl SegGrid {
         }
         out.sort_unstable();
         out.dedup();
+    }
+
+    /// Ids of the segments that may meet the segment `a b`, ascending, deduplicated: those of
+    /// the cells the segment passes through and their eight neighbours (a crossing point on a
+    /// cell boundary or corner lies in a cell both walks visit, up to one cell of rounding).
+    /// Every segment that crosses `a b` is among them, as with [`SegGrid::query`] of the
+    /// segment's box, but a long oblique segment visits O(length / cell) cells instead of
+    /// O(length^2 / cell^2) (shopping list 3.1). Falls back to the box when an end lies outside
+    /// the grid or the grid is capped. O(cells along x their ids).
+    pub fn query_seg(&self, a: Vec2, b: Vec2, cells: &mut Vec<usize>, out: &mut Vec<u32>) {
+        out.clear();
+        if !(self.whole && self.inside(a) && self.inside(b)) {
+            let lo = Vec2 { x: a.x.min(b.x), y: a.y.min(b.y) };
+            let hi = Vec2 { x: a.x.max(b.x), y: a.y.max(b.y) };
+            return self.query(lo, hi, out);
+        }
+        cells.clear();
+        let (nx, ny) = (self.nx, self.ny);
+        let ok = self.cells_along(a, b, |cx, cy| {
+            for y in cy.saturating_sub(1)..=(cy + 1).min(ny - 1) {
+                for x in cx.saturating_sub(1)..=(cx + 1).min(nx - 1) {
+                    cells.push(y * nx + x);
+                }
+            }
+        });
+        if !ok {
+            let lo = Vec2 { x: a.x.min(b.x), y: a.y.min(b.y) };
+            let hi = Vec2 { x: a.x.max(b.x), y: a.y.max(b.y) };
+            return self.query(lo, hi, out);
+        }
+        cells.sort_unstable();
+        cells.dedup();
+        for &c in cells.iter() {
+            out.extend_from_slice(&self.cells[c]);
+        }
+        out.sort_unstable();
+        out.dedup();
+    }
+}
+
+/// Scratch of [`SegScratch::candidates`]: the cells of a walk and a mark per segment id.
+#[derive(Clone, Debug, Default)]
+pub struct SegScratch {
+    cells: Vec<usize>,
+    mark: Vec<u32>,
+    stamp: u32,
+    /// The candidates of the last call.
+    pub out: Vec<u32>,
+}
+
+impl SegScratch {
+    /// The ids of the segments of `grid` (`n` of them) that may meet the segment `a b`, each
+    /// once, in no particular order: [`SegGrid::query_seg`] with a mark per id instead of a sort
+    /// (shopping list 3.1). O(cells along x their ids).
+    pub fn candidates(&mut self, grid: &SegGrid, n: usize, a: Vec2, b: Vec2) {
+        if !(grid.whole && grid.inside(a) && grid.inside(b)) {
+            let mut cells = std::mem::take(&mut self.cells);
+            grid.query_seg(a, b, &mut cells, &mut self.out);
+            self.cells = cells;
+            return;
+        }
+        if self.mark.len() < n {
+            self.mark.resize(n, 0);
+        }
+        self.stamp = self.stamp.wrapping_add(1);
+        if self.stamp == 0 {
+            self.mark.iter_mut().for_each(|m| *m = 0);
+            self.stamp = 1;
+        }
+        self.cells.clear();
+        let (nx, ny) = (grid.nx, grid.ny);
+        let cells = &mut self.cells;
+        let ok = grid.cells_along(a, b, |cx, cy| {
+            for y in cy.saturating_sub(1)..=(cy + 1).min(ny - 1) {
+                for x in cx.saturating_sub(1)..=(cx + 1).min(nx - 1) {
+                    cells.push(y * nx + x);
+                }
+            }
+        });
+        if !ok {
+            let mut cells = std::mem::take(&mut self.cells);
+            grid.query_seg(a, b, &mut cells, &mut self.out);
+            self.cells = cells;
+            return;
+        }
+        self.out.clear();
+        let st = self.stamp;
+        for &c in self.cells.iter() {
+            for &id in &grid.cells[c] {
+                let m = &mut self.mark[id as usize];
+                if *m != st {
+                    *m = st;
+                    self.out.push(id);
+                }
+            }
+        }
     }
 }
 
@@ -1162,6 +1281,59 @@ mod tests {
 
     fn v(x: f64, y: f64) -> Vec2 {
         Vec2 { x: x * 1e6, y: y * 1e6 }
+    }
+
+    /// Shopping list 3.1: the walk query along a segment finds every segment that crosses it
+    /// (the box query's answer filtered to the crossings is the same), also through cell corners
+    /// and along cell lines.
+    #[test]
+    fn segment_query_finds_every_crossing() {
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut rnd = move || {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            (x.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let (lo, hi) = (v(0.0, 0.0), v(20.0, 20.0));
+        let mut pt = |grid: bool| {
+            let (a, b) = (rnd(), rnd());
+            // Every fourth point on the 0.5 mm lattice (cell lines and corners).
+            if grid {
+                v((a * 40.0).round() * 0.5, (b * 40.0).round() * 0.5)
+            } else {
+                v(a * 20.0, b * 20.0)
+            }
+        };
+        let mut segs = Vec::new();
+        for i in 0..400 {
+            segs.push((pt(i % 4 == 0), pt(i % 4 == 1)));
+        }
+        let g = SegGrid::new(&segs, lo, hi);
+        assert!(g.whole);
+        let cross = |(a, b): (Vec2, Vec2), (c, d): (Vec2, Vec2)| -> bool {
+            let (e, f) = (b - a, d - c);
+            let den = e.cross(f);
+            if den.abs() < 1e-9 * e.len() * f.len() {
+                return false;
+            }
+            let (s, t) = ((c - a).cross(f) / den, (c - a).cross(e) / den);
+            (0.0..=1.0).contains(&s) && (0.0..=1.0).contains(&t)
+        };
+        let (mut cells, mut out, mut boxed) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..300 {
+            let q = (pt(i % 3 == 0), pt(i % 3 != 2));
+            g.query_seg(q.0, q.1, &mut cells, &mut out);
+            let lo = Vec2 { x: q.0.x.min(q.1.x), y: q.0.y.min(q.1.y) };
+            let hi = Vec2 { x: q.0.x.max(q.1.x), y: q.0.y.max(q.1.y) };
+            g.query(lo, hi, &mut boxed);
+            let want: Vec<u32> = (0..segs.len() as u32).filter(|&j| cross(q, segs[j as usize])).collect();
+            let got: Vec<u32> = out.iter().copied().filter(|&j| cross(q, segs[j as usize])).collect();
+            let via_box: Vec<u32> = boxed.iter().copied().filter(|&j| cross(q, segs[j as usize])).collect();
+            assert_eq!(got, want, "query {i}");
+            assert_eq!(via_box, want, "box query {i}");
+            assert!(out.windows(2).all(|w| w[0] < w[1]));
+        }
     }
 
     fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Vec2> {

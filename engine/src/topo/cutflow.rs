@@ -34,6 +34,7 @@ use super::demand::{need_in, Bound, Item};
 use super::draw::poly_dist;
 use super::pack::{funnel, tri_site_points, Packer};
 use super::refine::{mid_k, pass_layers_at, LEv};
+use super::sheet::SegScratch;
 use super::sheet::{JunctionFeat, LayerSheet, Norm, SheetInput, SheetOpts, SheetStats, ViaFeat};
 use super::state::{point_in_poly, Projection, State, VertId, VertKind, WireId, NO_OBS};
 use crate::geom::Vec2;
@@ -101,16 +102,82 @@ pub struct Stretch {
 }
 
 impl Stretch {
-    /// Width at a point of the band: the width of the nearest pass point (nominal at the ends).
-    fn width_at(&self, x: Vec2) -> f64 {
-        let mut best = (f64::INFINITY, self.w);
-        for (i, &w) in self.pass_w.iter().enumerate() {
-            let d = (self.curve[i + 1] - x).len2();
-            if d < best.0 {
-                best = (d, w);
+    /// Width at a point of the band: the width of the nearest pass point (the first of equally
+    /// near ones; nominal without pass points), through the index of the pass points
+    /// ([`Stretch::pass_index`]).
+    pub fn width_at_idx(&self, idx: &NearIdx, x: Vec2) -> f64 {
+        match idx.nearest(|i| self.curve[i + 1], x) {
+            Some(i) => self.pass_w[i],
+            None => self.w,
+        }
+    }
+
+    /// The index of the pass points `curve[1..=pass_w.len()]` ([`Stretch::width_at_idx`]).
+    pub fn pass_index(&self) -> NearIdx {
+        NearIdx::new(self.pass_w.len(), |i| self.curve[i + 1])
+    }
+}
+
+/// The nearest of a fixed point set to a query point, exactly as a scan with a strict `<`
+/// (the lowest index among equal squared distances), without scanning every point (shopping
+/// list 3.1: a band crosses hundreds of cuts and every crossing asks for its nearest pass point).
+/// The points are sorted along the axis of their larger extent; a query walks outward from its
+/// coordinate and stops at the first point whose axis gap squared exceeds the best squared
+/// distance. That gap is the first term of the squared distance as `Vec2::len2` computes it, so
+/// the bound holds in floating point too (adding a nonnegative term never rounds below it), and
+/// it grows monotonically along each side. O(m log m) to build, O(log m + points within the
+/// best distance's slab) per query.
+#[derive(Clone, Debug, Default)]
+pub struct NearIdx {
+    use_y: bool,
+    ord: Vec<(f64, u32)>,
+}
+
+impl NearIdx {
+    /// The index over `n` points `pt(0..n)`.
+    pub fn new(n: usize, pt: impl Fn(usize) -> Vec2) -> NearIdx {
+        let (mut lo, mut hi) = (Vec2 { x: f64::INFINITY, y: f64::INFINITY }, Vec2 { x: f64::NEG_INFINITY, y: f64::NEG_INFINITY });
+        for i in 0..n {
+            let p = pt(i);
+            lo = Vec2 { x: lo.x.min(p.x), y: lo.y.min(p.y) };
+            hi = Vec2 { x: hi.x.max(p.x), y: hi.y.max(p.y) };
+        }
+        let use_y = hi.y - lo.y > hi.x - lo.x;
+        let mut ord: Vec<(f64, u32)> = (0..n).map(|i| (if use_y { pt(i).y } else { pt(i).x }, i as u32)).collect();
+        ord.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        NearIdx { use_y, ord }
+    }
+
+    /// The index `i` minimising `(pt(i) - q).len2()`, the lowest among equal ones; `None` for no
+    /// points.
+    pub fn nearest(&self, pt: impl Fn(usize) -> Vec2, q: Vec2) -> Option<usize> {
+        let qc = if self.use_y { q.y } else { q.x };
+        let pos = self.ord.partition_point(|e| e.0 < qc);
+        // As the scan: the best starts at an infinite distance and only a smaller one replaces
+        // it (here also an equal one of a lower index, the scan's earlier point).
+        let (mut bd, mut bi) = (f64::INFINITY, None::<usize>);
+        let mut visit = |c: f64, i: usize| -> bool {
+            let g = c - qc;
+            if g * g > bd {
+                return false;
+            }
+            let d = (pt(i) - q).len2();
+            if d < bd || (d == bd && bi.is_some_and(|b| i < b)) {
+                (bd, bi) = (d, Some(i));
+            }
+            true
+        };
+        for &(c, i) in &self.ord[pos..] {
+            if !visit(c, i as usize) {
+                break;
             }
         }
-        best.1
+        for &(c, i) in self.ord[..pos].iter().rev() {
+            if !visit(c, i as usize) {
+                break;
+            }
+        }
+        bi
     }
 }
 
@@ -167,15 +234,7 @@ pub fn via_point(pr: &Projection, packer: &Packer, t: usize, net: i32, r: f64, s
     let pts = tri_site_points(a, b, c);
     let mut best = (f64::NEG_INFINITY, pts[0]);
     for q in pts {
-        let mut f = f64::INFINITY;
-        for o in pr.obstacles.iter().filter(|o| o.net != Some(net)) {
-            let d = if point_in_poly(q, &o.poly) { f64::NEG_INFINITY } else { poly_dist(q, &o.poly) - o.clear.max(s) - packer.eps() };
-            f = f.min(d);
-        }
-        for k in &pr.no_via {
-            let d = if point_in_poly(q, k) { f64::NEG_INFINITY } else { poly_dist(q, k) - packer.eps() };
-            f = f.min(d);
-        }
+        let f = point_free(pr, packer, q, net, s);
         if f >= r {
             return (q, true);
         }
@@ -184,6 +243,23 @@ pub fn via_point(pr: &Projection, packer: &Packer, t: usize, net: i32, r: f64, s
         }
     }
     (best.1, false)
+}
+
+/// The free radius (nm) of a via centre `q` of `net` at clearance `s` against the static board,
+/// as [`via_point`] measures it: every other net's obstacle at the larger of `s` and its own
+/// clearance, every keepout that forbids vias touching (negative infinity inside either).
+/// O(obstacles).
+pub fn point_free(pr: &Projection, packer: &Packer, q: Vec2, net: i32, s: f64) -> f64 {
+    let mut f = f64::INFINITY;
+    for o in pr.obstacles.iter().filter(|o| o.net != Some(net)) {
+        let d = if point_in_poly(q, &o.poly) { f64::NEG_INFINITY } else { poly_dist(q, &o.poly) - o.clear.max(s) - packer.eps() };
+        f = f.min(d);
+    }
+    for k in &pr.no_via {
+        let d = if point_in_poly(q, k) { f64::NEG_INFINITY } else { poly_dist(q, k) - packer.eps() };
+        f = f.min(d);
+    }
+    f
 }
 
 /// What [`stretches`] returns: the stretches, the planned vias (wire, disc, has a site), the
@@ -264,9 +340,22 @@ pub fn wire_stretches(st: &State, packer: &Packer, w: WireId, ev: &[LEv], via_k:
     }
     // Events in traversal order: (traversal, 0 = turn / 1 = via, point, via index).
     let mut evs: Vec<(usize, u8, Vec2, usize)> = wi.turns.iter().map(|&(k, v)| (k, 0u8, pr.pos[v], 0)).collect();
+    // 5.2: a via of an interval with no traversal strictly between its events (`[vias]
+    // between_crossings`) stands at its end site, on its own side of the event
+    // ([`super::refine::end_site`]), when it has one in its traversal.
+    let between = if packer.via_between { super::refine::via_ranges(ev, true).1 } else { Vec::new() };
+    let changes_ev: Vec<(LEv, LEv)> = ev.windows(2).filter(|x| x[0].2 != x[1].2).map(|x| (x[0], x[1])).collect();
     for (i, &k) in ks.iter().enumerate() {
         let k = k.min(n);
-        let (pt, ok) = site(wi.tris[k], wi.net, r, wi.s);
+        let end = (between.get(i) == Some(&false) && r > 0.0)
+            .then(|| changes_ev.get(i))
+            .flatten()
+            .and_then(|&(a, b)| super::refine::end_site(st, w, a, b, &|t, q| pr.inradius(t) >= r + wi.s && point_free(pr, packer, q, wi.net, wi.s) >= r))
+            .filter(|&(ke, _)| ke == k);
+        let (pt, ok) = match end {
+            Some((_, c)) => (c, true),
+            None => site(wi.tris[k], wi.net, r, wi.s),
+        };
         vias.push((ViaFeat { at: pt, r, net: wi.net, clear: wi.s }, ok));
         terms.push(pt);
         evs.push((k, 1, pt, i));
@@ -511,40 +600,62 @@ fn flows(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], pr: &Projection, st: 
 /// own vias is skipped (the via disc, an item of its own, covers it). O(band segments x cuts in
 /// their grid cells + wraps x cuts at the wrapped vertex).
 pub fn flow_items(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], via_r: f64) -> BTreeMap<usize, Vec<FlowItem>> {
+    let mut out = Vec::new();
+    flow_items_into(sh, sts, mine, via_r, &mut SegScratch::default(), &mut out);
     let mut per: BTreeMap<usize, Vec<FlowItem>> = BTreeMap::new();
-    let mut buf: Vec<u32> = Vec::new();
+    for (ci, x) in out {
+        per.entry(ci).or_default().push(x);
+    }
+    per
+}
+
+/// [`flow_items`] as `(cut, item)` pairs by ascending cut, the items of one cut in the order
+/// [`flow_items`] gives them (stretch, band segment, then wraps), with the caller's scratch: the
+/// planner's per-edit walk (shopping list 3.1). O(band segments x cuts along them + wraps).
+pub fn flow_items_into(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], via_r: f64, sc: &mut SegScratch, out: &mut Vec<(usize, FlowItem)>) {
+    out.clear();
     for &si in mine {
         let s = &sts[si];
         if s.band.len() < 2 {
             continue;
         }
         let ends = [s.band[0], s.band[s.band.len() - 1]];
+        let near = s.pass_index();
         for k in 0..s.band.len() - 1 {
             let (a, b) = (s.band[k], s.band[k + 1]);
-            let lo = Vec2 { x: a.x.min(b.x), y: a.y.min(b.y) };
-            let hi = Vec2 { x: a.x.max(b.x), y: a.y.max(b.y) };
-            sh.cut_grid.query(lo, hi, &mut buf);
+            // A segment crosses a cut at most once, so the order of the candidates does not
+            // matter here (the stable sort below groups them by cut).
+            sc.candidates(&sh.cut_grid, sh.cuts.len(), a, b);
             let d = b - a;
-            for &ci in buf.iter() {
+            let dl = d.len();
+            for &ci in sc.out.iter() {
                 let c = &sh.cuts[ci as usize];
                 let e = c.q - c.p;
                 let den = d.cross(e);
-                if den.abs() < 1e-9 * d.len() * e.len() {
-                    continue;
-                }
-                // a + s d = p + t e
+                // a + s d = p + t e. The tests of `flow_items` in a cheaper order (the ones
+                // without a square root first); the same ones, so the same outcome.
                 let w0 = c.p - a;
                 let sp = w0.cross(e) / den;
+                if !(0.0..=1.0).contains(&sp) {
+                    continue;
+                }
                 let tc = w0.cross(d) / den;
-                let tol = 1.0 / e.len().max(1.0);
-                if !(0.0..=1.0).contains(&sp) || tc <= tol || tc >= 1.0 - tol {
+                if !(tc > 0.0 && tc < 1.0) {
+                    continue;
+                }
+                let el = e.len();
+                if den.abs() < 1e-9 * dl * el {
+                    continue;
+                }
+                let tol = 1.0 / el.max(1.0);
+                if tc <= tol || tc >= 1.0 - tol {
                     continue;
                 }
                 let x = a + d * sp;
                 if via_r > 0.0 && (0..2).any(|i| s.via_ends[i] && (x - ends[i]).len() < via_r) {
                     continue;
                 }
-                per.entry(ci as usize).or_default().push(FlowItem { stretch: si, t: tc, kind: 0, w: s.width_at(x) });
+                out.push((ci as usize, FlowItem { stretch: si, t: tc, kind: 0, w: s.width_at_idx(&near, x) }));
             }
         }
         // Wraps at the band's interior corners.
@@ -556,12 +667,12 @@ pub fn flow_items(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], via_r: f64) 
                 let at_p = c.vp == v;
                 let u = if at_p { c.q - c.p } else { c.p - c.q };
                 if in_wedge(din, dout, left, u) {
-                    per.entry(ci).or_default().push(FlowItem { stretch: si, t: if at_p { 0.0 } else { 1.0 }, kind: if at_p { 1 } else { 2 }, w: s.width_at(s.band[k]) });
+                    out.push((ci, FlowItem { stretch: si, t: if at_p { 0.0 } else { 1.0 }, kind: if at_p { 1 } else { 2 }, w: s.width_at_idx(&near, s.band[k]) }));
                 }
             }
         }
     }
-    per
+    out.sort_by_key(|x| x.0);
 }
 
 /// Need of a cut's items (ordered from `p` to `q`) under both mixed-clearance rules and at the
@@ -863,6 +974,45 @@ impl Recorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Shopping list 3.1: the nearest-point index answers as the scan with a strict `<` does
+    /// (the lowest index among equal distances), on random points, on lattice points with many
+    /// ties and duplicates, and on a vertical row (the y axis chosen).
+    #[test]
+    fn near_index_equals_the_scan() {
+        let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut rnd = move || {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            (x.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let scan = |pts: &[Vec2], q: Vec2| -> Option<usize> {
+            let mut best = (f64::INFINITY, None);
+            for (i, &p) in pts.iter().enumerate() {
+                let d = (p - q).len2();
+                if d < best.0 {
+                    best = (d, Some(i));
+                }
+            }
+            best.1
+        };
+        for case in 0..300 {
+            let n = case % 23;
+            let pts: Vec<Vec2> = (0..n)
+                .map(|_| match case % 3 {
+                    0 => Vec2 { x: rnd() * 2e7, y: rnd() * 1e7 },
+                    1 => Vec2 { x: (rnd() * 4.0).round() * 1e6, y: (rnd() * 4.0).round() * 1e6 },
+                    _ => Vec2 { x: 5e6 + (rnd() * 2.0).round(), y: rnd() * 3e7 },
+                })
+                .collect();
+            let idx = NearIdx::new(n, |i| pts[i]);
+            for _ in 0..40 {
+                let q = if case % 3 == 1 { Vec2 { x: (rnd() * 8.0).round() * 0.5e6, y: (rnd() * 8.0).round() * 0.5e6 } } else { Vec2 { x: rnd() * 2e7, y: rnd() * 3e7 } };
+                assert_eq!(idx.nearest(|i| pts[i], q), scan(&pts, q), "case {case} q {q:?}");
+            }
+        }
+    }
 
     #[test]
     fn wedge_left_turn() {

@@ -219,3 +219,65 @@ fn a_wire_without_a_found_path_is_placed_and_priced() {
         assert!(st.check().is_ok(), "{:?}", st.check());
     }
 }
+
+/// 4.3b: the initial routing order is (tier, width desc, length asc, input index); tier 1 first.
+/// Wire ids follow the order the connections were routed in.
+#[test]
+fn initial_order_is_tier_first() {
+    use topor_engine::topo::init::{route_all_once_tiered, route_all_reg_tiered, route_order};
+    // Three far-apart nets, input order 1, 2, 3 (net 3 the shortest, net 1 the longest).
+    let m = board((0.0, 0.0, 40.0, 20.0), &[(1, 2.0, 3.0, true, 1.0), (1, 38.0, 3.0, true, 1.0), (2, 2.0, 10.0, true, 1.0), (2, 30.0, 10.0, true, 1.0), (3, 2.0, 17.0, true, 1.0), (3, 12.0, 17.0, true, 1.0)]);
+    let b = board::build(&m, &opts(false)).unwrap();
+    let conns = b.connections(&m);
+    assert_eq!(conns.len(), 3);
+    let net_of = |o: &[usize]| o.iter().map(|&i| conns[i].net).collect::<Vec<_>>();
+    let st = State::new(&b.proj);
+    // Equal tiers (or none): length ascending, as before.
+    assert_eq!(net_of(&route_order(&st, &conns, &[])), vec![3, 2, 1]);
+    assert_eq!(net_of(&route_order(&st, &conns, &[3, 3, 3])), vec![3, 2, 1]);
+    // Three tiers: tier beats length.
+    let tiers: Vec<u8> = conns.iter().map(|c| match c.net { 1 => 1, 2 => 3, _ => 2 }).collect();
+    assert_eq!(net_of(&route_order(&st, &conns, &tiers)), vec![1, 3, 2]);
+    for once in [false, true] {
+        let mut st = State::new(&b.proj);
+        let reg = Registry::standard();
+        let rep = if once { route_all_once_tiered(&mut st, &conns, &tiers, &reg, 2_000_000, 450_000.0) } else { route_all_reg_tiered(&mut st, &conns, &tiers, &reg, 2_000_000, 450_000.0) };
+        assert!(rep.failed.is_empty());
+        let nets: Vec<i32> = st.wires.iter().filter(|w| w.alive).map(|w| w.net).collect();
+        assert_eq!(nets, vec![1, 3, 2], "once {once}");
+    }
+}
+
+/// 4.3c: the wires that took part in a double-crossing removal are laid anew, the new lay kept
+/// only when its price is lower (Polubasov 2010). The state stays valid, every wire stays
+/// present (same connection), no wire gets dearer, no crossing appears.
+#[test]
+fn relay_after_uncross_keeps_only_cheaper_lays() {
+    use topor_engine::topo::init::InitWeights;
+    let m = board((0.0, 0.0, 20.0, 10.0), &[(1, 2.0, 5.6, true, 0.6), (1, 18.0, 5.6, true, 0.6), (2, 2.0, 6.4, true, 0.6), (2, 18.0, 6.4, true, 0.6), (3, 7.0, 9.0, true, 0.6), (3, 13.0, 1.0, true, 0.6)]);
+    for steiner in [false, true] {
+        let b = board::build(&m, &opts(steiner)).unwrap();
+        let conns: Vec<_> = b.connections(&m).into_iter().filter(|c| c.net != 3).collect();
+        let mut st = State::new(&b.proj);
+        st.taut_len = true;
+        st.relay_after_uncross = false;
+        route_all_once(&mut st, &conns, &Registry::standard(), 2_000_000, 450_000.0);
+        let (a, bw) = (st.wires.iter().position(|w| w.alive && w.net == 1).unwrap(), st.wires.iter().position(|w| w.alive && w.net == 2).unwrap());
+        let wt = InitWeights::default();
+        let conn_of = |st: &State, w: usize| conns.iter().find(|c| c.net == st.wires[w].net).map(|c| (*c, wt, (c.w + c.s) / 450_000.0));
+        let conn_of_static: std::collections::BTreeMap<usize, _> = [a, bw].into_iter().filter_map(|w| conn_of(&st, w).map(|x| (w, x))).collect();
+        let before: Vec<f64> = [a, bw].iter().map(|&w| st.lay_price(w, &wt, conn_of_static[&w].2)).collect();
+        let n = st.relay(&[a, bw], 1000, &|w| conn_of_static.get(&w).copied());
+        assert!(st.check().is_ok(), "{:?}", st.check());
+        assert_eq!(st.total_crossings(), 0);
+        for (k, &w) in [a, bw].iter().enumerate() {
+            let now = n.iter().find(|x| x.0 == w).map_or(w, |x| x.1);
+            assert!(st.wires[now].alive, "steiner {steiner}: wire of net {} present", st.wires[w].net);
+            assert!(st.lay_price(now, &wt, conn_of_static[&w].2) <= before[k] + 1e-9, "steiner {steiner}: wire {w} got dearer");
+        }
+        // The relay is idempotent: nothing is cheaper the second time.
+        let live: Vec<usize> = st.wires.iter().enumerate().filter(|(_, w)| w.alive).map(|(i, _)| i).collect();
+        let c2: std::collections::BTreeMap<usize, _> = live.iter().filter_map(|&w| conn_of(&st, w).map(|x| (w, x))).collect();
+        assert!(st.relay(&live, 1000, &|w| c2.get(&w).copied()).is_empty(), "steiner {steiner}: second relay changes nothing");
+    }
+}

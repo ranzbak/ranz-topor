@@ -927,6 +927,12 @@ pub struct Options {
     /// the estimated refill holding a pad or via of the net, or a pad whose thermal spokes are all
     /// cut) gets a via into the pour on another layer, or a short stub, near its pad.
     pub stitch_islands: bool,
+    /// Topological core (4.4, `topor.toml [planes] terminals`, user rule 2026-11-10): an own-net
+    /// pour is a terminal of its net like a pad, which may carry vias. A plane pad's stub may end
+    /// on own-net copper already on the plane (another pad's stub via, an existing through via
+    /// in the fill) instead of a via of its own, and a stub via that other stubs share moves to
+    /// where their stubs are shortest together. False: one via per plane pad (before 4.4).
+    pub plane_terminals: bool,
     /// `topor.toml [output] cleanup_safe`: the written copper is made stable under KiCad's Edit ->
     /// Cleanup Tracks & Vias ([`crate::topo::tidy`]): no null, duplicate or in-pad segments, T
     /// junctions as exact vertices, collinear segments merged.
@@ -1124,6 +1130,13 @@ pub struct Options {
     /// around a wrapped corner, the 0/45 degree legs of a slanted stretch; `demand::octi_stretch`)
     /// instead of the any-angle room.
     pub octi_room: bool,
+    /// P6 (c) (`[drawing] pull_taut`): every drawn run is pulled taut inside its corridor (a
+    /// vertex goes where the straight leg keeps every rule and the side of every wire not drawn
+    /// yet; `draw::Drawer::pull_taut`).
+    pub draw_pull_taut: bool,
+    /// P6 (b) (`[drawing] lane_walls`): "price" = the lane slot outside a run's span is a graded
+    /// price in the octilinear drawing; "hard" = a wall (before P6).
+    pub lane_walls: String,
     /// M-45 (`[drawing] bundle_pull`): with the octilinear style, the share of a segment's length
     /// taken off its price where it runs beside a drawn trace of another net at the clearance, so
     /// a trace follows its neighbour and a bundle keeps its pitch through its bends (0 = off).
@@ -1259,6 +1272,7 @@ impl Default for Options {
             reroute_rounds: 6,
             via_reduce: true,
             stitch_islands: true,
+            plane_terminals: true,
             cleanup_safe: true,
             net_tree: "free".into(),
             steiner: false,
@@ -1304,6 +1318,8 @@ impl Default for Options {
             bend_mm: 0.25,
             bend_spacing_mm: 0.5,
             octi_room: true,
+            draw_pull_taut: true,
+            lane_walls: "price".into(),
             bundle_pull: 0.3,
             reserve_via_sites: true,
             mixed_clearance: "conservative".into(),

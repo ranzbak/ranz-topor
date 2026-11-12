@@ -192,8 +192,10 @@ pub struct Packer<'a> {
     edge_clear: f64,
     cache: RefCell<HashMap<MarginKey, f64>>,
     taut_cache: RefCell<HashMap<TautKey, Rc<Taut>>>,
-    /// Diameter of the first via size of every net (nm); nets not listed use `via_d0`. 0 = the
-    /// planner gives vias no room (a packer built without a board model).
+    /// Reach diameter of the first via size of every net (nm, [`crate::vias::via_reach`] x 2:
+    /// the copper disc, or larger where the drill's hole clearance reaches further; 5.4 task 1);
+    /// nets not listed use `via_d0`. 0 = the planner gives vias no room (a packer built without
+    /// a board model).
     via_d: HashMap<i32, f64>,
     via_d0: f64,
     /// Free radius against other nets' obstacles at the incentre / centroid of a triangle, per
@@ -318,8 +320,9 @@ impl<'a> Packer<'a> {
         }
     }
 
-    /// Diameter of the via a wire of `net` gets (its first size; nm). 0 when the packer has no
-    /// via sizes.
+    /// Reach diameter of the via a wire of `net` gets (its first size, nm; see the field): the
+    /// disc that with the net's clearance round it keeps the copper and the hole rule. 0 when
+    /// the packer has no via sizes.
     pub fn via_d(&self, net: i32) -> f64 {
         self.via_d.get(&net).copied().unwrap_or(self.via_d0)
     }
@@ -365,7 +368,7 @@ impl<'a> Packer<'a> {
     pub fn for_model(model: &crate::model::BoardModel, opts: &crate::model::Options, pr: &'a Projection) -> Self {
         let edge_clear = if model.rules.ignored_checks.iter().any(|c| c == "copper_edge_clearance") { 0.0 } else { pr.edge_clear.max(pr.edge_clear_ignored) };
         let mut p = Packer::new(pr, super::board::outline_segments(model), opts.margin_nm as f64 + DRAW_TOL_NM, edge_clear);
-        let first = |net: i32| crate::vias::via_sizes(&model.rules, net, opts).first().map_or(0.0, |s| s.d as f64);
+        let first = |net: i32| crate::vias::via_sizes(&model.rules, net, opts).first().map_or(0.0, |&s| 2.0 * crate::vias::via_reach(&model.rules, net, s));
         p.via_d0 = first(0);
         p.via_d = model.nets.iter().map(|n| (n.code, first(n.code))).collect();
         p.reserve_sites = opts.reserve_via_sites;

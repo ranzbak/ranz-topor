@@ -261,6 +261,85 @@ fn channel_fit_holds_three_wires_with_slack() {
     nothing_overfull("channel_fit", Norm::Euclid, &|_| 0.25);
 }
 
+/// Shopping list 2.4, the three-level cut price on channel_fit's cut C1 (1.60 mm, three wires,
+/// need `3 w + 4 x 0.20`): the wires' nominal width `w` and neck floor `f` are set per case. Returns
+/// (C1's capacity, nominal need, slack beyond the floors, C1 shrinking (0/1), C1's reduction in
+/// pitches, the model's shrinkage price / amount (C1 and its twin: the octagonal norm has a second
+/// 1.60 cut across the channel with the same three wires), over-full count, over-full amount,
+/// total, necks).
+#[allow(clippy::type_complexity)]
+fn c1_price(w: f64, f: f64) -> (f64, f64, f64, usize, f64, f64, usize, f64, f64, Vec<(usize, usize, f64)>) {
+    let fx = load("channel_fit");
+    let pr = &fx.b.proj;
+    let mut o = opts(Norm::Octagonal);
+    o.shrink_mm = 30.0;
+    let sh = std::rc::Rc::new(bare_sheets(pr, &outline_segments(&fx.m), &o).expect("sheets"));
+    let c = fx.doc["cuts"].as_array().unwrap().iter().find(|c| c["id"] == "C1").unwrap();
+    let l = layer_idx(&fx, c["layer"].as_str().unwrap());
+    let ci = find_cut(&sh[l], pt(&c["p"]), pt(&c["q"]));
+    let (mut rs, vias) = runs(&fx, l, &|_| f);
+    assert_eq!(rs.len(), 3);
+    for r in rs.iter_mut() {
+        r.w = w * MM;
+        r.w_floor = f * MM;
+        r.pass_w.iter_mut().for_each(|x| *x = w * MM);
+    }
+    let mut cp = CutPrice::new(pr, sh.clone(), o, 50.0, rs.len());
+    for (i, r) in rs.iter_mut().enumerate() {
+        cp.set_wire(i, std::slice::from_mut(r), &vias.iter().copied().filter(|v| v.wire == i).collect::<Vec<_>>());
+    }
+    let (cap, need, slack) = cp.cut_state(l, ci);
+    let cut = &sh[l].cuts[ci];
+    let row = cp.report().into_iter().find(|r| r.layer == l && r.p == cut.p && r.q == cut.q).expect("C1 row");
+    let (n, a, price) = cp.shrinkage();
+    let c1 = row.shrink / MM / (w + 0.20);
+    assert!(n == 0 || (a / n as f64 - c1).abs() < 1e-6, "the shrinking cuts are C1's twins: {n} cuts, {a} pitches, C1 {c1}");
+    (cap / MM, need / MM, slack / MM, usize::from(row.shrink > 1.0), c1, price / n.max(1) as f64, cp.overfull(), cp.over_amount(), cp.total(), cp.necks())
+}
+
+#[test]
+fn three_level_price_of_a_three_wire_cut() {
+    // Nominal fit (0.25: need 1.55 of 1.60): no shrinkage, no violation.
+    let a = c1_price(0.25, 0.20);
+    eprintln!("nominal fit {a:?}");
+    assert!((a.0 - 1.60).abs() < 1e-6 && (a.1 - 1.55).abs() < 1e-6, "{a:?}");
+    assert_eq!((a.3, a.6), (0, 0), "{a:?}");
+    assert!(a.4 == 0.0 && a.9.is_empty(), "{a:?}");
+    // Fits only at the floors (0.30 nominal: need 1.70; floor 0.20: need 1.40): a shrinkage of
+    // the 0.10 mm reduction (0.2 pitches of 0.50 at 30 mm each), no violation; every wire necked
+    // by a third of its range, to 0.2667 (3 x 0.2667 + 0.8 = 1.60: the widest common width).
+    let b = c1_price(0.30, 0.20);
+    eprintln!("fits necked {b:?}");
+    assert_eq!((b.3, b.6), (1, 0), "{b:?}");
+    assert!((b.4 - 0.2).abs() < 1e-5 && (b.5 - 6.0).abs() < 1e-3, "{b:?}");
+    assert!(b.9.len() % 3 == 0 && !b.9.is_empty(), "{b:?}");
+    assert!((b.2 - 0.20).abs() < 1e-6, "slack beyond the floors {b:?}");
+    for x in &b.9 {
+        assert!((x.2 / MM - (0.30 - 0.1 / 3.0)).abs() < 1e-5, "{x:?}");
+    }
+    // Beyond the floors (floor 0.27: need 1.61): the violation is the 0.01 excess only (1 +
+    // 0.01 / 0.5 graded), the shrinkage all of N - F = 0.09; the necks at the floor.
+    let c = c1_price(0.30, 0.27);
+    eprintln!("beyond the floors {c:?}");
+    assert_eq!(c.3, 1, "{c:?}");
+    assert!(c.6 >= 1 && (c.2 + 0.01).abs() < 1e-6 && (c.7 - 1.02 * c.6 as f64).abs() < 1e-4, "{c:?}");
+    assert!((c.4 - 0.09 / 0.5).abs() < 1e-5, "{c:?}");
+    assert!(c.9.iter().all(|x| (x.2 / MM - 0.27).abs() < 1e-6), "{c:?}");
+    // Continuity at both boundaries: 1 nm of width either side changes the total by no more
+    // than the same step next to the boundary does (the slope; a jump would be the size of a
+    // price level, tens of mm).
+    let w0 = (1.60 - 0.80) / 3.0;
+    let step = |f: &dyn Fn(f64) -> f64, x: f64| ((f(x + 1e-6) - f(x - 1e-6)).abs(), (f(x - 1e-6) - f(x - 3e-6)).abs().max((f(x + 3e-6) - f(x + 1e-6)).abs()));
+    let (at, near) = step(&|w| c1_price(w, 0.20).8, w0);
+    assert!(at <= 2.0 * near + 1e-9 && at < 0.01, "jump where the nominal widths stop fitting: {at} (next to it {near})");
+    let (at, near) = step(&|f| c1_price(0.30, f).8, w0);
+    assert!(at <= 2.0 * near + 1e-9 && at < 0.01, "jump at the floors: {at} (next to it {near})");
+    let (lo, hi) = (c1_price(0.30, w0 - 1e-6), c1_price(0.30, w0 + 1e-6));
+    assert!(lo.6 == 0 && hi.6 >= 1, "the violation starts at the floors");
+    // And the price rises with the reduction: nominal fit < necked < beyond the floors.
+    assert!(a.8 < b.8 && b.8 < c.8, "{} {} {}", a.8, b.8, c.8);
+}
+
 #[test]
 fn channel_overfull_is_over_full_at_c1_by_040() {
     only_named_overfull("channel_overfull", Norm::Octagonal, "C1", 0.40, 1e-6);
@@ -479,6 +558,8 @@ struct EditWire {
     poly: Vec<Vec2>,
     net: i32,
     w: f64,
+    /// Neck floor (2.4: below `w` for some wires, so cuts reach the shrinkage level).
+    floor: f64,
     s: f64,
     splits: Vec<(usize, f64)>,
     layers: Vec<usize>,
@@ -511,7 +592,7 @@ impl EditWire {
                 layer: self.layers[j],
                 s: self.s,
                 w: self.w,
-                w_floor: self.w,
+                w_floor: self.floor,
                 curve_k: (0..n).map(|i| a.0 + i).collect(),
                 pass_w: vec![self.w; n.saturating_sub(2)],
                 curve,
@@ -529,9 +610,36 @@ impl EditWire {
 /// A cut with items: (layer, ends in nm, capacity, need, slack).
 type CutKey = (usize, i64, i64, i64, i64, f64, f64, f64);
 
-/// The totals of a fresh model holding `ws` (the full recompute): total, over-full count and
-/// every cut's (capacity, need, slack) by its ends.
-fn full_price(pr: &topor_engine::topo::state::Projection, sh: &std::rc::Rc<Vec<LayerSheet>>, o: CutOpts, ws: &[EditWire], via_r: f64) -> (f64, usize, Vec<CutKey>) {
+/// One item of a cut, bit for bit: (wire, traversal, kind, net, position, width, clearance,
+/// floor).
+type ItemBits = (usize, usize, u8, i32, u64, u64, u64, u64);
+
+/// Every cut's items as (layer, cut, items in their order along the cut).
+fn all_items(cp: &CutPrice, sh: &[LayerSheet]) -> Vec<(usize, usize, Vec<ItemBits>)> {
+    let mut out = Vec::new();
+    for (l, s) in sh.iter().enumerate() {
+        for ci in 0..s.cuts.len() {
+            let v: Vec<ItemBits> = cp.cut_items(l, ci).iter().map(|x| (x.wire, x.k, x.kind, x.it.net, x.t.to_bits(), x.it.w.to_bits(), x.it.s.to_bits(), x.floor.to_bits())).collect();
+            if !v.is_empty() {
+                out.push((l, ci, v));
+            }
+        }
+    }
+    out
+}
+
+/// What a model says beyond its totals (2.4): the shrinkage `(count, amount, price)`, the
+/// necks `(wire, traversal, width)` and the over-full amount.
+type Shrink = ((usize, f64, f64), Vec<(usize, usize, f64)>, f64);
+
+fn shrink_of(cp: &CutPrice) -> Shrink {
+    (cp.shrinkage(), cp.necks(), cp.over_amount())
+}
+
+/// The totals of a fresh model holding `ws` (the full recompute): total, over-full count,
+/// every cut's (capacity, need, slack) by its ends, the items and the shrinkage level.
+#[allow(clippy::type_complexity)]
+fn full_price(pr: &topor_engine::topo::state::Projection, sh: &std::rc::Rc<Vec<LayerSheet>>, o: CutOpts, ws: &[EditWire], via_r: f64) -> (f64, usize, Vec<CutKey>, Vec<(usize, usize, Vec<ItemBits>)>, Shrink) {
     let mut cp = CutPrice::new(pr, sh.clone(), o, 1.0, ws.len());
     for (w, x) in ws.iter().enumerate().filter(|(_, x)| x.alive) {
         let (mut r, v) = x.runs(w, via_r);
@@ -539,7 +647,18 @@ fn full_price(pr: &topor_engine::topo::state::Projection, sh: &std::rc::Rc<Vec<L
     }
     let mut rows: Vec<_> = cp.report().into_iter().map(|r| (r.layer, r.p.x as i64, r.p.y as i64, r.q.x as i64, r.q.y as i64, r.cap, r.need, r.slack)).collect();
     rows.sort_by_key(|a| (a.0, a.1, a.2, a.3, a.4));
-    (cp.total(), cp.overfull(), rows)
+    (cp.total(), cp.overfull(), rows, all_items(&cp, sh), shrink_of(&cp))
+}
+
+/// Whether two shrinkage levels agree (floats to 1e-6 relative).
+fn same_shrink(a: &Shrink, b: &Shrink) -> bool {
+    let close = |x: f64, y: f64| (x - y).abs() <= 1e-6 * x.abs().max(1.0);
+    a.0 .0 == b.0 .0
+        && close(a.0 .1, b.0 .1)
+        && close(a.0 .2, b.0 .2)
+        && a.1.len() == b.1.len()
+        && a.1.iter().zip(&b.1).all(|(x, y)| x.0 == y.0 && x.1 == y.1 && (x.2 - y.2).abs() < 1e-3)
+        && close(a.2, b.2)
 }
 
 #[test]
@@ -548,9 +667,13 @@ fn incremental_edits_price_as_a_full_recompute() {
     // wires of inner_layer_room (four layers, a pin gap that over-fills easily): after every
     // edit the incremental model's total, over-full count and every cut's need and slack equal
     // a model built from scratch, and the returned change equals the change of the full totals.
+    // 2.4: every other wire may neck to 60 % of its width, so cuts reach all three levels of the
+    // price (nominal fit, shrinkage, violation beyond the floors); the shrinkage level and the
+    // necks match the full recompute too.
     let fx = load("inner_layer_room");
     let pr = &fx.b.proj;
-    let o = opts(Norm::Octagonal);
+    let mut o = opts(Norm::Octagonal);
+    o.shrink_mm = 0.6;
     let sh = std::rc::Rc::new(bare_sheets(pr, &outline_segments(&fx.m), &o).expect("sheets"));
     let layers = [layer_idx(&fx, "F.Cu"), layer_idx(&fx, "In1.Cu"), layer_idx(&fx, "B.Cu")];
     let via_r = 0.5 * fx.m.rules.default.via_d as f64;
@@ -558,22 +681,25 @@ fn incremental_edits_price_as_a_full_recompute() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|w| EditWire {
+        .enumerate()
+        .map(|(i, w)| EditWire {
             poly: w["witness"].as_array().unwrap().iter().map(pt).collect(),
             net: net_code(&fx, w["net"].as_str().unwrap()),
             w: w["width"].as_f64().unwrap() * MM,
+            floor: w["width"].as_f64().unwrap() * MM * if i % 2 == 1 { 0.6 } else { 1.0 },
             s: w["clearance"].as_f64().unwrap() * MM,
             splits: Vec::new(),
             layers: vec![layer_idx(&fx, w["witness_layer"].as_str().unwrap())],
             alive: false,
         })
         .collect();
-    let (mut checked, mut reused, mut computed) = (0, 0, 0);
+    let (mut checked, mut reused, mut computed, mut skipped, mut shrinking) = (0, 0, 0, 0, 0);
     for seed in 1..=6u64 {
         let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ seed);
         let mut ws = base.clone();
         let mut cp = CutPrice::new(pr, sh.clone(), o, 1.0, ws.len());
         let mut prev = 0.0;
+        let mut prev_rows: Vec<CutKey> = Vec::new();
         for step in 0..60 {
             let w = rng.below(ws.len());
             let mut x = ws[w].clone();
@@ -623,7 +749,7 @@ fn incremental_edits_price_as_a_full_recompute() {
             };
             let mut after = ws.clone();
             after[w] = x;
-            let (t_full, over_full, rows) = full_price(pr, &sh, o, &after, via_r);
+            let (t_full, over_full, rows, items_full, shrink_full) = full_price(pr, &sh, o, &after, via_r);
             let tol = 1e-6 * t_full.abs().max(1.0);
             assert!((cp.total() - t_full).abs() <= tol, "seed {seed} step {step}: total {} vs full {}", cp.total(), t_full);
             assert!((d - (t_full - prev)).abs() <= tol, "seed {seed} step {step}: change {d} vs {}", t_full - prev);
@@ -635,21 +761,38 @@ fn incremental_edits_price_as_a_full_recompute() {
                 assert_eq!((a.0, a.1, a.2, a.3, a.4), (b.0, b.1, b.2, b.3, b.4));
                 assert!((a.6 - b.6).abs() < 1e-6 && (a.7 - b.7).abs() < 1e-6, "seed {seed} step {step}: cut need/slack {a:?} vs {b:?}");
             }
+            // The items themselves (wire, traversal) per cut, and the strict worse test of the
+            // move against the slacks before it.
+            assert!(all_items(&cp, &sh) == items_full, "seed {seed} step {step}: cut items differ");
+            assert!(same_shrink(&shrink_of(&cp), &shrink_full), "seed {seed} step {step}: shrinkage {:?} vs full {:?}", shrink_of(&cp), shrink_full);
+            shrinking += usize::from(shrink_full.0 .0 > 0);
+            if undo {
+                let before: std::collections::HashMap<(usize, i64, i64, i64, i64), f64> = prev_rows.iter().map(|r| ((r.0, r.1, r.2, r.3, r.4), r.7)).collect();
+                let worse = rows.iter().any(|r| r.7 < -1.0 && r.7 < before.get(&(r.0, r.1, r.2, r.3, r.4)).copied().unwrap_or(f64::INFINITY) - 1.0);
+                assert_eq!(cp.worse_somewhere(), worse, "seed {seed} step {step}: worse_somewhere");
+            }
             checked += 1;
             if undo {
                 cp.rollback();
-                let (t0, o0, _) = full_price(pr, &sh, o, &ws, via_r);
+                let (t0, o0, _, it0, sh0) = full_price(pr, &sh, o, &ws, via_r);
                 assert!((cp.total() - t0).abs() <= 1e-6 * t0.abs().max(1.0) && cp.overfull() == o0, "seed {seed} step {step}: rollback");
+                assert!(all_items(&cp, &sh) == it0, "seed {seed} step {step}: rollback items");
+                assert!(same_shrink(&shrink_of(&cp), &sh0), "seed {seed} step {step}: rollback shrinkage");
                 prev = t0;
             } else {
                 ws = after;
                 prev = t_full;
+                prev_rows = rows;
             }
         }
         reused += cp.parts.1;
         computed += cp.parts.0;
+        skipped += cp.skipped;
     }
-    eprintln!("incremental edits: {checked} edits checked; parts computed {computed}, reused {reused}");
+    eprintln!("incremental edits: {checked} edits checked ({shrinking} with shrinking cuts); parts computed {computed}, reused {reused}; cut pricings skipped {skipped}");
+    assert!(shrinking > 0, "no edit reached the shrinkage level");
+    // Via moves re-pull bands whose crossings mostly keep their place: the shortcut is taken.
+    assert!(skipped > 0, "no cut pricing was skipped");
     // Inserts compute every piece; relabels and via moves keep the pieces they do not touch.
     assert!(reused * 4 > computed, "the edits reused almost nothing: {reused} of {}", reused + computed);
 }

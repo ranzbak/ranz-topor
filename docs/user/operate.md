@@ -611,8 +611,10 @@ unsure about is kept. KiCad's DRC of the result stays the judge.
   [configuration.md](configuration.md#layers)) are not routed; through-hole pads reach them through their
   zone, and an SMD pad of a plane net gets a through via onto the plane at the cheapest free via site near
   the pad, inside the pad when `[vias] via_in_pad` is on (`[vias] plane_vias`, since 0.4.2). A pad with no site that close fails with *no via site within … of the
-  terminal (plane pour)*. Each pad gets its own via: existing stitching vias are not used as plane targets
-  and two pads do not share one. Only two-layer boards are benchmarked (eprom-to-kernal 27/27,
+  terminal (plane pour)*. In the topological core a pour is a terminal of its net like a pad (`[planes]
+  terminals`, default on): pads near each other share one plane via, sited where their stubs are shortest
+  together, a pad may end on an existing through via standing in the fill, and a pad too far for a stub is
+  wired to the pour's nearest filled copper instead of to another pad of the net. Only two-layer boards are benchmarked (eprom-to-kernal 27/27,
   wiccon-2023 62/62); 4+ layer boards route their signal layers but inner-layer quality is not tuned yet. Copper counts
   other than 2, 4, 6, 8 need roles in `[layers]` ([`LAYER_ROLES_NEEDED`](troubleshoot.md#layer_roles_needed)).
 - **Groups.** The KiCad API does not expose group membership: grouped items are treated one by one, and
@@ -634,7 +636,11 @@ unsure about is kept. KiCad's DRC of the result stays the judge.
   connections only pour connections, `false` routes it pad to pad although it has a pour.
 - **Existing copper `smooth`**: the engine treats it as `fixed` and says so in the report.
 - **Detour ratio**: the report's detour ratio is the routed length over the connection's topological ghost path
-  (`toporlib/detour.py`). The DRC-feasible reference search (`[run] detour_reference`) and the pad exit stubs
+  (`toporlib/detour.py`). For a net with three or more pads (a tree) the report adds a second figure next to it,
+  "tree nets (tree / MST of pads)": the net's whole drawn copper over the shortest spanning tree of its pads (a
+  Steiner tree can be up to 13 % shorter, so about 0.87 is the best possible). A connection of a tree may end at
+  another pad or branch of its net than the one it is named after, so its own ratio can look large while the tree is
+  fine; the per-connection list still shows it, so a branch that really wanders stays visible. The DRC-feasible reference search (`[run] detour_reference`) and the pad exit stubs
   (`[search] exit_stubs`, `pad_bridge_max_mm`) of the classic router were removed in the CL cleanup; necking at
   pads is `[search] neck_to_pad` / `neck_max_mm` of the topological core (never below KiCad's minimum track width,
   KiCad → File → Board Setup → Design Rules → Constraints → Minimum track width, or a custom-rule `track_width`

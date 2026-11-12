@@ -59,44 +59,60 @@ impl Bound {
 /// planned pad exits between fine-pitch neighbours that the packer and the drawing reject
 /// (Dayan 1997 pp. 15-16: a cut must hold the widths of the wires that cross it).
 pub fn need(items: &[Item], lo: Bound, hi: Bound) -> f64 {
-    let own = |b: &Bound, it: &Item| matches!(*b, Bound::Pad { net: Some(n), .. } if n == it.net);
-    // The run of own-net passes at an end as one item of half the widest width.
-    let half = |run: &[Item]| -> Option<Item> {
-        let f = run.first()?;
-        Some(Item { net: f.net, w: 0.5 * run.iter().map(|x| x.w).fold(0.0, f64::max), s: run.iter().map(|x| x.s).fold(0.0, f64::max) })
+    need_by(items.len(), |i| items[i], lo, hi)
+}
+
+/// [`need`] of the `n` items `get(0..n)` (ordered across the cut), without building them: the
+/// one definition [`need`] and the cut model's repricing share (shopping list 3.1: no
+/// allocation per cut; the same operations in the same order, so the same floats). O(n).
+pub fn need_by(n: usize, get: impl Fn(usize) -> Item, lo: Bound, hi: Bound) -> f64 {
+    let own = |b: &Bound, it: &Item| matches!(*b, Bound::Pad { net: Some(m), .. } if m == it.net);
+    // The run `a..b` of own-net passes at an end as one item of half the widest width.
+    let half = |a: usize, b: usize| -> Option<Item> {
+        if a >= b {
+            return None;
+        }
+        let f = get(a);
+        Some(Item { net: f.net, w: 0.5 * (a..b).map(|i| get(i).w).fold(0.0, f64::max), s: (a..b).map(|i| get(i).s).fold(0.0, f64::max) })
     };
-    let skip_lo = items.iter().take_while(|x| own(&lo, x)).count();
-    let run_lo = half(&items[..skip_lo]);
-    let items = &items[skip_lo..];
-    let skip_hi = items.iter().rev().take_while(|x| own(&hi, x)).count();
-    let run_hi = half(&items[items.len() - skip_hi..]);
-    let items = &items[..items.len() - skip_hi];
-    let all: Vec<Item> = run_lo.into_iter().chain(items.iter().copied()).chain(run_hi).collect();
-    let Some((first, last)) = all.first().zip(all.last()) else {
+    let skip_lo = (0..n).take_while(|&i| own(&lo, &get(i))).count();
+    let skip_hi = (skip_lo..n).rev().take_while(|&i| own(&hi, &get(i))).count();
+    let run_lo = half(0, skip_lo);
+    let run_hi = half(n - skip_hi, n);
+    let all = || run_lo.into_iter().chain((skip_lo..n - skip_hi).map(&get)).chain(run_hi);
+    let (Some(first), Some(last)) = (all().next(), all().last()) else {
         return 0.0;
     };
-    let mut n: f64 = all.iter().map(|x| x.w).sum();
-    for p in all.windows(2) {
-        if p[0].net != p[1].net {
-            n += p[0].s.max(p[1].s);
+    let mut need: f64 = all().map(|x| x.w).sum();
+    let mut prev: Option<Item> = None;
+    for x in all() {
+        if let Some(p) = prev {
+            if p.net != x.net {
+                need += p.s.max(x.s);
+            }
         }
+        prev = Some(x);
     }
     // An own run at an end needs no clearance to it (its copper may touch the pad).
-    let lo_c = if run_lo.is_some() { 0.0 } else { lo.clearance(first) };
-    let hi_c = if run_hi.is_some() { 0.0 } else { hi.clearance(last) };
-    n + lo_c + hi_c
+    let lo_c = if run_lo.is_some() { 0.0 } else { lo.clearance(&first) };
+    let hi_c = if run_hi.is_some() { 0.0 } else { hi.clearance(&last) };
+    need + lo_c + hi_c
+}
+
+/// [`need_in`] of the `n` items `get(0..n)` ([`need_by`]). O(n).
+pub fn need_in_by(regime: Option<f64>, n: usize, get: impl Fn(usize) -> Item, lo: Bound, hi: Bound) -> f64 {
+    let Some(r) = regime else { return need_by(n, get, lo, hi) };
+    let rep = |b: Bound| match b {
+        Bound::Pad { net, .. } => Bound::Pad { net, clear: r },
+        o => o,
+    };
+    need_by(n, |i| Item { s: r, ..get(i) }, rep(lo), rep(hi))
 }
 
 /// [`need`] where a custom courtyard rule replaces the clearances (`regime`, nm): between passes
 /// and to pads alike. The board-edge and hole clearances are separate rules and stay.
 pub fn need_in(regime: Option<f64>, items: &[Item], lo: Bound, hi: Bound) -> f64 {
-    let Some(r) = regime else { return need(items, lo, hi) };
-    let rep = |b: Bound| match b {
-        Bound::Pad { net, .. } => Bound::Pad { net, clear: r },
-        o => o,
-    };
-    let its: Vec<Item> = items.iter().map(|x| Item { s: r, ..*x }).collect();
-    need(&its, rep(lo), rep(hi))
+    need_in_by(regime, items.len(), |i| items[i], lo, hi)
 }
 
 /// Lower bound of the space `items` need on `k` layers together (all on the same layers, in any

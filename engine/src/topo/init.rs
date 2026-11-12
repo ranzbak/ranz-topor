@@ -8,7 +8,7 @@
 
 use super::demand::Item;
 use super::factors::{squeeze_amount, Event, Registry, WireCtx};
-use super::state::{interleave, EdgeId, ObsId, State, TriId, VertId, Wire, WireId};
+use super::state::{interleave, EdgeId, ObsId, State, NO_OBS, TriId, VertId, Wire, WireId};
 use crate::geom::Vec2;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -116,6 +116,8 @@ pub struct InitReport {
     /// Connections placed without a legal path (4.3 never fail: through walls at the `violation`
     /// price, or [`State::any_path`]).
     pub forced: Vec<usize>,
+    /// Wires laid anew after a double-crossing removal and kept (4.3c).
+    pub relaid: usize,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1007,7 +1009,14 @@ impl State<'_> {
     /// different-net crossings of the triangles touched drop); a wire whose stretch moved is
     /// checked in turn. Stops after `max_swaps`. O(swaps · crossings² of the wires checked).
     pub fn uncross_from(&mut self, w: WireId, max_swaps: usize) -> usize {
+        self.uncross_from_touched(w, max_swaps).0
+    }
+
+    /// [`State::uncross_from`] and the wires that took part in a kept swap (ascending, once each):
+    /// the ones Polubasov 2010 lays anew ([`State::relay`]).
+    pub fn uncross_from_touched(&mut self, w: WireId, max_swaps: usize) -> (usize, Vec<WireId>) {
         let mut swaps = 0;
+        let mut took_part: std::collections::BTreeSet<WireId> = std::collections::BTreeSet::new();
         let mut todo: Vec<WireId> = vec![w];
         while let Some(a) = todo.pop() {
             if swaps >= max_swaps {
@@ -1034,6 +1043,8 @@ impl State<'_> {
                         if after < before {
                             swaps += 1;
                             changed = true;
+                            took_part.insert(a);
+                            took_part.insert(x.other);
                             if !todo.contains(&x.other) {
                                 todo.push(x.other);
                             }
@@ -1044,7 +1055,56 @@ impl State<'_> {
                 }
             }
         }
-        swaps
+        (swaps, took_part.into_iter().collect())
+    }
+
+    /// Price of the wire `w` as placed (4.3c, to compare two lays of one connection): its length
+    /// (taut when `taut_len`) at the `length` price, and per crossing the `crossing` price (the
+    /// same-net one for a crossing of its own net).
+    pub fn lay_price(&self, w: WireId, wt: &InitWeights, scale: f64) -> f64 {
+        let net = self.wires[w].net;
+        let (mut same, mut diff) = (0usize, 0usize);
+        for x in self.crossings(w) {
+            if self.wires[x.other].net == net {
+                same += 1;
+            } else {
+                diff += 1;
+            }
+        }
+        scale * wt.length_mm * self.wire_len(w) / MM + wt.cross_mm * diff as f64 + wt.same_net_cross_mm * same as f64
+    }
+
+    /// Lay the wires `ws` anew (Polubasov 2010, «Начальная трассировка»: "все проводники,
+    /// участвовавшие в преобразованиях, перекладываются заново, поскольку существует большая
+    /// вероятность найти для них более короткие пути"): each in turn is taken out and searched
+    /// again with `conn_of(w)` (its connection, prices and length scale), and the new lay is kept
+    /// only when its [`State::lay_price`] is lower, else the old one goes back (same wire id).
+    /// A wire with a junction end or turns is left alone. Returns `(old id, new id)` of the wires
+    /// that were replaced (a kept lay is a new wire; the old one is dead). At most `max` wires.
+    pub fn relay(&mut self, ws: &[WireId], max: usize, conn_of: &dyn Fn(WireId) -> Option<(Conn, InitWeights, f64)>) -> Vec<(WireId, WireId)> {
+        let mut replaced = Vec::new();
+        for &w in ws.iter().take(max) {
+            let wi = &self.wires[w];
+            if !wi.alive || wi.pa == NO_OBS || wi.pb == NO_OBS || !wi.turns.is_empty() {
+                continue;
+            }
+            let Some((c, wt, scale)) = conn_of(w) else { continue };
+            let old_price = self.lay_price(w, &wt, scale);
+            let old_path = self.detach(w);
+            let Some((path, tris)) = self.search(&c, &wt, scale) else {
+                self.reattach(w, &old_path);
+                continue;
+            };
+            let wire = Wire { net: c.net, w: c.w, s: c.s, a: c.a, b: c.b, pa: c.pa, pb: c.pb, turns: Vec::new(), passes: Vec::new(), tris: Vec::new(), alive: true };
+            let n = self.insert(wire, &path, tris);
+            if self.lay_price(n, &wt, scale) < old_price - 1e-9 {
+                replaced.push((w, n));
+            } else {
+                self.remove(n);
+                self.reattach(w, &old_path);
+            }
+        }
+        replaced
     }
 
     /// Last resort of the never-fail initial routing (4.3): any sequence of triangles from a
@@ -1093,12 +1153,19 @@ impl State<'_> {
 /// Route all connections (widest first, then shortest), then remove double crossings, with the
 /// same prices for every wire. `ws0` = w0 + s0 of the default net class (the length unit).
 pub fn route_all(st: &mut State, conns: &[Conn], wt: &InitWeights, ws0: f64) -> InitReport {
-    route_all_with(st, conns, &|_| *wt, ws0)
+    route_all_with(st, conns, &[], &|_, _| *wt, ws0)
 }
 
 /// [`route_all`] with the prices of every connection from the factor registry (scope, tier).
 pub fn route_all_reg(st: &mut State, conns: &[Conn], reg: &Registry, max_expansions: usize, ws0: f64) -> InitReport {
-    route_all_with(st, conns, &|c| InitWeights { max_expansions, ..InitWeights::from_registry(reg, &WireCtx { net: c.net, tier: 3 }) }, ws0)
+    route_all_reg_tiered(st, conns, &[], reg, max_expansions, ws0)
+}
+
+/// [`route_all_reg`] with the priority tier of every connection (`tiers[i]` for `conns[i]`; an
+/// empty or short slice counts as tier 3): routing order (tier, width desc, length asc, input
+/// index) and the tier of the [`WireCtx`] that prices each wire (4.3b).
+pub fn route_all_reg_tiered(st: &mut State, conns: &[Conn], tiers: &[u8], reg: &Registry, max_expansions: usize, ws0: f64) -> InitReport {
+    route_all_with(st, conns, tiers, &|i, c| InitWeights { max_expansions, ..InitWeights::from_registry(reg, &WireCtx { net: c.net, tier: tiers.get(i).copied().unwrap_or(3) }) }, ws0)
 }
 
 /// [`route_all_reg`] the 4.3 way (`[optimize] initial = "once"`): double crossings removed after
@@ -1107,13 +1174,19 @@ pub fn route_all_reg(st: &mut State, conns: &[Conn], reg: &Registry, max_expansi
 /// [`State::any_path`]); `failed` stays empty unless two pads lie in parts of the board no edge
 /// joins.
 pub fn route_all_once(st: &mut State, conns: &[Conn], reg: &Registry, max_expansions: usize, ws0: f64) -> InitReport {
+    route_all_once_tiered(st, conns, &[], reg, max_expansions, ws0)
+}
+
+/// [`route_all_once`] with the priority tier of every connection (see [`route_all_reg_tiered`]).
+pub fn route_all_once_tiered(st: &mut State, conns: &[Conn], tiers: &[u8], reg: &Registry, max_expansions: usize, ws0: f64) -> InitReport {
     let viol = reg.price(&Event::Violation { kind: String::new(), at: Vec2::default(), layer: String::new(), depth_nm: 0.0, len_nm: 0.0, against: String::new(), cause: String::new() }, &WireCtx::default());
-    let wt = |c: &Conn| InitWeights { max_expansions, same_layer_mm: viol, ..InitWeights::from_registry(reg, &WireCtx { net: c.net, tier: 3 }) };
-    let order = route_order(st, conns);
+    let wt = |i: usize, c: &Conn| InitWeights { max_expansions, same_layer_mm: viol, ..InitWeights::from_registry(reg, &WireCtx { net: c.net, tier: tiers.get(i).copied().unwrap_or(3) }) };
+    let order = route_order(st, conns, tiers);
     let mut rep = InitReport::default();
+    let mut wire_conn: Vec<usize> = Vec::new(); // wire id -> index into conns
     for i in order {
         let c = &conns[i];
-        let w = wt(c);
+        let w = wt(i, c);
         let scale = (c.w + c.s) / ws0;
         let placed = st.route_conn(c, &w, scale).map(|x| x.0).or_else(|| {
             let (path, tris) = st.search(c, &InitWeights { wall_mm: viol, ..w }, scale).or_else(|| st.any_path(c))?;
@@ -1124,7 +1197,22 @@ pub fn route_all_once(st: &mut State, conns: &[Conn], reg: &Registry, max_expans
         match placed {
             Some(wid) => {
                 rep.routed += 1;
-                rep.swaps += st.uncross_from(wid, 1000);
+                if wire_conn.len() <= wid {
+                    wire_conn.resize(wid + 1, usize::MAX);
+                }
+                wire_conn[wid] = i;
+                let (n, touched) = st.uncross_from_touched(wid, 1000);
+                rep.swaps += n;
+                if st.relay_after_uncross && !touched.is_empty() {
+                    let conn_of = |w: WireId| wire_conn.get(w).copied().filter(|&ci| ci != usize::MAX).map(|ci| (conns[ci], wt(ci, &conns[ci]), (conns[ci].w + conns[ci].s) / ws0));
+                    for (old, new) in st.relay(&touched, 1000, &conn_of) {
+                        if wire_conn.len() <= new {
+                            wire_conn.resize(new + 1, usize::MAX);
+                        }
+                        wire_conn[new] = wire_conn[old];
+                        rep.relaid += 1;
+                    }
+                }
             }
             None => rep.failed.push(i),
         }
@@ -1134,27 +1222,23 @@ pub fn route_all_once(st: &mut State, conns: &[Conn], reg: &Registry, max_expans
     rep
 }
 
-/// The initial routing order (Polubasov 2010: the wider first, among them the shorter): width
-/// descending, then pad-to-pad distance ascending, then input order.
-fn route_order(st: &State, conns: &[Conn]) -> Vec<usize> {
+/// The initial routing order (user rule; Polubasov 2010: the wider first, among them the
+/// shorter): priority tier ascending (1 = first), width descending, pad-to-pad distance
+/// ascending, input order. `tiers` as in [`route_all_reg_tiered`].
+pub fn route_order(st: &State, conns: &[Conn], tiers: &[u8]) -> Vec<usize> {
     let len = |c: &Conn| (st.proj.pos[c.b] - st.proj.pos[c.a]).len();
+    let tier = |i: usize| tiers.get(i).copied().unwrap_or(3);
     let mut order: Vec<usize> = (0..conns.len()).collect();
-    order.sort_by(|&i, &j| conns[j].w.total_cmp(&conns[i].w).then(len(&conns[i]).total_cmp(&len(&conns[j]))).then(i.cmp(&j)));
+    order.sort_by(|&i, &j| tier(i).cmp(&tier(j)).then(conns[j].w.total_cmp(&conns[i].w)).then(len(&conns[i]).total_cmp(&len(&conns[j]))).then(i.cmp(&j)));
     order
 }
 
-fn route_all_with(st: &mut State, conns: &[Conn], weights: &dyn Fn(&Conn) -> InitWeights, ws0: f64) -> InitReport {
-    let len = |c: &Conn| (st.proj.pos[c.b] - st.proj.pos[c.a]).len();
-    let mut order: Vec<usize> = (0..conns.len()).collect();
-    order.sort_by(|&i, &j| {
-        conns[j].w.total_cmp(&conns[i].w)
-            .then(len(&conns[i]).total_cmp(&len(&conns[j])))
-            .then(i.cmp(&j))
-    });
+fn route_all_with(st: &mut State, conns: &[Conn], tiers: &[u8], weights: &dyn Fn(usize, &Conn) -> InitWeights, ws0: f64) -> InitReport {
+    let order = route_order(st, conns, tiers);
     let mut rep = InitReport::default();
     for i in order {
         let c = &conns[i];
-        match st.route_conn(c, &weights(c), (c.w + c.s) / ws0) {
+        match st.route_conn(c, &weights(i, c), (c.w + c.s) / ws0) {
             Some((_, over)) => {
                 rep.routed += 1;
                 rep.overflows += over;

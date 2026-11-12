@@ -29,7 +29,7 @@
 //!   list 3.1.
 //! - Need = [`super::cutflow::needs`] (widths, clearances between different nets, the end
 //!   clearances; no oblique factor: Maley's congestion is a plain width sum, p. 32); slack =
-//!   capacity - need.
+//!   capacity - need (the planner: capacity - need at the neck floors, see "Three levels").
 //!
 //! **Price** (design §4.4): with `u = -slack / pitch` (overflow in track pitches, `pitch` = mean
 //! width + clearance of the cut's items) and the softness `tau` (`[capacity] overflow_softness`),
@@ -38,14 +38,28 @@
 //! `refine.rs`, so the weights carry over; at `u = 0` it is about 0.57; for `u << 0` it goes to 0
 //! smoothly. No step, no cutoff (graded factors): a nearly full cut already costs a little.
 //!
+//! **Three levels** (shopping list 2.4; TopoR 6.3 manual p. 56: the minimum width "will be used
+//! in bottlenecks unless a different path is available"; pp. 72-73: shrinkages, "width reductions
+//! in nominally-wide wires", are a criterion of their own next to violations, vias and length).
+//! The planner ([`CutPrice`]) needs every cut twice: `N` with every run at its nominal width, `F`
+//! with every run at its neck floor (Board Setup minimum track width or the net's custom rule;
+//! vias do not neck). With capacity `C`: `C >= N` costs 0 (nominal fit); `F <= C < N` fits only
+//! necked and costs the shrinkage price `shrink_mm x red / pitch`, `red = N - C` the width
+//! reduction ([`shrink_need`]); beyond the floors the shrinkage is all of `N - F` and the
+//! violation is the rest, priced by `phi` of the slack `C - F`. Both parts are continuous in `C`
+//! (no jump where the nominal widths stop fitting nor at the floors). The over-full count and
+//! [`CutPrice::over_amount`] count only slack below the floors. The widths a shrinking cut needs
+//! are [`CutPrice::necks`]; the plan writes them into its pass widths before the drawing, so the
+//! drawing necks where the plan priced it and the variant's shrinkages count them.
+//!
 //! Complexity: building the sheets is U0's; a wire costs a walk and a funnel per run plus a grid
 //! query per band segment and per via; repricing a cut is O(items log items).
 
-use super::cutflow::{band, flow_items, needs, wire_stretches, Stretch};
-use super::demand::{Bound, Item};
+use super::cutflow::{band, flow_items_into, needs, wire_stretches, FlowItem, NearIdx, Stretch};
+use super::demand::{need_in_by, Bound, Item};
 use super::pack::Packer;
 use super::refine::LEv;
-use super::sheet::{FeatKind, JunctionFeat, LayerSheet, Norm, SheetInput, SheetOpts};
+use super::sheet::{SegScratch, FeatKind, JunctionFeat, LayerSheet, Norm, SheetInput, SheetOpts};
 use super::state::{point_in_poly, Projection, State, VertId, VertKind, WireId, NO_OBS};
 use crate::geom::Vec2;
 use std::cell::RefCell;
@@ -63,6 +77,9 @@ pub struct CutOpts {
     pub pairwise: bool,
     /// Softness `tau` of the over-full price, in track pitches (> 0).
     pub tau: f64,
+    /// Shopping list 2.4: the shrinkage price, mm per track pitch of width reduction a cut needs
+    /// below the nominal widths (`[factors] shrinkage`, default the `necking` weight).
+    pub shrink_mm: f64,
 }
 
 impl CutOpts {
@@ -71,8 +88,18 @@ impl CutOpts {
             sheet: SheetOpts { norm: Norm::for_style(&o.draw_style), radius_nm: o.cut_radius_mm.max(0.0) * 1e6, via_steps: 16, prune_walk: true },
             pairwise: o.mixed_clearance == "pairwise",
             tau: o.overflow_softness.max(1e-3),
+            shrink_mm: super::factors::Registry::from_config(super::factors::standard_factors(), &o.factors).0.weight("shrinkage").unwrap_or(30.0),
         }
     }
+}
+
+/// Shopping list 2.4: the width reduction (nm) a cut with capacity `cap` needs below the nominal
+/// need `need` when its wires may neck down to the need `floor` (TopoR 6.3 manual p. 56: the
+/// minimum width "in bottlenecks"): 0 while the nominal widths fit, `need - cap` while it fits
+/// necked, `need - floor` (all the necking there is) beyond the floors, where the rest is the
+/// violation. Continuous in `cap` (piecewise linear: no jump at either boundary). O(1).
+pub fn shrink_need(cap: f64, need: f64, floor: f64) -> f64 {
+    (need - cap).clamp(0.0, (need - floor).max(0.0))
 }
 
 /// The graded over-full price factor of a cut with `slack` and item `pitch` (nm), softness
@@ -159,6 +186,10 @@ pub struct Itm {
     pub kind: u8,
     pub it: Item,
     pub floor: f64,
+    /// The nominal width (nm): the wire's netclass width (a via: its item width). The cut is
+    /// priced at the nominal widths and at the floors (2.4), never at the width the plan necked a
+    /// pass to (`it.w`), so the shrinkage price stays put when the necks are written.
+    pub nom: f64,
     /// Traversal of the wire nearest to the item (the place a layer move acts on).
     pub k: usize,
     /// The run or via of the wire that put it there ([`CutPrice`] bookkeeping; 0 in [`flow`]).
@@ -206,6 +237,12 @@ fn nearest_k(s: &Stretch, x: Vec2) -> usize {
     best.1
 }
 
+/// [`nearest_k`] through an index of the curve points: the same traversal.
+fn nearest_k_idx(s: &Stretch, idx: Option<&NearIdx>, x: Vec2) -> usize {
+    let Some(idx) = idx else { return nearest_k(s, x) };
+    idx.nearest(|i| s.curve[i], x).map_or(0, |i| s.curve_k.get(i).copied().unwrap_or(0))
+}
+
 /// The items one wire adds to a sheet: its runs on the sheet's layer (`runs` with bands) and its
 /// vias. `(cut, item)`, and the junction features its runs end at with the half width.
 fn wire_items(sh: &LayerSheet, jf: &HashMap<(i64, i64), usize>, runs: &[Stretch], vias: &[ViaItem], buf: &mut Vec<u32>) -> WireItems {
@@ -213,7 +250,7 @@ fn wire_items(sh: &LayerSheet, jf: &HashMap<(i64, i64), usize>, runs: &[Stretch]
     let (mut out, jends) = run_items(sh, jf, runs, via_r);
     for v in vias {
         for (ci, t, w) in via_hits(sh, v, buf) {
-            out.push((ci, Itm { wire: v.wire, t, kind: 3, it: Item { net: v.net, w, s: v.s }, floor: w, k: v.k, src: 0 }));
+            out.push((ci, Itm { wire: v.wire, t, kind: 3, it: Item { net: v.net, w, s: v.s }, floor: w, nom: w, k: v.k, src: 0 }));
         }
     }
     (out, jends)
@@ -223,20 +260,24 @@ fn wire_items(sh: &LayerSheet, jf: &HashMap<(i64, i64), usize>, runs: &[Stretch]
 /// radius `via_r`, and the junction features they end at with the half width. Each run's
 /// items depend on that run alone. O(band segments x cuts in their grid cells + wraps).
 fn run_items(sh: &LayerSheet, jf: &HashMap<(i64, i64), usize>, runs: &[Stretch], via_r: f64) -> WireItems {
+    run_items_with(sh, jf, runs, via_r, &mut SegScratch::default(), &mut Vec::new())
+}
+
+/// [`run_items`] with the caller's scratch.
+fn run_items_with(sh: &LayerSheet, jf: &HashMap<(i64, i64), usize>, runs: &[Stretch], via_r: f64, sc: &mut SegScratch, per: &mut Vec<(usize, FlowItem)>) -> WireItems {
     let mine: Vec<usize> = (0..runs.len()).filter(|&i| runs[i].layer == sh.l).collect();
-    let per = flow_items(sh, runs, &mine, via_r);
-    let mut out = Vec::new();
-    for (ci, items) in per {
+    flow_items_into(sh, runs, &mine, via_r, sc, per);
+    let mut out = Vec::with_capacity(per.len());
+    let near: Vec<Option<NearIdx>> = (0..runs.len()).map(|i| mine.contains(&i).then(|| NearIdx::new(runs[i].curve.len(), |j| runs[i].curve[j]))).collect();
+    for &(ci, x) in per.iter() {
         let c = &sh.cuts[ci];
-        for x in items {
-            let s = &runs[x.stretch];
-            let at = match x.kind {
-                1 => c.p,
-                2 => c.q,
-                _ => c.p + (c.q - c.p) * x.t,
-            };
-            out.push((ci, Itm { wire: s.wire, t: x.t, kind: x.kind, it: Item { net: s.net, w: x.w, s: s.s }, floor: s.w_floor, k: nearest_k(s, at), src: 0 }));
-        }
+        let s = &runs[x.stretch];
+        let at = match x.kind {
+            1 => c.p,
+            2 => c.q,
+            _ => c.p + (c.q - c.p) * x.t,
+        };
+        out.push((ci, Itm { wire: s.wire, t: x.t, kind: x.kind, it: Item { net: s.net, w: x.w, s: s.s }, floor: s.w_floor.min(s.w), nom: s.w, k: nearest_k_idx(s, near[x.stretch].as_ref(), at), src: 0 }));
     }
     let mut jends = Vec::new();
     for &i in &mine {
@@ -250,10 +291,23 @@ fn run_items(sh: &LayerSheet, jf: &HashMap<(i64, i64), usize>, runs: &[Stretch],
     (out, jends)
 }
 
-/// Need, slack and price of a cut with its items sorted. `jhalf(f)`: the half width carried by a
-/// junction feature on this layer (`None`: no run ends there, the end is open).
-fn evaluate(sh: &LayerSheet, ci: usize, items: &mut [Itm], regime: Option<f64>, jhalf: &dyn Fn(usize) -> Option<f64>, o: &CutOpts) -> (f64, Needs3) {
-    items.sort_by(|a, b| a.t.total_cmp(&b.t).then(a.wire.cmp(&b.wire)).then(a.kind.cmp(&b.kind)).then(a.k.cmp(&b.k)));
+/// The order of the items of a cut: along it, ties by wire, kind and traversal. Every pricing
+/// sorts by it (stable), so the incremental model and a full recompute see one order.
+fn item_order(a: &Itm, b: &Itm) -> std::cmp::Ordering {
+    a.t.total_cmp(&b.t).then(a.wire.cmp(&b.wire)).then(a.kind.cmp(&b.kind)).then(a.k.cmp(&b.k))
+}
+
+/// Whether two sorted item lists price the same: equal (net, width, clearance, floor, nominal
+/// width, kind) item by item ([`CutPrice`] install). O(items).
+fn same_keys(a: &[Itm], b: &[Itm]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| {
+        x.it.net == y.it.net && x.it.w.to_bits() == y.it.w.to_bits() && x.it.s.to_bits() == y.it.s.to_bits() && x.floor.to_bits() == y.floor.to_bits() && x.nom.to_bits() == y.nom.to_bits() && x.kind == y.kind
+    })
+}
+
+/// The ends of cut `ci` (bounds and the half widths of junction ends). `jhalf(f)`: the half
+/// width carried by a junction feature on this layer (`None`: no run ends there, the end is open).
+fn cut_ends(sh: &LayerSheet, ci: usize, jhalf: &dyn Fn(usize) -> Option<f64>) -> ((Bound, f64), (Bound, f64)) {
     let c = &sh.cuts[ci];
     let end = |f: usize| -> (Bound, f64) {
         if matches!(sh.feats[f].kind, FeatKind::Junction(_)) {
@@ -265,12 +319,40 @@ fn evaluate(sh: &LayerSheet, ci: usize, items: &mut [Itm], regime: Option<f64>, 
             (sh.bound(f), 0.0)
         }
     };
-    let ((bp, hp), (bq, hq)) = (end(c.fp), end(c.fq));
+    (end(c.fp), end(c.fq))
+}
+
+/// Need, slack and price of a cut with its items sorted ([`item_order`]). `jhalf(f)`: see
+/// [`cut_ends`].
+fn evaluate(sh: &LayerSheet, ci: usize, items: &mut [Itm], regime: Option<f64>, jhalf: &dyn Fn(usize) -> Option<f64>, o: &CutOpts) -> (f64, Needs3) {
+    items.sort_by(item_order);
+    let c = &sh.cuts[ci];
+    let ((bp, hp), (bq, hq)) = cut_ends(sh, ci, jhalf);
     let cap = c.cap - hp - hq;
     let its: Vec<Item> = items.iter().map(|x| x.it).collect();
     let floors: Vec<f64> = items.iter().map(|x| x.floor).collect();
     let n = needs(regime, &its, &floors, bp, bq, o.pairwise);
     (cap, Needs3 { need: n.need, other: n.other, floor: n.floor })
+}
+
+/// The planner's pricing of a cut (shopping list 2.4): capacity, the need at the nominal
+/// widths and the need at the neck floors, with the selected clearance rule only (the other rule
+/// is the standalone test's report), without building item lists (the same operations as
+/// [`needs`], so the same floats). Without a neckable item the floor need is the nominal one.
+/// O(items log items).
+fn evaluate_need(sh: &LayerSheet, ci: usize, items: &mut [Itm], regime: Option<f64>, jhalf: &dyn Fn(usize) -> Option<f64>, o: &CutOpts) -> (f64, f64, f64) {
+    items.sort_by(item_order);
+    let ((bp, hp), (bq, hq)) = cut_ends(sh, ci, jhalf);
+    let cap = sh.cuts[ci].cap - hp - hq;
+    let items = &*items;
+    let smax = if o.pairwise { 0.0 } else { items.iter().map(|x| x.it.s).fold(0.0, f64::max) };
+    let at = |i: usize, w: f64| -> Item {
+        let x = &items[i];
+        Item { net: x.it.net, w, s: if o.pairwise { x.it.s } else { smax } }
+    };
+    let need = need_in_by(regime, items.len(), |i| at(i, items[i].nom), bp, bq);
+    let floor = if items.iter().any(|x| x.floor < x.nom) { need_in_by(regime, items.len(), |i| at(i, items[i].floor), bp, bq) } else { need };
+    (cap, need, floor)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -280,14 +362,15 @@ struct Needs3 {
     floor: f64,
 }
 
+/// The mean pitch (nominal width + clearance) of a cut's run items (vias only: theirs). O(items).
 fn pitch_of(items: &[Itm]) -> f64 {
     let (mut sum, mut n) = (0.0, 0usize);
     for x in items.iter().filter(|x| x.kind != 3) {
-        sum += x.it.w + x.it.s;
+        sum += x.nom + x.it.s;
         n += 1;
     }
     if n == 0 {
-        items.iter().map(|x| x.it.w.max(0.0) + x.it.s).sum::<f64>() / items.len().max(1) as f64
+        items.iter().map(|x| x.nom.max(0.0) + x.it.s).sum::<f64>() / items.len().max(1) as f64
     } else {
         sum / n as f64
     }
@@ -537,13 +620,22 @@ impl CutCtx {
 struct CutSt {
     items: Vec<Itm>,
     cap: f64,
+    /// Need at the nominal widths and at the neck floors (2.4).
     need: f64,
+    need_floor: f64,
+    /// `cap - need_floor`: over-full (a violation) only beyond the floors.
     slack: f64,
-    /// `price x phi`.
+    /// The width reduction below the nominal widths the cut needs ([`shrink_need`], nm) and the
+    /// pitch of its items.
+    red: f64,
+    pitch: f64,
+    /// `price x phi(slack) + shrink_mm x red / pitch`.
     cost: f64,
     /// Whether it held items when it was last priced (`slack` and `cost` are of that state; the
     /// items may have changed since, until the next pricing).
     live: bool,
+    /// The id of the last move that recorded its slack ([`Txn::slack`]; 0 = none).
+    txn: u32,
 }
 
 /// What one run or one via of a wire contributes: `(layer, cut, item)` and the junction ends
@@ -590,8 +682,9 @@ struct ViaKey {
 /// What one wire contributes: its runs and its vias, each a [`Part`] with its key.
 #[derive(Clone, Debug, Default)]
 struct WireSt {
-    runs: Vec<(RunKey, Part)>,
-    vias: Vec<(ViaKey, Part)>,
+    /// Shared, so the undo copy of a wire and the reuse of its parts are pointer copies.
+    runs: Vec<Rc<(RunKey, Part)>>,
+    vias: Vec<Rc<(ViaKey, Part)>>,
 }
 
 impl WireSt {
@@ -604,7 +697,11 @@ impl WireSt {
 #[derive(Default)]
 struct Txn {
     wires: BTreeMap<WireId, WireSt>,
-    slack: BTreeMap<(usize, usize), f64>,
+    /// The slack of every cut priced since [`CutPrice::begin`] as it was before (first touch,
+    /// [`CutSt::txn`]).
+    slack: Vec<(usize, usize, f64)>,
+    /// Its id ([`CutSt::txn`]).
+    id: u32,
     total: f64,
     over: usize,
 }
@@ -632,10 +729,21 @@ pub struct CutPrice<'a> {
     pub incremental: bool,
     /// Runs and vias whose items were computed / reused (report).
     pub parts: (usize, usize),
+    /// Cuts priced since the last install (added to the process-wide meter once per install).
+    priced: u64,
+    /// Touched cuts whose pricing was skipped (same key sequence, [`CutPrice::install`]; report).
+    pub skipped: usize,
     total: f64,
     over: usize,
     txn: Option<Txn>,
+    /// Id of the last move ([`Txn::id`]).
+    txn_id: u32,
     buf: Vec<u32>,
+    /// A cut's item list being rebuilt ([`CutPrice::install`]).
+    scratch: Vec<Itm>,
+    /// The walk's scratch ([`flow_items_into`]).
+    seg: SegScratch,
+    flow: Vec<(usize, FlowItem)>,
     /// Via site points per (triangle, net, r, s) ([`super::cutflow::via_point`]).
     sites: RefCell<SiteCache>,
 }
@@ -647,8 +755,12 @@ pub struct CutRow {
     pub p: Vec2,
     pub q: Vec2,
     pub cap: f64,
+    /// Need at the nominal widths and at the neck floors; `slack = cap - need_floor` (2.4: over-full
+    /// only beyond the floors); `shrink` the width reduction the cut needs (nm, [`shrink_need`]).
     pub need: f64,
+    pub need_floor: f64,
     pub slack: f64,
+    pub shrink: f64,
     pub wires: Vec<WireId>,
 }
 
@@ -676,10 +788,16 @@ impl<'a> CutPrice<'a> {
             next_src: 1,
             incremental: std::env::var("TOPO_CUT_FULL").is_err(),
             parts: (0, 0),
+            priced: 0,
+            skipped: 0,
             total: 0.0,
             over: 0,
             txn: None,
+            txn_id: 0,
             buf: Vec::new(),
+            scratch: Vec::new(),
+            seg: SegScratch::default(),
+            flow: Vec::new(),
             sites: RefCell::new(HashMap::new()),
         }
     }
@@ -718,7 +836,7 @@ impl<'a> CutPrice<'a> {
     }
 
     fn reprice(&mut self, l: usize, ci: usize) {
-        super::refine::meter::CUTS_PRICED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.priced += 1;
         let regime = self.regime(l, ci);
         let sh = self.sheets.clone();
         let jh = &self.jhalf[l];
@@ -727,16 +845,26 @@ impl<'a> CutPrice<'a> {
         // The state as last priced (the items have changed since).
         let old = (cs.cost, cs.live && cs.slack < -OVER_TOL);
         if let Some(t) = self.txn.as_mut() {
-            t.slack.entry((l, ci)).or_insert(if cs.live { cs.slack } else { f64::INFINITY });
+            if cs.txn != t.id {
+                cs.txn = t.id;
+                t.slack.push((l, ci, if cs.live { cs.slack } else { f64::INFINITY }));
+            }
         }
         if cs.items.is_empty() {
-            *cs = CutSt::default();
+            *cs = CutSt { txn: cs.txn, ..CutSt::default() };
         } else {
-            let (cap, n) = evaluate(&sh[l], ci, &mut cs.items, regime, &half, &self.o);
+            let (cap, need, floor) = evaluate_need(&sh[l], ci, &mut cs.items, regime, &half, &self.o);
+            let pitch = pitch_of(&cs.items);
             cs.cap = cap;
-            cs.need = n.need;
-            cs.slack = cap - n.need;
-            cs.cost = self.price * phi(cs.slack, pitch_of(&cs.items), self.o.tau);
+            cs.need = need;
+            cs.need_floor = floor;
+            cs.slack = cap - floor;
+            cs.red = shrink_need(cap, need, floor);
+            cs.pitch = pitch;
+            cs.cost = self.price * phi(cs.slack, pitch, self.o.tau);
+            if cs.red > 0.0 {
+                cs.cost += self.o.shrink_mm * cs.red / pitch.max(1.0);
+            }
             cs.live = true;
         }
         let new = (cs.cost, cs.live && cs.slack < -OVER_TOL);
@@ -746,8 +874,17 @@ impl<'a> CutPrice<'a> {
 
     /// Put wire `w`'s contribution `ws` in place of its current one: the parts (runs, vias) of
     /// the old one that `ws` does not hold leave their cuts, the new ones enter, the parts both
-    /// hold stay; only the cuts they touch are priced again. Returns the change of the total.
-    /// O(items of the changed parts x their cuts' items).
+    /// hold stay. Returns the change of the total.
+    ///
+    /// Shopping list 3.1: a cut's price depends on its items only through their order along the
+    /// cut and their (net, width, clearance, floor, kind) (`need` is a function of that sequence,
+    /// the pitch a sum over it), not on their positions `t` or traversals `k`. An edit moves most
+    /// of a re-pulled band's crossings along their cuts without passing another item (Dayan 1997
+    /// p. 68: a rubber-band edit changes the order only where it sweeps over other wires), so a
+    /// cut whose sorted sequence of those keys is unchanged and whose ends are untouched keeps its
+    /// price exactly: its items are replaced, the pricing is skipped. Every other touched cut is
+    /// priced again, in ascending (layer, cut) order as before, so the totals are the same floats
+    /// as a full recompute's. O(items of the changed parts + their cuts' items x log).
     fn install(&mut self, w: WireId, ws: WireSt) -> f64 {
         let t0 = self.total;
         if w >= self.wires.len() {
@@ -757,39 +894,99 @@ impl<'a> CutPrice<'a> {
         if let Some(t) = self.txn.as_mut() {
             t.wires.entry(w).or_insert_with(|| old.clone());
         }
-        let keep_new: BTreeSet<u32> = self.wires[w].parts().map(|p| p.src).collect();
-        let keep_old: BTreeSet<u32> = old.parts().map(|p| p.src).collect();
-        let mut dirty: BTreeSet<(usize, usize)> = BTreeSet::new();
-        for part in old.parts().filter(|p| !keep_new.contains(&p.src)) {
-            let src = part.src;
-            let mut seen: BTreeSet<(usize, usize)> = BTreeSet::new();
-            for &(l, ci, _) in &part.items {
-                if seen.insert((l, ci)) {
-                    self.cuts[l][ci].items.retain(|x| !(x.wire == w && x.src == src));
-                    dirty.insert((l, ci));
-                }
-            }
+        let new = self.wires[w].clone();
+        let new_src: Vec<u32> = new.parts().map(|p| p.src).collect();
+        let old_src: Vec<u32> = old.parts().map(|p| p.src).collect();
+        let removed: Vec<&Part> = old.parts().filter(|p| !new_src.contains(&p.src)).collect();
+        let added: Vec<&Part> = new.parts().filter(|p| !old_src.contains(&p.src)).collect();
+        let gone: Vec<u32> = removed.iter().map(|p| p.src).collect();
+        // Junction ends: their half widths change the capacity of every cut at the junction.
+        let mut jdirty: Vec<(usize, usize)> = Vec::new();
+        for part in &removed {
             for &(l, f, _) in &part.jends {
                 if let Some(v) = self.jhalf[l].get_mut(&f) {
-                    v.retain(|x| !(x.0 == w && x.1 == src));
+                    v.retain(|x| !(x.0 == w && x.1 == part.src));
                 }
-                dirty.extend(self.junction_cuts(l, f));
+                jdirty.extend(self.junction_cuts(l, f));
             }
         }
-        let added: Vec<Part> = self.wires[w].parts().filter(|p| !keep_old.contains(&p.src)).cloned().collect();
-        for part in added {
-            for (l, ci, it) in part.items {
-                self.cuts[l][ci].items.push(it);
-                dirty.insert((l, ci));
-            }
-            for (l, f, h) in part.jends {
+        for part in &added {
+            for &(l, f, h) in &part.jends {
                 self.jhalf[l].entry(f).or_default().push((w, part.src, h));
-                dirty.extend(self.junction_cuts(l, f));
+                jdirty.extend(self.junction_cuts(l, f));
             }
         }
-        for (l, ci) in dirty {
-            self.reprice(l, ci);
+        jdirty.sort_unstable();
+        jdirty.dedup();
+        // The cuts the removed parts leave (each part's items come by ascending cut, so the
+        // stable sort merges presorted runs).
+        let mut rems: Vec<(usize, usize)> = removed.iter().flat_map(|p| p.items.iter().map(|x| (x.0, x.1))).collect();
+        rems.sort();
+        rems.dedup();
+        // Added items by cut, in the order they are pushed (part, then item).
+        let mut adds: Vec<(usize, usize, Itm)> = added.iter().flat_map(|p| p.items.iter().copied()).collect();
+        adds.sort_by_key(|x| (x.0, x.1));
+        let mut scratch = std::mem::take(&mut self.scratch);
+        let (mut ri, mut ai, mut ji) = (0usize, 0usize, 0usize);
+        loop {
+            // The next touched cut: the least of the three sorted lists' heads.
+            let next = [rems.get(ri).copied(), adds.get(ai).map(|x| (x.0, x.1)), jdirty.get(ji).copied()].into_iter().flatten().min();
+            let Some((l, ci)) = next else { break };
+            let rem = rems.get(ri) == Some(&(l, ci));
+            if rem {
+                ri += 1;
+            }
+            let jd = jdirty.get(ji) == Some(&(l, ci));
+            if jd {
+                ji += 1;
+            }
+            let a0 = ai;
+            while adds.get(ai).is_some_and(|x| (x.0, x.1) == (l, ci)) {
+                ai += 1;
+            }
+            let add = &adds[a0..ai];
+            if !rem && add.is_empty() {
+                self.reprice(l, ci);
+                continue;
+            }
+            let cs = &mut self.cuts[l][ci];
+            // Fast path: one item of the wire replaced by one that stays in its place (strictly
+            // between its neighbours, so the stable sort of the general path puts it there too).
+            if rem && add.len() == 1 && cs.live {
+                let mut mine = cs.items.iter().enumerate().filter(|(_, x)| x.wire == w && gone.contains(&x.src)).map(|(i, _)| i);
+                if let (Some(p), None) = (mine.next(), mine.next()) {
+                    let n = add[0].2;
+                    let lt = |a: &Itm, b: &Itm| item_order(a, b) == std::cmp::Ordering::Less;
+                    if (p == 0 || lt(&cs.items[p - 1], &n)) && (p + 1 == cs.items.len() || lt(&n, &cs.items[p + 1])) {
+                        let same = !jd && same_keys(std::slice::from_ref(&cs.items[p]), std::slice::from_ref(&n));
+                        cs.items[p] = n;
+                        if same {
+                            self.skipped += 1;
+                        } else {
+                            self.reprice(l, ci);
+                        }
+                        continue;
+                    }
+                }
+            }
+            scratch.clear();
+            if rem {
+                scratch.extend(cs.items.iter().copied().filter(|x| !(x.wire == w && gone.contains(&x.src))));
+            } else {
+                scratch.extend_from_slice(&cs.items);
+            }
+            scratch.extend(add.iter().map(|x| x.2));
+            scratch.sort_by(item_order);
+            let same = cs.live && !jd && same_keys(&scratch, &cs.items);
+            std::mem::swap(&mut cs.items, &mut scratch);
+            if same {
+                self.skipped += 1;
+            } else {
+                self.reprice(l, ci);
+            }
         }
+        self.scratch = scratch;
+        super::refine::meter::CUTS_PRICED.fetch_add(std::mem::take(&mut self.priced), std::sync::atomic::Ordering::Relaxed);
         self.total - t0
     }
 
@@ -815,7 +1012,7 @@ impl<'a> CutPrice<'a> {
             run.band = b;
             run.wraps = wr;
         }
-        let (items, jends) = run_items(sh, &self.jf[l], std::slice::from_ref(run), via_r);
+        let (items, jends) = run_items_with(sh, &self.jf[l], std::slice::from_ref(run), via_r, &mut self.seg, &mut self.flow);
         part.items = items.into_iter().map(|(ci, mut it)| {
             it.src = src;
             (l, ci, it)
@@ -837,7 +1034,7 @@ impl<'a> CutPrice<'a> {
         let sheets = self.sheets.clone();
         for (l, sh) in sheets.iter().enumerate() {
             for (ci, t, wv) in via_hits(sh, v, &mut self.buf) {
-                part.items.push((l, ci, Itm { wire: v.wire, t, kind: 3, it: Item { net: v.net, w: wv, s: v.s }, floor: wv, k: v.k, src }));
+                part.items.push((l, ci, Itm { wire: v.wire, t, kind: 3, it: Item { net: v.net, w: wv, s: v.s }, floor: wv, nom: wv, k: v.k, src }));
             }
         }
         part
@@ -863,7 +1060,7 @@ impl<'a> CutPrice<'a> {
             self.next_src += 1;
             let part = self.run_part(run, via_r, src);
             self.parts.0 += 1;
-            ws.runs.push((key, part));
+            ws.runs.push(Rc::new((key, part)));
         }
         for v in vias {
             let key = ViaKey { at: v.at, r: v.r, s: v.s, net: v.net, k: v.k };
@@ -876,7 +1073,7 @@ impl<'a> CutPrice<'a> {
             self.next_src += 1;
             let part = self.via_part(v, src);
             self.parts.0 += 1;
-            ws.vias.push((key, part));
+            ws.vias.push(Rc::new((key, part)));
         }
         let t0 = std::time::Instant::now();
         let d = self.install(w, ws);
@@ -891,7 +1088,12 @@ impl<'a> CutPrice<'a> {
 
     /// Open a move: every later change can be undone by [`CutPrice::rollback`].
     pub fn begin(&mut self) {
-        self.txn = Some(Txn { total: self.total, over: self.over, ..Txn::default() });
+        self.txn_id = self.txn_id.wrapping_add(1).max(1);
+        if self.txn_id == 1 {
+            // Ids wrapped (or the first move): no cut may carry a stale id.
+            self.cuts.iter_mut().flatten().for_each(|c| c.txn = 0);
+        }
+        self.txn = Some(Txn { total: self.total, over: self.over, id: self.txn_id, ..Txn::default() });
     }
 
     /// Keep the changes since [`CutPrice::begin`].
@@ -915,7 +1117,7 @@ impl<'a> CutPrice<'a> {
     /// before (the strict test of the P4 label moves).
     pub fn worse_somewhere(&self) -> bool {
         let Some(t) = self.txn.as_ref() else { return false };
-        t.slack.iter().any(|(&(l, ci), &s0)| {
+        t.slack.iter().any(|&(l, ci, s0)| {
             let c = &self.cuts[l][ci];
             !c.items.is_empty() && c.slack < -OVER_TOL && c.slack < s0 - 1.0
         })
@@ -934,7 +1136,9 @@ impl<'a> CutPrice<'a> {
     /// The graded amount of the over-full cuts (the TopoR loop's predicted violations, shopping
     /// list 5.2): every cut [`CutPrice::overfull`] counts gives 1 plus how far it is over, in
     /// pitches of its items (`-slack / pitch`, the `u` of [`phi`]): the `violation` factor's own
-    /// amount, 1 per violation plus its depth. At least [`CutPrice::overfull`]. O(cuts).
+    /// amount, 1 per violation plus its depth. At least [`CutPrice::overfull`]. The slack is the
+    /// one beyond the neck floors (2.4): a cut that fits necked is a shrinkage, no violation.
+    /// O(cuts).
     pub fn over_amount(&self) -> f64 {
         let mut a = 0.0;
         for cs in &self.cuts {
@@ -943,6 +1147,47 @@ impl<'a> CutPrice<'a> {
             }
         }
         a
+    }
+
+    /// Shopping list 2.4, the shrinkage level of the price: the cuts that fit only necked (or not
+    /// even at the floors: their whole necking), `(count, sum of red / pitch, price)` with `red`
+    /// the width reduction below the nominal widths ([`shrink_need`]) and the price `shrink_mm x
+    /// red / pitch` per cut (part of [`CutPrice::total`]). O(cuts).
+    pub fn shrinkage(&self) -> (usize, f64, f64) {
+        let (mut n, mut a) = (0usize, 0.0);
+        for cs in &self.cuts {
+            for c in cs.iter().filter(|c| c.live && !c.items.is_empty() && c.red > 0.0) {
+                n += usize::from(c.red > OVER_TOL);
+                a += c.red / c.pitch.max(1.0);
+            }
+        }
+        (n, a, self.o.shrink_mm * a)
+    }
+
+    /// The cut-level necks (2.4): for every cut that needs a width reduction `red` below its
+    /// nominal need `N` (its floor need `F`), every neckable run item of it narrowed by the same
+    /// share `alpha = red / (N - F)` of its own range, `w = nom - alpha (nom - floor)`: the widest
+    /// common share that fits (need is linear in the widths except the own-net end run's maximum,
+    /// which is convex, so the need at these widths is at most `cap`; Dayan 1997 pp. 15-16: a cut
+    /// holds the widths of the wires that cross it). Beyond the floors `alpha = 1` (the floor;
+    /// the rest is the violation). `(wire, traversal, width)`, sorted, one per item. O(items of
+    /// the shrinking cuts).
+    pub fn necks(&self) -> Vec<(WireId, usize, f64)> {
+        let mut out = Vec::new();
+        for cs in &self.cuts {
+            for c in cs.iter().filter(|c| c.live && !c.items.is_empty() && c.red > 0.0) {
+                let span = c.need - c.need_floor;
+                if span <= 0.0 {
+                    continue;
+                }
+                let alpha = (c.red / span).clamp(0.0, 1.0);
+                for x in c.items.iter().filter(|x| x.kind != 3 && x.floor < x.nom) {
+                    out.push((x.wire, x.k, x.nom - alpha * (x.nom - x.floor)));
+                }
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.total_cmp(&b.2)));
+        out
     }
 
     /// The over-full cuts `(layer, cut, slack)`, most over-full first, ties by layer and cut.
@@ -981,8 +1226,13 @@ impl<'a> CutPrice<'a> {
             let cut = &self.sheets[l].cuts[ci];
             self.pr.regime_at((cut.p + cut.q) * 0.5)
         });
-        let (cap, n) = evaluate(&self.sheets[l], ci, &mut items, regime, &half, &self.o);
-        cap - n.need >= -OVER_TOL
+        let (cap, _, floor) = evaluate_need(&self.sheets[l], ci, &mut items, regime, &half, &self.o);
+        cap - floor >= -OVER_TOL
+    }
+
+    /// The items of cut `ci` on layer `l` as last installed (sorted along the cut).
+    pub fn cut_items(&self, l: usize, ci: usize) -> &[Itm] {
+        &self.cuts[l][ci].items
     }
 
     /// The (wire, traversal) of every item of cut `ci` on layer `l` (vias and runs).
@@ -1000,14 +1250,14 @@ impl<'a> CutPrice<'a> {
                 let mut ws: Vec<WireId> = c.items.iter().map(|x| x.wire).collect();
                 ws.sort_unstable();
                 ws.dedup();
-                v.push(CutRow { layer: l, p: cut.p, q: cut.q, cap: c.cap, need: c.need, slack: c.slack, wires: ws });
+                v.push(CutRow { layer: l, p: cut.p, q: cut.q, cap: c.cap, need: c.need, need_floor: c.need_floor, slack: c.slack, shrink: c.red, wires: ws });
             }
         }
         v.sort_by(|a, b| a.slack.total_cmp(&b.slack).then(a.layer.cmp(&b.layer)));
         v
     }
 
-    /// Capacity, need and slack of a cut (nm).
+    /// Capacity, nominal need and slack (beyond the floors) of a cut (nm).
     pub fn cut_state(&self, l: usize, ci: usize) -> (f64, f64, f64) {
         let c = &self.cuts[l][ci];
         (c.cap, c.need, c.slack)

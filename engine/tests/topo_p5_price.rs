@@ -245,7 +245,7 @@ fn a_reroute_pays_exactly_the_archives_violation_measure_and_gains_it_back() {
     assert!(!through_door(&st, w3), "net 3 goes round: {:?}", st.polyline(w3));
     let lr0 = layers::assign_with(&st, &smd, &LayerParams { cap_mm: 50.0, ..LayerParams::default() }, Some(&packer));
     let p0 = measure(&st, &packer, &lr0);
-    assert_eq!(p0, Predicted { count: 0, graded: 0.0 }, "two tracks on the bottom layer fit the door: no violation");
+    assert_eq!(p0, Predicted { count: 0, graded: 0.0, ..Predicted::default() }, "two tracks on the bottom layer fit the door: no violation");
 
     // The reroute through the door: 8 mm shorter, but the door is then over-full on one layer.
     let mut r = Measured { conns: &conns, reg: reg.clone(), avoid_door: false, packer: &packer, smd: &smd, viol_mm, viol_old: p0.price(viol_mm), pending: None, last: None };
@@ -287,7 +287,7 @@ fn a_reroute_pays_exactly_the_archives_violation_measure_and_gains_it_back() {
 #[test]
 fn the_archive_criteria_and_the_move_price_are_one_measure() {
     let p = Predicted::of((2, 2.5), 1, 1);
-    assert_eq!(p, Predicted { count: 4, graded: 4.5 });
+    assert_eq!(p, Predicted { count: 4, graded: 4.5, ..Predicted::default() });
     assert_eq!(p.price(1000.0), 4500.0);
     assert_eq!(p.penalty(1000.0), 500.0);
     let c = criteria_of(p, 1000.0, 3, 100.0, 1, 0.0);

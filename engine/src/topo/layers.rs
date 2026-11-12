@@ -616,7 +616,11 @@ fn stretches_and_vias(st: &State, polys: &[Vec<Vec2>], evl: &[Vec<(usize, f64, i
             rep.vias += 1;
             rep.via_pts.push(at(pts, km, sm));
             rep.slots.push(ViaSlot { wire: w, from: (ka, sa), to: (kb, sb), at: (km, sm) });
-            if !has || !site(r.0, r.1, w) {
+            // 5.2: without a traversal strictly between its events the via may still stand on
+            // its own side of an end event ([`super::refine::end_site`]).
+            let free = |t: TriId, q: Vec2| pr.inradius(t) >= p.via_site_r && pr.free_radius(q, wi.net) >= p.via_site_r;
+            let site_ok = if has { site(r.0, r.1, w) } else { super::refine::end_site(st, w, x[0], x[1], &free).is_some() };
+            if !site_ok {
                 rep.vias_no_site += 1;
             }
         }
