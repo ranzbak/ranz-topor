@@ -1737,7 +1737,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // ---- P3 ----
     let lp = LayerParams {
         via_mm: reg.price(&Event::Via { wire: 0, count: 1, at: None }, &WireCtx::default()),
-        via_site_r: 0.5 * crate::vias::plan_via_d(&model.rules, opts) + model.rules.default.clearance as f64,
+        via_site_r: crate::vias::plan_via_need(&model.rules, opts),
         n_signal: b.n_signal,
         plane_mm: reg.price(&Event::PlaneLength { wire: 0, layer: b.n_signal, mm: 1.0 }, &WireCtx::default()),
         plane_cut: reg.price(&Event::PlaneCut { wire: 0, layer: b.n_signal }, &WireCtx::default()),
@@ -1798,7 +1798,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let obj = Objective::from_options(&opts.objective, opts.mm_per_via, &opts.pick);
     let overflow_mm = reg.price(&Event::Overflow { wire: 0, edge: 0 }, &WireCtx::default()).max(1e-6);
     let via_area_mm = {
-        let r = 0.5 * crate::vias::plan_via_d(&model.rules, opts) + model.rules.default.clearance as f64;
+        let r = crate::vias::plan_via_need(&model.rules, opts);
         std::f64::consts::PI * r * r * b.signal_layers.len().max(1) as f64 / ws0 / MM
     };
     // `[capacity] model = "cuts"` (shopping list 3.2): P4 is priced by the per-layer cuts: the
@@ -4261,6 +4261,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             dr.stats.partners_moved,
             dr.stats.pulled
         ));
+        if dr.stats.partners_unfixed > 0 {
+            warnings.push(format!(
+                "vias: {} crossing partner(s) of a placed via could not be led past it on the planned side (neither the packed nor the plan's taut crossing keeps them there; P6 a, Polubasov 2001 p. 4): they may cross the via wire on their own layer; the drawing's checker decides, any violation is reported with its connection",
+                dr.stats.partners_unfixed
+            ));
+        }
     }
     if let Ok(path) = std::env::var("TOPO_DIAG") {
         let rows: Vec<String> = diag

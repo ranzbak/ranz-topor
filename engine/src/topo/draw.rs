@@ -388,13 +388,9 @@ fn kicad_pt(p: Vec2) -> IVec2 {
 /// ([`crate::model::Rules::via_hole_clear`]) reaches further (`drill / 2 + hole clearance >
 /// d / 2 + clearance`, e.g. a 0.4 / 0.3 mm via with 0.2 mm clearance and 0.254 mm hole
 /// clearance). Both are discs about the via centre.
+/// The same rule as the plan's ([`crate::vias::via_need_copper`], 5.4 task 1: one function).
 pub fn via_clear(model: &BoardModel, net: i32, d: i64, drill: i64) -> f64 {
-    let r = &model.rules;
-    let copper = r.net_rule(net).clearance as f64;
-    if drill <= 0 {
-        return copper;
-    }
-    copper.max(0.5 * drill as f64 + r.via_hole_clear() as f64 - 0.5 * d as f64)
+    crate::vias::via_need_copper(&model.rules, net, ViaSize { d, drill }, 0.0, 0.0) - 0.5 * d as f64
 }
 
 pub fn track_item(net: i32, layer: u32, w: f64, a: Vec2, b: Vec2, wire: Option<usize>) -> Item {
@@ -497,6 +493,9 @@ pub struct DrawStats {
     pub via_forced: usize,
     /// P6 (a): crossing partners whose nominal chord was moved to follow a via ([`Drawer::follow_vias`]).
     pub partners_moved: usize,
+    /// P6 (a): crossing partners neither their packed nor their taut crossing keeps on a placed
+    /// via's planned side ([`Drawer::follow_vias`]).
+    pub partners_unfixed: usize,
     /// P6 (c): vertices the taut pull removed from drawn runs ([`Drawer::pull_taut`]).
     pub pulled: usize,
 }
@@ -604,6 +603,19 @@ impl Viol {
     pub fn amount(&self) -> f64 {
         super::factors::violation_amount(self.depth_nm, self.len_nm)
     }
+}
+
+/// The severity key of a forced run's violations: `(short amount, total amount)`. A short
+/// (copper overlap, KiCad's `shorting_items`; Cleanup removes the track) is no graded judgement
+/// call: a run with less short amount wins whatever its clearance amount, and a change that adds
+/// or deepens a short is never taken (KiCad tools are the spec).
+pub fn viol_key(vs: &[Viol]) -> (f64, f64) {
+    (vs.iter().filter(|v| v.kind == "short").map(Viol::amount).sum(), vs.iter().map(Viol::amount).sum())
+}
+
+/// `a` is no worse than `b` on [`viol_key`]: no more short amount, and no more total amount.
+fn key_le(a: (f64, f64), b: (f64, f64)) -> bool {
+    a.0 <= b.0 + 1e-9 && a.1 <= b.1 + 1e-9
 }
 
 pub struct Drawer<'a> {
@@ -1527,7 +1539,7 @@ impl<'a> Drawer<'a> {
                 }
             }
             'sizes: for &sz in &sizes {
-                let need_r = crate::vias::via_need_copper(&self.model.rules, net, sz, 0.0, 0.0);
+                let need_r = crate::vias::via_need_copper(&self.model.rules, net, sz, 0.0, self.opts.margin_nm.max(0) as f64);
                 let at = plan.at.get(i).copied().filter(|&k| (ka..=kb.max(ka)).contains(&k));
                 let mut sites = at.map_or(Vec::new(), |k| self.chord_sites(w, k));
                 if let Some(k) = at {
@@ -1749,7 +1761,7 @@ impl<'a> Drawer<'a> {
         let turn_at = |k: usize| wi.turns.iter().find(|x| x.0 == k).map(|x| pr.pos[x.1]);
         let mut best: Option<(f64, f64, usize, Vec2, ViaSize, Vec<Viol>)> = None;
         for &sz in sizes {
-            let need_r = crate::vias::via_need_copper(&self.model.rules, net, sz, 0.0, 0.0);
+            let need_r = crate::vias::via_need_copper(&self.model.rules, net, sz, 0.0, self.opts.margin_nm.max(0) as f64);
             let at = plan.at.get(i).copied().filter(|&k| (ka..=kb).contains(&k));
             let mut sites = at.map_or(Vec::new(), |k| self.chord_sites(w, k));
             sites.extend(self.via_candidates(w, ka, kb, need_r, at));
@@ -1849,6 +1861,13 @@ impl<'a> Drawer<'a> {
                 let ends = [(ok.checked_sub(1), taut[0]), ((ok < n).then_some(ok), *taut.last().expect("chord"))];
                 let fr: Vec<(PassId, f64)> = ends.iter().filter_map(|&(j, x)| j.map(|j| (oi.passes[j], self.edge_frac(oi.passes[j], x)))).collect();
                 if fr.is_empty() || !self.partner_side_ok(w, k, p, la, lb, o, ok, Some(&fr)) {
+                    // Neither the packed nor the taut crossing keeps this partner on the via's
+                    // planned side: it may cross the via wire's part on its own layer (counted and
+                    // reported; the drawing's checker then decides).
+                    self.stats.partners_unfixed += 1;
+                    if std::env::var("TOPO_VIAREL").is_ok() {
+                        eprintln!("FOLLOW wire {o} trav {ok} cannot follow via of wire {w} at ({:.3},{:.3})", p.x / 1e6, -p.y / 1e6);
+                    }
                     continue;
                 }
                 for &(pid, f) in &fr {
@@ -2726,7 +2745,12 @@ impl<'a> Drawer<'a> {
                         eprintln!("FORCED wire {w} layer {layer} k {k0}..{k1}: {} price {:.1}, {} pts, viols {:?}", c.5, c.0, c.1.len(), c.3.iter().map(|v| (v.kind, v.against.clone(), (v.depth_nm / 1e3).round(), (v.len_nm / 1e3).round())).collect::<Vec<_>>());
                     }
                 }
-                if let Some((price, pts, items, vs, neck, src)) = cands.into_iter().min_by(|a, b| a.0.total_cmp(&b.0)) {
+                // Shorts first, then the total violation price (a funnel run through a via must
+                // not beat a relaxed run that only grazes clearances).
+                if let Some((price, pts, items, vs, neck, src)) = cands.into_iter().min_by(|a, b| {
+                    let (ka, kb) = (viol_key(&a.3), viol_key(&b.3));
+                    ka.0.total_cmp(&kb.0).then(ka.1.total_cmp(&kb.1)).then(a.0.total_cmp(&b.0))
+                }) {
                     // M-45: the forced run octilinear too, where that breaks no rule deeper than
                     // the run itself and costs no more violation price.
                     let (mut pts, mut items, mut vs) = (pts, items, vs);
@@ -2743,7 +2767,7 @@ impl<'a> Drawer<'a> {
                             let rep = self.checker.check_against(&self.idx, &its, &[]);
                             let mut v2 = self.viols_of(&its, &rep);
                             v2.extend(self.graze_viols(w, &its));
-                            if v2.iter().map(Viol::amount).sum::<f64>() <= price + 1e-9 {
+                            if v2.iter().map(Viol::amount).sum::<f64>() <= price + 1e-9 && key_le(viol_key(&v2), viol_key(&vs)) {
                                 pts = o.pts;
                                 items = its;
                                 vs = v2;
@@ -2761,16 +2785,17 @@ impl<'a> Drawer<'a> {
                     }
                     // P6 (c): the forced run pulled taut too, where its violation price does not rise.
                     if self.opts.draw_pull_taut && neck.is_none() && pneck.is_none() {
-                        let price: f64 = vs.iter().map(Viol::amount).sum();
-                        if let Some(p2) = self.pull_pts(w, k0, k1, layer, &pts, Some(price)) {
+                        if let Some(p2) = self.pull_pts(w, k0, k1, layer, &pts, Some(viol_key(&vs))) {
                             let its = self.run_items(w, layer, &p2);
                             let rep = self.checker.check_against(&self.idx, &its, &[]);
                             let mut v2 = self.viols_of(&its, &rep);
                             v2.extend(self.graze_viols(w, &its));
-                            self.stats.pulled += pts.len() - p2.len();
-                            pts = p2;
-                            items = its;
-                            vs = v2;
+                            if key_le(viol_key(&v2), viol_key(&vs)) {
+                                self.stats.pulled += pts.len() - p2.len();
+                                pts = p2;
+                                items = its;
+                                vs = v2;
+                            }
                         }
                     }
                     match src {
@@ -2898,7 +2923,7 @@ impl<'a> Drawer<'a> {
     /// The vertex removal of [`Drawer::pull_taut`]; with `forced = Some(price)` (a run drawn by
     /// force, never drop) a leg is taken when the whole run's violation price stays at most
     /// `price` (then lowered to the new one) instead of when the leg is legal.
-    fn pull_pts(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], mut forced: Option<f64>) -> Option<Vec<Vec2>> {
+    fn pull_pts(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], mut forced: Option<(f64, f64)>) -> Option<Vec<Vec2>> {
         if pts.len() < 3 {
             return None;
         }
@@ -2925,6 +2950,47 @@ impl<'a> Drawer<'a> {
             }
         }
         let cross = |poly: &[Vec2], g: &(Vec2, Vec2)| poly.windows(2).filter(|x| seg_proper(x[0], x[1], g.0, g.1)).count() % 2;
+        // The planned room of those wires (reserve planned room): a shortcut that reaches deeper
+        // into the corridor of an undrawn wire's planned path (its taut and packed chords, half
+        // its width plus the clearance either side) than the two legs it replaces is not taken.
+        // Priced like `planned_room` (`pitch x (x + x^2)`, `x = depth / pitch`), compared, no wall.
+        let mut corr: Vec<(Vec<Vec2>, f64, f64)> = Vec::new();
+        let (ka, kb) = (k0.saturating_sub(1), (k1 + 1).min(wi.tris.len().saturating_sub(1)));
+        for k in ka..=kb {
+            for &(o, ok) in &st.tri_trav[wi.tris[k]] {
+                let oi = &st.wires[o];
+                if o == w || !oi.alive || oi.net == wi.net || self.drawn_once[o] || self.polys[o].is_empty() {
+                    continue;
+                }
+                let (a, b) = (if ok > 0 { lay(o, ok - 1) } else { -2 }, lay(o, ok));
+                if !(a == layer as i32 || b == layer as i32) {
+                    continue;
+                }
+                let s = oi.s.max(wi.s);
+                let reach = 0.5 * wi.w + s + 0.5 * oi.w;
+                let pitch = (oi.w + s).max(1.0);
+                let mut nom = vec![self.chord_pt(o, ok)];
+                nom.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| pr.pos[x.1]));
+                nom.push(self.chord_pt(o, ok + 1));
+                corr.push((nom, reach, pitch));
+                let taut = self.taut_chord(o, ok);
+                if taut.len() >= 2 {
+                    corr.push((taut, reach, pitch));
+                }
+            }
+        }
+        let room_price = |legs: &[Vec2]| -> f64 {
+            let mut tot = 0.0;
+            for (c, reach, pitch) in &corr {
+                let d = legs.windows(2).flat_map(|l| c.windows(2).map(move |x| seg_seg_dist(l[0], l[1], x[0], x[1]))).fold(f64::INFINITY, f64::min);
+                let depth = reach - d;
+                if depth > 0.0 {
+                    let x = depth / pitch;
+                    tot += pitch * (x + x * x);
+                }
+            }
+            tot
+        };
         let octi = self.octi.on;
         let mut cur = pts.to_vec();
         let mut changed = false;
@@ -2934,7 +3000,7 @@ impl<'a> Drawer<'a> {
             while i + 1 < cur.len() {
                 let (a, b, c) = (cur[i - 1], cur[i], cur[i + 1]);
                 let keep_octi = octi && super::octi::octi_dir(c - a).is_none() && super::octi::octi_dir(b - a).is_some() && super::octi::octi_dir(c - b).is_some();
-                if keep_octi || (c - a).len2() < 1.0 || guards.iter().any(|g| cross(&[a, b, c], g) != cross(&[a, c], g)) {
+                if keep_octi || (c - a).len2() < 1.0 || guards.iter().any(|g| cross(&[a, b, c], g) != cross(&[a, c], g)) || room_price(&[a, c]) > room_price(&[a, b, c]) + 1.0 {
                     i += 1;
                     continue;
                 }
@@ -2947,9 +3013,9 @@ impl<'a> Drawer<'a> {
                         let rep = self.checker.check_against(&self.idx, &its, &[]);
                         let mut vs = self.viols_of(&its, &rep);
                         vs.extend(self.graze_viols(w, &its));
-                        let p2: f64 = vs.iter().map(Viol::amount).sum();
-                        if p2 <= price + 1e-9 {
-                            forced = Some(p2);
+                        let k2 = viol_key(&vs);
+                        if key_le(k2, price) {
+                            forced = Some(k2);
                             true
                         } else {
                             false

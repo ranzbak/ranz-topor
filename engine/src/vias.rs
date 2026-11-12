@@ -43,6 +43,13 @@ pub fn plan_via_d(rules: &Rules, opts: &Options) -> f64 {
     2.0 * via_reach(rules, 0, sz)
 }
 
+/// Centre distance (nm) the plan's board-level via ([`plan_via_d`]) needs to foreign copper:
+/// [`via_need_copper`] of the default net, `[search] margin_um` included (the projection's via
+/// site radius, the via area of the cut price). O(1).
+pub fn plan_via_need(rules: &Rules, opts: &Options) -> f64 {
+    0.5 * plan_via_d(rules, opts) + net_clear(rules, 0) + opts.margin_nm.max(0) as f64
+}
+
 // ---- The room a via needs (shopping list 5.4, task 1): one rule for the plan and the drawing ----
 //
 // KiCad checks a through via against foreign copper twice (Board Setup -> Constraints): its
