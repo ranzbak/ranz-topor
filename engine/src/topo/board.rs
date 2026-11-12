@@ -70,7 +70,7 @@ pub enum Extra {
     /// gets a centre vertex (a terminal like a pad) but is no copper: the wire's track end in the
     /// fill joins the pour when KiCad refills it.
     Terminal { net: i32, at: Vec2, layers: Vec<u32>, size: f64 },
-    /// Shopping list 5.10 (`[search] exit_stubs`): the planned exit of a connection from the pad
+    /// Shopping list 5.10 (`[search] pad_exit_stubs`): the planned exit of a connection from the pad
     /// `pad` (index into `BoardModel::pads`) towards the point `toward` (its other terminal), for
     /// a wire of width `w` and clearance `s` (nm). The build turns it into an exit stub
     /// ([`exit_stub`]): the rectangle the wire's copper takes from the pad's tip along the pad's
@@ -373,16 +373,21 @@ fn exit_stub(obstacles: &[Obstacle], src: &[Src], oi: usize, toward: Vec2, w: f6
         let (a, b) = bb(poly);
         !(a.x > hi.x + d || b.x < lo.x - d || a.y > hi.y + d || b.y < lo.y - d)
     };
-    // Fine pitch: another net's copper beside the pad, on the long side facing the target,
-    // closer than the wire could pass. A pad whose side towards the target is free (the end pin
-    // of a row) needs no planned exit: its wire may leave through that side (fanout_inner_beyond
-    // U1.5: the stub on its tip took the room of U1.6's wire, which the wire of U1.5, leaving
-    // through the free side at 45 degrees, never needed).
+    // Fine pitch: another net's copper beside the pad closer than the wire could pass. Where the
+    // straight line to the target leaves the pad decides which: through a tip zone (the last
+    // `lv / 2` of the pad's length, its rounded ends) a neighbour on either side, through a long
+    // side only one on that side. A pad whose side towards the target is free (the end pin of a
+    // row) needs no planned exit: its wire may leave through that side (fanout_inner_beyond U1.5:
+    // the stub on its tip took the room of U1.6's wire, which the wire of U1.5, leaving through the
+    // free side at 45 degrees, never needed).
     let v = u0.perp();
-    let side = if (toward - c).dot(v) >= 0.0 { 1.0 } else { -1.0 };
+    let (du, dv) = ((toward - c).dot(u0), (toward - c).dot(v));
+    let tx = (0.5 * lu / du.abs().max(1e-9)).min(0.5 * lv / dv.abs().max(1e-9));
+    let tip_zone = (du * tx).abs() >= 0.5 * (lu - lv) - 1.0;
+    let side = if dv >= 0.0 { 1.0 } else { -1.0 };
     let (plo, phi) = bb(&ob.poly);
     let fine = obstacles.iter().enumerate().any(|(j, o)| {
-        if j == oi || o.net == Some(net) || !on(o) || keepout(j) || side * (o.center - c).dot(v) <= 0.5 * lv {
+        if j == oi || o.net == Some(net) || !on(o) || keepout(j) || (!tip_zone && side * (o.center - c).dot(v) <= 0.5 * lv) {
             return false;
         }
         let gap = ws + 2.0 * need(j, o);

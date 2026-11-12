@@ -1210,15 +1210,15 @@ impl Fixed {
             Err(format!("{} signal layer(s)", signal.len()))
         } else {
             let pm: &BoardModel = alias.as_ref().unwrap_or(model);
-            // 5.10 (`[search] exit_stubs`): the planned pad exits join the fixed items.
+            // 5.10 (`[search] pad_exit_stubs`): the planned pad exits join the fixed items.
             let mut extra = stubs.extra.clone();
-            if opts.exit_stubs {
+            if opts.pad_exit_stubs {
                 extra.extend(exit_requests(pm, &dec));
             }
             board::build_full(pm, &build_opts(opts), &[], &extra).map(|mut b| {
                 if !b.exit_stubs.is_empty() {
                     notes.push(format!(
-                        "pad exits ([search] exit_stubs): {} planned exit stubs (fine-pitch pads left through their tip along the pad axis, fixed before the topology)",
+                        "pad exits ([search] pad_exit_stubs): {} planned exit stubs (fine-pitch pads left through their tip along the pad axis, fixed before the topology)",
                         b.exit_stubs.len()
                     ));
                 }
