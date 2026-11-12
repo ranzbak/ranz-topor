@@ -250,7 +250,7 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
     let mut meter = Meter::new(p.stable_window, p.stable_gain_pct);
     let score = |a: &Archive<Gen<S::Var>>| -> Option<(Score, f64)> {
         let c = a.items[a.pick(&obj)?].crit;
-        Some((Score { incomplete: c.errors, value: obj.value(&c), scale: obj.base(&c) }, obj.value(&c)))
+        Some((Score { incomplete: c.errors, shorts: c.shorts, value: obj.value(&c), scale: obj.base(&c) }, obj.value(&c)))
     };
     let offer = |sp: &mut S, arch: &mut Archive<Gen<S::Var>>, label: String, gen: usize, cycle: usize, rep: &mut LoopReport| -> bool {
         let crit = sp.criteria();
@@ -347,6 +347,10 @@ pub struct Predicted {
     /// 0 for the per-edge model.
     pub shrink_n: usize,
     pub shrink_mm: f64,
+    /// Of `count`: the predicted shorts, crossings no layer separates and traversals through
+    /// foreign copper (both a short when drawn: KiCad `shorting_items` / `tracks_crossing`); the
+    /// archive's [`Criteria::shorts`] of a plan. 0 with `[optimize] pick_shorts` off.
+    pub shorts: usize,
 }
 
 impl Predicted {
@@ -354,11 +358,16 @@ impl Predicted {
     /// connections. O(1).
     pub fn of(cap: (usize, f64), unlayerable: usize, forced: usize) -> Predicted {
         let n = unlayerable + forced;
-        Predicted { count: cap.0 + n, graded: cap.1 + n as f64, shrink_n: 0, shrink_mm: 0.0 }
+        Predicted { count: cap.0 + n, graded: cap.1 + n as f64, shrink_n: 0, shrink_mm: 0.0, shorts: unlayerable }
     }
     /// Plus the traversals through foreign copper `(count, graded)` ([`foreign_copper`]). O(1).
     pub fn with_foreign(self, f: (usize, f64)) -> Predicted {
-        Predicted { count: self.count + f.0, graded: self.graded + f.1, ..self }
+        Predicted { count: self.count + f.0, graded: self.graded + f.1, shorts: self.shorts + f.0, ..self }
+    }
+    /// The same prediction with the shorts not ranked (`[optimize] pick_shorts` off: they stay
+    /// in `count` and `graded`, as before 2026-11-12). O(1).
+    pub fn shorts_ranked(self, on: bool) -> Predicted {
+        Predicted { shorts: if on { self.shorts } else { 0 }, ..self }
     }
     /// With the cut model's shrinkages `(stretches added, price mm)` (2.4). O(1).
     pub fn with_shrink(self, n: usize, mm: f64) -> Predicted {
@@ -437,9 +446,10 @@ pub fn foreign_copper(st: &State, layers: &[Vec<u64>]) -> (usize, f64) {
 }
 
 /// The loop's criteria of one topology (what the archive keeps): errors = violations = the
-/// predicted count, penalty = its graded part ([`Predicted::penalty`]). O(1).
+/// predicted count, shorts = the predicted shorts among them, penalty = its graded part
+/// ([`Predicted::penalty`]). O(1).
 pub fn criteria_of(p: Predicted, viol_mm: f64, vias: usize, length_mm: f64, shrinkages: usize, area_mm2: f64) -> Criteria {
-    Criteria { errors: p.count, open: 0, violations: p.count, penalty: p.penalty(viol_mm), vias, length_mm, shrinkages, warnings: 0, area_mm2 }
+    Criteria { errors: p.count, shorts: p.shorts, open: 0, violations: p.count, penalty: p.penalty(viol_mm), vias, length_mm, shrinkages, warnings: 0, area_mm2 }
 }
 
 /// The evaluation of a whole topology that every whole-board loop move (layer re-optimisation,

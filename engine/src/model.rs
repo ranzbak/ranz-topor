@@ -1044,6 +1044,13 @@ pub struct Options {
     /// then shrinkages; the order before 2026-11-10). Only the final pick: the archive's Pareto
     /// membership and the internal search prices do not change. `objective = "area"` ignores it.
     pub pick: String,
+    /// Topological core (`topor.toml [optimize] pick_shorts`, user 2026-11-12 "shorts should be
+    /// in the routing criteria"): connections with a short (copper over another net's copper:
+    /// KiCad `shorting_items` / `tracks_crossing`) are a criterion right after the errors, before
+    /// the open connections, in every pick (the archive pick, the seeded runs' pick, the TopoR
+    /// loop's plan pick with the predicted shorts) and in the P4 round score (per-edge capacity
+    /// model). Default true; false = the order before 2026-11-12.
+    pub pick_shorts: bool,
     /// Topological core (S3, `topor.toml [optimize] variants`): most result variants the archive
     /// keeps besides the champions (fewest errors, shortest, fewest vias, fewest shrinkages,
     /// fewest warnings).
@@ -1327,6 +1334,7 @@ impl Default for Options {
             objective: "length_vias".into(),
             mm_per_via: 25.0,
             pick: "errors_vias_length".into(),
+            pick_shorts: true,
             variants: 8,
             moves: false,
             max_moves: 400,

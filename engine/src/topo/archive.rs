@@ -10,7 +10,9 @@
 //!   are a column, not a fifth dimension). When the archive is over its cap the variant worst by
 //!   the objective goes first; the champions (fewest errors, shortest, fewest vias, fewest
 //!   shrinkages, fewest warnings) are never pruned.
-//! * The pick: fewest errors first (lexicographic), then by `objective` and `[optimize] pick`:
+//! * The pick: fewest errors first (lexicographic), then the fewest connections with a short
+//!   (`[optimize] pick_shorts`, default on; see [`Criteria::shorts`]), then by `objective` and
+//!   `[optimize] pick`:
 //!   `length_vias` with `pick = "errors_vias_length"` (default) = fewest vias, then the shortest
 //!   length; with `pick = "errors_weighted"` = least `length + mm_per_via x vias` (the 25 mm/via
 //!   rule of the TopoR manual: a step to fewer vias is taken while it costs at most `mm_per_via`
@@ -33,6 +35,16 @@ pub struct Criteria {
     /// pick. Counted per connection, so an open connection never counts less than one drawn with
     /// violations; how many rules and how badly is the graded [`Criteria::penalty`].
     pub errors: usize,
+    /// Of `errors`: connections whose written copper overlaps copper of another net (a short:
+    /// KiCad's `shorting_items` / `tracks_crossing`, a DRC error that breaks the board, and the
+    /// track KiCad's Cleanup removes, so it ends as an open plus the error). In a plan (the
+    /// TopoR loop's variants, the P4 score): the predicted shorts, crossings no layer separates
+    /// and traversals through foreign copper. Ranked right after `errors`, before `open`: within
+    /// one error count a short is worse than an open (user 2026-11-12, "shorts should be in the
+    /// routing criteria"). Not counted again in `errors` (a shorted connection is one error, like
+    /// any other connection with violations). 0 when `[optimize] pick_shorts` is off (the order
+    /// before 2026-11-12, bit for bit).
+    pub shorts: usize,
     /// Connections without copper (unrouted: no path, the time limit, legal-only output).
     pub open: usize,
     /// Rule violations of the written copper (never drop).
@@ -51,13 +63,15 @@ pub struct Criteria {
 }
 
 impl Criteria {
-    /// At least as good on all four criteria (errors with their price, vias, length, shrinkages).
+    /// At least as good on all four criteria (errors with their shorts and their price, vias,
+    /// length, shrinkages). The shorts are part of the errors criterion, so a variant with more
+    /// shorts never covers one with fewer: the archive keeps what the pick prefers.
     pub fn covers(&self, o: &Criteria) -> bool {
-        self.errors <= o.errors && self.penalty <= o.penalty + 1e-9 && self.vias <= o.vias && self.length_mm <= o.length_mm + 1e-9 && self.shrinkages <= o.shrinkages
+        self.errors <= o.errors && self.shorts <= o.shorts && self.penalty <= o.penalty + 1e-9 && self.vias <= o.vias && self.length_mm <= o.length_mm + 1e-9 && self.shrinkages <= o.shrinkages
     }
     /// Covers `o` and is better on at least one criterion.
     pub fn dominates(&self, o: &Criteria) -> bool {
-        self.covers(o) && (self.errors < o.errors || self.penalty < o.penalty - 1e-9 || self.vias < o.vias || self.length_mm < o.length_mm - 1e-9 || self.shrinkages < o.shrinkages)
+        self.covers(o) && (self.errors < o.errors || self.shorts < o.shorts || self.penalty < o.penalty - 1e-9 || self.vias < o.vias || self.length_mm < o.length_mm - 1e-9 || self.shrinkages < o.shrinkages)
     }
 }
 
@@ -106,13 +120,19 @@ impl Objective {
             Objective::Area => c.area_mm2,
         }
     }
-    /// Lexicographic key: errors, objective value, shrinkages (`ErrorsViasLength`: errors, open
-    /// connections, vias, length, shrinkages; lengths within 1e-9 mm are equal).
+    /// Lexicographic key: errors, shorts, objective value, shrinkages (`ErrorsViasLength`:
+    /// errors, shorts, open connections, vias, length, shrinkages; lengths within 1e-9 mm are
+    /// equal). Shorts right after errors in every pick (a short is one of the errors, so it is not
+    /// counted twice; within one error count it is worse than an open or a clearance violation:
+    /// KiCad's DRC fails the board on it and Cleanup removes the track).
     pub fn better(&self, a: &Criteria, b: &Criteria) -> bool {
+        if a.errors != b.errors {
+            return a.errors < b.errors;
+        }
+        if a.shorts != b.shorts {
+            return a.shorts < b.shorts;
+        }
         if let Objective::ErrorsViasLength { .. } = self {
-            if a.errors != b.errors {
-                return a.errors < b.errors;
-            }
             // Within the same error count, a connection drawn with a violation beats one left open:
             // drawn copper can still be optimised, a dropped trace cannot (user 2026-11-10, "costly
             // traces made can be optimized for, traces that just failed cannot").
@@ -127,13 +147,11 @@ impl Objective {
             }
             return a.shrinkages < b.shrinkages;
         }
-        a.errors < b.errors
-            || a.errors == b.errors
-                && (self.value(a) < self.value(b) - 1e-9 || (self.value(a) - self.value(b)).abs() <= 1e-9 && a.shrinkages < b.shrinkages)
+        self.value(a) < self.value(b) - 1e-9 || (self.value(a) - self.value(b)).abs() <= 1e-9 && a.shrinkages < b.shrinkages
     }
     /// The criterion on which [`Objective::better`] decides between `a` and `b`, in the pick
     /// order, with `a` minus `b` on it (`a` is better exactly when that is negative); `None` when
-    /// they score the same. Names: `"errors"`, `"open"`, `"vias"`, `"length"` (mm),
+    /// they score the same. Names: `"errors"`, `"shorts"`, `"open"`, `"vias"`, `"length"` (mm),
     /// `"shrinkages"`, and for the other picks `"score"` (`errors_weighted`: length +
     /// mm_per_via x vias + the violation price, mm) or `"area"` (mm² + the violation price).
     /// The progress dialog and the per-round log line say with it why a round is not the best. O(1).
@@ -141,6 +159,9 @@ impl Objective {
         let d = |x: usize, y: usize| x as f64 - y as f64;
         if a.errors != b.errors {
             return Some(("errors", d(a.errors, b.errors)));
+        }
+        if a.shorts != b.shorts {
+            return Some(("shorts", d(a.shorts, b.shorts)));
         }
         if let Objective::ErrorsViasLength { .. } = self {
             if a.open != b.open {
@@ -177,6 +198,8 @@ pub struct VariantRow {
     pub errors: usize,
     /// Of `errors`: rule violations of the written copper (never drop).
     pub violations: usize,
+    /// Of `errors`: connections with a short ([`Criteria::shorts`]).
+    pub shorts: usize,
     /// The `violation` factor's price of the errors (mm).
     pub penalty_mm: f64,
     pub vias: usize,
@@ -255,12 +278,15 @@ impl<T> Archive<T> {
         }
         self.items.push(v);
         while self.items.len() > self.cap {
-            // The worst by the objective that is no champion goes.
+            // The worst by the objective (errors, shorts, value) that is no champion and not the
+            // variant the pick takes goes (the pick's own order has more keys than the
+            // champions, e.g. shorts and open: pruning it would hand KiCad a worse variant).
+            let pick = self.pick(obj);
             let worst = (0..self.items.len())
-                .filter(|&i| self.champions(i).is_empty())
+                .filter(|&i| Some(i) != pick && self.champions(i).is_empty())
                 .max_by(|&a, &b| {
                     let (ca, cb) = (&self.items[a].crit, &self.items[b].crit);
-                    ca.errors.cmp(&cb.errors).then(obj.value(ca).total_cmp(&obj.value(cb))).then(a.cmp(&b))
+                    ca.errors.cmp(&cb.errors).then(ca.shorts.cmp(&cb.shorts)).then(obj.value(ca).total_cmp(&obj.value(cb))).then(a.cmp(&b))
                 });
             match worst {
                 Some(i) => {
@@ -301,6 +327,7 @@ impl<T> Archive<T> {
                 label: self.items[i].label.clone(),
                 errors: c.errors,
                 violations: c.violations,
+                shorts: c.shorts,
                 penalty_mm: c.penalty.round(),
                 vias: c.vias,
                 length_mm: (c.length_mm * 1000.0).round() / 1000.0,
@@ -321,17 +348,18 @@ impl<T> Archive<T> {
 pub fn table_text(rows: &[VariantRow], obj: &Objective) -> String {
     let objective = match obj {
         Objective::LengthVias { mm_per_via } => format!("length_vias, pick errors_weighted, {mm_per_via} mm/via"),
-        Objective::ErrorsViasLength { .. } => "length_vias, pick errors_vias_length (errors, vias, length)".to_string(),
+        Objective::ErrorsViasLength { .. } => "length_vias, pick errors_vias_length (errors, shorts, open, vias, length)".to_string(),
         Objective::Area => "area".to_string(),
     };
-    let mut s = format!("variants ({} kept, objective {objective}; errors (violations) / vias / length mm / shrinkages / warnings / area mm2 / mm per via):", rows.len());
+    let mut s = format!("variants ({} kept, objective {objective}; errors (violations, shorts) / vias / length mm / shrinkages / warnings / area mm2 / mm per via):", rows.len());
     for r in rows {
         s.push_str(&format!(
-            " [{}{}] {} ({}) / {} / {:.1} / {} / {} / {:.1} / {}{};",
+            " [{}{}] {} ({}, {}) / {} / {:.1} / {} / {} / {:.1} / {}{};",
             if r.picked { "PICKED " } else { "" },
             r.label,
             r.errors,
             r.violations,
+            r.shorts,
             r.vias,
             r.length_mm,
             r.shrinkages,
@@ -471,6 +499,8 @@ mod tests {
         let worse = Criteria { errors: 5, open: 0, vias: 160, ..base };
         assert_eq!(n.decider(&worse, &base), Some(("errors", 2.0)));
         assert_eq!(n.decider(&Criteria { open: 0, violations: 3, ..base }, &base), Some(("open", -1.0)));
+        assert_eq!(n.decider(&Criteria { shorts: 1, open: 0, violations: 3, ..base }, &base), Some(("shorts", 1.0)), "shorts before open");
+        assert_eq!(w.decider(&Criteria { shorts: 2, vias: 100, ..base }, &base), Some(("shorts", 2.0)), "shorts before the weighted score");
         assert_eq!(n.decider(&Criteria { vias: 168, length_mm: 1.0, ..base }, &base), Some(("vias", 2.0)));
         let (dn, dl) = n.decider(&Criteria { length_mm: 7410.0, ..base }, &base).expect("length differs");
         assert!(dn == "length" && (dl - 30.0).abs() < 1e-9);
@@ -481,10 +511,12 @@ mod tests {
         let mut grid = Vec::new();
         for errors in 0..3 {
             for open in 0..=errors.min(1) {
-                for vias in [10, 11] {
-                    for length_mm in [100.0, 100.0 + 1e-12, 125.0] {
-                        for shrinkages in 0..2 {
-                            grid.push(Criteria { errors, open, vias, length_mm, shrinkages, area_mm2: length_mm * 0.4, ..Criteria::default() });
+                for shorts in 0..=(errors - open).min(1) {
+                    for vias in [10, 11] {
+                        for length_mm in [100.0, 100.0 + 1e-12, 125.0] {
+                            for shrinkages in 0..2 {
+                                grid.push(Criteria { errors, shorts, open, vias, length_mm, shrinkages, area_mm2: length_mm * 0.4, ..Criteria::default() });
+                            }
                         }
                     }
                 }
@@ -498,5 +530,55 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn shorts_rank_after_errors_before_open_in_every_pick() {
+        // User 2026-11-12 "shorts should be in the routing criteria": a connection with a short is
+        // one of the errors (not counted twice) and, within one error count, worse than an open
+        // connection or a clearance violation (KiCad's DRC fails the board on it, Cleanup removes
+        // the track), whatever the vias and the length.
+        let n = Objective::from_options("length_vias", 25.0, "errors_vias_length");
+        let w = Objective::from_options("length_vias", 25.0, "errors_weighted");
+        let short = Criteria { errors: 2, shorts: 1, open: 0, violations: 2, penalty: 4000.0, vias: 10, length_mm: 100.0, ..Criteria::default() };
+        let open = Criteria { errors: 2, shorts: 0, open: 1, violations: 1, penalty: 20000.0, vias: 12, length_mm: 130.0, ..Criteria::default() };
+        let clear = Criteria { errors: 2, shorts: 0, open: 0, violations: 2, penalty: 9000.0, vias: 14, length_mm: 150.0, ..Criteria::default() };
+        for obj in [n, w, Objective::Area] {
+            assert!(obj.better(&open, &short) && !obj.better(&short, &open), "{obj:?}: an open beats a short at the same errors");
+            assert!(obj.better(&clear, &short) && !obj.better(&short, &clear), "{obj:?}: a clearance violation beats a short");
+            assert_eq!(obj.decider(&short, &open), Some(("shorts", 1.0)), "{obj:?}");
+        }
+        // Without shorts on either side the old order holds: drawn (open 0) beats open.
+        assert!(n.better(&clear, &open), "same errors and shorts: open decides, as before");
+        // Errors stay first: one error that is a short beats two clean-of-shorts errors.
+        let one = Criteria { errors: 1, shorts: 1, violations: 1, vias: 30, length_mm: 300.0, ..Criteria::default() };
+        assert!(n.better(&one, &open) && w.better(&one, &open) && Objective::Area.better(&one, &open));
+        // Pareto: more shorts never covers fewer, so the archive keeps the variant the pick takes.
+        let cheap_short = Criteria { penalty: 3000.0, vias: 9, length_mm: 90.0, ..short };
+        assert!(!cheap_short.covers(&clear) && !clear.covers(&cheap_short));
+        let a = arch(&[cheap_short, clear]);
+        assert_eq!(a.items.len(), 2, "both kept: neither dominates");
+        assert_eq!(a.items[a.pick(&n).unwrap()].crit.shorts, 0, "the pick takes the one without a short");
+        let t = a.table(a.pick(&n));
+        assert!(t.iter().any(|r| r.picked && r.shorts == 0) && t.iter().any(|r| !r.picked && r.shorts == 1), "{t:?}");
+        assert!(table_text(&t, &n).contains("(2, 1)"), "the table shows violations and shorts");
+        // `pick_shorts` off: the builders leave `shorts` at 0 and the order is the old one.
+        let (s0, o0) = (Criteria { shorts: 0, ..short }, open);
+        assert!(n.better(&s0, &o0), "off: drawn with a violation beats open, as before 2026-11-12");
+    }
+
+    #[test]
+    fn cap_pruning_never_removes_the_pick() {
+        // Over the cap the worst non-champion by (errors, shorts, value) goes, never the variant the
+        // pick takes: the pick's order has keys the champions do not cover (shorts, open).
+        let n = Objective::from_options("length_vias", 25.0, "errors_vias_length");
+        let mk = |shorts: usize, open: usize, vias: usize, length_mm: f64, shrinkages: usize| Criteria { errors: 3, shorts, open, violations: 3 - open, vias, length_mm, shrinkages, ..Criteria::default() };
+        let mut a: Archive<usize> = Archive::new(2);
+        // v0 shortest, v1 fewest vias, v2 fewest shrinkages; v3 has no short but is worst by value.
+        for (i, x) in [mk(1, 0, 10, 100.0, 3), mk(1, 0, 5, 200.0, 3), mk(1, 0, 8, 150.0, 0), mk(0, 1, 12, 400.0, 2)].iter().enumerate() {
+            a.offer(Variant { label: format!("v{i}"), crit: *x, payload: i }, &n);
+        }
+        let p = a.pick(&n).expect("non-empty");
+        assert_eq!(a.items[p].label, "v3", "{:?}", a.items.iter().map(|v| &v.label).collect::<Vec<_>>());
     }
 }

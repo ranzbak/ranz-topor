@@ -287,11 +287,14 @@ fn a_reroute_pays_exactly_the_archives_violation_measure_and_gains_it_back() {
 #[test]
 fn the_archive_criteria_and_the_move_price_are_one_measure() {
     let p = Predicted::of((2, 2.5), 1, 1);
-    assert_eq!(p, Predicted { count: 4, graded: 4.5, ..Predicted::default() });
+    // The crossing no layer separates is a predicted short (a short when drawn), one of the four.
+    assert_eq!(p, Predicted { count: 4, graded: 4.5, shorts: 1, ..Predicted::default() });
+    assert_eq!(p.shorts_ranked(false).shorts, 0, "[optimize] pick_shorts off: not ranked");
+    assert_eq!(p.with_foreign((2, 3.0)).shorts, 3, "a traversal through foreign copper is a predicted short too");
     assert_eq!(p.price(1000.0), 4500.0);
     assert_eq!(p.penalty(1000.0), 500.0);
     let c = criteria_of(p, 1000.0, 3, 100.0, 1, 0.0);
-    assert_eq!((c.errors, c.violations, c.vias, c.shrinkages), (4, 4, 3, 1));
+    assert_eq!((c.errors, c.shorts, c.violations, c.vias, c.shrinkages), (4, 1, 4, 3, 1));
     let obj = Objective::LengthVias { mm_per_via: 25.0 };
     // length + 25 mm/via + 1000 mm x graded.
     assert!((evaluation(&obj, &c, 1000.0) - (100.0 + 75.0 + 4500.0)).abs() < 1e-9);
