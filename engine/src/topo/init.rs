@@ -8,7 +8,7 @@
 
 use super::demand::Item;
 use super::factors::{squeeze_amount, Event, Registry, WireCtx};
-use super::state::{interleave, EdgeId, ObsId, State, TriId, VertId, Wire, WireId};
+use super::state::{interleave, EdgeId, ObsId, State, NO_OBS, TriId, VertId, Wire, WireId};
 use crate::geom::Vec2;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -116,6 +116,8 @@ pub struct InitReport {
     /// Connections placed without a legal path (4.3 never fail: through walls at the `violation`
     /// price, or [`State::any_path`]).
     pub forced: Vec<usize>,
+    /// Wires laid anew after a double-crossing removal and kept (4.3c).
+    pub relaid: usize,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1007,7 +1009,14 @@ impl State<'_> {
     /// different-net crossings of the triangles touched drop); a wire whose stretch moved is
     /// checked in turn. Stops after `max_swaps`. O(swaps · crossings² of the wires checked).
     pub fn uncross_from(&mut self, w: WireId, max_swaps: usize) -> usize {
+        self.uncross_from_touched(w, max_swaps).0
+    }
+
+    /// [`State::uncross_from`] and the wires that took part in a kept swap (ascending, once each):
+    /// the ones Polubasov 2010 lays anew ([`State::relay`]).
+    pub fn uncross_from_touched(&mut self, w: WireId, max_swaps: usize) -> (usize, Vec<WireId>) {
         let mut swaps = 0;
+        let mut took_part: std::collections::BTreeSet<WireId> = std::collections::BTreeSet::new();
         let mut todo: Vec<WireId> = vec![w];
         while let Some(a) = todo.pop() {
             if swaps >= max_swaps {
@@ -1034,6 +1043,8 @@ impl State<'_> {
                         if after < before {
                             swaps += 1;
                             changed = true;
+                            took_part.insert(a);
+                            took_part.insert(x.other);
                             if !todo.contains(&x.other) {
                                 todo.push(x.other);
                             }
@@ -1044,7 +1055,56 @@ impl State<'_> {
                 }
             }
         }
-        swaps
+        (swaps, took_part.into_iter().collect())
+    }
+
+    /// Price of the wire `w` as placed (4.3c, to compare two lays of one connection): its length
+    /// (taut when `taut_len`) at the `length` price, and per crossing the `crossing` price (the
+    /// same-net one for a crossing of its own net).
+    pub fn lay_price(&self, w: WireId, wt: &InitWeights, scale: f64) -> f64 {
+        let net = self.wires[w].net;
+        let (mut same, mut diff) = (0usize, 0usize);
+        for x in self.crossings(w) {
+            if self.wires[x.other].net == net {
+                same += 1;
+            } else {
+                diff += 1;
+            }
+        }
+        scale * wt.length_mm * self.wire_len(w) / MM + wt.cross_mm * diff as f64 + wt.same_net_cross_mm * same as f64
+    }
+
+    /// Lay the wires `ws` anew (Polubasov 2010, «Начальная трассировка»: "все проводники,
+    /// участвовавшие в преобразованиях, перекладываются заново, поскольку существует большая
+    /// вероятность найти для них более короткие пути"): each in turn is taken out and searched
+    /// again with `conn_of(w)` (its connection, prices and length scale), and the new lay is kept
+    /// only when its [`State::lay_price`] is lower, else the old one goes back (same wire id).
+    /// A wire with a junction end or turns is left alone. Returns `(old id, new id)` of the wires
+    /// that were replaced (a kept lay is a new wire; the old one is dead). At most `max` wires.
+    pub fn relay(&mut self, ws: &[WireId], max: usize, conn_of: &dyn Fn(WireId) -> Option<(Conn, InitWeights, f64)>) -> Vec<(WireId, WireId)> {
+        let mut replaced = Vec::new();
+        for &w in ws.iter().take(max) {
+            let wi = &self.wires[w];
+            if !wi.alive || wi.pa == NO_OBS || wi.pb == NO_OBS || !wi.turns.is_empty() {
+                continue;
+            }
+            let Some((c, wt, scale)) = conn_of(w) else { continue };
+            let old_price = self.lay_price(w, &wt, scale);
+            let old_path = self.detach(w);
+            let Some((path, tris)) = self.search(&c, &wt, scale) else {
+                self.reattach(w, &old_path);
+                continue;
+            };
+            let wire = Wire { net: c.net, w: c.w, s: c.s, a: c.a, b: c.b, pa: c.pa, pb: c.pb, turns: Vec::new(), passes: Vec::new(), tris: Vec::new(), alive: true };
+            let n = self.insert(wire, &path, tris);
+            if self.lay_price(n, &wt, scale) < old_price - 1e-9 {
+                replaced.push((w, n));
+            } else {
+                self.remove(n);
+                self.reattach(w, &old_path);
+            }
+        }
+        replaced
     }
 
     /// Last resort of the never-fail initial routing (4.3): any sequence of triangles from a
@@ -1123,6 +1183,7 @@ pub fn route_all_once_tiered(st: &mut State, conns: &[Conn], tiers: &[u8], reg: 
     let wt = |i: usize, c: &Conn| InitWeights { max_expansions, same_layer_mm: viol, ..InitWeights::from_registry(reg, &WireCtx { net: c.net, tier: tiers.get(i).copied().unwrap_or(3) }) };
     let order = route_order(st, conns, tiers);
     let mut rep = InitReport::default();
+    let mut wire_conn: Vec<usize> = Vec::new(); // wire id -> index into conns
     for i in order {
         let c = &conns[i];
         let w = wt(i, c);
@@ -1136,7 +1197,22 @@ pub fn route_all_once_tiered(st: &mut State, conns: &[Conn], tiers: &[u8], reg: 
         match placed {
             Some(wid) => {
                 rep.routed += 1;
-                rep.swaps += st.uncross_from(wid, 1000);
+                if wire_conn.len() <= wid {
+                    wire_conn.resize(wid + 1, usize::MAX);
+                }
+                wire_conn[wid] = i;
+                let (n, touched) = st.uncross_from_touched(wid, 1000);
+                rep.swaps += n;
+                if st.relay_after_uncross && !touched.is_empty() {
+                    let conn_of = |w: WireId| wire_conn.get(w).copied().filter(|&ci| ci != usize::MAX).map(|ci| (conns[ci], wt(ci, &conns[ci]), (conns[ci].w + conns[ci].s) / ws0));
+                    for (old, new) in st.relay(&touched, 1000, &conn_of) {
+                        if wire_conn.len() <= new {
+                            wire_conn.resize(new + 1, usize::MAX);
+                        }
+                        wire_conn[new] = wire_conn[old];
+                        rep.relaid += 1;
+                    }
+                }
             }
             None => rep.failed.push(i),
         }

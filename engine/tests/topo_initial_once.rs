@@ -247,3 +247,37 @@ fn initial_order_is_tier_first() {
         assert_eq!(nets, vec![1, 3, 2], "once {once}");
     }
 }
+
+/// 4.3c: the wires that took part in a double-crossing removal are laid anew, the new lay kept
+/// only when its price is lower (Polubasov 2010). The state stays valid, every wire stays
+/// present (same connection), no wire gets dearer, no crossing appears.
+#[test]
+fn relay_after_uncross_keeps_only_cheaper_lays() {
+    use topor_engine::topo::init::InitWeights;
+    let m = board((0.0, 0.0, 20.0, 10.0), &[(1, 2.0, 5.6, true, 0.6), (1, 18.0, 5.6, true, 0.6), (2, 2.0, 6.4, true, 0.6), (2, 18.0, 6.4, true, 0.6), (3, 7.0, 9.0, true, 0.6), (3, 13.0, 1.0, true, 0.6)]);
+    for steiner in [false, true] {
+        let b = board::build(&m, &opts(steiner)).unwrap();
+        let conns: Vec<_> = b.connections(&m).into_iter().filter(|c| c.net != 3).collect();
+        let mut st = State::new(&b.proj);
+        st.taut_len = true;
+        st.relay_after_uncross = false;
+        route_all_once(&mut st, &conns, &Registry::standard(), 2_000_000, 450_000.0);
+        let (a, bw) = (st.wires.iter().position(|w| w.alive && w.net == 1).unwrap(), st.wires.iter().position(|w| w.alive && w.net == 2).unwrap());
+        let wt = InitWeights::default();
+        let conn_of = |st: &State, w: usize| conns.iter().find(|c| c.net == st.wires[w].net).map(|c| (*c, wt, (c.w + c.s) / 450_000.0));
+        let conn_of_static: std::collections::BTreeMap<usize, _> = [a, bw].into_iter().filter_map(|w| conn_of(&st, w).map(|x| (w, x))).collect();
+        let before: Vec<f64> = [a, bw].iter().map(|&w| st.lay_price(w, &wt, conn_of_static[&w].2)).collect();
+        let n = st.relay(&[a, bw], 1000, &|w| conn_of_static.get(&w).copied());
+        assert!(st.check().is_ok(), "{:?}", st.check());
+        assert_eq!(st.total_crossings(), 0);
+        for (k, &w) in [a, bw].iter().enumerate() {
+            let now = n.iter().find(|x| x.0 == w).map_or(w, |x| x.1);
+            assert!(st.wires[now].alive, "steiner {steiner}: wire of net {} present", st.wires[w].net);
+            assert!(st.lay_price(now, &wt, conn_of_static[&w].2) <= before[k] + 1e-9, "steiner {steiner}: wire {w} got dearer");
+        }
+        // The relay is idempotent: nothing is cheaper the second time.
+        let live: Vec<usize> = st.wires.iter().enumerate().filter(|(_, w)| w.alive).map(|(i, _)| i).collect();
+        let c2: std::collections::BTreeMap<usize, _> = live.iter().filter_map(|&w| conn_of(&st, w).map(|x| (w, x))).collect();
+        assert!(st.relay(&live, 1000, &|w| c2.get(&w).copied()).is_empty(), "steiner {steiner}: second relay changes nothing");
+    }
+}

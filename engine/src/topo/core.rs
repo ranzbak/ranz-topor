@@ -1653,7 +1653,23 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             r
         };
         if ok && st.wires.len() > n0 {
-            st.uncross_from(st.wires.len() - 1, 1000);
+            let (_, touched) = st.uncross_from_touched(st.wires.len() - 1, 1000);
+            // 4.3c: the wires of a double-crossing removal are laid anew, kept when cheaper
+            // (Polubasov 2010, «Начальная трассировка»).
+            if st.relay_after_uncross && !touched.is_empty() {
+                let wc = wire_conn.clone();
+                let conn_of = |w: usize| {
+                    let ci = wc.get(w).copied().filter(|&ci| ci != usize::MAX)?;
+                    let c = conns[ci];
+                    Some((c, weights(rg, &c, tier_of(conn_of[ci]), cap), (c.w + c.s) / ws0))
+                };
+                for (old, new) in st.relay(&touched, 1000, &conn_of) {
+                    if wire_conn.len() <= new {
+                        wire_conn.resize(new + 1, usize::MAX);
+                    }
+                    wire_conn[new] = wire_conn[old];
+                }
+            }
         }
         ok
     };
