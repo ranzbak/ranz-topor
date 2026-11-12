@@ -747,7 +747,10 @@ Measured on six snapshot boards (offline tests against KiCad's own polygons); th
   minus features thinner than the zone's minimum width, islands dropped or kept as KiCad → zone properties →
   Remove islands says). A piece of a pour net that is no longer joined to the rest of its pour gets a
   stitching via inside it near its pad (or a short stub from the pad), into the pour on another layer; the
-  report lists each piece and each stitch, and the pieces it could not join. KiCad's DRC is the judge.
+  report lists each piece and each stitch, and the pieces it could not join. A kept island that holds no pad
+  (KiCad: isolated copper, e.g. Remove islands = never) and that no stitching via reaches is joined to the
+  nearest connected pad of its net by a short track (`[planes] join_islands`, default on). KiCad's DRC is the
+  judge.
 - **Pads** are exact; custom, trapezoid, chamfered and offset pads become the convex hull of KiCad's
   polygon (larger, never smaller).
 - **Free vias**: KiCad's `free` flag is read from the saved board copy; a via whose flag cannot be read is

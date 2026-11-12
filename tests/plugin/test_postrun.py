@@ -100,9 +100,23 @@ def test_violations_finding_says_what_kicad_cleanup_does_to_a_short():
     assert "Delete tracks connecting different nets" in f.message and "unconnected at one end" in f.message
 
 
+def test_island_join_is_a_stitch():
+    """[planes] join_islands (user 2026-11-12): a pad-less island joined to a connected pad of its net."""
+    res = {"connections": [_c("GND", "routed")], "warnings": [
+        "pour stitching: 1 pour pieces cut off by the routed copper before, 0 after; 0 island vias, 0 pad stubs, "
+        "1 island joins (0.01 s)",
+        "pour piece cut off: GND: 1 island(s) 7.50 mm², pads [], 0 via(s), near (0.000, 0.000)",
+        "island join R1.2 -> (8.600, 14.000) (2.600 mm) for GND: 1 island(s) 7.50 mm², pads [], 0 via(s), "
+        "near (0.000, 0.000)"]}
+    fs = {f.code: f for f in postrun.route_findings(res)}
+    assert set(fs) == {"POUR_STITCHED"}
+    assert "1 isolated island(s)" in fs["POUR_STITCHED"].message and fs["POUR_STITCHED"].items[0].startswith("island join R1.2")
+
+
 def test_route_findings_quiet_on_a_clean_run():
     res = {"connections": [_c("A", "routed")], "warnings": [
-        "pour stitching: 0 pour pieces cut off by the routed copper before, 0 after; 0 island vias, 0 pad stubs (0.01 s)",
+        "pour stitching: 0 pour pieces cut off by the routed copper before, 0 after; 0 island vias, 0 pad stubs, "
+        "0 island joins (0.01 s)",
         "via_squeeze: 0 of 23 wire vias in a narrow pass (less slack than half the via diameter next to them)"]}
     assert postrun.route_findings(res) == []
     assert postrun.route_findings(None) == []

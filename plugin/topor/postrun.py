@@ -10,7 +10,7 @@ Codes (catalogued in messages.py, one section each in docs/user/troubleshoot.md)
     CONNECTION_WIDTH    connections dropped because a track would graze its own pad / via (KiCad's minimum
                         connection width check)
     POUR_ISLANDS        pour pieces that stay cut off from their pour after the stitching
-    POUR_STITCHED       stitching vias / pad stubs topor added to join cut-off pour pieces (info)
+    POUR_STITCHED       stitching vias / pad stubs / island joins topor added to join cut-off pour pieces (info)
     PLANE_PAD_SIGNAL    plane pads that got no stub into their pour and were joined by a trace instead (info):
                         to the pour's filled copper (planes.terminals) or to another pad of the net
     PLANE_VIA_OUTSIDE_POUR  a plane stub via that ended outside the filled copper of its plane
@@ -127,7 +127,7 @@ def route_findings(result: dict | None) -> list:
 
     st = next((x for x in w if x.startswith("pour stitching:")), None)
     m = re.match(r"pour stitching: (\d+) pour pieces cut off by the routed copper before, (\d+) after; "
-                 r"(\d+) island vias, (\d+) pad stubs", st or "")
+                 r"(\d+) island vias, (\d+) pad stubs(?:, (\d+) island joins)?", st or "")
     left = lines("no stitch site for ")
     if m and int(m.group(2)) > 0 or left:
         n_after = int(m.group(2)) if m else len(left)
@@ -135,11 +135,14 @@ def route_findings(result: dict | None) -> list:
                        f"{n_after} piece(s) of copper pours are cut off from their pour by the new copper and could "
                        "not be stitched back; KiCad's DRC lists them as unconnected items after a zone refill.",
                        [x.removeprefix("no stitch site for ") for x in left]))
-    stitched = lines("stitch via ") + lines("pad stub ")
-    if m and (int(m.group(3)) or int(m.group(4))):
+    stitched = lines("stitch via ") + lines("pad stub ") + lines("island join ")
+    joins = int(m.group(5) or 0) if m else 0
+    if m and (int(m.group(3)) or int(m.group(4)) or joins):
         out.append(_mk("POUR_STITCHED",
                        f"{m.group(3)} stitching via(s) and {m.group(4)} pad stub(s) join pour pieces the new copper "
-                       f"cut off ({m.group(1)} pieces were cut off).", stitched))
+                       f"cut off ({m.group(1)} pieces were cut off)"
+                       + (f"; {joins} isolated island(s) without a pad joined to a pad of their net by a short track "
+                          "(planes.join_islands)" if joins else "") + ".", stitched))
     sig = lines(contains="joined to its net's copper by a signal connection instead")
     # 4.4 (planes.terminals): such a pad is wired to its pour's filled copper instead.
     far = lines(contains="wired to its pour's filled copper at")

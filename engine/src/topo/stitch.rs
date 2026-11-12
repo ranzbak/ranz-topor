@@ -58,6 +58,8 @@ pub struct StitchOut {
     /// Island vias and pad stubs placed.
     pub island_vias: usize,
     pub pad_stubs: usize,
+    /// Pad-less islands joined to a connected pad of their net by a track (`[planes] join_islands`).
+    pub island_joins: usize,
     /// Report lines.
     pub notes: Vec<String>,
 }
@@ -269,6 +271,27 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
                     d += 0.1e6;
                 }
             }
+            // Island join (`[planes] join_islands`, user 2026-11-12): a piece holding no pad that no
+            // via reaches is joined to the nearest pad of its net that is connected to the rest of
+            // the net, by a track from the pad into the island (shortest first).
+            if !done && c.pads.is_empty() && opts.plane_join_islands {
+                if let Some(it) = join_island(model, &reach, c, &|it: &Item| ok(&idx, std::slice::from_ref(it))) {
+                    let (pi, len) = (it.1, it.2);
+                    out.notes.push(format!(
+                        "island join {}.{} -> {} ({:.3} mm) for {}",
+                        model.pads[pi].ref_,
+                        model.pads[pi].number,
+                        kicad_mm(it.3),
+                        len / 1e6,
+                        cut_text(model, c)
+                    ));
+                    idx.insert(&it.0);
+                    all.push(it.0.clone());
+                    out.items.push(it.0);
+                    out.island_joins += 1;
+                    done = true;
+                }
+            }
             if done {
                 placed_any = true;
             } else {
@@ -288,4 +311,51 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
     }
     out.notes.extend(unplaced.into_iter().map(|s| format!("no stitch site for {s}")));
     out
+}
+
+/// The island join of a cut-off component `c` that holds no pad: candidates are pairs (pad of the
+/// net in the main component with copper on a routable layer of one of `c`'s islands, a site of
+/// that island at least w/2 deep), within [`STUB_MAX_NM`] of the pad's edge; tried shortest first
+/// (the length is the price, no other cutoff), the first track `ok` accepts wins. Returns (track,
+/// pad index, length nm, end point math frame). O(sites x pads + MAX_TRIES checker queries).
+fn join_island(model: &BoardModel, reach: &PourReach, c: &Cut, ok: &dyn Fn(&Item) -> bool) -> Option<(Item, usize, f64, Vec2)> {
+    let w = model.rules.net_rule(c.net).width.max(1) as f64;
+    let mut main: Vec<usize> = model
+        .pours
+        .iter()
+        .enumerate()
+        .filter(|(_, z)| z.net == c.net)
+        .flat_map(|(zi, _)| reach.main_pads.get(&zi).cloned().unwrap_or_default())
+        .collect();
+    main.sort_unstable();
+    main.dedup();
+    let mut cand: Vec<(f64, usize, u32, Vec2)> = Vec::new();
+    for &(zi, l, isl) in &c.islands {
+        if !model.layers.iter().any(|x| x.id == l && x.routable) {
+            continue;
+        }
+        let Some(ras) = reach.raster(zi, l) else { continue };
+        let pads: Vec<usize> = main.iter().copied().filter(|&pi| model.pads[pi].layers.contains(&l)).collect();
+        if pads.is_empty() {
+            continue;
+        }
+        for p in ras.island_sites(isl, 0.5 * w, STEP) {
+            for &pi in &pads {
+                let pad = &model.pads[pi];
+                let len = (p - pad.center.to_vec2()).len();
+                let edge = crate::geom::point_skeleton(p, &model.skeleton(pad, l)).max(0.0);
+                if edge <= STUB_MAX_NM {
+                    cand.push((len, pi, l, p));
+                }
+            }
+        }
+    }
+    cand.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.3.x.total_cmp(&b.3.x)).then(a.3.y.total_cmp(&b.3.y)));
+    for &(len, pi, l, p) in cand.iter().take(MAX_TRIES) {
+        let t = track_item(c.net, l, w, model.pads[pi].center.to_vec2(), p, None);
+        if ok(&t) {
+            return Some((t, pi, len, p));
+        }
+    }
+    None
 }

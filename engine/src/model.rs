@@ -930,6 +930,13 @@ pub struct Options {
     /// the estimated refill holding a pad or via of the net, or a pad whose thermal spokes are all
     /// cut) gets a via into the pour on another layer, or a short stub, near its pad.
     pub stitch_islands: bool,
+    /// Topological core (`topor.toml [planes] join_islands`, user 2026-11-12, default true): with
+    /// `stitch_islands`, a cut-off piece of a pour net's copper that holds no pad (an island the
+    /// zone keeps, e.g. remove islands = never) and that no stitch via can reach gets a short
+    /// track of the net width from the nearest pad of the net that is connected to the rest of its
+    /// net, into the island (shortest first, within the stitching stub reach), so the island is no
+    /// longer isolated copper. False: such an island is only reported.
+    pub plane_join_islands: bool,
     /// Topological core (4.4, `topor.toml [planes] terminals`, user rule 2026-11-10): an own-net
     /// pour is a terminal of its net like a pad, which may carry vias. Only fill connected to the
     /// rest of its net before the run (the main component of [`crate::pourcheck`] on the board as
@@ -1330,6 +1337,7 @@ impl Default for Options {
             reroute_rounds: 6,
             via_reduce: true,
             stitch_islands: true,
+            plane_join_islands: true,
             plane_terminals: true,
             plane_share_vias: false,
             cleanup_safe: true,

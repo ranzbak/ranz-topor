@@ -87,19 +87,27 @@ fn track_len(items: &[Item], net: i32) -> f64 {
         .sum()
 }
 
-/// A GND pad 1.5 mm from a small GND island on F.Cu (no pad in it, "remove islands: never") and
+/// A GND pad 1.5 mm below a small GND island on F.Cu (no pad in it, "remove islands: never") and
 /// 6 mm from the GND pour on B.Cu (the net's main copper). The island is no terminal: the pad is
 /// wired to the B.Cu pour (a via and a trace ending on its fill), not only stubbed into the
-/// island (the wire may cross the island, its own net's copper, on the way).
+/// island. After routing the
+/// island is joined to the pad by a short stub (`[planes] join_islands`).
 #[test]
 fn a_pad_is_not_stubbed_into_a_cut_off_island() {
-    let m = board(30.0, 20.0, &[("R1", 1, 10.0, 10.0, 1.0)], &[(1, 0, 12.0, 8.5, 14.5, 11.5, 1), (1, 2, 16.0, 0.5, 29.5, 19.5, 0)]);
+    let m = board(30.0, 20.0, &[("R1", 1, 10.0, 10.0, 1.0)], &[(1, 0, 9.0, 5.5, 11.0, 8.0, 1), (1, 2, 16.0, 0.5, 29.5, 19.5, 0)]);
     let on = route_with(&m, &Options::default(), &RunControl::new());
     assert_eq!(on.routed, 1, "{:?}", on.warnings);
     let ends = track_ends(&on.items, 1);
-    let in_island = |&(x, y, l): &(f64, f64, u32)| l == 0 && (12.0..=14.5).contains(&x) && (8.5..=11.5).contains(&y);
+    let in_island = |&(x, y, l): &(f64, f64, u32)| l == 0 && (9.0..=11.0).contains(&x) && (5.5..=8.0).contains(&y);
     let on_plane = |&(x, _, l): &(f64, f64, u32)| l == 2 && x >= 16.0;
     assert!(ends.iter().any(on_plane), "the pad is wired to the B.Cu pour: {ends:?}");
+    // planes.join_islands (default, user 2026-11-12): the island, no longer isolated copper, is
+    // joined to the pad (now connected through its via) by a short stub after routing.
+    assert!(ends.iter().any(in_island), "the island is joined to R1: {ends:?}");
+    assert!(on.warnings.iter().any(|w| w.starts_with("island join R1.1")), "{:?}", on.warnings);
+    let nojoin = route_with(&m, &Options { plane_join_islands: false, ..Options::default() }, &RunControl::new());
+    let nj = track_ends(&nojoin.items, 1);
+    assert!(nj.iter().any(on_plane) && !nj.iter().any(in_island), "join_islands off: the island is only reported: {nj:?}");
     // Before (planes.terminals off): the island counts as the net's copper, a stub ends in it
     // and nothing reaches the B.Cu pour (the pad floats).
     let off = route_with(&m, &Options { plane_terminals: false, ..Options::default() }, &RunControl::new());
