@@ -109,8 +109,9 @@ def via_list(rules: dict, nr: dict, net_code: int | None, opts: dict) -> list[li
 def unsupported(rules: dict) -> list[str]:
     """Custom-rule parts the router cannot carry exactly (each named): a track width / via size / hole size whose
     condition is a courtyard or rule area (the router has one width and via per net, evaluated outside every
-    region), constraints it warns about or applies only as a precaution, refused rules, regions naming nothing.
-    O(rules)."""
+    region), constraints it warns about or applies only as a precaution, refused rules, regions naming nothing,
+    looser values the router does not use (a pad / net-pair clearance below the net class, a board-wide value that
+    differs per net: the router is stricter than KiCad there). O(rules)."""
     out = []
     for r in rules.get("custom_rules") or []:
         use, con, cond = r.get("use"), r.get("constraint"), str(r.get("condition") or "")
@@ -128,6 +129,10 @@ def unsupported(rules: dict) -> list[str]:
     for n in rules.get("custom_notes") or []:
         if "depends on the net" in n or "names no footprint" in n:
             out.append(str(n))
+        elif ("looser" in n and "not used" in n) or "differs between nets / layers" in n:
+            # KiCad allows less here than the router uses (a looser pad / pair clearance, a per-net board-wide
+            # value): the router is stricter than the expected answer may be
+            out.append(f"{n} [router stricter than KiCad]")
     return sorted(dict.fromkeys(out))
 
 

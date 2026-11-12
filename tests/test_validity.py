@@ -149,6 +149,22 @@ def test_partial_board_and_net_declaration_keeps_the_omitted_fields():
     assert m["nets"]["A1"]["vias"] == [[0.4, 0.2]] and m["margin"] == 0.0
 
 
+def test_looser_custom_clearance_not_used_is_invalid_unless_not_needed():
+    """A looser pad / pair clearance KiCad allows but the router does not use: the router is stricter than the
+    expected answer may be, so the run is INVALID unless the answer lists it under not_needed."""
+    note = ("custom rule 'pads': looser clearance (0.1) on 4 pad(s) not used (topor's pad override can only add "
+            "clearance; the net class value stays)")
+    assert any("looser clearance" in u for u in va.unsupported({"custom_notes": [note]}))
+    eff = dict(_rs("board"))
+    eff["unsupported"] = eff["unsupported"] + va.unsupported({"custom_notes": [note]})
+    v = va.judge(DECL, eff, _rs("board"))
+    assert not v["valid"] and any("looser clearance" in d["effective"] for d in v["invalid"])
+    decl = dict(DECL, not_needed=DECL["not_needed"] + ["'pads': looser clearance"])
+    v2 = va.judge(decl, eff, _rs("board"))
+    assert v2["valid"], v2["invalid"]
+    assert any("looser clearance" in n for n in v2["notes"])
+
+
 def test_find_expected(tmp_path):
     (tmp_path / "pat" / "reference").mkdir(parents=True)
     (tmp_path / "pat" / "expected.json").write_text(json.dumps({"rules_assumed": DECL}))
