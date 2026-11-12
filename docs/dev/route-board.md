@@ -71,3 +71,28 @@ and the feedback counts. Environment variables of the engine (debugging only, no
 
 Without Python: `cargo run --release --example topo_route -- <input.json>` on a `harness.g0 export` model.
 Settings that steer it: `[search] drawing_feedback`, `feedback_max_rip`, `[vias] offset_sites`.
+
+## Validity first (M0v)
+
+A pattern or board run can only judge the router when the router worked to exactly the rules the expected answer was
+built for (user 2026-11-12: "the test needs to be valid in order to be able to judge the algorithm"). Every
+`route_board.sh` run therefore starts its summary with a `VALIDITY:` line and writes `<name>--validity.json`
+(`harness/validity.py`): the rules of the model the engine received (board minimums after fab floors, per-net width /
+clearance / the via sizes the router may place, clearance regions of custom rules, `[search] margin_um`) against
+
+- the pattern's `expected.json` `rules_assumed` (schema in the `harness/validity.py` docstring; also checked against
+  the board files, so a declaration the `.kicad_pro` / `.kicad_dru` do not carry is caught), or
+- without one, the board's own files resolved with `[rules] fab_profile = "board"` (real boards: the hand layout's
+  rules).
+
+A pattern's reference board (the hand copy) must also use only what the router may place (via sizes, track widths
+at or above its floor). Custom-rule parts topor cannot model (a track width tied to a courtyard, refused rules) make
+the run INVALID unless the declaration lists them in `not_needed`. INVALID = the run's faults are not router faults;
+metrics carry `valid` / `validity`, the scorecard lists invalid runs under its table.
+
+Route patterns with `--set rules.fab_profile=board` (and the options their `rules_assumed` declares, e.g.
+`--set vias.size='"board_min"'`): the default `jlcpcb_1oz` raises Board Setup values below the JLCPCB 1 oz minimums
+and adds the profile's smaller vias, which most patterns do not assume. Check a pattern without routing:
+
+    PYTHONPATH=$PWD:$PWD/plugin .venv/bin/python -m harness.validity audit <pattern dir>... --set rules.fab_profile=board [--md]
+    PYTHONPATH=$PWD:$PWD/plugin .venv/bin/python -m harness.validity show <route_board out dir>
