@@ -65,6 +65,11 @@ pub enum Extra {
     /// the zone's minimum width; KiCad's connection width check otherwise flags the neck).
     Via { net: i32, at: Vec2, d: f64, ring: f64 },
     Track { net: i32, layer: u32, a: Vec2, b: Vec2, width: f64 },
+    /// 4.4 (planes as terminals): the place where a wire of `net` ends on its own pour, a square
+    /// of side `size` at `at` on the model layers `layers` where the pour's fill covers it. It
+    /// gets a centre vertex (a terminal like a pad) but is no copper: the wire's track end in the
+    /// fill joins the pour when KiCad refills it.
+    Terminal { net: i32, at: Vec2, layers: Vec<u32>, size: f64 },
 }
 
 #[derive(Clone, Debug)]
@@ -490,6 +495,7 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
             });
         }
     }
+    let mut term_obs: Vec<usize> = Vec::new();
     for (xi, x) in extra.iter().enumerate() {
         let (poly, sag, layers, drilled, net, clear) = match *x {
             Extra::Via { net, at, d, ring } => {
@@ -505,6 +511,21 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
                 }
                 let nrm = Vec2 { x: -u.y / l, y: u.x / l } * (0.5 * width);
                 (vec![a - nrm, b - nrm, b + nrm, a + nrm], 0.0, LayerMask(1 << li), false, net, (m.rules.net_rule(net).clearance).max(m.rules.min_clearance) as f64)
+            }
+            Extra::Terminal { net, at, ref layers, size } => {
+                let mut mask = LayerMask(0);
+                for (li, id) in signal_layers.iter().enumerate() {
+                    if layers.contains(id) {
+                        mask.0 |= 1 << li;
+                    }
+                }
+                if mask.0 == 0 {
+                    continue;
+                }
+                let h = 0.5 * size;
+                let poly = vec![at + Vec2 { x: -h, y: -h }, at + Vec2 { x: h, y: -h }, at + Vec2 { x: h, y: h }, at + Vec2 { x: -h, y: h }];
+                term_obs.push(obstacles.len());
+                (poly, 0.0, mask, false, net, (m.rules.net_rule(net).clearance).max(m.rules.min_clearance) as f64)
             }
         };
         if poly.len() < 3 {
@@ -522,6 +543,10 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
         if ob.net.is_some() {
             points.push((ob.center, VertKind::Centre(i)));
         }
+    }
+    // 4.4: a pour terminal is a terminal like a pad.
+    for &i in &term_obs {
+        points.push((obstacles[i].center, VertKind::Centre(i)));
     }
     // LCT cuts (see `cuts`): the feet of obstacle / outline vertices on facing sides, so that the
     // nearest copper of every sector is a vertex. Sides: obstacle polygon sides, then the outline.

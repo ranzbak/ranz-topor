@@ -927,6 +927,12 @@ pub struct Options {
     /// the estimated refill holding a pad or via of the net, or a pad whose thermal spokes are all
     /// cut) gets a via into the pour on another layer, or a short stub, near its pad.
     pub stitch_islands: bool,
+    /// Topological core (4.4, `topor.toml [planes] terminals`, user rule 2026-11-10): an own-net
+    /// pour is a terminal of its net like a pad, which may carry vias. A plane pad's stub may end
+    /// on own-net copper already on the plane (another pad's stub via, an existing through via
+    /// in the fill) instead of a via of its own, and a stub via that other stubs share moves to
+    /// where their stubs are shortest together. False: one via per plane pad (before 4.4).
+    pub plane_terminals: bool,
     /// `topor.toml [output] cleanup_safe`: the written copper is made stable under KiCad's Edit ->
     /// Cleanup Tracks & Vias ([`crate::topo::tidy`]): no null, duplicate or in-pad segments, T
     /// junctions as exact vertices, collinear segments merged.
@@ -1259,6 +1265,7 @@ impl Default for Options {
             reroute_rounds: 6,
             via_reduce: true,
             stitch_islands: true,
+            plane_terminals: true,
             cleanup_safe: true,
             net_tree: "free".into(),
             steiner: false,
