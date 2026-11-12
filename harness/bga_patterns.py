@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sys
 import textwrap
 from dataclasses import dataclass, field
@@ -1110,6 +1111,30 @@ WHY = {
 }
 
 
+#: Custom-rule parts topor does not model that no expected answer uses (harness.validity ``not_needed``): the neckdown
+#: rule's track_width inside U1's courtyard (min 0.10, opt 0.15) -- the expected answer routes 0.15 (= the net class
+#: width = the rule's opt) and needs no neck (bga_neckdown judgement call), so one width per net suffices.
+NOT_NEEDED = {"bga_neckdown": ["'BGA neckdown': track_width inside"]}
+
+
+def rules_assumed(pat: BPat) -> dict:
+    """The rule set every expected answer of `pat` is built for (harness.validity ``rules_assumed``, mm): the
+    board's own Board Setup, net class and .kicad_dru values, no fab profile, exact clearances (no margin). The
+    validity gate compares the router's effective rules with it before anything is judged (user 2026-11-12: "the
+    test needs to be valid in order to be able to judge the algorithm")."""
+    R = pat.rules
+    k = R.kicad()
+    return {"authority": "board",
+            "board": {"min_clearance": R.clear, "min_track_width": R.track, "min_via_diameter": R.via[0],
+                      "min_via_drill": R.via[1], "min_annular": k["min_via_annular_width"],
+                      "hole_clearance": k["min_hole_clearance"], "via_hole_clearance": k["min_hole_clearance"],
+                      "hole_to_hole": k["min_hole_to_hole"], "edge_clearance": EDGE},
+            "nets": {"*": {"clearance": R.clear, "width": R.track, "vias": [list(R.via)]}},
+            "regions": ([{"rule": "BGA neckdown", "arg": "U1", "clearance": pat.region_clear}]
+                        if pat.region_clear is not None else []),
+            "margin": 0.0, "not_needed": NOT_NEEDED.get(pat.name, []), "options": {"vias.via_in_pad": False}}
+
+
 def generate(name: str, out: Path, *, png: bool = True, drc: bool = True) -> dict:
     pat = build(BUILDERS[name]())
     built = check(pat)
@@ -1158,7 +1183,7 @@ def generate(name: str, out: Path, *, png: bool = True, drc: bool = True) -> dic
            "bga_rules": RULES_TEXT, "reference_rule_faults": [],
            "alternative_rule_faults": {k: len(v) for k, v in faults_by_rule(alt_faults).items()},
            "alternative_rules": pat.alt_rules, "kicad_dru": pat.dru or None,
-           "courtyard_clearance": pat.region_clear}
+           "courtyard_clearance": pat.region_clear, "rules_assumed": rules_assumed(pat)}
     d.mkdir(parents=True, exist_ok=True)
     (d / "expected.json").write_text(json.dumps(doc, indent=1) + "\n")
     paths["expected"] = d / "expected.json"
@@ -1298,6 +1323,10 @@ def readme(out: Path, docs: dict) -> Path:
         tp = Path(out) / n / "topor" / "result.json"
         if tp.exists():
             t = json.loads(tp.read_text())
+            va = t.get("validity") or {}
+            if va:
+                L += ["**Validity.** " + (va.get("line") or str(va)), ""] + [f"- {x}" for x in va.get("invalid") or []] + \
+                     [f"- note: {x}" for x in va.get("notes") or []] + [""]
             L += [f"**topor** (`{n}/topor/`, {t.get('settings')}): {t.get('summary')}", "",
                   f"![{n} topor]({n}/topor/{n}-vs-expected.png)", "", f"Reading: {TOPOR_NOTES.get(n, '')}",
                   f"KiCad render: `{n}/topor/{n}-compare.png` (yellow = new DRC violations).", ""]
@@ -1498,8 +1527,9 @@ def main(argv: list[str] | None = None) -> int:
                       else "")
                    + "; faults by rule " + (", ".join(f"{k} {v}" for k, v in s["faults_by_rule"].items()) or "none")
                    + f"; {s['length_mm']:.1f} mm (expected {s['reference_mm']:.1f}); router {m['router_s']} s")
-            res = {"settings": "defaults + [optimize] loop = \"topor\"", "summary": txt, "metrics": {k: m.get(k) for k in keep},
-                   "analysis": s, "faults": cmp["faults"]}
+            settings = os.environ.get("TOPOR_RUN_SETTINGS", "defaults + [optimize] loop = \"topor\"")
+            res = {"settings": settings, "summary": txt, "metrics": {k: m.get(k) for k in keep},
+                   "analysis": s, "faults": cmp["faults"], "valid": m.get("valid"), "validity": m.get("validity")}
             (Path(argv[3]).parent / "result.json").write_text(json.dumps(res, indent=1) + "\n")
             print(txt)
         print(json.dumps(cmp["summary"], indent=1))
