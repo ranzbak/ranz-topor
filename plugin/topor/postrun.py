@@ -11,7 +11,8 @@ Codes (catalogued in messages.py, one section each in docs/user/troubleshoot.md)
                         connection width check)
     POUR_ISLANDS        pour pieces that stay cut off from their pour after the stitching
     POUR_STITCHED       stitching vias / pad stubs topor added to join cut-off pour pieces (info)
-    PLANE_PAD_SIGNAL    plane pads that got no stub into their pour and were joined by a trace instead (info)
+    PLANE_PAD_SIGNAL    plane pads that got no stub into their pour and were joined by a trace instead (info):
+                        to the pour's filled copper (planes.terminals) or to another pad of the net
     PLANE_VIA_OUTSIDE_POUR  a plane stub via that ended outside the filled copper of its plane
     VIA_SQUEEZE         vias placed in a narrow pass (the via_squeeze social factor's report)
     NECKED              stretches drawn narrower than the net width to get out of a pad (info)
@@ -139,11 +140,15 @@ def route_findings(result: dict | None) -> list:
                        f"{m.group(3)} stitching via(s) and {m.group(4)} pad stub(s) join pour pieces the new copper "
                        f"cut off ({m.group(1)} pieces were cut off).", stitched))
     sig = lines(contains="joined to its net's copper by a signal connection instead")
-    if sig:
+    # 4.4 (planes.terminals): such a pad is wired to its pour's filled copper instead.
+    far = lines(contains="wired to its pour's filled copper at")
+    if sig or far:
+        both = sig + far
         out.append(_mk("PLANE_PAD_SIGNAL",
-                       f"{len(sig)} pad(s) of plane nets had no room for a stub and via into their pour and are "
-                       "joined by a trace instead: " + ", ".join(x.split(":")[0].removeprefix("pad ") for x in sig[:10])
-                       + (" ..." if len(sig) > 10 else "") + ".", [x.split(":")[0] for x in sig]))
+                       f"{len(both)} pad(s) of plane nets had no room for a stub and via into their pour and are "
+                       f"joined by a trace instead ({len(far)} to their pour's filled copper, {len(sig)} to another "
+                       "pad of their net): " + ", ".join(x.split(":")[0].removeprefix("pad ") for x in both[:10])
+                       + (" ..." if len(both) > 10 else "") + ".", [x.split(":")[0] for x in both]))
     isl = lines("plane island: ")
     if isl:
         out.append(_mk("PLANE_VIA_OUTSIDE_POUR",

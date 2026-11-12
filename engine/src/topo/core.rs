@@ -1163,6 +1163,9 @@ struct PlaneStubs {
     signal_pads: BTreeSet<usize>,
     /// One report line per such pad.
     notes: Vec<String>,
+    /// 4.4: plane pads no stub serves, wired to their pour's filled copper by a wire of the plan
+    /// (their end is an [`board::Extra::Terminal`] of `extra`).
+    far: Vec<planes::FarTerm>,
 }
 
 /// The projection of one route call (shopping list 4.2, roadmap box 1 "triangulation on fixed
@@ -1286,35 +1289,162 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
         let mut dr = Drawer::new(model, opts, &b, &st, &checker);
         let mut out = PlaneStubs::default();
         let mut vias: Vec<(Vec2, f64)> = Vec::new();
+        // 4.4 (`[planes] terminals`): the own-net copper on the plane a stub may end on. The
+        // existing vias of the board standing in a fill of their net's pour come first; every
+        // stub via placed joins them.
+        let mut shared: Vec<planes::PlaneVia> = if opts.plane_terminals { existing_plane_vias(model) } else { Vec::new() };
+        let mut outs: Vec<Option<planes::Out>> = Vec::with_capacity(reqs.len());
+        let mut results: Vec<Result<planes::Out, String>> = Vec::with_capacity(reqs.len());
         let mut dropped = false;
-        for rq in &reqs {
+        for (i, rq) in reqs.iter().enumerate() {
             if stop() {
                 return PlaneStubs::default();
             }
-            let r = planes::place(&mut dr, rq, &cost, &vias);
+            let r = planes::place(&mut dr, rq, &cost, &vias, &shared);
             match &r {
                 Ok(o) => {
-                    out.extra.extend(planes::extras(&b, rq, o));
                     if let Some(v) = o.via {
                         vias.push((v, 0.5 * o.size.d as f64));
+                        if opts.plane_terminals {
+                            shared.push(planes::PlaneVia { at: v, size: o.size, net: rq.net, load: rq.w, owner: Some(i), users: Vec::new(), dead: false });
+                        }
+                    }
+                    if let Some(k) = o.shared {
+                        shared[k].load += rq.w;
+                        shared[k].users.push(i);
                     }
                 }
-                // No clean via site inside the pour's fill near the pad: a signal connection
-                // joins it to its net's copper instead.
-                Err(e) => {
-                    notes.push(format!("{e}: joined to its net's copper by a signal connection instead"));
-                    signal_pads.insert(rq.pad);
-                    dropped = true;
-                }
+                // No clean via site inside the pour's fill near the pad. 4.4: the pour is a
+                // terminal of the net, so the pad is wired to the pour's nearest filled copper
+                // (a wire of the plan, ending on it); without such a place, or with `[planes]
+                // terminals` off, a signal connection joins it to its net's copper instead.
+                Err(e) => match planes::far_terminal(&dr, rq, &cost).filter(|_| opts.plane_terminals) {
+                    Some(ft) => {
+                        notes.push(format!(
+                            "{e}: wired to its pour's filled copper at ({:.3}, {:.3}) mm instead (planes as terminals)",
+                            ft.at.x / 1e6,
+                            -ft.at.y / 1e6
+                        ));
+                        // Later stubs keep off the wire's end.
+                        for &l in &ft.layers {
+                            dr.commit(&draw::track_item(rq.net, l, ft.size, ft.at, ft.at + Vec2 { x: 1.0, y: 0.0 }, None));
+                        }
+                        out.extra.push(board::Extra::Terminal { net: rq.net, at: ft.at, layers: ft.layers.clone(), size: ft.size });
+                        out.far.push(ft);
+                    }
+                    None => {
+                        notes.push(format!("{e}: joined to its net's copper by a signal connection instead"));
+                        signal_pads.insert(rq.pad);
+                        dropped = true;
+                    }
+                },
             }
-            out.res.push((rq.conn, r));
+            outs.push(r.as_ref().ok().cloned());
+            results.push(r);
         }
         if !dropped {
+            // 4.4: a stub via that other pads' stubs share moves to where their stubs are
+            // shortest together (plane_via_3r: the three GND stubs meet at the centre). A pad
+            // left with a via of its own is then offered the moved vias again (the order of the
+            // first pass decided which via it saw), and the groups that grew move again; at most
+            // as many rounds as there are vias, each round removes one or ends.
+            for _ in 0..=shared.len() {
+                for v in shared.iter_mut() {
+                    if stop() {
+                        return PlaneStubs::default();
+                    }
+                    if v.dead || v.owner.is_none() || v.users.is_empty() {
+                        continue;
+                    }
+                    let old = v.at;
+                    if planes::resite(&mut dr, &reqs, &mut outs, v, &cost, &vias) {
+                        if let Some(e) = vias.iter_mut().find(|e| (e.0 - old).len() <= 1.0) {
+                            e.0 = v.at;
+                        }
+                    }
+                }
+                let mut merged = false;
+                for k in 0..shared.len() {
+                    let Some(i) = shared[k].owner.filter(|_| !shared[k].dead && shared[k].users.is_empty()) else { continue };
+                    let Some(prev) = outs[i].clone() else { continue };
+                    for &h in &prev.handles {
+                        dr.uncommit(h);
+                    }
+                    shared[k].dead = true;
+                    let at = shared[k].at;
+                    let others: Vec<(Vec2, f64)> = vias.iter().copied().filter(|e| (e.0 - at).len() > 1.0).collect();
+                    match planes::place(&mut dr, &reqs[i], &cost, &others, &shared) {
+                        Ok(o) if o.shared.is_some() => {
+                            let j = o.shared.expect("shared");
+                            shared[j].load += reqs[i].w;
+                            shared[j].users.push(i);
+                            vias = others;
+                            outs[i] = Some(o);
+                            merged = true;
+                        }
+                        // Not cheaper to share: put the pad's own copper back as it was.
+                        Ok(o) => {
+                            for &h in &o.handles {
+                                dr.uncommit(h);
+                            }
+                            shared[k].dead = false;
+                            let mut back = prev;
+                            back.handles = back.items.iter().map(|it| dr.commit(it)).collect();
+                            outs[i] = Some(back);
+                        }
+                        Err(_) => {
+                            shared[k].dead = false;
+                            let mut back = prev;
+                            back.handles = back.items.iter().map(|it| dr.commit(it)).collect();
+                            outs[i] = Some(back);
+                        }
+                    }
+                }
+                if !merged {
+                    break;
+                }
+            }
+            for (i, (rq, r)) in reqs.iter().zip(results).enumerate() {
+                if out.far.iter().any(|f| f.conn == rq.conn) {
+                    continue; // a wire of the plan (4.4), not a stub
+                }
+                match &outs[i] {
+                    Some(o) => {
+                        out.extra.extend(planes::extras(&b, rq, o));
+                        out.res.push((rq.conn, Ok(o.clone())));
+                    }
+                    None => out.res.push((rq.conn, r)),
+                }
+            }
+            let nshared = shared.iter().filter(|v| !v.dead && v.owner.is_some()).map(|v| v.users.len()).sum::<usize>();
+            let nexist = shared.iter().filter(|v| v.owner.is_none()).map(|v| v.users.len()).sum::<usize>();
+            if nshared + nexist > 0 {
+                notes.push(format!(
+                    "planes as terminals ([planes] terminals): {nshared} plane stub(s) end on another pad's stub via, {nexist} on an existing via of the board; {} stub via(s) for {} plane pad(s)",
+                    shared.iter().filter(|v| !v.dead && v.owner.is_some()).count(),
+                    outs.iter().filter(|o| o.is_some()).count()
+                ));
+            }
             out.signal_pads = signal_pads;
             out.notes = notes;
             return out;
         }
     }
+}
+
+/// The existing through vias of the board that stand in a fill of a pour of their own net (4.4): own-net
+/// copper already on the plane, which a plane pad's stub may end on like on a stub via. O(vias x
+/// pours x fill vertices).
+fn existing_plane_vias(model: &BoardModel) -> Vec<planes::PlaneVia> {
+    // Through vias only: a blind or buried one may not reach the pad's layer.
+    let all = model.all_layer_ids();
+    model
+        .vias
+        .iter()
+        .filter(|v| v.net > 0 && (v.layers.is_empty() || crate::model::via_layers(&v.layers, &all).len() == all.len()))
+        .filter(|v| model.pours.iter().any(|z| z.net == v.net && planes::in_fill(z, v.at.to_vec2(), 0.5 * v.d as f64)))
+        .map(|v| planes::PlaneVia { at: v.at.to_vec2(), size: crate::vias::ViaSize { d: v.d, drill: v.drill }, net: v.net, load: 0.0, owner: None, users: Vec::new(), dead: false })
+        .collect()
 }
 
 /// One whole route. `hist0` is the per-edge over-full history of earlier rounds (empty = none);
@@ -1431,6 +1561,22 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 };
                 conns.push(Conn { net: c.net, pa: oa, pb: ob, a: va, b: vb, w, s });
                 prio_w.push(pw);
+            }
+            // 4.4: a plane pad no stub serves is wired to its pour's terminal like to a pad.
+            (TermKind::Pad(pa), TermKind::Pour(_)) if stubs.far.iter().any(|f| f.conn == i) => {
+                let ft = stubs.far.iter().find(|f| f.conn == i).expect("far terminal");
+                let term = (0..b.proj.obstacles.len()).find(|&o| b.pad_of[o] == usize::MAX && b.proj.obstacles[o].net == Some(c.net) && (b.proj.obstacles[o].center - ft.at).len() <= 2.0 && b.centre[o].is_some());
+                let (Some(&oa), Some(ot)) = (obs_of_pad.get(pa), term) else {
+                    fail(&mut out, i, "a pad has no copper on a signal layer, or its pour terminal is not in the projection");
+                    continue;
+                };
+                let (Some(va), Some(vt)) = (b.centre[oa], b.centre[ot]) else {
+                    fail(&mut out, i, "a pad has no net centre vertex");
+                    continue;
+                };
+                conn_of.push(i);
+                conns.push(Conn { net: c.net, pa: oa, pb: ot, a: va, b: vt, w: c.width as f64, s: c.clearance as f64 });
+                prio_w.push(c.width as f64);
             }
             (TermKind::Pad(pa), TermKind::Pour(zi)) => match obs_of_pad.get(pa) {
                 Some(&oa) => plane_reqs.push(planes::Req {
