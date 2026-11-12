@@ -249,6 +249,10 @@ pub struct RouteResult {
     /// D7: one entry per routed differential-pair connection (topological core): lengths, skew,
     /// coupled share at the gap, uncoupled length at each end, vias.
     pub diff_pairs: Vec<DiffPairReport>,
+    /// M1 compass (topological core): what the plan handed to the drawing predicts per violation
+    /// class, located, and per connection its planned vias and length ([`crate::topo::compass`]);
+    /// `None` for other engines and for results without a plan.
+    pub compass: Option<crate::topo::compass::Compass>,
 }
 
 /// A routed differential-pair connection (D7), nm. `from` / `to` are the P connection's pads.
@@ -704,6 +708,7 @@ pub(crate) fn unrouted(model: &BoardModel, opts: &Options, reason: &str) -> Rout
         moves: BTreeMap::new(),
         violations: Vec::new(),
         diff_pairs: Vec::new(),
+        compass: None,
     }
 }
 
