@@ -31,14 +31,72 @@ pub fn via_sizes(rules: &Rules, net: i32, opts: &Options) -> Vec<ViaSize> {
     sizes_for(rules, net, &opts.allowed_drills_nm)
 }
 
-/// The diameter (nm) of the default net's via in the plan's via-site test and via area: the net
-/// class via (`net_class`, as before 5.4) or the `board_min` rule size. O(pairs).
+/// The reach diameter (nm, [`via_reach`] x 2) of the default net's via in the plan's via-site
+/// test and via area: the net class via (`net_class`, as before 5.4) or the `board_min` rule
+/// size. O(pairs).
 pub fn plan_via_d(rules: &Rules, opts: &Options) -> f64 {
-    if opts.via_size == "board_min" {
-        rule_size(rules, rules.default.width, opts.via_drill_grid_nm, &opts.allowed_drills_nm).d as f64
+    let sz = if opts.via_size == "board_min" {
+        rule_size(rules, rules.default.width, opts.via_drill_grid_nm, &opts.allowed_drills_nm)
     } else {
-        rules.default.via_d as f64
+        ViaSize { d: rules.default.via_d, drill: rules.default.via_drill }
+    };
+    2.0 * via_reach(rules, 0, sz)
+}
+
+// ---- The room a via needs (shopping list 5.4, task 1): one rule for the plan and the drawing ----
+//
+// KiCad checks a through via against foreign copper twice (Board Setup -> Constraints): its
+// copper disc keeps the clearance (`d / 2 + clearance`), and its drill keeps the hole clearance
+// (`drill / 2 + hole clearance`, the router's via drill: [`Rules::via_hole_clear`]); between two
+// holes (any nets) the hole-to-hole distance holds (`(drill_a + drill_b) / 2 + hole_to_hole`).
+// The drawing's checker tests all three ([`crate::topo::draw::via_clear`] is its disc form); the
+// plan reasons with the same numbers through these functions. With small vias (`[vias] size =
+// "board_min"`, e.g. 0.4 / 0.3 mm with 0.2 mm clearance and 0.25 mm hole clearance) the hole term
+// reaches as far as or further than the copper term, which the plan's disc-only room missed.
+// `margin` is `[search] margin_um` (nm), added to every requirement as the drawing does.
+
+/// The clearance (nm) of `net` the via rules start from: the net's rule, floored by the board
+/// minimum. O(1).
+fn net_clear(rules: &Rules, net: i32) -> f64 {
+    rules.net_rule(net).clearance.max(rules.min_clearance) as f64
+}
+
+/// Centre distance (nm) a via `sz` of `net` needs to the edge of foreign copper whose own
+/// clearance is `other_clear` (0: none beyond the via net's): `max(d / 2 + clearance, drill / 2 +
+/// hole clearance) + margin`, the clearance the larger of the two nets'. O(1).
+pub fn via_need_copper(rules: &Rules, net: i32, sz: ViaSize, other_clear: f64, margin: f64) -> f64 {
+    let copper = 0.5 * sz.d as f64 + net_clear(rules, net).max(other_clear);
+    let hole = if sz.drill > 0 { 0.5 * sz.drill as f64 + rules.via_hole_clear() as f64 } else { 0.0 };
+    copper.max(hole) + margin
+}
+
+/// The reach (nm) of a via `sz` of `net`: the radius of the disc that, with the net's clearance
+/// round it, needs exactly [`via_need_copper`] (`max(d / 2, drill / 2 + hole clearance -
+/// clearance)`). The plan packs and prices a via as this disc, so every place that adds "radius +
+/// clearance" keeps the hole rule too. Never below `d / 2`; equal to it when the copper term is the
+/// larger (every net class via of the ladder boards). O(1).
+pub fn via_reach(rules: &Rules, net: i32, sz: ViaSize) -> f64 {
+    via_need_copper(rules, net, sz, 0.0, 0.0) - net_clear(rules, net)
+}
+
+/// Centre distance (nm) two vias need: `a` of net `na` and `b` of net `nb`. Foreign nets: each
+/// disc keeps the clearance to the other's disc and each drill the hole clearance to the other's
+/// disc; any nets: the two drills keep `hole_to_hole`; the same net: the discs may touch. Plus
+/// `margin`. O(1).
+pub fn via_via_need(rules: &Rules, na: i32, a: ViaSize, nb: i32, b: ViaSize, margin: f64) -> f64 {
+    let (ra, rb) = (0.5 * a.d as f64, 0.5 * b.d as f64);
+    let (ha, hb) = (0.5 * a.drill.max(0) as f64, 0.5 * b.drill.max(0) as f64);
+    let mut need = if na != nb || na == 0 {
+        let c = net_clear(rules, na).max(net_clear(rules, nb));
+        let hc = rules.via_hole_clear() as f64;
+        (ra + rb + c).max(if a.drill > 0 { ha + hc + rb } else { 0.0 }).max(if b.drill > 0 { hb + hc + ra } else { 0.0 })
+    } else {
+        0.0
+    };
+    if a.drill > 0 && b.drill > 0 {
+        need = need.max(ha + hb + rules.hole_to_hole as f64);
     }
+    need + margin
 }
 
 /// The width (nm) of the trace a via of `net` carries: the pair's `diff_pair_width` for a net of
@@ -151,6 +209,39 @@ mod tests {
             let s = rule_size(&r, w, 10_000, &[]);
             assert!(std::f64::consts::PI * s.drill as f64 >= w as f64 - 1e-6, "{w} {s:?}");
             assert!(s.d - s.drill >= 2 * r.min_annular && s.d >= r.min_via_diameter);
+        }
+    }
+
+    #[test]
+    fn the_via_need_is_the_larger_of_the_copper_and_the_hole_rule() {
+        // wiccon's rules: clearance 0.2, hole clearance 0.25, hole to hole 0.25.
+        let mut r = Rules { hole_clearance: 250_000, hole_to_hole: 250_000, ..Rules::default() };
+        r.default.clearance = 200_000;
+        let class = ViaSize { d: 800_000, drill: 400_000 };
+        let small = ViaSize { d: 400_000, drill: 300_000 };
+        // The class via: the copper term binds (0.4 + 0.2 > 0.2 + 0.25); reach = radius.
+        assert_eq!(via_need_copper(&r, 1, class, 0.0, 0.0), 600_000.0);
+        assert_eq!(via_reach(&r, 1, class), 400_000.0);
+        // 0.4 / 0.3: copper 0.2 + 0.2 = 0.4 = hole 0.15 + 0.25; with a 0.27 mm via-hole clearance
+        // (a fab floor) the hole binds: 0.42, reach 0.22 > the 0.2 radius.
+        assert_eq!(via_need_copper(&r, 1, small, 0.0, 0.0), 400_000.0);
+        r.via_hole_clearance = 270_000;
+        assert_eq!(via_need_copper(&r, 1, small, 0.0, 0.0), 420_000.0);
+        assert_eq!(via_reach(&r, 1, small), 220_000.0);
+        // A neighbour with a larger clearance raises the copper term only; the margin adds.
+        assert_eq!(via_need_copper(&r, 1, small, 300_000.0, 10_000.0), 510_000.0);
+        // Via to via, foreign nets: discs 0.2 + 0.2 + 0.2 = 0.6, drill to disc 0.15 + 0.27 + 0.2
+        // = 0.62, drill to drill 0.15 + 0.15 + 0.25 = 0.55 -> 0.62.
+        assert_eq!(via_via_need(&r, 1, small, 2, small, 0.0), 620_000.0);
+        // The same net: only hole to hole (the discs may touch).
+        assert_eq!(via_via_need(&r, 1, small, 1, small, 0.0), 550_000.0);
+        // Class vias: copper 1.0 binds, as the old disc sum.
+        assert_eq!(via_via_need(&r, 1, class, 2, class, 0.0), 1_000_000.0);
+        // The reach form never asks less than the rule: reach + clearance >= the need.
+        for (a, b) in [(small, small), (small, class), (class, small)] {
+            let c = r.default.clearance as f64;
+            assert!(via_reach(&r, 1, a) + c >= via_need_copper(&r, 1, a, 0.0, 0.0) - 1e-9);
+            assert!(via_reach(&r, 1, a) + via_reach(&r, 2, b) + c >= via_via_need(&r, 1, a, 2, b, 0.0) - 1e-9);
         }
     }
 

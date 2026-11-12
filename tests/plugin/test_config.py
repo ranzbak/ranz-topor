@@ -188,15 +188,17 @@ def test_topological_core_settings_reach_the_engine():
 
 
 
-def test_via_auto_settings_follow_the_loop(tmp_path):
-    """5.4 defaults: [vias] relocate / between_crossings = "auto" are on with the TopoR loop (+ taut length),
-    off with the default cycles loop; "on" / "off" / true / false force them (toml and --set)."""
+def test_via_auto_settings_follow_the_taut_length(tmp_path):
+    """5.4 defaults: [vias] relocate / between_crossings = "auto" are on with [search] length = "taut" in any loop
+    (user 2026-11-11: cycles too), off with the default "even" length; "on" / "off" / true / false force them
+    (toml and --set)."""
     keys = ("via_relocate", "via_between")
     pick = lambda c: tuple(c.engine_options()[k] for k in keys)
     d = Config.defaults()
     assert pick(d) == (False, False)
     tl = d.with_values({("optimize", "loop"): "topor", ("search", "length"): "taut"})
     assert pick(tl) == (True, True)
+    assert pick(d.with_values({("search", "length"): "taut"})) == (True, True)  # the cycles loop too
     assert pick(d.with_values({("optimize", "loop"): "topor"})) == (False, False)  # relocate needs taut
     assert pick(tl.with_values({("vias", "relocate"): "off", ("vias", "between_crossings"): False})) == (False, False)
     assert pick(d.with_values({("vias", "relocate"): "on", ("vias", "between_crossings"): True})) == (True, True)

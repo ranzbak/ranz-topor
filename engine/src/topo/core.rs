@@ -977,7 +977,7 @@ fn stitch_pours(model: &BoardModel, opts: &Options, best: &mut RouteResult, dead
         return 0;
     }
     best.warnings.push(format!(
-        "pour stitching: {} pour pieces cut off by the routed copper before, {} after; {} island vias, {} pad stubs ({:.2} s)",
+        "pour stitching: {} pour pieces cut off by the routed copper before, {} after; {} island vias, {} pad stubs ({:.2} s); these vias come after routing, the plan has no price for the pour pieces its copper cuts off (vias, plan vs drawn: class \"pour stitching\")",
         s.before,
         s.after,
         s.island_vias,
@@ -3171,11 +3171,20 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     if opts.via_relocate && opts.search_length == "taut" {
         let t_vr = Instant::now();
         let outline = super::board::outline_segments(model);
-        let via_r = |net: i32| 0.5 * crate::vias::via_sizes(&model.rules, net, opts).first().map_or(0.0, |s| s.d as f64);
-        let clear = |net: i32| model.rules.net_rule(net).clearance.max(model.rules.min_clearance) as f64;
-        let cx = super::viaopt::ViaCtx { st: &st, outline: &outline, edge_clear: proj.edge_clear, via_r: &via_r, clear: &clear };
+        // 5.4 task 1: the via's room is the real rule ([`crate::vias::via_reach`],
+        // [`crate::vias::via_via_need`]: copper, hole clearance, hole to hole), plus the margin.
+        let first = |net: i32| crate::vias::via_sizes(&model.rules, net, opts).first().copied();
+        let via_r = |net: i32| first(net).map_or(0.0, |s| crate::vias::via_reach(&model.rules, net, s));
+        let margin = opts.margin_nm as f64;
+        let clear = |net: i32| model.rules.net_rule(net).clearance.max(model.rules.min_clearance) as f64 + margin;
+        let via_via = |a: i32, b: i32| match (first(a), first(b)) {
+            (Some(sa), Some(sb)) => crate::vias::via_via_need(&model.rules, a, sa, b, sb, margin),
+            _ => 0.0,
+        };
+        let cx = super::viaopt::ViaCtx { st: &st, outline: &outline, edge_clear: proj.edge_clear + margin, via_r: &via_r, clear: &clear, via_via: &via_via };
         let (sites, rr) = super::viaopt::relocate_vias(&cx, &mut plans, &lr.events);
         dr.via_site = sites;
+        dr.via_site_tight = rr.tight.iter().copied().collect();
         warnings.push(format!(
             "via relocation ([vias] relocate; Dayan & Dai 1991, force balance): {} vias, {} moved in their free interval to the most clearance, smallest gap {:+.3} mm in total",
             rr.vias,
@@ -3313,6 +3322,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         dr.set_wire_layers(w, pl, &pl.at, &vec![d; pl.at.len()]);
     }
     dr.compute_intervals();
+    // 5.4 task 2: the vias the plan hands to the drawing (the plan vs drawn summary below).
+    let plan_vias: usize = plans.values().map(|p| p.vias.len()).sum();
     // Phase 1: the vias of every wire (they are obstacles for the wires drawn next).
     let mut placed: BTreeMap<WireId, Vec<(usize, Vec2, crate::vias::ViaSize)>> = BTreeMap::new();
     let mut via_ids: BTreeMap<WireId, Vec<usize>> = BTreeMap::new();
@@ -3384,10 +3395,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     for &w in &live {
         let (pl, vs) = (&plans[&w], &placed[&w]);
         let ks: Vec<usize> = vs.iter().map(|v| v.0).collect();
-        let ds: Vec<f64> = vs.iter().map(|v| v.2.d as f64).collect();
+        // The disc as its reach (5.4 task 1: the drill's hole clearance where it reaches further).
+        let ds: Vec<f64> = vs.iter().map(|v| 2.0 * crate::vias::via_reach(&model.rules, st.wires[w].net, v.2)).collect();
         dr.set_wire_layers(w, pl, &ks, &ds);
     }
     dr.compute_intervals();
+    // P6 (a): the crossing partners follow the vias as placed.
+    dr.follow_vias();
     let over_n = dr.over.iter().filter(|&&o| o).count();
     // Planning-time check (D0 item 4): an edge-layer the plan packs without overflow (P3 labels,
     // capacity model) must fit in the drawing's packing too (same packer, pass layers from the
@@ -3670,6 +3684,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // ---- Junctions (D5 net trees): a branch whose trunk was not drawn, or that reaches its
     // junction on another layer than the trunk passes it, is not connected: its copper goes and
     // its connection fails (locally; the rest of the tree stays).
+    let mut junction_join_vias = 0usize;
     if tree_free {
         let js = tree::junctions(&st);
         let (mut lost_trunk, mut lost_layer) = (0usize, 0usize);
@@ -3751,6 +3766,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                                     let h = dr.commit(it);
                                     match it {
                                         Item::Via(v) => {
+                                            junction_join_vias += 1;
                                             via_h.entry(bw).or_default().push(h);
                                             wo.vias.push((Vec2 { x: v.at.x as f64, y: -(v.at.y as f64) }, sz));
                                         }
@@ -3901,12 +3917,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // The result as drawn is a variant of its own (more vias, maybe shorter).
     let mut pre_snap: Option<Snapshot> = None;
     // TOPO_NOREDUCE=1 (debug): leave the vias as drawn, to compare with the reduction.
+    let mut vias_reduced = 0usize;
     if opts.via_reduce && std::env::var("TOPO_NOREDUCE").is_err() {
         pre_snap = Some((out.clone(), necking.clone()));
         let (rs, changed) = super::reduce::reduce_vias(&mut dr, &mut drawn, &mut placed, &mut plans, &mut via_h, &end_fixed, &frozen, b.n_signal, ctl.deadline().map(|d| d.max(floor)), &|| ctl.is_cancelled());
         // Cancel / OK ends the via reduction (cancel-fix; anytime: every relabel accepted so far
         // stays; measured on qmtech it took 12-22 s for 0-10 of ~110 vias). In the TopoR loop pick's
         // one drawing that keeps the result complete; only the time limit makes it a cut-short one.
+        vias_reduced = rs.vias_removed;
         let limit_cut = rs.timed_out && ctl.deadline().is_some_and(|d| Instant::now() >= d.max(floor));
         let cancel_cut = rs.timed_out && !limit_cut;
         timed_out |= limit_cut || cancel_cut && !draw_through.get();
@@ -4211,6 +4229,28 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         warnings.push(format!(
             "via relocation in the drawing ([vias] relocate): {} vias at their planned site, {} planned sites not free (drawn at the usual search's site)",
             dr.stats.planned_sites, dr.stats.planned_sites_missed
+        ));
+    }
+    // 5.4 task 2 ("decide early, draw once": a via the plan did not price is a bug to explain):
+    // the plan's vias against the drawn ones, and every drawn via the plan's wire vias do not
+    // hold, by class. The plane stub vias are decided before the topology and enter it as
+    // obstacles (priced, `planes.rs`); the pour stitching vias come after routing (reported by
+    // the stitching).
+    {
+        let drawn_vias: usize = drawn.values().map(|wo| wo.vias.len()).sum();
+        let plane_vias = plane_res.iter().filter(|(_, r)| r.as_ref().is_ok_and(|o| o.via.is_some())).count();
+        let lost: usize = plans.iter().filter(|(w, _)| !drawn.contains_key(w)).map(|(_, p)| p.vias.len()).sum();
+        warnings.push(format!(
+            "vias, plan vs drawn: plan {plan_vias} wire vias, drawn {drawn_vias} wire vias (+ {plane_vias} plane stub vias decided before the topology); placements: {} at the planned site, {} by the drawing's site search ({} of them where the planned site was not free), {} by force (never drop); {} added joining a branch to its trunk by force; {} removed by the via reduction; {} planned vias on wires not drawn; {} crossing partners re-read from a via as placed (P6 a); {} corners removed by the taut pull of the drawn runs (P6 c, [drawing] pull_taut)",
+            dr.stats.planned_sites,
+            dr.stats.via_searched,
+            dr.stats.planned_sites_missed,
+            dr.stats.via_forced,
+            junction_join_vias,
+            vias_reduced,
+            lost,
+            dr.stats.partners_moved,
+            dr.stats.pulled
         ));
     }
     if let Ok(path) = std::env::var("TOPO_DIAG") {

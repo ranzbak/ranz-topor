@@ -28,12 +28,14 @@ _ENGINE_SCALE = {"margin_nm": 1000, "allowed_drills_nm": 1_000_000, "neck_max_nm
                  "diffpair_zip_max_nm": 1_000_000, "via_drill_grid_nm": 1_000_000}
 
 
-def _topor_loop_taut(values: dict) -> bool:
-    return values[("optimize", "loop")] == "topor" and values[("search", "length")] == "taut"
+def _taut(values: dict) -> bool:
+    """[vias] relocate / between_crossings = "auto": on with [search] length = "taut" in any loop (user 2026-11-11:
+    "cycles" too; the relocation needs the plan's taut path, Polubasov 2001 p. 4 puts a via between two crossings)."""
+    return values[("search", "length")] == "taut"
 
 
 # engine_field of an auto / on / off setting -> what "auto" means for the current values (the engine gets a bool)
-_ENGINE_AUTO = {"via_relocate": _topor_loop_taut, "via_between": _topor_loop_taut}
+_ENGINE_AUTO = {"via_relocate": _taut, "via_between": _taut}
 
 # ---------------------------------------------------------------- value handling
 
