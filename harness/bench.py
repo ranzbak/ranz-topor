@@ -286,6 +286,7 @@ def run_bench(
     # the routing, costs one slot search per connection (the plugin default is its own setting).
     options.setdefault("detour_reference", True)
     fab_floors = bool(options.pop("apply_fab_floors", True))  # harness-only, not an engine option
+    fab_profile = str(options.pop("fab_profile", "jlcpcb_1oz"))  # [rules] fab_profile, not an engine option
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     src = _source_pcb(board, pcb_override)
@@ -303,7 +304,7 @@ def run_bench(
 
     dru_text = cp.dru.read_text() if cp.dru is not None else None
     rules = resolve_rules(b, dru_text=dru_text, widths_before=widths_before,
-                          apply_fab_floors=fab_floors)
+                          apply_fab_floors=fab_floors, fab_profile=fab_profile)
     pre_model = export_model(b, rules, name=board, dru_text=dru_text)  # the untouched hand board (hand stats)
     hand_stats = None
     try:

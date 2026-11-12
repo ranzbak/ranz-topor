@@ -270,7 +270,7 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: warning.*
 
-**Cause.** A custom rule could not be used exactly: its condition depends on the other item or uses a function topor does not evaluate (its value is then applied only where it is stricter, never where it is looser), its values differ per layer where topor has one width / clearance per net, or the constraint is not honoured at all (e.g. length, via_count).
+**Cause.** A custom rule could not be used exactly: its condition depends on the other item or uses a function topor does not evaluate (its value is then applied only where it is stricter, never where it is looser), its values differ per layer where topor has one width / clearance per net, a value below the fab profile's minimum was raised to it (a note starting with "floor:"; [rules] fab_profile = "board" uses custom values as given), or the constraint is not honoured at all (e.g. length, via_count).
 
 **Fix.** Check the named rules after routing with KiCad → Inspect → Design Rules Checker; simplify the condition (A.NetClass, A.NetName, A.intersectsCourtyard('REF'), A.intersectsArea('name'), A.Pad_Type) or route that part by hand. See docs/user/operate.md, Custom design rules.
 

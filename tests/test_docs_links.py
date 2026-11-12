@@ -123,8 +123,8 @@ def test_operate_md_reaches_every_kicad_setting_and_toml_key():
 
 def test_operate_md_fab_floors_match_the_profile():
     """F I-4: operate.md documents the fab floors with the values of toporlib.rules.JLCPCB_1OZ, the extra via
-    drills (routing_vias), where the report lists them, that pre-defined vias are not read and that no
-    topor.toml key turns the floors off."""
+    drills (routing_vias), where the report lists them, that pre-defined vias are not read and that
+    ``[rules] fab_profile = "board"`` turns the floors off (M0v)."""
     from toporlib.rules import JLCPCB_1OZ as P
 
     text = (USER / "operate.md").read_text(encoding="utf-8")
@@ -134,7 +134,8 @@ def test_operate_md_fab_floors_match_the_profile():
               "pth_hole_to_track", "hole_to_hole_via", "edge"):
         assert mm(P[k]) in sec, (k, mm(P[k]))
     assert ", ".join(f"{d / 1e6:g}" for d in P["routing_vias"]) + " mm" in sec
-    for words in ("JLCPCB", "Fab floors raised", "no `topor.toml` key", "not read", "0.5.0", "VIA_NOT_SET_UP"):
+    for words in ("JLCPCB", "Fab floors raised", '`[rules] fab_profile = "board"`', "not read", "0.5.0",
+                  "VIA_NOT_SET_UP"):
         assert words in sec, words
     lim = text.split("## Limitations", 1)[1]
     assert "Cancel reacts within about a second in every phase" in lim  # MINOR 10

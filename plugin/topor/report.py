@@ -259,7 +259,10 @@ class RunReport:
         out = ["Non-default settings:"] + ([f"- {k} = {v!r}" for k, v in sorted(nd.items())] or ["- none"])
         out.append(f"Built-in defaults used: {_na(f.get('defaults_used'))} settings")
         out.append("Accepted fallbacks: " + (", ".join(f["fallbacks"]) if f.get("fallbacks") else "none"))
-        if "floors_applied" in f:  # toporlib.rules: KiCad minimums below the fab profile, raised (F I-4)
+        if f.get("fab_profile") == "board":  # [rules] fab_profile = "board": no profile, no floors
+            out.append("Fab floors raised: none ([rules] fab_profile = \"board\": Board Setup, net classes and custom "
+                       "rules are the authority)")
+        elif "floors_applied" in f:  # toporlib.rules: KiCad minimums below the fab profile, raised (F I-4)
             fl = f["floors_applied"] or []
             out.append("Fab floors raised (JLCPCB 1 oz profile): " + (", ".join(
                 f"{x['name']} {x['design'] / MM:g} → {x['floor'] / MM:g} mm" for x in fl) if fl else "none"))

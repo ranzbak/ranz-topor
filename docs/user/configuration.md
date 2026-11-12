@@ -43,6 +43,14 @@ Which nets are touched, how they are classified and prioritised.
 | `pour_served` | table | `{}` |  | any | Net name → true/false to force or forbid serving a net by a copper pour; absent = automatic. true: only pour connections are made for the net (none when it has no usable pour); false: the net is routed pad to pad although it has a pour. |
 | `ignore_pads` | list | `[]` |  | any | Pads (REF.PAD, e.g. "U1.3") skipped as terminals, typically pads outside the board; written by the pre-flight dialog. Their connections are reported as ignored; they are neither terminals nor obstacles. |
 
+## `[rules]`
+
+Which design rules the router works to: KiCad's Board Setup, net classes and custom rules, with or without a fab profile's minimums as floors (see operate.md, Fab minimums).
+
+| Key | Type | Default | Unit | Range | Description |
+|---|---|---|---|---|---|
+| `fab_profile` | str | `"jlcpcb_1oz"` |  | jlcpcb_1oz\|board | Authority for the design rules the router works to. jlcpcb_1oz (default) = KiCad's Board Setup minimums, net classes and custom rules (.kicad_dru), with the JLCPCB 1 oz manufacturing minimums as FLOORS: a smaller value (track width 0.2, clearance 0.15, via 0.45 / 0.25, annular ring 0.10 (2 layers) / 0.075 (4+ layers), hole to track 0.35 (component holes) / 0.20 (vias), hole to hole 0.25, copper to edge 0.2 mm), also a custom rule's clearance or width (per net or inside a courtyard / rule area, e.g. a BGA neck-down rule), is raised to it; the report lists what was raised (report.md -> Settings -> Fab floors raised; custom-rule values in CUSTOM_RULE_LIMITED), and the profile's smaller vias (drills 0.25 / 0.3 / 0.4 / 0.5 mm) are offered where the net class via does not fit. board = no fab profile: Board Setup, the net classes and the custom rules are the only authority, exactly as KiCad's DRC judges them (a minimum of 0 = no minimum; a custom rule's value is used as given, also below the Board Setup minimum, as in KiCad); the vias are the net class vias and KiCad's pre-defined vias only. Use board when your fab makes finer copper than the profile and your Board Setup says so, or when a result must be judged at exactly the board's rules (test patterns). KiCad's DRC judges the result with your rules either way. KiCad: KiCad → File → Board Setup → Design Rules → Constraints (also Net Classes and Custom Rules). |
+
 ## `[vias]`
 
 Via cost, count and size policy (each net routes with its KiCad net class via, plus smaller fab-profile vias where space requires; see operate.md, Fab minimums).
@@ -228,7 +236,7 @@ Price of what a route does (social factors), in mm of copper per unit: weight, s
 | Clearance | KiCad → File → Board Setup → Design Rules → Constraints |
 | Track widths | KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Track Widths and netclass track width |
 | Via sizes | KiCad → File → Board Setup → Design Rules → Net Classes (via size / hole per net) and Pre-defined Sizes → Vias (the smaller ones are used where space requires) |
-| Minimum via, hole and annular ring | KiCad → File → Board Setup → Design Rules → Constraints (values below topor's fab floors are raised; see operate.md, Fab minimums) |
+| Minimum via, hole and annular ring | KiCad → File → Board Setup → Design Rules → Constraints (values below topor's fab floors are raised unless [rules] fab_profile = "board"; see operate.md, Fab minimums) |
 | Copper-to-edge clearance | KiCad → File → Board Setup → Design Rules → Constraints → Copper to Edge Clearance |
 | Netclasses and net assignments | KiCad → File → Board Setup → Design Rules → Net Classes |
 | Custom rules | KiCad → File → Board Setup → Design Rules → Custom Rules (.kicad_dru) |

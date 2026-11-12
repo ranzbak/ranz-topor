@@ -323,8 +323,9 @@ def widths_before(text: str) -> dict:
     return {n: _W(int(statistics.median(v))) for n, v in by.items()}
 
 
-def resolve_rules(port: BoardPort, pcb_copy: Path, copy_text: str) -> dict:
-    """Rules from the copy's .kicad_pro + .kicad_dru and the port's net classes (toporlib.rules). The ``per_net``
+def resolve_rules(port: BoardPort, pcb_copy: Path, copy_text: str, cfg: Config | None = None) -> dict:
+    """Rules from the copy's .kicad_pro + .kicad_dru and the port's net classes (toporlib.rules), under
+    ``[rules] fab_profile`` of `cfg` (None: the default profile). The ``per_net``
     keys use the port's ONE net-code table (``port.net_codes()``, the same the model is exported with; gate
     review MINOR 13); a port without one (FakeBoard: its model carries codes and rules) lets the resolver derive
     them from the net classes. O(N * R)."""
@@ -337,7 +338,13 @@ def resolve_rules(port: BoardPort, pcb_copy: Path, copy_text: str) -> dict:
     n_cu = max(2, len(cu))
     return rules_mod.resolve_rules_from_project(pro, dru, netclass_of=of, classes=classes,
                                                 widths_before=widths_before(copy_text), copper_layer_count=n_cu,
-                                                net_codes=codes, layer_names={l["id"]: l["name"] for l in cu})
+                                                net_codes=codes, layer_names={l["id"]: l["name"] for l in cu},
+                                                fab_profile=fab_profile_of(cfg))
+
+
+def fab_profile_of(cfg: Config | None) -> str:
+    """``[rules] fab_profile`` of `cfg` (the schema default without one). O(1)."""
+    return str(cfg.get("rules", "fab_profile")) if cfg is not None else rules_mod.DEFAULT_FAB_PROFILE
 
 
 def attach_diff_pairs(model: dict, rules: dict, pcb_copy: Path, pro: dict, cfg: Config, netclass_of: dict) -> tuple:
@@ -642,8 +649,9 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     out.pcb_copy = pcb_copy
     copy_text = pcb_copy.read_text()
     log.line(f"save_as copy: {pcb_copy} ({len(copy_text)} bytes)")
-    rules = resolve_rules(port, pcb_copy, copy_text)
+    rules = resolve_rules(port, pcb_copy, copy_text, cfg)
     report.facts["floors_applied"] = list(rules.get("floors_applied") or [])  # report.md Settings (F I-4)
+    report.facts["fab_profile"] = rules.get("profile")
     pro_p = pcb_copy.with_suffix(".kicad_pro")
     try:
         pro = json.loads(pro_p.read_text()) if pro_p.is_file() else {}

@@ -41,6 +41,13 @@ JLCPCB_1OZ: dict = {
     "annular_4l": 75_000,
 }
 
+#: ``[rules] fab_profile`` values: the name of a fab profile (its minimums are FLOORS over Board Setup and the custom
+#: rules) or ``"board"`` (no profile: Board Setup, the net classes and the .kicad_dru are the only authority, as
+#: KiCad's own DRC judges them).
+FAB_PROFILES: dict = {"jlcpcb_1oz": JLCPCB_1OZ}
+BOARD_AUTHORITY = "board"
+DEFAULT_FAB_PROFILE = "jlcpcb_1oz"
+
 _POWER_RE = re.compile(r"^(\+|-)?\d|^(V|VCC|VDD|VBAT|GND|AGND|PWR)")
 _REFUSE = ("track_angle", "track_segment_length")
 
@@ -215,6 +222,7 @@ def resolve_rules_from_project(
     copper_layer_count: int = 2,
     net_codes: dict[str, int] | None = None,
     layer_names: dict[int, str] | None = None,
+    fab_profile: str = DEFAULT_FAB_PROFILE,
 ) -> dict:
     """Resolve design rules; manufacturer minimums (the profile) are FLOORS.
 
@@ -233,7 +241,23 @@ def resolve_rules_from_project(
     (`floor: <name> <design> -> <floor> mm`); values above the floor are used as-is. A design value of 0
     means "unset" and is silently filled from the profile. `apply_fab_floors=False` uses the board's own
     values (the profile only fills unset zeros).
+
+    `fab_profile` (``[rules] fab_profile``): a key of :data:`FAB_PROFILES` (default ``"jlcpcb_1oz"``: `profile`
+    as given) or ``"board"``: no profile at all -- no floor, a board minimum of 0 stays 0 (KiCad: no minimum), no
+    fab-profile alternative vias (``routing_vias`` / ``drill_list`` empty), and a custom rule's clearance / width
+    (per net or in a courtyard / rule-area region) is used as the rule gives it, also below the Board Setup
+    minimum, as KiCad's DRC does (the matching custom rule wins over the implicit board rule; KiCad 10 PCB Editor
+    manual, "Custom design rules"). The result carries ``"profile"`` (the profile name or ``"board"``).
     """
+    board_auth = fab_profile == BOARD_AUTHORITY
+    if not board_auth:
+        if fab_profile not in FAB_PROFILES:
+            raise ValueError(f"unknown [rules] fab_profile {fab_profile!r} (known: "
+                             f"{', '.join([*FAB_PROFILES, BOARD_AUTHORITY])})")
+        if fab_profile != DEFAULT_FAB_PROFILE:
+            profile = FAB_PROFILES[fab_profile]
+    else:
+        apply_fab_floors = False
     settings_table = settings_table or {}
     dv = rule_values_from_pro(pro)
     codes = net_codes if net_codes is not None else net_codes_by_name(netclass_of)
@@ -251,6 +275,8 @@ def resolve_rules_from_project(
 
     def floored(name: str, design, floor: int) -> int:
         design = int(design)
+        if board_auth:  # Board Setup is the authority: its value as is (0 = no minimum, as in KiCad)
+            return max(design, 0)
         if design <= 0:
             return floor
         if apply_fab_floors and design < floor:
@@ -290,6 +316,11 @@ def resolve_rules_from_project(
             warnings.append(f"REFUSE: rule {r.name} disallows {' '.join(r.disallow)} without a supported "
                             "area condition (A.insideArea('name'))")
 
+    # a net class value of 0 (unset): the profile's, or KiCad's built-in Default class value without a profile
+    unset_via = ((_CLASS_DEFAULTS_NM["via_diameter"], _CLASS_DEFAULTS_NM["via_drill"]) if board_auth
+                 else (profile["via_d"], profile["via_drill"]))
+    unset_width = _CLASS_DEFAULTS_NM["track_width"] if board_auth else profile["width"]
+
     def eff(ncname: str, field: str) -> int:
         """First class of the (composite) name that sets `field`, else Default, else KiCad's built-in."""
         parts = [ncname] if ncname in classes else ncname.split(",")
@@ -307,14 +338,16 @@ def resolve_rules_from_project(
         ncname = netclass_of.get(net_name, "Default")
         clearance = base_clearance(net_name)
         class_w = eff(ncname, "track_width")
-        via_d = max(_nz(eff(ncname, "via_diameter"), profile["via_d"]), floors["min_via_diameter"])
-        via_drill = max(_nz(eff(ncname, "via_drill"), profile["via_drill"]), floors["min_via_drill"])
+        via_d = max(_nz(eff(ncname, "via_diameter"), unset_via[0]), floors["min_via_diameter"])
+        via_drill = max(_nz(eff(ncname, "via_drill"), unset_via[1]), floors["min_via_drill"])
         cu = cr.net(net=net_name, netclass=ncname, base_clearance=clearance, base_width=class_w,
                     base_via=(via_d, via_drill), diff_base=_diff_base(net_name)) if cr else None
-        if cu is not None and cu.clearance is not None:
+        if cu is not None and cu.clearance is not None and board_auth:
+            clearance = cu.clearance  # KiCad: the matching custom rule wins, also below the board minimum
+        elif cu is not None and cu.clearance is not None:
             if cu.clearance < floors["min_clearance"]:
                 cr.notes.add(f"floor: custom clearance {cu.clearance / 1e6:g} -> {floors['min_clearance'] / 1e6:g} mm "
-                             f"(fab minimum, [fab] profile)", net_name)
+                             f"(fab minimum, [rules] fab_profile)", net_name)
             clearance = max(cu.clearance, floors["min_clearance"])
         custom_w = cu.width if cu is not None else None
         custom_min_w = cu.min_width if cu is not None else 0
@@ -328,23 +361,24 @@ def resolve_rules_from_project(
         elif net_name in settings_table:
             width, src = int(settings_table[net_name]), "settings_table"
         else:
-            width, src = class_w if class_w > 0 else profile["width"], "default"
+            width, src = class_w if class_w > 0 else unset_width, "default"
         if cu is not None and src != "custom_rule":
             # a custom min / max still bounds a width from elsewhere
             if cu.min_width and width < cu.min_width:
                 width, src = cu.min_width, "custom_rule"
             if cu.max_width is not None and width > cu.max_width:
                 width, src = max(cu.max_width, cu.min_width), "custom_rule"
-        if cu is not None and src == "custom_rule" and width < floors["min_track_width"]:
+        if cu is not None and src == "custom_rule" and width < floors["min_track_width"] and not board_auth:
             cr.notes.add(f"floor: custom track width {width / 1e6:g} -> {floors['min_track_width'] / 1e6:g} mm "
-                         f"(fab minimum, [fab] profile)", net_name)
-        width = max(width, floors["min_track_width"])
+                         f"(fab minimum, [rules] fab_profile)", net_name)
+        if not (board_auth and src == "custom_rule"):  # KiCad: a custom width wins over the board minimum
+            width = max(width, floors["min_track_width"])
         if src == "default" and net_name and _POWER_RE.match(net_name):
             warnings.append(f"POWER?: {net_name} uses Default width")
         if cu is not None and cu.via_d is not None:
-            via_d = max(cu.via_d, floors["min_via_diameter"])
+            via_d = cu.via_d if board_auth else max(cu.via_d, floors["min_via_diameter"])
         if cu is not None and cu.via_drill is not None:
-            via_drill = max(cu.via_drill, floors["min_via_drill"])
+            via_drill = cu.via_drill if board_auth else max(cu.via_drill, floors["min_via_drill"])
         return {
             "clearance": clearance,
             "width": width,
@@ -356,7 +390,9 @@ def resolve_rules_from_project(
         }
 
     if cr:
-        cr.plan_regions(cr_nets, {n: base_clearance(n) for n, _c, _d in cr_nets}, floors["min_clearance"])
+        # the region floor: the fab / board minimum, none with the board as the authority (KiCad: the custom rule wins)
+        cr.plan_regions(cr_nets, {n: base_clearance(n) for n, _c, _d in cr_nets},
+                        0 if board_auth else floors["min_clearance"])
     default = net_rule("")
     default["width_source"] = "default"
     per_net: dict[str, dict] = {}
@@ -376,9 +412,10 @@ def resolve_rules_from_project(
                         "0.8/0.4 mm (the engine's via fallback applies)")
     return {
         **floors,
-        "profile": "jlcpcb_1oz",
-        "drill_list": list(profile["drill_list"]),
-        "routing_vias": list(profile["routing_vias"]),
+        "profile": BOARD_AUTHORITY if board_auth else fab_profile,
+        # the fab profile's drills and smaller alternative vias; none without a profile (KiCad's own vias only)
+        "drill_list": [] if board_auth else list(profile["drill_list"]),
+        "routing_vias": [] if board_auth else list(profile["routing_vias"]),
         "predefined_vias": predefined,
         "default": default,
         "per_net": per_net,

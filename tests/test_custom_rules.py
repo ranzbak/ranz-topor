@@ -168,7 +168,7 @@ def test_fab_floor_raises_a_custom_width_with_one_note():
                                    widths_before={}, copper_layer_count=6)
     assert r["per_net"]["1"]["width"] == r["min_track_width"] == 200_000
     notes = [w for w in r["warnings"] if w.startswith("floor: custom track width")]
-    assert notes == ["floor: custom track width 0.135 -> 0.2 mm (fab minimum, [fab] profile) [2 net(s): A, B]"], notes
+    assert notes == ["floor: custom track width 0.135 -> 0.2 mm (fab minimum, [rules] fab_profile) [2 net(s): A, B]"], notes
 
 
 def test_net_dependent_area_rule_is_no_region():
