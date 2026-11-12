@@ -219,3 +219,31 @@ fn a_wire_without_a_found_path_is_placed_and_priced() {
         assert!(st.check().is_ok(), "{:?}", st.check());
     }
 }
+
+/// 4.3b: the initial routing order is (tier, width desc, length asc, input index); tier 1 first.
+/// Wire ids follow the order the connections were routed in.
+#[test]
+fn initial_order_is_tier_first() {
+    use topor_engine::topo::init::{route_all_once_tiered, route_all_reg_tiered, route_order};
+    // Three far-apart nets, input order 1, 2, 3 (net 3 the shortest, net 1 the longest).
+    let m = board((0.0, 0.0, 40.0, 20.0), &[(1, 2.0, 3.0, true, 1.0), (1, 38.0, 3.0, true, 1.0), (2, 2.0, 10.0, true, 1.0), (2, 30.0, 10.0, true, 1.0), (3, 2.0, 17.0, true, 1.0), (3, 12.0, 17.0, true, 1.0)]);
+    let b = board::build(&m, &opts(false)).unwrap();
+    let conns = b.connections(&m);
+    assert_eq!(conns.len(), 3);
+    let net_of = |o: &[usize]| o.iter().map(|&i| conns[i].net).collect::<Vec<_>>();
+    let st = State::new(&b.proj);
+    // Equal tiers (or none): length ascending, as before.
+    assert_eq!(net_of(&route_order(&st, &conns, &[])), vec![3, 2, 1]);
+    assert_eq!(net_of(&route_order(&st, &conns, &[3, 3, 3])), vec![3, 2, 1]);
+    // Three tiers: tier beats length.
+    let tiers: Vec<u8> = conns.iter().map(|c| match c.net { 1 => 1, 2 => 3, _ => 2 }).collect();
+    assert_eq!(net_of(&route_order(&st, &conns, &tiers)), vec![1, 3, 2]);
+    for once in [false, true] {
+        let mut st = State::new(&b.proj);
+        let reg = Registry::standard();
+        let rep = if once { route_all_once_tiered(&mut st, &conns, &tiers, &reg, 2_000_000, 450_000.0) } else { route_all_reg_tiered(&mut st, &conns, &tiers, &reg, 2_000_000, 450_000.0) };
+        assert!(rep.failed.is_empty());
+        let nets: Vec<i32> = st.wires.iter().filter(|w| w.alive).map(|w| w.net).collect();
+        assert_eq!(nets, vec![1, 3, 2], "once {once}");
+    }
+}

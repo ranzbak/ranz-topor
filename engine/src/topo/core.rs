@@ -1495,7 +1495,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let len_of = |c: &Conn| (proj.pos[c.b] - proj.pos[c.a]).len();
     let mut order: Vec<usize> = (0..conns.len()).collect();
     order.sort_by(|&i, &j| {
-        prio_w[j].total_cmp(&prio_w[i]).then(len_of(&conns[i]).total_cmp(&len_of(&conns[j]))).then(i.cmp(&j))
+        tier_of(conn_of[i]).cmp(&tier_of(conn_of[j])).then(prio_w[j].total_cmp(&prio_w[i])).then(len_of(&conns[i]).total_cmp(&len_of(&conns[j]))).then(i.cmp(&j))
     });
     let mut wire_conn: Vec<usize> = Vec::new(); // wire id -> index into conns
     let mut p2_failed: Vec<usize> = Vec::new();

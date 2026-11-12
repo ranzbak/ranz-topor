@@ -1093,12 +1093,19 @@ impl State<'_> {
 /// Route all connections (widest first, then shortest), then remove double crossings, with the
 /// same prices for every wire. `ws0` = w0 + s0 of the default net class (the length unit).
 pub fn route_all(st: &mut State, conns: &[Conn], wt: &InitWeights, ws0: f64) -> InitReport {
-    route_all_with(st, conns, &|_| *wt, ws0)
+    route_all_with(st, conns, &[], &|_, _| *wt, ws0)
 }
 
 /// [`route_all`] with the prices of every connection from the factor registry (scope, tier).
 pub fn route_all_reg(st: &mut State, conns: &[Conn], reg: &Registry, max_expansions: usize, ws0: f64) -> InitReport {
-    route_all_with(st, conns, &|c| InitWeights { max_expansions, ..InitWeights::from_registry(reg, &WireCtx { net: c.net, tier: 3 }) }, ws0)
+    route_all_reg_tiered(st, conns, &[], reg, max_expansions, ws0)
+}
+
+/// [`route_all_reg`] with the priority tier of every connection (`tiers[i]` for `conns[i]`; an
+/// empty or short slice counts as tier 3): routing order (tier, width desc, length asc, input
+/// index) and the tier of the [`WireCtx`] that prices each wire (4.3b).
+pub fn route_all_reg_tiered(st: &mut State, conns: &[Conn], tiers: &[u8], reg: &Registry, max_expansions: usize, ws0: f64) -> InitReport {
+    route_all_with(st, conns, tiers, &|i, c| InitWeights { max_expansions, ..InitWeights::from_registry(reg, &WireCtx { net: c.net, tier: tiers.get(i).copied().unwrap_or(3) }) }, ws0)
 }
 
 /// [`route_all_reg`] the 4.3 way (`[optimize] initial = "once"`): double crossings removed after
@@ -1107,13 +1114,18 @@ pub fn route_all_reg(st: &mut State, conns: &[Conn], reg: &Registry, max_expansi
 /// [`State::any_path`]); `failed` stays empty unless two pads lie in parts of the board no edge
 /// joins.
 pub fn route_all_once(st: &mut State, conns: &[Conn], reg: &Registry, max_expansions: usize, ws0: f64) -> InitReport {
+    route_all_once_tiered(st, conns, &[], reg, max_expansions, ws0)
+}
+
+/// [`route_all_once`] with the priority tier of every connection (see [`route_all_reg_tiered`]).
+pub fn route_all_once_tiered(st: &mut State, conns: &[Conn], tiers: &[u8], reg: &Registry, max_expansions: usize, ws0: f64) -> InitReport {
     let viol = reg.price(&Event::Violation { kind: String::new(), at: Vec2::default(), layer: String::new(), depth_nm: 0.0, len_nm: 0.0, against: String::new(), cause: String::new() }, &WireCtx::default());
-    let wt = |c: &Conn| InitWeights { max_expansions, same_layer_mm: viol, ..InitWeights::from_registry(reg, &WireCtx { net: c.net, tier: 3 }) };
-    let order = route_order(st, conns);
+    let wt = |i: usize, c: &Conn| InitWeights { max_expansions, same_layer_mm: viol, ..InitWeights::from_registry(reg, &WireCtx { net: c.net, tier: tiers.get(i).copied().unwrap_or(3) }) };
+    let order = route_order(st, conns, tiers);
     let mut rep = InitReport::default();
     for i in order {
         let c = &conns[i];
-        let w = wt(c);
+        let w = wt(i, c);
         let scale = (c.w + c.s) / ws0;
         let placed = st.route_conn(c, &w, scale).map(|x| x.0).or_else(|| {
             let (path, tris) = st.search(c, &InitWeights { wall_mm: viol, ..w }, scale).or_else(|| st.any_path(c))?;
@@ -1134,27 +1146,23 @@ pub fn route_all_once(st: &mut State, conns: &[Conn], reg: &Registry, max_expans
     rep
 }
 
-/// The initial routing order (Polubasov 2010: the wider first, among them the shorter): width
-/// descending, then pad-to-pad distance ascending, then input order.
-fn route_order(st: &State, conns: &[Conn]) -> Vec<usize> {
+/// The initial routing order (user rule; Polubasov 2010: the wider first, among them the
+/// shorter): priority tier ascending (1 = first), width descending, pad-to-pad distance
+/// ascending, input order. `tiers` as in [`route_all_reg_tiered`].
+pub fn route_order(st: &State, conns: &[Conn], tiers: &[u8]) -> Vec<usize> {
     let len = |c: &Conn| (st.proj.pos[c.b] - st.proj.pos[c.a]).len();
+    let tier = |i: usize| tiers.get(i).copied().unwrap_or(3);
     let mut order: Vec<usize> = (0..conns.len()).collect();
-    order.sort_by(|&i, &j| conns[j].w.total_cmp(&conns[i].w).then(len(&conns[i]).total_cmp(&len(&conns[j]))).then(i.cmp(&j)));
+    order.sort_by(|&i, &j| tier(i).cmp(&tier(j)).then(conns[j].w.total_cmp(&conns[i].w)).then(len(&conns[i]).total_cmp(&len(&conns[j]))).then(i.cmp(&j)));
     order
 }
 
-fn route_all_with(st: &mut State, conns: &[Conn], weights: &dyn Fn(&Conn) -> InitWeights, ws0: f64) -> InitReport {
-    let len = |c: &Conn| (st.proj.pos[c.b] - st.proj.pos[c.a]).len();
-    let mut order: Vec<usize> = (0..conns.len()).collect();
-    order.sort_by(|&i, &j| {
-        conns[j].w.total_cmp(&conns[i].w)
-            .then(len(&conns[i]).total_cmp(&len(&conns[j])))
-            .then(i.cmp(&j))
-    });
+fn route_all_with(st: &mut State, conns: &[Conn], tiers: &[u8], weights: &dyn Fn(usize, &Conn) -> InitWeights, ws0: f64) -> InitReport {
+    let order = route_order(st, conns, tiers);
     let mut rep = InitReport::default();
     for i in order {
         let c = &conns[i];
-        match st.route_conn(c, &weights(c), (c.w + c.s) / ws0) {
+        match st.route_conn(c, &weights(i, c), (c.w + c.s) / ws0) {
             Some((_, over)) => {
                 rep.routed += 1;
                 rep.overflows += over;
