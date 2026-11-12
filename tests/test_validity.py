@@ -134,6 +134,21 @@ def test_via_list_mirrors_the_engine(via_size, want):
     assert va.via_list(rules, nr, 1, {"via_size": via_size, "grid_nm": 10_000, "allowed_nm": []}) == want
 
 
+def test_partial_board_and_net_declaration_keeps_the_omitted_fields():
+    """Verifier repro (M0v review): a declaration that names only some board / net fields still compares the
+    omitted ones with the board files' values (merged field by field, not one level deep)."""
+    decl = {"authority": "board", "board": {"min_clearance": 0.15}, "nets": {"*": {"clearance": 0.15}},
+            "not_needed": ["'BGA neckdown': track_width inside"]}
+    v = va.judge(decl, _rs("jlcpcb_1oz"), _rs("board"))
+    assert not v["valid"]
+    rules = {d["rule"] for d in v["invalid"]}
+    assert {"board.min_track_width", "board.min_via_diameter", "net.width", "net.vias", "regions"} <= rules
+    assert va.judge(decl, _rs("board"), _rs("board"))["valid"]
+    m = va.merged_declaration(decl, _rs("board"))
+    assert m["board"]["min_track_width"] == 0.15 and m["nets"]["A1"]["width"] == 0.15
+    assert m["nets"]["A1"]["vias"] == [[0.4, 0.2]] and m["margin"] == 0.0
+
+
 def test_find_expected(tmp_path):
     (tmp_path / "pat" / "reference").mkdir(parents=True)
     (tmp_path / "pat" / "expected.json").write_text(json.dumps({"rules_assumed": DECL}))

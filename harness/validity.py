@@ -359,6 +359,28 @@ def compare(declared: dict, eff: dict, *, cfg=None, what: str = "effective") -> 
     return out
 
 
+def merged_declaration(declared: dict, board: dict | None) -> dict:
+    """The full rule set an expected answer assumes: the board files' rule set `board` with the declared fields
+    laid over it field by field (``board`` per key; ``nets`` per net and field: the board net, then ``"*"``, then
+    the named net; ``regions`` / ``options`` / ``not_needed`` replace when given; ``margin`` declared or 0). A key
+    not declared keeps the board files' value, so it is still compared. `board` None: the declaration as is.
+    O(N x fields)."""
+    if board is None:
+        return declared
+    dn = declared.get("nets") or {}
+    star = dn.get("*") or {}
+    nets = {name: {**fields, **star, **(dn.get(name) or {})} for name, fields in (board.get("nets") or {}).items()}
+    for name, fields in dn.items():
+        if name != "*" and name not in nets:
+            nets[name] = dict(fields)
+    out = {**board, "board": {**(board.get("board") or {}), **(declared.get("board") or {})}, "nets": nets,
+           "margin": float(declared.get("margin", 0.0) or 0.0)}
+    for k in ("authority", "regions", "options", "not_needed"):
+        if k in declared:
+            out[k] = declared[k]
+    return out
+
+
 def judge(declared: dict | None, eff: dict, board: dict | None, *, cfg=None, expected_path=None,
           reference_text: str | None = None) -> dict:
     """The validity verdict of one run. `declared`: ``rules_assumed`` (None: `board` is the declaration);
@@ -370,7 +392,7 @@ def judge(declared: dict | None, eff: dict, board: dict | None, *, cfg=None, exp
         "board files (no rules_assumed): Board Setup + net classes + custom rules, [rules] fab_profile = \"board\""
     # a declaration states what it gives; the rest is the board's own rules ({"authority": "board", "options":
     # {...}} = the board files plus these options)
-    decl = ({**(board or {}), **declared} if declared is not None else board)
+    decl = merged_declaration(declared, board) if declared is not None else board
     diffs = compare(decl, eff, cfg=cfg) if decl is not None else []
     if declared is not None and board is not None:
         for d in compare(declared, board, cfg=None):
