@@ -2954,6 +2954,10 @@ impl<'a> Drawer<'a> {
         // into the corridor of an undrawn wire's planned path (its taut and packed chords, half
         // its width plus the clearance either side) than the two legs it replaces is not taken.
         // Priced like `planned_room` (`pitch x (x + x^2)`, `x = depth / pitch`), compared, no wall.
+        // Not in a forced run: there a shortcut is taken only when it lowers or keeps the run's
+        // violations and adds or deepens no short ([`viol_key`]); measured on qmtech, the room
+        // test there kept forced runs on their violations (new DRC 177 -> 658, shorts 62 -> 241),
+        // without it 245 / 45 (main 434 / 104), planned_crossing_window cycles stays short-free.
         let mut corr: Vec<(Vec<Vec2>, f64, f64)> = Vec::new();
         let (ka, kb) = (k0.saturating_sub(1), (k1 + 1).min(wi.tris.len().saturating_sub(1)));
         for k in ka..=kb {
@@ -3000,7 +3004,7 @@ impl<'a> Drawer<'a> {
             while i + 1 < cur.len() {
                 let (a, b, c) = (cur[i - 1], cur[i], cur[i + 1]);
                 let keep_octi = octi && super::octi::octi_dir(c - a).is_none() && super::octi::octi_dir(b - a).is_some() && super::octi::octi_dir(c - b).is_some();
-                if keep_octi || (c - a).len2() < 1.0 || guards.iter().any(|g| cross(&[a, b, c], g) != cross(&[a, c], g)) || room_price(&[a, c]) > room_price(&[a, b, c]) + 1.0 {
+                if keep_octi || (c - a).len2() < 1.0 || guards.iter().any(|g| cross(&[a, b, c], g) != cross(&[a, c], g)) || (forced.is_none() && room_price(&[a, c]) > room_price(&[a, b, c]) + 1.0) {
                     i += 1;
                     continue;
                 }
