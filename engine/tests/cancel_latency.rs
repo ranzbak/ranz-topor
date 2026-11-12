@@ -18,13 +18,36 @@ fn opts(extra: &str) -> Options {
     .expect("options parse")
 }
 
-/// Cancel `o` after `after`; the result, the seconds from the Cancel to the end, and the control.
-fn cancel_after(o: Options, after: Duration) -> (RouteResult, f64) {
+/// What a Cancel waits for before its delay starts (M0: with the cut model, the default since
+/// M0, the projection computes the cut room before any run begins and the routing is slower,
+/// seconds in a debug build, so a delay from the call's start would often cancel an earlier
+/// phase than the test means; `cancel_during_the_projection_ends_quickly` covers the projection).
+#[derive(Clone, Copy, PartialEq)]
+enum After {
+    /// the first run began routing (progress phase "route")
+    Routing,
+    /// a run began its TopoR loop (progress stage "TopoR loop ..."; a Cancel from there on draws
+    /// the loop's pick; before it, during P3/P4, a Cancel leaves no copper)
+    Loop,
+}
+
+/// Cancel `o` `after` the state `from` is reached; the result and the seconds from the Cancel
+/// to the end.
+fn cancel_after(o: Options, from: After, after: Duration) -> (RouteResult, f64) {
     let m = eprom();
     let ctl = RunControl::new();
     ctl.limit.init(o.wall_clock_s);
     let c2 = ctl.clone();
     let h = std::thread::spawn(move || route_with(&m, &o, &c2));
+    let t0 = Instant::now();
+    let reached = |p: &topor_engine::control::Progress| match from {
+        After::Routing => p.phase == "route",
+        After::Loop => p.stage.contains("TopoR loop"),
+    };
+    while !reached(&ctl.snapshot()) && !h.is_finished() {
+        assert!(t0.elapsed().as_secs() < 300, "never reached the state to cancel in");
+        std::thread::sleep(Duration::from_millis(2));
+    }
     std::thread::sleep(after);
     assert!(!h.is_finished(), "the run ended before the Cancel at {after:?}");
     let t = Instant::now();
@@ -39,7 +62,7 @@ const BOUND_S: f64 = 5.0;
 #[test]
 fn cancel_at_any_time_ends_quickly_with_the_best_so_far() {
     for ms in [30u64, 300, 1200, 2500] {
-        let (r, s) = cancel_after(opts(""), Duration::from_millis(ms));
+        let (r, s) = cancel_after(opts(""), if ms >= 1200 { After::Loop } else { After::Routing }, Duration::from_millis(ms));
         assert!(s < BOUND_S, "Cancel at {ms} ms took {s:.2} s to end the run");
         assert_eq!(r.stop_reason, "cancel", "{:?}", r.warnings);
         if ms >= 1200 {
@@ -50,8 +73,8 @@ fn cancel_at_any_time_ends_quickly_with_the_best_so_far() {
 
 #[test]
 fn cancel_in_the_topor_loop_draws_one_pick_quickly() {
-    // the initial routing of eprom takes well under a second: at 1.5 s the five loops run
-    let (r, s) = cancel_after(opts(r#", "opt_loop": "topor", "search_length": "taut""#), Duration::from_millis(1500));
+    // 1.5 s after a run began its loop (M0: with the cut model P3/P4 takes seconds in a debug build)
+    let (r, s) = cancel_after(opts(r#", "opt_loop": "topor", "search_length": "taut""#), After::Loop, Duration::from_millis(1500));
     assert!(s < BOUND_S, "Cancel in the TopoR loop took {s:.2} s to end the run");
     assert_eq!(r.routed, r.connections_total, "the loop's pick is drawn completely: {:?}", r.warnings);
     let skipped = r.warnings.iter().filter(|w| w.contains("pick not drawn (another run")).count();
@@ -59,9 +82,24 @@ fn cancel_in_the_topor_loop_draws_one_pick_quickly() {
 }
 
 #[test]
+fn cancel_during_the_projection_ends_quickly() {
+    // Cancel at once, before the projection (with the cut model's cut room) is done: the call
+    // ends quickly as a Cancel, with no copper and the reason in the warnings.
+    let m = eprom();
+    let o = opts("");
+    let ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    ctl.request_cancel();
+    let t = Instant::now();
+    let r = route_with(&m, &o, &ctl);
+    assert!(t.elapsed().as_secs_f64() < BOUND_S, "took {:.2} s", t.elapsed().as_secs_f64());
+    assert_eq!(r.stop_reason, "cancel", "{:?}", r.warnings);
+}
+
+#[test]
 fn cancel_before_a_run_begins_skips_it() {
     // more runs than threads: the runs not begun when Cancel comes have no result of their own
-    let (r, s) = cancel_after(opts(r#", "runs": 64"#), Duration::from_millis(200));
+    let (r, s) = cancel_after(opts(r#", "runs": 64"#), After::Routing, Duration::from_millis(200));
     assert!(s < BOUND_S, "took {s:.2} s");
     let line = r.warnings.iter().find(|w| w.starts_with("best of 64 seeded runs")).unwrap_or_else(|| panic!("best-of line: {} {:?}", r.stop_reason, r.warnings));
     assert!(line.contains("not begun") && line.contains("without a result of their own"), "{line}");

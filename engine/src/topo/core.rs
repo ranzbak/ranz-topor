@@ -3060,6 +3060,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let mut stop = || cancelled() || ctl.is_cancelled() || ctl.deadline().is_some_and(|d| Instant::now() >= d) || loop_deadline.is_some_and(|d| Instant::now() >= d);
         let clock = || t_loop.elapsed().as_secs_f64();
         gate.1.enter(gate.0);
+        // M0: the loop is the default; the progress dialog names it (and a Cancel from here on
+        // draws the loop's pick, tests/cancel_latency.rs).
+        ctl.stage(rnd, rnds, "TopoR loop on the topology");
         let rep = optimise(&mut sp, &mut arch, &params, &mut stop, &clock);
         let pick = arch.pick(&obj).expect("the initial plan is always archived");
         if ctl.is_cancelled() {
