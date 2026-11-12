@@ -931,9 +931,12 @@ pub struct Options {
     /// cut) gets a via into the pour on another layer, or a short stub, near its pad.
     pub stitch_islands: bool,
     /// Topological core (4.4, `topor.toml [planes] terminals`, user rule 2026-11-10): an own-net
-    /// pour is a terminal of its net like a pad, which may carry vias. A plane pad that no stub
-    /// serves is wired to its pour's nearest filled copper (a far terminal) instead of to another
-    /// pad of its net. False: such a pad is joined to another pad of its net (before 4.4).
+    /// pour is a terminal of its net like a pad, which may carry vias. Only fill connected to the
+    /// rest of its net before the run (the main component of [`crate::pourcheck`] on the board as
+    /// given) counts: a stub never ends in a cut-off island. A plane pad that no stub serves is
+    /// wired to its net's connected fill (a far terminal), ending where the path search first
+    /// reaches it (user 2026-11-12: routing over a connected pour has no length), instead of to
+    /// another pad of its net. False: stubs into any fill, other pads joined pad to pad (before 4.4).
     pub plane_terminals: bool,
     /// Topological core (4.4, `topor.toml [planes] share_vias`, default false): a plane pad's stub
     /// may end on own-net copper already on the plane (another pad's stub via, an existing

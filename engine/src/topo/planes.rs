@@ -90,9 +90,17 @@ pub fn load_price(v: &PlaneVia, w: f64, via_price: f64) -> f64 {
 
 /// Prices of a stub site (D6a): `mm` per mm of stub (the `length` factor) and the
 /// `via_squeeze` price of the room a via leaves to the foreign copper around it.
+///
+/// `live` (planes as terminals, `[planes] terminals`; `None` = off, every fill counts): the
+/// pour connectivity of the board before the run ([`crate::pourcheck::check_pour_reach`] with no
+/// routed copper: the KiCad fill of the ripped board, its existing tracks and vias, the pads).
+/// Only fill in its net's main component is the net's copper (user 2026-11-12: a pour is a
+/// terminal "given that the pour is connected to the rest of the net"); a stub or a wire that ends
+/// in a piece cut off from it (an island) connects nothing.
 pub struct SiteCost<'r> {
     pub mm: f64,
     pub reg: &'r Registry,
+    pub live: Option<&'r crate::pourcheck::PourReach>,
 }
 
 impl SiteCost<'_> {
@@ -102,6 +110,38 @@ impl SiteCost<'_> {
     }
     fn squeeze(&self, slack: f64, d: f64) -> f64 {
         self.reg.price(&Event::ViaSqueeze { wire: 0, at: Vec2::default(), slack_nm: slack, via_nm: d }, &WireCtx::default())
+    }
+    /// Whether `p` on model layer `layer` lies in fill of pour `zi` that is connected to the rest
+    /// of its net before the run (see `live`); true without `live`.
+    pub fn connected(&self, zi: usize, layer: u32, p: Vec2) -> bool {
+        self.live.is_none_or(|r| r.in_main(zi, layer, p))
+    }
+    /// [`in_fill`] restricted to connected fill: a disc of radius `r` at `p` inside a fill of pour
+    /// `zi` on some layer where that fill is connected. O(fill vertices).
+    pub fn in_live_fill(&self, pour: &crate::model::Pour, zi: usize, p: Vec2, r: f64) -> bool {
+        let mut layers: Vec<u32> = pour.fills.iter().map(|f| f.layer).collect();
+        layers.sort_unstable();
+        layers.dedup();
+        layers.into_iter().any(|l| in_fill_on(pour, Some(l), p, r) && self.connected(zi, l, p))
+    }
+    /// The pours a stub of `rq` may end in: with `live`, every pour of its net (each one is the
+    /// net's copper where it is connected; the decomposition named the nearest, which may be a
+    /// cut-off island), else its own pour only (before 4.4).
+    pub fn pours_of(&self, model: &BoardModel, rq: &Req) -> Vec<usize> {
+        if self.live.is_some() {
+            (0..model.pours.len()).filter(|&k| model.pours[k].net == rq.net).collect()
+        } else {
+            vec![rq.pour]
+        }
+    }
+    /// A via disc of radius `r` at `p` stands in connected fill of one of the pours `zs`.
+    pub fn via_ok_at(&self, model: &BoardModel, zs: &[usize], p: Vec2, r: f64) -> bool {
+        zs.iter().any(|&k| self.in_live_fill(&model.pours[k], k, p, r))
+    }
+    /// A track end of half width `r` at `p` on model layer `layer` lies in connected fill of one
+    /// of the pours `zs`.
+    pub fn track_ok_at(&self, model: &BoardModel, zs: &[usize], layer: u32, p: Vec2, r: f64) -> bool {
+        zs.iter().any(|&k| in_fill_on(&model.pours[k], Some(layer), p, r) && self.connected(k, layer, p))
     }
 }
 
@@ -160,6 +200,7 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)], s
     let layer_idx = b.smd_layer(rq.obs).unwrap_or(0);
     let lid = b.signal_layers[layer_idx];
     let c = ob.center;
+    let zs = cost.pours_of(model, rq);
     let rpad = ob.poly.iter().map(|&p| (p - c).len()).fold(0.0, f64::max);
     let sizes = via_sizes(&model.rules, rq.net, dr.opts);
     let step = 0.1e6;
@@ -175,7 +216,7 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)], s
     let mut best_track: Option<(f64, Vec2, u32)> = None;
     for l in (0..b.signal_layers.len()).filter(|&l| ob.layers.has(l)) {
         let tl = b.signal_layers[l];
-        if !pour.fills.iter().any(|f| f.layer == tl) {
+        if !zs.iter().any(|&k| model.pours[k].fills.iter().any(|f| f.layer == tl)) {
             continue;
         }
         let mut d = step;
@@ -185,7 +226,7 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)], s
             }
             for u in &dirs {
                 let p = c + *u * d;
-                if point_in_poly(p, &ob.poly) || !in_fill_on(pour, Some(tl), p, 0.5 * rq.w) {
+                if point_in_poly(p, &ob.poly) || !cost.track_ok_at(model, &zs, tl, p, 0.5 * rq.w) {
                     continue;
                 }
                 let price = cost.mm * d / 1e6;
@@ -216,7 +257,7 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)], s
                 if !dr.opts.via_in_pad && point_in_poly(p, &ob.poly) {
                     continue;
                 }
-                if !in_fill(pour, p, 0.5 * sz.d as f64) {
+                if !cost.via_ok_at(model, &zs, p, 0.5 * sz.d as f64) {
                     continue;
                 }
                 let price = cost.mm * d / 1e6 + cost.squeeze(dr.point_room(p, sz.d as f64, rq.net), sz.d as f64);
@@ -249,7 +290,7 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)], s
     let mut best_share: Option<(f64, usize)> = None;
     for (k, v) in shared.iter().enumerate() {
         let len = (v.at - c).len();
-        if v.dead || v.net != rq.net || len > rpad + 3.0e6 || !in_fill(pour, v.at, 0.5 * v.size.d as f64) {
+        if v.dead || v.net != rq.net || len > rpad + 3.0e6 || !cost.via_ok_at(model, &zs, v.at, 0.5 * v.size.d as f64) {
             continue;
         }
         let price = cost.mm * len / 1e6 + load_price(v, rq.w, via_price);
@@ -274,7 +315,7 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)], s
     // instead of 6, 12 connections fewer). So where the pour also fills a layer the pad has no
     // copper on, a via site wins and a track is the fallback; where it fills only the pad's own
     // layers, the via adds no access and the cheaper of the two wins.
-    let other_layers = pour.fills.iter().any(|f| !b.signal_layers.iter().enumerate().any(|(l, &id)| id == f.layer && ob.layers.has(l)));
+    let other_layers = zs.iter().flat_map(|&k| model.pours[k].fills.iter()).any(|f| !b.signal_layers.iter().enumerate().any(|(l, &id)| id == f.layer && ob.layers.has(l)));
     let take_track = match (best_track, best_via) {
         (Some(_), None) => true,
         (Some((bt, ..)), Some((bv, ..))) => !other_layers && bt <= bv,
@@ -340,62 +381,132 @@ pub struct FarTerm {
     pub layers: Vec<u32>,
     /// Side of the terminal square (the wire's width).
     pub size: f64,
+    /// Straight price of the candidate (mm: distance plus a via where the pad has no copper on
+    /// its layers); the path search picks among the candidates.
+    pub price: f64,
 }
 
-/// The end of `rq`'s wire on its pour when no stub serves it (4.4). The region used is the
-/// board's existing fill of the pour (`model.pours[..].fills`, the copper KiCad filled before the
-/// run), kept clear by a margin: the track end's disc of radius w/2 + the zone's minimum width +
-/// the net clearance lies inside one fill, outside its holes. Of the fills on every layer, the
-/// point nearest the pad (its nearest boundary point, stepped inward along the pad-to-boundary
-/// direction until the disc fits), priced by distance plus the `via` price where the pad has no
-/// copper on that layer. `None`: no such point (the caller joins the pad by a signal connection
-/// as before). O(fill vertices).
-pub fn far_terminal(dr: &Drawer, rq: &Req, cost: &SiteCost) -> Option<FarTerm> {
+/// Most far-terminal candidates per pad ([`far_candidates`]).
+pub const FAR_CANDIDATES: usize = 24;
+
+/// Whether a disc of radius `r` at `p` lies inside the one fill piece `f` (inside its outer ring,
+/// outside its holes, at least `r` from every edge of them). O(piece vertices).
+fn in_piece(f: &crate::model::PourFill, p: Vec2, r: f64) -> bool {
+    let ring = |pts: &[crate::model::Pt]| -> Vec<Vec2> { pts.iter().map(|q| q.to_vec2()).collect() };
+    let far = |ps: &[Vec2]| (0..ps.len()).all(|i| seg_dist(p, ps[i], ps[(i + 1) % ps.len()]) >= r);
+    let outer = ring(&f.outer);
+    outer.len() >= 3
+        && point_in_poly(p, &outer)
+        && far(&outer)
+        && f.holes.iter().all(|h| {
+            let h = ring(h);
+            h.len() < 3 || (!point_in_poly(p, &h) && far(&h))
+        })
+}
+
+/// Spacing of the boundary samples of [`far_candidates`] and the least distance between two of
+/// its candidates, nm.
+pub const FAR_SAMPLE_NM: f64 = 0.5e6;
+pub const FAR_SPACING_NM: f64 = 1.0e6;
+
+/// Where the wire of `rq` may end on its net's pours when no stub serves it (4.4, planes as
+/// terminals; user 2026-11-12: "Routing over pours should be zero length, because the trace ends
+/// there, given that the pour is connected to the rest of the net"). The region is the fill
+/// KiCad filled before the run (`model.pours[..].fills`) of every pour of the pad's net, on the
+/// signal layers, only where it is connected to the rest of the net (`cost.live`, the main
+/// component; a cut-off island would leave the pad floating). Each candidate keeps a margin: the
+/// track end's disc of radius w/2 + the zone's minimum width + the net clearance lies inside one
+/// fill piece. Candidates: the boundary of every piece sampled every [`FAR_SAMPLE_NM`] (and the
+/// boundary point nearest the pad on each side), each stepped inward along the pad-to-boundary
+/// direction until the disc fits; priced by distance plus the `via` price where the pad has no
+/// copper on that layer. Returned cheapest first, at most [`FAR_CANDIDATES`], at least
+/// [`FAR_SPACING_NM`] apart: the caller lets the path search pick among them, so a point behind
+/// an obstacle loses to one the trace reaches directly (no detour to the nearest point). Inside
+/// the region the trace has no length: it ends at the region's edge. Empty: no such point (the
+/// caller joins the pad by a signal connection as before).
+/// O(B log B) in the boundary samples B, plus O(piece vertices) per tried sample.
+pub fn far_candidates(dr: &Drawer, rq: &Req, cost: &SiteCost) -> Vec<FarTerm> {
     let (model, b) = (dr.model, dr.b);
-    let pour = &model.pours[rq.pour];
     let ob = &b.proj.obstacles[rq.obs];
     let c = ob.center;
-    let margin = 0.5 * rq.w + pour.min_thickness.max(0) as f64 + model.rules.net_rule(rq.net).clearance as f64;
     let via_price = cost.via();
-    let mut best: Option<(f64, Vec2)> = None;
-    for f in pour.fills.iter().filter(|f| b.signal_layers.contains(&f.layer)) {
-        let li = b.signal_layers.iter().position(|&l| l == f.layer).unwrap_or(0);
-        let extra = if ob.layers.has(li) { 0.0 } else { via_price };
-        for ring in std::iter::once(&f.outer).chain(f.holes.iter()) {
-            let pts: Vec<Vec2> = ring.iter().map(|q| q.to_vec2()).collect();
-            if pts.len() < 3 {
-                continue;
-            }
-            for i in 0..pts.len() {
-                let (a, e) = (pts[i], pts[(i + 1) % pts.len()]);
-                let ab = e - a;
-                let t = ((c - a).dot(ab) / ab.len2().max(1.0)).clamp(0.0, 1.0);
-                let q = a + ab * t;
-                let d0 = (q - c).len();
-                if best.is_some_and(|(bp, _)| cost.mm * d0 / 1e6 + extra >= bp) {
+    // Boundary samples (lower bound of the price, point, inward direction, zone, fill).
+    let mut samples: Vec<(f64, Vec2, Vec2, usize, usize)> = Vec::new();
+    for (zi, pour) in model.pours.iter().enumerate().filter(|(_, z)| z.net == rq.net) {
+        for (fi, f) in pour.fills.iter().enumerate().filter(|(_, f)| b.signal_layers.contains(&f.layer)) {
+            let li = b.signal_layers.iter().position(|&l| l == f.layer).unwrap_or(0);
+            let extra = if ob.layers.has(li) { 0.0 } else { via_price };
+            for ring in std::iter::once(&f.outer).chain(f.holes.iter()) {
+                let pts: Vec<Vec2> = ring.iter().map(|q| q.to_vec2()).collect();
+                if pts.len() < 3 {
                     continue;
                 }
-                // Into the fill: away from the pad past the boundary point (the pad lies outside the
-                // fill or in a hole of it), or across the side where the pad sits on it.
-                let u = if d0 > 1.0 { (q - c) * (1.0 / d0) } else { Vec2 { x: -ab.y, y: ab.x } * (1.0 / ab.len().max(1.0)) };
-                let mut s = margin;
-                while s <= 4.0 * margin + 0.5e6 {
-                    let p = q + u * s;
-                    if in_fill_on(pour, Some(f.layer), p, margin) {
-                        let price = cost.mm * (p - c).len() / 1e6 + extra;
-                        if best.is_none_or(|(bp, _)| price < bp) {
-                            best = Some((price, p));
-                        }
-                        break;
+                for i in 0..pts.len() {
+                    let (a, e) = (pts[i], pts[(i + 1) % pts.len()]);
+                    let ab = e - a;
+                    let l = ab.len();
+                    let tn = ((c - a).dot(ab) / ab.len2().max(1.0)).clamp(0.0, 1.0);
+                    let n = (l / FAR_SAMPLE_NM).floor() as usize;
+                    for t in std::iter::once(tn).chain((0..=n).map(|k| k as f64 * FAR_SAMPLE_NM / l.max(1.0))) {
+                        let q = a + ab * t.min(1.0);
+                        let d0 = (q - c).len();
+                        // Into the fill: away from the pad past the boundary point (the pad lies outside
+                        // the fill or in a hole of it), or across the side where the pad sits on it.
+                        let u = if d0 > 1.0 { (q - c) * (1.0 / d0) } else { Vec2 { x: -ab.y, y: ab.x } * (1.0 / l.max(1.0)) };
+                        samples.push((cost.mm * d0 / 1e6 + extra, q, u, zi, fi));
                     }
-                    s += 0.25 * margin;
                 }
             }
         }
     }
-    let (_, at) = best?;
-    let layers: Vec<u32> = pour.fills.iter().filter(|f| b.signal_layers.contains(&f.layer) && in_fill_on(pour, Some(f.layer), at, margin)).map(|f| f.layer).collect::<std::collections::BTreeSet<u32>>().into_iter().collect();
-    (!layers.is_empty()).then_some(FarTerm { conn: rq.conn, at, layers, size: rq.w })
+    samples.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.x.total_cmp(&y.1.x)).then(x.1.y.total_cmp(&y.1.y)));
+    let mut out: Vec<FarTerm> = Vec::new();
+    for (lb, q, u, zi, fi) in samples {
+        if out.len() >= FAR_CANDIDATES && out.iter().all(|f| f.price <= lb) {
+            break;
+        }
+        let pour = &model.pours[zi];
+        let f = &pour.fills[fi];
+        let margin = 0.5 * rq.w + pour.min_thickness.max(0) as f64 + model.rules.net_rule(rq.net).clearance as f64;
+        let extra = lb - cost.mm * (q - c).len() / 1e6;
+        let mut s = margin;
+        let mut found = None;
+        while s <= 4.0 * margin + 0.5e6 {
+            let p = q + u * s;
+            if in_piece(f, p, margin) && cost.connected(zi, f.layer, p) {
+                found = Some(p);
+                break;
+            }
+            s += 0.25 * margin;
+        }
+        let Some(at) = found else { continue };
+        let price = cost.mm * (at - c).len() / 1e6 + extra;
+        if out.iter().any(|g| (g.at - at).len() < FAR_SPACING_NM) {
+            continue;
+        }
+        // The layers where some connected fill of the net covers the end with its margin.
+        let layers: Vec<u32> = model
+            .pours
+            .iter()
+            .enumerate()
+            .filter(|(_, z)| z.net == rq.net)
+            .flat_map(|(zj, z)| {
+                let m = 0.5 * rq.w + z.min_thickness.max(0) as f64 + model.rules.net_rule(rq.net).clearance as f64;
+                z.fills.iter().filter(move |g| b.signal_layers.contains(&g.layer) && in_piece(g, at, m) && cost.connected(zj, g.layer, at)).map(|g| g.layer)
+            })
+            .collect::<std::collections::BTreeSet<u32>>()
+            .into_iter()
+            .collect();
+        if layers.is_empty() {
+            continue;
+        }
+        out.push(FarTerm { conn: rq.conn, at, layers, size: rq.w, price });
+        out.sort_by(|x, y| x.price.total_cmp(&y.price));
+        while out.len() > FAR_CANDIDATES {
+            out.pop();
+        }
+    }
+    out
 }
 
 /// Geometric median of `pts` (Weiszfeld's iteration, 50 steps from the centroid): the point
@@ -456,7 +567,7 @@ pub fn resite(dr: &mut Drawer, reqs: &[Req], outs: &mut [Option<Out>], v: &mut P
         if members.iter().any(|&i| (ctr(i) - p).len() > rpad(i) + 3.0e6 || (!dr.opts.via_in_pad && point_in_poly(p, &b.proj.obstacles[reqs[i].obs].poly))) {
             return false;
         }
-        if !in_fill(pour, p, r) || others.iter().any(|&(q, rq2)| (q - p).len() < r + rq2 + 1_000.0) {
+        if !cost.via_ok_at(model, &cost.pours_of(model, &reqs[owner]), p, r) || others.iter().any(|&(q, rq2)| (q - p).len() < r + rq2 + 1_000.0) {
             return false;
         }
         let crowd = via_item(v.net, p, ViaSize { d: sz.d + 2 * pour.min_thickness.max(0), drill: sz.drill }, None);
@@ -518,12 +629,13 @@ pub fn islands(model: &BoardModel, b: &Board, vias: &[(usize, Vec2)], reqs: &[Re
     let mut out = Vec::new();
     for &(conn, at) in vias {
         let Some(rq) = reqs.iter().find(|r| r.conn == conn) else { continue };
-            let pour = &model.pours[rq.pour];
-        let inside = pour.fills.iter().any(|f| {
+        // Any pour of the net: with planes as terminals a stub may end in another pour of its net.
+        let pours = || model.pours.iter().filter(|z| z.net == rq.net);
+        let inside = pours().flat_map(|z| z.fills.iter()).any(|f| {
             let ring: Vec<Vec2> = f.outer.iter().map(|p| p.to_vec2()).collect();
             ring.len() >= 3 && point_in_poly(at, &ring)
         });
-        if !pour.fills.is_empty() && !inside {
+        if pours().any(|z| !z.fills.is_empty()) && !inside {
             let pad = &model.pads[rq.pad];
             out.push(format!(
                 "plane island: via of pad {}.{} at ({:.3}, {:.3}) mm is outside the filled copper of its plane ({} zone)",
