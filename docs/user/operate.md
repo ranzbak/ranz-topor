@@ -90,8 +90,9 @@ board needs.
   the net's via. Example: wiccon-2023 (factory 0.8 / 0.4 mm net class, minimum via drill 0.3 mm, annular
   0.1 mm) may get 0.8 / 0.4 and 0.5 / 0.3 mm vias.
 - KiCad's **pre-defined vias** (KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias,
-  `via_dimensions` in the `.kicad_pro`) are **not read** for routing in 0.4.0; routing with them (and a fallback to the profile only
-  when the list is empty) arrives in 0.5.0. They do decide whether
+  `via_dimensions` in the `.kicad_pro`) **are used** for routing: with `[vias] size = "net_class"` the net's
+  class via comes first, then every pre-defined via (and every profile via above) that is smaller than it and
+  meets the minimums, largest first (`engine/src/vias.rs` `sizes_for`). They also decide whether
   [`VIA_NOT_SET_UP`](troubleshoot.md#via_not_set_up) fires: no pre-defined via and only KiCad's factory
   0.8 / 0.4 mm net class via → the nets with that via get `[vias] fallback_diameter_mm` /
   `fallback_drill_mm` (0.8 / 0.4 mm by default) as their own via, plus the smaller profile vias above.
@@ -711,8 +712,9 @@ Measured on six snapshot boards (offline tests against KiCad's own polygons); th
   UNVERIFIED on a live KiCad until the GUI checklist ran.
 - **Via sizes**: when KiCad has no via sizes set up ([`VIA_NOT_SET_UP`](troubleshoot.md#via_not_set_up)),
   topor uses `[vias] fallback_diameter_mm` / `[vias] fallback_drill_mm` (0.8 / 0.4 mm) for every net whose
-  via size is KiCad's factory default. On every board the router may add smaller fab-profile vias, and
-  KiCad's pre-defined vias are not read ([Fab minimums and via sizes](#fab-minimums-and-via-sizes)).
+  via size is KiCad's factory default. Smaller KiCad pre-defined vias are used where the class via does not
+  fit, and so are smaller fab-profile vias unless `[rules] fab_profile = "board"`
+  ([Fab minimums and via sizes](#fab-minimums-and-via-sizes)).
 
 **Not yet**: same-net T-junctions, via relaxation and per-layer costs
 (0.5.0); free via placement and the 45° mode (backlog). Plugin calls that need a running KiCad are listed
