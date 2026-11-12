@@ -18,6 +18,10 @@ def test_numbers():
 @pytest.mark.skipif(not kicad_cli().exists(), reason="no kicad-cli")
 def test_kicad_drc(tmp_path):
     g = vp.generate("pair_move", tmp_path, png=False, drc=False)
+    # valid test (harness.validity): the expected answer is built for the board's own rules, route with
+    # [rules] fab_profile = "board" and the via rule the via patterns assume
+    import json
+    assert json.loads(g["expected"].read_text())["rules_assumed"] == vp.RULES_ASSUMED
     assert vp.drc_of(g["problem"])["violations"] == 0
     for k in ("reference", "careless"):
         r = vp.drc_of(g[k])
