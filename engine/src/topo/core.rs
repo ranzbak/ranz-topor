@@ -1952,11 +1952,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         r
     };
-    // The P4 pick follows the board objective, violations first: the fewest over-full
-    // edge-layers under the drawing's packer (the predicted violations), then the objective's own
-    // value (`length + mm_per_via x vias`, or the occupied area in mm of default trace) instead
-    // of the bare via count. (Measured: pricing the over-full edge-layers into one sum with the
-    // `overflow` weight routed fewer connections on bornhack2026, so violations stay lexicographic.)
+    // The P4 pick follows the board objective: the objective's own value (`length + mm_per_via x
+    // vias`, or the occupied area in mm of default trace) plus the graded price of the predicted
+    // violations (M0: one price S = sum k_i x_i, Polubasov 2010 «Оптимизация разводки»; the
+    // archive judges the variants). `[capacity] edges_test = "refuse"` (per-edge model only) keeps
+    // the pick before M0: the fewest over-full edge-layers first, then the objective (S3,
+    // 3814139, measured then: one sum routed fewer connections on bornhack2026; that was a
+    // monotone gate, no-monotone-gates).
     let obj = Objective::from_options(&opts.objective, opts.mm_per_via, &opts.pick);
     let overflow_mm = reg.price(&Event::Overflow { wire: 0, edge: 0 }, &WireCtx::default()).max(1e-6);
     let via_area_mm = {
@@ -1969,6 +1971,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // plus the over-full price of the cuts, vias without a site and unlayerable crossings at the
     // `overflow` weight; design docs/dev/inflated-sketch.md §4.4). The count stays in the report.
     let cuts_on = packer.cuts.is_some();
+    // M0: the over-full edge-layers (per-edge model) or cuts (cut model) are priced, never a hard
+    // gate, unless `[capacity] edges_test = "refuse"` asks for the per-edge hard test before M0.
+    let priced = cuts_on || opts.edges_test != "refuse";
     let score = |st: &State, lr: &layers::LayerReport| -> Score {
         let dirs = dirs_of(st);
         let cm = if cuts_on { CapModel::new_cut(st, &packer, &dirs, &lr.events, bottom, overflow_mm) } else { CapModel::new(st, &packer, &dirs, &lr.events, bottom, overflow_mm) };
@@ -1986,11 +1991,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // that cannot be layered (both stretches held to one layer: a short when drawn) and
         // (Q14b) traversals through foreign copper (a short when drawn).
         let fc = super::optimise::foreign_copper(st, &super::optimise::layers_now(st, &lr.events, bottom));
-        let graded = if cuts_on { cm.total() + overflow_mm * (lr.unlayerable.len() as f64 + fc.1) } else { 0.0 };
+        let graded = if priced { cm.total() + overflow_mm * (lr.unlayerable.len() as f64 + fc.1) } else { 0.0 };
         (own, cm.overfull() + lr.unlayerable.len() + fc.0, lr.vias, graded)
     };
-    // Lexicographic: over-full edge-layers, then the objective (cut model: one graded sum).
-    let p4_better = |a: &Score, b: &Score| if cuts_on { a.0 + a.3 < b.0 + b.3 - 1e-6 } else { a.1 < b.1 || (a.1 == b.1 && a.0 < b.0 - 1e-6) };
+    // One graded sum (priced), or lexicographic: over-full edge-layers, then the objective.
+    let p4_better = |a: &Score, b: &Score| if priced { a.0 + a.3 < b.0 + b.3 - 1e-6 } else { a.1 < b.1 || (a.1 == b.1 && a.0 < b.0 - 1e-6) };
     // Reroute counter per connection: the P4 moves pay the `reroute` factor's price for it.
     // (Measured: ripping the least moved wires first in the negotiated rip-up routed fewer
     // connections on dcsgonebadge and qmtech, so the rip order stays routed-last first.)
@@ -2057,7 +2062,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             ripped: *ripped_total,
             max_ripped: opts.max_ripped,
             tight: Vec::new(),
-            over_mm: cuts_on.then_some(overflow_mm),
+            over_mm: priced.then_some(overflow_mm),
             tally: Tally::default(),
         };
         let mut resolved = 0usize;
@@ -2303,7 +2308,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
                 t
             },
-            over_mm: cuts_on.then_some(overflow_mm),
+            over_mm: priced.then_some(overflow_mm),
             tally: Tally::default(),
         };
         let mut st2 = st.clone();
@@ -2360,7 +2365,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             n_signal: n_sig,
             evals: 0,
             max_evals: opts.max_moves,
-            strict: !cuts_on,
+            strict: !priced,
             add_vias: cuts_on && opts.cut_vias,
             tally: Tally::default(),
         };
@@ -2539,6 +2544,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             overflow_mm: f64,
             viol_mm: f64,
             cuts_on: bool,
+            priced: bool,
             obj: Objective,
             via_area_mm: f64,
             crossing_share: f64,
@@ -2895,7 +2901,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         n_signal: self.n_sig,
                         evals: 0,
                         max_evals: self.max_moves,
-                        strict: !self.cuts_on,
+                        strict: !self.priced,
                         add_vias: self.cuts_on && self.cut_vias,
                         tally: Tally::default(),
                     };
@@ -3016,6 +3022,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             overflow_mm,
             viol_mm,
             cuts_on,
+            priced,
             obj,
             via_area_mm,
             crossing_share: opts.loop_crossing.max(0.0),

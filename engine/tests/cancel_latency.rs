@@ -63,6 +63,6 @@ fn cancel_before_a_run_begins_skips_it() {
     // more runs than threads: the runs not begun when Cancel comes have no result of their own
     let (r, s) = cancel_after(opts(r#", "runs": 64"#), Duration::from_millis(200));
     assert!(s < BOUND_S, "took {s:.2} s");
-    let line = r.warnings.iter().find(|w| w.starts_with("best of 64 seeded runs")).expect("best-of line");
+    let line = r.warnings.iter().find(|w| w.starts_with("best of 64 seeded runs")).unwrap_or_else(|| panic!("best-of line: {} {:?}", r.stop_reason, r.warnings));
     assert!(line.contains("not begun") && line.contains("without a result of their own"), "{line}");
 }

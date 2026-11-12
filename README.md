@@ -93,7 +93,8 @@ is unchanged by K1 (eprom 27/27, wiccon 60/60, dcs 189/231, qmtech 346/426, rout
 
 ### Iterations like TopoR: "Routes stable", OK, best of N runs (M-B0)
 
-A run no longer stops after a fixed four rounds. Like TopoR it keeps iterating whole-route cycles: every cycle
+(Since M0 this whole-route cycle loop is `[optimize] loop = "cycles"`; the default is TopoR's loop on the topology,
+see *Defaults = the TopoR method (M0)* below.) A run no longer stops after a fixed four rounds. Like TopoR it keeps iterating whole-route cycles: every cycle
 routes the board again with the passages the drawing found too small lowered and with fluctuating factor weights
 (Polubasov 2010) whose width starts wide, narrows every cycle and widens again when the run is stuck with
 connections still open (annealing with reheating; `[optimize] fluctuation`, `fluctuation_narrowing`,
@@ -326,6 +327,26 @@ and at dcsgonebadge U1 (pads 1.27 mm apart: the fan-out centred on the pad pair 
 (the wire arrives from the side that swaps P and N: the planner does not choose the approach side yet). One qmtech
 run (seed 4, first attempt) ended ENGINE_UNRESPONSIVE at the CPU limit under heavy machine load; its rerun is in the
 table. eprom and wiccon have no pairs; their higher CPU seconds (11 vs 7, 142 vs 93) come from the busier machine.
+
+### Defaults = the TopoR method (M0)
+
+The TopoR pipeline (Polubasov 2010; TopoR 6.3 manual pp. 65, 72–73) is now what a run does by default, step by step:
+the fixed board is triangulated once; every connection is laid once, widest first, never dropped (`[optimize]
+initial = "once"`), its length priced as the shortest path that keeps the clearances (`[search] length = "taut"`);
+layers are assigned by via minimisation with the per-layer cut test as the capacity price (`[capacity] model =
+"cuts"`); TopoR's loop then works on the topology only (`[optimize] loop = "topor"`: single-wire rip-up and reroute
+with oscillating weights, layer re-optimisation, vias relocated between their crossings, crossing rules, an archive
+of variants with restarts); the picked variant is drawn once, without drawing feedback (`[search] drawing_feedback
+= "auto"`). Every judgement is one price (S = Σ weight × amount): an over-full passage, a crossing on one layer or a
+trace through foreign copper is costly, never a refusal (the per-edge model's hard move tests and its lexicographic
+P4 pick are `[capacity] edges_test = "refuse"`, an option). The routing before M0 is still there, value for value:
+`loop = "cycles"`, `initial = "per_cycle"`, `length = "even"`, `[capacity] model = "edges"`, `edges_test = "refuse"`
+(`drawing_feedback = "auto"` is on with the cycles loop).
+
+The drawing is still sequential (each wire an obstacle for the next) until the draw-once stages land; the stage
+order from here (method first, then symptoms): M1 predicted-vs-drawn report → M2 draw once → M3 radii, spokes and
+octilinear bands → M4 diff pairs in the topology → M5 defaults re-check → M6 remove firefighting → M7 necks and pad
+exits → M8 install → M9 re-check the parked board symptoms.
 
 ## Requirements
 

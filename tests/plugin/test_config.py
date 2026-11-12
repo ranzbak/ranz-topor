@@ -190,22 +190,50 @@ def test_topological_core_settings_reach_the_engine():
 
 def test_via_auto_settings_follow_the_taut_length(tmp_path):
     """5.4 defaults: [vias] relocate / between_crossings = "auto" are on with [search] length = "taut" in any loop
-    (user 2026-11-11: cycles too), off with the default "even" length; "on" / "off" / true / false force them
-    (toml and --set)."""
+    (user 2026-11-11: cycles too), off with the "even" length; "on" / "off" / true / false force them (toml and
+    --set). M0: "taut" is the default length, so the defaults have them on."""
     keys = ("via_relocate", "via_between")
     pick = lambda c: tuple(c.engine_options()[k] for k in keys)
     d = Config.defaults()
-    assert pick(d) == (False, False)
+    assert pick(d) == (True, True)
+    even = d.with_values({("search", "length"): "even"})
+    assert pick(even) == (False, False)
     tl = d.with_values({("optimize", "loop"): "topor", ("search", "length"): "taut"})
     assert pick(tl) == (True, True)
-    assert pick(d.with_values({("search", "length"): "taut"})) == (True, True)  # the cycles loop too
-    assert pick(d.with_values({("optimize", "loop"): "topor"})) == (False, False)  # relocate needs taut
+    assert pick(d.with_values({("optimize", "loop"): "cycles"})) == (True, True)  # the cycles loop too
+    assert pick(even.with_values({("optimize", "loop"): "topor"})) == (False, False)  # relocate needs taut
     assert pick(tl.with_values({("vias", "relocate"): "off", ("vias", "between_crossings"): False})) == (False, False)
-    assert pick(d.with_values({("vias", "relocate"): "on", ("vias", "between_crossings"): True})) == (True, True)
+    assert pick(even.with_values({("vias", "relocate"): "on", ("vias", "between_crossings"): True})) == (True, True)
     (tmp_path / "topor.toml").write_text("version = 1\n[vias]\nrelocate = true\nbetween_crossings = \"off\"\n")
     cfg, findings = load_config(tmp_path)
     assert pick(cfg) == (True, False)
     assert not [f for f in findings if f.code == "CFG_VALUE"]
+
+def test_m0_defaults_are_the_topor_method(tmp_path):
+    """M0 (user 2026-11-12, "change the options to match TopoR"): the defaults are TopoR's method (Polubasov 2010):
+    the TopoR loop on the topology, the initial routing once, taut lengths, the per-layer cut test as the capacity
+    price, the per-edge model priced too, no drawing feedback with the TopoR loop. The engine's own defaults agree
+    (engine/src/model.rs m0_defaults_are_the_topor_method). The values before M0 stay available, and drawing_feedback
+    "auto" is on with the cycles loop (the behaviour before M0)."""
+    d = Config.defaults()
+    assert (d.get("optimize", "loop"), d.get("optimize", "initial"), d.get("search", "length"),
+            d.get("capacity", "model"), d.get("capacity", "edges_test"), d.get("search", "drawing_feedback")) == \
+        ("topor", "once", "taut", "cuts", "price", "auto")
+    e = d.engine_options()
+    assert (e["opt_loop"], e["initial"], e["search_length"], e["capacity_model"], e["edges_test"],
+            e["drawing_feedback"]) == ("topor", "once", "taut", "cuts", "price", False)
+    old = d.with_values({("optimize", "loop"): "cycles", ("optimize", "initial"): "per_cycle",
+                         ("search", "length"): "even", ("capacity", "model"): "edges",
+                         ("capacity", "edges_test"): "refuse"})
+    o = old.engine_options()
+    assert (o["opt_loop"], o["initial"], o["search_length"], o["capacity_model"], o["edges_test"], o["drawing_feedback"],
+            o["via_relocate"], o["via_between"]) == ("cycles", "per_cycle", "even", "edges", "refuse", True, False, False)
+    assert d.with_values({("search", "drawing_feedback"): "on"}).engine_options()["drawing_feedback"] is True
+    assert old.with_values({("search", "drawing_feedback"): "off"}).engine_options()["drawing_feedback"] is False
+    (tmp_path / "topor.toml").write_text("version = 1\n[search]\ndrawing_feedback = true\n")
+    cfg, findings = load_config(tmp_path)
+    assert cfg.engine_options()["drawing_feedback"] is True and not [f for f in findings if f.code == "CFG_VALUE"]
+
 
 def test_removed_keys_are_ignored_with_a_warning(tmp_path):
     """CL cleanup: an old topor.toml that sets removed keys (also whole removed sections) still loads; each such

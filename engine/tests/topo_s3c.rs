@@ -449,6 +449,39 @@ fn cut_model_label_moves_are_kept_on_price_alone() {
     }
 }
 
+#[test]
+fn edge_model_label_moves_are_priced_unless_refuse() {
+    // M0: with [capacity] model = "edges" the label moves are priced too (edges_test = "price",
+    // the default; Polubasov 2010: one price S = sum k_i x_i): the lift of
+    // a_label_move_that_overfills_the_door_is_refused drops two vias (2 x 25) and over-fills the
+    // door on layer 1; at a cheap overflow price it is kept, at a dear one refused by the price.
+    // edges_test = "refuse" (strict, the hard test before M0) refuses it whatever the price.
+    let m = door();
+    let b = board::build(&m, &BuildOpts::default()).unwrap();
+    let conns = b.connections(&m);
+    let mut st = State::new(&b.proj);
+    route(&mut st, &conns, &InitWeights::default());
+    let opts = Options { capacity_model: "edges".into(), ..Options::default() };
+    let packer = Packer::for_model(&m, &opts, &b.proj);
+    let polys = packer.taut_dirs(&st);
+    let n = st.wires[0].passes.len();
+    let evl = vec![vec![(0, 0.5, 1), (1, 0.5, 0), (n, 0.5, 1)], vec![(0, 0.5, 1)]];
+    let (mask, partner) = (vec![vec![0b10, 0b11, 0b10], vec![0b10]], vec![vec![None; 3], vec![None]]);
+    for (price, strict, kept) in [(2.0, true, false), (200.0, false, false), (2.0, false, true)] {
+        let cm = CapModel::new(&st, &packer, &polys, &evl, 1, price);
+        assert!(cm.cut.is_none(), "priced by the edges");
+        let before = cm.total();
+        let mut lb = Labels { strict, add_vias: false, ..labels(&st, cm, evl.clone(), &mask, &partner) };
+        let lifted = lb.lifts(0);
+        let after = lb.cm.total();
+        eprintln!("edges, overflow price {price} strict {strict}: lifted {lifted}, price {before:.3} -> {after:.3}");
+        assert_eq!(lifted >= 1, kept, "price {price} strict {strict}");
+        if kept {
+            assert!(after > before, "the door is over-full after the kept lift");
+        }
+    }
+}
+
 // ---------------------------------------------------------------- blocks_pad in the search
 
 /// The search itself avoids the last free entry sector of an unrouted pad when `blocks_pad` is

@@ -105,8 +105,8 @@ type, default, unit, range and the KiCad place that influences it.
 | `[search]` | detour factor, safety margin, zero-slack retry |
 | `[ripup]` | rip-up escalation |
 | `[iterations]` | when the optimiser stops (cap, patience, minimum gain) |
-| `[optimize]` | topological core: how a run iterates (fluctuation schedule, *Routes stable*, best of N `runs`), the safety and work caps that make a run reproducible (`rounds`, `max_ripped`, `max_expansions`, `max_moves`), the P4 moves, the board objective (`objective` = `length_vias` or `area`, `mm_per_via`) and how many result variants are kept (`variants`) |
-| `[capacity]` | topological core: the per-layer cut test (`mixed_clearance`, `cut_radius_mm`) and its debug report (`cut_report`: a folder that gets the cut test of every routing cycle, for `harness/cutclass.py`); by default it only measures, `model = "cuts"` makes it the price of the layer assignment (with `overflow_softness`, `cut_vias`; opt-in, the per-edge model stays the default) |
+| `[optimize]` | topological core: how a run iterates (`loop`: TopoR's loop on the topology by default, `"cycles"` = the whole-route cycles before M0; `initial`; fluctuation schedule, *Routes stable*, best of N `runs`), the safety and work caps that make a run reproducible (`rounds`, `max_ripped`, `max_expansions`, `max_moves`), the P4 moves, the board objective (`objective` = `length_vias` or `area`, `mm_per_via`) and how many result variants are kept (`variants`) |
+| `[capacity]` | topological core: the per-layer cut test (`mixed_clearance`, `cut_radius_mm`) and its debug report (`cut_report`: a folder that gets the cut test of every routing cycle, for `harness/cutclass.py`); by default (`model = "cuts"`, since M0) it is the price of the layer assignment and of the rip-up rounds (with `overflow_softness`, `cut_vias`); `model = "edges"` is the per-edge model before M0, its over-full edge-layers priced too (`edges_test = "price"`) or refused as before (`"refuse"`) |
 | `[factors]` | topological core: weight, scope and report level of each social factor (via, crossing, squeeze, blocks_pad, reroute, …; see the factor table in configuration.md) |
 | `[output]` | arcs or straight segments; report folder |
 | `[expert]` | router constants — leave them alone unless you know the router |
@@ -361,7 +361,17 @@ close to and the cause; KiCad's DRC shows the same places, and the progress dial
 result under *Best so far*. `[optimize] allow_violations = false` writes legal copper only: such connections are
 reported unrouted and nothing of them is written (the behaviour before).
 
-**How the cycles remove violations (M-B2).** Each cycle feeds what went wrong back to the next one *locally*:
+**The method by default (M0).** A run follows TopoR's method (Polubasov 2010): the initial routing once
+(`[optimize] initial = "once"`), lengths priced as the shortest path that keeps the clearances (`[search] length
+= "taut"`), the per-layer cut test as the capacity price (`[capacity] model = "cuts"`), then TopoR's loop on the
+topology only (`[optimize] loop = "topor"`), and the picked variant drawn once, without drawing feedback
+(`[search] drawing_feedback = "auto"`). Every judgement is one price (the sum of weight × amount over the
+factors): an over-full passage, a crossing on one layer or a trace through foreign copper is costly, never a
+refusal. The whole-route cycles below are the method before M0, still available with `loop = "cycles"`
+(`initial = "per_cycle"`, `length = "even"`, `[capacity] model = "edges"`, `edges_test = "refuse"` and
+`drawing_feedback = "on"` give exactly the routing before M0).
+
+**How the cycles remove violations (M-B2, `loop = "cycles"`).** Each cycle feeds what went wrong back to the next one *locally*:
 the history (a price) goes only on the stretch of the trace where its copper broke a rule, weighted by the
 distance to the place, and on the passages that were over-full; a passage the drawing found too narrow gets a
 lowered room (a cut). Old findings fade every cycle (`[optimize] history_fade`, default 0.5), and when a cycle

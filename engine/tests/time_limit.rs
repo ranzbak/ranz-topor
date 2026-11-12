@@ -12,9 +12,11 @@ fn eprom() -> BoardModel {
 }
 
 /// Never stable (a huge stable window) and no stop at stable: only the limit or Cancel ends it.
+/// The whole-route cycles (`opt_loop = "cycles"`, the default before M0): they iterate until the
+/// limit; TopoR's loop (the default since M0) ends by itself when its plan is stable.
 fn opts(limit_s: f64) -> Options {
     Options::from_json(&format!(
-        r#"{{"runs": 1, "wall_clock_s": {limit_s}, "stop_when_stable": false, "finish_when_stable": false, "topo_rounds": 100000, "stable_window": 100000, "threads": 2}}"#
+        r#"{{"runs": 1, "wall_clock_s": {limit_s}, "stop_when_stable": false, "finish_when_stable": false, "topo_rounds": 100000, "stable_window": 100000, "threads": 2, "opt_loop": "cycles"}}"#
     ))
     .expect("options parse")
 }

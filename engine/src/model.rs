@@ -890,7 +890,10 @@ pub struct Options {
     pub neck_to_pad: bool,
     /// Topological core (S2c, `topor.toml [search] drawing_feedback`): a wire the drawing cannot
     /// fit is drawn before the wires that block its sleeve, which are redrawn around it (at most
-    /// one round per wire) instead of being reported failed at once.
+    /// one round per wire) instead of being reported failed at once; with `opt_loop = "cycles"`
+    /// the rooms the drawing found too narrow also feed into the next cycle's plan. Default false
+    /// (M0: the TopoR method computes the copper once from the topology, Polubasov 2010 intro;
+    /// the plugin's `"auto"` is on with `opt_loop = "cycles"`, off with `"topor"`).
     pub drawing_feedback: bool,
     /// Topological core (S2c, `topor.toml [vias] offset_sites`): besides the sample points of the
     /// via interval's triangles, also try the via's offset corners of nearby pads and copper.
@@ -954,20 +957,21 @@ pub struct Options {
     /// wire's length. `"taut"` = the shortest path through the wire's sleeve that keeps the
     /// clearances (to the pads at the ends of each crossed edge and to the passes already there),
     /// as TopoR's initial routing takes "the shortest path on the triangulation with the clearances
-    /// needed" (Polubasov 2010, «Начальная трассировка»); `"even"` (default until 4.3 is accepted)
-    /// = between evenly spaced points on each crossed edge, a poor estimate on long edges (the
-    /// projection without the Steiner grid).
+    /// needed" (Polubasov 2010, «Начальная трассировка»; default since M0); `"even"` (the default
+    /// before M0) = between evenly spaced points on each crossed edge, a poor estimate on long
+    /// edges (the projection without the Steiner grid).
     pub search_length: String,
     /// Topological core (shopping list 4.3, `topor.toml [optimize] initial`): `"once"` = the
     /// initial routing runs once per run (first cycle): every wire placed (never "no topological
     /// path": a wire without a legal path goes through at the `violation` price), double crossings
     /// removed after every wire, a crossing that no layer assignment separates priced as a
     /// violation; later cycles start from the previous cycle's plan and improve it.
-    /// `"per_cycle"` (default until 4.3 is accepted) = every cycle routes from scratch (before 4.3).
+    /// Default since M0 (Polubasov 2010: the initial routing once, then the optimisation of that
+    /// topology). `"per_cycle"` (the default before M0) = every cycle routes from scratch.
     pub initial: String,
     /// Topological core (shopping list 5.1, `topor.toml [optimize] loop`): how a run iterates.
-    /// `"cycles"` (default) = whole-route cycles, each planned and drawn, the drawing feeding back
-    /// into the next plan (before 5.1). `"topor"` = TopoR's loop (Polubasov 2010 «Оптимизация
+    /// `"cycles"` (the default before M0) = whole-route cycles, each planned and drawn, the drawing
+    /// feeding back into the next plan (before 5.1). `"topor"` (default since M0) = TopoR's loop (Polubasov 2010 «Оптимизация
     /// разводки»): the initial routing once (as `initial = "once"`), then cycles on the topology
     /// only: single-wire rip-up and reroute with per-wire oscillating coefficients, the layer
     /// re-optimisation with a random choice among equal layerings, the wires whose vias rose laid
@@ -1158,8 +1162,9 @@ pub struct Options {
     pub cut_report: String,
     /// P1a fit authority (`[capacity] model`, shopping list 2.2): which capacity model prices the
     /// layer assignment (P3), the P4 label moves and the P4 pick of the best round. `"edges"`
-    /// (default): the per-edge packer of the shared projection (`topo::refine::CapModel`).
-    /// `"cuts"`: the per-layer cut test (`topo::cutmodel`, the critical cuts of each layer's sheet
+    /// (the default before M0): the per-edge packer of the shared projection
+    /// (`topo::refine::CapModel`), its over-full edge-layers priced as [`Options::edges_test`]
+    /// says. `"cuts"` (default since M0): the per-layer cut test (`topo::cutmodel`, the critical cuts of each layer's sheet
     /// in the planning norm) with the graded over-full price `overflow x phi` per cut; P2's
     /// per-edge room of an edge with an end that is no copper on a layer then comes from that
     /// layer's sheet (`topo::cutmodel::sheet_room`, shopping list 2.3), and P4 is priced by the
@@ -1167,6 +1172,16 @@ pub struct Options {
     /// the topology and label moves keep a change by its graded total (no hard capacity test) and
     /// the pick of the best round is objective + over-full price.
     pub capacity_model: String,
+    /// M0 (`[capacity] edges_test`, `capacity_model = "edges"` only): how the per-edge model's
+    /// over-full edge-layers enter P4. `"price"` (default) = as the method prices everything
+    /// (Polubasov 2010 «Оптимизация разводки»: one price S = sum k_i x_i): a topology move pays
+    /// the `overflow` weight per over-room or unsafe pass, a label move is kept on its price alone
+    /// (the over-full price of the edge-layers + vias) and the pick of the best P4 round is the
+    /// objective plus the graded over-full price, as with `"cuts"`. `"refuse"` = the hard test
+    /// before M0 (a move with more over-room passes, or a label move that makes an edge-layer more
+    /// over-full or leaves a via without a site, is refused whatever its price; the rounds are
+    /// picked by the over-full count first, the objective second). The cut model is always priced.
+    pub edges_test: String,
     /// `[capacity] overflow_softness` (model = "cuts"): the softness `tau` of the graded over-full
     /// price, in track pitches: the price of a cut rises smoothly from almost 0 at a slack of a few
     /// `tau` pitches through about 0.57 x `overflow` at zero slack to `overflow x (1 + overflow in
@@ -1263,7 +1278,7 @@ impl Default for Options {
             ignore_pads: Vec::new(),
             pour_served: BTreeMap::new(),
             neck_to_pad: true,
-            drawing_feedback: true,
+            drawing_feedback: false,
             via_offset_sites: true,
             feedback_max_rip: 8,
             history_fade: 0.5,
@@ -1276,9 +1291,9 @@ impl Default for Options {
             cleanup_safe: true,
             net_tree: "free".into(),
             steiner: false,
-            search_length: "even".into(),
-            initial: "per_cycle".into(),
-            opt_loop: "cycles".into(),
+            search_length: "taut".into(),
+            initial: "once".into(),
+            opt_loop: "topor".into(),
             loop_restart: 2,
             loop_stable_window: 8,
             loop_via_start: 0.5,
@@ -1325,7 +1340,8 @@ impl Default for Options {
             mixed_clearance: "conservative".into(),
             cut_radius_mm: 0.0,
             cut_report: String::new(),
-            capacity_model: "edges".into(),
+            capacity_model: "cuts".into(),
+            edges_test: "price".into(),
             overflow_softness: 0.1,
             cut_vias: true,
             stop_after: String::new(),
@@ -1336,9 +1352,9 @@ impl Default for Options {
             via_drill_grid_nm: 10_000,
             via_pair_min: false,
             via_pair_max_mm: 10.0,
-            via_relocate: false,
+            via_relocate: true,
             branch_relocate: false,
-            via_between: false,
+            via_between: true,
         }
     }
 }
@@ -1400,5 +1416,26 @@ impl Item {
             return Ok(Vec::new());
         }
         serde_json::from_str(s).map_err(|e| format!("items json: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Options;
+
+    /// M0 (user 2026-11-12, "change the options to match TopoR"): the defaults are the TopoR method
+    /// (Polubasov 2010): initial routing once, taut lengths, the per-layer cut test as the capacity
+    /// price, TopoR's loop on the topology, no drawing feedback, the vias relocated between their
+    /// crossings (the plugin's `auto` with taut), and every capacity judgement priced. The plugin's
+    /// schema (`plugin/topor/schema.py`) has the same defaults (tests/plugin/test_config.py).
+    #[test]
+    fn m0_defaults_are_the_topor_method() {
+        let o = Options::default();
+        assert_eq!(
+            (o.opt_loop.as_str(), o.initial.as_str(), o.search_length.as_str(), o.capacity_model.as_str(), o.edges_test.as_str()),
+            ("topor", "once", "taut", "cuts", "price")
+        );
+        assert!(!o.drawing_feedback);
+        assert!(o.via_relocate && o.via_between);
     }
 }

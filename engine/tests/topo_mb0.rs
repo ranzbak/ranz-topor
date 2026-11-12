@@ -19,10 +19,12 @@ fn cycles_line(r: &RouteResult) -> &str {
 }
 
 /// A headless run iterates until its routes are stable (no fixed round count) and says so; the
-/// stable test needs `stable_window + 1` cycles (TopoR: not before level 5-10).
+/// stable test needs `stable_window + 1` cycles (TopoR: not before level 5-10). The whole-route
+/// cycles' schedule (`opt_loop = "cycles"`, the default before M0; TopoR's loop, the default since
+/// M0, is one cycle per run with its own stable test, `loop_stable_window`).
 #[test]
 fn a_run_iterates_until_stable() {
-    let r = route(&eprom(), &opts(r#"{"runs": 1, "wall_clock_s": 120.0, "stable_window": 3}"#));
+    let r = route(&eprom(), &opts(r#"{"runs": 1, "wall_clock_s": 120.0, "stable_window": 3, "opt_loop": "cycles"}"#));
     assert_eq!(r.stop_reason, "stable", "{:?}", r.warnings);
     assert!(!r.timed_out);
     let line = cycles_line(&r);
@@ -52,11 +54,12 @@ fn best_of_runs_is_reproducible_and_not_worse_than_one_run() {
 
 /// With the dialog (`stop_when_stable` false) the run keeps going after "Routes stable"; OK
 /// (= Cancel) then returns exactly the best result the progress showed, as "stable" and without
-/// the time-budget warning.
+/// the time-budget warning. The whole-route cycles (`opt_loop = "cycles"`): TopoR's loop (the
+/// default since M0) ends each run after its one loop, so nothing goes on after stable there.
 #[test]
 fn ok_after_stable_returns_the_best_so_far() {
     let m = eprom();
-    let o = opts(r#"{"runs": 2, "wall_clock_s": 300.0, "stop_when_stable": false, "finish_when_stable": false, "topo_rounds": 1000}"#);
+    let o = opts(r#"{"runs": 2, "wall_clock_s": 300.0, "stop_when_stable": false, "finish_when_stable": false, "topo_rounds": 1000, "opt_loop": "cycles"}"#);
     let ctl = RunControl::new();
     let c2 = ctl.clone();
     let h = std::thread::spawn(move || route_with(&m, &o, &c2));

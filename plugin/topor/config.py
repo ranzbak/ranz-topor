@@ -34,8 +34,15 @@ def _taut(values: dict) -> bool:
     return values[("search", "length")] == "taut"
 
 
+def _cycles(values: dict) -> bool:
+    """[search] drawing_feedback = "auto": on with [optimize] loop = "cycles" (its whole-route cycles feed the drawing
+    back into the next plan, the behaviour before M0), off with the TopoR loop, which draws the picked topology once
+    (Polubasov 2010, introduction: the wire shapes are computed on the metric stage, from the topology)."""
+    return values[("optimize", "loop")] == "cycles"
+
+
 # engine_field of an auto / on / off setting -> what "auto" means for the current values (the engine gets a bool)
-_ENGINE_AUTO = {"via_relocate": _taut, "via_between": _taut}
+_ENGINE_AUTO = {"via_relocate": _taut, "via_between": _taut, "drawing_feedback": _cycles}
 
 # ---------------------------------------------------------------- value handling
 
