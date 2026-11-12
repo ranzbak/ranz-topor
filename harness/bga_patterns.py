@@ -1243,25 +1243,14 @@ RULE_HOW = {
              "R1), plus every KiCad DRC shorting_items of the routed board.",
 }
 
-TOPOR_NOTES = {  # what the topor run (main 0f36b1e engine, defaults + loop = topor, 2026-11-12) did, read off the PNGs,
-    # rule_faults() and KiCad DRC. topor raises the boards' rules to its JLCPCB 1 oz fab floors (track 0.15 -> 0.20,
-    # via 0.40 / 0.20 -> 0.45 / 0.25, hole clearance 0.20 -> 0.35, the courtyard clearance 0.10 -> 0.15)
-    "bga_one_layer": "Same as the ef43e25 run: every one of the 16 inner balls gets a via and escapes on B.Cu (expected 0 "
-                     "vias). R2: all 16 vias 0.35-0.54 mm off the open-space centre, overlapping their own ball pad; R3: "
-                     "B3, C5, E4, D2 point toward the next quadrant; R1: the C3 B.Cu track runs over B3's via at (7.78, "
-                     "6.51) and the C4 B.Cu spike (10.08, 7.04) -> (9.98, 7.65) -> (10.07, 7.10) over C5's via at "
-                     "(9.94, 7.91): KiCad shorting_items + hole_clearance. C4 detours x1.34.",
-    "bga_plane_balls": "DRC clean, R4 holds (one via per plane ball). 8 ring-1 signals take a via each (16 vias, "
-                       "expected 8); R2: all 16 vias 0.35-0.54 off centre; R3: 12 vias point the wrong way (GND vias "
-                       "toward the package centre, VCC vias up-right everywhere).",
-    "bga_dogbone": "Topology right (ring 0 on F.Cu, 16 vias, inner balls on B.Cu, 182.5 mm). R2: every via 0.35-0.43 "
-                   "mm off its open-space centre and overlapping its own ball pad (the floored 0.45 via does not fit a "
-                   "cell centre: 0.566 - 0.20 - 0.225 = 0.141 < 0.15); R3: C3, C4, D3, D4 point wrong; R1: C3 B.Cu track "
-                   "over B3's via at (7.47, 6.65) (shorting_items), D4 B.Cu track 0.070 mm from E4's via at (8.53, "
-                   "9.35) (clearance + hole_clearance). KiCad DRC 10 new.",
-    "bga_neckdown": "topor reads the rule (CUSTOM_RULES: track_width -> net, clearance -> region) but floors the region "
-                    "clearance 0.10 -> 0.15 (CUSTOM_RULE_LIMITED), so the channels stay closed and it routes "
-                    "bga_dogbone's way: 16 vias (expected 0), the same R1 / R2 / R3 faults and 8 new DRC violations.",
+TOPOR_NOTES = {  # what the valid topor run (engine main 09c18ca, [rules] fab_profile = "board" + [optimize] loop =
+    # "topor", 2026-11-12, M0v) did, read off the PNGs, rule_faults() and KiCad DRC. Earlier readings (ef43e25 / 64d3c06)
+    # came from INVALID runs: the default fab profile raised track 0.15 -> 0.20, via 0.40 / 0.20 -> 0.45 / 0.25, hole
+    # clearance 0.20 -> 0.35 and the courtyard clearance 0.10 -> 0.15.
+    "bga_one_layer": "Matches the expected answer: 36/36 on F.Cu, 0 vias, 0 rule faults, DRC 0, 170.4 mm (expected 170.4). The 16 vias, R1 shorts and R2/R3 faults in the ef43e25/64d3c06 galleries came from the fab floors: 0.2 mm tracks do not fit between 0.5 mm-gap balls, while 0.15 mm tracks do.",
+    "bga_plane_balls": "DRC 0, 36/36, 6 vias (expected 8). R4: the four centre GND balls C3/C4/D3/D4 share one via at (7.25, 7.25) instead of one via each. This breaks the project's own rule 'one via per plane ball, no shared plane vias'. VCC corners B2/B5/E2/E5 get their own via, but 0.36 mm off the open-space centre (R2), and three of them point the wrong way (R3). B4 is the only signal that leaves on B.Cu via a via 0.54 mm off centre; the expected answer keeps it on F.Cu. These are genuine router faults: the rules match.",
+    "bga_dogbone": "Topology right: ring 0 on F.Cu, 16 vias as expected, inner balls on B.Cu, DRC 0, 181.0 mm (expected 184.1). R2: all 16 vias sit 0.35-0.43 mm off the open-space centre and overlap their own ball pad (gap -0.19 to -0.20). At board rules a 0.4 via fits the cell centre (0.566 - 0.20 - 0.20 = 0.166 >= 0.15), so this is a genuine placement fault, not a rule effect. R3: C3, C4, D3, D4 point the wrong way. The earlier R1 shorts are gone; they were a fab-floor effect.",
+    "bga_neckdown": "Matches the expected answer: 0 vias, 36/36 on F.Cu, DRC 0, 0 rule faults, 181.2 mm (expected 181.6). With the region clearance 0.10 no longer floored to 0.15, the channels open and topor uses them. The earlier claim 'neckdown routes bga_dogbone's way' was entirely a floor effect.",
 }
 
 
@@ -1271,7 +1260,7 @@ def readme(out: Path, docs: dict) -> Path:
          "(balls, destination rows, planes; nothing routed), `reference/` (expected copper), `alternative/` (a real layout "
          "the expected answer rules out, if any), `expected.json` (per-ball expectations: net, ring, escape layer, vias, "
          "cell, destination; per-net reference lengths), `<name>.png` (problem | expected | zoom | alternative or "
-         "channel arithmetic). `topor/`: one topor run (defaults + `[optimize] loop = \"topor\"`) and its comparison PNG.",
+         "channel arithmetic). `topor/`: one topor run at the board's own rules (`[rules] fab_profile = \"board\"` + `[optimize] loop = \"topor\"`; the validity gate must say valid) and its comparison PNG; `topor-fab/`: the same run at the default fab profile, INVALID, kept as a control only.",
          "", "NOT in the test suite: waiting for the user's approval of the PNGs.", "",
          "## Survey of the hand-routed BGAs (router-test-designs)", "", SURVEY, "",
          "## Rules (every `.kicad_pro`)", "",
@@ -1332,7 +1321,7 @@ def readme(out: Path, docs: dict) -> Path:
                   f"KiCad render: `{n}/topor/{n}-compare.png` (yellow = new DRC violations).", ""]
         for j in d["judgement_calls"]:
             judg.append(f"- {n}: {j}")
-    L += ["## Rule 1 in the ef43e25 runs (\"traces through vias of other pads\")", "", R1_FORENSICS, "",
+    L += ["## Rule 1 in the ef43e25 runs (\"traces through vias of other pads\"; INVALID runs, default fab profile, kept for the record)", "", R1_FORENSICS, "",
           "## Judgement calls needing the user", ""] + judg + ["", "## Literature", ""]
     seen = []
     for d in docs.values():
