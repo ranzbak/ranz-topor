@@ -22,7 +22,9 @@ inside the fill (the far-terminal margin of 4.4):
    Careless: a 1.6 mm stub into the island, 0 vias, R1.2 left floating (KiCad: unconnected).
 
 Same conventions as `harness/plane_terminal_pattern.py`: solvable by construction (the reference copper is drawn
-first; KiCad DRC of the reference with the zones refilled must show 0 violations and 0 unconnected), deterministic.
+first; KiCad DRC of the reference with the zones refilled must show 0 unconnected and no violation except the
+island's own `isolated_copper` warning, which the problem board already has: question 3 is about that island),
+deterministic.
 Coordinates in mm, KiCad frame (y down). `python -m harness.pour_zero_pattern OUT` writes
 OUT/pour_zero/{problem,reference,careless}/, expected.json and pour_zero.png.
 
