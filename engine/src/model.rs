@@ -931,11 +931,17 @@ pub struct Options {
     /// cut) gets a via into the pour on another layer, or a short stub, near its pad.
     pub stitch_islands: bool,
     /// Topological core (4.4, `topor.toml [planes] terminals`, user rule 2026-11-10): an own-net
-    /// pour is a terminal of its net like a pad, which may carry vias. A plane pad's stub may end
-    /// on own-net copper already on the plane (another pad's stub via, an existing through via
-    /// in the fill) instead of a via of its own, and a stub via that other stubs share moves to
-    /// where their stubs are shortest together. False: one via per plane pad (before 4.4).
+    /// pour is a terminal of its net like a pad, which may carry vias. A plane pad that no stub
+    /// serves is wired to its pour's nearest filled copper (a far terminal) instead of to another
+    /// pad of its net. False: such a pad is joined to another pad of its net (before 4.4).
     pub plane_terminals: bool,
+    /// Topological core (4.4, `topor.toml [planes] share_vias`, default false): a plane pad's stub
+    /// may end on own-net copper already on the plane (another pad's stub via, an existing
+    /// through via in the fill) instead of a via of its own, and a stub via that other stubs
+    /// share moves to where their stubs are shortest together. Off by default (user rule
+    /// 2026-11-12: one via per plane pad; a shared via conducts heat worse, makes single-via
+    /// current paths and adds inductance towards the power pins).
+    pub plane_share_vias: bool,
     /// `topor.toml [output] cleanup_safe`: the written copper is made stable under KiCad's Edit ->
     /// Cleanup Tracks & Vias ([`crate::topo::tidy`]): no null, duplicate or in-pad segments, T
     /// junctions as exact vertices, collinear segments merged.
@@ -1322,6 +1328,7 @@ impl Default for Options {
             via_reduce: true,
             stitch_islands: true,
             plane_terminals: true,
+            plane_share_vias: false,
             cleanup_safe: true,
             net_tree: "free".into(),
             steiner: false,

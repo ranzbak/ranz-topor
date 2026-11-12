@@ -1,7 +1,8 @@
 //! 4.4 (planes as terminals, user rule 2026-11-10): an own-net pour is a terminal of its net like
-//! a pad, one that may carry vias. Plane pads share a via onto the plane, sited where their stubs
-//! are shortest together; a pad no stub serves is wired to the pour's filled copper, not to
-//! another pad of the net.
+//! a pad, one that may carry vias. A pad no stub serves is wired to the pour's filled copper, not
+//! to another pad of the net. Every plane pad has a via of its own by default (user rule
+//! 2026-11-12); with `[planes] share_vias` plane pads share a via onto the plane, sited where
+//! their stubs are shortest together.
 
 use topor_engine::control::RunControl;
 use topor_engine::model::{BoardModel, Item, Options};
@@ -68,17 +69,19 @@ fn vias(items: &[Item]) -> Vec<(f64, f64)> {
 }
 
 /// plane_via_3r in small: three GND pads round (12, 12), 1.5 mm out at 120 degrees, a GND pour on
-/// B.Cu over the board. One via shared by the three stubs, at the centre; one via per pad with
-/// `[planes] terminals` off.
+/// B.Cu over the board. By default one via per pad (user rule 2026-11-12: no shared plane vias);
+/// with `[planes] share_vias` one via shared by the three stubs, at the centre.
 #[test]
-fn three_plane_pads_share_one_via_at_their_median() {
+fn three_plane_pads_get_a_via_each_and_share_one_only_when_asked() {
     let a = |deg: f64| {
         let r = deg.to_radians();
         (12.0 + 1.5 * r.cos(), 12.0 + 1.5 * r.sin())
     };
     let (p1, p2, p3) = (a(-90.0), a(30.0), a(150.0));
     let m = board(24.0, 24.0, &[("R1", 1, p1.0, p1.1, 1.0), ("R2", 1, p2.0, p2.1, 1.0), ("R3", 1, p3.0, p3.1, 1.0)], &[(1, 2, 0.5, 0.5, 23.5, 23.5, &[])]);
-    let on = route_with(&m, &Options::default(), &RunControl::new());
+    let def = route_with(&m, &Options::default(), &RunControl::new());
+    assert_eq!((def.routed, vias(&def.items).len()), (3, 3), "one via per plane pad by default: {:?}", def.warnings);
+    let on = route_with(&m, &Options { plane_share_vias: true, ..Options::default() }, &RunControl::new());
     let v = vias(&on.items);
     assert_eq!(on.routed, 3, "{:?}", on.warnings);
     assert_eq!(v.len(), 1, "one shared plane via: {v:?}");

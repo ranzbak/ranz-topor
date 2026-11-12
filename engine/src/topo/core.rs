@@ -1319,10 +1319,11 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
         let mut dr = Drawer::new(model, opts, &b, &st, &checker);
         let mut out = PlaneStubs::default();
         let mut vias: Vec<(Vec2, f64)> = Vec::new();
-        // 4.4 (`[planes] terminals`): the own-net copper on the plane a stub may end on. The
-        // existing vias of the board standing in a fill of their net's pour come first; every
-        // stub via placed joins them.
-        let mut shared: Vec<planes::PlaneVia> = if opts.plane_terminals { existing_plane_vias(model) } else { Vec::new() };
+        // 4.4 (`[planes] share_vias`, default off: one via per plane pad, user rule 2026-11-12):
+        // the own-net copper on the plane a stub may end on. The existing vias of the board
+        // standing in a fill of their net's pour come first; every stub via placed joins them.
+        // Empty when sharing is off, so the re-siting and merge rounds below do nothing.
+        let mut shared: Vec<planes::PlaneVia> = if opts.plane_share_vias { existing_plane_vias(model) } else { Vec::new() };
         let mut outs: Vec<Option<planes::Out>> = Vec::with_capacity(reqs.len());
         let mut results: Vec<Result<planes::Out, String>> = Vec::with_capacity(reqs.len());
         let mut dropped = false;
@@ -1335,7 +1336,7 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
                 Ok(o) => {
                     if let Some(v) = o.via {
                         vias.push((v, 0.5 * o.size.d as f64));
-                        if opts.plane_terminals {
+                        if opts.plane_share_vias {
                             shared.push(planes::PlaneVia { at: v, size: o.size, net: rq.net, load: rq.w, owner: Some(i), users: Vec::new(), dead: false });
                         }
                     }
@@ -1450,7 +1451,7 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
             let nexist = shared.iter().filter(|v| v.owner.is_none()).map(|v| v.users.len()).sum::<usize>();
             if nshared + nexist > 0 {
                 notes.push(format!(
-                    "planes as terminals ([planes] terminals): {nshared} plane stub(s) end on another pad's stub via, {nexist} on an existing via of the board; {} stub via(s) for {} plane pad(s)",
+                    "shared plane vias ([planes] share_vias): {nshared} plane stub(s) end on another pad's stub via, {nexist} on an existing via of the board; {} stub via(s) for {} plane pad(s)",
                     shared.iter().filter(|v| !v.dead && v.owner.is_some()).count(),
                     outs.iter().filter(|o| o.is_some()).count()
                 ));

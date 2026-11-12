@@ -672,9 +672,10 @@ unsure about is kept. KiCad's DRC of the result stays the judge.
   zone, and an SMD pad of a plane net gets a through via onto the plane at the cheapest free via site near
   the pad, inside the pad when `[vias] via_in_pad` is on (`[vias] plane_vias`, since 0.4.2). A pad with no site that close fails with *no via site within … of the
   terminal (plane pour)*. In the topological core a pour is a terminal of its net like a pad (`[planes]
-  terminals`, default on): pads near each other share one plane via, sited where their stubs are shortest
-  together, a pad may end on an existing through via standing in the fill, and a pad too far for a stub is
-  wired to the pour's nearest filled copper instead of to another pad of the net. Only two-layer boards are benchmarked (eprom-to-kernal 27/27,
+  terminals`, default on): a pad too far for a stub is wired to the pour's nearest filled copper instead of
+  to another pad of the net. Every plane pad gets a via of its own; `[planes] share_vias = true` lets pads
+  near each other share one plane via (sited where their stubs are shortest together) or end on an existing
+  through via standing in the fill. Only two-layer boards are benchmarked (eprom-to-kernal 27/27,
   wiccon-2023 62/62); 4+ layer boards route their signal layers but inner-layer quality is not tuned yet. Copper counts
   other than 2, 4, 6, 8 need roles in `[layers]` ([`LAYER_ROLES_NEEDED`](troubleshoot.md#layer_roles_needed)).
 - **Groups.** The KiCad API does not expose group membership: grouped items are treated one by one, and
