@@ -341,6 +341,12 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
 pub struct Predicted {
     pub count: usize,
     pub graded: f64,
+    /// Shopping list 2.4 (`[capacity] model = "cuts"`): the necked stretches the cut model's
+    /// necks add to the plan's own (the archive's shrinkages count them), and the shrinkage price
+    /// of the cuts that fit only necked (mm, `[factors] shrinkage`; part of [`Predicted::price`]).
+    /// 0 for the per-edge model.
+    pub shrink_n: usize,
+    pub shrink_mm: f64,
 }
 
 impl Predicted {
@@ -348,16 +354,24 @@ impl Predicted {
     /// connections. O(1).
     pub fn of(cap: (usize, f64), unlayerable: usize, forced: usize) -> Predicted {
         let n = unlayerable + forced;
-        Predicted { count: cap.0 + n, graded: cap.1 + n as f64 }
+        Predicted { count: cap.0 + n, graded: cap.1 + n as f64, shrink_n: 0, shrink_mm: 0.0 }
     }
     /// Plus the traversals through foreign copper `(count, graded)` ([`foreign_copper`]). O(1).
     pub fn with_foreign(self, f: (usize, f64)) -> Predicted {
-        Predicted { count: self.count + f.0, graded: self.graded + f.1 }
+        Predicted { count: self.count + f.0, graded: self.graded + f.1, ..self }
+    }
+    /// With the cut model's shrinkages `(stretches added, price mm)` (2.4). O(1).
+    pub fn with_shrink(self, n: usize, mm: f64) -> Predicted {
+        Predicted { shrink_n: n, shrink_mm: mm, ..self }
     }
     /// What the violations cost a move (mm): the `violation` weight `viol_mm` x the graded amount,
     /// so one more predicted violation costs at least `viol_mm` and one fewer gains as much.
     pub fn price(&self, viol_mm: f64) -> f64 {
-        viol_mm * self.graded
+        if self.shrink_mm == 0.0 {
+            viol_mm * self.graded
+        } else {
+            viol_mm * self.graded + self.shrink_mm
+        }
     }
     /// The archive's graded part ([`Criteria::penalty`]): the amount beyond 1 per violation at the
     /// `violation` weight (the count itself is [`Criteria::errors`]).

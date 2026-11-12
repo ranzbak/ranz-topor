@@ -32,6 +32,7 @@ mod necking;
 mod overflow;
 mod plane_signal;
 mod reroute;
+mod shrinkage;
 mod squeeze;
 mod style;
 mod via;
@@ -186,6 +187,11 @@ pub trait Factor: Send + Sync {
     fn unit(&self) -> &'static str;
     /// Default weight: mm of copper per unit.
     fn default_weight(&self) -> f64;
+    /// A factor whose weight, unless `[factors] weight` sets it, is the resolved weight of the
+    /// named factor (`shrinkage` follows `necking`). `None`: [`Factor::default_weight`].
+    fn default_follows(&self) -> Option<&'static str> {
+        None
+    }
     /// Default report level of the factor's events.
     fn default_report(&self) -> Report {
         Report::Off
@@ -261,6 +267,9 @@ pub fn standard_factors() -> Vec<Box<dyn Factor>> {
         Box::new(diffpair::GapDeviation),
         Box::new(diffpair::ViaUnpaired),
         Box::new(diffpair::PolarityCross),
+        // Last: the fluctuation draws and the per-factor oscillation phases of the factors
+        // before it stay as they were (one draw per factor in registry order).
+        Box::new(shrinkage::Shrinkage),
     ]
 }
 
@@ -282,7 +291,7 @@ impl Registry {
                 }
             }
         }
-        let res = factors
+        let mut res: Vec<Resolved> = factors
             .iter()
             .map(|f| {
                 let name = f.name();
@@ -313,6 +322,14 @@ impl Registry {
                 Resolved { weight, scope, report }
             })
             .collect();
+        // Weights that follow another factor's resolved weight when not set themselves.
+        for (i, f) in factors.iter().enumerate() {
+            if let (Some(of), None) = (f.default_follows(), cfg.weight.get(f.name())) {
+                if let Some(j) = factors.iter().position(|g| g.name() == of) {
+                    res[i].weight = res[j].weight;
+                }
+            }
+        }
         (Registry { factors: factors.into_iter().map(std::sync::Arc::from).collect(), res }, problems)
     }
 
@@ -529,5 +546,19 @@ mod tests {
         let f = r.findings(&[ev_cross()], &WireCtx::default());
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].level, Report::Info);
+    }
+
+    #[test]
+    fn shrinkage_follows_the_necking_weight_unless_set() {
+        let w = |pairs: &[(&str, f64)]| {
+            let cfg = FactorConfig { weight: pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect(), ..FactorConfig::default() };
+            Registry::from_config(standard_factors(), &cfg).0.weight("shrinkage")
+        };
+        assert_eq!(w(&[]), Some(30.0), "default = the necking default");
+        assert_eq!(w(&[("necking", 12.0)]), Some(12.0), "follows the necking setting");
+        assert_eq!(w(&[("necking", 12.0), ("shrinkage", 4.0)]), Some(4.0), "its own setting wins");
+        // It prices no P2 event (the cut model reads the weight), and it is the last factor.
+        assert_eq!(Registry::standard().price(&ev_cross(), &WireCtx::default()), 20.0);
+        assert_eq!(standard_factors().last().map(|f| f.name()), Some("shrinkage"));
     }
 }

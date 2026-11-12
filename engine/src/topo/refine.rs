@@ -567,6 +567,19 @@ impl<'a> CapModel<'a> {
         (self.overfull(), over + nosite as f64)
     }
 
+    /// Shopping list 2.4: the cut model's shrinkage level, `(cuts that fit only necked, graded
+    /// amount in pitches of width reduction, price mm)` ([`CutPrice::shrinkage`]); zeros for the
+    /// per-edge model (it necks in P2, `State::refit_wire`). O(cuts).
+    pub fn shrinkage(&self) -> (usize, f64, f64) {
+        self.cut.as_ref().map_or((0, 0.0, 0.0), |c| c.shrinkage())
+    }
+
+    /// The cut model's necks `(wire, traversal, width)` ([`CutPrice::necks`]); empty for the
+    /// per-edge model.
+    pub fn cut_necks(&self) -> Vec<(WireId, usize, f64)> {
+        self.cut.as_ref().map_or_else(Vec::new, |c| c.necks())
+    }
+
     /// The over-full `(edge, layer)` pairs, ascending.
     pub fn overfull_list(&self) -> Vec<(usize, usize)> {
         (0..self.cost.len()).filter(|&i| self.cost[i] > 0.0).map(|i| (i / self.nl, i % self.nl)).collect()

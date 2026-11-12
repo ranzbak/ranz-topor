@@ -315,6 +315,7 @@ fn the_factor_reference_matches_the_schema_text() {
         ("dp_gap_deviation", 5.0),
         ("dp_via_unpaired", 25.0),
         ("dp_polarity_cross", 1000.0),
+        ("shrinkage", 30.0),
     ];
     assert_eq!(got, want);
 }

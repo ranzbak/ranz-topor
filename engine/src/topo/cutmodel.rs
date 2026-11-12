@@ -29,7 +29,7 @@
 //!   list 3.1.
 //! - Need = [`super::cutflow::needs`] (widths, clearances between different nets, the end
 //!   clearances; no oblique factor: Maley's congestion is a plain width sum, p. 32); slack =
-//!   capacity - need.
+//!   capacity - need (the planner: capacity - need at the neck floors, see "Three levels").
 //!
 //! **Price** (design §4.4): with `u = -slack / pitch` (overflow in track pitches, `pitch` = mean
 //! width + clearance of the cut's items) and the softness `tau` (`[capacity] overflow_softness`),
@@ -37,6 +37,20 @@
 //! `u >> tau` this is `1 + u`, the per-edge price `overflow_mm (1 + over / pitch)` of
 //! `refine.rs`, so the weights carry over; at `u = 0` it is about 0.57; for `u << 0` it goes to 0
 //! smoothly. No step, no cutoff (graded factors): a nearly full cut already costs a little.
+//!
+//! **Three levels** (shopping list 2.4; TopoR 6.3 manual p. 56: the minimum width "will be used
+//! in bottlenecks unless a different path is available"; pp. 72-73: shrinkages, "width reductions
+//! in nominally-wide wires", are a criterion of their own next to violations, vias and length).
+//! The planner ([`CutPrice`]) needs every cut twice: `N` with every run at its nominal width, `F`
+//! with every run at its neck floor (Board Setup minimum track width or the net's custom rule;
+//! vias do not neck). With capacity `C`: `C >= N` costs 0 (nominal fit); `F <= C < N` fits only
+//! necked and costs the shrinkage price `shrink_mm x red / pitch`, `red = N - C` the width
+//! reduction ([`shrink_need`]); beyond the floors the shrinkage is all of `N - F` and the
+//! violation is the rest, priced by `phi` of the slack `C - F`. Both parts are continuous in `C`
+//! (no jump where the nominal widths stop fitting nor at the floors). The over-full count and
+//! [`CutPrice::over_amount`] count only slack below the floors. The widths a shrinking cut needs
+//! are [`CutPrice::necks`]; the plan writes them into its pass widths before the drawing, so the
+//! drawing necks where the plan priced it and the variant's shrinkages count them.
 //!
 //! Complexity: building the sheets is U0's; a wire costs a walk and a funnel per run plus a grid
 //! query per band segment and per via; repricing a cut is O(items log items).
@@ -63,6 +77,9 @@ pub struct CutOpts {
     pub pairwise: bool,
     /// Softness `tau` of the over-full price, in track pitches (> 0).
     pub tau: f64,
+    /// Shopping list 2.4: the shrinkage price, mm per track pitch of width reduction a cut needs
+    /// below the nominal widths (`[factors] shrinkage`, default the `necking` weight).
+    pub shrink_mm: f64,
 }
 
 impl CutOpts {
@@ -71,8 +88,18 @@ impl CutOpts {
             sheet: SheetOpts { norm: Norm::for_style(&o.draw_style), radius_nm: o.cut_radius_mm.max(0.0) * 1e6, via_steps: 16, prune_walk: true },
             pairwise: o.mixed_clearance == "pairwise",
             tau: o.overflow_softness.max(1e-3),
+            shrink_mm: super::factors::Registry::from_config(super::factors::standard_factors(), &o.factors).0.weight("shrinkage").unwrap_or(30.0),
         }
     }
+}
+
+/// Shopping list 2.4: the width reduction (nm) a cut with capacity `cap` needs below the nominal
+/// need `need` when its wires may neck down to the need `floor` (TopoR 6.3 manual p. 56: the
+/// minimum width "in bottlenecks"): 0 while the nominal widths fit, `need - cap` while it fits
+/// necked, `need - floor` (all the necking there is) beyond the floors, where the rest is the
+/// violation. Continuous in `cap` (piecewise linear: no jump at either boundary). O(1).
+pub fn shrink_need(cap: f64, need: f64, floor: f64) -> f64 {
+    (need - cap).clamp(0.0, (need - floor).max(0.0))
 }
 
 /// The graded over-full price factor of a cut with `slack` and item `pitch` (nm), softness
@@ -159,6 +186,10 @@ pub struct Itm {
     pub kind: u8,
     pub it: Item,
     pub floor: f64,
+    /// The nominal width (nm): the wire's netclass width (a via: its item width). The cut is
+    /// priced at the nominal widths and at the floors (2.4), never at the width the plan necked a
+    /// pass to (`it.w`), so the shrinkage price stays put when the necks are written.
+    pub nom: f64,
     /// Traversal of the wire nearest to the item (the place a layer move acts on).
     pub k: usize,
     /// The run or via of the wire that put it there ([`CutPrice`] bookkeeping; 0 in [`flow`]).
@@ -219,7 +250,7 @@ fn wire_items(sh: &LayerSheet, jf: &HashMap<(i64, i64), usize>, runs: &[Stretch]
     let (mut out, jends) = run_items(sh, jf, runs, via_r);
     for v in vias {
         for (ci, t, w) in via_hits(sh, v, buf) {
-            out.push((ci, Itm { wire: v.wire, t, kind: 3, it: Item { net: v.net, w, s: v.s }, floor: w, k: v.k, src: 0 }));
+            out.push((ci, Itm { wire: v.wire, t, kind: 3, it: Item { net: v.net, w, s: v.s }, floor: w, nom: w, k: v.k, src: 0 }));
         }
     }
     (out, jends)
@@ -246,7 +277,7 @@ fn run_items_with(sh: &LayerSheet, jf: &HashMap<(i64, i64), usize>, runs: &[Stre
             2 => c.q,
             _ => c.p + (c.q - c.p) * x.t,
         };
-        out.push((ci, Itm { wire: s.wire, t: x.t, kind: x.kind, it: Item { net: s.net, w: x.w, s: s.s }, floor: s.w_floor, k: nearest_k_idx(s, near[x.stretch].as_ref(), at), src: 0 }));
+        out.push((ci, Itm { wire: s.wire, t: x.t, kind: x.kind, it: Item { net: s.net, w: x.w, s: s.s }, floor: s.w_floor.min(s.w), nom: s.w, k: nearest_k_idx(s, near[x.stretch].as_ref(), at), src: 0 }));
     }
     let mut jends = Vec::new();
     for &i in &mine {
@@ -266,11 +297,11 @@ fn item_order(a: &Itm, b: &Itm) -> std::cmp::Ordering {
     a.t.total_cmp(&b.t).then(a.wire.cmp(&b.wire)).then(a.kind.cmp(&b.kind)).then(a.k.cmp(&b.k))
 }
 
-/// Whether two sorted item lists price the same: equal (net, width, clearance, floor, kind)
-/// item by item ([`CutPrice`] install). O(items).
+/// Whether two sorted item lists price the same: equal (net, width, clearance, floor, nominal
+/// width, kind) item by item ([`CutPrice`] install). O(items).
 fn same_keys(a: &[Itm], b: &[Itm]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| {
-        x.it.net == y.it.net && x.it.w.to_bits() == y.it.w.to_bits() && x.it.s.to_bits() == y.it.s.to_bits() && x.floor.to_bits() == y.floor.to_bits() && x.kind == y.kind
+        x.it.net == y.it.net && x.it.w.to_bits() == y.it.w.to_bits() && x.it.s.to_bits() == y.it.s.to_bits() && x.floor.to_bits() == y.floor.to_bits() && x.nom.to_bits() == y.nom.to_bits() && x.kind == y.kind
     })
 }
 
@@ -304,21 +335,24 @@ fn evaluate(sh: &LayerSheet, ci: usize, items: &mut [Itm], regime: Option<f64>, 
     (cap, Needs3 { need: n.need, other: n.other, floor: n.floor })
 }
 
-/// [`evaluate`]'s capacity and need with the selected clearance rule only (the planner's
-/// pricing; the other rule and the floors are the standalone test's report), without building
-/// item lists: the same operations as [`needs`], so the same floats. O(items log items).
-fn evaluate_need(sh: &LayerSheet, ci: usize, items: &mut [Itm], regime: Option<f64>, jhalf: &dyn Fn(usize) -> Option<f64>, o: &CutOpts) -> (f64, f64) {
+/// The planner's pricing of a cut (shopping list 2.4): capacity, the need at the nominal
+/// widths and the need at the neck floors, with the selected clearance rule only (the other rule
+/// is the standalone test's report), without building item lists (the same operations as
+/// [`needs`], so the same floats). Without a neckable item the floor need is the nominal one.
+/// O(items log items).
+fn evaluate_need(sh: &LayerSheet, ci: usize, items: &mut [Itm], regime: Option<f64>, jhalf: &dyn Fn(usize) -> Option<f64>, o: &CutOpts) -> (f64, f64, f64) {
     items.sort_by(item_order);
     let ((bp, hp), (bq, hq)) = cut_ends(sh, ci, jhalf);
     let cap = sh.cuts[ci].cap - hp - hq;
     let items = &*items;
-    let need = if o.pairwise {
-        need_in_by(regime, items.len(), |i| items[i].it, bp, bq)
-    } else {
-        let smax = items.iter().map(|x| x.it.s).fold(0.0, f64::max);
-        need_in_by(regime, items.len(), |i| Item { s: smax, ..items[i].it }, bp, bq)
+    let smax = if o.pairwise { 0.0 } else { items.iter().map(|x| x.it.s).fold(0.0, f64::max) };
+    let at = |i: usize, w: f64| -> Item {
+        let x = &items[i];
+        Item { net: x.it.net, w, s: if o.pairwise { x.it.s } else { smax } }
     };
-    (cap, need)
+    let need = need_in_by(regime, items.len(), |i| at(i, items[i].nom), bp, bq);
+    let floor = if items.iter().any(|x| x.floor < x.nom) { need_in_by(regime, items.len(), |i| at(i, items[i].floor), bp, bq) } else { need };
+    (cap, need, floor)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -328,14 +362,15 @@ struct Needs3 {
     floor: f64,
 }
 
+/// The mean pitch (nominal width + clearance) of a cut's run items (vias only: theirs). O(items).
 fn pitch_of(items: &[Itm]) -> f64 {
     let (mut sum, mut n) = (0.0, 0usize);
     for x in items.iter().filter(|x| x.kind != 3) {
-        sum += x.it.w + x.it.s;
+        sum += x.nom + x.it.s;
         n += 1;
     }
     if n == 0 {
-        items.iter().map(|x| x.it.w.max(0.0) + x.it.s).sum::<f64>() / items.len().max(1) as f64
+        items.iter().map(|x| x.nom.max(0.0) + x.it.s).sum::<f64>() / items.len().max(1) as f64
     } else {
         sum / n as f64
     }
@@ -585,9 +620,16 @@ impl CutCtx {
 struct CutSt {
     items: Vec<Itm>,
     cap: f64,
+    /// Need at the nominal widths and at the neck floors (2.4).
     need: f64,
+    need_floor: f64,
+    /// `cap - need_floor`: over-full (a violation) only beyond the floors.
     slack: f64,
-    /// `price x phi`.
+    /// The width reduction below the nominal widths the cut needs ([`shrink_need`], nm) and the
+    /// pitch of its items.
+    red: f64,
+    pitch: f64,
+    /// `price x phi(slack) + shrink_mm x red / pitch`.
     cost: f64,
     /// Whether it held items when it was last priced (`slack` and `cost` are of that state; the
     /// items may have changed since, until the next pricing).
@@ -713,8 +755,12 @@ pub struct CutRow {
     pub p: Vec2,
     pub q: Vec2,
     pub cap: f64,
+    /// Need at the nominal widths and at the neck floors; `slack = cap - need_floor` (2.4: over-full
+    /// only beyond the floors); `shrink` the width reduction the cut needs (nm, [`shrink_need`]).
     pub need: f64,
+    pub need_floor: f64,
     pub slack: f64,
+    pub shrink: f64,
     pub wires: Vec<WireId>,
 }
 
@@ -807,11 +853,18 @@ impl<'a> CutPrice<'a> {
         if cs.items.is_empty() {
             *cs = CutSt { txn: cs.txn, ..CutSt::default() };
         } else {
-            let (cap, need) = evaluate_need(&sh[l], ci, &mut cs.items, regime, &half, &self.o);
+            let (cap, need, floor) = evaluate_need(&sh[l], ci, &mut cs.items, regime, &half, &self.o);
+            let pitch = pitch_of(&cs.items);
             cs.cap = cap;
             cs.need = need;
-            cs.slack = cap - need;
-            cs.cost = self.price * phi(cs.slack, pitch_of(&cs.items), self.o.tau);
+            cs.need_floor = floor;
+            cs.slack = cap - floor;
+            cs.red = shrink_need(cap, need, floor);
+            cs.pitch = pitch;
+            cs.cost = self.price * phi(cs.slack, pitch, self.o.tau);
+            if cs.red > 0.0 {
+                cs.cost += self.o.shrink_mm * cs.red / pitch.max(1.0);
+            }
             cs.live = true;
         }
         let new = (cs.cost, cs.live && cs.slack < -OVER_TOL);
@@ -981,7 +1034,7 @@ impl<'a> CutPrice<'a> {
         let sheets = self.sheets.clone();
         for (l, sh) in sheets.iter().enumerate() {
             for (ci, t, wv) in via_hits(sh, v, &mut self.buf) {
-                part.items.push((l, ci, Itm { wire: v.wire, t, kind: 3, it: Item { net: v.net, w: wv, s: v.s }, floor: wv, k: v.k, src }));
+                part.items.push((l, ci, Itm { wire: v.wire, t, kind: 3, it: Item { net: v.net, w: wv, s: v.s }, floor: wv, nom: wv, k: v.k, src }));
             }
         }
         part
@@ -1083,7 +1136,9 @@ impl<'a> CutPrice<'a> {
     /// The graded amount of the over-full cuts (the TopoR loop's predicted violations, shopping
     /// list 5.2): every cut [`CutPrice::overfull`] counts gives 1 plus how far it is over, in
     /// pitches of its items (`-slack / pitch`, the `u` of [`phi`]): the `violation` factor's own
-    /// amount, 1 per violation plus its depth. At least [`CutPrice::overfull`]. O(cuts).
+    /// amount, 1 per violation plus its depth. At least [`CutPrice::overfull`]. The slack is the
+    /// one beyond the neck floors (2.4): a cut that fits necked is a shrinkage, no violation.
+    /// O(cuts).
     pub fn over_amount(&self) -> f64 {
         let mut a = 0.0;
         for cs in &self.cuts {
@@ -1092,6 +1147,47 @@ impl<'a> CutPrice<'a> {
             }
         }
         a
+    }
+
+    /// Shopping list 2.4, the shrinkage level of the price: the cuts that fit only necked (or not
+    /// even at the floors: their whole necking), `(count, sum of red / pitch, price)` with `red`
+    /// the width reduction below the nominal widths ([`shrink_need`]) and the price `shrink_mm x
+    /// red / pitch` per cut (part of [`CutPrice::total`]). O(cuts).
+    pub fn shrinkage(&self) -> (usize, f64, f64) {
+        let (mut n, mut a) = (0usize, 0.0);
+        for cs in &self.cuts {
+            for c in cs.iter().filter(|c| c.live && !c.items.is_empty() && c.red > 0.0) {
+                n += usize::from(c.red > OVER_TOL);
+                a += c.red / c.pitch.max(1.0);
+            }
+        }
+        (n, a, self.o.shrink_mm * a)
+    }
+
+    /// The cut-level necks (2.4): for every cut that needs a width reduction `red` below its
+    /// nominal need `N` (its floor need `F`), every neckable run item of it narrowed by the same
+    /// share `alpha = red / (N - F)` of its own range, `w = nom - alpha (nom - floor)`: the widest
+    /// common share that fits (need is linear in the widths except the own-net end run's maximum,
+    /// which is convex, so the need at these widths is at most `cap`; Dayan 1997 pp. 15-16: a cut
+    /// holds the widths of the wires that cross it). Beyond the floors `alpha = 1` (the floor;
+    /// the rest is the violation). `(wire, traversal, width)`, sorted, one per item. O(items of
+    /// the shrinking cuts).
+    pub fn necks(&self) -> Vec<(WireId, usize, f64)> {
+        let mut out = Vec::new();
+        for cs in &self.cuts {
+            for c in cs.iter().filter(|c| c.live && !c.items.is_empty() && c.red > 0.0) {
+                let span = c.need - c.need_floor;
+                if span <= 0.0 {
+                    continue;
+                }
+                let alpha = (c.red / span).clamp(0.0, 1.0);
+                for x in c.items.iter().filter(|x| x.kind != 3 && x.floor < x.nom) {
+                    out.push((x.wire, x.k, x.nom - alpha * (x.nom - x.floor)));
+                }
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.total_cmp(&b.2)));
+        out
     }
 
     /// The over-full cuts `(layer, cut, slack)`, most over-full first, ties by layer and cut.
@@ -1130,8 +1226,8 @@ impl<'a> CutPrice<'a> {
             let cut = &self.sheets[l].cuts[ci];
             self.pr.regime_at((cut.p + cut.q) * 0.5)
         });
-        let (cap, need) = evaluate_need(&self.sheets[l], ci, &mut items, regime, &half, &self.o);
-        cap - need >= -OVER_TOL
+        let (cap, _, floor) = evaluate_need(&self.sheets[l], ci, &mut items, regime, &half, &self.o);
+        cap - floor >= -OVER_TOL
     }
 
     /// The items of cut `ci` on layer `l` as last installed (sorted along the cut).
@@ -1154,14 +1250,14 @@ impl<'a> CutPrice<'a> {
                 let mut ws: Vec<WireId> = c.items.iter().map(|x| x.wire).collect();
                 ws.sort_unstable();
                 ws.dedup();
-                v.push(CutRow { layer: l, p: cut.p, q: cut.q, cap: c.cap, need: c.need, slack: c.slack, wires: ws });
+                v.push(CutRow { layer: l, p: cut.p, q: cut.q, cap: c.cap, need: c.need, need_floor: c.need_floor, slack: c.slack, shrink: c.red, wires: ws });
             }
         }
         v.sort_by(|a, b| a.slack.total_cmp(&b.slack).then(a.layer.cmp(&b.layer)));
         v
     }
 
-    /// Capacity, need and slack of a cut (nm).
+    /// Capacity, nominal need and slack (beyond the floors) of a cut (nm).
     pub fn cut_state(&self, l: usize, ci: usize) -> (f64, f64, f64) {
         let c = &self.cuts[l][ci];
         (c.cap, c.need, c.slack)
