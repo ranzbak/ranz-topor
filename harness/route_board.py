@@ -208,6 +208,19 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
         "rayon_threads": os.environ.get("RAYON_NUM_THREADS"),
         "report_dir": str(outcome.report_dir) if outcome.report_dir else None,
     }
+    # M1 compass (toporlib.compass): per violation class predicted vs drawn vs KiCad DRC, per connection detour and
+    # vias planned vs drawn; full table in <name>--compass.json, flat columns in the metrics
+    try:
+        from toporlib import compass as compass_mod
+        from toporlib.drc import new_routing as _new_routing
+        cps = compass_mod.build(res or {}, _new_routing(routed_drc, base, created),
+                                cls["incomplete"].get("unconnected_new"))
+        (out_dir / f"{name}--compass.json").write_text(json.dumps(cps, indent=1))
+        m["compass"] = compass_mod.columns(cps)
+        m["compass_line"] = compass_mod.summary_line(cps)
+    except Exception as e:  # noqa: BLE001 - a metric, never a failed run
+        m["compass"] = None
+        m["compass_error"] = f"{type(e).__name__}: {e}"
     # KiCad's Cleanup Tracks & Vias replayed on the routed copy as the plugin hands it back (0 = nothing changes)
     try:
         from harness.cleanup_check import check as cleanup_check
@@ -297,6 +310,7 @@ def summary(m: dict) -> str:
         + (f"; dangling removals {m['cleanup_dangling'].get('independent')} independent, "
            f"{m['cleanup_dangling'].get('cascade')} cascade after {m['cleanup_dangling'].get('cascade_after')}"
            if m.get("cleanup_dangling") else ""),
+        f"  {m.get('compass_line') or 'compass: ' + str(m.get('compass_error', 'n/a'))}",
         f"  png: {m.get('png')}",
     ])
 

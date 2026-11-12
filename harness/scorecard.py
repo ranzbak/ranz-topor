@@ -127,6 +127,8 @@ def run_row(d: Path, board: str) -> dict | None:
             "hit": str(m.get("stop_reason") or "").startswith("timeout"),
             "unconnected": m["unconnected"], "routed": m.get("routed"), "connections": m.get("connections"),
             "cleanup": m.get("cleanup_unstable"),
+            # M1 compass columns (toporlib.compass.columns: p_/d_/k_<class>), in the --json rows only
+            "compass": m.get("compass"),
             # M0v validity gate (harness.validity): did the router work to the reference's own rules?
             "valid": m.get("valid"), "invalid": (m.get("validity") or {}).get("invalid") or []}
 

@@ -41,6 +41,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
+from toporlib import compass as compass_mod
 from toporlib import drcloop, pcbfile
 from toporlib import rules as rules_mod
 from toporlib.drc import classify, new_routing, run_drc
@@ -107,6 +108,8 @@ class RunOutcome:
     #: the time limit of the routing: {"clock": wall|cpu, "start_s", "final_s" (0 = none), "changes": [{"at_s",
     #: "limit_s"}]}; changes are the user's, made in the progress dialog while the router ran (time_limit_text)
     time_limit: dict | None = None
+    #: M1 compass (toporlib.compass.build): per violation class predicted vs drawn vs KiCad DRC, per connection
+    compass: dict | None = None
 
 
 class _Log:
@@ -420,7 +423,7 @@ def _facts_result(status: str, out: RunOutcome, report: dict | None) -> dict:
             "cancelled": out.cancelled, "rounds": out.rounds, "router_s": round(out.router_s, 3), "router_cpu_s": round(out.router_cpu_s, 3),
             "wall_s": round(out.wall_s, 3), "items": len(out.items), "ripped": len(out.ripped), "drc": out.drc,
             "findings": [asdict(f) for f in out.findings], "route": slim, "via_fallback": out.via_fallback,
-            "time_limit": out.time_limit,
+            "time_limit": out.time_limit, "compass": out.compass,
             "pcb_copy": str(out.pcb_copy) if out.pcb_copy else None}
 
 
@@ -945,6 +948,12 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         log.line(f"after routing: {f.code} ({f.severity}): {f.message}")
     classified = classify(loop.routed_drc, base_drc, loop.created, unconnected_baseline=orig_drc)
     out.drc = classified
+    try:  # M1 compass: a measurement, never a failed run
+        out.compass = compass_mod.build(
+            rr, new_routing(loop.routed_drc, base_drc, loop.created) if loop.routed_drc is not None else None,
+            classified["incomplete"].get("unconnected_new") if loop.routed_drc is not None else None)
+    except Exception as e:  # noqa: BLE001
+        out.compass = {"available": False, "error": f"{type(e).__name__}: {e}"}
     inc = classified["incomplete"]
     partial = int(rr.get("partial", 0))
     scope_info = {"mode": cfg.get("run", "scope_mode") if (sel.footprints or sel.pads) else "whole board",
@@ -954,7 +963,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     build_report({**rr, "items": out.items}, classified, cfg, findings, scope_info, before_stats,
                  {"router_s": out.router_s, "router_cpu_s": out.router_cpu_s, "drc_rounds": loop.rounds}, report=report,
                  facts={"layers": report.facts.get("layers"), "versions": report.facts.get("versions"),
-                        "time_limit": out.time_limit,
+                        "time_limit": out.time_limit, "compass": out.compass,
                         "notes": [f"geometry: {geometry}", f"DRC rounds: {loop.rounds}"] + _ripup_notes(rr) + _via_relax_notes(rr) + (
                             ["time budget exhausted"] if loop.budget_exhausted else [])})
     log.line(f"routed {out.routed}/{out.total}, stop {out.stop_reason}, router {out.router_s:.1f} s, CPU {out.router_cpu_s:.1f} s, rounds {loop.rounds}, "

@@ -8,7 +8,8 @@ Writes `<root>/<board>/s<k>/` (k = 0..5; s0 = the default run, s<k> = `--set opt
 second). The limit is fixed on purpose (user 2026-11-07: raising `timeout_s` to 1800 skewed the algorithm
 comparison): CPU time, 2400 s (= the old 600 s wall x 4 rayon threads), RAYON_NUM_THREADS=4. CPU time is summed over
 all threads, so a busy machine or extra threads neither buy nor cost budget (`[run] timeout_clock`, docs/user/operate.md).
-Changing a default is possible (`--clock`, `--timeout`, `--threads`) but is written to `<root>/limits.json` with the
+After every run its M1 compass row (predicted / drawn / KiCad DRC per violation class, `toporlib.compass`) is appended
+to `<root>/compass.tsv` and printed. Changing a default is possible (`--clock`, `--timeout`, `--threads`) but is written to `<root>/limits.json` with the
 git hash, the engine path and the load average at start and end, and `harness.scorecard --compare` refuses to
 compare roots whose clock, limit or thread count differ unless `--force`.
 """
@@ -67,6 +68,28 @@ def run_command(board: str, out_dir: Path, seed: int, *, clock: str, timeout_s: 
     return cmd
 
 
+def compass_row(root: Path, board: str, k: int, out: Path) -> str | None:
+    """M1 compass columns of one finished run (`<out>/*--compass.json`, written by route_board) appended to
+    `<root>/compass.tsv` (board, run, then p_/d_/k_<class> = predicted / drawn / KiCad DRC per class, detour_gt_1_5,
+    vias_plan_ne_drawn; `harness.predict_vs_drawn <root>` prints the tables). Returns the run's compass line."""
+    from toporlib import compass as compass_mod
+    hits = sorted(out.glob("*--compass.json"))
+    if not hits:
+        return None
+    cp = json.loads(hits[0].read_text())
+    cols = compass_mod.columns(cp)
+    if not cols:
+        return None
+    tsv = root / "compass.tsv"
+    keys = sorted(cols)
+    new = not tsv.exists()
+    with tsv.open("a") as f:
+        if new:
+            f.write("\t".join(["board", "run", *keys]) + "\n")
+        f.write("\t".join([board, f"s{k}", *("" if cols[c] is None else str(cols[c]) for c in keys)]) + "\n")
+    return compass_mod.summary_line(cp)
+
+
 def main(argv: list | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("root", type=Path, help="output root: <root>/<board>/s<k>/, <root>/limits.json")
@@ -106,6 +129,9 @@ def main(argv: list | None = None) -> int:
                 if r.returncode:
                     print(f"  run failed (exit {r.returncode}): see {a.root / f'{name}-s{k}.log'}", file=sys.stderr)
                     rc = 1
+                line = compass_row(a.root, name, k, out)
+                if line:
+                    print(f"  {line}", flush=True)
     finally:
         lim["load_avg_end"] = list(os.getloadavg())
         lim["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
