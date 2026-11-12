@@ -13,7 +13,15 @@
 
 Metrics come from `kicad-cli pcb drc --refill-zones` on the routed copy: unconnected items, routing_new (routing-type
 violations the stripped input does not already have), vias; plus the run's routed/total connection count, the detour
-ratio and ladder warnings when the engine report carries them, and the runtime. On `topor-topo` before S2 the engine
+ratio and ladder warnings when the engine report carries them, and the runtime.
+
+Detour (`toporlib.detour.detour_stats`): per connection, routed length / ghost length (`median`, `p90`, `max`,
+`count_gt_1_5`, `top10`), unchanged; beside it `trees`: per net with two or more pad-to-pad connections, the drawn
+tree length over the Euclidean MST of its pad positions (Du & Hwang 1990: a Steiner tree is at least sqrt(3)/2 of the
+MST), with its own `n`, `max`, `count_gt_1_5`, `top10`. Nets with an unrouted connection get no tree row; their routed
+connections still count per connection. Compare scorecards on both: the per-connection ratio over-states a tree branch
+that ends at another pad of its net (wiccon cycles GPIO0 4.53 per connection, tree 1.68), the tree ratio hides a
+single wandering branch (qmtech JS2_5 5.69 per connection, tree 2.79). On `topor-topo` before S2 the engine
 route is a placeholder: every connection fails with `NO_ENGINE`, the tool reports 0 % routed.
 
 `tools/classic_reference.sh <out_dir>` builds main @ 64b3979 in a temporary worktree, runs it once on the gate boards

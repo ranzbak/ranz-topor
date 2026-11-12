@@ -129,12 +129,12 @@ def test_detour_stats_uses_reference_and_reports_ghost():
     assert detour_stats([_c(1, 5, 5)], field="ref_len_nm") is None
 
 
-def test_tree_net_is_one_row_against_the_mst_of_its_pads():
-    # GPIO0-like tree: three pads on a line 0 - 4 - 10 mm, two connections; the drawn tree may end a
-    # connection at another pad of its tree than labelled (per connection 9 mm against a 4 mm ghost).
+def _tree_conns():
+    # A tree on a line 0 - 4 - 10 mm with two connections; the first one wanders (9 mm against a
+    # 4 mm ghost), the second is short. Plus a two-pad net.
     mm = 1_000_000
     pad = lambda x: {"kind": "pad", "at": [x * mm, 0]}
-    conns = [
+    return [
         {"id": 1, "net": 7, "name": "T", "status": "routed", "length_nm": 9 * mm, "ghost_len_nm": 4 * mm,
          "from": pad(0), "to": pad(4)},
         {"id": 2, "net": 7, "name": "T", "status": "routed", "length_nm": 2 * mm, "ghost_len_nm": 6 * mm,
@@ -142,8 +142,22 @@ def test_tree_net_is_one_row_against_the_mst_of_its_pads():
         {"id": 3, "net": 8, "name": "S", "status": "routed", "length_nm": 3 * mm, "ghost_len_nm": 2 * mm,
          "from": pad(0), "to": pad(2)},
     ]
-    s = detour_stats(conns)
-    assert s["n"] == 2 and s["tree_nets"] == 1
-    t = next(r for r in s["top10"] if r.get("tree"))
-    assert t["ratio"] == 1.1 and t["pads"] == 3 and t["connections"] == 2
-    assert s["max"] == 1.5
+
+
+def test_tree_net_metric_sits_next_to_the_per_connection_rows():
+    s = detour_stats(_tree_conns())
+    # Per connection unchanged: the wandering branch stays visible as the worst row.
+    assert s["n"] == 3 and s["max"] == 2.25 and s["top10"][0]["id"] == 1
+    # Tree metric beside it: (9 + 2) / MST 10.
+    assert s["trees"]["n"] == 1 and s["trees"]["max"] == 1.1 and s["trees"]["count_gt_1_5"] == 0
+    assert s["trees"]["top10"][0]["pads"] == 3 and s["trees"]["top10"][0]["ids"] == [1, 2]
+    assert "tree nets" in detour_line(s)
+
+
+def test_tree_with_an_unrouted_connection_has_no_tree_row_and_keeps_no_reference_count():
+    c = _tree_conns()
+    c[1]["status"] = "failed"
+    s = detour_stats(c)
+    assert s["trees"]["n"] == 0
+    # The routed connections of that net still count per connection; the failed one is no reference.
+    assert s["n"] == 2 and s["no_reference"] == 1
