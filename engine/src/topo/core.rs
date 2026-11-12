@@ -1210,7 +1210,18 @@ impl Fixed {
             Err(format!("{} signal layer(s)", signal.len()))
         } else {
             let pm: &BoardModel = alias.as_ref().unwrap_or(model);
-            board::build_full(pm, &build_opts(opts), &[], &stubs.extra).map(|mut b| {
+            // 5.10 (`[search] exit_stubs`): the planned pad exits join the fixed items.
+            let mut extra = stubs.extra.clone();
+            if opts.exit_stubs {
+                extra.extend(exit_requests(pm, &dec));
+            }
+            board::build_full(pm, &build_opts(opts), &[], &extra).map(|mut b| {
+                if !b.exit_stubs.is_empty() {
+                    notes.push(format!(
+                        "pad exits ([search] exit_stubs): {} planned exit stubs (fine-pitch pads left through their tip along the pad axis, fixed before the topology)",
+                        b.exit_stubs.len()
+                    ));
+                }
                 // `[capacity] model = "cuts"` (shopping list 2.3): the per-layer room of the edges the
                 // shared projection leaves unbounded comes from the layer's sheet (P2 and the per-edge
                 // layer masks).
@@ -1230,6 +1241,23 @@ impl Fixed {
         };
         Fixed { dec, pairs, alias, board, notes }
     }
+}
+
+/// Shopping list 5.10: one [`board::Extra::Exit`] per pad end of every connection of `dec`
+/// (towards its other terminal), in connection order; the build keeps those that are needed and
+/// legal ([`board::Extra::Exit`]). O(connections).
+fn exit_requests(m: &BoardModel, dec: &crate::decompose::Decomposition) -> Vec<board::Extra> {
+    let mut out = Vec::new();
+    for c in &dec.connections {
+        for (t, o) in [(&c.from, &c.to), (&c.to, &c.from)] {
+            if let crate::decompose::TermKind::Pad(pi) = t.kind {
+                if pi < m.pads.len() {
+                    out.push(board::Extra::Exit { pad: pi, toward: o.at, w: c.width as f64, s: (c.clearance.max(m.rules.min_clearance)) as f64 });
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The pad-to-pour connections of `dec` (the plane stage's requests), as `route_round` sorts them.
