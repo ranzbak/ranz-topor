@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import re
 import sys
 import tempfile
@@ -67,42 +66,30 @@ def _nm(mm) -> int:
     return int(round(float(mm) * 1e6))
 
 
-# ------------------------------------------------------------------ via sizes (mirror of engine/src/vias.rs)
-def _rule_size(rules: dict, width: int, grid: int, allowed: list[int]) -> tuple[int, int]:
-    need = math.ceil(max(width, 0) / math.pi)
-    drill = (need + grid - 1) // grid * grid if grid > 0 else need
-    drill = max(drill, int(rules.get("min_via_drill") or 0))
-    bigger = [a for a in allowed if a >= drill]
-    if bigger:
-        drill = min(bigger)
-    return max(int(rules.get("min_via_diameter") or 0), drill + 2 * int(rules.get("min_annular") or 0)), drill
+# ------------------------------------------------------------------ via sizes (the engine's own list)
+DEFAULT_RULE_NET = -(2 ** 31)  # engine/src/vias.rs DEFAULT_RULE_NET (i32::MIN): the board's default rule
 
 
-def via_list(rules: dict, nr: dict, net_code: int | None, opts: dict) -> list[list[float]]:
-    """Via sizes ``[d, drill]`` (mm) the engine may place for a net with rule `nr`, largest first: ``via_sizes`` of
-    engine/src/vias.rs (net class via or the via fallback, then the smaller pre-defined and ``routing_vias``
-    sizes; ``[vias] size = "board_min"``: the one rule size). `opts`: ``via_size``, ``grid_nm``, ``allowed_nm``.
-    O(V log V)."""
-    allowed = list(opts.get("allowed_nm") or [])
-    pairs = rules.get("diff_pairs") or []
-    in_pair = net_code is not None and any(int(p.get("p", -1)) == net_code or int(p.get("n", -1)) == net_code
-                                           for p in pairs)
-    if opts.get("via_size") == "board_min" and not in_pair:
-        w = int(nr.get("width") or 0)
-        d, dr = _rule_size(rules, w, int(opts.get("grid_nm") or 0), allowed)
-        return [[_mm(d), _mm(dr)]]
-    dmin, rmin, ann = (int(rules.get(k) or 0) for k in ("min_via_diameter", "min_via_drill", "min_annular"))
-    fb = rules.get("via_fallback") or [800_000, 400_000]
-    if (not rules.get("predefined_vias") and [nr.get("via_d"), nr.get("via_drill")] == [800_000, 400_000]
-            and list(fb) != [800_000, 400_000]):
-        first = (max(int(fb[0]), dmin), max(int(fb[1]), rmin))
-    else:
-        first = (int(nr.get("via_d") or 0), int(nr.get("via_drill") or 0))
-    cand = [(int(d), int(r)) for d, r in rules.get("predefined_vias") or []]
-    cand += [(max(int(r) + 2 * ann, dmin), int(r)) for r in rules.get("routing_vias") or []]
-    rest = sorted({(d, r) for d, r in cand if r >= rmin and d >= dmin and 2 * ann <= d - r and d < first[0]
-                   and r < first[1] and (not allowed or r in allowed)}, reverse=True)
-    return [[_mm(d), _mm(r)] for d, r in [first, *rest]]
+def _engine():
+    try:
+        import topor_engine
+    except ImportError as exc:  # pragma: no cover - the harness always has the engine
+        raise RuntimeError("harness.validity needs topor_engine (the via list is the engine's own)") from exc
+    if not hasattr(topor_engine, "via_sizes"):  # pragma: no cover
+        raise RuntimeError("topor_engine.via_sizes missing: rebuild the engine")
+    return topor_engine
+
+
+def via_list(rules: dict | str, net_code: int | None, opts: dict) -> list[list[float]]:
+    """Via sizes ``[d, drill]`` (mm) the engine may place for net `net_code` (None: the board default rule),
+    largest first: ``topor_engine.via_sizes`` (engine/src/vias.rs ``via_sizes``: net class via or the via
+    fallback, then the smaller pre-defined and ``routing_vias`` sizes; ``[vias] size = "board_min"``: the one rule
+    size), so the gate cannot drift from the engine. `rules`: the rules dict or its JSON; `opts`: engine option
+    fields (``via_size``, ``via_drill_grid_nm``, ``allowed_drills_nm``). One engine call."""
+    rj = rules if isinstance(rules, str) else json.dumps(rules)
+    net = DEFAULT_RULE_NET if net_code is None else int(net_code)
+    out = json.loads(_engine().via_sizes(rj, net, json.dumps(opts)))
+    return [[_mm(d), _mm(r)] for d, r in out]
 
 
 # ------------------------------------------------------------------ canonical rule set
@@ -137,10 +124,11 @@ def unsupported(rules: dict) -> list[str]:
 
 
 def _opts_of(cfg) -> dict:
+    """The engine option fields the via list depends on (engine names; none: the engine's defaults). O(1)."""
     if cfg is None:
-        return {"via_size": "net_class", "grid_nm": 10_000, "allowed_nm": []}
-    return {"via_size": str(cfg.get("vias", "size")), "grid_nm": _nm(cfg.get("vias", "drill_grid_mm") or 0),
-            "allowed_nm": [_nm(x) for x in cfg.get("vias", "allowed_drills_mm") or []]}
+        return {}
+    return {"via_size": str(cfg.get("vias", "size")), "via_drill_grid_nm": _nm(cfg.get("vias", "drill_grid_mm") or 0),
+            "allowed_drills_nm": [_nm(x) for x in cfg.get("vias", "allowed_drills_mm") or []]}
 
 
 def rule_set(rules: dict, net_names: dict, cfg=None) -> dict:
@@ -151,9 +139,11 @@ def rule_set(rules: dict, net_names: dict, cfg=None) -> dict:
     if not rules.get("via_hole_clearance"):  # engine: 0 (older models) = hole_clearance
         board["via_hole_clearance"] = board["hole_clearance"]
 
+    rj = json.dumps(rules)
+
     def net(nr: dict, code) -> dict:
         d = {f: _mm(nr.get(f)) for f in NET_FIELDS}
-        d["vias"] = via_list(rules, nr, code, opts)
+        d["vias"] = via_list(rj, code, opts)
         return d
 
     nets = {DEFAULT_NET: net(rules.get("default") or {}, None)}

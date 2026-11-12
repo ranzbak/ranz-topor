@@ -127,11 +127,13 @@ def test_margin_counts_as_a_rule_difference():
     ("net_class", [[0.6, 0.3], [0.45, 0.25]]),  # net class via, then the fab-profile 0.25 drill (vias.rs sizes_for)
     ("board_min", [[0.45, 0.25]]),             # a 0.25 trace: pi x 0.25 -> drill 0.08, floored to 0.25 (rule_size)
 ])
-def test_via_list_mirrors_the_engine(via_size, want):
+def test_via_list_is_the_engines(via_size, want):
+    """The gate's via list comes from topor_engine.via_sizes (engine/src/vias.rs), not a Python copy."""
     rules = {"min_via_diameter": 450_000, "min_via_drill": 250_000, "min_annular": 100_000,
-             "routing_vias": [250_000, 300_000, 400_000, 500_000], "predefined_vias": [], "via_fallback": [800_000, 400_000]}
-    nr = {"via_d": 600_000, "via_drill": 300_000, "width": 250_000}
-    assert va.via_list(rules, nr, 1, {"via_size": via_size, "grid_nm": 10_000, "allowed_nm": []}) == want
+             "routing_vias": [250_000, 300_000, 400_000, 500_000], "predefined_vias": [], "via_fallback": [800_000, 400_000],
+             "default": {"via_d": 600_000, "via_drill": 300_000, "width": 250_000, "clearance": 200_000}, "per_net": {}}
+    assert va.via_list(rules, 1, {"via_size": via_size}) == want
+    assert va.via_list(rules, None, {"via_size": via_size}) == want  # None = the board's default rule
 
 
 def test_partial_board_and_net_declaration_keeps_the_omitted_fields():
