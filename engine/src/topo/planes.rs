@@ -449,6 +449,18 @@ pub fn in_bga(areas: &[crate::geom::Aabb], p: Vec2) -> bool {
     areas.iter().any(|a| p.x >= a.min.x && p.x <= a.max.x && p.y >= a.min.y && p.y <= a.max.y)
 }
 
+/// Whether a pad, an existing via or a plane via at `p` may take part in sharing under the
+/// `[planes] share_vias` `mode` ("always", "outside_bga" = not in `areas`, anything else = no).
+/// The one gate for the pads, the existing vias, the placed stub vias and every site [`resite`]
+/// moves a shared via to. O(areas).
+pub fn may_share_at(mode: &str, areas: &[crate::geom::Aabb], p: Vec2) -> bool {
+    match mode {
+        "always" => true,
+        "outside_bga" => !in_bga(areas, p),
+        _ => false,
+    }
+}
+
 /// Most far-terminal candidates per pad ([`far_candidates`]).
 pub const FAR_CANDIDATES: usize = 24;
 
@@ -625,9 +637,10 @@ pub fn weber(pts: &[Vec2]) -> Vec2 {
 /// no site is cheaper. Every stub stays within the reach of [`place`] (3 mm past its pad) and
 /// passes the same checks as there. `outs` (per request, in the stage's order) and `v` are
 /// updated; `vias` = every stub via's (centre, radius) for the keep-off checks (this one's own
-/// entry is skipped). Returns whether the via moved.
+/// entry is skipped); `site_ok` = the share gate ([`may_share_at`]: never into a BGA area under
+/// "outside_bga"). Returns whether the via moved.
 #[allow(clippy::too_many_arguments)]
-pub fn resite(dr: &mut Drawer, reqs: &[Req], outs: &mut [Option<Out>], v: &mut PlaneVia, cost: &SiteCost, vias: &[(Vec2, f64)]) -> bool {
+pub fn resite(dr: &mut Drawer, reqs: &[Req], outs: &mut [Option<Out>], v: &mut PlaneVia, cost: &SiteCost, vias: &[(Vec2, f64)], site_ok: &dyn Fn(Vec2) -> bool) -> bool {
     let Some(owner) = v.owner else { return false };
     if v.users.is_empty() {
         return false;
@@ -654,6 +667,9 @@ pub fn resite(dr: &mut Drawer, reqs: &[Req], outs: &mut [Option<Out>], v: &mut P
     let others: Vec<(Vec2, f64)> = vias.iter().copied().filter(|&(q, _)| (q - v.at).len() > 1.0).collect();
     let price_at = |dr: &Drawer, p: Vec2| -> f64 { members.iter().map(|&i| cost.mm * (ctr(i) - p).len() / 1e6).sum::<f64>() + cost.squeeze(dr.point_room(p, sz.d as f64, v.net), sz.d as f64) };
     let legal = |dr: &Drawer, p: Vec2| -> bool {
+        if !site_ok(p) {
+            return false;
+        }
         if members.iter().any(|&i| (ctr(i) - p).len() > rpad(i) + 3.0e6 || (!dr.opts.via_in_pad && point_in_poly(p, &b.proj.obstacles[reqs[i].obs].poly))) {
             return false;
         }

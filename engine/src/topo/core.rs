@@ -1337,11 +1337,7 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
         if !matches!(share_mode, "never" | "outside_bga" | "always") {
             notes.push(format!("[planes] share_vias = \"{share_mode}\" is not one of never, outside_bga, always: no plane via is shared"));
         }
-        let may_share = |p: Vec2| match share_mode {
-            "always" => true,
-            "outside_bga" => !planes::in_bga(&bga, p),
-            _ => false,
-        };
+        let may_share = |p: Vec2| planes::may_share_at(share_mode, &bga, p);
         let pad_at = |rq: &planes::Req| model.pads[rq.pad].center.to_vec2();
         let mut shared: Vec<planes::PlaneVia> = if share_mode == "never" { Vec::new() } else { existing_plane_vias(model).into_iter().filter(|v| may_share(v.at)).collect() };
         let mut outs: Vec<Option<planes::Out>> = Vec::with_capacity(reqs.len());
@@ -1402,7 +1398,7 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
                         continue;
                     }
                     let old = v.at;
-                    if planes::resite(&mut dr, &reqs, &mut outs, v, &cost, &vias) {
+                    if planes::resite(&mut dr, &reqs, &mut outs, v, &cost, &vias, &may_share) {
                         if let Some(e) = vias.iter_mut().find(|e| (e.0 - old).len() <= 1.0) {
                             e.0 = v.at;
                         }

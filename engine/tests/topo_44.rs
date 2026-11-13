@@ -162,3 +162,18 @@ fn a_pad_out_of_stub_reach_is_wired_to_its_pour_not_to_a_pad() {
     }).fold(f64::MIN, f64::max);
     assert!(xmax_off > 22.0, "without terminals the pad is wired to C1: {xmax_off}");
 }
+
+/// The share gate ([`planes::may_share_at`]) that the pads, the existing vias, the placed stub vias
+/// and every re-site of a shared via pass: under "outside_bga" no site in a BGA area, also not one
+/// a shared via of pads outside would move to (user 2026-11-13).
+#[test]
+fn a_shared_via_never_moves_into_a_bga_area() {
+    use topor_engine::geom::{Aabb, Vec2};
+    use topor_engine::topo::planes::may_share_at;
+    let areas = [Aabb { min: Vec2 { x: 0.0, y: 0.0 }, max: Vec2 { x: 5e6, y: 5e6 } }];
+    let (inside, edge, outside) = (Vec2 { x: 2e6, y: 2e6 }, Vec2 { x: 5e6, y: 1e6 }, Vec2 { x: 5.1e6, y: 1e6 });
+    assert!(!may_share_at("outside_bga", &areas, inside) && !may_share_at("outside_bga", &areas, edge));
+    assert!(may_share_at("outside_bga", &areas, outside));
+    assert!(may_share_at("always", &areas, inside));
+    assert!(!may_share_at("never", &areas, outside) && !may_share_at("bogus", &areas, outside));
+}
