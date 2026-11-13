@@ -99,8 +99,8 @@ def test_highlight_changes_pixel(tmp_path):
     assert im.getpixel((50, 30)) == (255, 255, 255)
 
 
-def test_progress_accepts_dcsgonebadge():
-    assert progress.board_options("dcsgonebadge") == {"wall_clock_s": 60, "partial_routes": False}
+def test_progress_accepts_long_board():
+    assert progress.board_options("esp-rust-board") == {"wall_clock_s": 60, "partial_routes": False}
     assert progress.board_options("eprom-to-kernal") is None
 
 
