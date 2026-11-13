@@ -274,6 +274,65 @@ _DEF_CLASSES = [
 ]
 
 
+def make_pair_via_board(path: Path, *, wide: bool = True) -> Path:
+    """Pair-via room fixture (pair-via site proposal 2026-11-13): a 20 x 10 mm 2-layer board, the diff pair
+    USB+ / USB- from J1 (SMD pads on F.Cu at x 1) to J2 (SMD pads on B.Cu at x 19), so the pair changes layer once,
+    in a channel between two GND copper walls on both layers (filled copper rectangles of net GND). The channel
+    (y 5.275 +- 0.62 mm) holds the pair band (2 x 0.2 mm tracks at a 0.2 mm gap, 0.2 mm clearance) everywhere but
+    not the two-via disc of the smallest via (0.4 / 0.3 mm, via gap 0.2: a 1.0 mm disc + 0.2 mm clearance); with
+    ``wide`` the channel widens to +- 1.6 mm for x 5 .. 9 mm, the one place that holds the disc. Use with
+    ``write_project_file(.., classes=PAIR_VIA_CLASSES)``."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    b = pcbnew.CreateEmptyBoard()
+    b.SetCopperLayerCount(2)
+    nets = {}
+    for name in ("USB+", "USB-", "GND"):
+        n = pcbnew.NETINFO_ITEM(b, name)
+        b.Add(n)
+        nets[name] = n
+    W, H = 20.0, 10.0
+    for a, c in (((0, 0), (W, 0)), ((W, 0), (W, H)), ((W, H), (0, H)), ((0, H), (0, 0))):
+        s = pcbnew.PCB_SHAPE(b)
+        s.SetShape(pcbnew.SHAPE_T_SEGMENT)
+        s.SetLayer(pcbnew.Edge_Cuts)
+        s.SetWidth(int(0.05 * MM))
+        s.SetStart(_v(*a))
+        s.SetEnd(_v(*c))
+        b.Add(s)
+    for ref, x, back in (("J1", 1.0, False), ("J2", 19.0, True)):
+        fp = pcbnew.FOOTPRINT(b)
+        fp.SetReference(ref)
+        fp.SetValue(ref)
+        fp.SetPosition(_v(0, 0))
+        b.Add(fp)
+        _add_pad(fp, "1", pcbnew.PAD_SHAPE_RECT, (0.25, 0.25), (x, 5.0), nets["USB+"], back=back)
+        _add_pad(fp, "2", pcbnew.PAD_SHAPE_RECT, (0.25, 0.25), (x, 5.55), nets["USB-"], back=back)
+    yc, h, hw = 5.275, 0.62, 1.6
+    parts = [(0.6, 5.0, h), (5.0, 9.0, hw), (9.0, W - 0.6, h)] if wide else [(0.6, W - 0.6, h)]
+    for x0, x1, hh in parts:
+        for y0, y1 in ((0.6, yc - hh), (yc + hh, H - 0.6)):
+            for layer in (pcbnew.F_Cu, pcbnew.B_Cu):
+                s = pcbnew.PCB_SHAPE(b)
+                s.SetShape(pcbnew.SHAPE_T_RECT)
+                s.SetLayer(layer)
+                s.SetFilled(True)
+                s.SetWidth(0)
+                s.SetStart(_v(x0, y0))
+                s.SetEnd(_v(x1, y1))
+                s.SetNet(nets["GND"])
+                b.Add(s)
+    pcbnew.SaveBoard(str(path), b)
+    return path
+
+
+#: Net class of the pair-via fixture: 0.2 mm tracks and clearance, diff pair 0.2 / 0.2 mm, via gap 0.2 mm.
+PAIR_VIA_CLASSES = [
+    {"name": "Default", "clearance": 0.2, "track_width": 0.2, "via_diameter": 0.6, "via_drill": 0.3,
+     "diff_pair_width": 0.2, "diff_pair_gap": 0.2, "diff_pair_via_gap": 0.2, "priority": 2147483647}
+]
+
+
 def write_project_file(pcb: Path, *, rules: dict, classes: list[dict], patterns=()) -> Path:
     pcb = Path(pcb)
     merged = {**_DEF_RULES, **rules}

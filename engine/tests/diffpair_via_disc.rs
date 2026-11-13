@@ -100,3 +100,144 @@ fn pair_via_disc_keeps_clear_of_the_partner_pads() {
     let mid = topor_engine::geom::Vec2 { x: 10.0e6, y: 5.0e6 };
     assert!(cutflow::point_free(&b.proj, &packer, mid, 1, 200_000.0) > 0.55e6);
 }
+
+#[test]
+fn pair_disc_free_radius_counts_both_halves_pads() {
+    // Item 1 (pair-via site proposal 2026-11-13): the projection's free radius of a pair net counts
+    // the pair's own pads (in the plan the partner's pads carry the lead net): on a pad it is 0.
+    let (pm, _) = planned();
+    let bo = board::BuildOpts { existing_vias: true, keepouts: true, copper_shapes: true, ..board::BuildOpts::default() };
+    let b = board::build_full(&pm, &bo, &[], &[]).expect("board");
+    assert!(b.proj.pair_nets.contains(&1));
+    for o in b.proj.obstacles.iter().filter(|o| o.net == Some(1)) {
+        assert_eq!(b.proj.free_radius(o.center, 1), 0.0, "pair net on its own pad at {:?}", o.center);
+    }
+    // the layer report's site radius of the pair: the disc (radius 0.55) + clearance 0.2
+    let need = topor_engine::vias::pair_via_need(&pm.rules, &Options::default());
+    assert!((need - 0.75e6).abs() < 0.02e6, "pair via need {need}");
+    assert_eq!(topor_engine::vias::pair_via_need(&pair_board().rules, &Options::default()), 0.0, "no pair disc outside the plan");
+}
+
+// ---- Item 2 / 4 end to end in the engine: a pair from J1 (F.Cu) to J2 (B.Cu) must change layer in a
+// GND-walled channel (copper on both layers). The pair band (0.2 + 0.2 + 0.2 mm, 0.2 mm clearance:
+// 1.0 mm) fits the 1.4 mm channel everywhere; the two-via disc (1.1 mm + 2 x 0.2 mm = 1.5 mm) fits
+// only where the channel widens to 3.2 mm (x 5 .. 9 mm), when it does.
+
+fn channel_board(wide: bool) -> BoardModel {
+    let p = |v: f64| (v * MM).round() as i64;
+    let c = [(0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (0.0, 10.0)];
+    let segs: Vec<String> = (0..4)
+        .map(|i| {
+            let (a, b) = (c[i], c[(i + 1) % 4]);
+            format!(r#"{{"kind":"seg","a":[{},{}],"b":[{},{}]}}"#, p(a.0), p(a.1), p(b.0), p(b.1))
+        })
+        .collect();
+    // (ref, number, net, x, y, layer)
+    let pads = [("J1", "1", 1, 1.0, 5.0, 0), ("J1", "2", 2, 1.0, 5.65, 0), ("J2", "1", 1, 19.0, 5.0, 2), ("J2", "2", 2, 19.0, 5.65, 2)];
+    let pj: Vec<String> = pads
+        .iter()
+        .enumerate()
+        .map(|(i, &(r, num, net, x, y, l))| {
+            format!(
+                r#"{{"uuid":"p{i}","ref":"{r}","number":"{num}","net":{net},"attr":"smd","center":[{},{}],
+                    "rotation_deg":0.0,"layers":[{l}],"shapes":{{"{l}":{{"kind":"rect","w":{},"h":{}}}}},"drill":null}}"#,
+                p(x),
+                p(y),
+                p(0.3),
+                p(0.3)
+            )
+        })
+        .collect();
+    // channel centre y 5.325, half width 0.7 (walls at 4.625 / 6.025); wide part half width 1.6
+    let (yc, h, hw) = (5.325, 0.7, 1.6);
+    let mut walls: Vec<(f64, f64, f64, f64)> = Vec::new();
+    if wide {
+        for &(x0, x1, hh) in &[(0.3, 5.0, h), (5.0, 9.0, hw), (9.0, 19.7, h)] {
+            walls.push((x0, 0.3, x1, yc - hh));
+            walls.push((x0, yc + hh, x1, 9.7));
+        }
+    } else {
+        walls.push((0.3, 0.3, 19.7, yc - h));
+        walls.push((0.3, yc + h, 19.7, 9.7));
+    }
+    let mut shapes: Vec<String> = Vec::new();
+    for (i, &(x0, y0, x1, y1)) in walls.iter().enumerate() {
+        for l in [0, 2] {
+            shapes.push(format!(
+                r#"{{"uuid":"w{i}-{l}","net":3,"layer":{l},"poly":[[{},{}],[{},{}],[{},{}],[{},{}]]}}"#,
+                p(x0),
+                p(y0),
+                p(x1),
+                p(y0),
+                p(x1),
+                p(y1),
+                p(x0),
+                p(y1)
+            ));
+        }
+    }
+    let nr = r#"{"clearance":200000,"width":200000,"via_d":600000,"via_drill":300000,"netclass":"Default","width_source":"netclass"}"#;
+    let s = format!(
+        r#"{{"units":"nm","board":"pairchannel",
+            "layers":[{{"id":0,"name":"F.Cu","kind":"signal"}},{{"id":2,"name":"B.Cu","kind":"signal"}}],
+            "nets":[{{"code":1,"name":"USB+"}},{{"code":2,"name":"USB-"}},{{"code":3,"name":"GND"}}],
+            "pads":[{}],"outline":[{}],"copper_shapes":[{}],
+            "rules":{{"min_clearance":100000,"min_track_width":100000,"min_via_diameter":250000,"min_via_drill":150000,
+                     "min_annular":50000,"hole_clearance":100000,"hole_to_hole":200000,"edge_clearance":200000,
+                     "default":{{"clearance":200000,"width":200000,"via_d":600000,"via_drill":300000}},
+                     "per_net":{{"1":{nr},"2":{nr}}},
+                     "diff_pairs":[{{"p":1,"n":2,"p_name":"USB+","n_name":"USB-","netclass":"Default","width":200000,"gap":200000,
+                                    "via_gap":200000,"via_d":450000,"via_drill":250000}}]}}}}"#,
+        pj.join(","),
+        segs.join(","),
+        shapes.join(",")
+    );
+    serde_json::from_str(&s).expect("model json")
+}
+
+fn route_channel(wide: bool) -> (BoardModel, topor_engine::route::RouteResult) {
+    let m = channel_board(wide);
+    let opts = Options { runs: 1, ..Options::default() };
+    let r = topor_engine::route::route_with(&m, &opts, &topor_engine::control::RunControl::new());
+    for w in r.warnings.iter().filter(|w| w.starts_with("pair via") || w.starts_with("via relocation") || w.starts_with("vias, plan vs drawn") || w.starts_with("plan metrics")) {
+        eprintln!("{w}");
+    }
+    (m, r)
+}
+
+fn pair_vias(r: &topor_engine::route::RouteResult) -> Vec<(i32, f64, f64)> {
+    r.items
+        .iter()
+        .filter_map(|it| match it {
+            topor_engine::model::Item::Via(v) if v.net == 1 || v.net == 2 => Some((v.net, v.at.x as f64 / MM, v.at.y as f64 / MM)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn pair_via_takes_the_one_side_with_room_and_draws_clean() {
+    let (m, r) = route_channel(true);
+    assert_eq!(r.failed, 0, "{:?}", r.warnings);
+    let vs = pair_vias(&r);
+    assert_eq!(vs.len(), 2, "one via pair: {vs:?}");
+    for &(_, x, _) in &vs {
+        assert!((5.0..=9.0).contains(&x), "the via pair sits where the channel holds its disc: {vs:?}");
+    }
+    assert!(!r.warnings.iter().any(|w| w.starts_with("pair via forced:")), "{:?}", r.warnings);
+    let rep = topor_engine::check::Checker::new(&m, &Options::default()).check_items(&r.items);
+    assert!(rep.violations.is_empty(), "{:?}", rep.violations);
+}
+
+#[test]
+fn pair_via_without_room_is_still_drawn_and_warned() {
+    // Costly, not failed: no site holds the disc; the pair is drawn with its via pair at the least
+    // missing room and the forced via pair is a warning of its own.
+    let (_, r) = route_channel(false);
+    assert_eq!(r.failed, 0, "{:?}", r.warnings);
+    assert_eq!(pair_vias(&r).len(), 2, "{:?}", pair_vias(&r));
+    let forced: Vec<&String> = r.warnings.iter().filter(|w| w.starts_with("pair via forced: diff pair USB+ / USB-")).collect();
+    assert_eq!(forced.len(), 1, "{:?}", r.warnings);
+    let metrics = r.warnings.iter().find(|w| w.starts_with("plan metrics:")).expect("plan metrics");
+    assert!(metrics.contains("\"vias_without_site\":1"), "the plan predicts it: {metrics}");
+}
