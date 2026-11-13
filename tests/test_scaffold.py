@@ -1,5 +1,6 @@
 # tests/test_scaffold.py
-import subprocess, sys, pathlib
+import os, subprocess, sys, pathlib
+import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 def test_python_is_venv_with_pcbnew():
@@ -7,6 +8,8 @@ def test_python_is_venv_with_pcbnew():
     assert sys.prefix != sys.base_prefix
     assert pcbnew.GetBuildVersion().startswith("10.0")
 
+@pytest.mark.skipif(bool(os.environ.get("CI")),
+                    reason="CI runs `cargo test --release` in its own rust job; here it would rebuild the engine in debug and rerun the timing tests")
 def test_cargo_workspace_builds():
     r = subprocess.run(["cargo", "test", "-p", "topor-engine", "--quiet"], cwd=ROOT, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
