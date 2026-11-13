@@ -1,8 +1,9 @@
 //! 4.4 (planes as terminals, user rule 2026-11-10): an own-net pour is a terminal of its net like
 //! a pad, one that may carry vias. A pad no stub serves is wired to the pour's filled copper, not
-//! to another pad of the net. Every plane pad has a via of its own by default (user rule
-//! 2026-11-12); with `[planes] share_vias` plane pads share a via onto the plane, sited where
-//! their stubs are shortest together.
+//! to another pad of the net. Plane pads may share a via onto the plane, sited where their stubs
+//! are shortest together, except under a ball-grid footprint, where every ball gets its own via
+//! (`[planes] share_vias` = "outside_bga", user 2026-11-13); "never" = one via per pad (the rule
+//! of 2026-11-12).
 
 use topor_engine::control::RunControl;
 use topor_engine::model::{BoardModel, Item, Options};
@@ -69,10 +70,10 @@ fn vias(items: &[Item]) -> Vec<(f64, f64)> {
 }
 
 /// plane_via_3r in small: three GND pads round (12, 12), 1.5 mm out at 120 degrees, a GND pour on
-/// B.Cu over the board. By default one via per pad (user rule 2026-11-12: no shared plane vias);
-/// with `[planes] share_vias` one via shared by the three stubs, at the centre.
+/// B.Cu over the board. No BGA, so by default (share_vias = "outside_bga") one via shared by the
+/// three stubs, at the centre; "never" (the 2026-11-12 rule): one via per pad.
 #[test]
-fn three_plane_pads_get_a_via_each_and_share_one_only_when_asked() {
+fn three_plane_pads_share_one_via_unless_never() {
     let a = |deg: f64| {
         let r = deg.to_radians();
         (12.0 + 1.5 * r.cos(), 12.0 + 1.5 * r.sin())
@@ -80,14 +81,59 @@ fn three_plane_pads_get_a_via_each_and_share_one_only_when_asked() {
     let (p1, p2, p3) = (a(-90.0), a(30.0), a(150.0));
     let m = board(24.0, 24.0, &[("R1", 1, p1.0, p1.1, 1.0), ("R2", 1, p2.0, p2.1, 1.0), ("R3", 1, p3.0, p3.1, 1.0)], &[(1, 2, 0.5, 0.5, 23.5, 23.5, &[])]);
     let def = route_with(&m, &Options::default(), &RunControl::new());
-    assert_eq!((def.routed, vias(&def.items).len()), (3, 3), "one via per plane pad by default: {:?}", def.warnings);
-    let on = route_with(&m, &Options { plane_share_vias: true, ..Options::default() }, &RunControl::new());
-    let v = vias(&on.items);
-    assert_eq!(on.routed, 3, "{:?}", on.warnings);
+    let v = vias(&def.items);
+    assert_eq!(def.routed, 3, "{:?}", def.warnings);
     assert_eq!(v.len(), 1, "one shared plane via: {v:?}");
     assert!((v[0].0 - 12.0).hypot(v[0].1 - 12.0) < 0.15, "the via stands at the pads' median: {v:?}");
+    let never = route_with(&m, &Options { plane_share_vias: "never".into(), ..Options::default() }, &RunControl::new());
+    assert_eq!((never.routed, vias(&never.items).len()), (3, 3), "one via per plane pad: {:?}", never.warnings);
+    // planes.terminals off (stubs into any fill): the sharing is the same.
     let off = route_with(&m, &Options { plane_terminals: false, ..Options::default() }, &RunControl::new());
-    assert_eq!((off.routed, vias(&off.items).len()), (3, 3));
+    assert_eq!((off.routed, vias(&off.items).len()), (3, 1));
+}
+
+/// A 4 x 4 ball grid U1 (pitch 1.27 mm, all GND) over a B.Cu GND pour: by default every ball gets
+/// a via of its own (user 2026-11-13: "no shared vias under bga chips"); "always" shares.
+#[test]
+fn bga_balls_get_a_via_each_by_default() {
+    let mut pads = Vec::new();
+    for i in 0..4 {
+        for j in 0..4 {
+            pads.push(("U1", 1, 8.0 + 1.27 * i as f64, 8.0 + 1.27 * j as f64, 0.5));
+        }
+    }
+    let m = board(24.0, 24.0, &pads, &[(1, 2, 0.5, 0.5, 23.5, 23.5, &[])]);
+    assert_eq!(topor_engine::topo::planes::bga_areas(&m).len(), 1);
+    let def = route_with(&m, &Options::default(), &RunControl::new());
+    assert_eq!(vias(&def.items).len(), def.routed, "one via per ball: {:?}", def.warnings);
+    let always = route_with(&m, &Options { plane_share_vias: "always".into(), ..Options::default() }, &RunControl::new());
+    assert!(vias(&always.items).len() < always.routed, "\"always\" shares under the BGA: {:?}", always.warnings);
+}
+
+/// The detector: a ring of 16 pads (QFN-like, 2 neighbours each) and a 2 x 10 header are no
+/// ball grid; a 4 x 4 grid with its centre 2 x 2 missing (12 pads) is too small.
+#[test]
+fn rings_and_headers_are_no_bga() {
+    let mut ring = Vec::new();
+    for k in 0..5 {
+        let t = 5.0 + 0.5 * k as f64;
+        ring.extend([("Q1", 1, t, 4.0, 0.3), ("Q1", 1, t, 7.0, 0.3), ("Q1", 1, 4.0, t + 0.25, 0.3), ("Q1", 1, 8.5, t + 0.25, 0.3)]);
+    }
+    let mut hdr = Vec::new();
+    for k in 0..10 {
+        hdr.extend([("J1", 1, 12.0, 4.0 + 2.54 * k as f64, 1.0), ("J1", 1, 14.54, 4.0 + 2.54 * k as f64, 1.0)]);
+    }
+    let mut hollow = Vec::new();
+    for i in 0..4 {
+        for j in 0..4 {
+            if !((1..3).contains(&i) && (1..3).contains(&j)) {
+                hollow.push(("U2", 1, 20.0 + 1.0 * i as f64, 4.0 + 1.0 * j as f64, 0.5));
+            }
+        }
+    }
+    let all: Vec<_> = ring.iter().chain(&hdr).chain(&hollow).copied().collect();
+    let m = board(40.0, 40.0, &all, &[]);
+    assert!(topor_engine::topo::planes::bga_areas(&m).is_empty());
 }
 
 /// A VCC pad 15 mm left of a VCC pour (F.Cu, x >= 18) that holds the other VCC pad: the pad is

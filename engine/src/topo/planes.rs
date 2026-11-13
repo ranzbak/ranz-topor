@@ -394,6 +394,61 @@ pub struct FarTerm {
 /// Most set-aside candidates kept next to a far-terminal candidate ([`FarTerm::alts`]).
 pub const FAR_ALTS: usize = 8;
 
+/// Fewest pads of an area-array footprint ([`bga_areas`]).
+pub const BGA_MIN_BALLS: usize = 16;
+
+/// The areas under the board's ball-grid (area-array) footprints, math frame: per footprint
+/// (pads grouped by reference) with at least [`BGA_MIN_BALLS`] pads whose centres, in the
+/// footprint's own frame (the pads' rotation), form a grid of at least 4 x 4 rows and columns
+/// where most pads (at least half) have 3 or more neighbours one pitch away along the grid's
+/// axes (the pitch = the median nearest-neighbour distance): a BGA or PGA, also with its centre
+/// depopulated; not a QFN / QFP ring (2 neighbours per pad) nor a 2-row header. Each area is
+/// the box of the ball centres grown by half a pitch. The `[planes] share_vias` mode
+/// "outside_bga" keeps every pad standing in one to a via of its own (user 2026-11-13).
+/// O(pads log pads + per footprint n^2).
+pub fn bga_areas(model: &BoardModel) -> Vec<crate::geom::Aabb> {
+    let mut by_ref: std::collections::BTreeMap<&str, Vec<usize>> = std::collections::BTreeMap::new();
+    for (i, p) in model.pads.iter().enumerate() {
+        by_ref.entry(p.ref_.as_str()).or_default().push(i);
+    }
+    let mut out = Vec::new();
+    for idx in by_ref.values().filter(|v| v.len() >= BGA_MIN_BALLS) {
+        let phi = -model.pads[idx[0]].rotation_deg.to_radians();
+        let pts: Vec<Vec2> = idx.iter().map(|&i| model.pads[i].center.to_vec2().rot(phi)).collect();
+        let mut nn: Vec<f64> = pts
+            .iter()
+            .enumerate()
+            .map(|(a, p)| pts.iter().enumerate().filter(|(b, _)| *b != a).map(|(_, q)| (*q - *p).len()).fold(f64::INFINITY, f64::min))
+            .collect();
+        nn.sort_by(f64::total_cmp);
+        let pitch = nn[nn.len() / 2];
+        if !(pitch.is_finite() && pitch > 0.0) {
+            continue;
+        }
+        let tol = 0.1 * pitch;
+        let distinct = |mut v: Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v.windows(2).filter(|w| w[1] - w[0] > tol).count() + 1
+        };
+        let (cols, rows) = (distinct(pts.iter().map(|p| p.x).collect()), distinct(pts.iter().map(|p| p.y).collect()));
+        let axis = |d: Vec2| (d.len() - pitch).abs() <= tol && (d.x.abs() <= tol || d.y.abs() <= tol);
+        let inner = pts.iter().filter(|p| pts.iter().filter(|q| axis(**q - **p)).count() >= 3).count();
+        if cols < 4 || rows < 4 || 2 * inner < pts.len() {
+            continue;
+        }
+        let ps: Vec<Vec2> = idx.iter().map(|&i| model.pads[i].center.to_vec2()).collect();
+        let min = ps.iter().fold(Vec2 { x: f64::INFINITY, y: f64::INFINITY }, |m, p| Vec2 { x: m.x.min(p.x), y: m.y.min(p.y) });
+        let max = ps.iter().fold(Vec2 { x: f64::NEG_INFINITY, y: f64::NEG_INFINITY }, |m, p| Vec2 { x: m.x.max(p.x), y: m.y.max(p.y) });
+        out.push(crate::geom::Aabb { min, max }.grow(0.5 * pitch));
+    }
+    out
+}
+
+/// Whether `p` stands in one of `areas` ([`bga_areas`]).
+pub fn in_bga(areas: &[crate::geom::Aabb], p: Vec2) -> bool {
+    areas.iter().any(|a| p.x >= a.min.x && p.x <= a.max.x && p.y >= a.min.y && p.y <= a.max.y)
+}
+
 /// Most far-terminal candidates per pad ([`far_candidates`]).
 pub const FAR_CANDIDATES: usize = 24;
 

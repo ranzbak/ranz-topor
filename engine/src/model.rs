@@ -945,13 +945,16 @@ pub struct Options {
     /// reaches it (user 2026-11-12: routing over a connected pour has no length), instead of to
     /// another pad of its net. False: stubs into any fill, other pads joined pad to pad (before 4.4).
     pub plane_terminals: bool,
-    /// Topological core (4.4, `topor.toml [planes] share_vias`, default false): a plane pad's stub
-    /// may end on own-net copper already on the plane (another pad's stub via, an existing
-    /// through via in the fill) instead of a via of its own, and a stub via that other stubs
-    /// share moves to where their stubs are shortest together. Off by default (user rule
-    /// 2026-11-12: one via per plane pad; a shared via conducts heat worse, makes single-via
-    /// current paths and adds inductance towards the power pins).
-    pub plane_share_vias: bool,
+    /// Topological core (4.4, `topor.toml [planes] share_vias`, default `"outside_bga"`): whether
+    /// a plane pad's stub may end on own-net copper already on the plane (another pad's stub via,
+    /// an existing through via in the fill) instead of a via of its own; a stub via that other
+    /// stubs share moves to where their stubs are shortest together. `"outside_bga"` (user
+    /// 2026-11-13: "no shared vias under bga chips, shared vias are okay outside of BGA
+    /// footprints"): pads and vias in a ball-grid footprint's area ([`crate::topo::planes::bga_areas`])
+    /// never share, every plane ball gets its own via; `"never"` (the 2026-11-12 rule: a shared
+    /// via conducts heat worse, makes single-via current paths and adds inductance towards the
+    /// power pins); `"always"`.
+    pub plane_share_vias: String,
     /// `topor.toml [output] cleanup_safe`: the written copper is made stable under KiCad's Edit ->
     /// Cleanup Tracks & Vias ([`crate::topo::tidy`]): no null, duplicate or in-pad segments, T
     /// junctions as exact vertices, collinear segments merged.
@@ -1339,7 +1342,7 @@ impl Default for Options {
             stitch_islands: true,
             plane_join_islands: true,
             plane_terminals: true,
-            plane_share_vias: false,
+            plane_share_vias: "outside_bga".into(),
             cleanup_safe: true,
             net_tree: "free".into(),
             steiner: false,

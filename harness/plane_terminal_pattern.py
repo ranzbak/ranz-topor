@@ -10,15 +10,16 @@ Three questions on one small 2-layer board (30 x 20 mm, rules as `harness/fit_pa
 1. VCC: pad J1.1 (F.Cu) far left; a VCC pour on F.Cu covers the right part of the board (x >= 18) and holds C1.1.
    The pour is a terminal of VCC: J1.1's trace ends on it at its near edge (15.5 mm, no via). Careless answer
    (pads only): J1.1 to C1.1 through the pour, 20.0 mm.
-2. GND pair: R1.2 and R2.1 (F.Cu, 1.5 mm apart face to face); a GND pour on B.Cu over the whole board. Each pad gets
-   its own via onto the plane (stubs of 1.35 mm). No shared plane via (user 2026-11-12: "No, because this will create
-   poor thermal conductivity, can create single via current paths, increases the amount of induction towards the
-   power pins"; `[planes] share_vias`, default false). Careless: one via midway shared by both pads.
+2. GND pair: R1.2 and R2.1 (F.Cu, 1.5 mm apart face to face); a GND pour on B.Cu over the whole board. Both need a
+   via onto the plane; the plane may carry vias and a via on it is the net's copper, so the second pad ends on the
+   first pad's via: one shared via midway (stubs 1.25 + 1.25 mm). Careless: one via per pad (2 vias). Sharing is
+   allowed outside BGA footprints (user 2026-11-13: "no shared vias under bga chips, shared vias are okay outside of
+   BGA footprints"; `[planes] share_vias` = "outside_bga", the default); with "never" each pad gets its own via.
 3. GND single: C1.2 (F.Cu) stands inside the VCC F.Cu pour; its shortest connection is one via straight onto the
    B.Cu GND plane beside it (the VCC pour refills around it).
 
-Expected (cost = length + 25 mm per via, TopoR 6.3 manual p. 184): 15.5 + 2 x 1.35 + 1.3 mm, 3 vias. Careless: 20.0
-+ 2.5 + 1.3 mm, 2 vias (cheaper by the via price, but against the user rule: a plane pad never shares its via).
+Expected (cost = length + 25 mm per via, TopoR 6.3 manual p. 184): 15.5 + 2.5 + 1.3 mm, 2 vias. Careless: 20.0 + 2 x
+~1.2 + 1.3 mm, 3 vias.
 
 Same conventions as `harness/plane_via_pattern.py` (branch `plane-via-pattern`): solvable by construction (the
 reference copper is drawn first; KiCad DRC of the reference with the zones refilled must show 0 violations and 0
@@ -76,22 +77,22 @@ def plane_terminal() -> PTPattern:
         Fp("R1", [Pad("1", None, R1_1, PAD), Pad("2", "GND", R1_2, PAD)], "obstacle"),
         Fp("R2", [Pad("1", "GND", R2_1, PAD), Pad("2", None, R2_2, PAD)], "obstacle"),
     ]
-    own1, own2 = (R1_2[0], R1_2[1] + 1.35), (R2_1[0], R2_1[1] + 1.35)
     ref_tracks = [
         Track("VCC", "F.Cu", W_SIG, [J1, VCC_END]),
-        Track("GND", "F.Cu", W_SIG, [R1_2, own1]),
-        Track("GND", "F.Cu", W_SIG, [R2_1, own2]),
-        Track("GND", "F.Cu", W_SIG, [C1_2, C1_VIA]),
-    ]
-    careless_tracks = [
-        Track("VCC", "F.Cu", W_SIG, [J1, C1_1]),
         Track("GND", "F.Cu", W_SIG, [R1_2, SHARED_VIA]),
         Track("GND", "F.Cu", W_SIG, [R2_1, SHARED_VIA]),
         Track("GND", "F.Cu", W_SIG, [C1_2, C1_VIA]),
     ]
+    own1, own2 = (R1_2[0], R1_2[1] + 1.35), (R2_1[0], R2_1[1] + 1.35)
+    careless_tracks = [
+        Track("VCC", "F.Cu", W_SIG, [J1, C1_1]),
+        Track("GND", "F.Cu", W_SIG, [R1_2, own1]),
+        Track("GND", "F.Cu", W_SIG, [R2_1, own2]),
+        Track("GND", "F.Cu", W_SIG, [C1_2, C1_VIA]),
+    ]
     return PTPattern("plane_terminal", (W, H), 2, ["GND", "VCC"], fps, ref_tracks,
-                     [Via("GND", own1), Via("GND", own2), Via("GND", C1_VIA)], careless_tracks,
-                     [Via("GND", SHARED_VIA), Via("GND", C1_VIA)])
+                     [Via("GND", SHARED_VIA), Via("GND", C1_VIA)], careless_tracks,
+                     [Via("GND", own1), Via("GND", own2), Via("GND", C1_VIA)])
 
 
 def _zone(b: pcbnew.BOARD, net: str, layer: int, rect) -> None:
@@ -141,7 +142,7 @@ def expected_doc(pat: PTPattern) -> dict:
         # harness.validity: built for the board's own rules (route with [rules] fab_profile = "board")
         "rules_assumed": {"authority": "board", "margin": 0.0},
         "name": pat.name,
-        "title": "Own-net pours are terminals: end on the VCC pour, one GND plane via per pad (never shared)",
+        "title": "Own-net pours are terminals: end on the VCC pour, share a GND plane via, one via onto the GND plane",
         "kind": "solvable",
         "board": {"size": list(pat.size), "layers": pat.layers,
                   "pours": {"VCC": f"F.Cu, x >= {VCC_POUR_X} (holds C1.1)", "GND": "B.Cu, whole board"}},
@@ -150,7 +151,7 @@ def expected_doc(pat: PTPattern) -> dict:
         "expected": {
             "VCC J1.1": f"F.Cu trace from J1.1 ending inside the VCC fill at its near edge (x ~ {VCC_END[0]}): "
                         f"{_len([J1, VCC_END]):.1f} mm, 0 vias, no copper inside the pour",
-            "GND R1.2 + R2.1": "one via per pad (1.35 mm stubs), never a shared plane via (user 2026-11-12)",
+            "GND R1.2 + R2.1": f"one shared via at {SHARED_VIA}, two F.Cu stubs of 1.25 mm",
             "GND C1.2": f"one via beside the pad ({C1_VIA}), onto the B.Cu GND plane",
             "vias": len(pat.ref_vias),
             "length_mm": round(lr, 3),
@@ -158,7 +159,7 @@ def expected_doc(pat: PTPattern) -> dict:
         },
         "careless": {
             "VCC J1.1": f"pads only: J1.1 to C1.1 through the pour, {_len([J1, C1_1]):.1f} mm",
-            "GND": f"one via at {SHARED_VIA} shared by R1.2 and R2.1 (against the user rule of 2026-11-12)",
+            "GND": "one via per pad",
             "vias": len(pat.careless_vias),
             "length_mm": round(lc, 3),
             "cost_mm": round(lc + VIA_MM * len(pat.careless_vias), 3),
@@ -174,8 +175,8 @@ def render(pat: PTPattern, doc: dict, out: Path) -> Path:
     from matplotlib.patches import Circle, Rectangle
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5.6))
-    for ax, (label, tracks, vias) in zip(axes, (("expected (4.4: pours are terminals, own via per pad)", pat.ref_tracks, pat.ref_vias),
-                                                 ("careless (pads only, shared plane via)", pat.careless_tracks, pat.careless_vias))):
+    for ax, (label, tracks, vias) in zip(axes, (("expected (4.4: pours are terminals)", pat.ref_tracks, pat.ref_vias),
+                                                 ("careless (pads only, one via per pad)", pat.careless_tracks, pat.careless_vias))):
         ax.add_patch(Rectangle((0, 0), W, H, fill=False, ec="#999", lw=1))
         ax.add_patch(Rectangle((0.5, 0.5), W - 1, H - 1, fc="#1f77b4", alpha=0.10, ec="none"))
         ax.add_patch(Rectangle((VCC_POUR_X, 0.5), W - 0.5 - VCC_POUR_X, H - 1, fc="#ff7f0e", alpha=0.22, ec="#ff7f0e", lw=0.8))
