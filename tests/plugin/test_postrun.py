@@ -111,6 +111,11 @@ def test_island_join_is_a_stitch():
     fs = {f.code: f for f in postrun.route_findings(res)}
     assert set(fs) == {"POUR_STITCHED"}
     assert "1 isolated island(s)" in fs["POUR_STITCHED"].message and fs["POUR_STITCHED"].items[0].startswith("island join R1.2")
+    assert "check them by hand" not in fs["POUR_STITCHED"].message
+    res["warnings"].append("long island join R1.2 -> (8.600, 14.000): 4.100 mm from the pad edge, over the 3.0 mm "
+                           "scale (check it by hand)")
+    msg = {f.code: f for f in postrun.route_findings(res)}["POUR_STITCHED"].message
+    assert "1 of those join(s) run more than 3 mm from the pad" in msg
 
 
 def test_route_findings_quiet_on_a_clean_run():

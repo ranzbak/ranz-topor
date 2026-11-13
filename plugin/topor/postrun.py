@@ -135,14 +135,17 @@ def route_findings(result: dict | None) -> list:
                        f"{n_after} piece(s) of copper pours are cut off from their pour by the new copper and could "
                        "not be stitched back; KiCad's DRC lists them as unconnected items after a zone refill.",
                        [x.removeprefix("no stitch site for ") for x in left]))
-    stitched = lines("stitch via ") + lines("pad stub ") + lines("island join ")
+    long_joins = lines("long island join ")
+    stitched = lines("stitch via ") + lines("pad stub ") + lines("island join ") + long_joins
     joins = int(m.group(5) or 0) if m else 0
     if m and (int(m.group(3)) or int(m.group(4)) or joins):
         out.append(_mk("POUR_STITCHED",
                        f"{m.group(3)} stitching via(s) and {m.group(4)} pad stub(s) join pour pieces the new copper "
                        f"cut off ({m.group(1)} pieces were cut off)"
                        + (f"; {joins} isolated island(s) without a pad joined to a pad of their net by a short track "
-                          "(planes.join_islands)" if joins else "") + ".", stitched))
+                          "(planes.join_islands)" if joins else "")
+                       + (f"; {len(long_joins)} of those join(s) run more than 3 mm from the pad, check them by hand"
+                          if long_joins else "") + ".", stitched))
     sig = lines(contains="joined to its net's copper by a signal connection instead")
     # 4.4 (planes.terminals): such a pad is wired to its pour's filled copper instead.
     far = lines(contains="wired to its pour's filled copper at")
