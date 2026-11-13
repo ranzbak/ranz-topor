@@ -112,10 +112,6 @@ fn pair_disc_free_radius_counts_both_halves_pads() {
     for o in b.proj.obstacles.iter().filter(|o| o.net == Some(1)) {
         assert_eq!(b.proj.free_radius(o.center, 1), 0.0, "pair net on its own pad at {:?}", o.center);
     }
-    // the layer report's site radius of the pair: the disc (radius 0.55) + clearance 0.2
-    let need = topor_engine::vias::pair_via_need(&pm.rules, &Options::default());
-    assert!((need - 0.75e6).abs() < 0.02e6, "pair via need {need}");
-    assert_eq!(topor_engine::vias::pair_via_need(&pair_board().rules, &Options::default()), 0.0, "no pair disc outside the plan");
 }
 
 // ---- Item 2 / 4 end to end in the engine: a pair from J1 (F.Cu) to J2 (B.Cu) must change layer in a
@@ -224,9 +220,13 @@ fn pair_via_takes_the_one_side_with_room_and_draws_clean() {
     for &(_, x, _) in &vs {
         assert!((5.0..=9.0).contains(&x), "the via pair sits where the channel holds its disc: {vs:?}");
     }
-    assert!(!r.warnings.iter().any(|w| w.starts_with("pair via forced:")), "{:?}", r.warnings);
+    assert!(!r.warnings.iter().any(|w| w.starts_with("pair via violations:")), "{:?}", r.warnings);
     let rep = topor_engine::check::Checker::new(&m, &Options::default()).check_items(&r.items);
     assert!(rep.violations.is_empty(), "{:?}", rep.violations);
+    // Decide early (items 2 / 4): the plan's site holds the disc, so the drawing takes it as planned
+    // (no search, no force).
+    let pv = r.warnings.iter().find(|w| w.starts_with("pair vias, plan vs drawn:")).expect("pair via line");
+    assert!(pv.contains("1 pair via discs drawn: 1 at the planned site, 0 by the drawing's site search, 0 by force"), "{pv}");
 }
 
 #[test]
@@ -236,8 +236,11 @@ fn pair_via_without_room_is_still_drawn_and_warned() {
     let (_, r) = route_channel(false);
     assert_eq!(r.failed, 0, "{:?}", r.warnings);
     assert_eq!(pair_vias(&r).len(), 2, "{:?}", pair_vias(&r));
-    let forced: Vec<&String> = r.warnings.iter().filter(|w| w.starts_with("pair via forced: diff pair USB+ / USB-")).collect();
-    assert_eq!(forced.len(), 1, "{:?}", r.warnings);
+    // Board-rules finding 4: the via pair is checked against the final copper and warned there
+    // with how the drawing placed it.
+    let viol: Vec<&String> = r.warnings.iter().filter(|w| w.starts_with("pair via violations: diff pair USB+ / USB-")).collect();
+    assert_eq!(viol.len(), 1, "{:?}", r.warnings);
+    assert!(viol[0].contains("in the final copper") && viol[0].contains("forced by the drawing"), "{}", viol[0]);
     let metrics = r.warnings.iter().find(|w| w.starts_with("plan metrics:")).expect("plan metrics");
     assert!(metrics.contains("\"vias_without_site\":1"), "the plan predicts it: {metrics}");
 }

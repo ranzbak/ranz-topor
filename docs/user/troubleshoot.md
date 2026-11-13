@@ -310,7 +310,7 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: warning.*
 
-**Cause.** A differential pair changes layer through a via pair (two vias side by side at the pair's via gap) where the plan found no free site for both vias: topor placed the via pair anyway, with the clearance violations listed per via pair, so the pair stays connected and the spot is easy to find.
+**Cause.** A differential pair changes layer through a via pair (two vias side by side at the pair's via gap) that breaks a clearance rule in the routed copper: either the drawing found no free site for both vias and placed the pair anyway, or copper drawn next to it (another trace, or the pair's own other half) came too close. topor keeps the pair connected and lists each via pair with how it was placed and its violations, so the spot is easy to find.
 
 **Fix.** Make room or smaller vias: KiCad → File → Board Setup → Design Rules → Constraints (minimum via diameter and hole) and → Net Classes (DP Width, DP Gap, DP Via Gap) set the via pair's size; diffpair.via in topor.toml picks the via (smallest, the default, or net_class). Or move the via pair by hand in KiCad and run DRC.
 

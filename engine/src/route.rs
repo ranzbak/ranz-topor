@@ -240,6 +240,11 @@ pub struct RouteResult {
     /// `connections[..].id` of every item (same order as `items`); in-process only.
     #[serde(skip)]
     pub item_conn: Vec<usize>,
+    /// How the drawing placed each pair disc of the drawn pair wires (its centre, KiCad frame nm,
+    /// and `planned` / `searched` / `forced`), for the final pair-via check
+    /// ([`pair_via_check`]); in-process only.
+    #[serde(skip)]
+    pub pair_via_how: Vec<([i64; 2], &'static str)>,
     /// Pad exit stubs (A6 / NX) planned by the routing passes, in pass and pad order.
     pub stubs: Vec<StubOut>,
     /// Topological core: the variant table of the Pareto archive (`[optimize] objective`), the
@@ -571,7 +576,81 @@ pub fn route_with(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
             r.warnings.push(st.line());
         }
     }
+    let pv = pair_via_check(model, opts, &r.items, &r.pair_via_how);
+    r.warnings.extend(pv);
     r
+}
+
+/// Board-rules finding 4 (verifier 2026-11-13): every via pair of a coupled differential pair
+/// checked against the final copper (after the drawing, the pair realisation, the stitching and
+/// the cleanup), whether the drawing placed its disc at the plan's site, by its site search or by
+/// force: one `pair via violations: ...` warning per via pair whose vias break a rule there
+/// (costly, not failed: the pair stays connected, the user sees the spot). A via pair is a via of
+/// the pair's P net and the nearest via of its N net within two via diameters plus the via gap;
+/// `how` ([`RouteResult::pair_via_how`]) names how its disc was placed (nearest disc centre
+/// within a via diameter, else `moved after the drawing`). O(pair vias x checker query).
+pub fn pair_via_check(model: &BoardModel, opts: &Options, items: &[Item], how: &[([i64; 2], &'static str)]) -> Vec<String> {
+    let vias: Vec<(usize, &crate::model::ViaItem)> = items.iter().enumerate().filter_map(|(i, it)| if let Item::Via(v) = it { Some((i, v)) } else { None }).collect();
+    let mut out = Vec::new();
+    let mut checker: Option<(crate::check::Checker, crate::check::ItemIndex, Vec<usize>)> = None;
+    for dp in &model.rules.diff_pairs {
+        let ps: Vec<&(usize, &crate::model::ViaItem)> = vias.iter().filter(|(_, v)| v.net == dp.p).collect();
+        let mut ns: Vec<&(usize, &crate::model::ViaItem)> = vias.iter().filter(|(_, v)| v.net == dp.n).collect();
+        for &&(ip, vp) in &ps {
+            let reach = 2.0 * vp.d as f64 + dp.via_gap.max(dp.gap) as f64;
+            let d = |v: &crate::model::ViaItem| (((v.at.x - vp.at.x) as f64).powi(2) + ((v.at.y - vp.at.y) as f64).powi(2)).sqrt();
+            let Some(j) = (0..ns.len()).filter(|&j| d(ns[j].1) <= reach).min_by(|&a, &b| d(ns[a].1).total_cmp(&d(ns[b].1))) else { continue };
+            let (inn, vn) = *ns.remove(j);
+            let (ch, idx, ids) = checker.get_or_insert_with(|| {
+                let ch = crate::check::Checker::new(model, opts);
+                let mut idx = crate::check::ItemIndex::new(ch.cell());
+                let ids: Vec<usize> = items.iter().map(|it| idx.insert(it)).collect();
+                (ch, idx, ids)
+            });
+            let mut by: BTreeMap<&'static str, usize> = BTreeMap::new();
+            // (the N via skips the P via too: their mutual gap counts once)
+            let mut skip_n = vec![ids[ip], ids[inn]];
+            skip_n.sort_unstable();
+            let mut least: Option<(i64, i64)> = None;
+            for (i, skip) in [(ip, vec![ids[ip]]), (inn, skip_n)] {
+                let rep = ch.check_against(idx, std::slice::from_ref(&items[i]), &skip);
+                for v in &rep.violations {
+                    let kind = if v.gap <= 0 { "overlap" } else { "clearance" };
+                    *by.entry(kind).or_default() += 1;
+                    if least.is_none_or(|l| v.gap - v.required < l.0 - l.1) {
+                        least = Some((v.gap, v.required));
+                    }
+                }
+            }
+            let n: usize = by.values().sum();
+            if n == 0 {
+                continue;
+            }
+            let c = [(vp.at.x + vn.at.x) / 2, (vp.at.y + vn.at.y) / 2];
+            let dd = |h: &[i64; 2]| (((h[0] - c[0]) as f64).powi(2) + ((h[1] - c[1]) as f64).powi(2)).sqrt();
+            let placed = how.iter().filter(|(h, _)| dd(h) <= vp.d as f64).min_by(|a, b| dd(&a.0).total_cmp(&dd(&b.0))).map_or("moved after the drawing", |x| x.1);
+            let placed = match placed {
+                "planned" => "drawn at the plan's site",
+                "searched" => "drawn at a site the drawing's search found",
+                "forced" => "forced by the drawing, which found no free site for both vias",
+                x => x,
+            };
+            out.push(format!(
+                "pair via violations: diff pair {} / {}: via pair at ({:.3}, {:.3}) mm ({}, vias {:.3} / {:.3} mm): {n} violation(s) in the final copper ({}; least gap {:.3} mm where {:.3} mm is needed)",
+                dp.p_name,
+                dp.n_name,
+                c[0] as f64 / 1e6,
+                c[1] as f64 / 1e6,
+                placed,
+                vp.d as f64 / 1e6,
+                vp.drill as f64 / 1e6,
+                by.iter().map(|(k, c)| format!("{k} {c}")).collect::<Vec<_>>().join(", "),
+                least.map_or(0.0, |l| l.0 as f64 / 1e6),
+                least.map_or(0.0, |l| l.1 as f64 / 1e6)
+            ));
+        }
+    }
+    out
 }
 
 /// Decompose `model` on its routable layers and report every connection as failed with
@@ -707,6 +786,7 @@ pub(crate) fn unrouted(model: &BoardModel, opts: &Options, reason: &str) -> Rout
         zero_slack: "not run".into(),
         profile: None,
         item_conn: Vec::new(),
+        pair_via_how: Vec::new(),
         stubs: Vec::new(),
         variants: Vec::new(),
         moves: BTreeMap::new(),

@@ -1930,7 +1930,6 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let lp = LayerParams {
         via_mm: reg.price(&Event::Via { wire: 0, count: 1, at: None }, &WireCtx::default()),
         via_site_r: crate::vias::plan_via_need(&model.rules, opts),
-        pair_site_r: crate::vias::pair_via_need(&model.rules, opts),
         n_signal: b.n_signal,
         plane_mm: reg.price(&Event::PlaneLength { wire: 0, layer: b.n_signal, mm: 1.0 }, &WireCtx::default()),
         plane_cut: reg.price(&Event::PlaneCut { wire: 0, layer: b.n_signal }, &WireCtx::default()),
@@ -3460,6 +3459,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let (sn, sa, _) = c.shrinkage();
                 m["shrink_cuts"] = serde_json::json!(sn);
                 m["cut_shrink_pitches"] = serde_json::json!((sa * 1e3).round() / 1e3);
+                // CM1 (cut model only): the via cuts between planned vias within reach and how
+                // many of them are over-full (a foreign band planned between two vias).
+                m["via_cuts"] = serde_json::json!({"pairs": c.vc.pairs(), "overfull": c.vc.overfull()});
                 if let Ok(path) = std::env::var("TOPO_CUTS") {
                     let nm = |x: f64| (x / MM * 1e4).round() / 1e4;
                     let js: Vec<serde_json::Value> = rows
@@ -4648,33 +4650,19 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // Pair vias (the two-via disc of a coupled pair's lead net) of the drawn wires, by how the
     // drawing placed them (each disc once, its last placement): so the drawing's share of the
     // site decision is visible (the search and the force are the drawing-side fallback M6
-    // removes). Every forced disc that survives is a warning of its own ("costly, not failed":
-    // the wire is drawn, the violations stay for the user to see).
-    {
-        let live: Vec<(&(WireId, usize), &super::draw::PairVia)> = dr.pair_how.iter().filter(|((w, _), _)| drawn.contains_key(w)).collect();
-        if !live.is_empty() {
-            let n = |h: &str| live.iter().filter(|(_, pv)| pv.how == h).count();
-            warnings.push(format!(
-                "pair vias, plan vs drawn: {} pair via discs drawn: {} at the planned site, {} by the drawing's site search, {} by force",
-                live.len(),
-                n("planned"),
-                n("searched"),
-                n("forced")
-            ));
-        }
-        for ((w, _), pv) in live.iter().filter(|(_, pv)| pv.how == "forced") {
-            let net = st.wires[*w].net;
-            let name = model.rules.diff_pairs.iter().find(|p| p.p == net || p.n == net).map_or_else(|| format!("net {net}"), |p| format!("{} / {}", p.p_name, p.n_name));
-            let nv: usize = pv.viols.values().sum();
-            let kinds: Vec<String> = pv.viols.iter().map(|(k, c)| format!("{k} {c}")).collect();
-            warnings.push(format!(
-                "pair via forced: diff pair {name}: via pair at ({:.3}, {:.3}) mm placed without room: the disc of both vias ({:.3} mm) had no free site in its interval; {nv} violation(s){}",
-                pv.at.x / 1e6,
-                -pv.at.y / 1e6,
-                pv.size.d as f64 / 1e6,
-                if kinds.is_empty() { String::new() } else { format!(" ({})", kinds.join(", ")) }
-            ));
-        }
+    // removes). Whether a via pair breaks a rule is decided on the final copper
+    // ([`crate::route::pair_via_check`], one warning per via pair with violations, however it was
+    // placed: costly, not failed), from `pair_via_how` below.
+    let pair_via_how: Vec<([i64; 2], &'static str)> = dr.pair_how.iter().filter(|((w, _), _)| drawn.contains_key(w)).map(|(_, pv)| ([pv.at.x.round() as i64, (-pv.at.y).round() as i64], pv.how)).collect();
+    if !pair_via_how.is_empty() {
+        let n = |h: &str| pair_via_how.iter().filter(|x| x.1 == h).count();
+        warnings.push(format!(
+            "pair vias, plan vs drawn: {} pair via discs drawn: {} at the planned site, {} by the drawing's site search, {} by force",
+            pair_via_how.len(),
+            n("planned"),
+            n("searched"),
+            n("forced")
+        ));
     }
     // 5.4 task 2 ("decide early, draw once": a via the plan did not price is a bug to explain):
     // the plan's vias against the drawn ones, and every drawn via the plan's wire vias do not
@@ -5048,6 +5036,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         zero_slack: "not run".into(),
         profile: None,
         item_conn,
+        pair_via_how,
         stubs: Vec::new(),
         variants: Vec::new(),
         moves: super::moves::KINDS.iter().map(|&k| (k.name().to_string(), tally.applied_of(k))).collect(),

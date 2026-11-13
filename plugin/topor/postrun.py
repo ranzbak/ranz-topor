@@ -107,11 +107,11 @@ def route_findings(result: dict | None) -> list:
                        f"{len(dps)} differential-pair connection(s) routed as coupled pairs: coupled at the gap "
                        f"{cpl[0]:.0f}-{cpl[-1]:.0f} % (median {cpl[len(cpl) // 2]:.0f} %), largest skew {worst:.3f} mm.",
                        lines))
-    forced = [str(x)[len("pair via forced: "):] for x in result.get("warnings") or [] if str(x).startswith("pair via forced: ")]
-    if forced:
+    pvv = [str(x)[len("pair via violations: "):] for x in result.get("warnings") or [] if str(x).startswith("pair via violations: ")]
+    if pvv:
         out.append(_mk("DIFF_PAIR_VIA_FORCED",
-                       f"{len(forced)} differential-pair via pair(s) placed without room for both vias (see the "
-                       "violations at each).", forced))
+                       f"{len(pvv)} differential-pair via pair(s) break a clearance rule in the routed copper "
+                       "(how each was placed and its violations are listed).", pvv))
     width = [c for c in failed if c not in diff and "minimum connection width" in (c.get("reason") or "")]
     if width:
         out.append(_mk("CONNECTION_WIDTH",

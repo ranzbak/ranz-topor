@@ -1525,6 +1525,8 @@ impl<'a> Drawer<'a> {
         let net = self.st.wires[w].net;
         let sizes = via_sizes(&self.model.rules, net, self.opts);
         let mut out: Vec<(usize, Vec2, ViaSize)> = Vec::new();
+        // A redraw places this wire's vias again: its pair discs are recorded anew.
+        self.pair_how.retain(|&(x, _), _| x != w);
         // P6: the other nets' wires the plan crosses this wire with (their traversal here), for
         // the room a via pair keeps between its two vias.
         let xs: Vec<(usize, WireId)> = if self.octi.room > 0.0 {

@@ -46,11 +46,11 @@ def test_pair_via_goes_where_the_channel_holds_it(tmp_path, monkeypatch):
     assert len(vias) == 2 and {v[0] for v in vias} == {"USB+", "USB-"}, vias
     assert all(5.0 <= x <= 9.0 for _, x, _ in vias), vias
     assert m["routing_new"] == 0, m.get("drc_by_type_new")
-    assert not any(w.startswith("pair via forced:") for w in warns), warns
+    assert not any(w.startswith("pair via violations:") for w in warns), warns
 
 
 def test_pair_via_without_room_is_placed_and_reported(tmp_path, monkeypatch):
     m, warns, vias = _route(tmp_path, wide=False, monkeypatch=monkeypatch)
     assert m["unconnected_pair"] == 0, m
     assert len(vias) == 2, vias
-    assert sum(w.startswith("pair via forced: diff pair USB+ / USB-") for w in warns) == 1, warns
+    assert sum(w.startswith("pair via violations: diff pair USB+ / USB-") for w in warns) == 1, warns
