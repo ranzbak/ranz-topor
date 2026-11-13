@@ -465,6 +465,10 @@ pub struct LayerParams {
     pub via_mm: f64,
     /// Via pad radius + clearance (nm), for the plausible-site count.
     pub via_site_r: f64,
+    /// The same for the two-via disc of a coupled pair (nets in [`super::state::Projection::pair_nets`]):
+    /// the largest pair disc's reach radius + clearance (nm); 0 = no pair. The site count of a pair
+    /// net uses the larger of the two.
+    pub pair_site_r: f64,
     pub exact_max: usize,
     pub restarts: usize,
     pub seed: u64,
@@ -496,6 +500,7 @@ impl Default for LayerParams {
         LayerParams {
             via_mm: 25.0,
             via_site_r: 0.5e6,
+            pair_site_r: 0.0,
             exact_max: 16,
             restarts: 64,
             seed: 1,
@@ -564,9 +569,12 @@ fn stretches_and_vias(st: &State, polys: &[Vec<Vec2>], evl: &[Vec<(usize, f64, i
     let pr = st.proj;
     // A plausible site: a point of the stretch (pass point or triangle centroid) whose free disc
     // against other nets' obstacles holds a via pad plus clearance (wire demand ignored).
+    // A pair net's via is the disc of both vias (and its own pads are foreign to it, see
+    // `Projection::free_radius`).
+    let site_r = |net: i32| if pr.pair_nets.contains(&net) { p.via_site_r.max(p.pair_site_r) } else { p.via_site_r };
     let site = |k1: usize, k2: usize, w: WireId| -> bool {
         let net = st.wires[w].net;
-        let free = |q: Vec2| pr.free_radius(q, net) >= p.via_site_r;
+        let free = |q: Vec2| pr.free_radius(q, net) >= site_r(net);
         st.wires[w].tris[k1..=k2].iter().any(|&t: &TriId| {
             let c = pr.tris[t].iter().fold(Vec2 { x: 0.0, y: 0.0 }, |a, &v| a + pr.pos[v]) * (1.0 / 3.0);
             !pr.tri_out[t] && free(c)
@@ -618,7 +626,8 @@ fn stretches_and_vias(st: &State, polys: &[Vec<Vec2>], evl: &[Vec<(usize, f64, i
             rep.slots.push(ViaSlot { wire: w, from: (ka, sa), to: (kb, sb), at: (km, sm) });
             // 5.2: without a traversal strictly between its events the via may still stand on
             // its own side of an end event ([`super::refine::end_site`]).
-            let free = |t: TriId, q: Vec2| pr.inradius(t) >= p.via_site_r && pr.free_radius(q, wi.net) >= p.via_site_r;
+            let need = site_r(wi.net);
+            let free = |t: TriId, q: Vec2| pr.inradius(t) >= need && pr.free_radius(q, wi.net) >= need;
             let site_ok = if has { site(r.0, r.1, w) } else { super::refine::end_site(st, w, x[0], x[1], &free).is_some() };
             if !site_ok {
                 rep.vias_no_site += 1;

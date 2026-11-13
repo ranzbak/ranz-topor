@@ -450,10 +450,13 @@ impl Projection {
         self.edge_demand(e, &[it]) <= self.room_for(e, l, it.net)
     }
 
-    /// Distance from `p` to the nearest obstacle not of `net` (0 inside one). O(obstacles).
+    /// Distance from `p` to the nearest obstacle a via of `net` must keep clear of (0 inside
+    /// one): another net's, or for a pair's two-via disc every obstacle, the pair's own pads too
+    /// ([`Projection::via_foreign`]: in the plan the partner's pads carry the lead's net).
+    /// O(obstacles).
     pub fn free_radius(&self, p: Vec2, net: i32) -> f64 {
         let mut d = f64::INFINITY;
-        for ob in self.obstacles.iter().filter(|o| o.net != Some(net)) {
+        for ob in self.obstacles.iter().filter(|o| self.via_foreign(o, net)) {
             if point_in_poly(p, &ob.poly) {
                 return 0.0;
             }
