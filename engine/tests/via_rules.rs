@@ -119,3 +119,23 @@ fn fallback_only_when_nothing_set_up() {
     assert_eq!(d.via_fallback, [800_000, 400_000]);
     assert!(!via_fallback_used(&d, 0));
 }
+
+#[test]
+fn diff_pair_nets_use_the_pairs_via() {
+    // User 2026-11-12: a pair's vias are the smallest the board allows (the plugin resolves it into
+    // the pair rule); a pair net routed alone uses it too, in both `[vias] size` modes.
+    use topor_engine::model::DiffPairRule;
+    let mut r = rules();
+    r.predefined_vias = vec![[600_000, 300_000]];
+    r.diff_pairs = vec![DiffPairRule { p: 3, n: 4, width: 200_000, via_d: 450_000, via_drill: 250_000, ..Default::default() }];
+    for mode in ["net_class", "board_min"] {
+        let o = Options { via_size: mode.into(), ..Options::default() };
+        assert_eq!(via_sizes(&r, 3, &o), vec![sz(450_000, 250_000)], "{mode}");
+        assert_eq!(via_sizes(&r, 4, &o), vec![sz(450_000, 250_000)], "{mode}");
+    }
+    // other nets keep their own rule
+    assert_eq!(via_sizes(&r, 0, &Options::default())[0], sz(800_000, 400_000));
+    // a pair rule without a via (older model): the net's sizes as before
+    r.diff_pairs[0].via_d = 0;
+    assert_eq!(via_sizes(&r, 3, &Options::default())[0], sz(800_000, 400_000));
+}

@@ -25,6 +25,11 @@ pub fn via_fallback_used(rules: &Rules, net: i32) -> bool {
 /// Via sizes for `net`, largest first, never empty (see `sizes_for`); `opts.allowed_drills_nm`
 /// is the drill filter. O(|predefined|) plus the sort.
 pub fn via_sizes(rules: &Rules, net: i32, opts: &Options) -> Vec<ViaSize> {
+    // A diff-pair net: the pair's via (the smallest the board allows by default, resolved by the
+    // plugin; `topo::diffpair::via_of`), also where the net is routed alone.
+    if let Some(p) = rules.diff_pairs.iter().find(|p| (p.p == net || p.n == net) && p.via_d > 0 && p.via_drill > 0) {
+        return vec![ViaSize { d: p.via_d, drill: p.via_drill }];
+    }
     if opts.via_size == "board_min" && !rules.diff_pairs.iter().any(|p| p.p == net || p.n == net) {
         return vec![rule_size(rules, carried_width(rules, net), opts.via_drill_grid_nm, &opts.allowed_drills_nm)];
     }

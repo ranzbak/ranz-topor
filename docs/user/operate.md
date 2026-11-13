@@ -604,7 +604,14 @@ Topor routes differential pairs as coupled pairs (`[diffpair] enabled = true`, t
   their width and gap and where those came from, are listed in the run log.
 - **Sizes.** Width = the net class's DP width (KiCad → File → Board Setup → Design Rules → Net Classes), gap = its
   DP gap or a custom rule `diff_pair_gap (opt ..)`, both raised to the board minimums (see Design rules and via sizes). Between the two tracks of a pair the gap is the clearance, as in KiCad. Via pairs:
-  two vias side by side, edge gap = the pair gap raised to the hole-to-hole and copper-to-hole rules.
+  two vias side by side, edge gap = the net class's DP Via Gap (else the pair gap) raised to the hole-to-hole and
+  copper-to-hole rules. Via size (`[diffpair] via = "smallest"`, the default): the smallest via the board allows
+  for the pair width, because a via's pad is wider than the track and every via disturbs the pair's impedance: the
+  Board Setup minimum via (smallest drill with pi x drill >= the DP width, diameter = drill + 2 x minimum annular
+  ring or the minimum via diameter, whichever is larger; KiCad → File → Board Setup → Design Rules → Constraints),
+  a smaller pre-defined via (KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias) or the net class
+  via, whichever is smallest. `via = "net_class"` uses the net class via (KiCad → File → Board Setup → Design Rules
+  → Net Classes → Via Size / Via Hole) instead. The run log names the via of every pair and where it came from.
 - **How.** A pair connection is planned as one wire as wide as both tracks and the gap: it is placed early (by its
   width), crosses other wires once and changes layer with one via pair, whose site is checked as the disc around
   both vias. It is drawn as two tracks at the gap about that wire's centre line, 45 degree corners in the

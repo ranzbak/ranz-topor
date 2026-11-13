@@ -360,8 +360,9 @@ def attach_diff_pairs(model: dict, rules: dict, pcb_copy: Path, pro: dict, cfg: 
     dru_p = pcb_copy.with_suffix(".kicad_dru")
     dru = dru_p.read_text() if dru_p.is_file() else None
     codes = {n["name"]: int(n["code"]) for n in model.get("nets", []) if n.get("name") and int(n.get("code") or 0)}
-    settings = {k: cfg.get("diffpair", k) for k in ("detect", "width_source", "gap_mm", "via_gap_mm",
+    settings = {k: cfg.get("diffpair", k) for k in ("detect", "width_source", "gap_mm", "via_gap_mm", "via",
                                                        "gap_tolerance_mm", "max_uncoupled_mm", "skew_max_mm", "pairs")}
+    settings.update({k: cfg.get("vias", k) for k in ("drill_grid_mm", "allowed_drills_mm")})
     mr = model.get("rules") or rules
     pairs, notes = diffpair.resolve_pairs(codes, pro=pro, dru_text=dru, netclass_of=netclass_of, rules=mr,
                                           settings=settings)
