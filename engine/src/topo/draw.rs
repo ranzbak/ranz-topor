@@ -65,56 +65,15 @@ pub fn plan(ev: &[(usize, f64, i32)], n_layers: usize) -> Plan {
 }
 
 /// Funnel (string pulling) from `s` to `e` through `portals` `(left, right)`, seen along the
-/// travel direction. O(portals).
+/// travel direction: [`super::pack::funnel`] (the chain-edge funnel, correct also where the
+/// funnel opens past 180 degrees on a sharp turn), corners only, near-duplicates dropped.
+/// O(portals).
 pub fn funnel(s: Vec2, e: Vec2, portals: &[(Vec2, Vec2)]) -> Vec<Vec2> {
-    let cross = |a: Vec2, b: Vec2| a.x * b.y - a.y * b.x;
-    let mut all: Vec<(Vec2, Vec2)> = portals.to_vec();
-    all.push((e, e));
-    let mut pts = vec![s];
-    let (mut apex, mut left, mut right) = (s, s, s);
-    let (mut left_i, mut right_i) = (0usize, 0usize);
-    let mut i = 0;
-    let mut guard = 0usize;
-    while i < all.len() {
-        guard += 1;
-        if guard > 20 * all.len() + 100 {
-            break;
-        }
-        let (l, r) = all[i];
-        let same = |a: Vec2, b: Vec2| (a - b).len2() < 1e-6;
-        if cross(right - apex, r - apex) >= 0.0 {
-            if same(apex, right) || cross(left - apex, r - apex) < 0.0 {
-                right = r;
-                right_i = i;
-            } else {
-                pts.push(left);
-                apex = left;
-                right_i = left_i;
-                right = apex;
-                left = apex;
-                i = left_i + 1;
-                continue;
-            }
-        }
-        if cross(left - apex, l - apex) <= 0.0 {
-            if same(apex, left) || cross(right - apex, l - apex) > 0.0 {
-                left = l;
-                left_i = i;
-            } else {
-                pts.push(right);
-                apex = right;
-                left_i = right_i;
-                left = apex;
-                right = apex;
-                i = right_i + 1;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    if (*pts.last().expect("start") - e).len2() > 1e-6 {
-        pts.push(e);
-    }
+    let mut ports = Vec::with_capacity(portals.len() + 2);
+    ports.push((s, s));
+    ports.extend_from_slice(portals);
+    ports.push((e, e));
+    let mut pts: Vec<Vec2> = super::pack::funnel(&ports).into_iter().map(|c| c.0).collect();
     pts.dedup_by(|a, b| (*a - *b).len2() < 1e-6);
     pts
 }
@@ -3744,6 +3703,17 @@ mod tests {
         let pts = funnel(v(0.0, 0.0), v(20.0, 0.0), &p);
         assert_eq!(pts.len(), 3, "{pts:?}");
         assert!((pts[1] - v(10.0, 10.0)).len() < 1e-9, "{pts:?}");
+    }
+
+    /// The path wraps (5, 2) on its left, runs east to (6, 2) and turns up to the end: after
+    /// the first corner the funnel opens past 180 degrees (right end (3, 0) south-west, the end
+    /// north-east). The previous drawing funnel went (5, 2) -> end straight (`pack` test
+    /// `funnel_past_180_degrees_both_sides`).
+    #[test]
+    fn funnel_past_180_degrees_keeps_the_corner() {
+        let p = [(v(5.0, 2.0), v(3.0, 0.0)), (v(6.0, 2.0), v(3.0, 0.0))];
+        let pts = funnel(v(3.2, 3.3), v(6.9, 4.4), &p);
+        assert_eq!(pts, vec![v(3.2, 3.3), v(5.0, 2.0), v(6.0, 2.0), v(6.9, 4.4)]);
     }
 
     #[test]
