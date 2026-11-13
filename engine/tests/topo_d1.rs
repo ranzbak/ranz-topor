@@ -189,3 +189,31 @@ fn pad_obstacles_grow_by_their_sagitta_only() {
     let want = 200_000.0 * (1.0 - (std::f64::consts::PI / 16.0).cos());
     assert!((round.sag - want).abs() < 1.0, "{} vs {want}", round.sag);
 }
+
+/// A redraw places a wire's vias again, so the record of how its pair discs were placed
+/// (`Drawer::pair_how`, read by the final pair-via report) starts afresh: a disc of the earlier
+/// drawing that this drawing does not place again leaves no stale record behind.
+#[test]
+fn a_redraw_clears_the_wires_old_pair_via_records() {
+    use topor_engine::check::Checker;
+    use topor_engine::geom::Vec2;
+    use topor_engine::topo::draw::{Drawer, PairVia, Plan};
+    use topor_engine::vias::ViaSize;
+    let m = corridor();
+    let b = board::build(&m, &BuildOpts::default()).unwrap();
+    let conns = b.connections(&m);
+    let mut st = State::new(&b.proj);
+    st.route_conn(&conns[0], &InitWeights::default(), (conns[0].w + conns[0].s) / WS0).expect("routes");
+    let opts = Options::default();
+    let checker = Checker::new(&m, &opts);
+    let mut dr = Drawer::new(&m, &opts, &b, &st, &checker);
+    let old = PairVia { how: "forced", at: Vec2 { x: 5.0 * MM, y: -8.0 * MM }, size: ViaSize { d: 600_000, drill: 300_000 }, viols: Default::default() };
+    dr.pair_how.insert((0, 0), old.clone());
+    dr.pair_how.insert((1, 0), old);
+    // The redraw of wire 0 on one layer: no via, so no pair disc.
+    let plan = Plan { layers: vec![0], vias: Vec::new(), at: Vec::new() };
+    let mut ids = Vec::new();
+    assert!(dr.place_vias(0, &plan, &mut ids).expect("no vias to place").is_empty());
+    assert!(!dr.pair_how.contains_key(&(0, 0)), "wire 0's record of the earlier drawing is gone");
+    assert!(dr.pair_how.contains_key(&(1, 0)), "another wire's record stays");
+}
