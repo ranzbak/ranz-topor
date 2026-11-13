@@ -80,9 +80,11 @@ fn only_the_picked_variant_is_drawn() {
 }
 
 #[test]
-fn the_drawing_never_changes_the_plan_on_the_topor_path() {
-    // drawing feedback asked for: on the TopoR-loop path it never reaches the plan (it may only
-    // redraw blockers inside the one drawing), so the plan is the one without it
+fn regression_guard_drawing_feedback_leaves_the_topor_plan_alone() {
+    // A regression guard, not a proof (verify-m2 D): with one run and the TopoR loop the plan is
+    // handed to the drawing once, so a feedback path that changed the plan could not show here on
+    // the base either. It guards the M2 claim that the drawing never reaches the plan: drawing
+    // feedback asked for leaves the plan line, the one drawing and the planning-only plan alone.
     let m = eprom();
     let off = run(&m, &topor(r#", "runs": 1, "drawing_feedback": false"#));
     let on = run(&m, &topor(r#", "runs": 1, "drawing_feedback": true"#));
@@ -187,4 +189,62 @@ fn cancel_in_p3_p4_keeps_no_plan_and_says_so() {
     assert_eq!(r.stop_reason, "cancel", "{:?}", r.warnings);
     assert!(r.warnings.first().is_some_and(|w| w.starts_with("ERROR: nothing to draw yet")), "{:?}", r.warnings);
     assert!(r.items.is_empty() && r.routed == 0);
+}
+
+/// The P3/P4 move counts of a run: the P4 lines (evaluations, moves tried / applied per kind) and
+/// the P3 capacity refinement's move count. All counts, no timings.
+fn move_counts(r: &RouteResult) -> Vec<String> {
+    let mut v: Vec<String> = r.warnings.iter().filter(|w| w.starts_with("P4 moves on the")).cloned().collect();
+    let p3 = r.warnings.iter().find(|w| w.starts_with("layers: P3 capacity refinement")).unwrap_or_else(|| panic!("P3 line: {:?}", r.warnings));
+    v.push(p3.split(" moves)").next().and_then(|t| t.rsplit('(').next()).expect("P3 moves").to_string());
+    assert_eq!(v.len(), 3, "P4 topology + layers lines and the P3 count: {v:?}");
+    v
+}
+
+#[test]
+fn a_soft_limit_in_p3_p4_does_not_cut_their_moves() {
+    // M2.TL: with the soft limit only Cancel / OK ends the moves inside a step (verify-m2 C: the
+    // limit stopping M0's move checks again was not caught; the plan still drew complete). The
+    // moves of P3/P4 under a limit reached in P3 are the moves of the unlimited run, one by one.
+    let m = crop("qmtech-usb-crop.json");
+    let o = topor(r#", "runs": 1, "capacity_model": "cuts""#);
+    let free = run(&m, &o);
+    let want = move_counts(&free);
+    assert!(want[0].contains(" evaluations") && !want[0].contains(": 0 evaluations"), "the fixture moves in P4: {want:?}");
+    let ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let (m2, o2, c2) = (m.clone(), o.clone(), ctl.clone());
+    let h = std::thread::spawn(move || route_with(&m2, &o2, &c2));
+    let t0 = Instant::now();
+    while !ctl.snapshot().stage.contains("layer assignment") && !h.is_finished() {
+        assert!(t0.elapsed().as_secs() < 600, "never reached P3");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(!h.is_finished(), "the run ended before P3");
+    ctl.limit.reach();
+    let r = h.join().expect("run thread");
+    assert!(r.limit.as_ref().is_some_and(|l| l.reached && l.mode == "soft"), "{:?}", r.limit);
+    assert_eq!(move_counts(&r), want, "the soft limit cut P3/P4 moves");
+}
+
+#[test]
+fn more_runs_than_rayon_threads_never_hang_at_the_draw_gate() {
+    // M2: 3 TopoR-loop runs on a 2-thread pool share 2 compute slots; a run waiting at the draw
+    // gate must give its slot back, else the third run never computes and the call hangs
+    // (verify-m2 A: caught only at RAYON_NUM_THREADS=2). A watchdog fails the test fast.
+    let m = eprom();
+    let o = topor(r#", "runs": 3"#);
+    let h = std::thread::spawn(move || {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().expect("2-thread pool");
+        pool.install(|| run(&m, &o))
+    });
+    let t0 = Instant::now();
+    while !h.is_finished() {
+        assert!(t0.elapsed() < Duration::from_secs(120), "3 runs on 2 slots hung at the draw gate");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let r = h.join().expect("run thread");
+    let line = best_of_line(&r);
+    assert_eq!(line.matches("pick not drawn (another run's is: [drawing] candidates = 1").count(), 2, "all 3 runs offered: {line}");
+    assert_eq!(r.routed, r.connections_total, "{:?}", r.warnings);
 }
