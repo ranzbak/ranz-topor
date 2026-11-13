@@ -97,5 +97,5 @@ def test_cli_helpers():
     m = {"board": "x", "status": "rejected", "engine_version": "0.4.0", "routed": 0, "connections": 5,
          "routed_pct": 0.0, "unconnected": 5, "unconnected_hand": 0, "unconnected_input": 5, "routing_new": 0,
          "vias": 0, "vias_hand": 3, "detour": None, "ladder_warnings": None, "runtime_s": 1.0,
-         "run_flow_s": 0.5, "router_s": 0.0, "stop_reason": "no engine", "findings": [], "png": None}
+         "run_flow_s": 0.5, "router_s": 0.0, "router_cpu_s": 0.0, "timeout_s": 600, "timeout_clock": "wall", "stop_reason": "no engine", "findings": [], "png": None}
     assert "routed 0/5 (0.0 %)" in summary(m)

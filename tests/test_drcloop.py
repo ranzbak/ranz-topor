@@ -54,9 +54,9 @@ def test_drcloop_matches_run_bench_on_fixture(fixture_board, tmp_path, monkeypat
         "routing_new": 0, "routing_preexisting": 0, "other": 0, "by_type_new": {},
         "by_type_preexisting": {}, "track_dangling": 2, "via_dangling": 1, "unconnected_items": 1}
     assert r["drc_loop"] == {"rounds": 1, "pinned": {}, "spots": [], "budget_exhausted": False}
-    assert r["zero_slack"] == {"status": "no candidate", "wires": []}
-    assert (len(rep["items"]), r["routed_items"], r["unchanged_items"], r["replaced"]) == (5, 5, 0, 0)
-    assert _digest(rep["items"]) == "0924279a204e2888826be81a8512139ab08454a2221112541fb9086e3a3b1c2b"
+    assert r["zero_slack"] == {"status": "not run", "wires": []}
+    assert (len(rep["items"]), r["routed_items"], r["unchanged_items"], r["replaced"]) == (7, 7, 0, 0)
+    assert _digest(rep["items"]) == "0624057e9c4918ad9f96b50b9ae5798cf8c6ac8077532bccd9b42e99af996b2e"
 
 
 def test_drcloop_pin_round_matches_run_bench_on_fixture(fixture_board, tmp_path, monkeypatch):

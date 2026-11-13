@@ -51,7 +51,7 @@ Every expected answer has 0 faults (asserted when generating); the PNG of a rout
 
 ## bga_one_layer: 6 x 6, 1.0 mm, one track per channel: everything escapes on F.Cu, 0 vias
 
-![bga_one_layer](../../scratch/bga-patterns/bga_one_layer/bga_one_layer.png)
+Image `scratch/bga-patterns/bga_one_layer/bga_one_layer.png` (bga_one_layer; git-ignored, regenerate with `python -m harness.bga_patterns`).
 
 **Rules.** pitch 1.0, pad 0.5 (round SMD), track 0.15, clearance 0.15, via 0.4 / 0.2. Sources: pitch / pad: HaasoscopePro IC5 (BGA484) and IC1 (BGA256), 1.0 mm, 0.50 / 0.53 mm pads; track / gap 0.15 / 0.15: Luzin & Polubasov 2008 PDF p. 2 example (one track between two balls); via 0.40 / 0.20: HaasoscopePro Board Setup minimum and BGA vias.
 
@@ -76,14 +76,14 @@ Every expected answer has 0 faults (asserted when generating); the PNG of a rout
 
 **topor** (`bga_one_layer/topor/`, defaults + [optimize] loop = "topor" + [rules] fab_profile = "board"): 36/36 routed, KiCad DRC 0 new routing violations / 0 unconnected, 0 vias (expected 0); balls as expected 36/36; escape layer differs on 0, via count on 0, detours 0; faults by rule none; 170.4 mm (expected 170.4); router 1.73 s
 
-![bga_one_layer topor](../../scratch/bga-patterns/bga_one_layer/topor/bga_one_layer-vs-expected.png)
+Image `scratch/bga-patterns/bga_one_layer/topor/bga_one_layer-vs-expected.png` (bga_one_layer topor; git-ignored, regenerate with `python -m harness.bga_patterns`).
 
 Reading: Matches the expected answer: 36/36 on F.Cu, 0 vias, 0 rule faults, DRC 0, 170.4 mm (expected 170.4). The 16 vias, R1 shorts and R2/R3 faults in the ef43e25/64d3c06 galleries came from the fab floors: 0.2 mm tracks do not fit between 0.5 mm-gap balls, while 0.15 mm tracks do.
 KiCad render: `bga_one_layer/topor/bga_one_layer-compare.png` (yellow = new DRC violations).
 
 ## bga_plane_balls: Plane balls: one via per ball into its plane, no trace; signals on F.Cu
 
-![bga_plane_balls](../../scratch/bga-patterns/bga_plane_balls/bga_plane_balls.png)
+Image `scratch/bga-patterns/bga_plane_balls/bga_plane_balls.png` (bga_plane_balls; git-ignored, regenerate with `python -m harness.bga_patterns`).
 
 **Rules.** pitch 1.0, pad 0.5 (round SMD), track 0.15, clearance 0.15, via 0.4 / 0.2. Sources: pitch / pad: HaasoscopePro IC5 (BGA484) and IC1 (BGA256), 1.0 mm, 0.50 / 0.53 mm pads; track / gap 0.15 / 0.15: Luzin & Polubasov 2008 PDF p. 2 example (one track between two balls); via 0.40 / 0.20: HaasoscopePro Board Setup minimum and BGA vias.
 
@@ -109,14 +109,14 @@ KiCad render: `bga_one_layer/topor/bga_one_layer-compare.png` (yellow = new DRC 
 
 **topor** (`bga_plane_balls/topor/`, defaults + [optimize] loop = "topor" + [rules] fab_profile = "board"): 36/36 routed, KiCad DRC 0 new routing violations / 0 unconnected, 6 vias (expected 8); balls as expected 27/36; escape layer differs on 1, via count on 1, detours 0; faults by rule R2 5, R3 4, R4 4; 95.6 mm (expected 97.1); router 1.63 s
 
-![bga_plane_balls topor](../../scratch/bga-patterns/bga_plane_balls/topor/bga_plane_balls-vs-expected.png)
+Image `scratch/bga-patterns/bga_plane_balls/topor/bga_plane_balls-vs-expected.png` (bga_plane_balls topor; git-ignored, regenerate with `python -m harness.bga_patterns`).
 
 Reading: DRC 0, 36/36, 6 vias (expected 8). R4: the four centre GND balls C3/C4/D3/D4 share one via at (7.25, 7.25) instead of one via each. This breaks the project's own rule 'one via per plane ball, no shared plane vias'. VCC corners B2/B5/E2/E5 get their own via, but 0.36 mm off the open-space centre (R2), and three of them point the wrong way (R3). B4 is the only signal that leaves on B.Cu via a via 0.54 mm off centre; the expected answer keeps it on F.Cu. These are genuine router faults: the rules match.
 KiCad render: `bga_plane_balls/topor/bga_plane_balls-compare.png` (yellow = new DRC violations).
 
 ## bga_dogbone: 6 x 6, 0.8 mm, no track between balls: ring 0 on F.Cu, 16 dog-bones to B.Cu
 
-![bga_dogbone](../../scratch/bga-patterns/bga_dogbone/bga_dogbone.png)
+Image `scratch/bga-patterns/bga_dogbone/bga_dogbone.png` (bga_dogbone; git-ignored, regenerate with `python -m harness.bga_patterns`).
 
 **Rules.** pitch 0.8, pad 0.4 (round SMD), track 0.15, clearance 0.15, via 0.4 / 0.2. Sources: pitch / pad 0.8 / 0.40: ULX3S U1 (CABGA381), ButterStick U4 (caBGA381); via 0.40 / 0.20: ButterStick, ~ULX3S 0.419 / 0.20, ThunderScope 0.406 / 0.203; track / gap 0.15 / 0.15 (6 mil, the common low-cost fab class) instead of the 0.127 / 0.127 those boards use, so that no track passes between two balls.
 
@@ -139,14 +139,14 @@ KiCad render: `bga_plane_balls/topor/bga_plane_balls-compare.png` (yellow = new 
 
 **topor** (`bga_dogbone/topor/`, defaults + [optimize] loop = "topor" + [rules] fab_profile = "board"): 36/36 routed, KiCad DRC 0 new routing violations / 0 unconnected, 16 vias (expected 16); balls as expected 20/36; escape layer differs on 0, via count on 0, detours 0; faults by rule R2 16, R3 4; 181.0 mm (expected 184.1); router 4.18 s
 
-![bga_dogbone topor](../../scratch/bga-patterns/bga_dogbone/topor/bga_dogbone-vs-expected.png)
+Image `scratch/bga-patterns/bga_dogbone/topor/bga_dogbone-vs-expected.png` (bga_dogbone topor; git-ignored, regenerate with `python -m harness.bga_patterns`).
 
 Reading: Topology right: ring 0 on F.Cu, 16 vias as expected, inner balls on B.Cu, DRC 0, 181.0 mm (expected 184.1). R2: all 16 vias sit 0.35-0.43 mm off the open-space centre and overlap their own ball pad (gap -0.19 to -0.20). At board rules a 0.4 via fits the cell centre (0.566 - 0.20 - 0.20 = 0.166 >= 0.15), so this is a genuine placement fault, not a rule effect. R3: C3, C4, D3, D4 point the wrong way. The earlier R1 shorts are gone; they were a fab-floor effect.
 KiCad render: `bga_dogbone/topor/bga_dogbone-compare.png` (yellow = new DRC violations).
 
 ## bga_neckdown: bga_dogbone + a .kicad_dru BGA neckdown rule: one track per channel, everything on F.Cu, 0 vias
 
-![bga_neckdown](../../scratch/bga-patterns/bga_neckdown/bga_neckdown.png)
+Image `scratch/bga-patterns/bga_neckdown/bga_neckdown.png` (bga_neckdown; git-ignored, regenerate with `python -m harness.bga_patterns`).
 
 **Rules.** pitch 0.8, pad 0.4 (round SMD), track 0.15, clearance 0.15, via 0.4 / 0.2. Sources: pitch / pad 0.8 / 0.40: ULX3S U1 (CABGA381), ButterStick U4 (caBGA381); via 0.40 / 0.20: ButterStick, ~ULX3S 0.419 / 0.20, ThunderScope 0.406 / 0.203; track / gap 0.15 / 0.15 (6 mil, the common low-cost fab class) instead of the 0.127 / 0.127 those boards use, so that no track passes between two balls.
 
@@ -182,7 +182,7 @@ KiCad render: `bga_dogbone/topor/bga_dogbone-compare.png` (yellow = new DRC viol
 
 **topor** (`bga_neckdown/topor/`, defaults + [optimize] loop = "topor" + [rules] fab_profile = "board"): 36/36 routed, KiCad DRC 0 new routing violations / 0 unconnected, 0 vias (expected 0); balls as expected 36/36; escape layer differs on 0, via count on 0, detours 0; faults by rule none; 181.2 mm (expected 181.6); router 2.06 s
 
-![bga_neckdown topor](../../scratch/bga-patterns/bga_neckdown/topor/bga_neckdown-vs-expected.png)
+Image `scratch/bga-patterns/bga_neckdown/topor/bga_neckdown-vs-expected.png` (bga_neckdown topor; git-ignored, regenerate with `python -m harness.bga_patterns`).
 
 Reading: Matches the expected answer: 0 vias, 36/36 on F.Cu, DRC 0, 0 rule faults, 181.2 mm (expected 181.6). With the region clearance 0.10 no longer floored to 0.15, the channels open and topor uses them. The earlier claim 'neckdown routes bga_dogbone's way' was entirely a floor effect.
 KiCad render: `bga_neckdown/topor/bga_neckdown-compare.png` (yellow = new DRC violations).
