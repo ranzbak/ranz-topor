@@ -1538,6 +1538,7 @@ impl<'a> Drawer<'a> {
                         ids.push(id);
                         out.push((k, p, sz));
                         self.stats.planned_sites += 1;
+                        self.pair_via_dbg(w, i, "planned", p, sz, 0);
                         done = true;
                         break;
                     }
@@ -1669,6 +1670,7 @@ impl<'a> Drawer<'a> {
                     ids.push(id);
                     out.push((k, p, sz));
                     self.stats.via_searched += 1;
+                    self.pair_via_dbg(w, i, if self.via_site.contains_key(&(w, i)) { "searched (planned site not free)" } else { "searched (no planned site)" }, p, sz, 0);
                     done = true;
                     break 'sizes;
                 }
@@ -1680,6 +1682,7 @@ impl<'a> Drawer<'a> {
                     self.via_marks.push((w, k, p, plan.layers[i], plan.layers[i + 1], id));
                     ids.push(id);
                     out.push((k, p, sz));
+                    self.pair_via_dbg(w, i, if self.via_site.contains_key(&(w, i)) { "forced (planned site not free)" } else { "forced (no planned site)" }, p, sz, vs.len());
                     self.via_viol.entry(w).or_default().extend(vs);
                     self.stats.via_forced += 1;
                     continue;
@@ -2290,6 +2293,15 @@ impl<'a> Drawer<'a> {
             };
             dist - e.grow - r >= e.clear.max(own) - self.eps
         })
+    }
+
+    /// Diagnosis (`TOPO_PAIRVIADBG`): how via `i` of a pair wire was placed. O(1).
+    fn pair_via_dbg(&self, w: WireId, i: usize, how: &str, p: Vec2, sz: ViaSize, viols: usize) {
+        let net = self.st.wires[w].net;
+        if self.model.rules.pair_disc(net) && std::env::var("TOPO_PAIRVIADBG").is_ok() {
+            let planned = self.via_site.get(&(w, i)).map(|s| format!("({:.3},{:.3})", s.1.x / 1e6, -s.1.y / 1e6)).unwrap_or_else(|| "none".into());
+            eprintln!("PAIRVIA wire {w} net {net} via {i} {how} at ({:.3},{:.3}) d {} planned site {planned} violations {viols}", p.x / 1e6, -p.y / 1e6, sz.d);
+        }
     }
 
     /// [`Drawer::pair_disc_clear`] of wire `w`'s disc at `p` against the static and the drawn copper;
