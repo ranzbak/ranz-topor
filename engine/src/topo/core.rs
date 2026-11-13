@@ -1930,6 +1930,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let lp = LayerParams {
         via_mm: reg.price(&Event::Via { wire: 0, count: 1, at: None }, &WireCtx::default()),
         via_site_r: crate::vias::plan_via_need(&model.rules, opts),
+        pair_site_r: crate::vias::pair_via_need(&model.rules, opts),
         n_signal: b.n_signal,
         plane_mm: reg.price(&Event::PlaneLength { wire: 0, layer: b.n_signal, mm: 1.0 }, &WireCtx::default()),
         plane_cut: reg.price(&Event::PlaneCut { wire: 0, layer: b.n_signal }, &WireCtx::default()),
@@ -4630,6 +4631,37 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             "via relocation in the drawing ([vias] relocate): {} vias at their planned site, {} planned sites not free (drawn at the usual search's site)",
             dr.stats.planned_sites, dr.stats.planned_sites_missed
         ));
+    }
+    // Pair vias (the two-via disc of a coupled pair's lead net) of the drawn wires, by how the
+    // drawing placed them (each disc once, its last placement): so the drawing's share of the
+    // site decision is visible (the search and the force are the drawing-side fallback M6
+    // removes). Every forced disc that survives is a warning of its own ("costly, not failed":
+    // the wire is drawn, the violations stay for the user to see).
+    {
+        let live: Vec<(&(WireId, usize), &super::draw::PairVia)> = dr.pair_how.iter().filter(|((w, _), _)| drawn.contains_key(w)).collect();
+        if !live.is_empty() {
+            let n = |h: &str| live.iter().filter(|(_, pv)| pv.how == h).count();
+            warnings.push(format!(
+                "pair vias, plan vs drawn: {} pair via discs drawn: {} at the planned site, {} by the drawing's site search, {} by force",
+                live.len(),
+                n("planned"),
+                n("searched"),
+                n("forced")
+            ));
+        }
+        for ((w, _), pv) in live.iter().filter(|(_, pv)| pv.how == "forced") {
+            let net = st.wires[*w].net;
+            let name = model.rules.diff_pairs.iter().find(|p| p.p == net || p.n == net).map_or_else(|| format!("net {net}"), |p| format!("{} / {}", p.p_name, p.n_name));
+            let nv: usize = pv.viols.values().sum();
+            let kinds: Vec<String> = pv.viols.iter().map(|(k, c)| format!("{k} {c}")).collect();
+            warnings.push(format!(
+                "pair via forced: diff pair {name}: via pair at ({:.3}, {:.3}) mm placed without room: the disc of both vias ({:.3} mm) had no free site in its interval; {nv} violation(s){}",
+                pv.at.x / 1e6,
+                -pv.at.y / 1e6,
+                pv.size.d as f64 / 1e6,
+                if kinds.is_empty() { String::new() } else { format!(" ({})", kinds.join(", ")) }
+            ));
+        }
     }
     // 5.4 task 2 ("decide early, draw once": a via the plan did not price is a bug to explain):
     // the plan's vias against the drawn ones, and every drawn via the plan's wire vias do not

@@ -41,7 +41,7 @@ from .findings import Finding
 from .messages import MESSAGES
 
 #: every code route_findings can emit (the preview summary names those present)
-POSTRUN_CODES = ("DIFF_PAIRS", "DIFF_PAIRS_SKIPPED", "POUR_UNJOINED", "UNROUTED", "CONNECTION_WIDTH", "POUR_ISLANDS", "POUR_STITCHED", "PLANE_PAD_SIGNAL",
+POSTRUN_CODES = ("DIFF_PAIRS", "DIFF_PAIR_VIA_FORCED", "DIFF_PAIRS_SKIPPED", "POUR_UNJOINED", "UNROUTED", "CONNECTION_WIDTH", "POUR_ISLANDS", "POUR_STITCHED", "PLANE_PAD_SIGNAL",
                  "PLANE_VIA_OUTSIDE_POUR", "VIA_SQUEEZE", "NECKED", "IGNORED_RULE", "VIOLATIONS", "TIME_BUDGET_HIT", "DRC_NEW_VIOLATIONS", "RULES_MISMATCH")
 DIFF_PAIR_REASON = "diff pair: not in the rough version"  # engine/src/topo/core.rs DIFF_PAIR
 _ITEMS = 40  # items kept per finding (the report lists them; result.json keeps all engine lines)
@@ -107,6 +107,11 @@ def route_findings(result: dict | None) -> list:
                        f"{len(dps)} differential-pair connection(s) routed as coupled pairs: coupled at the gap "
                        f"{cpl[0]:.0f}-{cpl[-1]:.0f} % (median {cpl[len(cpl) // 2]:.0f} %), largest skew {worst:.3f} mm.",
                        lines))
+    forced = [str(x)[len("pair via forced: "):] for x in result.get("warnings") or [] if str(x).startswith("pair via forced: ")]
+    if forced:
+        out.append(_mk("DIFF_PAIR_VIA_FORCED",
+                       f"{len(forced)} differential-pair via pair(s) placed without room for both vias (see the "
+                       "violations at each).", forced))
     width = [c for c in failed if c not in diff and "minimum connection width" in (c.get("reason") or "")]
     if width:
         out.append(_mk("CONNECTION_WIDTH",

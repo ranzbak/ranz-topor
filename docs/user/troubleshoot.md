@@ -306,6 +306,14 @@ copper violates a rule anywhere else, file a bug.
 
 **Fix.** Set [diffpair] enabled = true in topor.toml to route them as coupled pairs, or route them by hand with KiCad's differential-pair router (KiCad → Route → Differential Pair, hotkey 6). To keep topor off them completely, list them in nets.do_not_touch.
 
+### DIFF_PAIR_VIA_FORCED
+
+*Severity: warning.*
+
+**Cause.** A differential pair changes layer through a via pair (two vias side by side at the pair's via gap) where the plan found no free site for both vias: topor placed the via pair anyway, with the clearance violations listed per via pair, so the pair stays connected and the spot is easy to find.
+
+**Fix.** Make room or smaller vias: KiCad → File → Board Setup → Design Rules → Constraints (minimum via diameter and hole) and → Net Classes (DP Width, DP Gap, DP Via Gap) set the via pair's size; diffpair.via in topor.toml picks the via (smallest, the default, or net_class). Or move the via pair by hand in KiCad and run DRC.
+
 ### DO_NOT_TOUCH
 
 *Severity: warning.*

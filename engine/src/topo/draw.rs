@@ -577,6 +577,17 @@ pub fn merge_viols(vs: Vec<Viol>) -> Vec<Viol> {
     out
 }
 
+/// How a pair disc was placed ([`Drawer::pair_how`]).
+#[derive(Clone, Debug)]
+pub struct PairVia {
+    /// `planned`, `searched` or `forced`.
+    pub how: &'static str,
+    pub at: Vec2,
+    pub size: ViaSize,
+    /// Violations it was forced with, by kind (empty unless forced).
+    pub viols: BTreeMap<&'static str, usize>,
+}
+
 /// A rule the written copper of a wire breaks (M-B1 never drop), priced by the `violation`
 /// factor ([`super::factors::violation_amount`]).
 #[derive(Clone, Debug, PartialEq)]
@@ -716,6 +727,12 @@ pub struct Drawer<'a> {
     pub force: bool,
     /// Violations of the vias placed by force, per wire.
     pub via_viol: BTreeMap<WireId, Vec<Viol>>,
+    /// How each pair disc (via `i` of wire `w` of a coupled pair's lead net,
+    /// [`crate::model::NetRule::pair_disc`]) was last placed: at the plan's site, by the drawing's
+    /// site search, or by force, with its point, size and the violations it was forced with (by
+    /// kind). The last placement of a re-drawn wire overwrites the earlier one. Read for the
+    /// "pair vias, plan vs drawn" line and the forced-pair-via warnings (core.rs).
+    pub pair_how: BTreeMap<(WireId, usize), PairVia>,
     /// Octilinear drawing (M-45, [`super::octi`]): style switch and prices.
     pub octi: super::octi::OctiCfg,
 }
@@ -795,6 +812,7 @@ impl<'a> Drawer<'a> {
             split_at: BTreeMap::new(),
             force: false,
             via_viol: BTreeMap::new(),
+            pair_how: BTreeMap::new(),
             octi: super::octi::OctiCfg::from_opts(opts),
         }
         .with_static()
@@ -1538,7 +1556,7 @@ impl<'a> Drawer<'a> {
                         ids.push(id);
                         out.push((k, p, sz));
                         self.stats.planned_sites += 1;
-                        self.pair_via_dbg(w, i, "planned", p, sz, 0);
+                        self.pair_via_dbg(w, i, "planned", p, sz, &[]);
                         done = true;
                         break;
                     }
@@ -1670,7 +1688,7 @@ impl<'a> Drawer<'a> {
                     ids.push(id);
                     out.push((k, p, sz));
                     self.stats.via_searched += 1;
-                    self.pair_via_dbg(w, i, if self.via_site.contains_key(&(w, i)) { "searched (planned site not free)" } else { "searched (no planned site)" }, p, sz, 0);
+                    self.pair_via_dbg(w, i, if self.via_site.contains_key(&(w, i)) { "searched (planned site not free)" } else { "searched (no planned site)" }, p, sz, &[]);
                     done = true;
                     break 'sizes;
                 }
@@ -1682,7 +1700,7 @@ impl<'a> Drawer<'a> {
                     self.via_marks.push((w, k, p, plan.layers[i], plan.layers[i + 1], id));
                     ids.push(id);
                     out.push((k, p, sz));
-                    self.pair_via_dbg(w, i, if self.via_site.contains_key(&(w, i)) { "forced (planned site not free)" } else { "forced (no planned site)" }, p, sz, vs.len());
+                    self.pair_via_dbg(w, i, if self.via_site.contains_key(&(w, i)) { "forced (planned site not free)" } else { "forced (no planned site)" }, p, sz, &vs);
                     self.via_viol.entry(w).or_default().extend(vs);
                     self.stats.via_forced += 1;
                     continue;
@@ -2295,12 +2313,22 @@ impl<'a> Drawer<'a> {
         })
     }
 
-    /// Diagnosis (`TOPO_PAIRVIADBG`): how via `i` of a pair wire was placed. O(1).
-    fn pair_via_dbg(&self, w: WireId, i: usize, how: &str, p: Vec2, sz: ViaSize, viols: usize) {
+    /// Record how via `i` of a pair wire was placed ([`Drawer::pair_how`]); with
+    /// `TOPO_PAIRVIADBG` also print it. A no-op for a via that is no pair disc. O(violations).
+    fn pair_via_dbg(&mut self, w: WireId, i: usize, how: &str, p: Vec2, sz: ViaSize, viols: &[Viol]) {
         let net = self.st.wires[w].net;
-        if self.model.rules.pair_disc(net) && std::env::var("TOPO_PAIRVIADBG").is_ok() {
+        if !self.model.rules.pair_disc(net) {
+            return;
+        }
+        let kind = if how.starts_with("planned") { "planned" } else if how.starts_with("searched") { "searched" } else { "forced" };
+        let mut by: BTreeMap<&'static str, usize> = BTreeMap::new();
+        for v in viols {
+            *by.entry(v.kind).or_default() += 1;
+        }
+        self.pair_how.insert((w, i), PairVia { how: kind, at: p, size: sz, viols: by });
+        if std::env::var("TOPO_PAIRVIADBG").is_ok() {
             let planned = self.via_site.get(&(w, i)).map(|s| format!("({:.3},{:.3})", s.1.x / 1e6, -s.1.y / 1e6)).unwrap_or_else(|| "none".into());
-            eprintln!("PAIRVIA wire {w} net {net} via {i} {how} at ({:.3},{:.3}) d {} planned site {planned} violations {viols}", p.x / 1e6, -p.y / 1e6, sz.d);
+            eprintln!("PAIRVIA wire {w} net {net} via {i} {how} at ({:.3},{:.3}) d {} planned site {planned} violations {}", p.x / 1e6, -p.y / 1e6, sz.d, viols.len());
         }
     }
 
