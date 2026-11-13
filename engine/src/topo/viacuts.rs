@@ -343,10 +343,12 @@ mod tests {
         vc.rollback();
         assert_eq!(vc.total(), 0.0);
         assert_eq!(vc.overfull(), 0);
-        // with the vias 1.6 mm apart the band fits (slack 0.15 mm, price ~0)
+        // with the vias 1.6 mm apart the band fits: slack 0.15 mm = 1/3 pitch, priced on the
+        // graded tail of phi only (the cuts' and edges' shape), on the one layer with the band
         vc.set_wire(0, &[], &[via(0, 0.0, 0.0), via(0, 1.6, 0.0)]);
         assert_eq!(vc.overfull(), 0);
-        assert!(vc.total() < 0.01, "{}", vc.total());
+        let tail = phi(0.15e6, 0.45e6, 0.1);
+        assert!(tail < 0.05 && (vc.total() - tail).abs() < 1e-6, "{} vs {tail}", vc.total());
         // moving the band away re-prices the via cut (incremental) ...
         vc.set_wire(0, &[], &[via(0, 0.0, 0.0), via(0, d, 0.0)]);
         assert_eq!(vc.overfull(), 1);

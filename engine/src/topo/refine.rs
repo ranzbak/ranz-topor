@@ -1105,10 +1105,13 @@ mod tests {
         let (need, tau) = (0.75e6, 0.1);
         let f = |s: f64| site_price(s, need, tau);
         assert_eq!(f(f64::INFINITY), 0.0);
-        assert!(f(0.5 * need) < 1e-6, "room to spare costs ~0: {}", f(0.5 * need));
+        // room to spare: only phi's tail (z = -5 at half the need: ~0.007; ~5e-5 at the need)
+        assert!(f(0.5 * need) < 0.01, "room to spare costs little: {}", f(0.5 * need));
+        assert!(f(need) < 1e-4, "room to spare costs ~0: {}", f(need));
         assert!((f(0.0) - (0.5 + 0.1 * 2f64.ln())).abs() < 1e-9, "at the boundary {}", f(0.0));
-        // continuous at 0 and monotone in the missing room
-        assert!((f(1.0) - f(-1.0)).abs() < 1e-6);
+        // continuous at 0 (slope 1 / (4 tau) + 1/2 per need: +-1 nm moves it ~1e-5) and monotone
+        // in the missing room
+        assert!((f(1.0) - f(-1.0)).abs() < 1e-4, "{}", f(1.0) - f(-1.0));
         let xs: Vec<f64> = (-40..=10).map(|i| i as f64 * 0.05 * need).collect();
         for w in xs.windows(2) {
             assert!(f(w[0]) >= f(w[1]), "slack {} -> {}: {} < {}", w[0], w[1], f(w[0]), f(w[1]));
