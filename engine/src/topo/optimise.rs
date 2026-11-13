@@ -151,6 +151,9 @@ pub struct CycleStats {
     pub pair_moved: usize,
     pub pair_moved_kept: usize,
     pub pair_moved_wires: usize,
+    /// Kept moves whose stretch was longer than the `[vias] pair_max_mm` scale (its graded price
+    /// grows with the square of the length over that scale; warned).
+    pub pair_moved_long: usize,
 }
 
 impl CycleStats {
@@ -172,6 +175,7 @@ impl CycleStats {
         self.pair_moved += o.pair_moved;
         self.pair_moved_kept += o.pair_moved_kept;
         self.pair_moved_wires += o.pair_moved_wires;
+        self.pair_moved_long += o.pair_moved_long;
     }
 }
 

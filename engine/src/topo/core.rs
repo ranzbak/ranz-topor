@@ -2571,13 +2571,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         /// 5.8: one obstructed via pair of a wire ([`Sp::obstructed_pairs`]): its stretch (events
         /// `span`), the layers before and after it (`lv`, `lu`), the layer `t` it would go onto
-        /// and the wires crossing it there.
+        /// and the wires crossing it there; the stretch's length (nm) and its graded price (mm,
+        /// [`pair_len_price`]).
         struct PairCand {
             span: (usize, usize),
             t: i32,
             lv: i32,
             lu: i32,
             obs: Vec<WireId>,
+            len: f64,
+            price: f64,
         }
         /// The real topology of this route as the loop's [`Space`].
         struct Sp<'a, 'p> {
@@ -2621,9 +2624,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// 5.4 `[vias] pair_min`: the longest stretch (nm) between a via pair the loop tries
             /// to remove; `None` = off.
             pair_max: Option<f64>,
-            /// 5.8 `[vias] pair_move`: the longest stretch (nm) between a via pair whose crossing
-            /// wires the loop lays again round it; `None` = off.
+            /// 5.8 `[vias] pair_move`: the length scale (nm, `[vias] pair_max_mm`) of the graded
+            /// stretch price ([`super::viaopt::pair_len_price`]); `None` = off.
             pair_move: Option<f64>,
+            /// The objective's price of a via (mm, `mm_per_via`), the unit of that stretch price.
+            via_mm: f64,
             /// Debug (`TOPO_LOOPDBG`): one line per reroute and per cycle stage.
             dbg: bool,
             dbg_tag: u64,
@@ -2674,13 +2679,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     false
                 }
             }
-            /// One single-wire rip-up and reroute of `w` (and the branches on its junctions) with the
-            /// wire's oscillating coefficients and the via weight `via_w`; whether it was kept.
-            /// The search registry of a try on wire `w`: the wire's oscillating coefficients
-            /// (its amplitude widened by its fruitless tries) with the via weight `via_w`, and
-            /// that amplitude.
+            /// The search registry of a try on wire `w`: [`Sp::conn_reg`] of its connection.
             fn try_reg(&self, w: WireId, seed: u64, amp: f64, via_w: f64) -> (Registry, f64) {
-                let ci = self.wire_conn[w];
+                self.conn_reg(self.wire_conn[w], seed, amp, via_w)
+            }
+            /// The search registry of a try on connection `ci`: its oscillating coefficients (the
+            /// amplitude widened by its fruitless tries) with the via weight `via_w`, and that
+            /// amplitude.
+            fn conn_reg(&self, ci: usize, seed: u64, amp: f64, via_w: f64) -> (Registry, f64) {
                 let id = self.conn_of[ci];
                 let (amp_i, visit) = (wire_amp(amp, self.stuck[ci]), self.tries[ci]);
                 // The search: a pass over the room of its passage (on all layers together) is a
@@ -2706,6 +2712,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 });
                 (reg_w, amp_i)
             }
+            /// One single-wire rip-up and reroute of `w` (and the branches on its junctions) with the
+            /// wire's oscillating coefficients and the via weight `via_w`; whether it was kept.
             fn reroute(&mut self, topo: &mut Topo, w: WireId, seed: u64, amp: f64, via_w: f64) -> bool {
                 let ci = self.wire_conn[w];
                 let (reg_w, amp_i) = self.try_reg(w, seed, amp, via_w);
@@ -2818,14 +2826,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// (from `Lv`, the layer of event `i-1`) and `u` (to `Lu`, event `j+1`; an SMD pad end
             /// counts by its event), whose part that must stay on `l` (events `i..=j`, the vias
             /// may sit anywhere in their intervals; measured where the wire meets the wires it
-            /// crosses, [`super::viaopt::crossing_stretch_len`]) is at most `max_len` long. The
+            /// crosses, [`super::viaopt::crossing_stretch_len`]) carries a price that grows with
+            /// its length on the scale `scale` ([`super::viaopt::pair_len_price`]: no cutoff). The
             /// stretch may go onto `T` = `Lv` or `Lu` when every event of it is allowed there
             /// (step 4); the wires crossing it on `T` (`Lv ∩ Lcross`, step 8) obstruct that. With
             /// `Lv = Lu` both vias go, else the one on `T`'s side (the other changes type, step
             /// 8.2). A target crossed on `T` by nothing is the label lift's (`pair_min`), not
-            /// this move's. Per stretch the target with fewer obstructing wires first (step 6).
-            /// In wire order. O(events of `w` x path corners).
-            fn obstructed_pairs(&self, w: WireId, max_len: f64) -> Vec<PairCand> {
+            /// this move's. The cheapest stretch first, per stretch the target with fewer
+            /// obstructing wires first (step 6). O(events of `w` x path corners).
+            fn obstructed_pairs(&self, w: WireId, scale: f64) -> Vec<PairCand> {
                 let mut out = Vec::new();
                 let has_conn = |x: WireId| self.st.wires.get(x).is_some_and(|wi| wi.alive) && self.wire_conn.get(x).is_some_and(|&c| c != usize::MAX);
                 if !has_conn(w) || w >= self.lr.events.len() || w >= self.lr.partner.len() || w >= self.lr.mask.len() {
@@ -2842,7 +2851,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     }
                     let (lv, lu) = (ev[i - 1].2, ev.get(j + 1).map_or(l, |e| e.2));
                     let sig = |x: i32| (0..n_sig).contains(&x);
-                    if j + 1 < ev.len() && lv != l && lu != l && sig(l) && super::viaopt::crossing_stretch_len(self.st, w, &self.lr.events, &self.lr.partner[w], i, j) <= max_len {
+                    if j + 1 < ev.len() && lv != l && lu != l && sig(l) {
+                        let len = super::viaopt::crossing_stretch_len(self.st, w, &self.lr.events, &self.lr.partner[w], i, j);
+                        let price = super::viaopt::pair_len_price(len, scale, self.via_mm);
                         let mut cands: Vec<PairCand> = Vec::new();
                         for t in if lv == lu { vec![lv] } else { vec![lv, lu] } {
                             if !sig(t) || !(i..=j).all(|k| self.lr.mask[w].get(k).is_some_and(|m| (m >> t) & 1 == 1)) {
@@ -2857,7 +2868,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                             obs.sort_unstable();
                             obs.dedup();
                             if !obs.is_empty() {
-                                cands.push(PairCand { span: (i, j), t, lv, lu, obs });
+                                cands.push(PairCand { span: (i, j), t, lv, lu, obs, len, price });
                             }
                         }
                         cands.sort_by_key(|c| c.obs.len());
@@ -2865,6 +2876,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     }
                     i = j + 1;
                 }
+                out.sort_by(|a, b| a.price.total_cmp(&b.price));
                 out
             }
 
@@ -2876,13 +2888,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// present layers, [`State::held_layers`], as if copied onto `c.t`: the via interval
             /// on the other side then joins `c.t` and that side's layer), the wires `c.obs`
             /// crossing it on `c.t` (and the branches on their junctions) are taken out together
-            /// and laid again, in route order, with the try's coefficients at the via weight
-            /// `via_w`, so each prices crossing the stretch as the via it would imply and goes
-            /// round it where that is cheaper; the board is layered again (the loop's tie seed)
-            /// and the change is kept when the archive's evaluation of the whole board
-            /// ([`evaluation`]: violations first, then vias and length by the objective) drops,
-            /// else everything comes back exactly. A priced move, not a gate: nothing is refused
-            /// by a threshold. Whether it was kept.
+            /// and laid again, in route order, each with its own try coefficients (as a single
+            /// reroute of it: [`Sp::conn_reg`]) at the via weight `via_w`, so each prices crossing
+            /// the stretch as the via it would imply and goes round it where that is cheaper; the
+            /// board is layered again (the loop's tie seed) and the change is kept when the
+            /// archive's evaluation of the whole board ([`evaluation`]: violations first, then
+            /// vias and length by the objective) plus the stretch's graded price (`c.price`,
+            /// [`super::viaopt::pair_len_price`]) drops below the evaluation before, else
+            /// everything comes back exactly. Every obstructing wire's connection counts the try
+            /// (its fruitless tries widen its coefficients, as a reroute's). A priced move, not a
+            /// gate: nothing is refused by a threshold. Whether it was kept.
             fn pair_move(&mut self, a: WireId, c: &PairCand, seed: u64, amp: f64, via_w: f64) -> bool {
                 let e0 = self.eval_now();
                 let before = self.snapshot();
@@ -2910,7 +2925,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         }
                     }
                 }
-                let (reg, _) = self.try_reg(c.obs[0], seed, amp, via_w);
+                let obs_cis: BTreeSet<usize> = c.obs.iter().map(|&x| self.wire_conn[x]).collect();
                 let gone: BTreeSet<WireId> = c.obs.iter().copied().collect();
                 let set: Vec<WireId> = gone.iter().copied().chain(tree::dependents(self.st, &gone)).collect();
                 let mut cis: Vec<usize> = set.iter().map(|&x| self.wire_conn[x]).collect();
@@ -2922,24 +2937,36 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 for &ci in &cis {
                     self.forced.borrow_mut().remove(&self.conn_of[ci]);
                 }
-                let placed = cis.iter().all(|&ci| (self.place)(self.st, ci, self.cap, self.wire_conn, &reg));
+                let regs: Vec<Registry> = cis.iter().map(|&ci| self.conn_reg(ci, seed, amp, via_w).0).collect();
+                let placed = cis.iter().zip(&regs).all(|(&ci, reg)| (self.place)(self.st, ci, self.cap, self.wire_conn, reg));
+                let mut kept = false;
                 if placed {
                     let lr = (self.assign_t)(self.st, self.ties);
                     self.set_lr(lr, None);
                     let e1 = self.eval_now();
                     if self.dbg {
                         let c1 = self.criteria();
-                        eprintln!("LOOPDBG[{}] pair move wire {a} events {i}..={j} ({} -> {} -> {}) onto {}: wires {:?} laid again, eval {e0:.3} -> {e1:.3} (pred {} graded {:.3}, vias {}, len {:.3})", self.dbg_tag, c.lv, ev[i].2, c.lu, c.t, c.obs, self.pred.count, self.pred.graded, c1.vias, c1.length_mm);
+                        eprintln!("LOOPDBG[{}] pair move wire {a} events {i}..={j} ({} -> {} -> {}) onto {}: stretch {:.3} mm price {:.3}: wires {:?} laid again, eval {e0:.3} -> {e1:.3} (pred {} graded {:.3}, vias {}, len {:.3})", self.dbg_tag, c.lv, ev[i].2, c.lu, c.t, c.len / MM, c.price, c.obs, self.pred.count, self.pred.graded, c1.vias, c1.length_mm);
                     }
-                    if e1 < e0 - 1e-6 {
-                        for ci in cis {
+                    if e1 + c.price < e0 - 1e-6 {
+                        for &ci in &cis {
                             self.reroutes[ci] += 1;
                         }
-                        return true;
+                        kept = true;
                     }
                 }
-                self.restore(&before);
-                false
+                if !kept {
+                    self.restore(&before);
+                }
+                for ci in obs_cis {
+                    self.tries[ci] += 1;
+                    if kept {
+                        self.stuck[ci] = 0;
+                    } else {
+                        self.stuck[ci] += 1;
+                    }
+                }
+                kept
             }
         }
         impl<'p> Space for Sp<'_, 'p> {
@@ -3184,14 +3211,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 // per wire (id order) its obstructed via pairs, each tried once at the
                 // end-of-cycle via weight; after a kept move the wire's pairs are read again from
                 // the new layering (the pair it removed is gone, the next one moves up).
-                if let Some(max_len) = self.pair_move {
+                if let Some(scale) = self.pair_move {
                     let mut w = 0;
                     while w < self.st.wires.len() {
                         let mut skip = 0usize;
                         let mut tries = 0usize;
                         let mut limit = usize::MAX;
                         loop {
-                            let pairs = self.obstructed_pairs(w, max_len);
+                            let pairs = self.obstructed_pairs(w, scale);
                             limit = limit.min(pairs.len());
                             if tries >= limit || ripped >= self.max_ripped || stop() {
                                 break;
@@ -3203,6 +3230,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                             ripped += pc.obs.len();
                             if self.pair_move(w, &pc, c.seed ^ 0x3C3C, c.amp, c.emphasis.via_at(1.0)) {
                                 cs.pair_moved_kept += 1;
+                                cs.pair_moved_long += usize::from(pc.len > scale);
                             } else {
                                 skip += 1;
                             }
@@ -3267,6 +3295,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             pred: pred0,
             pair_max: opts.via_pair_min.then(|| opts.via_pair_max_mm.max(0.0) * MM),
             pair_move: opts.via_pair_move.then(|| opts.via_pair_max_mm.max(0.0) * MM),
+            via_mm: opts.mm_per_via,
             dbg: std::env::var_os("TOPO_LOOPDBG").is_some(),
             dbg_tag: opts.seed,
         };
@@ -3399,7 +3428,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             "undone": rep.stats.undone,
             "layerings": [rep.stats.layer_kept, rep.stats.layer_runs],
             "crossing_share": opts.loop_crossing,
-            "pair_move": [rep.stats.pair_moved_kept, rep.stats.pair_moved, rep.stats.pair_moved_wires],
+            "pair_move": [rep.stats.pair_moved_kept, rep.stats.pair_moved, rep.stats.pair_moved_wires, rep.stats.pair_moved_long],
             "variants_table": arch.items.iter().map(|v| serde_json::json!({"label": v.label, "gen": v.payload.gen, "cycle": v.payload.cycle, "errors": v.crit.errors, "penalty": (v.crit.penalty * 1e3).round() / 1e3, "vias": v.crit.vias, "length_mm": (v.crit.length_mm * 1e3).round() / 1e3, "shrinkages": v.crit.shrinkages})).collect::<Vec<_>>(),
             "layer_share_pct": (1000.0 * rep.stats.layer_s / loop_s.max(1e-9)).round() / 10.0,
         }));
@@ -3411,9 +3440,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         if opts.via_pair_move {
             warnings.push(format!(
-                "TopoR loop, local via-pair minimisation, obstructing wires ([vias] pair_move; Luzin, Popov & Popov 2013 step 8.1): {} of {} via pairs moved (the wires that cross their stretch on the layer round it laid again together, {} wires in all tries; kept when the board's evaluation dropped)",
+                "TopoR loop, local via-pair minimisation, obstructing wires ([vias] pair_move; Luzin, Popov & Popov 2013 step 8.1): {} of {} via pairs moved (the wires that cross their stretch on the layer round it laid again together, {} wires in all tries; kept when the board's evaluation dropped by more than the stretch's graded price, one via at a stretch of pair_max_mm, growing with the square of the length)",
                 rep.stats.pair_moved_kept, rep.stats.pair_moved, rep.stats.pair_moved_wires
             ));
+            if rep.stats.pair_moved_long > 0 {
+                warnings.push(format!(
+                    "TopoR loop, local via-pair minimisation: {} kept via-pair move(s) over a stretch longer than [vias] pair_max_mm = {} mm (priced, not refused: the crossing wires were laid again round a long stretch because the board gained more than its price; raise pair_max_mm to make long stretches cheaper, lower it to make them dearer)",
+                    rep.stats.pair_moved_long, opts.via_pair_max_mm
+                ));
+            }
         }
         if let Some(r) = crep.as_mut() {
             r.stage("after the TopoR loop", &st, &lr.events, &packer, bottom, &|w| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]));

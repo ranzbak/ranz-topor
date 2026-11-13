@@ -1260,17 +1260,20 @@ pub struct Options {
     /// the plan's price (mm + via price); a priced move, never a gate. Runs in the TopoR loop
     /// (`loop = "topor"`, every cycle) and once before the drawing in the `cycles` loop.
     pub via_pair_min: bool,
-    /// 5.4 (`[vias] pair_max_mm`): the via-pair minimisation (`via_pair_min`, `via_pair_move`)
-    /// looks at pairs of vias joined by a stretch at most this long (mm; Luzin-Popov 2013 p. 2: "shorter than a given length, e.g.
-    /// 10 mm").
+    /// 5.4 (`[vias] pair_max_mm`): the via-pair minimisation `via_pair_min` looks at pairs of
+    /// vias joined by a stretch at most this long (mm; Luzin-Popov 2013 p. 2: "shorter than a
+    /// given length, e.g. 10 mm"); for `via_pair_move` (5.8) it is the length scale of a graded
+    /// stretch price, not a cutoff (`topo::viaopt::pair_len_price`: one via at this length,
+    /// growing with the square of the length).
     pub via_pair_max_mm: f64,
     /// 5.8 (`[vias] pair_move`): the obstructing-wire half of the local via-pair minimisation in
     /// the TopoR loop (`loop = "topor"`, every cycle; Luzin, Popov & Popov 2013 p. 134 step 8.1
     /// and fig. 1; Luzin 2013 p. 104 fig. 21c): for a wire that dives to another layer and comes
-    /// back over a stretch of at most `via_pair_max_mm`, the wires that cross that stretch on the
+    /// back over a stretch (priced by its length on the scale `via_pair_max_mm`), the wires that cross that stretch on the
     /// wire's own layer are laid again together round it (as if the stretch were on that layer),
     /// so the wire needs neither via; kept only when the archive's evaluation of the whole board
-    /// drops (a priced move, never a gate). No effect with `loop = "cycles"`.
+    /// drops by more than that stretch price (a priced move, never a gate). No effect with
+    /// `loop = "cycles"`.
     pub via_pair_move: bool,
     /// 5.4 (`[vias] relocate`): the plan puts every via at the point of its free interval where
     /// the forces of the copper around it balance (Dayan & Dai 1991; TopoR FreeStyle "Shift

@@ -235,6 +235,18 @@ pub fn crossing_stretch_len(st: &State, w: WireId, events: &[Vec<(usize, f64, i3
     (pos(j) - pos(i)).abs()
 }
 
+/// 5.8 (`[vias] pair_move`): the graded price (mm) of moving the wires that cross a via pair's
+/// stretch `len` (nm) round it, on the scale `scale` (nm, `[vias] pair_max_mm`): `mm_per_via x
+/// (len / scale)^2`. Luzin, Popov & Popov 2013 (p. 2) look only at pairs "shorter than a given
+/// length, e.g. 10 mm"; here that length is a scale, not a cutoff (graded factors, never
+/// thresholds): a short stretch costs next to nothing, one as long as the scale costs one via, and
+/// the price keeps growing smoothly, so a longer stretch is moved only where the board gains
+/// clearly more. A scale of 0 is taken as 1 µm. O(1).
+pub fn pair_len_price(len: f64, scale: f64, mm_per_via: f64) -> f64 {
+    let r = len.max(0.0) / scale.max(1e3);
+    mm_per_via.max(0.0) * r * r
+}
+
 /// What the via relocation needs of the board beyond the state.
 pub struct ViaCtx<'a> {
     pub st: &'a State<'a>,
