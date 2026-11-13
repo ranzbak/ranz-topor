@@ -191,67 +191,76 @@ def nested_wraps() -> Pattern:
 
 # ----------------------------------------------------------------------------------------------- 3. distant radius
 def distant_radius() -> Pattern:
-    """3. A's radius through w1 and w2 sets the height of w3, which is beyond the triangle edge B-C (Popov Fig. 6)."""
+    """3. A's radius through W1 and W2 sets the height of W3, whose own band touches no feature (Popov Fig. 6)."""
     W, H = 16.0, 12.0
-    A, B, C = (8.0, 8.0), (5.0, 7.4), (11.0, 7.4)
+    A = (8.0, 8.0)
     r = 0.4
-    obst = Fp("TP", [Pad("1", None, A, (2 * r, 2 * r), "circle"), Pad("2", None, B, (2 * r, 2 * r), "circle"),
-                     Pad("3", None, C, (2 * r, 2 * r), "circle")], "obstacle")
+    obst = Fp("TP", [Pad("1", None, A, (2 * r, 2 * r), "circle")], "obstacle")
     nets = ["W1", "W2", "W3"]
     rho = {"W1": r + CLEAR + EPS + W_SIG / 2}
     rho["W2"] = rho["W1"] + W_SIG + CLEAR + EPS
     rho["W3"] = rho["W2"] + W_SIG + CLEAR + EPS
-    ys = {"W1": 10.4, "W2": 9.4, "W3": 6.9}
-    j1 = Fp("J1", [Pad(str(i + 1), n, (1.0, ys[n]), (0.6, 0.6)) for i, n in enumerate(nets)], "terminal")
-    j2 = Fp("J2", [Pad(str(i + 1), n, (15.0, ys[n]), (0.6, 0.6)) for i, n in enumerate(nets)], "terminal")
-    # w1, w2: horizontal, a rising 45 degree leg x + y = c between B (below it) and A (above it), over A at A's stack
-    # radius, mirrored down. w3: rises before B to A's radius for it, level over B, A, C, mirrored down.
+    # Terminal rows 0.5 apart. Only W1's straight line runs into A (near its top); W2's and W3's clear A alone (a
+    # wire alone needs y <= A - rho W1 = 7.273), so they bow only for the wires inside them: the wave. Over A is
+    # the optimum: a level-45-level detour of height h adds 2 h (sqrt 2 - 1); all over (heights 0.277, 0.229,
+    # 0.181) adds 0.569; W1 under instead (1.177 down, W2 and W3 then straight) adds 0.975.
+    ys = {"W1": 7.55, "W2": 7.05, "W3": 6.55}
+    j1 = Fp("J1", [Pad(str(i + 1), n, (1.0, ys[n]), (0.3, 0.3)) for i, n in enumerate(nets)], "terminal")
+    j2 = Fp("J2", [Pad(str(i + 1), n, (15.0, ys[n]), (0.3, 0.3)) for i, n in enumerate(nets)], "terminal")
+    # Every wire: level from J1, a 45 degree leg on the side of A's octagon of its stack radius (x + y = Ax + Ay -
+    # rho sqrt 2, KiCad frame y down), level over A at Ay - rho, mirrored down to J2. W3's octagon is the one A's
+    # radius reaches through W1 and W2.
     tops = {n: A[1] - rho[n] for n in nets}
-    cs = {"W2": 13.6, "W1": 14.3}
     tracks = []
-    for n in ("W1", "W2"):
-        y0, top, c = ys[n], tops[n], cs[n]
+    for n in nets:
+        y0, top = ys[n], tops[n]
+        c = A[0] + A[1] - rho[n] * math.sqrt(2.0)
         left = [(1.0, y0), (c - y0, y0), (c - top, top)]
         right = [(2 * A[0] - x, y) for x, y in reversed(left)]
         tracks.append(Track(n, "F.Cu", W_SIG, left + right))
-    y0, top = ys["W3"], tops["W3"]
-    xa = 4.4
-    left = [(1.0, y0), (xa, y0), (xa + (y0 - top), top)]
-    tracks.insert(0, Track("W3", "F.Cu", W_SIG, left + [(2 * A[0] - x, y) for x, y in reversed(left)]))
     lengths = {t.net: _len(t.pts) for t in tracks}
-    b_alone = B[1] - (r + CLEAR + W_SIG / 2)
+    k = 2.0 * (math.sqrt(2.0) - 1.0)
+    over_all = sum(k * (ys[n] - tops[n]) for n in nets)
+    w1_under = k * (A[1] + rho["W1"] - ys["W1"])
     expected = {
         "radius_from_A": {n: _r(rho[n]) for n in nets},
-        "w3": {"zero_width_band": "straight at y = 6.9 (touches no feature)",
-               "height_over_A_needed": _r(tops["W3"]), "height_over_B_alone": _r(b_alone),
-               "distant": "A and w3 are on opposite sides of the triangle edge B-C; A's cut up to the board edge "
-                          "crosses w1, w2, w3 (radius 0.4 + 3 x 0.2 + 2 x 0.25 + 0.125 = 1.625)"},
+        "w3": {"zero_width_band": f"straight at y = {ys['W3']} (touches no feature)",
+               "height_over_A_needed": _r(tops["W3"]),
+               "distant": "W3's band does not wrap A; A's cut up to the board edge crosses W1, W2, W3 (radius 0.4 + "
+                          "3 x 0.2 + 2 x 0.25 + 0.125 = 1.625, + 3 x 0.002 margin)"},
+        "over_not_under": {"all_over_excess": _r(over_all), "w1_under_excess": _r(w1_under)},
         "draw_order_today": ["W3 (shortest) first", "W2", "W1"],
         "nets": {t.net: {"width": t.width, "length": _r(lengths[t.net]),
                          "reference": [[_r(x), _r(y)] for x, y in t.pts]} for t in tracks},
-        "judge": ["KiCad DRC 0 violations, 0 unconnected", "no via", "W3 at y <= 6.375 + 0.01 over A (x = 8)",
+        "judge": ["KiCad DRC 0 violations, 0 unconnected", "no via", f"W3 at y <= {_r(tops['W3']) + 0.01} over A (x = 8)",
                   "lengths = reference (+0.5 %)", "order on A's vertical cut: W1, W2, W3"],
     }
     return Pattern(
         name="distant_radius", title="Distant pad radius (Popov wave)", kind="solvable",
         gap_classes=["drawing: radius of a distant pad (Q2)"],
-        purpose="Three 0.25 mm wires from J1 (left) to J2 (right). W1 and W2 pass over the round pad A (no net) and "
-                "under the round pads B and C; W3 passes over B and C. W3's zero-width band is a straight line at "
-                "y = 6.9 that touches no feature, and A is on the other side of the triangle edge B-C.",
-        answer=f"W1 and W2 nest over A at {rho['W1']:.3f} / {rho['W2']:.3f} mm; W3 bows up to {tops['W3']:.3f} "
-               f"(A's radius for it, {rho['W3']:.3f} mm, through W1 and W2), not to {b_alone:.3f} (what B alone "
-               f"asks). Lengths W1 {lengths['W1']:.3f}, W2 {lengths['W2']:.3f}, W3 {lengths['W3']:.3f} mm. No via, "
-               "DRC 0.",
-        why="Solvable by construction: W1 and W2's level legs lie exactly on A's stack radii, their 45 degree legs "
-            "between the octagons of B (below) and A (above), 0.495 mm apart; W3's level leg 0.45 mm above W2's. "
-            "Going under B (with W1 and W2) costs W3 a long detour.",
+        purpose="Three 0.25 mm wires from J1 (left) to J2 (right) past the round pad A (no net). The straight lines of "
+                "Only W1's straight line runs into A (near its top), so W1 goes over A. W2's and W3's straight lines (their "
+                "zero-width bands) clear A and touch no feature: only A's radius through the wires inside them makes "
+                "them bow, W2 through W1, W3 through W1 and W2.",
+        answer=f"W1 wraps A at {rho['W1']:.3f} mm; W2 bows up to y = {tops['W2']:.3f} (radius {rho['W2']:.3f}, "
+               f"through W1) and W3 up to y = {tops['W3']:.3f} (A's radius for it, {rho['W3']:.3f} mm, through W1 and "
+               f"W2), although their own bands are straight at y = {ys['W2']} / {ys['W3']}. Each wire: level, one 45 degree leg on A's octagon, level over A, mirrored. Lengths "
+               f"W1 {lengths['W1']:.3f}, W2 {lengths['W2']:.3f}, W3 {lengths['W3']:.3f} mm. No via, DRC 0.",
+        why="Optimal by construction: every wire hugs the octagon of its stack radius about A (the shortest "
+            "octilinear way round), the 45 degree legs 0.452 mm apart (pitch 0.45), the level legs 0.5 mm apart at "
+            f"the terminals. All three over A add {over_all:.3f} mm; sending W1 under A instead (W2, W3 then "
+            f"straight) adds {w1_under:.3f} mm.",
         size=(W, H), layers=2, nets=nets, fps=[obst, j1, j2],
         connections=[(n, f"J1.{i + 1}", f"J2.{i + 1}") for i, n in enumerate(nets)], cuts=[],
         keepouts=_closed_bcu(W, H), classes=[dict(c) for c in CLASSES], ref_tracks=tracks,
-        witness={t.net: (t.layer, t.pts) for t in tracks}, extra={"m3": expected, "A": A, "rho": rho})
+        witness={t.net: (t.layer, t.pts) for t in tracks}, extra={"m3": expected, "A": A, "rho": rho, "ys": ys})
 
 
 PATTERNS = {f.__name__: f for f in (three_diagonals, nested_wraps, distant_radius)}
+# User 2026-11-13: three_diagonals and nested_wraps approved; distant_radius reworked (W1 / W2 had no reason to bend
+# over A), awaiting confirmation.
+STATUS = {"three_diagonals": "approved 2026-11-13", "nested_wraps": "approved 2026-11-13",
+          "distant_radius": "PROPOSED (reworked 2026-11-13), needs approval"}
 
 
 # ----------------------------------------------------------------------------------------------- checks
@@ -293,7 +302,7 @@ def clearance_report(pat: Pattern) -> list[dict]:
 def expected_doc(pat: Pattern) -> dict:
     return {
         "name": pat.name, "title": pat.title, "kind": pat.kind, "gap_classes": pat.gap_classes,
-        "purpose": pat.purpose, "expected": pat.answer, "why": pat.why, "status": "PROPOSED, not approved",
+        "purpose": pat.purpose, "expected": pat.answer, "why": pat.why, "status": STATUS[pat.name],
         "board": {"size_mm": list(pat.size), "copper_layers": pat.layers,
                   "keepouts": [{"layers": k.layers, "tracks": k.tracks, "vias": k.vias} for k in pat.keepouts]},
         "rules": {"clearance": CLEAR, "track_width": {c["name"]: c["track_width"] for c in pat.classes},
@@ -334,7 +343,7 @@ def generate(name: str, out: Path, *, png: bool = True, drc: bool = False) -> di
 
 
 def readme(out: Path) -> Path:
-    lines = ["# M3 radii patterns (PROPOSED, need the user's approval)", "",
+    lines = ["# M3 radii patterns (three_diagonals, nested_wraps approved 2026-11-13; distant_radius proposed)", "",
              "Generated by `harness/radii_patterns.py` (branch `radii-m3`). Each directory: `problem/` (pads, rule "
              "areas, nets), `reference/` (the expected copper, KiCad DRC 0 / 0), `expected.json`, the PNG (problem "
              "left, reference right, radii and order marked).", ""]

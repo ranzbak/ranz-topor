@@ -109,6 +109,9 @@ pub struct CutItems {
     /// predicted violation), nm.
     pub neck: f64,
     pub squeeze: f64,
+    /// Step b: the junction half widths at the two ends (in `need`; the cut model takes them off
+    /// the capacity instead).
+    pub halves: f64,
 }
 
 /// Attachment stack (Dayan PDF 125): the bands wrapping sheet vertex `v` with `v` on the given
@@ -160,6 +163,13 @@ pub struct OrderReport {
     pub squeeze: f64,
     /// Step b: stack members placed by the stack's own layout (on no cut).
     pub radius_own: usize,
+    /// Step b: stack members the inside-out pass pushed out past their tip on a cut carrying
+    /// them, and by how much in all (nm; graded, reported).
+    pub radius_pushed: usize,
+    pub radius_push: f64,
+    /// Step b: cuts whose need (junction halves off) differs from the cut model's `CutFlow.need`
+    /// by more than 1 nm (sizes open decision D1: the key order against the band order).
+    pub need_diff: usize,
 }
 
 /// The order of one layer.
@@ -208,6 +218,48 @@ fn pick_key(hits: &[f64], kind: u8, t_band: f64) -> Option<f64> {
         2 => it.max_by(f64::total_cmp),
         _ => it.min_by(|a, b| (a - t_band).abs().total_cmp(&(b - t_band).abs()).then(a.total_cmp(b))),
     }
+}
+
+/// An order-preserving match of the sorted values `a` into the sorted values `b` of least total
+/// distance (each `a` gets one `b`, strictly increasing; `None` where `b` runs out). O(|a| |b|).
+fn match_in_order(a: &[f64], b: &[f64]) -> Vec<Option<f64>> {
+    let (n, m) = (a.len(), b.len());
+    if n == 0 {
+        return Vec::new();
+    }
+    if m < n {
+        // Fewer hits than crossings: each nearest (the curve misses the cut where the band crosses).
+        return a.iter().map(|&t| b.iter().copied().min_by(|x, y| (x - t).abs().total_cmp(&(y - t).abs()).then(x.total_cmp(y)))).collect();
+    }
+    // d[i][k]: best cost of a[..=i] with a[i] on b[k].
+    let inf = f64::INFINITY;
+    let mut d = vec![vec![inf; m]; n];
+    let mut from = vec![vec![usize::MAX; m]; n];
+    for k in 0..m {
+        d[0][k] = (a[0] - b[k]).abs();
+    }
+    for i in 1..n {
+        let (mut best, mut bk) = (inf, usize::MAX);
+        for k in 0..m {
+            if k > 0 && d[i - 1][k - 1] < best {
+                best = d[i - 1][k - 1];
+                bk = k - 1;
+            }
+            if best < inf {
+                d[i][k] = best + (a[i] - b[k]).abs();
+                from[i][k] = bk;
+            }
+        }
+    }
+    let mut k = (0..m).min_by(|&x, &y| d[n - 1][x].total_cmp(&d[n - 1][y]).then(x.cmp(&y))).expect("m >= n >= 1");
+    let mut out = vec![None; n];
+    for i in (0..n).rev() {
+        out[i] = Some(b[k]);
+        if i > 0 {
+            k = from[i][k];
+        }
+    }
+    out
 }
 
 /// The band corner of a wrap item at vertex `v`: the corner wrapping `v` whose wedge holds the
@@ -355,27 +407,44 @@ pub fn order_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], via_r: f64)
         let j = i + raw[i..].iter().take_while(|x| x.0 == ci).count();
         let c = &sh.cuts[ci];
         let mut used: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
-        let mut items: Vec<CutItem> = raw[i..j]
-            .iter()
-            .map(|&(_, x)| {
-                let s = &sts[x.stretch];
-                curve_hits(&s.curve, c.p, c.q, &mut hits);
-                let key = pick_key(&hits, x.kind, x.t);
-                let corner = match x.kind {
-                    0 => None,
-                    k => {
-                        let (v, u) = if k == 1 { (c.vp, c.q - c.p) } else { (c.vq.unwrap_or(usize::MAX), c.p - c.q) };
-                        let us = used.entry((x.stretch, v)).or_default();
-                        let r = wrap_corner(s, v, u, us).map(|(k, _)| k);
-                        if let Some(k) = r {
-                            us.push(k);
-                        }
-                        r
+        // Crossing keys per stretch: its band crossings (sorted) paired in order with its curve
+        // hits (an order-preserving match of least total distance), so a curve that crosses the
+        // cut more often than its band (a reduced back-and-forth) gives each crossing its own hit.
+        let mut ckeys: BTreeMap<usize, Vec<(f64, Option<f64>)>> = BTreeMap::new();
+        for &(_, x) in raw[i..j].iter().filter(|x| x.1.kind == 0) {
+            ckeys.entry(x.stretch).or_default().push((x.t, None));
+        }
+        for (&si, ts) in ckeys.iter_mut() {
+            curve_hits(&sts[si].curve, c.p, c.q, &mut hits);
+            hits.sort_by(f64::total_cmp);
+            ts.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let tb: Vec<f64> = ts.iter().map(|t| t.0).collect();
+            for (k, h) in match_in_order(&tb, &hits).into_iter().enumerate() {
+                ts[k].1 = h;
+            }
+        }
+        let mut items: Vec<CutItem> = Vec::with_capacity(j - i);
+        for &(_, x) in &raw[i..j] {
+            let s = &sts[x.stretch];
+            let (key, corner) = match x.kind {
+                0 => {
+                    let ts = &ckeys[&x.stretch];
+                    (ts.iter().find(|t| t.0 == x.t).and_then(|t| t.1), None)
+                }
+                k => {
+                    curve_hits(&s.curve, c.p, c.q, &mut hits);
+                    let key = pick_key(&hits, k, x.t);
+                    let Some((v, u)) = (if k == 1 { Some((c.vp, c.q - c.p)) } else { c.vq.map(|q| (q, c.p - c.q)) }) else { continue };
+                    let us = used.entry((x.stretch, v)).or_default();
+                    let r = wrap_corner(s, v, u, us).map(|(k, _)| k);
+                    if let Some(k) = r {
+                        us.push(k);
                     }
-                };
-                CutItem { stretch: x.stretch, kind: x.kind, t_band: x.t, key: key.unwrap_or(x.t), keyed: key.is_some(), corner, w: x.w, s: s.s, net: s.net, w_tip: x.w, tip_p: 0.0, tip_q: 0.0 }
-            })
-            .collect();
+                    (key, r)
+                }
+            };
+            items.push(CutItem { stretch: x.stretch, kind: x.kind, t_band: x.t, key: key.unwrap_or(x.t), keyed: key.is_some(), corner, w: x.w, s: s.s, net: s.net, w_tip: x.w, tip_p: 0.0, tip_q: 0.0 });
+        }
         items.sort_by(|a, b| a.key.total_cmp(&b.key).then(a.t_band.total_cmp(&b.t_band)).then(a.stretch.cmp(&b.stretch)).then(a.kind.cmp(&b.kind)));
         let tol = 1.0 / (c.q - c.p).len().max(1.0);
         let ts: Vec<f64> = items.iter().map(|x| x.t_band).collect();
@@ -385,7 +454,7 @@ pub fn order_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], via_r: f64)
         rep.examples.extend(ex.into_iter().map(|(a, b)| Disagree { cut: ci, a: items[a].stretch, b: items[b].stretch }));
         rep.items += items.len();
         rep.keyless += items.iter().filter(|x| !x.keyed).count();
-        cuts.push(CutItems { cut: ci, items, cap: c.cap, need: 0.0, slack: 0.0, neck: 0.0, squeeze: 0.0 });
+        cuts.push(CutItems { cut: ci, items, cap: c.cap, need: 0.0, slack: 0.0, neck: 0.0, squeeze: 0.0, halves: 0.0 });
         i = j;
     }
     rep.cuts = cuts.len();
@@ -503,8 +572,11 @@ fn ruled(items: &[TipItem], lo: Bound, hi: Bound, r: TipRules) -> (Vec<TipItem>,
 /// Centre lines from the `lo` end (items in order from `lo`), widths `w`, gaps and end
 /// clearances scaled by `g`, the `lo` end holding `half_lo` of own copper: the tips and the far
 /// edge plus the `hi` clearance (the need). As [`super::demand::need_by`]: an own-net run at an
-/// end sits on that end (no clearance to it, its widest half reaches into the cut); same-net
-/// neighbours take no gap; the run at the `hi` end shares one start edge.
+/// end sits on that end (no clearance to it, its widest half reaches into the cut, its largest
+/// clearance faces the next item); same-net neighbours take no gap; the run at the `hi` end
+/// shares one start edge. Caveat: for a member `i` of an own-net end run, `tip_p + tip_q =
+/// need - (max_w - w_i) / 2` (the run is one item of its widest half width), so its portal is
+/// wider than the slack by that much; every other item has `tip_p + tip_q = need`.
 fn layout(its: &[TipItem], w: &[f64], lo: Bound, hi: Bound, half_lo: f64, half_hi: f64, g: f64) -> (Vec<f64>, f64) {
     let n = its.len();
     let own = |b: &Bound, x: &TipItem| matches!(*b, Bound::Pad { net: Some(m), .. } if m == x.net);
@@ -525,14 +597,29 @@ fn layout(its: &[TipItem], w: &[f64], lo: Bound, hi: Bound, half_lo: f64, half_h
         edge = half_lo + g * lo.clearance(&it(0));
     }
     let gap = |a: usize, b: usize| if its[a].net == its[b].net { 0.0 } else { g * its[a].s.max(its[b].s) };
+    // An own-net run at an end counts as one item with the largest clearance of the run (as
+    // `demand::need_by`).
+    let run_s = |r: std::ops::Range<usize>| its[r].iter().map(|x| x.s).fold(0.0, f64::max);
     let mid_end = n - run_hi;
     for i in run_lo..mid_end {
-        let tw = if i > 0 { edge + gap(i - 1, i) } else { edge };
+        let tw = if i == run_lo && run_lo > 0 {
+            edge + if its[i - 1].net == its[i].net { 0.0 } else { g * run_s(0..run_lo).max(its[i].s) }
+        } else if i > 0 {
+            edge + gap(i - 1, i)
+        } else {
+            edge
+        };
         tip[i] = tw + 0.5 * w[i];
         edge = tw + w[i];
     }
     if run_hi > 0 {
-        let start = if mid_end > 0 { edge + gap(mid_end - 1, mid_end) } else { edge };
+        let start = if mid_end > 0 {
+            let a = mid_end - 1;
+            let rs = if a < run_lo { run_s(0..run_lo) } else { its[a].s };
+            edge + if its[a].net == its[mid_end].net { 0.0 } else { g * rs.max(run_s(mid_end..n)) }
+        } else {
+            edge
+        };
         for i in mid_end..n {
             tip[i] = start + 0.5 * w[i];
         }
@@ -580,7 +667,8 @@ pub fn cut_tips(items: &[TipItem], bp: Bound, bq: Bound, half_p: f64, half_q: f6
         1.0
     };
     let w = wf(f);
-    let neck: f64 = w0.iter().zip(&w).map(|(a, b)| a - b).sum();
+    // The need the necks took off (a same-net run counts its widest member once).
+    let neck = need - need_at(f, 1.0);
     // Gaps: the need is linear in g (widths fixed).
     let (n1, n0) = (need_at(f, 1.0), need_at(f, 0.0));
     if n1 <= cap {
@@ -632,28 +720,45 @@ pub fn radii_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &mut Lay
         ci.slack = c.cap - t.need;
         ci.neck = t.neck;
         ci.squeeze = t.squeeze;
-        if ci.slack < 0.0 {
+        ci.halves = half(c.fp) + half(c.fq);
+        if ci.slack < -1.0 {
             rep.overfull += 1;
             rep.deficit -= ci.slack;
             rep.neck += t.neck;
             rep.squeeze += t.squeeze;
         }
     }
-    // Stack radii: the largest tip from the vertex on the cuts carrying the member.
-    let mut tips: BTreeMap<(usize, usize, usize), f64> = BTreeMap::new();
-    for ci in &o.cuts {
+    // Stack radii: per member the largest tip from the vertex on the cuts carrying it (the
+    // smallest on over-full cuts, design note §4.2.4: the squeezed tips hold there), then an
+    // inside-out pass so every member clears the one inside it (Dayan 1997 Fig. 60, pp. 115-116:
+    // the attachment list is laid out from the inside; Popov 2012 p. 118: each circle about the
+    // pad grows by the wire inside it).
+    #[derive(Default)]
+    struct MTip {
+        free: Option<f64>,
+        squeezed: Option<f64>,
+        cuts: Vec<(usize, f64)>,
+    }
+    let mut tips: BTreeMap<(usize, usize, usize), MTip> = BTreeMap::new();
+    for (oi, ci) in o.cuts.iter().enumerate() {
         let c = &sh.cuts[ci.cut];
         for x in &ci.items {
             let Some(k) = x.corner else { continue };
-            let (v, t) = match x.kind {
-                1 => (c.vp, x.tip_p),
-                2 => (c.vq.unwrap_or(usize::MAX), x.tip_q),
+            let (v, t, far) = match (x.kind, c.vq) {
+                (1, _) => (c.vp, x.tip_p, c.cap - x.tip_q),
+                (2, Some(q)) => (q, x.tip_q, c.cap - x.tip_p),
                 _ => continue,
             };
-            let e = tips.entry((v, x.stretch, k)).or_insert(0.0);
-            *e = e.max(t);
+            let e = tips.entry((v, x.stretch, k)).or_default();
+            if ci.squeeze > 0.0 {
+                e.squeezed = Some(e.squeezed.map_or(t, |m| m.min(t)));
+            } else {
+                e.free = Some(e.free.map_or(t, |m| m.max(t)));
+            }
+            e.cuts.push((oi, far));
         }
     }
+    let mut pidx: BTreeMap<usize, super::cutflow::NearIdx> = BTreeMap::new();
     for st in &mut o.stacks {
         let at = sh.pos[st.v];
         let b = sh.vfeat[st.v].map_or(Bound::Open, |f| sh.bound(f));
@@ -664,26 +769,47 @@ pub fn radii_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &mut Lay
             .zip(&st.corner)
             .map(|(&s, &k)| {
                 let x = &sts[s];
-                TipItem { net: x.net, w: x.width_at_idx(&x.pass_index(), x.band[k]), floor: x.w_floor, s: x.s }
+                let idx = pidx.entry(s).or_insert_with(|| x.pass_index());
+                TipItem { net: x.net, w: x.width_at_idx(idx, x.band[k]), floor: x.w_floor, s: x.s }
             })
             .collect();
         let r = TipRules { pairwise, regime: regime(at) };
         let (rits, rb, _) = ruled(&its, b, Bound::Open, r);
         let w: Vec<f64> = rits.iter().map(|x| x.w).collect();
         let (own, _) = layout(&rits, &w, rb, Bound::Open, h, 0.0, 1.0);
-        st.radius = st
-            .order
-            .iter()
-            .zip(&st.corner)
-            .enumerate()
-            .map(|(i, (&s, &k))| match tips.get(&(st.v, s, k)) {
-                Some(&t) => t,
+        let m: Vec<Option<&MTip>> = st.order.iter().zip(&st.corner).map(|(&s, &k)| tips.get(&(st.v, s, k))).collect();
+        let mut radius: Vec<f64> = Vec::with_capacity(m.len());
+        for (i, mt) in m.iter().enumerate() {
+            let base = match mt.and_then(|t| t.free.or(t.squeezed)) {
+                Some(t) => t,
                 None => {
                     rep.radius_own += 1;
                     own[i]
                 }
-            })
-            .collect();
+            };
+            let mut r = base;
+            if i > 0 {
+                // Both on one over-full cut: the squeezed tips already space them.
+                let shared_sq = match (m[i - 1], *mt) {
+                    (Some(a), Some(b)) => a.cuts.iter().any(|x| o.cuts[x.0].squeeze > 0.0 && b.cuts.iter().any(|y| y.0 == x.0)),
+                    _ => false,
+                };
+                if !shared_sq {
+                    let gap = if rits[i - 1].net == rits[i].net { 0.0 } else { rits[i - 1].s.max(rits[i].s) };
+                    r = r.max(radius[i - 1] + 0.5 * (w[i - 1] + w[i]) + gap);
+                }
+            }
+            if r > base + 1.0 {
+                if let Some(t) = mt {
+                    if t.cuts.iter().any(|&(_, far)| r > far + 1.0) {
+                        rep.radius_pushed += 1;
+                        rep.radius_push += t.cuts.iter().map(|&(_, far)| (r - far).max(0.0)).fold(0.0, f64::max);
+                    }
+                }
+            }
+            radius.push(r);
+        }
+        st.radius = radius;
     }
 }
 
@@ -695,6 +821,8 @@ pub fn from_measure(m: &Measure, regime: &dyn Fn(Vec2) -> Option<f64>) -> Vec<La
         .map(|lf| {
             let mut o = order_layer(&lf.sheet, &m.stretches, &lf.stretches, 0.0);
             radii_layer(&lf.sheet, &m.stretches, &lf.stretches, &mut o, m.opts.pairwise, regime);
+            let need: BTreeMap<usize, f64> = lf.flows.iter().map(|f| (f.cut, f.need)).collect();
+            o.report.need_diff = o.cuts.iter().filter(|c| need.get(&c.cut).is_some_and(|&n| (c.need - c.halves - n).abs() > 1.0)).count();
             o
         })
         .collect()
@@ -709,7 +837,7 @@ pub fn summary(m: &Measure, ords: &[LayerOrder], layer_names: &dyn Fn(usize) -> 
             .zip(ords)
             .map(|(lf, o)| {
                 let r = &o.report;
-                let l = lf.stretches.first().map_or(0, |&s| m.stretches[s].layer);
+                let l = lf.sheet.l;
                 let ex: Vec<Value> = r
                     .examples
                     .iter()
@@ -724,6 +852,7 @@ pub fn summary(m: &Measure, ords: &[LayerOrder], layer_names: &dyn Fn(usize) -> 
                     "stack_entries": r.stack_entries, "stack_cycles": r.stack_cycles, "examples": ex,
                     "overfull": r.overfull, "deficit_mm": r.deficit / 1e6, "neck_mm": r.neck / 1e6,
                     "squeeze_mm": r.squeeze / 1e6, "radius_own": r.radius_own,
+                    "radius_pushed": r.radius_pushed, "radius_push_mm": r.radius_push / 1e6, "need_diff": r.need_diff,
                 })
             })
             .collect(),
@@ -751,12 +880,18 @@ mod tests {
 
     /// A projection of the given obstacles on layer 0 (each its own net).
     fn proj(obs: Vec<Vec<Vec2>>) -> Projection {
+        let n = obs.len();
+        proj_n(obs.into_iter().zip(1..=n as i32).collect())
+    }
+
+    /// [`proj`] with the nets given (a stretch `i` of [`setup`] has net 100 + i: its terminal
+    /// pads take that net).
+    fn proj_n(obs: Vec<(Vec<Vec2>, i32)>) -> Projection {
         let obstacles: Vec<Obstacle> = obs
             .into_iter()
-            .enumerate()
-            .map(|(i, poly)| {
+            .map(|(poly, net)| {
                 let c = poly.iter().fold(Vec2::default(), |a, &p| a + p) * (1.0 / poly.len() as f64);
-                Obstacle { kind: ObsKind::Pad, poly, center: c, layers: LayerMask(1), drilled: false, net: Some(i as i32 + 1), clear: 0.2e6, bare: false, sag: 0.0 }
+                Obstacle { kind: ObsKind::Pad, poly, center: c, layers: LayerMask(1), drilled: false, net: Some(net), clear: 0.2e6, bare: false, sag: 0.0 }
             })
             .collect();
         let mut pts = Vec::new();
@@ -1181,5 +1316,224 @@ mod tests {
         assert_eq!(st.order, vec![2, 1, 0]);
         assert_eq!(mm3(&st.radius), vec![0.25, 0.45, 0.65], "{st:?}");
         assert!(o.report.radius_own >= 1, "{:?}", o.report);
+    }
+
+    // ---- Step c (ERBS, `super::super::erbs`) ----
+
+    use crate::topo::erbs::{check_layer, erbs_layer, ErbsOpts, Party};
+
+    /// The channel of fit pattern 1: three straight ERBS on the hand's centre lines' side of
+    /// their portals (straight, the pads in line), no violation.
+    #[test]
+    fn erbs_channel_straight() {
+        let xs: Vec<f64> = (0..3).map(|i| 2.0 + 0.3375 + 0.4625 * i as f64).collect();
+        let mut obs = vec![(rect(0.0, 0.0, 2.0, 2.0), 1), (rect(3.6, 0.0, 5.6, 2.0), 2)];
+        let mut curves = Vec::new();
+        for (i, &x) in xs.iter().enumerate() {
+            obs.push((pad(x, 4.0), 100 + i as i32));
+            obs.push((pad(x, -2.0), 100 + i as i32));
+            curves.push(vec![v(x, 4.0), v(x, -2.0)]);
+        }
+        let pr = proj_n(obs);
+        let (sh, sts) = setup_w(&pr, &curves, Norm::Octagonal, &[(0.25, 0.2, 0.25); 3]);
+        let mut o = order_layer(&sh, &sts, &[0, 1, 2], 0.0);
+        radii_layer(&sh, &sts, &[0, 1, 2], &mut o, true, &|_| None);
+        let es = erbs_layer(&sh, &sts, &[0, 1, 2], &o, &ErbsOpts::default());
+        assert_eq!(es.len(), 3);
+        for (e, &x) in es.iter().zip(&xs) {
+            assert!(e.converged);
+            assert_eq!(e.path.len(), 2, "{:?}", e.path);
+            assert!(e.pts.iter().all(|p| (p.x - x * 1e6).abs() < 1.0), "{:?}", e.pts);
+        }
+        let vs = check_layer(&sh, &sts, &o, &es);
+        assert!(vs.is_empty(), "{vs:?}");
+    }
+
+    /// Nested wraps: each ERBS goes round the corner outside its stack radius, as tight as the
+    /// arc samples allow (octagon: in-radius to circumradius; circle: to rho / cos(step / 2)),
+    /// with no violation between the three or against the block.
+    #[test]
+    fn erbs_nested_wraps_radii() {
+        let ds = [1.3, 0.9, 0.5];
+        let mut obs = vec![(rect(0.0, 0.0, 2.0, 2.0), 1)];
+        let mut curves = Vec::new();
+        for (i, d) in ds.into_iter().enumerate() {
+            obs.push((pad(0.5, 2.0 + d), 100 + i as i32));
+            obs.push((pad(2.0 + d, 0.5), 100 + i as i32));
+            curves.push(vec![v(0.5, 2.0 + d), v(2.0 + 0.7 * d, 2.0 + 0.7 * d), v(2.0 + d, 0.5)]);
+        }
+        let pr = proj_n(obs);
+        for (norm, half) in [(Norm::Octagonal, FRAC_PI_8_), (Norm::Euclid, 11.25f64.to_radians())] {
+            let (sh, sts) = setup(&pr, &curves, norm);
+            let mut o = order_layer(&sh, &sts, &[0, 1, 2], 0.0);
+            radii_layer(&sh, &sts, &[0, 1, 2], &mut o, true, &|_| None);
+            let corner = vert(&sh, v(2.0, 2.0));
+            let st = stack(&o, corner).clone();
+            let es = erbs_layer(&sh, &sts, &[0, 1, 2], &o, &ErbsOpts::default());
+            for e in &es {
+                assert!(e.converged, "{norm:?}");
+                let i = st.order.iter().position(|&s| s == e.stretch).expect("in stack");
+                let rho = st.radius[i];
+                let d = e.path.windows(2).map(|w| crate::topo::draw::seg_dist(v(2.0, 2.0), w[0], w[1])).fold(f64::INFINITY, f64::min);
+                assert!(d >= rho - 1.0 && d <= rho / half.cos() + 1.0, "{norm:?} stretch {}: {d} vs {rho}", e.stretch);
+            }
+            let vs = check_layer(&sh, &sts, &o, &es);
+            assert!(vs.iter().all(|x| !matches!(x.other, Party::Stretch(_))), "{norm:?} {vs:?}");
+            assert!(vs.iter().all(|x| x.predicted), "{norm:?} {vs:?}");
+        }
+    }
+
+    const FRAC_PI_8_: f64 = std::f64::consts::FRAC_PI_8;
+
+    /// An over-full channel (1.5 mm, no neck room): the ERBS run at the squeezed tips, and every
+    /// violation they have is predicted (the over-full cut carries both), none an erbs_gap.
+    #[test]
+    fn erbs_overfull_predicted() {
+        let xs: Vec<f64> = (0..3).map(|i| 2.0 + 0.3125 + 0.4375 * i as f64).collect();
+        let mut obs = vec![(rect(0.0, 0.0, 2.0, 2.0), 1), (rect(3.5, 0.0, 5.5, 2.0), 2)];
+        let mut curves = Vec::new();
+        for (i, &x) in xs.iter().enumerate() {
+            obs.push((pad(x, 4.0), 100 + i as i32));
+            obs.push((pad(x, -2.0), 100 + i as i32));
+            curves.push(vec![v(x, 4.0), v(x, -2.0)]);
+        }
+        let pr = proj_n(obs);
+        let (sh, sts) = setup_w(&pr, &curves, Norm::Octagonal, &[(0.25, 0.2, 0.25); 3]);
+        let mut o = order_layer(&sh, &sts, &[0, 1, 2], 0.0);
+        radii_layer(&sh, &sts, &[0, 1, 2], &mut o, true, &|_| None);
+        assert!(o.report.overfull > 0 && o.report.squeeze > 0.0, "{:?}", o.report);
+        let es = erbs_layer(&sh, &sts, &[0, 1, 2], &o, &ErbsOpts::default());
+        let vs = check_layer(&sh, &sts, &o, &es);
+        assert!(!vs.is_empty());
+        assert!(vs.iter().all(|x| x.predicted && x.amount < 0.0125e6 + 2.0), "{vs:?}");
+    }
+
+    /// Independent per stretch: the ERBS do not depend on the order of `mine`.
+    #[test]
+    fn erbs_order_independent() {
+        let (obs, curves) = s_bundle();
+        let pr = proj(obs);
+        let (sh, sts) = setup(&pr, &curves, Norm::Octagonal);
+        let mut o = order_layer(&sh, &sts, &[0, 1, 2], 0.0);
+        radii_layer(&sh, &sts, &[0, 1, 2], &mut o, true, &|_| None);
+        let a = erbs_layer(&sh, &sts, &[0, 1, 2], &o, &ErbsOpts::default());
+        let b = erbs_layer(&sh, &sts, &[2, 1, 0], &o, &ErbsOpts::default());
+        assert_eq!(format!("{a:?}"), format!("{b:?}"));
+    }
+
+    /// A violation no over-full cut predicts is an erbs_gap.
+    #[test]
+    fn erbs_gap_reported() {
+        let xs = [2.3375, 3.2625];
+        let mut obs = vec![(rect(0.0, 0.0, 2.0, 2.0), 1), (rect(3.6, 0.0, 5.6, 2.0), 2)];
+        let mut curves = Vec::new();
+        for (i, &x) in xs.iter().enumerate() {
+            obs.push((pad(x, 4.0), 100 + i as i32));
+            obs.push((pad(x, -2.0), 100 + i as i32));
+            curves.push(vec![v(x, 4.0), v(x, -2.0)]);
+        }
+        let pr = proj_n(obs);
+        let (sh, sts) = setup_w(&pr, &curves, Norm::Octagonal, &[(0.25, 0.2, 0.25); 2]);
+        let mut o = order_layer(&sh, &sts, &[0, 1], 0.0);
+        radii_layer(&sh, &sts, &[0, 1], &mut o, true, &|_| None);
+        let mut es = erbs_layer(&sh, &sts, &[0, 1], &o, &ErbsOpts::default());
+        // Move the second ERBS 0.2 mm towards the first (a model gap, not the plan's).
+        for p in es[1].pts.iter_mut() {
+            p.x = 2.4375e6;
+        }
+        let vs = check_layer(&sh, &sts, &o, &es);
+        let g: Vec<_> = vs.iter().filter(|x| x.other == Party::Stretch(1)).collect();
+        assert_eq!(g.len(), 1, "{vs:?}");
+        assert!(!g[0].predicted && (g[0].amount - 0.35e6).abs() < 2.0, "{g:?}");
+    }
+
+    // ---- Verifier findings F1-F3, F6 ----
+
+    /// F2: an own-net run at an end faces the next item with the run's largest clearance (as
+    /// `demand::need_by`), not its edge member's.
+    #[test]
+    fn own_run_gap_uses_run_max_clearance() {
+        let its = [ti(1, 0.25, 0.3, 0.25), ti(1, 0.25, 0.1, 0.25), ti(12, 0.25, 0.1, 0.25)];
+        let items: Vec<Item> = its.iter().map(|x| Item { net: x.net, w: x.w, s: x.s }).collect();
+        let t = cut_tips(&its, PAD, Bound::Open, 0.0, 0.0, 3e6, PAIR);
+        // Run on p (tip 0, reaches 0.125), gap 0.3 (the run's max), then 0.125: 0.55.
+        assert_eq!(mm3(&t.tip_p), vec![0.0, 0.0, 0.55]);
+        assert!(close(t.need, super::super::demand::need(&items, PAD, Bound::Open)));
+        let t = cut_tips(&[its[2], its[1], its[0]], Bound::Open, PAD, 0.0, 0.0, 3e6, PAIR);
+        // From p: 0.25 of the first wire, the run's gap 0.3, then the run's centre lines.
+        assert_eq!(mm3(&t.tip_p), vec![0.125, 0.675, 0.675]);
+        assert_eq!(mm3(&t.tip_q), vec![0.55, 0.0, 0.0]);
+    }
+
+    /// F3: a junction end's half width moves every tip from that end and adds to the need; an own
+    /// run sits on the end at the half width; the caveat sum for run members.
+    #[test]
+    fn junction_halves_and_own_run_tips() {
+        let its = [ti(10, 0.25, 0.2, 0.25), ti(11, 0.25, 0.2, 0.25)];
+        let a = cut_tips(&its, PAD, PAD, 0.0, 0.0, 3e6, PAIR);
+        let b = cut_tips(&its, PAD, PAD, 0.1e6, 0.05e6, 3e6, PAIR);
+        for i in 0..2 {
+            assert!(close(b.tip_p[i], a.tip_p[i] + 0.1e6) && close(b.tip_q[i], a.tip_q[i] + 0.05e6));
+        }
+        assert!(close(b.need, a.need + 0.15e6));
+        // Own run (net 1 = the PAD's) at p with a junction half 0.1: the run's tips are 0.1.
+        let own = [ti(1, 0.2, 0.2, 0.2), ti(1, 0.3, 0.2, 0.3), ti(12, 0.25, 0.2, 0.25)];
+        let t = cut_tips(&own, PAD, Bound::Open, 0.1e6, 0.0, 3e6, PAIR);
+        assert_eq!(mm3(&t.tip_p[..2]), vec![0.1, 0.1]);
+        // Caveat: tip_p + tip_q = need - (max_w - w_i) / 2 for run members, = need otherwise.
+        for (i, x) in own.iter().enumerate() {
+            let short = if i < 2 { 0.5 * (0.3e6 - x.w) } else { 0.0 };
+            assert!(close(t.tip_p[i] + t.tip_q[i], t.need - short), "{i}: {t:?}");
+        }
+    }
+
+    /// F1: stack radii take the largest tip over the cuts carrying a member (not the last or the
+    /// smallest), and an inside-out pass keeps every member a pitch outside the one inside it.
+    #[test]
+    fn stack_radii_max_then_inside_out() {
+        let ds = [1.3, 0.9, 0.5];
+        let mut obs = vec![rect(0.0, 0.0, 2.0, 2.0)];
+        let mut curves = Vec::new();
+        for d in ds {
+            obs.push(pad(0.5, 2.0 + d));
+            obs.push(pad(2.0 + d, 0.5));
+            curves.push(vec![v(0.5, 2.0 + d), v(2.0 + 0.7 * d, 2.0 + 0.7 * d), v(2.0 + d, 0.5)]);
+        }
+        let pr = proj(obs);
+        let (sh, sts) = setup(&pr, &curves, Norm::Octagonal);
+        let corner = vert(&sh, v(2.0, 2.0));
+        // A larger clearance on one side of the corner only (the regime covers the midpoints of
+        // the cuts towards the upper-left pads): the inner member's tips differ per cut.
+        for g in [0.35e6, 0.5e6] {
+            let mut o = order_layer(&sh, &sts, &[0, 1, 2], 0.0);
+            let reg = move |p: Vec2| if p.x < 2.0e6 && p.y < 2.5e6 && p.y > 2.0e6 { Some(g) } else { None };
+            radii_layer(&sh, &sts, &[0, 1, 2], &mut o, true, &reg);
+            let st = stack(&o, corner);
+            assert_eq!(st.order, vec![2, 1, 0]);
+            // The inner member's radius is its largest tip over the cuts at the corner.
+            let inner = o
+                .cuts
+                .iter()
+                .filter_map(|ci| {
+                    let c = &sh.cuts[ci.cut];
+                    ci.items.iter().find(|x| x.stretch == 2 && x.corner.is_some()).map(|x| if x.kind == 1 { x.tip_p } else { x.tip_q }).filter(|_| c.vp == corner || c.vq == Some(corner))
+                })
+                .collect::<Vec<f64>>();
+            assert!(inner.len() >= 2 && inner.iter().any(|&t| (t - inner[0]).abs() > 1.0), "tips do not differ: {inner:?}");
+            let mx = inner.iter().copied().fold(0.0, f64::max);
+            assert!(close(st.radius[0], mx), "{g}: {:?} vs {inner:?}", st.radius);
+            for i in 1..3 {
+                assert!(st.radius[i] >= st.radius[i - 1] + 0.2e6 - 1.0, "{g}: {:?}", mm3(&st.radius));
+            }
+        }
+    }
+
+    /// F6: a stretch's crossings of one cut get their own curve hits, in order.
+    #[test]
+    fn crossings_match_hits_in_order() {
+        assert_eq!(match_in_order(&[0.2, 0.25], &[0.1, 0.22, 0.6]), vec![Some(0.1), Some(0.22)]);
+        assert_eq!(match_in_order(&[0.2, 0.7], &[0.1, 0.22, 0.6]), vec![Some(0.22), Some(0.6)]);
+        assert_eq!(match_in_order(&[0.5], &[0.1, 0.6]), vec![Some(0.6)]);
+        assert_eq!(match_in_order(&[0.2, 0.3], &[0.25]), vec![Some(0.25), Some(0.25)]);
     }
 }

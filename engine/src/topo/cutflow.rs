@@ -946,7 +946,13 @@ impl Recorder {
             // M3 step a debug: the topological order of the cut items and the stacks (report only).
             if std::env::var_os("TOPO_RADII").is_some() {
                 let ords = super::radii::from_measure(&m, &|p| st.proj.regime_at(p));
-                let r = super::radii::summary(&m, &ords, &nm);
+                let mut r = super::radii::summary(&m, &ords, &nm);
+                // M3 step c: the ERBS of every stretch and their check (report only).
+                for (i, (lf, o)) in m.layers.iter().zip(&ords).enumerate() {
+                    let es = super::erbs::erbs_layer(&lf.sheet, &m.stretches, &lf.stretches, o, &super::erbs::ErbsOpts::default());
+                    let vs = super::erbs::check_layer(&lf.sheet, &m.stretches, o, &es);
+                    r[i]["erbs"] = super::erbs::summary(&super::erbs::report(&es, &vs), &vs, &m.stretches);
+                }
                 eprintln!("TOPO_RADII {r}");
                 f["radii"] = r;
             }

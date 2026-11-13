@@ -59,21 +59,19 @@ def _nested_wraps(ax, pat):
 
 
 def _distant_radius(ax, pat):
-    A, rho = pat.extra["A"], pat.extra["rho"]
+    A, rho, ys = pat.extra["A"], pat.extra["rho"], pat.extra["ys"]
     for n in ("W1", "W2", "W3"):
         ax.add_patch(Polygon(_octagon(A, rho[n]), closed=True, fc="none", ec=_color(pat, n), lw=0.7, ls="--",
                              zorder=6))
-    B = next(p.pos for f in pat.fps for p in f.pads if f.ref == "TP" and p.num == "2")
-    C = next(p.pos for f in pat.fps for p in f.pads if f.ref == "TP" and p.num == "3")
-    ax.plot([B[0], C[0]], [B[1], C[1]], color="#555555", lw=0.8, ls=":", zorder=6)
-    ax.text(C[0] + 0.5, C[1] + 0.05, "triangle edge B-C", fontsize=7, color="#555555")
     ax.plot([A[0], A[0]], [A[1] - 0.4, 0.5], color=MARK, lw=0.8, ls="--", zorder=6)
     ax.text(A[0] + 0.15, 1.2, f"A's cut: W1, W2, W3\nradius for W3 = {rho['W3']:.3f}", fontsize=7.5, color=MARK, zorder=8)
-    ax.plot([1.0, 15.0], [6.9, 6.9], color=_color(pat, "W3"), lw=0.6, ls=(0, (1, 2)), zorder=6)
-    ax.text(1.2, 6.65, "W3's zero-width band", fontsize=7, color=_color(pat, "W3"))
-    for nm, p in (("A", A), ("B", B), ("C", C)):
-        ax.text(p[0], p[1] + 0.75, nm, fontsize=9, ha="center", color="#333333", zorder=8)
-    ax.text(0.3, 11.6, "draw order today: W3 (shortest) first", fontsize=7.5, color=MARK)
+    ax.plot([1.0, 15.0], [ys["W3"], ys["W3"]], color=_color(pat, "W3"), lw=0.6, ls=(0, (1, 2)), zorder=6)
+    ax.text(10.2, ys["W3"] - 0.2, "W3's zero-width band (touches nothing)", fontsize=7, color=_color(pat, "W3"))
+    for n in ("W1", "W2"):
+        ax.plot([1.0, 15.0], [ys[n], ys[n]], color=_color(pat, n), lw=0.5, ls=(0, (1, 3)), zorder=5)
+    ax.text(A[0], A[1] + 0.75, "A", fontsize=9, ha="center", color="#333333", zorder=8)
+    ax.text(0.3, 10.6, "dotted: straight lines J1-J2; only W1 runs into A", fontsize=7.5, color="#555555")
+    ax.text(0.3, 11.2, "draw order today: W3 (shortest) first", fontsize=7.5, color=MARK)
 
 
 MARKS = {"three_diagonals": _three_diagonals, "nested_wraps": _nested_wraps, "distant_radius": _distant_radius}
@@ -96,7 +94,8 @@ def render(pat, doc: dict, out: Path) -> Path:
     _tracks(ax_r, pat, layers)
     _labels(ax_r, pat)
     MARKS[pat.name](ax_r, pat)
-    fig.suptitle(f"{pat.name}: {pat.title}   [PROPOSED, needs approval]", fontsize=13)
+    from harness.radii_patterns import STATUS
+    fig.suptitle(f"{pat.name}: {pat.title}   [{STATUS.get(pat.name, 'PROPOSED')}]", fontsize=13)
     fig.text(0.01, 0.005, "\n".join(textwrap.wrap("Expected: " + pat.answer, width=int(16 * (2 * pw + 0.8)))),
              fontsize=8.5, ha="left", va="bottom")
     fig.tight_layout(rect=(0, 0.09, 1, 0.97))

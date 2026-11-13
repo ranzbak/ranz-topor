@@ -291,6 +291,15 @@ pub struct Spokes {
    - The shrunk gaps are this cut's predicted violation. The compass reports them as predicted; the drawing does not
      search for something better.
    - Two over-full cuts that share an item use, per item, the smaller tip from each end (the more shrunk spacing).
+   - **As built (step b, deviation).** The necks are taken by one equal fraction of every item's neck room
+     (`w - floor`, bisected to the cut), not in the plan's `pass_w` neck order; the plan's necked widths are already
+     the item widths, so this only acts on cuts the plan left over-full. `neck` is the need it takes off (a same-net
+     run counts its widest member once). A cut counts as over-full at `slack < -1 nm`, as `Measure::summary`.
+   - **As built (stack radii).** Per member the largest tip from the vertex over the cuts that carry it, the
+     smallest over over-full cuts (their squeezed tips hold), then an inside-out pass: every member at least its
+     inner neighbour's radius plus the two half widths and their gap (Dayan 1997 Fig. 60, pp. 115-116; Popov 2012
+     p. 118). A member the pass pushes past its far tip on a carrying cut is counted (`radius_pushed`, graded
+     amount), never cut off.
 
 ### 4.3 Step c: ERBS per stretch, then octilinear
 

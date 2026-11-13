@@ -184,7 +184,7 @@ pub(super) fn poly_dist(p: Vec2, poly: &[Vec2]) -> f64 {
 
 
 /// Closest points of the segments `a1-b1` and `a2-b2`: `(distance, point on 1, point on 2)`.
-fn seg_seg(a1: Vec2, b1: Vec2, a2: Vec2, b2: Vec2) -> (f64, Vec2, Vec2) {
+pub(super) fn seg_seg(a1: Vec2, b1: Vec2, a2: Vec2, b2: Vec2) -> (f64, Vec2, Vec2) {
     let (d1, d2) = (b1 - a1, b2 - a2);
     let den = d1.cross(d2);
     if den.abs() > 1e-9 {
