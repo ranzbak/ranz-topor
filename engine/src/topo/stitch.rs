@@ -339,7 +339,7 @@ pub fn join_price(len: f64, edge: f64) -> f64 {
 
 /// The island join of a cut-off component `c` that holds no pad: candidates are pairs (pad of the
 /// net in the main component with copper on a routable layer of one of `c`'s islands, a site of
-/// that island at least w/2 deep whose track end keeps a gap to the net's other vias and tracks,
+/// that island at least w/2 + the zone's minimum width deep whose track end keeps a gap to the net's other vias and tracks,
 /// `site_ok(end, w/2)`, the D4 sliver rule), priced by [`join_price`]; tried cheapest first, the
 /// first track `ok` accepts wins. Returns (track, pad index, length nm, end point math frame,
 /// distance from the pad edge nm). O(sites x pads log + MAX_TRIES checker queries).
@@ -364,7 +364,9 @@ fn join_island(model: &BoardModel, reach: &PourReach, c: &Cut, ok: &dyn Fn(&Item
         if pads.is_empty() {
             continue;
         }
-        for p in ras.island_sites(isl, 0.5 * w, STEP) {
+        // Deep enough that the fill still holds the end after KiCad's min-width opening.
+        let deep = 0.5 * w + model.pours[zi].min_thickness.max(0) as f64;
+        for p in ras.island_sites(isl, deep, STEP) {
             if !site_ok(p, 0.5 * w) {
                 continue;
             }

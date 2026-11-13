@@ -181,3 +181,19 @@ fn a_far_island_is_joined_with_a_warning() {
     assert!((join_price(4e6, 6e6) - 20e6).abs() < 1.0, "twice the scale: five times the length");
     assert!(join_price(4e6, 3.1e6) > join_price(4e6, 3.0e6), "graded, no step");
 }
+
+/// The join's island end keeps the D4 gap to the net's other copper (own_copper_ok, the sliver
+/// rule of stitch vias): a GND via stands in the island right where the shortest join would end;
+/// the join ends clear of it (or would graze it into a sliver KiCad flags).
+#[test]
+fn an_island_join_ends_clear_of_own_net_vias() {
+    use topor_engine::model::{Pt, ViaItem};
+    let m = island_model(22.0);
+    let via = Item::Via(ViaItem { kind: "via".into(), net: 1, at: Pt { x: 22_600_000, y: 15_000_000 }, d: 600_000, drill: 300_000, layers: vec![], group: None, wire: None });
+    let s = stitch(&m, &Options::default(), &reg(), &[via], &[], None);
+    assert_eq!(s.island_joins, 1, "{:?}", s.notes);
+    let Item::Track(t) = &s.items[0] else { panic!("{:?}", s.items) };
+    let b = t.prim.end();
+    let d = ((b.x as f64 - 22.6e6).powi(2) + (b.y as f64 - 15e6).powi(2)).sqrt();
+    assert!(d >= 0.3e6 + 0.125e6, "the join end keeps off the via: {b:?}, {:.3} mm", d / 1e6);
+}

@@ -394,54 +394,142 @@ pub struct FarTerm {
 /// Most set-aside candidates kept next to a far-terminal candidate ([`FarTerm::alts`]).
 pub const FAR_ALTS: usize = 8;
 
-/// Fewest pads of an area-array footprint ([`bga_areas`]).
+/// Fewest pads of a ball-grid cluster ([`bga_footprints`]).
 pub const BGA_MIN_BALLS: usize = 16;
+/// Largest gap along a grid axis, in pitches, that still joins two balls into one cluster (a
+/// DDR BGA-96's two 3-column blocks are 4 pitches apart; a module's two pin rows tens of mm).
+pub const BGA_MAX_GAP_PITCHES: f64 = 4.0;
 
-/// The areas under the board's ball-grid (area-array) footprints, math frame: per footprint
-/// (pads grouped by reference) with at least [`BGA_MIN_BALLS`] pads whose centres, in the
-/// footprint's own frame (the pads' rotation), form a grid of at least 4 x 4 rows and columns
-/// where most pads (at least half) have 3 or more neighbours one pitch away along the grid's
-/// axes (the pitch = the median nearest-neighbour distance): a BGA or PGA, also with its centre
-/// depopulated; not a QFN / QFP ring (2 neighbours per pad) nor a 2-row header. Each area is
-/// the box of the ball centres grown by half a pitch. The `[planes] share_vias` mode
-/// "outside_bga" keeps every pad standing in one to a via of its own (user 2026-11-13).
-/// O(pads log pads + per footprint n^2).
-pub fn bga_areas(model: &BoardModel) -> Vec<crate::geom::Aabb> {
+/// One ball-grid area: the footprint's reference and the box it covers (math frame).
+#[derive(Clone, Debug)]
+pub struct BgaArea {
+    pub ref_: String,
+    pub area: crate::geom::Aabb,
+    pub balls: usize,
+    /// Forced by `[planes] bga_refs`, not detected.
+    pub forced: bool,
+}
+
+/// The areas under the board's ball-grid footprints, math frame. Per footprint (pads grouped by
+/// reference), SMD pads only (a THT connector or module is no BGA), in the footprint's own frame
+/// (the pads' rotation): the pitch per axis (the median distance to the next pad in the same
+/// row, resp. column; rectangular pitches like 0.8 x 0.65 mm); pads joined along an axis when
+/// they lie in one row (column) at most [`BGA_MAX_GAP_PITCHES`] pitches apart; a connected
+/// cluster counts when it holds at least [`BGA_MIN_BALLS`] pads in at least 4 rows and 4 columns
+/// and at least half of them have 3 or more neighbours one pitch away (a BGA, also with its
+/// centre or a column band depopulated; not a QFN/QFP ring, a header pair, two pin rows of a
+/// module). Its area is the box of its ball centres grown by half a pitch; a footprint may give
+/// several. `overrides` (`[planes] bga_refs`): "REF" forces the whole footprint in (box of all
+/// its pads), "-REF" keeps it out. O(pads log pads + per footprint n^2).
+pub fn bga_footprints(model: &BoardModel, overrides: &[String]) -> Vec<BgaArea> {
+    use crate::geom::Aabb;
+    let forced_in: std::collections::BTreeSet<&str> = overrides.iter().filter(|r| !r.starts_with('-')).map(|r| r.as_str()).collect();
+    let forced_out: std::collections::BTreeSet<&str> = overrides.iter().filter_map(|r| r.strip_prefix('-')).collect();
     let mut by_ref: std::collections::BTreeMap<&str, Vec<usize>> = std::collections::BTreeMap::new();
     for (i, p) in model.pads.iter().enumerate() {
         by_ref.entry(p.ref_.as_str()).or_default().push(i);
     }
+    let bbox = |ps: &mut dyn Iterator<Item = Vec2>| {
+        let mut b = Aabb { min: Vec2 { x: f64::INFINITY, y: f64::INFINITY }, max: Vec2 { x: f64::NEG_INFINITY, y: f64::NEG_INFINITY } };
+        for p in ps {
+            b.min = Vec2 { x: b.min.x.min(p.x), y: b.min.y.min(p.y) };
+            b.max = Vec2 { x: b.max.x.max(p.x), y: b.max.y.max(p.y) };
+        }
+        b
+    };
+    let median = |mut v: Vec<f64>| {
+        v.retain(|x| x.is_finite());
+        v.sort_by(f64::total_cmp);
+        v.get(v.len() / 2).copied()
+    };
     let mut out = Vec::new();
-    for idx in by_ref.values().filter(|v| v.len() >= BGA_MIN_BALLS) {
-        let phi = -model.pads[idx[0]].rotation_deg.to_radians();
-        let pts: Vec<Vec2> = idx.iter().map(|&i| model.pads[i].center.to_vec2().rot(phi)).collect();
-        let mut nn: Vec<f64> = pts
-            .iter()
-            .enumerate()
-            .map(|(a, p)| pts.iter().enumerate().filter(|(b, _)| *b != a).map(|(_, q)| (*q - *p).len()).fold(f64::INFINITY, f64::min))
-            .collect();
-        nn.sort_by(f64::total_cmp);
-        let pitch = nn[nn.len() / 2];
-        if !(pitch.is_finite() && pitch > 0.0) {
+    for (&r, idx) in &by_ref {
+        if forced_out.contains(r) {
             continue;
         }
-        let tol = 0.1 * pitch;
-        let distinct = |mut v: Vec<f64>| {
+        if forced_in.contains(r) {
+            let ps: Vec<Vec2> = idx.iter().map(|&i| model.pads[i].center.to_vec2()).collect();
+            let nn = median(ps.iter().enumerate().map(|(a, p)| ps.iter().enumerate().filter(|(b, _)| *b != a).map(|(_, q)| (*q - *p).len()).fold(f64::INFINITY, f64::min)).collect()).unwrap_or(0.0);
+            out.push(BgaArea { ref_: r.to_string(), area: bbox(&mut ps.iter().copied()).grow(0.5 * nn), balls: ps.len(), forced: true });
+            continue;
+        }
+        let idx: Vec<usize> = idx.iter().copied().filter(|&i| model.pads[i].attr == crate::model::PadAttr::Smd).collect();
+        if idx.len() < BGA_MIN_BALLS {
+            continue;
+        }
+        let phi = -model.pads[idx[0]].rotation_deg.to_radians();
+        let pts: Vec<Vec2> = idx.iter().map(|&i| model.pads[i].center.to_vec2().rot(phi)).collect();
+        let n = pts.len();
+        // A rough scale first (median nearest neighbour), then the pitch per axis.
+        let Some(d0) = median((0..n).map(|a| (0..n).filter(|&b| b != a).map(|b| (pts[b] - pts[a]).len()).fold(f64::INFINITY, f64::min)).collect()) else { continue };
+        if d0 <= 0.0 {
+            continue;
+        }
+        let row_tol = 0.25 * d0;
+        let next = |a: usize, along_x: bool| {
+            (0..n)
+                .filter(|&b| b != a)
+                .filter_map(|b| {
+                    let d = pts[b] - pts[a];
+                    let (u, v) = if along_x { (d.x, d.y) } else { (d.y, d.x) };
+                    (v.abs() <= row_tol && u.abs() > row_tol).then_some(u.abs())
+                })
+                .fold(f64::INFINITY, f64::min)
+        };
+        let (Some(px), Some(py)) = (median((0..n).map(|a| next(a, true)).collect()), median((0..n).map(|a| next(a, false)).collect())) else { continue };
+        let (tx, ty) = (0.15 * px, 0.15 * py);
+        // Union-find over the axis neighbours (gap up to BGA_MAX_GAP_PITCHES pitches).
+        let mut parent: Vec<usize> = (0..n).collect();
+        fn find(p: &mut [usize], mut a: usize) -> usize {
+            while p[a] != a {
+                p[a] = p[p[a]];
+                a = p[a];
+            }
+            a
+        }
+        let mut close = vec![0usize; n];
+        for a in 0..n {
+            for b in (a + 1)..n {
+                let d = pts[b] - pts[a];
+                let (ax, ay) = (d.x.abs(), d.y.abs());
+                let in_row = ay <= ty && ax <= BGA_MAX_GAP_PITCHES * px + tx;
+                let in_col = ax <= tx && ay <= BGA_MAX_GAP_PITCHES * py + ty;
+                if in_row || in_col {
+                    let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                    parent[ra] = rb;
+                }
+                if (ay <= ty && (ax - px).abs() <= tx) || (ax <= tx && (ay - py).abs() <= ty) {
+                    close[a] += 1;
+                    close[b] += 1;
+                }
+            }
+        }
+        let mut comps: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+        for a in 0..n {
+            let root = find(&mut parent, a);
+            comps.entry(root).or_default().push(a);
+        }
+        let distinct = |mut v: Vec<f64>, tol: f64| {
             v.sort_by(f64::total_cmp);
             v.windows(2).filter(|w| w[1] - w[0] > tol).count() + 1
         };
-        let (cols, rows) = (distinct(pts.iter().map(|p| p.x).collect()), distinct(pts.iter().map(|p| p.y).collect()));
-        let axis = |d: Vec2| (d.len() - pitch).abs() <= tol && (d.x.abs() <= tol || d.y.abs() <= tol);
-        let inner = pts.iter().filter(|p| pts.iter().filter(|q| axis(**q - **p)).count() >= 3).count();
-        if cols < 4 || rows < 4 || 2 * inner < pts.len() {
-            continue;
+        for c in comps.values().filter(|c| c.len() >= BGA_MIN_BALLS) {
+            let cols = distinct(c.iter().map(|&a| pts[a].x).collect(), tx);
+            let rows = distinct(c.iter().map(|&a| pts[a].y).collect(), ty);
+            let inner = c.iter().filter(|&&a| close[a] >= 3).count();
+            if cols < 4 || rows < 4 || 2 * inner < c.len() {
+                continue;
+            }
+            let area = bbox(&mut c.iter().map(|&a| model.pads[idx[a]].center.to_vec2())).grow(0.5 * px.max(py));
+            out.push(BgaArea { ref_: r.to_string(), area, balls: c.len(), forced: false });
         }
-        let ps: Vec<Vec2> = idx.iter().map(|&i| model.pads[i].center.to_vec2()).collect();
-        let min = ps.iter().fold(Vec2 { x: f64::INFINITY, y: f64::INFINITY }, |m, p| Vec2 { x: m.x.min(p.x), y: m.y.min(p.y) });
-        let max = ps.iter().fold(Vec2 { x: f64::NEG_INFINITY, y: f64::NEG_INFINITY }, |m, p| Vec2 { x: m.x.max(p.x), y: m.y.max(p.y) });
-        out.push(crate::geom::Aabb { min, max }.grow(0.5 * pitch));
     }
     out
+}
+
+/// The areas of [`bga_footprints`] without overrides.
+pub fn bga_areas(model: &BoardModel) -> Vec<crate::geom::Aabb> {
+    bga_footprints(model, &[]).into_iter().map(|b| b.area).collect()
 }
 
 /// Whether `p` stands in one of `areas` ([`bga_areas`]).

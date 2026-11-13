@@ -131,9 +131,38 @@ fn rings_and_headers_are_no_bga() {
             }
         }
     }
-    let all: Vec<_> = ring.iter().chain(&hdr).chain(&hollow).copied().collect();
-    let m = board(40.0, 40.0, &all, &[]);
-    assert!(topor_engine::topo::planes::bga_areas(&m).is_empty());
+    // A module (QMTECH core board style): two 2 x 32 pin rows far apart in one footprint.
+    let mut module = Vec::new();
+    for k in 0..32 {
+        let y = 4.0 + 2.54 * k as f64 * 0.4;
+        module.extend([("M1", 1, 50.0, y, 0.6), ("M1", 1, 50.0 + 0.4 * 2.54, y, 0.6), ("M1", 1, 74.0, y, 0.6), ("M1", 1, 74.0 + 0.4 * 2.54, y, 0.6)]);
+    }
+    // A 4-row connector (THT pins: no BGA).
+    let mut conn4 = Vec::new();
+    for k in 0..12 {
+        for r in 0..4 {
+            conn4.push(("J4", 1, 4.0 + 1.0 * k as f64, 30.0 + 1.0 * r as f64, 0.5));
+        }
+    }
+    let all: Vec<_> = ring.iter().chain(&hdr).chain(&hollow).chain(&module).chain(&conn4).copied().collect();
+    let mut m = board(90.0, 40.0, &all, &[]);
+    for p in m.pads.iter_mut().filter(|p| p.ref_ == "J4") {
+        p.attr = topor_engine::model::PadAttr::Pth;
+    }
+    let found: Vec<String> = topor_engine::topo::planes::bga_footprints(&m, &[]).into_iter().map(|b| b.ref_).collect();
+    assert!(found.is_empty(), "{found:?}");
+    // [planes] bga_refs: "J4" forces it in, "-U9" keeps a real grid out.
+    let mut g = Vec::new();
+    for i in 0..5 {
+        for j in 0..5 {
+            g.push(("U9", 1, 60.0 + 0.8 * i as f64, 30.0 + 0.65 * j as f64, 0.3));
+        }
+    }
+    let m2 = board(90.0, 40.0, &g, &[]);
+    assert_eq!(topor_engine::topo::planes::bga_footprints(&m2, &[]).len(), 1, "a 0.8 x 0.65 mm grid is a BGA");
+    assert!(topor_engine::topo::planes::bga_footprints(&m2, &["-U9".into()]).is_empty());
+    let forced = topor_engine::topo::planes::bga_footprints(&m, &["J4".into()]);
+    assert!(forced.len() == 1 && forced[0].ref_ == "J4" && forced[0].forced);
 }
 
 /// A VCC pad 15 mm left of a VCC pour (F.Cu, x >= 18) that holds the other VCC pad: the pad is
@@ -176,4 +205,53 @@ fn a_shared_via_never_moves_into_a_bga_area() {
     assert!(may_share_at("outside_bga", &areas, outside));
     assert!(may_share_at("always", &areas, inside));
     assert!(!may_share_at("never", &areas, outside) && !may_share_at("bogus", &areas, outside));
+}
+
+/// An L-shaped ball grid U1 (6 x 6 at 1 mm, its upper right 3 x 3 empty; no-net balls) whose area
+/// covers the empty corner, and two GND pads just outside it, right of it and above it, over a
+/// B.Cu GND pour: they share one via, and its best site (their midpoint) lies in the empty corner
+/// inside the BGA area. "always" puts it there; by default (outside_bga) the re-site keeps it out.
+#[test]
+fn a_shared_via_of_pads_outside_is_not_resited_into_the_bga() {
+    let mut pads = Vec::new();
+    for i in 0..6 {
+        for j in 0..6 {
+            if !(i >= 3 && j <= 2) {
+                pads.push(("U1", 0, 10.0 + i as f64, 10.0 + j as f64, 0.5));
+            }
+        }
+    }
+    pads.push(("RA", 1, 16.3, 11.0, 1.0));
+    pads.push(("RB", 1, 14.0, 8.7, 1.0));
+    let m = board(30.0, 30.0, &pads, &[(1, 2, 0.5, 0.5, 29.5, 29.5, &[])]);
+    let areas = topor_engine::topo::planes::bga_areas(&m);
+    assert_eq!(areas.len(), 1);
+    let inside = |v: &(f64, f64)| (9.5..=15.5).contains(&v.0) && (9.5..=15.5).contains(&v.1);
+    let always = route_with(&m, &Options { plane_share_vias: "always".into(), ..Options::default() }, &RunControl::new());
+    let va = vias(&always.items);
+    assert!(va.len() == 1 && inside(&va[0]), "the geometry puts the shared via in the BGA area: {va:?} {:?}", always.warnings);
+    let def = route_with(&m, &Options::default(), &RunControl::new());
+    let vd = vias(&def.items);
+    assert_eq!(def.routed, 2, "{:?}", def.warnings);
+    assert!(!vd.is_empty() && !vd.iter().any(inside), "no plane via in the BGA area: {vd:?}");
+}
+
+/// A 4 x 4 GND ball grid and a GND pad R9 just outside its corner, over a B.Cu GND pour: R9's via
+/// is shareable (outside), but no ball ends on it: every ball keeps a via of its own (the pad-side
+/// gate), 17 vias; "always" lets balls share.
+#[test]
+fn a_ball_does_not_end_on_a_shareable_via_outside() {
+    let mut pads = Vec::new();
+    for i in 0..4 {
+        for j in 0..4 {
+            pads.push(("U1", 1, 8.0 + 1.27 * i as f64, 8.0 + 1.27 * j as f64, 0.5));
+        }
+    }
+    pads.push(("R9", 1, 8.0 + 1.27 * 3.0 + 1.6, 8.0 + 1.27 * 3.0 + 1.6, 0.6));
+    let m = board(24.0, 24.0, &pads, &[(1, 2, 0.5, 0.5, 23.5, 23.5, &[])]);
+    let def = route_with(&m, &Options::default(), &RunControl::new());
+    assert_eq!((def.routed, vias(&def.items).len()), (17, 17), "{:?}", def.warnings);
+    assert!(def.warnings.iter().any(|w| w.starts_with("BGA area U1")), "{:?}", def.warnings);
+    let always = route_with(&m, &Options { plane_share_vias: "always".into(), ..Options::default() }, &RunControl::new());
+    assert!(vias(&always.items).len() < 17, "{:?}", always.warnings);
 }

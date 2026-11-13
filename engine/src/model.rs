@@ -934,8 +934,10 @@ pub struct Options {
     /// `stitch_islands`, a cut-off piece of a pour net's copper that holds no pad (an island the
     /// zone keeps, e.g. remove islands = never) and that no stitch via can reach gets a short
     /// track of the net width from the nearest pad of the net that is connected to the rest of its
-    /// net, into the island (shortest first, within the stitching stub reach), so the island is no
-    /// longer isolated copper. False: such an island is only reported.
+    /// net, into the island, so the island is no longer isolated copper; its end stands at least
+    /// w/2 + the zone's minimum width deep in the island; priced length x (1 + (d / 3 mm)^2), d
+    /// = distance from the pad's edge ([`crate::topo::stitch::join_price`]), no cutoff, a warning
+    /// beyond 3 mm. False: such an island is only reported.
     pub plane_join_islands: bool,
     /// Topological core (4.4, `topor.toml [planes] terminals`, user rule 2026-11-10): an own-net
     /// pour is a terminal of its net like a pad, which may carry vias. Only fill connected to the
@@ -955,6 +957,10 @@ pub struct Options {
     /// via conducts heat worse, makes single-via current paths and adds inductance towards the
     /// power pins); `"always"`.
     pub plane_share_vias: String,
+    /// Topological core (`topor.toml [planes] bga_refs`, default empty): overrides of the BGA
+    /// detection behind `plane_share_vias = "outside_bga"` ([`crate::topo::planes::bga_footprints`]):
+    /// "REF" counts footprint REF as a BGA (its whole pad box), "-REF" never.
+    pub plane_bga_refs: Vec<String>,
     /// `topor.toml [output] cleanup_safe`: the written copper is made stable under KiCad's Edit ->
     /// Cleanup Tracks & Vias ([`crate::topo::tidy`]): no null, duplicate or in-pad segments, T
     /// junctions as exact vertices, collinear segments merged.
@@ -1343,6 +1349,7 @@ impl Default for Options {
             plane_join_islands: true,
             plane_terminals: true,
             plane_share_vias: "outside_bga".into(),
+            plane_bga_refs: Vec::new(),
             cleanup_safe: true,
             net_tree: "free".into(),
             steiner: false,

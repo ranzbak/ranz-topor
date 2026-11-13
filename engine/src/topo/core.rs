@@ -1332,7 +1332,20 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
         // standing in a ball-grid footprint's area never shares (every plane ball its own via);
         // "never": no pad shares (empty, so the re-siting and merge rounds below do nothing);
         // "always": every pad may.
-        let bga = if opts.plane_share_vias == "outside_bga" { planes::bga_areas(model) } else { Vec::new() };
+        let bga_fp = if opts.plane_share_vias == "outside_bga" { planes::bga_footprints(model, &opts.plane_bga_refs) } else { Vec::new() };
+        for f in &bga_fp {
+            notes.push(format!(
+                "BGA area {}: ({:.2}, {:.2})-({:.2}, {:.2}) mm, {} balls ({}); its plane pads get a via each ([planes] share_vias = \"outside_bga\")",
+                f.ref_,
+                f.area.min.x / 1e6,
+                -f.area.max.y / 1e6,
+                f.area.max.x / 1e6,
+                -f.area.min.y / 1e6,
+                f.balls,
+                if f.forced { "forced by [planes] bga_refs" } else { "detected; [planes] bga_refs = [\"-REF\"] keeps a footprint out" }
+            ));
+        }
+        let bga: Vec<crate::geom::Aabb> = bga_fp.iter().map(|f| f.area).collect();
         let share_mode = opts.plane_share_vias.as_str();
         if !matches!(share_mode, "never" | "outside_bga" | "always") {
             notes.push(format!("[planes] share_vias = \"{share_mode}\" is not one of never, outside_bga, always: no plane via is shared"));
@@ -1468,7 +1481,7 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
             }
             // 4.4: the end of each far terminal's wire, picked by the path search among its
             // candidates on the board with every stub in place.
-            let picks = select_far(model, opts, &reg, &dec, &dr, &out.extra, &reqs, &pending);
+            let picks = select_far(model, opts, &reg, &dec, &dr, &out.extra, &reqs, &pending, &mut notes);
             if picks.iter().any(Option::is_none) {
                 // No candidate clear of the stubs: a signal connection; the decomposition changes,
                 // so place again.
@@ -1505,7 +1518,7 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
 /// set aside next to it ([`planes::FarTerm::alts`]). Decided once per route (decide early: the
 /// planner gets one terminal per pad). O(2 board builds + two P2 searches per pending pad).
 #[allow(clippy::too_many_arguments)]
-fn select_far(model: &BoardModel, opts: &Options, reg: &Registry, dec: &crate::decompose::Decomposition, dr: &Drawer, stub_extra: &[board::Extra], reqs: &[planes::Req], pending: &[(usize, String, Vec<planes::FarTerm>)]) -> Vec<Option<planes::FarTerm>> {
+fn select_far(model: &BoardModel, opts: &Options, reg: &Registry, dec: &crate::decompose::Decomposition, dr: &Drawer, stub_extra: &[board::Extra], reqs: &[planes::Req], pending: &[(usize, String, Vec<planes::FarTerm>)], notes: &mut Vec<String>) -> Vec<Option<planes::FarTerm>> {
     // Clear of the stubs on at least one of its layers (those layers kept).
     let clear_of = |net: i32, f: &planes::FarTerm| {
         let layers: Vec<u32> = f.layers.iter().copied().filter(|&l| dr.check_ok(&draw::track_item(net, l, f.size, f.at, f.at + Vec2 { x: 1.0, y: 0.0 }, None))).collect();
@@ -1513,7 +1526,7 @@ fn select_far(model: &BoardModel, opts: &Options, reg: &Registry, dec: &crate::d
     };
     let pads: Vec<usize> = pending.iter().map(|p| p.0).collect();
     let clear: Vec<Vec<planes::FarTerm>> = pending.iter().map(|(i, _, cands)| cands.iter().filter_map(|f| clear_of(reqs[*i].net, f)).collect()).collect();
-    let picks = pick_far(model, opts, reg, dec, stub_extra, reqs, &pads, &clear);
+    let picks = pick_far(model, opts, reg, dec, stub_extra, reqs, &pads, &clear, notes);
     let mut out: Vec<Option<planes::FarTerm>> = clear.iter().zip(&picks).map(|(c, &k)| c.get(k).cloned()).collect();
     // Second round, by the same path price: the picked end against the candidates its spacing
     // set aside (`FarTerm::alts`, e.g. the corner next to an edge point that was straighter from
@@ -1524,7 +1537,7 @@ fn select_far(model: &BoardModel, opts: &Options, reg: &Registry, dec: &crate::d
         .map(|(p, &i)| p.as_ref().map_or_else(Vec::new, |f| std::iter::once(f.clone()).chain(f.alts.iter().filter_map(|a| clear_of(reqs[i].net, a))).collect()))
         .collect();
     if round2.iter().any(|c| c.len() > 1) {
-        let picks2 = pick_far(model, opts, reg, dec, stub_extra, reqs, &pads, &round2);
+        let picks2 = pick_far(model, opts, reg, dec, stub_extra, reqs, &pads, &round2, notes);
         for (o, (c, &k)) in out.iter_mut().zip(round2.iter().zip(&picks2)) {
             if c.len() > 1 {
                 *o = c.get(k).cloned();
@@ -1542,7 +1555,8 @@ fn select_far(model: &BoardModel, opts: &Options, reg: &Registry, dec: &crate::d
 /// off the straight line (plane_terminal J1.1: 16.74 mm instead of 15.57) or round the far side
 /// of a connector row (pour_zero J3.1). One board build plus one search per pad.
 #[allow(clippy::too_many_arguments)]
-fn pick_far(model: &BoardModel, opts: &Options, reg: &Registry, dec: &crate::decompose::Decomposition, stub_extra: &[board::Extra], reqs: &[planes::Req], pads: &[usize], cands: &[Vec<planes::FarTerm>]) -> Vec<usize> {
+fn pick_far(model: &BoardModel, opts: &Options, reg: &Registry, dec: &crate::decompose::Decomposition, stub_extra: &[board::Extra], reqs: &[planes::Req], pads: &[usize], cands: &[Vec<planes::FarTerm>], notes: &mut Vec<String>) -> Vec<usize> {
+    let pad_name = |i: usize| format!("{}.{}", model.pads[reqs[i].pad].ref_, model.pads[reqs[i].pad].number);
     if cands.iter().all(|c| c.len() <= 1) {
         return vec![0; cands.len()];
     }
@@ -1552,8 +1566,15 @@ fn pick_far(model: &BoardModel, opts: &Options, reg: &Registry, dec: &crate::dec
             extra.push(board::Extra::Terminal { net: reqs[i].net, at: f.at, layers: f.layers.clone(), size: f.size });
         }
     }
-    let Ok(b2) = board::build_full(model, &build_opts(opts), &[], &extra) else {
-        return vec![0; cands.len()];
+    let b2 = match board::build_full(model, &build_opts(opts), &[], &extra) {
+        Ok(b2) => b2,
+        Err(e) => {
+            notes.push(format!(
+                "far terminal ends of {}: the board with the candidate ends did not build ({e}); each takes its straightest candidate, unchecked by the path search",
+                pads.iter().zip(cands).filter(|(_, c)| c.len() > 1).map(|(&i, _)| pad_name(i)).collect::<Vec<_>>().join(", ")
+            ));
+            return vec![0; cands.len()];
+        }
     };
     let mut st = State::new(&b2.proj);
     st.cross_vias = opts.crossing_vias == "via";
@@ -1571,6 +1592,7 @@ fn pick_far(model: &BoardModel, opts: &Options, reg: &Registry, dec: &crate::dec
         let pad_obs = (0..b2.proj.obstacles.len()).find(|&o| b2.pad_of[o] == rq.pad);
         let ends: Vec<(usize, super::init::TreeEnd)> = cs.iter().enumerate().filter_map(|(k, f)| term_obs(rq.net, f.at).and_then(end).map(|e| (k, e))).collect();
         let (Some(src), false) = (pad_obs.and_then(end), ends.is_empty()) else {
+            notes.push(format!("far terminal end of {}: the pad or its candidate ends are not in the projection; it takes its straightest candidate, unchecked by the path search", pad_name(i)));
             out.push(0);
             continue;
         };
@@ -1580,7 +1602,13 @@ fn pick_far(model: &BoardModel, opts: &Options, reg: &Registry, dec: &crate::dec
         let conn = Conn { net: rq.net, pa: src.obs, pb: ends[0].1.obs, a: src.v, b: ends[0].1.v, w, s };
         let wt = InitWeights { max_expansions: opts.max_expansions.max(1), ..InitWeights::from_registry(reg, &WireCtx { net: rq.net, tier: c.tier }) };
         let dst: Vec<super::init::TreeEnd> = ends.iter().map(|e| e.1).collect();
-        out.push(st.search_tree(&conn, &[src], &dst, &wt, (w + s) / ws0, None).map_or(0, |(_, _, j)| ends[j].0));
+        match st.search_tree(&conn, &[src], &dst, &wt, (w + s) / ws0, None) {
+            Some((_, _, j)) => out.push(ends[j].0),
+            None => {
+                notes.push(format!("far terminal end of {}: the path search reached none of its candidate ends; it takes its straightest candidate", pad_name(i)));
+                out.push(0);
+            }
+        }
     }
     out
 }
