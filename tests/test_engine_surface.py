@@ -166,6 +166,25 @@ def test_default_options_lists_every_field(engine, root):
     assert out["routed"] == 1 and out["stop_reason"] == "stable"  # M-B0: a headless run ends at "Routes stable"
 
 
+def test_direct_engine_calls_have_the_overrun_cap_by_default(engine):
+    """User 2026-11-13: a direct engine call (route / route_async: the harness's route_router, bench.py, the M4 gate,
+    classic_ref.py) gets the soft limit's overrun cap by default: timeout_overrun_s = "auto" = wall_clock_s. 0 (what
+    the plugin passes in the KiCad dialog) or "none" = no cap."""
+    d = json.loads(engine.default_options())
+    assert d["timeout_overrun_s"] == "auto"
+    m = json.dumps(_model_routable())
+    out = json.loads(engine.route(m, json.dumps({"wall_clock_s": 10.0})))
+    lim = out["limit"]
+    assert lim["cap_s"] == pytest.approx(10.0) and not lim["cap_hit"] and lim["cut"] == "none", lim
+    for none in (0.0, "none"):
+        lim = json.loads(engine.route(m, json.dumps({"wall_clock_s": 10.0, "timeout_overrun_s": none})))["limit"]
+        assert lim["cap_s"] is None, (none, lim)
+    lim = json.loads(engine.route(m, json.dumps({"wall_clock_s": 10.0, "timeout_overrun_s": 3.0})))["limit"]
+    assert lim["cap_s"] == pytest.approx(3.0), lim
+    with pytest.raises(ValueError):
+        engine.route(m, json.dumps({"timeout_overrun_s": "soon"}))
+
+
 def _strip(r):
     r = dict(r)
     r.pop("runtime_s")

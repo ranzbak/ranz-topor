@@ -208,6 +208,9 @@ pub struct TimeLimit {
     /// [`TimeLimit::harden`]: the plugin's CPU clock).
     cap_ns: AtomicU64,
     capped: AtomicBool,
+    /// A stop test saw the limit act as hard after it passed ([`TimeLimit::cuts`]): a step was
+    /// cut by it (the report then says what was cut, not only that the limit acted as hard).
+    cut: AtomicBool,
 }
 
 const LIMIT_UNSET: u64 = u64::MAX;
@@ -215,7 +218,7 @@ const LIMIT_NONE: u64 = u64::MAX - 1;
 
 impl Default for TimeLimit {
     fn default() -> TimeLimit {
-        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false), cap_ns: AtomicU64::new(LIMIT_NONE), capped: AtomicBool::new(false) }
+        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false), cap_ns: AtomicU64::new(LIMIT_NONE), capped: AtomicBool::new(false), cut: AtomicBool::new(false) }
     }
 }
 
@@ -274,6 +277,26 @@ impl TimeLimit {
             self.capped.store(true, Ordering::Relaxed);
         }
         hit
+    }
+
+    /// The limit stops the step that runs now: it passed and acts as hard (`[run] timeout_mode =
+    /// "hard"`, or the overrun cap fired, [`TimeLimit::is_hard`]). When true it is noted
+    /// ([`TimeLimit::cut_any`]): the stop test that asked stops its step there. O(1).
+    pub fn cuts(&self) -> bool {
+        self.is_hard() && self.passed() && self.note_cut()
+    }
+
+    /// A stop test with its own condition (the round's 1 s floor, the drawing's exemption) found
+    /// the limit cutting its step: noted for the report ([`TimeLimit::cut_any`]). Always true. O(1).
+    pub fn note_cut(&self) -> bool {
+        self.cut.store(true, Ordering::Relaxed);
+        true
+    }
+
+    /// Whether the limit, acting as hard, cut a step of the run ([`TimeLimit::cuts`]). A limit
+    /// (or overrun cap) that passed only after the steps it stops had ended cut nothing. O(1).
+    pub fn cut_any(&self) -> bool {
+        self.cut.load(Ordering::Relaxed)
     }
 
     /// The caller's overrun cap fired (the plugin's CPU clock: limit plus cap reached in CPU
@@ -565,7 +588,7 @@ pub fn with_control_mode<R>(ctl: &RunControl, limit_stops: bool, f: impl FnOnce(
 /// work loops that have no `RunControl` (the topology and label moves of P3/P4 and their cut
 /// prices, M0). Cheap: one atomic load, and a clock read only with a limit set. O(1).
 pub fn stop_requested() -> bool {
-    STOP.with(|c| c.borrow().as_ref().is_some_and(|(f, l, always)| f.load(Ordering::Relaxed) || ((*always || l.is_hard()) && l.passed())))
+    STOP.with(|c| c.borrow().as_ref().is_some_and(|(f, l, always)| f.load(Ordering::Relaxed) || ((*always || l.is_hard()) && l.passed() && l.note_cut())))
 }
 
 /// Deadline passed or run cancelled: the single stop test of every deadline site. O(1).

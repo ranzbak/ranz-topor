@@ -843,9 +843,14 @@ pub struct Options {
     /// the behaviour before M2, not the same: Cancel in P2-P4 and draw once hold in both modes).
     pub timeout_mode: String,
     /// F3 `[run] timeout_overrun_s` (user 2026-11-13): seconds past `wall_clock_s` after which the
-    /// soft limit acts as the hard one (the step that runs is cut, what exists is drawn, a loud
-    /// warning); `<= 0` = no cap (default). The engine's wall clock only: the plugin's CPU clock
-    /// caps on its own (`RouteJob.harden`). It never changes `wall_clock_s`.
+    /// soft limit acts as the hard one (the step that runs is cut, the kept plan is drawn in full,
+    /// a loud warning). JSON: `"auto"` (default) = equal to `wall_clock_s`, so a direct engine
+    /// call (`route`, `route_async`, the harness) takes at most twice its limit plus the drawing
+    /// of one plan; a number = that many seconds; `0`, a negative number or `"none"` = no cap (the
+    /// KiCad dialog passes 0: Cancel stops a run there). In Rust "auto" is [`OVERRUN_AUTO`]; read
+    /// the cap through [`Options::overrun_cap_s`]. The engine's wall clock only: the plugin's CPU
+    /// clock caps on its own (`RouteJob.harden`). It never changes `wall_clock_s`.
+    #[serde(with = "overrun_cap")]
     pub timeout_overrun_s: f64,
     /// An accepted path longer than this factor times its slot-free ghost counts as an absurd
     /// detour and triggers rip-up of the blockers.
@@ -1317,7 +1322,7 @@ impl Default for Options {
             margin_nm: 0,
             wall_clock_s: 60.0,
             timeout_mode: "soft".into(),
-            timeout_overrun_s: 0.0,
+            timeout_overrun_s: OVERRUN_AUTO,
             detour_factor: 2.0,
             factors: Default::default(),
             drc_loop_cap: 5,
@@ -1422,7 +1427,48 @@ impl Default for Options {
     }
 }
 
+/// `Options::timeout_overrun_s` = `"auto"` (the default): the overrun cap equals `wall_clock_s`.
+pub const OVERRUN_AUTO: f64 = -1.0;
+
+/// `Options::timeout_overrun_s` on the wire: `"auto"` ([`OVERRUN_AUTO`]), `"none"` (= 0, no cap)
+/// or seconds (`<= 0` = no cap; a negative number reads as 0, never as "auto").
+mod overrun_cap {
+    use super::OVERRUN_AUTO;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &f64, s: S) -> Result<S::Ok, S::Error> {
+        if *v == OVERRUN_AUTO {
+            s.serialize_str("auto")
+        } else {
+            s.serialize_f64(*v)
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Seconds(f64),
+            Word(String),
+        }
+        match Raw::deserialize(d)? {
+            Raw::Seconds(v) => Ok(if v.is_finite() { v.max(0.0) } else { 0.0 }),
+            Raw::Word(w) => match w.trim().to_ascii_lowercase().as_str() {
+                "auto" => Ok(OVERRUN_AUTO),
+                "none" => Ok(0.0),
+                _ => Err(serde::de::Error::custom(format!("timeout_overrun_s: {w:?} is not a number of seconds, \"auto\" or \"none\""))),
+            },
+        }
+    }
+}
+
 impl Options {
+    /// The overrun cap in seconds past the limit (`timeout_overrun_s`; `"auto"` = `wall_clock_s`);
+    /// `<= 0` = no cap. O(1).
+    pub fn overrun_cap_s(&self) -> f64 {
+        if self.timeout_overrun_s == OVERRUN_AUTO { self.wall_clock_s.max(0.0) } else { self.timeout_overrun_s.max(0.0) }
+    }
+
     pub fn from_json(s: &str) -> Result<Self, String> {
         if s.trim().is_empty() {
             return Ok(Options::default());
@@ -1501,5 +1547,27 @@ mod tests {
         );
         assert!(!o.drawing_feedback);
         assert!(o.via_relocate && o.via_between);
+    }
+
+    /// User 2026-11-13: direct engine callers get the overrun cap by default ("auto" =
+    /// `wall_clock_s`); the KiCad dialog passes 0 (no cap). JSON says "auto", "none" or seconds.
+    #[test]
+    fn the_overrun_cap_is_auto_by_default_and_reads_auto_none_or_seconds() {
+        let o = Options::default();
+        assert_eq!(o.timeout_overrun_s, super::OVERRUN_AUTO);
+        assert_eq!(o.overrun_cap_s(), o.wall_clock_s);
+        let v = serde_json::to_value(&o).expect("options serialise");
+        assert_eq!(v["timeout_overrun_s"], "auto", "self-documenting on the wire");
+        let o2: Options = serde_json::from_value(v).expect("round trip");
+        assert_eq!(o2, o);
+        let parse = |j: &str| Options::from_json(j).map(|o| (o.timeout_overrun_s, o.overrun_cap_s()));
+        assert_eq!(parse(r#"{"wall_clock_s": 120}"#), Ok((super::OVERRUN_AUTO, 120.0)), "auto follows the limit");
+        assert_eq!(parse(r#"{"wall_clock_s": 120, "timeout_overrun_s": "auto"}"#), Ok((super::OVERRUN_AUTO, 120.0)));
+        assert_eq!(parse(r#"{"wall_clock_s": 120, "timeout_overrun_s": 0.0}"#), Ok((0.0, 0.0)), "the KiCad dialog: no cap");
+        assert_eq!(parse(r#"{"wall_clock_s": 120, "timeout_overrun_s": "none"}"#), Ok((0.0, 0.0)));
+        assert_eq!(parse(r#"{"wall_clock_s": 120, "timeout_overrun_s": -1}"#), Ok((0.0, 0.0)), "a negative number is no cap, never auto");
+        assert_eq!(parse(r#"{"wall_clock_s": 120, "timeout_overrun_s": 30}"#), Ok((30.0, 30.0)));
+        assert_eq!(parse(r#"{"wall_clock_s": 0, "timeout_overrun_s": "auto"}"#), Ok((super::OVERRUN_AUTO, 0.0)), "no limit: no cap");
+        assert!(parse(r#"{"timeout_overrun_s": "soon"}"#).is_err());
     }
 }

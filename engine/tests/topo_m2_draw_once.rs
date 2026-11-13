@@ -124,19 +124,67 @@ fn a_limit_reached_before_the_run_draws_the_initial_plan() {
     assert!(l.reached && l.mode == "soft" && l.overrun_s > 0.0, "{l:?}");
     assert!(r.warnings.iter().any(|w| w.starts_with("time limit (soft, [run] timeout_mode)")), "{:?}", r.warnings);
     assert_eq!(r.stop_reason, "timeout");
+    // The drawing's own steps are not cut either (verify-m2 F2): their counts are those of the
+    // same plan drawn without a limit (the plane stubs, placed first: tests/topo_44.rs).
+    let ctl = RunControl::new();
+    ctl.limit.init(1e-6);
+    let r = route_with(&m, &topor(r#", "runs": 1"#), &ctl);
+    let free = initial_plan_free(&m, r#", "runs": 1"#);
+    assert_eq!(plan_core(&r), plan_core(&free), "the plan drawn is the initial plan");
+    assert!(via_reduction(&free).1.is_empty(), "{:?}", via_reduction(&free));
+    assert_eq!(via_reduction(&r), via_reduction(&free), "the soft limit does not cut the via reduction");
+}
+
+/// The via reduction's counts (wires with vias, relabels tried, sweeps, accepted, vias removed),
+/// without its time; and how it ended (a stop by the time budget or Cancel / OK, or none).
+fn via_reduction(r: &RouteResult) -> (String, String) {
+    let w = r.warnings.iter().find(|w| w.starts_with("via reduction after drawing:")).unwrap_or_else(|| panic!("via reduction line: {:?}", r.warnings));
+    let counts = w.split(" (").next().expect("counts").to_string();
+    let stop = ["stopped by the time budget", "stopped by Cancel / OK"].into_iter().find(|s| w.contains(s)).unwrap_or("").to_string();
+    (counts, stop)
+}
+
+/// The plane stubs placed before the topology (stub vias, plane pads), from the planes line
+/// (`None`: the board has no plane pads).
+fn plane_stubs(r: &RouteResult) -> Option<String> {
+    r.warnings.iter().find(|w| w.starts_with("planes as terminals")).map(|w| w.rsplit("; ").next().expect("stub count").to_string())
+}
+
+/// [`plan_line`] without what differs between the TopoR loop's pick of the initial plan and the
+/// same plan drawn by one whole-route cycle: the loop's own block and the cut sheets' cache hits.
+fn plan_core(r: &RouteResult) -> serde_json::Value {
+    let mut v = plan_line(r);
+    if let Some(m) = v.as_object_mut() {
+        m.remove("loop");
+        m.remove("cut_sheets");
+    }
+    v
+}
+
+/// The initial plan drawn without a time limit: one whole-route cycle, no TopoR loop (the
+/// reference of the limit tests: the drawing of the same plan, with nothing cut).
+fn initial_plan_free(m: &BoardModel, extra: &str) -> RouteResult {
+    run(m, &topor(&format!(r#"{extra}, "opt_loop": "cycles", "topo_rounds": 1"#)))
 }
 
 #[test]
 fn a_limit_reached_in_p3_p4_still_draws_the_initial_plan() {
     // The limit is reached while the layer assignment and the rip-up rounds run (as the plugin's
-    // CPU clock does it): they finish, and their plan is drawn, completely.
+    // CPU clock does it): they finish, and their plan is drawn, completely: the drawing's own
+    // steps too (verify-m2 F2: the via reduction got 0 s past the limit, and the plane stubs
+    // stopped at it): their counts are those of the same plan drawn without a limit.
     for fx in p3_crops() {
         let m = crop(fx);
         let o = topor(r#", "runs": 1, "capacity_model": "cuts""#);
+        // The reference: the initial plan drawn with no limit.
+        let free = initial_plan_free(&m, r#", "runs": 1, "capacity_model": "cuts""#);
+        assert!(via_reduction(&free).1.is_empty(), "{fx}: {:?}", via_reduction(&free));
         let ctl = RunControl::new();
         ctl.limit.init(o.wall_clock_s);
         let c2 = ctl.clone();
-        let h = std::thread::spawn(move || route_with(&m, &o, &c2));
+        let m2 = m.clone();
+        let o2 = o.clone();
+        let h = std::thread::spawn(move || route_with(&m2, &o2, &c2));
         let t0 = Instant::now();
         while !ctl.snapshot().stage.contains("layer assignment") && !h.is_finished() {
             assert!(t0.elapsed().as_secs() < 600, "{fx}: never reached P3");
@@ -149,8 +197,11 @@ fn a_limit_reached_in_p3_p4_still_draws_the_initial_plan() {
         assert!(open.is_empty(), "{fx}: nothing is cut by the soft limit: {open:?}");
         assert!(r.routed > 0 && !r.items.is_empty(), "{fx}: the initial plan is drawn");
         let l = r.limit.as_ref().expect("limit report");
-        assert!(l.reached && l.step.contains("layer assignment"), "{fx}: {l:?}");
+        assert!(l.reached && l.step.contains("layer assignment") && l.cut == "none", "{fx}: {l:?}");
         assert!(r.warnings.iter().any(|w| w.contains(": 0 cycles") && w.contains("ended by time limit")), "{fx}: no loop cycle after the limit: {:?}", r.warnings);
+        assert_eq!(plan_core(&r), plan_core(&free), "{fx}: the plan drawn is the initial plan");
+        assert_eq!(via_reduction(&r), via_reduction(&free), "{fx}: the soft limit does not cut the via reduction");
+        assert_eq!(plane_stubs(&r), plane_stubs(&free), "{fx}");
     }
 }
 
@@ -242,9 +293,10 @@ fn a_soft_limit_in_p3_p4_does_not_cut_their_moves_until_its_overrun_cap() {
     assert!(want[0].contains(" evaluations") && !want[0].contains(": 0 evaluations"), "the fixture moves in P4: {want:?}");
     let r = reached_in_p3(&m, &o);
     let l = r.limit.as_ref().expect("limit report");
-    assert!(l.reached && l.mode == "soft" && !l.cap_hit && l.cap_s.is_none(), "{l:?}");
+    // user 2026-11-13: a direct engine call has the overrun cap by default ("auto" = wall_clock_s)
+    assert!(l.reached && l.mode == "soft" && !l.cap_hit && l.cap_s == Some(o.wall_clock_s) && l.cut == "none", "{l:?}");
     assert_eq!(move_counts(&r), want, "the soft limit cut P3/P4 moves");
-    assert!(!r.warnings.iter().any(|w| w.contains("overrun cap")), "{:?}", r.warnings);
+    assert!(!r.warnings.iter().any(|w| w.contains("overrun cap reached")), "{:?}", r.warnings);
     // F3 `[run] timeout_overrun_s` (user 2026-11-13): past the cap the soft limit acts as the hard
     // one: the moves stop, what exists is drawn, and a loud warning says so.
     let capped = topor(r#", "runs": 1, "capacity_model": "cuts", "moves": true, "net_tree": "fixed", "timeout_overrun_s": 0.001"#);
@@ -257,6 +309,27 @@ fn a_soft_limit_in_p3_p4_does_not_cut_their_moves_until_its_overrun_cap() {
     // "draw what exists": the cap fired in P3, before the drawing began, so the plan is drawn to its end
     assert!(r.routed > 0 && !r.items.is_empty(), "what existed is drawn: {:?}", r.warnings);
     assert!(!r.connections.iter().any(|c| c.reason.contains("time limit")), "the drawing was not cut: {:?}", r.connections.iter().filter(|c| c.reason.contains("time limit")).collect::<Vec<_>>());
+    assert_eq!(l.cut, "plan", "{l:?}");
+    assert!(r.warnings.iter().any(|w| w.starts_with("WARNING: time limit overrun cap reached") && w.contains("the step that ran then was cut and the kept plan")), "{:?}", r.warnings);
+}
+
+#[test]
+fn a_hard_limit_before_the_drawing_draws_the_kept_plan_in_full() {
+    // User 2026-11-13: `hard` takes the overrun cap's path: the limit cuts the planning step that
+    // runs (here P3/P4, reached when P3 begins) and the kept plan is drawn in full (TopoR judges
+    // the variants before any copper and draws the chosen one, 6.3 manual pp. 72-73, p. 237).
+    // Before, the hard limit cut the drawing too and left a nearly empty board.
+    let m = crop("qmtech-usb-crop.json");
+    let soft = reached_in_p3(&m, &topor(r#", "runs": 1, "capacity_model": "cuts""#));
+    let r = reached_in_p3(&m, &topor(r#", "runs": 1, "capacity_model": "cuts", "timeout_mode": "hard""#));
+    let l = r.limit.as_ref().expect("limit report");
+    assert!(l.reached && l.mode == "hard" && l.cut == "plan" && !l.cap_hit, "{l:?}");
+    let undrawn: Vec<_> = r.connections.iter().filter(|c| c.reason.contains("before this connection was drawn")).collect();
+    assert!(undrawn.is_empty(), "the hard limit did not cut the drawing of the kept plan: {undrawn:?}");
+    assert!(r.routed > 0 && !r.items.is_empty(), "{:?}", r.warnings);
+    assert_eq!(via_reduction(&r).1, "", "the via reduction of the kept plan runs to its end: {:?}", via_reduction(&r));
+    assert!(r.warnings.iter().any(|w| w.starts_with("time limit (hard, [run] timeout_mode)") && w.contains("the step that ran then was cut and the kept plan")), "{:?}", r.warnings);
+    assert_eq!(plane_stubs(&r), plane_stubs(&soft), "the plane stubs were placed before the limit");
 }
 
 #[test]

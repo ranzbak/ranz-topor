@@ -107,7 +107,9 @@ class RunOutcome:
     via_fallback: dict | None = None  # apply_via_fallback info when VIA_NOT_SET_UP patched the engine rules
     #: the time limit of the routing: {"clock": wall|cpu, "start_s", "final_s" (0 = none), "changes": [{"at_s",
     #: "limit_s"}], "cap_s" (run.timeout_overrun_s in effect, None = no cap), "cap_hit" (it fired: the soft limit then
-    #: acted as the hard one), plus mode / reached / step / overrun_s (M2.TL)}; changes are the user's, made in the
+    #: acted as the hard one), "cut" (what the limit acting as hard cut: "plan" = a planning step, the kept plan was
+    #: drawn in full; "drawing" = the drawing, connections left unrouted; "none"), plus mode / reached / step /
+    #: overrun_s (M2.TL)}; changes are the user's, made in the
     #: progress dialog while the router ran (time_limit_text)
     time_limit: dict | None = None
     #: M1 compass (toporlib.compass.build): per violation class predicted vs drawn vs KiCad DRC, per connection
@@ -806,7 +808,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     opts["timeout_overrun_s"] = 0.0 if cpu_clock else cap
     state["cap_hit"] = False
     out.time_limit = {"clock": "cpu" if cpu_clock else "wall", "start_s": state["limit"], "final_s": state["limit"],
-                      "changes": [], "cap_s": cap or None, "cap_hit": False}
+                      "changes": [], "cap_s": cap or None, "cap_hit": False, "cut": "none"}
     geometry = cfg.get("output", "geometry")
     max_err = int(rules.get("max_error") or 5000)
     layer_names = {int(l["id"]): l["name"] for l in model.get("layers", [])}
@@ -833,13 +835,14 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         out.time_limit.update({"mode": "soft" if soft_limit else "hard", "reached": reached,
                                "step": str(eng.get("step") or ""),
                                "overrun_s": round(max(0.0, spent - lim), 3) if reached else 0.0,
-                               "cap_hit": state["cap_hit"]})
+                               "cap_hit": state["cap_hit"], "cut": str(eng.get("cut") or "none")})
         if reached:
             log.line(f"time limit ({out.time_limit['mode']}): reached during {out.time_limit['step'] or 'the run'}; "
                      f"the result was ready {out.time_limit['overrun_s']:.1f} s past the limit "
                      f"({'CPU' if cpu_clock else 'wall'} clock)"
                      + (f"; WARNING: the overrun cap (run.timeout_overrun_s = {cap:g} s) was reached, the run then "
-                        "stopped as with the hard limit" if state["cap_hit"] else ""))
+                        f"acted as with the hard limit ({messages.CUT_TEXT.get(out.time_limit['cut'], messages.CUT_TEXT['none'])})"
+                        if state["cap_hit"] else ""))
 
     def route_fn(m, o):
         if (state["cancel"] or state["limit_hit"]) and state["last_result"] is not None:
@@ -911,7 +914,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                     state["cap_hit"] = True
                     log.line(f"WARNING: time limit overrun cap reached: {p.cpu_s - p.measure_s:.0f} CPU s of router work, "
                              f"limit {state['limit']:.0f} s + run.timeout_overrun_s {cap:g} s; the step that runs is cut "
-                             "and what exists is drawn (as with the hard limit)")
+                             "and the kept plan is drawn in full (as with the hard limit; a drawing that runs is cut)")
                     harden = getattr(job, "harden", None)
                     if callable(harden):
                         harden()
@@ -987,10 +990,12 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         cap_line = "WARNING: time limit overrun cap reached"
         warns = [w for w in rr.get("warnings") or [] if not str(w).startswith(cap_line)]  # the engine's own: no clock
         if state["cap_hit"]:
-            warns.append(f"{cap_line} (run.timeout_overrun_s = {cap:g} s past the {state['limit']:.0f} s limit, CPU clock): "
-                         "past it the soft limit acted as the hard one, the step that ran then was cut and what existed "
-                         "was drawn (the drawing of the plan that exists runs to its end unless it was the step that ran; a cut initial routing or drawing leaves connections unrouted; a cut TopoR loop cycle "
-                         "is not kept); raise run.timeout_overrun_s or timeout_s, or use Cancel instead")
+            # what the cap did is the engine's (it cut a planning step, the drawing, or nothing): its own line names it
+            eng_cap = next((str(w) for w in rr.get("warnings") or [] if str(w).startswith(cap_line)), "")
+            what = (eng_cap.split("): ", 1)[1] if "): " in eng_cap else
+                    f"past it the soft limit acted as the hard one: {messages.CUT_TEXT['plan']}; raise run.timeout_overrun_s or "
+                    "timeout_s, or use Cancel instead")
+            warns.append(f"{cap_line} (run.timeout_overrun_s = {cap:g} s past the {state['limit']:.0f} s limit, CPU clock): {what}")
         rr = {**rr, "stop_reason": "timeout_cpu", "timed_out": True, "warnings": warns + [
             f"time budget hit: CPU-time limit of {state['limit']:.0f} s reached ({out.router_cpu_s:.0f} CPU s of router "
             f"work, {state['router_s']:.0f} s on the clock, run.timeout_clock = cpu{changed}): result may differ between runs"]}

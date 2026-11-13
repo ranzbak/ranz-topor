@@ -25,6 +25,13 @@ class Msg:
 
 _CFG = "topor.toml (next to the .kicad_pro)"
 
+
+#: What the time limit cut when it acted as hard (`hard`, or past run.timeout_overrun_s: one path, user
+#: 2026-11-13), by the engine's limit report `cut` (run report time_limit.cut).
+CUT_TEXT = {"plan": "the step that ran then was cut and the kept plan was drawn in full",
+            "drawing": "the drawing was the step that ran then and was cut: the connections it had not drawn stay unrouted",
+            "none": "it passed only after the steps it stops had ended: nothing was cut"}
+
 MESSAGES: dict[str, Msg] = {
     # ---------------------------------------------------------------- configuration
     "CFG_CREATED": Msg("info",
@@ -215,7 +222,7 @@ MESSAGES: dict[str, Msg] = {
         "The time limit (or a Cancel) stopped the topological core before its routes were stable ([optimize] stable_window / stable_gain_pct); the result is the best so far and may differ between runs and machines. The stop reason says which clock fired: timeout_wall (seconds on the clock) or timeout_cpu (CPU seconds summed over all threads, run.timeout_clock = cpu).",
         "Raise run.timeout_s (0 = no limit; Cancel always works; run.timeout_clock chooses wall or cpu seconds) and route again, or add time while the router runs (progress dialog: +5 min / +15 min or a new Time limit), or lower [optimize] runs (best of N runs share the threads); wait for \"Routes stable\" and press OK for a reproducible result."),
     "TIME_OVERRUN_CAP": Msg("warning",
-        "The soft time limit (run.timeout_mode = soft) let the step that ran go on past run.timeout_s, until the overrun cap run.timeout_overrun_s (on the same clock); then the run stopped as with the hard limit: the step that ran was cut and the plan that existed was drawn (to its end, unless the drawing itself was the step that ran). A cut initial routing or drawing leaves connections unrouted, a cut TopoR loop cycle is not kept. By default the cap is equal to run.timeout_s in headless runs (harness, MCP, scripts: at most twice the limit) and off in the KiCad dialog, where Cancel stops a run.",
+        "The soft time limit (run.timeout_mode = soft) let the step that ran go on past run.timeout_s, until the overrun cap run.timeout_overrun_s (on the same clock); then the run acted as with the hard limit: the step that ran was cut and the kept plan (the best variant so far, or the initial plan) was drawn in full; when the drawing itself was the step that ran, the drawing was cut there. A cut initial routing or drawing leaves connections unrouted, a cut TopoR loop cycle is not kept; a cap that passed only after those steps had ended cut nothing. The warning says which. By default the cap is equal to run.timeout_s in headless runs (harness, MCP, scripts and direct engine calls: at most twice the limit plus the drawing of one plan) and off in the KiCad dialog, where Cancel stops a run.",
         "Raise run.timeout_overrun_s (seconds past the limit; 0 or \"none\" = no cap) or run.timeout_s and route again, or lower [optimize] runs; in the KiCad dialog leave the cap off (auto) and press Cancel when the overrun is too long."),
     "DRC_NEW_VIOLATIONS": Msg("warning",
         "KiCad's DRC of the routed copy finds rule violations in the new copper that the board did not have before (clearance, short, hole clearance, edge clearance, ...). The finding counts them by type and names the first places with their nets and position. The result can still be accepted: the violations then stay on the board until you fix them.",

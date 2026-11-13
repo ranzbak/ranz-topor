@@ -214,6 +214,8 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
         # F3 run.timeout_overrun_s: the cap in effect (None = none) and whether it fired (the run then acted as hard)
         "overrun_cap_s": (outcome.time_limit or {}).get("cap_s"),
         "overrun_cap_hit": bool((outcome.time_limit or {}).get("cap_hit")),
+        # what the limit acting as hard cut (hard and the cap share one path): plan (kept plan drawn in full) / drawing / none
+        "limit_cut": (outcome.time_limit or {}).get("cut"),
         "report_dir": str(outcome.report_dir) if outcome.report_dir else None,
     }
     # M1 compass (toporlib.compass): per violation class predicted vs drawn vs KiCad DRC, per connection detour and

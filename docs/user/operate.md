@@ -325,21 +325,26 @@ TopoR loop cycle plus the drawing can take minutes (qmtech, 2026-11-13: about 4 
 press Cancel to stop at once.
 
 **The overrun has a cap** (`[run] timeout_overrun_s`): seconds past `timeout_s`, on the same clock, that the step
-running at the limit may still take. Past it the run acts as with `hard` (below): the step that runs is cut and the plan
-that exists is drawn (the drawing runs to its end, unless the drawing itself was the step that ran when the cap
-fired: then it is cut there and the connections it had not reached stay unrouted), and the warning [`TIME_OVERRUN_CAP`](troubleshoot.md#time_overrun_cap) says so in log.txt, the
-findings, report.md (*Time limit* line) and `result.json` (`time_limit.cap_s`, `time_limit.cap_hit`;
-`harness/score_runs.py` prints a WARNING line and lists the run in `limits.json` `overrun_cap_hit`). The default
-`auto` is equal to `timeout_s` in headless runs (harness, MCP, scripts), so such a run takes at most twice its limit,
-and no cap in the KiCad dialog, where Cancel stops a run at once. A number sets the cap; `0` or `"none"` = no cap. The
-cap never changes `timeout_s` itself, and has no effect with `timeout_mode = "hard"` or without a limit.
+running at the limit may still take. Past it the run acts as with `hard` (below): the step that runs is cut and the
+kept plan (the best variant so far, or the initial plan) is drawn in full; when the drawing itself is the step that
+runs when the cap fires, the drawing is cut there and the connections it had not drawn stay unrouted. The warning
+[`TIME_OVERRUN_CAP`](troubleshoot.md#time_overrun_cap) says which in log.txt, the findings, report.md (*Time limit*
+line) and `result.json` (`time_limit.cap_s`, `time_limit.cap_hit`, and `time_limit.cut`: `plan`, `drawing`
+or `none` when the cap passed only after the steps it stops had ended; `harness/score_runs.py` prints a WARNING
+line and lists the run in `limits.json` `overrun_cap_hit`). The default `auto` is equal to `timeout_s` in headless
+runs (harness, MCP, scripts, and direct calls of the engine's `route` / `route_async`, whose own default
+`timeout_overrun_s` is `"auto"`), so such a run takes at most twice its limit plus the drawing of one plan, and no
+cap in the KiCad dialog, where Cancel stops a run at once. A number sets the cap; `0` or `"none"` = no cap. The cap
+never changes `timeout_s` itself, and has no effect with `timeout_mode = "hard"` or without a limit.
 
-`hard` stops every step at the limit; the progress dialog says *Time limit reached (hard): the current step stops
-now (<step>)*. This is close to the behaviour before 2026-11-13 but not the same: an initial routing the limit cut is
-drawn as far as it got (the connections it had not reached stay unrouted), its rip-up rounds stop and their plan so
-far is drawn, a TopoR loop cycle the limit cut is thrown away (the best variant kept before it is drawn), and the
-drawing's own steps (via reduction, pour stitching, the drawing of the connections) stop too. What 2026-11-13 changed
-holds in both modes: Cancel during the initial routing (up to its rip-up rounds) keeps no plan
+`hard` cuts the step that runs at the limit and draws the kept plan (the best variant so far, or the initial plan)
+in full, the same path as past the overrun cap (TopoR judges its variants before any copper and draws the chosen
+one, 6.3 manual pp. 72-73, p. 237); the progress dialog says *Time limit reached (hard): the current step stops now
+(<step>)*. An initial routing the limit cut leaves the connections it had not reached unrouted, its rip-up rounds
+stop and their plan so far is kept, and a TopoR loop cycle the limit cut is thrown away. A limit reached while the
+drawing runs (its via reduction and pour stitching included) cuts the drawing: the connections it had not drawn
+stay unrouted. A hard run so takes the limit plus the drawing of one plan. What 2026-11-13 changed holds in both
+modes: Cancel during the initial routing (up to its rip-up rounds) keeps no plan
 ([`NOTHING_TO_DRAW`](troubleshoot.md#nothing_to_draw)), and only the picked variant is drawn (below).
 
 **Only the picked variant is drawn** (`[drawing] candidates = 1`, the default since 2026-11-13, with `[optimize]

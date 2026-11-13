@@ -638,7 +638,7 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: warning.*
 
-**Cause.** The soft time limit (run.timeout_mode = soft) let the step that ran go on past run.timeout_s, until the overrun cap run.timeout_overrun_s (on the same clock); then the run stopped as with the hard limit: the step that ran was cut and the plan that existed was drawn (to its end, unless the drawing itself was the step that ran). A cut initial routing or drawing leaves connections unrouted, a cut TopoR loop cycle is not kept. By default the cap is equal to run.timeout_s in headless runs (harness, MCP, scripts: at most twice the limit) and off in the KiCad dialog, where Cancel stops a run.
+**Cause.** The soft time limit (run.timeout_mode = soft) let the step that ran go on past run.timeout_s, until the overrun cap run.timeout_overrun_s (on the same clock); then the run acted as with the hard limit: the step that ran was cut and the kept plan (the best variant so far, or the initial plan) was drawn in full; when the drawing itself was the step that ran, the drawing was cut there. A cut initial routing or drawing leaves connections unrouted, a cut TopoR loop cycle is not kept; a cap that passed only after those steps had ended cut nothing. The warning says which. By default the cap is equal to run.timeout_s in headless runs (harness, MCP, scripts and direct engine calls: at most twice the limit plus the drawing of one plan) and off in the KiCad dialog, where Cancel stops a run.
 
 **Fix.** Raise run.timeout_overrun_s (seconds past the limit; 0 or "none" = no cap) or run.timeout_s and route again, or lower [optimize] runs; in the KiCad dialog leave the cap off (auto) and press Cancel when the overrun is too long.
 

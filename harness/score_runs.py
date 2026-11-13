@@ -155,7 +155,9 @@ def main(argv: list | None = None) -> int:
                 met = json.loads(mets[0].read_text()) if mets else {}
                 if met.get("overrun_cap_hit"):
                     print(f"  WARNING: {name} s{k}: time limit overrun cap reached ({met.get('overrun_cap_s')} s past the "
-                          f"{a.timeout:g} s {a.clock} limit): the run stopped as with the hard limit", flush=True)
+                          f"{a.timeout:g} s {a.clock} limit): the run acted as with the hard limit (cut: "
+                          f"{met.get('limit_cut') or 'plan'}: plan = the step that ran was cut and the kept plan drawn in full, "
+                          "drawing = the drawing was cut, none = nothing was cut)", flush=True)
                     lim.setdefault("overrun_cap_hit", []).append(f"{name}/s{k}")
     finally:
         lim["load_avg_end"] = list(os.getloadavg())

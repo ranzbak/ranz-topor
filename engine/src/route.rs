@@ -276,6 +276,11 @@ pub struct LimitReport {
     pub cap_s: Option<f64>,
     /// The overrun cap fired: from then on the soft limit acted as the hard one.
     pub cap_hit: bool,
+    /// What the limit cut when it acted as hard (`hard`, or past the overrun cap; user
+    /// 2026-11-13: one path for both): `"plan"` = a planning step was cut and the kept plan drawn
+    /// in full; `"drawing"` = the drawing was the step that ran and was cut (connections left
+    /// unrouted); `"none"` = nothing (the soft limit, or it passed after the steps it stops).
+    pub cut: String,
 }
 
 /// A routed differential-pair connection (D7), nm. `from` / `to` are the P connection's pads.
