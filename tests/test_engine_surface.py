@@ -241,7 +241,8 @@ def test_route_async_cancel_in_the_topor_loop_returns_anytime_result(engine):
     job = _job_at_stage(engine, mj, {"wall_clock_s": 0.0}, "TopoR loop on the topology")
     job.cancel()
     out = json.loads(job.wait())
-    assert out["stop_reason"] == "cancel" and out["timed_out"]
+    # the loop's pick is drawn to its end (not cut short, so timed_out may be false)
+    assert out["stop_reason"] == "cancel"
     assert out["routed"] >= 1 and out["items"], out["warnings"][:3]
     assert not any(w.startswith("ERROR:") for w in out["warnings"]), out["warnings"][:3]
     chk = json.loads(engine.check_items(mj, json.dumps(out["items"]), json.dumps({"margin_nm": 0})))

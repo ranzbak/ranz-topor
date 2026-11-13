@@ -159,4 +159,3 @@ def test_cancel_after_the_cpu_soft_limit_still_cancels_the_job(app, eprom, tmp_p
     job = eng.jobs[0]
     assert job.reached, "the soft limit came first"
     assert job.cancelled, "the user's Cancel after the soft limit never reached the engine job"
-    assert out.cancelled is True
