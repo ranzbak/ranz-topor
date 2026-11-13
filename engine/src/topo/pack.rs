@@ -208,6 +208,9 @@ pub struct Packer<'a> {
     /// another net's via planned in the same triangle has none there unless the triangle holds
     /// two discs ([`super::refine::CapModel`]).
     pub reserve_sites: bool,
+    /// Softness (in via reaches) of the graded via-site price ([`super::cutmodel::phi`]): the
+    /// `[capacity] overflow_softness` every over-full price uses.
+    pub site_tau: f64,
     /// 5.4 `[vias] between_crossings`: via intervals exclude the triangles of their events
     /// ([`super::refine::via_ranges`]).
     pub via_between: bool,
@@ -314,6 +317,7 @@ impl<'a> Packer<'a> {
             free_cache: RefCell::new(HashMap::new()),
             via_squeeze: 0.0,
             reserve_sites: false,
+            site_tau: 0.1,
             via_between: false,
             octi: false,
             cuts: None,
@@ -335,13 +339,24 @@ impl<'a> Packer<'a> {
     /// of which the drawing placed 7, and P4 rerouted their wires for it.) Cached per
     /// (triangle, net, s). O(obstacles) per new key.
     pub fn via_site(&self, t: super::state::TriId, net: i32, r: f64, s: f64) -> bool {
+        self.via_free(t, net, s) >= r
+    }
+
+    /// The free radius (nm) [`Packer::via_site`] measures in triangle `t` for a via of `net` at
+    /// clearance `s`: the largest, over the triangle's static candidate points, of the distance to
+    /// the nearest foreign obstacle less its clearance (and to a keepout that forbids vias);
+    /// negative infinity outside the board or with an obstacle inside the triangle. A via of
+    /// radius `r` has a site there when it is at least `r`; how far below `r` it is, is the
+    /// missing room the graded via-site price ([`super::refine::CapModel`]) grows with. Cached
+    /// per (triangle, net, s). O(obstacles) per new key.
+    pub fn via_free(&self, t: super::state::TriId, net: i32, s: f64) -> f64 {
         let pr = self.pr;
         if pr.tri_out[t] || !pr.tri_obs[t].is_empty() {
-            return false;
+            return f64::NEG_INFINITY;
         }
         let key = (t, net ^ ((s as i64 as i32) << 8));
         if let Some(&f) = self.free_cache.borrow().get(&key) {
-            return f >= r;
+            return f;
         }
         let [a, b, c] = pr.tris[t].map(|v| pr.pos[v]);
         let pts = tri_site_points(a, b, c);
@@ -361,7 +376,7 @@ impl<'a> Packer<'a> {
         }
         let f = free.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         self.free_cache.borrow_mut().insert(key, f);
-        f >= r
+        f
     }
 
     /// The packer of `model` over the projection `pr`, with the drawing's tolerance and edge rule.
@@ -372,6 +387,7 @@ impl<'a> Packer<'a> {
         p.via_d0 = first(0);
         p.via_d = model.nets.iter().map(|n| (n.code, first(n.code))).collect();
         p.reserve_sites = opts.reserve_via_sites;
+        p.site_tau = opts.overflow_softness.max(1e-3);
         p.via_between = opts.via_between;
         p.octi = opts.draw_style == "octilinear" && opts.octi_room;
         if opts.capacity_model == "cuts" {

@@ -277,9 +277,21 @@ pub mod meter {
     }
 }
 
-/// Order of a via traversal: (no site, overflow + squeeze change in um-mm, other wires in the
-/// triangle, -inradius, traversal).
-type SiteKey = (bool, i64, usize, i64, usize);
+/// Order of a via traversal: (overflow + squeeze + via-site price change in um-mm, missing room
+/// in um, other wires in the triangle, -inradius, traversal).
+type SiteKey = (i64, i64, usize, i64, usize);
+
+/// Graded via-site price factor of a via whose static free radius leaves `slack` (nm: free
+/// radius less via reach; negative = missing room) at reach + clearance `need` (nm), softness
+/// `tau` ([`super::cutmodel::phi`], the over-full price shape of the edges and cuts): about 0
+/// with room to spare, 0.57 at slack 0, `1 + missing / need` deep inside. Continuous, no cutoff.
+/// O(1).
+pub fn site_price(slack: f64, need: f64, tau: f64) -> f64 {
+    if slack == f64::INFINITY {
+        return 0.0;
+    }
+    super::cutmodel::phi(slack, need, tau)
+}
 
 /// Per edge-layer overflow price of a labelling, kept incrementally.
 ///
@@ -291,7 +303,10 @@ type SiteKey = (bool, i64, usize, i64, usize);
 /// edge order. Where in its interval the via goes is chosen here ("move the via"): the
 /// traversal with a static via site ([`Packer::via_site`]) and the least overflow price, then
 /// the drawing's order (fewest other wires in the triangle, widest triangle, first). A via
-/// whose interval has no site at all pays one overflow price (`nosite`), so P3/P4 act on it.
+/// pays the graded via-site price ([`site_price`] of its missing room: the static free radius of
+/// its site, the pair's two-via disc for a coupled pair, against the via's reach, and the room
+/// another net's via planned in the same triangle takes), so P3/P4 act on it; the vias with
+/// missing room are counted (`nosite`) for the over-full count and the reports.
 pub struct CapModel<'a> {
     st: &'a State<'a>,
     packer: &'a Packer<'a>,
@@ -311,6 +326,10 @@ pub struct CapModel<'a> {
     pub via_k: Vec<Vec<usize>>,
     /// Per wire: its vias without a static site in their interval.
     nosite: Vec<usize>,
+    /// Per wire: the sum of its vias' graded via-site price factors ([`site_price`]) and of their
+    /// violation amounts (`1 + missing / need` per via without room, as [`CapModel::violations`]).
+    site_pr: Vec<f64>,
+    site_over: Vec<f64>,
     /// 5.2: the site in an end traversal ([`end_site`]) of an interval without a traversal
     /// strictly between its events, per (wire, event a, event b) (`f64` fractions as bits); the
     /// state is borrowed for the model's life, so the geometry is fixed.
@@ -367,6 +386,8 @@ impl<'a> CapModel<'a> {
             via_iv: vec![Vec::new(); nw],
             via_k: vec![Vec::new(); nw],
             nosite: vec![0; nw],
+            site_pr: vec![0.0; nw],
+            site_over: vec![0.0; nw],
             end_sites: std::cell::RefCell::new(std::collections::HashMap::new()),
             cost: vec![0.0; st.proj.edges.len() * nl],
             sq: vec![0.0; st.proj.edges.len() * nl],
@@ -407,9 +428,10 @@ impl<'a> CapModel<'a> {
         m
     }
 
-    /// [`CapModel::rank`] (debug output).
+    /// [`CapModel::rank`] with its first member as "no site" (missing room > 0).
     pub fn rank_of(&self, w: WireId, k: usize) -> (bool, usize, i64, usize) {
-        self.rank(w, k)
+        let r = self.rank(w, k);
+        (r.0 > 0, r.1, r.2, r.3)
     }
 
     /// Via radius plus clearance of wire `w` (0 when the packer has no via sizes).
@@ -423,30 +445,56 @@ impl<'a> CapModel<'a> {
         }
     }
 
-    /// The drawing's preference of traversal `k` of `w` for a via: `(no site, other wires in
-    /// the triangle, -inradius, k)`, smaller first.
-    fn rank(&self, w: WireId, k: usize) -> (bool, usize, i64, usize) {
+    /// The drawing's preference of traversal `k` of `w` for a via: `(missing room in um, other
+    /// wires in the triangle, -inradius, k)`, smaller first: a site with room first, else the one
+    /// missing the least ([`CapModel::slack_at`]).
+    fn rank(&self, w: WireId, k: usize) -> (i64, usize, i64, usize) {
         let (st, pr) = (self.st, self.st.proj);
         let t = st.wires[w].tris[k.min(st.wires[w].tris.len() - 1)];
-        let wi = &st.wires[w];
-        let d = self.packer.via_d(wi.net);
-        let site = d <= 0.0 || (self.packer.via_site(t, wi.net, 0.5 * d, wi.s) && !self.site_taken(w, t));
+        let short = (-self.slack_at(w, k)).max(0.0);
         let others = st.tri_trav[t].iter().filter(|&&(o, _)| o != w).count();
-        (!site, others, -(pr.inradius(t) as i64), k)
+        ((short / 1e3).ceil() as i64, others, -(pr.inradius(t) as i64), k)
     }
 
-    /// Whether triangle `t` is taken for a via of `w` (M-C via room, Polubasov 2001 pp. 3-9: a via
-    /// lies in its interval, at a site of its own): another net's wire already has a planned via
-    /// in `t` and `t` cannot hold two discs (inradius below twice the via radius plus clearance).
+    /// Room a via of `w` has in traversal `k` (nm): the static free radius of the triangle
+    /// ([`Packer::via_free`]; a pair's two-via disc keeps clear of both halves' copper) less the
+    /// via's reach, less the room another net's via planned in the same triangle takes
+    /// ([`CapModel::taken_short`]). Negative = missing room; `INFINITY` without via sizes. Inside an
+    /// obstacle the free radius counts as minus the reach (missing room twice the reach), so the
+    /// price stays finite and still grows with the missing room elsewhere. O(1) cached, else
+    /// O(obstacles).
+    fn slack_at(&self, w: WireId, k: usize) -> f64 {
+        let wi = &self.st.wires[w];
+        let d = self.packer.via_d(wi.net);
+        if d <= 0.0 {
+            return f64::INFINITY;
+        }
+        let t = wi.tris[k.min(wi.tris.len() - 1)];
+        let r = 0.5 * d;
+        self.packer.via_free(t, wi.net, wi.s).max(-r) - r - self.taken_short(w, t)
+    }
+
+    /// Room another net's planned via takes from a via of `w` in triangle `t` (M-C via room,
+    /// Polubasov 2001 pp. 3-9: a via lies in its interval, at a site of its own), graded: with
+    /// another net's via planned in `t`, how far the inradius is below the two discs (twice the
+    /// via reach plus clearance); 0 when it holds both, or without `[vias] reserve_sites`.
     /// Derived from `via_k` alone, so the undo of a move restores it. O(traversals of `t`).
-    fn site_taken(&self, w: WireId, t: super::state::TriId) -> bool {
+    fn taken_short(&self, w: WireId, t: super::state::TriId) -> f64 {
         if !self.packer.reserve_sites {
-            return false;
+            return 0.0;
         }
         let st = self.st;
         let net = st.wires[w].net;
-        st.tri_trav[t].iter().any(|&(o, ko)| o != w && st.wires[o].net != net && self.via_k.get(o).is_some_and(|ks| ks.contains(&ko)))
-            && st.proj.inradius(t) < 2.0 * self.need_r(w)
+        if st.tri_trav[t].iter().any(|&(o, ko)| o != w && st.wires[o].net != net && self.via_k.get(o).is_some_and(|ks| ks.contains(&ko))) {
+            (2.0 * self.need_r(w) - st.proj.inradius(t)).max(0.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Whether triangle `t` is taken for a via of `w`: [`CapModel::taken_short`] > 0.
+    fn site_taken(&self, w: WireId, t: super::state::TriId) -> bool {
+        self.taken_short(w, t) > 0.0
     }
 
     /// 5.2: the end-traversal site ([`end_site`]) of via interval `i` of `w` under events `ev`
@@ -519,11 +567,31 @@ impl<'a> CapModel<'a> {
         // events has a site only on its own side of an end event ([`end_site`], 5.2); the others
         // have one when their traversal does.
         let between = if self.packer.via_between { via_ranges(ev, true).1 } else { Vec::new() };
-        self.nosite[w] = if nr > 0.0 {
-            ks.iter().enumerate().filter(|&(i, &k)| if between.get(i) == Some(&false) { self.end_site_of(w, ev, i).is_none() } else { self.rank(w, k).0 }).count()
-        } else {
-            0
-        };
+        // Graded via-site price: the missing room of each via at its traversal; a via of an
+        // interval without a traversal between its events either has its end site (room) or
+        // misses at least a little (its traversal's room, capped below 0).
+        let (mut cnt, mut pr_sum, mut over) = (0usize, 0.0f64, 0.0f64);
+        if nr > 0.0 {
+            for (i, &k) in ks.iter().enumerate() {
+                let slack = if between.get(i) == Some(&false) {
+                    if self.end_site_of(w, ev, i).is_some() {
+                        f64::INFINITY
+                    } else {
+                        self.slack_at(w, k).min(-1.0)
+                    }
+                } else {
+                    self.slack_at(w, k)
+                };
+                pr_sum += site_price(slack, nr, self.packer.site_tau);
+                if slack < 0.0 {
+                    cnt += 1;
+                    over += 1.0 - slack / nr;
+                }
+            }
+        }
+        self.nosite[w] = cnt;
+        self.site_pr[w] = pr_sum;
+        self.site_over[w] = over;
         self.via_k[w] = ks;
         if self.cut.is_some() {
             self.evs[w] = ev.to_vec();
@@ -606,7 +674,7 @@ impl<'a> CapModel<'a> {
                 run += self.reprice(&ch);
                 meter::add(&meter::VIAPOS_NS, &meter::VIAPOS, t0);
                 let r = self.rank(w, k);
-                let key = (r.0, (run * 1e3).round() as i64, r.1, r.2, r.3);
+                let key = (((run + self.price * self.site_pr[w]) * 1e3).round() as i64, r.0, r.1, r.2, r.3);
                 if best.as_ref().is_none_or(|b| key < b.0) {
                     best = Some((key, k));
                 }
@@ -681,7 +749,7 @@ impl<'a> CapModel<'a> {
     /// included.
     pub fn total(&self) -> f64 {
         let cut = self.cut.as_ref().map_or(0.0, |c| c.total());
-        self.edge_w() * self.cost.iter().sum::<f64>() + self.sq.iter().sum::<f64>() + self.price * self.nosite.iter().sum::<usize>() as f64 + cut
+        self.edge_w() * self.cost.iter().sum::<f64>() + self.sq.iter().sum::<f64>() + self.price * self.site_pr.iter().sum::<f64>() + cut
     }
 
     /// Via squeeze price of the labelling (mm).
@@ -704,15 +772,16 @@ impl<'a> CapModel<'a> {
     /// without a site); the graded amount gives each of them 1 plus how far it is over, as the
     /// `violation` factor does (1 per violation plus its depth): an edge-layer its price factor
     /// `1 + over / pitch` (the per-edge price, `CapModel::eval`), a cut `1 - slack / pitch`
-    /// ([`CutPrice::over_amount`]), a via without a site 1. So `graded >= count`, and one more
-    /// over-full item always adds at least 1. O(edges x layers + cuts).
+    /// ([`CutPrice::over_amount`]), a via without a site `1 + missing / need` (missing room over
+    /// reach + clearance). So `graded >= count`, and one more over-full item always adds at least
+    /// 1. O(edges x layers + cuts).
     pub fn violations(&self) -> (usize, f64) {
-        let nosite = self.nosite.iter().sum::<usize>();
+        let nosite = self.site_over.iter().sum::<f64>();
         let over = match self.cut.as_ref() {
             Some(c) => c.over_amount(),
             None => self.cost.iter().filter(|&&c| c > 0.0).map(|&c| c / self.price).sum(),
         };
-        (self.overfull(), over + nosite as f64)
+        (self.overfull(), over + nosite)
     }
 
     /// Shopping list 2.4: the cut model's shrinkage level, `(cuts that fit only necked, graded
@@ -751,7 +820,7 @@ impl<'a> CapModel<'a> {
             for k in ka..=kb.min(wi.tris.len().saturating_sub(1)) {
                 let t = wi.tris[k];
                 let site = d <= 0.0 || self.packer.via_site(t, wi.net, 0.5 * d, wi.s);
-                out += &format!(" k{k} t{t} site {site} taken {} inr {:.3} out {} obs {};", self.site_taken(w, t), self.st.proj.inradius(t) / 1e6, self.st.proj.tri_out[t], self.st.proj.tri_obs[t].len());
+                out += &format!(" k{k} t{t} site {site} slack {:.3} taken {} inr {:.3} out {} obs {};", self.slack_at(w, k) / 1e6, self.site_taken(w, t), self.st.proj.inradius(t) / 1e6, self.st.proj.tri_out[t], self.st.proj.tri_obs[t].len());
             }
             out += "]";
         }
@@ -949,6 +1018,7 @@ fn try_move_in(
         iv: Vec<(usize, usize)>,
         ks: Vec<usize>,
         nosite: usize,
+        site: (f64, f64),
     }
     let snaps: Vec<Snap> = wires
         .iter()
@@ -959,9 +1029,11 @@ fn try_move_in(
             iv: cm.via_iv[w].clone(),
             ks: cm.via_k[w].clone(),
             nosite: cm.nosite[w],
+            site: (cm.site_pr[w], cm.site_over[w]),
         })
         .collect();
     let old_ns: usize = wires.iter().map(|&w| cm.nosite[w]).sum();
+    let old_sp: f64 = wires.iter().map(|&w| cm.site_pr[w]).sum();
     let old_evs: Vec<Vec<LEv>> = if cm.cut.is_some() { wires.iter().map(|&w| cm.evs[w].clone()).collect() } else { Vec::new() };
     let cut0 = cm.cut.as_mut().map(|c| {
         c.begin();
@@ -978,12 +1050,13 @@ fn try_move_in(
         before.entry(i).or_insert((c, q));
     }
     let new_ns: usize = wires.iter().map(|&w| cm.nosite[w]).sum();
+    let new_sp: f64 = wires.iter().map(|&w| cm.site_pr[w]).sum();
     let ew = cm.edge_w();
     let d_cut = match (cm.cut.as_ref(), cut0) {
         (Some(c), Some(t0)) => c.total() - t0,
         _ => 0.0,
     };
-    let d_oc: f64 = before.iter().map(|(&i, &(c, q))| ew * (cm.cost[i] - c) + (cm.sq[i] - q)).sum::<f64>() + cm.price * (new_ns as f64 - old_ns as f64) + d_cut;
+    let d_oc: f64 = before.iter().map(|(&i, &(c, q))| ew * (cm.cost[i] - c) + (cm.sq[i] - q)).sum::<f64>() + cm.price * (new_sp - old_sp) + d_cut;
     let worse_edge = match cm.cut.as_ref() {
         Some(c) => c.worse_somewhere(),
         None => before.iter().any(|(&i, &(c, _))| cm.cost[i] > c + EPS),
@@ -1013,6 +1086,7 @@ fn try_move_in(
         cm.via_iv[s.w] = s.iv;
         cm.via_k[s.w] = s.ks;
         cm.nosite[s.w] = s.nosite;
+        (cm.site_pr[s.w], cm.site_over[s.w]) = s.site;
     }
     for (&((w, i), _), &l) in mv.iter().zip(&old_lab) {
         evl[w][i].2 = l;
@@ -1023,6 +1097,25 @@ fn try_move_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn site_price_grows_smoothly_with_the_missing_room() {
+        // Pair-via site proposal 2026-11-13, item 2: the graded via-site price replaces the flat
+        // price of a via without a site (phi of the cuts and edges: one price shape).
+        let (need, tau) = (0.75e6, 0.1);
+        let f = |s: f64| site_price(s, need, tau);
+        assert_eq!(f(f64::INFINITY), 0.0);
+        assert!(f(0.5 * need) < 1e-6, "room to spare costs ~0: {}", f(0.5 * need));
+        assert!((f(0.0) - (0.5 + 0.1 * 2f64.ln())).abs() < 1e-9, "at the boundary {}", f(0.0));
+        // continuous at 0 and monotone in the missing room
+        assert!((f(1.0) - f(-1.0)).abs() < 1e-6);
+        let xs: Vec<f64> = (-40..=10).map(|i| i as f64 * 0.05 * need).collect();
+        for w in xs.windows(2) {
+            assert!(f(w[0]) >= f(w[1]), "slack {} -> {}: {} < {}", w[0], w[1], f(w[0]), f(w[1]));
+        }
+        // deep inside: 1 + missing / need, the over-full price of an edge (1 + over / pitch)
+        assert!((f(-2.0 * need) - 3.0).abs() < 0.01, "{}", f(-2.0 * need));
+    }
 
     #[test]
     fn via_ranges_exclude_the_triangles_of_the_events() {
