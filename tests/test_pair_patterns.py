@@ -1,4 +1,4 @@
-"""Via-pair patterns (harness/pair_patterns.py: pair_move 5.8 NEEDS USER APPROVAL, pair_swap 5.2 restored): hand numbers hold, KiCad DRC passes."""
+"""Via-pair patterns (harness/pair_patterns.py: pair_move = the 5.8 suite pattern (approved 2026-11-13), pair_swap 5.2 kept beside it): hand numbers hold, KiCad DRC passes."""
 import pytest
 
 from harness import pair_patterns as pp
@@ -33,3 +33,7 @@ def test_pair_swap_restored():
     p = vp.build("pair_swap")
     assert len(p.ref.vias) == 0 and len(p.careless.vias) == 4
     assert p.expected["reference"]["price"] < p.expected["careless"]["price"]
+
+
+def test_suite_is_pair_move():
+    assert pp.SUITE == ("pair_move",)

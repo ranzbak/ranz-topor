@@ -1,9 +1,9 @@
-"""Via-pair local-minimum patterns. Neither is in the suite; the user decides which stays.
+"""Via-pair local-minimum patterns. `pair_move` is the 5.8 suite pattern (`SUITE`); `pair_swap` is kept beside it.
 
-* `pair_move` (shopping list 5.8; NOT yet approved by the user, NEEDS USER APPROVAL): a wire A sits in a via pair only
+* `pair_move` (shopping list 5.8; APPROVED by the user 2026-11-13, the 5.8 suite pattern): a wire A sits in a via pair only
   because two wires B1, B2 cross the stretch between its vias, and the optimum moves B1 and B2 together round A's end
   so A needs no via at all.
-* `pair_swap` (shopping list 5.2 step 4; the user approved this pattern's CONCEPT on 2026-11-11, for diagnosis): two
+* `pair_swap` (shopping list 5.2 step 4, not in the suite; the user approved this pattern's CONCEPT on 2026-11-11, for diagnosis): two
   wires in each other's one-wire channel; restored unchanged from b5f41d3 below `pair_move` (see the note at the end of
   this docstring for why 5.8 built `pair_move` instead).
 
@@ -42,7 +42,7 @@ every constraint is in the PNG (pads, widths, the copper-to-edge band).
 
 Why 5.8 built `pair_move` beside `pair_swap` (b5f41d3, 5.2 step 4): in `pair_swap` the router reached the 0-via
 answer without any pair move (the initial routing already swapped the two wires, measured in 5.2), so it does not
-test a local-minimum escape, and it needs walls and plugs to force the situation. It is kept for the user to decide.
+test a local-minimum escape, and it needs walls and plugs to force the situation. It is kept beside it (not in the suite).
 
 Rules and conventions as `harness/via_patterns.py` (rules, price, PNG). `python -m harness.pair_patterns [OUT]` writes
 `OUT/pair_move/` and `OUT/pair_swap/` (default `scratch/pair-patterns`). Coordinates in mm, KiCad frame (y down).
@@ -58,6 +58,8 @@ from pathlib import Path
 from harness import via_patterns as vp
 from harness.fit_patterns import Fp, Pad, Track
 
+#: The suite patterns of this file (user approval 2026-11-13: pair_move). Engine test: engine/tests/topo_pair58.rs.
+SUITE = ("pair_move",)
 W_SIG = vp.W_NORMAL  # A: Default class 0.25
 W_PWR = 0.50  # B1, B2: class PWR
 SQ2 = math.sqrt(2.0)
