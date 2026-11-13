@@ -10,8 +10,8 @@ Read: `m3-detour-diagnosis.md` (M4-D1, D3, withdrawn F6), `graph.rs:462-500`, `w
   decisions), docs/progress/notes/m3-detour-diagnosis.md (M4-D1/D3, withdrawn F6 and why the M2 front-only eprom guard caught it),
   current code on main (A1's memoised bend_ok/clearance_bend and face clear radius are merged; P1's stop rule and
   ripup_max_per_pair = 8 backstop in negotiate.rs; A9's tiers).
-- The HARD gate is dcsgonebadge 231/231 (see global-constraints.md); a parallel F worker (DX) diagnoses the remaining 67 failures on
-  dcsgone. For each design item state its expected effect on dcsgone (which failure classes it addresses) and on eprom/wiccon (must
+- The HARD gate is private-badge-b 231/231 (see global-constraints.md); a parallel F worker (DX) diagnoses the remaining 67 failures on
+  private-badge-b. For each design item state its expected effect on private-badge-b (which failure classes it addresses) and on eprom/wiccon (must
   stay not-worse: eprom front-only guard 27/27 ≤ 67.8 mm; wiccon 62/62, vias ≤ 37, outside ≤ 1380 mm).
 - Every judgement call in the design becomes an Options field with a default (and its topor.toml key if user-facing — the schema already
   has `[search] exit_stubs/steiner/dangling_ends`, `[vias] via_relaxation`, `[ripup] growth/max_per_pair`); list them in a table

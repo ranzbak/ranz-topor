@@ -3,12 +3,12 @@
 **Interfaces:** `Terminal::Stub { pad: Vec2, end: Vec2, layer: u32 }`; `Options.exit_stubs: String` (`"auto" | "all" | "off"`, default `"auto"`); `ConnReport.stub_nm: i64`; generation `O(T·q)`.
 
 - [ ] **Step 1:** `stub_generated_for_unfit_fine_pitch_pad`, `stub_skipped_when_infeasible` (reason `"stub infeasible"`), `exit_stubs_off_matches_previous`, `exit_stubs_all_on_every_smd_pad` (`engine/tests/route_stubs.rs`). FAIL → implement → PASS.
-- [ ] **Step 2:** eprom byte-identical (THT only); wiccon not worse; dcsgone #201 routed. PNG `--task A6 --board dcsgonebadge`. Commit `feat(route): pad exit stubs (auto/all/off)`.
+- [ ] **Step 2:** eprom byte-identical (THT only); wiccon not worse; private-badge-b #201 routed. PNG `--task A6 --board private-badge-b`. Commit `feat(route): pad exit stubs (auto/all/off)`.
 
 
 ## Coordinator additions (binding; Rulings A-C9 necking, A2 finding)
 - Design: docs/progress/notes/m4-capacity-steiner-design.md §3 (A3). This task ALSO implements trace necking (DX fix NX, TopoR
-  "necking", Ruling A-C9): docs/progress/notes/m4-dcsgone-diagnosis.md §6 item 2 (≈ 12 on dcsgone: 0.5 mm nets 33, 47, D23-A, VCC at U3
+  "necking", Ruling A-C9): the private-badge-b completion diagnosis (note removed: private board) §6 item 2 (≈ 12 on private-badge-b: 0.5 mm nets 33, 47, D23-A, VCC at U3
   entering pads narrower than w + 2c: U4 0.25, U5 0.3, J1 0.6, U3 0.6): the stub / first-last piece of a connection is drawn at
   min(w, what fits) but ≥ the effective min track width (KiCad min_track_width + netclass/custom-rule minima as resolved in rules)
   for ≤ neck_max_mm; keys `[search] neck_to_pad` (bool) and `[search] neck_max_mm` (default from DX: 2 × pad length — measure);
@@ -21,14 +21,14 @@
   allowed to START off-centre inside the own pad (copper of the stub overlaps the own pad; KiCad connectivity: the stub end inside the
   pad connects) — reuse search.rs `edge_window`. Without this 231/231 is unreachable. Checker-verified before use.
 - `exit_stubs` auto|all|off (schema since 0.5.0 → live key). eprom byte-identical expected (THT only) — report.
-- PNG `--milestone m4 --task A6 --board dcsgonebadge`.
+- PNG `--milestone m4 --task A6 --board private-badge-b`.
 
-- Acceptance (every task, main session): completion AND detours are non-regression items: on eprom, wiccon and dcsgone report
+- Acceptance (every task, main session): completion AND detours are non-regression items: on eprom, wiccon and private-badge-b report
   routed/connections_total, failed, vias, routing_new, unconnected, router_s, AND detour (reference, A7) median/p90/max/count > 1.5
   plus detour_ghost; count > 1.5 and max must not get worse than main at your base (numbers for both in the report), unless a
   connection newly routes (say which). Not-worse gate numbers (global-constraints.md) for eprom/wiccon; NOTE wiccon outside-pad length
   headroom is small (bound 1380 mm) — report it.
-- dcsgone at the gate options (A-C3; harness.progress --milestone m4 applies them). Gate predicate A-C11.
+- private-badge-b at the gate options (A-C3; harness.progress --milestone m4 applies them). Gate predicate A-C11.
 - License: topor is GPL-2.0-or-later (main 93f2126). Porting code from the gEDA PCB toporouter (src/toporouter.c, GPL-2.0-or-later,
   Anthony Blake) is allowed when it helps: keep the original copyright notice + attribution at the port site, name the origin in the
   commit message and report it (coordinator records a ruling). No new Apache-2.0-only runtime crates (no new crates at all without asking).

@@ -17,7 +17,7 @@ headless harness) by itself in a real KiCad 10, on a nested X display, without t
 ```bash
 tools/gui_e2e.sh wiccon-2023 scratch/k1/gui/wiccon --from-hand \
     --harness <route_board out>/wiccon-2023/wiccon-2023--metrics.json
-tools/gui_e2e.sh dcsgonebadge scratch/k1/gui/dcs --from-hand --cancel-after 30   # Cancel while routing
+tools/gui_e2e.sh bornhack2026 scratch/k1/gui/bornhack --from-hand --cancel-after 30   # Cancel while routing
 ```
 
 - **Isolation.** KiCad runs on `Xephyr :6` (started when not running; `--display` picks another) with its own home
@@ -157,7 +157,7 @@ otherwise.
 
 - [ ] eprom-to-kernal parity passed
 - [ ] wiccon-2023 parity passed
-- [ ] optional: the other snapshot boards (dcsgonebadge, bornhack2026, nametag-sao, wedding-gift), each
+- [ ] optional: the other snapshot boards (esp-rust-board, bornhack2026, nametag-sao, wedding-gift), each
   opened from a copy of `scratch/boards/<board>/<sha12>/`
 
 ## UNVERIFIED items

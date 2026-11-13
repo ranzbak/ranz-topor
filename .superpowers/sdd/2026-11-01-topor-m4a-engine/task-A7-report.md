@@ -40,27 +40,27 @@ The slot search accepts overuse (unfit edges are crossed at a cost), so its `est
 synthetic USB row: ghost 1.70 mm, ref 1.46 mm, committed 2.21 mm) and it inherits the state_point / clearance_bend
 runaway of M4-D2 (#208 est 24.9 mm on the empty graph; A2 is the fix). `reference_is_feasible_not_topological`
 therefore asserts: kind feasible, ref != ghost (independent search), ref >= pad distance; the 2.9 / 1.0 figures on the
-real board need A2 and a dcsgone run. The reference is the search's estimated length (funnel), not a metrized path.
+real board need A2 and a private-badge-b run. The reference is the search's estimated length (funnel), not a metrized path.
 
 ## Numbers (threads 4, machine load average ~20, so timings are rough)
 | board | routed | detour (ref) median / p90 / max / >1.5 | ghost median / p90 / max / >1.5 | fallbacks | ref < 2 mm |
 |---|---|---|---|---|---|
 | eprom bfaf705c0f25 | 27/27 | 1.0 / 1.006 / 1.147 / 0 | 1.0 / 1.03 / 1.312 / 0 | 0 | 0 |
 | wiccon 2d3063e70ed5 | 62/62 | 1.0 / 1.079 / 1.434 / 0 | 1.0 / 1.088 / 1.449 / 0 | 0 | 2 |
-| dcsgone 3e7e66f862a7 (60 s, 86/231 routed, timeout) | 86/231 | 1.0 / 1.0 / 1.83 / 2 (n 86) | 1.0 / 1.024 / 2.711 / 3 | 36 of the 86 routed (120 of 231) | 34 |
+| private-badge-b 3e7e66f862a7 (60 s, 86/231 routed, timeout) | 86/231 | 1.0 / 1.0 / 1.83 / 2 (n 86) | 1.0 / 1.024 / 2.711 / 3 | 36 of the 86 routed (120 of 231) | 34 |
 
 Top 5 by reference / by ghost: eprom ref A11 1.147, +5V 1.024, +5V 1.007, A12 1.006, A7 1.0; ghost A11 1.312, +5V 1.072, A14 1.038, A12 1.024, A13 1.017.
 wiccon ref RST 1.434, MOSI 1.256, GPIO0 1.244, GPIO16 1.241, 3.3v 1.145; ghost RST 1.449, GPIO0 1.323, MOSI 1.243, GPIO16 1.233, 3.3v 1.145.
-dcsgone ref GND#63 1.83 (ghost fb), GND#71 1.767 (ghost fb), Net-(D24-K)#143 1.155, VCC#6 1.041, Net-(D20-K)#73 1.01;
-ghost USB-#204 2.711, GND#63 1.83, GND#71 1.767, Net-(D24-K) 1.155, Net-(Q1-G) 1.113. (The gate-option 600 s dcsgone run was not made: A12 owns completion; only the 60 s default run.)
+private-badge-b ref GND#63 1.83 (ghost fb), GND#71 1.767 (ghost fb), Net-(D24-K)#143 1.155, VCC#6 1.041, Net-(D20-K)#73 1.01;
+ghost USB-#204 2.711, GND#63 1.83, GND#71 1.767, Net-(D24-K) 1.155, Net-(Q1-G) 1.113. (The gate-option 600 s private-badge-b run was not made: A12 owns completion; only the 60 s default run.)
 
 Reference time share (wiccon, 2 runs each): router_s 8.53 / 8.52 off vs 9.44 / 9.64 on, about +1.0 s (11 %), within the 10 % share plus noise;
-eprom 0.24 -> 0.37 s. dcsgone: the 10 % share (6 s) is not enough, 120/231 fall back to the ghost; with the share at 100 % the reference ate the
+eprom 0.24 -> 0.37 s. private-badge-b: the 10 % share (6 s) is not enough, 120/231 fall back to the ghost; with the share at 100 % the reference ate the
 whole 60 s budget (217 feasible, 14 ghost, nothing routed). The search speed (A1) decides this; the budget cap and fallback behave as designed.
 Note for the plugin: wiccon `router_s < 10.0` is tight with the reference on (about +1 s); the plugin default is on per the coordinator ruling.
 
 ## PNG (not committed)
-/home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-a8d6a6f956ec48585/docs/benchmarks/progress/2026-11-01-m4-A7-dcsgonebadge.png
+/home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-a8d6a6f956ec48585/docs/benchmarks/progress/2026-11-01-m4-A7-private-badge-b.png
 Caption: A7: 86/231 connections, 10/66 nets, partial 0, failed 145, vias 54, arcs 16, zero slack 0, iters 1, pcb 3e7e66f862a7;
 DRC routing 0 preexisting 4, unconnected 143, outside pads 181.0 vs hand 3574.7 mm, router 60.38 s on 4 threads;
 detours > 1.5: 1 (max 2.7) — USB- 2.7, Net-(D24-K) 1.2, Net-(Q1-G) 1.1 vs DRC-feasible reference (ghost fallbacks 36, ghost < 2 mm 33); stop_reason: timeout.

@@ -29,7 +29,7 @@ No port from the gEDA toporouter, no new crate.
 | `[search] steiner` / `steiner` | true | the A5 rule; false = byte-identical to main (test) |
 | `[expert] steiner_min_angle_deg` | 60 | design §2 (acute slivers / acid traps below 60) |
 | `[expert] steiner_len_slack` | 1.1 (+1 mm internal) | a T whose metrized length overshoots the search estimate is dropped (wiccon 3.3v J1.1→U1.3 took a T estimated 54.9 mm that metrized to 68.3 mm: the sibling crossed a 20 mm CDT edge far from the estimate) |
-| `[expert] steiner_ghost_factor` | 1.0 | a T is a goal only while it costs no more than the connection's own empty-board pad route: Ts share exits and save vias, they do not dodge congestion (without it: wiccon outside 1385.9 mm > 1380 bound, dcsgone vias +49, a 89 mm T vs 42 mm reference) |
+| `[expert] steiner_ghost_factor` | 1.0 | a T is a goal only while it costs no more than the connection's own empty-board pad route: Ts share exits and save vias, they do not dodge congestion (without it: wiccon outside 1385.9 mm > 1380 bound, private-badge-b vias +49, a 89 mm T vs 42 mm reference) |
 | internal consts | `STEINER_RESEARCH_FACTOR` 0.9, `JUNCTION_ROUNDS` 3, `JUNCTION_MOVE_TOL_NM` 1 µm, `JUNCTION_NEAR_MIN_NM` 0.5 mm, `JUNCTION_LEN_ABS_NM` 1 mm, `JUNCTION_SPLIT_MIN_NM` 20 µm, `JUNCTION_ARC_SAMPLES` 16 | bounds / tolerances, not user trade-offs |
 
 Not done from design §2: Weiszfeld junction relaxation toward the 120° Fermat point (the T stays on the sibling's
@@ -66,7 +66,7 @@ wiccon-2023: 62/62, vias **34** (main 36; bound 37), routing_new 0, unconnected 
 >1.5: 0. The max is RST RESET1.1→U1.1 35.41 mm (main 35.05), pushed 0.36 mm by the GPIO04 junction's copper.
 A-C6 revisit, `pour_listed_via_goals = true` with A5: vias 33, outside 1368.51 mm, detours unchanged.
 
-dcsgonebadge, gate options (600 s, partial off, threads 4), both runs on this machine after each other:
+private-badge-b, gate options (600 s, partial off, threads 4), both runs on this machine after each other:
 
 | | main 946530c | A5 |
 |---|---|---|
@@ -83,12 +83,12 @@ dcsgonebadge, gate options (600 s, partial off, threads 4), both runs on this ma
 (The coordinator's quiet-machine main numbers 201/243, vias 174, unconnected 41, detour max 22.3 >1.5 8 differ
 from my main run: the gate run's DRC rounds depend on the whole-run clock.)
 
-dcsgone, `wall_clock_s 0` (no clock: deterministic, both engines): main 200/242 failed 42 vias 173 routing_new 1
+private-badge-b, `wall_clock_s 0` (no clock: deterministic, both engines): main 200/242 failed 42 vias 173 routing_new 1
 unconnected 42 detour max 5.37 >1.5 10 (ghost 16); A5 210/250 failed 40 vias 196 routing_new 2 unconnected 39
 detour max **1.93** >1.5 **6** (ghost 14), 7 junctions (all shorter than or newly routed vs main: matched 58.4 vs
 68.5 mm, 1 vs 3 vias; newly routed +3V3 J3.17→R16.2, BT1 TP10.1→U4.14, GND C24.1→pour).
 
-dcsgone 60 s (brief Step 2): 209/250, vias 195, unconnected 39, detour >1.5: **6** (expected ≤ 6), max 1.93, ghost
+private-badge-b 60 s (brief Step 2): 209/250, vias 195, unconnected 39, detour >1.5: **6** (expected ≤ 6), max 1.93, ghost
 >1.5 12, stop timeout.
 
 Diagnosis cases (DX §6 item 5, by label): #207/#208 USB+ — the T forms (gate: J1.A6→J1.B6 1.82 mm onto U7.6→J1.A6,
@@ -100,12 +100,12 @@ removed by junctions onto GND copper (no such junction in the final results) but
 the junctions leave; GND hand-copper goals do exist in the completion passes (the pour cluster's kept tracks), they
 are few (decomposition puts only tracks touching listed pads/vias into the pour cluster).
 
-PNG (`harness.progress --milestone m4 --task A5 --router topor --board dcsgonebadge`, gate options, rendered twice,
-identical): `/home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-ab734063ffda3814f/docs/benchmarks/progress/2026-11-01-m4-A5-dcsgonebadge.png`
+PNG (`harness.progress --milestone m4 --task A5 --router topor --board private-badge-b`, gate options, rendered twice,
+identical): `/home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-ab734063ffda3814f/docs/benchmarks/progress/2026-11-01-m4-A5-private-badge-b.png`
 — caption: 207/251 connections, 45/66 nets, partial 0, failed 44, vias 210, routing_new 0, preexisting 4,
 unconnected 42, router 284.1 s (4 threads), detours > 1.5: 15 (max 4.8; ghost > 1.5: 25), stop no gain, pcb
 3e7e66f862a7. Main 946530c through the same PNG path on this machine
-(`.../docs/benchmarks/progress/2026-11-01-m4-A5base-dcsgonebadge.png`, for comparison only): 196/246, failed 50,
+(`.../docs/benchmarks/progress/2026-11-01-m4-A5base-private-badge-b.png`, for comparison only): 196/246, failed 50,
 vias 184, routing_new 0, unconnected 51, router 162.6 s, detours > 1.5: 15 (max 6.8). The PNG path and the plain
 `run_bench` path differ for A5 only in the harness DRC loop (PNG: 3 rounds / 4 spots, `run_bench`: 2 rounds / 2
 spots; each path reproducible), so the PNG numbers differ from the table above.
@@ -115,21 +115,21 @@ Scaling (`pytest -m scaling tests/scaling/test_route_scaling.py`, quiet machine)
 
 ## Concerns
 
-1. Brief "#207 fixture ≤ 1.2 mm T": not reachable. Hand geometry (snapshot): the three USB+ pads meet in one T at
-   (90.075, 123.375); branches U7.6 1.389, J1.A6 1.102, J1.B6 1.824 mm; any T on the J1.A6–J1.B6 trace (which clears
+1. Brief "#207 fixture ≤ 1.2 mm T": not reachable. Hand geometry (snapshot): the three USB+ pads meet in one T;
+   branches U7.6 1.389, J1.A6 1.102, J1.B6 1.824 mm; any T on the J1.A6–J1.B6 trace (which clears
    J1.A7's tip by c + w/2) is ≥ 1.375 mm from U7.6. The test bounds are 1.2 × the hand branch of the joining pad and
    the pair ≤ 1.05 × the hand tree (4.315 mm); measured: the T is J1.B6 → onto U7.6→J1.A6, 1.821 mm (= hand branch),
    pair 4.23 mm, 0 vias. Test runs on the crop with `scope.nets = USB±` (all other pads stay obstacles): on the full
    crop the unrelated failing connections make the USB+ pair's outcome trajectory-dependent.
 2. wiccon detour max 1.283 vs main 1.270 (count 0 = 0): RST pushed 0.36 mm by a junction's copper; outside +0.97 mm
    (1368.25, bound 1380), vias −2.
-3. dcsgone `shorting_items` JP1.1 ↔ Net-(J3-Pin_22) in the wall_clock-0 runs (gate runs: the DRC loop fixes it,
+3. private-badge-b `shorting_items` JP1.1 ↔ Net-(J3-Pin_22) in the wall_clock-0 runs (gate runs: the DRC loop fixes it,
    routing_new 0): a pre-existing engine model issue exposed by a different route — pads of a net-tie group are
    exempt for the other net's *tracks* (`obstacle.rs` / `check.rs` pad `tie_nets`, pinned by
    `obstacle_model::same_net_and_net_tie_are_exempt`), KiCad flags the track touching JP1.1. Not changed here
    (designed M1 behaviour, out of scope); recommend a fix task (tie exemption only for the footprint's own copper).
    Same for `connection_width` (+5V via neck, also on main).
-4. Gate-option dcsgone numbers depend on the harness path (DRC-loop rounds differ between `harness.progress` and a
+4. Gate-option private-badge-b numbers depend on the harness path (DRC-loop rounds differ between `harness.progress` and a
    plain `run_bench` call for the A5 engine; main gives the same in both): PNG path A5 207/251, unconnected 42,
    vias 210, > 1.5: 15 (max 4.8) vs main 196/246, 51, 184, 15 (max 6.8); `run_bench` path see the table. The vias
    rise with the extra routed connections (most newly routed ones take 2-4 vias); matched junction connections use
@@ -137,4 +137,4 @@ Scaling (`pytest -m scaling tests/scaling/test_route_scaling.py`, quiet machine)
    `anytime_timeout_emits_committed_subset` passes alone on a quiet machine (A5 and main) and fails under load for
    both.
 5. A-C6: with A5, `pour_listed_via_goals = true` is not worse on wiccon beyond +0.26 mm outside (33 vias); default
-   kept false (not measured on dcsgone) — recommend the coordinator flips it after a dcsgone check.
+   kept false (not measured on private-badge-b) — recommend the coordinator flips it after a private-badge-b check.

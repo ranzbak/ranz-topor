@@ -35,7 +35,7 @@
   wiccon copies in scratch/gui/<board>/ (never the originals in ~/work/kicad/projects). Install steps per B10 report (`bash tools/build.sh --dev`,
   Preferences → Plugins → Enable KiCad API, Recreate Plugin Environment, restart PCB Editor). How to run `test_ipc_parity` live
   (KICAD_API_SOCKET / token env, which board open).
-- README.md: status table for 0.4.0 (M4b: plugin) — what works now from inside KiCad, what comes in 0.5.0 (M4a engine: dcsgone 231/231 etc.);
+- README.md: status table for 0.4.0 (M4b: plugin) — what works now from inside KiCad, what comes in 0.5.0 (M4a engine: private-badge-b 231/231 etc.);
   requirements (KiCad 10, Python ≥ 3.11 for the plugin venv); links to docs/user/*.md. docs/README.md: add a "User guide" + "Developer" section.
   docs/design/45-mvp-plan.md: M4 row records the split M4b (0.4.0 plugin) / M4a (0.5.0 engine) (B12 file item; small edit).
 - docs/dev/debug.md: check each command exists (`python -m harness.route_probe --help` etc.) before documenting it; document only what runs.

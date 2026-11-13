@@ -1,8 +1,8 @@
-# M3 scaling diagnosis (F, 2026-10-31) — layers=1 regression, debug-only stub failures, dcsgone 0/231
+# M3 scaling diagnosis (F, 2026-10-31) — layers=1 regression, debug-only stub failures, private-badge-b 0/231
 
 Scope (ruling M3-R10): (A) the `tests/scaling` layers=1 regression since M3 start, (B) the debug-profile-only
 failures of `partial_on_emits_two_checked_stubs` / `partial_off_emits_nothing_for_blocked_connection`,
-(C) why the M2 dcsgone informational gate passes with 0/231 routed. Method for A: the synth models of the
+(C) why the M2 private-badge-b informational gate passes with 0/231 routed. Method for A: the synth models of the
 test (`synth_model(n, 1, layers=1)`, n = 10/100/1000, byte-identical at every commit — `synth.py` only gained
 the `layers` parameter) run through a minimal `route()` runner (`Options {wall_clock_s: 120}`, default
 threads, best of 3) built at each commit in a detached worktree; counters from `route_probe` where it
@@ -131,14 +131,14 @@ drop. (2) Tests: `opts()` uses a budget that cannot fire (600 s, the precedent o
 these tests pin geometry and iteration counts, every test of the deadline sets its own (`0.0`, `0.05`). No
 assertion was weakened. Both profiles pass (`cargo test --test route_engine` debug and `cargo test --release`).
 
-## C — M2 dcsgone informational gate: 0/231 in 60.04 s (explanation, no fix)
+## C — M2 private-badge-b informational gate: 0/231 in 60.04 s (explanation, no fix)
 
 `tests/gate/test_m2_gate.py:74` runs `run_bench(..., options={"wall_clock_s": 60, "partial_routes": False})`,
 `threads` 4 (`bench.py:225` default), rip all. In the engine the negotiation loop (`route.rs`, `for _ in
 1..=pathfinder_iter_cap`) calls `neg.iteration` and on `out.timed_out` breaks **before** `metrize` and before a
 `Snap` is recorded. `Negotiator::iteration` (`negotiate.rs`) times out when any search returns
 `SearchOutcome::Timeout` (`search.rs:1198`, checked every 16 expansions) in the parallel phase or in the
-sequential re-search of an invalidated path. On dcsgone iteration 1 needs more than 60 s on this machine (gate
+sequential re-search of an invalidated path. On private-badge-b iteration 1 needs more than 60 s on this machine (gate
 diagnosis: 379 searches at 140 ms, 77 ghosts at 607 ms = 47 s CPU, one 24 s exhaustive search for an
 unenterable goal, 149 sequential re-searches; T11 on a quiet machine got 164/231 through iteration 1). So
 `best` stays `None`, every connection gets `reason = "timeout"` (`no_result`), `routed = 0`, `items = []`,
@@ -148,10 +148,10 @@ the informational test asserts only those two things and passes. Reproduced on t
 timed_out true`, every connection `reason: "timeout"`, `iteration: 0`. It is a defect of the anytime contract (the
 paths already committed in iteration 1 are in `mg` but are never metrized / emitted), masked by a test that does
 not assert `routed`. F2 (ghost 607 → ~5 ms), F3 (no 24 s exhaustive search) and F4 (≈ 20–40 instead of 149
-re-searches) are expected to bring iteration 1 to a few seconds, which removes the symptom on dcsgone; F5 does
+re-searches) are expected to bring iteration 1 to a few seconds, which removes the symptom on private-badge-b; F5 does
 not touch it. The structural gap stays: a board whose first iteration exceeds the budget returns nothing. Not
 scheduled — recommended as an F4 extension or an F8: on `out.timed_out` in iteration 1, metrize the committed
-subset (`out.paths`) and emit it as the anytime result, plus a gate assertion on `routed > 0` for dcsgone.
+subset (`out.paths`) and emit it as the anytime result, plus a gate assertion on `routed > 0` for private-badge-b.
 
 ## Tooling
 `engine/examples/route_probe` counters; the bisect used a 60-line `route()` runner (scratch, not committed) that

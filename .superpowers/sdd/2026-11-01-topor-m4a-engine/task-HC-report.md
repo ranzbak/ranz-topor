@@ -1,6 +1,6 @@
 # Task HC report (NPTH hole clearance, geometry proptest, TopoR backlog rows)
 
-Status: DONE_WITH_CONCERNS (concerns: dcsgone gate options hit the 600 s wall on a loaded machine; wiccon router_s 11.99 s under load).
+Status: DONE_WITH_CONCERNS (concerns: private-badge-b gate options hit the 600 s wall on a loaded machine; wiccon router_s 11.99 s under load).
 Branch worktree-agent-a0f559be8df34d4fb. Commits: fca57b2 (test geom), 86e839b (docs), 2b359ba (fix engine).
 
 ## 1. NPTH hole clearance (2b359ba)
@@ -12,7 +12,7 @@ charged both. Fix = one helper, no per-stage patches:
   `pad_own_clearance(pad, net_clr)` = max(local, net, npth hole clearance); `required_clearance` includes it (vias.rs/fuzz.rs).
 - engine/src/obstacle.rs `ObstacleSet::build` and engine/src/check.rs `Checker::new` use `pad_own_clearance` (the only two
   places that computed a pad's own clearance). Big-O O(1) each, unchanged overall.
-- Second bug found by the same dcsgone cases (D17/D18 slots, gap 0.25): the Checker modelled a slot hole as a circle of the long
+- Second bug found by the same private-badge-b cases (D17/D18 slots, gap 0.25): the Checker modelled a slot hole as a circle of the long
   side, the obstacle set as the capsule. check.rs `hole_track` now builds the same capsule. No option needed (both are plain bugs).
 Tests (engine/tests/npth_hole.rs, written first, failed with `failed self-check: hole:... (gap 205000 < 350000 nm)`, the DX
 message, before the fix): `edge_pinch_legal_for_copper_but_not_for_hole_is_not_taken` (0.75 mm pinch hole-to-edge: router keeps
@@ -20,8 +20,8 @@ message, before the fix): `edge_pinch_legal_for_copper_but_not_for_hole_is_not_t
 `edge_pinch_wide_enough_for_the_hole_is_routed_clean`, `checker_models_a_slot_hole_as_its_capsule_like_the_router`.
 Fixture gap (0.75) legal for 0.2 (needs 0.65) and illegal for 0.35 (needs 0.80).
 
-Numbers (counts primary; machine heavily shared, all dcsgone runs hit wall 600 s so completion counts are load-dependent):
-| dcsgone, gate options (wall 600, partial false, threads 4) | before | after |
+Numbers (counts primary; machine heavily shared, all private-badge-b runs hit wall 600 s so completion counts are load-dependent):
+| private-badge-b, gate options (wall 600, partial false, threads 4) | before | after |
 |---|---|---|
 | routed / 231 | 170 | 178 |
 | failed | 61 | 53 |
@@ -38,10 +38,10 @@ eprom: 27/27, 25/25, vias 0, F.Cu 90.323 / B.Cu 17.773, outside 64.628 mm, routi
 detour max 1.31, byte-identical geometry to M3 (no NPTH on the board). wiccon: 62/62, vias 37, outside 1373.553 mm (identical),
 routing_new 0, unconnected 0, router_s 11.99 s UNDER heavy load (STATE: 3.07 s quiet; no NPTH on wiccon, code path identical;
 re-measure on a quiet machine, concern for the coordinator).
-PNG: /home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-a0f559be8df34d4fb/docs/benchmarks/progress/2026-11-01-m4-HC-dcsgonebadge.png
+PNG: /home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-a0f559be8df34d4fb/docs/benchmarks/progress/2026-11-01-m4-HC-private-badge-b.png
 Caption: HC: 90/231 connections, 11/66 nets, partial 0, failed 141, vias 56, arcs 20, zero slack 0, iters 1, pcb 3e7e66f862a7;
 DRC routing 0 preexisting 4, unconnected 139; router 60.34 s on 4 threads (harness.progress uses `wall_clock_s: 60` for
-dcsgonebadge, so this PNG is the 60 s run, stop_reason timeout, not the 600 s gate run); detours > 1.5: 3 (max 2.7) USB- 2.7, GND 1.8, GND 1.8.
+private-badge-b, so this PNG is the 60 s run, stop_reason timeout, not the 600 s gate run); detours > 1.5: 3 (max 2.7) USB- 2.7, GND 1.8, GND 1.8.
 
 ## 2. Geometry proptest (fca57b2)
 Evidence: the analytic `arc_arc` is right. `arc_arc(a,b) = arc_arc(b,a) = 1524.79789 nm`; a 4M-point scan along b against an

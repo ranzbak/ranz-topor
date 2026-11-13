@@ -8,7 +8,7 @@ All M0–M3 Global Constraints and rulings still apply (Linux; `.venv` only; rea
 
 - **No pcbnew in the plugin runtime (user):** nothing under `plugin/` or `toporlib/` imports `pcbnew`, directly or transitively; enforced by `tests/plugin/test_no_pcbnew.py` (AST scan + a subprocess that blocks the module and imports `topor.app`). Board I/O = kipy (IPC) + `Board.save_as` copies + our s-expression writer + `kicad-cli`. Every kipy call the plugin relies on is pinned by `tests/plugin/test_kipy_surface.py` against the installed kipy source (names, signatures, proto fields); whatever needs a running KiCad is marked UNVERIFIED in the task and appears in the GUI checklist.
 - **Hard M4b gate (user):** a GUI-testable whole-board plugin on eprom + wiccon with the current engine behaviour: from KiCad 10, pre-flight → progress + Cancel → preview → Reject leaves the board untouched / Accept = **one undo step**; eprom 27/27 and wiccon 62/62 routed, `routing_new 0`, `unconnected 0` on the `save_as` copy judged by `kicad-cli`; headless e2e on `FakeBoard` reproduces the numbers; `topor.toml` self-documenting + generated reference + undocumented-key test; user guide / troubleshoot / GUI checklist / CONTRIBUTING / debug guide; IPC model parity with the harness model on every snapshot board (live test, user-run). Version 0.4.0 (engine + plugin) at this gate.
-- **Hard M4a gate (user, M3-R14):** dcsgonebadge `3e7e66f862a7`, `run_bench(router=route_router, rip="all", threads=4, options={"wall_clock_s": 600, "partial_routes": False})`: `routed == connections_total == 231`, `partial == failed == 0`, `routing_new == 0`, `unconnected_items == 0`, `runtime_s ≤ 600` (whole run), 22 locked edge-GND items identical + 0 DRC pairs with router copper, threads 1/2/4 + repeat byte-identical. Version 0.5.0.
+- **Hard M4a gate (user, M3-R14):** private-badge-b `3e7e66f862a7`, `run_bench(router=route_router, rip="all", threads=4, options={"wall_clock_s": 600, "partial_routes": False})`: `routed == connections_total == 231`, `partial == failed == 0`, `routing_new == 0`, `unconnected_items == 0`, `runtime_s ≤ 600` (whole run), 22 locked edge-GND items identical + 0 DRC pairs with router copper, threads 1/2/4 + repeat byte-identical. Version 0.5.0.
 - **Not worse than M3 (user):** eprom 27/27, 25/25, `routing_new 0`, `unconnected 0`, `length_outside_pads_nm ≤ 64_700_000` and `≤ hand`, `router_s < 2.0`, zero_slack 0 or DRC-kept, the M2 guard `eprom_ripped_front_only_is_the_m2_result` (27/27, ≤ 67.8 mm) green; wiccon 62/62 (signal 57/57), `vias ≤ 37`, `routing_new 0`, `unconnected 0`, `length_outside_pads_nm ≤ 1_380_000_000`, `router_s < 10.0`; scaling L1/L2 within `t100/t10 ≤ 40`, `t1000/t100 ≤ 30`. **Budgets are never relaxed by a worker or coordinator**; one F diagnosis round, then escalate with numbers.
 - **Complexity (45 §5a):** every new component states its Big-O in its task and code comment; no exponential/factorial stage; every loop capped; every long call checks the deadline **and the cancel flag**; rip-up bound `O(max_per_pair · m²)`.
 - **Determinism:** byte-identical result JSON (minus `runtime_s`) for `threads ∈ {1, 2, 4}` and across runs, for every board and option; no `HashMap` iteration order reaches the output.
@@ -31,18 +31,18 @@ All M0–M3 Global Constraints and rulings still apply (Linux; `.venv` only; rea
 - No per-connection detours where a direct path exists (user): detour ratio stats (median/p90/max/count > 1.5/top 10) per board in
   every report; PNG captions highlight detours > 1.5.
 - "If in doubt, make it configurable" with sane defaults (46). No pcbnew in plugin/ or toporlib/ (M4-R1). No deprecated KiCad APIs.
-- M3-R13/R14: dcsgonebadge 3e7e66f862a7 231/231, 0 router DRC (routing_new 0), unconnected 0, ≤ 10 min whole run, 22 locked GND
+- M3-R13/R14: private-badge-b 3e7e66f862a7 231/231, 0 router DRC (routing_new 0), unconnected 0, ≤ 10 min whole run, 22 locked GND
   items kept identical with 0 DRC pairs vs router copper = HARD M4a gate. Pre-existing violations (hand copper) are `preexisting`,
   never router errors.
 - M3-R15: detour reference = DRC-feasible shortest path on fixed copper only (A7); ghost stays heuristic + rip trigger; bench
   reports `detour` (reference) and `detour_ghost`; reference failure → ghost fallback, flagged.
 - M4-R8 (plugin): IPC model approximations conservative; unchanged.
-- Gate failure rule: if the dcsgone gate fails after ONE diagnosis round → commit, numbers + profile, hand back. Never relax.
+- Gate failure rule: if the private-badge-b gate fails after ONE diagnosis round → commit, numbers + profile, hand back. Never relax.
 
 ## M4 carry-over folded into M4a (coordinator mapping, see ledger A-C4)
-1. search speed: clearance_bend ~162 candidates/query, 94 % of search time on dcsgone → A1.
+1. search speed: clearance_bend ~162 candidates/query, 94 % of search time on private-badge-b → A1.
 2. #201 U1.13→U7.4 fine-pitch entry, M4-D2 state point / los (#208) → A2.
-3. dcsgone completion (M3-R14) → A12 (+ diagnosis).
+3. private-badge-b completion (M3-R14) → A12 (+ diagnosis).
 4. M4-D1 own-net capacity → A4; M4-D3 same-net siblings → A5; M4-D4 detour reference → A7.
 5. M3 review D-1..D-10 → A0 (D-11 = items 1–4).
 6. Plugin hand-back: engine must use net priorities (@1–@3 marker > topor_pN netclass > [nets] priority), do_not_touch/exclude_nets,

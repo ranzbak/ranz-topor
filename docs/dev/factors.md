@@ -124,7 +124,7 @@ Everything else is 0 until the learning loop fits it. Do not tune a default to m
 ## Ignored KiCad checks
 
 When a check is set to `ignore` in KiCad (Board Setup, Violation Severity; for example
-`copper_edge_clearance` in dcsgonebadge), topor does not treat it as a hard rule. A violation of it is an
+`copper_edge_clearance` in private-badge-b), topor does not treat it as a hard rule. A violation of it is an
 `Event::IgnoredRuleViolated { rule, at, amount_nm }`, priced by `ignored_rule` (high by default) and
 reported as a warning at `at`. The rule's value is read from KiCad every run and never written into
 topor. P2 prices it (S3): with the check ignored the projection bounds the cuts at the outline with a

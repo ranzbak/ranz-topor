@@ -38,11 +38,11 @@ Status: DONE. Note only, no engine code. Worktree branch `worktree-agent-a66da99
    k = 5, saturation at k ≈ 7); overshoot bounded by `is_detour` + the stop rule; `growth 1 / max 3` = M3.
 
 ## Numbers used
-- 0.3.0 committed dcsgone 60 s run: 148/231, 83 failed = 45 timeout, 16 blocked no path, 8 infeasible (wall/pad/site),
+- 0.3.0 committed private-badge-b 60 s run: 148/231, 83 failed = 45 timeout, 16 blocked no path, 8 infeasible (wall/pad/site),
   5 self-check hole gap, 3 inconsistent slot path, 6 other; overuse_edges 192; wiccon 62/62 vias 37 outside 1373.55 mm
   (6.4 mm headroom to 1380 — flagged as the stub risk); eprom 27/27 64.628 mm. F6 measurements from the M3 diagnosis
   (wiccon vias 33 → 30, outside 1357 → 1352; eprom identical; guard 26/27) reused as the expectation for §1.
-- No bench run by me (DX measures; Ruling A-C3 dcsgone runs cost ~10 min); no PNG (note-only task).
+- No bench run by me (DX measures; Ruling A-C3 private-badge-b runs cost ~10 min); no PNG (note-only task).
 
 ## Tests
 None to run (no code). `git status` clean apart from the two files.

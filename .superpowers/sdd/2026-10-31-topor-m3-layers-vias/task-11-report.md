@@ -16,18 +16,18 @@ Status: DONE_WITH_CONCERNS. Commit 9005d56 on worktree-agent-ac62532d1efbe815e (
 ## Tests
 - cargo test --release --no-fail-fast: all green; clippy -D warnings clean.
 - pytest default: 130 passed after the final test fix (the one earlier failure, test_scaffold debug cargo test, was the oversubscription above, fixed; not re-run in full afterwards, route_engine debug passes).
-- Gate `test_m2_gate.py -m gate`: 2 failures, both expected: (a) eprom `threads_used == 1` (now 4; Task 12 change, test untouched), (b) dcsgonebadge router_s 120.06 > 65 (see below). eprom router_s 0.076 < 2.0 and wiccon info test pass.
+- Gate `test_m2_gate.py -m gate`: 2 failures, both expected: (a) eprom `threads_used == 1` (now 4; Task 12 change, test untouched), (b) private-badge-b router_s 120.06 > 65 (see below). eprom router_s 0.076 < 2.0 and wiccon info test pass.
 
 ## Timing (router_s from harness.bench --rip all --router topor)
 | board | threads 1 | threads 4 | routed |
 | --- | --- | --- | --- |
 | eprom | 0.075 s | 0.063 s | 27/27, DRC clean |
 | wiccon | 2.64 s | 1.90 s | 50/60 (budget < 10 s met; was 9.74 s), 15 iterations (was 10), vias 26 (was 28) |
-| dcsgone (gate options) | 120.0 s | 120.0 s | 160/231 harness; engine-only probe 164/231, timed_out, 1 iteration |
+| private-badge-b (gate options) | 120.0 s | 120.0 s | 160/231 harness; engine-only probe 164/231, timed_out, 1 iteration |
 
 Byte-identical JSON (minus runtime_s/threads_used) for threads 1/2/4: eprom and wiccon confirmed via route_probe --dump; also run-to-run in route_threads test.
 
-## Concern: dcsgone budget NOT met
+## Concern: private-badge-b budget NOT met
 Profile at 4 threads: iteration 1 = parallel search 18.5 s (one connection with an exhaustive blocked search + ghost takes 14.7 s, the critical path), then commit with 141 of 231 paths invalidated and re-searched sequentially (~24 s), iteration 2 another ~17 s; the 60 s wall clock hits in iteration 2, the harness DRC loop re-routes once, hence 120 s. Threads 1 and 4 give the same result because both finish iteration 1 within the clock. Ideas not done: run search and ghost of a never-seen connection concurrently (cuts the 14.7 s task roughly in half), a hard-constraints-only ghost to mark more connections dead, a less conservative P4 invalidation (141/231 re-searches), parallel re-search waves (rejected: breaks priority/eprom cleanliness). The note section 7 should be amended for the precomputed ghost and the dead set.
 
 ## PNGs (real routed boards, viewed)

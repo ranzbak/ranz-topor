@@ -1,6 +1,6 @@
 ### Task HC (S): NPTH hole clearance in relax/taut (DX fix #3) + geometry proptest oracle + TopoR backlog rows
 
-1. **NPTH hole clearance (engine).** docs/progress/notes/m4-dcsgone-diagnosis.md (§2 "i-hole" rows, §6 item 3): NPTH pads (dcsgone
+1. **NPTH hole clearance (engine).** the private-badge-b completion diagnosis (note removed: private board) (§2 "i-hole" rows, §6 item 3): NPTH pads (private-badge-b
    H1/H2/H4, D17/D18 slots, J1 locator) are anchored as net-0 pads at 0.2 mm clearance in relax/taut (metrization) while the Checker
    wants `hole_clearance` 0.35 mm → 6 connections (+1 zero-slack) fail metrization. Make every geometric consumer (graph capacity,
    search, sketch/taut anchors, relax, Checker) use the same clearance for an NPTH pad: `max(clearance, hole_clearance)` when
@@ -8,8 +8,8 @@
    0.25 mm gap is legal for copper clearance 0.2 but illegal for hole_clearance 0.35 → the router keeps ≥ 0.35 from the hole, DRC clean;
    and a test that search and metrization agree (no "found path rejected by metrization" for that pinch).
    eprom/wiccon: byte-identical expected (report; if they change, explain which NPTH caused it and that DRC is still clean).
-   dcsgone gate options (A-C3: wall 600, partial false, threads 4): routed/connections_total, failed, vias, routing_new, unconnected,
-   router_s, detour max/count>1.5; which of DX's 6 hole cases route now. PNG `--milestone m4 --task HC --board dcsgonebadge`.
+   private-badge-b gate options (A-C3: wall 600, partial false, threads 4): routed/connections_total, failed, vias, routing_new, unconnected,
+   router_s, detour max/count>1.5; which of DX's 6 hole cases route now. PNG `--milestone m4 --task HC --board private-badge-b`.
    Commit `fix(engine): NPTH pads keep hole_clearance in every geometric stage`.
 2. **Geometry proptest (test oracle).** Debug-profile `cargo test` (tests/test_scaffold.py runs it) found a counter-example in
    `engine/tests/dist_props.rs::prop_arc_arc_matches_sampling`: a = Arc { c: (-800549.6885420157, -807637.6065073739), r: 1966315.95029234,

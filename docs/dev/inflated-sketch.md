@@ -551,15 +551,15 @@ Per layer, after the plan is final:
 
 ## 5. Complexity with real sizes
 
-Sizes from the input dumps (`scratchpad/mb1/in-{dcs,qmtech}/model-1.json`) and the qmtech/dcs run logs.
+Sizes from the input dumps (`scratchpad/mb1/in-{private-badge-b,qmtech}/model-1.json`) and the qmtech/private-badge-b run logs.
 
-| | dcs | qmtech |
+| | private-badge-b | qmtech |
 |---|---|---|
 | signal layers routed | 2 (F, B) | 2 (F, B); In1/In2 are planes |
 | pads (TH) | 458 (25) | 875 (191) |
 | features touching F.Cu / B.Cu | 145 / 328 | 814 / 243 |
 | polygon vertices F / B (estimate: rect 4, roundrect 20, circle 16, oval 18) | ~2.8 k / ~4.8 k | ~12.5 k / ~4.1 k |
-| projection triangles | 39,230 (dcs-r8) | 39,719 |
+| projection triangles | 39,230 (private-badge-b-r8) | 39,719 |
 | projection edges carrying passes | 6,788 | 8,766 |
 | wires in P2 | 185 | 309 |
 | P3 vias | 144 | 126 |
@@ -609,7 +609,7 @@ Input: the run above (89 violations; `result.json` `route.violations` and `drc.j
      by `class` = pad_exit.
    - **model gap.** The per-edge packer said "fits" while the cut test says over-full (counts the effect of §3.2
      items 1–3).
-3. Output: a table per class for qmtech, then dcs, compared with today's `class` field.
+3. Output: a table per class for qmtech, then private-badge-b, compared with today's `class` field.
 
 Expectation, a hypothesis to falsify: the SDRAM_A0 group, which was forced relaxed with −0.2 mm, is either a model
 gap (a per-layer cut missing near IC1) or a drawing loss.
@@ -648,8 +648,8 @@ commits yet relative to `topor-topo`. Each unit is one agent, with an Opus check
 | Unit | Content | Gate |
 |---|---|---|
 | U0 sheets | `LayerSheet` per signal layer (per-layer features, `sag` growth, via discs, terminals); per-layer critical cuts (per side, no 3 mm cap, crossing cuts as records); octagonal norm + shadow pruning; unit tests on tiny geometries | tests; counts of cuts (raw / pruned / nonempty) on the ladder boards logged; build time < 5 % of P2 on qmtech; routing output byte-identical |
-| U1 measure (M-A) | per-layer bands of the final plan, cut flows, `cut_report` dump, Python classification joined with `result.json` | classification table for qmtech's 89 and dcs; B1, B2, B5 detect what §6.2 says; routing output byte-identical |
-| U2 price in P3 | `CutModel` with φ replacing `CapModel` in P3 (batch per call), octagonal capacity for the octilinear style, oblique factor dropped on critical cuts | ladder eprom → wiccon → dcs → qmtech A/B (score_runs); per-connection analysis; planned over-full cuts down |
+| U1 measure (M-A) | per-layer bands of the final plan, cut flows, `cut_report` dump, Python classification joined with `result.json` | classification table for qmtech's 89 and private-badge-b; B1, B2, B5 detect what §6.2 says; routing output byte-identical |
+| U2 price in P3 | `CutModel` with φ replacing `CapModel` in P3 (batch per call), octagonal capacity for the octilinear style, oblique factor dropped on critical cuts | ladder eprom → wiccon → esp-rust-board → qmtech A/B (score_runs); per-connection analysis; planned over-full cuts down |
 | U3 incremental + P4 | incremental insert/remove/relabel/via; P4 rounds, label moves and topo moves priced by Δφ; hard gates (`moves.rs:17-29`) replaced by prices; history per (cut, layer) | per-move cost measured (target ≤ 5× today); ladder A/B; B3 passes |
 | U4 ERBS drawing | spoke radii from the plan; independent funnel per stretch; exact path only as fallback; never-drop deficit spreading | B1, B2, B6 DRC-clean (or the planned violation only); qmtech drawing-loss class → near 0; forced runs down |
 | U5 octilinear | Staepelaere transform (option a) or `octi.rs` on the ERBS (option b), chosen by a measured comparison on B4 and qmtech | `fx_octi_*` pass; `any_angle` count not worse per connection; DRC-clean octilinear bundles |

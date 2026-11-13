@@ -9,7 +9,7 @@ Every Python / harness number comes from my own engine build loaded via `PYTHONP
 ## 1. Reproduction
 
 The M3 info config (`wall_clock_s 60, partial_routes False, threads 4`) at base gave `routing_new 1`, a single `shorting_items`:
-`Pad 1 [Net-(JP1-A)] of JP1 on B.Cu` ↔ `Track [Net-(J3-Pin_22)] on B.Cu, length 1.9363 mm` at (56.0, 80.0). The base run with
+`Pad 1 [Net-(JP1-A)] of JP1 on B.Cu` ↔ `Track [Net-(J3-Pin_22)] on B.Cu, length 1.9363 mm`. The base run with
 `wall_clock_s 0` shows the same item. JP1 is `Jumper:SolderJumper-3_P1.3mm_Bridged12_RoundedPad1.0x1.5mm` with
 `net_tie_pad_groups "1,2"` and a copper `fp_poly` bridge between pads 1 and 2. Pad 2 is net Net-(J3-Pin_22). The track leaves pad 2
 and runs through pad 1, which sits 0.25 mm away. The engine exempted every pad of a tie group for every net of that group
@@ -49,7 +49,7 @@ tied nets anywhere. A gapped tie pad is therefore an ordinary obstacle for the o
 | `engine/src/obstacle.rs` | A pad's `tie_nets` is now `pad_fused_tie_nets` instead of the whole group's nets. A tie pad's PTH drill gets no tie exemption. Copper shapes keep `tie_nets_of(owner)` (case 25 is legal). |
 | `engine/src/check.rs` | Pads lose `tie_nets`. A new field `Obstacle.tie_pads` holds `(net, skeleton)` for each tie-group pad of the same footprint on that layer. A violation against such a pad is dropped only when `tie_exclusion` holds. The check samples the item centreline (step 2 µm, at most 1024 samples, first minimum, deterministic), takes the point of the pad copper nearest to it as the collision position, and requires both points to lie inside the item net's tie pad. O(s·v), and it runs only for a violation against a tie pad. Tie-pad drills are strict. |
 | `engine/src/geom/dist.rs` (+ `mod.rs`) | `skeleton_closest_point`, `point_skeleton`, `skeleton_gap` (Big-O in doc comments), with a unit test. |
-| `engine/tests/net_tie.rs` (new) | The KiCad cases above on `Checker`, plus two router tests: the dcsgone JP1 geometry routes net B around pad 1 (copper ≥ 0.2 mm from JP.1, Checker clean), and overlapping (fused) tie pads stay routable. |
+| `engine/tests/net_tie.rs` (new) | The KiCad cases above on `Checker`, plus two router tests: the private-badge-b JP1 geometry routes net B around pad 1 (copper ≥ 0.2 mm from JP.1, Checker clean), and overlapping (fused) tie pads stay routable. |
 | `engine/tests/obstacle_model.rs` | `same_net_and_net_tie_are_exempt` now pins the legal exemptions: same net, fused tie pads exempt for each other's net, touching counts as fused. The illegal exemption it used to pin (a lone tie-group pad exempt for every group net) is inverted in the new `gapped_net_tie_pad_is_an_obstacle_for_the_other_tied_net`, with the KiCad evidence in the comments. New: `net_tie_pad_drill_is_an_obstacle_for_the_other_tied_net`. `copper_shape_polygon_and_tie_owner` is unchanged and still passes. |
 | `tools/net_tie_drc_probe.py` (new) | The re-runnable KiCad evidence. |
 | `docs/design/44-feature-gap-analysis.md` | The net-tie row gains the verified semantics. |
@@ -65,12 +65,12 @@ Decisions:
 
 ## 4. connection_width
 
-Not reproduced at this base. No `connection_width` item appeared in any of these dcsgone runs:
+Not reproduced at this base. No `connection_width` item appeared in any of these private-badge-b runs:
 - base: 60 s, wall_clock 0
 - head: 60 s (×3: my repro, M2 info, M3 info), wall_clock 0, and the gate-options progress run
 
 eprom and wiccon also showed none. A-C9 holds. Exit-stub necks never go below `max(min_track_width, NetRule.min_width)`
-(`stubs.rs::min_width`); the fab floor is 0.2 mm, and dcsgone's `min_connection` is 0.127 mm. So a neck cannot be the source of a
+(`stubs.rs::min_width`); the fab floor is 0.2 mm, and private-badge-b's `min_connection` is 0.127 mm. So a neck cannot be the source of a
 KiCad `connection_width` item, and nothing was changed for it. If it comes back on a 600 s run, it would be a junction geometry
 (a track overlapping a via or pad by a sliver), not a neck-width rule. That needs the run's `drc-routed.json` item positions.
 
@@ -81,21 +81,21 @@ Machine shared: 1-minute load average 16–35 during every run, which is above 6
 
 | board | | routed | failed | vias | routing_new | unconnected | outside mm | router_s | detour med/p90/max/>1.5 | ghost max/>1.5 | stop |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| dcsgonebadge | base | 205/241 | 36 | 196 | **1** (shorting JP1) | 38 | 1814.469 | 403.9 (load) | 1.000/1.294/4.624/9 | 4.709/15 | no gain |
-| dcsgonebadge | head | 205/241 | 36 | 196 | **0** | 38 | 1814.429 | 403.9 (load) | 1.000/1.294/4.624/9 | 4.709/15 | no gain |
+| private-badge-b | base | 205/241 | 36 | 196 | **1** (shorting JP1) | 38 | 1814.469 | 403.9 (load) | 1.000/1.294/4.624/9 | 4.709/15 | no gain |
+| private-badge-b | head | 205/241 | 36 | 196 | **0** | 38 | 1814.429 | 403.9 (load) | 1.000/1.294/4.624/9 | 4.709/15 | no gain |
 | eprom-to-kernal | base | 27/27 | 0 | 0 | 0 | 0 | 64.628 | 0.196 | 1.000/1.006/1.147/0 | 1.312/0 | converged |
 | eprom-to-kernal | head | 27/27 | 0 | 0 | 0 | 0 | 64.628 | 0.225 (load 32) | 1.000/1.006/1.147/0 | 1.312/0 | converged |
 | wiccon-2023 | base | 62/62 | 0 | 34 | 0 | 0 | 1363.375 | 4.641 | 1.000/1.053/1.282/0 | 1.295/0 | no gain |
 | wiccon-2023 | head | 62/62 | 0 | 34 | 0 | 0 | 1363.375 | 7.576 (load 32) | 1.000/1.053/1.282/0 | 1.295/0 | no gain |
 
-- dcsgone gate options (600 s, threads 4, via `harness.progress`, load 16–19, stop "no gain", router 169 s, runtime 261 s): 205/241,
+- private-badge-b gate options (600 s, threads 4, via `harness.progress`, load 16–19, stop "no gain", router 169 s, runtime 261 s): 205/241,
   failed 36, vias 196, `routing_new 0`, preexisting 4 (clearance, U7 hand pads), unconnected 38. The rotation-2 base reference is
   204/241, unconnected 39. The gate predicate (231/231) is not met; that is another task's job, and completion did not get worse.
-- The dcsgone 60 s info config (timed out, as designed) gave 200/229, `routing_new 0`.
+- The private-badge-b 60 s info config (timed out, as designed) gave 200/229, `routing_new 0`.
 - eprom and wiccon outcomes are byte-for-byte the same numbers (neither board has a net tie). Only router_s changed, from load.
-- detours: unchanged (dcsgone > 1.5: 9, max 4.62 U1-EN; ghost max 4.71 / 15).
+- detours: unchanged (private-badge-b > 1.5: 9, max 4.62 U1-EN; ghost max 4.71 / 15).
 
-Progress PNG: `/home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-af3823b217b46fe3e/docs/benchmarks/progress/2026-11-01-m4-NT-dcsgonebadge.png`
+Progress PNG: `/home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-af3823b217b46fe3e/docs/benchmarks/progress/2026-11-01-m4-NT-private-badge-b.png`
 (not committed). Caption: "NT: 205/241 connections, 45/66 nets, partial 0, failed 36, vias 196, arcs 232, zero slack 0, iters 24,
 pcb 3e7e66f862a7 / DRC routing 0 preexisting 4, unconnected 38, outside pads 1814.4 vs hand 3574.7 mm, F.Cu 1035.7 / B.Cu 998.9 mm,
 router 168.99 s on 4 threads / detours > 1.5: 9 (max 4.6) — Net-(U1-EN/CHIP_PU) 4.6, VCC 4.2, TACT_B 3.6 vs DRC-feasible reference
@@ -104,7 +104,7 @@ router 168.99 s on 4 threads / detours > 1.5: 9 (max 4.6) — Net-(U1-EN/CHIP_PU
 ## 6. Tests
 
 - `pytest tests/gate/test_m2_gate.py tests/gate/test_m3_gate.py -m "gate or not gate" -q -s`: **6 passed** (814 s, loaded). M2
-  dcsgone info: 200/229, `drc_new=0`. M3 dcsgone info: 200/229, `drc_new=0`, preexisting 4. eprom: 27/27, router 0.127 / 0.177 s.
+  private-badge-b info: 200/229, `drc_new=0`. M3 private-badge-b info: 200/229, `drc_new=0`, preexisting 4. eprom: 27/27, router 0.127 / 0.177 s.
   wiccon: 62/62, 34 vias, router 7.25 / 4.25 s.
 - `cargo test --release --no-fail-fast`: everything passes except the base reds:
   - route_steiner 4/6

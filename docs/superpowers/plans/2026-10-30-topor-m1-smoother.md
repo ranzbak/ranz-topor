@@ -472,7 +472,7 @@ def test_smooth_rejects_bad_json(engine):     # ValueError on "{"
 ### Task 9 (S, gate review F): M1 gate, benchmark run 0.1.0, images
 
 **Files:**
-- Create: `tests/gate/test_m1_gate.py`, `docs/benchmarks/2026-10-30-topor-0.1.0/README.md`, `.../images/eprom-to-kernal-{hand,topor,compare}.png`, `.../metrics/eprom-to-kernal--{metrics,drc-orig,drc-routed}.json` (+ wiccon/dcsgone informational runs)
+- Create: `tests/gate/test_m1_gate.py`, `docs/benchmarks/2026-10-30-topor-0.1.0/README.md`, `.../images/eprom-to-kernal-{hand,topor,compare}.png`, `.../metrics/eprom-to-kernal--{metrics,drc-orig,drc-routed}.json` (+ wiccon/private-badge-b informational runs)
 - Modify: `engine/Cargo.toml` (version `0.1.0`), `docs/benchmarks/README.md` (runs table row), `docs/progress/STATE.md` (coordinator)
 
 **Interfaces:**
@@ -506,7 +506,7 @@ def test_m1_gate_eprom_taut_smoother(engine, tmp_path):
           f"drc_new {r['routed_drc']['routing_new']} arcs {r['routed_all']['arcs']} router_s {r['router_s']} iters {rep['iterations']}")
 
 @pytest.mark.gate
-@pytest.mark.parametrize("board", ["wiccon-2023", "dcsgonebadge"])
+@pytest.mark.parametrize("board", ["wiccon-2023", "private-badge-b"])
 def test_m1_smoother_other_boards_complete(board, tmp_path):
     """Informational (not an M1 criterion): the smoother must complete; fallback keeps the board DRC-equal."""
     r = run_bench(board, tmp_path, router=smooth_router, rip="none", options={"existing_copper": "smooth", "wall_clock_s": 30})
@@ -516,7 +516,7 @@ def test_m1_smoother_other_boards_complete(board, tmp_path):
 
 - [ ] **Step 2: Run** `.venv/bin/python -m pytest -m gate tests/gate/test_m1_gate.py -v -s` → expected PASS; if any assertion fails: one F diagnosis note (`docs/progress/notes/m1-gate-diagnosis.md`) → fix task(s) each ending with a progress PNG → re-run; a second failure of the same budget escalates to the user (45 §5a).
 - [ ] **Step 3: Version 0.1.0** — set `engine/Cargo.toml` version to `0.1.0`, `bash tools/build.sh --dev`, `pytest tests/test_scaffold.py tests/test_engine_surface.py` green (version test).
-- [ ] **Step 4: Benchmark run** — `bash tools/bench.sh eprom-to-kernal scratch/bench-0.1.0/eprom --rip none --router smoother` and the same for `wiccon-2023`, `dcsgonebadge`; copy `*-hand.png`, `*-topor.png`, `*-compare.png` into `docs/benchmarks/2026-10-30-topor-0.1.0/images/` and the `--metrics.json`/`--drc-*.json` into `metrics/`; write `README.md` in the 0.0.1 format: metrics table (nets taut, wires, segs/arcs, length vs the measured hand length, DRC routing_new, runtime/router_s), the eprom compare image embedded, observations (edge-clearance pads pre-existing: 12; `track_dangling` 1 from the `+5V` stub kept), raw data link; add the run row to `docs/benchmarks/README.md`.
+- [ ] **Step 4: Benchmark run** — `bash tools/bench.sh eprom-to-kernal scratch/bench-0.1.0/eprom --rip none --router smoother` and the same for `wiccon-2023`, `private-badge-b`; copy `*-hand.png`, `*-topor.png`, `*-compare.png` into `docs/benchmarks/2026-10-30-topor-0.1.0/images/` and the `--metrics.json`/`--drc-*.json` into `metrics/`; write `README.md` in the 0.0.1 format: metrics table (nets taut, wires, segs/arcs, length vs the measured hand length, DRC routing_new, runtime/router_s), the eprom compare image embedded, observations (edge-clearance pads pre-existing: 12; `track_dangling` 1 from the `+5V` stub kept), raw data link; add the run row to `docs/benchmarks/README.md`.
 - [ ] **Step 5: Progress PNG** — `.venv/bin/python -m harness.progress --task T1.4-gate` → `docs/benchmarks/progress/2026-10-30-m1-T1.4-gate.png`; coordinator sends path + numbers to main.
 - [ ] **Step 6: Full verification** — `cargo test --release`, `cargo clippy --all-targets -- -D warnings`, `.venv/bin/python -m pytest` (default) and `-m "gate or scaling"`; all green; record the numbers in STATE.md.
 - [ ] **Step 7: Commit** `feat: M1 taut smoother gate and benchmark 0.1.0 (eprom hand vs topor)`; then F gate review (complexity of the new loops: every loop cap named above present; no all-pairs; stack/relax O(k) per wire per iteration) → note `docs/progress/notes/m1-gate-review.md`; conditions fixed before handover.

@@ -4,7 +4,7 @@ Status: **DONE_WITH_CONCERNS**. Branch `worktree-agent-a52787a1d9b26a2bb`, based
 (fast-forwarded from `68a77b6`). Engine for every Python run: `PYTHONPATH` override
 (`target/pyeng*/topor_engine/__init__.py`, printed by every run), never the shared `.venv` build.
 
-dcsgone (gate options): **210/241 routed, failed 31** (main 201/243, failed 42), routing_new 0, unconnected 35
+private-badge-b (gate options): **210/241 routed, failed 31** (main 201/243, failed 42), routing_new 0, unconnected 35
 (41), vias 175 (174), detour max **4.56** (22.3), count > 1.5 unchanged (8 / ghost 15). eprom and wiccon
 produce the same result as main (0 stubs). The gate is not reached; #201 U1.13→U7.4 routes alone but not
 with the whole board (concern 1).
@@ -96,7 +96,7 @@ with the whole board (concern 1).
 1. **Auto criterion is geometric (T0), not "an own tip/spoke edge of the graph is unfit".**
    - It needs no graph before the terminals are known.
    - It is exactly the A2 finding (U7 middle pads) plus the NX class (net wider than the pad row allows).
-   - Effect: eprom and wiccon get 0 stubs (identical results); dcsgone gets 6 exit stubs and 6 bridges
+   - Effect: eprom and wiccon get 0 stubs (identical results); private-badge-b gets 6 exit stubs and 6 bridges
      (12 used).
 2. **Bridges (`pad_bridge_max_mm`, new key, default 2.0 mm, same footprint only).**
    - Not in the design note. The off-centre start alone does not route U7.4→U7.7 / U7.2→U7.9: both pads
@@ -109,15 +109,15 @@ with the whole board (concern 1).
    end may not lie on another pad. Without that, U4.14's stub ended inside U4.15 and the route from there
    failed in the sketch.
 4. **Off-centre at full width (B1) is tried before necking (A2).** The net keeps its width where it fits.
-   - dcsgone v2 has 0 necks: U4.14 / U5.2 are covered by B1 (0.1 / 0.125 mm off centre) and bridges.
+   - private-badge-b v2 has 0 necks: U4.14 / U5.2 are covered by B1 (0.1 / 0.125 mm off centre) and bridges.
    - With the opposite order (run v1), U5.2 / U5.3 were necked to 0.289 mm.
 5. **`neck_to_pad` default true.** routing_new 0 on all six snapshot boards. Necks actually used:
    - bornhack2026: 2 (U3.21 0.309 mm and U3.22 0.200 mm, net 0.342 mm);
-   - dcsgone: 0 in the final run, 2 in v1 (0.289 mm), also routing_new 0.
+   - private-badge-b: 0 in the final run, 2 in v1 (0.289 mm), also routing_new 0.
 6. **`neck_max_mm` default 0 = 2 × the pad's long side** (the DX rule as a per-pad value, not a fixed mm).
    Measured neck lengths are 0.705 mm (U5, v1) and ≈ 0.71 mm (bornhack U3), all well under the cap.
 7. **Overlapping same-net pads merge in decompose.** This is a correctness fix (KiCad connects
-   overlapping pads). dcsgone `connections_total` 243 → 241.
+   overlapping pads). private-badge-b `connections_total` 243 → 241.
 8. **Stub length is added to `ghost_len_nm` / `ref_len_nm`** of stubbed connections (pad-to-pad ratio).
 
 Options (judgement calls), each a `topor.toml` key, `since 0.5.0` (commented out until the version bump):
@@ -141,7 +141,7 @@ constants: `OFFSET_STEP_NM` 5 µm, `OFFSET_SAMPLES_CAP` 128, `WIDTH_BISECT_STEPS
     and the centre-blocked guard now covers. The M2 guard `eprom_ripped_front_only_is_the_m2_result`
     passes.
 - `cargo clippy --all-targets -- -D warnings`: clean.
-- **Determinism.** dcsgone model with `route_probe`, wall clock off: threads 1, 2 and 4, plus a repeat, all
+- **Determinism.** private-badge-b model with `route_probe`, wall clock off: threads 1, 2 and 4, plus a repeat, all
   give md5 `af5bcc6fdb03c79730b98124c6be3ae3` (210/241, 175 vias, 23 iterations). The crop test does
   threads 1, 2, 4, 4 in-test.
 - **`pytest -q` default suite (engine override): 499 passed, 7 skipped, 4 failed.**
@@ -162,7 +162,7 @@ Gate options, `run_bench(rip="all", threads=4)`, same loaded machine (load 15–
 column. Counts are exact; times are inflated. The main run reproduces the coordinator's base numbers
 exactly.
 
-### dcsgonebadge 3e7e66f862a7
+### private-badge-b 3e7e66f862a7
 
 | | main 946530c | A6 |
 |---|---|---|
@@ -187,9 +187,9 @@ exactly.
   - USB-: U7.4→U7.7.
   - D23-A: J1.A4→B9 and A9→B4 (merged pads).
   - Also: U4-STAT2 R11.1→U4.7, GND U7.8→pour, GND C24.1→pour, D12-DOUT, TFT_D~C, VCC C14.1→C15.1,
-    VCC D11.1→C11.1, +3V3 J3.17→R16.2, STRAP_8, IR_TX.
+    VCC D11.1→C11.1, +3V3 J3.17→R16.2, STRAP, IR_TX.
 - **Newly failed (12, negotiation interplay).** USB+ U1.14→U7.5, USB+ J1.A6→J1.B6, USB- J1.A7→J1.B7,
-  CC1 R6.1→U7.10, CC2 J1.B5→R5.2, +5V U4.17→TP9.1, NTCLEV U4.5→BT1.3, I2C_SDA ×2, SPI_SCK, TACT_A,
+  CC1 R6.1→U7.10, CC2 J1.B5→R5.2, +5V U4.17→TP9.1, NTC U4.5→BT1.3, I2C_SDA ×2, SPI_SCK, TACT_A,
   +3V3 R1.1→R16.2.
 - **#201 U1.13→U7.4 and #203 U7.4→J1.B7 still fail on the whole board ("blocked: no path").** Routed alone
   on the same model (scope USB-), all 4 USB- connections route:
@@ -221,7 +221,7 @@ router 5.1 s. Detour max 1.27, > 1.5: 0; ghost max 1.28, 0. Identical to main wi
 | bornhack2026 | 139/307 (timeout, 3 iterations), routing_new 0 | 131/288 (timeout, 2 iterations), routing_new 0 | 12 planned, 7 used, 2 necked |
 
 ## PNG
-`/home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-a52787a1d9b26a2bb/docs/benchmarks/progress/2026-11-01-m4-A6-dcsgonebadge.png`
+`/home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-a52787a1d9b26a2bb/docs/benchmarks/progress/2026-11-01-m4-A6-private-badge-b.png`
 (not committed). Caption: "A6: 210/241 connections, 48/66 nets, partial 0, failed 31, vias 175, arcs 182,
 zero slack 0, iters 23, pcb 3e7e66f862a7 / DRC routing 0 preexisting 4, unconnected 35, outside pads 1698.5
 vs hand 3574.7 mm, F.Cu 975.6 / B.Cu 953.1 mm, router 80.26 s on 4 threads / detours > 1.5: 8 (max 4.6) —
@@ -239,5 +239,5 @@ ghost < 2 mm 55) / stop_reason: no gain".
    - Worth a re-run on a quiet machine.
 3. **`vias.rs` changed** (A10/A13 file): one additive function, wrapper signature unchanged.
 4. **`gate_diag` example is not updated.** It still builds the M3 terminals, so it does not see stubs.
-5. **dcsgone runtime_s was 796 s in the first loaded run (v1).** The final code ran 153–227 s whole run,
+5. **private-badge-b runtime_s was 796 s in the first loaded run (v1).** The final code ran 153–227 s whole run,
    80–91 s router. Timings need a quiet machine.

@@ -1,6 +1,6 @@
 # Task A4 report: own-net / same-net capacity, wall-aware (M4-D1)
 
-Status: **DONE_WITH_CONCERNS**. The capacity rule is in. All guards are green. dcsgone failures drop from 67 to 52
+Status: **DONE_WITH_CONCERNS**. The capacity rule is in. All guards are green. private-badge-b failures drop from 67 to 52
 (the diagnosis expected 25–35 fewer, we got 15 fewer). The gate is not reached; A4 alone was not expected to reach it.
 The rest of the failures are the classes of other tasks, see the per-mechanism table below.
 
@@ -72,7 +72,7 @@ wall times are inflated 2–3×. The counts are exact and deterministic.
    - THT and via ends differ: U2.28 with r 0.8 gets 0.2 instead of 0.8.
 2. **The wall term is measured in copper terms: blocked radius `r_W + clr(W)`, not `r_W + clr + w/2 + ε`.** The note
    compares a centreline-blocked set with the copper demand `need = w + ε`, which counts the width twice.
-   - Measured on dcsgone: the U4 tip `e1249` (0.25 mm pad, 0.5 mm pitch, 0.275 mm to each neighbour) came out unfit
+   - Measured on private-badge-b: the U4 tip `e1249` (0.25 mm pad, 0.5 mm pitch, 0.275 mm to each neighbour) came out unfit
      at 0.2 mm (free 0.14 < 0.205).
    - In copper terms it fits (`fine_pitch_tip_fits_between_neighbours`).
    - The row-7 test uses an outline notch whose apex is 0.1 mm below two same-net pads. The edge is M3-fit by accident
@@ -116,7 +116,7 @@ Judgement calls, all Options and schema Settings with defaults:
 - `expert.transit_pinch = true`
 - `zero_slack_failed = true`
 
-With all four off the result equals M3: dcsgone 188/255 with 199 vias, and wiccon 1373.553 mm with 37 vias, both
+With all four off the result equals M3: private-badge-b 188/255 with 199 vias, and wiccon 1373.553 mm with 37 vias, both
 identical to main.
 
 ## Guards
@@ -135,9 +135,9 @@ identical to main.
   - detour max 1.449 → 1.282, count > 1.5: 0
   - Ablation: own_net alone gives all of the gain; the wall term and the transit pinch change nothing on wiccon.
 - Determinism: wiccon route_probe threads 1/2/4 plus a repeat give byte-identical dumps (md5 `f51fe1e9…`). The
-  `route_threads` tests are green. The dcsgone PNG run reproduced the gate bench exactly (190/242, 190 vias).
+  `route_threads` tests are green. The private-badge-b PNG run reproduced the gate bench exactly (190/242, 190 vias).
 
-## dcsgonebadge, gate options (A-C3: wall 600, partial false, threads 4, rip all), `3e7e66f862a7`
+## private-badge-b, gate options (A-C3: wall 600, partial false, threads 4, rip all), `3e7e66f862a7`
 
 | | main (baseline, this machine) | A4 (harness gate) | A4 (route_probe, same model) |
 |---|---|---|---|
@@ -233,7 +233,7 @@ The remaining (b) 0.2 mm cases are not capacity any more:
 
 ## PNGs (docs/benchmarks, not committed)
 
-- dcsgonebadge: `/home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-a0f172ccd5405dc85/docs/benchmarks/progress/2026-11-01-m4-A4-dcsgonebadge.png`
+- private-badge-b: `/home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-a0f172ccd5405dc85/docs/benchmarks/progress/2026-11-01-m4-A4-private-badge-b.png`
   - 190/242 connections, 40/66 nets, partial 0, failed 52, vias 190, arcs 171, iters 28, pcb `3e7e66f862a7`.
   - routing_new 0, preexisting 4, unconnected 51, outside 1522.4 vs hand 3574.7 mm, router 466.5 s on 4 threads.
   - Detours > 1.5: 20 (max 3.5): VCC 3.5, VCC 3.0, GND 2.6. stop_reason no gain.
@@ -244,13 +244,13 @@ The remaining (b) 0.2 mm cases are not capacity any more:
 
 ## Concerns
 
-1. The dcsgone gain is 15 fewer failures in the gate run, not the estimated 25–35. The remaining capacity-looking
+1. The private-badge-b gain is 15 fewer failures in the gate run, not the estimated 25–35. The remaining capacity-looking
    failures are A2 (state point / los), A5 (sibling holds the single tip) and NX (0.5 mm necks). One real gap remains:
    the per-edge capacity is a 1D cross-section, so oblique pinches are caught only by the transit check.
 2. Two additions are beyond the design note: the transit pinch in `search.rs` `push_state` (refusal) and
    `zero_slack_failed` in `route.rs`. They were needed for the M2 guard, and both are switchable. They overlap A2
    (search.rs) and A7 (route.rs) file-wise, but not function-wise.
-3. The dcsgone gate runtime_s was 704 s at load ~25. That is a DRC loop of 4 rounds at 526 s router time. On equal
+3. The private-badge-b gate runtime_s was 704 s at load ~25. That is a DRC loop of 4 rounds at 526 s router time. On equal
    load the route itself is faster than main (160 s vs 287 s probe).
 4. Each search costs about 1.8× more (210 k vs 155 k clearance candidates per search). Fewer searches more than
    offset it. A1 or A2 may want to look at it.

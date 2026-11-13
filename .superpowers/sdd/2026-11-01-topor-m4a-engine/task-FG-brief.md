@@ -1,6 +1,6 @@
 ### Task FG (opus, rotation 2): geometry-model consistency — via drill hole clearance, taut deep wall, sub-margin grazes, signal-net polygons (DG R2.4 items 3 + 5(i))
 
-Read rotation-2-common.md (incl. "Round 2 update") and docs/progress/notes/m4-dcsgone-diagnosis.md R2.3 (d) 2–4, R2.4 items 3 and 5.
+Read rotation-2-common.md (incl. "Round 2 update") and the private-badge-b completion diagnosis (note removed: private board) R2.3 (d) 2–4, R2.4 items 3 and 5.
 (a) Via drill hole clearance is not in the graph / site model: a router via is a vertex of radius d/2 + copper clearance; for the
     0.45/0.25 pre-defined via the hole term wins (0.125 + 0.35 = 0.475 > 0.425), so search/taut use a corridor 50 µm too narrow and the
     self-check rejects it (`viahole:topor:193 (gap 305000 < 350000)`). Model vias of earlier passes get copper + Hole anchors at one
@@ -16,8 +16,8 @@ Read rotation-2-common.md (incl. "Round 2 update") and docs/progress/notes/m4-dc
 (c) Sub-margin grazes (< margin_nm 5 µm, DRC-clean at margin 0): accept per wall at margin 0 inside taut with a self-check at margin 0;
     option `[expert] accept_submargin_graze` (default by measurement; must keep routing_new 0 on every snapshot board).
 (d) Signal-net copper polygons (copper_shapes net ≠ 0) become terminals in decompose (IR_RX and +3V3 islands: 2 unconnected_items with no
-    failed connection on dcsgone).
+    failed connection on private-badge-b).
 Unit tests per item (0.45/0.25 via with hole_clearance 0.35: no corridor at 0.43 mm from its centre; chord through a 0.3×1.1 pad's middle
 wraps its end; 1 µm graze accepted and self-checks clean at margin 0; a signal polygon island is a terminal). (b)/(c) touch the M2
-guard eprom_ripped_front_only_is_the_m2_result: run it (default options). PNG `--task FG --board dcsgonebadge`. One commit per item.
+guard eprom_ripped_front_only_is_the_m2_result: run it (default options). PNG `--task FG --board private-badge-b`. One commit per item.
 Report task-FG-report.md.

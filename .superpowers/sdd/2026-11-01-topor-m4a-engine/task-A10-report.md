@@ -42,7 +42,7 @@ Python
   they are routed with.
 
 Judgement calls made configurable: `via_in_pad`, `allowed_drills_mm`, `reduction_len_slack_pct`, `cost_by_netclass`, `cost_by_priority`, `via_fallback`.
-Decisions: alternatives = predefined UNION fab profile (keeps eprom/wiccon/dcsgone behaviour identical; `allowed_drills_mm` is the user's way to prune);
+Decisions: alternatives = predefined UNION fab profile (keeps eprom/wiccon/private-badge-b behaviour identical; `allowed_drills_mm` is the user's way to prune);
 fallback warning only when the fallback differs from the factory size (keeps results byte-identical for default boards).
 
 Tests (A10): `engine/tests/via_rules.rs` (6: the brief's names), `tests/test_rules_vias.py` (the toporlib test), `tests/plugin/test_via_rule_agreement.py`.
@@ -73,7 +73,7 @@ Numbers (harness `run_bench`, rip all, threads 4, option `wall_clock_s 300`; bas
 eprom GND pour islands (raster of the B.Cu / F.Cu fills, via a throwaway diagnostic, not committed): before routing 4, after routing 12 with cost 0 and
 12 with cost 1.0 (lost items 0 in both): no effect on eprom.
 
-### dcsgonebadge (gate options: wall 600, partial false, threads 4; machine shared, counts only)
+### private-badge-b (gate options: wall 600, partial false, threads 4; machine shared, counts only)
 | | pour_cut 0 | pour_cut 1.0 |
 |---|---|---|
 | routed / total | 171 / 231 (failed 60) | 164 / 231 (failed 67) |
@@ -85,11 +85,11 @@ eprom GND pour islands (raster of the B.Cu / F.Cu fills, via a throwaway diagnos
 | pour-completion passes | 0 (no budget left: the first pass uses the whole 600 s) | 0 (same) |
 | outside pads | 1398.0 mm | 1262.9 mm |
 | detour max / count > 1.5 | 16.2 / 10 | 3.5 / 11 |
-So on dcsgone the pour cost does what the diagnosis said (15 fewer GND items cut off the fill, 42 fewer islands), but both runs end in the first pass at the
+So on private-badge-b the pour cost does what the diagnosis said (15 fewer GND items cut off the fill, 42 fewer islands), but both runs end in the first pass at the
 wall clock, so completion connections / re-routes cannot be counted; vias +40 and routed -7 in the same time. The M4a gate (231/231) is not reached by A11;
 re-measure when A1/A2/A4 (search speed, capacity) have landed, ideally with a value between 0 and 1.
 
-PNG (harness.progress with the A-C3 600 s option patched in at run time): `/home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-a348fe40021811dba/docs/benchmarks/progress/2026-11-01-m4-A11-dcsgonebadge.png`
+PNG (harness.progress with the A-C3 600 s option patched in at run time): `/home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-a348fe40021811dba/docs/benchmarks/progress/2026-11-01-m4-A11-private-badge-b.png`
 (untracked, not committed). Caption: 175/231 connections, 41/66 nets, partial 0, failed 56, vias 183, arcs 225, zero slack 0, iters 5, pcb 3e7e66f862a7;
 DRC routing 0, preexisting 4, unconnected 71, outside pads 1639.5 vs hand 3574.7 mm, F.Cu 972.7 / B.Cu 864.5 mm, router 600.07 s on 4 threads (loaded machine);
 detours > 1.5: 18 (max 11.6) — VCC 11.6, USB- 5.2, USB+ 3.6; stop_reason timeout. (pour_cut 0, the default; not a gate result.)
@@ -107,7 +107,7 @@ wiccon numbers did not move with the default (identical sha), so no wiccon PNG.
   byte-identity of the new terms was not run separately (the terms are pure functions of the graph; no map iteration order reaches the output).
 
 ## Concerns
-1. A11 default is 0 (opt-in) because 1 mm/mm is worse on eprom (length gate) and wiccon (58/61); dcsgone improves pour connectivity but is time-bound.
+1. A11 default is 0 (opt-in) because 1 mm/mm is worse on eprom (length gate) and wiccon (58/61); private-badge-b improves pour connectivity but is time-bound.
 2. Conflict surface for the merge: `ViaSite.net` field (4 test literals), `search.rs` (Search struct, push_state cost, Layered::new), `route.rs`
    (route_with, params closure now takes the net), `multigraph.rs` (site_free, LayerCtx literal), `model.rs` Options fields.
 3. A foreign pour face on the whole layer (a full GND plane) charges every signal step on it; with a plane on only one layer this is what steers the layer choice,

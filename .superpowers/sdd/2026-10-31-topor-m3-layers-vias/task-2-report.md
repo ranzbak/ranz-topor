@@ -38,12 +38,12 @@ Status: DONE_WITH_CONCERNS. Commit 4010c90 on branch worktree-agent-a141224bcf3a
   exemption was added, the D10 pinch test failed before the vertex loop existed. `statically_unfit_edge_is_hard` was seen passing without D2
   while it asserted only the planar search; it now asserts the ghost (discriminating).
 
-## dcsgonebadge (existing model JSON, route_probe --quiet, single run, machine shared with other workers)
+## private-badge-b (existing model JSON, route_probe --quiet, single run, machine shared with other workers)
 - Before (base 1087a9f): router 60.089 s, routed 0/231 (best iteration 1, wall-clock cap hit), 2 blocked searches printed.
 - After: router 60.458 s, routed 0/231, 4 blocked searches printed.
 - No speedup measured: this run is bound by the 60 s cap with 0 routed in both builds, and the M2 time split (34 s in 59 ghost
   searches) was not reproduced; perf was unusable here so the remaining cost centre is not identified. The candidate bound
-  (<= expansions*33*64) holds on the 200-pad ghost test, but the dcsgonebadge wall time is dominated by something other than the
+  (<= expansions*33*64) holds on the 200-pad ghost test, but the private-badge-b wall time is dominated by something other than the
   clearance query (suspects: Cyc::new/strands per expansion, D9 block probe in route.rs). Needs a profile before calling RC3 closed.
 
 ## Fix round 1 (commit 85c21fb, after `git merge main`)
@@ -52,7 +52,7 @@ Gate options reproduced engine-only: `route_probe <model> --options '{"wall_cloc
 and prints wall, routed, iterations and the search counters (`search::search_totals()`: per planar/ghost: seconds, runs, expansions,
 candidates, clearance_bend calls; 2 clock reads per search, nothing in the expansion loop).
 
-Timing, dcsgonebadge model, same options, same machine, run back-to-back:
+Timing, private-badge-b model, same options, same machine, run back-to-back:
 
 | build | router s | routed | iterations | timed out |
 |---|---|---|---|---|

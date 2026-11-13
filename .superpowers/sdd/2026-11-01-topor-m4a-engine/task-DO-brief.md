@@ -1,9 +1,9 @@
 ### Task DO (opus, rotation 2): hidden-detour check (user observation) + detour-optimisation-by-rip-up phase (Blake toporouter)
 
-Read rotation-2-common.md (incl. "Round 2 update"), docs/progress/notes/m4-dcsgone-diagnosis.md R2.3 (b), ledger rulings A-C18/A-C19,
+Read rotation-2-common.md (incl. "Round 2 update"), the private-badge-b completion diagnosis (note removed: private board) R2.3 (b), ledger rulings A-C18/A-C19,
 M3-R15 in global-constraints.md. User rule: no per-connection detours where a direct path exists. M4a gate item: "detours: no connection
 above 1.5 where a direct feasible path exists (count + max per board)".
-Part 1 — hidden detours. The user saw in the dcsgone image (docs/benchmarks/progress/2026-11-01-m4-G3-merged-dcsgonebadge.png and later
+Part 1 — hidden detours. The user saw in the private-badge-b image (docs/benchmarks/progress/2026-11-01-m4-G3-merged-private-badge-b.png and later
 ones; render a fresh one from your base) (i) tracks zigzagging between the pads of the TOP connector row, and (ii) a long B.Cu T-junction
 across the open display area. Identify both (net, connection ids, geometry) and check whether either is a detour the metric misses:
 e.g. a Steiner junction connection's detour measured against a reference to the junction point instead of per branch / per tree
@@ -21,7 +21,7 @@ accept the change only if routed count is not lower (completion never lost), no 
 rounds (`[search] detour_rounds`, default by measurement), deadline + cancel checked; Big-O stated. Options + schema + docs.
 Gate classification: per board, list every connection still > 1.5 after the phase with the evidence that no direct feasible path exists
 without losing completion (the phase tried and why it failed) — this is the gate's "where a direct feasible path exists" count; report
-count + max per board for eprom, wiccon, dcsgone, nametag, wedding.
+count + max per board for eprom, wiccon, private-badge-b, nametag, wedding.
 Tests: detour phase on a fixture with a blocker that can move (detour removed, completion kept), with an immovable blocker (kept, reason),
-threads byte-identical, phase off = today. PNG `--task DO --board dcsgonebadge`. Commits `fix(detour): ...` (metric) and
+threads byte-identical, phase off = today. PNG `--task DO --board private-badge-b`. Commits `fix(detour): ...` (metric) and
 `feat(route): detour optimisation by rip-up (after Blake's toporouter)`. Report task-DO-report.md.
