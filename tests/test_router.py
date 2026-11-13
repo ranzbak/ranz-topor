@@ -265,7 +265,7 @@ def _wall_pcb(tmp_path):
                               locked_track=False, arc=False)
 
 
-@pytest.mark.xfail(strict=False, reason="PT1 parked: expectation predates the topo core, see f20e5d5")
+@pytest.mark.xfail(strict=False, reason="PT1 parked: the wall fixture now routes 1/1 around the wall, so the expected failed connection never happens (fixture premise stale)")
 def test_partial_routes_off_leaves_net_unconnected(engine, tmp_path):
     pcb = _wall_pcb(tmp_path)
     r = bench.run_bench("wall", tmp_path / "o", router=route_router, rip="all", pcb_override=pcb,
@@ -274,7 +274,7 @@ def test_partial_routes_off_leaves_net_unconnected(engine, tmp_path):
     assert r["routed_drc"]["incomplete"]["unconnected_items"] == 1 and r["routed_drc"]["routing_new"] == 0
 
 
-@pytest.mark.xfail(strict=False, reason="PT1 parked: expectation predates the topo core, see f20e5d5")
+@pytest.mark.xfail(strict=False, reason="PT1 parked: the wall fixture now routes 1/1 around the wall, so no partial stubs are written (fixture premise stale; partial_routes wiring in the topo core unchecked)")
 def test_partial_routes_on_writes_grouped_stubs(engine, tmp_path):
     pcb = _wall_pcb(tmp_path)
     r = bench.run_bench("wall", tmp_path / "o", router=route_router, rip="all", pcb_override=pcb,
@@ -364,7 +364,7 @@ def test_progress_options_and_names_are_pure_helpers():
     assert progress.progress_png_name("D", "m4", "A0") == "D-m4-A0.png"
 
 
-@pytest.mark.xfail(strict=False, reason="PT1 parked: expectation predates the topo core, see f20e5d5")
+@pytest.mark.xfail(strict=False, reason="PT1 parked: routes 2/4; the topo core planner has no dangling-track-end continuation")
 def test_bench_dangling_fixture_g1(engine, tmp_path):
     """A14: the hand-started SIG track of the fixture ends in the open; the router continues it with the
     same width and layer, leaving the end within 1 degree of the hand direction, and keeps the hand copper."""
