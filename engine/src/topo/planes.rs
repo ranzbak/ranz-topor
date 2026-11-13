@@ -385,7 +385,7 @@ pub struct FarTerm {
     /// its layers); the path search picks among the candidates.
     pub price: f64,
     /// Candidates within [`FAR_SPACING_NM`] of this one that the spacing set aside (cheapest
-    /// straight price first, at most [`FAR_ALTS`], at least w + clearance apart): the path search
+    /// straight price first, at most [`FAR_ALTS`], at least w apart): the path search
     /// compares them with this one once this one is picked, so the spacing never drops a better
     /// end (no `alts` of their own).
     pub alts: Vec<FarTerm>,
@@ -425,9 +425,9 @@ pub const FAR_SPACING_NM: f64 = 1.0e6;
 /// component; a cut-off island would leave the pad floating). Each candidate keeps a margin: the
 /// track end's disc of radius w/2 + the zone's minimum width + the net clearance lies inside one
 /// fill piece. Candidates: the boundary of every piece sampled every [`FAR_SAMPLE_NM`] (and the
-/// boundary point nearest the pad on each side), each stepped inward until the disc fits: along
-/// the pad-to-boundary direction first, else straight across the edge (a side edge that
-/// direction runs along), and at a vertex along the corner's bisector; priced by distance plus the `via` price where the pad has no
+/// boundary point nearest the pad on each side), each stepped inward to the nearest point where
+/// the disc fits along the pad-to-boundary direction, straight across the edge (a side edge that
+/// direction runs along) or, at a vertex, along the corner's bisector; priced by distance plus the `via` price where the pad has no
 /// copper on that layer. Returned cheapest first, at most [`FAR_CANDIDATES`], at least
 /// [`FAR_SPACING_NM`] apart (the ones the spacing sets aside kept as [`FarTerm::alts`] of the
 /// nearest, for the caller's second round): the caller lets the path search pick among them, so a point behind
@@ -491,22 +491,26 @@ pub fn far_candidates(dr: &Drawer, rq: &Req, cost: &SiteCost) -> Vec<FarTerm> {
         let f = &pour.fills[fi];
         let margin = 0.5 * rq.w + pour.min_thickness.max(0) as f64 + model.rules.net_rule(rq.net).clearance as f64;
         let extra = lb - cost.mm * (q - c).len() / 1e6;
-        let mut found = None;
-        'dirs: for u in dirs.into_iter().filter(|u| u.len2() > 0.25).flat_map(|u| [u, u * -1.0]) {
+        // The inward point nearest the sample over the directions (the first direction on a tie):
+        // at a corner that is the bisector's, not the pad direction's further along the edge.
+        let mut found: Option<(f64, Vec2)> = None;
+        for u in dirs.into_iter().filter(|u| u.len2() > 0.25).flat_map(|u| [u, u * -1.0]) {
             let mut s = margin;
-            while s <= 4.0 * margin + 0.5e6 {
+            while s <= 4.0 * margin + 0.5e6 && found.is_none_or(|(s0, _)| s < s0) {
                 let p = q + u * s;
                 if in_piece(f, p, margin) && cost.connected(zi, f.layer, p) {
-                    found = Some(p);
-                    break 'dirs;
+                    found = Some((s, p));
+                    break;
                 }
                 s += 0.25 * margin;
             }
         }
-        let Some(at) = found else { continue };
+        let Some((_, at)) = found else { continue };
         let price = cost.mm * (at - c).len() / 1e6 + extra;
         let near = out.iter().enumerate().map(|(k, g)| (k, (g.at - at).len())).filter(|x| x.1 < FAR_SPACING_NM).min_by(|x, y| x.1.total_cmp(&y.1));
-        let alt_sep = rq.w + model.rules.net_rule(rq.net).clearance as f64;
+        // Set-aside ends only have to stay apart as terminals of one net (their squares of side
+        // w must not overlap); the clearance between them does not matter.
+        let alt_sep = rq.w;
         // The layers where some connected fill of the net covers the end with its margin.
         let layers: Vec<u32> = model
             .pours

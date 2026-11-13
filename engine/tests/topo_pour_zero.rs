@@ -161,7 +161,14 @@ fn a_far_pad_takes_the_corner_the_spacing_set_aside() {
     for (k, r) in row.iter().enumerate() {
         pads.push((r.as_str(), 0, 4.0 + 1.27 * k as f64, 14.0, 1.0));
     }
-    let m = board(30.0, 22.0, &pads, &[(2, 0, 5.0, 2.0, 25.0, 10.0, 0)]);
+    let mut m = board(30.0, 22.0, &pads, &[(2, 0, 5.0, 2.0, 25.0, 10.0, 0)]);
+    // The row on both layers (with B.Cu free under it, two vias under the row are shorter, a
+    // price question of P2, not of the end): the only way is round it.
+    for p in m.pads.iter_mut().filter(|p| p.ref_.starts_with('X')) {
+        let sh = p.shapes[&0].clone();
+        p.layers.push(2);
+        p.shapes.insert(2, sh);
+    }
     let on = route_with(&m, &Options::default(), &RunControl::new());
     assert_eq!(on.routed, 1, "{:?}", on.warnings);
     let ends = track_ends(&on.items, 2);
