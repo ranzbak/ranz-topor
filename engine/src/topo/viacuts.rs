@@ -173,9 +173,7 @@ impl ViaCuts {
         }
         let t0 = self.total;
         if let Some(s) = self.snap.as_mut() {
-            if !s.wires.contains_key(&w) {
-                s.wires.insert(w, (self.runs[w].clone(), self.vias[w].clone()));
-            }
+            s.wires.entry(w).or_insert_with(|| (self.runs[w].clone(), self.vias[w].clone()));
         }
         let old: Vec<Run> = std::mem::take(&mut self.runs[w]);
         self.runs[w] = runs.iter().filter(|r| r.curve.len() >= 2).map(Run::of).collect();
