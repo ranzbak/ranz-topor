@@ -679,7 +679,9 @@ unsure about is kept. KiCad's DRC of the result stays the judge.
   footprint (BGA/PGA) shares only as a last resort, where no via of its own fits (`[planes] share_vias =
   "outside_bga"`, the default; the price is `bga_share_cost`, and each such via gets a warning); parts under
   a BGA share among themselves; `"never"` = one via per plane pad everywhere, `"always"` = balls share at
-  the plain price too. Only two-layer boards are benchmarked (eprom-to-kernal 27/27,
+  the plain price too. The router finds the ball grids itself (a connected grid of at least 16 copper SMD
+  pads of one footprint, pitch at most 1.5 mm) and notes each one in the run report ("BGA area REF: …");
+  `[planes] bga_refs` corrects it by KiCad → footprint reference: `"U3"` makes U3 a BGA, `"-U4"` never. Only two-layer boards are benchmarked (eprom-to-kernal 27/27,
   wiccon-2023 62/62); 4+ layer boards route their signal layers but inner-layer quality is not tuned yet. Copper counts
   other than 2, 4, 6, 8 need roles in `[layers]` ([`LAYER_ROLES_NEEDED`](troubleshoot.md#layer_roles_needed)).
 - **Groups.** The KiCad API does not expose group membership: grouped items are treated one by one, and
