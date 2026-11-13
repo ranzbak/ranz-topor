@@ -17,7 +17,7 @@ topor_engine = pytest.importorskip("topor_engine")
 if not hasattr(topor_engine, "via_sizes"):
     pytest.skip("topor_engine.via_sizes not in the installed engine (rebuild)", allow_module_level=True)
 
-BOARDS = ["bornhack2026", "dcsgonebadge", "eprom-to-kernal", "nametag-sao", "wedding-gift", "wiccon-2023"]
+BOARDS = ["bornhack2026", "esp-rust-board", "eprom-to-kernal", "nametag-sao", "wedding-gift", "wiccon-2023"]
 
 
 def _rules(board):

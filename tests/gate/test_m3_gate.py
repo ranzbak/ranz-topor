@@ -75,9 +75,9 @@ def test_m3_gate_wiccon(engine, tmp_path):
 
 
 @pytest.mark.gate
-@pytest.mark.parametrize("board", ["dcsgonebadge"])
+@pytest.mark.parametrize("board", ["esp-rust-board"])
 def test_m3_router_other_boards_complete(board, tmp_path):
-    """Informational (M3-R13 (user): dcsgonebadge info only, robustness board).
+    """Informational (M3-R13 (user): the long board is info only, robustness board).
 
     Asserted: no crash/panic, the run ends within the timeout and returns an anytime result
     (report present; timed_out may be true), no routing violation from router copper

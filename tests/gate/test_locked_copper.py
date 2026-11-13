@@ -1,5 +1,6 @@
-"""Locked copper (the user's locked edge GND trace on dcsgonebadge) survives rip, model export,
-the full route and the writer untouched, and no routing violation pairs router copper with it."""
+"""Locked copper (the designer's locked tracks on bornhack2026, a locked arc on the synthetic fixture board)
+survives rip, model export, the full route and the writer untouched, and no routing violation pairs router
+copper with it."""
 import json
 from pathlib import Path
 
@@ -15,8 +16,10 @@ from harness.rip import record_widths, rip_tracks
 from harness.router import route_router
 from harness.rules import resolve_rules
 
-BOARD = "dcsgonebadge"
-N_LOCKED = 22  # B.Cu 16 tracks + 4 arcs, F.Cu 2 tracks (user's locked edge GND trace)
+BOARD = "bornhack2026"
+N_LOCKED = 17  # B.Cu 17 tracks on 8 signal / power nets (the designer's locked copper in snapshot 21c5f478f1af)
+LOCKED_NETS = {"/BUZZER", "Net-(C67-Pad2)", "Net-(D4-A)", "Net-(Q3-D)", "Net-(Q3-G)", "Net-(R14-Pad2)",
+               "Net-(U10-EN)", "VIN"}
 
 
 def _geom(t):
@@ -35,16 +38,16 @@ def snap_copy(tmp_path_factory):
     return copy_project(BENCH_BOARDS[BOARD], tmp_path_factory.mktemp("locked") / "w")
 
 
-def test_snapshot_has_22_locked_gnd_items(snap_copy):
+def test_snapshot_has_17_locked_items(snap_copy):
     b = load_board(snap_copy)
     lk = _locked(b)
     assert len(lk) == N_LOCKED
-    assert {str(t.GetNetname()) for t in lk} == {"GND"}
+    assert {str(t.GetNetname()) for t in lk} == LOCKED_NETS
     by = {}
     for t in lk:
         by.setdefault((b.GetLayerName(t.GetLayer()), t.GetClass()), 0)
         by[(b.GetLayerName(t.GetLayer()), t.GetClass())] += 1
-    assert by == {("B.Cu", "PCB_TRACK"): 16, ("B.Cu", "PCB_ARC"): 4, ("F.Cu", "PCB_TRACK"): 2}
+    assert by == {("B.Cu", "PCB_TRACK"): 17}
 
 
 def test_rip_all_keeps_locked_items(snap_copy, tmp_path):
@@ -57,23 +60,18 @@ def test_rip_all_keeps_locked_items(snap_copy, tmp_path):
     assert after == before and len(after) == N_LOCKED
 
 
-def test_model_passes_locked_items_as_kept_obstacles(tmp_path):
-    pc = copy_project(BENCH_BOARDS[BOARD], tmp_path / "w")
-    b = load_board(pc)
-    rules = resolve_rules(b, dru_text=pc.dru.read_text() if pc.dru else None,
-                          widths_before=record_widths(b))
-    rip_tracks(b, mode="all")
-    want = {t.m_Uuid.AsString(): t for t in _locked(b)}
-    m = export_model(b, rules, name="dcs")
+def _assert_kept_obstacles(m, want, n_locked):
+    """Every locked item of `want` (uuid -> track/arc) is a kept, locked obstacle of model `m` with its exact
+    layer, width, net and geometry; nothing else is locked."""
     nets = {n["code"]: n["name"] for n in m["nets"]}
     kept = {k["uuid"]: k for k in m["kept"]}
-    assert len(m["kept"]) >= N_LOCKED
+    assert len(m["kept"]) >= n_locked
     assert set(want) <= set(kept)
     for uid, t in want.items():
         k = kept[uid]
         assert k["locked"] is True
         assert k["layer"] == int(t.GetLayer()) and k["width"] == int(t.GetWidth())
-        assert nets[k["net"]] == "GND" == str(t.GetNetname())
+        assert nets[k["net"]] == str(t.GetNetname())
         p = k["prim"]
         if t.GetClass() == "PCB_ARC":
             assert p["kind"] == "arc"
@@ -84,7 +82,36 @@ def test_model_passes_locked_items_as_kept_obstacles(tmp_path):
             assert p["kind"] == "seg"
             assert (p["a"], p["b"]) == ([int(t.GetStart().x), int(t.GetStart().y)],
                                         [int(t.GetEnd().x), int(t.GetEnd().y)])
-    assert sum(1 for k in m["kept"] if k["locked"]) == N_LOCKED  # nothing else is locked
+    assert sum(1 for k in m["kept"] if k["locked"]) == n_locked  # nothing else is locked
+
+
+def test_model_passes_locked_items_as_kept_obstacles(tmp_path):
+    pc = copy_project(BENCH_BOARDS[BOARD], tmp_path / "w")
+    b = load_board(pc)
+    rules = resolve_rules(b, dru_text=pc.dru.read_text() if pc.dru else None,
+                          widths_before=record_widths(b))
+    rip_tracks(b, mode="all")
+    want = {t.m_Uuid.AsString(): t for t in _locked(b)}
+    _assert_kept_obstacles(export_model(b, rules, name=BOARD), want, N_LOCKED)
+
+
+def test_model_passes_a_locked_arc_as_kept_obstacle(tmp_path):
+    """The arc branch (no public snapshot board has a locked arc): the fixture board's arc and track, both
+    locked, survive rip and become kept obstacles with their exact start / mid / end."""
+    from harness.fixtures import make_fixture_board
+
+    pcb = make_fixture_board(tmp_path / "fx" / "fixture.kicad_pcb")
+    b = pcbnew.LoadBoard(str(pcb))
+    for t in b.GetTracks():
+        if t.GetClass() == "PCB_ARC":
+            t.SetLocked(True)
+    rules = resolve_rules(b, dru_text=None, widths_before=record_widths(b))
+    before = sorted(_geom(t) for t in _locked(b))
+    assert [g[0] for g in before].count("PCB_ARC") == 1 and len(before) == 2
+    rep = rip_tracks(b, mode="all")
+    assert rep.kept_locked_tracks == 2 and sorted(_geom(t) for t in _locked(b)) == before
+    want = {t.m_Uuid.AsString(): t for t in _locked(b)}
+    _assert_kept_obstacles(export_model(b, rules, name="fixture"), want, 2)
 
 
 @pytest.mark.gate
