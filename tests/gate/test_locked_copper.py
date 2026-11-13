@@ -114,6 +114,33 @@ def test_model_passes_a_locked_arc_as_kept_obstacle(tmp_path):
     _assert_kept_obstacles(export_model(b, rules, name="fixture"), want, 2)
 
 
+def test_bench_rip_keeps_vias_touched_by_locked_copper(tmp_path):
+    """The M0-gate bookkeeping on a synthetic board (no public snapshot has a via touched by locked copper):
+    run_bench's rip keeps the free via and the SIG transition via whose B.Cu track is locked, removes only
+    unlocked copper, and both vias are still on the written board (kept_free + removed + touched == vias)."""
+    from harness.fixtures import make_fixture_board
+    from harness.writer import save
+
+    pcb = make_fixture_board(tmp_path / "fx" / "fixture.kicad_pcb", locked_track=False, arc=False,
+                             transition_via=True)
+    b = pcbnew.LoadBoard(str(pcb))
+    for t in b.GetTracks():
+        if t.GetClass() == "PCB_TRACK" and t.GetLayer() == pcbnew.B_Cu:
+            t.SetLocked(True)
+    assert len(_locked(b)) == 1
+    save(b, pcb)
+    del b
+
+    r = run_bench("fx", tmp_path / "run", router=None, rip="all", pcb_override=pcb)
+    vias = r["orig_all"]["vias"]
+    kept, removed = r["kept"]["kept_free_vias"], r["removed"]["removed_vias"]
+    assert (vias, kept, removed) == (2, 1, 0)
+    assert kept + removed + 1 == vias  # the 1 via touched by the locked track is retained
+    assert r["kept"]["kept_locked_tracks"] == 1
+    assert r["removed"]["removed_tracks"] == 1  # the unlocked F.Cu half of the transition
+    assert r["routed_all"]["vias"] == vias and r["routed_all"]["segments"] == 1
+
+
 @pytest.mark.gate
 def test_full_route_leaves_locked_copper_untouched_and_drc_clean_of_it(tmp_path):
     src = BENCH_BOARDS[BOARD]
