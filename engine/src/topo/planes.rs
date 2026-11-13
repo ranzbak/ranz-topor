@@ -400,6 +400,10 @@ pub const BGA_MIN_BALLS: usize = 16;
 /// DDR BGA-96's two 3-column blocks are 4 pitches apart; a module's two pin rows tens of mm).
 pub const BGA_MAX_GAP_PITCHES: f64 = 4.0;
 
+/// Largest ball pitch per axis, mm: the JEDEC BGA pitches (JEP95) run from 0.3 to 1.5 mm. A
+/// grid of larger pitch (a keyboard's key contacts, a header field) is no ball grid.
+pub const BGA_MAX_PITCH_MM: f64 = 1.5;
+
 /// One ball-grid area: the footprint's reference and the box it covers (math frame).
 #[derive(Clone, Debug)]
 pub struct BgaArea {
@@ -412,8 +416,9 @@ pub struct BgaArea {
 
 /// The areas under the board's ball-grid footprints, math frame. Per footprint (pads grouped by
 /// reference), SMD pads only (a THT connector or module is no BGA), in the footprint's own frame
-/// (the pads' rotation): the pitch per axis (the median distance to the next pad in the same
-/// row, resp. column; rectangular pitches like 0.8 x 0.65 mm); pads joined along an axis when
+/// (the pads' rotation), copper pads only (no paste-only aperture): the pitch per axis (the
+/// smallest distance to the next pad in the same row, resp. column, that [`BGA_MIN_BALLS`] pads
+/// share; rectangular pitches like 0.8 x 0.65 mm; at most [`BGA_MAX_PITCH_MM`]); pads joined along an axis when
 /// they lie in one row (column) at most [`BGA_MAX_GAP_PITCHES`] pitches apart; a connected
 /// cluster counts when it holds at least [`BGA_MIN_BALLS`] pads in at least 4 rows and 4 columns
 /// and at least half of them have 3 or more neighbours one pitch away (a BGA, also with its
@@ -453,7 +458,9 @@ pub fn bga_footprints(model: &BoardModel, overrides: &[String]) -> Vec<BgaArea> 
             out.push(BgaArea { ref_: r.to_string(), area: bbox(&mut ps.iter().copied()).grow(0.5 * nn), balls: ps.len(), forced: true });
             continue;
         }
-        let idx: Vec<usize> = idx.iter().copied().filter(|&i| model.pads[i].attr == crate::model::PadAttr::Smd).collect();
+        // Copper SMD pads only: a paste-only aperture grid (a QFN's exposed-pad paste windows) has
+        // no copper layer and is no ball.
+        let idx: Vec<usize> = idx.iter().copied().filter(|&i| model.pads[i].attr == crate::model::PadAttr::Smd && !model.pads[i].layers.is_empty()).collect();
         if idx.len() < BGA_MIN_BALLS {
             continue;
         }
@@ -476,7 +483,18 @@ pub fn bga_footprints(model: &BoardModel, overrides: &[String]) -> Vec<BgaArea> 
                 })
                 .fold(f64::INFINITY, f64::min)
         };
-        let (Some(px), Some(py)) = (median((0..n).map(|a| next(a, true)).collect()), median((0..n).map(|a| next(a, false)).collect())) else { continue };
+        // The pitch of an axis: the smallest next-pad distance that at least BGA_MIN_BALLS pads
+        // share (within 15 %). Not the median over all pads: a QFN's two pin rows per axis are
+        // 10 mm apart and would outvote its 0.35 mm pin pitch.
+        let pitch = |along_x: bool| {
+            let mut v: Vec<f64> = (0..n).map(|a| next(a, along_x)).filter(|x| x.is_finite()).collect();
+            v.sort_by(f64::total_cmp);
+            (0..v.len()).find(|&i| v[i..].iter().take_while(|&&x| x <= 1.15 * v[i]).count() >= BGA_MIN_BALLS).map(|i| v[i])
+        };
+        let (Some(px), Some(py)) = (pitch(true), pitch(false)) else { continue };
+        if px.max(py) > (BGA_MAX_PITCH_MM + 1e-6) * 1e6 {
+            continue;
+        }
         let (tx, ty) = (0.15 * px, 0.15 * py);
         // Union-find over the axis neighbours (gap up to BGA_MAX_GAP_PITCHES pitches).
         let mut parent: Vec<usize> = (0..n).collect();

@@ -111,7 +111,9 @@ fn bga_balls_get_a_via_each_by_default() {
 }
 
 /// The detector: a ring of 16 pads (QFN-like, 2 neighbours each) and a 2 x 10 header are no
-/// ball grid; a 4 x 4 grid with its centre 2 x 2 missing (12 pads) is too small.
+/// ball grid; a 4 x 4 grid with its centre 2 x 2 missing (12 pads) is too small; a module's two
+/// pin-row pairs, a THT 4-row connector, a QFN with a paste-aperture grid on its exposed pad and
+/// a keyboard's contact grid (pitch above the JEDEC 1.5 mm) are none either.
 #[test]
 fn rings_and_headers_are_no_bga() {
     let mut ring = Vec::new();
@@ -144,10 +146,41 @@ fn rings_and_headers_are_no_bga() {
             conn4.push(("J4", 1, 4.0 + 1.0 * k as f64, 30.0 + 1.0 * r as f64, 0.5));
         }
     }
-    let all: Vec<_> = ring.iter().chain(&hdr).chain(&hollow).chain(&module).chain(&conn4).copied().collect();
-    let mut m = board(90.0, 40.0, &all, &[]);
-    for p in m.pads.iter_mut().filter(|p| p.ref_ == "J4") {
-        p.attr = topor_engine::model::PadAttr::Pth;
+    // A QFN-104 (26 pins a side at 0.35 mm, 10 mm body) with its exposed pad and a 4 x 4 grid of
+    // paste-only apertures (no copper layer) on it: neither the paste grid nor the far pin rows
+    // make it a ball grid.
+    let mut qfn = Vec::new();
+    for k in 0..26 {
+        let t = 30.0 + 0.35 * (k as f64 - 12.5);
+        qfn.extend([("Q8", 1, t, 25.0, 0.18), ("Q8", 1, t, 35.0, 0.18), ("Q8", 1, 25.0, t, 0.18), ("Q8", 1, 35.0, t, 0.18)]);
+    }
+    qfn.push(("Q8", 1, 30.0, 30.0, 7.5));
+    for i in 0..4 {
+        for j in 0..4 {
+            qfn.push(("Q8P", 1, 30.0 + 1.875 * (i as f64 - 1.5), 30.0 + 1.875 * (j as f64 - 1.5), 1.5));
+        }
+    }
+    // A keyboard footprint: per key three contacts 2.5 mm apart in a column, keys 9.7 mm apart,
+    // three key rows (a grid of 9 rows x 8 columns, but no ball pitch).
+    let mut keys = Vec::new();
+    for c in 0..8 {
+        for r in 0..3 {
+            for k in 0..3 {
+                keys.push(("K1", 1, 40.0 + 9.7 * c as f64, 2.0 + 8.5 * r as f64 + 2.5 * k as f64, 2.0));
+            }
+        }
+    }
+    let all: Vec<_> = ring.iter().chain(&hdr).chain(&hollow).chain(&module).chain(&conn4).chain(&qfn).chain(&keys).copied().collect();
+    let mut m = board(120.0, 40.0, &all, &[]);
+    for p in m.pads.iter_mut() {
+        if p.ref_ == "J4" {
+            p.attr = topor_engine::model::PadAttr::Pth;
+        }
+        if p.ref_ == "Q8P" {
+            p.ref_ = "Q8".into();
+            p.layers.clear();
+            p.shapes.clear();
+        }
     }
     let found: Vec<String> = topor_engine::topo::planes::bga_footprints(&m, &[]).into_iter().map(|b| b.ref_).collect();
     assert!(found.is_empty(), "{found:?}");
@@ -236,9 +269,9 @@ fn a_shared_via_of_pads_outside_is_not_resited_into_the_bga() {
     assert!(!vd.is_empty() && !vd.iter().any(inside), "no plane via in the BGA area: {vd:?}");
 }
 
-/// A 4 x 4 GND ball grid and a GND pad R9 just outside its corner, over a B.Cu GND pour: R9's via
-/// is shareable (outside), but no ball ends on it: every ball keeps a via of its own (the pad-side
-/// gate), 17 vias; "always" lets balls share.
+/// A 4 x 4 GND ball grid over a B.Cu GND pour and an existing GND via of the board 1 mm out
+/// from its corner ball on both axes (outside the BGA area, so shareable): no ball ends on it,
+/// every ball keeps a via of its own (the pad-side gate), 16 new vias; "always" lets balls share.
 #[test]
 fn a_ball_does_not_end_on_a_shareable_via_outside() {
     let mut pads = Vec::new();
@@ -247,11 +280,16 @@ fn a_ball_does_not_end_on_a_shareable_via_outside() {
             pads.push(("U1", 1, 8.0 + 1.27 * i as f64, 8.0 + 1.27 * j as f64, 0.5));
         }
     }
-    pads.push(("R9", 1, 8.0 + 1.27 * 3.0 + 1.6, 8.0 + 1.27 * 3.0 + 1.6, 0.6));
-    let m = board(24.0, 24.0, &pads, &[(1, 2, 0.5, 0.5, 23.5, 23.5, &[])]);
+    let mut m = board(24.0, 24.0, &pads, &[(1, 2, 0.5, 0.5, 23.5, 23.5, &[])]);
+    let (cx, cy) = (m.pads.iter().map(|p| p.center.x).sum::<i64>() / 16, m.pads.iter().map(|p| p.center.y).sum::<i64>() / 16);
+    let corner = m.pads.iter().max_by_key(|p| (p.center.x - cx) + (p.center.y - cy)).unwrap().center;
+    let at = topor_engine::model::Pt { x: corner.x + MM as i64, y: corner.y + MM as i64 };
+    m.vias.push(topor_engine::model::Via { uuid: "v1".into(), net: 1, at, d: 600_000, drill: 300_000, layers: vec![], free: false, locked: false });
+    let area = topor_engine::topo::planes::bga_areas(&m);
+    assert!(area.len() == 1 && !topor_engine::topo::planes::in_bga(&area, at.to_vec2()), "the via stands outside the BGA area");
     let def = route_with(&m, &Options::default(), &RunControl::new());
-    assert_eq!((def.routed, vias(&def.items).len()), (17, 17), "{:?}", def.warnings);
+    assert_eq!((def.routed, vias(&def.items).len()), (16, 16), "{:?}", def.warnings);
     assert!(def.warnings.iter().any(|w| w.starts_with("BGA area U1")), "{:?}", def.warnings);
     let always = route_with(&m, &Options { plane_share_vias: "always".into(), ..Options::default() }, &RunControl::new());
-    assert!(vias(&always.items).len() < 17, "{:?}", always.warnings);
+    assert!(vias(&always.items).len() < 16, "{:?}", always.warnings);
 }
