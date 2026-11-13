@@ -169,6 +169,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     });
     ctl.stage(1, opts.topo_rounds.max(1) as u32, "plane stubs (pads of plane nets onto their pour)");
     ctl.limit.init(opts.wall_clock_s); // live limit (control::TimeLimit): the caller may change it during the run
+    ctl.limit.set_hard(opts.timeout_mode == "hard");
     let stubs = place_plane_stubs(model, opts, ctl);
     ctl.stage(1, opts.topo_rounds.max(1) as u32, "projection of the board");
     let t_fx = Instant::now();
@@ -275,7 +276,7 @@ fn limit_report(ctl: &RunControl, opts: &Options, runtime_s: f64, warnings: &mut
     let overrun_s = if reached { ((runtime_s - limit_s) * 1e3).round() / 1e3 } else { 0.0 };
     if reached {
         warnings.push(format!(
-            "time limit ({mode}, [run] timeout_mode): {limit_s:.0} s reached during {}; {} the result was ready {overrun_s:.1} s past the limit",
+            "time limit ({mode}, [run] timeout_mode): {limit_s:.0} s reached during {}; {} the result was ready {overrun_s:.1} s past the limit (wall clock)",
             if step.is_empty() { "the run" } else { step.as_str() },
             if mode == "soft" { "the step that ran finished, no new one began and the best kept variant was drawn;" } else { "every step stopped there;" }
         ));
@@ -403,9 +404,11 @@ impl DrawGate {
     /// Run `k` will not offer (not begun, nothing kept, or it offered already: then nothing
     /// changes). Idempotent. O(log runs).
     fn withdraw(&self, k: usize) {
-        if let Ok(mut g) = self.st.lock() {
-            g.open.remove(&k);
-        }
+        // also from a run's Drop while a panic unwinds: never panic here, take the state as it is
+        // (the gate's state is a set and two maps, consistent between its statements)
+        let mut g = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        g.open.remove(&k);
+        drop(g);
         self.cv.notify_all();
     }
 
@@ -422,15 +425,15 @@ impl DrawGate {
 
     /// [`DrawGate::offer`] without the slot: waits until no run can offer, decides once. O(runs log runs) + the wait.
     fn decide(&self, k: usize, crit: Criteria, obj: &Objective, cancel: bool) -> Option<String> {
-        let Ok(mut g) = self.st.lock() else { return None };
+        // A poisoned lock = a run panicked while it decided: loud (the call's thread scope passes the
+        // panic on to the caller), never a quiet "draw every pick" (verify-m2 F7c).
+        const POISONED: &str = "M2 draw gate: its lock is poisoned (a run panicked while the runs' picks were decided)";
+        let mut g = self.st.lock().expect(POISONED);
         g.open.remove(&k);
         g.offered.insert(k, crit);
         self.cv.notify_all();
         while g.decided.is_none() && !g.open.is_empty() {
-            g = match self.cv.wait_timeout(g, std::time::Duration::from_millis(200)) {
-                Ok((g, _)) => g,
-                Err(_) => return None,
-            };
+            g = self.cv.wait_timeout(g, std::time::Duration::from_millis(200)).expect(POISONED).0;
         }
         if g.decided.is_none() {
             let mut ks: Vec<usize> = g.offered.keys().copied().collect();
@@ -1062,6 +1065,7 @@ fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, 
         // M2.TL: with the soft limit only Cancel / OK stops the moves inside a step (M0's stop checks)
         let _slot = topor.then(|| SlotGuard::take(&coord.gate.slots));
         crate::control::with_control_mode(&c, opts.timeout_mode == "hard", || r.step(model, opts, &c, coord, stubs, fx, t_call));
+        c.idle(); // between its cycles or done: the soft limit's notice no longer names its step (F6)
         let st = (r.cycles, r.done);
         drop(r);
         if let (Ok(mut tk), Ok(mut cy)) = (taken.lock(), cycles.lock()) {
@@ -1445,9 +1449,12 @@ fn plane_requests(model: &BoardModel, b: &board::Board, dec: &crate::decompose::
 /// Place every plane stub on the static board (pads, holes, outline, keepouts, copper shapes,
 /// existing copper; the stubs placed before it), each at its cheapest site ([`planes::place`]).
 fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> PlaneStubs {
-    // Cancel / the time limit end the placement at once (K1: Cancel was ignored here on a live run); the
-    // route that follows sees the same stop and returns the best result so far.
-    let stop = || cancelled() || ctl.is_cancelled() || ctl.over_limit();
+    // Cancel ends the placement at once (K1: Cancel was ignored here on a live run); the route that
+    // follows sees the same stop. The time limit ends it only with `[run] timeout_mode = "hard"`:
+    // the soft limit (M2.TL, default) cuts no step, and the initial routing that follows needs every
+    // stub to give a complete plan (verify-m2 F2).
+    let hard = opts.timeout_mode == "hard";
+    let stop = || cancelled() || ctl.is_cancelled() || (hard && ctl.over_limit());
     let signal: Vec<u32> = model.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
     if signal.len() < 2 {
         return PlaneStubs::default();
@@ -3305,6 +3312,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let pick = arch.pick(&obj).expect("the initial plan is always archived");
         // M2 (6.1 draw once): the runs' picks are judged by their predicted criteria; only the
         // `[drawing] candidates` best are drawn (after Cancel / OK the best one).
+        ctl.idle(); // waiting at the gate computes nothing: the soft limit names the runs still computing (F6)
         let skip_draw = gate.1.offer(gate.0, arch.items[pick].crit, gate.2, stop_now());
         sp.restore(&arch.items[pick].payload.var);
         drop(sp);
@@ -4509,15 +4517,19 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut vias_reduced = 0usize;
     if opts.via_reduce && std::env::var("TOPO_NOREDUCE").is_err() {
         pre_snap = Some((out.clone(), necking.clone()));
-        let (rs, changed) = super::reduce::reduce_vias(&mut dr, &mut drawn, &mut placed, &mut plans, &mut via_h, &end_fixed, &frozen, b.n_signal, ctl.deadline().map(|d| d.max(floor)), &|| ctl.is_cancelled());
+        // M2.TL soft limit: the via reduction belongs to the one drawing of the picked variant and
+        // runs to its end (Cancel still ends it, anytime); `hard`: the limit cuts it (verify-m2 F2:
+        // past the soft limit it got 0 s, "0 relabels tried").
+        let red_deadline = if soft { None } else { ctl.deadline().map(|d| d.max(floor)) };
+        let (rs, changed) = super::reduce::reduce_vias(&mut dr, &mut drawn, &mut placed, &mut plans, &mut via_h, &end_fixed, &frozen, b.n_signal, red_deadline, &|| ctl.is_cancelled());
         // Cancel / OK ends the via reduction (cancel-fix; anytime: every relabel accepted so far
         // stays; measured on qmtech it took 12-22 s for 0-10 of ~110 vias). In the TopoR loop pick's
         // one drawing that keeps the result complete; only the time limit makes it a cut-short one.
         vias_reduced = rs.vias_removed;
-        let limit_cut = rs.timed_out && ctl.deadline().is_some_and(|d| Instant::now() >= d.max(floor));
+        // Soft limit: no deadline was given, so a stopped reduction is a Cancel's.
+        let limit_cut = rs.timed_out && !soft && ctl.deadline().is_some_and(|d| Instant::now() >= d.max(floor));
         let cancel_cut = rs.timed_out && !limit_cut;
-        // M2.TL soft limit: a reduction the limit stopped leaves a complete result (anytime).
-        timed_out |= limit_cut && !soft || cancel_cut && !draw_through.get();
+        timed_out |= limit_cut || cancel_cut && !draw_through.get();
         for w in changed {
             let ci = conn_of[wire_conn[w]];
             necking.retain(|(c, _)| *c != ci);
@@ -5796,5 +5808,22 @@ mod tests {
             });
             assert_eq!(drawn, want, "quota {quota}, cancel {cancel}");
         }
+    }
+
+    #[test]
+    fn a_poisoned_draw_gate_is_loud_never_draw_every_pick() {
+        // verify-m2 F7c: a run that panicked while deciding poisons the gate; the others panic
+        // (the call's thread scope passes it on) instead of each drawing its pick quietly
+        let obj = Objective::from_options("length_vias", 25.0, "errors_vias_length");
+        let g = DrawGate::new(2, 1, 2);
+        let _ = std::thread::scope(|s| s.spawn(|| {
+            let _held = g.st.lock().expect("fresh lock");
+            panic!("a run panics while it decides");
+        }).join());
+        assert!(g.st.is_poisoned());
+        g.withdraw(1); // from a Drop while unwinding: never panics
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| g.decide(0, Criteria::default(), &obj, false)));
+        let msg = r.expect_err("a poisoned gate panics").downcast::<String>().map(|m| *m).unwrap_or_default();
+        assert!(msg.contains("draw gate"), "{msg}");
     }
 }

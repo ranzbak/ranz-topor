@@ -146,14 +146,22 @@ pub struct Progress {
     /// current step to finish (<step>); press Cancel to stop now"), "" when it does not apply.
     #[serde(default)]
     pub notice: String,
+    /// The step each run of a best-of-N call computes now (index = run - 1; "" = the run computes
+    /// nothing: between its cycles, waiting at the M2 draw gate, or done). The soft limit names
+    /// these steps, not only the stage text the last run set (verify-m2 F6).
+    #[serde(default)]
+    pub run_steps: Vec<String>,
 }
 
 /// The soft time limit's line for the progress dialog and the run log ([`Progress::notice`]). O(len).
-pub fn limit_notice(step: &str) -> String {
-    if step.is_empty() {
-        "time limit reached, waiting for the current step to finish; press Cancel to stop now".into()
-    } else {
-        format!("time limit reached, waiting for the current step to finish ({step}); press Cancel to stop now")
+/// `hard` (`[run] timeout_mode = "hard"`): the limit stops the step that runs, so the line says
+/// that instead of waiting (verify-m2 F7a).
+pub fn limit_notice(step: &str, hard: bool) -> String {
+    match (hard, step.is_empty()) {
+        (false, true) => "time limit reached, waiting for the current step to finish; press Cancel to stop now".into(),
+        (false, false) => format!("time limit reached, waiting for the current step to finish ({step}); press Cancel to stop now"),
+        (true, true) => "time limit reached (hard): the current step stops now".into(),
+        (true, false) => format!("time limit reached (hard): the current step stops now ({step})"),
     }
 }
 
@@ -161,6 +169,13 @@ pub fn limit_notice(step: &str) -> String {
 pub const ROUND_LINES: usize = 32;
 
 impl Progress {
+    /// The steps that compute now: of a best-of-N call each run's that computes ("run k: step",
+    /// joined by "; "), else the stage text. O(runs).
+    pub fn open_steps(&self) -> String {
+        let open: Vec<String> = self.run_steps.iter().enumerate().filter(|(_, s)| !s.is_empty()).map(|(i, s)| format!("run {}: {s}", i + 1)).collect();
+        if open.is_empty() { self.stage.clone() } else { open.join("; ") }
+    }
+
     /// Note an ended round's log line (the last [`ROUND_LINES`] stay). O(ROUND_LINES).
     pub(crate) fn push_round_line(&mut self, line: String) {
         self.rounds_ended += 1;
@@ -184,6 +199,8 @@ pub struct TimeLimit {
     ns: AtomicU64,
     /// Set by [`TimeLimit::set`] (the caller changed the limit during the run): the report says so.
     changed: AtomicBool,
+    /// `[run] timeout_mode = "hard"` (the limit stops the step that runs; [`limit_notice`]).
+    hard: AtomicBool,
 }
 
 const LIMIT_UNSET: u64 = u64::MAX;
@@ -191,7 +208,7 @@ const LIMIT_NONE: u64 = u64::MAX - 1;
 
 impl Default for TimeLimit {
     fn default() -> TimeLimit {
-        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false) }
+        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false) }
     }
 }
 
@@ -209,6 +226,16 @@ impl TimeLimit {
     /// The run's own limit (`Options::wall_clock_s`, 0 = none), only when nobody set one yet. O(1).
     pub fn init(&self, seconds: f64) {
         let _ = self.ns.compare_exchange(LIMIT_UNSET, Self::encode(seconds), Ordering::Relaxed, Ordering::Relaxed);
+    }
+
+    /// The limit is hard (`[run] timeout_mode = "hard"`) or soft (default). O(1).
+    pub fn set_hard(&self, hard: bool) {
+        self.hard.store(hard, Ordering::Relaxed);
+    }
+
+    /// Whether the limit is hard ([`TimeLimit::set_hard`]). O(1).
+    pub fn is_hard(&self) -> bool {
+        self.hard.load(Ordering::Relaxed)
     }
 
     /// Change the limit (seconds since the start; `0` = no limit). O(1), any thread.
@@ -328,7 +355,8 @@ impl RunControl {
         if passed {
             self.with_progress(|p| {
                 if p.limit_step.is_empty() {
-                    p.limit_step = if p.stage.is_empty() { "routing".into() } else { p.stage.clone() };
+                    let open = p.open_steps();
+                    p.limit_step = if open.is_empty() { "routing".into() } else { open };
                 }
             });
         }
@@ -341,10 +369,11 @@ impl RunControl {
         let mut p = self.progress.lock().map(|p| p.clone()).unwrap_or_default();
         p.limit_reached = self.limit.passed() && !self.is_cancelled() && p.phase != "done";
         if p.limit_reached {
+            let open = p.open_steps();
             if p.limit_step.is_empty() {
-                p.limit_step = p.stage.clone();
+                p.limit_step = open.clone();
             }
-            p.notice = limit_notice(&p.stage);
+            p.notice = limit_notice(&open, self.limit.is_hard());
         }
         p
     }
@@ -353,16 +382,44 @@ impl RunControl {
     pub(crate) fn stage(&self, round: u32, rounds: u32, stage: &str) {
         if let Ok(mut p) = self.progress.lock() {
             // M2.TL: the stage that ran when the limit passed is the step the soft limit waited for.
-            if p.limit_step.is_empty() && !p.stage.is_empty() && self.limit.passed() {
-                p.limit_step = p.stage.clone();
-            }
+            Self::note_limit_step(&self.limit, &mut p);
             if self.run > 0 && p.runs > 1 {
                 p.stage = if stage.is_empty() { String::new() } else { format!("run {}: {stage}", self.run) };
+                let i = self.run as usize - 1;
+                if p.run_steps.len() <= i {
+                    p.run_steps.resize(i + 1, String::new());
+                }
+                p.run_steps[i] = stage.to_string();
                 return;
             }
             p.stage = stage.to_string();
             p.round = round;
             p.rounds = rounds;
+        }
+    }
+
+    /// M2.TL: the steps that ran when the limit passed are the steps the soft limit waits for
+    /// (recorded once, before a step changes). O(runs).
+    fn note_limit_step(limit: &TimeLimit, p: &mut Progress) {
+        if p.limit_step.is_empty() && limit.passed() {
+            let open = p.open_steps();
+            if !open.is_empty() {
+                p.limit_step = open;
+            }
+        }
+    }
+
+    /// Run `run` of a best-of-N call computes nothing now (between its cycles, waiting at the M2
+    /// draw gate, or done): the soft limit no longer names its step. O(runs).
+    pub(crate) fn idle(&self) {
+        if self.run == 0 {
+            return;
+        }
+        if let Ok(mut p) = self.progress.lock() {
+            Self::note_limit_step(&self.limit, &mut p);
+            if let Some(s) = p.run_steps.get_mut(self.run as usize - 1) {
+                s.clear();
+            }
         }
     }
 
@@ -693,6 +750,37 @@ mod tests {
         none.limit.init(0.0);
         none.limit.reach();
         assert!(none.over_limit(), "no limit: reach() sets one at the time spent");
+    }
+
+    #[test]
+    fn the_soft_limit_names_the_steps_of_the_runs_still_computing() {
+        // verify-m2 F6: not only the stage text the last run set
+        let ctl = RunControl::new();
+        ctl.limit.init(600.0);
+        ctl.with_progress(|p| p.runs = 3);
+        let (r1, r2, r3) = (ctl.for_run(1), ctl.for_run(2), ctl.for_run(3));
+        r2.stage(1, 1, "layer assignment, rip-up and reroute");
+        r3.stage(1, 1, "topological search");
+        r1.stage(1, 1, "TopoR loop on the topology");
+        r1.idle(); // run 1 waits at the draw gate
+        ctl.limit.reach();
+        let p = ctl.snapshot();
+        assert_eq!(p.limit_step, "run 2: layer assignment, rip-up and reroute; run 3: topological search");
+        assert_eq!(p.notice, "time limit reached, waiting for the current step to finish (run 2: layer assignment, rip-up and reroute; run 3: topological search); press Cancel to stop now");
+        r3.idle();
+        assert_eq!(ctl.snapshot().limit_step, "run 2: layer assignment, rip-up and reroute; run 3: topological search", "recorded once");
+        assert!(ctl.snapshot().notice.contains("(run 2: layer assignment, rip-up and reroute)"), "the notice follows the runs still computing");
+    }
+
+    #[test]
+    fn the_hard_limit_has_its_own_notice() {
+        // verify-m2 F7a: the hard limit stops the step, it does not wait for it
+        let ctl = RunControl::new();
+        ctl.limit.init(600.0);
+        ctl.limit.set_hard(true);
+        ctl.stage(1, 1, "drawing the traces");
+        ctl.limit.reach();
+        assert_eq!(ctl.snapshot().notice, "time limit reached (hard): the current step stops now (drawing the traces)");
     }
 
     #[test]
