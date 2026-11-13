@@ -579,7 +579,7 @@ title/label/button/checkbox/choice/heading/text).
 | progress | score_length | text | {length} m |
 | progress | score_pending | text | – |
 | progress | score_waiting | text | Waiting for round 1… |
-| progress | score_hint | text | Scores compare in the pick order: fewest errors (open connections and connections with rule violations), then fewest open, fewest vias, the shortest length ([optimize] pick). The best so far is the board OK or Cancel keeps. |
+| progress | score_hint | text | Scores compare in the pick order: fewest errors (open connections and connections with rule violations), then fewest connections with a short, then fewest open, fewest vias, the shortest length ([optimize] pick). The best so far is the board OK or Cancel keeps. |
 | progress | vs_first | text | The first result is the best so far. |
 | progress | vs_new_best | text | Last round is the new best: {delta}. |
 | progress | vs_worse | text | Last round is worse than the best: {delta}. |
