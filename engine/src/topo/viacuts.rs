@@ -18,6 +18,14 @@
 //! graded amount like a static cut (Polubasov 2001 p. 4: the via lies on the wire piece between
 //! its two events; Luzin & Polubasov 2008 p. 4: the real via size counts in the optimisation).
 //!
+//! **Scope (board-rules finding 3).** Cut model only (`[capacity] model = "cuts"`,
+//! [`super::cutmodel::CutPrice`]): its runs ([`super::cutflow::Stretch`]) exist there. With the
+//! per-edge model (the default since 2026-11-13) the plan does not price via cuts; its side of CM1
+//! is the via relocation's band term ([`super::viaopt`] `gap_at`): two vias of one wire keep the
+//! room of the other nets' bands the plan crosses between them, so the drawing finds it
+//! (`topo_reroute52`). Pricing via cuts in the per-edge plan needs the runs of every wire in every
+//! P3 / P4 price and is an open question (runtime).
+//!
 //! **Incremental.** [`ViaCuts::set_wire`] keeps the runs and vias of every wire; a change of wire
 //! `w` re-prices the via cuts of `w`'s vias (dropped and rebuilt) and every via cut whose segment's
 //! box meets the box of one of `w`'s old or new runs on that layer. [`ViaCuts::begin`] /
@@ -89,8 +97,11 @@ impl VPair {
     }
 }
 
+/// Undo log of a move: the old value of every via cut the move changed (`None`: it did not exist),
+/// so [`ViaCuts::begin`] copies nothing (board-rules finding 6: the old snapshot cloned every via
+/// pair on every move).
 struct Snap {
-    pairs: BTreeMap<(ViaRef, ViaRef), VPair>,
+    pairs: BTreeMap<(ViaRef, ViaRef), Option<VPair>>,
     total: f64,
     wires: BTreeMap<WireId, (Vec<Run>, Vec<ViaItem>)>,
 }
@@ -181,6 +192,7 @@ impl ViaCuts {
         // The via cuts of w's vias: rebuilt below.
         let mine: Vec<(ViaRef, ViaRef)> = self.pairs.keys().filter(|k| k.0 .0 == w || k.1 .0 == w).copied().collect();
         for k in mine {
+            self.log_pair(k);
             if let Some(p) = self.pairs.remove(&k) {
                 self.total -= p.price();
             }
@@ -197,6 +209,7 @@ impl ViaCuts {
             }
         }
         for (k, l) in redo {
+            self.log_pair(k);
             let (a, b) = {
                 let p = &self.pairs[&k];
                 (p.a, p.b)
@@ -225,6 +238,7 @@ impl ViaCuts {
             }
         }
         for (key, a, b) in add {
+            self.log_pair(key);
             let per = self.eval_all(&a, &b);
             let p = VPair { a, b, per };
             self.total += p.price();
@@ -233,9 +247,17 @@ impl ViaCuts {
         self.total - t0
     }
 
-    /// Open a move ([`ViaCuts::rollback`] undoes every change after it).
+    /// Record the value of via cut `k` before its first change in the open move. O(log pairs).
+    fn log_pair(&mut self, k: (ViaRef, ViaRef)) {
+        let pairs = &self.pairs;
+        if let Some(s) = self.snap.as_mut() {
+            s.pairs.entry(k).or_insert_with(|| pairs.get(&k).cloned());
+        }
+    }
+
+    /// Open a move ([`ViaCuts::rollback`] undoes every change after it). O(1).
     pub fn begin(&mut self) {
-        self.snap = Some(Snap { pairs: self.pairs.clone(), total: self.total, wires: BTreeMap::new() });
+        self.snap = Some(Snap { pairs: BTreeMap::new(), total: self.total, wires: BTreeMap::new() });
     }
 
     pub fn commit(&mut self) {
@@ -244,12 +266,26 @@ impl ViaCuts {
 
     pub fn rollback(&mut self) {
         let Some(s) = self.snap.take() else { return };
-        self.pairs = s.pairs;
+        for (k, old) in s.pairs {
+            match old {
+                Some(p) => {
+                    self.pairs.insert(k, p);
+                }
+                None => {
+                    self.pairs.remove(&k);
+                }
+            }
+        }
         self.total = s.total;
         for (w, (r, v)) in s.wires {
             self.runs[w] = r;
             self.vias[w] = v;
         }
+    }
+
+    /// Via pairs within reach (each spans a via cut on every layer).
+    pub fn pairs(&self) -> usize {
+        self.pairs.len()
     }
 
     /// Total price of the via cuts (mm).
@@ -276,7 +312,11 @@ impl ViaCuts {
         let Some(s) = self.snap.as_ref() else { return false };
         self.pairs.iter().any(|(k, p)| {
             p.per.iter().enumerate().any(|(l, c)| {
-                let before = s.pairs.get(k).map_or(f64::INFINITY, |o| o.per[l].slack);
+                // unchanged since begin: not worse; changed: against its old value (none: room)
+                let before = match s.pairs.get(k) {
+                    None => c.slack,
+                    Some(o) => o.as_ref().map_or(f64::INFINITY, |o| o.per[l].slack),
+                };
                 c.slack < -OVER_TOL && c.slack < before - 1.0
             })
         })
@@ -353,6 +393,36 @@ mod tests {
         vc.set_wire(1, &[run(0, 1, &[(5.0, -3.0), (5.0, 3.0)])], &[]);
         assert_eq!(vc.overfull(), 0, "band moved off the gap");
         assert!(vc.total().abs() < 1e-9);
+    }
+
+    #[test]
+    fn rollback_restores_repriced_removed_and_added_via_cuts() {
+        // Finding 6: the undo log records only the via cuts a move changes; a rollback restores
+        // a re-priced cut, a removed one and drops an added one.
+        let mut vc = ViaCuts::new(2, 3, 1.0, 0.1);
+        vc.set_wire(1, &[run(0, 1, &[(0.68, -3.0), (0.68, 3.0)])], &[]);
+        vc.set_wire(0, &[], &[via(0, 0.0, 0.0), via(0, 1.36, 0.0)]);
+        let (t0, n0, keys0) = (vc.total(), vc.overfull(), vc.pairs.keys().copied().collect::<Vec<_>>());
+        assert_eq!(n0, 1);
+        vc.begin();
+        // re-priced: the band moves off the gap
+        vc.set_wire(1, &[run(0, 1, &[(5.0, -3.0), (5.0, 3.0)])], &[]);
+        assert_eq!(vc.overfull(), 0);
+        // removed and added: wire 0's vias move, wire 2 adds a via near them
+        vc.set_wire(0, &[], &[via(0, 10.0, 0.0), via(0, 11.36, 0.0)]);
+        vc.set_wire(2, &[], &[via(2, 10.6, 1.0)]);
+        assert!(!vc.pairs.is_empty());
+        vc.rollback();
+        assert!((vc.total() - t0).abs() < 1e-9, "{} vs {t0}", vc.total());
+        assert_eq!(vc.overfull(), n0);
+        assert_eq!(vc.pairs.keys().copied().collect::<Vec<_>>(), keys0);
+        assert!(vc.vias[2].is_empty() && vc.vias[0][0].at.x == 0.0);
+        // a second move after the rollback logs afresh
+        vc.begin();
+        vc.set_wire(1, &[run(0, 1, &[(5.0, -3.0), (5.0, 3.0)])], &[]);
+        assert!(!vc.worse_somewhere());
+        vc.commit();
+        assert_eq!(vc.overfull(), 0);
     }
 
     #[test]

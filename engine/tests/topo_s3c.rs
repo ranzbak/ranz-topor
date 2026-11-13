@@ -357,12 +357,38 @@ fn via_shift_moves_a_layer_change_out_of_a_full_door() {
         let mut lb = labels(st, cm, evl, &mask, &partner);
         assert_eq!(lb.via_shifts(0), 1, "the via shift fires");
         // The door fits now: nothing over-full, no via short of room; what is left of the price
-        // is the graded via-site tail of the one via (phi, pair proposal 2026-11-13 item 2; the
-        // old flat price was 0 for a via with a site).
+        // is the graded via-site tail of the one via, about 0 for a via with room (phi moved
+        // SITE_SHIFT softnesses towards the room: at most 0.02 x 50 mm for a via that just fits;
+        // board-rules finding 1, the old flat price was 0 for a via with a site).
         assert_eq!(lb.cm.violations(), (0, 0.0), "the door fits now");
+        assert!(lb.cm.total() < 1.0, "a via with room costs about 0: {}", lb.cm.total());
         assert!(lb.cm.total() < 0.01 * before, "{} vs {before}", lb.cm.total());
         assert_eq!(lb.evl[0].windows(2).filter(|x| x[0].2 != x[1].2).count(), 1, "still one via");
         assert_eq!(lb.tally.applied_of(Kind::ViaShift), 1);
+    });
+}
+
+#[test]
+fn another_nets_via_in_the_triangle_takes_graded_room() {
+    // Board-rules finding 5 (M2d): another net's via planned in the same triangle takes room from
+    // a via (`[vias] reserve_sites`), graded by how far the triangle is below the two discs, never
+    // a cutoff: both nets' vias in the triangle before the door are priced finitely, a little
+    // more than one via alone.
+    labels_case(|st, b, packer, polys| {
+        let (k0, k1) = (door_pass(st, b, 0), door_pass(st, b, 1));
+        assert_eq!(st.wires[0].tris[k0], st.wires[1].tris[k1], "one triangle before the door");
+        let n1 = st.wires[1].passes.len();
+        let one = vec![vec![(k0, 0.3, 0), (k0, 0.7, 1)], vec![(0, 0.5, 0), (n1, 0.5, 0)]];
+        let both = vec![vec![(k0, 0.3, 0), (k0, 0.7, 1)], vec![(k1, 0.3, 1), (k1, 0.7, 0)]];
+        let cm1 = CapModel::new(st, packer, polys, &one, 1, 50.0);
+        let cm2 = CapModel::new(st, packer, polys, &both, 1, 50.0);
+        eprintln!("{}", cm2.nosite_debug(0, &both[0]));
+        eprintln!("{}", cm2.nosite_debug(1, &both[1]));
+        let (v1, v2) = (cm1.violations().1, cm2.violations().1);
+        eprintln!("one via: {v1}, both: {v2}; total {} / {}", cm1.total(), cm2.total());
+        assert!(v2 > v1, "the second via in the triangle takes room: {v1} -> {v2}");
+        assert!(v2 < 10.0, "graded, not a cutoff: {v2}");
+        assert!(cm2.total() < 1e4, "{}", cm2.total());
     });
 }
 
@@ -453,6 +479,31 @@ fn cut_model_label_moves_are_kept_on_price_alone() {
             assert!(after - before < 50.0, "the overflow costs less than the two vias saved");
         }
     }
+}
+
+#[test]
+fn cut_model_prices_the_via_cut_between_two_planned_vias() {
+    // CM1 wiring (board-rules finding 3, mutant M4a): with [capacity] model = "cuts" the planned
+    // vias of a wire within reach of each other span a via cut ([`topor_engine::topo::viacuts`]),
+    // installed with the wire's runs and part of the cut price.
+    let m = door();
+    let b = board::build(&m, &BuildOpts::default()).unwrap();
+    let conns = b.connections(&m);
+    let mut st = State::new(&b.proj);
+    route(&mut st, &conns, &InitWeights::default());
+    let opts = Options { capacity_model: "cuts".into(), ..Options::default() };
+    let packer = Packer::for_model(&m, &opts, &b.proj);
+    let polys = packer.taut_dirs(&st);
+    let n = st.wires[0].passes.len();
+    assert!(n >= 3, "{n} passes");
+    // wire 0: layer 1, 0, 1 with the two changes in neighbouring traversals (vias close together)
+    let evl = vec![vec![(0, 0.5, 1), (1, 0.5, 0), (2, 0.5, 1), (n, 0.5, 1)], vec![(0, 0.5, 1)]];
+    let cm = CapModel::new_cut(&st, &packer, &polys, &evl, 1, 50.0);
+    let c = cm.cut.as_ref().expect("priced by the cuts");
+    eprintln!("via cuts {} (over-full {}), vias {:?}", c.vc.pairs(), c.vc.overfull(), cm.via_k[0]);
+    assert_eq!(cm.via_k[0].len(), 2);
+    assert!(c.vc.pairs() >= 1, "the two vias span a via cut");
+    assert!((c.total() - c.vc.total()).is_finite());
 }
 
 #[test]

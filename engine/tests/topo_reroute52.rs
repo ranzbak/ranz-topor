@@ -104,6 +104,12 @@ fn planned_crossing_window_predicts_no_via_without_a_site() {
                 .collect();
             assert_eq!(vias.len(), 2, "{vias:?}");
             assert!(vias.iter().all(|&(x, y)| (12.2 - 1e-3..=13.8 + 1e-3).contains(&x) && (5.9..=8.1).contains(&y)), "VCC vias inside the window: {vias:?}");
+            // CM1 in the relocation (board-rules finding 3): SDA's band is planned between VCC's two
+            // vias, so their relocation keeps its room (0.4 + 0.2 + 0.25 + 0.2 + 0.4 = 1.45 mm) as far
+            // as the plan's traversals allow (without the band term they sat 0.93 mm apart and SDA
+            // shorted into VCC).
+            let d = ((vias[0].0 - vias[1].0).powi(2) + (vias[0].1 - vias[1].1).powi(2)).sqrt();
+            assert!(d >= 1.3, "VCC vias {d:.3} mm apart: {vias:?}");
         }
     }
 }

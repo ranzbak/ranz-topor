@@ -80,19 +80,6 @@ pub fn plan_via_need(rules: &Rules, opts: &Options) -> f64 {
 // reaches as far as or further than the copper term, which the plan's disc-only room missed.
 // `margin` is `[search] margin_um` (nm), added to every requirement as the drawing does.
 
-/// Centre distance (nm) the largest coupled pair's two-via disc ([`Rules::pair_disc`] nets of the
-/// planning model) needs to foreign copper: [`via_need_copper`] of its first size, `[search]
-/// margin_um` included; 0 when the model has no coupled pair. O(nets with a rule).
-pub fn pair_via_need(rules: &Rules, opts: &Options) -> f64 {
-    let margin = opts.margin_nm.max(0) as f64;
-    rules
-        .per_net
-        .iter()
-        .filter(|(_, r)| r.pair_disc)
-        .filter_map(|(&n, _)| via_sizes(rules, n, opts).first().map(|&sz| via_need_copper(rules, n, sz, 0.0, margin)))
-        .fold(0.0, f64::max)
-}
-
 /// The clearance (nm) of `net` the via rules start from: the net's rule, floored by the board
 /// minimum. O(1).
 fn net_clear(rules: &Rules, net: i32) -> f64 {
