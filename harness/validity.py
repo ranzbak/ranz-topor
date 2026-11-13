@@ -168,7 +168,9 @@ def rule_set(rules: dict, net_names: dict, cfg=None) -> dict:
                                for x in rules.get("floors_applied") or []],
             "custom_floors": [n for n in rules.get("custom_notes") or [] if str(n).startswith("floor:")],
             "fallbacks": [{"field": x["field"], "value": _mm(x["value"]), "kicad": _mm(x["kicad"]),
-                           "setting": x.get("setting", "")} for x in rules.get("fallbacks") or []]}
+                           "setting": x.get("setting", ""),
+                           **({"reset_from": _mm(x["reset_from"])} if "reset_from" in x else {})}
+                          for x in rules.get("fallbacks") or []]}
 
 
 def model_rule_set(model: dict, cfg=None) -> dict:
@@ -396,8 +398,10 @@ def judge(declared: dict | None, eff: dict, board: dict | None, *, cfg=None, exp
     source = f"expected.json rules_assumed ({expected_path})" if declared is not None else \
         "board files (no rules_assumed): Board Setup + net classes + custom rules, [rules] fab_profile = \"board\""
     for fb in eff.get("fallbacks") or []:
-        txt = (f"rule fallback {fb['field']} = {fb['value']:g} mm (the board files do not set it; KiCad's DRC uses "
-               f"{fb['kicad']:g} mm)")
+        txt = (f"rule fallback {fb['field']} = {fb['value']:g} mm ("
+               + (f"the board files give {fb['reset_from']:g} mm, outside KiCad's load range; KiCad resets it and "
+                  "its DRC uses " if fb.get("reset_from") is not None else
+                  "the board files do not set it; KiCad's DRC uses ") + f"{fb['kicad']:g} mm)")
         if _same(fb["value"], fb["kicad"]):
             notes_fb.append(txt)
         else:

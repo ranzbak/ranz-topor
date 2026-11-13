@@ -221,6 +221,27 @@ def test_missing_keys_take_the_reported_fallback(tmp_path):
     assert r["min_track_width"] == 200_000 and r["hole_to_hole"] == 250_000
 
 
+def test_out_of_range_values_take_kicads_reset_value_reported(tmp_path):
+    """A .kicad_pro value outside KiCad's load range (max_error 0, a negative clearance) is what KiCad replaces by
+    its PARAM default on load (common/settings/parameters.h:450-454; board_design_settings.cpp:1136-1138 for
+    max_error, range [0.0001, 1] mm, ARC_HIGH_DEF): its DRC uses that value, so topor does, listed as a fallback
+    row and a ``rule fallback:`` warning (before: max_error 0 -> 0.005 mm silently). The legacy -0.01 mm
+    copper-to-edge flag is inside the range and stays."""
+    from toporlib.rules import KICAD_RANGE_NM, fallback_text
+
+    b = _board(tmp_path, rules={"max_error": 0, "min_clearance": -0.1, "min_copper_edge_clearance": -0.01})
+    r = resolve_rules(b, dru_text=None, widths_before={})
+    assert r["max_error"] == 5_000 and r["min_clearance"] == KICAD_RANGE_NM["min_clearance"][2] == 0
+    rows = {x["field"]: x for x in r["fallbacks"]}
+    assert set(rows) == {"max_error", "min_clearance"}
+    assert rows["max_error"]["reset_from"] == 0 and rows["max_error"]["value"] == rows["max_error"]["kicad"]
+    assert rows["min_clearance"]["reset_from"] == -100_000
+    txt = fallback_text(rows["max_error"])
+    assert txt in r["warnings"] and "outside KiCad's range [0.0001, 1] mm -> 0.005 mm used" in txt
+    assert "Maximum allowed deviation" in txt
+    assert r["edge_clearance"] == 0  # the legacy flag: a board value, no fallback row (no minimum here)
+
+
 def test_output_parses_with_engine_rules(tmp_path, engine):
     b = _board(tmp_path)
     r = resolve_rules(b, dru_text=None, widths_before={})

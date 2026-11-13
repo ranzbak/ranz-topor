@@ -598,7 +598,7 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: warning.*
 
-**Cause.** A design rule the router needs is not set in the board's KiCad configuration (a key missing from the .kicad_pro, e.g. a project written by an older KiCad or by a script, or no .kicad_pro at all; or a net class Default without a track width / via size), so topor used a fallback: the JLCPCB 1 oz value, raised to KiCad's own value for the missing setting where that is stricter. Values the board does set are always used as they are, a 0 included.
+**Cause.** A design rule the router needs is not set in the board's KiCad configuration (a key missing from the .kicad_pro, e.g. a project written by an older KiCad or by a script, or no .kicad_pro at all; or a net class Default without a track width / via size), so topor used a fallback: the JLCPCB 1 oz value, raised to KiCad's own value for the missing setting where that is stricter. A value outside the range KiCad accepts on load (e.g. Maximum allowed deviation 0) is replaced, as KiCad itself replaces it when it opens the board, by KiCad's built-in default, which its DRC then uses; it is listed here too. Values the board does set inside that range are always used as they are, a 0 included.
 
 **Fix.** Set each named value in KiCad → File → Board Setup → Design Rules → Constraints (or → Net Classes → Default) and save the board; KiCad then writes it to the .kicad_pro and the finding goes away. The fallback table is in docs/user/operate.md, Design rules.
 

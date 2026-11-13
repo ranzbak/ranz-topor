@@ -284,7 +284,8 @@ def _rule_fallback_findings(rules: dict) -> list:
     if not rows:
         return []
     texts = [fallback_text(r) for r in rows]
-    return [_mk("RULE_FALLBACK", f"{len(rows)} design rule(s) not set by the board, fallback used: "
+    return [_mk("RULE_FALLBACK", f"{len(rows)} design rule(s) not set by the board (or outside KiCad's range), "
+                "fallback used: "
                 + "; ".join(f"{r['label']} {r['value'] / _NM:g} mm" for r in rows) + ".", texts)]
 
 

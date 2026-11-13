@@ -58,10 +58,11 @@ BOARD_AUTHORITY = "board"
 DEFAULT_FAB_PROFILE = BOARD_AUTHORITY
 
 #: The value KiCad itself uses for a ``board.design_settings.rules`` key the .kicad_pro does not carry (nm): the
-#: BOARD_DESIGN_SETTINGS constructor values (pcbnew/board_design_settings.cpp:151-161 and :215, the DEFAULT_* of
-#: board_design_settings.h:79-89), because BOARD_DESIGN_SETTINGS sets ``m_resetParamsIfMissing = false``
-#: (board_design_settings.cpp:48: "leave alone parameters that aren't found in the project JSON"; KiCad
-#: 86a7a3f4). The annular ring is (0.5 - 0.3) / 2 = 0.1 mm there (the JSON PARAM default 0.5 mm never applies).
+#: BOARD_DESIGN_SETTINGS constructor values (pcbnew/board_design_settings.cpp:151-165, m_MaxError = ARC_HIGH_DEF at
+#: :221; the DEFAULT_* of include/board_design_settings_defaults.h:69-79), because BOARD_DESIGN_SETTINGS sets
+#: ``m_resetParamsIfMissing = false`` (board_design_settings.cpp:52: "leave alone parameters that aren't found in
+#: the project JSON"; KiCad 86a7a3f4). The annular ring is (0.5 - 0.3) / 2 = 0.1 mm there (the JSON PARAM default
+#: 0.5 mm applies only to an out-of-range value, :data:`KICAD_RANGE_NM`).
 KICAD_ABSENT_NM = {
     "min_clearance": 0,
     "min_track_width": 200_000,
@@ -74,7 +75,24 @@ KICAD_ABSENT_NM = {
     "min_connection": 0,
     "max_error": 5_000,  # ARC_HIGH_DEF
 }
-#: KiCad's values of a net class field nobody set (common/netclass.cpp:40-45 DEFAULT_CLEARANCE / TRACK_WIDTH /
+#: KiCad's load range of each ``board.design_settings.rules`` key and the value it puts in place of a value outside
+#: it, nm: ``(min, max, reset)`` (the PARAM_SCALED min / max / default of board_design_settings.cpp:292-359 and
+#: :1136-1138; PARAM_SCALED::Load replaces an out-of-range value by the PARAM default, common/settings/parameters.h
+#: :450-454, also PARAM<T>::Load :127-130). KiCad's DRC works with the reset value, so topor mirrors it, reported
+#: (:func:`board_rule_values`). The annular ring's PARAM default is DEFAULT_VIASMINSIZE (0.5 mm) in KiCad's source.
+KICAD_RANGE_NM = {
+    "min_clearance": (0, 25_000_000, 0),
+    "min_track_width": (0, 25_000_000, 200_000),
+    "min_via_diameter": (0, 25_000_000, 500_000),
+    "min_through_hole_diameter": (0, 25_000_000, 300_000),
+    "min_via_annular_width": (0, 25_000_000, 500_000),
+    "min_hole_clearance": (0, 100_000_000, 250_000),
+    "min_hole_to_hole": (0, 10_000_000, 250_000),
+    "min_copper_edge_clearance": (-10_000, 25_000_000, 500_000),
+    "min_connection": (0, 100_000_000, 0),
+    "max_error": (100, 1_000_000, 5_000),  # ARC_HIGH_DEF
+}
+#: KiCad's values of a net class field nobody set (common/netclass.cpp:36-41 DEFAULT_CLEARANCE / TRACK_WIDTH /
 #: VIA_DIAMETER / VIA_DRILL), nm.
 KICAD_CLASS_ABSENT_NM = {"clearance": 200_000, "track_width": 200_000, "via_diameter": 600_000, "via_drill": 300_000}
 _CLASS_FIELDS = tuple(KICAD_CLASS_ABSENT_NM)
@@ -118,11 +136,26 @@ VIA_HOLE_FALLBACK = max(JLCPCB_1OZ["via_hole_to_track"], KICAD_ABSENT_NM["min_ho
 
 
 def fallback_text(row: dict) -> str:
-    """The report line of one used fallback (`row`: a :data:`RULE_FALLBACK` entry). O(1)."""
+    """The report line of one used fallback (`row`: a :data:`RULE_FALLBACK` entry, or a range-reset row of
+    :func:`reset_row`). O(1)."""
+    if "reset_from" in row:
+        lo, hi = row["range"]
+        return (f"rule fallback: {row['label']} {row['reset_from'] / 1e6:g} mm is outside KiCad's range "
+                f"[{lo / 1e6:g}, {hi / 1e6:g}] mm -> {row['value'] / 1e6:g} mm used (KiCad resets it to this on "
+                f"load and its DRC uses it); set it in {row['setting']}")
     src = (f"JLCPCB 1 oz {row['jlcpcb'] / 1e6:g} mm, KiCad's own {row['kicad'] / 1e6:g} mm, the stricter"
            if row.get("jlcpcb") is not None else "KiCad's own value; JLCPCB gives none")
     return (f"rule fallback: {row['label']} is not set by the board -> {row['value'] / 1e6:g} mm used ({src}); "
             f"set it in {row['setting']}")
+
+
+def reset_row(field: str, given: int) -> dict:
+    """The fallback row of a ``board.design_settings.rules`` value outside KiCad's load range
+    (:data:`KICAD_RANGE_NM`): KiCad's reset value, the given value and the range. O(1)."""
+    lo, hi, reset = KICAD_RANGE_NM[field]
+    _, label, setting = _FALLBACK_SRC[field]
+    return {"field": field, "label": label, "value": reset, "jlcpcb": None, "kicad": reset, "setting": setting,
+            "reset_from": int(given), "range": (lo, hi)}
 
 
 _POWER_RE = re.compile(r"^(\+|-)?\d|^(V|VCC|VDD|VBAT|GND|AGND|PWR)")
@@ -238,12 +271,14 @@ def netclass_of_from_pro(pro: dict, net_names) -> dict[str, str]:
     return out
 
 
-def board_rule_values(pro: dict) -> tuple[dict[str, int], list[str]]:
+def board_rule_values(pro: dict, resets: dict | None = None) -> tuple[dict[str, int], list[str]]:
     """``board.design_settings.rules`` as nm and the keys the project file does not carry (in
     :data:`KICAD_ABSENT_NM` order). A missing (or non-numeric) key takes its :data:`RULE_FALLBACK` value; a value
     the file carries is used as is, 0 and negative values included (KiCad: 0 = no minimum; -0.01 mm is KiCad's
-    legacy copper-to-edge flag, i.e. no minimum here). ``max_error`` is read from ``rules`` and, for older files,
-    from ``design_settings``. O(1)."""
+    legacy copper-to-edge flag, i.e. no minimum here), unless it lies outside KiCad's load range
+    (:data:`KICAD_RANGE_NM`, e.g. ``max_error`` 0): then it takes the value KiCad resets it to on load, and
+    `resets` (when given) receives ``{key: given value}``. ``max_error`` is read from ``rules`` and, for older
+    files, from ``design_settings``. O(1)."""
     ds = (pro.get("board") or {}).get("design_settings") or {}
     rules = ds.get("rules") or {}
     out: dict[str, int] = {}
@@ -255,6 +290,12 @@ def board_rule_values(pro: dict) -> tuple[dict[str, int], list[str]]:
         except (TypeError, ValueError):
             out[k] = RULE_FALLBACK[k]["value"]
             missing.append(k)
+            continue
+        lo, hi, reset = KICAD_RANGE_NM[k]
+        if not lo <= out[k] <= hi:
+            if resets is not None:
+                resets[k] = out[k]
+            out[k] = reset
     return out, missing
 
 
@@ -321,8 +362,10 @@ def resolve_rules_from_project(
                          f"{', '.join([BOARD_AUTHORITY, *FAB_PROFILES])})")
     profile = FAB_PROFILES.get(fab_profile)
     settings_table = settings_table or {}
-    dv, missing = board_rule_values(pro)
+    resets: dict[str, int] = {}
+    dv, missing = board_rule_values(pro, resets)
     fallbacks: dict[str, dict] = {k: RULE_FALLBACK[k] for k in missing}
+    fallbacks.update({k: reset_row(k, v) for k, v in resets.items()})
     codes = net_codes if net_codes is not None else net_codes_by_name(netclass_of)
     cr = CustomRules(parse_dru(dru_text) if dru_text else [], canonical_layers(copper_layer_count),
                      {v: canonical_name(k) for k, v in (layer_names or {}).items()})
@@ -367,7 +410,7 @@ def resolve_rules_from_project(
                                       P.get("via_hole_to_track", P.get("pth_hole_to_track", 0))),
         "hole_to_hole": floored("hole_to_hole", dv["min_hole_to_hole"], P.get("hole_to_hole_via", 0)),
         "edge_clearance": floored("edge_clearance", dv["min_copper_edge_clearance"], P.get("edge", 0)),
-        "max_error": dv["max_error"] if dv["max_error"] > 0 else RULE_FALLBACK["max_error"]["value"],
+        "max_error": int(dv["max_error"]),  # in KiCad's range (board_rule_values: an out-of-range value is reset)
         # Narrowest copper connection KiCad accepts (Board Setup > Constraints > Minimum connection width): a
         # necked pad exit may not go below it. 0 = no limit (KiCad's own value).
         "min_connection": max(int(dv["min_connection"]), 0),

@@ -51,6 +51,10 @@ def _swig_inputs(board) -> tuple[dict, dict, dict, dict]:
     for k in list(syn):
         if k not in file_rules and not (k == "max_error" and k in file_ds):
             del syn[k]
+        elif isinstance(file_rules.get(k, file_ds.get(k)), (int, float)):
+            # the file's own value: pcbnew has already reset a value outside its load range (e.g. max_error 0),
+            # the resolver mirrors that reset and reports it, as the plugin does (toporlib.rules KICAD_RANGE_NM)
+            syn[k] = file_rules.get(k, file_ds.get(k))
     if file_ds.get("rule_severities"):
         pro["board"]["design_settings"]["rule_severities"] = file_ds["rule_severities"]
     classes: dict[str, NetClassVals] = {}
