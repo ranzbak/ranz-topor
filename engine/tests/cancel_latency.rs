@@ -104,3 +104,32 @@ fn cancel_before_a_run_begins_skips_it() {
     let line = r.warnings.iter().find(|w| w.starts_with("best of 64 seeded runs")).unwrap_or_else(|| panic!("best-of line: {} {:?}", r.stop_reason, r.warnings));
     assert!(line.contains("not begun") && line.contains("without a result of their own"), "{line}");
 }
+
+/// M0 stop latency (verifier 2026-11-13): with the cut model (default since M0) a Cancel / the
+/// time limit during P3/P4 (layer assignment, rip-up and the topology and label moves, where the
+/// cut prices are computed per move) ends the call within seconds, on a crop of a real board.
+#[test]
+fn cancel_in_p3_p4_with_the_cut_model_ends_quickly() {
+    for fx in ["qmtech-usb-crop.json", "dcsgone-usb-crop.json"] {
+        let path = format!("{}/tests/fixtures/{fx}", env!("CARGO_MANIFEST_DIR"));
+        let m = BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).expect("fixture parses");
+        let o = opts(r#", "runs": 1"#);
+        let ctl = RunControl::new();
+        ctl.limit.init(o.wall_clock_s);
+        let c2 = ctl.clone();
+        let h = std::thread::spawn(move || route_with(&m, &o, &c2));
+        let t0 = Instant::now();
+        while !ctl.snapshot().stage.contains("layer assignment") && !h.is_finished() {
+            assert!(t0.elapsed().as_secs() < 600, "{fx}: never reached P3");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        let t = Instant::now();
+        ctl.request_cancel();
+        let r = h.join().expect("run thread");
+        let s = t.elapsed().as_secs_f64();
+        eprintln!("{fx}: stopped {s:.2} s after the Cancel ({} s into the call)", t0.elapsed().as_secs_f64() - s);
+        assert!(s < BOUND_S, "{fx}: Cancel in P3/P4 took {s:.2} s to end the run");
+        assert_eq!(r.stop_reason, "cancel", "{fx}: {:?}", r.warnings);
+    }
+}

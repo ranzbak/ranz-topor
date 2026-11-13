@@ -152,7 +152,9 @@ impl Topo {
     }
     /// Whether another evaluation is allowed (and count it).
     pub fn budget(&mut self) -> bool {
-        if self.evals >= self.max_evals {
+        // M0: a Cancel / the time limit ends the moves at the next evaluation (with the cut
+        // model one evaluation prices the cuts it touches: ~0.3 s each on qmtech).
+        if self.evals >= self.max_evals || crate::control::stop_requested() {
             return false;
         }
         self.evals += 1;
@@ -581,7 +583,7 @@ impl<'a> Labels<'a> {
             && self.partner[w][i].is_none_or(|(w2, i2)| self.evl[w2][i2].2 != l)
     }
     fn apply(&mut self, mv: &[((WireId, usize), i32)], kind: Kind) -> bool {
-        if self.evals >= self.max_evals {
+        if self.evals >= self.max_evals || crate::control::stop_requested() {
             return false;
         }
         self.evals += 1;

@@ -914,7 +914,7 @@ fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, 
         };
         let Ok(mut r) = runs[k].lock() else { return };
         let c = if n == 1 { ctl.clone() } else { ctl.for_run(k as u32 + 1) };
-        r.step(model, opts, &c, coord, stubs, fx, t_call);
+        crate::control::with_control(&c, || r.step(model, opts, &c, coord, stubs, fx, t_call));
         let st = (r.cycles, r.done);
         drop(r);
         if let (Ok(mut tk), Ok(mut cy)) = (taken.lock(), cycles.lock()) {
