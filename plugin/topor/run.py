@@ -989,7 +989,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         if state["cap_hit"]:
             warns.append(f"{cap_line} (run.timeout_overrun_s = {cap:g} s past the {state['limit']:.0f} s limit, CPU clock): "
                          "past it the soft limit acted as the hard one, the step that ran then was cut and what existed "
-                         "was drawn (a cut initial routing or drawing leaves connections unrouted; a cut TopoR loop cycle "
+                         "was drawn (the drawing of the plan that exists runs to its end unless it was the step that ran; a cut initial routing or drawing leaves connections unrouted; a cut TopoR loop cycle "
                          "is not kept); raise run.timeout_overrun_s or timeout_s, or use Cancel instead")
         rr = {**rr, "stop_reason": "timeout_cpu", "timed_out": True, "warnings": warns + [
             f"time budget hit: CPU-time limit of {state['limit']:.0f} s reached ({out.router_cpu_s:.0f} CPU s of router "

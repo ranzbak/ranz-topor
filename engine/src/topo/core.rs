@@ -290,7 +290,7 @@ fn limit_report(ctl: &RunControl, opts: &Options, runtime_s: f64, warnings: &mut
     if cap_hit {
         // F3 (user 2026-11-13): loud, the result is what existed when the cap fired
         warnings.push(format!(
-            "WARNING: time limit overrun cap reached ({}): past it the soft limit acted as the hard one, the step that ran then was cut and what existed was drawn (a cut initial routing or drawing leaves connections unrouted; a cut TopoR loop cycle is not kept); raise [run] timeout_overrun_s or timeout_s, or use Cancel instead",
+            "WARNING: time limit overrun cap reached ({}): past it the soft limit acted as the hard one, the step that ran then was cut and what existed was drawn (the drawing of the plan that exists runs to its end unless it was the step that ran; a cut initial routing or drawing leaves connections unrouted; a cut TopoR loop cycle is not kept); raise [run] timeout_overrun_s or timeout_s, or use Cancel instead",
             cap_s.map_or("the caller's cap on its own clock".to_string(), |c| format!("[run] timeout_overrun_s = {c:.0} s past the {limit_s:.0} s limit, wall clock"))
         ));
     }
@@ -895,7 +895,9 @@ impl Run {
             // M2.TL soft limit: the stitching belongs to the drawing of this variant and finishes
             // (Cancel still ends it); `hard` (or the soft limit past its overrun cap, F3, read
             // live): the limit cuts it.
-            let cut = || ctl.limit.is_hard() && ctl.over_limit();
+            // F3: a cap that fired before the stitching began does not cut it (it draws what exists).
+            let exempt = opts.timeout_mode != "hard" && ctl.limit.cap_hit();
+            let cut = || !exempt && ctl.limit.is_hard() && ctl.over_limit();
             let stitched = |mut r: RouteResult, mut c: Criteria| -> (RouteResult, Criteria) {
                 if opts.stitch_islands {
                     ctl.stage(cycle as u32, opts.topo_rounds.max(1) as u32, "pour stitching");
@@ -1680,10 +1682,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // finishes, no new one begins (the loop's cycles, the next whole-route cycle) and the best kept
     // variant is drawn to its end; Cancel / OK stops at once. hard = every step stops at the limit
     // (before M2).
-    // F3: past `[run] timeout_overrun_s` the soft limit acts as the hard one, read live.
+    // F3: past `[run] timeout_overrun_s` the soft limit acts as the hard one, read live: it cuts the
+    // step that runs. "Draw what exists" (user 2026-11-13): a cap that fired before the drawing
+    // began does not cut the drawing of the plan that exists (its via reduction included); a cap
+    // that fires while the drawing runs cuts it like the hard limit.
     let soft = || !ctl.limit.is_hard();
+    let draw_exempt = std::cell::Cell::new(false);
     let stop_now = || cancelled() || ctl.is_cancelled();
-    let limit_cut = || !soft() && ctl.deadline().is_some_and(|d| Instant::now() >= d.max(floor));
+    let limit_cut = || !draw_exempt.get() && !soft() && ctl.deadline().is_some_and(|d| Instant::now() >= d.max(floor));
     let expired = || (!draw_through.get() && stop_now()) || limit_cut();
     // M2.TL: Cancel / OK cut the initial routing (P2) before every connection had its place: the
     // plan is not complete, so it is no variant (nothing kept to draw).
@@ -3450,6 +3456,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     let lr = lr;
     let t_draw = Instant::now();
+    draw_exempt.set(opts.timeout_mode != "hard" && ctl.limit.cap_hit());
     // 4.3 `initial = "once"`: the plan handed to the next cycle (before anything is dropped).
     let plan_carry = once.then(|| PlanCarry { topo: st.topology(), wire_conn: wire_conn.clone(), conns: conns.clone(), term_over: term_over.clone() });
     if once {

@@ -244,7 +244,9 @@ fn a_soft_limit_in_p3_p4_does_not_cut_their_moves_until_its_overrun_cap() {
     let p4: Vec<String> = r.warnings.iter().filter(|w| w.starts_with("P4 moves on the")).cloned().collect();
     assert_ne!(p4, want[..2].to_vec(), "past the overrun cap the P4 moves stop (or never begin)");
     assert!(r.warnings.iter().any(|w| w.starts_with("WARNING: time limit overrun cap reached ([run] timeout_overrun_s = 0 s")), "{:?}", r.warnings);
-    assert!(!r.items.is_empty(), "what existed is drawn");
+    // "draw what exists": the cap fired in P3, before the drawing began, so the plan is drawn to its end
+    assert!(r.routed > 0 && !r.items.is_empty(), "what existed is drawn: {:?}", r.warnings);
+    assert!(!r.connections.iter().any(|c| c.reason.contains("time limit")), "the drawing was not cut: {:?}", r.connections.iter().filter(|c| c.reason.contains("time limit")).collect::<Vec<_>>());
 }
 
 #[test]
