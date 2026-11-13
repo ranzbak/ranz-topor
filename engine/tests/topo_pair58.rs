@@ -1,7 +1,7 @@
 //! Shopping list 5.8: the obstructing-wire half of the local via-pair minimisation (Luzin, Popov
 //! & Popov 2013 p. 134 step 8.1, fig. 1; Luzin 2013 p. 104 fig. 21c) on the engine model of the
-//! `pair_move` pattern (`harness/pair_patterns.py`, scratch/pair-patterns/pair_move/, awaiting
-//! user approval): two 0.5 mm rails B1, B2 (laid first, straight) cross the short 0.25 mm wire A,
+//! `pair_move` pattern (`harness/pair_patterns.py`, scratch/pair-patterns/pair_move/; the
+//! 5.8 suite pattern, approved by the user 2026-11-13): two 0.5 mm rails B1, B2 (laid first, straight) cross the short 0.25 mm wire A,
 //! whose pads are SMD on F.Cu; A then dives under both (2 vias), a local minimum of single-wire
 //! reroutes. The pair move lays B1 and B2 again together round A's lower pad: 0 vias.
 
