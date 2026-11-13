@@ -1044,6 +1044,22 @@ pub struct Options {
     /// then shrinkages; the order before 2026-11-10). Only the final pick: the archive's Pareto
     /// membership and the internal search prices do not change. `objective = "area"` ignores it.
     pub pick: String,
+    /// Topological core (`topor.toml [optimize] pick_shorts`, user 2026-11-12 "shorts should be
+    /// in the routing criteria"): connections with a short (copper over another net's copper:
+    /// KiCad `shorting_items` / `tracks_crossing`) are a criterion right after the errors, before
+    /// the open connections, in every pick (the archive pick, the seeded runs' pick, the TopoR
+    /// loop's plan pick with the predicted shorts) and in the P4 round score (per-edge capacity
+    /// model), and in the stable meter (so in the reheat schedule and the stable / finish stop:
+    /// it changes a run's trajectory, not only ties). Default true; false = shorts counted only as
+    /// errors, as before 2026-11-12 (the archive's cap pruning keeps the pick either way).
+    pub pick_shorts: bool,
+    /// Topological core (`topor.toml [optimize] short_weight`, PS1, user 2026-11-13): k, how many
+    /// errors a connection with a short counts in every ranking (`pick_shorts` on): the ranked
+    /// count is `errors + (k - 1) x shorts`, the shorts themselves only a tie-break after it.
+    /// Default 1 (a short is one error, TopoR 6.3 manual p. 72; the order of 2026-11-12); values
+    /// below 1 count as 1. A k above 1 is not chosen yet: it needs a run that checks the
+    /// alternative variants in KiCad.
+    pub short_weight: f64,
     /// Topological core (S3, `topor.toml [optimize] variants`): most result variants the archive
     /// keeps besides the champions (fewest errors, shortest, fewest vias, fewest shrinkages,
     /// fewest warnings).
@@ -1327,6 +1343,8 @@ impl Default for Options {
             objective: "length_vias".into(),
             mm_per_via: 25.0,
             pick: "errors_vias_length".into(),
+            pick_shorts: true,
+            short_weight: 1.0,
             variants: 8,
             moves: false,
             max_moves: 400,

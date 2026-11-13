@@ -19,7 +19,8 @@
 //!   stop the optimization process before the value in the Level column reaches 5-10": stable
 //!   needs `window + 1` cycles, 5 with the default window of 4).
 //!
-//! The best result is compared by [`Score`]: lexicographic (incomplete count, objective value).
+//! The best result is compared by [`Score`]: lexicographic (incomplete count, connections with a
+//! short among them, objective value), the archive pick's own order ([`super::archive`]).
 //! `incomplete` is the archive's error count: since M-B1 ("never drop") the connections whose
 //! written copper still breaks a rule plus the connections without copper. The value includes the violation price;
 //! its relative gain is measured against the objective's own value (`scale`), so a large
@@ -33,6 +34,12 @@
 pub struct Score {
     /// Connections not complete: with rule violations in their copper, or without copper.
     pub incomplete: usize,
+    /// Of `incomplete`: connections with a short ([`super::archive::Criteria::shorts`]; 0 with
+    /// `[optimize] pick_shorts` off). A short fewer at the same count is a gain like a completion.
+    pub shorts: usize,
+    /// The ranked error count ([`super::archive::Criteria::ranked`]: a short counted
+    /// `[optimize] short_weight` times; = `incomplete` at k = 1), compared first.
+    pub ranked: f64,
     /// The board objective's value (`length + mm_per_via x vias`, or the area) plus the
     /// violation price.
     pub value: f64,
@@ -42,11 +49,16 @@ pub struct Score {
 
 impl Score {
     /// Gain in percent from `old` to `self` (`self` is at least as good: the best only improves).
-    /// Fewer incomplete counts as 100 % (any completion is worth more than any length).
+    /// Fewer incomplete counts as 100 % (any completion is worth more than any length), and so
+    /// do fewer shorts at the same incomplete count (the pick ranks them before the objective).
     pub fn gain_pct(&self, old: &Score) -> f64 {
-        if self.incomplete < old.incomplete {
+        if self.ranked < old.ranked - 1e-9 {
             100.0
-        } else if self.incomplete > old.incomplete {
+        } else if self.ranked > old.ranked + 1e-9 {
+            0.0
+        } else if self.shorts < old.shorts {
+            100.0
+        } else if self.shorts > old.shorts {
             0.0
         } else if old.value > 1e-9 {
             let den = if old.scale > 1e-9 { old.scale } else { old.value };
@@ -112,7 +124,7 @@ impl Meter {
 
     /// Record the best score after a cycle; true when it is better than the one before.
     pub fn push(&mut self, s: Score) -> bool {
-        let gained = self.best.last().is_none_or(|p| s.incomplete < p.incomplete || (s.incomplete == p.incomplete && s.value < p.value - 1e-9));
+        let gained = self.best.last().is_none_or(|p| s.ranked < p.ranked - 1e-9 || ((s.ranked - p.ranked).abs() <= 1e-9 && (s.shorts < p.shorts || s.shorts == p.shorts && s.value < p.value - 1e-9)));
         self.best.push(s);
         gained
     }
@@ -134,7 +146,7 @@ mod tests {
     use super::*;
 
     fn sc(i: usize, v: f64) -> Score {
-        Score { incomplete: i, value: v, scale: 0.0 }
+        Score { incomplete: i, shorts: 0, ranked: i as f64, value: v, scale: 0.0 }
     }
 
     #[test]
@@ -143,8 +155,8 @@ mod tests {
         assert!((sc(3, 99.0).gain_pct(&sc(3, 100.0)) - 1.0).abs() < 1e-9);
         assert_eq!(sc(3, 100.0).gain_pct(&sc(3, 100.0)), 0.0);
         // With a violation price on top, the gain is relative to the objective's own value.
-        let old = Score { incomplete: 3, value: 10_100.0, scale: 100.0 };
-        let new = Score { incomplete: 3, value: 10_099.0, scale: 99.0 };
+        let old = Score { incomplete: 3, shorts: 0, ranked: 3.0, value: 10_100.0, scale: 100.0 };
+        let new = Score { incomplete: 3, shorts: 0, ranked: 3.0, value: 10_099.0, scale: 99.0 };
         assert!((new.gain_pct(&old) - 1.0).abs() < 1e-9);
     }
 

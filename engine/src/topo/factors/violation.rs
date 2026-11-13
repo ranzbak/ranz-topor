@@ -57,7 +57,7 @@ impl Factor for Violation {
     fn describe(&self, ev: &Event) -> String {
         match ev {
             Event::Violation { kind, at, layer, depth_nm, len_nm, against, cause, .. } => format!(
-                "violation ({kind}) at ({:.3}, {:.3}) mm on {layer}: {:.3} mm below the rule over {:.3} mm against {against}; cause: {cause}",
+                "violation ({kind}) at ({:.3}, {:.3}) mm on {layer}: {:.3} mm below the rule over {:.3} mm against {against}; first failed check of the connection: {cause}",
                 at.x / 1e6,
                 -at.y / 1e6,
                 depth_nm / 1e6,

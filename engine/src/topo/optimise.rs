@@ -250,7 +250,7 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
     let mut meter = Meter::new(p.stable_window, p.stable_gain_pct);
     let score = |a: &Archive<Gen<S::Var>>| -> Option<(Score, f64)> {
         let c = a.items[a.pick(&obj)?].crit;
-        Some((Score { incomplete: c.errors, value: obj.value(&c), scale: obj.base(&c) }, obj.value(&c)))
+        Some((Score { incomplete: c.errors, shorts: c.shorts, ranked: c.ranked(), value: obj.value(&c), scale: obj.base(&c) }, obj.value(&c)))
     };
     let offer = |sp: &mut S, arch: &mut Archive<Gen<S::Var>>, label: String, gen: usize, cycle: usize, rep: &mut LoopReport| -> bool {
         let crit = sp.criteria();
@@ -347,6 +347,13 @@ pub struct Predicted {
     /// 0 for the per-edge model.
     pub shrink_n: usize,
     pub shrink_mm: f64,
+    /// Of `count`: the predicted shorts, crossings no layer separates and traversals through
+    /// copper of another net (both a short when drawn: KiCad `shorting_items` /
+    /// `tracks_crossing`; a traversal of a no-tracks rule area is a violation, no short); the
+    /// archive's [`Criteria::shorts`] of a plan. 0 with `[optimize] pick_shorts` off.
+    pub shorts: usize,
+    /// `[optimize] short_weight` minus 1 ([`Criteria::short_extra`]); 0 with `pick_shorts` off.
+    pub short_extra: f64,
 }
 
 impl Predicted {
@@ -354,11 +361,18 @@ impl Predicted {
     /// connections. O(1).
     pub fn of(cap: (usize, f64), unlayerable: usize, forced: usize) -> Predicted {
         let n = unlayerable + forced;
-        Predicted { count: cap.0 + n, graded: cap.1 + n as f64, shrink_n: 0, shrink_mm: 0.0 }
+        Predicted { count: cap.0 + n, graded: cap.1 + n as f64, shrink_n: 0, shrink_mm: 0.0, shorts: unlayerable, short_extra: 0.0 }
     }
-    /// Plus the traversals through foreign copper `(count, graded)` ([`foreign_copper`]). O(1).
-    pub fn with_foreign(self, f: (usize, f64)) -> Predicted {
-        Predicted { count: self.count + f.0, graded: self.graded + f.1, ..self }
+    /// Plus the traversals through foreign copper `(count, graded, shorts)` ([`foreign_copper`]:
+    /// the ones through a no-tracks rule area are violations but no shorts). O(1).
+    pub fn with_foreign(self, f: (usize, f64, usize)) -> Predicted {
+        Predicted { count: self.count + f.0, graded: self.graded + f.1, shorts: self.shorts + f.2, ..self }
+    }
+    /// The same prediction with the shorts ranked at weight `k` (`[optimize] short_weight`, at
+    /// least 1) when `on` (`[optimize] pick_shorts`); off: not ranked (they stay in `count` and
+    /// `graded`, as before 2026-11-12). O(1).
+    pub fn shorts_ranked(self, on: bool, k: f64) -> Predicted {
+        Predicted { shorts: if on { self.shorts } else { 0 }, short_extra: if on { k.max(1.0) - 1.0 } else { 0.0 }, ..self }
     }
     /// With the cut model's shrinkages `(stretches added, price mm)` (2.4). O(1).
     pub fn with_shrink(self, n: usize, mm: f64) -> Predicted {
@@ -389,13 +403,16 @@ impl Predicted {
 /// the loop's moves can take it out). One per wire and object it runs through; graded like the
 /// `violation` factor (`factors/violation.rs`: 1 + depth x length per 0.01 mm²) with the wire's
 /// pitch (width + clearance, the whole overlap) as the depth over the length of its traversals
-/// inside the object (straight chords between its passes). Returns `(count, graded)`.
+/// inside the object (straight chords between its passes). Returns `(count, graded, shorts)`:
+/// `shorts` = the traversals of copper of another net (a pad, a via, a copper shape: KiCad
+/// `shorting_items` when drawn); a no-tracks rule area (`net = None`) is in `count` and `graded`
+/// but no short (KiCad reports it as a rule-area violation, not as a short).
 /// Polubasov 2010 («Многовариантная оптимизация»): "a design-rule violation cannot be compensated
 /// by any reduction of wire length". O(traversals x obstacles per triangle).
-pub fn foreign_copper(st: &State, layers: &[Vec<u64>]) -> (usize, f64) {
+pub fn foreign_copper(st: &State, layers: &[Vec<u64>]) -> (usize, f64, usize) {
     let pr = st.proj;
     let all = if pr.n_layers >= 64 { u64::MAX } else { (1u64 << pr.n_layers) - 1 };
-    let (mut count, mut graded) = (0usize, 0.0f64);
+    let (mut count, mut graded, mut shorts) = (0usize, 0.0f64, 0usize);
     for (w, wi) in st.wires.iter().enumerate() {
         if !wi.alive || wi.tris.is_empty() {
             continue;
@@ -428,18 +445,22 @@ pub fn foreign_copper(st: &State, layers: &[Vec<u64>]) -> (usize, f64) {
                 }
             }
         }
-        for (_, len) in inside {
+        for (o, len) in inside {
             count += 1;
             graded += super::factors::violation_amount(wi.w + wi.s, len);
+            if pr.obstacles[o].net.is_some() {
+                shorts += 1;
+            }
         }
     }
-    (count, graded)
+    (count, graded, shorts)
 }
 
 /// The loop's criteria of one topology (what the archive keeps): errors = violations = the
-/// predicted count, penalty = its graded part ([`Predicted::penalty`]). O(1).
+/// predicted count, shorts = the predicted shorts among them, penalty = its graded part
+/// ([`Predicted::penalty`]). O(1).
 pub fn criteria_of(p: Predicted, viol_mm: f64, vias: usize, length_mm: f64, shrinkages: usize, area_mm2: f64) -> Criteria {
-    Criteria { errors: p.count, open: 0, violations: p.count, penalty: p.penalty(viol_mm), vias, length_mm, shrinkages, warnings: 0, area_mm2 }
+    Criteria { errors: p.count, shorts: p.shorts, short_extra: p.short_extra, open: 0, violations: p.count, penalty: p.penalty(viol_mm), vias, length_mm, shrinkages, warnings: 0, area_mm2 }
 }
 
 /// The evaluation of a whole topology that every whole-board loop move (layer re-optimisation,

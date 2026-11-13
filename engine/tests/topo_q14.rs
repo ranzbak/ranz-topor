@@ -170,10 +170,44 @@ fn a_planned_traversal_through_a_foreign_pad_is_a_graded_violation() {
         let f = on(1);
         assert_eq!(f.0, 1, "pad {size}: one violation on F.Cu: {f:?}");
         assert!(f.1 > 1.0, "pad {size}: graded above the count: {f:?}");
-        assert_eq!(on(2), (0, 0.0), "pad {size}: on B.Cu under the F.Cu pad: no violation");
-        assert_eq!(on(3), (0, 0.0), "pad {size}: inside a via interval: no violation");
+        assert_eq!(f.2, 1, "pad {size}: a foreign pad: a predicted short: {f:?}");
+        assert_eq!(on(2), (0, 0.0, 0), "pad {size}: on B.Cu under the F.Cu pad: no violation");
+        assert_eq!(on(3), (0, 0.0, 0), "pad {size}: inside a via interval: no violation");
         graded.push(f.1);
     }
     assert!(graded[1] > graded[0], "a longer run through the pad costs more: {graded:?}");
 }
 
+
+/// Q14b and the shorts criterion (`[optimize] pick_shorts`): a wire through a no-tracks rule area
+/// (no net) is a predicted violation when its layering puts it on the closed layer there, but no
+/// predicted short: KiCad reports a track in a rule area as a rule-area violation, not as
+/// `shorting_items` (a foreign pad is one, see the test above).
+#[test]
+fn a_planned_traversal_through_a_rule_area_is_a_violation_but_no_short() {
+    // Walls of net 3 on both layers leave a gap at x = 15, y 7.9..12.1; a B.Cu rule area fills it.
+    let pads = vec![
+        ("A", 1, 3.0, 10.0, 1.0, 1.0, 0),
+        ("B", 1, 27.0, 10.0, 1.0, 1.0, 0),
+        ("WN", 3, 15.0, 4.2, 1.0, 7.4, 99),
+        ("WS", 3, 15.0, 15.8, 1.0, 7.4, 99),
+    ];
+    let mut m = board(30.0, 20.0, 3, &pads);
+    b_cu_rule_area(&mut m, 14.5, 7.9, 15.5, 12.1);
+    let b = tb::build(&m, &opts()).unwrap();
+    let mut st = State::new(&b.proj);
+    let w = st.route_conn(&conn(&m, &b, 1, "A", "B"), &InitWeights::default(), 1.0).expect("placed").0;
+    let n = st.wires[w].tris.len();
+    let area = b.proj.obstacles.iter().position(|o| o.net.is_none() && !o.drilled && o.layers.0 & 2 != 0 && o.layers.0 & 1 == 0);
+    assert!(area.is_some(), "the rule area is an obstacle of no net on B.Cu only");
+    assert!(st.wires[w].tris.iter().any(|&t| b.proj.tri_obs[t].contains(&area.unwrap())), "the wire crosses the rule area: {:?}", st.polyline(w));
+    let on = |bits: u64| {
+        let mut l = vec![Vec::new(); st.wires.len()];
+        l[w] = vec![bits; n];
+        foreign_copper(&st, &l)
+    };
+    let f = on(2);
+    assert_eq!((f.0, f.2), (1, 0), "on B.Cu through the rule area: one violation, no short: {f:?}");
+    assert!(f.1 > 1.0, "graded above the count: {f:?}");
+    assert_eq!(on(1), (0, 0.0, 0), "on F.Cu: free");
+}

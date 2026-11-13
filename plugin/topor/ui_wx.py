@@ -168,7 +168,7 @@ WORDING: dict[str, dict[str, str]] = {
         "score_length": "{length} m",
         "score_pending": "–",
         "score_hint": "Scores compare in the pick order: fewest errors (open connections and connections with rule "
-                      "violations), then fewest open, fewest vias, the shortest length ([optimize] pick). The best "
+                      "violations), then fewest connections with a short, then fewest open, fewest vias, the shortest length ([optimize] pick). The best "
                       "so far is the board OK or Cancel keeps.",
         "vs_first": "The first result is the best so far.",
         "vs_new_best": "Last round is the new best: {delta}.",
@@ -177,6 +177,7 @@ WORDING: dict[str, dict[str, str]] = {
         "vs_tie": "Last round scores the same as the best and is the best now (ties go to the lower run).",
         "vs_better": "Last round is better ({delta}), but the variant table kept the best.",
         "delta_errors": "errors {d}",
+        "delta_shorts": "connections with a short {d}",
         "delta_open": "open {d}",
         "delta_vias": "vias {d}",
         "delta_length": "length {d} m",

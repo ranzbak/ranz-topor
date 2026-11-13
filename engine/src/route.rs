@@ -107,7 +107,11 @@ pub struct ViolationReport {
     pub length_nm: i64,
     /// What it is too close to (`pad:REF:NUM`, `item:N` = routed copper, `edge`, ...).
     pub against: String,
-    /// Why the drawing found no legal geometry.
+    /// Why the connection's drawing found no legal geometry: its first failed check, one per
+    /// connection and the same on all its violations, so not necessarily about this one (a
+    /// `short` of the written fallback copper can carry the positive clearance gap of the rejected
+    /// legal attempt, e.g. "drawing: clearance gap 0.050 mm < 0.200 mm"). `kind` is this
+    /// violation's own, from the written copper.
     pub cause: String,
     /// Price by the `violation` factor (mm).
     pub price_mm: f64,

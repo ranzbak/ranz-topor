@@ -518,7 +518,7 @@ impl<'a> Coord<'a> {
                     (Some((i, b)), Some(d)) => format!("worse than the best ({}): {}", at(i, b.cycle), delta(d)),
                 };
                 let line = format!(
-                    "{}: errors {}, open {}, vias {}, length {:.3} m, shrinkages {}; rule violations {}, routed {} of {}{}: {against}",
+                    "{}: errors {}, open {}, vias {}, length {:.3} m, shrinkages {}; rule violations {}{}, routed {} of {}{}: {against}",
                     at(k, cycle),
                     c.errors,
                     c.open,
@@ -526,6 +526,7 @@ impl<'a> Coord<'a> {
                     c.length_mm / 1000.0,
                     c.shrinkages,
                     c.violations,
+                    if c.shorts > 0 { format!(" ({} connections with a short)", c.shorts) } else { String::new() },
                     j.routed,
                     j.total,
                     if j.as_drawn { " (as drawn, before the via reduction)" } else { "" },
@@ -781,7 +782,7 @@ impl Run {
             self.all.clear();
             self.notes.push(format!("{cycle}: worse than the best ({cyc_err} > {} errors): {n} lowered rooms turned soft", best_before.unwrap_or(0)));
         }
-        let gained = self.meter.push(super::schedule::Score { incomplete: pc.errors, value: obj.value(&pc), scale: obj.base(&pc) });
+        let gained = self.meter.push(super::schedule::Score { incomplete: pc.errors, shorts: pc.shorts, ranked: pc.ranked(), value: obj.value(&pc), scale: obj.base(&pc) });
         if gained {
             self.picked_at = cycle;
         }
@@ -1064,8 +1065,9 @@ fn near_weight(d: f64, r: f64) -> f64 {
 }
 
 /// The P4 score of a plan: (objective, predicted violations, vias, graded over-full price of the
-/// cut model, 0 for the per-edge model).
-type Score = (f64, usize, usize, f64);
+/// cut model, 0 for the per-edge model; predicted shorts among the violations: crossings no layer
+/// separates and traversals through foreign copper, 0 with `[optimize] pick_shorts` off).
+type Score = (f64, usize, usize, f64, usize);
 
 /// The projection edges of the passes nearest to cut items `(wire, traversal)` (where a wire
 /// crosses or wraps the cut), ascending.
@@ -2020,10 +2022,24 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // (Q14b) traversals through foreign copper (a short when drawn).
         let fc = super::optimise::foreign_copper(st, &super::optimise::layers_now(st, &lr.events, bottom));
         let graded = if priced { cm.total() + overflow_mm * (lr.unlayerable.len() as f64 + fc.1) } else { 0.0 };
-        (own, cm.overfull() + lr.unlayerable.len() + fc.0, lr.vias, graded)
+        let shorts = if opts.pick_shorts { lr.unlayerable.len() + fc.2 } else { 0 };
+        (own, cm.overfull() + lr.unlayerable.len() + fc.0, lr.vias, graded, shorts)
     };
-    // One graded sum (priced), or lexicographic: over-full edge-layers, then the objective.
-    let p4_better = |a: &Score, b: &Score| if priced { a.0 + a.3 < b.0 + b.3 - 1e-6 } else { a.1 < b.1 || (a.1 == b.1 && a.0 < b.0 - 1e-6) };
+    // One graded sum (priced: the objective plus the over-full price, where a predicted short
+    // is already priced at least one violation and `[optimize] short_weight` k adds (k - 1)
+    // more at the `overflow` weight, PS1), or lexicographic: the ranked predicted violations (a
+    // predicted short counted k times), then the predicted shorts among them as a tie-break (as
+    // in the archive pick), then the objective. k = 1 adds nothing to either.
+    let short_extra = if opts.pick_shorts { opts.short_weight.max(1.0) - 1.0 } else { 0.0 };
+    let p4_ranked = |s: &Score| s.1 as f64 + short_extra * s.4 as f64;
+    let p4_better = |a: &Score, b: &Score| {
+        if priced {
+            let extra = |s: &Score| short_extra * overflow_mm * s.4 as f64;
+            return a.0 + a.3 + extra(a) < b.0 + b.3 + extra(b) - 1e-6;
+        }
+        let (ra, rb) = (p4_ranked(a), p4_ranked(b));
+        ra < rb - 1e-9 || ((ra - rb).abs() <= 1e-9 && (a.4 < b.4 || a.4 == b.4 && a.0 < b.0 - 1e-6))
+    };
     // Reroute counter per connection: the P4 moves pay the `reroute` factor's price for it.
     // (Measured: ripping the least moved wires first in the negotiated rip-up routed fewer
     // connections on dcsgonebadge and qmtech, so the rip order stays routed-last first.)
@@ -2455,7 +2471,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let measure = |st: &State, lr: &layers::LayerReport| -> Predicted {
             let dirs = dirs_of(st);
             let cm = if cuts_on { CapModel::new_cut(st, &packer, &dirs, &lr.events, bottom, overflow_mm) } else { CapModel::new(st, &packer, &dirs, &lr.events, bottom, overflow_mm) };
-            let p = Predicted::of(cm.violations(), lr.unlayerable.len(), forced.borrow().len()).with_foreign(foreign_copper(st, &layers_now(st, &lr.events, bottom)));
+            let p = Predicted::of(cm.violations(), lr.unlayerable.len(), forced.borrow().len()).with_foreign(foreign_copper(st, &layers_now(st, &lr.events, bottom))).shorts_ranked(opts.pick_shorts, opts.short_weight);
             if !cuts_on {
                 return p;
             }
@@ -4685,10 +4701,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             .sum()
     };
     let n_copper = b.signal_layers.len().max(1);
-    let crit_main = criteria(model, dec, &asm, &out, warn_n(&necking), n_copper, &reg);
+    let crit_main = criteria(model, dec, &asm, &out, warn_n(&necking), n_copper, &reg, opts);
     let pre_parts = pre_snap.as_ref().map(|(o, nk)| {
         let a = assemble(model, dec, o, &term_over, first_layer, &reg);
-        let c = criteria(model, dec, &a, o, warn_n(nk), n_copper, &reg);
+        let c = criteria(model, dec, &a, o, warn_n(nk), n_copper, &reg, opts);
         (c, a)
     });
     let Assembled { items, item_conn, reports, nets, length_by_layer, tot_len, tot_vias, violations: viol_list, diff_pairs: dp_list } = asm;
@@ -5395,8 +5411,12 @@ fn viol_events(model: &BoardModel, dec: &crate::decompose::Decomposition, out: &
 }
 
 /// The archive criteria of the assembled result `a` of outcomes `out` (`warnings` = warning-level
-/// factor findings). O(items).
-fn criteria(model: &BoardModel, dec: &crate::decompose::Decomposition, a: &Assembled, out: &[Outcome], warnings: usize, n_layers: usize, reg: &Registry) -> Criteria {
+/// factor findings; `opts`: `[optimize] pick_shorts` counts the connections with a short, ranked
+/// at `short_weight`).
+/// O(items).
+#[allow(clippy::too_many_arguments)]
+fn criteria(model: &BoardModel, dec: &crate::decompose::Decomposition, a: &Assembled, out: &[Outcome], warnings: usize, n_layers: usize, reg: &Registry, opts: &Options) -> Criteria {
+    let shorts_on = opts.pick_shorts;
     let routed = a.reports.iter().filter(|r| r.status == "routed").count();
     let mut area = 0.0;
     for (it, &ci) in a.items.iter().zip(&a.item_conn) {
@@ -5418,10 +5438,15 @@ fn criteria(model: &BoardModel, dec: &crate::decompose::Decomposition, a: &Assem
     // Connections not complete: without copper, or with violations (one error per connection,
     // however many rules it breaks: an open connection never counts less than a drawn one).
     let violating = out.iter().filter(|o| o.routed && !o.viol.is_empty()).count();
+    // Of those: the connections whose copper overlaps another net's ([`draw::viol_key`]'s short:
+    // gap < 0, KiCad `shorting_items` / `tracks_crossing`). Each is already one of `errors`.
+    let shorts = if shorts_on { out.iter().filter(|o| o.routed && o.viol.iter().any(|v| v.kind == "short")).count() } else { 0 };
     let penalty = viol_events(model, dec, out).iter().map(|(ci, ev)| reg.price(ev, &WireCtx { net: dec.connections[*ci].net, tier: dec.connections[*ci].tier })).sum::<f64>()
         + dec.connections.iter().flat_map(|c| out[c.id].dp_events.iter().map(move |ev| (c, ev))).map(|(c, ev)| reg.price(ev, &WireCtx { net: c.net, tier: c.tier })).sum::<f64>();
     Criteria {
         errors: open + violating,
+        shorts,
+        short_extra: if shorts_on { opts.short_weight.max(1.0) - 1.0 } else { 0.0 },
         open,
         violations,
         penalty,

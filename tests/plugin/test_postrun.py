@@ -79,8 +79,8 @@ def test_violations_finding_lists_place_type_and_cause():
     assert f.severity == "warning" and f.message.startswith("2 rule violation(s) in the copper of 2 connection(s)")
     assert "1 clearance" in f.message and "1 hole_clearance" in f.message
     assert f.items[0] == ("SIG A1.1 -> B1.1: clearance at (14.396, 9.932) mm on F.Cu, 0.194 mm below the rule over "
-                          "1.500 mm against pad:WNF:1; cause: drawing: clearance gap 0.016 mm < 0.200 mm against "
-                          "pad:WNF:1 on layer F.Cu")
+                          "1.500 mm against pad:WNF:1; first failed check of the connection: drawing: clearance gap "
+                          "0.016 mm < 0.200 mm against pad:WNF:1 on layer F.Cu")
     assert "VIOLATIONS" in postrun.POSTRUN_CODES and "VIOLATIONS" in MESSAGES
     assert "Cleanup Tracks" not in f.message, "no short, no cleanup note"
 

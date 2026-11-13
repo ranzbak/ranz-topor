@@ -261,7 +261,13 @@ included); and the **score** of the **Last round** and of the **Best so far**.
 
 The score rows show run, round, **Errors** (connections open or drawn with rule violations), **Open** (connections
 without copper), **Vias** and **Length** — the order in which topor judges results (`[optimize] pick`, default
-`errors_vias_length`: fewest errors, then fewest open, fewest vias, the shortest length, then fewest shrinkages).
+`errors_vias_length`: fewest errors, then fewest connections with a short, then fewest open, fewest vias, the shortest
+length, then fewest shrinkages; `[optimize] pick_shorts`). A short (copper over another net's copper) is one of the
+errors and, at the same error count, worse than an open connection: KiCad's DRC fails the board on it and Cleanup
+removes the track. `[optimize] short_weight` (k, default 1) grades this: the ranked count is errors + (k - 1) x
+shorts, the shorts a tie-break after it. The round lines in log.txt name the connections with a short. The same order decides when the
+best result improved (the stable meter: reheats and the stable stop), so `pick_shorts` changes which rounds a run makes,
+not only the final pick among equal error counts.
 *Last round* is the round any run finished last; *Best so far* is the best result over all runs, exactly the board OK
 or Cancel keeps; until the first round ends their place reads *Waiting for round 1…*. The line below says how the
 last round compares, on the first criterion that differs: *Last round is worse than the best: errors +2.* (amber; more
@@ -360,7 +366,7 @@ and the funnel through the passages, and keeps the one whose violations cost lea
 very high by the `violation` factor (1000 mm per violation plus 1000 mm per 0.01 mm² of depth × length, `[factors]
 weight violation`), so the next rounds work to remove it; the best result counts errors first (errors =
 connections with violations plus connections without copper; "a design-rule violation cannot be compensated by any reduction of
-wire length", Polubasov 2010), then fewest vias, then the shortest length (`[optimize] pick`). A complete route with a violation can still be fixed by hand or
+wire length", Polubasov 2010), then fewest connections with a short (`[optimize] pick_shorts`), then fewest vias, then the shortest length (`[optimize] pick`). A complete route with a violation can still be fixed by hand or
 improved; a dropped one connects nothing.
 
 The violating copper is written to the board. The findings list every violation
