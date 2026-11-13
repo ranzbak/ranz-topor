@@ -141,7 +141,7 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
         })
     };
     // Nor touch other copper of its net without overlapping it well (a via grazing an own-net via
-    // or track is a sliver KiCad flags: dcsgonebadge D4, two GND vias 0.596 mm apart, "actual
+    // or track is a sliver KiCad flags: a 2-layer badge in D4, two GND vias 0.596 mm apart, "actual
     // 0.074 mm"): it keeps a gap to every own-net via and track.
     let own_copper_ok = |all: &[Item], p: Vec2, r: f64, net: i32| {
         let gap = 1_000.0 + 2.0 * tol;
@@ -180,8 +180,8 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
             let r = 0.5 * sz.d as f64;
             // The fill has to reach the via with a ring of at least the zone's minimum width
             // (thinner fill is removed by KiCad's filler, and what is left meets the via in a
-            // neck KiCad's connection width check flags: dcsgonebadge D5, a GND via at
-            // (126.79, 121.1) mm, 0.1038 mm < 0.127 mm; D6a).
+            // neck KiCad's connection width check flags: a 2-layer badge in D5, a GND via,
+            // 0.1038 mm < 0.127 mm; D6a).
             let ring = model.pours.iter().filter(|z| z.net == c.net).map(|z| z.min_thickness.max(0) as f64).fold(0.0, f64::max).max(model.rules.min_connection.max(0) as f64);
             let need = r + ring;
             let targets: Vec<Vec2> = if c.pads.is_empty() { c.vias.clone() } else { c.pads.iter().map(|&p| model.pads[p].center.to_vec2()).collect() };

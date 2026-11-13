@@ -119,7 +119,7 @@ fn funnel_bends_only_where_a_portal_forces_it() {
 }
 
 /// A via that dips a few um into a pad of its own net leaves a lens of copper narrower than
-/// KiCad's minimum connection width (dcsgonebadge, BT1 pad 3: 4 um deep, "actual 0.1044 mm" <
+/// KiCad's minimum connection width (a 2-layer badge, a battery holder pad: 4 um deep, "actual 0.1044 mm" <
 /// 0.127 mm): such a site is refused; clear of the pad (by KiCad's max_error) or centred in it is fine, and so is any
 /// site when no minimum connection width is set.
 #[test]

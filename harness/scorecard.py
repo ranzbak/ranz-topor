@@ -217,7 +217,7 @@ def scorecard(root: Path) -> tuple[str, dict]:
              "footprint count as new when routing connects those pads; diff pairs are skipped by the topological "
              "core and count as unconnected; zone fills are judged after kicad-cli's refill, not as saved; total "
              "length compares routing styles too: a hand board that routes a pour net (GND) with tracks is longer "
-             "than topor's pour + stubs (dcsgonebadge hand: 1.5 m of GND track).\n")
+             "than topor's pour + stubs (one 2-layer badge's hand layout: 1.5 m of GND track).\n")
     inval = []
     for b, runs in rows.items():
         bad = sorted(k for k, r in runs.items() if r.get("valid") is False)

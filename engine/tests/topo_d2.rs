@@ -122,7 +122,7 @@ fn board(outline: (f64, f64, f64, f64), pads: &[(i32, f64, f64, bool, f64)]) -> 
 
 /// A track that passes a pad of its own net (not one of its ends) keeps KiCad's `max_error` off
 /// it, or runs into it: closer, KiCad's minimum connection width check sees a sliver
-/// (dcsgonebadge R10.1, D2: a +3V3 track 1.7 um off the pad's corner arc, "actual 0.0023 mm").
+/// (a 2-layer badge, a resistor pad, D2: a +3V3 track 1.7 um off the pad's corner arc, "actual 0.0023 mm").
 #[test]
 fn a_track_does_not_graze_a_pad_of_its_own_net() {
     use topor_engine::check::Checker;

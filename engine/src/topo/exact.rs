@@ -275,7 +275,7 @@ impl Drawer<'_> {
         if e.net == Some(wp.net) {
             // A pad of the own net that is not an end: KiCad's minimum connection width check
             // builds the pad's polygon up to `max_error` outside its arcs, so a track closer than
-            // that reads as a sliver connection (dcsgonebadge R10.1, D2: 1.7 um off the arc,
+            // that reads as a sliver connection (a resistor pad, D2: 1.7 um off the arc,
             // "actual 0.0023 mm").
             return e.grow + 0.5 * w + self.eps + self.model.rules.max_error as f64;
         }

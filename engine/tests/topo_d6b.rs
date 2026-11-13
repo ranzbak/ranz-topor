@@ -71,7 +71,7 @@ pub fn conn(m: &BoardModel, b: &Board, net: i32, ra: &str, rb: &str) -> Conn {
 /// net N4); their pads are on F.Cu, so both wires are held to F.Cu. A foreign B.Cu pad (N3) covers
 /// the middle of the crossing square: under it neither can change layer, so they must not cross
 /// there (one takes vias and crosses where it can change layer, or passes the other's end pad on
-/// B.Cu) (D6a dcsgonebadge: 8 "crossing ... cannot be layered: both
+/// B.Cu) (D6a, a 2-layer badge: 8 "crossing ... cannot be layered: both
 /// stretches are fixed to the same layer", all inside the fan of a foreign pad on the other side).
 #[test]
 fn crossing_of_two_wires_held_to_one_layer_moves_off_the_foreign_pad() {

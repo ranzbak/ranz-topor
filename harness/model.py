@@ -102,7 +102,7 @@ def _pad_shape(pad, layer: int) -> dict:
     if shp == pcbnew.PAD_SHAPE_OVAL:
         return {"kind": "oval", "w": w, "h": h}
     # ERROR_OUTSIDE: the obstacle contains the pad (pcbnew's default ERROR_INSIDE polygon of a
-    # custom solder-jumper pad was up to 3.3 um inside its arcs; dcsgonebadge JP1 pad 3 in D1).
+    # custom solder-jumper pad was up to 3.3 um inside its arcs; pad 3 of a 3-pad jumper in D1).
     poly = pad.GetEffectivePolygon(layer, pcbnew.ERROR_OUTSIDE)
     pts = [p for i in range(poly.OutlineCount()) for p in _outline_pts(poly, i)]
     return {"kind": "poly", "pts": _hull(pts)}
@@ -245,7 +245,7 @@ def _graphics(board):
 # Vertex error of the copper graphics' polygons (nm): they are obstacles, so the polygon must
 # CONTAIN KiCad's shape (ERROR_OUTSIDE), at most this much larger (the plugin's IPC exporter keeps
 # <= 0.5 um, model_ipc OBSTACLE_ERR_NM). ERROR_INSIDE at the board's max_error (5 um) let D1's
-# margin-0 drawing put copper 3.3 um inside the clearance of a GND arc on dcsgonebadge.
+# margin-0 drawing put copper 3.3 um inside the clearance of a GND arc on a 2-layer badge.
 SHAPE_ERR_NM = 500
 
 

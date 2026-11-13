@@ -748,7 +748,7 @@ mod tests {
 
     #[test]
     fn t_end_next_to_its_own_neighbour_joins_the_trunk() {
-        // dcsgonebadge VCC: a 0.22 mm stub (0.5 mm wide) ends 0.243 mm off a vertical trunk; its own
+        // a 2-layer badge, VCC: a 0.22 mm stub (0.5 mm wide) ends 0.243 mm off a vertical trunk; its own
         // neighbour's shared end is nearer, but is no trunk
         let m = BoardModel::default();
         let w = |a: P, b: P| Item::Track(TrackItem { net: 1, layer: 0, width: 500_000, prim: TrackPrim::Seg { a: iv(a), b: iv(b) }, group: None, wire: None });
@@ -778,7 +778,7 @@ mod tests {
 
     #[test]
     fn a_split_that_repeats_a_segment_leaves_one_copy() {
-        // dcsgonebadge I2C_SDA (90 s run): a free end moved onto a trunk whose new half is the same
+        // a 2-layer badge, I2C_SDA (90 s run): a free end moved onto a trunk whose new half is the same
         // segment as an existing one
         let m = BoardModel::default();
         let (out, st) = run(

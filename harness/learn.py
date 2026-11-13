@@ -30,7 +30,7 @@ R1 = Path("/home/paul/work/kicad/plugins/topor/scratch/r1")
 BOARDS = {
     "eprom": ("eprom-to-kernal", "eprom-to-kernal"),
     "wiccon": ("wiccon-2023", "wiccon-2023"),
-    "dcsgonebadge": ("dcsgonebadge", "dcsgonebadge"),
+    "esp-rust-board": ("esp-rust-board", "esp-rust-board"),
     "qmtech": ("qmtech", "qmtech-minimig"),
     "tanmatsu": ("tanmatsu", "tanmatsu"),
     "bornhack2026": ("bornhack2026", "bornhack2026"),
