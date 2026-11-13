@@ -76,9 +76,7 @@ def test_schema_compat_with_harness_export(engine, fixture_board):
     rules = {
         "min_clearance": 0, "min_track_width": 200_000, "min_via_diameter": 400_000, "min_via_drill": 300_000,
         "min_annular": 50_000, "hole_clearance": 250_000, "hole_to_hole": 250_000, "edge_clearance": 500_000,
-        "max_error": 5_000, "profile": "jlcpcb_1oz",
-        "drill_list": [200_000, 250_000, 300_000, 400_000, 500_000, 800_000, 1_000_000],
-        "routing_vias": [250_000, 300_000, 400_000, 500_000],
+        "max_error": 5_000,
         "default": {"clearance": 200_000, "width": 200_000, "via_d": 600_000, "via_drill": 300_000,
                     "netclass": "Default", "width_source": "default"},
         "per_net": {}, "warnings": [],

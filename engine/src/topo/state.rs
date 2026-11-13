@@ -141,6 +141,10 @@ pub struct Projection {
     /// Keepouts that forbid vias (D6a), on any copper layer: a through via spans every layer,
     /// so none may touch one. Polygons (nm); set by `board::build`.
     pub no_via: Vec<Vec<Vec2>>,
+    /// Nets whose via is a coupled pair's two-via disc ([`crate::model::NetRule::pair_disc`]): every
+    /// obstacle, its own net's too, is foreign to that disc ([`Projection::via_foreign`]). Set by
+    /// `board::build`.
+    pub pair_nets: std::collections::BTreeSet<i32>,
     /// How the triangulation was built ([`Cdt::build_reported`]): the path, and the input
     /// constraints left out (the board builder names them).
     pub cdt: CdtReport,
@@ -170,6 +174,13 @@ pub fn point_in_segments(p: Vec2, segs: &[(Vec2, Vec2)]) -> bool {
 }
 
 impl Projection {
+    /// Whether obstacle `o` limits a via of `net`: another net's copper, or any copper when the via
+    /// is a pair's two-via disc (the partner's pads carry the lead's net in the plan; the disc holds
+    /// both vias, so neither half's copper is its own). O(log N).
+    pub fn via_foreign(&self, o: &Obstacle, net: i32) -> bool {
+        o.net != Some(net) || self.pair_nets.contains(&net)
+    }
+
     /// `points` with their kinds (coincident points share a vertex; the first non-free kind
     /// wins), `constraints` as index pairs into `points`, `inside` = inside the board.
     pub fn build(
@@ -297,6 +308,7 @@ impl Projection {
             edge_regime: Vec::new(),
             edge_constraint,
             no_via: Vec::new(),
+            pair_nets: std::collections::BTreeSet::new(),
             cdt: cdt_report,
         })
     }

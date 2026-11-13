@@ -282,6 +282,19 @@ def _seg(a, b) -> dict:
     return {"kind": "seg", "a": _pt(a), "b": _pt(b)}
 
 
+def outline_half_stroke(board) -> int:
+    """Half the widest Edge.Cuts stroke (nm): KiCad's DRC measures copper-to-edge clearance from each edge's
+    effective shape, its stroke included (drc_test_provider_edge_clearance.cpp ``testAgainstEdge``:
+    ``edge->GetEffectiveShape( Edge_Cuts )``), while the model's outline is the stroke's centre line; the engine
+    adds this to the edge clearance (``Rules.outline_half_stroke``, ``Rules::edge_clear``). The widest stroke
+    covers every edge (an outline drawn with mixed widths is held to the widest). O(graphics)."""
+    w = 0
+    for item, _ in _graphics(board):
+        if item.GetClass() == "PCB_SHAPE" and int(item.GetLayer()) == int(pcbnew.Edge_Cuts):
+            w = max(w, int(item.GetWidth()))
+    return w // 2
+
+
 def _export_outline(board, max_err: int):
     out = []
     for item, _ in _graphics(board):
@@ -483,7 +496,7 @@ def export_model(board, rules: dict, *, name: str, dru_text: str | None = None) 
     tie_groups = {fp.GetReference(): _net_tie_groups(fp) for fp in board.GetFootprints() if fp.IsNetTie()}
     pads, holes, net_ties = _export_pads(board, cu, tie_groups)
     kept, vias = _export_copper(board)
-    rules = {**rules, "clearance_regions": []}
+    rules = {**rules, "clearance_regions": [], "outline_half_stroke": outline_half_stroke(board)}
     keepouts, rules = merge_dru_keepouts(_export_keepouts(board), rules, dru_text,
                                          {l["name"]: l["id"] for l in layers})
     model = {

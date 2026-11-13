@@ -168,18 +168,17 @@ def test_via_not_set_up():
 
 
 def test_via_not_set_up_says_what_happens():
-    """F I-4: the finding names the fallback via AND the smaller fab-profile vias the engine may add
-    (engine/src/vias.rs via_sizes: routing_vias drills in [min_via_drill, via_drill), d = max(drill + 2 * annular,
-    min_via_diameter), only when d is smaller than the net's own via)."""
+    """F I-4: the finding names the fallback via; since 2026-11-12 there is no fab-profile via list, so no smaller
+    via is claimed (VIA_NOT_SET_UP means the board has no pre-defined via either). An old rules dict that still
+    carries ``routing_vias`` adds nothing (engine/src/vias.rs via_sizes ignores it)."""
     rl = rules(min_via_diameter=450_000, min_via_drill=300_000, min_annular=100_000,
                routing_vias=[250_000, 300_000, 400_000, 500_000])
     f = one(run(rl=rl, pro={}), "VIA_NOT_SET_UP")
-    assert "0.8 / 0.4 mm" in f.message and "0.5 / 0.3 mm" in f.message, f.message
-    assert "0.25" not in f.message  # below the board's (floored) minimum via drill
+    assert "0.8 / 0.4 mm" in f.message and "smaller" not in f.message, f.message
     cfg = Config.defaults().with_values({("vias", "fallback_diameter_mm"): 1.0, ("vias", "fallback_drill_mm"): 0.5})
     f = one(run(rl=rl, pro={}, cfg=cfg), "VIA_NOT_SET_UP")
-    assert "1 / 0.5 mm" in f.message and "0.6 / 0.4 mm" in f.message and "0.5 / 0.3 mm" in f.message, f.message
-    f = one(run(pro={}), "VIA_NOT_SET_UP")  # rules without routing_vias: no extra sizes claimed
+    assert "1 / 0.5 mm" in f.message and "smaller" not in f.message, f.message
+    f = one(run(pro={}), "VIA_NOT_SET_UP")
     assert "smaller" not in f.message, f.message
     assert "pre-defined" in f.fix and "smaller" in f.fix  # pre-defined vias stop the finding and are routed with (0.5.0)
 
@@ -364,3 +363,13 @@ def test_preflight_does_not_mutate_inputs():
     before = copy.deepcopy(m)
     run(m)
     assert m == before
+
+
+def test_edge_clearance_zero_warns_and_stays_zero():
+    """User 2026-11-13: a copper-to-edge clearance of 0 stays 0 (no fallback), with a plain warning naming the
+    KiCad setting."""
+    f = one(run(rl=rules(edge_clearance=0)), "EDGE_CLEARANCE_ZERO")
+    assert f.severity == "warning"
+    assert "copper-to-edge clearance is 0 (KiCad → File → Board Setup → Design Rules → Constraints → Copper to edge " \
+           "clearance)" in f.message
+    assert "EDGE_CLEARANCE_ZERO" not in codes(run(rl=rules(edge_clearance=200_000)))

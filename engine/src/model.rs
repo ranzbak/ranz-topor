@@ -317,6 +317,19 @@ pub struct NetRule {
     /// rules matching the net (KiCad `(constraint track_width (min …))`); 0 = none. The engine's
     /// effective minimum is `max(Rules.min_track_width, min_width)` (necked exit stubs, A6/NX).
     pub min_width: i64,
+    /// Least via diameter / drill of the net from a matching custom rule (`(constraint
+    /// via_diameter (min …))`, `(constraint hole_size (min …))`, the last matching rule in the
+    /// file); 0 = no custom rule. KiCad's DRC uses a matching custom rule's minimum in place of the
+    /// Board Setup minimum (drc_engine.cpp: a matching rule returns before the board-minimum
+    /// clamp), so a via of this net is checked against it ([`Rules::via_min_of`]).
+    pub via_d_min: i64,
+    pub via_drill_min: i64,
+    /// The net is a coupled pair's lead in the planning model (`topo::diffpair::alias`): its via
+    /// is the pair's two-via disc, and the partner's pads, shapes and copper carry its net there.
+    /// That disc holds the N via as well as the P via, so no copper of either half is own copper
+    /// for it: it keeps the net's clearance to all of it (user 2026-11-13: "partner copper is not
+    /// own copper for clearance purposes"; dcsgonebadge USB-: a pair via on USB+ pads of U7 / J1).
+    pub pair_disc: bool,
 }
 
 impl Default for NetRule {
@@ -329,6 +342,9 @@ impl Default for NetRule {
             netclass: "Default".into(),
             width_source: "default".into(),
             min_width: 0,
+            via_d_min: 0,
+            via_drill_min: 0,
+            pair_disc: false,
         }
     }
 }
@@ -348,15 +364,23 @@ pub struct Rules {
     #[serde(default)]
     pub via_hole_clearance: i64,
     pub hole_to_hole: i64,
+    /// Board Setup copper-to-edge clearance, as the board gives it (0 = 0). Measured, as KiCad's
+    /// DRC does, from the Edge.Cuts shape's EFFECTIVE shape, i.e. its stroke
+    /// (drc_test_provider_edge_clearance.cpp `testAgainstEdge`: `edge->GetEffectiveShape(
+    /// Edge_Cuts)` collided at `max(0, min - epsilon)`); the outline here is the stroke's centre
+    /// line, so the engine keeps [`Rules::edge_clear`] = this + [`Rules::outline_half_stroke`].
     pub edge_clearance: i64,
+    /// Half the widest Edge.Cuts stroke (nm; 0 = unset, older models): see [`Rules::edge_clear`].
+    #[serde(default)]
+    pub outline_half_stroke: i64,
     /// Narrowest copper connection KiCad's DRC accepts (`min_connection`, nm; 0 = unset): a
     /// necked pad exit stays at least this wide.
     #[serde(default)]
     pub min_connection: i64,
     pub max_error: i64,
-    pub profile: String,
-    pub drill_list: Vec<i64>,
-    pub routing_vias: Vec<i64>,
+    // No fab profile here (user decision 2026-11-12): every rule comes from the board's KiCad
+    // configuration as the plugin resolved it (`toporlib.rules`). Older models' `profile`,
+    // `drill_list` and `routing_vias` keys are ignored when read (serde skips unknown fields).
     /// KiCad's pre-defined via list (`board.design_settings.via_dimensions`, entries with a
     /// diameter > 0), `[diameter, drill]` nm. The smaller ones are alternatives for tight spots
     /// (`vias::via_sizes`).
@@ -460,6 +484,11 @@ impl Rules {
     }
 }
 
+/// Values for a model without `rules` (unit tests, hand-made JSON). The plugin always writes every
+/// field it resolved from the board, so a routed board never runs on these: they are neutral
+/// placeholders close to KiCad's own Board Setup defaults (board_design_settings.h DEFAULT_*), no
+/// fab profile and no extra via sizes; `via_fallback` is KiCad's factory 0.8 / 0.4 via, i.e. no
+/// fallback at all ([`crate::vias::via_fallback_used`] is false for it).
 impl Default for Rules {
     fn default() -> Self {
         Rules {
@@ -472,13 +501,9 @@ impl Default for Rules {
             via_hole_clearance: 0,
             hole_to_hole: 250_000,
             edge_clearance: 500_000,
+            outline_half_stroke: 0,
             min_connection: 0,
             max_error: 5_000,
-            profile: "jlcpcb_1oz".into(),
-            drill_list: vec![
-                200_000, 250_000, 300_000, 400_000, 500_000, 800_000, 1_000_000,
-            ],
-            routing_vias: vec![250_000, 300_000, 400_000, 500_000],
             predefined_vias: Vec::new(),
             via_fallback: [800_000, 400_000],
             allowed_drills: Vec::new(),
@@ -493,6 +518,32 @@ impl Default for Rules {
 }
 
 impl Rules {
+    /// Centre-line distance copper keeps from the board outline: the copper-to-edge clearance
+    /// plus half the outline's stroke width (KiCad measures from the stroke's edge), also when the
+    /// clearance is 0 (copper may then touch the stroke, not cross it). An ignored copper-to-edge
+    /// check (`ignored_checks`) keeps `edge_clearance` alone (callers set it to 0 there). O(1).
+    pub fn edge_clear(&self) -> i64 {
+        if self.ignored_checks.iter().any(|c| c == "copper_edge_clearance") {
+            self.edge_clearance
+        } else {
+            self.edge_clearance + self.outline_half_stroke.max(0)
+        }
+    }
+
+    /// The least via `(diameter, drill)` KiCad's DRC accepts on `net`: the net's custom-rule
+    /// minimum where one matches ([`NetRule::via_d_min`]), else the Board Setup minimum. O(1).
+    pub fn via_min_of(&self, net: i32) -> (i64, i64) {
+        let nr = self.net_rule(net);
+        let d = if nr.via_d_min > 0 { nr.via_d_min } else { self.min_via_diameter };
+        let r = if nr.via_drill_min > 0 { nr.via_drill_min } else { self.min_via_drill };
+        (d, r)
+    }
+
+    /// Whether a via of `net` is a pair's two-via disc ([`NetRule::pair_disc`]). O(log N).
+    pub fn pair_disc(&self, net: i32) -> bool {
+        self.per_net.get(&net).is_some_and(|r| r.pair_disc)
+    }
+
     pub fn net_rule(&self, net: i32) -> &NetRule {
         self.per_net.get(&net).unwrap_or(&self.default)
     }
@@ -858,7 +909,7 @@ pub struct Options {
     /// signals off them (only the routable layers are signal layers).
     pub plane_signals: String,
     /// Router (A10): when non-empty only these drills (nm) are used for the *alternative* via
-    /// sizes (predefined and profile vias); the net's own class via is never dropped.
+    /// sizes (the pre-defined vias); the net's own class via is never dropped.
     pub allowed_drills_nm: Vec<i64>,
     /// Router (A10): allow via sites inside the net's own SMD pads (fab must fill and cap).
     pub via_in_pad: bool,
@@ -1242,7 +1293,7 @@ pub struct Options {
     pub diffpair_via_axes: Vec<f64>,
     /// 5.4 (`topor.toml [vias] size`): which via the router puts at a layer change, in the plan
     /// (room, via sites) and in the drawing. `"net_class"` (default, the behaviour before 5.4) =
-    /// the net class via first, then the smaller pre-defined / fab-profile vias for tight spots
+    /// the net class via first, then the smaller pre-defined vias for tight spots
     /// ([`crate::vias::via_sizes`]). `"board_min"` = the smallest via the Board Setup minimums
     /// allow (min via diameter, min through-hole drill, min annular ring: the supplier's
     /// capability) that still carries the trace's current: drill = the smallest with

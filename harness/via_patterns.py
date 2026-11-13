@@ -48,7 +48,7 @@ MIN_ANNULAR, MIN_DRILL, MIN_VIA_D = 0.10, 0.25, 0.45
 VIA_PRICE = 25.0
 SQ2 = math.sqrt(2.0)
 #: The rules every expected answer here is built for (harness.validity ``rules_assumed``): the board's own Board
-#: Setup and net classes (no fab profile: route with ``[rules] fab_profile = "board"``) and the via rule of the
+#: Setup and net classes (no fab profile: ``[rules] fab_profile = "board"``, the default) and the via rule of the
 #: answers, ``[vias] size = "board_min"`` (the smallest Board Setup via with pi x drill >= the trace width).
 RULES_ASSUMED = {"authority": "board", "margin": 0.0, "options": {"vias.size": "board_min"}}
 RULES_VP = dict(RULES, min_track_width=0.20, min_via_diameter=MIN_VIA_D, min_through_hole_diameter=MIN_DRILL,

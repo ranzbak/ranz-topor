@@ -137,7 +137,7 @@ def expected_doc(pat: PTPattern) -> dict:
     car = {t.net + ":" + "-".join(f"{p[0]:g},{p[1]:g}" for p in t.pts): round(_len(t.pts), 4) for t in pat.careless_tracks}
     lr, lc = sum(ref.values()), sum(car.values())
     return {
-        # harness.validity: built for the board's own rules (route with [rules] fab_profile = "board")
+        # harness.validity: built for the board's own rules ([rules] fab_profile = "board", the default)
         "rules_assumed": {"authority": "board", "margin": 0.0},
         "name": pat.name,
         "title": "Own-net pours are terminals: end on the VCC pour, share a GND plane via, one via onto the GND plane",

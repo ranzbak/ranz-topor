@@ -264,6 +264,8 @@ _DEF_RULES = {
     "min_via_diameter": 0.4,
     "min_through_hole_diameter": 0.3,
     "min_via_annular_width": 0.05,
+    # every Board Setup constraint KiCad writes (a key the file lacks takes topor's reported rule fallback)
+    "min_connection": 0.0,
     "max_error": 0.005,
 }
 _DEF_CLASSES = [
