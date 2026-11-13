@@ -66,7 +66,7 @@ KiCad home (never your own); it is not part of pytest ([gui-test-checklist.md](d
 
 `.github/workflows/ci.yml` runs on every push to a branch other than `main`, on pull requests and on demand:
 
-- **rust**: `cargo test --release` and `cargo clippy --release --all-targets -- -D warnings` in `engine/`.
+- **rust**: `cargo test --release` and `cargo clippy --release --all-targets` in `engine/` (not yet `-D warnings`: 5 pre-existing warnings on stable 1.96; make it strict once fixed).
 - **python**: builds the `topor-engine` wheel with maturin (feature `python`), installs it with the Python test
   dependencies into a plain venv, and runs `pytest` (junit xml uploaded as the `pytest-junit` artifact).
 
