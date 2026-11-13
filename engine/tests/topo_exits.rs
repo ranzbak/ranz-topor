@@ -103,3 +103,33 @@ fn an_end_pin_towards_its_free_side_gets_no_stub() {
     let b = tb::build_full(&m, &opts(), &[], &[exit(&m, "R0", (3.0, 12.0))]).unwrap();
     assert_eq!(b.exit_stubs.len(), 1, "R0 towards the row");
 }
+
+/// End to end through the core (`route::route` -> `Fixed::build` -> `exit_requests`): off (the
+/// default) the build gets no `Extra::Exit`, so no stub note; on, the row's pins towards their
+/// western targets get planned exit stubs. On a board without fine-pitch neighbours the option
+/// changes nothing: the routed copper is the same item for item.
+#[test]
+fn the_option_adds_stubs_through_the_core_only_when_on() {
+    use topor_engine::model::Options;
+    let off = Options::from_json(r#"{"wall_clock_s": 60.0}"#).unwrap();
+    assert!(!off.pad_exit_stubs, "default off");
+    let on = Options { pad_exit_stubs: true, ..off.clone() };
+    let stub_note = |r: &topor_engine::route::RouteResult| r.warnings.iter().find(|w| w.contains("planned exit stubs")).cloned();
+    // The row, nets 1..=5 to test points on the west.
+    let m = row(&[("T1", 1, 3.0, 3.0, 0.6, 0.6, 0), ("T2", 2, 3.0, 6.0, 0.6, 0.6, 0), ("T3", 3, 3.0, 9.0, 0.6, 0.6, 0), ("T4", 4, 3.0, 12.0, 0.6, 0.6, 0), ("T5", 5, 3.0, 15.0, 0.6, 0.6, 0)]);
+    let r_off = topor_engine::route::route(&m, &off);
+    assert_eq!(stub_note(&r_off), None, "off: no exit stub was built");
+    let r_on = topor_engine::route::route(&m, &on);
+    let note = stub_note(&r_on).expect("on: the row's pins get exit stubs");
+    let n: usize = note.split("pad_exit_stubs): ").nth(1).and_then(|t| t.split(' ').next()).and_then(|t| t.parse().ok()).unwrap_or(0);
+    assert!(n >= 1, "{note}");
+    // Lone pads (no other net within reach): on and off route the same copper.
+    let lone = tb_lone();
+    let (a, b) = (topor_engine::route::route(&lone, &off), topor_engine::route::route(&lone, &on));
+    assert_eq!(stub_note(&b), None);
+    assert_eq!(a.items, b.items, "no fine-pitch pad: the option is inert");
+}
+
+fn tb_lone() -> topor_engine::model::BoardModel {
+    topo_d6b::board(20.0, 16.0, 2, &[("A", 1, 10.0, 4.0, 1.6, 0.3, 0), ("B", 1, 3.0, 4.0, 0.6, 0.6, 0), ("C", 2, 10.0, 12.0, 1.6, 0.3, 0), ("D", 2, 3.0, 12.0, 0.6, 0.6, 0)])
+}
