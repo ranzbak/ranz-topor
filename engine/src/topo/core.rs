@@ -1489,8 +1489,8 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
 /// connected pour has no length, the trace ends there): of its candidates ([`planes::far_candidates`],
 /// cheapest straight price first) those that keep clear of the stubs placed, then the one the P2
 /// path search on the bare board (every stub and every candidate in the projection, no wire
-/// routed yet) reaches cheapest: its length, its layer changes and walls priced as in P2, nothing
-/// inside the pour. A pad with one candidate left keeps it without a search; `None`: no candidate
+/// routed yet) reaches cheapest: its taut length, its layer changes and walls priced as in P2,
+/// nothing inside the pour. A pad with one candidate left keeps it without a search; `None`: no candidate
 /// is clear of the stubs. Decided once per route (decide early: the planner gets one terminal per
 /// pad). O(candidates x board build + one P2 search per pending pad).
 #[allow(clippy::too_many_arguments)]
@@ -1523,7 +1523,11 @@ fn select_far(model: &BoardModel, opts: &Options, reg: &Registry, dec: &crate::d
     };
     let mut st = State::new(&b2.proj);
     st.cross_vias = opts.crossing_vias == "via";
-    st.taut_len = opts.search_length == "taut";
+    // The pick compares ends whose paths differ by a few mm: always the taut length here. The
+    // "even" length overrates straight paths on long triangulation edges (`[search] length`) and
+    // picked an end off the straight line (plane_terminal J1.1: 16.74 mm instead of 15.57) or
+    // round the far side of a connector row (pour_zero J3.1). One search per far pad.
+    st.taut_len = true;
     let ws0 = (model.rules.default.width + model.rules.default.clearance) as f64;
     let term_obs = |net: i32, at: Vec2| (0..b2.proj.obstacles.len()).find(|&o| b2.pad_of[o] == usize::MAX && b2.proj.obstacles[o].net == Some(net) && (b2.proj.obstacles[o].center - at).len() <= 2.0 && b2.centre[o].is_some());
     let end = |o: ObsId| b2.centre[o].map(|v| super::init::TreeEnd { v, obs: o, on: None, adj: 0.0, arms: [None; 4] });

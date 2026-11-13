@@ -134,3 +134,17 @@ fn a_far_pad_ends_where_its_path_first_reaches_the_pour() {
     let far_end = ends.iter().map(|e| e.0).fold(f64::MIN, f64::max);
     assert!(len < 17.0 && far_end > 20.0, "the trace ends near the pour's lower right corner: {len:.2} mm, ends {ends:?}");
 }
+
+/// plane_terminal's geometry: a VCC pad at (3, 10) with the VCC pour (F.Cu, x >= 18) straight to
+/// its right, GND pads above the path (y 4) and a GND pour on B.Cu. The far terminal's end is
+/// picked by the taut path length: straight right to the pour edge at y 10 (15.575 mm), not an
+/// end off the line (the "even" length picked (18.71, 12.49): 16.74 mm).
+#[test]
+fn a_far_pad_takes_the_straight_end_when_its_path_is_straight() {
+    let pads = [("J1", 2, 3.0, 10.0, 1.0), ("R1", 0, 5.6, 4.0, 1.0), ("R1", 1, 7.5, 4.0, 1.0), ("R2", 1, 10.0, 4.0, 1.0), ("R2", 0, 11.9, 4.0, 1.0)];
+    let m = board(30.0, 20.0, &pads, &[(2, 0, 18.0, 0.5, 29.5, 19.5, 0), (1, 2, 0.5, 0.5, 29.5, 19.5, 0)]);
+    let on = route_with(&m, &Options::default(), &RunControl::new());
+    let len = track_len(&on.items, 2);
+    let ends = track_ends(&on.items, 2);
+    assert!(len < 16.0 && ends.iter().all(|e| (e.1 - 10.0).abs() < 0.3), "straight to the pour edge: {len:.2} mm, ends {ends:?}");
+}
