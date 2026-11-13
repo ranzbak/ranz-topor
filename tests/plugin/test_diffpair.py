@@ -90,3 +90,40 @@ def test_pair_via_is_the_smallest_the_board_allows():
                         allowed_drills_nm=[300_000, 400_000])[:2] == (600_000, 400_000)
     # never larger than the class via; no Board Setup minimum (0) -> no minimum-via candidate
     assert smallest_via({**rules, "min_via_diameter": 0}, 200_000, (500_000, 300_000))[:2] == (500_000, 300_000)
+
+
+def test_pair_via_respects_custom_rule_via_minimums():
+    """A custom rule's via_diameter / hole_size minimum on a pair net replaces the Board Setup minimum in KiCad's
+    DRC (drc_engine.cpp: a matching rule returns before the board-minimum clamp). Before this fix the pair got the
+    Board Setup minimum via 0.45 / 0.25 anyway: a KiCad DRC violation. Both nets count (KiCad checks each via
+    against its own net)."""
+    from toporlib.rules import NetClassVals, resolve_rules_from_project
+
+    pro = {"board": {"design_settings": {"rules": {
+        "min_clearance": 0.15, "min_track_width": 0.2, "min_via_diameter": 0.45, "min_through_hole_diameter": 0.25,
+        "min_via_annular_width": 0.1, "min_hole_clearance": 0.25, "min_hole_to_hole": 0.25,
+        "min_copper_edge_clearance": 0.5, "min_connection": 0, "max_error": 0.005}}},
+        "net_settings": {"classes": [{"name": "Default", "clearance": 0.2, "track_width": 0.25, "via_diameter": 0.8,
+                                      "via_drill": 0.4, "diff_pair_width": 0.2, "diff_pair_gap": 0.15,
+                                      "diff_pair_via_gap": 0.25}]}}
+    dru = """(version 1)
+(rule usb_vias (condition "A.NetName == 'USB_N'")
+  (constraint via_diameter (min 0.6mm)) (constraint hole_size (min 0.35mm)))
+"""
+    codes = {"USB_P": 1, "USB_N": 2}
+    classes = {"Default": NetClassVals("Default", 200_000, 250_000, 800_000, 400_000)}
+    rules = resolve_rules_from_project(pro, dru, netclass_of={n: "Default" for n in codes}, classes=classes,
+                                       widths_before={}, net_codes=codes)
+    assert rules["per_net"]["2"]["via_d_min"] == 600_000 and rules["per_net"]["2"]["via_drill_min"] == 350_000
+    assert "via_d_min" not in rules["per_net"]["1"]
+    (dp,), _ = resolve_pairs(codes, pro=pro, dru_text=dru, netclass_of={}, rules=rules)
+    # drill = the N net's minimum 0.35, diameter = max(0.6, 0.35 + 2 x 0.1); not 0.45 / 0.25
+    assert (dp["via_d"], dp["via_drill"]) == (600_000, 350_000), dp
+    # without the rule: the Board Setup minimum via
+    plain = resolve_rules_from_project(pro, None, netclass_of={n: "Default" for n in codes}, classes=classes,
+                                       widths_before={}, net_codes=codes)
+    (dq,), _ = resolve_pairs(codes, pro=pro, dru_text=None, netclass_of={}, rules=plain)
+    assert (dq["via_d"], dq["via_drill"]) == (450_000, 250_000)
+    # [diffpair] via = "net_class": the class via 0.8 / 0.4 already meets the minimums
+    (dc,), _ = resolve_pairs(codes, pro=pro, dru_text=dru, netclass_of={}, rules=rules, settings={"via": "net_class"})
+    assert (dc["via_d"], dc["via_drill"]) == (800_000, 400_000)

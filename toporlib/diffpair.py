@@ -121,15 +121,22 @@ def _matches(r: DruRule, net: str, netclass: str) -> bool:
 
 
 def smallest_via(rules: dict, width: int, class_via: tuple[int, int], *, drill_grid_nm: int = 0,
-                 allowed_drills_nm=()) -> tuple[int, int, str]:
+                 allowed_drills_nm=(), net_min: tuple[int, int] = (0, 0)) -> tuple[int, int, str]:
     """The smallest via ``(d, drill, source)`` (nm) the board allows for a pair track of `width` nm: the candidates
     are the Board Setup minimum via -- ``drill = max(min_via_drill, ceil(width / pi))`` rounded up to
     `drill_grid_nm`, the smallest `allowed_drills_nm` entry at least that large, ``d = max(min_via_diameter, drill +
     2 x min_annular)``, exactly ``engine/src/vias.rs`` ``rule_size``, only when the Board Setup sets a minimum via
     diameter and drill (> 0) -- every pre-defined via (``rules["predefined_vias"]``) that meets the minimums, carries
     the width (``pi x drill >= width``) and passes the drill filter, and `class_via` (the net class via, always
-    allowed). The least ``(d, drill)`` wins. O(P) for P pre-defined vias."""
+    allowed). The least ``(d, drill)`` wins. `net_min`: the custom-rule ``via_diameter`` / ``hole_size`` minimum
+    of the pair's nets (``per_net`` ``via_d_min`` / ``via_drill_min``, 0 = none); where set it replaces the Board
+    Setup minimum, as in KiCad's DRC (a matching custom rule returns before the board-minimum clamp,
+    drc_engine.cpp), and no candidate below it is taken. O(P) for P pre-defined vias."""
     lo_d, lo_r = int(rules.get("min_via_diameter") or 0), int(rules.get("min_via_drill") or 0)
+    if net_min[0] > 0:
+        lo_d = int(net_min[0])
+    if net_min[1] > 0:
+        lo_r = int(net_min[1])
     ann = int(rules.get("min_annular") or 0)
     allowed = sorted(int(x) for x in allowed_drills_nm or ())
     cands: list[tuple[int, int, str]] = []
@@ -144,8 +151,11 @@ def smallest_via(rules: dict, width: int, class_via: tuple[int, int], *, drill_g
         if (r >= lo_r and d >= lo_d and d - r >= 2 * ann and math.pi * r >= width
                 and (not allowed or r in allowed)):
             cands.append((d, r, "pre-defined via"))
-    if class_via[0] > 0 and class_via[1] > 0:
+    if class_via[0] > 0 and class_via[1] > 0 and class_via[0] >= lo_d and class_via[1] >= lo_r:
         cands.append((int(class_via[0]), int(class_via[1]), "net class via"))
+    if not cands and class_via[0] > 0 and class_via[1] > 0:  # the class via raised to the minimums
+        r = max(int(class_via[1]), lo_r)
+        return max(int(class_via[0]), lo_d, r + 2 * ann), r, "net class via (raised to the via minimums)"
     return min(cands, key=lambda c: (c[0], c[1])) if cands else (0, 0, "none")
 
 
@@ -216,10 +226,18 @@ def resolve_pairs(names_codes: dict, *, pro: dict, dru_text: str | None, netclas
         via_d = int(nr.get("via_d") or 0)
         via_drill = int(nr.get("via_drill") or 0)
         src["via"] = "net class via"
+        # the custom-rule via minimums of both nets (KiCad checks each via against its own net's rules)
+        nrn = (rules.get("per_net") or {}).get(str(names_codes[n_name])) or {}
+        net_min = (max(int(nr.get("via_d_min") or 0), int(nrn.get("via_d_min") or 0)),
+                   max(int(nr.get("via_drill_min") or 0), int(nrn.get("via_drill_min") or 0)))
         if st["via"] != "net_class":
             via_d, via_drill, src["via"] = smallest_via(
                 rules, width, (via_d, via_drill), drill_grid_nm=int(round(float(st["drill_grid_mm"] or 0) * 1e6)),
-                allowed_drills_nm=[int(round(float(x) * 1e6)) for x in st["allowed_drills_mm"] or []])
+                allowed_drills_nm=[int(round(float(x) * 1e6)) for x in st["allowed_drills_mm"] or []],
+                net_min=net_min)
+        elif net_min != (0, 0):  # the class via raised to the minimums (diameter keeps the annular ring)
+            via_drill = max(via_drill, net_min[1])
+            via_d = max(via_d, net_min[0], via_drill + 2 * int(rules.get("min_annular") or 0))
         ann = max(0, (via_d - via_drill) // 2)
         h2h = int(rules.get("hole_to_hole") or 0)
         c2h = int(rules.get("via_hole_clearance") or rules.get("hole_clearance") or 0)

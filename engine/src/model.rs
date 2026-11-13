@@ -317,6 +317,13 @@ pub struct NetRule {
     /// rules matching the net (KiCad `(constraint track_width (min …))`); 0 = none. The engine's
     /// effective minimum is `max(Rules.min_track_width, min_width)` (necked exit stubs, A6/NX).
     pub min_width: i64,
+    /// Least via diameter / drill of the net from a matching custom rule (`(constraint
+    /// via_diameter (min …))`, `(constraint hole_size (min …))`, the last matching rule in the
+    /// file); 0 = no custom rule. KiCad's DRC uses a matching custom rule's minimum in place of the
+    /// Board Setup minimum (drc_engine.cpp: a matching rule returns before the board-minimum
+    /// clamp), so a via of this net is checked against it ([`Rules::via_min_of`]).
+    pub via_d_min: i64,
+    pub via_drill_min: i64,
 }
 
 impl Default for NetRule {
@@ -329,6 +336,8 @@ impl Default for NetRule {
             netclass: "Default".into(),
             width_source: "default".into(),
             min_width: 0,
+            via_d_min: 0,
+            via_drill_min: 0,
         }
     }
 }
@@ -493,6 +502,15 @@ impl Default for Rules {
 }
 
 impl Rules {
+    /// The least via `(diameter, drill)` KiCad's DRC accepts on `net`: the net's custom-rule
+    /// minimum where one matches ([`NetRule::via_d_min`]), else the Board Setup minimum. O(1).
+    pub fn via_min_of(&self, net: i32) -> (i64, i64) {
+        let nr = self.net_rule(net);
+        let d = if nr.via_d_min > 0 { nr.via_d_min } else { self.min_via_diameter };
+        let r = if nr.via_drill_min > 0 { nr.via_drill_min } else { self.min_via_drill };
+        (d, r)
+    }
+
     pub fn net_rule(&self, net: i32) -> &NetRule {
         self.per_net.get(&net).unwrap_or(&self.default)
     }

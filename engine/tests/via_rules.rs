@@ -139,3 +139,31 @@ fn diff_pair_nets_use_the_pairs_via() {
     r.diff_pairs[0].via_d = 0;
     assert_eq!(via_sizes(&r, 3, &Options::default())[0], sz(800_000, 400_000));
 }
+
+#[test]
+fn custom_rule_via_minimums_floor_pair_board_min_and_predefined_vias() {
+    // A custom rule `(constraint via_diameter (min 0.6mm))` / `hole_size (min 0.35mm)` on a net
+    // replaces the Board Setup minimum in KiCad's DRC (drc_engine.cpp: a matching rule returns
+    // before the board-minimum clamp). Before: the pair via 0.45 / 0.25 and the board_min size
+    // ignored it (a DRC violation in KiCad).
+    use topor_engine::model::DiffPairRule;
+    let mut r = rules();
+    r.predefined_vias = vec![[450_000, 250_000], [700_000, 350_000]];
+    let floor = NetRule { via_d: 800_000, via_drill: 400_000, via_d_min: 600_000, via_drill_min: 350_000, ..Default::default() };
+    r.per_net.insert(4, floor.clone());
+    r.per_net.insert(7, floor);
+    r.diff_pairs = vec![DiffPairRule { p: 3, n: 4, width: 200_000, via_d: 450_000, via_drill: 250_000, ..Default::default() }];
+    for mode in ["net_class", "board_min"] {
+        let o = Options { via_size: mode.into(), ..Options::default() };
+        // the N net's minimum floors the pair via for both nets: drill 0.35, d = max(0.6, 0.35 + 2 x 0.1)
+        assert_eq!(via_sizes(&r, 3, &o), vec![sz(600_000, 350_000)], "{mode}");
+        assert_eq!(via_sizes(&r, 4, &o), vec![sz(600_000, 350_000)], "{mode}");
+    }
+    // board_min on a single net with the custom minimum
+    let o = Options { via_size: "board_min".into(), ..Options::default() };
+    assert_eq!(via_sizes(&r, 7, &o), vec![sz(600_000, 350_000)]);
+    // net_class mode: the pre-defined 0.45 / 0.25 is below net 7's minimum, 0.7 / 0.35 is kept
+    assert_eq!(via_sizes(&r, 7, &Options::default()), vec![sz(800_000, 400_000), sz(700_000, 350_000)]);
+    // a net without a custom rule keeps the Board Setup minimums
+    assert_eq!(via_sizes(&r, 0, &o)[0], sz(450_000, 250_000));
+}

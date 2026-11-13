@@ -299,14 +299,17 @@ fn pad_corners(pad: &crate::model::Pad, layer: u32) -> Vec<Vec2> {
 ///
 /// A rule without a via (an older model): with `[vias] size = "board_min"` (5.4) the smallest
 /// Board Setup via that carries the pair's `diff_pair_width` ([`crate::vias::rule_size`]), else
-/// the P net's via.
+/// the P net's via. Never below the custom-rule via minimum of either net (`via_d_min` /
+/// `via_drill_min`, [`crate::vias::pair_floor`]): KiCad's DRC checks each via against its net's rules.
 pub fn via_of(model: &BoardModel, r: &DiffPairRule, opts: &Options) -> (i64, i64) {
+    use crate::vias::{pair_floor, rule_size, ViaSize};
     if r.via_d > 0 && r.via_drill > 0 {
-        return (r.via_d, r.via_drill);
+        let s = pair_floor(&model.rules, r, ViaSize { d: r.via_d, drill: r.via_drill });
+        return (s.d, s.drill);
     }
     if opts.via_size == "board_min" {
         let w = if r.width > 0 { r.width } else { model.rules.net_rule(r.p).width };
-        let s = crate::vias::rule_size(&model.rules, w, opts.via_drill_grid_nm, &opts.allowed_drills_nm);
+        let s = pair_floor(&model.rules, r, rule_size(&model.rules, w, opts.via_drill_grid_nm, &opts.allowed_drills_nm));
         return (s.d, s.drill);
     }
     let nr = model.rules.net_rule(r.p);

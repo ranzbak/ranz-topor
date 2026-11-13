@@ -241,6 +241,10 @@ class NetCustom:
     max_width: int | None = None
     via_d: int | None = None
     via_drill: int | None = None
+    #: the matching custom rules' via_diameter / hole_size minimum (0 = none): KiCad's DRC checks the net's
+    #: vias against it in place of the Board Setup minimum
+    via_d_min: int = 0
+    via_drill_min: int = 0
     width_rule: str | None = None
 
 
@@ -396,6 +400,7 @@ class CustomRules:
             out.via_d = max(vd if vd is not None else d0, vmn or 0)
         if hs is not None or (hmn is not None and hmn > h0):
             out.via_drill = max(hs if hs is not None else h0, hmn or 0)
+        out.via_d_min, out.via_drill_min = int(vmn or 0), int(hmn or 0)
         return out
 
     # -------------------------------------------------------------- board-wide

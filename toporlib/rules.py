@@ -446,7 +446,7 @@ def resolve_rules_from_project(
             via_d = cu.via_d if board_auth else max(cu.via_d, floors["min_via_diameter"])
         if cu is not None and cu.via_drill is not None:
             via_drill = cu.via_drill if board_auth else max(cu.via_drill, floors["min_via_drill"])
-        return {
+        out = {
             "clearance": clearance,
             "width": width,
             "via_d": via_d,
@@ -455,6 +455,13 @@ def resolve_rules_from_project(
             "width_source": src,
             "min_width": custom_min_w,
         }
+        # a custom-rule via minimum (engine NetRule via_d_min / via_drill_min; only when a rule sets one): the
+        # smallest via the net may get (diff pairs, [vias] size = "board_min", pre-defined alternatives)
+        if cu is not None and cu.via_d_min:
+            out["via_d_min"] = cu.via_d_min if board_auth else max(cu.via_d_min, floors["min_via_diameter"])
+        if cu is not None and cu.via_drill_min:
+            out["via_drill_min"] = cu.via_drill_min if board_auth else max(cu.via_drill_min, floors["min_via_drill"])
+        return out
 
     if cr:
         # the region floor: the fab minimum in the floor mode, none with the board as the authority (KiCad: the
