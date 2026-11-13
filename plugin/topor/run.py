@@ -840,7 +840,9 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         job = engine.route_async(mj, oj)
         job_t0, router_before = time.monotonic(), state["router_s"]
         cpu_t0, cpu_before = time.process_time(), state["router_cpu_s"]
-        last_poll, cancelled_at = -1e9, None
+        # cancelled_at: Cancel / OK or the hard limit was sent (job.cancel()); limit_at: the soft limit was sent
+        # (job.reach_limit()). Kept apart so a Cancel after the soft limit still reaches the job (verify-m2 F1).
+        last_poll, cancelled_at, limit_at = -1e9, None, None
         rounds_seen = 0  # round lines of this job written to log.txt (round_log_lines)
         # Ends when the job is done (also after an engine panic: B-1). After Cancel / OK / the CPU limit the engine
         # finishes the stage it is in and returns its best result so far; that can take a while on a big board, so
@@ -874,19 +876,21 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                         setter(engine_limit(router_before))
                     else:
                         log.line("this engine cannot change its time limit during a run; the change is ignored")
-                if state["limit_hit"] and cancelled_at is None:
-                    cancelled_at = now
+                if state["limit_hit"] and cancelled_at is None and limit_at is None:
                     reach = getattr(job, "reach_limit", None)
                     if soft_limit and callable(reach):
                         # M2.TL: the CPU clock's limit is the engine's soft limit: the step that runs finishes and the
-                        # best kept variant is drawn (Cancel still stops now)
+                        # best kept variant is drawn (Cancel still stops now: cancelled_at stays unset)
+                        limit_at = now
                         reach()
                     else:
+                        cancelled_at = now
                         job.cancel()
                         log.line("time limit: waiting for the engine to finish its current stage")
                 if p.limit_reached and not state.get("limit_noted"):
                     state["limit_noted"] = True
-                    log.line(p.notice or "time limit reached, waiting for the current step to finish")
+                    log.line(p.notice or ("time limit reached, waiting for the current step to finish" if soft_limit
+                                          else "time limit reached (hard): the current step stops now"))
                 if state["cancel"] and cancelled_at is None:
                     cancelled_at = now
                     job.cancel()
@@ -900,6 +904,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
             time.sleep(0.02)
         if cancelled_at is not None:
             log.line(f"engine stopped {time.monotonic() - cancelled_at:.1f} s after the stop request")
+        elif limit_at is not None:
+            log.line(f"engine finished {time.monotonic() - limit_at:.1f} s (wall clock) after the soft time limit")
         res = json.loads(job.wait())  # a panicked job raises RuntimeError("routing thread panicked: ...")
         note_limit(res)
         items = res.get("items") or []

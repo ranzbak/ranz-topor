@@ -140,3 +140,23 @@ def test_soft_limit_overrun_leaves_out_the_measurements(app, eprom, tmp_path, re
     tl = _result_json(out)["time_limit"]
     assert eng.jobs[0].reached and tl["reached"] is True
     assert tl["overrun_s"] == pytest.approx(max(0.0, out.router_cpu_s - 4.0 - 3.0), abs=1e-3), (tl, out.router_cpu_s)
+
+
+class _CancelOnceLimitPassed(ScriptedUi):
+    """Presses Cancel once the CPU soft limit (3 s) is well behind (8 CPU s on the counter)."""
+
+    def progress(self, p):
+        super().progress(p)
+        return not (p.cpu_s >= 8.0)
+
+
+def test_cancel_after_the_cpu_soft_limit_still_cancels_the_job(app, eprom, tmp_path, reports, cpu_counter):
+    # M2.TL: the soft limit lets the current step finish; Cancel after it must still stop now (found by verify-m2:
+    # the soft limit used the Cancel bookkeeping, so the later Cancel never reached the engine)
+    cfg = CFG.with_values({("run", "timeout_clock"): "cpu", ("run", "timeout_s"): 3.0})
+    eng = RecordingEngine(hold=20, patch=_as("timeout", timed_out=True))
+    _, _, out = do_run(eprom, tmp_path, ui=_CancelOnceLimitPassed(accept=False), cfg=cfg, engine=eng)
+    job = eng.jobs[0]
+    assert job.reached, "the soft limit came first"
+    assert job.cancelled, "the user's Cancel after the soft limit never reached the engine job"
+    assert out.cancelled is True
