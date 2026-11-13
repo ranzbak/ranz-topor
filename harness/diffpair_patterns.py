@@ -2272,8 +2272,13 @@ def pair_via(pat: DPat, cls: dict) -> tuple[float, float]:
 def rules_assumed(pat: DPat) -> dict:
     """The rule set the expected answer of `pat` is built for (harness.validity ``rules_assumed``, mm): the board's
     own Board Setup, net classes and .kicad_dru (no fab profile, exact clearances), and for every pair net the one
-    via it may place, :func:`pair_via` (the gate checks it against the router's effective via list). The single
-    nets keep the board files' own via list. O(nets)."""
+    via it may place, :func:`pair_via` (the gate checks it against the router's effective via list). A single net
+    whose reference via is not its net class via (the crossers of dp_bus_crossing, the GND vias between P and N: the
+    smallest the Board Setup allows, rule 6) needs ``[vias] size = "board_min"`` (engine vias.rs rule_size: the
+    smallest Board Setup via with pi x drill >= the trace width; pair nets keep the pair via in that mode too), so
+    the declaration names that option and :func:`pair_via` must give the same size for that net. Without it the
+    router has only the net class via there (no pre-defined vias on these boards; before 2026-11-12 the engine's
+    hidden JLCPCB via list offered 0.45 / 0.25, which made such a test look valid). O(nets + vias)."""
     from fnmatch import fnmatchcase  # noqa: PLC0415
 
     from toporlib.diffpair import pair_nets  # noqa: PLC0415
@@ -2284,8 +2289,19 @@ def rules_assumed(pat: DPat) -> dict:
         for n in pat.nets:
             if n not in cls_of and fnmatchcase(n, np_["pattern"]):
                 cls_of[n] = by_name[np_["netclass"]]
-    nets = {n: {"vias": [list(pair_via(pat, cls_of[n]))]} for n in sorted(pair_nets(pat.nets)) if n in cls_of}
-    return {"authority": "board", "margin": 0.0, "nets": nets}
+    pn = pair_nets(pat.nets)
+    nets = {n: {"vias": [list(pair_via(pat, cls_of[n]))]} for n in sorted(pn) if n in cls_of}
+    out = {"authority": "board", "margin": 0.0, "nets": nets}
+    default = by_name.get("Default") or {}
+    for v in pat.ref.vias:
+        if v.net in pn:
+            continue
+        cls = cls_of.get(v.net, default)
+        if (v.dia, v.drill) != (cls.get("via_diameter"), cls.get("via_drill")):
+            # rule_size of the net's own track width (pair_via with that width in place of the pair width)
+            assert (v.dia, v.drill) == pair_via(pat, {**cls, "diff_pair_width": cls["track_width"]}), (pat.name, v)
+            out["options"] = {"vias.size": "board_min"}
+    return out
 
 
 def build(name: str) -> DPat:

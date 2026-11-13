@@ -148,3 +148,17 @@ def test_rules_assumed_pair_via_is_the_smallest(name, generated):
     for v in pat.ref.vias:  # the reference pair vias are that via
         if v.net in ra["nets"]:
             assert (nm(v.dia), nm(v.drill)) == (d, drill)
+
+
+@pytest.mark.parametrize("name", dp.NAMES)
+def test_rules_assumed_single_net_small_vias_need_board_min(name):
+    """A single net whose reference via is the smallest Board Setup via (not its net class via) can only be valid
+    under ``[vias] size = "board_min"``: the board has no pre-defined vias, so the router's via list is the class
+    via otherwise (the engine's hidden JLCPCB list that offered 0.45 / 0.25 is gone, 2026-11-12)."""
+    from toporlib.diffpair import pair_nets
+
+    pat = dp.build(name)
+    pn = pair_nets(pat.nets)
+    small = [v for v in pat.ref.vias if v.net not in pn]
+    want = {"vias.size": "board_min"} if small else None
+    assert dp.rules_assumed(pat).get("options") == want
