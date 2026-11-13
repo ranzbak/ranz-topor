@@ -32,7 +32,7 @@ from pathlib import Path
 from toporlib import compass as compass_mod
 
 
-def _rebuild(run: Path, cuts: Path | None) -> dict | None:
+def _rebuild(run: Path, cuts: Path | None, join: dict | None = None) -> dict | None:
     hits = sorted(glob.glob(str(run / "reports" / "**" / "result.json"), recursive=True))
     if not hits:
         return None
@@ -55,17 +55,18 @@ def _rebuild(run: Path, cuts: Path | None) -> dict | None:
         rep = json.loads((cuts / f"run{k}" / f"cycle{c}.json").read_text())
         gap = {row["i"]: f"cut test: over-full ({row['sub']}); the per-edge plan: fits"
                for row in cutclass.classify(r, rep) if row["class"] == "planner: over-full cut"}
-    return compass_mod.build(route, drc_new, unc, model_gap=gap)
+    return compass_mod.build(route, drc_new, unc, model_gap=gap, **(join or {}))
 
 
-def load(run: Path, cuts: Path | None = None, rebuild: bool = False) -> dict | None:
+def load(run: Path, cuts: Path | None = None, rebuild: bool = False, join: dict | None = None) -> dict | None:
     """The compass of one route_board run directory (see the module doc); `rebuild`: from result.json and the DRC
-    files even when `<name>--compass.json` exists (after a classifier change)."""
-    if cuts is None and not rebuild:
+    files even when `<name>--compass.json` exists (after a classifier change); `join`: build() keywords of the KiCad
+    join (drc_radius_mm, join_nets), implies a rebuild."""
+    if cuts is None and not rebuild and not join:
         hits = sorted(run.glob("*--compass.json"))
         if hits:
             return json.loads(hits[0].read_text())
-    return _rebuild(run, cuts)
+    return _rebuild(run, cuts, join)
 
 
 def runs_of(root: Path) -> list[Path]:
@@ -79,6 +80,9 @@ def main(argv=None) -> int:
     ap.add_argument("paths", nargs="+", type=Path)
     ap.add_argument("--cuts", type=Path, default=None, help="cut_report directory of the run (model gap, edges model)")
     ap.add_argument("--rebuild", action="store_true", help="classify again from result.json + DRC files")
+    ap.add_argument("--join-mm", type=float, default=None,
+                    help="KiCad join radius in mm (default: the run's [output] compass_join_mm, 0.5)")
+    ap.add_argument("--join-any-net", action="store_true", help="join KiCad items by place alone (compass_join_nets = false)")
     ap.add_argument("--json", type=Path, default=None, help="write all compasses as one JSON file")
     ap.add_argument("--conns", type=int, default=15, help="flagged connections listed per run")
     a = ap.parse_args(argv)
@@ -86,7 +90,9 @@ def main(argv=None) -> int:
     rc = 0
     for p in a.paths:
         for run in runs_of(p):
-            cp = load(run, a.cuts, a.rebuild)
+            join = {k: v for k, v in (("drc_radius_mm", a.join_mm), ("join_nets", False if a.join_any_net else None))
+                    if v is not None}
+            cp = load(run, a.cuts, a.rebuild, join)
             label = f"{run.parent.name}/{run.name}" if run.name.startswith("s") and run.name[1:].isdigit() else run.name
             print(f"## {label}\n")
             if cp is None:

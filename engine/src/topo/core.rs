@@ -3393,16 +3393,6 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         // `[capacity] model = "cuts"`: the per-layer cuts of the plan (the authority there).
         let cmc_plan = packer.cuts.is_some().then(|| CapModel::new_cut(&st, &packer, &dirs_plan, &lr.events, bottom, 1.0));
-        {
-            let lname = |l: usize| b.signal_layers.get(l).and_then(|&id| model.layers.iter().find(|x| x.id == id)).map_or(format!("layer {l}"), |x| x.name.clone());
-            let wc = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
-            let fset = forced.borrow().clone();
-            // `pad_exits`: shopping list 5.10 fills it from `b.exit_stubs` (see compass::pad_exit_items).
-            let view = super::compass::PlanView { st: &st, lr: &lr, cm_edge: &cm_plan, cm_cut: cmc_plan.as_ref(), bottom, conn: &wc, layer: &lname, forced: &fset, pad_exits: None };
-            let mut cp = super::compass::plan_compass(&view, if cmc_plan.is_some() { "cuts" } else { "edges" }, &opts.opt_loop, round);
-            cp.loop_predicted = m.get("loop").and_then(|l| l.get("predicted")).and_then(|p| p.get("violations")).and_then(|v| v.as_u64()).map(|v| v as usize);
-            compass_plan = Some(cp);
-        }
         if let Some(cmc) = cmc_plan.as_ref() {
             if let Some(c) = cmc.cut.as_ref() {
                 let rows = c.report();
@@ -3439,6 +3429,28 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let (fl, st_ms, np, p_ms, nc, i_ms) = super::refine::meter::read_split();
         m["cut_split"] = serde_json::json!({"flushes": fl, "ms_stretches": st_ms.round(), "parts": np, "ms_parts": p_ms.round(), "cuts_priced": nc, "ms_install": i_ms.round()});
         warnings.push(format!("plan metrics: {m}"));
+        // M1 compass, after the plan metrics (its read-only cut test must not enter their meters).
+        {
+            let lname = |l: usize| b.signal_layers.get(l).and_then(|&id| model.layers.iter().find(|x| x.id == id)).map_or(format!("layer {l}"), |x| x.name.clone());
+            let wc = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
+            let fset = forced.borrow().clone();
+            // `[capacity] compass_cut_check`: with the per-edge model in charge, the cut test of
+            // the same plan, read-only (its own packer; the plan, the projection and the drawing
+            // never see it), so the model gap of inflated-sketch §6.1 is measured.
+            let opts_chk = (cmc_plan.is_none() && opts.compass_cut_check).then(|| Options { capacity_model: "cuts".into(), ..opts.clone() });
+            let packer_chk = opts_chk.as_ref().map(|o| {
+                let mut p = Packer::for_model(model, o, proj);
+                p.via_squeeze = packer.via_squeeze;
+                p
+            });
+            let cm_chk = packer_chk.as_ref().map(|p| CapModel::new_cut(&st, p, &dirs_plan, &lr.events, bottom, 1.0)).filter(|c| c.cut.is_some());
+            let cm_cut = cmc_plan.as_ref().or(cm_chk.as_ref());
+            // `pad_exits`: shopping list 5.10 fills it from `b.exit_stubs` (see compass::pad_exit_items).
+            let view = super::compass::PlanView { st: &st, lr: &lr, cm_edge: &cm_plan, cm_cut, cut_is_plan: cmc_plan.is_some(), bottom, conn: &wc, layer: &lname, forced: &fset, pad_exits: None };
+            let mut cp = super::compass::plan_compass(&view, if cmc_plan.is_some() { "cuts" } else { "edges" }, &opts.opt_loop, round);
+            cp.loop_predicted = m.get("loop").and_then(|l| l.get("predicted")).and_then(|p| p.get("violations")).and_then(|v| v.as_u64()).map(|v| v as usize);
+            compass_plan = Some(cp);
+        }
         if opts.stop_after == "plan" {
             let mut r = unrouted(model_real, opts, "not drawn: [run] stop_after = \"plan\" ends each run after the plan of its first cycle");
             r.warnings.extend(warnings);

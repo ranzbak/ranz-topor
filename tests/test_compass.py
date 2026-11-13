@@ -65,14 +65,59 @@ def test_clean_plan_drawn_violation_is_a_drawing_loss_and_kicad_only_is_a_checke
     assert any(f.startswith("drawing loss") for f in cp["flags"])
 
 
-def test_model_gap_needs_the_other_models_item_on_the_same_connection():
-    conns = [conn(i) for i in range(2)]
-    ref = {"class": "model_ref", "layers": ["F.Cu"], "conns": [0], "segs": [seg((0, 0), (2, 0))], "over_nm": 0}
-    v = [viol(0, (1, 0.1)), viol(1, (1, 0.1))]
-    cp = compass.build(route(v, [ref], conns, {"planner_overfull": 0}), None, None)
-    assert row(cp, "model_gap")["drawn"] == 1  # conn 0: the drawing's packer had it over-full, the cut test not
-    assert row(cp, "drawing_loss")["drawn"] == 1  # conn 1: in no item
+def test_model_gap_is_the_sketch_61_direction_and_the_reverse_is_edge_overpredict():
+    # §6.1: a bottleneck of conn 0 the cut test finds over-full and the per-edge packer fits = model gap; an edge-layer
+    # of conn 1 the per-edge packer finds over-full and the cut test fits = per-edge over-predicted; conn 2 in no item.
+    conns = [conn(i) for i in range(3)]
+    gap = {"class": "model_gap", "layers": ["F.Cu"], "conns": [0], "segs": [seg((0, 0), (2, 0))], "over_nm": 100000}
+    opd = {"class": "edge_overpredict", "layers": ["F.Cu"], "conns": [1], "segs": [seg((5, 0), (7, 0))], "over_nm": 0}
+    v = [viol(0, (1, 0.1)), viol(1, (6, 0.1)), viol(2, (12, 0))]
+    cp = compass.build(route(v, [gap, opd], conns, {"planner_overfull": 0, "model_gap": 1, "edge_overpredict": 1}),
+                       None, None)
+    assert (row(cp, "model_gap")["predicted"], row(cp, "model_gap")["drawn"]) == (1, 1)
+    assert (row(cp, "edge_overpredict")["predicted"], row(cp, "edge_overpredict")["drawn"]) == (1, 1)
+    assert row(cp, "drawing_loss")["drawn"] == 1  # conn 2
     assert row(cp, "planner_overfull")["kicad"] is None  # no DRC run
+    # not measured (no cut test): None, shown so, never "missing method step"
+    cp = compass.build(route([viol(0, (1, 0.1))], [], conns, {"planner_overfull": 0}), None, None)
+    assert row(cp, "model_gap")["predicted"] is None
+    assert "not measured" in "\n".join(compass.table_md(cp))
+    assert not any("missing method step" in f for f in cp["flags"])
+
+
+def test_plan_errors_do_not_hide_as_drawing_loss():
+    # Over-full bottleneck of conns 0-1 next to conn 2's violation: "over-full nearby"; a violation at a planned neck of
+    # conn 3: "at a planned neck". Neither is a drawing loss; both are flagged as plan errors.
+    conns = [conn(i) for i in range(4)]
+    over = {"class": "planner_overfull", "layers": ["F.Cu"], "conns": [0, 1], "segs": [seg((0, 0), (2, 0))],
+            "over_nm": 200000}
+    neck = {"class": "shrinkage", "layers": ["F.Cu"], "conns": [3], "segs": [seg((9, 0), (10, 0))], "over_nm": 50000}
+    v = [viol(2, (1, 0.2), cls="static"), viol(3, (9.5, 0.1), cls="static")]
+    cp = compass.build(route(v, [over, neck], conns, {"planner_overfull": 1, "shrinkage": 1}), None, None)
+    assert row(cp, "overfull_nearby")["drawn"] == 1 and row(cp, "neck_loss")["drawn"] == 1
+    assert row(cp, "drawing_loss")["drawn"] == 0
+    assert row(cp, "overfull_nearby")["predicted"] is None and row(cp, "neck_loss")["predicted"] is None
+    assert any("plan error" in f for f in cp["flags"]) and any("necked" in f for f in cp["flags"])
+    # (b) drawn clean = no drawn violation within reach, whoever's: the over-full item is NOT clean (conn 2's
+    # violation lies on it although it matched it only as "nearby")
+    assert row(cp, "planner_overfull")["predicted_clean"] == 0
+
+
+def test_kicad_join_radius_and_nets_are_options():
+    conns = [conn(0), conn(1)]
+    v = [viol(0, (1, 0)), viol(1, (1.3, 0))]
+    item = {"description": "Track [N1] on F.Cu, length 3 mm", "pos": {"x": 1.25, "y": 0.0}}
+    d = [{"type": "clearance", "items": [item]}]
+    r = route(v, [], conns, {"planner_overfull": 0})
+    by_net = compass.build(r, d, 0)  # the nearest drawn violation is conn 0's (N0), but KiCad names N1
+    assert [x["kicad"] for x in by_net["rows"] if x["class"] == "drawing_loss"] == [1]
+    assert by_net["join"] == {"radius_mm": 0.5, "nets": True}
+    assert compass.build(r, d, 0, drc_radius_mm=0.01)["kicad_only_by_type"] == {"clearance": 1}
+    other = [{"type": "clearance", "items": [dict(item, description="Track [N7] on F.Cu")]}]
+    assert compass.build(r, other, 0)["kicad_only_by_type"] == {"clearance": 1}  # no drawn violation of N7
+    assert compass.build(r, other, 0, join_nets=False)["kicad_only_by_type"] == {}
+    md = "\n".join(compass.table_md(compass.build(r, d, 0, drc_radius_mm=0.8)))
+    assert "within 0.8 mm" in md and "not 1:1" in md
 
 
 def test_pad_exit_without_a_plan_object_is_a_missing_method_step():

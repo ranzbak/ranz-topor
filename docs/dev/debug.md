@@ -57,11 +57,14 @@ candidates, bend queries per run) — the first stop when a board is slow.
 
 Every engine result of the topological core carries `compass` (engine `topo/compass.rs`): the plan handed to the
 drawing, per violation class (docs/dev/inflated-sketch.md §6.1) its count and its located items (cuts, edge-layers,
-via sites, unlayerable crossings, traversals through foreign copper, forced paths; with `[capacity] model = "cuts"`
-also the per-edge packer's over-full edge-layers as `model_ref`, the evidence for *model gap*), and per connection the
+via sites, unlayerable crossings, traversals through foreign copper, forced paths; merged into physical bottlenecks, `Compass::bottlenecks`; the two capacity models compared on the
+same plan: `model_gap` = cuts over-full by the cut test that no per-edge over-full edge-layer carrying all their wires
+touches (inflated-sketch §6.1; with model = "edges" the cut test runs read-only, `[capacity] compass_cut_check`),
+`edge_overpredict` = the reverse), and per connection the
 planned vias, taut length and necked stretches. `toporlib/compass.py` classifies every drawn violation against those
-items (first match: via site, unlayerable, foreign copper, over-full (own / nearby), forced path, pad exit, pad exit at
-a planned stub, shrinkage, model gap, pad exit not predicted, else drawing loss), joins KiCad's new routing DRC items by place and builds the
+items (first match: via site, unlayerable, foreign copper, over-full, model gap (§6.1 direction), over-full nearby,
+forced path, pad exit, pad exit at a planned stub, at a planned neck, per-edge over-predicted, pad exit not predicted,
+else drawing loss), joins KiCad's new routing DRC items by place and builds the
 table; the plugin writes it to report.md / result.json, `tools/route_board.sh` to `<name>--compass.json` and the
 metrics (`compass`, `compass_line`), `harness.score_runs` appends one row per run to `<root>/compass.tsv`.
 

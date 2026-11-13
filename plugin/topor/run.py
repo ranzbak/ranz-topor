@@ -951,7 +951,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     try:  # M1 compass: a measurement, never a failed run
         out.compass = compass_mod.build(
             rr, new_routing(loop.routed_drc, base_drc, loop.created) if loop.routed_drc is not None else None,
-            classified["incomplete"].get("unconnected_new") if loop.routed_drc is not None else None)
+            classified["incomplete"].get("unconnected_new") if loop.routed_drc is not None else None,
+            drc_radius_mm=float(cfg.get("output", "compass_join_mm")), join_nets=bool(cfg.get("output", "compass_join_nets")))
     except Exception as e:  # noqa: BLE001
         out.compass = {"available": False, "error": f"{type(e).__name__}: {e}"}
     inc = classified["incomplete"]

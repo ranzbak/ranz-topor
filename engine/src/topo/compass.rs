@@ -25,15 +25,16 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The compass classes in table order (`docs/dev/inflated-sketch.md` §6.1, M1 brief). The first
-/// six are predicted by the plan; `drawing_loss` and `model_gap` are drawn-only by definition
-/// (the plan never predicts its own drawing's failure), `open` is a connection without copper.
-pub const CLASSES: [&str; 10] = ["planner_overfull", "shrinkage", "via_site", "unlayerable", "foreign_copper", "forced_path", "pad_exit", "drawing_loss", "model_gap", "open"];
+/// seven are predicted by the plan. `model_gap` (§6.1: the per-edge packer said fits while the
+/// cut test says over-full) and `edge_overpredict` (the reverse: per-edge over-full, cut test
+/// fits) compare the two capacity models on the plan; `drawing_loss` is drawn-only (the plan
+/// never predicts its own drawing's failure), `open` is a connection without copper.
+pub const CLASSES: [&str; 11] = ["planner_overfull", "shrinkage", "via_site", "unlayerable", "foreign_copper", "forced_path", "pad_exit", "model_gap", "edge_overpredict", "drawing_loss", "open"];
 
 /// A located predicted item of the plan handed to the drawing (KiCad frame, nm).
 #[derive(Clone, Debug, Default, Serialize, PartialEq)]
 pub struct CompassItem {
-    /// One of [`CLASSES`], or `model_ref` (the other capacity model's over-full item: the
-    /// classifier's evidence for `model_gap`, not part of the predicted counts).
+    /// One of [`CLASSES`], or `pad_exit_stub` (5.10: a planned exit stub, located, not counted).
     pub class: String,
     /// Copper layer names the item lies on; empty = any layer (a via, a crossing point).
     pub layers: Vec<String>,
@@ -42,8 +43,10 @@ pub struct CompassItem {
     /// Its place: segments (a cut, an edge, a traversal chord) or points (`[p, p]`).
     pub segs: Vec<[[i64; 2]; 2]>,
     /// How far over (nm, > 0 = over-full; a cut's `-slack`, a shrinkage's width reduction); 0
-    /// when not measured.
+    /// when not measured. A bottleneck of several members: the largest.
     pub over_nm: i64,
+    /// Cuts / edge-layers merged into this item: one physical bottleneck ([`bottlenecks`]).
+    pub members: usize,
 }
 
 /// What the plan hands the drawing for one connection.
@@ -67,9 +70,13 @@ pub struct Compass {
     pub opt_loop: String,
     /// The cycle (round) whose plan this is.
     pub round: usize,
-    /// Predicted items per class of the plan handed to the drawing. A class missing from the map
-    /// is not predicted by this build (`pad_exit` until 5.10 hooks in).
+    /// Predicted items per class of the plan handed to the drawing, counted as the plan counts
+    /// them (cuts, edge-layers, vias, crossings, traversals). A class missing from the map is not
+    /// predicted by this build (`pad_exit` until 5.10 hooks in; `model_gap` without a cut test).
     pub predicted: BTreeMap<String, usize>,
+    /// The same, counted as physical bottlenecks ([`bottlenecks`]): the twin cuts at both ends of
+    /// one channel are one bottleneck.
+    pub bottlenecks: BTreeMap<String, usize>,
     /// Sum of the violation classes of `predicted` (planner_overfull + via_site + unlayerable +
     /// foreign_copper + forced_path + pad_exit when predicted): the plan's own predicted violations
     /// ([`super::optimise::Predicted::count`] of this plan).
@@ -92,8 +99,11 @@ pub struct PlanView<'a, 'p, 'c> {
     pub lr: &'a super::layers::LayerReport,
     /// The per-edge capacity model of the plan (the drawing's packer and via positions).
     pub cm_edge: &'a CapModel<'c>,
-    /// The cut model of the plan (`[capacity] model = "cuts"`), else `None`.
+    /// The cut model: the plan's (`[capacity] model = "cuts"`, `cut_is_plan`) or the read-only cut
+    /// test of the compass (`[capacity] compass_cut_check`); `None` = no cut test.
     pub cm_cut: Option<&'a CapModel<'c>>,
+    /// `cm_cut` is the plan's capacity authority (else a read-only check).
+    pub cut_is_plan: bool,
     pub bottom: i32,
     /// Wire -> connection id (`None`: a wire of no connection).
     pub conn: &'a dyn Fn(WireId) -> Option<usize>,
@@ -129,7 +139,7 @@ fn edge_items(v: &PlanView, cm: &CapModel, class: &str) -> Vec<CompassItem> {
         .map(|(e, l)| {
             let ws = v.st.edge_order[e].iter().filter(|&&p| cm.pass_layer.get(p).is_some_and(|&pl| pl == l as i32)).map(|&p| v.st.passes[p].wire);
             let [a, b] = pr.edges[e];
-            CompassItem { class: class.into(), layers: vec![(v.layer)(l)], conns: conns_of(v, ws), segs: vec![seg(pr.pos[a], pr.pos[b])], over_nm: 0 }
+            CompassItem { class: class.into(), layers: vec![(v.layer)(l)], conns: conns_of(v, ws), segs: vec![seg(pr.pos[a], pr.pos[b])], over_nm: 0, members: 1 }
         })
         .collect()
 }
@@ -147,6 +157,7 @@ fn cut_items(v: &PlanView, cm: &CapModel, over: bool, class: &str) -> Vec<Compas
             conns: conns_of(v, r.wires.iter().copied()),
             segs: vec![seg(r.p, r.q)],
             over_nm: (if over { -r.slack } else { r.shrink }).round() as i64,
+            members: 1,
         })
         .collect()
 }
@@ -197,7 +208,7 @@ pub fn foreign_items(v: &PlanView) -> Vec<CompassItem> {
         }
         for (_, bits, chords) in inside {
             let ls = (0..pr.n_layers.min(64)).filter(|&l| bits & (1u64 << l) != 0).map(|l| (v.layer)(l)).collect();
-            out.push(CompassItem { class: "foreign_copper".into(), layers: ls, conns: conns_of(v, [w]), segs: chords.into_iter().map(|(a, b)| seg(a, b)).collect(), over_nm: 0 });
+            out.push(CompassItem { class: "foreign_copper".into(), layers: ls, conns: conns_of(v, [w]), segs: chords.into_iter().map(|(a, b)| seg(a, b)).collect(), over_nm: 0, members: 1 });
         }
     }
     out
@@ -215,24 +226,125 @@ pub fn pad_exit_items(v: &PlanView) -> Option<Vec<CompassItem>> {
     v.pad_exits.map(|x| x.to_vec())
 }
 
+/// Distance between segments `a` and `b` (nm; 0 when they cross or touch). O(1).
+fn seg_dist(a: &[[i64; 2]; 2], b: &[[i64; 2]; 2]) -> f64 {
+    let f = |p: [i64; 2]| Vec2 { x: p[0] as f64, y: p[1] as f64 };
+    let (p, q, r, s) = (f(a[0]), f(a[1]), f(b[0]), f(b[1]));
+    let cr = |o: Vec2, u: Vec2, w: Vec2| (u.x - o.x) * (w.y - o.y) - (u.y - o.y) * (w.x - o.x);
+    let (d1, d2, d3, d4) = (cr(p, q, r), cr(p, q, s), cr(r, s, p), cr(r, s, q));
+    if ((d1 > 0.0) != (d2 > 0.0)) && ((d3 > 0.0) != (d4 > 0.0)) && d1 != 0.0 && d2 != 0.0 {
+        return 0.0;
+    }
+    let pd = |x: Vec2, u: Vec2, w: Vec2| {
+        let d = w - u;
+        let l2 = d.x * d.x + d.y * d.y;
+        let t = if l2 <= 0.0 { 0.0 } else { (((x.x - u.x) * d.x + (x.y - u.y) * d.y) / l2).clamp(0.0, 1.0) };
+        (x - (u + d * t)).len()
+    };
+    pd(p, r, s).min(pd(q, r, s)).min(pd(r, p, q)).min(pd(s, p, q))
+}
+
+/// Touch tolerance of [`explains`]: the cut test's sheet and the triangulation place the same
+/// pad corner within a few um of each other (polygonised arcs, sagitta).
+const TOUCH_NM: f64 = 5_000.0;
+
+/// The over-full item `a` (one model) accounts for the over-full item `b` (the other model): on
+/// the same layer, touching or crossing it, and carrying every connection of `b`. O(segments).
+fn explains(a: &CompassItem, b: &CompassItem) -> bool {
+    a.layers == b.layers && b.conns.iter().all(|c| a.conns.contains(c)) && a.segs.iter().any(|x| b.segs.iter().any(|y| seg_dist(x, y) <= TOUCH_NM))
+}
+
+/// Merges the items of one class into physical bottlenecks: items on the same layers with the
+/// same connections whose segments come within the shorter one's length of each other are one
+/// bottleneck (the top and bottom cut of one channel between two pads, the cuts of one pad gap).
+/// The merged item keeps every segment, the largest `over_nm` and `members` = how many. Union
+/// find, O(items^2) per class (items are the over-full ones, few).
+pub fn bottlenecks(items: Vec<CompassItem>) -> Vec<CompassItem> {
+    let n = items.len();
+    let mut up: Vec<usize> = (0..n).collect();
+    fn root(up: &mut [usize], mut i: usize) -> usize {
+        while up[i] != i {
+            up[i] = up[up[i]];
+            i = up[i];
+        }
+        i
+    }
+    let len = |s: &[[i64; 2]; 2]| (((s[1][0] - s[0][0]) as f64).powi(2) + ((s[1][1] - s[0][1]) as f64).powi(2)).sqrt();
+    for i in 0..n {
+        for j in i + 1..n {
+            let (a, b) = (&items[i], &items[j]);
+            if a.layers != b.layers || a.conns != b.conns || a.conns.is_empty() {
+                continue;
+            }
+            let near = a.segs.iter().any(|x| b.segs.iter().any(|y| seg_dist(x, y) <= len(x).min(len(y)).max(TOUCH_NM)));
+            if near {
+                let (ri, rj) = (root(&mut up, i), root(&mut up, j));
+                up[rj] = ri;
+            }
+        }
+    }
+    let mut out: Vec<CompassItem> = Vec::new();
+    let mut at: BTreeMap<usize, usize> = BTreeMap::new();
+    for (i, it) in items.into_iter().enumerate() {
+        let r = root(&mut up, i);
+        match at.get(&r) {
+            Some(&k) => {
+                let o = &mut out[k];
+                o.segs.extend(it.segs);
+                o.over_nm = o.over_nm.max(it.over_nm);
+                o.members += it.members;
+            }
+            None => {
+                at.insert(r, out.len());
+                out.push(it);
+            }
+        }
+    }
+    out
+}
+
 /// The compass of the plan `v` (predicted side; the drawn side is filled by the caller and the
 /// Python classifier). O(see module doc).
 pub fn plan_compass(v: &PlanView, model: &str, opt_loop: &str, round: usize) -> Compass {
     let st = v.st;
-    let auth = v.cm_cut.unwrap_or(v.cm_edge);
+    let auth = if v.cut_is_plan { v.cm_cut.unwrap_or(v.cm_edge) } else { v.cm_edge };
     let mut items: Vec<CompassItem> = Vec::new();
     let mut notes = Vec::new();
-    // Over-full: the authority's items; the other model's over-full items as the model-gap
-    // evidence (with the cut model in charge the per-edge packer is the drawing's model).
+    let mut predicted = BTreeMap::new();
+    let mut bn = BTreeMap::new();
     let n_nosite = auth.nosite();
     let n_over = auth.overfull().saturating_sub(n_nosite);
-    if let Some(cc) = v.cm_cut {
-        items.extend(cut_items(v, cc, true, "planner_overfull"));
-        items.extend(cut_items(v, cc, false, "shrinkage"));
-        items.extend(edge_items(v, v.cm_edge, "model_ref"));
+    // Over-full: the authority's items, merged into bottlenecks. The two models compared on the
+    // same plan (§6.1): a cut over-full by the cut test that no per-edge over-full edge-layer
+    // carrying all its wires touches is a model gap; a per-edge over-full edge-layer that no
+    // over-full cut carrying all its wires touches is a per-edge over-prediction.
+    let edge_over = edge_items(v, v.cm_edge, "planner_overfull");
+    let cut_over = v.cm_cut.map(|c| cut_items(v, c, true, "planner_overfull")).unwrap_or_default();
+    let over_items = if v.cut_is_plan && v.cm_cut.is_some() { cut_over.clone() } else { edge_over.clone() };
+    let g = bottlenecks(over_items);
+    bn.insert("planner_overfull".to_string(), g.len());
+    items.extend(g);
+    if v.cut_is_plan {
+        if let Some(cc) = v.cm_cut {
+            let g = bottlenecks(cut_items(v, cc, false, "shrinkage"));
+            items.extend(g);
+        }
+    }
+    if v.cm_cut.is_some() {
+        let gap: Vec<CompassItem> = cut_over.iter().filter(|c| !edge_over.iter().any(|e| explains(e, c))).map(|c| CompassItem { class: "model_gap".into(), ..CompassItem::clone(c) }).collect();
+        let opd: Vec<CompassItem> = edge_over.iter().filter(|e| !cut_over.iter().any(|c| explains(c, e))).map(|e| CompassItem { class: "edge_overpredict".into(), ..CompassItem::clone(e) }).collect();
+        predicted.insert("model_gap".to_string(), gap.len());
+        predicted.insert("edge_overpredict".to_string(), opd.len());
+        let (g1, g2) = (bottlenecks(gap), bottlenecks(opd));
+        bn.insert("model_gap".to_string(), g1.len());
+        bn.insert("edge_overpredict".to_string(), g2.len());
+        items.extend(g1);
+        items.extend(g2);
+        if !v.cut_is_plan {
+            notes.push("model_gap: measured by the compass's read-only cut test ([capacity] compass_cut_check); the plan and the drawing used the per-edge packer".into());
+        }
     } else {
-        items.extend(edge_items(v, v.cm_edge, "planner_overfull"));
-        notes.push("model_gap: not measured ([capacity] model = \"edges\": the plan and the drawing share the per-edge packer; the per-layer cut test runs only with model = \"cuts\" or [capacity] cut_report, see harness/cutclass.py)".into());
+        notes.push("model_gap: not measured ([capacity] model = \"edges\" and compass_cut_check = false: no cut test on this plan)".into());
     }
     // Vias without a site: per wire, the vias of its intervals (points: the planned via
     // traversals' pass points).
@@ -241,20 +353,19 @@ pub fn plan_compass(v: &PlanView, model: &str, opt_loop: &str, round: usize) -> 
             let q = st.pass_point(p);
             seg(q, q)
         }).collect();
-        items.push(CompassItem { class: "via_site".into(), layers: Vec::new(), conns: conns_of(v, [w]), segs: pts, over_nm: 0 });
+        items.push(CompassItem { class: "via_site".into(), layers: Vec::new(), conns: conns_of(v, [w]), segs: pts, over_nm: 0, members: 1 });
     }
     // Crossings no layer separates.
     for (i, &(a, b)) in v.lr.unlayerable_pairs.iter().enumerate() {
         let p = v.lr.unlayerable_at.get(i).copied();
-        items.push(CompassItem { class: "unlayerable".into(), layers: Vec::new(), conns: conns_of(v, [a, b]), segs: p.map(|p| seg(p, p)).into_iter().collect(), over_nm: 0 });
+        items.push(CompassItem { class: "unlayerable".into(), layers: Vec::new(), conns: conns_of(v, [a, b]), segs: p.map(|p| seg(p, p)).into_iter().collect(), over_nm: 0, members: 1 });
     }
     let fc = foreign_items(v);
     let n_fc = fc.len();
     items.extend(fc);
     for &c in v.forced {
-        items.push(CompassItem { class: "forced_path".into(), layers: Vec::new(), conns: vec![c], segs: Vec::new(), over_nm: 0 });
+        items.push(CompassItem { class: "forced_path".into(), layers: Vec::new(), conns: vec![c], segs: Vec::new(), over_nm: 0, members: 1 });
     }
-    let mut predicted = BTreeMap::new();
     predicted.insert("planner_overfull".to_string(), n_over);
     predicted.insert("via_site".to_string(), n_nosite);
     predicted.insert("unlayerable".to_string(), v.lr.unlayerable.len());
@@ -289,6 +400,7 @@ pub fn plan_compass(v: &PlanView, model: &str, opt_loop: &str, round: usize) -> 
         opt_loop: opt_loop.into(),
         round,
         predicted,
+        bottlenecks: bn,
         predicted_violations,
         loop_predicted: None,
         drawn_shrinkages: 0,

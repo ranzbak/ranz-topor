@@ -18,44 +18,56 @@ Classification of one drawn violation (conn c, layer L, place p = the middle of 
 max(``reach_mm``, 4 x its width, about two pitches) + half the stretch's length): the first that matches of
   via site (its class is via_site and the plan has a via of c without a site), unlayerable (a crossing of c no layer
   separates, within r), foreign copper (a traversal of c through foreign copper on L, within r), planner over-full (an
-  over-full cut / edge-layer on L within r that c crosses; or one c does not cross: sub-class "nearby"), forced path
-  (c was placed without a legal path), pad exit (a pad exit of c within r the plan predicts as violating; 5.10), pad
-  exit at a planned exit stub (its class is pad_exit and a planned stub of c lies within r; 5.10), drawing loss at a planned
-  neck (a cut on L within r that fits only necked), model gap (the other capacity model's over-full item of c on L
-  within r: with ``[capacity] model = "cuts"`` the per-edge packer the drawing uses), pad exit not predicted (its class
-  is pad_exit), else drawing loss (sub-class: the engine's own class). The violation rows add up to the drawn
-  violations; the shrinkage row compares the plan's necked stretches with the drawn ones (a shrinkage is no violation,
-  TopoR 6.3 manual p. 72). A KiCad DRC item joins the nearest drawn violation whose stretch it lies within
-  ``drc_radius_mm`` of (distance to the middle minus half the stretch). O(violations x items of the connection + DRC
-  items x violations).
+  over-full bottleneck on L within r that c crosses), model gap (a bottleneck of c on L within r that the cut test
+  finds over-full and the per-edge packer fits: docs/dev/inflated-sketch.md §6.1), over-full nearby (an over-full or
+  model-gap bottleneck of other wires within r: a plan error, not a drawing loss), forced path (c was placed without a
+  legal path), pad exit (a pad exit of c within r the plan predicts as violating; 5.10), pad exit at a planned exit
+  stub (its class is pad_exit and a planned stub of c lies within r; 5.10), at a planned neck (a cut of c on L within r
+  that fits only necked), per-edge over-predicted (an edge-layer of c on L within r that the per-edge packer finds
+  over-full and the cut test fits), pad exit not predicted (its class is pad_exit), else drawing loss (sub-class: the
+  engine's own class). The violation rows add up to the drawn violations; the shrinkage row compares the plan's necked
+  stretches with the drawn ones (a shrinkage is no violation, TopoR 6.3 manual p. 72). A predicted item is drawn clean
+  when no drawn violation of any connection lies within that violation's reach of it. A KiCad DRC item joins the
+  nearest drawn violation whose stretch it lies within ``drc_radius_mm`` of (distance to the middle minus half the
+  stretch), of a net and on a layer the KiCad item names (``join_nets``). O(violations x items + DRC items x
+  violations).
 """
 from __future__ import annotations
 
 import json
 import math
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
 MM = 1_000_000
 DETOUR_FLAG = 1.5  # the user's no-detours mark (memory no-detours): a flag in the table, never a gate
 
-ORDER = ("planner_overfull", "shrinkage", "via_site", "unlayerable", "foreign_copper", "forced_path", "pad_exit",
-         "drawing_loss", "model_gap", "open", "kicad_only")
+ORDER = ("planner_overfull", "overfull_nearby", "shrinkage", "neck_loss", "via_site", "unlayerable", "foreign_copper",
+         "forced_path", "pad_exit", "model_gap", "edge_overpredict", "drawing_loss", "open", "kicad_only")
 LABELS = {
     "planner_overfull": "planner: over-full",
+    "overfull_nearby": "planner: over-full nearby (another wire's bottleneck)",
     "shrinkage": "planner: shrinkage",
+    "neck_loss": "planner: at a planned neck",
     "via_site": "planner: via site",
     "unlayerable": "planner: unlayerable crossing",
     "foreign_copper": "planner: foreign copper",
     "forced_path": "planner: forced path",
     "pad_exit": "pad exit",
     "drawing_loss": "drawing loss",
-    "model_gap": "model gap",
+    "model_gap": "model gap (per-edge fits, cut test over-full)",
+    "edge_overpredict": "per-edge over-predicted (cut test fits)",
     "open": "open (no copper)",
     "kicad_only": "KiCad only (our checker silent)",
 }
 # Classes that are violations in the plan's measure (their sum = the plan's predicted violations).
 VIOLATION_CLASSES = ("planner_overfull", "via_site", "unlayerable", "foreign_copper", "forced_path", "pad_exit")
+# Drawn-side groupings of plan errors (no predicted count of their own): shown as "-" in the predicted column.
+DRAWN_ONLY = ("overfull_nearby", "neck_loss", "open")
+# The two-model comparison: None from the engine = not measured (no cut test on this plan).
+MODEL_CLASSES = ("model_gap", "edge_overpredict")
+JOIN_MM = 0.5  # default join radius of a KiCad DRC item to a drawn violation ([output] compass_join_mm)
 
 
 def _seg_dist(p, a, b) -> float:
@@ -79,7 +91,7 @@ def _near(item: dict, at, layer: str, r: float) -> bool:
 
 def classify_violation(v: dict, mine: list, others: list, reach_nm: float) -> tuple:
     """(class, sub-class, index of the matched item in `mine` or None) of one drawn violation (see the module doc).
-    `mine`: the compass items of its connection; `others`: the over-full items of other connections only."""
+    `mine`: the compass items of its connection; `others`: the over-full and model-gap items of other connections."""
     at, layer, vc = v.get("at") or [0, 0], v.get("layer", ""), v.get("class") or ""
 
     def first(cls, need_near=True):
@@ -90,11 +102,14 @@ def classify_violation(v: dict, mine: list, others: list, reach_nm: float) -> tu
 
     if vc == "via_site" and (i := first("via_site", need_near=False)) is not None:
         return "via_site", "", i
-    for cls, sub in (("unlayerable", ""), ("foreign_copper", ""), ("planner_overfull", "crosses it")):
+    for cls, sub in (("unlayerable", ""), ("foreign_copper", ""), ("planner_overfull", "crosses it"),
+                     ("model_gap", "its bottleneck: per-edge packer fits, cut test over-full")):
         if (i := first(cls)) is not None:
             return cls, sub, i
-    if any(it["class"] == "planner_overfull" and _near(it, at, layer, reach_nm) for it in others):
-        return "planner_overfull", "nearby (the wire does not cross it)", None
+    for it in others:
+        if it["class"] in ("planner_overfull", "model_gap") and _near(it, at, layer, reach_nm):
+            return "overfull_nearby", ("over-full" if it["class"] == "planner_overfull" else "model gap") + \
+                " of other wires (this wire does not cross it)", None
     if (i := first("forced_path", need_near=False)) is not None:
         return "forced_path", "", i
     if (i := first("pad_exit")) is not None:
@@ -102,9 +117,9 @@ def classify_violation(v: dict, mine: list, others: list, reach_nm: float) -> tu
     if vc == "pad_exit" and (i := first("pad_exit_stub")) is not None:
         return "pad_exit", "at a planned exit stub (the drawing left the stub)", i
     if (i := first("shrinkage")) is not None:
-        return "drawing_loss", "at a planned neck (the cut fits only necked)", i
-    if (i := first("model_ref")) is not None:
-        return "model_gap", "the drawing's per-edge packer: over-full; the plan's cut test: fits", i
+        return "neck_loss", "the cut fits only necked: neck width planned too wide, or not drawn as planned", i
+    if (i := first("edge_overpredict")) is not None:
+        return "edge_overpredict", "the drawing's per-edge packer: over-full; the cut test: fits", i
     if vc == "pad_exit":
         return "pad_exit", "not predicted (no planned exit of the connection there)", None
     return "drawing_loss", vc, None
@@ -121,15 +136,31 @@ def _drc_points(v) -> list:
     return out
 
 
+_NET = re.compile(r"\[([^\]]+)\]")
+_LAYER = re.compile(r"\b([A-Za-z0-9_]+\.Cu)\b")
+
+
+def _drc_nets_layers(v) -> tuple:
+    """Net names (``[NET]``) and copper layers (``on F.Cu``) named by a DRC violation's item descriptions."""
+    items = v.items if hasattr(v, "items") and not isinstance(v, dict) else (v.get("items") or [])
+    nets, layers = set(), set()
+    for it in items:
+        d = it.get("description") or ""
+        nets.update(n for n in _NET.findall(d) if n != "<no net>")
+        layers.update(_LAYER.findall(d))
+    return nets, layers
+
+
 def _drc_type(v) -> str:
     return v.type if hasattr(v, "type") and not isinstance(v, dict) else v.get("type", "")
 
 
 def build(route: dict, drc_new=None, unconnected_new: int | None = None, *, reach_mm: float = 0.5,
-          drc_radius_mm: float = 0.5, model_gap: dict | None = None) -> dict:
+          drc_radius_mm: float = JOIN_MM, join_nets: bool = True, model_gap: dict | None = None) -> dict:
     """The compass of one run: `route` = the engine result dict (``result.json["route"]`` or the bare RouteResult),
     `drc_new` = KiCad's new routing violations of the written board (``toporlib.drc.new_routing``; Violation objects
-    or JSON dicts; None = not run), `unconnected_new` = KiCad's new unconnected items. Returns a JSON-able dict:
+    or JSON dicts; None = not run), `unconnected_new` = KiCad's new unconnected items. `drc_radius_mm` / `join_nets`:
+    the join of a KiCad item to a drawn violation ([output] compass_join_mm / compass_join_nets). Returns a JSON-able dict:
     ``rows`` (per class), ``violations`` (per drawn violation its class), ``connections`` (per connection),
     ``flags``, ``notes``. Never raises on a result without a compass (``available`` False). `model_gap`: violation
     index -> sub-class text for violations an outside cut test found over-full (``harness.predict_vs_drawn --cuts``
@@ -147,34 +178,40 @@ def build(route: dict, drc_new=None, unconnected_new: int | None = None, *, reac
         it = {**it, "_k": k}
         for c in it.get("conns") or []:
             by_conn[c].append(it)
-            if it["class"] == "planner_overfull":
+            if it["class"] in ("planner_overfull", "model_gap"):
                 over_by_conn[c].add(k)
-    overfull = [dict(it, _k=k) for k, it in enumerate(items) if it["class"] == "planner_overfull"]
+    overfull = [dict(it, _k=k) for k, it in enumerate(items) if it["class"] in ("planner_overfull", "model_gap")]
+    reaches = []
     drawn_rows = []
-    matched_items = set()
     for i, v in enumerate(viols):
         c = v.get("conn", -1)
         reach = max(reach_mm * MM, 4.0 * (width.get(c) or 0)) + 0.5 * (v.get("length_nm") or 0)
         mine = by_conn.get(c, [])
         others = [it for it in overfull if it["_k"] not in over_by_conn.get(c, set())]
         cls, sub, j = classify_violation(v, mine, others, reach) if cp is not None else ("drawing_loss", v.get("class") or "", None)
-        if j is not None:
-            matched_items.add(mine[j]["_k"])
+        reaches.append((v.get("at") or [0, 0], v.get("layer", ""), reach))
         if model_gap and cls == "drawing_loss" and i in model_gap:
             cls, sub = "model_gap", model_gap[i]
         drawn_rows.append({"i": i, "conn": c, "name": v.get("name"), "from": v.get("from"), "to": v.get("to"),
                            "layer": v.get("layer"), "at_mm": [round(v["at"][0] / MM, 3), round(v["at"][1] / MM, 3)],
                            "kind": v.get("kind"), "engine_class": v.get("class"), "class": cls, "sub": sub,
                            "half_len_mm": round(0.5 * (v.get("length_nm") or 0) / MM, 3)})
-    # KiCad's DRC items: the class of the nearest drawn violation within drc_radius_mm, else "KiCad only".
+    # KiCad's DRC items: the class of the nearest drawn violation within drc_radius_mm (with join_nets: of a net the
+    # KiCad item names, on a layer it names), else "KiCad only". Not 1:1: one drawn stretch below the rule can be
+    # several KiCad items (one per pair of items), and several drawn violations can share one KiCad item.
     kicad = Counter()
     kicad_only = Counter()
     if drc_new is not None:
         rad = drc_radius_mm * MM
         for dv in drc_new:
             pts = _drc_points(dv)
+            nets, layers = _drc_nets_layers(dv) if join_nets else (set(), set())
             best = None
             for r in drawn_rows:
+                if nets and r.get("name") not in nets:
+                    continue
+                if layers and r.get("layer") not in layers and r.get("layer") != "all layers":
+                    continue
                 at = (r["at_mm"][0] * MM, r["at_mm"][1] * MM)
                 d = min((math.hypot(px - at[0], py - at[1]) for px, py in pts), default=math.inf) - r["half_len_mm"] * MM
                 if d <= rad and (best is None or d < best[0]):
@@ -194,16 +231,17 @@ def build(route: dict, drc_new=None, unconnected_new: int | None = None, *, reac
     for it in items:
         pred_items[it["class"]] += 1
         pred_conns[it["class"]].update(it.get("conns") or [])
+    # drawn clean = no drawn violation (of any connection) within its reach of the item, on the item's layers
     clean = Counter()
-    for k, it in enumerate(items):
-        if k not in matched_items:
+    for it in items:
+        if not any(_near(it, at, layer, r) for at, layer, r in reaches):
             clean[it["class"]] += 1
     open_n = sum(1 for c in conns if c.get("status") not in ("routed", "ignored"))
     rows = []
     for cls in ORDER:
-        if cls == "open":
+        if cls in DRAWN_ONLY:
             p, pc = None, None
-        elif cls in ("drawing_loss", "model_gap", "kicad_only"):
+        elif cls in ("drawing_loss", "kicad_only"):
             p, pc = 0, 0  # the plan never predicts its drawing's failure
         else:
             p = pred.get(cls) if cp is not None else None
@@ -223,12 +261,22 @@ def build(route: dict, drc_new=None, unconnected_new: int | None = None, *, reac
             k = kicad.get(cls, 0) if drc_new is not None else None
         located = pred_items.get(cls, 0) > 0 and cls != "shrinkage"
         rows.append({"class": cls, "label": LABELS[cls], "predicted": p, "predicted_conns": pc,
+                     "bottlenecks": ((cp or {}).get("bottlenecks") or {}).get(cls) if p else None,
                      "predicted_clean": (clean.get(cls, 0) if located else None) if p else (0 if p == 0 else None),
                      "drawn": d, "drawn_conns": dc, "kicad": k})
     flags = []
     for r in rows:
-        if r["predicted"] is None and r["drawn"] and r["class"] not in ("open",):
+        if r["class"] in MODEL_CLASSES and r["predicted"] is None:
+            if r["drawn"]:
+                flags.append(f"{r['label']}: drawn {r['drawn']}, not measured (no cut test on this plan)")
+        elif r["predicted"] is None and r["drawn"] and r["class"] not in DRAWN_ONLY:
             flags.append(f"{r['label']}: drawn {r['drawn']}, not predicted by the plan (missing method step)")
+        elif r["class"] == "overfull_nearby" and r["drawn"]:
+            flags.append(f"{r['label']}: {r['drawn']} violations next to a bottleneck their wire does not cross (plan error)")
+        elif r["class"] == "neck_loss" and r["drawn"]:
+            flags.append(f"{r['label']}: {r['drawn']} violations where the plan necked the wire (neck width or its drawing)")
+        elif r["class"] == "edge_overpredict" and r["drawn"]:
+            flags.append(f"{r['label']}: {r['drawn']} violations where the drawing's packer is over-full and the cut test fits")
         elif r["class"] == "drawing_loss" and r["drawn"]:
             flags.append(f"drawing loss: {r['drawn']} violations where the plan said fits (drawing fault)")
         elif r["class"] == "model_gap" and r["drawn"]:
@@ -242,6 +290,7 @@ def build(route: dict, drc_new=None, unconnected_new: int | None = None, *, reac
         "drawn_violations": len(viols),
         "drawn_shrinkages": (cp or {}).get("drawn_shrinkages"),
         "kicad_routing_new": None if drc_new is None else len(list(drc_new)),
+        "join": {"radius_mm": drc_radius_mm, "nets": join_nets},
         "kicad_only_by_type": dict(kicad_only),
         "violations": drawn_rows,
         "connections": connection_rows(route),
@@ -306,18 +355,29 @@ def table_md(cp: dict, *, max_conns: int = 15) -> list:
     """The compass as markdown lines (report.md section, harness/predict_vs_drawn.py). O(rows)."""
     if not cp or not cp.get("rows"):
         return ["Compass: not available (this engine result carries no plan; the topological core writes it)."]
+    j = cp.get("join") or {"radius_mm": JOIN_MM, "nets": True}
     lines = [f"Plan model `{cp.get('model')}`, loop `{cp.get('loop')}`, cycle {cp.get('round')}. Predicted = what the "
-             "plan handed to the drawing predicts (items: cuts, edges, vias, crossings; conns = connections in them); "
-             "drawn = rule violations of the written copper by our checker, classified against the plan; KiCad = new "
-             "routing DRC items of the written board, by the class of the nearest drawn violation (0.5 mm).", "",
+             "plan handed to the drawing predicts (items: cuts, edges, vias, crossings; conns = connections in them; "
+             "[n bottlenecks] = items of one physical bottleneck counted once); drawn clean = predicted bottlenecks no "
+             "drawn violation lies within reach of; drawn = rule violations of the written copper by our checker, "
+             "classified against the plan; KiCad = new routing DRC items of the written board, each given the class "
+             f"of the nearest drawn violation within {j['radius_mm']} mm"
+             + (" of a net and layer the KiCad item names" if j.get("nets") else "")
+             + " ([output] compass_join_mm / compass_join_nets). KiCad counts are not 1:1 with drawn counts: one "
+             "drawn stretch below a rule can be several KiCad items, and several drawn violations can share one.", "",
              "| class | predicted (conns) | predicted, drawn clean | drawn (conns) | KiCad DRC |",
              "|---|---|---|---|---|"]
     for r in cp["rows"]:
         pc = f" ({r['predicted_conns']})" if r.get("predicted_conns") else ""
         dc = f" ({r['drawn_conns']})" if r.get("drawn_conns") else ""
-        p = "not predicted" if r["predicted"] is None and r["class"] not in ("open",) else _n(r["predicted"])
-        if r["class"] == "open":
+        if r["class"] in DRAWN_ONLY:
             p = "-"
+        elif r["predicted"] is None:
+            p = "not measured" if r["class"] in MODEL_CLASSES else "not predicted"
+        else:
+            p = _n(r["predicted"])
+            if r.get("bottlenecks") is not None and r["bottlenecks"] != r["predicted"]:
+                pc += f" [{r['bottlenecks']} bottleneck{'s' if r['bottlenecks'] != 1 else ''}]"
         lines.append(f"| {r['label']} | {p}{pc} | {_n(r['predicted_clean'])} | {_n(r['drawn'])}{dc} | {_n(r['kicad'])} |")
     lines += ["", f"Totals: plan predicts {_n(cp.get('predicted_violations'))} violations"
               + (f" (TopoR loop pick: {cp['loop_predicted']})" if cp.get("loop_predicted") is not None else "")

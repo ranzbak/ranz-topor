@@ -214,7 +214,9 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
         from toporlib import compass as compass_mod
         from toporlib.drc import new_routing as _new_routing
         cps = compass_mod.build(res or {}, _new_routing(routed_drc, base, created),
-                                cls["incomplete"].get("unconnected_new"))
+                                cls["incomplete"].get("unconnected_new"),
+                                drc_radius_mm=float(cfg.get("output", "compass_join_mm")),
+                                join_nets=bool(cfg.get("output", "compass_join_nets")))
         (out_dir / f"{name}--compass.json").write_text(json.dumps(cps, indent=1))
         m["compass"] = compass_mod.columns(cps)
         m["compass_line"] = compass_mod.summary_line(cps)

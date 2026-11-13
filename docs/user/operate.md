@@ -533,21 +533,26 @@ once from it; KiCad's DRC judges the written board (p. 183). The table puts the 
 
 | Row | Meaning |
 |---|---|
-| planner: over-full | a passage the plan knows is too narrow for the traces it sends through (over-full cut / edge) |
+| planner: over-full | a passage the plan knows is too narrow for the traces it sends through (over-full cut / edge); "[n bottlenecks]" = the cuts of one channel (its two ends) counted once |
+| planner: over-full nearby | a violation next to another trace's over-full passage that this trace does not cross (a plan error, not a drawing fault) |
 | planner: shrinkage | a passage that fits only with traces necked below their net-class width (not a violation) |
+| planner: at a planned neck | a violation where the plan necked the trace (the neck width or its drawing) |
 | planner: via site | a via the plan needs where no via fits |
 | planner: unlayerable crossing | two traces that must cross and cannot be put on different layers |
 | planner: foreign copper | a trace the plan runs through copper of another net (a short if not moved) |
 | planner: forced path | a connection the plan placed without any legal path |
 | pad exit | a violation at the exit from the trace's own fine-pitch pad; "not predicted" = this version does not plan pad exits yet |
+| model gap (per-edge fits, cut test over-full) | a passage the per-edge measure (the drawing's, and the plan's with `[capacity] model = "edges"`) finds fitting but the per-layer cut test finds too narrow; with model = "edges" measured by a read-only cut test (`[capacity] compass_cut_check`), "not measured" when that is off |
+| per-edge over-predicted (cut test fits) | the reverse: the per-edge measure finds a passage too narrow that the cut test finds fitting |
 | drawing loss | the plan said it fits, the drawing still broke a rule there (a drawing fault) |
-| model gap | the plan's capacity measure and the drawing's disagree there |
 | open (no copper) | connections without copper; KiCad column = its new unconnected items |
 | KiCad only | KiCad DRC items near no violation topor reported (topor's own check missed them) |
 
-Columns: **predicted** (the plan's count; connections in brackets), **predicted, drawn clean** (predicted problems the
-drawing still drew without a violation), **drawn** (rule violations of the written copper, connections in brackets),
-**KiCad DRC** (KiCad's new routing violations, each counted in the row of the nearest topor violation within 0.5 mm).
+Columns: **predicted** (the plan's count; connections in brackets), **predicted, drawn clean** (predicted problems
+with no drawn violation within reach), **drawn** (rule violations of the written copper, connections in brackets),
+**KiCad DRC** (KiCad's new routing violations, each counted in the row of the nearest topor violation within
+`[output] compass_join_mm` (0.5 mm) of a net and layer the KiCad item names, `compass_join_nets`). KiCad counts are not
+1:1 with drawn counts: one drawn stretch below a rule can be several KiCad items, several drawn violations one.
 Below the table: the connections with a detour above 1.5 x their reference length, drawn much longer than planned,
 with a different via count than planned, or with violations. How to read it: a problem in a "planner" row is
 predicted, so the fix is in the plan or your rules (more room, another layer, a via site); a "drawing loss" or
