@@ -180,7 +180,9 @@ pub fn pair_floor(rules: &Rules, p: &crate::model::DiffPairRule, s: ViaSize) -> 
 ///    `d < first.d`, `drill < first.drill` and (when `allowed` is not empty) `drill` in `allowed`.
 ///    The list is sorted by `(d, drill)` descending and deduplicated.
 ///
-/// Never a size the board does not define. O(P log P) for P pre-defined vias.
+/// No list of its own: the net's via and the board's pre-defined vias (the via fallback only when the
+/// board sets up no via). Pair vias and `board_min` are built from the Board Setup minimums
+/// elsewhere (`pair_floor`, `net_rule_size`). O(P log P) for P pre-defined vias.
 fn sizes_for(rules: &Rules, net: i32, allowed: &[i64]) -> Vec<ViaSize> {
     let nr = rules.net_rule(net);
     // a pre-defined via below the net's custom-rule minimum is no alternative (KiCad's DRC would flag it)

@@ -68,6 +68,9 @@ width / via size — takes a fallback: the JLCPCB 1 oz value, raised to KiCad's 
 where that is stricter (KiCad's DRC judges the result with its own value). Every fallback used is a
 [`RULE_FALLBACK`](troubleshoot.md#rule_fallback) finding and a line in **report.md → Settings → Rule fallbacks**
 naming the value used and the KiCad setting to fill in; set it there and save, and the fallback is gone.
+A value outside the range KiCad accepts on load (for example *Maximum allowed deviation* 0; range 0.0001 to 1 mm)
+is what KiCad itself replaces by its built-in default when it opens the board, and its DRC then uses that
+default: topor uses the same value and lists it the same way (`... is outside KiCad's range ... -> ... mm used`).
 
 | Missing setting (`.kicad_pro` key) | JLCPCB 1 oz | KiCad's own value | fallback used | set it in KiCad → File → Board Setup → Design Rules → |
 |---|---|---|---|---|
@@ -85,8 +88,9 @@ naming the value used and the KiCad setting to fill in; set it there and save, a
 | Net class Default track width (missing or 0) | 0.2 mm | 0.2 mm | 0.2 mm | Net Classes → Default → Track Width |
 | Net class Default via size / hole (missing or 0) | 0.6 / 0.3 mm | 0.6 / 0.3 mm | 0.6 / 0.3 mm | Net Classes → Default → Via Size / Via Hole |
 
-"KiCad's own value" is what KiCad itself uses when the key is missing (the Board Setup built-ins of
-`board_design_settings.cpp`, the net class built-ins of `netclass.cpp`). A net class other than Default that
+"KiCad's own value" is what KiCad itself uses when the key is missing (the Board Setup built-ins of the
+`BOARD_DESIGN_SETTINGS` constructor, `board_design_settings.cpp:151-165` with the `DEFAULT_*` values of
+`include/board_design_settings_defaults.h:69-79`; the net class built-ins of `netclass.cpp:36-41`). A net class other than Default that
 leaves a value empty takes it from the next class of the net, then from Default, as KiCad composes net
 classes — that is not a fallback.
 
@@ -98,14 +102,23 @@ rule's width or clearance (named in [`CUSTOM_RULE_LIMITED`](troubleshoot.md#cust
 values are in **report.md → Settings → Fab floors raised** (`name design → floor mm`). Use it only when your
 Board Setup is looser than what you will order; KiCad's DRC still judges the result with your board's rules.
 
+- Copper to edge (Board Setup *Copper to edge clearance* or a custom `edge_clearance`) is measured as KiCad's
+  DRC measures it: from the outer side of the Edge.Cuts line, i.e. half the line width out from its centre
+  line. A clearance of 0 stays 0 (copper may touch the drawn line, not cross it); there is no hidden minimum.
 - Per net, the clearance and the track width are the net class values (at least the Board Setup minimums), and
   the net's via is its net class *Via Size* / *Via Hole* (a class without them: the next class, then Default),
   at least the minimum via diameter / drill.
 - **Via sizes the router uses** (`engine/src/vias.rs`, `via_sizes`): KiCad's **pre-defined vias** (KiCad →
   File → Board Setup → Design Rules → Pre-defined Sizes → Vias, `via_dimensions` in the `.kicad_pro`) **are
   used** for routing: with `[vias] size = "net_class"` the net's class via comes first, then every pre-defined
-  via that is smaller than it and meets the minimums, largest first (`sizes_for`). There is no other via list:
-  topor never places a via size your board does not define. The pre-defined vias also decide whether
+  via that is smaller than it and meets the minimums, largest first (`sizes_for`). There is no other via list.
+  A via size that is not one of the board's own vias comes only from a rule you can see and switch: a
+  **diff pair** via is the smallest via the board allows (built from the Board Setup minimums, see
+  [Differential pairs](#differential-pairs); `[diffpair] via = "net_class"` uses the class via instead),
+  `[vias] size = "board_min"` builds each net's via from the Board Setup minimums, and the via fallback below
+  applies when the board sets up no via at all. A custom rule's via minimum (`via_diameter` / `hole_size`
+  `min`) on a net raises every one of these, and a pre-defined via below it is no alternative for that net.
+  The pre-defined vias also decide whether
   [`VIA_NOT_SET_UP`](troubleshoot.md#via_not_set_up) fires: no pre-defined via and only KiCad's factory
   0.8 / 0.4 mm net class via → the nets with that via get `[vias] fallback_diameter_mm` /
   `fallback_drill_mm` (0.8 / 0.4 mm by default) as their own via.
@@ -152,7 +165,7 @@ Honoured constraints and how the router uses them:
 | Constraint | Used as |
 |---|---|
 | `clearance` | per-net clearance (net / net class / layer conditions); a **clearance region** for `A.intersectsCourtyard('REF')`, `A.insideCourtyard('REF')`, `A.intersectsArea('name')`, `A.insideArea('name')`, `A.enclosedByArea('name')` (inside, the rule's value replaces both nets' clearances); a **pad clearance** for pad conditions (`A.Pad_Type == 'SMD'`, `A.memberOfFootprint('REF')`, `A.Type == 'Pad'`, `A.isPlated()`) |
-| `edge_clearance`, `hole_clearance` | board-wide copper-to-edge / hole clearance (the largest value any routed net gets); a track into a pad that itself lies within the edge clearance ends inside that pad off its centre, where the track keeps the clearance (the pad's own violation is pre-existing) |
+| `edge_clearance`, `hole_clearance` | board-wide copper-to-edge / hole clearance (the largest value any routed net gets; the copper-to-edge distance is measured, as KiCad's DRC does, from the outer side of the Edge.Cuts line, i.e. half its line width out from the centre line, so an edge clearance of 0 keeps copper off the drawn line and adds nothing more); a track into a pad that itself lies within the edge clearance ends inside that pad off its centre, where the track keeps the clearance (the pad's own violation is pre-existing) |
 | `track_width` | per-net width: `opt` is the target, `min` / `max` bound it (`min` is also the floor a necked pad exit may not go below) |
 | `via_diameter`, `hole_size` | per-net via size (`opt`, raised to `min`) |
 | `disallow track` / `via` with `A.insideArea('name')` | keepout (the opt-in [fab floors](#design-rules-and-via-sizes) do not apply) |
