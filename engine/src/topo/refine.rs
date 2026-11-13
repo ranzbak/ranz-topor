@@ -304,21 +304,37 @@ pub const SITE_SHIFT: f64 = 4.0;
 
 /// Graded via-site price factor of a via whose static free radius leaves `slack` (nm: free
 /// radius less via reach; negative = missing room) at reach + clearance `need` (nm), softness
-/// `tau`: [`super::cutmodel::phi`] (the over-full price shape of the edges and cuts) of the slack
-/// moved [`SITE_SHIFT`] softnesses towards the room. Board-rules finding 1 (verifier
-/// 2026-11-13): unshifted, a legal via that just fits (slack 0) cost phi(0) = 0.57 of the
-/// `overflow` weight (28 mm at 50 mm, more than a via at 25 mm), so the plan preferred long detours
-/// to legal tight vias (esp-rust-board IO10_SDA 3.2 x its direct length). The static slack is
-/// measured at nine candidate points of the triangle, a lower bound of the room the drawing's
-/// site search finds, so a small static shortfall is drawn clean more often than not and costs
-/// little; the price passes the old flat price (1) at a shortfall of about 0.55 need and grows
-/// as 1 + missing / need - 0.4 deep inside. Values (tau 0.1): slack 0 -> 0.02, -0.2 need -> 0.13,
-/// -0.4 need -> 0.57, -need -> 1.6; +0.1 need -> 0.007. Continuous and monotone, no cutoff. O(1).
+/// `tau`: the logistic step of [`super::cutmodel::phi`] (the over-full price shape of the edges
+/// and cuts) of the slack moved [`SITE_SHIFT`] softnesses towards the room, bounded by 1.
+///
+/// Board-rules finding 1 (verifier 2026-11-13), ablation 2026-11-13 on esp-rust-board:
+/// - unshifted, a legal via that just fits (slack 0) cost phi(0) = 0.57 of the `overflow`
+///   weight (28 mm at 50 mm, more than a via at 25 mm). The shift makes it ~0.02;
+/// - phi's linear tail (1 + missing / need) priced a via far short of room at 2 to 3 overflows
+///   (100 to 150 mm), so the plan bought planned detours of 25 to 57 mm to keep a wire off a
+///   via (IO10_SDA 3.2 x and IO8_SCL 2.4 x their direct length). With the price bounded by 1
+///   (the flat price of a via without a site before the graded price) both took their via or
+///   their direct path again. A via short of room is one illegal via however deep the
+///   shortfall, as TopoR counts violations, not their depth (TopoR 6.3 manual pp. 72-74,
+///   optimisation criteria; our black-box runs avoid a crossing at 13-20 mm of detour,
+///   docs/literature/topor50-blackbox-results.md).
+///
+/// The static slack is measured at nine candidate points of the triangle, a lower bound of the
+/// room the drawing's site search finds, so a small static shortfall is drawn clean more often
+/// than not and costs little. Values (tau 0.1): +0.1 need -> 0.007, slack 0 -> 0.018,
+/// -0.2 need -> 0.12, -0.4 need -> 0.5, -0.6 need -> 0.88, -need -> 0.998, deeper -> 1.
+/// Continuous, monotone and bounded; no cutoff. O(1).
 pub fn site_price(slack: f64, need: f64, tau: f64) -> f64 {
     if slack == f64::INFINITY {
         return 0.0;
     }
-    super::cutmodel::phi(slack + SITE_SHIFT * tau * need.max(1.0), need, tau)
+    let need = need.max(1.0);
+    let z = -(slack + SITE_SHIFT * tau * need) / (need * tau.max(1e-9));
+    if z >= 0.0 {
+        1.0 / (1.0 + (-z).exp())
+    } else {
+        z.exp() / (1.0 + z.exp())
+    }
 }
 
 /// Per edge-layer overflow price of a labelling, kept incrementally.
@@ -1173,10 +1189,10 @@ mod tests {
         assert!(f(0.0) < 0.025, "a via that just fits costs about 0: {}", f(0.0));
         assert!(f(0.1 * need) < 0.01, "room to spare costs less: {}", f(0.1 * need));
         assert!(f(need) < 1e-4, "room to spare costs ~0: {}", f(need));
-        // half the price at a shortfall of SITE_SHIFT softnesses, the old flat price (1) at ~0.55 need
+        // half the price at a shortfall of SITE_SHIFT softnesses
         let half = -SITE_SHIFT * tau * need;
-        assert!((f(half) - (0.5 + 0.1 * 2f64.ln())).abs() < 1e-9, "at the step {}", f(half));
-        assert!(f(-0.5 * need) > 0.85 && f(-0.6 * need) > 1.0, "{} {}", f(-0.5 * need), f(-0.6 * need));
+        assert!((f(half) - 0.5).abs() < 1e-9, "at the step {}", f(half));
+        assert!(f(-0.5 * need) > 0.7 && f(-0.6 * need) > 0.85, "{} {}", f(-0.5 * need), f(-0.6 * need));
         // continuous (+-1 nm moves it ~1e-5 at its steepest) and monotone in the missing room
         assert!((f(half + 1.0) - f(half - 1.0)).abs() < 1e-4, "{}", f(half + 1.0) - f(half - 1.0));
         assert!((f(1.0) - f(-1.0)).abs() < 1e-4, "{}", f(1.0) - f(-1.0));
@@ -1184,11 +1200,13 @@ mod tests {
         for w in xs.windows(2) {
             assert!(f(w[0]) >= f(w[1]), "slack {} -> {}: {} < {}", w[0], w[1], f(w[0]), f(w[1]));
         }
-        // deep inside: 1 + missing / need less the shift, the slope of an over-full edge
-        assert!((f(-2.0 * need) - (3.0 - SITE_SHIFT * tau)).abs() < 0.01, "{}", f(-2.0 * need));
-        // never cheaper with less room than a via with more room anywhere on the range, and a
-        // via missing half its reach + clearance costs at least the old flat price
-        assert!(f(-0.55 * need) >= 0.95, "{}", f(-0.55 * need));
+        // a via missing all of its reach + clearance costs the whole price (one illegal via) ...
+        assert!(f(-need) > 0.99, "{}", f(-need));
+        // ... and no more however deep the shortfall (board-rules finding 1: phi's linear tail
+        // priced it at 2-3 overflows and bought 25-57 mm planned detours)
+        for k in [2.0, 5.0, 100.0] {
+            assert!(f(-k * need) <= 1.0, "{k} x need short: {}", f(-k * need));
+        }
     }
 
     #[test]
