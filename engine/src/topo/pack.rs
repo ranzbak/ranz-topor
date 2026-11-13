@@ -91,7 +91,7 @@ pub fn pair_req(a: &PackItem, b: &PackItem, gap: f64) -> f64 {
 /// a full disc on both (Popov & Popov 2012, p. 117-118: a via is a round pad, and the room of a
 /// passage counts what passes it). Measured (D3): a disc on the entry edge's far side only (the
 /// via as a vertex on the exit crossing) lost wiccon 3.3v TP2.1 -> U1.8 again and routed 184
-/// instead of 190 on dcsgonebadge, so both edges count it. O(passes + vias).
+/// instead of 190 on a 2-layer badge, so both edges count it. O(passes + vias).
 pub fn wire_discs(st: &State, w: WireId, ks: &[usize], ds: &[f64]) -> Vec<Disc> {
     let n = st.wires[w].passes.len();
     let mut out: Vec<Disc> = vec![[0.0, 0.0]; n];
@@ -331,7 +331,7 @@ impl<'a> Packer<'a> {
     /// board: not outside, no obstacle inside, and at one of the drawing's static candidate points
     /// of the triangle ([`tri_site_points`]: incentre, centroid, seven barycentric points) every
     /// other net's obstacle at least `r` plus the larger of `s` and the obstacle's clearance away.
-    /// (D4: the incentre and centroid alone said "no site" for 15 planned vias of dcsgonebadge,
+    /// (D4: the incentre and centroid alone said "no site" for 15 planned vias of a 2-layer badge,
     /// of which the drawing placed 7, and P4 rerouted their wires for it.) Cached per
     /// (triangle, net, s). O(obstacles) per new key.
     pub fn via_site(&self, t: super::state::TriId, net: i32, r: f64, s: f64) -> bool {

@@ -42,9 +42,9 @@ Sources and conventions:
    taken from the pair gap rule, not from the netclass field `diff_pair_via_gap`.
 9. **Tuning**: DP length tuner meanders both wires about the coupled centre line; skew tuner meanders one (the
    shorter) wire only. Both are `(generated (type tuning_pattern))` groups; the DRC pair test ignores their members.
-10. **Our boards**: qmtech 6 name-pairs (26 connections: confirmed; 13 pair-connections), dcsgonebadge 1 pair
+10. **Our boards**: qmtech 6 name-pairs (26 connections: confirmed; 13 pair-connections), private-badge-b 1 pair
     (8 connections: confirmed), wiccon-2023 0 pairs. The hand routing is 41-45 % coupled at the intended gap on
-    qmtech (loose 0.8-0.9 mm coupling elsewhere), 80 % on dcs; skew is exactly 0 on three of four qmtech HDMI pairs.
+    qmtech (loose 0.8-0.9 mm coupling elsewhere), 80 % on private-badge-b; skew is exactly 0 on three of four qmtech HDMI pairs.
 
 ## 1. Pair detection
 
@@ -73,8 +73,8 @@ Sources and conventions:
   (`pns_router.cpp:343`).
 - DRC: `DRC_ENGINE::IsNetADiffPair` (`drc_engine.cpp:2492`) returns false; the pair tests skip the net;
   `inDiffPair('*')` is false for it (docs, "Custom design rule functions").
-- Real example: dcsgonebadge net `/Microcontrol/STRAP_8` matches the suffix rule (skips `8`, `_`, hits `P`) but
-  `/Microcontrol/STRAN_8` does not exist, so it is not a pair.
+- Real example: a net `/mcu/BOOTSTRAP_5` matches the suffix rule (skips `5`, `_`, hits `P`) but
+  `/mcu/BOOTSTRAN_5` does not exist, so it is not a pair.
 - A pair is **not** limited to one netclass. For router sizes, the queries use the start net as A and the coupled net
   as B (`pns_kicad_iface.cpp:1236-1268`), so the start net's netclass decides. NOT VERIFIED what happens when the
   halves have different netclasses in the DRC (the engine evaluates per item).
@@ -255,7 +255,7 @@ A `DP_GATEWAY` is a pair of anchor points (P, N) with optional entry lines (from
   in the GUI.
 - Both vias are added on `FixRoute` with the pair's nets (`:826-831`); the next layer starts from the via pair
   (`SetLayer`, `:620+`; layer change only when the previous end is a via pair).
-- Measured: dcs USB vias are 0.6 / 0.3 mm at centre pitch 0.85 mm = edge gap 0.25 mm = the netclass pair gap,
+- Measured: private-badge-b USB vias are 0.6 / 0.3 mm at centre pitch 0.85 mm = edge gap 0.25 mm = the netclass pair gap,
   consistent with the formula.
 
 ### 3.5 When the gap does not fit
@@ -350,7 +350,7 @@ our boards, no pair-mode pattern exists in them):
 
 ## 5. Our boards
 
-Boards: `scratch/boards/qmtech-hand/qmtech-minimig.kicad_pcb`, `dcsgonebadge/.../dcsgonebadge.kicad_pcb`,
+Boards: `scratch/boards/qmtech-hand/qmtech-minimig.kicad_pcb`, `private-badge-b/.../private-badge-b.kicad_pcb`,
 `wiccon-2023/.../2023.kicad_pcb`. No `.kicad_dru` exists for any of them (so no pair constraints at all). Script:
 `<scratchpad>/diffpair/measure.py` (copies only). Method: segments only (no arcs exist in the pair nets), coupled =
 parallel within 1 degree, same layer, overlapping projection, edge gap <= 0.35 mm; bends = degree-2 vertices turning
@@ -358,7 +358,7 @@ parallel within 1 degree, same layer, overlapping projection, edge gap <= 0.35 m
 
 **Validation against KiCad**: with a probe `.kicad_dru` (`diff_pair_uncoupled (max 0mm)`, `diff_pair_gap (max 0.5mm)`,
 `skew (max 0mm) (within_diff_pairs)`) on copies, KiCad reports uncoupled length qmtech TX0 8.6252, TX1 9.3555, TX2 9.2741,
-TXC 9.3614, USB_C 1.2894, dcs USB 8.6329 mm. My script gives 8.625, 9.356, 9.274, 9.361, 1.289, 8.633. Agreement to
+TXC 9.3614, USB_C 1.2894, private-badge-b USB 8.6329 mm. My script gives 8.625, 9.356, 9.274, 9.361, 1.289, 8.633. Agreement to
 the third decimal. With a very loose gap limit (2 mm) KiCad reports less coupled length (its "nothing in between"
 test removes candidates), so use the tight limit.
 
@@ -367,7 +367,7 @@ test removes candidates), so use the tight limit.
 | Board | KiCad name-pairs | Connections (nets with n pads give n-1) | Netclass of pair | Rules |
 |---|---|---|---|---|
 | qmtech | `ADV_TX0+/-`, `ADV_TX1+/-`, `ADV_TX2+/-`, `ADV_TXC+/-` (4 pads per net), `USB_C_D+/-` (2 pads), `CLK_74.25_P/N` (1 pad each: nothing to route) | 4 x 2 x 3 + 2 x 1 = **26** (plan confirmed) | `ADV_TX*`: class `HDMI_TX` (track 0.2, dp width 0.16, dp gap 0.2, dp via gap 0.25, clearance 0.127, via 0.45/0.3); `USB_C_D*`: Default (track 0.25, dp width 0.2, gap 0.25, clearance 0.15, via 0.8/0.4) | none; board min clearance 0.09, min track 0.09 |
-| dcsgonebadge | `USB+/-` (5 pads per net) | 2 x 4 = **8** (plan confirmed) | Default (track 0.2, dp width 0.2, gap 0.25, via gap 0.25, clearance 0.2, via 0.6/0.3) | none; min clearance 0.1 |
+| private-badge-b | `USB+/-` (5 pads per net) | 2 x 4 = **8** (plan confirmed) | Default (track 0.2, dp width 0.2, gap 0.25, via gap 0.25, clearance 0.2, via 0.6/0.3) | none; min clearance 0.1 |
 | wiccon-2023 | **none** (KiCad 6 format file, 38 nets with copper) | 0 | Default | none |
 
 Note qmtech: the hand routing of the HDMI pairs does not follow the `HDMI_TX` class (width 0.2, gap 0.25 = the
@@ -382,30 +382,30 @@ Default class's pair values, versus class 0.16 / 0.2). Hand layout is reference 
 | qm ADV_TX2 | 15.889 / 15.889 | 0.000 | 0.2 / 0.2 | 6.615 (41.6 %) | 9.274 | 0.25: 6.5, 0.9: 3.2, 0.8: 1.95 | 16 / 16 (14x45, 97, 38) | 0 / 0 |
 | qm ADV_TXC | 15.906 / 15.906 | 0.000 | 0.2 / 0.2 | 6.544 (41.1 %) | 9.361 | 0.25: 6.3, 0.9: 3.2, 0.8: 1.95 | 16 / 16 (14x45, 97, 38) | 0 / 0 |
 | qm USB_C_D | 2.652 / 2.557 | +0.094 (KiCad, with via height: -3.195) | 0.28 / 0.28 | 1.362 (52.3 %) | 1.289 | 0.22: 0.63, 0.27: 0.58, 0.34: 0.1 | 4 / 2 (43, 45, 45, 44 / 45, 45) | 2 / 0 (unpaired) |
-| dcs USB | 40.391 / 41.192 | -0.801 (KiCad: -0.779) | 0.2 / 0.2 | 32.559 (79.8 %) | 8.633 | 0.25: 25.9, 0.20: 5.1, 0.30: 1.6, 0.65: 1.4 | 13 / 18 (12x45 + one 90 / 18x45) | 2 / 2, pitch 0.85, edge gap 0.25 |
+| private-badge-b USB | 40.391 / 41.192 | -0.801 (KiCad: -0.779) | 0.2 / 0.2 | 32.559 (79.8 %) | 8.633 | 0.25: 25.9, 0.20: 5.1, 0.30: 1.6, 0.65: 1.4 | 13 / 18 (12x45 + one 90 / 18x45) | 2 / 2, pitch 0.85, edge gap 0.25 |
 
 - **Actual gap** is mostly the Default-class pair gap, 0.25 mm; the HDMI pairs also run loosely coupled at
   0.8-0.9 mm over about 5 mm (near the HDMI connector and the ESD array), which is why only 41-45 % is "coupled at the
   intended gap". With a 2.0 mm limit those loose parts count as coupled and the coupled share is about 84 %.
 - **Uncoupled at the ends** (length from the pad to the first coupled segment): qmtech ADV7511 pads 0 (the pair
   leaves the pad already coupled); the HDMI connector pads (USB1) 2.34 mm on both P and N (a fan-out at gap 0.9);
-  the ESD array pads (U3) 0.14-1.8 mm; USB_C_D: 0 at U9. dcs: U1 pads 1.76 mm both, J1 3.05 mm on N pads, 0 to 1.8 mm
+  the ESD array pads (U3) 0.14-1.8 mm; USB_C_D: 0 at U9. private-badge-b: U1 pads 1.76 mm both, J1 3.05 mm on N pads, 0 to 1.8 mm
   elsewhere. The lead numbers on multi-pad parts are noisy (several tracks touch one pad); treat them as order of
   magnitude.
-- **Bends**: all hand bends are 45 degrees except one 90 on dcs P and one 97 and one 38 degree pair on three
+- **Bends**: all hand bends are 45 degrees except one 90 on private-badge-b P and one 97 and one 38 degree pair on three
   qmtech pairs (the hand route is not strictly octilinear). Skew is exactly 0 on three of the four HDMI pairs with
   13-16 bends each, so the hand layout keeps bends symmetric (cancelling).
-- **Vias**: only USB_C_D (P has two, N none: skew 3.2 mm in KiCad's accounting) and dcs USB (two matched pairs).
+- **Vias**: only USB_C_D (P has two, N none: skew 3.2 mm in KiCad's accounting) and private-badge-b USB (two matched pairs).
 
 ### 5.3 KiCad DRC on the hand boards (`kicad-cli pcb drc --severity-all`, 10.0.8, copies)
 
 | Board | Total | Pair violations (`diff_pair_gap_out_of_range`, `..._uncoupled_length_too_long`, `skew_out_of_range`, `too_many_vias`) |
 |---|---|---|
 | qmtech | 171 (15 clearance, 4 hole clearance, 1 invalid outline, 113 + 25 library, 10 silk edge, 2 silk over copper, 1 footprint type) | **0** |
-| dcsgonebadge | 207 (8 clearance, 11 courtyards, 5 unconnected, 3 starved thermal, silk/text warnings) | **0** (3 plain clearance errors on USB- pads vs U7 GND pads: inherent footprint pitch 0.15 / 0.175 mm vs clearance 0.2) |
+| private-badge-b | 207 (8 clearance, 11 courtyards, 5 unconnected, 3 starved thermal, silk/text warnings) | **0** (3 plain clearance errors on USB- pads vs U7 GND pads: inherent footprint pitch 0.15 / 0.175 mm vs clearance 0.2) |
 | wiccon-2023 | 48 (library, silk, text, 4 starved thermal, 2 padstack) | **0** (no pairs) |
 
-With the probe rules above, qmtech and dcs report uncoupled-length and skew violations as quoted in the validation
+With the probe rules above, qmtech and private-badge-b report uncoupled-length and skew violations as quoted in the validation
 paragraph; real violation text example:
 `Differential uncoupled length too long (dp_uncoupled_probe maximum uncoupled length 0,0000 mm; actual 8,6329 mm)`.
 So in a normal topor + DRC pipeline pair rules cannot fail unless the user wrote them.
@@ -522,7 +522,7 @@ Order of work for D7:
   accepts a hand-written `(generated)` with missing keys is untested.
 - The netclass field `diff_pair_via_gap` being unused by the router in netclass mode is read from source (see 3.4).
 - Lead (pad end) lengths on multi-pad parts are approximate. The uncoupled/coupled lengths are validated against
-  KiCad's DRC at gap limit 0.5 mm for qmtech and dcs.
+  KiCad's DRC at gap limit 0.5 mm for qmtech and private-badge-b.
 - Literature: TopoR also treats a pair as "zipped" wires with a movable "slider" where the pair splits, minimum 3 x
   pair width straight length to zip (Eremex TopoR 6.3 manual, "Routing Differential Pairs", PDF p. 171), pairs
   restored by wires that obey the gap (p. 160), and serpentines on zipped or unzipped parts (Lysenko & Polubasov,

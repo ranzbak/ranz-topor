@@ -236,7 +236,7 @@ pub fn alias(model: &BoardModel, pairs: &Pairs, opts: &Options) -> BoardModel {
         // The room between two partner pads belongs to the pair (its fan-out): where another net's
         // track would fit between them, a copper bridge of the P net joins their centres (as thick as
         // the pads' narrow side), so no other net is planned between them (the N stub could not cross
-        // it; dcsgonebadge U1.13 / U1.14 at 1.27 mm). Closer pads need none.
+        // it; a USB pair on MCU pads 1.27 mm apart). Closer pads need none.
         let other = (model.rules.min_track_width + 2 * model.rules.default.clearance.max(model.rules.min_clearance)) as f64;
         for (&a, &b) in cp.partner.iter().filter(|(a, b)| model.pads[**a].net == p && !cp.keep.contains(*b)) {
             let (pa, pb) = (&model.pads[a], &model.pads[b]);

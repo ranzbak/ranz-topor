@@ -4,8 +4,8 @@ Scope: the six engine rules of M4a tasks A4, A5, A6, A13, A14, A16 (engine 0.5.0
 implement and test. Inputs: `m3-detour-diagnosis.md` (M4-D1/D3, withdrawn F6), `graph.rs:462-500` (`fits_at`, `overuse`),
 `search.rs` (`margin_of`, `hard`, `step_cost`, `leave_vertex`), `wires.rs` (terminals, hand T-splits), `relax.rs`,
 `negotiate.rs:40-55, 510-528` (`rip`), 46 rows 6/17/17b, 12 §1, 22 §3, 25 §3. Note only; no engine code. A parallel F
-worker (DX) classifies the 67 dcsgone failures at the gate options; the numbers below are the committed 0.3.0 run
-(dcsgone 60 s, 148/231: 45 timeout, 16 "blocked: no path (wall, capacity or via sites)", 8 "infeasible: wall grazed /
+worker (DX) classifies the 67 private-badge-b failures at the gate options; the numbers below are the committed 0.3.0 run
+(private-badge-b 60 s, 148/N: 45 timeout, 16 "blocked: no path (wall, capacity or via sites)", 8 "infeasible: wall grazed /
 pad-pad / site-site", 5 "self-check: hole gap", 3 "sketch: inconsistent slot path"; wiccon 62/62, vias 37, outside
 1373.55 mm; eprom 27/27, 64.628 mm) and the M3 diagnosis cases (#34, #45, #197, #207, #208, wiccon #52). Units: mm in
 the text, nm in the code; `ε` = `rules.eps` (5 µm), `c` = the connection's clearance, `w` its width.
@@ -70,7 +70,7 @@ Own tip rule in words: a track fits its own pad's tip iff `w + ε ≤ pad width`
 Tests that flip (A4 `graph_ownnet.rs`): `own_tip_edge_fits_own_net` (row 1), `two_same_net_strands_share_one_tip_edge`
 (rows 3/4), `own_end_edge_against_outline_wall_stays_unfit` (row 7), `search_layers (1)` → "fits, ghost not soft"
 (row 6); `eprom_ripped_front_only_is_the_m2_result` stays 27/27 ≤ 67.8 mm because the U2.28 corridor stays unfit (the
-F6 experiment without the wall term was 26/27; with it the corridor is priced as before). Expected effect: dcsgone —
+F6 experiment without the wall term was 26/27; with it the corridor is priced as before). Expected effect: private-badge-b —
 the pad-exit subset of "blocked: no path" and of the overuse-driven 2-via escapes (#34, #197, #207, #45 class; the
 "static dead" set shrinks only where `w + ε ≤ pad width`), `overuse_edges` 192 → well under 50 (own tips were most of
 them); eprom two-layer byte-identical (F6 measured identical; the wall term only removes fits), front-only guard
@@ -117,7 +117,7 @@ is searched once more with the sibling's strands as goals (bounded: ≤ 1 re-sea
 sequential re-search path that already exists for invalidated paths). `steiner = false` disables goals, split and
 cascade (M3 behaviour, `steiner_off_is_m3_behaviour`).
 
-Effect: #207 5.55 mm / 2 vias → ≈ 0.9 mm T onto #208's trace (hand geometry), 0 vias; dcsgone `count > 1.5` ≤ 6
+Effect: #207 5.55 mm / 2 vias → ≈ 0.9 mm T onto #208's trace (hand geometry), 0 vias; private-badge-b `count > 1.5` ≤ 6
 expected; wiccon vias not up (a junction replaces an escape via at worst); eprom: 2 nets have two connections — a T
 may shorten them (not worse, identity not claimed).
 
@@ -214,7 +214,7 @@ decides. The three-way contention of the F.Cu-only eprom board (+5V vs two other
 0.5 = 1.5 = one `hist_fail` in M3) reaches 1.5 after two rips and 3.5 after three: settles at least as fast; the risk
 is overshoot (a party priced out at `h = 3.5` takes a long detour) — bounded by `is_detour` (factor 2 vs the straight
 line) which rips the blockers of the ghost and by the stop rule (patience 5, `min_gain_pct` 1); the guard
-(27/27, ≤ 67.8 mm) is A16's acceptance. Saturation: once `h > L_alt/L_old − 1` (≈ 10-20 on dcsgone for a short
+(27/27, ≤ 67.8 mm) is A16's acceptance. Saturation: once `h > L_alt/L_old − 1` (≈ 10-20 on private-badge-b for a short
 connection vs a board-crossing alternative) further growth changes nothing; `0.5 · 2^(k−1) ≥ 20` at `k = 7`, so
 `max_per_pair = 8` sits just past saturation — consistent defaults. Bound: rips per run ≤ `max_per_pair · m(m−1)` =
 `O(max_per_pair · m²)`, each `O(path length · layers)`. Report `RouteResult.ripup: RipReport { rips_per_connection:
@@ -268,7 +268,7 @@ Options (every judgement call; `[expert]` keys map 1:1 to `Options.expert` field
 
 Expected effect per board (DX measures; not-worse bounds are the acceptance of each S task):
 
-| rule | dcsgone (231) | eprom (27/27, ≤ 64.7 mm, guard ≤ 67.8 mm) | wiccon (62/62, vias ≤ 37, ≤ 1380 mm) |
+| rule | private-badge-b (N) | eprom (27/27, ≤ 64.7 mm, guard ≤ 67.8 mm) | wiccon (62/62, vias ≤ 37, ≤ 1380 mm) |
 |---|---|---|---|
 | §1 capacity | pad-exit "no path" + overuse escapes (#34/#45/#197/#207 class); `overuse_edges` 192 → < 50 | two-layer identical (F6 measured), guard green via `W_n` | vias → ≈ 30-33, outside −5 mm (F6) |
 | §2 Steiner | detours > 1.5: 12 → ≤ 6; escape vias of sibling connections | 2 two-connection nets may shorten | not worse (junction ≤ via) |

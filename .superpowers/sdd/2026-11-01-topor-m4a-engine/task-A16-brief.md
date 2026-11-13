@@ -18,16 +18,16 @@
   `max_per_pair = 8` (backstop only) replace the fixed RIP_PAIR_CAP with constant +0.5 per rip. P1 currently reads
   ripup_max_per_pair as the cap; the M3 damping test pins 3 — update it to the new semantics without weakening what it checks
   (ping-pong settles before the backstop). `RouteResult.ripup` report fields as the plan says; plugin run report lists them.
-- DX: neither is a completion lever on dcsgone; they must not regress it (and wiccon iterations reported before/after).
+- DX: neither is a completion lever on private-badge-b; they must not regress it (and wiccon iterations reported before/after).
 - A13: `[vias] via_relaxation` (since 0.5.0 → live key). wiccon: via count unchanged, outside ≤ previous, DRC 0. PNG
   `--milestone m4 --task A13 --board wiccon-2023`.
 
-- Acceptance (every task, main session): completion AND detours are non-regression items: on eprom, wiccon and dcsgone report
+- Acceptance (every task, main session): completion AND detours are non-regression items: on eprom, wiccon and private-badge-b report
   routed/connections_total, failed, vias, routing_new, unconnected, router_s, AND detour (reference, A7) median/p90/max/count > 1.5
   plus detour_ghost; count > 1.5 and max must not get worse than main at your base (numbers for both in the report), unless a
   connection newly routes (say which). Not-worse gate numbers (global-constraints.md) for eprom/wiccon; NOTE wiccon outside-pad length
   headroom is small (bound 1380 mm) — report it.
-- dcsgone at the gate options (A-C3; harness.progress --milestone m4 applies them). Gate predicate A-C11.
+- private-badge-b at the gate options (A-C3; harness.progress --milestone m4 applies them). Gate predicate A-C11.
 - License: topor is GPL-2.0-or-later (main 93f2126). Porting code from the gEDA PCB toporouter (src/toporouter.c, GPL-2.0-or-later,
   Anthony Blake) is allowed when it helps: keep the original copyright notice + attribution at the port site, name the origin in the
   commit message and report it (coordinator records a ruling). No new Apache-2.0-only runtime crates (no new crates at all without asking).

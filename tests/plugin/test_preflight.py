@@ -218,11 +218,11 @@ def test_via_sizes_list_is_not_a_kicad_key():
 
 #: snapshot boards on which VIA_NOT_SET_UP fires (C33): wiccon-2023 has only the via_dimensions placeholder and
 #: the factory Default class, wedding-gift an empty list and the factory class. eprom-to-kernal has an empty list
-#: but its Signal class sets 0.6 / 0.3; bornhack2026, dcsgonebadge and nametag-sao have pre-defined vias.
+#: but its Signal class sets 0.6 / 0.3; bornhack2026, esp-rust-board and nametag-sao have pre-defined vias.
 VIA_NOT_SET_UP_BOARDS = {"wiccon-2023", "wedding-gift"}
 
 
-@pytest.mark.parametrize("board", ["bornhack2026", "dcsgonebadge", "eprom-to-kernal", "nametag-sao",
+@pytest.mark.parametrize("board", ["bornhack2026", "esp-rust-board", "eprom-to-kernal", "nametag-sao",
                                    "wedding-gift", "wiccon-2023"])
 def test_via_setup_on_snapshot_projects(board):
     from harness.paths import board_pcb

@@ -95,6 +95,31 @@ Run the full local suite (nothing skipped) with `.venv/bin/pytest -q`.
 - Benchmark and progress images go to `docs/benchmarks/` on disk only — that directory is git-ignored and never
   committed; quote the key numbers in `docs/progress/STATE.md` or a progress note instead.
 
+## Public and private boards
+
+The repository is public. Only boards whose licence allows it are named in git, in code, tests, fixtures,
+docs and commit messages: `eprom-to-kernal`, `wiccon-2023`, `esp-rust-board`
+([esp-rs/esp-rust-board](https://github.com/esp-rs/esp-rust-board), CERN-OHL-P-2.0), `qmtech-minimig`,
+`bornhack2026`. Committed data taken from a public board (crops, model exports, DRC dumps) carries an
+attribution line: upstream URL and licence. Nothing from any other board goes into git: no name, no data,
+no net names, part references with coordinates or screenshots. Describe the mechanism generically instead
+("a 2-layer badge whose USB-C pair crosses an ESD array").
+
+Private boards stay routable locally through the git-ignored `scratch/private-boards.toml`, which
+`harness/paths.py` merges into `SOURCE_BOARDS` / `BOARD_SNAPSHOTS` when it exists:
+
+```toml
+[my-badge]                                  # local name, used with --board / BENCH_BOARDS
+path = "vendor/my-badge/my-badge.kicad_pcb" # absolute, ~/..., or relative to ~/work/kicad/projects
+pin = "0123456789ab"                        # sha256[:12] printed by `python -m harness.snapshot my-badge`
+long = true                                 # optional: harness.progress long-board options (60 s / 600 s)
+```
+
+Snapshot it with `.venv/bin/python -m harness.snapshot my-badge`, then add the printed hash as `pin`.
+
+Board ladder for engine changes (cheap to expensive; re-run the lower rungs after each fix):
+eprom-to-kernal → wiccon-2023 → esp-rust-board → qmtech → bornhack2026 → larger local boards.
+
 ## Configuration: schema → topor.toml → docs
 
 Every judgement call is a setting with a safe default ("if in doubt, make it configurable"):

@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 from harness import bench
+from harness.paths import LONG_BOARDS
 from harness.render import board_bbox_nm, compose_compare, highlight_points
 from harness.render import caption as add_caption
 from harness.router import route_router
@@ -17,14 +18,15 @@ ROOT = Path(__file__).resolve().parents[1]
 DETOUR_THRESHOLD = 1.5
 # Informational boards: the M2/M3 gate tests run them with these options.
 _LONG_BOARD_OPTIONS = {"wall_clock_s": 60, "partial_routes": False}
-# M4a gate options of dcsgonebadge (M3-R14, ruling A-C3): whole run <= 10 min, no partial routes.
+# M4a gate options of the long boards (M3-R14, ruling A-C3): whole run <= 10 min, no partial routes.
 _M4_GATE_OPTIONS = {"wall_clock_s": 600, "partial_routes": False}
 
 
 def board_options(board: str, milestone: str = "m3") -> dict | None:
     """run_bench options for `board` (None = defaults); mirrors tests/gate/test_m3_gate.py
-    (`milestone` m3: 60 s) and the M4a gate (`milestone` m4: 600 s) for dcsgonebadge."""
-    if board != "dcsgonebadge":
+    (`milestone` m3: 60 s) and the M4a gate (`milestone` m4: 600 s) for the long boards
+    (harness.paths.LONG_BOARDS: esp-rust-board plus private boards marked `long`)."""
+    if board not in LONG_BOARDS:
         return None
     return dict(_M4_GATE_OPTIONS if milestone == "m4" else _LONG_BOARD_OPTIONS)
 
@@ -198,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--milestone", choices=["m3", "m4"], default="m4",
                     help="output name <date>-<milestone>-<task>[-<board>].png; m4 also selects "
-                         "the M4 gate options of dcsgonebadge (600 s)")
+                         "the M4 gate options of the long boards (600 s)")
     ap.add_argument("--options", default=None, metavar="JSON",
                     help="engine options JSON merged over the board defaults, "
                          "e.g. '{\"wall_clock_s\": 300}'")

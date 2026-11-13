@@ -90,7 +90,7 @@ _IRM_TO_KICAD = {bt.IslandRemovalMode.IRM_UNKNOWN: 0, bt.IslandRemovalMode.IRM_A
 #: kipy ZoneConnectionStyle -> the model's zone connection, pcbnew's ZONE_CONNECTION values as the harness exports
 #: them and the engine reads them (engine/src/pourcheck.rs CONN_*: NONE 0, THERMAL 1, FULL 2, THT_THERMAL 3);
 #: inherited / unknown -> None (no override). K1: this table was off by one (INHERITED 0, NONE 1, ...), so over
-#: IPC a thermal zone read as full and a pad set to "none" as thermal (dcsgonebadge JP1, U4.21).
+#: IPC a thermal zone read as full and a pad set to "none" as thermal (a solder jumper and a charger IC pad).
 _ZC_TO_KICAD = {_ZCS.ZCS_UNKNOWN: None, _ZCS.ZCS_INHERITED: None, _ZCS.ZCS_NONE: 0, _ZCS.ZCS_THERMAL: 1,
                 _ZCS.ZCS_FULL: 2, _ZCS.ZCS_PTH_THERMAL: 3}
 _ZONE_DEFAULT_CONN = 1  # a zone without a setting: KiCad's default, thermal reliefs
@@ -246,7 +246,7 @@ def pad_polygon_rings(pwh, max_err: int) -> list:
     CONTAIN the copper. KiCad hands the pad's curves already flattened (plain points ON the curve, its own polygon at
     the board's max error), so the ring is grown outward by `max_err` (``geom.grow_ring_outward``, as pcbnew's
     ERROR_OUTSIDE polygon of the harness is), and arc nodes, if any, are flattened outward first. K1 (live
-    dcsgonebadge): the chords of solder-jumper pad JP1.3's two r = 0.5 mm circles lay up to 5 um inside KiCad's
+    plugin run on a 2-layer badge): the chords of a solder-jumper pad's two r = 0.5 mm circles lay up to 5 um inside KiCad's
     copper and seven routed tracks came 1 - 4 um too close to it (KiCad DRC clearance). Excess <= max_err +
     OBSTACLE_ERR_NM. O(points^2) (simplicity check of the grown ring; pads have few points)."""
     err = min(int(max_err), OBSTACLE_ERR_NM)
@@ -484,7 +484,7 @@ def shape_to_polys(shape, max_err: int) -> list[list[list[int]]]:
                 if w > 0 and len(ring) >= 3 and all(pc[0] == "pt" for pc in pieces):
                     # K1: ONE ring (the polygon grown by half the stroke, as pcbnew exports it), not the polygon
                     # plus a capsule per edge: overlapping rings of one shape crashed the engine's triangulation
-                    # on dcsgonebadge (an "E"-shaped filled IR_RX polygon)
+                    # on a 2-layer badge (an "E"-shaped filled signal-net polygon)
                     grown = geom.grow_ring_outward(ring, w / 2.0, err)
                     if grown is not None:
                         out.append(grown)

@@ -3,5 +3,5 @@
 **Interfaces:** `state_point` shrinks the usable sub-segment by every foreign vertex within `r_v + c + w/2 + eps` (`verts_near`, `O(q)`) and discretises roundrect-corner crossings at the corner-circle tangent point; `los` returns `ok = false` when the bend loop does not converge (apex not approaching within `LOS_PORTAL_CAP` or cap hit).
 
 - [ ] **Step 1:** `fine_pitch_entry_u7_4_routes_direct` (U1.13→U7.4 geometry extracted via `gate_diag --detour 201` into a fixture; 0 vias, `est_len ≤ 1.5 × straight`), `los_nonconverging_bend_loop_is_rejected` (#208 trio: 0-via path `≤ 1.3 × 2.93 mm`, `apex_len ≤ 4 × chord`) in `engine/tests/search_entry.rs`. FAIL → implement → PASS.
-- [ ] **Step 2:** eprom byte-identical or not worse (diff reported); wiccon not worse. PNG `--task A2 --board dcsgonebadge`. Commit `fix(search): fine-pitch entry, state point shrink, los convergence`.
+- [ ] **Step 2:** eprom byte-identical or not worse (diff reported); wiccon not worse. PNG `--task A2 --board private-badge-b`. Commit `fix(search): fine-pitch entry, state point shrink, los convergence`.
 

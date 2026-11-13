@@ -227,7 +227,7 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)], s
                 let crowd = via_item(rq.net, p, ViaSize { d: sz.d + 2 * pour.min_thickness.max(0), drill: sz.drill }, None);
                 let stub = track_item(rq.net, lid, rq.w, c, p, None);
                 // The via must not dip partly into its own pad either (KiCad connection width;
-                // dcsgonebadge J3 pad 16: a GND stub via 3 um into the 0.3 mm oval pad, 0.09 mm).
+                // a 0.5 mm pitch FPC connector: a GND stub via 3 um into the 0.3 mm oval pad, 0.09 mm).
                 let r = 0.5 * sz.d as f64;
                 if vias.iter().any(|&(q, rq2)| (q - p).len() < r + rq2 + 1_000.0) {
                     continue;
@@ -269,7 +269,7 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)], s
         best_via = Some((ps, shared[k].at, shared[k].size));
     }
     // A via reaches every layer the pour fills; a track only the fill on its own layer, which the
-    // signals routed later on that layer can cut off (dcsgonebadge, D6b: with tracks preferred
+    // signals routed later on that layer can cut off (a 2-layer badge, D6b: with tracks preferred
     // wherever cheaper, 35 of 35 GND stubs became F.Cu tracks, 16 pour pieces were cut off
     // instead of 6, 12 connections fewer). So where the pour also fills a layer the pad has no
     // copper on, a via site wins and a track is the fallback; where it fills only the pad's own
@@ -544,8 +544,8 @@ pub fn islands(model: &BoardModel, b: &Board, vias: &[(usize, Vec2)], reqs: &[Re
 /// track trimmed to the stretch between the pad's polygon and the via's (so no obstacle
 /// overlaps another). A via inside its pad (`[vias] via_in_pad`) has no track part.
 /// No pour ring around the via (`Extra::Via::ring` 0): a hard ring of the zone's minimum width
-/// (against the neck KiCad's connection width check flagged at a GND plane via on dcsgonebadge in
-/// D5, (126.79, 121.1) mm, 0.1038 mm) cost qmtech 16 connections in D6a; the pour needs room on
+/// (against the neck KiCad's connection width check flagged at a GND plane via on a 2-layer badge in
+/// D5, 0.1038 mm) cost qmtech 16 connections in D6a; the pour needs room on
 /// one side only, which wants a graded factor, not a ring.
 pub fn extras(b: &Board, rq: &Req, o: &Out) -> Vec<Extra> {
     let ob = &b.proj.obstacles[rq.obs];

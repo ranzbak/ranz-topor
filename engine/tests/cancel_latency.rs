@@ -106,10 +106,12 @@ fn cancel_before_a_run_begins_skips_it() {
 
 /// M0 stop latency (verifier 2026-11-13): with the cut model (`[capacity] model = "cuts"`) a Cancel / the
 /// time limit during P3/P4 (layer assignment, rip-up and the topology and label moves, where the
-/// cut prices are computed per move) ends the call within seconds, on a crop of a real board.
+/// cut prices are computed per move) ends the call within seconds, on crops of real boards: a 4-layer
+/// one (qmtech-minimig) and a 2-layer one (esp-rs/esp-rust-board, CERN-OHL-P-2.0: USB-C, ESD diodes,
+/// charger; `source` in the fixture).
 #[test]
 fn cancel_in_p3_p4_with_the_cut_model_ends_quickly() {
-    for fx in ["qmtech-usb-crop.json", "dcsgone-usb-crop.json"] {
+    for fx in ["qmtech-usb-crop.json", "esp-rust-board-usb-crop.json"] {
         let path = format!("{}/tests/fixtures/{fx}", env!("CARGO_MANIFEST_DIR"));
         let m = BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).expect("fixture parses");
         let o = opts(r#", "runs": 1, "capacity_model": "cuts""#);

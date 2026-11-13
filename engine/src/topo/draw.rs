@@ -2214,8 +2214,8 @@ impl<'a> Drawer<'a> {
 
     /// A via of `size` at `p` does not overlap a pad of its own net only partly (D1): the overlap
     /// of the via disc with the pad copper is a lens whose chord is the narrowest copper between
-    /// them, and KiCad's minimum connection width check flags it (seen on dcsgonebadge: a 0.6 mm
-    /// via 4 um into BT1 pad 3, "actual 0.1044 mm" < 0.127 mm). Clear of the pad (gap >= 0) or
+    /// them, and KiCad's minimum connection width check flags it (seen on a 2-layer badge: a 0.6 mm
+    /// via 4 um into a battery holder pad, "actual 0.1044 mm" < 0.127 mm). Clear of the pad (gap >= 0) or
     /// centred inside it is fine; with no minimum connection width set, anything goes.
     /// O(pads of the net x pad vertices).
     pub fn via_own_pad_ok(&self, p: Vec2, size: ViaSize, net: i32) -> bool {
@@ -2224,7 +2224,7 @@ impl<'a> Drawer<'a> {
         }
         let r = 0.5 * size.d as f64;
         // KiCad's pad polygon reaches up to `max_error` past the arcs: a via that clears the
-        // exact copper by less still touches it in a sliver (dcsgonebadge C22.1, D6a: 6 um).
+        // exact copper by less still touches it in a sliver (a capacitor pad, D6a: 6 um).
         let tol = self.model.rules.max_error.max(0) as f64;
         self.model.pads.iter().filter(|pad| pad.net == net).all(|pad| {
             pad.layers.iter().all(|&l| {
@@ -2237,7 +2237,7 @@ impl<'a> Drawer<'a> {
     /// No track of `items` (a run of wire `w`) grazes a pad of its own net other than its end
     /// pads: either it keeps KiCad's `max_error` off the pad (KiCad's minimum connection width
     /// check builds the pad polygon up to that far outside the arcs) or its centre line runs
-    /// into the pad. A graze is a sliver connection KiCad flags (dcsgonebadge R10.1, D2: a track
+    /// into the pad. A graze is a sliver connection KiCad flags (a resistor pad, D2: a track
     /// 1.7 um off the corner arc, "actual 0.0023 mm" < 0.127 mm). Without a minimum connection
     /// width set, anything goes. O(tracks x pads of the net).
     pub fn track_own_pad_ok(&self, w: WireId, items: &[Item]) -> bool {
@@ -2284,8 +2284,8 @@ impl<'a> Drawer<'a> {
 
     /// A plane stub's track does not graze a pad of its net other than its own (`own`, an index
     /// into `model.pads`) nor an own-net via of `vias` (centre, radius): the sliver connection
-    /// [`Drawer::track_own_pad_ok`] keeps wires from (D6a, dcsgonebadge J3.16: a GND stub to a
-    /// via down-left grazed J3.15, "actual 0.0904 mm" < 0.127 mm). O(pads of the net).
+    /// [`Drawer::track_own_pad_ok`] keeps wires from (D6a, a 0.5 mm pitch FPC connector: a GND stub to a
+    /// via down-left grazed the neighbouring GND pad, "actual 0.0904 mm" < 0.127 mm). O(pads of the net).
     pub fn stub_own_ok(&self, stub: &Item, own: usize, vias: &[(Vec2, f64)]) -> bool {
         let Item::Track(t) = stub else { return true };
         if self.model.rules.min_connection <= 0 || t.net == 0 {
@@ -2297,9 +2297,9 @@ impl<'a> Drawer<'a> {
         let tol = self.model.rules.max_error as f64;
         let ok = |d: f64| d - 0.5 * t.width as f64 >= tol || d <= 0.0;
         // Another pad of the net: the stub keeps off it altogether. A centre line that only clips
-        // a corner is still a sliver (J3.16 again: 0.1025 mm), and a stub needs no other pad.
-        // A pad the stub starts inside is the own pad's copper (D6b: dcsgonebadge USB-C J1.A1 and
-        // J1.B12 are one GND pad drawn twice; every stub of J1.A1 started inside J1.B12 and was
+        // a corner is still a sliver (the FPC pad again: 0.1025 mm), and a stub needs no other pad.
+        // A pad the stub starts inside is the own pad's copper (D6b: a USB-C receptacle's A1 and
+        // B12 are one GND pad drawn twice; every stub of A1 started inside B12 and was
         // refused, so J1.A1 became a 16 mm signal connection).
         let off = |d: f64| d - 0.5 * t.width as f64 >= tol;
         let root = crate::geom::Prim::Seg(crate::geom::Seg { a, b: a });

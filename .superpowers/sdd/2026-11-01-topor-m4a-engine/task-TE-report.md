@@ -146,11 +146,11 @@ The engine is right here, so the fix is in the tests: the stop is placed by meas
 
 ## Numbers (base = ea1f064 build, head = TE; machine shared, load average 20–35 throughout)
 
-eprom-to-kernal and wiccon-2023 use the default bench options. dcsgonebadge uses the gate options with
+eprom-to-kernal and wiccon-2023 use the default bench options. private-badge-b uses the gate options with
 **`wall_clock_s 0`**, because load was > 6 for the whole session (rotation-2 rule). That run has no deadline, so
 both engines are deterministic. The 600 s gate run was not used, since it is not a valid measurement at this load.
 
-| | eprom base | eprom head | wiccon base | wiccon head | dcsgone base | dcsgone head |
+| | eprom base | eprom head | wiccon base | wiccon head | private-badge-b base | private-badge-b head |
 |---|---|---|---|---|---|---|
 | routed / total | 27/27 | 27/27 | 62/62 | 62/62 | 205/241 | 205/241 |
 | failed | 0 | 0 | 0 | 0 | 36 | 36 |
@@ -164,19 +164,19 @@ both engines are deterministic. The 600 s gate run was not used, since it is not
 | detour_ghost max / > 1.5 | 1.312/0 | same | 1.295/0 | same | 4.71/15 | same |
 | junctions | 0 | 0 | 2 | 2 | 3 | 3 |
 
-- **The three boards:** all are identical between base and head (same failed list on dcsgone). The router_s
+- **The three boards:** all are identical between base and head (same failed list on private-badge-b). The router_s
   differences are machine load: base load 20 → 32, head load 32 → 23.
-- **Is A5⊕A6 the A12 lever?** The fix **does not change dcsgone routed (+0)**. On the whole board the fallback
+- **Is A5⊕A6 the A12 lever?** The fix **does not change private-badge-b routed (+0)**. On the whole board the fallback
   never fires: the USB connections fail there for whole-board reasons, not because of this T metrization. So
   this fix is not the A12 lever, and "A6 alone 210/241, merged 204/241" stays open.
 - **Not worse:**
   - eprom: 27/27, 64.628 ≤ 64.7 mm, router < 2 s.
   - wiccon: 62/62, 34 ≤ 37 vias, 1363.4 ≤ 1380 mm, 4.5 s < 10 s.
   - routing_new and unconnected are 0 on both boards.
-  - dcsgone is not below 204/241: 205/241.
-- **dcsgone routing_new 1:** present in both wall-clock-0 runs, so it is not from TE. In a gate run the
+  - private-badge-b is not below 204/241: 205/241.
+- **private-badge-b routing_new 1:** present in both wall-clock-0 runs, so it is not from TE. In a gate run the
   clock-dependent DRC loop removes it. This is the JP1 net-tie short known from A5 (task NT).
-- **No PNG:** dcsgone does not change, so the brief asks for none.
+- **No PNG:** private-badge-b does not change, so the brief asks for none.
 - **Determinism:** `steiner_threads_byte_identical` (threads 1/2/4 plus a repeat, with junctions) and
   `stubs_threads_byte_identical` are green. The fallback is order-deterministic: it walks the `refined` list,
   which follows the routed order.
@@ -197,7 +197,7 @@ both engines are deterministic. The 600 s gate run was not used, since it is not
 
 ## Concerns
 
-1. **The dcsgone A12 lever is not explained.** The fix does not change dcsgone (205/241 both). The lever
+1. **The private-badge-b A12 lever is not explained.** The fix does not change private-badge-b (205/241 both). The lever
    "A5+A6 < A6 alone" still needs its own diagnosis on the whole board; it is not this metrization failure.
 2. **A16 lowers the crop.** A16's escalating rip cost routes one connection fewer on the USB crop with steiner
    off (30/37 against 31/37 for A6 alone; measured, not acted on).

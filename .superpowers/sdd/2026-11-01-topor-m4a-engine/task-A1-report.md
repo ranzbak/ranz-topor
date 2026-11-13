@@ -1,9 +1,9 @@
 # Task A1 report: slot-search speed
 
-Status: DONE_WITH_CONCERNS (speed target far exceeded; dcsgone 231/231 not reached, that is A2..A12)
+Status: DONE_WITH_CONCERNS (speed target far exceeded; private-badge-b N/N not reached, that is A2..A12)
 
 ## Key finding (premise correction)
-Instrumenting the planar search on dcsgone (1 thread, 30 s): `clearance_bend` was only ~13 % of search time
+Instrumenting the planar search on private-badge-b (1 thread, 30 s): `clearance_bend` was only ~13 % of search time
 (2.1 s of 15.8 s); **`bend_ok` (called from `los`) was ~86 %** (13.6 s). The "94 % in clearance_bend/los" in the
 carry-over lumped them. So A1 also memoises and cache-queries `bend_ok` (exact; on the `los` call path).
 
@@ -35,13 +35,13 @@ carry-over lumped them. So A1 also memoises and cache-queries `bend_ok` (exact; 
   `O((C+1)*hit)`, memo hit `O(1)`; `bend_ok` hit `O(1)`.
 - No new Options/settings (all exact-preserving, no judgement call).
 
-## Numbers (dcsgone, `--options '{"threads":4,"wall_clock_s":60}' --profile`)
+## Numbers (private-badge-b, `--options '{"threads":4,"wall_clock_s":60}' --profile`)
 | | before | after |
 |---|---|---|
 | candidates/query | 109 (brief said 162) | 11 (9.9x) |
 | search ms/run | 775 | 28 (27x) |
 | bends / skipped_faces / memo_hits | 1.44M / - / - | 30.8M / 142k / 28.2M (91 %) |
-| routed in 60 s | 86/231 (1 iteration) | 175/231 (6 iterations) |
+| routed in 60 s | 86/N (1 iteration) | 175/N (6 iterations) |
 | stop_reason | timeout | timeout |
 After A1 the remaining cost in 60 s is ghost (28 s CPU, 35 ms/run) and commit (26 s in the profile), not slot search.
 eprom 0.275 s -> 0.10 s, wiccon 17.7 s -> 4.1 s (1 thread), 9.7 -> 2.9 s (4 threads), nametag 3.6 -> 1.0 s.
@@ -50,14 +50,14 @@ eprom 0.275 s -> 0.10 s, wiccon 17.7 s -> 4.1 s (1 thread), 9.7 -> 2.9 s (4 thre
 Route JSON minus runtime_s/threads_used byte-identical to the main engine (68a77b6 line) on eprom and wiccon for
 threads 1, 2, 4; nametag-sao identical (threads 2). wedding-gift not comparable (old build times out at 60 s).
 
-## Gate-options run (info for A12), dcsgonebadge 3e7e66f862a7, wall_clock_s 600, partial_routes false, threads 4
+## Gate-options run (info for A12), private-badge-b (private pin), wall_clock_s 600, partial_routes false, threads 4
 Harness run: 188/255 connections reported (DRC-loop rounds included), failed 67, vias 199, routing_new 0,
 preexisting 4, unconnected 62, router_s 144.1, runtime_s 190.0, iterations 42, detour median 1.003 / p90 1.52 /
-max 11.6 (VCC U3.1->U3.3) / count>1.5: 20 of 188 (67 without reference). Hard gate NOT met (231/231 pending
+max 11.6 (VCC U3.1->U3.3) / count>1.5: 20 of 188 (67 without reference). Hard gate NOT met (N/N pending
 A2..A12), but 190 s whole run is well inside 600 s.
-PNG (not committed): /home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-a8a5912ff53400ed1/docs/benchmarks/progress/2026-10-31-m4-A1-dcsgonebadge.png
-Caption: "A1: 188/255 connections, 40/66 nets, partial 0, failed 67, vias 199, arcs 216, zero slack 0, iters 42,
-pcb 3e7e66f862a7; DRC routing 0 preexisting 4, unconnected 62, outside pads 1725.8 vs hand 3574.7 mm, router 144.08 s
+PNG (not committed): /home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-a8a5912ff53400ed1/docs/benchmarks/progress/2026-10-31-m4-A1-private-badge-b.png
+Caption: "A1: 188/255 connections, 40/M nets, partial 0, failed 67, vias 199, arcs 216, zero slack 0, iters 42,
+pcb (private pin); DRC routing 0 preexisting 4, unconnected 62, outside pads 1725.8 vs hand (hand length) mm, router 144.08 s
 on 4 threads".
 
 ## Tests

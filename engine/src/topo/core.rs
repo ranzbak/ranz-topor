@@ -2042,7 +2042,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     // Reroute counter per connection: the P4 moves pay the `reroute` factor's price for it.
     // (Measured: ripping the least moved wires first in the negotiated rip-up routed fewer
-    // connections on dcsgonebadge and qmtech, so the rip order stays routed-last first.)
+    // connections on a 2-layer badge and qmtech, so the rip order stays routed-last first.)
     let mut reroutes: Vec<u32> = vec![0; conns.len()];
     // Wires taken out and routed again in this whole route (the `max_ripped` work cap).
     let mut ripped_total = 0usize;

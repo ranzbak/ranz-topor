@@ -13,7 +13,7 @@ Branch: worktree-agent-a225d937172afa61f (merged worktree-agent-a141224bcf3a2052
 
 ## Verification
 - engine suite: all green, clippy clean. Python `pytest -q` and the M2 gate: see below.
-- `tests/gate/test_m2_gate.py -m gate`: eprom gate PASSES (27/27, 25/25, routing_new 0, unconnected 0, 64.628 mm vs hand 76.598, router 0.05 s, 1 iteration, no zero-slack); wiccon info passes; **dcsgonebadge info test FAILS** `router_s 120 <= 65`: engine itself stops at 60.01 s (timed out in iteration 1, 164/231 routed) but the harness DRC loop re-routes once (1 new DRC spot in round 1) = 2 x 60 s. Cause: search cost on a 231-connection two-layer board (search 108 ms/run, ghost 336 ms/run with ~23 M clearance candidates per ghost run, Task 8 territory / Task 11 threads). Not weakened; needs a perf pass.
+- `tests/gate/test_m2_gate.py -m gate`: eprom gate PASSES (27/27, 25/25, routing_new 0, unconnected 0, 64.628 mm vs hand 76.598, router 0.05 s, 1 iteration, no zero-slack); wiccon info passes; **private-badge-b info test FAILS** `router_s 120 <= 65`: engine itself stops at 60.01 s (timed out in iteration 1, 164/N routed) but the harness DRC loop re-routes once (1 new DRC spot in round 1) = 2 x 60 s. Cause: search cost on a N-connection two-layer board (search 108 ms/run, ghost 336 ms/run with ~23 M clearance candidates per ghost run, Task 8 territory / Task 11 threads). Not weakened; needs a perf pass.
 
 ## Progress numbers
 eprom (docs/benchmarks/progress/2026-10-31-m3-T9.png): routed 27/27, nets 25/25, vias 0 (THT pads ride B.Cu), routing_new 0, unconnected 0, outside 64.628 mm vs hand 76.598, F.Cu 90.323 / B.Cu 17.773 mm, zero_slack_wires 0, router 0.048 s, iterations 1.

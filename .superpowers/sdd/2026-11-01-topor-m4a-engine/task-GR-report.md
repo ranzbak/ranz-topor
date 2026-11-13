@@ -5,9 +5,9 @@ Status: DONE_WITH_CONCERNS. Base: main bde9602 (fast-forwarded the worktree, it 
 ## Decision
 Default `ripup_growth` = **1.25** (max_per_pair 8 unchanged). Rule applied: completion first, then routing_new, then detours > 1.5, then length/vias.
 
-- Completion (sum of failed): identical for every growth on every board (dcsgone 36, wedding-gift 12, others 0); dcsgone at 1.5 shows 206/242 (one extra connection counted by the engine, same 36 failed).
-- routing_new: identical for all values (dcsgone 1, all others 0; the dcsgone 1 is a base effect, not growth-dependent).
-- Detours > 1.5 (dcsgone): 1.0 and 1.25 = 8 (max 4.215); 1.5, 1.75, 2.0 = 9; 3.0 = 8 (max 4.215, 197 vias, rips 92). 1.0 and 1.25 are identical in every column.
+- Completion (sum of failed): identical for every growth on every board (private-badge-b 36, wedding-gift 12, others 0); private-badge-b at 1.5 shows 206/242 (one extra connection counted by the engine, same 36 failed).
+- routing_new: identical for all values (private-badge-b 1, all others 0; the private-badge-b 1 is a base effect, not growth-dependent).
+- Detours > 1.5 (private-badge-b): 1.0 and 1.25 = 8 (max 4.215); 1.5, 1.75, 2.0 = 9; 3.0 = 8 (max 4.215, 197 vias, rips 92). 1.0 and 1.25 are identical in every column.
 - Hard constraints, F.Cu-only eprom guards (both tests use the same fixture and defaults): see Table 2. Growth 2.0 fails the guard (92.29 mm, no zero-slack wire) and `front_only_plus5v_needs_zero_slack_for_failed`; 1.0 to 1.75 and 3.0 pass.
 - 1.25 over 1.0: same numbers everywhere, keeps the escalation the user asked for (row 17), and sits in the middle of the 1.0 to 1.75 plateau (not at its edge, not at an isolated value like 3.0).
 
@@ -20,16 +20,16 @@ Default `ripup_growth` = **1.25** (max_per_pair 8 unchanged). Rule applied: comp
 - Judgement calls as options: none new (growth was already an option).
 
 ## Table 1: growth sweep (max_per_pair 8, threads 4, rip all, partial_routes False)
-Machine load was 14 to 35 throughout, so every run used `wall_clock_s 0` (deterministic, no deadline) per the measuring rule; router_s values are inflated by load (wiccon quiet: 1.5 s, dcsgone quiet base 120 s) and are NOT valid timings (load in brackets). Per-board detour values of eprom/wiccon/nametag are 0 > 1.5 except where listed.
+Machine load was 14 to 35 throughout, so every run used `wall_clock_s 0` (deterministic, no deadline) per the measuring rule; router_s values are inflated by load (wiccon quiet: 1.5 s, private-badge-b quiet base 120 s) and are NOT valid timings (load in brackets). Per-board detour values of eprom/wiccon/nametag are 0 > 1.5 except where listed.
 
 | board | value | routed/total | failed | routing_new | unconn | detours>1.5 (ref) | ref max | outside mm | vias | router_s (load) | rips (max pair, backstop pairs) | stop | iters |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| dcsgonebadge | 1 | 205/241 | 36 | 1 | 38 | 8 | 4.215 | 1799.565 | 196 | 247.789 (19.04) | 82 (5, 0) | no gain | 29 |
-| dcsgonebadge | 1.25 | 205/241 | 36 | 1 | 38 | 8 | 4.215 | 1799.565 | 196 | 285.097 (30.04) | 82 (5, 0) | no gain | 29 |
-| dcsgonebadge | 1.5 | 206/242 | 36 | 1 | 39 | 9 | 4.215 | 1807.489 | 196 | 254.072 (32.8) | 85 (5, 0) | no gain | 27 |
-| dcsgonebadge | 1.75 | 205/241 | 36 | 1 | 38 | 9 | 4.624 | 1814.469 | 196 | 406.573 (22.01) | 85 (5, 0) | no gain | 24 |
-| dcsgonebadge | 2 | 205/241 | 36 | 1 | 38 | 9 | 4.624 | 1814.469 | 196 | 273.508 (32.76) | 95 (5, 0) | no gain | 24 |
-| dcsgonebadge | 3 | 205/241 | 36 | 1 | 38 | 8 | 4.215 | 1799.584 | 197 | 183.464 (24.57) | 92 (4, 0) | no gain | 29 |
+| private-badge-b | 1 | 205/241 | 36 | 1 | 38 | 8 | 4.215 | 1799.565 | 196 | 247.789 (19.04) | 82 (5, 0) | no gain | 29 |
+| private-badge-b | 1.25 | 205/241 | 36 | 1 | 38 | 8 | 4.215 | 1799.565 | 196 | 285.097 (30.04) | 82 (5, 0) | no gain | 29 |
+| private-badge-b | 1.5 | 206/242 | 36 | 1 | 39 | 9 | 4.215 | 1807.489 | 196 | 254.072 (32.8) | 85 (5, 0) | no gain | 27 |
+| private-badge-b | 1.75 | 205/241 | 36 | 1 | 38 | 9 | 4.624 | 1814.469 | 196 | 406.573 (22.01) | 85 (5, 0) | no gain | 24 |
+| private-badge-b | 2 | 205/241 | 36 | 1 | 38 | 9 | 4.624 | 1814.469 | 196 | 273.508 (32.76) | 95 (5, 0) | no gain | 24 |
+| private-badge-b | 3 | 205/241 | 36 | 1 | 38 | 8 | 4.215 | 1799.584 | 197 | 183.464 (24.57) | 92 (4, 0) | no gain | 29 |
 | eprom-to-kernal | 1 | 27/27 | 0 | 0 | 0 | 0 | 1.147 | 64.628 | 0 | 0.274 (17.74) | 0 (0, 0) | converged | 1 |
 | eprom-to-kernal | 1.25 | 27/27 | 0 | 0 | 0 | 0 | 1.147 | 64.628 | 0 | 0.233 (32.18) | 0 (0, 0) | converged | 1 |
 | eprom-to-kernal | 1.5 | 27/27 | 0 | 0 | 0 | 0 | 1.147 | 64.628 | 0 | 0.265 (33.04) | 0 (0, 0) | converged | 1 |
@@ -74,9 +74,9 @@ Baseline 0.0 = the growth 1.25 rows of Table 1. Value column is nm (250000 = 0.2
 
 | board | value | routed/total | failed | routing_new | unconn | detours>1.5 (ref) | ref max | outside mm | vias | router_s (load) | rips (max pair, backstop pairs) | stop | iters |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| dcsgonebadge | 250000 | 211/250 | 39 | 1 | 43 | 13 | 16.793 | 1699.891 | 218 | 245.533 (23.32) | 155 (6, 0) | no gain | 36 |
-| dcsgonebadge | 500000 | 207/241 | 34 | 3 | 37 | 6 | 5.09 | 1761.604 | 205 | 152.935 (14.15) | 94 (5, 0) | no gain | 31 |
-| dcsgonebadge | 1e+06 | 207/247 | 40 | 3 | 38 | 10 | 3.104 | 1678.125 | 214 | 162.223 (14.25) | 115 (5, 0) | no gain | 26 |
+| private-badge-b | 250000 | 211/250 | 39 | 1 | 43 | 13 | 16.793 | 1699.891 | 218 | 245.533 (23.32) | 155 (6, 0) | no gain | 36 |
+| private-badge-b | 500000 | 207/241 | 34 | 3 | 37 | 6 | 5.09 | 1761.604 | 205 | 152.935 (14.15) | 94 (5, 0) | no gain | 31 |
+| private-badge-b | 1e+06 | 207/247 | 40 | 3 | 38 | 10 | 3.104 | 1678.125 | 214 | 162.223 (14.25) | 115 (5, 0) | no gain | 26 |
 | eprom-to-kernal | 250000 | 27/27 | 0 | 0 | 0 | 0 | 1.147 | 64.257 | 0 | 0.152 (17.71) | 0 (0, 0) | converged | 1 |
 | eprom-to-kernal | 500000 | 27/27 | 0 | 0 | 0 | 0 | 1.181 | 65.874 | 0 | 0.268 (20.69) | 0 (0, 0) | converged | 1 |
 | eprom-to-kernal | 1e+06 | 27/27 | 0 | 0 | 0 | 0 | 1.181 | 65.874 | 0 | 0.198 (32.05) | 0 (0, 0) | no gain | 7 |
@@ -84,7 +84,7 @@ Baseline 0.0 = the growth 1.25 rows of Table 1. Value column is nm (250000 = 0.2
 | wiccon-2023 | 500000 | 60/60 | 0 | 0 | 0 | 0 | 1.154 | 1390.07 | 54 | 6.92 (27.97) | 0 (0, 0) | no gain | 9 |
 | wiccon-2023 | 1e+06 | 60/60 | 0 | 0 | 0 | 0 | 1.173 | 1387.758 | 74 | 11.582 (23.68) | 0 (0, 0) | no gain | 13 |
 
-Observations: connection totals change with the cost (wiccon 62 -> 63/60/60, dcsgone 241 -> 250/241/247: pour-served connections appear/disappear), so rows are not strictly comparable. The cost trades vias and length for pour crossings: wiccon vias 34 -> 41/54/74 and outside +6 to +27 mm; dcsgone gets routing_new 3 at 0.5 and 1.0 mm and a 16.8 detour max at 0.25. No value improves completion without a cost elsewhere; no default change (A-C15 stays at 0.0).
+Observations: connection totals change with the cost (wiccon 62 -> 63/60/60, private-badge-b 241 -> 250/241/247: pour-served connections appear/disappear), so rows are not strictly comparable. The cost trades vias and length for pour crossings: wiccon vias 34 -> 41/54/74 and outside +6 to +27 mm; private-badge-b gets routing_new 3 at 0.5 and 1.0 mm and a 16.8 detour max at 0.25. No value improves completion without a cost elsewhere; no default change (A-C15 stays at 0.0).
 
 ## Tests
 - cargo test --release --no-fail-fast: green except the base-red/flaky ones: route_detour_ref::reference_is_feasible_not_topological, route_steiner (4 of 6), route_control::route_async_cancel_returns_anytime_result and route_engine::anytime_timeout_emits_committed_subset (load flakes), and route_stubs::exit_stubs_off_matches_previous (fails identically with growth 2.0, so not caused by this change; it is not in the coordinator's base-red list, please note). graph_ownnet::front_only_plus5v_needs_zero_slack_for_failed and eprom_ripped_front_only_is_the_m2_result green. Not run: clippy (no non-test Rust change besides two literals).
@@ -95,6 +95,6 @@ Observations: connection totals change with the cost (wiccon 62 -> 63/60/60, dcs
 Caption: 62/62 connections, vias 34, DRC routing 0, preexisting 0, unconnected 0, outside 1363.4 vs hand 1690.1 mm, router 1.51 s, detours > 1.5: 0 (max 1.3), pcb sha12 2d3063e70ed5. (Outcome-neutral for the two-layer boards: they never rip.)
 
 ## Concerns
-1. dcsgone gate (231/231) is not met at any growth: 205/241, failed 36, routing_new 1 (base reported 0 at wc 600; here wc 0, load 15 to 35), so growth is not the lever for the gate.
+1. private-badge-b gate (N/N) is not met at any growth: 205/241, failed 36, routing_new 1 (base reported 0 at wc 600; here wc 0, load 15 to 35), so growth is not the lever for the gate.
 2. route_stubs::exit_stubs_off_matches_previous red independent of growth.
 3. Timings in the tables are load-inflated; no quiet re-run possible.

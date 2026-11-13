@@ -98,7 +98,7 @@ def test_m1_gate_eprom_taut_smoother(engine, tmp_path):
 
 
 @pytest.mark.gate
-@pytest.mark.parametrize("board", ["wiccon-2023", "dcsgonebadge"])
+@pytest.mark.parametrize("board", ["wiccon-2023", "esp-rust-board"])
 def test_m1_smoother_other_boards_complete(board, tmp_path):
     """Informational (not an M1 criterion): the smoother must complete; fallback keeps the board DRC-equal."""
     src = BENCH_BOARDS[board]

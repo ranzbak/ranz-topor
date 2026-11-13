@@ -682,7 +682,7 @@ impl BoardModel {
     /// KiCad 10 (`DRC_ENGINE::IsNetTieExclusion`, verified with kicad-cli 10.0.8 in task NT,
     /// `engine/tests/net_tie.rs`) allows a track of net N to collide with a pad of a net-tie
     /// footprint only where the collision lies inside a tie-group pad of net N of that
-    /// footprint. That needs the two pads to overlap; a gapped tie pad (dcsgonebadge JP1, 0.3 mm)
+    /// footprint. That needs the two pads to overlap; a gapped tie pad (a 3-pad solder jumper, 0.3 mm gap)
     /// is an ordinary obstacle for the other tied net. For fused pads the routing model exempts
     /// the whole pad (a track ending in its own pad cannot keep clearance from the fused
     /// neighbour); the exact rule is enforced by `Checker` (self-check), which rejects a

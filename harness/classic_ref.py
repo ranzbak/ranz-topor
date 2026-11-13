@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-ORDER = ["qmtech", "qmtech-usb-crop", "dcsgone-usb-crop", "eprom-to-kernal", "wiccon-2023", "tanmatsu",
+ORDER = ["qmtech", "qmtech-usb-crop", "esp-rust-board-usb-crop", "eprom-to-kernal", "wiccon-2023", "tanmatsu",
          "bornhack2026", "hh2027"]
 
 

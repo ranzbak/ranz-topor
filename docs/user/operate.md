@@ -299,14 +299,14 @@ rounds). The first round of the first run always uses the plain weights, and eve
 board and settings give the same result.
 
 How long a run takes with the default best of 5 runs (measured headless with 4 threads and two boards at once; the
-router time is most of the total): eprom-to-kernal 2 s, wiccon-2023 about 25 s, dcsgonebadge (231 connections)
+router time is most of the total): eprom-to-kernal 2 s, wiccon-2023 about 25 s, a 2-layer badge (a few hundred connections)
 about 450 s of router time (320–710 s over six seeds), qmtech (426 connections, 4 layers) about 1000 s (680–1300 s).
-That is 5–8 times the fixed four rounds of earlier versions; in exchange dcsgonebadge connects 80.5 % instead of
+That is 5–8 times the fixed four rounds of earlier versions; in exchange that badge connects 80.5 % instead of
 77.6 % and qmtech 81.5 % instead of 79.6 % (KiCad DRC). `[optimize] runs = 1` takes roughly a quarter to a half of the
 time for a smaller gain; *Routes stable* and OK let you stop as soon as the result is good enough.
 `[run] timeout_s` (default 600 s of router time) is only an emergency stop: when it fires before the routes are
 stable the result is the best so far, may differ between runs, and the findings say so
-([`TIME_BUDGET_HIT`](troubleshoot.md#time_budget_hit)). Runs on large boards (dcsgonebadge, qmtech with the default
+([`TIME_BUDGET_HIT`](troubleshoot.md#time_budget_hit)). Runs on large boards (that badge, qmtech with the default
 best of 5 runs) may hit it and keep the best result so far. `0` = no limit.
 
 **Wall or CPU time.** `[run] timeout_clock` (also a choice next to the limit in the pre-flight dialog) says what
@@ -649,7 +649,7 @@ unsure about is kept. KiCad's DRC of the result stays the judge.
   matching, no P/N swap with vias (a connection whose pads swap sides is routed as two single tracks); the
   fan-out at pads can leave a skew of up to about a millimetre ([Differential pairs](#differential-pairs)).
 - Two or more signal layers are needed; through vias only.
-- Not every connection finishes legally on dense boards. Never drop draws them anyway (dcsgonebadge 222/231
+- Not every connection finishes legally on dense boards. Never drop draws them anyway (the 2-layer badge 222/n
   connections drawn, about 35 of them with violations; qmtech 400/426, about 50 with violations; measured headless,
   cut at 600 s): every violation is listed ([`VIOLATIONS`](troubleshoot.md#violations)) and needs a fix by hand,
   and there are many on these boards (hundreds, about half of them copper over a foreign pad or trace).

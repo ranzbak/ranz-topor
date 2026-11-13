@@ -4,7 +4,7 @@ Review: /home/paul/work/kicad/plugins/topor/docs/progress/notes/m4b-gate-review.
 Coordinator rulings C33, C34 in global-constraints.md are binding. Fix, each with a test where code changes:
 1. **I-3 (C33)** `preflight` via-setup detection reads `board.design_settings.via_dimensions` (entries with diameter > 0; the `{0,0}` first entry is a
    placeholder) instead of the non-existent `via_sizes_list`, plus the existing net-class check. Tests on the six snapshot .kicad_pro files under
-   scratch/boards/<board>/<sha12>/ (bornhack2026, dcsgonebadge, nametag-sao have pre-defined vias → no finding; wiccon-2023 placeholder only, eprom and
+   scratch/boards/<board>/<sha12>/ (bornhack2026, private-badge-b, nametag-sao have pre-defined vias → no finding; wiccon-2023 placeholder only, eprom and
    wedding-gift empty lists → finding iff no net class has a non-factory via size — report which fire) and fix the synthetic tests that used the made-up key.
 2. **I-4** docs: operate.md gets a section on fab minimums: the rule resolver applies the JLCPCB 1 oz profile floors (toporlib/rules.py JLCPCB_1OZ,
    `apply_fab_floors`) — list the values, which design values are raised, where the run report shows `floors_applied`, and that the engine's

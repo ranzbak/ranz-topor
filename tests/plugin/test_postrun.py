@@ -1,5 +1,5 @@
 """Post-run findings (K1, plugin/topor/postrun.py): the engine report lines below are copied from real runs of the
-topological core (qmtech / dcsgonebadge at 6eb1584), so a change of their wording breaks this test, not the user's
+topological core (qmtech and a 2-layer badge at 6eb1584), so a change of their wording breaks this test, not the user's
 findings list silently."""
 from topor import postrun
 from topor.findings import Finding
@@ -148,12 +148,12 @@ def test_preview_ratsnest_svg_draws_unconnected_items_blue():
 
 
 def test_preview_ratsnest_to_a_zone_is_a_ring_not_a_line_to_its_anchor():
-    """K1 (live dcs preview): a pad missing its GND pour was drawn as a line to the zone's anchor, the board corner."""
+    """K1 (live preview): a pad missing its GND pour was drawn as a line to the zone's anchor, the board corner."""
     from topor.preview import ratsnest_svg
-    unc = [{"items": [{"description": "Pad 0 [GND] of SW5 on F.Cu", "pos": {"x": 55.5, "y": 97.25}},
+    unc = [{"items": [{"description": "Pad 1 [GND] of SW1 on F.Cu", "pos": {"x": 58.0, "y": 71.5}},
                       {"description": "Zone [GND] on F.Cu and B.Cu, priority 0", "pos": {"x": 50.0, "y": 50.0}}]}]
     out = ratsnest_svg("<svg></svg>", unc, (50_000_000, 50_000_000))
-    assert "<line" not in out and '<circle cx="5.5000" cy="47.2500"' in out
+    assert "<line" not in out and '<circle cx="8.0000" cy="21.5000"' in out
 
 
 # ------------------------------------------------------------------------- KiCad DRC of the result (user 2026-11-11)

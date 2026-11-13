@@ -2,7 +2,7 @@
 
 Writes a small KiCad 10 board of 3-pad net-tie footprints (`net_tie_pad_groups "1,2"`, pad 1 =
 net Ak, pad 2 = net Bk, pad 3 = untied net Ck; optional copper bridge `fp_poly` between pads 1
-and 2, as `Jumper:SolderJumper-3_P1.3mm_Bridged12`, dcsgonebadge JP1), one footprint + one track
+and 2, as `Jumper:SolderJumper-3_P1.3mm_Bridged12`), one footprint + one track
 per case, runs `kicad-cli pcb drc` on it and compares each case with the expected outcome. The
 engine pins the result in `engine/tests/net_tie.rs` (Checker) and `engine/tests/obstacle_model.rs`.
 
@@ -44,7 +44,7 @@ LONG_BRIDGE = (-0.9, -0.4, -1.5, 0.3)
 
 # case: (description, pads, bridge, track (x0, y0, x1, y1, net letter, width), anchored, expect flag)
 CASES = {
-    1: ("dcsgone JP1: B from pad-2 centre across the bridge into pad 1", GAPPED, BRIDGE,
+    1: ("gapped jumper: B from pad-2 centre across the bridge into pad 1", GAPPED, BRIDGE,
         (0, 0, -1.6, 0, "B", 0.2), False, True),
     7: ("untied C from pad-3 centre into pad 2", GAPPED, BRIDGE, (1.3, 0, 0.3, 0, "C", 0.2), False, True),
     8: ("B 0.1 mm from pad 1 (clearance), outside pad 2", GAPPED, BRIDGE,

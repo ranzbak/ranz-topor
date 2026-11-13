@@ -1,10 +1,12 @@
 """Crop a harness model export to a window (dev helper for the search fixtures, A2).
 
-Usage: python3 crop_model.py MODEL.json X0 Y0 X1 Y1 OUT.json   (KiCad mm, y down)
+Usage: python3 crop_model.py MODEL.json X0 Y0 X1 Y1 OUT.json [SOURCE]   (KiCad mm, y down)
 
 Keeps the pads, vias and holes whose centre lies in the window, every net and the rules; replaces
 the outline by the window rectangle; drops pours, copper shapes, kept items, keepouts, net ties
 and dangling ends (the fixtures test the slot search's pad entry on the empty board, not pours).
+SOURCE (upstream URL, commit, licence of the board) is stored as the model's `source` attribution;
+crop only public boards (CONTRIBUTING.md "Public and private boards").
 """
 import json
 import sys
@@ -29,6 +31,8 @@ def main() -> None:
     for k in ("pours", "copper_shapes", "kept", "keepouts", "net_ties", "dangling_ends"):
         m[k] = []
     m["board"] = f"{m.get('board', 'board')}-crop"
+    if len(sys.argv) > 7:
+        m["source"] = f"{sys.argv[7]}; harness model export cropped to x {x0 / MM:g}-{x1 / MM:g}, y {y0 / MM:g}-{y1 / MM:g} mm"
     json.dump(m, open(out, "w"), separators=(",", ":"), sort_keys=True)
     print(f"{len(m['pads'])} pads, {len(m['vias'])} vias, {len(m['holes'])} holes -> {out}")
 

@@ -15,7 +15,8 @@ SNAPSHOT_ROOT = ROOT / "scratch/boards"
 SOURCE_BOARDS = {
     "eprom-to-kernal": PROJECTS / "eprom-to-kernal/eprom-to-kernal/eprom-to-kernal.kicad_pcb",
     "wiccon-2023": PROJECTS / "Wiccon/wiccon-main-badge/2023.kicad_pcb",
-    "dcsgonebadge": PROJECTS / "badge.team/dcsgonebadge-0.8.5/dcsgonebadge.kicad_pcb",
+    # esp-rs/esp-rust-board (https://github.com/esp-rs/esp-rust-board, commit efe1e8a), CERN-OHL-P-2.0
+    "esp-rust-board": PROJECTS / "router-test-designs/24-esp-rs-esp-rust-board/esp-rust-board.kicad_pcb",
     "bornhack2026": PROJECTS
     / "badge.team/bornhack2026/bornhack2026-hardware/bornhack2026-hardware.kicad_pcb",
     "nametag-sao": PROJECTS
@@ -28,11 +29,56 @@ SOURCE_BOARDS = {
 BOARD_SNAPSHOTS = {
     "eprom-to-kernal": "bfaf705c0f25",
     "wiccon-2023": "2d3063e70ed5",
-    "dcsgonebadge": "3e7e66f862a7",
+    "esp-rust-board": "4907cec7fec3",
     "bornhack2026": "21c5f478f1af",
     "nametag-sao": "ca9b0acc5ff0",
     "wedding-gift": "683d3088a14f",
 }
+
+# Boards run under the long-board options of harness.progress (M3 info 60 s, M4 gate 600 s).
+LONG_BOARDS = {"esp-rust-board"}
+
+# Private boards (licence or owner forbids publishing them) are never named in git. A gitignored local
+# file adds them to the maps above; the format is in CONTRIBUTING.md "Public and private boards".
+PRIVATE_BOARDS_FILE = ROOT / "scratch/private-boards.toml"
+PRIVATE_BOARDS: set[str] = set()  # names merged from that file
+
+
+def load_private_boards(path: Path = PRIVATE_BOARDS_FILE) -> dict[str, dict]:
+    """`{name: {"path": Path, "pin": str | None, "long": bool}}` from ``path`` (empty when it is absent).
+
+    One TOML table per board: ``path`` (absolute, ``~/...`` or relative to ~/work/kicad/projects),
+    ``pin`` (sha256[:12] of the pcb, printed by ``harness.snapshot``; without it the board can be
+    snapshotted but not run) and ``long`` (optional, default false: use the long-board options).
+    """
+    import tomllib
+
+    if not path.is_file():
+        return {}
+    out: dict[str, dict] = {}
+    for name, t in tomllib.loads(path.read_text()).items():
+        if not isinstance(t, dict) or "path" not in t:
+            raise ValueError(f"{path}: [{name}] needs a `path`")
+        pcb = Path(t["path"]).expanduser()
+        out[name] = {"path": pcb if pcb.is_absolute() else PROJECTS / pcb,
+                     "pin": t.get("pin"), "long": bool(t.get("long", False))}
+    return out
+
+
+def merge_private_boards(private: dict[str, dict]) -> None:
+    """Add `private` (see load_private_boards) to SOURCE_BOARDS, BOARD_SNAPSHOTS and LONG_BOARDS."""
+    for name, b in private.items():
+        if name in SOURCE_BOARDS and SOURCE_BOARDS[name] != b["path"]:
+            raise ValueError(f"private board {name!r} clashes with a public board of that name")
+        SOURCE_BOARDS[name] = b["path"]
+        PRIVATE_BOARDS.add(name)
+        if b["pin"]:
+            BOARD_SNAPSHOTS[name] = b["pin"]
+        if b["long"]:
+            LONG_BOARDS.add(name)
+
+
+merge_private_boards(load_private_boards())
 
 
 def _sha256(path: Path) -> str:
