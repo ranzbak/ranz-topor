@@ -114,6 +114,9 @@ WORDING: dict[str, dict[str, str]] = {
         "phase_preview": "Rendering the preview",
         # after Cancel the engine finishes the stage it is in; {stage} = " (drawing the traces)" or "", {s} = seconds
         "phase_cancelling": "Cancel pressed: finishing the current stage{stage}… {s} s",
+        # M2.TL soft time limit: the engine's notice ("time limit reached, waiting for the current step to finish
+        # (<step>); press Cancel to stop now"), capitalised
+        "phase_limit": "{notice}",
         "gauge_value": "{routed} / {total}",
         "iteration_label": "Round",
         "iteration_value": "{iteration} of up to {cap}",
@@ -1253,7 +1256,11 @@ class ProgressDialog(_Base):
         st.SetMinSize(wx.Size(w, -1))
         return st
 
-    def set_phase(self, phase: str, stage: str = "") -> None:
+    def set_phase(self, phase: str, stage: str = "", notice: str = "") -> None:
+        if notice and not self.cancelled and phase in ("setup", "route"):
+            # M2.TL: the time limit is reached; the engine finishes the step that runs (Cancel stops now)
+            self._phase_label(WORDING["progress"]["phase_limit"].format(notice=notice[:1].upper() + notice[1:]))
+            return
         if self.cancelled:
             # The engine finishes the stage it is in after Cancel / OK: say so, with the seconds since the click; the
             # DRC and the preview of the result that follow keep their own labels.
@@ -1323,7 +1330,7 @@ class ProgressDialog(_Base):
     def update(self, p: Progress) -> None:
         W = WORDING["progress"]
         self.set_stable(bool(getattr(p, "stable", False)))
-        self.set_phase(p.phase, getattr(p, "stage", ""))
+        self.set_phase(p.phase, getattr(p, "stage", ""), getattr(p, "notice", "") if getattr(p, "limit_reached", False) else "")
         if self.cancelled or not (p.phase == "route" and p.total > 0):
             self.gauge.Pulse()
             self.gauge_value.SetLabel("")

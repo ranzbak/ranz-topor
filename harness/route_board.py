@@ -206,6 +206,11 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
         "timeout_clock": cfg.get("run", "timeout_clock"),
         "timeout_s": cfg.get("run", "timeout_s"),
         "rayon_threads": os.environ.get("RAYON_NUM_THREADS"),
+        # M2.TL: where the time limit was reached and how far past it the result was ready (the run's clock)
+        "timeout_mode": (outcome.time_limit or {}).get("mode"),
+        "limit_reached": (outcome.time_limit or {}).get("reached"),
+        "limit_step": (outcome.time_limit or {}).get("step"),
+        "overrun_s": (outcome.time_limit or {}).get("overrun_s"),
         "report_dir": str(outcome.report_dir) if outcome.report_dir else None,
     }
     # M1 compass (toporlib.compass): per violation class predicted vs drawn vs KiCad DRC, per connection detour and
@@ -306,7 +311,8 @@ def summary(m: dict) -> str:
         f"  DRC unconnected {m['unconnected']} (hand {m['unconnected_hand']}, input {m['unconnected_input']}), "
         f"routing_new {m['routing_new']}",
         f"  vias {m['vias']} (hand {m['vias_hand']}), detour {dl}, ladder warnings {m['ladder_warnings']}",
-        f"  runtime {m['runtime_s']} s (run flow {m['run_flow_s']} s, router {m['router_s']} s, CPU {m['router_cpu_s']} s; limit {m['timeout_s']} {m['timeout_clock']})",
+        f"  runtime {m['runtime_s']} s (run flow {m['run_flow_s']} s, router {m['router_s']} s, CPU {m['router_cpu_s']} s; limit {m['timeout_s']} {m['timeout_clock']}"
+        + (f", reached during {m.get('limit_step') or 'the run'}, {m.get('overrun_s')} s past it" if m.get("limit_reached") else "") + ")",
         f"  stop: {m['stop_reason']}; findings: {', '.join(m['findings']) or 'none'}",
         f"  cleanup-unstable items: {m.get('cleanup_unstable')} ({m.get('cleanup_by_rule') or m.get('cleanup_error') or 'none'})"
         + (f"; dangling removals {m['cleanup_dangling'].get('independent')} independent, "

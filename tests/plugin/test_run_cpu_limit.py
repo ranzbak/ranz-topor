@@ -54,7 +54,8 @@ def test_cpu_clock_cancels_the_job_and_keeps_the_best(app, eprom, tmp_path, repo
     eng = RecordingEngine(hold=12, patch=_as("cancel", timed_out=True))
     ui = ScriptedUi(accept=False)
     _, _, out = do_run(eprom, tmp_path, ui=ui, cfg=cfg, engine=eng)
-    assert eng.jobs[0].cancelled  # the plugin cancelled the job when the CPU limit was reached
+    # M2.TL soft limit (default): the CPU limit is the engine's soft limit, not a Cancel
+    assert eng.jobs[0].reached and not eng.jobs[0].cancelled
     assert eng.options[0]["wall_clock_s"] == 0.0  # the engine's own wall limit is off in cpu mode
     assert out.stop_reason == "timeout_cpu" and out.cancelled is False
     assert out.items, "the best result so far is kept"
@@ -86,3 +87,30 @@ def test_wall_clock_is_unchanged_and_cpu_time_is_still_reported(app, eprom, tmp_
     assert out.stop_reason == "timeout_wall"
     assert "TIME_BUDGET_HIT" in {x.code for x in out.findings}
     assert out.router_cpu_s >= 5.0 and _result_json(out)["router_cpu_s"] >= 5.0
+
+
+def test_cpu_clock_soft_limit_reports_where_and_how_far_past(app, eprom, tmp_path, reports, cpu_counter):
+    cfg = CFG.with_values({("run", "timeout_clock"): "cpu", ("run", "timeout_s"): 3.0})
+    eng = RecordingEngine(hold=12, patch=_as("timeout", timed_out=True))
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=cfg, engine=eng)
+    tl = _result_json(out)["time_limit"]
+    assert tl["mode"] == "soft" and tl["reached"] is True and tl["overrun_s"] >= 0.0
+    assert "reached during" in (out.report.dir / "report.md").read_text()
+
+
+def test_cpu_clock_hard_limit_cancels_the_job(app, eprom, tmp_path, reports, cpu_counter):
+    cfg = CFG.with_values({("run", "timeout_clock"): "cpu", ("run", "timeout_s"): 3.0, ("run", "timeout_mode"): "hard"})
+    eng = RecordingEngine(hold=12, patch=_as("cancel", timed_out=True))
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=cfg, engine=eng)
+    assert eng.jobs[0].cancelled and not eng.jobs[0].reached
+    assert eng.options[0]["timeout_mode"] == "hard"
+    assert out.stop_reason == "timeout_cpu"
+
+
+def test_cancel_before_any_plan_is_a_loud_error(app, eprom, tmp_path, reports, cpu_counter):
+    # M2.TL fail fast: the engine kept no plan (Cancel during the initial routing): an error, never a quiet cancel
+    why = "nothing to draw yet: Cancel / OK came before the initial routing of any run had ended"
+    eng = RecordingEngine(hold=2, patch=_as("cancel", items=[], routed=0, warnings=[f"ERROR: {why}", why]))
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=CFG, engine=eng, strict=False)
+    assert out.status == "error" and out.error is not None and out.error.code == "NOTHING_TO_DRAW", out.status
+    assert why in out.error.message

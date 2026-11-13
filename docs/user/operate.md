@@ -309,6 +309,24 @@ stable the result is the best so far, may differ between runs, and the findings 
 ([`TIME_BUDGET_HIT`](troubleshoot.md#time_budget_hit)). Runs on large boards (dcsgonebadge, qmtech with the default
 best of 5 runs) may hit it and keep the best result so far. `0` = no limit.
 
+**The limit is soft** (`[run] timeout_mode = "soft"`, the default since 2026-11-13). When it is reached, the
+progress dialog says *Time limit reached, waiting for the current step to finish (<step>); press Cancel to stop
+now*. The step that runs finishes and its plan is kept as a variant: the initial routing up to its rip-up rounds,
+the TopoR loop cycle that runs, or (with `[optimize] loop = "cycles"`) the whole-route cycle that runs. No new step
+begins, and the best kept variant is drawn to its end, so a limit never leaves half-drawn copper. **Cancel** stops
+at once and draws the best variant kept so far; when none is kept yet (Cancel during the initial routing of every
+run) the run ends with the error [`NOTHING_TO_DRAW`](troubleshoot.md#nothing_to_draw) and writes no copper. How far
+the run went past the limit, and in which step it was reached, is in log.txt, report.md (*Time limit* line) and
+`result.json` (`time_limit.reached`, `step`, `overrun_s` on the run's clock). `hard` is the behaviour before: every
+step stops at the limit, and the connections a cut step had not reached stay unrouted.
+
+**Only the picked variant is drawn** (`[drawing] candidates = 1`, the default since 2026-11-13, with `[optimize]
+loop = "topor"`). Every run judges its plans on the topology, by their predicted violations, vias, length and
+shrinkages; only the best pick over all runs is drawn (TopoR judges its variants before any copper, 6.3 manual
+pp. 72-73, and computes the exact geometry once, Polubasov 2010). The other runs draw nothing; the report's
+*best of N runs* line names whose pick was drawn. A higher `candidates` draws more of the runs' picks and keeps
+the best drawn one (more drawing time); `[optimize] runs` or more is the behaviour before (every run draws its pick).
+
 **Wall or CPU time.** `[run] timeout_clock` (also a choice next to the limit in the pre-flight dialog) says what
 `timeout_s` counts. `wall` (the default) is seconds on the clock, what you wait for. `cpu` is CPU seconds of router
 work summed over all threads of the run (`time.process_time` over the engine jobs): a 4-thread run uses it up about 4

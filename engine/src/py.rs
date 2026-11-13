@@ -104,6 +104,7 @@ fn via_sizes(rules_json: String, net: i32, options_json: String) -> PyResult<Str
 }
 
 /// A routing run on its own thread: `progress()` (JSON of `control::Progress`), `cancel()`,
+/// `reach_limit()` (M2.TL: the caller's clock reached the limit),
 /// `set_time_limit(seconds)` / `time_limit()` (the live wall-clock limit, seconds since the job
 /// started, `0` / `None` = no limit; `control::TimeLimit`), `done()`, `wait()` (blocks with the GIL
 /// released; the `RouteResult` JSON, idempotent).
@@ -132,6 +133,13 @@ impl RouteJob {
     /// stop reason of the time limit). The interactive plugin's progress window only.
     fn set_time_limit(&self, seconds: f64) {
         self.ctl.set_time_limit(seconds);
+    }
+
+    /// M2.TL: the caller's own clock (the plugin's CPU clock) reached its limit: the engine's soft
+    /// limit is reached now (the step that runs finishes, the best kept variant is drawn; not a
+    /// change of the limit, not a Cancel). O(1).
+    fn reach_limit(&self) {
+        self.ctl.limit.reach();
     }
 
     /// The wall-clock limit now (seconds since the job started); `None` = no limit.

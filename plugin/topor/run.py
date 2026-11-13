@@ -789,6 +789,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     # (take_limit); on the wall clock the engine job gets the change (RouteJob.set_time_limit), on the CPU clock the
     # poll loop below compares against it.
     cpu_clock = cfg.get("run", "timeout_clock") == "cpu"
+    soft_limit = str(opts.get("timeout_mode", "soft")) != "hard"  # M2.TL
     no_budget = budget <= 0 or cpu_clock
     state["limit"] = max(0.0, budget)
     out.time_limit = {"clock": "cpu" if cpu_clock else "wall", "start_s": state["limit"], "final_s": state["limit"],
@@ -805,6 +806,20 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         at its first check. O(1)."""
         lim = state["limit"]
         return 0.0 if cpu_clock or lim <= 0 else max(1e-3, lim - router_before)
+
+    def note_limit(res: dict) -> None:
+        """M2.TL: what the time limit did (out.time_limit: mode, reached, the step that ran then, overrun_s past it on
+        the run's clock), with a log line. O(1)."""
+        lim, eng = state["limit"], res.get("limit") or {}
+        spent = state["router_cpu_s"] if cpu_clock else state["router_s"]
+        reached = bool(lim > 0 and (state["limit_hit"] or spent >= lim or eng.get("reached")))
+        out.time_limit.update({"mode": "soft" if soft_limit else "hard", "reached": reached,
+                               "step": str(eng.get("step") or ""),
+                               "overrun_s": round(max(0.0, spent - lim), 3) if reached else 0.0})
+        if reached:
+            log.line(f"time limit ({out.time_limit['mode']}): reached during {out.time_limit['step'] or 'the run'}; "
+                     f"the result was ready {out.time_limit['overrun_s']:.1f} s past the limit "
+                     f"({'CPU' if cpu_clock else 'wall'} clock)")
 
     def route_fn(m, o):
         if (state["cancel"] or state["limit_hit"]) and state["last_result"] is not None:
@@ -858,8 +873,17 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                         log.line("this engine cannot change its time limit during a run; the change is ignored")
                 if state["limit_hit"] and cancelled_at is None:
                     cancelled_at = now
-                    job.cancel()
-                    log.line("time limit: waiting for the engine to finish its current stage")
+                    reach = getattr(job, "reach_limit", None)
+                    if soft_limit and callable(reach):
+                        # M2.TL: the CPU clock's limit is the engine's soft limit: the step that runs finishes and the
+                        # best kept variant is drawn (Cancel still stops now)
+                        reach()
+                    else:
+                        job.cancel()
+                        log.line("time limit: waiting for the engine to finish its current stage")
+                if p.limit_reached and not state.get("limit_noted"):
+                    state["limit_noted"] = True
+                    log.line(p.notice or "time limit reached, waiting for the current step to finish")
                 if state["cancel"] and cancelled_at is None:
                     cancelled_at = now
                     job.cancel()
@@ -874,6 +898,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         if cancelled_at is not None:
             log.line(f"engine stopped {time.monotonic() - cancelled_at:.1f} s after the stop request")
         res = json.loads(job.wait())  # a panicked job raises RuntimeError("routing thread panicked: ...")
+        note_limit(res)
         items = res.get("items") or []
         if geometry == "segments":
             items = preview_mod.arcs_to_segments(items, max_err)
@@ -985,6 +1010,12 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         ui.error(mismatch)
         return finish("error", error_code=mismatch.code)
     engine_err = probe_mod.engine_failure(rr)  # robust-cdt: an engine error is loud, never a quiet empty run
+    nothing = next((str(w) for w in rr.get("warnings") or [] if str(w).startswith("ERROR: nothing to draw yet")), None)
+    if nothing is not None and not out.items:
+        # M2.TL (fail fast): Cancel before any plan was kept is a loud error, never a quiet cancelled run
+        engine_err = Finding("NOTHING_TO_DRAW", messages.MESSAGES["NOTHING_TO_DRAW"].severity, nothing.removeprefix("ERROR: "),
+                             messages.MESSAGES["NOTHING_TO_DRAW"].fix)
+        out.cancelled = False
     if engine_err is not None and not out.items and not out.cancelled:
         log.line(f"error: {engine_err.message}")
         out.error = engine_err

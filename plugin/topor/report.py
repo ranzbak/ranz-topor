@@ -43,6 +43,9 @@ def time_limit_text(tl: dict | None) -> str:
         how = ("removed" if final <= 0 else "set" if start <= 0 else "raised" if final > start
                else "lowered" if final < start else "changed")
         txt += f" ({how} during the run from {limit_text(start)}, {n} change{'s' if n > 1 else ''})"
+    if tl.get("reached"):  # M2.TL: where the limit was reached and how far the run went past it
+        txt += (f", reached during {tl.get('step') or 'the run'} ({tl.get('mode', 'soft')}), "
+                f"{float(tl.get('overrun_s') or 0.0):.1f} s past it")
     return txt
 
 SUMMARY_MAX_LINES = 20
@@ -276,7 +279,11 @@ class RunReport:
         if tl:  # the start limit, every change the user made during the run, the final limit
             out.append(f"Time limit ({tl.get('clock', 'wall')} clock): {limit_text(tl.get('start_s'))} at the start"
                        + "".join(f"; at {c['at_s']:g} s set to {limit_text(c['limit_s'])}" for c in tl.get("changes") or [])
-                       + (f"; final {limit_text(tl.get('final_s'))}" if tl.get("changes") else ""))
+                       + (f"; final {limit_text(tl.get('final_s'))}" if tl.get("changes") else "")
+                       + (f"; reached during {tl.get('step') or 'the run'} ([run] timeout_mode = {tl.get('mode', 'soft')}: "
+                          + ("the step that ran finished and the best kept variant was drawn" if tl.get("mode", "soft") == "soft"
+                             else "every step stopped there")
+                          + f"), result ready {float(tl.get('overrun_s') or 0.0):.1f} s past the limit" if tl.get("reached") else ""))
         if f.get("toml_path"):
             out.append(f"Config file: {f['toml_path']}")
         return out

@@ -134,6 +134,27 @@ pub struct Progress {
     pub rounds_ended: u32,
     #[serde(default)]
     pub round_lines: Vec<String>,
+    /// M2.TL soft time limit: the limit has passed while the run goes on (the step that runs
+    /// finishes, then the best kept variant is drawn; Cancel stops now). Live in
+    /// [`RunControl::snapshot`]; false after Cancel and once the run is done.
+    #[serde(default)]
+    pub limit_reached: bool,
+    /// The step that ran when the limit passed (its stage text; "" before the limit).
+    #[serde(default)]
+    pub limit_step: String,
+    /// The progress dialog's line for the soft limit ("time limit reached, waiting for the
+    /// current step to finish (<step>); press Cancel to stop now"), "" when it does not apply.
+    #[serde(default)]
+    pub notice: String,
+}
+
+/// The soft time limit's line for the progress dialog and the run log ([`Progress::notice`]). O(len).
+pub fn limit_notice(step: &str) -> String {
+    if step.is_empty() {
+        "time limit reached, waiting for the current step to finish; press Cancel to stop now".into()
+    } else {
+        format!("time limit reached, waiting for the current step to finish ({step}); press Cancel to stop now")
+    }
 }
 
 /// Round lines [`Progress`] keeps (the run flow polls every 0.25 s; a round takes longer).
@@ -241,6 +262,14 @@ impl TimeLimit {
     pub fn passed(&self) -> bool {
         self.deadline().is_some_and(|d| Instant::now() >= d)
     }
+
+    /// The limit is reached now (M2.TL, the plugin's CPU clock: it reached its own limit and the
+    /// engine's soft limit follows): the limit becomes the time spent, not a change by the caller
+    /// ([`TimeLimit::changed`]); a limit already passed stays. O(1).
+    pub fn reach(&self) {
+        let now = ((self.elapsed_s() * 1e9) as u64).clamp(1, LIMIT_NONE - 1);
+        let _ = self.ns.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |ns| (ns == LIMIT_UNSET || ns == LIMIT_NONE || ns > now).then_some(now));
+    }
 }
 
 /// Cancel flag, time limit and progress of one run; cheap to clone (shared state).
@@ -292,17 +321,41 @@ impl RunControl {
         self.with_progress(|p| p.measure_s += seconds.max(0.0));
     }
 
-    /// Copy of the current progress. O(1).
+    /// The run's time limit has passed: the step that runs finishes and no new one starts (M2.TL
+    /// soft limit). Records the step that ran when it passed ([`Progress::limit_step`]). O(1).
+    pub fn limit_reached(&self) -> bool {
+        let passed = self.limit.passed();
+        if passed {
+            self.with_progress(|p| {
+                if p.limit_step.is_empty() {
+                    p.limit_step = if p.stage.is_empty() { "routing".into() } else { p.stage.clone() };
+                }
+            });
+        }
+        passed
+    }
+
+    /// Copy of the current progress; the soft limit's fields ([`Progress::limit_reached`],
+    /// [`Progress::notice`]) are read live. O(1).
     pub fn snapshot(&self) -> Progress {
-        self.progress
-            .lock()
-            .map(|p| p.clone())
-            .unwrap_or_default()
+        let mut p = self.progress.lock().map(|p| p.clone()).unwrap_or_default();
+        p.limit_reached = self.limit.passed() && !self.is_cancelled() && p.phase != "done";
+        if p.limit_reached {
+            if p.limit_step.is_empty() {
+                p.limit_step = p.stage.clone();
+            }
+            p.notice = limit_notice(&p.stage);
+        }
+        p
     }
 
     /// Name the current stage and round (progress dialog wording); leaves the counters alone. O(1).
     pub(crate) fn stage(&self, round: u32, rounds: u32, stage: &str) {
         if let Ok(mut p) = self.progress.lock() {
+            // M2.TL: the stage that ran when the limit passed is the step the soft limit waited for.
+            if p.limit_step.is_empty() && !p.stage.is_empty() && self.limit.passed() {
+                p.limit_step = p.stage.clone();
+            }
             if self.run > 0 && p.runs > 1 {
                 p.stage = if stage.is_empty() { String::new() } else { format!("run {}: {stage}", self.run) };
                 return;
@@ -592,6 +645,28 @@ mod tests {
         });
         other.join().expect("thread");
         assert!(ctl.over_limit());
+    }
+
+    #[test]
+    fn reach_ends_the_limit_now_without_counting_as_a_change() {
+        let ctl = RunControl::new();
+        ctl.limit.init(600.0);
+        ctl.stage(1, 1, "layer assignment, rip-up and reroute");
+        assert!(!ctl.snapshot().limit_reached);
+        ctl.limit.reach();
+        assert!(ctl.over_limit());
+        assert!(!ctl.limit.changed(), "the plugin's CPU clock reached its limit: no change by the user");
+        let p = ctl.snapshot();
+        assert!(p.limit_reached);
+        assert_eq!(p.notice, "time limit reached, waiting for the current step to finish (layer assignment, rip-up and reroute); press Cancel to stop now");
+        ctl.stage(1, 1, "drawing the traces");
+        assert_eq!(ctl.snapshot().limit_step, "layer assignment, rip-up and reroute", "the step that ran when the limit passed");
+        ctl.request_cancel();
+        assert!(!ctl.snapshot().limit_reached, "after Cancel the dialog says Cancel, not the limit");
+        let none = RunControl::new();
+        none.limit.init(0.0);
+        none.limit.reach();
+        assert!(none.over_limit(), "no limit: reach() sets one at the time spent");
     }
 
     #[test]

@@ -482,6 +482,14 @@ copper violates a rule anywhere else, file a bug.
 
 **Fix.** See the connection reasons in the report; relax a setting (run.timeout_s, optimize.rounds) or route by hand.
 
+### NOTHING_TO_DRAW
+
+*Severity: error.*
+
+**Cause.** Cancel / OK came before the router had kept any plan (during the initial routing of every run, before each connection had its place), so there was nothing to draw: no copper was written and the board was not changed. A Cancel later in the run draws the best plan kept so far.
+
+**Fix.** Route again and let the initial routing finish (the progress dialog names the step; on a large board it can take a minute or more), then press OK / Cancel; or let the time limit end the run (run.timeout_s, [run] timeout_mode = soft: the step that runs then finishes and its plan is drawn).
+
 ### PAD_OUTSIDE_BOARD
 
 *Severity: warning.*

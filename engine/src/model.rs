@@ -833,6 +833,14 @@ pub struct Options {
     /// Wall-clock budget of the run in seconds; `0.0` disables the timeout (the stop rule and
     /// the iteration cap still end the run).
     pub wall_clock_s: f64,
+    /// M2.TL (`[run] timeout_mode`, user 2026-11-13): what the time limit does in the
+    /// topological core. `"soft"` (default): when the limit is reached the step that runs (the
+    /// initial routing P2-P4, a TopoR loop cycle, a whole-route cycle with `opt_loop = "cycles"`, or
+    /// the drawing) finishes, its plan is kept as a variant, no new step starts and the best kept
+    /// variant is drawn; the time past the limit is reported (`RouteResult::limit`). Cancel / OK
+    /// stops at once. `"hard"` (the behaviour before M2): every step stops at the limit; a step cut
+    /// there leaves the connections it had not reached unrouted.
+    pub timeout_mode: String,
     /// An accepted path longer than this factor times its slot-free ghost counts as an absurd
     /// detour and triggers rip-up of the blockers.
     pub detour_factor: f64,
@@ -1142,6 +1150,14 @@ pub struct Options {
     /// segments, the hand boards' style; a stretch where 45 degrees does not fit stays any-angle
     /// and pays the `any_angle` factor) or `"smooth"` (the taut any-angle drawing).
     pub draw_style: String,
+    /// M2 = 6.1 draw once (`[drawing] candidates`): with `opt_loop = "topor"` how many TopoR loop
+    /// picks of the call's runs are drawn: the best `candidates` by their predicted criteria (the
+    /// plan's measure: violations, vias, length, shrinkages; `[optimize] pick`), the best drawn one
+    /// is the result. 1 (default) = only the variant the loop picks is drawn (TopoR 6.3 manual
+    /// pp. 72-73: the variants are judged before any copper; Polubasov 2010: the exact geometry is
+    /// computed on the metric stage). `>= runs` = every run draws its own pick (before M2). After
+    /// Cancel / OK only one pick is drawn. `opt_loop = "cycles"` draws every cycle and ignores it.
+    pub draw_candidates: usize,
     /// M-45 (`[drawing] any_angle`): `"costly"` (default: a stretch that is not at 0/45/90
     /// degrees pays the `any_angle` factor and is reported) or `"forbidden"` (such a run counts
     /// as a drawing failure; never drop still writes it on the last resort).
@@ -1294,6 +1310,7 @@ impl Default for Options {
         Options {
             margin_nm: 0,
             wall_clock_s: 60.0,
+            timeout_mode: "soft".into(),
             detour_factor: 2.0,
             factors: Default::default(),
             drc_loop_cap: 5,
@@ -1365,6 +1382,7 @@ impl Default for Options {
             pad_exit_stubs: false,
             neck_in_drawing: false,
             draw_style: "octilinear".into(),
+            draw_candidates: 1,
             any_angle: "costly".into(),
             acute: "costly".into(),
             bend_mm: 0.25,

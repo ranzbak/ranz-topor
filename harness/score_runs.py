@@ -86,6 +86,11 @@ def compass_row(root: Path, board: str, k: int, out: Path) -> str | None:
     cols = compass_mod.columns(cp)
     if not cols:
         return None
+    # M2.TL: the time limit's columns (reached, the step that ran then, seconds past it on the run's clock)
+    mets = sorted(out.glob("*--metrics.json"))
+    met = json.loads(mets[0].read_text()) if mets else {}
+    cols.update({"limit_reached": met.get("limit_reached"), "limit_step": met.get("limit_step"),
+                 "overrun_s": met.get("overrun_s"), "router_cpu_s": met.get("router_cpu_s")})
     tsv = root / "compass.tsv"
     keys = sorted(cols)
     new = not tsv.exists()

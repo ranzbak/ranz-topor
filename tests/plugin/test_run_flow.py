@@ -110,6 +110,7 @@ class ProxyJob:
 
     def __init__(self, real, hold=1, patch=None):
         self.real, self.hold, self.polls, self.cancelled, self.patch = real, hold, 0, False, patch
+        self.reached = False
         self.limits = []  # set_time_limit calls (the progress dialog's live limit, wall clock)
 
     def progress(self):
@@ -123,6 +124,9 @@ class ProxyJob:
 
     def cancel(self):
         self.cancelled = True  # recorded only: the real job has to finish for a deterministic result
+
+    def reach_limit(self):
+        self.reached = True  # M2.TL soft limit (CPU clock): recorded only, as cancel
 
     def set_time_limit(self, seconds):
         self.limits.append(seconds)
