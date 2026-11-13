@@ -1491,53 +1491,77 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
 /// path search on the bare board (every stub and every candidate in the projection, no wire
 /// routed yet) reaches cheapest: its taut length, its layer changes and walls priced as in P2,
 /// nothing inside the pour. A pad with one candidate left keeps it without a search; `None`: no candidate
-/// is clear of the stubs. Decided once per route (decide early: the planner gets one terminal per
-/// pad). O(candidates x board build + one P2 search per pending pad).
+/// is clear of the stubs. Then the same search between that end and the candidates the spacing
+/// set aside next to it ([`planes::FarTerm::alts`]). Decided once per route (decide early: the
+/// planner gets one terminal per pad). O(2 board builds + two P2 searches per pending pad).
 #[allow(clippy::too_many_arguments)]
 fn select_far(model: &BoardModel, opts: &Options, reg: &Registry, dec: &crate::decompose::Decomposition, dr: &Drawer, stub_extra: &[board::Extra], reqs: &[planes::Req], pending: &[(usize, String, Vec<planes::FarTerm>)]) -> Vec<Option<planes::FarTerm>> {
     // Clear of the stubs on at least one of its layers (those layers kept).
-    let clear: Vec<Vec<planes::FarTerm>> = pending
+    let clear_of = |net: i32, f: &planes::FarTerm| {
+        let layers: Vec<u32> = f.layers.iter().copied().filter(|&l| dr.check_ok(&draw::track_item(net, l, f.size, f.at, f.at + Vec2 { x: 1.0, y: 0.0 }, None))).collect();
+        (!layers.is_empty()).then(|| planes::FarTerm { layers, ..f.clone() })
+    };
+    let pads: Vec<usize> = pending.iter().map(|p| p.0).collect();
+    let clear: Vec<Vec<planes::FarTerm>> = pending.iter().map(|(i, _, cands)| cands.iter().filter_map(|f| clear_of(reqs[*i].net, f)).collect()).collect();
+    let picks = pick_far(model, opts, reg, dec, stub_extra, reqs, &pads, &clear);
+    let mut out: Vec<Option<planes::FarTerm>> = clear.iter().zip(&picks).map(|(c, &k)| c.get(k).cloned()).collect();
+    // Second round, by the same path price: the picked end against the candidates its spacing
+    // set aside (`FarTerm::alts`, e.g. the corner next to an edge point that was straighter from
+    // the pad: pour_zero J3.1). The spacing only spreads the first round over the pour.
+    let round2: Vec<Vec<planes::FarTerm>> = out
         .iter()
-        .map(|(i, _, cands)| {
-            let net = reqs[*i].net;
-            cands
-                .iter()
-                .filter_map(|f| {
-                    let layers: Vec<u32> = f.layers.iter().copied().filter(|&l| dr.check_ok(&draw::track_item(net, l, f.size, f.at, f.at + Vec2 { x: 1.0, y: 0.0 }, None))).collect();
-                    (!layers.is_empty()).then(|| planes::FarTerm { layers, ..f.clone() })
-                })
-                .collect()
-        })
+        .zip(&pads)
+        .map(|(p, &i)| p.as_ref().map_or_else(Vec::new, |f| std::iter::once(f.clone()).chain(f.alts.iter().filter_map(|a| clear_of(reqs[i].net, a))).collect()))
         .collect();
-    if clear.iter().all(|c| c.len() <= 1) {
-        return clear.into_iter().map(|c| c.into_iter().next()).collect();
+    if round2.iter().any(|c| c.len() > 1) {
+        let picks2 = pick_far(model, opts, reg, dec, stub_extra, reqs, &pads, &round2);
+        for (o, (c, &k)) in out.iter_mut().zip(round2.iter().zip(&picks2)) {
+            if c.len() > 1 {
+                *o = c.get(k).cloned();
+            }
+        }
+    }
+    out
+}
+
+/// The index of the candidate per pending pad (`pads[k]` indexes `reqs`, `cands[k]` its
+/// candidates) the P2 path search reaches cheapest from the pad, on the board with the stubs and
+/// every candidate in the projection; 0 where there is nothing to choose or no search. The pick
+/// compares ends whose paths differ by a few mm: always the taut length here. The "even" length
+/// overrates straight paths on long triangulation edges (`[search] length`) and picked an end
+/// off the straight line (plane_terminal J1.1: 16.74 mm instead of 15.57) or round the far side
+/// of a connector row (pour_zero J3.1). One board build plus one search per pad.
+#[allow(clippy::too_many_arguments)]
+fn pick_far(model: &BoardModel, opts: &Options, reg: &Registry, dec: &crate::decompose::Decomposition, stub_extra: &[board::Extra], reqs: &[planes::Req], pads: &[usize], cands: &[Vec<planes::FarTerm>]) -> Vec<usize> {
+    if cands.iter().all(|c| c.len() <= 1) {
+        return vec![0; cands.len()];
     }
     let mut extra = stub_extra.to_vec();
-    for ((i, _, _), cands) in pending.iter().zip(&clear) {
-        for f in cands {
-            extra.push(board::Extra::Terminal { net: reqs[*i].net, at: f.at, layers: f.layers.clone(), size: f.size });
+    for (&i, cs) in pads.iter().zip(cands) {
+        for f in cs {
+            extra.push(board::Extra::Terminal { net: reqs[i].net, at: f.at, layers: f.layers.clone(), size: f.size });
         }
     }
     let Ok(b2) = board::build_full(model, &build_opts(opts), &[], &extra) else {
-        return clear.into_iter().map(|c| c.into_iter().next()).collect();
+        return vec![0; cands.len()];
     };
     let mut st = State::new(&b2.proj);
     st.cross_vias = opts.crossing_vias == "via";
-    // The pick compares ends whose paths differ by a few mm: always the taut length here. The
-    // "even" length overrates straight paths on long triangulation edges (`[search] length`) and
-    // picked an end off the straight line (plane_terminal J1.1: 16.74 mm instead of 15.57) or
-    // round the far side of a connector row (pour_zero J3.1). One search per far pad.
     st.taut_len = true;
     let ws0 = (model.rules.default.width + model.rules.default.clearance) as f64;
     let term_obs = |net: i32, at: Vec2| (0..b2.proj.obstacles.len()).find(|&o| b2.pad_of[o] == usize::MAX && b2.proj.obstacles[o].net == Some(net) && (b2.proj.obstacles[o].center - at).len() <= 2.0 && b2.centre[o].is_some());
     let end = |o: ObsId| b2.centre[o].map(|v| super::init::TreeEnd { v, obs: o, on: None, adj: 0.0, arms: [None; 4] });
-    let mut out = Vec::with_capacity(pending.len());
-    for ((i, _, _), cands) in pending.iter().zip(clear) {
-        let rq = &reqs[*i];
+    let mut out = Vec::with_capacity(cands.len());
+    for (&i, cs) in pads.iter().zip(cands) {
+        let rq = &reqs[i];
+        if cs.len() <= 1 {
+            out.push(0);
+            continue;
+        }
         let pad_obs = (0..b2.proj.obstacles.len()).find(|&o| b2.pad_of[o] == rq.pad);
-        let ends: Vec<(usize, super::init::TreeEnd)> = cands.iter().enumerate().filter_map(|(k, f)| term_obs(rq.net, f.at).and_then(end).map(|e| (k, e))).collect();
+        let ends: Vec<(usize, super::init::TreeEnd)> = cs.iter().enumerate().filter_map(|(k, f)| term_obs(rq.net, f.at).and_then(end).map(|e| (k, e))).collect();
         let (Some(src), false) = (pad_obs.and_then(end), ends.is_empty()) else {
-            out.push(cands.into_iter().next());
+            out.push(0);
             continue;
         };
         let c = &dec.connections[rq.conn];
@@ -1546,8 +1570,7 @@ fn select_far(model: &BoardModel, opts: &Options, reg: &Registry, dec: &crate::d
         let conn = Conn { net: rq.net, pa: src.obs, pb: ends[0].1.obs, a: src.v, b: ends[0].1.v, w, s };
         let wt = InitWeights { max_expansions: opts.max_expansions.max(1), ..InitWeights::from_registry(reg, &WireCtx { net: rq.net, tier: c.tier }) };
         let dst: Vec<super::init::TreeEnd> = ends.iter().map(|e| e.1).collect();
-        let pick = st.search_tree(&conn, &[src], &dst, &wt, (w + s) / ws0, None).map_or(0, |(_, _, j)| ends[j].0);
-        out.push(cands.into_iter().nth(pick));
+        out.push(st.search_tree(&conn, &[src], &dst, &wt, (w + s) / ws0, None).map_or(0, |(_, _, j)| ends[j].0));
     }
     out
 }

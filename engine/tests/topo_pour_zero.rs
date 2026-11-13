@@ -148,3 +148,23 @@ fn a_far_pad_takes_the_straight_end_when_its_path_is_straight() {
     let ends = track_ends(&on.items, 2);
     assert!(len < 16.0 && ends.iter().all(|e| (e.1 - 10.0).abs() < 0.3), "straight to the pour edge: {len:.2} mm, ends {ends:?}");
 }
+
+/// pour_zero Q2's geometry: the row runs past the pour's right edge (x 4..25.6, pour x 5..25),
+/// so the shortest path round the row's right end reaches the pour at its lower right corner
+/// (end (24.425, 9.425): the margin w/2 + min width + clearance inside both edges). The corner
+/// candidate lies within the 1 mm spacing of a lower-edge candidate that is straighter from the
+/// pad; the spacing sets it aside and the second round of the path search picks it.
+#[test]
+fn a_far_pad_takes_the_corner_the_spacing_set_aside() {
+    let mut pads = vec![("J1", 2, 15.0, 18.0, 1.0)];
+    let row: Vec<String> = (0..18).map(|k| format!("X{k}")).collect();
+    for (k, r) in row.iter().enumerate() {
+        pads.push((r.as_str(), 0, 4.0 + 1.27 * k as f64, 14.0, 1.0));
+    }
+    let m = board(30.0, 22.0, &pads, &[(2, 0, 5.0, 2.0, 25.0, 10.0, 0)]);
+    let on = route_with(&m, &Options::default(), &RunControl::new());
+    assert_eq!(on.routed, 1, "{:?}", on.warnings);
+    let ends = track_ends(&on.items, 2);
+    let corner = ends.iter().any(|e| (e.0 - 24.425).abs() < 0.3 && (e.1 - 9.425).abs() < 0.3);
+    assert!(corner, "the trace ends at the pour's lower right corner: ends {ends:?}, {:.2} mm", track_len(&on.items, 2));
+}

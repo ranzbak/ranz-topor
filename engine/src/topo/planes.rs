@@ -384,7 +384,15 @@ pub struct FarTerm {
     /// Straight price of the candidate (mm: distance plus a via where the pad has no copper on
     /// its layers); the path search picks among the candidates.
     pub price: f64,
+    /// Candidates within [`FAR_SPACING_NM`] of this one that the spacing set aside (cheapest
+    /// straight price first, at most [`FAR_ALTS`], at least w + clearance apart): the path search
+    /// compares them with this one once this one is picked, so the spacing never drops a better
+    /// end (no `alts` of their own).
+    pub alts: Vec<FarTerm>,
 }
+
+/// Most set-aside candidates kept next to a far-terminal candidate ([`FarTerm::alts`]).
+pub const FAR_ALTS: usize = 8;
 
 /// Most far-terminal candidates per pad ([`far_candidates`]).
 pub const FAR_CANDIDATES: usize = 24;
@@ -421,7 +429,8 @@ pub const FAR_SPACING_NM: f64 = 1.0e6;
 /// the pad-to-boundary direction first, else straight across the edge (a side edge that
 /// direction runs along), and at a vertex along the corner's bisector; priced by distance plus the `via` price where the pad has no
 /// copper on that layer. Returned cheapest first, at most [`FAR_CANDIDATES`], at least
-/// [`FAR_SPACING_NM`] apart: the caller lets the path search pick among them, so a point behind
+/// [`FAR_SPACING_NM`] apart (the ones the spacing sets aside kept as [`FarTerm::alts`] of the
+/// nearest, for the caller's second round): the caller lets the path search pick among them, so a point behind
 /// an obstacle loses to one the trace reaches directly (no detour to the nearest point). Inside
 /// the region the trace has no length: it ends at the region's edge. Empty: no such point (the
 /// caller joins the pad by a signal connection as before).
@@ -496,9 +505,8 @@ pub fn far_candidates(dr: &Drawer, rq: &Req, cost: &SiteCost) -> Vec<FarTerm> {
         }
         let Some(at) = found else { continue };
         let price = cost.mm * (at - c).len() / 1e6 + extra;
-        if out.iter().any(|g| (g.at - at).len() < FAR_SPACING_NM) {
-            continue;
-        }
+        let near = out.iter().enumerate().map(|(k, g)| (k, (g.at - at).len())).filter(|x| x.1 < FAR_SPACING_NM).min_by(|x, y| x.1.total_cmp(&y.1));
+        let alt_sep = rq.w + model.rules.net_rule(rq.net).clearance as f64;
         // The layers where some connected fill of the net covers the end with its margin.
         let layers: Vec<u32> = model
             .pours
@@ -515,7 +523,15 @@ pub fn far_candidates(dr: &Drawer, rq: &Req, cost: &SiteCost) -> Vec<FarTerm> {
         if layers.is_empty() {
             continue;
         }
-        out.push(FarTerm { conn: rq.conn, at, layers, size: rq.w, price });
+        let t = FarTerm { conn: rq.conn, at, layers, size: rq.w, price, alts: Vec::new() };
+        if let Some((k, d)) = near {
+            let g = &mut out[k];
+            if d >= alt_sep && g.alts.len() < FAR_ALTS && g.alts.iter().all(|a| (a.at - at).len() >= alt_sep) {
+                g.alts.push(t);
+            }
+            continue;
+        }
+        out.push(t);
         out.sort_by(|x, y| x.price.total_cmp(&y.price));
         while out.len() > FAR_CANDIDATES {
             out.pop();
