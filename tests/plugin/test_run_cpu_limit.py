@@ -114,3 +114,29 @@ def test_cancel_before_any_plan_is_a_loud_error(app, eprom, tmp_path, reports, c
     _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=CFG, engine=eng, strict=False)
     assert out.status == "error" and out.error is not None and out.error.code == "NOTHING_TO_DRAW", out.status
     assert why in out.error.message
+
+
+def test_soft_limit_overrun_leaves_out_the_measurements(app, eprom, tmp_path, reports, cpu_counter):
+    # M2.TL: the overrun is router time past the limit; the engine's measurements outside the limit (M1 compass cut
+    # test, Progress.measure_s) are not part of it, as they are not part of the limit
+    from test_run_flow import ProxyJob
+
+    class Measuring(ProxyJob):
+        def progress(self):
+            d = json.loads(super().progress())
+            d["measure_s"] = 4.0
+            return json.dumps(d)
+
+    class Eng(RecordingEngine):
+        def route_async(self, m, o):
+            job = super().route_async(m, o)
+            mj = Measuring(job.real, job.hold, job.patch)
+            self.jobs[-1] = mj
+            return mj
+
+    cfg = CFG.with_values({("run", "timeout_clock"): "cpu", ("run", "timeout_s"): 3.0})
+    eng = Eng(hold=14, patch=_as("timeout", timed_out=True))
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=cfg, engine=eng)
+    tl = _result_json(out)["time_limit"]
+    assert eng.jobs[0].reached and tl["reached"] is True
+    assert tl["overrun_s"] == pytest.approx(max(0.0, out.router_cpu_s - 4.0 - 3.0), abs=1e-3), (tl, out.router_cpu_s)

@@ -811,7 +811,10 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         """M2.TL: what the time limit did (out.time_limit: mode, reached, the step that ran then, overrun_s past it on
         the run's clock), with a log line. O(1)."""
         lim, eng = state["limit"], res.get("limit") or {}
-        spent = state["router_cpu_s"] if cpu_clock else state["router_s"]
+        # the engine's measurements outside the limit (M1 compass cut test) are not time past it
+        last = state.get("last")
+        measured = float(getattr(last, "measure_s", 0.0) or 0.0) if last is not None else 0.0
+        spent = (state["router_cpu_s"] if cpu_clock else state["router_s"]) - measured
         reached = bool(lim > 0 and (state["limit_hit"] or spent >= lim or eng.get("reached")))
         out.time_limit.update({"mode": "soft" if soft_limit else "hard", "reached": reached,
                                "step": str(eng.get("step") or ""),
