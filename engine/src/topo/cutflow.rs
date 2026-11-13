@@ -567,7 +567,7 @@ pub fn measure(plan: &Plan, outline: &[(Vec2, Vec2)], o: &MeasureOpts, layers: &
 }
 
 /// The half width of a junction end (a point feature carries the copper of its wires).
-fn half_at(sh: &LayerSheet, f: usize, sts: &[Stretch], mine: &[usize]) -> f64 {
+pub(super) fn half_at(sh: &LayerSheet, f: usize, sts: &[Stretch], mine: &[usize]) -> f64 {
     if sh.feats[f].poly.len() != 1 {
         return 0.0;
     }
@@ -945,7 +945,7 @@ impl Recorder {
             let mut f = m.full(&nm);
             // M3 step a debug: the topological order of the cut items and the stacks (report only).
             if std::env::var_os("TOPO_RADII").is_some() {
-                let ords = super::radii::from_measure(&m);
+                let ords = super::radii::from_measure(&m, &|p| st.proj.regime_at(p));
                 let r = super::radii::summary(&m, &ords, &nm);
                 eprintln!("TOPO_RADII {r}");
                 f["radii"] = r;

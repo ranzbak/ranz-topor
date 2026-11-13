@@ -27,15 +27,43 @@
 //!    cycle (cuts that disagree: an inconsistent plan) is broken at the node of least mean depth
 //!    and counted.
 //!
-//! Nothing reads this yet (step b computes the radii from the stacks and the per-cut order).
+//! M3 step b (§4.2, Q2; [`radii_layer`]): the spoke tips and the stack radii.
+//!
+//! 5. **Spoke tips.** Per cut, items in key order, from each end: the end's bound (its clearance
+//!    to the first item, the half width of an own-net junction), then per item its width and the
+//!    gap to its neighbour; the tip is the item's centre line (`tip_p(i) = end + sum of the
+//!    widths and gaps before i + w_i / 2`). The same terms as [`super::demand::need_by`] (an
+//!    own-net run at an end sits on the end vertex; `[capacity] mixed_clearance` pairwise or
+//!    conservative; a courtyard regime replaces the clearances), so the tips agree with the
+//!    plan's need. Distances are in the sheet's planning norm (the cut's `cap`): the octagonal
+//!    length for octilinear (Staepelaere eq. 1.2, PDF p. 12), Euclidean for smooth.
+//!    **Distant features** (Popov 2012 pp. 120-121): the sheet keeps every critical cut from a
+//!    feature vertex to every visible feature (no distance cap), so a stretch that is not next to
+//!    a feature still gets its tip from it through the items in between; Popov's stage 2 (the
+//!    circle of a segment cut back by the segments before it) is the prefix sum. No new search.
+//! 6. **Over-full cuts** (never drop; graded, not thresholds; inflated-sketch §4.6, TopoR manual
+//!    p. 56: the minimum width only where needed). First the widths go down towards their neck
+//!    floors, all by the same fraction of their neck room; then, if that is not enough, every
+//!    gap (end clearances included) by the same factor; past that (widths alone over the cut)
+//!    the whole layout is scaled. The shrunk gaps are the cut's predicted violation (`squeeze`),
+//!    reported; the tips from both ends then meet (`tip_p + tip_q = cap`).
+//! 7. **Stack radii.** Per stack member: the largest tip from the vertex over the cuts at the
+//!    vertex that carry it (a crossing item between it and the vertex on one cut pushes it out
+//!    there); a member on no cut gets the stack's own layout (the vertex feature's bound, the
+//!    members inside it with their widths and gaps). In the planning norm: an octagon's
+//!    in-radius for octilinear (Dayan PDF p. 33, octilinear spokes as the arc), a circle for
+//!    smooth.
+//!
+//! Nothing reads this yet (step c draws from the tips and radii).
 //! Debug: `TOPO_RADII=1` with a cut report prints the summary of the plan handed to the drawing.
 //!
 //! Complexity per layer: O(items x curve segments of their stretch) for the keys (a bounding-box
 //! reject per segment), O(n log n) per cut for the order and the disagreement count, O(e log e)
-//! per stack.
+//! per stack; the tips O(n) per cut (O(n x 60) on an over-full cut, the neck bisection).
 
-use super::cutflow::{flow_items_into, in_wedge, FlowItem, Measure, Stretch};
-use super::sheet::{LayerSheet, SegScratch};
+use super::cutflow::{flow_items_into, half_at, in_wedge, FlowItem, Measure, Stretch};
+use super::demand::{Bound, Item};
+use super::sheet::{Cut, LayerSheet, SegScratch};
 use crate::geom::Vec2;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -60,6 +88,12 @@ pub struct CutItem {
     pub w: f64,
     pub s: f64,
     pub net: i32,
+    /// Step b: the width the tips use (`w`, necked towards the floor on an over-full cut).
+    pub w_tip: f64,
+    /// Step b: the nearest the centre line may come to `p` / to `q` along the cut (planning norm,
+    /// nm). The item's portal is `[tip_p, cap - tip_q]` from `p`.
+    pub tip_p: f64,
+    pub tip_q: f64,
 }
 
 /// The items of one cut in topological order from `p` to `q`.
@@ -67,6 +101,14 @@ pub struct CutItem {
 pub struct CutItems {
     pub cut: usize,
     pub items: Vec<CutItem>,
+    /// Step b: the cut's length in the planning norm, the items' need and `cap - need` (nm).
+    pub cap: f64,
+    pub need: f64,
+    pub slack: f64,
+    /// Step b, over-full cuts: width taken off by necking, and gap taken off past the necks (the
+    /// predicted violation), nm.
+    pub neck: f64,
+    pub squeeze: f64,
 }
 
 /// Attachment stack (Dayan PDF 125): the bands wrapping sheet vertex `v` with `v` on the given
@@ -84,6 +126,8 @@ pub struct Stack {
     pub depth: Vec<f64>,
     /// Forced picks: a cycle of "inside of" pairs broken at the least mean depth.
     pub cycles: usize,
+    /// Step b: the centre-line radius of each (planning norm, nm, from the vertex).
+    pub radius: Vec<f64>,
 }
 
 /// A pair whose band order contradicts the key order: `a` is before `b` by key, after by band.
@@ -109,6 +153,13 @@ pub struct OrderReport {
     pub stacks: usize,
     pub stack_entries: usize,
     pub stack_cycles: usize,
+    /// Step b: over-full cuts, their summed deficit, neck and squeeze (nm).
+    pub overfull: usize,
+    pub deficit: f64,
+    pub neck: f64,
+    pub squeeze: f64,
+    /// Step b: stack members placed by the stack's own layout (on no cut).
+    pub radius_own: usize,
 }
 
 /// The order of one layer.
@@ -322,7 +373,7 @@ pub fn order_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], via_r: f64)
                         r
                     }
                 };
-                CutItem { stretch: x.stretch, kind: x.kind, t_band: x.t, key: key.unwrap_or(x.t), keyed: key.is_some(), corner, w: x.w, s: s.s, net: s.net }
+                CutItem { stretch: x.stretch, kind: x.kind, t_band: x.t, key: key.unwrap_or(x.t), keyed: key.is_some(), corner, w: x.w, s: s.s, net: s.net, w_tip: x.w, tip_p: 0.0, tip_q: 0.0 }
             })
             .collect();
         items.sort_by(|a, b| a.key.total_cmp(&b.key).then(a.t_band.total_cmp(&b.t_band)).then(a.stretch.cmp(&b.stretch)).then(a.kind.cmp(&b.kind)));
@@ -334,7 +385,7 @@ pub fn order_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], via_r: f64)
         rep.examples.extend(ex.into_iter().map(|(a, b)| Disagree { cut: ci, a: items[a].stretch, b: items[b].stretch }));
         rep.items += items.len();
         rep.keyless += items.iter().filter(|x| !x.keyed).count();
-        cuts.push(CutItems { cut: ci, items });
+        cuts.push(CutItems { cut: ci, items, cap: c.cap, need: 0.0, slack: 0.0, neck: 0.0, squeeze: 0.0 });
         i = j;
     }
     rep.cuts = cuts.len();
@@ -397,15 +448,256 @@ pub fn order_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], via_r: f64)
         let (order, depth, cycles) = merge_stack(&rs);
         rep.stack_entries += order.len();
         rep.stack_cycles += cycles;
-        stacks.push(Stack { v, left, order: order.iter().map(|n| n.0).collect(), corner: order.iter().map(|n| n.1).collect(), depth, cycles });
+        stacks.push(Stack { v, left, order: order.iter().map(|n| n.0).collect(), corner: order.iter().map(|n| n.1).collect(), depth, cycles, radius: Vec::new() });
     }
     rep.stacks = stacks.len();
     LayerOrder { cuts, stacks, report: rep }
 }
 
-/// The order of every measured layer (the bands of the measurement, its sheets).
-pub fn from_measure(m: &Measure) -> Vec<LayerOrder> {
-    m.layers.iter().map(|lf| order_layer(&lf.sheet, &m.stretches, &lf.stretches, 0.0)).collect()
+/// One item for the tips: net, width, neck floor, clearance.
+#[derive(Clone, Copy, Debug)]
+pub struct TipItem {
+    pub net: i32,
+    pub w: f64,
+    pub floor: f64,
+    pub s: f64,
+}
+
+/// The rules of one cut's tips: `[capacity] mixed_clearance` and the courtyard regime there.
+#[derive(Clone, Copy, Debug)]
+pub struct TipRules {
+    pub pairwise: bool,
+    pub regime: Option<f64>,
+}
+
+/// The tips of one cut: from `p`, from `q`, the widths used, and the need, neck, squeeze.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Tips {
+    pub tip_p: Vec<f64>,
+    pub tip_q: Vec<f64>,
+    pub w: Vec<f64>,
+    pub need: f64,
+    pub neck: f64,
+    pub squeeze: f64,
+}
+
+/// The items and ends with the rules applied: the clearances `s` (regime, conservative), the end
+/// bounds (regime on pad clearances).
+fn ruled(items: &[TipItem], lo: Bound, hi: Bound, r: TipRules) -> (Vec<TipItem>, Bound, Bound) {
+    let smax = items.iter().map(|x| x.s).fold(0.0, f64::max);
+    let mut its: Vec<TipItem> = items.to_vec();
+    for x in &mut its {
+        if let Some(g) = r.regime {
+            x.s = g;
+        } else if !r.pairwise {
+            x.s = smax;
+        }
+    }
+    let reg = |b: Bound| match (b, r.regime) {
+        (Bound::Pad { net, .. }, Some(g)) => Bound::Pad { net, clear: g },
+        (b, _) => b,
+    };
+    (its, reg(lo), reg(hi))
+}
+
+/// Centre lines from the `lo` end (items in order from `lo`), widths `w`, gaps and end
+/// clearances scaled by `g`, the `lo` end holding `half_lo` of own copper: the tips and the far
+/// edge plus the `hi` clearance (the need). As [`super::demand::need_by`]: an own-net run at an
+/// end sits on that end (no clearance to it, its widest half reaches into the cut); same-net
+/// neighbours take no gap; the run at the `hi` end shares one start edge.
+fn layout(its: &[TipItem], w: &[f64], lo: Bound, hi: Bound, half_lo: f64, half_hi: f64, g: f64) -> (Vec<f64>, f64) {
+    let n = its.len();
+    let own = |b: &Bound, x: &TipItem| matches!(*b, Bound::Pad { net: Some(m), .. } if m == x.net);
+    let run_lo = (0..n).take_while(|&i| own(&lo, &its[i])).count();
+    let run_hi = (run_lo..n).rev().take_while(|&i| own(&hi, &its[i])).count();
+    let mut tip = vec![0.0; n];
+    if n == 0 {
+        return (tip, 0.0);
+    }
+    let it = |i: usize| Item { net: its[i].net, w: w[i], s: its[i].s };
+    let mut edge;
+    if run_lo > 0 {
+        for t in tip.iter_mut().take(run_lo) {
+            *t = half_lo;
+        }
+        edge = half_lo + 0.5 * w[..run_lo].iter().copied().fold(0.0, f64::max);
+    } else {
+        edge = half_lo + g * lo.clearance(&it(0));
+    }
+    let gap = |a: usize, b: usize| if its[a].net == its[b].net { 0.0 } else { g * its[a].s.max(its[b].s) };
+    let mid_end = n - run_hi;
+    for i in run_lo..mid_end {
+        let tw = if i > 0 { edge + gap(i - 1, i) } else { edge };
+        tip[i] = tw + 0.5 * w[i];
+        edge = tw + w[i];
+    }
+    if run_hi > 0 {
+        let start = if mid_end > 0 { edge + gap(mid_end - 1, mid_end) } else { edge };
+        for i in mid_end..n {
+            tip[i] = start + 0.5 * w[i];
+        }
+        edge = start + 0.5 * w[mid_end..].iter().copied().fold(0.0, f64::max);
+        return (tip, edge + half_hi);
+    }
+    (tip, edge + g * hi.clearance(&it(n - 1)) + half_hi)
+}
+
+/// The spoke tips of the items of one cut (in order from `p`, ends `bp` / `bq` holding `half_p`
+/// / `half_q` of own junction copper) in a cut of length `cap` (planning norm). Over-full: necks
+/// first (every width by the same fraction of its neck room, bisected), then the gaps by one
+/// factor, then the whole layout; the tips from both ends then meet. O(n), O(60 n) over-full.
+pub fn cut_tips(items: &[TipItem], bp: Bound, bq: Bound, half_p: f64, half_q: f64, cap: f64, r: TipRules) -> Tips {
+    let (its, bp, bq) = ruled(items, bp, bq, r);
+    let n = its.len();
+    let rev: Vec<TipItem> = its.iter().rev().copied().collect();
+    let run = |w: &[f64], g: f64| -> (Vec<f64>, Vec<f64>, f64) {
+        let (tp, need) = layout(&its, w, bp, bq, half_p, half_q, g);
+        let wr: Vec<f64> = w.iter().rev().copied().collect();
+        let (mut tq, _) = layout(&rev, &wr, bq, bp, half_q, half_p, g);
+        tq.reverse();
+        (tp, tq, need)
+    };
+    let w0: Vec<f64> = its.iter().map(|x| x.w).collect();
+    let (tp, tq, need) = run(&w0, 1.0);
+    if need <= cap || n == 0 {
+        return Tips { tip_p: tp, tip_q: tq, w: w0, need, neck: 0.0, squeeze: 0.0 };
+    }
+    // Necks: w(f) = w - f (w - floor), the need falls monotonically in f.
+    let wf = |f: f64| -> Vec<f64> { its.iter().map(|x| x.w - f * (x.w - x.floor.min(x.w)).max(0.0)).collect() };
+    let need_at = |f: f64, g: f64| layout(&its, &wf(f), bp, bq, half_p, half_q, g).1;
+    let f = if need_at(1.0, 1.0) <= cap {
+        let (mut a, mut b) = (0.0, 1.0);
+        for _ in 0..60 {
+            let m = 0.5 * (a + b);
+            if need_at(m, 1.0) <= cap {
+                b = m;
+            } else {
+                a = m;
+            }
+        }
+        b
+    } else {
+        1.0
+    };
+    let w = wf(f);
+    let neck: f64 = w0.iter().zip(&w).map(|(a, b)| a - b).sum();
+    // Gaps: the need is linear in g (widths fixed).
+    let (n1, n0) = (need_at(f, 1.0), need_at(f, 0.0));
+    if n1 <= cap {
+        let (tp, tq, _) = run(&w, 1.0);
+        return Tips { tip_p: tp, tip_q: tq, w, need, neck, squeeze: 0.0 };
+    }
+    let g = if n1 > n0 { ((cap - n0) / (n1 - n0)).clamp(0.0, 1.0) } else { 0.0 };
+    let (mut tp, mut tq, ng) = run(&w, g);
+    // Everything past the necks is the predicted violation: gaps, then overlapping widths.
+    let squeeze = n1 - cap;
+    if ng > cap && ng > 0.0 {
+        // Widths alone over the cut: the whole layout scaled.
+        let k = cap / ng;
+        for t in tp.iter_mut().chain(tq.iter_mut()) {
+            *t *= k;
+        }
+    }
+    Tips { tip_p: tp, tip_q: tq, w, need, neck, squeeze }
+}
+
+/// A point at planning-norm distance `rho` from `p` along cut `c` (the norm is homogeneous, so
+/// the fraction is `rho / cap`).
+pub fn tip_point(c: &Cut, rho: f64) -> Vec2 {
+    if c.cap <= 0.0 {
+        return c.p;
+    }
+    c.p + (c.q - c.p) * (rho / c.cap)
+}
+
+/// Step b on a layer ordered by [`order_layer`]: the spoke tips of every cut and the stack radii.
+/// `pairwise`: `[capacity] mixed_clearance`; `regime`: the courtyard clearance at a point.
+pub fn radii_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &mut LayerOrder, pairwise: bool, regime: &dyn Fn(Vec2) -> Option<f64>) {
+    let mut halves: BTreeMap<usize, f64> = BTreeMap::new();
+    let mut half = |f: usize| *halves.entry(f).or_insert_with(|| half_at(sh, f, sts, mine));
+    let item = |x: &CutItem| TipItem { net: x.net, w: x.w, floor: sts[x.stretch].w_floor, s: x.s };
+    let rep = &mut o.report;
+    for ci in &mut o.cuts {
+        let c = &sh.cuts[ci.cut];
+        let its: Vec<TipItem> = ci.items.iter().map(item).collect();
+        let r = TipRules { pairwise, regime: regime((c.p + c.q) * 0.5) };
+        let t = cut_tips(&its, sh.bound(c.fp), sh.bound(c.fq), half(c.fp), half(c.fq), c.cap, r);
+        for (k, x) in ci.items.iter_mut().enumerate() {
+            x.tip_p = t.tip_p[k];
+            x.tip_q = t.tip_q[k];
+            x.w_tip = t.w[k];
+        }
+        ci.cap = c.cap;
+        ci.need = t.need;
+        ci.slack = c.cap - t.need;
+        ci.neck = t.neck;
+        ci.squeeze = t.squeeze;
+        if ci.slack < 0.0 {
+            rep.overfull += 1;
+            rep.deficit -= ci.slack;
+            rep.neck += t.neck;
+            rep.squeeze += t.squeeze;
+        }
+    }
+    // Stack radii: the largest tip from the vertex on the cuts carrying the member.
+    let mut tips: BTreeMap<(usize, usize, usize), f64> = BTreeMap::new();
+    for ci in &o.cuts {
+        let c = &sh.cuts[ci.cut];
+        for x in &ci.items {
+            let Some(k) = x.corner else { continue };
+            let (v, t) = match x.kind {
+                1 => (c.vp, x.tip_p),
+                2 => (c.vq.unwrap_or(usize::MAX), x.tip_q),
+                _ => continue,
+            };
+            let e = tips.entry((v, x.stretch, k)).or_insert(0.0);
+            *e = e.max(t);
+        }
+    }
+    for st in &mut o.stacks {
+        let at = sh.pos[st.v];
+        let b = sh.vfeat[st.v].map_or(Bound::Open, |f| sh.bound(f));
+        let h = sh.vfeat[st.v].map_or(0.0, &mut half);
+        let its: Vec<TipItem> = st
+            .order
+            .iter()
+            .zip(&st.corner)
+            .map(|(&s, &k)| {
+                let x = &sts[s];
+                TipItem { net: x.net, w: x.width_at_idx(&x.pass_index(), x.band[k]), floor: x.w_floor, s: x.s }
+            })
+            .collect();
+        let r = TipRules { pairwise, regime: regime(at) };
+        let (rits, rb, _) = ruled(&its, b, Bound::Open, r);
+        let w: Vec<f64> = rits.iter().map(|x| x.w).collect();
+        let (own, _) = layout(&rits, &w, rb, Bound::Open, h, 0.0, 1.0);
+        st.radius = st
+            .order
+            .iter()
+            .zip(&st.corner)
+            .enumerate()
+            .map(|(i, (&s, &k))| match tips.get(&(st.v, s, k)) {
+                Some(&t) => t,
+                None => {
+                    rep.radius_own += 1;
+                    own[i]
+                }
+            })
+            .collect();
+    }
+}
+
+/// The order, tips and radii of every measured layer (the bands of the measurement, its
+/// sheets); `regime` the courtyard clearance at a point.
+pub fn from_measure(m: &Measure, regime: &dyn Fn(Vec2) -> Option<f64>) -> Vec<LayerOrder> {
+    m.layers
+        .iter()
+        .map(|lf| {
+            let mut o = order_layer(&lf.sheet, &m.stretches, &lf.stretches, 0.0);
+            radii_layer(&lf.sheet, &m.stretches, &lf.stretches, &mut o, m.opts.pairwise, regime);
+            o
+        })
+        .collect()
 }
 
 /// Summary per layer (debug output).
@@ -430,6 +722,8 @@ pub fn summary(m: &Measure, ords: &[LayerOrder], layer_names: &dyn Fn(usize) -> 
                     "layer": layer_names(l), "cuts": r.cuts, "items": r.items, "keyless": r.keyless,
                     "tied_pairs": r.tied_pairs, "disagree": r.disagree, "stacks": r.stacks,
                     "stack_entries": r.stack_entries, "stack_cycles": r.stack_cycles, "examples": ex,
+                    "overfull": r.overfull, "deficit_mm": r.deficit / 1e6, "neck_mm": r.neck / 1e6,
+                    "squeeze_mm": r.squeeze / 1e6, "radius_own": r.radius_own,
                 })
             })
             .collect(),
@@ -482,6 +776,11 @@ mod tests {
     /// The sheet of layer 0 with the curve ends as terminals, and the stretches (curves given,
     /// bands computed). Stretch `i` has net 100 + i.
     fn setup(pr: &Projection, curves: &[Vec<Vec2>], norm: Norm) -> (LayerSheet, Vec<Stretch>) {
+        setup_w(pr, curves, norm, &vec![(0.1, 0.1, 0.1); curves.len()])
+    }
+
+    /// [`setup`] with per stretch (width, clearance, neck floor) in mm.
+    fn setup_w(pr: &Projection, curves: &[Vec<Vec2>], norm: Norm, wsf: &[(f64, f64, f64)]) -> (LayerSheet, Vec<Stretch>) {
         let terms: Vec<Vec2> = curves.iter().flat_map(|c| [c[0], c[c.len() - 1]]).collect();
         let inp = SheetInput { proj: pr, outline: &[], vias: &[], junctions: &[], terminals: &terms };
         let sh = LayerSheet::build(&inp, 0, &SheetOpts { norm, ..SheetOpts::default() }).expect("sheet");
@@ -495,12 +794,12 @@ mod tests {
                     conn: None,
                     net: 100 + i as i32,
                     layer: 0,
-                    s: 0.1e6,
-                    w: 0.1e6,
-                    w_floor: 0.1e6,
+                    s: wsf[i].1 * 1e6,
+                    w: wsf[i].0 * 1e6,
+                    w_floor: wsf[i].2 * 1e6,
                     curve: c.clone(),
                     curve_k: vec![0; c.len()],
-                    pass_w: vec![0.1e6; c.len().saturating_sub(2)],
+                    pass_w: vec![wsf[i].0 * 1e6; c.len().saturating_sub(2)],
                     nosite: false,
                     via_ends: [false; 2],
                     band: b,
@@ -689,5 +988,198 @@ mod tests {
         assert_eq!(format!("{:?}", a.cuts), format!("{:?}", b.cuts));
         assert_eq!(format!("{:?}", a.stacks), format!("{:?}", b.stacks));
         assert_eq!(format!("{:?}", a.report), format!("{:?}", b.report));
+    }
+
+    // ---- Step b ----
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 2.0
+    }
+
+    fn mm3(v: &[f64]) -> Vec<f64> {
+        v.iter().map(|x| (x / 1e3).round() / 1e3).collect()
+    }
+
+    fn ti(net: i32, w: f64, s: f64, floor: f64) -> TipItem {
+        TipItem { net, w: w * 1e6, s: s * 1e6, floor: floor * 1e6 }
+    }
+
+    const PAD: Bound = Bound::Pad { net: Some(1), clear: 0.2e6 };
+    const PAIR: TipRules = TipRules { pairwise: true, regime: None };
+
+    /// Fit pattern 1 (`channel_fit`, approved): three 0.25 mm wires at 0.2 mm through a 1.6 mm
+    /// channel. Tips from each wall at minimum clearance: 0.325, 0.775, 1.225; each portal is the
+    /// 0.05 mm slack wide and holds the hand's centre line (pitch 0.4625, walls 0.2125).
+    #[test]
+    fn channel_tips_match_fit_pattern() {
+        let xs: Vec<f64> = (0..3).map(|i| 2.0 + 0.3375 + 0.4625 * i as f64).collect();
+        let mut obs = vec![rect(0.0, 0.0, 2.0, 2.0), rect(3.6, 0.0, 5.6, 2.0)];
+        let mut curves = Vec::new();
+        for &x in &xs {
+            obs.push(pad(x, 4.0));
+            obs.push(pad(x, -2.0));
+            curves.push(vec![v(x, 4.0), v(x, -2.0)]);
+        }
+        let pr = proj(obs);
+        for norm in [Norm::Octagonal, Norm::Euclid] {
+            let (sh, sts) = setup_w(&pr, &curves, norm, &[(0.25, 0.2, 0.25); 3]);
+            let mut o = order_layer(&sh, &sts, &[0, 1, 2], 0.0);
+            radii_layer(&sh, &sts, &[0, 1, 2], &mut o, true, &|_| None);
+            let mut seen = 0;
+            for ci in &o.cuts {
+                let c = &sh.cuts[ci.cut];
+                let ys = [0.0, 2.0];
+                let at = |p: Vec2, x: f64| ys.iter().any(|&y| (p - v(x, y)).len() < 10.0);
+                let flip = if at(c.p, 2.0) && at(c.q, 3.6) {
+                    false
+                } else if at(c.p, 3.6) && at(c.q, 2.0) {
+                    true
+                } else {
+                    continue;
+                };
+                seen += 1;
+                assert!(close(ci.cap, 1.6e6) && close(ci.need, 1.55e6) && close(ci.slack, 0.05e6), "{ci:?}");
+                let mut tp: Vec<f64> = ci.items.iter().map(|x| x.tip_p).collect();
+                let mut tq: Vec<f64> = ci.items.iter().map(|x| x.tip_q).collect();
+                let mut ids: Vec<usize> = ci.items.iter().map(|x| x.stretch).collect();
+                if flip {
+                    std::mem::swap(&mut tp, &mut tq);
+                    tp.reverse();
+                    tq.reverse();
+                    ids.reverse();
+                }
+                assert_eq!(ids, vec![0, 1, 2]);
+                assert_eq!(mm3(&tp), vec![0.325, 0.775, 1.225], "{norm:?}");
+                assert_eq!(mm3(&tq), vec![1.225, 0.775, 0.325], "{norm:?}");
+                for (i, &x) in xs.iter().enumerate() {
+                    let h = (x - 2.0) * 1e6;
+                    assert!(tp[i] <= h && h <= 1.6e6 - tq[i], "hand centre {i} outside its portal");
+                    assert!(close(1.6e6 - tq[i] - tp[i], 0.05e6));
+                }
+            }
+            assert!(seen > 0, "no channel cut");
+        }
+    }
+
+    /// Mixed clearances (the middle net at 0.3 mm): pairwise is KiCad's max of the two
+    /// neighbours, conservative every gap and end at the cut's largest; a courtyard regime
+    /// replaces them all. The need equals `cutflow::needs` / `demand::need_in`.
+    #[test]
+    fn mixed_clearance_tips() {
+        let its = [ti(10, 0.25, 0.2, 0.25), ti(11, 0.25, 0.3, 0.25), ti(12, 0.25, 0.2, 0.25)];
+        let items: Vec<Item> = its.iter().map(|x| Item { net: x.net, w: x.w, s: x.s }).collect();
+        let floors: Vec<f64> = its.iter().map(|x| x.floor).collect();
+        let t = cut_tips(&its, PAD, PAD, 0.0, 0.0, 3e6, PAIR);
+        assert_eq!(mm3(&t.tip_p), vec![0.325, 0.875, 1.425]);
+        assert_eq!(mm3(&t.tip_q), vec![1.425, 0.875, 0.325]);
+        assert!(close(t.need, super::super::cutflow::needs(None, &items, &floors, PAD, PAD, true).need));
+        let c = cut_tips(&its, PAD, PAD, 0.0, 0.0, 3e6, TipRules { pairwise: false, regime: None });
+        assert_eq!(mm3(&c.tip_p), vec![0.425, 0.975, 1.525]);
+        assert!(close(c.need, super::super::cutflow::needs(None, &items, &floors, PAD, PAD, false).need));
+        let r = cut_tips(&its, PAD, PAD, 0.0, 0.0, 3e6, TipRules { pairwise: true, regime: Some(0.15e6) });
+        assert_eq!(mm3(&r.tip_p), vec![0.275, 0.675, 1.075]);
+        assert!(close(r.need, super::super::demand::need_in(Some(0.15e6), &items, PAD, PAD)));
+        // Own-net items: no gap between them, none to their own pad, the run on the vertex.
+        let own = [ti(1, 0.25, 0.2, 0.25), ti(1, 0.3, 0.2, 0.3), ti(12, 0.25, 0.2, 0.25)];
+        let items: Vec<Item> = own.iter().map(|x| Item { net: x.net, w: x.w, s: x.s }).collect();
+        let o = cut_tips(&own, PAD, PAD, 0.0, 0.0, 3e6, PAIR);
+        assert_eq!(mm3(&o.tip_p), vec![0.0, 0.0, 0.475]);
+        assert!(close(o.need, super::super::demand::need(&items, PAD, PAD)));
+    }
+
+    /// Over-full: necks first (all widths by one fraction of their neck room), then every gap by
+    /// one factor, then the whole layout; the tips from both ends meet, the rest is the
+    /// predicted violation.
+    #[test]
+    fn overfull_necks_then_gaps() {
+        let its = [ti(10, 0.25, 0.2, 0.2), ti(11, 0.25, 0.2, 0.2), ti(12, 0.25, 0.2, 0.2)];
+        let t = cut_tips(&its, PAD, PAD, 0.0, 0.0, 1.5e6, PAIR);
+        assert!(close(t.need, 1.55e6) && close(t.neck, 0.05e6) && t.squeeze == 0.0, "{t:?}");
+        assert!(t.w.iter().all(|&w| (w - 0.25e6 + 0.05e6 / 3.0).abs() < 1.0), "{:?}", t.w);
+        for i in 0..3 {
+            assert!((t.tip_p[i] + t.tip_q[i] - 1.5e6).abs() < 1.0);
+        }
+        // No neck room: the four gaps 0.2 -> 0.1875 (0.05 over 0.8).
+        let hard: Vec<TipItem> = its.iter().map(|x| TipItem { floor: x.w, ..*x }).collect();
+        let t = cut_tips(&hard, PAD, PAD, 0.0, 0.0, 1.5e6, PAIR);
+        assert!(t.neck == 0.0 && close(t.squeeze, 0.05e6), "{t:?}");
+        assert!(t.tip_p.iter().zip([0.3125e6, 0.75e6, 1.1875e6]).all(|(&a, b)| close(a, b)), "{:?}", t.tip_p);
+        for i in 0..3 {
+            assert!((t.tip_p[i] + t.tip_q[i] - 1.5e6).abs() < 1.0);
+        }
+        // Widths alone over the cut: everything scaled, still meeting.
+        let t = cut_tips(&hard, PAD, PAD, 0.0, 0.0, 0.5e6, PAIR);
+        assert!(close(t.squeeze, 1.05e6), "{t:?}");
+        for i in 0..3 {
+            assert!((t.tip_p[i] + t.tip_q[i] - 0.5e6).abs() < 1.0);
+        }
+        assert!(t.tip_p.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    /// A tip at planning-norm distance rho: on a cut at 22.5 degrees the octagonal norm puts it
+    /// 1 / cos 22.5 further out (Euclidean) than the Euclidean norm.
+    #[test]
+    fn tip_point_norms() {
+        let a = std::f64::consts::FRAC_PI_8;
+        let d = Vec2 { x: a.cos(), y: a.sin() } * 2e6;
+        let mk = |n: Norm| Cut { p: Vec2::default(), q: d, vp: 0, vq: Some(1), fp: 0, fq: 1, cap: n.len(d), kind: crate::topo::sheet::CutKind::Vertex };
+        let (co, ce) = (mk(Norm::Octagonal), mk(Norm::Euclid));
+        assert!((tip_point(&ce, 1e6).len() - 1e6).abs() < 1e-3);
+        assert!((tip_point(&co, 1e6).len() - 1e6 / a.cos()).abs() < 1e-3);
+        assert!((tip_point(&co, co.cap) - d).len() < 1e-6);
+    }
+
+    /// The distant-radius check (Popov pp. 120-121): three wires above pad A, the outer one
+    /// (W3) two wires away from A. A's cut to the far block carries all three, and W3's tip from
+    /// A counts A's clearance and both wires between: 0.2 + 2 x (0.25 + 0.2) + 0.125 = 1.225.
+    #[test]
+    fn distant_tip_through_wires() {
+        let ys = [9.0, 9.5, 10.5];
+        let mut obs = vec![rect(7.6, 7.6, 8.4, 8.4), rect(4.6, 7.6, 5.4, 8.4), rect(10.6, 7.6, 11.4, 8.4), rect(6.0, 12.0, 10.0, 13.0)];
+        let mut curves = Vec::new();
+        for &y in &ys {
+            obs.push(pad(1.0, y));
+            obs.push(pad(15.0, y));
+            curves.push(vec![v(1.0, y), v(15.0, y)]);
+        }
+        let pr = proj(obs);
+        let (sh, sts) = setup_w(&pr, &curves, Norm::Octagonal, &[(0.25, 0.2, 0.25); 3]);
+        let a = sh.vfeat[vert(&sh, v(7.6, 8.4))].expect("A");
+        let mut o = order_layer(&sh, &sts, &[0, 1, 2], 0.0);
+        radii_layer(&sh, &sts, &[0, 1, 2], &mut o, true, &|_| None);
+        let mut seen = 0;
+        for ci in &o.cuts {
+            let c = &sh.cuts[ci.cut];
+            if ci.items.len() != 3 || !(c.fp == a || c.fq == a) {
+                continue;
+            }
+            seen += 1;
+            let from_a: Vec<(usize, f64)> = ci.items.iter().map(|x| (x.stretch, if c.fp == a { x.tip_p } else { x.tip_q })).collect();
+            let w3 = from_a.iter().find(|x| x.0 == 2).expect("W3").1;
+            assert!(close(w3, 1.225e6), "{from_a:?}");
+        }
+        assert!(seen > 0, "no cut from A through all three");
+    }
+
+    /// Stack radii at the nested corner: inside-out 0.25, 0.45, 0.65 (block clearance 0.2, widths
+    /// and gaps 0.1); the outer member, on no cut, from the stack's own layout.
+    #[test]
+    fn stack_radii_nested() {
+        let ds = [1.3, 0.9, 0.5];
+        let mut obs = vec![rect(0.0, 0.0, 2.0, 2.0)];
+        let mut curves = Vec::new();
+        for d in ds {
+            obs.push(pad(0.5, 2.0 + d));
+            obs.push(pad(2.0 + d, 0.5));
+            curves.push(vec![v(0.5, 2.0 + d), v(2.0 + 0.7 * d, 2.0 + 0.7 * d), v(2.0 + d, 0.5)]);
+        }
+        let pr = proj(obs);
+        let (sh, sts) = setup(&pr, &curves, Norm::Octagonal);
+        let mut o = order_layer(&sh, &sts, &[0, 1, 2], 0.0);
+        radii_layer(&sh, &sts, &[0, 1, 2], &mut o, true, &|_| None);
+        let st = stack(&o, vert(&sh, v(2.0, 2.0)));
+        assert_eq!(st.order, vec![2, 1, 0]);
+        assert_eq!(mm3(&st.radius), vec![0.25, 0.45, 0.65], "{st:?}");
+        assert!(o.report.radius_own >= 1, "{:?}", o.report);
     }
 }
