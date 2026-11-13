@@ -206,8 +206,10 @@ fn a_soft_limit_in_p3_p4_does_not_cut_their_moves() {
     // M2.TL: with the soft limit only Cancel / OK ends the moves inside a step (verify-m2 C: the
     // limit stopping M0's move checks again was not caught; the plan still drew complete). The
     // moves of P3/P4 under a limit reached in P3 are the moves of the unlimited run, one by one.
+    // The optional P4 moves are on ([optimize] moves; they skip net trees with branch points on
+    // traces, so the net trees are fixed) so there are moves to count.
     let m = crop("qmtech-usb-crop.json");
-    let o = topor(r#", "runs": 1, "capacity_model": "cuts""#);
+    let o = topor(r#", "runs": 1, "capacity_model": "cuts", "moves": true, "net_tree": "fixed""#);
     let free = run(&m, &o);
     let want = move_counts(&free);
     assert!(want[0].contains(" evaluations") && !want[0].contains(": 0 evaluations"), "the fixture moves in P4: {want:?}");
