@@ -1,7 +1,7 @@
 //! A coupled pair's via in the plan is the two-via disc, and that disc keeps clear of the copper of
 //! both halves (user 2026-11-13: "partner copper is not own copper for clearance purposes").
 //! In the planning model (`topo::diffpair::alias`) the N half's pads carry the P net, so before
-//! this a pair via site could lie on a partner pad (dcsgonebadge USB-: vias on USB+ pads of U7 /
+//! this a pair via site could lie on a partner pad (a 2-layer badge, USB-: vias on USB+ pads of U7 /
 //! J1; qmtech U1-Out_1 +/-); and with the pair via resolved by the plugin (f6880cd) the plan
 //! reserved only one small via instead of the disc of both.
 
