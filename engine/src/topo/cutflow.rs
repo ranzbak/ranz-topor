@@ -1014,6 +1014,97 @@ mod tests {
         }
     }
 
+    fn v(x: f64, y: f64) -> Vec2 {
+        Vec2 { x: x * 1e6, y: y * 1e6 }
+    }
+
+    fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Vec2> {
+        vec![v(x0, y0), v(x1, y0), v(x1, y1), v(x0, y1)]
+    }
+
+    fn pad(x: f64, y: f64) -> Vec<Vec2> {
+        rect(x - 0.1, y - 0.1, x + 0.1, y + 0.1)
+    }
+
+    /// The sheet of layer 0 of the given obstacles (each its own net, a pad) with `terms` as
+    /// terminals.
+    fn sheet_of(obs: Vec<Vec<Vec2>>, terms: &[Vec2]) -> LayerSheet {
+        use super::super::state::{LayerMask, ObsKind, Obstacle};
+        let obstacles: Vec<Obstacle> = obs
+            .into_iter()
+            .enumerate()
+            .map(|(i, poly)| {
+                let c = poly.iter().fold(Vec2::default(), |a, &p| a + p) * (1.0 / poly.len() as f64);
+                Obstacle { kind: ObsKind::Pad, poly, center: c, layers: LayerMask(1), drilled: false, net: Some(i as i32 + 1), clear: 0.2e6, bare: false, sag: 0.0 }
+            })
+            .collect();
+        let mut pts = Vec::new();
+        let mut cons = Vec::new();
+        for (i, ob) in obstacles.iter().enumerate() {
+            let s = pts.len();
+            for &p in &ob.poly {
+                pts.push((p, VertKind::Outline(i)));
+            }
+            for j in 0..ob.poly.len() {
+                cons.push((s + j, s + (j + 1) % ob.poly.len()));
+            }
+        }
+        let pr = Projection::build(2, obstacles, &pts, &cons, |_| true).expect("projection");
+        let inp = SheetInput { proj: &pr, outline: &[], vias: &[], junctions: &[], terminals: terms };
+        LayerSheet::build(&inp, 0, &SheetOpts { norm: Norm::Octagonal, ..SheetOpts::default() }).expect("sheet")
+    }
+
+    /// Whether the open segment `a b` passes through the inside of the axis-aligned box.
+    fn seg_through_box(a: Vec2, b: Vec2, x0: f64, y0: f64, x1: f64, y1: f64) -> bool {
+        (1..200).any(|k| {
+            let p = a + (b - a) * (k as f64 / 200.0);
+            p.x > x0 * 1e6 + 1.0 && p.x < x1 * 1e6 - 1.0 && p.y > y0 * 1e6 + 1.0 && p.y < y1 * 1e6 - 1.0
+        })
+    }
+
+    /// An S bundle: three curves go up the left of block O1 (2..3 x 0..3), over it, down to
+    /// pass under block O2 (5..6 x 2..5) and up its right side to a pad. Each curve wraps O1's
+    /// corners (2, 3), (3, 3) on its right, then O2's (5, 2) and (6, 2) on its left: the band
+    /// must too, and no band segment may run through a block. Past (5, 2) the funnel opens
+    /// beyond 180 degrees (a portal end south-west of the apex, the next north-east of it; the
+    /// previous funnel took (5, 2) -> end pad straight through O2). Mirrored (x -> -x) the
+    /// sides swap: the same fault on the left side.
+    #[test]
+    fn band_sharp_turn_wraps_both_corners() {
+        for mirror in [false, true] {
+            let sx = if mirror { -1.0 } else { 1.0 };
+            let w = |x: f64, y: f64| v(sx * x, y);
+            let rect_m = |x0: f64, y0: f64, x1: f64, y1: f64| if mirror { rect(-x1, y0, -x0, y1) } else { rect(x0, y0, x1, y1) };
+            let mut obs = vec![rect_m(2.0, 0.0, 3.0, 3.0), rect_m(5.0, 2.0, 6.0, 5.0)];
+            let mut curves = Vec::new();
+            for j in 0..3 {
+                let jf = j as f64;
+                let (x0, y1) = (1.7 - 0.3 * jf, 3.3 + 0.3 * jf);
+                let (y2, x3) = (2.0 - 0.3 * (3.0 - jf), 6.0 + 0.3 * (3.0 - jf));
+                obs.push(pad(sx * x0, 0.6));
+                obs.push(pad(sx * x3, 4.4));
+                curves.push(vec![w(x0, 0.6), w(x0, y1), w(3.0 + 0.1 * (jf + 1.0), y1), w(5.0 - 0.1 * (3.0 - jf), y2), w(x3, y2), w(x3, 4.4)]);
+            }
+            let terms: Vec<Vec2> = curves.iter().flat_map(|c| [c[0], c[c.len() - 1]]).collect();
+            let sh = sheet_of(obs, &terms);
+            for (j, c) in curves.iter().enumerate() {
+                let (b, wr) = band(&sh, c).expect("band");
+                for s in b.windows(2) {
+                    for (x0, y0, x1, y1) in [(2.0, 0.0, 3.0, 3.0), (5.0, 2.0, 6.0, 5.0)] {
+                        let (x0, x1) = if mirror { (-x1, -x0) } else { (x0, x1) };
+                        assert!(!seg_through_box(s[0], s[1], x0, y0, x1, y1), "mirror {mirror} lane {j}: band segment {s:?} through a block: {b:?}");
+                    }
+                }
+                // O1 lies right of the curve, O2 left of it (mirrored the other way round).
+                for (want, left) in [(w(2.0, 3.0), false), (w(3.0, 3.0), false), (w(5.0, 2.0), true), (w(6.0, 2.0), true)] {
+                    let k = b.iter().position(|&p| (p - want).len() < 10.0);
+                    assert!(k.is_some(), "mirror {mirror} lane {j}: band misses {want:?}: {b:?}");
+                    assert_eq!(wr[k.unwrap()].map(|x| x.1), Some(left != mirror), "mirror {mirror} lane {j}: {want:?} wrapped on the wrong side: {wr:?}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn wedge_left_turn() {
         // East, then north-east: the vertex is on the left, the band passes south of it.
