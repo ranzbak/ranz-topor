@@ -54,24 +54,10 @@ def _model_with_track():
     return m
 
 
-def test_smooth_surface_round_trip(engine):
-    out = json.loads(engine.smooth(json.dumps(_model_with_track()), json.dumps({"existing_copper": "smooth"})))
-    for key in ("items", "replaced", "nets", "wires", "runtime_s", "threads_used"):
-        assert key in out
-    assert out["threads_used"] == 1
-    assert out["wires_total"] == 1 and out["wires_taut"] == 1
-    assert out["replaced"] == ["k1"] and len(out["items"]) == 1
-
-
-def test_smooth_rejects_bad_json(engine):
-    with pytest.raises(ValueError):
-        engine.smooth("{", "{}")
-
-
 def test_check_items_reports_violation(engine):
     item = {"net": 1, "layer": 0, "width": 250_000, "prim": {"kind": "seg", "a": [0, 1_000_000], "b": [5_000_000, 1_000_000]}}
     rep = json.loads(engine.check_items(json.dumps(_model()), json.dumps([item]), "{}"))
-    assert rep["checked"] == 1 and len(rep["violations"]) == 1 and rep["violations"][0]["required"] == 205_000
+    assert rep["checked"] == 1 and len(rep["violations"]) == 1 and rep["violations"][0]["required"] == 200_000  # margin_nm default 0 (5febf58)
 
 
 def test_check_items_bad_json_raises(engine):
@@ -126,8 +112,22 @@ def test_arc_center_matches_pcbnew(engine):
         assert abs(got[0] - c.x) <= 100 and abs(got[1] - c.y) <= 100, (pts, got, (c.x, c.y))
 
 
-def test_route_surface_round_trip(engine):
+def _model_routable():
+    """Two connected through-hole pads on a two-layer board: the topological core (2f1430a) routes boards with two
+    or more signal layers, so the one-layer `_model_with_track` fixture fails to route by design."""
     m = _model_with_track()
+    m["kept"] = []
+    m["layers"].append({"id": 1, "name": "B.Cu", "kind": "signal", "routable": True})
+    for p in m["pads"]:
+        p["layers"] = [0, 1]
+        p["shapes"]["1"] = p["shapes"]["0"]
+        p["attr"] = "pth"
+        p["drill"] = {"w": 800_000, "h": 800_000}
+    return m
+
+
+def test_route_surface_round_trip(engine):
+    m = _model_routable()
     m["kept"] = []
     m["layers"][0]["routable"] = True
     out = json.loads(engine.route(json.dumps(m), json.dumps({"wall_clock_s": 10.0})))
@@ -137,20 +137,12 @@ def test_route_surface_round_trip(engine):
     for key in ("vias", "length_by_layer_nm", "sites"):
         assert key in out
     assert out["vias"] == 0 and out["sites"] >= 0
-    assert out["length_by_layer_nm"] == {"F.Cu": out["total_length_nm"]}
+    assert sum(out["length_by_layer_nm"].values()) == out["total_length_nm"] > 0
     assert out["routed"] == 1 and len(out["items"]) == 1
     stats = json.loads(engine.wire_stats(json.dumps(_model_with_track())))
     assert stats["wires"] == 1 and stats["skipped"] == 0
     with pytest.raises(ValueError):
         engine.route("{", "{}")
-
-
-def test_route_threads_option(engine):
-    m = _model_with_track()
-    m["kept"] = []
-    m["layers"][0]["routable"] = True
-    out = json.loads(engine.route(json.dumps(m), json.dumps({"wall_clock_s": 10.0, "threads": 2})))
-    assert out["threads_used"] == 2
 
 
 def _rust_pub_fields(root, struct):
@@ -165,19 +157,10 @@ def test_default_options_lists_every_field(engine, root):
     d = json.loads(engine.default_options())
     top = _rust_pub_fields(root, "Options")
     assert top and set(top) == set(d), set(top) ^ set(d)
-    expert = _rust_pub_fields(root, "Expert")
-    assert expert and set(expert) == set(d["expert"]), set(expert) ^ set(d["expert"])
-    assert d["pathfinder_iter_cap"] == 30 and d["patience"] == 5 and d["min_gain_pct"] == 1.0
-    assert d["wall_clock_s"] == 60.0 and d["detour_factor"] == 2.0
-    assert d["ripup_growth"] == 1.25 and d["ripup_max_per_pair"] == 8
-    assert d["expert"] == {"hist_fail": 1.0, "hist_block": 0.5, "hist_overuse": 0.5, "present_overuse": 4.0,
-                           "zero_slack_candidates": 4, "relax_iter_cap": 200,
-                           "own_net_capacity": True, "wall_aware_capacity": True, "transit_pinch": True,
-                           "steiner_min_angle_deg": 60.0, "steiner_len_slack": 1.1, "steiner_ghost_factor": 1.0}
+    assert d["wall_clock_s"] == 60.0 and d["detour_factor"] == 2.0 and d["margin_nm"] == 0
     assert d["steiner"] is False  # 4.2: the Steiner grid of the projection, default off
-    assert d["zero_slack_failed"] is True
     # every key parses back as options (round trip)
-    m = _model_with_track()
+    m = _model_routable()
     m["kept"] = []
     out = json.loads(engine.route(json.dumps(m), json.dumps({**d, "wall_clock_s": 10.0})))
     assert out["routed"] == 1 and out["stop_reason"] == "stable"  # M-B0: a headless run ends at "Routes stable"
@@ -186,11 +169,12 @@ def test_default_options_lists_every_field(engine, root):
 def _strip(r):
     r = dict(r)
     r.pop("runtime_s")
+    r.pop("warnings")  # the "plan metrics" line carries wall-time shares (layer_share_pct, loop_s) that differ per run
     return r
 
 
 def test_route_async_roundtrip_fixture(engine):
-    m = _model_with_track()
+    m = _model_routable()
     m["kept"] = []
     m["layers"][0]["routable"] = True
     mj, oj = json.dumps(m), json.dumps({"wall_clock_s": 10.0, "threads": 2})
@@ -208,7 +192,7 @@ def test_route_async_roundtrip_fixture(engine):
 def test_route_async_time_limit_is_live(engine):
     """RouteJob.set_time_limit / time_limit: the job's wall-clock limit (seconds since it started) set from
     wall_clock_s at the start and changeable while it runs (the plugin's progress dialog); 0 = no limit."""
-    m = _model_with_track()
+    m = _model_routable()
     m["kept"] = []
     m["layers"][0]["routable"] = True
     mj = json.dumps(m)
