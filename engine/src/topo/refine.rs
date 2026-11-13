@@ -92,7 +92,7 @@ pub fn via_ranges(ev: &[LEv], strict: bool) -> (Vec<(usize, usize)>, Vec<bool>) 
 }
 
 /// Cache of [`end_site`] per (wire, end events as (traversal, fraction bits) pairs).
-type EndSites = std::collections::HashMap<(WireId, usize, u64, usize, u64), Option<(usize, Vec2)>>;
+type EndSites = std::collections::HashMap<(WireId, usize, u64, usize, u64), Option<(usize, Vec2, f64)>>;
 
 /// 5.2 (`[vias] between_crossings`): a site for the via of the interval between the events `a`
 /// and `b` of wire `w` inside an end traversal, on the via's own side of the event, for an
@@ -118,6 +118,15 @@ type EndSites = std::collections::HashMap<(WireId, usize, u64, usize, u64), Opti
 /// left out (its chord is not one segment). Returns the traversal and the centre.
 /// O(candidates x (crossings + cost of `free`)).
 pub fn end_site(st: &State, w: WireId, a: LEv, b: LEv, free: &dyn Fn(usize, Vec2) -> bool) -> Option<(usize, Vec2)> {
+    end_site_graded(st, w, a, b, &|t, q| if free(t, q) { 0.0 } else { -1.0 }).filter(|x| x.2 >= 0.0).map(|x| (x.0, x.1))
+}
+
+/// [`end_site`] graded (board-rules finding 2: no step between "an end site" and "none"): `slack`
+/// gives every candidate centre its room (nm, negative = missing; a candidate is a site when it is
+/// at least 0). Returns the end site [`end_site`] picks when one exists, else the candidate with
+/// the most room, each with its slack; `None` only when the interval has no end piece at all (no
+/// candidate). O(candidates x (crossings + cost of `slack`)).
+pub fn end_site_graded(st: &State, w: WireId, a: LEv, b: LEv, slack: &dyn Fn(usize, Vec2) -> f64) -> Option<(usize, Vec2, f64)> {
     const SAMPLES: usize = 8;
     const GRID: usize = 8;
     let wi = &st.wires[w];
@@ -141,7 +150,9 @@ pub fn end_site(st: &State, w: WireId, a: LEv, b: LEv, free: &dyn Fn(usize, Vec2
     }
     let pr = st.proj;
     // (side clearance, -distance to the far end, traversal, centre): larger first.
-    let mut best: Option<(f64, f64, usize, Vec2)> = None;
+    let mut best: Option<(f64, f64, usize, Vec2, f64)> = None;
+    // Without a site: the candidate with the most room (traversal, centre, slack).
+    let mut roomiest: Option<(usize, Vec2, f64)> = None;
     for (k, far, ev) in pieces {
         if k >= wi.tris.len() || wi.turns.iter().any(|t| t.0 == k) {
             continue;
@@ -173,12 +184,17 @@ pub fn end_site(st: &State, w: WireId, a: LEv, b: LEv, free: &dyn Fn(usize, Vec2
         let cands = super::pack::tri_site_points(p, q, r).into_iter().chain(grid).chain((0..SAMPLES).map(|i| far + (ev - far) * (i as f64 / SAMPLES as f64)));
         for c in cands {
             let key = (side(c), -(c - far).len());
-            if best.is_none_or(|b| key.0 > b.0 + 1.0 || ((key.0 - b.0).abs() <= 1.0 && key.1 > b.1)) && free(t, c) {
-                best = Some((key.0, key.1, k, c));
+            if best.is_none_or(|b| key.0 > b.0 + 1.0 || ((key.0 - b.0).abs() <= 1.0 && key.1 > b.1)) {
+                let sl = slack(t, c);
+                if sl >= 0.0 {
+                    best = Some((key.0, key.1, k, c, sl));
+                } else if roomiest.is_none_or(|r| sl > r.2) {
+                    roomiest = Some((k, c, sl));
+                }
             }
         }
     }
-    best.map(|b| (b.2, b.3))
+    best.map(|b| (b.2, b.3, b.4)).or(roomiest)
 }
 
 /// The default traversal of a via in interval `(ka, kb)`: `(ka + kb) / 2` rounded up (at `ka`
@@ -281,16 +297,28 @@ pub mod meter {
 /// in um, other wires in the triangle, -inradius, traversal).
 type SiteKey = (i64, i64, usize, i64, usize);
 
+/// Where the graded via-site price's step lies, in units of its softness `tau x need` below a
+/// slack of 0 ([`site_price`]): 4 puts phi's half price at a shortfall of 0.4 need (tau 0.1) and
+/// leaves a via that just fits at phi(-0.4 need) ~ 0.02 of the price.
+pub const SITE_SHIFT: f64 = 4.0;
+
 /// Graded via-site price factor of a via whose static free radius leaves `slack` (nm: free
 /// radius less via reach; negative = missing room) at reach + clearance `need` (nm), softness
-/// `tau` ([`super::cutmodel::phi`], the over-full price shape of the edges and cuts): about 0
-/// with room to spare, 0.57 at slack 0, `1 + missing / need` deep inside. Continuous, no cutoff.
-/// O(1).
+/// `tau`: [`super::cutmodel::phi`] (the over-full price shape of the edges and cuts) of the slack
+/// moved [`SITE_SHIFT`] softnesses towards the room. Board-rules finding 1 (verifier
+/// 2026-11-13): unshifted, a legal via that just fits (slack 0) cost phi(0) = 0.57 of the
+/// `overflow` weight (28 mm at 50 mm, more than a via at 25 mm), so the plan preferred long detours
+/// to legal tight vias (esp-rust-board IO10_SDA 3.2 x its direct length). The static slack is
+/// measured at nine candidate points of the triangle, a lower bound of the room the drawing's
+/// site search finds, so a small static shortfall is drawn clean more often than not and costs
+/// little; the price passes the old flat price (1) at a shortfall of about 0.55 need and grows
+/// as 1 + missing / need - 0.4 deep inside. Values (tau 0.1): slack 0 -> 0.02, -0.2 need -> 0.13,
+/// -0.4 need -> 0.57, -need -> 1.6; +0.1 need -> 0.007. Continuous and monotone, no cutoff. O(1).
 pub fn site_price(slack: f64, need: f64, tau: f64) -> f64 {
     if slack == f64::INFINITY {
         return 0.0;
     }
-    super::cutmodel::phi(slack, need, tau)
+    super::cutmodel::phi(slack + SITE_SHIFT * tau * need.max(1.0), need, tau)
 }
 
 /// Per edge-layer overflow price of a labelling, kept incrementally.
@@ -501,6 +529,16 @@ impl<'a> CapModel<'a> {
     /// when the interval has no traversal strictly between its events (`[vias]
     /// between_crossings`); `None` otherwise or when there is none. Cached.
     fn end_site_of(&self, w: WireId, ev: &[LEv], i: usize) -> Option<(usize, Vec2)> {
+        self.end_site_graded_of(w, ev, i).filter(|x| x.2 >= 0.0).map(|x| (x.0, x.1))
+    }
+
+    /// [`CapModel::end_site_of`] graded ([`end_site_graded`]): the end site with its slack, or,
+    /// without one, the end candidate with the most room and its (negative) slack; the slack of a
+    /// candidate is the least of its free radius less the via's reach, the triangle's inradius
+    /// less reach + clearance, and minus the room another net's via takes there
+    /// ([`CapModel::taken_short`]), so slack >= 0 is exactly the old site test. `None` without
+    /// an end piece. Cached.
+    fn end_site_graded_of(&self, w: WireId, ev: &[LEv], i: usize) -> Option<(usize, Vec2, f64)> {
         if !self.packer.via_between {
             return None;
         }
@@ -513,7 +551,7 @@ impl<'a> CapModel<'a> {
         let d = self.packer.via_d(wi.net);
         let (pr, packer, net, s) = (self.st.proj, self.packer, wi.net, wi.s);
         let need = self.need_r(w);
-        let x = end_site(self.st, w, a, b, &|t, q| pr.inradius(t) >= need && !self.site_taken(w, t) && super::cutflow::point_free(pr, packer, q, net, s) >= 0.5 * d);
+        let x = end_site_graded(self.st, w, a, b, &|t, q| (pr.inradius(t) - need).min(super::cutflow::point_free(pr, packer, q, net, s) - 0.5 * d).min(-self.taken_short(w, t)));
         self.end_sites.borrow_mut().insert(key, x);
         x
     }
@@ -589,16 +627,19 @@ impl<'a> CapModel<'a> {
         // have one when their traversal does.
         let between = if self.packer.via_between { via_ranges(ev, true).1 } else { Vec::new() };
         // Graded via-site price: the missing room of each via at its traversal; a via of an
-        // interval without a traversal between its events either has its end site (room) or
-        // misses at least a little (its traversal's room, capped below 0).
+        // interval without a traversal between its events is graded by its end candidate's room
+        // ([`CapModel::end_site_graded_of`]: the end site's slack, or the roomiest end
+        // candidate's shortfall; no step between "an end site" and "none"). Without any end
+        // piece (both events at a traversal's end or a turn) the via has no place between its
+        // events and would stand on the event, i.e. on the crossed wire: it misses its own reach
+        // + clearance beyond its traversal's shortfall.
         let (mut cnt, mut pr_sum, mut over) = (0usize, 0.0f64, 0.0f64);
         if nr > 0.0 {
             for (i, &k) in ks.iter().enumerate() {
                 let slack = if between.get(i) == Some(&false) {
-                    if self.end_site_of(w, ev, i).is_some() {
-                        f64::INFINITY
-                    } else {
-                        self.slack_at(w, k).min(-1.0)
+                    match self.end_site_graded_of(w, ev, i) {
+                        Some(x) => x.2,
+                        None => self.slack_at(w, k).min(0.0) - nr,
                     }
                 } else {
                     self.slack_at(w, k)
@@ -1122,23 +1163,32 @@ mod tests {
     #[test]
     fn site_price_grows_smoothly_with_the_missing_room() {
         // Pair-via site proposal 2026-11-13, item 2: the graded via-site price replaces the flat
-        // price of a via without a site (phi of the cuts and edges: one price shape).
+        // price of a via without a site (phi of the cuts and edges: one price shape), moved
+        // SITE_SHIFT softnesses towards the room (board-rules finding 1: a legal via that just
+        // fits costs about 0, not phi(0) = 0.57 of the overflow weight).
         let (need, tau) = (0.75e6, 0.1);
         let f = |s: f64| site_price(s, need, tau);
         assert_eq!(f(f64::INFINITY), 0.0);
-        // room to spare: only phi's tail (z = -5 at half the need: ~0.007; ~5e-5 at the need)
-        assert!(f(0.5 * need) < 0.01, "room to spare costs little: {}", f(0.5 * need));
+        // a legal via that just fits: about 0 (0.02 of the price, ~1 mm at 50 mm); room to spare less
+        assert!(f(0.0) < 0.025, "a via that just fits costs about 0: {}", f(0.0));
+        assert!(f(0.1 * need) < 0.01, "room to spare costs less: {}", f(0.1 * need));
         assert!(f(need) < 1e-4, "room to spare costs ~0: {}", f(need));
-        assert!((f(0.0) - (0.5 + 0.1 * 2f64.ln())).abs() < 1e-9, "at the boundary {}", f(0.0));
-        // continuous at 0 (slope 1 / (4 tau) + 1/2 per need: +-1 nm moves it ~1e-5) and monotone
-        // in the missing room
+        // half the price at a shortfall of SITE_SHIFT softnesses, the old flat price (1) at ~0.55 need
+        let half = -SITE_SHIFT * tau * need;
+        assert!((f(half) - (0.5 + 0.1 * 2f64.ln())).abs() < 1e-9, "at the step {}", f(half));
+        assert!(f(-0.5 * need) > 0.85 && f(-0.6 * need) > 1.0, "{} {}", f(-0.5 * need), f(-0.6 * need));
+        // continuous (+-1 nm moves it ~1e-5 at its steepest) and monotone in the missing room
+        assert!((f(half + 1.0) - f(half - 1.0)).abs() < 1e-4, "{}", f(half + 1.0) - f(half - 1.0));
         assert!((f(1.0) - f(-1.0)).abs() < 1e-4, "{}", f(1.0) - f(-1.0));
         let xs: Vec<f64> = (-40..=10).map(|i| i as f64 * 0.05 * need).collect();
         for w in xs.windows(2) {
             assert!(f(w[0]) >= f(w[1]), "slack {} -> {}: {} < {}", w[0], w[1], f(w[0]), f(w[1]));
         }
-        // deep inside: 1 + missing / need, the over-full price of an edge (1 + over / pitch)
-        assert!((f(-2.0 * need) - 3.0).abs() < 0.01, "{}", f(-2.0 * need));
+        // deep inside: 1 + missing / need less the shift, the slope of an over-full edge
+        assert!((f(-2.0 * need) - (3.0 - SITE_SHIFT * tau)).abs() < 0.01, "{}", f(-2.0 * need));
+        // never cheaper with less room than a via with more room anywhere on the range, and a
+        // via missing half its reach + clearance costs at least the old flat price
+        assert!(f(-0.55 * need) >= 0.95, "{}", f(-0.55 * need));
     }
 
     #[test]
