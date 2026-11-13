@@ -206,7 +206,8 @@ def refill_pours(model: dict, refilled_text: str) -> dict:
             else:
                 pours.append(p)
             continue
-        rp, rv = pour_reach(p["net"], p["layers"], fl, model["pads"], model["vias"])
+        rp, rv = pour_reach(p["net"], p["layers"], fl, model["pads"], model["vias"],
+                            p.get("pad_connection", 1))
         pours.append({k: v for k, v in {**p, "fills": fl, "pads": rp, "vias": rv}.items() if k != "warning"})
     cu = [int(l["id"]) for l in model.get("layers", [])]
     return {**model, "pours": pours,

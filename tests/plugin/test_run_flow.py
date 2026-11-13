@@ -858,7 +858,8 @@ def test_run_fixed_takes_pour_fills_from_the_refilled_copy(app, eprom, tmp_path,
             if q["layer"] in ids and ids[q["layer"]] in gnd["layers"]]
     assert want and seen["fills"] == want and seen["fills"] != stale_fills
     assert "FAKE.1" not in seen["pads"] and "fake-via" not in seen["vias"]
-    rp, rv = pourreach.pour_reach(gnd["net"], gnd["layers"], want, model["pads"], model["vias"])
+    rp, rv = pourreach.pour_reach(gnd["net"], gnd["layers"], want, model["pads"], model["vias"],
+                              gnd.get("pad_connection", 1))
     assert (seen["pads"], seen["vias"]) == (rp, rv) and rp
     assert set(rp) <= set(gnd["pads"])  # the refilled reach errs toward "not reached" vs pcbnew (C26)
     # the save_as copy itself stays as KiCad wrote it (the refill went into a separate file)

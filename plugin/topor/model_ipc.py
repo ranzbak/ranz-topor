@@ -559,6 +559,9 @@ def zone_to_pour(zone, *, net_codes: dict, cu_ids: set, pads: list, vias: list, 
         for pwh in polys:
             fills.append({"layer": i, "outer": ring_pts(pwh.outline, max_err),
                           "holes": [ring_pts(hh, max_err) for hh in pwh.holes]})
+    cs, th = zone.proto.copper_settings, zone.proto.copper_settings.connection.thermal_spokes
+    pad_conn = (_ZONE_DEFAULT_CONN if _ZC_TO_KICAD.get(cs.connection.zone_connection) is None
+                else _ZC_TO_KICAD[cs.connection.zone_connection])
     warn = None
     if not fills:
         warn = "filled polygon list unavailable (zone not filled); using zone outline, reaching nothing"
@@ -566,15 +569,13 @@ def zone_to_pour(zone, *, net_codes: dict, cu_ids: set, pads: list, vias: list, 
         fills = [{"layer": i, "outer": ol, "holes": []} for i in layers]
         reach_pads, reach_vias = [], []  # M4-R8: an unfilled zone connects nothing ("not reached")
     else:
-        reach_pads, reach_vias = pour_reach(code, layers, fills, pads, vias)
-    cs, th = zone.proto.copper_settings, zone.proto.copper_settings.connection.thermal_spokes
+        reach_pads, reach_vias = pour_reach(code, layers, fills, pads, vias, pad_conn)
     d = {"uuid": zone.id.value, "net": code, "layers": layers, "pads": reach_pads, "vias": reach_vias,
          "fills": fills,
          "clearance": int(cs.clearance.value_nm), "min_thickness": int(cs.min_thickness.value_nm),
          "thermal_gap": int(th.gap.value_nm) if th.HasField("gap") else _DEFAULT_THERMAL_NM,
          "spoke_width": int(th.width.value_nm) if th.HasField("width") else _DEFAULT_THERMAL_NM,
-         "pad_connection": (_ZONE_DEFAULT_CONN if _ZC_TO_KICAD.get(cs.connection.zone_connection) is None
-                            else _ZC_TO_KICAD[cs.connection.zone_connection]),
+         "pad_connection": pad_conn,
          "island_removal": _IRM_TO_KICAD.get(cs.island_mode, 0), "min_island_area": float(cs.min_island_area)}
     if warn:
         d["warning"] = warn
