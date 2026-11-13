@@ -417,8 +417,9 @@ pub const FAR_SPACING_NM: f64 = 1.0e6;
 /// component; a cut-off island would leave the pad floating). Each candidate keeps a margin: the
 /// track end's disc of radius w/2 + the zone's minimum width + the net clearance lies inside one
 /// fill piece. Candidates: the boundary of every piece sampled every [`FAR_SAMPLE_NM`] (and the
-/// boundary point nearest the pad on each side), each stepped inward along the pad-to-boundary
-/// direction until the disc fits; priced by distance plus the `via` price where the pad has no
+/// boundary point nearest the pad on each side), each stepped inward until the disc fits: along
+/// the pad-to-boundary direction first, else straight across the edge (a side edge that
+/// direction runs along), and at a vertex along the corner's bisector; priced by distance plus the `via` price where the pad has no
 /// copper on that layer. Returned cheapest first, at most [`FAR_CANDIDATES`], at least
 /// [`FAR_SPACING_NM`] apart: the caller lets the path search pick among them, so a point behind
 /// an obstacle loses to one the trace reaches directly (no detour to the nearest point). Inside
@@ -430,8 +431,8 @@ pub fn far_candidates(dr: &Drawer, rq: &Req, cost: &SiteCost) -> Vec<FarTerm> {
     let ob = &b.proj.obstacles[rq.obs];
     let c = ob.center;
     let via_price = cost.via();
-    // Boundary samples (lower bound of the price, point, inward direction, zone, fill).
-    let mut samples: Vec<(f64, Vec2, Vec2, usize, usize)> = Vec::new();
+    // Boundary samples (lower bound of the price, point, directions to step in, zone, fill).
+    let mut samples: Vec<(f64, Vec2, [Vec2; 3], usize, usize)> = Vec::new();
     for (zi, pour) in model.pours.iter().enumerate().filter(|(_, z)| z.net == rq.net) {
         for (fi, f) in pour.fills.iter().enumerate().filter(|(_, f)| b.signal_layers.contains(&f.layer)) {
             let li = b.signal_layers.iter().position(|&l| l == f.layer).unwrap_or(0);
@@ -441,19 +442,31 @@ pub fn far_candidates(dr: &Drawer, rq: &Req, cost: &SiteCost) -> Vec<FarTerm> {
                 if pts.len() < 3 {
                     continue;
                 }
+                let unit = |v: Vec2| v * (1.0 / v.len().max(1.0));
+                // Normal of edge i (one side; the other side is tried as its negative).
+                let normal = |i: usize| {
+                    let ab = pts[(i + 1) % pts.len()] - pts[i];
+                    unit(Vec2 { x: -ab.y, y: ab.x })
+                };
                 for i in 0..pts.len() {
                     let (a, e) = (pts[i], pts[(i + 1) % pts.len()]);
                     let ab = e - a;
                     let l = ab.len();
                     let tn = ((c - a).dot(ab) / ab.len2().max(1.0)).clamp(0.0, 1.0);
                     let n = (l / FAR_SAMPLE_NM).floor() as usize;
-                    for t in std::iter::once(tn).chain((0..=n).map(|k| k as f64 * FAR_SAMPLE_NM / l.max(1.0))) {
+                    let nrm = normal(i);
+                    // At the vertex: also the bisector of the two edges' normals (into a corner).
+                    let bis = unit(nrm + normal((i + pts.len() - 1) % pts.len()));
+                    for (k, t) in std::iter::once((usize::MAX, tn)).chain((0..=n).map(|k| (k, k as f64 * FAR_SAMPLE_NM / l.max(1.0)))) {
                         let q = a + ab * t.min(1.0);
                         let d0 = (q - c).len();
                         // Into the fill: away from the pad past the boundary point (the pad lies outside
-                        // the fill or in a hole of it), or across the side where the pad sits on it.
-                        let u = if d0 > 1.0 { (q - c) * (1.0 / d0) } else { Vec2 { x: -ab.y, y: ab.x } * (1.0 / l.max(1.0)) };
-                        samples.push((cost.mm * d0 / 1e6 + extra, q, u, zi, fi));
+                        // the fill or in a hole of it), or across the side where the pad sits on it;
+                        // then straight across the edge (a side edge the pad's direction runs along),
+                        // and at a vertex along the corner's bisector (either sign: `in_piece` keeps
+                        // the inward one).
+                        let u = if d0 > 1.0 { (q - c) * (1.0 / d0) } else { nrm };
+                        samples.push((cost.mm * d0 / 1e6 + extra, q, [u, nrm, if k == 0 { bis } else { Vec2::default() }], zi, fi));
                     }
                 }
             }
@@ -461,7 +474,7 @@ pub fn far_candidates(dr: &Drawer, rq: &Req, cost: &SiteCost) -> Vec<FarTerm> {
     }
     samples.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.x.total_cmp(&y.1.x)).then(x.1.y.total_cmp(&y.1.y)));
     let mut out: Vec<FarTerm> = Vec::new();
-    for (lb, q, u, zi, fi) in samples {
+    for (lb, q, dirs, zi, fi) in samples {
         if out.len() >= FAR_CANDIDATES && out.iter().all(|f| f.price <= lb) {
             break;
         }
@@ -469,15 +482,17 @@ pub fn far_candidates(dr: &Drawer, rq: &Req, cost: &SiteCost) -> Vec<FarTerm> {
         let f = &pour.fills[fi];
         let margin = 0.5 * rq.w + pour.min_thickness.max(0) as f64 + model.rules.net_rule(rq.net).clearance as f64;
         let extra = lb - cost.mm * (q - c).len() / 1e6;
-        let mut s = margin;
         let mut found = None;
-        while s <= 4.0 * margin + 0.5e6 {
-            let p = q + u * s;
-            if in_piece(f, p, margin) && cost.connected(zi, f.layer, p) {
-                found = Some(p);
-                break;
+        'dirs: for u in dirs.into_iter().filter(|u| u.len2() > 0.25).flat_map(|u| [u, u * -1.0]) {
+            let mut s = margin;
+            while s <= 4.0 * margin + 0.5e6 {
+                let p = q + u * s;
+                if in_piece(f, p, margin) && cost.connected(zi, f.layer, p) {
+                    found = Some(p);
+                    break 'dirs;
+                }
+                s += 0.25 * margin;
             }
-            s += 0.25 * margin;
         }
         let Some(at) = found else { continue };
         let price = cost.mm * (at - c).len() / 1e6 + extra;
