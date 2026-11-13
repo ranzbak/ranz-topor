@@ -93,7 +93,8 @@ fn three_plane_pads_share_one_via_unless_never() {
 }
 
 /// A 4 x 4 ball grid U1 (pitch 1.27 mm, all GND) over a B.Cu GND pour: by default every ball gets
-/// a via of its own (user 2026-11-13: "no shared vias under bga chips"); "always" shares.
+/// a via of its own (user 2026-11-13: "no shared vias under bga chips", sharing only as a last
+/// resort); "always" shares.
 #[test]
 fn bga_balls_get_a_via_each_by_default() {
     let mut pads = Vec::new();
@@ -225,19 +226,48 @@ fn a_pad_out_of_stub_reach_is_wired_to_its_pour_not_to_a_pad() {
     assert!(xmax_off > 22.0, "without terminals the pad is wired to C1: {xmax_off}");
 }
 
-/// The share gate ([`planes::may_share_at`]) that the pads, the existing vias, the placed stub vias
-/// and every re-site of a shared via pass: under "outside_bga" no site in a BGA area, also not one
-/// a shared via of pads outside would move to (user 2026-11-13).
+/// The re-site gate ([`planes::resite_ok`]) under "outside_bga": a shared via never moves into a
+/// BGA area none of its pads stands in (user 2026-11-13); parts standing in the area (decoupling
+/// caps under the BGA) may have it there.
 #[test]
 fn a_shared_via_never_moves_into_a_bga_area() {
     use topor_engine::geom::{Aabb, Vec2};
-    use topor_engine::topo::planes::may_share_at;
+    use topor_engine::topo::planes::resite_ok;
     let areas = [Aabb { min: Vec2 { x: 0.0, y: 0.0 }, max: Vec2 { x: 5e6, y: 5e6 } }];
     let (inside, edge, outside) = (Vec2 { x: 2e6, y: 2e6 }, Vec2 { x: 5e6, y: 1e6 }, Vec2 { x: 5.1e6, y: 1e6 });
-    assert!(!may_share_at("outside_bga", &areas, inside) && !may_share_at("outside_bga", &areas, edge));
-    assert!(may_share_at("outside_bga", &areas, outside));
-    assert!(may_share_at("always", &areas, inside));
-    assert!(!may_share_at("never", &areas, outside) && !may_share_at("bogus", &areas, outside));
+    let out_pads = [Vec2 { x: 6e6, y: 1e6 }, Vec2 { x: 7e6, y: 2e6 }];
+    assert!(!resite_ok(&areas, &out_pads, inside) && !resite_ok(&areas, &out_pads, edge));
+    assert!(resite_ok(&areas, &out_pads, outside));
+    let under = [Vec2 { x: 3e6, y: 3e6 }, Vec2 { x: 6e6, y: 1e6 }];
+    assert!(resite_ok(&areas, &under, inside), "a pad under the BGA: its via may stand there");
+}
+
+/// The L-shaped ball grid of the test below with two GND caps CA, CB in its empty corner (inside
+/// the BGA area, not balls) over a B.Cu GND pour: by footprint membership they share like pads
+/// anywhere (user 2026-11-13, F3: only a ball's share is a last resort), as many vias as
+/// "always", fewer than "never".
+#[test]
+fn caps_under_a_bga_share_among_themselves() {
+    let mut pads = Vec::new();
+    for i in 0..6 {
+        for j in 0..6 {
+            if !(i >= 3 && j <= 2) {
+                pads.push(("U1", 0, 10.0 + i as f64, 10.0 + j as f64, 0.5));
+            }
+        }
+    }
+    pads.push(("CA", 1, 13.6, 10.4, 0.5));
+    pads.push(("CB", 1, 14.8, 11.6, 0.5));
+    let m = board(30.0, 30.0, &pads, &[(1, 2, 0.5, 0.5, 29.5, 29.5, &[])]);
+    let areas = topor_engine::topo::planes::bga_areas(&m);
+    assert!(areas.len() == 1 && topor_engine::topo::planes::in_bga(&areas, m.pads.iter().find(|p| p.ref_ == "CA").unwrap().center.to_vec2()));
+    let run = |mode: &str| {
+        let r = route_with(&m, &Options { plane_share_vias: mode.into(), ..Options::default() }, &RunControl::new());
+        assert_eq!(r.routed, 2, "{mode}: {:?}", r.warnings);
+        vias(&r.items).len()
+    };
+    let (def, always, never) = (run("outside_bga"), run("always"), run("never"));
+    assert_eq!((def, always, never), (1, 1, 2), "caps under the BGA share one via");
 }
 
 /// An L-shaped ball grid U1 (6 x 6 at 1 mm, its upper right 3 x 3 empty; no-net balls) whose area
@@ -270,8 +300,9 @@ fn a_shared_via_of_pads_outside_is_not_resited_into_the_bga() {
 }
 
 /// A 4 x 4 GND ball grid over a B.Cu GND pour and an existing GND via of the board 1 mm out
-/// from its corner ball on both axes (outside the BGA area, so shareable): no ball ends on it,
-/// every ball keeps a via of its own (the pad-side gate), 16 new vias; "always" lets balls share.
+/// from its corner ball on both axes (outside the BGA area): no ball ends on it, every ball keeps
+/// a via of its own (a ball's share is a last resort, `bga_share_cost`), 16 new vias; "always"
+/// and a zero `bga_share_cost` let balls share, the latter with a warning per shared via.
 #[test]
 fn a_ball_does_not_end_on_a_shareable_via_outside() {
     let mut pads = Vec::new();
@@ -292,4 +323,10 @@ fn a_ball_does_not_end_on_a_shareable_via_outside() {
     assert!(def.warnings.iter().any(|w| w.starts_with("BGA area U1")), "{:?}", def.warnings);
     let always = route_with(&m, &Options { plane_share_vias: "always".into(), ..Options::default() }, &RunControl::new());
     assert!(vias(&always.items).len() < 16, "{:?}", always.warnings);
+    // [planes] bga_share_cost = 0: a ball's share costs no more than any other, so balls share,
+    // and every via a ball shares is warned about.
+    let cheap = route_with(&m, &Options { plane_bga_share_cost: 0.0, ..Options::default() }, &RunControl::new());
+    let nv = vias(&cheap.items).len();
+    let warned = cheap.warnings.iter().filter(|w| w.starts_with("BGA ball shares a plane via")).count();
+    assert!(nv < 16 && warned >= 1, "{nv} vias, {warned} warnings: {:?}", cheap.warnings);
 }

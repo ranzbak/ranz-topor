@@ -78,6 +78,9 @@ pub struct PlaneVia {
     pub users: Vec<usize>,
     /// Given up: its owner's stub now ends on another via ([`place`] skips it).
     pub dead: bool,
+    /// Serves a ball of a ball-grid footprint (its owner or a user is one, [`bga_footprints`]):
+    /// one more stub on it pays the last-resort price ([`place`]).
+    pub ball: bool,
 }
 
 /// Graded price of one more stub of width `w` on via `v` (4.4): 0 while pi * drill covers the
@@ -191,8 +194,12 @@ pub fn in_fill_on(pour: &crate::model::Pour, layer: Option<u32>, p: Vec2, r: f64
 /// `shared` (4.4, `[planes] terminals`; empty = off): own-net copper already on the plane. A
 /// stub may end on one of them instead of a via of its own, within the same reach, priced by
 /// its length and the via's current load ([`load_price`]); it competes with an own via (which
-/// pays the `via` price) as the via-like option.
-pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)], shared: &[PlaneVia]) -> Result<Out, String> {
+/// pays the `via` price) as the via-like option. `ball` (the pad is a ball of a ball-grid
+/// footprint): a share where the pad or the via ([`PlaneVia::ball`]) is a ball's adds
+/// `last_resort` times the `via` price (user 2026-11-13: "sharing only when not possible in any
+/// other way"), so it wins only where no own via site is within reach.
+#[allow(clippy::too_many_arguments)]
+pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)], shared: &[PlaneVia], ball: bool, last_resort: f64) -> Result<Out, String> {
     let (model, b) = (dr.model, dr.b);
     let pad = &model.pads[rq.pad];
     let ob = &b.proj.obstacles[rq.obs];
@@ -293,7 +300,7 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)], s
         if v.dead || v.net != rq.net || len > rpad + 3.0e6 || !cost.via_ok_at(model, &zs, v.at, 0.5 * v.size.d as f64) {
             continue;
         }
-        let price = cost.mm * len / 1e6 + load_price(v, rq.w, via_price);
+        let price = cost.mm * len / 1e6 + load_price(v, rq.w, via_price) + if ball || v.ball { last_resort * via_price } else { 0.0 };
         if best_share.is_some_and(|(bc, _)| price >= bc) {
             continue;
         }
@@ -412,6 +419,8 @@ pub struct BgaArea {
     pub balls: usize,
     /// Forced by `[planes] bga_refs`, not detected.
     pub forced: bool,
+    /// The ball pads (indices into `model.pads`): the cluster's, or every pad of a forced one.
+    pub pads: Vec<usize>,
 }
 
 /// The areas under the board's ball-grid footprints, math frame. Per footprint (pads grouped by
@@ -455,7 +464,7 @@ pub fn bga_footprints(model: &BoardModel, overrides: &[String]) -> Vec<BgaArea> 
         if forced_in.contains(r) {
             let ps: Vec<Vec2> = idx.iter().map(|&i| model.pads[i].center.to_vec2()).collect();
             let nn = median(ps.iter().enumerate().map(|(a, p)| ps.iter().enumerate().filter(|(b, _)| *b != a).map(|(_, q)| (*q - *p).len()).fold(f64::INFINITY, f64::min)).collect()).unwrap_or(0.0);
-            out.push(BgaArea { ref_: r.to_string(), area: bbox(&mut ps.iter().copied()).grow(0.5 * nn), balls: ps.len(), forced: true });
+            out.push(BgaArea { ref_: r.to_string(), area: bbox(&mut ps.iter().copied()).grow(0.5 * nn), balls: ps.len(), forced: true, pads: idx.clone() });
             continue;
         }
         // Copper SMD pads only: a paste-only aperture grid (a QFN's exposed-pad paste windows) has
@@ -539,7 +548,7 @@ pub fn bga_footprints(model: &BoardModel, overrides: &[String]) -> Vec<BgaArea> 
                 continue;
             }
             let area = bbox(&mut c.iter().map(|&a| model.pads[idx[a]].center.to_vec2())).grow(0.5 * px.max(py));
-            out.push(BgaArea { ref_: r.to_string(), area, balls: c.len(), forced: false });
+            out.push(BgaArea { ref_: r.to_string(), area, balls: c.len(), forced: false, pads: c.iter().map(|&a| idx[a]).collect() });
         }
     }
     out
@@ -555,16 +564,13 @@ pub fn in_bga(areas: &[crate::geom::Aabb], p: Vec2) -> bool {
     areas.iter().any(|a| p.x >= a.min.x && p.x <= a.max.x && p.y >= a.min.y && p.y <= a.max.y)
 }
 
-/// Whether a pad, an existing via or a plane via at `p` may take part in sharing under the
-/// `[planes] share_vias` `mode` ("always", "outside_bga" = not in `areas`, anything else = no).
-/// The one gate for the pads, the existing vias, the placed stub vias and every site [`resite`]
-/// moves a shared via to. O(areas).
-pub fn may_share_at(mode: &str, areas: &[crate::geom::Aabb], p: Vec2) -> bool {
-    match mode {
-        "always" => true,
-        "outside_bga" => !in_bga(areas, p),
-        _ => false,
-    }
+/// Whether [`resite`] may move a shared via whose stubs come from the pads at `members` to `p`:
+/// not into a ball-grid area (`areas`, [`bga_areas`]) unless one of those pads stands in it (the
+/// room under a BGA is its balls' fan-out; parts under it, e.g. decoupling caps, keep theirs).
+/// O(areas * members).
+pub fn resite_ok(areas: &[crate::geom::Aabb], members: &[Vec2], p: Vec2) -> bool {
+    let inside = |a: &crate::geom::Aabb, q: Vec2| q.x >= a.min.x && q.x <= a.max.x && q.y >= a.min.y && q.y <= a.max.y;
+    areas.iter().all(|a| !inside(a, p) || members.iter().any(|&m| inside(a, m)))
 }
 
 /// Most far-terminal candidates per pad ([`far_candidates`]).
@@ -743,8 +749,8 @@ pub fn weber(pts: &[Vec2]) -> Vec2 {
 /// no site is cheaper. Every stub stays within the reach of [`place`] (3 mm past its pad) and
 /// passes the same checks as there. `outs` (per request, in the stage's order) and `v` are
 /// updated; `vias` = every stub via's (centre, radius) for the keep-off checks (this one's own
-/// entry is skipped); `site_ok` = the share gate ([`may_share_at`]: never into a BGA area under
-/// "outside_bga"). Returns whether the via moved.
+/// entry is skipped); `site_ok` = the site gate ([`resite_ok`]: not into a BGA area none of its
+/// pads stands in, under "outside_bga"). Returns whether the via moved.
 #[allow(clippy::too_many_arguments)]
 pub fn resite(dr: &mut Drawer, reqs: &[Req], outs: &mut [Option<Out>], v: &mut PlaneVia, cost: &SiteCost, vias: &[(Vec2, f64)], site_ok: &dyn Fn(Vec2) -> bool) -> bool {
     let Some(owner) = v.owner else { return false };
@@ -917,7 +923,7 @@ mod tests {
 
     #[test]
     fn load_price_is_zero_within_pi_drill_and_grows_past_it() {
-        let v = PlaneVia { at: Vec2::default(), size: ViaSize { d: 600_000, drill: 300_000 }, net: 1, load: 500_000.0, owner: Some(0), users: vec![], dead: false };
+        let v = PlaneVia { at: Vec2::default(), size: ViaSize { d: 600_000, drill: 300_000 }, net: 1, load: 500_000.0, owner: Some(0), users: vec![], dead: false, ball: false };
         // pi * 0.3 mm = 0.942 mm >= 0.5 + 0.25 mm.
         assert_eq!(load_price(&v, 250_000.0, 25.0), 0.0);
         let full = PlaneVia { load: 942_477.8, ..v.clone() };

@@ -1328,14 +1328,18 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
         // 4.4 (`[planes] share_vias`): the own-net copper on the plane a stub may end on. The
         // existing vias of the board standing in a fill of their net's pour come first; every
         // stub via placed joins them. Default "outside_bga" (user 2026-11-13: "no shared vias
-        // under bga chips, shared vias are okay outside of BGA footprints"): a pad, or a via,
-        // standing in a ball-grid footprint's area never shares (every plane ball its own via);
-        // "never": no pad shares (empty, so the re-siting and merge rounds below do nothing);
-        // "always": every pad may.
+        // under bga chips, shared vias are okay outside of BGA footprints"; for the balls:
+        // "sharing only when not possible in any other way, usually there is a good reason
+        // multiple balls are assigned for the same net"): by footprint membership, a share where
+        // the pad or the via is a ball's ([`planes::bga_footprints`] pads) is a last resort (the
+        // `[planes] bga_share_cost` price, one warning per such via); other pads, also parts
+        // under a BGA, share freely among themselves; a shared via is not re-sited into a BGA
+        // area none of its pads stands in. "never": no pad shares (empty, so the re-siting and
+        // merge rounds below do nothing); "always": every pad shares at the plain price.
         let bga_fp = if opts.plane_share_vias == "outside_bga" { planes::bga_footprints(model, &opts.plane_bga_refs) } else { Vec::new() };
         for f in &bga_fp {
             notes.push(format!(
-                "BGA area {}: ({:.2}, {:.2})-({:.2}, {:.2}) mm, {} balls ({}); its plane pads get a via each ([planes] share_vias = \"outside_bga\")",
+                "BGA area {}: ({:.2}, {:.2})-({:.2}, {:.2}) mm, {} balls ({}); its plane balls share a via only where no own via site is within reach ([planes] share_vias = \"outside_bga\", bga_share_cost)",
                 f.ref_,
                 f.area.min.x / 1e6,
                 -f.area.max.y / 1e6,
@@ -1350,9 +1354,11 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
         if !matches!(share_mode, "never" | "outside_bga" | "always") {
             notes.push(format!("[planes] share_vias = \"{share_mode}\" is not one of never, outside_bga, always: no plane via is shared"));
         }
-        let may_share = |p: Vec2| planes::may_share_at(share_mode, &bga, p);
+        let balls: BTreeSet<usize> = bga_fp.iter().flat_map(|f| f.pads.iter().copied()).collect();
+        let is_ball = |rq: &planes::Req| balls.contains(&rq.pad);
+        let last_resort = opts.plane_bga_share_cost.max(0.0);
         let pad_at = |rq: &planes::Req| model.pads[rq.pad].center.to_vec2();
-        let mut shared: Vec<planes::PlaneVia> = if share_mode == "never" { Vec::new() } else { existing_plane_vias(model).into_iter().filter(|v| may_share(v.at)).collect() };
+        let mut shared: Vec<planes::PlaneVia> = if matches!(share_mode, "outside_bga" | "always") { existing_plane_vias(model) } else { Vec::new() };
         let mut outs: Vec<Option<planes::Out>> = Vec::with_capacity(reqs.len());
         let mut results: Vec<Result<planes::Out, String>> = Vec::with_capacity(reqs.len());
         let mut dropped = false;
@@ -1363,18 +1369,19 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
             if stop() {
                 return PlaneStubs::default();
             }
-            let r = planes::place(&mut dr, rq, &cost, &vias, if may_share(pad_at(rq)) { &shared } else { &[] });
+            let r = planes::place(&mut dr, rq, &cost, &vias, &shared, is_ball(rq), last_resort);
             match &r {
                 Ok(o) => {
                     if let Some(v) = o.via {
                         vias.push((v, 0.5 * o.size.d as f64));
-                        if may_share(pad_at(rq)) && may_share(v) {
-                            shared.push(planes::PlaneVia { at: v, size: o.size, net: rq.net, load: rq.w, owner: Some(i), users: Vec::new(), dead: false });
+                        if share_mode != "never" {
+                            shared.push(planes::PlaneVia { at: v, size: o.size, net: rq.net, load: rq.w, owner: Some(i), users: Vec::new(), dead: false, ball: is_ball(rq) });
                         }
                     }
                     if let Some(k) = o.shared {
                         shared[k].load += rq.w;
                         shared[k].users.push(i);
+                        shared[k].ball |= is_ball(rq);
                     }
                 }
                 // No clean via site inside the pour's fill near the pad. 4.4: the pour is a
@@ -1411,7 +1418,9 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
                         continue;
                     }
                     let old = v.at;
-                    if planes::resite(&mut dr, &reqs, &mut outs, v, &cost, &vias, &may_share) {
+                    let members: Vec<Vec2> = v.owner.into_iter().chain(v.users.iter().copied()).map(|i| pad_at(&reqs[i])).collect();
+                    let site_ok = |p: Vec2| share_mode != "outside_bga" || planes::resite_ok(&bga, &members, p);
+                    if planes::resite(&mut dr, &reqs, &mut outs, v, &cost, &vias, &site_ok) {
                         if let Some(e) = vias.iter_mut().find(|e| (e.0 - old).len() <= 1.0) {
                             e.0 = v.at;
                         }
@@ -1427,11 +1436,12 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
                     shared[k].dead = true;
                     let at = shared[k].at;
                     let others: Vec<(Vec2, f64)> = vias.iter().copied().filter(|e| (e.0 - at).len() > 1.0).collect();
-                    match planes::place(&mut dr, &reqs[i], &cost, &others, if may_share(pad_at(&reqs[i])) { &shared } else { &[] }) {
+                    match planes::place(&mut dr, &reqs[i], &cost, &others, &shared, is_ball(&reqs[i]), last_resort) {
                         Ok(o) if o.shared.is_some() => {
                             let j = o.shared.expect("shared");
                             shared[j].load += reqs[i].w;
                             shared[j].users.push(i);
+                            shared[j].ball |= is_ball(&reqs[i]);
                             vias = others;
                             outs[i] = Some(o);
                             merged = true;
@@ -1469,6 +1479,20 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
                     }
                     None => out.res.push((rq.conn, r)),
                 }
+            }
+            // One warning per via a ball shares (the last resort of "outside_bga"): check it by hand.
+            for v in shared.iter().filter(|v| !v.dead && v.ball && !v.users.is_empty()) {
+                let names: Vec<String> = v.owner.into_iter().chain(v.users.iter().copied()).map(|i| {
+                    let p = &model.pads[reqs[i].pad];
+                    format!("{}.{}", p.ref_, p.number)
+                }).collect();
+                notes.push(format!(
+                    "BGA ball shares a plane via (last resort, no own via site within reach): the {} at ({:.3}, {:.3}) mm serves {} ([planes] bga_share_cost)",
+                    if v.owner.is_some() { "stub via" } else { "existing via" },
+                    v.at.x / 1e6,
+                    -v.at.y / 1e6,
+                    names.join(", ")
+                ));
             }
             let nshared = shared.iter().filter(|v| !v.dead && v.owner.is_some()).map(|v| v.users.len()).sum::<usize>();
             let nexist = shared.iter().filter(|v| v.owner.is_none()).map(|v| v.users.len()).sum::<usize>();
@@ -1624,7 +1648,7 @@ fn existing_plane_vias(model: &BoardModel) -> Vec<planes::PlaneVia> {
         .iter()
         .filter(|v| v.net > 0 && (v.layers.is_empty() || crate::model::via_layers(&v.layers, &all).len() == all.len()))
         .filter(|v| model.pours.iter().any(|z| z.net == v.net && planes::in_fill(z, v.at.to_vec2(), 0.5 * v.d as f64)))
-        .map(|v| planes::PlaneVia { at: v.at.to_vec2(), size: crate::vias::ViaSize { d: v.d, drill: v.drill }, net: v.net, load: 0.0, owner: None, users: Vec::new(), dead: false })
+        .map(|v| planes::PlaneVia { at: v.at.to_vec2(), size: crate::vias::ViaSize { d: v.d, drill: v.drill }, net: v.net, load: 0.0, owner: None, users: Vec::new(), dead: false, ball: false })
         .collect()
 }
 

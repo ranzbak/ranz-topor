@@ -952,8 +952,12 @@ pub struct Options {
     /// an existing through via in the fill) instead of a via of its own; a stub via that other
     /// stubs share moves to where their stubs are shortest together. `"outside_bga"` (user
     /// 2026-11-13: "no shared vias under bga chips, shared vias are okay outside of BGA
-    /// footprints"): pads and vias in a ball-grid footprint's area ([`crate::topo::planes::bga_areas`])
-    /// never share, every plane ball gets its own via; `"never"` (the 2026-11-12 rule: a shared
+    /// footprints"; 2026-11-13 for the balls: "sharing only when not possible in any other way,
+    /// usually there is a good reason multiple balls are assigned for the same net"): a share
+    /// where the pad or the via is a ball of a ball-grid footprint
+    /// ([`crate::topo::planes::bga_footprints`], by membership) is a last resort priced
+    /// [`Options::plane_bga_share_cost`] and warned per via; other pads (also parts under a BGA)
+    /// share freely; `"never"` (the 2026-11-12 rule: a shared
     /// via conducts heat worse, makes single-via current paths and adds inductance towards the
     /// power pins); `"always"`.
     pub plane_share_vias: String,
@@ -961,6 +965,11 @@ pub struct Options {
     /// detection behind `plane_share_vias = "outside_bga"` ([`crate::topo::planes::bga_footprints`]):
     /// "REF" counts footprint REF as a BGA (its whole pad box), "-REF" never.
     pub plane_bga_refs: Vec<String>,
+    /// Topological core (`topor.toml [planes] bga_share_cost`, default 100): the extra price, in
+    /// `via` prices, of a plane stub ending on a shared via where the pad or the via is a BGA
+    /// ball's (under `plane_share_vias = "outside_bga"`). High: a ball shares only where no own
+    /// via site is within reach; each such via gets a warning.
+    pub plane_bga_share_cost: f64,
     /// `topor.toml [output] cleanup_safe`: the written copper is made stable under KiCad's Edit ->
     /// Cleanup Tracks & Vias ([`crate::topo::tidy`]): no null, duplicate or in-pad segments, T
     /// junctions as exact vertices, collinear segments merged.
@@ -1350,6 +1359,7 @@ impl Default for Options {
             plane_terminals: true,
             plane_share_vias: "outside_bga".into(),
             plane_bga_refs: Vec::new(),
+            plane_bga_share_cost: 100.0,
             cleanup_safe: true,
             net_tree: "free".into(),
             steiner: false,

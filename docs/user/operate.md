@@ -675,9 +675,11 @@ unsure about is kept. KiCad's DRC of the result stays the judge.
   terminals`, default on): a pad too far for a stub is wired to its net's fill, ending where its path first
   reaches the fill (routing over a connected pour has no length), instead of to another pad of the net. Only
   fill connected to the rest of the net before the run counts; a cut-off island is never a stub or trace end. Plane pads near each other may share one plane via (sited where their stubs
-  are shortest together) or end on an existing through via standing in the fill, except under a ball-grid
-  footprint (BGA/PGA), where every ball gets a via of its own (`[planes] share_vias = "outside_bga"`, the
-  default; `"never"` = one via per plane pad everywhere, `"always"` = share under BGAs too). Only two-layer boards are benchmarked (eprom-to-kernal 27/27,
+  are shortest together) or end on an existing through via standing in the fill. A ball of a ball-grid
+  footprint (BGA/PGA) shares only as a last resort, where no via of its own fits (`[planes] share_vias =
+  "outside_bga"`, the default; the price is `bga_share_cost`, and each such via gets a warning); parts under
+  a BGA share among themselves; `"never"` = one via per plane pad everywhere, `"always"` = balls share at
+  the plain price too. Only two-layer boards are benchmarked (eprom-to-kernal 27/27,
   wiccon-2023 62/62); 4+ layer boards route their signal layers but inner-layer quality is not tuned yet. Copper counts
   other than 2, 4, 6, 8 need roles in `[layers]` ([`LAYER_ROLES_NEEDED`](troubleshoot.md#layer_roles_needed)).
 - **Groups.** The KiCad API does not expose group membership: grouped items are treated one by one, and
