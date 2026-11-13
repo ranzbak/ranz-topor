@@ -18,7 +18,7 @@
 - Guards: `eprom_ripped_front_only_is_the_m2_result` (27/27, ≤ 67.8 mm) green (the withdrawn F6 broke it — read m3-detour-diagnosis.md
   why); eprom two-layer identity re-verified (or not-worse with the diff explained); wiccon not worse (62/62, vias ≤ 37 — plan expects
   ≤ 33 —, outside ≤ 1380 mm, routing_new 0, unconnected 0).
-- private-badge-b at the gate options (A-C3, wall 600, partial false, threads 4): routed / connections_total (and first-pass 231 count), failed,
+- private-badge-b at the gate options (A-C3, wall 600, partial false, threads 4): routed / connections_total (and first-pass N count), failed,
   vias, routing_new, preexisting, unconnected, router_s, runtime_s, iterations, stop_reason, detour median/p90/max/count>1.5/top 5.
   PNGs `--milestone m4 --task A4 --board private-badge-b` and `--board wiccon-2023`.
 - Any judgement call (e.g. wall term on/off, credit fraction) → Options field + default; name it in the report.

@@ -4,7 +4,7 @@ Read rotation-2-common.md first.
 
 Symptom: `.venv/bin/pytest tests/gate/test_m2_gate.py tests/gate/test_m3_gate.py -m "gate or not gate" -q -s` → the private-badge-b 60 s info
 tests report drc_new 1 (routing_new must be 0, M3-R13). A5 report concern 3 (task-A5-report.md): private-badge-b `shorting_items` JP1.1 ↔
-Net-(J3-Pin_22) in wall_clock-0 runs: pads of a net-tie group are exempt for the OTHER net's tracks (obstacle.rs / check.rs pad
+Net-(Jx-Pin_n) in wall_clock-0 runs: pads of a net-tie group are exempt for the OTHER net's tracks (obstacle.rs / check.rs pad
 `tie_nets`, pinned by `obstacle_model::same_net_and_net_tie_are_exempt`), so the engine lets a track of net B touch the tie pad of
 net A; KiCad flags it. Also "connection_width (+5V via neck, also on main)" — check whether that is a second router DRC item.
 Steps: (1) reproduce: read the routed_drc of those gate runs (which violation type/items exactly — confirm it is JP1 and not

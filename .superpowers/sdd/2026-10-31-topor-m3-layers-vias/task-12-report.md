@@ -12,9 +12,9 @@ Build: tools/build.sh --dev fails in a worktree (no .venv/bin/maturin); used the
 ## Gates (11 passed, 2 failed of 13)
 - M3 eprom PASS: GATE M3 eprom: routed 27/27 nets 25/25 vias 0 layers {B.Cu 17773415, F.Cu 90323030} outside-pads 64.628 (hand 76.598) mm drc_new 0 unconnected 0 arcs 13 router_s 0.095 iters 1 zero_slack_wires 0 via_reduction 'removed 0 of 0 vias in 0 candidates'
 - M3 wiccon FAIL: routed 50/60 (all, incl pour completion) = 83 %, signal-only 48/57 (84 %), vias 26, drc_new 0, unconnected 10, router_s 3.536, iters 15, zero_slack 0.
-- M3 private-badge-b FAIL: routed 160/231, failed 71, drc_new 0, router_s 120.218 > 65.
+- M3 private-badge-b FAIL: routed 160/N, failed 71, drc_new 0, router_s 120.218 > 65.
 - M2 eprom (threads assertion updated) PASS: 27/27, 64.628 vs 76.598, router_s 0.095.
-- M2 wiccon info: 50/60 drc_new 0 3.8 s. M2 private-badge-b info PASSED: routed 0/231, router_s 60.037 (M2 test uses default options; the router routes nothing in 60 s there).
+- M2 wiccon info: 50/60 drc_new 0 3.8 s. M2 private-badge-b info PASSED: routed 0/N, router_s 60.037 (M2 test uses default options; the router routes nothing in 60 s there).
 - M0/M1 gates pass (M1 eprom outside-pads 71.494, drc_new 0).
 ## Other suites
 - cargo test --release: all pass; clippy -D warnings clean.

@@ -162,7 +162,7 @@ Gate options, `run_bench(rip="all", threads=4)`, same loaded machine (load 15–
 column. Counts are exact; times are inflated. The main run reproduces the coordinator's base numbers
 exactly.
 
-### private-badge-b 3e7e66f862a7
+### private-badge-b (private pin)
 
 | | main 946530c | A6 |
 |---|---|---|
@@ -189,7 +189,7 @@ exactly.
   - Also: U4-STAT2 R11.1→U4.7, GND U7.8→pour, GND C24.1→pour, D12-DOUT, TFT_D~C, VCC C14.1→C15.1,
     VCC D11.1→C11.1, +3V3 J3.17→R16.2, STRAP, IR_TX.
 - **Newly failed (12, negotiation interplay).** USB+ U1.14→U7.5, USB+ J1.A6→J1.B6, USB- J1.A7→J1.B7,
-  CC1 R6.1→U7.10, CC2 J1.B5→R5.2, +5V U4.17→TP9.1, NTC U4.5→BT1.3, I2C_SDA ×2, SPI_SCK, TACT_A,
+  CC1 R6.1→U7.10, CC2 J1.B5→R5.2, +5V U4.17→TP9.1, NTC Ux→BTx, I2C_SDA ×2, SPI_SCK, TACT_A,
   +3V3 R1.1→R16.2.
 - **#201 U1.13→U7.4 and #203 U7.4→J1.B7 still fail on the whole board ("blocked: no path").** Routed alone
   on the same model (scope USB-), all 4 USB- connections route:
@@ -222,10 +222,10 @@ router 5.1 s. Detour max 1.27, > 1.5: 0; ghost max 1.28, 0. Identical to main wi
 
 ## PNG
 `/home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-a52787a1d9b26a2bb/docs/benchmarks/progress/2026-11-01-m4-A6-private-badge-b.png`
-(not committed). Caption: "A6: 210/241 connections, 48/66 nets, partial 0, failed 31, vias 175, arcs 182,
-zero slack 0, iters 23, pcb 3e7e66f862a7 / DRC routing 0 preexisting 4, unconnected 35, outside pads 1698.5
-vs hand 3574.7 mm, F.Cu 975.6 / B.Cu 953.1 mm, router 80.26 s on 4 threads / detours > 1.5: 8 (max 4.6) —
-GND 4.6, Net-(J1-CC1) 3.4, Net-(U1-EN{slash}CHIP_PU) 2.0 vs DRC-feasible reference (ghost fallbacks 0,
+(not committed). Caption: "A6: 210/241 connections, 48/M nets, partial 0, failed 31, vias 175, arcs 182,
+zero slack 0, iters 23, pcb (private pin) / DRC routing 0 preexisting 4, unconnected 35, outside pads 1698.5
+vs hand (hand length) mm, F.Cu 975.6 / B.Cu 953.1 mm, router 80.26 s on 4 threads / detours > 1.5: 8 (max 4.6) —
+GND 4.6, Net-(J1-CC1) 3.4, Net-(U1-EN) 2.0 vs DRC-feasible reference (ghost fallbacks 0,
 ghost < 2 mm 55) / stop_reason: no gain".
 
 ## Concerns

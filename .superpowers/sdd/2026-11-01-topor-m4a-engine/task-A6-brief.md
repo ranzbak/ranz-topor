@@ -19,7 +19,7 @@
   entered from the pad CENTRE (a 0.2 mm wire at the centre is 0.175 mm from the GND pads U7.3/U7.8, clearance 0.2). A DRC-clean entry
   exists off-centre: wire centre at y ∈ [121.530, 121.570] (40 µm corridor inside the pad), leaving through the tip. The stub must be
   allowed to START off-centre inside the own pad (copper of the stub overlaps the own pad; KiCad connectivity: the stub end inside the
-  pad connects) — reuse search.rs `edge_window`. Without this 231/231 is unreachable. Checker-verified before use.
+  pad connects) — reuse search.rs `edge_window`. Without this N/N is unreachable. Checker-verified before use.
 - `exit_stubs` auto|all|off (schema since 0.5.0 → live key). eprom byte-identical expected (THT only) — report.
 - PNG `--milestone m4 --task A6 --board private-badge-b`.
 

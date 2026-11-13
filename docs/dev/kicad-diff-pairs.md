@@ -73,8 +73,8 @@ Sources and conventions:
   (`pns_router.cpp:343`).
 - DRC: `DRC_ENGINE::IsNetADiffPair` (`drc_engine.cpp:2492`) returns false; the pair tests skip the net;
   `inDiffPair('*')` is false for it (docs, "Custom design rule functions").
-- Real example: a net `/mcu/STRAP_8` matches the suffix rule (skips `8`, `_`, hits `P`) but
-  `/mcu/STRAN_8` does not exist, so it is not a pair.
+- Real example: a net `/mcu/BOOTSTRAP_5` matches the suffix rule (skips `5`, `_`, hits `P`) but
+  `/mcu/BOOTSTRAN_5` does not exist, so it is not a pair.
 - A pair is **not** limited to one netclass. For router sizes, the queries use the start net as A and the coupled net
   as B (`pns_kicad_iface.cpp:1236-1268`), so the start net's netclass decides. NOT VERIFIED what happens when the
   halves have different netclasses in the DRC (the engine evaluates per item).

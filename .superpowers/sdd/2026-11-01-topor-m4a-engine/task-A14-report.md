@@ -28,7 +28,7 @@ Snapshot dangling ends (harness model `dangling_ends`): eprom 0, wiccon 0, priva
 | eprom | 27/27, vias 0, outside 64.628 mm, routing_new 0, unconnected 0, router 0.21 s, detour max 1.147, >1.5: 0 | identical |
 | wiccon | 62/62, failed 0, vias 36, outside 1367.278 mm (bound 1380, headroom 12.7), routing_new 0, unconnected 0, router 2.84 s, detour max 1.27 >1.5: 0 | identical (outside 1367.3, router 3.63 s while tests ran) |
 | private-badge-b | 201/243, failed 42, vias 174, routing_new 0, unconnected 41, detour (ref) max 22.3, >1.5: 8 | identical (router 221.8 s, stop no gain, DRC preexisting 4) |
-private-badge-b detour median 1.000 p90 1.296. A first private-badge-b run executed concurrently with the pytest suite timed out (186/231); not a valid number, re-run alone matches base exactly. No PNG attached: no snapshot number moved (fixture image would be a test pattern).
+private-badge-b detour median 1.000 p90 1.296. A first private-badge-b run executed concurrently with the pytest suite timed out (186/N); not a valid number, re-run alone matches base exactly. No PNG attached: no snapshot number moved (fixture image would be a test pattern).
 
 ## Tests
 - `cargo test --release`: all green except `route_detour_ref::reference_is_feasible_not_topological`, which FAILS ON MAIN 946530c too (verified in a clean worktree: ghost length == reference). Not mine.

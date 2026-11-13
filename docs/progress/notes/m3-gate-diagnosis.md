@@ -51,12 +51,12 @@ outside 64.628 mm, no zero-slack, converged, 0.21 s).
 
 ## Item 2 — private-badge-b: router_s 120 s (gate ≤ 65 s with wall_clock_s 60)
 
-**Evidence.** (a) Gate options, 4 threads, this machine: iteration 1 does not finish in 60 s (0/231; T11 on a quiet machine:
-164/231 in iteration 1). Counters: search 379 runs, 140 ms/run, 268 k clearance candidates/run; **ghost 77 runs, 607 ms/run,
+**Evidence.** (a) Gate options, 4 threads, this machine: iteration 1 does not finish in 60 s (0/N; T11 on a quiet machine:
+164/N in iteration 1). Counters: search 379 runs, 140 ms/run, 268 k clearance candidates/run; **ghost 77 runs, 607 ms/run,
 20 M candidates/run (433 per bend query)** = 46.7 s CPU of the 60 s. (b) Empty graph, 1 thread: search total 36.7 s (4 runs
-> 0.5 s, max 24.3 s: #201 U1.13→U7.4), **ghost total 759 s** (64 runs > 1 s, max 24.8 s), ghost `None` for **166 of 231**
+> 0.5 s, max 24.3 s: #201 U1.13→U7.4), **ghost total 759 s** (64 runs > 1 s, max 24.8 s), ghost `None` for **166 of N**
 connections although the search finds 212 of them in ms (e.g. #150 search 9 ms Found, ghost None in 0 ms; #173 search 2 ms,
-ghost None after 20.4 s). (c) Replay, 4 threads, no deadline: iteration 1 = 76.6 s, 209/231 routed, **149/231 invalidated
+ghost None after 20.4 s). (c) Replay, 4 threads, no deadline: iteration 1 = 76.6 s, 209/N routed, **149/N invalidated
 and re-searched sequentially**, 305 overused edges, 164 vias; 22 remain blocked and are static (13 GND pour completions at
 0.5 mm width from U4/U5/U7/J3 pads, #191 U4.8→R13.1 at 0.5 mm, net65/net80 at U7.4/U7.9: 0.625×0.25 mm pads, the terminal
 cannot be left or entered — same class as item 1's escape, geometry not negotiation). (d) Harness: `bench.py:281-289` gives
@@ -67,7 +67,7 @@ every DRC-loop round (and the zero-slack rejection re-run) a fresh `wall_clock_s
 ghost every statically-unfit edge (`cap < w + ε + end_gaps·max(c, c_e)`) while the real search crosses such edges as overuse
 (`leave_vertex` `search.rs:1019`, face loop `:1215`). A pad's own polygon spokes/sides are "unfit" for its own net (same-net
 corner vertices still count as clearance gaps in `GEdge::end_gaps` `graph.rs:70`), so the ghost cannot leave most SMD pads ⇒
-`None` (166/231), ⇒ `negotiate.rs:240` marks the connection **dead** on a false premise, no blockers, no rip-up, no partial
+`None` (166/N), ⇒ `negotiate.rs:240` marks the connection **dead** on a false premise, no blockers, no rip-up, no partial
 stubs. When the ghost does explore it is a full geometric A* (`los` + clearance candidates per expansion) whose soft cost
 `GHOST_BLOCK_NM = 1e10` makes it visit the **entire reachable component** (f < 1e10) before conceding — 10–25 s per run with
 long apex chords (RC3 of the M2 review, `O(V)` candidates per chord). `hard()` also includes dynamic facts (`along`, caps shrunk
@@ -80,7 +80,7 @@ is per plan and not the problem — reaching it is.
 **RC2c — P4 invalidation is too coarse.** `path_valid` (`negotiate.rs:333`) rejects a path when any edge of any touched face
 moved (`faces_unchanged_since`, every `insert_path`/`set_site` bumps whole faces) **or** a site activated since the freeze lies
 within `rho_max + w/2 + ε` of the bbox of all faces of the whole path — `rho_max` is the largest `r + clr` of the layer (THT
-hole + 0.35 mm), the bbox of a 20 mm path covers much of the board, and iteration 1 activates 164 vias ⇒ 149/231 rejected and
+hole + 0.35 mm), the bbox of a 20 mm path covers much of the board, and iteration 1 activates 164 vias ⇒ 149/N rejected and
 re-searched one by one (`O(V' log V')` each, ~0.1–0.25 s) ≈ 24 s sequential (T11) — the parallel phase is wasted.
 
 **RC2d — harness budget.** See (d). Not a relaxation question: with an anytime engine the budget must be the run's.
@@ -136,7 +136,7 @@ per-iteration `search / commit / metrize / check` seconds to the report (`RouteR
 
 **Expected private-badge-b after F1–F5 (estimate, quiet machine, 4 threads):** iteration 1 ≈ 3–4 s parallel search (36.7 s CPU minus
 #201's 24 s, ÷ 4) + ≈ 5 s commit + metrize; 2–4 further iterations on the active set; ≈ 20–35 s per `route()`; with F5 the gate
-sees `router_s ≤ 60 + final pass` even when a DRC round repeats. Routed stays ≈ 209/231 (22 static). Risk flag: if metrize
+sees `router_s ≤ 60 + final pass` even when a DRC round repeats. Routed stays ≈ 209/N (22 static). Risk flag: if metrize
 proves > 20 s (F7), a second round is still needed — report rather than tune.
 
 ## Requirement / ruling items for main (coordinator: escalate, do not decide)

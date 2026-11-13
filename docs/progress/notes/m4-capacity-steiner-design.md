@@ -5,7 +5,7 @@ implement and test. Inputs: `m3-detour-diagnosis.md` (M4-D1/D3, withdrawn F6), `
 `search.rs` (`margin_of`, `hard`, `step_cost`, `leave_vertex`), `wires.rs` (terminals, hand T-splits), `relax.rs`,
 `negotiate.rs:40-55, 510-528` (`rip`), 46 rows 6/17/17b, 12 §1, 22 §3, 25 §3. Note only; no engine code. A parallel F
 worker (DX) classifies the 67 private-badge-b failures at the gate options; the numbers below are the committed 0.3.0 run
-(private-badge-b 60 s, 148/231: 45 timeout, 16 "blocked: no path (wall, capacity or via sites)", 8 "infeasible: wall grazed /
+(private-badge-b 60 s, 148/N: 45 timeout, 16 "blocked: no path (wall, capacity or via sites)", 8 "infeasible: wall grazed /
 pad-pad / site-site", 5 "self-check: hole gap", 3 "sketch: inconsistent slot path"; wiccon 62/62, vias 37, outside
 1373.55 mm; eprom 27/27, 64.628 mm) and the M3 diagnosis cases (#34, #45, #197, #207, #208, wiccon #52). Units: mm in
 the text, nm in the code; `ε` = `rules.eps` (5 µm), `c` = the connection's clearance, `w` its width.
@@ -268,7 +268,7 @@ Options (every judgement call; `[expert]` keys map 1:1 to `Options.expert` field
 
 Expected effect per board (DX measures; not-worse bounds are the acceptance of each S task):
 
-| rule | private-badge-b (231) | eprom (27/27, ≤ 64.7 mm, guard ≤ 67.8 mm) | wiccon (62/62, vias ≤ 37, ≤ 1380 mm) |
+| rule | private-badge-b (N) | eprom (27/27, ≤ 64.7 mm, guard ≤ 67.8 mm) | wiccon (62/62, vias ≤ 37, ≤ 1380 mm) |
 |---|---|---|---|
 | §1 capacity | pad-exit "no path" + overuse escapes (#34/#45/#197/#207 class); `overuse_edges` 192 → < 50 | two-layer identical (F6 measured), guard green via `W_n` | vias → ≈ 30-33, outside −5 mm (F6) |
 | §2 Steiner | detours > 1.5: 12 → ≤ 6; escape vias of sibling connections | 2 two-connection nets may shorten | not worse (junction ≤ via) |

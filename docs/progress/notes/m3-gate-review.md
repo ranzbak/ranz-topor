@@ -4,7 +4,7 @@ Reviewed at `c0d4b5c` (main; engine unchanged since `4bb63a1`, wheel built 14:52
 note changed. Re-run here: `cargo test --release` for `route_layers` 14, `negotiate_loop` 11, `route_threads` 3,
 `route_engine` 28, `via_sites` 6, `search_layers` 12, `multigraph` 4, lib 9 — all green; `tests/gate/test_m3_gate.py -k
 "eprom or wiccon"` 2 passed (wiccon 62/62, signal 57/57, vias 37, drc_new 0, unconnected 0, 3.30 s, 26 it, zs 0);
-`tests/test_locked_copper.py` 4 passed incl. the gate-marked full route (private-badge-b 148/231, locked-vs-router violations 0,
+`tests/test_locked_copper.py` 4 passed incl. the gate-marked full route (private-badge-b 148/N, locked-vs-router violations 0,
 preexisting 4 clearance, routing_new 0).
 
 ## 1. Complexity vs 45 §5a (every new/changed loop)
@@ -131,7 +131,7 @@ Fix shape (M4, one S task + profile): (a) per-layer static "free radius" per fac
 whose sleeve lies inside the free radii skips the candidate scan; (b) memoise `clearance_bend` per search on `(portal edge,
 side, apex vertex)` — the same chord is rebuilt for every slot of an edge; (c) order candidates by chord parameter and stop at
 the first violation instead of scanning all (the `offer` closure already keeps the minimum). Expected ≥ 5× on private-badge-b;
-measured target per M3-R14 (231/231, ≤ 10 min).
+measured target per M3-R14 (N/N, ≤ 10 min).
 
 ## Findings
 
@@ -163,5 +163,5 @@ measured target per M3-R14 (231/231, ≤ 10 min).
 - **D-9** `pourcheck.rs:186-195` capsule stamps scan the full bbox (long diagonal tracks: `O(L²/res²)`); scanline per row;
   and a per-run cell budget for boards with many pours (no deadline inside `check_pour_reach`).
 - **D-10** `multigraph.rs:381-387` `alloc_legs` sorts and `remove(0)` per call; use a `BTreeSet` free list.
-- **D-11** Slot-search per-expansion cost (§8), private-badge-b 231/231 (M3-R14), fine-pitch entry (#201), detour items M4-D1..D4
+- **D-11** Slot-search per-expansion cost (§8), private-badge-b N/N (M3-R14), fine-pitch entry (#201), detour items M4-D1..D4
   (M3-R15) — as STATE.md M4 carry-over.

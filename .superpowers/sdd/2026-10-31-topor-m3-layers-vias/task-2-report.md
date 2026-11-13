@@ -39,8 +39,8 @@ Status: DONE_WITH_CONCERNS. Commit 4010c90 on branch worktree-agent-a141224bcf3a
   while it asserted only the planar search; it now asserts the ghost (discriminating).
 
 ## private-badge-b (existing model JSON, route_probe --quiet, single run, machine shared with other workers)
-- Before (base 1087a9f): router 60.089 s, routed 0/231 (best iteration 1, wall-clock cap hit), 2 blocked searches printed.
-- After: router 60.458 s, routed 0/231, 4 blocked searches printed.
+- Before (base 1087a9f): router 60.089 s, routed 0/N (best iteration 1, wall-clock cap hit), 2 blocked searches printed.
+- After: router 60.458 s, routed 0/N, 4 blocked searches printed.
 - No speedup measured: this run is bound by the 60 s cap with 0 routed in both builds, and the M2 time split (34 s in 59 ghost
   searches) was not reproduced; perf was unusable here so the remaining cost centre is not identified. The candidate bound
   (<= expansions*33*64) holds on the 200-pad ghost test, but the private-badge-b wall time is dominated by something other than the
@@ -56,9 +56,9 @@ Timing, private-badge-b model, same options, same machine, run back-to-back:
 
 | build | router s | routed | iterations | timed out |
 |---|---|---|---|---|
-| M2 1087a9f | 45.7 | 24/231 | 9 | no |
-| main after merge (739bafb, my first sleeve version) | 60.3 | 24/231 | 2 | yes |
-| 85c21fb (this fix) | 16.9 | 24/231 | 9 | no |
+| M2 1087a9f | 45.7 | 24/N | 9 | no |
+| main after merge (739bafb, my first sleeve version) | 60.3 | 24/N | 2 | yes |
+| 85c21fb (this fix) | 16.9 | 24/N | 9 | no |
 
 Hotspot (instrumented, 739bafb, 60 s run): ghost 57.2 s in 17 runs (3.4 s/run, 509 expansions/run, 6.6 ms/expansion, ~17 clearance_bend
 queries per expansion, 393 candidates/query); planar 2.8 s in 59 runs. So the M2 claim (ghost searches dominate) holds. Inside it:

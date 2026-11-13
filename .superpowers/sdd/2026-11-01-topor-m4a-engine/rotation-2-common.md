@@ -3,7 +3,7 @@
 Read in this order: worker-contract.md, global-constraints.md (same directory), this file, your task brief.
 
 ## State at base 789e050 (= engine ea1f064), quiet machine, gate options (600 s, threads 4, partial_routes False, rip all)
-private-badge-b 3e7e66f862a7: 204/241 routed (first pass 231), failed 37, vias 196, routing_new 0, preexisting 4, unconnected 39,
+private-badge-b (private pin): 204/241 routed (first pass N), failed 37, vias 196, routing_new 0, preexisting 4, unconnected 39,
 24 it, stop "no gain", router 120 s, runtime 146 s; detour (DRC-feasible reference, A7) med 1.000 p90 1.296 max 4.62, > 1.5: 9
 (U1-EN 4.6, VCC 4.2, TACT_B 3.6); ghost max 4.66, > 1.5: 15.
 eprom-to-kernal: 27/27, 0 vias, outside 64.628 mm, ref max 1.1, 0.04 s. wiccon-2023: 62/62, 34 vias, outside 1363.375 mm, ref max 1.3,

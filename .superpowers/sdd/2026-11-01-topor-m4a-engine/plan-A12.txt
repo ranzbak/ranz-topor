@@ -2,5 +2,5 @@
 
 - [ ] **Step 1:** `tests/gate/test_m4_gate.py::test_m4_gate_private_badge_complete` with the Global Constraints numbers (locked-copper helpers reused; threads 1/2/4 + repeat; pcb sha printed). Run → record.
 - [ ] **Step 2:** if failing: one F note the private-badge-b completion diagnosis (note removed: private board) (where the remaining connections go: capacity, entry, time; per-iteration profile), fix tasks (S), re-run; still failing → commit, numbers + profile to STATE, escalate (no relaxation).
-- [ ] **Step 3:** PNG `--task A12 --board private-badge-b`. Commit `test(gate): M4 private-badge-b 231/231 (+ fixes)`.
+- [ ] **Step 3:** PNG `--task A12 --board private-badge-b`. Commit `test(gate): M4 private-badge-b N/N (+ fixes)`.
 

@@ -11,7 +11,7 @@ test and benchmark harness in `harness/`. Linux only for now.
 
 | Works now, from inside KiCad 10 | Comes in 0.5.0 (milestone M4a: the engine) |
 |---|---|
-| **Topor: route** button: pre-flight findings (code, cause, fix), options, progress with Cancel, before/after preview, **Accept = one undo step** / Reject = nothing changed | private-badge-b 231/231 routed, 0 router DRC, ≤ 10 min (now 148/231 in 60 s) |
+| **Topor: route** button: pre-flight findings (code, cause, fix), options, progress with Cancel, before/after preview, **Accept = one undo step** / Reject = nothing changed | private-badge-b n/n routed, 0 router DRC, ≤ 10 min (now 148/n in 60 s) |
 | Whole board or a selection (between / touching selected footprints); existing copper kept, or ripped and re-routed; locked copper respected | priorities used for routing order (`@N` markers, `topor_pN` net classes, `[nets] priority` — computed and reported now) |
 | Self-documenting `topor.toml` per project, generated [reference](docs/user/configuration.md); every finding names the KiCad menu or the key to change | pad exit stubs for fine pitch, same-net T-junctions, via rules from the board setup, bounded via relaxation, layer costs |
 | Result verified by `kicad-cli` DRC on a copy before you decide; report folder (report, preview, DRC, log) per run | engine-side `do_not_touch` / `ignore_pads` options (applied by the plugin's scope now) |
@@ -54,14 +54,14 @@ What works on this branch:
 
 The board ladder at commit `121e3eb` (headless, `tools/route_board.sh`, judged by `kicad-cli` DRC after a zone
 refill; "unconnected" counts DRC unconnected items, the hand-routed board's own count in brackets).
-`private-badge-b` in this and the tables below is a 2-layer badge (231 connections, USB-C, arcs) whose design files
+`private-badge-b` in this and the tables below is a 2-layer badge (a few hundred connections, written n, USB-C, arcs) whose design files
 are not public; its rows stay as measurements, the public stand-in for new runs is esp-rust-board:
 
 | Board | Routed | Unconnected (hand) | New routing DRC errors | Vias |
 |---|---|---|---|---|
 | eprom-to-kernal | 27/27 | 0 (0) | 0 | 0 |
 | wiccon-2023 | 60/60 | 0 (0) | 0 | 23 |
-| private-badge-b | 189/231 | 47 (4) | 0 | 116 |
+| private-badge-b | 189/n | 47 (4) | 0 | 116 |
 | qmtech | 346/426 | 85 (0) | 0 | 195 |
 
 ### The topological core inside KiCad (K1)
@@ -83,13 +83,13 @@ headless harness on the same board (engine at K1):
 | Board | Live plugin: routed / unconnected / routing_new / vias | Harness | Same? |
 |---|---|---|---|
 | wiccon-2023 | 60/60 / 0 / 0 / 23 | 60/60 / 0 / 0 / 23 | yes |
-| private-badge-b | 184/231 / 52 / 0 / 110 | 189/231 / 47 / 0 / 116 | no: the copper-graphics polygons differ by < 0.5 µm (both contain KiCad's copper); the plugin's engine input with the harness's polygons routes 189/116 |
+| private-badge-b | 184/n / 52 / 0 / 110 | 189/n / 47 / 0 / 116 | no: the copper-graphics polygons differ by < 0.5 µm (both contain KiCad's copper); the plugin's engine input with the harness's polygons routes 189/116 |
 | qmtech | 349/426 / 84 / 0 / 206 | 346/426 / 85 / 0 / 195 | no: the net numbering differs (KiCad's API has no net codes, the plugin numbers nets by sorted name); the plugin's engine input renumbered with pcbnew's codes routes 346/195 |
 
 Every other part of the engine input is now identical between the plugin and the harness (rules, widths, net
 classes and priorities, pads, pours, zone connections, keepouts, teardrops); the remaining differences are the
 router's sensitivity to the copper-graphics vertices and to the net numbering, not plugin errors. The ladder above
-is unchanged by K1 (eprom 27/27, wiccon 60/60, private-badge-b 189/231, qmtech 346/426, routing_new 0).
+is unchanged by K1 (eprom 27/27, wiccon 60/60, private-badge-b 189/n, qmtech 346/426, routing_new 0).
 
 
 
@@ -197,7 +197,7 @@ Scorecard (same setup as M-B1: best of 5 runs, cut at 600 s of router time; defa
 Per cycle the errors now fall over the first cycles (median over all runs, private-badge-b 56.5 → 49 → 47.5 → 45;
 qmtech 94 → 77.5 → 80.5 → 77 → 75); before, the violations of the later cycles grew (private-badge-b median 240 → 446).
 On private-badge-b the default run's 5 more unconnected items are GND pour joins after the refill (stub and zone
-pieces), not signal connections: the engine routes 222 of 231 in every run. On qmtech about 40 % of what is left
+pieces), not signal connections: the engine routes 222 of n in every run. On qmtech about 40 % of what is left
 is at pad exits (M-C). Still open: the crossing rules leave traces of net trees with branch points alone, and a
 trace drawn by force can still run over other copper for a millimetre or two.
 
@@ -318,7 +318,7 @@ Scorecard (`harness.score_runs`: cpu 2400 s, 4 threads, default run + seeds 1–
 |---|---|---|---|---|---|---|
 | eprom-to-kernal | 100 / 100 | 100 | 100 | 27 / 27 | 0 / 0 | 0 / 0 of 6 |
 | wiccon-2023 | 100 / 100 | 100 | 100 | 60 / 60 | 0 / 0 | 0 / 0 of 6 |
-| private-badge-b | 96.7 / 93.8 | 94.8 [91.9–96.7] | 91.0 [91.0–92.4] | 230 / 222 of 231 | 24–32 / 19–21 | 2 / 0 of 6 |
+| private-badge-b | 96.7 / 93.8 | 94.8 [91.9–96.7] | 91.0 [91.0–92.4] | 230 / 222 of n | 24–32 / 19–21 | 2 / 0 of 6 |
 | qmtech | 95.7 / 91.6 | 95.7 [95.2–95.9] | 91.8 [91.6–92.1] | 426 / 400 of 426 | 29–37 / 22–26 | 6 / 6 of 6 |
 
 All 26 qmtech and 8 private-badge-b pair connections are routed (before: skipped). qmtech HDMI pairs: coupled at the

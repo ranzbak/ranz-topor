@@ -54,7 +54,7 @@ uses) the same pads route direct (see the test).
   Later lines keep the old behaviour; see the decisions below.
 - **`probe_entry` (doc(hidden) test hook):** returns the state point and the los of one exit.
 - `engine/tests/search_entry.rs` (new, 2 tests) and `engine/tests/fixtures/private-badge-b-usb-crop.json` (39 KB). The
-  fixture is a crop of the harness model export of snapshot 3e7e66f862a7: a window around the USB-C corner, pads / vias
+  fixture is a crop of the harness model export of snapshot (private pin): a window around the USB-C corner, pads / vias
   / holes inside, window outline, no pours or kept copper. It is made by `engine/tests/fixtures/crop_model.py`
   (dev helper, committed).
 - Big-O is stated in each doc comment. Every new loop is bounded: intervals ≤ candidates, bends ≤
@@ -124,7 +124,7 @@ uses) the same pads route direct (see the test).
 All runs use gate options (`wall_clock_s` 600, `partial_routes` false, threads 4), `run_bench rip=all`. The
 machine was shared: load average 23–30 on 8 cores, so times are noisy; counts are exact.
 
-### private-badge-b 3e7e66f862a7
+### private-badge-b (private pin)
 | | main cba0e2a | A2 |
 |---|---|---|
 | routed / total | 188/255 | **180/239** |
@@ -152,10 +152,10 @@ machine was shared: load average 23–30 on 8 cores, so times are noisy; counts 
 - VCC U3.1→U3.3: **3.29 mm, 0 vias** (main: 31.0 mm, 4 vias).
 - Failed set by (net, from, to): 33 fixed, 25 newly failed, net −8. The newly failed are mostly negotiation
   effects (I2C / VCC / GND completions).
-- The gate is not met. 231/231 still needs A4, A6+NX, HC and A5.
+- The gate is not met. N/N still needs A4, A6+NX, HC and A5.
 - The PNG run reproduced the gate numbers exactly (deterministic).
 
-Empty-graph search (`gate_diag --iters 0`, static, all 231 connections):
+Empty-graph search (`gate_diag --iters 0`, static, all N connections):
 
 | | main | A2 |
 |---|---|---|
@@ -217,14 +217,14 @@ Not worse by every gate number. The length sits only 0.64 mm under its bound: a 
 `/home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-ae6b4e0b56c729daa/docs/benchmarks/progress/2026-11-01-m4-A2-private-badge-b.png`
 (not committed)
 
-Caption: "A2: 180/239 connections, 39/66 nets, partial 0, failed 59, vias 146, arcs 184, zero slack 0, iters 32,
-pcb 3e7e66f862a7 / DRC routing 0 preexisting 4, unconnected 60, outside pads 1374.8 vs hand 3574.7 mm, F.Cu
+Caption: "A2: 180/239 connections, 39/M nets, partial 0, failed 59, vias 146, arcs 184, zero slack 0, iters 32,
+pcb (private pin) / DRC routing 0 preexisting 4, unconnected 60, outside pads 1374.8 vs hand (hand length) mm, F.Cu
 839.1 / B.Cu 737.5 mm, router 127.00 s on 4 threads / detours > 1.5: 11 (max 2.7) — USB+ 2.7, GND 2.3, GND 2.1
 / stop_reason: no gain".
 
 ## Concerns
 1. U7.2/4/7/9 are DRC-infeasible from the pad centre at 0.2 mm. A6 must attach off-centre, in the 40 µm in-pad
-   corridor. Otherwise the M4a gate (231/231) is unreachable for these 5 connections.
+   corridor. Otherwise the M4a gate (N/N) is unreachable for these 5 connections.
 2. Spec deviations: the los rule is root-only (the M2 guard needs it), `LOS_STALL_CAP` is 2, the U1.13→U7.4
    assertion allows ≤ 2 vias at 0.15 mm, and the corner-tangent discretisation is not implemented.
 3. wiccon outside-pad length is 1379.36 mm against the 1380 mm bound: within the bound, but with only 0.64 mm

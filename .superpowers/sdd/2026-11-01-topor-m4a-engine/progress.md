@@ -48,7 +48,7 @@ Briefs: task-<ID>-brief.md (plan text extracted + coordinator additions). Report
   default 1 unless measured as a gain inside the 600 s budget — cost if wrong: an unused completion lever.
 - Ruling A-C11 (DX §1): private-badge-b gate predicate = routed == connections_total (incl. pour-completion connections; 255 today),
   failed == partial == 0, unconnected_items == 0, routing_new == 0, runtime ≤ 600 s; `RouteResult.connections_initial` (first-pass
-  decomposition = 231) printed and all 231 first-pass connections routed — cost if wrong: none (stricter than "231/231").
+  decomposition = N) printed and all N first-pass connections routed — cost if wrong: none (stricter than "N/N").
 - Ruling A-C12 (A3 concern 1): `[search] dangling_ends` ∈ {continue (default, G1 continuation), fixed (M3: hand stub kept as fixed
   copper, route from pads), drop (rip the dangling hand stub in scope)}; engine `Options.dangling_ends` takes the same strings (A14) —
   cost if wrong: one choice's semantics.
@@ -61,7 +61,7 @@ Briefs: task-<ID>-brief.md (plan text extracted + coordinator additions). Report
   credit min(r, w/2) and wall term in copper terms (note §1 deviations, numbers in task-A4-report.md) — cost if wrong: one default.
 - Ruling A-C15 (A11): `[layers] pour_cut_cost_mm` default 0.0 (engine + schema), not the plan's 1.0: 1.0 is worse on eprom (outside
   65.874 > 64.7 mm gate) and wiccon (58/61, 83 vias, 35.6 s); on private-badge-b 1.0 keeps GND items in the pour (lost 17 → 2) but routes less
-  (164 vs 171/231 under load). Revisit only with a value sweep — cost if wrong: extra pour-completion passes on private-badge-b.
+  (164 vs 171/N under load). Revisit only with a value sweep — cost if wrong: extra pour-completion passes on private-badge-b.
 - Ruling A-C16 (A2): los convergence rule applied only to lines leaving a terminal (everywhere breaks the M2 front-only guard,
   92.35 > 67.8 mm); LOS_STALL_CAP 2 internal; roundrect corner-tangent discretisation not done (not needed after state_point shrink) —
   cost if wrong: residual los runaway away from terminals (detour stats watch it).
@@ -91,16 +91,16 @@ Briefs: task-<ID>-brief.md (plan text extracted + coordinator additions). Report
   (documented, user-visible doc string says so).
 
 ## Baseline (0.4.0 engine, main 6ea3040)
-private-badge-b gate options (600 s, threads 4) on 6ea3040, coordinator run: 172/231, failed 59, vias 178, 3 iterations, stop timeout,
+private-badge-b gate options (600 s, threads 4) on 6ea3040, coordinator run: 172/N, failed 59, vias 178, 3 iterations, stop timeout,
 router 600.3 s, runtime 659.8 s, routing_new 0, preexisting 4 (clearance, hand copper), unconnected 69 (new), via reduction skipped
-(timeout), detour median 1.018 p90 1.484 max 4.229 >1.5: 16. Main's run (scratch/v040): 171/231, 60 failed, 152 vias, 2 it, max detour
+(timeout), detour median 1.018 p90 1.484 max 4.229 >1.5: 16. Main's run (scratch/v040): 171/N, 60 failed, 152 vias, 2 it, max detour
 16.175 (GND SW1.0→pour 14.07 vs 0.87), USB- J1.A7→J1.B7 4.4×, VCC U3.1→U3.3 3.0×.
 
 ## Log
 - Group 1 (A0, A1, A9, AP; sonnet worktree workers) all DONE(_WITH_CONCERNS); merged afcd794 (A1 1bcbe3b), a51815d (A0 0a6fa5f),
   48e954f (A9 20be763+db325b4), 7d87e7e (AP ae72705+d673dd3); no conflicts. clippy clean, docs_gen --check clean, maturin develop from main.
 - A1: bend_ok (not clearance_bend) was ~86 % of planar search; memo + cached candidates + face clear radius (rarely fires), exact:
-  candidates/query 109→11, search 775→28 ms/run, private-badge-b 60 s 86→175/231 (6 it); eprom/wiccon/nametag byte-identical; wiccon 9.7→2.9 s @4.
+  candidates/query 109→11, search 775→28 ms/run, private-badge-b 60 s 86→175/N (6 it); eprom/wiccon/nametag byte-identical; wiccon 9.7→2.9 s @4.
   Gate options: 188/255 (bench count incl. pour completion), failed 67, vias 199, routing_new 0, pre 4, unconnected 62, router 144 s
   (stop rule, not timeout), runtime 190 s, detour med 1.003 p90 1.52 max 11.6 (VCC U3.1→U3.3), 20 > 1.5. PNG
   docs/benchmarks/progress/2026-10-31-m4-A1-private-badge-b.png. Concern: anytime_timeout_emits_committed_subset (0.5 s) load-flaky.
@@ -113,7 +113,7 @@ router 600.3 s, runtime 659.8 s, routing_new 0, preexisting 4 (clearance, hand c
   commit (BOARD_CHANGED_DURING_RUN); cancel during DRC rounds/preview export not killing kicad-cli (bounded by timeout); live UNVERIFIED rows.
 - A3 DONE 99c7aab (merge f15895b): note docs/progress/notes/m4-capacity-steiner-design.md; concerns → A-C12, wiccon outside headroom
   6.4 mm (stubs must report delta), Steiner changes eprom (not-worse, not identity).
-- DX DONE fcc66c4 + 5a3399c (profile-only IterProfile) (merge 50103c8): note the private-badge-b completion diagnosis (note removed: private board). 231 = first
+- DX DONE fcc66c4 + 5a3399c (profile-only IterProfile) (merge 50103c8): note the private-badge-b completion diagnosis (note removed: private board). N = first
   pass, 255 = after 3 pour-completion passes. 67 failed: own-pad/fine-pitch capacity 23 (12 need a neck), metrization rejects 37
   (taut pinch 11, wall grazed 7, NPTH hole clearance 6, via-site pair 4, sketch 4, self-check 3, other 2), pour completion 5, dynamic
   2; 0 "no room". Negotiator holds 205–215 paths/it, 156–175 survive metrization. Commit phase 44 % runtime. No option is a lever.
@@ -135,9 +135,9 @@ router 600.3 s, runtime 659.8 s, routing_new 0, preexisting 4 (clearance, hand c
     max 2.71, 11 > 1.5; VCC U3.1→U3.3 31 mm/4 vias → 3.29 mm/0; wiccon 62/62 vias 35, 1379.36 mm (0.64 mm headroom!). → A-C16.
   - HC 2b359ba/fca57b2/86e839b: NPTH clearance via BoardModel::pad_own_clearance (CDT kept first anchor per position = the pad's 0.2
     mm), slot holes as capsules in the Checker; arc_arc correct, oracle fixed (1-D profile scan); 44/45 TopoR rows, placement non-goal.
-    private-badge-b (600 s, loaded, timeout) 170 → 178/231, hole failures 8 → 0. eprom/wiccon identical.
+    private-badge-b (600 s, loaded, timeout) 170 → 178/N, hole failures 8 → 0. eprom/wiccon identical.
   - A7 f7983f0: reference search per connection (fixed copper, full clearance) under budget pct; eprom ref max 1.147, wiccon 1.434, 0
-    fallbacks; private-badge-b 60 s: 120/231 ghost fallbacks at 10 %; at 100 % it ate the budget. Reference = search est_len (not metrized).
+    fallbacks; private-badge-b 60 s: 120/N ghost fallbacks at 10 %; at 100 % it ate the budget. Reference = search est_len (not metrized).
   - A10/A11 4162039/3e7a9ae: predefined vias, allowed drills, via-in-pad, per-net via cost (plugin by netclass > by priority >
     via_cost_mm), engine/preflight agreement test; layer costs default off (A-C15). eprom/wiccon identical.
 - Main messages: detours got worse after A1 (20 > 1.5) — hairpin in A1 PNG is VCC U3.1→U3.3 (11.6×, 31 mm/4 vias), fixed by A2
@@ -149,7 +149,7 @@ router 600.3 s, runtime 659.8 s, routing_new 0, preexisting 4 (clearance, hand c
   - A6 alone: private-badge-b 210/241, failed 31, detour max 4.56 (8 > 1.5). A5 alone: 198/243 failed 45 (worker base 196/246), wiccon 34 vias.
     A16: wiccon identical, A13: wiccon outside −10.8 mm, detour max 1.449 → 1.243. A14: no snapshot change (private-badge-b 31 dangling ends
     = locked GND, not exercised).
-- Verify @ea1f064 (quiet machine, coordinator): private-badge-b gate options 204/241 (first pass 231), failed 37, vias 196, routing_new 0,
+- Verify @ea1f064 (quiet machine, coordinator): private-badge-b gate options 204/241 (first pass N), failed 37, vias 196, routing_new 0,
   pre 4, unconnected 39, 24 it, "no gain", router 120 s, runtime 146 s, detour ref med 1.000 p90 1.296 max 4.62 >1.5 9 (U1-EN 4.6,
   VCC 4.2, TACT_B 3.6), ghost max 4.66 >1.5 15. eprom 27/27, 0 vias, 64.6 mm, ref max 1.1, 0.04 s. wiccon 62/62, 34 vias, 1363.4 mm,
   ref max 1.3, 1.56 s, "no gain". PNGs docs/benchmarks/progress/2026-11-01-m4-G3-merged-{private-badge-b,eprom-to-kernal,wiccon-2023}.png.
@@ -179,7 +179,7 @@ Brief additions for every rotation-2 task: rotation-2-common.md (state, private-
   connection_width), PY (sonnet: pytest reds incl. wiccon plugin 63 vs 62), GR (sonnet: ripup growth sweep Q1 + pour_cut sweep),
   DG (opus F: private-badge-b diagnosis round 2). Round 1b after TE: VR (variants, A-C10), DO (detour rip-up phase + item 5 hidden detours).
 - Round 1a results (all loaded 14–39: private-badge-b measured with wall_clock_s 0; base = head counts deterministic):
-  - NT 09229f3: private-badge-b router DRC item = shorting_items JP1.1 (Net-(JP1-A)) ↔ Net-(J3-Pin_22) track; KiCad 10.0.8 rules measured with
+  - NT 09229f3: private-badge-b router DRC item = shorting_items JP1.1 (Net-(JPx-A)) ↔ Net-(Jx-Pin_n) track; KiCad 10.0.8 rules measured with
     kicad-cli (tools/net_tie_drc_probe.py, 15 cases): a tied net's track may touch the tie's net-less bridge anywhere and the other tie
     pad only where the contact lies inside its own tie pad (pads overlap); a gapped tie pad is an ordinary obstacle. Model: tie pad
     exempt only for its own net + nets of touching/overlapping tie pads of the same footprint, drills never; checker = KiCad's exact

@@ -76,7 +76,7 @@ eprom GND pour islands (raster of the B.Cu / F.Cu fills, via a throwaway diagnos
 ### private-badge-b (gate options: wall 600, partial false, threads 4; machine shared, counts only)
 | | pour_cut 0 | pour_cut 1.0 |
 |---|---|---|
-| routed / total | 171 / 231 (failed 60) | 164 / 231 (failed 67) |
+| routed / total | 171 / N (failed 60) | 164 / N (failed 67) |
 | vias | 152 | 192 |
 | stop / iterations | timeout / 2 | timeout / 2 |
 | routing_new / preexisting | 0 / 4 | 1 / 4 |
@@ -86,12 +86,12 @@ eprom GND pour islands (raster of the B.Cu / F.Cu fills, via a throwaway diagnos
 | outside pads | 1398.0 mm | 1262.9 mm |
 | detour max / count > 1.5 | 16.2 / 10 | 3.5 / 11 |
 So on private-badge-b the pour cost does what the diagnosis said (15 fewer GND items cut off the fill, 42 fewer islands), but both runs end in the first pass at the
-wall clock, so completion connections / re-routes cannot be counted; vias +40 and routed -7 in the same time. The M4a gate (231/231) is not reached by A11;
+wall clock, so completion connections / re-routes cannot be counted; vias +40 and routed -7 in the same time. The M4a gate (N/N) is not reached by A11;
 re-measure when A1/A2/A4 (search speed, capacity) have landed, ideally with a value between 0 and 1.
 
 PNG (harness.progress with the A-C3 600 s option patched in at run time): `/home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-a348fe40021811dba/docs/benchmarks/progress/2026-11-01-m4-A11-private-badge-b.png`
-(untracked, not committed). Caption: 175/231 connections, 41/66 nets, partial 0, failed 56, vias 183, arcs 225, zero slack 0, iters 5, pcb 3e7e66f862a7;
-DRC routing 0, preexisting 4, unconnected 71, outside pads 1639.5 vs hand 3574.7 mm, F.Cu 972.7 / B.Cu 864.5 mm, router 600.07 s on 4 threads (loaded machine);
+(untracked, not committed). Caption: 175/N connections, 41/M nets, partial 0, failed 56, vias 183, arcs 225, zero slack 0, iters 5, pcb (private pin);
+DRC routing 0, preexisting 4, unconnected 71, outside pads 1639.5 vs hand (hand length) mm, F.Cu 972.7 / B.Cu 864.5 mm, router 600.07 s on 4 threads (loaded machine);
 detours > 1.5: 18 (max 11.6) — VCC 11.6, USB- 5.2, USB+ 3.6; stop_reason timeout. (pour_cut 0, the default; not a gate result.)
 wiccon numbers did not move with the default (identical sha), so no wiccon PNG.
 

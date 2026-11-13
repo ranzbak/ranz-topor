@@ -9,9 +9,9 @@ Every Python / harness number comes from my own engine build loaded via `PYTHONP
 ## 1. Reproduction
 
 The M3 info config (`wall_clock_s 60, partial_routes False, threads 4`) at base gave `routing_new 1`, a single `shorting_items`:
-`Pad 1 [Net-(JP1-A)] of JP1 on B.Cu` ↔ `Track [Net-(J3-Pin_22)] on B.Cu, length 1.9363 mm`. The base run with
+`Pad 1 [Net-(JPx-A)] of JP1 on B.Cu` ↔ `Track [Net-(Jx-Pin_n)] on B.Cu, length 1.9363 mm`. The base run with
 `wall_clock_s 0` shows the same item. JP1 is `Jumper:SolderJumper-3_P1.3mm_Bridged12_RoundedPad1.0x1.5mm` with
-`net_tie_pad_groups "1,2"` and a copper `fp_poly` bridge between pads 1 and 2. Pad 2 is net Net-(J3-Pin_22). The track leaves pad 2
+`net_tie_pad_groups "1,2"` and a copper `fp_poly` bridge between pads 1 and 2. Pad 2 is net Net-(Jx-Pin_n). The track leaves pad 2
 and runs through pad 1, which sits 0.25 mm away. The engine exempted every pad of a tie group for every net of that group
 (`pad_group_nets`, used in both `obstacle.rs` and `check.rs`). So the router and its self-check accepted copper that KiCad rejects.
 None of these runs reported a `connection_width` item.
@@ -90,15 +90,15 @@ Machine shared: 1-minute load average 16–35 during every run, which is above 6
 
 - private-badge-b gate options (600 s, threads 4, via `harness.progress`, load 16–19, stop "no gain", router 169 s, runtime 261 s): 205/241,
   failed 36, vias 196, `routing_new 0`, preexisting 4 (clearance, U7 hand pads), unconnected 38. The rotation-2 base reference is
-  204/241, unconnected 39. The gate predicate (231/231) is not met; that is another task's job, and completion did not get worse.
+  204/241, unconnected 39. The gate predicate (N/N) is not met; that is another task's job, and completion did not get worse.
 - The private-badge-b 60 s info config (timed out, as designed) gave 200/229, `routing_new 0`.
 - eprom and wiccon outcomes are byte-for-byte the same numbers (neither board has a net tie). Only router_s changed, from load.
 - detours: unchanged (private-badge-b > 1.5: 9, max 4.62 U1-EN; ghost max 4.71 / 15).
 
 Progress PNG: `/home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-af3823b217b46fe3e/docs/benchmarks/progress/2026-11-01-m4-NT-private-badge-b.png`
-(not committed). Caption: "NT: 205/241 connections, 45/66 nets, partial 0, failed 36, vias 196, arcs 232, zero slack 0, iters 24,
-pcb 3e7e66f862a7 / DRC routing 0 preexisting 4, unconnected 38, outside pads 1814.4 vs hand 3574.7 mm, F.Cu 1035.7 / B.Cu 998.9 mm,
-router 168.99 s on 4 threads / detours > 1.5: 9 (max 4.6) — Net-(U1-EN/CHIP_PU) 4.6, VCC 4.2, TACT_B 3.6 vs DRC-feasible reference
+(not committed). Caption: "NT: 205/241 connections, 45/M nets, partial 0, failed 36, vias 196, arcs 232, zero slack 0, iters 24,
+pcb (private pin) / DRC routing 0 preexisting 4, unconnected 38, outside pads 1814.4 vs hand (hand length) mm, F.Cu 1035.7 / B.Cu 998.9 mm,
+router 168.99 s on 4 threads / detours > 1.5: 9 (max 4.6) — Net-(U1-EN) 4.6, VCC 4.2, TACT_B 3.6 vs DRC-feasible reference
 (ghost fallbacks 0, ghost < 2 mm 52) / stop_reason: no gain".
 
 ## 6. Tests

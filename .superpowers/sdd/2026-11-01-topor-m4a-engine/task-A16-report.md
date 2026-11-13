@@ -14,7 +14,7 @@ Branch `worktree-agent-afc384996005e682e`. Commits: A16 `62af5ad`, A13 `8eb47e3`
    (`ripup.total` 0), so only this single-layer restriction sees it. Coordinator decision needed: accept (the user's row 17 default is 2.0),
    or ask whether the guard should pin the default.
 2. **private-badge-b not measurable under the machine load.** Other workers kept load average 10-13 on 8 cores. Both main-base (68a77b6 engine) and A16
-   timed out at 600 s after only 2 iterations with byte-identical results (171/231, failed 60, vias 152, routing_new 0, unconnected 70,
+   timed out at 600 s after only 2 iterations with byte-identical results (171/N, failed 60, vias 152, routing_new 0, unconnected 70,
    detour max 16.175, count > 1.5: 10); the A16 rip report there: 5 rips in total, max_pair 1, no backstop pair. The gate-options numbers of the
    brief (201/243, 25 iterations) could not be reproduced for either engine, so "A16/A13 do not regress private-badge-b" is NOT demonstrated. A13 is
    skipped on a timed-out run (`skipped: timeout`); its cost was measured on wiccon (below) and extrapolated.
@@ -74,12 +74,12 @@ Base = main engine at 68a77b6 (A16 `ripup.total` 0 on eprom and wiccon, so resul
 | wiccon | base | 62/62 | 0 | 37 | 0 | 0 | 1373.553 | 20 | 6.2 (8.5-9.8 under load) | 1.000 / 1.088 / 1.449 / 0 |
 | wiccon | A16 | 62/62 | 0 | 37 | 0 | 0 | 1373.553 | 20 | 8.5-10.5 (load) | identical to base |
 | wiccon | A13 | 62/62 | 0 | 37 | 0 | 0 | **1362.751** | 21 | 7.0-10.0 (load) | 1.000 / 1.098 / **1.243** / 0 |
-| private-badge-b (gate options, 600 s) | base2 and A16 | 171/231 | 60 | 152 | 0 | 70 | 1398.027 | 2 (timeout) | 600 | median 1.011 / p90 1.372 / max 16.175 / 10 |
+| private-badge-b (gate options, 600 s) | base2 and A16 | 171/N | 60 | 152 | 0 | 70 | 1398.027 | 2 (timeout) | 600 | median 1.011 / p90 1.372 / max 16.175 / 10 |
 
 - wiccon A13: via count unchanged (37), outside **1373.553 -> 1362.751 mm** (headroom to 1380 mm now 17.2 mm instead of 6.4), DRC routing_new 0, `moved 8 of 30 vias`
   in the final pass; iterations 20 -> 21 because the pour-reach completion passes (GND) run on the relaxed copper and the last pass stopped after 10 instead of 9
   iterations (no regression; the pour passes are the same set in both). `via_relaxation=false` on the A13 engine reproduces base exactly (20 iterations, 1373.553 mm).
-- A13 cost: the pass took 0.38 s on wiccon (30 vias, 60 connections) of ~7 s router time; extrapolated to private-badge-b (152 vias, 231 connections) roughly
+- A13 cost: the pass took 0.38 s on wiccon (30 vias, 60 connections) of ~7 s router time; extrapolated to private-badge-b (152 vias, N connections) roughly
   10-30 s of the 600 s budget (not measured: see concern 2).
 - eprom F.Cu-only guard: see concern 1 (92.29 mm / 67.03 mm numbers). detour_ghost fields are `null` in the harness result at this base for all boards.
 - Detour (reference) non-regression: eprom and wiccon count > 1.5 stays 0 and max does not get worse (wiccon max 1.449 -> 1.243 with A13); private-badge-b unchanged (timeout-limited).

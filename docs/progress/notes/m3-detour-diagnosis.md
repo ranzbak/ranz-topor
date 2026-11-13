@@ -3,7 +3,7 @@
 Scope: the top detour offenders after F2–F4 (head fdf8c10): private-badge-b #208 USB+ J1.A6→J1.B6 (3.49), #34 VCC
 U3.1→U3.3 (3.03), #197 SPI_SDO TP17.1→J3.2 (2.83), #207 USB+ U7.6→J1.A6 (2.30), plus #45 GND SW1.0→pour (2.32) and
 wiccon-2023 #52 GPIO0 U1.18→FLASH1.1 (1.405, the wiccon max). Numbers from a snapshot bench run (threads 4; private-badge-b
-60 s budget, timed out in iteration 1 with 148/231, vias 102, detours > 1.5: 12, median 1.0, p90 1.374; wiccon 60/60,
+60 s budget, timed out in iteration 1 with 148/N, vias 102, detours > 1.5: 12, median 1.0, p90 1.374; wiccon 60/60,
 1.56 s, 0 > 1.5). Tool: `gate_diag --detour <ids>` (new, this commit) dumps, on the empty graph, the committed path,
 the slot search alone, the ghost, and the empty-graph path re-checked with every other committed path present (edge
 cap / need / fits / passable / occupant); `--chord` probes `clearance_bend` along a polyline. Hand routes read from the

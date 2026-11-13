@@ -137,12 +137,12 @@ identical to main.
 - Determinism: wiccon route_probe threads 1/2/4 plus a repeat give byte-identical dumps (md5 `f51fe1e9…`). The
   `route_threads` tests are green. The private-badge-b PNG run reproduced the gate bench exactly (190/242, 190 vias).
 
-## private-badge-b, gate options (A-C3: wall 600, partial false, threads 4, rip all), `3e7e66f862a7`
+## private-badge-b, gate options (A-C3: wall 600, partial false, threads 4, rip all), `(private pin)`
 
 | | main (baseline, this machine) | A4 (harness gate) | A4 (route_probe, same model) |
 |---|---|---|---|
 | routed / connections_total | 188 / 255 | **190 / 242** | 195 / 245 |
-| first-pass connections | 231 | 231 | 231 |
+| first-pass connections | N | N | N |
 | failed | 67 | **52** | 50 |
 | vias | 199 | 190 | 186 |
 | routing_new / preexisting | 0 / 4 | 0 / 4 | — |
@@ -234,8 +234,8 @@ The remaining (b) 0.2 mm cases are not capacity any more:
 ## PNGs (docs/benchmarks, not committed)
 
 - private-badge-b: `/home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-a0f172ccd5405dc85/docs/benchmarks/progress/2026-11-01-m4-A4-private-badge-b.png`
-  - 190/242 connections, 40/66 nets, partial 0, failed 52, vias 190, arcs 171, iters 28, pcb `3e7e66f862a7`.
-  - routing_new 0, preexisting 4, unconnected 51, outside 1522.4 vs hand 3574.7 mm, router 466.5 s on 4 threads.
+  - 190/242 connections, 40/M nets, partial 0, failed 52, vias 190, arcs 171, iters 28, pcb `(private pin)`.
+  - routing_new 0, preexisting 4, unconnected 51, outside 1522.4 vs hand (hand length) mm, router 466.5 s on 4 threads.
   - Detours > 1.5: 20 (max 3.5): VCC 3.5, VCC 3.0, GND 2.6. stop_reason no gain.
 - wiccon-2023: `/home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-a0f172ccd5405dc85/docs/benchmarks/progress/2026-11-01-m4-A4-wiccon-2023.png`
   - 62/62, 27/27 nets, vias 36, arcs 69, iters 14, pcb `2d3063e70ed5`.

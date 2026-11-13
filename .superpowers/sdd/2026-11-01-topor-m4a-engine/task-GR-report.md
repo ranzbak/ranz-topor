@@ -95,6 +95,6 @@ Observations: connection totals change with the cost (wiccon 62 -> 63/60/60, pri
 Caption: 62/62 connections, vias 34, DRC routing 0, preexisting 0, unconnected 0, outside 1363.4 vs hand 1690.1 mm, router 1.51 s, detours > 1.5: 0 (max 1.3), pcb sha12 2d3063e70ed5. (Outcome-neutral for the two-layer boards: they never rip.)
 
 ## Concerns
-1. private-badge-b gate (231/231) is not met at any growth: 205/241, failed 36, routing_new 1 (base reported 0 at wc 600; here wc 0, load 15 to 35), so growth is not the lever for the gate.
+1. private-badge-b gate (N/N) is not met at any growth: 205/241, failed 36, routing_new 1 (base reported 0 at wc 600; here wc 0, load 15 to 35), so growth is not the lever for the gate.
 2. route_stubs::exit_stubs_off_matches_previous red independent of growth.
 3. Timings in the tables are load-inflated; no quiet re-run possible.

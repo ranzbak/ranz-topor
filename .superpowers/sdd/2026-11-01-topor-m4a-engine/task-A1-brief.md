@@ -8,7 +8,7 @@
 
 ## Coordinator additions (binding)
 - Context: docs/progress/notes/m3-gate-review.md §8 (fix shape), STATE.md M4 carry-over (1): private-badge-b 162 candidates/query, 94 % of
-  search time in clearance_bend/los. The M4a HARD gate is private-badge-b 231/231 in ≤ 600 s whole run — your speed-up is its basis.
+  search time in clearance_bend/los. The M4a HARD gate is private-badge-b N/N in ≤ 600 s whole run — your speed-up is its basis.
 - Measure BEFORE and AFTER with the same command and report both: `cargo run --release --example route_probe -- <private-badge-b model.json>
   --options '{"threads":4,"wall_clock_s":60}' --profile --quiet` (export the model once via `PYTHONPATH=$PWD/target/pyeng
   .venv/bin/python -m harness.bench private-badge-b /tmp/<you>/private-badge-b --router topor` or reuse the `--model.json` that run writes).

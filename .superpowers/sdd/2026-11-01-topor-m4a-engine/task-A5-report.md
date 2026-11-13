@@ -102,9 +102,9 @@ are few (decomposition puts only tracks touching listed pads/vias into the pour 
 
 PNG (`harness.progress --milestone m4 --task A5 --router topor --board private-badge-b`, gate options, rendered twice,
 identical): `/home/paul/work/kicad/plugins/topor/.claude/worktrees/agent-ab734063ffda3814f/docs/benchmarks/progress/2026-11-01-m4-A5-private-badge-b.png`
-— caption: 207/251 connections, 45/66 nets, partial 0, failed 44, vias 210, routing_new 0, preexisting 4,
+— caption: 207/251 connections, 45/M nets, partial 0, failed 44, vias 210, routing_new 0, preexisting 4,
 unconnected 42, router 284.1 s (4 threads), detours > 1.5: 15 (max 4.8; ghost > 1.5: 25), stop no gain, pcb
-3e7e66f862a7. Main 946530c through the same PNG path on this machine
+(private pin). Main 946530c through the same PNG path on this machine
 (`.../docs/benchmarks/progress/2026-11-01-m4-A5base-private-badge-b.png`, for comparison only): 196/246, failed 50,
 vias 184, routing_new 0, unconnected 51, router 162.6 s, detours > 1.5: 15 (max 6.8). The PNG path and the plain
 `run_bench` path differ for A5 only in the harness DRC loop (PNG: 3 rounds / 4 spots, `run_bench`: 2 rounds / 2
@@ -123,7 +123,7 @@ Scaling (`pytest -m scaling tests/scaling/test_route_scaling.py`, quiet machine)
    crop the unrelated failing connections make the USB+ pair's outcome trajectory-dependent.
 2. wiccon detour max 1.283 vs main 1.270 (count 0 = 0): RST pushed 0.36 mm by a junction's copper; outside +0.97 mm
    (1368.25, bound 1380), vias −2.
-3. private-badge-b `shorting_items` JP1.1 ↔ Net-(J3-Pin_22) in the wall_clock-0 runs (gate runs: the DRC loop fixes it,
+3. private-badge-b `shorting_items` JP1.1 ↔ Net-(Jx-Pin_n) in the wall_clock-0 runs (gate runs: the DRC loop fixes it,
    routing_new 0): a pre-existing engine model issue exposed by a different route — pads of a net-tie group are
    exempt for the other net's *tracks* (`obstacle.rs` / `check.rs` pad `tie_nets`, pinned by
    `obstacle_model::same_net_and_net_tie_are_exempt`), KiCad flags the track touching JP1.1. Not changed here
