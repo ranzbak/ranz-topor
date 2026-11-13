@@ -1,4 +1,4 @@
-"""Via-pair pattern (harness/pair_patterns.py, shopping list 5.8; NEEDS USER APPROVAL): hand numbers hold, KiCad DRC passes."""
+"""Via-pair patterns (harness/pair_patterns.py: pair_move 5.8 NEEDS USER APPROVAL, pair_swap 5.2 restored): hand numbers hold, KiCad DRC passes."""
 import pytest
 
 from harness import pair_patterns as pp
@@ -26,3 +26,10 @@ def test_kicad_drc(tmp_path):
     for k in ("reference", "careless"):
         r = vp.drc_of(g[k])
         assert r["violations"] == 0 and r["unconnected"] == 0
+
+
+def test_pair_swap_restored():
+    """pair_swap (5.2, restored beside pair_move for the user to decide): it still builds, the same numbers."""
+    p = vp.build("pair_swap")
+    assert len(p.ref.vias) == 0 and len(p.careless.vias) == 4
+    assert p.expected["reference"]["price"] < p.expected["careless"]["price"]
