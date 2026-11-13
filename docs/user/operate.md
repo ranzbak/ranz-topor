@@ -317,8 +317,12 @@ begins, and the best kept variant is drawn to its end, so a limit never leaves h
 at once and draws the best variant kept so far; when none is kept yet (Cancel during the initial routing of every
 run) the run ends with the error [`NOTHING_TO_DRAW`](troubleshoot.md#nothing_to_draw) and writes no copper. How far
 the run went past the limit, and in which step it was reached, is in log.txt, report.md (*Time limit* line) and
-`result.json` (`time_limit.reached`, `step`, `overrun_s` on the run's clock). `hard` is the behaviour before: every
-step stops at the limit, and the connections a cut step had not reached stay unrouted.
+`result.json` (`time_limit.reached`, `step`, `overrun_s` on the run's clock; measurements outside the limit, such as
+`[capacity] compass_cut_check`, are left out as they are left out of the limit). With several runs each run finishes
+its own step; the step named is the one the progress dialog showed when the limit was reached. On a large board a
+TopoR loop cycle plus the drawing can take minutes (qmtech, 2026-11-13: about 4 minutes on the clock past the limit);
+press Cancel to stop at once. `hard` is the behaviour before: every step stops at the limit, and the connections a cut
+step had not reached stay unrouted.
 
 **Only the picked variant is drawn** (`[drawing] candidates = 1`, the default since 2026-11-13, with `[optimize]
 loop = "topor"`). Every run judges its plans on the topology, by their predicted violations, vias, length and
