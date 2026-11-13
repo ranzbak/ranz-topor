@@ -432,8 +432,11 @@ thread_local! {
     /// ([`with_control`]), read only by [`stop_requested`] (not by [`cancelled`], whose readers,
     /// the drawing and the pour stitching, run on through a Cancel to draw the loop's pick).
     /// The time limit is `None` with the soft limit (M2.TL: the limit cuts no step).
-    static STOP: RefCell<Option<(Arc<AtomicBool>, Option<Arc<TimeLimit>>)>> = const { RefCell::new(None) };
+    static STOP: RefCell<Option<StopState>> = const { RefCell::new(None) };
 }
+
+/// What [`stop_requested`] reads: the cancel flag and, where the limit stops steps, the time limit.
+type StopState = (Arc<AtomicBool>, Option<Arc<TimeLimit>>);
 
 /// Runs `f` with `ctl`'s cancel flag and time limit as what [`stop_requested`] reads on this
 /// thread; the state before comes back after `f`, also when it panics. O(1) + `f`.
@@ -444,7 +447,7 @@ pub fn with_control<R>(ctl: &RunControl, f: impl FnOnce() -> R) -> R {
 /// [`with_control`]; `limit_stops` = false (M2.TL soft limit, `[run] timeout_mode = "soft"`):
 /// only Cancel / OK stops the work loops, the time limit lets the step that runs finish. O(1) + `f`.
 pub fn with_control_mode<R>(ctl: &RunControl, limit_stops: bool, f: impl FnOnce() -> R) -> R {
-    struct Restore(Option<(Arc<AtomicBool>, Option<Arc<TimeLimit>>)>);
+    struct Restore(Option<StopState>);
     impl Drop for Restore {
         fn drop(&mut self) {
             let prev = self.0.take();
