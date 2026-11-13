@@ -91,6 +91,10 @@ route dialog opens ([operate.md](operate.md#first-run)). Cancel there changes no
    `tools/build.sh --dev` instead, or delete `~/.cache/kicad/10.0/python-environments/org.topor.router/` and
    restart the PCB Editor — KiCad then rebuilds the environment from scratch.
 
+The start-up splash shows the version with the build time and git revision (for example
+`0.4.0 · built 2026-11-14 01:05 UTC · 7e320c1-dirty`, `-dirty` = uncommitted changes), so you can tell which build is
+installed. Running from the source tree shows the version only.
+
 The plugin checks at start that the installed engine is the version it was shipped with; if not, it stops
 with [`ENGINE_VERSION`](troubleshoot.md#engine_version) before touching anything.
 
