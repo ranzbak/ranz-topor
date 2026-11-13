@@ -277,8 +277,10 @@ _DEF_CLASSES = [
 def make_pair_via_board(path: Path, *, wide: bool = True) -> Path:
     """Pair-via room fixture (pair-via site proposal 2026-11-13): a 20 x 10 mm 2-layer board, the diff pair
     USB+ / USB- from J1 (SMD pads on F.Cu at x 1) to J2 (SMD pads on B.Cu at x 19), so the pair changes layer once,
-    in a channel between two GND copper walls on both layers (filled copper rectangles of net GND). The channel
-    (y 5.275 +- 0.62 mm) holds the pair band (2 x 0.2 mm tracks at a 0.2 mm gap, 0.2 mm clearance) everywhere but
+    in a channel between two GND copper walls on both layers (filled copper rectangles of net GND, separate pieces:
+    KiCad counts them as unconnected GND items, in the input as in the result). The pads (0.2 mm, at the pair's own
+    0.4 mm pitch, so the pair runs straight out of them) sit at y 5.0 / 5.4 mm; the channel
+    (y 5.2 +- 0.62 mm) holds the pair band (2 x 0.2 mm tracks at a 0.2 mm gap, 0.2 mm clearance) everywhere but
     not the two-via disc of the smallest via (0.4 / 0.3 mm, via gap 0.2: a 1.0 mm disc + 0.2 mm clearance); with
     ``wide`` the channel widens to +- 1.6 mm for x 5 .. 9 mm, the one place that holds the disc. Use with
     ``write_project_file(.., classes=PAIR_VIA_CLASSES)``."""
@@ -306,9 +308,9 @@ def make_pair_via_board(path: Path, *, wide: bool = True) -> Path:
         fp.SetValue(ref)
         fp.SetPosition(_v(0, 0))
         b.Add(fp)
-        _add_pad(fp, "1", pcbnew.PAD_SHAPE_RECT, (0.25, 0.25), (x, 5.0), nets["USB+"], back=back)
-        _add_pad(fp, "2", pcbnew.PAD_SHAPE_RECT, (0.25, 0.25), (x, 5.55), nets["USB-"], back=back)
-    yc, h, hw = 5.275, 0.62, 1.6
+        _add_pad(fp, "1", pcbnew.PAD_SHAPE_RECT, (0.2, 0.2), (x, 5.0), nets["USB+"], back=back)
+        _add_pad(fp, "2", pcbnew.PAD_SHAPE_RECT, (0.2, 0.2), (x, 5.4), nets["USB-"], back=back)
+    yc, h, hw = 5.2, 0.62, 1.6
     parts = [(0.6, 5.0, h), (5.0, 9.0, hw), (9.0, W - 0.6, h)] if wide else [(0.6, W - 0.6, h)]
     for x0, x1, hh in parts:
         for y0, y1 in ((0.6, yc - hh), (yc + hh, H - 0.6)):

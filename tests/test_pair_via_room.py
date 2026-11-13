@@ -17,8 +17,10 @@ pcbnew = pytest.importorskip("pcbnew")
 from harness.fixtures import PAIR_VIA_CLASSES, make_pair_via_board, write_project_file  # noqa: E402
 
 
-def _route(tmp_path: Path, wide: bool):
+def _route(tmp_path: Path, wide: bool, monkeypatch):
     from harness.route_board import route_board
+    # route_board only sets the report root when unset (setdefault): one per test.
+    monkeypatch.setenv("TOPOR_REPORT_ROOT", str(tmp_path / "out" / "reports"))
     pcb = make_pair_via_board(tmp_path / "pv" / "pairvia.kicad_pcb", wide=wide)
     write_project_file(pcb, rules={"min_via_diameter": 0.4, "min_through_hole_diameter": 0.3}, classes=PAIR_VIA_CLASSES)
     m = route_board(str(pcb), tmp_path / "out", png=False)
@@ -31,20 +33,24 @@ def _route(tmp_path: Path, wide: bool):
     out = next((tmp_path / "out").glob("*-topor/*.kicad_pcb"))
     b = pcbnew.LoadBoard(str(out))
     vias = [(t.GetNetname(), t.GetPosition().x / 1e6, t.GetPosition().y / 1e6) for t in b.GetTracks() if t.GetClass() == "PCB_VIA"]
+    # The GND walls are separate copper pieces (unconnected GND in the input too): count the pair's own only.
+    drc = json.loads(next((tmp_path / "out").glob("*--drc-routed.json")).read_text())
+    m["unconnected_pair"] = sum(any("[USB" in (i.get("description") or "") for i in u.get("items", []))
+                                for u in drc.get("unconnected_items", []))
     return m, warns, vias
 
 
-def test_pair_via_goes_where_the_channel_holds_it(tmp_path):
-    m, warns, vias = _route(tmp_path, wide=True)
-    assert m["unconnected"] == 0, m
+def test_pair_via_goes_where_the_channel_holds_it(tmp_path, monkeypatch):
+    m, warns, vias = _route(tmp_path, wide=True, monkeypatch=monkeypatch)
+    assert m["unconnected_pair"] == 0, m
     assert len(vias) == 2 and {v[0] for v in vias} == {"USB+", "USB-"}, vias
     assert all(5.0 <= x <= 9.0 for _, x, _ in vias), vias
     assert m["routing_new"] == 0, m.get("drc_by_type_new")
     assert not any(w.startswith("pair via forced:") for w in warns), warns
 
 
-def test_pair_via_without_room_is_placed_and_reported(tmp_path):
-    m, warns, vias = _route(tmp_path, wide=False)
-    assert m["unconnected"] == 0, m
+def test_pair_via_without_room_is_placed_and_reported(tmp_path, monkeypatch):
+    m, warns, vias = _route(tmp_path, wide=False, monkeypatch=monkeypatch)
+    assert m["unconnected_pair"] == 0, m
     assert len(vias) == 2, vias
     assert sum(w.startswith("pair via forced: diff pair USB+ / USB-") for w in warns) == 1, warns
