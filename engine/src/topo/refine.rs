@@ -242,7 +242,25 @@ pub mod meter {
     pub static PARTS: AtomicU64 = AtomicU64::new(0);
     pub static INSTALL_NS: AtomicU64 = AtomicU64::new(0);
     pub static CUTS_PRICED: AtomicU64 = AtomicU64::new(0);
+    thread_local! {
+        static OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    /// The meters count on this thread (not inside [`suspended`]).
+    pub fn on() -> bool {
+        !OFF.with(|c| c.get())
+    }
+    /// Runs `f` with the meters off on this thread: the M1 compass's read-only cut test must not
+    /// enter the plan metrics of later cycles (the cut code runs on the calling thread).
+    pub fn suspended<T>(f: impl FnOnce() -> T) -> T {
+        let was = OFF.with(|c| c.replace(true));
+        let r = f();
+        OFF.with(|c| c.set(was));
+        r
+    }
     pub fn add(ns: &AtomicU64, n: &AtomicU64, t: std::time::Instant) {
+        if !on() {
+            return;
+        }
         ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         n.fetch_add(1, Ordering::Relaxed);
     }

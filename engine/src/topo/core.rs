@@ -3392,6 +3392,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     // C0: the plan handed to the drawing, as one machine-readable line (every cycle), and
     // `[run] stop_after = "plan"`: the round ends here, before any copper is drawn.
+    // M1 compass: the same plan's predicted items per violation class (structured, measurement
+    // only), carried to this round's result below.
+    let mut compass_plan: Option<super::compass::Compass>;
     {
         let alive: Vec<WireId> = (0..st.wires.len()).filter(|&w| st.wires[w].alive).collect();
         let crossings: usize = alive.iter().map(|&w| st.crossings(w).iter().filter(|c| st.wires[c.other].net != st.wires[w].net).count()).sum::<usize>() / 2;
@@ -3417,8 +3420,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             m["loop"] = lj;
         }
         // `[capacity] model = "cuts"`: the per-layer cuts of the plan (the authority there).
-        if packer.cuts.is_some() {
-            let cmc = CapModel::new_cut(&st, &packer, &dirs_plan, &lr.events, bottom, 1.0);
+        let cmc_plan = packer.cuts.is_some().then(|| CapModel::new_cut(&st, &packer, &dirs_plan, &lr.events, bottom, 1.0));
+        if let Some(cmc) = cmc_plan.as_ref() {
             if let Some(c) = cmc.cut.as_ref() {
                 let rows = c.report();
                 let over: Vec<&super::cutmodel::CutRow> = rows.iter().filter(|r| r.slack < -super::cutmodel::OVER_TOL).collect();
@@ -3454,9 +3457,23 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let (fl, st_ms, np, p_ms, nc, i_ms) = super::refine::meter::read_split();
         m["cut_split"] = serde_json::json!({"flushes": fl, "ms_stretches": st_ms.round(), "parts": np, "ms_parts": p_ms.round(), "cuts_priced": nc, "ms_install": i_ms.round()});
         warnings.push(format!("plan metrics: {m}"));
+        // M1 compass, after the plan metrics (its read-only cut test must not enter their meters).
+        {
+            let lname = |l: usize| b.signal_layers.get(l).and_then(|&id| model.layers.iter().find(|x| x.id == id)).map_or(format!("layer {l}"), |x| x.name.clone());
+            let wc = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
+            let fset = forced.borrow().clone();
+            // `[capacity] compass_cut_check` (model = "edges"): the read-only cut test runs after the
+            // drawing (end of this round), outside the time limit.
+            // `pad_exits`: shopping list 5.10 fills it from `b.exit_stubs` (see compass::pad_exit_items).
+            let view = super::compass::PlanView { st: &st, lr: &lr, cm_edge: &cm_plan, cm_cut: cmc_plan.as_ref(), cut_is_plan: cmc_plan.is_some(), bottom, conn: &wc, layer: &lname, forced: &fset, pad_exits: None };
+            let mut cp = super::refine::meter::suspended(|| super::compass::plan_compass(&view, if cmc_plan.is_some() { "cuts" } else { "edges" }, &opts.opt_loop, round));
+            cp.loop_predicted = m.get("loop").and_then(|l| l.get("predicted")).and_then(|p| p.get("violations")).and_then(|v| v.as_u64()).map(|v| v as usize);
+            compass_plan = Some(cp);
+        }
         if opts.stop_after == "plan" {
             let mut r = unrouted(model_real, opts, "not drawn: [run] stop_after = \"plan\" ends each run after the plan of its first cycle");
             r.warnings.extend(warnings);
+            r.compass = compass_plan.take();
             return (RoundOut::unrouted(r), Vec::new(), mem.clone());
         }
     }
@@ -4901,6 +4918,26 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         "converged"
     };
     ctl.update("done", 4, routed_n, nconn, tot_vias, t0.elapsed().as_secs_f64());
+    // M1 compass, `[capacity] compass_cut_check` (model = "edges"; off by default, harness.score_runs
+    // turns it on): the read-only cut test of the plan handed to the drawing, after the drawing; its
+    // time goes back to the run's limit ([`RunControl::measured`]), so it never takes loop time.
+    if let Some(cp) = compass_plan.as_mut().filter(|_| !cuts_on && opts.compass_cut_check) {
+        let t_chk = Instant::now();
+        let opts_chk = Options { capacity_model: "cuts".into(), ..opts.clone() };
+        let mut pk = Packer::for_model(model, &opts_chk, proj);
+        pk.via_squeeze = packer.via_squeeze;
+        let lname = |l: usize| b.signal_layers.get(l).and_then(|&id| model.layers.iter().find(|x| x.id == id)).map_or(format!("layer {l}"), |x| x.name.clone());
+        let wc = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
+        let fset = forced.borrow().clone();
+        super::refine::meter::suspended(|| {
+            let cm_chk = CapModel::new_cut(&st, &pk, &dirs_plan, &lr.events, bottom, 1.0);
+            if cm_chk.cut.is_some() {
+                let view = super::compass::PlanView { st: &st, lr: &lr, cm_edge: &cm_plan, cm_cut: Some(&cm_chk), cut_is_plan: false, bottom, conn: &wc, layer: &lname, forced: &fset, pad_exits: None };
+                super::compass::model_check(&view, cp);
+            }
+        });
+        ctl.measured(t_chk.elapsed().as_secs_f64());
+    }
     let result = RouteResult {
         items,
         connections_total: reports.len(),
@@ -4943,6 +4980,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         moves: super::moves::KINDS.iter().map(|&k| (k.name().to_string(), tally.applied_of(k))).collect(),
         violations: viol_list,
         diff_pairs: dp_list,
+        compass: compass_plan.map(|mut c| {
+            c.drawn_shrinkages = crit_main.shrinkages;
+            c
+        }),
     };
     let pre = pre_parts.map(|(c, a)| (c, with_parts(&result, a)));
     let vias_out: BTreeMap<usize, usize> = plans.iter().map(|(&w, pl)| (conn_of[wire_conn[w]], pl.vias.len())).collect();

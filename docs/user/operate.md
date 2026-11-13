@@ -517,12 +517,46 @@ the error dialog, with **Open report folder**:
 
 | File | Content |
 |---|---|
-| `report.md` | the summary block, connections, vias, lengths, DRC, findings, settings, files, versions |
+| `report.md` | the summary block, connections, vias, lengths, DRC, findings, settings, files, versions, the compass (below) |
 | `preview.png` | the before/after image of the preview (composite, with caption and legend) |
 | `preview-before.png`, `preview-after.png`, `preview-legend.json` | the two boards as separate images and the legend entries, which the preview dialog shows |
 | `result.json` | machine-readable result: status, routed/total, stop reason, DRC classification, findings |
 | `drc.json` | KiCad's DRC report of the routed copy |
 | `log.txt` | every step with timings; the first thing to attach to a bug report |
+
+### The compass: what the plan predicted, what was drawn, what KiCad finds
+
+`report.md → Compass` (and `result.json → compass`, the summary line *Compass (predicted/drawn/KiCad)*) is one table
+per run. Topor first plans every connection topologically (which side of every pad, which layer, where the vias go),
+judges that plan by what it predicts (like TopoR's variant table, TopoR 6.3 manual pp. 72-73) and then draws the copper
+once from it; KiCad's DRC judges the written board (p. 183). The table puts the three side by side per kind of problem:
+
+| Row | Meaning |
+|---|---|
+| planner: over-full | a passage the plan knows is too narrow for the traces it sends through (over-full cut / edge); "[n bottlenecks]" = the cuts of one channel (its two ends) counted once |
+| planner: over-full nearby | a violation next to another trace's over-full passage that this trace does not cross (a plan error, not a drawing fault) |
+| planner: shrinkage | a passage that fits only with traces necked below their net-class width (not a violation) |
+| planner: at a planned neck | a violation where the plan necked the trace (the neck width or its drawing) |
+| planner: via site | a via the plan needs where no via fits |
+| planner: unlayerable crossing | two traces that must cross and cannot be put on different layers |
+| planner: foreign copper | a trace the plan runs through copper of another net (a short if not moved) |
+| planner: forced path | a connection the plan placed without any legal path |
+| pad exit | a violation at the exit from the trace's own fine-pitch pad; "not predicted" = this version does not plan pad exits yet |
+| model gap (per-edge fits, cut test over-full) | a passage the per-edge measure (the drawing's, and the plan's with `[capacity] model = "edges"`) finds fitting but the per-layer cut test finds too narrow; with model = "edges" measured by a read-only cut test after the drawing, outside the time limit (`[capacity] compass_cut_check`, off by default: "not measured (compass_cut_check off)"; `harness.score_runs` turns it on) |
+| per-edge over-predicted (cut test fits) | the reverse: the per-edge measure finds a passage too narrow that the cut test finds fitting |
+| drawing loss | the plan said it fits, the drawing still broke a rule there (a drawing fault) |
+| open (no copper) | connections without copper; KiCad column = its new unconnected items |
+| KiCad only | KiCad DRC items near no violation topor reported (topor's own check missed them) |
+
+Columns: **predicted** (the plan's count; connections in brackets), **predicted, drawn clean** (predicted problems
+with no drawn violation within reach), **drawn** (rule violations of the written copper, connections in brackets),
+**KiCad DRC** (KiCad's new routing violations, each counted in the row of the nearest topor violation within
+`[output] compass_join_mm` (0.5 mm) of a net and layer the KiCad item names, `compass_join_nets`). KiCad counts are not
+1:1 with drawn counts: one drawn stretch below a rule can be several KiCad items, several drawn violations one.
+Below the table: the connections with a detour above 1.5 x their reference length, drawn much longer than planned,
+with a different via count than planned, or with violations. How to read it: a problem in a "planner" row is
+predicted, so the fix is in the plan or your rules (more room, another layer, a via site); a "drawing loss" or
+"KiCad only" is a topor bug worth reporting with the report folder.
 
 Default location: `~/.cache/kicad/10.0/topor/<board file name>/<YYYYmmdd-HHMMSS>/`
 (`$TOPOR_REPORT_ROOT`, else `$XDG_CACHE_HOME/kicad/10.0/topor`). `[output] report_dir` in `topor.toml`

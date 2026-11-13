@@ -1177,6 +1177,12 @@ pub struct Options {
     /// the topology and label moves keep a change by its graded total (no hard capacity test) and
     /// the pick of the best round is objective + over-full price.
     pub capacity_model: String,
+    /// M1 compass (`[capacity] compass_cut_check`): with `capacity_model = "edges"` the compass
+    /// also runs the per-layer cut test on the plan handed to the drawing, read-only and after the
+    /// drawing, so the model gap of `docs/dev/inflated-sketch.md` §6.1 (per-edge packer: fits,
+    /// cut test: over-full) is measured. Its time goes back to the time limit. Off by default
+    /// (user 2026-11-13); `harness.score_runs` turns it on. Never changes the routing.
+    pub compass_cut_check: bool,
     /// `[capacity] overflow_softness` (model = "cuts"): the softness `tau` of the graded over-full
     /// price, in track pitches: the price of a cut rises smoothly from almost 0 at a slack of a few
     /// `tau` pitches through about 0.57 x `overflow` at zero slack to `overflow x (1 + overflow in
@@ -1337,6 +1343,7 @@ impl Default for Options {
             cut_radius_mm: 0.0,
             cut_report: String::new(),
             capacity_model: "edges".into(),
+            compass_cut_check: false,
             overflow_softness: 0.1,
             cut_vias: true,
             stop_after: String::new(),

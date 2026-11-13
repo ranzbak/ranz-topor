@@ -53,6 +53,31 @@ lines). **`--profile`** (or `"profile": true` in the options) adds the per-itera
 metrize / check seconds, searched, re-searched, ripped, overuse) and the search counters (expansions,
 candidates, bend queries per run) — the first stop when a board is slow.
 
+## Predicted vs drawn vs KiCad DRC (`harness.predict_vs_drawn`, stage M1 compass)
+
+Every engine result of the topological core carries `compass` (engine `topo/compass.rs`): the plan handed to the
+drawing, per violation class (docs/dev/inflated-sketch.md §6.1) its count and its located items (cuts, edge-layers,
+via sites, unlayerable crossings, traversals through foreign copper, forced paths; merged into physical bottlenecks, `Compass::bottlenecks`; the two capacity models compared on the
+same plan: `model_gap` = cuts over-full by the cut test that no per-edge over-full edge-layer carrying all their wires
+touches (inflated-sketch §6.1; with model = "edges" the cut test runs read-only after the drawing, outside the time
+limit, `[capacity] compass_cut_check`: off by default, on in `harness.score_runs`),
+`edge_overpredict` = the reverse), and per connection the
+planned vias, taut length and necked stretches. `toporlib/compass.py` classifies every drawn violation against those
+items (first match: via site, unlayerable, foreign copper, over-full, model gap (§6.1 direction), over-full nearby,
+forced path, pad exit, pad exit at a planned stub, at a planned neck, per-edge over-predicted, pad exit not predicted,
+else drawing loss), joins KiCad's new routing DRC items by place and builds the
+table; the plugin writes it to report.md / result.json, `tools/route_board.sh` to `<name>--compass.json` and the
+metrics (`compass`, `compass_line`), `harness.score_runs` appends one row per run to `<root>/compass.tsv`.
+
+    .venv/bin/python -m harness.predict_vs_drawn <route_board out dir | score_runs root> [--cuts DIR] [--json OUT]
+
+`--cuts DIR`: a run with `[capacity] model = "edges"` and `--set capacity.cut_report=DIR` gets the model-gap class from
+the cut test (`harness.cutclass`). Shopping list 5.10 (pad exits as plan objects) fills the slot
+`topo::compass::PlanView::pad_exits` at the compass hand-off in `core.rs` (main passes `None`, so that row reads "not
+predicted"): `pad_exit_stub` items = the planned exit stubs (located, not counted; a drawn pad-exit violation next to one
+is the drawing leaving the stub), `pad_exit` items = planned exits the plan itself predicts as violating (counted). The
+doc of `compass::pad_exit_items` lists what the merge of 5.10 has to add.
+
 ## Blocked or detouring connections (`gate_diag`)
 
 ```bash

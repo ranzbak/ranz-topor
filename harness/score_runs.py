@@ -8,7 +8,10 @@ Writes `<root>/<board>/s<k>/` (k = 0..5; s0 = the default run, s<k> = `--set opt
 second). The limit is fixed on purpose (user 2026-11-07: raising `timeout_s` to 1800 skewed the algorithm
 comparison): CPU time, 2400 s (= the old 600 s wall x 4 rayon threads), RAYON_NUM_THREADS=4. CPU time is summed over
 all threads, so a busy machine or extra threads neither buy nor cost budget (`[run] timeout_clock`, docs/user/operate.md).
-Changing a default is possible (`--clock`, `--timeout`, `--threads`) but is written to `<root>/limits.json` with the
+After every run its M1 compass row (predicted / drawn / KiCad DRC per violation class, `toporlib.compass`) is appended
+to `<root>/compass.tsv` and printed. Every run has `[capacity] compass_cut_check = true` (a measurement: the
+read-only cut test of the plan runs after the drawing, outside the time limit, so the compass's model-gap rows are
+measured; `--no-cut-check` leaves it off; recorded in limits.json). Changing a default is possible (`--clock`, `--timeout`, `--threads`) but is written to `<root>/limits.json` with the
 git hash, the engine path and the load average at start and end, and `harness.scorecard --compare` refuses to
 compare roots whose clock, limit or thread count differ unless `--force`.
 """
@@ -54,6 +57,10 @@ def limits(clock: str, timeout_s: float, threads: int, jobs: int, seeds: int, bo
             "started": time.strftime("%Y-%m-%d %H:%M:%S")}
 
 
+# M1 compass measurement every scorecard run makes (outside the time limit; never changes the routing).
+CUT_CHECK = "capacity.compass_cut_check=true"
+
+
 def run_command(board: str, out_dir: Path, seed: int, *, clock: str, timeout_s: float, png: bool = True,
                 sets: tuple = ()) -> list:
     """The route_board command of one run (seed 0 = defaults); `sets` are extra `section.key=value` settings."""
@@ -67,6 +74,28 @@ def run_command(board: str, out_dir: Path, seed: int, *, clock: str, timeout_s: 
     return cmd
 
 
+def compass_row(root: Path, board: str, k: int, out: Path) -> str | None:
+    """M1 compass columns of one finished run (`<out>/*--compass.json`, written by route_board) appended to
+    `<root>/compass.tsv` (board, run, then p_/d_/k_<class> = predicted / drawn / KiCad DRC per class, detour_gt_1_5,
+    vias_plan_ne_drawn; `harness.predict_vs_drawn <root>` prints the tables). Returns the run's compass line."""
+    from toporlib import compass as compass_mod
+    hits = sorted(out.glob("*--compass.json"))
+    if not hits:
+        return None
+    cp = json.loads(hits[0].read_text())
+    cols = compass_mod.columns(cp)
+    if not cols:
+        return None
+    tsv = root / "compass.tsv"
+    keys = sorted(cols)
+    new = not tsv.exists()
+    with tsv.open("a") as f:
+        if new:
+            f.write("\t".join(["board", "run", *keys]) + "\n")
+        f.write("\t".join([board, f"s{k}", *("" if cols[c] is None else str(cols[c]) for c in keys)]) + "\n")
+    return compass_mod.summary_line(cp)
+
+
 def main(argv: list | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("root", type=Path, help="output root: <root>/<board>/s<k>/, <root>/limits.json")
@@ -78,6 +107,8 @@ def main(argv: list | None = None) -> int:
     ap.add_argument("--threads", type=int, default=THREADS, help=f"RAYON_NUM_THREADS (default {THREADS})")
     ap.add_argument("--no-png", action="store_true")
     ap.add_argument("--dry-run", action="store_true", help="print the commands and write limits.json only")
+    ap.add_argument("--no-cut-check", action="store_true",
+                    help="leave [capacity] compass_cut_check off (the compass's model-gap rows read 'not measured')")
     ap.add_argument("--set", action="append", default=[], metavar="SECTION.KEY=VALUE",
                     help="extra setting for every run (debug dumps such as capacity.cut_report=DIR; recorded in "
                          "limits.json). A {board} and {k} in the value become the board name and run number.")
@@ -85,6 +116,8 @@ def main(argv: list | None = None) -> int:
     runs = [int(x) for x in a.only.split(",")] if a.only else list(range(0, a.seeds + 1))
     a.root.mkdir(parents=True, exist_ok=True)
     lim = limits(a.clock, a.timeout, a.threads, JOBS, a.seeds, a.boards)
+    if not a.no_cut_check and not any(kv.startswith("capacity.compass_cut_check=") for kv in a.set):
+        a.set.append(CUT_CHECK)
     lim["sets"] = list(a.set)
     lf = a.root / "limits.json"
     lf.write_text(json.dumps(lim, indent=1))
@@ -106,6 +139,9 @@ def main(argv: list | None = None) -> int:
                 if r.returncode:
                     print(f"  run failed (exit {r.returncode}): see {a.root / f'{name}-s{k}.log'}", file=sys.stderr)
                     rc = 1
+                line = compass_row(a.root, name, k, out)
+                if line:
+                    print(f"  {line}", flush=True)
     finally:
         lim["load_avg_end"] = list(os.getloadavg())
         lim["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")

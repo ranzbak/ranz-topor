@@ -12,6 +12,7 @@
 
 pub mod board;
 pub mod capacity;
+pub mod compass;
 pub mod archive;
 pub mod core;
 pub mod descent;

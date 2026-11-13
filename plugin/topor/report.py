@@ -18,6 +18,8 @@ import math
 import shutil
 from pathlib import Path
 
+from toporlib.compass import summary_line as compass_summary_line
+from toporlib.compass import table_md as compass_table_md
 from toporlib.detour import detour_line, detour_stats
 
 from .postrun import POSTRUN_CODES
@@ -123,6 +125,8 @@ class RunReport:
             lines.append(f"Detours {f['detour_line']}")
         if f.get("detour_ghost_line"):
             lines.append(f"Detours vs ghost line {f['detour_ghost_line']}")
+        if (cl := compass_summary_line(f.get("compass"))):
+            lines.append(cl[0].upper() + cl[1:] + " (report.md → Compass)")
         tl = f.get("time_limit")
         lines += [
             f"Stopped: {_na(f.get('stop_reason'))} after {_na(f.get('iterations'))} iterations, "
@@ -157,6 +161,8 @@ class RunReport:
             md += [f"## {title}", "", *(body or ["none"]), ""]
         if self.facts.get("notes"):
             md += ["## Notes", "", *[f"- {n}" for n in self.facts["notes"]], ""]
+        if self.facts.get("compass"):
+            md += ["## Compass (predicted vs drawn vs KiCad DRC)", "", *compass_table_md(self.facts["compass"]), ""]
         if self.facts.get("variants"):
             md += ["## Variants", "", *self._variants(), ""]
         return "\n".join(md)
