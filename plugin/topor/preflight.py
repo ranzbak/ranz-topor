@@ -275,6 +275,18 @@ def _rule_findings(rules: dict) -> list:
                 names)]
 
 
+#: The run log / report line of a 0 copper-to-edge clearance (user 2026-11-13: "just leave it at 0 ... do warn").
+EDGE_ZERO_TEXT = "copper-to-edge clearance is 0 (KiCad → File → Board Setup → Design Rules → Constraints → Copper to edge clearance)"
+
+
+def _edge_zero_findings(rules: dict) -> list:
+    """EDGE_CLEARANCE_ZERO: the resolved copper-to-edge clearance is 0 (Board Setup 0, no custom rule raising it). The
+    value is used as it is (no fallback); this only warns. O(1)."""
+    if rules.get("edge_clearance") is None or int(rules["edge_clearance"]) > 0:
+        return []
+    return [_mk("EDGE_CLEARANCE_ZERO", EDGE_ZERO_TEXT + ".")]
+
+
 def _rule_fallback_findings(rules: dict) -> list:
     """RULE_FALLBACK: one finding listing every design-rule field the board does not provide and the value used
     instead (toporlib.rules RULE_FALLBACK; one item per field, naming the KiCad setting to fill in). O(fields)."""
@@ -465,6 +477,7 @@ def preflight(model: dict, rules: dict, cfg, sel, orig_drc, cfg_findings, *, pcb
     out += _pad_findings(model, cfg)
     out += _rule_findings(rules)
     out += _rule_fallback_findings(rules)
+    out += _edge_zero_findings(rules)
     out += _custom_rule_findings(model.get("rules") or rules)
     out += _copper_findings(model, cfg)
     out += _do_not_touch(model, cfg)

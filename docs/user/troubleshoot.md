@@ -330,6 +330,14 @@ copper violates a rule anywhere else, file a bug.
 
 **Fix.** Add the drill to vias.allowed_drills_mm (accepting the finding does it) or change the via sizes in KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias.
 
+### EDGE_CLEARANCE_ZERO
+
+*Severity: warning.*
+
+**Cause.** The board's copper-to-edge clearance is 0 (KiCad: no minimum). topor uses it as it is: copper may come up to the outer side of the Edge.Cuts line, which most fabs do not accept.
+
+**Fix.** Set the value your fab needs in KiCad → File → Board Setup → Design Rules → Constraints → Copper to edge clearance (or with a custom edge_clearance rule) and save the board.
+
 ### ENGINE_BOARD_UNREADABLE
 
 *Severity: error.*

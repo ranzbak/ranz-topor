@@ -660,6 +660,10 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     report.facts["rule_fallbacks"] = [rules_mod.fallback_text(r) for r in rules.get("fallbacks") or []]
     for line in report.facts["rule_fallbacks"]:
         log.line(line)
+    if rules.get("edge_clearance") is not None and int(rules["edge_clearance"]) <= 0:
+        from topor.preflight import EDGE_ZERO_TEXT  # noqa: PLC0415
+
+        log.line("warning: " + EDGE_ZERO_TEXT)
     pro_p = pcb_copy.with_suffix(".kicad_pro")
     try:
         pro = json.loads(pro_p.read_text()) if pro_p.is_file() else {}

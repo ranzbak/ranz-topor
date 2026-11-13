@@ -358,3 +358,13 @@ def test_preflight_does_not_mutate_inputs():
     before = copy.deepcopy(m)
     run(m)
     assert m == before
+
+
+def test_edge_clearance_zero_warns_and_stays_zero():
+    """User 2026-11-13: a copper-to-edge clearance of 0 stays 0 (no fallback), with a plain warning naming the
+    KiCad setting."""
+    f = one(run(rl=rules(edge_clearance=0)), "EDGE_CLEARANCE_ZERO")
+    assert f.severity == "warning"
+    assert "copper-to-edge clearance is 0 (KiCad → File → Board Setup → Design Rules → Constraints → Copper to edge " \
+           "clearance)" in f.message
+    assert "EDGE_CLEARANCE_ZERO" not in codes(run(rl=rules(edge_clearance=200_000)))

@@ -185,9 +185,11 @@ def test_pad_local_clearance_override_wins(tmp_path, engine):
 
 def test_zero_minimums_are_board_values(tmp_path):
     """A 0 the board sets is KiCad's "no minimum" and is used as is (2026-11-12; before: filled from the profile)."""
-    b = _board(tmp_path, rules={"min_clearance": 0, "min_via_diameter": 0})
+    b = _board(tmp_path, rules={"min_clearance": 0, "min_via_diameter": 0, "min_copper_edge_clearance": 0})
     r = resolve_rules(b, dru_text=None, widths_before={})
     assert r["min_clearance"] == 0 and r["min_via_diameter"] == 0 and r["fallbacks"] == []
+    # copper to edge 0 stays 0 too (user 2026-11-13: no exception, a plain warning in the plugin)
+    assert r["edge_clearance"] == 0
     # the opt-in floor mode raises them (and lists them)
     f = resolve_rules(b, dru_text=None, widths_before={}, fab_profile="jlcpcb_1oz")
     assert f["min_clearance"] == 150_000 and f["min_via_diameter"] == 450_000
