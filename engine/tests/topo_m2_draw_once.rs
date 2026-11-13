@@ -131,7 +131,7 @@ fn a_limit_reached_in_p3_p4_still_draws_the_initial_plan() {
         let r = h.join().expect("run thread");
         let open: Vec<_> = r.connections.iter().filter(|c| c.status != "routed" && c.reason.contains("time limit")).collect();
         assert!(open.is_empty(), "{fx}: nothing is cut by the soft limit: {open:?}");
-        assert!(r.routed > 0 && r.items.len() > 0, "{fx}: the initial plan is drawn");
+        assert!(r.routed > 0 && !r.items.is_empty(), "{fx}: the initial plan is drawn");
         let l = r.limit.as_ref().expect("limit report");
         assert!(l.reached && l.step.contains("layer assignment"), "{fx}: {l:?}");
         assert!(r.warnings.iter().any(|w| w.contains(": 0 cycles") && w.contains("ended by time limit")), "{fx}: no loop cycle after the limit: {:?}", r.warnings);
