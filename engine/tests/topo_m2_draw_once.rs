@@ -17,6 +17,14 @@ fn eprom() -> BoardModel {
     BoardModel::from_json(include_str!("fixtures/eprom-to-kernal-ripped.json")).expect("fixture parses")
 }
 
+/// The real-board crops of the P3/P4 tests, public boards only: qmtech-minimig's USB corner (4
+/// layers) and esp-rs/esp-rust-board's (2 layers, CERN-OHL-P-2.0), the latter once branch
+/// public-boards brings its fixture (it drops in by name; until then only qmtech runs).
+fn p3_crops() -> Vec<&'static str> {
+    let dir = format!("{}/tests/fixtures", env!("CARGO_MANIFEST_DIR"));
+    ["qmtech-usb-crop.json", "esp-rust-board-usb-crop.json"].into_iter().filter(|f| f.starts_with("qmtech") || std::path::Path::new(&format!("{dir}/{f}")).exists()).collect()
+}
+
 fn crop(name: &str) -> BoardModel {
     let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
     BoardModel::from_json(&std::fs::read_to_string(path).expect("fixture")).expect("fixture parses")
@@ -122,7 +130,7 @@ fn a_limit_reached_before_the_run_draws_the_initial_plan() {
 fn a_limit_reached_in_p3_p4_still_draws_the_initial_plan() {
     // The limit is reached while the layer assignment and the rip-up rounds run (as the plugin's
     // CPU clock does it): they finish, and their plan is drawn, completely.
-    for fx in ["qmtech-usb-crop.json", "dcsgone-usb-crop.json"] {
+    for fx in p3_crops() {
         let m = crop(fx);
         let o = topor(r#", "runs": 1, "capacity_model": "cuts""#);
         let ctl = RunControl::new();
@@ -170,25 +178,27 @@ fn cancel_in_p3_p4_keeps_no_plan_and_says_so() {
     // one step and its plan counts as a variant only once P4 ends (user 2026-11-13, M2.TL); M0's
     // stop checks end P3/P4 within a move, so nothing is kept: the loud "nothing to draw yet",
     // no copper, quickly, never half a plan drawn.
-    let m = crop("qmtech-usb-crop.json");
-    let o = topor(r#", "runs": 2, "capacity_model": "cuts""#);
-    let ctl = RunControl::new();
-    ctl.limit.init(o.wall_clock_s);
-    let c2 = ctl.clone();
-    let h = std::thread::spawn(move || route_with(&m, &o, &c2));
-    let t0 = Instant::now();
-    while !ctl.snapshot().stage.contains("layer assignment") && !h.is_finished() {
-        assert!(t0.elapsed().as_secs() < 600, "never reached P3");
-        std::thread::sleep(Duration::from_millis(2));
+    for fx in p3_crops() {
+        let m = crop(fx);
+        let o = topor(r#", "runs": 2, "capacity_model": "cuts""#);
+        let ctl = RunControl::new();
+        ctl.limit.init(o.wall_clock_s);
+        let c2 = ctl.clone();
+        let h = std::thread::spawn(move || route_with(&m, &o, &c2));
+        let t0 = Instant::now();
+        while !ctl.snapshot().stage.contains("layer assignment") && !h.is_finished() {
+            assert!(t0.elapsed().as_secs() < 600, "{fx}: never reached P3");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(!h.is_finished(), "{fx}: the run ended before P3");
+        let t = Instant::now();
+        ctl.request_cancel();
+        let r = h.join().expect("run thread");
+        assert!(t.elapsed().as_secs_f64() < 5.0, "{fx}: Cancel in P3/P4 took {:.2} s", t.elapsed().as_secs_f64());
+        assert_eq!(r.stop_reason, "cancel", "{fx}: {:?}", r.warnings);
+        assert!(r.warnings.first().is_some_and(|w| w.starts_with("ERROR: nothing to draw yet")), "{fx}: {:?}", r.warnings);
+        assert!(r.items.is_empty() && r.routed == 0, "{fx}");
     }
-    assert!(!h.is_finished(), "the run ended before P3");
-    let t = Instant::now();
-    ctl.request_cancel();
-    let r = h.join().expect("run thread");
-    assert!(t.elapsed().as_secs_f64() < 5.0, "Cancel in P3/P4 took {:.2} s", t.elapsed().as_secs_f64());
-    assert_eq!(r.stop_reason, "cancel", "{:?}", r.warnings);
-    assert!(r.warnings.first().is_some_and(|w| w.starts_with("ERROR: nothing to draw yet")), "{:?}", r.warnings);
-    assert!(r.items.is_empty() && r.routed == 0);
 }
 
 /// The P3/P4 move counts of a run: the P4 lines (evaluations, moves tried / applied per kind) and
