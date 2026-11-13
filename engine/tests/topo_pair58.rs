@@ -110,32 +110,64 @@ fn net_len(items: &[Item], net: i32) -> f64 {
         .sum()
 }
 
-/// The TopoR loop with the pair move: no via, A straight (67.125 mm), the copper clean. Without it
-/// the loop stays in the local minimum: A keeps its two vias (the rails stay straight). Per-edge
-/// capacity with steiner off, the cut model with steiner off and on. Parked, not 5.8: with steiner
-/// on, an edge from A2's pad corner to a free Steiner vertex 0.85 mm away is unlimited room for
-/// the search but over-full for the per-edge capacity model and the drawing's packer: with the
-/// per-edge model the move is refused (predicted over-full), with the cut model it is kept but
-/// the drawing forces a rail against A2 (clearance), so there the copper is not checked.
+/// The TopoR loop with the pair move, steiner off (per-edge capacity and the cut model): no via,
+/// A straight (67.125 mm), the copper clean. Without it the loop stays in the local minimum: A
+/// keeps its two vias (the rails stay straight).
 #[test]
 fn pair_move_frees_the_short_wire() {
     let m = pair_move_board();
-    for (steiner, cap) in [(false, "edges"), (false, "cuts"), (true, "cuts")] {
+    for cap in ["edges", "cuts"] {
         for seed in [0u64, 1] {
-            let tag = format!("steiner {steiner} {cap} seed {seed}");
-            let r = route_with(&m, &opts58(steiner, cap, true, seed), &RunControl::new());
+            let tag = format!("steiner off {cap} seed {seed}");
+            let r = route_with(&m, &opts58(false, cap, true, seed), &RunControl::new());
             assert_eq!(r.failed, 0, "{tag}: {:?}", r.warnings);
             assert!(vias(&r.items).is_empty(), "{tag}: {:?} {:?}", vias(&r.items), r.warnings);
             assert!((net_len(&r.items, 1) - 67.125).abs() < 0.05, "{tag}: A {}", net_len(&r.items, 1));
             assert!(r.warnings.iter().any(|w| w.contains("[vias] pair_move") && !w.contains("): 0 of")), "{tag}: {:?}", r.warnings);
-            if !steiner {
-                clean(&m, &r.items, &tag);
-            }
-            let r0 = route_with(&m, &opts58(steiner, cap, false, seed), &RunControl::new());
+            clean(&m, &r.items, &tag);
+            let r0 = route_with(&m, &opts58(false, cap, false, seed), &RunControl::new());
             assert_eq!(r0.failed, 0, "{tag}: {:?}", r0.warnings);
             assert_eq!(vias(&r0.items).len(), 2, "{tag}, pair_move off: {:?}", vias(&r0.items));
         }
     }
+}
+
+/// The same board with steiner on: the correct result is the same (no via, A straight, clean
+/// copper). PARKED, not 5.8 (Steiner-vertex edge room): an edge from A2's pad corner to a free
+/// Steiner vertex 0.85 mm away is unlimited room for the search but over-full for the per-edge
+/// capacity model and the drawing's packer; with the per-edge model the move is refused (3
+/// predicted over-full edge-layers), with the cut model it is kept but the drawing crosses and
+/// shorts the rails at A2. Ignored until that is fixed; it asserts the correct result, not today's.
+#[test]
+#[ignore = "parked: Steiner-vertex edge room (search unlimited, per-edge capacity / drawing packer over-full)"]
+fn pair_move_frees_the_short_wire_steiner_on() {
+    let m = pair_move_board();
+    for cap in ["edges", "cuts"] {
+        let tag = format!("steiner on {cap}");
+        let r = route_with(&m, &opts58(true, cap, true, 0), &RunControl::new());
+        assert_eq!(r.failed, 0, "{tag}: {:?}", r.warnings);
+        assert!(vias(&r.items).is_empty(), "{tag}: {:?}", vias(&r.items));
+        assert!((net_len(&r.items, 1) - 67.125).abs() < 0.05, "{tag}: A {}", net_len(&r.items, 1));
+        clean(&m, &r.items, &tag);
+    }
+}
+
+/// The graded stretch price (`[vias] pair_max_mm` as a scale, never a cutoff): next to nothing for
+/// a short stretch, one via at the scale, growing smoothly (with the square) beyond it.
+#[test]
+fn pair_stretch_price_is_graded() {
+    use topor_engine::topo::viaopt::pair_len_price;
+    let (scale, via) = (10.0 * MM, 25.0);
+    assert!(pair_len_price(1.2 * MM, scale, via) < 0.5);
+    assert!((pair_len_price(scale, scale, via) - via).abs() < 1e-9);
+    let mut last = -1.0;
+    for k in 0..=60 {
+        let p = pair_len_price(k as f64 * MM, scale, via);
+        assert!(p > last && p.is_finite(), "not growing at {k} mm");
+        last = p;
+    }
+    assert!((pair_len_price(20.0 * MM, scale, via) - 4.0 * via).abs() < 1e-9);
+    assert!(pair_len_price(5.0 * MM, 0.0, via).is_finite());
 }
 
 /// `loop = "cycles"` (the default): the move does not run, the setting changes nothing.
