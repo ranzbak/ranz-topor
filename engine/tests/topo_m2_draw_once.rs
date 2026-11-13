@@ -80,17 +80,22 @@ fn only_the_picked_variant_is_drawn() {
 
 #[test]
 fn the_drawing_never_changes_the_plan_on_the_topor_path() {
-    // drawing feedback asked for: on the TopoR-loop path it has no effect, the plan and the
-    // copper are the ones without it
+    // drawing feedback asked for: on the TopoR-loop path it never reaches the plan (it may only
+    // redraw blockers inside the one drawing), so the plan is the one without it
     let m = eprom();
     let off = run(&m, &topor(r#", "runs": 1, "drawing_feedback": false"#));
     let on = run(&m, &topor(r#", "runs": 1, "drawing_feedback": true"#));
     assert_eq!(plan_line(&off), plan_line(&on));
-    assert_eq!(off.items.len(), on.items.len());
-    assert_eq!(off.total_length_nm, on.total_length_nm);
-    assert_eq!(off.vias, on.vias);
-    // the plan that was drawn is the loop's pick: one plan line, one drawing
-    assert_eq!(on.warnings.iter().filter(|w| w.starts_with("plan metrics:")).count(), 1);
+    // the plan that was drawn is the loop's pick: one plan line, one drawing, nothing after it
+    for r in [&off, &on] {
+        assert_eq!(r.warnings.iter().filter(|w| w.starts_with("plan metrics:")).count(), 1);
+        assert!(r.warnings.iter().any(|w| w.starts_with("TopoR loop ([optimize]")), "{:?}", r.warnings);
+        assert_eq!(r.routed, r.connections_total, "{:?}", r.warnings);
+    }
+    // and the plan of a planning-only run (no copper) is the plan the full run drew
+    let plan = run(&m, &topor(r#", "runs": 1, "drawing_feedback": true, "stop_after": "plan""#));
+    assert!(plan.items.is_empty());
+    assert_eq!(plan_line(&plan), plan_line(&on), "the drawing does not change the plan it was handed");
 }
 
 #[test]

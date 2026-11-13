@@ -736,13 +736,15 @@ impl Run {
         o2.wall_clock_s = ctl.limit.remaining_s().map_or(0.0, |r| r.max(1.0));
         // 5.1 `[optimize] loop = "topor"`: one cycle per run: the initial routing once, the TopoR
         // loop on the topology, the picked variant drawn once. M2 (6.1): nothing of the drawing
-        // feeds back on this path (`drawing_feedback` off: the plan is decided on the topology,
-        // the drawing only realises it; Polubasov 2010, introduction).
+        // feeds back into the plan on this path: no room hints from a drawing reach a plan (the
+        // plan is decided on the topology, the drawing only realises it; Polubasov 2010,
+        // introduction). `drawing_feedback` there only says whether the drawing redraws the
+        // blockers of a trace it could not fit, inside that one drawing (M0: "auto" = off with
+        // this loop; removing that rescue is M6).
         if topor {
             o2.initial = "once".into();
-            o2.drawing_feedback = false;
         }
-        let hv: Hints = if o2.drawing_feedback { self.all.iter().map(|(&(e, l), &r)| (e, l, r)).collect() } else { Vec::new() };
+        let hv: Hints = if o2.drawing_feedback && !topor { self.all.iter().map(|(&(e, l), &r)| (e, l, r)).collect() } else { Vec::new() };
         let kept = !self.arch.items.is_empty();
         let (ro, h2, mem2) = route_round(model, &o2, ctl, &hv, &self.mem, cycle, stubs, fx, opts.fluctuation, (self.k, &coord.gate, &obj), kept);
         self.cycles = cycle;
