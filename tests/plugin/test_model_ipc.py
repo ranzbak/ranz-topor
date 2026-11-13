@@ -466,6 +466,7 @@ def test_export_model_ipc_end_to_end_and_engine_loads_it(engine):
     assert nt["net_tie_group"] == 0 and m["net_ties"] == [{"ref": "NT1", "groups": [["1", "2"]], "nets": [[1, 2]]}]
     assert len(m["kept"]) == 1 and m["kept"][0]["net"] == 1 and len(m["vias"]) == 1 and m["vias"][0]["free"]
     assert len(m["outline"]) == 2 and any(c["layer"] == 0 for c in m["copper_shapes"])
+    assert m["rules"]["outline_half_stroke"] == 50_000  # B2: half the 0.1 mm Edge.Cuts stroke (as harness.model)
     assert [(k["name"], k["no_tracks"], k["no_vias"]) for k in m["keepouts"]] == [
         ("ant", True, True), ("dru:r", False, True)]
     assert [p["uuid"] for p in m["pours"]] == ["gnd-pour"] and m["pours"][0]["pads"] == ["R1.1"]

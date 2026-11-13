@@ -852,7 +852,7 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
         }
     };
     let notes = cdt_notes(m, &src, &points, &cons, &proj.cdt);
-    proj.edge_clear = m.rules.edge_clearance as f64;
+    proj.edge_clear = m.rules.edge_clear() as f64;
     // A copper-to-edge check set to ignore is no hard bound in the topology: the cuts at the
     // outline bound with 0 and P2 prices a pass that fits only without the rule (ignored_rule).
     if m.rules.ignored_checks.iter().any(|c| c == "copper_edge_clearance") {

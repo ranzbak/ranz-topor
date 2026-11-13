@@ -923,7 +923,7 @@ impl<'a> Drawer<'a> {
             }
         }
         let r = &model.rules;
-        let maxclr = r.per_net.values().map(|n| n.clearance).fold(r.default.clearance.max(r.min_clearance).max(r.hole_clearance).max(r.edge_clearance), i64::max);
+        let maxclr = r.per_net.values().map(|n| n.clearance).fold(r.default.clearance.max(r.min_clearance).max(r.hole_clearance).max(r.edge_clear()), i64::max);
         let maxw = r.per_net.values().map(|n| n.width).fold(r.default.width, i64::max);
         self.qgrow = (maxclr + maxw) as f64 + 4.0 * self.eps;
         self.n_static = self.ents.len();

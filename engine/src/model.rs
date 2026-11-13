@@ -357,7 +357,15 @@ pub struct Rules {
     #[serde(default)]
     pub via_hole_clearance: i64,
     pub hole_to_hole: i64,
+    /// Board Setup copper-to-edge clearance, as the board gives it (0 = 0). Measured, as KiCad's
+    /// DRC does, from the Edge.Cuts shape's EFFECTIVE shape, i.e. its stroke
+    /// (drc_test_provider_edge_clearance.cpp `testAgainstEdge`: `edge->GetEffectiveShape(
+    /// Edge_Cuts)` collided at `max(0, min - epsilon)`); the outline here is the stroke's centre
+    /// line, so the engine keeps [`Rules::edge_clear`] = this + [`Rules::outline_half_stroke`].
     pub edge_clearance: i64,
+    /// Half the widest Edge.Cuts stroke (nm; 0 = unset, older models): see [`Rules::edge_clear`].
+    #[serde(default)]
+    pub outline_half_stroke: i64,
     /// Narrowest copper connection KiCad's DRC accepts (`min_connection`, nm; 0 = unset): a
     /// necked pad exit stays at least this wide.
     #[serde(default)]
@@ -486,6 +494,7 @@ impl Default for Rules {
             via_hole_clearance: 0,
             hole_to_hole: 250_000,
             edge_clearance: 500_000,
+            outline_half_stroke: 0,
             min_connection: 0,
             max_error: 5_000,
             predefined_vias: Vec::new(),
@@ -502,6 +511,18 @@ impl Default for Rules {
 }
 
 impl Rules {
+    /// Centre-line distance copper keeps from the board outline: the copper-to-edge clearance
+    /// plus half the outline's stroke width (KiCad measures from the stroke's edge), also when the
+    /// clearance is 0 (copper may then touch the stroke, not cross it). An ignored copper-to-edge
+    /// check (`ignored_checks`) keeps `edge_clearance` alone (callers set it to 0 there). O(1).
+    pub fn edge_clear(&self) -> i64 {
+        if self.ignored_checks.iter().any(|c| c == "copper_edge_clearance") {
+            self.edge_clearance
+        } else {
+            self.edge_clearance + self.outline_half_stroke.max(0)
+        }
+    }
+
     /// The least via `(diameter, drill)` KiCad's DRC accepts on `net`: the net's custom-rule
     /// minimum where one matches ([`NetRule::via_d_min`]), else the Board Setup minimum. O(1).
     pub fn via_min_of(&self, net: i32) -> (i64, i64) {

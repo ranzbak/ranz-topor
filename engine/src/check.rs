@@ -261,7 +261,7 @@ impl Checker {
             .clearance
             .max(r.min_clearance)
             .max(r.hole_clearance)
-            .max(r.edge_clearance);
+            .max(r.edge_clear());
         max_clr = r
             .per_net
             .values()
@@ -287,7 +287,7 @@ impl Checker {
             rules_min_clearance: r.min_clearance as f64,
             hole_clearance: r.hole_clearance as f64,
             via_hole_clearance: r.via_hole_clear() as f64,
-            edge_clearance: r.edge_clearance as f64,
+            edge_clearance: r.edge_clear() as f64,
             margin,
             clearances: r
                 .per_net

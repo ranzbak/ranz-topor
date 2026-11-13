@@ -189,7 +189,7 @@ pub struct EdgeTrim {
 /// stretches. O(T · (P_net + E)) for T tracks, E outline segments.
 pub fn pad_ends_off_edge(model: &BoardModel, items: &mut [Item]) -> Vec<EdgeTrim> {
     let mut out = Vec::new();
-    let ec = model.rules.edge_clearance as f64;
+    let ec = model.rules.edge_clear() as f64;
     if ec <= 0.0 || model.outline.is_empty() || model.rules.ignored_checks.iter().any(|c| c == "copper_edge_clearance") {
         return out;
     }
