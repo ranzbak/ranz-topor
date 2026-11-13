@@ -1007,7 +1007,8 @@ fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, 
         };
         let Ok(mut r) = runs[k].lock() else { return };
         let c = if n == 1 { ctl.clone() } else { ctl.for_run(k as u32 + 1) };
-        crate::control::with_control(&c, || r.step(model, opts, &c, coord, stubs, fx, t_call));
+        // M2.TL: with the soft limit only Cancel / OK stops the moves inside a step (M0's stop checks)
+        crate::control::with_control_mode(&c, opts.timeout_mode == "hard", || r.step(model, opts, &c, coord, stubs, fx, t_call));
         let st = (r.cycles, r.done);
         drop(r);
         if let (Ok(mut tk), Ok(mut cy)) = (taken.lock(), cycles.lock()) {

@@ -431,28 +431,37 @@ thread_local! {
     /// M0 stop latency: the cancel flag and live time limit of the run on this thread
     /// ([`with_control`]), read only by [`stop_requested`] (not by [`cancelled`], whose readers,
     /// the drawing and the pour stitching, run on through a Cancel to draw the loop's pick).
-    static STOP: RefCell<Option<(Arc<AtomicBool>, Arc<TimeLimit>)>> = const { RefCell::new(None) };
+    /// The time limit is `None` with the soft limit (M2.TL: the limit cuts no step).
+    static STOP: RefCell<Option<(Arc<AtomicBool>, Option<Arc<TimeLimit>>)>> = const { RefCell::new(None) };
 }
 
 /// Runs `f` with `ctl`'s cancel flag and time limit as what [`stop_requested`] reads on this
 /// thread; the state before comes back after `f`, also when it panics. O(1) + `f`.
 pub fn with_control<R>(ctl: &RunControl, f: impl FnOnce() -> R) -> R {
-    struct Restore(Option<(Arc<AtomicBool>, Arc<TimeLimit>)>);
+    with_control_mode(ctl, true, f)
+}
+
+/// [`with_control`]; `limit_stops` = false (M2.TL soft limit, `[run] timeout_mode = "soft"`):
+/// only Cancel / OK stops the work loops, the time limit lets the step that runs finish. O(1) + `f`.
+pub fn with_control_mode<R>(ctl: &RunControl, limit_stops: bool, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<(Arc<AtomicBool>, Option<Arc<TimeLimit>>)>);
     impl Drop for Restore {
         fn drop(&mut self) {
             let prev = self.0.take();
             STOP.with(|c| *c.borrow_mut() = prev);
         }
     }
-    let _restore = Restore(STOP.with(|c| c.replace(Some((ctl.cancel.clone(), ctl.limit.clone())))));
+    let limit = limit_stops.then(|| ctl.limit.clone());
+    let _restore = Restore(STOP.with(|c| c.replace(Some((ctl.cancel.clone(), limit)))));
     f()
 }
 
-/// The run of this thread ([`with_control`]) was cancelled or its time limit passed: the stop
-/// test of the work loops that have no `RunControl` (the topology and label moves of P3/P4 and
-/// their cut prices, M0). Cheap: one atomic load, and a clock read only with a limit set. O(1).
+/// The run of this thread ([`with_control`]) was cancelled or its time limit passed (the latter
+/// only where the limit stops steps: `[run] timeout_mode = "hard"`, M2.TL): the stop test of the
+/// work loops that have no `RunControl` (the topology and label moves of P3/P4 and their cut
+/// prices, M0). Cheap: one atomic load, and a clock read only with a limit set. O(1).
 pub fn stop_requested() -> bool {
-    STOP.with(|c| c.borrow().as_ref().is_some_and(|(f, l)| f.load(Ordering::Relaxed) || l.passed()))
+    STOP.with(|c| c.borrow().as_ref().is_some_and(|(f, l)| f.load(Ordering::Relaxed) || l.as_ref().is_some_and(|l| l.passed())))
 }
 
 /// Deadline passed or run cancelled: the single stop test of every deadline site. O(1).
@@ -556,6 +565,20 @@ impl Job {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_soft_limit_lets_the_moves_run_on_and_cancel_still_stops_them() {
+        // M2.TL: with_control_mode(.., false) = the soft limit: a passed limit is no stop request
+        // for the work loops (the step that runs finishes); Cancel is; hard (with_control) both.
+        let ctl = RunControl::new();
+        ctl.limit.init(600.0);
+        ctl.limit.reach();
+        assert!(with_control(&ctl, stop_requested), "hard: the passed limit stops the moves");
+        assert!(!with_control_mode(&ctl, false, stop_requested), "soft: the step runs on");
+        ctl.request_cancel();
+        assert!(with_control_mode(&ctl, false, stop_requested), "soft: Cancel stops now");
+        assert!(!stop_requested(), "outside the scope nothing is installed");
+    }
 
     #[test]
     fn with_cancel_installs_the_flag_for_its_scope_only() {
