@@ -44,6 +44,7 @@ pub mod stitch;
 pub mod tidy;
 pub mod stats;
 pub mod tree;
+pub mod viacuts;
 pub mod viaopt;
 pub mod xrules;
 pub mod witness;

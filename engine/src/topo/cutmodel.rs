@@ -746,6 +746,8 @@ pub struct CutPrice<'a> {
     flow: Vec<(usize, FlowItem)>,
     /// Via site points per (triangle, net, r, s) ([`super::cutflow::via_point`]).
     sites: RefCell<SiteCache>,
+    /// CM1: the via cuts (a foreign band planned between two planned vias, [`super::viacuts`]).
+    pub vc: super::viacuts::ViaCuts,
 }
 
 /// One row of [`CutPrice::report`].
@@ -799,6 +801,7 @@ impl<'a> CutPrice<'a> {
             seg: SegScratch::default(),
             flow: Vec::new(),
             sites: RefCell::new(HashMap::new()),
+            vc: super::viacuts::ViaCuts::new(nl, n_wires, price, o.tau),
         }
     }
 
@@ -1083,12 +1086,12 @@ impl<'a> CutPrice<'a> {
         if super::refine::meter::on() {
             super::refine::meter::INSTALL_NS.fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         }
-        d
+        d + self.vc.set_wire(w, runs, vias)
     }
 
     /// Take wire `w` out (a dead wire); returns the change of the total.
     pub fn clear_wire(&mut self, w: WireId) -> f64 {
-        self.install(w, WireSt::default())
+        self.install(w, WireSt::default()) + self.vc.set_wire(w, &[], &[])
     }
 
     /// Open a move: every later change can be undone by [`CutPrice::rollback`].
@@ -1099,11 +1102,13 @@ impl<'a> CutPrice<'a> {
             self.cuts.iter_mut().flatten().for_each(|c| c.txn = 0);
         }
         self.txn = Some(Txn { total: self.total, over: self.over, id: self.txn_id, ..Txn::default() });
+        self.vc.begin();
     }
 
     /// Keep the changes since [`CutPrice::begin`].
     pub fn commit(&mut self) {
         self.txn = None;
+        self.vc.commit();
     }
 
     /// Undo the changes since [`CutPrice::begin`].
@@ -1116,6 +1121,7 @@ impl<'a> CutPrice<'a> {
         // restored to avoid float drift.
         self.total = t.total;
         self.over = t.over;
+        self.vc.rollback();
     }
 
     /// Whether some cut touched since [`CutPrice::begin`] is over-full and more over-full than
@@ -1125,17 +1131,17 @@ impl<'a> CutPrice<'a> {
         t.slack.iter().any(|&(l, ci, s0)| {
             let c = &self.cuts[l][ci];
             !c.items.is_empty() && c.slack < -OVER_TOL && c.slack < s0 - 1.0
-        })
+        }) || self.vc.worse_somewhere()
     }
 
     /// Total over-full price (mm).
     pub fn total(&self) -> f64 {
-        self.total
+        self.total + self.vc.total()
     }
 
     /// Over-full cuts (slack below [`OVER_TOL`]).
     pub fn overfull(&self) -> usize {
-        self.over
+        self.over + self.vc.overfull()
     }
 
     /// The graded amount of the over-full cuts (the TopoR loop's predicted violations, shopping
@@ -1151,7 +1157,7 @@ impl<'a> CutPrice<'a> {
                 a += 1.0 + -c.slack / pitch_of(&c.items).max(1.0);
             }
         }
-        a
+        a + self.vc.over_amount()
     }
 
     /// Shopping list 2.4, the shrinkage level of the price: the cuts that fit only necked (or not
