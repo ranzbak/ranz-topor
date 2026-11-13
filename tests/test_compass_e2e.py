@@ -34,7 +34,7 @@ PLAN_ERRORS = {"planner_overfull", "model_gap", "overfull_nearby"}
 def _route(name: str, model: str) -> dict:
     eng = pytest.importorskip("topor_engine")
     doc = json.loads((FIX / f"{name}.json").read_text())
-    opts = {"runs": 1, "wall_clock_s": 120.0, "topo_rounds": 1, "capacity_model": model}
+    opts = {"runs": 1, "wall_clock_s": 120.0, "topo_rounds": 1, "capacity_model": model, "compass_cut_check": True}
     r = json.loads(eng.route(json.dumps(doc["model"]), json.dumps(opts)))
     if r.get("compass") is None:
         pytest.skip("this engine writes no compass")

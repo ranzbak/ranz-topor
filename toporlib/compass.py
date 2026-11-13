@@ -268,7 +268,8 @@ def build(route: dict, drc_new=None, unconnected_new: int | None = None, *, reac
     for r in rows:
         if r["class"] in MODEL_CLASSES and r["predicted"] is None:
             if r["drawn"]:
-                flags.append(f"{r['label']}: drawn {r['drawn']}, not measured (no cut test on this plan)")
+                flags.append(f"{r['label']}: drawn {r['drawn']}, not measured (compass_cut_check off: no cut test on "
+                             "this plan; harness.score_runs turns it on)")
         elif r["predicted"] is None and r["drawn"] and r["class"] not in DRAWN_ONLY:
             flags.append(f"{r['label']}: drawn {r['drawn']}, not predicted by the plan (missing method step)")
         elif r["class"] == "overfull_nearby" and r["drawn"]:
@@ -373,7 +374,7 @@ def table_md(cp: dict, *, max_conns: int = 15) -> list:
         if r["class"] in DRAWN_ONLY:
             p = "-"
         elif r["predicted"] is None:
-            p = "not measured" if r["class"] in MODEL_CLASSES else "not predicted"
+            p = "not measured (compass_cut_check off)" if r["class"] in MODEL_CLASSES else "not predicted"
         else:
             p = _n(r["predicted"])
             if r.get("bottlenecks") is not None and r["bottlenecks"] != r["predicted"]:

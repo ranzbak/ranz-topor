@@ -3434,19 +3434,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let lname = |l: usize| b.signal_layers.get(l).and_then(|&id| model.layers.iter().find(|x| x.id == id)).map_or(format!("layer {l}"), |x| x.name.clone());
             let wc = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
             let fset = forced.borrow().clone();
-            // `[capacity] compass_cut_check`: with the per-edge model in charge, the cut test of
-            // the same plan, read-only (its own packer; the plan, the projection and the drawing
-            // never see it), so the model gap of inflated-sketch §6.1 is measured.
-            let opts_chk = (cmc_plan.is_none() && opts.compass_cut_check).then(|| Options { capacity_model: "cuts".into(), ..opts.clone() });
-            let packer_chk = opts_chk.as_ref().map(|o| {
-                let mut p = Packer::for_model(model, o, proj);
-                p.via_squeeze = packer.via_squeeze;
-                p
-            });
-            let cm_chk = packer_chk.as_ref().and_then(|p| super::refine::meter::suspended(|| Some(CapModel::new_cut(&st, p, &dirs_plan, &lr.events, bottom, 1.0)).filter(|c| c.cut.is_some())));
-            let cm_cut = cmc_plan.as_ref().or(cm_chk.as_ref());
+            // `[capacity] compass_cut_check` (model = "edges"): the read-only cut test runs after the
+            // drawing (end of this round), outside the time limit.
             // `pad_exits`: shopping list 5.10 fills it from `b.exit_stubs` (see compass::pad_exit_items).
-            let view = super::compass::PlanView { st: &st, lr: &lr, cm_edge: &cm_plan, cm_cut, cut_is_plan: cmc_plan.is_some(), bottom, conn: &wc, layer: &lname, forced: &fset, pad_exits: None };
+            let view = super::compass::PlanView { st: &st, lr: &lr, cm_edge: &cm_plan, cm_cut: cmc_plan.as_ref(), cut_is_plan: cmc_plan.is_some(), bottom, conn: &wc, layer: &lname, forced: &fset, pad_exits: None };
             let mut cp = super::refine::meter::suspended(|| super::compass::plan_compass(&view, if cmc_plan.is_some() { "cuts" } else { "edges" }, &opts.opt_loop, round));
             cp.loop_predicted = m.get("loop").and_then(|l| l.get("predicted")).and_then(|p| p.get("violations")).and_then(|v| v.as_u64()).map(|v| v as usize);
             compass_plan = Some(cp);
@@ -4899,6 +4890,26 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         "converged"
     };
     ctl.update("done", 4, routed_n, nconn, tot_vias, t0.elapsed().as_secs_f64());
+    // M1 compass, `[capacity] compass_cut_check` (model = "edges"; off by default, harness.score_runs
+    // turns it on): the read-only cut test of the plan handed to the drawing, after the drawing; its
+    // time goes back to the run's limit ([`RunControl::measured`]), so it never takes loop time.
+    if let Some(cp) = compass_plan.as_mut().filter(|_| !cuts_on && opts.compass_cut_check) {
+        let t_chk = Instant::now();
+        let opts_chk = Options { capacity_model: "cuts".into(), ..opts.clone() };
+        let mut pk = Packer::for_model(model, &opts_chk, proj);
+        pk.via_squeeze = packer.via_squeeze;
+        let lname = |l: usize| b.signal_layers.get(l).and_then(|&id| model.layers.iter().find(|x| x.id == id)).map_or(format!("layer {l}"), |x| x.name.clone());
+        let wc = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
+        let fset = forced.borrow().clone();
+        super::refine::meter::suspended(|| {
+            let cm_chk = CapModel::new_cut(&st, &pk, &dirs_plan, &lr.events, bottom, 1.0);
+            if cm_chk.cut.is_some() {
+                let view = super::compass::PlanView { st: &st, lr: &lr, cm_edge: &cm_plan, cm_cut: Some(&cm_chk), cut_is_plan: false, bottom, conn: &wc, layer: &lname, forced: &fset, pad_exits: None };
+                super::compass::model_check(&view, cp);
+            }
+        });
+        ctl.measured(t_chk.elapsed().as_secs_f64());
+    }
     let result = RouteResult {
         items,
         connections_total: reports.len(),

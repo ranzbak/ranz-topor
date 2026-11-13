@@ -100,6 +100,9 @@ def main(argv=None) -> int:
                 rc = 1
                 continue
             print("\n".join(compass_mod.table_md(cp, max_conns=a.conns)) + "\n")
+            if any(r["class"] == "model_gap" and r["predicted"] is None for r in cp.get("rows") or []):
+                print("(model gap not measured: run it with --set capacity.compass_cut_check=true, as harness.score_runs "
+                      "does; the cut test then runs after the drawing, outside the time limit)\n")
             print(compass_mod.summary_line(cp) or "", "\n")
             allc[label] = cp
     if a.json:

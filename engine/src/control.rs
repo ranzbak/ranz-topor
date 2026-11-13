@@ -48,6 +48,9 @@ pub struct Progress {
     /// `stable_window` cycles in every run ("Routes stable"; the plugin's Cancel then reads OK).
     #[serde(default)]
     pub stable: bool,
+    /// Seconds spent on measurements outside the time limit so far ([`RunControl::measured`]).
+    #[serde(default)]
+    pub measure_s: f64,
     /// M-B0: gain (%) of the best result over the last `stable_window` cycles (the largest over
     /// the runs still going); `None` before a full window.
     #[serde(default)]
@@ -224,6 +227,16 @@ impl TimeLimit {
         self.seconds().map(|l| (l - self.elapsed_s()).max(0.0))
     }
 
+    /// Moves a set limit later by `seconds` (time spent on a measurement that must not count:
+    /// the M1 compass's read-only cut test); not a change by the caller ([`TimeLimit::changed`]).
+    /// No limit: nothing. O(1).
+    pub fn extend(&self, seconds: f64) {
+        if seconds > 0.0 && seconds.is_finite() {
+            let add = (seconds * 1e9) as u64;
+            let _ = self.ns.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |ns| (ns < LIMIT_NONE).then(|| ns.saturating_add(add).min(LIMIT_NONE - 1)));
+        }
+    }
+
     /// The limit has passed (as it stands now). O(1).
     pub fn passed(&self) -> bool {
         self.deadline().is_some_and(|d| Instant::now() >= d)
@@ -269,6 +282,14 @@ impl RunControl {
     /// The run's wall-clock limit has passed (read live at every check). O(1).
     pub fn over_limit(&self) -> bool {
         self.limit.passed()
+    }
+
+    /// `seconds` spent on a measurement outside the time limit (the M1 compass's cut test): the
+    /// wall-clock limit moves later by it and `Progress::measure_s` adds it up (the plugin's CPU
+    /// clock leaves it out). O(1).
+    pub(crate) fn measured(&self, seconds: f64) {
+        self.limit.extend(seconds);
+        self.with_progress(|p| p.measure_s += seconds.max(0.0));
     }
 
     /// Copy of the current progress. O(1).

@@ -303,6 +303,37 @@ pub fn bottlenecks(items: Vec<CompassItem>) -> Vec<CompassItem> {
     out
 }
 
+/// The note of a plan without a cut test (`[capacity] model = "edges"`, `compass_cut_check` off).
+pub const NOT_MEASURED: &str = "model_gap: not measured (compass_cut_check off: [capacity] model = \"edges\" and no cut test on this plan; harness.score_runs turns it on)";
+
+/// The two capacity models compared on the same plan (inflated-sketch §6.1): a cut over-full by
+/// the cut test that no per-edge over-full edge-layer carrying all its wires touches is a model
+/// gap; a per-edge over-full edge-layer that no over-full cut carrying all its wires touches is a
+/// per-edge over-prediction. O(over-full edges x over-full cuts).
+fn compare(edge_over: &[CompassItem], cut_over: &[CompassItem], items: &mut Vec<CompassItem>, predicted: &mut BTreeMap<String, usize>, bn: &mut BTreeMap<String, usize>) {
+    let gap: Vec<CompassItem> = cut_over.iter().filter(|c| !edge_over.iter().any(|e| explains(e, c))).map(|c| CompassItem { class: "model_gap".into(), ..c.clone() }).collect();
+    let opd: Vec<CompassItem> = edge_over.iter().filter(|e| !cut_over.iter().any(|c| explains(c, e))).map(|e| CompassItem { class: "edge_overpredict".into(), ..e.clone() }).collect();
+    predicted.insert("model_gap".to_string(), gap.len());
+    predicted.insert("edge_overpredict".to_string(), opd.len());
+    let (g1, g2) = (bottlenecks(gap), bottlenecks(opd));
+    bn.insert("model_gap".to_string(), g1.len());
+    bn.insert("edge_overpredict".to_string(), g2.len());
+    items.extend(g1);
+    items.extend(g2);
+}
+
+/// `[capacity] compass_cut_check` (model = "edges"): the model comparison of the plan `v`, whose
+/// `cm_cut` is the read-only cut test, added to its compass `cp` after the drawing (the caller
+/// gives its time back to the run's limit). O(see [`compare`]).
+pub fn model_check(v: &PlanView, cp: &mut Compass) {
+    let Some(cc) = v.cm_cut else { return };
+    let edge_over = edge_items(v, v.cm_edge, "planner_overfull");
+    let cut_over = cut_items(v, cc, true, "planner_overfull");
+    compare(&edge_over, &cut_over, &mut cp.items, &mut cp.predicted, &mut cp.bottlenecks);
+    cp.notes.retain(|n| n != NOT_MEASURED);
+    cp.notes.push("model_gap: measured after the drawing by a read-only cut test ([capacity] compass_cut_check, outside the time limit); the plan and the drawing used the per-edge packer".into());
+}
+
 /// The compass of the plan `v` (predicted side; the drawn side is filled by the caller and the
 /// Python classifier). O(see module doc).
 pub fn plan_compass(v: &PlanView, model: &str, opt_loop: &str, round: usize) -> Compass {
@@ -331,20 +362,9 @@ pub fn plan_compass(v: &PlanView, model: &str, opt_loop: &str, round: usize) -> 
         }
     }
     if v.cm_cut.is_some() {
-        let gap: Vec<CompassItem> = cut_over.iter().filter(|c| !edge_over.iter().any(|e| explains(e, c))).map(|c| CompassItem { class: "model_gap".into(), ..CompassItem::clone(c) }).collect();
-        let opd: Vec<CompassItem> = edge_over.iter().filter(|e| !cut_over.iter().any(|c| explains(c, e))).map(|e| CompassItem { class: "edge_overpredict".into(), ..CompassItem::clone(e) }).collect();
-        predicted.insert("model_gap".to_string(), gap.len());
-        predicted.insert("edge_overpredict".to_string(), opd.len());
-        let (g1, g2) = (bottlenecks(gap), bottlenecks(opd));
-        bn.insert("model_gap".to_string(), g1.len());
-        bn.insert("edge_overpredict".to_string(), g2.len());
-        items.extend(g1);
-        items.extend(g2);
-        if !v.cut_is_plan {
-            notes.push("model_gap: measured by the compass's read-only cut test ([capacity] compass_cut_check); the plan and the drawing used the per-edge packer".into());
-        }
+        compare(&edge_over, &cut_over, &mut items, &mut predicted, &mut bn);
     } else {
-        notes.push("model_gap: not measured ([capacity] model = \"edges\" and compass_cut_check = false: no cut test on this plan)".into());
+        notes.push(NOT_MEASURED.into());
     }
     // Vias without a site: per wire, the vias of its intervals (points: the planned via
     // traversals' pass points).

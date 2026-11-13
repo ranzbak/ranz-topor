@@ -59,7 +59,8 @@ Every engine result of the topological core carries `compass` (engine `topo/comp
 drawing, per violation class (docs/dev/inflated-sketch.md §6.1) its count and its located items (cuts, edge-layers,
 via sites, unlayerable crossings, traversals through foreign copper, forced paths; merged into physical bottlenecks, `Compass::bottlenecks`; the two capacity models compared on the
 same plan: `model_gap` = cuts over-full by the cut test that no per-edge over-full edge-layer carrying all their wires
-touches (inflated-sketch §6.1; with model = "edges" the cut test runs read-only, `[capacity] compass_cut_check`),
+touches (inflated-sketch §6.1; with model = "edges" the cut test runs read-only after the drawing, outside the time
+limit, `[capacity] compass_cut_check`: off by default, on in `harness.score_runs`),
 `edge_overpredict` = the reverse), and per connection the
 planned vias, taut length and necked stretches. `toporlib/compass.py` classifies every drawn violation against those
 items (first match: via site, unlayerable, foreign copper, over-full, model gap (§6.1 direction), over-full nearby,

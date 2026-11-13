@@ -542,7 +542,7 @@ once from it; KiCad's DRC judges the written board (p. 183). The table puts the 
 | planner: foreign copper | a trace the plan runs through copper of another net (a short if not moved) |
 | planner: forced path | a connection the plan placed without any legal path |
 | pad exit | a violation at the exit from the trace's own fine-pitch pad; "not predicted" = this version does not plan pad exits yet |
-| model gap (per-edge fits, cut test over-full) | a passage the per-edge measure (the drawing's, and the plan's with `[capacity] model = "edges"`) finds fitting but the per-layer cut test finds too narrow; with model = "edges" measured by a read-only cut test (`[capacity] compass_cut_check`), "not measured" when that is off |
+| model gap (per-edge fits, cut test over-full) | a passage the per-edge measure (the drawing's, and the plan's with `[capacity] model = "edges"`) finds fitting but the per-layer cut test finds too narrow; with model = "edges" measured by a read-only cut test after the drawing, outside the time limit (`[capacity] compass_cut_check`, off by default: "not measured (compass_cut_check off)"; `harness.score_runs` turns it on) |
 | per-edge over-predicted (cut test fits) | the reverse: the per-edge measure finds a passage too narrow that the cut test finds fitting |
 | drawing loss | the plan said it fits, the drawing still broke a rule there (a drawing fault) |
 | open (no copper) | connections without copper; KiCad column = its new unconnected items |

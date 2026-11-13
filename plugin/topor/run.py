@@ -843,7 +843,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                 for line in round_log_lines(p, rounds_seen):
                     log.line(line)
                 rounds_seen = max(rounds_seen, p.rounds_ended)
-                if (cpu_clock and 0 < state["limit"] <= p.cpu_s and not state["limit_hit"] and not done):
+                # the engine's measurements outside the limit (M1 compass cut test, one thread) do not count
+                if (cpu_clock and 0 < state["limit"] <= p.cpu_s - p.measure_s and not state["limit_hit"] and not done):
                     state["limit_hit"] = "cpu"
                     log.line(f"CPU-time limit reached: {p.cpu_s:.1f} s of {state['limit']:.0f} s (router wall {p.elapsed_s:.1f} s)")
                 p.limit_s = state["limit"]

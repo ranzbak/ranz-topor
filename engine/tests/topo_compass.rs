@@ -13,7 +13,8 @@
 //! - Need of a cut (inflated-sketch §1.2; Maley p. 32): n x w + (n + 1) x s with foreign pads at
 //!   both ends; slack = length - need.
 //! - Model gap (inflated-sketch §6.1): a cut over-full by the cut test that no per-edge over-full
-//!   edge-layer carrying all its wires touches.
+//!   edge-layer carrying all its wires touches (with the per-edge model in charge measured by the
+//!   read-only cut test after the drawing, `compass_cut_check`, on in these tests).
 //!
 //! `channel_fit`: walls at x 4.30 and 5.90 (the 3 centre lines at pitch 0.4625 about x 5.10 plus
 //! 0.125 + 0.2125): cut 1.60, need 3 x 0.25 + 4 x 0.20 = 1.55, slack +0.05: nothing over-full.
@@ -52,7 +53,7 @@ fn pred(r: &RouteResult, class: &str) -> Option<usize> {
 #[test]
 fn channel_fit_predicts_nothing() {
     for model in ["cuts", "edges"] {
-        let r = run("channel_fit", &format!(r#", "capacity_model": "{model}""#));
+        let r = run("channel_fit", &format!(r#", "capacity_model": "{model}", "compass_cut_check": true"#));
         let c = r.compass.as_ref().expect("compass");
         assert_eq!(c.model, model);
         // Hand: slack +0.05, the cut test finds nothing over-full: no model gap in either model.
@@ -98,7 +99,7 @@ fn channel_overfull_predicts_one_bottleneck_of_two_cuts_with_its_four_connection
 fn model_gap_cut_is_a_model_gap_in_both_models() {
     let across = |s: &[[i64; 2]; 2]| s[0][1] == s[1][1] && s[0][0].min(s[1][0]) == 5_300_000 && s[0][0].max(s[1][0]) == 9_000_000;
     for model in ["cuts", "edges"] {
-        let r = run("model_gap_cut", &format!(r#", "capacity_model": "{model}""#));
+        let r = run("model_gap_cut", &format!(r#", "capacity_model": "{model}", "compass_cut_check": true"#));
         let c = r.compass.as_ref().expect("compass");
         // Hand: AC and its twin, over-full by 0.10, 8 connections, 1 bottleneck; the per-edge
         // model has no edge holding all 8: both are a model gap (with model = "edges" measured by
@@ -117,8 +118,8 @@ fn model_gap_cut_is_a_model_gap_in_both_models() {
             assert!(c.notes.iter().any(|n| n.starts_with("model_gap: measured")), "{:?}", c.notes);
         }
     }
-    // Off: no cut test with the per-edge model, said so.
-    let e = run("model_gap_cut", r#", "capacity_model": "edges", "compass_cut_check": false"#);
+    // Off (the default, user 2026-11-13): no cut test with the per-edge model, said so.
+    let e = run("model_gap_cut", r#", "capacity_model": "edges""#);
     let ce = e.compass.as_ref().expect("compass");
     assert_eq!(ce.predicted.get("model_gap"), None);
     assert!(ce.notes.iter().any(|n| n.starts_with("model_gap: not measured")), "{:?}", ce.notes);
