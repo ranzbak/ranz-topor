@@ -170,11 +170,12 @@ fn pair_stretch_price_is_graded() {
     assert!(pair_len_price(5.0 * MM, 0.0, via).is_finite());
 }
 
-/// `loop = "cycles"` (the default): the move does not run, the setting changes nothing.
+/// `loop = "cycles"` (the default before M0; M0 made `"topor"` the default, so it is set here): the
+/// move does not run, the setting changes nothing.
 #[test]
 fn pair_move_is_topor_loop_only() {
     let m = pair_move_board();
-    let a = route_with(&m, &Options { search_length: "taut".into(), via_pair_move: true, ..Options::default() }, &RunControl::new());
-    let b = route_with(&m, &Options { search_length: "taut".into(), via_pair_move: false, ..Options::default() }, &RunControl::new());
+    let a = route_with(&m, &Options { search_length: "taut".into(), opt_loop: "cycles".into(), via_pair_move: true, ..Options::default() }, &RunControl::new());
+    let b = route_with(&m, &Options { search_length: "taut".into(), opt_loop: "cycles".into(), via_pair_move: false, ..Options::default() }, &RunControl::new());
     assert_eq!(format!("{:?}", a.items), format!("{:?}", b.items));
 }
