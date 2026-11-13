@@ -62,6 +62,26 @@ KiCad home (never your own); it is not part of pytest ([gui-test-checklist.md](d
 - `tests/plugin/test_no_pcbnew.py` fails if anything under `plugin/` or `toporlib/` imports pcbnew;
   `tests/plugin/test_kipy_surface.py` pins every kipy call the plugin uses against the installed kipy.
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to a branch other than `main`, on pull requests and on demand:
+
+- **rust**: `cargo test --release` and `cargo clippy --release --all-targets` in `engine/` (not yet `-D warnings`: 5 pre-existing warnings on stable 1.96; make it strict once fixed).
+- **python**: builds the `topor-engine` wheel with maturin (feature `python`), installs it with the Python test
+  dependencies into a plain venv, and runs `pytest` (junit xml uploaded as the `pytest-junit` artifact).
+
+The runner has neither KiCad nor the private benchmark boards, so `tests/conftest.py` turns "resource absent" into a
+**skip with the reason** (never a failure, and never when the resource is present):
+
+- `pcbnew` / `wx` not importable: the module (or test) is skipped. Locally use `tools/dev-venv.sh` (system KiCad Python).
+- `snapshot of board ... (snapshot directory missing)`: tests on the pinned boards under `scratch/boards` are skipped.
+  Create them with `.venv/bin/python -m harness.snapshot` from `~/work/kicad/projects` (private, never committed).
+- tests needing a running KiCad (`KICAD_API_SOCKET`) and the live-KiCad GUI tests skip as before.
+- `tests/test_scaffold.py::test_cargo_workspace_builds` skips when `CI` is set (the rust job covers it).
+
+Known failures parked as PT1 are `xfail(strict=False)`, so they are visible but do not turn CI red.
+Run the full local suite (nothing skipped) with `.venv/bin/pytest -q`.
+
 ## Boards are read-only
 
 - The source projects under `~/work/kicad/projects` are **never modified** — not by code, not by hand.

@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+      - name: Thread count
+        run: echo "RAYON_NUM_THREADS=$(nproc)" >> "$GITHUB_ENV"
+      - name: cargo test
+        working-directory: engine
+        run: cargo test --release
+      # Not -D warnings yet: stable clippy (1.96) reports 5 pre-existing warnings (4 lib, 1 in
+      # tests/topo_fit.rs); engine code is not touched by the CI change. Tighten to
+      # `-- -D warnings` once they are fixed (CONTRIBUTING.md asks for a clean run).
+      - name: cargo clippy
+        working-directory: engine
+        run: cargo clippy --release --all-targets
+
+  python:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+      - name: Create venv and install test dependencies
+        run: |
+          python -m venv .ci-venv
+          .ci-venv/bin/pip install --upgrade pip
+          .ci-venv/bin/pip install 'maturin>=1.7,<2' 'pytest>=8' 'hypothesis>=6' \
+            'kicad-python>=0.8,<0.9' matplotlib pillow shapely numpy mcp
+      - name: Build and install the engine wheel
+        run: |
+          .ci-venv/bin/maturin build --release -m engine/Cargo.toml -o wheels
+          .ci-venv/bin/pip install wheels/*.whl
+      - name: pytest
+        env:
+          RAYON_NUM_THREADS: "4"
+        run: .ci-venv/bin/python -m pytest -q -rs --junitxml=pytest-junit.xml
+      - name: Upload junit xml
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-junit
+          path: pytest-junit.xml

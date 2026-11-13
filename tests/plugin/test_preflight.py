@@ -10,7 +10,10 @@ import pytest
 from topor import preflight as pf
 from topor.config import Config
 from topor.ports import Selection
+from pathlib import Path
+
 from toporlib.drc import DrcReport
+from toporlib.kicad_cli import kicad_cli
 
 MM = 1_000_000
 
@@ -78,6 +81,8 @@ def one(fs, code):
     return got[0]
 
 
+@pytest.mark.skipif(not Path(kicad_cli()).is_file(),
+                    reason="needs kicad-cli (KiCad install); without it preflight correctly reports KICAD_CLI_MISSING")
 def test_clean_model_has_only_info():
     fs = run(base_model(pours=[pour(4, 1), pour(6, 2)]))
     assert not [f for f in fs if f.severity in ("warning", "error")], fs
