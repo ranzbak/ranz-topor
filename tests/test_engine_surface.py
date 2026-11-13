@@ -206,21 +206,43 @@ def test_route_async_time_limit_is_live(engine):
     assert engine.route_async(mj, json.dumps({"wall_clock_s": 0.0, "threads": 2})).time_limit() is None
 
 
-@pytest.mark.xfail(strict=False, reason="PT1 parked: cancel after 2 s returns no anytime copper with the topo core (assert 0 >= 1); expectation predates it, see f20e5d5")
-def test_route_async_cancel_returns_anytime_result(engine):
-    """Cancel after 2 s of a board that routes for >= 5 s: anytime result, no panic (ruling C10)."""
+def _job_at_stage(engine, mj, opts, stage):
+    """route_async with `opts`, polled until its progress stage names `stage` (fails if the job ends first)."""
     import time
 
+    job = engine.route_async(mj, json.dumps(opts))
+    t0 = time.monotonic()
+    while stage not in json.loads(job.progress()).get("stage", ""):
+        assert not job.done(), f"the job ended before the stage {stage!r}"
+        assert time.monotonic() - t0 < 300, f"never reached the stage {stage!r}"
+        time.sleep(0.01)
+    return job
+
+
+def test_route_async_cancel_in_the_initial_routing_is_nothing_to_draw(engine):
+    """M2.TL (user 2026-11-13): Cancel during the initial routing (P2-P4) keeps no plan: the loud
+    NOTHING_TO_DRAW error, no copper, never a quiet empty or half-drawn result (was PT1: cancel at 2 s)."""
     from tests.scaling.synth import synth_model
 
-    m = synth_model(400, 1, layers=2)  # ~12 s uncancelled (2 threads)
-    mj = json.dumps(m)
-    job = engine.route_async(mj, json.dumps({"wall_clock_s": 0.0, "threads": 2}))
-    time.sleep(2.0)
-    assert not job.done()
+    mj = json.dumps(synth_model(400, 1, layers=2))
+    job = _job_at_stage(engine, mj, {"wall_clock_s": 0.0, "runs": 1}, "topological search")
     job.cancel()
     out = json.loads(job.wait())
     assert out["stop_reason"] == "cancel" and out["timed_out"]
-    assert out["routed"] >= 1
+    assert out["warnings"][0].startswith("ERROR: nothing to draw yet"), out["warnings"][:3]
+    assert out["routed"] == 0 and out["items"] == []
+
+
+def test_route_async_cancel_in_the_topor_loop_returns_anytime_result(engine):
+    """Cancel once the TopoR loop runs: the best kept variant is drawn, no panic (ruling C10; M2.TL)."""
+    from tests.scaling.synth import synth_model
+
+    mj = json.dumps(synth_model(400, 1, layers=2))
+    job = _job_at_stage(engine, mj, {"wall_clock_s": 0.0}, "TopoR loop on the topology")
+    job.cancel()
+    out = json.loads(job.wait())
+    assert out["stop_reason"] == "cancel" and out["timed_out"]
+    assert out["routed"] >= 1 and out["items"], out["warnings"][:3]
+    assert not any(w.startswith("ERROR:") for w in out["warnings"]), out["warnings"][:3]
     chk = json.loads(engine.check_items(mj, json.dumps(out["items"]), json.dumps({"margin_nm": 0})))
     assert chk["violations"] == []
