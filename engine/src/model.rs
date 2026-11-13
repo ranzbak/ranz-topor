@@ -981,12 +981,46 @@ pub struct Options {
     /// the estimated refill holding a pad or via of the net, or a pad whose thermal spokes are all
     /// cut) gets a via into the pour on another layer, or a short stub, near its pad.
     pub stitch_islands: bool,
+    /// Topological core (`topor.toml [planes] join_islands`, user 2026-11-12, default true): with
+    /// `stitch_islands`, a cut-off piece of a pour net's copper that holds no pad (an island the
+    /// zone keeps, e.g. remove islands = never) and that no stitch via can reach gets a short
+    /// track of the net width from the nearest pad of the net that is connected to the rest of its
+    /// net, into the island, so the island is no longer isolated copper; its end stands at least
+    /// w/2 + the zone's minimum width deep in the island; priced length x (1 + (d / 3 mm)^2), d
+    /// = distance from the pad's edge ([`crate::topo::stitch::join_price`]), no cutoff, a warning
+    /// beyond 3 mm. False: such an island is only reported.
+    pub plane_join_islands: bool,
     /// Topological core (4.4, `topor.toml [planes] terminals`, user rule 2026-11-10): an own-net
-    /// pour is a terminal of its net like a pad, which may carry vias. A plane pad's stub may end
-    /// on own-net copper already on the plane (another pad's stub via, an existing through via
-    /// in the fill) instead of a via of its own, and a stub via that other stubs share moves to
-    /// where their stubs are shortest together. False: one via per plane pad (before 4.4).
+    /// pour is a terminal of its net like a pad, which may carry vias. Only fill connected to the
+    /// rest of its net before the run (the main component of [`crate::pourcheck`] on the board as
+    /// given) counts: a stub never ends in a cut-off island. A plane pad that no stub serves is
+    /// wired to its net's connected fill (a far terminal), ending where the path search first
+    /// reaches it (user 2026-11-12: routing over a connected pour has no length), instead of to
+    /// another pad of its net. False: stubs into any fill, other pads joined pad to pad (before 4.4).
     pub plane_terminals: bool,
+    /// Topological core (4.4, `topor.toml [planes] share_vias`, default `"outside_bga"`): whether
+    /// a plane pad's stub may end on own-net copper already on the plane (another pad's stub via,
+    /// an existing through via in the fill) instead of a via of its own; a stub via that other
+    /// stubs share moves to where their stubs are shortest together. `"outside_bga"` (user
+    /// 2026-11-13: "no shared vias under bga chips, shared vias are okay outside of BGA
+    /// footprints"; 2026-11-13 for the balls: "sharing only when not possible in any other way,
+    /// usually there is a good reason multiple balls are assigned for the same net"): a share
+    /// where the pad or the via is a ball of a ball-grid footprint
+    /// ([`crate::topo::planes::bga_footprints`], by membership) is a last resort priced
+    /// [`Options::plane_bga_share_cost`] and warned per via; other pads (also parts under a BGA)
+    /// share freely; `"never"` (the 2026-11-12 rule: a shared
+    /// via conducts heat worse, makes single-via current paths and adds inductance towards the
+    /// power pins); `"always"`.
+    pub plane_share_vias: String,
+    /// Topological core (`topor.toml [planes] bga_refs`, default empty): overrides of the BGA
+    /// detection behind `plane_share_vias = "outside_bga"` ([`crate::topo::planes::bga_footprints`]):
+    /// "REF" counts footprint REF as a BGA (its whole pad box), "-REF" never.
+    pub plane_bga_refs: Vec<String>,
+    /// Topological core (`topor.toml [planes] bga_share_cost`, default 100): the extra price, in
+    /// `via` prices, of a plane stub ending on a shared via where the pad or the via is a BGA
+    /// ball's (under `plane_share_vias = "outside_bga"`). High: a ball shares only where no own
+    /// via site is within reach; each such via gets a warning.
+    pub plane_bga_share_cost: f64,
     /// `topor.toml [output] cleanup_safe`: the written copper is made stable under KiCad's Edit ->
     /// Cleanup Tracks & Vias ([`crate::topo::tidy`]): no null, duplicate or in-pad segments, T
     /// junctions as exact vertices, collinear segments merged.
@@ -1383,7 +1417,11 @@ impl Default for Options {
             reroute_rounds: 6,
             via_reduce: true,
             stitch_islands: true,
+            plane_join_islands: true,
             plane_terminals: true,
+            plane_share_vias: "outside_bga".into(),
+            plane_bga_refs: Vec::new(),
+            plane_bga_share_cost: 100.0,
             cleanup_safe: true,
             net_tree: "free".into(),
             steiner: false,

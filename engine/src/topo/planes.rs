@@ -78,6 +78,9 @@ pub struct PlaneVia {
     pub users: Vec<usize>,
     /// Given up: its owner's stub now ends on another via ([`place`] skips it).
     pub dead: bool,
+    /// Serves a ball of a ball-grid footprint (its owner or a user is one, [`bga_footprints`]):
+    /// one more stub on it pays the last-resort price ([`place`]).
+    pub ball: bool,
 }
 
 /// Graded price of one more stub of width `w` on via `v` (4.4): 0 while pi * drill covers the
@@ -90,9 +93,17 @@ pub fn load_price(v: &PlaneVia, w: f64, via_price: f64) -> f64 {
 
 /// Prices of a stub site (D6a): `mm` per mm of stub (the `length` factor) and the
 /// `via_squeeze` price of the room a via leaves to the foreign copper around it.
+///
+/// `live` (planes as terminals, `[planes] terminals`; `None` = off, every fill counts): the
+/// pour connectivity of the board before the run ([`crate::pourcheck::check_pour_reach`] with no
+/// routed copper: the KiCad fill of the ripped board, its existing tracks and vias, the pads).
+/// Only fill in its net's main component is the net's copper (user 2026-11-12: a pour is a
+/// terminal "given that the pour is connected to the rest of the net"); a stub or a wire that ends
+/// in a piece cut off from it (an island) connects nothing.
 pub struct SiteCost<'r> {
     pub mm: f64,
     pub reg: &'r Registry,
+    pub live: Option<&'r crate::pourcheck::PourReach>,
 }
 
 impl SiteCost<'_> {
@@ -102,6 +113,38 @@ impl SiteCost<'_> {
     }
     fn squeeze(&self, slack: f64, d: f64) -> f64 {
         self.reg.price(&Event::ViaSqueeze { wire: 0, at: Vec2::default(), slack_nm: slack, via_nm: d }, &WireCtx::default())
+    }
+    /// Whether `p` on model layer `layer` lies in fill of pour `zi` that is connected to the rest
+    /// of its net before the run (see `live`); true without `live`.
+    pub fn connected(&self, zi: usize, layer: u32, p: Vec2) -> bool {
+        self.live.is_none_or(|r| r.in_main(zi, layer, p))
+    }
+    /// [`in_fill`] restricted to connected fill: a disc of radius `r` at `p` inside a fill of pour
+    /// `zi` on some layer where that fill is connected. O(fill vertices).
+    pub fn in_live_fill(&self, pour: &crate::model::Pour, zi: usize, p: Vec2, r: f64) -> bool {
+        let mut layers: Vec<u32> = pour.fills.iter().map(|f| f.layer).collect();
+        layers.sort_unstable();
+        layers.dedup();
+        layers.into_iter().any(|l| in_fill_on(pour, Some(l), p, r) && self.connected(zi, l, p))
+    }
+    /// The pours a stub of `rq` may end in: with `live`, every pour of its net (each one is the
+    /// net's copper where it is connected; the decomposition named the nearest, which may be a
+    /// cut-off island), else its own pour only (before 4.4).
+    pub fn pours_of(&self, model: &BoardModel, rq: &Req) -> Vec<usize> {
+        if self.live.is_some() {
+            (0..model.pours.len()).filter(|&k| model.pours[k].net == rq.net).collect()
+        } else {
+            vec![rq.pour]
+        }
+    }
+    /// A via disc of radius `r` at `p` stands in connected fill of one of the pours `zs`.
+    pub fn via_ok_at(&self, model: &BoardModel, zs: &[usize], p: Vec2, r: f64) -> bool {
+        zs.iter().any(|&k| self.in_live_fill(&model.pours[k], k, p, r))
+    }
+    /// A track end of half width `r` at `p` on model layer `layer` lies in connected fill of one
+    /// of the pours `zs`.
+    pub fn track_ok_at(&self, model: &BoardModel, zs: &[usize], layer: u32, p: Vec2, r: f64) -> bool {
+        zs.iter().any(|&k| in_fill_on(&model.pours[k], Some(layer), p, r) && self.connected(k, layer, p))
     }
 }
 
@@ -151,8 +194,12 @@ pub fn in_fill_on(pour: &crate::model::Pour, layer: Option<u32>, p: Vec2, r: f64
 /// `shared` (4.4, `[planes] terminals`; empty = off): own-net copper already on the plane. A
 /// stub may end on one of them instead of a via of its own, within the same reach, priced by
 /// its length and the via's current load ([`load_price`]); it competes with an own via (which
-/// pays the `via` price) as the via-like option.
-pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)], shared: &[PlaneVia]) -> Result<Out, String> {
+/// pays the `via` price) as the via-like option. `ball` (the pad is a ball of a ball-grid
+/// footprint): a share where the pad or the via ([`PlaneVia::ball`]) is a ball's adds
+/// `last_resort` times the `via` price (user 2026-11-13: "sharing only when not possible in any
+/// other way"), so it wins only where no own via site is within reach.
+#[allow(clippy::too_many_arguments)]
+pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)], shared: &[PlaneVia], ball: bool, last_resort: f64) -> Result<Out, String> {
     let (model, b) = (dr.model, dr.b);
     let pad = &model.pads[rq.pad];
     let ob = &b.proj.obstacles[rq.obs];
@@ -160,6 +207,7 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)], s
     let layer_idx = b.smd_layer(rq.obs).unwrap_or(0);
     let lid = b.signal_layers[layer_idx];
     let c = ob.center;
+    let zs = cost.pours_of(model, rq);
     let rpad = ob.poly.iter().map(|&p| (p - c).len()).fold(0.0, f64::max);
     let sizes = via_sizes(&model.rules, rq.net, dr.opts);
     let step = 0.1e6;
@@ -175,7 +223,7 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)], s
     let mut best_track: Option<(f64, Vec2, u32)> = None;
     for l in (0..b.signal_layers.len()).filter(|&l| ob.layers.has(l)) {
         let tl = b.signal_layers[l];
-        if !pour.fills.iter().any(|f| f.layer == tl) {
+        if !zs.iter().any(|&k| model.pours[k].fills.iter().any(|f| f.layer == tl)) {
             continue;
         }
         let mut d = step;
@@ -185,7 +233,7 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)], s
             }
             for u in &dirs {
                 let p = c + *u * d;
-                if point_in_poly(p, &ob.poly) || !in_fill_on(pour, Some(tl), p, 0.5 * rq.w) {
+                if point_in_poly(p, &ob.poly) || !cost.track_ok_at(model, &zs, tl, p, 0.5 * rq.w) {
                     continue;
                 }
                 let price = cost.mm * d / 1e6;
@@ -216,7 +264,7 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)], s
                 if !dr.opts.via_in_pad && point_in_poly(p, &ob.poly) {
                     continue;
                 }
-                if !in_fill(pour, p, 0.5 * sz.d as f64) {
+                if !cost.via_ok_at(model, &zs, p, 0.5 * sz.d as f64) {
                     continue;
                 }
                 let price = cost.mm * d / 1e6 + cost.squeeze(dr.point_room(p, sz.d as f64, rq.net), sz.d as f64);
@@ -249,10 +297,10 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)], s
     let mut best_share: Option<(f64, usize)> = None;
     for (k, v) in shared.iter().enumerate() {
         let len = (v.at - c).len();
-        if v.dead || v.net != rq.net || len > rpad + 3.0e6 || !in_fill(pour, v.at, 0.5 * v.size.d as f64) {
+        if v.dead || v.net != rq.net || len > rpad + 3.0e6 || !cost.via_ok_at(model, &zs, v.at, 0.5 * v.size.d as f64) {
             continue;
         }
-        let price = cost.mm * len / 1e6 + load_price(v, rq.w, via_price);
+        let price = cost.mm * len / 1e6 + load_price(v, rq.w, via_price) + if ball || v.ball { last_resort * via_price } else { 0.0 };
         if best_share.is_some_and(|(bc, _)| price >= bc) {
             continue;
         }
@@ -274,7 +322,7 @@ pub fn place(dr: &mut Drawer, rq: &Req, cost: &SiteCost, vias: &[(Vec2, f64)], s
     // instead of 6, 12 connections fewer). So where the pour also fills a layer the pad has no
     // copper on, a via site wins and a track is the fallback; where it fills only the pad's own
     // layers, the via adds no access and the cheaper of the two wins.
-    let other_layers = pour.fills.iter().any(|f| !b.signal_layers.iter().enumerate().any(|(l, &id)| id == f.layer && ob.layers.has(l)));
+    let other_layers = zs.iter().flat_map(|&k| model.pours[k].fills.iter()).any(|f| !b.signal_layers.iter().enumerate().any(|(l, &id)| id == f.layer && ob.layers.has(l)));
     let take_track = match (best_track, best_via) {
         (Some(_), None) => true,
         (Some((bt, ..)), Some((bv, ..))) => !other_layers && bt <= bv,
@@ -340,62 +388,339 @@ pub struct FarTerm {
     pub layers: Vec<u32>,
     /// Side of the terminal square (the wire's width).
     pub size: f64,
+    /// Straight price of the candidate (mm: distance plus a via where the pad has no copper on
+    /// its layers); the path search picks among the candidates.
+    pub price: f64,
+    /// Candidates within [`FAR_SPACING_NM`] of this one that the spacing set aside (cheapest
+    /// straight price first, at most [`FAR_ALTS`], at least w apart): the path search
+    /// compares them with this one once this one is picked, so the spacing never drops a better
+    /// end (no `alts` of their own).
+    pub alts: Vec<FarTerm>,
 }
 
-/// The end of `rq`'s wire on its pour when no stub serves it (4.4). The region used is the
-/// board's existing fill of the pour (`model.pours[..].fills`, the copper KiCad filled before the
-/// run), kept clear by a margin: the track end's disc of radius w/2 + the zone's minimum width +
-/// the net clearance lies inside one fill, outside its holes. Of the fills on every layer, the
-/// point nearest the pad (its nearest boundary point, stepped inward along the pad-to-boundary
-/// direction until the disc fits), priced by distance plus the `via` price where the pad has no
-/// copper on that layer. `None`: no such point (the caller joins the pad by a signal connection
-/// as before). O(fill vertices).
-pub fn far_terminal(dr: &Drawer, rq: &Req, cost: &SiteCost) -> Option<FarTerm> {
-    let (model, b) = (dr.model, dr.b);
-    let pour = &model.pours[rq.pour];
-    let ob = &b.proj.obstacles[rq.obs];
-    let c = ob.center;
-    let margin = 0.5 * rq.w + pour.min_thickness.max(0) as f64 + model.rules.net_rule(rq.net).clearance as f64;
-    let via_price = cost.via();
-    let mut best: Option<(f64, Vec2)> = None;
-    for f in pour.fills.iter().filter(|f| b.signal_layers.contains(&f.layer)) {
-        let li = b.signal_layers.iter().position(|&l| l == f.layer).unwrap_or(0);
-        let extra = if ob.layers.has(li) { 0.0 } else { via_price };
-        for ring in std::iter::once(&f.outer).chain(f.holes.iter()) {
-            let pts: Vec<Vec2> = ring.iter().map(|q| q.to_vec2()).collect();
-            if pts.len() < 3 {
+/// Most set-aside candidates kept next to a far-terminal candidate ([`FarTerm::alts`]).
+pub const FAR_ALTS: usize = 8;
+
+/// Fewest pads of a ball-grid cluster ([`bga_footprints`]).
+pub const BGA_MIN_BALLS: usize = 16;
+/// Largest gap along a grid axis, in pitches, that still joins two balls into one cluster (a
+/// DDR BGA-96's two 3-column blocks are 4 pitches apart; a module's two pin rows tens of mm).
+pub const BGA_MAX_GAP_PITCHES: f64 = 4.0;
+
+/// Largest ball pitch per axis, mm: the JEDEC BGA pitches (JEP95) run from 0.3 to 1.5 mm. A
+/// grid of larger pitch (a keyboard's key contacts, a header field) is no ball grid.
+pub const BGA_MAX_PITCH_MM: f64 = 1.5;
+
+/// One ball-grid area: the footprint's reference and the box it covers (math frame).
+#[derive(Clone, Debug)]
+pub struct BgaArea {
+    pub ref_: String,
+    pub area: crate::geom::Aabb,
+    pub balls: usize,
+    /// Forced by `[planes] bga_refs`, not detected.
+    pub forced: bool,
+    /// The ball pads (indices into `model.pads`): the cluster's, or every pad of a forced one.
+    pub pads: Vec<usize>,
+}
+
+/// The areas under the board's ball-grid footprints, math frame. Per footprint (pads grouped by
+/// reference), SMD pads only (a THT connector or module is no BGA), in the footprint's own frame
+/// (the pads' rotation), copper pads only (no paste-only aperture): the pitch per axis (the
+/// smallest distance to the next pad in the same row, resp. column, that [`BGA_MIN_BALLS`] pads
+/// share; rectangular pitches like 0.8 x 0.65 mm; at most [`BGA_MAX_PITCH_MM`]); pads joined along an axis when
+/// they lie in one row (column) at most [`BGA_MAX_GAP_PITCHES`] pitches apart; a connected
+/// cluster counts when it holds at least [`BGA_MIN_BALLS`] pads in at least 4 rows and 4 columns
+/// and at least half of them have 3 or more neighbours one pitch away (a BGA, also with its
+/// centre or a column band depopulated; not a QFN/QFP ring, a header pair, two pin rows of a
+/// module). Its area is the box of its ball centres grown by half a pitch; a footprint may give
+/// several. `overrides` (`[planes] bga_refs`): "REF" forces the whole footprint in (box of all
+/// its pads), "-REF" keeps it out. O(pads log pads + per footprint n^2).
+pub fn bga_footprints(model: &BoardModel, overrides: &[String]) -> Vec<BgaArea> {
+    use crate::geom::Aabb;
+    let forced_in: std::collections::BTreeSet<&str> = overrides.iter().filter(|r| !r.starts_with('-')).map(|r| r.as_str()).collect();
+    let forced_out: std::collections::BTreeSet<&str> = overrides.iter().filter_map(|r| r.strip_prefix('-')).collect();
+    let mut by_ref: std::collections::BTreeMap<&str, Vec<usize>> = std::collections::BTreeMap::new();
+    for (i, p) in model.pads.iter().enumerate() {
+        by_ref.entry(p.ref_.as_str()).or_default().push(i);
+    }
+    let bbox = |ps: &mut dyn Iterator<Item = Vec2>| {
+        let mut b = Aabb { min: Vec2 { x: f64::INFINITY, y: f64::INFINITY }, max: Vec2 { x: f64::NEG_INFINITY, y: f64::NEG_INFINITY } };
+        for p in ps {
+            b.min = Vec2 { x: b.min.x.min(p.x), y: b.min.y.min(p.y) };
+            b.max = Vec2 { x: b.max.x.max(p.x), y: b.max.y.max(p.y) };
+        }
+        b
+    };
+    let median = |mut v: Vec<f64>| {
+        v.retain(|x| x.is_finite());
+        v.sort_by(f64::total_cmp);
+        v.get(v.len() / 2).copied()
+    };
+    let mut out = Vec::new();
+    for (&r, idx) in &by_ref {
+        if forced_out.contains(r) {
+            continue;
+        }
+        if forced_in.contains(r) {
+            let ps: Vec<Vec2> = idx.iter().map(|&i| model.pads[i].center.to_vec2()).collect();
+            let nn = median(ps.iter().enumerate().map(|(a, p)| ps.iter().enumerate().filter(|(b, _)| *b != a).map(|(_, q)| (*q - *p).len()).fold(f64::INFINITY, f64::min)).collect()).unwrap_or(0.0);
+            out.push(BgaArea { ref_: r.to_string(), area: bbox(&mut ps.iter().copied()).grow(0.5 * nn), balls: ps.len(), forced: true, pads: idx.clone() });
+            continue;
+        }
+        // Copper SMD pads only: a paste-only aperture grid (a QFN's exposed-pad paste windows) has
+        // no copper layer and is no ball.
+        let idx: Vec<usize> = idx.iter().copied().filter(|&i| model.pads[i].attr == crate::model::PadAttr::Smd && !model.pads[i].layers.is_empty()).collect();
+        if idx.len() < BGA_MIN_BALLS {
+            continue;
+        }
+        let phi = -model.pads[idx[0]].rotation_deg.to_radians();
+        let pts: Vec<Vec2> = idx.iter().map(|&i| model.pads[i].center.to_vec2().rot(phi)).collect();
+        let n = pts.len();
+        // A rough scale first (median nearest neighbour), then the pitch per axis.
+        let Some(d0) = median((0..n).map(|a| (0..n).filter(|&b| b != a).map(|b| (pts[b] - pts[a]).len()).fold(f64::INFINITY, f64::min)).collect()) else { continue };
+        if d0 <= 0.0 {
+            continue;
+        }
+        let row_tol = 0.25 * d0;
+        let next = |a: usize, along_x: bool| {
+            (0..n)
+                .filter(|&b| b != a)
+                .filter_map(|b| {
+                    let d = pts[b] - pts[a];
+                    let (u, v) = if along_x { (d.x, d.y) } else { (d.y, d.x) };
+                    (v.abs() <= row_tol && u.abs() > row_tol).then_some(u.abs())
+                })
+                .fold(f64::INFINITY, f64::min)
+        };
+        // The pitch of an axis: the smallest next-pad distance that at least BGA_MIN_BALLS pads
+        // share (within 15 %). Not the median over all pads: a QFN's two pin rows per axis are
+        // 10 mm apart and would outvote its 0.35 mm pin pitch.
+        let pitch = |along_x: bool| {
+            let mut v: Vec<f64> = (0..n).map(|a| next(a, along_x)).filter(|x| x.is_finite()).collect();
+            v.sort_by(f64::total_cmp);
+            (0..v.len()).find(|&i| v[i..].iter().take_while(|&&x| x <= 1.15 * v[i]).count() >= BGA_MIN_BALLS).map(|i| v[i])
+        };
+        let (Some(px), Some(py)) = (pitch(true), pitch(false)) else { continue };
+        if px.max(py) > (BGA_MAX_PITCH_MM + 1e-6) * 1e6 {
+            continue;
+        }
+        let (tx, ty) = (0.15 * px, 0.15 * py);
+        // Union-find over the axis neighbours (gap up to BGA_MAX_GAP_PITCHES pitches).
+        let mut parent: Vec<usize> = (0..n).collect();
+        fn find(p: &mut [usize], mut a: usize) -> usize {
+            while p[a] != a {
+                p[a] = p[p[a]];
+                a = p[a];
+            }
+            a
+        }
+        let mut close = vec![0usize; n];
+        for a in 0..n {
+            for b in (a + 1)..n {
+                let d = pts[b] - pts[a];
+                let (ax, ay) = (d.x.abs(), d.y.abs());
+                let in_row = ay <= ty && ax <= BGA_MAX_GAP_PITCHES * px + tx;
+                let in_col = ax <= tx && ay <= BGA_MAX_GAP_PITCHES * py + ty;
+                if in_row || in_col {
+                    let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                    parent[ra] = rb;
+                }
+                if (ay <= ty && (ax - px).abs() <= tx) || (ax <= tx && (ay - py).abs() <= ty) {
+                    close[a] += 1;
+                    close[b] += 1;
+                }
+            }
+        }
+        let mut comps: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+        for a in 0..n {
+            let root = find(&mut parent, a);
+            comps.entry(root).or_default().push(a);
+        }
+        let distinct = |mut v: Vec<f64>, tol: f64| {
+            v.sort_by(f64::total_cmp);
+            v.windows(2).filter(|w| w[1] - w[0] > tol).count() + 1
+        };
+        for c in comps.values().filter(|c| c.len() >= BGA_MIN_BALLS) {
+            let cols = distinct(c.iter().map(|&a| pts[a].x).collect(), tx);
+            let rows = distinct(c.iter().map(|&a| pts[a].y).collect(), ty);
+            let inner = c.iter().filter(|&&a| close[a] >= 3).count();
+            if cols < 4 || rows < 4 || 2 * inner < c.len() {
                 continue;
             }
-            for i in 0..pts.len() {
-                let (a, e) = (pts[i], pts[(i + 1) % pts.len()]);
-                let ab = e - a;
-                let t = ((c - a).dot(ab) / ab.len2().max(1.0)).clamp(0.0, 1.0);
-                let q = a + ab * t;
-                let d0 = (q - c).len();
-                if best.is_some_and(|(bp, _)| cost.mm * d0 / 1e6 + extra >= bp) {
+            let area = bbox(&mut c.iter().map(|&a| model.pads[idx[a]].center.to_vec2())).grow(0.5 * px.max(py));
+            out.push(BgaArea { ref_: r.to_string(), area, balls: c.len(), forced: false, pads: c.iter().map(|&a| idx[a]).collect() });
+        }
+    }
+    out
+}
+
+/// The areas of [`bga_footprints`] without overrides.
+pub fn bga_areas(model: &BoardModel) -> Vec<crate::geom::Aabb> {
+    bga_footprints(model, &[]).into_iter().map(|b| b.area).collect()
+}
+
+/// Whether `p` stands in one of `areas` ([`bga_areas`]).
+pub fn in_bga(areas: &[crate::geom::Aabb], p: Vec2) -> bool {
+    areas.iter().any(|a| p.x >= a.min.x && p.x <= a.max.x && p.y >= a.min.y && p.y <= a.max.y)
+}
+
+/// Whether [`resite`] may move a shared via whose stubs come from the pads at `members` to `p`:
+/// not into a ball-grid area (`areas`, [`bga_areas`]) unless one of those pads stands in it (the
+/// room under a BGA is its balls' fan-out; parts under it, e.g. decoupling caps, keep theirs).
+/// O(areas * members).
+pub fn resite_ok(areas: &[crate::geom::Aabb], members: &[Vec2], p: Vec2) -> bool {
+    let inside = |a: &crate::geom::Aabb, q: Vec2| q.x >= a.min.x && q.x <= a.max.x && q.y >= a.min.y && q.y <= a.max.y;
+    areas.iter().all(|a| !inside(a, p) || members.iter().any(|&m| inside(a, m)))
+}
+
+/// Most far-terminal candidates per pad ([`far_candidates`]).
+pub const FAR_CANDIDATES: usize = 24;
+
+/// Whether a disc of radius `r` at `p` lies inside the one fill piece `f` (inside its outer ring,
+/// outside its holes, at least `r` from every edge of them). O(piece vertices).
+fn in_piece(f: &crate::model::PourFill, p: Vec2, r: f64) -> bool {
+    let ring = |pts: &[crate::model::Pt]| -> Vec<Vec2> { pts.iter().map(|q| q.to_vec2()).collect() };
+    let far = |ps: &[Vec2]| (0..ps.len()).all(|i| seg_dist(p, ps[i], ps[(i + 1) % ps.len()]) >= r);
+    let outer = ring(&f.outer);
+    outer.len() >= 3
+        && point_in_poly(p, &outer)
+        && far(&outer)
+        && f.holes.iter().all(|h| {
+            let h = ring(h);
+            h.len() < 3 || (!point_in_poly(p, &h) && far(&h))
+        })
+}
+
+/// Spacing of the boundary samples of [`far_candidates`] and the least distance between two of
+/// its candidates, nm.
+pub const FAR_SAMPLE_NM: f64 = 0.5e6;
+pub const FAR_SPACING_NM: f64 = 1.0e6;
+
+/// Where the wire of `rq` may end on its net's pours when no stub serves it (4.4, planes as
+/// terminals; user 2026-11-12: "Routing over pours should be zero length, because the trace ends
+/// there, given that the pour is connected to the rest of the net"). The region is the fill
+/// KiCad filled before the run (`model.pours[..].fills`) of every pour of the pad's net, on the
+/// signal layers, only where it is connected to the rest of the net (`cost.live`, the main
+/// component; a cut-off island would leave the pad floating). Each candidate keeps a margin: the
+/// track end's disc of radius w/2 + the zone's minimum width + the net clearance lies inside one
+/// fill piece. Candidates: the boundary of every piece sampled every [`FAR_SAMPLE_NM`] (and the
+/// boundary point nearest the pad on each side), each stepped inward to the nearest point where
+/// the disc fits along the pad-to-boundary direction, straight across the edge (a side edge that
+/// direction runs along) or, at a vertex, along the corner's bisector; priced by distance plus the `via` price where the pad has no
+/// copper on that layer. Returned cheapest first, at most [`FAR_CANDIDATES`], at least
+/// [`FAR_SPACING_NM`] apart (the ones the spacing sets aside kept as [`FarTerm::alts`] of the
+/// nearest, for the caller's second round): the caller lets the path search pick among them, so a point behind
+/// an obstacle loses to one the trace reaches directly (no detour to the nearest point). Inside
+/// the region the trace has no length: it ends at the region's edge. Empty: no such point (the
+/// caller joins the pad by a signal connection as before).
+/// O(B log B) in the boundary samples B, plus O(piece vertices) per tried sample.
+pub fn far_candidates(dr: &Drawer, rq: &Req, cost: &SiteCost) -> Vec<FarTerm> {
+    let (model, b) = (dr.model, dr.b);
+    let ob = &b.proj.obstacles[rq.obs];
+    let c = ob.center;
+    let via_price = cost.via();
+    // Boundary samples (lower bound of the price, point, directions to step in, zone, fill).
+    let mut samples: Vec<(f64, Vec2, [Vec2; 3], usize, usize)> = Vec::new();
+    for (zi, pour) in model.pours.iter().enumerate().filter(|(_, z)| z.net == rq.net) {
+        for (fi, f) in pour.fills.iter().enumerate().filter(|(_, f)| b.signal_layers.contains(&f.layer)) {
+            let li = b.signal_layers.iter().position(|&l| l == f.layer).unwrap_or(0);
+            let extra = if ob.layers.has(li) { 0.0 } else { via_price };
+            for ring in std::iter::once(&f.outer).chain(f.holes.iter()) {
+                let pts: Vec<Vec2> = ring.iter().map(|q| q.to_vec2()).collect();
+                if pts.len() < 3 {
                     continue;
                 }
-                // Into the fill: away from the pad past the boundary point (the pad lies outside the
-                // fill or in a hole of it), or across the side where the pad sits on it.
-                let u = if d0 > 1.0 { (q - c) * (1.0 / d0) } else { Vec2 { x: -ab.y, y: ab.x } * (1.0 / ab.len().max(1.0)) };
-                let mut s = margin;
-                while s <= 4.0 * margin + 0.5e6 {
-                    let p = q + u * s;
-                    if in_fill_on(pour, Some(f.layer), p, margin) {
-                        let price = cost.mm * (p - c).len() / 1e6 + extra;
-                        if best.is_none_or(|(bp, _)| price < bp) {
-                            best = Some((price, p));
-                        }
-                        break;
+                let unit = |v: Vec2| v * (1.0 / v.len().max(1.0));
+                // Normal of edge i (one side; the other side is tried as its negative).
+                let normal = |i: usize| {
+                    let ab = pts[(i + 1) % pts.len()] - pts[i];
+                    unit(Vec2 { x: -ab.y, y: ab.x })
+                };
+                for i in 0..pts.len() {
+                    let (a, e) = (pts[i], pts[(i + 1) % pts.len()]);
+                    let ab = e - a;
+                    let l = ab.len();
+                    let tn = ((c - a).dot(ab) / ab.len2().max(1.0)).clamp(0.0, 1.0);
+                    let n = (l / FAR_SAMPLE_NM).floor() as usize;
+                    let nrm = normal(i);
+                    // At the vertex: also the bisector of the two edges' normals (into a corner).
+                    let bis = unit(nrm + normal((i + pts.len() - 1) % pts.len()));
+                    for (k, t) in std::iter::once((usize::MAX, tn)).chain((0..=n).map(|k| (k, k as f64 * FAR_SAMPLE_NM / l.max(1.0)))) {
+                        let q = a + ab * t.min(1.0);
+                        let d0 = (q - c).len();
+                        // Into the fill: away from the pad past the boundary point (the pad lies outside
+                        // the fill or in a hole of it), or across the side where the pad sits on it;
+                        // then straight across the edge (a side edge the pad's direction runs along),
+                        // and at a vertex along the corner's bisector (either sign: `in_piece` keeps
+                        // the inward one).
+                        let u = if d0 > 1.0 { (q - c) * (1.0 / d0) } else { nrm };
+                        samples.push((cost.mm * d0 / 1e6 + extra, q, [u, nrm, if k == 0 { bis } else { Vec2::default() }], zi, fi));
                     }
-                    s += 0.25 * margin;
                 }
             }
         }
     }
-    let (_, at) = best?;
-    let layers: Vec<u32> = pour.fills.iter().filter(|f| b.signal_layers.contains(&f.layer) && in_fill_on(pour, Some(f.layer), at, margin)).map(|f| f.layer).collect::<std::collections::BTreeSet<u32>>().into_iter().collect();
-    (!layers.is_empty()).then_some(FarTerm { conn: rq.conn, at, layers, size: rq.w })
+    samples.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.x.total_cmp(&y.1.x)).then(x.1.y.total_cmp(&y.1.y)));
+    let mut out: Vec<FarTerm> = Vec::new();
+    for (lb, q, dirs, zi, fi) in samples {
+        if out.len() >= FAR_CANDIDATES && out.iter().all(|f| f.price <= lb) {
+            break;
+        }
+        let pour = &model.pours[zi];
+        let f = &pour.fills[fi];
+        let margin = 0.5 * rq.w + pour.min_thickness.max(0) as f64 + model.rules.net_rule(rq.net).clearance as f64;
+        let extra = lb - cost.mm * (q - c).len() / 1e6;
+        // The inward point nearest the sample over the directions (the first direction on a tie):
+        // at a corner that is the bisector's, not the pad direction's further along the edge.
+        let mut found: Option<(f64, Vec2)> = None;
+        for u in dirs.into_iter().filter(|u| u.len2() > 0.25).flat_map(|u| [u, u * -1.0]) {
+            let mut s = margin;
+            while s <= 4.0 * margin + 0.5e6 && found.is_none_or(|(s0, _)| s < s0) {
+                let p = q + u * s;
+                if in_piece(f, p, margin) && cost.connected(zi, f.layer, p) {
+                    found = Some((s, p));
+                    break;
+                }
+                s += 0.25 * margin;
+            }
+        }
+        let Some((_, at)) = found else { continue };
+        let price = cost.mm * (at - c).len() / 1e6 + extra;
+        let near = out.iter().enumerate().map(|(k, g)| (k, (g.at - at).len())).filter(|x| x.1 < FAR_SPACING_NM).min_by(|x, y| x.1.total_cmp(&y.1));
+        // Set-aside ends only have to stay apart as terminals of one net (their squares of side
+        // w must not overlap); the clearance between them does not matter.
+        let alt_sep = rq.w;
+        // The layers where some connected fill of the net covers the end with its margin.
+        let layers: Vec<u32> = model
+            .pours
+            .iter()
+            .enumerate()
+            .filter(|(_, z)| z.net == rq.net)
+            .flat_map(|(zj, z)| {
+                let m = 0.5 * rq.w + z.min_thickness.max(0) as f64 + model.rules.net_rule(rq.net).clearance as f64;
+                z.fills.iter().filter(move |g| b.signal_layers.contains(&g.layer) && in_piece(g, at, m) && cost.connected(zj, g.layer, at)).map(|g| g.layer)
+            })
+            .collect::<std::collections::BTreeSet<u32>>()
+            .into_iter()
+            .collect();
+        if layers.is_empty() {
+            continue;
+        }
+        let t = FarTerm { conn: rq.conn, at, layers, size: rq.w, price, alts: Vec::new() };
+        if let Some((k, d)) = near {
+            let g = &mut out[k];
+            if d >= alt_sep && g.alts.len() < FAR_ALTS && g.alts.iter().all(|a| (a.at - at).len() >= alt_sep) {
+                g.alts.push(t);
+            }
+            continue;
+        }
+        out.push(t);
+        out.sort_by(|x, y| x.price.total_cmp(&y.price));
+        while out.len() > FAR_CANDIDATES {
+            out.pop();
+        }
+    }
+    out
 }
 
 /// Geometric median of `pts` (Weiszfeld's iteration, 50 steps from the centroid): the point
@@ -424,9 +749,10 @@ pub fn weber(pts: &[Vec2]) -> Vec2 {
 /// no site is cheaper. Every stub stays within the reach of [`place`] (3 mm past its pad) and
 /// passes the same checks as there. `outs` (per request, in the stage's order) and `v` are
 /// updated; `vias` = every stub via's (centre, radius) for the keep-off checks (this one's own
-/// entry is skipped). Returns whether the via moved.
+/// entry is skipped); `site_ok` = the site gate ([`resite_ok`]: not into a BGA area none of its
+/// pads stands in, under "outside_bga"). Returns whether the via moved.
 #[allow(clippy::too_many_arguments)]
-pub fn resite(dr: &mut Drawer, reqs: &[Req], outs: &mut [Option<Out>], v: &mut PlaneVia, cost: &SiteCost, vias: &[(Vec2, f64)]) -> bool {
+pub fn resite(dr: &mut Drawer, reqs: &[Req], outs: &mut [Option<Out>], v: &mut PlaneVia, cost: &SiteCost, vias: &[(Vec2, f64)], site_ok: &dyn Fn(Vec2) -> bool) -> bool {
     let Some(owner) = v.owner else { return false };
     if v.users.is_empty() {
         return false;
@@ -453,10 +779,13 @@ pub fn resite(dr: &mut Drawer, reqs: &[Req], outs: &mut [Option<Out>], v: &mut P
     let others: Vec<(Vec2, f64)> = vias.iter().copied().filter(|&(q, _)| (q - v.at).len() > 1.0).collect();
     let price_at = |dr: &Drawer, p: Vec2| -> f64 { members.iter().map(|&i| cost.mm * (ctr(i) - p).len() / 1e6).sum::<f64>() + cost.squeeze(dr.point_room(p, sz.d as f64, v.net), sz.d as f64) };
     let legal = |dr: &Drawer, p: Vec2| -> bool {
+        if !site_ok(p) {
+            return false;
+        }
         if members.iter().any(|&i| (ctr(i) - p).len() > rpad(i) + 3.0e6 || (!dr.opts.via_in_pad && point_in_poly(p, &b.proj.obstacles[reqs[i].obs].poly))) {
             return false;
         }
-        if !in_fill(pour, p, r) || others.iter().any(|&(q, rq2)| (q - p).len() < r + rq2 + 1_000.0) {
+        if !cost.via_ok_at(model, &cost.pours_of(model, &reqs[owner]), p, r) || others.iter().any(|&(q, rq2)| (q - p).len() < r + rq2 + 1_000.0) {
             return false;
         }
         let crowd = via_item(v.net, p, ViaSize { d: sz.d + 2 * pour.min_thickness.max(0), drill: sz.drill }, None);
@@ -518,12 +847,13 @@ pub fn islands(model: &BoardModel, b: &Board, vias: &[(usize, Vec2)], reqs: &[Re
     let mut out = Vec::new();
     for &(conn, at) in vias {
         let Some(rq) = reqs.iter().find(|r| r.conn == conn) else { continue };
-            let pour = &model.pours[rq.pour];
-        let inside = pour.fills.iter().any(|f| {
+        // Any pour of the net: with planes as terminals a stub may end in another pour of its net.
+        let pours = || model.pours.iter().filter(|z| z.net == rq.net);
+        let inside = pours().flat_map(|z| z.fills.iter()).any(|f| {
             let ring: Vec<Vec2> = f.outer.iter().map(|p| p.to_vec2()).collect();
             ring.len() >= 3 && point_in_poly(at, &ring)
         });
-        if !pour.fills.is_empty() && !inside {
+        if pours().any(|z| !z.fills.is_empty()) && !inside {
             let pad = &model.pads[rq.pad];
             out.push(format!(
                 "plane island: via of pad {}.{} at ({:.3}, {:.3}) mm is outside the filled copper of its plane ({} zone)",
@@ -593,7 +923,7 @@ mod tests {
 
     #[test]
     fn load_price_is_zero_within_pi_drill_and_grows_past_it() {
-        let v = PlaneVia { at: Vec2::default(), size: ViaSize { d: 600_000, drill: 300_000 }, net: 1, load: 500_000.0, owner: Some(0), users: vec![], dead: false };
+        let v = PlaneVia { at: Vec2::default(), size: ViaSize { d: 600_000, drill: 300_000 }, net: 1, load: 500_000.0, owner: Some(0), users: vec![], dead: false, ball: false };
         // pi * 0.3 mm = 0.942 mm >= 0.5 + 0.25 mm.
         assert_eq!(load_price(&v, 250_000.0, 25.0), 0.0);
         let full = PlaneVia { load: 942_477.8, ..v.clone() };

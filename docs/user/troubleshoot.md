@@ -518,7 +518,7 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: info.*
 
-**Cause.** A pad of a plane net (a net whose pour is on a plane layer) had no room for a short stub and via into its pour, so it is joined by an ordinary trace instead: to the pour's nearest filled copper (planes.terminals, the default), or to another pad of its net where the pour has no filled copper to end on.
+**Cause.** A pad of a plane net (a net whose pour is on a plane layer) had no room for a short stub and via into its pour, so it is joined by an ordinary trace instead: to its net's connected pour fill where its path first reaches it (planes.terminals, the default), or to another pad of its net where the pour has no filled copper to end on.
 
 **Fix.** Nothing to do if the trace is acceptable; otherwise make room next to the pad or allow vias in pads (vias.via_in_pad).
 

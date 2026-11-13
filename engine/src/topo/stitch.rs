@@ -18,7 +18,11 @@
 //! - **pad stub**: a pad of the component with no island to put a via in (its thermal spokes all
 //!   cut) gets a short track of the net width on its own layer, ending in the main fill of that
 //!   layer, or else in a via standing in the main fill of another pour layer (nearest first,
-//!   rings 0.1 mm apart up to [`STUB_MAX_NM`], 32 directions), as the plane stage does.
+//!   rings 0.1 mm apart up to [`STUB_MAX_NM`], 32 directions), as the plane stage does;
+//! - **island join** (`[planes] join_islands`): a component with no pad and no via site gets a
+//!   track from a pad of the net in the main component into the island, priced by
+//!   [`join_price`] (length, growing with the square of the distance from the pad over the
+//!   [`STUB_MAX_NM`] scale; a warning beyond it), its end clear of the net's other copper.
 //!
 //! The pass repeats (the fill is estimated again with the stitches in) up to [`PASSES`] times or
 //! until a pass places nothing. Literature: TopoR leaves islands of a poured area to the user
@@ -44,7 +48,8 @@ pub const PASSES: usize = 3;
 pub const MAX_TRIES: usize = 64;
 /// Candidate lattice: every STEP-th raster cell.
 pub const STEP: usize = 4;
-/// Longest pad stub, nm.
+/// Longest pad stub, nm; also the length scale of an island join (no cutoff there, see
+/// [`join_price`]).
 pub const STUB_MAX_NM: f64 = 3.0e6;
 
 /// What the stitching added and found.
@@ -58,6 +63,8 @@ pub struct StitchOut {
     /// Island vias and pad stubs placed.
     pub island_vias: usize,
     pub pad_stubs: usize,
+    /// Pad-less islands joined to a connected pad of their net by a track (`[planes] join_islands`).
+    pub island_joins: usize,
     /// Report lines.
     pub notes: Vec<String>,
 }
@@ -74,7 +81,7 @@ fn cut_text(model: &BoardModel, c: &Cut) -> String {
         .first()
         .map(|&p| model.pads[p].center.to_vec2())
         .or_else(|| c.vias.first().copied())
-        .unwrap_or_default();
+        .unwrap_or(c.at);
     format!(
         "{name}: {} island(s) {:.2} mm², pads [{}{}], {} via(s), near {}",
         c.islands.len(),
@@ -269,6 +276,38 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
                     d += 0.1e6;
                 }
             }
+            // Island join (`[planes] join_islands`, user 2026-11-12): a piece holding no pad that no
+            // via reaches is joined to the nearest pad of its net that is connected to the rest of
+            // the net, by a track from the pad into the island (shortest first).
+            if !done && c.pads.is_empty() && opts.plane_join_islands {
+                let site_ok = |p: Vec2, r: f64| own_copper_ok(&all, p, r, c.net);
+                if let Some(it) = join_island(model, &reach, c, &|it: &Item| ok(&idx, std::slice::from_ref(it)), &site_ok) {
+                    let (pi, len) = (it.1, it.2);
+                    out.notes.push(format!(
+                        "island join {}.{} -> {} ({:.3} mm) for {}",
+                        model.pads[pi].ref_,
+                        model.pads[pi].number,
+                        kicad_mm(it.3),
+                        len / 1e6,
+                        cut_text(model, c)
+                    ));
+                    if it.4 > STUB_MAX_NM {
+                        out.notes.push(format!(
+                            "long island join {}.{} -> {}: {:.3} mm from the pad edge, over the {:.1} mm scale (check it by hand)",
+                            model.pads[pi].ref_,
+                            model.pads[pi].number,
+                            kicad_mm(it.3),
+                            it.4 / 1e6,
+                            STUB_MAX_NM / 1e6
+                        ));
+                    }
+                    idx.insert(&it.0);
+                    all.push(it.0.clone());
+                    out.items.push(it.0);
+                    out.island_joins += 1;
+                    done = true;
+                }
+            }
             if done {
                 placed_any = true;
             } else {
@@ -288,4 +327,63 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
     }
     out.notes.extend(unplaced.into_iter().map(|s| format!("no stitch site for {s}")));
     out
+}
+
+/// Price of an island join of length `len` that runs `edge` from the pad's edge (nm): the length,
+/// growing smoothly with the square of `edge` over the [`STUB_MAX_NM`] scale (graded, no cutoff:
+/// a join twice the scale costs five times its length). O(1).
+pub fn join_price(len: f64, edge: f64) -> f64 {
+    let e = edge.max(0.0) / STUB_MAX_NM;
+    len * (1.0 + e * e)
+}
+
+/// The island join of a cut-off component `c` that holds no pad: candidates are pairs (pad of the
+/// net in the main component with copper on a routable layer of one of `c`'s islands, a site of
+/// that island at least w/2 + the zone's minimum width deep whose track end keeps a gap to the net's other vias and tracks,
+/// `site_ok(end, w/2)`, the D4 sliver rule), priced by [`join_price`]; tried cheapest first, the
+/// first track `ok` accepts wins. Returns (track, pad index, length nm, end point math frame,
+/// distance from the pad edge nm). O(sites x pads log + MAX_TRIES checker queries).
+fn join_island(model: &BoardModel, reach: &PourReach, c: &Cut, ok: &dyn Fn(&Item) -> bool, site_ok: &dyn Fn(Vec2, f64) -> bool) -> Option<(Item, usize, f64, Vec2, f64)> {
+    let w = model.rules.net_rule(c.net).width.max(1) as f64;
+    let mut main: Vec<usize> = model
+        .pours
+        .iter()
+        .enumerate()
+        .filter(|(_, z)| z.net == c.net)
+        .flat_map(|(zi, _)| reach.main_pads.get(&zi).cloned().unwrap_or_default())
+        .collect();
+    main.sort_unstable();
+    main.dedup();
+    let mut cand: Vec<(f64, usize, u32, Vec2, f64, f64)> = Vec::new();
+    for &(zi, l, isl) in &c.islands {
+        if !model.layers.iter().any(|x| x.id == l && x.routable) {
+            continue;
+        }
+        let Some(ras) = reach.raster(zi, l) else { continue };
+        let pads: Vec<usize> = main.iter().copied().filter(|&pi| model.pads[pi].layers.contains(&l)).collect();
+        if pads.is_empty() {
+            continue;
+        }
+        // Deep enough that the fill still holds the end after KiCad's min-width opening.
+        let deep = 0.5 * w + model.pours[zi].min_thickness.max(0) as f64;
+        for p in ras.island_sites(isl, deep, STEP) {
+            if !site_ok(p, 0.5 * w) {
+                continue;
+            }
+            for &pi in &pads {
+                let pad = &model.pads[pi];
+                let len = (p - pad.center.to_vec2()).len();
+                let edge = crate::geom::point_skeleton(p, &model.skeleton(pad, l)).max(0.0);
+                cand.push((join_price(len, edge), pi, l, p, len, edge));
+            }
+        }
+    }
+    cand.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.3.x.total_cmp(&b.3.x)).then(a.3.y.total_cmp(&b.3.y)));
+    for &(_, pi, l, p, len, edge) in cand.iter().take(MAX_TRIES) {
+        let t = track_item(c.net, l, w, model.pads[pi].center.to_vec2(), p, None);
+        if ok(&t) {
+            return Some((t, pi, len, p, edge));
+        }
+    }
+    None
 }

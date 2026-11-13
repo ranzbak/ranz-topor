@@ -197,7 +197,7 @@ MESSAGES: dict[str, Msg] = {
         "The new copper cut pieces off a copper pour; topor joined them back with stitching vias inside the pieces or short stubs from their pads (each one is listed).",
         "Nothing to do; check them after a zone refill (KiCad → Edit → Fill All Zones, B). planes.stitch_islands = false only reports the pieces."),
     "PLANE_PAD_SIGNAL": Msg("info",
-        "A pad of a plane net (a net whose pour is on a plane layer) had no room for a short stub and via into its pour, so it is joined by an ordinary trace instead: to the pour's nearest filled copper (planes.terminals, the default), or to another pad of its net where the pour has no filled copper to end on.",
+        "A pad of a plane net (a net whose pour is on a plane layer) had no room for a short stub and via into its pour, so it is joined by an ordinary trace instead: to its net's connected pour fill where its path first reaches it (planes.terminals, the default), or to another pad of its net where the pour has no filled copper to end on.",
         "Nothing to do if the trace is acceptable; otherwise make room next to the pad or allow vias in pads (vias.via_in_pad)."),
     "PLANE_VIA_OUTSIDE_POUR": Msg("warning",
         "A via that should drop a pad onto its plane ended outside the filled copper of that plane, so it does not connect there.",

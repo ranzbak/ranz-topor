@@ -705,9 +705,16 @@ unsure about is kept. KiCad's DRC of the result stays the judge.
   zone, and an SMD pad of a plane net gets a through via onto the plane at the cheapest free via site near
   the pad, inside the pad when `[vias] via_in_pad` is on (`[vias] plane_vias`, since 0.4.2). A pad with no site that close fails with *no via site within … of the
   terminal (plane pour)*. In the topological core a pour is a terminal of its net like a pad (`[planes]
-  terminals`, default on): pads near each other share one plane via, sited where their stubs are shortest
-  together, a pad may end on an existing through via standing in the fill, and a pad too far for a stub is
-  wired to the pour's nearest filled copper instead of to another pad of the net. Only two-layer boards are benchmarked (eprom-to-kernal 27/27,
+  terminals`, default on): a pad too far for a stub is wired to its net's fill, ending where its path first
+  reaches the fill (routing over a connected pour has no length), instead of to another pad of the net. Only
+  fill connected to the rest of the net before the run counts; a cut-off island is never a stub or trace end. Plane pads near each other may share one plane via (sited where their stubs
+  are shortest together) or end on an existing through via standing in the fill. A ball of a ball-grid
+  footprint (BGA/PGA) shares only as a last resort, where no via of its own fits (`[planes] share_vias =
+  "outside_bga"`, the default; the price is `bga_share_cost`, and each such via gets a warning); parts under
+  a BGA share among themselves; `"never"` = one via per plane pad everywhere, `"always"` = balls share at
+  the plain price too. The router finds the ball grids itself (a connected grid of at least 16 copper SMD
+  pads of one footprint, pitch at most 1.5 mm) and notes each one in the run report ("BGA area REF: …");
+  `[planes] bga_refs` corrects it by KiCad → footprint reference: `"U3"` makes U3 a BGA, `"-U4"` never. Only two-layer boards are benchmarked (eprom-to-kernal 27/27,
   wiccon-2023 62/62); 4+ layer boards route their signal layers but inner-layer quality is not tuned yet. Copper counts
   other than 2, 4, 6, 8 need roles in `[layers]` ([`LAYER_ROLES_NEEDED`](troubleshoot.md#layer_roles_needed)).
 - **Groups.** The KiCad API does not expose group membership: grouped items are treated one by one, and
@@ -778,7 +785,10 @@ Measured on six snapshot boards (offline tests against KiCad's own polygons); th
   minus features thinner than the zone's minimum width, islands dropped or kept as KiCad → zone properties →
   Remove islands says). A piece of a pour net that is no longer joined to the rest of its pour gets a
   stitching via inside it near its pad (or a short stub from the pad), into the pour on another layer; the
-  report lists each piece and each stitch, and the pieces it could not join. KiCad's DRC is the judge.
+  report lists each piece and each stitch, and the pieces it could not join. A kept island that holds no pad
+  (KiCad: isolated copper, e.g. Remove islands = never) and that no stitching via reaches is joined to the
+  nearest connected pad of its net by a short track (`[planes] join_islands`, default on). KiCad's DRC is the
+  judge.
 - **Pads** are exact; custom, trapezoid, chamfered and offset pads become the convex hull of KiCad's
   polygon (larger, never smaller).
 - **Free vias**: KiCad's `free` flag is read from the saved board copy; a via whose flag cannot be read is
