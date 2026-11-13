@@ -10,8 +10,9 @@
 //!   are a column, not a fifth dimension). When the archive is over its cap the variant worst by
 //!   the objective goes first; the champions (fewest errors, shortest, fewest vias, fewest
 //!   shrinkages, fewest warnings) are never pruned.
-//! * The pick: fewest errors first (lexicographic), then the fewest connections with a short
-//!   (`[optimize] pick_shorts`, default on; see [`Criteria::shorts`]), then by `objective` and
+//! * The pick: fewest ranked errors first ([`Criteria::ranked`]: errors + (k - 1) x shorts, k =
+//!   `[optimize] short_weight`, default 1 = the plain count), then the fewest connections with a
+//!   short as a tie-break (`[optimize] pick_shorts`, default on; see [`Criteria::shorts`]), then by `objective` and
 //!   `[optimize] pick`:
 //!   `length_vias` with `pick = "errors_vias_length"` (default) = fewest vias, then the shortest
 //!   length; with `pick = "errors_weighted"` = least `length + mm_per_via x vias` (the 25 mm/via
@@ -39,12 +40,19 @@ pub struct Criteria {
     /// KiCad's `shorting_items` / `tracks_crossing`, a DRC error that breaks the board, and the
     /// track KiCad's Cleanup removes, so it ends as an open plus the error). In a plan (the
     /// TopoR loop's variants, the P4 score): the predicted shorts, crossings no layer separates
-    /// and traversals through foreign copper. Ranked right after `errors`, before `open`: within
+    /// and traversals through copper of another net (not a no-tracks rule area: a violation, no
+    /// short). Ranked right after `errors`, before `open`: within
     /// one error count a short is worse than an open (user 2026-11-12, "shorts should be in the
     /// routing criteria"). Not counted again in `errors` (a shorted connection is one error, like
-    /// any other connection with violations). 0 when `[optimize] pick_shorts` is off (the order
-    /// before 2026-11-12, bit for bit).
+    /// any other connection with violations). 0 when `[optimize] pick_shorts` is off (the ranking
+    /// before 2026-11-12; the cap pruning in [`Archive::offer`] keeps the pick either way).
     pub shorts: usize,
+    /// `[optimize] short_weight` k minus 1 (PS1, user 2026-11-13): what a connection with a short
+    /// counts on top of its one error in the ranked count [`Criteria::ranked`]. 0 (k = 1, the
+    /// default and `Default`): a short counts once, like any error, as TopoR's variant table
+    /// counts violations (6.3 manual p. 72: "sorted by number of violations, then by ascending
+    /// length"). Set by the builders; 0 when `pick_shorts` is off.
+    pub short_extra: f64,
     /// Connections without copper (unrouted: no path, the time limit, legal-only output).
     pub open: usize,
     /// Rule violations of the written copper (never drop).
@@ -63,6 +71,15 @@ pub struct Criteria {
 }
 
 impl Criteria {
+    /// The ranked error count (PS1): `errors + (k - 1) x shorts` with k = `[optimize]
+    /// short_weight`, so a connection with a short counts k errors and any other incomplete
+    /// connection one. Graded, no hard key: k = 1 is the plain error count (TopoR p. 72), a k
+    /// above 1 lets a variant with fewer shorts win over one with somewhat fewer errors. Still
+    /// first in every pick: "a design-rule violation cannot be compensated by any reduction of
+    /// wire length" (Polubasov 2010, «Многовариантная оптимизация»). O(1).
+    pub fn ranked(&self) -> f64 {
+        self.errors as f64 + self.short_extra * self.shorts as f64
+    }
     /// At least as good on all four criteria (errors with their shorts and their price, vias,
     /// length, shrinkages). The shorts are part of the errors criterion, so a variant with more
     /// shorts never covers one with fewer: the archive keeps what the pick prefers.
@@ -120,14 +137,17 @@ impl Objective {
             Objective::Area => c.area_mm2,
         }
     }
-    /// Lexicographic key: errors, shorts, objective value, shrinkages (`ErrorsViasLength`:
-    /// errors, shorts, open connections, vias, length, shrinkages; lengths within 1e-9 mm are
-    /// equal). Shorts right after errors in every pick (a short is one of the errors, so it is not
-    /// counted twice; within one error count it is worse than an open or a clearance violation:
-    /// KiCad's DRC fails the board on it and Cleanup removes the track).
+    /// Lexicographic key: the ranked error count ([`Criteria::ranked`]: errors, a short counted
+    /// `[optimize] short_weight` times), shorts, objective value, shrinkages (`ErrorsViasLength`:
+    /// ranked errors, shorts, open connections, vias, length, shrinkages; lengths within 1e-9 mm
+    /// are equal). The shorts after the ranked count are a tie-break only (PS1): at the same
+    /// ranked count the variant with fewer shorts wins (KiCad's DRC fails the board on a short and
+    /// Cleanup removes the track), but they never outrank the count. With k = 1 this is the
+    /// order of 2026-11-12 (errors, then shorts) unchanged.
     pub fn better(&self, a: &Criteria, b: &Criteria) -> bool {
-        if a.errors != b.errors {
-            return a.errors < b.errors;
+        let (ra, rb) = (a.ranked(), b.ranked());
+        if (ra - rb).abs() > 1e-9 {
+            return ra < rb;
         }
         if a.shorts != b.shorts {
             return a.shorts < b.shorts;
@@ -157,8 +177,9 @@ impl Objective {
     /// The progress dialog and the per-round log line say with it why a round is not the best. O(1).
     pub fn decider(&self, a: &Criteria, b: &Criteria) -> Option<(&'static str, f64)> {
         let d = |x: usize, y: usize| x as f64 - y as f64;
-        if a.errors != b.errors {
-            return Some(("errors", d(a.errors, b.errors)));
+        let dr = a.ranked() - b.ranked();
+        if dr.abs() > 1e-9 {
+            return Some(("errors", dr));
         }
         if a.shorts != b.shorts {
             return Some(("shorts", d(a.shorts, b.shorts)));
@@ -278,7 +299,7 @@ impl<T> Archive<T> {
         }
         self.items.push(v);
         while self.items.len() > self.cap {
-            // The worst by the objective (errors, shorts, value) that is no champion and not the
+            // The worst by the objective (ranked errors, shorts, value) that is no champion and not the
             // variant the pick takes goes (the pick's own order has more keys than the
             // champions, e.g. shorts and open: pruning it would hand KiCad a worse variant).
             let pick = self.pick(obj);
@@ -286,7 +307,7 @@ impl<T> Archive<T> {
                 .filter(|&i| Some(i) != pick && self.champions(i).is_empty())
                 .max_by(|&a, &b| {
                     let (ca, cb) = (&self.items[a].crit, &self.items[b].crit);
-                    ca.errors.cmp(&cb.errors).then(ca.shorts.cmp(&cb.shorts)).then(obj.value(ca).total_cmp(&obj.value(cb))).then(a.cmp(&b))
+                    ca.ranked().total_cmp(&cb.ranked()).then(ca.shorts.cmp(&cb.shorts)).then(obj.value(ca).total_cmp(&obj.value(cb))).then(a.cmp(&b))
                 });
             match worst {
                 Some(i) => {
@@ -565,6 +586,36 @@ mod tests {
         // `pick_shorts` off: the builders leave `shorts` at 0 and the order is the old one.
         let (s0, o0) = (Criteria { shorts: 0, ..short }, open);
         assert!(n.better(&s0, &o0), "off: drawn with a violation beats open, as before 2026-11-12");
+    }
+
+    #[test]
+    fn short_weight_grades_the_error_count_and_k_1_is_the_plain_count() {
+        // PS1 (user 2026-11-13): ranked errors = errors + (k - 1) x shorts, the shorts only a
+        // tie-break after it; k = 1 (short_extra 0) is the plain error count (TopoR 6.3 p. 72).
+        let n = Objective::from_options("length_vias", 25.0, "errors_vias_length");
+        let w = Objective::from_options("length_vias", 25.0, "errors_weighted");
+        let few_err = Criteria { errors: 50, shorts: 25, violations: 50, vias: 190, length_mm: 4700.0, ..Criteria::default() };
+        let few_sh = Criteria { errors: 55, shorts: 17, violations: 55, vias: 175, length_mm: 4480.0, ..Criteria::default() };
+        for obj in [n, w, Objective::Area] {
+            assert!(obj.better(&few_err, &few_sh), "{obj:?}: k = 1: fewer errors win (the 2026-11-12 order)");
+            assert_eq!(obj.decider(&few_err, &few_sh), Some(("errors", -5.0)), "{obj:?}");
+            // k = 2: 50 + 25 = 75 against 55 + 17 = 72: the one with fewer shorts wins, graded.
+            let k = |c: Criteria, k: f64| Criteria { short_extra: k - 1.0, ..c };
+            assert!(obj.better(&k(few_sh, 2.0), &k(few_err, 2.0)), "{obj:?}: k = 2: 8 shorts fewer outweigh 5 errors more");
+            assert_eq!(obj.decider(&k(few_sh, 2.0), &k(few_err, 2.0)), Some(("errors", -3.0)), "{obj:?}");
+            // k = 1.5: 62.5 against 63.5: fewer errors still win; no hard shorts key.
+            assert!(obj.better(&k(few_err, 1.5), &k(few_sh, 1.5)), "{obj:?}: k = 1.5: not enough");
+            // The same ranked count: the shorts break the tie.
+            let a = Criteria { errors: 10, shorts: 2, short_extra: 1.0, ..Criteria::default() };
+            let b = Criteria { errors: 12, shorts: 0, short_extra: 1.0, vias: 0, ..Criteria::default() };
+            assert!((a.ranked() - b.ranked()).abs() < 1e-9 && obj.better(&b, &a), "{obj:?}: at 12 = 12 the one without shorts");
+        }
+        // The stable meter ranks the same way.
+        use super::super::schedule::Meter;
+        let sc = |c: &Criteria| super::super::schedule::Score { incomplete: c.errors, shorts: c.shorts, ranked: c.ranked(), value: 1.0, scale: 1.0 };
+        let mut m = Meter::new(4, 0.5);
+        assert!(m.push(sc(&Criteria { short_extra: 1.0, ..few_err })));
+        assert!(m.push(sc(&Criteria { short_extra: 1.0, ..few_sh })), "k = 2: fewer shorts is a gain for the meter too");
     }
 
     #[test]

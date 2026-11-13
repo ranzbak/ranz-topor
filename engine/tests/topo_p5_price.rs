@@ -289,8 +289,14 @@ fn the_archive_criteria_and_the_move_price_are_one_measure() {
     let p = Predicted::of((2, 2.5), 1, 1);
     // The crossing no layer separates is a predicted short (a short when drawn), one of the four.
     assert_eq!(p, Predicted { count: 4, graded: 4.5, shorts: 1, ..Predicted::default() });
-    assert_eq!(p.shorts_ranked(false).shorts, 0, "[optimize] pick_shorts off: not ranked");
-    assert_eq!(p.with_foreign((2, 3.0)).shorts, 3, "a traversal through foreign copper is a predicted short too");
+    assert_eq!(p.shorts_ranked(false, 1.0).shorts, 0, "[optimize] pick_shorts off: not ranked");
+    assert_eq!(p.with_foreign((2, 3.0, 2)).shorts, 3, "a traversal through foreign copper is a predicted short too");
+    let k3 = p.shorts_ranked(true, 3.0);
+    assert_eq!((k3.shorts, k3.short_extra), (1, 2.0), "short_weight 3: a predicted short counts 3 in the ranked count");
+    assert_eq!(criteria_of(k3, 1000.0, 3, 100.0, 1, 0.0).ranked(), 6.0, "4 errors + (3 - 1) x 1 short");
+    assert_eq!(p.shorts_ranked(true, 0.5).short_extra, 0.0, "below 1 counts as 1");
+    let rule_area = p.with_foreign((1, 1.5, 0));
+    assert_eq!((rule_area.count, rule_area.shorts), (5, 1), "a traversal of a no-tracks rule area: a violation, no short");
     assert_eq!(p.price(1000.0), 4500.0);
     assert_eq!(p.penalty(1000.0), 500.0);
     let c = criteria_of(p, 1000.0, 3, 100.0, 1, 0.0);

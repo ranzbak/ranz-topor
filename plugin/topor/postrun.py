@@ -75,12 +75,13 @@ def _label(c: dict) -> str:
 
 
 def _violation_text(v: dict) -> str:
-    """One VIOLATIONS item: connection, type, place, depth and length, what it is too close to, cause."""
+    """One VIOLATIONS item: connection, type, place, depth and length, what it is too close to, and the
+    connection's first failed check (per connection: why its drawing found no legal geometry, not this item)."""
     at = v.get("at") or [0, 0]
     return (f"{v.get('name') or '?'} {v.get('from', '?')} -> {v.get('to', '?')}: {v.get('kind')} at "
             f"({at[0] / 1e6:.3f}, {at[1] / 1e6:.3f}) mm on {v.get('layer')}, {int(v.get('depth_nm') or 0) / 1e6:.3f} mm "
             f"below the rule over {int(v.get('length_nm') or 0) / 1e6:.3f} mm against {v.get('against')}; "
-            f"cause: {v.get('cause')}")
+            f"first failed check of the connection: {v.get('cause')}")
 
 
 def route_findings(result: dict | None) -> list:

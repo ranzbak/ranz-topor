@@ -264,7 +264,10 @@ without copper), **Vias** and **Length** — the order in which topor judges res
 `errors_vias_length`: fewest errors, then fewest connections with a short, then fewest open, fewest vias, the shortest
 length, then fewest shrinkages; `[optimize] pick_shorts`). A short (copper over another net's copper) is one of the
 errors and, at the same error count, worse than an open connection: KiCad's DRC fails the board on it and Cleanup
-removes the track. The round lines in log.txt name the connections with a short.
+removes the track. `[optimize] short_weight` (k, default 1) grades this: the ranked count is errors + (k - 1) x
+shorts, the shorts a tie-break after it. The round lines in log.txt name the connections with a short. The same order decides when the
+best result improved (the stable meter: reheats and the stable stop), so `pick_shorts` changes which rounds a run makes,
+not only the final pick among equal error counts.
 *Last round* is the round any run finished last; *Best so far* is the best result over all runs, exactly the board OK
 or Cancel keeps; until the first round ends their place reads *Waiting for round 1…*. The line below says how the
 last round compares, on the first criterion that differs: *Last round is worse than the best: errors +2.* (amber; more
