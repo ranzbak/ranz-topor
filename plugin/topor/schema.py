@@ -370,6 +370,7 @@ BACKLOG_VALUES = {("output", "geometry"): ("45deg",)}
 
 # Engine Options fields the plugin deliberately does not expose, with the reason.
 ENGINE_INTERNAL = {
+    "timeout_overrun_s": "set per run by the plugin from run.timeout_overrun_s (auto: timeout_s headless, none in the KiCad dialog; 0 on the CPU clock, which the plugin caps itself)",
     "stop_when_stable": "set per run by the plugin: false with the progress dialog (OK / finish_when_stable end it), true headless",
     "drc_spots": "set by the DRC loop from KiCad's own violations, not a user choice",
     "skip_self_check": "test-only switch that disables the engine's self check",

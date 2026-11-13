@@ -234,11 +234,12 @@ def test_route_async_cancel_in_the_initial_routing_is_nothing_to_draw(engine):
 
 
 def test_route_async_cancel_in_the_topor_loop_returns_anytime_result(engine):
-    """Cancel once the TopoR loop runs: the best kept variant is drawn, no panic (ruling C10; M2.TL)."""
+    """Cancel once the TopoR loop runs: the best kept variant is drawn, no panic (ruling C10; M2.TL). Legal copper only
+    (allow_violations = false; by default the topo core writes copper it cannot draw legally on purpose, never drop)."""
     from tests.scaling.synth import synth_model
 
     mj = json.dumps(synth_model(400, 1, layers=2))
-    job = _job_at_stage(engine, mj, {"wall_clock_s": 0.0}, "TopoR loop on the topology")
+    job = _job_at_stage(engine, mj, {"wall_clock_s": 0.0, "allow_violations": False}, "TopoR loop on the topology")
     job.cancel()
     out = json.loads(job.wait())
     # the loop's pick is drawn to its end (not cut short, so timed_out may be false)
