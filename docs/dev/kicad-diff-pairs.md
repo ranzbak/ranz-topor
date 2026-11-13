@@ -104,8 +104,8 @@ port `MatchDpSuffix` exactly, with the full net name, in one place (the plugin) 
 | max uncoupled length | custom rule `diff_pair_uncoupled (max ..)` only | none |
 | skew | custom rule `skew (min/opt/max) [(within_diff_pairs)]` only; target for the skew tuner | none |
 | length | custom rule `length (min/opt/max)` | none |
-| pre-defined pair sizes | `.kicad_pro` `board.design_settings.diff_pair_dimensions` (list of width/gap/via_gap) and session "custom" values (defaults 0.125 / 0.18 / 0.18 mm: `board_design_settings.h:72-74`) | |
-| tuning pattern defaults | `.kicad_pro` `diff_pair_defaults`, `diff_pair_skew_defaults` (min_amplitude, max_amplitude, spacing, corner_style, corner_radius_percentage, single_sided) | spacing 1.0 mm (pair) / 0.6 mm (skew, single); amplitude 0.2..1.0 mm; corner radius 80 % (`board_design_settings.h:76-77`, `pns_meander.cpp:42-56`) |
+| pre-defined pair sizes | `.kicad_pro` `board.design_settings.diff_pair_dimensions` (list of width/gap/via_gap) and session "custom" values (defaults 0.125 / 0.18 / 0.18 mm: `include/board_design_settings_defaults.h:61-63`) | |
+| tuning pattern defaults | `.kicad_pro` `diff_pair_defaults`, `diff_pair_skew_defaults` (min_amplitude, max_amplitude, spacing, corner_style, corner_radius_percentage, single_sided) | spacing 1.0 mm (pair) / 0.6 mm (skew, single); amplitude 0.2..1.0 mm; corner radius 80 % (spacing: `include/board_design_settings_defaults.h:65-66`; `pns_meander.cpp:42-56`) |
 
 The router picks the source in `PNS_KICAD_IFACE_BASE::GetSizes` (`pns_kicad_iface.cpp:1222-1283`):
 

@@ -17,8 +17,10 @@ allows that carries the pair width -- the Board Setup minimum via (:func:`smalle
 ``engine/src/vias.rs`` ``rule_size``) or a smaller legal pre-defined via, never larger than the net class via;
 ``"net_class"`` = the P net's class via. Via gap = ``max(base, hole-to-hole - 2 x annular, copper-to-hole -
 annular)`` with the pair via's ring (KiCad ``EffectiveDiffPairViaGap``, pns_sizes_settings.h:146), base = the net
-class ``diff_pair_via_gap`` (user 2026-11-12), the pair gap when the class sets none (KiCad's interactive router in
-net class mode starts from the pair gap, pns_kicad_iface.cpp:1259-1264; the class field is its "user choice"
+class ``diff_pair_via_gap``, the pair gap when the class sets none. The class field is a user decision (user
+2026-11-10, memory diffpair-rules 3c: "use net class diff_pair_width, diff_pair_gap, diff_pair_via_gap ... for the
+pair's vias"); KiCad's interactive router differs: it sets the pair via gap from the board minimum clearance and
+then from the pair gap constraint, pns_kicad_iface.cpp:1286 and :1326 (the class field is only its "user choice"
 value, board_design_settings.cpp:1596). Max uncoupled length and max skew come only from custom rules
 (``diff_pair_uncoupled (max ..)``, ``skew (max ..)``); gap min/max for checking only from ``diff_pair_gap``.
 
