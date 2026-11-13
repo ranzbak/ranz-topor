@@ -163,12 +163,13 @@ fn cancel_before_any_plan_is_a_loud_error() {
 }
 
 #[test]
-fn cancel_in_p3_p4_draws_the_plan_kept_so_far() {
-    // Cancel while the layer assignment and the rip-up rounds run: the initial routing (P2) has
-    // given every connection its place, the layer assignment finishes, the rip-up rounds end at
-    // their best round so far; that plan is the run's variant and is drawn (never "no copper").
+fn cancel_in_p3_p4_keeps_no_plan_and_says_so() {
+    // Cancel while the layer assignment and the rip-up rounds run: the initial routing (P2-P4) is
+    // one step and its plan counts as a variant only once P4 ends (user 2026-11-13, M2.TL); M0's
+    // stop checks end P3/P4 within a move, so nothing is kept: the loud "nothing to draw yet",
+    // no copper, quickly, never half a plan drawn.
     let m = crop("qmtech-usb-crop.json");
-    let o = topor(r#", "runs": 1, "capacity_model": "cuts""#);
+    let o = topor(r#", "runs": 2, "capacity_model": "cuts""#);
     let ctl = RunControl::new();
     ctl.limit.init(o.wall_clock_s);
     let c2 = ctl.clone();
@@ -179,10 +180,11 @@ fn cancel_in_p3_p4_draws_the_plan_kept_so_far() {
         std::thread::sleep(Duration::from_millis(2));
     }
     assert!(!h.is_finished(), "the run ended before P3");
+    let t = Instant::now();
     ctl.request_cancel();
     let r = h.join().expect("run thread");
+    assert!(t.elapsed().as_secs_f64() < 5.0, "Cancel in P3/P4 took {:.2} s", t.elapsed().as_secs_f64());
     assert_eq!(r.stop_reason, "cancel", "{:?}", r.warnings);
-    assert!(!r.warnings.iter().any(|w| w.starts_with("ERROR: nothing to draw yet")), "a plan was kept: {:?}", r.warnings);
-    assert!(r.routed > 0 && !r.items.is_empty(), "the plan kept so far is drawn: {:?}", r.warnings);
-    assert!(r.warnings.iter().any(|w| w.starts_with("TopoR loop ([optimize]") && w.contains(": 0 cycles")), "no loop cycle after Cancel: {:?}", r.warnings);
+    assert!(r.warnings.first().is_some_and(|w| w.starts_with("ERROR: nothing to draw yet")), "{:?}", r.warnings);
+    assert!(r.items.is_empty() && r.routed == 0);
 }

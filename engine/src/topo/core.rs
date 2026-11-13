@@ -321,13 +321,64 @@ struct Coord<'a> {
 /// when no run can offer any more, the best `[drawing] candidates` picks by the objective draw
 /// (ties: the lower run), after Cancel / OK only the best one. TopoR judges its variants on the
 /// topology and draws the one picked (6.3 manual pp. 72-73; Polubasov 2010: the exact geometry
-/// «на метрическом этапе»). The runs' loops run side by side (one thread each, [`run_all`]), so
-/// the decision sees every run's pick and does not depend on the thread count. `opt_loop =
-/// "cycles"` draws every cycle; after Cancel there only the first run whose initial routing
-/// ended draws it ([`DrawGate::claim`]).
+/// «на метрическом этапе»). Every run has a thread of its own ([`run_all`]), so the decision sees
+/// every run's pick and does not depend on the thread count; only `slots` of them compute at a
+/// time ([`Slots`]: the engine's share of the cores), a run waiting here gives its slot back.
+/// `opt_loop = "cycles"` draws every cycle and does not use the gate.
 struct DrawGate {
     st: std::sync::Mutex<GateState>,
     cv: std::sync::Condvar,
+    /// The runs that compute at once.
+    slots: Slots,
+}
+
+/// A counting semaphore: at most `n` runs compute at once (the others' threads wait idle, so the
+/// busy threads stay at the engine's share, `min(runs, rayon threads)`). O(1) per call.
+struct Slots {
+    free: std::sync::Mutex<usize>,
+    cv: std::sync::Condvar,
+}
+
+impl Slots {
+    fn new(n: usize) -> Slots {
+        Slots { free: std::sync::Mutex::new(n.max(1)), cv: std::sync::Condvar::new() }
+    }
+
+    /// Waits for a free slot and takes it. O(1) + the wait.
+    fn acquire(&self) {
+        let Ok(mut f) = self.free.lock() else { return };
+        while *f == 0 {
+            f = match self.cv.wait(f) {
+                Ok(f) => f,
+                Err(_) => return,
+            };
+        }
+        *f -= 1;
+    }
+
+    /// Gives a slot back. O(1).
+    fn release(&self) {
+        if let Ok(mut f) = self.free.lock() {
+            *f += 1;
+        }
+        self.cv.notify_one();
+    }
+}
+
+/// Holds a [`Slots`] slot for its scope (also while a panic unwinds). O(1).
+struct SlotGuard<'s>(&'s Slots);
+
+impl<'s> SlotGuard<'s> {
+    fn take(s: &'s Slots) -> SlotGuard<'s> {
+        s.acquire();
+        SlotGuard(s)
+    }
+}
+
+impl Drop for SlotGuard<'_> {
+    fn drop(&mut self) {
+        self.0.release();
+    }
 }
 
 struct GateState {
@@ -338,15 +389,14 @@ struct GateState {
     offered: BTreeMap<usize, Criteria>,
     /// The runs that draw, once decided.
     decided: Option<Vec<usize>>,
-    /// `opt_loop = "cycles"`, after Cancel: a run claimed the one drawing.
-    claimed: bool,
 }
 
 impl DrawGate {
-    fn new(n: usize, quota: usize) -> DrawGate {
+    fn new(n: usize, quota: usize, slots: usize) -> DrawGate {
         DrawGate {
-            st: std::sync::Mutex::new(GateState { quota: quota.max(1), open: (0..n).collect(), offered: BTreeMap::new(), decided: None, claimed: false }),
+            st: std::sync::Mutex::new(GateState { quota: quota.max(1), open: (0..n).collect(), offered: BTreeMap::new(), decided: None }),
             cv: std::sync::Condvar::new(),
+            slots: Slots::new(slots),
         }
     }
 
@@ -363,6 +413,15 @@ impl DrawGate {
     /// drawing only). Waits until no run can offer any more, then decides once. `None` = run `k`
     /// draws; else why not. O(runs log runs) + the wait for the other runs' loops.
     fn offer(&self, k: usize, crit: Criteria, obj: &Objective, cancel: bool) -> Option<String> {
+        // the wait gives this run's compute slot back, so a run without one can finish its loop
+        self.slots.release();
+        let r = self.decide(k, crit, obj, cancel);
+        self.slots.acquire();
+        r
+    }
+
+    /// [`DrawGate::offer`] without the slot: waits until no run can offer, decides once. O(runs log runs) + the wait.
+    fn decide(&self, k: usize, crit: Criteria, obj: &Objective, cancel: bool) -> Option<String> {
         let Ok(mut g) = self.st.lock() else { return None };
         g.open.remove(&k);
         g.offered.insert(k, crit);
@@ -398,13 +457,6 @@ impl DrawGate {
         } else {
             format!("[drawing] candidates = {}: the pick of run {runs} is predicted better", g.quota)
         })
-    }
-
-    /// `opt_loop = "cycles"`, after Cancel / OK in a run's first cycle: does this run draw its
-    /// plan? The first to ask does. O(1).
-    fn claim(&self) -> bool {
-        let Ok(mut g) = self.st.lock() else { return true };
-        !std::mem::replace(&mut g.claimed, true)
     }
 }
 
@@ -458,7 +510,7 @@ enum RoundEnd<'s> {
 
 impl<'a> Coord<'a> {
     fn new(ctl: &'a RunControl, n: usize, obj: Objective, candidates: usize) -> Coord<'a> {
-        Coord { ctl, obj, st: std::sync::Mutex::new(vec![RunState::default(); n]), snap: std::sync::Mutex::new(None), gate: DrawGate::new(n, candidates), judge: std::sync::Mutex::new(None) }
+        Coord { ctl, obj, st: std::sync::Mutex::new(vec![RunState::default(); n]), snap: std::sync::Mutex::new(None), gate: DrawGate::new(n, candidates, n.min(rayon::current_num_threads())), judge: std::sync::Mutex::new(None) }
     }
 
     /// cancel-fix: note a run's pick with criteria `crit` (`complete`: of a cycle not cut short)
@@ -745,8 +797,7 @@ impl Run {
             o2.initial = "once".into();
         }
         let hv: Hints = if o2.drawing_feedback && !topor { self.all.iter().map(|(&(e, l), &r)| (e, l, r)).collect() } else { Vec::new() };
-        let kept = !self.arch.items.is_empty();
-        let (ro, h2, mem2) = route_round(model, &o2, ctl, &hv, &self.mem, cycle, stubs, fx, opts.fluctuation, (self.k, &coord.gate, &obj), kept);
+        let (ro, h2, mem2) = route_round(model, &o2, ctl, &hv, &self.mem, cycle, stubs, fx, opts.fluctuation, (self.k, &coord.gate, &obj));
         self.cycles = cycle;
         self.mem = mem2;
         for (e, l, r) in h2 {
@@ -995,6 +1046,7 @@ impl Run {
 #[allow(clippy::too_many_arguments)]
 fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, stubs: &PlaneStubs, fx: &Fixed, t_call: Instant, n: usize) -> (Vec<RunOut>, Vec<(usize, String)>) {
     use std::sync::Mutex;
+    let topor = opts.opt_loop == "topor";
     let runs: Vec<Mutex<Run>> = (0..n).map(|k| Mutex::new(Run::new(opts, k))).collect();
     let taken: Mutex<Vec<bool>> = Mutex::new(vec![false; n]);
     let cycles: Mutex<Vec<(usize, bool)>> = Mutex::new(vec![(0, false); n]);
@@ -1008,6 +1060,7 @@ fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, 
         let Ok(mut r) = runs[k].lock() else { return };
         let c = if n == 1 { ctl.clone() } else { ctl.for_run(k as u32 + 1) };
         // M2.TL: with the soft limit only Cancel / OK stops the moves inside a step (M0's stop checks)
+        let _slot = topor.then(|| SlotGuard::take(&coord.gate.slots));
         crate::control::with_control_mode(&c, opts.timeout_mode == "hard", || r.step(model, opts, &c, coord, stubs, fx, t_call));
         let st = (r.cycles, r.done);
         drop(r);
@@ -1018,8 +1071,9 @@ fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, 
     };
     // M2: with the TopoR loop every run has a thread of its own: a run waits after its loop until
     // every run offered its pick ([`DrawGate`]), so the decision sees all of them and never waits
-    // for a run that has no thread. Their work shares the cores (one cycle per run).
-    let workers = if opts.opt_loop == "topor" { n } else { n.min(rayon::current_num_threads()).max(1) };
+    // for a run that has no thread. Only `min(runs, rayon threads)` of them compute at once (the
+    // gate's slots; a run waiting at the gate gives its slot back): the busy threads stay as before.
+    let workers = if topor { n } else { n.min(rayon::current_num_threads()).max(1) };
     if workers == 1 {
         worker();
     } else {
@@ -1589,9 +1643,7 @@ fn existing_plane_vias(model: &BoardModel) -> Vec<planes::PlaneVia> {
 #[allow(clippy::too_many_arguments)]
 /// `gate`: the run (0-based), the call's [`DrawGate`] and objective (cancel-fix: after Cancel only
 /// one TopoR loop pick of the call is drawn).
-/// `kept`: the run has a drawn variant already (`opt_loop = "cycles"`: a Cancel then stops this
-/// cycle at once; without one the cycle's plan is drawn through the Cancel, M2.TL).
-fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize, stubs: &PlaneStubs, fx: &Fixed, fluct0: f64, gate: (usize, &DrawGate, &Objective), kept: bool) -> (RoundOut, Hints, Memory) {
+fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize, stubs: &PlaneStubs, fx: &Fixed, fluct0: f64, gate: (usize, &DrawGate, &Objective)) -> (RoundOut, Hints, Memory) {
     // TOPO_TIMES=1 (debug): phase times on stderr; never part of the result.
     let times = std::env::var_os("TOPO_TIMES").is_some();
     let tlog = |what: &str, t: Instant| {
@@ -2572,23 +2624,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut loop_end: Option<LoopEnd> = None;
     let mut loop_json: Option<serde_json::Value> = None;
     // M2.TL: the initial routing (P2-P4) has ended; its plan is the run's first variant (the TopoR
-    // loop's generation 0). Cancel / OK cut P2 before every connection had its place: no variant.
-    if plan_cut.get() {
-        let why = "Cancel / OK came during the initial routing, before every connection had its place in the plan".to_string();
-        return (RoundOut::not_drawn(model, opts, None, Some(why), None), Vec::new(), Memory::default());
+    // loop's generation 0, or this whole-route cycle's plan). Cancel / OK during it (P2 before
+    // every connection had its place, or the layer assignment and rip-up rounds of P3/P4, which
+    // M0's stop checks end within a move): the step did not end, so it kept no variant (the user's
+    // rule: the plan counts once P4 ends); the run keeps what it had (nothing, or the earlier
+    // cycles' variants), never half a step.
+    if plan_cut.get() || stop_now() {
+        let why = if plan_cut.get() { "Cancel / OK came during the initial routing, before every connection had its place in the plan" } else { "Cancel / OK came during the initial routing (layer assignment, rip-up and reroute), before its plan was complete" };
+        return (RoundOut::not_drawn(model, opts, None, Some(why.to_string()), None), Vec::new(), Memory::default());
     }
     let topor = opts.opt_loop == "topor";
-    if !topor && stop_now() && !kept {
-        // `opt_loop = "cycles"`, Cancel / OK in a run's first cycle with no result anywhere yet: the
-        // plan of this cycle is the best kept one and is drawn through (one run only).
-        if gate.1.claim() {
-            draw_through.set(true);
-            warnings.push("Cancel / OK came during this cycle before any result was drawn: its plan is drawn to the end (M2.TL)".into());
-        } else {
-            let why = "Cancel / OK: another run's plan is drawn".to_string();
-            return (RoundOut::not_drawn(model, opts, Some(why), None, None), Vec::new(), Memory::default());
-        }
-    }
     if topor {
         use super::optimise::{criteria_of, evaluation, foreign_copper, k_osc, layers_now, optimise, reroute_set, wire_amp, CycleCtx, CycleStats, Emphasis, Gen, LoopParams, Predicted, Rerouter, Space, VIA_FACTORS};
         let t_loop = Instant::now();
@@ -5739,7 +5784,7 @@ mod tests {
         let obj = Objective::from_options("length_vias", 25.0, "errors_vias_length");
         let crit = |errors: usize, vias: usize| Criteria { errors, vias, length_mm: 100.0, ..Criteria::default() };
         for (quota, cancel, want) in [(1usize, false, vec![2usize]), (2, false, vec![0, 2]), (2, true, vec![2]), (9, false, vec![0, 2, 3])] {
-            let g = DrawGate::new(4, quota);
+            let g = DrawGate::new(4, quota, 2);
             let offers = [(0usize, crit(0, 5)), (2, crit(0, 3)), (3, crit(1, 0))];
             let drawn: Vec<usize> = std::thread::scope(|s| {
                 let hs: Vec<_> = offers.iter().map(|&(k, c)| { let g = &g; let obj = &obj; s.spawn(move || (k, g.offer(k, c, obj, cancel))) }).collect();
@@ -5751,7 +5796,5 @@ mod tests {
             });
             assert_eq!(drawn, want, "quota {quota}, cancel {cancel}");
         }
-        let g = DrawGate::new(1, 1);
-        assert!(g.claim() && !g.claim(), "cycles after Cancel: the first run draws");
     }
 }
