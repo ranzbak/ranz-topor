@@ -42,12 +42,13 @@ fn best_of_line(r: &RouteResult) -> &str {
 }
 
 /// The plan handed to the drawing, as its machine-readable line (C0), without its timings (keys
-/// ending in `_s` or starting with `ms_` / `us_`: they differ between any two runs).
+/// ending in `_s`, starting with `ms_` / `us_`, and `layer_share_pct`, a share of the loop's
+/// time: they differ between any two runs).
 fn plan_line(r: &RouteResult) -> serde_json::Value {
     fn untimed(v: &mut serde_json::Value) {
         match v {
             serde_json::Value::Object(m) => {
-                m.retain(|k, _| !(k.ends_with("_s") || k.starts_with("ms_") || k.starts_with("us_")));
+                m.retain(|k, _| !(k.ends_with("_s") || k.starts_with("ms_") || k.starts_with("us_") || k == "layer_share_pct"));
                 m.values_mut().for_each(untimed);
             }
             serde_json::Value::Array(a) => a.iter_mut().for_each(untimed),

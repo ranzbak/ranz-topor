@@ -536,6 +536,7 @@ title/label/button/checkbox/choice/heading/text).
 | progress | phase_drc | text | Verifying with KiCad DRC |
 | progress | phase_preview | text | Rendering the preview |
 | progress | phase_cancelling | text | Cancel pressed: finishing the current stage{stage}… {s} s |
+| progress | phase_limit | text | {notice} |
 | progress | gauge_value | text | {routed} / {total} |
 | progress | iteration_label | label | Round |
 | progress | iteration_value | text | {iteration} of up to {cap} |
