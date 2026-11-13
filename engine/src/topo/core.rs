@@ -179,11 +179,10 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         eprintln!("[topo call] projection built once (decomposition, triangulation, cut room): {:.3} s", t_fx.elapsed().as_secs_f64());
     }
     if ctl.is_cancelled() && opts.capacity_model == "cuts" {
-        let mut r = unrouted(model, opts, "Cancel / OK came during the projection of the board (the cut room of [capacity] model = \"cuts\"), before any run began");
-        r.stop_reason = "cancel".into();
-        r.timed_out = true;
+        // M2.TL (fail fast): no plan kept yet, so nothing to draw, said loudly.
+        let why = format!("{NOTHING_TO_DRAW}: Cancel / OK came during the projection of the board (the cut room of [capacity] model = \"cuts\"), before any run began, so no plan was kept and no copper is written");
+        let mut r = nothing_to_draw(model, opts, ctl, &why, t0);
         r.converged = false;
-        r.runtime_s = t0.elapsed().as_secs_f64();
         return r;
     }
     let coord = Coord::new(ctl, n, obj, opts.draw_candidates);
@@ -197,13 +196,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         } else {
             format!("{NOTHING_TO_DRAW}: no run of the call kept a plan ({})", skipped.iter().map(|(k, w)| format!("run {}: {w}", k + 1)).collect::<Vec<_>>().join("; "))
         };
-        let mut r = unrouted(model, opts, &why);
-        r.warnings.insert(0, format!("ERROR: {why}"));
-        r.stop_reason = if ctl.is_cancelled() { "cancel" } else { "timeout" }.into();
-        r.timed_out = true;
-        r.runtime_s = t0.elapsed().as_secs_f64();
-        r.limit = limit_report(ctl, opts, r.runtime_s, &mut r.warnings);
-        return r;
+        return nothing_to_draw(model, opts, ctl, &why, t0);
     }
     // The best run: fewest errors, then the objective, then shrinkages; ties: the lower run.
     let mut pick = 0;
@@ -257,6 +250,19 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
 
 /// M2.TL: the start of the loud error when Cancel / OK came before any plan was kept.
 pub const NOTHING_TO_DRAW: &str = "nothing to draw yet";
+
+/// M2.TL (fail fast): the call's result when no plan was kept (`why` starts with
+/// [`NOTHING_TO_DRAW`]): every connection unrouted with `why`, an `ERROR:` line first, no copper.
+/// O(connections).
+fn nothing_to_draw(model: &BoardModel, opts: &Options, ctl: &RunControl, why: &str, t0: Instant) -> RouteResult {
+    let mut r = unrouted(model, opts, why);
+    r.warnings.insert(0, format!("ERROR: {why}"));
+    r.stop_reason = if ctl.is_cancelled() { "cancel" } else { "timeout" }.into();
+    r.timed_out = true;
+    r.runtime_s = t0.elapsed().as_secs_f64();
+    r.limit = limit_report(ctl, opts, r.runtime_s, &mut r.warnings);
+    r
+}
 
 /// M2.TL: the call's time limit at its end ([`crate::route::LimitReport`]): reached or not, the
 /// step that ran then and the time past it (`runtime_s` minus the limit), with a report line.

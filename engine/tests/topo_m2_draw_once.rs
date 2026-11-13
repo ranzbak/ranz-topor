@@ -22,9 +22,13 @@ fn crop(name: &str) -> BoardModel {
     BoardModel::from_json(&std::fs::read_to_string(path).expect("fixture")).expect("fixture parses")
 }
 
-/// The TopoR method's settings (M0 defaults: loop topor, initial once, taut lengths), headless.
+/// The TopoR method's settings (M0 defaults: loop topor, initial once, taut lengths), headless;
+/// `extra` (`, "key": value ...`) adds keys or overrides these.
 fn topor(extra: &str) -> Options {
-    Options::from_json(&format!(r#"{{"wall_clock_s": 600.0, "opt_loop": "topor", "initial": "once", "search_length": "taut"{extra}}}"#)).expect("options parse")
+    let mut o: serde_json::Map<String, serde_json::Value> = serde_json::from_str(r#"{"wall_clock_s": 600.0, "opt_loop": "topor", "initial": "once", "search_length": "taut"}"#).expect("base");
+    let more: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&format!("{{{}}}", extra.trim_start_matches(','))).expect("extra options");
+    o.extend(more);
+    Options::from_json(&serde_json::Value::Object(o).to_string()).expect("options parse")
 }
 
 fn run(m: &BoardModel, o: &Options) -> RouteResult {
@@ -37,9 +41,23 @@ fn best_of_line(r: &RouteResult) -> &str {
     r.warnings.iter().find(|w| w.starts_with("best of ")).map(|s| s.as_str()).unwrap_or_else(|| panic!("best-of line: {:?}", r.warnings))
 }
 
-/// The plan handed to the drawing, as its machine-readable line (C0).
-fn plan_line(r: &RouteResult) -> String {
-    r.warnings.iter().find(|w| w.starts_with("plan metrics:")).cloned().unwrap_or_else(|| panic!("plan metrics line: {:?}", r.warnings))
+/// The plan handed to the drawing, as its machine-readable line (C0), without its timings (keys
+/// ending in `_s` or starting with `ms_` / `us_`: they differ between any two runs).
+fn plan_line(r: &RouteResult) -> serde_json::Value {
+    fn untimed(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Object(m) => {
+                m.retain(|k, _| !(k.ends_with("_s") || k.starts_with("ms_") || k.starts_with("us_")));
+                m.values_mut().for_each(untimed);
+            }
+            serde_json::Value::Array(a) => a.iter_mut().for_each(untimed),
+            _ => {}
+        }
+    }
+    let line = r.warnings.iter().find(|w| w.starts_with("plan metrics:")).unwrap_or_else(|| panic!("plan metrics line: {:?}", r.warnings));
+    let mut v: serde_json::Value = serde_json::from_str(line.trim_start_matches("plan metrics:").trim()).expect("plan metrics JSON");
+    untimed(&mut v);
+    v
 }
 
 #[test]
@@ -121,7 +139,8 @@ fn a_limit_reached_in_p3_p4_still_draws_the_initial_plan() {
 
 #[test]
 fn cancel_before_any_plan_is_a_loud_error() {
-    for extra in [r#", "runs": 2"#, r#", "runs": 2, "opt_loop": "cycles""#] {
+    // the TopoR loop, whole-route cycles, and the cut model (Cancel during its projection)
+    for extra in [r#", "runs": 2"#, r#", "runs": 2, "opt_loop": "cycles""#, r#", "runs": 2, "capacity_model": "cuts""#] {
         let m = eprom();
         let o = topor(extra);
         let ctl = RunControl::new();
@@ -134,4 +153,29 @@ fn cancel_before_any_plan_is_a_loud_error() {
         assert_eq!(r.stop_reason, "cancel");
         assert!(r.connections.iter().all(|c| c.reason.starts_with("nothing to draw yet")), "{extra}: every connection says why");
     }
+}
+
+#[test]
+fn cancel_in_p3_p4_draws_the_plan_kept_so_far() {
+    // Cancel while the layer assignment and the rip-up rounds run: the initial routing (P2) has
+    // given every connection its place, the layer assignment finishes, the rip-up rounds end at
+    // their best round so far; that plan is the run's variant and is drawn (never "no copper").
+    let m = crop("qmtech-usb-crop.json");
+    let o = topor(r#", "runs": 1, "capacity_model": "cuts""#);
+    let ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let c2 = ctl.clone();
+    let h = std::thread::spawn(move || route_with(&m, &o, &c2));
+    let t0 = Instant::now();
+    while !ctl.snapshot().stage.contains("layer assignment") && !h.is_finished() {
+        assert!(t0.elapsed().as_secs() < 600, "never reached P3");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(!h.is_finished(), "the run ended before P3");
+    ctl.request_cancel();
+    let r = h.join().expect("run thread");
+    assert_eq!(r.stop_reason, "cancel", "{:?}", r.warnings);
+    assert!(!r.warnings.iter().any(|w| w.starts_with("ERROR: nothing to draw yet")), "a plan was kept: {:?}", r.warnings);
+    assert!(r.routed > 0 && !r.items.is_empty(), "the plan kept so far is drawn: {:?}", r.warnings);
+    assert!(r.warnings.iter().any(|w| w.starts_with("TopoR loop ([optimize]") && w.contains(": 0 cycles")), "no loop cycle after Cancel: {:?}", r.warnings);
 }
