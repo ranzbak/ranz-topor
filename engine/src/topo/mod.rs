@@ -33,6 +33,7 @@ pub mod planes;
 pub mod reduce;
 pub mod schedule;
 pub mod sheet;
+pub mod radii;
 pub mod refine;
 pub mod metrize;
 pub mod moves;

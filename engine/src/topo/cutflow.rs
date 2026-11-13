@@ -513,7 +513,7 @@ fn cw(a: Vec2, b: Vec2) -> f64 {
 
 /// Whether a band that comes in along `din`, leaves along `dout` and has the wrapped vertex on
 /// its `left`, crosses the ray from the vertex in direction `u` (the reflex side of the bend).
-fn in_wedge(din: Vec2, dout: Vec2, left: bool, u: Vec2) -> bool {
+pub(super) fn in_wedge(din: Vec2, dout: Vec2, left: bool, u: Vec2) -> bool {
     const TOL: f64 = 1e-9;
     let back = -din;
     if left {
@@ -943,6 +943,13 @@ impl Recorder {
             s["edge_layers_overfull"] = json!(edge_over.len());
             self.stages.push(s);
             let mut f = m.full(&nm);
+            // M3 step a debug: the topological order of the cut items and the stacks (report only).
+            if std::env::var_os("TOPO_RADII").is_some() {
+                let ords = super::radii::from_measure(&m);
+                let r = super::radii::summary(&m, &ords, &nm);
+                eprintln!("TOPO_RADII {r}");
+                f["radii"] = r;
+            }
             let pr = st.proj;
             f["edge_over"] = Value::Array(edge_over.iter().map(|&(e, l)| {
                 let [a, b] = pr.edges[e];
