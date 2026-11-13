@@ -783,6 +783,12 @@ def test_via_fallback_from_topor_toml(app, factory_eprom, tmp_path, reports):
 
 def test_via_sizes_set_up_leaves_rules_unchanged(app, eprom, tmp_path, reports):
     board = _project(eprom, tmp_path)  # eprom's own .kicad_pro: Signal 0.6 / 0.3 -> via sizes are set up
+    # the net classes KiCad reports for this project (FakeBoard's default is a Default class without values, which
+    # the board-authority resolver rightly reports as rule fallbacks; KiCad always gives the Default values)
+    from toporlib.rules import classes_from_pro, netclass_of_from_pro
+
+    pro = json.loads(board.pcb.with_suffix(".kicad_pro").read_text())
+    board.netclass_value = (classes_from_pro(pro), netclass_of_from_pro(pro, [n["name"] for n in eprom.model["nets"]]))
     eng = CaptureEngine()
     board, ui, out = do_run(eprom, tmp_path, board=board, engine=eng)
     assert not any(f.code == "VIA_NOT_SET_UP" for f in out.findings)
@@ -791,8 +797,12 @@ def test_via_sizes_set_up_leaves_rules_unchanged(app, eprom, tmp_path, reports):
     assert json.loads((out.report_dir / "result.json").read_text())["via_fallback"] is None
     md = (out.report_dir / "report.md").read_text()
     assert "via fallback" not in md
-    # F I-4: eprom's own minimums below the fab profile (track 0.15, hole clearance 0.25 mm) are listed as raised
-    assert "min_track_width 0.15 → 0.2 mm" in md and "hole_clearance 0.25 → 0.35 mm" in md, md
+    # board authority (user 2026-11-12): eprom's own minimums (track 0.15, hole clearance 0.25 mm) are used as given,
+    # nothing is raised and the board sets every field (no rule fallback); the floors line belongs to the opt-in
+    # [rules] fab_profile = "jlcpcb_1oz" only (before: "min_track_width 0.15 → 0.2 mm" was listed as raised)
+    assert "Design rules: the board's KiCad configuration" in md and "Fab floors raised" not in md, md
+    assert "Rule fallbacks (fields the board does not set): none" in md, md
+    assert "min_track_width 0.15 → 0.2 mm" not in md
 
 
 def test_apply_via_fallback_pure():

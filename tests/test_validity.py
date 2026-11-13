@@ -50,8 +50,11 @@ def test_board_authority_uses_board_setup_and_custom_rules_as_given():
     # KiCad: the matching custom rule wins, also below the Board Setup minimum clearance (0.15)
     assert r["custom_regions"][0]["clearance"] == 100_000
     assert not any(str(n).startswith("floor:") for n in r.get("custom_notes") or [])
-    assert "routing_vias" not in r and "drill_list" not in r and r["fallbacks"] == []
-    assert va.rule_set(r, {1: "A1", 2: "B2"})["fallbacks"] == []
+    assert "routing_vias" not in r and "drill_list" not in r
+    # PRO is a Constraints-page excerpt without min_connection / max_error: exactly those two take the fallback
+    # (KiCad's own values for a missing key, so the gate only notes them; test_gate_reports_fallbacks)
+    assert [f["field"] for f in r["fallbacks"]] == ["min_connection", "max_error"]
+    assert [f["field"] for f in va.rule_set(r, {1: "A1", 2: "B2"})["fallbacks"]] == ["min_connection", "max_error"]
 
 
 def test_board_authority_keeps_zero_minimums_and_custom_values_below_board_minimums():
