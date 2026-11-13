@@ -211,17 +211,17 @@ def test_via_auto_settings_follow_the_taut_length(tmp_path):
 
 def test_m0_defaults_are_the_topor_method(tmp_path):
     """M0 (user 2026-11-12, "change the options to match TopoR"): the defaults are TopoR's method (Polubasov 2010):
-    the TopoR loop on the topology, the initial routing once, taut lengths, the per-layer cut test as the capacity
-    price, the per-edge model priced too, no drawing feedback with the TopoR loop. The engine's own defaults agree
+    the TopoR loop on the topology, the initial routing once, taut lengths, the per-edge capacity model priced (user
+    2026-11-13, interim: the per-layer cut test, the method's price, is too slow for qmtech within the time limit), no drawing feedback with the TopoR loop. The engine's own defaults agree
     (engine/src/model.rs m0_defaults_are_the_topor_method). The values before M0 stay available, and drawing_feedback
     "auto" is on with the cycles loop (the behaviour before M0)."""
     d = Config.defaults()
     assert (d.get("optimize", "loop"), d.get("optimize", "initial"), d.get("search", "length"),
             d.get("capacity", "model"), d.get("capacity", "edges_test"), d.get("search", "drawing_feedback")) == \
-        ("topor", "once", "taut", "cuts", "price", "auto")
+        ("topor", "once", "taut", "edges", "price", "auto")
     e = d.engine_options()
     assert (e["opt_loop"], e["initial"], e["search_length"], e["capacity_model"], e["edges_test"],
-            e["drawing_feedback"]) == ("topor", "once", "taut", "cuts", "price", False)
+            e["drawing_feedback"]) == ("topor", "once", "taut", "edges", "price", False)
     old = d.with_values({("optimize", "loop"): "cycles", ("optimize", "initial"): "per_cycle",
                          ("search", "length"): "even", ("capacity", "model"): "edges",
                          ("capacity", "edges_test"): "refuse"})

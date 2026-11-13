@@ -333,8 +333,9 @@ table. eprom and wiccon have no pairs; their higher CPU seconds (11 vs 7, 142 vs
 The TopoR pipeline (Polubasov 2010; TopoR 6.3 manual pp. 65, 72–73) is now what a run does by default, step by step:
 the fixed board is triangulated once; every connection is laid once, widest first, never dropped (`[optimize]
 initial = "once"`), its length priced as the shortest path that keeps the clearances (`[search] length = "taut"`);
-layers are assigned by via minimisation with the per-layer cut test as the capacity price (`[capacity] model =
-"cuts"`); TopoR's loop then works on the topology only (`[optimize] loop = "topor"`: single-wire rip-up and reroute
+layers are assigned by via minimisation with the per-edge room as the capacity price (`[capacity] model =
+"edges"`, `edges_test = "price"`; the method's per-layer cut test, `model = "cuts"`, is an option for now: on a
+large board its prices take the whole time limit before TopoR's loop starts, user decision 2026-11-13); TopoR's loop then works on the topology only (`[optimize] loop = "topor"`: single-wire rip-up and reroute
 with oscillating weights, layer re-optimisation, vias relocated between their crossings, crossing rules, an archive
 of variants with restarts); the picked variant is drawn once, without drawing feedback (`[search] drawing_feedback
 = "auto"`). Every judgement is one price (S = Σ weight × amount): an over-full passage, a crossing on one layer or a

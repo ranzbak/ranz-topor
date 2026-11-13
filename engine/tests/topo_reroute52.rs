@@ -97,7 +97,7 @@ fn planned_crossing_window_predicts_no_via_without_a_site() {
     }
 }
 
-/// The drawn half of the test above under the cut model (default since M0). Fails at M0: a
+/// The drawn half of the test above under the cut model (`[capacity] model = "cuts"`, the M0 default until 2026-11-13). Fails at M0: a
 /// drawn-side miss parked until the draw-once stages (M2/M3); un-ignore when they land.
 #[test]
 #[ignore = "M0 parked: cut model, plan predicts 0 violations but the sequential drawing shorts SDA into VCC on F.Cu (M2/M3 draw once)"]

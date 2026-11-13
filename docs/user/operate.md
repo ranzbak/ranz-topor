@@ -106,7 +106,7 @@ type, default, unit, range and the KiCad place that influences it.
 | `[ripup]` | rip-up escalation |
 | `[iterations]` | when the optimiser stops (cap, patience, minimum gain) |
 | `[optimize]` | topological core: how a run iterates (`loop`: TopoR's loop on the topology by default, `"cycles"` = the whole-route cycles before M0; `initial`; fluctuation schedule, *Routes stable*, best of N `runs`), the safety and work caps that make a run reproducible (`rounds`, `max_ripped`, `max_expansions`, `max_moves`), the P4 moves, the board objective (`objective` = `length_vias` or `area`, `mm_per_via`) and how many result variants are kept (`variants`) |
-| `[capacity]` | topological core: the per-layer cut test (`mixed_clearance`, `cut_radius_mm`) and its debug report (`cut_report`: a folder that gets the cut test of every routing cycle, for `harness/cutclass.py`); by default (`model = "cuts"`, since M0) it is the price of the layer assignment and of the rip-up rounds (with `overflow_softness`, `cut_vias`); `model = "edges"` is the per-edge model before M0, its over-full edge-layers priced too (`edges_test = "price"`) or refused as before (`"refuse"`) |
+| `[capacity]` | topological core: the per-layer cut test (`mixed_clearance`, `cut_radius_mm`) and its debug report (`cut_report`: a folder that gets the cut test of every routing cycle, for `harness/cutclass.py`); by default (`model = "edges"`) the per-edge room is the capacity price, its over-full edge-layers priced (`edges_test = "price"`) or refused as before M0 (`"refuse"`); `model = "cuts"` makes the cut test the price of the layer assignment and of the rip-up rounds (with `overflow_softness`, `cut_vias`), for now an option: too slow for a large board within the time limit |
 | `[factors]` | topological core: weight, scope and report level of each social factor (via, crossing, squeeze, blocks_pad, reroute, …; see the factor table in configuration.md) |
 | `[output]` | arcs or straight segments; report folder |
 | `[expert]` | router constants — leave them alone unless you know the router |
@@ -363,7 +363,8 @@ reported unrouted and nothing of them is written (the behaviour before).
 
 **The method by default (M0).** A run follows TopoR's method (Polubasov 2010): the initial routing once
 (`[optimize] initial = "once"`), lengths priced as the shortest path that keeps the clearances (`[search] length
-= "taut"`), the per-layer cut test as the capacity price (`[capacity] model = "cuts"`), then TopoR's loop on the
+= "taut"`), the per-edge room as the capacity price (`[capacity] model = "edges"`, `edges_test = "price"`; the
+per-layer cut test, `model = "cuts"`, is an option for now: too slow for a large board within the time limit), then TopoR's loop on the
 topology only (`[optimize] loop = "topor"`), and the picked variant drawn once, without drawing feedback
 (`[search] drawing_feedback = "auto"`). Every judgement is one price (the sum of weight × amount over the
 factors): an over-full passage, a crossing on one layer or a trace through foreign copper is costly, never a

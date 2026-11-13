@@ -1162,9 +1162,10 @@ pub struct Options {
     pub cut_report: String,
     /// P1a fit authority (`[capacity] model`, shopping list 2.2): which capacity model prices the
     /// layer assignment (P3), the P4 label moves and the P4 pick of the best round. `"edges"`
-    /// (the default before M0): the per-edge packer of the shared projection
+    /// (default; user 2026-11-13, interim until the cut prices are fast enough for a large board
+    /// within the time limit and an early limit draws the initial plan): the per-edge packer of the shared projection
     /// (`topo::refine::CapModel`), its over-full edge-layers priced as [`Options::edges_test`]
-    /// says. `"cuts"` (default since M0): the per-layer cut test (`topo::cutmodel`, the critical cuts of each layer's sheet
+    /// says (default `"price"`). `"cuts"` (the method's capacity price, default in M0 before 2026-11-13): the per-layer cut test (`topo::cutmodel`, the critical cuts of each layer's sheet
     /// in the planning norm) with the graded over-full price `overflow x phi` per cut; P2's
     /// per-edge room of an edge with an end that is no copper on a layer then comes from that
     /// layer's sheet (`topo::cutmodel::sheet_room`, shopping list 2.3), and P4 is priced by the
@@ -1341,7 +1342,7 @@ impl Default for Options {
             mixed_clearance: "conservative".into(),
             cut_radius_mm: 0.0,
             cut_report: String::new(),
-            capacity_model: "cuts".into(),
+            capacity_model: "edges".into(),
             edges_test: "price".into(),
             overflow_softness: 0.1,
             cut_vias: true,
@@ -1425,16 +1426,17 @@ mod tests {
     use super::Options;
 
     /// M0 (user 2026-11-12, "change the options to match TopoR"): the defaults are the TopoR method
-    /// (Polubasov 2010): initial routing once, taut lengths, the per-layer cut test as the capacity
-    /// price, TopoR's loop on the topology, no drawing feedback, the vias relocated between their
-    /// crossings (the plugin's `auto` with taut), and every capacity judgement priced. The plugin's
+    /// (Polubasov 2010): initial routing once, taut lengths, TopoR's loop on the topology, no drawing feedback, the vias relocated between their
+    /// crossings (the plugin's `auto` with taut), and every capacity judgement priced. The capacity
+    /// model is the per-edge one, priced (user 2026-11-13, interim: the cut model, the method's
+    /// price, is too slow for qmtech within the time limit). The plugin's
     /// schema (`plugin/topor/schema.py`) has the same defaults (tests/plugin/test_config.py).
     #[test]
     fn m0_defaults_are_the_topor_method() {
         let o = Options::default();
         assert_eq!(
             (o.opt_loop.as_str(), o.initial.as_str(), o.search_length.as_str(), o.capacity_model.as_str(), o.edges_test.as_str()),
-            ("topor", "once", "taut", "cuts", "price")
+            ("topor", "once", "taut", "edges", "price")
         );
         assert!(!o.drawing_feedback);
         assert!(o.via_relocate && o.via_between);

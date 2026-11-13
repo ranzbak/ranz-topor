@@ -18,9 +18,8 @@ fn opts(extra: &str) -> Options {
     .expect("options parse")
 }
 
-/// What a Cancel waits for before its delay starts (M0: with the cut model, the default since
-/// M0, the projection computes the cut room before any run begins and the routing is slower,
-/// seconds in a debug build, so a delay from the call's start would often cancel an earlier
+/// What a Cancel waits for before its delay starts (M0: the TopoR method's routing, and with the
+/// cut model the projection's cut room before any run begins, take seconds in a debug build, so a delay from the call's start would often cancel an earlier
 /// phase than the test means; `cancel_during_the_projection_ends_quickly` covers the projection).
 #[derive(Clone, Copy, PartialEq)]
 enum After {
@@ -105,7 +104,7 @@ fn cancel_before_a_run_begins_skips_it() {
     assert!(line.contains("not begun") && line.contains("without a result of their own"), "{line}");
 }
 
-/// M0 stop latency (verifier 2026-11-13): with the cut model (default since M0) a Cancel / the
+/// M0 stop latency (verifier 2026-11-13): with the cut model (`[capacity] model = "cuts"`) a Cancel / the
 /// time limit during P3/P4 (layer assignment, rip-up and the topology and label moves, where the
 /// cut prices are computed per move) ends the call within seconds, on a crop of a real board.
 #[test]
@@ -113,7 +112,7 @@ fn cancel_in_p3_p4_with_the_cut_model_ends_quickly() {
     for fx in ["qmtech-usb-crop.json", "dcsgone-usb-crop.json"] {
         let path = format!("{}/tests/fixtures/{fx}", env!("CARGO_MANIFEST_DIR"));
         let m = BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).expect("fixture parses");
-        let o = opts(r#", "runs": 1"#);
+        let o = opts(r#", "runs": 1, "capacity_model": "cuts""#);
         let ctl = RunControl::new();
         ctl.limit.init(o.wall_clock_s);
         let c2 = ctl.clone();
