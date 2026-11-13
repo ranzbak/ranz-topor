@@ -106,7 +106,9 @@ def test_without_a_change_the_limit_is_fixed_and_reported(app, eprom, tmp_path, 
     assert eng.jobs[0].limits == [] and eng.options[0]["wall_clock_s"] == 60.0
     # M2.TL: the limit's mode and whether it was reached (not here: no overrun, no step)
     assert _res(out)["time_limit"] == {"clock": "wall", "start_s": 60.0, "final_s": 60.0, "changes": [],
-                                       "mode": "soft", "reached": False, "step": "", "overrun_s": 0.0}
+                                       "mode": "soft", "reached": False, "step": "", "overrun_s": 0.0,
+                                       # F3: headless, run.timeout_overrun_s = auto = timeout_s; not fired
+                                       "cap_s": 60.0, "cap_hit": False}
     assert "limit 60 s wall" in "\n".join(out.report.summary_lines())
 
 
