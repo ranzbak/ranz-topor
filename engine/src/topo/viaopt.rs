@@ -272,7 +272,7 @@ fn gap_at(cx: &ViaCtx, tracks: &[Track], near: &Near, sites: &[Site], me: (WireI
     for &o in &near.obs {
         let ob = &st.proj.obstacles[o];
         let req = rv + if ob.bare { ob.clear } else { c.max(ob.clear) };
-        add(dist_poly(p, &ob.poly) - req, ob.net != Some(net));
+        add(dist_poly(p, &ob.poly) - req, st.proj.via_foreign(ob, net));
     }
     for &(a, b) in cx.outline {
         add(seg_point(p, a, b).0 - rv - cx.edge_clear, true);

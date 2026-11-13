@@ -324,6 +324,12 @@ pub struct NetRule {
     /// clamp), so a via of this net is checked against it ([`Rules::via_min_of`]).
     pub via_d_min: i64,
     pub via_drill_min: i64,
+    /// The net is a coupled pair's lead in the planning model (`topo::diffpair::alias`): its via
+    /// is the pair's two-via disc, and the partner's pads, shapes and copper carry its net there.
+    /// That disc holds the N via as well as the P via, so no copper of either half is own copper
+    /// for it: it keeps the net's clearance to all of it (user 2026-11-13: "partner copper is not
+    /// own copper for clearance purposes"; dcsgonebadge USB-: a pair via on USB+ pads of U7 / J1).
+    pub pair_disc: bool,
 }
 
 impl Default for NetRule {
@@ -338,6 +344,7 @@ impl Default for NetRule {
             min_width: 0,
             via_d_min: 0,
             via_drill_min: 0,
+            pair_disc: false,
         }
     }
 }
@@ -530,6 +537,11 @@ impl Rules {
         let d = if nr.via_d_min > 0 { nr.via_d_min } else { self.min_via_diameter };
         let r = if nr.via_drill_min > 0 { nr.via_drill_min } else { self.min_via_drill };
         (d, r)
+    }
+
+    /// Whether a via of `net` is a pair's two-via disc ([`NetRule::pair_disc`]). O(log N).
+    pub fn pair_disc(&self, net: i32) -> bool {
+        self.per_net.get(&net).is_some_and(|r| r.pair_disc)
     }
 
     pub fn net_rule(&self, net: i32) -> &NetRule {

@@ -346,7 +346,7 @@ impl<'a> Packer<'a> {
         let [a, b, c] = pr.tris[t].map(|v| pr.pos[v]);
         let pts = tri_site_points(a, b, c);
         let mut free = [f64::INFINITY; 9];
-        for o in pr.obstacles.iter().filter(|o| o.net != Some(net)) {
+        for o in pr.obstacles.iter().filter(|o| pr.via_foreign(o, net)) {
             for (q, f) in pts.iter().zip(free.iter_mut()) {
                 let d = if super::state::point_in_poly(*q, &o.poly) { f64::NEG_INFINITY } else { poly_dist(*q, &o.poly) - o.clear.max(s) - self.eps };
                 *f = f.min(d);

@@ -25,10 +25,17 @@ pub fn via_fallback_used(rules: &Rules, net: i32) -> bool {
 /// Via sizes for `net`, largest first, never empty (see `sizes_for`); `opts.allowed_drills_nm`
 /// is the drill filter. O(|predefined|) plus the sort.
 pub fn via_sizes(rules: &Rules, net: i32, opts: &Options) -> Vec<ViaSize> {
+    // The lead net of a coupled pair in the planning model: its one via is the disc of the pair's
+    // two vias (`topo::diffpair::alias`), no smaller alternative (a smaller disc holds no pair).
+    if rules.pair_disc(net) {
+        let nr = rules.net_rule(net);
+        return vec![ViaSize { d: nr.via_d, drill: nr.via_drill }];
+    }
     // A diff-pair net: the pair's via (the smallest the board allows by default, resolved by the
     // plugin; `topo::diffpair::via_of`), also where the net is routed alone.
     // Never below the custom-rule minimum of either net of the pair (KiCad DRC checks each via
-    // against its own net's rules).
+    // against its own net's rules). (Before the disc clause above, this replaced the planning
+    // disc by one small via: dcsgonebadge USB +/-, qmtech U1-Out_1 +/-.)
     if let Some(p) = rules.diff_pairs.iter().find(|p| (p.p == net || p.n == net) && p.via_d > 0 && p.via_drill > 0) {
         return vec![pair_floor(rules, p, ViaSize { d: p.via_d, drill: p.via_drill })];
     }

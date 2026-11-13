@@ -861,6 +861,7 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
     }
     // Keepouts forbidding vias, on whatever copper layer (a through via spans them all): no
     // via site may touch one (the P3 site test, the drawing's checker).
+    proj.pair_nets = m.rules.per_net.iter().filter(|(_, r)| r.pair_disc).map(|(&n, _)| n).collect();
     proj.no_via = m.keepouts.iter().filter(|k| k.no_vias && k.poly.len() >= 3).map(|k| k.poly.iter().map(|p| p.to_vec2()).collect()).collect();
     // The projection is one CDT over every layer: a region bound to some layers only is left to
     // the drawing and its checker (which see layers).

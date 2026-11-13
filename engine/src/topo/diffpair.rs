@@ -208,7 +208,8 @@ pub fn plan(model: &BoardModel, dec: &mut Decomposition) -> Pairs {
 
 /// The planning model: the N half of every coupled pair carries the P net (pads, vias, kept copper,
 /// copper shapes), the P net's rule gets the envelope width, the larger clearance of the two halves,
-/// the single track width as its neck floor, and the via-pair disc as its via. O(model).
+/// the single track width as its neck floor, and the via-pair disc as its via; the disc treats the
+/// copper of both halves as foreign ([`crate::model::NetRule::pair_disc`]). O(model).
 pub fn alias(model: &BoardModel, pairs: &Pairs, opts: &Options) -> BoardModel {
     let mut m = model.clone();
     for cp in &pairs.coupled {
@@ -268,6 +269,7 @@ pub fn alias(model: &BoardModel, pairs: &Pairs, opts: &Options) -> BoardModel {
         nr.width = cp.envelope().round() as i64;
         nr.clearance = rp.clearance.max(rn.clearance);
         nr.min_width = cp.rule.width;
+        nr.pair_disc = true;
         let (d, drill) = via_of(model, &cp.rule, opts);
         let pv = (d + cp.rule.via_gap) as f64;
         nr.via_d = (pv + d as f64).round() as i64;

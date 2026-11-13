@@ -251,7 +251,7 @@ pub fn via_point(pr: &Projection, packer: &Packer, t: usize, net: i32, r: f64, s
 /// O(obstacles).
 pub fn point_free(pr: &Projection, packer: &Packer, q: Vec2, net: i32, s: f64) -> f64 {
     let mut f = f64::INFINITY;
-    for o in pr.obstacles.iter().filter(|o| o.net != Some(net)) {
+    for o in pr.obstacles.iter().filter(|o| pr.via_foreign(o, net)) {
         let d = if point_in_poly(q, &o.poly) { f64::NEG_INFINITY } else { poly_dist(q, &o.poly) - o.clear.max(s) - packer.eps() };
         f = f.min(d);
     }

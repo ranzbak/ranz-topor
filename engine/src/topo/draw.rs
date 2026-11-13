@@ -2219,6 +2219,9 @@ impl<'a> Drawer<'a> {
     /// centred inside it is fine; with no minimum connection width set, anything goes.
     /// O(pads of the net x pad vertices).
     pub fn via_own_pad_ok(&self, p: Vec2, size: ViaSize, net: i32) -> bool {
+        if self.model.rules.pair_disc(net) && !self.pair_disc_clear(p, size, net) {
+            return false;
+        }
         if self.model.rules.min_connection <= 0 || net == 0 {
             return true;
         }
@@ -2231,6 +2234,36 @@ impl<'a> Drawer<'a> {
                 let d = crate::geom::point_skeleton(p, &self.model.skeleton(pad, l));
                 d >= r + tol || d <= 0.0
             })
+        })
+    }
+
+    /// A pair's two-via disc of `size` at `p` (lead `net` of the planning model,
+    /// [`crate::model::NetRule::pair_disc`]) keeps the net's clearance to the static copper of
+    /// its own net there: the pads, copper shapes, kept copper and vias of both halves (the
+    /// partner's carry the lead's net in the plan; the disc holds the N via as well as the P via,
+    /// so none of it is own copper for it). User 2026-11-13. O(static objects nearby).
+    pub fn pair_disc_clear(&self, p: Vec2, size: ViaSize, net: i32) -> bool {
+        let own = self.model.rules.net_rule(net).clearance as f64;
+        let r = 0.5 * size.d as f64;
+        let mut ids = self.grid.query(bbox_of(&[p]).grow(r + own + 2.0e6));
+        ids.sort_unstable();
+        ids.dedup();
+        ids.into_iter().filter(|&id| id < self.n_static).all(|id| {
+            let e = &self.ents[id];
+            if !e.live || e.net != Some(net) {
+                return true;
+            }
+            let dist = match &e.core {
+                Core::Poly(q) => {
+                    if super::state::point_in_poly(p, q) {
+                        return false;
+                    }
+                    poly_dist(p, q)
+                }
+                Core::Seg(a, b) => seg_dist(p, *a, *b),
+                Core::Pt(q) => (p - *q).len(),
+            };
+            dist - e.grow - r >= e.clear.max(own) - self.eps
         })
     }
 
