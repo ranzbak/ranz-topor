@@ -106,7 +106,9 @@ class RunOutcome:
     routed_pcb: Path | None = None
     via_fallback: dict | None = None  # apply_via_fallback info when VIA_NOT_SET_UP patched the engine rules
     #: the time limit of the routing: {"clock": wall|cpu, "start_s", "final_s" (0 = none), "changes": [{"at_s",
-    #: "limit_s"}]}; changes are the user's, made in the progress dialog while the router ran (time_limit_text)
+    #: "limit_s"}], "cap_s" (run.timeout_overrun_s in effect, None = no cap), "cap_hit" (it fired: the soft limit then
+    #: acted as the hard one), plus mode / reached / step / overrun_s (M2.TL)}; changes are the user's, made in the
+    #: progress dialog while the router ran (time_limit_text)
     time_limit: dict | None = None
     #: M1 compass (toporlib.compass.build): per violation class predicted vs drawn vs KiCad DRC, per connection
     compass: dict | None = None
@@ -792,8 +794,19 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     soft_limit = str(opts.get("timeout_mode", "soft")) != "hard"  # M2.TL
     no_budget = budget <= 0 or cpu_clock
     state["limit"] = max(0.0, budget)
+    # F3 run.timeout_overrun_s (user 2026-11-13): seconds past the soft limit, on the limit's clock, before the run
+    # acts as with the hard limit. auto = timeout_s headless (harness, MCP, scripts), no cap in the KiCad dialog
+    # (Cancel works there); 0 = no cap. The wall clock's cap is the engine's (timeout_overrun_s), the CPU clock's
+    # the poll loop's (RouteJob.harden). Never changes the limit itself.
+    raw_cap = cfg.get("run", "timeout_overrun_s")
+    gui = bool(getattr(ui, "waits_for_ok", False))
+    cap = (0.0 if gui else state["limit"]) if raw_cap == "auto" else max(0.0, float(raw_cap or 0.0))
+    if not soft_limit or state["limit"] <= 0:
+        cap = 0.0
+    opts["timeout_overrun_s"] = 0.0 if cpu_clock else cap
+    state["cap_hit"] = False
     out.time_limit = {"clock": "cpu" if cpu_clock else "wall", "start_s": state["limit"], "final_s": state["limit"],
-                      "changes": []}
+                      "changes": [], "cap_s": cap or None, "cap_hit": False}
     geometry = cfg.get("output", "geometry")
     max_err = int(rules.get("max_error") or 5000)
     layer_names = {int(l["id"]): l["name"] for l in model.get("layers", [])}
@@ -816,13 +829,17 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         measured = float(getattr(last, "measure_s", 0.0) or 0.0) if last is not None else 0.0
         spent = (state["router_cpu_s"] if cpu_clock else state["router_s"]) - measured
         reached = bool(lim > 0 and (state["limit_hit"] or spent >= lim or eng.get("reached")))
+        state["cap_hit"] = bool(state["cap_hit"] or eng.get("cap_hit"))
         out.time_limit.update({"mode": "soft" if soft_limit else "hard", "reached": reached,
                                "step": str(eng.get("step") or ""),
-                               "overrun_s": round(max(0.0, spent - lim), 3) if reached else 0.0})
+                               "overrun_s": round(max(0.0, spent - lim), 3) if reached else 0.0,
+                               "cap_hit": state["cap_hit"]})
         if reached:
             log.line(f"time limit ({out.time_limit['mode']}): reached during {out.time_limit['step'] or 'the run'}; "
                      f"the result was ready {out.time_limit['overrun_s']:.1f} s past the limit "
-                     f"({'CPU' if cpu_clock else 'wall'} clock)")
+                     f"({'CPU' if cpu_clock else 'wall'} clock)"
+                     + (f"; WARNING: the overrun cap (run.timeout_overrun_s = {cap:g} s) was reached, the run then "
+                        "stopped as with the hard limit" if state["cap_hit"] else ""))
 
     def route_fn(m, o):
         if (state["cancel"] or state["limit_hit"]) and state["last_result"] is not None:
@@ -887,6 +904,21 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                         cancelled_at = now
                         job.cancel()
                         log.line("time limit: waiting for the engine to finish its current stage")
+                # F3: the CPU clock's overrun cap: past the soft limit by run.timeout_overrun_s CPU seconds, the run
+                # acts as with the hard limit (the engine's own cap counts the wall clock, timeout_overrun_s)
+                if (cpu_clock and limit_at is not None and cancelled_at is None and cap > 0 and not state["cap_hit"]
+                        and not done and p.cpu_s - p.measure_s >= state["limit"] + cap):
+                    state["cap_hit"] = True
+                    log.line(f"WARNING: time limit overrun cap reached: {p.cpu_s - p.measure_s:.0f} CPU s of router work, "
+                             f"limit {state['limit']:.0f} s + run.timeout_overrun_s {cap:g} s; the step that runs is cut "
+                             "and what exists is drawn (as with the hard limit)")
+                    harden = getattr(job, "harden", None)
+                    if callable(harden):
+                        harden()
+                    else:  # an engine older than the plugin (fail loud, still stop)
+                        log.line("WARNING: this engine cannot act as the hard limit (no RouteJob.harden): Cancel instead")
+                        cancelled_at = now
+                        job.cancel()
                 if p.limit_reached and not state.get("limit_noted"):
                     state["limit_noted"] = True
                     log.line(p.notice or ("time limit reached, waiting for the current step to finish" if soft_limit
@@ -952,7 +984,14 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         out.stop_reason = "timeout_cpu"
         changed = (f"; changed during the run, run.timeout_s = {limit_text(out.time_limit['start_s'])}"
                    if out.time_limit["changes"] else "")
-        rr = {**rr, "stop_reason": "timeout_cpu", "timed_out": True, "warnings": list(rr.get("warnings") or []) + [
+        cap_line = "WARNING: time limit overrun cap reached"
+        warns = [w for w in rr.get("warnings") or [] if not str(w).startswith(cap_line)]  # the engine's own: no clock
+        if state["cap_hit"]:
+            warns.append(f"{cap_line} (run.timeout_overrun_s = {cap:g} s past the {state['limit']:.0f} s limit, CPU clock): "
+                         "past it the soft limit acted as the hard one, the step that ran then was cut and what existed "
+                         "was drawn (a cut initial routing or drawing leaves connections unrouted; a cut TopoR loop cycle "
+                         "is not kept); raise run.timeout_overrun_s or timeout_s, or use Cancel instead")
+        rr = {**rr, "stop_reason": "timeout_cpu", "timed_out": True, "warnings": warns + [
             f"time budget hit: CPU-time limit of {state['limit']:.0f} s reached ({out.router_cpu_s:.0f} CPU s of router "
             f"work, {state['router_s']:.0f} s on the clock, run.timeout_clock = cpu{changed}): result may differ between runs"]}
     elif out.stop_reason == "timeout":

@@ -838,9 +838,15 @@ pub struct Options {
     /// initial routing P2-P4, a TopoR loop cycle, a whole-route cycle with `opt_loop = "cycles"`, or
     /// the drawing) finishes, its plan is kept as a variant, no new step starts and the best kept
     /// variant is drawn; the time past the limit is reported (`RouteResult::limit`). Cancel / OK
-    /// stops at once. `"hard"` (the behaviour before M2): every step stops at the limit; a step cut
-    /// there leaves the connections it had not reached unrouted.
+    /// stops at once. `"hard"`: every step stops at the limit; a step cut there leaves the
+    /// connections it had not reached unrouted, a TopoR loop cycle cut there is not kept (close to
+    /// the behaviour before M2, not the same: Cancel in P2-P4 and draw once hold in both modes).
     pub timeout_mode: String,
+    /// F3 `[run] timeout_overrun_s` (user 2026-11-13): seconds past `wall_clock_s` after which the
+    /// soft limit acts as the hard one (the step that runs is cut, what exists is drawn, a loud
+    /// warning); `<= 0` = no cap (default). The engine's wall clock only: the plugin's CPU clock
+    /// caps on its own (`RouteJob.harden`). It never changes `wall_clock_s`.
+    pub timeout_overrun_s: f64,
     /// An accepted path longer than this factor times its slot-free ghost counts as an absurd
     /// detour and triggers rip-up of the blockers.
     pub detour_factor: f64,
@@ -1311,6 +1317,7 @@ impl Default for Options {
             margin_nm: 0,
             wall_clock_s: 60.0,
             timeout_mode: "soft".into(),
+            timeout_overrun_s: 0.0,
             detour_factor: 2.0,
             factors: Default::default(),
             drc_loop_cap: 5,

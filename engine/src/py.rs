@@ -142,6 +142,14 @@ impl RouteJob {
         self.ctl.limit.reach();
     }
 
+    /// F3 `[run] timeout_overrun_s` on the caller's own clock (the plugin's CPU clock): the soft
+    /// limit was overrun by the cap: it acts as the hard one from now on (the step that runs is
+    /// cut, what exists is drawn, the result's limit report says so). O(1).
+    fn harden(&self) {
+        self.ctl.limit.reach();
+        self.ctl.limit.harden();
+    }
+
     /// The wall-clock limit now (seconds since the job started); `None` = no limit.
     fn time_limit(&self) -> Option<f64> {
         self.ctl.limit.seconds()

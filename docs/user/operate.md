@@ -324,6 +324,15 @@ runs still computing when the limit was reached (a run waiting for the others' p
 TopoR loop cycle plus the drawing can take minutes (qmtech, 2026-11-13: about 4 minutes on the clock past the limit);
 press Cancel to stop at once.
 
+**The overrun has a cap** (`[run] timeout_overrun_s`): seconds past `timeout_s`, on the same clock, that the step
+running at the limit may still take. Past it the run acts as with `hard` (below): the step that runs is cut, what
+exists is drawn, and the warning [`TIME_OVERRUN_CAP`](troubleshoot.md#time_overrun_cap) says so in log.txt, the
+findings, report.md (*Time limit* line) and `result.json` (`time_limit.cap_s`, `time_limit.cap_hit`;
+`harness/score_runs.py` prints a WARNING line and lists the run in `limits.json` `overrun_cap_hit`). The default
+`auto` is equal to `timeout_s` in headless runs (harness, MCP, scripts), so such a run takes at most twice its limit,
+and no cap in the KiCad dialog, where Cancel stops a run at once. A number sets the cap; `0` or `"none"` = no cap. The
+cap never changes `timeout_s` itself, and has no effect with `timeout_mode = "hard"` or without a limit.
+
 `hard` stops every step at the limit; the progress dialog says *Time limit reached (hard): the current step stops
 now (<step>)*. This is close to the behaviour before 2026-11-13 but not the same: an initial routing the limit cut is
 drawn as far as it got (the connections it had not reached stay unrouted), its rip-up rounds stop and their plan so

@@ -271,6 +271,11 @@ pub struct LimitReport {
     pub reached: bool,
     pub step: String,
     pub overrun_s: f64,
+    /// F3 `[run] timeout_overrun_s` on the engine's clock (`None` = no cap here; the plugin's CPU
+    /// clock caps on its own and hardens the limit, `cap_hit` then true).
+    pub cap_s: Option<f64>,
+    /// The overrun cap fired: from then on the soft limit acted as the hard one.
+    pub cap_hit: bool,
 }
 
 /// A routed differential-pair connection (D7), nm. `from` / `to` are the P connection's pads.

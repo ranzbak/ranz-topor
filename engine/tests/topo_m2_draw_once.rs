@@ -201,18 +201,9 @@ fn move_counts(r: &RouteResult) -> Vec<String> {
     v
 }
 
-#[test]
-fn a_soft_limit_in_p3_p4_does_not_cut_their_moves() {
-    // M2.TL: with the soft limit only Cancel / OK ends the moves inside a step (verify-m2 C: the
-    // limit stopping M0's move checks again was not caught; the plan still drew complete). The
-    // moves of P3/P4 under a limit reached in P3 are the moves of the unlimited run, one by one.
-    // The optional P4 moves are on ([optimize] moves; they skip net trees with branch points on
-    // traces, so the net trees are fixed) so there are moves to count.
-    let m = crop("qmtech-usb-crop.json");
-    let o = topor(r#", "runs": 1, "capacity_model": "cuts", "moves": true, "net_tree": "fixed""#);
-    let free = run(&m, &o);
-    let want = move_counts(&free);
-    assert!(want[0].contains(" evaluations") && !want[0].contains(": 0 evaluations"), "the fixture moves in P4: {want:?}");
+/// A run of `o` on `m` whose wall-clock limit is reached when P3 begins (as the plugin's CPU
+/// clock does it), returned when it ends.
+fn reached_in_p3(m: &BoardModel, o: &Options) -> RouteResult {
     let ctl = RunControl::new();
     ctl.limit.init(o.wall_clock_s);
     let (m2, o2, c2) = (m.clone(), o.clone(), ctl.clone());
@@ -224,9 +215,36 @@ fn a_soft_limit_in_p3_p4_does_not_cut_their_moves() {
     }
     assert!(!h.is_finished(), "the run ended before P3");
     ctl.limit.reach();
-    let r = h.join().expect("run thread");
-    assert!(r.limit.as_ref().is_some_and(|l| l.reached && l.mode == "soft"), "{:?}", r.limit);
+    h.join().expect("run thread")
+}
+
+#[test]
+fn a_soft_limit_in_p3_p4_does_not_cut_their_moves_until_its_overrun_cap() {
+    // M2.TL: with the soft limit only Cancel / OK ends the moves inside a step (verify-m2 C: the
+    // limit stopping M0's move checks again was not caught; the plan still drew complete). The
+    // moves of P3/P4 under a limit reached in P3 are the moves of the unlimited run, one by one.
+    // The optional P4 moves are on ([optimize] moves; they skip net trees with branch points on
+    // traces, so the net trees are fixed) so there are moves to count.
+    let m = crop("qmtech-usb-crop.json");
+    let o = topor(r#", "runs": 1, "capacity_model": "cuts", "moves": true, "net_tree": "fixed""#);
+    let free = run(&m, &o);
+    let want = move_counts(&free);
+    assert!(want[0].contains(" evaluations") && !want[0].contains(": 0 evaluations"), "the fixture moves in P4: {want:?}");
+    let r = reached_in_p3(&m, &o);
+    let l = r.limit.as_ref().expect("limit report");
+    assert!(l.reached && l.mode == "soft" && !l.cap_hit && l.cap_s.is_none(), "{l:?}");
     assert_eq!(move_counts(&r), want, "the soft limit cut P3/P4 moves");
+    assert!(!r.warnings.iter().any(|w| w.contains("overrun cap")), "{:?}", r.warnings);
+    // F3 `[run] timeout_overrun_s` (user 2026-11-13): past the cap the soft limit acts as the hard
+    // one: the moves stop, what exists is drawn, and a loud warning says so.
+    let capped = topor(r#", "runs": 1, "capacity_model": "cuts", "moves": true, "net_tree": "fixed", "timeout_overrun_s": 0.001"#);
+    let r = reached_in_p3(&m, &capped);
+    let l = r.limit.as_ref().expect("limit report");
+    assert!(l.reached && l.mode == "soft" && l.cap_hit && l.cap_s.is_some_and(|c| (c - 0.001).abs() < 1e-9), "{l:?}");
+    let p4: Vec<String> = r.warnings.iter().filter(|w| w.starts_with("P4 moves on the")).cloned().collect();
+    assert_ne!(p4, want[..2].to_vec(), "past the overrun cap the P4 moves stop (or never begin)");
+    assert!(r.warnings.iter().any(|w| w.starts_with("WARNING: time limit overrun cap reached ([run] timeout_overrun_s = 0 s")), "{:?}", r.warnings);
+    assert!(!r.items.is_empty(), "what existed is drawn");
 }
 
 #[test]

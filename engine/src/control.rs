@@ -156,12 +156,14 @@ pub struct Progress {
 /// The soft time limit's line for the progress dialog and the run log ([`Progress::notice`]). O(len).
 /// `hard` (`[run] timeout_mode = "hard"`): the limit stops the step that runs, so the line says
 /// that instead of waiting (verify-m2 F7a).
-pub fn limit_notice(step: &str, hard: bool) -> String {
-    match (hard, step.is_empty()) {
-        (false, true) => "time limit reached, waiting for the current step to finish; press Cancel to stop now".into(),
-        (false, false) => format!("time limit reached, waiting for the current step to finish ({step}); press Cancel to stop now"),
-        (true, true) => "time limit reached (hard): the current step stops now".into(),
-        (true, false) => format!("time limit reached (hard): the current step stops now ({step})"),
+/// `capped`: the overrun cap (`[run] timeout_overrun_s`) has fired: the soft limit acts as the
+/// hard one from then on (F3, user 2026-11-13).
+pub fn limit_notice(step: &str, hard: bool, capped: bool) -> String {
+    let at = if step.is_empty() { String::new() } else { format!(" ({step})") };
+    match (capped, hard) {
+        (true, _) => format!("time limit overrun cap reached ([run] timeout_overrun_s): the current step stops now{at}"),
+        (false, false) => format!("time limit reached, waiting for the current step to finish{at}; press Cancel to stop now"),
+        (false, true) => format!("time limit reached (hard): the current step stops now{at}"),
     }
 }
 
@@ -201,6 +203,11 @@ pub struct TimeLimit {
     changed: AtomicBool,
     /// `[run] timeout_mode = "hard"` (the limit stops the step that runs; [`limit_notice`]).
     hard: AtomicBool,
+    /// F3 `[run] timeout_overrun_s`: nanoseconds past the limit after which the soft limit acts as
+    /// the hard one (`LIMIT_NONE` = no cap), and whether that happened (or the caller said so,
+    /// [`TimeLimit::harden`]: the plugin's CPU clock).
+    cap_ns: AtomicU64,
+    capped: AtomicBool,
 }
 
 const LIMIT_UNSET: u64 = u64::MAX;
@@ -208,7 +215,7 @@ const LIMIT_NONE: u64 = u64::MAX - 1;
 
 impl Default for TimeLimit {
     fn default() -> TimeLimit {
-        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false) }
+        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false), cap_ns: AtomicU64::new(LIMIT_NONE), capped: AtomicBool::new(false) }
     }
 }
 
@@ -233,9 +240,46 @@ impl TimeLimit {
         self.hard.store(hard, Ordering::Relaxed);
     }
 
-    /// Whether the limit is hard ([`TimeLimit::set_hard`]). O(1).
+    /// Whether the limit acts as hard now: `[run] timeout_mode = "hard"`, or the overrun cap fired
+    /// ([`TimeLimit::cap_hit`]). Read live. O(1) (a clock read with a cap set).
     pub fn is_hard(&self) -> bool {
-        self.hard.load(Ordering::Relaxed)
+        self.hard.load(Ordering::Relaxed) || self.cap_hit()
+    }
+
+    /// F3 `[run] timeout_overrun_s`: seconds the soft limit may be overrun before it acts as the
+    /// hard one (`<= 0` / non-finite = no cap; on this limit's clock, the wall clock). O(1).
+    pub fn set_overrun_cap(&self, seconds: f64) {
+        self.cap_ns.store(Self::encode(seconds), Ordering::Relaxed);
+    }
+
+    /// The overrun cap in seconds; `None` = no cap. O(1).
+    pub fn overrun_cap_s(&self) -> Option<f64> {
+        match self.cap_ns.load(Ordering::Relaxed) {
+            LIMIT_UNSET | LIMIT_NONE => None,
+            ns => Some(ns as f64 * 1e-9),
+        }
+    }
+
+    /// The overrun cap fired (the limit plus the cap passed, noted once), or the caller hardened
+    /// the limit ([`TimeLimit::harden`]). O(1).
+    pub fn cap_hit(&self) -> bool {
+        if self.capped.load(Ordering::Relaxed) {
+            return true;
+        }
+        let hit = match (self.seconds(), self.overrun_cap_s()) {
+            (Some(l), Some(c)) => self.elapsed_s() >= l + c,
+            _ => false,
+        };
+        if hit {
+            self.capped.store(true, Ordering::Relaxed);
+        }
+        hit
+    }
+
+    /// The caller's overrun cap fired (the plugin's CPU clock: limit plus cap reached in CPU
+    /// seconds): the limit acts as the hard one from now on ([`TimeLimit::is_hard`]). O(1).
+    pub fn harden(&self) {
+        self.capped.store(true, Ordering::Relaxed);
     }
 
     /// Change the limit (seconds since the start; `0` = no limit). O(1), any thread.
@@ -373,7 +417,7 @@ impl RunControl {
             if p.limit_step.is_empty() {
                 p.limit_step = open.clone();
             }
-            p.notice = limit_notice(&open, self.limit.is_hard());
+            p.notice = limit_notice(&open, self.limit.is_hard(), self.limit.cap_hit());
         }
         p
     }
@@ -488,12 +532,13 @@ thread_local! {
     /// M0 stop latency: the cancel flag and live time limit of the run on this thread
     /// ([`with_control`]), read only by [`stop_requested`] (not by [`cancelled`], whose readers,
     /// the drawing and the pour stitching, run on through a Cancel to draw the loop's pick).
-    /// The time limit is `None` with the soft limit (M2.TL: the limit cuts no step).
+    /// With the soft limit the time limit stops nothing until the overrun cap fires (M2.TL, F3).
     static STOP: RefCell<Option<StopState>> = const { RefCell::new(None) };
 }
 
-/// What [`stop_requested`] reads: the cancel flag and, where the limit stops steps, the time limit.
-type StopState = (Arc<AtomicBool>, Option<Arc<TimeLimit>>);
+/// What [`stop_requested`] reads: the cancel flag, the time limit and whether it always stops the
+/// steps (`hard`; else only once it acts as hard, [`TimeLimit::is_hard`]: the overrun cap, F3).
+type StopState = (Arc<AtomicBool>, Arc<TimeLimit>, bool);
 
 /// Runs `f` with `ctl`'s cancel flag and time limit as what [`stop_requested`] reads on this
 /// thread; the state before comes back after `f`, also when it panics. O(1) + `f`.
@@ -511,17 +556,16 @@ pub fn with_control_mode<R>(ctl: &RunControl, limit_stops: bool, f: impl FnOnce(
             STOP.with(|c| *c.borrow_mut() = prev);
         }
     }
-    let limit = limit_stops.then(|| ctl.limit.clone());
-    let _restore = Restore(STOP.with(|c| c.replace(Some((ctl.cancel.clone(), limit)))));
+    let _restore = Restore(STOP.with(|c| c.replace(Some((ctl.cancel.clone(), ctl.limit.clone(), limit_stops)))));
     f()
 }
 
 /// The run of this thread ([`with_control`]) was cancelled or its time limit passed (the latter
-/// only where the limit stops steps: `[run] timeout_mode = "hard"`, M2.TL): the stop test of the
+/// only where the limit stops steps: `[run] timeout_mode = "hard"` or the overrun cap fired, M2.TL / F3): the stop test of the
 /// work loops that have no `RunControl` (the topology and label moves of P3/P4 and their cut
 /// prices, M0). Cheap: one atomic load, and a clock read only with a limit set. O(1).
 pub fn stop_requested() -> bool {
-    STOP.with(|c| c.borrow().as_ref().is_some_and(|(f, l)| f.load(Ordering::Relaxed) || l.as_ref().is_some_and(|l| l.passed())))
+    STOP.with(|c| c.borrow().as_ref().is_some_and(|(f, l, always)| f.load(Ordering::Relaxed) || ((*always || l.is_hard()) && l.passed())))
 }
 
 /// Deadline passed or run cancelled: the single stop test of every deadline site. O(1).
@@ -781,6 +825,31 @@ mod tests {
         ctl.stage(1, 1, "drawing the traces");
         ctl.limit.reach();
         assert_eq!(ctl.snapshot().notice, "time limit reached (hard): the current step stops now (drawing the traces)");
+    }
+
+    #[test]
+    fn the_overrun_cap_makes_the_soft_limit_hard() {
+        // F3 `[run] timeout_overrun_s`: before the limit plus the cap the soft limit stops no
+        // step; after it (or when the caller hardens it, the plugin's CPU clock) it acts as hard
+        let ctl = RunControl::new();
+        ctl.limit.init(1e-6);
+        ctl.limit.set_overrun_cap(3600.0);
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(ctl.over_limit() && !ctl.limit.is_hard() && !ctl.limit.cap_hit());
+        assert!(!with_control_mode(&ctl, false, stop_requested), "soft: the limit stops no step");
+        ctl.limit.set_overrun_cap(1e-6);
+        assert!(ctl.limit.cap_hit() && ctl.limit.is_hard(), "limit + cap passed");
+        assert!(with_control_mode(&ctl, false, stop_requested), "past the cap the soft limit stops the steps");
+        ctl.limit.set_overrun_cap(0.0);
+        assert!(ctl.limit.cap_hit(), "noted once: it stays hard");
+        assert!(ctl.snapshot().notice.starts_with("time limit overrun cap reached ([run] timeout_overrun_s): the current step stops now"), "{}", ctl.snapshot().notice);
+        let cpu = RunControl::new();
+        cpu.limit.init(0.0);
+        cpu.limit.reach();
+        assert!(!cpu.limit.is_hard() && cpu.limit.overrun_cap_s().is_none());
+        cpu.limit.harden();
+        assert!(cpu.limit.is_hard() && cpu.limit.cap_hit(), "the caller's clock hardened it");
+        assert!(with_control_mode(&cpu, false, stop_requested));
     }
 
     #[test]

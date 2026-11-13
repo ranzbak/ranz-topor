@@ -159,3 +159,53 @@ def test_cancel_after_the_cpu_soft_limit_still_cancels_the_job(app, eprom, tmp_p
     job = eng.jobs[0]
     assert job.reached, "the soft limit came first"
     assert job.cancelled, "the user's Cancel after the soft limit never reached the engine job"
+
+
+def test_headless_overrun_cap_acts_as_the_hard_limit_and_warns(app, eprom, tmp_path, reports, cpu_counter):
+    # F3 run.timeout_overrun_s = auto (default): headless = timeout_s, so past 2 x the limit the soft limit acts as the
+    # hard one (RouteJob.harden on the CPU clock), loudly: log, finding, report, result.json
+    cfg = CFG.with_values({("run", "timeout_clock"): "cpu", ("run", "timeout_s"): 3.0})
+    eng = RecordingEngine(hold=20, patch=_as("timeout", timed_out=True))
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=cfg, engine=eng)
+    job = eng.jobs[0]
+    assert job.reached and job.hardened and not job.cancelled
+    assert eng.options[0]["timeout_overrun_s"] == 0.0, "the CPU clock caps in the plugin, not on the engine's wall clock"
+    tl = _result_json(out)["time_limit"]
+    assert tl["cap_s"] == 3.0 and tl["cap_hit"] is True, tl
+    f = {x.code: x for x in out.findings}
+    assert "TIME_OVERRUN_CAP" in f and "CPU clock" in f["TIME_OVERRUN_CAP"].message, list(f)
+    assert "overrun cap" in (out.report.dir / "report.md").read_text()
+    assert "WARNING: time limit overrun cap reached" in (out.report_dir / "log.txt").read_text()
+
+
+def test_headless_wall_clock_overrun_cap_goes_to_the_engine(app, eprom, tmp_path, reports, cpu_counter):
+    cfg = CFG.with_values({("run", "timeout_s"): 60.0, ("run", "timeout_overrun_s"): 15.0})
+    eng = RecordingEngine(hold=3)
+    do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=cfg, engine=eng)
+    assert eng.options[0]["timeout_overrun_s"] == 15.0 and eng.options[0]["wall_clock_s"] == 60.0
+
+
+class _GuiCancelLate(ScriptedUi):
+    """The progress dialog (waits_for_ok) whose user presses Cancel only at 14 CPU s (limit 3 s: past 2 x the limit)."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.waits_for_ok = True
+
+    def progress(self, p):
+        super().progress(p)
+        return not (p.cpu_s >= 14.0)
+
+
+def test_gui_has_no_overrun_cap_and_keeps_going_until_cancel(app, eprom, tmp_path, reports, cpu_counter):
+    # F3: in the KiCad dialog auto = no cap: the run goes on past 2 x the limit until the user's Cancel (F1)
+    cfg = CFG.with_values({("run", "timeout_clock"): "cpu", ("run", "timeout_s"): 3.0})
+    eng = RecordingEngine(hold=40, patch=_as("cancel", timed_out=True))
+    _, _, out = do_run(eprom, tmp_path, ui=_GuiCancelLate(accept=False), cfg=cfg, engine=eng)
+    job = eng.jobs[0]
+    assert job.reached and job.cancelled and not job.hardened
+    assert eng.options[0]["timeout_overrun_s"] == 0.0
+    tl = _result_json(out)["time_limit"]
+    assert tl["cap_s"] is None and tl["cap_hit"] is False, tl
+    assert out.router_cpu_s >= 14.0, "it went on past twice the limit"
+    assert "TIME_OVERRUN_CAP" not in {x.code for x in out.findings}
