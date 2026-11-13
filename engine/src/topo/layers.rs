@@ -697,7 +697,9 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
         let mut xs = st.crossings(w);
         xs.retain(|x| st.wires[x.other].net != wi.net);
         for (k, &t) in wi.tris.iter().enumerate() {
-            let mask = pr.allowed(t, wi.net).expect("wire inside a wall");
+            // A wire placed through another net's wall (4.3 `initial = "once"`, `State::any_path`:
+            // placed anyway, its foreign copper priced, Q14b) is restricted to no layer there.
+            let mask = pr.allowed(t, wi.net).unwrap_or(super::state::LayerMask::all(pr.n_layers));
             let mut here: Vec<Event> = Vec::new();
             if let Some(l) = mask.single() {
                 here.push(Event { node: 0, pi: l as u8, k, s: 0.0 });
@@ -705,7 +707,7 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
             for x in xs.iter().filter(|x| x.k == k) {
                 let o = x.other;
                 let s = cross_s(st, &polys, w, x);
-                let mo = pr.allowed(x.tri, st.wires[o].net).expect("wire inside a wall");
+                let mo = pr.allowed(x.tri, st.wires[o].net).unwrap_or(super::state::LayerMask::all(pr.n_layers));
                 let key = if w < o { (w, k, o, x.other_k) } else { (o, x.other_k, w, k) };
                 match (mask.single(), mo.single()) {
                     (Some(a), Some(b)) => {
@@ -936,7 +938,9 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
         let mut xs = st.crossings(w);
         xs.retain(|x| st.wires[x.other].net != wi.net);
         for (k, &t) in wi.tris.iter().enumerate() {
-            let tm = pr.allowed(t, wi.net).expect("wire inside a wall").0;
+            // A wire placed through another net's wall (4.3 `initial = "once"`, `State::any_path`:
+            // placed anyway, its foreign copper priced, Q14b) is restricted to no layer there.
+            let tm = pr.allowed(t, wi.net).map_or(full, |m| m.0);
             // (s, mask, crossing key) of the events of this triangle, in order along the wire.
             let mut here: Vec<(f64, u64, Option<CrossKey>)> = Vec::new();
             if tm != full {
@@ -945,7 +949,7 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
             for x in xs.iter().filter(|x| x.k == k) {
                 let o = x.other;
                 let s = cross_s(st, &polys, w, x);
-                let mo = pr.allowed(x.tri, st.wires[o].net).expect("wire inside a wall").0;
+                let mo = pr.allowed(x.tri, st.wires[o].net).map_or(full, |m| m.0);
                 let key = if w < o { (w, k, o, x.other_k) } else { (o, x.other_k, w, k) };
                 if tm == mo && tm.count_ones() == 1 {
                     unl.insert(key);
