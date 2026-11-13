@@ -1187,8 +1187,9 @@ pub struct Options {
     /// `tau` pitches through about 0.57 x `overflow` at zero slack to `overflow x (1 + overflow in
     /// pitches)` (`topo::cutmodel::phi`).
     pub overflow_softness: f64,
-    /// `[capacity] cut_vias` (model = "cuts"): the layer refinement may add vias where they remove
-    /// more cut overflow price than the vias cost (false: only moves that keep the via price).
+    /// `[capacity] cut_vias`: the layer refinement (model = "cuts") and the P4 label moves (model =
+    /// "cuts", and since M0 model = "edges" with edges_test = "price") may add vias where they
+    /// remove more over-full price than the vias cost (false: only moves that keep the via price).
     pub cut_vias: bool,
     /// C0 (`[run] stop_after`, measurement): `"plan"` ends every run of the topological core
     /// after the plan of its first cycle (later cycles need the drawing's feedback), before the

@@ -28,8 +28,9 @@
 //! another layer). They are kept when the price (`via` per layer change plus the over-full price:
 //! `overflow` per over-full edge-layer, or with `[capacity] model = "cuts"` the change of the
 //! graded over-full price of the per-layer cuts, [`super::cutmodel::CutPrice`]) drops
-//! ([`Labels::strict`] false); with the cut model and `[capacity] cut_vias` they may add vias
-//! (the per-edge model only relabels, as its P3 refinement does).
+//! ([`Labels::strict`] false); with `[capacity] cut_vias` they may add vias when that removes
+//! more over-full price than the via costs (cut model, and per-edge model with `edges_test =
+//! "price"`, M0; the per-edge P3 refinement still only relabels, as before M0).
 //!
 //! `[capacity] model = "edges"` with `edges_test = "refuse"` (the behaviour before M0, kept as an
 //! option): the hard tests. A topological move whose new path has more unsafe or over-room passes

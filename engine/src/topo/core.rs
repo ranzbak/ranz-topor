@@ -2366,7 +2366,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             evals: 0,
             max_evals: opts.max_moves,
             strict: !priced,
-            add_vias: cuts_on && opts.cut_vias,
+            // Priced label moves (cut model; per-edge model with edges_test = "price", M0) may add
+            // a via when it removes over-full price worth more than the via ([capacity] cut_vias).
+            add_vias: priced && opts.cut_vias,
             tally: Tally::default(),
         };
         let lt = descend_labels(&mut lb);
@@ -2902,7 +2904,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         evals: 0,
                         max_evals: self.max_moves,
                         strict: !self.priced,
-                        add_vias: self.cuts_on && self.cut_vias,
+                        add_vias: self.priced && self.cut_vias,
                         tally: Tally::default(),
                     };
                     let lt = descend_labels(&mut lb);
