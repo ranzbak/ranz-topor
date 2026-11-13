@@ -25,7 +25,7 @@
 
 use super::board::Board;
 use super::pack::{infl_dir, layer_items, wire_discs, Disc, PackItem, Packer};
-use super::state::{EdgeId, PassId, State, TriId, WireId};
+use super::state::{EdgeId, PassId, State, TriId, VertId, VertKind, WireId};
 use crate::check::{CheckReport, Checker, ItemIndex, Violation};
 use crate::geom::prim::Aabb;
 use crate::geom::quant::{IVec2, TrackPrim};
@@ -3395,6 +3395,27 @@ impl<'a> Drawer<'a> {
         self.repair(wi.net, wi.w, wi.s, layer, pre)
     }
 
+    /// Shopping list 5.10: obstacle `o` is an exit stub ([`Board::exit_stubs`]). O(log stubs).
+    pub(super) fn is_exit_stub(&self, o: usize) -> bool {
+        self.b.exit_stubs.binary_search_by_key(&o, |x| x.0).is_ok()
+    }
+
+    /// Shopping list 5.10: edge `e` lies inside the copper of `net` with an exit stub at one of its
+    /// ends (both ends on obstacles of `net`, one of them an exit stub, [`Board::exit_stubs`]).
+    /// O(log stubs).
+    pub(super) fn in_own_stub(&self, net: i32, e: EdgeId) -> bool {
+        let pr = &self.b.proj;
+        let of = |v: VertId| match pr.vkind[v] {
+            VertKind::Outline(o) | VertKind::Centre(o) if pr.obstacles[o].net == Some(net) => Some(o),
+            _ => None,
+        };
+        let [p, q] = pr.edges[e];
+        match (of(p), of(q)) {
+            (Some(a), Some(b)) => self.is_exit_stub(a) || self.is_exit_stub(b),
+            _ => false,
+        }
+    }
+
     /// The polyline before the repair.
     fn base_polyline(&self, w: WireId, k0: usize, k1: usize, s: Vec2, e: Vec2, attempt: usize) -> Vec<Vec2> {
         let st = self.st;
@@ -3403,6 +3424,12 @@ impl<'a> Drawer<'a> {
         let mut nominal = vec![s];
         for k in k0..k1 {
             let pid = wi.passes[k];
+            // 5.10: inside the wire's own pad and exit stub the plan's passes are no portals (the
+            // copper there is the wire's own; the sliver edges between the two zigzagged the
+            // funnel).
+            if self.in_own_stub(wi.net, st.passes[pid].edge) {
+                continue;
+            }
             let (lo, hi, nom) = (self.iv.lo[pid], self.iv.hi[pid], self.iv.nom[pid]);
             let (lo, hi) = match attempt {
                 0 => match self.tight_span(pid) {

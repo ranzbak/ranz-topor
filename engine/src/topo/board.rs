@@ -11,7 +11,7 @@
 
 use super::cuts;
 use super::init::Conn;
-use super::state::{point_in_segments, LayerMask, ObsId, ObsKind, Obstacle, Projection, VertId, VertKind};
+use super::state::{point_in_poly, point_in_segments, LayerMask, ObsId, ObsKind, Obstacle, Projection, VertId, VertKind};
 use crate::geom::quant::TrackPrim;
 use crate::geom::{Arc, Skeleton, Vec2};
 use crate::model::{BoardModel, PadAttr};
@@ -70,6 +70,15 @@ pub enum Extra {
     /// gets a centre vertex (a terminal like a pad) but is no copper: the wire's track end in the
     /// fill joins the pour when KiCad refills it.
     Terminal { net: i32, at: Vec2, layers: Vec<u32>, size: f64 },
+    /// Shopping list 5.10 (`[search] pad_exit_stubs`): the planned exit of a connection from the pad
+    /// `pad` (index into `BoardModel::pads`) towards the point `toward` (its other terminal), for
+    /// a wire of width `w` and clearance `s` (nm). The build turns it into an exit stub
+    /// ([`exit_stub`]): the rectangle the wire's copper takes from the pad's tip along the pad's
+    /// long axis to where it may turn without coming nearer than the clearance to the pads beside
+    /// it, an obstacle of the pad's net. Only for an elongated SMD pad with another net's copper
+    /// beside it, on the long side facing `toward`, closer than the wire could pass, and only where the rectangle keeps every
+    /// clearance; else nothing (the wire leaves the pad as before).
+    Exit { pad: usize, toward: Vec2, w: f64, s: f64 },
 }
 
 #[derive(Clone, Debug)]
@@ -89,6 +98,8 @@ pub struct Board {
     /// Report lines of the build: the triangulation needed its noded path, and the constraints
     /// (obstacle sides, cuts) it left out, with their owners and places ([`cdt_notes`]).
     pub notes: Vec<String>,
+    /// 5.10: the exit stubs of the build (`Extra::Exit`): `(obstacle, pad index)`.
+    pub exit_stubs: Vec<(ObsId, usize)>,
 }
 
 /// Where an obstacle of the projection comes from (for the report).
@@ -99,6 +110,8 @@ enum Src {
     Keepout(usize),
     Shape(usize),
     Extra(usize),
+    /// 5.10: the exit stub of a pad (index into `BoardModel::pads`).
+    Exit(usize),
 }
 
 /// A point in the KiCad frame (y down), mm.
@@ -137,6 +150,10 @@ fn owner_text(m: &BoardModel, src: &[Src], k: VertKind) -> String {
             format!("copper graphic{fp} on {} [{}] (uuid {})", layer_name(m, c.layer), net_name(m, c.net), c.uuid)
         }
         Some(&Src::Extra(i)) => format!("plane stub {i} (a via or track placed before routing)"),
+        Some(&Src::Exit(i)) => {
+            let p = &m.pads[i];
+            format!("planned exit of pad {}.{} [{}]", p.ref_, p.number, net_name(m, p.net))
+        }
         None => format!("obstacle {o}"),
     }
 }
@@ -273,6 +290,141 @@ fn bare_hole(pad: &crate::model::Pad) -> bool {
         PadShape::Rect { w, h } | PadShape::RoundRect { w, h, .. } | PadShape::Oval { w, h } => w <= dw + 1000 && h <= dh + 1000,
         PadShape::Poly { .. } => false,
     })
+}
+
+/// Distance between segment `a`-`b` and the polygon `poly` (0 when an end lies inside). O(|poly|).
+fn seg_poly_dist(a: Vec2, b: Vec2, poly: &[Vec2]) -> f64 {
+    if point_in_poly(a, poly) || point_in_poly(b, poly) {
+        return 0.0;
+    }
+    let k = poly.len();
+    (0..k).map(|i| super::draw::seg_seg_dist(a, b, poly[i], poly[(i + 1) % k])).fold(f64::INFINITY, f64::min)
+}
+
+/// Distance between two polygons (0 when a vertex of one lies inside the other). O(|p| |q|).
+fn poly_poly_dist(p: &[Vec2], q: &[Vec2]) -> f64 {
+    if p.iter().any(|&x| point_in_poly(x, q)) || q.iter().any(|&x| point_in_poly(x, p)) {
+        return 0.0;
+    }
+    let k = p.len();
+    (0..k).map(|i| seg_poly_dist(p[i], p[(i + 1) % k], q)).fold(f64::INFINITY, f64::min)
+}
+
+/// Shopping list 5.10: the exit stub of the pad obstacle `oi` for a wire of width `w` and
+/// clearance `s` (nm) leaving towards `toward`, as `(rectangle, tip)`, `tip` = whether it leaves
+/// along `+axis` (the pad's principal axis, a deterministic sign).
+///
+/// TopoR (6.3 manual p. 71, "Don't stretch wire to polygonal pad origin"; p. 56, the minimum width
+/// "near pads that are narrower than the wire") and Maley (1987 p. 29: terminals are points)
+/// both put a wire's end at a point of its pad; where the pads stand closer than a wire can pass
+/// between them (a fine-pitch row), the only legal way out is through the pad's tip along its
+/// long axis, until the wire's copper may turn without nearing the neighbour pads' tips closer
+/// than the clearance: `s + width` past the tip (the octilinear drawing's pad exit leg,
+/// `octi::Exit::reach`, plus the copper's half width). That stretch is fixed before any topology
+/// is planned (as the plane stubs are, D6a): the planner routes the other nets round it, the
+/// clearance cuts between its end and the neighbour pads are cuts of the projection (and of the
+/// cut model's layer sheets: `[capacity] model = "cuts"` prices them), and the drawing keeps
+/// other copper off it. Its width is the wire's, at most the pad's own width (the neck rule: the
+/// pad's width first). The rectangle starts where its whole width has left the pad's polygon, so
+/// the two do not overlap.
+///
+/// `None` (no stub, the exit is left to the plan as before) when the pad is no elongated SMD pad
+/// (long side under 1.2 x the short side, drilled, or on several layers), when no copper of
+/// another net on its layer stands closer to it than `w + 2 x clearance` (the wire could leave
+/// through a side), or when the rectangle would come nearer than the clearance to any other
+/// net's copper, a no-tracks rule area or the board edge (`edge_clear`).
+/// O(obstacles x polygon sizes) per call.
+#[allow(clippy::too_many_arguments)]
+fn exit_stub(obstacles: &[Obstacle], src: &[Src], oi: usize, toward: Vec2, w: f64, s: f64, outline: &[(Vec2, Vec2)], edge_clear: f64) -> Option<(Vec<Vec2>, bool)> {
+    let ob = &obstacles[oi];
+    let net = ob.net?;
+    if ob.drilled || ob.layers.0.count_ones() != 1 || ob.poly.len() < 3 || w <= 0.0 {
+        return None;
+    }
+    let c = ob.center;
+    let (mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0);
+    for &p in &ob.poly {
+        let d = p - c;
+        sxx += d.x * d.x;
+        syy += d.y * d.y;
+        sxy += d.x * d.y;
+    }
+    let th = 0.5 * (2.0 * sxy).atan2(sxx - syy);
+    let u0 = Vec2 { x: th.cos(), y: th.sin() };
+    // A deterministic sign of the axis (its larger component positive).
+    let u0 = if u0.x.abs() >= u0.y.abs() { if u0.x < 0.0 { -u0 } else { u0 } } else if u0.y < 0.0 { -u0 } else { u0 };
+    let ext = |v: Vec2| ob.poly.iter().map(|&p| (p - c).dot(v)).fold(f64::MIN, f64::max);
+    let (lu, lv) = (ext(u0) + ext(-u0), ext(u0.perp()) + ext(-u0.perp()));
+    if lu < 1.2 * lv {
+        return None;
+    }
+    let plus = (toward - c).dot(u0) >= 0.0;
+    let u = if plus { u0 } else { -u0 };
+    let ws = w.min(lv);
+    let on = |o: &Obstacle| o.drilled || o.layers.0 & ob.layers.0 != 0;
+    let keepout = |j: usize| matches!(src.get(j), Some(Src::Keepout(_)));
+    let need = |j: usize, o: &Obstacle| if keepout(j) { o.clear } else { o.clear.max(s) };
+    let bb = |poly: &[Vec2]| {
+        poly.iter().fold((Vec2 { x: f64::INFINITY, y: f64::INFINITY }, Vec2 { x: f64::NEG_INFINITY, y: f64::NEG_INFINITY }), |(lo, hi), p| {
+            (Vec2 { x: lo.x.min(p.x), y: lo.y.min(p.y) }, Vec2 { x: hi.x.max(p.x), y: hi.y.max(p.y) })
+        })
+    };
+    let near = |lo: Vec2, hi: Vec2, poly: &[Vec2], d: f64| {
+        let (a, b) = bb(poly);
+        !(a.x > hi.x + d || b.x < lo.x - d || a.y > hi.y + d || b.y < lo.y - d)
+    };
+    // Fine pitch: another net's copper beside the pad closer than the wire could pass. Where the
+    // straight line to the target leaves the pad decides which: through a tip zone (the last
+    // `lv / 2` of the pad's length, its rounded ends) a neighbour on either side, through a long
+    // side only one on that side. A pad whose side towards the target is free (the end pin of a
+    // row) needs no planned exit: its wire may leave through that side (fanout_inner_beyond U1.5:
+    // the stub on its tip took the room of U1.6's wire, which the wire of U1.5, leaving through the
+    // free side at 45 degrees, never needed).
+    let v = u0.perp();
+    let (du, dv) = ((toward - c).dot(u0), (toward - c).dot(v));
+    let tx = (0.5 * lu / du.abs().max(1e-9)).min(0.5 * lv / dv.abs().max(1e-9));
+    let tip_zone = (du * tx).abs() >= 0.5 * (lu - lv) - 1.0;
+    let side = if dv >= 0.0 { 1.0 } else { -1.0 };
+    let (plo, phi) = bb(&ob.poly);
+    let fine = obstacles.iter().enumerate().any(|(j, o)| {
+        if j == oi || o.net == Some(net) || !on(o) || keepout(j) || (!tip_zone && side * (o.center - c).dot(v) <= 0.5 * lv) {
+            return false;
+        }
+        let gap = ws + 2.0 * need(j, o);
+        near(plo, phi, &o.poly, gap) && poly_poly_dist(&ob.poly, &o.poly) - o.sag < gap
+    });
+    if !fine {
+        return None;
+    }
+    // From where the whole width has left the pad to `s + width` past its tip.
+    let nrm = u.perp() * (0.5 * ws);
+    let inside = |q: Vec2| point_in_poly(q, &ob.poly);
+    let tip = ext(u);
+    let step = 0.005 * MM;
+    let mut t = 0.0;
+    while t < tip + ws && (inside(c + u * t) || inside(c + u * t + nrm) || inside(c + u * t - nrm)) {
+        t += step;
+    }
+    let t1 = tip + s + ws;
+    if t1 - t <= step {
+        return None;
+    }
+    let (a, b) = (c + u * t, c + u * t1);
+    // Legal: the clearance to every other net's copper, rule area and the board edge.
+    let (slo, shi) = bb(&[a, b]);
+    for (j, o) in obstacles.iter().enumerate() {
+        if j == oi || o.net == Some(net) || !on(o) {
+            continue;
+        }
+        let req = need(j, o) + 0.5 * ws + o.sag;
+        if near(slo, shi, &o.poly, req) && seg_poly_dist(a, b, &o.poly) < req - 1.0 {
+            return None;
+        }
+    }
+    if outline.iter().any(|&(p, q)| super::draw::seg_seg_dist(a, b, p, q) < edge_clear + 0.5 * ws - 1.0) {
+        return None;
+    }
+    Some((vec![a - nrm, b - nrm, b + nrm, a + nrm], plus))
 }
 
 /// The board outline as segments (arcs split to 0.05 mm sagitta).
@@ -527,6 +679,7 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
                 term_obs.push(obstacles.len());
                 (poly, 0.0, mask, false, net, (m.rules.net_rule(net).clearance).max(m.rules.min_clearance) as f64)
             }
+            Extra::Exit { .. } => continue,
         };
         if poly.len() < 3 {
             continue;
@@ -535,6 +688,35 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
         pad_of.push(usize::MAX);
         src.push(Src::Extra(xi));
         obstacles.push(Obstacle { kind: ObsKind::Pad, poly, center: c, layers, drilled, net: (net > 0).then_some(net), clear, bare: false, sag });
+    }
+    // 5.10: the exit stubs, after every other obstacle (each keeps its clearance to all of them
+    // and to the stubs placed before it); one per pad and tip.
+    let mut exit_stubs: Vec<(ObsId, usize)> = Vec::new();
+    if extra.iter().any(|x| matches!(x, Extra::Exit { .. })) {
+        let osegs = outline_segments(m);
+        let obs_of: BTreeMap<usize, usize> = pad_of.iter().enumerate().filter(|(_, &p)| p != usize::MAX).map(|(o, &p)| (p, o)).collect();
+        let mut done: BTreeSet<(usize, bool)> = BTreeSet::new();
+        for x in extra {
+            let Extra::Exit { pad, toward, w, s } = *x else { continue };
+            let Some(&oi) = obs_of.get(&pad) else { continue };
+            let Some((poly, plus)) = exit_stub(&obstacles, &src, oi, toward, w, s, &osegs, m.rules.edge_clearance as f64) else { continue };
+            if !done.insert((pad, plus)) {
+                continue;
+            }
+            let ob = &obstacles[oi];
+            let net = ob.net.unwrap_or(0);
+            let c = poly.iter().fold(Vec2 { x: 0.0, y: 0.0 }, |acc, &p| acc + p) * (1.0 / poly.len() as f64);
+            let clear = (m.rules.net_rule(net).clearance).max(m.rules.min_clearance) as f64;
+            let layers = ob.layers;
+            if std::env::var_os("TOPO_EXITDBG").is_some() {
+                let (lo, hi) = poly.iter().fold(((f64::MAX, f64::MAX), (f64::MIN, f64::MIN)), |(l, h), p| ((l.0.min(p.x), l.1.min(-p.y)), (h.0.max(p.x), h.1.max(-p.y))));
+                eprintln!("EXITSTUB pad {}.{} net {net} x {:.3}..{:.3} y {:.3}..{:.3}", m.pads[pad].ref_, m.pads[pad].number, lo.0 / 1e6, hi.0 / 1e6, lo.1 / 1e6, hi.1 / 1e6);
+            }
+            exit_stubs.push((obstacles.len(), pad));
+            pad_of.push(usize::MAX);
+            src.push(Src::Exit(pad));
+            obstacles.push(Obstacle { kind: ObsKind::Pad, poly, center: c, layers, drilled: false, net: (net > 0).then_some(net), clear, bare: false, sag: 0.0 });
+        }
     }
     // Centres first, so a coincident vertex keeps the terminal kind.
     let mut points: Vec<(Vec2, VertKind)> = Vec::new();
@@ -690,7 +872,7 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
         }
     }
     let poured = m.pours.iter().map(|p| p.net).collect();
-    Ok(Board { proj, signal_layers, n_signal, centre, pad_of, poured, notes })
+    Ok(Board { proj, signal_layers, n_signal, centre, pad_of, poured, notes, exit_stubs })
 }
 
 impl Board {

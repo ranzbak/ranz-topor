@@ -1100,6 +1100,16 @@ pub struct Options {
     /// footprint and may reach further back to free room for others; never a neck in the middle
     /// of a full-width run). False: only the bottleneck passes themselves are necked.
     pub neck_from_pad: bool,
+    /// Shopping list 5.10 (`topor.toml [search] pad_exit_stubs`): a connection's exit from a
+    /// fine-pitch pad (another net's copper beside it closer than the wire could pass) is fixed
+    /// before the topology as a stub along the pad's long axis out of the tip that faces the
+    /// connection's other end, `clearance + width` long past the tip; the planner routes the other
+    /// nets round it and prices its clearance cuts, the drawing keeps other copper off it.
+    /// False (default until the plan chooses the exit tip; today the straight line to the other end
+    /// does, shopping list 5.10): the exit is
+    /// left to the plan and the drawing (the behaviour before 5.10). Not the classic router's
+    /// removed `[search] exit_stubs`.
+    pub pad_exit_stubs: bool,
     /// M-C (`topor.toml [search] neck_in_drawing`): the drawing may also neck a pad end the plan
     /// kept at full width when the full-width copper is rejected (the behaviour before M-C).
     /// False (default): the drawing necks only where the plan necked.
@@ -1311,6 +1321,7 @@ impl Default for Options {
             allow_violations: true,
             neck_max_nm: 0,
             neck_from_pad: true,
+            pad_exit_stubs: false,
             neck_in_drawing: false,
             draw_style: "octilinear".into(),
             any_angle: "costly".into(),
