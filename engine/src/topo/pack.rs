@@ -200,7 +200,7 @@ pub struct Packer<'a> {
     via_d0: f64,
     /// Free radius against other nets' obstacles at the incentre / centroid of a triangle, per
     /// (triangle, net). Cached.
-    free_cache: RefCell<HashMap<(usize, i32), f64>>,
+    free_cache: RefCell<HashMap<(usize, i32), (f64, usize)>>,
     /// Price (mm) of a via disc that leaves its passage-layer no slack (the `via_squeeze`
     /// factor); 0 = off.
     pub via_squeeze: f64,
@@ -350,16 +350,23 @@ impl<'a> Packer<'a> {
     /// missing room the graded via-site price ([`super::refine::CapModel`]) grows with. Cached
     /// per (triangle, net, s). O(obstacles) per new key.
     pub fn via_free(&self, t: super::state::TriId, net: i32, s: f64) -> f64 {
+        self.via_free_at(t, net, s).0
+    }
+
+    /// [`Packer::via_free`] and the candidate point that has it: the plan's via site in `t`
+    /// (decide early: the relocation starts there, [`super::viaopt::relocate_vias`]). The point
+    /// is the incentre when `t` has no site at all. Cached as [`Packer::via_free`].
+    pub fn via_free_at(&self, t: super::state::TriId, net: i32, s: f64) -> (f64, Vec2) {
         let pr = self.pr;
-        if pr.tri_out[t] || !pr.tri_obs[t].is_empty() {
-            return f64::NEG_INFINITY;
-        }
-        let key = (t, net ^ ((s as i64 as i32) << 8));
-        if let Some(&f) = self.free_cache.borrow().get(&key) {
-            return f;
-        }
         let [a, b, c] = pr.tris[t].map(|v| pr.pos[v]);
         let pts = tri_site_points(a, b, c);
+        if pr.tri_out[t] || !pr.tri_obs[t].is_empty() {
+            return (f64::NEG_INFINITY, pts[0]);
+        }
+        let key = (t, net ^ ((s as i64 as i32) << 8));
+        if let Some(&(f, j)) = self.free_cache.borrow().get(&key) {
+            return (f, pts[j]);
+        }
         let mut free = [f64::INFINITY; 9];
         for o in pr.obstacles.iter().filter(|o| pr.via_foreign(o, net)) {
             for (q, f) in pts.iter().zip(free.iter_mut()) {
@@ -374,9 +381,9 @@ impl<'a> Packer<'a> {
                 *f = f.min(d);
             }
         }
-        let f = free.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        self.free_cache.borrow_mut().insert(key, f);
-        f
+        let (j, f) = free.iter().copied().enumerate().fold((0, f64::NEG_INFINITY), |b, (j, f)| if f > b.1 { (j, f) } else { b });
+        self.free_cache.borrow_mut().insert(key, (f, j));
+        (f, pts[j])
     }
 
     /// The packer of `model` over the projection `pr`, with the drawing's tolerance and edge rule.

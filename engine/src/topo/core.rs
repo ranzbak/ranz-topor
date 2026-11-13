@@ -3574,14 +3574,27 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             _ => 0.0,
         };
         let cx = super::viaopt::ViaCtx { st: &st, outline: &outline, edge_clear: proj.edge_clear + margin, via_r: &via_r, clear: &clear, via_via: &via_via };
-        let (sites, rr) = super::viaopt::relocate_vias(&cx, &mut plans, &lr.events);
+        // Decide early: the relocation starts at the plan's own via sites (the ones the via-site
+        // price measured; pair proposal 2026-11-13 item 4).
+        let mut plan_sites: super::viaopt::Sites = BTreeMap::new();
+        for (&w, pl) in plans.iter() {
+            for i in 0..pl.vias.len() {
+                if let Some(s) = lr.events.get(w).and_then(|ev| cm_plan.site_of(w, ev, i)) {
+                    plan_sites.insert((w, i), s);
+                }
+            }
+        }
+        let (sites, rr) = super::viaopt::relocate_vias(&cx, &mut plans, &lr.events, &plan_sites);
         dr.via_site = sites;
         dr.via_site_tight = rr.tight.iter().copied().collect();
         warnings.push(format!(
-            "via relocation ([vias] relocate; Dayan & Dai 1991, force balance): {} vias, {} moved in their free interval to the most clearance, smallest gap {:+.3} mm in total",
+            "via relocation ([vias] relocate; Dayan & Dai 1991, force balance): {} vias, {} moved in their free interval to the most clearance, smallest gap {:+.3} mm in total; {} started at the plan's site, {} kept in the plan's traversals (taut crossing outside them), {} tight (no legal site in range)",
             rr.vias,
             rr.moved,
-            rr.gap_gain / MM
+            rr.gap_gain / MM,
+            plan_sites.len(),
+            rr.kept_in_plan,
+            rr.tight.len()
         ));
         if std::env::var("TOPO_VIAREL").is_ok() {
             for &(w, i, a, b, g0, g1) in &rr.moves {

@@ -356,7 +356,11 @@ fn via_shift_moves_a_layer_change_out_of_a_full_door() {
         assert!(before > 0.0);
         let mut lb = labels(st, cm, evl, &mask, &partner);
         assert_eq!(lb.via_shifts(0), 1, "the via shift fires");
-        assert_eq!(lb.cm.total(), 0.0, "the door fits now");
+        // The door fits now: nothing over-full, no via short of room; what is left of the price
+        // is the graded via-site tail of the one via (phi, pair proposal 2026-11-13 item 2; the
+        // old flat price was 0 for a via with a site).
+        assert_eq!(lb.cm.violations(), (0, 0.0), "the door fits now");
+        assert!(lb.cm.total() < 0.01 * before, "{} vs {before}", lb.cm.total());
         assert_eq!(lb.evl[0].windows(2).filter(|x| x[0].2 != x[1].2).count(), 1, "still one via");
         assert_eq!(lb.tally.applied_of(Kind::ViaShift), 1);
     });
@@ -391,7 +395,9 @@ fn segment_lifting_puts_a_stretch_on_its_neighbours_layer() {
         let mut lb = labels(st, cm, evl, &mask, &partner);
         assert!(lb.lifts(0) >= 1, "the lift fires");
         assert!(lb.evl[0].windows(2).filter(|x| x[0].2 != x[1].2).count() < 2, "{:?}", lb.evl[0]);
-        assert_eq!(lb.cm.total(), 0.0);
+        // Fits: no over-full door, no via short of room (the graded via-site tail of a via that
+        // is left may remain in the price, pair proposal 2026-11-13 item 2).
+        assert_eq!(lb.cm.violations(), (0, 0.0));
         assert!(lb.tally.applied_of(Kind::Lift) >= 1);
     });
 }

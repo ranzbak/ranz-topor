@@ -518,6 +518,27 @@ impl<'a> CapModel<'a> {
         x
     }
 
+    /// The plan's site of via `i` of `w` under events `ev` (decide early, TopoR way: the site the
+    /// via-site price measured, so the relocation and the drawing start where the plan priced the
+    /// room, [`super::viaopt::relocate_vias`]): the end site ([`CapModel::end_site_of`]) of an
+    /// interval without a traversal strictly between its events, else the point of the planned
+    /// traversal's triangle with the most room ([`Packer::via_free_at`]). `None` without via
+    /// sizes, without a planned traversal, or for an end-site interval without an end site.
+    /// O(1) cached, else O(obstacles).
+    pub fn site_of(&self, w: WireId, ev: &[LEv], i: usize) -> Option<(usize, Vec2)> {
+        let wi = &self.st.wires[w];
+        let k = *self.via_k.get(w)?.get(i)?;
+        if self.packer.via_d(wi.net) <= 0.0 || wi.tris.is_empty() {
+            return None;
+        }
+        let between = if self.packer.via_between { via_ranges(ev, true).1 } else { Vec::new() };
+        if between.get(i) == Some(&false) {
+            return self.end_site_of(w, ev, i);
+        }
+        let t = wi.tris[k.min(wi.tris.len() - 1)];
+        Some((k, self.packer.via_free_at(t, wi.net, wi.s).1))
+    }
+
     /// Via traversals by the drawing's preference alone (no room), keeping the traversal of a
     /// via whose interval is unchanged from `old` (intervals, traversals); a via of an interval
     /// with no traversal strictly between its events takes the traversal of its end site

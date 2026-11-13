@@ -156,6 +156,21 @@ impl Track {
         a + (b - a) * ((s - self.cum[j - 1]) / l)
     }
 
+    /// Arc length of the track point nearest `p`. O(corners).
+    pub fn arc_of(&self, p: Vec2) -> f64 {
+        let mut best = (f64::INFINITY, 0.0);
+        for j in 1..self.pts.len() {
+            let (a, b) = (self.pts[j - 1], self.pts[j]);
+            let l2 = (b - a).len2();
+            let t = if l2 <= 0.0 { 0.0 } else { ((p - a).dot(b - a) / l2).clamp(0.0, 1.0) };
+            let d = (a + (b - a) * t - p).len();
+            if d < best.0 {
+                best = (d, self.cum[j - 1] + t * (self.cum[j] - self.cum[j - 1]));
+            }
+        }
+        best.1
+    }
+
     /// The traversal holding arc length `s`: the number of passes crossed before it.
     pub fn trav(&self, s: f64) -> usize {
         self.sig.partition_point(|&x| x < s)
@@ -217,6 +232,9 @@ pub struct Site {
     /// Traversal and point.
     pub k: usize,
     pub p: Vec2,
+    /// Arc length of the point on the wire's taut track (the nearest track point for a site off
+    /// the track, as the plan's end site), for the room between the wire's own vias.
+    pub arc: f64,
 }
 
 /// What [`relocate_vias`] did.
@@ -232,6 +250,10 @@ pub struct RelocReport {
     /// plan's geometry has no legal room there, so the drawing may not take the site on the
     /// plan's word alone (P6).
     pub tight: Vec<(WireId, usize)>,
+    /// The vias whose interval on the taut tracks lay outside the plan's traversals (the taut
+    /// crossing outside the planned window, planned_crossing_window): relocated inside the
+    /// plan's traversals, from the plan's site.
+    pub kept_in_plan: usize,
 }
 
 /// The via intervals `(ka, sa, kb, sb)` of `events` (consecutive events whose labels differ), in
@@ -243,6 +265,9 @@ pub fn intervals(events: &[(usize, f64, i32)]) -> Vec<(usize, f64, usize, f64)> 
 struct Near {
     obs: Vec<usize>,
     wires: Vec<WireId>,
+    /// The other nets' crossings of the via's wire in the plan: arc length of the crossing event
+    /// on the wire's track and the room its wire takes (width plus clearance).
+    xarc: Vec<(f64, f64)>,
 }
 
 /// Gaps of a via of `net` (radius `rv`, clearance `c`) at `p`: `(rule, force, potential)`.
@@ -255,7 +280,7 @@ struct Near {
 /// the free interval"); it is no rule (a via may touch its own pad). `potential` =
 /// `sum(1 / g - 1 / POT_RANGE)` over the force gaps below `POT_RANGE`. O(near items).
 #[allow(clippy::too_many_arguments)]
-fn gap_at(cx: &ViaCtx, tracks: &[Track], near: &Near, sites: &[Site], me: (WireId, usize), net: i32, rv: f64, c: f64, p: Vec2) -> (f64, f64, f64) {
+fn gap_at(cx: &ViaCtx, tracks: &[Track], near: &Near, sites: &[Site], me: (WireId, usize), net: i32, rv: f64, c: f64, p: Vec2, arc: f64) -> (f64, f64, f64) {
     let st = cx.st;
     let mut grule = f64::INFINITY;
     let mut gforce = f64::INFINITY;
@@ -277,6 +302,11 @@ fn gap_at(cx: &ViaCtx, tracks: &[Track], near: &Near, sites: &[Site], me: (WireI
     for &(a, b) in cx.outline {
         add(seg_point(p, a, b).0 - rv - cx.edge_clear, true);
     }
+    // A keepout that forbids vias: the disc may not touch it (the plan's site test,
+    // [`super::pack::Packer::via_free`]: one room count).
+    for k in &st.proj.no_via {
+        add(dist_poly(p, k) - rv, true);
+    }
     for &u in &near.wires {
         let wu = &st.wires[u];
         add(dist_polyline(p, &tracks[u].pts) - rv - 0.5 * wu.w - c.max(wu.s), true);
@@ -291,6 +321,15 @@ fn gap_at(cx: &ViaCtx, tracks: &[Track], near: &Near, sites: &[Site], me: (WireI
         let mut need = (cx.via_via)(net, nu);
         if s.wire == me.0 {
             need = need.max(rv + (cx.via_r)(nu));
+            // CM1: the other nets' wires the plan crosses between the two vias pass between
+            // them on some layer (a through via blocks every layer): their widths and
+            // clearances count, as the cut model's via cut does ([`super::viacuts`]).
+            let (a0, a1) = (arc.min(s.arc), arc.max(s.arc));
+            // (a via at the crossing's own event still has the crossing beside it)
+            let band: f64 = near.xarc.iter().filter(|x| x.0 >= a0 - 1.0 && x.0 <= a1 + 1.0).map(|x| x.1).sum();
+            if band > 0.0 {
+                need = need.max(rv + (cx.via_r)(nu) + band + c);
+            }
         }
         add((p - s.p).len() - need, true);
     }
@@ -362,7 +401,7 @@ pub type Sites = BTreeMap<(WireId, usize), (usize, Vec2)>;
 /// doc). `events` are the layering's per-wire events. Returns the planned site per
 /// `(wire, via index)` as `(traversal, point)` and the report. Two Gauss-Seidel sweeps (each via
 /// sees the others' current sites). O(vias x SAMPLES x near items).
-pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan>, events: &[Vec<(usize, f64, i32)>]) -> (Sites, RelocReport) {
+pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan>, events: &[Vec<(usize, f64, i32)>], plan_sites: &Sites) -> (Sites, RelocReport) {
     let st = cx.st;
     let mut rep = RelocReport::default();
     let alive: Vec<WireId> = (0..st.wires.len()).filter(|&w| st.wires[w].alive).collect();
@@ -395,6 +434,17 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
         let poly = st.polyline(w);
         let wnet = st.wires[w].net;
         let xs: Vec<super::state::Crossing> = st.crossings(w).into_iter().filter(|x| st.wires[x.other].net != wnet).collect();
+        // CM1: where the plan crosses the other nets' wires along this wire (the event, not the
+        // taut tracks' crossing) and the room each takes between two of the wire's vias.
+        let cw = (cx.clear)(wnet);
+        let xarc: Vec<(f64, f64)> = xs
+            .iter()
+            .map(|x| {
+                let wo = &st.wires[x.other];
+                (tr.sigma(x.k, event_s(st, &poly, &st.polyline(x.other), w, x)), wo.w + cw.max(wo.s))
+            })
+            .collect();
+        let mut prev_kept: Option<f64> = None;
         for (i, &(ka, sa, kb, sb)) in ivs.iter().enumerate() {
             let (lo, hi) = (tr.sigma(ka, sa), tr.sigma(kb, sb));
             let (mut lo, mut hi) = (lo.min(hi), lo.max(hi));
@@ -436,16 +486,50 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
             if std::env::var_os("TOPO_VIAREL").is_some() {
                 eprintln!("VIACLAMP w{w} v{i} -> lo {:.3} hi {:.3} mm pinched {pinched}", lo / 1e6, hi / 1e6);
             }
+            let (ea, eb) = (tr.sigma(ka, sa).min(tr.sigma(kb, sb)), tr.sigma(ka, sa).max(tr.sigma(kb, sb)));
             if pinched {
                 // The two crossings meet (no stretch between them on the taut tracks): the old
                 // interval; the site is marked tight (the drawing does not take it on the plan's
                 // geometry alone).
-                (lo, hi) = (tr.sigma(ka, sa).min(tr.sigma(kb, sb)), tr.sigma(ka, sa).max(tr.sigma(kb, sb)));
+                (lo, hi) = (ea, eb);
             }
-            // The drawing's own first choice: the middle of the planned traversal.
-            let k = pl.at.get(i).copied().unwrap_or((ka + kb).div_ceil(2));
+            // Decide early: the plan's traversals bound the interval, and the plan's site lies in
+            // it. A taut crossing that leaves the plan's site traversal outside the interval
+            // (planned_crossing_window: SDA's taut track crosses VCC in the B.Cu keepout, left of
+            // the window the topology put the crossing and VCC's end site in) contradicts the
+            // plan; it never moves the via out: the interval is then the events' stretch inside
+            // the plan's traversals, and the neighbouring via across that crossing keeps to the
+            // event's side too (the crossing lies between the two vias as planned).
+            let (pka, pkb) = pl.vias.get(i).map_or((ka, kb), |&(a, b)| (a, b.max(a)));
+            let (pa, pb) = (tr.sigma(pka, 0.0), tr.sigma(pkb, 1.0));
+            if let Some(e) = prev_kept.filter(|_| i > 0) {
+                lo = lo.max(e);
+            }
+            prev_kept = None;
+            let ksite = plan_sites.get(&(w, i)).map(|s| s.0);
+            let site_out = ksite.is_some_and(|k| tr.sigma(k, 1.0) < lo || tr.sigma(k, 0.0) > hi);
+            let mut kept_in_plan = false;
+            if hi < pa || lo > pb || site_out {
+                let (a2, b2) = (ea.max(pa), eb.min(pb));
+                (lo, hi) = if a2 <= b2 { (a2, b2) } else { (pa, pb) };
+                kept_in_plan = true;
+                prev_kept = Some(eb);
+                if let Some(v) = vs.last_mut().filter(|v| v.w == w && v.i + 1 == i) {
+                    v.hi = v.hi.min(ea).max(v.lo);
+                }
+            } else {
+                (lo, hi) = (lo.max(pa), hi.min(pb));
+            }
+            // The start: on the taut track (no detour) in the plan's traversal, at the point
+            // nearest the plan's own site (the one the via-site price measured,
+            // [`super::refine::CapModel::site_of`]: the end site in the crossing's triangle, or the
+            // triangle's point with the most room), else the drawing's own first choice, the
+            // middle of the planned traversal.
+            let k = plan_sites.get(&(w, i)).map(|s| s.0).or(pl.at.get(i).copied()).unwrap_or((ka + kb).div_ceil(2));
             let (a, b) = (tr.sigma(k, 0.0).max(lo), tr.sigma(k, 1.0).min(hi));
-            let p = tr.at(if a <= b { 0.5 * (a + b) } else { 0.5 * (lo + hi) });
+            let (a, b) = if a <= b { (a, b) } else { (lo, hi) };
+            let arc0 = plan_sites.get(&(w, i)).map_or(0.5 * (a + b), |s| tr.arc_of(s.1).clamp(a, b));
+            let p = tr.at(arc0);
             // Copper near the interval (bbox + range).
             let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
             for s in 0..=8 {
@@ -460,11 +544,14 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
             let obs: Vec<usize> = (0..st.proj.obstacles.len()).filter(|&o| st.proj.obstacles[o].poly.iter().any(|&q| inb(q)) || inb(st.proj.obstacles[o].center)).collect();
             let net = st.wires[w].net;
             let wires: Vec<WireId> = alive.iter().copied().filter(|&u| st.wires[u].net != net && (tracks[u].pts.iter().any(|&q| inb(q)) || tracks[u].pts.windows(2).any(|x| inb((x[0] + x[1]) * 0.5)))).collect();
+            if kept_in_plan {
+                rep.kept_in_plan += 1;
+            }
             // The traversals the via may take: the plan's range (with [vias] between_crossings
             // strictly between the events, never a crossing's triangle).
             let (ka, kb) = pl.vias.get(i).map_or((ka, kb), |&(a, b)| (a, b.max(a)));
-            vs.push(V { w, i, lo, hi, ka, kb, near: Near { obs, wires }, pinched });
-            sites.push(Site { wire: w, i, k, p });
+            vs.push(V { w, i, lo, hi, ka, kb, near: Near { obs, wires, xarc: xarc.clone() }, pinched });
+            sites.push(Site { wire: w, i, k, p, arc: arc0 });
         }
     }
     rep.vias = vs.len();
@@ -477,20 +564,20 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
             let turn_k: Vec<usize> = st.wires[v.w].turns.iter().map(|t| t.0).collect();
             let ok_k = |k: usize| k >= v.ka && k <= v.kb && !turn_k.contains(&k) && !st.proj.tri_out[st.wires[v.w].tris[k.min(st.wires[v.w].tris.len() - 1)]];
             let cur = sites[vi];
-            let (rc, gc, pc) = gap_at(cx, &tracks, &v.near, &sites, (v.w, v.i), net, rv, c, cur.p);
+            let (rc, gc, pc) = gap_at(cx, &tracks, &v.near, &sites, (v.w, v.i), net, rv, c, cur.p, cur.arc);
             // A site is allowed when it predicts no violation, or none worse than the old site.
             let rule_ok = |r: f64| r >= 0.0 || r >= rc;
-            let eval = |s: f64, sites: &[Site]| -> Option<(f64, f64, usize, Vec2)> {
+            let eval = |s: f64, sites: &[Site]| -> Option<(f64, f64, usize, Vec2, f64)> {
                 let k = tr.trav(s);
                 if !ok_k(k) {
                     return None;
                 }
                 let p = tr.at(s);
-                let (r, g, pot) = gap_at(cx, &tracks, &v.near, sites, (v.w, v.i), net, rv, c, p);
-                rule_ok(r).then_some((g, pot, k, p))
+                let (r, g, pot) = gap_at(cx, &tracks, &v.near, sites, (v.w, v.i), net, rv, c, p, s);
+                rule_ok(r).then_some((g, pot, k, p, s))
             };
-            let better = |a: &(f64, f64, usize, Vec2), b: &(f64, f64, usize, Vec2)| a.0 > b.0 + 1.0 || (a.0 > b.0 - 1.0 && a.1 < b.1 - 1e-12);
-            let mut best = (gc, pc, cur.k, cur.p);
+            let better = |a: &(f64, f64, usize, Vec2, f64), b: &(f64, f64, usize, Vec2, f64)| a.0 > b.0 + 1.0 || (a.0 > b.0 - 1.0 && a.1 < b.1 - 1e-12);
+            let mut best = (gc, pc, cur.k, cur.p, cur.arc);
             let span = v.hi - v.lo;
             let mut best_s = None;
             for j in 0..=SAMPLES {
@@ -520,7 +607,7 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
                     }
                 }
             }
-            sites[vi] = Site { wire: v.w, i: v.i, k: best.2, p: best.3 };
+            sites[vi] = Site { wire: v.w, i: v.i, k: best.2, p: best.3, arc: best.4 };
         }
     }
     let mut out = BTreeMap::new();
@@ -528,8 +615,8 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
         let s = sites[vi];
         let net = st.wires[v.w].net;
         let (rv, c) = ((cx.via_r)(net), (cx.clear)(net));
-        let (g0, _, _) = gap_at(cx, &tracks, &v.near, &start, (v.w, v.i), net, rv, c, start[vi].p);
-        let (g1, _, _) = gap_at(cx, &tracks, &v.near, &sites, (v.w, v.i), net, rv, c, s.p);
+        let (g0, _, _) = gap_at(cx, &tracks, &v.near, &start, (v.w, v.i), net, rv, c, start[vi].p, start[vi].arc);
+        let (g1, _, _) = gap_at(cx, &tracks, &v.near, &sites, (v.w, v.i), net, rv, c, s.p, s.arc);
         if (s.p - start[vi].p).len() > 1.0 {
             rep.moved += 1;
             rep.gap_gain += g1 - g0;
