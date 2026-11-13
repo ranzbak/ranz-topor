@@ -667,6 +667,8 @@ pub struct Drawer<'a> {
     pub(super) qgrow: f64,
     /// Number of static objects (they come first in `ents`).
     pub(super) n_static: usize,
+    /// The wire of each drawn (dynamic) object that has one, by ent id ([`Drawer::pair_disc_clear`]).
+    ent_wire: BTreeMap<usize, usize>,
     /// Diagnosis: ignore the copper drawn so far.
     pub(super) only_static: std::cell::Cell<bool>,
     /// Trial drawing (via reduction): a rejected run is not diagnosed or recorded.
@@ -776,6 +778,7 @@ impl<'a> Drawer<'a> {
             handles: Vec::new(),
             qgrow: 0.0,
             n_static: 0,
+            ent_wire: BTreeMap::new(),
             only_static: std::cell::Cell::new(false),
             quiet: false,
             widths: None,
@@ -932,6 +935,18 @@ impl<'a> Drawer<'a> {
 
     /// Index copper accepted for `net` as an object the next wires keep away from.
     fn add_dynamic(&mut self, item: &Item) -> usize {
+        let wire = match item {
+            Item::Track(t) => t.wire,
+            Item::Via(v) => v.wire,
+        };
+        let id = self.add_dynamic_ent(item);
+        if let Some(w) = wire.filter(|_| id != usize::MAX) {
+            self.ent_wire.insert(id, w);
+        }
+        id
+    }
+
+    fn add_dynamic_ent(&mut self, item: &Item) -> usize {
         let b = self.b;
         match item {
             Item::Track(t) => {
@@ -1517,7 +1532,7 @@ impl<'a> Drawer<'a> {
                     // have been free), the pair still leaves the wires that cross between them
                     // their room ([`Drawer::via_pair_price`] 0); else the search prices the site.
                     let pair_ok = || self.via_pair_price(w, out.last().copied(), &xs, k, p, sz) <= 0.0;
-                    if (self.via_side_ok(w, k, p, la, lb) || taut_ok()) && pair_ok() && self.check_ok(&item) && self.via_hole_ok(p, sz, net) && self.via_own_pad_ok(p, sz, net) {
+                    if (self.via_side_ok(w, k, p, la, lb) || taut_ok()) && pair_ok() && self.check_ok(&item) && self.via_hole_ok(p, sz, net) && self.via_own_pad_ok(p, sz, net) && self.pair_via_ok(w, p, sz, net) {
                         let id = self.commit(&item);
                         self.via_marks.push((w, k, p, plan.layers[i], plan.layers[i + 1], id));
                         ids.push(id);
@@ -1613,7 +1628,7 @@ impl<'a> Drawer<'a> {
                             eprintln!("VIAREJ wire {w} via {i} k {k} at ({:.3},{:.3}): {:?} hole {} own {}", p.x / 1e6, -p.y / 1e6, rep.violations.first().map(|v| (v.against.clone(), v.gap, v.required)), self.via_hole_ok(p, sz, net), self.via_own_pad_ok(p, sz, net));
                         }
                     }
-                    if self.check_ok(&item) && self.via_hole_ok(p, sz, net) && self.via_own_pad_ok(p, sz, net) {
+                    if self.check_ok(&item) && self.via_hole_ok(p, sz, net) && self.via_own_pad_ok(p, sz, net) && self.pair_via_ok(w, p, sz, net) {
                         let room = self.via_room(w, k, p, sz.d as f64);
                         // The room around the via is priced the same way (short of one via
                         // diameter of free room, the `via_squeeze` measure), so a site free of the
@@ -1782,6 +1797,9 @@ impl<'a> Drawer<'a> {
                 let mut vs = self.viols_of(std::slice::from_ref(&item), &rep);
                 if !self.via_hole_ok(p, sz, net) {
                     vs.push(Viol { kind: "hole_clearance", at: p, layer: u32::MAX, depth_nm: self.model.rules.via_hole_clear().max(1) as f64, len_nm: sz.d as f64, against: "copper shape".into(), via: true });
+                }
+                if !self.pair_via_ok(w, p, sz, net) {
+                    vs.push(Viol { kind: "clearance", at: p, layer: u32::MAX, depth_nm: self.model.rules.net_rule(net).clearance.max(1) as f64, len_nm: sz.d as f64, against: "diff pair partner copper".into(), via: true });
                 }
                 if !self.via_own_pad_ok(p, sz, net) {
                     vs.push(Viol { kind: "connection_width", at: p, layer: u32::MAX, depth_nm: self.model.rules.min_connection.max(1) as f64, len_nm: sz.d as f64, against: "own-net pad".into(), via: true });
@@ -2219,7 +2237,7 @@ impl<'a> Drawer<'a> {
     /// centred inside it is fine; with no minimum connection width set, anything goes.
     /// O(pads of the net x pad vertices).
     pub fn via_own_pad_ok(&self, p: Vec2, size: ViaSize, net: i32) -> bool {
-        if self.model.rules.pair_disc(net) && !self.pair_disc_clear(p, size, net) {
+        if self.model.rules.pair_disc(net) && !self.pair_disc_clear(p, size, net, None) {
             return false;
         }
         if self.model.rules.min_connection <= 0 || net == 0 {
@@ -2238,19 +2256,26 @@ impl<'a> Drawer<'a> {
     }
 
     /// A pair's two-via disc of `size` at `p` (lead `net` of the planning model,
-    /// [`crate::model::NetRule::pair_disc`]) keeps the net's clearance to the static copper of
-    /// its own net there: the pads, copper shapes, kept copper and vias of both halves (the
+    /// [`crate::model::NetRule::pair_disc`]) keeps the net's clearance to the copper of its own
+    /// net there: the static pads, copper shapes, kept copper and vias of both halves (the
     /// partner's carry the lead's net in the plan; the disc holds the N via as well as the P via,
-    /// so none of it is own copper for it). User 2026-11-13. O(static objects nearby).
-    pub fn pair_disc_clear(&self, p: Vec2, size: ViaSize, net: i32) -> bool {
+    /// so none of it is own copper for it), and with `wire` (the wire the disc belongs to) the
+    /// copper drawn so far of the pair's other wires (their tracks and discs: the other
+    /// connections of the pair, own net in the plan, are partner copper in the drawing too).
+    /// User 2026-11-13. O(objects nearby).
+    pub fn pair_disc_clear(&self, p: Vec2, size: ViaSize, net: i32, wire: Option<WireId>) -> bool {
         let own = self.model.rules.net_rule(net).clearance as f64;
         let r = 0.5 * size.d as f64;
         let mut ids = self.grid.query(bbox_of(&[p]).grow(r + own + 2.0e6));
         ids.sort_unstable();
         ids.dedup();
-        ids.into_iter().filter(|&id| id < self.n_static).all(|id| {
+        ids.into_iter().all(|id| {
             let e = &self.ents[id];
             if !e.live || e.net != Some(net) {
+                return true;
+            }
+            // drawn copper: only with the disc's wire known, and only the pair's other wires'
+            if id >= self.n_static && (wire.is_none() || self.ent_wire.get(&id).copied() == wire) {
                 return true;
             }
             let dist = match &e.core {
@@ -2265,6 +2290,12 @@ impl<'a> Drawer<'a> {
             };
             dist - e.grow - r >= e.clear.max(own) - self.eps
         })
+    }
+
+    /// [`Drawer::pair_disc_clear`] of wire `w`'s disc at `p` against the static and the drawn copper;
+    /// true for a via that is no pair disc. O(objects nearby).
+    pub fn pair_via_ok(&self, w: WireId, p: Vec2, size: ViaSize, net: i32) -> bool {
+        !self.model.rules.pair_disc(net) || self.pair_disc_clear(p, size, net, Some(w))
     }
 
     /// No track of `items` (a run of wire `w`) grazes a pad of its own net other than its end
