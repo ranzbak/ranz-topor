@@ -914,7 +914,7 @@ fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, 
         };
         let Ok(mut r) = runs[k].lock() else { return };
         let c = if n == 1 { ctl.clone() } else { ctl.for_run(k as u32 + 1) };
-        r.step(model, opts, &c, coord, stubs, fx, t_call);
+        crate::control::with_control(&c, || r.step(model, opts, &c, coord, stubs, fx, t_call));
         let st = (r.cycles, r.done);
         drop(r);
         if let (Ok(mut tk), Ok(mut cy)) = (taken.lock(), cycles.lock()) {
@@ -1980,11 +1980,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         r
     };
-    // The P4 pick follows the board objective, violations first: the fewest over-full
-    // edge-layers under the drawing's packer (the predicted violations), then the objective's own
-    // value (`length + mm_per_via x vias`, or the occupied area in mm of default trace) instead
-    // of the bare via count. (Measured: pricing the over-full edge-layers into one sum with the
-    // `overflow` weight routed fewer connections on bornhack2026, so violations stay lexicographic.)
+    // The P4 pick follows the board objective: the objective's own value (`length + mm_per_via x
+    // vias`, or the occupied area in mm of default trace) plus the graded price of the predicted
+    // violations (M0: one price S = sum k_i x_i, Polubasov 2010 «Оптимизация разводки»; the
+    // archive judges the variants). `[capacity] edges_test = "refuse"` (per-edge model only) keeps
+    // the pick before M0: the fewest over-full edge-layers first, then the objective (S3,
+    // 3814139, measured then: one sum routed fewer connections on bornhack2026; that was a
+    // monotone gate, no-monotone-gates).
     let obj = Objective::from_options(&opts.objective, opts.mm_per_via, &opts.pick);
     let overflow_mm = reg.price(&Event::Overflow { wire: 0, edge: 0 }, &WireCtx::default()).max(1e-6);
     let via_area_mm = {
@@ -1997,6 +1999,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // plus the over-full price of the cuts, vias without a site and unlayerable crossings at the
     // `overflow` weight; design docs/dev/inflated-sketch.md §4.4). The count stays in the report.
     let cuts_on = packer.cuts.is_some();
+    // M0: the over-full edge-layers (per-edge model) or cuts (cut model) are priced, never a hard
+    // gate, unless `[capacity] edges_test = "refuse"` asks for the per-edge hard test before M0.
+    let priced = cuts_on || opts.edges_test != "refuse";
     let score = |st: &State, lr: &layers::LayerReport| -> Score {
         let dirs = dirs_of(st);
         let cm = if cuts_on { CapModel::new_cut(st, &packer, &dirs, &lr.events, bottom, overflow_mm) } else { CapModel::new(st, &packer, &dirs, &lr.events, bottom, overflow_mm) };
@@ -2014,11 +2019,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // that cannot be layered (both stretches held to one layer: a short when drawn) and
         // (Q14b) traversals through foreign copper (a short when drawn).
         let fc = super::optimise::foreign_copper(st, &super::optimise::layers_now(st, &lr.events, bottom));
-        let graded = if cuts_on { cm.total() + overflow_mm * (lr.unlayerable.len() as f64 + fc.1) } else { 0.0 };
+        let graded = if priced { cm.total() + overflow_mm * (lr.unlayerable.len() as f64 + fc.1) } else { 0.0 };
         (own, cm.overfull() + lr.unlayerable.len() + fc.0, lr.vias, graded)
     };
-    // Lexicographic: over-full edge-layers, then the objective (cut model: one graded sum).
-    let p4_better = |a: &Score, b: &Score| if cuts_on { a.0 + a.3 < b.0 + b.3 - 1e-6 } else { a.1 < b.1 || (a.1 == b.1 && a.0 < b.0 - 1e-6) };
+    // One graded sum (priced), or lexicographic: over-full edge-layers, then the objective.
+    let p4_better = |a: &Score, b: &Score| if priced { a.0 + a.3 < b.0 + b.3 - 1e-6 } else { a.1 < b.1 || (a.1 == b.1 && a.0 < b.0 - 1e-6) };
     // Reroute counter per connection: the P4 moves pay the `reroute` factor's price for it.
     // (Measured: ripping the least moved wires first in the negotiated rip-up routed fewer
     // connections on dcsgonebadge and qmtech, so the rip order stays routed-last first.)
@@ -2085,7 +2090,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             ripped: *ripped_total,
             max_ripped: opts.max_ripped,
             tight: Vec::new(),
-            over_mm: cuts_on.then_some(overflow_mm),
+            over_mm: priced.then_some(overflow_mm),
             tally: Tally::default(),
         };
         let mut resolved = 0usize;
@@ -2331,7 +2336,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
                 t
             },
-            over_mm: cuts_on.then_some(overflow_mm),
+            over_mm: priced.then_some(overflow_mm),
             tally: Tally::default(),
         };
         let mut st2 = st.clone();
@@ -2388,8 +2393,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             n_signal: n_sig,
             evals: 0,
             max_evals: opts.max_moves,
-            strict: !cuts_on,
-            add_vias: cuts_on && opts.cut_vias,
+            strict: !priced,
+            // Priced label moves (cut model; per-edge model with edges_test = "price", M0) may add
+            // a via when it removes over-full price worth more than the via ([capacity] cut_vias).
+            add_vias: priced && opts.cut_vias,
             tally: Tally::default(),
         };
         let lt = descend_labels(&mut lb);
@@ -2567,6 +2574,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             overflow_mm: f64,
             viol_mm: f64,
             cuts_on: bool,
+            priced: bool,
             obj: Objective,
             via_area_mm: f64,
             crossing_share: f64,
@@ -2923,8 +2931,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         n_signal: self.n_sig,
                         evals: 0,
                         max_evals: self.max_moves,
-                        strict: !self.cuts_on,
-                        add_vias: self.cuts_on && self.cut_vias,
+                        strict: !self.priced,
+                        add_vias: self.priced && self.cut_vias,
                         tally: Tally::default(),
                     };
                     let lt = descend_labels(&mut lb);
@@ -3044,6 +3052,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             overflow_mm,
             viol_mm,
             cuts_on,
+            priced,
             obj,
             via_area_mm,
             crossing_share: opts.loop_crossing.max(0.0),
@@ -3081,6 +3090,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let mut stop = || cancelled() || ctl.is_cancelled() || ctl.deadline().is_some_and(|d| Instant::now() >= d) || loop_deadline.is_some_and(|d| Instant::now() >= d);
         let clock = || t_loop.elapsed().as_secs_f64();
         gate.1.enter(gate.0);
+        // M0: the loop is the default; the progress dialog names it (and a Cancel from here on
+        // draws the loop's pick, tests/cancel_latency.rs).
+        ctl.stage(rnd, rnds, "TopoR loop on the topology");
         let rep = optimise(&mut sp, &mut arch, &params, &mut stop, &clock);
         let pick = arch.pick(&obj).expect("the initial plan is always archived");
         if ctl.is_cancelled() {
@@ -3304,7 +3316,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 "stretches": lr.stretches.get(w).map(|v| v.iter().map(|(l, ps)| serde_json::json!([l, ps.iter().map(|&q| pt(q)).collect::<Vec<_>>()])).collect::<Vec<_>>()).unwrap_or_default(),
                 "events": lr.events.get(w).cloned().unwrap_or_default(), "layers_now": lnow.get(w).cloned().unwrap_or_default(), "passes": passes, "crossings": xs})
         }).collect();
-        let _ = std::fs::write(format!("{path}.r{round}"), serde_json::json!({"wires": wires, "foreign": fc_plan.0}).to_string());
+        let _ = std::fs::write(format!("{path}.s{}.r{round}", opts.seed), serde_json::json!({"wires": wires, "foreign": fc_plan.0}).to_string());
     }
     if std::env::var("TOPO_VIADBG").is_ok() {
         let dirs = dirs_of(&st);
@@ -4494,7 +4506,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     tlog("via reduction", t_red);
     if let Ok(path) = std::env::var("TOPO_DUMP") {
         // One file per whole-route round, like `TOPO_DIAG`.
-        let _ = std::fs::write(format!("{path}.r{round}"), dr.dump());
+        let _ = std::fs::write(format!("{path}.s{}.r{round}", opts.seed), dr.dump());
     }
     let diag = std::mem::take(&mut dr.diag);
     let forced_stats = dr.stats;

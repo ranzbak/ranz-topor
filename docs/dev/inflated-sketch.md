@@ -346,6 +346,9 @@ Duncan et al. "fat edges".
    - `moves.rs:26-29`: label moves need "no edge-layer they touch gets more over-full".
    - `core.rs:1087-1116`: P4 scoring is lexicographic on the *count* of over-full edge-layers. A measured reason is
      recorded at `core.rs:1088-1090`: one weighted sum routed fewer on bornhack.
+   - M0 (2026-11-12): the three gates above are prices under both capacity models (`[capacity] model = "cuts"` is
+     the default; with `"edges"`, `edges_test = "price"` is the default and `"refuse"` keeps the hard tests as an
+     option). P4 is ranked by one graded sum (objective + over-full price), Polubasov 2010 S = Σkᵢxᵢ.
 7. **The drawing is sequential.**
    - Intervals are packed per edge independently (`draw.rs:924-1012`).
    - On an over-full edge the passes are spread evenly with zero-width intervals: "the checker will tell"
@@ -676,7 +679,8 @@ Re-run the lower ladder rungs per fix (memory board-ladder-testing).
      and its capacity cost belongs in the plan.
 4. **Lexicographic P4 scoring.** `core.rs:1088-1090` records a measurement that a weighted sum routed fewer on
    bornhack. U3 must re-measure with φ and analyse per connection. If the lexicographic order stays, it should at
-   least use Σφ rather than a count.
+   least use Σφ rather than a count. (M0: one graded sum by default under both models; the lexicographic order is
+   `[capacity] edges_test = "refuse"`.)
 5. **Proof gap.** The sufficiency proofs (Maley ch. 6–8), the SURF spoke algorithm (Dai, Kong & Sato 1991) and Kong's
    S-route proof are not available (§2.5). Necessity is safe; sufficiency for our construction rests on the checker
    and the boardlets until the papers are read.

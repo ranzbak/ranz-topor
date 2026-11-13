@@ -374,6 +374,34 @@ pub fn with_cancel<R>(flag: Arc<AtomicBool>, f: impl FnOnce() -> R) -> R {
     f()
 }
 
+thread_local! {
+    /// M0 stop latency: the cancel flag and live time limit of the run on this thread
+    /// ([`with_control`]), read only by [`stop_requested`] (not by [`cancelled`], whose readers,
+    /// the drawing and the pour stitching, run on through a Cancel to draw the loop's pick).
+    static STOP: RefCell<Option<(Arc<AtomicBool>, Arc<TimeLimit>)>> = const { RefCell::new(None) };
+}
+
+/// Runs `f` with `ctl`'s cancel flag and time limit as what [`stop_requested`] reads on this
+/// thread; the state before comes back after `f`, also when it panics. O(1) + `f`.
+pub fn with_control<R>(ctl: &RunControl, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<(Arc<AtomicBool>, Arc<TimeLimit>)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let prev = self.0.take();
+            STOP.with(|c| *c.borrow_mut() = prev);
+        }
+    }
+    let _restore = Restore(STOP.with(|c| c.replace(Some((ctl.cancel.clone(), ctl.limit.clone())))));
+    f()
+}
+
+/// The run of this thread ([`with_control`]) was cancelled or its time limit passed: the stop
+/// test of the work loops that have no `RunControl` (the topology and label moves of P3/P4 and
+/// their cut prices, M0). Cheap: one atomic load, and a clock read only with a limit set. O(1).
+pub fn stop_requested() -> bool {
+    STOP.with(|c| c.borrow().as_ref().is_some_and(|(f, l)| f.load(Ordering::Relaxed) || l.passed()))
+}
+
 /// Deadline passed or run cancelled: the single stop test of every deadline site. O(1).
 pub fn expired(deadline: Instant) -> bool {
     Instant::now() >= deadline || cancelled()

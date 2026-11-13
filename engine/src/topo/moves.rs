@@ -15,24 +15,28 @@
 //! * [`Topo::try_joint`] takes two crossing wires out and routes them again in the other order;
 //! * the double-crossing swap is [`State::uncross_all`] (reused).
 //!
-//! Capacity test of a topological move: a pass is unsafe when its cut is over-full now (by the
+//! Capacity price of a topological move: a pass is unsafe when its cut is over-full now (by the
 //! drawing's packer, [`Topo::tight`]) or when the passes of the cut, itself included, do not fit on
 //! the narrowest layer (the demand model: only then can no layer assignment over-fill it); a move
-//! whose new path has more unsafe passes or more over-room passes (the `overflow` events) than the
-//! old one is refused whatever its price.
+//! pays the `overflow` weight per unsafe or over-room pass (the `overflow` events) of its new
+//! path ([`Topo::over_mm`]) and is kept on that price alone (M0: one price S = sum k_i x_i,
+//! Polubasov 2010 «Оптимизация разводки»; costly, not refused).
 //!
 //! Label moves (on the P3 labelling, against the drawing's packer [`CapModel`]): the crossing
 //! flip of the capacity refinement ([`refine::try_move`], reused), shifting a via interval over
 //! one event along its wire, and segment lifting (a stretch between two layer changes onto
-//! another layer). They are kept only when the price (`via` per layer change plus `overflow` per
-//! over-full edge-layer) drops, the via count does not rise and no edge-layer they touch gets
-//! more over-full (the drawing's capacity test, [`pack`](super::pack)).
+//! another layer). They are kept when the price (`via` per layer change plus the over-full price:
+//! `overflow` per over-full edge-layer, or with `[capacity] model = "cuts"` the change of the
+//! graded over-full price of the per-layer cuts, [`super::cutmodel::CutPrice`]) drops
+//! ([`Labels::strict`] false); with `[capacity] cut_vias` they may add vias when that removes
+//! more over-full price than the via costs (cut model, and per-edge model with `edges_test =
+//! "price"`, M0; the per-edge P3 refinement still only relabels, as before M0).
 //!
-//! `[capacity] model = "cuts"` (shopping list 3.2; design `docs/dev/inflated-sketch.md` §4.4):
-//! the hard tests become prices. A topological move pays the `overflow` weight per over-room or
-//! unsafe pass instead of being refused for more of them ([`Topo::over_mm`]); a label move is
-//! priced by the per-layer cuts ([`super::cutmodel::CutPrice`], the change of the graded
-//! over-full price) plus the via price, and kept on that price alone ([`Labels::strict`]).
+//! `[capacity] model = "edges"` with `edges_test = "refuse"` (the behaviour before M0, kept as an
+//! option): the hard tests. A topological move whose new path has more unsafe or over-room passes
+//! than the old one is refused whatever its price (`over_mm = None`); a label move is kept only
+//! when the via count does not rise and no edge-layer it touches gets more over-full (the
+//! drawing's capacity test, [`pack`](super::pack)) and the price drops.
 //!
 //! Deterministic: candidates in wire, event and edge order; Vec + index ids.
 //!
@@ -125,9 +129,10 @@ pub struct Topo {
     /// Edges that are over-full on some layer under the current labelling (the drawing's packer):
     /// a move may not add passes through them (empty = no such test).
     pub tight: Vec<bool>,
-    /// Shopping list 3.2 (`[capacity] model = "cuts"`): the price of one over-room or unsafe pass
-    /// (the `overflow` weight); a move is then kept on its price alone, these passes priced in.
-    /// `None`: the hard test (a move with more such passes is refused whatever its price).
+    /// The price of one over-room or unsafe pass (the `overflow` weight); a move is then kept on
+    /// its price alone, these passes priced in (cut model, and since M0 the per-edge model).
+    /// `None`: the hard test of `[capacity] edges_test = "refuse"` (a move with more such passes
+    /// is refused whatever its price).
     pub over_mm: Option<f64>,
     pub tally: Tally,
 }
@@ -148,7 +153,9 @@ impl Topo {
     }
     /// Whether another evaluation is allowed (and count it).
     pub fn budget(&mut self) -> bool {
-        if self.evals >= self.max_evals {
+        // M0: a Cancel / the time limit ends the moves at the next evaluation (with the cut
+        // model one evaluation prices the cuts it touches: ~0.3 s each on qmtech).
+        if self.evals >= self.max_evals || crate::control::stop_requested() {
             return false;
         }
         self.evals += 1;
@@ -555,10 +562,11 @@ pub struct Labels<'a> {
     pub n_signal: usize,
     pub evals: usize,
     pub max_evals: usize,
-    /// The hard test of the per-edge model: a move that makes a touched edge-layer more over-full
-    /// is refused, and no move may add a via. Shopping list 3.2 (`[capacity] model = "cuts"`):
-    /// false, a move is kept on its price alone (cut overflow price change + via price), and
-    /// `add_vias` says whether it may add vias (`[capacity] cut_vias`).
+    /// The hard test of `[capacity] edges_test = "refuse"` (per-edge model, before M0): a move
+    /// that makes a touched edge-layer more over-full is refused, and no move may add a via.
+    /// false (cut model; per-edge model since M0): a move is kept on its price alone (over-full
+    /// price change + via price), and `add_vias` says whether it may add vias
+    /// (`[capacity] cut_vias`).
     pub strict: bool,
     pub add_vias: bool,
     pub tally: Tally,
@@ -576,7 +584,7 @@ impl<'a> Labels<'a> {
             && self.partner[w][i].is_none_or(|(w2, i2)| self.evl[w2][i2].2 != l)
     }
     fn apply(&mut self, mv: &[((WireId, usize), i32)], kind: Kind) -> bool {
-        if self.evals >= self.max_evals {
+        if self.evals >= self.max_evals || crate::control::stop_requested() {
             return false;
         }
         self.evals += 1;

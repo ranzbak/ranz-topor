@@ -13,9 +13,28 @@ fn opts(json: &str) -> Options {
     Options::from_json(json).expect("options parse")
 }
 
-/// The `plan metrics:` lines of a result, parsed.
+/// The `plan metrics:` lines of a result, parsed, without their timing and work counters
+/// (`move_cost` and `cut_split` are process-wide sums, so the tests running beside this one add
+/// to them; the loop's seconds and layer-time share measure the machine, not the plan). M0 made
+/// the cut model and the TopoR loop the default, which fill them.
 fn plan_lines(r: &RouteResult) -> Vec<serde_json::Value> {
-    r.warnings.iter().filter_map(|w| w.strip_prefix("plan metrics: ")).map(|s| serde_json::from_str(s).expect("plan metrics JSON")).collect()
+    r.warnings
+        .iter()
+        .filter_map(|w| w.strip_prefix("plan metrics: "))
+        .map(|s| {
+            let mut v: serde_json::Value = serde_json::from_str(s).expect("plan metrics JSON");
+            if let Some(o) = v.as_object_mut() {
+                o.remove("cut_split");
+                o.remove("move_cost");
+                if let Some(l) = o.get_mut("loop").and_then(|l| l.as_object_mut()) {
+                    l.remove("loop_s");
+                    l.remove("layer_share_pct");
+                    l.remove("first_variant_s");
+                }
+            }
+            v
+        })
+        .collect()
 }
 
 #[test]

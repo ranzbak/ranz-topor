@@ -883,7 +883,8 @@ impl Around<'_> {
                 moves.push(vec![((w, i), nl)]);
             }
             for mv in moves {
-                if *evals >= self.max_evals {
+                // M0: a Cancel / the time limit ends the refinement at the next move.
+                if *evals >= self.max_evals || crate::control::stop_requested() {
                     break;
                 }
                 *evals += 1;
