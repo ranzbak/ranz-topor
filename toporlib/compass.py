@@ -19,7 +19,8 @@ max(``reach_mm``, 4 x its width, about two pitches) + half the stretch's length)
   via site (its class is via_site and the plan has a via of c without a site), unlayerable (a crossing of c no layer
   separates, within r), foreign copper (a traversal of c through foreign copper on L, within r), planner over-full (an
   over-full cut / edge-layer on L within r that c crosses; or one c does not cross: sub-class "nearby"), forced path
-  (c was placed without a legal path), pad exit (a planned pad exit of c within r; 5.10), drawing loss at a planned
+  (c was placed without a legal path), pad exit (a pad exit of c within r the plan predicts as violating; 5.10), pad
+  exit at a planned exit stub (its class is pad_exit and a planned stub of c lies within r; 5.10), drawing loss at a planned
   neck (a cut on L within r that fits only necked), model gap (the other capacity model's over-full item of c on L
   within r: with ``[capacity] model = "cuts"`` the per-edge packer the drawing uses), pad exit not predicted (its class
   is pad_exit), else drawing loss (sub-class: the engine's own class). The violation rows add up to the drawn
@@ -98,12 +99,14 @@ def classify_violation(v: dict, mine: list, others: list, reach_nm: float) -> tu
         return "forced_path", "", i
     if (i := first("pad_exit")) is not None:
         return "pad_exit", "", i
+    if vc == "pad_exit" and (i := first("pad_exit_stub")) is not None:
+        return "pad_exit", "at a planned exit stub (the drawing left the stub)", i
     if (i := first("shrinkage")) is not None:
         return "drawing_loss", "at a planned neck (the cut fits only necked)", i
     if (i := first("model_ref")) is not None:
         return "model_gap", "the drawing's per-edge packer: over-full; the plan's cut test: fits", i
     if vc == "pad_exit":
-        return "pad_exit", "not predicted (no pad-exit plan object)", None
+        return "pad_exit", "not predicted (no planned exit of the connection there)", None
     return "drawing_loss", vc, None
 
 

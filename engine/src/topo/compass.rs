@@ -71,7 +71,7 @@ pub struct Compass {
     /// is not predicted by this build (`pad_exit` until 5.10 hooks in).
     pub predicted: BTreeMap<String, usize>,
     /// Sum of the violation classes of `predicted` (planner_overfull + via_site + unlayerable +
-    /// foreign_copper + forced_path): the plan's own predicted violations
+    /// foreign_copper + forced_path + pad_exit when predicted): the plan's own predicted violations
     /// ([`super::optimise::Predicted::count`] of this plan).
     pub predicted_violations: usize,
     /// The TopoR loop's predicted violations of its pick (archive criteria), when the loop ran:
@@ -101,6 +101,13 @@ pub struct PlanView<'a, 'p, 'c> {
     pub layer: &'a dyn Fn(usize) -> String,
     /// Connections placed without a legal topological path (`initial = "once"`), by id.
     pub forced: &'a BTreeSet<usize>,
+    /// Shopping list 5.10 slot: the plan's pad-exit objects as items, built by the caller from
+    /// the board (`Board::exit_stubs` on `padexit-510`). `None` = this build has no pad-exit plan
+    /// object (main): the class is "not predicted". Item classes: `pad_exit_stub` = a planned
+    /// exit stub of the connection (located, not counted: a drawn pad_exit violation next to it
+    /// is a fault of the drawing's realisation of the stub); `pad_exit` = a planned exit the plan
+    /// itself predicts as violating (counted in `predicted["pad_exit"]`).
+    pub pad_exits: Option<&'a [CompassItem]>,
 }
 
 fn seg(a: Vec2, b: Vec2) -> [[i64; 2]; 2] {
@@ -196,12 +203,16 @@ pub fn foreign_items(v: &PlanView) -> Vec<CompassItem> {
     out
 }
 
-/// Shopping list 5.10 hook: the planned pad exits that the plan predicts as violations. Empty on
-/// this build (main has no pad-exit plan object; 5.10 `padexit-510` adds `Board::exit_stubs`):
-/// 5.10 fills this with one item per planned exit stub whose clearance cut is over-full or that
-/// could not be planned legal, and inserts `pad_exit` into `predicted`.
-pub fn pad_exit_items(_v: &PlanView) -> Option<Vec<CompassItem>> {
-    None
+/// Shopping list 5.10 hook: the plan's pad-exit items ([`PlanView::pad_exits`]); `None` on a
+/// build without a pad-exit plan object (main). What 5.10 (`padexit-510`) must add when it
+/// merges: in `core.rs` at the compass hand-off, with `[search] pad_exit_stubs` on, one
+/// `pad_exit_stub` item per `Board::exit_stubs` entry (layers = the pad's layer, conns = the
+/// connections ending at that pad, segs = the stub rectangle's sides) and one `pad_exit` item
+/// per exit request that needed a stub (another net's copper closer than w + 2 x clearance) but
+/// got none because the rectangle would break a clearance (today `exit_stub` returns `None`
+/// for both "not needed" and "not legal": it must tell them apart).
+pub fn pad_exit_items(v: &PlanView) -> Option<Vec<CompassItem>> {
+    v.pad_exits.map(|x| x.to_vec())
 }
 
 /// The compass of the plan `v` (predicted side; the drawn side is filled by the caller and the
@@ -254,14 +265,16 @@ pub fn plan_compass(v: &PlanView, model: &str, opt_loop: &str, round: usize) -> 
     let empty = BTreeMap::new();
     let necks: Vec<(WireId, usize)> = (0..st.wires.len()).filter(|&w| st.wires[w].alive).map(|w| (w, st.neck_stretches_with(w, &empty))).collect();
     predicted.insert("shrinkage".to_string(), necks.iter().map(|x| x.1).sum());
+    let mut n_px = 0;
     match pad_exit_items(v) {
         Some(px) => {
-            predicted.insert("pad_exit".to_string(), px.len());
+            n_px = px.iter().filter(|i| i.class == "pad_exit").count();
+            predicted.insert("pad_exit".to_string(), n_px);
             items.extend(px);
         }
         None => notes.push("pad_exit: not predicted by this build (no pad-exit plan object; shopping list 5.10 adds it): every drawn pad_exit violation is a missing method step".into()),
     }
-    let predicted_violations = n_over + n_nosite + v.lr.unlayerable.len() + n_fc + v.forced.len();
+    let predicted_violations = n_over + n_nosite + v.lr.unlayerable.len() + n_fc + v.forced.len() + n_px;
     // Per connection: planned vias, taut length, necked stretches.
     let mut per: BTreeMap<usize, CompassConn> = BTreeMap::new();
     for (w, nk) in necks {

@@ -130,3 +130,16 @@ def test_shrinkage_row_compares_planned_and_drawn_necks_and_long_stretches_join_
     assert row(cp, "drawing_loss")["kicad"] == 1 and row(cp, "kicad_only")["kicad"] == 0
     # the violation rows add up to the drawn violations
     assert sum(x["drawn"] for x in cp["rows"] if x["class"] not in ("open", "kicad_only", "shrinkage")) == 1
+
+
+def test_pad_exit_with_the_510_slot_stub_items_locate_and_do_not_count():
+    # 5.10 slot (compass.rs PlanView::pad_exits): a planned stub of conn 0 at (1, 1); the drawn pad_exit violation there
+    # is the stub's realisation (predicted 0, drawn 1, sub-class "at a planned exit stub"); one far away is not.
+    stub = {"class": "pad_exit_stub", "layers": ["F.Cu"], "conns": [0], "segs": [seg((1, 0.9), (1, 1.1))], "over_nm": 0}
+    v = [viol(0, (1, 1), cls="pad_exit"), viol(0, (9, 9), cls="pad_exit")]
+    cp = compass.build(route(v, [stub], [conn(0)], {"planner_overfull": 0, "pad_exit": 0}), [], 0)
+    r = row(cp, "pad_exit")
+    assert (r["predicted"], r["drawn"]) == (0, 2)
+    assert [x["sub"] for x in cp["violations"]] == ["at a planned exit stub (the drawing left the stub)",
+                                                     "not predicted (no planned exit of the connection there)"]
+    assert not any("missing method step" in f for f in cp["flags"])

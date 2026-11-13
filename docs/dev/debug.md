@@ -60,16 +60,19 @@ drawing, per violation class (docs/dev/inflated-sketch.md §6.1) its count and i
 via sites, unlayerable crossings, traversals through foreign copper, forced paths; with `[capacity] model = "cuts"`
 also the per-edge packer's over-full edge-layers as `model_ref`, the evidence for *model gap*), and per connection the
 planned vias, taut length and necked stretches. `toporlib/compass.py` classifies every drawn violation against those
-items (first match: via site, unlayerable, foreign copper, over-full (own / nearby), forced path, pad exit, shrinkage,
-model gap, pad exit not predicted, else drawing loss), joins KiCad's new routing DRC items by place and builds the
+items (first match: via site, unlayerable, foreign copper, over-full (own / nearby), forced path, pad exit, pad exit at
+a planned stub, shrinkage, model gap, pad exit not predicted, else drawing loss), joins KiCad's new routing DRC items by place and builds the
 table; the plugin writes it to report.md / result.json, `tools/route_board.sh` to `<name>--compass.json` and the
 metrics (`compass`, `compass_line`), `harness.score_runs` appends one row per run to `<root>/compass.tsv`.
 
     .venv/bin/python -m harness.predict_vs_drawn <route_board out dir | score_runs root> [--cuts DIR] [--json OUT]
 
 `--cuts DIR`: a run with `[capacity] model = "edges"` and `--set capacity.cut_report=DIR` gets the model-gap class from
-the cut test (`harness.cutclass`). Shopping list 5.10 (pad exits as plan objects) fills
-`topo::compass::pad_exit_items` and the `pad_exit` predicted count; until then that row reads "not predicted".
+the cut test (`harness.cutclass`). Shopping list 5.10 (pad exits as plan objects) fills the slot
+`topo::compass::PlanView::pad_exits` at the compass hand-off in `core.rs` (main passes `None`, so that row reads "not
+predicted"): `pad_exit_stub` items = the planned exit stubs (located, not counted; a drawn pad-exit violation next to one
+is the drawing leaving the stub), `pad_exit` items = planned exits the plan itself predicts as violating (counted). The
+doc of `compass::pad_exit_items` lists what the merge of 5.10 has to add.
 
 ## Blocked or detouring connections (`gate_diag`)
 

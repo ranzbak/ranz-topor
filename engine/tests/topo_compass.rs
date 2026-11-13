@@ -12,8 +12,9 @@
 //!   with the four connections; the per-edge model sees it too.
 //! - `model_gap_cut`: the opening's non-adjacent cut AC is over-full by 0.10 mm while every
 //!   triangulation edge fits (Maley 1987 p. 32): the cut model predicts AC and its bottom twin (2
-//!   cuts, 8 connections each), the per-edge model none (its `model_ref` items are empty; with
-//!   `model = "edges"` the plan predicts 0 over-full and says model gap is not measured).
+//!   cuts, 8 connections each); the router's per-edge packer misses AC (no `model_ref` item across
+//!   the opening) and instead over-prices diagonal edges to TP1 / TP2 that fit; with
+//!   `model = "edges"` the plan says model gap is not measured.
 //!
 //! And the compass never changes the routing: the copper is the same with and without it (it is
 //! always built, so this is checked by determinism of two runs and by the C0 plan line).
@@ -74,7 +75,7 @@ fn channel_overfull_predicts_one_cut_with_its_four_connections() {
     }
     // The per-edge model (the drawing's packer) sees it too: no model gap.
     assert!(items(&r, "model_ref") >= 1, "{:?}", c.items);
-    assert_eq!(c.predicted_violations, c.predicted.iter().filter(|(k, _)| ["planner_overfull", "via_site", "unlayerable", "foreign_copper", "forced_path"].contains(&k.as_str())).map(|(_, v)| v).sum::<usize>());
+    assert_eq!(c.predicted_violations, c.predicted.iter().filter(|(k, _)| ["planner_overfull", "via_site", "unlayerable", "foreign_copper", "forced_path", "pad_exit"].contains(&k.as_str())).map(|(_, v)| v).sum::<usize>());
 }
 
 #[test]
@@ -86,11 +87,19 @@ fn model_gap_cut_is_seen_by_the_cut_model_only() {
         assert_eq!(it.conns.len(), 8, "{it:?}");
         assert!((it.over_nm - 100_000).abs() < 2_000, "{it:?}");
     }
-    assert_eq!(items(&r, "model_ref"), 0, "the per-edge model fits every edge: {:?}", c.items);
-    // The per-edge model in charge: nothing over-full predicted, the cut test not run (note).
+    // The per-edge packer (the drawing's model) misses AC: none of its over-full edge-layers runs
+    // across the opening between the rows (AC and its twin are horizontal, x 5.3 to 9.0 mm). It
+    // does flag diagonal edges from the row corners to TP1 / TP2 that the cut test (and the hand
+    // numbers: room 2.12 for need 2.00) finds fitting: its oblique factor (fit_patterns README,
+    // "Capacity definitions") is pessimistic there. Both are model-gap evidence of the compass.
+    let across = |s: &[[i64; 2]; 2]| s[0][1] == s[1][1] && (s[0][0] - s[1][0]).abs() > 3_000_000;
+    assert!(c.items.iter().filter(|i| i.class == "model_ref").all(|i| !i.segs.iter().any(across)), "{:?}", c.items);
+    assert!(items(&r, "model_ref") > 0, "the pessimistic diagonals are reported");
+    // The per-edge model in charge: its over-full items are the diagonals again, never AC; the cut
+    // test is not run (note).
     let e = run("model_gap_cut", r#", "capacity_model": "edges""#);
     let ce = e.compass.as_ref().expect("compass");
-    assert_eq!(ce.predicted.get("planner_overfull").copied(), Some(0));
+    assert!(ce.items.iter().filter(|i| i.class == "planner_overfull").all(|i| !i.segs.iter().any(across)), "{:?}", ce.items);
     assert!(ce.notes.iter().any(|n| n.starts_with("model_gap: not measured")), "{:?}", ce.notes);
 }
 
