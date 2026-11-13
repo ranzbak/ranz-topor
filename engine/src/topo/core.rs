@@ -3443,11 +3443,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 p.via_squeeze = packer.via_squeeze;
                 p
             });
-            let cm_chk = packer_chk.as_ref().map(|p| CapModel::new_cut(&st, p, &dirs_plan, &lr.events, bottom, 1.0)).filter(|c| c.cut.is_some());
+            let cm_chk = packer_chk.as_ref().and_then(|p| super::refine::meter::suspended(|| Some(CapModel::new_cut(&st, p, &dirs_plan, &lr.events, bottom, 1.0)).filter(|c| c.cut.is_some())));
             let cm_cut = cmc_plan.as_ref().or(cm_chk.as_ref());
             // `pad_exits`: shopping list 5.10 fills it from `b.exit_stubs` (see compass::pad_exit_items).
             let view = super::compass::PlanView { st: &st, lr: &lr, cm_edge: &cm_plan, cm_cut, cut_is_plan: cmc_plan.is_some(), bottom, conn: &wc, layer: &lname, forced: &fset, pad_exits: None };
-            let mut cp = super::compass::plan_compass(&view, if cmc_plan.is_some() { "cuts" } else { "edges" }, &opts.opt_loop, round);
+            let mut cp = super::refine::meter::suspended(|| super::compass::plan_compass(&view, if cmc_plan.is_some() { "cuts" } else { "edges" }, &opts.opt_loop, round));
             cp.loop_predicted = m.get("loop").and_then(|l| l.get("predicted")).and_then(|p| p.get("violations")).and_then(|v| v.as_u64()).map(|v| v as usize);
             compass_plan = Some(cp);
         }

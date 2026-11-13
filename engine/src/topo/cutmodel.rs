@@ -986,7 +986,10 @@ impl<'a> CutPrice<'a> {
             }
         }
         self.scratch = scratch;
-        super::refine::meter::CUTS_PRICED.fetch_add(std::mem::take(&mut self.priced), std::sync::atomic::Ordering::Relaxed);
+        let priced = std::mem::take(&mut self.priced);
+        if super::refine::meter::on() {
+            super::refine::meter::CUTS_PRICED.fetch_add(priced, std::sync::atomic::Ordering::Relaxed);
+        }
         self.total - t0
     }
 
@@ -1077,7 +1080,9 @@ impl<'a> CutPrice<'a> {
         }
         let t0 = std::time::Instant::now();
         let d = self.install(w, ws);
-        super::refine::meter::INSTALL_NS.fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        if super::refine::meter::on() {
+            super::refine::meter::INSTALL_NS.fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         d
     }
 
