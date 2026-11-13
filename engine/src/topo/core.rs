@@ -3288,7 +3288,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 "stretches": lr.stretches.get(w).map(|v| v.iter().map(|(l, ps)| serde_json::json!([l, ps.iter().map(|&q| pt(q)).collect::<Vec<_>>()])).collect::<Vec<_>>()).unwrap_or_default(),
                 "events": lr.events.get(w).cloned().unwrap_or_default(), "layers_now": lnow.get(w).cloned().unwrap_or_default(), "passes": passes, "crossings": xs})
         }).collect();
-        let _ = std::fs::write(format!("{path}.r{round}"), serde_json::json!({"wires": wires, "foreign": fc_plan.0}).to_string());
+        let _ = std::fs::write(format!("{path}.s{}.r{round}", opts.seed), serde_json::json!({"wires": wires, "foreign": fc_plan.0}).to_string());
     }
     if std::env::var("TOPO_VIADBG").is_ok() {
         let dirs = dirs_of(&st);
@@ -4461,7 +4461,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     tlog("via reduction", t_red);
     if let Ok(path) = std::env::var("TOPO_DUMP") {
         // One file per whole-route round, like `TOPO_DIAG`.
-        let _ = std::fs::write(format!("{path}.r{round}"), dr.dump());
+        let _ = std::fs::write(format!("{path}.s{}.r{round}", opts.seed), dr.dump());
     }
     let diag = std::mem::take(&mut dr.diag);
     let forced_stats = dr.stats;
