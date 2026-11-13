@@ -140,7 +140,10 @@ fn progress_scores_every_round_and_its_best_is_the_result() {
                 assert_eq!(n, 1, "{mode}: one round per run: {:?}", p.round_lines);
             }
         }
-        assert!(p.round_lines[0].contains("new best (the first result)"), "{mode}: {}", p.round_lines[0]);
+        // M2 (draw once): a run whose loop pick another run draws ends first with "not judged"; the
+        // first judged round is the first result
+        let first = p.round_lines.iter().find(|l| !l.contains("not judged")).expect("a judged round");
+        assert!(first.contains("new best (the first result)"), "{mode}: {first}");
         assert!(p.last_run >= 1 && p.last_round >= 1 && !p.last_vs_best.is_empty(), "{mode}: {p:?}");
         // The best shown is the board returned.
         assert!(p.best_run >= 1 && p.best_round >= 1, "{mode}: {p:?}");
