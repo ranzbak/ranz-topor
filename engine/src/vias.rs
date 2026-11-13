@@ -35,7 +35,7 @@ pub fn via_sizes(rules: &Rules, net: i32, opts: &Options) -> Vec<ViaSize> {
     // plugin; `topo::diffpair::via_of`), also where the net is routed alone.
     // Never below the custom-rule minimum of either net of the pair (KiCad DRC checks each via
     // against its own net's rules). (Before the disc clause above, this replaced the planning
-    // disc by one small via: dcsgonebadge USB +/-, qmtech U1-Out_1 +/-.)
+    // disc by one small via: a 2-layer badge USB +/-, qmtech U1-Out_1 +/-.)
     if let Some(p) = rules.diff_pairs.iter().find(|p| (p.p == net || p.n == net) && p.via_d > 0 && p.via_drill > 0) {
         return vec![pair_floor(rules, p, ViaSize { d: p.via_d, drill: p.via_drill })];
     }

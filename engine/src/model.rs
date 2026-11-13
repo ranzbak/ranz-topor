@@ -328,7 +328,7 @@ pub struct NetRule {
     /// is the pair's two-via disc, and the partner's pads, shapes and copper carry its net there.
     /// That disc holds the N via as well as the P via, so no copper of either half is own copper
     /// for it: it keeps the net's clearance to all of it (user 2026-11-13: "partner copper is not
-    /// own copper for clearance purposes"; dcsgonebadge USB-: a pair via on USB+ pads of U7 / J1).
+    /// own copper for clearance purposes"; a 2-layer badge, USB-: a pair via on the USB+ pads of an ESD part / the USB-C socket).
     pub pair_disc: bool,
 }
 
