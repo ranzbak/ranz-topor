@@ -312,7 +312,7 @@ fn key(p: Vec2) -> (u64, u64) {
 /// The shortest path through the portals (`(left, right)` in the direction of travel, the
 /// terminals as points). Corners with the portal index.
 fn pull(ports: &[(Vec2, Vec2)]) -> Vec<(Vec2, usize)> {
-    super::pack::funnel(ports)
+    super::funnel::funnel(ports)
 }
 
 /// One stretch's obstacle points and their sides.

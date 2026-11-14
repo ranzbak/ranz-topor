@@ -1038,10 +1038,9 @@ mod tests {
     /// through O2 and with (6, 2) on the right: in `pack::funnel` the right side's tighten test
     /// `(rp - apex) x (r - apex) >= 0` reads a portal end more than 180 degrees round from the
     /// right boundary (rp = (3, 0) south-west of the apex (5, 2), r = (7, 4.3) north-east) as
-    /// widening, so the crossing over the left side (6, 2) is never seen. Reported (M3 step a);
-    /// the fix changes the cut model's bands (planner pricing), so it waits for the lead.
+    /// widening, so the crossing over the left side (6, 2) is never seen. Fixed by the
+    /// chain-edge funnel of branch funnel-fix (merged into radii-m3).
     #[test]
-    #[ignore = "pack::funnel misses a corner when the funnel opens past 180 degrees (reported)"]
     fn funnel_sharp_turn() {
         let (obs, curves) = s_bundle();
         let pr = proj(obs);
