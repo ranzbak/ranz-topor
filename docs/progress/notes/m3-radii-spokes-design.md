@@ -626,3 +626,30 @@ without one finished stretch, so the sequential fallback that follows is starved
 share of the limit for the ERBS (an option with a safe default, like `loop_time_share`) and a cheaper
 free-meeting order (the 4716 order cycles on esp) are the next steps; until then `realise = "sequential"` stays
 the default. PNGs: `scratch/m3-erbs/lad4/`, `lad4b/`, gallery stage "M3 ERBS realise".
+
+## 15. ERBS rebuilt as the funnel over a sleeve (2026-11-14, user decision "rebuild ERBS on the funnel")
+
+The gate-order solve of §4.3 / §14 had no notion of side: a gate pair's meeting order was guessed
+(free-meeting order) and the path zigzagged through fans of cuts (eprom stretch 2: 11.06 mm against a
+9.15 mm band, 7 reversals). It is replaced (`topo/erbs.rs`, `DESIGN.md` in the worktree) by Dayan's
+definition taken literally: the ERBS is "a minimal length member of the topological class" with the
+spoke ends as terminals (Dayan 1997 PDF pp. 25-26, spokes p. 32). The class fixes on which side of
+the path every obstacle point lies; the shortest path of a class among points is the funnel through
+the sleeve of a triangulation (Hershberger & Snoeyink 1994; Efrat, Kobourov & Lubiw 2006 PDF p. 9;
+Popov & Popov 2012 PDF pp. 2-3). Steps: labelled points (spoke tips by the side of `p` at that
+crossing, arc samples at the stack radius in the wrap's wedge, other-net features grown by
+w/2 + clearance), a rough path (band + thin loops round the points it passes on the wrong side), the
+reduced sleeve of the rough path in a Delaunay triangulation, then `topo::funnel` (branch funnel-fix).
+O(n log n) per stretch, sequential (no rayon), deadline and Cancel checked between stretches.
+
+Rules found on the boards (each with a unit test): tips on one ray go farther first and points within
+20 nm merge (nested_wraps spike); a feature the band runs through has no side and is left out
+(predicted; esp: a via the band wraps from inside wound the path round 24 points, 9.5 x band); a zero
+spoke on an own terminal pad holds no room (wiccon: 3 unexplained bends -> 1); an obstacle point on the
+rough path is passed by its label (the walk crosses its spokes). Known limit: tips are per item, so a
+later own visit's tip on the same cut bounds an earlier wrap from outside (wiccon st 46, +0.07 mm).
+
+Arc samples: octagonal norm = the 8 vertices of the circumscribed octagon (flat sides on the octilinear
+directions), so a bend on a sample is a 45-degree octilinear bend and the arc length equals the
+octagonal-norm arc exactly; Euclidean norm = a circumscribed polygon of `arc_step_deg` (default 22.5,
+16 sides: at most 1.3 % longer than the round arc on the arc part).
