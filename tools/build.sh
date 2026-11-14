@@ -31,6 +31,10 @@ fi
 ID="org.topor.router"
 PLUGIN_DIR="$KICAD_HOME/plugins/$ID"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' engine/Cargo.toml | head -1)"
+# Build stamp (UTC, to the minute) and short git revision, "-dirty" with uncommitted changes; shown on the splash.
+BUILD_DATE="$(date -u '+%Y-%m-%d %H:%M UTC')"
+BUILD_REV="$(git rev-parse --short HEAD 2>/dev/null || true)"
+if [ -n "$BUILD_REV" ] && [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then BUILD_REV="$BUILD_REV-dirty"; fi
 
 if [ -n "${TOPOR_WHEEL:-}" ]; then
     WHEEL="$TOPOR_WHEEL"
@@ -53,6 +57,7 @@ install_into() { # $1 = plugin-layout dir
     cp -r toporlib "$d/toporlib"
     mkdir -p "$d/docs/user"
     if [ -d docs/user ]; then cp -r docs/user/. "$d/docs/user/"; fi
+    printf '%s\n' '"""Written by tools/build.sh; shown on the splash (topor.buildinfo)."""' "BUILD_DATE = \"$BUILD_DATE\"" "BUILD_REV = \"$BUILD_REV\"" > "$d/topor/_build_info.py"
     find "$d" -name __pycache__ -type d -prune -exec rm -rf {} +
     sed "s/^SHIPPED_VERSION = .*/SHIPPED_VERSION = \"$VERSION\"/" plugin/topor_plugin.py > "$d/topor_plugin.py.tmp"
     mv "$d/topor_plugin.py.tmp" "$d/topor_plugin.py"
