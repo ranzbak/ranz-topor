@@ -188,6 +188,8 @@ fn solve_flip(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BT
         all.extend(cur.p.iter().copied());
         all.push(e);
         let mut want: Vec<(usize, usize)> = Vec::new();
+        // Of each wanted swap: the chord's ends (`all` indices) round its pin.
+        let mut win: Vec<(usize, usize)> = Vec::new();
         let mut keep: Vec<(usize, usize)> = Vec::new();
         for &(i, j, x) in &cur.frees {
             // Pinned: both points within a wire width of the meeting point (nested_wraps: a
@@ -218,7 +220,10 @@ fn solve_flip(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BT
                 continue;
             }
             match order_by_side(by_id[&f], by_id[&l], side > 0.0) {
-                Some(false) => want.push((l, f)),
+                Some(false) => {
+                    want.push((l, f));
+                    win.push((k, m));
+                }
                 Some(true) => keep.push((f, l)),
                 None => {}
             }
@@ -251,9 +256,18 @@ fn solve_flip(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BT
             continue;
         }
         let mut any = false;
-        for &w in &want {
+        for (wi, &w) in want.iter().enumerate() {
             if opts.expired() {
                 break;
+            }
+            // Screen: the swap alone between the chord's ends round its pin (the gates there in
+            // the order the swap gives, the ends held). A swap that does not shorten the path
+            // there is not tried on the whole stretch (most single swaps fail: eprom, 1689 solves
+            // of one stretch for 3 flips). Valid while the order is the one the chords were
+            // taken from: until the first swap of the round is accepted.
+            if !any && !local_gain(&cur, &all, win[wi], w, wedges, forced, opts) {
+                forced.insert((w.1, w.0));
+                continue;
             }
             let (nxt, f2) = try_set(&[w], forced, sweeps);
             if ok(&nxt, &cur) {
@@ -273,6 +287,35 @@ fn solve_flip(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BT
         pt.insert(g.id, x);
     }
     cur
+}
+
+/// Whether swapping the pinned pair `w` (first, second by id) shortens the path between the
+/// chord's ends `win` (`all` indices, `all` = start, the solve's points, end): the gates between
+/// them ordered with the swap ([`order_gates`]) and solved with the ends held ([`solve`]),
+/// against the current path there by more than 1 nm. O(window^2).
+fn local_gain(cur: &Solved, all: &[Vec2], win: (usize, usize), w: (usize, usize), wedges: &[Wedge], forced: &BTreeSet<(usize, usize)>, opts: &ErbsOpts) -> bool {
+    let (k, m) = win;
+    if m <= k + 1 {
+        return true;
+    }
+    // Gates at positions k ..= m - 2 (their points are all[k + 1 ..= m - 1]).
+    let sub: Vec<Gate> = cur.og[k..m - 1].to_vec();
+    let ids: BTreeSet<usize> = sub.iter().map(|g| g.id).collect();
+    if !ids.contains(&w.0) || !ids.contains(&w.1) {
+        return true;
+    }
+    let mut f2: BTreeSet<(usize, usize)> = forced.iter().copied().filter(|(i, j)| ids.contains(i) && ids.contains(j)).collect();
+    f2.remove(&(w.1, w.0));
+    f2.insert(w);
+    let prio: BTreeMap<usize, usize> = sub.iter().enumerate().map(|(i, g)| (g.id, i)).collect();
+    let (ord, _, _) = order_gates(&sub, wedges, &f2, Some(&prio));
+    let at: BTreeMap<usize, Vec2> = sub.iter().zip(&all[k + 1..m]).map(|(g, &x)| (g.id, x)).collect();
+    let segs: Vec<(Vec2, Vec2)> = ord.iter().map(|&i| (sub[i].a, sub[i].b)).collect();
+    let init: Vec<Vec2> = ord.iter().map(|&i| at[&sub[i].id]).collect();
+    let (p, _, _) = solve(all[k], all[m], &segs, &init, opts.tol, opts.sweeps_per_gate * segs.len() + 100);
+    let new = poly_len(&std::iter::once(all[k]).chain(p).chain(std::iter::once(all[m])).collect::<Vec<_>>());
+    let old = poly_len(&all[k..=m]);
+    new < old - 1.0
 }
 
 /// [`solve_flip`] on the gates that can bind (lazy constraints): on a real board a stretch
@@ -303,10 +346,15 @@ fn solve_lazy(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BT
             on.insert(g.id);
         }
     }
+    // While gates are still being added, solve without the order flips (each flip round costs
+    // solves; wiccon: 1918 solves of one stretch); the flips once the set holds.
+    let quick = ErbsOpts { flip_rounds: 0, ..opts.clone() };
+    let mut settled = false;
     loop {
         let sub: Vec<Gate> = base.iter().filter(|g| on.contains(&g.id)).copied().collect();
-        let cur = solve_flip(a, e, &sub, wedges, forced, prio, pt, opts, sweeps, flips);
-        if sub.len() == base.len() || opts.expired() {
+        let full = sub.len() == base.len();
+        let cur = solve_flip(a, e, &sub, wedges, forced, prio, pt, if settled || full { opts } else { &quick }, sweeps, flips);
+        if full || opts.expired() {
             return cur;
         }
         let mut path = Vec::with_capacity(cur.p.len() + 2);
@@ -330,8 +378,13 @@ fn solve_lazy(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BT
         };
         let add: Vec<usize> = base.iter().filter(|g| !on.contains(&g.id) && (crosses(g.p, g.a) || crosses(g.q, g.b))).map(|g| g.id).collect();
         if add.is_empty() {
-            return cur;
+            if settled || opts.flip_rounds == 0 {
+                return cur;
+            }
+            settled = true;
+            continue;
         }
+        settled = false;
         on.extend(add);
     }
 }
