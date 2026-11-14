@@ -153,6 +153,13 @@ pub struct ConnPlan {
 /// which draw legal copper, instead of a coupled pair whose tracks cross at an end.
 pub const SWAPS_DRAWN: bool = false;
 
+/// Whether the drawing draws a pair end from its planned gateway (a reverse exit with its turn-back
+/// included). Not before the M4 drawing stage: the drawing takes the pair's handedness from its
+/// own zip (`pick_zip`), which follows the preferred exits, so a reverse exit that would change
+/// the pair's parity is drawn with P and N crossed (a short). Until then the plan keeps the
+/// preferred exits' parity and only reports the cheaper reverse exit.
+pub const REVERSE_EXITS_DRAWN: bool = false;
+
 /// Fan-out skew of a via pair at a layer change whose path turns by `theta` (radians, 0 =
 /// straight on, pi = turn-back), via pitch `pv` (nm): `(keep, flip)` in nm. The vias' axis is
 /// square to the incoming leg rotated by `phi`; each leg's two tracks then differ by `pv sin phi`.
@@ -383,6 +390,46 @@ fn x_extent(pad: &crate::model::Pad, x: Vec2) -> f64 {
     (a.dot(x).abs().max(b.dot(x).abs()) / l).clamp(0.0, 1.0)
 }
 
+/// The turn-back of the reverse exit `r` of a pad pair (KiCad builds gateways on every side, doc
+/// 3.2): the pair leaves its pads away from the far end, turns 180 degrees and passes the pad pair
+/// on the cheaper side to the point abreast of the preferred gateway `g_pref`. Returns the graded
+/// clearance breaks of its P and N tracks on the fan's layers and its length (nm): a turn-back past
+/// a pad row's neighbours is costly, not forbidden. O(sides x layers x checker queries).
+fn turn_back(model: &BoardModel, checker: &Checker, base: &ItemIndex, cp: &Coupled, r: &Fan, g_pref: Vec2, clear: f64) -> ((usize, f64), f64) {
+    let (w, p) = (cp.rule.width as f64, cp.pitch());
+    let n = r.x.perp();
+    let (ca, cb) = (model.pads[r.pad_p].center.to_vec2(), model.pads[r.pad_n].center.to_vec2());
+    let m = (ca + cb) * 0.5;
+    let mut ext = 0.0f64;
+    for q in [r.pad_p, r.pad_n] {
+        let pad = &model.pads[q];
+        for c in pad_corners(pad, pad.layers.first().copied().unwrap_or(0)) {
+            ext = ext.max((c - m).dot(n).abs());
+        }
+    }
+    // Lateral offset of the pair's centre line: past the pads, a clearance and half the ribbon.
+    let lat = ext + clear + 0.5 * p + 0.5 * w + 50_000.0;
+    let len = lat + (r.g - g_pref).len();
+    let mut best: Option<(usize, f64)> = None;
+    for s in [1.0, -1.0] {
+        let centre = [r.g, r.g + n * (s * lat), g_pref + n * (s * lat)];
+        let (a, b) = (super::diffpair::offset(&centre, 0.5 * p), super::diffpair::offset(&centre, -0.5 * p));
+        if a.len() < 2 || b.len() < 2 {
+            continue;
+        }
+        let (pl, nl) = if (a[0] - r.gp).len() <= (a[0] - r.gn).len() { (a, b) } else { (b, a) };
+        let mut v = (0usize, 0.0f64);
+        for &l in &r.layers {
+            let (x, y) = static_viol(checker, base, &tracks(cp.rule.p, l, w, &pl), &tracks(cp.rule.n, l, w, &nl));
+            v = (v.0 + x, v.1 + y);
+        }
+        if best.is_none_or(|b| v.0 < b.0 || (v.0 == b.0 && v.1 < b.1)) {
+            best = Some(v);
+        }
+    }
+    (best.unwrap_or((0, 0.0)), len)
+}
+
 /// The fan-out tracks of `f` as copper polygons, one per track (the track's outline at the pair
 /// width), the zone reserved for the pair in the planning model. Each starts where its run-out
 /// leaves its pad, so no polygon overlaps a pad or another one (the projection's CDT nodes
@@ -543,6 +590,7 @@ pub fn plan_ends(model: &BoardModel, opts: &Options, checker: &Checker, fixed: &
         // to the far end. The pair takes the cheapest combination, the parity included (a needed
         // flip on one layer costs at least two single tracks), so a pad pair on a module's rim
         // whose "away" side is the board edge leaves inward when that avoids a swap.
+        let clear = model.rules.net_rule(cp.rule.p).clearance.max(model.rules.net_rule(cp.rule.n).clearance).max(model.rules.min_clearance) as f64;
         let la: Vec<u32> = pad_signal_layers(model, &model.pads[a]);
         let lb: Vec<u32> = pad_signal_layers(model, &model.pads[b]);
         let forced_ends = !la.iter().any(|l| lb.contains(l));
@@ -562,7 +610,7 @@ pub fn plan_ends(model: &BoardModel, opts: &Options, checker: &Checker, fixed: &
             if layers.is_empty() {
                 continue;
             }
-            let mut g0 = None;
+            let mut g0: Option<Vec2> = None;
             for (x, rev) in [(x0, false), (-x0, true)] {
                 let key = (q, (x.x * 1e6) as i64, (x.y * 1e6) as i64);
                 let f = match fans.get(&key) {
@@ -573,10 +621,10 @@ pub fn plan_ends(model: &BoardModel, opts: &Options, checker: &Checker, fixed: &
                         f
                     }
                 };
-                let to_far = (f.g - mid(other)).len();
-                let g_pref = *g0.get_or_insert(to_far);
-                let extra = if rev { (to_far - g_pref).max(0.0) } else { 0.0 };
-                let price = brk * (f.viol.0 as f64 + f.viol.1 / MM) + price_mm * (f.run_out + extra) / MM;
+                // The reverse exit adds its turn-back (graded breaks and length) to the fan-out.
+                let g_pref = *g0.get_or_insert(f.g);
+                let (tb, extra) = if rev { turn_back(model, checker, &base, cp, &f, g_pref, clear) } else { ((0, 0.0), 0.0) };
+                let price = brk * ((f.viol.0 + tb.0) as f64 + (f.viol.1 + tb.1) / MM) + price_mm * (f.run_out + extra) / MM;
                 cands[slot].push((f, price));
             }
         }
@@ -584,21 +632,41 @@ pub fn plan_ends(model: &BoardModel, opts: &Options, checker: &Checker, fixed: &
             [cands[0].first().map(|c| c.0.clone()), cands[1].first().map(|c| c.0.clone())]
         } else {
             let single_lb = 2.0 * price_via + 2.0 * price_unpaired + price_cross;
+            let need_of = |i: usize, j: usize| cands[0][i].0.n_side_out() != -cands[1][j].0.n_side_out();
+            let need0 = need_of(0, 0);
             let mut best: Option<(f64, usize, usize)> = None;
-            for (i, (x, px)) in cands[0].iter().enumerate() {
-                for (j, (y, py)) in cands[1].iter().enumerate() {
-                    let need = x.n_side_out() != -y.n_side_out();
+            let mut best_any: Option<(f64, usize, usize)> = None;
+            for (i, (_, px)) in cands[0].iter().enumerate() {
+                for (j, (_, py)) in cands[1].iter().enumerate() {
+                    let need = need_of(i, j);
                     let p = px + py + if need && !forced_ends { single_lb } else { 0.0 };
                     // Ties keep the preferred exits (index 0 first).
-                    if best.is_none_or(|b| p < b.0 - 1e-9) {
+                    if best_any.is_none_or(|b| p < b.0 - 1e-9) {
+                        best_any = Some((p, i, j));
+                    }
+                    // Not drawn yet: the drawn handedness follows the preferred exits.
+                    if (REVERSE_EXITS_DRAWN || need == need0) && best.is_none_or(|b| p < b.0 - 1e-9) {
                         best = Some((p, i, j));
                     }
                 }
             }
-            let (_, i, j) = best.expect("candidates");
+            let (pb, i, j) = best.expect("candidates");
+            if let Some((pa, ia, ja)) = best_any.filter(|b| (b.1, b.2) != (i, j)) {
+                exit_notes.push(format!(
+                    "diff pair {} / {}: leaving {}.{} {} and {}.{} {} would avoid the polarity flip for less ({pa:.1} against {pb:.1}), but the drawing does not draw from the planned gateways yet (M4 drawing stage): the plan keeps the drawn sides",
+                    cp.rule.p_name,
+                    cp.rule.n_name,
+                    model.pads[a].ref_,
+                    model.pads[a].number,
+                    if ia == 0 { "as preferred" } else { "on the reverse side" },
+                    model.pads[b].ref_,
+                    model.pads[b].number,
+                    if ja == 0 { "as preferred" } else { "on the reverse side" }
+                ));
+            }
             if i != 0 || j != 0 {
                 exit_notes.push(format!(
-                    "diff pair {} / {}: the pair leaves {}.{} {} and {}.{} {} (the reverse exit is cheaper: fewer clearance breaks or no polarity flip)",
+                    "diff pair {} / {}: the pair leaves {}.{} {} and {}.{} {} (the reverse exit is cheaper: fewer clearance breaks, its turn-back included)",
                     cp.rule.p_name,
                     cp.rule.n_name,
                     model.pads[a].ref_,
