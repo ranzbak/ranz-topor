@@ -65,15 +65,15 @@ pub fn plan(ev: &[(usize, f64, i32)], n_layers: usize) -> Plan {
 }
 
 /// Funnel (string pulling) from `s` to `e` through `portals` `(left, right)`, seen along the
-/// travel direction: [`super::pack::funnel`] (the chain-edge funnel, correct also where the
-/// funnel opens past 180 degrees on a sharp turn), corners only, near-duplicates dropped.
-/// O(portals).
+/// travel direction: [`super::funnel::funnel`] (exact predicates; a run that starts in front of
+/// its first portal or ends behind its last comes back to touch it), corners only,
+/// near-duplicates dropped. O(portals).
 pub fn funnel(s: Vec2, e: Vec2, portals: &[(Vec2, Vec2)]) -> Vec<Vec2> {
     let mut ports = Vec::with_capacity(portals.len() + 2);
     ports.push((s, s));
     ports.extend_from_slice(portals);
     ports.push((e, e));
-    let mut pts: Vec<Vec2> = super::pack::funnel(&ports).into_iter().map(|c| c.0).collect();
+    let mut pts: Vec<Vec2> = super::funnel::funnel(&ports).into_iter().map(|c| c.0).collect();
     pts.dedup_by(|a, b| (*a - *b).len2() < 1e-6);
     pts
 }
@@ -1167,7 +1167,7 @@ impl<'a> Drawer<'a> {
         let t: TriId = wi.tris[k];
         let [p, q] = pr.edges[e];
         let (pp, pq) = (pr.pos[p], pr.pos[q]);
-        let pt = |f: f64| pp + (pq - pp) * f;
+        let pt = |f: f64| super::funnel::edge_point(pp, pq, f);
         let a = pr.tris[t][pr.side(t, e)];
         if a == p {
             (pt(hi), pt(lo))

@@ -488,8 +488,16 @@ pub fn band(sh: &LayerSheet, curve: &[Vec2]) -> Result<(Vec<Vec2>, Vec<Option<(u
             wr.push(None);
             continue;
         }
+        // A corner is a portal end, or (an input the funnel folds by reflection) a touch point
+        // on the portal that is no sheet vertex.
         let x = red[pi - 1];
-        wr.push(Some(if q == sh.pos[x.left] { (x.left, true) } else { (x.right, false) }));
+        wr.push(if q == sh.pos[x.left] {
+            Some((x.left, true))
+        } else if q == sh.pos[x.right] {
+            Some((x.right, false))
+        } else {
+            None
+        });
     }
     Ok((pts, wr))
 }
