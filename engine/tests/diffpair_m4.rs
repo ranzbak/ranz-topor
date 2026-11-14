@@ -114,3 +114,36 @@ fn the_critical_polarity_line_names_the_cause() {
     assert!(l.starts_with("CRITICAL: diff pair A+ / A- U1.1 -> J1.1: P and N cross between the ends"), "{l}");
     assert!(l.contains("no polarity plan"), "{l}");
 }
+
+#[test]
+fn a_probe_short_of_the_clearance_by_nm_rounding_is_no_break_but_a_micron_is() {
+    // Two pair tracks (P, N) on F.Cu, 0.2 mm wide, the clearance 0.2 mm: centre lines 0.4 mm apart
+    // fit exactly; the quantised probes of the swap footprint land up to 1 um short.
+    use topor_engine::check::{Checker, ItemIndex};
+    use topor_engine::geom::Vec2;
+    use topor_engine::topo::draw::track_item;
+    let m = mirrored();
+    let checker = Checker::new(&m, &opts());
+    let base = ItemIndex::new(checker.cell());
+    let at = |short_nm: f64| {
+        let y = 0.4 * MM - short_nm;
+        let p = [track_item(1, 0, 0.2 * MM, Vec2 { x: 6.0 * MM, y: 2.0 * MM }, Vec2 { x: 12.0 * MM, y: 2.0 * MM }, None)];
+        let n = [track_item(2, 0, 0.2 * MM, Vec2 { x: 6.0 * MM, y: 2.0 * MM + y }, Vec2 { x: 12.0 * MM, y: 2.0 * MM + y }, None)];
+        dpplan::static_viol(&checker, &base, &p, &n).0
+    };
+    assert_eq!(at(0.0), 0);
+    assert_eq!(at(900.0), 0, "a shortfall of 1 um or less is nm rounding");
+    assert_eq!(at(5_000.0), 1, "5 um short is a break");
+}
+
+#[test]
+fn a_cheaper_reverse_exit_is_reported_but_the_plan_keeps_the_drawn_sides() {
+    // Ends away from the board edge: leaving J1 on its far side and turning back would avoid the
+    // swap for a few mm, but the drawing does not draw from the planned gateways yet, so the plan
+    // keeps the drawn (preferred) sides and plans the swap.
+    let m = board(&[("J1", "1", 1, 6.0, 5.0), ("J1", "2", 2, 6.0, 5.65), ("J2", "1", 1, 14.0, 5.65), ("J2", "2", 2, 14.0, 5.0)]);
+    let r = topor_engine::route::route(&m, &opts());
+    let w = r.warnings.join("\n");
+    assert!(w.contains("would avoid the polarity flip for less"), "{w}");
+    assert!(w.contains("swap planned at"), "{w}");
+}
