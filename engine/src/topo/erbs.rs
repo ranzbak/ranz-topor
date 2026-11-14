@@ -128,7 +128,7 @@ fn solve_ordered(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &BTr
     let kept: Vec<Vec2> = og.iter().map(|g| pt.get(&g.id).copied().unwrap_or(g.p)).collect();
     let plen = |q: &[Vec2]| poly_len(&std::iter::once(a).chain(q.iter().copied()).chain(std::iter::once(e)).collect::<Vec<_>>());
     let init = if plen(&funnel) <= plen(&kept) { funnel } else { kept };
-    let (p, sweeps, converged) = solve_active(a, e, &segs, &init, opts.tol, opts.sweeps_per_gate * segs.len() + 100);
+    let (p, sweeps, converged) = solve_newton(a, e, &segs, &init, opts.tol, opts.sweeps_per_gate * segs.len() + 100);
     let mut all = Vec::with_capacity(p.len() + 2);
     all.push(a);
     all.extend(p.iter().copied());
@@ -545,84 +545,142 @@ pub fn solve(s: Vec2, e: Vec2, gates: &[(Vec2, Vec2)], init: &[Vec2], tol: f64, 
     (p, sweeps, converged)
 }
 
-/// [`solve`] on the gates the path bends on only (an active set): the optimum is a polyline
-/// that bends at a few gate tips and meeting points; every other gate merely lies across one of
-/// its straight legs. Gauss-Seidel moves information one gate per sweep, so on a long chain it
-/// needs O(gates) sweeps of O(gates) each (eprom: a stretch of 691 gates, 617 k sweeps, 39 s);
-/// on the bends alone the sweeps are few and short. Start: the gates where the start points
-/// bend. Then, in rounds, solve on the active gates, put every other gate's point where the leg
-/// between its active neighbours crosses it, and make active each gate the leg misses or
-/// crosses out of order (the path must visit them in order); until no gate is missed. A last
-/// pass of [`exact_sweeps`] over all gates from there checks it (it converges at once when the
-/// set was right) and gives the same optimum as the plain solve (the objective is convex).
-/// Short chains (32 gates or fewer) go to [`solve`] directly. O(rounds x gates + sweeps x active).
-pub fn solve_active(s: Vec2, e: Vec2, gates: &[(Vec2, Vec2)], init: &[Vec2], tol: f64, max_sweeps: usize) -> (Vec<Vec2>, usize, bool) {
+/// [`solve`] from a near-exact start: Newton's method on the gate parameters `t_i` (point
+/// `a_i + t_i (b_i - a_i)`) for the smoothed length `sum sqrt(|d_k|^2 + eps^2)` plus a log
+/// barrier `-mu (ln t + ln (1 - t))` for the gate ends (an interior-point method, Boyd &
+/// Vandenberghe 2004, Convex Optimization, ch. 11.3, p. 568-569: centring steps for a falling
+/// `mu`). Each leg couples only two neighbouring gates, so the Hessian is tridiagonal and a Newton
+/// step costs O(gates) (Thomas' algorithm). Gauss-Seidel alone moves information one gate per sweep
+/// and needs O(gates) sweeps of O(gates) each on a long chain (eprom: a stretch of 691 gates, 617 k
+/// sweeps, 39 s; an active-set variant was slower). The sweeps then only polish (exact gate ends,
+/// the stalled pairs, [`exact_sweeps`]) and give the same optimum (the objective is convex).
+/// Chains of 8 gates or fewer go to [`solve`] directly. O(gates x Newton steps + polish).
+pub fn solve_newton(s: Vec2, e: Vec2, gates: &[(Vec2, Vec2)], init: &[Vec2], tol: f64, max_sweeps: usize) -> (Vec<Vec2>, usize, bool) {
     let n = gates.len();
-    if n <= 32 {
+    if n <= 8 {
         return solve(s, e, gates, init, tol, max_sweeps);
     }
-    let mut p: Vec<Vec2> = init.to_vec();
-    let at = |p: &[Vec2], i: isize| if i < 0 { s } else if i as usize >= p.len() { e } else { p[i as usize] };
-    // A start point off the chord of its neighbours bends the path there.
-    let mut act: Vec<bool> = (0..n)
+    let dir: Vec<Vec2> = gates.iter().map(|g| g.1 - g.0).collect();
+    const LO: f64 = 1e-9;
+    let mut t: Vec<f64> = (0..n)
         .map(|i| {
-            let (u, x, v) = (at(&p, i as isize - 1), p[i], at(&p, i as isize + 1));
-            let d = v - u;
-            let l2 = d.len2();
-            let t = if l2 > 0.0 { ((x - u).dot(d) / l2).clamp(0.0, 1.0) } else { 0.0 };
-            (x - (u + d * t)).len() > 1.0
+            let l2 = dir[i].len2();
+            let x = if l2 > 0.0 { (init[i] - gates[i].0).dot(dir[i]) / l2 } else { 0.5 };
+            x.clamp(1e-3, 1.0 - 1e-3)
         })
         .collect();
-    let mut sweeps = 0usize;
-    for _ in 0..n {
-        let idx: Vec<usize> = (0..n).filter(|&i| act[i]).collect();
-        let sub: Vec<(Vec2, Vec2)> = idx.iter().map(|&i| gates[i]).collect();
-        let mut q: Vec<Vec2> = idx.iter().map(|&i| p[i]).collect();
-        let (sw, _) = exact_sweeps(s, e, &sub, &mut q, tol, opts_sweeps(sub.len(), max_sweeps));
-        sweeps += sw;
-        for (k, &i) in idx.iter().enumerate() {
-            p[i] = q[k];
+    let pt = |t: &[f64], k: usize| -> Vec2 {
+        // Path point k: 0 = s, k = i + 1 for gate i, n + 1 = e.
+        if k == 0 {
+            s
+        } else if k == n + 1 {
+            e
+        } else {
+            gates[k - 1].0 + dir[k - 1] * t[k - 1]
         }
-        let mut missed = false;
-        let mut prev = s;
-        let mut i = 0usize;
-        while i <= n {
-            let j = (i..n).find(|&j| act[j]).unwrap_or(n);
-            let next = if j == n { e } else { p[j] };
-            let d = next - prev;
-            let l2 = d.len2();
-            let mut t_last = 0.0f64;
-            for m in i..j {
-                let (g0, g1) = gates[m];
-                let (r, _, y) = super::draw::seg_seg(prev, next, g0, g1);
-                let t = if l2 > 0.0 { (y - prev).dot(d) / l2 } else { 0.0 };
-                if r <= 1.0 && t >= t_last - 1e-9 {
-                    p[m] = y;
-                    t_last = t.max(t_last);
-                } else {
-                    act[m] = true;
-                    p[m] = min_on_gate(prev, next, g0, g1);
-                    missed = true;
+    };
+    let f = |t: &[f64], mu: f64, eps: f64| -> f64 {
+        let mut v = 0.0;
+        for k in 0..=n {
+            let d = pt(t, k + 1) - pt(t, k);
+            v += (d.len2() + eps * eps).sqrt();
+        }
+        for &x in t {
+            v -= mu * (x.ln() + (1.0 - x).ln());
+        }
+        v
+    };
+    let (mut g, mut hd, mut ho) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+    let mut mu = 1e3;
+    while mu > 1e-4 {
+        let eps = mu;
+        for _ in 0..60 {
+            g.iter_mut().for_each(|x| *x = 0.0);
+            hd.iter_mut().for_each(|x| *x = 0.0);
+            ho.iter_mut().for_each(|x| *x = 0.0);
+            for k in 0..=n {
+                let d = pt(&t, k + 1) - pt(&t, k);
+                let ph = (d.len2() + eps * eps).sqrt();
+                let u = d * (1.0 / ph);
+                // Hessian of the leg in d: (I - u u^T) / ph (+ eps^2 part, positive).
+                let hq = |x: Vec2, y: Vec2| (x.dot(y) - u.dot(x) * u.dot(y)) / ph;
+                if k < n {
+                    // + gate k (path point k + 1).
+                    g[k] += u.dot(dir[k]);
+                    hd[k] += hq(dir[k], dir[k]);
+                }
+                if k >= 1 {
+                    // - gate k - 1 (path point k).
+                    g[k - 1] -= u.dot(dir[k - 1]);
+                    hd[k - 1] += hq(dir[k - 1], dir[k - 1]);
+                    if k < n {
+                        ho[k - 1] -= hq(dir[k - 1], dir[k]);
+                    }
                 }
             }
-            if j == n {
+            for i in 0..n {
+                let (x, y) = (t[i], 1.0 - t[i]);
+                g[i] += -mu / x + mu / y;
+                hd[i] += mu / (x * x) + mu / (y * y);
+            }
+            // Thomas: solve H dx = -g (H symmetric tridiagonal, positive definite).
+            let mut c = vec![0.0; n];
+            let mut r = vec![0.0; n];
+            let mut den = hd[0];
+            c[0] = ho[0] / den;
+            r[0] = -g[0] / den;
+            for i in 1..n {
+                den = hd[i] - ho[i - 1] * c[i - 1];
+                if den <= 0.0 || !den.is_finite() {
+                    den = hd[i].abs().max(1e-12);
+                }
+                c[i] = if i + 1 < n { ho[i] / den } else { 0.0 };
+                r[i] = (-g[i] - ho[i - 1] * r[i - 1]) / den;
+            }
+            let mut dx = r;
+            for i in (0..n - 1).rev() {
+                dx[i] -= c[i] * dx[i + 1];
+            }
+            let dec: f64 = -g.iter().zip(&dx).map(|(a, b)| a * b).sum::<f64>();
+            if !(dec > 1e-9) {
                 break;
             }
-            prev = p[j];
-            i = j + 1;
+            // Fraction to the boundary, then Armijo backtracking.
+            let mut alpha: f64 = 1.0;
+            for i in 0..n {
+                if dx[i] < 0.0 {
+                    alpha = alpha.min(0.99 * (t[i] - LO) / -dx[i]);
+                } else if dx[i] > 0.0 {
+                    alpha = alpha.min(0.99 * (1.0 - LO - t[i]) / dx[i]);
+                }
+            }
+            let f0 = f(&t, mu, eps);
+            let mut tn = t.clone();
+            let mut ok = false;
+            for _ in 0..40 {
+                for i in 0..n {
+                    tn[i] = t[i] + alpha * dx[i];
+                }
+                if f(&tn, mu, eps) <= f0 - 0.25 * alpha * dec {
+                    ok = true;
+                    break;
+                }
+                alpha *= 0.5;
+            }
+            if !ok {
+                break;
+            }
+            let moved = (0..n).map(|i| (alpha * dx[i]).abs() * dir[i].len()).fold(0.0, f64::max);
+            std::mem::swap(&mut t, &mut tn);
+            if moved < 0.01 * tol {
+                break;
+            }
         }
-        if !missed {
-            break;
-        }
+        mu *= 0.2;
     }
+    let mut p: Vec<Vec2> = (0..n).map(|i| gates[i].0 + dir[i] * t[i]).collect();
     let (sw, converged) = exact_sweeps(s, e, gates, &mut p, tol, max_sweeps);
-    (p, sweeps + sw, converged)
-}
-
-/// The sweep budget of an active-set solve on `m` gates: as [`ErbsOpts::sweeps_per_gate`] (20
-/// per gate + 100), at most the caller's. O(1).
-fn opts_sweeps(m: usize, max_sweeps: usize) -> usize {
-    (20 * m + 100).min(max_sweeps)
+    (p, sw, converged)
 }
 
 /// `pts` without repeated points and without points within `tol` of the line of their
@@ -1943,6 +2001,29 @@ mod tests {
         // Both on one side: the reflection (equal angles), here the middle.
         let x = min_on_gate(v(0.0, 1.0), v(4.0, 1.0), v(-5.0, 0.0), v(5.0, 0.0));
         assert!((x - v(2.0, 0.0)).len() < 1e-6, "{x:?}");
+    }
+
+    #[test]
+    fn newton_matches_the_sweeps_on_a_long_chain() {
+        // 400 gates (mm scale, nm units): a zig-zag of portals, the taut path bends on a few tips.
+        let mm = 1e6;
+        let mut gs = Vec::new();
+        for i in 0..400 {
+            let x = (i as f64 + 1.0) * 0.1 * mm;
+            let c = 2.0 * mm * (i as f64 * 0.05).sin();
+            gs.push((v(x, c - 0.3 * mm), v(x, c + 0.3 * mm)));
+        }
+        let init: Vec<Vec2> = gs.iter().map(|g| (g.0 + g.1) * 0.5).collect();
+        let (s, e) = (v(0.0, 0.0), v(40.1 * mm, 0.0));
+        let t0 = std::time::Instant::now();
+        let (pn, swn, okn) = solve_newton(s, e, &gs, &init, 0.1, 20 * 400 + 100);
+        let tn = t0.elapsed();
+        let (pg, swg, _) = solve(s, e, &gs, &init, 0.1, 400 * 400 * 40);
+        let len = |p: &[Vec2]| poly_len(&std::iter::once(s).chain(p.iter().copied()).chain(std::iter::once(e)).collect::<Vec<_>>());
+        eprintln!("newton {swn} sweeps {tn:?} len {:.3}; sweeps {swg} len {:.3}", len(&pn), len(&pg));
+        assert!(okn);
+        assert!(len(&pn) <= len(&pg) + 1.0, "{} vs {}", len(&pn), len(&pg));
+        assert!(swn < swg / 10, "{swn} vs {swg}");
     }
 
     #[test]
