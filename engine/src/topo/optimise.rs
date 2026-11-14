@@ -145,6 +145,15 @@ pub struct CycleStats {
     pub pair_lifts: usize,
     pub pair_relaid: usize,
     pub pair_relaid_kept: usize,
+    /// 5.8 `[vias] pair_move`: via pairs whose crossing wires were laid again round the stretch
+    /// between the vias (Luzin-Popov 2013 step 8.1) / kept (the board's evaluation dropped), and
+    /// the wires those tries laid again.
+    pub pair_moved: usize,
+    pub pair_moved_kept: usize,
+    pub pair_moved_wires: usize,
+    /// Kept moves whose stretch was longer than the `[vias] pair_max_mm` scale (its graded price
+    /// grows with the square of the length over that scale; warned).
+    pub pair_moved_long: usize,
 }
 
 impl CycleStats {
@@ -163,6 +172,10 @@ impl CycleStats {
         self.pair_lifts += o.pair_lifts;
         self.pair_relaid += o.pair_relaid;
         self.pair_relaid_kept += o.pair_relaid_kept;
+        self.pair_moved += o.pair_moved;
+        self.pair_moved_kept += o.pair_moved_kept;
+        self.pair_moved_wires += o.pair_moved_wires;
+        self.pair_moved_long += o.pair_moved_long;
     }
 }
 

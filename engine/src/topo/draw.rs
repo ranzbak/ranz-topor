@@ -65,57 +65,19 @@ pub fn plan(ev: &[(usize, f64, i32)], n_layers: usize) -> Plan {
 }
 
 /// Funnel (string pulling) from `s` to `e` through `portals` `(left, right)`, seen along the
-/// travel direction. O(portals).
+/// travel direction: [`super::funnel::funnel`] (exact predicates; a run that starts in front of
+/// its first portal or ends behind its last comes back to touch it), corners only. The same
+/// corners as the taut paths of [`super::pack`]: ends an ulp off a shared vertex are snapped in
+/// the funnel itself (relative tolerance, so no absolute distance here, which dropped genuine
+/// corners of nm-sized features); only repeated points go (a zero-length run is one point).
+/// O(portals).
 pub fn funnel(s: Vec2, e: Vec2, portals: &[(Vec2, Vec2)]) -> Vec<Vec2> {
-    let cross = |a: Vec2, b: Vec2| a.x * b.y - a.y * b.x;
-    let mut all: Vec<(Vec2, Vec2)> = portals.to_vec();
-    all.push((e, e));
-    let mut pts = vec![s];
-    let (mut apex, mut left, mut right) = (s, s, s);
-    let (mut left_i, mut right_i) = (0usize, 0usize);
-    let mut i = 0;
-    let mut guard = 0usize;
-    while i < all.len() {
-        guard += 1;
-        if guard > 20 * all.len() + 100 {
-            break;
-        }
-        let (l, r) = all[i];
-        let same = |a: Vec2, b: Vec2| (a - b).len2() < 1e-6;
-        if cross(right - apex, r - apex) >= 0.0 {
-            if same(apex, right) || cross(left - apex, r - apex) < 0.0 {
-                right = r;
-                right_i = i;
-            } else {
-                pts.push(left);
-                apex = left;
-                right_i = left_i;
-                right = apex;
-                left = apex;
-                i = left_i + 1;
-                continue;
-            }
-        }
-        if cross(left - apex, l - apex) <= 0.0 {
-            if same(apex, left) || cross(right - apex, l - apex) > 0.0 {
-                left = l;
-                left_i = i;
-            } else {
-                pts.push(right);
-                apex = right;
-                left_i = right_i;
-                left = apex;
-                right = apex;
-                i = right_i + 1;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    if (*pts.last().expect("start") - e).len2() > 1e-6 {
-        pts.push(e);
-    }
-    pts.dedup_by(|a, b| (*a - *b).len2() < 1e-6);
+    let mut ports = Vec::with_capacity(portals.len() + 2);
+    ports.push((s, s));
+    ports.extend_from_slice(portals);
+    ports.push((e, e));
+    let mut pts: Vec<Vec2> = super::funnel::funnel(&ports).into_iter().map(|c| c.0).collect();
+    pts.dedup();
     pts
 }
 
@@ -676,6 +638,8 @@ pub struct Drawer<'a> {
     pub(super) qgrow: f64,
     /// Number of static objects (they come first in `ents`).
     pub(super) n_static: usize,
+    /// The wire of each drawn (dynamic) object that has one, by ent id ([`Drawer::pair_disc_clear`]).
+    ent_wire: BTreeMap<usize, usize>,
     /// Diagnosis: ignore the copper drawn so far.
     pub(super) only_static: std::cell::Cell<bool>,
     /// Trial drawing (via reduction): a rejected run is not diagnosed or recorded.
@@ -788,6 +752,7 @@ impl<'a> Drawer<'a> {
             handles: Vec::new(),
             qgrow: 0.0,
             n_static: 0,
+            ent_wire: BTreeMap::new(),
             only_static: std::cell::Cell::new(false),
             quiet: false,
             widths: None,
@@ -936,7 +901,7 @@ impl<'a> Drawer<'a> {
             }
         }
         let r = &model.rules;
-        let maxclr = r.per_net.values().map(|n| n.clearance).fold(r.default.clearance.max(r.min_clearance).max(r.hole_clearance).max(r.edge_clearance), i64::max);
+        let maxclr = r.per_net.values().map(|n| n.clearance).fold(r.default.clearance.max(r.min_clearance).max(r.hole_clearance).max(r.edge_clear()), i64::max);
         let maxw = r.per_net.values().map(|n| n.width).fold(r.default.width, i64::max);
         self.qgrow = (maxclr + maxw) as f64 + 4.0 * self.eps;
         self.n_static = self.ents.len();
@@ -945,6 +910,18 @@ impl<'a> Drawer<'a> {
 
     /// Index copper accepted for `net` as an object the next wires keep away from.
     fn add_dynamic(&mut self, item: &Item) -> usize {
+        let wire = match item {
+            Item::Track(t) => t.wire,
+            Item::Via(v) => v.wire,
+        };
+        let id = self.add_dynamic_ent(item);
+        if let Some(w) = wire.filter(|_| id != usize::MAX) {
+            self.ent_wire.insert(id, w);
+        }
+        id
+    }
+
+    fn add_dynamic_ent(&mut self, item: &Item) -> usize {
         let b = self.b;
         match item {
             Item::Track(t) => {
@@ -1220,7 +1197,7 @@ impl<'a> Drawer<'a> {
         let t: TriId = wi.tris[k];
         let [p, q] = pr.edges[e];
         let (pp, pq) = (pr.pos[p], pr.pos[q]);
-        let pt = |f: f64| pp + (pq - pp) * f;
+        let pt = |f: f64| super::funnel::edge_point(pp, pq, f);
         let a = pr.tris[t][pr.side(t, e)];
         if a == p {
             (pt(hi), pt(lo))
@@ -1544,12 +1521,13 @@ impl<'a> Drawer<'a> {
                     // have been free), the pair still leaves the wires that cross between them
                     // their room ([`Drawer::via_pair_price`] 0); else the search prices the site.
                     let pair_ok = || self.via_pair_price(w, out.last().copied(), &xs, k, p, sz) <= 0.0;
-                    if (self.via_side_ok(w, k, p, la, lb) || taut_ok()) && pair_ok() && self.check_ok(&item) && self.via_hole_ok(p, sz, net) && self.via_own_pad_ok(p, sz, net) {
+                    if (self.via_side_ok(w, k, p, la, lb) || taut_ok()) && pair_ok() && self.check_ok(&item) && self.via_hole_ok(p, sz, net) && self.via_own_pad_ok(p, sz, net) && self.pair_via_ok(w, p, sz, net) {
                         let id = self.commit(&item);
                         self.via_marks.push((w, k, p, plan.layers[i], plan.layers[i + 1], id));
                         ids.push(id);
                         out.push((k, p, sz));
                         self.stats.planned_sites += 1;
+                        self.pair_via_dbg(w, i, "planned", p, sz, 0);
                         done = true;
                         break;
                     }
@@ -1640,7 +1618,7 @@ impl<'a> Drawer<'a> {
                             eprintln!("VIAREJ wire {w} via {i} k {k} at ({:.3},{:.3}): {:?} hole {} own {}", p.x / 1e6, -p.y / 1e6, rep.violations.first().map(|v| (v.against.clone(), v.gap, v.required)), self.via_hole_ok(p, sz, net), self.via_own_pad_ok(p, sz, net));
                         }
                     }
-                    if self.check_ok(&item) && self.via_hole_ok(p, sz, net) && self.via_own_pad_ok(p, sz, net) {
+                    if self.check_ok(&item) && self.via_hole_ok(p, sz, net) && self.via_own_pad_ok(p, sz, net) && self.pair_via_ok(w, p, sz, net) {
                         let room = self.via_room(w, k, p, sz.d as f64);
                         // The room around the via is priced the same way (short of one via
                         // diameter of free room, the `via_squeeze` measure), so a site free of the
@@ -1681,6 +1659,7 @@ impl<'a> Drawer<'a> {
                     ids.push(id);
                     out.push((k, p, sz));
                     self.stats.via_searched += 1;
+                    self.pair_via_dbg(w, i, if self.via_site.contains_key(&(w, i)) { "searched (planned site not free)" } else { "searched (no planned site)" }, p, sz, 0);
                     done = true;
                     break 'sizes;
                 }
@@ -1692,6 +1671,7 @@ impl<'a> Drawer<'a> {
                     self.via_marks.push((w, k, p, plan.layers[i], plan.layers[i + 1], id));
                     ids.push(id);
                     out.push((k, p, sz));
+                    self.pair_via_dbg(w, i, if self.via_site.contains_key(&(w, i)) { "forced (planned site not free)" } else { "forced (no planned site)" }, p, sz, vs.len());
                     self.via_viol.entry(w).or_default().extend(vs);
                     self.stats.via_forced += 1;
                     continue;
@@ -1809,6 +1789,9 @@ impl<'a> Drawer<'a> {
                 let mut vs = self.viols_of(std::slice::from_ref(&item), &rep);
                 if !self.via_hole_ok(p, sz, net) {
                     vs.push(Viol { kind: "hole_clearance", at: p, layer: u32::MAX, depth_nm: self.model.rules.via_hole_clear().max(1) as f64, len_nm: sz.d as f64, against: "copper shape".into(), via: true });
+                }
+                if !self.pair_via_ok(w, p, sz, net) {
+                    vs.push(Viol { kind: "clearance", at: p, layer: u32::MAX, depth_nm: self.model.rules.net_rule(net).clearance.max(1) as f64, len_nm: sz.d as f64, against: "diff pair partner copper".into(), via: true });
                 }
                 if !self.via_own_pad_ok(p, sz, net) {
                     vs.push(Viol { kind: "connection_width", at: p, layer: u32::MAX, depth_nm: self.model.rules.min_connection.max(1) as f64, len_nm: sz.d as f64, against: "own-net pad".into(), via: true });
@@ -2241,17 +2224,20 @@ impl<'a> Drawer<'a> {
 
     /// A via of `size` at `p` does not overlap a pad of its own net only partly (D1): the overlap
     /// of the via disc with the pad copper is a lens whose chord is the narrowest copper between
-    /// them, and KiCad's minimum connection width check flags it (seen on dcsgonebadge: a 0.6 mm
-    /// via 4 um into BT1 pad 3, "actual 0.1044 mm" < 0.127 mm). Clear of the pad (gap >= 0) or
+    /// them, and KiCad's minimum connection width check flags it (seen on a 2-layer badge: a 0.6 mm
+    /// via 4 um into a battery holder pad, "actual 0.1044 mm" < 0.127 mm). Clear of the pad (gap >= 0) or
     /// centred inside it is fine; with no minimum connection width set, anything goes.
     /// O(pads of the net x pad vertices).
     pub fn via_own_pad_ok(&self, p: Vec2, size: ViaSize, net: i32) -> bool {
+        if self.model.rules.pair_disc(net) && !self.pair_disc_clear(p, size, net, None) {
+            return false;
+        }
         if self.model.rules.min_connection <= 0 || net == 0 {
             return true;
         }
         let r = 0.5 * size.d as f64;
         // KiCad's pad polygon reaches up to `max_error` past the arcs: a via that clears the
-        // exact copper by less still touches it in a sliver (dcsgonebadge C22.1, D6a: 6 um).
+        // exact copper by less still touches it in a sliver (a capacitor pad, D6a: 6 um).
         let tol = self.model.rules.max_error.max(0) as f64;
         self.model.pads.iter().filter(|pad| pad.net == net).all(|pad| {
             pad.layers.iter().all(|&l| {
@@ -2261,10 +2247,62 @@ impl<'a> Drawer<'a> {
         })
     }
 
+    /// A pair's two-via disc of `size` at `p` (lead `net` of the planning model,
+    /// [`crate::model::NetRule::pair_disc`]) keeps the net's clearance to the copper of its own
+    /// net there: the static pads, copper shapes, kept copper and vias of both halves (the
+    /// partner's carry the lead's net in the plan; the disc holds the N via as well as the P via,
+    /// so none of it is own copper for it), and with `wire` (the wire the disc belongs to) the
+    /// copper drawn so far of the pair's other wires (their tracks and discs: the other
+    /// connections of the pair, own net in the plan, are partner copper in the drawing too).
+    /// User 2026-11-13. O(objects nearby).
+    pub fn pair_disc_clear(&self, p: Vec2, size: ViaSize, net: i32, wire: Option<WireId>) -> bool {
+        let own = self.model.rules.net_rule(net).clearance as f64;
+        let r = 0.5 * size.d as f64;
+        let mut ids = self.grid.query(bbox_of(&[p]).grow(r + own + 2.0e6));
+        ids.sort_unstable();
+        ids.dedup();
+        ids.into_iter().all(|id| {
+            let e = &self.ents[id];
+            if !e.live || e.net != Some(net) {
+                return true;
+            }
+            // drawn copper: only with the disc's wire known, and only the pair's other wires'
+            if id >= self.n_static && (wire.is_none() || self.ent_wire.get(&id).copied() == wire) {
+                return true;
+            }
+            let dist = match &e.core {
+                Core::Poly(q) => {
+                    if super::state::point_in_poly(p, q) {
+                        return false;
+                    }
+                    poly_dist(p, q)
+                }
+                Core::Seg(a, b) => seg_dist(p, *a, *b),
+                Core::Pt(q) => (p - *q).len(),
+            };
+            dist - e.grow - r >= e.clear.max(own) - self.eps
+        })
+    }
+
+    /// Diagnosis (`TOPO_PAIRVIADBG`): how via `i` of a pair wire was placed. O(1).
+    fn pair_via_dbg(&self, w: WireId, i: usize, how: &str, p: Vec2, sz: ViaSize, viols: usize) {
+        let net = self.st.wires[w].net;
+        if self.model.rules.pair_disc(net) && std::env::var("TOPO_PAIRVIADBG").is_ok() {
+            let planned = self.via_site.get(&(w, i)).map(|s| format!("({:.3},{:.3})", s.1.x / 1e6, -s.1.y / 1e6)).unwrap_or_else(|| "none".into());
+            eprintln!("PAIRVIA wire {w} net {net} via {i} {how} at ({:.3},{:.3}) d {} planned site {planned} violations {viols}", p.x / 1e6, -p.y / 1e6, sz.d);
+        }
+    }
+
+    /// [`Drawer::pair_disc_clear`] of wire `w`'s disc at `p` against the static and the drawn copper;
+    /// true for a via that is no pair disc. O(objects nearby).
+    pub fn pair_via_ok(&self, w: WireId, p: Vec2, size: ViaSize, net: i32) -> bool {
+        !self.model.rules.pair_disc(net) || self.pair_disc_clear(p, size, net, Some(w))
+    }
+
     /// No track of `items` (a run of wire `w`) grazes a pad of its own net other than its end
     /// pads: either it keeps KiCad's `max_error` off the pad (KiCad's minimum connection width
     /// check builds the pad polygon up to that far outside the arcs) or its centre line runs
-    /// into the pad. A graze is a sliver connection KiCad flags (dcsgonebadge R10.1, D2: a track
+    /// into the pad. A graze is a sliver connection KiCad flags (a resistor pad, D2: a track
     /// 1.7 um off the corner arc, "actual 0.0023 mm" < 0.127 mm). Without a minimum connection
     /// width set, anything goes. O(tracks x pads of the net).
     pub fn track_own_pad_ok(&self, w: WireId, items: &[Item]) -> bool {
@@ -2311,8 +2349,8 @@ impl<'a> Drawer<'a> {
 
     /// A plane stub's track does not graze a pad of its net other than its own (`own`, an index
     /// into `model.pads`) nor an own-net via of `vias` (centre, radius): the sliver connection
-    /// [`Drawer::track_own_pad_ok`] keeps wires from (D6a, dcsgonebadge J3.16: a GND stub to a
-    /// via down-left grazed J3.15, "actual 0.0904 mm" < 0.127 mm). O(pads of the net).
+    /// [`Drawer::track_own_pad_ok`] keeps wires from (D6a, a 0.5 mm pitch FPC connector: a GND stub to a
+    /// via down-left grazed the neighbouring GND pad, "actual 0.0904 mm" < 0.127 mm). O(pads of the net).
     pub fn stub_own_ok(&self, stub: &Item, own: usize, vias: &[(Vec2, f64)]) -> bool {
         let Item::Track(t) = stub else { return true };
         if self.model.rules.min_connection <= 0 || t.net == 0 {
@@ -2324,9 +2362,9 @@ impl<'a> Drawer<'a> {
         let tol = self.model.rules.max_error as f64;
         let ok = |d: f64| d - 0.5 * t.width as f64 >= tol || d <= 0.0;
         // Another pad of the net: the stub keeps off it altogether. A centre line that only clips
-        // a corner is still a sliver (J3.16 again: 0.1025 mm), and a stub needs no other pad.
-        // A pad the stub starts inside is the own pad's copper (D6b: dcsgonebadge USB-C J1.A1 and
-        // J1.B12 are one GND pad drawn twice; every stub of J1.A1 started inside J1.B12 and was
+        // a corner is still a sliver (the FPC pad again: 0.1025 mm), and a stub needs no other pad.
+        // A pad the stub starts inside is the own pad's copper (D6b: a USB-C receptacle's A1 and
+        // B12 are one GND pad drawn twice; every stub of A1 started inside B12 and was
         // refused, so J1.A1 became a 16 mm signal connection).
         let off = |d: f64| d - 0.5 * t.width as f64 >= tol;
         let root = crate::geom::Prim::Seg(crate::geom::Seg { a, b: a });
@@ -3742,6 +3780,29 @@ mod tests {
         let pts = funnel(v(0.0, 0.0), v(20.0, 0.0), &p);
         assert_eq!(pts.len(), 3, "{pts:?}");
         assert!((pts[1] - v(10.0, 10.0)).len() < 1e-9, "{pts:?}");
+    }
+
+    /// The path wraps (5, 2) on its left, runs east to (6, 2) and turns up to the end: after
+    /// the first corner the funnel opens past 180 degrees (right end (3, 0) south-west, the end
+    /// north-east). The previous drawing funnel went (5, 2) -> end straight (`pack` test
+    /// `funnel_past_180_degrees_both_sides`).
+    #[test]
+    fn funnel_past_180_degrees_keeps_the_corner() {
+        let p = [(v(5.0, 2.0), v(3.0, 0.0)), (v(6.0, 2.0), v(3.0, 0.0))];
+        let pts = funnel(v(3.2, 3.3), v(6.9, 4.4), &p);
+        assert_eq!(pts, vec![v(3.2, 3.3), v(5.0, 2.0), v(6.0, 2.0), v(6.9, 4.4)]);
+    }
+
+    /// The drawing keeps the corners of the taut path however small the features: a gap 0.1 pm
+    /// high, 0.5 pm from the start, keeps its corner (an absolute 1e-3 nm dedup dropped it, and
+    /// the run then missed the gap). The same corners as [`super::super::funnel::funnel`].
+    #[test]
+    fn funnel_keeps_the_corners_of_tiny_features() {
+        let p = [(v(5e-4, 3e-4), v(5e-4, 2e-4))];
+        let pts = funnel(v(0.0, 0.0), v(1e-3, 0.0), &p);
+        assert_eq!(pts, vec![v(0.0, 0.0), v(5e-4, 2e-4), v(1e-3, 0.0)]);
+        let ports = [(v(0.0, 0.0), v(0.0, 0.0)), p[0], (v(1e-3, 0.0), v(1e-3, 0.0))];
+        assert_eq!(pts, super::super::funnel::funnel(&ports).into_iter().map(|c| c.0).collect::<Vec<_>>());
     }
 
     #[test]

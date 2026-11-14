@@ -291,7 +291,7 @@ free-list ids sorted; heap key total; `collect` in index order; no `HashMap` ite
   the previous crossing's gap (the append position where none is feasible), and `leg_strand_blockers` walks those slots:
   the M2 routine assumed append slots everywhere and missed every strand that ends on the ghost's own exit edge (the
   plus-board fixture `rip_up_ping_pong_is_damped`, wiccon's 0 rips). `GHOST_BLOCK_NM` is gone. Cost
-  `O(Σ_L E_L (max_vias + 1))` per run: dcsgone 976 → 33 ms/run, 0 candidates.
+  `O(Σ_L E_L (max_vias + 1))` per run: private-badge-b 976 → 33 ms/run, 0 candidates.
 - **§7 damping (RC-A2):** `Negotiator::rip` keeps `rip_pairs[(ripper, blocker)]`; a connection rips a given blocker at
   most `RIP_PAIR_CAP = 3` times per run (both the absurd-detour rip and the blocked-ghost rip), so total rips are bounded
   by `3·m²` whatever the length comparisons do. Why 3 and not 1: one exchange leaves `HIST_BLOCK = 0.5` on the blocker's
@@ -309,7 +309,7 @@ free-list ids sorted; heap key total; `collect` in index order; no `HashMap` ite
   vertex. Otherwise `Blocked { ghost: None, static_reason: Some("blocked: terminal cannot be left/entered (width w,
   clearance c)") }` at once, `O(Σ deg)`, no expansion, no ghost (`ghost_len_nm` null). `Negotiator.dead` holds exactly
   these connections (with the reason, repeated every iteration without a search); a ghost `None` no longer makes a
-  connection dead. Finding on dcsgone U7.4 (#201/#202/#203, net65 at 0.2 mm / 0.2 mm, 0.5 mm pitch): the rule does
+  connection dead. Finding on private-badge-b U7.4 (#201/#202/#203, net65 at 0.2 mm / 0.2 mm, 0.5 mm pitch): the rule does
   **not** fire — all 4 faces around v3284 are inside and all 12 edges are passable; every edge is statically unfit
   (spokes cap 195 194 nm, long sides 375 000, short sides 0 against a need of 605 000) and the block is geometric: a
   0.2 mm wire with 0.2 mm clearance must keep its centreline within ±75 µm of the pad axis between the 0.5 mm-pitch

@@ -90,7 +90,7 @@ _IRM_TO_KICAD = {bt.IslandRemovalMode.IRM_UNKNOWN: 0, bt.IslandRemovalMode.IRM_A
 #: kipy ZoneConnectionStyle -> the model's zone connection, pcbnew's ZONE_CONNECTION values as the harness exports
 #: them and the engine reads them (engine/src/pourcheck.rs CONN_*: NONE 0, THERMAL 1, FULL 2, THT_THERMAL 3);
 #: inherited / unknown -> None (no override). K1: this table was off by one (INHERITED 0, NONE 1, ...), so over
-#: IPC a thermal zone read as full and a pad set to "none" as thermal (dcsgonebadge JP1, U4.21).
+#: IPC a thermal zone read as full and a pad set to "none" as thermal (a solder jumper and a charger IC pad).
 _ZC_TO_KICAD = {_ZCS.ZCS_UNKNOWN: None, _ZCS.ZCS_INHERITED: None, _ZCS.ZCS_NONE: 0, _ZCS.ZCS_THERMAL: 1,
                 _ZCS.ZCS_FULL: 2, _ZCS.ZCS_PTH_THERMAL: 3}
 _ZONE_DEFAULT_CONN = 1  # a zone without a setting: KiCad's default, thermal reliefs
@@ -246,7 +246,7 @@ def pad_polygon_rings(pwh, max_err: int) -> list:
     CONTAIN the copper. KiCad hands the pad's curves already flattened (plain points ON the curve, its own polygon at
     the board's max error), so the ring is grown outward by `max_err` (``geom.grow_ring_outward``, as pcbnew's
     ERROR_OUTSIDE polygon of the harness is), and arc nodes, if any, are flattened outward first. K1 (live
-    dcsgonebadge): the chords of solder-jumper pad JP1.3's two r = 0.5 mm circles lay up to 5 um inside KiCad's
+    plugin run on a 2-layer badge): the chords of a solder-jumper pad's two r = 0.5 mm circles lay up to 5 um inside KiCad's
     copper and seven routed tracks came 1 - 4 um too close to it (KiCad DRC clearance). Excess <= max_err +
     OBSTACLE_ERR_NM. O(points^2) (simplicity check of the grown ring; pads have few points)."""
     err = min(int(max_err), OBSTACLE_ERR_NM)
@@ -484,7 +484,7 @@ def shape_to_polys(shape, max_err: int) -> list[list[list[int]]]:
                 if w > 0 and len(ring) >= 3 and all(pc[0] == "pt" for pc in pieces):
                     # K1: ONE ring (the polygon grown by half the stroke, as pcbnew exports it), not the polygon
                     # plus a capsule per edge: overlapping rings of one shape crashed the engine's triangulation
-                    # on dcsgonebadge (an "E"-shaped filled IR_RX polygon)
+                    # on a 2-layer badge (an "E"-shaped filled signal-net polygon)
                     grown = geom.grow_ring_outward(ring, w / 2.0, err)
                     if grown is not None:
                         out.append(grown)
@@ -559,6 +559,9 @@ def zone_to_pour(zone, *, net_codes: dict, cu_ids: set, pads: list, vias: list, 
         for pwh in polys:
             fills.append({"layer": i, "outer": ring_pts(pwh.outline, max_err),
                           "holes": [ring_pts(hh, max_err) for hh in pwh.holes]})
+    cs, th = zone.proto.copper_settings, zone.proto.copper_settings.connection.thermal_spokes
+    pad_conn = (_ZONE_DEFAULT_CONN if _ZC_TO_KICAD.get(cs.connection.zone_connection) is None
+                else _ZC_TO_KICAD[cs.connection.zone_connection])
     warn = None
     if not fills:
         warn = "filled polygon list unavailable (zone not filled); using zone outline, reaching nothing"
@@ -566,15 +569,13 @@ def zone_to_pour(zone, *, net_codes: dict, cu_ids: set, pads: list, vias: list, 
         fills = [{"layer": i, "outer": ol, "holes": []} for i in layers]
         reach_pads, reach_vias = [], []  # M4-R8: an unfilled zone connects nothing ("not reached")
     else:
-        reach_pads, reach_vias = pour_reach(code, layers, fills, pads, vias)
-    cs, th = zone.proto.copper_settings, zone.proto.copper_settings.connection.thermal_spokes
+        reach_pads, reach_vias = pour_reach(code, layers, fills, pads, vias, pad_conn)
     d = {"uuid": zone.id.value, "net": code, "layers": layers, "pads": reach_pads, "vias": reach_vias,
          "fills": fills,
          "clearance": int(cs.clearance.value_nm), "min_thickness": int(cs.min_thickness.value_nm),
          "thermal_gap": int(th.gap.value_nm) if th.HasField("gap") else _DEFAULT_THERMAL_NM,
          "spoke_width": int(th.width.value_nm) if th.HasField("width") else _DEFAULT_THERMAL_NM,
-         "pad_connection": (_ZONE_DEFAULT_CONN if _ZC_TO_KICAD.get(cs.connection.zone_connection) is None
-                            else _ZC_TO_KICAD[cs.connection.zone_connection]),
+         "pad_connection": pad_conn,
          "island_removal": _IRM_TO_KICAD.get(cs.island_mode, 0), "min_island_area": float(cs.min_island_area)}
     if warn:
         d["warning"] = warn
@@ -677,6 +678,7 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
     # copper graphics and the board outline
     shapes = [(s, None) for s in board.get_shapes()] + fp_shapes
     copper_shapes, outline = [], []
+    edge_stroke = 0  # widest Edge.Cuts stroke: KiCad measures copper-to-edge from the stroke's edge
     for s, owner in shapes:
         i = cu_id(s.layer)
         if i is not None and i in cu_ids:
@@ -685,6 +687,7 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
                                       "layer": i, "poly": ring, "owner_ref": owner})
         elif s.layer == BoardLayer.BL_Edge_Cuts:
             outline += shape_to_prims(s, max_err)
+            edge_stroke = max(edge_stroke, _stroke_w(s))
     for t, owner in [(t, None) for t in board.get_text()] + fp_texts:  # UNVERIFIED: get_item_bounding_box
         i = cu_id(t.layer) if hasattr(t, "layer") else None
         if i is None or i not in cu_ids:
@@ -702,6 +705,9 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
             keepouts += zone_to_keepouts(z, cu_ids, max_err)
     layer_ids = {g["name"]: g["id"] for g in plan}
     dru = _dru_text(project, name, dru_text)
+    # half the widest Edge.Cuts stroke (as harness.model.outline_half_stroke): the engine's edge clearance is
+    # measured from the outline's centre line (Rules::edge_clear)
+    rules = {**rules, "outline_half_stroke": edge_stroke // 2}
     keepouts, rules = merge_dru_keepouts(keepouts, rules, dru, layer_ids)
     pours = sorted((zone_to_pour(z, net_codes=codes, cu_ids=cu_ids, pads=pads, vias=vias, max_err=max_err)
                     for z in zones if _is_copper_pour(z)), key=lambda d: d["uuid"])

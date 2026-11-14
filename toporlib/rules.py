@@ -1,6 +1,14 @@
-"""Rule resolution without pcbnew (M4-R1): board floors, netclasses, custom-rule (.kicad_dru) subset, widths,
-JLCPCB profile. ``resolve_rules_from_project`` is the pure core; ``harness.rules.resolve_rules`` (SWIG) and the
-plugin (IPC) both feed it.
+"""Rule resolution without pcbnew (M4-R1): Board Setup constraints, net classes, pre-defined vias, custom-rule
+(.kicad_dru) subset, widths. ``resolve_rules_from_project`` is the pure core; ``harness.rules.resolve_rules`` (SWIG)
+and the plugin (IPC) both feed it.
+
+Authority (user decision 2026-11-12): the board's KiCad configuration, resolved as KiCad's DRC resolves it. A value
+the project file carries is used as is, a 0 included (KiCad: 0 = no minimum). Only a field the board does not provide
+at all (a key missing from the ``.kicad_pro``, a net class value no class of the net sets, a 0 track width / via size
+of the Default class) takes the value of :data:`RULE_FALLBACK` (JLCPCB 1 oz derived, never below the value KiCad
+itself uses for the missing key, so KiCad's DRC accepts the copper); every fallback used is one entry of the result's
+``fallbacks`` and one ``rule fallback:`` warning naming the KiCad setting to fill in. The optional floor mode
+``[rules] fab_profile = "jlcpcb_1oz"`` (off by default) raises board values below the JLCPCB 1 oz minimums.
 
 Inputs come from stable sources only: the ``.kicad_pro`` JSON (``board.design_settings.rules.*``,
 ``net_settings``), the ``.kicad_dru`` text, and the effective net class per net (IPC
@@ -19,6 +27,9 @@ from dataclasses import dataclass
 from .custom_rules import CustomRules, canonical_layers, canonical_name
 from .dru import DruRule, _disallow_areas, parse_dru
 
+#: JLCPCB standard rigid, 1 oz copper (docs/kicad/30-kicad-constraints.md, retrieved 2026-10-30), nm. Used for the
+#: :data:`RULE_FALLBACK` values and by the opt-in floor mode ``[rules] fab_profile = "jlcpcb_1oz"``; never sent to
+#: the engine (the engine holds no fab profile).
 JLCPCB_1OZ: dict = {
     "width": 200_000,
     "clearance": 150_000,
@@ -26,8 +37,6 @@ JLCPCB_1OZ: dict = {
     "via_drill": 300_000,
     "via_d_min_auto": 450_000,
     "via_drill_min_auto": 250_000,
-    "drill_list": [200_000, 250_000, 300_000, 400_000, 500_000, 800_000, 1_000_000],
-    "routing_vias": [250_000, 300_000, 400_000, 500_000],
     "via_hole_to_track": 200_000,
     "pth_hole_to_track": 350_000,
     "npth_to_track": 250_000,
@@ -41,18 +50,20 @@ JLCPCB_1OZ: dict = {
     "annular_4l": 75_000,
 }
 
-#: ``[rules] fab_profile`` values: the name of a fab profile (its minimums are FLOORS over Board Setup and the custom
-#: rules) or ``"board"`` (no profile: Board Setup, the net classes and the .kicad_dru are the only authority, as
-#: KiCad's own DRC judges them).
+#: ``[rules] fab_profile`` values: ``"board"`` (default: Board Setup, the net classes, the pre-defined vias and the
+#: .kicad_dru are the only authority, as KiCad's own DRC judges them) or the name of a fab profile whose minimums are
+#: FLOORS over them (opt-in, for a Board Setup known to be looser than the fab).
 FAB_PROFILES: dict = {"jlcpcb_1oz": JLCPCB_1OZ}
 BOARD_AUTHORITY = "board"
-DEFAULT_FAB_PROFILE = "jlcpcb_1oz"
+DEFAULT_FAB_PROFILE = BOARD_AUTHORITY
 
-_POWER_RE = re.compile(r"^(\+|-)?\d|^(V|VCC|VDD|VBAT|GND|AGND|PWR)")
-_REFUSE = ("track_angle", "track_segment_length")
-
-#: KiCad's own defaults for a project file that does not set a design rule (mm in the JSON, nm here).
-_RULE_DEFAULTS_NM = {
+#: The value KiCad itself uses for a ``board.design_settings.rules`` key the .kicad_pro does not carry (nm): the
+#: BOARD_DESIGN_SETTINGS constructor values (pcbnew/board_design_settings.cpp:151-165, m_MaxError = ARC_HIGH_DEF at
+#: :221; the DEFAULT_* of include/board_design_settings_defaults.h:69-79), because BOARD_DESIGN_SETTINGS sets
+#: ``m_resetParamsIfMissing = false`` (board_design_settings.cpp:52: "leave alone parameters that aren't found in
+#: the project JSON"; KiCad 86a7a3f4). The annular ring is (0.5 - 0.3) / 2 = 0.1 mm there (the JSON PARAM default
+#: 0.5 mm applies only to an out-of-range value, :data:`KICAD_RANGE_NM`).
+KICAD_ABSENT_NM = {
     "min_clearance": 0,
     "min_track_width": 200_000,
     "min_via_diameter": 500_000,
@@ -62,11 +73,93 @@ _RULE_DEFAULTS_NM = {
     "min_hole_to_hole": 250_000,
     "min_copper_edge_clearance": 500_000,
     "min_connection": 0,
-    "max_error": 5_000,
+    "max_error": 5_000,  # ARC_HIGH_DEF
 }
-#: KiCad's built-in values of a net class that does not set them (the "Default" class of an empty project).
-_CLASS_DEFAULTS_NM = {"clearance": 200_000, "track_width": 200_000, "via_diameter": 600_000, "via_drill": 300_000}
-_CLASS_FIELDS = tuple(_CLASS_DEFAULTS_NM)
+#: KiCad's load range of each ``board.design_settings.rules`` key and the value it puts in place of a value outside
+#: it, nm: ``(min, max, reset)`` (the PARAM_SCALED min / max / default of board_design_settings.cpp:292-359 and
+#: :1136-1138; PARAM_SCALED::Load replaces an out-of-range value by the PARAM default, common/settings/parameters.h
+#: :450-454, also PARAM<T>::Load :127-130). KiCad's DRC works with the reset value, so topor mirrors it, reported
+#: (:func:`board_rule_values`). The annular ring's PARAM default is DEFAULT_VIASMINSIZE (0.5 mm) in KiCad's source.
+KICAD_RANGE_NM = {
+    "min_clearance": (0, 25_000_000, 0),
+    "min_track_width": (0, 25_000_000, 200_000),
+    "min_via_diameter": (0, 25_000_000, 500_000),
+    "min_through_hole_diameter": (0, 25_000_000, 300_000),
+    "min_via_annular_width": (0, 25_000_000, 500_000),
+    "min_hole_clearance": (0, 100_000_000, 250_000),
+    "min_hole_to_hole": (0, 10_000_000, 250_000),
+    "min_copper_edge_clearance": (-10_000, 25_000_000, 500_000),
+    "min_connection": (0, 100_000_000, 0),
+    "max_error": (100, 1_000_000, 5_000),  # ARC_HIGH_DEF
+}
+#: KiCad's values of a net class field nobody set (common/netclass.cpp:36-41 DEFAULT_CLEARANCE / TRACK_WIDTH /
+#: VIA_DIAMETER / VIA_DRILL), nm.
+KICAD_CLASS_ABSENT_NM = {"clearance": 200_000, "track_width": 200_000, "via_diameter": 600_000, "via_drill": 300_000}
+_CLASS_FIELDS = tuple(KICAD_CLASS_ABSENT_NM)
+
+_BS = "KiCad → File → Board Setup → Design Rules → Constraints → "
+_NC = "KiCad → File → Board Setup → Design Rules → Net Classes → Default → "
+#: The JLCPCB 1 oz value of each field (None: the fab gives no figure) and the KiCad setting that provides it.
+_FALLBACK_SRC = {
+    "min_clearance": (JLCPCB_1OZ["clearance"], "minimum clearance", _BS + "Minimum clearance"),
+    "min_track_width": (JLCPCB_1OZ["width"], "minimum track width", _BS + "Minimum track width"),
+    "min_via_diameter": (JLCPCB_1OZ["via_d_min_auto"], "minimum via diameter", _BS + "Minimum via diameter"),
+    "min_through_hole_diameter": (JLCPCB_1OZ["via_drill_min_auto"], "minimum through hole",
+                                  _BS + "Minimum through hole"),
+    "min_via_annular_width": (JLCPCB_1OZ["annular_2l"], "minimum annular width", _BS + "Minimum annular width"),
+    "min_hole_clearance": (JLCPCB_1OZ["pth_hole_to_track"], "hole clearance", _BS + "Hole clearance"),
+    "min_hole_to_hole": (JLCPCB_1OZ["hole_to_hole_via"], "hole to hole clearance", _BS + "Hole to hole clearance"),
+    "min_copper_edge_clearance": (JLCPCB_1OZ["edge"], "copper to edge clearance", _BS + "Copper to edge clearance"),
+    "min_connection": (None, "minimum connection width", _BS + "Minimum connection width"),
+    "max_error": (None, "maximum allowed deviation (arc approximation)", _BS + "Maximum allowed deviation"),
+    "clearance": (JLCPCB_1OZ["clearance"], "net class Default clearance", _NC + "Clearance"),
+    "track_width": (JLCPCB_1OZ["width"], "net class Default track width", _NC + "Track Width"),
+    "via_diameter": (JLCPCB_1OZ["via_d"], "net class Default via size", _NC + "Via Size"),
+    "via_drill": (JLCPCB_1OZ["via_drill"], "net class Default via hole", _NC + "Via Hole"),
+}
+
+
+def _fallback_row(field: str) -> dict:
+    jlc, label, setting = _FALLBACK_SRC[field]
+    kicad = KICAD_ABSENT_NM.get(field, KICAD_CLASS_ABSENT_NM.get(field, 0))
+    return {"field": field, "label": label, "value": kicad if jlc is None else max(int(jlc), kicad),
+            "jlcpcb": jlc, "kicad": kicad, "setting": setting}
+
+
+#: Fallback per field the board does not provide (nm): the JLCPCB 1 oz value, raised to KiCad's own value for the
+#: missing key where that is stricter (KiCad's DRC judges the result with its own value; "KiCad tools are the
+#: spec"). Fields without a JLCPCB figure (minimum connection width, arc deviation) take KiCad's value.
+RULE_FALLBACK: dict = {f: _fallback_row(f) for f in _FALLBACK_SRC}
+#: The via drill's clearance when the hole clearance is missing: JLCPCB's via hole to track 0.2 mm, raised to
+#: KiCad's 0.25 mm (component holes use RULE_FALLBACK["min_hole_clearance"], JLCPCB's PTH 0.35 mm).
+VIA_HOLE_FALLBACK = max(JLCPCB_1OZ["via_hole_to_track"], KICAD_ABSENT_NM["min_hole_clearance"])
+
+
+def fallback_text(row: dict) -> str:
+    """The report line of one used fallback (`row`: a :data:`RULE_FALLBACK` entry, or a range-reset row of
+    :func:`reset_row`). O(1)."""
+    if "reset_from" in row:
+        lo, hi = row["range"]
+        return (f"rule fallback: {row['label']} {row['reset_from'] / 1e6:g} mm is outside KiCad's range "
+                f"[{lo / 1e6:g}, {hi / 1e6:g}] mm -> {row['value'] / 1e6:g} mm used (KiCad resets it to this on "
+                f"load and its DRC uses it); set it in {row['setting']}")
+    src = (f"JLCPCB 1 oz {row['jlcpcb'] / 1e6:g} mm, KiCad's own {row['kicad'] / 1e6:g} mm, the stricter"
+           if row.get("jlcpcb") is not None else "KiCad's own value; JLCPCB gives none")
+    return (f"rule fallback: {row['label']} is not set by the board -> {row['value'] / 1e6:g} mm used ({src}); "
+            f"set it in {row['setting']}")
+
+
+def reset_row(field: str, given: int) -> dict:
+    """The fallback row of a ``board.design_settings.rules`` value outside KiCad's load range
+    (:data:`KICAD_RANGE_NM`): KiCad's reset value, the given value and the range. O(1)."""
+    lo, hi, reset = KICAD_RANGE_NM[field]
+    _, label, setting = _FALLBACK_SRC[field]
+    return {"field": field, "label": label, "value": reset, "jlcpcb": None, "kicad": reset, "setting": setting,
+            "reset_from": int(given), "range": (lo, hi)}
+
+
+_POWER_RE = re.compile(r"^(\+|-)?\d|^(V|VCC|VDD|VBAT|GND|AGND|PWR)")
+_REFUSE = ("track_angle", "track_segment_length")
 
 
 @dataclass(frozen=True)
@@ -78,11 +171,6 @@ class NetClassVals:
     track_width: int | None = None
     via_diameter: int | None = None
     via_drill: int | None = None
-
-
-def _nz(v, fallback: int) -> int:
-    v = int(v)
-    return v if v > 0 else fallback
 
 
 def _nm(mm) -> int:
@@ -183,16 +271,37 @@ def netclass_of_from_pro(pro: dict, net_names) -> dict[str, str]:
     return out
 
 
-def rule_values_from_pro(pro: dict) -> dict[str, int]:
-    """``board.design_settings.rules`` as nm, KiCad defaults for unset keys. ``max_error`` is read from
-    ``rules`` and falls back to ``design_settings``. O(1)."""
+def board_rule_values(pro: dict, resets: dict | None = None) -> tuple[dict[str, int], list[str]]:
+    """``board.design_settings.rules`` as nm and the keys the project file does not carry (in
+    :data:`KICAD_ABSENT_NM` order). A missing (or non-numeric) key takes its :data:`RULE_FALLBACK` value; a value
+    the file carries is used as is, 0 and negative values included (KiCad: 0 = no minimum; -0.01 mm is KiCad's
+    legacy copper-to-edge flag, i.e. no minimum here), unless it lies outside KiCad's load range
+    (:data:`KICAD_RANGE_NM`, e.g. ``max_error`` 0): then it takes the value KiCad resets it to on load, and
+    `resets` (when given) receives ``{key: given value}``. ``max_error`` is read from ``rules`` and, for older
+    files, from ``design_settings``. O(1)."""
     ds = (pro.get("board") or {}).get("design_settings") or {}
     rules = ds.get("rules") or {}
-    out = {}
-    for k, d in _RULE_DEFAULTS_NM.items():
+    out: dict[str, int] = {}
+    missing: list[str] = []
+    for k in KICAD_ABSENT_NM:
         v = rules.get(k, ds.get(k) if k == "max_error" else None)
-        out[k] = _nm(v) if v is not None else d
-    return out
+        try:
+            out[k] = _nm(v)
+        except (TypeError, ValueError):
+            out[k] = RULE_FALLBACK[k]["value"]
+            missing.append(k)
+            continue
+        lo, hi, reset = KICAD_RANGE_NM[k]
+        if not lo <= out[k] <= hi:
+            if resets is not None:
+                resets[k] = out[k]
+            out[k] = reset
+    return out, missing
+
+
+def rule_values_from_pro(pro: dict) -> dict[str, int]:
+    """The values of :func:`board_rule_values` (fallbacks filled in). O(1)."""
+    return board_rule_values(pro)[0]
 
 
 def ignored_checks_from_pro(pro: dict) -> list[str]:
@@ -217,91 +326,94 @@ def resolve_rules_from_project(
     classes: dict[str, NetClassVals],
     widths_before: dict,
     settings_table: dict[str, int] | None = None,
-    profile: dict = JLCPCB_1OZ,
-    apply_fab_floors: bool = True,
     copper_layer_count: int = 2,
     net_codes: dict[str, int] | None = None,
     layer_names: dict[int, str] | None = None,
     fab_profile: str = DEFAULT_FAB_PROFILE,
 ) -> dict:
-    """Resolve design rules; manufacturer minimums (the profile) are FLOORS.
+    """Resolve the design rules the router works to from the board's KiCad configuration.
 
     Custom rules (`dru_text`) are applied as :mod:`toporlib.custom_rules` describes (per-net values, board-wide
     edge / hole clearance, a region plan in ``custom_regions``, a report in ``custom_rules``); `layer_names`:
     copper layer id -> the board's (user) layer name, so a rule's ``(layer "<user name>")`` matches.
 
-    `pro`: parsed .kicad_pro (design-rule floors). `netclass_of`: net name -> effective class name (``""``
-    optional -> Default; a composite ``"Power,Default"`` is resolved from `classes` unless it is itself a
-    key of `classes`). `classes`: class name -> values (None = unset; falls back to the Default class, then
-    KiCad's built-ins). `widths_before`: net name -> object with ``median_nm``. `net_codes`: net name ->
-    code for the ``per_net`` keys (default: :func:`net_codes_by_name` of `netclass_of`).
+    `pro`: parsed .kicad_pro (Board Setup constraints, pre-defined vias). `netclass_of`: net name -> effective class
+    name (``""`` optional -> Default; a composite ``"Power,Default"`` is resolved from `classes` unless it is itself
+    a key of `classes`). `classes`: class name -> values (None = unset: the next class of the composite, then the
+    Default class, as KiCad composes them). `widths_before`: net name -> object with ``median_nm``. `net_codes`:
+    net name -> code for the ``per_net`` keys (default: :func:`net_codes_by_name` of `netclass_of`).
 
-    With `apply_fab_floors` (default) every design value below the profile minimum is raised to it and
-    reported in `floors_applied` (`[{"name", "design", "floor"}]`, nm) and in `warnings`
-    (`floor: <name> <design> -> <floor> mm`); values above the floor are used as-is. A design value of 0
-    means "unset" and is silently filled from the profile. `apply_fab_floors=False` uses the board's own
-    values (the profile only fills unset zeros).
+    `fab_profile` (``[rules] fab_profile``): ``"board"`` (default) = the board's values exactly as KiCad's DRC
+    judges them: a minimum of 0 stays 0 (no minimum), a matching custom rule's clearance / width / via (per net or
+    in a courtyard / rule-area region) is used as given, also below the Board Setup minimum (KiCad drc_engine.cpp
+    EvalRules: a matching custom rule returns before the implicit board-minimum rule). A key of
+    :data:`FAB_PROFILES` (opt-in floor mode) raises every design value below the profile minimum to it, reported
+    in ``floors_applied`` (``[{"name", "design", "floor"}]``, nm) and in ``warnings`` (``floor: <name> <design> ->
+    <floor> mm``).
 
-    `fab_profile` (``[rules] fab_profile``): a key of :data:`FAB_PROFILES` (default ``"jlcpcb_1oz"``: `profile`
-    as given) or ``"board"``: no profile at all -- no floor, a board minimum of 0 stays 0 (KiCad: no minimum), no
-    fab-profile alternative vias (``routing_vias`` / ``drill_list`` empty), and a custom rule's clearance / width
-    (per net or in a courtyard / rule-area region) is used as the rule gives it, also below the Board Setup
-    minimum, as KiCad's DRC does (the matching custom rule wins over the implicit board rule; KiCad 10 PCB Editor
-    manual, "Custom design rules"). The result carries ``"profile"`` (the profile name or ``"board"``).
+    A field the board does not provide at all takes its :data:`RULE_FALLBACK` value, listed in ``fallbacks``
+    (rows of :data:`RULE_FALLBACK`) and in ``warnings`` (:func:`fallback_text`). The result carries ``"profile"``
+    (``"board"`` or the floor profile's name; report only, the engine never reads it). The via alternatives are
+    the board's pre-defined vias (``predefined_vias``); there is no fab-profile via list.
     """
     board_auth = fab_profile == BOARD_AUTHORITY
-    if not board_auth:
-        if fab_profile not in FAB_PROFILES:
-            raise ValueError(f"unknown [rules] fab_profile {fab_profile!r} (known: "
-                             f"{', '.join([*FAB_PROFILES, BOARD_AUTHORITY])})")
-        if fab_profile != DEFAULT_FAB_PROFILE:
-            profile = FAB_PROFILES[fab_profile]
-    else:
-        apply_fab_floors = False
+    if not board_auth and fab_profile not in FAB_PROFILES:
+        raise ValueError(f"unknown [rules] fab_profile {fab_profile!r} (known: "
+                         f"{', '.join([BOARD_AUTHORITY, *FAB_PROFILES])})")
+    profile = FAB_PROFILES.get(fab_profile)
     settings_table = settings_table or {}
-    dv = rule_values_from_pro(pro)
+    resets: dict[str, int] = {}
+    dv, missing = board_rule_values(pro, resets)
+    fallbacks: dict[str, dict] = {k: RULE_FALLBACK[k] for k in missing}
+    fallbacks.update({k: reset_row(k, v) for k, v in resets.items()})
     codes = net_codes if net_codes is not None else net_codes_by_name(netclass_of)
     cr = CustomRules(parse_dru(dru_text) if dru_text else [], canonical_layers(copper_layer_count),
                      {v: canonical_name(k) for k, v in (layer_names or {}).items()})
     cr_nets = [(n, netclass_of.get(n, "Default"), _diff_base(n)) for n in [""] + sorted(codes)] if cr else []
+    hole_missing = "min_hole_clearance" in missing
     if cr:
-        # Board-wide custom values replace the Board Setup ones before the fab floors (KiCad: the matching
-        # custom rule wins over the implicit board rule).
-        dv["min_copper_edge_clearance"] = cr.board("edge_clearance", dv["min_copper_edge_clearance"], cr_nets)
-        dv["min_hole_clearance"] = cr.board("hole_clearance", dv["min_hole_clearance"], cr_nets)
+        # Board-wide custom values replace the Board Setup ones (KiCad: the matching custom rule wins over the
+        # implicit board rule); a custom value is a board value, so it also replaces a fallback.
+        for key, con in (("min_copper_edge_clearance", "edge_clearance"), ("min_hole_clearance", "hole_clearance")):
+            got = cr.board(con, dv[key], cr_nets)
+            if got != dv[key]:  # a custom rule gives the value (else the Board Setup / fallback value stays)
+                dv[key] = got
+                fallbacks.pop(key, None)
+                hole_missing = hole_missing and key != "min_hole_clearance"
     warnings: list[str] = []
     floors_applied: list[dict] = []
-    annular_floor = profile["annular_2l"] if copper_layer_count <= 2 else profile["annular_4l"]
+    annular_floor = (profile["annular_2l"] if copper_layer_count <= 2 else profile["annular_4l"]) if profile else 0
 
     def floored(name: str, design, floor: int) -> int:
         design = int(design)
         if board_auth:  # Board Setup is the authority: its value as is (0 = no minimum, as in KiCad)
             return max(design, 0)
-        if design <= 0:
-            return floor
-        if apply_fab_floors and design < floor:
+        if design < floor:
             floors_applied.append({"name": name, "design": design, "floor": floor})
             warnings.append(f"floor: {name} {design / 1e6:g} -> {floor / 1e6:g} mm")
             return floor
         return design
 
+    P = profile or {}
+    # The drill of a via the router places keeps KiCad's hole clearance (the floor mode: floored by the fab's VIA
+    # hole to track, JLCPCB 0.2 mm, not its PTH value 0.35 mm for component holes); a missing hole clearance:
+    # VIA_HOLE_FALLBACK for vias, RULE_FALLBACK (PTH) for component holes.
+    via_hole_design = VIA_HOLE_FALLBACK if hole_missing else dv["min_hole_clearance"]
     floors = {
-        "min_clearance": floored("min_clearance", dv["min_clearance"], profile["clearance"]),
-        "min_track_width": floored("min_track_width", dv["min_track_width"], profile["width"]),
-        "min_via_diameter": floored("min_via_diameter", dv["min_via_diameter"], profile["via_d_min_auto"]),
-        "min_via_drill": floored("min_via_drill", dv["min_through_hole_diameter"], profile["via_drill_min_auto"]),
+        "min_clearance": floored("min_clearance", dv["min_clearance"], P.get("clearance", 0)),
+        "min_track_width": floored("min_track_width", dv["min_track_width"], P.get("width", 0)),
+        "min_via_diameter": floored("min_via_diameter", dv["min_via_diameter"], P.get("via_d_min_auto", 0)),
+        "min_via_drill": floored("min_via_drill", dv["min_through_hole_diameter"], P.get("via_drill_min_auto", 0)),
         "min_annular": floored("min_annular", dv["min_via_annular_width"], annular_floor),
-        "hole_clearance": floored("hole_clearance", dv["min_hole_clearance"], profile["pth_hole_to_track"]),
-        # The drill of a via the router places keeps KiCad's hole clearance floored by the fab's VIA hole to
-        # track (JLCPCB 0.2 mm), not its PTH value (0.35 mm, `hole_clearance` above, for component holes).
-        "via_hole_clearance": floored("via_hole_clearance", dv["min_hole_clearance"],
-                                      profile.get("via_hole_to_track", profile["pth_hole_to_track"])),
-        "hole_to_hole": floored("hole_to_hole", dv["min_hole_to_hole"], profile["hole_to_hole_via"]),
-        "edge_clearance": floored("edge_clearance", dv["min_copper_edge_clearance"], profile["edge"]),
-        "max_error": _nz(dv["max_error"], 5_000),
+        "hole_clearance": floored("hole_clearance", dv["min_hole_clearance"], P.get("pth_hole_to_track", 0)),
+        "via_hole_clearance": floored("via_hole_clearance", via_hole_design,
+                                      P.get("via_hole_to_track", P.get("pth_hole_to_track", 0))),
+        "hole_to_hole": floored("hole_to_hole", dv["min_hole_to_hole"], P.get("hole_to_hole_via", 0)),
+        "edge_clearance": floored("edge_clearance", dv["min_copper_edge_clearance"], P.get("edge", 0)),
+        "max_error": int(dv["max_error"]),  # in KiCad's range (board_rule_values: an out-of-range value is reset)
         # Narrowest copper connection KiCad accepts (Board Setup > Constraints > Minimum connection width): a
-        # necked pad exit may not go below it. 0 = unset (no limit).
-        "min_connection": int(dv["min_connection"]),
+        # necked pad exit may not go below it. 0 = no limit (KiCad's own value).
+        "min_connection": max(int(dv["min_connection"]), 0),
     }
 
     rules: list[DruRule] = parse_dru(dru_text) if dru_text else []
@@ -316,20 +428,18 @@ def resolve_rules_from_project(
             warnings.append(f"REFUSE: rule {r.name} disallows {' '.join(r.disallow)} without a supported "
                             "area condition (A.insideArea('name'))")
 
-    # a net class value of 0 (unset): the profile's, or KiCad's built-in Default class value without a profile
-    unset_via = ((_CLASS_DEFAULTS_NM["via_diameter"], _CLASS_DEFAULTS_NM["via_drill"]) if board_auth
-                 else (profile["via_d"], profile["via_drill"]))
-    unset_width = _CLASS_DEFAULTS_NM["track_width"] if board_auth else profile["width"]
-
     def eff(ncname: str, field: str) -> int:
-        """First class of the (composite) name that sets `field`, else Default, else KiCad's built-in."""
+        """First class of the (composite) name that sets `field`, else Default (KiCad's composition), else the
+        fallback (reported). A track width / via size of 0 is no usable size: the next class decides (a 0
+        clearance is a real value)."""
         parts = [ncname] if ncname in classes else ncname.split(",")
         for p in parts + ["Default"]:
             c = classes.get(p)
             v = getattr(c, field, None) if c is not None else None
-            if v is not None:
+            if v is not None and (int(v) > 0 or field == "clearance"):
                 return int(v)
-        return _CLASS_DEFAULTS_NM[field]
+        fallbacks.setdefault(field, RULE_FALLBACK[field])
+        return int(RULE_FALLBACK[field]["value"])
 
     def base_clearance(net_name: str) -> int:
         return max(eff(netclass_of.get(net_name, "Default"), "clearance"), floors["min_clearance"])
@@ -338,8 +448,8 @@ def resolve_rules_from_project(
         ncname = netclass_of.get(net_name, "Default")
         clearance = base_clearance(net_name)
         class_w = eff(ncname, "track_width")
-        via_d = max(_nz(eff(ncname, "via_diameter"), unset_via[0]), floors["min_via_diameter"])
-        via_drill = max(_nz(eff(ncname, "via_drill"), unset_via[1]), floors["min_via_drill"])
+        via_d = max(eff(ncname, "via_diameter"), floors["min_via_diameter"])
+        via_drill = max(eff(ncname, "via_drill"), floors["min_via_drill"])
         cu = cr.net(net=net_name, netclass=ncname, base_clearance=clearance, base_width=class_w,
                     base_via=(via_d, via_drill), diff_base=_diff_base(net_name)) if cr else None
         if cu is not None and cu.clearance is not None and board_auth:
@@ -354,14 +464,14 @@ def resolve_rules_from_project(
         non_default = any(p != "Default" for p in ncname.split(","))
         if custom_w is not None:
             width, src = custom_w, "custom_rule"
-        elif non_default and class_w > 0:
+        elif non_default:
             width, src = class_w, "netclass"
         elif net_name in widths_before:
             width, src = widths_before[net_name].median_nm, "existing_copper"
         elif net_name in settings_table:
             width, src = int(settings_table[net_name]), "settings_table"
         else:
-            width, src = class_w if class_w > 0 else unset_width, "default"
+            width, src = class_w, "default"
         if cu is not None and src != "custom_rule":
             # a custom min / max still bounds a width from elsewhere
             if cu.min_width and width < cu.min_width:
@@ -379,7 +489,7 @@ def resolve_rules_from_project(
             via_d = cu.via_d if board_auth else max(cu.via_d, floors["min_via_diameter"])
         if cu is not None and cu.via_drill is not None:
             via_drill = cu.via_drill if board_auth else max(cu.via_drill, floors["min_via_drill"])
-        return {
+        out = {
             "clearance": clearance,
             "width": width,
             "via_d": via_d,
@@ -388,9 +498,17 @@ def resolve_rules_from_project(
             "width_source": src,
             "min_width": custom_min_w,
         }
+        # a custom-rule via minimum (engine NetRule via_d_min / via_drill_min; only when a rule sets one): the
+        # smallest via the net may get (diff pairs, [vias] size = "board_min", pre-defined alternatives)
+        if cu is not None and cu.via_d_min:
+            out["via_d_min"] = cu.via_d_min if board_auth else max(cu.via_d_min, floors["min_via_diameter"])
+        if cu is not None and cu.via_drill_min:
+            out["via_drill_min"] = cu.via_drill_min if board_auth else max(cu.via_drill_min, floors["min_via_drill"])
+        return out
 
     if cr:
-        # the region floor: the fab / board minimum, none with the board as the authority (KiCad: the custom rule wins)
+        # the region floor: the fab minimum in the floor mode, none with the board as the authority (KiCad: the
+        # custom rule wins)
         cr.plan_regions(cr_nets, {n: base_clearance(n) for n, _c, _d in cr_nets},
                         0 if board_auth else floors["min_clearance"])
     default = net_rule("")
@@ -406,6 +524,8 @@ def resolve_rules_from_project(
         warnings.extend(cr.rule_warnings(skip=_REFUSE))
         warnings.extend(cr.notes.items)
 
+    fb_rows = [fallbacks[k] for k in _FALLBACK_SRC if k in fallbacks]
+    warnings.extend(fallback_text(r) for r in fb_rows)
     predefined = predefined_vias_from_pro(pro)
     if via_setup_missing_from(predefined, classes):
         warnings.append("via sizes not set up: no pre-defined via and every net class via is KiCad's factory "
@@ -413,13 +533,11 @@ def resolve_rules_from_project(
     return {
         **floors,
         "profile": BOARD_AUTHORITY if board_auth else fab_profile,
-        # the fab profile's drills and smaller alternative vias; none without a profile (KiCad's own vias only)
-        "drill_list": [] if board_auth else list(profile["drill_list"]),
-        "routing_vias": [] if board_auth else list(profile["routing_vias"]),
         "predefined_vias": predefined,
         "default": default,
         "per_net": per_net,
         "floors_applied": floors_applied,
+        "fallbacks": [dict(r) for r in fb_rows],
         "warnings": warnings,
         "ignored_checks": ignored_checks_from_pro(pro),
         # How each custom rule is used (report) and the courtyard / rule-area regions the model export turns

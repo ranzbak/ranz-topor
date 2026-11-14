@@ -2,8 +2,8 @@
 //! criteria"): with the option on, the variant table counts per variant the connections with a
 //! short, the picked one's count is the result's own (its `short` violations), and no variant of
 //! the same error count has fewer; with it off, no variant counts a short and the pick takes
-//! the fewest errors as before. Fixtures: the qmtech and dcsgonebadge USB crops (dense pad
-//! exits, where the drawing writes shorts).
+//! the fewest errors as before. Fixtures: the qmtech and esp-rust-board USB crops (dense pad
+//! exits, where the drawing writes shorts; esp-rs/esp-rust-board, CERN-OHL-P-2.0, `source` in the fixture).
 
 use std::collections::BTreeSet;
 use topor_engine::model::{BoardModel, Options};
@@ -35,6 +35,6 @@ fn qmtech_usb_crop_ranks_shorts_with_the_option_and_not_without() {
 }
 
 #[test]
-fn dcsgone_usb_crop_ranks_shorts_with_the_option_and_not_without() {
-    check("dcsgone-usb-crop", include_str!("fixtures/dcsgone-usb-crop.json"));
+fn esp_rust_board_usb_crop_ranks_shorts_with_the_option_and_not_without() {
+    check("esp-rust-board-usb-crop", include_str!("fixtures/esp-rust-board-usb-crop.json"));
 }

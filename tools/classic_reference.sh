@@ -2,7 +2,7 @@
 # Freeze the classic reference (S6 gate): build main @ 64b3979 in a temp worktree, run it once per board with
 # tools/route_board.sh (same metric code as for topor-topo), write the table, remove the worktree.
 #   tools/classic_reference.sh <out_dir> [--timeout S] [board ...]
-# Boards (default: all): qmtech qmtech-usb-crop dcsgone-usb-crop eprom-to-kernal wiccon-2023 tanmatsu bornhack2026 hh2027
+# Boards (default: all): qmtech qmtech-usb-crop esp-rust-board-usb-crop eprom-to-kernal wiccon-2023 tanmatsu bornhack2026 hh2027
 # Environment: TOPOR_BOARDS (default <repo>/scratch/boards; in a git worktree point it at the main tree's),
 #   TOPOR_VENV, CLASSIC_COMMIT (default 64b3979), CLASSIC_KEEP=1 keeps the temp worktree.
 set -euo pipefail
@@ -13,7 +13,7 @@ COMMIT="${CLASSIC_COMMIT:-64b3979}"
 OUT="$(mkdir -p "$1" && cd "$1" && pwd)"; shift
 TIMEOUT=600
 if [ "${1:-}" = "--timeout" ]; then TIMEOUT="$2"; shift 2; fi
-WANT=("$@"); [ ${#WANT[@]} -eq 0 ] && WANT=(qmtech qmtech-usb-crop dcsgone-usb-crop eprom-to-kernal wiccon-2023 tanmatsu bornhack2026 hh2027)
+WANT=("$@"); [ ${#WANT[@]} -eq 0 ] && WANT=(qmtech qmtech-usb-crop esp-rust-board-usb-crop eprom-to-kernal wiccon-2023 tanmatsu bornhack2026 hh2027)
 want() { for w in "${WANT[@]}"; do [ "$w" = "$1" ] && return 0; done; return 1; }
 
 TMP="$(mktemp -d)"
@@ -32,14 +32,15 @@ run_board() { # name pcb [extra args]
     echo "== $name"; "$ROOT/tools/route_board.sh" "$pcb" "$OUT/$name" --name "$name" --timeout "$TIMEOUT" "$@" 2>&1 \
         | grep -v "Debug: Adding duplicate" | tail -12
 }
-run_crop() { # name fixture
+run_crop() { # name fixture (from the classic commit, else from this tree: crops added later)
     want "$1" || return 0
-    echo "== $1"; git -C "$WT" show "$COMMIT:engine/tests/fixtures/$2" >"$OUT/$2"
+    echo "== $1"; git -C "$WT" show "$COMMIT:engine/tests/fixtures/$2" >"$OUT/$2" 2>/dev/null \
+        || cp "$ROOT/engine/tests/fixtures/$2" "$OUT/$2"
     PYTHONPATH="$TOPOR_ENGINE_SITE:$WT" "$VENV/bin/python" -P "$ROOT/harness/classic_ref.py" crop "$OUT/$2" "$1" "$OUT/crop-$1.json"
 }
 run_board qmtech "$B/qmtech-rec-on/qmtech-minimig.kicad_pcb"
 run_crop qmtech-usb-crop qmtech-usb-crop.json
-run_crop dcsgone-usb-crop dcsgone-usb-crop.json
+run_crop esp-rust-board-usb-crop esp-rust-board-usb-crop.json
 run_board eprom-to-kernal "$B/eprom-to-kernal/bfaf705c0f25/eprom-to-kernal.kicad_pcb"
 run_board wiccon-2023 "$B/wiccon-2023/2d3063e70ed5/2023.kicad_pcb"
 run_board tanmatsu "$B/tanmatsu-copy/tanmatsu.kicad_pcb"

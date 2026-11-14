@@ -99,6 +99,11 @@ fn planned_crossing_window_predicts_no_via_without_a_site() {
 
 /// The drawn half of the test above under the cut model (`[capacity] model = "cuts"`, the M0 default until 2026-11-13). Fails at M0: a
 /// drawn-side miss parked until the draw-once stages (M2/M3); un-ignore when they land.
+///
+/// Board-rules diagnosis (2026-11-13), shopping list item CM1 "Capacity measure completeness: a
+/// foreign band through a planned via disc must count": SDA's planned F.Cu band runs through the
+/// centre of a planned VCC via; the cut measure has no cut inside a feature, so the plan predicts 0
+/// violations and the drawing then finds no room for both vias (1.36 mm apart, 1.45 mm needed).
 #[test]
 #[ignore = "M0 parked: cut model, plan predicts 0 violations but the sequential drawing shorts SDA into VCC on F.Cu (M2/M3 draw once)"]
 fn planned_crossing_window_draws_clean_with_the_cut_model() {

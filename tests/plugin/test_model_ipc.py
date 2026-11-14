@@ -466,6 +466,7 @@ def test_export_model_ipc_end_to_end_and_engine_loads_it(engine):
     assert nt["net_tie_group"] == 0 and m["net_ties"] == [{"ref": "NT1", "groups": [["1", "2"]], "nets": [[1, 2]]}]
     assert len(m["kept"]) == 1 and m["kept"][0]["net"] == 1 and len(m["vias"]) == 1 and m["vias"][0]["free"]
     assert len(m["outline"]) == 2 and any(c["layer"] == 0 for c in m["copper_shapes"])
+    assert m["rules"]["outline_half_stroke"] == 50_000  # B2: half the 0.1 mm Edge.Cuts stroke (as harness.model)
     assert [(k["name"], k["no_tracks"], k["no_vias"]) for k in m["keepouts"]] == [
         ("ant", True, True), ("dru:r", False, True)]
     assert [p["uuid"] for p in m["pours"]] == ["gnd-pour"] and m["pours"][0]["pads"] == ["R1.1"]
@@ -509,7 +510,7 @@ def test_export_model_ipc_via_free_is_the_kicad_flag():
 
 
 def test_thick_arc_is_one_obstacle_ring_containing_its_stroke():
-    """K1 (live dcsgonebadge): a 2 mm wide GND arc of radius 1 mm became 44 capsule rings (44 planner obstacles)
+    """K1 (live plugin run on a 2-layer badge): a 2 mm wide GND arc of radius 1 mm became 44 capsule rings (44 planner obstacles)
     over IPC, one polygon in the harness; now one ring that still contains the stroke."""
     import math as _m
     from toporlib import geom
@@ -526,13 +527,13 @@ def test_thick_arc_is_one_obstacle_ring_containing_its_stroke():
 
 
 def test_filled_stroked_concave_polygon_is_one_ring():
-    """K1 (live dcsgonebadge): an "E"-shaped filled gr_poly with a 0.2 mm stroke became the polygon plus 12 edge
+    """K1 (live plugin run): an "E"-shaped filled gr_poly with a 0.2 mm stroke became the polygon plus 12 edge
     capsules (13 overlapping obstacle rings; the engine's triangulation panicked on that model); now one ring,
     the polygon grown by half the stroke, which contains every edge capsule."""
     from toporlib import geom
-    e = [(67302355, 58798981), (71149731, 58798981), (71149731, 59431728), (68314410, 59431728),
-         (68314410, 61643783), (70485944, 61643783), (70485944, 62229118), (68314410, 62229118),
-         (68314410, 64474364), (71149731, 64474364), (71149731, 65107111), (67302355, 65107111)]
+    e = [(0, 0), (3847376, 0), (3847376, 632747), (1012055, 632747),
+         (1012055, 2844802), (3183589, 2844802), (3183589, 3430137), (1012055, 3430137),
+         (1012055, 5675383), (3847376, 5675383), (3847376, 6308130), (0, 6308130)]
     g = geom.grow_ring_outward(e, 100_000, 500)
     assert g is not None and geom.ring_is_simple(g)
     for cap in geom.polyline_stroke_rings(e, 200_000, 500, closed=True):
@@ -544,7 +545,7 @@ def test_filled_stroked_concave_polygon_is_one_ring():
 
 
 def test_custom_pad_polygon_arcs_are_flattened_outward():
-    """K1 (live dcsgonebadge, 7 KiCad clearance violations at JP1.3): the arc side of a custom pad's polygon was
+    """K1 (live plugin run, 7 KiCad clearance violations at a solder-jumper pad): the arc side of a custom pad's polygon was
     flattened with vertices on the arc, up to max_error inside KiCad's copper. Now every point of the true arc lies
     inside the obstacle ring."""
     import math as _m
@@ -566,7 +567,7 @@ def test_custom_pad_polygon_arcs_are_flattened_outward():
 
 def test_custom_pad_polygon_of_flattened_circles_is_grown_by_max_error():
     """K1: KiCad's pad polygon arrives as points ON the circles (chords inside the copper); the obstacle is grown by
-    the board's max error so it contains the true circle (dcsgonebadge JP1.3: two filled r = 0.5 mm circles)."""
+    the board's max error so it contains the true circle (a solder-jumper pad of two filled r = 0.5 mm circles)."""
     import math as _m
     from kipy.geometry import PolygonWithHoles
     from toporlib import geom

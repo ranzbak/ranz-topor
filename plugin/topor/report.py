@@ -78,7 +78,8 @@ class RunReport:
     total, nets, layers, partial, failed, vias, vias_before, length_mm, length_before_mm, routing_new,
     preexisting, unconnected, detour_line, stop_reason, iterations, elapsed_s, threads, scope, existing_copper,
     respect_locked, non_default, defaults_used, findings (list of Finding), notes (list of str), drc_rounds,
-    floors_applied (toporlib.rules ``[{"name", "design", "floor"}]`` nm; set by run.py);
+    floors_applied (toporlib.rules ``[{"name", "design", "floor"}]`` nm; set by run.py; listed only with the opt-in
+    floor mode), fab_profile, rule_fallbacks (toporlib.rules.fallback_text lines; set by run.py);
     set by build_report: connection_rows, net_rows, partial_routes, zero_slack_wires, vias_in_pads,
     ignored_pads, fallbacks, accepted_codes, non_defaults, versions, drc_by_type_*, unconnected_pre*."""
 
@@ -265,13 +266,18 @@ class RunReport:
         out = ["Non-default settings:"] + ([f"- {k} = {v!r}" for k, v in sorted(nd.items())] or ["- none"])
         out.append(f"Built-in defaults used: {_na(f.get('defaults_used'))} settings")
         out.append("Accepted fallbacks: " + (", ".join(f["fallbacks"]) if f.get("fallbacks") else "none"))
-        if f.get("fab_profile") == "board":  # [rules] fab_profile = "board": no profile, no floors
-            out.append("Fab floors raised: none ([rules] fab_profile = \"board\": Board Setup, net classes and custom "
-                       "rules are the authority)")
-        elif "floors_applied" in f:  # toporlib.rules: KiCad minimums below the fab profile, raised (F I-4)
+        if f.get("fab_profile") not in (None, "board") and "floors_applied" in f:
+            # opt-in [rules] fab_profile = "jlcpcb_1oz": KiCad values below the fab minimums, raised (F I-4)
             fl = f["floors_applied"] or []
-            out.append("Fab floors raised (JLCPCB 1 oz profile): " + (", ".join(
+            out.append(f"Fab floors raised ([rules] fab_profile = \"{f['fab_profile']}\", opt-in): " + (", ".join(
                 f"{x['name']} {x['design'] / MM:g} → {x['floor'] / MM:g} mm" for x in fl) if fl else "none"))
+        elif "fab_profile" in f or "floors_applied" in f:
+            out.append("Design rules: the board's KiCad configuration (Board Setup constraints, net classes, "
+                       "pre-defined vias, custom rules), as KiCad's DRC uses them")
+        if "rule_fallbacks" in f:  # toporlib.rules RULE_FALLBACK: a field the board does not provide
+            rf = f["rule_fallbacks"] or []
+            out.append("Rule fallbacks (fields the board does not set): " + ("none" if not rf else f"{len(rf)}"))
+            out += [f"- {t}" for t in rf]
         tl = f.get("time_limit")
         if tl:  # the start limit, every change the user made during the run, the final limit
             out.append(f"Time limit ({tl.get('clock', 'wall')} clock): {limit_text(tl.get('start_s'))} at the start"

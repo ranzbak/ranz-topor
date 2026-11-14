@@ -9,7 +9,7 @@ the rule it encodes (say so in the commit + report).
 2. `tests/test_router.py::test_progress_m4_name_and_caption_lines`: find why it fails (run it; harness/progress.py caption lines vs
    the A7/A0 detour columns, stop_reason line, etc.) and fix the code or the test by root cause.
 3. wiccon plugin path counts 63 connections, harness 62: `tests/plugin/test_run_flow.py::test_run_wiccon_refill_gives_harness_
-   connection_count` and `tests/gate/test_m4b_gate.py` headless wiccon (total 63 ≠ 62). A6 merged overlapping same-net pads (dcsgone
+   connection_count` and `tests/gate/test_m4b_gate.py` headless wiccon (total 63 ≠ 62). A6 merged overlapping same-net pads (private-badge-b
    total 243 → 241) — likely the plugin's IPC/FakeBoard model export or plugin-side connection count differs from the harness model
    (pad merge, pour completion, ignore_pads, refill). Diff the two models / RouteResults (connections list) and fix where they
    diverge. If the root cause is in the engine (Rust), stop and report it with the evidence instead of changing Rust.

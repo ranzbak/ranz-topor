@@ -258,7 +258,7 @@ def arc_stroke_rings(s, m, e, w: float, max_err: int) -> list[list[list[int]]]:
         e3 = max(int(max_err) // 3, 1)
         if r - hw <= max_err and abs(sw) < TAU - 1e-9:
             # The stroke covers (almost) the centre: ONE ring, the union of the wedge and the two end discs (K1:
-            # the capsule chain below gave dcsgonebadge's 2 mm wide GND arcs of radius 1 mm 44 overlapping rings
+            # the capsule chain below gave a 2-layer badge's 2 mm wide GND arcs of radius 1 mm 44 overlapping rings
             # each, 704 planner obstacles instead of 16; the harness exports one polygon per shape).
             return [star_stroke_ring(c, r, a0, sw, max(hw, r), max_err)]
         return polyline_stroke_rings(chord_arc_pts(c, r, a0, sw, e3), w, e3, grow=e3)

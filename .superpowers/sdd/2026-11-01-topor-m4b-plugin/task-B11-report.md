@@ -37,7 +37,7 @@ Status: DONE_WITH_CONCERNS (see Concerns). Branch `worktree-agent-ad92ae9abcddab
 - `CONTRIBUTING.md` (new): layout incl. `toporlib/`, build (maturin develop, build.sh, `--dev` caveat, version files), tests, read-only
   projects / snapshots / copies, schema → toml → configuration.md, MESSAGES → troubleshoot.md (regeneration snippet), code rules
   (Big-O, determinism, UNVERIFIED, no detours, progress PNGs), commit style.
-- `README.md`: 0.4.0 / M4b status table (works now vs 0.5.0 M4a: dcsgone 231/231 etc.), requirements (KiCad 10, Python ≥ 3.11),
+- `README.md`: 0.4.0 / M4b status table (works now vs 0.5.0 M4a: private-badge-b N/N etc.), requirements (KiCad 10, Python ≥ 3.11),
   user-guide links, quick start, dev section, layout incl. toporlib. `docs/README.md`: "User guide" + "Developer" sections.
 - `docs/design/45-mvp-plan.md`: M4 row records the split M4b (0.4.0 plugin) / M4a (0.5.0 engine) (M4-R2).
 - `plugin/topor/schema.py`: `[nets] priority` doc aligned with C22 / priority.py (marker > topor_pN > table; exact > glob; computed and

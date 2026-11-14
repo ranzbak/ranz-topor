@@ -175,7 +175,7 @@ def fx_two_sided_overlap(d: Path) -> Path:
 
 def fx_copper_graphic_corridor(d: Path) -> Path:
     """A copper graphic (gr_poly, no net) across the straight line of a two-pad net: the planner
-    routes around it, the drawing does not discover it (dcsgonebadge D5 "clearance vs shape"
+    routes around it, the drawing does not discover it (a 2-layer badge, D5 "clearance vs shape"
     failures, 1 -> 6: board.rs had no obstacles for copper graphics).
 
     SIG: (6, 10) and (24, 10) SMD on F.Cu; a 2 x 6 mm copper rectangle on F.Cu at x 14..16,
@@ -229,8 +229,8 @@ def fx_keepout_no_via_inner(d: Path) -> Path:
 def fx_pinned_crossing(d: Path) -> Path:
     """Two F.Cu nets that must cross in a cross-shaped corridor whose middle a foreign B.Cu pad
     covers: under it both wires are held to F.Cu, so they may not cross there (D6a layer pin:
-    dcsgonebadge 8 "crossing ... cannot be layered: both stretches are fixed to the same layer",
-    all inside the fan of a foreign pad on the other side, e.g. I2C_SDA x I2C_SCL over D7.3).
+    a 2-layer badge: 8 "crossing ... cannot be layered: both stretches are fixed to the same layer",
+    all inside the fan of a foreign pad on the other side, e.g. I2C_SDA x I2C_SCL over an LED pad).
 
     A (2, 10) - (28, 10) and B (15.3, 2) - (15.3, 18) on F.Cu; walls (both layers, no net) leave a
     corridor y 7..13 / x 12..18.5 with end caps; K: a 4 x 4 mm B.Cu pad at (15.6, 10.2)."""
@@ -268,8 +268,8 @@ def fx_local_pour_far_pads(d: Path) -> Path:
 def fx_same_layer_pour_stub(d: Path) -> Path:
     """A B.Cu pad of a pour net next to (not in) that net's B.Cu pour, with no via site anywhere
     (a no-via keepout over the board): a track on B.Cu from the pad into the fill joins it
-    (dcsgonebadge J1.A1, D6b: no via site inside the fill, so a signal connection D11.3 -> J1.A1,
-    16.4 mm with a via, ran on F.Cu inside the GND pour along J1.S1 and left a 0.096 mm neck).
+    (a USB-C GND pin, D6b: no via site inside the fill, so a signal connection from an LED pad to it,
+    16.4 mm with a via, ran on F.Cu inside the GND pour along the shield pad and left a 0.096 mm neck).
 
     GND: P (3, 10) 0.6 x 1.4 mm on B.Cu; Q (15, 10) inside a B.Cu GND pour 4.5..19 x 1..19."""
     f = Fx(20, 20, nets=("GND",))
@@ -281,7 +281,7 @@ def fx_same_layer_pour_stub(d: Path) -> Path:
 
 
 def fx_coincident_pad_stub(d: Path) -> Path:
-    """Two GND pads drawn on top of each other (a USB-C GND pin pair, dcsgonebadge J1.A1/J1.B12)
+    """Two GND pads drawn on top of each other (a USB-C GND pin pair, A1/B12)
     outside the B.Cu GND pour: the plane stub and via of one starts inside the other, which is
     the same copper (D6b: every stub was refused as grazing another pad of its net, so J1.A1 became
     a 16 mm signal connection that ran inside the F.Cu pour and left a 0.096 mm neck).
@@ -300,7 +300,7 @@ def fx_corner_wrap(d: Path) -> Path:
     """A signal that bends around the corners of a field of foreign pads: the drawing's exact
     path repairs the funnel stretch by stretch, and two repairs that wrap one corner from either
     side of a funnel vertex left that vertex as an out-and-back spike, a segment and its exact
-    reverse (D6b: wiccon 12, dcsgonebadge 14, qmtech 15, e.g. wiccon SCLK at (127.02, 142.00) B.Cu).
+    reverse (D6b: wiccon 12, a 2-layer badge 14, qmtech 15, e.g. wiccon SCLK at (127.02, 142.00) B.Cu).
 
     SIG: (2.5, 3) and (27.5, 17) on F.Cu; K: eight F.Cu pads between them."""
     f = Fx(30, 20, nets=("SIG", "K"))

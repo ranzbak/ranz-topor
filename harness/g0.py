@@ -34,10 +34,9 @@ def export(src: str, out_dir: Path, keep_planes: bool = False) -> tuple[Path, Pa
     widths = record_widths(b)
     rules = resolve_rules(b, dru_text=dru, widths_before=widths)
     model = export_model(b, rules, name=name, dru_text=dru)
-    # The hand reference carries the board's own rules (netclasses, design settings, .kicad_dru),
-    # NOT raised to the fab profile: the hand copper was DRC-checked against those, so a witness
-    # test against the floored rules would report the profile's capability limit as a model error.
-    hand_rules = resolve_rules(b, dru_text=dru, widths_before=widths, apply_fab_floors=False)
+    # The hand reference carries the board's own rules (netclasses, design settings, .kicad_dru): the hand
+    # copper was DRC-checked against those. Since 2026-11-12 the router's default is the same authority.
+    hand_rules = resolve_rules(b, dru_text=dru, widths_before=widths, fab_profile="board")
     hand_model = export_model(b, hand_rules, name=name, dru_text=dru)
     # A copper layer with a pour and no track is a plane (qmtech In1/In2 are declared "signal"
     # in the pcb): not routable, as the plugin's plane detection decides for the real run

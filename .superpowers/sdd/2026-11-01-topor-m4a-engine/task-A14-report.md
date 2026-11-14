@@ -22,13 +22,13 @@ Status: DONE_WITH_CONCERNS. Branch worktree-agent-af6cb7bede02dbaed, commit d2d1
 5. TDD: tests were written after the first implementation pass (not strictly red-first); the hint test did go red -> green after the face-only version.
 
 ## Numbers (progress options = gate options, 4 threads, nothing else running)
-Snapshot dangling ends (harness model `dangling_ends`): eprom 0, wiccon 0, dcsgonebadge 31 (locked edge GND; results unchanged).
+Snapshot dangling ends (harness model `dangling_ends`): eprom 0, wiccon 0, private-badge-b 31 (locked edge GND; results unchanged).
 | board | base 946530c | A14 |
 |---|---|---|
 | eprom | 27/27, vias 0, outside 64.628 mm, routing_new 0, unconnected 0, router 0.21 s, detour max 1.147, >1.5: 0 | identical |
 | wiccon | 62/62, failed 0, vias 36, outside 1367.278 mm (bound 1380, headroom 12.7), routing_new 0, unconnected 0, router 2.84 s, detour max 1.27 >1.5: 0 | identical (outside 1367.3, router 3.63 s while tests ran) |
-| dcsgone | 201/243, failed 42, vias 174, routing_new 0, unconnected 41, detour (ref) max 22.3, >1.5: 8 | identical (router 221.8 s, stop no gain, DRC preexisting 4) |
-dcsgone detour median 1.000 p90 1.296. A first dcsgone run executed concurrently with the pytest suite timed out (186/231); not a valid number, re-run alone matches base exactly. No PNG attached: no snapshot number moved (fixture image would be a test pattern).
+| private-badge-b | 201/243, failed 42, vias 174, routing_new 0, unconnected 41, detour (ref) max 22.3, >1.5: 8 | identical (router 221.8 s, stop no gain, DRC preexisting 4) |
+private-badge-b detour median 1.000 p90 1.296. A first private-badge-b run executed concurrently with the pytest suite timed out (186/N); not a valid number, re-run alone matches base exactly. No PNG attached: no snapshot number moved (fixture image would be a test pattern).
 
 ## Tests
 - `cargo test --release`: all green except `route_detour_ref::reference_is_feasible_not_topological`, which FAILS ON MAIN 946530c too (verified in a clean worktree: ghost length == reference). Not mine.
@@ -39,4 +39,4 @@ dcsgone detour median 1.000 p90 1.296. A first dcsgone run executed concurrently
 - Pre-existing failures above (not fixed).
 - Hint is one edge, not STUB_LEN prefix; a stub pointing at a far blocker behaves as "pass it on the stub's side" only for the first obstacle.
 - Commit trailer uses the system-reminder attribution (Sonnet 5.5), the contract text says Opus 5.5.
-- dcsgone's 31 dangling ends do not exercise the new path (numbers identical); the continued path is covered by the fixture/engine tests only.
+- private-badge-b's 31 dangling ends do not exercise the new path (numbers identical); the continued path is covered by the fixture/engine tests only.

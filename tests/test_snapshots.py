@@ -7,16 +7,16 @@ from harness import paths
 
 
 def test_missing_snapshot_raises_actionable(monkeypatch):
-    monkeypatch.setitem(paths.BOARD_SNAPSHOTS, "dcsgonebadge", "000000000000")
+    monkeypatch.setitem(paths.BOARD_SNAPSHOTS, "esp-rust-board", "000000000000")
     with pytest.raises(RuntimeError) as e:
-        paths.board_pcb("dcsgonebadge")
+        paths.board_pcb("esp-rust-board")
     msg = str(e.value)
-    assert "dcsgonebadge" in msg and "000000000000" in msg
-    assert "scratch/boards/dcsgonebadge/000000000000/dcsgonebadge.kicad_pcb" in msg
+    assert "esp-rust-board" in msg and "000000000000" in msg
+    assert "scratch/boards/esp-rust-board/000000000000/esp-rust-board.kicad_pcb" in msg
     assert ".venv/bin/python -m harness.snapshot" in msg and "harness/paths.py" in msg
     with pytest.raises(RuntimeError, match="harness.snapshot"):
-        paths.BENCH_BOARDS["dcsgonebadge"]  # lazy: fails on use only
-    assert "dcsgonebadge" in paths.BENCH_BOARDS  # membership never resolves
+        paths.BENCH_BOARDS["esp-rust-board"]  # lazy: fails on use only
+    assert "esp-rust-board" in paths.BENCH_BOARDS  # membership never resolves
 
 
 def test_snapshot_sha_mismatch_and_missing_manifest(monkeypatch, tmp_path):
@@ -42,7 +42,34 @@ def test_snapshot_sha_mismatch_and_missing_manifest(monkeypatch, tmp_path):
 
 def test_pins_resolve_for_all_boards():
     for b in paths.SOURCE_BOARDS:
+        if b in paths.PRIVATE_BOARDS and b not in paths.BOARD_SNAPSHOTS:
+            continue  # a local private board not pinned yet (scratch/private-boards.toml)
         assert paths.board_pcb(b).is_file()
+
+
+def test_private_boards_file_merges_into_the_maps(monkeypatch, tmp_path):
+    """scratch/private-boards.toml (git-ignored) adds boards that must not be named in git."""
+    monkeypatch.setattr(paths, "SOURCE_BOARDS", dict(paths.SOURCE_BOARDS))
+    monkeypatch.setattr(paths, "BOARD_SNAPSHOTS", dict(paths.BOARD_SNAPSHOTS))
+    monkeypatch.setattr(paths, "LONG_BOARDS", set(paths.LONG_BOARDS))
+    monkeypatch.setattr(paths, "PRIVATE_BOARDS", set())
+    assert paths.load_private_boards(tmp_path / "absent.toml") == {}
+    f = tmp_path / "private-boards.toml"
+    f.write_text('[priv-a]\npath = "vendor/a/a.kicad_pcb"\npin = "0123456789ab"\nlong = true\n'
+                 '[priv-b]\npath = "/abs/b.kicad_pcb"\n')
+    got = paths.load_private_boards(f)
+    assert got == {"priv-a": {"path": paths.PROJECTS / "vendor/a/a.kicad_pcb", "pin": "0123456789ab", "long": True},
+                   "priv-b": {"path": paths.Path("/abs/b.kicad_pcb"), "pin": None, "long": False}}
+    paths.merge_private_boards(got)
+    assert paths.SOURCE_BOARDS["priv-a"] == paths.PROJECTS / "vendor/a/a.kicad_pcb"
+    assert paths.BOARD_SNAPSHOTS["priv-a"] == "0123456789ab" and "priv-b" not in paths.BOARD_SNAPSHOTS
+    assert paths.LONG_BOARDS >= {"priv-a", "esp-rust-board"} and "priv-b" not in paths.LONG_BOARDS
+    assert paths.PRIVATE_BOARDS == {"priv-a", "priv-b"}
+    with pytest.raises(ValueError, match="clashes"):
+        paths.merge_private_boards({"wiccon-2023": {"path": paths.Path("/x.kicad_pcb"), "pin": None, "long": False}})
+    f.write_text('[priv-c]\npin = "0123456789ab"\n')
+    with pytest.raises(ValueError, match="needs a `path`"):
+        paths.load_private_boards(f)
 
 
 def test_snapshot_existing_pin_survives_source_edit(monkeypatch, tmp_path):

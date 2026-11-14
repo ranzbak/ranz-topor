@@ -11,7 +11,7 @@ test and benchmark harness in `harness/`. Linux only for now.
 
 | Works now, from inside KiCad 10 | Comes in 0.5.0 (milestone M4a: the engine) |
 |---|---|
-| **Topor: route** button: pre-flight findings (code, cause, fix), options, progress with Cancel, before/after preview, **Accept = one undo step** / Reject = nothing changed | dcsgonebadge 231/231 routed, 0 router DRC, ≤ 10 min (now 148/231 in 60 s) |
+| **Topor: route** button: pre-flight findings (code, cause, fix), options, progress with Cancel, before/after preview, **Accept = one undo step** / Reject = nothing changed | private-badge-b n/n routed, 0 router DRC, ≤ 10 min (now 148/n in 60 s) |
 | Whole board or a selection (between / touching selected footprints); existing copper kept, or ripped and re-routed; locked copper respected | priorities used for routing order (`@N` markers, `topor_pN` net classes, `[nets] priority` — computed and reported now) |
 | Self-documenting `topor.toml` per project, generated [reference](docs/user/configuration.md); every finding names the KiCad menu or the key to change | pad exit stubs for fine pitch, same-net T-junctions, via rules from the board setup, bounded via relaxation, layer costs |
 | Result verified by `kicad-cli` DRC on a copy before you decide; report folder (report, preview, DRC, log) per run | engine-side `do_not_touch` / `ignore_pads` options (applied by the plugin's scope now) |
@@ -53,13 +53,15 @@ What works on this branch:
 - the drawing's exact path has no out-and-back track pieces at its joints any more.
 
 The board ladder at commit `121e3eb` (headless, `tools/route_board.sh`, judged by `kicad-cli` DRC after a zone
-refill; "unconnected" counts DRC unconnected items, the hand-routed board's own count in brackets):
+refill; "unconnected" counts DRC unconnected items, the hand-routed board's own count in brackets).
+`private-badge-b` in this and the tables below is a 2-layer badge (a few hundred connections, written n, USB-C, arcs) whose design files
+are not public; its rows stay as measurements, the public stand-in for new runs is esp-rust-board:
 
 | Board | Routed | Unconnected (hand) | New routing DRC errors | Vias |
 |---|---|---|---|---|
 | eprom-to-kernal | 27/27 | 0 (0) | 0 | 0 |
 | wiccon-2023 | 60/60 | 0 (0) | 0 | 23 |
-| dcsgonebadge | 189/231 | 47 (4) | 0 | 116 |
+| private-badge-b | 189/n | 47 (4) | 0 | 116 |
 | qmtech | 346/426 | 85 (0) | 0 | 195 |
 
 ### The topological core inside KiCad (K1)
@@ -81,13 +83,13 @@ headless harness on the same board (engine at K1):
 | Board | Live plugin: routed / unconnected / routing_new / vias | Harness | Same? |
 |---|---|---|---|
 | wiccon-2023 | 60/60 / 0 / 0 / 23 | 60/60 / 0 / 0 / 23 | yes |
-| dcsgonebadge | 184/231 / 52 / 0 / 110 | 189/231 / 47 / 0 / 116 | no: the copper-graphics polygons differ by < 0.5 µm (both contain KiCad's copper); the plugin's engine input with the harness's polygons routes 189/116 |
+| private-badge-b | 184/n / 52 / 0 / 110 | 189/n / 47 / 0 / 116 | no: the copper-graphics polygons differ by < 0.5 µm (both contain KiCad's copper); the plugin's engine input with the harness's polygons routes 189/116 |
 | qmtech | 349/426 / 84 / 0 / 206 | 346/426 / 85 / 0 / 195 | no: the net numbering differs (KiCad's API has no net codes, the plugin numbers nets by sorted name); the plugin's engine input renumbered with pcbnew's codes routes 346/195 |
 
 Every other part of the engine input is now identical between the plugin and the harness (rules, widths, net
 classes and priorities, pads, pours, zone connections, keepouts, teardrops); the remaining differences are the
 router's sensitivity to the copper-graphics vertices and to the net numbering, not plugin errors. The ladder above
-is unchanged by K1 (eprom 27/27, wiccon 60/60, dcs 189/231, qmtech 346/426, routing_new 0).
+is unchanged by K1 (eprom 27/27, wiccon 60/60, private-badge-b 189/n, qmtech 346/426, routing_new 0).
 
 
 
@@ -106,7 +108,7 @@ the board you get. The run also stops there by itself (`finish_when_stable`, `fi
 2026-11-07: "When route stable appears it should stop indeed"; `finish_when_stable = false` keeps iterating for
 marginal gains until OK), and headless runs stop at stable. `[optimize] runs` (default 5) seeded runs go on in
 parallel on the engine's threads and the best by the pick (errors, vias, length) is offered; `[optimize] rounds` (30) is only a
-safety cap and `[run] timeout_s` (600 s) the emergency stop: runs on large boards (dcsgonebadge, qmtech with runs = 5) may hit it
+safety cap and `[run] timeout_s` (600 s) the emergency stop: runs on large boards (private-badge-b, qmtech with runs = 5) may hit it
 and keep the best result so far (`TIME_BUDGET_HIT`).
 
 Scorecard (KiCad DRC after a refill; connected % of KiCad's own input count, default run and median [range] of
@@ -116,7 +118,7 @@ seeds 1–5; `harness/scorecard.py`):
 |---|---|---|---|
 | eprom-to-kernal | 100 / 100 | 100 / 100 | 0.3 s → 2 s |
 | wiccon-2023 | 100 / 100 [98.2–100] | 100 / 100 [100–100] | 1 s → 27 s |
-| dcsgonebadge | 77.6 / 76.2 [74.3–78.6] | 80.5 / 79.5 [77.1–80.5] | 53 s → 442 s |
+| private-badge-b | 77.6 / 76.2 [74.3–78.6] | 80.5 / 79.5 [77.1–80.5] | 53 s → 442 s |
 | qmtech | 79.6 / 78.9 [77.5–79.9] | 81.5 / 81.5 [80.6–83.2] | 174 s → 1014 s |
 
 The defaults are provisional; their re-measurement with the M-B1 objective was skipped (user 2026-11-07: next
@@ -152,7 +154,7 @@ Scorecard at the defaults (best of 5 runs, measurement runs cut at 600 s of rout
 |---|---|---|---|---|---|
 | eprom-to-kernal | 100 / 100 | 100 / 100 | 95 | 0 | 2 s |
 | wiccon-2023 | 100 / 100 | 100 / 100 [100–100] | 89 / 88 | 0 | 24 s |
-| dcsgonebadge | 80.5 / 79.5 [77.1–80.5] | 92.4 / 91.0 [90.0–91.4] | 62 / 63 | 236–385 (33–41) | 600 s (cut, all 6) |
+| private-badge-b | 80.5 / 79.5 [77.1–80.5] | 92.4 / 91.0 [90.0–91.4] | 62 / 63 | 236–385 (33–41) | 600 s (cut, all 6) |
 | qmtech | 81.5 / 81.5 [80.6–83.2] | 91.4 / 91.6 [90.9–93.3] | 96 / 96 | 445–911 (47–58) | 600 s (cut, all 6) |
 
 The violations are many and some are bad (copper over foreign pads and traces, `short` about half of them): the
@@ -189,13 +191,13 @@ Scorecard (same setup as M-B1: best of 5 runs, cut at 600 s of router time; defa
 |---|---|---|---|---|---|
 | eprom-to-kernal | 100 / 100 | 100 / 100 | 0 → 0 | 0 | 0 / 6 |
 | wiccon-2023 | 100 / 100 | 100 / 100 [100–100] | 0 → 0 | 0 | 0 / 6 |
-| dcsgonebadge | 92.4 / 91.0 [90.0–91.4] | 90.0 / 91.0 [90.5–92.4] | 236–385 (29–38) → 95–176 (21–25) | 108–177 → 25–74 | 6 → 0 / 6 |
+| private-badge-b | 92.4 / 91.0 [90.0–91.4] | 90.0 / 91.0 [90.5–92.4] | 236–385 (29–38) → 95–176 (21–25) | 108–177 → 25–74 | 6 → 0 / 6 |
 | qmtech | 91.4 / 91.6 [90.9–93.3] | 91.8 / 91.8 [91.1–92.6] | 445–911 (49–58) → 139–280 (32–40) | 234–613 → 35–154 | 6 → 6 / 6 |
 
-Per cycle the errors now fall over the first cycles (median over all runs, dcsgonebadge 56.5 → 49 → 47.5 → 45;
-qmtech 94 → 77.5 → 80.5 → 77 → 75); before, the violations of the later cycles grew (dcsgonebadge median 240 → 446).
-On dcsgonebadge the default run's 5 more unconnected items are GND pour joins after the refill (stub and zone
-pieces), not signal connections: the engine routes 222 of 231 in every run. On qmtech about 40 % of what is left
+Per cycle the errors now fall over the first cycles (median over all runs, private-badge-b 56.5 → 49 → 47.5 → 45;
+qmtech 94 → 77.5 → 80.5 → 77 → 75); before, the violations of the later cycles grew (private-badge-b median 240 → 446).
+On private-badge-b the default run's 5 more unconnected items are GND pour joins after the refill (stub and zone
+pieces), not signal connections: the engine routes 222 of n in every run. On qmtech about 40 % of what is left
 is at pad exits (M-C). Still open: the crossing rules leave traces of net trees with branch points alone, and a
 trace drawn by force can still run over other copper for a millimetre or two.
 
@@ -224,14 +226,14 @@ Scorecard (same setup as M-B2; default / median [range] of seeds 1–5; violatio
 |---|---|---|---|---|---|---|
 | eprom-to-kernal | 100 / 100 | 100 / 100 | 0 → 0 | 0 → 0 | 0 | 0 / 6 |
 | wiccon-2023 | 100 / 100 | 100 / 100 | 0 → 0 | 0 → 0 | 0 | 0 / 6 |
-| dcsgonebadge | 90.0 / 91.0 [90.5–92.4] | 90.5 / 90.0 [89.0–91.0] | 21–25 → 19–23 | 12–15 → 6–14 | 250–525 → 228–596 | 0 → 1 / 6 |
+| private-badge-b | 90.0 / 91.0 [90.5–92.4] | 90.5 / 90.0 [89.0–91.0] | 21–25 → 19–23 | 12–15 → 6–14 | 250–525 → 228–596 | 0 → 1 / 6 |
 | qmtech | 91.8 / 91.8 [91.1–92.6] | 91.4 / 91.8 [91.4–92.1] | 32–40 → 13–23 | 23–33 → 7–15 | 516–817 → 149–496 | 6 → 6 / 6 |
 
 On qmtech the ADV7511 → FPGA header traces now leave their pins straight out (pins 57–68 without a clip in the
 default run). Still open: traces from neighbouring 0.5 mm pins that all turn to 45° right at the row's tips run
 closer than their clearance allows (the planner compares passes edge by edge; mechfix `fx_fine_pitch_exit`, xfail),
 a via inside a pin ring (qmtech ADV_DVDD → C22 under the chip) is not preferred yet (the connection routes legally
-with its via outside the ring), and dcsgonebadge's GND pour joins after the refill still vary with the copper.
+with its via outside the ring), and private-badge-b's GND pour joins after the refill still vary with the copper.
 
 ### Octilinear drawing: straight and 45 degrees (M-45)
 
@@ -273,10 +275,10 @@ default run + seeds 1–5, M-C and M-45 interleaved; `scratch/ab-cpu/`). Default
 |---|---|---|---|---|---|---|
 | eprom-to-kernal | 100 / 100 | 100 / 100 | 0 | 0 | 0 → 0 | 6 → 7 |
 | wiccon-2023 | 100 / 100 | 100 / 100 | 0 | 0 | 0 → 0 | 62 → 93 |
-| dcsgonebadge | 90.5 / 90.0 [89.0–91.0] | 93.8 / 91.0 [91.0–92.4] | 228–596 (median 327) | 90–380 (median 193) | 19–23 → 13–19 | 1405 → 1490 |
+| private-badge-b | 90.5 / 90.0 [89.0–91.0] | 93.8 / 91.0 [91.0–92.4] | 228–596 (median 327) | 90–380 (median 193) | 19–23 → 13–19 | 1405 → 1490 |
 | qmtech | 91.4 / 91.6 [91.1–91.8] | 91.6 / 91.8 [91.6–92.1] | 149–496 (median 286) | 263–440 (median 327) | 34–37 → 33–35 | 2423 → 2426 (limit hit 5 of 6 → 6 of 6) |
 
-dcsgonebadge gains (fewer violations and open connections). qmtech hits the CPU limit on every run, and octilinear
+private-badge-b gains (fewer violations and open connections). qmtech hits the CPU limit on every run, and octilinear
 drawing costs about 50 % more CPU (wiccon), so fewer optimisation cycles fit in the budget; its violations against
 other routed copper rose (`foreign_copper` 10–59 → 48–87 per run): the octilinear shapes take more of the passages
 than the taut chords did. The structural answer (exact per-layer cut test and inflation, `docs/dev/inflated-sketch.md`)
@@ -301,7 +303,7 @@ by the board minimums; via gap as KiCad's `EffectiveDiffPairViaGap`. Reference: 
   fan-out stubs that leave square to the pad pair first where needed (KiCad's pad gateways); each track zips at the
   nearest legal point, else the least violating one (never drop). P against N is checked against the pair gap
   (KiCad's `isCoupledDiffPair` clearance).
-- **Polarity**: a connection pair whose pads swap sides is routed as two single tracks (qmtech USB_C_D, dcsgonebadge
+- **Polarity**: a connection pair whose pads swap sides is routed as two single tracks (qmtech USB_C_D, private-badge-b
   USB-C A/B rows); a coupled wire that arrives at its end pad pair from the side that swaps P and N is drawn and
   priced (`dp_polarity_cross`, the checker's violations): the planner does not choose the approach side yet.
 - **Report and factors**: one line per pair connection (lengths, skew and the bend estimate, coupled share at the gap,
@@ -316,14 +318,14 @@ Scorecard (`harness.score_runs`: cpu 2400 s, 4 threads, default run + seeds 1–
 |---|---|---|---|---|---|---|
 | eprom-to-kernal | 100 / 100 | 100 | 100 | 27 / 27 | 0 / 0 | 0 / 0 of 6 |
 | wiccon-2023 | 100 / 100 | 100 | 100 | 60 / 60 | 0 / 0 | 0 / 0 of 6 |
-| dcsgonebadge | 96.7 / 93.8 | 94.8 [91.9–96.7] | 91.0 [91.0–92.4] | 230 / 222 of 231 | 24–32 / 19–21 | 2 / 0 of 6 |
+| private-badge-b | 96.7 / 93.8 | 94.8 [91.9–96.7] | 91.0 [91.0–92.4] | 230 / 222 of n | 24–32 / 19–21 | 2 / 0 of 6 |
 | qmtech | 95.7 / 91.6 | 95.7 [95.2–95.9] | 91.8 [91.6–92.1] | 426 / 400 of 426 | 29–37 / 22–26 | 6 / 6 of 6 |
 
-All 26 qmtech and 8 dcsgonebadge pair connections are routed (before: skipped). qmtech HDMI pairs: coupled at the
+All 26 qmtech and 8 private-badge-b pair connections are routed (before: skipped). qmtech HDMI pairs: coupled at the
 gap 14–56 % per connection (median about 35 %), |skew| up to 1.25 mm (the fan-outs at U3 and the HDMI connector are
 not symmetric; no tuning yet), no via; USB_C_D (pads swap sides) as two single tracks. 4–7 pair connections per run
 carry violations, mostly at the HDMI connector, where a shield pin sits between P and N and the N fan-out crosses it,
-and at dcsgonebadge U1 (pads 1.27 mm apart: the fan-out centred on the pad pair leaves the planned corridor) and U7
+and at private-badge-b U1 (pads 1.27 mm apart: the fan-out centred on the pad pair leaves the planned corridor) and U7
 (the wire arrives from the side that swaps P and N: the planner does not choose the approach side yet). One qmtech
 run (seed 4, first attempt) ended ENGINE_UNRESPONSIVE at the CPU limit under heavy machine load; its rerun is in the
 table. eprom and wiccon have no pairs; their higher CPU seconds (11 vs 7, 142 vs 93) come from the busier machine.

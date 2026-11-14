@@ -50,7 +50,7 @@ Trace of synth n=30, iteration 1 (`PROF_PEN` trace, `scratch/review/emit-30.png`
    finds an equivalent class, metrization fails again → stall stop after 8 iterations without improvement.
 
 The same mechanism, not the fixture, limits the gate boards: eprom converges only because its hand-like geometry has
-slack (relax 2–4 iterations); dcsgone relax converges (2–4 iterations, 36 ms total) but see §1.4.
+slack (relax 2–4 iterations); private-badge-b relax converges (2–4 iterations, 36 ms total) but see §1.4.
 
 ### 1.3 Is the fixture valid? [M] Partly
 
@@ -65,7 +65,7 @@ routability assumption is unproven; the > 9 mm fallback is a fixture bug.
 
 ### 1.4 Real boards [M]
 
-wiccon-2023: 8 live connections (52 "terminal not on layer F.Cu"), 0.028 s, trivial. dcsgonebadge (V 4552 / E 13 649,
+wiccon-2023: 8 live connections (52 "terminal not on layer F.Cu"), 0.028 s, trivial. private-badge-b (V 4552 / E 13 649,
 34 live): 46.6 s = **41.0 s in searches** (225 slot searches; 59 ghost searches = 34.0 s, 0.58 s each; iterations 2 and 7
 = 15 s each) + 5.3 s block probe; relax 0.04 s. The ghost search of an unroutable connection explores the whole graph
 (cap `8E+64` ≈ 109 k) and every `push_state` runs `los` → `clearance_bend` (`search.rs:557-628`) with an axis-aligned
@@ -83,7 +83,7 @@ is O(V·E) per connection, not O(V log V) (45 §5a "Search per connection"). Thi
   the side the crossing's `left/right` dictates; in `penetrations()` never add the wire's own terminals and only add a
   dyn-segment's adjacent anchor when the penetration point lies within that anchor's ρ (else report the conflict to the
   *other* wire via its stack radius — the M1 F5 "fan" rule). Expected: relax converges in 2–5 iterations as on eprom /
-  dcsgone (~0.1–0.15 ms per wire-pass), n=100 iteration-1 metrization failures 25 → ~0, n=1000 first relax ≈ 0.5–1 s.
+  private-badge-b (~0.1–0.15 ms per wire-pass), n=100 iteration-1 metrization failures 25 → ~0, n=1000 first relax ≈ 0.5–1 s.
 - **RC2 (BLOCKING for the scaling test) metrization is global per PathFinder iteration.** `route.rs:1420-1423` relaxes
   *all* routed wires every iteration (`O(iters_PF · relax_iter_cap · m · k · q)` — polynomial, but 200·m tautens per
   iteration), and at n=1000 the deadline strikes inside the first call so `best == None` and every connection reports
@@ -91,10 +91,10 @@ is O(V·E) per connection, not O(V log V) (45 §5a "Search per connection"). Thi
   connections searched this iteration plus their dynamic neighbours (grid query), keep the others' chains; and complete
   a first result before any global relax (one Gauss–Seidel pass in routing order with the deadline). Expected n=1000:
   per-iteration cost ≈ Σ changed wires, a completed iteration 1 within seconds.
-- **RC3 (DEFERRED M2.5, hurts wiccon/dcsgone budgets) search per-expansion cost O(V).** Restrict `clearance_bend` to the
+- **RC3 (DEFERRED M2.5, hurts wiccon/private-badge-b budgets) search per-expansion cost O(V).** Restrict `clearance_bend` to the
   sleeve: the chord from the apex must cross every portal pushed since the apex (≤ `LOS_PORTAL_CAP`), so the candidate
   vertices/walls are those of the ≤ C+1 sleeve faces and their ρ-neighbourhood (or query ≤ C small boxes along the
-  chord). Expected dcsgone: ghost searches 0.58 s → ms; 46 s → a few s.
+  chord). Expected private-badge-b: ghost searches 0.58 s → ms; 46 s → a few s.
 - **Fixture:** drop the > 9 mm fallback (pair leftovers within reach or skip the cell) and add a deterministic 0.1-pitch
   jitter so no three centres are exactly collinear, *or* keep the exact grid as a deliberate robustness test (then RC1(c)
   must be fixed first). Budget verdict: the m log m test is attainable in principle (search 6 µs/expansion, 15
@@ -114,7 +114,7 @@ is O(V·E) per connection, not O(V log V) (45 §5a "Search per connection"). Thi
 | Clinch detection `negotiate.rs:281-348` | O(Σk·n_max + E·n_max + m), only on a better best | n/a | ok [R] |
 | Metrize / relax `route.rs:296-485`, `relax.rs:385-438` | `relax_iter_cap` 200 × m tautens, `TAUT_PASS_CAP` 64, `MAX_SLEEVE`; self-check rounds ≤ n+1 (`route.rs:417`) | before relax (`:351`), per wire inside relax (`relax.rs:388`), per self-check round (`:433`) | bounded but RC1/RC2 |
 | Partial stubs `route.rs:782-955` | 2 × 24 bisection `check_items` per block; self-check rounds ≤ n+1 (`:888`) | `:849` once; `bisect_stub` has none | ok [R] |
-| Block probe `route.rs:639-779` | per failed conn O(k · (|base| + 784) · q) + 33-dot pinch | **none** (only skipped when already timed out, `:1565`) | DEFERRED D9: 5.3 s on dcsgone [M] |
+| Block probe `route.rs:639-779` | per failed conn O(k · (|base| + 784) · q) + 33-dot pinch | **none** (only skipped when already timed out, `:1565`) | DEFERRED D9: 5.3 s on private-badge-b [M] |
 | KiCad DRC loop `harness/bench.py:228-262` | `drc_loop_cap` 5 (`rounds > loop_cap`) | n/a | ok [R] |
 
 No exponential/factorial stage, no order permutations, no all-pairs board loops found. Minor: `route.rs:1602` and
@@ -157,7 +157,7 @@ are the only run-to-run variance (by design).
 | D6 | partial stubs start at the terminal, not `last_reached` (`route.rs:794`) | yes, deviation from note §6; functional | low, DEFERRED M3 |
 | D7 | spot vertex blocks every net in search (`search.rs:579-588` ignores `only_nets`) | yes; over-conservative in DRC-loop rounds ≥ 2 only | low, DEFERRED |
 | D8 | clinches summary prints `len(u)` | cosmetic | DEFERRED |
-| D9 | block probe cost (`route.rs:639-708`) | **measured 5.3 s on dcsgone, 0.9 s at synth n=100**; no deadline check; `probe_path` builds 784 stubs per face step against the full `base` | med, DEFERRED M2.5: deadline per step, cap steps, probe only the blocked step |
+| D9 | block probe cost (`route.rs:639-708`) | **measured 5.3 s on private-badge-b, 0.9 s at synth n=100**; no deadline check; `probe_path` builds 784 stubs per face step against the full `base` | med, DEFERRED M2.5: deadline per step, cap steps, probe only the blocked step |
 | D10 | Fix-ABC bend test skips point walls / foreign vertices (`search.rs:727`) | yes; a bend pinched against a non-adjacent *vertex* is invisible (same argument as the wall case) | low–med, DEFERRED M2.5 |
 
 ## 6. Findings
@@ -173,7 +173,7 @@ are the only run-to-run variance (by design).
 - **B3** Fixture — `tests/scaling/synth.py:31-33` violates its own ≤ 9 mm spec for leftover cells (n=1000: 28 connections
   up to 90 mm). Fix: pair leftovers within reach or drop them; decide (user) whether exact collinearity stays. [M]
 
-**DEFERRED** (M2.5 unless noted): RC3 search per-expansion O(V) (`search.rs:579,597`; dcsgone 34 s in 59 ghost searches);
+**DEFERRED** (M2.5 unless noted): RC3 search per-expansion O(V) (`search.rs:579,597`; private-badge-b 34 s in 59 ghost searches);
 D1–D10 above; `record_best` dead code; stall stop may end before the cap while progress is still possible (by R6, note only).
 
 Escalation (45 §5a): the scaling budget cannot be met at ac31995; one diagnosis round is spent. The eprom gate criteria

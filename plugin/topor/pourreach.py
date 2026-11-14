@@ -53,17 +53,15 @@ def pad_sample_points(pad: dict, layer: int) -> list[list[float]]:
     (M4-R8: reach errs toward "not reached"): the centre plus, in the 8 directions of the pad's box (corners and
     edge midpoints), the point at 98 % of the way to the shape's boundary (a circle / oval / roundrect corner
     probe is pulled in onto the rounded edge, so it is never outside the pad). ``poly`` pads: the centre and the
-    hull vertices / edge midpoints pulled 2 % toward the centre, kept only when inside the hull (a concave custom
-    pad's hull may still exceed its copper: listed in the module limitations). O(1) (O(n) for a hull)."""
+    hull vertices pulled 2 % toward the centre, kept only when inside the hull (hull edge midpoints are NOT probed:
+    an edge can bridge a notch of a concave custom pad that KiCad fills; a hull vertex is a real copper vertex). O(1) (O(n) for a hull)."""
     sh = pad["shapes"].get(str(layer))
     cx, cy = pad["center"]
     if sh is None:
         return []
     if sh["kind"] == "poly":
         pts = sh["pts"]
-        mids = [[(pts[i][0] + pts[(i + 1) % len(pts)][0]) / 2, (pts[i][1] + pts[(i + 1) % len(pts)][1]) / 2]
-                for i in range(len(pts))]
-        cand = [[cx + 0.98 * (q[0] - cx), cy + 0.98 * (q[1] - cy)] for q in [*pts, *mids]]
+        cand = [[cx + 0.98 * (q[0] - cx), cy + 0.98 * (q[1] - cy)] for q in pts]
         return [[cx, cy]] + [q for q in cand if pad_contains(pad, layer, q)]
     w, h = (sh["d"], sh["d"]) if sh["kind"] == "circle" else (sh["w"], sh["h"])
     th = math.radians(pad["rotation_deg"])
@@ -96,15 +94,21 @@ def _in_span(span: list, layer: int) -> bool:
     return _top_down(lo) <= _top_down(layer) <= _top_down(hi)
 
 
-def pour_reach(code: int, layers: list, fills: list, pads: list, vias: list) -> tuple:
+ZONE_CONN_NONE = 0  # KiCad ZONE_CONNECTION: INHERITED -1 (never exported), NONE 0, THERMAL 1, FULL 2, THT_THERMAL 3
+
+
+def pour_reach(code: int, layers: list, fills: list, pads: list, vias: list, pad_connection: int = 1) -> tuple:
     """(reached pad refs "REF.NUM", reached via uuids) of a pour of net `code` on `layers` with `fills`
     (dicts layer/outer/holes). A same-net pad is reached on a zone layer when one of its probe points lies in
-    that layer's fill (even-odd over all rings); a same-net via when its centre does (over its span). Shared by
-    the IPC exporter and the run flow's post-rip refill. O(F * (pads + vias))."""
+    that layer's fill (even-odd over all rings), unless its effective zone connection is NONE (the pad's own
+    ``zone_connection`` if present, else the pour's `pad_connection`, as the engine's ``pourcheck.rs`` does:
+    pcbnew never connects such a pad, though the fill may touch or enter it); a same-net via when its centre does (over its span). Shared by
+    the IPC exporter and the run flow's post-rip refill. Known limitation: a concave custom pad's hull may still
+    exceed its copper at a hull vertex (probes err toward "not reached" but are not copper-exact). O(F * (pads + vias))."""
     rings: dict[int, list] = {}
     for f in fills:
         rings.setdefault(f["layer"], []).extend([f["outer"], *f.get("holes", [])])
-    reach_pads = sorted(f"{p['ref']}.{p['number']}" for p in pads if p["net"] == code and any(
+    reach_pads = sorted(f"{p['ref']}.{p['number']}" for p in pads if p["net"] == code and p.get("zone_connection", pad_connection) != ZONE_CONN_NONE and any(
         l in rings and any(geom.point_in_rings(pt, rings[l]) for pt in pad_sample_points(p, l))
         for l in p["layers"] if l in layers))
     reach_vias = sorted(v["uuid"] for v in vias if v["net"] == code and any(

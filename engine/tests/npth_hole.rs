@@ -7,7 +7,7 @@ use topor_engine::model::{BoardModel, Item, Options};
 fn checker_models_a_slot_hole_as_its_capsule_like_the_router() {
     // NPTH slot 1.8 x 2.4 mm (long axis y). A vertical track whose copper edge is 0.36 mm from
     // the slot's flat side is legal for hole_clearance 0.35; a circle of d 2.4 mm would call it
-    // a violation (the D17 / D18 slot cases of dcsgonebadge).
+    // a violation (the slot cases of a 2-layer badge).
     let s = r#"{ "layers": [ { "id": 0, "routable": true } ],
         "nets": [ { "code": 1, "name": "N1" } ],
         "pads": [ { "uuid": "d", "ref": "D", "number": "", "net": 0, "attr": "npth",

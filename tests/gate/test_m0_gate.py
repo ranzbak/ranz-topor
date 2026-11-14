@@ -29,11 +29,18 @@ BOARDS = {
         footprints=45, pads=124, nets=38,
         orig_all={"segments": 381, "arcs": 0, "vias": 36, "track_mm": 1831.97},
         orig_drc_total=48, kept_free_vias=11, removed_vias=25, hand_png=(1095, 1160)),
-    "dcsgonebadge": dict(
-        footprints=157, pads=458, nets=86,
-        orig_all={"segments": 1369, "arcs": 14, "vias": 203, "track_mm": 4210.28, "arc_mm": 43.2},
-        orig_drc_total=210, kept_free_vias=7, removed_vias=196, hand_png=(1012, 1160)),
+    # esp-rs/esp-rust-board (https://github.com/esp-rs/esp-rust-board, CERN-OHL-P-2.0), snapshot 4907cec7fec3:
+    # baseline = harness run 2026-11-13 on KiCad 10.0.8 (images/esp-rust-board-hand.png); 150 GND stitching vias.
+    "esp-rust-board": dict(
+        footprints=96, pads=240, nets=63,
+        orig_all={"segments": 543, "arcs": 0, "vias": 216, "track_mm": 878.637},
+        orig_drc_total=84,
+        orig_drc_types={"footprint_type_mismatch": 1, "silk_overlap": 24, "text_height": 1,
+                        "silk_edge_clearance": 3, "via_dangling": 1},
+        kept_free_vias=150, removed_vias=66, hand_png=(397, 1160)),
 }
+# DRC types that depend on the machine's footprint libraries, not on the board copy.
+ENV_DRC_TYPES = {"courtyards_overlap", "lib_footprint_issues", "lib_footprint_mismatch", "starved_thermal"}
 
 
 def png_size(p: Path) -> tuple[int, int]:
@@ -106,18 +113,12 @@ def test_m0_gate_reproduces_baseline(board, tmp_path):
         assert r["orig_drc"]["total"] == 0, r["orig_drc"]
         raw = json.loads((tmp_path / f"{board}--drc-orig.json").read_text())
         assert raw.get("unconnected_items", []) == []
-    elif board == "dcsgonebadge":
-        # The baseline's 210 total included 18 library/courtyard/thermal reports that depend on
-        # the machine's footprint libraries (192 here); every other type must match exactly.
-        base = json.loads((BASELINE / "metrics/dcsgone--drc-orig.json").read_text())
-        want = {}
-        for v in base["violations"]:
-            want[v["type"]] = want.get(v["type"], 0) + 1
-        env = {"courtyards_overlap", "lib_footprint_issues", "starved_thermal"}
+    elif "orig_drc_types" in e:
+        # The baseline total includes library reports that depend on the machine's footprint
+        # libraries (ENV_DRC_TYPES); every other type must match exactly.
         got = r["orig_drc"]["violations"]
-        assert {k: v for k, v in got.items() if k not in env} == \
-            {k: v for k, v in want.items() if k not in env}
-        print(f"GATE dcsgonebadge orig_drc total {r['orig_drc']['total']} (baseline {e['orig_drc_total']})")
+        assert {k: v for k, v in got.items() if k not in ENV_DRC_TYPES} == e["orig_drc_types"]
+        print(f"GATE {board} orig_drc total {r['orig_drc']['total']} (baseline {e['orig_drc_total']})")
     else:
         assert r["orig_drc"]["total"] == e["orig_drc_total"]
     for k, v in e.get("orig_drc", {}).items():
@@ -130,16 +131,11 @@ def test_m0_gate_reproduces_baseline(board, tmp_path):
           f"(baseline {e.get('kept_free_vias')}/{e.get('removed_vias')})")
     if board == "wiccon-2023":
         assert (kept, removed) == (e["kept_free_vias"], e["removed_vias"])
-    elif board == "dcsgonebadge":
-        # DEVIATION: the baseline kept 7 free vias (removed 196); the harness rip (`GetIsFree()`)
-        # keeps 2 (removed 201). Open rip-policy question (README step 1: keep stitching/fence
-        # vias, i.e. vias no track of their net touches), to be settled before M3. Pin the
-        # measured values so any change is visible.
-        # Re-pinned after the user locked the edge GND trace (snapshot 3e7e66f862a7: 22 locked GND
-        # items): removed 201 -> 197, the 4 vias touched by that locked copper are retained.
-        assert (kept, removed) == (2, 197)
-        assert kept + removed + 4 == e["orig_all"]["vias"]
-        assert r["kept"]["kept_locked_tracks"] == 22
+    elif board == "esp-rust-board":
+        # rip policy: the free (stitching) vias stay, every other via goes; nothing is locked
+        assert (kept, removed) == (e["kept_free_vias"], e["removed_vias"])
+        assert kept + removed == e["orig_all"]["vias"]
+        assert r["kept"]["kept_locked_tracks"] == 0
     assert png_size(tmp_path / f"{board}-hand.png") == e["hand_png"]
     ref = e["hand_ref"] if board == "eprom-to-kernal" else BASELINE / f"images/{board}-hand.png"
     d = rmse(tmp_path / f"{board}-hand.png", ref, tmp_path)

@@ -62,6 +62,8 @@ pub struct Raster {
     label: Vec<u32>,
     /// Fill area per island id (index 0 unused), nm².
     area: Vec<f64>,
+    /// Centroid (math frame) per island id (index 0 unused).
+    centroid: Vec<Vec2>,
     /// Island id → in the net's main component (index 0 unused).
     in_main: Vec<bool>,
     /// Per cell: distance from the cell centre to the edge of the fill after the knockouts and
@@ -266,6 +268,7 @@ fn build_raster(
         ny,
         label: vec![0; nx * ny],
         area: vec![0.0],
+        centroid: vec![Vec2::default()],
         in_main: vec![false],
         depth: Vec::new(),
     };
@@ -389,13 +392,17 @@ fn build_raster(
         }
         let id = r.area.len() as u32;
         r.area.push(0.0);
+        r.centroid.push(Vec2::default());
         r.in_main.push(false);
         r.label[start] = id;
         stack.push(start);
         let mut cells = 0usize;
+        let (mut si, mut sj) = (0.0f64, 0.0f64);
         while let Some(c) = stack.pop() {
             cells += 1;
             let (i, j) = (c % nx, c / nx);
+            si += i as f64;
+            sj += j as f64;
             let mut visit = |n: usize| {
                 if fill[n] && r.label[n] == 0 {
                     r.label[n] = id;
@@ -416,6 +423,8 @@ fn build_raster(
             }
         }
         r.area[id as usize] = cells as f64 * res * res;
+        let n = cells.max(1) as f64;
+        r.centroid[id as usize] = Vec2 { x: r.x0 + (si / n + 0.5) * res, y: r.y0 + (sj / n + 0.5) * res };
     }
     (r, stamped, cut)
 }
@@ -602,6 +611,9 @@ pub struct Cut {
     pub islands: Vec<(usize, u32, u32)>,
     /// Fill area of those islands, nm².
     pub area: f64,
+    /// Area-weighted centroid (math frame) of those islands: where to look for a piece that
+    /// holds no pad or via (it may lie outside a non-convex piece).
+    pub at: Vec2,
 }
 
 impl PourReach {
@@ -1111,6 +1123,7 @@ pub fn check_pour_reach_until(
                     let root = dsu.find(island_base[k] + l);
                     let c = comp.entry(root).or_default();
                     c.islands.push((k.0, k.1, l as u32));
+                    c.at = c.at + r.centroid[l] * r.area[l];
                     c.area += r.area[l];
                     let kept = match z.island_removal {
                         1 => true,
@@ -1129,6 +1142,7 @@ pub fn check_pour_reach_until(
                 }
                 c.net = net;
                 c.pads.sort_unstable();
+                c.at = if c.area > 0.0 { c.at * (1.0 / c.area) } else { c.vias.first().copied().unwrap_or_default() };
                 out.cuts.push(c);
             }
         }

@@ -95,7 +95,7 @@ All from `/home/paul/work/kicad/projects` (read-only; copies in the scratch work
 |---|---|---|---|---|
 | `eprom-to-kernal` (KiCad 5 file) | Smallest routed board: THT only, no vias, no zones — Topola's home turf | 2 | 5 / 56 / 26 | 80 segments, 0 arcs, 0 vias, 189.9 mm |
 | `Wiccon/wiccon-main-badge/2023` | Medium: SMD on the back, THT connectors, one GND zone, 36 vias | 2 | 45 / 124 / 38 | 381 segments, 36 vias, 1 832 mm |
-| `badge.team/dcsgonebadge-0.8.5` — **robustness data only** | Largest 2-layer board with arcs: 157 footprints, both sides, 203 vias, GND pour but no plane strategy; the user does not consider its hand layout a reference, so it is used only for failure analysis, not for quality comparison | 2 | 157 / 458 / 86 | (not used as comparison) |
+| private-badge-b — **robustness data only** | Largest 2-layer board with arcs: 157 footprints, both sides, 203 vias, GND pour but no plane strategy; the user does not consider its hand layout a reference, so it is used only for failure analysis, not for quality comparison | 2 | 157 / 458 / 86 | (not used as comparison) |
 
 A fourth, advanced board (`badge.team/bornhack2026`, 4 layers, RF paths, keepout areas, many
 stitching vias) was deliberately **not** tested: the simple boards already fail on
@@ -129,13 +129,13 @@ project copies: `…/topola-eval/boards/<board>-topola-routed/` and `<board>-rip
 | Wiccon 2023, multilayer mode | silent early exit (`Invoker::replay` drops the error), 2 + 1 connections | 0.0 s | 6 segs + 1 arc, 0 vias | 54 unconnected | 36 vias, 1 832 mm |
 | Wiccon 2023, planar F.Cu | 5 connections (only pads present on F.Cu form ratlines; 36 of 45 parts are on B.Cu) | 0.3 s | 12 segs + 2 arcs | 54 unconnected | — |
 | Wiccon 2023, planar B.Cu (where 36 of 45 parts are) | no result: 13 permutations, each failing on one connection (`NotFound`), 48 partial routes undone | killed after 1 105 s | none (no SES written) | — | — |
-| dcsgonebadge (robustness only), multilayer mode | silent early exit, 27 connections, B.Cu empty | 0.7 s | 48 segs + 13 arcs, 0 vias, 137 mm; F.Cu traces drawn through both NPTH mounting holes | 198 unconnected, `hole_clearance` 2 (VCC track through NPTH H2 and H4, actual 0 mm), `clearance` 413 → 4 after removing artefacts (all pad-to-pad, present in the original) | — |
-| dcsgonebadge (robustness only), planar F.Cu | 27 connections (F.Cu-only pads), identical result | 0.7 s | same | same | — |
-| dcsgonebadge (robustness only), planar B.Cu | no result within 10 min (permutation loop), killed | > 600 s | none | — | — |
+| private-badge-b (robustness only), multilayer mode | silent early exit, 27 connections, B.Cu empty | 0.7 s | 48 segs + 13 arcs, 0 vias, 137 mm; F.Cu traces drawn through both NPTH mounting holes | 198 unconnected, `hole_clearance` 2 (VCC track through NPTH H2 and H4, actual 0 mm), `clearance` 413 → 4 after removing artefacts (all pad-to-pad, present in the original) | — |
+| private-badge-b (robustness only), planar F.Cu | 27 connections (F.Cu-only pads), identical result | 0.7 s | same | same | — |
+| private-badge-b (robustness only), planar B.Cu | no result within 10 min (permutation loop), killed | > 600 s | none | — | — |
 | Topola's own `tht_de9_to_tht_de9` example, default | 9 nets | 0.1 s | 37 segs + 28 arcs | not run | — |
 | Topola's own `3x4_tactswitch_ir_remote` multilayer example with its shipped command file | **panic** `navmesh.rs:440 no entry found for key` | after 7 min 5 s | none | — | — |
 
-Conclusions are drawn from eprom-to-kernal and Wiccon 2023; dcsgonebadge rows are robustness
+Conclusions are drawn from eprom-to-kernal and Wiccon 2023; private-badge-b rows are robustness
 data only (see §4.1). KiCad DRC counts are totals over all severities; non-copper categories (silkscreen,
 courtyards, library mismatches, text size, starved thermals) are identical before and after
 and are attributable to the original design.
@@ -147,11 +147,11 @@ and are attributable to the original design.
   "arcs from polylines" does not re-fit them; a real bridge must read the bends from the
   `Layout`, not the SES.
 - Every rectangle/polygon pad contributes its outline as 1 µm-wide wires in the SES (16 on
-  eprom, 1 016 on Wiccon, 5 984 on dcsgonebadge). KiCad imports them as 0.001 mm tracks
-  → `track_width` violations and, on dcsgonebadge, 409 spurious `clearance` reports; nothing
+  eprom, 1 016 on Wiccon, 5 984 on private-badge-b). KiCad imports them as 0.001 mm tracks
+  → `track_width` violations and, on private-badge-b, 409 spurious `clearance` reports; nothing
   functional, but the importer side would have to filter them. On Wiccon the imported board
   therefore shows 1 122 "segments" of which only 6 + one 100-chord arc are routes.
-- NPTH mounting holes and rule areas are not obstacles (dcsgonebadge: traces through both
+- NPTH mounting holes and rule areas are not obstacles (private-badge-b: traces through both
   M3 holes; §5.3) — a disqualifying defect for use on real boards, independent of board size.
 - With correct width and clearance the routed copper had **no copper-to-copper violations**
   at KiCad's exact DRC — despite the 1 µm epsilon — on a THT board with 0.2 mm clearance.
@@ -170,12 +170,12 @@ and are attributable to the original design.
 | Failure | Where | Cause (source reading) |
 |---|---|---|
 | DSN parse error `ExpectedEndOfList` at the kept GND vias | `specctra-core` `Via` struct (name, x, y, net) | No `type` field; KiCad writes `(type route)` after `(net …)`. Workaround: text strip. |
-| Multilayer mode exits in 0.0 s with a partial SES, exit code 0 | `Invoker::replay` ignores `execute()`'s `Result`; `main.rs` does not check | Error swallowed; with the diagnostic patch the planar runs show the stepper simply has 5 (Wiccon F.Cu) or 27 (dcsgone) ratlines because the ratsnest only links pads on the principal layer; the multilayer fan-out did not add anything usable. |
+| Multilayer mode exits in 0.0 s with a partial SES, exit code 0 | `Invoker::replay` ignores `execute()`'s `Result`; `main.rs` does not check | Error swallowed; with the diagnostic patch the planar runs show the stepper simply has 5 (Wiccon F.Cu) or 27 (private-badge-b) ratlines because the ratsnest only links pads on the principal layer; the multilayer fan-out did not add anything usable. |
 | Multilayer example panic after 7 min | `router/navmesh.rs:440` `no entry found for key` | Navmesh assumes prenavnodes are fixed dots ("ugly shortcut" comment at line 400); a fan-out via/bend node is missing from the map. Matches issues #193/#210. |
 | Permutation loop | `PlanarAutorouteReconfigurator::reconfigure` | Any failure or timeout advances to the *next permutation* of the whole ratline order and reroutes from scratch; n! candidates, no memory of which connection failed. |
 | Width ignored by default CLI | `topola-cli/main.rs` | `routed_band_width: 100.0` literal. |
-| **Traces through NPTH mounting holes** (dcsgonebadge H2, H4; KiCad `hole_clearance` 0 mm) | DSN: KiCad exports each NPTH pad as `(keepout "" (circle F.Cu 3400))` / `(circle B.Cu …)` inside the footprint image and rule areas as `(keepout "" (polygon signal …))` in `structure` — 10 keepouts in that file. `specctra-core` parses `keepout`, `place_keepout`, `via_keepout`, `wire_keepout` into `Keepouts`; `src/specctra/design.rs` never reads them, so no obstacle is created | Disqualifying for any board with mounting holes or rule areas. KiCad DRC does report it (`hole_clearance`); nothing in Topola does. |
-| **Other copper layer empty** (B.Cu on dcsgonebadge and Wiccon when F.Cu is principal) | `Autorouter::selected_ratlines` + `Ratsnest::add_layer_to_ratsnest_triangulations`: ratlines are built per *principal layer* between pads that have copper on that layer; the planar command routes only that layer. `MultilayerAutoroute` is meant to add fan-out vias for off-layer pads and then run the same planar pass — it added nothing here (no via in any SES; cause not determined, UNVERIFIED) | "Multilayer" is single-layer plus fan-out, not layer assignment. Choosing B.Cu as principal gives more ratlines but ended in the permutation loop on both boards. |
+| **Traces through NPTH mounting holes** (private-badge-b H2, H4; KiCad `hole_clearance` 0 mm) | DSN: KiCad exports each NPTH pad as `(keepout "" (circle F.Cu 3400))` / `(circle B.Cu …)` inside the footprint image and rule areas as `(keepout "" (polygon signal …))` in `structure` — 10 keepouts in that file. `specctra-core` parses `keepout`, `place_keepout`, `via_keepout`, `wire_keepout` into `Keepouts`; `src/specctra/design.rs` never reads them, so no obstacle is created | Disqualifying for any board with mounting holes or rule areas. KiCad DRC does report it (`hole_clearance`); nothing in Topola does. |
+| **Other copper layer empty** (B.Cu on private-badge-b and Wiccon when F.Cu is principal) | `Autorouter::selected_ratlines` + `Ratsnest::add_layer_to_ratsnest_triangulations`: ratlines are built per *principal layer* between pads that have copper on that layer; the planar command routes only that layer. `MultilayerAutoroute` is meant to add fan-out vias for off-layer pads and then run the same planar pass — it added nothing here (no via in any SES; cause not determined, UNVERIFIED) | "Multilayer" is single-layer plus fan-out, not layer assignment. Choosing B.Cu as principal gives more ratlines but ended in the permutation loop on both boards. |
 
 ### 5.4 Runtime
 
@@ -227,14 +227,14 @@ Concretely reusable ideas, mapped to our documents:
 - Whether Topola's `TopoAutoroute` (planar-incr-embed backend) performs better than the
   Theta* backend on our boards — it is not reachable from the default CLI and was not run.
 - The exact cause of the `navmesh.rs:440` panic (inferred from code comments, not debugged).
-- Why the multilayer fan-out placed no vias on Wiccon/dcsgonebadge, and which connection
+- Why the multilayer fan-out placed no vias on Wiccon/private-badge-b, and which connection
   (`NotFound` from Theta*) blocks the B.Cu runs — the per-ratline log only names an index.
 - Wiccon hand-routing comparison (1 832 mm, 36 vias) could not be made because no complete
   Topola result exists for that board.
 - TopoR behaviour in the comparison table is from the published descriptions cited in
   [01 §D](../01-bibliography.md), not from running TopoR.
 - Hand-routing DRC baselines are from the boards as found, which already contain
-  violations (eprom: 93, Wiccon: 48, dcsgonebadge: 210 incl. 5 unconnected).
+  violations (eprom: 93, Wiccon: 48, private-badge-b: 210 incl. 5 unconnected).
 
 ## References
 

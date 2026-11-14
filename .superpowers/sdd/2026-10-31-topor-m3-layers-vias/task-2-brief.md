@@ -28,6 +28,6 @@
 
 - [ ] **Step 2: Run to verify failure:** `cargo test --release --manifest-path engine/Cargo.toml --test search_sleeve` — Expected: FAIL.
 - [ ] **Step 3: Implement** per the Interfaces (the portal list for `clearance_bend` is the `since` chain of `los`; `direct` passes `&[]`).
-- [ ] **Step 4: Run** all engine suites + clippy — Expected: PASS; `search_slots`, `negotiate_loop`, `route_engine` unchanged. Then produce a dcsgonebadge model JSON with `.venv/bin/python -m harness.bench dcsgonebadge <scratch> --rip all --router topor` (writes `<scratch>/dcsgonebadge--model.json`) and run `cargo run --release --example route_probe -- <scratch>/dcsgonebadge--model.json --quiet`: report router seconds (M2: 45 s, 34 s of it in 59 ghost searches; expected a few s) in the task report.
+- [ ] **Step 4: Run** all engine suites + clippy — Expected: PASS; `search_slots`, `negotiate_loop`, `route_engine` unchanged. Then produce a private-badge-b model JSON with `.venv/bin/python -m harness.bench private-badge-b <scratch> --rip all --router topor` (writes `<scratch>/private-badge-b--model.json`) and run `cargo run --release --example route_probe -- <scratch>/private-badge-b--model.json --quiet`: report router seconds (M2: 45 s, 34 s of it in 59 ghost searches; expected a few s) in the task report.
 - [ ] **Step 5: Commit:** `git commit -m "perf(search): sleeve-restricted clearance queries (RC3); D2 hard edges, D3 direct check, D7 spot nets, D10 vertex pinch"`.
 

@@ -1,4 +1,4 @@
-# M3 gate diagnosis (F, 2026-10-31) — wiccon completion and dcsgone wall clock
+# M3 gate diagnosis (F, 2026-10-31) — wiccon completion and private-badge-b wall clock
 
 Scope: the two failing M3 gate items after Tasks 1–11 (head 8a03f54). Method: a new dev tool `engine/examples/gate_diag.rs`
 (replicates `route_inner`'s setup, then (A) search + ghost of every connection on the **empty** graph, (B) negotiator replay,
@@ -15,7 +15,7 @@ it is static geometry. The vertex-escape dump shows one terminal per failing con
 false`**: J1.1/J1.5/J1.6 (THT header), S1.B1/S1.C1, TP2.1, J4.5/J4.6, RESET1.2 — the hand board routes all of them (GPIO12/13,
 3.3v entirely on B.Cu, 0 vias). wiccon's outline has 114 segments + 8 arcs with chord sagitta up to **14.3 mm**; Python
 ray-casting with the arcs tessellated classifies those pads inside, with the arcs collapsed to chords 17 of 122 pads fall
-outside. dcsgone (24 arcs, sagitta 0.59 mm) and eprom (no arcs) have 0 misclassified pads.
+outside. private-badge-b (24 arcs, sagitta 0.59 mm) and eprom (no arcs) have 0 misclassified pads.
 
 **Root cause RC1a (parity).** `graph.rs:157 chord()` maps `Prim::Arc` to its single chord; `RouteGraph::build`
 (`graph.rs:305`) and the face-site cull (`vias.rs:152-160`) run `inside_outline` (`graph.rs:165`) on these chords. Every face
@@ -45,18 +45,18 @@ outside 64.628 mm, no zero-slack, converged, 0.21 s).
 - Tests: `inside_outline_handles_arc_pockets` (D-shaped outline, 180° arc r 20 mm, a point 8 mm inside the pocket ⇒ inside;
   with chords ⇒ outside); `route_pad_in_arc_pocket_routes` (route_layers: pad in the pocket ↔ pad in the body routes, no
   constraint crossing, both layers); `face_sites_exist_in_arc_pocket` (via_sites); gate assertion wiccon ≥ 54/60 (measured 60).
-- Expected: wiccon 50 → 60/60; eprom byte-identical (no arcs); dcsgone: 24 arcs (r ≈ 2 mm) → ~5 sub-arcs each, ~100 more
+- Expected: wiccon 50 → 60/60; eprom byte-identical (no arcs); private-badge-b: 24 arcs (r ≈ 2 mm) → ~5 sub-arcs each, ~100 more
   anchors, results may move slightly. Cost `O(Σ n_i)` prims, CDT `+O(n log n)`; `n_i ≤ sweep/0.084 rad` ≈ 25–50 per rim arc.
 - Deliverable: hand-vs-topor PNG for wiccon and eprom (memory rule), threads 1/2/4 byte-identical check.
 
-## Item 2 — dcsgonebadge: router_s 120 s (gate ≤ 65 s with wall_clock_s 60)
+## Item 2 — private-badge-b: router_s 120 s (gate ≤ 65 s with wall_clock_s 60)
 
-**Evidence.** (a) Gate options, 4 threads, this machine: iteration 1 does not finish in 60 s (0/231; T11 on a quiet machine:
-164/231 in iteration 1). Counters: search 379 runs, 140 ms/run, 268 k clearance candidates/run; **ghost 77 runs, 607 ms/run,
+**Evidence.** (a) Gate options, 4 threads, this machine: iteration 1 does not finish in 60 s (0/N; T11 on a quiet machine:
+164/N in iteration 1). Counters: search 379 runs, 140 ms/run, 268 k clearance candidates/run; **ghost 77 runs, 607 ms/run,
 20 M candidates/run (433 per bend query)** = 46.7 s CPU of the 60 s. (b) Empty graph, 1 thread: search total 36.7 s (4 runs
-> 0.5 s, max 24.3 s: #201 U1.13→U7.4), **ghost total 759 s** (64 runs > 1 s, max 24.8 s), ghost `None` for **166 of 231**
+> 0.5 s, max 24.3 s: #201 U1.13→U7.4), **ghost total 759 s** (64 runs > 1 s, max 24.8 s), ghost `None` for **166 of N**
 connections although the search finds 212 of them in ms (e.g. #150 search 9 ms Found, ghost None in 0 ms; #173 search 2 ms,
-ghost None after 20.4 s). (c) Replay, 4 threads, no deadline: iteration 1 = 76.6 s, 209/231 routed, **149/231 invalidated
+ghost None after 20.4 s). (c) Replay, 4 threads, no deadline: iteration 1 = 76.6 s, 209/N routed, **149/N invalidated
 and re-searched sequentially**, 305 overused edges, 164 vias; 22 remain blocked and are static (13 GND pour completions at
 0.5 mm width from U4/U5/U7/J3 pads, #191 U4.8→R13.1 at 0.5 mm, net65/net80 at U7.4/U7.9: 0.625×0.25 mm pads, the terminal
 cannot be left or entered — same class as item 1's escape, geometry not negotiation). (d) Harness: `bench.py:281-289` gives
@@ -67,7 +67,7 @@ every DRC-loop round (and the zero-slack rejection re-run) a fresh `wall_clock_s
 ghost every statically-unfit edge (`cap < w + ε + end_gaps·max(c, c_e)`) while the real search crosses such edges as overuse
 (`leave_vertex` `search.rs:1019`, face loop `:1215`). A pad's own polygon spokes/sides are "unfit" for its own net (same-net
 corner vertices still count as clearance gaps in `GEdge::end_gaps` `graph.rs:70`), so the ghost cannot leave most SMD pads ⇒
-`None` (166/231), ⇒ `negotiate.rs:240` marks the connection **dead** on a false premise, no blockers, no rip-up, no partial
+`None` (166/N), ⇒ `negotiate.rs:240` marks the connection **dead** on a false premise, no blockers, no rip-up, no partial
 stubs. When the ghost does explore it is a full geometric A* (`los` + clearance candidates per expansion) whose soft cost
 `GHOST_BLOCK_NM = 1e10` makes it visit the **entire reachable component** (f < 1e10) before conceding — 10–25 s per run with
 long apex chords (RC3 of the M2 review, `O(V)` candidates per chord). `hard()` also includes dynamic facts (`along`, caps shrunk
@@ -80,7 +80,7 @@ is per plan and not the problem — reaching it is.
 **RC2c — P4 invalidation is too coarse.** `path_valid` (`negotiate.rs:333`) rejects a path when any edge of any touched face
 moved (`faces_unchanged_since`, every `insert_path`/`set_site` bumps whole faces) **or** a site activated since the freeze lies
 within `rho_max + w/2 + ε` of the bbox of all faces of the whole path — `rho_max` is the largest `r + clr` of the layer (THT
-hole + 0.35 mm), the bbox of a 20 mm path covers much of the board, and iteration 1 activates 164 vias ⇒ 149/231 rejected and
+hole + 0.35 mm), the bbox of a 20 mm path covers much of the board, and iteration 1 activates 164 vias ⇒ 149/N rejected and
 re-searched one by one (`O(V' log V')` each, ~0.1–0.25 s) ≈ 24 s sequential (T11) — the parallel phase is wasted.
 
 **RC2d — harness budget.** See (d). Not a relaxation question: with an anytime engine the budget must be the run's.
@@ -92,7 +92,7 @@ candidates, no slots/strands**; key = `(soft_count, length)` lexicographic with 
 || !fits` edge, owned/blocked site, `along`; hard = only faces outside the outline. Return the same `GhostOut` (legs with
 `slot = slot_count(e)`, sites, first soft element in travel order, `last_reached`); `est_len` = funnel length of the found
 sequence (`O(k)`, existing taut code) or the hop sum. `dead` (F3) no longer depends on it. Cost `O(Σ_L E_L · (max_vias+1))` per
-run, deterministic (adjacency in index order, `BinaryHeap` with total key). Expected: 607 ms → ≤ 5 ms per run on dcsgone;
+run, deterministic (adjacency in index order, `BinaryHeap` with total key). Expected: 607 ms → ≤ 5 ms per run on private-badge-b;
 ghost `None` only for truly unreachable goals; rip-up/detour/stubs become effective (wiccon's 15 stalled iterations had 0 rips).
 Tests: all `search_layers` ghost tests unchanged; new `ghost_is_never_stricter_than_search` (on every fixture board: `search` Found
 ⇒ `ghost` Some with 0 soft elements); `ghost_cost_is_linear` (fixture with 1 k faces: < 50 k node pops).
@@ -104,7 +104,7 @@ reachable only through such an edge); otherwise return `Blocked{ghost: None}` im
 completions at 0.5 mm from 0.25 mm pads are explained. Expected: #201 24 s → ms; the 22 static blocks cost 0 in every
 iteration. `O(deg)` per terminal. Test: `search_blocks_unenterable_goal_instantly` (SMD pad narrower than `w + 2c` on a board
 where the start is open: `expansions == 0`), `dead_only_for_static_blocks` (negotiate_loop: a connection blocked by another's via
-is re-searched after rip-up, not dead). Worker: run `gate_diag dcsgonebadge --skip-a --iters 1` and read the "vertex escape"
+is re-searched after rip-up, not dead). Worker: run `gate_diag private-badge-b --skip-a --iters 1` and read the "vertex escape"
 dump for U7.4 to pin the exact failing rule before coding (expected: every incident edge either `passable == false` through a
 foreign pad constraint or `los` to the state point fails for `w = 0.5 mm`).
 
@@ -113,7 +113,7 @@ For a path that fails `path_valid`, first **re-validate in `O(k)`** against the 
 with `Cyc::cross_slot` against current strands, per edge `fits`, per via `site_free` + `goal_ok`, per `AtSite` the start rule on
 the other layer; all pass ⇒ insert with the recomputed slots (`resolved_sequentially` unchanged, count as `revalidated`); else
 re-search as now. Also tighten the site rule: test each activated site against the bbox of the **leg's** faces grown by that
-via's own `d/2 + clr + w/2 + ε` (not `rho_max` of the layer). Expected: 149 → ~20–40 re-searches on dcsgone, commit 24 s → ≈ 5 s.
+via's own `d/2 + clr + w/2 + ε` (not `rho_max` of the layer). Expected: 149 → ~20–40 re-searches on private-badge-b, commit 24 s → ≈ 5 s.
 Order of phase 3 unchanged ⇒ determinism and `iteration_batch_commit_invalidates_shared_edge` hold (the cap-1 channel still
 fails `fits` ⇒ re-search ⇒ detour). New test `batch_validation_accepts_unaffected_paths` (two connections sharing a face's
 bbox but no edge/site: `resolved_sequentially == 0`, both paths identical to a sequential run).
@@ -126,7 +126,7 @@ final pass` by construction and the bound keeps its stated meaning. Test: `tests
 
 ### Fix task F6 (optional, second-order) — same-net end gaps
 `fits_at`/`hard`: an edge end whose vertex `nets` contain the connection's net (own pad corners, own via) needs no clearance gap
-(`end_gaps` per net). Removes the false "unfit" on pad escape edges (dcsgone: 305 overused edges after iteration 1, many are pad
+(`end_gaps` per net). Removes the false "unfit" on pad escape edges (private-badge-b: 305 overused edges after iteration 1, many are pad
 spokes) and the overuse noise that keeps wiccon "stalled" at 60/60. Risk: changes costs ⇒ eprom's path choice may change ⇒ run
 only after F1–F5 and keep it out if eprom is not byte-identical (then R-ii).
 
@@ -134,9 +134,9 @@ only after F1–F5 and keep it out if eprom is not byte-identical (then R-ii).
 Search + ghost were ≈ 100 s CPU of 240 s CPU available in the gate run; metrization and the self-check are unmeasured. Add
 per-iteration `search / commit / metrize / check` seconds to the report (`RouteResult.profile`, behind `--quiet` in the probe).
 
-**Expected dcsgone after F1–F5 (estimate, quiet machine, 4 threads):** iteration 1 ≈ 3–4 s parallel search (36.7 s CPU minus
+**Expected private-badge-b after F1–F5 (estimate, quiet machine, 4 threads):** iteration 1 ≈ 3–4 s parallel search (36.7 s CPU minus
 #201's 24 s, ÷ 4) + ≈ 5 s commit + metrize; 2–4 further iterations on the active set; ≈ 20–35 s per `route()`; with F5 the gate
-sees `router_s ≤ 60 + final pass` even when a DRC round repeats. Routed stays ≈ 209/231 (22 static). Risk flag: if metrize
+sees `router_s ≤ 60 + final pass` even when a DRC round repeats. Routed stays ≈ 209/N (22 static). Risk flag: if metrize
 proves > 20 s (F7), a second round is still needed — report rather than tune.
 
 ## Requirement / ruling items for main (coordinator: escalate, do not decide)
@@ -147,7 +147,7 @@ proves > 20 s (F7), a second round is still needed — report rather than tune.
   change only ghost/dead/commit paths that eprom never exercises: 0 ghost runs, 0 re-searches, converged in 1 iteration — the
   worker must re-verify). F6 may change eprom's cost landscape: if it does, main must rule whether a changed (still clean) eprom
   is acceptable; otherwise F6 is dropped.
-- **R-iii** dcsgone keeps ≈ 22 statically unroutable connections (0.5 mm GND pour completions from 0.25 mm pads, fine-pitch U7
+- **R-iii** private-badge-b keeps ≈ 22 statically unroutable connections (0.5 mm GND pour completions from 0.25 mm pads, fine-pitch U7
   at 0.2 mm track / 0.2 mm clearance): the informational gate does not assert `routed`, but the final report should say they are
   width/clearance limits, not router defects (F3's reason string).
 
@@ -155,4 +155,4 @@ proves > 20 s (F7), a second round is still needed — report rather than tune.
 All fixes keep the parallel phase pure and phase 3 sequential; no `HashMap` iteration reaches a result (F2's BFS uses index-order
 adjacency, F4 only re-validates in commit order). The wiccon experiment was byte-identical at threads 1 and 4. Tool:
 `cargo run --release --example gate_diag -- <model.json> [--options JSON] [--iters N] [--skip-a] [--probes]`
-(binary under the workspace `target/release/examples/`; `--probes` is slow on dcsgone — one ghost per probe until F2 lands).
+(binary under the workspace `target/release/examples/`; `--probes` is slow on private-badge-b — one ghost per probe until F2 lands).

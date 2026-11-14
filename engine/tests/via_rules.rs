@@ -13,7 +13,6 @@ fn rules() -> Rules {
         min_via_drill: 250_000,
         min_annular: 100_000,
         min_via_diameter: 400_000,
-        routing_vias: Vec::new(),
         default: NetRule {
             via_d: 800_000,
             via_drill: 400_000,
@@ -51,13 +50,30 @@ fn via_sizes_prefer_netclass_then_predefined_smaller() {
         via_sizes(&r, 5, &o),
         vec![sz(600_000, 300_000), sz(450_000, 250_000)]
     );
-    // the fab profile list still contributes when the board sets nothing smaller up
-    let mut p = rules();
-    p.routing_vias = vec![250_000, 300_000];
+}
+
+#[test]
+fn no_fab_profile_vias_only_the_boards_own() {
+    // User decision 2026-11-12: the engine holds no fab profile. An older model still carrying
+    // `profile` / `drill_list` / `routing_vias` reads fine, and those keys add no via size: a
+    // board without pre-defined vias routes with its net class via only.
+    let old = r#"{"min_via_drill": 250000, "min_annular": 100000, "min_via_diameter": 400000,
+        "profile": "jlcpcb_1oz", "drill_list": [200000, 250000, 300000],
+        "routing_vias": [250000, 300000, 400000, 500000],
+        "default": {"via_d": 800000, "via_drill": 400000}}"#;
+    let r: Rules = serde_json::from_str(old).expect("an old model's rules still deserialize");
+    let o = Options::default();
+    assert_eq!(via_sizes(&r, 0, &o), vec![sz(800_000, 400_000)]);
+    // the board's pre-defined vias are the alternatives
+    let mut p = r.clone();
+    p.predefined_vias = vec![[500_000, 300_000], [450_000, 250_000]];
     assert_eq!(
         via_sizes(&p, 0, &o),
         vec![sz(800_000, 400_000), sz(500_000, 300_000), sz(450_000, 250_000)]
     );
+    // and the rules serialize without any profile key
+    let js = serde_json::to_string(&r).unwrap();
+    assert!(!js.contains("routing_vias") && !js.contains("drill_list") && !js.contains("\"profile\""), "{js}");
 }
 
 #[test]
@@ -75,13 +91,6 @@ fn allowed_drills_filters_predefined() {
         ..Options::default()
     };
     assert_eq!(via_sizes(&r, 0, &none), vec![sz(800_000, 400_000)]);
-    // the profile list is filtered too
-    let mut p = rules();
-    p.routing_vias = vec![250_000, 300_000];
-    assert_eq!(
-        via_sizes(&p, 0, &o),
-        vec![sz(800_000, 400_000), sz(450_000, 250_000)]
-    );
 }
 
 #[test]
@@ -109,4 +118,52 @@ fn fallback_only_when_nothing_set_up() {
     let d = rules();
     assert_eq!(d.via_fallback, [800_000, 400_000]);
     assert!(!via_fallback_used(&d, 0));
+}
+
+#[test]
+fn diff_pair_nets_use_the_pairs_via() {
+    // User 2026-11-12: a pair's vias are the smallest the board allows (the plugin resolves it into
+    // the pair rule); a pair net routed alone uses it too, in both `[vias] size` modes.
+    use topor_engine::model::DiffPairRule;
+    let mut r = rules();
+    r.predefined_vias = vec![[600_000, 300_000]];
+    r.diff_pairs = vec![DiffPairRule { p: 3, n: 4, width: 200_000, via_d: 450_000, via_drill: 250_000, ..Default::default() }];
+    for mode in ["net_class", "board_min"] {
+        let o = Options { via_size: mode.into(), ..Options::default() };
+        assert_eq!(via_sizes(&r, 3, &o), vec![sz(450_000, 250_000)], "{mode}");
+        assert_eq!(via_sizes(&r, 4, &o), vec![sz(450_000, 250_000)], "{mode}");
+    }
+    // other nets keep their own rule
+    assert_eq!(via_sizes(&r, 0, &Options::default())[0], sz(800_000, 400_000));
+    // a pair rule without a via (older model): the net's sizes as before
+    r.diff_pairs[0].via_d = 0;
+    assert_eq!(via_sizes(&r, 3, &Options::default())[0], sz(800_000, 400_000));
+}
+
+#[test]
+fn custom_rule_via_minimums_floor_pair_board_min_and_predefined_vias() {
+    // A custom rule `(constraint via_diameter (min 0.6mm))` / `hole_size (min 0.35mm)` on a net
+    // replaces the Board Setup minimum in KiCad's DRC (drc_engine.cpp: a matching rule returns
+    // before the board-minimum clamp). Before: the pair via 0.45 / 0.25 and the board_min size
+    // ignored it (a DRC violation in KiCad).
+    use topor_engine::model::DiffPairRule;
+    let mut r = rules();
+    r.predefined_vias = vec![[450_000, 250_000], [700_000, 350_000]];
+    let floor = NetRule { via_d: 800_000, via_drill: 400_000, via_d_min: 600_000, via_drill_min: 350_000, ..Default::default() };
+    r.per_net.insert(4, floor.clone());
+    r.per_net.insert(7, floor);
+    r.diff_pairs = vec![DiffPairRule { p: 3, n: 4, width: 200_000, via_d: 450_000, via_drill: 250_000, ..Default::default() }];
+    for mode in ["net_class", "board_min"] {
+        let o = Options { via_size: mode.into(), ..Options::default() };
+        // the N net's minimum floors the pair via for both nets: drill 0.35, d = max(0.6, 0.35 + 2 x 0.1)
+        assert_eq!(via_sizes(&r, 3, &o), vec![sz(600_000, 350_000)], "{mode}");
+        assert_eq!(via_sizes(&r, 4, &o), vec![sz(600_000, 350_000)], "{mode}");
+    }
+    // board_min on a single net with the custom minimum
+    let o = Options { via_size: "board_min".into(), ..Options::default() };
+    assert_eq!(via_sizes(&r, 7, &o), vec![sz(600_000, 350_000)]);
+    // net_class mode: the pre-defined 0.45 / 0.25 is below net 7's minimum, 0.7 / 0.35 is kept
+    assert_eq!(via_sizes(&r, 7, &Options::default()), vec![sz(800_000, 400_000), sz(700_000, 350_000)]);
+    // a net without a custom rule keeps the Board Setup minimums
+    assert_eq!(via_sizes(&r, 0, &o)[0], sz(450_000, 250_000));
 }

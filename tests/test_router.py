@@ -351,10 +351,10 @@ def test_progress_m4_name_and_caption_lines(engine, fixture_board, tmp_path):
 
 
 def test_progress_options_and_names_are_pure_helpers():
-    assert progress.board_options("dcsgonebadge", "m4") == {"wall_clock_s": 600, "partial_routes": False}
-    assert progress.board_options("dcsgonebadge", "m3") == {"wall_clock_s": 60, "partial_routes": False}
+    assert progress.board_options("esp-rust-board", "m4") == {"wall_clock_s": 600, "partial_routes": False}
+    assert progress.board_options("esp-rust-board", "m3") == {"wall_clock_s": 60, "partial_routes": False}
     assert progress.board_options("eprom-to-kernal", "m4") is None
-    assert progress.merged_options("dcsgonebadge", "m4", {"wall_clock_s": 120}) == {
+    assert progress.merged_options("esp-rust-board", "m4", {"wall_clock_s": 120}) == {
         "wall_clock_s": 120, "partial_routes": False}
     assert progress.merged_options("eprom-to-kernal", "m4", None) is None
     assert progress.merged_options("eprom-to-kernal", "m4", {"threads": 2}) == {"threads": 2}

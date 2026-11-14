@@ -852,7 +852,7 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
         }
     };
     let notes = cdt_notes(m, &src, &points, &cons, &proj.cdt);
-    proj.edge_clear = m.rules.edge_clearance as f64;
+    proj.edge_clear = m.rules.edge_clear() as f64;
     // A copper-to-edge check set to ignore is no hard bound in the topology: the cuts at the
     // outline bound with 0 and P2 prices a pass that fits only without the rule (ignored_rule).
     if m.rules.ignored_checks.iter().any(|c| c == "copper_edge_clearance") {
@@ -861,6 +861,7 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
     }
     // Keepouts forbidding vias, on whatever copper layer (a through via spans them all): no
     // via site may touch one (the P3 site test, the drawing's checker).
+    proj.pair_nets = m.rules.per_net.iter().filter(|(_, r)| r.pair_disc).map(|(&n, _)| n).collect();
     proj.no_via = m.keepouts.iter().filter(|k| k.no_vias && k.poly.len() >= 3).map(|k| k.poly.iter().map(|p| p.to_vec2()).collect()).collect();
     // The projection is one CDT over every layer: a region bound to some layers only is left to
     // the drawing and its checker (which see layers).

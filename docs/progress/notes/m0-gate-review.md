@@ -5,7 +5,7 @@ Gate criteria (45 §1) met on the coordinator's run (gate-run.txt: cargo 75 test
 9 gate/scaling green). Numbers signed off: fuzz fixture seeds 1/2/3 = 1000/2814, 1000/2544, 1000/3620 attempts,
 truncated=false, routing_new=0; eprom (ripped) 1000/20252, routing_new=0; negative-margin control (−20 µm)
 59–98 clearance violations (oracle sees the items). Baseline reproduced: eprom 80/0/0 segs/arcs/vias, 189.934 mm,
-DRC 93, RMSE 0.0036; wiccon 381/0/36, 1831.971 mm, DRC 48, free vias 11/25 exact, RMSE 0.0003; dcsgone
+DRC 93, RMSE 0.0036; wiccon 381/0/36, 1831.971 mm, DRC 48, free vias 11/25 exact, RMSE 0.0003; private-badge-b
 1369/14/203, 4167.082+43.197 mm, DRC 192 (plan 210, diff only in 3 library/env types), RMSE 0.0025.
 Runtime 5.1 / 6.5 / 12.3 s (< 60 s). Grid 1k→100k: candidates/query 4.87→4.92 (1.01×), 4.29e-4→5.10e-4 s (1.19×).
 Conditions: C1–C3 below must be closed in M1 before the checker is trusted with vias/multiple netclasses.
@@ -32,13 +32,13 @@ Conditions: C1–C3 below must be closed in M1 before the checker is trusted wit
   multiple netclasses, keepouts or net ties — see C1–C3.
 - track_dangling ≥ 1 instead of ≥ 1000: agree (KiCad merges touching same-net items; criterion is
   routing_new == 0). Add `board track count == 1000` after `write_items` so a partial drop is caught directly.
-- dcsgone DRC 192 vs 210: agree (per-type equality outside courtyards/lib/thermal is the right assertion).
-- dcsgone free vias 2/201 vs 7/196: agree with deferring the rip policy, disagree with the assertion.
+- private-badge-b DRC 192 vs 210: agree (per-type equality outside courtyards/lib/thermal is the right assertion).
+- private-badge-b free vias 2/201 vs 7/196: agree with deferring the rip policy, disagree with the assertion.
   `kept + removed == 203` is a tautology (every via is one or the other) — pin the measured (2, 201) with
   the DEVIATION comment so a regression is visible. `GetIsFree()` is KiCad's "free via" flag, which stitching
   vias placed with the via tool do not carry; README step 1 ("keep stitching/fence vias") implies "no track
   of its net touches it on the original board" (worker's endpoint-free count 6 is the closest). Must be
-  settled before M3 (dcsgone, bornhack ~877 stitching vias) — not an M0 blocker.
+  settled before M3 (private-badge-b, bornhack ~877 stitching vias) — not an M0 blocker.
 - Image compare flatten+crop: agree (RMSE ≤ 0.0036 after; 0.02 threshold generous but fine for hand images).
 
 ## Findings

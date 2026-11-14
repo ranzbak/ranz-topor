@@ -412,7 +412,7 @@ def with_true_arc_reference(h: dict, b) -> dict:
 
 
 # ---------------------------------------------------------------- live
-BOARDS = ["eprom-to-kernal", "wiccon-2023", "dcsgonebadge", "bornhack2026", "nametag-sao", "wedding-gift"]
+BOARDS = ["eprom-to-kernal", "wiccon-2023", "esp-rust-board", "bornhack2026", "nametag-sao", "wedding-gift"]
 
 
 @pytest.mark.skipif(not os.environ.get("KICAD_API_SOCKET"), reason="needs a running KiCad (KICAD_API_SOCKET)")

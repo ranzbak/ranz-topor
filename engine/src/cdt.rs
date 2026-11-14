@@ -150,7 +150,7 @@ impl Cdt {
     ///    never hit spade's panic keep exactly this triangulation.
     /// 2. **Noded** (after spade panicked): spade 2.15's splitting can panic (`!previous_region.
     ///    is_empty() || from == final_vertex`) where constraints cross at a nearly degenerate
-    ///    position (K1: copper graphics of dcsgonebadge; bornhack2026 2026-11-07: see
+    ///    position (K1: copper graphics of a 2-layer badge; bornhack2026 2026-11-07: see
     ///    `engine/tests/topo_cdt_noding.rs`). The arrangement is then computed here: the points
     ///    snapped to [`NODE_GRID_NM`], the constraints noded by snap rounding
     ///    ([`crate::noding`]), and the crossing-free pieces inserted with `try_add_constraint`.

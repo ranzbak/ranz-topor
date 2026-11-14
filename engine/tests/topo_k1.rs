@@ -2,9 +2,10 @@
 
 use topor_engine::model::{BoardModel, Options};
 
-/// Four copper graphics of dcsgonebadge as KiCad's IPC API exports them (the plugin's
-/// `model_ipc`; arcs flattened outward, overlapping one another) plus the board outline, found by
-/// delta debugging from the live plugin run that panicked in spade 2.15's
+/// Four GND copper graphics (2 mm wide arcs of radius 1 mm around both ends of a 3 x 3.5 mm board
+/// slot, on F.Cu and B.Cu) as KiCad's IPC API exports them (the plugin's `model_ipc`; arcs flattened
+/// outward, overlapping one another) plus the slot's outline in a plain rectangular board, reduced by
+/// delta debugging from a live plugin run on a 2-layer badge that panicked in spade 2.15's
 /// `add_constraint_and_split` ("!previous_region.is_empty() || from == final_vertex"). The
 /// projection now retries with the constraints reversed, then with snapped points
 /// (`cdt::Cdt::build`), so the route returns instead of panicking.
@@ -29,7 +30,7 @@ fn degenerate_crossing_constraints_take_the_noded_path() {
     assert_eq!(p.path, "noded");
     assert_eq!(p.notes.len(), 1, "{:?}", p.notes);
     let n = &p.notes[0];
-    assert!(n.contains("copper graphic on B.Cu [GND] (uuid 671c67bf-4fe3-4d9d-a2a8-c45279f5fdf4)"), "{n}");
+    assert!(n.contains("copper graphic on B.Cu [GND] (uuid 00000000-0000-4000-8000-000000000004)"), "{n}");
     assert!(n.contains("(64.1708, 51.1086) mm"), "{n}");
     assert!(n.contains("built by the noded path"), "{n}");
 }

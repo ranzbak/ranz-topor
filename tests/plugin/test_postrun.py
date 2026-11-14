@@ -1,5 +1,5 @@
 """Post-run findings (K1, plugin/topor/postrun.py): the engine report lines below are copied from real runs of the
-topological core (qmtech / dcsgonebadge at 6eb1584), so a change of their wording breaks this test, not the user's
+topological core (qmtech and a 2-layer badge at 6eb1584), so a change of their wording breaks this test, not the user's
 findings list silently."""
 from topor import postrun
 from topor.findings import Finding
@@ -100,9 +100,28 @@ def test_violations_finding_says_what_kicad_cleanup_does_to_a_short():
     assert "Delete tracks connecting different nets" in f.message and "unconnected at one end" in f.message
 
 
+def test_island_join_is_a_stitch():
+    """[planes] join_islands (user 2026-11-12): a pad-less island joined to a connected pad of its net."""
+    res = {"connections": [_c("GND", "routed")], "warnings": [
+        "pour stitching: 1 pour pieces cut off by the routed copper before, 0 after; 0 island vias, 0 pad stubs, "
+        "1 island joins (0.01 s)",
+        "pour piece cut off: GND: 1 island(s) 7.50 mm², pads [], 0 via(s), near (0.000, 0.000)",
+        "island join R1.2 -> (8.600, 14.000) (2.600 mm) for GND: 1 island(s) 7.50 mm², pads [], 0 via(s), "
+        "near (0.000, 0.000)"]}
+    fs = {f.code: f for f in postrun.route_findings(res)}
+    assert set(fs) == {"POUR_STITCHED"}
+    assert "1 isolated island(s)" in fs["POUR_STITCHED"].message and fs["POUR_STITCHED"].items[0].startswith("island join R1.2")
+    assert "check them by hand" not in fs["POUR_STITCHED"].message
+    res["warnings"].append("long island join R1.2 -> (8.600, 14.000): 4.100 mm from the pad edge, over the 3.0 mm "
+                           "scale (check it by hand)")
+    msg = {f.code: f for f in postrun.route_findings(res)}["POUR_STITCHED"].message
+    assert "1 of those join(s) run more than 3 mm from the pad" in msg
+
+
 def test_route_findings_quiet_on_a_clean_run():
     res = {"connections": [_c("A", "routed")], "warnings": [
-        "pour stitching: 0 pour pieces cut off by the routed copper before, 0 after; 0 island vias, 0 pad stubs (0.01 s)",
+        "pour stitching: 0 pour pieces cut off by the routed copper before, 0 after; 0 island vias, 0 pad stubs, "
+        "0 island joins (0.01 s)",
         "via_squeeze: 0 of 23 wire vias in a narrow pass (less slack than half the via diameter next to them)"]}
     assert postrun.route_findings(res) == []
     assert postrun.route_findings(None) == []
@@ -148,12 +167,12 @@ def test_preview_ratsnest_svg_draws_unconnected_items_blue():
 
 
 def test_preview_ratsnest_to_a_zone_is_a_ring_not_a_line_to_its_anchor():
-    """K1 (live dcs preview): a pad missing its GND pour was drawn as a line to the zone's anchor, the board corner."""
+    """K1 (live preview): a pad missing its GND pour was drawn as a line to the zone's anchor, the board corner."""
     from topor.preview import ratsnest_svg
-    unc = [{"items": [{"description": "Pad 0 [GND] of SW5 on F.Cu", "pos": {"x": 55.5, "y": 97.25}},
+    unc = [{"items": [{"description": "Pad 1 [GND] of SW1 on F.Cu", "pos": {"x": 58.0, "y": 71.5}},
                       {"description": "Zone [GND] on F.Cu and B.Cu, priority 0", "pos": {"x": 50.0, "y": 50.0}}]}]
     out = ratsnest_svg("<svg></svg>", unc, (50_000_000, 50_000_000))
-    assert "<line" not in out and '<circle cx="5.5000" cy="47.2500"' in out
+    assert "<line" not in out and '<circle cx="8.0000" cy="21.5000"' in out
 
 
 # ------------------------------------------------------------------------- KiCad DRC of the result (user 2026-11-11)

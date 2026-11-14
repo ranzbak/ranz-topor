@@ -11,9 +11,17 @@ pre-flight / priority code uses the same function.
 Dimensions (doc section 2): pair width = netclass ``diff_pair_width``; gap (edge to edge) = netclass
 ``diff_pair_gap``, overridden by a custom rule ``diff_pair_gap (opt ..)`` (the last matching rule in the file
 wins); both floored by the board minimums (KiCad: ``max(min track width, rule)``, ``max(min clearance, rule)``;
-topor's board minimums are the resolved, fab-floored ones). Via gap = ``max(pair gap, hole-to-hole - 2 x annular,
-copper-to-hole - annular)`` (``EffectiveDiffPairViaGap``; in netclass mode KiCad takes the pair gap, not the
-netclass field ``diff_pair_via_gap``). Max uncoupled length and max skew come only from custom rules
+topor's board minimums are the resolved ones). Pair via (user 2026-11-12: "the smaller the via the better, to
+keep impedance disruption to a minimum"; ``[diffpair] via = "smallest"``, the default): the smallest via the board
+allows that carries the pair width -- the Board Setup minimum via (:func:`smallest_via`, the same rule as
+``engine/src/vias.rs`` ``rule_size``) or a smaller legal pre-defined via, never larger than the net class via;
+``"net_class"`` = the P net's class via. Via gap = ``max(base, hole-to-hole - 2 x annular, copper-to-hole -
+annular)`` with the pair via's ring (KiCad ``EffectiveDiffPairViaGap``, pns_sizes_settings.h:146), base = the net
+class ``diff_pair_via_gap``, the pair gap when the class sets none. The class field is a user decision (user
+2026-11-10, memory diffpair-rules 3c: "use net class diff_pair_width, diff_pair_gap, diff_pair_via_gap ... for the
+pair's vias"); KiCad's interactive router differs: it sets the pair via gap from the board minimum clearance and
+then from the pair gap constraint, pns_kicad_iface.cpp:1286 and :1326 (the class field is only its "user choice"
+value, board_design_settings.cpp:1596). Max uncoupled length and max skew come only from custom rules
 (``diff_pair_uncoupled (max ..)``, ``skew (max ..)``); gap min/max for checking only from ``diff_pair_gap``.
 
 Complexity: detection O(N x L) for N nets of length L; dimensions O(P x R) for P pairs and R custom rules.
@@ -22,6 +30,7 @@ Complexity: detection O(N x L) for N nets of length L; dimensions O(P x R) for P
 from __future__ import annotations
 
 import fnmatch
+import math
 
 from .dru import DruRule, match_condition, parse_dru
 
@@ -113,20 +122,61 @@ def _matches(r: DruRule, net: str, netclass: str) -> bool:
     return bool(match_condition(cond, net_name=net, netclass=netclass, ref=None))
 
 
+def smallest_via(rules: dict, width: int, class_via: tuple[int, int], *, drill_grid_nm: int = 0,
+                 allowed_drills_nm=(), net_min: tuple[int, int] = (0, 0)) -> tuple[int, int, str]:
+    """The smallest via ``(d, drill, source)`` (nm) the board allows for a pair track of `width` nm: the candidates
+    are the Board Setup minimum via -- ``drill = max(min_via_drill, ceil(width / pi))`` rounded up to
+    `drill_grid_nm`, the smallest `allowed_drills_nm` entry at least that large, ``d = max(min_via_diameter, drill +
+    2 x min_annular)``, exactly ``engine/src/vias.rs`` ``rule_size``, only when the Board Setup sets a minimum via
+    diameter and drill (> 0) -- every pre-defined via (``rules["predefined_vias"]``) that meets the minimums, carries
+    the width (``pi x drill >= width``) and passes the drill filter, and `class_via` (the net class via, always
+    allowed). The least ``(d, drill)`` wins. `net_min`: the custom-rule ``via_diameter`` / ``hole_size`` minimum
+    of the pair's nets (``per_net`` ``via_d_min`` / ``via_drill_min``, 0 = none); where set it replaces the Board
+    Setup minimum, as in KiCad's DRC (a matching custom rule returns before the board-minimum clamp,
+    drc_engine.cpp), and no candidate below it is taken. O(P) for P pre-defined vias."""
+    lo_d, lo_r = int(rules.get("min_via_diameter") or 0), int(rules.get("min_via_drill") or 0)
+    if net_min[0] > 0:
+        lo_d = int(net_min[0])
+    if net_min[1] > 0:
+        lo_r = int(net_min[1])
+    ann = int(rules.get("min_annular") or 0)
+    allowed = sorted(int(x) for x in allowed_drills_nm or ())
+    cands: list[tuple[int, int, str]] = []
+    if lo_d > 0 and lo_r > 0:
+        need = math.ceil(max(int(width), 0) / math.pi)
+        drill = -(-need // drill_grid_nm) * drill_grid_nm if drill_grid_nm > 0 else need
+        drill = max(drill, lo_r)
+        drill = next((a for a in allowed if a >= drill), drill)
+        cands.append((max(lo_d, drill + 2 * ann), drill, "Board Setup minimum via"))
+    for d, r in rules.get("predefined_vias") or []:
+        d, r = int(d), int(r)
+        if (r >= lo_r and d >= lo_d and d - r >= 2 * ann and math.pi * r >= width
+                and (not allowed or r in allowed)):
+            cands.append((d, r, "pre-defined via"))
+    if class_via[0] > 0 and class_via[1] > 0 and class_via[0] >= lo_d and class_via[1] >= lo_r:
+        cands.append((int(class_via[0]), int(class_via[1]), "net class via"))
+    if not cands and class_via[0] > 0 and class_via[1] > 0:  # the class via raised to the minimums
+        r = max(int(class_via[1]), lo_r)
+        return max(int(class_via[0]), lo_d, r + 2 * ann), r, "net class via (raised to the via minimums)"
+    return min(cands, key=lambda c: (c[0], c[1])) if cands else (0, 0, "none")
+
+
 def resolve_pairs(names_codes: dict, *, pro: dict, dru_text: str | None, netclass_of: dict, rules: dict,
                   settings: dict | None = None) -> tuple[list[dict], list[str]]:
     """The model's ``rules["diff_pairs"]`` entries and report lines.
 
     `names_codes`: net name -> code. `pro`: the parsed ``.kicad_pro``. `netclass_of`: net name -> effective class.
     `rules`: the resolved rules (``min_track_width``, ``min_clearance``, ``hole_to_hole``, ``per_net`` via sizes).
-    `settings`: ``[diffpair]`` values (``detect``, ``width_source``, ``gap_mm``, ``via_gap_mm``,
-    ``gap_tolerance_mm``, ``max_uncoupled_mm``, ``skew_max_mm``). Each entry (nm): ``p``, ``n`` (codes), ``p_name``,
+    `settings`: ``[diffpair]`` values (``detect``, ``width_source``, ``gap_mm``, ``via_gap_mm``, ``via``,
+    ``gap_tolerance_mm``, ``max_uncoupled_mm``, ``skew_max_mm``) and the ``[vias]`` drill grid / filter
+    (``drill_grid_mm``, ``allowed_drills_mm``). Each entry (nm): ``p``, ``n`` (codes), ``p_name``,
     ``n_name``, ``netclass``, ``width``, ``gap``, ``via_gap``, ``gap_min``, ``gap_max`` (0 = none: only a custom rule's min / max raise violations; KiCad's netclass gap
     rule has no max and its min is the board minimum), ``tolerance``,
     ``max_uncoupled`` (0 = none), ``max_skew`` (0 = none), the rule names that set them (``rule_gap``,
     ``rule_uncoupled``, ``rule_skew``) and ``sources`` (where each value came from). O(P x R)."""
     st = {"detect": "kicad", "width_source": "pair", "gap_mm": 0.0, "via_gap_mm": 0.0, "gap_tolerance_mm": 0.01,
-          "max_uncoupled_mm": 0.0, "skew_max_mm": 0.0, "pairs": {}}
+          "max_uncoupled_mm": 0.0, "skew_max_mm": 0.0, "pairs": {}, "via": "smallest", "drill_grid_mm": 0.0,
+          "allowed_drills_mm": []}
     st.update({k: v for k, v in (settings or {}).items() if v is not None})
     notes: list[str] = []
     pairs = [] if st["detect"] == "off" else detect_pairs(names_codes)
@@ -177,11 +227,26 @@ def resolve_pairs(names_codes: dict, *, pro: dict, dru_text: str | None, netclas
             gap = min_cl
         via_d = int(nr.get("via_d") or 0)
         via_drill = int(nr.get("via_drill") or 0)
+        src["via"] = "net class via"
+        # the custom-rule via minimums of both nets (KiCad checks each via against its own net's rules)
+        nrn = (rules.get("per_net") or {}).get(str(names_codes[n_name])) or {}
+        net_min = (max(int(nr.get("via_d_min") or 0), int(nrn.get("via_d_min") or 0)),
+                   max(int(nr.get("via_drill_min") or 0), int(nrn.get("via_drill_min") or 0)))
+        if st["via"] != "net_class":
+            via_d, via_drill, src["via"] = smallest_via(
+                rules, width, (via_d, via_drill), drill_grid_nm=int(round(float(st["drill_grid_mm"] or 0) * 1e6)),
+                allowed_drills_nm=[int(round(float(x) * 1e6)) for x in st["allowed_drills_mm"] or []],
+                net_min=net_min)
+        elif net_min != (0, 0):  # the class via raised to the minimums (diameter keeps the annular ring)
+            via_drill = max(via_drill, net_min[1])
+            via_d = max(via_d, net_min[0], via_drill + 2 * int(rules.get("min_annular") or 0))
         ann = max(0, (via_d - via_drill) // 2)
         h2h = int(rules.get("hole_to_hole") or 0)
         c2h = int(rules.get("via_hole_clearance") or rules.get("hole_clearance") or 0)
-        via_gap = max(gap, h2h - 2 * ann, c2h - ann)
-        src["via_gap"] = "pair gap, floored by hole-to-hole and copper-to-hole (KiCad EffectiveDiffPairViaGap)"
+        vg = _class_field(classes_pro, nc, "diff_pair_via_gap")
+        base, base_src = (vg, f"netclass '{nc}' diff_pair_via_gap") if vg else (gap, "pair gap")
+        via_gap = max(base, h2h - 2 * ann, c2h - ann)
+        src["via_gap"] = f"{base_src}, floored by hole-to-hole and copper-to-hole (KiCad EffectiveDiffPairViaGap)"
         if st["via_gap_mm"]:
             via_gap, src["via_gap"] = int(round(float(st["via_gap_mm"]) * 1e6)), "[diffpair] via_gap_mm"
         if st["max_uncoupled_mm"]:
@@ -199,7 +264,8 @@ def resolve_pairs(names_codes: dict, *, pro: dict, dru_text: str | None, netclas
             "rule_uncoupled": rule_unc, "rule_skew": rule_skew, "sources": src,
         })
         notes.append(f"diff pair {p_name} / {n_name}: width {width / 1e6:g} mm ({src['width']}), gap "
-                     f"{gap / 1e6:g} mm ({src['gap']}), via gap {via_gap / 1e6:g} mm, max uncoupled "
+                     f"{gap / 1e6:g} mm ({src['gap']}), via {via_d / 1e6:g} / {via_drill / 1e6:g} mm ({src['via']}), "
+                     f"via gap {via_gap / 1e6:g} mm, max uncoupled "
                      + (f"{unc / 1e6:g} mm ({rule_unc})" if unc else "none") + ", max skew "
                      + (f"{skew / 1e6:g} mm ({rule_skew})" if skew else "none"))
     return out, notes

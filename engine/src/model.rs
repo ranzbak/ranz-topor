@@ -317,6 +317,19 @@ pub struct NetRule {
     /// rules matching the net (KiCad `(constraint track_width (min …))`); 0 = none. The engine's
     /// effective minimum is `max(Rules.min_track_width, min_width)` (necked exit stubs, A6/NX).
     pub min_width: i64,
+    /// Least via diameter / drill of the net from a matching custom rule (`(constraint
+    /// via_diameter (min …))`, `(constraint hole_size (min …))`, the last matching rule in the
+    /// file); 0 = no custom rule. KiCad's DRC uses a matching custom rule's minimum in place of the
+    /// Board Setup minimum (drc_engine.cpp: a matching rule returns before the board-minimum
+    /// clamp), so a via of this net is checked against it ([`Rules::via_min_of`]).
+    pub via_d_min: i64,
+    pub via_drill_min: i64,
+    /// The net is a coupled pair's lead in the planning model (`topo::diffpair::alias`): its via
+    /// is the pair's two-via disc, and the partner's pads, shapes and copper carry its net there.
+    /// That disc holds the N via as well as the P via, so no copper of either half is own copper
+    /// for it: it keeps the net's clearance to all of it (user 2026-11-13: "partner copper is not
+    /// own copper for clearance purposes"; a 2-layer badge, USB-: a pair via on USB+ pads of U7 / J1).
+    pub pair_disc: bool,
 }
 
 impl Default for NetRule {
@@ -329,6 +342,9 @@ impl Default for NetRule {
             netclass: "Default".into(),
             width_source: "default".into(),
             min_width: 0,
+            via_d_min: 0,
+            via_drill_min: 0,
+            pair_disc: false,
         }
     }
 }
@@ -348,15 +364,23 @@ pub struct Rules {
     #[serde(default)]
     pub via_hole_clearance: i64,
     pub hole_to_hole: i64,
+    /// Board Setup copper-to-edge clearance, as the board gives it (0 = 0). Measured, as KiCad's
+    /// DRC does, from the Edge.Cuts shape's EFFECTIVE shape, i.e. its stroke
+    /// (drc_test_provider_edge_clearance.cpp `testAgainstEdge`: `edge->GetEffectiveShape(
+    /// Edge_Cuts)` collided at `max(0, min - epsilon)`); the outline here is the stroke's centre
+    /// line, so the engine keeps [`Rules::edge_clear`] = this + [`Rules::outline_half_stroke`].
     pub edge_clearance: i64,
+    /// Half the widest Edge.Cuts stroke (nm; 0 = unset, older models): see [`Rules::edge_clear`].
+    #[serde(default)]
+    pub outline_half_stroke: i64,
     /// Narrowest copper connection KiCad's DRC accepts (`min_connection`, nm; 0 = unset): a
     /// necked pad exit stays at least this wide.
     #[serde(default)]
     pub min_connection: i64,
     pub max_error: i64,
-    pub profile: String,
-    pub drill_list: Vec<i64>,
-    pub routing_vias: Vec<i64>,
+    // No fab profile here (user decision 2026-11-12): every rule comes from the board's KiCad
+    // configuration as the plugin resolved it (`toporlib.rules`). Older models' `profile`,
+    // `drill_list` and `routing_vias` keys are ignored when read (serde skips unknown fields).
     /// KiCad's pre-defined via list (`board.design_settings.via_dimensions`, entries with a
     /// diameter > 0), `[diameter, drill]` nm. The smaller ones are alternatives for tight spots
     /// (`vias::via_sizes`).
@@ -460,6 +484,11 @@ impl Rules {
     }
 }
 
+/// Values for a model without `rules` (unit tests, hand-made JSON). The plugin always writes every
+/// field it resolved from the board, so a routed board never runs on these: they are neutral
+/// placeholders close to KiCad's own Board Setup defaults (board_design_settings.h DEFAULT_*), no
+/// fab profile and no extra via sizes; `via_fallback` is KiCad's factory 0.8 / 0.4 via, i.e. no
+/// fallback at all ([`crate::vias::via_fallback_used`] is false for it).
 impl Default for Rules {
     fn default() -> Self {
         Rules {
@@ -472,13 +501,9 @@ impl Default for Rules {
             via_hole_clearance: 0,
             hole_to_hole: 250_000,
             edge_clearance: 500_000,
+            outline_half_stroke: 0,
             min_connection: 0,
             max_error: 5_000,
-            profile: "jlcpcb_1oz".into(),
-            drill_list: vec![
-                200_000, 250_000, 300_000, 400_000, 500_000, 800_000, 1_000_000,
-            ],
-            routing_vias: vec![250_000, 300_000, 400_000, 500_000],
             predefined_vias: Vec::new(),
             via_fallback: [800_000, 400_000],
             allowed_drills: Vec::new(),
@@ -493,6 +518,32 @@ impl Default for Rules {
 }
 
 impl Rules {
+    /// Centre-line distance copper keeps from the board outline: the copper-to-edge clearance
+    /// plus half the outline's stroke width (KiCad measures from the stroke's edge), also when the
+    /// clearance is 0 (copper may then touch the stroke, not cross it). An ignored copper-to-edge
+    /// check (`ignored_checks`) keeps `edge_clearance` alone (callers set it to 0 there). O(1).
+    pub fn edge_clear(&self) -> i64 {
+        if self.ignored_checks.iter().any(|c| c == "copper_edge_clearance") {
+            self.edge_clearance
+        } else {
+            self.edge_clearance + self.outline_half_stroke.max(0)
+        }
+    }
+
+    /// The least via `(diameter, drill)` KiCad's DRC accepts on `net`: the net's custom-rule
+    /// minimum where one matches ([`NetRule::via_d_min`]), else the Board Setup minimum. O(1).
+    pub fn via_min_of(&self, net: i32) -> (i64, i64) {
+        let nr = self.net_rule(net);
+        let d = if nr.via_d_min > 0 { nr.via_d_min } else { self.min_via_diameter };
+        let r = if nr.via_drill_min > 0 { nr.via_drill_min } else { self.min_via_drill };
+        (d, r)
+    }
+
+    /// Whether a via of `net` is a pair's two-via disc ([`NetRule::pair_disc`]). O(log N).
+    pub fn pair_disc(&self, net: i32) -> bool {
+        self.per_net.get(&net).is_some_and(|r| r.pair_disc)
+    }
+
     pub fn net_rule(&self, net: i32) -> &NetRule {
         self.per_net.get(&net).unwrap_or(&self.default)
     }
@@ -682,7 +733,7 @@ impl BoardModel {
     /// KiCad 10 (`DRC_ENGINE::IsNetTieExclusion`, verified with kicad-cli 10.0.8 in task NT,
     /// `engine/tests/net_tie.rs`) allows a track of net N to collide with a pad of a net-tie
     /// footprint only where the collision lies inside a tie-group pad of net N of that
-    /// footprint. That needs the two pads to overlap; a gapped tie pad (dcsgonebadge JP1, 0.3 mm)
+    /// footprint. That needs the two pads to overlap; a gapped tie pad (a 3-pad solder jumper, 0.3 mm gap)
     /// is an ordinary obstacle for the other tied net. For fused pads the routing model exempts
     /// the whole pad (a track ending in its own pad cannot keep clearance from the fused
     /// neighbour); the exact rule is enforced by `Checker` (self-check), which rejects a
@@ -858,7 +909,7 @@ pub struct Options {
     /// signals off them (only the routable layers are signal layers).
     pub plane_signals: String,
     /// Router (A10): when non-empty only these drills (nm) are used for the *alternative* via
-    /// sizes (predefined and profile vias); the net's own class via is never dropped.
+    /// sizes (the pre-defined vias); the net's own class via is never dropped.
     pub allowed_drills_nm: Vec<i64>,
     /// Router (A10): allow via sites inside the net's own SMD pads (fab must fill and cap).
     pub via_in_pad: bool,
@@ -930,12 +981,46 @@ pub struct Options {
     /// the estimated refill holding a pad or via of the net, or a pad whose thermal spokes are all
     /// cut) gets a via into the pour on another layer, or a short stub, near its pad.
     pub stitch_islands: bool,
+    /// Topological core (`topor.toml [planes] join_islands`, user 2026-11-12, default true): with
+    /// `stitch_islands`, a cut-off piece of a pour net's copper that holds no pad (an island the
+    /// zone keeps, e.g. remove islands = never) and that no stitch via can reach gets a short
+    /// track of the net width from the nearest pad of the net that is connected to the rest of its
+    /// net, into the island, so the island is no longer isolated copper; its end stands at least
+    /// w/2 + the zone's minimum width deep in the island; priced length x (1 + (d / 3 mm)^2), d
+    /// = distance from the pad's edge ([`crate::topo::stitch::join_price`]), no cutoff, a warning
+    /// beyond 3 mm. False: such an island is only reported.
+    pub plane_join_islands: bool,
     /// Topological core (4.4, `topor.toml [planes] terminals`, user rule 2026-11-10): an own-net
-    /// pour is a terminal of its net like a pad, which may carry vias. A plane pad's stub may end
-    /// on own-net copper already on the plane (another pad's stub via, an existing through via
-    /// in the fill) instead of a via of its own, and a stub via that other stubs share moves to
-    /// where their stubs are shortest together. False: one via per plane pad (before 4.4).
+    /// pour is a terminal of its net like a pad, which may carry vias. Only fill connected to the
+    /// rest of its net before the run (the main component of [`crate::pourcheck`] on the board as
+    /// given) counts: a stub never ends in a cut-off island. A plane pad that no stub serves is
+    /// wired to its net's connected fill (a far terminal), ending where the path search first
+    /// reaches it (user 2026-11-12: routing over a connected pour has no length), instead of to
+    /// another pad of its net. False: stubs into any fill, other pads joined pad to pad (before 4.4).
     pub plane_terminals: bool,
+    /// Topological core (4.4, `topor.toml [planes] share_vias`, default `"outside_bga"`): whether
+    /// a plane pad's stub may end on own-net copper already on the plane (another pad's stub via,
+    /// an existing through via in the fill) instead of a via of its own; a stub via that other
+    /// stubs share moves to where their stubs are shortest together. `"outside_bga"` (user
+    /// 2026-11-13: "no shared vias under bga chips, shared vias are okay outside of BGA
+    /// footprints"; 2026-11-13 for the balls: "sharing only when not possible in any other way,
+    /// usually there is a good reason multiple balls are assigned for the same net"): a share
+    /// where the pad or the via is a ball of a ball-grid footprint
+    /// ([`crate::topo::planes::bga_footprints`], by membership) is a last resort priced
+    /// [`Options::plane_bga_share_cost`] and warned per via; other pads (also parts under a BGA)
+    /// share freely; `"never"` (the 2026-11-12 rule: a shared
+    /// via conducts heat worse, makes single-via current paths and adds inductance towards the
+    /// power pins); `"always"`.
+    pub plane_share_vias: String,
+    /// Topological core (`topor.toml [planes] bga_refs`, default empty): overrides of the BGA
+    /// detection behind `plane_share_vias = "outside_bga"` ([`crate::topo::planes::bga_footprints`]):
+    /// "REF" counts footprint REF as a BGA (its whole pad box), "-REF" never.
+    pub plane_bga_refs: Vec<String>,
+    /// Topological core (`topor.toml [planes] bga_share_cost`, default 100): the extra price, in
+    /// `via` prices, of a plane stub ending on a shared via where the pad or the via is a BGA
+    /// ball's (under `plane_share_vias = "outside_bga"`). High: a ball shares only where no own
+    /// via site is within reach; each such via gets a warning.
+    pub plane_bga_share_cost: f64,
     /// `topor.toml [output] cleanup_safe`: the written copper is made stable under KiCad's Edit ->
     /// Cleanup Tracks & Vias ([`crate::topo::tidy`]): no null, duplicate or in-pad segments, T
     /// junctions as exact vertices, collinear segments merged.
@@ -1249,7 +1334,7 @@ pub struct Options {
     pub diffpair_via_axes: Vec<f64>,
     /// 5.4 (`topor.toml [vias] size`): which via the router puts at a layer change, in the plan
     /// (room, via sites) and in the drawing. `"net_class"` (default, the behaviour before 5.4) =
-    /// the net class via first, then the smaller pre-defined / fab-profile vias for tight spots
+    /// the net class via first, then the smaller pre-defined vias for tight spots
     /// ([`crate::vias::via_sizes`]). `"board_min"` = the smallest via the Board Setup minimums
     /// allow (min via diameter, min through-hole drill, min annular ring: the supplier's
     /// capability) that still carries the trace's current: drill = the smallest with
@@ -1267,10 +1352,21 @@ pub struct Options {
     /// the plan's price (mm + via price); a priced move, never a gate. Runs in the TopoR loop
     /// (`loop = "topor"`, every cycle) and once before the drawing in the `cycles` loop.
     pub via_pair_min: bool,
-    /// 5.4 (`[vias] pair_max_mm`): the via-pair minimisation looks at pairs of vias joined by a
-    /// stretch at most this long (mm; Luzin-Popov 2013 p. 2: "shorter than a given length, e.g.
-    /// 10 mm").
+    /// 5.4 (`[vias] pair_max_mm`): the via-pair minimisation `via_pair_min` looks at pairs of
+    /// vias joined by a stretch at most this long (mm; Luzin-Popov 2013 p. 2: "shorter than a
+    /// given length, e.g. 10 mm"); for `via_pair_move` (5.8) it is the length scale of a graded
+    /// stretch price, not a cutoff (`topo::viaopt::pair_len_price`: one via at this length,
+    /// growing with the square of the length).
     pub via_pair_max_mm: f64,
+    /// 5.8 (`[vias] pair_move`): the obstructing-wire half of the local via-pair minimisation in
+    /// the TopoR loop (`loop = "topor"`, every cycle; Luzin, Popov & Popov 2013 p. 134 step 8.1
+    /// and fig. 1; Luzin 2013 p. 104 fig. 21c): for a wire that dives to another layer and comes
+    /// back over a stretch (priced by its length on the scale `via_pair_max_mm`), the wires that cross that stretch on the
+    /// wire's own layer are laid again together round it (as if the stretch were on that layer),
+    /// so the wire needs neither via; kept only when the archive's evaluation of the whole board
+    /// drops by more than that stretch price (a priced move, never a gate). No effect with
+    /// `loop = "cycles"`.
+    pub via_pair_move: bool,
     /// 5.4 (`[vias] relocate`): the plan puts every via at the point of its free interval where
     /// the forces of the copper around it balance (Dayan & Dai 1991; TopoR FreeStyle "Shift
     /// vias", 6.3 manual p. 179; Luzin-Popov 2013 p. 3), equal clearance between two neighbours,
@@ -1328,7 +1424,11 @@ impl Default for Options {
             reroute_rounds: 6,
             via_reduce: true,
             stitch_islands: true,
+            plane_join_islands: true,
             plane_terminals: true,
+            plane_share_vias: "outside_bga".into(),
+            plane_bga_refs: Vec::new(),
+            plane_bga_share_cost: 100.0,
             cleanup_safe: true,
             net_tree: "free".into(),
             steiner: false,
@@ -1398,6 +1498,7 @@ impl Default for Options {
             via_drill_grid_nm: 10_000,
             via_pair_min: false,
             via_pair_max_mm: 10.0,
+            via_pair_move: true,
             via_relocate: true,
             branch_relocate: false,
             via_between: true,

@@ -12,7 +12,7 @@
 //! The crossing direction of a pass (for the oblique factor) comes from the wire's *taut path*
 //! ([`Packer::taut`]): the shortest path from terminal to terminal through its sleeve that
 //! crosses every edge of its pass list inside the edge's end margins (string pulling, the
-//! simple stupid funnel over the per-edge intervals; the margins are the least over the layers,
+//! funnel algorithm over the per-edge intervals; the margins are the least over the layers,
 //! since a pass may run on any layer). Where the taut path runs straight the direction is that
 //! of the segment; where it bends at a pass it wraps the end vertex of that edge, and wires
 //! packed there follow arcs about it, which cross the (radial) edge square when the edge lies in
@@ -22,7 +22,7 @@
 //!
 //! Complexity: a margin is a 30-step bisection over the end obstacle's polygon, cached per
 //! (edge, end, net, width, clearance, layer); a fit test is O(passes); a taut path is O(passes
-//! of the wire) (the funnel restarts at most once per corner it adds), cached per wire content.
+//! of the wire) (each portal end enters and leaves the funnel once), cached per wire content.
 
 use super::draw::{poly_dist, seg_dist};
 use super::state::{EdgeId, Obstacle, Projection, State, VertKind, WireId};
@@ -91,7 +91,7 @@ pub fn pair_req(a: &PackItem, b: &PackItem, gap: f64) -> f64 {
 /// a full disc on both (Popov & Popov 2012, p. 117-118: a via is a round pad, and the room of a
 /// passage counts what passes it). Measured (D3): a disc on the entry edge's far side only (the
 /// via as a vertex on the exit crossing) lost wiccon 3.3v TP2.1 -> U1.8 again and routed 184
-/// instead of 190 on dcsgonebadge, so both edges count it. O(passes + vias).
+/// instead of 190 on a 2-layer badge, so both edges count it. O(passes + vias).
 pub fn wire_discs(st: &State, w: WireId, ks: &[usize], ds: &[f64]) -> Vec<Disc> {
     let n = st.wires[w].passes.len();
     let mut out: Vec<Disc> = vec![[0.0, 0.0]; n];
@@ -240,65 +240,7 @@ pub fn infl_of(pr: &Projection, e: EdgeId, pl: &[Vec2], k: usize) -> f64 {
     infl_dir(pr, e, pl[k + 2] - pl[k])
 }
 
-/// Shortest path through a sequence of portals (simple stupid funnel). `ports[i]` is
-/// `(left, right)` seen in the direction of travel; the first and the last are the two
-/// terminals (`left == right`). Returns the path corners with the index of the portal each lies
-/// on, first and last included. O(portals) when the path is straight, O(portals x corners) at
-/// worst (the scan restarts after each new corner from that corner's portal; the corner index
-/// strictly grows, so it ends; capped at `n^2 + 16` steps as a guard).
-pub fn funnel(ports: &[(Vec2, Vec2)]) -> Vec<(Vec2, usize)> {
-    let n = ports.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    let mut out = vec![(ports[0].0, 0usize)];
-    let (mut apex, mut ai) = (ports[0].0, 0usize);
-    let (mut lp, mut li, mut rp, mut ri) = (apex, ai, apex, ai);
-    let mut i = 1;
-    let mut steps = 0usize;
-    while i < n && steps < n * n + 16 {
-        steps += 1;
-        let (l, r) = ports[i];
-        // Right side: `r` tightens when it lies left of (or on) apex -> right.
-        if (rp - apex).cross(r - apex) >= 0.0 {
-            if apex == rp || (lp - apex).cross(r - apex) < 0.0 {
-                rp = r;
-                ri = i;
-            } else {
-                // Crosses over the left side: the left point is a corner (once: a portal whose
-                // end is the apex itself moves the apex on without a new corner).
-                if lp != apex {
-                    out.push((lp, li));
-                }
-                (apex, ai) = (lp, li);
-                (lp, li, rp, ri) = (apex, ai, apex, ai);
-                i = ai + 1;
-                continue;
-            }
-        }
-        // Left side: `l` tightens when it lies right of (or on) apex -> left.
-        if (lp - apex).cross(l - apex) <= 0.0 {
-            if apex == lp || (rp - apex).cross(l - apex) > 0.0 {
-                lp = l;
-                li = i;
-            } else {
-                if rp != apex {
-                    out.push((rp, ri));
-                }
-                (apex, ai) = (rp, ri);
-                (lp, li, rp, ri) = (apex, ai, apex, ai);
-                i = ai + 1;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    let last = ports[n - 1].0;
-    if out.last().is_none_or(|c| c.1 != n - 1) {
-        out.push((last, n - 1));
-    }
-    out
-}
+pub use super::funnel::{edge_point, funnel};
 
 impl<'a> Packer<'a> {
     pub fn new(pr: &'a Projection, outline: Vec<(Vec2, Vec2)>, eps: f64, edge_clear: f64) -> Self {
@@ -331,7 +273,7 @@ impl<'a> Packer<'a> {
     /// board: not outside, no obstacle inside, and at one of the drawing's static candidate points
     /// of the triangle ([`tri_site_points`]: incentre, centroid, seven barycentric points) every
     /// other net's obstacle at least `r` plus the larger of `s` and the obstacle's clearance away.
-    /// (D4: the incentre and centroid alone said "no site" for 15 planned vias of dcsgonebadge,
+    /// (D4: the incentre and centroid alone said "no site" for 15 planned vias of a 2-layer badge,
     /// of which the drawing placed 7, and P4 rerouted their wires for it.) Cached per
     /// (triangle, net, s). O(obstacles) per new key.
     pub fn via_site(&self, t: super::state::TriId, net: i32, r: f64, s: f64) -> bool {
@@ -346,7 +288,7 @@ impl<'a> Packer<'a> {
         let [a, b, c] = pr.tris[t].map(|v| pr.pos[v]);
         let pts = tri_site_points(a, b, c);
         let mut free = [f64::INFINITY; 9];
-        for o in pr.obstacles.iter().filter(|o| o.net != Some(net)) {
+        for o in pr.obstacles.iter().filter(|o| pr.via_foreign(o, net)) {
             for (q, f) in pts.iter().zip(free.iter_mut()) {
                 let d = if super::state::point_in_poly(*q, &o.poly) { f64::NEG_INFINITY } else { poly_dist(*q, &o.poly) - o.clear.max(s) - self.eps };
                 *f = f.min(d);
@@ -490,7 +432,7 @@ impl<'a> Packer<'a> {
             let (lo, hi) = (m0, len - m1);
             let (lo, hi) = if lo <= hi { (lo, hi) } else { (0.5 * (lo + hi), 0.5 * (lo + hi)) };
             let (lo, hi) = (lo.clamp(0.0, len), hi.clamp(0.0, len));
-            let (a, b) = (pp + (pq - pp) * (lo / len), pp + (pq - pp) * (hi / len));
+            let (a, b) = (edge_point(pp, pq, lo / len), edge_point(pp, pq, hi / len));
             // Left and right as seen coming from the triangle of traversal `k`.
             let t = pr.tris[wi.tris[k]];
             let c = (pr.pos[t[0]] + pr.pos[t[1]] + pr.pos[t[2]]) * (1.0 / 3.0);

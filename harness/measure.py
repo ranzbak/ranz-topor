@@ -94,6 +94,8 @@ def measure(board: str, work: Path) -> list[str]:
         f"{rules['default']['clearance'] / MM:g} w {rules['default']['width'] / MM:g}",
         "  floors applied: " + ("; ".join(f"{x['name']} {x['design'] / MM:g}->{x['floor'] / MM:g}"
                                          for x in rules["floors_applied"]) or "none"),
+        "  rule fallbacks: " + ("; ".join(f"{x['field']} {x['value'] / MM:g}" for x in rules.get("fallbacks") or [])
+                                or "none"),
         f"  orig DRC: total {len(drc.violations)} routing {routing} unconnected {len(drc.unconnected)} "
         f"by type {dict(sorted(drc.by_type.items()))}",
         f"  engine wires: {wire_count(mj)}",

@@ -63,15 +63,15 @@ under LIMITATIONS).
 ## Measured numbers
 Copper graphics (C25), worst over all shapes: pcbnew polygon minus (IPC + 1 um) = 0 nm^2 (board max_error and 20 nm
 fine reference), IPC minus (pcbnew + max_error + 1 um) = 0 nm^2:
-bornhack2026 77 shapes, dcsgonebadge 71, nametag-sao 1, eprom / wiccon / wedding-gift 0; synthetic 79 x 2 max_errors.
+bornhack2026 77 shapes, private-badge-b 71, nametag-sao 1, eprom / wiccon / wedding-gift 0; synthetic 79 x 2 max_errors.
 Copper text: 480 synthetic + bornhack2026's 1 knockout text, glyph / knockout copper outside the grown box = 0 nm^2.
 KiCad's ungrown `GetBoundingBox()` misses up to 0.33 x the text size (stroke font, 0.02 mm stroke, "ÅÉ ÿ"); hence 0.5.
-Fills: symmetric difference 0 nm^2 on every zone layer (bornhack 7 layers 11 391 mm^2, dcsgone 2 / 7 973, eprom 2 /
+Fills: symmetric difference 0 nm^2 on every zone layer (bornhack 7 layers 11 391 mm^2, private-badge-b 2 / 7 973, eprom 2 /
 1 070, nametag 2 / 24 514, wedding 4 / 13 343, wiccon 2 / 17 355).
-Pour reach (C26), IPC-only = 0 on every board; "pcbnew reached, IPC not" (allowed): dcsgonebadge pads 2 vias 2, all
+Pour reach (C26), IPC-only = 0 on every board; "pcbnew reached, IPC not" (allowed): private-badge-b pads 2 vias 2, all
 others 0 (bornhack 151 pads / 750 vias reached, eprom 4 / 17, nametag 14 / 35, wedding 28 / 0, wiccon 28 / 11).
 Via free (C23): parsed == GetIsFree on all boards, re-saved KiCad 10 text and original snapshot text (bornhack 870 vias
-/ 680 free, dcsgone 203 / 2, eprom 17 / 17, nametag 50 / 35, wedding 0, wiccon 36 / 11 (legacy file)).
+/ 680 free, private-badge-b 203 / 2, eprom 17 / 17, nametag 50 / 35, wedding 0, wiccon 36 / 11 (legacy file)).
 Run flow (FakeBoard + harness model, existing_copper = rip, Reject; kicad-cli DRC), keep_unconnected_vias true / false:
 
 | board | vias / free flag | vias ripped | newly kept by C24 | routed | new vias | routing_new | unconnected_new | unconnected items |

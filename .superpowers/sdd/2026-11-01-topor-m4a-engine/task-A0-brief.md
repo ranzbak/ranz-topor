@@ -17,7 +17,7 @@
   (`Options::relax_cap` resolves). Keep ONE source of truth (`expert.relax_iter_cap`); the top-level key stays accepted on input
   (serde alias / legacy field documented) so old JSON still parses, but `default_options()` no longer lists a duplicate;
   update plugin ENGINE_INTERNAL accordingly; tests green.
-- Step 5 (harness, Ruling A-C3): `harness.progress` gets `--options '<json>'` (merged over the board defaults) and dcsgonebadge's
+- Step 5 (harness, Ruling A-C3): `harness.progress` gets `--options '<json>'` (merged over the board defaults) and private-badge-b's
   default board options become the M4 gate options `{"wall_clock_s": 600, "partial_routes": false}` when `--milestone m4`
   (m3 keeps 60 s). Caption adds `stop_reason`. Bench summary columns `detour` (reference, empty until A7), `detour_ghost`,
   `stop_reason`, `vias_per_net`.

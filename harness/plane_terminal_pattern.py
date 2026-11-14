@@ -12,7 +12,9 @@ Three questions on one small 2-layer board (30 x 20 mm, rules as `harness/fit_pa
    (pads only): J1.1 to C1.1 through the pour, 20.0 mm.
 2. GND pair: R1.2 and R2.1 (F.Cu, 1.5 mm apart face to face); a GND pour on B.Cu over the whole board. Both need a
    via onto the plane; the plane may carry vias and a via on it is the net's copper, so the second pad ends on the
-   first pad's via: one shared via midway (stubs 1.25 + 1.25 mm). Careless: one via per pad (2 vias).
+   first pad's via: one shared via midway (stubs 1.25 + 1.25 mm). Careless: one via per pad (2 vias). Sharing is
+   allowed outside BGA footprints (user 2026-11-13: "no shared vias under bga chips, shared vias are okay outside of
+   BGA footprints"; `[planes] share_vias` = "outside_bga", the default); with "never" each pad gets its own via.
 3. GND single: C1.2 (F.Cu) stands inside the VCC F.Cu pour; its shortest connection is one via straight onto the
    B.Cu GND plane beside it (the VCC pour refills around it).
 
@@ -137,7 +139,7 @@ def expected_doc(pat: PTPattern) -> dict:
     car = {t.net + ":" + "-".join(f"{p[0]:g},{p[1]:g}" for p in t.pts): round(_len(t.pts), 4) for t in pat.careless_tracks}
     lr, lc = sum(ref.values()), sum(car.values())
     return {
-        # harness.validity: built for the board's own rules (route with [rules] fab_profile = "board")
+        # harness.validity: built for the board's own rules ([rules] fab_profile = "board", the default)
         "rules_assumed": {"authority": "board", "margin": 0.0},
         "name": pat.name,
         "title": "Own-net pours are terminals: end on the VCC pour, share a GND plane via, one via onto the GND plane",

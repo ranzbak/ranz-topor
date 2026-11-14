@@ -723,7 +723,7 @@ def expected_doc(pat: Pattern) -> dict:
                   "board_min_track_width": pat.rules["min_track_width"], "copper_edge_clearance": EDGE,
                   "hole_clearance": HOLE_CLEAR, "kicad_dru": pat.dru or None,
                   "netclass_patterns": pat.net_patterns},
-        # harness.validity: the hand numbers use the board's own rules (route with [rules] fab_profile = "board")
+        # harness.validity: the hand numbers use the board's own rules ([rules] fab_profile = "board", the default)
         "rules_assumed": {"authority": "board", "margin": 0.0},
         "capacity_definition": {
             "capacity": "length of the cut in the planning norm: Euclid (style smooth) or octagonal max(|dx|, |dy|, "

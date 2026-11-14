@@ -10,7 +10,7 @@ import pytest
 
 from harness.bench import run_bench
 from harness.copy import assert_unchanged, sha256_tree
-from harness.paths import BENCH_BOARDS
+from harness.paths import BENCH_BOARDS, LONG_BOARDS
 from harness.router import route_router
 from tests.gate.test_m0_gate import png_size
 from tests.gate.test_m1_gate import measured_hand_facts
@@ -66,7 +66,7 @@ def test_m2_gate_eprom_router(engine, tmp_path):
 
 
 @pytest.mark.gate
-@pytest.mark.parametrize("board", ["wiccon-2023", "dcsgonebadge"])
+@pytest.mark.parametrize("board", ["wiccon-2023", "esp-rust-board"])
 def test_m2_router_other_boards_complete(board, tmp_path):
     """Informational: must complete, no new routing DRC, anytime wall clock respected."""
     src = BENCH_BOARDS[board]
@@ -77,7 +77,7 @@ def test_m2_router_other_boards_complete(board, tmp_path):
     print(f"GATE-INFO {board}: routed {rt['routed']}/{rt['connections']} failed {rt['failed']} "
           f"drc_new={r['routed_drc']['routing_new']} router_s={r['router_s']}")
     assert r["routed_drc"]["routing_new"] == 0
-    if board == "dcsgonebadge":  # M3-R13 (user): dcsgonebadge info only, robustness board
+    if board in LONG_BOARDS:  # M3-R13 (user): the long board is info only, robustness board
         print(f"GATE-INFO {board} router_s={r['router_s']} (<=65: {r['router_s'] <= 65.0})")
     else:
         assert r["router_s"] <= 65.0  # anytime: wall_clock_s 60 plus the final metrization/self-check pass

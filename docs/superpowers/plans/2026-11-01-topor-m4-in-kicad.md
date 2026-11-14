@@ -6,9 +6,9 @@
 >
 > **Revision 2 (user rulings 2026-10-31):** plugin first (M4b, version 0.4.0), engine second (M4a, version 0.5.0); **no pcbnew/SWIG anywhere in the plugin runtime** (IPC + stable file formats + `kicad-cli` only; the dev/test harness keeps pcbnew as an oracle for now); via placement = bounded relaxation, free placement → backlog; iteration cap 30 accepted (wiccon before/after reported); kipy fallbacks accepted; `plugin.json` `min_version` 3.11; every plugin UI task runs the UI design skills, with F-designed ASCII wireframes reviewed before implementation.
 
-**Goal:** First, route eprom-to-kernal and wiccon-2023 from inside KiCad 10 through the IPC plugin with today's engine behaviour — pre-flight report, progress dialog with Cancel, preview with Accept/Reject, one undo step, configured by a self-documenting `topor.toml`, usable without AI (M4b gate, 0.4.0). Then bring the engine to the M4 hard numbers: dcsgonebadge (snapshot `3e7e66f862a7`) 231/231 routed, 0 router DRC, ≤ 10 min, locked edge GND kept (M3-R14), eprom/wiccon not worse (M4a gate, 0.5.0).
+**Goal:** First, route eprom-to-kernal and wiccon-2023 from inside KiCad 10 through the IPC plugin with today's engine behaviour — pre-flight report, progress dialog with Cancel, preview with Accept/Reject, one undo step, configured by a self-documenting `topor.toml`, usable without AI (M4b gate, 0.4.0). Then bring the engine to the M4 hard numbers: private-badge-b (snapshot `(private pin)`) N/N routed, 0 router DRC, ≤ 10 min, locked edge GND kept (M3-R14), eprom/wiccon not worse (M4a gate, 0.5.0).
 
-**Architecture:** **M4b (plugin)** adds a thin KiCad side behind two ports — `BoardPort` (kicad-python 0.8 over the IPC API; `FakeBoard` for headless tests) and `UiPort` (wx dialogs designed from F wireframes; `ScriptedUi` for tests). Board data comes from IPC (items, pads with padstacks, footprints, zones with fills, rule areas, nets, netclasses) plus a `save_as` copy of the live board (which includes unsaved edits) for what IPC does not expose (`(layers …)` types) and for verification: the routed items are appended to that copy by our own s-expression writer, `kicad-cli pcb drc` judges it and `kicad-cli pcb export svg` → `wx.svg` renders the preview. Rules come from `.kicad_pro` JSON + `.kicad_dru` parsing, then IPC netclasses. Accept = one `begin_commit` / `create_items` / `push_commit`; Reject writes nothing. Shared pure code (DRC runner/classifier, dru parser, rule resolution, DRC loop, detour stats) moves into `toporlib/`, used by both the plugin and the harness; a test proves the plugin runtime never imports `pcbnew`. Three engine prerequisites (cancel + progress, `default_options`, stop rule) are the first M4b task. **M4a (engine)** then finishes the router: slot-search speed, fine-pitch entry, own-net capacity and same-net Steiner T-junctions, pad exit stubs, G1 continuation, escalating rip cost, priority tiers, via rules from the board setup, bounded via relaxation, layer cost terms, a DRC-feasible detour reference, dcsgone completion.
+**Architecture:** **M4b (plugin)** adds a thin KiCad side behind two ports — `BoardPort` (kicad-python 0.8 over the IPC API; `FakeBoard` for headless tests) and `UiPort` (wx dialogs designed from F wireframes; `ScriptedUi` for tests). Board data comes from IPC (items, pads with padstacks, footprints, zones with fills, rule areas, nets, netclasses) plus a `save_as` copy of the live board (which includes unsaved edits) for what IPC does not expose (`(layers …)` types) and for verification: the routed items are appended to that copy by our own s-expression writer, `kicad-cli pcb drc` judges it and `kicad-cli pcb export svg` → `wx.svg` renders the preview. Rules come from `.kicad_pro` JSON + `.kicad_dru` parsing, then IPC netclasses. Accept = one `begin_commit` / `create_items` / `push_commit`; Reject writes nothing. Shared pure code (DRC runner/classifier, dru parser, rule resolution, DRC loop, detour stats) moves into `toporlib/`, used by both the plugin and the harness; a test proves the plugin runtime never imports `pcbnew`. Three engine prerequisites (cancel + progress, `default_options`, stop rule) are the first M4b task. **M4a (engine)** then finishes the router: slot-search speed, fine-pitch entry, own-net capacity and same-net Steiner T-junctions, pad exit stubs, G1 continuation, escalating rip cost, priority tiers, via rules from the board setup, bounded via relaxation, layer cost terms, a DRC-feasible detour reference, private-badge-b completion.
 
 **Tech Stack:** as M3 (Rust 1.96, spade 2.15.1, rayon 1.10, pyo3 0.23 abi3-py39, maturin in `.venv`, Python 3.12 + pcbnew SWIG **harness only**, KiCad 10.0.8 `kicad-cli`, rsvg-convert/ImageMagick harness only) plus, plugin: **kicad-python `>=0.8,<0.9`** (pinned), **wxPython 4.2.1 incl. `wx.svg`** (verified in `~/.cache/kicad/10.0/python-environments/org.topor.router`), `tomllib` (Python ≥ 3.11 → `plugin.json` `min_version` `"3.11"`). No new Rust crates.
 
@@ -20,7 +20,7 @@ All M0–M3 Global Constraints and rulings still apply (Linux; `.venv` only; rea
 
 - **No pcbnew in the plugin runtime (user):** nothing under `plugin/` or `toporlib/` imports `pcbnew`, directly or transitively; enforced by `tests/plugin/test_no_pcbnew.py` (AST scan + a subprocess that blocks the module and imports `topor.app`). Board I/O = kipy (IPC) + `Board.save_as` copies + our s-expression writer + `kicad-cli`. Every kipy call the plugin relies on is pinned by `tests/plugin/test_kipy_surface.py` against the installed kipy source (names, signatures, proto fields); whatever needs a running KiCad is marked UNVERIFIED in the task and appears in the GUI checklist.
 - **Hard M4b gate (user):** a GUI-testable whole-board plugin on eprom + wiccon with the current engine behaviour: from KiCad 10, pre-flight → progress + Cancel → preview → Reject leaves the board untouched / Accept = **one undo step**; eprom 27/27 and wiccon 62/62 routed, `routing_new 0`, `unconnected 0` on the `save_as` copy judged by `kicad-cli`; headless e2e on `FakeBoard` reproduces the numbers; `topor.toml` self-documenting + generated reference + undocumented-key test; user guide / troubleshoot / GUI checklist / CONTRIBUTING / debug guide; IPC model parity with the harness model on every snapshot board (live test, user-run). Version 0.4.0 (engine + plugin) at this gate.
-- **Hard M4a gate (user, M3-R14):** dcsgonebadge `3e7e66f862a7`, `run_bench(router=route_router, rip="all", threads=4, options={"wall_clock_s": 600, "partial_routes": False})`: `routed == connections_total == 231`, `partial == failed == 0`, `routing_new == 0`, `unconnected_items == 0`, `runtime_s ≤ 600` (whole run), 22 locked edge-GND items identical + 0 DRC pairs with router copper, threads 1/2/4 + repeat byte-identical. Version 0.5.0.
+- **Hard M4a gate (user, M3-R14):** private-badge-b `(private pin)`, `run_bench(router=route_router, rip="all", threads=4, options={"wall_clock_s": 600, "partial_routes": False})`: `routed == connections_total == N`, `partial == failed == 0`, `routing_new == 0`, `unconnected_items == 0`, `runtime_s ≤ 600` (whole run), 22 locked edge-GND items identical + 0 DRC pairs with router copper, threads 1/2/4 + repeat byte-identical. Version 0.5.0.
 - **Not worse than M3 (user):** eprom 27/27, 25/25, `routing_new 0`, `unconnected 0`, `length_outside_pads_nm ≤ 64_700_000` and `≤ hand`, `router_s < 2.0`, zero_slack 0 or DRC-kept, the M2 guard `eprom_ripped_front_only_is_the_m2_result` (27/27, ≤ 67.8 mm) green; wiccon 62/62 (signal 57/57), `vias ≤ 37`, `routing_new 0`, `unconnected 0`, `length_outside_pads_nm ≤ 1_380_000_000`, `router_s < 10.0`; scaling L1/L2 within `t100/t10 ≤ 40`, `t1000/t100 ≤ 30`. **Budgets are never relaxed by a worker or coordinator**; one F diagnosis round, then escalate with numbers.
 - **Complexity (45 §5a):** every new component states its Big-O in its task and code comment; no exponential/factorial stage; every loop capped; every long call checks the deadline **and the cancel flag**; rip-up bound `O(max_per_pair · m²)`.
 - **Determinism:** byte-identical result JSON (minus `runtime_s`) for `threads ∈ {1, 2, 4}` and across runs, for every board and option; no `HashMap` iteration order reaches the output.
@@ -85,7 +85,7 @@ plugin/
   topor/app.py                 main(), --headless (B10)
 docs/progress/notes/m4-ui-wireframes.md             F UI design (B4)
 docs/progress/notes/m4-capacity-steiner-design.md   F engine note (A3)
-docs/progress/notes/m4b-gate-review.md, m4a-gate-review.md, m4-dcsgone-diagnosis.md
+docs/progress/notes/m4b-gate-review.md, m4a-gate-review.md, the private-badge-b completion diagnosis (note removed: private board)
 docs/user/{install,configuration,operate,troubleshoot,gui-test-checklist}.md, docs/dev/debug.md, CONTRIBUTING.md (B11)
 tests/plugin/test_{no_pcbnew,kipy_surface,config,config_docs,fake_board,ipc_mapping,ipc_parity,pcbfile,model_ipc,preflight,
                    priority,scope,run_flow,report,messages,ui_wx,app}.py
@@ -116,7 +116,7 @@ docs/benchmarks/<date>-topor-0.5.0/   (A15)
   `control::RunControl { cancel: Arc<AtomicBool>, progress: Arc<Mutex<Progress>> }`, `Progress { phase: String, iteration: u32, routed: usize, total: usize, vias: usize, elapsed_s: f64 }` updated per iteration and per pass; `route_with(model, opts, ctl: &RunControl) -> RouteResult`; `route()` = `route_with(…, &RunControl::default())`; `Ctx::stop(&self) -> bool` = deadline **or** cancel, used at every existing deadline site (O(1)).
   PyO3: `route_async(model_json, options_json) -> RouteJob` (`#[pyclass]`: `progress() -> str`, `cancel()`, `done() -> bool`, `wait() -> str`; job on a `std::thread`, `wait` releases the GIL); `default_options() -> str` (JSON of `Options::default()`).
 
-- [ ] **Step 1:** tests (`route_control.rs`): `stop_rule_no_gain_terminates_without_timeout` (unroutable fixture, `wall_clock_s: 0.0` → `stop_reason == "no gain"`, iterations ≤ 30), `stop_rule_counts_newly_routed_as_progress`, `route_async_cancel_returns_anytime_result` (dcsgone model, cancel after 2 s → `"cancel"`, `routed ≥ 1`, self-checked, no panic), `progress_is_monotone`, `timeout_zero_is_disabled`. Run → FAIL. Implement. PASS.
+- [ ] **Step 1:** tests (`route_control.rs`): `stop_rule_no_gain_terminates_without_timeout` (unroutable fixture, `wall_clock_s: 0.0` → `stop_reason == "no gain"`, iterations ≤ 30), `stop_rule_counts_newly_routed_as_progress`, `route_async_cancel_returns_anytime_result` (private-badge-b model, cancel after 2 s → `"cancel"`, `routed ≥ 1`, self-checked, no panic), `progress_is_monotone`, `timeout_zero_is_disabled`. Run → FAIL. Implement. PASS.
 - [ ] **Step 2:** `tests/test_engine_surface.py`: `test_default_options_lists_every_field`, `test_route_async_roundtrip_fixture` (`wait()` == `route()` minus `runtime_s`).
 - [ ] **Step 3:** eprom byte-identical; wiccon with cap 30 / patience 5 reported before/after (62/62 expected; if worse → escalate per the user's ruling, do not tune). Scaling green. Progress PNG `--task P1 --board wiccon-2023`. Commit `feat(engine): stop rule, cancel + progress, route_async, default_options, 46 options`.
 
@@ -294,14 +294,14 @@ docs/benchmarks/<date>-topor-0.5.0/   (A15)
 **Interfaces:** `RouteGraph.clear_r[f]` = distance from face `f`'s incentre to the nearest vertex not of `f` and nearest wall (one grid query per face at build, `O(F·q)`); `clearance_bend` (a) skips the candidate scan for a sub-chord between consecutive portals whose endpoints both lie inside `D(incentre(f), clear_r[f] − ρ)` (convex disk ⇒ every point of the sub-chord is ≥ ρ from every non-face obstacle; the face's own 3 vertices are still tested exactly), (b) memoises per search on `(portal edge, side, apex vertex, target vertex)` (`RefCell<HashMap>`, membership only), (c) tests candidates in ascending chord parameter and stops at the first violation. Per call `O((C+1)·hit)`. Counters in `search_totals()`: `bends`, `candidates`, `skipped_faces`, `memo_hits`.
 
 - [ ] **Step 1:** `clear_radius_skip_is_conservative` (proptest 200 cases), `memoised_bend_equals_recomputed`, `early_stop_bend_equals_full_scan` (`engine/tests/search_speed.rs`). FAIL → implement → PASS.
-- [ ] **Step 2:** measure on dcsgone (`route_probe … --profile`): candidates/query (was 162) and search share (was 94 %) in the ledger; target `≥ 5×`; `< 2×` → stop and report. eprom/wiccon byte-identical; dcsgone 60 s ≥ 148. PNG `--task A1 --board dcsgonebadge`. Commit `perf(search): face clear radius, memoised clearance_bend, early stop`.
+- [ ] **Step 2:** measure on private-badge-b (`route_probe … --profile`): candidates/query (was 162) and search share (was 94 %) in the ledger; target `≥ 5×`; `< 2×` → stop and report. eprom/wiccon byte-identical; private-badge-b 60 s ≥ 148. PNG `--task A1 --board private-badge-b`. Commit `perf(search): face clear radius, memoised clearance_bend, early stop`.
 
 ### Task A2 (S, F review at the gate): fine-pitch entry #201 and state-point / los convergence (M4-D2) — `engine/src/search.rs:1373, :1758`
 
 **Interfaces:** `state_point` shrinks the usable sub-segment by every foreign vertex within `r_v + c + w/2 + eps` (`verts_near`, `O(q)`) and discretises roundrect-corner crossings at the corner-circle tangent point; `los` returns `ok = false` when the bend loop does not converge (apex not approaching within `LOS_PORTAL_CAP` or cap hit).
 
 - [ ] **Step 1:** `fine_pitch_entry_u7_4_routes_direct` (U1.13→U7.4 geometry extracted via `gate_diag --detour 201` into a fixture; 0 vias, `est_len ≤ 1.5 × straight`), `los_nonconverging_bend_loop_is_rejected` (#208 trio: 0-via path `≤ 1.3 × 2.93 mm`, `apex_len ≤ 4 × chord`) in `engine/tests/search_entry.rs`. FAIL → implement → PASS.
-- [ ] **Step 2:** eprom byte-identical or not worse (diff reported); wiccon not worse. PNG `--task A2 --board dcsgonebadge`. Commit `fix(search): fine-pitch entry, state point shrink, los convergence`.
+- [ ] **Step 2:** eprom byte-identical or not worse (diff reported); wiccon not worse. PNG `--task A2 --board private-badge-b`. Commit `fix(search): fine-pitch entry, state point shrink, los convergence`.
 
 ### Task A3 (F): design note — own-net capacity, same-net Steiner attachment, exit stubs, G1 continuation, via relaxation, escalating rip cost — `docs/progress/notes/m4-capacity-steiner-design.md`
 
@@ -314,28 +314,28 @@ Read: `m3-detour-diagnosis.md` (M4-D1, D3, withdrawn F6), `graph.rs:462-500`, `w
 **Interfaces:** `RouteGraph::fits_for(e, net, w, c) -> bool`, `RouteGraph.wall_r: Vec<f64>`; own-net ends charge 0 gap + core radius back; same-net strands on `e` charge 0 gap. Build `O(E·q)`.
 
 - [ ] **Step 1:** `own_tip_edge_fits_own_net`, `two_same_net_strands_share_one_tip_edge`, `own_end_edge_against_outline_wall_stays_unfit`, `search_layers (1)` flips to "fits, ghost not soft" (`engine/tests/graph_ownnet.rs`). FAIL → implement → PASS.
-- [ ] **Step 2:** `eprom_ripped_front_only_is_the_m2_result` green; eprom two-layer identity re-verified; wiccon not worse (vias ≤ 33 expected). PNGs `--task A4` dcsgone + wiccon. Commit `feat(graph): own-net and same-net capacity, wall-aware`.
+- [ ] **Step 2:** `eprom_ripped_front_only_is_the_m2_result` green; eprom two-layer identity re-verified; wiccon not worse (vias ≤ 33 expected). PNGs `--task A4` private-badge-b + wiccon. Commit `feat(graph): own-net and same-net capacity, wall-aware`.
 
 ### Task A5 (S): same-net Steiner attachment and net ordering (M4-D3) — `decompose.rs`, `search.rs`, `route.rs`, `wires.rs`
 
 **Interfaces:** `Goal::OwnStrand { conn, leg, edge }`; `ConnReport.junction: bool`; `Options.steiner: bool = true`. One extra goal set per sibling, `O(Σ sibling leg length)` per search.
 
 - [ ] **Step 1:** `t_junction_onto_routed_sibling` (#207 fixture: ≤ 1.2 mm T-junction, 0 vias, sibling split, self-check clean), `t_junction_onto_hand_copper`, `steiner_off_is_m3_behaviour`, `junction_angle_below_60_is_rejected` (`engine/tests/route_steiner.rs`). FAIL → implement → PASS.
-- [ ] **Step 2:** eprom/wiccon not worse; threads byte-identical; dcsgone 60 s `count > 1.5` reported (expected ≤ 6). PNG `--task A5 --board dcsgonebadge`. Commit `feat(route): same-net Steiner T-junctions and net ordering`.
+- [ ] **Step 2:** eprom/wiccon not worse; threads byte-identical; private-badge-b 60 s `count > 1.5` reported (expected ≤ 6). PNG `--task A5 --board private-badge-b`. Commit `feat(route): same-net Steiner T-junctions and net ordering`.
 
 ### Task A6 (S): pad exit stubs — `route.rs`, `wires.rs`, `decompose.rs`, `model.rs`
 
 **Interfaces:** `Terminal::Stub { pad: Vec2, end: Vec2, layer: u32 }`; `Options.exit_stubs: String` (`"auto" | "all" | "off"`, default `"auto"`); `ConnReport.stub_nm: i64`; generation `O(T·q)`.
 
 - [ ] **Step 1:** `stub_generated_for_unfit_fine_pitch_pad`, `stub_skipped_when_infeasible` (reason `"stub infeasible"`), `exit_stubs_off_matches_previous`, `exit_stubs_all_on_every_smd_pad` (`engine/tests/route_stubs.rs`). FAIL → implement → PASS.
-- [ ] **Step 2:** eprom byte-identical (THT only); wiccon not worse; dcsgone #201 routed. PNG `--task A6 --board dcsgonebadge`. Commit `feat(route): pad exit stubs (auto/all/off)`.
+- [ ] **Step 2:** eprom byte-identical (THT only); wiccon not worse; private-badge-b #201 routed. PNG `--task A6 --board private-badge-b`. Commit `feat(route): pad exit stubs (auto/all/off)`.
 
 ### Task A7 (S): DRC-feasible detour reference (M4-D4, M3-R15) — `route.rs`, `model.rs`, `toporlib/detour.py`, `harness/bench.py`, `harness/progress.py`
 
 **Interfaces:** `Options.detour_reference: bool = false`, `Options.detour_reference_budget_pct: f64 = 10.0`; `ConnReport.ref_len_nm: Option<i64>`, `ConnReport.ref_kind: String` (`"feasible" | "ghost" | "none"`): one slot search per connection with full clearance/width on a `MultiGraph` of fixed copper only, same layers/via rules/`via_cost`, `par_iter` collected in order, under the budget share; failure → ghost fallback flagged. `O(m · search)`. `detour_stats(connections, field="ref_len_nm")` → `detour`, `ghost_len_nm` → `detour_ghost`; bench sets `detour_reference: true` (offline only); caption flags `ghost < 2 mm`.
 
 - [ ] **Step 1:** `reference_is_feasible_not_topological` (#208: `ref ≈ 2.9 mm`, ghost 1.0), `reference_off_leaves_fields_none`, `reference_budget_exhausted_falls_back_to_ghost`, `reference_threads_byte_identical` (`engine/tests/route_detour_ref.rs`); `test_detour_stats_uses_reference_and_reports_ghost`. FAIL → implement → PASS.
-- [ ] **Step 2:** PNG `--task A7 --board dcsgonebadge`. Commit `feat(route): DRC-feasible detour reference (M3-R15)`.
+- [ ] **Step 2:** PNG `--task A7 --board private-badge-b`. Commit `feat(route): DRC-feasible detour reference (M3-R15)`.
 
 ### Task A9 (S): priority tiers, do-not-touch nets, ignored pads — `decompose.rs`, `model.rs`, `route.rs`
 
@@ -355,11 +355,11 @@ Read: `m3-detour-diagnosis.md` (M4-D1, D3, withdrawn F6), `graph.rs:462-500`, `w
 
 - [ ] **Step 1:** `leg_through_foreign_pour_prefers_other_layer_when_cost_set`, `preferred_direction_cost_tilts_choice`, `costs_zero_match_m3` (`engine/tests/route_layer_cost.rs`). FAIL → implement → PASS. eprom B.Cu GND pour islands before/after reported. PNG `--task A11`. Commit `feat(search): pour-cut and preferred-direction layer costs`.
 
-### Task A12 (S; F diagnosis if the gate misses): dcsgonebadge completion — M3-R14
+### Task A12 (S; F diagnosis if the gate misses): private-badge-b completion — M3-R14
 
-- [ ] **Step 1:** `tests/gate/test_m4_gate.py::test_m4_gate_dcsgone_complete` with the Global Constraints numbers (locked-copper helpers reused; threads 1/2/4 + repeat; pcb sha printed). Run → record.
-- [ ] **Step 2:** if failing: one F note `docs/progress/notes/m4-dcsgone-diagnosis.md` (where the remaining connections go: capacity, entry, time; per-iteration profile), fix tasks (S), re-run; still failing → commit, numbers + profile to STATE, escalate (no relaxation).
-- [ ] **Step 3:** PNG `--task A12 --board dcsgonebadge`. Commit `test(gate): M4 dcsgone 231/231 (+ fixes)`.
+- [ ] **Step 1:** `tests/gate/test_m4_gate.py::test_m4_gate_private_badge_complete` with the Global Constraints numbers (locked-copper helpers reused; threads 1/2/4 + repeat; pcb sha printed). Run → record.
+- [ ] **Step 2:** if failing: one F note the private-badge-b completion diagnosis (note removed: private board) (where the remaining connections go: capacity, entry, time; per-iteration profile), fix tasks (S), re-run; still failing → commit, numbers + profile to STATE, escalate (no relaxation).
+- [ ] **Step 3:** PNG `--task A12 --board private-badge-b`. Commit `test(gate): M4 private-badge-b N/N (+ fixes)`.
 
 ### Task A13 (S): bounded via position relaxation (M3-R3) — `relax.rs`, `route.rs`
 
@@ -383,7 +383,7 @@ Read: `m3-detour-diagnosis.md` (M4-D1, D3, withdrawn F6), `graph.rs:462-500`, `w
 ### Task A15 (S, gate review F): M4a gate, version 0.5.0, benchmark 0.5.0, review
 
 - [ ] **Step 1:** `test_m4_gate_eprom_not_worse`, `test_m4_gate_wiccon_not_worse` (Global Constraints numbers); `pytest tests/gate -m "gate or not gate"` all green (M0–M4b + M4a); `pytest tests/scaling -m scaling` green; `since = "0.5.0"` schema keys become active (B1 commented lines un-commented in `render_toml`, reference regenerated).
-- [ ] **Step 2:** version 0.5.0; `bash tools/build.sh --dev`; benchmark `docs/benchmarks/<date>-topor-0.5.0/` on all boards with the A0/A7 columns; gate PNGs `--task A15-gate` for eprom, wiccon, dcsgone; `docs/benchmarks/README.md` row.
+- [ ] **Step 2:** version 0.5.0; `bash tools/build.sh --dev`; benchmark `docs/benchmarks/<date>-topor-0.5.0/` on all boards with the A0/A7 columns; gate PNGs `--task A15-gate` for eprom, wiccon, private-badge-b; `docs/benchmarks/README.md` row.
 - [ ] **Step 3 (F):** independent review: complexity of every new loop (A1, A4–A7, A13, A14, A16), note conformance, determinism audit, D-1..D-10 closure, gate tests vs numbers; BLOCKING fixed → STATE "M4a DONE (0.5.0) — M4 complete". Commit `docs(state): M4a DONE (0.5.0)`.
 
 ---

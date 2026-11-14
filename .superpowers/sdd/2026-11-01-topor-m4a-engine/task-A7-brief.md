@@ -3,7 +3,7 @@
 **Interfaces:** `Options.detour_reference: bool = false`, `Options.detour_reference_budget_pct: f64 = 10.0`; `ConnReport.ref_len_nm: Option<i64>`, `ConnReport.ref_kind: String` (`"feasible" | "ghost" | "none"`): one slot search per connection with full clearance/width on a `MultiGraph` of fixed copper only, same layers/via rules/`via_cost`, `par_iter` collected in order, under the budget share; failure → ghost fallback flagged. `O(m · search)`. `detour_stats(connections, field="ref_len_nm")` → `detour`, `ghost_len_nm` → `detour_ghost`; bench sets `detour_reference: true` (offline only); caption flags `ghost < 2 mm`.
 
 - [ ] **Step 1:** `reference_is_feasible_not_topological` (#208: `ref ≈ 2.9 mm`, ghost 1.0), `reference_off_leaves_fields_none`, `reference_budget_exhausted_falls_back_to_ghost`, `reference_threads_byte_identical` (`engine/tests/route_detour_ref.rs`); `test_detour_stats_uses_reference_and_reports_ghost`. FAIL → implement → PASS.
-- [ ] **Step 2:** PNG `--task A7 --board dcsgonebadge`. Commit `feat(route): DRC-feasible detour reference (M3-R15)`.
+- [ ] **Step 2:** PNG `--task A7 --board private-badge-b`. Commit `feat(route): DRC-feasible detour reference (M3-R15)`.
 
 
 ## Coordinator additions (binding; M3-R15, Ruling A-C5)
@@ -17,5 +17,5 @@
   "vs DRC-feasible reference" (+ count of ghost fallbacks).
 - The reference search must not change routing results: route JSON minus the new ref fields/runtime_s byte-identical on eprom and
   wiccon with detour_reference on vs off; threads 1/2/4 identical with it on.
-- Report per board (eprom, wiccon, dcsgone at the gate options A-C3): detour median/p90/max/count>1.5/top 5 by reference AND by ghost,
-  number of ghost fallbacks, reference time share. PNG `--milestone m4 --task A7 --board dcsgonebadge`.
+- Report per board (eprom, wiccon, private-badge-b at the gate options A-C3): detour median/p90/max/count>1.5/top 5 by reference AND by ghost,
+  number of ghost fallbacks, reference time share. PNG `--milestone m4 --task A7 --board private-badge-b`.

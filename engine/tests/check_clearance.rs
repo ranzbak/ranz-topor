@@ -75,3 +75,33 @@ fn fuzz_respects_pad_netclass_clearance() {
     let rep2 = Checker::new(&strict, &o).check_items(&r.items);
     assert!(rep2.violations.is_empty(), "{:?}", rep2.violations);
 }
+
+/// B2 (KiCad drc_test_provider_edge_clearance.cpp `testAgainstEdge`: copper is collided with the
+/// edge's EFFECTIVE shape, its stroke included, at `max(0, min - epsilon)`): the model's outline is
+/// the stroke's centre line, so copper keeps `edge_clearance + outline_half_stroke` from it. With
+/// a copper-to-edge clearance of 0 (wiccon, qmtech) a track may touch the stroke, not cross it.
+#[test]
+fn edge_clearance_counts_half_the_outline_stroke() {
+    let mut m = model("");
+    // track copper edge 30 µm inside the outline centre line (y = 20 mm): inside a 0.1 mm stroke
+    let edge_track = |inside: i32| {
+        let y: i32 = 20_000_000 - inside - 100_000;
+        Item::Track(TrackItem { net: 1, layer: 0, width: 200_000, prim: TrackPrim::Seg { a: [-3_000_000, y].into(), b: [3_000_000, y].into() }, group: None, wire: None })
+    };
+    m.rules.edge_clearance = 0;
+    m.rules.outline_half_stroke = 0;
+    let o = Options::default();
+    assert!(Checker::new(&m, &o).check_items(&[edge_track(30_000)]).violations.is_empty(), "0 = 0 without a stroke");
+    m.rules.outline_half_stroke = 50_000;
+    let v = Checker::new(&m, &o).check_items(&[edge_track(30_000)]).violations;
+    assert_eq!(v.len(), 1, "{v:?}");
+    assert!(Checker::new(&m, &o).check_items(&[edge_track(60_000)]).violations.is_empty());
+    // the stroke adds to a set clearance
+    m.rules.edge_clearance = 200_000;
+    assert_eq!(m.rules.edge_clear(), 250_000);
+    assert_eq!(Checker::new(&m, &o).check_items(&[edge_track(240_000)]).violations.len(), 1);
+    assert!(Checker::new(&m, &o).check_items(&[edge_track(260_000)]).violations.is_empty());
+    // an ignored copper-to-edge check: the stroke is not added (KiCad does not test it)
+    m.rules.ignored_checks.push("copper_edge_clearance".into());
+    assert_eq!(m.rules.edge_clear(), 200_000);
+}

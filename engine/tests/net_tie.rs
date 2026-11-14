@@ -5,7 +5,7 @@
 //! `.venv/bin/python tools/net_tie_drc_probe.py <out_dir>`): a small board of 3-pad net-tie
 //! footprints (`net_tie_pad_groups "1,2"`, pads 1.0 × 1.5 mm rect, pad 1 = net A at x −1.3, pad 2
 //! = net B at x 0, pad 3 = untied net C at x +1.3, copper bridge `fp_poly` x −0.9..−0.4, y ±0.3 as
-//! in `Jumper:SolderJumper-3_P1.3mm_Bridged12`, the footprint of dcsgonebadge JP1), every track
+//! in `Jumper:SolderJumper-3_P1.3mm_Bridged12`, a KiCad library footprint), every track
 //! starting in a pad of its own net (an unanchored track touching a single pad takes that pad's
 //! net in KiCad's net propagation and proves nothing):
 //!
@@ -26,8 +26,8 @@
 //! i.e. KiCad's `DRC_ENGINE::IsNetTieExclusion`: a collision of a track of net N with copper of a
 //! net-tie footprint is allowed only where the collision lies inside a tie-group pad of net N of
 //! that footprint; the footprint's net-less copper graphics are allowed for the tied nets. A tie
-//! pad is therefore NOT exempt for the other tied net's tracks (the dcsgonebadge JP1.1 ↔
-//! Net-(J3-Pin_22) short of the A5 report, concern 3).
+//! pad is therefore NOT exempt for the other tied net's tracks (the short between tie pad 1 and
+//! another net's track of the A5 report, concern 3).
 use topor_engine::check::Checker;
 use topor_engine::geom::quant::TrackPrim;
 use topor_engine::model::{BoardModel, Item, Options, TrackItem};
@@ -112,7 +112,7 @@ fn tie_model(xs: [f64; 3], bridge: Option<(f64, f64, f64, f64)>, extra: &[String
     BoardModel::from_json(&s).unwrap_or_else(|e| panic!("{e}\n{s}"))
 }
 
-/// dcsgonebadge JP1 geometry: gapped tie pads (0.3 mm), copper bridge between them.
+/// `SolderJumper-3_P1.3mm_Bridged12` geometry: gapped tie pads (0.3 mm), copper bridge between them.
 fn gapped() -> BoardModel {
     tie_model([-1.3, 0.0, 1.3], Some((-0.9, -0.4, -0.3, 0.3)), &[])
 }
@@ -161,7 +161,7 @@ fn against(m: &BoardModel, it: Item) -> Vec<String> {
 #[test]
 fn other_tied_net_touching_a_gapped_tie_pad_is_a_violation() {
     let m = gapped();
-    // case 1 (dcsgone JP1): from pad 2's centre across the bridge into pad 1
+    // case 1 (gapped jumper): from pad 2's centre across the bridge into pad 1
     assert_eq!(
         against(&m, track(B, (0.0, 0.0), (-1.6, 0.0), 0.2)),
         ["pad:JP:1"]

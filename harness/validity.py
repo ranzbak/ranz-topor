@@ -3,14 +3,20 @@ design rules the expected answer was built for (user 2026-11-12: "the test needs
 judge the algorithm").
 
 Every `tools/route_board.sh` run compares, before anything else, the router's EFFECTIVE rules -- the rules in the
-model the engine received (`outcome.model["rules"]`: fab floors raised, custom-rule values floored or not modelled,
+model the engine received (`outcome.model["rules"]`: rule fallbacks for fields the board lacks, fab floors raised (only
+with the opt-in ``[rules] fab_profile = "jlcpcb_1oz"``), custom-rule values floored or not modelled,
 widths, clearances, via sizes the router may place, clearance regions, edge and hole clearances, `[search]
 margin_um`) -- with the rule set the expected answer assumes:
 
 - a pattern declares it in its `expected.json` under ``"rules_assumed"`` (schema below), or
 - without a declaration (older patterns, real boards: the hand layout is the reference) it is derived from the board's
-  own files: the same rule pipeline with ``[rules] fab_profile = "board"`` (Board Setup, net classes and custom rules
-  exactly as KiCad's DRC judges them; KiCad DRC-checked the reference copper against these files).
+  own files: the same rule pipeline with ``[rules] fab_profile = "board"`` (the default since 2026-11-12: Board
+  Setup, net classes and custom rules exactly as KiCad's DRC judges them; KiCad DRC-checked the reference copper
+  against these files).
+
+A rule fallback (`toporlib.rules.RULE_FALLBACK`: a field the board files do not carry) is reported per field: a note
+when the fallback equals the value KiCad's DRC uses for the missing key, a difference (INVALID) when it is stricter
+(the router then works to a rule the expected answer was not checked against).
 
 A declared rule set is also checked against the board files (a generator that declares 0.15 mm but writes 0.20 into
 the .kicad_pro builds an invalid test). Any difference makes the run INVALID: `<name>--validity.json`, metrics
@@ -31,7 +37,7 @@ the board files; ``margin`` defaults to 0; the audit applies ``options`` before 
      "options": {"vias.via_in_pad": false}}        # topor.toml settings the answer assumes
 
 "vias" is the list of via sizes ``[diameter, drill]`` the router may place for the net, largest first: a mirror of
-`engine/src/vias.rs` ``via_sizes`` (net class via, then the smaller pre-defined and fab-profile vias; ``[vias] size =
+`engine/src/vias.rs` ``via_sizes`` (net class via, then the smaller pre-defined vias; ``[vias] size =
 "board_min"`` the rule size). "unsupported" lists custom-rule parts the router cannot carry exactly (a track width or
 via size tied to a courtyard / rule area, rules it warns about or refuses): each one makes the run INVALID unless the
 declaration names it in ``not_needed``.
@@ -83,7 +89,7 @@ def _engine():
 def via_list(rules: dict | str, net_code: int | None, opts: dict) -> list[list[float]]:
     """Via sizes ``[d, drill]`` (mm) the engine may place for net `net_code` (None: the board default rule),
     largest first: ``topor_engine.via_sizes`` (engine/src/vias.rs ``via_sizes``: net class via or the via
-    fallback, then the smaller pre-defined and ``routing_vias`` sizes; ``[vias] size = "board_min"``: the one rule
+    fallback, then the smaller pre-defined vias; ``[vias] size = "board_min"``: the one rule
     size), so the gate cannot drift from the engine. `rules`: the rules dict or its JSON; `opts`: engine option
     fields (``via_size``, ``via_drill_grid_nm``, ``allowed_drills_nm``). One engine call."""
     rj = rules if isinstance(rules, str) else json.dumps(rules)
@@ -160,7 +166,11 @@ def rule_set(rules: dict, net_names: dict, cfg=None) -> dict:
             "unsupported": unsupported(rules),
             "floors_applied": [f"{x['name']} {_mm(x['design']):g} -> {_mm(x['floor']):g}"
                                for x in rules.get("floors_applied") or []],
-            "custom_floors": [n for n in rules.get("custom_notes") or [] if str(n).startswith("floor:")]}
+            "custom_floors": [n for n in rules.get("custom_notes") or [] if str(n).startswith("floor:")],
+            "fallbacks": [{"field": x["field"], "value": _mm(x["value"]), "kicad": _mm(x["kicad"]),
+                           "setting": x.get("setting", ""),
+                           **({"reset_from": _mm(x["reset_from"])} if "reset_from" in x else {})}
+                          for x in rules.get("fallbacks") or []]}
 
 
 def model_rule_set(model: dict, cfg=None) -> dict:
@@ -328,8 +338,8 @@ def compare(declared: dict, eff: dict, *, cfg=None, what: str = "effective") -> 
     for (f, v, e), names in sorted(grouped.items()):
         v, e = json.loads(v), json.loads(e)
         hint = why({"width": "min_track_width", "clearance": "min_clearance"}.get(f, f))
-        if not hint and f == "vias" and prof != "board":
-            hint = f"fab profile ({prof}) via floors / alternative drills"
+        if not hint and f == "vias" and prof not in (None, "board"):
+            hint = f"fab floor ({prof}) via minimums"
         out.append({"rule": f"net.{f}", "expected": v, "effective": e, "nets": names, "why": hint})
     if "regions" in declared:
         key = lambda r: (str(r.get("arg")), round(float(r.get("clearance") or 0), 6))  # noqa: E731
@@ -383,19 +393,32 @@ def judge(declared: dict | None, eff: dict, board: dict | None, *, cfg=None, exp
     difference of `eff` from the declaration, a declaration that differs from the board files, or an
     unsupported custom-rule part not in ``not_needed`` makes it INVALID; with `reference_text` (the expected
     copper of a pattern) so does copper the router may not place (:func:`reference_uses`). O(N x fields + items)."""
+    notes_fb: list[str] = []
+    fb_diffs: list[dict] = []
     source = f"expected.json rules_assumed ({expected_path})" if declared is not None else \
         "board files (no rules_assumed): Board Setup + net classes + custom rules, [rules] fab_profile = \"board\""
+    for fb in eff.get("fallbacks") or []:
+        txt = (f"rule fallback {fb['field']} = {fb['value']:g} mm ("
+               + (f"the board files give {fb['reset_from']:g} mm, outside KiCad's load range; KiCad resets it and "
+                  "its DRC uses " if fb.get("reset_from") is not None else
+                  "the board files do not set it; KiCad's DRC uses ") + f"{fb['kicad']:g} mm)")
+        if _same(fb["value"], fb["kicad"]):
+            notes_fb.append(txt)
+        else:
+            fb_diffs.append({"rule": f"fallback {fb['field']}", "expected": fb["kicad"], "effective": fb["value"],
+                             "why": f"the board files do not set it ({fb.get('setting', '')}); the router's fallback "
+                                    "is stricter than the value KiCad's DRC checked the answer with"})
     # a declaration states what it gives; the rest is the board's own rules ({"authority": "board", "options":
     # {...}} = the board files plus these options)
     decl = merged_declaration(declared, board) if declared is not None else board
-    diffs = compare(decl, eff, cfg=cfg) if decl is not None else []
+    diffs = (compare(decl, eff, cfg=cfg) if decl is not None else []) + fb_diffs
     if declared is not None and board is not None:
         for d in compare(declared, board, cfg=None):
             out = dict(d, rule=f"declaration vs board files: {d['rule']}", effective=d["effective"],
                        why="the expected answer assumes rules the board files do not carry")
             diffs.append(out)
     not_needed = [str(x) for x in (declared or {}).get("not_needed") or []]
-    notes = []
+    notes = list(notes_fb)
     if reference_text is not None:
         rd, rn = reference_uses(reference_text, eff)
         diffs += rd

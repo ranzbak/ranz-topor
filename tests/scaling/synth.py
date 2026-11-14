@@ -94,6 +94,5 @@ def synth_model(n_pairs: int, seed: int, jitter_nm: int = 0, layers: int = 1) ->
         "rules": {"min_clearance": 200_000, "min_track_width": 200_000, "min_via_diameter": 600_000,
                   "min_via_drill": 300_000, "min_annular": 200_000, "hole_clearance": 350_000,
                   "hole_to_hole": 250_000, "edge_clearance": 250_000, "max_error": 1500,
-                  "profile": "jlcpcb_1oz", "drill_list": [300_000], "routing_vias": [300_000],
                   "default": rule, "per_net": {}},
     }

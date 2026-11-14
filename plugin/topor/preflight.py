@@ -134,15 +134,14 @@ def via_setup_missing(pro: dict | None, cfg=None) -> bool:
 
 def smaller_profile_vias(rules: dict, d_nm: int, drill_nm: int, allowed_drills_nm=()) -> list:
     """The extra via sizes ``(d, drill)`` nm, largest first, that the engine may use for a net whose own via is
-    ``(d_nm, drill_nm)``: mirrors ``engine/src/vias.rs`` ``sizes_for`` -- every ``rules.predefined_vias`` entry and
-    every ``rules.routing_vias`` drill (``d = max(drill + 2 * min_annular, min_via_diameter)``) with
-    ``drill >= min_via_drill``, ``d >= min_via_diameter``, ``(d - drill) / 2 >= min_annular``, ``d < d_nm``,
-    ``drill < drill_nm`` and, when ``allowed_drills_nm`` is not empty, its drill in it. Agreement with the engine is
-    tested on the six snapshot projects (tests/plugin/test_via_rule_agreement.py). O((P + R) log (P + R))."""
+    ``(d_nm, drill_nm)``: mirrors ``engine/src/vias.rs`` ``sizes_for`` -- every ``rules.predefined_vias`` entry
+    (KiCad's pre-defined vias; there is no fab-profile via list) with ``drill >= min_via_drill``,
+    ``d >= min_via_diameter``, ``(d - drill) / 2 >= min_annular``, ``d < d_nm``, ``drill < drill_nm`` and, when
+    ``allowed_drills_nm`` is not empty, its drill in it. Agreement with the engine is tested on the six snapshot
+    projects (tests/plugin/test_via_rule_agreement.py). O(P log P)."""
     lo, ann = int(rules.get("min_via_drill") or 0), int(rules.get("min_annular") or 0)
     dmin = int(rules.get("min_via_diameter") or 0)
     cand = [(int(d), int(r)) for d, r in rules.get("predefined_vias") or []]
-    cand += [(max(int(x) + 2 * ann, dmin), int(x)) for x in rules.get("routing_vias") or []]
     allowed = {int(x) for x in allowed_drills_nm}
     sizes = {(d, r) for d, r in cand
              if r >= lo and d >= dmin and 2 * ann <= d - r and d < d_nm and r < drill_nm
@@ -159,7 +158,7 @@ def _via_findings(model: dict, rules: dict, cfg, pcb_text: str | None, pro: dict
         r_nm = max(int(round(r * _NM)), int(rules.get("min_via_drill") or 0))
         extra = smaller_profile_vias(rules, d_nm, r_nm,
                                      [int(round(float(x) * _NM)) for x in cfg.get("vias", "allowed_drills_mm")])
-        more = ("; where space requires, also the smaller fab-profile via(s) "
+        more = ("; where space requires, also the smaller pre-defined via(s) "
                 + ", ".join(f"{_mm(a)} / {_mm(b)} mm" for a, b in extra)) if extra else ""
         out.append(_mk("VIA_NOT_SET_UP",
                        f"KiCad has no via sizes set up (only the factory 0.8 / 0.4 mm net class via); the nets "
@@ -274,6 +273,32 @@ def _rule_findings(rules: dict) -> list:
     return [_mk("TRACK_ANGLE_RULE",
                 f"Custom rule(s) {', '.join(names)} restrict track angle or segment length, which curved traces cannot satisfy.",
                 names)]
+
+
+#: The run log / report line of a 0 copper-to-edge clearance (user 2026-11-13: "just leave it at 0 ... do warn").
+EDGE_ZERO_TEXT = "copper-to-edge clearance is 0 (KiCad → File → Board Setup → Design Rules → Constraints → Copper to edge clearance)"
+
+
+def _edge_zero_findings(rules: dict) -> list:
+    """EDGE_CLEARANCE_ZERO: the resolved copper-to-edge clearance is 0 (Board Setup 0, no custom rule raising it). The
+    value is used as it is (no fallback); this only warns. O(1)."""
+    if rules.get("edge_clearance") is None or int(rules["edge_clearance"]) > 0:
+        return []
+    return [_mk("EDGE_CLEARANCE_ZERO", EDGE_ZERO_TEXT + ".")]
+
+
+def _rule_fallback_findings(rules: dict) -> list:
+    """RULE_FALLBACK: one finding listing every design-rule field the board does not provide and the value used
+    instead (toporlib.rules RULE_FALLBACK; one item per field, naming the KiCad setting to fill in). O(fields)."""
+    from toporlib.rules import fallback_text  # noqa: PLC0415
+
+    rows = rules.get("fallbacks") or []
+    if not rows:
+        return []
+    texts = [fallback_text(r) for r in rows]
+    return [_mk("RULE_FALLBACK", f"{len(rows)} design rule(s) not set by the board (or outside KiCad's range), "
+                "fallback used: "
+                + "; ".join(f"{r['label']} {r['value'] / _NM:g} mm" for r in rows) + ".", texts)]
 
 
 def _custom_rule_findings(rules: dict) -> list:
@@ -451,6 +476,8 @@ def preflight(model: dict, rules: dict, cfg, sel, orig_drc, cfg_findings, *, pcb
     out += _via_findings(model, rules, cfg, pcb_text, pro)
     out += _pad_findings(model, cfg)
     out += _rule_findings(rules)
+    out += _rule_fallback_findings(rules)
+    out += _edge_zero_findings(rules)
     out += _custom_rule_findings(model.get("rules") or rules)
     out += _copper_findings(model, cfg)
     out += _do_not_touch(model, cfg)

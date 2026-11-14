@@ -527,7 +527,7 @@ def test_fills_equivalent_and_pour_reach_subset(board_name, tmp_path_factory):
 
     extra, short_p, short_v, tot_p, tot_v = [], 0, 0, 0, 0
     for p in model["pours"]:
-        rp, rv = M.pour_reach(p["net"], p["layers"], p["fills"], model["pads"], model["vias"])
+        rp, rv = M.pour_reach(p["net"], p["layers"], p["fills"], model["pads"], model["vias"], p.get("pad_connection", 1))
         extra += [(p["uuid"], x) for x in sorted(set(rp) - set(p["pads"]))]
         extra += [(p["uuid"], x) for x in sorted(set(rv) - set(p["vias"]))]
         short_p += len(set(p["pads"]) - set(rp))

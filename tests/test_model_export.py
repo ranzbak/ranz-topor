@@ -29,6 +29,8 @@ def test_export_fixture_counts(fixture_board):
     assert any(cs["net"] == 0 for cs in m["copper_shapes"])
     assert len(m["kept"]) == 2 and any(k["locked"] for k in m["kept"])
     assert len(m["vias"]) == 1 and m["vias"][0]["free"]
+    # B2: the fixture's Edge.Cuts strokes are 0.1 mm; KiCad measures copper-to-edge from the stroke's edge
+    assert m["rules"]["outline_half_stroke"] == 50_000
     json.dumps(m)
 
 

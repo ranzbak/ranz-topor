@@ -1,9 +1,9 @@
 # M3 detour diagnosis (F, 2026-10-31, ruling M3-R11)
 
-Scope: the top detour offenders after F2–F4 (head fdf8c10): dcsgonebadge #208 USB+ J1.A6→J1.B6 (3.49), #34 VCC
+Scope: the top detour offenders after F2–F4 (head fdf8c10): private-badge-b #208 USB+ J1.A6→J1.B6 (3.49), #34 VCC
 U3.1→U3.3 (3.03), #197 SPI_SDO TP17.1→J3.2 (2.83), #207 USB+ U7.6→J1.A6 (2.30), plus #45 GND SW1.0→pour (2.32) and
-wiccon-2023 #52 GPIO0 U1.18→FLASH1.1 (1.405, the wiccon max). Numbers from a snapshot bench run (threads 4; dcsgone
-60 s budget, timed out in iteration 1 with 148/231, vias 102, detours > 1.5: 12, median 1.0, p90 1.374; wiccon 60/60,
+wiccon-2023 #52 GPIO0 U1.18→FLASH1.1 (1.405, the wiccon max). Numbers from a snapshot bench run (threads 4; private-badge-b
+60 s budget, timed out in iteration 1 with 148/N, vias 102, detours > 1.5: 12, median 1.0, p90 1.374; wiccon 60/60,
 1.56 s, 0 > 1.5). Tool: `gate_diag --detour <ids>` (new, this commit) dumps, on the empty graph, the committed path,
 the slot search alone, the ghost, and the empty-graph path re-checked with every other committed path present (edge
 cap / need / fits / passable / occupant); `--chord` probes `clearance_bend` along a polyline. Hand routes read from the
@@ -41,7 +41,7 @@ tip stays unfit ⇒ 2-via 17.4 mm path (cost 23.3 vs the overuse-laden direct on
 U7.6 (pad 0.625×0.25: tip edge cap 0.375, spoke cap 0.195, both < 0.605 even empty) are occupied by #206 USB+
 U7.5→U7.6 — the **same net** — and e3944 (cap 0.000) by #205 USB+ U1.14→U7.5: same-net strands are charged full
 clearance against each other and against their own pad corners. Batch commit of iteration 1 resolves it to 2 vias;
-dcsgone never reaches iteration 2, so no rip-up (a).
+private-badge-b never reaches iteration 2, so no rip-up (a).
 
 **#45 GND SW1.0→pour, 2.01 mm / ghost 0.87 (c).** Escape via straight below the pad (0.87) needs the pad's own tip
 edge e2281: cap 0.600 < need 0.605 by **5 µm** (eps) ⇒ next escape site at 2.07. Tiny ghost inflates the ratio.
@@ -56,13 +56,13 @@ problem (< 1.5, shorter than hand); same mechanism (same-net capacity) as #207.
 1. **Own-net / same-net capacity (F6, 5 of 6).** `fits_at` charges `max(c, c_e)` at both edge ends regardless of net
    and subtracts the own corner radius: a pad's own tip / spoke edges are unfit for the pad's own net (0.3 mm tips,
    0.6 mm pads with 0.5 mm tracks, U7's 0.25 mm pads), same-net strands block each other. The search still crosses
-   them as overuse (factor 4–8 on the step), which decides via-vs-direct and feeds `overuse_edges` (315 after dcsgone
+   them as overuse (factor 4–8 on the step), which decides via-vs-direct and feeds `overuse_edges` (315 after private-badge-b
    iteration 1) and the "stalled" wiccon loop.
 2. **State point + los runaway on own-pad edges (#208, the worst ratio).** Static search-geometry defect, independent
    of negotiation.
 3. **Ghost reference (b).** Foreign pads are soft and corners tight, so short same-footprint pairs read 3× where the
    best DRC-feasible path is 1.2× (#208: 1.00 vs hand 2.93; #34: 2.67 vs 3.63; #197: 6.78 vs 13.49).
-4. **No second iteration on dcsgone** (60 s, M3-R13): sibling connections of one net take each other's pad exits in
+4. **No second iteration on private-badge-b** (60 s, M3-R13): sibling connections of one net take each other's pad exits in
    the batch commit and are never ripped.
 
 ## Fix tried in M3 and withdrawn
@@ -90,7 +90,7 @@ snapshot PNGs stand.
   Changes search geometry everywhere ⇒ full gate + eprom identity check. 1–2 days.
 - **M4-D3 same-net sibling connections** (root cause 4, #207 / #34 / #52): let a connection terminate on same-net
   committed copper (hand-style T-junction, 0.9 mm instead of 5.5 mm for #207) or order a net's connections so the
-  shared pad is left once; plus a rip-up pass within the dcsgone budget (slot-search cost, already M4 per M3-R13). 3–5
+  shared pad is left once; plus a rip-up pass within the private-badge-b budget (slot-search cost, already M4 per M3-R13). 3–5
   days.
 - **M4-D4 detour reference** (root cause 3): a DRC-feasible reference (foreign constraint edges hard, clearance bends
   as in the slot search, no capacity / other nets) instead of the topological ghost, so the ratio measures the detour

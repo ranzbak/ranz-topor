@@ -117,7 +117,7 @@ Branch `worktree-agent-ac41ce8ebfa08e312`, based on main 369e029 (fast-forwarded
 | Board | via_dimensions | net classes | fires |
 |---|---|---|---|
 | bornhack2026 | placeholder + 0.35/0.25, 0.45/0.3, 0.5/0.3, 0.8/0.4 | Default 0.6/0.3, … | no |
-| dcsgonebadge | placeholder + 0.25/0.15, 0.4/0.2, 0.8/0.4 | Default 0.6/0.3 | no |
+| private-badge-b | placeholder + 0.25/0.15, 0.4/0.2, 0.8/0.4 | Default 0.6/0.3 | no |
 | nametag-sao | placeholder + 0.35/0.2, 0.45/0.3, 0.5/0.3, 0.8/0.4 | Default 0.8/0.4, MIPI 0.35/0.2, … | no |
 | eprom-to-kernal | `[]` | Default 0.8/0.4, Signal 0.6/0.3, power 0.8/0.4 | no (Signal is non-factory) |
 | wiccon-2023 | placeholder only | Default 0.8/0.4 | **yes** |

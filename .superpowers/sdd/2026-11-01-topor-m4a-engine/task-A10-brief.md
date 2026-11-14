@@ -25,13 +25,13 @@
   construction or by a shared test that feeds the same inputs to both (engine via `topor_engine` call, plugin via the Python function)
   on the six snapshot projects.
 - A11: `[layers] pour_cut_cost_mm = 1.0`, `preferred_direction = {}`, `direction_cost = 0.0` become live keys (since 0.5.0 → live) mapped
-  to the engine fields; NOTE default pour_cut_cost 1 mm/mm changes routing vs 0.4.0 — if eprom/wiccon/dcsgone get WORSE with the
+  to the engine fields; NOTE default pour_cut_cost 1 mm/mm changes routing vs 0.4.0 — if eprom/wiccon/private-badge-b get WORSE with the
   plan default, report numbers for 0 and 1.0 and keep the plan default only if not worse; otherwise default 0.0 and report
   (coordinator rules). Report eprom B.Cu GND pour islands before/after.
-- Not-worse numbers (global-constraints.md) on eprom + wiccon after each commit; dcsgone at the gate options (A-C3) once at the end
-  (routed/total, failed, vias, routing_new, unconnected, router_s, detour max/count>1.5). PNG `--milestone m4 --task A11 --board dcsgonebadge`
+- Not-worse numbers (global-constraints.md) on eprom + wiccon after each commit; private-badge-b at the gate options (A-C3) once at the end
+  (routed/total, failed, vias, routing_new, unconnected, router_s, detour max/count>1.5). PNG `--milestone m4 --task A11 --board private-badge-b`
   (and wiccon if its numbers moved).
 - Regenerate configuration.md; docs_gen --check clean; remove "(available from 0.5.0)"/"No effect in 0.4.0" tails of keys you make live.
-- DX diagnosis (docs/progress/notes/m4-dcsgone-diagnosis.md §6): A10/A13 are NOT completion levers on dcsgone (0 "no via site"
+- DX diagnosis (the private-badge-b completion diagnosis (note removed: private board) §6): A10/A13 are NOT completion levers on private-badge-b (0 "no via site"
   reasons), but **A11 pour-cut cost is** (≈ 5 + 2): pass-1 copper cuts 20 GND items off the fill → 26 + 22 + 3 completion connections
-  and 15 re-routes. Report for dcsgone: pour-completion pass count, completion connections, unconnected, with pour_cut_cost 0 vs 1.0.
+  and 15 re-routes. Report for private-badge-b: pour-completion pass count, completion connections, unconnected, with pour_cut_cost 0 vs 1.0.

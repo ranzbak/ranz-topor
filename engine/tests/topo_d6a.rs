@@ -148,7 +148,7 @@ fn smd_wire_under_a_foreign_pad_on_the_other_layer_needs_no_via() {
 
 #[test]
 fn plane_stub_may_not_graze_an_own_net_pad() {
-    // J3-like column (dcsgonebadge J3.15/16, D6a): GND pads 1.1 x 0.3 mm at 0.5 mm pitch on B.Cu.
+    // FPC-connector-like column (a 2-layer badge, D6a): GND pads 1.1 x 0.3 mm at 0.5 mm pitch on B.Cu.
     let m = board(&[("J16", 1, 20.0, 10.0, 1.1, 0.3, 2), ("J15", 1, 20.0, 10.5, 1.1, 0.3, 2)], "");
     let b = board::build(&m, &opts()).unwrap();
     let st = State::new(&b.proj);
@@ -176,7 +176,7 @@ fn plane_stub_may_not_graze_an_own_net_pad() {
 
 #[test]
 fn a_via_clears_its_own_pad_by_the_arc_tolerance() {
-    // dcsgonebadge C22.1 (D6a): a +5V via 6 um into KiCad's pad polygon, which reaches max_error
+    // a capacitor pad (D6a): a +5V via 6 um into KiCad's pad polygon, which reaches max_error
     // (5 um here) past the exact copper. Clear by less than that: refused; by more: fine.
     use topor_engine::vias::ViaSize;
     let m = board(&[("C1", 1, 20.0, 10.0, 1.0, 1.0, 2), ("C2", 1, 30.0, 10.0, 1.0, 1.0, 2)], "");
