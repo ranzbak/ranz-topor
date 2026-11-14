@@ -1166,19 +1166,33 @@ impl<'a> Drawer<'a> {
     /// `pid` in its packed lane, before it (`after` false) or after it: the neighbour's planned
     /// crossing (its taut path, [`Packer::taut`]) less the spacing the lane needs between the two.
     /// `None` without a fitting lane or without that neighbour. O(lane) plus the cached taut.
+    ///
+    /// With `[drawing] realise = "erbs"` the neighbour's planned crossing is where its ERBS on
+    /// this layer crosses the edge (the taut point picks among several): the ERBS is the plan's
+    /// realisation, spaced by the radii and spoke tips (Dayan 1997 PDF pp. 15-16, 32). The taut
+    /// path has zero width, so round a vertex several wires wrap it lies on the vertex itself,
+    /// and the bound, its crossing less the lane spacing, fell behind the vertex: the whole
+    /// span of the inner wire was its neighbour's room (nested_wraps B, drawn after C and before
+    /// A: 22 mm of `planned_room` price on its own ERBS, the octilinear form jogged out round
+    /// A's pad to shorten the priced leg, 1.6 % longer).
     pub(super) fn neighbour_bound(&self, pid: PassId, after: bool) -> Option<f64> {
         let (e, l, i, _, _) = self.slot[pid]?;
         let ln = self.lanes.get(&(e, l))?;
         let j = if after { i + 1 } else { i.checked_sub(1)? };
         let q = *ln.pids.get(j)?;
-        let at = *self.packer.taut(self.st, self.st.passes[q].wire).at.get(self.pass_k[q])?;
+        let wq = self.st.passes[q].wire;
+        let at = *self.packer.taut(self.st, wq).at.get(self.pass_k[q])?;
         let [p, r] = self.b.proj.edges[e];
         let (pp, pr) = (self.b.proj.pos[p], self.b.proj.pos[r]);
         let len = (pr - pp).len();
         if len < 1.0 {
             return None;
         }
-        let x = (at - pp).dot((pr - pp) * (1.0 / len));
+        let taut_x = (at - pp).dot((pr - pp) * (1.0 / len));
+        let erbs_x = (self.opts.realise == "erbs").then(|| self.erbs.get(&wq)).flatten().and_then(|v| {
+            v.iter().filter(|b| b.layer == l).filter_map(|b| crossing(&b.path, pp, pr, taut_x)).min_by(|a, b| (a - taut_x).abs().total_cmp(&(b - taut_x).abs()))
+        });
+        let x = erbs_x.unwrap_or(taut_x);
         let gap = (ln.cum[i.max(j)] - ln.cum[i.min(j)]).abs();
         Some(if after { x - gap } else { x + gap })
     }
