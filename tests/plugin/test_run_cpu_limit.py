@@ -98,13 +98,42 @@ def test_cpu_clock_soft_limit_reports_where_and_how_far_past(app, eprom, tmp_pat
     assert "reached during" in (out.report.dir / "report.md").read_text()
 
 
-def test_cpu_clock_hard_limit_cancels_the_job(app, eprom, tmp_path, reports, cpu_counter):
+def test_cpu_clock_hard_limit_takes_the_engines_hard_path(app, eprom, tmp_path, reports, cpu_counter):
+    # verify-m2c 1: the CPU clock's hard limit is reached in the engine and acts as hard (reach_limit, then harden):
+    # the same path as the wall clock's hard limit (the step that runs is cut, the kept plan drawn in full); never a
+    # Cancel, which keeps no plan during the initial routing (NOTHING_TO_DRAW)
     cfg = CFG.with_values({("run", "timeout_clock"): "cpu", ("run", "timeout_s"): 3.0, ("run", "timeout_mode"): "hard"})
-    eng = RecordingEngine(hold=12, patch=_as("cancel", timed_out=True))
+    eng = RecordingEngine(hold=12, patch=_as("timeout", timed_out=True))
     _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=cfg, engine=eng)
-    assert eng.jobs[0].cancelled and not eng.jobs[0].reached
+    assert eng.jobs[0].reached and eng.jobs[0].hardened and not eng.jobs[0].cancelled
     assert eng.options[0]["timeout_mode"] == "hard"
+    assert out.stop_reason == "timeout_cpu" and out.cancelled is False
+    assert out.items, "the kept plan is drawn"
+    tl = _result_json(out)["time_limit"]
+    assert tl["mode"] == "hard" and tl["reached"] is True and tl["cap_hit"] is False, tl
+
+
+def test_cpu_clock_hard_limit_cancels_an_engine_without_reach(app, eprom, tmp_path, reports, cpu_counter):
+    # an engine older than the plugin (no RouteJob.reach_limit / harden): Cancel as the fallback, said loudly
+    from test_run_flow import ProxyJob
+
+    class Old(ProxyJob):
+        reach_limit = None
+        harden = None
+
+    class Eng(RecordingEngine):
+        def route_async(self, m, o):
+            job = super().route_async(m, o)
+            old = Old(job.real, job.hold, job.patch)
+            self.jobs[-1] = old
+            return old
+
+    cfg = CFG.with_values({("run", "timeout_clock"): "cpu", ("run", "timeout_s"): 3.0, ("run", "timeout_mode"): "hard"})
+    eng = Eng(hold=12, patch=_as("cancel", timed_out=True))
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=cfg, engine=eng)
+    assert eng.jobs[0].cancelled
     assert out.stop_reason == "timeout_cpu"
+    assert "cannot reach its time limit from the CPU clock" in (out.report_dir / "log.txt").read_text()
 
 
 def test_cancel_before_any_plan_is_a_loud_error(app, eprom, tmp_path, reports, cpu_counter):

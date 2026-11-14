@@ -21,6 +21,7 @@ Codes (catalogued in messages.py, one section each in docs/user/troubleshoot.md)
                         geometry), one item per violation with place, type and cause (``result["violations"]``)
     TIME_BUDGET_HIT     run.timeout_s stopped the topological core before its work caps
     TIME_OVERRUN_CAP    the soft time limit went past run.timeout_overrun_s and acted as the hard one (F3)
+    TIME_DRAWING_CUT    the time limit, acting as hard, cut a step of the drawing (part of the board not drawn)
     DRC_NEW_VIOLATIONS  KiCad's DRC of the routed copy finds new violations (counts by type, the first places);
                         a warning: the result can still be accepted ("costly, not failed")
     RULES_MISMATCH      self-check (error): KiCad's DRC required a larger clearance between two nets than the
@@ -43,8 +44,9 @@ from .messages import MESSAGES
 
 #: every code route_findings can emit (the preview summary names those present)
 POSTRUN_CODES = ("DIFF_PAIRS", "DIFF_PAIRS_SKIPPED", "POUR_UNJOINED", "UNROUTED", "CONNECTION_WIDTH", "POUR_ISLANDS", "POUR_STITCHED", "PLANE_PAD_SIGNAL",
-                 "PLANE_VIA_OUTSIDE_POUR", "VIA_SQUEEZE", "NECKED", "IGNORED_RULE", "VIOLATIONS", "TIME_BUDGET_HIT", "TIME_OVERRUN_CAP", "DRC_NEW_VIOLATIONS", "RULES_MISMATCH")
+                 "PLANE_VIA_OUTSIDE_POUR", "VIA_SQUEEZE", "NECKED", "IGNORED_RULE", "VIOLATIONS", "TIME_BUDGET_HIT", "TIME_OVERRUN_CAP", "TIME_DRAWING_CUT", "DRC_NEW_VIOLATIONS", "RULES_MISMATCH")
 DIFF_PAIR_REASON = "diff pair: not in the rough version"  # engine/src/topo/core.rs DIFF_PAIR
+DRAWING_CUT_LINE = "WARNING: the drawing was cut by the hard time limit"  # engine/src/topo/core.rs DRAWING_CUT_LINE
 _ITEMS = 40  # items kept per finding (the report lists them; result.json keeps all engine lines)
 
 
@@ -189,6 +191,9 @@ def route_findings(result: dict | None) -> list:
     oc = lines("WARNING: time limit overrun cap reached")
     if oc:
         out.append(_mk("TIME_OVERRUN_CAP", oc[0].removeprefix("WARNING: ") + ".", oc))
+    dc = lines(DRAWING_CUT_LINE)
+    if dc:  # verify-m2c 3: loud, with what to change for a complete board
+        out.append(_mk("TIME_DRAWING_CUT", dc[0].removeprefix("WARNING: ") + ".", dc))
     return out
 
 

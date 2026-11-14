@@ -144,10 +144,24 @@ fn via_reduction(r: &RouteResult) -> (String, String) {
     (counts, stop)
 }
 
-/// The plane stubs placed before the topology (stub vias, plane pads), from the planes line
-/// (`None`: the board has no plane pads).
-fn plane_stubs(r: &RouteResult) -> Option<String> {
-    r.warnings.iter().find(|w| w.starts_with("planes as terminals")).map(|w| w.rsplit("; ").next().expect("stub count").to_string())
+/// The start of the planes line (stub vias, plane pads): "planes as terminals ([planes]
+/// terminals)" on this branch; main renamed it "shared plane vias ([planes] share_vias)". MERGE:
+/// both are matched, so the merge cannot turn [`plane_stubs`] into a silent `None == None`.
+const PLANES_LINE: [&str; 2] = ["planes as terminals ([planes] terminals)", "shared plane vias ([planes] share_vias)"];
+
+/// The plane stubs placed before the topology (stub vias, plane pads), from the planes line; a
+/// board without a planes line must have no plane stub via (the via reduction's line counts them,
+/// always written): else the line was renamed and this fails loudly (verify-m2c 2).
+fn plane_stubs(r: &RouteResult) -> String {
+    let red = r.warnings.iter().find(|w| w.starts_with("via reduction after drawing:")).unwrap_or_else(|| panic!("via reduction line: {:?}", r.warnings));
+    let stub_vias: usize = red.split(" plane stub vias").next().and_then(|t| t.rsplit(' ').next()).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("plane stub via count: {red}"));
+    match r.warnings.iter().find(|w| PLANES_LINE.iter().any(|p| w.starts_with(p))) {
+        Some(w) => w.rsplit("; ").next().expect("stub count").to_string(),
+        None => {
+            assert_eq!(stub_vias, 0, "{stub_vias} plane stub vias but no planes line starting with one of {PLANES_LINE:?} (renamed?): {:?}", r.warnings);
+            "no plane stub vias".to_string()
+        }
+    }
 }
 
 /// [`plan_line`] without what differs between the TopoR loop's pick of the initial plan and the
@@ -352,4 +366,194 @@ fn more_runs_than_rayon_threads_never_hang_at_the_draw_gate() {
     let line = best_of_line(&r);
     assert_eq!(line.matches("pick not drawn (another run's is: [drawing] candidates = 1").count(), 2, "all 3 runs offered: {line}");
     assert_eq!(r.routed, r.connections_total, "{:?}", r.warnings);
+}
+
+// ---- verify-m2c: what the limit, acting as hard, cut (LimitReport.cut / cut_steps), the drawing
+// cut by it (decided behaviour, loud), a Cancel's own reason, the stitching's exemption.
+
+/// The reason of a connection the time limit left undrawn (core.rs DRAW_CUT).
+const DRAW_CUT: &str = "time limit reached before this connection was drawn";
+/// The reason of a connection a Cancel / OK left undrawn (core.rs DRAW_CANCEL).
+const DRAW_CANCEL: &str = "Cancel / OK came before this connection was drawn";
+/// The loud line of a drawing the limit cut (core.rs DRAWING_CUT_LINE; plugin postrun.py).
+const DRAWING_CUT_LINE: &str = "WARNING: the drawing was cut by the hard time limit";
+
+/// Runs `o` on `m` (limit `o.wall_clock_s`); calls `act` once the stage names one of `at`;
+/// returns the result and whether `act` came while the run still ran.
+fn act_at(m: &BoardModel, o: &Options, at: &[&str], act: impl Fn(&RunControl)) -> (RouteResult, bool) {
+    let ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let (m2, o2, c2) = (m.clone(), o.clone(), ctl.clone());
+    let h = std::thread::spawn(move || route_with(&m2, &o2, &c2));
+    let t0 = Instant::now();
+    while !at.iter().any(|a| ctl.snapshot().stage.contains(a)) && !h.is_finished() {
+        assert!(t0.elapsed().as_secs() < 900, "never reached {at:?}");
+        std::thread::yield_now();
+    }
+    let hit = !h.is_finished();
+    act(&ctl);
+    (h.join().expect("run thread"), hit)
+}
+
+fn reasons(r: &RouteResult, why: &str) -> usize {
+    r.connections.iter().filter(|c| c.reason == why).count()
+}
+
+#[test]
+fn a_hard_limit_reached_in_the_drawing_cuts_it_loudly() {
+    // Decided behaviour (verify-m2c 3, a change is the user's call): a limit that passes while the
+    // drawing runs cuts it; the board is drawn only in part, and a WARNING line says how much and
+    // what to change. The report names the step cut: the drawing (not "plan ... drawn in full").
+    let m = crop("qmtech-usb-crop.json");
+    let o = topor(r#", "runs": 1, "capacity_model": "cuts", "timeout_mode": "hard""#);
+    let (r, hit) = act_at(&m, &o, &["drawing the traces"], |c| c.limit.reach());
+    assert!(hit, "the run ended before the drawing");
+    let l = r.limit.as_ref().expect("limit report");
+    let undrawn = reasons(&r, DRAW_CUT);
+    assert!(undrawn > 0 && reasons(&r, DRAW_CANCEL) == 0, "the hard limit cut the drawing: {:?}", r.connections.iter().map(|c| &c.reason).collect::<Vec<_>>());
+    assert!(l.reached && l.mode == "hard" && !l.cap_hit, "{l:?}");
+    assert_eq!((l.cut.as_str(), l.cut_steps.clone()), ("drawing", vec!["drawing".to_string()]), "{l:?}");
+    assert!(r.warnings.iter().any(|w| w.starts_with("time limit (hard, [run] timeout_mode)") && w.contains("the drawing was the step that ran then: the drawing of the traces was cut")), "{:?}", r.warnings);
+    let want = format!("{DRAWING_CUT_LINE} (the drawing of the traces): {} of {} connections drawn, {undrawn} left undrawn by the cut; use [run] timeout_mode = \"soft\" or a longer [run] timeout_s for a complete board", r.routed, r.connections_total);
+    assert!(r.warnings.iter().any(|w| w.starts_with(&want)), "{want}\n{:?}", r.warnings);
+}
+
+#[test]
+fn the_overrun_cap_firing_in_the_drawing_cuts_it() {
+    // The soft limit passed in P3 (the step finishes, no new one begins); the cap fires (here: the
+    // caller hardens the limit, as the plugin's CPU clock does) once the drawing runs: the drawing
+    // began before it, so the cap cuts it (one path with `hard`).
+    let m = crop("qmtech-usb-crop.json");
+    let o = topor(r#", "runs": 1, "capacity_model": "cuts""#);
+    let ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let (m2, o2, c2) = (m.clone(), o.clone(), ctl.clone());
+    let h = std::thread::spawn(move || route_with(&m2, &o2, &c2));
+    let t0 = Instant::now();
+    while !ctl.snapshot().stage.contains("layer assignment") && !h.is_finished() {
+        assert!(t0.elapsed().as_secs() < 900, "never reached P3");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    ctl.limit.reach();
+    while !ctl.snapshot().stage.contains("drawing the traces") && !h.is_finished() {
+        std::thread::yield_now();
+    }
+    assert!(!h.is_finished(), "the run ended before the drawing");
+    ctl.limit.harden();
+    let r = h.join().expect("run thread");
+    let l = r.limit.as_ref().expect("limit report");
+    assert!(l.reached && l.mode == "soft" && l.cap_hit, "{l:?}");
+    assert!(reasons(&r, DRAW_CUT) > 0, "the cap firing in the drawing cut it");
+    assert_eq!(l.cut, "drawing", "{l:?}");
+    assert!(l.cut_steps.contains(&"drawing".to_string()), "{l:?}");
+    assert!(r.warnings.iter().any(|w| w.starts_with(&format!("{DRAWING_CUT_LINE} (the soft limit past its overrun cap acts as the hard one) (")) && w.contains("raise [run] timeout_overrun_s or timeout_s for a complete board")), "{:?}", r.warnings);
+}
+
+#[test]
+fn a_cancel_is_no_limit_cut_and_leaves_its_own_reason() {
+    // verify-m2c 4: Cancel / OK is no cut by the time limit (cut "none", whatever the mode), and a
+    // whole-route cycle's drawing it ends leaves Cancel's reason, not the time limit's.
+    let m = crop("qmtech-usb-crop.json");
+    let o = topor(r#", "runs": 1, "capacity_model": "cuts", "timeout_mode": "hard", "opt_loop": "cycles", "topo_rounds": 3"#);
+    let (r, hit) = act_at(&m, &o, &["drawing the traces"], |c| c.request_cancel());
+    assert!(hit, "the run ended before the drawing");
+    let l = r.limit.as_ref().expect("limit report");
+    assert_eq!((l.cut.as_str(), l.cut_steps.len(), l.reached), ("none", 0, false), "a Cancel is no limit cut: {l:?}");
+    assert!(reasons(&r, DRAW_CANCEL) > 0 && reasons(&r, DRAW_CUT) == 0, "Cancel's own reason: {:?}", r.connections.iter().map(|c| &c.reason).collect::<Vec<_>>());
+    assert!(!r.warnings.iter().any(|w| w.starts_with(DRAWING_CUT_LINE)), "{:?}", r.warnings);
+    // the TopoR loop, hard: a Cancel in P3 keeps no plan, and is no limit cut either
+    let o = topor(r#", "runs": 1, "capacity_model": "cuts", "timeout_mode": "hard""#);
+    let (r, hit) = act_at(&m, &o, &["layer assignment"], |c| c.request_cancel());
+    assert!(hit, "the run ended before P3");
+    let l = r.limit.as_ref().expect("limit report");
+    assert_eq!((l.cut.as_str(), l.cut_steps.len()), ("none", 0), "{l:?}");
+}
+
+/// A 40 x 38 mm 2-layer board: GND (net 1) poured on F.Cu and B.Cu over [2, 32] x [3, 35] mm,
+/// GND pads U1.1 (SMD, B.Cu, (4, 19)) and U3.1 (THT, (20, 19)); SIG (net 2) from J1.1 (7, 1.5) to
+/// J2.1 (7, 36.5), both SMD on B.Cu: its straight trace cuts the B.Cu pour from edge to edge, so
+/// U1.1's piece needs a stitch via (as tests/topo_d4.rs, here drawn by the router).
+fn pour_cut_board() -> BoardModel {
+    const MM: i64 = 1_000_000;
+    let pad = |r: &str, net: i32, x: i64, y: i64, layers: &str, attr: &str| {
+        let shapes: Vec<String> = layers.split(',').map(|l| format!(r#""{}": {{ "kind": "circle", "d": 1000000 }}"#, l.trim())).collect();
+        format!(r#"{{ "uuid": "{r}", "ref": "{r}", "number": "1", "net": {net}, "attr": "{attr}", "center": [{x}, {y}], "layers": [{layers}], "shapes": {{ {} }} }}"#, shapes.join(","))
+    };
+    let pads = [pad("U1", 1, 4 * MM, 19 * MM, "31", "smd"), pad("U3", 1, 20 * MM, 19 * MM, "0, 31", "pth"), pad("J1", 2, 7 * MM, 1_500_000, "31", "smd"), pad("J2", 2, 7 * MM, 36_500_000, "31", "smd")];
+    let fill = |l: u32| format!(r#"{{ "layer": {l}, "outer": [[2000000, 3000000], [32000000, 3000000], [32000000, 35000000], [2000000, 35000000]] }}"#);
+    let s = format!(
+        r#"{{ "layers": [ {{ "id": 0, "name": "F.Cu" }}, {{ "id": 31, "name": "B.Cu" }} ],
+          "nets": [ {{ "code": 1, "name": "GND" }}, {{ "code": 2, "name": "SIG" }} ],
+          "outline": [ {{ "kind": "seg", "a": [0, 0], "b": [40000000, 0] }},
+            {{ "kind": "seg", "a": [40000000, 0], "b": [40000000, 38000000] }},
+            {{ "kind": "seg", "a": [40000000, 38000000], "b": [0, 38000000] }},
+            {{ "kind": "seg", "a": [0, 38000000], "b": [0, 0] }} ],
+          "pads": [ {} ],
+          "pours": [ {{ "uuid": "zz", "net": 1, "layers": [0, 31], "pads": ["U1.1", "U3.1"],
+            "vias": [], "clearance": 200000, "min_thickness": 254000, "thermal_gap": 500000,
+            "spoke_width": 500000, "pad_connection": 2,
+            "fills": [ {}, {} ] }} ],
+          "rules": {{ "default": {{ "clearance": 200000, "width": 250000 }}, "min_clearance": 0 }} }}"#,
+        pads.join(","),
+        fill(0),
+        fill(31)
+    );
+    BoardModel::from_json(&s).expect("pour board")
+}
+
+/// The pour stitching line's counts ("N pour pieces cut off by the routed copper before, M after").
+fn stitching(r: &RouteResult) -> String {
+    let w = r.warnings.iter().find(|w| w.starts_with("pour stitching:")).unwrap_or_else(|| panic!("pour stitching line: {:?}", r.warnings));
+    w.split(';').next().expect("counts").to_string()
+}
+
+#[test]
+fn a_hard_limit_before_the_drawing_does_not_cut_the_pour_stitching() {
+    // The limit acted as hard before the drawing began: the kept plan is drawn in full, its pour
+    // stitching too (it carries the drawing's decision, verify-m2c 5): the piece is joined.
+    let m = pour_cut_board();
+    let free = run(&m, &topor(r#", "runs": 1"#));
+    assert_eq!(free.routed, free.connections_total, "{:?}", free.warnings);
+    assert_eq!(stitching(&free), "pour stitching: 1 pour pieces cut off by the routed copper before, 0 after", "the board needs its stitch via");
+    let o = topor(r#", "runs": 1, "timeout_mode": "hard""#);
+    let ctl = RunControl::new();
+    ctl.limit.init(1e-6);
+    let r = route_with(&m, &o, &ctl);
+    let l = r.limit.as_ref().expect("limit report");
+    // (the initial routing ends within its 1 s floor here, so the limit may have cut nothing)
+    assert!(l.reached && l.mode == "hard" && l.cut != "drawing", "{l:?}");
+    assert!(!l.cut_steps.iter().any(|s| s == "stitching" || s == "drawing" || s == "via_reduction"), "the drawing's steps were not cut: {l:?}");
+    assert_eq!(stitching(&r), stitching(&free), "the stitching of the kept plan runs to its end");
+    assert!(!r.warnings.iter().any(|w| w.starts_with(DRAWING_CUT_LINE)), "{:?}", r.warnings);
+}
+
+#[test]
+fn the_pour_stitching_after_a_drawing_the_limit_cut_is_cut_too() {
+    // verify-m2c 5: the stitching carries the drawing's decision: the limit passed after the
+    // drawing began (the decision is made before the stage says "drawing the traces"), so the
+    // drawing's steps are not exempt and the stitching that follows is cut (before, it re-decided
+    // at its start and ran in full). The drawing itself is not cut: a round gets at least 1 s,
+    // and this board's round takes less; the stitching has no such floor.
+    // The board's drawing takes milliseconds: a loaded machine may not let this thread see it, so
+    // a run whose limit came too late (not while the drawing or the via reduction ran) is tried again.
+    let m = pour_cut_board();
+    let o = topor(r#", "runs": 1, "timeout_mode": "hard""#);
+    let in_time = std::sync::atomic::AtomicBool::new(false);
+    let r = (0..40)
+        .find_map(|_| {
+            in_time.store(false, std::sync::atomic::Ordering::Relaxed);
+            let (r, hit) = act_at(&m, &o, &["drawing the traces", "via reduction"], |c| {
+                c.limit.reach();
+                let st = c.snapshot().stage;
+                in_time.store(st.contains("drawing the traces") || st.contains("via reduction"), std::sync::atomic::Ordering::Relaxed);
+            });
+            (hit && in_time.load(std::sync::atomic::Ordering::Relaxed)).then_some(r)
+        })
+        .expect("in 40 runs the limit never came while the drawing ran");
+    let l = r.limit.as_ref().expect("limit report");
+    assert!(l.reached && l.cut == "drawing" && l.cut_steps.contains(&"stitching".to_string()), "{l:?}");
+    assert!(!l.cut_steps.contains(&"plan".to_string()), "{l:?}");
+    assert_eq!(r.routed, r.connections_total, "the traces were drawn before the limit: {:?}", r.warnings);
+    assert!(r.warnings.iter().any(|w| w.starts_with(&format!("{DRAWING_CUT_LINE} (")) && w.contains("the pour stitching")), "{:?}", r.warnings);
+    assert!(r.warnings.iter().any(|w| w.starts_with("time limit (hard") && w.contains("the pour stitching was cut")), "{:?}", r.warnings);
 }

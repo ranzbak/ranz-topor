@@ -327,13 +327,15 @@ press Cancel to stop at once.
 **The overrun has a cap** (`[run] timeout_overrun_s`): seconds past `timeout_s`, on the same clock, that the step
 running at the limit may still take. Past it the run acts as with `hard` (below): the step that runs is cut and the
 kept plan (the best variant so far, or the initial plan) is drawn in full; when the drawing itself is the step that
-runs when the cap fires, the drawing is cut there and the connections it had not drawn stay unrouted. The warning
+runs when the cap fires, the drawing is cut there and the connections it had not drawn stay unrouted
+([`TIME_DRAWING_CUT`](troubleshoot.md#time_drawing_cut), as with `hard` below). The warning
 [`TIME_OVERRUN_CAP`](troubleshoot.md#time_overrun_cap) says which in log.txt, the findings, report.md (*Time limit*
 line) and `result.json` (`time_limit.cap_s`, `time_limit.cap_hit`, and `time_limit.cut`: `plan`, `drawing`
 or `none` when the cap passed only after the steps it stops had ended; `harness/score_runs.py` prints a WARNING
 line and lists the run in `limits.json` `overrun_cap_hit`). The default `auto` is equal to `timeout_s` in headless
 runs (harness, MCP, scripts, and direct calls of the engine's `route` / `route_async`, whose own default
-`timeout_overrun_s` is `"auto"`), so such a run takes at most twice its limit plus the drawing of one plan, and no
+`timeout_overrun_s` is `"auto"`), so such a run takes about twice its limit plus the drawing of one plan (plus what
+the bound of a hard run below names), and no
 cap in the KiCad dialog, where Cancel stops a run at once. A number sets the cap; `0` or `"none"` = no cap. The cap
 never changes `timeout_s` itself, and has no effect with `timeout_mode = "hard"` or without a limit.
 
@@ -341,10 +343,37 @@ never changes `timeout_s` itself, and has no effect with `timeout_mode = "hard"`
 in full, the same path as past the overrun cap (TopoR judges its variants before any copper and draws the chosen
 one, 6.3 manual pp. 72-73, p. 237); the progress dialog says *Time limit reached (hard): the current step stops now
 (<step>)*. An initial routing the limit cut leaves the connections it had not reached unrouted, its rip-up rounds
-stop and their plan so far is kept, and a TopoR loop cycle the limit cut is thrown away. A limit reached while the
-drawing runs (its via reduction and pour stitching included) cuts the drawing: the connections it had not drawn
-stay unrouted. A hard run so takes the limit plus the drawing of one plan. What 2026-11-13 changed holds in both
-modes: Cancel during the initial routing (up to its rip-up rounds) keeps no plan
+stop and their plan so far is kept, and a TopoR loop cycle the limit cut is thrown away. A limit that acted as hard
+before the drawing began never cuts the drawing of the kept plan.
+
+**A hard limit can cut the drawing.** A limit reached while the drawing runs (its via reduction and pour stitching
+included) cuts the drawing there: the drawing began before the limit and ran past it, so the board is drawn only
+in part. The connections it had not drawn stay unrouted (reason *time limit reached before this connection was
+drawn*), a cut via reduction keeps the vias it had not removed yet, and the pour stitching after a cut drawing is
+cut too (pour pieces it had not joined stay apart: open in KiCad's DRC). The warning
+[`TIME_DRAWING_CUT`](troubleshoot.md#time_drawing_cut) says *the drawing was cut by the hard time limit: N of M
+connections drawn* and what to change; `result.json` has `time_limit.cut = "drawing"` and `time_limit.cut_steps`
+(`drawing`, `via_reduction`, `stitching`; `plan` and `plane_stubs` for the planning steps). With `[optimize] loop =
+"topor"` the loop uses at most `loop_time_share` (default 0.5) of the time left, so on a large board the drawing
+can begin before the limit and still run past it. For a complete board use `soft` (the default: the drawing always
+runs to its end) or a longer `timeout_s`. This is the behaviour as decided on 2026-11-13; whether a hard limit should
+spare a drawing that has begun is an open question.
+
+**How long a hard run takes.** About the limit plus the drawing of one plan, plus:
+
+- the time the step that runs takes to see the stop: its next stop check (within a move in the rip-up rounds and
+  the TopoR loop, one connection in the drawing); a round (the initial routing, or a whole-route cycle) gets at
+  least 1 s from its start, also past the limit;
+- measurements outside the limit: `[capacity] compass_cut_check` moves the limit later by the time it took (it is
+  not router time, and the overrun leaves it out);
+- more drawings: with `[optimize] loop = "cycles"` every whole-route cycle draws its own plan (a cycle the limit
+  cut in its planning still draws its plan in full, and is then kept only when no other cycle is); with
+  `[optimize] runs` > 1 every run that draws (`loop = "cycles"`: each run; `loop = "topor"`: `[drawing]
+  candidates` of them) draws at the same time, sharing the threads, so each drawing takes longer.
+
+With `timeout_clock = "cpu"` the plugin reaches the engine's limit when the CPU seconds pass it (polled every
+0.25 s); with `hard` it then acts as above, the same path as on the wall clock (not a Cancel). What 2026-11-13
+changed holds in both modes: Cancel during the initial routing (up to its rip-up rounds) keeps no plan
 ([`NOTHING_TO_DRAW`](troubleshoot.md#nothing_to_draw)), and only the picked variant is drawn (below).
 
 **Only the picked variant is drawn** (`[drawing] candidates = 1`, the default since 2026-11-13, with `[optimize]

@@ -98,9 +98,13 @@ fn a_soft_limit_passed_before_the_run_places_every_plane_stub() {
     };
     let (p1, p2, p3) = (a(-90.0), a(30.0), a(150.0));
     let m = board(24.0, 24.0, &[("R1", 1, p1.0, p1.1, 1.0), ("R2", 1, p2.0, p2.1, 1.0), ("R3", 1, p3.0, p3.1, 1.0)], &[(1, 2, 0.5, 0.5, 23.5, 23.5, &[])]);
-    let planes = |r: &topor_engine::route::RouteResult| r.warnings.iter().find(|w| w.starts_with("planes as terminals")).cloned();
+    // MERGE: main renamed the line "shared plane vias ([planes] share_vias)"; both are matched
+    // (verify-m2c 2), and the unlimited run below must have it (a loud failure, never None == None).
+    let planes = |r: &topor_engine::route::RouteResult| r.warnings.iter().find(|w| ["planes as terminals ([planes] terminals)", "shared plane vias ([planes] share_vias)"].iter().any(|p| w.starts_with(p))).cloned();
     let free = route_with(&m, &Options::default(), &RunControl::new());
     assert!(planes(&free).is_some_and(|w| w.ends_with("1 stub via(s) for 3 plane pad(s)")), "{:?}", free.warnings);
+    // what tests/topo_m2_draw_once.rs plane_stubs() relies on: stub vias placed = a planes line
+    assert!(free.warnings.iter().any(|w| w.starts_with("via reduction after drawing:") && !w.contains("; 0 plane stub vias")), "{:?}", free.warnings);
     let ctl = RunControl::new();
     ctl.limit.init(1e-6);
     let late = route_with(&m, &Options::default(), &ctl);

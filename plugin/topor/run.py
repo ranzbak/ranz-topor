@@ -108,7 +108,9 @@ class RunOutcome:
     #: the time limit of the routing: {"clock": wall|cpu, "start_s", "final_s" (0 = none), "changes": [{"at_s",
     #: "limit_s"}], "cap_s" (run.timeout_overrun_s in effect, None = no cap), "cap_hit" (it fired: the soft limit then
     #: acted as the hard one), "cut" (what the limit acting as hard cut: "plan" = a planning step, the kept plan was
-    #: drawn in full; "drawing" = the drawing, connections left unrouted; "none"), plus mode / reached / step /
+    #: drawn in full; "drawing" = a step of the drawing (the traces: connections left unrouted; the via reduction; the
+    #: pour stitching); "none"), "cut_steps" (the engine's names of the steps cut: plan, plane_stubs, drawing,
+    #: via_reduction, stitching), plus mode / reached / step /
     #: overrun_s (M2.TL)}; changes are the user's, made in the
     #: progress dialog while the router ran (time_limit_text)
     time_limit: dict | None = None
@@ -808,7 +810,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     opts["timeout_overrun_s"] = 0.0 if cpu_clock else cap
     state["cap_hit"] = False
     out.time_limit = {"clock": "cpu" if cpu_clock else "wall", "start_s": state["limit"], "final_s": state["limit"],
-                      "changes": [], "cap_s": cap or None, "cap_hit": False, "cut": "none"}
+                      "changes": [], "cap_s": cap or None, "cap_hit": False, "cut": "none", "cut_steps": []}
     geometry = cfg.get("output", "geometry")
     max_err = int(rules.get("max_error") or 5000)
     layer_names = {int(l["id"]): l["name"] for l in model.get("layers", [])}
@@ -835,7 +837,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         out.time_limit.update({"mode": "soft" if soft_limit else "hard", "reached": reached,
                                "step": str(eng.get("step") or ""),
                                "overrun_s": round(max(0.0, spent - lim), 3) if reached else 0.0,
-                               "cap_hit": state["cap_hit"], "cut": str(eng.get("cut") or "none")})
+                               "cap_hit": state["cap_hit"], "cut": str(eng.get("cut") or "none"),
+                               "cut_steps": [str(x) for x in eng.get("cut_steps") or []]})
         if reached:
             log.line(f"time limit ({out.time_limit['mode']}): reached during {out.time_limit['step'] or 'the run'}; "
                      f"the result was ready {out.time_limit['overrun_s']:.1f} s past the limit "
@@ -860,8 +863,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         job = engine.route_async(mj, oj)
         job_t0, router_before = time.monotonic(), state["router_s"]
         cpu_t0, cpu_before = time.process_time(), state["router_cpu_s"]
-        # cancelled_at: Cancel / OK or the hard limit was sent (job.cancel()); limit_at: the soft limit was sent
-        # (job.reach_limit()). Kept apart so a Cancel after the soft limit still reaches the job (verify-m2 F1).
+        # cancelled_at: Cancel / OK was sent (job.cancel(); also the CPU clock's limit for an engine without
+        # reach_limit / harden); limit_at: the CPU clock's limit was sent (job.reach_limit(), and job.harden() when hard). Kept apart so a Cancel after the soft limit still reaches the job (verify-m2 F1).
         last_poll, cancelled_at, limit_at = -1e9, None, None
         rounds_seen = 0  # round lines of this job written to log.txt (round_log_lines)
         # Ends when the job is done (also after an engine panic: B-1). After Cancel / OK / the CPU limit the engine
@@ -898,15 +901,26 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                         log.line("this engine cannot change its time limit during a run; the change is ignored")
                 if state["limit_hit"] and cancelled_at is None and limit_at is None:
                     reach = getattr(job, "reach_limit", None)
+                    harden = getattr(job, "harden", None)
                     if soft_limit and callable(reach):
                         # M2.TL: the CPU clock's limit is the engine's soft limit: the step that runs finishes and the
                         # best kept variant is drawn (Cancel still stops now: cancelled_at stays unset)
                         limit_at = now
                         reach()
-                    else:
+                    elif callable(reach) and callable(harden):
+                        # verify-m2c 1: the CPU clock's hard limit takes the wall clock's hard path in the engine: the
+                        # limit is reached now and acts as hard, the step that runs is cut and the kept plan is drawn
+                        # in full (a drawing that runs then is cut); not a Cancel, which would keep no plan in the
+                        # initial routing (NOTHING_TO_DRAW)
+                        limit_at = now
+                        reach()
+                        harden()
+                    else:  # an engine older than the plugin (no reach_limit / harden): fail loud, still stop
                         cancelled_at = now
                         job.cancel()
-                        log.line("time limit: waiting for the engine to finish its current stage")
+                        log.line("WARNING: this engine cannot reach its time limit from the CPU clock (no "
+                                 "RouteJob.reach_limit / harden): Cancel instead; waiting for the engine to finish "
+                                 "its current stage")
                 # F3: the CPU clock's overrun cap: past the soft limit by run.timeout_overrun_s CPU seconds, the run
                 # acts as with the hard limit (the engine's own cap counts the wall clock, timeout_overrun_s)
                 if (cpu_clock and limit_at is not None and cancelled_at is None and cap > 0 and not state["cap_hit"]
@@ -940,7 +954,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         if cancelled_at is not None:
             log.line(f"engine stopped {time.monotonic() - cancelled_at:.1f} s after the stop request")
         elif limit_at is not None:
-            log.line(f"engine finished {time.monotonic() - limit_at:.1f} s (wall clock) after the soft time limit")
+            log.line(f"engine finished {time.monotonic() - limit_at:.1f} s (wall clock) after the "
+                     f"{'soft' if soft_limit else 'hard'} time limit")
         res = json.loads(job.wait())  # a panicked job raises RuntimeError("routing thread panicked: ...")
         note_limit(res)
         items = res.get("items") or []

@@ -110,7 +110,7 @@ def test_without_a_change_the_limit_is_fixed_and_reported(app, eprom, tmp_path, 
                                        # F3: headless, run.timeout_overrun_s = auto = timeout_s; not fired
                                        "cap_s": 60.0, "cap_hit": False,
                                        # what the limit acting as hard cut (hard and the cap: one path): nothing
-                                       "cut": "none"}
+                                       "cut": "none", "cut_steps": []}
     assert "limit 60 s wall" in "\n".join(out.report.summary_lines())
 
 

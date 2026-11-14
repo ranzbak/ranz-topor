@@ -20,7 +20,7 @@
 //! [`RunControl::update`] is O(1) under an uncontended mutex.
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -208,9 +208,64 @@ pub struct TimeLimit {
     /// [`TimeLimit::harden`]: the plugin's CPU clock).
     cap_ns: AtomicU64,
     capped: AtomicBool,
-    /// A stop test saw the limit act as hard after it passed ([`TimeLimit::cuts`]): a step was
-    /// cut by it (the report then says what was cut, not only that the limit acted as hard).
-    cut: AtomicBool,
+    /// The steps a stop test saw the limit cut, acting as hard after it passed ([`TimeLimit::cuts`],
+    /// [`TimeLimit::note_cut_in`]): one bit per [`CutStep`] (the report then names what was cut,
+    /// not only that the limit acted as hard).
+    cut: AtomicU8,
+}
+
+/// M2 fix 3 (verify-m2c 4): a step the time limit, acting as hard (`[run] timeout_mode = "hard"`,
+/// or the soft limit past its overrun cap), can cut, as the report names it. The planning steps
+/// (initial routing, its rip-up rounds, the TopoR loop cycle, P3/P4 moves) are [`CutStep::Plan`];
+/// the drawing's own steps each have theirs. The octilinear polish and the fuse have no stop
+/// test: the limit never cuts them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CutStep {
+    /// A planning step: the kept plan is drawn in full after it.
+    Plan,
+    /// The plane stubs, placed before the topology (a planning step: the plan needs them).
+    PlaneStubs,
+    /// The drawing of the traces (vias, wires, the feedback redraw, never-drop).
+    Drawing,
+    /// The via reduction after the drawing.
+    ViaReduction,
+    /// The pour stitching (D4) of a drawn variant.
+    Stitching,
+}
+
+impl CutStep {
+    pub const ALL: [CutStep; 5] = [CutStep::Plan, CutStep::PlaneStubs, CutStep::Drawing, CutStep::ViaReduction, CutStep::Stitching];
+
+    fn bit(self) -> u8 {
+        1 << (self as u8)
+    }
+
+    /// Its name in `LimitReport::cut_steps` / `result.json` `time_limit.cut_steps`.
+    pub fn name(self) -> &'static str {
+        match self {
+            CutStep::Plan => "plan",
+            CutStep::PlaneStubs => "plane_stubs",
+            CutStep::Drawing => "drawing",
+            CutStep::ViaReduction => "via_reduction",
+            CutStep::Stitching => "stitching",
+        }
+    }
+
+    /// Its words in the report lines.
+    pub fn words(self) -> &'static str {
+        match self {
+            CutStep::Plan => "a planning step",
+            CutStep::PlaneStubs => "the plane stubs",
+            CutStep::Drawing => "the drawing of the traces",
+            CutStep::ViaReduction => "the via reduction",
+            CutStep::Stitching => "the pour stitching",
+        }
+    }
+
+    /// A step of the drawing (cut: the board is drawn only in part, or not finished).
+    pub fn in_drawing(self) -> bool {
+        matches!(self, CutStep::Drawing | CutStep::ViaReduction | CutStep::Stitching)
+    }
 }
 
 const LIMIT_UNSET: u64 = u64::MAX;
@@ -218,7 +273,7 @@ const LIMIT_NONE: u64 = u64::MAX - 1;
 
 impl Default for TimeLimit {
     fn default() -> TimeLimit {
-        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false), cap_ns: AtomicU64::new(LIMIT_NONE), capped: AtomicBool::new(false), cut: AtomicBool::new(false) }
+        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false), cap_ns: AtomicU64::new(LIMIT_NONE), capped: AtomicBool::new(false), cut: AtomicU8::new(0) }
     }
 }
 
@@ -281,22 +336,44 @@ impl TimeLimit {
 
     /// The limit stops the step that runs now: it passed and acts as hard (`[run] timeout_mode =
     /// "hard"`, or the overrun cap fired, [`TimeLimit::is_hard`]). When true it is noted
-    /// ([`TimeLimit::cut_any`]): the stop test that asked stops its step there. O(1).
+    /// ([`TimeLimit::cut_any`]) as a cut of a planning step: the stop test that asked stops its
+    /// step there. O(1).
     pub fn cuts(&self) -> bool {
-        self.is_hard() && self.passed() && self.note_cut()
+        self.cuts_in(CutStep::Plan)
     }
 
-    /// A stop test with its own condition (the round's 1 s floor, the drawing's exemption) found
-    /// the limit cutting its step: noted for the report ([`TimeLimit::cut_any`]). Always true. O(1).
+    /// [`TimeLimit::cuts`] for the stop test of `step`. O(1).
+    pub fn cuts_in(&self, step: CutStep) -> bool {
+        self.is_hard() && self.passed() && self.note_cut_in(step)
+    }
+
+    /// A planning step's stop test with its own condition (the round's 1 s floor) found the limit
+    /// cutting its step: noted for the report ([`TimeLimit::cut_any`]). Always true. O(1).
     pub fn note_cut(&self) -> bool {
-        self.cut.store(true, Ordering::Relaxed);
+        self.note_cut_in(CutStep::Plan)
+    }
+
+    /// The stop test of `step` found the limit cutting it: noted for the report. Always true. O(1).
+    pub fn note_cut_in(&self, step: CutStep) -> bool {
+        self.cut.fetch_or(step.bit(), Ordering::Relaxed);
         true
     }
 
     /// Whether the limit, acting as hard, cut a step of the run ([`TimeLimit::cuts`]). A limit
     /// (or overrun cap) that passed only after the steps it stops had ended cut nothing. O(1).
     pub fn cut_any(&self) -> bool {
-        self.cut.load(Ordering::Relaxed)
+        self.cut.load(Ordering::Relaxed) != 0
+    }
+
+    /// The steps the limit cut, in [`CutStep::ALL`] order. O(1).
+    pub fn cut_steps(&self) -> Vec<CutStep> {
+        let bits = self.cut.load(Ordering::Relaxed);
+        CutStep::ALL.into_iter().filter(|s| bits & s.bit() != 0).collect()
+    }
+
+    /// `[run] timeout_mode = "hard"` was set ([`TimeLimit::set_hard`]), apart from the overrun cap. O(1).
+    pub fn hard_mode(&self) -> bool {
+        self.hard.load(Ordering::Relaxed)
     }
 
     /// The caller's overrun cap fired (the plugin's CPU clock: limit plus cap reached in CPU
@@ -440,7 +517,7 @@ impl RunControl {
             if p.limit_step.is_empty() {
                 p.limit_step = open.clone();
             }
-            p.notice = limit_notice(&open, self.limit.is_hard(), self.limit.cap_hit());
+            p.notice = limit_notice(&open, self.limit.is_hard(), !self.limit.hard_mode() && self.limit.cap_hit());
         }
         p
     }

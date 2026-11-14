@@ -279,8 +279,12 @@ pub struct LimitReport {
     /// What the limit cut when it acted as hard (`hard`, or past the overrun cap; user
     /// 2026-11-13: one path for both): `"plan"` = a planning step was cut and the kept plan drawn
     /// in full; `"drawing"` = the drawing was the step that ran and was cut (connections left
-    /// unrouted); `"none"` = nothing (the soft limit, or it passed after the steps it stops).
+    /// unrouted, or its via reduction or pour stitching cut); `"none"` = nothing (the soft limit,
+    /// or it passed after the steps it stops).
     pub cut: String,
+    /// The steps the limit cut, as the stop tests noted them (`crate::control::CutStep::name`:
+    /// `plan`, `plane_stubs`, `drawing`, `via_reduction`, `stitching`); empty when `cut` is `"none"`.
+    pub cut_steps: Vec<String>,
 }
 
 /// A routed differential-pair connection (D7), nm. `from` / `to` are the P connection's pads.

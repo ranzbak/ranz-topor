@@ -43,7 +43,7 @@ use super::planes;
 use super::state::{ObsId, State, VertId, VertKind, WireId, NO_OBS};
 use super::tree;
 use crate::check::Checker;
-use crate::control::{cancelled, RunControl};
+use crate::control::{cancelled, CutStep, RunControl};
 use crate::decompose::{decompose_with, Connection, TermKind, TermRef};
 use crate::geom::Vec2;
 use crate::model::{BoardModel, Item, Options};
@@ -273,9 +273,11 @@ fn nothing_to_draw(model: &BoardModel, opts: &Options, ctl: &RunControl, why: &s
 /// step that ran then and the time past it (`r.runtime_s` minus the limit), with report lines in
 /// `r.warnings` that name what the limit did: with the soft limit the step that ran finished; when
 /// it acted as hard (`hard`, or past the overrun cap) the step that ran was cut and the kept plan
-/// drawn in full (one path for both, user 2026-11-13), or the drawing itself was cut (connections
-/// left unrouted), or nothing was cut (it passed after the steps it stops had ended).
-/// `None` without a limit. O(connections).
+/// drawn in full (one path for both, user 2026-11-13), or a step of the drawing itself was cut
+/// (the drawing: connections left unrouted; the via reduction; the pour stitching), or nothing
+/// was cut (it passed after the steps it stops had ended). What was cut is what the stop tests
+/// noted ([`crate::control::TimeLimit::cut_steps`], verify-m2c 4), not the connections' reasons
+/// (a Cancel leaves its own). `None` without a limit. O(connections).
 fn limit_report(ctl: &RunControl, opts: &Options, r: &mut RouteResult) -> Option<crate::route::LimitReport> {
     let limit_s = ctl.limit.seconds()?;
     let runtime_s = r.runtime_s;
@@ -285,13 +287,28 @@ fn limit_report(ctl: &RunControl, opts: &Options, r: &mut RouteResult) -> Option
     let overrun_s = if reached { ((runtime_s - limit_s) * 1e3).round() / 1e3 } else { 0.0 };
     let cap_s = ctl.limit.overrun_cap_s();
     let cap_hit = mode == "soft" && ctl.limit.cap_hit();
-    // (the drawing's reason is also a Cancel's in a whole-route cycle: only a limit's cut counts)
-    let drawing_cut = r.connections.iter().any(|c| c.reason == DRAW_CUT);
-    let cut = if !ctl.limit.cut_any() { "none" } else if drawing_cut { "drawing" } else { "plan" };
+    let steps = ctl.limit.cut_steps();
+    let drawn_cut: Vec<CutStep> = steps.iter().copied().filter(|s| s.in_drawing()).collect();
+    let cut = if steps.is_empty() { "none" } else if drawn_cut.is_empty() { "plan" } else { "drawing" };
+    let undrawn = r.connections.iter().filter(|c| c.reason == DRAW_CUT).count();
     // What the limit did when it acted as hard (`hard`, or the soft limit past its overrun cap).
+    let plan_text = |words: &str| format!("the step that ran then was cut and the kept plan (the best variant so far, or the initial plan) was drawn in full (cut: {words}; a cut initial routing leaves the connections it had not reached unrouted; a cut TopoR loop cycle is not kept)");
+    let plan_words = steps.iter().filter(|s| !s.in_drawing()).map(|s| s.words()).collect::<Vec<_>>().join(", ");
+    let draw_text = || {
+        let parts: Vec<String> = drawn_cut
+            .iter()
+            .map(|s| match s {
+                CutStep::Drawing => format!("the drawing of the traces was cut: {} of {} connections drawn, {undrawn} left undrawn by the cut", r.routed, r.connections_total),
+                CutStep::ViaReduction => "the via reduction was cut (the vias it had not removed yet stay)".to_string(),
+                _ => "the pour stitching was cut (pour pieces it had not joined stay apart: open connections in KiCad's DRC)".to_string(),
+            })
+            .collect();
+        format!("the drawing was the step that ran then: {}", parts.join("; "))
+    };
     let as_hard = match cut {
-        "drawing" => "the drawing was the step that ran then and was cut there: the connections it had not drawn stay unrouted".to_string(),
-        "plan" => "the step that ran then was cut and the kept plan (the best variant so far, or the initial plan) was drawn in full (a cut initial routing leaves the connections it had not reached unrouted; a cut TopoR loop cycle is not kept)".to_string(),
+        "drawing" if plan_words.is_empty() => draw_text(),
+        "drawing" => format!("{}; in a run whose drawing ran then {}", plan_text(&plan_words), draw_text()),
+        "plan" => plan_text(&plan_words),
         _ => format!("it passed only after the steps it stops had ended{}: nothing was cut", if ctl.snapshot().stage.is_empty() { String::new() } else { format!(" (during {})", ctl.snapshot().stage) }),
     };
     if reached {
@@ -308,11 +325,32 @@ fn limit_report(ctl: &RunControl, opts: &Options, r: &mut RouteResult) -> Option
             cap_s.map_or("the caller's cap on its own clock".to_string(), |c| format!("[run] timeout_overrun_s = {c:.0} s past the {limit_s:.0} s limit, wall clock"))
         ));
     }
-    Some(crate::route::LimitReport { limit_s, mode: mode.into(), reached, step, overrun_s, cap_s, cap_hit, cut: cut.into() })
+    if !drawn_cut.is_empty() {
+        // verify-m2c 3 (decided behaviour, user decision on a change pending): a limit acting as
+        // hard that passes while the drawing runs cuts it; the board is then drawn only in part.
+        let what = drawn_cut.iter().map(|s| s.words()).collect::<Vec<_>>().join(", ");
+        r.warnings.push(format!(
+            "{DRAWING_CUT_LINE}{} ({what}): {} of {} connections drawn{}; {}",
+            if cap_hit { " (the soft limit past its overrun cap acts as the hard one)" } else { "" },
+            r.routed,
+            r.connections_total,
+            if undrawn > 0 { format!(", {undrawn} left undrawn by the cut") } else { String::new() },
+            if cap_hit { "raise [run] timeout_overrun_s or timeout_s for a complete board (the drawing began before the cap and ran past it)" } else { "use [run] timeout_mode = \"soft\" or a longer [run] timeout_s for a complete board (the drawing began before the limit and ran past it)" }
+        ));
+    }
+    let cut_steps = steps.iter().map(|s| s.name().to_string()).collect();
+    Some(crate::route::LimitReport { limit_s, mode: mode.into(), reached, step, overrun_s, cap_s, cap_hit, cut: cut.into(), cut_steps })
 }
 
 /// The reason of a connection the time limit left undrawn (the drawing was the step that ran).
 const DRAW_CUT: &str = "time limit reached before this connection was drawn";
+
+/// The reason of a connection a Cancel / OK left undrawn in a drawing that it ends (a whole-route
+/// cycle of `[optimize] loop = "cycles"`; the TopoR loop's one drawing runs through a Cancel).
+const DRAW_CANCEL: &str = "Cancel / OK came before this connection was drawn";
+
+/// The start of the loud line when the time limit, acting as hard, cut a step of the drawing.
+pub const DRAWING_CUT_LINE: &str = "WARNING: the drawing was cut by the hard time limit";
 
 /// One run of a best-of-N call, as [`route_topo`] needs it back.
 struct RunOut {
@@ -927,11 +965,16 @@ impl Run {
             // error of the variant (else the pick prefers short copper that islands a pour).
             // M2.TL soft limit: the stitching belongs to the drawing of this variant and finishes
             // (Cancel still ends it); `hard` (or the soft limit past its overrun cap, F3, read
-            // live): a limit that passes while it runs cuts it. A limit that acted as hard before
-            // the stitching began does not cut it: the plan that exists is drawn in full (user
-            // 2026-11-13, one path for `hard` and the cap, as in the drawing).
-            let exempt = ctl.limit.is_hard() && ctl.over_limit();
-            let cut = || !exempt && ctl.limit.cuts();
+            // live): a limit that passes while the drawing or the stitching runs cuts it. A limit
+            // that acted as hard before the drawing began does not cut it: the plan that exists is
+            // drawn in full (user 2026-11-13, one path for `hard` and the cap). The decision is
+            // the drawing's (verify-m2c 5): after a drawing the limit cut, the stitching is cut too
+            // (before, it re-decided at its own start and so ran in full).
+            let exempt = ro.draw_exempt;
+            let cut = || !exempt && ctl.limit.cuts_in(CutStep::Stitching);
+            // The same test without noting a cut (the stitching may have ended before it): whether
+            // a variant counts as cut short below; only the stitching's own stop test reports one.
+            let past = || !exempt && ctl.limit.is_hard() && ctl.limit.passed();
             let stitched = |mut r: RouteResult, mut c: Criteria| -> (RouteResult, Criteria) {
                 if opts.stitch_islands {
                     ctl.stage(cycle as u32, opts.topo_rounds.max(1) as u32, "pour stitching");
@@ -947,14 +990,14 @@ impl Run {
             let RoundOut { result, crit, pre, .. } = ro;
             if let Some((c, r)) = pre.filter(|_| !cancel_cut) {
                 let (r, c) = stitched(r, c);
-                if !cut() || empty {
+                if !past() || empty {
                     note_judged(c, r.routed, true);
                     self.arch.offer(Variant { label: format!("round {cycle} as drawn"), crit: c, payload: Drawn { cycle, result: r } }, &obj);
                 }
             }
             let (r, c) = stitched(result, crit);
             (cyc_err, cyc_viol) = (c.errors, c.violations);
-            if !cut() || self.arch.items.is_empty() {
+            if !past() || self.arch.items.is_empty() {
                 note_judged(c, r.routed, false);
                 self.arch.offer(Variant { label: format!("round {cycle}"), crit: c, payload: Drawn { cycle, result: r } }, &obj);
             }
@@ -1212,6 +1255,10 @@ struct RoundOut {
     skipped: Option<String>,
     /// M2.TL: nothing kept to draw (Cancel / OK came before the run's initial routing ended), why.
     nothing: Option<String>,
+    /// The limit acted as hard before the drawing began (`draw_exempt` in [`route_round`]): it
+    /// cut a planning step, and the drawing of the kept plan is not cut, its pour stitching
+    /// neither (verify-m2c 5: the stitching carries the drawing's decision, not its own).
+    draw_exempt: bool,
 }
 
 /// How the TopoR loop of a round ended (`[optimize] loop = "topor"`).
@@ -1223,7 +1270,7 @@ struct LoopEnd {
 
 impl RoundOut {
     fn unrouted(r: RouteResult) -> RoundOut {
-        RoundOut { crit: Criteria { errors: r.failed, open: r.failed, ..Criteria::default() }, result: r, pre: None, lp: None, skipped: None, nothing: None }
+        RoundOut { crit: Criteria { errors: r.failed, open: r.failed, ..Criteria::default() }, result: r, pre: None, lp: None, skipped: None, nothing: None, draw_exempt: false }
     }
 
     /// A round that draws nothing: `skipped` (another run's pick is drawn) or `nothing` (no plan
@@ -1502,7 +1549,7 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
     // follows sees the same stop. The time limit ends it only with `[run] timeout_mode = "hard"`:
     // the soft limit (M2.TL, default) cuts no step, and the initial routing that follows needs every
     // stub to give a complete plan (verify-m2 F2); past the overrun cap (F3) it acts as hard.
-    let stop = || cancelled() || ctl.is_cancelled() || ctl.limit.cuts();
+    let stop = || cancelled() || ctl.is_cancelled() || ctl.limit.cuts_in(CutStep::PlaneStubs);
     let signal: Vec<u32> = model.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
     if signal.len() < 2 {
         return PlaneStubs::default();
@@ -1724,9 +1771,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // that passes while the drawing runs cuts it (the drawing is then the step that ran).
     let soft = || !ctl.limit.is_hard();
     let draw_exempt = std::cell::Cell::new(false);
+    // verify-m2c 4: the step the stop tests below belong to (a planning step until the drawing
+    // begins), so the report names what the limit cut.
+    let cut_step = std::cell::Cell::new(CutStep::Plan);
     let stop_now = || cancelled() || ctl.is_cancelled();
-    let limit_cut = || !draw_exempt.get() && !soft() && ctl.deadline().is_some_and(|d| Instant::now() >= d.max(floor)) && ctl.limit.note_cut();
+    let limit_cut = || !draw_exempt.get() && !soft() && ctl.deadline().is_some_and(|d| Instant::now() >= d.max(floor)) && ctl.limit.note_cut_in(cut_step.get());
     let expired = || (!draw_through.get() && stop_now()) || limit_cut();
+    // The reason of a connection the drawing did not reach: a Cancel / OK's or the limit's (a
+    // Cancel wins when both hold; verify-m2c 4: a Cancel wrote the limit's reason before).
+    let draw_cut_reason = || if !draw_through.get() && stop_now() { DRAW_CANCEL } else { DRAW_CUT };
     // M2.TL: Cancel / OK cut the initial routing (P2) before every connection had its place: the
     // plan is not complete, so it is no variant (nothing kept to draw).
     let plan_cut = std::cell::Cell::new(false);
@@ -3495,6 +3548,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // One path for `hard` and the overrun cap (user 2026-11-13): the limit acted as hard before
     // the drawing began, so it cut a planning step; the kept plan is drawn in full.
     draw_exempt.set(ctl.limit.is_hard() && ctl.over_limit());
+    cut_step.set(CutStep::Drawing);
     // 4.3 `initial = "once"`: the plan handed to the next cycle (before anything is dropped).
     let plan_carry = once.then(|| PlanCarry { topo: st.topology(), wire_conn: wire_conn.clone(), conns: conns.clone(), term_over: term_over.clone() });
     if once {
@@ -3987,7 +4041,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     for &w in &draw_order {
         if expired() {
             timed_out = true;
-            fail(&mut out, conn_of[wire_conn[w]], DRAW_CUT);
+            fail(&mut out, conn_of[wire_conn[w]], draw_cut_reason());
             continue;
         }
         let mut ids = Vec::new();
@@ -4111,7 +4165,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     for &w in &live {
         if expired() {
             timed_out = true;
-            fail(&mut out, conn_of[wire_conn[w]], DRAW_CUT);
+            fail(&mut out, conn_of[wire_conn[w]], draw_cut_reason());
             continue;
         }
         let ci = conn_of[wire_conn[w]];
@@ -4579,6 +4633,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // runs to its end (Cancel still ends it, anytime; verify-m2 F2: past the soft limit it got
         // 0 s, "0 relabels tried"). A limit acting as hard (`hard`, or past the overrun cap, read
         // live) cuts it only when it passed after the drawing began (`draw_exempt`).
+        cut_step.set(CutStep::ViaReduction);
         let (rs, changed) = super::reduce::reduce_vias(&mut dr, &mut drawn, &mut placed, &mut plans, &mut via_h, &end_fixed, &frozen, b.n_signal, None, &|| ctl.is_cancelled() || limit_cut());
         // Cancel / OK ends the via reduction (cancel-fix; anytime: every relabel accepted so far
         // stays; measured on qmtech it took 12-22 s for 0-10 of ~110 vias). In the TopoR loop pick's
@@ -5276,7 +5331,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     let pre = pre_parts.map(|(c, a)| (c, with_parts(&result, a)));
     let vias_out: BTreeMap<usize, usize> = plans.iter().map(|(&w, pl)| (conn_of[wire_conn[w]], pl.vias.len())).collect();
-    (RoundOut { result, crit: crit_main, pre, lp: loop_end, skipped: None, nothing: None }, new_hints, Memory { edge: hist_out, own: own_out, vias: vias_out, plan: plan_carry })
+    (RoundOut { result, crit: crit_main, pre, lp: loop_end, skipped: None, nothing: None, draw_exempt: draw_exempt.get() }, new_hints, Memory { edge: hist_out, own: own_out, vias: vias_out, plan: plan_carry })
 }
 
 /// D7: realise every coupled pair connection of `out`: the lead's drawn centre line becomes the P
