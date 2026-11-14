@@ -1013,7 +1013,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         changed = (f"; changed during the run, run.timeout_s = {limit_text(out.time_limit['start_s'])}"
                    if out.time_limit["changes"] else "")
         cap_line = "WARNING: time limit overrun cap reached"
-        warns = [w for w in rr.get("warnings") or [] if not str(w).startswith(cap_line)]  # the engine's own: no clock
+        # the engine's own cap line and time-budget line carry no CPU clock: the plugin's line below names the CPU limit
+        warns = [w for w in rr.get("warnings") or [] if not str(w).startswith((cap_line, "time budget hit"))]
         if state["cap_hit"]:
             # what the cap did is the engine's (it cut a planning step, the drawing, or nothing): its own line names it
             eng_cap = next((str(w) for w in rr.get("warnings") or [] if str(w).startswith(cap_line)), "")
