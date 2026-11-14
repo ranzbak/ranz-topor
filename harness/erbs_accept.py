@@ -86,9 +86,10 @@ def bends(path, gates):
     """(bends, unexplained, list of unexplained corners)."""
     ends = []
     for g in gates:
-        ends.append((g["a"], g["p"]))
-        if g.get("src") == "cut":
-            ends.append((g["b"], g["q"]))
+        cut = g.get("src") == "cut"
+        ends.append((g["a"], g["p"], g["q"] if cut else None))
+        if cut:
+            ends.append((g["b"], g["q"], g["p"]))
     n = un = 0
     bad = []
     for k in range(1, len(path) - 1):
@@ -104,8 +105,13 @@ def bends(path, gates):
         n += 1
         inner = (dout[0] / lo - din[0] / li, dout[1] / lo - din[1] / li)
         ok = False
-        for tip, root in ends:
-            if math.dist(tip, x) <= TOL_TIP and ((root[0] - x[0]) * inner[0] + (root[1] - x[1]) * inner[1]) > 0:
+        for tip, root, other in ends:
+            if math.dist(tip, x) > TOL_TIP:
+                continue
+            # A tip at its cut's end (a spoke of length 0): the feature lies past the end, along the cut.
+            if other is not None and math.dist(tip, root) <= TOL_TIP:
+                root = (x[0] + root[0] - other[0], x[1] + root[1] - other[1])
+            if ((root[0] - x[0]) * inner[0] + (root[1] - x[1]) * inner[1]) > 0:
                 ok = True
                 break
         if not ok:

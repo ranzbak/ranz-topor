@@ -325,6 +325,8 @@ struct Points {
     /// The rough path's detour round the point ([`Detour`]).
     det: Vec<Detour>,
     seen: HashMap<(u64, u64), usize>,
+    /// Points by [`MERGE`] cell.
+    grid: HashMap<(i64, i64), Vec<usize>>,
     conflicts: usize,
 }
 
@@ -333,7 +335,7 @@ impl Points {
         let mut seen = HashMap::new();
         seen.insert(key(s), 0);
         seen.entry(key(e)).or_insert(1);
-        Points { pts: vec![s, e], lab: vec![0, 1], gate: vec![None, None], w: vec![w, w], det: vec![Detour::Never, Detour::Never], seen, conflicts: 0 }
+        Points { pts: vec![s, e], lab: vec![0, 1], gate: vec![None, None], w: vec![w, w], det: vec![Detour::Never, Detour::Never], seen, grid: HashMap::new(), conflicts: 0 }
     }
 
     /// Add a point (the first of coincident points stays; one of the other side is a conflict).
@@ -345,8 +347,27 @@ impl Points {
         if !(p.x.is_finite() && p.y.is_finite()) {
             return;
         }
-        match self.seen.get(&key(p)) {
-            Some(&i) => {
+        // Points closer than [`MERGE`] are one obstacle (a detour's loop is [`EPS`] wide).
+        let cell = |v: f64| (v / MERGE).floor() as i64;
+        let (cx, cy) = (cell(p.x), cell(p.y));
+        let mut found = self.seen.get(&key(p)).copied();
+        if found.is_none() {
+            'o: for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for &i in self.grid.get(&(cx + dx, cy + dy)).map_or(&[][..], |v| v.as_slice()) {
+                        if (self.pts[i] - p).len() <= MERGE {
+                            found = Some(i);
+                            break 'o;
+                        }
+                    }
+                }
+            }
+        }
+        if found.is_none() {
+            self.grid.entry((cx, cy)).or_default().push(self.pts.len());
+        }
+        match found {
+            Some(i) => {
                 if self.lab[i] >= 2 && self.lab[i] <= 3 && lab <= 3 && self.lab[i] != lab {
                     self.conflicts += 1;
                 }
@@ -396,6 +417,8 @@ enum Detour {
 const ON: f64 = 0.5;
 /// Half size of a detour round a point (nm).
 const EPS: f64 = 5.0;
+/// Points closer than this are one obstacle (nm).
+const MERGE: f64 = 4.0 * EPS;
 
 /// The rough path: the band with a thin detour round every point on the wrong side of it, so that
 /// every labelled point lies on its own side (Dayan 1997 PDF p. 32: a band that crosses a spoke
@@ -468,6 +491,23 @@ fn rough_path(band: &[Vec2], pp: &Points) -> Vec<Vec2> {
         det.push((s, ang, i, x));
     }
     det.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    // Detours from one base along one ray (a spoke tip on an arc sample's ray): the farther
+    // first. The nearer point lies beside the farther one's loop, and a loop round the pair is the
+    // farther one's then the nearer one's; in the other order the path winds round the pair.
+    let along = |a: &(f64, f64, usize, Vec2), b: &(f64, f64, usize, Vec2)| {
+        let (pa, pb) = (pp.pts[a.2] - a.3, pp.pts[b.2] - b.3);
+        (a.3 - b.3).len() <= ON && pa.dot(pb) > 0.0 && pa.cross(pb).abs() <= 2.0 * MERGE * pa.len().max(pb.len())
+    };
+    let mut swapped = true;
+    while swapped {
+        swapped = false;
+        for k in 1..det.len() {
+            if along(&det[k - 1], &det[k]) && (pp.pts[det[k - 1].2] - det[k - 1].3).len() < (pp.pts[det[k].2] - det[k].3).len() {
+                det.swap(k - 1, k);
+                swapped = true;
+            }
+        }
+    }
     let mut out = vec![band[0]];
     let mut k = 1;
     for &(s, _, i, x) in &det {
@@ -1427,6 +1467,24 @@ mod tests {
         }
         let p = path_of(v(0.0, 0.0), v(10.0, 0.0), &ls, &rs).unwrap();
         assert_eq!(p, vec![v(0.0, 0.0), v(10.0, 0.0)]);
+    }
+
+    /// Two points to go round on one ray from the band (a spoke tip on an arc sample's ray), the
+    /// nearer added first: the path goes round the farther one only, once.
+    #[test]
+    fn collinear_detours_far_first() {
+        let ls = vec![v(5.0, -0.5), v(5.0, -1.0)];
+        let p = path_of(v(0.0, 0.0), v(10.0, 0.0), &ls, &[]).unwrap();
+        assert_eq!(p, vec![v(0.0, 0.0), v(5.0, -1.0), v(10.0, 0.0)]);
+    }
+
+    /// Points closer than MERGE are one obstacle.
+    #[test]
+    fn near_points_merge() {
+        let mut pp = Points::new(v(0.0, 0.0), v(1.0, 0.0), 1.0);
+        pp.add(v(0.5, 0.1), true, None, 1.0);
+        pp.add(Vec2 { x: 0.5e6 + 5.0, y: 0.1e6 - 3.0 }, true, None, 1.0);
+        assert_eq!(pp.pts.len(), 3);
     }
 
     /// A tip the band only touches (the with_dropped counter-example class: touch vs crossing):

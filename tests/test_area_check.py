@@ -97,3 +97,14 @@ def test_erbs_accept_straight_and_zigzag():
     z = EA.stretch_row(_dump([[0, 0], [6, 1], [4, 1.2], [10, 0]], band, [g]))
     assert z["unexplained"] >= 2 and z["reversals"] == 1 and z["back_um"] > 1000
     assert z["ratio"] > 1.03
+
+
+def test_erbs_accept_tip_at_its_cut_end():
+    """A tip at its cut's end (a spoke of length 0, an open end): the spoke lies past the tip along the cut
+    (from p to q for tip b), so a bend there turning toward that side is explained, one turning away is not."""
+    band = [[0, 0], [10, 0]]
+    g = {"src": "cut", "a": [5, 4], "b": [5, 0.5], "p": [5, 4], "q": [5, 0.5]}
+    toward = EA.stretch_row(_dump([[0, 0], [5, 0.5], [10, 0]], band, [g]))
+    assert toward["bends"] == 1 and toward["unexplained"] == 0
+    away = EA.stretch_row(_dump([[0, 0], [5, 0.5], [10, 0]], band, [dict(g, p=[5, -3], a=[5, -3])]))
+    assert away["unexplained"] == 1
