@@ -391,7 +391,8 @@ fn x_extent(pad: &crate::model::Pad, x: Vec2) -> f64 {
 }
 
 /// The turn-back of the reverse exit `r` of a pad pair (KiCad builds gateways on every side, doc
-/// 3.2): the pair leaves its pads away from the far end, turns 180 degrees and passes the pad pair
+/// 3.2): the pair leaves its pads away from the far end, runs on until the turn's inner track
+/// clears the pads, turns 180 degrees and passes the pad pair
 /// on the cheaper side to the point abreast of the preferred gateway `g_pref`. Returns the graded
 /// clearance breaks of its P and N tracks on the fan's layers and its length (nm): a turn-back past
 /// a pad row's neighbours is costly, not forbidden. O(sides x layers x checker queries).
@@ -409,10 +410,13 @@ fn turn_back(model: &BoardModel, checker: &Checker, base: &ItemIndex, cp: &Coupl
     }
     // Lateral offset of the pair's centre line: past the pads, a clearance and half the ribbon.
     let lat = ext + clear + 0.5 * p + 0.5 * w + 50_000.0;
-    let len = lat + (r.g - g_pref).len();
+    // Straight on past the gateway until the turn's inner track clears the pads.
+    let e = 0.5 * p + 0.5 * w + clear + 50_000.0;
+    let len = e + lat + (r.g + r.x * e - g_pref).len();
     let mut best: Option<(usize, f64)> = None;
     for s in [1.0, -1.0] {
-        let centre = [r.g, r.g + n * (s * lat), g_pref + n * (s * lat)];
+        let t = r.g + r.x * e;
+        let centre = [r.g, t, t + n * (s * lat), g_pref + n * (s * lat)];
         let (a, b) = (super::diffpair::offset(&centre, 0.5 * p), super::diffpair::offset(&centre, -0.5 * p));
         if a.len() < 2 || b.len() < 2 {
             continue;
@@ -635,6 +639,9 @@ pub fn plan_ends(model: &BoardModel, opts: &Options, checker: &Checker, fixed: &
             let single_lb = 2.0 * price_via + 2.0 * price_unpaired + price_cross;
             let need_of = |i: usize, j: usize| cands[0][i].0.n_side_out() != -cands[1][j].0.n_side_out();
             let need0 = need_of(0, 0);
+            if std::env::var_os("TOPO_DPDBG").is_some() {
+                eprintln!("dpdbg exits {}.{}: {:?} / {}.{}: {:?}", model.pads[a].ref_, model.pads[a].number, cands[0].iter().map(|c| c.1).collect::<Vec<_>>(), model.pads[b].ref_, model.pads[b].number, cands[1].iter().map(|c| c.1).collect::<Vec<_>>());
+            }
             let mut best: Option<(f64, usize, usize)> = None;
             let mut best_any: Option<(f64, usize, usize)> = None;
             for (i, (_, px)) in cands[0].iter().enumerate() {
