@@ -507,41 +507,92 @@ pub fn plan_ends(model: &BoardModel, opts: &Options, checker: &Checker, fixed: &
     let price_via = reg.price(&Event::Via { wire: 0, count: 1, at: None }, &ctx);
     let price_cross = reg.price(&Event::Crossing { a: 0, b: 1, tri: 0, same_net: false }, &ctx);
     let price_unpaired = reg.price(&Event::DpViaUnpaired { count: 1 }, &ctx);
+    let brk = 10.0 * price_via.max(1.0);
     let routable: Vec<u32> = model.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
     let leads: Vec<(usize, usize, usize)> = pairs.lead.iter().map(|(&ci, &(k, cn))| (ci, k, cn)).collect();
     let mut fans: BTreeMap<(usize, i64, i64), Fan> = BTreeMap::new();
     let mut plans: BTreeMap<usize, ConnPlan> = BTreeMap::new();
+    let mut exit_notes: Vec<String> = Vec::new();
     // Pass 1: the fan-outs of every pair end (shared ends: one fan-out per pad pair and direction).
     for &(ci, k, cn) in &leads {
         let cp = &pairs.coupled[k];
         let c = &dec.connections[ci];
         let (Some(a), Some(b)) = (pad_of(&c.from), pad_of(&c.to)) else { continue };
         let mid = |q: usize| (model.pads[q].center.to_vec2() + model.pads[cp.partner[&q]].center.to_vec2()) * 0.5;
-        let mut ends: [Option<Fan>; 2] = [None, None];
+        // Both exits of every end (KiCad builds gateways on every side of a pad pair, doc 3.2): the
+        // preferred one (away from the body, or toward the far end) and the reverse, each priced by
+        // its fan-out's clearance breaks (graded), its run-out and, for the reverse, the extra way
+        // to the far end. The pair takes the cheapest combination, the parity included (a needed
+        // flip on one layer costs at least two single tracks), so a pad pair on a module's rim
+        // whose "away" side is the board edge leaves inward when that avoids a swap.
+        let la: Vec<u32> = pad_signal_layers(model, &model.pads[a]);
+        let lb: Vec<u32> = pad_signal_layers(model, &model.pads[b]);
+        let forced_ends = !la.iter().any(|l| lb.contains(l));
+        let mut cands: [Vec<(Fan, f64)>; 2] = [Vec::new(), Vec::new()];
         for (slot, (q, other)) in [(a, b), (b, a)].into_iter().enumerate() {
             let qn = cp.partner[&q];
             // Both ends on one part (a flow-through part): the pads leave toward each other.
-            let (x, derived) = if model.pads[q].ref_ == model.pads[other].ref_ {
+            let (x0, derived) = if model.pads[q].ref_ == model.pads[other].ref_ {
                 let mut nb = body.clone();
                 nb.remove(model.pads[q].ref_.as_str());
                 exit_dir(model, &nb, q, qn, mid(other))
             } else {
                 exit_dir(model, &body, q, qn, mid(other))
             };
-            let key = (q, (x.x * 1e6) as i64, (x.y * 1e6) as i64);
-            if let Some(f) = fans.get(&key) {
-                ends[slot] = Some(f.clone());
-                continue;
-            }
             let mut layers = pad_signal_layers(model, &model.pads[q]);
             layers.retain(|l| model.pads[qn].layers.contains(l));
             if layers.is_empty() {
                 continue;
             }
-            let f = plan_fan(model, checker, &base, cp, q, qn, x, derived, layers);
-            fans.insert(key, f.clone());
-            ends[slot] = Some(f);
+            let mut g0 = None;
+            for (x, rev) in [(x0, false), (-x0, true)] {
+                let key = (q, (x.x * 1e6) as i64, (x.y * 1e6) as i64);
+                let f = match fans.get(&key) {
+                    Some(f) => f.clone(),
+                    None => {
+                        let f = plan_fan(model, checker, &base, cp, q, qn, x, derived && !rev, layers.clone());
+                        fans.insert(key, f.clone());
+                        f
+                    }
+                };
+                let to_far = (f.g - mid(other)).len();
+                let g_pref = *g0.get_or_insert(to_far);
+                let extra = if rev { (to_far - g_pref).max(0.0) } else { 0.0 };
+                let price = brk * (f.viol.0 as f64 + f.viol.1 / MM) + price_mm * (f.run_out + extra) / MM;
+                cands[slot].push((f, price));
+            }
         }
+        let ends: [Option<Fan>; 2] = if cands[0].is_empty() || cands[1].is_empty() {
+            [cands[0].first().map(|c| c.0.clone()), cands[1].first().map(|c| c.0.clone())]
+        } else {
+            let single_lb = 2.0 * price_via + 2.0 * price_unpaired + price_cross;
+            let mut best: Option<(f64, usize, usize)> = None;
+            for (i, (x, px)) in cands[0].iter().enumerate() {
+                for (j, (y, py)) in cands[1].iter().enumerate() {
+                    let need = x.n_side_out() != -y.n_side_out();
+                    let p = px + py + if need && !forced_ends { single_lb } else { 0.0 };
+                    // Ties keep the preferred exits (index 0 first).
+                    if best.is_none_or(|b| p < b.0 - 1e-9) {
+                        best = Some((p, i, j));
+                    }
+                }
+            }
+            let (_, i, j) = best.expect("candidates");
+            if i != 0 || j != 0 {
+                exit_notes.push(format!(
+                    "diff pair {} / {}: the pair leaves {}.{} {} and {}.{} {} (the reverse exit is cheaper: fewer clearance breaks or no polarity flip)",
+                    cp.rule.p_name,
+                    cp.rule.n_name,
+                    model.pads[a].ref_,
+                    model.pads[a].number,
+                    if i == 0 { "as preferred" } else { "on the reverse side" },
+                    model.pads[b].ref_,
+                    model.pads[b].number,
+                    if j == 0 { "as preferred" } else { "on the reverse side" }
+                ));
+            }
+            [Some(cands[0][i].0.clone()), Some(cands[1][j].0.clone())]
+        };
         let [mut fa, mut fb] = ends;
         if std::env::var_os("TOPO_DPDBG").is_some() {
             for f in [&fa, &fb].into_iter().flatten() {
@@ -586,6 +637,7 @@ pub fn plan_ends(model: &BoardModel, opts: &Options, checker: &Checker, fixed: &
         };
         plans.insert(ci, ConnPlan { k, conn_p: ci, conn_n: cn, pad_a: a, pad_b: b, fa, fb, need, forced, choice: Choice::Keep, swap: None, swap_price: f64::INFINITY, single_price: f64::INFINITY, drawn_single: false });
     }
+    pairs.notes.append(&mut exit_notes);
     // Pass 2: polarity. The fan-outs of every end and the swaps planned so far are what a swap
     // site must keep clear of besides the static board.
     let mut taken = ItemIndex::new(checker.cell());
@@ -638,7 +690,6 @@ pub fn plan_ends(model: &BoardModel, opts: &Options, checker: &Checker, fixed: &
         let to = routable.iter().rev().copied().find(|&l| l != leg).unwrap_or(leg);
         let t = unit(gb - ga);
         let n_left = pl.fa.as_ref().map_or(true, |f| f.n_side_out() > 0.0);
-        let brk = 10.0 * price_via.max(1.0);
         let squeeze = reg.price(&Event::ViaSqueeze { wire: 0, at: Vec2::default(), slack_nm: 0.0, via_nm: vd as f64 }, &ctx);
         let mut best: Option<SwapSite> = None;
         let step = 250_000.0;
