@@ -520,6 +520,7 @@ fn swap_at(cp: &Coupled, size: ViaSize, clear: f64, c: Vec2, t: Vec2, side: Vec2
 pub fn critical_polarity_line(p: &str, n: &str, a: &str, b: &str, pl: Option<&ConnPlan>) -> String {
     let why = match pl {
         None => "the connection had no polarity plan".to_string(),
+        Some(pl) if !pl.need && pl.fa.is_none() => "the plan's direct run from pad pair to pad pair (ends too close for two gateways) needs no flip: the drawn ends leave their pads on other sides (plan-vs-drawn gap, M4 drawing stage)".to_string(),
         Some(pl) if !pl.need => "the plan's gateways need no flip: the drawn ends leave their pads on other sides than the planned gateways (plan-vs-drawn gap, M4 drawing stage)".to_string(),
         Some(pl) => match pl.choice {
             Choice::Swap => "the plan wanted a swap (two via pairs) that the drawing does not realise yet (M4 drawing stage)".to_string(),
