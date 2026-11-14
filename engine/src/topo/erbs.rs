@@ -123,9 +123,9 @@ struct Solved {
 
 /// Order the `base` gates (with `forced`) and solve from the points `pt` (by id).
 #[allow(clippy::too_many_arguments)]
-fn solve_ordered(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &BTreeSet<(usize, usize)>, prio: Option<&BTreeMap<usize, usize>>, pt: &BTreeMap<usize, Vec2>, opts: &ErbsOpts) -> Solved {
+fn solve_ordered(a: Vec2, e: Vec2, base: &[Gate], mt: &Meets, forced: &BTreeSet<(usize, usize)>, prio: Option<&BTreeMap<usize, usize>>, pt: &BTreeMap<usize, Vec2>, opts: &ErbsOpts) -> Solved {
     let t_o = std::time::Instant::now();
-    let (ord, counts, frees) = order_gates(base, wedges, forced, prio);
+    let (ord, counts, frees) = order_with(base, mt, forced, prio);
     let t_order = t_o.elapsed().as_secs_f64();
     let og: Vec<Gate> = ord.iter().map(|&i| base[i]).collect();
     let segs: Vec<(Vec2, Vec2)> = og.iter().map(|g| (g.a, g.b)).collect();
@@ -163,7 +163,10 @@ fn solve_ordered(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &BTr
 fn solve_flip(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BTreeSet<(usize, usize)>, prio: Option<&BTreeMap<usize, usize>>, pt: &mut BTreeMap<usize, Vec2>, opts: &ErbsOpts, sweeps: &mut usize, flips: &mut usize) -> Solved {
     let dbg = std::env::var_os("TOPO_ERBS_DEBUG").is_some();
     let by_id: BTreeMap<usize, &Gate> = base.iter().map(|g| (g.id, g)).collect();
-    let mut cur = solve_ordered(a, e, base, wedges, forced, prio, pt, opts);
+    let t_m = std::time::Instant::now();
+    let mt = gate_meets(base, wedges);
+    PROF.with(|c| c.borrow_mut().1 += t_m.elapsed().as_secs_f64());
+    let mut cur = solve_ordered(a, e, base, &mt, forced, prio, pt, opts);
     *sweeps += cur.sweeps;
     for _ in 0..opts.flip_rounds {
         if opts.expired() {
@@ -221,7 +224,7 @@ fn solve_flip(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BT
                 f2.remove(&(j, i));
                 f2.insert((i, j));
             }
-            let r = solve_ordered(a, e, base, wedges, &f2, Some(&pos), &at, opts);
+            let r = solve_ordered(a, e, base, &mt, &f2, Some(&pos), &at, opts);
             *sweeps += r.sweeps;
             (r, f2)
         };
@@ -1098,94 +1101,127 @@ fn order_by_side(g: &Gate, h: &Gate, x_left: bool) -> Option<bool> {
 /// the path passes decides their order ([`erbs_layer`] flips pinned pairs).
 type FreeMeet = (usize, usize, Vec2);
 
+/// The meetings of a stretch's gates that depart from the band order ([`gate_before`]): pairs
+/// `(i, j, meet)` (indices into the gates, `i < j`) whose meet is `Free` (with the meeting point
+/// and whether the sides conflicted) or `Before(false)`. Every other pair keeps the band order.
+/// They depend on the gates only, not on the forced pairs or the priorities, so one set serves
+/// every solve of a [`solve_flip`] (eprom: 1689 solves of one stretch, 80 % of its time in the
+/// pair tests). The pairs tested: those whose boxes overlap (a sweep over the boxes sorted by
+/// x; touching counts). O(n log n + overlapping pairs).
+pub struct Meets {
+    pairs: Vec<(usize, usize, Meet, Option<Vec2>, bool)>,
+}
+
+pub fn gate_meets(gs: &[Gate], wedges: &[Wedge]) -> Meets {
+    let n = gs.len();
+    let boxes: Vec<(Vec2, Vec2)> = gs.iter().map(|g| bbox(g.p, g.q, 0.0)).collect();
+    let mut by_x: Vec<usize> = (0..n).collect();
+    by_x.sort_by(|&i, &j| boxes[i].0.x.total_cmp(&boxes[j].0.x).then(i.cmp(&j)));
+    let mut pairs = Vec::new();
+    for (k, &i) in by_x.iter().enumerate() {
+        for &j in &by_x[k + 1..] {
+            if boxes[j].0.x > boxes[i].1.x {
+                break;
+            }
+            if boxes[i].1.y < boxes[j].0.y || boxes[j].1.y < boxes[i].0.y {
+                continue;
+            }
+            let (i, j) = (i.min(j), i.max(j));
+            let mut c = 0usize;
+            let m = gate_before(&gs[i], &gs[j], wedges, &mut c);
+            match m {
+                Meet::Free => pairs.push((i, j, m, meet_point(&gs[i], &gs[j]), c > 0)),
+                Meet::Before(false) => pairs.push((i, j, m, None, false)),
+                _ => {}
+            }
+        }
+    }
+    pairs.sort_unstable_by_key(|x| (x.0, x.1));
+    Meets { pairs }
+}
+
 /// The gates in the order the path crosses them: the band order (`gs` as given) for gates that
 /// do not meet, the meeting point's order for gates that do ([`gate_before`]), `forced` pairs
 /// (ids, first before second) over both. Kahn's topological sort of the pairwise constraints;
 /// among the free gates the earliest by `prio` (ids to rank; else the given order) first; a
 /// cycle (contradicting constraints) is broken at the earliest remaining gate. Returns the
 /// order, the counts (meeting constraints against the given order; conflicts; cycle breaks) and
-/// the meetings inside both portals.
-///
-/// Only the pairs whose boxes overlap (a sweep over the boxes sorted by x) and the forced pairs
-/// are tested ("partners"); every other pair keeps the band order without an edge: a gate is
-/// free when its explicit predecessors are done and every gate before it in the band order that
-/// is not done yet is a partner of it. So a free gate lies among the first (its partner count
-/// + 1) gates not done, and each step scans only that far (the largest partner count of the
-/// gates not done). The dense form tested all n^2 pairs and kept an edge for each (eprom: 80 %
-/// of the ERBS time, 135 s of 162 s on a stretch of 1270 gates). The same order as the dense
-/// form (test `sparse_order_matches_dense`). O(n log n + partner pairs + n x largest partner
-/// count).
+/// the meetings inside both portals. [`order_with`] on [`gate_meets`].
 pub fn order_gates(gs: &[Gate], wedges: &[Wedge], forced: &BTreeSet<(usize, usize)>, prio: Option<&BTreeMap<usize, usize>>) -> (Vec<usize>, [usize; 3], Vec<FreeMeet>) {
+    order_with(gs, &gate_meets(gs, wedges), forced, prio)
+}
+
+/// [`order_gates`] from the meetings `mt` of `gs`. Only the pairs that depart from the band order
+/// (`mt` and the forced pairs, "partners") carry an edge; for every other pair the band order
+/// holds without one: a gate is free when its explicit predecessors are done and every gate
+/// before it in the band order not done yet is a partner of it. So a free gate lies among the
+/// first (its partner count + 1) gates not done, and each step scans only that far (the
+/// largest partner count of the gates not done). The dense form kept an edge for each of the
+/// n^2 / 2 pairs. The same order and counts as the dense form (test `sparse_order_matches_dense`).
+/// O(n + partners x log + n x largest partner count).
+pub fn order_with(gs: &[Gate], mt: &Meets, forced: &BTreeSet<(usize, usize)>, prio: Option<&BTreeMap<usize, usize>>) -> (Vec<usize>, [usize; 3], Vec<FreeMeet>) {
     let n = gs.len();
-    let mut conflict = 0usize;
-    let mut against = 0usize;
-    let mut frees = Vec::new();
     let dbg = std::env::var_os("TOPO_ERBS_CYCLE").is_some();
-    let boxes: Vec<(Vec2, Vec2)> = gs.iter().map(|g| bbox(g.p, g.q, 0.0)).collect();
-    // Partner pairs (i < j): overlapping boxes (touching counts, as the dense test), and forced.
-    let mut pairs: Vec<(usize, usize)> = Vec::new();
-    let mut by_x: Vec<usize> = (0..n).collect();
-    by_x.sort_by(|&i, &j| boxes[i].0.x.total_cmp(&boxes[j].0.x).then(i.cmp(&j)));
-    for (k, &i) in by_x.iter().enumerate() {
-        for &j in &by_x[k + 1..] {
-            if boxes[j].0.x > boxes[i].1.x {
-                break;
-            }
-            if !(boxes[i].1.y < boxes[j].0.y || boxes[j].1.y < boxes[i].0.y) {
-                pairs.push((i.min(j), i.max(j)));
-            }
-        }
-    }
-    if !forced.is_empty() {
-        let at: BTreeMap<usize, usize> = gs.iter().enumerate().map(|(i, g)| (g.id, i)).collect();
-        for &(x, y) in forced {
-            if let (Some(&i), Some(&j)) = (at.get(&x), at.get(&y)) {
-                if i != j {
-                    pairs.push((i.min(j), i.max(j)));
-                }
-            }
-        }
-    }
-    pairs.sort_unstable();
-    pairs.dedup();
-    let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut indeg = vec![0usize; n];
-    // Partners after / before each gate in the band order.
-    let mut later: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut below = vec![0usize; n];
-    let mut why: BTreeMap<(usize, usize), Meet> = BTreeMap::new();
-    for &(i, j) in &pairs {
-        later[i].push(j);
-        below[j] += 1;
-        let meet = if forced.contains(&(gs[i].id, gs[j].id)) {
-            Meet::Before(true)
+    let (mut against, mut conflict) = (0usize, 0usize);
+    let mut frees = Vec::new();
+    // (i, j, i first?) of every partner pair: Some(true / false) an edge, None no edge (free).
+    let mut part: Vec<(usize, usize, Option<bool>)> = Vec::new();
+    let at: BTreeMap<usize, usize> = if forced.is_empty() { BTreeMap::new() } else { gs.iter().enumerate().map(|(i, g)| (g.id, i)).collect() };
+    let is_forced = |i: usize, j: usize| -> Option<bool> {
+        if forced.is_empty() {
+            None
+        } else if forced.contains(&(gs[i].id, gs[j].id)) {
+            Some(true)
         } else if forced.contains(&(gs[j].id, gs[i].id)) {
-            Meet::Before(false)
+            Some(false)
         } else {
-            let m = gate_before(&gs[i], &gs[j], wedges, &mut conflict);
-            if m == Meet::Free {
-                if let Some(x) = meet_point(&gs[i], &gs[j]) {
+            None
+        }
+    };
+    for &(i, j, m, x, c) in &mt.pairs {
+        if is_forced(i, j).is_some() {
+            continue;
+        }
+        match m {
+            Meet::Free => {
+                if let Some(x) = x {
                     frees.push((gs[i].id, gs[j].id, x));
                 }
+                conflict += c as usize;
+                part.push((i, j, None));
             }
-            if matches!(m, Meet::Before(false)) {
+            _ => {
                 against += 1;
+                part.push((i, j, Some(false)));
             }
-            m
-        };
-        if dbg {
-            why.insert((i, j), meet);
         }
-        match meet {
-            Meet::Disjoint | Meet::Before(true) => {
+    }
+    for &(x, y) in forced {
+        if let (Some(&i), Some(&j)) = (at.get(&x), at.get(&y)) {
+            if i != j {
+                part.push((i.min(j), i.max(j), Some(i < j)));
+            }
+        }
+    }
+    part.sort_unstable_by_key(|x| (x.0, x.1));
+    part.dedup_by_key(|x| (x.0, x.1));
+    let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut indeg = vec![0usize; n];
+    let mut later: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut below = vec![0usize; n];
+    for &(i, j, e) in &part {
+        later[i].push(j);
+        below[j] += 1;
+        match e {
+            Some(true) => {
                 succ[i].push(j);
                 indeg[j] += 1;
             }
-            Meet::Before(false) => {
+            Some(false) => {
                 succ[j].push(i);
                 indeg[i] += 1;
             }
-            Meet::Free => {}
+            None => {}
         }
     }
     let rank: Vec<usize> = (0..n).map(|i| prio.and_then(|m| m.get(&gs[i].id).copied()).unwrap_or(i)).collect();
@@ -1199,8 +1235,7 @@ pub fn order_gates(gs: &[Gate], wedges: &[Wedge], forced: &BTreeSet<(usize, usiz
         *degs.entry(d).or_insert(0) += 1;
     }
     // Partners before each gate that are not done yet.
-    let mut pb = below.clone();
-    let mut done = vec![false; n];
+    let mut pb = below;
     let mut out = Vec::with_capacity(n);
     let mut cycles = 0usize;
     while out.len() < n {
@@ -1219,38 +1254,9 @@ pub fn order_gates(gs: &[Gate], wedges: &[Wedge], forced: &BTreeSet<(usize, usiz
             None => {
                 cycles += 1;
                 if dbg {
-                    // One cycle among the gates left (the dense edges: partners' and band order).
-                    let start = head;
-                    let mut seen: Vec<usize> = vec![start];
-                    let mut cur = start;
-                    let succ_of = |x: usize| -> Option<usize> {
-                        let mut k = head;
-                        while k < n {
-                            let ok = if pairs.binary_search(&(x.min(k), x.max(k))).is_ok() { succ[x].contains(&k) } else { k > x };
-                            if k != x && ok {
-                                return Some(k);
-                            }
-                            k = next[k];
-                        }
-                        None
-                    };
-                    while let Some(nx) = succ_of(cur) {
-                        if let Some(k) = seen.iter().position(|&x| x == nx) {
-                            let cyc: Vec<String> = seen[k..]
-                                .iter()
-                                .zip(seen[k..].iter().skip(1).chain(std::iter::once(&nx)))
-                                .map(|(&x, &y)| {
-                                    let m = why.get(&(x.min(y), x.max(y))).copied().unwrap_or(Meet::Disjoint);
-                                    let fz = forced.contains(&(gs[x].id, gs[y].id));
-                                    format!("{}->{} {:?}{}", gs[x].id, gs[y].id, m, if fz { " forced" } else { "" })
-                                })
-                                .collect();
-                            eprintln!("ERBS cycle ({} left): {}", n - out.len(), cyc.join(", "));
-                            break;
-                        }
-                        seen.push(nx);
-                        cur = nx;
-                    }
+                    let left: Vec<usize> = std::iter::successors(Some(head), |&k| (next[k] < n).then_some(next[k])).filter(|&k| k < n).collect();
+                    let edges: Vec<String> = part.iter().filter(|p| p.2.is_some() && left.contains(&p.0) && left.contains(&p.1)).map(|&(i, j, e)| if e == Some(true) { format!("{}->{}", gs[i].id, gs[j].id) } else { format!("{}->{}", gs[j].id, gs[i].id) }).collect();
+                    eprintln!("ERBS cycle ({} left): edges against the band order or forced: {}", left.len(), edges.join(", "));
                 }
                 let mut b = (usize::MAX, usize::MAX);
                 let mut k = head;
@@ -1261,9 +1267,7 @@ pub fn order_gates(gs: &[Gate], wedges: &[Wedge], forced: &BTreeSet<(usize, usiz
                 b.1
             }
         };
-        done[i] = true;
         out.push(i);
-        // Unlink.
         if i == head {
             head = next[i];
         } else {
