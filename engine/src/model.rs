@@ -1167,6 +1167,13 @@ pub struct Options {
     /// P6 (b) (`[drawing] lane_walls`): "price" = the lane slot outside a run's span is a graded
     /// price in the octilinear drawing; "hard" = a wall (before P6).
     pub lane_walls: String,
+    /// M3 (`[drawing] realise`): how the drawing realises the plan's topology. `"sequential"`
+    /// (default; the wires one by one, each against the copper drawn before it, through the
+    /// attempt ladder of `draw::Drawer::draw_wire`) or `"erbs"` (each run first as its extended
+    /// rubber band from the plan's spoke tips and stack radii, `topo::erbs`, independent of the
+    /// draw order, the wires in Staepelaere's precedes order; the old ladder only where the
+    /// checker rejects the band, counted).
+    pub realise: String,
     /// M-45 (`[drawing] bundle_pull`): with the octilinear style, the share of a segment's length
     /// taken off its price where it runs beside a drawn trace of another net at the clearance, so
     /// a trace follows its neighbour and a bundle keeps its pitch through its bends (0 = off).
@@ -1372,6 +1379,7 @@ impl Default for Options {
             octi_room: true,
             draw_pull_taut: true,
             lane_walls: "price".into(),
+            realise: "sequential".into(),
             bundle_pull: 0.3,
             reserve_via_sites: true,
             mixed_clearance: "conservative".into(),

@@ -3802,6 +3802,36 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     dr.compute_intervals();
     // P6 (a): the crossing partners follow the vias as placed.
     dr.follow_vias();
+    // M3 `[drawing] realise = "erbs"`: every run's extended rubber band from the plan with the
+    // placed vias (independent of the draw order), the wires in the precedes order.
+    let mut erbs_line: Option<String> = None;
+    if opts.realise == "erbs" {
+        let pts: BTreeMap<WireId, Vec<(usize, Vec2)>> = placed.iter().map(|(&w, v)| (w, v.iter().map(|x| (x.0, x.1)).collect())).collect();
+        let layers: Vec<usize> = (0..b.n_signal).collect();
+        let conn = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
+        let mo = super::cutflow::MeasureOpts::from_options(opts);
+        match super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &super::board::outline_segments(model), &mo, &layers, &live) {
+            Ok(r) => {
+                erbs_line = Some(format!(
+                    "ERBS drawing ([drawing] realise = \"erbs\"; Dayan 1997 pp. 15-16): {} stretches in {:.2} s, length over the zero-width bands {:.3}, {} gates ({} added by the feature check), {} not converged, {} order cycles; checked: {} violations an over-full cut predicts, {} model gaps (erbs_gap, worst {:.3} mm); {} stretches without a band",
+                    r.report.stretches,
+                    r.seconds,
+                    if r.report.band_len > 0.0 { r.report.len / r.report.band_len } else { 1.0 },
+                    r.report.gates,
+                    r.report.refined,
+                    r.report.not_converged,
+                    r.report.cycles,
+                    r.report.predicted,
+                    r.report.erbs_gap,
+                    r.report.worst_gap / 1e6,
+                    r.unbanded
+                ));
+                live = r.order.clone();
+                dr.erbs = r.runs;
+            }
+            Err(e) => erbs_line = Some(format!("ERBS drawing ([drawing] realise = \"erbs\") not available, the sequential drawing instead: {e}")),
+        }
+    }
     let over_n = dr.over.iter().filter(|&&o| o).count();
     // Planning-time check (D0 item 4): an edge-layer the plan packs without overflow (P3 labels,
     // capacity model) must fit in the drawing's packing too (same packer, pass layers from the
@@ -4624,6 +4654,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             fb_tried,
             fb_rescued
         ));
+    }
+    if let Some(l) = erbs_line {
+        warnings.push(format!("{l}; drawn: {} runs from their ERBS ({} in its octilinear form before the check), {} by the sequential attempts after the check rejected the ERBS, {} without an ERBS", dr.stats.erbs_ok, dr.stats.erbs_octi, dr.stats.erbs_fallback, dr.stats.erbs_none));
     }
     if opts.via_relocate && opts.search_length == "taut" {
         warnings.push(format!(

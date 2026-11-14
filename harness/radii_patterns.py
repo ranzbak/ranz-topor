@@ -238,7 +238,7 @@ def distant_radius() -> Pattern:
     return Pattern(
         name="distant_radius", title="Distant pad radius (Popov wave)", kind="solvable",
         gap_classes=["drawing: radius of a distant pad (Q2)"],
-        purpose="Three 0.25 mm wires from J1 (left) to J2 (right) past the round pad A (no net). The straight lines of "
+        purpose="Three 0.25 mm wires from J1 (left) to J2 (right) past the round pad A (no net). "
                 "Only W1's straight line runs into A (near its top), so W1 goes over A. W2's and W3's straight lines (their "
                 "zero-width bands) clear A and touch no feature: only A's radius through the wires inside them makes "
                 "them bow, W2 through W1, W3 through W1 and W2.",

@@ -498,6 +498,15 @@ pub struct DrawStats {
     pub partners_unfixed: usize,
     /// P6 (c): vertices the taut pull removed from drawn runs ([`Drawer::pull_taut`]).
     pub pulled: usize,
+    /// M3 `[drawing] realise = "erbs"`: runs drawn from their ERBS; runs whose ERBS the checker
+    /// rejected (the sequential attempts drew them: the fallback); runs without an ERBS (a
+    /// branch ending on its trunk, a moved junction, a stretch the measurement could not band).
+    pub erbs_ok: usize,
+    pub erbs_fallback: usize,
+    pub erbs_none: usize,
+    /// Of `erbs_ok`: drawn in the ERBS's octilinear form because the any-angle ERBS missed the
+    /// clearance to octilinear copper drawn before it.
+    pub erbs_octi: usize,
 }
 
 /// Per-stretch widths that replace a wire's single width (the drawing witness, variant A: the
@@ -708,6 +717,9 @@ pub struct Drawer<'a> {
     /// the wire's run is split there (drawn through it), like at a via without a layer change
     /// ([`super::viaopt::relocate_junctions`]). Empty: none.
     pub split_at: BTreeMap<WireId, Vec<(usize, Vec2)>>,
+    /// M3 `[drawing] realise = "erbs"`: the ERBS of every wire's runs (`topo::erbs::realise`),
+    /// tried before the attempt ladder.
+    pub erbs: BTreeMap<WireId, Vec<super::erbs::RunBand>>,
     /// M-B1 never drop: a run that no attempt draws legally, or a via without a legal site, is
     /// placed anyway on the attempt / site with the least `violation` price, and its violations
     /// are recorded ([`WireOut::viol`], [`Drawer::via_viol`]). Off: such a wire fails.
@@ -790,6 +802,7 @@ impl<'a> Drawer<'a> {
             via_site: BTreeMap::new(),
             via_site_tight: Default::default(),
             split_at: BTreeMap::new(),
+            erbs: BTreeMap::new(),
             force: false,
             via_viol: BTreeMap::new(),
             octi: super::octi::OctiCfg::from_opts(opts),
@@ -2494,13 +2507,36 @@ impl<'a> Drawer<'a> {
             let neck = self.neck_zones(w, r == 0, r == plan.layers.len() - 1);
             // M-C: the plan's necked stretches (width in P2); the drawing realises them.
             let pneck = self.plan_neck(w);
-            for attempt in 0..6 {
+            // M3 `[drawing] realise = "erbs"`: the run's ERBS first (attempt -1), checked like any
+            // attempt against the copper drawn so far; the ladder below is the counted fallback.
+            let band = self.erbs.get(&w).and_then(|v| v.iter().find(|b| b.layer == layer && (b.s - s).len() < 1000.0 && (b.e - e).len() < 1000.0)).map(|b| b.path.clone());
+            let ladder: Vec<isize> = if self.opts.realise == "erbs" {
+                if band.is_none() {
+                    self.stats.erbs_none += 1;
+                }
+                std::iter::once(-1).chain(0..6).collect()
+            } else {
+                (0..6).collect()
+            };
+            for attempt in ladder {
+                // -1 (`realise = "erbs"`): the run's ERBS;
                 // 0: the exact taut path at the nominal width; 1: the same with the plan's necked
                 // stretches (M-C; TopoR 6.3 manual p. 56: the minimum width only where no other
                 // path is available), only when the plan necks the wire; 2 (only with
                 // `neck_in_drawing`, the behaviour before M-C): pad-end neck zones of the drawing's
                 // own; 3..5: S2a's funnel + repair attempts.
-                let pts = if attempt <= 2 {
+                let pts = if attempt < 0 {
+                    match &band {
+                        Some(b) if b.len() >= 2 => {
+                            let mut b = b.clone();
+                            b[0] = s;
+                            let n = b.len();
+                            b[n - 1] = e;
+                            b
+                        }
+                        _ => continue,
+                    }
+                } else if attempt <= 2 {
                     if (attempt == 1 && pneck.is_none()) || (attempt == 2 && (neck.is_none() || !self.opts.neck_in_drawing)) {
                         continue;
                     }
@@ -2520,7 +2556,7 @@ impl<'a> Drawer<'a> {
                         }
                     }
                 } else {
-                    self.run_polyline(w, k0, k1, s, e, attempt - 3, layer)
+                    self.run_polyline(w, k0, k1, s, e, (attempt - 3) as usize, layer)
                 };
                 tried.push(pts.clone());
                 if attempt >= 3 {
@@ -2552,6 +2588,24 @@ impl<'a> Drawer<'a> {
                     },
                     None => full,
                 };
+                // The ERBS is any-angle; the wires drawn before it were made octilinear, which
+                // moves their corners outwards (an octagon's vertex lies at rho / cos 22.5 deg),
+                // into the room this ERBS keeps at the exact pitch. Its own octilinear form keeps
+                // the same pitch to them (Dayan 1997 PDF p. 33, Fig. 11: octilinear spokes
+                // approximate the arc), so it is checked before the ladder takes over.
+                let mut pts = pts;
+                if attempt < 0 && !rep.violations.is_empty() && self.octi.on && pts.len() >= 2 {
+                    let exits = [if r == 0 { self.pad_exit(w, 0, pts[1]) } else { None }, if r == plan.layers.len() - 1 { self.pad_exit(w, 1, pts[pts.len() - 2]) } else { None }];
+                    if let Some(o) = self.octilinear(w, k0, k1, layer, &pts, None, exits, 0.0) {
+                        if let Some((its, pn)) = self.realise(w, layer, lid, &o.pts, &pneck) {
+                            pts = o.pts;
+                            items = its;
+                            pneck_out = pn;
+                            rep = CheckReport::default();
+                            self.stats.erbs_octi += 1;
+                        }
+                    }
+                }
                 let mut neck: Option<(f64, [f64; 2])> = None;
                 if !rep.violations.is_empty() && self.opts.neck_in_drawing && self.opts.neck_to_pad && (ps || pe) {
                     if let Some((wn, its, ls)) = self.neck_run(w, lid, &pts, ps, pe) {
@@ -2620,8 +2674,9 @@ impl<'a> Drawer<'a> {
                             continue;
                         }
                     }
-                    // P6 (c): pulled taut in its corridor (no bumps, no spikes).
-                    if self.opts.draw_pull_taut && neck.is_none() {
+                    // P6 (c): pulled taut in its corridor (no bumps, no spikes). An ERBS is taut
+                    // by construction, and keeps the room of the wires not drawn yet.
+                    if self.opts.draw_pull_taut && neck.is_none() && attempt >= 0 {
                         if let Some((p2, its2, pn2)) = self.pull_taut(w, k0, k1, layer, lid, &pts, &pneck) {
                             self.stats.pulled += pts.len() - p2.len();
                             pts = p2;
@@ -2655,10 +2710,15 @@ impl<'a> Drawer<'a> {
                             }
                         }
                     }
-                    if attempt <= 2 {
+                    if attempt < 0 {
+                        self.stats.erbs_ok += 1;
+                    } else if attempt <= 2 {
                         self.stats.exact_ok += 1;
                     } else {
                         self.stats.fallback_ok += 1;
+                    }
+                    if attempt >= 0 && band.is_some() {
+                        self.stats.erbs_fallback += 1;
                     }
                     out.items.extend(items);
                     out.runs.push((layer, pts));
