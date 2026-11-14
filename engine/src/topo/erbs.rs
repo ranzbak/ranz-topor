@@ -165,6 +165,15 @@ fn solve_flip(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BT
     let by_id: BTreeMap<usize, &Gate> = base.iter().map(|g| (g.id, g)).collect();
     let t_m = std::time::Instant::now();
     let mt = gate_meets(base, wedges);
+    if std::env::var_os("TOPO_ERBS_TIME").is_some() {
+        let free = mt.pairs.iter().filter(|x| x.2 == Meet::Free).count();
+        let mut deg = vec![0usize; base.len()];
+        for x in &mt.pairs {
+            deg[x.0] += 1;
+            deg[x.1] += 1;
+        }
+        eprintln!("ERBS meets gates {} departing pairs {} free {} max partners {} forced {} in {:.1} ms", base.len(), mt.pairs.len(), free, deg.iter().max().unwrap_or(&0), forced.len(), t_m.elapsed().as_secs_f64() * 1e3);
+    }
     PROF.with(|c| c.borrow_mut().1 += t_m.elapsed().as_secs_f64());
     let mut cur = solve_ordered(a, e, base, &mt, forced, prio, pt, opts);
     *sweeps += cur.sweeps;
