@@ -266,7 +266,7 @@ fn solve_flip(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BT
             // of one stretch for 3 flips). Valid while the order is the one the chords were
             // taken from: until the first swap of the round is accepted.
             let t_g = std::time::Instant::now();
-            let gain = any || local_gain(&cur, &all, win[wi], w, wedges, forced, opts);
+            let gain = any || std::env::var_os("TOPO_ERBS_NOSCREEN").is_some() || local_gain(&cur, &all, win[wi], w, wedges, forced, opts);
             PROF.with(|c| c.borrow_mut().3 += t_g.elapsed().as_secs_f64());
             if !gain {
                 forced.insert((w.1, w.0));
@@ -337,6 +337,7 @@ fn local_gain(cur: &Solved, all: &[Vec2], win: (usize, usize), w: (usize, usize)
 fn solve_lazy(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BTreeSet<(usize, usize)>, prio: Option<&BTreeMap<usize, usize>>, pt: &mut BTreeMap<usize, Vec2>, opts: &ErbsOpts, sweeps: &mut usize, flips: &mut usize, band: &[Vec2], on: &mut BTreeSet<usize>) -> Solved {
     // TOPO_ERBS_NEAR (mm): also start with the cuts whose spoke root lies that near the band.
     let lazy_near: Option<f64> = std::env::var("TOPO_ERBS_NEAR").ok().and_then(|v| v.parse::<f64>().ok()).map(|v| v * 1e6);
+    let all_on = std::env::var_os("TOPO_ERBS_NOLAZY").is_some();
     let to_band = |x: Vec2| band.windows(2).map(|w| super::draw::seg_seg(x, x, w[0], w[1]).0).fold(f64::INFINITY, f64::min);
     for g in base {
         if on.contains(&g.id) {
@@ -344,7 +345,7 @@ fn solve_lazy(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BT
         }
         let keep = match g.src {
             GateSrc::Arc(_) | GateSrc::Feature(_) => true,
-            GateSrc::Cut(_) => lazy_near.is_some_and(|d| to_band(g.p) <= (g.a - g.p).len() + d || to_band(g.q) <= (g.q - g.b).len() + d),
+            GateSrc::Cut(_) => all_on || lazy_near.is_some_and(|d| to_band(g.p) <= (g.a - g.p).len() + d || to_band(g.q) <= (g.q - g.b).len() + d),
         };
         if keep {
             on.insert(g.id);
