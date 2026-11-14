@@ -93,4 +93,9 @@ enters its pads around the far side), dp_bus_crossing coupled 98.2 -> 75 %, dp_g
 
 ### Ladder seed 0 (score_runs --only 0, CPU limit 2400 s; main 7e320c1 vs m4-pairs)
 
-(see below)
+Deterministic (`optimize.rounds=1`, `runs=1`). esp new DRC 120 -> 300 (s0), 84 -> 248 (s1), 107 -> 338 (s2); qmtech
+401 -> 393; the private 2-layer badge 251 -> 253. The esp rise comes entirely from two pair connections that main's static
+`swaps()` drew as two singles and the gateway parity now couples (USB_D U4.19-U3.27 through the U3/U4 IO bus, and the
+2.8 mm USB-C hop J1.A6-B6): forcing both to singles reproduces main exactly. Open: price coupled against two singles for
+every pair connection, not only when a flip is needed. esp U4.19-D8.1: main draws a P/N cross, this branch draws the
+planned via-pair flip (fixed).
