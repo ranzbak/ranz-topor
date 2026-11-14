@@ -354,6 +354,22 @@ copper violates a rule anywhere else, file a bug.
 
 **Fix.** Reinstall the plugin with tools/build.sh (docs/user/install.md) and restart KiCad (File → Quit, then start KiCad again).
 
+### ERBS_FALLBACK
+
+*Severity: warning.*
+
+**Cause.** [drawing] realise = "erbs" did not draw every trace from its extended rubber band: for some (or all) of them the band had no path to its end or its check found a violation, so they were drawn the sequential way instead. The finding counts them and names the first wires with the reason; the result is valid, but those traces do not have the band's shape.
+
+**Fix.** Accept the result, or route again with drawing.realise = "sequential" (the default; topor.toml [drawing] realise) for one drawing method throughout; report the board and the listed wires if this repeats.
+
+### ERBS_TIMEOUT
+
+*Severity: warning.*
+
+**Cause.** [drawing] realise = "erbs" ran out of time: the run's time limit (or a Cancel) passed before every trace had its extended rubber band, so the rest were drawn the sequential way. The bands cost time on large boards (several seconds to minutes per layer).
+
+**Fix.** Raise run.timeout_s and route again, or use drawing.realise = "sequential" (the default; topor.toml [drawing] realise) on large boards.
+
 ### GROUPS_UNAVAILABLE
 
 *Severity: info.*

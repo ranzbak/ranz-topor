@@ -956,19 +956,12 @@ impl Recorder {
                 let mut r = super::radii::summary(&m, &ords, &nm);
                 // M3 step c: the ERBS of every stretch and their check (report only).
                 for (i, (lf, o)) in m.layers.iter().zip(&ords).enumerate() {
-                    let mut eo = super::erbs::ErbsOpts::default();
-                    if let Some(n) = std::env::var("TOPO_ERBS_REFINE").ok().and_then(|v| v.parse().ok()) {
-                        eo.refine_rounds = n;
-                    }
-                    if let Some(n) = std::env::var("TOPO_ERBS_FLIPS").ok().and_then(|v| v.parse().ok()) {
-                        eo.flip_rounds = n;
-                    }
-                    let es = super::erbs::erbs_layer(&lf.sheet, &m.stretches, &lf.stretches, o, &eo);
-                    let vs = super::erbs::check_layer(&lf.sheet, &m.stretches, o, &es);
-                    r[i]["erbs"] = super::erbs::summary(&super::erbs::report(&es, &vs), &vs, &m.stretches);
+                    let le = super::erbs::erbs_layer_with(&lf.sheet, &m.stretches, &lf.stretches, o, &super::erbs::ErbsOpts::default());
+                    let vs = super::erbs::check_layer(&lf.sheet, &m.stretches, o, &le.es);
+                    r[i]["erbs"] = super::erbs::summary(&super::erbs::report(&le, &vs), &vs, &m.stretches);
                     if let Some(d) = std::env::var_os("TOPO_ERBS_DUMP") {
                         let path = std::path::Path::new(&d).join(format!("erbs-{}.json", nm(lf.sheet.l)));
-                        let _ = std::fs::write(path, super::erbs::dump(&lf.sheet, &m.stretches, &es, &vs).to_string());
+                        let _ = std::fs::write(path, super::erbs::dump(&lf.sheet, &m.stretches, &le, &vs).to_string());
                     }
                 }
                 eprintln!("TOPO_RADII {r}");

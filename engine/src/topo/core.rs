@@ -3805,26 +3805,30 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // M3 `[drawing] realise = "erbs"`: every run's extended rubber band from the plan with the
     // placed vias (independent of the draw order), the wires in the precedes order.
     let mut erbs_line: Option<String> = None;
+    // Stretches whose sleeve did not reach the end (wire, reason), for the erbs_fallback line.
+    let mut erbs_failed: Vec<(usize, String)> = Vec::new();
+    let mut erbs_err: Option<String> = None;
     if opts.realise == "erbs" {
         let pts: BTreeMap<WireId, Vec<(usize, Vec2)>> = placed.iter().map(|(&w, v)| (w, v.iter().map(|x| (x.0, x.1)).collect())).collect();
         let layers: Vec<usize> = (0..b.n_signal).collect();
         let conn = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
         let mo = super::cutflow::MeasureOpts::from_options(opts);
-        match super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &super::board::outline_segments(model), &mo, &layers, &live, ctl.deadline().map(|d| d.max(floor)), Some(ctl.cancel.clone())) {
+        match super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &super::board::outline_segments(model), &mo, &layers, &live, ctl.deadline().map(|d| d.max(floor)), (!draw_through.get()).then(|| ctl.cancel.clone())) {
             Ok(r) => {
                 if r.timed_out > 0 {
-                    warnings.push(format!("ERBS drawing: the time limit passed (or the run was cancelled) before {} stretch(es) had their ERBS; those runs are drawn the sequential way (erbs_none)", r.timed_out));
+                    warnings.push(format!("erbs_timeout: the time limit passed (or the run was cancelled) before {} stretch(es) had their ERBS; those runs are drawn the sequential way", r.timed_out));
                 }
+                erbs_failed = r.failed.clone();
                 erbs_line = Some(format!(
-                    "ERBS drawing ([drawing] realise = \"erbs\"; Dayan 1997 pp. 15-16): {} stretches in {:.2} s ({} past the time limit, drawn sequentially), length over the zero-width bands {:.3}, {} gates ({} added by the feature check), {} not converged, {} order cycles; checked: {} violations an over-full cut predicts, {} model gaps (erbs_gap, worst {:.3} mm); {} stretches without a band",
+                    "ERBS drawing ([drawing] realise = \"erbs\"; Dayan 1997 pp. 15-16, shortest homotopic path by the funnel over the sleeve): {} stretches in {:.2} s ({} past the time limit, {} without a sleeve: drawn sequentially), length over the zero-width bands {:.3}, {} obstacle points, {} portals, {} side conflicts; checked: {} violations an over-full cut predicts, {} model gaps (erbs_gap, worst {:.3} mm); {} stretches without a band",
                     r.report.stretches,
                     r.seconds,
                     r.timed_out,
+                    r.failed.len(),
                     if r.report.band_len > 0.0 { r.report.len / r.report.band_len } else { 1.0 },
-                    r.report.gates,
-                    r.report.refined,
-                    r.report.not_converged,
-                    r.report.cycles,
+                    r.report.points,
+                    r.report.portals,
+                    r.report.conflicts,
                     r.report.predicted,
                     r.report.erbs_gap,
                     r.report.worst_gap / 1e6,
@@ -3833,7 +3837,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 live = r.order.clone();
                 dr.erbs = r.runs;
             }
-            Err(e) => erbs_line = Some(format!("ERBS drawing ([drawing] realise = \"erbs\") not available, the sequential drawing instead: {e}")),
+            Err(e) => {
+                erbs_line = Some(format!("ERBS drawing ([drawing] realise = \"erbs\") not available, the sequential drawing instead: {e}"));
+                erbs_err = Some(e);
+            }
         }
     }
     let over_n = dr.over.iter().filter(|&&o| o).count();
@@ -4661,6 +4668,20 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     if let Some(l) = erbs_line {
         warnings.push(format!("{l}; drawn: {} runs from their ERBS ({} in its octilinear form before the check), {} by the sequential attempts after the check rejected the ERBS, {} without an ERBS", dr.stats.erbs_ok, dr.stats.erbs_octi, dr.stats.erbs_fallback, dr.stats.erbs_none));
+    }
+    // M3: a loud line whenever realise = "erbs" did not draw every run from its ERBS
+    // (plugin finding ERBS_FALLBACK; the time limit's share is erbs_timeout's, ERBS_TIMEOUT).
+    if let Some(e) = &erbs_err {
+        warnings.push(format!("erbs_fallback: no ERBS for the whole run, every trace drawn the sequential way: {e}"));
+    } else if opts.realise == "erbs" && (dr.stats.erbs_fallback > 0 || !erbs_failed.is_empty()) {
+        let ex: Vec<String> = erbs_failed.iter().take(3).map(|(w, m)| format!("wire {w}: {m}")).collect();
+        warnings.push(format!(
+            "erbs_fallback: {} run(s) drawn by the sequential attempts after the check rejected their ERBS, {} stretch(es) without a sleeve to the end{}{}",
+            dr.stats.erbs_fallback,
+            erbs_failed.len(),
+            if ex.is_empty() { "" } else { ": " },
+            ex.join("; ")
+        ));
     }
     if opts.via_relocate && opts.search_length == "taut" {
         warnings.push(format!(

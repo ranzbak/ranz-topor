@@ -237,3 +237,18 @@ def test_drc_new_violations_counts_types_and_places():
     assert f.items[1].startswith("clearance A14 – A13 at (201.040, 70.552) mm on B.Cu")  # between the two tracks
     assert "Inspect → Design Rules Checker" in f.fix
     assert postrun.drc_new_findings([]) == [] and postrun.drc_new_findings(None) == []
+
+
+def test_erbs_fallback_and_timeout_are_loud():
+    """M3: realise = "erbs" runs not drawn from their ERBS are a warning, never only a counter in the info line."""
+    res = {"connections": [_c("A", "routed")], "warnings": [
+        "erbs_fallback: 2 run(s) drawn by the sequential attempts after the check rejected their ERBS, 1 stretch(es) "
+        "without a sleeve to the end: wire 7: sleeve: start has no portal",
+        "erbs_timeout: the time limit passed (or the run was cancelled) before 3 stretch(es) had their ERBS; those runs "
+        "are drawn the sequential way"]}
+    fs = {f.code: f for f in postrun.route_findings(res)}
+    assert fs["ERBS_FALLBACK"].severity == "warning" and "wire 7" in fs["ERBS_FALLBACK"].message
+    assert fs["ERBS_TIMEOUT"].severity == "warning" and "3 stretch(es)" in fs["ERBS_TIMEOUT"].message
+    quiet = {f.code for f in postrun.route_findings({"connections": [_c("A", "routed")], "warnings": [
+        "ERBS drawing ([drawing] realise = \"erbs\"; ...): 4 stretches; drawn: 4 runs from their ERBS"]})}
+    assert not quiet & {"ERBS_FALLBACK", "ERBS_TIMEOUT"}

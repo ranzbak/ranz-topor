@@ -1452,6 +1452,52 @@ mod tests {
         assert!(!g[0].predicted && (g[0].amount - 0.35e6).abs() < 2.0, "{g:?}");
     }
 
+    /// The time limit and the cancel flag: a stretch not started by then has no ERBS and is
+    /// counted; neither set, every stretch has one.
+    #[test]
+    fn erbs_deadline_and_stop() {
+        use std::sync::{atomic::AtomicBool, Arc};
+        let (obs, curves) = s_bundle();
+        let pr = proj(obs);
+        let (sh, sts) = setup(&pr, &curves, Norm::Octagonal);
+        let mut o = order_layer(&sh, &sts, &[0, 1, 2], 0.0);
+        radii_layer(&sh, &sts, &[0, 1, 2], &mut o, true, &|_| None);
+        let now = std::time::Instant::now();
+        let le = crate::topo::erbs::erbs_layer_with(&sh, &sts, &[0, 1, 2], &o, &ErbsOpts { deadline: Some(now), ..ErbsOpts::default() });
+        assert_eq!((le.es.len(), le.timed_out), (0, 3));
+        let le = crate::topo::erbs::erbs_layer_with(&sh, &sts, &[0, 1, 2], &o, &ErbsOpts { stop: Some(Arc::new(AtomicBool::new(true))), ..ErbsOpts::default() });
+        assert_eq!((le.es.len(), le.timed_out), (0, 3));
+        let later = ErbsOpts { deadline: Some(now + std::time::Duration::from_secs(3600)), stop: Some(Arc::new(AtomicBool::new(false))), ..ErbsOpts::default() };
+        let le = crate::topo::erbs::erbs_layer_with(&sh, &sts, &[0, 1, 2], &o, &later);
+        assert_eq!((le.es.len(), le.timed_out, le.failed.len()), (3, 0, 0));
+    }
+
+    /// A U-turn: the band goes down a channel, round a pad below it and back up the same channel,
+    /// crossing each cut of the channel twice (the sides alternate along the cut: the first
+    /// crossing's tips and the second's face opposite ways). The ERBS goes round the pad grown by
+    /// its clearance, close to its band, its height falling then rising (no backward leg).
+    #[test]
+    fn erbs_u_turn_round_a_pad() {
+        let obs = vec![(rect(0.0, 0.0, 2.0, 2.0), 1), (rect(3.6, 0.0, 5.6, 2.0), 2), (pad(2.8, -1.5), 3), (pad(2.4, 4.0), 100), (pad(3.2, 4.0), 100)];
+        let curves = vec![vec![v(2.4, 4.0), v(2.4, -2.0), v(3.2, -2.0), v(3.2, 4.0)]];
+        let pr = proj_n(obs);
+        let (sh, sts) = setup(&pr, &curves, Norm::Octagonal);
+        let mut o = order_layer(&sh, &sts, &[0], 0.0);
+        radii_layer(&sh, &sts, &[0], &mut o, true, &|_| None);
+        let twice = o.cuts.iter().filter(|cu| cu.items.iter().filter(|x| x.stretch == 0).count() == 2).count();
+        assert!(twice >= 1, "no cut crossed twice: {:?}", o.cuts.iter().map(|c| c.items.len()).collect::<Vec<_>>());
+        let le = crate::topo::erbs::erbs_layer_with(&sh, &sts, &[0], &o, &ErbsOpts::default());
+        assert!(le.failed.is_empty(), "{:?}", le.failed);
+        let e = &le.es[0];
+        let ys: Vec<f64> = e.path.iter().map(|p| p.y).collect();
+        let lo = ys.iter().enumerate().min_by(|a, b| a.1.total_cmp(b.1)).map(|x| x.0).unwrap();
+        assert!(ys[..=lo].windows(2).all(|w| w[1] <= w[0] + 1.0) && ys[lo..].windows(2).all(|w| w[1] >= w[0] - 1.0), "{:?}", e.path);
+        assert!(ys[lo] < -1.6e6, "below the pad: {:?}", e.path);
+        assert!(e.len <= 1.15 * e.band_len, "{} vs {}", e.len, e.band_len);
+        let vs = check_layer(&sh, &sts, &o, &le.es);
+        assert!(vs.iter().all(|x| x.predicted), "{vs:?}");
+    }
+
     // ---- Verifier findings F1-F3, F6 ----
 
     /// F2: an own-net run at an end faces the next item with the run's largest clearance (as
