@@ -537,3 +537,92 @@ Measured on the four approved patterns (judge j15, `m3-runs/erbs`); the ladder i
   terminal at the pad's planned exit, `docs/dev/inflated-sketch.md` §4.6), i.e. M7.
 - **Left:** three_diagonals model gaps 0.03-0.05 mm next to the pads (pairs that meet inside both portals near a pad,
   ordered by the flip heuristic); the drawing's octilinear form clears them (drawn: 0 violations, length = optimum).
+
+## 14. Runtime of the ERBS on real boards, and the drawing's planned room (2026-11-14)
+
+The pattern solver (§4.3, symmetric Gauss-Seidel over all gates, all gate pairs ordered) did not finish on any
+ladder board within the 600 s limit (m3-prof-90def91: all five boards at the limit; eprom stretch 2: 685 gates, cuts
+13 mm long with 12 mm portals for a 10 mm path, 97 % of the gate pairs meet). The cost had three sources: the sweeps
+(information moves one gate per sweep, O(gates^2) per solve), the pairwise order (O(gates^2) meeting tests per solve)
+and the number of solves (order flips, refinement rounds). Each step below keeps the optimum of §4.3 (the objective
+is convex for a fixed order) and was checked against the dense form on the patterns (judge j15-j19).
+
+- **Bounded and parallel.** `ErbsOpts::deadline` / `stop` (the run's time limit and Cancel), tested between solves
+  through `expired()`: a stretch not finished has no ERBS, its runs are drawn by the sequential ladder and counted in
+  `erbs_none`, with a warning. Stretches of a layer are solved in parallel (rayon); each is independent (§4, item 3).
+- **Newton interior-point solve** (`erbs.rs::solve_newton`). The smoothed length `sum sqrt(|d_k|^2 + eps^2)` plus the
+  log barrier `-mu (ln t + ln (1 - t))` of the gate ends, centring steps for a falling `mu` (Boyd & Vandenberghe
+  2004, *Convex Optimization*, §11.2-11.3, pp. 562-569, the barrier method). A leg couples only two neighbouring gates,
+  so the Hessian is tridiagonal and one Newton step costs O(gates) (Thomas' algorithm, the LU of a tridiagonal
+  matrix; Boyd & Vandenberghe App. C.3, banded systems in O(n k^2)). Neither book is in `docs/literature/`: the
+  pages are those of the 2004 Cambridge edition as cited in the code, not checked against a local copy. At most 100 Gauss-Seidel sweeps polish
+  after it (exact gate ends, stalled pairs). eprom stretch 2: 617 k sweeps / 39 s before, milliseconds after.
+- **Sparse order** (`gate_meets`, `Meets`, `order_with`). Only gate pairs whose boxes overlap can meet; the band
+  order of disjoint gates is implicit (Kahn's sort sees only the departures from it). The meetings are computed once
+  per `solve_flip` and reused by its re-solves. `sparse_order_matches_dense` checks the same order as the dense form.
+- **Lazy gates (row generation)** (`solve_lazy`; Dantzig, Fulkerson & Johnson 1954, *Solution of a large-scale
+  traveling-salesman problem*, Oper. Res. 2(4), pp. 393-410: solve with a subset of the constraints, add the ones
+  the solution violates). Start with the arc and refinement gates; after each solve add every cut gate whose spoke
+  the path crosses (more than 2 nm from its tip); stop when none. A path homotopic to the band that crosses no spoke
+  crosses every gate inside its portal, so the result is feasible for all gates; the order flips run once the set
+  holds. `with_dropped` then puts the gates left out back where the path crosses them (in path order), so the
+  precedes order (§13) and the check see every gate.
+- **Swap screen** (`local_gain`). A single order flip is first solved locally, between the chord ends round its
+  pin with the ends held; a flip that does not shorten that window is not tried on the whole stretch (eprom: 1689
+  solves of one stretch for 3 accepted flips before).
+- Debug switches: `TOPO_ERBS_TIME` (per stretch: solves, ordering / solving / screen / lazy seconds, meets),
+  `TOPO_ERBS_NOSCREEN`, `TOPO_ERBS_NOLAZY` (all gates from the start, the reference), `TOPO_ERBS_NEAR=<mm>` (also
+  start with the cut gates whose spoke root lies that near the band).
+
+ERBS-mode runtime on the plugin dumps (`topo_route`, 1 thread, ccx43; m3-prof*): eprom 600 s (limit) -> 7.6 s,
+wiccon 600 s -> 76 s; esp-rust-board, bornhack2026 and qmtech-minimig still reach the 600 s limit, but those
+runs also spend most of the limit before the drawing (the sequential runs of the same dumps are long too); their
+ERBS stretches past the limit fall back to sequential (`erbs_none`).
+
+**Lazy is right; nested_wraps B 1.016 was the drawing's planned room** (judge j18 -> j19). With lazy gates the B
+ERBS is shorter than the all-gates solve (16.083 vs 16.127 mm, both 0 violations): the all-gates solve keeps pins
+of wrong free-meeting orders that 18 flips did not all undo. The drawn B was longer because of the octilinear
+form: B is drawn after C and before A (precedes order), and the `planned_room` price of A's room
+(`draw.rs::neighbour_bound`) took A's crossing from its zero-width taut path. Round the block corner all three
+taut paths lie on the corner vertex, so A's crossing less the lane spacing fell behind the vertex and B's whole
+span, its own ERBS included, was A's room: 22 mm of price on the leg along B's ERBS. With the all-gates ERBS
+the DP had more taut vertices to hide in by chance; with the lazy ERBS (two vertices) it jogged up round A's
+pad corner to shorten the priced leg (+0.25 mm). Fix: with `realise = "erbs"` the neighbour's planned crossing is
+its ERBS crossing (the ERBS is the plan's realisation, spaced by the radii and the spoke tips, Dayan 1997 PDF
+pp. 15-16, 32; room for the lines drawn later, Bast, Brosi & Storandt 2020 §4.3, p. 7). The sequential mode has
+the same degenerate bound (nested_wraps seq: 66 mm of room price on B, B 1.115): open item, not changed here
+(the sequential path stays as measured on the ladder). Debug: `TOPO_OCTINODES=<wire>` prints the octilinear
+DP's nodes, the chosen legs with their room price, the zones and the lane gates.
+
+**The gates left out go back once, at the right meeting** (8bfa82f). `with_dropped` ran inside `solve_lazy`, so
+every refinement round's tie-break order (`prio`, the earlier solve's order) held the dropped gates at the first
+place the path touched them, a shared spoke tip far before their crossing; the next solve folded the path back
+to reach them. eprom stretch 2 (691 gates): 13.41 mm with a fold and a 0.277 mm model gap; now 11.06 mm and
+0.107 mm, as the all-gates solve (11.08 mm, `TOPO_ERBS_NOLAZY`). The dropped gates go back once, after the
+refinement rounds, each at the meeting whose share of the path length is nearest the share of the band length
+at the gate (band and path are homotopic, so they cross the gates in the same order). Left: the same stretch
+still bends 0.4 mm off its band (11.06 against 9.15 mm) through a fan of cuts that meet inside both portals;
+the all-gates solve shows the same zigzag, so it is the free-meeting order (§13, "Left"), not the lazy rows.
+PNG: `scratch/m3-erbs/gaps/eprom-gap-*.png` (lazy before, nolazy, fixed).
+
+**Ladder at 8bfa82f** (seed 0, default config but `[drawing] realise`; score_runs cpu clock, shared ccx43;
+`m3-runs/erbs/ladder-m3-lad4.md` against the lad2 sequential runs, `ladder-m3-lad4b.md` with `optimize.rounds = 3`
+in both modes so that the time-limited TopoR loop has the same budget):
+
+| board | seq DRC / vias / mm / >1.5 / s | erbs DRC / vias / mm / >1.5 / s | ERBS counters |
+|---|---|---|---|
+| eprom-to-kernal | 0 / 0 / 111.4 / 0 / 8.7 | 0 / 0 / 111.4 / 0 / 10.7 (identical copper) | ok 27 (octi 1), gap 0.107 mm, 1.4 s |
+| wiccon-2023 | 0 / 17 / 1639.8 / 3 / 55.6 | 0 / 17 / 1635.3 / 2 / 35.5 | ok 67 (octi 18), gaps worst 0.032 mm, 12.1 s |
+| esp-rust-board (rounds 3) | 313 / 61 / 972.6 / 13 / 293 | 336 / 65 / 987.0 / 14 / 928 | ok 107, none 11, 4716 order cycles, 681.8 s |
+| bornhack2026 (rounds 3) | 942 / 224 / 2627.2 / 33 / 1051 | 935 / 228 / 2625.2 / 32 / 1010 | 0 stretches (limit passed), 409 erbs_none |
+| qmtech-minimig (rounds 3) | 421 / 164 / 4384.6 / 22 / 820 | 580 / 154 / 4624.1 / 33 / 1107 | 0 stretches, 414 erbs_none |
+
+wiccon: 7 connections change; SCLK detour 1.60 -> 1.50, 4v U2.3-C5.1 dog-leg -> straight (1.20 -> 1.03), RXD
+1.04 -> 1.00; GPIO05, 4v J3.1-D4.1, D3-Pad2 and 4v C5.1-TP28 0.3-1.7 mm longer (bundle forms), no DRC change.
+On the three big boards the loop picks still differ between modes (the loop is time-limited), so their
+per-connection diffs are not the drawing's alone. The plain finding: **the ERBS has no time budget of its own**.
+It runs after the loop on whatever the 600 s limit leaves; on esp it takes 682 s and on qmtech it spends 528 s
+without one finished stretch, so the sequential fallback that follows is starved (qmtech DRC 421 -> 580). A
+share of the limit for the ERBS (an option with a safe default, like `loop_time_share`) and a cheaper
+free-meeting order (the 4716 order cycles on esp) are the next steps; until then `realise = "sequential"` stays
+the default. PNGs: `scratch/m3-erbs/lad4/`, `lad4b/`, gallery stage "M3 ERBS realise".
