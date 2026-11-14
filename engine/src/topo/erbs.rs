@@ -105,7 +105,7 @@ const PIN: f64 = 5000.0;
 
 thread_local! {
     /// TOPO_ERBS_TIME: solves, seconds ordering, seconds solving, of this thread's stretch.
-    static PROF: std::cell::RefCell<(usize, f64, f64)> = const { std::cell::RefCell::new((0, 0.0, 0.0)) };
+    static PROF: std::cell::RefCell<(usize, f64, f64, f64, f64)> = const { std::cell::RefCell::new((0, 0.0, 0.0, 0.0, 0.0)) };
 }
 
 /// One solve of a stretch's gates in a given constraint state.
@@ -265,7 +265,10 @@ fn solve_flip(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BT
             // there is not tried on the whole stretch (most single swaps fail: eprom, 1689 solves
             // of one stretch for 3 flips). Valid while the order is the one the chords were
             // taken from: until the first swap of the round is accepted.
-            if !any && !local_gain(&cur, &all, win[wi], w, wedges, forced, opts) {
+            let t_g = std::time::Instant::now();
+            let gain = any || local_gain(&cur, &all, win[wi], w, wedges, forced, opts);
+            PROF.with(|c| c.borrow_mut().3 += t_g.elapsed().as_secs_f64());
+            if !gain {
                 forced.insert((w.1, w.0));
                 continue;
             }
@@ -312,7 +315,7 @@ fn local_gain(cur: &Solved, all: &[Vec2], win: (usize, usize), w: (usize, usize)
     let at: BTreeMap<usize, Vec2> = sub.iter().zip(&all[k + 1..m]).map(|(g, &x)| (g.id, x)).collect();
     let segs: Vec<(Vec2, Vec2)> = ord.iter().map(|&i| (sub[i].a, sub[i].b)).collect();
     let init: Vec<Vec2> = ord.iter().map(|&i| at[&sub[i].id]).collect();
-    let (p, _, _) = solve(all[k], all[m], &segs, &init, opts.tol, opts.sweeps_per_gate * segs.len() + 100);
+    let (p, _, _) = solve_newton(all[k], all[m], &segs, &init, opts.tol, opts.sweeps_per_gate * segs.len() + 100);
     let new = poly_len(&std::iter::once(all[k]).chain(p).chain(std::iter::once(all[m])).collect::<Vec<_>>());
     let old = poly_len(&all[k..=m]);
     new < old - 1.0
@@ -332,7 +335,8 @@ fn local_gain(cur: &Solved, all: &[Vec2], win: (usize, usize), w: (usize, usize)
 /// O(rounds x (solve + gates x path)).
 #[allow(clippy::too_many_arguments)]
 fn solve_lazy(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BTreeSet<(usize, usize)>, prio: Option<&BTreeMap<usize, usize>>, pt: &mut BTreeMap<usize, Vec2>, opts: &ErbsOpts, sweeps: &mut usize, flips: &mut usize, band: &[Vec2], on: &mut BTreeSet<usize>) -> Solved {
-    const NEAR: f64 = 1e5;
+    // TOPO_ERBS_NEAR (mm): also start with the cuts whose spoke root lies that near the band.
+    let lazy_near: Option<f64> = std::env::var("TOPO_ERBS_NEAR").ok().and_then(|v| v.parse::<f64>().ok()).map(|v| v * 1e6);
     let to_band = |x: Vec2| band.windows(2).map(|w| super::draw::seg_seg(x, x, w[0], w[1]).0).fold(f64::INFINITY, f64::min);
     for g in base {
         if on.contains(&g.id) {
@@ -340,7 +344,7 @@ fn solve_lazy(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BT
         }
         let keep = match g.src {
             GateSrc::Arc(_) | GateSrc::Feature(_) => true,
-            GateSrc::Cut(_) => to_band(g.p) <= (g.a - g.p).len() + NEAR || to_band(g.q) <= (g.q - g.b).len() + NEAR,
+            GateSrc::Cut(_) => lazy_near.is_some_and(|d| to_band(g.p) <= (g.a - g.p).len() + d || to_band(g.q) <= (g.q - g.b).len() + d),
         };
         if keep {
             on.insert(g.id);
@@ -357,6 +361,7 @@ fn solve_lazy(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BT
         if full || opts.expired() {
             return cur;
         }
+        let t_l = std::time::Instant::now();
         let mut path = Vec::with_capacity(cur.p.len() + 2);
         path.push(a);
         path.extend(cur.p.iter().copied());
@@ -377,6 +382,7 @@ fn solve_lazy(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BT
             })
         };
         let add: Vec<usize> = base.iter().filter(|g| !on.contains(&g.id) && (crosses(g.p, g.a) || crosses(g.q, g.b))).map(|g| g.id).collect();
+        PROF.with(|c| c.borrow_mut().4 += t_l.elapsed().as_secs_f64());
         if add.is_empty() {
             if settled || opts.flip_rounds == 0 {
                 return cur;
@@ -1489,7 +1495,7 @@ pub fn erbs_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrd
             }
             let s = &sts[si];
             let t_st = std::time::Instant::now();
-            PROF.with(|c| *c.borrow_mut() = (0, 0.0, 0.0));
+            PROF.with(|c| *c.borrow_mut() = (0, 0.0, 0.0, 0.0, 0.0));
             let mut base = gates_of(sh, &feats, &fg, s, si, o, per.get(&si).unwrap_or(&none), &radius, opts);
             let (c0, c1) = (s.band[0], s.band[s.band.len() - 1]);
             // Pad exits: the path leaves an elongated own pad straight along its axis to just past
@@ -1709,8 +1715,8 @@ pub fn erbs_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrd
             w.push(s.w);
             let path = simplify(&pts, 0.5);
             if std::env::var_os("TOPO_ERBS_TIME").is_some() {
-                let (ns, to, ts) = PROF.with(|c| *c.borrow());
-                eprintln!("ERBS time st {si} wire {} gates {} refined {} sweeps {} flips {} cycles {} conv {} solves {ns} order {:.1} ms solve {:.1} ms {:.1} ms", s.wire, gs.len(), refined, sweeps, flips, counts[2], converged, to * 1e3, ts * 1e3, t_st.elapsed().as_secs_f64() * 1e3);
+                let (ns, to, ts, tg, tl) = PROF.with(|c| *c.borrow());
+                eprintln!("ERBS time st {si} wire {} gates {} refined {} sweeps {} flips {} cycles {} conv {} solves {ns} order {:.1} ms solve {:.1} ms screen {:.1} ms lazy {:.1} ms {:.1} ms", s.wire, gs.len(), refined, sweeps, flips, counts[2], converged, to * 1e3, ts * 1e3, tg * 1e3, tl * 1e3, t_st.elapsed().as_secs_f64() * 1e3);
             }
             Some(Erbs { lead, stretch: si, len: poly_len(&path), band_len: poly_len(&s.band), pts, w, path, gates: gs.len(), refined, sweeps, converged, gate_list: gs, reordered: counts[0], conflicts: counts[1], cycles: counts[2], flips: counts[3] })
         })
