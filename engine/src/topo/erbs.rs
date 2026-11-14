@@ -275,6 +275,67 @@ fn solve_flip(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BT
     cur
 }
 
+/// [`solve_flip`] on the gates that can bind (lazy constraints): on a real board a stretch
+/// crosses hundreds of long cuts whose portals are wide open round it (eprom stretch 2: 685
+/// gates, cuts 13 mm long with 12 mm portals, for a 10 mm path; 97 % of the gate pairs meet,
+/// almost all inside both portals), and only the gates whose spoke the path comes near decide
+/// it. The path is right when it crosses no spoke of any gate (a path homotopic to the band
+/// that crosses no spoke crosses every gate in its portal), so: solve on the gates in `on`
+/// (first the arcs, the refinement gates and the gates whose spoke root lies near the band:
+/// within the spoke's length + 0.1 mm), then add every other gate whose spoke the path
+/// crosses (more than 2 nm from its tip), until none (Dantzig, Fulkerson & Johnson 1954's
+/// row generation: the constraints are added as they are violated). `on` keeps the gates added,
+/// for the next call (the refinement rounds). The same path as the solve on all gates.
+/// O(rounds x (solve + gates x path)).
+#[allow(clippy::too_many_arguments)]
+fn solve_lazy(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BTreeSet<(usize, usize)>, prio: Option<&BTreeMap<usize, usize>>, pt: &mut BTreeMap<usize, Vec2>, opts: &ErbsOpts, sweeps: &mut usize, flips: &mut usize, band: &[Vec2], on: &mut BTreeSet<usize>) -> Solved {
+    const NEAR: f64 = 1e5;
+    let to_band = |x: Vec2| band.windows(2).map(|w| super::draw::seg_seg(x, x, w[0], w[1]).0).fold(f64::INFINITY, f64::min);
+    for g in base {
+        if on.contains(&g.id) {
+            continue;
+        }
+        let keep = match g.src {
+            GateSrc::Arc(_) | GateSrc::Feature(_) => true,
+            GateSrc::Cut(_) => to_band(g.p) <= (g.a - g.p).len() + NEAR || to_band(g.q) <= (g.q - g.b).len() + NEAR,
+        };
+        if keep {
+            on.insert(g.id);
+        }
+    }
+    loop {
+        let sub: Vec<Gate> = base.iter().filter(|g| on.contains(&g.id)).copied().collect();
+        let cur = solve_flip(a, e, &sub, wedges, forced, prio, pt, opts, sweeps, flips);
+        if sub.len() == base.len() || opts.expired() {
+            return cur;
+        }
+        let mut path = Vec::with_capacity(cur.p.len() + 2);
+        path.push(a);
+        path.extend(cur.p.iter().copied());
+        path.push(e);
+        let lo = path.iter().fold(Vec2 { x: f64::INFINITY, y: f64::INFINITY }, |m, p| Vec2 { x: m.x.min(p.x), y: m.y.min(p.y) });
+        let hi = path.iter().fold(Vec2 { x: f64::NEG_INFINITY, y: f64::NEG_INFINITY }, |m, p| Vec2 { x: m.x.max(p.x), y: m.y.max(p.y) });
+        let crosses = |r: Vec2, tip: Vec2| -> bool {
+            if (tip - r).len() <= 1.0 {
+                return false;
+            }
+            let (blo, bhi) = bbox(r, tip, 1.0);
+            if bhi.x < lo.x || blo.x > hi.x || bhi.y < lo.y || blo.y > hi.y {
+                return false;
+            }
+            path.windows(2).any(|w| {
+                let (d, _, y) = super::draw::seg_seg(w[0], w[1], r, tip);
+                d < 0.5 && (y - tip).len() > 2.0
+            })
+        };
+        let add: Vec<usize> = base.iter().filter(|g| !on.contains(&g.id) && (crosses(g.p, g.a) || crosses(g.q, g.b))).map(|g| g.id).collect();
+        if add.is_empty() {
+            return cur;
+        }
+        on.extend(add);
+    }
+}
+
 /// Where a gate comes from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GateSrc {
@@ -1475,7 +1536,8 @@ pub fn erbs_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrd
             let mut forced: BTreeSet<(usize, usize)> = BTreeSet::new();
             let mut sweeps = 0;
             let mut flips = 0usize;
-            let mut cur = solve_flip(a, e, &base, &wedges, &mut forced, None, &mut pt, opts, &mut sweeps, &mut flips);
+            let mut on: BTreeSet<usize> = BTreeSet::new();
+            let mut cur = solve_lazy(a, e, &base, &wedges, &mut forced, None, &mut pt, opts, &mut sweeps, &mut flips, &s.band, &mut on);
             let dbg_st = std::env::var("TOPO_ERBS_STRETCH").ok().and_then(|v| v.parse::<usize>().ok()) == Some(si);
             if dbg_st {
                 eprintln!("ERBS st {si} a ({:.3},{:.3}) e ({:.3},{:.3}) first solve len {:.4}", a.x / 1e6, a.y / 1e6, e.x / 1e6, e.y / 1e6, cur.len / 1e6);
@@ -1567,7 +1629,7 @@ pub fn erbs_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrd
                     refined += 1;
                 }
                 let prio: BTreeMap<usize, usize> = cur.og.iter().enumerate().map(|(k, g)| (g.id, k)).collect();
-                cur = solve_flip(a, e, &base, &wedges, &mut forced, Some(&prio), &mut pt, opts, &mut sweeps, &mut flips);
+                cur = solve_lazy(a, e, &base, &wedges, &mut forced, Some(&prio), &mut pt, opts, &mut sweeps, &mut flips, &s.band, &mut on);
             }
             // Past the limit inside the stretch: its solve stopped part way, so no ERBS.
             if opts.expired() {
