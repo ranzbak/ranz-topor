@@ -1722,6 +1722,10 @@ pub fn erbs_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrd
             }
             // Past the limit inside the stretch: its solve stopped part way, so no ERBS.
             if opts.expired() {
+                if std::env::var_os("TOPO_ERBS_TIME").is_some() {
+                    let (ns, to, ts, tg, tl) = PROF.with(|c| *c.borrow());
+                    eprintln!("ERBS time st {si} wire {} CUT gates {} lazy-on {} refined {refined} solves {ns} order {:.1} ms solve {:.1} ms screen {:.1} ms lazy {:.1} ms {:.1} ms", s.wire, base.len(), on.len(), to * 1e3, ts * 1e3, tg * 1e3, tl * 1e3, t_st.elapsed().as_secs_f64() * 1e3);
+                }
                 return None;
             }
             let (gs, p, converged) = (cur.og, cur.p, cur.converged);
@@ -1746,7 +1750,7 @@ pub fn erbs_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrd
             let path = simplify(&pts, 0.5);
             if std::env::var_os("TOPO_ERBS_TIME").is_some() {
                 let (ns, to, ts, tg, tl) = PROF.with(|c| *c.borrow());
-                eprintln!("ERBS time st {si} wire {} gates {} refined {} sweeps {} flips {} cycles {} conv {} solves {ns} order {:.1} ms solve {:.1} ms screen {:.1} ms lazy {:.1} ms {:.1} ms", s.wire, gs.len(), refined, sweeps, flips, counts[2], converged, to * 1e3, ts * 1e3, tg * 1e3, tl * 1e3, t_st.elapsed().as_secs_f64() * 1e3);
+                eprintln!("ERBS time st {si} wire {} gates {} refined {} sweeps {} flips {} cycles {} conv {} lazy-on {} of {} solves {ns} order {:.1} ms solve {:.1} ms screen {:.1} ms lazy {:.1} ms {:.1} ms", s.wire, gs.len(), refined, sweeps, flips, counts[2], converged, on.len(), base.len(), to * 1e3, ts * 1e3, tg * 1e3, tl * 1e3, t_st.elapsed().as_secs_f64() * 1e3);
             }
             Some(Erbs { lead, stretch: si, len: poly_len(&path), band_len: poly_len(&s.band), pts, w, path, gates: gs.len(), refined, sweeps, converged, gate_list: gs, reordered: counts[0], conflicts: counts[1], cycles: counts[2], flips: counts[3] })
         })
