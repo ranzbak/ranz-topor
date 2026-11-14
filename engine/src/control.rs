@@ -453,9 +453,33 @@ pub struct RunControl {
     /// M-B0: 0 = the only run; k >= 1 = run k of a best-of-N call (its stage text is prefixed
     /// with the run, and the round is the coordinator's).
     pub run: u32,
+    /// Test-only injection point (see [`TestHook`]); `None` in every real run.
+    pub test_hook: TestHook,
+}
+
+/// A test-only hook: the engine asks it at a few named points (`RunControl::test_point`); a test
+/// installs a closure that acts there (reach the limit, cancel) or answers `true` to inject a fault.
+/// Not part of any option or config; unset (the default) it costs one `Option` check.
+#[derive(Clone, Default)]
+pub struct TestHook(pub Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>);
+
+impl std::fmt::Debug for TestHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() { "TestHook(set)" } else { "TestHook(none)" })
+    }
 }
 
 impl RunControl {
+    /// Install the test hook (tests only).
+    pub fn set_test_hook(&mut self, f: impl Fn(&str) -> bool + Send + Sync + 'static) {
+        self.test_hook = TestHook(Some(Arc::new(f)));
+    }
+
+    /// Ask the test hook (if any) at the named point; `false` without one.
+    pub fn test_point(&self, point: &str) -> bool {
+        self.test_hook.0.as_ref().is_some_and(|h| h(point))
+    }
+
     pub fn new() -> RunControl {
         RunControl::default()
     }

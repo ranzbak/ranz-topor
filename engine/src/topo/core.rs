@@ -252,11 +252,11 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         let why = if cancel {
             "Cancel stopped the run before its routes were stable".to_string()
         } else if ctl.limit.changed() {
-            format!("the time limit of {limit:.0} s wall clock (changed during the run; [run] timeout_s = {:.0} s) stopped the run before its routes were stable", opts.wall_clock_s)
+            format!("the time limit of {limit:.0} s wall clock (changed during the run; [run] timeout_s = {:.0} s at this engine job's start) stopped the run before its routes were stable", opts.wall_clock_s)
         } else if opts.wall_clock_s <= 0.0 {
             format!("the caller's own time limit ([run] timeout_s on its clock, e.g. [run] timeout_clock = cpu; reached {limit:.0} s into the run, wall clock) stopped the run before its routes were stable")
         } else {
-            format!("[run] timeout_s = {limit:.0} s (wall clock) stopped the run before its routes were stable")
+            format!("the wall-clock limit of {limit:.0} s for this engine job ([run] timeout_s, less the time the plugin used before the job) stopped the run before its routes were stable")
         };
         best.warnings.push(format!("{TIME_HIT} ({why})"));
     }
@@ -301,7 +301,7 @@ fn limit_report(ctl: &RunControl, opts: &Options, r: &mut RouteResult) -> Option
     let steps = ctl.limit.cut_steps();
     let drawn_cut: Vec<CutStep> = steps.iter().copied().filter(|s| s.in_drawing()).collect();
     let cut = if steps.is_empty() { "none" } else if drawn_cut.is_empty() { "plan" } else { "drawing" };
-    let undrawn = r.connections.iter().filter(|c| c.reason == DRAW_CUT).count();
+    let undrawn = r.connections.iter().filter(|c| c.reason.starts_with(DRAW_CUT)).count();
     // What the limit did when it acted as hard (`hard`, or the soft limit past its overrun cap).
     let plan_text = |words: &str| format!("the step that ran then was cut and the kept plan (the best variant so far, or the initial plan) was drawn in full (cut: {words}; a cut initial routing leaves the connections it had not reached unrouted; a cut TopoR loop cycle is not kept)");
     let plan_words = steps.iter().filter(|s| !s.in_drawing()).map(|s| s.words()).collect::<Vec<_>>().join(", ");
@@ -4580,6 +4580,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         let ci = conn_of[wire_conn[w]];
         let mut ids = via_ids.remove(&w).unwrap_or_default();
+        if ctl.test_point("fail wire drawing") {
+            // test-only fault: this wire's drawing fails (no feedback diagnosis), so never drop meets it
+            for id in ids {
+                dr.uncommit(id);
+            }
+            fail(&mut out, ci, "drawing: injected by the test hook");
+            continue;
+        }
         let vh = ids[..placed[&w].len().min(ids.len())].to_vec();
         if let Some((key, q)) = joint_of(w, &drawn, &plans) {
             dr.end_at.insert(key, q);
@@ -4758,15 +4766,17 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut n_forced = 0usize;
     if opts.allow_violations {
         dr.force = true;
+        ctl.test_point("never drop");
         for &w in &live {
             if drawn.contains_key(&w) {
                 continue;
             }
             let ci = conn_of[wire_conn[w]];
             if expired() {
-                // the cut skips it: it says so (Cancel's or the limit's reason), not its drawing failure
+                // the cut skips it: the reason says so (Cancel's or the limit's) and keeps why its own
+                // drawing failed (user 2026-11-14: report both)
                 if out[ci].reason.starts_with("drawing:") {
-                    out[ci].reason = draw_cut_reason().into();
+                    out[ci].reason = format!("{} (its own drawing had failed: {})", draw_cut_reason(), out[ci].reason);
                 }
                 continue;
             }

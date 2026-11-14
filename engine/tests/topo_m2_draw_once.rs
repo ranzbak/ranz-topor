@@ -438,13 +438,39 @@ fn a_hard_limit_reached_in_the_via_reduction_names_that_step() {
     // verify-m2d O2: the step the limit cut is the via reduction (its own CutStep), not the drawing
     // that precedes it: cut_steps names it and the report line says the vias it had not removed stay.
     let m = crop("qmtech-usb-crop.json");
-    let o = topor(r#", "runs": 1, "capacity_model": "cuts", "timeout_mode": "hard""#);
+    let o = topor(r#", "runs": 1, "capacity_model": "cuts", "timeout_mode": "hard", "opt_loop": "cycles", "topo_rounds": 1"#);
     let (r, hit) = act_at(&m, &o, &["via reduction and fuse"], |c| c.limit.reach());
     assert!(hit, "the run ended before the via reduction");
     let l = r.limit.as_ref().expect("limit report");
     assert!(l.reached && l.mode == "hard", "{l:?}");
     assert!(l.cut_steps.contains(&"via_reduction".to_string()), "the via reduction is the step cut: {l:?}");
     assert!(r.warnings.iter().any(|w| w.contains("the via reduction was cut (the vias it had not removed yet stay)")), "{:?}", r.warnings);
+}
+
+#[test]
+fn a_wire_never_drop_skips_because_of_the_cut_keeps_both_reasons() {
+    // verify-m2e F3 (user 2026-11-14: keep both): the limit passes between a wire's failed drawing and
+    // never drop; the skipped wire's reason names the cut AND why its own drawing had failed. The test
+    // hook injects the failed drawing of the first wire and reaches the (hard) limit at never drop's start.
+    let m = eprom();
+    let o = topor(r#", "runs": 1, "timeout_mode": "hard", "opt_loop": "cycles", "topo_rounds": 1"#);
+    let mut ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (l2, f2) = (ctl.limit.clone(), failed.clone());
+    ctl.set_test_hook(move |p| match p {
+        "fail wire drawing" => !f2.swap(true, std::sync::atomic::Ordering::SeqCst),
+        "never drop" => {
+            l2.reach();
+            false
+        }
+        _ => false,
+    });
+    let r = route_with(&m, &o, &ctl);
+    let own = "its own drawing had failed: drawing: injected by the test hook";
+    let both: Vec<&String> = r.connections.iter().map(|c| &c.reason).filter(|w| w.starts_with(DRAW_CUT) && w.contains(own)).collect();
+    assert_eq!(both.len(), 1, "one wire: the cut reason and its own failure: {:?}", r.connections.iter().map(|c| &c.reason).filter(|w| !w.is_empty()).collect::<Vec<_>>());
+    assert_eq!(r.limit.as_ref().expect("limit report").cut_steps.contains(&"drawing".to_string()), true, "{:?}", r.limit);
 }
 
 #[test]

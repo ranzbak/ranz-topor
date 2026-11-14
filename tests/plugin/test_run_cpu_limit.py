@@ -61,7 +61,7 @@ def test_cpu_clock_cancels_the_job_and_keeps_the_best(app, eprom, tmp_path, repo
     assert out.items, "the best result so far is kept"
     assert out.router_cpu_s >= 3.0
     f = {x.code: x for x in out.findings}
-    assert "TIME_BUDGET_HIT" in f and "CPU-time limit" in f["TIME_BUDGET_HIT"].message
+    assert "TIME_BUDGET_HIT" in f and "CPU-time limit of 3 s" in f["TIME_BUDGET_HIT"].message
     assert any("timeout_cpu" in line for line in out.report.summary_lines())
     res = _result_json(out)
     assert res["router_cpu_s"] == pytest.approx(out.router_cpu_s, abs=0.01) and res["stop_reason"] == "timeout_cpu"

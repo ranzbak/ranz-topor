@@ -57,7 +57,8 @@ fn cancel_after(o: Options, from: After, after: Duration) -> (RouteResult, f64) 
 }
 
 /// Generous for a loaded test machine: the engine stops within a second or two on eprom.
-const BOUND_S: f64 = 5.0;
+/// Debug builds are several times slower (user 2026-11-14: scale bounds with the build profile).
+const BOUND_S: f64 = if cfg!(debug_assertions) { 60.0 } else { 5.0 };
 
 #[test]
 fn cancel_at_any_time_ends_quickly_with_the_best_so_far() {
