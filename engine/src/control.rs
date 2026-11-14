@@ -593,7 +593,7 @@ impl RunControl {
 
     /// The same cancel flag and progress, as run `run` (1-based) of a best-of-N call. O(1).
     pub(crate) fn for_run(&self, run: u32) -> RunControl {
-        RunControl { cancel: self.cancel.clone(), progress: self.progress.clone(), limit: self.limit.clone(), run }
+        RunControl { cancel: self.cancel.clone(), progress: self.progress.clone(), limit: self.limit.clone(), run, test_hook: self.test_hook.clone() }
     }
 
     /// Change the progress under the lock (the M-B0 coordinator's fields). O(1) + `f`.
