@@ -128,7 +128,7 @@ fn solve_ordered(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &BTr
     let kept: Vec<Vec2> = og.iter().map(|g| pt.get(&g.id).copied().unwrap_or(g.p)).collect();
     let plen = |q: &[Vec2]| poly_len(&std::iter::once(a).chain(q.iter().copied()).chain(std::iter::once(e)).collect::<Vec<_>>());
     let init = if plen(&funnel) <= plen(&kept) { funnel } else { kept };
-    let (p, sweeps, converged) = solve(a, e, &segs, &init, opts.tol, opts.sweeps_per_gate * segs.len() + 100);
+    let (p, sweeps, converged) = solve_active(a, e, &segs, &init, opts.tol, opts.sweeps_per_gate * segs.len() + 100);
     let mut all = Vec::with_capacity(p.len() + 2);
     all.push(a);
     all.extend(p.iter().copied());
@@ -543,6 +543,86 @@ pub fn solve(s: Vec2, e: Vec2, gates: &[(Vec2, Vec2)], init: &[Vec2], tol: f64, 
     let mut p: Vec<Vec2> = init.to_vec();
     let (sweeps, converged) = exact_sweeps(s, e, gates, &mut p, tol, max_sweeps);
     (p, sweeps, converged)
+}
+
+/// [`solve`] on the gates the path bends on only (an active set): the optimum is a polyline
+/// that bends at a few gate tips and meeting points; every other gate merely lies across one of
+/// its straight legs. Gauss-Seidel moves information one gate per sweep, so on a long chain it
+/// needs O(gates) sweeps of O(gates) each (eprom: a stretch of 691 gates, 617 k sweeps, 39 s);
+/// on the bends alone the sweeps are few and short. Start: the gates where the start points
+/// bend. Then, in rounds, solve on the active gates, put every other gate's point where the leg
+/// between its active neighbours crosses it, and make active each gate the leg misses or
+/// crosses out of order (the path must visit them in order); until no gate is missed. A last
+/// pass of [`exact_sweeps`] over all gates from there checks it (it converges at once when the
+/// set was right) and gives the same optimum as the plain solve (the objective is convex).
+/// Short chains (32 gates or fewer) go to [`solve`] directly. O(rounds x gates + sweeps x active).
+pub fn solve_active(s: Vec2, e: Vec2, gates: &[(Vec2, Vec2)], init: &[Vec2], tol: f64, max_sweeps: usize) -> (Vec<Vec2>, usize, bool) {
+    let n = gates.len();
+    if n <= 32 {
+        return solve(s, e, gates, init, tol, max_sweeps);
+    }
+    let mut p: Vec<Vec2> = init.to_vec();
+    let at = |p: &[Vec2], i: isize| if i < 0 { s } else if i as usize >= p.len() { e } else { p[i as usize] };
+    // A start point off the chord of its neighbours bends the path there.
+    let mut act: Vec<bool> = (0..n)
+        .map(|i| {
+            let (u, x, v) = (at(&p, i as isize - 1), p[i], at(&p, i as isize + 1));
+            let d = v - u;
+            let l2 = d.len2();
+            let t = if l2 > 0.0 { ((x - u).dot(d) / l2).clamp(0.0, 1.0) } else { 0.0 };
+            (x - (u + d * t)).len() > 1.0
+        })
+        .collect();
+    let mut sweeps = 0usize;
+    for _ in 0..n {
+        let idx: Vec<usize> = (0..n).filter(|&i| act[i]).collect();
+        let sub: Vec<(Vec2, Vec2)> = idx.iter().map(|&i| gates[i]).collect();
+        let mut q: Vec<Vec2> = idx.iter().map(|&i| p[i]).collect();
+        let (sw, _) = exact_sweeps(s, e, &sub, &mut q, tol, opts_sweeps(sub.len(), max_sweeps));
+        sweeps += sw;
+        for (k, &i) in idx.iter().enumerate() {
+            p[i] = q[k];
+        }
+        let mut missed = false;
+        let mut prev = s;
+        let mut i = 0usize;
+        while i <= n {
+            let j = (i..n).find(|&j| act[j]).unwrap_or(n);
+            let next = if j == n { e } else { p[j] };
+            let d = next - prev;
+            let l2 = d.len2();
+            let mut t_last = 0.0f64;
+            for m in i..j {
+                let (g0, g1) = gates[m];
+                let (r, _, y) = super::draw::seg_seg(prev, next, g0, g1);
+                let t = if l2 > 0.0 { (y - prev).dot(d) / l2 } else { 0.0 };
+                if r <= 1.0 && t >= t_last - 1e-9 {
+                    p[m] = y;
+                    t_last = t.max(t_last);
+                } else {
+                    act[m] = true;
+                    p[m] = min_on_gate(prev, next, g0, g1);
+                    missed = true;
+                }
+            }
+            if j == n {
+                break;
+            }
+            prev = p[j];
+            i = j + 1;
+        }
+        if !missed {
+            break;
+        }
+    }
+    let (sw, converged) = exact_sweeps(s, e, gates, &mut p, tol, max_sweeps);
+    (p, sweeps + sw, converged)
+}
+
+/// The sweep budget of an active-set solve on `m` gates: as [`ErbsOpts::sweeps_per_gate`] (20
+/// per gate + 100), at most the caller's. O(1).
+fn opts_sweeps(m: usize, max_sweeps: usize) -> usize {
+    (20 * m + 100).min(max_sweeps)
 }
 
 /// `pts` without repeated points and without points within `tol` of the line of their

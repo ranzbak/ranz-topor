@@ -507,3 +507,33 @@ Generator `harness/radii_patterns.py`. PNGs are in `scratch/agent-wt/m3-runs/pat
 - **D4.** Nominal clearance / even wire distribution (TopoR p. 237; Su & Dai EWD): not in M3. Is it a new item?
 - **D5.** The new compass class `erbs_gap` (drawn violation that no cut predicted) next to `drawing_loss`, or folded
   into it?
+
+## 13. Step c follow-up (2026-11-14): order at wrapped vertices, precedes, refinement spokes, pad exits
+
+Measured on the four approved patterns (judge j15, `m3-runs/erbs`); the ladder is §14.
+
+- **Order of two cuts that meet at a wrapped vertex** (`erbs.rs::gate_before`, `Wedge`). The meeting rule (path, `X`
+  and the two crossings bound a triangle) holds only while the path, seen from `X`, turns by less than a half turn
+  between the crossings. Round a vertex the band wraps it turns by the wrap angle plus a half turn, so two cuts rooted
+  on that vertex (stack items, arc spokes) more than a half turn apart came out reversed. nested_wraps B: the
+  incoming cut of M1's corner after the outgoing one, a cycle of 8 constraints closed by every flip of a pair near the
+  corner, Kahn's break undid the accepted flip, C written by force (0.118 mm model gap). Now such pairs are ordered by
+  their rays' share of the wrap from the incoming side: the cyclic order of a terminal's incident nets (Dayan 1997
+  PDF p. 125, Fig. 59), the circles taken in their order along the path (Popov 2012 p. 119, Fig. 3).
+- **Precedes order** (`erbs.rs::precedes`). The bend test took the neighbouring points of the gate list, and gates
+  that share a point (a cut item and the arc spoke along it) gave a zero leg: no precedes pair at all on
+  nested_wraps, the outer wire drawn first, its octilinear form took the inner wire's room (Staepelaere 1992 PDF 29:
+  the transform needs the "is below" order). Now the nearest distinct points.
+- **Feature refinement spokes.** Only the spokes the chord crosses inside their tip; none crossed: the one nearest the
+  outward direction. A spoke the chord does not cross made the path cross it, round the vertex the other way (Dayan
+  PDF p. 32: a spoke pushes the wire away from the fixed object; it must not move it to the object's other side).
+  Radii test `erbs_nested_wraps_radii` un-ignored and passing; three_diagonals had a spoke up into the wire's own
+  pad.
+- **Cuts from the own terminal pad crossed at the pad** are no gates (the band starts inside the pad, the path ends
+  there anyway; crossed at the pad's corner they zigzagged along its edge next to the neighbour).
+- **Pad-exit legs: measured, off** (`ErbsOpts::pad_exit`). A straight leg out of an elongated pad (as the drawing's
+  `pad_exit`) moves the wire off the tips the radii gave the others: three_diagonals model gaps of 0.25-0.5 mm
+  between the bundle's wires, even with the legs as features of the other nets. The leg belongs in the sheet (the
+  terminal at the pad's planned exit, `docs/dev/inflated-sketch.md` §4.6), i.e. M7.
+- **Left:** three_diagonals model gaps 0.03-0.05 mm next to the pads (pairs that meet inside both portals near a pad,
+  ordered by the flip heuristic); the drawing's octilinear form clears them (drawn: 0 violations, length = optimum).
