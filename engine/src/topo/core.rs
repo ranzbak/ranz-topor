@@ -1206,7 +1206,16 @@ impl Fixed {
     fn build(model: &BoardModel, opts: &Options, stubs: &PlaneStubs) -> Fixed {
         let signal: Vec<u32> = model.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
         let mut dec = decompose_with(model, opts, &signal, &stubs.signal_pads);
-        let pairs: Pairs = if opts.diffpair_route { diffpair::plan(model, &mut dec) } else { Pairs::default() };
+        let mut pairs: Pairs = if opts.diffpair_route { diffpair::plan(model, &mut dec) } else { Pairs::default() };
+        // M4 (shopping list 5.7): the pair ends (gateways, fan-out zones) and every pair connection's
+        // polarity (a flip at a via pair, a swap, or two single tracks) are decided here, before the
+        // topology, against the static board and the plane stubs ([`super::dpplan::plan_ends`]).
+        if !pairs.coupled.is_empty() {
+            let checker = Checker::new(model, opts);
+            let fixed: Vec<Item> = stubs.res.iter().filter_map(|(_, r)| r.as_ref().ok()).flat_map(|o| o.items.iter().cloned()).collect();
+            let (reg, _) = Registry::from_config(standard_factors(), &opts.factors);
+            super::dpplan::plan_ends(model, opts, &checker, &fixed, &dec, &mut pairs, &reg);
+        }
         let alias = (!pairs.coupled.is_empty()).then(|| diffpair::alias(model, &pairs, opts));
         let mut notes = Vec::new();
         let board = if signal.len() < 2 {
@@ -3988,6 +3997,91 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         tlog("via relocation", t_vr);
     }
+    // ---- M4: each pair connection's polarity at the plan's via pairs ----
+    // The via sites are final here (relocated, or the planned traversal's point on the taut path).
+    // Per via pair the turn of the plan's path across it prices keep and flip
+    // ([`super::dpplan::turn_prices`]); the cheapest assignment with the parity the gateways need
+    // ([`super::dpplan::solve_parity`]); a planned swap is dropped when one of the plan's own via
+    // pairs flips for less. The drawing realises these flips (`dp_flips`).
+    let mut dp_flips: BTreeMap<usize, Vec<bool>> = BTreeMap::new();
+    if !pairs.lead.is_empty() {
+        let wc = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
+        let price_mm = |mm: f64| reg.price(&Event::DpViaTurn { mm, deg: 0.0, flip: false }, &WireCtx::default());
+        for (&w, p) in &plans {
+            let Some(ci) = wc(w) else { continue };
+            let (Some(&(k, _)), Some(pl)) = (pairs.lead.get(&ci), pairs.conn_plan.get(&ci)) else { continue };
+            let cp = &pairs.coupled[k];
+            let (vd, _) = diffpair::via_of(model_real, &cp.rule, opts);
+            let pv = (vd + cp.rule.via_gap) as f64;
+            let tr = super::viaopt::Track::of(&st, w);
+            let arc_of = |q: Vec2| -> f64 {
+                let mut best = (f64::INFINITY, 0.0);
+                for j in 1..tr.pts.len() {
+                    let (a, b) = (tr.pts[j - 1], tr.pts[j]);
+                    let l2 = (b - a).len2();
+                    let t = if l2 > 0.0 { ((q - a).dot(b - a) / l2).clamp(0.0, 1.0) } else { 0.0 };
+                    let d = (a + (b - a) * t - q).len();
+                    if d < best.0 {
+                        best = (d, tr.cum[j - 1] + t * l2.sqrt());
+                    }
+                }
+                best.1
+            };
+            let delta = pv.max(0.5 * MM);
+            let mut turns: Vec<(f64, (f64, f64))> = Vec::new();
+            for (i, &(ka, kb)) in p.vias.iter().enumerate() {
+                let at = dr.via_site.get(&(w, i)).map(|x| x.1).unwrap_or_else(|| {
+                    let kk = p.at.get(i).copied().unwrap_or((ka + kb) / 2);
+                    tr.at(tr.sigma(kk, 0.5))
+                });
+                let sa = arc_of(at);
+                let (din, dout) = (at - tr.at(sa - delta), tr.at(sa + delta) - at);
+                let th = super::dpplan::turn_angle(din, dout);
+                turns.push((th.to_degrees(), super::dpplan::turn_prices(th, pv)));
+            }
+            let prices: Vec<(f64, f64)> = turns.iter().map(|t| t.1).collect();
+            let need = pl.need && pl.choice != super::dpplan::Choice::Single;
+            let swap = pl.choice == super::dpplan::Choice::Swap;
+            // With a planned swap the vias owe no flip; without it they owe the needed one.
+            let (f0, c0, _) = super::dpplan::solve_parity(need && !swap, &prices);
+            let (flips, cost_nm, ok, swap_kept) = if swap {
+                let (f1, c1, ok1) = super::dpplan::solve_parity(need, &prices);
+                if ok1 && price_mm(c1 / MM) < price_mm(c0 / MM) + pl.swap_price {
+                    (f1, c1, true, false)
+                } else {
+                    (f0, c0, true, true)
+                }
+            } else {
+                let ok = !need || !prices.is_empty();
+                (f0, c0, ok, false)
+            };
+            let r = &cp.rule;
+            let lbl = |q: usize| model_real.pads.get(q).map_or("?".to_string(), |x| format!("{}.{}", x.ref_, x.number));
+            let desc: Vec<String> = turns.iter().zip(&flips).map(|(t, &f)| format!("{:.0} deg {}", t.0, if f { "flip" } else { "keep" })).collect();
+            warnings.push(format!(
+                "diff pair {} / {} {} -> {}: polarity plan: {} flip needed, {} via pair(s) [{}], fan-out skew at the via pairs {:.3} mm (price {:.1}){}",
+                r.p_name,
+                r.n_name,
+                lbl(pl.pad_a),
+                lbl(pl.pad_b),
+                if need { "a" } else { "no" },
+                turns.len(),
+                desc.join(", "),
+                cost_nm / MM,
+                price_mm(cost_nm / MM),
+                if swap && swap_kept {
+                    format!("; the planned swap provides the flip (price {:.1})", pl.swap_price)
+                } else if swap {
+                    format!("; the planned swap is not needed: a via pair of the plan flips for less than the swap ({:.1})", pl.swap_price)
+                } else if !ok {
+                    "; NO via pair can flip: P and N cross (priced as dp_polarity_cross)".into()
+                } else {
+                    String::new()
+                }
+            ));
+            dp_flips.insert(ci, flips);
+        }
+    }
     // 5.4 `[search] branch_relocate`: the junctions of the net trees to the Fermat point of their
     // arms, out of a pad (< 120 degrees there) or into it (>= 120 degrees;
     // [`super::viaopt::relocate_junctions`]). The drawing splits the wire through the point and
@@ -5078,10 +5172,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     if !pairs.coupled.is_empty() || !pairs.single.is_empty() {
         let t_dp = Instant::now();
         let real_checker = Checker::new(model_real, opts);
-        warnings.extend(realise_pairs(model_real, opts, pairs, &mut out, &mut necking, octi_on, &real_checker, dec, &reg));
+        warnings.extend(realise_pairs(model_real, opts, pairs, &mut out, &mut necking, octi_on, &real_checker, dec, &reg, &dp_flips));
         tlog("diff pairs", t_dp);
         if let Some((o, nk)) = pre_snap.as_mut() {
-            let _ = realise_pairs(model_real, opts, pairs, o, nk, octi_on, &real_checker, dec, &reg);
+            let _ = realise_pairs(model_real, opts, pairs, o, nk, octi_on, &real_checker, dec, &reg, &dp_flips);
         }
     }
     let isl = planes::islands(model, b, &out_vias(&out, &plane_reqs, &dec.connections), &plane_reqs);
@@ -5424,7 +5518,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
 /// necking events (the envelope narrowed at its pads: the fan-out zone) are dropped. Returns the
 /// report lines. O(pair connections x zip candidates x checker queries).
 #[allow(clippy::too_many_arguments)]
-fn realise_pairs(model: &BoardModel, opts: &Options, pairs: &Pairs, out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, octi: bool, checker: &Checker, dec: &crate::decompose::Decomposition, reg: &Registry) -> Vec<String> {
+#[allow(clippy::too_many_arguments)]
+fn realise_pairs(model: &BoardModel, opts: &Options, pairs: &Pairs, out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, octi: bool, checker: &Checker, dec: &crate::decompose::Decomposition, reg: &Registry, dp_flips: &BTreeMap<usize, Vec<bool>>) -> Vec<String> {
     let mut lines = Vec::new();
     let mut idx = crate::check::ItemIndex::new(checker.cell());
     for (ci, o) in out.iter().enumerate() {
@@ -5469,12 +5564,13 @@ fn realise_pairs(model: &BoardModel, opts: &Options, pairs: &Pairs, out: &mut [O
             let (b, y) = diffpair::viol_count(&ctx, &idx, &rz.n_items, Some(&diffpair::index_of(&ctx, &rz.p_items)));
             (a + b, x + y)
         };
-        let rc = diffpair::realise(&ctx, cp, &runs, ea, eb, &idx, true);
+        let planned = dp_flips.get(&cp_ci).map(|v| v.as_slice());
+        let rc = diffpair::realise(&ctx, cp, &runs, ea, eb, &idx, true, planned);
         let sc = score(&rc);
         let rz = if sc.0 == 0 {
             rc
         } else {
-            let ru = diffpair::realise(&ctx, cp, &runs, ea, eb, &idx, false);
+            let ru = diffpair::realise(&ctx, cp, &runs, ea, eb, &idx, false, planned);
             let su = score(&ru);
             if su.0 < sc.0 || (su.0 == sc.0 && su.1 < sc.1) { ru } else { rc }
         };
@@ -5555,6 +5651,25 @@ fn realise_pairs(model: &BoardModel, opts: &Options, pairs: &Pairs, out: &mut [O
             st.vias_n,
             if st.polarity_cross { "; POLARITY: P and N swap sides between the ends" } else { "" },
         ));
+        if st.flips > 0 || st.parity_resolved {
+            lines.push(format!(
+                "diff pair {} / {} {} -> {}: {} via pair(s) drawn as a turn-back flip{}",
+                r.p_name,
+                r.n_name,
+                label(pa),
+                label(pb),
+                st.flips,
+                if st.parity_resolved { " (the plan's flips did not fit the drawn layer changes: solved again on the drawn turns)" } else { " (as planned)" }
+            ));
+        }
+        if let Some(sw) = pairs.conn_plan.get(&cp_ci).and_then(|pl| pl.swap.as_ref().filter(|_| pl.choice == super::dpplan::Choice::Swap)) {
+            if st.polarity_cross {
+                lines.push(format!(
+                    "diff pair {} / {} {} -> {}: the planned swap at ({:.3}, {:.3}) mm is not drawn yet (drawing realisation of swaps waits for the rebuilt ERBS, M4 drawing stage)",
+                    r.p_name, r.n_name, label(pa), label(pb), sw.at.x / MM, -sw.at.y / MM
+                ));
+            }
+        }
         // KiCad's own wording, only where a matching custom rule exists (doc section 6.4).
         if r.max_uncoupled > 0 && unc > r.max_uncoupled as f64 {
             lines.push(format!("Differential uncoupled length too long ({} maximum uncoupled length {:.4} mm; actual {:.4} mm): {} / {} {} -> {}", r.rule_uncoupled, r.max_uncoupled as f64 / MM, unc / MM, r.p_name, r.n_name, label(pa), label(pb)));

@@ -178,6 +178,38 @@ impl Factor for PolarityCross {
     }
 }
 
+/// M4: the fan-out skew of a via pair from the turn of the pair's path across it: keep costs
+/// `2 pv sin(theta/2)`, flip `2 pv cos(theta/2)` (`pv` the via pitch); priced in the plan's
+/// polarity choice ([`crate::topo::dpplan::solve_parity`]), so a flip lands where the path turns
+/// back and a keep where it runs on (graded, no cut-off at 90 degrees).
+pub struct ViaTurn;
+impl Factor for ViaTurn {
+    fn name(&self) -> &'static str {
+        "dp_via_turn"
+    }
+    fn doc(&self) -> &'static str {
+        "Differential pair: per mm of fan-out skew at a via pair from the turn of the pair's path across it: 2 x via pitch x sin(turn/2) to keep P and N on their sides, 2 x via pitch x cos(turn/2) to swap them (a turn-back); the plan picks the cheapest choice whose number of swaps gives the polarity the pair ends need."
+    }
+    fn unit(&self) -> &'static str {
+        "per mm of via-pair skew"
+    }
+    fn default_weight(&self) -> f64 {
+        10.0
+    }
+    fn amount(&self, ev: &Event) -> f64 {
+        match *ev {
+            Event::DpViaTurn { mm, .. } => mm.abs(),
+            _ => 0.0,
+        }
+    }
+    fn describe(&self, ev: &Event) -> String {
+        match ev {
+            Event::DpViaTurn { mm, deg, flip } => format!("via pair at a {deg:.0} degree turn drawn as a {}: fan-out skew {mm:.3} mm", if *flip { "flip (turn-back)" } else { "keep" }),
+            _ => String::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

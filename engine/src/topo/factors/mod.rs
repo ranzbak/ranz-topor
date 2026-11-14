@@ -117,6 +117,9 @@ pub enum Event {
     DpViaUnpaired { count: u32 },
     /// D7: P and N of a pair connection swap sides between the ends (they cross near `at`).
     DpPolarityCross { at: Vec2 },
+    /// M4: fan-out skew `mm` at a via pair whose path turns by `deg`, drawn as a flip (turn-back,
+    /// P and N swap sides) or a keep ([`crate::topo::dpplan::turn_prices`]).
+    DpViaTurn { mm: f64, deg: f64, flip: bool },
 }
 
 /// How a factor's events appear in the report.
@@ -270,6 +273,8 @@ pub fn standard_factors() -> Vec<Box<dyn Factor>> {
         // Last: the fluctuation draws and the per-factor oscillation phases of the factors
         // before it stay as they were (one draw per factor in registry order).
         Box::new(shrinkage::Shrinkage),
+        // M4, after shrinkage for the same reason.
+        Box::new(diffpair::ViaTurn),
     ]
 }
 

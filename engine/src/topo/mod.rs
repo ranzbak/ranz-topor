@@ -21,6 +21,7 @@ pub mod cutflow;
 pub mod cutmodel;
 pub mod demand;
 pub mod diffpair;
+pub mod dpplan;
 pub mod draw;
 pub mod dwitness;
 pub mod exact;

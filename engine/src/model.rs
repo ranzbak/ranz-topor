@@ -1325,6 +1325,17 @@ pub struct Options {
     /// D7 (`[diffpair] via_pair_axes`): allowed directions (degrees) of the line through the two
     /// vias of a via pair.
     pub diffpair_via_axes: Vec<f64>,
+    /// M4 (`[diffpair] swap`): a pair connection whose polarity needs a flip and whose ends share a
+    /// layer (no layer change is forced). `"via_pair"` (default) = the cheaper of a swap (two via
+    /// pairs, priced by vias, excursion, crowding and clearance breaks at its cheapest site) and two
+    /// single tracks; `"via_pair_always"` = the swap at any price; `"single"` = two single tracks.
+    pub diffpair_swap: String,
+    /// M4 (`[diffpair] fanout`): how the planning model keeps the planned pair ends (gateways,
+    /// always planned) free of other nets. `"bridge"` (default) = the D7 copper bridge between
+    /// partner pads with room between them; `"gateway"` = the two fan-out tracks reserved as lead-net
+    /// copper (experimental; bends the lead's own way into its pads in patterns dp_gateway and
+    /// dp_bus_crossing).
+    pub diffpair_fanout: String,
     /// 5.4 (`topor.toml [vias] size`): which via the router puts at a layer change, in the plan
     /// (room, via sites) and in the drawing. `"net_class"` (default, the behaviour before 5.4) =
     /// the net class via first, then the smaller pre-defined vias for tight spots
@@ -1486,6 +1497,8 @@ impl Default for Options {
             diffpair_route: true,
             diffpair_zip_max_nm: 3_000_000,
             diffpair_via_axes: vec![0.0, 45.0, 90.0, 135.0],
+            diffpair_swap: "via_pair".into(),
+            diffpair_fanout: "bridge".into(),
             via_size: "net_class".into(),
             via_drill_grid_nm: 10_000,
             via_pair_min: false,

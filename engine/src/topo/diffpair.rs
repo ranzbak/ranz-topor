@@ -89,9 +89,13 @@ pub struct Pairs {
     pub width: BTreeMap<i32, i64>,
     /// Nets of the coupled pairs' P halves (the lead nets).
     pub lead_nets: BTreeSet<i32>,
-    /// Connection pairs `(P conn, N conn, rule index)` routed as two single tracks because P and N swap
-    /// sides between their ends.
+    /// Connection pairs `(P conn, N conn, rule index)` routed as two single tracks: their polarity
+    /// needs a flip, no layer change is forced and the swap cost more (M4,
+    /// [`super::dpplan::plan_ends`]; `[diffpair] swap`).
     pub single: Vec<(usize, usize, usize)>,
+    /// M4: per pair connection (P conn id) its fan-outs, parity and polarity choice
+    /// ([`super::dpplan::plan_ends`]).
+    pub conn_plan: BTreeMap<usize, super::dpplan::ConnPlan>,
     pub notes: Vec<String>,
 }
 
@@ -154,9 +158,12 @@ pub fn plan(model: &BoardModel, dec: &mut Decomposition) -> Pairs {
         })();
         match why {
             Ok((partner, terms)) => {
-                // Mirror the P tree onto N, connection i of P to the i-th N connection id.
-                let (mut conns, mut crossed) = (Vec::new(), Vec::new());
-                let mut keep = BTreeSet::new();
+                // Mirror the P tree onto N, connection i of P to the i-th N connection id. Every
+                // connection pair is coupled here; its polarity (a flip at a via pair, a swap, or two
+                // single tracks) is decided in the topology by [`super::dpplan::plan_ends`] (M4; the
+                // static straight-line test that routed crossing pads as two singles is gone).
+                let mut conns = Vec::new();
+                let keep = BTreeSet::new();
                 for (k, &ip) in pc.iter().enumerate() {
                     let c = dec.connections[ip].clone();
                     let (Some(a), Some(b)) = (pad_of(&c.from), pad_of(&c.to)) else { continue };
@@ -166,24 +173,7 @@ pub fn plan(model: &BoardModel, dec: &mut Decomposition) -> Pairs {
                     n.from = terms[&na].clone();
                     n.to = terms[&nb].clone();
                     n.est_len = (n.from.at - n.to.at).len();
-                    // P and N swap sides between the ends (their straight lines cross, or run along one
-                    // line one behind the other, as between the A and B rows of a USB-C connector): the
-                    // two tracks must cross, which needs vias KiCad never places for a pair. Such a
-                    // connection pair is routed as two single tracks (its N pads stay N in the plan).
-                    let at = |q: usize| model.pads[q].center.to_vec2();
-                    if swaps(at(a), at(b), at(na), at(nb)) {
-                        crossed.push((ip, jn));
-                        keep.insert(na);
-                        keep.insert(nb);
-                    } else {
-                        conns.push((ip, jn));
-                    }
-                }
-                let ri = model.rules.diff_pairs.iter().position(|x| x == r).unwrap_or(0);
-                out.single.extend(crossed.iter().map(|&(ip, jn)| (ip, jn, ri)));
-                for &(ip, jn) in &crossed {
-                    let lbl = |i: usize| format!("{} -> {}", dec.connections[i].from.label, dec.connections[i].to.label);
-                    out.notes.push(format!("diff pair {} / {}: {} and {} swap sides between their ends (P and N must cross): routed as two single tracks at the pair width", r.p_name, r.n_name, lbl(ip), lbl(jn)));
+                    conns.push((ip, jn));
                 }
                 if conns.is_empty() {
                     continue;
@@ -237,9 +227,18 @@ pub fn alias(model: &BoardModel, pairs: &Pairs, opts: &Options) -> BoardModel {
         // The room between two partner pads belongs to the pair (its fan-out): where another net's
         // track would fit between them, a copper bridge of the P net joins their centres (as thick as
         // the pads' narrow side), so no other net is planned between them (the N stub could not cross
-        // it; a USB pair on MCU pads 1.27 mm apart). Closer pads need none.
+        // it; a USB pair on MCU pads 1.27 mm apart). Closer pads need none. M4 (`[diffpair] fanout =
+        // "gateway"`, opt-in): a pad pair with a planned fan-out ([`super::dpplan::Fan`]) has its
+        // two fan-out tracks reserved instead ([`super::dpplan::reservations`]), so a foreign pad
+        // between P and N (HDMI P / GND / N) keeps its way out behind; the bridge stays for pad
+        // pairs without one.
         let other = (model.rules.min_track_width + 2 * model.rules.default.clearance.max(model.rules.min_clearance)) as f64;
-        for (&a, &b) in cp.partner.iter().filter(|(a, b)| model.pads[**a].net == p && !cp.keep.contains(*b)) {
+        let fanned: BTreeSet<usize> = if opts.diffpair_fanout == "gateway" {
+            pairs.conn_plan.values().flat_map(|pl| [&pl.fa, &pl.fb]).flatten().map(|f| f.pad_p).collect()
+        } else {
+            BTreeSet::new()
+        };
+        for (&a, &b) in cp.partner.iter().filter(|(a, b)| model.pads[**a].net == p && !cp.keep.contains(*b) && !fanned.contains(*a)) {
             let (pa, pb) = (&model.pads[a], &model.pads[b]);
             for &l in pa.layers.iter().filter(|l| pb.layers.contains(l) && model.layers.iter().any(|x| x.id == **l)) {
                 let gap = crate::geom::skeleton_gap(&model.skeleton(pa, l), &model.skeleton(pb, l));
@@ -276,12 +275,15 @@ pub fn alias(model: &BoardModel, pairs: &Pairs, opts: &Options) -> BoardModel {
         nr.via_drill = (pv + drill as f64).round() as i64;
         m.rules.per_net.insert(p, nr);
     }
+    if opts.diffpair_fanout == "gateway" {
+        m.copper_shapes.extend(super::dpplan::reservations(model, pairs));
+    }
     m
 }
 
 /// The outline corners of `pad` on `layer` (math frame): its rectangle (a circle's square, a
 /// polygon's points). O(points).
-fn pad_corners(pad: &crate::model::Pad, layer: u32) -> Vec<Vec2> {
+pub(super) fn pad_corners(pad: &crate::model::Pad, layer: u32) -> Vec<Vec2> {
     use crate::model::PadShape;
     let c = pad.center.to_vec2();
     let rot = pad.rotation_deg.to_radians();
@@ -370,28 +372,6 @@ fn partners(model: &BoardModel, pp: &BTreeSet<usize>, np: &BTreeSet<usize>) -> B
         }
     }
     out
-}
-
-/// P runs `pa -> pb`, N `na -> nb`: do they swap sides (the straight lines cross, or lie on one
-/// line overlapping)? O(1).
-fn swaps(pa: Vec2, pb: Vec2, na: Vec2, nb: Vec2) -> bool {
-    let (d1, d2) = (pb - pa, nb - na);
-    let den = d1.cross(d2);
-    let l = d1.len().max(d2.len()).max(1.0);
-    if den.abs() < 1e-3 * l * l {
-        // Parallel: crossing only when on one line (within a fifth of the pad pair spacing) and
-        // overlapping.
-        let off = (na - pa).cross(d1).abs() / d1.len().max(1.0);
-        if off > 0.2 * (na - pa).len().min((nb - pb).len()) + 1_000.0 {
-            return false;
-        }
-        let u = d1 * (1.0 / d1.len2().max(1.0));
-        let (t0, t1) = ((na - pa).dot(u), (nb - pa).dot(u));
-        return t0.min(t1) < 1.0 && t0.max(t1) > 0.0;
-    }
-    let t = (na - pa).cross(d2) / den;
-    let v = (na - pa).cross(d1) / den;
-    (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&v)
 }
 
 // ------------------------------------------------------------------ geometry
@@ -503,11 +483,17 @@ fn stubs(a: Vec2, b: Vec2, octi: bool) -> Vec<Vec<Vec2>> {
     out
 }
 
-/// The via pair at a layer change at `v`: the allowed axis (degrees in `axes`) nearest to square to
-/// the pair's direction (the bisector of `din` and `dout`), P on side `-s`, N on side `+s` of it.
-fn via_pair(v: Vec2, din: Vec2, dout: Vec2, s: f64, pv: f64, axes: &[f64]) -> (Vec2, Vec2) {
-    let b = unit(unit(din) + unit(dout));
-    let want = b.perp();
+/// The via pair at a layer change at `v`, P on side `-s`, N on side `+s` of the incoming travel.
+/// Keep (`flip` false): the axis along the left normal of `din + dout` (square to the bisector), so
+/// P stays on side `-s` of the outgoing travel. Flip (M4, the turn-back of user rule 3): along the
+/// left normal of `din - dout`, so P leaves on side `+s` (the caller toggles `s`); at a turn-back
+/// that is square to the travel, which fixes the degenerate bisector of M4-PAIR2. A degenerate
+/// direction (keep at a U-turn, flip straight on) falls back to the in-line axis along `din`. The
+/// allowed axis (degrees in `axes`) nearest to that direction is taken.
+fn via_pair(v: Vec2, din: Vec2, dout: Vec2, s: f64, pv: f64, axes: &[f64], flip: bool) -> (Vec2, Vec2) {
+    let (a, b) = (unit(din), unit(dout));
+    let d = if flip { a - b } else { a + b };
+    let want = if d.len() > 1e-6 { unit(d).perp() } else { a };
     let axes: Vec<f64> = if axes.is_empty() { vec![0.0, 45.0, 90.0, 135.0] } else { axes.to_vec() };
     let mut best = (f64::NEG_INFINITY, want);
     for a in axes {
@@ -519,6 +505,18 @@ fn via_pair(v: Vec2, din: Vec2, dout: Vec2, s: f64, pv: f64, axes: &[f64]) -> (V
     }
     let u = best.1;
     (v - u * (s * 0.5 * pv), v + u * (s * 0.5 * pv))
+}
+
+/// M4 parity at the drawn layer changes of a lead: `(din, dout)` per via pair, whether a flip is
+/// needed, the planned flips (used when they match in count and parity), pitch `pv`: the flips
+/// and whether the drawing had to solve them itself ([`super::dpplan::solve_parity`] on the
+/// drawn turn angles, the plan's own rule). O(vias).
+pub fn drawn_flips(turns: &[(Vec2, Vec2)], need: bool, planned: Option<&[bool]>, pv: f64) -> (Vec<bool>, bool) {
+    if let Some(f) = planned.filter(|f| f.len() == turns.len() && (f.iter().filter(|&&x| x).count() % 2 == 1) == need) {
+        return (f.to_vec(), false);
+    }
+    let prices: Vec<(f64, f64)> = turns.iter().map(|&(a, b)| super::dpplan::turn_prices(super::dpplan::turn_angle(a, b), pv)).collect();
+    (super::dpplan::solve_parity(need, &prices).0, true)
 }
 
 /// Signed skew estimate `P - N` of a centre line whose N track lies on side `s` (+1 = left) at
@@ -633,6 +631,10 @@ pub struct ConnStats {
     pub vias_n: usize,
     /// P and N swap sides between the two ends (they must cross: KiCad never does that).
     pub polarity_cross: bool,
+    /// M4: via pairs drawn as a flip (a turn-back that swaps P and N), and whether the drawing
+    /// solved the flips itself because the plan's did not fit its layer changes.
+    pub flips: usize,
+    pub parity_resolved: bool,
     /// The N connection id (set by the caller).
     #[serde(skip)]
     pub conn_n: usize,
@@ -682,7 +684,7 @@ fn tracks(net: i32, layer: u32, w: f64, pts: &[Vec2]) -> Vec<Item> {
 /// last leg of the centre line are moved sideways onto the middle of their pad pair (the lead's wire
 /// ends at the P pad's centre), so the two tracks fan out symmetrically; the caller keeps the better
 /// of both. O(runs x zip candidates).
-pub fn realise(ctx: &Ctx, cp: &Coupled, runs: &[(u32, Vec<Vec2>)], start: Ends, end: Ends, idx: &ItemIndex, centre: bool) -> Realised {
+pub fn realise(ctx: &Ctx, cp: &Coupled, runs: &[(u32, Vec<Vec2>)], start: Ends, end: Ends, idx: &ItemIndex, centre: bool, planned: Option<&[bool]>) -> Realised {
     let r = &cp.rule;
     let (w, p) = (r.width as f64, cp.pitch());
     let runs: Vec<(u32, Vec<Vec2>)> = runs.iter().map(|(l, pts)| (*l, clean(pts))).filter(|(_, pts)| pts.len() >= 2).collect();
@@ -699,13 +701,25 @@ pub fn realise(ctx: &Ctx, cp: &Coupled, runs: &[(u32, Vec<Vec2>)], start: Ends, 
     let last = &runs[runs.len() - 1].1;
     let de = unit(last[last.len() - 1] - last[last.len() - 2]);
     let s_end = if de.cross(end.n - end.p) >= 0.0 { 1.0 } else { -1.0 };
-    st.polarity_cross = s_end != s;
     // 2 nm over half the pitch: the 45-degree offsets round to whole nm and must not end 1 nm inside
     // the gap.
-    let (o_p, o_n) = (-s * (0.5 * p + 2.0), s * (0.5 * p + 2.0));
     let (vd, vdr) = via_of(ctx.model, r, ctx.opts);
     let vsize = ViaSize { d: vd, drill: vdr };
     let pv = (vd + r.via_gap) as f64;
+    // M4 parity: which via pairs flip P and N (the plan's choice when it fits the drawn layer
+    // changes, else the same rule on the drawn turns); the side of N per run.
+    let turns: Vec<(Vec2, Vec2)> = runs.windows(2).map(|w| {
+        let (pts, nx) = (&w[0].1, &w[1].1);
+        (pts[pts.len() - 1] - pts[pts.len() - 2], nx[1] - nx[0])
+    }).collect();
+    let (flips, resolved) = drawn_flips(&turns, s != s_end, planned, pv);
+    st.flips = flips.iter().filter(|&&f| f).count();
+    st.parity_resolved = resolved && planned.is_some();
+    let mut side = vec![s; runs.len()];
+    for k in 1..runs.len() {
+        side[k] = if flips[k - 1] { -side[k - 1] } else { side[k - 1] };
+    }
+    st.polarity_cross = side[runs.len() - 1] != s_end;
     // Anchors per run end.
     let mut anchors: Vec<(Ends, Ends)> = Vec::new();
     let mut a0 = start;
@@ -714,11 +728,9 @@ pub fn realise(ctx: &Ctx, cp: &Coupled, runs: &[(u32, Vec<Vec2>)], start: Ends, 
         let e = if k + 1 == runs.len() {
             end
         } else {
-            let nx = &runs[k + 1].1;
-            let din = pts[pts.len() - 1] - pts[pts.len() - 2];
-            let dout = nx[1] - nx[0];
+            let (din, dout) = turns[k];
             let v = pts[pts.len() - 1];
-            let (vp, vn) = via_pair(v, din, dout, s, pv, &ctx.opts.diffpair_via_axes);
+            let (vp, vn) = via_pair(v, din, dout, side[k], pv, &ctx.opts.diffpair_via_axes, flips[k]);
             p_vias.push((vp, vsize));
             n_vias.push((vn, vsize));
             Ends { p: vp, n: vn, long: 0.0 }
@@ -732,6 +744,8 @@ pub fn realise(ctx: &Ctx, cp: &Coupled, runs: &[(u32, Vec<Vec2>)], start: Ends, 
     let nr = runs.len();
     for (k, (layer, pts0)) in runs.iter().enumerate() {
         let (sa, ea) = anchors[k];
+        let sk = side[k];
+        let (o_p, o_n) = (-sk * (0.5 * p + 2.0), sk * (0.5 * p + 2.0));
         let pts = &if centre {
             let mid = |e: Ends| (e.p + e.n) * 0.5;
             let da = if k == 0 { (mid(start) - pts0[0]).dot(unit(pts0[1] - pts0[0]).perp()) } else { 0.0 };
@@ -765,7 +779,7 @@ pub fn realise(ctx: &Ctx, cp: &Coupled, runs: &[(u32, Vec<Vec2>)], start: Ends, 
         n_items.extend(tracks(r.n, *layer, w, &ln));
         st.length_p += length(&lp);
         st.length_n += length(&ln);
-        st.skew_estimate += skew_estimate(pts, s, p);
+        st.skew_estimate += skew_estimate(pts, sk, p);
         // Uncoupled at an end: from the anchor to where both lines run coupled.
         let (fs, fe) = (tps.max(tns), tpe.max(tne));
         let fan = |stub: &[Vec2], t_own: f64, t_both: f64| length(stub) + (t_both - t_own).max(0.0);
@@ -983,20 +997,30 @@ mod tests {
     }
 
     #[test]
-    fn swapped_sides_are_found() {
-        // qmtech USB_C_D: U9 D+ right of D-, U1 D+ left of D-: the straight lines cross.
-        assert!(swaps(v(100.177, 0.0), v(99.627, -2.6), v(99.677, 0.0), v(100.177, -2.6)));
-        // Two parallel rows, P above N at both ends (fx_dp_straight).
-        assert!(!swaps(v(3.0, -9.75), v(27.0, -9.75), v(3.0, -10.25), v(27.0, -10.25)));
-        // HDMI: P left of N at both ends.
-        assert!(!swaps(v(133.72, 0.0), v(133.2, 5.2), v(134.22, 0.0), v(134.2, 5.2)));
-        // USB-C rows: B6 -> A6 and A7 -> B7 on one line, overlapping.
-        assert!(swaps(v(89.25, 0.0), v(90.25, 0.0), v(89.75, 0.0), v(90.75, 0.0)));
+    fn via_pair_axis_is_square_to_the_pair() {
+        let (p, n) = via_pair(v(0.0, 0.0), v(1.0, 0.0), v(1.0, 0.0), 1.0, 0.65 * MM, &[0.0, 45.0, 90.0, 135.0], false);
+        assert!((p - v(0.0, -0.325)).len() < 1.0 && (n - v(0.0, 0.325)).len() < 1.0, "{p:?} {n:?}");
     }
 
     #[test]
-    fn via_pair_axis_is_square_to_the_pair() {
-        let (p, n) = via_pair(v(0.0, 0.0), v(1.0, 0.0), v(1.0, 0.0), 1.0, 0.65 * MM, &[0.0, 45.0, 90.0, 135.0]);
-        assert!((p - v(0.0, -0.325)).len() < 1.0 && (n - v(0.0, 0.325)).len() < 1.0, "{p:?} {n:?}");
+    fn a_flip_at_a_turn_back_keeps_the_axis_square_to_the_travel() {
+        // M4-PAIR2: heading east, turning back west. Keep would need the degenerate bisector; the
+        // flip puts the vias square to the travel, P on the side it arrived on (side -s = right).
+        let (p, n) = via_pair(v(0.0, 0.0), v(1.0, 0.0), v(-1.0, 0.0), 1.0, 0.7 * MM, &[0.0, 45.0, 90.0, 135.0], true);
+        assert!((p - v(0.0, -0.35)).len() < 1.0 && (n - v(0.0, 0.35)).len() < 1.0, "{p:?} {n:?}");
+        // Straight on with a flip: the in-line axis is the fallback only for a degenerate keep; a
+        // flip straight on uses din - dout = 0 too: in line along the travel.
+        let (p, n) = via_pair(v(0.0, 0.0), v(1.0, 0.0), v(1.0, 0.0), 1.0, 0.7 * MM, &[0.0, 45.0, 90.0, 135.0], true);
+        assert!((p.y).abs() < 1.0 && (n.y).abs() < 1.0 && (p - n).len() > 0.69 * MM, "{p:?} {n:?}");
+    }
+
+    #[test]
+    fn drawn_flips_take_the_plan_when_it_fits() {
+        let e = v(1.0, 0.0);
+        let back = v(-1.0, 0.0);
+        // Plan says flip at the one via pair, drawn turn is straight: kept (plan decides).
+        assert_eq!(drawn_flips(&[(e, e)], true, Some(&[true]), 0.7 * MM), (vec![true], false));
+        // Plan does not fit (no flip but one is needed): solved on the drawn turns.
+        assert_eq!(drawn_flips(&[(e, e), (e, back)], true, Some(&[false, false]), 0.7 * MM), (vec![false, true], true));
     }
 }
