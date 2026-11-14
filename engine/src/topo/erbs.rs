@@ -103,6 +103,11 @@ impl ErbsOpts {
 /// gates' width when larger, [`solve_flip`]).
 const PIN: f64 = 5000.0;
 
+thread_local! {
+    /// TOPO_ERBS_TIME: solves, seconds ordering, seconds solving, of this thread's stretch.
+    static PROF: std::cell::RefCell<(usize, f64, f64)> = const { std::cell::RefCell::new((0, 0.0, 0.0)) };
+}
+
 /// One solve of a stretch's gates in a given constraint state.
 struct Solved {
     /// The gates in path order.
@@ -119,7 +124,9 @@ struct Solved {
 /// Order the `base` gates (with `forced`) and solve from the points `pt` (by id).
 #[allow(clippy::too_many_arguments)]
 fn solve_ordered(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &BTreeSet<(usize, usize)>, prio: Option<&BTreeMap<usize, usize>>, pt: &BTreeMap<usize, Vec2>, opts: &ErbsOpts) -> Solved {
+    let t_o = std::time::Instant::now();
     let (ord, counts, frees) = order_gates(base, wedges, forced, prio);
+    let t_order = t_o.elapsed().as_secs_f64();
     let og: Vec<Gate> = ord.iter().map(|&i| base[i]).collect();
     let segs: Vec<(Vec2, Vec2)> = og.iter().map(|g| (g.a, g.b)).collect();
     // Two starts: the funnel ([`warm_start`]) and the points of the earlier solve (each gate's
@@ -134,6 +141,12 @@ fn solve_ordered(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &BTr
     all.extend(p.iter().copied());
     all.push(e);
     let len = poly_len(&all);
+    PROF.with(|c| {
+        let mut c = c.borrow_mut();
+        c.0 += 1;
+        c.1 += t_order;
+        c.2 += t_o.elapsed().as_secs_f64() - t_order;
+    });
     Solved { og, p, len, sweeps, converged, counts, frees }
 }
 
@@ -1266,6 +1279,7 @@ pub fn erbs_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrd
             }
             let s = &sts[si];
             let t_st = std::time::Instant::now();
+            PROF.with(|c| *c.borrow_mut() = (0, 0.0, 0.0));
             let mut base = gates_of(sh, &feats, &fg, s, si, o, per.get(&si).unwrap_or(&none), &radius, opts);
             let (c0, c1) = (s.band[0], s.band[s.band.len() - 1]);
             // Pad exits: the path leaves an elongated own pad straight along its axis to just past
@@ -1484,7 +1498,8 @@ pub fn erbs_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrd
             w.push(s.w);
             let path = simplify(&pts, 0.5);
             if std::env::var_os("TOPO_ERBS_TIME").is_some() {
-                eprintln!("ERBS time st {si} wire {} gates {} refined {} sweeps {} flips {} cycles {} conv {} {:.1} ms", s.wire, gs.len(), refined, sweeps, flips, counts[2], converged, t_st.elapsed().as_secs_f64() * 1e3);
+                let (ns, to, ts) = PROF.with(|c| *c.borrow());
+                eprintln!("ERBS time st {si} wire {} gates {} refined {} sweeps {} flips {} cycles {} conv {} solves {ns} order {:.1} ms solve {:.1} ms {:.1} ms", s.wire, gs.len(), refined, sweeps, flips, counts[2], converged, to * 1e3, ts * 1e3, t_st.elapsed().as_secs_f64() * 1e3);
             }
             Some(Erbs { lead, stretch: si, len: poly_len(&path), band_len: poly_len(&s.band), pts, w, path, gates: gs.len(), refined, sweeps, converged, gate_list: gs, reordered: counts[0], conflicts: counts[1], cycles: counts[2], flips: counts[3] })
         })
