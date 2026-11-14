@@ -321,6 +321,35 @@ fn local_gain(cur: &Solved, all: &[Vec2], win: (usize, usize), w: (usize, usize)
     new < old - 1.0
 }
 
+/// The solve on the gates in `on` with every other gate of `base` put back where the path
+/// crosses it (its portal: the path crosses no spoke), in the order along the path: the ERBS
+/// lists every gate it crosses, as the precedes order ([`precedes`]: a wire that bends at a cut's
+/// tip after the cut's inner items) and the check need (nested_wraps with the cuts left out:
+/// the precedes order lost, B drawn before A, 1.6 % longer). A gate the path does not meet
+/// (within 1 nm) stays out. O(gates x path).
+fn with_dropped(path: &[Vec2], base: &[Gate], on: &BTreeSet<usize>, cur: Solved, pt: &mut BTreeMap<usize, Vec2>) -> Solved {
+    // (leg, parameter along it, gate, point): an active gate's point k is path point k + 1, the
+    // end of leg k.
+    let mut items: Vec<(usize, f64, Gate, Vec2)> = cur.og.iter().zip(&cur.p).enumerate().map(|(k, (g, &x))| (k, 1.0, *g, x)).collect();
+    for g in base.iter().filter(|g| !on.contains(&g.id)) {
+        let hit = path.windows(2).enumerate().find_map(|(j, w)| {
+            let (d, x, _) = super::draw::seg_seg(w[0], w[1], g.a, g.b);
+            let l2 = (w[1] - w[0]).len2();
+            (d < 1.0).then(|| (j, if l2 > 0.0 { ((x - w[0]).dot(w[1] - w[0]) / l2).clamp(0.0, 1.0) } else { 0.0 }, x))
+        });
+        if let Some((j, t, x)) = hit {
+            // Leg j ends at active point j - 1 + 1: before that point when t < 1.
+            items.push((j, t, *g, x));
+            pt.insert(g.id, x);
+        }
+    }
+    // Leg j: from path point j to j + 1; the active point closing leg j has key (j, 1.0).
+    items.sort_by(|x, y| x.0.cmp(&y.0).then(x.1.total_cmp(&y.1)));
+    let og: Vec<Gate> = items.iter().map(|x| x.2).collect();
+    let p: Vec<Vec2> = items.iter().map(|x| x.3).collect();
+    Solved { og, p, ..cur }
+}
+
 /// [`solve_flip`] on the gates that can bind (lazy constraints): on a real board a stretch
 /// crosses hundreds of long cuts whose portals are wide open round it (eprom stretch 2: 685
 /// gates, cuts 13 mm long with 12 mm portals, for a 10 mm path; 97 % of the gate pairs meet,
@@ -386,7 +415,7 @@ fn solve_lazy(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BT
         PROF.with(|c| c.borrow_mut().4 += t_l.elapsed().as_secs_f64());
         if add.is_empty() {
             if settled || opts.flip_rounds == 0 {
-                return cur;
+                return with_dropped(&path, base, on, cur, pt);
             }
             settled = true;
             continue;
