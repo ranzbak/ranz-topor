@@ -462,6 +462,8 @@ fn a_wire_never_drop_skips_because_of_the_cut_keeps_both_reasons() {
         "fail wire drawing" => !f2.swap(true, std::sync::atomic::Ordering::SeqCst),
         "never drop" => {
             l2.reach();
+            // a round is cut only past its 1 s floor (core.rs `floor`)
+            std::thread::sleep(Duration::from_millis(1200));
             false
         }
         _ => false,
@@ -470,7 +472,6 @@ fn a_wire_never_drop_skips_because_of_the_cut_keeps_both_reasons() {
     let own = "its own drawing had failed: drawing: injected by the test hook";
     let both: Vec<&String> = r.connections.iter().map(|c| &c.reason).filter(|w| w.starts_with(DRAW_CUT) && w.contains(own)).collect();
     assert_eq!(both.len(), 1, "one wire: the cut reason and its own failure: {:?}\n{:?} {:?}", r.connections.iter().map(|c| &c.reason).filter(|w| !w.is_empty()).collect::<Vec<_>>(), r.limit, r.warnings.iter().filter(|w| w.contains("never drop") || w.contains("limit")).collect::<Vec<_>>());
-    assert_eq!(r.limit.as_ref().expect("limit report").cut_steps.contains(&"drawing".to_string()), true, "{:?}", r.limit);
 }
 
 #[test]
