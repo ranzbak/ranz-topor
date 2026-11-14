@@ -254,8 +254,10 @@ pub struct LoopReport {
 /// each, the state's predicted criteria are offered to `arch` (a copy taken only when no archived
 /// variant covers it). After `p.restart_after` cycles in which the pick did not get better the
 /// loop goes on from an archived variant drawn at random (seeded). Ends at stable, the cycle cap or
-/// when `stop()` (the time limit; then the report says so). The caller restores the pick.
-pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopParams, stop: &mut dyn FnMut() -> bool, clock: &dyn Fn() -> f64) -> LoopReport {
+/// when `stop()` before a cycle (the time limit, Cancel; then the report says so). `inner()` ends
+/// a running cycle early (M2.TL: Cancel only with the soft limit); a cycle it cut short is not
+/// offered (Cancel keeps the best variant archived so far). The caller restores the pick.
+pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopParams, stop: &mut dyn FnMut() -> bool, inner: &mut dyn FnMut() -> bool, clock: &dyn Fn() -> f64) -> LoopReport {
     let obj = p.obj;
     let mut rep = LoopReport { stop: "cycle cap".into(), ..LoopReport::default() };
     let mut rng = ChaCha8Rng::seed_from_u64(mix(p.seed, 0x5EED_7090));
@@ -299,9 +301,14 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
             since_gain = 0;
         }
         let ctx = CycleCtx { cycle, seed: mix(p.seed, cycle as u64), amp: sched.width, emphasis: p.emphasis };
-        let cs = sp.cycle(&ctx, stop);
+        let cs = sp.cycle(&ctx, inner);
         rep.stats.add(&cs);
         rep.cycles = cycle;
+        if inner() {
+            // cut short inside (Cancel): not a finished cycle, not a variant
+            rep.stop = "time limit".into();
+            break;
+        }
         gen += 1;
         let kept = offer(sp, arch, format!("cycle {cycle} (gen {gen})"), gen, cycle, &mut rep);
         if kept {
@@ -662,7 +669,7 @@ mod tests {
             t.set(t.get() + 1.0);
             t.get()
         };
-        let rep = optimise(&mut sp, &mut a, &params(seed, restart_after), &mut || false, &clock);
+        let rep = optimise(&mut sp, &mut a, &params(seed, restart_after), &mut || false, &mut || false, &clock);
         (sp, a, rep)
     }
 
@@ -722,10 +729,26 @@ mod tests {
             n += 1;
             n > 3
         };
-        let rep = optimise(&mut sp, &mut a, &params(1, 2), &mut stop, &|| 0.0);
+        let rep = optimise(&mut sp, &mut a, &params(1, 2), &mut stop, &mut || false, &|| 0.0);
         assert_eq!(rep.stop, "time limit");
         assert_eq!(rep.cycles, 3);
         assert!(!a.items.is_empty());
+    }
+
+    #[test]
+    fn a_cycle_cut_short_inside_is_not_offered() {
+        // M2.TL: Cancel inside a cycle stops it; its half-done state is no variant.
+        let mut sp = toy();
+        let mut a = Archive::new(4);
+        let mut n = 0;
+        let mut inner = || {
+            n += 1;
+            n > 2
+        };
+        let rep = optimise(&mut sp, &mut a, &params(1, 2), &mut || false, &mut inner, &|| 0.0);
+        assert_eq!(rep.stop, "time limit");
+        assert_eq!(rep.cycles, 3, "the third cycle was cut inside");
+        assert_eq!(rep.offered, 3, "the initial plan and the two finished cycles only");
     }
 
     #[test]
@@ -733,7 +756,7 @@ mod tests {
         let mut sp = toy();
         let mut a = Archive::new(4);
         let p = LoopParams { stable_window: 2, stable_gain_pct: 50.0, ..params(1, 0) };
-        let rep = optimise(&mut sp, &mut a, &p, &mut || false, &|| 0.0);
+        let rep = optimise(&mut sp, &mut a, &p, &mut || false, &mut || false, &|| 0.0);
         assert_eq!(rep.stop, "stable");
         assert_eq!(rep.stable_at, Some(2), "a gain below 50 % over 2 cycles");
         assert_eq!(rep.cycles, 2);

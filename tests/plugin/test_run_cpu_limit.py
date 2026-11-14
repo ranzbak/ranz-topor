@@ -54,7 +54,8 @@ def test_cpu_clock_cancels_the_job_and_keeps_the_best(app, eprom, tmp_path, repo
     eng = RecordingEngine(hold=12, patch=_as("cancel", timed_out=True))
     ui = ScriptedUi(accept=False)
     _, _, out = do_run(eprom, tmp_path, ui=ui, cfg=cfg, engine=eng)
-    assert eng.jobs[0].cancelled  # the plugin cancelled the job when the CPU limit was reached
+    # M2.TL soft limit (default): the CPU limit is the engine's soft limit, not a Cancel
+    assert eng.jobs[0].reached and not eng.jobs[0].cancelled
     assert eng.options[0]["wall_clock_s"] == 0.0  # the engine's own wall limit is off in cpu mode
     assert out.stop_reason == "timeout_cpu" and out.cancelled is False
     assert out.items, "the best result so far is kept"
@@ -86,3 +87,165 @@ def test_wall_clock_is_unchanged_and_cpu_time_is_still_reported(app, eprom, tmp_
     assert out.stop_reason == "timeout_wall"
     assert "TIME_BUDGET_HIT" in {x.code for x in out.findings}
     assert out.router_cpu_s >= 5.0 and _result_json(out)["router_cpu_s"] >= 5.0
+
+
+def test_cpu_clock_soft_limit_reports_where_and_how_far_past(app, eprom, tmp_path, reports, cpu_counter):
+    cfg = CFG.with_values({("run", "timeout_clock"): "cpu", ("run", "timeout_s"): 3.0})
+    eng = RecordingEngine(hold=12, patch=_as("timeout", timed_out=True))
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=cfg, engine=eng)
+    tl = _result_json(out)["time_limit"]
+    assert tl["mode"] == "soft" and tl["reached"] is True and tl["overrun_s"] >= 0.0
+    assert "reached during" in (out.report.dir / "report.md").read_text()
+
+
+def test_cpu_clock_hard_limit_takes_the_engines_hard_path(app, eprom, tmp_path, reports, cpu_counter):
+    # verify-m2c 1: the CPU clock's hard limit is reached in the engine and acts as hard (reach_limit, then harden):
+    # the same path as the wall clock's hard limit (the step that runs is cut, the kept plan drawn in full); never a
+    # Cancel, which keeps no plan during the initial routing (NOTHING_TO_DRAW)
+    cfg = CFG.with_values({("run", "timeout_clock"): "cpu", ("run", "timeout_s"): 3.0, ("run", "timeout_mode"): "hard"})
+    eng = RecordingEngine(hold=12, patch=_as("timeout", timed_out=True))
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=cfg, engine=eng)
+    assert eng.jobs[0].reached and eng.jobs[0].hardened and not eng.jobs[0].cancelled
+    assert eng.options[0]["timeout_mode"] == "hard"
+    assert out.stop_reason == "timeout_cpu" and out.cancelled is False
+    assert out.items, "the kept plan is drawn"
+    tl = _result_json(out)["time_limit"]
+    assert tl["mode"] == "hard" and tl["reached"] is True and tl["cap_hit"] is False, tl
+
+
+def test_cpu_clock_hard_limit_cancels_an_engine_without_reach(app, eprom, tmp_path, reports, cpu_counter):
+    # an engine older than the plugin (no RouteJob.reach_limit / harden): Cancel as the fallback, said loudly
+    from test_run_flow import ProxyJob
+
+    class Old(ProxyJob):
+        reach_limit = None
+        harden = None
+
+    class Eng(RecordingEngine):
+        def route_async(self, m, o):
+            job = super().route_async(m, o)
+            old = Old(job.real, job.hold, job.patch)
+            self.jobs[-1] = old
+            return old
+
+    cfg = CFG.with_values({("run", "timeout_clock"): "cpu", ("run", "timeout_s"): 3.0, ("run", "timeout_mode"): "hard"})
+    eng = Eng(hold=12, patch=_as("cancel", timed_out=True))
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=cfg, engine=eng)
+    assert eng.jobs[0].cancelled
+    assert out.stop_reason == "timeout_cpu"
+    assert "cannot reach its time limit from the CPU clock" in (out.report_dir / "log.txt").read_text()
+
+
+def test_cancel_before_any_plan_is_a_loud_error(app, eprom, tmp_path, reports, cpu_counter):
+    # M2.TL fail fast: the engine kept no plan (Cancel during the initial routing): an error, never a quiet cancel
+    why = "nothing to draw yet: Cancel / OK came before the initial routing of any run had ended"
+    eng = RecordingEngine(hold=2, patch=_as("cancel", items=[], routed=0, warnings=[f"ERROR: {why}", why]))
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=CFG, engine=eng, strict=False)
+    assert out.status == "error" and out.error is not None and out.error.code == "NOTHING_TO_DRAW", out.status
+    assert why in out.error.message
+
+
+def test_soft_limit_overrun_leaves_out_the_measurements(app, eprom, tmp_path, reports, cpu_counter):
+    # M2.TL: the overrun is router time past the limit; the engine's measurements outside the limit (M1 compass cut
+    # test, Progress.measure_s) are not part of it, as they are not part of the limit
+    from test_run_flow import ProxyJob
+
+    class Measuring(ProxyJob):
+        def progress(self):
+            d = json.loads(super().progress())
+            d["measure_s"] = 4.0
+            return json.dumps(d)
+
+    class Eng(RecordingEngine):
+        def route_async(self, m, o):
+            job = super().route_async(m, o)
+            mj = Measuring(job.real, job.hold, job.patch)
+            self.jobs[-1] = mj
+            return mj
+
+    cfg = CFG.with_values({("run", "timeout_clock"): "cpu", ("run", "timeout_s"): 3.0})
+    eng = Eng(hold=14, patch=_as("timeout", timed_out=True))
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=cfg, engine=eng)
+    tl = _result_json(out)["time_limit"]
+    assert eng.jobs[0].reached and tl["reached"] is True
+    assert tl["overrun_s"] == pytest.approx(max(0.0, out.router_cpu_s - 4.0 - 3.0), abs=1e-3), (tl, out.router_cpu_s)
+
+
+class _CancelOnceLimitPassed(ScriptedUi):
+    """Presses Cancel once the CPU soft limit (3 s) is well behind (8 CPU s on the counter)."""
+
+    def progress(self, p):
+        super().progress(p)
+        return not (p.cpu_s >= 8.0)
+
+
+def test_cancel_after_the_cpu_soft_limit_still_cancels_the_job(app, eprom, tmp_path, reports, cpu_counter):
+    # M2.TL: the soft limit lets the current step finish; Cancel after it must still stop now (found by verify-m2:
+    # the soft limit used the Cancel bookkeeping, so the later Cancel never reached the engine)
+    cfg = CFG.with_values({("run", "timeout_clock"): "cpu", ("run", "timeout_s"): 3.0})
+    eng = RecordingEngine(hold=20, patch=_as("timeout", timed_out=True))
+    _, _, out = do_run(eprom, tmp_path, ui=_CancelOnceLimitPassed(accept=False), cfg=cfg, engine=eng)
+    job = eng.jobs[0]
+    assert job.reached, "the soft limit came first"
+    assert job.cancelled, "the user's Cancel after the soft limit never reached the engine job"
+
+
+def test_headless_overrun_cap_acts_as_the_hard_limit_and_warns(app, eprom, tmp_path, reports, cpu_counter):
+    # F3 run.timeout_overrun_s = auto (default): headless = timeout_s, so past 2 x the limit the soft limit acts as the
+    # hard one (RouteJob.harden on the CPU clock), loudly: log, finding, report, result.json
+    cfg = CFG.with_values({("run", "timeout_clock"): "cpu", ("run", "timeout_s"): 3.0})
+    eng = RecordingEngine(hold=20, patch=_as("timeout", timed_out=True))
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=cfg, engine=eng)
+    job = eng.jobs[0]
+    assert job.reached and job.hardened and not job.cancelled
+    assert eng.options[0]["timeout_overrun_s"] == 0.0, "the CPU clock caps in the plugin, not on the engine's wall clock"
+    tl = _result_json(out)["time_limit"]
+    assert tl["cap_s"] == 3.0 and tl["cap_hit"] is True, tl
+    f = {x.code: x for x in out.findings}
+    assert "TIME_OVERRUN_CAP" in f and "CPU clock" in f["TIME_OVERRUN_CAP"].message, list(f)
+    assert "overrun cap" in (out.report.dir / "report.md").read_text()
+    assert "WARNING: time limit overrun cap reached" in (out.report_dir / "log.txt").read_text()
+
+
+def test_headless_wall_clock_overrun_cap_goes_to_the_engine(app, eprom, tmp_path, reports, cpu_counter):
+    cfg = CFG.with_values({("run", "timeout_s"): 60.0, ("run", "timeout_overrun_s"): 15.0})
+    eng = RecordingEngine(hold=3)
+    do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=cfg, engine=eng)
+    assert eng.options[0]["timeout_overrun_s"] == 15.0 and eng.options[0]["wall_clock_s"] == 60.0
+
+
+class _GuiCancelLate(ScriptedUi):
+    """The progress dialog (waits_for_ok) whose user presses Cancel only at 14 CPU s (limit 3 s: past 2 x the limit)."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.waits_for_ok = True
+
+    def progress(self, p):
+        super().progress(p)
+        return not (p.cpu_s >= 14.0)
+
+
+def test_gui_has_no_overrun_cap_and_keeps_going_until_cancel(app, eprom, tmp_path, reports, cpu_counter):
+    # F3: in the KiCad dialog auto = no cap: the run goes on past 2 x the limit until the user's Cancel (F1)
+    cfg = CFG.with_values({("run", "timeout_clock"): "cpu", ("run", "timeout_s"): 3.0})
+    eng = RecordingEngine(hold=40, patch=_as("cancel", timed_out=True))
+    _, _, out = do_run(eprom, tmp_path, ui=_GuiCancelLate(accept=False), cfg=cfg, engine=eng)
+    job = eng.jobs[0]
+    assert job.reached and job.cancelled and not job.hardened
+    assert eng.options[0]["timeout_overrun_s"] == 0.0
+    tl = _result_json(out)["time_limit"]
+    assert tl["cap_s"] is None and tl["cap_hit"] is False, tl
+    assert out.router_cpu_s >= 14.0, "it went on past twice the limit"
+    assert "TIME_OVERRUN_CAP" not in {x.code for x in out.findings}
+
+
+def test_the_engines_cut_steps_reach_result_json(app, eprom, tmp_path, reports, cpu_counter):
+    # verify-m2d O4: time_limit.cut / cut_steps of the engine's limit report are carried into result.json
+    cfg = CFG.with_values({("run", "timeout_clock"): "cpu", ("run", "timeout_s"): 3.0, ("run", "timeout_mode"): "hard"})
+    lim = {"limit_s": 0.0, "mode": "hard", "reached": True, "step": "drawing the traces", "overrun_s": 0.0,
+           "cap_s": None, "cap_hit": False, "cut": "drawing", "cut_steps": ["drawing", "via_reduction"]}
+    eng = RecordingEngine(hold=12, patch=_as("timeout_cpu", timed_out=True, limit=lim))
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=cfg, engine=eng)
+    tl = _result_json(out)["time_limit"]
+    assert tl["cut"] == "drawing" and tl["cut_steps"] == ["drawing", "via_reduction"], tl

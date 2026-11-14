@@ -25,6 +25,13 @@ class Msg:
 
 _CFG = "topor.toml (next to the .kicad_pro)"
 
+
+#: What the time limit cut when it acted as hard (`hard`, or past run.timeout_overrun_s: one path, user
+#: 2026-11-13), by the engine's limit report `cut` (run report time_limit.cut).
+CUT_TEXT = {"plan": "the step that ran then was cut and the kept plan was drawn in full",
+            "drawing": "the drawing was the step that ran then and was cut (TIME_DRAWING_CUT): the connections it had not drawn stay unrouted, a cut via reduction or pour stitching leaves its work unfinished",
+            "none": "it passed only after the steps it stops had ended: nothing was cut"}
+
 MESSAGES: dict[str, Msg] = {
     # ---------------------------------------------------------------- configuration
     "CFG_CREATED": Msg("info",
@@ -85,6 +92,9 @@ MESSAGES: dict[str, Msg] = {
     "ENGINE_BOARD_UNREADABLE": Msg("error",
         "The routing engine could not read this board: building its map of the board (one triangulation of every pad, via, rule area, copper graphic and the outline, on all layers at once) failed, so every connection would fail. Topor checks this right after reading the board and stopped before the pre-flight DRC and the settings dialog. The board was not changed. The message names the copper where it failed, with its layer, net and place.",
         "Look at the named copper (KiCad → Edit → Find by its footprint reference, or go to the coordinates): copper graphics, vias or rule areas whose outlines lie almost exactly on top of each other on different layers (e.g. a footprint's copper arcs and lines that meet end to end on two layers) are the usual cause. Move one by a few µm or merge the duplicates, save, and press the Topor button again. Please report the board (docs/dev/debug.md, TOPOR_DUMP_ENGINE_INPUT) so the engine can read it as it is."),
+    "NOTHING_TO_DRAW": Msg("error",
+        "Cancel / OK came before the router had kept any plan (before the initial routing of any run had ended: its topology search, layer assignment and rip-up rounds), so there was nothing to draw: no copper was written and the board was not changed. A Cancel later in the run draws the best plan kept so far.",
+        "Route again and let the initial routing finish (the progress dialog names the step; on a large board it can take a minute or more), then press OK / Cancel; or let the time limit end the run (run.timeout_s, [run] timeout_mode = soft: the step that runs then finishes and its plan is drawn)."),
     "ENGINE_FAILED": Msg("error",
         "All or most connections failed with the same routing-engine error (e.g. the board's projection could not be built), so this is not a normal run that happened to route nothing. No copper was written; the board was not changed.",
         "Read the engine message in the details; for a projection error look at the named copper as for ENGINE_BOARD_UNREADABLE (KiCad → Edit → Find by its footprint reference). Run again; if it recurs, file a bug with log.txt and result.json from the report folder (docs/dev/debug.md)."),
@@ -217,6 +227,12 @@ MESSAGES: dict[str, Msg] = {
     "TIME_BUDGET_HIT": Msg("warning",
         "The time limit (or a Cancel) stopped the topological core before its routes were stable ([optimize] stable_window / stable_gain_pct); the result is the best so far and may differ between runs and machines. The stop reason says which clock fired: timeout_wall (seconds on the clock) or timeout_cpu (CPU seconds summed over all threads, run.timeout_clock = cpu).",
         "Raise run.timeout_s (0 = no limit; Cancel always works; run.timeout_clock chooses wall or cpu seconds) and route again, or add time while the router runs (progress dialog: +5 min / +15 min or a new Time limit), or lower [optimize] runs (best of N runs share the threads); wait for \"Routes stable\" and press OK for a reproducible result."),
+    "TIME_OVERRUN_CAP": Msg("warning",
+        "The soft time limit (run.timeout_mode = soft) let the step that ran go on past run.timeout_s, until the overrun cap run.timeout_overrun_s (on the same clock); then the run acted as with the hard limit: the step that ran was cut and the kept plan (the best variant so far, or the initial plan) was drawn in full; when the drawing itself was the step that ran, the drawing was cut there (TIME_DRAWING_CUT). A cut initial routing or drawing leaves connections unrouted, a cut TopoR loop cycle is not kept; a cap that passed only after those steps had ended cut nothing. The warning says which. By default the cap is equal to run.timeout_s in headless runs (harness, MCP, scripts and direct engine calls: about twice the limit plus the drawing of one plan, plus the time a step takes to see the stop, measurements outside the limit and more drawings with [optimize] loop = \"cycles\" or runs > 1; operate.md) and off in the KiCad dialog, where Cancel stops a run.",
+        "Raise run.timeout_overrun_s (seconds past the limit; 0 or \"none\" = no cap) or run.timeout_s and route again, or lower [optimize] runs; in the KiCad dialog leave the cap off (auto) and press Cancel when the overrun is too long."),
+    "TIME_DRAWING_CUT": Msg("warning",
+        "The time limit acted as hard (run.timeout_mode = hard, or the soft limit past its overrun cap run.timeout_overrun_s) while the drawing ran: the drawing had begun before the limit and ran past it, so the limit cut it there. The board is drawn only in part: the connections the drawing had not reached stay unrouted (reason \"time limit reached before this connection was drawn\"), a cut via reduction leaves the vias it had not removed, a cut pour stitching leaves pour pieces apart (open in KiCad's DRC). The warning says how many connections were drawn. A limit that acted as hard before the drawing began never cuts it (the kept plan is drawn in full). With [optimize] loop = \"topor\" the loop may use loop_time_share of the time left, so on a large board the drawing can start before the limit and still run past it.",
+        "For a complete board use run.timeout_mode = soft (the default: the drawing always runs to its end) or a longer run.timeout_s (or run.timeout_overrun_s past the soft limit), or lower [optimize] loop_time_share so more of the limit is left for the drawing; then route again."),
     "DRC_NEW_VIOLATIONS": Msg("warning",
         "KiCad's DRC of the routed copy finds rule violations in the new copper that the board did not have before (clearance, short, hole clearance, edge clearance, ...). The finding counts them by type and names the first places with their nets and position. The result can still be accepted: the violations then stay on the board until you fix them.",
         "After Accept, run KiCad → Inspect → Design Rules Checker to see each one; fix them by hand or route again (Reject, then give the router more room or time: run.timeout_s, [optimize] runs)."),

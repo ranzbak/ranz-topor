@@ -26,7 +26,8 @@ enum After {
     /// the first run began routing (progress phase "route")
     Routing,
     /// a run began its TopoR loop (progress stage "TopoR loop ..."; a Cancel from there on draws
-    /// the loop's pick; before it, during P3/P4, a Cancel leaves no copper)
+    /// the loop's pick; before it, during P3/P4, a Cancel leaves no copper and says so loudly,
+    /// M2.TL "nothing to draw yet")
     Loop,
 }
 
@@ -132,5 +133,7 @@ fn cancel_in_p3_p4_with_the_cut_model_ends_quickly() {
         eprintln!("{fx}: stopped {s:.2} s after the Cancel ({} s into the call)", t0.elapsed().as_secs_f64() - s);
         assert!(s < BOUND_S, "{fx}: Cancel in P3/P4 took {s:.2} s to end the run");
         assert_eq!(r.stop_reason, "cancel", "{fx}: {:?}", r.warnings);
+        // M2.TL: the initial routing's plan counts once P4 ends: no copper, said loudly
+        assert!(r.warnings.first().is_some_and(|w| w.starts_with("ERROR: nothing to draw yet")) && r.items.is_empty(), "{fx}: {:?}", r.warnings);
     }
 }

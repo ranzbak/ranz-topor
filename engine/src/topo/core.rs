@@ -43,7 +43,7 @@ use super::planes;
 use super::state::{ObsId, State, VertId, VertKind, WireId, NO_OBS};
 use super::tree;
 use crate::check::Checker;
-use crate::control::{cancelled, RunControl};
+use crate::control::{cancelled, CutStep, RunControl};
 use crate::decompose::{decompose_with, Connection, TermKind, TermRef};
 use crate::geom::Vec2;
 use crate::model::{BoardModel, Item, Options};
@@ -169,6 +169,11 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     });
     ctl.stage(1, opts.topo_rounds.max(1) as u32, "plane stubs (pads of plane nets onto their pour)");
     ctl.limit.init(opts.wall_clock_s); // live limit (control::TimeLimit): the caller may change it during the run
+    ctl.limit.set_hard(opts.timeout_mode == "hard");
+    // F3 `[run] timeout_overrun_s` (the engine's own wall-clock limit; the plugin's CPU clock
+    // hardens the limit itself, RouteJob.harden): past the limit by this much, the soft limit acts
+    // as the hard one. "auto" (the engine's default, user 2026-11-13) = `wall_clock_s`.
+    ctl.limit.set_overrun_cap(if opts.timeout_mode == "hard" { 0.0 } else { opts.overrun_cap_s() });
     let stubs = place_plane_stubs(model, opts, ctl);
     ctl.stage(1, opts.topo_rounds.max(1) as u32, "projection of the board");
     let t_fx = Instant::now();
@@ -179,21 +184,24 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         eprintln!("[topo call] projection built once (decomposition, triangulation, cut room): {:.3} s", t_fx.elapsed().as_secs_f64());
     }
     if ctl.is_cancelled() && opts.capacity_model == "cuts" {
-        let mut r = unrouted(model, opts, "Cancel / OK came during the projection of the board (the cut room of [capacity] model = \"cuts\"), before any run began");
-        r.stop_reason = "cancel".into();
-        r.timed_out = true;
+        // M2.TL (fail fast): no plan kept yet, so nothing to draw, said loudly.
+        let why = format!("{NOTHING_TO_DRAW}: Cancel / OK came during the projection of the board (the cut room of [capacity] model = \"cuts\"), before any run began, so no plan was kept and no copper is written");
+        let mut r = nothing_to_draw(model, opts, ctl, &why, t0);
         r.converged = false;
-        r.runtime_s = t0.elapsed().as_secs_f64();
         return r;
     }
-    let coord = Coord::new(ctl, n, obj);
+    let coord = Coord::new(ctl, n, obj, opts.draw_candidates);
     let (mut outs, skipped) = run_all(model, opts, ctl, &coord, &stubs, &fx, t0, n);
     if outs.is_empty() {
-        // cannot happen (the first run to begin always ends with a result); never a panic
-        let mut r = unrouted(model, opts, "no run of the call began a cycle");
-        r.stop_reason = if ctl.is_cancelled() { "cancel" } else { "timeout" }.into();
-        r.timed_out = true;
-        return r;
+        // M2.TL (fail fast): Cancel / OK before any run kept a plan: nothing to draw, said loudly
+        // (never a quiet empty result). Without a Cancel this cannot happen (the first run to begin
+        // always keeps its initial plan); never a panic.
+        let why = if ctl.is_cancelled() {
+            format!("{NOTHING_TO_DRAW}: Cancel / OK came before the initial routing of any run had ended, so no plan was kept and no copper is written ({})", skipped.iter().map(|(k, w)| format!("run {}: {w}", k + 1)).collect::<Vec<_>>().join("; "))
+        } else {
+            format!("{NOTHING_TO_DRAW}: no run of the call kept a plan ({})", skipped.iter().map(|(k, w)| format!("run {}: {w}", k + 1)).collect::<Vec<_>>().join("; "))
+        };
+        return nothing_to_draw(model, opts, ctl, &why, t0);
     }
     // The best run: fewest errors, then the objective, then shrinkages; ties: the lower run.
     let mut pick = 0;
@@ -238,11 +246,122 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     best.runtime_s = t0.elapsed().as_secs_f64();
     if best.timed_out {
         let limit = ctl.limit.seconds().unwrap_or(opts.wall_clock_s);
-        let why = if cancel { "Cancel stopped the run before its routes were stable".to_string() } else if ctl.limit.changed() { format!("the time limit of {limit:.0} s (changed during the run; run.timeout_s = {:.0} s) stopped the run before its routes were stable", opts.wall_clock_s) } else { format!("run.timeout_s = {limit:.0} s stopped the run before its routes were stable") };
+        // Name the limit and its clock. The engine's own limit is the wall clock; a caller that counts
+        // another clock (the plugin's [run] timeout_clock = cpu) reaches the limit itself and gives the engine
+        // none (`wall_clock_s` 0), so the seconds `limit` are then wall seconds at the reach, not its limit.
+        let why = if cancel {
+            "Cancel stopped the run before its routes were stable".to_string()
+        } else if ctl.limit.changed() {
+            format!("the time limit of {limit:.0} s wall clock (changed during the run; [run] timeout_s = {:.0} s) stopped the run before its routes were stable", opts.wall_clock_s)
+        } else if opts.wall_clock_s <= 0.0 {
+            format!("the caller's own time limit ([run] timeout_s on its clock, e.g. [run] timeout_clock = cpu; reached {limit:.0} s into the run, wall clock) stopped the run before its routes were stable")
+        } else {
+            format!("[run] timeout_s = {limit:.0} s (wall clock) stopped the run before its routes were stable")
+        };
         best.warnings.push(format!("{TIME_HIT} ({why})"));
     }
+    best.limit = limit_report(ctl, opts, &mut best);
     best
 }
+
+/// M2.TL: the start of the loud error when Cancel / OK came before any plan was kept.
+pub const NOTHING_TO_DRAW: &str = "nothing to draw yet";
+
+/// M2.TL (fail fast): the call's result when no plan was kept (`why` starts with
+/// [`NOTHING_TO_DRAW`]): every connection unrouted with `why`, an `ERROR:` line first, no copper.
+/// O(connections).
+fn nothing_to_draw(model: &BoardModel, opts: &Options, ctl: &RunControl, why: &str, t0: Instant) -> RouteResult {
+    let mut r = unrouted(model, opts, why);
+    r.warnings.insert(0, format!("ERROR: {why}"));
+    r.stop_reason = if ctl.is_cancelled() { "cancel" } else { "timeout" }.into();
+    r.timed_out = true;
+    r.runtime_s = t0.elapsed().as_secs_f64();
+    r.limit = limit_report(ctl, opts, &mut r);
+    r
+}
+
+/// M2.TL: the call's time limit at its end ([`crate::route::LimitReport`]): reached or not, the
+/// step that ran then and the time past it (`r.runtime_s` minus the limit), with report lines in
+/// `r.warnings` that name what the limit did: with the soft limit the step that ran finished; when
+/// it acted as hard (`hard`, or past the overrun cap) the step that ran was cut and the kept plan
+/// drawn in full (one path for both, user 2026-11-13), or a step of the drawing itself was cut
+/// (the drawing: connections left unrouted; the via reduction; the pour stitching), or nothing
+/// was cut (it passed after the steps it stops had ended). What was cut is what the stop tests
+/// noted ([`crate::control::TimeLimit::cut_steps`], verify-m2c 4), not the connections' reasons
+/// (a Cancel leaves its own). `None` without a limit. O(connections).
+fn limit_report(ctl: &RunControl, opts: &Options, r: &mut RouteResult) -> Option<crate::route::LimitReport> {
+    let limit_s = ctl.limit.seconds()?;
+    let runtime_s = r.runtime_s;
+    let mode = if opts.timeout_mode == "hard" { "hard" } else { "soft" };
+    let reached = runtime_s >= limit_s;
+    let step = if reached { ctl.snapshot().limit_step } else { String::new() };
+    let overrun_s = if reached { ((runtime_s - limit_s) * 1e3).round() / 1e3 } else { 0.0 };
+    let cap_s = ctl.limit.overrun_cap_s();
+    let cap_hit = mode == "soft" && ctl.limit.cap_hit();
+    let steps = ctl.limit.cut_steps();
+    let drawn_cut: Vec<CutStep> = steps.iter().copied().filter(|s| s.in_drawing()).collect();
+    let cut = if steps.is_empty() { "none" } else if drawn_cut.is_empty() { "plan" } else { "drawing" };
+    let undrawn = r.connections.iter().filter(|c| c.reason == DRAW_CUT).count();
+    // What the limit did when it acted as hard (`hard`, or the soft limit past its overrun cap).
+    let plan_text = |words: &str| format!("the step that ran then was cut and the kept plan (the best variant so far, or the initial plan) was drawn in full (cut: {words}; a cut initial routing leaves the connections it had not reached unrouted; a cut TopoR loop cycle is not kept)");
+    let plan_words = steps.iter().filter(|s| !s.in_drawing()).map(|s| s.words()).collect::<Vec<_>>().join(", ");
+    let draw_text = || {
+        let parts: Vec<String> = drawn_cut
+            .iter()
+            .map(|s| match s {
+                CutStep::Drawing => format!("the drawing of the traces was cut: {} of {} connections drawn, {undrawn} left undrawn by the cut", r.routed, r.connections_total),
+                CutStep::ViaReduction => "the via reduction was cut (the vias it had not removed yet stay)".to_string(),
+                _ => "the pour stitching was cut (pour pieces it had not joined stay apart: open connections in KiCad's DRC)".to_string(),
+            })
+            .collect();
+        format!("the drawing was the step that ran then: {}", parts.join("; "))
+    };
+    let as_hard = match cut {
+        "drawing" if plan_words.is_empty() => draw_text(),
+        "drawing" => format!("{}; in a run whose drawing ran then {}", plan_text(&plan_words), draw_text()),
+        "plan" => plan_text(&plan_words),
+        _ => format!("it passed only after the steps it stops had ended{}: nothing was cut", if ctl.snapshot().stage.is_empty() { String::new() } else { format!(" (during {})", ctl.snapshot().stage) }),
+    };
+    if reached {
+        r.warnings.push(format!(
+            "time limit ({mode}, [run] timeout_mode): {limit_s:.0} s reached during {}; {}; the result was ready {overrun_s:.1} s past the limit (wall clock)",
+            if step.is_empty() { "the run" } else { step.as_str() },
+            if cap_hit { format!("the step that ran went on until the overrun cap, then {as_hard}") } else if mode == "soft" { "the step that ran finished, no new one began and the best kept variant was drawn".to_string() } else { as_hard.clone() }
+        ));
+    }
+    if cap_hit {
+        // F3 (user 2026-11-13): loud; says what the cap did (cut a step, cut the drawing, or nothing)
+        r.warnings.push(format!(
+            "WARNING: time limit overrun cap reached ({}): past it the soft limit acted as the hard one: {as_hard}; raise [run] timeout_overrun_s or timeout_s, or use Cancel instead",
+            cap_s.map_or("the caller's cap on its own clock".to_string(), |c| format!("[run] timeout_overrun_s = {c:.0} s past the {limit_s:.0} s limit, wall clock"))
+        ));
+    }
+    if !drawn_cut.is_empty() {
+        // verify-m2c 3 (decided behaviour, user decision on a change pending): a limit acting as
+        // hard that passes while the drawing runs cuts it; the board is then drawn only in part.
+        let what = drawn_cut.iter().map(|s| s.words()).collect::<Vec<_>>().join(", ");
+        r.warnings.push(format!(
+            "{DRAWING_CUT_LINE}{} ({what}): {} of {} connections drawn{}; {}",
+            if cap_hit { " (the soft limit past its overrun cap acts as the hard one)" } else { "" },
+            r.routed,
+            r.connections_total,
+            if undrawn > 0 { format!(", {undrawn} left undrawn by the cut") } else { String::new() },
+            if cap_hit { "raise [run] timeout_overrun_s or timeout_s for a complete board (the drawing began before the cap and ran past it)" } else { "use [run] timeout_mode = \"soft\" or a longer [run] timeout_s for a complete board (the drawing began before the limit and ran past it)" }
+        ));
+    }
+    let cut_steps = steps.iter().map(|s| s.name().to_string()).collect();
+    Some(crate::route::LimitReport { limit_s, mode: mode.into(), reached, step, overrun_s, cap_s, cap_hit, cut: cut.into(), cut_steps })
+}
+
+/// The reason of a connection the time limit left undrawn (the drawing was the step that ran).
+const DRAW_CUT: &str = "time limit reached before this connection was drawn";
+
+/// The reason of a connection a Cancel / OK left undrawn in a drawing that it ends (a whole-route
+/// cycle of `[optimize] loop = "cycles"`; the TopoR loop's one drawing runs through a Cancel).
+const DRAW_CANCEL: &str = "Cancel / OK came before this connection was drawn";
+
+/// The start of the loud line when the time limit, acting as hard, cut a step of the drawing.
+pub const DRAWING_CUT_LINE: &str = "WARNING: the drawing was cut by the hard time limit";
 
 /// One run of a best-of-N call, as [`route_topo`] needs it back.
 struct RunOut {
@@ -267,7 +386,7 @@ struct Coord<'a> {
     /// cancel-fix: criteria of the call's best pick so far ([`Coord::publish`]) and whether it is
     /// of a complete cycle (not cut short).
     snap: std::sync::Mutex<Option<(Criteria, bool)>>,
-    /// cancel-fix: after Cancel / OK only one TopoR loop pick of the call is drawn.
+    /// M2: which runs draw their TopoR loop pick ([`DrawGate`]).
     gate: DrawGate,
     /// cancel-fix: after Cancel / OK the cut-short cycles of the runs are stitched and judged one at
     /// a time, and only one that beats the cut-short cycles judged before it (their criteria before
@@ -276,80 +395,176 @@ struct Coord<'a> {
     judge: std::sync::Mutex<Option<Criteria>>,
 }
 
-/// cancel-fix, `[optimize] loop = "topor"`: after Cancel / OK the loops of the runs end at their
-/// next stop check, and only one of their picks is drawn (the drawing of a big board takes many
-/// seconds, the plan is all the loop changes): the best by its predicted criteria among the runs
-/// whose loops ended within [`DrawGate::WAIT`] of each other; ties: the lower run. A loop that
-/// ends by itself (stable, cycle cap, time limit) is drawn as before.
-#[derive(Default)]
+/// M2 = 6.1 draw once, `[optimize] loop = "topor"`: which runs draw their TopoR loop pick. Every
+/// run offers its pick with its predicted criteria (the plan's measure, nothing drawn) or
+/// withdraws (it was not begun, or Cancel came before its initial routing ended: nothing kept);
+/// when no run can offer any more, the best `[drawing] candidates` picks by the objective draw
+/// (ties: the lower run), after Cancel / OK only the best one. TopoR judges its variants on the
+/// topology and draws the one picked (6.3 manual pp. 72-73; Polubasov 2010: the exact geometry
+/// «на метрическом этапе»). Every run has a thread of its own ([`run_all`]), so the decision sees
+/// every run's pick and does not depend on the thread count; only `slots` of them compute at a
+/// time ([`Slots`]: the engine's share of the cores), a run waiting here gives its slot back.
+/// `opt_loop = "cycles"` draws every cycle and does not use the gate.
 struct DrawGate {
     st: std::sync::Mutex<GateState>,
     cv: std::sync::Condvar,
-    /// A complete result of the call is published already ([`Coord::publish`]): after Cancel no
-    /// loop pick needs drawing.
-    complete: std::sync::atomic::AtomicBool,
+    /// The runs that compute at once.
+    slots: Slots,
 }
 
-#[derive(Default)]
+/// A counting semaphore: at most `n` runs compute at once (the others' threads wait idle, so the
+/// busy threads stay at the engine's share, `min(runs, rayon threads)`). O(1) per call.
+struct Slots {
+    /// Free slots; below 0 only for a moment after [`Slots::take_now`] (a slot owed).
+    free: std::sync::Mutex<isize>,
+    cv: std::sync::Condvar,
+}
+
+impl Slots {
+    fn new(n: usize) -> Slots {
+        Slots { free: std::sync::Mutex::new(n.max(1) as isize), cv: std::sync::Condvar::new() }
+    }
+
+    /// Waits for a free slot and takes it. O(1) + the wait.
+    fn acquire(&self) {
+        let Ok(mut f) = self.free.lock() else { return };
+        while *f <= 0 {
+            f = match self.cv.wait(f) {
+                Ok(f) => f,
+                Err(_) => return,
+            };
+        }
+        *f -= 1;
+    }
+
+    /// Takes a slot without waiting (a slot owed while none is free): a panic unwinding through
+    /// [`DrawGate::offer`], whose [`SlotGuard`] gives the slot back once more. O(1).
+    fn take_now(&self) {
+        if let Ok(mut f) = self.free.lock() {
+            *f -= 1;
+        }
+    }
+
+    /// Gives a slot back. O(1).
+    fn release(&self) {
+        if let Ok(mut f) = self.free.lock() {
+            *f += 1;
+        }
+        self.cv.notify_one();
+    }
+}
+
+/// Holds a [`Slots`] slot for its scope (also while a panic unwinds). O(1).
+struct SlotGuard<'s>(&'s Slots);
+
+impl<'s> SlotGuard<'s> {
+    fn take(s: &'s Slots) -> SlotGuard<'s> {
+        s.acquire();
+        SlotGuard(s)
+    }
+}
+
+impl Drop for SlotGuard<'_> {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
 struct GateState {
-    in_loop: BTreeSet<usize>,
+    /// `[drawing] candidates` (at least 1).
+    quota: usize,
+    /// Runs that may still offer.
+    open: BTreeSet<usize>,
     offered: BTreeMap<usize, Criteria>,
-    decided: Option<usize>,
+    /// The runs that draw, once decided.
+    decided: Option<Vec<usize>>,
 }
 
 impl DrawGate {
-    /// The longest wait for the other runs' loops to end after Cancel.
-    const WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
-
-    /// Run `k` enters its loop. O(log runs).
-    fn enter(&self, k: usize) {
-        if let Ok(mut g) = self.st.lock() {
-            g.in_loop.insert(k);
+    fn new(n: usize, quota: usize, slots: usize) -> DrawGate {
+        DrawGate {
+            st: std::sync::Mutex::new(GateState { quota: quota.max(1), open: (0..n).collect(), offered: BTreeMap::new(), decided: None }),
+            cv: std::sync::Condvar::new(),
+            slots: Slots::new(slots),
         }
     }
 
-    /// Run `k`'s loop ended by itself (it draws its pick as before). O(log runs).
-    fn leave(&self, k: usize) {
-        if let Ok(mut g) = self.st.lock() {
-            g.in_loop.remove(&k);
-        }
+    /// Run `k` will not offer (not begun, nothing kept, or it offered already: then nothing
+    /// changes). Idempotent. O(log runs).
+    fn withdraw(&self, k: usize) {
+        // also from a run's Drop while a panic unwinds: never panic here, take the state as it is
+        // (the gate's state is a set and two maps, consistent between its statements)
+        let mut g = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        g.open.remove(&k);
+        drop(g);
         self.cv.notify_all();
     }
 
-    /// Run `k`'s loop ended by Cancel with a pick of predicted criteria `crit`: does run `k` draw?
-    /// Waits (at most [`DrawGate::WAIT`]) until no other loop runs, then the best offer draws; an
-    /// offer after the decision never does, nor any once a complete result is published. O(runs) + the wait.
-    fn offer(&self, k: usize, crit: Criteria, obj: &Objective) -> bool {
-        let Ok(mut g) = self.st.lock() else { return true };
-        if self.complete.load(std::sync::atomic::Ordering::Relaxed) {
-            g.in_loop.remove(&k);
-            self.cv.notify_all();
-            return false;
+    /// Run `k` offers its pick with predicted criteria `crit`; `cancel`: Cancel / OK came (one
+    /// drawing only). Waits until no run can offer any more, then decides once. `None` = run `k`
+    /// draws; else why not. O(runs log runs) + the wait for the other runs' loops.
+    fn offer(&self, k: usize, crit: Criteria, obj: &Objective, cancel: bool) -> Option<String> {
+        // the wait gives this run's compute slot back, so a run without one can finish its loop
+        self.slots.release();
+        // ... and takes it again after the wait; when `decide` panics (a poisoned gate) without
+        // a wait, since this run's SlotGuard gives it back once more on the unwind.
+        struct Retake<'s>(&'s Slots);
+        impl Drop for Retake<'_> {
+            fn drop(&mut self) {
+                if std::thread::panicking() { self.0.take_now() } else { self.0.acquire() }
+            }
         }
-        g.in_loop.remove(&k);
+        let _retake = Retake(&self.slots);
+        self.decide(k, crit, obj, cancel)
+    }
+
+    /// [`DrawGate::offer`] without the slot: waits until no run can offer, decides once. O(runs log runs) + the wait.
+    fn decide(&self, k: usize, crit: Criteria, obj: &Objective, cancel: bool) -> Option<String> {
+        // A poisoned lock = a run panicked while it decided: loud (the call's thread scope passes the
+        // panic on to the caller), never a quiet "draw every pick" (verify-m2 F7c).
+        const POISONED: &str = "M2 draw gate: its lock is poisoned (a run panicked while the runs' picks were decided)";
+        let mut g = self.st.lock().expect(POISONED);
+        g.open.remove(&k);
         g.offered.insert(k, crit);
         self.cv.notify_all();
-        let t = Instant::now();
-        while g.decided.is_none() && !g.in_loop.is_empty() {
-            let left = Self::WAIT.saturating_sub(t.elapsed());
-            if left.is_zero() {
-                break;
-            }
-            g = match self.cv.wait_timeout(g, left) {
-                Ok((g, _)) => g,
-                Err(_) => return true,
-            };
+        while g.decided.is_none() && !g.open.is_empty() {
+            g = self.cv.wait_timeout(g, std::time::Duration::from_millis(200)).expect(POISONED).0;
         }
         if g.decided.is_none() {
-            let mut best: Option<(usize, Criteria)> = None;
-            for (&j, c) in &g.offered {
-                if best.as_ref().is_none_or(|(_, b)| obj.better(c, b)) {
-                    best = Some((j, *c));
+            let mut ks: Vec<usize> = g.offered.keys().copied().collect();
+            ks.sort_by(|&a, &b| {
+                let (ca, cb) = (&g.offered[&a], &g.offered[&b]);
+                if obj.better(ca, cb) {
+                    std::cmp::Ordering::Less
+                } else if obj.better(cb, ca) {
+                    std::cmp::Ordering::Greater
+                } else {
+                    a.cmp(&b)
                 }
-            }
-            g.decided = best.map(|b| b.0);
+            });
+            ks.truncate(if cancel { 1 } else { g.quota });
+            g.decided = Some(ks);
         }
-        g.decided == Some(k)
+        let d = g.decided.as_ref().expect("decided");
+        if d.contains(&k) {
+            return None;
+        }
+        let runs = d.iter().map(|j| (j + 1).to_string()).collect::<Vec<_>>().join(", ");
+        Some(if cancel {
+            format!("after Cancel / OK only one pick is drawn: run {runs}'s, predicted better")
+        } else {
+            format!("[drawing] candidates = {}: the pick of run {runs} is predicted better", g.quota)
+        })
+    }
+}
+
+/// Withdraws its run from the [`DrawGate`] when dropped (also while a panic unwinds the run's
+/// thread, so the other runs never wait for it).
+struct GateGuard<'g>(&'g DrawGate, usize);
+
+impl Drop for GateGuard<'_> {
+    fn drop(&mut self) {
+        self.0.withdraw(self.1);
     }
 }
 
@@ -392,8 +607,8 @@ enum RoundEnd<'s> {
 }
 
 impl<'a> Coord<'a> {
-    fn new(ctl: &'a RunControl, n: usize, obj: Objective) -> Coord<'a> {
-        Coord { ctl, obj, st: std::sync::Mutex::new(vec![RunState::default(); n]), snap: std::sync::Mutex::new(None), gate: DrawGate::default(), judge: std::sync::Mutex::new(None) }
+    fn new(ctl: &'a RunControl, n: usize, obj: Objective, candidates: usize) -> Coord<'a> {
+        Coord { ctl, obj, st: std::sync::Mutex::new(vec![RunState::default(); n]), snap: std::sync::Mutex::new(None), gate: DrawGate::new(n, candidates, n.min(rayon::current_num_threads())), judge: std::sync::Mutex::new(None) }
     }
 
     /// cancel-fix: note a run's pick with criteria `crit` (`complete`: of a cycle not cut short)
@@ -408,9 +623,6 @@ impl<'a> Coord<'a> {
             }
         }
         *s = Some((crit, complete));
-        if complete {
-            self.gate.complete.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
     }
 
     /// cancel-fix: may run `k` begin its first cycle? Not after Cancel / the time limit (`stopping`)
@@ -641,7 +853,12 @@ impl Run {
         let t = Instant::now();
         let obj = coord.obj;
         let cycle = self.cycles + 1;
-        let over_budget = ctl.over_limit();
+        // M2.TL: past the limit no new step begins (soft: the one running finished; hard: it was cut).
+        let over_budget = ctl.limit_reached();
+        // M2: a TopoR-loop run offers its pick or withdraws exactly once ([`DrawGate`]); the guard
+        // withdraws it on every way out, also a panic.
+        let topor = opts.opt_loop == "topor";
+        let _gate = topor.then(|| GateGuard(&coord.gate, self.k));
         // C0: `[run] stop_after = "plan"` plans one cycle (the next would need the drawing's feedback).
         let plan_only = cycle > 1 && opts.stop_after == "plan";
         if plan_only || cycle > opts.topo_rounds.max(1) || (cycle > 1 && (ctl.is_cancelled() || cancelled() || over_budget)) {
@@ -668,12 +885,16 @@ impl Run {
         o2.fluctuation = width;
         o2.wall_clock_s = ctl.limit.remaining_s().map_or(0.0, |r| r.max(1.0));
         // 5.1 `[optimize] loop = "topor"`: one cycle per run: the initial routing once, the TopoR
-        // loop on the topology, the picked variant drawn once.
-        let topor = opts.opt_loop == "topor";
+        // loop on the topology, the picked variant drawn once. M2 (6.1): nothing of the drawing
+        // feeds back into the plan on this path: no room hints from a drawing reach a plan (the
+        // plan is decided on the topology, the drawing only realises it; Polubasov 2010,
+        // introduction). `drawing_feedback` there only says whether the drawing redraws the
+        // blockers of a trace it could not fit, inside that one drawing (M0: "auto" = off with
+        // this loop; removing that rescue is M6).
         if topor {
             o2.initial = "once".into();
         }
-        let hv: Hints = if opts.drawing_feedback { self.all.iter().map(|(&(e, l), &r)| (e, l, r)).collect() } else { Vec::new() };
+        let hv: Hints = if o2.drawing_feedback && !topor { self.all.iter().map(|(&(e, l), &r)| (e, l, r)).collect() } else { Vec::new() };
         let (ro, h2, mem2) = route_round(model, &o2, ctl, &hv, &self.mem, cycle, stubs, fx, opts.fluctuation, (self.k, &coord.gate, &obj));
         self.cycles = cycle;
         self.mem = mem2;
@@ -695,9 +916,26 @@ impl Run {
         // result already (this run's, or another run's): what OK / Cancel returns is the best of the
         // cycles that finished before; the stitching of a big board takes seconds.
         let judged_elsewhere = if interrupted { !self.arch.items.is_empty() || coord.has_result(false) } else { coord.has_result(true) };
-        if ro.skipped || ctl.is_cancelled() && judged_elsewhere {
-            let why = if ro.skipped { "its TopoR loop pick not drawn: another run's is" } else { "Cancel / OK came first" };
-            self.notes.push(if ro.skipped { format!("{cycle}: its TopoR loop pick not drawn (another run's is)") } else { format!("{cycle}: not judged (Cancel / OK came first)") });
+        if ro.skipped.is_some() || ro.nothing.is_some() || ctl.is_cancelled() && judged_elsewhere {
+            let why = if ro.skipped.is_some() {
+                "its TopoR loop pick not drawn: another run's is"
+            } else if ro.nothing.is_some() {
+                "nothing kept to draw: Cancel / OK came before its initial routing ended"
+            } else {
+                "Cancel / OK came first"
+            };
+            self.notes.push(match (&ro.skipped, &ro.nothing) {
+                (Some(w), _) => format!("{cycle}: its TopoR loop pick not drawn (another run's is: {w})"),
+                (_, Some(w)) => format!("{cycle}: nothing kept to draw ({w})"),
+                _ => format!("{cycle}: not judged (Cancel / OK came first)"),
+            });
+            if let Some(e) = loop_end.filter(|_| ro.skipped.is_some()) {
+                // A run whose pick another run draws still ended its loop: stable or cut by the limit.
+                if e.stable {
+                    self.stable_at.get_or_insert(cycle);
+                }
+                coord.report(self.k, |r| r.stable = e.stable);
+            }
             self.time_hit = self.stable_at.is_none();
             self.done = true;
             self.busy_s += t.elapsed().as_secs_f64();
@@ -736,11 +974,22 @@ impl Run {
             // Pour stitching (D4) on each variant before it is judged: a pour piece the copper cut
             // off that no stitch joins back is an open connection in KiCad's DRC, so it counts as an
             // error of the variant (else the pick prefers short copper that islands a pour).
-            let deadline = ctl.deadline();
+            // M2.TL soft limit: the stitching belongs to the drawing of this variant and finishes
+            // (Cancel still ends it); `hard` (or the soft limit past its overrun cap, F3, read
+            // live): a limit that passes while the drawing or the stitching runs cuts it. A limit
+            // that acted as hard before the drawing began does not cut it: the plan that exists is
+            // drawn in full (user 2026-11-13, one path for `hard` and the cap). The decision is
+            // the drawing's (verify-m2c 5): after a drawing the limit cut, the stitching is cut too
+            // (before, it re-decided at its own start and so ran in full).
+            let exempt = ro.draw_exempt;
+            let cut = || !exempt && ctl.limit.cuts_in(CutStep::Stitching);
+            // The same test without noting a cut (the stitching may have ended before it): whether
+            // a variant counts as cut short below; only the stitching's own stop test reports one.
+            let past = || !exempt && ctl.limit.is_hard() && ctl.limit.passed();
             let stitched = |mut r: RouteResult, mut c: Criteria| -> (RouteResult, Criteria) {
                 if opts.stitch_islands {
                     ctl.stage(cycle as u32, opts.topo_rounds.max(1) as u32, "pour stitching");
-                    c.errors += stitch_pours(model, opts, &mut r, deadline, &|| ctl.is_cancelled());
+                    c.errors += stitch_pours(model, opts, &mut r, None, &|| ctl.is_cancelled() || cut());
                 }
                 (r, c)
             };
@@ -748,19 +997,18 @@ impl Run {
             // uncounted, so it would look better than it is: offered only when nothing else is
             // there, like an interrupted cycle (M-B2: measurement runs cut at 600 s picked such
             // variants and KiCad found the GND pieces open).
-            let cut = || deadline.is_some_and(|d| Instant::now() >= d);
             let empty = self.arch.items.is_empty();
             let RoundOut { result, crit, pre, .. } = ro;
             if let Some((c, r)) = pre.filter(|_| !cancel_cut) {
                 let (r, c) = stitched(r, c);
-                if !cut() || empty {
+                if !past() || empty {
                     note_judged(c, r.routed, true);
                     self.arch.offer(Variant { label: format!("round {cycle} as drawn"), crit: c, payload: Drawn { cycle, result: r } }, &obj);
                 }
             }
             let (r, c) = stitched(result, crit);
             (cyc_err, cyc_viol) = (c.errors, c.violations);
-            if !cut() || self.arch.items.is_empty() {
+            if !past() || self.arch.items.is_empty() {
                 note_judged(c, r.routed, false);
                 self.arch.offer(Variant { label: format!("round {cycle}"), crit: c, payload: Drawn { cycle, result: r } }, &obj);
             }
@@ -899,10 +1147,12 @@ impl Run {
 /// The runs' cycles on `workers` threads: a free thread takes the run with the fewest cycles
 /// that no other thread is stepping (so every run progresses, also when there are more runs than
 /// threads, and "Routes stable" can come from all of them). The threads are the engine's share
-/// for the runs (`min(runs, rayon threads)`), the checks inside a cycle use the rayon pool.
+/// for the runs (`min(runs, rayon threads)`; one per run with the TopoR loop), the checks inside a
+/// cycle use the rayon pool.
 #[allow(clippy::too_many_arguments)]
 fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, stubs: &PlaneStubs, fx: &Fixed, t_call: Instant, n: usize) -> (Vec<RunOut>, Vec<(usize, String)>) {
     use std::sync::Mutex;
+    let topor = opts.opt_loop == "topor";
     let runs: Vec<Mutex<Run>> = (0..n).map(|k| Mutex::new(Run::new(opts, k))).collect();
     let taken: Mutex<Vec<bool>> = Mutex::new(vec![false; n]);
     let cycles: Mutex<Vec<(usize, bool)>> = Mutex::new(vec![(0, false); n]);
@@ -915,7 +1165,10 @@ fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, 
         };
         let Ok(mut r) = runs[k].lock() else { return };
         let c = if n == 1 { ctl.clone() } else { ctl.for_run(k as u32 + 1) };
-        crate::control::with_control(&c, || r.step(model, opts, &c, coord, stubs, fx, t_call));
+        // M2.TL: with the soft limit only Cancel / OK stops the moves inside a step (M0's stop checks)
+        let _slot = topor.then(|| SlotGuard::take(&coord.gate.slots));
+        crate::control::with_control_mode(&c, opts.timeout_mode == "hard", || r.step(model, opts, &c, coord, stubs, fx, t_call));
+        c.idle(); // between its cycles or done: the soft limit's notice no longer names its step (F6)
         let st = (r.cycles, r.done);
         drop(r);
         if let (Ok(mut tk), Ok(mut cy)) = (taken.lock(), cycles.lock()) {
@@ -923,7 +1176,11 @@ fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, 
             cy[k] = st;
         }
     };
-    let workers = n.min(rayon::current_num_threads()).max(1);
+    // M2: with the TopoR loop every run has a thread of its own: a run waits after its loop until
+    // every run offered its pick ([`DrawGate`]), so the decision sees all of them and never waits
+    // for a run that has no thread. Only `min(runs, rayon threads)` of them compute at once (the
+    // gate's slots; a run waiting at the gate gives its slot back): the busy threads stay as before.
+    let workers = if topor { n } else { n.min(rayon::current_num_threads()).max(1) };
     if workers == 1 {
         worker();
     } else {
@@ -1005,9 +1262,15 @@ struct RoundOut {
     pre: Option<(Criteria, RouteResult)>,
     /// `[optimize] loop = "topor"`: how the loop ended.
     lp: Option<LoopEnd>,
-    /// cancel-fix: the loop ended by Cancel and another run's pick is drawn ([`DrawGate`]): no
-    /// result of this run.
-    skipped: bool,
+    /// M2 draw once ([`DrawGate`]): this run's TopoR loop pick is not drawn (another run's is), why;
+    /// no result of this run.
+    skipped: Option<String>,
+    /// M2.TL: nothing kept to draw (Cancel / OK came before the run's initial routing ended), why.
+    nothing: Option<String>,
+    /// The limit acted as hard before the drawing began (`draw_exempt` in [`route_round`]): it
+    /// cut a planning step, and the drawing of the kept plan is not cut, its pour stitching
+    /// neither (verify-m2c 5: the stitching carries the drawing's decision, not its own).
+    draw_exempt: bool,
 }
 
 /// How the TopoR loop of a round ended (`[optimize] loop = "topor"`).
@@ -1019,7 +1282,14 @@ struct LoopEnd {
 
 impl RoundOut {
     fn unrouted(r: RouteResult) -> RoundOut {
-        RoundOut { crit: Criteria { errors: r.failed, open: r.failed, ..Criteria::default() }, result: r, pre: None, lp: None, skipped: false }
+        RoundOut { crit: Criteria { errors: r.failed, open: r.failed, ..Criteria::default() }, result: r, pre: None, lp: None, skipped: None, nothing: None, draw_exempt: false }
+    }
+
+    /// A round that draws nothing: `skipped` (another run's pick is drawn) or `nothing` (no plan
+    /// kept), with the loop's end. O(connections).
+    fn not_drawn(model: &BoardModel, opts: &Options, skipped: Option<String>, nothing: Option<String>, lp: Option<LoopEnd>) -> RoundOut {
+        let why = skipped.clone().or_else(|| nothing.clone()).unwrap_or_default();
+        RoundOut { lp, skipped, nothing, ..RoundOut::unrouted(unrouted(model, opts, &why)) }
     }
 }
 
@@ -1287,9 +1557,11 @@ fn plane_requests(model: &BoardModel, b: &board::Board, dec: &crate::decompose::
 /// Place every plane stub on the static board (pads, holes, outline, keepouts, copper shapes,
 /// existing copper; the stubs placed before it), each at its cheapest site ([`planes::place`]).
 fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> PlaneStubs {
-    // Cancel / the time limit end the placement at once (K1: Cancel was ignored here on a live run); the
-    // route that follows sees the same stop and returns the best result so far.
-    let stop = || cancelled() || ctl.is_cancelled() || ctl.over_limit();
+    // Cancel ends the placement at once (K1: Cancel was ignored here on a live run); the route that
+    // follows sees the same stop. The time limit ends it only with `[run] timeout_mode = "hard"`:
+    // the soft limit (M2.TL, default) cuts no step, and the initial routing that follows needs every
+    // stub to give a complete plan (verify-m2 F2); past the overrun cap (F3) it acts as hard.
+    let stop = || cancelled() || ctl.is_cancelled() || ctl.limit.cuts_in(CutStep::PlaneStubs);
     let signal: Vec<u32> = model.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
     if signal.len() < 2 {
         return PlaneStubs::default();
@@ -1673,9 +1945,37 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // `[optimize] loop = "topor"`: after the loop the one drawing runs through an OK / Cancel (only
     // the time limit cuts it), so the loop's picked variant always reaches the copper.
     let draw_through = std::cell::Cell::new(false);
-    // cancel-fix: the loop ended by Cancel and another run's pick is drawn ([`DrawGate`]).
-    let mut skip_draw = false;
-    let expired = || (!draw_through.get() && (cancelled() || ctl.is_cancelled())) || ctl.deadline().is_some_and(|d| Instant::now() >= d.max(floor));
+    // M2.TL (`[run] timeout_mode`): soft (default) = the time limit cuts no step: the step that runs
+    // finishes, no new one begins (the loop's cycles, the next whole-route cycle) and the best kept
+    // variant is drawn to its end; Cancel / OK stops at once. hard = every step stops at the limit
+    // (before M2).
+    // F3: past `[run] timeout_overrun_s` the soft limit acts as the hard one, read live: it cuts the
+    // step that runs. "Draw what exists" (user 2026-11-13, for the cap and for `hard` alike, one
+    // path): a limit that acted as hard before the drawing began cuts the planning step that ran
+    // and does not cut the drawing of the kept plan (its via reduction included; TopoR judges the
+    // variants before any copper and draws the chosen one, 6.3 manual pp. 72-73, p. 237); a limit
+    // that passes while the drawing runs cuts it (the drawing is then the step that ran).
+    let soft = || !ctl.limit.is_hard();
+    let draw_exempt = std::cell::Cell::new(false);
+    // verify-m2c 4: the step the stop tests below belong to (a planning step until the drawing
+    // begins), so the report names what the limit cut.
+    let cut_step = std::cell::Cell::new(CutStep::Plan);
+    let stop_now = || cancelled() || ctl.is_cancelled();
+    let limit_cut = || !draw_exempt.get() && !soft() && ctl.deadline().is_some_and(|d| Instant::now() >= d.max(floor)) && ctl.limit.note_cut_in(cut_step.get());
+    let expired = || (!draw_through.get() && stop_now()) || limit_cut();
+    // The reason of a connection the drawing did not reach: a Cancel / OK's or the limit's (a
+    // Cancel wins when both hold; verify-m2c 4: a Cancel wrote the limit's reason before).
+    let draw_cut_reason = || if !draw_through.get() && stop_now() { DRAW_CANCEL } else { DRAW_CUT };
+    // M2.TL: Cancel / OK cut the initial routing (P2) before every connection had its place: the
+    // plan is not complete, so it is no variant (nothing kept to draw).
+    let plan_cut = std::cell::Cell::new(false);
+    let cut_here = || {
+        let e = expired();
+        if e && stop_now() {
+            plan_cut.set(true);
+        }
+        e
+    };
     let signal: Vec<u32> = model.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
     if signal.len() < 2 {
         let why = format!("the topological core routes boards with two or more signal layers; this board has {}", signal.len());
@@ -2060,9 +2360,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         p2_replaced = vic_conns.len();
         for ci in vic_conns {
-            if expired() {
+            if cut_here() {
                 timed_out = true;
-                fail(&mut out, conn_of[ci], "time limit reached before this connection was routed again");
+                fail(&mut out, conn_of[ci], if stop_now() { "Cancel / OK came before this connection was routed again" } else { "time limit reached before this connection was routed again" });
                 continue;
             }
             if !place(&mut st, ci, cap, &mut wire_conn, &reg_p2) {
@@ -2071,9 +2371,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
     } else {
         for &ci in &order {
-            if expired() {
+            if cut_here() {
                 timed_out = true;
-                fail(&mut out, conn_of[ci], "time limit reached before this connection was routed");
+                fail(&mut out, conn_of[ci], if stop_now() { "Cancel / OK came before this connection was routed" } else { "time limit reached before this connection was routed" });
                 continue;
             }
             let ok = if once { place(&mut st, ci, cap, &mut wire_conn, &reg_p2) } else { route_one(&mut st, ci, cap, &mut wire_conn, &reg_p2) };
@@ -2086,7 +2386,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // One retry of the failed connections with a larger search cap.
     let mut still: Vec<usize> = Vec::new();
     for &ci in &p2_failed {
-        if expired() || !route_one(&mut st, ci, cap * 4, &mut wire_conn, &reg_p2) {
+        if cut_here() || !route_one(&mut st, ci, cap * 4, &mut wire_conn, &reg_p2) {
             still.push(ci);
         }
     }
@@ -2624,7 +2924,18 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // the one drawing below. No drawing inside the loop, nothing fed back from a drawing.
     let mut loop_end: Option<LoopEnd> = None;
     let mut loop_json: Option<serde_json::Value> = None;
-    if opts.opt_loop == "topor" && !expired() {
+    // M2.TL: the initial routing (P2-P4) has ended; its plan is the run's first variant (the TopoR
+    // loop's generation 0, or this whole-route cycle's plan). Cancel / OK during it (P2 before
+    // every connection had its place, or the layer assignment and rip-up rounds of P3/P4, which
+    // M0's stop checks end within a move): the step did not end, so it kept no variant (the user's
+    // rule: the plan counts once P4 ends); the run keeps what it had (nothing, or the earlier
+    // cycles' variants), never half a step.
+    if plan_cut.get() || stop_now() {
+        let why = if plan_cut.get() { "Cancel / OK came during the initial routing, before every connection had its place in the plan" } else { "Cancel / OK came during the initial routing (layer assignment, rip-up and reroute), before its plan was complete" };
+        return (RoundOut::not_drawn(model, opts, None, Some(why.to_string()), None), Vec::new(), Memory::default());
+    }
+    let topor = opts.opt_loop == "topor";
+    if topor {
         use super::optimise::{criteria_of, evaluation, foreign_copper, k_osc, layers_now, optimise, reroute_set, wire_amp, CycleCtx, CycleStats, Emphasis, Gen, LoopParams, Predicted, Rerouter, Space, VIA_FACTORS};
         let t_loop = Instant::now();
         // The loop's own emergency stop: a share of the time left (the rest is the drawing's).
@@ -3489,19 +3800,25 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             obj,
         };
         let mut arch: Archive<Gen<LoopVar>> = Archive::new(opts.variants);
-        let mut stop = || cancelled() || ctl.is_cancelled() || ctl.deadline().is_some_and(|d| Instant::now() >= d) || loop_deadline.is_some_and(|d| Instant::now() >= d);
+        // M2.TL: between cycles the loop ends at Cancel / OK, the time limit or its share of it
+        // (no new step begins); inside a cycle only Cancel / OK stops it with the soft limit (the
+        // cycle finishes and is offered), with `hard` the limits too. A cycle Cancel cut short is
+        // not offered (Cancel = the best variant kept so far).
+        let loop_over = || loop_deadline.is_some_and(|d| Instant::now() >= d);
+        let mut stop = || stop_now() || ctl.limit_reached() || loop_over();
+        let mut inner = || stop_now() || ctl.limit.cuts() || (!soft() && loop_over());
         let clock = || t_loop.elapsed().as_secs_f64();
-        gate.1.enter(gate.0);
-        // M0: the loop is the default; the progress dialog names it (and a Cancel from here on
-        // draws the loop's pick, tests/cancel_latency.rs).
+        // M0: the progress dialog names the loop (tests/cancel_latency.rs waits for it).
         ctl.stage(rnd, rnds, "TopoR loop on the topology");
-        let rep = optimise(&mut sp, &mut arch, &params, &mut stop, &clock);
-        let pick = arch.pick(&obj).expect("the initial plan is always archived");
-        if ctl.is_cancelled() {
-            skip_draw = !gate.1.offer(gate.0, arch.items[pick].crit, gate.2);
-        } else {
-            gate.1.leave(gate.0);
+        let mut rep = optimise(&mut sp, &mut arch, &params, &mut stop, &mut inner, &clock);
+        if rep.stop == "time limit" {
+            rep.stop = if stop_now() { "Cancel / OK" } else if ctl.over_limit() { "time limit" } else { "loop_time_share" }.into();
         }
+        let pick = arch.pick(&obj).expect("the initial plan is always archived");
+        // M2 (6.1 draw once): the runs' picks are judged by their predicted criteria; only the
+        // `[drawing] candidates` best are drawn (after Cancel / OK the best one).
+        ctl.idle(); // waiting at the gate computes nothing: the soft limit names the runs still computing (F6)
+        let skip_draw = gate.1.offer(gate.0, arch.items[pick].crit, gate.2, stop_now());
         sp.restore(&arch.items[pick].payload.var);
         drop(sp);
         if std::env::var_os("TOPO_LOOPDBG").is_some() {
@@ -3544,7 +3861,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         st.cross_vias = cross_vias0;
         st.layers_now.clear();
         let loop_s = t_loop.elapsed().as_secs_f64();
-        let time_hit = rep.stop == "time limit";
+        let time_hit = rep.stop == "time limit" || rep.stop == "loop_time_share";
         loop_end = Some(LoopEnd { stable: rep.stable_at.is_some(), time_hit });
         let pc = arch.items[pick].crit;
         let table = table_text(&arch.table(Some(pick)), &obj);
@@ -3629,16 +3946,19 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             r.stage("after the TopoR loop", &st, &lr.events, &packer, bottom, &|w| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]));
         }
         tlog("TopoR loop", t_loop);
-        // The one drawing of the loop's pick runs to its end (only the time limit cuts it); after
-        // Cancel only the pick of one run is drawn (cancel-fix), the others stop here.
-        if skip_draw {
-            warnings.push("TopoR loop: Cancel / OK ended the loop; another run's pick is drawn".into());
-        } else {
-            draw_through.set(true);
+        // The one drawing of the loop's pick runs to its end (soft limit: nothing cuts it; hard:
+        // the time limit); a run whose pick another run draws stops here, before any copper.
+        if let Some(why) = skip_draw {
+            return (RoundOut::not_drawn(model, opts, Some(why), None, loop_end), Vec::new(), Memory::default());
         }
+        draw_through.set(true);
     }
     let lr = lr;
     let t_draw = Instant::now();
+    // One path for `hard` and the overrun cap (user 2026-11-13): the limit acted as hard before
+    // the drawing began, so it cut a planning step; the kept plan is drawn in full.
+    draw_exempt.set(ctl.limit.is_hard() && ctl.over_limit());
+    cut_step.set(CutStep::Drawing);
     // 4.3 `initial = "once"`: the plan handed to the next cycle (before anything is dropped).
     let plan_carry = once.then(|| PlanCarry { topo: st.topology(), wire_conn: wire_conn.clone(), conns: conns.clone(), term_over: term_over.clone() });
     if once {
@@ -4131,7 +4451,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     for &w in &draw_order {
         if expired() {
             timed_out = true;
-            fail(&mut out, conn_of[wire_conn[w]], "time limit reached before this connection was drawn");
+            fail(&mut out, conn_of[wire_conn[w]], draw_cut_reason());
             continue;
         }
         let mut ids = Vec::new();
@@ -4255,7 +4575,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     for &w in &live {
         if expired() {
             timed_out = true;
-            fail(&mut out, conn_of[wire_conn[w]], "time limit reached before this connection was drawn");
+            fail(&mut out, conn_of[wire_conn[w]], draw_cut_reason());
             continue;
         }
         let ci = conn_of[wire_conn[w]];
@@ -4439,10 +4759,17 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     if opts.allow_violations {
         dr.force = true;
         for &w in &live {
-            if drawn.contains_key(&w) || expired() {
+            if drawn.contains_key(&w) {
                 continue;
             }
             let ci = conn_of[wire_conn[w]];
+            if expired() {
+                // the cut skips it: it says so (Cancel's or the limit's reason), not its drawing failure
+                if out[ci].reason.starts_with("drawing:") {
+                    out[ci].reason = draw_cut_reason().into();
+                }
+                continue;
+            }
             if !out[ci].reason.starts_with("drawing:") {
                 continue;
             }
@@ -4719,14 +5046,20 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut vias_reduced = 0usize;
     if opts.via_reduce && std::env::var("TOPO_NOREDUCE").is_err() {
         pre_snap = Some((out.clone(), necking.clone()));
-        let (rs, changed) = super::reduce::reduce_vias(&mut dr, &mut drawn, &mut placed, &mut plans, &mut via_h, &end_fixed, &frozen, b.n_signal, ctl.deadline().map(|d| d.max(floor)), &|| ctl.is_cancelled());
+        // M2.TL soft limit: the via reduction belongs to the one drawing of the picked variant and
+        // runs to its end (Cancel still ends it, anytime; verify-m2 F2: past the soft limit it got
+        // 0 s, "0 relabels tried"). A limit acting as hard (`hard`, or past the overrun cap, read
+        // live) cuts it only when it passed after the drawing began (`draw_exempt`).
+        cut_step.set(CutStep::ViaReduction);
+        let (rs, changed) = super::reduce::reduce_vias(&mut dr, &mut drawn, &mut placed, &mut plans, &mut via_h, &end_fixed, &frozen, b.n_signal, None, &|| ctl.is_cancelled() || limit_cut());
         // Cancel / OK ends the via reduction (cancel-fix; anytime: every relabel accepted so far
         // stays; measured on qmtech it took 12-22 s for 0-10 of ~110 vias). In the TopoR loop pick's
         // one drawing that keeps the result complete; only the time limit makes it a cut-short one.
         vias_reduced = rs.vias_removed;
-        let limit_cut = rs.timed_out && ctl.deadline().is_some_and(|d| Instant::now() >= d.max(floor));
-        let cancel_cut = rs.timed_out && !limit_cut;
-        timed_out |= limit_cut || cancel_cut && !draw_through.get();
+        // Soft limit (before its overrun cap): the limit stops nothing, so a stopped reduction is a Cancel's.
+        let red_limit_cut = rs.timed_out && limit_cut();
+        let cancel_cut = rs.timed_out && !red_limit_cut;
+        timed_out |= red_limit_cut || cancel_cut && !draw_through.get();
         for w in changed {
             let ci = conn_of[wire_conn[w]];
             necking.retain(|(c, _)| *c != ci);
@@ -4740,7 +5073,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             rs.accepted,
             rs.vias_removed,
             t_red.elapsed().as_secs_f64(),
-            if limit_cut { ", stopped by the time budget" } else if cancel_cut { ", stopped by Cancel / OK" } else { "" },
+            if red_limit_cut { ", stopped by the time budget" } else if cancel_cut { ", stopped by Cancel / OK" } else { "" },
             causes_before,
             causes(&plans, &drawn)
         ));
@@ -5407,6 +5740,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         moves: super::moves::KINDS.iter().map(|&k| (k.name().to_string(), tally.applied_of(k))).collect(),
         violations: viol_list,
         diff_pairs: dp_list,
+        limit: None,
         compass: compass_plan.map(|mut c| {
             c.drawn_shrinkages = crit_main.shrinkages;
             c
@@ -5414,7 +5748,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     let pre = pre_parts.map(|(c, a)| (c, with_parts(&result, a)));
     let vias_out: BTreeMap<usize, usize> = plans.iter().map(|(&w, pl)| (conn_of[wire_conn[w]], pl.vias.len())).collect();
-    (RoundOut { result, crit: crit_main, pre, lp: loop_end, skipped: skip_draw }, new_hints, Memory { edge: hist_out, own: own_out, vias: vias_out, plan: plan_carry })
+    (RoundOut { result, crit: crit_main, pre, lp: loop_end, skipped: None, nothing: None, draw_exempt: draw_exempt.get() }, new_hints, Memory { edge: hist_out, own: own_out, vias: vias_out, plan: plan_carry })
 }
 
 /// D7: realise every coupled pair connection of `out`: the lead's drawn centre line becomes the P
@@ -5924,7 +6258,7 @@ mod tests {
     fn progress_carries_the_last_round_and_the_best_in_the_pick_order() {
         let ctl = RunControl::new();
         let obj = Objective::from_options("length_vias", 25.0, "errors_vias_length");
-        let coord = Coord::new(&ctl, 2, obj);
+        let coord = Coord::new(&ctl, 2, obj, 1);
         let crit = |errors: usize, open: usize, vias: usize, length_mm: f64| Criteria { errors, open, violations: errors - open, vias, length_mm, shrinkages: 1, ..Criteria::default() };
         let round = |k: usize, cycle: usize, c: Criteria, best: Criteria, best_cycle: usize| {
             let j = Judged { crit: c, routed: 20 - c.open, total: 20, as_drawn: false };
@@ -5982,5 +6316,44 @@ mod tests {
         assert_eq!((p.last_vs_best.as_str(), p.last_decider.as_str()), ("tie", ""));
         assert_eq!((p.best_run, p.best_round), (1, 4));
         assert!(p.round_lines.last().expect("line").ends_with(": the best now: the same score as run 2, round 3, and ties go to the lower run"), "{:?}", p.round_lines.last());
+    }
+
+    /// M2: the gate decides once, when no run can offer any more: the best `candidates` picks by
+    /// the objective draw (ties: the lower run), after Cancel only the best one; a withdrawn run
+    /// (not begun, nothing kept) is not waited for.
+    #[test]
+    fn the_draw_gate_draws_the_best_picks_over_all_runs() {
+        let obj = Objective::from_options("length_vias", 25.0, "errors_vias_length");
+        let crit = |errors: usize, vias: usize| Criteria { errors, vias, length_mm: 100.0, ..Criteria::default() };
+        for (quota, cancel, want) in [(1usize, false, vec![2usize]), (2, false, vec![0, 2]), (2, true, vec![2]), (9, false, vec![0, 2, 3])] {
+            let g = DrawGate::new(4, quota, 2);
+            let offers = [(0usize, crit(0, 5)), (2, crit(0, 3)), (3, crit(1, 0))];
+            let drawn: Vec<usize> = std::thread::scope(|s| {
+                let hs: Vec<_> = offers.iter().map(|&(k, c)| { let g = &g; let obj = &obj; s.spawn(move || (k, g.offer(k, c, obj, cancel))) }).collect();
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                g.withdraw(1); // run 2 never begun: the decision does not wait for it
+                let mut d: Vec<usize> = hs.into_iter().map(|h| h.join().expect("offer")).filter(|(_, w)| w.is_none()).map(|(k, _)| k).collect();
+                d.sort_unstable();
+                d
+            });
+            assert_eq!(drawn, want, "quota {quota}, cancel {cancel}");
+        }
+    }
+
+    #[test]
+    fn a_poisoned_draw_gate_is_loud_never_draw_every_pick() {
+        // verify-m2 F7c: a run that panicked while deciding poisons the gate; the others panic
+        // (the call's thread scope passes it on) instead of each drawing its pick quietly
+        let obj = Objective::from_options("length_vias", 25.0, "errors_vias_length");
+        let g = DrawGate::new(2, 1, 2);
+        let _ = std::thread::scope(|s| s.spawn(|| {
+            let _held = g.st.lock().expect("fresh lock");
+            panic!("a run panics while it decides");
+        }).join());
+        assert!(g.st.is_poisoned());
+        g.withdraw(1); // from a Drop while unwinding: never panics
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| g.decide(0, Criteria::default(), &obj, false)));
+        let msg = r.expect_err("a poisoned gate panics").downcast::<String>().map(|m| *m).unwrap_or_default();
+        assert!(msg.contains("draw gate"), "{msg}");
     }
 }

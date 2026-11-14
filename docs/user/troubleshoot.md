@@ -490,6 +490,14 @@ copper violates a rule anywhere else, file a bug.
 
 **Fix.** See the connection reasons in the report; relax a setting (run.timeout_s, optimize.rounds) or route by hand.
 
+### NOTHING_TO_DRAW
+
+*Severity: error.*
+
+**Cause.** Cancel / OK came before the router had kept any plan (before the initial routing of any run had ended: its topology search, layer assignment and rip-up rounds), so there was nothing to draw: no copper was written and the board was not changed. A Cancel later in the run draws the best plan kept so far.
+
+**Fix.** Route again and let the initial routing finish (the progress dialog names the step; on a large board it can take a minute or more), then press OK / Cancel; or let the time limit end the run (run.timeout_s, [run] timeout_mode = soft: the step that runs then finishes and its plan is drawn).
+
 ### PAD_OUTSIDE_BOARD
 
 *Severity: warning.*
@@ -641,6 +649,22 @@ copper violates a rule anywhere else, file a bug.
 **Cause.** The time limit (or a Cancel) stopped the topological core before its routes were stable ([optimize] stable_window / stable_gain_pct); the result is the best so far and may differ between runs and machines. The stop reason says which clock fired: timeout_wall (seconds on the clock) or timeout_cpu (CPU seconds summed over all threads, run.timeout_clock = cpu).
 
 **Fix.** Raise run.timeout_s (0 = no limit; Cancel always works; run.timeout_clock chooses wall or cpu seconds) and route again, or add time while the router runs (progress dialog: +5 min / +15 min or a new Time limit), or lower [optimize] runs (best of N runs share the threads); wait for "Routes stable" and press OK for a reproducible result.
+
+### TIME_DRAWING_CUT
+
+*Severity: warning.*
+
+**Cause.** The time limit acted as hard (run.timeout_mode = hard, or the soft limit past its overrun cap run.timeout_overrun_s) while the drawing ran: the drawing had begun before the limit and ran past it, so the limit cut it there. The board is drawn only in part: the connections the drawing had not reached stay unrouted (reason "time limit reached before this connection was drawn"), a cut via reduction leaves the vias it had not removed, a cut pour stitching leaves pour pieces apart (open in KiCad's DRC). The warning says how many connections were drawn. A limit that acted as hard before the drawing began never cuts it (the kept plan is drawn in full). With [optimize] loop = "topor" the loop may use loop_time_share of the time left, so on a large board the drawing can start before the limit and still run past it.
+
+**Fix.** For a complete board use run.timeout_mode = soft (the default: the drawing always runs to its end) or a longer run.timeout_s (or run.timeout_overrun_s past the soft limit), or lower [optimize] loop_time_share so more of the limit is left for the drawing; then route again.
+
+### TIME_OVERRUN_CAP
+
+*Severity: warning.*
+
+**Cause.** The soft time limit (run.timeout_mode = soft) let the step that ran go on past run.timeout_s, until the overrun cap run.timeout_overrun_s (on the same clock); then the run acted as with the hard limit: the step that ran was cut and the kept plan (the best variant so far, or the initial plan) was drawn in full; when the drawing itself was the step that ran, the drawing was cut there (TIME_DRAWING_CUT). A cut initial routing or drawing leaves connections unrouted, a cut TopoR loop cycle is not kept; a cap that passed only after those steps had ended cut nothing. The warning says which. By default the cap is equal to run.timeout_s in headless runs (harness, MCP, scripts and direct engine calls: about twice the limit plus the drawing of one plan, plus the time a step takes to see the stop, measurements outside the limit and more drawings with [optimize] loop = "cycles" or runs > 1; operate.md) and off in the KiCad dialog, where Cancel stops a run.
+
+**Fix.** Raise run.timeout_overrun_s (seconds past the limit; 0 or "none" = no cap) or run.timeout_s and route again, or lower [optimize] runs; in the KiCad dialog leave the cap off (auto) and press Cancel when the overrun is too long.
 
 ### TRACK_ANGLE_RULE
 

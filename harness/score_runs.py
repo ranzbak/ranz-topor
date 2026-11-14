@@ -86,6 +86,13 @@ def compass_row(root: Path, board: str, k: int, out: Path) -> str | None:
     cols = compass_mod.columns(cp)
     if not cols:
         return None
+    # M2.TL: the time limit's columns (reached, the step that ran then, seconds past it on the run's clock)
+    mets = sorted(out.glob("*--metrics.json"))
+    met = json.loads(mets[0].read_text()) if mets else {}
+    cols.update({"limit_reached": met.get("limit_reached"), "limit_step": met.get("limit_step"),
+                 "overrun_s": met.get("overrun_s"), "router_cpu_s": met.get("router_cpu_s"),
+                 # F3: the overrun cap fired (the run then acted as with the hard limit)
+                 "overrun_cap_hit": met.get("overrun_cap_hit")})
     tsv = root / "compass.tsv"
     keys = sorted(cols)
     new = not tsv.exists()
@@ -142,6 +149,16 @@ def main(argv: list | None = None) -> int:
                 line = compass_row(a.root, name, k, out)
                 if line:
                     print(f"  {line}", flush=True)
+                # F3 run.timeout_overrun_s (default auto = timeout_s headless): say when the cap fired, the run then
+                # acted as with the hard limit (limits.json overrun_cap_hit lists those runs)
+                mets = sorted(out.glob("*--metrics.json"))
+                met = json.loads(mets[0].read_text()) if mets else {}
+                if met.get("overrun_cap_hit"):
+                    print(f"  WARNING: {name} s{k}: time limit overrun cap reached ({met.get('overrun_cap_s')} s past the "
+                          f"{a.timeout:g} s {a.clock} limit): the run acted as with the hard limit (cut: "
+                          f"{met.get('limit_cut') or 'plan'}: plan = the step that ran was cut and the kept plan drawn in full, "
+                          "drawing = the drawing was cut, none = nothing was cut)", flush=True)
+                    lim.setdefault("overrun_cap_hit", []).append(f"{name}/s{k}")
     finally:
         lim["load_avg_end"] = list(os.getloadavg())
         lim["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")

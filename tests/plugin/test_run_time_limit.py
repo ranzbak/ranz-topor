@@ -104,7 +104,13 @@ def test_without_a_change_the_limit_is_fixed_and_reported(app, eprom, tmp_path, 
     eng = RecordingEngine(hold=2)
     _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=CFG, engine=eng)
     assert eng.jobs[0].limits == [] and eng.options[0]["wall_clock_s"] == 60.0
-    assert _res(out)["time_limit"] == {"clock": "wall", "start_s": 60.0, "final_s": 60.0, "changes": []}
+    # M2.TL: the limit's mode and whether it was reached (not here: no overrun, no step)
+    assert _res(out)["time_limit"] == {"clock": "wall", "start_s": 60.0, "final_s": 60.0, "changes": [],
+                                       "mode": "soft", "reached": False, "step": "", "overrun_s": 0.0,
+                                       # F3: headless, run.timeout_overrun_s = auto = timeout_s; not fired
+                                       "cap_s": 60.0, "cap_hit": False,
+                                       # what the limit acting as hard cut (hard and the cap: one path): nothing
+                                       "cut": "none", "cut_steps": []}
     assert "limit 60 s wall" in "\n".join(out.report.summary_lines())
 
 
@@ -125,7 +131,8 @@ def test_cpu_limit_lowered_fires_at_the_new_value(app, eprom, tmp_path, reports,
     eng = RecordingEngine(hold=12, patch=_as("cancel", timed_out=True))
     ui = ScriptedUi(accept=False, limit_changes=[(lambda p: p.cpu_s >= 1, 4.0)])
     _, _, out = do_run(eprom, tmp_path, ui=ui, cfg=cfg, engine=eng)
-    assert eng.jobs[0].cancelled and out.stop_reason == "timeout_cpu"
+    # M2.TL soft limit (default): the CPU clock reaches the engine's soft limit, not a Cancel
+    assert eng.jobs[0].reached and not eng.jobs[0].cancelled and out.stop_reason == "timeout_cpu"
     assert 4.0 <= _fired_at(out) <= 5.0  # the job double keeps counting after the cancel: check when it fired
     f = {x.code: x for x in out.findings}
     assert "CPU-time limit of 4 s" in f["TIME_BUDGET_HIT"].message
@@ -138,8 +145,9 @@ def test_cpu_limit_lowered_below_the_time_spent_stops_now(app, eprom, tmp_path, 
     eng = RecordingEngine(hold=12, patch=_as("cancel", timed_out=True))
     ui = ScriptedUi(accept=False, limit_changes=[(lambda p: p.cpu_s >= 3, 0.5)])
     _, _, out = do_run(eprom, tmp_path, ui=ui, cfg=cfg, engine=eng)
-    assert eng.jobs[0].cancelled and out.stop_reason == "timeout_cpu"
+    assert eng.jobs[0].reached and not eng.jobs[0].cancelled and out.stop_reason == "timeout_cpu"  # M2.TL soft
     tl = _res(out)["time_limit"]
+    assert tl["reached"] is True and tl["mode"] == "soft"
     assert tl["changes"][0]["limit_s"] == tl["changes"][0]["at_s"] >= 3.0  # clamped to the time spent
     assert _fired_at(out) <= tl["final_s"] + 1.0  # at the next poll
 

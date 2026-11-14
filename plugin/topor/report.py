@@ -22,6 +22,7 @@ from toporlib.compass import summary_line as compass_summary_line
 from toporlib.compass import table_md as compass_table_md
 from toporlib.detour import detour_line, detour_stats
 
+from .messages import CUT_TEXT
 from .postrun import POSTRUN_CODES
 
 
@@ -43,6 +44,12 @@ def time_limit_text(tl: dict | None) -> str:
         how = ("removed" if final <= 0 else "set" if start <= 0 else "raised" if final > start
                else "lowered" if final < start else "changed")
         txt += f" ({how} during the run from {limit_text(start)}, {n} change{'s' if n > 1 else ''})"
+    if tl.get("reached"):  # M2.TL: where the limit was reached and how far the run went past it
+        txt += (f", reached during {tl.get('step') or 'the run'} ({tl.get('mode', 'soft')}), "
+                f"{float(tl.get('overrun_s') or 0.0):.1f} s past it")
+    if tl.get("cap_hit"):  # F3: the overrun cap fired, the soft limit then acted as the hard one
+        txt += (f", WARNING: overrun cap of {limit_text(tl.get('cap_s') or 0.0)} reached (as with the hard limit: "
+                f"{CUT_TEXT.get(tl.get('cut') or 'plan', CUT_TEXT['plan'])})")
     return txt
 
 SUMMARY_MAX_LINES = 20
@@ -282,7 +289,16 @@ class RunReport:
         if tl:  # the start limit, every change the user made during the run, the final limit
             out.append(f"Time limit ({tl.get('clock', 'wall')} clock): {limit_text(tl.get('start_s'))} at the start"
                        + "".join(f"; at {c['at_s']:g} s set to {limit_text(c['limit_s'])}" for c in tl.get("changes") or [])
-                       + (f"; final {limit_text(tl.get('final_s'))}" if tl.get("changes") else ""))
+                       + (f"; final {limit_text(tl.get('final_s'))}" if tl.get("changes") else "")
+                       + (f"; reached during {tl.get('step') or 'the run'} ([run] timeout_mode = {tl.get('mode', 'soft')}: "
+                          + ("the step that ran finished and the best kept variant was drawn" if tl.get("mode", "soft") == "soft"
+                             else CUT_TEXT.get(tl.get("cut") or "plan", CUT_TEXT["plan"]))
+                          + f"), result ready {float(tl.get('overrun_s') or 0.0):.1f} s past the limit" if tl.get("reached") else "")
+                       + (f"; overrun cap run.timeout_overrun_s = {limit_text(tl.get('cap_s'))}" if tl.get("cap_s") else
+                          "; no overrun cap (run.timeout_overrun_s)" if "cap_s" in tl and tl.get("mode", "soft") == "soft"
+                          else "")
+                       + ("; WARNING: the overrun cap was reached, the run then acted as with the hard limit: "
+                          + CUT_TEXT.get(tl.get("cut") or "plan", CUT_TEXT["plan"]) + " (TIME_OVERRUN_CAP)" if tl.get("cap_hit") else ""))
         if f.get("toml_path"):
             out.append(f"Config file: {f['toml_path']}")
         return out

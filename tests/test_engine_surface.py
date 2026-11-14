@@ -164,6 +164,25 @@ def test_default_options_lists_every_field(engine, root):
     assert out["routed"] == 1 and out["stop_reason"] == "stable"  # M-B0: a headless run ends at "Routes stable"
 
 
+def test_direct_engine_calls_have_the_overrun_cap_by_default(engine):
+    """User 2026-11-13: a direct engine call (route / route_async: the harness's route_router, bench.py, the M4 gate,
+    classic_ref.py) gets the soft limit's overrun cap by default: timeout_overrun_s = "auto" = wall_clock_s. 0 (what
+    the plugin passes in the KiCad dialog) or "none" = no cap."""
+    d = json.loads(engine.default_options())
+    assert d["timeout_overrun_s"] == "auto"
+    m = json.dumps(_model_routable())
+    out = json.loads(engine.route(m, json.dumps({"wall_clock_s": 10.0})))
+    lim = out["limit"]
+    assert lim["cap_s"] == pytest.approx(10.0) and not lim["cap_hit"] and lim["cut"] == "none", lim
+    for none in (0.0, "none"):
+        lim = json.loads(engine.route(m, json.dumps({"wall_clock_s": 10.0, "timeout_overrun_s": none})))["limit"]
+        assert lim["cap_s"] is None, (none, lim)
+    lim = json.loads(engine.route(m, json.dumps({"wall_clock_s": 10.0, "timeout_overrun_s": 3.0})))["limit"]
+    assert lim["cap_s"] == pytest.approx(3.0), lim
+    with pytest.raises(ValueError):
+        engine.route(m, json.dumps({"timeout_overrun_s": "soon"}))
+
+
 def _strip(r):
     r = dict(r)
     r.pop("runtime_s")
@@ -204,21 +223,45 @@ def test_route_async_time_limit_is_live(engine):
     assert engine.route_async(mj, json.dumps({"wall_clock_s": 0.0, "threads": 2})).time_limit() is None
 
 
-@pytest.mark.xfail(strict=False, reason="PT1 parked: cancel after 2 s returns no anytime copper with the topo core (assert 0 >= 1); expectation predates it, see f20e5d5")
-def test_route_async_cancel_returns_anytime_result(engine):
-    """Cancel after 2 s of a board that routes for >= 5 s: anytime result, no panic (ruling C10)."""
+def _job_at_stage(engine, mj, opts, stage):
+    """route_async with `opts`, polled until its progress stage names `stage` (fails if the job ends first)."""
     import time
 
+    job = engine.route_async(mj, json.dumps(opts))
+    t0 = time.monotonic()
+    while stage not in json.loads(job.progress()).get("stage", ""):
+        assert not job.done(), f"the job ended before the stage {stage!r}"
+        assert time.monotonic() - t0 < 300, f"never reached the stage {stage!r}"
+        time.sleep(0.01)
+    return job
+
+
+def test_route_async_cancel_in_the_initial_routing_is_nothing_to_draw(engine):
+    """M2.TL (user 2026-11-13): Cancel during the initial routing (P2-P4) keeps no plan: the loud
+    NOTHING_TO_DRAW error, no copper, never a quiet empty or half-drawn result (was PT1: cancel at 2 s)."""
     from tests.scaling.synth import synth_model
 
-    m = synth_model(400, 1, layers=2)  # ~12 s uncancelled (2 threads)
-    mj = json.dumps(m)
-    job = engine.route_async(mj, json.dumps({"wall_clock_s": 0.0, "threads": 2}))
-    time.sleep(2.0)
-    assert not job.done()
+    mj = json.dumps(synth_model(400, 1, layers=2))
+    job = _job_at_stage(engine, mj, {"wall_clock_s": 0.0, "runs": 1}, "topological search")
     job.cancel()
     out = json.loads(job.wait())
     assert out["stop_reason"] == "cancel" and out["timed_out"]
-    assert out["routed"] >= 1
+    assert out["warnings"][0].startswith("ERROR: nothing to draw yet"), out["warnings"][:3]
+    assert out["routed"] == 0 and out["items"] == []
+
+
+def test_route_async_cancel_in_the_topor_loop_returns_anytime_result(engine):
+    """Cancel once the TopoR loop runs: the best kept variant is drawn, no panic (ruling C10; M2.TL). Legal copper only
+    (allow_violations = false; by default the topo core writes copper it cannot draw legally on purpose, never drop)."""
+    from tests.scaling.synth import synth_model
+
+    mj = json.dumps(synth_model(400, 1, layers=2))
+    job = _job_at_stage(engine, mj, {"wall_clock_s": 0.0, "allow_violations": False}, "TopoR loop on the topology")
+    job.cancel()
+    out = json.loads(job.wait())
+    # the loop's pick is drawn to its end (not cut short, so timed_out may be false)
+    assert out["stop_reason"] == "cancel"
+    assert out["routed"] >= 1 and out["items"], out["warnings"][:3]
+    assert not any(w.startswith("ERROR:") for w in out["warnings"]), out["warnings"][:3]
     chk = json.loads(engine.check_items(mj, json.dumps(out["items"]), json.dumps({"margin_nm": 0})))
     assert chk["violations"] == []

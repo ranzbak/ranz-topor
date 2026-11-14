@@ -20,7 +20,7 @@
 //! [`RunControl::update`] is O(1) under an uncontended mutex.
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -134,12 +134,50 @@ pub struct Progress {
     pub rounds_ended: u32,
     #[serde(default)]
     pub round_lines: Vec<String>,
+    /// M2.TL soft time limit: the limit has passed while the run goes on (the step that runs
+    /// finishes, then the best kept variant is drawn; Cancel stops now). Live in
+    /// [`RunControl::snapshot`]; false after Cancel and once the run is done.
+    #[serde(default)]
+    pub limit_reached: bool,
+    /// The step that ran when the limit passed (its stage text; "" before the limit).
+    #[serde(default)]
+    pub limit_step: String,
+    /// The progress dialog's line for the soft limit ("time limit reached, waiting for the
+    /// current step to finish (<step>); press Cancel to stop now"), "" when it does not apply.
+    #[serde(default)]
+    pub notice: String,
+    /// The step each run of a best-of-N call computes now (index = run - 1; "" = the run computes
+    /// nothing: between its cycles, waiting at the M2 draw gate, or done). The soft limit names
+    /// these steps, not only the stage text the last run set (verify-m2 F6).
+    #[serde(default)]
+    pub run_steps: Vec<String>,
+}
+
+/// The soft time limit's line for the progress dialog and the run log ([`Progress::notice`]). O(len).
+/// `hard` (`[run] timeout_mode = "hard"`): the limit stops the step that runs, so the line says
+/// that instead of waiting (verify-m2 F7a).
+/// `capped`: the overrun cap (`[run] timeout_overrun_s`) has fired: the soft limit acts as the
+/// hard one from then on (F3, user 2026-11-13).
+pub fn limit_notice(step: &str, hard: bool, capped: bool) -> String {
+    let at = if step.is_empty() { String::new() } else { format!(" ({step})") };
+    match (capped, hard) {
+        (true, _) => format!("time limit overrun cap reached ([run] timeout_overrun_s): the current step stops now{at}"),
+        (false, false) => format!("time limit reached, waiting for the current step to finish{at}; press Cancel to stop now"),
+        (false, true) => format!("time limit reached (hard): the current step stops now{at}"),
+    }
 }
 
 /// Round lines [`Progress`] keeps (the run flow polls every 0.25 s; a round takes longer).
 pub const ROUND_LINES: usize = 32;
 
 impl Progress {
+    /// The steps that compute now: of a best-of-N call each run's that computes ("run k: step",
+    /// joined by "; "), else the stage text. O(runs).
+    pub fn open_steps(&self) -> String {
+        let open: Vec<String> = self.run_steps.iter().enumerate().filter(|(_, s)| !s.is_empty()).map(|(i, s)| format!("run {}: {s}", i + 1)).collect();
+        if open.is_empty() { self.stage.clone() } else { open.join("; ") }
+    }
+
     /// Note an ended round's log line (the last [`ROUND_LINES`] stay). O(ROUND_LINES).
     pub(crate) fn push_round_line(&mut self, line: String) {
         self.rounds_ended += 1;
@@ -163,6 +201,71 @@ pub struct TimeLimit {
     ns: AtomicU64,
     /// Set by [`TimeLimit::set`] (the caller changed the limit during the run): the report says so.
     changed: AtomicBool,
+    /// `[run] timeout_mode = "hard"` (the limit stops the step that runs; [`limit_notice`]).
+    hard: AtomicBool,
+    /// F3 `[run] timeout_overrun_s`: nanoseconds past the limit after which the soft limit acts as
+    /// the hard one (`LIMIT_NONE` = no cap), and whether that happened (or the caller said so,
+    /// [`TimeLimit::harden`]: the plugin's CPU clock).
+    cap_ns: AtomicU64,
+    capped: AtomicBool,
+    /// The steps a stop test saw the limit cut, acting as hard after it passed ([`TimeLimit::cuts`],
+    /// [`TimeLimit::note_cut_in`]): one bit per [`CutStep`] (the report then names what was cut,
+    /// not only that the limit acted as hard).
+    cut: AtomicU8,
+}
+
+/// M2 fix 3 (verify-m2c 4): a step the time limit, acting as hard (`[run] timeout_mode = "hard"`,
+/// or the soft limit past its overrun cap), can cut, as the report names it. The planning steps
+/// (initial routing, its rip-up rounds, the TopoR loop cycle, P3/P4 moves) are [`CutStep::Plan`];
+/// the drawing's own steps each have theirs. The octilinear polish and the fuse have no stop
+/// test: the limit never cuts them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CutStep {
+    /// A planning step: the kept plan is drawn in full after it.
+    Plan,
+    /// The plane stubs, placed before the topology (a planning step: the plan needs them).
+    PlaneStubs,
+    /// The drawing of the traces (vias, wires, the feedback redraw, never-drop).
+    Drawing,
+    /// The via reduction after the drawing.
+    ViaReduction,
+    /// The pour stitching (D4) of a drawn variant.
+    Stitching,
+}
+
+impl CutStep {
+    pub const ALL: [CutStep; 5] = [CutStep::Plan, CutStep::PlaneStubs, CutStep::Drawing, CutStep::ViaReduction, CutStep::Stitching];
+
+    fn bit(self) -> u8 {
+        1 << (self as u8)
+    }
+
+    /// Its name in `LimitReport::cut_steps` / `result.json` `time_limit.cut_steps`.
+    pub fn name(self) -> &'static str {
+        match self {
+            CutStep::Plan => "plan",
+            CutStep::PlaneStubs => "plane_stubs",
+            CutStep::Drawing => "drawing",
+            CutStep::ViaReduction => "via_reduction",
+            CutStep::Stitching => "stitching",
+        }
+    }
+
+    /// Its words in the report lines.
+    pub fn words(self) -> &'static str {
+        match self {
+            CutStep::Plan => "a planning step",
+            CutStep::PlaneStubs => "the plane stubs",
+            CutStep::Drawing => "the drawing of the traces",
+            CutStep::ViaReduction => "the via reduction",
+            CutStep::Stitching => "the pour stitching",
+        }
+    }
+
+    /// A step of the drawing (cut: the board is drawn only in part, or not finished).
+    pub fn in_drawing(self) -> bool {
+        matches!(self, CutStep::Drawing | CutStep::ViaReduction | CutStep::Stitching)
+    }
 }
 
 const LIMIT_UNSET: u64 = u64::MAX;
@@ -170,7 +273,7 @@ const LIMIT_NONE: u64 = u64::MAX - 1;
 
 impl Default for TimeLimit {
     fn default() -> TimeLimit {
-        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false) }
+        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false), cap_ns: AtomicU64::new(LIMIT_NONE), capped: AtomicBool::new(false), cut: AtomicU8::new(0) }
     }
 }
 
@@ -188,6 +291,95 @@ impl TimeLimit {
     /// The run's own limit (`Options::wall_clock_s`, 0 = none), only when nobody set one yet. O(1).
     pub fn init(&self, seconds: f64) {
         let _ = self.ns.compare_exchange(LIMIT_UNSET, Self::encode(seconds), Ordering::Relaxed, Ordering::Relaxed);
+    }
+
+    /// The limit is hard (`[run] timeout_mode = "hard"`) or soft (default). O(1).
+    pub fn set_hard(&self, hard: bool) {
+        self.hard.store(hard, Ordering::Relaxed);
+    }
+
+    /// Whether the limit acts as hard now: `[run] timeout_mode = "hard"`, or the overrun cap fired
+    /// ([`TimeLimit::cap_hit`]). Read live. O(1) (a clock read with a cap set).
+    pub fn is_hard(&self) -> bool {
+        self.hard.load(Ordering::Relaxed) || self.cap_hit()
+    }
+
+    /// F3 `[run] timeout_overrun_s`: seconds the soft limit may be overrun before it acts as the
+    /// hard one (`<= 0` / non-finite = no cap; on this limit's clock, the wall clock). O(1).
+    pub fn set_overrun_cap(&self, seconds: f64) {
+        self.cap_ns.store(Self::encode(seconds), Ordering::Relaxed);
+    }
+
+    /// The overrun cap in seconds; `None` = no cap. O(1).
+    pub fn overrun_cap_s(&self) -> Option<f64> {
+        match self.cap_ns.load(Ordering::Relaxed) {
+            LIMIT_UNSET | LIMIT_NONE => None,
+            ns => Some(ns as f64 * 1e-9),
+        }
+    }
+
+    /// The overrun cap fired (the limit plus the cap passed, noted once), or the caller hardened
+    /// the limit ([`TimeLimit::harden`]). O(1).
+    pub fn cap_hit(&self) -> bool {
+        if self.capped.load(Ordering::Relaxed) {
+            return true;
+        }
+        let hit = match (self.seconds(), self.overrun_cap_s()) {
+            (Some(l), Some(c)) => self.elapsed_s() >= l + c,
+            _ => false,
+        };
+        if hit {
+            self.capped.store(true, Ordering::Relaxed);
+        }
+        hit
+    }
+
+    /// The limit stops the step that runs now: it passed and acts as hard (`[run] timeout_mode =
+    /// "hard"`, or the overrun cap fired, [`TimeLimit::is_hard`]). When true it is noted
+    /// ([`TimeLimit::cut_any`]) as a cut of a planning step: the stop test that asked stops its
+    /// step there. O(1).
+    pub fn cuts(&self) -> bool {
+        self.cuts_in(CutStep::Plan)
+    }
+
+    /// [`TimeLimit::cuts`] for the stop test of `step`. O(1).
+    pub fn cuts_in(&self, step: CutStep) -> bool {
+        self.is_hard() && self.passed() && self.note_cut_in(step)
+    }
+
+    /// A planning step's stop test with its own condition (the round's 1 s floor) found the limit
+    /// cutting its step: noted for the report ([`TimeLimit::cut_any`]). Always true. O(1).
+    pub fn note_cut(&self) -> bool {
+        self.note_cut_in(CutStep::Plan)
+    }
+
+    /// The stop test of `step` found the limit cutting it: noted for the report. Always true. O(1).
+    pub fn note_cut_in(&self, step: CutStep) -> bool {
+        self.cut.fetch_or(step.bit(), Ordering::Relaxed);
+        true
+    }
+
+    /// Whether the limit, acting as hard, cut a step of the run ([`TimeLimit::cuts`]). A limit
+    /// (or overrun cap) that passed only after the steps it stops had ended cut nothing. O(1).
+    pub fn cut_any(&self) -> bool {
+        self.cut.load(Ordering::Relaxed) != 0
+    }
+
+    /// The steps the limit cut, in [`CutStep::ALL`] order. O(1).
+    pub fn cut_steps(&self) -> Vec<CutStep> {
+        let bits = self.cut.load(Ordering::Relaxed);
+        CutStep::ALL.into_iter().filter(|s| bits & s.bit() != 0).collect()
+    }
+
+    /// `[run] timeout_mode = "hard"` was set ([`TimeLimit::set_hard`]), apart from the overrun cap. O(1).
+    pub fn hard_mode(&self) -> bool {
+        self.hard.load(Ordering::Relaxed)
+    }
+
+    /// The caller's overrun cap fired (the plugin's CPU clock: limit plus cap reached in CPU
+    /// seconds): the limit acts as the hard one from now on ([`TimeLimit::is_hard`]). O(1).
+    pub fn harden(&self) {
+        self.capped.store(true, Ordering::Relaxed);
     }
 
     /// Change the limit (seconds since the start; `0` = no limit). O(1), any thread.
@@ -241,6 +433,14 @@ impl TimeLimit {
     pub fn passed(&self) -> bool {
         self.deadline().is_some_and(|d| Instant::now() >= d)
     }
+
+    /// The limit is reached now (M2.TL, the plugin's CPU clock: it reached its own limit and the
+    /// engine's soft limit follows): the limit becomes the time spent, not a change by the caller
+    /// ([`TimeLimit::changed`]); a limit already passed stays. O(1).
+    pub fn reach(&self) {
+        let now = ((self.elapsed_s() * 1e9) as u64).clamp(1, LIMIT_NONE - 1);
+        let _ = self.ns.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |ns| (ns == LIMIT_UNSET || ns == LIMIT_NONE || ns > now).then_some(now));
+    }
 }
 
 /// Cancel flag, time limit and progress of one run; cheap to clone (shared state).
@@ -292,24 +492,78 @@ impl RunControl {
         self.with_progress(|p| p.measure_s += seconds.max(0.0));
     }
 
-    /// Copy of the current progress. O(1).
+    /// The run's time limit has passed: the step that runs finishes and no new one starts (M2.TL
+    /// soft limit). Records the step that ran when it passed ([`Progress::limit_step`]). O(1).
+    pub fn limit_reached(&self) -> bool {
+        let passed = self.limit.passed();
+        if passed {
+            self.with_progress(|p| {
+                if p.limit_step.is_empty() {
+                    let open = p.open_steps();
+                    p.limit_step = if open.is_empty() { "routing".into() } else { open };
+                }
+            });
+        }
+        passed
+    }
+
+    /// Copy of the current progress; the soft limit's fields ([`Progress::limit_reached`],
+    /// [`Progress::notice`]) are read live. O(1).
     pub fn snapshot(&self) -> Progress {
-        self.progress
-            .lock()
-            .map(|p| p.clone())
-            .unwrap_or_default()
+        let mut p = self.progress.lock().map(|p| p.clone()).unwrap_or_default();
+        p.limit_reached = self.limit.passed() && !self.is_cancelled() && p.phase != "done";
+        if p.limit_reached {
+            let open = p.open_steps();
+            if p.limit_step.is_empty() {
+                p.limit_step = open.clone();
+            }
+            p.notice = limit_notice(&open, self.limit.is_hard(), !self.limit.hard_mode() && self.limit.cap_hit());
+        }
+        p
     }
 
     /// Name the current stage and round (progress dialog wording); leaves the counters alone. O(1).
     pub(crate) fn stage(&self, round: u32, rounds: u32, stage: &str) {
         if let Ok(mut p) = self.progress.lock() {
+            // M2.TL: the stage that ran when the limit passed is the step the soft limit waited for.
+            Self::note_limit_step(&self.limit, &mut p);
             if self.run > 0 && p.runs > 1 {
                 p.stage = if stage.is_empty() { String::new() } else { format!("run {}: {stage}", self.run) };
+                let i = self.run as usize - 1;
+                if p.run_steps.len() <= i {
+                    p.run_steps.resize(i + 1, String::new());
+                }
+                p.run_steps[i] = stage.to_string();
                 return;
             }
             p.stage = stage.to_string();
             p.round = round;
             p.rounds = rounds;
+        }
+    }
+
+    /// M2.TL: the steps that ran when the limit passed are the steps the soft limit waits for
+    /// (recorded once, before a step changes). O(runs).
+    fn note_limit_step(limit: &TimeLimit, p: &mut Progress) {
+        if p.limit_step.is_empty() && limit.passed() {
+            let open = p.open_steps();
+            if !open.is_empty() {
+                p.limit_step = open;
+            }
+        }
+    }
+
+    /// Run `run` of a best-of-N call computes nothing now (between its cycles, waiting at the M2
+    /// draw gate, or done): the soft limit no longer names its step. O(runs).
+    pub(crate) fn idle(&self) {
+        if self.run == 0 {
+            return;
+        }
+        if let Ok(mut p) = self.progress.lock() {
+            Self::note_limit_step(&self.limit, &mut p);
+            if let Some(s) = p.run_steps.get_mut(self.run as usize - 1) {
+                s.clear();
+            }
         }
     }
 
@@ -378,28 +632,40 @@ thread_local! {
     /// M0 stop latency: the cancel flag and live time limit of the run on this thread
     /// ([`with_control`]), read only by [`stop_requested`] (not by [`cancelled`], whose readers,
     /// the drawing and the pour stitching, run on through a Cancel to draw the loop's pick).
-    static STOP: RefCell<Option<(Arc<AtomicBool>, Arc<TimeLimit>)>> = const { RefCell::new(None) };
+    /// With the soft limit the time limit stops nothing until the overrun cap fires (M2.TL, F3).
+    static STOP: RefCell<Option<StopState>> = const { RefCell::new(None) };
 }
+
+/// What [`stop_requested`] reads: the cancel flag, the time limit and whether it always stops the
+/// steps (`hard`; else only once it acts as hard, [`TimeLimit::is_hard`]: the overrun cap, F3).
+type StopState = (Arc<AtomicBool>, Arc<TimeLimit>, bool);
 
 /// Runs `f` with `ctl`'s cancel flag and time limit as what [`stop_requested`] reads on this
 /// thread; the state before comes back after `f`, also when it panics. O(1) + `f`.
 pub fn with_control<R>(ctl: &RunControl, f: impl FnOnce() -> R) -> R {
-    struct Restore(Option<(Arc<AtomicBool>, Arc<TimeLimit>)>);
+    with_control_mode(ctl, true, f)
+}
+
+/// [`with_control`]; `limit_stops` = false (M2.TL soft limit, `[run] timeout_mode = "soft"`):
+/// only Cancel / OK stops the work loops, the time limit lets the step that runs finish. O(1) + `f`.
+pub fn with_control_mode<R>(ctl: &RunControl, limit_stops: bool, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<StopState>);
     impl Drop for Restore {
         fn drop(&mut self) {
             let prev = self.0.take();
             STOP.with(|c| *c.borrow_mut() = prev);
         }
     }
-    let _restore = Restore(STOP.with(|c| c.replace(Some((ctl.cancel.clone(), ctl.limit.clone())))));
+    let _restore = Restore(STOP.with(|c| c.replace(Some((ctl.cancel.clone(), ctl.limit.clone(), limit_stops)))));
     f()
 }
 
-/// The run of this thread ([`with_control`]) was cancelled or its time limit passed: the stop
-/// test of the work loops that have no `RunControl` (the topology and label moves of P3/P4 and
-/// their cut prices, M0). Cheap: one atomic load, and a clock read only with a limit set. O(1).
+/// The run of this thread ([`with_control`]) was cancelled or its time limit passed (the latter
+/// only where the limit stops steps: `[run] timeout_mode = "hard"` or the overrun cap fired, M2.TL / F3): the stop test of the
+/// work loops that have no `RunControl` (the topology and label moves of P3/P4 and their cut
+/// prices, M0). Cheap: one atomic load, and a clock read only with a limit set. O(1).
 pub fn stop_requested() -> bool {
-    STOP.with(|c| c.borrow().as_ref().is_some_and(|(f, l)| f.load(Ordering::Relaxed) || l.passed()))
+    STOP.with(|c| c.borrow().as_ref().is_some_and(|(f, l, always)| f.load(Ordering::Relaxed) || ((*always || l.is_hard()) && l.passed() && l.note_cut())))
 }
 
 /// Deadline passed or run cancelled: the single stop test of every deadline site. O(1).
@@ -505,6 +771,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_soft_limit_lets_the_moves_run_on_and_cancel_still_stops_them() {
+        // M2.TL: with_control_mode(.., false) = the soft limit: a passed limit is no stop request
+        // for the work loops (the step that runs finishes); Cancel is; hard (with_control) both.
+        let ctl = RunControl::new();
+        ctl.limit.init(600.0);
+        ctl.limit.reach();
+        assert!(with_control(&ctl, stop_requested), "hard: the passed limit stops the moves");
+        assert!(!with_control_mode(&ctl, false, stop_requested), "soft: the step runs on");
+        ctl.request_cancel();
+        assert!(with_control_mode(&ctl, false, stop_requested), "soft: Cancel stops now");
+        assert!(!stop_requested(), "outside the scope nothing is installed");
+    }
+
+    #[test]
     fn with_cancel_installs_the_flag_for_its_scope_only() {
         assert!(!cancelled());
         let flag = Arc::new(AtomicBool::new(false));
@@ -592,6 +872,98 @@ mod tests {
         });
         other.join().expect("thread");
         assert!(ctl.over_limit());
+    }
+
+    #[test]
+    fn reach_ends_the_limit_now_without_counting_as_a_change() {
+        let ctl = RunControl::new();
+        ctl.limit.init(600.0);
+        ctl.stage(1, 1, "layer assignment, rip-up and reroute");
+        assert!(!ctl.snapshot().limit_reached);
+        ctl.limit.reach();
+        assert!(ctl.over_limit());
+        assert!(!ctl.limit.changed(), "the plugin's CPU clock reached its limit: no change by the user");
+        let p = ctl.snapshot();
+        assert!(p.limit_reached);
+        assert_eq!(p.notice, "time limit reached, waiting for the current step to finish (layer assignment, rip-up and reroute); press Cancel to stop now");
+        ctl.stage(1, 1, "drawing the traces");
+        assert_eq!(ctl.snapshot().limit_step, "layer assignment, rip-up and reroute", "the step that ran when the limit passed");
+        ctl.request_cancel();
+        assert!(!ctl.snapshot().limit_reached, "after Cancel the dialog says Cancel, not the limit");
+        let none = RunControl::new();
+        none.limit.init(0.0);
+        none.limit.reach();
+        assert!(none.over_limit(), "no limit: reach() sets one at the time spent");
+    }
+
+    #[test]
+    fn the_soft_limit_names_the_steps_of_the_runs_still_computing() {
+        // verify-m2 F6: not only the stage text the last run set
+        let ctl = RunControl::new();
+        ctl.limit.init(600.0);
+        ctl.with_progress(|p| p.runs = 3);
+        let (r1, r2, r3) = (ctl.for_run(1), ctl.for_run(2), ctl.for_run(3));
+        r2.stage(1, 1, "layer assignment, rip-up and reroute");
+        r3.stage(1, 1, "topological search");
+        r1.stage(1, 1, "TopoR loop on the topology");
+        r1.idle(); // run 1 waits at the draw gate
+        ctl.limit.reach();
+        let p = ctl.snapshot();
+        assert_eq!(p.limit_step, "run 2: layer assignment, rip-up and reroute; run 3: topological search");
+        assert_eq!(p.notice, "time limit reached, waiting for the current step to finish (run 2: layer assignment, rip-up and reroute; run 3: topological search); press Cancel to stop now");
+        r3.idle();
+        assert_eq!(ctl.snapshot().limit_step, "run 2: layer assignment, rip-up and reroute; run 3: topological search", "recorded once");
+        assert!(ctl.snapshot().notice.contains("(run 2: layer assignment, rip-up and reroute)"), "the notice follows the runs still computing");
+    }
+
+    #[test]
+    fn the_hard_limit_has_its_own_notice() {
+        // verify-m2 F7a: the hard limit stops the step, it does not wait for it
+        let ctl = RunControl::new();
+        ctl.limit.init(600.0);
+        ctl.limit.set_hard(true);
+        ctl.stage(1, 1, "drawing the traces");
+        ctl.limit.reach();
+        assert_eq!(ctl.snapshot().notice, "time limit reached (hard): the current step stops now (drawing the traces)");
+    }
+
+    #[test]
+    fn a_hardened_hard_limit_keeps_the_hard_notice() {
+        // verify-m2d O3: in hard mode a caller's harden() (the plugin's CPU clock) is no "overrun cap":
+        // the cap is a soft-mode feature, so the notice stays the hard mode's own line.
+        let ctl = RunControl::new();
+        ctl.limit.init(0.0);
+        ctl.limit.set_hard(true);
+        ctl.stage(1, 1, "drawing the traces");
+        ctl.limit.reach();
+        ctl.limit.harden();
+        assert!(ctl.limit.cap_hit(), "harden() fired the cap flag");
+        assert_eq!(ctl.snapshot().notice, "time limit reached (hard): the current step stops now (drawing the traces)");
+    }
+
+    #[test]
+    fn the_overrun_cap_makes_the_soft_limit_hard() {
+        // F3 `[run] timeout_overrun_s`: before the limit plus the cap the soft limit stops no
+        // step; after it (or when the caller hardens it, the plugin's CPU clock) it acts as hard
+        let ctl = RunControl::new();
+        ctl.limit.init(1e-6);
+        ctl.limit.set_overrun_cap(3600.0);
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(ctl.over_limit() && !ctl.limit.is_hard() && !ctl.limit.cap_hit());
+        assert!(!with_control_mode(&ctl, false, stop_requested), "soft: the limit stops no step");
+        ctl.limit.set_overrun_cap(1e-6);
+        assert!(ctl.limit.cap_hit() && ctl.limit.is_hard(), "limit + cap passed");
+        assert!(with_control_mode(&ctl, false, stop_requested), "past the cap the soft limit stops the steps");
+        ctl.limit.set_overrun_cap(0.0);
+        assert!(ctl.limit.cap_hit(), "noted once: it stays hard");
+        assert!(ctl.snapshot().notice.starts_with("time limit overrun cap reached ([run] timeout_overrun_s): the current step stops now"), "{}", ctl.snapshot().notice);
+        let cpu = RunControl::new();
+        cpu.limit.init(0.0);
+        cpu.limit.reach();
+        assert!(!cpu.limit.is_hard() && cpu.limit.overrun_cap_s().is_none());
+        cpu.limit.harden();
+        assert!(cpu.limit.is_hard() && cpu.limit.cap_hit(), "the caller's clock hardened it");
+        assert!(with_control_mode(&cpu, false, stop_requested));
     }
 
     #[test]

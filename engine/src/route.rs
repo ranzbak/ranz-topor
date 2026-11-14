@@ -257,6 +257,34 @@ pub struct RouteResult {
     /// class, located, and per connection its planned vias and length ([`crate::topo::compass`]);
     /// `None` for other engines and for results without a plan.
     pub compass: Option<crate::topo::compass::Compass>,
+    /// M2.TL: the time limit of the call and what it did (`None`: no limit set).
+    pub limit: Option<LimitReport>,
+}
+
+/// M2.TL: the time limit of a call ([`RouteResult::limit`]): the limit (s since the start, as it
+/// stood at the end), `[run] timeout_mode`, whether it was reached, the step that ran then (its
+/// stage text) and the time past it until the result was ready (`overrun_s`, 0 when not reached).
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+pub struct LimitReport {
+    pub limit_s: f64,
+    pub mode: String,
+    pub reached: bool,
+    pub step: String,
+    pub overrun_s: f64,
+    /// F3 `[run] timeout_overrun_s` on the engine's clock (`None` = no cap here; the plugin's CPU
+    /// clock caps on its own and hardens the limit, `cap_hit` then true).
+    pub cap_s: Option<f64>,
+    /// The overrun cap fired: from then on the soft limit acted as the hard one.
+    pub cap_hit: bool,
+    /// What the limit cut when it acted as hard (`hard`, or past the overrun cap; user
+    /// 2026-11-13: one path for both): `"plan"` = a planning step was cut and the kept plan drawn
+    /// in full; `"drawing"` = the drawing was the step that ran and was cut (connections left
+    /// unrouted, or its via reduction or pour stitching cut); `"none"` = nothing (the soft limit,
+    /// or it passed after the steps it stops).
+    pub cut: String,
+    /// The steps the limit cut, as the stop tests noted them (`crate::control::CutStep::name`:
+    /// `plan`, `plane_stubs`, `drawing`, `via_reduction`, `stitching`); empty when `cut` is `"none"`.
+    pub cut_steps: Vec<String>,
 }
 
 /// A routed differential-pair connection (D7), nm. `from` / `to` are the P connection's pads.
@@ -713,6 +741,7 @@ pub(crate) fn unrouted(model: &BoardModel, opts: &Options, reason: &str) -> Rout
         violations: Vec::new(),
         diff_pairs: Vec::new(),
         compass: None,
+        limit: None,
     }
 }
 
