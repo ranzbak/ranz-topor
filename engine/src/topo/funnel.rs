@@ -12,8 +12,10 @@
 //! **Funnel.** On a proper sleeve (every portal shares one end with the one before it, each
 //! triangle between two consecutive portals turning the way of travel) this is the funnel
 //! algorithm of Lee & Preparata (1984, Networks 14:393-410), as in Hershberger & Snoeyink (1994,
-//! CGTA 4:63-98) and Erickson, Computational Topology notes, ch. 5 sec. 5.5 "Growing funnels"
-//! pp. 4-5 (local copy docs/literature/erickson-shortest-homotopic.html): an apex and two
+//! CGTA 4:63-98) and J. Erickson's Computational Topology lecture notes, "Shortest (Homotopic)
+//! Paths", section "Growing Funnels" (an HTML page without page numbers; local copy
+//! docs/literature/erickson-shortest-homotopic.html, from
+//! jeffe.cs.illinois.edu/teaching/comptop/2023/notes/05-shortest-homotopic.html): an apex and two
 //! concave chains; a new end is tested against the *last edge of its own chain* (popping the
 //! ends it sees past) and, once that chain is empty, against the *first edge of the other
 //! chain* (each end it crosses over becomes a corner and the next apex). Chain-edge tests keep
@@ -25,6 +27,13 @@
 //! are ordered by coordinate comparisons ([`crate::geom::predicates::on_ray`]); so two tests on
 //! the same points never disagree by rounding, and the ties below are decided on the true
 //! geometry of the input.
+//!
+//! **Shared ends.** Exact tests need a vertex shared by two portals to be the same `f64` point
+//! in both. On entry, an end within a few ulps of an end of the portal before it (a shared
+//! vertex computed twice, along two edges) is replaced by that end, and a portal whose two ends
+//! are that close is a point portal. The radius is a floating-point error bound relative to the
+//! largest coordinate, far below any feature of the input ([`same_point_tol`]; at most 2e-6 nm
+//! on a board); fold points (constructions) that close to the corner next to them are dropped.
 //!
 //! **Ties** (the apex `a`, the other chain's first vertex `c`, the new end `p` collinear):
 //! `p` on the far side of `a` from `c` (the apex lies on the portal between its ends: it touches
@@ -46,8 +55,10 @@
 //!   touch it. The apex is replaced by its mirror image in that line (a virtual apex behind the
 //!   portal); when the next corner is fixed, the straight leg from the virtual apex is folded
 //!   back at the line, adding the touch point. If the rounded mirror image does not come out
-//!   behind the line (the apex lies on it up to rounding), the portal is taken as seen the
-//!   right way round from the apex (the limit of a mirror image an infinitesimal step behind).
+//!   behind the line or is the apex itself within the same-point tolerance (the apex lies on
+//!   the line up to rounding: a portal on an edge radial from a turn vertex, its ends computed
+//!   along the edge), the collinear tie above decides, along the line: the apex inside the
+//!   portal touches it there, else the portal's near end is a corner.
 //! * a point portal behind the line of the portal before it (an end pad the last pass lies
 //!   beyond, a turn vertex just behind its radial edge) whose plain funnel path misses that
 //!   portal (tested exactly; a band wrapping a corner by more than 180 degrees comes back
@@ -60,17 +71,25 @@
 //! vertex) from hiding the ones that do not, all exact:
 //!
 //! * an end crossing over a vertex of the other chain makes no corner there when every portal
-//!   since the apex, up to the one before that chain's next vertex (up to the current one when
-//!   it is the last), passes through the apex: that part of the chain constrains nothing.
+//!   since the apex, up to the last one that vertex is an end of, passes through the apex: the
+//!   vertex is on the chain only for portals touched at the apex already.
 //! * a point portal equal to the apex while a portal since the apex misses it: the path goes
-//!   out along the shorter chain (touching those portals) and back to the point (Lee &
-//!   Preparata's funnel never revisits the apex; the touching order requires it here).
+//!   out and comes back to the point (Lee & Preparata's funnel never revisits the apex; the
+//!   touching order requires it here). With one such portal it goes to the portal's nearest
+//!   point and back (shortest); with several, out along the shorter chain, touching them at its
+//!   ends, and back (a heuristic: the shortest such tour may touch them between their ends).
 //! * a right end equal to the apex is not added; when the left end then moves the apex on,
 //!   the right end is added from the new apex (the portal is still to be touched).
+//! * a segment portal that holds, up to rounding (within the same-point tolerance, not exactly),
+//!   the point portal after it or the apex (while every portal since the apex passes through
+//!   it) is touched at that point, in order, and is skipped: a terminal on its first or last
+//!   portal, a turn vertex computed on a portal. Whether such a point lies in front of the
+//!   line or behind it is rounding and decides nothing; exact incidences keep the exact rules.
 //!
 //! Corners are portal ends (with the index of the last portal each is an end of) and the two
-//! terminals; a fold point from a reflection carries the index of the portal it touches and
-//! is no portal end (callers that map corners to sheet vertices compare positions).
+//! terminals; a fold point (from a reflection, or the nearest point of an excursion) carries
+//! the index of the portal it touches and is no portal end (callers that map corners to sheet
+//! vertices compare positions).
 
 use crate::geom::predicates::{on_ray, orient, OnRay};
 use crate::geom::Vec2;
@@ -82,11 +101,35 @@ pub fn funnel(ports: &[(Vec2, Vec2)]) -> Vec<(Vec2, usize)> {
     if n == 0 {
         return Vec::new();
     }
+    let tol = same_point_tol(ports);
+    let snapped = snap_shared_ends(ports, tol);
+    let ports: &[(Vec2, Vec2)] = snapped.as_deref().unwrap_or(ports);
     let s = ports[0].0;
-    let mut f = Funnel { ports, apex: (s, 0), mirrors: Vec::new(), chain: [Vec::new(), Vec::new()], head: [0, 0], out: vec![(s, 0)], pend: (s, 0, 1, usize::MAX) };
+    // A segment portal that holds the point portal after it up to rounding (a point computed on
+    // it, the last terminal on the last portal: within the same-point tolerance, not exactly on
+    // it) is touched at that point, which the path passes next: it is skipped. Whether such a
+    // point lies in front of the line or behind it is rounding. A point exactly on the portal
+    // is left to the exact tie rules.
+    let skip: Vec<bool> = (0..n)
+        .map(|i| {
+            let ((l, r), q) = (ports[i], ports[(i + 1).min(n - 1)].0);
+            i > 0 && i + 1 < n && l != r && ports[i + 1].1 == q && !on_segment(q, l, r) && near_segment(q, l, r, tol)
+        })
+        .collect();
+    let mut f = Funnel { ports, tol, skip, apex: (s, 0), mirrors: Vec::new(), chain: [Vec::new(), Vec::new()], head: [0, 0], out: vec![(s, 0)], pend: (s, 0, 1, usize::MAX) };
     for i in 1..n {
         let (l, r) = ports[i];
-        if l == r && i >= 2 && ports[i - 1].0 != ports[i - 1].1 && orient(ports[i - 1].1, ports[i - 1].0, l) > 0 {
+        if f.skip[i] {
+            continue;
+        }
+        if l != r && f.mirrors.is_empty() && !on_segment(f.apex.0, l, r) && near_segment(f.apex.0, l, r, tol) && !f.pending(i - 1) {
+            // The apex lies on this portal up to rounding (a turn vertex or terminal computed on
+            // it), and every portal since the apex passes through the apex: touched there, in
+            // order. Skipped (and never pending), like a portal through the apex exactly.
+            f.skip[i] = true;
+            continue;
+        }
+        if l == r && i >= 2 && ports[i - 1].0 != ports[i - 1].1 && !f.skip[i - 1] && orient(ports[i - 1].1, ports[i - 1].0, l) > 0 {
             // A point behind the line of the portal before it: the plain funnel path to it may
             // still touch that portal (round one of its ends, e.g. a band wrapping a corner by
             // more than 180 degrees); only when it misses the portal is the point reflected.
@@ -140,6 +183,112 @@ pub fn edge_point(a: Vec2, b: Vec2, t: f64) -> Vec2 {
     }
 }
 
+/// Unit roundoff of `f64` (half an ulp of 1; Shewchuk's epsilon).
+const UNIT_ROUNDOFF: f64 = f64::EPSILON * 0.5;
+
+/// Width of the same-point tolerance in unit roundoffs of the largest coordinate. See
+/// [`same_point_tol`].
+const SAME_POINT_ROUNDOFFS: f64 = 16.0;
+
+/// The radius (per coordinate) within which two portal ends are one vertex computed twice:
+/// `16 u M`, `u` the unit roundoff (2^-53), `M` the largest coordinate magnitude of the input.
+///
+/// This is a correctness tolerance on the exact equality of shared vertices, not a judgement
+/// threshold. Callers compute a portal end on a sheet edge `a b` by interpolation, `a + (b - a) t`
+/// (or [`edge_point`]); a vertex shared with the next portal is then the same point computed
+/// along two edges, which can come out an ulp or two apart. Each rounded operation errs by at
+/// most `u` times the magnitude of its exact result (exact rounding: Shewchuk 1997, sec. 2.1
+/// "Background" p. 4, and sec. 2.2 "Properties of Binary Arithmetic" p. 5,
+/// `|err(a (*) b)| <= ulp(a (*) b) / 2`; page numbers of the CMU-CS-96-140R version). So one
+/// coordinate of `a + (b - a) t` (`0 <= t <= 1`, `t` itself rounded: four operations) errs by
+/// at most `3 u |b - a| + u |result| + O(u^2) <= 7 u M` when both edge ends lie within `M`
+/// ([`edge_point`]: `t <= 1/2`, `1 - t` exact by Sterbenz's lemma, Lemma 5 p. 6: `<= 3 u M`).
+/// `16 u M` covers that with room for an edge end about twice as far out as the portals. At
+/// board scale (`M <= 2^30` nm, about 1 m) it is below 2e-6 nm, five orders of magnitude below
+/// the 1 nm grid of the board data, so distinct vertices are never merged. The tolerance has to
+/// be relative: an absolute one (1e-3 nm was tried) merges genuinely distinct ends of tiny or
+/// far-translated features. O(n).
+fn same_point_tol(ports: &[(Vec2, Vec2)]) -> f64 {
+    let m = ports.iter().flat_map(|&(l, r)| [l.x, l.y, r.x, r.y]).fold(0.0f64, |m, c| m.max(c.abs()));
+    SAME_POINT_ROUNDOFFS * UNIT_ROUNDOFF * m
+}
+
+/// `a` and `b` are one point within the tolerance `tol` ([`same_point_tol`]), per coordinate.
+fn same_point(a: Vec2, b: Vec2, tol: f64) -> bool {
+    (a.x - b.x).abs() <= tol && (a.y - b.y).abs() <= tol
+}
+
+/// The portals with every end that lies within `tol` of an end of the portal before it (after
+/// that one's own snap) replaced by that end, and a portal whose two ends are within `tol` made
+/// a point portal: a shared vertex computed along two edges becomes the same `f64` point, which
+/// the funnel's exact tests need (an end an ulp off its shared vertex is a wall a few femtometres
+/// long whose direction is rounding noise; the path can miss the portal by up to its width).
+/// `None` when nothing moves (the common case: callers pass exact shared ends). O(n).
+fn snap_shared_ends(ports: &[(Vec2, Vec2)], tol: f64) -> Option<Vec<(Vec2, Vec2)>> {
+    if tol == 0.0 {
+        return None;
+    }
+    let mut out: Option<Vec<(Vec2, Vec2)>> = None;
+    for i in 1..ports.len() {
+        let (pl, pr) = out.as_ref().map_or(ports[i - 1], |o| o[i - 1]);
+        let fix = |x: Vec2| -> Vec2 {
+            if x == pl || x == pr {
+                return x;
+            }
+            let (nl, nr) = (same_point(x, pl, tol), same_point(x, pr, tol));
+            match (nl, nr) {
+                (true, true) => if (x - pl).len2() <= (x - pr).len2() { pl } else { pr },
+                (true, false) => pl,
+                (false, true) => pr,
+                _ => x,
+            }
+        };
+        let (l, r) = ports[i];
+        let (sl, mut sr) = (fix(l), fix(r));
+        if sl != sr && same_point(sl, sr, tol) {
+            sr = sl;
+        }
+        if (sl, sr) != (l, r) || out.is_some() {
+            out.get_or_insert_with(|| ports[..i].to_vec()).push((sl, sr));
+        }
+    }
+    out
+}
+
+/// `q` lies on the segment `l r` within the same-point tolerance `tol` ([`same_point_tol`]): at
+/// an end, or the rounded foot of its perpendicular is `q` (the foot errs by a few unit
+/// roundoffs of the coordinates, well inside `tol`). O(1).
+fn near_segment(q: Vec2, l: Vec2, r: Vec2, tol: f64) -> bool {
+    if same_point(q, l, tol) || same_point(q, r, tol) {
+        return true;
+    }
+    let d = r - l;
+    let dd = d.dot(d);
+    if dd == 0.0 {
+        return false;
+    }
+    let u = (q - l).dot(d) / dd;
+    (0.0..=1.0).contains(&u) && same_point(q, l + d * u, tol)
+}
+
+/// The point of the segment `l r` nearest to `t`: the foot of the perpendicular, or the nearer
+/// end when the foot falls outside (then exactly that end). A construction: rounded. O(1).
+fn nearest_on_segment(t: Vec2, l: Vec2, r: Vec2) -> Vec2 {
+    let d = r - l;
+    let dd = d.dot(d);
+    if dd == 0.0 {
+        return l;
+    }
+    let u = (t - l).dot(d) / dd;
+    if u <= 0.0 {
+        l
+    } else if u >= 1.0 {
+        r
+    } else {
+        edge_point(l, r, u)
+    }
+}
+
 const LEFT: usize = 0;
 const RIGHT: usize = 1;
 
@@ -182,6 +331,12 @@ fn seg_meets(u: Vec2, w: Vec2, a: Vec2, b: Vec2) -> bool {
 /// vector whose live part starts at `head` (popping from the apex end only moves `head`).
 struct Funnel<'a> {
     ports: &'a [(Vec2, Vec2)],
+    /// [`same_point_tol`] of the input: a fold point (a construction) this close to the corner
+    /// before or after it is that corner.
+    tol: f64,
+    /// Portals touched at the point portal after them or at the apex up to rounding (see
+    /// [`funnel`]): not processed, and never pending.
+    skip: Vec<bool>,
     /// The apex the tests use: the last corner, or its mirror image (see `mirrors`).
     apex: (Vec2, usize),
     /// Reflections applied to the last corner, in order: (line end, line end, portal, the apex
@@ -209,7 +364,7 @@ impl Funnel<'_> {
                 from = before;
             }
             for &(x, pi) in folds.iter().rev() {
-                if x != self.out[self.out.len() - 1].0 && x != c {
+                if !same_point(x, self.out[self.out.len() - 1].0, self.tol) && !same_point(x, c, self.tol) {
                     self.out.push((x, pi));
                 }
             }
@@ -244,7 +399,7 @@ impl Funnel<'_> {
         self.out.pop();
         let prev = self.out[k - 2].0;
         let x = line_hit(prev, img, pl, pr);
-        if x != prev && x != t {
+        if !same_point(x, prev, self.tol) && !same_point(x, t, self.tol) {
             self.out.push((x, i - 1));
         }
         self.out.push((t, i));
@@ -260,7 +415,25 @@ impl Funnel<'_> {
     fn add_point(&mut self, t: Vec2, i: usize) {
         if t == self.apex.0 && self.mirrors.is_empty() && self.chain.iter().zip(self.head).any(|(c, h)| c.len() > h) && self.pending(i) {
             // The point is the apex, but portals since the apex that do not pass through it
-            // are still to be touched first: out along the shorter chain and back.
+            // are still to be touched first: the path goes out and comes back to the point.
+            let ai = self.apex.1;
+            let mut missing = (ai + 1..i).filter(|&j| !self.skip[j] && !on_segment(t, self.ports[j].0, self.ports[j].1));
+            if let (Some(j), None) = (missing.next(), missing.next()) {
+                // One portal to touch (the others pass through the point, touched there on the
+                // way out or back): the shortest excursion is to its nearest point and back,
+                // twice the distance from the point to the segment. Exact up to the rounded
+                // foot of the perpendicular (a fold point, carrying the portal's index).
+                let (l, r) = self.ports[j];
+                self.commit(nearest_on_segment(t, l, r), j);
+                self.commit(t, i);
+                self.chain = [Vec::new(), Vec::new()];
+                self.head = [0, 0];
+                return;
+            }
+            // Several: out along the shorter chain (touching those portals at its ends) and
+            // back. A heuristic: the shortest closed tour from the point touching the portals
+            // in order (Dror, Efrat, Lubiw & Mitchell 2003, the "touring polygons" problem) can
+            // touch them between their ends and is not computed here.
             let s = self.shorter_chain();
             let path: Vec<(Vec2, usize)> = self.chain[s][self.head[s]..].to_vec();
             for (q, qi) in path {
@@ -291,7 +464,7 @@ impl Funnel<'_> {
         }
         while self.pend.3 == usize::MAX && self.pend.2 <= k {
             let (l, r) = self.ports[self.pend.2];
-            if !on_segment(a, l, r) {
+            if !self.skip[self.pend.2] && !on_segment(a, l, r) {
                 self.pend.3 = self.pend.2;
             }
             self.pend.2 += 1;
@@ -299,15 +472,23 @@ impl Funnel<'_> {
         self.pend.3 <= k
     }
 
-    /// Whether the other chain's end `chain[o][k]`, which a new end of portal `i` crosses over,
-    /// is slack: every portal since the apex up to the one before the next end on that chain
-    /// (up to portal `i` when it is the last) passes through the apex. Those portals are
-    /// touched at the apex already and the chain edge from it constrains nothing up to there,
-    /// so it makes no corner (degenerate fans of portals collinear with the apex, radial edges
-    /// of a turn vertex). Exact. O(1) amortised.
-    fn slack(&mut self, o: usize, k: usize, i: usize) -> bool {
-        let next = if k + 1 < self.chain[o].len() { self.chain[o][k + 1].1 } else { i + 1 };
-        !self.pending(next - 1)
+    /// Whether the other chain's end `chain[o][k]`, which a new end crosses over, is slack:
+    /// every portal since the apex up to the last one that end is an end of passes through the
+    /// apex. The end is on the chain only for those portals, which are touched at the apex
+    /// already, so it makes no corner (degenerate fans of portals collinear with the apex,
+    /// radial edges of a turn vertex); the ends after it on the chain stay and are tested in
+    /// turn. The bound is the end's own portal, not the portal before the next chain end: the
+    /// portals in between have that next end (or one it popped) as their end on this side, and
+    /// the next end, tested after this one, answers for them; with the wider bound an end that
+    /// is the chain's last counted the current portal itself, which never passes through the
+    /// apex, and made a corner the shortest path does not have (+17.5 mm on the verifier's fuzz).
+    /// Checked against the exact reference by fuzz (degenerate fans, terminals on portal ends:
+    /// the verifier's modes in scratch/agent-wt/verify-ff2-runs/fz, `zp+E` and the noisy modes)
+    /// and the test `slack_is_bounded_by_the_vertex_own_portal`; not proven in general. Exact.
+    /// O(1) amortised.
+    fn slack(&mut self, o: usize, k: usize) -> bool {
+        let ci = self.chain[o][k].1;
+        !self.pending(ci)
     }
 
     /// The side whose chain (from the apex) is shorter; an empty chain does not count. O(chain).
@@ -425,16 +606,33 @@ impl Funnel<'_> {
                     // apex passes through the apex (none is to be touched on the way). Mirror
                     // the apex behind the line.
                     let img = reflect(a, p, c);
-                    if orient(img, c, p) > 0 {
+                    if orient(img, c, p) > 0 && !same_point(img, a, self.tol) {
                         self.mirrors.push((p, c, i, a));
                         self.apex.0 = img;
+                        break;
                     }
-                    break;
+                    // The apex lies on the portal's line up to rounding (its rounded image is not
+                    // behind the line, or is the apex itself within the same-point tolerance:
+                    // a portal on an edge radial from a turn vertex, its ends computed along
+                    // the edge): the collinear tie, decided along the line as above. The apex
+                    // inside the portal touches it there; else the portal's near end is the
+                    // first point any path from the apex touches it at, and a corner (`p`
+                    // nearer: `p` itself; `c` nearer: `p` crosses over it).
+                    match on_ray(a, c, p) {
+                        OnRay::Behind => break,
+                        OnRay::Between => {
+                            self.commit(p, i);
+                            self.chain[s].clear();
+                            self.head[s] = 0;
+                            return;
+                        }
+                        OnRay::AtOrBeyond => {}
+                    }
                 }
                 if cross {
                     let k = self.head[o];
                     self.head[o] += 1;
-                    if !self.slack(o, k, i) {
+                    if !self.slack(o, k) {
                         self.commit(c, ci);
                     }
                 } else {
@@ -784,19 +982,168 @@ mod tests {
     }
 
     /// A point portal equal to the apex while a portal since the apex misses it (a turn vertex
-    /// passed twice around a portal radial-ish to it): out along the shorter chain to touch the
-    /// portal and back; on a tie the right chain. The plain path keeps this (it touches the
-    /// portal before the point), so the point is not reflected although it lies behind it.
+    /// passed twice around a portal radial-ish to it): out to touch the portal and back. With
+    /// one such portal the excursion goes to the portal's nearest point, the foot of the
+    /// perpendicular (0, 2): 6.83 mm in all, the shortest (out along a chain to (1, 2) was 7.30).
+    /// The plain path keeps this (it touches the portal before the point), so the point is not
+    /// reflected although it lies behind it.
     #[test]
     fn point_equal_to_the_apex_goes_out_and_back() {
         let (s, t, e) = (v(-1.0, -1.0), v(0.0, 0.0), v(1.0, -1.0));
         let ports = vec![(s, s), (t, t), (v(-1.0, 2.0), v(1.0, 2.0)), (t, t), (e, e)];
         let f = funnel(&ports);
-        assert_eq!(pts(&f), vec![(-1.0, -1.0), (0.0, 0.0), (1.0, 2.0), (0.0, 0.0), (1.0, -1.0)]);
-        assert_eq!(f.iter().map(|c| c.1).collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
-        // The left chain shorter: out to its end.
-        let ports = vec![(s, s), (t, t), (v(-1.0, 2.0), v(2.0, 2.0)), (t, t), (e, e)];
-        assert_eq!(pts(&funnel(&ports)), vec![(-1.0, -1.0), (0.0, 0.0), (-1.0, 2.0), (0.0, 0.0), (1.0, -1.0)]);
+        assert_eq!(pts(&f), vec![(-1.0, -1.0), (0.0, 0.0), (0.0, 2.0), (0.0, 0.0), (1.0, -1.0)]);
+        assert_eq!(f.iter().map(|c| c.1).collect::<Vec<_>>(), vec![0, 1, 2, 3, 4], "the fold point carries the portal it touches");
+        assert!((plen(&f) - (2.0 * 2f64.sqrt() + 4.0) * 1e6).abs() < 1.0, "{}", plen(&f));
+        // The foot outside the portal: its nearer end.
+        let ports = vec![(s, s), (t, t), (v(1.0, 2.0), v(3.0, 2.0)), (t, t), (e, e)];
+        assert_eq!(pts(&funnel(&ports)), vec![(-1.0, -1.0), (0.0, 0.0), (1.0, 2.0), (0.0, 0.0), (1.0, -1.0)]);
+        // A portal through the point on the way out does not count (touched at the point).
+        let ports = vec![(s, s), (t, t), (v(0.0, -2.0), v(0.0, 2.0)), (v(-1.0, 2.0), v(2.0, 2.0)), (t, t), (e, e)];
+        let f = funnel(&ports);
+        assert_eq!(pts(&f), vec![(-1.0, -1.0), (0.0, 0.0), (0.0, 2.0), (0.0, 0.0), (1.0, -1.0)]);
+        assert_eq!(touches_in_order(&f.iter().map(|c| c.0).collect::<Vec<_>>(), &ports), Ok(()));
+    }
+
+    /// HEURISTIC, pinned: two portals to touch before the point comes again. The path goes out
+    /// along the shorter chain (touching the portals at its ends, here only the end (-1, 3),
+    /// on the way past the first) and back; it touches every portal in order, but the shortest
+    /// tour runs straight up and back, (0, 2) and (0, 3), 6 mm from the point, where this one
+    /// takes 2 sqrt(10) = 6.32 mm (the "touring polygons" problem; not solved here, see the
+    /// module documentation).
+    #[test]
+    fn point_equal_to_the_apex_with_several_portals_is_a_heuristic() {
+        let (s, t, e) = (v(-1.0, -1.0), v(0.0, 0.0), v(1.0, -1.0));
+        let ports = vec![(s, s), (t, t), (v(-1.0, 2.0), v(1.0, 2.0)), (v(-1.0, 3.0), v(2.0, 3.0)), (t, t), (e, e)];
+        let f = funnel(&ports);
+        assert_eq!(touches_in_order(&f.iter().map(|c| c.0).collect::<Vec<_>>(), &ports), Ok(()));
+        assert_eq!(pts(&f), vec![(-1.0, -1.0), (0.0, 0.0), (-1.0, 3.0), (0.0, 0.0), (1.0, -1.0)]);
+    }
+
+    /// The slack rule's bound is the crossed vertex's own last portal (the verifier's minimal
+    /// case of 3419093/b197f5b): the start lies left of the portal x = 0, the end on the next
+    /// portal near their shared end (0, -1). With the bound at the current portal the shared
+    /// end (0, -1), the chain's last vertex, counted portal 2 (which never passes through the
+    /// apex) and the path took a corner the shortest one does not have.
+    #[test]
+    fn slack_is_bounded_by_the_vertex_own_portal() {
+        let (s, e) = (v(-1.831, -0.221), v(0.0324, -1.1155));
+        let ports = vec![(s, s), (v(0.0, 1.0), v(0.0, -1.0)), (v(0.267, -1.952), v(0.0, -1.0)), (e, e)];
+        let f = funnel(&ports);
+        let pp: Vec<Vec2> = f.iter().map(|c| c.0).collect();
+        assert_eq!(touches_in_order(&pp, &ports), Ok(()), "{:?}", pts(&f));
+        assert!(plen(&f) <= reference(&ports) + 10.0, "{} > {}: {:?}", plen(&f), reference(&ports), pts(&f));
+    }
+
+    /// Ends an ulp off the vertex they share with the portal before (margins computed as
+    /// `l + (r - l) * (1 - m)`, the noisy fuzz mode `zn`): 617056.8429656076 vs ...075 and
+    /// -141014.76777668286 vs ...297. Snapped on entry they are one vertex; before, the exact
+    /// tests saw a wall a few femtometres long and the path missed portals by up to 1.9 mm.
+    #[test]
+    fn ends_an_ulp_off_a_shared_vertex_are_that_vertex() {
+        let c: &[[f64; 4]] = &[
+            [-1897105.5578628038, -327237.5983770483, -1897105.5578628038, -327237.5983770483],
+            [0.0, 1000000.0, 0.0, -1000000.0],
+            [0.0, 1000000.0, 617056.8429656076, -388797.37397834193],
+            [2691909.8675892516, 819060.4142728453, 617056.8429656075, -388797.37397834193],
+            [2691909.8675892516, 819060.4142728453, 4763726.6761682555, -141014.76777668286],
+            [5148740.002985071, 1659796.8945087874, 4763726.6761682555, -141014.76777668297],
+            [5879111.632609725, -1699653.1500827018, 4763726.6761682555, -141014.76777668297],
+            [4360343.280447775, -1446746.0026910503, 4360343.280447775, -1446746.0026910503],
+        ];
+        let ports: Vec<(Vec2, Vec2)> = c.iter().map(|q| (Vec2 { x: q[0], y: q[1] }, Vec2 { x: q[2], y: q[3] })).collect();
+        let f = funnel(&ports);
+        let pp: Vec<Vec2> = f.iter().map(|c| c.0).collect();
+        assert_eq!(touches_in_order(&pp, &ports), Ok(()), "{:?}", pts(&f));
+        assert!(plen(&f) <= reference(&ports) + 10.0, "{} > {}", plen(&f), reference(&ports));
+        // The tolerance is relative (16 unit roundoffs of the largest coordinate): ends 1e-4 nm
+        // apart near the origin stay distinct, as they do 1 nm apart at 1e9 nm.
+        let ports = [(Vec2 { x: 0.0, y: 0.0 }, Vec2 { x: 0.0, y: 0.0 }), (Vec2 { x: 1e-3, y: 1e-4 }, Vec2 { x: 1e-3, y: 0.0 }), (Vec2 { x: 1e-3, y: 1e-4 }, Vec2 { x: 2e-3, y: 1e-4 }), (Vec2 { x: 3e-3, y: 0.0 }, Vec2 { x: 3e-3, y: 0.0 })];
+        assert!(snap_shared_ends(&ports, same_point_tol(&ports)).is_none());
+        let (a, b) = (Vec2 { x: 1e9, y: 0.0 }, Vec2 { x: 1e9 + 1.0, y: 0.0 });
+        assert!(!same_point(a, b, same_point_tol(&[(a, b)])));
+        let b = Vec2 { x: 1e9 + 2.0 * f64::EPSILON * 1e9, y: 0.0 };
+        assert!(same_point(a, b, same_point_tol(&[(a, b)])), "two ulps at 1e9 nm are one point");
+    }
+
+    /// Incidences that hold only up to rounding (the verifier's fuzz, exact coordinates in nm):
+    /// a point computed on a portal and a portal on a ray from the apex. Each path touches every
+    /// portal in order and is no longer than the exact reference.
+    ///
+    /// * `gp+E` 2660, `gp+M` 1190: the point after portal 3 lies on it up to rounding (the second
+    ///   a 1-ulp portal, a point after the snap), and portal 3 lies on a ray from the turn vertex
+    ///   (0, -1) (its ends computed along an edge from it). The point came out a hair behind the
+    ///   portal and the path ran out to the portal's far end and back.
+    /// * `og+E` 2044: the same with the start as the turn vertex and the end on the portal.
+    /// * `zp+ERMK` 52 (translated to 1e9 nm, features of microns): the turn vertex 17 lies on
+    ///   portals 16, 18 and 19 (one edge, repeated) up to rounding; portal 19, two steps on, took
+    ///   the path out to its far end (+32 um).
+    #[test]
+    fn incidences_up_to_rounding_touch_at_the_point() {
+        let cases: [&[[f64; 4]]; 4] = [
+            &[[-1043886.2458930372, 347894.9575325762, -1043886.2458930372, 347894.9575325762], [0.0, 648254.927638604, 0.0, -198291.88089640578], [0.0, -1000000.0, 0.0, -1000000.0], [1716765.872748864, -2164643.9739124295, 936018.530719476, -1634989.5222039241], [1649727.2672907312, -2119165.374235181, 1649727.2672907312, -2119165.374235181]],
+            &[[-1727838.2370644263, 566675.2768290214, -1727838.2370644263, 566675.2768290214], [0.0, 791912.5951591912, 0.0, -448785.6198602973], [0.0, -1000000.0, 0.0, -1000000.0], [757493.4408147834, 263612.35691007285, 158156.70299451635, -736170.9640454924], [637853.8048172364, 64035.54967051215, 637853.8048172365, 64035.54967051215], [783586.2980309145, -521808.9345213905, 783586.2980309145, -521808.9345213905]],
+            &[[0.0, -1000000.0, 0.0, -1000000.0], [0.0, 779537.0566630729, 0.0, -1000000.0], [1389759.9976154664, -1822959.117094301, 587006.3705744924, -1347601.2011322682], [814936.2262949694, -1482571.9537406303, 814936.2262949694, -1482571.9537406303]],
+            &[[1000000486.8188535, -1000000209.9251509, 1000000486.8188535, -1000000209.9251509], [1000000486.8188535, -999998929.156047, 1000000486.8188535, -1000000929.156047], [1000003362.3375208, -1000001773.1866497, 1000000486.8188535, -1000000929.156047], [999999416.0881014, -1000003338.8616737, 1000000486.8188535, -1000000929.156047], [999999416.0881014, -1000003338.8616737, 999999416.0881014, -1000003338.8616737], [999999416.0881014, -1000003338.8616737, 999997286.2394568, -1000001259.2385921], [999997752.9284766, -1000001714.9222671, 999997752.9284766, -1000001714.9222671], [999999416.0881014, -1000003338.8616737, 999995686.8734555, -1000005205.6052376], [999999416.0881014, -1000003338.8616737, 999995236.9541427, -1000008070.1998407], [999999416.0881014, -1000003338.8616737, 1000005593.6149997, -1000008905.70076], [999999416.0881014, -1000003338.8616737, 1000007358.9344044, -999995694.4569145], [999999416.0881014, -1000003338.8616737, 1000007358.9344044, -999995694.4569145], [999999416.0881014, -1000003338.8616737, 1000007358.9344044, -999995694.4569145], [999999416.0881014, -1000003338.8616737, 999994345.0664309, -999989206.4859796], [999999416.0881014, -1000003338.8616737, 999994345.0664309, -999989206.4859796], [999995153.7771331, -999991460.2731279, 999995153.7771331, -999991460.2731279], [999977681.2516439, -999972313.9209001, 999994345.0664309, -999989206.4859796], [999982233.03565, -999976928.1889132, 999982233.03565, -999976928.1889132], [999977681.2516439, -999972313.9209001, 999994345.0664309, -999989206.4859796], [999977681.2516439, -999972313.9209001, 999994345.0664309, -999989206.4859796], [999977681.2516439, -999972313.9209001, 999977791.6849725, -999961247.9042557], [999977681.2516439, -999972313.9209001, 999965572.1355872, -999967373.9138116], [999968845.3715855, -999969100.0398964, 999968845.3715855, -999969100.0398964]],
+        ];
+        for (k, c) in cases.iter().enumerate() {
+            let ports: Vec<(Vec2, Vec2)> = c.iter().map(|q| (Vec2 { x: q[0], y: q[1] }, Vec2 { x: q[2], y: q[3] })).collect();
+            let f = funnel(&ports);
+            let pp: Vec<Vec2> = f.iter().map(|q| q.0).collect();
+            assert_eq!(touches_in_order(&pp, &ports), Ok(()), "case {k}: {:?}", pts(&f));
+            assert!(plen(&f) <= reference(&ports) + 10.0, "case {k}: {} > {}: {:?}", plen(&f), reference(&ports), pts(&f));
+        }
+    }
+
+    /// One fuzz witness per rounding rule of the funnel (exact coordinates, nm; the fuzz
+    /// tolerance `eps` and its exact reference length): each case breaks when its rule is
+    /// removed. The funnel touches every portal in order and is no longer than the reference
+    /// (by more than the fuzz slack 10 eps).
+    #[test]
+    fn each_rounding_rule_has_a_witness() {
+        let cases: [(f64, f64, &[[f64; 4]]); 7] = [
+            // a portal narrower than the tolerance is a point portal (snap collapse); also a portal
+            // that holds the next point up to rounding (og+M case 911)
+            (1.0, 3232327.403433013, &[[-1282131.187136807, 499834.4988346992, -1282131.187136807, 499834.4988346992], [0.0, 1000000.0, 0.0, -553048.5207174507], [428589.18558757537, 1335751.6481830182, 693246.5088932188, 1543081.0337384518], [550748.6153896323, 1431449.8862076392, 550748.6153896324, 1431449.8862076392], [-443013.38616109604, 2119753.305398148, 1009594.2143249944, 1790904.04717268], [743990.6107618841, 2571658.297919471, 743990.6107618841, 2571658.297919471]]),
+            // an apex on the line of a portal seen the wrong way round: the collinear tie along that line (gpn+ERMK case 929)
+            (1.6474125742912293e-05, 43.78736757110438, &[[1000000057.6339487, -999999861.9437298, 1000000057.6339487, -999999861.9437298], [1000000057.6339487, -999999853.8678572, 1000000057.6339487, -999999861.9437298], [1000000057.6339487, -999999861.3490999, 1000000057.6339487, -999999861.3490999], [1000000057.6339487, -999999844.8749741, 1000000057.6339487, -999999844.8749741], [1000000059.8586972, -999999841.5110543, 1000000061.4451718, -999999839.1122333], [1000000063.9141473, -999999835.3790314, 1000000063.9141473, -999999835.3790314], [1000000056.7104883, -999999841.8478053, 1000000061.6812856, -999999837.3841065], [1000000056.7104883, -999999841.8478053, 1000000061.6812856, -999999837.3841065], [1000000060.9484899, -999999838.0421457, 1000000060.9484899, -999999838.0421457], [1000000056.7104883, -999999841.8478053, 1000000061.6812856, -999999837.3841065], [1000000055.9079071, -999999836.730714, 1000000062.5164444, -999999835.6150037], [1000000055.9079071, -999999836.730714, 1000000062.5164444, -999999835.6150037], [1000000055.9079071, -999999836.730714, 1000000062.5164444, -999999835.6150037], [1000000068.0631971, -999999830.6888978, 1000000064.5871001, -999999834.6183178], [1000000066.6919932, -999999840.6839024, 1000000065.2909433, -999999838.0083078], [1000000059.0035495, -999999842.6488429, 1000000063.5029362, -999999835.9878018], [1000000063.5029362, -999999835.9878018, 1000000063.5029362, -999999835.9878018]]),
+            // a mirror image within the same-point tolerance of the apex is no mirror (the collinear tie) (gpn+ERMK case 715)
+            (0.0026287976929679577, 6113.565007058715, &[[1000000555.771123, -999999988.249697, 1000000555.771123, -999999988.249697], [1000000555.771123, -999999595.7646663, 1000000555.771123, -999999988.249697], [1000001244.4825562, -1000002132.7419765, 1000000863.3907655, -1000001425.437555], [1000001004.7771262, -1000001687.8499198, 1000001004.7771262, -1000001687.8499198], [1000001244.4825562, -1000002132.7419765, 1000000863.3907655, -1000001425.437555], [1000001446.0828388, -1000002506.9110736, 1000001446.0828388, -1000002506.9110736], [1000001446.0828388, -1000002506.9110736, 1000001446.0828388, -1000002506.9110736], [1000001015.2485651, -1000002738.7865442, 999999147.7936507, -1000003743.852793], [1000001015.2485651, -1000002738.7865442, 999999147.7936507, -1000003743.852793], [1000001015.2485651, -1000002738.7865442, 999999147.7936507, -1000003743.852793], [999999512.0080436, -1000003547.8322139, 999999512.0080436, -1000003547.8322139], [999999936.8150445, -1000004700.9464672, 999999936.8150445, -1000004700.9464672]]),
+            // a portal that holds the next point up to rounding is touched at that point (thinm+E case 22)
+            (0.09999999999999999, 438861.5737173551, &[[-49167.58153153888, -75714.73626541981, -49167.58153153888, -75714.73626541981], [-4.193519064074896, 2.722939194921622, 4.193519064074896, -2.722939194921622], [504024.4116775552, 769946.6913947258, 4224.316473270289, 6444.0049497773025], [190923.16011330977, 291648.1696610158, 190923.16011330977, 291648.1696610158]]),
+            // a portal that holds the apex up to rounding is touched at the apex (gpn+ERMK case 532)
+            (9.568336173805233e-06, 19.83628419762285, &[[1000000090.9296813, -999999202.3687571, 1000000090.9296813, -999999202.3687571], [1000000090.9296813, -999999202.3687571, 1000000090.9296813, -999999212.1617153], [1000000093.4597049, -999999211.5965433, 1000000092.7684509, -999999212.8736252], [1000000092.8419323, -999999212.7378693, 1000000092.8419323, -999999212.7378693], [1000000093.4597049, -999999211.5965433, 1000000092.7684509, -999999212.8736252], [1000000093.4597049, -999999211.5965433, 1000000092.7684509, -999999212.8736252], [1000000093.2024333, -999999212.0718486, 1000000093.2024333, -999999212.0718486], [1000000098.4240805, -999999218.8231815, 1000000098.4240805, -999999218.8231815]]),
+            // ... but not while the portal before it is still to be touched (on case 425)
+            (1.0, 5259533.78180249, &[[-1351424.2115583862, 641590.7425761361, -1351424.2115583862, 641590.7425761361], [0.0, 813011.3842585457, 0.0, -1000000.0], [0.0, 1000000.0, 504883.3604995946, -261986.29691416398], [2659519.527279334, -314630.60431768536, 1032526.6688745036, -353767.0792582098], [2413016.16507089, -964897.1793791646, 546281.508776986, -365463.4560583916], [-202748.34596443397, -792420.4013417795, 546281.5087769863, -365463.4560583916], [242268.0320350646, 910575.4359579084, 472983.0212292308, -57806.960565897636], [1458099.146883905, -1261032.7831399434, 546281.5087769863, -365463.4560583916], [332250.70144346176, -1907896.7340601534, 332250.70144346176, -1907896.7340601534]]),
+            // exact incidences are no skip (the chain rules handle them) (zp+E case 538)
+            (1.0, 2877476.3748416454, &[[0.0, -1000000.0, 0.0, -1000000.0], [0.0, 1000000.0, 0.0, -1000000.0], [2309985.2650672626, -3036596.5501610674, 0.0, -1000000.0], [0.0, -1000000.0, 0.0, -1000000.0], [-1661018.4255773458, -645535.3403434348, 0.0, -1000000.0], [1707775.084123028, -860871.3420136938, 0.0, -1000000.0], [1707775.084123028, -860871.3420136938, 721465.4533669839, -1272253.0463654299], [1707775.084123028, -860871.3420136938, 2965422.912297478, -753326.6953178273], [2133345.4836928323, -523554.154419974, 2965422.912297478, -753326.6953178273], [2133345.4836928323, -523554.154419974, 2536953.2393398248, -116963.14485914691], [2022858.019262054, 87540.8144233746, 2022858.019262054, 87540.8144233746]]),
+        ];
+        for (k, &(eps, refl, c)) in cases.iter().enumerate() {
+            let ports: Vec<(Vec2, Vec2)> = c.iter().map(|q| (Vec2 { x: q[0], y: q[1] }, Vec2 { x: q[2], y: q[3] })).collect();
+            let f = funnel(&ports);
+            let pp: Vec<Vec2> = f.iter().map(|q| q.0).collect();
+            assert_eq!(touches_in_order(&pp, &ports), Ok(()), "case {k}: {:?}", pts(&f));
+            assert!(plen(&f) <= refl + 10.0 * eps, "case {k}: {} > {}: {:?}", plen(&f), refl, pts(&f));
+        }
+    }
+
+    /// [`edge_point`] returns the edge's ends bit for bit at `t = 0` and `t = 1` (the naive
+    /// `a + (b - a) t` misses `b` by an ulp for these board-scale coordinates: checked below), and
+    /// stays within an ulp of the line in between.
+    #[test]
+    fn edge_point_hits_both_ends_bit_exact() {
+        let xs = [(-198646752.25025728, 71173699.81907648), (-192772985.84858796, 115095321.5921737), (-177717107.59684262, 166427739.37679636), (135371712.4672529, -147771269.138752)];
+        let mut naive_missed = 0;
+        for &(p, q) in &xs {
+            let (a, b) = (Vec2 { x: p, y: q }, Vec2 { x: q, y: p });
+            assert_eq!(edge_point(a, b, 0.0), a);
+            assert_eq!(edge_point(a, b, 1.0), b);
+            assert_eq!(edge_point(b, a, 1.0), a);
+            naive_missed += (a + (b - a) * 1.0 != b) as usize + (b + (a - b) * 1.0 != a) as usize;
+            let m = edge_point(a, b, 0.5);
+            assert!(((m - a).len() - (b - m).len()).abs() < 1e-6, "the midpoint");
+        }
+        assert!(naive_missed >= 4, "the naive form should miss an end here: {naive_missed}");
     }
 
     /// While every portal since the apex passes through it (a fan of portals ending at the apex

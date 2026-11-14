@@ -66,15 +66,18 @@ pub fn plan(ev: &[(usize, f64, i32)], n_layers: usize) -> Plan {
 
 /// Funnel (string pulling) from `s` to `e` through `portals` `(left, right)`, seen along the
 /// travel direction: [`super::funnel::funnel`] (exact predicates; a run that starts in front of
-/// its first portal or ends behind its last comes back to touch it), corners only,
-/// near-duplicates dropped. O(portals).
+/// its first portal or ends behind its last comes back to touch it), corners only. The same
+/// corners as the taut paths of [`super::pack`]: ends an ulp off a shared vertex are snapped in
+/// the funnel itself (relative tolerance, so no absolute distance here, which dropped genuine
+/// corners of nm-sized features); only repeated points go (a zero-length run is one point).
+/// O(portals).
 pub fn funnel(s: Vec2, e: Vec2, portals: &[(Vec2, Vec2)]) -> Vec<Vec2> {
     let mut ports = Vec::with_capacity(portals.len() + 2);
     ports.push((s, s));
     ports.extend_from_slice(portals);
     ports.push((e, e));
     let mut pts: Vec<Vec2> = super::funnel::funnel(&ports).into_iter().map(|c| c.0).collect();
-    pts.dedup_by(|a, b| (*a - *b).len2() < 1e-6);
+    pts.dedup();
     pts
 }
 
@@ -3714,6 +3717,18 @@ mod tests {
         let p = [(v(5.0, 2.0), v(3.0, 0.0)), (v(6.0, 2.0), v(3.0, 0.0))];
         let pts = funnel(v(3.2, 3.3), v(6.9, 4.4), &p);
         assert_eq!(pts, vec![v(3.2, 3.3), v(5.0, 2.0), v(6.0, 2.0), v(6.9, 4.4)]);
+    }
+
+    /// The drawing keeps the corners of the taut path however small the features: a gap 0.1 pm
+    /// high, 0.5 pm from the start, keeps its corner (an absolute 1e-3 nm dedup dropped it, and
+    /// the run then missed the gap). The same corners as [`super::super::funnel::funnel`].
+    #[test]
+    fn funnel_keeps_the_corners_of_tiny_features() {
+        let p = [(v(5e-4, 3e-4), v(5e-4, 2e-4))];
+        let pts = funnel(v(0.0, 0.0), v(1e-3, 0.0), &p);
+        assert_eq!(pts, vec![v(0.0, 0.0), v(5e-4, 2e-4), v(1e-3, 0.0)]);
+        let ports = [(v(0.0, 0.0), v(0.0, 0.0)), p[0], (v(1e-3, 0.0), v(1e-3, 0.0))];
+        assert_eq!(pts, super::super::funnel::funnel(&ports).into_iter().map(|c| c.0).collect::<Vec<_>>());
     }
 
     #[test]

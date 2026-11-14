@@ -1,9 +1,14 @@
 //! Exact orientation of `f64` points: the sign of `(b - a) x (c - a)` of the points as given,
-//! never a rounded one. Shewchuk, "Adaptive precision floating-point arithmetic and fast robust
-//! geometric predicates", Discrete Comput. Geom. 18 (1997) 305-363: the rounded determinant with
-//! his forward error bound `ccwerrboundA` (sec. 4.3, p. 340), and when the bound does not settle
-//! the sign the exact value as a floating-point expansion (Two-Sum, Two-Product, Grow-Expansion;
-//! secs. 2.4-2.6, pp. 314-324; Two-Product by fused multiply-add). Exact for every finite input
+//! never a rounded one. J. R. Shewchuk, "Adaptive Precision Floating-Point Arithmetic and Fast
+//! Robust Geometric Predicates", Discrete & Computational Geometry 18(3):305-363, 1997 (local
+//! copy docs/literature/shewchuk1997-robust-predicates.pdf, the CMU-CS-96-140R version, whose
+//! page numbers are cited): the rounded determinant (approximation A) with its forward error
+//! bound `ccwerrboundA = (3 eps + 16 eps^2)(|l| + |r|)` (sec. 4.3 "Orient2D", pp. 40-41,
+//! Table 1), and when the bound does not settle the sign the exact value as a floating-point
+//! expansion: Two-Sum (sec. 2.3 "Simple Addition", Theorem 7, p. 8), Grow-Expansion (sec. 2.4
+//! "Expansion Addition", Theorem 10, p. 10, with zero elimination) and Two-Product (sec. 2.5
+//! "Simple Multiplication", Theorem 18, p. 19; here by fused multiply-add instead of Veltkamp's
+//! splitting). Exact for every finite input
 //! whose products neither overflow nor underflow: board coordinates are nm below 2^40, so the
 //! products stay below 2^81 and the error terms far above the subnormal range.
 //!
@@ -146,6 +151,56 @@ mod tests {
             }
         }
         assert!(rounded_wrong > 0, "the rounded determinant should fail here");
+    }
+
+    /// Exact sign of `(b - a) x (c - a)` in integers: every coordinate is a multiple of the
+    /// smallest ulp among them, so scaled by its inverse they are integers below 2^62 here, and
+    /// the determinant fits an `i128`. Independent of the floating-point code under test.
+    fn exact_sign_i128(a: Vec2, b: Vec2, c: Vec2) -> i32 {
+        let cs = [a.x, a.y, b.x, b.y, c.x, c.y];
+        // x = m 2^e with an integer m below 2^53: e = exponent - 52.
+        let ex = |x: f64| ((x.to_bits() >> 52) & 0x7ff) as i32 - 1075;
+        let lo = cs.iter().filter(|x| **x != 0.0).map(|&x| ex(x)).min().unwrap();
+        let int = |x: f64| -> i128 {
+            if x == 0.0 {
+                return 0;
+            }
+            let m = ((x.to_bits() & ((1u64 << 52) - 1)) | (1u64 << 52)) as i128;
+            let sh = ex(x) - lo;
+            assert!((0..=9).contains(&sh), "spread too wide for i128");
+            if x < 0.0 { -(m << sh) } else { m << sh }
+        };
+        let [ax, ay, bx, by, cx, cy] = cs.map(int);
+        ((bx - ax) * (cy - ay) - (by - ay) * (cx - ax)).signum() as i32
+    }
+
+    /// Near-collinear points (found by search) on which the rounded determinant has the wrong
+    /// sign although it exceeds half of `ccwerrboundA`: a filter with half the bound returns
+    /// that wrong sign; the full bound sends them to the exact stage. The expected signs come
+    /// from integer arithmetic, not from the code under test.
+    #[test]
+    fn wrong_rounded_signs_beyond_half_the_filter_bound() {
+        let cases = [
+            (v(276993121.243269, -27984422.3283785), v(-46854380.34368849, 581143420.1763375), v(129311970.79621474, 249790456.61807504)),
+            (v(479452.39791749895, -100607.69462204688), v(1557724.7234042152, 1138560.729161283), v(-509066.7009900735, -1236630.2231795646)),
+            (v(366941.6455463168, -228747.2075937671), v(951867.3685483336, -1382105.746427564), v(80099.54117514272, 336849.03371294)),
+            (v(-982802368.7584409, 685672380.4583789), v(-350427949.7536838, 1845508380.6645164), v(-349050944.44291157, 1848033941.9204924)),
+            (v(-373.5636484590166, 215.3242519048786), v(-1150.351776753227, 479.87963961367564), v(671.479801722148, -140.5924582826675)),
+            (v(283.00109126841863, 295.9943521636093), v(808.4506346564488, -1110.8049879443556), v(-212.9042092059312, 1623.6941441647032)),
+        ];
+        let mut signs = [0usize; 2];
+        for (k, &(a, b, c)) in cases.iter().enumerate() {
+            let want = exact_sign_i128(a, b, c);
+            assert_ne!(want, 0, "case {k}");
+            signs[(want > 0) as usize] += 1;
+            assert_eq!(orient(a, b, c), want, "case {k}");
+            // The case is adversarial: the rounded value has the wrong sign and lies between
+            // half the bound and the bound.
+            let (l, r) = ((b.x - a.x) * (c.y - a.y), (b.y - a.y) * (c.x - a.x));
+            let (det, bound) = (l - r, ERR * (l.abs() + r.abs()));
+            assert!(det.signum() as i32 == -want && det.abs() > 0.5 * bound && det.abs() <= bound, "case {k}: {det} {bound}");
+        }
+        assert!(signs[0] > 0 && signs[1] > 0, "both signs");
     }
 
     #[test]
