@@ -47,6 +47,7 @@ use super::radii::{tip_point, LayerOrder};
 use super::sheet::{Feature, LayerSheet, Norm};
 use super::state::point_in_poly;
 use crate::geom::Vec2;
+use rayon::prelude::*;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::{FRAC_PI_8, TAU};
@@ -55,7 +56,7 @@ use std::f64::consts::{FRAC_PI_8, TAU};
 const FAR: f64 = 1e9;
 
 /// ERBS options.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ErbsOpts {
     /// Arc sample step of the Euclidean norm (degrees); the octagonal norm uses its 8 vertices.
     pub arc_step_deg: f64,
@@ -76,11 +77,25 @@ pub struct ErbsOpts {
     /// wires); the octilinear drawing applies the exits itself. On once the sheet's terminal is the
     /// planned exit (M7, inflated-sketch §4.6).
     pub pad_exit: bool,
+    /// The run's time limit: a stretch not finished by then has no ERBS (its runs are drawn by
+    /// the sequential ladder, counted in `erbs_none`, with a warning), so the ERBS never holds a
+    /// run past its limit. `None`: no limit.
+    pub deadline: Option<std::time::Instant>,
+    /// The run's cancel flag (the plugin's CPU-clock limit or the user's Cancel): as the deadline,
+    /// the stretches not finished have no ERBS and are drawn the sequential way.
+    pub stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Default for ErbsOpts {
     fn default() -> Self {
-        ErbsOpts { arc_step_deg: 22.5, tol: 0.1, sweeps_per_gate: 20, refine_rounds: 8, flip_rounds: 8, pad_exit: false }
+        ErbsOpts { arc_step_deg: 22.5, tol: 0.1, sweeps_per_gate: 20, refine_rounds: 8, flip_rounds: 8, pad_exit: false, deadline: None, stop: None }
+    }
+}
+
+impl ErbsOpts {
+    /// The time limit has passed or the run was cancelled. O(1).
+    fn expired(&self) -> bool {
+        self.deadline.is_some_and(|d| std::time::Instant::now() >= d) || self.stop.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
     }
 }
 
@@ -138,6 +153,9 @@ fn solve_flip(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BT
     let mut cur = solve_ordered(a, e, base, wedges, forced, prio, pt, opts);
     *sweeps += cur.sweeps;
     for _ in 0..opts.flip_rounds {
+        if opts.expired() {
+            break;
+        }
         let pos: BTreeMap<usize, usize> = cur.og.iter().enumerate().map(|(k, g)| (g.id, k)).collect();
         let at: BTreeMap<usize, Vec2> = cur.og.iter().zip(&cur.p).map(|(g, &x)| (g.id, x)).collect();
         let mut all = Vec::with_capacity(cur.p.len() + 2);
@@ -209,6 +227,9 @@ fn solve_flip(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BT
         }
         let mut any = false;
         for &w in &want {
+            if opts.expired() {
+                break;
+            }
             let (nxt, f2) = try_set(&[w], forced, sweeps);
             if ok(&nxt, &cur) {
                 *flips += 1;
@@ -1088,10 +1109,17 @@ pub fn erbs_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrd
         }
     }
     let no_skip = BTreeSet::new();
-    own.iter()
+    // The stretches in parallel: each ERBS is independent of the others (the gates, wedges and
+    // features are the stretch's own; the sheet is read only), so the result does not depend on
+    // the thread count.
+    own.par_iter()
         .filter(|&&si| sts[si].band.len() >= 2)
-        .map(|&si| {
+        .filter_map(|&si| {
+            if opts.expired() {
+                return None;
+            }
             let s = &sts[si];
+            let t_st = std::time::Instant::now();
             let mut base = gates_of(sh, &feats, &fg, s, si, o, per.get(&si).unwrap_or(&none), &radius, opts);
             let (c0, c1) = (s.band[0], s.band[s.band.len() - 1]);
             // Pad exits: the path leaves an elongated own pad straight along its axis to just past
@@ -1206,6 +1234,9 @@ pub fn erbs_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrd
             let mut near = BTreeSet::new();
             let mut spokes: BTreeSet<(usize, usize, usize)> = BTreeSet::new();
             for _ in 0..opts.refine_rounds {
+                if opts.expired() {
+                    break;
+                }
                 let (og, p) = (&cur.og, &cur.p);
                 let mut add: Vec<(usize, Gate)> = Vec::new();
                 for k in 0..=p.len() {
@@ -1282,6 +1313,10 @@ pub fn erbs_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrd
                 let prio: BTreeMap<usize, usize> = cur.og.iter().enumerate().map(|(k, g)| (g.id, k)).collect();
                 cur = solve_flip(a, e, &base, &wedges, &mut forced, Some(&prio), &mut pt, opts, &mut sweeps, &mut flips);
             }
+            // Past the limit inside the stretch: its solve stopped part way, so no ERBS.
+            if opts.expired() {
+                return None;
+            }
             let (gs, p, converged) = (cur.og, cur.p, cur.converged);
             let counts = [cur.counts[0], cur.counts[1], cur.counts[2], flips];
             let mut pts = Vec::with_capacity(p.len() + 4);
@@ -1302,7 +1337,10 @@ pub fn erbs_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrd
             pts.push(c1);
             w.push(s.w);
             let path = simplify(&pts, 0.5);
-            Erbs { lead, stretch: si, len: poly_len(&path), band_len: poly_len(&s.band), pts, w, path, gates: gs.len(), refined, sweeps, converged, gate_list: gs, reordered: counts[0], conflicts: counts[1], cycles: counts[2], flips: counts[3] }
+            if std::env::var_os("TOPO_ERBS_TIME").is_some() {
+                eprintln!("ERBS time st {si} wire {} gates {} refined {} sweeps {} flips {} cycles {} conv {} {:.1} ms", s.wire, gs.len(), refined, sweeps, flips, counts[2], converged, t_st.elapsed().as_secs_f64() * 1e3);
+            }
+            Some(Erbs { lead, stretch: si, len: poly_len(&path), band_len: poly_len(&s.band), pts, w, path, gates: gs.len(), refined, sweeps, converged, gate_list: gs, reordered: counts[0], conflicts: counts[1], cycles: counts[2], flips: counts[3] })
         })
         .collect()
 }
@@ -1597,6 +1635,9 @@ pub struct Realised {
     pub report: ErbsReport,
     /// Stretches the measurement could not band (walk failed): drawn the sequential way.
     pub unbanded: usize,
+    /// Stretches without an ERBS because the run's time limit passed ([`ErbsOpts::deadline`]):
+    /// drawn the sequential way.
+    pub timed_out: usize,
     pub seconds: f64,
 }
 
@@ -1693,7 +1734,7 @@ pub fn precedes_order(given: &[usize], before: &BTreeSet<(usize, usize)>) -> Vec
 /// the drawing's placed vias (sheets with the via discs, bands, cut items), the order, tips and
 /// radii (steps a, b), the ERBS per layer and their check, and the precedes order of `given`.
 #[allow(clippy::too_many_arguments)]
-pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], packer: &super::pack::Packer, bottom: i32, conn: &dyn Fn(usize) -> Option<usize>, placed: &BTreeMap<usize, Vec<(usize, Vec2)>>, outline: &[(Vec2, Vec2)], mo: &super::cutflow::MeasureOpts, layers: &[usize], given: &[usize]) -> Result<Realised, String> {
+pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], packer: &super::pack::Packer, bottom: i32, conn: &dyn Fn(usize) -> Option<usize>, placed: &BTreeMap<usize, Vec<(usize, Vec2)>>, outline: &[(Vec2, Vec2)], mo: &super::cutflow::MeasureOpts, layers: &[usize], given: &[usize], deadline: Option<std::time::Instant>, stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) -> Result<Realised, String> {
     let t0 = std::time::Instant::now();
     let none: Vec<Vec<usize>> = Vec::new();
     let plan = super::cutflow::Plan { st, events, via_k: &none, bottom, packer, conn, placed: Some(placed) };
@@ -1703,7 +1744,10 @@ pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], pac
     let mut before: BTreeSet<(usize, usize)> = BTreeSet::new();
     for (lf, o) in m.layers.iter().zip(&ords) {
         out.unbanded += lf.walk_failed;
-        let es = erbs_layer(&lf.sheet, &m.stretches, &lf.stretches, o, &ErbsOpts::default());
+        let eo = ErbsOpts { deadline, stop: stop.clone(), ..ErbsOpts::default() };
+        let es = erbs_layer(&lf.sheet, &m.stretches, &lf.stretches, o, &eo);
+        let banded: BTreeSet<usize> = lf.stretches.iter().copied().filter(|&si| m.stretches[si].band.len() >= 2).collect();
+        out.timed_out += banded.len().saturating_sub(es.len());
         let vs = check_layer(&lf.sheet, &m.stretches, o, &es);
         let r = report(&es, &vs);
         let gap: BTreeSet<usize> = vs.iter().filter(|v| !v.predicted).flat_map(|v| match v.other {

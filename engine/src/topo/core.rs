@@ -3810,12 +3810,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let layers: Vec<usize> = (0..b.n_signal).collect();
         let conn = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
         let mo = super::cutflow::MeasureOpts::from_options(opts);
-        match super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &super::board::outline_segments(model), &mo, &layers, &live) {
+        match super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &super::board::outline_segments(model), &mo, &layers, &live, ctl.deadline().map(|d| d.max(floor)), Some(ctl.cancel.clone())) {
             Ok(r) => {
+                if r.timed_out > 0 {
+                    warnings.push(format!("ERBS drawing: the time limit passed (or the run was cancelled) before {} stretch(es) had their ERBS; those runs are drawn the sequential way (erbs_none)", r.timed_out));
+                }
                 erbs_line = Some(format!(
-                    "ERBS drawing ([drawing] realise = \"erbs\"; Dayan 1997 pp. 15-16): {} stretches in {:.2} s, length over the zero-width bands {:.3}, {} gates ({} added by the feature check), {} not converged, {} order cycles; checked: {} violations an over-full cut predicts, {} model gaps (erbs_gap, worst {:.3} mm); {} stretches without a band",
+                    "ERBS drawing ([drawing] realise = \"erbs\"; Dayan 1997 pp. 15-16): {} stretches in {:.2} s ({} past the time limit, drawn sequentially), length over the zero-width bands {:.3}, {} gates ({} added by the feature check), {} not converged, {} order cycles; checked: {} violations an over-full cut predicts, {} model gaps (erbs_gap, worst {:.3} mm); {} stretches without a band",
                     r.report.stretches,
                     r.seconds,
+                    r.timed_out,
                     if r.report.band_len > 0.0 { r.report.len / r.report.band_len } else { 1.0 },
                     r.report.gates,
                     r.report.refined,
