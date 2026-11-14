@@ -76,4 +76,21 @@ dp_swap_no_room every site breaks clearance (10 x 25 per break) and two singles 
 
 ## 4. Results
 
-(filled in below after the runs)
+### Approved 5.6 patterns (main 7e320c1 vs this branch, Hetzner ccx43, RAYON 2, timeout 120 s)
+
+| pattern | main | m4-pairs | judgement |
+| --- | --- | --- | --- |
+| dp_gateway | coupled 84.4 %, 0 new DRC | identical; plan: no flip needed | = (the expected gateway geometry is drawing work) |
+| dp_bus_crossing | 4 pairs coupled 98.2 %, 0 new DRC | identical; plan: no flip for all 4 | = |
+| dp_gnd_between | 37 % coupled, 8 new DRC (4 clearance) | identical | = (`fanout = "gateway"` draws 0 new DRC here, but see below) |
+| dp_esd_flowthrough | 17 unconnected, polarity cross U2.1-U2.9 | identical | = (flow-through parity open, section 5) |
+| dp_swap_needed | two single tracks (static `swaps()`) | **swap planned** (price 106.2 vs two singles 138.2, 0 breaks), drawn as two single tracks until the drawing realises swaps | decision = expected; drawing waits for ERBS |
+| dp_swap_no_room | two single tracks (static) | two single tracks by price (swap 2310.6: 8 clearance breaks against C1-C4 and the pads, crowding 2.0) | = expected, now a priced decision |
+| dp_uturn_parity | two single tracks, 2 vias | **coupled pair**, one via pair drawn as a flip (as planned), 0 new DRC, coupled 54 %, skew 0.69 mm | better; the expected turn-back at x = 6 is not reached (section 5) |
+
+`fanout = "gateway"` (reserved fan-out tracks) on the same patterns: dp_gateway 53 new DRC and a polarity cross (the lead
+enters its pads around the far side), dp_bus_crossing coupled 98.2 -> 75 %, dp_gnd_between 8 -> 0 new DRC. Hence opt-in.
+
+### Ladder seed 0 (score_runs --only 0, CPU limit 2400 s; main 7e320c1 vs m4-pairs)
+
+(see below)

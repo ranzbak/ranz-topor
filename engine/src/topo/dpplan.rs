@@ -466,6 +466,24 @@ fn swap_at(cp: &Coupled, size: ViaSize, clear: f64, c: Vec2, t: Vec2, side: Vec2
     SwapSite { at: c, t, side, h, hb, s, leg, to, vias, p_items, n_items, viol: (0, 0.0), crowd: 0.0, mm, price: 0.0 }
 }
 
+/// The CRITICAL report line of a pair connection whose drawn P and N tracks cross between its ends
+/// (a short where they cross; a survivor of the polarity price, never dropped), with what the plan
+/// decided (`pl`) so the cause is visible: a plan that wanted no flip and a drawing that crosses is
+/// the plan-vs-drawn gap of the drawing stage. O(1).
+pub fn critical_polarity_line(p: &str, n: &str, a: &str, b: &str, pl: Option<&ConnPlan>) -> String {
+    let why = match pl {
+        None => "the connection had no polarity plan".to_string(),
+        Some(pl) if !pl.need => "the plan's gateways need no flip: the drawn ends leave their pads on other sides than the planned gateways (plan-vs-drawn gap, M4 drawing stage)".to_string(),
+        Some(pl) => match pl.choice {
+            Choice::Swap => "the plan wanted a swap (two via pairs) that the drawing does not realise yet (M4 drawing stage)".to_string(),
+            Choice::Cross => "the board has one signal layer: the plan prices the crossing, there is no other way".to_string(),
+            Choice::FlipAtLayerChange => "the plan wanted one of the pair's via pairs to turn back, the drawing did not fit it".to_string(),
+            _ => "the plan wanted a flip that the drawing did not draw".to_string(),
+        },
+    };
+    format!("CRITICAL: diff pair {p} / {n} {a} -> {b}: P and N cross between the ends (a short where the tracks cross): {why}; fix by hand, or route it as two single tracks ([diffpair] swap = \"single\")")
+}
+
 /// The P pad of a terminal.
 fn pad_of(t: &TermRef) -> Option<usize> {
     if let TermKind::Pad(p) = t.kind {
@@ -750,7 +768,7 @@ pub fn plan_ends(model: &BoardModel, opts: &Options, checker: &Checker, fixed: &
         ));
         let drawn_single = !SWAPS_DRAWN && lone(pl.pad_a) && lone(pl.pad_b) && to_single(model, pairs, ci, &pl);
         if drawn_single {
-            pairs.notes.push(format!("{head}: the planned swap is drawn as two single tracks until the drawing realises swaps (M4 drawing stage, rebuilt ERBS)"));
+            pairs.notes.push(format!("CRITICAL: {head}: the planned swap is drawn as two single tracks (uncoupled over the whole connection, one hop) until the drawing realises swaps (M4 drawing stage, rebuilt ERBS); route it by hand as a coupled pair with the swap if the coupling matters"));
         }
         let e = plans.get_mut(&ci).expect("plan");
         e.choice = Choice::Swap;

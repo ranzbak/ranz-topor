@@ -5662,6 +5662,9 @@ fn realise_pairs(model: &BoardModel, opts: &Options, pairs: &Pairs, out: &mut [O
                 if st.parity_resolved { " (the plan's flips did not fit the drawn layer changes: solved again on the drawn turns)" } else { " (as planned)" }
             ));
         }
+        if st.polarity_cross {
+            lines.push(super::dpplan::critical_polarity_line(&r.p_name, &r.n_name, &label(pa), &label(pb), pairs.conn_plan.get(&cp_ci)));
+        }
         if let Some(sw) = pairs.conn_plan.get(&cp_ci).and_then(|pl| pl.swap.as_ref().filter(|_| pl.choice == super::dpplan::Choice::Swap)) {
             if st.polarity_cross {
                 lines.push(format!(
