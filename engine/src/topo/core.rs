@@ -246,7 +246,18 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     best.runtime_s = t0.elapsed().as_secs_f64();
     if best.timed_out {
         let limit = ctl.limit.seconds().unwrap_or(opts.wall_clock_s);
-        let why = if cancel { "Cancel stopped the run before its routes were stable".to_string() } else if ctl.limit.changed() { format!("the time limit of {limit:.0} s (changed during the run; run.timeout_s = {:.0} s) stopped the run before its routes were stable", opts.wall_clock_s) } else { format!("run.timeout_s = {limit:.0} s stopped the run before its routes were stable") };
+        // Name the limit and its clock. The engine's own limit is the wall clock; a caller that counts
+        // another clock (the plugin's [run] timeout_clock = cpu) reaches the limit itself and gives the engine
+        // none (`wall_clock_s` 0), so the seconds `limit` are then wall seconds at the reach, not its limit.
+        let why = if cancel {
+            "Cancel stopped the run before its routes were stable".to_string()
+        } else if ctl.limit.changed() {
+            format!("the time limit of {limit:.0} s wall clock (changed during the run; [run] timeout_s = {:.0} s) stopped the run before its routes were stable", opts.wall_clock_s)
+        } else if opts.wall_clock_s <= 0.0 {
+            format!("the caller's own time limit ([run] timeout_s on its clock, e.g. [run] timeout_clock = cpu; reached {limit:.0} s into the run, wall clock) stopped the run before its routes were stable")
+        } else {
+            format!("[run] timeout_s = {limit:.0} s (wall clock) stopped the run before its routes were stable")
+        };
         best.warnings.push(format!("{TIME_HIT} ({why})"));
     }
     best.limit = limit_report(ctl, opts, &mut best);
@@ -4349,10 +4360,17 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     if opts.allow_violations {
         dr.force = true;
         for &w in &live {
-            if drawn.contains_key(&w) || expired() {
+            if drawn.contains_key(&w) {
                 continue;
             }
             let ci = conn_of[wire_conn[w]];
+            if expired() {
+                // the cut skips it: it says so (Cancel's or the limit's reason), not its drawing failure
+                if out[ci].reason.starts_with("drawing:") {
+                    out[ci].reason = draw_cut_reason().into();
+                }
+                continue;
+            }
             if !out[ci].reason.starts_with("drawing:") {
                 continue;
             }

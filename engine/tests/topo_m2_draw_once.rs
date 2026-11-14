@@ -32,11 +32,22 @@ fn crop(name: &str) -> BoardModel {
 
 /// The TopoR method's settings (M0 defaults: loop topor, initial once, taut lengths), headless;
 /// `extra` (`, "key": value ...`) adds keys or overrides these.
+/// The wall limit is a day, not the product's 600 s: these tests reach, harden and cancel the limit
+/// themselves where it is under test, and a debug `cargo test` (tests/test_scaffold.py) runs several
+/// times slower than release, so a 600 s limit fired on its own there (verify-m2d). The product
+/// default (`[run] timeout_s` 600) is untouched.
 fn topor(extra: &str) -> Options {
-    let mut o: serde_json::Map<String, serde_json::Value> = serde_json::from_str(r#"{"wall_clock_s": 600.0, "opt_loop": "topor", "initial": "once", "search_length": "taut"}"#).expect("base");
+    let mut o: serde_json::Map<String, serde_json::Value> = serde_json::from_str(r#"{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut"}"#).expect("base");
     let more: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&format!("{{{}}}", extra.trim_start_matches(','))).expect("extra options");
     o.extend(more);
     Options::from_json(&serde_json::Value::Object(o).to_string()).expect("options parse")
+}
+
+/// Seconds a test waits for a stage before it calls the run hung. A debug build (tests/test_scaffold.py runs
+/// `cargo test` unoptimised, several times slower, under load) needs far longer to reach the drawing than
+/// release (verify-m2d: "never reached drawing the traces" at 900 s); this is a hang detector, not a bound.
+fn watchdog_s() -> u64 {
+    if cfg!(debug_assertions) { 14_400 } else { 900 }
 }
 
 fn run(m: &BoardModel, o: &Options) -> RouteResult {
@@ -201,7 +212,7 @@ fn a_limit_reached_in_p3_p4_still_draws_the_initial_plan() {
         let h = std::thread::spawn(move || route_with(&m2, &o2, &c2));
         let t0 = Instant::now();
         while !ctl.snapshot().stage.contains("layer assignment") && !h.is_finished() {
-            assert!(t0.elapsed().as_secs() < 600, "{fx}: never reached P3");
+            assert!(t0.elapsed().as_secs() < watchdog_s(), "{fx}: never reached P3");
             std::thread::sleep(Duration::from_millis(2));
         }
         ctl.limit.reach();
@@ -252,14 +263,18 @@ fn cancel_in_p3_p4_keeps_no_plan_and_says_so() {
         let h = std::thread::spawn(move || route_with(&m, &o, &c2));
         let t0 = Instant::now();
         while !ctl.snapshot().stage.contains("layer assignment") && !h.is_finished() {
-            assert!(t0.elapsed().as_secs() < 600, "{fx}: never reached P3");
+            assert!(t0.elapsed().as_secs() < watchdog_s(), "{fx}: never reached P3");
             std::thread::sleep(Duration::from_millis(2));
         }
         assert!(!h.is_finished(), "{fx}: the run ended before P3");
         let t = Instant::now();
         ctl.request_cancel();
         let r = h.join().expect("run thread");
-        assert!(t.elapsed().as_secs_f64() < 5.0, "{fx}: Cancel in P3/P4 took {:.2} s", t.elapsed().as_secs_f64());
+        // Latency in seconds depends on the build profile: a debug build (tests/test_scaffold.py runs
+        // `cargo test` unoptimised) is ~10x slower per move, so its bound is wider (measured 6.1 s on
+        // the esp crop where release stays well under 1 s); the stop check is within one move either way.
+        let bound = if cfg!(debug_assertions) { 60.0 } else { 5.0 };
+        assert!(t.elapsed().as_secs_f64() < bound, "{fx}: Cancel in P3/P4 took {:.2} s (bound {bound} s)", t.elapsed().as_secs_f64());
         assert_eq!(r.stop_reason, "cancel", "{fx}: {:?}", r.warnings);
         assert!(r.warnings.first().is_some_and(|w| w.starts_with("ERROR: nothing to draw yet")), "{fx}: {:?}", r.warnings);
         assert!(r.items.is_empty() && r.routed == 0, "{fx}");
@@ -285,7 +300,7 @@ fn reached_in_p3(m: &BoardModel, o: &Options) -> RouteResult {
     let h = std::thread::spawn(move || route_with(&m2, &o2, &c2));
     let t0 = Instant::now();
     while !ctl.snapshot().stage.contains("layer assignment") && !h.is_finished() {
-        assert!(t0.elapsed().as_secs() < 600, "never reached P3");
+        assert!(t0.elapsed().as_secs() < watchdog_s(), "never reached P3");
         std::thread::sleep(Duration::from_millis(2));
     }
     assert!(!h.is_finished(), "the run ended before P3");
@@ -387,7 +402,7 @@ fn act_at(m: &BoardModel, o: &Options, at: &[&str], act: impl Fn(&RunControl)) -
     let h = std::thread::spawn(move || route_with(&m2, &o2, &c2));
     let t0 = Instant::now();
     while !at.iter().any(|a| ctl.snapshot().stage.contains(a)) && !h.is_finished() {
-        assert!(t0.elapsed().as_secs() < 900, "never reached {at:?}");
+        assert!(t0.elapsed().as_secs() < watchdog_s(), "never reached {at:?}");
         std::thread::yield_now();
     }
     let hit = !h.is_finished();
@@ -419,6 +434,20 @@ fn a_hard_limit_reached_in_the_drawing_cuts_it_loudly() {
 }
 
 #[test]
+fn a_hard_limit_reached_in_the_via_reduction_names_that_step() {
+    // verify-m2d O2: the step the limit cut is the via reduction (its own CutStep), not the drawing
+    // that precedes it: cut_steps names it and the report line says the vias it had not removed stay.
+    let m = crop("qmtech-usb-crop.json");
+    let o = topor(r#", "runs": 1, "capacity_model": "cuts", "timeout_mode": "hard""#);
+    let (r, hit) = act_at(&m, &o, &["via reduction and fuse"], |c| c.limit.reach());
+    assert!(hit, "the run ended before the via reduction");
+    let l = r.limit.as_ref().expect("limit report");
+    assert!(l.reached && l.mode == "hard", "{l:?}");
+    assert!(l.cut_steps.contains(&"via_reduction".to_string()), "the via reduction is the step cut: {l:?}");
+    assert!(r.warnings.iter().any(|w| w.contains("the via reduction was cut (the vias it had not removed yet stay)")), "{:?}", r.warnings);
+}
+
+#[test]
 fn the_overrun_cap_firing_in_the_drawing_cuts_it() {
     // The soft limit passed in P3 (the step finishes, no new one begins); the cap fires (here: the
     // caller hardens the limit, as the plugin's CPU clock does) once the drawing runs: the drawing
@@ -431,7 +460,7 @@ fn the_overrun_cap_firing_in_the_drawing_cuts_it() {
     let h = std::thread::spawn(move || route_with(&m2, &o2, &c2));
     let t0 = Instant::now();
     while !ctl.snapshot().stage.contains("layer assignment") && !h.is_finished() {
-        assert!(t0.elapsed().as_secs() < 900, "never reached P3");
+        assert!(t0.elapsed().as_secs() < watchdog_s(), "never reached P3");
         std::thread::sleep(Duration::from_millis(2));
     }
     ctl.limit.reach();

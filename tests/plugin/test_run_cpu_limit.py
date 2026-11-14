@@ -238,3 +238,14 @@ def test_gui_has_no_overrun_cap_and_keeps_going_until_cancel(app, eprom, tmp_pat
     assert tl["cap_s"] is None and tl["cap_hit"] is False, tl
     assert out.router_cpu_s >= 14.0, "it went on past twice the limit"
     assert "TIME_OVERRUN_CAP" not in {x.code for x in out.findings}
+
+
+def test_the_engines_cut_steps_reach_result_json(app, eprom, tmp_path, reports, cpu_counter):
+    # verify-m2d O4: time_limit.cut / cut_steps of the engine's limit report are carried into result.json
+    cfg = CFG.with_values({("run", "timeout_clock"): "cpu", ("run", "timeout_s"): 3.0, ("run", "timeout_mode"): "hard"})
+    lim = {"limit_s": 0.0, "mode": "hard", "reached": True, "step": "drawing the traces", "overrun_s": 0.0,
+           "cap_s": None, "cap_hit": False, "cut": "drawing", "cut_steps": ["drawing", "via_reduction"]}
+    eng = RecordingEngine(hold=12, patch=_as("timeout_cpu", timed_out=True, limit=lim))
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=cfg, engine=eng)
+    tl = _result_json(out)["time_limit"]
+    assert tl["cut"] == "drawing" and tl["cut_steps"] == ["drawing", "via_reduction"], tl

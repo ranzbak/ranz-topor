@@ -928,6 +928,20 @@ mod tests {
     }
 
     #[test]
+    fn a_hardened_hard_limit_keeps_the_hard_notice() {
+        // verify-m2d O3: in hard mode a caller's harden() (the plugin's CPU clock) is no "overrun cap":
+        // the cap is a soft-mode feature, so the notice stays the hard mode's own line.
+        let ctl = RunControl::new();
+        ctl.limit.init(0.0);
+        ctl.limit.set_hard(true);
+        ctl.stage(1, 1, "drawing the traces");
+        ctl.limit.reach();
+        ctl.limit.harden();
+        assert!(ctl.limit.cap_hit(), "harden() fired the cap flag");
+        assert_eq!(ctl.snapshot().notice, "time limit reached (hard): the current step stops now (drawing the traces)");
+    }
+
+    #[test]
     fn the_overrun_cap_makes_the_soft_limit_hard() {
         // F3 `[run] timeout_overrun_s`: before the limit plus the cap the soft limit stops no
         // step; after it (or when the caller hardens it, the plugin's CPU clock) it acts as hard
