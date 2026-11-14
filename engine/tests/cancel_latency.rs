@@ -134,3 +134,15 @@ fn cancel_in_p3_p4_with_the_cut_model_ends_quickly() {
         assert_eq!(r.stop_reason, "cancel", "{fx}: {:?}", r.warnings);
     }
 }
+
+/// M3 verifier finding (cancel drops the ERBS): after a Cancel in the TopoR loop the loop's pick
+/// is drawn through (`draw_through`), so the Cancel must not stop the ERBS of that drawing; only
+/// the time limit does. The run draws from its ERBS, no `erbs_timeout` line.
+#[test]
+fn cancel_in_the_topor_loop_keeps_the_erbs() {
+    let (r, _) = cancel_after(opts(r#", "opt_loop": "topor", "search_length": "taut", "runs": 1, "realise": "erbs""#), After::Loop, Duration::from_millis(1500));
+    assert_eq!(r.routed, r.connections_total, "{:?}", r.warnings);
+    assert!(!r.warnings.iter().any(|w| w.starts_with("erbs_timeout")), "{:?}", r.warnings);
+    let line = r.warnings.iter().find(|w| w.starts_with("ERBS drawing")).unwrap_or_else(|| panic!("{:?}", r.warnings));
+    assert!(line.contains("(0 past the time limit"), "{line}");
+}

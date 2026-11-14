@@ -136,6 +136,9 @@ pub struct Erbs {
     pub portals: usize,
     /// Coincident points of opposite sides (the later one left out): a passage of zero width.
     pub conflicts: usize,
+    /// Features of other nets the band runs through (the plan's violation): no obstacle, the
+    /// check counts them as predicted.
+    pub through: Vec<usize>,
     /// The sleeve reached the end (always true for a returned ERBS; kept for the reports).
     pub converged: bool,
     pub len: f64,
@@ -339,6 +342,7 @@ impl Points {
     }
 
     /// Add a point (the first of coincident points stays; one of the other side is a conflict).
+    #[cfg(test)]
     fn add(&mut self, p: Vec2, left: bool, gate: Option<usize>, w: f64) {
         self.add_at(p, if left { 2 } else { 3 }, gate, w, Detour::Auto);
     }
@@ -577,7 +581,7 @@ fn sleeve(pp: &Points, rough: &[Vec2]) -> Result<Vec<(usize, usize)>, String> {
     // Inside (or on) face f: no edge has the point strictly outside.
     let inside = |f: [usize; 3], x: Vec2| (0..3).all(|k| (pos(f[(k + 1) % 3]) - pos(f[k])).cross(x - pos(f[k])) >= -ON * (pos(f[(k + 1) % 3]) - pos(f[k])).len());
     let mut out: Vec<(usize, usize)> = Vec::new();
-    let mut cross = |l: usize, r: usize, out: &mut Vec<(usize, usize)>| {
+    let cross = |l: usize, r: usize, out: &mut Vec<(usize, usize)>| {
         if out.last() == Some(&(r, l)) {
             out.pop();
         } else {
@@ -612,10 +616,28 @@ fn sleeve(pp: &Points, rough: &[Vec2]) -> Result<Vec<(usize, usize)>, String> {
         if wi > 0 {
             let f = topo.faces[fi];
             if let Some(&c) = f.iter().find(|&&c| (pos(c) - a).len() <= ON) {
-                match leave(c, a, b) {
-                    Some(nf) => fi = nf,
-                    None => return Err("no face round a vertex on the path holds its next piece".into()),
+                let Some(fl) = leave(c, a, b) else { return Err("no face round a vertex on the path holds its next piece".into()) };
+                // The path runs through an obstacle point: go round it on the side opposite its
+                // label, crossing its spokes from the face it arrived in to the one it leaves by
+                // (right label: clockwise, the point stays right; left: counter-clockwise).
+                if matches!(lab(c), 2 | 3) {
+                    let cw = lab(c) == 3;
+                    let mut n = 0;
+                    while fi != fl {
+                        n += 1;
+                        if n > star[c].len() + 1 {
+                            return Err("the walk round a point on the path does not close".into());
+                        }
+                        let f = topo.faces[fi];
+                        let k = f.iter().position(|&v| v == c).unwrap_or(0);
+                        let (x1, x2) = (f[(k + 1) % 3], f[(k + 2) % 3]);
+                        let (l, r, key) = if cw { (x1, c, (x1, c)) } else { (c, x2, (c, x2)) };
+                        cross(l, r, &mut out);
+                        let Some(&nf) = face_of.get(&key) else { return Err("the path left the triangulation (the hull)".into()) };
+                        fi = nf;
+                    }
                 }
+                fi = fl;
             }
         }
         loop {
@@ -751,8 +773,14 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
             let at = x.t_band.clamp(0.0, 1.0) * c.cap;
             let da = if at < lo - ON { Detour::From(xb) } else { Detour::Never };
             let db = if at > hi + ON { Detour::From(xb) } else { Detour::Never };
-            cand.push((a, a_left, gi, x.w_tip, da));
-            cand.push((b, !a_left, gi, x.w_tip, db));
+            // A tip at its cut's end on one of the stretch's own terminal pads holds no room (no
+            // item before it, no clearance to its own copper): the wire may pass over that pad.
+            if !((a - c.p).len() < 1.0 && in_pad(c.p)) {
+                cand.push((a, a_left, gi, x.w_tip, da));
+            }
+            if !((c.q - b).len() < 1.0 && in_pad(c.q)) {
+                cand.push((b, !a_left, gi, x.w_tip, db));
+            }
         }
     }
 
@@ -797,6 +825,7 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
     let (lo, hi) = band.iter().fold((Vec2 { x: f64::INFINITY, y: f64::INFINITY }, Vec2 { x: f64::NEG_INFINITY, y: f64::NEG_INFINITY }), |(lo, hi), p| (Vec2 { x: lo.x.min(p.x), y: lo.y.min(p.y) }, Vec2 { x: hi.x.max(p.x), y: hi.y.max(p.y) }));
     let mut near = BTreeSet::new();
     fg.query(lo - Vec2 { x: reach, y: reach }, hi + Vec2 { x: reach, y: reach }, &mut near);
+    let mut through = Vec::new();
     let wrapped: BTreeMap<usize, bool> = s.wraps.iter().flatten().filter_map(|&(v, l)| sh.vfeat[v].map(|f| (f, l))).collect();
     for &f in &near {
         let ft = &sh.feats[f];
@@ -806,6 +835,13 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
         }
         let d = band.windows(2).map(|w| seg_poly_dist(w[0], w[1], &ft.poly)).fold(f64::INFINITY, f64::min);
         if d > reach {
+            continue;
+        }
+        // The band runs through the feature (a violation the plan accepted, costly not failed):
+        // it has no side, so it is no obstacle; points of both sides would wind the class
+        // round each one (Dayan PDF p. 26: the ERBS keeps the spacing of a feasible sketch only).
+        if band.windows(2).any(|w| seg_through(w[0], w[1], &ft.poly)) {
+            through.push(f);
             continue;
         }
         let left = match wrapped.get(&f) {
@@ -872,7 +908,7 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
     if std::env::var_os("TOPO_ERBS_SLEEVE").is_some() {
         eprintln!("  path {:?}", path.iter().map(|&p| (p.x / 1e6, p.y / 1e6)).collect::<Vec<_>>());
     }
-    Ok(Erbs { stretch: si, len: poly_len(&path), band_len: poly_len(band), pts, w, at, path, gate_list: gates, points: n_obs, portals: portals.len(), conflicts: pp.conflicts, converged: true })
+    Ok(Erbs { stretch: si, len: poly_len(&path), band_len: poly_len(band), pts, w, at, path, gate_list: gates, points: n_obs, portals: portals.len(), conflicts: pp.conflicts, through, converged: true })
 }
 
 /// The ERBS of every stretch of `mine` on this layer (module documentation). Each stretch is
@@ -1043,6 +1079,37 @@ fn bbox(a: Vec2, b: Vec2, r: f64) -> (Vec2, Vec2) {
     (Vec2 { x: a.x.min(b.x) - r, y: a.y.min(b.y) - r }, Vec2 { x: a.x.max(b.x) + r, y: a.y.max(b.y) + r })
 }
 
+/// Whether segment `a b` runs through the inside of polygon `poly` deeper than [`DEEP`]: a
+/// piece between two of its crossings with the outline has its middle inside. O(sides log sides).
+fn seg_through(a: Vec2, b: Vec2, poly: &[Vec2]) -> bool {
+    if poly.len() < 3 {
+        return false;
+    }
+    let d = b - a;
+    let mut ts = vec![0.0, 1.0];
+    for i in 0..poly.len() {
+        let (p, q) = (poly[i], poly[(i + 1) % poly.len()]);
+        let e = q - p;
+        let den = d.cross(e);
+        if den == 0.0 {
+            continue;
+        }
+        let w0 = p - a;
+        let (t, u) = (w0.cross(e) / den, w0.cross(d) / den);
+        if (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u) {
+            ts.push(t);
+        }
+    }
+    ts.sort_by(f64::total_cmp);
+    ts.windows(2).any(|w| {
+        let m = a + d * (0.5 * (w[0] + w[1]));
+        point_in_poly(m, poly) && (0..poly.len()).all(|i| seg_seg_dist(m, m, poly[i], poly[(i + 1) % poly.len()]) > DEEP)
+    })
+}
+
+/// Depth inside a feature that counts as running through it (1 µm).
+const DEEP: f64 = 1_000.0;
+
 /// Distance of segment `a b` to polygon `poly` (0 when it touches or lies inside; a single point
 /// is a point feature).
 fn seg_poly_dist(a: Vec2, b: Vec2, poly: &[Vec2]) -> f64 {
@@ -1078,6 +1145,11 @@ pub fn check_layer(sh: &LayerSheet, sts: &[Stretch], o: &LayerOrder, es: &[Erbs]
     }
     for d in &o.report.examples {
         pred_pair.insert((d.a.min(d.b), d.a.max(d.b)));
+    }
+    for e in es {
+        for &f in &e.through {
+            pred_feat.insert((e.stretch, f));
+        }
     }
     // Segments: (erbs index, point index), width, half reach.
     let segs: Vec<(usize, usize)> = es.iter().enumerate().flat_map(|(i, e)| (0..e.pts.len().saturating_sub(1)).map(move |k| (i, k))).collect();
@@ -1430,6 +1502,44 @@ mod tests {
         Ok(p)
     }
 
+    /// The path of `band` among labelled points (`2` left, `3` right) with their detours.
+    fn path_band(band: &[Vec2], pts: &[(Vec2, u8, Detour)]) -> Result<Vec<Vec2>, String> {
+        let (s, e) = (band[0], band[band.len() - 1]);
+        let mut pp = Points::new(s, e, 0.2e6);
+        for &(p, lab, det) in pts {
+            pp.add_at(p, lab, None, 0.2e6, det);
+        }
+        pp.frame(band);
+        let rough = rough_path(band, &pp);
+        let por = sleeve(&pp, &rough)?;
+        let mut ports = vec![(s, s)];
+        ports.extend(por.iter().map(|&(l, r)| (pp.pts[l], pp.pts[r])));
+        ports.push((e, e));
+        Ok(simplify(&pull(&ports).into_iter().map(|c| c.0).collect::<Vec<_>>(), 0.5))
+    }
+
+    /// A detour from the band's start (a tip whose spoke the band crosses at its first point):
+    /// the rough path's loop leaves from a vertex of the triangulation, the walk picks the face
+    /// of that vertex's star the loop enters, and the path goes round the point.
+    #[test]
+    fn detour_from_the_start_vertex() {
+        let (s, e) = (v(0.0, 0.0), v(10.0, 0.0));
+        let p = path_band(&[s, e], &[(v(0.5, -1.0), 2, Detour::From(s)), (v(5.0, 1.0), 2, Detour::Never)]).unwrap();
+        assert_eq!(p, vec![s, v(0.5, -1.0), e]);
+    }
+
+    /// The band runs through an obstacle point (a tie of the walk's side test): the point's own
+    /// label decides its side.
+    #[test]
+    fn band_through_a_point_takes_its_label() {
+        let band = [v(0.0, -0.5), v(1.0, 0.0), v(2.0, -0.5)];
+        let x = v(1.0, 0.0);
+        let right = path_band(&band, &[(x, 3, Detour::Never)]).unwrap();
+        assert_eq!(right, band.to_vec(), "kept on the right: the path bends over it");
+        let left = path_band(&band, &[(x, 2, Detour::Never)]).unwrap();
+        assert_eq!(left, vec![band[0], band[2]], "kept on the left: straight under it");
+    }
+
     /// Obstacles on their own sides of a straight band: the path is the band.
     #[test]
     fn sleeve_straight() {
@@ -1526,6 +1636,20 @@ mod tests {
         assert!(band_side(&band, v(9.0, 1.0)).0, "inside the left turn");
         assert!(!band_side(&band, v(11.0, -1.0)).0, "outside the corner");
         assert!(!band_side(&band, v(11.0, 5.0)).0);
+    }
+
+    /// A band piece through a feature (the plan's accepted violation) runs through it; one that
+    /// touches it, runs along a side or passes by does not.
+    #[test]
+    fn seg_through_feature() {
+        let sq = [v(0.0, 0.0), v(1.0, 0.0), v(1.0, 1.0), v(0.0, 1.0)];
+        assert!(seg_through(v(-1.0, 0.5), v(2.0, 0.5), &sq));
+        assert!(seg_through(v(0.5, 0.5), v(0.6, 0.6), &sq), "a piece inside");
+        assert!(seg_through(v(-1.0, -0.5), v(1.0, 1.5), &sq), "a diagonal through a corner region");
+        assert!(!seg_through(v(-1.0, 0.0), v(2.0, 0.0), &sq), "along a side");
+        assert!(!seg_through(v(-1.0, 1.0), v(1.0, 3.0), &sq), "touching a corner");
+        assert!(!seg_through(v(-1.0, 2.0), v(2.0, 2.0), &sq), "past it");
+        assert!(!seg_through(v(-1.0, 0.5), v(2.0, 0.5), &sq[..2]), "no area");
     }
 
     /// A convex feature grown by r in the octagonal norm: the hull of the vertex octagons, every

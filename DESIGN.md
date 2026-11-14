@@ -1,0 +1,39 @@
+# DESIGN: ERBS by funnel (radii-m3, M3 step c rebuild, 2026-11-14)
+
+Status: already implemented (erbs.rs, commits c60428f..1399b7a); this note is sent after the fact (rule came mid-round).
+
+## What
+The ERBS of a stretch = the shortest path in the band's homotopy class among point obstacles
+(Dayan 1997 PDF pp. 25-26 = printed pp. 14-15: "a minimal length member of the topological class",
+terminals = RBS terminals + spoke ends; spokes PDF p. 32). It replaces the gate-order solve (free-meeting
+order + Newton/Gauss-Seidel), which had no notion of side and zigzagged (eprom st2 1.21).
+
+## How (engine/src/topo/erbs.rs, module doc steps 1-4)
+1. Obstacle points with a side label: per cut item both spoke tips (a on p's side, b on q's side of the
+   band's crossing, `p_left_of`); per wrap the arc at the stack radius sampled in the wedge (octagon
+   vertices / circumscribed polygon); other-net features grown by w/2 + clearance; a frame box.
+2. Rough path = band + thin loops round every point the band passes on the wrong side (a tip whose spoke
+   the band crosses: Dayan p. 32 "goes round the spoke's end"; every arc sample; grown features on the
+   other side). Loops leave from the nearest band point, ordered by (arclength, angle), farther-first on a ray.
+3. Sleeve: walk the rough path through a Delaunay triangulation of the points; reduce back-crossings
+   (Hershberger & Snoeyink 1994, reduced sleeve; Efrat, Kobourov & Lubiw 2006 PDF p. 9: "follows the path
+   through the triangulation", O(n + k)).
+4. Funnel (topo::funnel, branch funnel-fix) through the portals; Popov & Popov 2012 PDF p. 3 Fig. 3
+   (funnel over obstacles classified left/right), p. 2 Fig. 1 (taut thread along arcs).
+
+## Invariants
+- Path homotopic to the rough path; every bend lies on an obstacle point and turns toward it.
+- No point on the wrong side; length <= band (+ detours) ; sleeve failure = loud ERBS_FALLBACK, drawn sequential.
+- O(n log n) per stretch; no rayon (sequential, deadline + cancel checked between stretches).
+
+## Tests
+Unit: sleeve_straight, pushes_round_a_tip, pushed_both_ways, crossing_portals, collinear_detours_far_first,
+near_points_merge, touched_tip_is_no_detour, conflicts_counted, band_sides, grown_rectangle, erbs_u_turn_round_a_pad,
+erbs_deadline_and_stop; judge patterns (4, both modes) at 1.000 / 0 violations; harness/erbs_accept.py marks
+(a) eprom st2w2 <= 1.03 x band, 0 reversals, bends explained; (b) eprom+wiccon p50 <= 1.02, max <= 1.15, esp agg <= 1.10;
+28+ source mutants (m3-runs/funnel/mutate.py); ladder seed 0 both modes with harness/area_check.py.
+
+## Known limits
+- Tips are per item: a later own visit's tip (same cut) bounds an earlier own wrap from outside (slot model,
+  conservative, wiccon st46 +0.07 mm).
+- Pad exits stay out of the sheet (M7).

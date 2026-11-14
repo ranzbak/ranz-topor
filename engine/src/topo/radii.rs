@@ -1500,6 +1500,49 @@ mod tests {
         assert!(vs.iter().all(|x| x.predicted), "{vs:?}");
     }
 
+    /// The U-turn with both legs inside a spoke: down next to the left block (the band's crossing
+    /// before `a`, on `p`'s spoke) and up next to the right one (after `b`, on `q`'s spoke). The
+    /// sides of the two crossings differ (p right going down, left going up): each leg is pushed
+    /// out to its tip, no farther, and the path does not wind (length near the band's).
+    #[test]
+    fn erbs_u_turn_inside_the_spokes() {
+        let obs = vec![(rect(0.0, 0.0, 2.0, 2.0), 1), (rect(3.6, 0.0, 5.6, 2.0), 2), (pad(2.8, -1.5), 3), (pad(2.05, 4.0), 100), (pad(3.55, 4.0), 100)];
+        let curves = vec![vec![v(2.05, 4.0), v(2.05, -2.0), v(3.55, -2.0), v(3.55, 4.0)]];
+        let pr = proj_n(obs);
+        let (sh, sts) = setup(&pr, &curves, Norm::Octagonal);
+        let mut o = order_layer(&sh, &sts, &[0], 0.0);
+        radii_layer(&sh, &sts, &[0], &mut o, true, &|_| None);
+        let le = crate::topo::erbs::erbs_layer_with(&sh, &sts, &[0], &o, &ErbsOpts::default());
+        assert!(le.failed.is_empty(), "{:?}", le.failed);
+        let e = &le.es[0];
+        // x of the path where it crosses y = 1 (inside the channel), per leg.
+        let xs: Vec<f64> = e.path.windows(2).filter(|w| (w[0].y - 1e6) * (w[1].y - 1e6) < 0.0).map(|w| w[0].x + (w[1].x - w[0].x) * (1e6 - w[0].y) / (w[1].y - w[0].y)).collect();
+        assert_eq!(xs.len(), 2, "{:?}", e.path);
+        assert!(xs[0] >= 2.05e6 + 0.05e6 && xs[0] <= 2.6e6, "down leg {} not pushed out to its tip a: {:?}", xs[0], e.path);
+        assert!(xs[1] <= 3.55e6 - 0.05e6 && xs[1] >= 3.0e6, "up leg {} not pushed out to its tip b: {:?}", xs[1], e.path);
+        assert!(e.len <= 1.15 * e.band_len, "{} vs {}", e.len, e.band_len);
+    }
+
+    /// A band through another net's pad (a violation the plan accepted) has no side of it: the
+    /// pad is no obstacle (`Erbs::through`), the ERBS stays straight and the check counts the
+    /// violation as predicted.
+    #[test]
+    fn erbs_band_through_a_pad() {
+        let obs = vec![(pad(1.0, 0.0), 3), (pad(-1.0, 0.0), 100), (pad(3.0, 0.0), 100)];
+        let curves = vec![vec![v(-1.0, 0.0), v(3.0, 0.0)]];
+        let pr = proj_n(obs);
+        let (sh, sts) = setup(&pr, &curves, Norm::Octagonal);
+        let mut o = order_layer(&sh, &sts, &[0], 0.0);
+        radii_layer(&sh, &sts, &[0], &mut o, true, &|_| None);
+        let le = crate::topo::erbs::erbs_layer_with(&sh, &sts, &[0], &o, &ErbsOpts::default());
+        assert!(le.failed.is_empty(), "{:?}", le.failed);
+        let e = &le.es[0];
+        assert!(!e.through.is_empty(), "band {:?}", sts[0].band);
+        assert!(e.len <= e.band_len + 1.0, "{} vs {}: {:?}", e.len, e.band_len, e.path);
+        let vs = check_layer(&sh, &sts, &o, &le.es);
+        assert!(!vs.is_empty() && vs.iter().all(|x| x.predicted), "{vs:?}");
+    }
+
     // ---- Verifier findings F1-F3, F6 ----
 
     /// F2: an own-net run at an end faces the next item with the run's largest clearance (as
