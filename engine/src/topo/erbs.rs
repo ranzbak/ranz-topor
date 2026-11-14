@@ -44,7 +44,7 @@ use super::cutflow::Stretch;
 use super::demand::{Bound, Item};
 use super::draw::{poly_dist, seg_seg, seg_seg_dist};
 use super::radii::{tip_point, LayerOrder};
-use super::sheet::{LayerSheet, Norm};
+use super::sheet::{Feature, LayerSheet, Norm};
 use super::state::point_in_poly;
 use crate::geom::Vec2;
 use serde_json::{json, Value};
@@ -70,11 +70,17 @@ pub struct ErbsOpts {
     /// the path is pinned (both points at the meeting point) swap their order when that makes
     /// the path shorter.
     pub flip_rounds: usize,
+    /// Pad-exit legs ([`pad_exit`]): the path leaves an elongated own pad along its axis first.
+    /// Off by default: the radii (step b) do not know the legs, so a leg moves its wire off the
+    /// tips the others were given (three_diagonals: model gaps of 0.25-0.5 mm between the bundle's
+    /// wires); the octilinear drawing applies the exits itself. On once the sheet's terminal is the
+    /// planned exit (M7, inflated-sketch §4.6).
+    pub pad_exit: bool,
 }
 
 impl Default for ErbsOpts {
     fn default() -> Self {
-        ErbsOpts { arc_step_deg: 22.5, tol: 0.1, sweeps_per_gate: 20, refine_rounds: 8, flip_rounds: 8 }
+        ErbsOpts { arc_step_deg: 22.5, tol: 0.1, sweeps_per_gate: 20, refine_rounds: 8, flip_rounds: 8, pad_exit: false }
     }
 }
 
@@ -96,8 +102,9 @@ struct Solved {
 }
 
 /// Order the `base` gates (with `forced`) and solve from the points `pt` (by id).
-fn solve_ordered(a: Vec2, e: Vec2, base: &[Gate], forced: &BTreeSet<(usize, usize)>, prio: Option<&BTreeMap<usize, usize>>, pt: &BTreeMap<usize, Vec2>, opts: &ErbsOpts) -> Solved {
-    let (ord, counts, frees) = order_gates(base, forced, prio);
+#[allow(clippy::too_many_arguments)]
+fn solve_ordered(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &BTreeSet<(usize, usize)>, prio: Option<&BTreeMap<usize, usize>>, pt: &BTreeMap<usize, Vec2>, opts: &ErbsOpts) -> Solved {
+    let (ord, counts, frees) = order_gates(base, wedges, forced, prio);
     let og: Vec<Gate> = ord.iter().map(|&i| base[i]).collect();
     let segs: Vec<(Vec2, Vec2)> = og.iter().map(|g| (g.a, g.b)).collect();
     // Two starts: the funnel ([`warm_start`]) and the points of the earlier solve (each gate's
@@ -125,10 +132,10 @@ fn solve_ordered(a: Vec2, e: Vec2, base: &[Gate], forced: &BTreeSet<(usize, usiz
 /// The order of a re-solve keeps the current one wherever no constraint moves it. `prio`: the
 /// current order (by id) of an earlier solve.
 #[allow(clippy::too_many_arguments)]
-fn solve_flip(a: Vec2, e: Vec2, base: &[Gate], forced: &mut BTreeSet<(usize, usize)>, prio: Option<&BTreeMap<usize, usize>>, pt: &mut BTreeMap<usize, Vec2>, opts: &ErbsOpts, sweeps: &mut usize, flips: &mut usize) -> Solved {
+fn solve_flip(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BTreeSet<(usize, usize)>, prio: Option<&BTreeMap<usize, usize>>, pt: &mut BTreeMap<usize, Vec2>, opts: &ErbsOpts, sweeps: &mut usize, flips: &mut usize) -> Solved {
     let dbg = std::env::var_os("TOPO_ERBS_DEBUG").is_some();
     let by_id: BTreeMap<usize, &Gate> = base.iter().map(|g| (g.id, g)).collect();
-    let mut cur = solve_ordered(a, e, base, forced, prio, pt, opts);
+    let mut cur = solve_ordered(a, e, base, wedges, forced, prio, pt, opts);
     *sweeps += cur.sweeps;
     for _ in 0..opts.flip_rounds {
         let pos: BTreeMap<usize, usize> = cur.og.iter().enumerate().map(|(k, g)| (g.id, k)).collect();
@@ -183,7 +190,7 @@ fn solve_flip(a: Vec2, e: Vec2, base: &[Gate], forced: &mut BTreeSet<(usize, usi
                 f2.remove(&(j, i));
                 f2.insert((i, j));
             }
-            let r = solve_ordered(a, e, base, &f2, Some(&pos), &at, opts);
+            let r = solve_ordered(a, e, base, wedges, &f2, Some(&pos), &at, opts);
             *sweeps += r.sweeps;
             (r, f2)
         };
@@ -250,14 +257,21 @@ pub struct Gate {
     pub p_left: bool,
     /// Stable id within the stretch (the order changes, the id does not).
     pub id: usize,
+    /// A spoke is empty (its tip on its root: a cut from the stretch's own terminal or
+    /// junction) and the path starts inside that root's feature, so it may cross the gate more
+    /// than once ([`gate_before`]). Not after a pad exit: the path starts outside the pad.
+    pub open: bool,
 }
 
 /// The ERBS of one stretch.
 #[derive(Clone, Debug)]
 pub struct Erbs {
     pub stretch: usize,
-    /// Start, one point per gate (in gate order), end.
+    /// Start, the pad-exit point ([`pad_exit`]) if any, one point per gate (in gate order), the
+    /// pad-exit point of the end if any, end.
     pub pts: Vec<Vec2>,
+    /// Index in `pts` of the first gate's point (1, or 2 after a pad-exit point).
+    pub lead: usize,
     /// Width at every point of `pts`.
     pub w: Vec<f64>,
     /// `pts` without repeated and collinear points (the drawn shape).
@@ -563,10 +577,10 @@ fn exit_offset(at: Vec2, u: Vec2, rho: f64, poly: &[Vec2]) -> f64 {
 }
 
 /// A uniform grid of feature boxes and the largest feature clearance (for the bare test).
-fn feat_grid(sh: &LayerSheet, cell: f64) -> (Grid, f64) {
+fn feat_grid(feats: &[Feature], cell: f64) -> (Grid, f64) {
     let mut g = Grid { cell, cells: BTreeMap::new() };
     let mut fclear: f64 = 0.0;
-    for (f, ft) in sh.feats.iter().enumerate() {
+    for (f, ft) in feats.iter().enumerate() {
         if ft.poly.is_empty() {
             continue;
         }
@@ -607,13 +621,13 @@ fn seg_poly_near(a: Vec2, b: Vec2, poly: &[Vec2]) -> (f64, Vec2, Vec2) {
 /// clearance on purpose, the tips hold it) are left out. A gate sits 2 nm past the requirement
 /// (the solver's tolerance).
 #[allow(clippy::too_many_arguments)]
-fn breach(sh: &LayerSheet, g: &Grid, fclear: f64, s: &Stretch, w: f64, a: Vec2, b: Vec2, skip: &BTreeSet<usize>, near: &mut BTreeSet<usize>) -> Option<(f64, usize, Vec2, Vec2, Vec2)> {
+fn breach(feats: &[Feature], g: &Grid, fclear: f64, s: &Stretch, w: f64, a: Vec2, b: Vec2, skip: &BTreeSet<usize>, near: &mut BTreeSet<usize>) -> Option<(f64, usize, Vec2, Vec2, Vec2)> {
     let it = Item { net: s.net, w, s: s.s };
     let (lo, hi) = bbox(a, b, 0.5 * w + fclear.max(s.s));
     g.query(lo, hi, near);
     let mut best: Option<(f64, usize, Vec2, Vec2, Vec2)> = None;
     for &f in near.iter() {
-        let ft = &sh.feats[f];
+        let ft = &feats[f];
         let cl = ft.bound.clearance(&it);
         if cl <= 0.0 || skip.contains(&f) {
             continue;
@@ -645,7 +659,7 @@ fn breach(sh: &LayerSheet, g: &Grid, fclear: f64, s: &Stretch, w: f64, a: Vec2, 
 /// feature). Features met by `at` itself are left out (the ray starts on the clearance ring of
 /// `own`, inside nothing else unless the plan is already short of room). Searched in growing
 /// boxes (2 mm, x4) through the feature grid. O(features near x sides).
-fn ray_hit(sh: &LayerSheet, g: &Grid, at: Vec2, u: Vec2, own: usize, near: &mut BTreeSet<usize>) -> Option<(f64, usize)> {
+fn ray_hit(feats: &[Feature], g: &Grid, at: Vec2, u: Vec2, own: usize, near: &mut BTreeSet<usize>) -> Option<(f64, usize)> {
     let mut reach: f64 = 2.0e6;
     loop {
         let reach_c = reach.min(FAR);
@@ -654,7 +668,7 @@ fn ray_hit(sh: &LayerSheet, g: &Grid, at: Vec2, u: Vec2, own: usize, near: &mut 
         g.query(lo, hi, near);
         let mut best: Option<(f64, usize)> = None;
         for &f in near.iter() {
-            let poly = &sh.feats[f].poly;
+            let poly = &feats[f].poly;
             if f == own || poly.len() < 3 || point_in_poly(at, poly) {
                 continue;
             }
@@ -681,7 +695,7 @@ fn ray_hit(sh: &LayerSheet, g: &Grid, at: Vec2, u: Vec2, own: usize, near: &mut 
 
 /// The gates of stretch `si` (unordered), with the item index of every cut item.
 #[allow(clippy::too_many_arguments)]
-fn gates_of(sh: &LayerSheet, fg: &Grid, s: &Stretch, si: usize, o: &LayerOrder, items: &[(usize, usize)], radius: &BTreeMap<(usize, usize, usize), f64>, opts: &ErbsOpts) -> Vec<Gate> {
+fn gates_of(sh: &LayerSheet, feats: &[Feature], fg: &Grid, s: &Stretch, si: usize, o: &LayerOrder, items: &[(usize, usize)], radius: &BTreeMap<(usize, usize, usize), f64>, opts: &ErbsOpts) -> Vec<Gate> {
     let mut gs = Vec::new();
     let band = &s.band;
     let corner_share = |k: usize, u: Vec2| -> Option<f64> {
@@ -729,7 +743,7 @@ fn gates_of(sh: &LayerSheet, fg: &Grid, s: &Stretch, si: usize, o: &LayerOrder, 
             }
             _ => continue,
         };
-        gs.push(Gate { a, b, w: x.w_tip, src: GateSrc::Cut(ci), key, p: c.p, q: c.q, p_left, id: 0 });
+        gs.push(Gate { a, b, w: x.w_tip, src: GateSrc::Cut(ci), key, p: c.p, q: c.q, p_left, id: 0, open: (a - c.p).len() < 1.0 || (c.q - b).len() < 1.0 });
     }
     // Arc samples of every wrap at its stack radius.
     let (dirs, grow): (Vec<Vec2>, f64) = match sh.norm {
@@ -760,14 +774,14 @@ fn gates_of(sh: &LayerSheet, fg: &Grid, s: &Stretch, si: usize, o: &LayerOrder, 
                 // the portal at that obstacle's clearance before it; a ray over the board would
                 // meet gates of unrelated places.
                 let own = sh.vfeat[v].unwrap_or(usize::MAX);
-                let (b, q) = match ray_hit(sh, fg, a, u, own, &mut near) {
+                let (b, q) = match ray_hit(feats, fg, a, u, own, &mut near) {
                     Some((t, h)) => {
-                        let cl = 0.5 * w + sh.feats[h].bound.clearance(&Item { net: s.net, w, s: s.s }).max(0.0);
+                        let cl = 0.5 * w + feats[h].bound.clearance(&Item { net: s.net, w, s: s.s }).max(0.0);
                         (a + u * (t - cl - 2.0).max(1.0), a + u * t)
                     }
                     None => (a + u * FAR, a + u * FAR),
                 };
-                gs.push(Gate { a, b, w, src: GateSrc::Arc(v), key: (k as f64, f), p: at, q, p_left: left, id: 0 });
+                gs.push(Gate { a, b, w, src: GateSrc::Arc(v), key: (k as f64, f), p: at, q, p_left: left, id: 0, open: false });
             }
         }
     }
@@ -806,6 +820,16 @@ enum Meet {
     Free,
 }
 
+/// A wrapped vertex of the stretch's band: where it is, the band's directions into and out of
+/// it, and the side it lies on (`left`, as [`Stretch::wraps`]).
+#[derive(Clone, Copy, Debug)]
+pub struct Wedge {
+    pub at: Vec2,
+    pub din: Vec2,
+    pub dout: Vec2,
+    pub left: bool,
+}
+
 /// Which of two gates the path crosses first, from where their segments `p q` meet.
 ///
 /// The meeting point `X` lies on a spoke of one of them (outside its portal), so its side of the
@@ -817,7 +841,17 @@ enum Meet {
 /// (near a wrapped corner, the ERBS is a stack radius away from the band). Cuts cross each other
 /// freely (they are not a planar subdivision, Maley 1987), so the order along the band is not a
 /// homotopy invariant for them.
-fn gate_before(g: &Gate, h: &Gate, conflict: &mut usize) -> Meet {
+///
+/// The triangle holds only while the path, seen from `X`, turns by less than a half turn between
+/// the two crossings. At a vertex the band wraps (`wedges`), the path turns round `X` by the wrap
+/// angle plus a half turn: two cuts that meet there (both rooted on the wrapped feature's vertex,
+/// as its stack items and arc spokes) are crossed in the cyclic order of their rays round the
+/// vertex, from the incoming side (Dayan 1997 PDF p. 125, Fig. 59: the incident nets of a
+/// terminal in a cyclic ordered list; Popov 2012 p. 119, Fig. 3: the circles ordered along the
+/// path). The cross product there reverses every pair more than a half turn apart (nested_wraps
+/// B: the incoming cut of M1's corner after the outgoing one, a cycle with every flip of a pair
+/// that meets near the corner).
+fn gate_before(g: &Gate, h: &Gate, wedges: &[Wedge], conflict: &mut usize) -> Meet {
     let (d1, d2) = (g.q - g.p, h.q - h.p);
     let den = d1.cross(d2);
     if den.abs() <= 1e-12 * d1.len() * d2.len() {
@@ -828,6 +862,17 @@ fn gate_before(g: &Gate, h: &Gate, conflict: &mut usize) -> Meet {
     const E: f64 = 1e-9;
     if !(-E..=1.0 + E).contains(&t) || !(-E..=1.0 + E).contains(&u) {
         return Meet::Disjoint;
+    }
+    let x = g.p + d1 * t;
+    if let Some(wd) = wedges.iter().find(|wd| (wd.at - x).len() < 1.0) {
+        // The ray of each gate from the vertex: towards its portal.
+        let ray = |gg: &Gate| (gg.a + gg.b) * 0.5 - wd.at;
+        let (rg, rh) = (ray(g), ray(h));
+        if rg.len() > 1.0 && rh.len() > 1.0 {
+            if let (Some(sg), Some(sh)) = (wedge_share(wd.din, wd.dout, wd.left, rg), wedge_share(wd.din, wd.dout, wd.left, rh)) {
+                return if (sg - sh).abs() < 1e-9 { Meet::Disjoint } else { Meet::Before(sg < sh) };
+            }
+        }
     }
     // The side of X by one gate: left / right of the path, or unknown (inside the portal).
     let side = |gg: &Gate, tt: f64| -> Option<bool> {
@@ -845,8 +890,7 @@ fn gate_before(g: &Gate, h: &Gate, conflict: &mut usize) -> Meet {
     // junction) may be crossed more than once (the path starts inside the root's pad, which has
     // no side), so the place of its crossing follows from a meeting only when the meeting point
     // lies on its own other spoke.
-    let empty = |gg: &Gate| (gg.a - gg.p).len() < 1.0 || (gg.q - gg.b).len() < 1.0;
-    if (empty(g) && sg.is_none()) || (empty(h) && sh.is_none()) {
+    if (g.open && sg.is_none()) || (h.open && sh.is_none()) {
         return Meet::Free;
     }
     let x_left = match (sg, sh) {
@@ -881,7 +925,7 @@ type FreeMeet = (usize, usize, Vec2);
 /// cycle (contradicting constraints) is broken at the earliest remaining gate. Returns the
 /// order, the counts (meeting constraints against the given order; conflicts; cycle breaks) and
 /// the meetings inside both portals. O(n^2) pair tests.
-pub fn order_gates(gs: &[Gate], forced: &BTreeSet<(usize, usize)>, prio: Option<&BTreeMap<usize, usize>>) -> (Vec<usize>, [usize; 3], Vec<FreeMeet>) {
+pub fn order_gates(gs: &[Gate], wedges: &[Wedge], forced: &BTreeSet<(usize, usize)>, prio: Option<&BTreeMap<usize, usize>>) -> (Vec<usize>, [usize; 3], Vec<FreeMeet>) {
     let n = gs.len();
     let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut indeg = vec![0usize; n];
@@ -889,6 +933,8 @@ pub fn order_gates(gs: &[Gate], forced: &BTreeSet<(usize, usize)>, prio: Option<
     let mut frees = Vec::new();
     let boxes: Vec<(Vec2, Vec2)> = gs.iter().map(|g| bbox(g.p, g.q, 0.0)).collect();
     let mut against = 0usize;
+    let dbg = std::env::var_os("TOPO_ERBS_CYCLE").is_some();
+    let mut why: BTreeMap<(usize, usize), Meet> = BTreeMap::new();
     for i in 0..n {
         for j in i + 1..n {
             let (a, b) = (boxes[i], boxes[j]);
@@ -899,7 +945,7 @@ pub fn order_gates(gs: &[Gate], forced: &BTreeSet<(usize, usize)>, prio: Option<
             } else if a.1.x < b.0.x || b.1.x < a.0.x || a.1.y < b.0.y || b.1.y < a.0.y {
                 Meet::Disjoint
             } else {
-                let m = gate_before(&gs[i], &gs[j], &mut conflict);
+                let m = gate_before(&gs[i], &gs[j], wedges, &mut conflict);
                 if m == Meet::Free {
                     if let Some(x) = meet_point(&gs[i], &gs[j]) {
                         frees.push((gs[i].id, gs[j].id, x));
@@ -910,6 +956,9 @@ pub fn order_gates(gs: &[Gate], forced: &BTreeSet<(usize, usize)>, prio: Option<
                 }
                 m
             };
+            if dbg {
+                why.insert((i, j), meet);
+            }
             match meet {
                 Meet::Disjoint | Meet::Before(true) => {
                     succ[i].push(j);
@@ -935,6 +984,29 @@ pub fn order_gates(gs: &[Gate], forced: &BTreeSet<(usize, usize)>, prio: Option<
             Some((_, i)) => i,
             None => {
                 cycles += 1;
+                if dbg {
+                    // One cycle among the gates left: walk successors from any left gate.
+                    let start = (0..n).find(|&i| !done[i]).unwrap();
+                    let mut seen: Vec<usize> = vec![start];
+                    let mut cur = start;
+                    while let Some(&nx) = succ[cur].iter().find(|&&j| !done[j]) {
+                        if let Some(k) = seen.iter().position(|&x| x == nx) {
+                            let cyc: Vec<String> = seen[k..]
+                                .iter()
+                                .zip(seen[k..].iter().skip(1).chain(std::iter::once(&nx)))
+                                .map(|(&x, &y)| {
+                                    let m = why.get(&(x.min(y), x.max(y))).copied();
+                                    let fz = forced.contains(&(gs[x].id, gs[y].id));
+                                    format!("{}->{} {:?}{}", gs[x].id, gs[y].id, m, if fz { " forced" } else { "" })
+                                })
+                                .collect();
+                            eprintln!("ERBS cycle ({} left): {}", (0..n).filter(|&i| !done[i]).count(), cyc.join(", "));
+                            break;
+                        }
+                        seen.push(nx);
+                        cur = nx;
+                    }
+                }
                 (0..n).filter(|&i| !done[i]).min_by_key(|&i| (rank[i], i)).expect("a gate left")
             }
         };
@@ -986,7 +1058,28 @@ pub fn erbs_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrd
     own.sort_unstable();
     own.dedup();
     let none = Vec::new();
-    let (fg, fclear) = feat_grid(sh, 0.5e6);
+    // Pad exits ([`pad_exit`]) of every stretch first: a leg belongs to its terminal (the pad
+    // and its planned exit, inflated-sketch §4.6), so the other nets' stretches keep clear of it
+    // as of the pad (feature refinement and spoke ends): a feature of the leg's copper with the
+    // pad's net, appended to the sheet's features. Each ERBS stays independent of the others.
+    let exits: BTreeMap<usize, [Option<(Vec2, usize)>; 2]> = own.iter().filter(|&&si| opts.pad_exit && sts[si].band.len() >= 2).map(|&si| (si, [pad_exit(sh, &sts[si], 0), pad_exit(sh, &sts[si], 1)])).collect();
+    let mut feats: Vec<Feature> = sh.feats.clone();
+    for (&si, ex) in &exits {
+        let s = &sts[si];
+        for (end, x) in ex.iter().enumerate() {
+            let Some((x, f)) = *x else { continue };
+            let c = if end == 0 { s.band[0] } else { s.band[s.band.len() - 1] };
+            let Some(d) = (x - c).unit() else { continue };
+            let n = d.perp() * (0.5 * s.w);
+            let mut poly = vec![c - n, x - n, x + n, c + n];
+            let area: f64 = (0..4).map(|i| poly[i].cross(poly[(i + 1) % 4])).sum();
+            if area < 0.0 {
+                poly.reverse();
+            }
+            feats.push(Feature { kind: sh.feats[f].kind, poly, bound: Bound::Pad { net: Some(s.net), clear: s.s } });
+        }
+    }
+    let (fg, fclear) = feat_grid(&feats, 0.5e6);
     let mut squeezed: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
     for cu in o.cuts.iter().filter(|cu| cu.squeeze > 0.0) {
         let c = &sh.cuts[cu.cut];
@@ -999,8 +1092,80 @@ pub fn erbs_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrd
         .filter(|&&si| sts[si].band.len() >= 2)
         .map(|&si| {
             let s = &sts[si];
-            let mut base = gates_of(sh, &fg, s, si, o, per.get(&si).unwrap_or(&none), &radius, opts);
-            let (a, e) = (s.band[0], s.band[s.band.len() - 1]);
+            let mut base = gates_of(sh, &feats, &fg, s, si, o, per.get(&si).unwrap_or(&none), &radius, opts);
+            let (c0, c1) = (s.band[0], s.band[s.band.len() - 1]);
+            // Pad exits: the path leaves an elongated own pad straight along its axis to just past
+            // its tip, then the band ([`pad_exit`]). A gate the leg crosses is crossed by the leg
+            // (the band crosses it once from the terminal: the rest of the path does not).
+            let ex = exits.get(&si).copied().unwrap_or([None, None]);
+            let exits = [ex[0].map(|x| x.0), ex[1].map(|x| x.0)];
+            let (a, e) = (exits[0].unwrap_or(c0), exits[1].unwrap_or(c1));
+            // Vertices of the exit pads: the path leaves them by the leg, so a wrap of one (a band
+            // through the pad's own corner) has no arc.
+            let own: BTreeSet<usize> = ex.iter().flatten().flat_map(|&(_, f)| sh.vfeat.iter().enumerate().filter(move |(_, vf)| **vf == Some(f)).map(|(v, _)| v)).collect();
+            if exits.iter().any(Option::is_some) {
+                let legs: Vec<(Vec2, Vec2)> = [(c0, exits[0]), (c1, exits[1])].into_iter().filter_map(|(c, x)| x.map(|x| (c, x))).collect();
+                // The wrap of an exit pad's vertex: its arc and its stack items (the cuts that end
+                // at that vertex, attached to it rather than crossed) go with it.
+                let own_wrap = |g: &Gate| -> bool {
+                    match g.src {
+                        GateSrc::Arc(v) => own.contains(&v),
+                        GateSrc::Cut(_) => {
+                            let k = g.key.0 as usize;
+                            g.key.0 == k as f64 && s.wraps.get(k).copied().flatten().is_some_and(|(v, _)| own.contains(&v) && ((g.p - sh.pos[v]).len() < 1.0 || (g.q - sh.pos[v]).len() < 1.0))
+                        }
+                        GateSrc::Feature(_) => false,
+                    }
+                };
+                base.retain(|g| !legs.iter().any(|&(c, x)| seg_seg(c, x, g.p, g.q).0 < 1.0) && !own_wrap(g));
+                // A gate whose empty spoke is rooted on an exit pad: the path starts outside the
+                // pad, past the leg, and crosses it once.
+                let pads: Vec<&[Vec2]> = ex.iter().flatten().map(|&(_, f)| sh.feats[f].poly.as_slice()).collect();
+                let on_pad = |x: Vec2| pads.iter().any(|poly| point_in_poly(x, poly) || poly_dist(x, poly) < 1.0);
+                for g in base.iter_mut().filter(|g| g.open) {
+                    let root = if (g.a - g.p).len() < 1.0 { g.p } else { g.q };
+                    if on_pad(root) {
+                        g.open = false;
+                    }
+                }
+                for (i, g) in base.iter_mut().enumerate() {
+                    g.id = i;
+                }
+            }
+            // A cut from the stretch's own terminal pad that the band crosses at that pad (at the
+            // cut's root: the band starts at the terminal inside the pad) is no constraint on
+            // the path, which ends in the pad anyway; as a gate it is crossed at its root on the
+            // pad's edge, in an order the meeting rule cannot fix (its spoke there is empty), and
+            // the path zigzags along the pad's edge next to the neighbour pad (three_diagonals).
+            let tpads: Vec<&[Vec2]> = [c0, c1]
+                .iter()
+                .enumerate()
+                .filter(|(end, _)| !s.via_ends[*end] && ex[*end].is_none())
+                .filter_map(|(_, &c)| sh.feats.iter().find(|ft| ft.poly.len() >= 3 && matches!(ft.bound, Bound::Pad { net: Some(m), .. } if m == s.net) && point_in_poly(c, &ft.poly)))
+                .map(|ft| ft.poly.as_slice())
+                .collect();
+            if !tpads.is_empty() {
+                // Inside: within the half width (the wire's copper there overlaps the pad's).
+                let in_pad = |x: Vec2| tpads.iter().any(|poly| point_in_poly(x, poly) || poly_dist(x, poly) < 0.5 * s.w);
+                let n0 = base.len();
+                base.retain(|g| {
+                    if !g.open || !matches!(g.src, GateSrc::Cut(_)) {
+                        return true;
+                    }
+                    let root = if (g.a - g.p).len() < 1.0 { g.p } else { g.q };
+                    let j = (g.key.0.floor() as usize).min(s.band.len() - 2);
+                    let x = s.band[j] + (s.band[j + 1] - s.band[j]) * (g.key.0 - j as f64);
+                    !(in_pad(root) && in_pad(x))
+                });
+                if base.len() != n0 {
+                    for (i, g) in base.iter_mut().enumerate() {
+                        g.id = i;
+                    }
+                }
+            }
+            let wedges: Vec<Wedge> = (1..s.band.len() - 1)
+                .filter_map(|k| s.wraps[k].filter(|w| !own.contains(&w.0)).map(|(_, left)| Wedge { at: s.band[k], din: s.band[k] - s.band[k - 1], dout: s.band[k + 1] - s.band[k], left }))
+                .collect();
             // Start on the band: the gate point nearest the band's own crossing (a for arcs).
             let mut pt: BTreeMap<usize, Vec2> = base
                 .iter()
@@ -1026,7 +1191,14 @@ pub fn erbs_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrd
             let mut forced: BTreeSet<(usize, usize)> = BTreeSet::new();
             let mut sweeps = 0;
             let mut flips = 0usize;
-            let mut cur = solve_flip(a, e, &base, &mut forced, None, &mut pt, opts, &mut sweeps, &mut flips);
+            let mut cur = solve_flip(a, e, &base, &wedges, &mut forced, None, &mut pt, opts, &mut sweeps, &mut flips);
+            let dbg_st = std::env::var("TOPO_ERBS_STRETCH").ok().and_then(|v| v.parse::<usize>().ok()) == Some(si);
+            if dbg_st {
+                eprintln!("ERBS st {si} a ({:.3},{:.3}) e ({:.3},{:.3}) first solve len {:.4}", a.x / 1e6, a.y / 1e6, e.x / 1e6, e.y / 1e6, cur.len / 1e6);
+                for (g, x) in cur.og.iter().zip(&cur.p) {
+                    eprintln!("  g{} {:?} open {} p ({:.3},{:.3}) q ({:.3},{:.3}) a ({:.3},{:.3}) b ({:.3},{:.3}) -> ({:.3},{:.3})", g.id, g.src, g.open, g.p.x / 1e6, g.p.y / 1e6, g.q.x / 1e6, g.q.y / 1e6, g.a.x / 1e6, g.a.y / 1e6, g.b.x / 1e6, g.b.y / 1e6, x.x / 1e6, x.y / 1e6);
+                }
+            }
             // Feature refinement: a chord between two gates may come nearer a feature than its
             // bare clearance (the spokes sample the plane at the cuts only): a gate off that
             // feature, outward from its closest point, then solve again from where it was.
@@ -1041,7 +1213,7 @@ pub fn erbs_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrd
                     let x1 = if k == p.len() { e } else { p[k] };
                     let w0 = if k == 0 { s.w } else { og[k - 1].w };
                     let w1 = if k == p.len() { s.w } else { og[k].w };
-                    if let Some((_, f, at, u, c)) = breach(sh, &fg, fclear, s, w0.min(w1), x0, x1, squeezed.get(&si).unwrap_or(&no_skip), &mut near) {
+                    if let Some((_, f, at, u, c)) = breach(&feats, &fg, fclear, s, w0.min(w1), x0, x1, squeezed.get(&si).unwrap_or(&no_skip), &mut near) {
                         // Octilinear spokes of the feature's vertex nearest the breach (Dayan
                         // 1997 PDF p. 33, Fig. 11: up to 8 spokes per point, octilinear, each to
                         // the nearest obstacle; they approximate the arc round the point). The
@@ -1056,30 +1228,45 @@ pub fn erbs_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrd
                         // 274 k conflicts, 1002 cycle breaks, 1031 gates for one wire): fault A.
                         let wd = w0.min(w1);
                         let req = (at - c).len() - 2.0;
-                        let poly = &sh.feats[f].poly;
+                        let poly = &feats[f].poly;
                         let vi = (0..poly.len()).min_by(|&i, &j| (poly[i] - c).len2().total_cmp(&(poly[j] - c).len2())).unwrap_or(0);
                         let v = poly.get(vi).copied().unwrap_or(c);
                         let rv = req / FRAC_PI_8.cos() + 2.0;
                         let after = if k == 0 { 0 } else { base.iter().position(|g| g.id == og[k - 1].id).map_or(0, |i| i + 1) };
-                        for dk in 0..8usize {
-                            let ang = dk as f64 * 2.0 * FRAC_PI_8;
-                            let d = Vec2 { x: ang.cos(), y: ang.sin() };
-                            if d.dot(u) < std::f64::consts::FRAC_1_SQRT_2 - 1e-9 || !spokes.insert((f, vi, dk)) {
+                        // Of those, the spokes the chord crosses inside their tip (the side of the
+                        // vertex the chord passes): a spoke the chord does not cross would make
+                        // the path cross it, round the vertex the other way (a topology change:
+                        // radii test erbs_nested_wraps_radii, the outer wire forced under its
+                        // neighbour's pad corner, across the inner wire; three_diagonals, a spoke
+                        // up into the wire's own pad pulled it along the pad's edge next to the
+                        // neighbour, 0.15 mm). None crossed (the chord ends before): the one
+                        // nearest `u`.
+                        let dirs: Vec<(usize, Vec2)> = (0..8usize)
+                            .map(|dk| {
+                                let ang = dk as f64 * 2.0 * FRAC_PI_8;
+                                (dk, Vec2 { x: ang.cos(), y: ang.sin() })
+                            })
+                            .filter(|(_, d)| d.dot(u) >= std::f64::consts::FRAC_1_SQRT_2 - 1e-9)
+                            .collect();
+                        let crossed: Vec<(usize, Vec2)> = dirs.iter().copied().filter(|&(_, d)| seg_seg(x0, x1, v, v + d * rv).0 < 1.0).collect();
+                        let pick = if crossed.is_empty() { dirs.iter().copied().max_by(|a, b| a.1.dot(u).total_cmp(&b.1.dot(u))).into_iter().collect() } else { crossed };
+                        for (dk, d) in pick {
+                            if !spokes.insert((f, vi, dk)) {
                                 continue;
                             }
                             let ga = v + d * rv;
                             // The spoke root lies on the side of the chord away from the spoke.
                             let p_left = (x1 - x0).cross(-d) > 0.0;
                             // The portal ends the far obstacle's clearance before it.
-                            let (gb, q) = match ray_hit(sh, &fg, ga, d, f, &mut near) {
+                            let (gb, q) = match ray_hit(&feats, &fg, ga, d, f, &mut near) {
                                 Some((t, h)) => {
-                                    let cl = 0.5 * wd + sh.feats[h].bound.clearance(&Item { net: s.net, w: wd, s: s.s }).max(0.0);
+                                    let cl = 0.5 * wd + feats[h].bound.clearance(&Item { net: s.net, w: wd, s: s.s }).max(0.0);
                                     (ga + d * (t - cl - 2.0).max(1.0), ga + d * t)
                                 }
                                 None => (ga + d * FAR, ga + d * FAR),
                             };
                             let id = base.len() + add.len();
-                            add.push((after, Gate { a: ga, b: gb, w: wd, src: GateSrc::Feature(f), key: (0.0, 0.0), p: v, q, p_left, id }));
+                            add.push((after, Gate { a: ga, b: gb, w: wd, src: GateSrc::Feature(f), key: (0.0, 0.0), p: v, q, p_left, id, open: false }));
                             pt.insert(id, ga);
                         }
                     }
@@ -1093,22 +1280,71 @@ pub fn erbs_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrd
                     refined += 1;
                 }
                 let prio: BTreeMap<usize, usize> = cur.og.iter().enumerate().map(|(k, g)| (g.id, k)).collect();
-                cur = solve_flip(a, e, &base, &mut forced, Some(&prio), &mut pt, opts, &mut sweeps, &mut flips);
+                cur = solve_flip(a, e, &base, &wedges, &mut forced, Some(&prio), &mut pt, opts, &mut sweeps, &mut flips);
             }
             let (gs, p, converged) = (cur.og, cur.p, cur.converged);
             let counts = [cur.counts[0], cur.counts[1], cur.counts[2], flips];
-            let mut pts = Vec::with_capacity(p.len() + 2);
-            pts.push(a);
-            pts.extend(p);
-            pts.push(e);
-            let mut w = Vec::with_capacity(pts.len());
+            let mut pts = Vec::with_capacity(p.len() + 4);
+            let mut w = Vec::with_capacity(p.len() + 4);
+            pts.push(c0);
             w.push(s.w);
+            if exits[0].is_some() {
+                pts.push(a);
+                w.push(s.w);
+            }
+            let lead = pts.len();
+            pts.extend(p);
             w.extend(gs.iter().map(|g| g.w));
+            if exits[1].is_some() {
+                pts.push(e);
+                w.push(s.w);
+            }
+            pts.push(c1);
             w.push(s.w);
             let path = simplify(&pts, 0.5);
-            Erbs { stretch: si, len: poly_len(&path), band_len: poly_len(&s.band), pts, w, path, gates: gs.len(), refined, sweeps, converged, gate_list: gs, reordered: counts[0], conflicts: counts[1], cycles: counts[2], flips: counts[3] }
+            Erbs { lead, stretch: si, len: poly_len(&path), band_len: poly_len(&s.band), pts, w, path, gates: gs.len(), refined, sweeps, converged, gate_list: gs, reordered: counts[0], conflicts: counts[1], cycles: counts[2], flips: counts[3] }
         })
         .collect()
+}
+
+/// The pad-exit point of end `end` (0: the band's start, 1: its end) of stretch `s`: when the
+/// end lies in an elongated pad of its own net (long side over 1.2 x the short side, as the
+/// drawing's `Drawer::pad_exit`), the point on the pad's long axis, on the band's side, just past
+/// the pad's tip by the clearance and half the width. The leg from the terminal to it is straight;
+/// the ERBS starts there. A path that enters a pad of a fine-pitch row diagonally passes its
+/// neighbour's corner at less than the clearance (three_diagonals: 0.15 mm), and the octilinear
+/// drawing leaves such pads along the axis anyway; the leg puts the plan's path where the copper
+/// goes (inflated-sketch §4.6: the terminal at the pad's planned exit; KiCad pad-exit practice).
+/// `None` for a via end, a pad that is not elongated, or a band whose next corner lies nearer than
+/// the exit point along the axis (the leg would overshoot it). O(pads of the layer).
+fn pad_exit(sh: &LayerSheet, s: &Stretch, end: usize) -> Option<(Vec2, usize)> {
+    let n = s.band.len();
+    if n < 2 || s.via_ends[end] {
+        return None;
+    }
+    let c = if end == 0 { s.band[0] } else { s.band[n - 1] };
+    let f = sh.feats.iter().position(|f| f.poly.len() >= 3 && matches!(f.bound, Bound::Pad { net: Some(m), .. } if m == s.net) && point_in_poly(c, &f.poly))?;
+    let poly = &sh.feats[f].poly;
+    // The band's first corner off the pad (a band through the pad's own corner wraps it).
+    let mut corners: Box<dyn Iterator<Item = &Vec2>> = if end == 0 { Box::new(s.band[1..].iter()) } else { Box::new(s.band[..n - 1].iter().rev()) };
+    let toward = *corners.find(|&&x| poly.iter().all(|&p| (p - x).len() > 1.0))?;
+    let cen = poly.iter().fold(Vec2::default(), |m, &p| m + p) * (1.0 / poly.len() as f64);
+    let (mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0);
+    for &p in poly {
+        let d = p - cen;
+        sxx += d.x * d.x;
+        syy += d.y * d.y;
+        sxy += d.x * d.y;
+    }
+    let th = 0.5 * (2.0 * sxy).atan2(sxx - syy);
+    let u = Vec2 { x: th.cos(), y: th.sin() };
+    let ext = |v: Vec2| poly.iter().map(|&p| (p - cen).dot(v)).fold(f64::MIN, f64::max);
+    if ext(u) + ext(-u) < 1.2 * (ext(u.perp()) + ext(-u.perp())) {
+        return None;
+    }
+    let u = if (toward - c).dot(u) >= 0.0 { u } else { -u };
+    let reach = ext(u) + (c - cen).dot(-u) + s.s + 0.5 * s.w;
+    ((toward - c).dot(u) > reach).then(|| (c + u * reach, f))
 }
 
 /// A uniform grid of boxes (cell `cell` nm).
@@ -1225,7 +1461,7 @@ pub fn check_layer(sh: &LayerSheet, sts: &[Stretch], o: &LayerOrder, es: &[Erbs]
         }
     }
     // Features: pads, vias, junctions, holes (in a grid of their boxes); the outline.
-    let (fgrid, fclear) = feat_grid(sh, cell);
+    let (fgrid, fclear) = feat_grid(&sh.feats, cell);
     for &(i, k) in &segs {
         let (a, b) = (es[i].pts[k], es[i].pts[k + 1]);
         let si = es[i].stretch;
@@ -1310,7 +1546,7 @@ pub fn dump(sh: &LayerSheet, sts: &[Stretch], es: &[Erbs], vs: &[Violation]) -> 
                 .collect();
             json!({"stretch": e.stretch, "wire": s.wire, "net": s.net, "w": s.w / 1e6, "s": s.s / 1e6, "band": s.band.iter().map(|&p| mm(p)).collect::<Vec<_>>(),
                    "wraps": s.wraps.iter().map(|w| w.map(|(v, l)| json!([v, l]))).collect::<Vec<_>>(),
-                   "pts": e.pts.iter().map(|&p| mm(p)).collect::<Vec<_>>(), "path": e.path.iter().map(|&p| mm(p)).collect::<Vec<_>>(),
+                   "lead": e.lead, "pts": e.pts.iter().map(|&p| mm(p)).collect::<Vec<_>>(), "path": e.path.iter().map(|&p| mm(p)).collect::<Vec<_>>(),
                    "gates": gates, "refined": e.refined, "converged": e.converged, "reordered": e.reordered, "conflicts": e.conflicts, "len": e.len / 1e6, "band_len": e.band_len / 1e6})
         })
         .collect();
@@ -1374,8 +1610,12 @@ pub fn precedes(es: &[Erbs], sts: &[Stretch], o: &LayerOrder, given: &[usize], b
     for e in es {
         let wire = sts[e.stretch].wire;
         for (k, g) in e.gate_list.iter().enumerate() {
-            let x = e.pts[k + 1];
-            let (u, v) = (e.pts[k], e.pts[k + 2]);
+            let x = e.pts[k + e.lead];
+            // The bend at `x`: the nearest points before and after it that differ from it (gates
+            // that share the point, a cut item and the arc spoke along it, gave a zero leg and no
+            // order at all: nested_wraps drew the outer wire first).
+            let Some(&u) = e.pts[..k + e.lead].iter().rev().find(|p| (**p - x).len() > 2.0) else { continue };
+            let Some(&v) = e.pts[k + e.lead + 1..].iter().find(|p| (**p - x).len() > 2.0) else { continue };
             if (v - x).cross(x - u).abs() <= 1e-6 * (v - x).len() * (x - u).len() + 1.0 {
                 continue;
             }
@@ -1492,6 +1732,9 @@ pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], pac
         t.worst_gap = t.worst_gap.max(r.worst_gap);
     }
     out.order = precedes_order(given, &before);
+    if std::env::var_os("TOPO_ERBS_DEBUG").is_some() {
+        eprintln!("ERBS precedes {:?} given {:?} order {:?}", before, given, out.order);
+    }
     out.seconds = t0.elapsed().as_secs_f64();
     Ok(out)
 }
@@ -1506,7 +1749,7 @@ mod tests {
 
     /// A gate on the cut `p q` with the portal `a b`.
     fn gate(p: Vec2, q: Vec2, a: Vec2, b: Vec2, p_left: bool, id: usize) -> Gate {
-        Gate { a, b, w: 0.0, src: GateSrc::Cut(id), key: (id as f64, 0.0), p, q, p_left, id }
+        Gate { a, b, w: 0.0, src: GateSrc::Cut(id), key: (id as f64, 0.0), p, q, p_left, id, open: (a - p).len() < 1.0 || (q - b).len() < 1.0 }
     }
 
     #[test]
@@ -1516,11 +1759,11 @@ mod tests {
         let g = gate(v(3.0, 5.0), v(3.0, -5.0), v(3.0, 1.0), v(3.0, -1.0), true, 0);
         let h = gate(v(2.0, 4.0), v(8.0, -2.0), v(5.0, 1.0), v(7.0, -1.0), true, 1);
         let mut c = 0;
-        assert_eq!(gate_before(&g, &h, &mut c), Meet::Before(true));
-        assert_eq!(gate_before(&h, &g, &mut c), Meet::Before(false));
+        assert_eq!(gate_before(&g, &h, &[], &mut c), Meet::Before(true));
+        assert_eq!(gate_before(&h, &g, &[], &mut c), Meet::Before(false));
         assert_eq!(c, 0);
         // The band gives them the wrong way round: the meeting rule wins.
-        let (ord, counts, frees) = order_gates(&[h, g], &BTreeSet::new(), None);
+        let (ord, counts, frees) = order_gates(&[h, g], &[], &BTreeSet::new(), None);
         assert_eq!(ord, vec![1, 0]);
         assert_eq!(counts, [1, 0, 0]);
         assert!(frees.is_empty());
@@ -1531,13 +1774,13 @@ mod tests {
         let g = gate(v(3.0, 5.0), v(3.0, -5.0), v(3.0, 1.0), v(3.0, -1.0), true, 0);
         let h = gate(v(1.0, 3.0), v(5.0, -3.0), v(1.0 + 4.0 / 3.0, 1.0), v(1.0 + 8.0 / 3.0, -1.0), true, 1);
         let mut c = 0;
-        assert_eq!(gate_before(&g, &h, &mut c), Meet::Free);
-        let (_, _, frees) = order_gates(&[g, h], &BTreeSet::new(), None);
+        assert_eq!(gate_before(&g, &h, &[], &mut c), Meet::Free);
+        let (_, _, frees) = order_gates(&[g, h], &[], &BTreeSet::new(), None);
         assert_eq!(frees.len(), 1);
         assert!((frees[0].2 - v(3.0, 0.0)).len() < 1.0);
         // A forced pair overrides the geometry.
         let forced: BTreeSet<(usize, usize)> = [(1, 0)].into_iter().collect();
-        assert_eq!(order_gates(&[g, h], &forced, None).0, vec![1, 0]);
+        assert_eq!(order_gates(&[g, h], &[], &forced, None).0, vec![1, 0]);
     }
 
     #[test]
@@ -1546,7 +1789,7 @@ mod tests {
         // reduced crossing sequence is a homotopy invariant).
         let g = gate(v(6.0, 5.0), v(6.0, -5.0), v(6.0, 1.0), v(6.0, -1.0), true, 0);
         let h = gate(v(3.0, 5.0), v(3.0, -5.0), v(3.0, 1.0), v(3.0, -1.0), true, 1);
-        assert_eq!(order_gates(&[g, h], &BTreeSet::new(), None).0, vec![0, 1]);
+        assert_eq!(order_gates(&[g, h], &[], &BTreeSet::new(), None).0, vec![0, 1]);
     }
 
     #[test]

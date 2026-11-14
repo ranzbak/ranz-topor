@@ -1353,7 +1353,6 @@ mod tests {
     /// arc samples allow (octagon: in-radius to circumradius; circle: to rho / cos(step / 2)),
     /// with no violation between the three or against the block.
     #[test]
-    #[ignore = "M3 open (radii-m3 HANDOFF): the end leg into the own pad breaches the neighbour pad of the terminal row (octagonal); needs the pad exit, not refinement spokes"]
     fn erbs_nested_wraps_radii() {
         let ds = [1.3, 0.9, 0.5];
         let mut obs = vec![(rect(0.0, 0.0, 2.0, 2.0), 1)];
@@ -1379,6 +1378,11 @@ mod tests {
                 assert!(d >= rho - 1.0 && d <= rho / half.cos() + 1.0, "{norm:?} stretch {}: {d} vs {rho}", e.stretch);
             }
             let vs = check_layer(&sh, &sts, &o, &es);
+            if std::env::var_os("TOPO_TEST_DUMP").is_some() {
+                for e in &es {
+                    eprintln!("{norm:?} st {} band {:?} path {:?}", e.stretch, sts[e.stretch].band.iter().map(|p| (p.x / 1e6, p.y / 1e6)).collect::<Vec<_>>(), e.path.iter().map(|p| ((p.x / 1e3).round() / 1e3, (p.y / 1e3).round() / 1e3)).collect::<Vec<_>>());
+                }
+            }
             assert!(vs.iter().all(|x| !matches!(x.other, Party::Stretch(_))), "{norm:?} {vs:?}");
             assert!(vs.iter().all(|x| x.predicted), "{norm:?} {vs:?}");
         }
