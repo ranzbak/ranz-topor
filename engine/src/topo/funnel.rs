@@ -59,8 +59,9 @@
 //! more rules keep portals that pass through the apex (degenerate fans, radial edges of a turn
 //! vertex) from hiding the ones that do not, all exact:
 //!
-//! * while every portal since the apex (the current one included) passes through it, an end
-//!   crossing over the other chain makes no corner: the chain ends then constrain nothing.
+//! * an end crossing over a vertex of the other chain makes no corner there when every portal
+//!   since the apex, up to the one before that chain's next vertex (up to the current one when
+//!   it is the last), passes through the apex: that part of the chain constrains nothing.
 //! * a point portal equal to the apex while a portal since the apex misses it: the path goes
 //!   out along the shorter chain (touching those portals) and back to the point (Lee &
 //!   Preparata's funnel never revisits the apex; the touching order requires it here).
@@ -82,7 +83,7 @@ pub fn funnel(ports: &[(Vec2, Vec2)]) -> Vec<(Vec2, usize)> {
         return Vec::new();
     }
     let s = ports[0].0;
-    let mut f = Funnel { ports, apex: (s, 0), mirrors: Vec::new(), chain: [Vec::new(), Vec::new()], head: [0, 0], out: vec![(s, 0)], pend: (s, 0, 1, false) };
+    let mut f = Funnel { ports, apex: (s, 0), mirrors: Vec::new(), chain: [Vec::new(), Vec::new()], head: [0, 0], out: vec![(s, 0)], pend: (s, 0, 1, usize::MAX) };
     for i in 1..n {
         let (l, r) = ports[i];
         if l == r && i >= 2 && ports[i - 1].0 != ports[i - 1].1 && orient(ports[i - 1].1, ports[i - 1].0, l) > 0 {
@@ -117,9 +118,10 @@ pub fn funnel(ports: &[(Vec2, Vec2)]) -> Vec<(Vec2, usize)> {
         }
     }
     let last = ports[n - 1].0;
+    let k = f.out.len();
     match f.out.last_mut() {
         Some(c) if c.1 == n - 1 && c.0 == last => {}
-        Some(c) if c.0 == last && f.mirrors.is_empty() => c.1 = n - 1,
+        Some(c) if c.0 == last && f.mirrors.is_empty() && k > 1 => c.1 = n - 1,
         _ => f.commit(last, n - 1),
     }
     f.out
@@ -188,8 +190,9 @@ struct Funnel<'a> {
     chain: [Vec<(Vec2, usize)>; 2],
     head: [usize; 2],
     out: Vec<(Vec2, usize)>,
-    /// Cache of [`Self::pending`]: (apex, apex portal, next portal to test, one misses it).
-    pend: (Vec2, usize, usize, bool),
+    /// Cache of [`Self::pending`]: (apex, apex portal, next portal to test, first portal that
+    /// misses the apex or `usize::MAX`).
+    pend: (Vec2, usize, usize, usize),
 }
 
 impl Funnel<'_> {
@@ -275,25 +278,36 @@ impl Funnel<'_> {
         }
     }
 
-    /// Whether a portal after the apex's, up to `i`, misses the apex, i.e. is still to be
-    /// touched; when none is, the chain ends are no constraints (every portal since the apex
-    /// passes through it: degenerate fans of portals collinear with the apex, e.g. radial
-    /// edges of a turn vertex), and an end crossing over the other chain makes no corner.
-    /// Exact. Cached per apex: amortised O(1) per portal while the apex stays.
-    fn pending(&mut self, i: usize) -> bool {
+    /// Whether a portal after the apex's, up to `k`, misses the apex, i.e. is still to be
+    /// touched. Exact. Cached per apex (the first portal that misses it): amortised O(1) per
+    /// portal while the apex stays.
+    fn pending(&mut self, k: usize) -> bool {
         if !self.mirrors.is_empty() {
             return true;
         }
         let (a, ai) = self.apex;
         if self.pend.0 != a || self.pend.1 != ai {
-            self.pend = (a, ai, ai + 1, false);
+            self.pend = (a, ai, ai + 1, usize::MAX);
         }
-        while !self.pend.3 && self.pend.2 <= i {
+        while self.pend.3 == usize::MAX && self.pend.2 <= k {
             let (l, r) = self.ports[self.pend.2];
-            self.pend.3 = !on_segment(a, l, r);
+            if !on_segment(a, l, r) {
+                self.pend.3 = self.pend.2;
+            }
             self.pend.2 += 1;
         }
-        self.pend.3
+        self.pend.3 <= k
+    }
+
+    /// Whether the other chain's end `chain[o][k]`, which a new end of portal `i` crosses over,
+    /// is slack: every portal since the apex up to the one before the next end on that chain
+    /// (up to portal `i` when it is the last) passes through the apex. Those portals are
+    /// touched at the apex already and the chain edge from it constrains nothing up to there,
+    /// so it makes no corner (degenerate fans of portals collinear with the apex, radial edges
+    /// of a turn vertex). Exact. O(1) amortised.
+    fn slack(&mut self, o: usize, k: usize, i: usize) -> bool {
+        let next = if k + 1 < self.chain[o].len() { self.chain[o][k + 1].1 } else { i + 1 };
+        !self.pending(next - 1)
     }
 
     /// The side whose chain (from the apex) is shorter; an empty chain does not count. O(chain).
@@ -418,8 +432,9 @@ impl Funnel<'_> {
                     break;
                 }
                 if cross {
+                    let k = self.head[o];
                     self.head[o] += 1;
-                    if self.pending(i) {
+                    if !self.slack(o, k, i) {
                         self.commit(c, ci);
                     }
                 } else {
@@ -765,7 +780,7 @@ mod tests {
             assert!(plen(&f) <= refl + 10.0, "{} {}: {} > reference {}", w[0], w[1], plen(&f), refl);
             n += 1;
         }
-        assert_eq!(n, 31);
+        assert_eq!(n, 32);
     }
 
     /// A point portal equal to the apex while a portal since the apex misses it (a turn vertex
@@ -832,6 +847,8 @@ mod tests {
         let (s, e) = (v(0.0, 0.0), v(4.0, 0.0));
         let ports = vec![(s, s), (v(2.0, 1.0), v(2.0, -1.0)), (e, e), (e, e)];
         assert_eq!(funnel(&ports), vec![(s, 0), (e, 3)]);
+        // A zero-length run (both terminals one point): both terminals stay.
+        assert_eq!(funnel(&[(s, s), (s, s)]), vec![(s, 0), (s, 1)]);
     }
 
     /// Exact reference (the verifier's): the shortest polyline from the first terminal to the
