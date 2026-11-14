@@ -326,18 +326,51 @@ fn local_gain(cur: &Solved, all: &[Vec2], win: (usize, usize), w: (usize, usize)
 /// lists every gate it crosses, as the precedes order ([`precedes`]: a wire that bends at a cut's
 /// tip after the cut's inner items) and the check need (nested_wraps with the cuts left out:
 /// the precedes order lost, B drawn before A, 1.6 % longer). A gate the path does not meet
-/// (within 1 nm) stays out. O(gates x path).
-fn with_dropped(path: &[Vec2], base: &[Gate], on: &BTreeSet<usize>, cur: Solved, pt: &mut BTreeMap<usize, Vec2>) -> Solved {
+/// (within 1 nm) stays out.
+///
+/// A long cut can meet the path more than once (a touch at a shared spoke tip, a leg that runs
+/// along it): of its meetings the one whose share of the path length is nearest the share of
+/// the band length at which the band crosses it (the gate's band key; band and path are
+/// homotopic, so they cross a gate in the same order). The first meeting along the path was
+/// taken before: on eprom's 691-gate stretch dropped gates went in at a touch far before their
+/// crossing, the next refinement round's tie-break order (`prio`) put them there again and the
+/// path folded back to reach them (13.41 mm against 11.06 mm without the dropped gates, 0.277
+/// against 0.107 mm model gap). Applied once, after the refinement rounds ([`erbs_layer`]): in
+/// between, their places went into the next round's tie-break order (`prio`) and folded the
+/// path too. Debug: `TOPO_ERBS_NODROP` leaves them out. O(gates x path).
+fn with_dropped(path: &[Vec2], band: &[Vec2], base: &[Gate], on: &BTreeSet<usize>, cur: Solved, pt: &mut BTreeMap<usize, Vec2>) -> Solved {
     // (leg, parameter along it, gate, point): an active gate's point k is path point k + 1, the
     // end of leg k.
     let mut items: Vec<(usize, f64, Gate, Vec2)> = cur.og.iter().zip(&cur.p).enumerate().map(|(k, (g, &x))| (k, 1.0, *g, x)).collect();
+    let cum = |pl: &[Vec2]| -> Vec<f64> {
+        let mut c = vec![0.0];
+        for w in pl.windows(2) {
+            c.push(c.last().unwrap() + (w[1] - w[0]).len());
+        }
+        c
+    };
+    let (pc, bc) = (cum(path), cum(band));
+    let (pl, bl) = (pc.last().copied().unwrap_or(0.0).max(1.0), bc.last().copied().unwrap_or(0.0).max(1.0));
     for g in base.iter().filter(|g| !on.contains(&g.id)) {
-        let hit = path.windows(2).enumerate().find_map(|(j, w)| {
-            let (d, x, _) = super::draw::seg_seg(w[0], w[1], g.a, g.b);
-            let l2 = (w[1] - w[0]).len2();
-            (d < 1.0).then(|| (j, if l2 > 0.0 { ((x - w[0]).dot(w[1] - w[0]) / l2).clamp(0.0, 1.0) } else { 0.0 }, x))
-        });
-        if let Some((j, t, x)) = hit {
+        // The band's share at the gate (its key: band segment + parameter).
+        let bs = if band.len() >= 2 {
+            let j = (g.key.0.max(0.0).floor() as usize).min(band.len() - 2);
+            let t = (g.key.0 - j as f64).clamp(0.0, 1.0);
+            (bc[j] + t * (bc[j + 1] - bc[j])) / bl
+        } else {
+            0.5
+        };
+        let hit = path
+            .windows(2)
+            .enumerate()
+            .filter_map(|(j, w)| {
+                let (d, x, _) = super::draw::seg_seg(w[0], w[1], g.a, g.b);
+                let l2 = (w[1] - w[0]).len2();
+                let t = if l2 > 0.0 { ((x - w[0]).dot(w[1] - w[0]) / l2).clamp(0.0, 1.0) } else { 0.0 };
+                (d < 1.0).then(|| (j, t, x, ((pc[j] + t * (pc[j + 1] - pc[j])) / pl - bs).abs()))
+            })
+            .min_by(|a, b| a.3.total_cmp(&b.3));
+        if let Some((j, t, x, _)) = hit {
             // Leg j ends at active point j - 1 + 1: before that point when t < 1.
             items.push((j, t, *g, x));
             pt.insert(g.id, x);
@@ -415,7 +448,7 @@ fn solve_lazy(a: Vec2, e: Vec2, base: &[Gate], wedges: &[Wedge], forced: &mut BT
         PROF.with(|c| c.borrow_mut().4 += t_l.elapsed().as_secs_f64());
         if add.is_empty() {
             if settled || opts.flip_rounds == 0 {
-                return with_dropped(&path, base, on, cur, pt);
+                return cur;
             }
             settled = true;
             continue;
@@ -1728,6 +1761,15 @@ pub fn erbs_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrd
                 }
                 return None;
             }
+            // The gates the lazy solve left out, put back where the path crosses them, once at
+            // the end ([`with_dropped`]): in between, the refinement rounds' tie-break order
+            // (`prio`) must not hold them (eprom's 691-gate stretch folded back on itself).
+            let cur = if on.len() < base.len() && std::env::var_os("TOPO_ERBS_NODROP").is_none() {
+                let path: Vec<Vec2> = std::iter::once(a).chain(cur.p.iter().copied()).chain(std::iter::once(e)).collect();
+                with_dropped(&path, &s.band, &base, &on, cur, &mut pt)
+            } else {
+                cur
+            };
             let (gs, p, converged) = (cur.og, cur.p, cur.converged);
             let counts = [cur.counts[0], cur.counts[1], cur.counts[2], flips];
             let mut pts = Vec::with_capacity(p.len() + 4);
