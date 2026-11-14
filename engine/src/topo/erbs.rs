@@ -845,6 +845,12 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
             continue;
         }
         let left = match wrapped.get(&f) {
+            // The band wraps a vertex of the feature with the feature's body on the other side
+            // (it passes the vertex on the inside): through it as well.
+            Some(&l) if wraps_inside(band, &ft.poly, l) => {
+                through.push(f);
+                continue;
+            }
             Some(&l) => l,
             None => {
                 let nv = ft.poly.iter().copied().min_by(|a, b| band_dist(band, *a).total_cmp(&band_dist(band, *b))).unwrap_or(ft.poly[0]);
@@ -1105,6 +1111,18 @@ fn seg_through(a: Vec2, b: Vec2, poly: &[Vec2]) -> bool {
         let m = a + d * (0.5 * (w[0] + w[1]));
         point_in_poly(m, poly) && (0..poly.len()).all(|i| seg_seg_dist(m, m, poly[i], poly[(i + 1) % poly.len()]) > DEEP)
     })
+}
+
+/// Whether the feature `poly` lies on the other side of the band than `left`, the side of its
+/// wrapped vertex: the band passes that vertex on the inside of the feature. The side of the
+/// centroid, more than [`DEEP`] off the band.
+fn wraps_inside(band: &[Vec2], poly: &[Vec2], left: bool) -> bool {
+    if poly.len() < 3 {
+        return false;
+    }
+    let cen = poly.iter().fold(Vec2::default(), |m, &p| m + p) * (1.0 / poly.len() as f64);
+    let (l, d) = band_side(band, cen);
+    d > DEEP && l != left
 }
 
 /// Depth inside a feature that counts as running through it (1 µm).
@@ -1650,6 +1668,17 @@ mod tests {
         assert!(!seg_through(v(-1.0, 1.0), v(1.0, 3.0), &sq), "touching a corner");
         assert!(!seg_through(v(-1.0, 2.0), v(2.0, 2.0), &sq), "past it");
         assert!(!seg_through(v(-1.0, 0.5), v(2.0, 0.5), &sq[..2]), "no area");
+    }
+
+    /// A band along a side of a square, its vertices wrapped: the square on the wrap's side is
+    /// outside the band; on the other side the band passes its vertices on the inside.
+    #[test]
+    fn wrap_from_inside() {
+        let sq = [v(0.0, -1.0), v(1.0, -1.0), v(1.0, 0.0), v(0.0, 0.0)];
+        let band = [v(2.0, 0.0), v(1.0, 0.0), v(0.0, 0.0), v(-1.0, 0.0)];
+        // Going west along y = 0 the square (below) is on the band's left.
+        assert!(!wraps_inside(&band, &sq, true));
+        assert!(wraps_inside(&band, &sq, false));
     }
 
     /// A convex feature grown by r in the octagonal norm: the hull of the vertex octagons, every
