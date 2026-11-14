@@ -25,6 +25,7 @@ pub mod draw;
 pub mod dwitness;
 pub mod exact;
 pub mod factors;
+pub mod funnel;
 pub mod gate;
 pub mod init;
 pub mod layers;

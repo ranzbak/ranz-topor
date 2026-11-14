@@ -65,57 +65,19 @@ pub fn plan(ev: &[(usize, f64, i32)], n_layers: usize) -> Plan {
 }
 
 /// Funnel (string pulling) from `s` to `e` through `portals` `(left, right)`, seen along the
-/// travel direction. O(portals).
+/// travel direction: [`super::funnel::funnel`] (exact predicates; a run that starts in front of
+/// its first portal or ends behind its last comes back to touch it), corners only. The same
+/// corners as the taut paths of [`super::pack`]: ends an ulp off a shared vertex are snapped in
+/// the funnel itself (relative tolerance, so no absolute distance here, which dropped genuine
+/// corners of nm-sized features); only repeated points go (a zero-length run is one point).
+/// O(portals).
 pub fn funnel(s: Vec2, e: Vec2, portals: &[(Vec2, Vec2)]) -> Vec<Vec2> {
-    let cross = |a: Vec2, b: Vec2| a.x * b.y - a.y * b.x;
-    let mut all: Vec<(Vec2, Vec2)> = portals.to_vec();
-    all.push((e, e));
-    let mut pts = vec![s];
-    let (mut apex, mut left, mut right) = (s, s, s);
-    let (mut left_i, mut right_i) = (0usize, 0usize);
-    let mut i = 0;
-    let mut guard = 0usize;
-    while i < all.len() {
-        guard += 1;
-        if guard > 20 * all.len() + 100 {
-            break;
-        }
-        let (l, r) = all[i];
-        let same = |a: Vec2, b: Vec2| (a - b).len2() < 1e-6;
-        if cross(right - apex, r - apex) >= 0.0 {
-            if same(apex, right) || cross(left - apex, r - apex) < 0.0 {
-                right = r;
-                right_i = i;
-            } else {
-                pts.push(left);
-                apex = left;
-                right_i = left_i;
-                right = apex;
-                left = apex;
-                i = left_i + 1;
-                continue;
-            }
-        }
-        if cross(left - apex, l - apex) <= 0.0 {
-            if same(apex, left) || cross(right - apex, l - apex) > 0.0 {
-                left = l;
-                left_i = i;
-            } else {
-                pts.push(right);
-                apex = right;
-                left_i = right_i;
-                left = apex;
-                right = apex;
-                i = right_i + 1;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    if (*pts.last().expect("start") - e).len2() > 1e-6 {
-        pts.push(e);
-    }
-    pts.dedup_by(|a, b| (*a - *b).len2() < 1e-6);
+    let mut ports = Vec::with_capacity(portals.len() + 2);
+    ports.push((s, s));
+    ports.extend_from_slice(portals);
+    ports.push((e, e));
+    let mut pts: Vec<Vec2> = super::funnel::funnel(&ports).into_iter().map(|c| c.0).collect();
+    pts.dedup();
     pts
 }
 
@@ -1208,7 +1170,7 @@ impl<'a> Drawer<'a> {
         let t: TriId = wi.tris[k];
         let [p, q] = pr.edges[e];
         let (pp, pq) = (pr.pos[p], pr.pos[q]);
-        let pt = |f: f64| pp + (pq - pp) * f;
+        let pt = |f: f64| super::funnel::edge_point(pp, pq, f);
         let a = pr.tris[t][pr.side(t, e)];
         if a == p {
             (pt(hi), pt(lo))
@@ -3744,6 +3706,29 @@ mod tests {
         let pts = funnel(v(0.0, 0.0), v(20.0, 0.0), &p);
         assert_eq!(pts.len(), 3, "{pts:?}");
         assert!((pts[1] - v(10.0, 10.0)).len() < 1e-9, "{pts:?}");
+    }
+
+    /// The path wraps (5, 2) on its left, runs east to (6, 2) and turns up to the end: after
+    /// the first corner the funnel opens past 180 degrees (right end (3, 0) south-west, the end
+    /// north-east). The previous drawing funnel went (5, 2) -> end straight (`pack` test
+    /// `funnel_past_180_degrees_both_sides`).
+    #[test]
+    fn funnel_past_180_degrees_keeps_the_corner() {
+        let p = [(v(5.0, 2.0), v(3.0, 0.0)), (v(6.0, 2.0), v(3.0, 0.0))];
+        let pts = funnel(v(3.2, 3.3), v(6.9, 4.4), &p);
+        assert_eq!(pts, vec![v(3.2, 3.3), v(5.0, 2.0), v(6.0, 2.0), v(6.9, 4.4)]);
+    }
+
+    /// The drawing keeps the corners of the taut path however small the features: a gap 0.1 pm
+    /// high, 0.5 pm from the start, keeps its corner (an absolute 1e-3 nm dedup dropped it, and
+    /// the run then missed the gap). The same corners as [`super::super::funnel::funnel`].
+    #[test]
+    fn funnel_keeps_the_corners_of_tiny_features() {
+        let p = [(v(5e-4, 3e-4), v(5e-4, 2e-4))];
+        let pts = funnel(v(0.0, 0.0), v(1e-3, 0.0), &p);
+        assert_eq!(pts, vec![v(0.0, 0.0), v(5e-4, 2e-4), v(1e-3, 0.0)]);
+        let ports = [(v(0.0, 0.0), v(0.0, 0.0)), p[0], (v(1e-3, 0.0), v(1e-3, 0.0))];
+        assert_eq!(pts, super::super::funnel::funnel(&ports).into_iter().map(|c| c.0).collect::<Vec<_>>());
     }
 
     #[test]

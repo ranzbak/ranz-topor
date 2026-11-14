@@ -4,6 +4,7 @@ pub const MIN_SAGITTA_NM: f64 = 5.0;
 pub const MIN_CHORD_NM: f64 = 10.0;
 
 pub mod dist;
+pub mod predicates;
 pub mod grid;
 pub mod prim;
 pub mod quant;

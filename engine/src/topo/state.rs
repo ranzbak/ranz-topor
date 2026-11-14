@@ -1066,7 +1066,7 @@ impl<'p> State<'p> {
         let (a, b) = (self.proj.pos[vp], self.proj.pos[vq]);
         let len = (b - a).len().max(1.0);
         let (lo, hi) = sp[g];
-        (a + (b - a) * (lo / len), a + (b - a) * (hi / len))
+        (super::funnel::edge_point(a, b, lo / len), super::funnel::edge_point(a, b, hi / len))
     }
 
     /// Length (nm) of wire `w` as the search prices it: with `taut_len`, the shortest path from
@@ -1098,7 +1098,7 @@ impl<'p> State<'p> {
             let (a, b) = (pr.pos[vp], pr.pos[vq]);
             let len = (b - a).len().max(1.0);
             let (lo, hi) = sp[g.min(sp.len() - 1)];
-            let (x, y) = (a + (b - a) * (lo / len), a + (b - a) * (hi / len));
+            let (x, y) = (super::funnel::edge_point(a, b, lo / len), super::funnel::edge_point(a, b, hi / len));
             let t = pr.tris[t1];
             let c = (pr.pos[t[0]] + pr.pos[t[1]] + pr.pos[t[2]]) * (1.0 / 3.0);
             let left_is_q = (b - a).cross(c - a) > 0.0;
