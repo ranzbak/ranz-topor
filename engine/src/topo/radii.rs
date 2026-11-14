@@ -1469,7 +1469,7 @@ mod tests {
         assert_eq!((le.es.len(), le.timed_out), (0, 3));
         let later = ErbsOpts { deadline: Some(now + std::time::Duration::from_secs(3600)), stop: Some(Arc::new(AtomicBool::new(false))), ..ErbsOpts::default() };
         let le = crate::topo::erbs::erbs_layer_with(&sh, &sts, &[0, 1, 2], &o, &later);
-        assert_eq!((le.es.len(), le.timed_out, le.failed.len()), (3, 0, 0));
+        assert_eq!((le.es.len(), le.timed_out, le.failed.len()), (3, 0, 0), "{:?}", le.failed);
     }
 
     /// A U-turn: the band goes down a channel, round a pad below it and back up the same channel,
@@ -1489,6 +1489,9 @@ mod tests {
         let le = crate::topo::erbs::erbs_layer_with(&sh, &sts, &[0], &o, &ErbsOpts::default());
         assert!(le.failed.is_empty(), "{:?}", le.failed);
         let e = &le.es[0];
+        if std::env::var_os("TOPO_TEST_DUMP").is_some() {
+            eprintln!("band {:?}\ngates {:?}", sts[0].band, e.gate_list.iter().map(|g| (g.a, g.b, g.p_left, g.src)).collect::<Vec<_>>());
+        }
         let ys: Vec<f64> = e.path.iter().map(|p| p.y).collect();
         let lo = ys.iter().enumerate().min_by(|a, b| a.1.total_cmp(b.1)).map(|x| x.0).unwrap();
         assert!(ys[..=lo].windows(2).all(|w| w[1] <= w[0] + 1.0) && ys[lo..].windows(2).all(|w| w[1] >= w[0] - 1.0), "{:?}", e.path);
