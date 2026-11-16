@@ -154,6 +154,10 @@ pub struct Erbs {
     /// Features of other nets the band runs through (the plan's violation): no obstacle, the
     /// check counts them as predicted.
     pub through: Vec<usize>,
+    /// Features of other nets within the half width plus their clearance of an end of the band
+    /// (the wire's own end violates their clearance: the pad exit's neck): no obstacle and no
+    /// spoke detour at them; the check counts them as predicted.
+    pub exit: Vec<usize>,
     /// The sleeve reached the end (always true for a returned ERBS; kept for the reports).
     pub converged: bool,
     pub len: f64,
@@ -430,6 +434,13 @@ enum Detour {
     From(Vec2),
     /// Never (a spoke tip whose spoke the band does not cross, the terminals, the frame).
     Never,
+}
+
+/// The band crosses (or touches) the spoke from feature vertex `root` to its grown point `x`:
+/// the band runs between the point and its feature (Dayan 1997 PDF p. 32: a band that crosses a
+/// spoke goes round its end). O(band).
+fn spoke_crossed(band: &[Vec2], x: Vec2, root: Vec2) -> bool {
+    band.windows(2).any(|w| seg_touch(w[0], w[1], x, root))
 }
 
 /// The segments `a b` and `c d` cross or touch (an end on the other segment). O(1).
@@ -769,6 +780,32 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
         .collect();
     let in_pad = |x: Vec2| tpads.iter().any(|poly| point_in_poly(x, poly) || poly_dist(x, poly) < 0.5 * s.w);
 
+    // Features of other nets the wire's own ends lie in the clearance of (the end is within half
+    // the width plus the feature's clearance of it): no room the band could keep there, the pad
+    // exit's neck (a predicted violation). As the features of an over-full cut (`skip`) they are
+    // no obstacle and their spokes push nothing (qmtech: a 0.63 mm wire leaving a 0.3 mm pad at
+    // 0.5 mm pitch, the neighbours' long cuts' tips 0.505 mm out on both sides, the ERBS wound
+    // round them, 4.6 x its band).
+    let it = Item { net: s.net, w: s.w, s: s.s };
+    let mut exit: Vec<usize> = Vec::new();
+    {
+        let rmax = 0.5 * s.w + fclear.max(s.s);
+        let (mut near, mut one) = (BTreeSet::new(), BTreeSet::new());
+        for c in [c0, c1] {
+            fg.query(c - Vec2 { x: rmax, y: rmax }, c + Vec2 { x: rmax, y: rmax }, &mut one);
+            near.append(&mut one);
+        }
+        for &f in &near {
+            let ft = &sh.feats[f];
+            let cl = ft.bound.clearance(&it);
+            if cl > 0.0 && ft.poly.len() >= 3 && [c0, c1].iter().any(|&c| point_in_poly(c, &ft.poly) || poly_dist(c, &ft.poly) < 0.5 * s.w + cl) {
+                exit.push(f);
+            }
+        }
+    }
+    let exit_set: BTreeSet<usize> = exit.iter().copied().collect();
+    let no_push = |f: usize| skip.contains(&f) || exit_set.contains(&f);
+
     // 1a. Cut items, grouped per cut in their order from p: the sides alternate along the cut.
     let mut per_cut: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for &(ci, ii) in items {
@@ -806,8 +843,8 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
             // ERBS wound round them, 4.6 x its band).
             let xb = band_cross(c, x);
             let at = x.t_band.clamp(0.0, 1.0) * c.cap;
-            let da = if at < lo - ON && !skip.contains(&c.fp) { Detour::From(xb) } else { Detour::Never };
-            let db = if at > hi + ON && !skip.contains(&c.fq) { Detour::From(xb) } else { Detour::Never };
+            let da = if at < lo - ON && !no_push(c.fp) { Detour::From(xb) } else { Detour::Never };
+            let db = if at > hi + ON && !no_push(c.fq) { Detour::From(xb) } else { Detour::Never };
             // A tip at its cut's end on one of the stretch's own terminal pads holds no room (no
             // item before it, no clearance to its own copper): the wire may pass over that pad.
             if !((a - c.p).len() < 1.0 && in_pad(c.p)) {
@@ -828,11 +865,13 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
         let w = s.width_at_idx(&pidx, band[k]);
         let poly = sh.vfeat[v].map(|f| &sh.feats[f].poly).filter(|p| p.len() >= 3);
         // A feature the band runs through, or whose vertex it wraps from the inside (its body in
-        // the wrap's wedge, `wraps_inside`), has no side (1c leaves it out): the rays of the wedge
-        // run over its body, so its offset along them would put the arc past the body's far side
-        // (esp L0 st 6: 1.09 mm samples round a 0.31 mm pad, the ERBS 3.7 x its band). The arc
-        // stays at the stack radius round the vertex.
-        let poly = poly.filter(|p| !(band.windows(2).any(|w| seg_through(w[0], w[1], p)) || wraps_inside(band, p, left)));
+        // the wrap's wedge, `wraps_inside`), has no side (1c leaves it out, a predicted
+        // violation): its vertex holds no arc either. The rays of the wedge run over its body, so
+        // the arc would put the path round the body's far side (esp L0 st 6: samples at 1.09 mm
+        // round a 0.31 mm pad, the ERBS 3.7 x its band) or into it at the stack radius.
+        if poly.is_some_and(|p| band.windows(2).any(|w| seg_through(w[0], w[1], p)) || wraps_inside(band, p, left)) {
+            continue;
+        }
         for &u in &dirs {
             if wedge_share(band[k] - band[k - 1], band[k + 1] - band[k], left, u).is_none() {
                 continue;
@@ -862,7 +901,6 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
     let reach = push + 2.0 * rmax + 0.5e6;
 
     // 1c. Features of other nets near the band, grown by the half width and their clearance.
-    let it = Item { net: s.net, w: s.w, s: s.s };
     let (lo, hi) = band.iter().fold((Vec2 { x: f64::INFINITY, y: f64::INFINITY }, Vec2 { x: f64::NEG_INFINITY, y: f64::NEG_INFINITY }), |(lo, hi), p| (Vec2 { x: lo.x.min(p.x), y: lo.y.min(p.y) }, Vec2 { x: hi.x.max(p.x), y: hi.y.max(p.y) }));
     let mut near = BTreeSet::new();
     fg.query(lo - Vec2 { x: reach, y: reach }, hi + Vec2 { x: reach, y: reach }, &mut near);
@@ -871,7 +909,7 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
     for &f in &near {
         let ft = &sh.feats[f];
         let cl = ft.bound.clearance(&it);
-        if cl <= 0.0 || skip.contains(&f) || ft.poly.is_empty() {
+        if cl <= 0.0 || no_push(f) || ft.poly.is_empty() {
             continue;
         }
         let d = band.windows(2).map(|w| seg_poly_dist(w[0], w[1], &ft.poly)).fold(f64::INFINITY, f64::min);
@@ -914,7 +952,7 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
             // path goes round it. Elsewhere its side is the band's own (a point past an end of
             // the band, or off a short band's corner, sided by the extended pieces; qmtech: big
             // pads 1-1.4 mm off a 0.5 mm band at a terminal, the ERBS 16 x its band).
-            let dips = band.windows(2).any(|w| seg_touch(w[0], w[1], x, root));
+            let dips = spoke_crossed(band, x, root);
             cand.push((x, left, gi, s.w, if dips { Detour::Auto } else { Detour::Never }));
         }
     }
@@ -976,7 +1014,7 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
     if dbg {
         eprintln!("  path {:?}", path.iter().map(|&p| (p.x / 1e6, p.y / 1e6)).collect::<Vec<_>>());
     }
-    Ok(Erbs { stretch: si, len: poly_len(&path), band_len: poly_len(band), pts, w, at, path, gate_list: gates, points: n_obs, portals: portals.len(), conflicts: pp.conflicts, through, converged: true })
+    Ok(Erbs { stretch: si, len: poly_len(&path), band_len: poly_len(band), pts, w, at, path, gate_list: gates, points: n_obs, portals: portals.len(), conflicts: pp.conflicts, through, exit, converged: true })
 }
 
 /// The ERBS of every stretch of `mine` on this layer (module documentation). Each stretch is
@@ -1235,7 +1273,7 @@ pub fn check_layer(sh: &LayerSheet, sts: &[Stretch], o: &LayerOrder, es: &[Erbs]
         pred_pair.insert((d.a.min(d.b), d.a.max(d.b)));
     }
     for e in es {
-        for &f in &e.through {
+        for &f in e.through.iter().chain(&e.exit) {
             pred_feat.insert((e.stretch, f));
         }
     }
@@ -1766,6 +1804,25 @@ mod tests {
             let d = poly_dist(*x, &poly);
             assert!(d >= 0.3e6 - 1.0 && d <= 0.3e6 / FRAC_PI_8.cos() + 1.0, "{d}");
         }
+    }
+
+    /// Round g rule 3: a grown point pushes only when the band crosses its spoke (from the
+    /// feature vertex to the point), or touches it (a band through the vertex).
+    #[test]
+    fn spoke_crossed_only_between_point_and_feature() {
+        let band = [v(0.0, 0.0), v(0.0, 6.0)];
+        // a pad right of the band, its grown point left of it: crossed
+        assert!(spoke_crossed(&band, v(-0.2, 3.0), v(0.2, 3.0)));
+        // the band through the vertex: touched
+        assert!(spoke_crossed(&band, v(-0.3, 3.0), v(0.0, 3.0)));
+        // a point left of the band beside the start, its pad behind the start: not crossed
+        assert!(!spoke_crossed(&band, v(-1.0, 0.1), v(-0.5, -0.3)));
+        // both left of the band: not crossed
+        assert!(!spoke_crossed(&band, v(-1.0, 3.0), v(-0.5, 3.0)));
+        // past the band's end: not crossed
+        assert!(!spoke_crossed(&band, v(0.3, 6.5), v(-0.3, 6.5)));
+        // a polyline: the second piece crosses
+        assert!(spoke_crossed(&[v(0.0, 0.0), v(2.0, 0.0), v(2.0, 2.0)], v(1.5, 1.0), v(2.5, 1.0)));
     }
 
     #[test]

@@ -1412,6 +1412,118 @@ mod tests {
         assert!(vs.iter().all(|x| x.predicted && x.amount < 0.0125e6 + 2.0), "{vs:?}");
     }
 
+    /// Round g rule 4: a 0.63 mm wire between two pads 0.5 mm apart (edge to edge; an over-full
+    /// cut) with distant pads beyond, so the long cuts from each pad put their spoke tips 0.6 mm
+    /// out on both sides of the band. The tips at the squeezed pads push nothing (the ERBS runs
+    /// with its band, not wound round them), and the over-full passage stays visible: counted
+    /// over-full with its squeeze, and the ERBS's violations against the two pads are predicted.
+    #[test]
+    fn erbs_squeezed_pads_keep_the_band_and_the_finding() {
+        let obs = vec![
+            (pad(-0.35, 0.0), 1),
+            (pad(0.35, 0.0), 2),
+            (pad(-3.0, 1.5), 3),
+            (pad(3.0, 1.5), 4),
+            (pad(-3.0, -1.5), 5),
+            (pad(3.0, -1.5), 6),
+            (pad(0.0, 3.0), 100),
+            (pad(0.0, -3.0), 100),
+        ];
+        let curves = vec![vec![v(0.0, 3.0), v(0.0, -3.0)]];
+        let pr = proj_n(obs);
+        let (sh, sts) = setup_w(&pr, &curves, Norm::Octagonal, &[(0.63, 0.2, 0.63)]);
+        let mut o = order_layer(&sh, &sts, &[0], 0.0);
+        radii_layer(&sh, &sts, &[0], &mut o, true, &|_| None);
+        assert!(o.report.overfull > 0 && o.report.squeeze > 0.0, "{:?}", o.report);
+        let es = erbs_layer(&sh, &sts, &[0], &o, &ErbsOpts::default());
+        assert_eq!(es.len(), 1);
+        assert!(es[0].len <= 1.02 * es[0].band_len, "ERBS {} over band {}: {:?}", es[0].len, es[0].band_len, es[0].path);
+        let vs = check_layer(&sh, &sts, &o, &es);
+        let at_pads: Vec<_> = vs.iter().filter(|x| matches!(x.other, Party::Feature(f) if sh.feats[f].poly.iter().all(|p| p.y.abs() <= 0.1e6 + 1.0))).collect();
+        assert!(!at_pads.is_empty(), "the over-full passage is a violation of the ERBS: {vs:?}");
+        assert!(at_pads.iter().all(|x| x.predicted), "{at_pads:?}");
+    }
+
+    /// Round g rule 3: a short band leaving a terminal next to a wide pad of another net behind
+    /// it (the terminal inside the pad's clearance): the pad's grown points beside the start lie
+    /// on the band's other side but the band does not run between them and the pad, so it keeps
+    /// its side (no loop round the pad's corners). A band that does run between a pad and its
+    /// grown points (the pad 0.3 mm beside a long band) is still pushed out to the clearance.
+    #[test]
+    fn erbs_grown_points_push_only_where_the_band_dips() {
+        let obs = vec![(rect(-1.0, -1.2, 1.0, -0.25), 1), (pad(0.0, 0.0), 100), (pad(0.0, 0.6), 100)];
+        let curves = vec![vec![v(0.0, 0.0), v(0.0, 0.6)]];
+        let pr = proj_n(obs);
+        let (sh, sts) = setup_w(&pr, &curves, Norm::Octagonal, &[(0.5, 0.2, 0.5)]);
+        let mut o = order_layer(&sh, &sts, &[0], 0.0);
+        radii_layer(&sh, &sts, &[0], &mut o, true, &|_| None);
+        let es = erbs_layer(&sh, &sts, &[0], &o, &ErbsOpts::default());
+        assert_eq!(es.len(), 1);
+        assert!(es[0].len <= 1.02 * es[0].band_len, "behind the start: ERBS {} over band {}: {:?}", es[0].len, es[0].band_len, es[0].path);
+        // a pad 0.2 mm beside the middle of a 6 mm band (edge at x = 0.2): the band dips into its
+        // clearance (0.25 + 0.2), the ERBS is pushed out to x <= -0.25
+        let obs = vec![(rect(0.2, 2.5, 1.2, 3.5), 1), (pad(0.0, 0.0), 100), (pad(0.0, 6.0), 100)];
+        let curves = vec![vec![v(0.0, 0.0), v(0.0, 6.0)]];
+        let pr = proj_n(obs);
+        let (sh, sts) = setup_w(&pr, &curves, Norm::Octagonal, &[(0.5, 0.2, 0.5)]);
+        let mut o = order_layer(&sh, &sts, &[0], 0.0);
+        radii_layer(&sh, &sts, &[0], &mut o, true, &|_| None);
+        let es = erbs_layer(&sh, &sts, &[0], &o, &ErbsOpts::default());
+        let xmin = es[0].path.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+        assert!(xmin <= -0.25e6 + 1.0, "beside the band: pushed out to {xmin}: {:?}", es[0].path);
+    }
+
+    /// Round g rule 2: a band that runs along a pad's edge and wraps its two corners with the
+    /// pad's body on the outside of the turns (the plan through the pad's corners, wraps_inside):
+    /// those wraps hold no arc (the rays of their wedges run over the body), so the ERBS stays
+    /// with its band instead of going round the pad's far side.
+    #[test]
+    fn erbs_no_arc_round_a_feature_wrapped_from_inside() {
+        let obs = vec![(rect(0.0, -1.0, 0.3, 0.0), 1), (pad(-1.0, 1.0), 100), (pad(1.3, 1.0), 100)];
+        // the plan runs through the pad (below its top corners): its band hugs the top edge
+        let curves = vec![vec![v(-1.0, 1.0), v(-0.1, -0.5), v(0.4, -0.5), v(1.3, 1.0)]];
+        let pr = proj_n(obs);
+        let (sh, sts) = setup_w(&pr, &curves, Norm::Octagonal, &[(0.25, 0.2, 0.25)]);
+        assert!(sts[0].wraps.iter().flatten().count() >= 1, "the band wraps the pad's corners: {:?}", sts[0].wraps);
+        let mut o = order_layer(&sh, &sts, &[0], 0.0);
+        radii_layer(&sh, &sts, &[0], &mut o, true, &|_| None);
+        let es = erbs_layer(&sh, &sts, &[0], &o, &ErbsOpts::default());
+        assert_eq!(es.len(), 1);
+        assert!(es[0].len <= 1.02 * es[0].band_len, "ERBS {} over band {}: {:?}", es[0].len, es[0].band_len, es[0].path);
+        assert!(es[0].through.len() == 1, "the pad is a predicted violation (through): {:?}", es[0].through);
+    }
+
+    /// Round g rule 4b (pad exit): a 0.63 mm wire leaving a 0.3 mm pad between two neighbours
+    /// 0.5 mm apart (pitch 0.5 mm), distant pads beyond so the neighbours' long cuts put their
+    /// tips 0.5 mm out on both sides of the band. The wire's own end lies in the neighbours'
+    /// clearance (the pad exit's neck): their spokes push nothing, the ERBS keeps its band, and the
+    /// violations against the neighbours stay visible as predicted.
+    #[test]
+    fn erbs_pad_exit_neighbours_push_nothing() {
+        let obs = vec![
+            (rect(-0.15, -1.5, 0.15, 0.0), 100),
+            (rect(0.35, -1.5, 0.65, 0.0), 1),
+            (rect(-0.65, -1.5, -0.35, 0.0), 2),
+            (pad(-3.0, 1.5), 3),
+            (pad(3.0, 1.5), 4),
+            (pad(-3.0, 0.8), 5),
+            (pad(3.0, 0.8), 6),
+            (pad(0.0, 4.0), 100),
+        ];
+        let curves = vec![vec![v(0.0, -0.75), v(0.0, 4.0)]];
+        let pr = proj_n(obs);
+        let (sh, sts) = setup_w(&pr, &curves, Norm::Octagonal, &[(0.63, 0.2, 0.63)]);
+        let mut o = order_layer(&sh, &sts, &[0], 0.0);
+        radii_layer(&sh, &sts, &[0], &mut o, true, &|_| None);
+        let es = erbs_layer(&sh, &sts, &[0], &o, &ErbsOpts::default());
+        assert_eq!(es.len(), 1);
+        assert_eq!(es[0].exit.len(), 2, "both neighbours are pad-exit features: {:?} band {:?} feats {:?}", es[0].exit, sts[0].band, sh.feats.iter().map(|f| (f.poly.clone(), f.bound.clearance(&crate::topo::demand::Item { net: 100, w: 0.63e6, s: 0.2e6 }))).collect::<Vec<_>>());
+        assert!(es[0].len <= 1.02 * es[0].band_len, "ERBS {} over band {}: {:?}", es[0].len, es[0].band_len, es[0].path);
+        let vs = check_layer(&sh, &sts, &o, &es);
+        let nb: Vec<_> = vs.iter().filter(|x| matches!(x.other, Party::Feature(f) if es[0].exit.contains(&f))).collect();
+        assert!(!nb.is_empty() && nb.iter().all(|x| x.predicted), "{vs:?}");
+    }
+
     /// Independent per stretch: the ERBS do not depend on the order of `mine`.
     #[test]
     fn erbs_order_independent() {

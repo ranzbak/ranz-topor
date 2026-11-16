@@ -37,3 +37,33 @@ erbs_deadline_and_stop; judge patterns (4, both modes) at 1.000 / 0 violations; 
 - Tips are per item: a later own visit's tip (same cut) bounds an earlier own wrap from outside (slot model,
   conservative, wiccon st46 +0.07 mm).
 - Pad exits stay out of the sheet (M7).
+
+## Round g (2026-11-16): length factor + three obstacle rules (sent to the lead before the board runs)
+
+### What
+1. **Length factor (draw.rs attempt -1).** A legal ERBS of length L over its band B is priced
+   `L (1 + k max(0, L/B - 1)^2)` (`[drawing] erbs_length_weight` k = 1): the length up to the band, smooth,
+   growing, no cutoff. Past `B (1 + g)` (`[drawing] erbs_margin` g = 0.05, about the octagon's 5.5 % on arcs) a
+   sequential run is drawn too; it replaces the ERBS when `L_s (1 + g)` is below the ERBS's price (the margin =
+   the room the ERBS keeps for the others). No legal sequential run: the ERBS stays. Finding ERBS_LONG lists them.
+2. **Arc of a wrap whose feature the band runs through / wraps from inside**: no feature exit offset (the rays
+   of the wedge run over the body; esp L0 st 6: samples at 1.09 mm round a 0.31 mm pad, 3.7 x band).
+3. **Grown feature point = spoke end of the feature**: the rough path goes round it only when the band crosses
+   the spoke (the segment from the feature vertex it was grown from to the point). Dayan 1997 PDF p. 33
+   (printed p. 22): spokes "push wires away from fixed objects"; PDF p. 32: a band that crosses a spoke goes
+   round its end. A point the band does not separate from its feature (past a band end, off a short band's
+   corner, sided only by the extended pieces) keeps the band's side (qmtech: 1-1.4 mm detours, 16 x band).
+4. **Tips at a squeezed feature**: a spoke tip at a feature of an over-full cut the stretch is on (`skip`, the
+   cut's squeeze is its predicted violation) is no detour, as the feature itself is already left out (the
+   over-full cut has not the room the tip asks for; Dayan PDF p. 33: spoke creation detects the violation,
+   it cannot satisfy it). qmtech: 0.63 mm wire between pads 0.7 mm apart, long cuts' tips 0.505 mm from both
+   pads, the ERBS wound round them (4.6 x).
+
+### Invariants
+- The class of the plan is never changed by a point the band is not separated from by a spoke (3, 4).
+- A legal ERBS is never dropped for its length; it competes on a smooth price (1).
+
+### Tests
+Unit `erbs_length_price_and_competition`; integration `wound_erbs_gives_way_to_the_sequential_run` (test point
+"wind erbs"); unit fixtures for 2-4 (dip / no dip / squeezed tip); erbs_accept marks on eprom/wiccon/esp dumps;
+qmtech dump ratio list; mutants per rule; deterministic ladder seed 0 rounds=1 both modes.
