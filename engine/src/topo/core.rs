@@ -174,6 +174,8 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     // hardens the limit itself, RouteJob.harden): past the limit by this much, the soft limit acts
     // as the hard one. "auto" (the engine's default, user 2026-11-13) = `wall_clock_s`.
     ctl.limit.set_overrun_cap(if opts.timeout_mode == "hard" { 0.0 } else { opts.overrun_cap_s() });
+    // `[run] limit_grace_s`: how long the TopoR loop step may run on past the soft limit.
+    ctl.limit.set_grace(opts.limit_grace_s);
     let stubs = place_plane_stubs(model, opts, ctl);
     ctl.stage(1, opts.topo_rounds.max(1) as u32, "projection of the board");
     let t_fx = Instant::now();
@@ -350,7 +352,21 @@ fn limit_report(ctl: &RunControl, opts: &Options, r: &mut RouteResult) -> Option
         ));
     }
     let cut_steps = steps.iter().map(|s| s.name().to_string()).collect();
-    Some(crate::route::LimitReport { limit_s, mode: mode.into(), reached, step, overrun_s, cap_s, cap_hit, cut: cut.into(), cut_steps })
+    // limit_grace_s: the wait of the TopoR loop step past the limit, always named (TIME_LIMIT_WAIT).
+    let grace_s = ctl.limit.grace_s();
+    let grace_hit = mode == "soft" && ctl.limit.grace_hit();
+    let loop_wait_s = if reached { (ctl.limit.loop_wait_s() * 1e3).round() / 1e3 } else { 0.0 };
+    if reached && loop_wait_s > 0.0 {
+        r.warnings.push(format!(
+            "time limit wait: the limit was reached during the TopoR loop step; waited {loop_wait_s:.1} s for it ({})",
+            match (grace_hit, grace_s) {
+                (true, Some(g)) => format!("[run] limit_grace_s = {g:.0} s ran out: the step was stopped at its next check, the cycle it was in was dropped, the best variant so far was drawn; raise limit_grace_s to let a cycle finish"),
+                (false, Some(g)) => format!("the step finished within [run] limit_grace_s = {g:.0} s"),
+                _ => "[run] limit_grace_s is unbounded here".to_string(),
+            }
+        ));
+    }
+    Some(crate::route::LimitReport { limit_s, mode: mode.into(), reached, step, overrun_s, cap_s, cap_hit, cut: cut.into(), cut_steps, grace_s, grace_hit, loop_wait_s })
 }
 
 /// The reason of a connection the time limit left undrawn (the drawing was the step that ran).
@@ -3531,6 +3547,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     let t = self.dbg_crit();
                     eprintln!("LOOPDBG[{}] cycle {} after sweep ({}/{} kept): {t}", self.dbg_tag, c.cycle, cs.kept, cs.tried);
                 }
+                // limit_grace_s: the cycle's later steps are not begun once the loop is to stop (the
+                // caller drops a cycle cut short, so the state it leaves is never offered).
+                if stop() {
+                    cs.busy_s = t0.elapsed().as_secs_f64();
+                    return cs;
+                }
                 if self.st.uncross_all(50) > 0 {
                     let lr = (self.assign_t)(self.st, self.ties);
                     self.set_lr(lr, None);
@@ -3593,6 +3615,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     cs.layer_runs += 1;
                     cs.layer_s += tl.elapsed().as_secs_f64();
                 }
+                if stop() {
+                    cs.busy_s = t0.elapsed().as_secs_f64();
+                    return cs;
+                }
                 // Floating up (Polubasov 2010 «всплытие»): the label moves (crossing flips, via
                 // shifts, segment lifting), each kept when the price drops; the new labelling is
                 // taken when the board's evaluation does not rise.
@@ -3641,6 +3667,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 if self.dbg {
                     let t = self.dbg_crit();
                     eprintln!("LOOPDBG[{}] cycle {} after floating up (kept {}, undone {}): {t}", self.dbg_tag, c.cycle, cs.float_kept, cs.undone);
+                }
+                if stop() {
+                    cs.busy_s = t0.elapsed().as_secs_f64();
+                    return cs;
                 }
                 // The crossing rules (clinches, double crossings, crossings no layer separates),
                 // taken when the board's evaluation does not rise.
@@ -3806,11 +3836,17 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // not offered (Cancel = the best variant kept so far).
         let loop_over = || loop_deadline.is_some_and(|d| Instant::now() >= d);
         let mut stop = || stop_now() || ctl.limit_reached() || loop_over();
-        let mut inner = || stop_now() || ctl.limit.cuts() || (!soft() && loop_over());
+        // `[run] limit_grace_s`: past the limit and its grace the step stops at its next check (the
+        // cycle it cut is not offered; the archive's best variant is kept). Read only after the limit
+        // passed, so a run without a limit takes the same moves in the same order.
+        let mut inner = || ctl.test_point("loop move") || stop_now() || ctl.limit.cuts() || ctl.limit.grace_over() || (!soft() && loop_over());
         let clock = || t_loop.elapsed().as_secs_f64();
         // M0: the progress dialog names the loop (tests/cancel_latency.rs waits for it).
         ctl.stage(rnd, rnds, "TopoR loop on the topology");
-        let mut rep = optimise(&mut sp, &mut arch, &params, &mut stop, &mut inner, &clock);
+        let mut rep = crate::control::in_loop_scope(|| optimise(&mut sp, &mut arch, &params, &mut stop, &mut inner, &clock));
+        if ctl.limit.passed() {
+            ctl.limit.note_loop_end(); // the wait of the loop step past the limit, for the report
+        }
         if rep.stop == "time limit" {
             rep.stop = if stop_now() { "Cancel / OK" } else if ctl.over_limit() { "time limit" } else { "loop_time_share" }.into();
         }

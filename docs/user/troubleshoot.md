@@ -658,6 +658,14 @@ copper violates a rule anywhere else, file a bug.
 
 **Fix.** For a complete board use run.timeout_mode = soft (the default: the drawing always runs to its end) or a longer run.timeout_s (or run.timeout_overrun_s past the soft limit), or lower [optimize] loop_time_share so more of the limit is left for the drawing; then route again.
 
+### TIME_LIMIT_WAIT
+
+*Severity: warning.*
+
+**Cause.** The time limit (run.timeout_s, soft) was reached while the TopoR loop step ran, and the run waited for it: the finding names the step and the seconds. With run.limit_grace_s (default 30 s) the wait is bounded: when the grace ran out the step was stopped at its next check (between rerouted connections, layer re-optimisations, label moves, crossing passes), the cycle it was in was dropped, and the best variant kept so far was drawn. When the step finished within the grace, nothing was lost.
+
+**Fix.** Raise run.limit_grace_s to let a longer cycle finish (negative = no bound), or run.timeout_s so the limit falls after the loop, or lower it for a shorter wait (0 = stop at the next check); in the KiCad dialog Cancel stops at once.
+
 ### TIME_OVERRUN_CAP
 
 *Severity: warning.*

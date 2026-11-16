@@ -903,6 +903,12 @@ pub struct Options {
     /// clock caps on its own (`RouteJob.harden`). It never changes `wall_clock_s`.
     #[serde(with = "overrun_cap")]
     pub timeout_overrun_s: f64,
+    /// `[run] limit_grace_s`: with the soft time limit, seconds past the limit that the TopoR loop
+    /// step (its cycle, down to the single move) may still run. Past it the step stops at its next
+    /// check, the cycle it was in is not kept, the best variant so far is drawn and the wait is
+    /// reported (`TIME_LIMIT_WAIT`). `0` = stop at the next check; negative = no bound. Never
+    /// changes the order of the moves (only read once the limit has passed).
+    pub limit_grace_s: f64,
     /// An accepted path longer than this factor times its slot-free ghost counts as an absurd
     /// detour and triggers rip-up of the blockers.
     pub detour_factor: f64,
@@ -1419,6 +1425,7 @@ impl Default for Options {
             wall_clock_s: 60.0,
             timeout_mode: "soft".into(),
             timeout_overrun_s: OVERRUN_AUTO,
+            limit_grace_s: 30.0,
             detour_factor: 2.0,
             factors: Default::default(),
             drc_loop_cap: 5,

@@ -285,6 +285,12 @@ pub struct LimitReport {
     /// The steps the limit cut, as the stop tests noted them (`crate::control::CutStep::name`:
     /// `plan`, `plane_stubs`, `drawing`, `via_reduction`, `stitching`); empty when `cut` is `"none"`.
     pub cut_steps: Vec<String>,
+    /// `[run] limit_grace_s` (`None` = no bound): seconds past the limit the TopoR loop step may run.
+    pub grace_s: Option<f64>,
+    /// The grace ran out: the loop step was stopped at its next check and the cycle it was in dropped.
+    pub grace_hit: bool,
+    /// Seconds the TopoR loop step ran past the limit before it ended (0: it was not running then).
+    pub loop_wait_s: f64,
 }
 
 /// A routed differential-pair connection (D7), nm. `from` / `to` are the P connection's pads.

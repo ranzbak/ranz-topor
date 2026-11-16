@@ -351,6 +351,15 @@ runs still computing when the limit was reached (a run waiting for the others' p
 TopoR loop cycle plus the drawing can take minutes (qmtech, 2026-11-13: about 4 minutes on the clock past the limit);
 press Cancel to stop at once.
 
+**The wait for the TopoR loop is bounded** (`[run] limit_grace_s`, default 30 s): the loop checks its stop
+between rerouted connections, layer re-optimisations, label moves and crossing passes, not only between cycles. After the
+limit the step that runs may go on for at most `limit_grace_s` seconds (`0` = stop at the next check, negative =
+no bound); then it stops at the next check, the cycle it was in is dropped (a cycle cut short is never kept) and
+the best variant kept so far is drawn. This holds in the KiCad dialog too, where the overrun cap is off. The initial
+routing and the drawing are never cut by it. [`TIME_LIMIT_WAIT`](troubleshoot.md#time_limit_wait) names the step and the
+seconds waited (log.txt, the findings, report.md, `result.json` `time_limit.loop_wait_s`, `grace_hit`). Runs that
+do not reach the limit are not affected.
+
 **The overrun has a cap** (`[run] timeout_overrun_s`): seconds past `timeout_s`, on the same clock, that the step
 running at the limit may still take. Past it the run acts as with `hard` (below): the step that runs is cut and the
 kept plan (the best variant so far, or the initial plan) is drawn in full; when the drawing itself is the step that

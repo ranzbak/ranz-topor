@@ -212,6 +212,13 @@ pub struct TimeLimit {
     /// [`TimeLimit::note_cut_in`]): one bit per [`CutStep`] (the report then names what was cut,
     /// not only that the limit acted as hard).
     cut: AtomicU8,
+    /// `[run] limit_grace_s`: nanoseconds past the limit that the TopoR loop step may still run
+    /// (`LIMIT_NONE` = no grace bound here; `0` is a real value: stop at the next check).
+    grace_ns: AtomicU64,
+    /// A stop test of the TopoR loop saw the grace over ([`TimeLimit::grace_over`]).
+    grace_hit: AtomicBool,
+    /// The longest time (ns) a TopoR loop step ran on past the limit ([`TimeLimit::note_loop_end`]).
+    loop_wait_ns: AtomicU64,
 }
 
 /// M2 fix 3 (verify-m2c 4): a step the time limit, acting as hard (`[run] timeout_mode = "hard"`,
@@ -273,7 +280,7 @@ const LIMIT_NONE: u64 = u64::MAX - 1;
 
 impl Default for TimeLimit {
     fn default() -> TimeLimit {
-        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false), cap_ns: AtomicU64::new(LIMIT_NONE), capped: AtomicBool::new(false), cut: AtomicU8::new(0) }
+        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false), cap_ns: AtomicU64::new(LIMIT_NONE), capped: AtomicBool::new(false), cut: AtomicU8::new(0), grace_ns: AtomicU64::new(LIMIT_NONE), grace_hit: AtomicBool::new(false), loop_wait_ns: AtomicU64::new(0) }
     }
 }
 
@@ -316,6 +323,54 @@ impl TimeLimit {
             LIMIT_UNSET | LIMIT_NONE => None,
             ns => Some(ns as f64 * 1e-9),
         }
+    }
+
+    /// `[run] limit_grace_s`: seconds past the limit the TopoR loop step may still run (soft
+    /// limit); `< 0` / non-finite = no bound, `0` = stop at the next check. O(1).
+    pub fn set_grace(&self, seconds: f64) {
+        let ns = if seconds.is_finite() && seconds >= 0.0 { ((seconds * 1e9) as u64).min(LIMIT_NONE - 1) } else { LIMIT_NONE };
+        self.grace_ns.store(ns, Ordering::Relaxed);
+    }
+
+    /// The grace in seconds; `None` = unbounded. O(1).
+    pub fn grace_s(&self) -> Option<f64> {
+        match self.grace_ns.load(Ordering::Relaxed) {
+            LIMIT_UNSET | LIMIT_NONE => None,
+            ns => Some(ns as f64 * 1e-9),
+        }
+    }
+
+    /// The limit passed and so did its grace: the stop test of the TopoR loop step ends the step
+    /// now (a cycle it cuts is not offered). Noted for the report when true ([`TimeLimit::grace_hit`]).
+    /// Only read inside the loop ([`in_loop_scope`]); the initial routing and the drawing never ask. O(1).
+    pub fn grace_over(&self) -> bool {
+        let over = match (self.seconds(), self.grace_s()) {
+            (Some(l), Some(g)) => self.elapsed_s() >= l + g,
+            _ => false,
+        };
+        if over {
+            self.grace_hit.store(true, Ordering::Relaxed);
+        }
+        over
+    }
+
+    /// A TopoR loop step ended with the limit passed: its wait is the time since the limit
+    /// (the longest of the runs counts). O(1).
+    pub fn note_loop_end(&self) {
+        if let Some(d) = self.deadline() {
+            let ns = Instant::now().saturating_duration_since(d).as_nanos().min(u128::from(u64::MAX / 2)) as u64;
+            self.loop_wait_ns.fetch_max(ns, Ordering::Relaxed);
+        }
+    }
+
+    /// Seconds the TopoR loop step ran past the limit (0 when it ended before). O(1).
+    pub fn loop_wait_s(&self) -> f64 {
+        self.loop_wait_ns.load(Ordering::Relaxed) as f64 * 1e-9
+    }
+
+    /// A stop test saw the grace over. O(1).
+    pub fn grace_hit(&self) -> bool {
+        self.grace_hit.load(Ordering::Relaxed)
     }
 
     /// The overrun cap fired (the limit plus the cap passed, noted once), or the caller hardened
@@ -689,7 +744,26 @@ pub fn with_control_mode<R>(ctl: &RunControl, limit_stops: bool, f: impl FnOnce(
 /// work loops that have no `RunControl` (the topology and label moves of P3/P4 and their cut
 /// prices, M0). Cheap: one atomic load, and a clock read only with a limit set. O(1).
 pub fn stop_requested() -> bool {
-    STOP.with(|c| c.borrow().as_ref().is_some_and(|(f, l, always)| f.load(Ordering::Relaxed) || ((*always || l.is_hard()) && l.passed() && l.note_cut())))
+    STOP.with(|c| c.borrow().as_ref().is_some_and(|(f, l, always)| f.load(Ordering::Relaxed) || ((*always || l.is_hard()) && l.passed() && l.note_cut()) || (LOOP_SCOPE.with(|s| s.get()) && l.grace_over())))
+}
+
+thread_local! {
+    /// Inside the TopoR loop step ([`in_loop_scope`]): the `[run] limit_grace_s` bound stops its moves.
+    static LOOP_SCOPE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` as the TopoR loop step: [`stop_requested`] then also answers true once the time limit
+/// and its grace (`[run] limit_grace_s`) have passed, so the move-level stop tests end the step.
+/// The flag before comes back after `f`, also when it panics. O(1) + `f`.
+pub fn in_loop_scope<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LOOP_SCOPE.with(|s| s.set(self.0));
+        }
+    }
+    let _restore = Restore(LOOP_SCOPE.with(|s| s.replace(true)));
+    f()
 }
 
 /// Deadline passed or run cancelled: the single stop test of every deadline site. O(1).
@@ -997,4 +1071,56 @@ mod tests {
         assert!(t.seconds().unwrap() > 1e9);
         assert!(!t.passed());
     }
+    #[test]
+    fn the_grace_ends_the_loop_step_only_after_limit_plus_grace_and_only_in_its_scope() {
+        // limit_grace_s: read only inside the TopoR loop; 0 = the next check after the limit; none = never.
+        let ctl = RunControl::new();
+        ctl.limit.init(0.2);
+        ctl.limit.set_grace(0.3);
+        assert!(!ctl.limit.grace_over(), "before the limit");
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(ctl.limit.passed() && !ctl.limit.grace_over(), "inside the grace");
+        assert!(!in_loop_scope(|| with_control_mode(&ctl, false, stop_requested)), "inside the grace the loop runs on");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(ctl.limit.grace_over() && ctl.limit.grace_hit());
+        assert!(in_loop_scope(|| with_control_mode(&ctl, false, stop_requested)), "grace over: the loop's moves stop");
+        assert!(!with_control_mode(&ctl, false, stop_requested), "outside the loop (initial routing, drawing) nothing stops");
+        assert!(!stop_requested(), "outside any control nothing is installed");
+        // the scope is restored, also on a panic
+        let _ = std::panic::catch_unwind(|| in_loop_scope(|| panic!("boom")));
+        assert!(!with_control_mode(&ctl, false, stop_requested));
+    }
+
+    #[test]
+    fn grace_zero_stops_at_the_limit_and_no_grace_never() {
+        let ctl = RunControl::new();
+        ctl.limit.init(0.05);
+        ctl.limit.set_grace(0.0);
+        assert!(!ctl.limit.grace_over());
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(ctl.limit.grace_over(), "0 = stop at the next check");
+        let none = RunControl::new();
+        none.limit.init(0.05);
+        none.limit.set_grace(-1.0);
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(none.limit.passed() && !none.limit.grace_over() && none.limit.grace_s().is_none(), "negative = unbounded");
+        let free = RunControl::new();
+        free.limit.init(0.0);
+        free.limit.set_grace(0.0);
+        assert!(!free.limit.grace_over(), "no limit: the grace never fires");
+        assert!(!in_loop_scope(|| with_control_mode(&free, false, stop_requested)));
+    }
+
+    #[test]
+    fn the_loop_wait_is_the_time_since_the_limit() {
+        let ctl = RunControl::new();
+        ctl.limit.init(0.1);
+        ctl.limit.note_loop_end();
+        assert_eq!(ctl.limit.loop_wait_s(), 0.0, "ended before the limit: no wait");
+        std::thread::sleep(Duration::from_millis(250));
+        ctl.limit.note_loop_end();
+        let w = ctl.limit.loop_wait_s();
+        assert!((0.1..5.0).contains(&w), "{w}");
+    }
+
 }

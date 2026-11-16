@@ -47,6 +47,9 @@ def time_limit_text(tl: dict | None) -> str:
     if tl.get("reached"):  # M2.TL: where the limit was reached and how far the run went past it
         txt += (f", reached during {tl.get('step') or 'the run'} ({tl.get('mode', 'soft')}), "
                 f"{float(tl.get('overrun_s') or 0.0):.1f} s past it")
+    if tl.get("loop_wait_s"):  # limit_grace_s: the TopoR loop step waited past the limit
+        txt += (f", the TopoR loop step ran {float(tl['loop_wait_s']):.1f} s past it"
+                + (f" (stopped by run.limit_grace_s = {float(tl.get('grace_s') or 0):g} s)" if tl.get("grace_hit") else ""))
     if tl.get("cap_hit"):  # F3: the overrun cap fired, the soft limit then acted as the hard one
         txt += (f", WARNING: overrun cap of {limit_text(tl.get('cap_s') or 0.0)} reached (as with the hard limit: "
                 f"{CUT_TEXT.get(tl.get('cut') or 'plan', CUT_TEXT['plan'])})")

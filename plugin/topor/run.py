@@ -848,7 +848,14 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                                "step": str(eng.get("step") or ""),
                                "overrun_s": round(max(0.0, spent - lim), 3) if reached else 0.0,
                                "cap_hit": state["cap_hit"], "cut": str(eng.get("cut") or "none"),
-                               "cut_steps": [str(x) for x in eng.get("cut_steps") or []]})
+                               "cut_steps": [str(x) for x in eng.get("cut_steps") or []],
+                               "loop_wait_s": float(eng.get("loop_wait_s") or 0.0),  # limit_grace_s: the TopoR loop step's wait
+                               "grace_s": eng.get("grace_s"), "grace_hit": bool(eng.get("grace_hit"))})
+        if reached and out.time_limit["loop_wait_s"] > 0:
+            log.line(f"time limit wait: the TopoR loop step ran {out.time_limit['loop_wait_s']:.1f} s past the limit "
+                     + (f"([run] limit_grace_s = {out.time_limit['grace_s']:g} s ran out: the step was stopped at its next check, "
+                        "the cycle it was in was dropped, the best variant so far was drawn)" if out.time_limit["grace_hit"]
+                        else "(it finished within run.limit_grace_s)"))
         if reached:
             log.line(f"time limit ({out.time_limit['mode']}): reached during {out.time_limit['step'] or 'the run'}; "
                      f"the result was ready {out.time_limit['overrun_s']:.1f} s past the limit "
