@@ -1559,6 +1559,50 @@ mod tests {
         assert!(gap.len() == 1 && gap[0].at.y > 0.0, "the violation further along is a gap: {vs:?}");
     }
 
+    /// DESIGN radii-m3-clear: a band that runs through another stretch's terminal pad (a predicted
+    /// feature violation) also violates that stretch where it leaves the pad: the same event,
+    /// predicted. The same pair further from the pad, and a third stretch that only grazes the
+    /// stretch, stay `erbs_gap`.
+    #[test]
+    fn erbs_band_through_a_terminal_pad_is_one_predicted_event() {
+        let obs = vec![
+            (pad(0.0, 4.0), 100),
+            (pad(0.0, -2.0), 100),
+            (pad(0.0, 1.0), 101),
+            (pad(3.0, 1.0), 101),
+            (pad(1.0, 1.6), 102),
+            (pad(3.0, 1.6), 102),
+        ];
+        let curves = vec![vec![v(0.0, 4.0), v(-0.6, 1.0), v(0.0, -2.0)], vec![v(0.0, 1.0), v(3.0, 1.0)], vec![v(1.0, 1.6), v(3.0, 1.6)]];
+        let pr = proj_n(obs);
+        let (sh, sts) = setup_w(&pr, &curves, Norm::Octagonal, &[(0.25, 0.2, 0.25); 3]);
+        let mut o = order_layer(&sh, &sts, &[0, 1, 2], 0.0);
+        radii_layer(&sh, &sts, &[0, 1, 2], &mut o, true, &|_| None);
+        let mut es = erbs_layer(&sh, &sts, &[0, 1, 2], &o, &ErbsOpts::default());
+        assert_eq!(es.len(), 3);
+        let fb = (0..sh.feats.len()).find(|&f| sh.feats[f].poly.len() >= 3 && crate::topo::state::point_in_poly(v(0.0, 1.0), &sh.feats[f].poly)).expect("pad of stretch 1");
+        // Stretch 0 straight through stretch 1's pad (the plan's predicted violation), then 0.25 mm
+        // under stretch 1's run at x = 2 (far from the pad).
+        es[0].pts = vec![v(0.0, 4.0), v(0.0, 0.6), v(2.0, 0.75), v(2.0, -2.0)];
+        es[0].w = vec![0.25e6; 4];
+        es[0].through = vec![fb];
+        es[1].pts = vec![v(0.0, 1.0), v(3.0, 1.0)];
+        es[1].w = vec![0.25e6; 2];
+        // Stretch 2 0.3 mm over stretch 1 (a gap of the model, nowhere near a pad).
+        es[2].pts = vec![v(1.0, 1.3), v(3.0, 1.3)];
+        es[2].w = vec![0.25e6; 2];
+        let vs = check_layer(&sh, &sts, &o, &es);
+        let s01: Vec<_> = vs.iter().filter(|x| x.stretch == 0 && x.other == Party::Stretch(1)).collect();
+        assert!(s01.iter().any(|x| x.predicted && (x.at - v(0.0, 1.0)).len() < 0.2e6), "at the pad: predicted {vs:?}");
+        assert!(s01.iter().any(|x| !x.predicted && x.at.x > 1.5e6), "far from the pad: a gap {vs:?}");
+        let s12: Vec<_> = vs.iter().filter(|x| x.stretch == 1 && x.other == Party::Stretch(2)).collect();
+        assert!(s12.len() == 1 && !s12[0].predicted, "a plain graze stays a gap {vs:?}");
+        // Symmetric: the same with the pad's own stretch checked first.
+        es.reverse();
+        let vr = check_layer(&sh, &sts, &o, &es);
+        assert!(vr.iter().any(|x| x.stretch == 0 && x.other == Party::Stretch(1) && x.predicted && (x.at - v(0.0, 1.0)).len() < 0.2e6), "either order {vr:?}");
+    }
+
     /// Independent per stretch: the ERBS do not depend on the order of `mine`.
     #[test]
     fn erbs_order_independent() {

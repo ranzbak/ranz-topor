@@ -81,3 +81,39 @@ erbs_deadline_and_stop; judge patterns (4, both modes) at 1.000 / 0 violations; 
 Unit `erbs_length_price_and_competition`; integration `wound_erbs_gives_way_to_the_sequential_run` (test point
 "wind erbs"); unit fixtures for 2-4 (dip / no dip / squeezed tip); erbs_accept marks on eprom/wiccon/esp dumps;
 qmtech dump ratio list; mutants per rule; deterministic ladder seed 0 rounds=1 both modes.
+
+## radii-m3-clear (2026-11-16): a band in another stretch's terminal feature is one predicted event
+
+#### What
+`erbs::check_layer` sorts every ERBS violation as predicted (a over-full cut, a planned crossing, a feature the band
+runs through, a pad-exit feature) or as an `erbs_gap`. Suppose stretch A's predicted violation is at feature f
+(A runs through it, or f is A's pad-exit neighbour). Suppose f is a terminal feature of stretch B: a pad, via or
+junction of B's own net that holds an end of B. Then A also violates B's ERBS where B leaves f, and that is the same
+event. New rule: a stretch-stretch violation A-B is predicted when its place (the midpoint of the two segments'
+closest points) lies within `w_A/2 + clearance(A, f)` of such a feature f, and A's predicted class at f covers that
+segment (through: the whole stretch; exit: only `exit_run`, as for the feature itself). Symmetric in A and B.
+
+#### Why
+On the m3g4 dumps (qmtech L0/L1, esp L0/L1), 24 of the 31 unpredicted stretch-stretch violations that are not near a
+winding are of this kind: B's end segment sits inside its own via or pad, and A runs through that via or pad
+(qmtech st368 through the via of st324, st296 through the via of st341, st359 through the via of st91; esp 11/41,
+44/50, 58/60, ...). They look like tight bundles in the `erbs_gap` count, but they are the plan's own feature
+violation seen a second time. With them counted, `erbs_gap` cannot show the real bundle-spacing faults.
+
+#### Literature
+Dayan 1997 PDF pp. 25-26 (printed 14-15): the ERBS meets the spacing iff the class is routable. A class whose band
+runs through a feature is not routable there, and every violation that comes from that is the plan's (already the
+rule for the feature itself, DESIGN round g rules 2, 4b, 5). B's copper inside its own terminal is part of that
+terminal (Maley 1987 p. 29: features enclose the element; the wire's end is attached to the feature).
+
+#### Invariants
+- Copper is unchanged. The `predicted` flag decides nothing in the drawing; `RunBand.gap` is read by no one.
+- A violation that is not at such a terminal feature keeps its class.
+- An exit feature predicts only along its `exit_run`, as before.
+
+#### Tests
+- Unit `erbs_band_through_a_terminal_via_is_one_predicted_event`: a band through a via of net 2, and the stretch of
+  net 2 that ends in it. The stretch-stretch violation is predicted.
+- A control in the same fixture: a third stretch that only grazes the end segment of the net-2 stretch away from
+  the via stays an `erbs_gap`.
+- Mutants: the rule off (`false`); the place test dropped (any terminal feature counts); exit_run ignored.

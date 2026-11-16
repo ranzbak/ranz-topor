@@ -5419,6 +5419,20 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             fb_rescued
         ));
     }
+    // Debug (`TOPO_ERBS_DUMP` with `realise = "sequential"`): the plan's ERBS model and over-full
+    // cuts dumped after the drawing (read by the packing classifier); nothing reads the result, so
+    // the copper and the drawing's time are those of the run without the dump.
+    if opts.realise != "erbs" && std::env::var_os("TOPO_ERBS_DUMP").is_some() {
+        let pts: BTreeMap<WireId, Vec<(usize, Vec2)>> = placed.iter().map(|(&w, v)| (w, v.iter().map(|x| (x.0, x.1)).collect())).collect();
+        let layers: Vec<usize> = (0..b.n_signal).collect();
+        let conn = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
+        let mo = super::cutflow::MeasureOpts::from_options(opts);
+        let _ = super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &super::board::outline_segments(model), &mo, &layers, &live, None, None, false);
+    }
+    if let Some(d) = std::env::var_os("TOPO_ERBS_DUMP") {
+        let nets: serde_json::Map<String, serde_json::Value> = model.nets.iter().map(|n| (n.code.to_string(), serde_json::Value::from(n.name.clone()))).collect();
+        let _ = std::fs::write(std::path::Path::new(&d).join("nets.json"), serde_json::Value::Object(nets).to_string());
+    }
     if let Some(l) = erbs_line {
         warnings.push(format!("{l}; drawn: {} runs from their ERBS ({} in its octilinear form before the check), {} by the sequential attempts after the check rejected the ERBS, {} without an ERBS, {} ERBS priced past their band against a sequential run ({} replaced by it)", dr.stats.erbs_ok, dr.stats.erbs_octi, dr.stats.erbs_fallback, dr.stats.erbs_none, dr.stats.erbs_long, dr.stats.erbs_long_replaced));
     }
