@@ -75,6 +75,12 @@ def test_pinned_old_default_warns_once_and_keeps_value(past, tmp_path):
     assert "set it explicitly" in f[0].message and "configuration.md#pinned-defaults" in f[0].fix
 
 
+def test_history_entry_equal_to_current_default_never_warns(tmp_path, monkeypatch):
+    monkeypatch.setattr(schema, "PAST_DEFAULTS", {("run", "timeout_s"): ((600, "2026-01-01"),)})
+    (tmp_path / "topor.toml").write_text("version = 1\n[run]\ntimeout_s = 600\n")
+    assert [x for x in load_config(tmp_path)[1] if x.code == "CFG_PINNED_OLD_DEFAULT"] == []
+
+
 def test_pinned_bool_says_warning_stays(past, tmp_path):
     cur = schema.SETTINGS_BY_KEY[("optimize", "finish_when_stable")].default
     old = False
@@ -101,7 +107,7 @@ def test_real_history_is_consistent():
 def test_docs_gen_lists_history_and_limitation():
     md = render_reference_md(schema.SETTINGS)
     assert "## Pinned defaults" in md and "`optimize.finish_when_stable` | `true` | 2026-11-16" in md
-    assert "never gets options that were added in a later version" in md
+    assert "Known limitation" in md and "never gets options that were added in a later version" in md
     changed = dict(schema.PAST_DEFAULTS)
     schema_hist = {**changed, ("run", "timeout_s"): ((1, "2026-03-03"),)}
     import topor.docs_gen as dg
