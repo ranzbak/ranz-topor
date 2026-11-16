@@ -298,10 +298,11 @@ fn a_via_site_across_an_uncrossed_drawn_wire_is_out_of_class() {
     let checker = Checker::new(&m, &opts);
     let v = |x: f64, y: f64| Vec2 { x: x * MM, y: y * MM };
     let none = BTreeSet::new();
+    // Math frame (y up = -KiCad y): the wire runs at y = -10, the drawn net-2 track at y = -11.
     // A traversal whose taut chord spans x = 10.
     let mk = |layer: u32| {
         let mut dr = Drawer::new(&m, &opts, &b, &st, &checker);
-        dr.commit(&track_item(2, layer, 0.25 * MM, v(4.0, 11.0), v(16.0, 11.0), None));
+        dr.commit(&track_item(2, layer, 0.25 * MM, v(4.0, -11.0), v(16.0, -11.0), None));
         dr
     };
     let dr = mk(0);
@@ -311,8 +312,8 @@ fn a_via_site_across_an_uncrossed_drawn_wire_is_out_of_class() {
             ch.len() >= 2 && ch.iter().any(|p| p.x <= 10.0 * MM) && ch.iter().any(|p| p.x >= 10.0 * MM)
         })
         .expect("a traversal over x = 10");
-    assert!(dr.taut_chord(0, k).iter().all(|p| (p.y - 10.0 * MM).abs() < 0.05 * MM), "{:?}", dr.taut_chord(0, k));
-    let (near, far) = (v(10.0, 10.4), v(10.0, 12.0));
+    assert!(dr.taut_chord(0, k).iter().all(|p| (p.y + 10.0 * MM).abs() < 0.05 * MM), "{:?}", dr.taut_chord(0, k));
+    let (near, far) = (v(10.0, -10.4), v(10.0, -12.0));
     let (ok, price) = dr.via_reach(0, k, near, 0, 1, &none);
     assert!(ok && price == 0.0, "near site, free reach: {ok} {price}");
     assert!(!dr.via_reach(0, k, far, 0, 1, &none).0, "far side of the drawn net-2 track on F.Cu: out of class");
