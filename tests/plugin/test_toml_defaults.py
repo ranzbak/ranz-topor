@@ -72,7 +72,7 @@ def test_pinned_old_default_warns_once_and_keeps_value(past, tmp_path):
     f = [x for x in findings if x.code == "CFG_PINNED_OLD_DEFAULT"]
     assert len(f) == 1 and f[0].severity == "warning"
     assert "run.timeout_s = 300" in f[0].message and "current default is 600" in f[0].message
-    assert "set it explicitly" in f[0].message and "configuration.md#pinned-defaults" in f[0].hint
+    assert "set it explicitly" in f[0].message and "configuration.md#pinned-defaults" in f[0].fix
 
 
 def test_pinned_bool_says_warning_stays(past, tmp_path):
