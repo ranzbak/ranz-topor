@@ -370,6 +370,14 @@ copper violates a rule anywhere else, file a bug.
 
 **Fix.** Accept the result, or route again with drawing.realise = "sequential" (the default; topor.toml [drawing] realise) for one drawing method throughout; report the board and the listed wires if this repeats.
 
+### ERBS_LONG
+
+*Severity: warning.*
+
+**Cause.** [drawing] realise = "erbs": some extended rubber bands were longer than their band by more than [drawing] erbs_margin. Such a band is priced by its length factor (length x (1 + erbs_length_weight x (length / band - 1)^2), graded, no cutoff) and a sequential run of the trace was drawn to compare: the cheaper one was drawn (the sequential run's length counts erbs_margin more, for the room the band keeps for the others). The finding counts both outcomes and names the longest bands with their factor; a band many times its band's length means a wrong topology class in the band (report the board).
+
+**Fix.** Accept the result, or route again with drawing.realise = "sequential" (the default); raise [drawing] erbs_length_weight to replace long bands sooner, lower it (0 = no length price) to keep them.
+
 ### ERBS_TIMEOUT
 
 *Severity: warning.*
