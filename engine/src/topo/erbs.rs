@@ -807,6 +807,12 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
         let at = sh.pos[v];
         let w = s.width_at_idx(&pidx, band[k]);
         let poly = sh.vfeat[v].map(|f| &sh.feats[f].poly).filter(|p| p.len() >= 3);
+        // A feature the band runs through, or whose vertex it wraps from the inside (its body in
+        // the wrap's wedge, `wraps_inside`), has no side (1c leaves it out): the rays of the wedge
+        // run over its body, so its offset along them would put the arc past the body's far side
+        // (esp L0 st 6: 1.09 mm samples round a 0.31 mm pad, the ERBS 3.7 x its band). The arc
+        // stays at the stack radius round the vertex.
+        let poly = poly.filter(|p| !(band.windows(2).any(|w| seg_through(w[0], w[1], p)) || wraps_inside(band, p, left)));
         for &u in &dirs {
             if wedge_share(band[k] - band[k - 1], band[k + 1] - band[k], left, u).is_none() {
                 continue;
@@ -905,6 +911,21 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
     if dbg {
         eprintln!("ERBS sleeve st {si}: band {:?}", band.iter().map(|&p| mm(p)).collect::<Vec<_>>());
         eprintln!("  points {:?}", pp.pts.iter().zip(&pp.lab).map(|(&p, &l)| (mm(p), l)).collect::<Vec<_>>());
+        // Per point: source (C cut, A arc vertex, F feature, - none) and detour (N never, A auto, F from).
+        let src = |i: usize| -> String {
+            let g = pp.gate[i].map(|g| match gates[g].src {
+                GateSrc::Cut(c) => format!("C{c}"),
+                GateSrc::Arc(v) => format!("A{v}"),
+                GateSrc::Feature(f) => format!("F{f}"),
+            });
+            let d = match pp.det[i] {
+                Detour::Never => "N",
+                Detour::Auto => "A",
+                Detour::From(_) => "F",
+            };
+            format!("{}{}", g.unwrap_or_else(|| "-".into()), d)
+        };
+        eprintln!("  srcs {:?}", (0..pp.pts.len()).map(src).collect::<Vec<_>>());
         eprintln!("  rough {:?}", rough.iter().map(|&p| mm(p)).collect::<Vec<_>>());
     }
     let portals = sleeve(&pp, &rough)?;
@@ -1024,7 +1045,7 @@ fn simplify(pts: &[Vec2], tol: f64) -> Vec<Vec2> {
     out
 }
 
-fn poly_len(p: &[Vec2]) -> f64 {
+pub(super) fn poly_len(p: &[Vec2]) -> f64 {
     p.windows(2).map(|w| (w[1] - w[0]).len()).sum()
 }
 
@@ -1353,6 +1374,9 @@ pub struct RunBand {
     pub s: Vec2,
     pub e: Vec2,
     pub path: Vec<Vec2>,
+    /// Length of the stretch's band (nm): the drawing's length factor compares the ERBS with it
+    /// (`draw::erbs_length_price`).
+    pub band_len: f64,
     /// The check found a violation no over-full cut predicts on this band (an `erbs_gap`).
     pub gap: bool,
 }
@@ -1488,7 +1512,7 @@ pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], pac
         precedes(&le.es, &m.stretches, o, &mut before);
         for e in &le.es {
             let s = &m.stretches[e.stretch];
-            out.runs.entry(s.wire).or_default().push(RunBand { layer: s.layer, s: e.pts[0], e: e.pts[e.pts.len() - 1], path: e.path.clone(), gap: gap.contains(&e.stretch) });
+            out.runs.entry(s.wire).or_default().push(RunBand { layer: s.layer, s: e.pts[0], e: e.pts[e.pts.len() - 1], path: e.path.clone(), band_len: e.band_len, gap: gap.contains(&e.stretch) });
         }
         out.failed.extend(le.failed.iter().map(|(si, why)| (m.stretches[*si].wire, why.clone())));
         let t = &mut out.report;
