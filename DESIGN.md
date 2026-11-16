@@ -117,3 +117,48 @@ terminal (Maley 1987 p. 29: features enclose the element; the wire's end is atta
 - A control in the same fixture: a third stretch that only grazes the end segment of the net-2 stretch away from
   the via stays an `erbs_gap`.
 - Mutants: the rule off (`false`); the place test dropped (any terminal feature counts); exit_run ignored.
+
+## radii-m3-clear (2026-11-16): a via site keeps the plan's class (lead's changes to the first note applied)
+
+#### What
+`Drawer::place_vias` (draw.rs, shared by both realise modes) searches a site when the plan's site is not free. Until
+now it priced each legal candidate (planned room taken + squeeze + distance to the missed site) and never asked whether
+the runs on the via's layers can reach the site from the plan's path. New `Drawer::via_reach`: per candidate p in
+traversal k, a straight reach segment at the wire's width per via layer from the point of `taut_chord(w, k)` nearest p
+to p, checked against the copper drawn so far. A reach that overlaps (gap <= 0) a drawn track of another net that the
+plan does not cross w with puts p on the far side of that wire: out of the plan's class, so not a candidate.
+- In-class legal sites: price as before + the reach's violation amounts x (octi.room x via diameter), graded.
+- No in-class legal site (force mode): `force_via` restricted to in-class sites, reach amounts added to its price
+  (costly, not failed).
+- No in-class site at all: the cheapest legal out-of-class site as before, counted (`via_out_of_class`, plan-vs-drawn
+  summary line); then force_via over every site as before.
+The planned site itself (on the plan's path) is not reach-tested.
+
+#### Why (data, qmtech s0 rounds=1, both modes identical; TOPO_VIADBG on the VM, m3c-3)
+JS_INTB_5V (wire 452): plan site (134.927,124.399) is tight (25 um from R18.2). Final draw candidates in k 55:
+(133.020,121.269) room 12 nm price 8.0e6, legal and on the plan's side of VIN5V; (132.887,118.904) room 538 um
+price 1.7e6, on the far side of VIN5V's drawn 0.5 mm track (y 120.469). The second wins. Every L0 candidate for the run
+then shorts VIN5V (FORCEDBG: attempts, funnel all short items 1495/1496); force mode takes the funnel with one short,
+which grazes U6 pins by 5-74 um. Connection forced in both modes by this site: seq 8, erbs 17 violations (the
+"JS_INTB_5V 8->17" of the m3 report is the two modes' force picks after the same bad site). With the
+via at 133.020 the plan's ERBS is legal (0 violations, U6 row at 125.724 >= 125.72). So a legal geometry existed.
+Of the 8 searched vias in the final qmtech draw, this is the only one cut off from every legal alternative by copper.
+
+#### Literature
+Dayan & Dai 1991 / Dayan 1997 PDF p. 32: vias are fixed objects the topology is built round; a via placed on the far
+side of a wire the plan does not cross changes the class (the run must cross it), so the site is not in the plan's
+class; the drawing only realises the plan, so such a site is no candidate while an in-class one exists.
+
+#### Invariants
+- Seq output changes where an out-of-class site won before, or where the graded reach price reorders in-class sites.
+  Judged per connection against main (lead: changed seq is fine if better).
+- No via is dropped: in class legal > in class forced > out of class legal (counted) > any site forced.
+- Root cause upstream (not fixed here): the plan's own site (134.927,124.399) is 25 um from R18.2 (planner via-site room
+  check; CM1 / parked VS-PLAN).
+- O(candidates x objects nearby) extra checks per searched via.
+
+#### Tests
+Synthetic fixture (harness/fixtures.py; PNG to the lead first, patterns need the user's approval): a via whose
+planned site is blocked by a pad, a drawn wide track between the near legal site and a roomier far site; expected
+the near site, no short. Mutants: class test off; reach on one layer only; force_via without the class; crossed-net
+exemption off.

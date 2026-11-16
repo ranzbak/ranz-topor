@@ -5493,11 +5493,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let plane_vias = plane_res.iter().filter(|(_, r)| r.as_ref().is_ok_and(|o| o.via.is_some())).count();
         let lost: usize = plans.iter().filter(|(w, _)| !drawn.contains_key(w)).map(|(_, p)| p.vias.len()).sum();
         warnings.push(format!(
-            "vias, plan vs drawn: plan {plan_vias} wire vias, drawn {drawn_vias} wire vias (+ {plane_vias} plane stub vias decided before the topology); placements: {} at the planned site, {} by the drawing's site search ({} of them where the planned site was not free), {} by force (never drop); {} added joining a branch to its trunk by force; {} removed by the via reduction; {} planned vias on wires not drawn; {} crossing partners re-read from a via as placed (P6 a); {} corners removed by the taut pull of the drawn runs (P6 c, [drawing] pull_taut)",
+            "vias, plan vs drawn: plan {plan_vias} wire vias, drawn {drawn_vias} wire vias (+ {plane_vias} plane stub vias decided before the topology); placements: {} at the planned site, {} by the drawing's site search ({} of them where the planned site was not free), {} by force (never drop); {} out of the plan's class (no site in it); {} added joining a branch to its trunk by force; {} removed by the via reduction; {} planned vias on wires not drawn; {} crossing partners re-read from a via as placed (P6 a); {} corners removed by the taut pull of the drawn runs (P6 c, [drawing] pull_taut)",
             dr.stats.planned_sites,
             dr.stats.via_searched,
             dr.stats.planned_sites_missed,
             dr.stats.via_forced,
+            dr.stats.via_out_of_class,
             junction_join_vias,
             vias_reduced,
             lost,

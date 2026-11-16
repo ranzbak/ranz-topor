@@ -454,6 +454,9 @@ pub struct DrawStats {
     /// committed via (a wire drawn again counts again; the summary uses the final wires).
     pub via_searched: usize,
     pub via_forced: usize,
+    /// Vias placed out of the plan's class ([`Drawer::via_reach`]): no site in the class was found
+    /// at all, so the cheapest one outside it was taken (counted in the plan-vs-drawn summary).
+    pub via_out_of_class: usize,
     /// P6 (a): crossing partners whose nominal chord was moved to follow a via ([`Drawer::follow_vias`]).
     pub partners_moved: usize,
     /// P6 (a): crossing partners neither their packed nor their taut crossing keeps on a placed
@@ -1544,9 +1547,15 @@ impl<'a> Drawer<'a> {
         } else {
             Vec::new()
         };
+        // The nets the plan crosses this wire with: a via site's reach may go over their drawn
+        // tracks without leaving the plan's class ([`Drawer::via_reach`]).
+        let crossed: std::collections::BTreeSet<i32> = self.st.crossings(w).iter().map(|x| self.st.wires[x.other].net).filter(|&n| n != net).collect();
         for (i, &(ka, kb)) in plan.vias.iter().enumerate() {
             let ka = out.last().map_or(ka, |l| ka.max(l.0));
             let mut done = false;
+            // The cheapest legal site out of the plan's class ([`Drawer::via_reach`]): taken only
+            // when no site in the class exists at all.
+            let mut oob: Option<(f64, f64, usize, Vec2, ViaSize)> = None;
             // P6 (d): the planned site when it is not free: the search then starts next to it.
             let mut missed: Option<Vec2> = None;
             // 5.4: the plan's site first, as it is, when every rule holds there.
@@ -1689,8 +1698,18 @@ impl<'a> Drawer<'a> {
                         // 5.4 task 1: the via as its reach disc (the hole rule included).
                         let dr = 2.0 * crate::vias::via_reach(&self.model.rules, net, sz);
                         let price = self.via_plan_price(w, ka, kb.max(ka), p, dr) + self.via_pair_price(w, out.last().copied(), &xs, k, p, sz) + squeeze;
+                        // In the plan's class only; the reach's violations priced like the squeeze
+                        // (one via diameter of squeeze per violation unit, graded).
+                        let (in_class, reach) = self.via_reach(w, k, p, plan.layers[i], plan.layers[i + 1], &crossed);
+                        let price = price + self.octi.room * dv * reach;
                         if dbg {
-                            eprintln!("VIACAND wire {w} via {i} k {k} at ({:.3},{:.3}) room {:.0} price {:.0}", p.x / 1e6, -p.y / 1e6, room, price);
+                            eprintln!("VIACAND wire {w} via {i} k {k} at ({:.3},{:.3}) room {:.0} price {:.0} reach {reach:.2} in class {in_class}", p.x / 1e6, -p.y / 1e6, room, price);
+                        }
+                        if !in_class {
+                            if oob.as_ref().is_none_or(|o| price < o.0 - 1.0 || (price <= o.0 + 1.0 && room > o.1 + 1.0)) {
+                                oob = Some((price, room, k, p, sz));
+                            }
+                            continue;
                         }
                         if best.is_none_or(|b| price < best_price - 1.0 || (price <= best_price + 1.0 && room > b.0 + 1.0)) {
                             best = Some((room, k, p));
@@ -1720,9 +1739,27 @@ impl<'a> Drawer<'a> {
                     break 'sizes;
                 }
             }
+            // No legal site in the plan's class: in force mode the cheapest site in the class with
+            // its violations (costly, not failed); with no site in the class at all, the cheapest
+            // legal one out of it (as before the class test), counted and reported.
+            let forced_in = if !done && self.force { self.force_via(w, plan, i, ka, kb.max(ka), &sizes, Some(&crossed)) } else { None };
+            if !done && forced_in.is_none() {
+                if let Some((_, room, k, p, sz)) = oob {
+                    if std::env::var("TOPO_VIADBG").is_ok() {
+                        eprintln!("VIAPICK wire {w} net {net} via {i} out of class at ({:.3},{:.3}) room {room:.0} size {}", p.x / 1e6, -p.y / 1e6, sz.d);
+                    }
+                    let id = self.commit(&via_item(net, p, sz, Some(w)));
+                    self.via_marks.push((w, k, p, plan.layers[i], plan.layers[i + 1], id));
+                    ids.push(id);
+                    out.push((k, p, sz));
+                    self.stats.via_searched += 1;
+                    self.stats.via_out_of_class += 1;
+                    done = true;
+                }
+            }
             if !done && self.force {
                 // Never drop (M-B1): the site with the least violation price.
-                if let Some((k, p, sz, vs)) = self.force_via(w, plan, i, ka, kb.max(ka), &sizes) {
+                if let Some((k, p, sz, vs)) = forced_in.or_else(|| self.force_via(w, plan, i, ka, kb.max(ka), &sizes, None)) {
                     let id = self.commit(&via_item(net, p, sz, Some(w)));
                     self.via_marks.push((w, k, p, plan.layers[i], plan.layers[i + 1], id));
                     ids.push(id);
@@ -1817,7 +1854,9 @@ impl<'a> Drawer<'a> {
     /// and every via size, the one with the least `violation` price (a site on the wrong side of
     /// another wire's chord counts one violation more: its run would cross that wire), ties by
     /// the most room. Its violations go with it. O(sites x sizes x checker query).
-    fn force_via(&self, w: WireId, plan: &Plan, i: usize, ka: usize, kb: usize, sizes: &[ViaSize]) -> Option<(usize, Vec2, ViaSize, Vec<Viol>)> {
+    /// `class`: the nets the plan crosses `w` with; `Some` = only sites in the plan's class
+    /// ([`Drawer::via_reach`]), their reach violations added to the price; `None` = every site.
+    fn force_via(&self, w: WireId, plan: &Plan, i: usize, ka: usize, kb: usize, sizes: &[ViaSize], class: Option<&std::collections::BTreeSet<i32>>) -> Option<(usize, Vec2, ViaSize, Vec<Viol>)> {
         let net = self.st.wires[w].net;
         let (st, pr) = (self.st, &self.b.proj);
         let wi = &st.wires[w];
@@ -1853,7 +1892,14 @@ impl<'a> Drawer<'a> {
                     vs.push(Viol { kind: "connection_width", at: p, layer: u32::MAX, depth_nm: self.model.rules.min_connection.max(1) as f64, len_nm: sz.d as f64, against: "own-net pad".into(), via: true });
                 }
                 let side = if self.via_side_ok(w, k, p, plan.layers[i], plan.layers[i + 1]) { 0.0 } else { 1.0 };
-                let price = vs.iter().map(Viol::amount).sum::<f64>() + side;
+                let reach = match class {
+                    Some(c) => match self.via_reach(w, k, p, plan.layers[i], plan.layers[i + 1], c) {
+                        (false, _) => continue,
+                        (true, r) => r,
+                    },
+                    None => 0.0,
+                };
+                let price = vs.iter().map(Viol::amount).sum::<f64>() + side + reach;
                 let room = self.via_room(w, k, p, sz.d as f64);
                 if best.as_ref().is_none_or(|b| price < b.0 - 1e-9 || (price - b.0).abs() <= 1e-9 && room > b.1 + 1.0) {
                     best = Some((price, room, k, p, sz, vs));
@@ -1861,6 +1907,55 @@ impl<'a> Drawer<'a> {
             }
         }
         best.map(|b| (b.2, b.3, b.4, b.5))
+    }
+
+    /// Whether via site `p` in traversal `k` of wire `w` keeps the plan's class, and the graded
+    /// price of reaching it. The runs on the via's layers `la` and `lb` leave the plan's path in
+    /// `k` (the point of [`Drawer::taut_chord`] nearest `p`) for `p`: a straight reach segment at
+    /// the wire's width per layer, checked against the copper drawn so far. A reach that overlaps
+    /// (a short) a drawn track of another net the plan does not cross this wire with goes over that
+    /// wire: the site is on its far side, which changes the topological class (Dayan 1997 PDF
+    /// p. 32: vias are fixed objects the topology is built round), so it is out of class.
+    /// Price: the violation amounts of both reach segments ([`Viol::amount`], graded; 0 for a free
+    /// reach). `crossed` = the nets the plan crosses `w` with. O(chord + objects nearby).
+    fn via_reach(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize, crossed: &std::collections::BTreeSet<i32>) -> (bool, f64) {
+        let net = self.st.wires[w].net;
+        let chord = self.taut_chord(w, k);
+        let q = match chord.len() {
+            0 => return (true, 0.0),
+            1 => chord[0],
+            _ => chord
+                .windows(2)
+                .map(|x| {
+                    let d = x[1] - x[0];
+                    let l2 = d.len2();
+                    let t = if l2 > 0.0 { ((p - x[0]).dot(d) / l2).clamp(0.0, 1.0) } else { 0.0 };
+                    x[0] + d * t
+                })
+                .min_by(|a, b| (*a - p).len2().total_cmp(&(*b - p).len2()))
+                .unwrap_or(chord[0]),
+        };
+        if (p - q).len2() <= 1.0 {
+            return (true, 0.0);
+        }
+        let (mut ok, mut price) = (true, 0.0);
+        for (j, &l) in [la, lb].iter().enumerate() {
+            if j == 1 && lb == la {
+                break;
+            }
+            let items = self.run_items(w, l, &[q, p]);
+            let rep = self.checker.check_against(&self.idx, &items, &[]);
+            for v in &rep.violations {
+                let other = v.against.strip_prefix("item:").and_then(|x| x.parse::<usize>().ok()).and_then(|id| self.idx.net_of(id));
+                if let Some((n2, false)) = other {
+                    if n2 != net && !crossed.contains(&n2) && v.gap <= 0 {
+                        ok = false;
+                    }
+                }
+            }
+            price += self.viols_of(&items, &rep).iter().map(Viol::amount).sum::<f64>();
+        }
+        (ok, price)
     }
 
     /// The via site `p` in traversal `k` of wire `w` (run layers `la` before the via, `lb` after)
