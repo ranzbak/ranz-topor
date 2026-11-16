@@ -273,3 +273,55 @@ fn a_placed_via_walls_off_its_chord_for_other_runs() {
     // On layer 1 the wall runs to the entry pass point instead.
     assert_eq!(dr.via_walls(1, 0, n1, 1).len(), 1);
 }
+
+/// radii-m3-clear: a searched via site keeps the plan's class. The runs on the via's layers reach the
+/// site from the plan's path (taut chord); a reach that runs over a drawn track of a net the plan
+/// does not cross puts the site on that wire's far side (qmtech JS_INTB_5V: the via went past VIN5V's
+/// drawn track, every run then shorted it). Dayan 1997 PDF p. 32.
+#[test]
+fn a_via_site_across_an_uncrossed_drawn_wire_is_out_of_class() {
+    use std::collections::BTreeSet;
+    use topor_engine::check::Checker;
+    use topor_engine::geom::Vec2;
+    use topor_engine::model::Options;
+    use topor_engine::topo::board::{self, BuildOpts};
+    use topor_engine::topo::draw::{track_item, Drawer};
+    use topor_engine::topo::init::InitWeights;
+    use topor_engine::topo::state::State;
+    let m = board((0.0, 0.0, 20.0, 20.0), &[(1, 2.0, 10.0, true, 0.6), (1, 18.0, 10.0, true, 0.6), (2, 2.0, 17.0, true, 0.6), (2, 18.0, 17.0, true, 0.6)]);
+    let b = board::build(&m, &BuildOpts { steiner_mm: 0.0, ..BuildOpts::default() }).unwrap();
+    let conns = b.connections(&m);
+    let mut st = State::new(&b.proj);
+    let c = conns.iter().find(|c| c.net == 1).unwrap();
+    st.route_conn(c, &InitWeights::default(), (c.w + c.s) / 400_000.0).expect("routes");
+    let opts = Options::default();
+    let checker = Checker::new(&m, &opts);
+    let v = |x: f64, y: f64| Vec2 { x: x * MM, y: y * MM };
+    let none = BTreeSet::new();
+    // A traversal whose taut chord spans x = 10.
+    let mk = |layer: u32| {
+        let mut dr = Drawer::new(&m, &opts, &b, &st, &checker);
+        dr.commit(&track_item(2, layer, 0.25 * MM, v(4.0, 11.0), v(16.0, 11.0), None));
+        dr
+    };
+    let dr = mk(0);
+    let k = (0..=st.wires[0].passes.len())
+        .find(|&k| {
+            let ch = dr.taut_chord(0, k);
+            ch.len() >= 2 && ch.iter().any(|p| p.x <= 10.0 * MM) && ch.iter().any(|p| p.x >= 10.0 * MM)
+        })
+        .expect("a traversal over x = 10");
+    assert!(dr.taut_chord(0, k).iter().all(|p| (p.y - 10.0 * MM).abs() < 0.05 * MM), "{:?}", dr.taut_chord(0, k));
+    let (near, far) = (v(10.0, 10.4), v(10.0, 12.0));
+    let (ok, price) = dr.via_reach(0, k, near, 0, 1, &none);
+    assert!(ok && price == 0.0, "near site, free reach: {ok} {price}");
+    assert!(!dr.via_reach(0, k, far, 0, 1, &none).0, "far side of the drawn net-2 track on F.Cu: out of class");
+    // A net the plan crosses this wire with: its drawn track does not change the class (priced).
+    let crossed: BTreeSet<i32> = [2].into_iter().collect();
+    let (ok, price) = dr.via_reach(0, k, far, 0, 1, &crossed);
+    assert!(ok && price > 1.0, "crossed net: in class, its violation priced: {ok} {price}");
+    // The track on B.Cu: the run after the via (lb) reaches over it; with both runs on F.Cu it is clear.
+    let dr = mk(2);
+    assert!(!dr.via_reach(0, k, far, 0, 1, &none).0, "B.Cu track, reach on lb: out of class");
+    assert!(dr.via_reach(0, k, far, 0, 0, &none).0, "only F.Cu runs: in class");
+}

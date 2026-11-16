@@ -1388,7 +1388,7 @@ impl<'a> Drawer<'a> {
     /// The plan's (taut) chord of wire `o` in its traversal `k`: its taut crossing of the edge it
     /// enters by (or its terminal), the turn corners there, its taut crossing of the edge it
     /// leaves by (or its terminal). O(turns) after the cached taut path.
-    fn taut_chord(&self, o: WireId, k: usize) -> Vec<Vec2> {
+    pub fn taut_chord(&self, o: WireId, k: usize) -> Vec<Vec2> {
         let (st, pr) = (self.st, &self.b.proj);
         let oi = &st.wires[o];
         let n = oi.passes.len();
@@ -1918,7 +1918,7 @@ impl<'a> Drawer<'a> {
     /// p. 32: vias are fixed objects the topology is built round), so it is out of class.
     /// Price: the violation amounts of both reach segments ([`Viol::amount`], graded; 0 for a free
     /// reach). `crossed` = the nets the plan crosses `w` with. O(chord + objects nearby).
-    fn via_reach(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize, crossed: &std::collections::BTreeSet<i32>) -> (bool, f64) {
+    pub fn via_reach(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize, crossed: &std::collections::BTreeSet<i32>) -> (bool, f64) {
         let net = self.st.wires[w].net;
         let chord = self.taut_chord(w, k);
         let q = match chord.len() {
