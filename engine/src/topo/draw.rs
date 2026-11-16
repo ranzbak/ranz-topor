@@ -24,6 +24,7 @@
 //! checker query per segment (grid candidates). Deterministic (Vec + index ids).
 
 use super::board::Board;
+use super::erbs::poly_len;
 use super::pack::{infl_dir, layer_items, wire_discs, Disc, PackItem, Packer};
 use super::state::{EdgeId, PassId, State, TriId, VertId, VertKind, WireId};
 use crate::check::{CheckReport, Checker, ItemIndex, Violation};
@@ -469,6 +470,37 @@ pub struct DrawStats {
     /// Of `erbs_ok`: drawn in the ERBS's octilinear form because the any-angle ERBS missed the
     /// clearance to octilinear copper drawn before it.
     pub erbs_octi: usize,
+    /// M3 length factor ([`erbs_length_price`]): legal ERBS whose price passed `B (1 + g)`, so a
+    /// sequential run was drawn to compare; of those, the ERBS a cheaper sequential run replaced.
+    pub erbs_long: usize,
+    pub erbs_long_replaced: usize,
+}
+
+/// M3 length factor (`[drawing] erbs_length_weight` k): the price of a legal ERBS of length `le`
+/// over a band of length `lb`, `le (1 + k max(0, le/lb - 1)^2)`: a smooth price that grows with
+/// the factor `le / lb` and is the length itself up to the band (no cutoff). The ERBS is the
+/// shortest path of the band's class with the spoke tips as terminals (Dayan 1997, PDF pp. 25-26),
+/// so it stays near its band where the class is right; a wound one (a wrong class, many times its
+/// band) prices itself out against a sequential run. O(1).
+pub fn erbs_length_price(le: f64, lb: f64, k: f64) -> f64 {
+    if lb <= 0.0 {
+        return le;
+    }
+    let x = (le / lb - 1.0).max(0.0);
+    le * (1.0 + k.max(0.0) * x * x)
+}
+
+/// The sequential run that competes with a legal ERBS of price `pe` (band length `lb`,
+/// `[drawing] erbs_margin` g): it is drawn only when `pe` passes `lb (1 + g)` (a sequential run of
+/// the same class is not shorter than its band, so below that it cannot win), and it replaces the
+/// ERBS when its own length `ls` priced at `1 + g` (the room the ERBS keeps for the others) is
+/// below `pe`. `None` = not worth drawing; `Some(true)` = the sequential run replaces the ERBS.
+pub fn erbs_vs_sequential(pe: f64, lb: f64, g: f64, ls: Option<f64>) -> Option<bool> {
+    let g = g.max(0.0);
+    if lb > 0.0 && pe <= lb * (1.0 + g) {
+        return None;
+    }
+    Some(ls.is_some_and(|ls| ls * (1.0 + g) < pe))
 }
 
 /// Per-stretch widths that replace a wire's single width (the drawing witness, variant A: the
@@ -684,6 +716,10 @@ pub struct Drawer<'a> {
     /// M3 `[drawing] realise = "erbs"`: the ERBS of every wire's runs (`topo::erbs::realise`),
     /// tried before the attempt ladder.
     pub erbs: BTreeMap<WireId, Vec<super::erbs::RunBand>>,
+    /// M3 length factor: every legal ERBS a sequential run was drawn against (wire, layer, ERBS
+    /// length, band length, sequential length or NaN when none was legal, replaced), for the
+    /// `erbs_long` warning (core.rs).
+    pub erbs_long: Vec<(WireId, usize, f64, f64, f64, bool)>,
     /// M-B1 never drop: a run that no attempt draws legally, or a via without a legal site, is
     /// placed anyway on the attempt / site with the least `violation` price, and its violations
     /// are recorded ([`WireOut::viol`], [`Drawer::via_viol`]). Off: such a wire fails.
@@ -768,6 +804,7 @@ impl<'a> Drawer<'a> {
             via_site_tight: Default::default(),
             split_at: BTreeMap::new(),
             erbs: BTreeMap::new(),
+            erbs_long: Vec::new(),
             force: false,
             via_viol: BTreeMap::new(),
             octi: super::octi::OctiCfg::from_opts(opts),
@@ -2561,12 +2598,21 @@ impl<'a> Drawer<'a> {
             let pneck = self.plan_neck(w);
             // M3 `[drawing] realise = "erbs"`: the run's ERBS first (attempt -1), checked like any
             // attempt against the copper drawn so far; the ladder below is the counted fallback.
-            let band = self.erbs.get(&w).and_then(|v| v.iter().find(|b| b.layer == layer && (b.s - s).len() < 1000.0 && (b.e - e).len() < 1000.0)).map(|b| b.path.clone());
+            let rb = self.erbs.get(&w).and_then(|v| v.iter().find(|b| b.layer == layer && (b.s - s).len() < 1000.0 && (b.e - e).len() < 1000.0));
+            let band_len = rb.map_or(0.0, |b| b.band_len);
+            let band = rb.map(|b| b.path.clone());
+            // M3 length factor: a legal ERBS priced past its band waits here while the ladder
+            // draws a sequential run to compare (`erbs_vs_sequential`); the last step
+            // (`ERBS_KEPT`) draws it when no sequential run was legal. Nothing is committed while
+            // it waits, so its check stands. (price, length, points, items, plan neck, pad neck)
+            #[allow(clippy::type_complexity)]
+            let mut kept: Option<(f64, f64, Vec<Vec2>, Vec<Item>, Option<(f64, [f64; super::exact::NECK_ZONES])>, Option<(f64, [f64; 2])>)> = None;
+            const ERBS_KEPT: isize = 6;
             let ladder: Vec<isize> = if self.opts.realise == "erbs" {
                 if band.is_none() {
                     self.stats.erbs_none += 1;
                 }
-                std::iter::once(-1).chain(0..6).collect()
+                std::iter::once(-1).chain(0..6).chain(std::iter::once(ERBS_KEPT)).collect()
             } else {
                 (0..6).collect()
             };
@@ -2577,7 +2623,13 @@ impl<'a> Drawer<'a> {
                 // path is available), only when the plan necks the wire; 2 (only with
                 // `neck_in_drawing`, the behaviour before M-C): pad-end neck zones of the drawing's
                 // own; 3..5: S2a's funnel + repair attempts.
-                let pts = if attempt < 0 {
+                let restored = attempt == ERBS_KEPT;
+                if restored && kept.is_none() {
+                    continue;
+                }
+                let pts = if restored {
+                    kept.as_ref().map(|k| k.2.clone()).unwrap_or_default()
+                } else if attempt < 0 {
                     match &band {
                         Some(b) if b.len() >= 2 => {
                             let mut b = b.clone();
@@ -2610,8 +2662,10 @@ impl<'a> Drawer<'a> {
                 } else {
                     self.run_polyline(w, k0, k1, s, e, (attempt - 3) as usize, layer)
                 };
-                tried.push(pts.clone());
-                if attempt >= 3 {
+                if !restored {
+                    tried.push(pts.clone());
+                }
+                if attempt >= 3 && !restored {
                     let walls = self.via_walls(w, k0, k1, layer);
                     if pts.windows(2).any(|x| walls.iter().any(|&(c, d)| seg_proper(x[0], x[1], c, d))) {
                         last_reason = "drawing: passes a via of another net on the wrong side (topology)".to_string();
@@ -2622,9 +2676,9 @@ impl<'a> Drawer<'a> {
                     }
                 }
                 let (ps, pe) = (r == 0, r == plan.layers.len() - 1);
-                let mut items = self.run_items(w, layer, &pts);
-                let mut pneck_out: Option<(f64, [f64; super::exact::NECK_ZONES])> = None;
-                let full = self.checker.check_against(&self.idx, &items, &[]);
+                let mut items = if restored { kept.as_ref().map(|k| k.3.clone()).unwrap_or_default() } else { self.run_items(w, layer, &pts) };
+                let mut pneck_out: Option<(f64, [f64; super::exact::NECK_ZONES])> = if restored { kept.as_ref().and_then(|k| k.4) } else { None };
+                let full = if restored { CheckReport::default() } else { self.checker.check_against(&self.idx, &items, &[]) };
                 let mut rep = match &pneck {
                     _ if full.violations.is_empty() => full,
                     Some(pn) => match self.plan_neck_run(w, lid, &pts, pn) {
@@ -2658,7 +2712,7 @@ impl<'a> Drawer<'a> {
                         }
                     }
                 }
-                let mut neck: Option<(f64, [f64; 2])> = None;
+                let mut neck: Option<(f64, [f64; 2])> = if restored { kept.as_ref().and_then(|k| k.5) } else { None };
                 if !rep.violations.is_empty() && self.opts.neck_in_drawing && self.opts.neck_to_pad && (ps || pe) {
                     if let Some((wn, its, ls)) = self.neck_run(w, lid, &pts, ps, pe) {
                         items = its;
@@ -2678,7 +2732,7 @@ impl<'a> Drawer<'a> {
                     // M-45: the legal taut run redrawn octilinear where that keeps every rule
                     // (`super::octi`); else the taut run stays (its any-angle stretches priced).
                     let (mut pts, mut items, mut pneck_out) = (pts, items, pneck_out);
-                    if self.octi.on && neck.is_none() && pts.len() >= 2 {
+                    if self.octi.on && neck.is_none() && pts.len() >= 2 && !restored {
                         let t_o = std::time::Instant::now();
                         let wneck = if pneck_out.is_some() || attempt == 1 { pneck } else { None };
                         let exits = [if ps { self.pad_exit(w, 0, pts[1]) } else { None }, if pe { self.pad_exit(w, 1, pts[pts.len() - 2]) } else { None }];
@@ -2728,12 +2782,37 @@ impl<'a> Drawer<'a> {
                     }
                     // P6 (c): pulled taut in its corridor (no bumps, no spikes). An ERBS is taut
                     // by construction, and keeps the room of the wires not drawn yet.
-                    if self.opts.draw_pull_taut && neck.is_none() && attempt >= 0 {
+                    if self.opts.draw_pull_taut && neck.is_none() && attempt >= 0 && !restored {
                         if let Some((p2, its2, pn2)) = self.pull_taut(w, k0, k1, layer, lid, &pts, &pneck) {
                             self.stats.pulled += pts.len() - p2.len();
                             pts = p2;
                             items = its2;
                             pneck_out = pn2;
+                        }
+                    }
+                    // M3 length factor: the ERBS against a sequential run (`erbs_vs_sequential`).
+                    let mut src = if restored { -1 } else { attempt };
+                    let mut replaced = false;
+                    if attempt < 0 {
+                        let le = poly_len(&pts);
+                        let pe = erbs_length_price(le, band_len, self.opts.erbs_length_weight);
+                        if erbs_vs_sequential(pe, band_len, self.opts.erbs_margin, None).is_some() {
+                            self.stats.erbs_long += 1;
+                            kept = Some((pe, le, pts, items, pneck_out, neck));
+                            continue;
+                        }
+                    } else if restored {
+                        if let Some(k) = kept.take() {
+                            self.erbs_long.push((w, layer, k.1, band_len, f64::NAN, false));
+                        }
+                    } else if let Some(k) = kept.take() {
+                        let ls = poly_len(&pts);
+                        replaced = erbs_vs_sequential(k.0, band_len, self.opts.erbs_margin, Some(ls)) == Some(true);
+                        self.erbs_long.push((w, layer, k.1, band_len, ls, replaced));
+                        if replaced {
+                            self.stats.erbs_long_replaced += 1;
+                        } else {
+                            (pts, items, pneck_out, neck, src) = (k.2, k.3, k.4, k.5, -1);
                         }
                     }
                     let first = committed.len();
@@ -2762,14 +2841,16 @@ impl<'a> Drawer<'a> {
                             }
                         }
                     }
-                    if attempt < 0 {
+                    if src < 0 {
                         self.stats.erbs_ok += 1;
-                    } else if attempt <= 2 {
+                    } else if src <= 2 {
                         self.stats.exact_ok += 1;
                     } else {
                         self.stats.fallback_ok += 1;
                     }
-                    if attempt >= 0 && band.is_some() {
+                    // A run the length factor gave to a sequential run is no fallback (the check
+                    // did not reject its ERBS): `erbs_long_replaced` counts it.
+                    if src >= 0 && band.is_some() && !replaced {
                         self.stats.erbs_fallback += 1;
                     }
                     out.items.extend(items);

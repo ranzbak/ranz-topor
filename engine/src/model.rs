@@ -1286,6 +1286,16 @@ pub struct Options {
     /// draw order, the wires in Staepelaere's precedes order; the old ladder only where the
     /// checker rejects the band, counted).
     pub realise: String,
+    /// M3 (`[drawing] erbs_length_weight`): with realise = "erbs", the graded price of an ERBS
+    /// longer than its band: the drawing prices a legal ERBS of length `L` over a band of length
+    /// `B` at `L (1 + k max(0, L/B - 1)^2)` and keeps it unless a legal sequential run is cheaper
+    /// (`draw::erbs_length_price`). 0 = no length price (the ERBS's excess is still reported).
+    pub erbs_length_weight: f64,
+    /// M3 (`[drawing] erbs_margin`): with realise = "erbs", the share `g` by which a sequential
+    /// run's length is priced above its length when it competes with a legal ERBS (the room the
+    /// ERBS keeps for the others): the sequential run replaces the ERBS when `L_s (1 + g)` is
+    /// below the ERBS's price, and it is drawn only when the ERBS's price passes `B (1 + g)`.
+    pub erbs_margin: f64,
     /// M-45 (`[drawing] bundle_pull`): with the octilinear style, the share of a segment's length
     /// taken off its price where it runs beside a drawn trace of another net at the clearance, so
     /// a trace follows its neighbour and a bundle keeps its pitch through its bends (0 = off).
@@ -1510,6 +1520,8 @@ impl Default for Options {
             draw_pull_taut: true,
             lane_walls: "price".into(),
             realise: "sequential".into(),
+            erbs_length_weight: 1.0,
+            erbs_margin: 0.05,
             bundle_pull: 0.3,
             reserve_via_sites: true,
             mixed_clearance: "conservative".into(),

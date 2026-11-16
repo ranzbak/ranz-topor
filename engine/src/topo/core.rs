@@ -4555,6 +4555,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 ));
                 live = r.order.clone();
                 dr.erbs = r.runs;
+                if ctl.test_point("wind erbs") {
+                    // test-only fault: every ERBS runs its path three times (a wound band of the
+                    // same copper, legal and three times its band), for the length factor
+                    for rb in dr.erbs.values_mut().flatten() {
+                        let back: Vec<Vec2> = rb.path.iter().rev().skip(1).copied().collect();
+                        let fwd: Vec<Vec2> = rb.path.iter().skip(1).copied().collect();
+                        rb.path.extend(back);
+                        rb.path.extend(fwd);
+                    }
+                }
             }
             Err(e) => {
                 erbs_line = Some(format!("ERBS drawing ([drawing] realise = \"erbs\") not available, the sequential drawing instead: {e}"));
@@ -5409,7 +5419,34 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         ));
     }
     if let Some(l) = erbs_line {
-        warnings.push(format!("{l}; drawn: {} runs from their ERBS ({} in its octilinear form before the check), {} by the sequential attempts after the check rejected the ERBS, {} without an ERBS", dr.stats.erbs_ok, dr.stats.erbs_octi, dr.stats.erbs_fallback, dr.stats.erbs_none));
+        warnings.push(format!("{l}; drawn: {} runs from their ERBS ({} in its octilinear form before the check), {} by the sequential attempts after the check rejected the ERBS, {} without an ERBS, {} ERBS priced past their band against a sequential run ({} replaced by it)", dr.stats.erbs_ok, dr.stats.erbs_octi, dr.stats.erbs_fallback, dr.stats.erbs_none, dr.stats.erbs_long, dr.stats.erbs_long_replaced));
+    }
+    // M3 length factor (`draw::erbs_length_price`): every ERBS priced past its band, the longest
+    // over its band first (plugin finding ERBS_LONG).
+    if opts.realise == "erbs" && !dr.erbs_long.is_empty() {
+        let mut ls = dr.erbs_long.clone();
+        ls.sort_by(|a, b| (b.2 / b.3.max(1.0)).total_cmp(&(a.2 / a.3.max(1.0))));
+        let ex: Vec<String> = ls
+            .iter()
+            .take(5)
+            .map(|&(w, l, le, lb, sq, rep)| {
+                let what = if rep {
+                    format!("drawn sequential ({:.3} mm)", sq / 1e6)
+                } else if sq.is_nan() {
+                    "ERBS kept (no legal sequential run)".to_string()
+                } else {
+                    format!("ERBS kept (sequential {:.3} mm)", sq / 1e6)
+                };
+                format!("wire {w} layer {l}: ERBS {:.3} mm over band {:.3} mm (x{:.2}), {what}", le / 1e6, lb / 1e6, le / lb.max(1.0))
+            })
+            .collect();
+        warnings.push(format!(
+            "erbs_long: {} ERBS longer than their band past [drawing] erbs_margin, priced by erbs_length_weight against a sequential run: {} replaced by a cheaper sequential run, {} kept; {}",
+            ls.len(),
+            ls.iter().filter(|x| x.5).count(),
+            ls.iter().filter(|x| !x.5).count(),
+            ex.join("; ")
+        ));
     }
     // M3: a loud line whenever realise = "erbs" did not draw every run from its ERBS
     // (plugin finding ERBS_FALLBACK; the time limit's share is erbs_timeout's, ERBS_TIMEOUT).

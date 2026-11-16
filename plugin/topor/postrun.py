@@ -45,7 +45,7 @@ from .messages import MESSAGES
 #: every code route_findings can emit (the preview summary names those present)
 POSTRUN_CODES = ("DIFF_PAIRS", "DIFF_PAIRS_SKIPPED", "POUR_UNJOINED", "UNROUTED", "CONNECTION_WIDTH", "POUR_ISLANDS", "POUR_STITCHED", "PLANE_PAD_SIGNAL",
                  "PLANE_VIA_OUTSIDE_POUR", "VIA_SQUEEZE", "NECKED", "IGNORED_RULE", "VIOLATIONS", "TIME_BUDGET_HIT", "TIME_OVERRUN_CAP", "TIME_DRAWING_CUT", "DRC_NEW_VIOLATIONS", "RULES_MISMATCH",
-                 "ERBS_FALLBACK", "ERBS_TIMEOUT")
+                 "ERBS_FALLBACK", "ERBS_TIMEOUT", "ERBS_LONG")
 DIFF_PAIR_REASON = "diff pair: not in the rough version"  # engine/src/topo/core.rs DIFF_PAIR
 DRAWING_CUT_LINE = "WARNING: the drawing was cut by the hard time limit"  # engine/src/topo/core.rs DRAWING_CUT_LINE
 _ITEMS = 40  # items kept per finding (the report lists them; result.json keeps all engine lines)
@@ -195,6 +195,9 @@ def route_findings(result: dict | None) -> list:
     ef = lines("erbs_fallback: ")
     if ef:
         out.append(_mk("ERBS_FALLBACK", "ERBS drawing fell back to the sequential drawing: " + ef[0].removeprefix("erbs_fallback: ") + ".", ef))
+    el = lines("erbs_long: ")
+    if el:
+        out.append(_mk("ERBS_LONG", "ERBS drawing: " + el[0].removeprefix("erbs_long: ") + ".", el))
     et = lines("erbs_timeout: ")
     if et:
         out.append(_mk("ERBS_TIMEOUT", "ERBS drawing: " + et[0].removeprefix("erbs_timeout: ") + ".", et))
