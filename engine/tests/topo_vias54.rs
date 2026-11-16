@@ -242,3 +242,28 @@ fn via_pair_slide_two_vias() {
         clean(&m, &r.items);
     }
 }
+
+/// via_site_class (radii-m3-clear, user-approved): A from an F.Cu pad (2, 7) to a B.Cu pad (22, 7); P
+/// (0.5 mm, drawn first) F.Cu from (14, 1.5) to (14, 12.5); a B.Cu wall x 4..12.2 edge to edge. The via
+/// stands between the wall and P (12.975 +-0.35), never on the roomy side right of P (A's F.Cu run
+/// would cross P). Caveat: this may pass without the drawing's in-class rule (the plan's own site can
+/// be free); the rule's guard is topo_d2 `a_via_site_across_an_uncrossed_drawn_wire_is_out_of_class`.
+#[test]
+fn via_site_class_left_of_the_power_wire() {
+    let pads: Vec<P> = vec![
+        (1, 2.0, 7.0, 0.8, 0.8, 0),
+        (1, 22.0, 7.0, 0.8, 0.8, 2),
+        (2, 14.0, 1.5, 0.8, 0.8, 0),
+        (2, 14.0, 12.5, 0.8, 0.8, 0),
+        (3, 8.1, 7.0, 8.2, 13.0, 2),
+    ];
+    let m = board(24.0, 14.0, &pads, &[0.25, 0.5, 0.25]);
+    for lp in ["cycles", "topor"] {
+        let r = route_with(&m, &opts54(lp, false), &RunControl::new());
+        assert_eq!(r.failed, 0, "{lp}: {:?}", r.warnings);
+        let v = vias(&r.items);
+        assert_eq!(v.len(), 1, "{lp}: {v:?}");
+        assert!((v[0].0 - 12.975).abs() <= 0.35, "{lp}: {v:?}");
+        clean(&m, &r.items);
+    }
+}
