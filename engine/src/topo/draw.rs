@@ -1577,6 +1577,21 @@ impl<'a> Drawer<'a> {
                     continue;
                 }
                 self.stats.planned_sites_missed += 1;
+                if std::env::var("TOPO_VIADBG").is_ok() {
+                    // Diagnosis only: which test refused the planned site (first size).
+                    let sz = sizes[0];
+                    let item = via_item(net, p, sz, Some(w));
+                    let (la, lb) = (plan.layers[i], plan.layers[i + 1]);
+                    let rep = self.checker.check_against(&self.idx, std::slice::from_ref(&item), &[]);
+                    eprintln!(
+                        "VIAMISS wire {w} net {net} via {i} planned ({:.3},{:.3}) d {} side {} taut {} tight {} pair {} check {:?} hole {} own {} pairdisc {}",
+                        p.x / 1e6, -p.y / 1e6, sz.d,
+                        self.via_side_ok(w, k, p, la, lb), self.via_side_ok_taut(w, k, p, la, lb), self.via_site_tight.contains(&(w, i)),
+                        self.via_pair_price(w, out.last().copied(), &xs, k, p, sz),
+                        rep.violations.iter().take(3).map(|v| (v.against.clone(), v.gap, v.required)).collect::<Vec<_>>(),
+                        self.via_hole_ok(p, sz, net), self.via_own_pad_ok(p, sz, net), self.pair_via_ok(w, p, sz, net)
+                    );
+                }
                 // A site the relocation marked tight (no legal room on the plan's geometry,
                 // planned_crossing_window: the taut crossing lies outside the via window) tells
                 // nothing about where the next-best site is: the search runs as without a plan.
