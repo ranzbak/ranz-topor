@@ -432,6 +432,17 @@ enum Detour {
     Never,
 }
 
+/// The segments `a b` and `c d` cross or touch (an end on the other segment). O(1).
+fn seg_touch(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
+    let o = |p: Vec2, q: Vec2, r: Vec2| (q - p).cross(r - p);
+    let (o1, o2, o3, o4) = (o(a, b, c), o(a, b, d), o(c, d, a), o(c, d, b));
+    if o1 * o2 < 0.0 && o3 * o4 < 0.0 {
+        return true;
+    }
+    let on = |p: Vec2, q: Vec2, r: Vec2| seg_seg_dist(r, r, p, q) <= ON;
+    on(a, b, c) || on(a, b, d) || on(c, d, a) || on(c, d, b)
+}
+
 /// Distance under which a point counts as on a line (nm): its side is its label.
 const ON: f64 = 0.5;
 /// Half size of a detour round a point (nm).
@@ -660,6 +671,10 @@ fn sleeve(pp: &Points, rough: &[Vec2]) -> Result<Vec<(usize, usize)>, String> {
             if steps > cap {
                 return Err("the walk through the triangulation does not end".into());
             }
+            if steps + 12 > cap && sleeve_dbg() {
+                let f = topo.faces[fi];
+                eprintln!("  walk piece {wi} {:?} -> {:?}: face {:?} labels {:?} sides {:?}", a, b, f.map(|c| pos(c)), f.map(|c| lab(c)), f.map(|c| left_of(c, a, b)));
+            }
             let f = topo.faces[fi];
             if to_end && f.contains(&ce) {
                 return Ok(out.into_iter().map(|(l, r)| (inp[l], inp[r])).collect());
@@ -784,10 +799,15 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
             gates.push(Gate { a, b, w: x.w_tip, src: GateSrc::Cut(ci), p: c.p, q: c.q, p_left: a_left });
             // The band crosses the spoke `p a` (its crossing before `a` along the cut) or `b q`
             // (after `b`): the rough path goes round that tip from the crossing.
+            // A tip at a feature of an over-full cut this stretch is on (`skip`: the cut's squeeze
+            // is its predicted violation) asks for room the over-full cut does not have: the
+            // band keeps its side of it, no detour (qmtech: a 0.63 mm wire between two pads 0.7
+            // mm apart, the tips of their long cuts 0.505 mm from each pad on both sides, the
+            // ERBS wound round them, 4.6 x its band).
             let xb = band_cross(c, x);
             let at = x.t_band.clamp(0.0, 1.0) * c.cap;
-            let da = if at < lo - ON { Detour::From(xb) } else { Detour::Never };
-            let db = if at > hi + ON { Detour::From(xb) } else { Detour::Never };
+            let da = if at < lo - ON && !skip.contains(&c.fp) { Detour::From(xb) } else { Detour::Never };
+            let db = if at > hi + ON && !skip.contains(&c.fq) { Detour::From(xb) } else { Detour::Never };
             // A tip at its cut's end on one of the stretch's own terminal pads holds no room (no
             // item before it, no clearance to its own copper): the wire may pass over that pad.
             if !((a - c.p).len() < 1.0 && in_pad(c.p)) {
@@ -889,7 +909,13 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
             let root = ft.poly.iter().copied().min_by(|a, b| (*a - x).len2().total_cmp(&(*b - x).len2())).unwrap_or(x);
             let gi = gates.len();
             gates.push(Gate { a: x, b: x, w: s.w, src: GateSrc::Feature(f), p: root, q: root, p_left: left });
-            cand.push((x, left, gi, s.w, Detour::Auto));
+            // A grown point lies on the other side of the band than its feature only where the
+            // band runs between the two (it dips into the feature's clearance): then the rough
+            // path goes round it. Elsewhere its side is the band's own (a point past an end of
+            // the band, or off a short band's corner, sided by the extended pieces; qmtech: big
+            // pads 1-1.4 mm off a 0.5 mm band at a terminal, the ERBS 16 x its band).
+            let dips = band.windows(2).any(|w| seg_touch(w[0], w[1], x, root));
+            cand.push((x, left, gi, s.w, if dips { Detour::Auto } else { Detour::Never }));
         }
     }
 

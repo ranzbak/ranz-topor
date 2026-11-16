@@ -283,4 +283,14 @@ def test_erbs_fallback_and_timeout_are_loud():
     assert fs["ERBS_TIMEOUT"].severity == "warning" and "3 stretch(es)" in fs["ERBS_TIMEOUT"].message
     quiet = {f.code for f in postrun.route_findings({"connections": [_c("A", "routed")], "warnings": [
         "ERBS drawing ([drawing] realise = \"erbs\"; ...): 4 stretches; drawn: 4 runs from their ERBS"]})}
-    assert not quiet & {"ERBS_FALLBACK", "ERBS_TIMEOUT"}
+    assert not quiet & {"ERBS_FALLBACK", "ERBS_TIMEOUT", "ERBS_LONG"}
+
+
+def test_erbs_long_is_a_warning():
+    """M3 length factor: ERBS priced past their band (engine line erbs_long) are the finding ERBS_LONG."""
+    res = {"connections": [_c("A", "routed")], "warnings": [
+        "erbs_long: 2 ERBS longer than their band past [drawing] erbs_margin, priced by erbs_length_weight against a "
+        "sequential run: 1 replaced by a cheaper sequential run, 1 kept; wire 4 layer 0: ERBS 24.000 mm over band "
+        "8.000 mm (x3.00), drawn sequential (8.000 mm)"]}
+    fs = {f.code: f for f in postrun.route_findings(res)}
+    assert fs["ERBS_LONG"].severity == "warning" and "wire 4" in fs["ERBS_LONG"].message and "x3.00" in fs["ERBS_LONG"].message

@@ -3846,6 +3846,38 @@ mod tests {
         Vec2 { x, y }
     }
 
+    /// M3 length factor: the price is the length up to the band and grows smoothly (quadratic
+    /// in the excess) past it; a sequential run is drawn only past `B (1 + g)` and replaces the
+    /// ERBS only when its length priced at `1 + g` is below the ERBS's price.
+    #[test]
+    fn erbs_length_price_and_competition() {
+        assert_eq!(erbs_length_price(9.0, 10.0, 1.0), 9.0);
+        assert_eq!(erbs_length_price(10.0, 10.0, 1.0), 10.0);
+        assert!((erbs_length_price(12.0, 10.0, 1.0) - 12.0 * 1.04).abs() < 1e-9);
+        assert!((erbs_length_price(30.0, 10.0, 1.0) - 30.0 * 5.0).abs() < 1e-9);
+        assert!((erbs_length_price(12.0, 10.0, 2.0) - 12.0 * 1.08).abs() < 1e-9);
+        assert_eq!(erbs_length_price(12.0, 10.0, 0.0), 12.0);
+        assert_eq!(erbs_length_price(12.0, 0.0, 1.0), 12.0);
+        // smooth: no step anywhere past the band
+        let mut last = erbs_length_price(10.0, 10.0, 1.0);
+        for k in 1..400 {
+            let p = erbs_length_price(10.0 + k as f64 * 0.05, 10.0, 1.0);
+            assert!(p > last && p - last < 1.0, "{k}: {last} -> {p}");
+            last = p;
+        }
+        // below B (1 + g) no sequential run is drawn
+        assert_eq!(erbs_vs_sequential(10.4, 10.0, 0.05, None), None);
+        assert_eq!(erbs_vs_sequential(10.5, 10.0, 0.05, Some(1.0)), None);
+        // past it: drawn; replaced only when ls (1 + g) < pe
+        assert_eq!(erbs_vs_sequential(10.6, 10.0, 0.05, None), Some(false));
+        assert_eq!(erbs_vs_sequential(10.6, 10.0, 0.05, Some(10.0)), Some(true));
+        assert_eq!(erbs_vs_sequential(10.6, 10.0, 0.05, Some(10.2)), Some(false));
+        assert_eq!(erbs_vs_sequential(31.5, 10.0, 0.05, Some(30.0)), Some(false));
+        assert_eq!(erbs_vs_sequential(31.6, 10.0, 0.05, Some(30.0)), Some(true));
+        // no band: always compared
+        assert_eq!(erbs_vs_sequential(1.0, 0.0, 0.05, Some(0.9)), Some(true));
+    }
+
     #[test]
     fn funnel_is_straight_in_a_corridor() {
         // Travel along +x through two vertical portals: left = +y side, right = -y side.
