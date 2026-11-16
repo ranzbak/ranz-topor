@@ -104,9 +104,9 @@ connections still open (annealing with reheating; `[optimize] fluctuation`, `flu
 cut off counts as an error). When the best result gains less than `stable_gain_pct` over `stable_window` cycles the
 routes are *stable* (TopoR 6.3 manual p. 73: "Autorouting may be stopped"; not before level 5–10): the progress
 dialog says **Routes stable** and its Cancel button reads **OK** — the same action, the best result shown is exactly
-the board you get. The run also stops there by itself (`finish_when_stable`, `finish_patience` = 0 since M-B1, user
-2026-11-07: "When route stable appears it should stop indeed"; `finish_when_stable = false` keeps iterating for
-marginal gains until OK), and headless runs stop at stable. `[optimize] runs` (default 5) seeded runs go on in
+the board you get. With the dialog the run keeps iterating for marginal gains until OK / Cancel
+(user 2026-11-16: "don't stop on stable"; `finish_when_stable = true` makes it finish at stable by itself,
+`finish_patience`), and headless runs stop at stable. `[optimize] runs` (default 5) seeded runs go on in
 parallel on the engine's threads and the best by the pick (errors, vias, length) is offered; `[optimize] rounds` (30) is only a
 safety cap and `[run] timeout_s` (600 s) the emergency stop: runs on large boards (private-badge-b, qmtech with runs = 5) may hit it
 and keep the best result so far (`TIME_BUDGET_HIT`).
