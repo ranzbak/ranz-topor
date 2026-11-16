@@ -46,7 +46,7 @@
 //! Debug: `TOPO_RADII` puts the ERBS counts per layer in the cut report's summary;
 //! `TOPO_ERBS_DUMP=<dir>` writes every layer's ERBS (cut report: `erbs-<layer>.json`, drawing:
 //! `realise-L<n>.json`; read by `harness/erbs_accept.py`); `TOPO_ERBS_TIME` one line per stretch; `TOPO_ERBS_SLEEVE` the band, points, rough path,
-//! portals and path of every stretch (mm).
+//! portals and path of every stretch (mm; `TOPO_ERBS_SLEEVE=bad`: only failed stretches and those over 1.3 x their band).
 //!
 //! Complexity per stretch: O(n log n) for n obstacle points (the triangulation; the walk and the
 //! funnel are O(n)); per layer the check O(segments x neighbours in the grid cells).
@@ -62,6 +62,21 @@ use crate::geom::Vec2;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::f64::consts::{FRAC_PI_4, FRAC_PI_8, TAU};
+
+thread_local! {
+    /// Debug (`TOPO_ERBS_SLEEVE=bad`): the stretch is run again with its sleeve printed.
+    static SLEEVE_AGAIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Print the sleeve of this stretch: `TOPO_ERBS_SLEEVE` set (any value but `bad`), or the
+/// second run of a bad stretch under `TOPO_ERBS_SLEEVE=bad`.
+fn sleeve_dbg() -> bool {
+    match std::env::var_os("TOPO_ERBS_SLEEVE") {
+        Some(v) if v == "bad" => SLEEVE_AGAIN.with(|c| c.get()),
+        Some(_) => true,
+        None => false,
+    }
+}
 
 /// ERBS options.
 #[derive(Clone, Debug)]
@@ -662,7 +677,7 @@ fn sleeve(pp: &Points, rough: &[Vec2]) -> Result<Vec<(usize, usize)>, String> {
                 }
             }
             let Some((l, r)) = next else {
-                if std::env::var_os("TOPO_ERBS_SLEEVE").is_some() {
+                if sleeve_dbg() {
                     eprintln!("  no exit: face {:?} labels {:?} seg {:?} -> {:?}", f.map(|c| pos(c)), f.map(|c| lab(c)), a, b);
                 }
                 return Err("no exit edge (the path runs along a vertex of both sides)".into());
@@ -885,7 +900,7 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
 
     // 2. The rough path and its sleeve, 3. the funnel.
     let rough = rough_path(band, &pp);
-    let dbg = std::env::var_os("TOPO_ERBS_SLEEVE").is_some();
+    let dbg = sleeve_dbg();
     let mm = |p: Vec2| (p.x / 1e6, p.y / 1e6);
     if dbg {
         eprintln!("ERBS sleeve st {si}: band {:?}", band.iter().map(|&p| mm(p)).collect::<Vec<_>>());
@@ -911,7 +926,7 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
         at.push(i.and_then(|i| pp.gate[i]));
     }
     let path = simplify(&pts, 0.5);
-    if std::env::var_os("TOPO_ERBS_SLEEVE").is_some() {
+    if dbg {
         eprintln!("  path {:?}", path.iter().map(|&p| (p.x / 1e6, p.y / 1e6)).collect::<Vec<_>>());
     }
     Ok(Erbs { stretch: si, len: poly_len(&path), band_len: poly_len(band), pts, w, at, path, gate_list: gates, points: n_obs, portals: portals.len(), conflicts: pp.conflicts, through, converged: true })
@@ -963,6 +978,14 @@ pub fn erbs_layer_with(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &Lay
         let t = std::time::Instant::now();
         let s = &sts[si];
         let r = erbs_stretch(sh, &fg, fclear, s, si, o, per.get(&si).unwrap_or(&none), &radius, squeezed.get(&si).unwrap_or(&no_skip), opts);
+        // Debug: `TOPO_ERBS_SLEEVE=bad` prints the sleeve of a failed stretch or one longer
+        // than 1.3 x its band (run again with the print on).
+        if std::env::var_os("TOPO_ERBS_SLEEVE").is_some_and(|v| v == "bad") && r.as_ref().map_or(true, |e| e.len > 1.3 * e.band_len) {
+            eprintln!("ERBS bad st {si} wire {} net {} layer {}: {}", s.wire, s.net, sh.l, r.as_ref().map_or_else(|m| m.clone(), |e| format!("len {:.3} mm band {:.3} mm", e.len / 1e6, e.band_len / 1e6)));
+            SLEEVE_AGAIN.with(|c| c.set(true));
+            let _ = erbs_stretch(sh, &fg, fclear, s, si, o, per.get(&si).unwrap_or(&none), &radius, squeezed.get(&si).unwrap_or(&no_skip), opts);
+            SLEEVE_AGAIN.with(|c| c.set(false));
+        }
         if time {
             match &r {
                 Ok(e) => eprintln!("ERBS time st {si} wire {} points {} portals {} conflicts {} len/band {:.4} {:.2} ms", s.wire, e.points, e.portals, e.conflicts, e.len / e.band_len.max(1.0), t.elapsed().as_secs_f64() * 1e3),
