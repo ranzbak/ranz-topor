@@ -1660,6 +1660,16 @@ mod tests {
     /// User 2026-11-13: direct engine callers get the overrun cap by default ("auto" =
     /// `wall_clock_s`); the KiCad dialog passes 0 (no cap). JSON says "auto", "none" or seconds.
     #[test]
+    fn the_limit_grace_defaults_to_30_s_and_reads_a_number() {
+        let o = Options::default();
+        assert_eq!(o.limit_grace_s, 30.0);
+        assert_eq!(serde_json::to_value(&o).unwrap()["limit_grace_s"], 30.0);
+        assert_eq!(Options::from_json(r#"{"limit_grace_s": 0}"#).map(|o| o.limit_grace_s), Ok(0.0));
+        assert_eq!(Options::from_json(r#"{"limit_grace_s": -1}"#).map(|o| o.limit_grace_s), Ok(-1.0));
+        assert_eq!(Options::from_json("{}").map(|o| o.limit_grace_s), Ok(30.0));
+    }
+
+    #[test]
     fn the_overrun_cap_is_auto_by_default_and_reads_auto_none_or_seconds() {
         let o = Options::default();
         assert_eq!(o.timeout_overrun_s, super::OVERRUN_AUTO);
