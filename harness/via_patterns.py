@@ -629,7 +629,9 @@ def p_class() -> VPat:
     A1, A2 = (2.0, y0), (22.0, y0)
     xp, wp = 14.0, 0.5
     xw0, xw1 = 4.0, 12.2
-    P1, P2 = (xp, EDGE + 1.0), (xp, H - EDGE - 1.0)
+    # P's pads touch the copper-to-edge band: nothing passes round P's ends (a first draft left 0.6 mm there and the
+    # router legally took A round P's top end, 25 mm instead of 20).
+    P1, P2 = (xp, EDGE + 0.4), (xp, H - EDGE - 0.4)
     fps = [terminal("A1", "A", *A1), terminal("A2", "A", *A2, layer="B.Cu"),
            terminal("P1", "P", *P1), terminal("P2", "P", *P2),
            strip("N", "NB", (xw0 + xw1) / 2, EDGE, H - EDGE, w=xw1 - xw0, layer="B.Cu")]
