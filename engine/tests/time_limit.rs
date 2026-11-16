@@ -42,7 +42,7 @@ fn a_raised_limit_lets_the_run_continue_and_a_lowered_one_stops_it() {
     assert_eq!(r.stop_reason, "timeout", "{:?}", r.warnings);
     assert!(r.timed_out);
     let hit = r.warnings.iter().find(|w| w.starts_with("time budget hit")).expect("time budget hit warning");
-    assert!(hit.contains("changed during the run") && hit.contains("run.timeout_s = 2 s"), "{hit}");
+    assert!(hit.contains("changed during the run") && hit.contains("[run] timeout_s = 2 s"), "{hit}");
     assert!(r.routed > 0, "the best result so far is kept");
 }
 

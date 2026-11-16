@@ -199,6 +199,32 @@ fn rings_and_headers_are_no_bga() {
     assert!(forced.len() == 1 && forced[0].ref_ == "J4" && forced[0].forced);
 }
 
+/// verify-m2 F2: the soft time limit (M2.TL, default) cuts no step, the plane stubs included
+/// (placed first, before the topology): a limit already passed when the run begins places every
+/// stub, as without a limit; the initial routing needs them for a complete plan.
+#[test]
+fn a_soft_limit_passed_before_the_run_places_every_plane_stub() {
+    let a = |deg: f64| {
+        let r = deg.to_radians();
+        (12.0 + 1.5 * r.cos(), 12.0 + 1.5 * r.sin())
+    };
+    let (p1, p2, p3) = (a(-90.0), a(30.0), a(150.0));
+    let m = board(24.0, 24.0, &[("R1", 1, p1.0, p1.1, 1.0), ("R2", 1, p2.0, p2.1, 1.0), ("R3", 1, p3.0, p3.1, 1.0)], &[(1, 2, 0.5, 0.5, 23.5, 23.5, &[])]);
+    // MERGE: main renamed the line "shared plane vias ([planes] share_vias)"; both are matched
+    // (verify-m2c 2), and the unlimited run below must have it (a loud failure, never None == None).
+    let planes = |r: &topor_engine::route::RouteResult| r.warnings.iter().find(|w| ["planes as terminals ([planes] terminals)", "shared plane vias ([planes] share_vias)"].iter().any(|p| w.starts_with(p))).cloned();
+    let free = route_with(&m, &Options::default(), &RunControl::new());
+    assert!(planes(&free).is_some_and(|w| w.ends_with("1 stub via(s) for 3 plane pad(s)")), "{:?}", free.warnings);
+    // what tests/topo_m2_draw_once.rs plane_stubs() relies on: stub vias placed = a planes line
+    assert!(free.warnings.iter().any(|w| w.starts_with("via reduction after drawing:") && !w.contains("; 0 plane stub vias")), "{:?}", free.warnings);
+    let ctl = RunControl::new();
+    ctl.limit.init(1e-6);
+    let late = route_with(&m, &Options::default(), &ctl);
+    assert!(late.limit.as_ref().is_some_and(|l| l.reached && l.mode == "soft" && l.cut == "none"), "{:?}", late.limit);
+    assert_eq!(planes(&late), planes(&free), "the soft limit cut the plane stubs");
+    assert_eq!((late.routed, vias(&late.items)), (free.routed, vias(&free.items)));
+}
+
 /// A VCC pad 15 mm left of a VCC pour (F.Cu, x >= 18) that holds the other VCC pad: the pad is
 /// wired to the pour's near edge (the trace ends inside the fill, ~15.5 mm), not through the
 /// pour to the other pad (20 mm).

@@ -36,6 +36,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+from .buildinfo import display_version
 from .findings import Finding
 from .ports import PadRef, Selection
 
@@ -153,7 +154,7 @@ def run_gui(shipped_version: str | None, engine=None, *, ui=None, connect=None) 
     if not callable(splash):
         def splash(*_a, **_kw):
             return None
-    splash("Starting the router…", shipped_version)
+    splash("Starting the router…", display_version(shipped_version))
     from . import messages
     from .ipc import IpcBoard
     from .run import run

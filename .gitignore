@@ -11,3 +11,4 @@ docs/literature/
 .pytest_cache/
 *.egg-info/
 .claude/
+plugin/topor/_build_info.py

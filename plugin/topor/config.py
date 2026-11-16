@@ -56,6 +56,11 @@ def coerce(s: Setting, raw):
     v = raw
     if s.key == "timeout_s" and isinstance(raw, str) and raw.strip().lower() == "none":
         return 0.0, None
+    if s.key == "timeout_overrun_s" and isinstance(raw, str):  # F3: "auto" (the default), "none" = 0 = no cap
+        word = raw.strip().lower()
+        if word in ("auto", "none"):
+            return ("auto" if word == "auto" else 0.0), None
+        return s.default, 'must be a number of seconds, "auto" or "none"'
     if s.type == "bool":
         if not isinstance(raw, bool):
             err = "must be true or false"

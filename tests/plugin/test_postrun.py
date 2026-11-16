@@ -118,6 +118,19 @@ def test_island_join_is_a_stitch():
     assert "1 of those join(s) run more than 3 mm from the pad" in msg
 
 
+def test_a_drawing_cut_by_the_hard_limit_is_a_loud_finding():
+    """verify-m2c 3: the engine's line (engine/tests/topo_m2_draw_once.rs pins its words) becomes TIME_DRAWING_CUT,
+    with the counts and what to change for a complete board."""
+    line = ("WARNING: the drawing was cut by the hard time limit (the drawing of the traces): 12 of 60 connections "
+            "drawn, 48 left undrawn by the cut; use [run] timeout_mode = \"soft\" or a longer [run] timeout_s for a "
+            "complete board (the drawing began before the limit and ran past it)")
+    fs = {f.code: f for f in postrun.route_findings({"connections": [_c("SIG", "routed")], "warnings": [line]})}
+    f = fs["TIME_DRAWING_CUT"]
+    assert f.severity == "warning" and "12 of 60 connections drawn" in f.message and "timeout_mode" in f.message
+    assert f.fix == MESSAGES["TIME_DRAWING_CUT"].fix and "soft" in f.fix
+    assert postrun.DRAWING_CUT_LINE == "WARNING: the drawing was cut by the hard time limit"
+
+
 def test_route_findings_quiet_on_a_clean_run():
     res = {"connections": [_c("A", "routed")], "warnings": [
         "pour stitching: 0 pour pieces cut off by the routed copper before, 0 after; 0 island vias, 0 pad stubs, "

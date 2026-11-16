@@ -534,6 +534,24 @@ def test_progress_names_the_engine_stage_round_and_times(app):
         dlg.Destroy()
 
 
+def test_progress_says_the_soft_time_limit_is_waiting_for_the_step(app):
+    """M2.TL (user 2026-11-13): when the limit is reached the dialog names the step the engine finishes and says
+    Cancel stops now; after Cancel it says Cancel again, not the limit."""
+    dlg = ui_wx.ProgressDialog("qmtech", 600.0, 4)
+    try:
+        p = Progress("route", 1, 120, 426, 30, 601.0, "layer assignment, rip-up and reroute", 1, 4, 610.0)
+        p.limit_reached = True
+        p.notice = "time limit reached, waiting for the current step to finish (layer assignment, rip-up and reroute); press Cancel to stop now"
+        dlg.update(p)
+        assert dlg.phase.GetLabel() == ("Time limit reached, waiting for the current step to finish (layer assignment, "
+                                        "rip-up and reroute); press Cancel to stop now")
+        dlg.cancelled = True
+        dlg.update(p)
+        assert not dlg.phase.GetLabel().startswith("Time limit reached"), dlg.phase.GetLabel()
+    finally:
+        dlg.Destroy()
+
+
 def test_progress_routes_stable_turns_cancel_into_ok(app):
     """M-B0 (user 2026-11-06): when the gain is below the threshold the dialog shows "Routes stable" and the
     Cancel button reads OK; same action (stop, keep the best result so far, which the dialog shows)."""
