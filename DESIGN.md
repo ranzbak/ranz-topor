@@ -59,8 +59,20 @@ erbs_deadline_and_stop; judge patterns (4, both modes) at 1.000 / 0 violations; 
    it cannot satisfy it). qmtech: 0.63 mm wire between pads 0.7 mm apart, long cuts' tips 0.505 mm from both
    pads, the ERBS wound round them (4.6 x).
 
+4b. **Pad exit** (added after the lead's OK, sent before the board run): a feature whose clearance zone holds a
+   terminal of the stretch (`poly_dist(terminal, feature) < w/2 + clearance`, or the terminal inside it) is in
+   the stretch's `exit` set: it gets no spoke tips and no grown-point detour, like a `skip` feature. Its
+   violations are predicted (they are the neck's own: the wire is wider than the room at the pad), counted in
+   the ERBS line, and the drawing's neck handles them as today. qmtech st 47: 0.63 mm wire leaving a 0.3 mm pad
+   at 0.5 mm pitch; both neighbours' long-cut tips lie 0.5 mm off the terminal on both sides, the ERBS wound
+   round them. Dayan PDF p. 33: spoke creation detects the violation, it cannot satisfy it.
+5. **Arcs round a feature wrapped from inside** (extends 2): no arc samples at all at a vertex whose feature
+   the band crosses or wraps from inside (`through`); the wrap's vertex stays a point of the path.
+
 ### Invariants
 - The class of the plan is never changed by a point the band is not separated from by a spoke (3, 4).
+- Over-full and pad-exit violations are never silently passed: predicted, counted in the ERBS line, and the
+  0.7 mm-pads test (`erbs_squeezed_pads_keep_the_band_and_the_finding`) asserts they stay findings.
 - A legal ERBS is never dropped for its length; it competes on a smooth price (1).
 
 ### Tests
