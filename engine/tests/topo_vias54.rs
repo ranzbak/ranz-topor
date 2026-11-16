@@ -262,8 +262,19 @@ fn via_site_class_left_of_the_power_wire() {
         let r = route_with(&m, &opts54(lp, false), &RunControl::new());
         assert_eq!(r.failed, 0, "{lp}: {:?}", r.warnings);
         let v = vias(&r.items);
-        assert_eq!(v.len(), 1, "{lp}: {v:?}");
-        assert!((v[0].0 - 12.975).abs() <= 0.35, "{lp}: {v:?}");
+        let lay: Vec<(u32, i32, (f64, f64), (f64, f64))> = r
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Track(t) => match t.prim {
+                    topor_engine::geom::quant::TrackPrim::Seg { a, b } => Some((t.layer, t.net, (a.x as f64 / MM, a.y as f64 / MM), (b.x as f64 / MM, b.y as f64 / MM))),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(v.len(), 1, "{lp}: {v:?} {lay:?}");
+        assert!((v[0].0 - 12.975).abs() <= 0.35, "{lp}: vias {v:?} tracks {lay:?} warnings {:?}", r.warnings);
         clean(&m, &r.items);
     }
 }
