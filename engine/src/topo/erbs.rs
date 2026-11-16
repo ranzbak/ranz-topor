@@ -90,11 +90,14 @@ pub struct ErbsOpts {
     /// drawing passes it only while a Cancel may still stop the drawing (not in the TopoR loop's
     /// one drawing, which runs through, core.rs `draw_through`).
     pub stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Test-only: the first stretch of the layer fails ("injected sleeve failure"), to see its
+    /// reason reach `failed` and the ERBS_FALLBACK line. Always false in real runs.
+    pub fail_first: bool,
 }
 
 impl Default for ErbsOpts {
     fn default() -> Self {
-        ErbsOpts { arc_step_deg: 22.5, deadline: None, stop: None }
+        ErbsOpts { arc_step_deg: 22.5, deadline: None, stop: None, fail_first: false }
     }
 }
 
@@ -1062,7 +1065,11 @@ pub fn erbs_layer_with(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &Lay
         }
         let t = std::time::Instant::now();
         let s = &sts[si];
-        let r = erbs_stretch(sh, &fg, fclear, s, si, o, per.get(&si).unwrap_or(&none), &radius, squeezed.get(&si).unwrap_or(&no_skip), opts);
+        let r = if opts.fail_first && out.es.is_empty() && out.failed.is_empty() {
+            Err("injected sleeve failure (test hook)".to_string())
+        } else {
+            erbs_stretch(sh, &fg, fclear, s, si, o, per.get(&si).unwrap_or(&none), &radius, squeezed.get(&si).unwrap_or(&no_skip), opts)
+        };
         // Debug: `TOPO_ERBS_SLEEVE=bad` prints the sleeve of a failed stretch or one longer
         // than 1.3 x its band (run again with the print on).
         if std::env::var_os("TOPO_ERBS_SLEEVE").is_some_and(|v| v == "bad") && r.as_ref().map_or(true, |e| e.len > 1.3 * e.band_len) {
@@ -1272,9 +1279,15 @@ pub fn check_layer(sh: &LayerSheet, sts: &[Stretch], o: &LayerOrder, es: &[Erbs]
     for d in &o.report.examples {
         pred_pair.insert((d.a.min(d.b), d.a.max(d.b)));
     }
+    // Through features: predicted along the whole stretch. Exit features (rule 4b): only at the
+    // pad exit (`exit_run`), not along the stretch.
+    let mut pred_exit: BTreeSet<(usize, usize)> = BTreeSet::new();
     for e in es {
-        for &f in e.through.iter().chain(&e.exit) {
+        for &f in &e.through {
             pred_feat.insert((e.stretch, f));
+        }
+        for &f in &e.exit {
+            pred_exit.insert((e.stretch, f));
         }
     }
     // Segments: (erbs index, point index), width, half reach.
@@ -1289,9 +1302,38 @@ pub fn check_layer(sh: &LayerSheet, sts: &[Stretch], o: &LayerOrder, es: &[Erbs]
         grid.insert(lo, hi, id);
     }
     let seg_w = |i: usize, k: usize| es[i].w[k].min(es[i].w[k + 1]);
-    let mut worst: BTreeMap<(usize, Party), Violation> = BTreeMap::new();
+    // Rule 4b: the pad exit of ERBS `i` at exit feature `f` = the segments from either end that
+    // violate `f` without a break (the neck's own violation, as long as the wire runs along the
+    // neighbour); the rest of the stretch is not predicted. Returns (a, b): segments < a or >= b.
+    let exit_run = |i: usize, f: usize| -> (usize, usize) {
+        let sa = &sts[es[i].stretch];
+        let n = es[i].pts.len() - 1;
+        let viol = |k: usize| -> bool {
+            let (p, q) = (es[i].pts[k], es[i].pts[k + 1]);
+            let it = Item { net: sa.net, w: seg_w(i, k), s: sa.s };
+            if sh.edge_feat == Some(f) {
+                match sh.feats[f].bound {
+                    Bound::Edge { clear } => sh.outline.iter().any(|&(a, b)| seg_seg_dist(p, q, a, b) < 0.5 * it.w + clear - 1.0),
+                    _ => false,
+                }
+            } else {
+                let cl = sh.feats[f].bound.clearance(&it);
+                cl > 0.0 && seg_poly_dist(p, q, &sh.feats[f].poly) < 0.5 * it.w + cl - 1.0
+            }
+        };
+        let mut a = 0;
+        while a < n && viol(a) {
+            a += 1;
+        }
+        let mut b = n;
+        while b > a && viol(b - 1) {
+            b -= 1;
+        }
+        (a, b)
+    };
+    let mut worst: BTreeMap<(usize, Party, bool), Violation> = BTreeMap::new();
     let mut put = |v: Violation| {
-        let e = worst.entry((v.stretch, v.other)).or_insert(v);
+        let e = worst.entry((v.stretch, v.other, v.predicted)).or_insert(v);
         if v.amount > e.amount {
             *e = v;
         }
@@ -1335,7 +1377,7 @@ pub fn check_layer(sh: &LayerSheet, sts: &[Stretch], o: &LayerOrder, es: &[Erbs]
             let req = 0.5 * it.w + cl;
             let dist = seg_poly_dist(a, b, &ft.poly);
             if dist < req - 1.0 {
-                put(Violation { stretch: si, other: Party::Feature(f), at: (a + b) * 0.5, amount: req - dist, predicted: pred_feat.contains(&(si, f)) });
+                put(Violation { stretch: si, other: Party::Feature(f), at: (a + b) * 0.5, amount: req - dist, predicted: pred_feat.contains(&(si, f)) || (pred_exit.contains(&(si, f)) && { let (x, y) = exit_run(i, f); k < x || k >= y }) });
             }
         }
         if let Some(ef) = sh.edge_feat {
@@ -1344,7 +1386,7 @@ pub fn check_layer(sh: &LayerSheet, sts: &[Stretch], o: &LayerOrder, es: &[Erbs]
                 for &(p, q) in &sh.outline {
                     let dist = seg_seg_dist(a, b, p, q);
                     if dist < req - 1.0 {
-                        put(Violation { stretch: si, other: Party::Edge, at: (a + b) * 0.5, amount: req - dist, predicted: pred_feat.contains(&(si, ef)) });
+                        put(Violation { stretch: si, other: Party::Edge, at: (a + b) * 0.5, amount: req - dist, predicted: pred_feat.contains(&(si, ef)) || (pred_exit.contains(&(si, ef)) && { let (x, y) = exit_run(i, ef); k < x || k >= y }) });
                     }
                 }
             }
@@ -1549,7 +1591,7 @@ pub fn precedes_order(given: &[usize], before: &BTreeSet<(usize, usize)>) -> Vec
 /// the drawing's placed vias (sheets with the via discs, bands, cut items), the order, tips and
 /// radii (steps a, b), the ERBS per layer and their check, and the precedes order of `given`.
 #[allow(clippy::too_many_arguments)]
-pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], packer: &super::pack::Packer, bottom: i32, conn: &dyn Fn(usize) -> Option<usize>, placed: &BTreeMap<usize, Vec<(usize, Vec2)>>, outline: &[(Vec2, Vec2)], mo: &super::cutflow::MeasureOpts, layers: &[usize], given: &[usize], deadline: Option<std::time::Instant>, stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) -> Result<Realised, String> {
+pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], packer: &super::pack::Packer, bottom: i32, conn: &dyn Fn(usize) -> Option<usize>, placed: &BTreeMap<usize, Vec<(usize, Vec2)>>, outline: &[(Vec2, Vec2)], mo: &super::cutflow::MeasureOpts, layers: &[usize], given: &[usize], deadline: Option<std::time::Instant>, stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>, fail_first: bool) -> Result<Realised, String> {
     let t0 = std::time::Instant::now();
     let none: Vec<Vec<usize>> = Vec::new();
     let plan = super::cutflow::Plan { st, events, via_k: &none, bottom, packer, conn, placed: Some(placed) };
@@ -1559,7 +1601,7 @@ pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], pac
     let mut before: BTreeSet<(usize, usize)> = BTreeSet::new();
     for (lf, o) in m.layers.iter().zip(&ords) {
         out.unbanded += lf.walk_failed;
-        let eo = ErbsOpts { deadline, stop: stop.clone(), ..ErbsOpts::default() };
+        let eo = ErbsOpts { deadline, stop: stop.clone(), fail_first, ..ErbsOpts::default() };
         let le = erbs_layer_with(&lf.sheet, &m.stretches, &lf.stretches, o, &eo);
         out.timed_out += le.timed_out;
         let vs = check_layer(&lf.sheet, &m.stretches, o, &le.es);

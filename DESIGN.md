@@ -49,14 +49,15 @@ erbs_deadline_and_stop; judge patterns (4, both modes) at 1.000 / 0 violations; 
 2. **Arc of a wrap whose feature the band runs through / wraps from inside**: no feature exit offset (the rays
    of the wedge run over the body; esp L0 st 6: samples at 1.09 mm round a 0.31 mm pad, 3.7 x band).
 3. **Grown feature point = spoke end of the feature**: the rough path goes round it only when the band crosses
-   the spoke (the segment from the feature vertex it was grown from to the point). Dayan 1997 PDF p. 33
-   (printed p. 22): spokes "push wires away from fixed objects"; PDF p. 32: a band that crosses a spoke goes
-   round its end. A point the band does not separate from its feature (past a band end, off a short band's
+   the spoke (the segment from the feature vertex it was grown from to the point). Dayan 1997 PDF p. 32
+   (printed p. 21): spokes "push wires away from fixed objects"; the rule that only a band separating a spoke tip
+   from its root goes round the tip follows from spokes as artificial terminals and the routability iff
+   (PDF pp. 25-26, Fig. 6). A point the band does not separate from its feature (past a band end, off a short band's
    corner, sided only by the extended pieces) keeps the band's side (qmtech: 1-1.4 mm detours, 16 x band).
 4. **Tips at a squeezed feature**: a spoke tip at a feature of an over-full cut the stretch is on (`skip`, the
    cut's squeeze is its predicted violation) is no detour, as the feature itself is already left out (the
-   over-full cut has not the room the tip asks for; Dayan PDF p. 33: spoke creation detects the violation,
-   it cannot satisfy it). qmtech: 0.63 mm wire between pads 0.7 mm apart, long cuts' tips 0.505 mm from both
+   over-full cut has not the room the tip asks for; Dayan PDF pp. 25-26: an ERBS satisfies the spacing iff the class is routable,
+   so an over-full class cannot be made legal by spokes; spoke creation, PDF p. 32, only detects it). qmtech: 0.63 mm wire between pads 0.7 mm apart, long cuts' tips 0.505 mm from both
    pads, the ERBS wound round them (4.6 x).
 
 4b. **Pad exit** (added after the lead's OK, sent before the board run): a feature whose clearance zone holds a
@@ -65,7 +66,8 @@ erbs_deadline_and_stop; judge patterns (4, both modes) at 1.000 / 0 violations; 
    violations are predicted (they are the neck's own: the wire is wider than the room at the pad), counted in
    the ERBS line, and the drawing's neck handles them as today. qmtech st 47: 0.63 mm wire leaving a 0.3 mm pad
    at 0.5 mm pitch; both neighbours' long-cut tips lie 0.5 mm off the terminal on both sides, the ERBS wound
-   round them. Dayan PDF p. 33: spoke creation detects the violation, it cannot satisfy it.
+   round them. Dayan PDF pp. 25-26 (ERBS legal iff the class is routable; a neck-violating class is not); PDF p. 32: spoke creation checks, it does not repair.
+   The violations are predicted at the pad exit only (within w/2 + clearance of the band's end), not along the stretch.
 5. **Arcs round a feature wrapped from inside** (extends 2): no arc samples at all at a vertex whose feature
    the band crosses or wraps from inside (`through`); the wrap's vertex stays a point of the path.
 

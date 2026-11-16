@@ -1519,9 +1519,44 @@ mod tests {
         assert_eq!(es.len(), 1);
         assert_eq!(es[0].exit.len(), 2, "both neighbours are pad-exit features: {:?} band {:?} feats {:?}", es[0].exit, sts[0].band, sh.feats.iter().map(|f| (f.poly.clone(), f.bound.clearance(&crate::topo::demand::Item { net: 100, w: 0.63e6, s: 0.2e6 }))).collect::<Vec<_>>());
         assert!(es[0].len <= 1.02 * es[0].band_len, "ERBS {} over band {}: {:?}", es[0].len, es[0].band_len, es[0].path);
+        // Rule 4b also keeps the exit features out of the grown points (1c): the corner of a
+        // neighbour grown by w/2 + clearance lies 14 um past the band, the band's crossing of its
+        // spoke would bend the path round it (a vertex off x = 0).
+        assert!(es[0].path.iter().all(|p| p.x.abs() < 1.0), "the straight band bent round a grown point of an exit feature: {:?}", es[0].path);
         let vs = check_layer(&sh, &sts, &o, &es);
         let nb: Vec<_> = vs.iter().filter(|x| matches!(x.other, Party::Feature(f) if es[0].exit.contains(&f))).collect();
         assert!(!nb.is_empty() && nb.iter().all(|x| x.predicted), "{vs:?}");
+    }
+
+    /// Rule 4b predicts the violations of an exit feature at the pad exit only: the run of
+    /// segments from the end of the ERBS that violate it without a break. A violation of the same
+    /// feature further along (the path left the neighbour and came back) is an `erbs_gap`.
+    #[test]
+    fn erbs_exit_violations_predicted_at_the_exit_only() {
+        let obs = vec![
+            (rect(-0.15, -1.5, 0.15, 0.0), 100),
+            (rect(0.35, -1.5, 0.65, 0.0), 1),
+            (pad(-3.0, 1.5), 3),
+            (pad(3.0, 1.5), 4),
+            (pad(0.0, 4.0), 100),
+        ];
+        let curves = vec![vec![v(0.0, -0.75), v(0.0, 4.0)]];
+        let pr = proj_n(obs);
+        let (sh, sts) = setup_w(&pr, &curves, Norm::Octagonal, &[(0.63, 0.2, 0.63)]);
+        let mut o = order_layer(&sh, &sts, &[0], 0.0);
+        radii_layer(&sh, &sts, &[0], &mut o, true, &|_| None);
+        let mut es = erbs_layer(&sh, &sts, &[0], &o, &ErbsOpts::default());
+        assert_eq!(es.len(), 1);
+        let nbr = es[0].exit[0];
+        // out of the pad along the neighbour (violating), away from it, back past its corner
+        es[0].pts = vec![v(0.0, -0.75), v(0.0, -0.55), v(-0.3, -0.55), v(-0.3, 0.3), v(0.0, 0.3), v(-0.3, 0.5), v(-0.3, 1.0)];
+        es[0].w = vec![0.63e6; 7];
+        let vs = check_layer(&sh, &sts, &o, &es);
+        let at: Vec<_> = vs.iter().filter(|x| x.other == Party::Feature(nbr)).collect();
+        let pred: Vec<_> = at.iter().filter(|x| x.predicted).collect();
+        let gap: Vec<_> = at.iter().filter(|x| !x.predicted).collect();
+        assert!(pred.len() == 1 && pred[0].at.y < -0.5e6, "the exit violation is predicted: {vs:?}");
+        assert!(gap.len() == 1 && gap[0].at.y > 0.0, "the violation further along is a gap: {vs:?}");
     }
 
     /// Independent per stretch: the ERBS do not depend on the order of `mine`.
@@ -1581,6 +1616,19 @@ mod tests {
         let later = ErbsOpts { deadline: Some(now + std::time::Duration::from_secs(3600)), stop: Some(Arc::new(AtomicBool::new(false))), ..ErbsOpts::default() };
         let le = crate::topo::erbs::erbs_layer_with(&sh, &sts, &[0, 1, 2], &o, &later);
         assert_eq!((le.es.len(), le.timed_out, le.failed.len()), (3, 0, 0), "{:?}", le.failed);
+    }
+
+    /// A failed sleeve is a failure with its reason (`LayerErbs::failed`), not an empty ERBS.
+    #[test]
+    fn erbs_failed_sleeve_keeps_its_reason() {
+        let (obs, curves) = s_bundle();
+        let pr = proj(obs);
+        let (sh, sts) = setup(&pr, &curves, Norm::Octagonal);
+        let mut o = order_layer(&sh, &sts, &[0, 1, 2], 0.0);
+        radii_layer(&sh, &sts, &[0, 1, 2], &mut o, true, &|_| None);
+        let le = crate::topo::erbs::erbs_layer_with(&sh, &sts, &[0, 1, 2], &o, &ErbsOpts { fail_first: true, ..ErbsOpts::default() });
+        assert_eq!((le.es.len(), le.failed.len()), (2, 1), "{:?}", le.failed);
+        assert!(le.failed[0].1.contains("injected sleeve failure"), "{:?}", le.failed);
     }
 
     /// A U-turn: the band goes down a channel, round a pad below it and back up the same channel,

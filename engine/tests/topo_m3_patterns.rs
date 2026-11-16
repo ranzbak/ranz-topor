@@ -44,6 +44,11 @@ fn judge_patterns_drawn_from_their_erbs() {
 /// (name, length mm) of every connection of pattern `p` with `realise = "erbs"`, every ERBS wound
 /// three times by the test hook ("wind erbs"), and the engine's warnings.
 fn route_wound(p: &str, extra: &[(&str, serde_json::Value)]) -> (Vec<(String, f64)>, Vec<String>) {
+    route_hooked(p, extra, &["wind erbs"])
+}
+
+/// As `route_wound` with the test hook answering true at the named points `hooks`.
+fn route_hooked(p: &str, extra: &[(&str, serde_json::Value)], hooks: &'static [&'static str]) -> (Vec<(String, f64)>, Vec<String>) {
     let path = format!("{}/tests/fixtures/m3/model-{p}.json", env!("CARGO_MANIFEST_DIR"));
     let m = BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let mut val = serde_json::to_value(Options::default()).unwrap();
@@ -54,7 +59,7 @@ fn route_wound(p: &str, extra: &[(&str, serde_json::Value)]) -> (Vec<(String, f6
     }
     let o: Options = serde_json::from_value(val).unwrap();
     let mut ctl = RunControl::new();
-    ctl.set_test_hook(|p| p == "wind erbs");
+    ctl.set_test_hook(move |p| hooks.contains(&p));
     let r = topor_engine::route::route_with(&m, &o, &ctl);
     assert_eq!(r.routed, r.connections_total, "{p}: every connection routes");
     (r.connections.iter().map(|c| (c.name.clone(), c.length_nm as f64 / 1e6)).collect(), r.warnings.clone())
@@ -74,6 +79,9 @@ fn wound_erbs_gives_way_to_the_sequential_run() {
     let el = warn.iter().find(|w| w.starts_with("erbs_long: ")).unwrap_or_else(|| panic!("no erbs_long line in {warn:?}"));
     assert!(el.contains("replaced by a cheaper sequential run") && el.contains("drawn sequential"), "{el}");
     assert!(!el.starts_with("erbs_long: 0 "), "{el}");
+    // a run the length factor gave to a sequential run is no check fallback (the ERBS was legal)
+    let line = warn.iter().find(|w| w.contains("ERBS priced past their band")).unwrap_or_else(|| panic!("no ERBS line in {warn:?}"));
+    assert!(line.contains(" 0 by the sequential attempts after the check rejected the ERBS"), "{line}");
     // weight 0, margin 10: the wound ERBS (3 x its band) is not priced past B (1 + g), no
     // sequential run is drawn against it (its retraced copper is one track, so the length does
     // not show it)
@@ -86,4 +94,29 @@ fn wound_erbs_gives_way_to_the_sequential_run() {
     let (_, warn) = route_wound("channel_fit", &[("erbs_margin", serde_json::json!(1.0)), ("erbs_length_weight", serde_json::json!(100.0))]);
     let el = warn.iter().find(|w| w.starts_with("erbs_long: ")).unwrap_or_else(|| panic!("no erbs_long line in {warn:?}"));
     assert!(el.contains(", 0 kept"), "{el}");
+}
+
+/// The last step of the length factor: a wound (long) ERBS whose sequential attempts are all
+/// illegal (test point "no sequential run") is drawn after all, and ERBS_LONG says so
+/// ("ERBS kept (no legal sequential run)"). Nothing is dropped.
+#[test]
+fn kept_erbs_is_drawn_when_no_sequential_run_is_legal() {
+    let (got, warn) = route_hooked("channel_fit", &[], &["wind erbs", "no sequential run"]);
+    assert_eq!(got.len(), 3, "{got:?}");
+    let el = warn.iter().find(|w| w.starts_with("erbs_long: ")).unwrap_or_else(|| panic!("no erbs_long line in {warn:?}"));
+    assert!(el.contains("ERBS kept (no legal sequential run)"), "{el}");
+    assert!(el.contains(" 0 replaced by a cheaper sequential run"), "{el}");
+    assert!(!el.contains("drawn sequential"), "{el}");
+    let line = warn.iter().find(|w| w.contains("ERBS priced past their band")).unwrap_or_else(|| panic!("no ERBS line in {warn:?}"));
+    assert!(line.contains(" 0 by the sequential attempts after the check rejected the ERBS"), "{line}");
+}
+
+/// A stretch whose sleeve fails (test point "fail erbs sleeve") is drawn the sequential way and
+/// its reason reaches the erbs_fallback warning (plugin finding ERBS_FALLBACK).
+#[test]
+fn failed_sleeve_reason_reaches_the_erbs_fallback_warning() {
+    let (got, warn) = route_hooked("channel_fit", &[], &["fail erbs sleeve"]);
+    assert_eq!(got.len(), 3, "every connection still routes: {got:?}");
+    let w = warn.iter().find(|w| w.starts_with("erbs_fallback: ")).unwrap_or_else(|| panic!("no erbs_fallback line in {warn:?}"));
+    assert!(w.contains("1 stretch(es) without a sleeve to the end") && w.contains("injected sleeve failure"), "{w}");
 }

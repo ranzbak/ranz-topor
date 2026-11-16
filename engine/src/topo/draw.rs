@@ -716,6 +716,9 @@ pub struct Drawer<'a> {
     /// M3 `[drawing] realise = "erbs"`: the ERBS of every wire's runs (`topo::erbs::realise`),
     /// tried before the attempt ladder.
     pub erbs: BTreeMap<WireId, Vec<super::erbs::RunBand>>,
+    /// Test-only (hook "no sequential run"): every sequential attempt (0..5) of a run with an ERBS
+    /// is illegal, so a parked ERBS reaches its last step (`ERBS_KEPT`). Always false in real runs.
+    pub test_no_sequential: bool,
     /// M3 length factor: every legal ERBS a sequential run was drawn against (wire, layer, ERBS
     /// length, band length, sequential length or NaN when none was legal, replaced), for the
     /// `erbs_long` warning (core.rs).
@@ -804,6 +807,7 @@ impl<'a> Drawer<'a> {
             via_site_tight: Default::default(),
             split_at: BTreeMap::new(),
             erbs: BTreeMap::new(),
+            test_no_sequential: false,
             erbs_long: Vec::new(),
             force: false,
             via_viol: BTreeMap::new(),
@@ -2624,6 +2628,9 @@ impl<'a> Drawer<'a> {
                 // `neck_in_drawing`, the behaviour before M-C): pad-end neck zones of the drawing's
                 // own; 3..5: S2a's funnel + repair attempts.
                 let restored = attempt == ERBS_KEPT;
+                if self.test_no_sequential && band.is_some() && (0..ERBS_KEPT).contains(&attempt) {
+                    continue;
+                }
                 if restored && kept.is_none() {
                     continue;
                 }

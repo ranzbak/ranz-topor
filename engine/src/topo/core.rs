@@ -4532,14 +4532,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let layers: Vec<usize> = (0..b.n_signal).collect();
         let conn = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
         let mo = super::cutflow::MeasureOpts::from_options(opts);
-        match super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &super::board::outline_segments(model), &mo, &layers, &live, ctl.deadline().map(|d| d.max(floor)), (!draw_through.get()).then(|| ctl.cancel.clone())) {
+        match super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &super::board::outline_segments(model), &mo, &layers, &live, ctl.deadline().map(|d| d.max(floor)), (!draw_through.get()).then(|| ctl.cancel.clone()), ctl.test_point("fail erbs sleeve")) {
             Ok(r) => {
                 if r.timed_out > 0 {
                     warnings.push(format!("erbs_timeout: the time limit passed (or the run was cancelled) before {} stretch(es) had their ERBS; those runs are drawn the sequential way", r.timed_out));
                 }
                 erbs_failed = r.failed.clone();
                 erbs_line = Some(format!(
-                    "ERBS drawing ([drawing] realise = \"erbs\"; Dayan 1997 pp. 15-16, shortest homotopic path by the funnel over the sleeve): {} stretches in {:.2} s ({} past the time limit, {} without a sleeve: drawn sequentially), length over the zero-width bands {:.3}, {} obstacle points, {} portals, {} side conflicts; checked: {} violations an over-full cut predicts, {} model gaps (erbs_gap, worst {:.3} mm); {} stretches without a band",
+                    "ERBS drawing ([drawing] realise = \"erbs\"; Dayan 1997 pp. 15-16, shortest homotopic path by the funnel over the sleeve): {} stretches in {:.2} s ({} past the time limit, {} without a sleeve: drawn sequentially), length over the zero-width bands {:.3}, {} obstacle points, {} portals, {} side conflicts; checked: {} predicted violations (over-full cuts, planned crossings, features the band runs through; features at a pad exit only at the exit), {} model gaps (erbs_gap, worst {:.3} mm); {} stretches without a band",
                     r.report.stretches,
                     r.seconds,
                     r.timed_out,
@@ -4555,6 +4555,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 ));
                 live = r.order.clone();
                 dr.erbs = r.runs;
+                dr.test_no_sequential = ctl.test_point("no sequential run");
                 if ctl.test_point("wind erbs") {
                     // test-only fault: every ERBS runs its path three times (a wound band of the
                     // same copper, legal and three times its band), for the length factor
