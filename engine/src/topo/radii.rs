@@ -1444,6 +1444,37 @@ mod tests {
         assert!(at_pads.iter().all(|x| x.predicted), "{at_pads:?}");
     }
 
+    /// Round h rule 5: the labelled points that push nothing and lie on the band's other side
+    /// (the squeezed pads' tips beyond the band) are no obstacle, but their features stay in the
+    /// check: the wire through the over-full passage still has its violations against the two
+    /// pads (here predicted), never a silent pass.
+    #[test]
+    fn erbs_unenforced_points_keep_their_features_checked() {
+        let obs = vec![
+            (pad(-0.35, 0.0), 1),
+            (pad(0.35, 0.0), 2),
+            (pad(-3.0, 1.5), 3),
+            (pad(3.0, 1.5), 4),
+            (pad(-3.0, -1.5), 5),
+            (pad(3.0, -1.5), 6),
+            (pad(0.0, 3.0), 100),
+            (pad(0.0, -3.0), 100),
+        ];
+        let curves = vec![vec![v(0.0, 3.0), v(0.0, -3.0)]];
+        let pr = proj_n(obs);
+        let (sh, sts) = setup_w(&pr, &curves, Norm::Octagonal, &[(0.63, 0.2, 0.63)]);
+        let mut o = order_layer(&sh, &sts, &[0], 0.0);
+        radii_layer(&sh, &sts, &[0], &mut o, true, &|_| None);
+        let es = erbs_layer(&sh, &sts, &[0], &o, &ErbsOpts::default());
+        assert_eq!(es.len(), 1);
+        assert!(es[0].unenforced > 0, "the squeezed tips beyond the band are left out: {}", es[0].unenforced);
+        let vs = check_layer(&sh, &sts, &o, &es);
+        for x in [-0.35, 0.35] {
+            let f = (0..sh.feats.len()).find(|&f| sh.feats[f].poly.iter().all(|p| (p.x - x * 1e6).abs() <= 0.1e6 + 1.0 && p.y.abs() <= 0.1e6 + 1.0)).expect("pad");
+            assert!(vs.iter().any(|y| y.other == Party::Feature(f)), "a violation against the pad at x = {x}: {vs:?}");
+        }
+    }
+
     /// Round g rule 3: a short band leaving a terminal next to a wide pad of another net behind
     /// it (the terminal inside the pad's clearance): the pad's grown points beside the start lie
     /// on the band's other side but the band does not run between them and the pad, so it keeps
@@ -1570,6 +1601,52 @@ mod tests {
         let a = erbs_layer(&sh, &sts, &[0, 1, 2], &o, &ErbsOpts::default());
         let b = erbs_layer(&sh, &sts, &[2, 1, 0], &o, &ErbsOpts::default());
         assert_eq!(format!("{a:?}"), format!("{b:?}"));
+    }
+
+    /// Round h rule 4: pushes settled at a cut (opposite pushes with crossing spokes) leave the
+    /// band at its over-full room; its violations of that cut's parties are predicted, as an
+    /// over-full cut's: the ERBS moved against the first block and the other wire are gaps, and
+    /// predicted once the stretch reports the channel's cut settled.
+    #[test]
+    fn erbs_settled_pushes_predict_their_violations() {
+        use crate::topo::erbs::GateSrc;
+        let xs = [2.3375, 3.2625];
+        let mut obs = vec![(rect(0.0, 0.0, 2.0, 2.0), 1), (rect(3.6, 0.0, 5.6, 2.0), 2)];
+        let mut curves = Vec::new();
+        for (i, &x) in xs.iter().enumerate() {
+            obs.push((pad(x, 4.0), 100 + i as i32));
+            obs.push((pad(x, -2.0), 100 + i as i32));
+            curves.push(vec![v(x, 4.0), v(x, -2.0)]);
+        }
+        let pr = proj_n(obs);
+        let (sh, sts) = setup_w(&pr, &curves, Norm::Octagonal, &[(0.25, 0.2, 0.25); 2]);
+        let mut o = order_layer(&sh, &sts, &[0, 1], 0.0);
+        radii_layer(&sh, &sts, &[0, 1], &mut o, true, &|_| None);
+        let mut es = erbs_layer(&sh, &sts, &[0, 1], &o, &ErbsOpts::default());
+        assert!(es.iter().all(|e| e.settled.is_empty()), "nothing settled in a channel that fits");
+        for p in es[0].pts.iter_mut() {
+            p.x = 2.1e6;
+        }
+        for p in es[1].pts.iter_mut() {
+            p.x = 2.4375e6;
+        }
+        let vs = check_layer(&sh, &sts, &o, &es);
+        let mine = |vs: &[crate::topo::erbs::Violation], ci: usize| -> Vec<crate::topo::erbs::Violation> {
+            let c = &sh.cuts[o.cuts[ci].cut];
+            vs.iter().filter(|v| v.stretch == 0 && (v.other == Party::Stretch(1) || v.other == Party::Feature(c.fp) || v.other == Party::Feature(c.fq))).cloned().collect()
+        };
+        // the channel's cut: both wires on it, the first block one of its ends
+        let ci = (0..o.cuts.len())
+            .find(|&ci| {
+                let ss: std::collections::BTreeSet<usize> = o.cuts[ci].items.iter().map(|x| x.stretch).collect();
+                ss.contains(&0) && ss.contains(&1) && mine(&vs, ci).iter().any(|v| matches!(v.other, Party::Feature(_)))
+            })
+            .expect("a cut of the channel with both wires");
+        let before = mine(&vs, ci);
+        assert!(before.len() >= 2 && before.iter().all(|v| !v.predicted), "gaps before: {before:?}");
+        es[0].settled = vec![GateSrc::Cut(ci)];
+        let after = mine(&check_layer(&sh, &sts, &o, &es), ci);
+        assert!(after.len() == before.len() && after.iter().all(|v| v.predicted), "predicted once settled: {after:?}");
     }
 
     /// A violation no over-full cut predicts is an erbs_gap.

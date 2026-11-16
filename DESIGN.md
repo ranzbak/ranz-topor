@@ -81,3 +81,74 @@ erbs_deadline_and_stop; judge patterns (4, both modes) at 1.000 / 0 violations; 
 Unit `erbs_length_price_and_competition`; integration `wound_erbs_gives_way_to_the_sequential_run` (test point
 "wind erbs"); unit fixtures for 2-4 (dip / no dip / squeezed tip); erbs_accept marks on eprom/wiccon/esp dumps;
 qmtech dump ratio list; mutants per rule; deterministic ladder seed 0 rounds=1 both modes.
+
+## Round h (2026-11-16): the rough path's class (draft, sent to the lead before commit)
+
+### Finding (sleeve dumps of the round-g runs + cut data, `m3-runs/h/tools/{conflict,legs,wind,nwrong}.py`)
+"Walk does not end" and long ERBS have three causes, none of them a repeated loop round one point
+(points are merged at 20 nm, one loop per point):
+- **A. Cap, not a cycle** (esp st 38, qmtech st 156/164/367): 1011 tips round a pad, every one a valid loop
+  from the band; the unreduced walk is loops x depth, longer than the one cap `8 (faces + rough) + 64`.
+- **B. Opposite pushes over-full across two cuts** (esp st 48/49/79/131, qmtech st 359): pushed tips of both
+  labels whose spokes cross (esp st 79: 565 pairs; the tips of a vertex's westward cut and of a northern
+  root's southward cut claim the same room). No single cut is over-full, the class is: the funnel zigzags
+  between the two fans (1.5-3 x the band).
+- **C. Unpushed tips on the wrong side** (qmtech st 108/119/177/271/335/364/416): tips left unpushed by rules
+  4/4b (squeezed / pad-exit features: 647 + 158 of 805 in st 108) or between two crossings of one cut stay
+  obstacles on the band's side; the loops of pushed tips beyond them make the path hook round each (st 108:
+  21 x its band).
+- Minor: the thin loop's legs (5 nm and 2.5 nm off the ray, proportional to the distance from the base)
+  and the walk's 0.5 nm label tie disagree for a point on the leg at 10-20 % of it (2 such points in st 108);
+  loops at one band vertex split by an arclength rounding cross (qmtech st 359).
+
+### Rules (erbs.rs, rough path only)
+1. **A loop is out, round, back over the same edges** (`Step::Loop`): the way back is the way out reversed,
+   so a loop is the conjugate of one turn round its point and never encloses another point (Hershberger &
+   Snoeyink 1994: the class as a reduced crossing sequence; Efrat, Kobourov & Lubiw 2006 PDF p. 9). A point on
+   the leg counts as on the loop point's label side, as the thin loop had it.
+2. **Walk cap per straight piece** (faces + 8): a straight piece crosses a face at most once with a consistent
+   side test, so more steps is a cycle; the total is the real work O(sum of loop depths).
+3. **Loops at one base** (within 0.5 nm) share it and go in angle order.
+4. **Opposite pushes whose spokes cross push nothing** (both tips `Never`): Dayan 1997 PDF p. 32 (printed 22):
+   spoke creation "checks the routability of a sketch"; PDF pp. 25-26: the ERBS keeps the spacing iff the class
+   is routable; crossing spokes of the two sides are a spacing the class cannot keep (over-full), the band
+   stays there (its violation, as rule 4 of round g for one over-full cut).
+5. **A labelled point that does not push and lies on the other side of the band than its label is no obstacle**
+   (its label is not enforced; kept, it makes the class hook round it). Covers rules 4/4b's tips and rule 4 above.
+
+### Lead conditions (approval 2026-11-16)
+- (a) Rule 4's violations are **predicted**: `Erbs.settled` lists the settled gates; `check_layer` treats a settled
+  cut like an over-full one for that stretch (its two features and the stretches on the cut), a settled arc
+  or grown point its feature. Test `erbs_settled_pushes_predict_their_violations` (gaps before, predicted after)
+  and `opposite_pushes_with_crossing_spokes_settle` (both gates reported). No single-wire board fixture: the
+  crossing point X of the two spokes gives |V N| <= |V X| + |X N| <= the two spoke lengths, so for one wire the
+  roots' segment is over-full and round g's rule 4 already squeezes it (a probe over 1250 geometries found no
+  case); on boards it comes from stacks of several wires (esp st 79: 565 pairs).
+- (b) Rule 5 changes obstacles only; `check_layer` checks every segment against every feature. `Erbs.unenforced`
+  counts the dropped points; `erbs_unenforced_points_keep_their_features_checked` (squeezed pads: points dropped,
+  violations against both pads reported).
+
+### Invariants
+- Every remaining obstacle point is on its label side of the band, or pushed (its loop puts it there): the
+  class has no contradiction a funnel would turn into a zigzag.
+- A loop never changes another point's side (exact reversal).
+- "Walk does not end" only for a cycle of the side test, never for the path's size.
+
+### Evidence (sleeve dumps, realise=erbs, job models; base = e1d7930 m3h-dbg1 / m3g4, exp = m3h-exp1)
+| board | stretches | "does not end" before/after | len/band > 1.5 | > 2 | ERBS ms sum / max |
+|---|---|---|---|---|---|
+| eprom | 27 | 0 / 0 | 0 / 0 | 0 / 0 | 20 / 7 -> 14 / 4 |
+| wiccon | 66 | 0 / 0 | 0 / 0 | 0 / 0 | 83 / 7 -> 73 / 5 |
+| esp | 132 | 1 / 0 | 4 / 0 | 1 / 0 | 1118 / 211 -> 746 / 258 |
+| qmtech | 421 | 3 / 0 | 8 / 1 | 7 / 0 | 20362 / 5782 -> 3200 / 338 |
+qmtech st 108 20.9 -> 1.04, 119 2.24 -> 1.00, 177 2.34 -> 1.05, 359 2.95 -> 1.04; 164 (29k points) walks in 338 ms.
+Left: qmtech st 335 1.70 (unchanged; 52 points claimed by both labels at the merge distance, an over-full
+cut at zero width, not the rough path), esp st 38/40/57 1.31-1.38 (a ring of 1029 tips round a pad: the loops
+are valid). The spoke grid passes each spoke's cells (Amanatides & Woo), not its box (`seg_cells`, tested
+against brute force: `crossing_spokes_share_a_passed_cell`).
+
+### Tests
+Unit: `crossing_spokes_share_a_passed_cell`, `loop_legs_agree_on_a_point_near_the_base`, `many_deep_loops_walk_to_the_end` (3600 pushed points),
+`same_base_loops_in_angle_order`, `opposite_pushes_with_crossing_spokes_settle`, `unpushed_wrong_side_point_is_no_obstacle`;
+all earlier erbs/radii/m3-pattern tests; mutants per rule; sleeve dumps of eprom/wiccon/esp/qmtech before/after
+(bad-stretch list, fallbacks, len/band, ERBS time); deterministic ladder seq + erbs.
