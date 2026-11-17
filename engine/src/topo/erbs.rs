@@ -91,7 +91,9 @@ pub struct ErbsOpts {
     /// one drawing, which runs through, core.rs `draw_through`).
     pub stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Test-only: the first stretch of the layer fails ("injected sleeve failure"), to see its
-    /// reason reach `failed` and the ERBS_FALLBACK line. Always false in real runs.
+    /// reason reach `failed` and the ERBS_FALLBACK line. [`realise`] sets it on the first layer
+    /// that has a stretch only, so a run has exactly one injected failure whatever its layering.
+    /// Always false in real runs.
     pub fail_first: bool,
 }
 
@@ -1670,10 +1672,17 @@ pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], pac
     let ords = super::radii::from_measure(&m, &|p| st.proj.regime_at(p));
     let mut out = Realised::default();
     let mut before: BTreeSet<(usize, usize)> = BTreeSet::new();
+    // The test hook fails one stretch of the run (the first of the first layer with one), not
+    // one per layer: the count it leaves does not depend on how the plan spreads the wires over
+    // the layers.
+    let mut inject = fail_first;
     for (lf, o) in m.layers.iter().zip(&ords) {
         out.unbanded += lf.walk_failed;
-        let eo = ErbsOpts { deadline, stop: stop.clone(), fail_first, ..ErbsOpts::default() };
+        let eo = ErbsOpts { deadline, stop: stop.clone(), fail_first: inject, ..ErbsOpts::default() };
         let le = erbs_layer_with(&lf.sheet, &m.stretches, &lf.stretches, o, &eo);
+        if !le.es.is_empty() || !le.failed.is_empty() {
+            inject = false;
+        }
         out.timed_out += le.timed_out;
         let vs = check_layer(&lf.sheet, &m.stretches, o, &le.es);
         // Debug: the drawing's ERBS per layer (harness/erbs_accept.py reads `realise-L<n>.json`).
