@@ -1620,6 +1620,24 @@ mod tests {
         assert!((x10 - x0 + 10.0).abs() < 0.5, "margin 10 nm: 10 nm further out, {x10} vs {x0}");
     }
 
+    /// erbs-margin: a pad-exit feature is one whose grown outline (half width + clearance +
+    /// margin) holds the wire's end: a neighbour 5 nm beyond `w/2 + clearance` of the start is
+    /// one with the 10 nm margin (its grown points would hold the end), none with margin 0.
+    #[test]
+    fn erbs_exit_features_carry_the_margin() {
+        let obs = vec![(pad(0.0, 0.0), 100), (rect(0.325 + 5e-6, -0.5, 1.0, 0.5), 1), (pad(0.0, 6.0), 100)];
+        let curves = vec![vec![v(0.0, 0.0), v(0.0, 6.0)]];
+        let pr = proj_n(obs);
+        let (sh, sts) = setup_w(&pr, &curves, Norm::Octagonal, &[(0.25, 0.2, 0.25)]);
+        let exits = |m: f64| {
+            let mut o = order_layer(&sh, &sts, &[0], 0.0);
+            radii_layer_m(&sh, &sts, &[0], &mut o, true, m, &|_| None);
+            erbs_layer(&sh, &sts, &[0], &o, &ErbsOpts { margin: m, ..ErbsOpts::default() })[0].exit.len()
+        };
+        assert_eq!(exits(0.0), 0);
+        assert_eq!(exits(10.0), 1);
+    }
+
     /// Round g rule 2: a band that runs along a pad's edge and wraps its two corners with the
     /// pad's body on the outside of the turns (the plan through the pad's corners, wraps_inside):
     /// those wraps hold no arc (the rays of their wedges run over the body), so the ERBS stays
