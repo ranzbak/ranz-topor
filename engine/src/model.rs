@@ -365,12 +365,14 @@ pub struct Rules {
     pub via_hole_clearance: i64,
     pub hole_to_hole: i64,
     /// Board Setup copper-to-edge clearance, as the board gives it (0 = 0). Measured, as KiCad's
-    /// DRC does, from the Edge.Cuts shape's EFFECTIVE shape, i.e. its stroke
-    /// (drc_test_provider_edge_clearance.cpp `testAgainstEdge`: `edge->GetEffectiveShape(
-    /// Edge_Cuts)` collided at `max(0, min - epsilon)`); the outline here is the stroke's centre
-    /// line, so the engine keeps [`Rules::edge_clear`] = this + [`Rules::outline_half_stroke`].
+    /// DRC does, from the Edge.Cuts shape's centre line: KiCad 10 builds the edge shapes with the
+    /// stroke width set to 0 (drc_test_provider_edge_clearance.cpp, tag 10.0.8 l. 295-298:
+    /// `if( item->IsOnLayer( Edge_Cuts ) ) stroke.SetWidth( 0 );`), and the 10.0.8 DRC reports
+    /// "actual 0.4750 mm" for a 0.25 mm track 0.6 mm from a 0.05 mm-stroke outline (fx pattern
+    /// edge_pads). The model's outline is that centre line: [`Rules::edge_clear`] = this.
     pub edge_clearance: i64,
-    /// Half the widest Edge.Cuts stroke (nm; 0 = unset, older models): see [`Rules::edge_clear`].
+    /// Half the widest Edge.Cuts stroke (nm; 0 = unset, older models). Informational only: KiCad's
+    /// copper-to-edge check ignores the stroke ([`Rules::edge_clear`]).
     #[serde(default)]
     pub outline_half_stroke: i64,
     /// Narrowest copper connection KiCad's DRC accepts (`min_connection`, nm; 0 = unset): a
@@ -518,16 +520,13 @@ impl Default for Rules {
 }
 
 impl Rules {
-    /// Centre-line distance copper keeps from the board outline: the copper-to-edge clearance
-    /// plus half the outline's stroke width (KiCad measures from the stroke's edge), also when the
-    /// clearance is 0 (copper may then touch the stroke, not cross it). An ignored copper-to-edge
-    /// check (`ignored_checks`) keeps `edge_clearance` alone (callers set it to 0 there). O(1).
+    /// Centre-line distance copper keeps from the board outline (the Edge.Cuts centre line): the
+    /// copper-to-edge clearance, as KiCad 10 measures it (the stroke width is not added: see
+    /// [`Rules::edge_clearance`]; it was added from 39e7297 to edge-clear, 0.025 mm too strict on a
+    /// 0.05 mm stroke). An ignored copper-to-edge check (`ignored_checks`) keeps `edge_clearance`
+    /// too (callers set it to 0 there). O(1).
     pub fn edge_clear(&self) -> i64 {
-        if self.ignored_checks.iter().any(|c| c == "copper_edge_clearance") {
-            self.edge_clearance
-        } else {
-            self.edge_clearance + self.outline_half_stroke.max(0)
-        }
+        self.edge_clearance
     }
 
     /// The least via `(diameter, drill)` KiCad's DRC accepts on `net`: the net's custom-rule

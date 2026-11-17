@@ -1,0 +1,204 @@
+{
+ "units": "nm",
+ "board": "edge_pads",
+ "layers": [
+  {
+   "id": 0,
+   "name": "F.Cu",
+   "kind": "signal",
+   "routable": true
+  },
+  {
+   "id": 2,
+   "name": "B.Cu",
+   "kind": "signal",
+   "routable": true
+  }
+ ],
+ "nets": [
+  {
+   "code": 1,
+   "name": "N"
+  }
+ ],
+ "pads": [
+  {
+   "uuid": "1e422d19-4724-4397-83b5-cd6bc685f1ab",
+   "ref": "J1",
+   "number": "1",
+   "net": 1,
+   "attr": "smd",
+   "center": [
+    600000,
+    2000000
+   ],
+   "rotation_deg": 0.0,
+   "layers": [
+    0
+   ],
+   "shapes": {
+    "0": {
+     "kind": "rect",
+     "w": 200000,
+     "h": 500000
+    }
+   },
+   "drill": null,
+   "local_clearance": null,
+   "net_tie_group": null,
+   "spoke_angle_deg": 45.0
+  },
+  {
+   "uuid": "6f2dcb47-e2de-4572-9735-0eca8727dd38",
+   "ref": "J2",
+   "number": "1",
+   "net": 1,
+   "attr": "smd",
+   "center": [
+    600000,
+    9000000
+   ],
+   "rotation_deg": 0.0,
+   "layers": [
+    0
+   ],
+   "shapes": {
+    "0": {
+     "kind": "rect",
+     "w": 200000,
+     "h": 500000
+    }
+   },
+   "drill": null,
+   "local_clearance": null,
+   "net_tie_group": null,
+   "spoke_angle_deg": 45.0
+  }
+ ],
+ "vias": [],
+ "kept": [],
+ "copper_shapes": [],
+ "holes": [],
+ "outline": [
+  {
+   "kind": "seg",
+   "a": [
+    0,
+    0
+   ],
+   "b": [
+    8000000,
+    0
+   ]
+  },
+  {
+   "kind": "seg",
+   "a": [
+    0,
+    12000000
+   ],
+   "b": [
+    0,
+    0
+   ]
+  },
+  {
+   "kind": "seg",
+   "a": [
+    8000000,
+    0
+   ],
+   "b": [
+    8000000,
+    12000000
+   ]
+  },
+  {
+   "kind": "seg",
+   "a": [
+    8000000,
+    12000000
+   ],
+   "b": [
+    0,
+    12000000
+   ]
+  }
+ ],
+ "keepouts": [
+  {
+   "name": "",
+   "layers": [
+    2
+   ],
+   "poly": [
+    [
+     0,
+     0
+    ],
+    [
+     8000000,
+     0
+    ],
+    [
+     8000000,
+     12000000
+    ],
+    [
+     0,
+     12000000
+    ]
+   ],
+   "no_tracks": true,
+   "no_vias": true,
+   "no_pour": false,
+   "no_pads": false,
+   "no_footprints": false
+  }
+ ],
+ "net_ties": [],
+ "pours": [],
+ "teardrops": [],
+ "dangling_ends": [],
+ "rules": {
+  "min_clearance": 200000,
+  "min_track_width": 250000,
+  "min_via_diameter": 400000,
+  "min_via_drill": 300000,
+  "min_annular": 50000,
+  "hole_clearance": 250000,
+  "via_hole_clearance": 250000,
+  "hole_to_hole": 250000,
+  "edge_clearance": 500000,
+  "max_error": 5000,
+  "min_connection": 0,
+  "profile": "board",
+  "predefined_vias": [],
+  "default": {
+   "clearance": 200000,
+   "width": 250000,
+   "via_d": 600000,
+   "via_drill": 300000,
+   "netclass": "Default",
+   "width_source": "default",
+   "min_width": 0
+  },
+  "per_net": {
+   "1": {
+    "clearance": 200000,
+    "width": 250000,
+    "via_d": 600000,
+    "via_drill": 300000,
+    "netclass": "Default",
+    "width_source": "default",
+    "min_width": 0
+   }
+  },
+  "floors_applied": [],
+  "fallbacks": [],
+  "warnings": [],
+  "ignored_checks": [],
+  "clearance_regions": [],
+  "outline_half_stroke": 25000
+ }
+}
