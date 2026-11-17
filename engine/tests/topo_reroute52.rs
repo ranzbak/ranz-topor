@@ -95,6 +95,12 @@ fn planned_crossing_window_predicts_no_via_without_a_site() {
 /// The drawn half under the per-edge model (the default since 2026-11-13). Expected to fail until
 /// M3 (radii / spokes / octilinear drawing geometry); shopping list PK-TW.
 ///
+/// cm1-room (2026-11-17, main 385e043): not a capacity-model miss. The plan's VCC via sites lie
+/// 1.67 mm apart in the window (SDA between needs 1.45: CM1's via-to-via cut fits, so the plan
+/// rightly predicts 0); the drawing's via relocation (`[vias] relocate`, "2 moved in their free
+/// interval to the most clearance") moves them to (12.28, 7.90) and (13.30, 7.00), 1.36 mm apart,
+/// and SDA's drawn F.Cu track runs between them at 0.149-0.186 mm (4 clearance violations).
+///
 /// Board-rules diagnosis (2026-11-13): the clean drawing before the board-rules merge relied on a
 /// 0.4/0.3 via drawn for VCC where the plan used the POWER class 0.8/0.4 disc (a plan/draw
 /// disagreement, and outside the power-via rule: net class via by default). With the net class
@@ -103,7 +109,7 @@ fn planned_crossing_window_predicts_no_via_without_a_site() {
 /// between vias closer than the 1.45 mm it needs. The taut pull not respecting the layer window
 /// is M3's drawing geometry.
 #[test]
-#[ignore = "M3 (PK-TW): the taut SDA track crosses VCC in the B.Cu keepout, outside the planned window; the VCC via pair has no legal sites on that geometry"]
+#[ignore = "drawing, not CM1: the plan's VCC via sites are 1.67 mm apart (fits); the drawing's via relocation moves them to 1.36 mm with SDA between (needs 1.45); PK-TW"]
 fn planned_crossing_window_draws_clean_with_the_edges_model() {
     let m = pcw();
     let r = route_with(&m, &Options { capacity_model: "edges".into(), ..loop_opts() }, &RunControl::new());
@@ -114,15 +120,20 @@ fn planned_crossing_window_draws_clean_with_the_edges_model() {
 /// The drawn half of the test above under the cut model (`[capacity] model = "cuts"`, the M0 default until 2026-11-13). Fails at M0: a
 /// drawn-side miss parked until the draw-once stages (M2/M3); un-ignore when they land.
 ///
+/// cm1-room (2026-11-17): until then this test ran the default model (edges), not the cut model
+/// its name says; it now sets `capacity_model = "cuts"`. The failure is the same drawing one as
+/// above (via relocation 1.67 -> 1.36 mm with SDA between), not the capacity model: CM1 counts the
+/// via pair and the via discs and the plan's sites fit.
+///
 /// Board-rules diagnosis (2026-11-13), shopping list item CM1 "Capacity measure completeness: a
 /// foreign band through a planned via disc must count": SDA's planned F.Cu band runs through the
 /// centre of a planned VCC via; the cut measure has no cut inside a feature, so the plan predicts 0
 /// violations and the drawing then finds no room for both vias (1.36 mm apart, 1.45 mm needed).
 #[test]
-#[ignore = "M0 parked: cut model, plan predicts 0 violations but the sequential drawing shorts SDA into VCC on F.Cu (M2/M3 draw once)"]
+#[ignore = "drawing, not CM1: the plan's VCC via sites fit (1.67 mm apart); the drawing's via relocation moves them to 1.36 mm with SDA between (needs 1.45); PK-TW"]
 fn planned_crossing_window_draws_clean_with_the_cut_model() {
     let m = pcw();
-    let r = route_with(&m, &loop_opts(), &RunControl::new());
+    let r = route_with(&m, &Options { capacity_model: "cuts".into(), ..loop_opts() }, &RunControl::new());
     let rep = Checker::new(&m, &Options::default()).check_items(&r.items);
     assert!(rep.violations.is_empty(), "{:?}", rep.violations);
 }

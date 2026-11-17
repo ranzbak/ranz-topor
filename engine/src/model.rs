@@ -1359,6 +1359,13 @@ pub struct Options {
     /// "cuts", and since M0 model = "edges" with edges_test = "price") may add vias where they
     /// remove more over-full price than the vias cost (false: only moves that keep the via price).
     pub cut_vias: bool,
+    /// CM1 (`[capacity] via_cuts`): a planned via is a feature of the capacity test in both
+    /// capacity models: its gap cuts (from the closest point of each nearby obstacle through the
+    /// via to the obstacle across, Maley 1987 pp. 32-33, 40; `topo::viacut`) hold the via and
+    /// every other net's wire that crosses them, so a via planned in a pad gap that another wire
+    /// passes too is predicted over-full. false = the model before CM1 (a via counted only on the
+    /// two edges its own wire crosses / on static cuts within reach).
+    pub via_cuts: bool,
     /// C0 (`[run] stop_after`, measurement): `"plan"` ends every run of the topological core
     /// after the plan of its first cycle (later cycles need the drawing's feedback), before the
     /// drawing; the result has no copper and its warnings carry the plan metrics line. `""`
@@ -1539,6 +1546,7 @@ impl Default for Options {
             edges_test: "price".into(),
             overflow_softness: 0.1,
             cut_vias: true,
+            via_cuts: true,
             stop_after: String::new(),
             diffpair_route: true,
             diffpair_zip_max_nm: 3_000_000,

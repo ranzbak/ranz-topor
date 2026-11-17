@@ -211,6 +211,9 @@ pub struct Packer<'a> {
     /// 5.4 `[vias] between_crossings`: via intervals exclude the triangles of their events
     /// ([`super::refine::via_ranges`]).
     pub via_between: bool,
+    /// CM1 (`[capacity] via_cuts`): the planned vias are features of the capacity test (their
+    /// gap cuts, [`super::viacut`]), measured in this planning norm; `None` = off.
+    pub via_cuts: Option<super::sheet::Norm>,
     /// M-45: the drawing is octilinear; a pass's oblique factor is the octilinear one
     /// ([`super::demand::octi_stretch`]).
     pub octi: bool,
@@ -257,6 +260,7 @@ impl<'a> Packer<'a> {
             via_squeeze: 0.0,
             reserve_sites: false,
             via_between: false,
+            via_cuts: None,
             octi: false,
             cuts: None,
         }
@@ -315,6 +319,7 @@ impl<'a> Packer<'a> {
         p.via_d = model.nets.iter().map(|n| (n.code, first(n.code))).collect();
         p.reserve_sites = opts.reserve_via_sites;
         p.via_between = opts.via_between;
+        p.via_cuts = opts.via_cuts.then(|| super::sheet::Norm::for_style(&opts.draw_style));
         p.octi = opts.draw_style == "octilinear" && opts.octi_room;
         if opts.capacity_model == "cuts" {
             p.cuts = Some(super::cutmodel::CutCtx::new(super::cutmodel::CutOpts::from_options(opts), opts.cut_vias, p.outline.clone()));
@@ -328,6 +333,11 @@ impl<'a> Packer<'a> {
 
     pub fn edge_clear(&self) -> f64 {
         self.edge_clear
+    }
+
+    /// The board outline's segments (math frame, nm).
+    pub fn outline_segs(&self) -> &[(Vec2, Vec2)] {
+        &self.outline
     }
 
     /// Clearance a wire with clearance `s` needs to the obstacle `ob` on edge `e` (nm).
