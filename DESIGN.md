@@ -161,3 +161,38 @@ Unit: `crossing_spokes_share_a_passed_cell`, `loop_legs_agree_on_a_point_near_th
 `same_base_loops_in_angle_order`, `opposite_pushes_with_crossing_spokes_settle`, `unpushed_wrong_side_point_is_no_obstacle`;
 all earlier erbs/radii/m3-pattern tests; mutants per rule; sleeve dumps of eprom/wiccon/esp/qmtech before/after
 (bad-stretch list, fallbacks, len/band, ERBS time); deterministic ladder seq + erbs.
+
+## Round i (2026-11-17): the length factor's sequential competitor keeps the undrawn ERBS (draft, sent to the lead)
+
+### Finding (qmtech erbs ADV_DE, round g -> h: 28.89 -> 38.98 mm, detour 1.12 -> 1.51, new ADV_CLK/ADV_DE crossing + short)
+Not the rough path. Dumps of the ladder's own run (hz-runs/m3i-dump-tip, -main; repro m3i-repro1 with the new
+`TOPO_ERBS_DEBUG` line "ERBS draw wire ..."):
+- Round g: both ERBS failed ("walk does not end", st 254 ADV_CLK, st 384 ADV_DE); both drawn sequentially in the
+  given order, ADV_DE (0.25 mm) before ADV_CLK (0.127 mm): ADV_DE clean, ADV_CLK forced round U429 (8 DRC).
+- Round h: both ERBS exist and are good (ADV_DE 27.59 / band 27.23, ADV_CLK 23.60 / 22.56, wrapping ADV_DE's
+  terminal U429 as its band does). `precedes` puts ADV_CLK first (inner on a cut ADV_DE bends at).
+  ADV_CLK's ERBS is legal but priced past `band (1 + erbs_margin)`, so the length factor draws a sequential
+  competitor: attempt 0, **18.92 mm, straight along y = 87.91 into U431, crossing ADV_DE's planned path at
+  (116.8, 87.9)** (ADV_DE not drawn yet, so the checker sees nothing). It wins (`replaced true`). ADV_DE then
+  has no legal geometry (ERBS 11 nm short against the new copper, exact windows "no path" at the U4 end) and is
+  drawn by force: the 38.98 mm detour and the crossing. Same pattern on wire 358 (net 55, L1: 17.05 vs band 20.97).
+- The length test is no class test: 45 of 394 drawn ERBS are shorter than their band (the band is the sheet
+  walk, not taut), so "shorter than the band" cannot tell a class jump.
+
+### Rule (draw.rs, erbs mode only: `kept` is set only there, seq copper unchanged)
+A sequential run that competes with a legal ERBS (`erbs_vs_sequential`) replaces it only if, for every other-net
+wire not drawn yet, it crosses that wire's ERBS on this layer no more often than the kept ERBS does (proper
+segment crossings). Otherwise the ERBS is drawn (it is in the plan's class; the competitor would take a path
+the plan gave another wire: a planned short). Not a threshold on a judgement value: it is the precondition of
+the comparison ("a sequential run of the same class", `erbs_vs_sequential`'s own doc), checked instead of
+assumed. Sources: Dayan 1997 PDF pp. 25-26 (the ERBS is a minimal member of the topological class; the
+realisation keeps the class), PDF p. 32 (spokes keep the room of the others); TopoR way: the topology is decided
+in the topological phase, the drawing only realises it (Polubasov 2010, docs/literature/polubasov2010-topor-inside.html, section 1: TopoR is a topological router, "стадии трассировки и метризации разделены", routing and metrisation are separate stages).
+The crossing count vs the undrawn ERBS is our own reasoning (two runs of one class cross a third wire's run the
+same number of times only up to planned crossings, which the kept ERBS carries too).
+
+### Invariants / tests
+- The competitor never crosses an undrawn other-net ERBS more often than the kept ERBS (unit test of the
+  predicate; drawing test: an inner wire drawn first whose shortcut crosses the outer's ERBS keeps its ERBS).
+- Mutant: predicate always false (competitor always eligible) must fail the drawing test.
+- Ladder: seq copper identical on the 5 boards; erbs per-connection table for qmtech/esp (ADV_CLK, ADV_DE, net 55).

@@ -474,6 +474,9 @@ pub struct DrawStats {
     /// sequential run was drawn to compare; of those, the ERBS a cheaper sequential run replaced.
     pub erbs_long: usize,
     pub erbs_long_replaced: usize,
+    /// Round i: of `erbs_long`, competitors that would have replaced the ERBS but cross an undrawn
+    /// wire's ERBS more often than it ([`competitor_keeps_class`]): the ERBS is drawn.
+    pub erbs_class_kept: usize,
 }
 
 /// M3 length factor (`[drawing] erbs_length_weight` k): the price of a legal ERBS of length `le`
@@ -501,6 +504,69 @@ pub fn erbs_vs_sequential(pe: f64, lb: f64, g: f64, ls: Option<f64>) -> Option<b
         return None;
     }
     Some(ls.is_some_and(|ls| ls * (1.0 + g) < pe))
+}
+
+/// Proper crossings of the run `run` with each path of `others` (wire, path), per wire (the wires
+/// it crosses at least once). O(|run| x sum |path|), boxes first.
+pub fn crossings_per_wire(run: &[Vec2], others: &[(WireId, &[Vec2])]) -> BTreeMap<WireId, usize> {
+    let mut out = BTreeMap::new();
+    if run.len() < 2 {
+        return out;
+    }
+    let bb = |p: &[Vec2]| p.iter().fold((Vec2 { x: f64::INFINITY, y: f64::INFINITY }, Vec2 { x: f64::NEG_INFINITY, y: f64::NEG_INFINITY }), |(lo, hi), q| (Vec2 { x: lo.x.min(q.x), y: lo.y.min(q.y) }, Vec2 { x: hi.x.max(q.x), y: hi.y.max(q.y) }));
+    let (rlo, rhi) = bb(run);
+    for &(o, path) in others {
+        if path.len() < 2 {
+            continue;
+        }
+        let (lo, hi) = bb(path);
+        if lo.x > rhi.x || hi.x < rlo.x || lo.y > rhi.y || hi.y < rlo.y {
+            continue;
+        }
+        let n = run.windows(2).map(|a| path.windows(2).filter(|b| seg_proper(a[0], a[1], b[0], b[1])).count()).sum::<usize>();
+        if n > 0 {
+            *out.entry(o).or_insert(0) += n;
+        }
+    }
+    out
+}
+
+/// Round i: the sequential run competing with a legal ERBS (`erbs_vs_sequential`) is of the plan's
+/// class only if it crosses no undrawn other-net wire's ERBS more often than the ERBS does (`seq`,
+/// `erbs`: [`crossings_per_wire`] of the two runs against those ERBS). A run that crosses one more
+/// often takes a path the plan gave that wire (a planned short once it is drawn: qmtech ADV_CLK,
+/// drawn before ADV_DE, cut straight across ADV_DE's ERBS to its pad and left ADV_DE no legal
+/// geometry); it does not compete and the ERBS is drawn (Dayan 1997 PDF pp. 25-26: the ERBS is a
+/// member of the class; Polubasov 2010: the drawing realises the topology, it does not change it).
+/// O(wires crossed).
+pub fn competitor_keeps_class(seq: &BTreeMap<WireId, usize>, erbs: &BTreeMap<WireId, usize>) -> bool {
+    seq.iter().all(|(o, &n)| n <= erbs.get(o).copied().unwrap_or(0))
+}
+
+/// Round i: the reference paths of the class test ([`competitor_keeps_class`]): per wire and
+/// layer its ERBS runs, or, where the wire has no ERBS on that layer (its sleeve failed, the time
+/// limit), its planned path (the chords through its passes' nominal crossings and its turns),
+/// so no undrawn wire is skipped; segments in a grid of their boxes (a competitor is tested
+/// against the paths whose boxes it meets only).
+pub(super) struct ClassRef {
+    paths: Vec<(WireId, usize, Vec<Vec2>)>,
+    grid: Grid<(usize, usize)>,
+}
+
+fn aabb_of(a: Vec2, b: Vec2) -> Aabb {
+    Aabb { min: Vec2 { x: a.x.min(b.x), y: a.y.min(b.y) }, max: Vec2 { x: a.x.max(b.x), y: a.y.max(b.y) } }
+}
+
+impl ClassRef {
+    /// Proper crossings of `run` (on `layer`) with the reference paths of the wires `keep` admits,
+    /// per wire. O(segments of the run x paths in their cells).
+    fn crossings(&self, run: &[Vec2], layer: usize, keep: &dyn Fn(WireId) -> bool) -> BTreeMap<WireId, usize> {
+        let mut ids: Vec<usize> = run.windows(2).flat_map(|s| self.grid.query(aabb_of(s[0], s[1]))).map(|(i, _)| i).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let others: Vec<(WireId, &[Vec2])> = ids.into_iter().filter_map(|i| self.paths.get(i)).filter(|p| p.1 == layer && keep(p.0)).map(|p| (p.0, p.2.as_slice())).collect();
+        crossings_per_wire(run, &others)
+    }
 }
 
 /// Per-stretch widths that replace a wire's single width (the drawing witness, variant A: the
@@ -719,6 +785,11 @@ pub struct Drawer<'a> {
     /// Test-only (hook "no sequential run"): every sequential attempt (0..5) of a run with an ERBS
     /// is illegal, so a parked ERBS reaches its last step (`ERBS_KEPT`). Always false in real runs.
     pub test_no_sequential: bool,
+    /// Test-only (hook "erbs class keep off"): the round-i class test of the length factor's
+    /// competitor ([`competitor_keeps_class`]) is skipped. Always false in real runs.
+    pub test_no_class_keep: bool,
+    /// Round i: the class test's reference paths, built at the first competitor.
+    class_ref: Option<ClassRef>,
     /// M3 length factor: every legal ERBS a sequential run was drawn against (wire, layer, ERBS
     /// length, band length, sequential length or NaN when none was legal, replaced), for the
     /// `erbs_long` warning (core.rs).
@@ -808,6 +879,8 @@ impl<'a> Drawer<'a> {
             split_at: BTreeMap::new(),
             erbs: BTreeMap::new(),
             test_no_sequential: false,
+            test_no_class_keep: false,
+            class_ref: None,
             erbs_long: Vec::new(),
             force: false,
             via_viol: BTreeMap::new(),
@@ -2739,6 +2812,8 @@ impl<'a> Drawer<'a> {
                     // M-45: the legal taut run redrawn octilinear where that keeps every rule
                     // (`super::octi`); else the taut run stays (its any-angle stretches priced).
                     let (mut pts, mut items, mut pneck_out) = (pts, items, pneck_out);
+                    // Debug (`TOPO_ERBS_DEBUG`): the run before its octilinear form and pull.
+                    let pre_octi = (band.is_some() && std::env::var_os("TOPO_ERBS_DEBUG").is_some()).then(|| pts.clone());
                     if self.octi.on && neck.is_none() && pts.len() >= 2 && !restored {
                         let t_o = std::time::Instant::now();
                         let wneck = if pneck_out.is_some() || attempt == 1 { pneck } else { None };
@@ -2815,6 +2890,24 @@ impl<'a> Drawer<'a> {
                     } else if let Some(k) = kept.take() {
                         let ls = poly_len(&pts);
                         replaced = erbs_vs_sequential(k.0, band_len, self.opts.erbs_margin, Some(ls)) == Some(true);
+                        // Round i: a competitor that crosses an undrawn wire's ERBS more often
+                        // than the ERBS does left the plan's class (`competitor_keeps_class`).
+                        if replaced && !self.test_no_class_keep {
+                            if self.class_ref.is_none() {
+                                self.class_ref = Some(self.build_class_ref());
+                            }
+                            let (st, drawn) = (self.st, &self.drawn_once);
+                            let keep = |o: WireId| o != w && !drawn[o] && st.wires[o].alive && st.wires[o].net != wi.net;
+                            let cr = self.class_ref.as_ref().expect("built");
+                            let (xs, xe) = (cr.crossings(&pts, layer, &keep), cr.crossings(&k.2, layer, &keep));
+                            if !competitor_keeps_class(&xs, &xe) {
+                                if std::env::var_os("TOPO_ERBS_DEBUG").is_some() {
+                                    eprintln!("ERBS class kept wire {w} net {} L{layer}: competitor {:.3} mm crosses {xs:?}, the ERBS {xe:?}; pre {:?}", wi.net, ls / 1e6, pre_octi.as_ref().map(|v| v.len()));
+                                }
+                                replaced = false;
+                                self.stats.erbs_class_kept += 1;
+                            }
+                        }
                         self.erbs_long.push((w, layer, k.1, band_len, ls, replaced));
                         if replaced {
                             self.stats.erbs_long_replaced += 1;
@@ -2851,6 +2944,8 @@ impl<'a> Drawer<'a> {
                     // Debug (`TOPO_ERBS_DEBUG`): how each run of the ERBS drawing was drawn.
                     if band.is_some() && std::env::var_os("TOPO_ERBS_DEBUG").is_some() {
                         eprintln!("ERBS draw wire {w} net {} L{layer} k {k0}..{k1}: src {src} len {:.3} band {:.3} replaced {replaced}", wi.net, poly_len(&pts) / 1e6, band_len / 1e6);
+                        let mm = |v: &[Vec2]| v.iter().map(|p| ((p.x / 1e3).round() / 1e3, (-p.y / 1e3).round() / 1e3)).collect::<Vec<_>>();
+                        eprintln!("  pre {:?}\n  drawn {:?}", pre_octi.as_deref().map(mm), mm(&pts));
                     }
                     if src < 0 {
                         self.stats.erbs_ok += 1;
@@ -3154,6 +3249,51 @@ impl<'a> Drawer<'a> {
     /// interleaved_boundary) cannot survive, and KiCad's Cleanup finds nothing to merge there.
     /// `None` when no vertex goes. O(passes x vertices x checker query).
     #[allow(clippy::type_complexity)]
+    /// The reference paths of the round-i class test ([`ClassRef`]). O(passes of all wires).
+    fn build_class_ref(&self) -> ClassRef {
+        let (st, pr) = (self.st, &self.b.proj);
+        let mut paths: Vec<(WireId, usize, Vec<Vec2>)> = Vec::new();
+        for (o, oi) in st.wires.iter().enumerate() {
+            if !oi.alive {
+                continue;
+            }
+            let runs = self.erbs.get(&o).map_or(&[][..], |v| v.as_slice());
+            for rb in runs {
+                paths.push((o, rb.layer, rb.path.clone()));
+            }
+            // Its planned path on the layers it has no ERBS on.
+            let n = oi.passes.len();
+            let lay = |j: usize| -> i32 { oi.passes.get(j).map_or(-2, |&q| self.prov_layer.get(q).copied().unwrap_or(-2)) };
+            let mut cur: BTreeMap<usize, Vec<Vec2>> = BTreeMap::new();
+            for ok in 0..=n {
+                let ls: Vec<usize> = [if ok > 0 { lay(ok - 1) } else { -2 }, lay(ok)].into_iter().filter(|&l| l >= 0).map(|l| l as usize).filter(|l| !runs.iter().any(|rb| rb.layer == *l)).collect();
+                for l in cur.keys().copied().collect::<Vec<_>>() {
+                    if !ls.contains(&l) {
+                        if let Some(p) = cur.remove(&l) {
+                            paths.push((o, l, p));
+                        }
+                    }
+                }
+                for &l in &ls {
+                    let e = cur.entry(l).or_default();
+                    if e.is_empty() {
+                        e.push(self.chord_pt(o, ok));
+                    }
+                    e.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| pr.pos[x.1]));
+                    e.push(self.chord_pt(o, ok + 1));
+                }
+            }
+            paths.extend(cur.into_iter().map(|(l, p)| (o, l, p)));
+        }
+        let mut grid = Grid::new(1.0e6);
+        for (i, p) in paths.iter().enumerate() {
+            for (k, s) in p.2.windows(2).enumerate() {
+                let _ = grid.try_insert(aabb_of(s[0], s[1]), (i, k));
+            }
+        }
+        ClassRef { paths, grid }
+    }
+
     pub(super) fn pull_taut(&self, w: WireId, k0: usize, k1: usize, layer: usize, lid: u32, pts: &[Vec2], pneck: &Option<super::exact::Neck>) -> Option<(Vec<Vec2>, Vec<Item>, Option<(f64, [f64; super::exact::NECK_ZONES])>)> {
         let cur = self.pull_pts(w, k0, k1, layer, pts, None)?;
         self.realise(w, layer, lid, &cur, pneck).map(|(its, pn)| (cur, its, pn))
