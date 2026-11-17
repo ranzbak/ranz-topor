@@ -619,19 +619,23 @@ def p_size() -> VPat:
 
 
 # ----------------------------------------------------------------------------------------------- 7 via site class
-def p_class() -> VPat:
+def p_class(p_inset: float = 1.0) -> VPat:
     """via_site_class (radii-m3-clear, user-approved 2026-11-16): a via whose roomy site lies across a wire its net does
     not cross is out of the plan's class. Caveat: end to end this may pass before the drawing's in-class rule
-    (draw.rs `Drawer::via_reach`), because the plan's own site can be free here; the rule's real guard is the unit test
-    engine/tests/topo_d2.rs `a_via_site_across_an_uncrossed_drawn_wire_is_out_of_class` (qmtech JS_INTB_5V repro)."""
+    (draw.rs `Drawer::via_reach`), because the plan's own site can be free here; the rule's real guards are the unit
+    tests in engine/tests/topo_d2.rs (`a_via_site_across_an_uncrossed_drawn_wire_is_out_of_class`, qmtech JS_INTB_5V
+    repro, and `a_forced_via_stays_in_the_plans_class`).
+
+    `p_inset`: P's pad centres this far inside the copper-to-edge band. 1.0 = the geometry the user approved
+    (2026-11-16, the suite's). 0.4 = the geometry 56a448b moved it to after the approval (P's pads touch the band,
+    nothing passes round P's ends): NOT approved, awaiting the user's choice (gallery stage "via_site_class: approved vs
+    moved pattern")."""
     W, H = 24.0, 14.0
     y0 = 7.0
     A1, A2 = (2.0, y0), (22.0, y0)
     xp, wp = 14.0, 0.5
     xw0, xw1 = 4.0, 12.2
-    # P's pads touch the copper-to-edge band: nothing passes round P's ends (a first draft left 0.6 mm there and the
-    # router legally took A round P's top end, 25 mm instead of 20).
-    P1, P2 = (xp, EDGE + 0.4), (xp, H - EDGE - 0.4)
+    P1, P2 = (xp, EDGE + p_inset), (xp, H - EDGE - p_inset)
     fps = [terminal("A1", "A", *A1), terminal("A2", "A", *A2, layer="B.Cu"),
            terminal("P1", "P", *P1), terminal("P2", "P", *P2),
            strip("N", "NB", (xw0 + xw1) / 2, EDGE, H - EDGE, w=xw1 - xw0, layer="B.Cu")]

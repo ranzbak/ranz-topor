@@ -277,15 +277,15 @@ fn a_placed_via_walls_off_its_chord_for_other_runs() {
 /// radii-m3-clear: a searched via site keeps the plan's class. The runs on the via's layers reach the
 /// site from the plan's path (taut chord); a reach that runs over a drawn track of a net the plan
 /// does not cross puts the site on that wire's far side (qmtech JS_INTB_5V: the via went past VIN5V's
-/// drawn track, every run then shorted it). Dayan 1997 PDF p. 32.
+/// drawn track, every run then shorted it). Dayan & Dai 1991 PDF p. 1 (homotopic via positioning),
+/// Dayan 1997 PDF p. 29 (band ends are terminals, vias or junctions).
 #[test]
 fn a_via_site_across_an_uncrossed_drawn_wire_is_out_of_class() {
-    use std::collections::BTreeSet;
     use topor_engine::check::Checker;
     use topor_engine::geom::Vec2;
     use topor_engine::model::Options;
     use topor_engine::topo::board::{self, BuildOpts};
-    use topor_engine::topo::draw::{track_item, Drawer};
+    use topor_engine::topo::draw::{track_item, ClassCrossings, Drawer};
     use topor_engine::topo::init::InitWeights;
     use topor_engine::topo::state::State;
     let m = board((0.0, 0.0, 20.0, 20.0), &[(1, 2.0, 10.0, true, 0.6), (1, 18.0, 10.0, true, 0.6), (2, 2.0, 17.0, true, 0.6), (2, 18.0, 17.0, true, 0.6)]);
@@ -297,7 +297,6 @@ fn a_via_site_across_an_uncrossed_drawn_wire_is_out_of_class() {
     let opts = Options::default();
     let checker = Checker::new(&m, &opts);
     let v = |x: f64, y: f64| Vec2 { x: x * MM, y: y * MM };
-    let none = BTreeSet::new();
     // Math frame (y up = -KiCad y): the wire runs at y = -10, the drawn net-2 track at y = -11.
     // A traversal whose taut chord spans x = 10.
     let mk = |layer: u32| {
@@ -314,15 +313,163 @@ fn a_via_site_across_an_uncrossed_drawn_wire_is_out_of_class() {
         .expect("a traversal over x = 10");
     assert!(dr.taut_chord(0, k).iter().all(|p| (p.y + 10.0 * MM).abs() < 0.05 * MM), "{:?}", dr.taut_chord(0, k));
     let (near, far) = (v(10.0, -10.4), v(10.0, -12.0));
+    let none = ClassCrossings::new();
     let (ok, price) = dr.via_reach(0, k, near, 0, 1, &none);
     assert!(ok && price == 0.0, "near site, free reach: {ok} {price}");
     assert!(!dr.via_reach(0, k, far, 0, 1, &none).0, "far side of the drawn net-2 track on F.Cu: out of class");
-    // A net the plan crosses this wire with: its drawn track does not change the class (priced).
-    let crossed: BTreeSet<i32> = [2].into_iter().collect();
-    let (ok, price) = dr.via_reach(0, k, far, 0, 1, &crossed);
-    assert!(ok && price > 1.0, "crossed net: in class, its violation priced: {ok} {price}");
+    // radii-m3-clear round 2: the plan's crossings count per traversal and layer.
+    let set = |x: &[(usize, i32, i32)]| -> ClassCrossings { x.iter().copied().collect() };
+    let other_k = if k > 0 { k - 1 } else { k + 1 };
+    // Crossed with net 2 in this traversal on the track's layer (F.Cu = 0): in class, its violation priced.
+    let (ok, price) = dr.via_reach(0, k, far, 0, 1, &set(&[(k, 2, 0)]));
+    assert!(ok && price > 1.0, "crossed here on F.Cu: in class, priced: {ok} {price}");
+    // Net 2's layer open there (its own via interval): in class.
+    assert!(dr.via_reach(0, k, far, 0, 1, &set(&[(k, 2, -1)])).0, "crossed here, layer open: in class");
+    // Crossed with net 2 on the other layer only (B.Cu = 1), or in another traversal only (qmtech
+    // JS_INTB_5V / VIN5V): the F.Cu track still puts the site out of class.
+    assert!(!dr.via_reach(0, k, far, 0, 1, &set(&[(k, 2, 1)])).0, "crossed here on B.Cu only: out of class");
+    assert!(!dr.via_reach(0, k, far, 0, 1, &set(&[(other_k, 2, 0), (other_k, 2, -1)])).0, "crossed in another traversal: out of class");
+    // Another net crossed here: no exemption for net 2.
+    assert!(!dr.via_reach(0, k, far, 0, 1, &set(&[(k, 3, 0)])).0, "another net crossed: out of class");
     // The track on B.Cu: the run after the via (lb) reaches over it; with both runs on F.Cu it is clear.
     let dr = mk(2);
     assert!(!dr.via_reach(0, k, far, 0, 1, &none).0, "B.Cu track, reach on lb: out of class");
     assert!(dr.via_reach(0, k, far, 0, 0, &none).0, "only F.Cu runs: in class");
+    assert!(dr.via_reach(0, k, far, 0, 1, &set(&[(k, 2, 1)])).0, "B.Cu track crossed here on B.Cu: in class");
+    assert!(!dr.via_reach(0, k, far, 0, 1, &set(&[(k, 2, 0)])).0, "B.Cu track crossed here on F.Cu only: out of class");
+}
+
+/// radii-m3-clear round 2 (verifier F5): the never-drop path keeps the class. In force mode, with no
+/// legal site in the plan's class (every site this side of an uncrossed drawn net-2 track is blocked
+/// by vias of net 3, which do not change the class) but a legal one past the net-2 track, the via is
+/// forced in the class with its violations, not put on the far side (whose run would short net 2).
+#[test]
+fn a_forced_via_stays_in_the_plans_class() {
+    use topor_engine::check::Checker;
+    use topor_engine::geom::Vec2;
+    use topor_engine::model::Options;
+    use topor_engine::topo::board::{self, BuildOpts};
+    use topor_engine::topo::draw::{track_item, via_item, Drawer, Plan};
+    use topor_engine::topo::init::InitWeights;
+    use topor_engine::topo::state::State;
+    use topor_engine::vias::ViaSize;
+    // Net 2's pads above and below the middle: the wire crosses two large triangles.
+    let m = board((0.0, 0.0, 20.0, 20.0), &[(1, 2.0, 10.0, true, 0.6), (1, 18.0, 10.0, true, 0.6), (2, 10.0, 3.0, true, 0.6), (2, 10.0, 17.0, true, 0.6)]);
+    let b = board::build(&m, &BuildOpts { steiner_mm: 0.0, ..BuildOpts::default() }).unwrap();
+    let conns = b.connections(&m);
+    let mut st = State::new(&b.proj);
+    let c = conns.iter().find(|c| c.net == 1).unwrap();
+    st.route_conn(c, &InitWeights::default(), (c.w + c.s) / 400_000.0).expect("routes");
+    let opts = Options::default();
+    let checker = Checker::new(&m, &opts);
+    let v = |x: f64, y: f64| Vec2 { x: x * MM, y: y * MM };
+    let probe = Drawer::new(&m, &opts, &b, &st, &checker);
+    let k = (0..=st.wires[0].passes.len())
+        .find(|&k| {
+            let ch = probe.taut_chord(0, k);
+            ch.len() >= 2 && ch.iter().any(|p| p.x <= 10.0 * MM) && ch.iter().any(|p| p.x >= 10.0 * MM)
+        })
+        .expect("a traversal over x = 10");
+    // The far side = the side of the chord (math y = -10) where the triangle's site points reach farthest.
+    let pr = &b.proj;
+    let [ta, tb, tc] = pr.tris[st.wires[0].tris[k]].map(|i| pr.pos[i]);
+    let pts = topor_engine::topo::pack::tri_site_points(ta, tb, tc);
+    let off = |p: Vec2| (p.y + 10.0 * MM) / MM;
+    let s = if pts.iter().map(|&p| off(p)).fold(f64::NEG_INFINITY, f64::max) >= -pts.iter().map(|&p| off(p)).fold(f64::INFINITY, f64::min) { 1.0 } else { -1.0 };
+    assert!(pts.iter().any(|&p| off(p) * s >= 1.8), "the fixture needs a site point 1.8 mm past the chord: {pts:?}");
+    let mut dr = Drawer::new(&m, &opts, &b, &st, &checker);
+    dr.force = true;
+    // The class boundary: a drawn F.Cu track of net 2, 1 mm off the chord on the far side.
+    dr.commit(&track_item(2, 0, 0.25 * MM, v(0.6, -10.0 + s), v(19.4, -10.0 + s), None));
+    // Net-3 vias (fixed copper, no class boundary) block every site on the near side and on the chord.
+    let blocker = ViaSize { d: 1_000_000, drill: 500_000 };
+    let mut y = 0.5;
+    while y <= 20.0 {
+        let yy = -10.0 + s * 0.6 - s * (y - 0.5);
+        let mut x = 0.4;
+        while x <= 19.6 {
+            dr.commit(&via_item(3, v(x, yy), blocker, None));
+            x += 0.7;
+        }
+        y += 0.7;
+    }
+    let plan = Plan { layers: vec![0, 1], vias: vec![(k, k)], at: vec![k] };
+    let mut ids = Vec::new();
+    let vias = dr.place_vias(0, &plan, &mut ids).expect("never drop: a via");
+    assert_eq!(vias.len(), 1);
+    let (vk, p, _) = vias[0];
+    assert!(off(p) * s < 0.75, "forced in the class, this side of net 2's track: {:?} (s {s}) stats {:?}", (p.x / MM, p.y / MM), dr.stats);
+    assert_eq!(dr.stats.via_forced, 1, "{:?}", dr.stats);
+    assert_eq!(dr.stats.via_out_of_class, 0, "{:?}", dr.stats);
+    assert!(dr.via_reach(0, vk, p, 0, 1, &dr.class_crossings(0)).0);
+}
+
+/// radii-m3-clear round 2: the plan's crossings for the via class test are per traversal and layer.
+/// Two wires that cross: `class_crossings` gives the traversal of the crossing and the other wire's
+/// layer there from the pass layers (`prov_layer`); a layer still open there (its own via interval,
+/// two different pass layers) or no pass layers at all = -1.
+#[test]
+fn class_crossings_are_per_traversal_and_layer() {
+    use topor_engine::check::Checker;
+    use topor_engine::model::Options;
+    use topor_engine::topo::board::{self, BuildOpts};
+    use topor_engine::topo::draw::Drawer;
+    use topor_engine::topo::init::InitWeights;
+    use topor_engine::topo::state::State;
+    let m = board((0.0, 0.0, 20.0, 20.0), &[(1, 2.0, 10.0, true, 0.6), (1, 18.0, 10.0, true, 0.6), (2, 10.0, 2.0, true, 0.6), (2, 10.0, 18.0, true, 0.6)]);
+    let b = board::build(&m, &BuildOpts { steiner_mm: 0.0, ..BuildOpts::default() }).unwrap();
+    let conns = b.connections(&m);
+    let mut st = State::new(&b.proj);
+    // A crossing costs nothing here: both wires take their straight line and cross in the middle.
+    let iw = InitWeights { cross_mm: 0.0, ..InitWeights::default() };
+    for c in &conns {
+        st.route_conn(c, &iw, (c.w + c.s) / 400_000.0).expect("routes");
+    }
+    let opts = Options::default();
+    let checker = Checker::new(&m, &opts);
+    let w0 = (0..st.wires.len()).find(|&w| st.wires[w].net == 1).unwrap();
+    let w1 = (0..st.wires.len()).find(|&w| st.wires[w].net == 2).unwrap();
+    let xs: Vec<_> = st.crossings(w0).into_iter().filter(|x| x.other == w1).collect();
+    assert_eq!(xs.len(), 1, "the fixture's two wires cross once: {xs:?}");
+    let (k, ok) = (xs[0].k, xs[0].other_k);
+    let mut dr = Drawer::new(&m, &opts, &b, &st, &checker);
+    // No pass layers: open.
+    assert_eq!(dr.class_crossings(w0).into_iter().collect::<Vec<_>>(), vec![(k, 2, -1)]);
+    // Wire 1 on B.Cu (1) there.
+    dr.prov_layer = vec![0; st.passes.len()];
+    for &pid in &st.wires[w1].passes {
+        dr.prov_layer[pid] = 1;
+    }
+    assert_eq!(dr.class_crossings(w0).into_iter().collect::<Vec<_>>(), vec![(k, 2, 1)]);
+    // Its two passes round traversal `ok` on different layers (a via of its own there): open.
+    let ps = &st.wires[w1].passes;
+    assert!(ok > 0 && ok < ps.len(), "a crossing between two passes of wire 1");
+    dr.prov_layer[ps[ok]] = 0;
+    assert_eq!(dr.class_crossings(w0).into_iter().collect::<Vec<_>>(), vec![(k, 2, -1)]);
+    // Only one pass known (the other -1, not decided yet): still open.
+    dr.prov_layer[ps[ok]] = -1;
+    assert_eq!(dr.class_crossings(w0).into_iter().collect::<Vec<_>>(), vec![(k, 2, -1)]);
+    // From the other wire's side: wire 0 on F.Cu.
+    assert_eq!(dr.class_crossings(w1).into_iter().collect::<Vec<_>>(), vec![(ok, 1, 0)]);
+}
+
+/// radii-m3-clear round 2: `[vias] reach_price` (default off, user 2026-11-17) gates the reach price
+/// of a via site; the class verdict does not depend on it.
+#[test]
+fn the_reach_price_is_opt_in() {
+    use topor_engine::check::Checker;
+    use topor_engine::model::Options;
+    use topor_engine::topo::board::{self, BuildOpts};
+    use topor_engine::topo::draw::Drawer;
+    use topor_engine::topo::state::State;
+    assert!(!Options::default().via_reach_price, "default off");
+    let m = board((0.0, 0.0, 20.0, 20.0), &[(1, 2.0, 10.0, true, 0.6), (1, 18.0, 10.0, true, 0.6)]);
+    let b = board::build(&m, &BuildOpts { steiner_mm: 0.0, ..BuildOpts::default() }).unwrap();
+    let st = State::new(&b.proj);
+    for on in [false, true] {
+        let opts = Options { via_reach_price: on, ..Options::default() };
+        let checker = Checker::new(&m, &opts);
+        let dr = Drawer::new(&m, &opts, &b, &st, &checker);
+        assert_eq!(dr.reach_cost(2.5, 4.0), if on { 10.0 } else { 0.0 }, "reach_price {on}");
+    }
 }

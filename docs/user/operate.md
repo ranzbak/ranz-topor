@@ -123,6 +123,14 @@ Board Setup is looser than what you will order; KiCad's DRC still judges the res
   [`VIA_NOT_SET_UP`](troubleshoot.md#via_not_set_up) fires: no pre-defined via and only KiCad's factory
   0.8 / 0.4 mm net class via → the nets with that via get `[vias] fallback_diameter_mm` /
   `fallback_drill_mm` (0.8 / 0.4 mm by default) as their own via.
+- **Where a via goes when the plan's site is taken.** The drawing then searches nearby sites, but only sites in
+  the plan's topological class: the trace must reach the site on each of the via's layers without running over a
+  trace of another net that the plan does not cross at that spot (same layer, same place along the trace). A site on
+  the far side of such a trace is used only when no site in the class exists (counted in the run report's
+  "vias, plan vs drawn" line, "out of the plan's class"). `[vias] reach_price = true` additionally prefers the site the
+  trace reaches with the fewest clearance grazes (graded price); it is off by default because, measured on the test
+  boards, it moves vias that were fine and costs more violations than it saves until the planner's own via-site room
+  check is improved.
 
 ### topor.toml
 

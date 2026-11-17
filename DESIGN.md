@@ -145,9 +145,12 @@ via at 133.020 the plan's ERBS is legal (0 violations, U6 row at 125.724 >= 125.
 Of the 8 searched vias in the final qmtech draw, this is the only one cut off from every legal alternative by copper.
 
 #### Literature
-Dayan & Dai 1991 / Dayan 1997 PDF p. 32: vias are fixed objects the topology is built round; a via placed on the far
-side of a wire the plan does not cross changes the class (the run must cross it), so the site is not in the plan's
-class; the drawing only realises the plan, so such a site is no candidate while an in-class one exists.
+Dayan & Dai 1991 (UCSC-CRL-91-40) PDF p. 1, abstract: vias (and Steiner points) are positioned *homotopically*, i.e.
+moved only within the sketch's topological class; Dayan 1997 PDF p. 29 (printed p. 18): the end-points of the rubber
+bands are terminals, vias or junction points, so a via is an end of the bands on its layers. A via placed on the far
+side of a wire the plan does not cross there changes the class (the run must cross it), so the site is not in the
+plan's class; the drawing only realises the plan, so such a site is no candidate while an in-class one exists.
+(Round 1 cited "Dayan 1997 PDF p. 32: vias are fixed objects"; p. 32 is about layer assignment and spokes, verifier F6.)
 
 #### Invariants
 - Seq output changes where an out-of-class site won before, or where the graded reach price reorders in-class sites.
@@ -162,3 +165,29 @@ Synthetic fixture (harness/fixtures.py; PNG to the lead first, patterns need the
 planned site is blocked by a pad, a drawn wide track between the near legal site and a roomier far site; expected
 the near site, no short. Mutants: class test off; reach on one layer only; force_via without the class; crossed-net
 exemption off.
+
+## radii-m3-clear round 2 (2026-11-17, user decisions on the verifier's findings)
+
+#### What
+1. **Class per traversal and layer** (F1). `crossed` was the set of nets the plan crosses wire w with anywhere, over
+   all layers, so a crossing with VIN5V elsewhere on JS_INTB_5V made its site across VIN5V's F.Cu track in the via
+   traversal look in class. Now `Drawer::class_crossings(w)` = `{(k, net, layer)}`: the traversal k of w, the other
+   net, and the other wire's layer in its traversal there (`prov_layer` of its two passes; -1 = open: a via interval of
+   its own, or no pass layers). `via_reach` in traversal k: a reach on layer l over a drawn track of net n is in class
+   only if `(k, n, l)` or `(k, n, -1)` is in the set. The reach segment runs from the taut chord of k to the site, both
+   in k's triangle, so the traversal is the place where the plan decides on which side of n the via stands.
+2. **Reach price opt-in** (F2): `[vias] reach_price` (Options `via_reach_price`, default false). Off: the reach's
+   violations add nothing to the searched or the forced site's price; the class verdict applies either way. On:
+   round 1's price (`octi.room x dv x reach` searched, `+ reach` forced). Off by default until VS-PLAN (the planner's
+   via-site room check) is fixed: the price re-picks in-class sites board-wide (qmtech MAX_SCLK +2, esp USB_D+).
+3. **Forced over every site counted** (F5): a via forced with `force_via(.., None)` whose site fails the class test
+   is counted in `via_out_of_class` (the summary line understated it).
+
+#### Invariants
+- With the price off, copper changes only where a site that won before is out of class now.
+- No via dropped (unchanged order: in class legal > in class forced > out of class legal > any site forced).
+
+#### Tests
+- topo_d2 `a_via_site_across_an_uncrossed_drawn_wire_is_out_of_class`: crossed in this traversal on the track's layer
+  = in class; on the other layer, or in another traversal = out of class; open layer = in class.
+- topo_d2 forced path: in force mode, no legal in-class site, a legal out-of-class one: the via is forced in class.
