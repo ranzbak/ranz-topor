@@ -281,6 +281,29 @@ pub mod meter {
 /// triangle, -inradius, traversal).
 type SiteKey = (bool, i64, usize, i64, usize);
 
+/// "Not filled yet" in [`CapModel::margins`] (a NaN pattern no margin takes: margins are finite).
+const MARGIN_UNSET: u64 = u64::MAX;
+
+/// Margin table slots per pass: per end, `nl` track margins, `nl` disc-alone margins and the via
+/// disc's margin over all layers.
+fn margin_slots(nl: usize) -> usize {
+    2 * (2 * nl + 1)
+}
+
+/// Per-thread scratch of [`CapModel::eval`].
+#[derive(Default)]
+struct EvalScratch {
+    items: Vec<PackItem>,
+    lo: Vec<f64>,
+    hi: Vec<f64>,
+    req: Vec<f64>,
+    rmax: Vec<f64>,
+}
+
+thread_local! {
+    static EVAL_SCRATCH: std::cell::RefCell<EvalScratch> = std::cell::RefCell::new(EvalScratch::default());
+}
+
 /// Per edge-layer overflow price of a labelling, kept incrementally.
 ///
 /// A planned via takes room (D3; Popov & Popov 2012 p. 118: vias are round pads, i.e. vertices
@@ -302,6 +325,18 @@ pub struct CapModel<'a> {
     bottom: i32,
     /// Position of every pass in its wire.
     pass_k: Vec<usize>,
+    /// Per pass of a live wire: its pack item without a disc (net, width, clearance, oblique
+    /// factor of its taut direction), as [`CapModel::items`] makes it; filled at the build
+    /// (static for the model's life: the state and the directions are borrowed).
+    item0: Vec<PackItem>,
+    /// Per wire: the via disc diameter its passes get ([`Packer::via_d`] of its net).
+    wire_d: Vec<f64>,
+    /// Per pass: its end margins ([`Packer::margin`] of its edge, both ends, every layer, at its
+    /// track width and as a disc alone (width 0), and [`Packer::margin_all`] of its wire's via
+    /// disc), filled when first asked ([`MARGIN_UNSET`] until then). `MARGIN_SLOTS(nl)` per pass.
+    /// The values are those of the packer's (pure) cache, so an entry read here equals the
+    /// packer's answer bit for bit.
+    margins: Vec<std::sync::atomic::AtomicU64>,
     /// Layer of every pass (-1: wire dead).
     pub pass_layer: Vec<i32>,
     /// Via disc diameter at every pass next to a via of its wire (0: none).
@@ -354,6 +389,16 @@ impl<'a> CapModel<'a> {
                 pass_k[p] = k;
             }
         }
+        let pr = st.proj;
+        let mut item0 = vec![PackItem::default(); st.passes.len()];
+        for (w, wi) in st.wires.iter().enumerate().filter(|(_, wi)| wi.alive) {
+            for (k, &p) in wi.passes.iter().enumerate() {
+                let e = st.passes[p].edge;
+                item0[p] = PackItem { net: wi.net, w: st.pass_w.get(p).copied().unwrap_or(wi.w), s: wi.s, infl: infl_dir(pr, e, dirs[w][k]), disc: [0.0; 2] };
+            }
+        }
+        let wire_d: Vec<f64> = st.wires.iter().map(|wi| packer.via_d(wi.net)).collect();
+        let margins = (0..st.passes.len() * margin_slots(nl)).map(|_| std::sync::atomic::AtomicU64::new(MARGIN_UNSET)).collect();
         let mut m = CapModel {
             st,
             packer,
@@ -362,6 +407,9 @@ impl<'a> CapModel<'a> {
             price,
             bottom,
             pass_k,
+            item0,
+            wire_d,
+            margins,
             pass_layer: vec![-1; st.passes.len()],
             pass_disc: vec![[0.0; 2]; st.passes.len()],
             via_iv: vec![Vec::new(); nw],
@@ -656,7 +704,58 @@ impl<'a> CapModel<'a> {
     /// Overflow price and via squeeze price of edge `e` on layer `l` under the current pass
     /// layers: every via disc there pays the `via_squeeze` weight times the squeeze of the slack
     /// the packing leaves (the least `rmax - lmin`) against one via diameter.
+    ///
+    /// The items, their end margins and the packing come from the per-pass tables and a
+    /// per-thread scratch ([`EvalScratch`]): the same items in the same order and the same
+    /// operations as [`CapModel::items`] + [`Packer::bounds`] + [`super::pack::Bounds::worst`]
+    /// (par-refine §3, exact), without a hash lookup or an allocation per call.
     fn eval(&self, e: usize, l: usize) -> (f64, f64) {
+        let order = &self.st.edge_order[e];
+        if order.is_empty() {
+            return (0.0, 0.0);
+        }
+        EVAL_SCRATCH.with(|sc| self.eval_in(e, l, order, &mut sc.borrow_mut()))
+    }
+
+    fn eval_in(&self, e: usize, l: usize, order: &[usize], sc: &mut EvalScratch) -> (f64, f64) {
+        sc.items.clear();
+        sc.lo.clear();
+        sc.hi.clear();
+        let len = self.packer.edge_len(e);
+        for &p in order {
+            let (pl, d) = (self.pass_layer[p], self.pass_disc[p]);
+            let track = pl == l as i32;
+            let it = if track {
+                PackItem { disc: d, ..self.item0[p] }
+            } else if pl >= 0 && d[0].max(d[1]) > 0.0 {
+                let i0 = &self.item0[p];
+                PackItem { net: i0.net, w: 0.0, s: i0.s, infl: 1.0, disc: d }
+            } else {
+                continue;
+            };
+            sc.lo.push(self.end_margin(p, e, 0, &it, l, track));
+            sc.hi.push(len - self.end_margin(p, e, 1, &it, l, track));
+            sc.items.push(it);
+        }
+        let items = &sc.items;
+        if items.is_empty() {
+            return (0.0, 0.0);
+        }
+        let over = self.packer.worst_into(e, items, &sc.lo, &sc.hi, &mut sc.req, &mut sc.rmax);
+        let sq_w = self.packer.via_squeeze;
+        let sq = if sq_w > 0.0 { sq_w * items.iter().filter(|i| i.dmax() > 0.0).map(|i| squeeze_amount(-over, i.dmax())).sum::<f64>() } else { 0.0 };
+        if over <= 1e-6 {
+            return (0.0, sq);
+        }
+        let pitch = (items.iter().map(|i| i.w.max(i.dmax()) + i.s).sum::<f64>() / items.len() as f64).max(1.0);
+        (self.price * (1.0 + over / pitch), sq)
+    }
+
+    /// [`CapModel::eval`] the way it was computed before the per-pass tables (par-refine §3):
+    /// [`CapModel::items`] + [`Packer::bounds`] + [`super::pack::Bounds::worst`]. The tests'
+    /// reference for the exactness of the tables. O(passes of the edge x margin lookups).
+    #[doc(hidden)]
+    pub fn eval_reference(&self, e: usize, l: usize) -> (f64, f64) {
         let items = self.items(e, l, None);
         if items.is_empty() {
             return (0.0, 0.0);
@@ -669,6 +768,49 @@ impl<'a> CapModel<'a> {
         }
         let pitch = (items.iter().map(|i| i.w.max(i.dmax()) + i.s).sum::<f64>() / items.len() as f64).max(1.0);
         (self.price * (1.0 + over / pitch), sq)
+    }
+
+    /// [`CapModel::eval`] of edge `e`, layer `l` under the current pass layers (tests). O(passes of the edge).
+    #[doc(hidden)]
+    pub fn eval_at(&self, e: usize, l: usize) -> (f64, f64) {
+        self.eval(e, l)
+    }
+
+    /// The end margin of item `it` of pass `p` at end `end` of edge `e` on layer `l` as
+    /// [`Packer::bounds`] takes it (its track's or, `track` = false, its disc-alone item's
+    /// [`Packer::margin`], at least the via disc's [`Packer::margin_all`] when it has a disc
+    /// there), through the pass's margin table. O(1) once filled.
+    fn end_margin(&self, p: usize, e: usize, end: usize, it: &PackItem, l: usize, track: bool) -> f64 {
+        use std::sync::atomic::Ordering::Relaxed;
+        let nl = self.nl;
+        let base = p * margin_slots(nl) + end * (2 * nl + 1);
+        let slot = &self.margins[base + if track { l } else { nl + l }];
+        let m = match slot.load(Relaxed) {
+            MARGIN_UNSET => {
+                let m = self.packer.margin(e, end, it.net, it.w, it.s, l);
+                slot.store(m.to_bits(), Relaxed);
+                m
+            }
+            b => f64::from_bits(b),
+        };
+        let d = it.disc[end];
+        if d <= 0.0 {
+            return m;
+        }
+        let w = self.st.passes[p].wire;
+        if d.to_bits() != self.wire_d[w].to_bits() {
+            return m.max(self.packer.margin_all(e, end, it.net, d, it.s));
+        }
+        let slot = &self.margins[base + 2 * nl];
+        let ma = match slot.load(Relaxed) {
+            MARGIN_UNSET => {
+                let ma = self.packer.margin_all(e, end, it.net, d, it.s);
+                slot.store(ma.to_bits(), Relaxed);
+                ma
+            }
+            b => f64::from_bits(b),
+        };
+        m.max(ma)
     }
 
     /// Whether the passes on edge `e`, layer `l` fit when the wires in `gone` are taken out.

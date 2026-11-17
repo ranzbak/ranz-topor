@@ -576,7 +576,6 @@ impl<'a> Packer<'a> {
         let [p, q] = pr.edges[e];
         let len = (pr.pos[q] - pr.pos[p]).len().max(1.0);
         let regime = pr.regime(e);
-        let s_of = |it: &PackItem| regime.unwrap_or(it.s);
         let n = items.len();
         // A via disc is copper on every layer: its end margins are the largest over the layers.
         let mar = |i: &PackItem, end: usize| {
@@ -589,13 +588,8 @@ impl<'a> Packer<'a> {
         };
         let lo: Vec<f64> = items.iter().map(|i| mar(i, 0)).collect();
         let hi: Vec<f64> = items.iter().map(|i| len - mar(i, 1)).collect();
-        let req: Vec<f64> = items
-            .windows(2)
-            .map(|x| {
-                let (a, b) = (&x[0], &x[1]);
-                pair_req(a, b, if a.net != b.net { s_of(a).max(s_of(b)) + self.eps } else { 0.0 })
-            })
-            .collect();
+        let mut req = Vec::with_capacity(n.saturating_sub(1));
+        self.req_into(regime, items, &mut req);
         let mut lmin = vec![0.0; n];
         let mut rmax = vec![0.0; n];
         for i in 0..n {
@@ -605,5 +599,43 @@ impl<'a> Packer<'a> {
             rmax[i] = if i == n - 1 { hi[i] } else { hi[i].min(rmax[i + 1] - req[i]) };
         }
         Bounds { lo, hi, lmin, rmax, req }
+    }
+
+    /// The centre distances `req` of neighbours `i`, `i + 1` of `items` (edge with `regime`), as
+    /// [`Packer::bounds`] packs them. O(items).
+    fn req_into(&self, regime: Option<f64>, items: &[PackItem], req: &mut Vec<f64>) {
+        let s_of = |it: &PackItem| regime.unwrap_or(it.s);
+        req.clear();
+        req.extend(items.windows(2).map(|x| {
+            let (a, b) = (&x[0], &x[1]);
+            pair_req(a, b, if a.net != b.net { s_of(a).max(s_of(b)) + self.eps } else { 0.0 })
+        }));
+    }
+
+    /// [`Bounds::worst`] of [`Packer::bounds`] on edge `e` for `items` whose allowed spans
+    /// `lo`, `hi` the caller computed (as `bounds` does: the end margins), without the five
+    /// vectors `bounds` returns: the same operations in the same order, so the same bits (the
+    /// capacity model's hot path, par-refine §3). `req`, `rmax`: scratch. O(items).
+    pub fn worst_into(&self, e: EdgeId, items: &[PackItem], lo: &[f64], hi: &[f64], req: &mut Vec<f64>, rmax: &mut Vec<f64>) -> f64 {
+        let n = items.len();
+        self.req_into(self.pr.regime(e), items, req);
+        rmax.clear();
+        rmax.resize(n, 0.0);
+        for i in (0..n).rev() {
+            rmax[i] = if i == n - 1 { hi[i] } else { hi[i].min(rmax[i + 1] - req[i]) };
+        }
+        let mut worst = f64::NEG_INFINITY;
+        let mut lmin = 0.0;
+        for i in 0..n {
+            lmin = if i == 0 { lo[0] } else { lo[i].max(lmin + req[i - 1]) };
+            worst = worst.max(lmin - rmax[i]);
+        }
+        worst
+    }
+
+    /// Length of edge `e` as [`Packer::bounds`] takes it (nm, at least 1). O(1).
+    pub fn edge_len(&self, e: EdgeId) -> f64 {
+        let [p, q] = self.pr.edges[e];
+        (self.pr.pos[q] - self.pr.pos[p]).len().max(1.0)
     }
 }
