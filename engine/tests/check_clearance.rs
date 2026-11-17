@@ -120,8 +120,8 @@ fn slanted_above(y0: i32) -> (Item, f64) {
 /// erbs-margin (user 2026-11-17: "when we use floating point math to do this we'll never have an
 /// exact match"): the checker passes a gap short of its requirement by at most
 /// `CHECK_TOL_NM` (1 nm, far below KiCad's DRCEpsilon of 0.5 um) and rejects anything shorter:
-/// a wire at the clearance + 0.42 nm, at it, at - 0.58 nm and at - 1 nm passes, at - 1.58 nm and
-/// - 2 nm does not. The innermost ERBS of every showcase pattern was rejected at 200000 vs 200000
+/// a wire at the clearance + 0.42 nm, at it, at -0.58 nm and at -1 nm passes, at -1.58 nm and at
+/// -2 nm does not. The innermost ERBS of every showcase pattern was rejected at 200000 vs 200000
 /// nm (short by < 0.5 nm) before (diag-bundle 2026-11-17).
 #[test]
 fn clearance_tolerance_is_a_fraction_of_a_nm() {

@@ -1600,6 +1600,26 @@ mod tests {
         assert!(xmin <= -0.25e6 + 1.0, "beside the band: pushed out to {xmin}: {:?}", es[0].path);
     }
 
+    /// erbs-margin: the grown features carry the placement margin. The pad 0.2 mm beside the
+    /// middle of a 6 mm band pushes the ERBS out to `edge - w/2 - clearance - margin` (x <= -0.25
+    /// mm - 10 nm), where margin 0 puts it at exactly -0.25 mm.
+    #[test]
+    fn erbs_margin_on_grown_features() {
+        let obs = vec![(rect(0.2, 2.5, 1.2, 3.5), 1), (pad(0.0, 0.0), 100), (pad(0.0, 6.0), 100)];
+        let curves = vec![vec![v(0.0, 0.0), v(0.0, 6.0)]];
+        let pr = proj_n(obs);
+        let (sh, sts) = setup_w(&pr, &curves, Norm::Octagonal, &[(0.5, 0.2, 0.5)]);
+        let xmin = |m: f64| {
+            let mut o = order_layer(&sh, &sts, &[0], 0.0);
+            radii_layer_m(&sh, &sts, &[0], &mut o, true, m, &|_| None);
+            let es = erbs_layer(&sh, &sts, &[0], &o, &ErbsOpts { margin: m, ..ErbsOpts::default() });
+            es[0].path.iter().map(|p| p.x).fold(f64::INFINITY, f64::min)
+        };
+        let (x0, x10) = (xmin(0.0), xmin(10.0));
+        assert!(x0 <= -0.25e6 + 0.5 && x0 > -0.25e6 - 2.0, "margin 0: at the clearance, {x0}");
+        assert!((x10 - x0 + 10.0).abs() < 0.5, "margin 10 nm: 10 nm further out, {x10} vs {x0}");
+    }
+
     /// Round g rule 2: a band that runs along a pad's edge and wraps its two corners with the
     /// pad's body on the outside of the turns (the plan through the pad's corners, wraps_inside):
     /// those wraps hold no arc (the rays of their wedges run over the body), so the ERBS stays

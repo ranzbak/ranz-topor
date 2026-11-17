@@ -11,9 +11,12 @@
 use topor_engine::control::RunControl;
 use topor_engine::model::{BoardModel, Options};
 
+/// (connections (name, length mm, violations), warnings, routed, total).
+type Routed = (Vec<(String, f64, usize)>, Vec<String>, usize, usize);
+
 /// The route of fixture `dir/model-<p>.json` with `[drawing] realise` and `style`, one run, one
-/// round (deterministic): (connections (name, length mm, violations), warnings, routed, total).
-fn route(dir: &str, p: &str, style: &str, realise: &str) -> (Vec<(String, f64, usize)>, Vec<String>, usize, usize) {
+/// round (deterministic).
+fn route(dir: &str, p: &str, style: &str, realise: &str) -> Routed {
     let path = format!("{}/tests/fixtures/{dir}/model-{p}.json", env!("CARGO_MANIFEST_DIR"));
     let m = BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let mut val = serde_json::to_value(Options::default()).unwrap();
@@ -23,7 +26,7 @@ fn route(dir: &str, p: &str, style: &str, realise: &str) -> (Vec<(String, f64, u
     val["draw_style"] = serde_json::json!(style);
     let o: Options = serde_json::from_value(val).unwrap();
     let r = topor_engine::route::route_with(&m, &o, &RunControl::new());
-    let c = r.connections.iter().map(|c| (c.name.clone(), c.length_nm as f64 / 1e6, c.violations as usize)).collect();
+    let c = r.connections.iter().map(|c| (c.name.clone(), c.length_nm as f64 / 1e6, c.violations)).collect();
     (c, r.warnings.clone(), r.routed, r.connections_total)
 }
 
