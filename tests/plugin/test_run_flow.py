@@ -6,6 +6,7 @@ test fixture) and ScriptedUi. wx needs an App for the preview renderer: `wx.App(
 shown (Ruling C18). Every report folder goes under a tmp TOPOR_REPORT_ROOT (Ruling C1).
 """
 import json
+from dataclasses import replace
 import math
 import re
 import shutil
@@ -30,7 +31,9 @@ MARKER = "11111111-2222-4333-8444-555555555555"  # a valid uuid: kicad-cli re-se
 LIVE_EDIT = (f'\t(gr_line\n\t\t(start 190 70)\n\t\t(end 191 70)\n\t\t(stroke\n\t\t\t(width 0.1)\n'
              f'\t\t\t(type default)\n\t\t)\n\t\t(layer "Cmts.User")\n\t\t(uuid "{MARKER}")\n\t)\n')
 
-CFG = Config.defaults().with_values({("run", "existing_copper"): "rip", ("run", "timeout_s"): 60.0})
+CFG_DEFAULT_REFILL = Config.defaults().with_values({("run", "existing_copper"): "rip", ("run", "timeout_s"): 60.0})
+# refill_after_accept defaults to true since 2026-11-17; most flows below judge Accept = one commit, so they pin false
+CFG = CFG_DEFAULT_REFILL.with_values({("run", "refill_after_accept"): False})
 
 
 @pytest.fixture(scope="module")
@@ -525,6 +528,78 @@ def test_run_failure_after_commit_stays_accepted(app, eprom, tmp_path, reports, 
         assert "zones refilled" in (out.report_dir / "report.md").read_text()
 
 
+def test_run_default_refills_zones_after_accept(app, eprom, tmp_path, reports):
+    """Default run.refill_after_accept = true (user 2026-11-17: pours came back stale): exactly one refill after the
+    commit, the report and the done notice say so; a topor.toml pinning false keeps Accept = one undo step."""
+    board, ui, out = do_run(eprom, tmp_path / "on", ui=ScriptedUi(accept=True), cfg=CFG_DEFAULT_REFILL)
+    assert out.status == "accepted" and board.refills == 1 and len(board.commits) == 1
+    assert out.report.facts["zones_refilled"] is True
+    assert "zones refilled by topor" in (out.report_dir / "report.md").read_text()
+    assert not [f for f in out.findings if f.code in ("ZONE_FILLS_SKIPPED", "POST_COMMIT_STEP_FAILED")]
+    board, ui, out = do_run(eprom, tmp_path / "off", ui=ScriptedUi(accept=True), cfg=CFG)  # pinned false
+    assert out.status == "accepted" and board.refills == 0 and out.report.facts["zones_refilled"] is False
+
+
+class _Log:
+    def __init__(self):
+        self.lines = []
+
+    def line(self, t):
+        self.lines.append(t)
+
+
+def test_routed_fills_every_skip_path_is_named(accepted, tmp_path):
+    """run.commit_fills: _routed_fills returns the fills, or why there are none ("off" = the user's own setting,
+    "no_copy", "other_items"); a skip other than "off" is logged with its reason."""
+    board, ui, out, tmp = accepted
+    state = {"judged_items": list(out.items)}
+    fills, skip = run_mod._routed_fills(CFG, out, state, _Log())
+    assert fills and skip is None
+    log = _Log()
+    assert run_mod._routed_fills(CFG.with_values({("run", "commit_fills"): False}), out, state, log) == ({}, "off")
+    assert log.lines == []  # the user's own choice is not a failure
+    log = _Log()
+    out2 = replace(out, routed_pcb=tmp_path / "gone.kicad_pcb")
+    assert run_mod._routed_fills(CFG, out2, state, log) == ({}, "no_copy")
+    assert "refilled copy of the routed result is missing" in log.lines[0]
+    log = _Log()
+    other = [{**out.items[0], "x_nm": 1}] + list(out.items[1:])
+    assert run_mod._routed_fills(CFG, out, {"judged_items": other}, log) == ({}, "other_items")
+    assert "judged for other items" in log.lines[0]
+
+
+@pytest.mark.parametrize("why", ["no_copy", "other_items", "not_applied"])
+def test_run_zone_fills_skip_is_shown_to_the_user(app, eprom, tmp_path, reports, monkeypatch, why):
+    """Fail fast: fills that commit_fills could not write are a ZONE_FILLS_SKIPPED warning in the done notice facts,
+    the report's Outcome line and findings, not only the log; moot when the live refill redid the zones."""
+    real = run_mod._routed_fills
+    if why == "not_applied":  # a fill for a zone that is not on the board: the port reports it
+        monkeypatch.setattr(run_mod, "_routed_fills",
+                            lambda *a: ({"no-such-zone-uuid": [{"layer": "F.Cu", "pts": [[0, 0], [1, 0], [1, 1]]}]}, None))
+    else:
+        monkeypatch.setattr(run_mod, "_routed_fills", lambda *a: ({}, why))
+    board, ui, out = do_run(eprom, tmp_path / "a", ui=ScriptedUi(accept=True), cfg=CFG)
+    f = [x for x in out.findings if x.code == "ZONE_FILLS_SKIPPED"]
+    assert len(f) == 1 and f[0].severity == "warning" and "Fill All Zones" in f[0].fix, out.findings
+    assert out.status == "accepted" and out.report.facts["post_commit_failed"] == f
+    assert out.report.facts["zone_fills_skipped"] == why and out.report.facts["zone_fills_committed"] == 0
+    md = (out.report_dir / "report.md").read_text()
+    assert "ZONE_FILLS_SKIPPED" in md and "zone fills NOT written" in md and "press B" in md
+    # with the live refill on the pours are redone anyway: nothing to warn about
+    board, ui, out = do_run(eprom, tmp_path / "b", ui=ScriptedUi(accept=True), cfg=CFG_DEFAULT_REFILL)
+    assert not [x for x in out.findings if x.code == "ZONE_FILLS_SKIPPED"] and board.refills == 1
+    monkeypatch.setattr(run_mod, "_routed_fills", real)
+
+
+def test_run_commit_fills_off_is_not_a_warning(app, eprom, tmp_path, reports):
+    """The user's own run.commit_fills = false: the done notice already says press B; no ZONE_FILLS_SKIPPED."""
+    cfg = CFG.with_values({("run", "commit_fills"): False})
+    board, ui, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=True), cfg=cfg)
+    assert out.report.facts["zone_fills_skipped"] == "off" and out.report.facts["zone_fills_committed"] == 0
+    assert not [x for x in out.findings if x.code == "ZONE_FILLS_SKIPPED"]
+    assert "zones not refilled: press B" in (out.report_dir / "report.md").read_text()
+
+
 def test_run_report_dir_unwritable_is_an_error(eprom, tmp_path, monkeypatch):
     """Ruling C32 (gate review I-5): a report folder that cannot be created gives the REPORT_DIR_UNWRITABLE
     error through ui.error (a dialog in KiCad), the board is not read further and nothing is routed."""
@@ -986,7 +1061,7 @@ def test_run_ok_at_routes_stable_is_not_a_cancel(app, eprom, tmp_path, reports):
     once the progress says stable ends it: the result is "stable", not cancelled, and is previewed and accepted
     like a finished run."""
     ui = ScriptedUi(accept=True, ok_at_stable=True)
-    cfg = CFG.with_values({("optimize", "finish_when_stable"): False})  # else eprom may finish before the OK poll
+    cfg = CFG  # default finish_when_stable = False: the run waits for the OK poll
     board, ui, out = do_run(eprom, tmp_path, ui=ui, engine=_RealCancelEngine(), cfg=cfg)
     assert out.status == "accepted" and out.routed == 27
     assert out.stop_reason == "stable" and out.cancelled is False

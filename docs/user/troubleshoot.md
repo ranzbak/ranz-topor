@@ -194,6 +194,14 @@ copper violates a rule anywhere else, file a bug.
 
 **Fix.** Fix the syntax at the reported line, or delete topor.toml to get a fresh commented one on the next run (run.timeout_s is the first key).
 
+### CFG_PINNED_OLD_DEFAULT
+
+*Severity: warning.*
+
+**Cause.** topor.toml has an option as an active line with a value that was the default in an older version; the value is kept (never changed silently) but the default has changed since.
+
+**Fix.** Delete or comment the line (put '# ' in front) to follow the current default, or set it explicitly to the value you want (e.g. optimize.finish_when_stable); docs/user/configuration.md, section Pinned defaults, lists what changed.
+
 ### CFG_REMOVED_KEY
 
 *Severity: warning.*
@@ -745,3 +753,11 @@ copper violates a rule anywhere else, file a bug.
 **Cause.** Never drop: some connections had no legal geometry when drawn (a gap too narrow, no free site for a via, a crossing that cannot be layered, a branch meeting its trace on another layer); topor kept them and wrote them on their best geometry, so the copper breaks a rule there. Each violation is listed with its place, type (clearance, short, hole_clearance, edge_clearance, connection_width) and cause; KiCad's DRC shows the same places. The summary groups them by origin: at a pad exit (a neighbour pin of the connection's own part: the trace does not get out of its pad at full width; pad exits and necking are planned in a later version), from a via without a legal site, at a crossing with another net, against other routed copper in a narrow passage, or against other pads, holes or the board edge.
 
 **Fix.** Fix each listed place by hand (move the trace or via, or a part), or give the router more room or time (run.timeout_s, [optimize] runs) and route again. [optimize] allow_violations = false writes legal copper only (those connections stay unrouted).
+
+### ZONE_FILLS_SKIPPED
+
+*Severity: warning.*
+
+**Cause.** Accept could not write the zone fills that KiCad's filler made for the routed result (run.commit_fills): the refilled copy is missing, it was judged for other items than the ones committed, or a zone of the copy is not on the board. The routes are on the board, but the pours in the zones are the ones from before the run, so the pours (and KiCad's DRC / unconnected counts, with 'Refill all zones before performing DRC' off) do not show the new copper yet.
+
+**Fix.** Refill the zones: KiCad → Edit → Fill All Zones (B). The report folder's log.txt names which case it was.

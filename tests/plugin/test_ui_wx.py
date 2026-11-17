@@ -446,6 +446,19 @@ def test_done_dialog_refill_hint_and_post_commit_warning(app, tmp_path):
         finally:
             dd.Destroy()
     assert "press B (Edit → Fill All Zones)" in W["done_refill_hint"]
+    # fills that could not be written: the hint (not "zones carry the fill") plus the warning text, per skip reason
+    for why in ("no_copy", "other_items", "not_applied"):
+        rep = FakeReport(tmp_path)
+        rep.facts = {"zones_refilled": False, "zone_fills_committed": 1, "zone_fills_skipped": why,
+                     "post_commit_failed": [Finding("ZONE_FILLS_SKIPPED", "warning",
+                                                    f"The routes were committed, but the zone fills were not written ({why}).",
+                                                    "Refill the zones: KiCad → Edit → Fill All Zones (B).")]}
+        dd = ui_wx.DoneDialog("accepted", rep, tmp_path)
+        try:
+            assert dd.widget("done_refill_hint") is not None and dd.widget("done_fills_committed") is None
+            assert why in re.sub(r"\s+", " ", dd.widget("done_post_commit").GetLabel())
+        finally:
+            dd.Destroy()
     rep = FakeReport(tmp_path)
     rep.facts = {"zones_refilled": False, "post_commit_failed": [Finding(
         "POST_COMMIT_STEP_FAILED", "warning", "The routes were committed, then zone refill failed: AS_BUSY.",

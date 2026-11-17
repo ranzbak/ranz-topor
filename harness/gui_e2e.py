@@ -22,7 +22,7 @@ What it does (every step leaves a screenshot in <out_dir>/shots/ and a line in <
      --ok-at-stable presses OK when the dialog says "Routes stable" and checks the board is the best result shown), preview -> Accept,
      finished -> Close.
   5. Over the KiCad API (an external kipy client in the plugin environment): counts the tracks / vias after
-     Accept, presses Ctrl+Z (one undo step must remove them all), Ctrl+Shift+Z (back), saves the board.
+     Accept, presses Ctrl+Z (one undo step, two with run.refill_after_accept, must remove them all), Ctrl+Shift+Z (back), saves the board.
   6. `harness.board_metrics` judges the saved board with kicad-cli DRC (unconnected, routing_new, vias) and
      renders <name>-gui-compare.png (hand left, KiCad result right, open ratsnest blue); with --harness the
      numbers are compared with a `tools/route_board.sh` metrics JSON of the same board.
@@ -76,6 +76,7 @@ class E2E:
         self.checks: list = []
         self.procs: list = []
         self.n = 0
+        self._drc_refill_off = False
 
     # ---------------------------------------------------------------- plumbing
     def log(self, msg: str) -> None:
@@ -387,6 +388,77 @@ class E2E:
             if time.monotonic() - calm_since >= quiet:
                 return True
         return False
+
+    def gui_drc(self, main: str, tag: str) -> Path:
+        """KiCad's own Inspect -> Design Rules Checker on the live board WITHOUT its zone refill (the checkbox is
+        switched off), so it judges the pours the board came back with; returns the cropped PNG of the result tabs
+        ("Violations (N)", "Unconnected Items (N)"), also kept in shots/. O(one DRC)."""
+        x0, y0, _w, _h = self.geom(main)
+        dlg = None
+        for _try in range(4):  # the menu click is lost now and then while KiCad is busy: retry
+            self.x("xdotool", "windowactivate", "--sync", main)
+            self.click_abs(x0 + 251, y0 + 14)
+            time.sleep(1)
+            self.click_abs(x0 + 318, y0 + 96)
+            dlg = self.wait("Design Rules Checker", 10)
+            if dlg:
+                break
+            self.x("xdotool", "key", "Escape")
+            time.sleep(2)
+        if not dlg:
+            raise RuntimeError("DRC dialog did not open")
+        time.sleep(1)
+        dx, dy, _dw, _dh = self.geom(dlg[1])
+        img = self.tmpdir() / "drc-dialog.png"
+        subprocess.run(f"xwd -id {dlg[1]} -display {self.display} | convert xwd:- {img}", shell=True)
+        if not self._drc_refill_off:  # KiCad's default is checked; it remembers the setting afterwards
+            self.click_abs(dx + 28, dy + 26)
+            self._drc_refill_off = True
+            time.sleep(0.5)
+        self.click_abs(dx + 628, dy + 473)
+        time.sleep(1)
+        for _ in range(120):
+            time.sleep(1)
+            subprocess.run(f"xwd -id {dlg[1]} -display {self.display} | convert xwd:- {img}", shell=True)
+            if self._dlg_text(img):
+                break
+        self.n += 1
+        txt_shot = self.shots / f"{self.n:02d}-drc-{tag}.png"
+        shutil.copy(img, txt_shot)
+        crop = self.shots / f"drc-{tag}-tabs.png"
+        # only the two count labels (not the focus frame around the first tab): "Violations (N)", "Unconnected Items (N)"
+        subprocess.run(["convert", "(", str(img), "-crop", "88x14+32+60", "+repage", ")", "(", str(img), "-crop",
+                        "150x14+145+60", "+repage", ")", "+append", str(crop)])
+        self.click_abs(dx + 225, dy + 473)  # Delete All Markers: they would change the canvas pixels
+        time.sleep(1)
+        self.click_abs(dx + 528, dy + 473)  # Close
+        self.wait_gone("Design Rules Checker", 10)
+        return crop
+
+    def _dlg_text(self, img: Path) -> str:
+        """"Completed" when the status line below the buttons shows text (it is blank before the run)."""
+        r = subprocess.run(["convert", str(img), "-crop", "200x20+10+498", "+repage", "-colorspace", "Gray",
+                            "-format", "%[fx:standard_deviation]", "info:"], capture_output=True, text=True).stdout
+        try:
+            return "Completed" if float(r) > 0.02 else ""
+        except ValueError:
+            return ""
+
+    def zone_fills(self) -> dict:
+        """uuid -> {net, layers: {layer: [polygons, outer area mm2 - hole area mm2]}} of every zone's FILLED polygons
+        of the open board (API); what the user sees as the pour."""
+        return self.ipc_retry(
+            "def area(o):\n"
+            "    pts = [(n.point.x_nm, n.point.y_nm) for n in o.nodes]\n"
+            "    return abs(sum(a[0]*b[1]-b[0]*a[1] for a, b in zip(pts, pts[1:] + pts[:1]))) / 2e12\n"
+            "for z in board.get_zones():\n"
+            "    ls = {}\n"
+            "    for fp in z._proto.filled_polygons:\n"
+            "        n = a = 0\n"
+            "        for p in fp.shapes.polygons:\n"
+            "            n += 1; a += area(p.outline) - sum(area(h) for h in p.holes)\n"
+            "        ls[int(fp.layer)] = [n, round(a, 3)]\n"
+            "    out[z.id.value] = {'net': z.net.name, 'layers': ls}\n")
 
     def counts(self, tries: int = 30) -> dict:
         """Tracks / vias of the open board; retried while KiCad answers "busy" (a modal dialog or tool). """
@@ -731,6 +803,15 @@ def run(a) -> int:
         cfg = Config.defaults().with_values({(s, k): v for s, k, v in map(_kv, a.toml)})
         (live.parent / "topor.toml").write_text(render_toml(cfg))
         e.log(f"topor.toml written with {a.toml}")
+    # the settings the run really uses: the board's own topor.toml (an old one may pin refill_after_accept = false),
+    # else the defaults plus --toml; the file is read before the plugin may create one
+    from topor.config import Config as _Config, load_config as _load_config
+    if (live.parent / "topor.toml").is_file():
+        eff_cfg, _ = _load_config(live.parent)
+    else:
+        eff_cfg = _Config.defaults()
+    e.log(f"effective settings from {'the board topor.toml' if (live.parent / 'topor.toml').is_file() else 'defaults'}: "
+          f"refill_after_accept={eff_cfg.get('run', 'refill_after_accept')} commit_fills={eff_cfg.get('run', 'commit_fills')}")
     e.make_home()
     e.install(a.wheel)
     started_x = e.start_x()
@@ -782,6 +863,8 @@ def run(a) -> int:
         time.sleep(0.5)
         e.shot("preflight", pre[1])
         e.key(pre[1], "Return")
+        fills_before = e.zone_fills()
+        e.log(f"zones before the run: {len(fills_before)}")
         t_route = time.monotonic()
         state = {"last": -10.0, "cancelled": False}
 
@@ -839,6 +922,7 @@ def run(a) -> int:
             return 1
         e.check("preview after routing", True, f"{result['route_wall_s']} s after Route")
         before = e.counts()
+        fills0 = fills_before
         e.key(nxt[1], "Return")  # Enter = Accept
         fin = e.wait("Topor — Finished", 60)
         e.check("Enter in the preview = Accept -> finished notice", bool(fin))
@@ -854,6 +938,15 @@ def run(a) -> int:
         e.wait_gone("Topor — Finished", 10)
         after = e.counts()
         e.check("Accept changed the copper", after != before, f"{before} -> {after}")
+        refill_on = bool(eff_cfg.get("run", "refill_after_accept"))
+        commit_on = bool(eff_cfg.get("run", "commit_fills"))
+        fills1 = e.zone_fills()
+        e.check("zones present", bool(fills1), f"{len(fills1)} zones")
+        stale = [u for u in fills1 if fills1[u]["layers"] == fills0.get(u, {}).get("layers")]
+        e.log(f"zones with the same fill as before the run: {len(stale)}/{len(fills1)}")
+        if refill_on or commit_on:
+            e.check("zone fills changed by Accept (not the pre-run pours)", len(stale) < len(fills1),
+                    f"{len(stale)}/{len(fills1)} zones unchanged")
         main = e.wait(f"{stem} — PCB Editor", 30)
         if not main:
             e.shot("no-editor-after-accept")
@@ -861,16 +954,56 @@ def run(a) -> int:
             return 1
         e.x("xdotool", "windowactivate", "--sync", main[1])
         e.x("xdotool", "mousemove", "1000", "600")
-        e.key(main[1], "ctrl+z")
-        time.sleep(2)
+        canvas_a = e.shot("canvas-after-accept", main[1])
+        drc_a = e.gui_drc(main[1], "after-accept")  # KiCad's DRC on the pours as Accept left them (no refill)
+        e.x("xdotool", "windowactivate", "--sync", main[1])
+        e.x("xdotool", "mousemove", "1000", "600")
+        steps = 2 if refill_on else 1  # the zone refill is its own undo step (run.refill_after_accept)
+        for i_ in range(steps):
+            e.key(main[1], "ctrl+z")
+            time.sleep(2)
+            if steps == 2 and i_ == 0:  # the refill is its own undo step: after one Ctrl+Z the routes are still there
+                mid = e.counts()
+                e.check("the 1st Ctrl+Z undoes only the refill (routes still on the board)", mid == after,
+                        f"{mid} vs {after}")
         undone = e.counts()
-        e.check("one Ctrl+Z removes everything Topor added (one undo step)", undone == before, f"{undone}")
-        e.key(main[1], "ctrl+y")
-        time.sleep(2)
+        e.check(f"{steps} Ctrl+Z remove everything Topor added ({steps} undo step{'s' if steps > 1 else ''})",
+                undone == before, f"{undone}")
+        for _ in range(steps):
+            e.key(main[1], "ctrl+y")
+            time.sleep(2)
+        fills2 = e.zone_fills()
+        e.check("redo brings the same zone fills back", fills2 == fills1)
         e.shot("after-redo", main[1])
         redone = e.counts()
         e.check("Ctrl+Y (Edit → Redo) brings it back", redone == after, f"{redone}")
         e.shot("board-after-accept", main[1])
+        # the pours the user sees now must be what KiCad's own filler makes (= what B would give)
+        if True:  # without refill and commit_fills this FAILS: that is the stale-pours symptom
+            e.ipc_retry("board.refill_zones(max_poll_seconds=600)", tries=120)
+            ref = e.zone_fills()
+            bad = []
+            for u, z in fills2.items():
+                for l, (n, a_) in z["layers"].items():
+                    r_ = ref.get(u, {"layers": {}})["layers"].get(l) or [0, 0.0]
+                    if abs(a_ - r_[1]) > max(0.02, 0.005 * r_[1]):
+                        bad.append(f"{z['net']} layer {l}: {a_} mm2 vs refill {r_[1]} mm2")
+            result["fills_vs_refill"] = bad
+            e.check("pours after Accept = pours after a fresh refill (B)", not bad, "; ".join(bad[:4]))
+            time.sleep(2)
+            canvas_b = e.shot("canvas-after-refill", main[1])
+            crop = ["-crop", "1300x850+345+120", "+repage"]
+            diff = subprocess.run(["compare", "-metric", "AE", "-fuzz", "8%", "(", str(canvas_a), *crop, ")", "(",
+                                   str(canvas_b), *crop, ")", "null:"], capture_output=True, text=True).stderr.split()
+            npx = int(float(diff[0])) if diff else -1
+            result["canvas_diff_px"] = npx
+            e.check("the canvas shows the pours Accept left = the pours after a fresh refill (pixel diff)",
+                    0 <= npx < 6000, f"{npx} px of {1300 * 850} differ; {canvas_a} vs {canvas_b}")
+            drc_b = e.gui_drc(main[1], "after-refill")
+            same = subprocess.run(["compare", "-metric", "AE", str(drc_a), str(drc_b), "null:"],
+                                  capture_output=True, text=True).stderr.strip().split()[0:1] == ["0"]
+            e.check("KiCad's own DRC counts after Accept = after a fresh refill (tab labels pixel-identical)", same,
+                    f"{drc_a} vs {drc_b}")
         e.ipc("board.save()")
         time.sleep(1)
         rds = sorted((e.home / ".cache/kicad/10.0/topor").glob(f"{stem}/*/result.json"))
