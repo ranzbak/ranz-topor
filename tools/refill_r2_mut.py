@@ -15,10 +15,16 @@ M = {
  "N7_fix_text_hint_in_catalogue": ("plugin/topor/messages.py", 'Fill All Zones (B). The report folder', 'Fill All Zones (B); or set run.refill_after_accept = true. The report folder'),
 }
 TESTS = ["tests/plugin/test_refill_matrix.py", "tests/plugin/test_config.py", "tests/plugin/test_report.py",
-         "tests/plugin/test_ui_wx.py", "tests/plugin/test_messages.py", "tests/plugin/test_config_docs.py"]
+         "tests/plugin/test_ui_wx.py", "tests/plugin/test_messages.py", "tests/plugin/test_config_docs.py", "tests/plugin/test_toml_defaults.py"]
 
 def main():
     tree, out = Path(sys.argv[1]), Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True)
+    r0 = subprocess.run([sys.executable, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider", *TESTS],
+                        cwd=tree, capture_output=True, text=True, env={**__import__("os").environ, "PYTHONPATH": "plugin"})
+    print(f"baseline (unmutated) rc {r0.returncode}", flush=True)
+    (out / "baseline.log").write_text(r0.stdout[-5000:])
+    if r0.returncode:
+        sys.exit("baseline red: mutant results would be meaningless")
     for mid in sys.argv[3:] or list(M):
         f, old, new = M[mid]
         p = tree / f; src = p.read_text()
