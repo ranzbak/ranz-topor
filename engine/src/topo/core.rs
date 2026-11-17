@@ -4563,6 +4563,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 live = r.order.clone();
                 dr.erbs = r.runs;
                 dr.test_no_sequential = ctl.test_point("no sequential run");
+                dr.test_no_class_keep = ctl.test_point("erbs class keep off");
+                dr.test_straight_seq = ctl.test_point("straight sequential run");
                 if ctl.test_point("wind erbs") {
                     // test-only fault: every ERBS runs its path three times (a wound band of the
                     // same copper, legal and three times its band), for the length factor
@@ -5448,7 +5450,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let _ = std::fs::write(std::path::Path::new(&d).join("nets.json"), serde_json::Value::Object(nets).to_string());
     }
     if let Some(l) = erbs_line {
-        warnings.push(format!("{l}; drawn: {} runs from their ERBS ({} in its octilinear form before the check), {} by the sequential attempts after the check rejected the ERBS, {} without an ERBS, {} ERBS priced past their band against a sequential run ({} replaced by it)", dr.stats.erbs_ok, dr.stats.erbs_octi, dr.stats.erbs_fallback, dr.stats.erbs_none, dr.stats.erbs_long, dr.stats.erbs_long_replaced));
+        warnings.push(format!("{l}; drawn: {} runs from their ERBS ({} in its octilinear form before the check), {} by the sequential attempts after the check rejected the ERBS, {} without an ERBS, {} ERBS priced past their band against a sequential run ({} replaced by it, {} kept because the sequential run crossed an undrawn wire's path with another parity: another class)", dr.stats.erbs_ok, dr.stats.erbs_octi, dr.stats.erbs_fallback, dr.stats.erbs_none, dr.stats.erbs_long, dr.stats.erbs_long_replaced, dr.stats.erbs_class_kept));
     }
     // M3 length factor (`draw::erbs_length_price`): every ERBS priced past its band, the longest
     // over its band first (plugin finding ERBS_LONG).

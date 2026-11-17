@@ -74,7 +74,20 @@ def _distant_radius(ax, pat):
     ax.text(0.3, 11.2, "draw order today: W3 (shortest) first", fontsize=7.5, color=MARK)
 
 
-MARKS = {"three_diagonals": _three_diagonals, "nested_wraps": _nested_wraps, "distant_radius": _distant_radius}
+def _shortcut_across(ax, pat):
+    rho = pat.extra["rho"]
+    for c in ((7.7, 7.7), (7.7, 8.3)):
+        ax.add_patch(Polygon(_octagon(c, rho), closed=True, fc="none", ec=_color(pat, "A"), lw=0.7, ls="--", zorder=6))
+    ax.plot([12.0, 12.0], [0.82, 15.18], color=MARK, lw=0.8, ls=(0, (2, 2)), zorder=6)
+    ax.text(12.3, 4.5, "A's shortcut (legal while B is not drawn,\n14.36 mm): crosses B's plan", fontsize=7.5,
+            color=MARK, zorder=8)
+    ax.text(0.4, 1.6, "A's pads 0.52 mm from the edge:\nno wire passes round them (needs 0.95)", fontsize=7,
+            color="#555555")
+    ax.text(0.4, 14.6, "draw order today: A (0.40) first, B (0.25) second", fontsize=7.5, color=MARK)
+
+
+MARKS = {"three_diagonals": _three_diagonals, "nested_wraps": _nested_wraps, "distant_radius": _distant_radius,
+         "shortcut_across": _shortcut_across}
 
 
 def render(pat, doc: dict, out: Path) -> Path:
