@@ -359,6 +359,13 @@ SETTINGS: list[Setting] = [
 #: Settings removed in the CL cleanup (2026-11-09): the topological core never read them (most were settings of
 #: the classic router, removed in the green field 2f1430a). An old topor.toml that still sets one gets the warning
 #: CFG_REMOVED_KEY ("ignored, removed in ..."), never an error. (section, key) -> what replaced it, if anything.
+# History of default changes, the one place it lives: (section, key) -> ((old_default, "date changed"), ...).
+# A topor.toml that pins an old default as an active line keeps it (never silently changed) and gets the
+# warning CFG_PINNED_OLD_DEFAULT while it differs from the current default. Add an entry whenever a default changes.
+PAST_DEFAULTS = {
+    ("optimize", "finish_when_stable"): ((True, "2026-11-16"),),
+}
+
 REMOVED_IN = "the CL cleanup of 2026-11-09"
 _CLASSIC = "a setting of the classic router; the topological core prices vias, crossings and detours with the [factors] weights and stops at the [optimize] work caps"
 REMOVED = {

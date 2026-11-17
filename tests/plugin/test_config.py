@@ -114,7 +114,7 @@ def test_update_config_keeps_comments(tmp_path):
     update_config(path, {"vias.allowed_drills_mm": [0.3, 0.4], "run.timeout_s": 120,
                          "nets.do_not_touch": ["GND", "/a b"]})
     after = path.read_text()
-    assert sum(1 for ln in after.splitlines() if ln.startswith("#")) >= n_comments - 1
+    assert sum(1 for ln in after.splitlines() if ln.startswith("#")) >= n_comments - 3  # three commented defaults became active lines
     cfg2, findings = load_config(tmp_path)
     assert findings == []
     assert cfg2.get("run", "timeout_s") == 120

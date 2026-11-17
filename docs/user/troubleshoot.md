@@ -194,6 +194,14 @@ copper violates a rule anywhere else, file a bug.
 
 **Fix.** Fix the syntax at the reported line, or delete topor.toml to get a fresh commented one on the next run (run.timeout_s is the first key).
 
+### CFG_PINNED_OLD_DEFAULT
+
+*Severity: warning.*
+
+**Cause.** topor.toml has an option as an active line with a value that was the default in an older version; the value is kept (never changed silently) but the default has changed since.
+
+**Fix.** Delete or comment the line (put '# ' in front) to follow the current default, or set it explicitly to the value you want (e.g. optimize.finish_when_stable); docs/user/configuration.md, section Pinned defaults, lists what changed.
+
 ### CFG_REMOVED_KEY
 
 *Severity: warning.*

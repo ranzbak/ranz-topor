@@ -4,6 +4,9 @@
 
 `topor.toml` lives next to the `.kicad_pro` file. It is created with every key and its documentation on the
 first run. Unknown keys give a warning; an invalid value gives a warning and the default is used.
+Options at their default are written as commented lines (`# key = value`), so a later version can change the
+default for you; a line without `# ` is your own value and is never changed by the plugin.
+Options added in a later version are not added to an existing file (see the known limitation at the end).
 Keys marked *since 0.5.0* are accepted but written commented-out until that engine feature is available.
 Keys that were removed (listed at the end) are ignored with the warning `CFG_REMOVED_KEY`.
 
@@ -262,6 +265,19 @@ Price of what a route does (social factors), in mm of copper per unit: weight, s
 | Layer types (signal/power/mixed/jumper) | KiCad → File → Board Setup → Board Editor Layers |
 | Locked tracks and vias | KiCad → item Properties → Locked |
 | Via protection (fill/cap) | KiCad → File → Board Setup → Board Stackup → Board Finish → Via protection |
+
+## Pinned defaults
+
+When a default changes, a `topor.toml` that has the old default as an active line keeps it (the plugin never
+edits your values) and every run warns `CFG_PINNED_OLD_DEFAULT`, one warning per option. Delete or comment the
+line to follow the defaults. History of changed defaults:
+
+| Key | Old default | Changed |
+|---|---|---|
+| `optimize.finish_when_stable` | `true` | 2026-11-16 |
+
+Known limitation: an existing `topor.toml` never gets options that were added in a later version; they use
+their default until you add them (copy the commented block from a freshly generated file).
 
 ## Removed keys
 
