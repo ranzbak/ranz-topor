@@ -99,3 +99,22 @@ recording: every `build` re-evaluates all 215k edge-layers (qmtech: 168 s, 16 % 
 copying unchanged edges from the previous model (content memo, exact) is likely cheaper than parallelising it (measure). `free_radius` index
 (9.5 / 3.4 / 0 %), `in_piece` precompute (0 / 0 / 8.8 %), search arrays (esp expand 11.7 %): outside refine, they shrink
 the serial part. Order: items 1-4 → re-measure → lanes → parallel initial eval → outside items.
+
+## 9. As implemented (branch par-refine, 2026-11-17)
+Commits: 1a FxHash (24a9db1), 1b+1c per-pass tables + scratch (9ac1ca1), 1d changed-layer reprice (3587b3a), 2 exact
+incremental build memo (a1c54b2), 3a Sync packer (fd1c337), 3b lane executor (cbcbe33), 4 `[optimize] refine_lanes`
+(bcc3ff0), trace hook `TOPO_REFINE_TRACE` (e4e3df4), 5 = item 3 `[optimize] measure_reuse` (0f81e8c).
+* refine.rs: `Frame` (read-only: state, packer, price, per-pass tables, margin atomics) + `Arrays` (mutable); layout and
+  pricing written once against `Mem`/`MemRead`: `Master` (in place: serial loop, build, P4 `try_move`) and the lanes'
+  `View` (master under an epoch-stamped `Overlay`). `RefineParams::reference` / `Options::refine_reference` keep the
+  serial in-place loop as the test reference; the cut model always takes it.
+* refine_par.rs: `Cursor` = the serial candidate stream (sweep, over-full edge-layer, pass, event, move) unrolled; an
+  epoch hands candidates out in stream order under one mutex, `min_keep` (first kept seq) stops lanes taking or
+  finishing later ones; the scan replays the cursor (asserted equal), merges end-site fills in stream order, evaluates
+  a candidate again on the run thread when an earlier one filled a key with another value, commits the first kept one
+  by copies. Deferred meters count only consumed candidates. One lane = no rayon call.
+* Lanes: `Slots` holds rayon-threads slots (runs still take one each, so as many runs compute as before); a lease per
+  epoch takes up to threads-1 free slots without waiting, none while a run waits (`waiters`). Whole-route cycles: no
+  pool (1 lane under auto). `refine_lanes = n` fixes n.
+* Item 3: `RefineStats::fin` = `FinalCap` (violations + packer address, bottom, price bits, `cap_key` of state and
+  labels); the measure uses it when all match, else builds (cut model, labels changed by the junction fix-up / P4).
