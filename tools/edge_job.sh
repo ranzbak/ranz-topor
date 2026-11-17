@@ -38,6 +38,12 @@ for st in "$@"; do
       u qm "pair qmtech $Q"
       u bh "pair bornhack bornhack2026" ;;
     tests) u tests "tests" ;;
+    seeds-esp)  # esp seq, seeds 0..3 (rule C off: = A+B on the tip; the base has no such setting)
+      X=""; [ -n "${EDGE_AB:-}" ] && X="--set rules.edge_clearance_zero=board"
+      u esps "python -m harness.score_runs \$R/seeds/esp $E --seeds 4 --no-png --set optimize.rounds=1 --set optimize.runs=1 $X > \$R/seeds-esp.log 2>&1; note 'seeds esp rc '\$?" ;;
+    seeds-qm)   # qmtech seq, seeds 0..2, rule C off and on
+      u qmoff "python -m harness.score_runs \$R/seeds/qm-off $Q --seeds 3 --no-png --set optimize.rounds=1 --set optimize.runs=1 --set rules.edge_clearance_zero=board > \$R/seeds-qmoff.log 2>&1; note 'seeds qm off rc '\$?"
+      u qmon "python -m harness.score_runs \$R/seeds/qm-on $Q --seeds 3 --no-png --set optimize.rounds=1 --set optimize.runs=1 > \$R/seeds-qmon.log 2>&1; note 'seeds qm on rc '\$?" ;;
     wq)
       u wic "pair wiccon wiccon-2023"
       u qm "pair qmtech $Q" ;;
