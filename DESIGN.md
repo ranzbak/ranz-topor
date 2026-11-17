@@ -222,3 +222,16 @@ the pour access of its via sites and runs, graded) STAYS PARKED (lead: on the pa
 topo_d4 fixture: a GND SMD pad boxed in by two foreign tracks so that the only legal stub via site lies between two
 coarse lattice points: before the fix POUR island stays (after = 1), after the fix one pad stub (after = 0). Mutant:
 fine pass off; fine radius 0.
+
+#### Measured (job m3c2-2 at 982bb11, in-run A/B hook TOPO_STITCHAB: the same stitching coarse-only on the same items)
+- qmtech erbs: C27.1 fixed (pad stub (134.284,121.860), 0.900 mm, via); unconnected 24 = main; coarse-only items all
+  kept (only-coarse 0, only-fine 2 = this stub). Fine lattice 24 pieces, 1 stub, cap reached, 650-775 ms per call.
+- qmtech seq: NOT bit-identical. The fine lattice fixed a GND pad at (160.773,-73.904) in pass 0 with a new via
+  (0.98 mm); coarse-only, the same pad gets a track-only stub (1.3 mm, no via) in a later pass, after another piece's
+  fix made that F.Cu fill main. So in pass 0 the fine lattice pre-empted a coarse stub of a later pass (+1 via).
+- Fix (this round): the fine lattice gets its own passes after the coarse passes are over (`FINE_PASSES` = 2);
+  everything the coarse passes place is the old copper; in a fine pass the coarse lattice is still tried first
+  per piece; a piece the fine lattice failed on is not searched again; a pass after one that placed nothing reuses
+  its reach and skips the (identical) island-via and coarse searches. Test: `the_fine_lattice_waits_for_the_coarse_passes`
+  (a second, roomy boxed GND pad is fixed before the fine stub in both piece orders; mutant `fine_on` from pass 0
+  fails it).

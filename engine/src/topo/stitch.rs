@@ -42,8 +42,10 @@ use crate::model::{BoardModel, Item, Options};
 use crate::pourcheck::{check_pour_reach_until, Cut, PourReach};
 use crate::vias::via_sizes;
 
-/// Most stitching passes.
+/// Most stitching passes (coarse lattice).
 pub const PASSES: usize = 3;
+/// Most passes of the fine stub lattice, after the coarse passes are over ([`STUB_LATTICES`]).
+pub const FINE_PASSES: usize = 2;
 /// Most checker queries per cut-off component and pass.
 pub const MAX_TRIES: usize = 64;
 /// Candidate lattice: every STEP-th raster cell.
@@ -56,10 +58,13 @@ pub const STUB_MAX_NM: f64 = 3.0e6;
 /// along a 0.9 mm ring, so a site in a narrower window between two of its points is missed (qmtech
 /// erbs C27.1, radii-m3-clear r2: legal x 134.21..134.30 between k7 134.328 and k8 134.152); the fine
 /// one (0.025 mm x 128, out to 1.5 mm) finds such a site near the pad, the way a designer nudges a
-/// GND pad via by hand. A stub the coarse lattice finds is never replaced (copper unchanged there).
+/// GND pad via by hand. The fine lattice runs only in its own passes after the coarse passes are
+/// over ([`FINE_PASSES`]), so everything the coarse passes place is unchanged; a piece the coarse
+/// lattice could still reach after another piece's fix gets its coarse stub there first.
 pub const STUB_LATTICES: [(f64, usize, f64); 2] = [(0.1e6, 32, STUB_MAX_NM), (0.025e6, 128, 1.5e6)];
 /// Work cap of the fine lattice over one stitching run (candidate points, all pads and passes
 /// together): about 15 pads' full fine search, so a board with many boxed-in pads cannot blow up.
+/// A piece the fine lattice failed on is not searched again in a later pass.
 pub const FINE_POINTS_MAX: usize = 100_000;
 
 /// What the stitching added and found.
@@ -181,9 +186,18 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
     };
     let squeeze = |slack: f64, d: f64| reg.price(&Event::ViaSqueeze { wire: 0, at: Vec2::default(), slack_nm: slack, via_nm: d }, &WireCtx::default()) * 1e6;
     let mut unplaced: Vec<String> = Vec::new();
-    for pass in 0..PASSES {
+    // Coarse passes first; once they are over, the fine lattice's own passes. `again`: the last
+    // pass placed nothing, so its reach and every coarse search would come out the same.
+    let (mut fine_on, mut fine_passes) = (false, 0usize);
+    let mut fine_failed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut kept: Option<PourReach> = None;
+    for pass in 0..PASSES + FINE_PASSES {
         unplaced.clear();
-        let reach = check_pour_reach_until(model, &all, routed_pads, deadline);
+        let again = kept.is_some();
+        let reach = match kept.take() {
+            Some(r) => r,
+            None => check_pour_reach_until(model, &all, routed_pads, deadline),
+        };
         if let Ok(path) = std::env::var("TOPO_POURDUMP") {
             reach.dump(&format!("{path}.p{pass}"));
         }
@@ -225,7 +239,7 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
             }
             cand.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.x.total_cmp(&b.1.x)).then(a.1.y.total_cmp(&b.1.y)));
             let mut done = false;
-            for &(_, p) in cand.iter().take(MAX_TRIES) {
+            for &(_, p) in cand.iter().take(if again { 0 } else { MAX_TRIES }) {
                 let v = via_item(c.net, p, sz, None);
                 if ok(&idx, std::slice::from_ref(&v)) {
                     out.notes.push(format!("stitch via {} mm at {} for {}", sz.d as f64 / 1e6, kicad_mm(p), cut_text(model, c)));
@@ -245,8 +259,11 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
             // it finds no stub, the fine one ([`STUB_LATTICES`]).
             'lat: for (li, &(d_step, n_dir, d_max)) in STUB_LATTICES.iter().enumerate() {
             let fine = li > 0;
+            if !fine && again {
+                continue;
+            }
             if fine {
-                if out.fine_points >= FINE_POINTS_MAX || c.pads.is_empty() {
+                if !fine_on || out.fine_points >= FINE_POINTS_MAX || c.pads.is_empty() || fine_failed.contains(&c.pads[0]) {
                     break;
                 }
                 out.fine_cuts += 1;
@@ -309,6 +326,7 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
             }
             if fine {
                 out.fine_s += t_fine.elapsed().as_secs_f64();
+                fine_failed.insert(c.pads[0]);
             }
             }
             // Island join (`[planes] join_islands`, user 2026-11-12): a piece holding no pad that no
@@ -349,15 +367,25 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
                 unplaced.push(cut_text(model, c));
             }
         }
-        if !placed_any {
-            break;
-        }
-        if pass + 1 == PASSES {
-            let reach = check_pour_reach_until(model, &all, routed_pads, deadline);
-            if let Ok(path) = std::env::var("TOPO_POURDUMP") {
-                reach.dump(&format!("{path}.p{PASSES}"));
+        fine_passes += usize::from(fine_on);
+        let over = !placed_any || if fine_on { fine_passes == FINE_PASSES } else { pass + 1 == PASSES };
+        if over && !fine_on && reach.cuts.iter().any(|c| !c.pads.is_empty()) {
+            // The coarse passes are over: the fine lattice's passes for the pieces left.
+            fine_on = true;
+            if !placed_any {
+                kept = Some(reach);
             }
-            out.after = reach.cuts.len();
+            continue;
+        }
+        if over {
+            if placed_any {
+                let reach = check_pour_reach_until(model, &all, routed_pads, deadline);
+                if let Ok(path) = std::env::var("TOPO_POURDUMP") {
+                    reach.dump(&format!("{path}.p{}", pass + 1));
+                }
+                out.after = reach.cuts.len();
+            }
+            break;
         }
     }
     if out.fine_cuts > 0 {
