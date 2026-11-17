@@ -353,7 +353,7 @@ fn limit_report(ctl: &RunControl, opts: &Options, r: &mut RouteResult) -> Option
     }
     let cut_steps = steps.iter().map(|s| s.name().to_string()).collect();
     // limit_grace_s: the wait of the TopoR loop step past the limit, always named (TIME_LIMIT_WAIT).
-    let grace_s = ctl.limit.grace_s();
+    let grace_s = ctl.limit.grace_s().map(|g| (g * 1e3).round() / 1e3);
     let grace_hit = mode == "soft" && ctl.limit.grace_hit();
     let loop_wait_s = if reached { (ctl.limit.loop_wait_s() * 1e3).round() / 1e3 } else { 0.0 };
     if reached && loop_wait_s > 0.0 {
