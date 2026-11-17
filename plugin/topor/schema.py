@@ -402,6 +402,8 @@ ENGINE_INTERNAL = {
     "exclude_nets": "built per run from [nets] do_not_touch (patterns expanded against the board's net names)",
     "ignore_pads": "passed through from [nets] ignore_pads (REF.PAD strings) by run.build_options",
     "pour_served": "passed through from [nets] pour_served (boolean entries only) by run.build_options",
+    "refine_reference": "test/debug switch: run the serial reference refine instead of the lane executor (same result by construction)",
+    "refine_test_window": "test-only switch that caps the lane look-ahead window to force speculation conflicts",
 }
 
 # KiCad-owned behaviours, written as comment-only entries: (name, place)
