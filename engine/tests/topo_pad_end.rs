@@ -138,3 +138,71 @@ fn the_anchor_keeps_inside_the_pad() {
     assert!(pad_end_line(&r).contains("pad ends: 2 track ends moved"), "{}", pad_end_line(&r));
     assert!(r.violations.is_empty(), "{:?}", r.violations);
 }
+
+/// The push step (kills mutant `no_push`): the left board edge slanted so its normal lies 11.25
+/// degrees off the nearest of the 16 fallback rays. A 0.38 mm track on a 0.2 mm pad whose centre
+/// is 0.62 mm from the edge (the pad keeps 0.5024): the end needs 0.5 + 0.19 = 0.69 mm, so the
+/// nearest legal point is 0.070 mm along the edge's normal (the push, exact for one straight
+/// feature); the best ray point is 0.070 / cos 11.25 deg = 0.071 mm away.
+#[test]
+fn slanted_edge_push_takes_the_nearest_point() {
+    let mut m = model();
+    // left side from (0, 12) to (12 tan 11.25 deg, 0) mm: inward normal (cos, sin) 11.25 deg
+    let x0 = 2_386_946;
+    m["outline"] = serde_json::json!([
+        {"kind": "seg", "a": [x0, 0], "b": [8_000_000, 0]},
+        {"kind": "seg", "a": [0, 12_000_000], "b": [x0, 0]},
+        {"kind": "seg", "a": [8_000_000, 0], "b": [8_000_000, 12_000_000]},
+        {"kind": "seg", "a": [8_000_000, 12_000_000], "b": [0, 12_000_000]}
+    ]);
+    let (nx, ny) = (11.25f64.to_radians().cos(), 11.25f64.to_radians().sin());
+    let (qx, qy) = (x0 as f64 * 0.5, 6_000_000.0); // the edge at y = 6 mm
+    let c = [(qx + 620_000.0 * nx).round() as i64, (qy + 620_000.0 * ny).round() as i64];
+    let pads = m["pads"].as_array_mut().unwrap();
+    pads[0]["center"] = serde_json::json!(c);
+    pads[0]["shapes"]["0"] = serde_json::json!({"kind": "rect", "w": 200_000, "h": 200_000});
+    pads[1]["center"] = serde_json::json!([5_000_000, 6_000_000]);
+    pads[1]["shapes"]["0"] = serde_json::json!({"kind": "rect", "w": 500_000, "h": 500_000});
+    m["rules"]["min_track_width"] = serde_json::json!(380_000);
+    m["rules"]["default"]["width"] = serde_json::json!(380_000);
+    m["rules"]["per_net"]["1"]["width"] = serde_json::json!(380_000);
+    let r = route(&m, "sequential");
+    assert_eq!(r.routed, 1);
+    assert!(r.violations.is_empty(), "{:?}", r.violations);
+    let l = pad_end_line(&r);
+    assert!(l.contains("pad ends: 1 track ends moved") && l.contains("largest move 0.070 mm") && l.contains("; 0 pad ends with no legal point"), "{l}");
+    // the drawn end: 0.69 mm (+ the drawing's tolerance) from the slanted edge, inside the pad
+    let dist = |p: [i64; 2]| (p[0] as f64 - x0 as f64 * (1.0 - p[1] as f64 / 12_000_000.0)) * nx;
+    let near: Vec<[i64; 2]> = segs(&r).iter().flat_map(|&(a, b)| [a, b]).filter(|p| (p[0] - c[0]).abs() < 100_000 && (p[1] - c[1]).abs() < 100_000).collect();
+    assert!(!near.is_empty(), "{:?}", segs(&r));
+    for p in near {
+        assert!((690_000.0..=690_200.0).contains(&dist(p)), "end {p:?} at {} nm from the edge", dist(p));
+    }
+}
+
+/// The ray fallback (kills mutant `no_rays`): a foreign 0.05 mm pad 0.075 mm short of the clearance
+/// beside a 0.2 x 1.0 mm pad, the edge far away. The push moves the end 0.125 mm straight away from
+/// it, out of the pad (half width 0.1): no push candidate; a ray along the pad (67.5 deg) finds a
+/// legal point inside, so the end still moves and nothing is left at the centre.
+#[test]
+fn rays_find_a_point_where_the_push_leaves_the_pad() {
+    let mut m = model();
+    let mut foreign = m["pads"][0].clone();
+    foreign["uuid"] = serde_json::json!("00000000-0000-0000-0000-00000000f0f0");
+    foreign["ref"] = serde_json::json!("J3");
+    foreign["net"] = serde_json::json!(2);
+    foreign["center"] = serde_json::json!([2_775_000, 2_000_000]);
+    foreign["shapes"]["0"] = serde_json::json!({"kind": "rect", "w": 50_000, "h": 50_000});
+    let pads = m["pads"].as_array_mut().unwrap();
+    pads[0]["center"] = serde_json::json!([3_000_000, 2_000_000]);
+    pads[0]["shapes"]["0"] = serde_json::json!({"kind": "rect", "w": 200_000, "h": 1_000_000});
+    pads[1]["center"] = serde_json::json!([3_000_000, 9_000_000]);
+    pads.push(foreign);
+    m["nets"].as_array_mut().unwrap().push(serde_json::json!({"code": 2, "name": "F"}));
+    let n1 = m["rules"]["per_net"]["1"].clone();
+    m["rules"]["per_net"]["2"] = n1;
+    let r = route(&m, "sequential");
+    assert_eq!(r.routed, 1);
+    let l = pad_end_line(&r);
+    assert!(l.contains("pad ends: 1 track ends moved") && l.contains("; 0 pad ends with no legal point"), "{l}");
+}

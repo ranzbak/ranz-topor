@@ -4,6 +4,7 @@
     tools/edge_mutate.py list
     tools/edge_mutate.py run <out_dir>      (VM: one tree copy, each mutant applied, tests run, restored; rc per mutant)
     tools/edge_mutate.py run-py <out_dir>   (rule C's Python mutants only; TOPOR_PY = the interpreter with pytest)
+    EDGE_MUT_ONLY=a,b ...                    (only these mutants)
 
 A mutant = (file, old text, new text); `old` must occur exactly once (else the mutant is reported as 'stale')."""
 import shutil, subprocess, sys
@@ -41,6 +42,8 @@ def run(out: Path, only_py: bool = False) -> int:
     rows = []
     py = __import__("os").environ.get("TOPOR_PY", sys.executable)
     cases = [(n, m, False) for n, m in M.items() if not only_py] + [(n, m, True) for n, m in PY.items()]
+    only = [x for x in __import__("os").environ.get("EDGE_MUT_ONLY", "").split(",") if x]  # a round's own mutants
+    cases = [c for c in cases if not only or c[0] in only]
     for name, (f, old, new), is_py in cases:
         p = ROOT / f
         src = p.read_text()
