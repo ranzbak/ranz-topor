@@ -340,7 +340,7 @@ Outcome: {outcome}
 Report: {report_dir}
 ```
 
-`{outcome}` maps 1:1 to B5's `RunOutcome.status`: `accepted` → `applied as one undo step`,
+`{outcome}` maps 1:1 to B5's `RunOutcome.status`: `accepted` → `applied to the board`,
 `rejected` → `rejected — board unchanged`, `cancelled` → `cancelled — nothing applied` (Cancel with
 nothing routed, so no preview was shown), `aborted_preflight` → `aborted at pre-flight`, `error` →
 `error {code}`. Cancel followed by Accept/Reject is `accepted`/`rejected` with `Stopped: cancel`.
@@ -373,7 +373,7 @@ Cancel without preview (never after `error`, which has its own dialog); modal, m
 Text by `outcome`: `accepted` → `done_accepted` (prefixed "Stopped early by Cancel: " when
 `stop_reason == "cancel"`, row `done_accepted_cancelled`), `rejected` → `done_rejected`,
 `cancelled` → `done_cancelled`. After `accepted` only (FX1, rulings C28 / C30): `done_refill_hint`
-when `[run] refill_after_accept = false` (the default; report fact `zones_refilled` false) or
+when `[run] refill_after_accept = false` (default true since 2026-11-17; report fact `zones_refilled` false) or
 `done_refilled` when topor refilled the zones after the commit; one `done_post_commit` line per
 POST_COMMIT_STEP_FAILED finding (report fact `post_commit_failed`). After `accepted` with new DRC violations
 (report facts `routing_new` > 0, `drc_by_type_new`; user 2026-11-11) the icon is `ART_WARNING` instead of the
@@ -621,11 +621,11 @@ title/label/button/checkbox/choice/heading/text).
 | dialog | id | kind | text |
 |---|---|---|---|
 | report | title | title | Topor — Finished |
-| report | done_accepted | text | Routed {routed}/{total} connections — applied to the board as one undo step (Edit → Undo). |
-| report | done_accepted_cancelled | text | Stopped early by Cancel: routed {routed}/{total} connections — applied to the board as one undo step (Edit → Undo). |
+| report | done_accepted | text | Routed {routed}/{total} connections — applied to the board (Edit → Undo). |
+| report | done_accepted_cancelled | text | Stopped early by Cancel: routed {routed}/{total} connections — applied to the board (Edit → Undo). |
 | report | done_rejected | text | Nothing was changed on the board. |
 | report | done_cancelled | text | Cancelled — nothing was changed on the board. |
-| report | done_refill_hint | text | Zones were not refilled: press B (Edit → Fill All Zones) to refill them — a separate undo step. |
+| report | done_refill_hint | text | Zones were not refilled: press B (Edit → Fill All Zones) to refill them — a separate undo step. Edit → Undo reverts the routes in one step. |
 | report | done_refilled | text | Zones were refilled by topor — a second undo step: the first Edit → Undo reverts the refill, the next one the routes. |
 | report | done_post_commit | text | {message} {fix} |
 | report | done_drc_new | text | ⚠ {n} new DRC violations ({types}) — run Inspect → Design Rules Checker |
@@ -657,7 +657,7 @@ title/label/button/checkbox/choice/heading/text).
 | report | sum_findings | text | Findings: {errors} errors · {warnings} warnings · {notes} notes |
 | report | sum_outcome | text | Outcome: {outcome} |
 | report | sum_report | text | Report: {report_dir} |
-| report | outcome_accepted | text | applied as one undo step |
+| report | outcome_accepted | text | applied to the board |
 | report | outcome_rejected | text | rejected — board unchanged |
 | report | outcome_cancelled | text | cancelled — nothing applied |
 | report | outcome_preflight | text | aborted at pre-flight |

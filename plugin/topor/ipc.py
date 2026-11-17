@@ -340,8 +340,9 @@ class IpcBoard:
                 board.remove_items_by_id([KIID(value=u) for u in req.remove_uuids])
             objs = [to_kipy_item(it, None, self._net_names) for it in req.items]
             created = list(board.create_items(objs)) if objs else []
+            not_applied: list = []
             if req.zone_fills:
-                self._set_fills(req.zone_fills, notes)
+                not_applied = self._set_fills(req.zone_fills, notes)
             grouped = False
             if req.group and created:
                 grouped = self._group(created, req.items, notes)
@@ -353,18 +354,23 @@ class IpcBoard:
                 pass
             raise
         return CommitResult(removed=len(req.remove_uuids), created=len(created),
-                            created_ids=[c.id.value for c in created], grouped=grouped, notes=notes)
+                            created_ids=[c.id.value for c in created], grouped=grouped, notes=notes,
+                            fills_not_applied=not_applied)
 
-    def _set_fills(self, fills: dict, notes: list) -> None:
+    def _set_fills(self, fills: dict, notes: list) -> list:
         """Inside the open commit: the zones whose uuid is a key of `fills` get those filled polygons
         (``CommitRequest.zone_fills``), so Accept hands the board back with fills that hold the new copper in the
         same undo step (KiCad's API reads a zone's ``filled_polygons`` on update, ``ZONE::Deserialize``). A zone
-        whose layer name is unknown keeps its fill and a note says so. O(zones + fill points)."""
+        whose layer name is unknown keeps its fill and a note says so. Returns the uuids of the zones in `fills`
+        that were NOT written (unknown layer, or no zone with that uuid on the live board). O(zones + fill points)."""
         from kipy.proto.board import board_types_pb2
 
         changed = []
+        missed: list = []
+        seen = set()
         for z in self.board.get_zones():
             polys = fills.get(z.id.value)
+            seen.add(z.id.value)
             if polys is None:
                 continue
             by_layer: dict = {}
@@ -373,6 +379,7 @@ class IpcBoard:
                     by_layer.setdefault(BoardLayer.Value("BL_" + p["layer"].replace(".", "_")), []).append(p["pts"])
             except ValueError as e:
                 notes.append(f"Zone {z.id.value}: fill not replaced ({e}); refill the zones (B).")
+                missed.append(z.id.value)
                 continue
             del z._proto.filled_polygons[:]
             for layer, rings in by_layer.items():
@@ -388,6 +395,10 @@ class IpcBoard:
             changed.append(z)
         if changed:
             self.board.update_items(changed)
+        absent = sorted(set(fills) - seen)
+        if absent:
+            notes.append(f"{len(absent)} zone fill(s) not written: no zone with that uuid on the board ({absent[0]}…).")
+        return missed + absent
 
     def _group(self, created: list, items: list, notes: list) -> bool:
         """Put created items into their ``topor`` / ``topor-partial`` groups. UNVERIFIED (kipy 0.8

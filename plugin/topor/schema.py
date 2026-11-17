@@ -97,7 +97,7 @@ SETTINGS: list[Setting] = [
        unit="s", range=(0, 86400)),
     _s("run", "commit_fills", "bool", True, "Accept also writes the zone fills that KiCad's own filler made for the routed result (kicad-cli, the refill of the preview's DRC) into the zones, in the same undo step as the copper. The board then comes back with pours that hold the new traces and vias, so KiCad's Edit → Cleanup Tracks & Vias (which judges a stub into a pour, or a via that reaches a plane, by the fill it finds) keeps them. false = the zones keep the fill they had before the run until you refill (B); the cleanup may then remove plane stubs and plane vias.",
        kicad="KiCad → Edit → Fill All Zones (B); Edit → Cleanup Tracks & Vias"),
-    _s("run", "refill_after_accept", "bool", False, "After Accept, refill all zones from topor (a second undo step in KiCad). false = Accept is exactly one undo step; press B (Edit → Fill All Zones) yourself.",
+    _s("run", "refill_after_accept", "bool", True, "After Accept, KiCad refills all zones itself (a second undo step), so the pours and the DRC counts are right without pressing B. false = Accept is exactly one undo step; the zones keep the fill written by commit_fills (or, with commit_fills = false, the fill from before the run) until you press B (Edit → Fill All Zones).",
        kicad="KiCad → Edit → Fill All Zones (B)"),
     # ---- [nets]
     _s("nets", "do_not_touch", "list", [], "Net names or glob patterns whose copper is a fixed obstacle and never routed, ripped or smoothed.",
@@ -364,6 +364,7 @@ SETTINGS: list[Setting] = [
 # warning CFG_PINNED_OLD_DEFAULT while it differs from the current default. Add an entry whenever a default changes.
 PAST_DEFAULTS = {
     ("optimize", "finish_when_stable"): ((True, "2026-11-16"),),
+    ("run", "refill_after_accept"): ((False, "2026-11-17"),),
 }
 
 REMOVED_IN = "the CL cleanup of 2026-11-09"

@@ -224,6 +224,38 @@ def test_commit_drop_names_the_document(tmp_path):
     assert type(end).__name__ == "EndCommit" and end.action == CommitAction.CMA_DROP
 
 
+class _StubZone:
+    def __init__(self, uid):
+        from kipy.proto.board import board_types_pb2 as bt
+        from kipy.proto.common.types import base_types_pb2 as bpb
+        self._proto = bt.Zone()
+        self._proto.id.CopyFrom(bpb.KIID(value=uid))
+
+    @property
+    def id(self):
+        return self._proto.id
+
+
+def test_ipcboard_commit_reports_zone_fills_not_written(tmp_path):
+    """run.commit_fills, IPC side: a fill for a zone that is not on the board, or one with a layer KiCad does not
+    know, comes back in CommitResult.fills_not_applied (the run turns it into ZONE_FILLS_SKIPPED); written zones do not."""
+    b = _StubBoard(tmp_path)
+    b.get_zones = lambda: [_StubZone("z-ok"), _StubZone("z-badlayer")]
+    updated = []
+    b.update_items = lambda items: updated.extend(i.id.value for i in items)
+    ib = ipc.IpcBoard(_StubKiCad(), b)
+    ib._net_names = NETS
+    sq = [[0, 0], [10, 0], [10, 10]]
+    res = ib.commit(CommitRequest([], [SEG], "m", zone_fills={
+        "z-ok": [{"layer": "F.Cu", "pts": sq}], "z-badlayer": [{"layer": "No.Such.Layer", "pts": sq}],
+        "z-gone": [{"layer": "F.Cu", "pts": sq}]}))
+    assert updated == ["z-ok"]
+    assert sorted(res.fills_not_applied) == ["z-badlayer", "z-gone"]
+    assert any("z-badlayer" in n for n in res.notes) and any("not written" in n for n in res.notes)
+    res = ib.commit(CommitRequest([], [SEG], "m", zone_fills={"z-ok": [{"layer": "F.Cu", "pts": sq}]}))
+    assert res.fills_not_applied == []
+
+
 def test_ipcboard_commit_drops_on_error(tmp_path):
     b = _StubBoard(tmp_path)
     ib = ipc.IpcBoard(_StubKiCad(), b)  # no net names -> KeyError while building items

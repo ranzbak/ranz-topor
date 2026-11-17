@@ -59,7 +59,7 @@ MM = 1_000_000
 #: RunOutcome.status -> wording of the ``Outcome:`` line (wireframe section 5).
 OUTCOME_TEXT = {
     "pending": "pending — waiting for Accept or Reject",
-    "accepted": "applied as one undo step",
+    "accepted": "applied to the board",
     "rejected": "rejected — board unchanged",
     "cancelled": "cancelled — nothing applied",
     "aborted_preflight": "aborted at pre-flight",
@@ -104,11 +104,18 @@ class RunReport:
         self.status, self.error_code = status, error_code
 
     def _refill_note(self) -> str:
-        """Tail of the Outcome line after Accept (ruling C28): how the zones get refilled. O(1)."""
+        """Tail of the Outcome line after Accept (ruling C28): how the zones get refilled; a zone fill that could not
+        be written is named here too (fail fast, ZONE_FILLS_SKIPPED). O(1)."""
         if self.status != "accepted" or "zones_refilled" not in self.facts:
             return ""
         if self.facts["zones_refilled"]:
             return " · zones refilled by topor (a second undo step)"
+        skip = self.facts.get("zone_fills_skipped") or ""
+        if skip not in ("", "off"):
+            why = {"no_copy": "the refilled copy of the result is missing",
+                   "other_items": "the refilled copy was judged for other items",
+                   "not_applied": "some zone fills could not be written"}.get(skip, skip)
+            return f" · zone fills NOT written ({why}): press B (Edit → Fill All Zones), a separate undo step"
         if self.facts.get("zone_fills_committed"):
             return " · zones filled for the new copper in the same undo step (run.commit_fills)"
         return " · zones not refilled: press B (Edit → Fill All Zones), a separate undo step"

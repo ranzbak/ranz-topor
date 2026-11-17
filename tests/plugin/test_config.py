@@ -24,15 +24,24 @@ def test_default_file_roundtrips_to_defaults(tmp_path):
 
 
 def test_refill_after_accept_key(tmp_path):
-    """Ruling C28 (gate review I-2): Accept = exactly one undo step by default; the refill is opt-in."""
+    """Ruling C28 (gate review I-2); default flipped to true 2026-11-17 (user: pours came back stale after Accept):
+    KiCad refills after Accept by default (a second undo step); false keeps Accept = one undo step."""
     s = schema.SETTINGS_BY_KEY[("run", "refill_after_accept")]
-    assert s.type == "bool" and s.default is False and s.plugin_field == "run.refill_after_accept"
+    assert s.type == "bool" and s.default is True and s.plugin_field == "run.refill_after_accept"
     assert s.engine_field is None
     assert "second undo step" in s.doc and "press B (Edit → Fill All Zones)" in s.doc
+    assert Config.defaults().get("run", "refill_after_accept") is True
     assert s.kicad_place == "KiCad → Edit → Fill All Zones (B)"
     (tmp_path / "topor.toml").write_text('version = 1\n[run]\nrefill_after_accept = true\n')
     cfg, findings = load_config(tmp_path)
     assert findings == [] and cfg.get("run", "refill_after_accept") is True
+    # a topor.toml that pins false (older generated files list every key) keeps working (Accept = one undo step)
+    # and is told once that false was the default until 2026-11-17 (PAST_DEFAULTS)
+    assert schema.PAST_DEFAULTS[("run", "refill_after_accept")] == ((False, "2026-11-17"),)
+    (tmp_path / "topor.toml").write_text('version = 1\n[run]\nrefill_after_accept = false\n')
+    cfg, findings = load_config(tmp_path)
+    assert cfg.get("run", "refill_after_accept") is False
+    assert [f.code for f in findings] == ["CFG_PINNED_OLD_DEFAULT"] and "2026-11-17" in findings[0].message
 
 
 def test_unknown_key_warns_not_ignored(tmp_path):
