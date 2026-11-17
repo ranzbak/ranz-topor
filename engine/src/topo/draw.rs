@@ -119,6 +119,14 @@ pub(super) fn seg_proper(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
     t > 1e-9 && t < 1.0 - 1e-9 && u > 1e-9 && u < 1.0 - 1e-9
 }
 
+/// Proper crossings of the polyline `poly` with the segment `a b` ([`seg_proper`], orientation
+/// signs, no distance threshold). Mod 2 it is the side invariant of an undrawn wire's path: the
+/// taut pull ([`Drawer::pull_taut`]) and the round-i class test ([`competitor_keeps_class`]).
+/// O(|poly|).
+pub(super) fn proper_crossings(poly: &[Vec2], a: Vec2, b: Vec2) -> usize {
+    poly.windows(2).filter(|x| seg_proper(x[0], x[1], a, b)).count()
+}
+
 pub(super) fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
     let d = b - a;
     let l2 = d.len2();
@@ -475,7 +483,7 @@ pub struct DrawStats {
     pub erbs_long: usize,
     pub erbs_long_replaced: usize,
     /// Round i: of `erbs_long`, competitors that would have replaced the ERBS but cross an undrawn
-    /// wire's ERBS more often than it ([`competitor_keeps_class`]): the ERBS is drawn.
+    /// wire's path with another parity than it ([`competitor_keeps_class`]): the ERBS is drawn.
     pub erbs_class_kept: usize,
 }
 
@@ -523,7 +531,7 @@ pub fn crossings_per_wire(run: &[Vec2], others: &[(WireId, &[Vec2])]) -> BTreeMa
         if lo.x > rhi.x || hi.x < rlo.x || lo.y > rhi.y || hi.y < rlo.y {
             continue;
         }
-        let n = run.windows(2).map(|a| path.windows(2).filter(|b| seg_proper(a[0], a[1], b[0], b[1])).count()).sum::<usize>();
+        let n = path.windows(2).map(|b| proper_crossings(run, b[0], b[1])).sum::<usize>();
         if n > 0 {
             *out.entry(o).or_insert(0) += n;
         }
@@ -532,15 +540,20 @@ pub fn crossings_per_wire(run: &[Vec2], others: &[(WireId, &[Vec2])]) -> BTreeMa
 }
 
 /// Round i: the sequential run competing with a legal ERBS (`erbs_vs_sequential`) is of the plan's
-/// class only if it crosses no undrawn other-net wire's ERBS more often than the ERBS does (`seq`,
-/// `erbs`: [`crossings_per_wire`] of the two runs against those ERBS). A run that crosses one more
-/// often takes a path the plan gave that wire (a planned short once it is drawn: qmtech ADV_CLK,
-/// drawn before ADV_DE, cut straight across ADV_DE's ERBS to its pad and left ADV_DE no legal
-/// geometry); it does not compete and the ERBS is drawn (Dayan 1997 PDF pp. 25-26: the ERBS is a
-/// member of the class; Polubasov 2010: the drawing realises the topology, it does not change it).
-/// O(wires crossed).
+/// class only if, for every undrawn other-net wire, it crosses that wire's reference path as often
+/// mod 2 as the ERBS does (`seq`, `erbs`: [`crossings_per_wire`] of the two runs against those
+/// paths). The parity of the crossings of an arc with a cut between two fixed points (the other
+/// wire's path between its terminals) is a homotopy invariant; the raw count is not (a bigon of two
+/// extra crossings comes and goes with the representatives: qmtech HDMI5V crossed ADV_SCL's path
+/// 4 times sequentially, 2 times as ERBS, one class). A run of the other parity takes a path the
+/// plan gave that wire (a planned short once it is drawn: qmtech ADV_CLK, drawn before ADV_DE, cut
+/// straight across ADV_DE's ERBS to its pad and left ADV_DE no legal geometry); it does not compete
+/// and the ERBS is drawn (Dayan 1997 PDF pp. 25-26: the ERBS is a member of the class; Polubasov
+/// 2010: the drawing realises the topology, it does not change it). The taut pull holds the same
+/// invariant against undrawn chords ([`Drawer::pull_taut`]). Sound, not complete: a different
+/// parity proves a different class, an equal one does not prove the same. O(wires crossed).
 pub fn competitor_keeps_class(seq: &BTreeMap<WireId, usize>, erbs: &BTreeMap<WireId, usize>) -> bool {
-    seq.iter().all(|(o, &n)| n <= erbs.get(o).copied().unwrap_or(0))
+    seq.keys().chain(erbs.keys()).all(|o| seq.get(o).copied().unwrap_or(0) % 2 == erbs.get(o).copied().unwrap_or(0) % 2)
 }
 
 /// Round i: the reference paths of the class test ([`competitor_keeps_class`]): per wire and
@@ -1531,9 +1544,7 @@ impl<'a> Drawer<'a> {
                 seen.push((o, ok));
                 // Both views of where the plan puts the wire: its taut chord (where the drawing
                 // pulls it) and its packed nominal chord (the side test's and the via walls').
-                let mut nom = vec![self.chord_pt(o, ok)];
-                nom.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| self.b.proj.pos[x.1]));
-                nom.push(self.chord_pt(o, ok + 1));
+                let nom = self.plan_chord(o, ok);
                 let taut = self.taut_chord(o, ok);
                 let Some(dist) = taut.windows(2).chain(nom.windows(2)).map(|x| seg_dist(p, x[0], x[1])).reduce(f64::min) else { continue };
                 let s = oi.s.max(wi.s);
@@ -2049,6 +2060,16 @@ impl<'a> Drawer<'a> {
         chord.windows(2).filter(|c| seg_proper(r, p, c[0], c[1])).count() % 2 == 0
     }
 
+    /// Wire `o`'s packed nominal chord through traversal `ok`: [`Drawer::chord_pt`] `ok`, its turn
+    /// points there, `ok + 1` (the plan's path; the side test, the via walls, the taut pull's
+    /// guards and the round-i class test all read it). O(turns).
+    fn plan_chord(&self, o: WireId, ok: usize) -> Vec<Vec2> {
+        let mut c = vec![self.chord_pt(o, ok)];
+        c.extend(self.st.wires[o].turns.iter().filter(|x| x.0 == ok).map(|x| self.b.proj.pos[x.1]));
+        c.push(self.chord_pt(o, ok + 1));
+        c
+    }
+
     /// Point `j` of wire `w`'s chord polyline (0: its start terminal, `n + 1`: its end, else
     /// the crossing of pass `j - 1`): the packed nominal crossing once the edges are packed
     /// (where the drawing and the via sites put it, D3), else the evenly spread pass point of
@@ -2072,7 +2093,7 @@ impl<'a> Drawer<'a> {
         if self.prov_layer.is_empty() {
             return true;
         }
-        let (st, pr) = (self.st, &self.b.proj);
+        let st = self.st;
         let wi = &st.wires[w];
         let t = wi.tris[k];
         let chord_layer = |o: WireId, ok: usize| -> i32 {
@@ -2102,10 +2123,7 @@ impl<'a> Drawer<'a> {
             let chord = if taut && self.taut_chord(o, ok).len() >= 2 {
                 self.taut_chord(o, ok)
             } else {
-                let mut c = vec![self.chord_pt(o, ok)];
-                c.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| pr.pos[x.1]));
-                c.push(self.chord_pt(o, ok + 1));
-                c
+                self.plan_chord(o, ok)
             };
             let crossings = chord.windows(2).filter(|c| seg_proper(r, p, c[0], c[1])).count();
             if crossings % 2 == 1 {
@@ -2897,8 +2915,8 @@ impl<'a> Drawer<'a> {
                     } else if let Some(k) = kept.take() {
                         let ls = poly_len(&pts);
                         replaced = erbs_vs_sequential(k.0, band_len, self.opts.erbs_margin, Some(ls)) == Some(true);
-                        // Round i: a competitor that crosses an undrawn wire's ERBS more often
-                        // than the ERBS does left the plan's class (`competitor_keeps_class`).
+                        // Round i: a competitor that crosses an undrawn wire's path with another
+                        // parity than the ERBS left the plan's class (`competitor_keeps_class`).
                         if replaced && !self.test_no_class_keep {
                             if self.class_ref.is_none() {
                                 self.class_ref = Some(self.build_class_ref());
@@ -3248,7 +3266,7 @@ impl<'a> Drawer<'a> {
 
     /// The reference paths of the round-i class test ([`ClassRef`]). O(passes of all wires).
     fn build_class_ref(&self) -> ClassRef {
-        let (st, pr) = (self.st, &self.b.proj);
+        let st = self.st;
         let mut paths: Vec<(WireId, usize, Vec<Vec2>)> = Vec::new();
         for (o, oi) in st.wires.iter().enumerate() {
             if !oi.alive {
@@ -3273,11 +3291,9 @@ impl<'a> Drawer<'a> {
                 }
                 for &l in &ls {
                     let e = cur.entry(l).or_default();
-                    if e.is_empty() {
-                        e.push(self.chord_pt(o, ok));
-                    }
-                    e.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| pr.pos[x.1]));
-                    e.push(self.chord_pt(o, ok + 1));
+                    let c = self.plan_chord(o, ok);
+                    let skip = usize::from(!e.is_empty());
+                    e.extend_from_slice(&c[skip..]);
                 }
             }
             paths.extend(cur.into_iter().map(|(l, p)| (o, l, p)));
@@ -3316,7 +3332,7 @@ impl<'a> Drawer<'a> {
         if pts.len() < 3 {
             return None;
         }
-        let (st, pr) = (self.st, &self.b.proj);
+        let st = self.st;
         let wi = &st.wires[w];
         // The guards: undrawn wires' chords on this layer and their via walls.
         let mut guards: Vec<(Vec2, Vec2)> = self.via_walls(w, k0, k1.min(wi.tris.len().saturating_sub(1)), layer);
@@ -3332,13 +3348,11 @@ impl<'a> Drawer<'a> {
                 if !(on(a) || on(b)) {
                     continue;
                 }
-                let mut c = vec![self.chord_pt(o, ok)];
-                c.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| pr.pos[x.1]));
-                c.push(self.chord_pt(o, ok + 1));
+                let c = self.plan_chord(o, ok);
                 guards.extend(c.windows(2).map(|x| (x[0], x[1])));
             }
         }
-        let cross = |poly: &[Vec2], g: &(Vec2, Vec2)| poly.windows(2).filter(|x| seg_proper(x[0], x[1], g.0, g.1)).count() % 2;
+        let cross = |poly: &[Vec2], g: &(Vec2, Vec2)| proper_crossings(poly, g.0, g.1) % 2;
         // The planned room of those wires (reserve planned room): a shortcut that reaches deeper
         // into the corridor of an undrawn wire's planned path (its taut and packed chords, half
         // its width plus the clearance either side) than the two legs it replaces is not taken.
@@ -3362,10 +3376,7 @@ impl<'a> Drawer<'a> {
                 let s = oi.s.max(wi.s);
                 let reach = 0.5 * wi.w + s + 0.5 * oi.w;
                 let pitch = (oi.w + s).max(1.0);
-                let mut nom = vec![self.chord_pt(o, ok)];
-                nom.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| pr.pos[x.1]));
-                nom.push(self.chord_pt(o, ok + 1));
-                corr.push((nom, reach, pitch));
+                corr.push((self.plan_chord(o, ok), reach, pitch));
                 let taut = self.taut_chord(o, ok);
                 if taut.len() >= 2 {
                     corr.push((taut, reach, pitch));
@@ -4041,7 +4052,7 @@ mod tests {
 
     /// Round i: crossings are counted by orientation signs (proper crossings), per wire; touching
     /// or collinear runs are no crossing, a path outside the run's box is not looked at; the
-    /// competitor keeps the class only if it crosses no wire more often than the ERBS.
+    /// competitor keeps the class only if it crosses every wire with the ERBS's parity.
     #[test]
     fn class_test_counts_proper_crossings_per_wire() {
         let run = [v(0.0, 0.0), v(10.0, 0.0)];
@@ -4056,10 +4067,38 @@ mod tests {
         let m = |v: &[(WireId, usize)]| v.iter().copied().collect::<BTreeMap<_, _>>();
         assert!(competitor_keeps_class(&m(&[]), &m(&[])));
         assert!(competitor_keeps_class(&m(&[(1, 2)]), &m(&[(1, 2)])));
-        assert!(competitor_keeps_class(&m(&[(1, 1)]), &m(&[(1, 2), (3, 1)])));
+        // qmtech HDMI5V / ADV_SCL: 4 against 2 is one class (a bigon), the competitor may win
+        assert!(competitor_keeps_class(&m(&[(1, 4)]), &m(&[(1, 2)])));
+        assert!(competitor_keeps_class(&m(&[(1, 2)]), &m(&[])));
+        assert!(competitor_keeps_class(&m(&[(1, 1), (2, 2)]), &m(&[(1, 3)])));
+        // the other parity on any wire, on either side: another class
         assert!(!competitor_keeps_class(&m(&[(1, 1)]), &m(&[])));
+        assert!(!competitor_keeps_class(&m(&[]), &m(&[(3, 1)])));
         assert!(!competitor_keeps_class(&m(&[(1, 3)]), &m(&[(1, 2)])));
         assert!(!competitor_keeps_class(&m(&[(1, 1), (2, 1)]), &m(&[(1, 1)])));
+    }
+
+    /// Round i, the bigon (qmtech HDMI5V / ADV_SCL): A's ERBS dips across B's undrawn path and back
+    /// (2 crossings), A's sequential competitor zigzags across it 4 times. Both bound a disc free
+    /// of B's terminals with B's path: one class, the competitor may win. A competitor that ends on
+    /// B's other side of A's terminals' line, crossing once (the qmtech ADV_CLK shortcut), may not.
+    #[test]
+    fn class_test_bigon_is_one_class() {
+        let b = [v(0.0, 0.0), v(10.0, 0.0)];
+        let erbs = [v(2.0, -3.0), v(3.0, 1.0), v(5.0, 1.0), v(6.0, -3.0)];
+        let seq = [v(2.0, -3.0), v(3.0, 1.0), v(3.5, -1.0), v(4.5, 1.0), v(6.0, -3.0)];
+        let (xe, xs) = (crossings_per_wire(&erbs, &[(7, &b)]), crossings_per_wire(&seq, &[(7, &b)]));
+        assert_eq!((xe.get(&7), xs.get(&7)), (Some(&2), Some(&4)));
+        assert!(competitor_keeps_class(&xs, &xe));
+        let straight = [v(2.0, -3.0), v(6.0, -3.0)];
+        assert!(competitor_keeps_class(&crossings_per_wire(&straight, &[(7, &b)]), &xe));
+        // the ADV_CLK shortcut: B's path ends between A's ERBS and the shortcut (fixture shortcut_across)
+        let b2 = [v(0.0, 0.0), v(4.0, 0.0)];
+        let wrap = [v(5.0, -3.0), v(-1.0, -1.0), v(-1.0, 1.0), v(5.0, 3.0)];
+        let short = [v(5.0, -3.0), v(2.0, 3.0)];
+        let (xw, xc) = (crossings_per_wire(&wrap, &[(7, &b2)]), crossings_per_wire(&short, &[(7, &b2)]));
+        assert_eq!((xw.get(&7), xc.get(&7)), (None, Some(&1)));
+        assert!(!competitor_keeps_class(&xc, &xw));
     }
 
     #[test]

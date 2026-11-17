@@ -181,8 +181,9 @@ Not the rough path. Dumps of the ladder's own run (hz-runs/m3i-dump-tip, -main; 
 
 ### Rule (draw.rs, erbs mode only: `kept` is set only there, seq copper unchanged)
 A sequential run that competes with a legal ERBS (`erbs_vs_sequential`) replaces it only if, for every other-net
-wire not drawn yet, it crosses that wire's reference path on this layer no more often than the kept ERBS does
-(`competitor_keeps_class`). The reference path is the wire's ERBS run, or, on a layer where it has none (sleeve
+wire not drawn yet, it crosses that wire's reference path on this layer as often mod 2 as the kept ERBS does
+(`competitor_keeps_class`; refined from "no more often" after the ladder, approved by the lead 2026-11-17, see
+"Parity" below). The reference path is the wire's ERBS run, or, on a layer where it has none (sleeve
 failed, no band), its planned path: the chords of its passes through its turn points (`build_class_ref`), so no
 undrawn wire is skipped. Crossings are counted topologically: proper segment crossings by orientation signs
 (`seg_proper`), no distance threshold. Candidates come from a 1 mm grid of the reference segments, queried by
@@ -192,15 +193,24 @@ the comparison ("a sequential run of the same class", `erbs_vs_sequential`'s own
 assumed. Sources: Dayan 1997 PDF pp. 25-26 (the ERBS is a minimal member of the topological class; the
 realisation keeps the class), PDF p. 32 (spokes keep the room of the others); TopoR way: the topology is decided
 in the topological phase, the drawing only realises it (Polubasov 2010, docs/literature/polubasov2010-topor-inside.html, section 1: TopoR is a topological router, "стадии трассировки и метризации разделены", routing and metrisation are separate stages).
-Counting crossings: Erickson, docs/literature/erickson-shortest-homotopic.html, section "Crossing Sequences"
-("Two paths are homotopic if and only if they have identical reduced crossing sequences"); comparing the counts
-per wire (not the reduced sequences) is our own simplification: a run that crosses an undrawn wire more often
-than the ERBS cannot be of the ERBS's class. The engine already holds the same invariant for the taut pull
-(`Drawer::pull_taut`: a vertex goes only if the parity of the crossings with undrawn wires' chords is unchanged).
+Parity (the refinement): Erickson, docs/literature/erickson-shortest-homotopic.html (lecture notes, HTML, no
+page numbers), section "Crossing Sequences": "Two paths are homotopic if and only if they have identical reduced
+crossing sequences"; the reduction cancels a crossing with the next crossing of the same cut (the example
+"...DDD..." loses a "DD"), always two at a time, so the number of crossings of each cut mod 2 is a homotopy
+invariant. The other wire's reference path runs between its two terminals (punctures), so it is such a cut;
+our use of it as one is our own reasoning. The rule is **sound, not complete**: a different parity proves a
+different class (the competitor is refused); an equal parity does not prove the same class (it competes as
+before round i). Raw counts are no invariant: two representatives of one class differ by bigons of 2 crossings.
+The taut pull holds the same invariant against undrawn chords (`Drawer::pull_taut`); both read the same code
+(`proper_crossings`, `Drawer::plan_chord`).
+Ladder evidence for the refinement (hz-runs/m3i-lad1, "no more often"): qmtech wire 358 (HDMI5V, B.Cu): the
+competitor crossed ADV_SCL's (wire 459) path 4 times, the ERBS 2 times; keeping the ERBS left ADV_SCL drawn into
+HDMI5V's via (+6 DRC, 2 shorts, ADV_SCL connection DRC 2 -> 8). Same parity: one class, the competitor competes.
 
 ### Invariants / tests
-- The competitor never crosses an undrawn other-net reference path more often than the kept ERBS
-  (draw.rs `class_test_counts_proper_crossings_per_wire`; tests/topo_m3_class_keep.rs on the synthetic
+- The competitor crosses every undrawn other-net reference path with the kept ERBS's parity
+  (draw.rs `class_test_counts_proper_crossings_per_wire`, `class_test_bigon_is_one_class` (4 against 2: one
+  class, the competitor competes; 1 against 0: refused); tests/topo_m3_class_keep.rs on the synthetic
   pattern `shortcut_across` (harness/radii_patterns.py, proposed, needs the user's approval): A drawn first,
   its straight competitor forced by the test hook "straight sequential run" crosses B: A keeps its ERBS, no
   crossing; with "erbs class keep off" A is straight and B is drawn across it, the qmtech symptom. With B's
