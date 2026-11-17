@@ -43,7 +43,13 @@ fn inner_wire_keeps_its_erbs_against_a_shortcut_across_the_outer() {
     }
     let len = |r: &[(String, f64, usize)], n: &str| r.iter().find(|c| c.0 == n).map(|c| c.1).expect("net");
     assert!(got.iter().all(|c| c.2 == 0), "no violation: {got:?}");
-    assert!(len(&got, "A") > 18.2 && len(&got, "A") < 19.5, "A wraps J3 (reference 18.255 mm): {got:?}");
+    // The approved judge (harness/radii_patterns.py shortcut_across): A = reference 18.255 mm
+    // (+0.5 %). XFAIL: measured 19.08 mm (+4.5 %, round i; the ERBS's octilinear / pad-exit form,
+    // open, parking list). The bound is the measured length (+0.5 %); strict: once A meets the
+    // judge this test fails (XPASS) so the bound is replaced by the judge.
+    let (a, a_ref, a_xfail) = (len(&got, "A"), 18.255, 19.08);
+    assert!(a > a_ref - 0.01 && a <= a_xfail * 1.005, "A wraps J3 (reference {a_ref} mm, xfail bound {a_xfail} mm): {got:?}");
+    assert!(a > a_ref * 1.005, "XPASS: A {a:.3} mm meets the approved judge (reference {a_ref} mm +0.5 %): tighten the bound to it");
     assert!((len(&got, "B") - 9.0).abs() < 0.01, "B straight: {got:?}");
     assert_eq!(kept_count(&warn), 1, "one competitor kept out: {warn:?}");
     // The rule off: the shortcut is drawn and B crosses it (the qmtech ADV_CLK / ADV_DE symptom).
