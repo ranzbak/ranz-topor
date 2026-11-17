@@ -25,7 +25,8 @@ def _board(tmp_path, rules=None, classes=CLASSES, patterns=({"netclass": "Power"
 
 
 def _code(b, name):
-    return str(int(b.GetNetsByName()[name].GetNetCode()))
+    from harness.model import engine_net_codes  # the plugin's IPC numbering (sorted names), not pcbnew's file order
+    return str(engine_net_codes(b)[name])
 
 
 def test_profile_values():
@@ -363,7 +364,8 @@ def _pure_vs_swig(b, pro_path, dru_text=None):
     """Pure resolver fed from the .kicad_pro JSON + net names only == the SWIG front end."""
     from toporlib import rules as R
     pro = json.loads(Path(pro_path).read_text())
-    nets = {str(n.GetNetname()): int(c) for c, n in b.GetNetsByNetcode().items() if int(c) != 0}
+    from harness.model import engine_net_codes  # same table as the front end (IPC numbering)
+    nets = engine_net_codes(b)
     kw = dict(widths_before={}, settings_table={"SIG": 300_000} if "SIG" in nets else None)
     swig = resolve_rules(b, dru_text=dru_text, **kw)
     pure = R.resolve_rules_from_project(
