@@ -242,6 +242,10 @@ pub mod meter {
     pub static PARTS: AtomicU64 = AtomicU64::new(0);
     pub static INSTALL_NS: AtomicU64 = AtomicU64::new(0);
     pub static CUTS_PRICED: AtomicU64 = AtomicU64::new(0);
+    /// Build memo (par-refine item 2): edge-layers whose packing numbers came from an earlier
+    /// build (hits) and those packed again (misses).
+    pub static MEMO_HIT: AtomicU64 = AtomicU64::new(0);
+    pub static MEMO_MISS: AtomicU64 = AtomicU64::new(0);
     thread_local! {
         static OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
@@ -308,10 +312,35 @@ fn margin_slots(nl: usize) -> usize {
     2 * (2 * nl + 1)
 }
 
+/// Packing numbers of an edge-layer: `(over, via squeeze price, pitch)` ([`CapModel::numbers_in`]).
+pub type EdgeNumbers = (f64, f64, f64);
+
+/// The build memo of a packer ([`CapModel::price_all`]): per edge-layer the items priced there
+/// last and their packing numbers. Valid for the packer's projection only.
+#[derive(Default)]
+pub struct EdgeMemo {
+    nl: usize,
+    ent: Vec<MemoEnt>,
+}
+
+#[derive(Default)]
+struct MemoEnt {
+    items: Vec<PackItem>,
+    nums: Option<EdgeNumbers>,
+}
+
+/// Whether two item lists are equal bit for bit (every field; `-0.0` and `0.0` differ). O(items).
+fn same_items(a: &[PackItem], b: &[PackItem]) -> bool {
+    let bits = |i: &PackItem| (i.net, i.w.to_bits(), i.s.to_bits(), i.infl.to_bits(), i.disc[0].to_bits(), i.disc[1].to_bits());
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| bits(x) == bits(y))
+}
+
 /// Per-thread scratch of [`CapModel::eval`].
 #[derive(Default)]
 struct EvalScratch {
     items: Vec<PackItem>,
+    /// The pass of each item and whether it is the pass's track (else its disc alone).
+    ids: Vec<(usize, bool)>,
     lo: Vec<f64>,
     hi: Vec<f64>,
     req: Vec<f64>,
@@ -458,11 +487,7 @@ impl<'a> CapModel<'a> {
                 m.apply(w, ev, ks);
             }
         }
-        for e in 0..st.proj.edges.len() {
-            for l in 0..nl {
-                (m.cost[e * nl + l], m.sq[e * nl + l]) = m.eval(e, l);
-            }
-        }
+        m.price_all();
         m.flush();
         for (w, ev) in evl.iter().enumerate().take(nw) {
             if st.wires[w].alive && !m.via_iv[w].is_empty() {
@@ -748,14 +773,23 @@ impl<'a> CapModel<'a> {
     }
 
     fn eval_in(&self, e: usize, l: usize, order: &[usize], sc: &mut EvalScratch) -> (f64, f64) {
+        self.items_in(l, order, sc);
+        if sc.items.is_empty() {
+            return (0.0, 0.0);
+        }
+        let n = self.numbers_in(e, l, sc);
+        self.cost_of(n)
+    }
+
+    /// The pack items of edge-layer `l` of the passes `order` (an edge's order) into `sc.items`,
+    /// their passes into `sc.ids` ([`layer_items`]'s rule: a pass on `l` packs its track and its
+    /// disc, a pass on another layer with a disc packs the disc alone). O(passes of the edge).
+    fn items_in(&self, l: usize, order: &[usize], sc: &mut EvalScratch) {
         sc.items.clear();
-        sc.lo.clear();
-        sc.hi.clear();
-        let len = self.packer.edge_len(e);
+        sc.ids.clear();
         for &p in order {
             let (pl, d) = (self.pass_layer[p], self.pass_disc[p]);
-            let track = pl == l as i32;
-            let it = if track {
+            let it = if pl == l as i32 {
                 PackItem { disc: d, ..self.item0[p] }
             } else if pl >= 0 && d[0].max(d[1]) > 0.0 {
                 let i0 = &self.item0[p];
@@ -763,22 +797,100 @@ impl<'a> CapModel<'a> {
             } else {
                 continue;
             };
-            sc.lo.push(self.end_margin(p, e, 0, &it, l, track));
-            sc.hi.push(len - self.end_margin(p, e, 1, &it, l, track));
+            sc.ids.push((p, pl == l as i32));
             sc.items.push(it);
         }
-        let items = &sc.items;
-        if items.is_empty() {
-            return (0.0, 0.0);
+    }
+
+    /// The packing numbers `(over, squeeze price, pitch)` of the items in `sc` on edge `e`,
+    /// layer `l` (`over` = [`super::pack::Bounds::worst`]): a function of the items and the
+    /// static packer alone (the end margins are the packer's), so equal items give equal bits.
+    fn numbers_in(&self, e: usize, l: usize, sc: &mut EvalScratch) -> EdgeNumbers {
+        sc.lo.clear();
+        sc.hi.clear();
+        let len = self.packer.edge_len(e);
+        for (&(p, track), it) in sc.ids.iter().zip(&sc.items) {
+            sc.lo.push(self.end_margin(p, e, 0, it, l, track));
+            sc.hi.push(len - self.end_margin(p, e, 1, it, l, track));
         }
+        let items = &sc.items;
         let over = self.packer.worst_into(e, items, &sc.lo, &sc.hi, &mut sc.req, &mut sc.rmax);
         let sq_w = self.packer.via_squeeze;
         let sq = if sq_w > 0.0 { sq_w * items.iter().filter(|i| i.dmax() > 0.0).map(|i| squeeze_amount(-over, i.dmax())).sum::<f64>() } else { 0.0 };
+        let pitch = (items.iter().map(|i| i.w.max(i.dmax()) + i.s).sum::<f64>() / items.len() as f64).max(1.0);
+        (over, sq, pitch)
+    }
+
+    /// Overflow and via squeeze price of an edge-layer from its packing numbers ([`CapModel::eval`]). O(1).
+    fn cost_of(&self, (over, sq, pitch): EdgeNumbers) -> (f64, f64) {
         if over <= 1e-6 {
             return (0.0, sq);
         }
-        let pitch = (items.iter().map(|i| i.w.max(i.dmax()) + i.s).sum::<f64>() / items.len() as f64).max(1.0);
         (self.price * (1.0 + over / pitch), sq)
+    }
+
+    /// The build's price of every edge-layer (par-refine item 2, exact): an edge-layer whose
+    /// items are bit for bit those it had in an earlier build with the same packer (the packer's
+    /// [`EdgeMemo`], one entry per edge-layer: the last items priced there) takes the packing
+    /// numbers of that build instead of packing again; the numbers are a function of the items
+    /// and the static packer only ([`CapModel::numbers_in`]), the price is applied after. Edges
+    /// without passes stay at 0. O(passes x layers) + the packings of the changed edge-layers.
+    fn price_all(&mut self) {
+        let (st, nl) = (self.st, self.nl);
+        let ne = st.proj.edges.len();
+        let mut memo = self.packer.edge_memo.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let usable = self.packer.same_proj(st.proj);
+        if usable && (memo.nl != nl || memo.ent.len() != ne * nl) {
+            memo.nl = nl;
+            memo.ent.clear();
+            memo.ent.resize_with(ne * nl, Default::default);
+        }
+        let (mut hits, mut misses) = (0u64, 0u64);
+        let mut out: Vec<(usize, (f64, f64))> = Vec::new();
+        EVAL_SCRATCH.with(|sc| {
+            let sc = &mut *sc.borrow_mut();
+            for e in 0..ne {
+                let order = &st.edge_order[e];
+                if order.is_empty() {
+                    continue;
+                }
+                for l in 0..nl {
+                    self.items_in(l, order, sc);
+                    if sc.items.is_empty() {
+                        continue;
+                    }
+                    let n = if usable {
+                        let ent = &mut memo.ent[e * nl + l];
+                        match ent.nums.filter(|_| same_items(&ent.items, &sc.items)) {
+                            Some(n) => {
+                                hits += 1;
+                                n
+                            }
+                            None => {
+                                misses += 1;
+                                let n = self.numbers_in(e, l, sc);
+                                ent.items.clear();
+                                ent.items.extend_from_slice(&sc.items);
+                                ent.nums = Some(n);
+                                n
+                            }
+                        }
+                    } else {
+                        self.numbers_in(e, l, sc)
+                    };
+                    out.push((e * nl + l, self.cost_of(n)));
+                }
+            }
+        });
+        drop(memo);
+        for (i, (c, q)) in out {
+            self.cost[i] = c;
+            self.sq[i] = q;
+        }
+        if meter::on() {
+            meter::MEMO_HIT.fetch_add(hits, std::sync::atomic::Ordering::Relaxed);
+            meter::MEMO_MISS.fetch_add(misses, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// [`CapModel::eval`] the way it was computed before the per-pass tables (par-refine §3):

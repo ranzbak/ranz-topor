@@ -217,6 +217,8 @@ pub struct Packer<'a> {
     /// P1a (`[capacity] model = "cuts"`): the planner's capacity price is the per-layer cut
     /// test ([`super::cutmodel`]) instead of this packer's per-edge packing.
     pub cuts: Option<super::cutmodel::CutCtx>,
+    /// The capacity model's build memo ([`super::refine::EdgeMemo`], par-refine item 2).
+    pub(crate) edge_memo: std::sync::Mutex<super::refine::EdgeMemo>,
 }
 
 /// The oblique-chord factor of a pass through edge `e` crossed in direction `d`: `1 / sin` of
@@ -259,7 +261,13 @@ impl<'a> Packer<'a> {
             via_between: false,
             octi: false,
             cuts: None,
+            edge_memo: std::sync::Mutex::new(Default::default()),
         }
+    }
+
+    /// Whether `pr` is this packer's projection (the build memo's edge ids are its edges). O(1).
+    pub fn same_proj(&self, pr: &Projection) -> bool {
+        std::ptr::eq(self.pr, pr)
     }
 
     /// Reach diameter of the via a wire of `net` gets (its first size, nm; see the field): the
