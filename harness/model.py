@@ -10,6 +10,7 @@ import pcbnew
 from toporlib.custom_rules import apply_to_model
 from toporlib.dru import merge_dru_keepouts
 from toporlib.geom import circle_ring, find_dangling, hull, track_item
+from toporlib.rules import net_codes_by_name
 
 _KIND = {
     pcbnew.LT_SIGNAL: "signal",
@@ -28,6 +29,34 @@ _HULL_SHAPES = {
     pcbnew.PAD_SHAPE_CHAMFERED_RECT,
     pcbnew.PAD_SHAPE_CUSTOM,
 }
+
+
+# ---------------------------------------------------------------- net codes
+#: net name -> engine code. The plugin numbers nets through KiCad IPC as ``net_codes_by_name`` (sorted names,
+#: 1-based, user 2026-11-17 "match KiCad"); pcbnew's own codes follow the file order and change the router's
+#: tie-breaks (wiccon 15 vs 27 violations). Every code the harness exports or reads back goes through this table.
+_CODES: dict[str, int] = {}
+
+
+def engine_net_codes(board) -> dict[str, int]:
+    """Net name -> the plugin's (IPC) net code for this pcbnew board."""
+    return net_codes_by_name(str(n.GetNetname()) for c, n in board.GetNetsByNetcode().items() if int(c) != 0)
+
+
+def use_board_codes(board) -> dict[str, int]:
+    _CODES.clear()
+    _CODES.update(engine_net_codes(board))
+    return _CODES
+
+
+def _nc(item) -> int:
+    """Engine net code of a pcbnew item (0 = no net)."""
+    name = str(item.GetNetname())
+    if not name:
+        return 0
+    if name not in _CODES:
+        use_board_codes(item.GetBoard())
+    return _CODES.get(name, 0)
 
 
 def load_board(pc):
@@ -159,7 +188,7 @@ def _export_pads(board, cu: list[int], tie_groups: dict):
                     "uuid": _uuid(pad),
                     "ref": ref,
                     "number": num,
-                    "net": int(pad.GetNetCode()),
+                    "net": _nc(pad),
                     "attr": attr,
                     "center": pos,
                     "rotation_deg": float(pad.GetOrientation().AsDegrees()),
@@ -181,7 +210,7 @@ def _export_pads(board, cu: list[int], tie_groups: dict):
                     hole["slot"] = [drill["w"], drill["h"]]
                 holes.append(hole)
         if groups:
-            pnets = {p.GetNumber(): int(p.GetNetCode()) for p in fp.Pads()}
+            pnets = {p.GetNumber(): _nc(p) for p in fp.Pads()}
             nets = []
             for g in groups:
                 seen: list[int] = []
@@ -208,7 +237,7 @@ def _export_copper(board):
             vias.append(
                 {
                     "uuid": _uuid(t),
-                    "net": int(t.GetNetCode()),
+                    "net": _nc(t),
                     "at": _pt(t.GetPosition()),
                     "d": int(t.GetWidth(pcbnew.F_Cu)),
                     "drill": int(t.GetDrillValue()),
@@ -221,7 +250,7 @@ def _export_copper(board):
             kept.append(
                 {
                     "uuid": _uuid(t),
-                    "net": int(t.GetNetCode()),
+                    "net": _nc(t),
                     "layer": int(t.GetLayer()),
                     "width": int(t.GetWidth()),
                     "prim": _track_prim(t),
@@ -269,7 +298,7 @@ def _export_copper_shapes(board, cu: list[int], max_err: int):
             out.append(
                 {
                     "uuid": _uuid(item),
-                    "net": int(item.GetNetCode()) if hasattr(item, "GetNetCode") else 0,
+                    "net": _nc(item) if hasattr(item, "GetNetCode") else 0,
                     "layer": layer,
                     "poly": _outline_pts(ps, i),
                     "owner_ref": owner,
@@ -364,17 +393,17 @@ def find_dangling_ends(board) -> list[dict]:
     vias_by_net: dict[int, list] = {}
     for t in board.GetTracks():
         if _is_via(t):
-            vias_by_net.setdefault(int(t.GetNetCode()), []).append(
+            vias_by_net.setdefault(_nc(t), []).append(
                 (_pt(t.GetPosition()), int(t.GetWidth(pcbnew.F_Cu)) / 2.0,
                  {int(l) for l in t.GetLayerSet().Seq()}))
             continue
-        items.append(track_item(_uuid(t), t.GetNetCode(), t.GetLayer(), t.GetWidth(), _pt(t.GetStart()),
+        items.append(track_item(_uuid(t), _nc(t), t.GetLayer(), t.GetWidth(), _pt(t.GetStart()),
                                 _pt(t.GetEnd()), _pt(t.GetMid()) if _is_arc(t) else None))
 
     pads_by_net: dict[int, list] = {}
     for fp in board.GetFootprints():
         for pad in fp.Pads():
-            pads_by_net.setdefault(int(pad.GetNetCode()), []).append(pad)
+            pads_by_net.setdefault(_nc(pad), []).append(pad)
     poly_cache: dict = {}
 
     def in_pad(net, layer, p) -> bool:
@@ -442,7 +471,7 @@ def _export_pours(board, cu: list[int]) -> list[dict]:
     memory only, never saved).
     """
     zones = [z for z in board.Zones() if not z.GetIsRuleArea() and not z.IsTeardropArea()
-             and int(z.GetNetCode()) != 0]
+             and _nc(z) != 0]
     if not zones:
         return []
     pcbnew.ZONE_FILLER(board).Fill(board.Zones())
@@ -456,7 +485,7 @@ def _export_pours(board, cu: list[int]) -> list[dict]:
         vias = sorted(_uuid(t) for t in conn.GetConnectedTracks(z)
                       if _is_via(t) and any(t.IsOnLayer(l) for l in layers))
         fills, warn = _pour_fills(z, layers)
-        d = {"uuid": _uuid(z), "net": int(z.GetNetCode()), "layers": layers,
+        d = {"uuid": _uuid(z), "net": _nc(z), "layers": layers,
              "pads": pads, "vias": vias, "fills": fills, **_zone_settings(z)}
         if warn:
             d["warning"] = warn
@@ -491,8 +520,7 @@ def export_model(board, rules: dict, *, name: str, dru_text: str | None = None) 
         kind = _KIND.get(board.GetLayerType(l), "signal")
         layers.append({"id": l, "name": board.GetLayerName(l), "kind": kind,
                        "routable": kind in ("signal", "mixed")})
-    nets = [{"code": int(c), "name": str(n.GetNetname())}
-            for c, n in sorted(board.GetNetsByNetcode().items()) if int(c) != 0]
+    nets = [{"code": c, "name": n} for n, c in sorted(use_board_codes(board).items(), key=lambda kv: kv[1])]
     tie_groups = {fp.GetReference(): _net_tie_groups(fp) for fp in board.GetFootprints() if fp.IsNetTie()}
     pads, holes, net_ties = _export_pads(board, cu, tie_groups)
     kept, vias = _export_copper(board)
@@ -513,7 +541,7 @@ def export_model(board, rules: dict, *, name: str, dru_text: str | None = None) 
         "keepouts": keepouts,
         "net_ties": net_ties,
         "pours": _export_pours(board, cu),
-        "teardrops": sorted(({"uuid": _uuid(z), "net": int(z.GetNetCode())} for z in board.Zones()
+        "teardrops": sorted(({"uuid": _uuid(z), "net": _nc(z)} for z in board.Zones()
                              if z.IsTeardropArea()), key=lambda d: d["uuid"]),
         "dangling_ends": find_dangling_ends(board),
         "rules": rules,

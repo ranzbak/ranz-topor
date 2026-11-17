@@ -33,7 +33,7 @@ def _group_for(board, groups: dict, name: str):
     return g
 
 
-def _make_item(board, it: dict):
+def _make_item(board, it: dict, pcb_code=lambda c: c):
     if it.get("kind") == "via":
         v = pcbnew.PCB_VIA(board)
         v.SetViaType(pcbnew.VIATYPE_THROUGH)
@@ -43,7 +43,7 @@ def _make_item(board, it: dict):
             v.SetDrill(int(it["drill"]))
         layers = it.get("layers") or [pcbnew.F_Cu, pcbnew.B_Cu]
         v.SetLayerPair(int(layers[0]), int(layers[-1]))
-        v.SetNetCode(int(it["net"]))
+        v.SetNetCode(pcb_code(int(it["net"])))
         return v
     prim = it["prim"]
     if prim["kind"] == "arc":
@@ -57,7 +57,7 @@ def _make_item(board, it: dict):
         t.SetEnd(_v(prim["b"]))
     t.SetWidth(int(it["width"]))
     t.SetLayer(int(it["layer"]))
-    t.SetNetCode(int(it["net"]))
+    t.SetNetCode(pcb_code(int(it["net"])))
     return t
 
 
@@ -101,10 +101,13 @@ def skip_unchanged(kept: list[dict], remove_uuids: list[str],
 
 def write_items(board, items: list[dict]) -> list[str]:
     """Add items to the board; return the uuids of created items in input order."""
+    from harness.model import engine_net_codes
+    by_code = {c: n for n, c in engine_net_codes(board).items()}  # engine (IPC) code -> name -> pcbnew code
+    pcb_code = lambda c: (int(board.FindNet(by_code[c]).GetNetCode()) if c in by_code else 0)  # noqa: E731
     groups: dict = {}
     ids: list[str] = []
     for it in items:
-        obj = _make_item(board, it)
+        obj = _make_item(board, it, pcb_code)
         board.Add(obj)
         name = it.get("group")
         if name:

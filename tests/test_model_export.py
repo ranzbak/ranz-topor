@@ -200,3 +200,42 @@ def test_model_pours_exclude_teardrop_zones(tmp_path):
     assert sum(1 for z in b.Zones() if z.IsTeardropArea()) == 1
     m = export_model(b, {}, name="fx")
     assert len(m["pours"]) == 1 and m["pours"][0]["layers"] == [int(pcbnew.B_Cu)]
+
+
+def test_net_codes_match_plugin_ipc_numbering(tmp_path):
+    """User 2026-11-17 "match KiCad": the harness numbers nets as the plugin does through IPC
+    (``toporlib.rules.net_codes_by_name``: sorted names, 1-based, the table model_ipc.export_model_ipc and the
+    rule resolver use), not by pcbnew's file order. Pads, kept copper and vias carry the code of their net NAME."""
+    from harness.rules import _swig_inputs
+    from toporlib.rules import net_codes_by_name
+
+    pc = copy_project(BENCH_BOARDS["eprom-to-kernal"], tmp_path / "w")
+    b = load_board(pc)
+    m = export_model(b, {}, name="eprom")
+    names = [str(n.GetNetname()) for c, n in b.GetNetsByNetcode().items() if int(c) != 0]
+    want = net_codes_by_name(names)
+    assert _codes(m) == want and [n["name"] for n in m["nets"]] == sorted(names)
+    assert _swig_inputs(b)[3] == want  # the rule resolver's per_net keys use the same table
+    pcb_order = [str(n.GetNetname()) for c, n in sorted(b.GetNetsByNetcode().items()) if int(c) != 0]
+    assert pcb_order != sorted(pcb_order)  # the board really is in file order (else this proves nothing)
+    for p in m["pads"]:
+        pad = next(q for f in b.GetFootprints() if f.GetReference() == p["ref"] for q in f.Pads()
+                   if q.GetNumber() == p["number"])
+        assert p["net"] == want.get(str(pad.GetNetname()), 0)
+    by_uuid = {str(t.m_Uuid.AsString()): t for t in b.GetTracks()}
+    for k in m["kept"] + m["vias"]:
+        assert k["net"] == want[str(by_uuid[k["uuid"]].GetNetname())]
+
+
+def test_writer_maps_engine_codes_back_to_pcbnew(tmp_path):
+    """write_items takes engine (IPC) net codes and sets the pcbnew code of the same NAME."""
+    from harness.model import engine_net_codes
+    from harness.writer import write_items
+
+    b = load_board(copy_project(BENCH_BOARDS["eprom-to-kernal"], tmp_path / "w"))
+    eng = engine_net_codes(b)
+    name = sorted(eng)[3]
+    seg = {"kind": "seg", "a": [0, 0], "b": [1_000_000, 0]}
+    write_items(b, [{"net": eng[name], "layer": 0, "width": 250_000, "prim": seg}])
+    t = [t for t in b.GetTracks() if t.GetStart().x == 0 and t.GetEnd().x == 1_000_000][0]
+    assert str(t.GetNetname()) == name
