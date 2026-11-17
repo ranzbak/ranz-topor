@@ -800,6 +800,7 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
         partner[v[1].0][v[1].1] = Some(v[0]);
     }
     let via = p.via_mm;
+    let h_in = super::rtrace::on().then(|| super::rtrace::hash(&evl));
     let rs = packer.map(|pk| {
         refine(
             st,
@@ -815,6 +816,9 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
         )
     });
     let rs = rs.unwrap_or_default();
+    if let Some(h) = h_in {
+        super::rtrace::note("a", h, &evl, &rs);
+    }
     rep.overfull_before = rs.before;
     rep.overfull_after = rs.after;
     rep.refine_moves = rs.moves;
@@ -1151,6 +1155,7 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
     let mask: Vec<Vec<u64>> = wev.iter().map(|l| l.iter().map(|&e| ev[e].mask).collect()).collect();
     let partner: Vec<Vec<Option<(WireId, usize)>>> =
         wev.iter().map(|l| l.iter().map(|&e| ev[e].partner.map(|q| at_ev[q])).collect()).collect();
+    let h_in = super::rtrace::on().then(|| super::rtrace::hash(&evl));
     let rs = packer
         .map(|pk| {
             refine(
@@ -1167,6 +1172,9 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
             )
         })
         .unwrap_or_default();
+    if let Some(h) = h_in {
+        super::rtrace::note("b", h, &evl, &rs);
+    }
     rep.overfull_before = rs.before;
     rep.overfull_after = rs.after;
     rep.refine_moves = rs.moves;
