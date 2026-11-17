@@ -183,7 +183,7 @@ def model_rule_set(model: dict, cfg=None) -> dict:
 def pipeline_model(pc, hand_pc, cfg, *, fab_profile: str | None = None) -> dict:
     """The engine-input model of a route_board run on project copy `pc` (rules from widths of `hand_pc`), as
     harness.route_board + topor.run build it: resolve_rules (``[rules] fab_profile`` of `cfg`, or `fab_profile`),
-    export_model, the via fallback, the diff pairs. `pc` / `hand_pc`: harness.copy.ProjectCopy. One pcbnew load
+    export_model, the via fallback, rule C (``[rules] edge_clearance_zero``), the diff pairs. `pc` / `hand_pc`: harness.copy.ProjectCopy. One pcbnew load
     per board."""
     from harness.model import export_model, load_board
     from harness.rip import record_widths
@@ -201,6 +201,9 @@ def pipeline_model(pc, hand_pc, cfg, *, fab_profile: str | None = None) -> dict:
     if preflight_mod.via_setup_missing(pro, cfg):
         mr, _info = run_mod.apply_via_fallback(model["rules"], cfg)
         model = {**model, "rules": mr}
+    # rule C (edge-clear): copper-to-edge 0 -> [rules] edge_clearance_zero, as the run flow (a non-zero value wins)
+    from toporlib import edge_zero
+    model, _rec = edge_zero.apply(model, run_mod.edge_zero_of(cfg))
     from harness.route_board import board_netclasses
     model, _notes = run_mod.attach_diff_pairs(model, rules, Path(pc.pcb), pro, cfg, board_netclasses(pc)[1])
     return model

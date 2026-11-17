@@ -1157,3 +1157,50 @@ def test_run_lock_unwritable_warns_and_goes_on(eprom, tmp_path, monkeypatch):
     out = run_mod.run(make_board(eprom), ScriptedUi(), CFG, ExplodingEngine(), tmp_root=tmp_path / "work")
     assert any(f.code == "RUN_LOCK_UNAVAILABLE" and f.severity == "warning" for f in out.findings)
     assert out.status != "aborted_preflight" or out.error is None
+
+
+def _edge_zero_project(tmp_path, eprom, toml=None):
+    """eprom with copper-to-edge 0 in its .kicad_pro and in the model's rules (as KiCad would resolve it)."""
+    src = Eprom()
+    src.pcb, src.text = eprom.pcb, eprom.text
+    src.model = {**eprom.model, "rules": {**eprom.model["rules"], "edge_clearance": 0}}
+    board = _project(src, tmp_path, toml=toml)
+    pro_p = board.pcb.with_suffix(".kicad_pro")
+    pro = json.loads(pro_p.read_text())
+    pro["board"]["design_settings"]["rules"]["min_copper_edge_clearance"] = 0.0
+    pro_p.write_text(json.dumps(pro))
+    return board
+
+
+@pytest.mark.parametrize("mode", ["zone_clearance", "board", "pours"])
+def test_edge_zero_rule_c_sets_the_engine_edge_clearance(app, eprom, tmp_path, reports, mode):
+    """Rule C (edge-clear): copper-to-edge 0 -> the engine gets [rules] edge_clearance_zero's value (default: the
+    biggest pour clearance), the EDGE_CLEARANCE_ZERO finding names it and the report's Settings list it."""
+    from toporlib import edge_zero as ez
+
+    toml = None if mode == "zone_clearance" else f'version = 1\n\n[rules]\nedge_clearance_zero = "{mode}"\n'
+    board = _edge_zero_project(tmp_path, eprom, toml)
+    eng = CaptureEngine()
+    out = run_mod.run(board, ScriptedUi(), None if toml else CFG, eng, tmp_root=tmp_path / "work")
+    _ok(out)
+    want = {"zone_clearance": ez.zone_clearance(eprom.model), "board": 0, "pours": ez.pour_setback(eprom.model)}[mode]
+    if mode == "zone_clearance":
+        assert want == max(p["clearance"] for p in eprom.model["pours"]) > 0
+    assert eng.models[0]["rules"]["edge_clearance"] == want
+    text = ez.text({"mode": mode, "value_nm": want, "board_nm": 0})
+    (f,) = [f for f in out.findings if f.code == "EDGE_CLEARANCE_ZERO"]
+    assert text in f.message and "Copper to edge clearance" in f.message, f.message
+    md = (out.report_dir / "report.md").read_text()
+    assert "Copper to edge clearance 0 on the board: " + text in md, md
+    assert "warning: " in (out.report_dir / "log.txt").read_text()
+
+
+def test_edge_non_zero_board_value_wins_in_the_run(app, eprom, tmp_path, reports):
+    """eprom's own 0.25 mm copper-to-edge: rule C is not consulted, the engine gets 0.25, no finding, no line."""
+    board = _project(eprom, tmp_path, toml='version = 1\n\n[rules]\nedge_clearance_zero = "pours"\n')
+    eng = CaptureEngine()
+    out = run_mod.run(board, ScriptedUi(), None, eng, tmp_root=tmp_path / "work")
+    _ok(out)
+    assert eng.models[0]["rules"]["edge_clearance"] == eprom.model["rules"]["edge_clearance"] == 250_000
+    assert not any(f.code == "EDGE_CLEARANCE_ZERO" for f in out.findings)
+    assert "Copper to edge clearance 0 on the board" not in (out.report_dir / "report.md").read_text()
