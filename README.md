@@ -11,7 +11,7 @@ test and benchmark harness in `harness/`. Linux only for now.
 
 | Works now, from inside KiCad 10 | Comes in 0.5.0 (milestone M4a: the engine) |
 |---|---|
-| **Topor: route** button: pre-flight findings (code, cause, fix), options, progress with Cancel, before/after preview, **Accept = one undo step** / Reject = nothing changed | private-badge-b n/n routed, 0 router DRC, ≤ 10 min (now 148/n in 60 s) |
+| **Topor: route** button: pre-flight findings (code, cause, fix), options, progress with Cancel, before/after preview, **Accept = one undo step for the routes** (plus one for the zone refill) / Reject = nothing changed | private-badge-b n/n routed, 0 router DRC, ≤ 10 min (now 148/n in 60 s) |
 | Whole board or a selection (between / touching selected footprints); existing copper kept, or ripped and re-routed; locked copper respected | priorities used for routing order (`@N` markers, `topor_pN` net classes, `[nets] priority` — computed and reported now) |
 | Self-documenting `topor.toml` per project, generated [reference](docs/user/configuration.md); every finding names the KiCad menu or the key to change | pad exit stubs for fine pitch, same-net T-junctions, via rules from the board setup, bounded via relaxation, layer costs |
 | Result verified by `kicad-cli` DRC on a copy before you decide; report folder (report, preview, DRC, log) per run | engine-side `do_not_touch` / `ignore_pads` options (applied by the plugin's scope now) |
@@ -70,7 +70,7 @@ The **Topor: route** button runs this core in KiCad 10: pre-flight findings (pad
 total time (`[run] timeout_s` is now 600 s, an emergency stop; the `[optimize]` work caps end a run), Cancel at any
 time, a preview with the open ratsnest in blue, findings after routing (unrouted connections by reason, pour
 islands and stitches, via squeeze, necking, ignored rules, ...; [operate.md](docs/user/operate.md#findings-after-routing)),
-Accept as one undo step. Every `topor.toml` setting the core reads reaches it (before K1 the `[optimize]`,
+Accept (routes = one undo step, zone refill = a second). Every `topor.toml` setting the core reads reaches it (before K1 the `[optimize]`,
 `[factors]` and the other core settings were dropped as "since 0.5.0"); settings of the classic engine say so in
 the [reference](docs/user/configuration.md).
 

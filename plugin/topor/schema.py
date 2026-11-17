@@ -97,7 +97,7 @@ SETTINGS: list[Setting] = [
        unit="s", range=(0, 86400)),
     _s("run", "commit_fills", "bool", True, "Accept also writes the zone fills that KiCad's own filler made for the routed result (kicad-cli, the refill of the preview's DRC) into the zones, in the same undo step as the copper. The board then comes back with pours that hold the new traces and vias, so KiCad's Edit → Cleanup Tracks & Vias (which judges a stub into a pour, or a via that reaches a plane, by the fill it finds) keeps them. false = the zones keep the fill they had before the run until you refill (B); the cleanup may then remove plane stubs and plane vias.",
        kicad="KiCad → Edit → Fill All Zones (B); Edit → Cleanup Tracks & Vias"),
-    _s("run", "refill_after_accept", "bool", False, "After Accept, refill all zones from topor (a second undo step in KiCad). false = Accept is exactly one undo step; press B (Edit → Fill All Zones) yourself.",
+    _s("run", "refill_after_accept", "bool", True, "After Accept, KiCad refills all zones itself (a second undo step), so the pours and the DRC counts are right without pressing B. false = Accept is exactly one undo step; the zones keep the fill written by commit_fills (or, with commit_fills = false, the fill from before the run) until you press B (Edit → Fill All Zones).",
        kicad="KiCad → Edit → Fill All Zones (B)"),
     # ---- [nets]
     _s("nets", "do_not_touch", "list", [], "Net names or glob patterns whose copper is a fixed obstacle and never routed, ripped or smoothed.",
@@ -225,6 +225,8 @@ SETTINGS: list[Setting] = [
        engine="reserve_via_sites"),
     _s("vias", "offset_sites", "bool", True, "Topological core: when no sample point of the corridor where a connection changes layer has room for a via, also try positions a via-radius plus clearance away from the corners of nearby pads and copper (and from the traces drawn before), nearest to the connection's path first. More connections get a via site, at the cost of some runtime.",
        engine="via_offset_sites"),
+    _s("vias", "reach_price", "bool", False, "Topological core: when the drawing has to search a via site (the plan's own site is not free), it takes only sites in the plan's topological class: the trace's run on each of the via's layers must reach the site from the plan's path without going over a drawn trace of another net that the plan does not cross there (same layer, same triangle). That class test always applies. reach_price = true also prices each such site by the clearance violations of that reach (graded, in via diameters of squeeze), so a site the run reaches cleanly wins over one it grazes. Default false until the plan's own via-site room check is fixed: measured on the test boards, the price moves vias that were fine board-wide (one board +26 DRC violations).",
+       engine="via_reach_price"),
     _s("search", "feedback_max_rip", "int", 8, "Work cap: most already drawn traces one such feedback round may take out and draw again (a larger value rescues more connections and costs more runtime). Whether they are taken out at all is a graded price, not this count: the reroute factor's price per blocking trace (more for one redrawn before in the same round) against the violation factor's price of drawing the rejected connection through them; the cheapest rescues go first.",
        range=(0, 100), engine="feedback_max_rip"),
     _s("search", "reroute_rounds", "int", 6, "Topological core: most rounds of negotiated rip-up-and-reroute. After the layers are assigned, the connections that run through a passage holding more copper on one layer than fits are taken out and routed again, with a growing price (the congestion factor) on the passages that were over-full, until none is over-full or a round brings no gain; the best round is kept. 0 = off.",
@@ -364,6 +366,7 @@ SETTINGS: list[Setting] = [
 # warning CFG_PINNED_OLD_DEFAULT while it differs from the current default. Add an entry whenever a default changes.
 PAST_DEFAULTS = {
     ("optimize", "finish_when_stable"): ((True, "2026-11-16"),),
+    ("run", "refill_after_accept"): ((False, "2026-11-17"),),
 }
 
 REMOVED_IN = "the CL cleanup of 2026-11-09"

@@ -209,14 +209,14 @@ WORDING: dict[str, dict[str, str]] = {
     },
     "report": {
         "title": "Topor — Finished",
-        "done_accepted": "Routed {routed}/{total} connections — applied to the board as one undo step "
+        "done_accepted": "Routed {routed}/{total} connections — applied to the board "
                          "(Edit → Undo).",
         "done_accepted_cancelled": "Stopped early by Cancel: routed {routed}/{total} connections — applied to the "
-                                   "board as one undo step (Edit → Undo).",
+                                   "board (Edit → Undo).",
         "done_rejected": "Nothing was changed on the board.",
         "done_cancelled": "Cancelled — nothing was changed on the board.",
         "done_refill_hint": "Zones were not refilled: press B (Edit → Fill All Zones) to refill them — a separate "
-                            "undo step.",
+                            "undo step. Edit → Undo reverts the routes in one step.",
         "done_fills_committed": "Zones carry the fill KiCad's own filler made for the new copper (run on a copy), in "
                                 "the same undo step as the routes: Edit → Undo reverts both.",
         "done_refilled": "Zones were refilled by topor — a second undo step: the first Edit → Undo reverts the refill, "
@@ -1666,7 +1666,7 @@ class DoneDialog(_Base):
             name = ("done_accepted_cancelled" if getattr(report, "stop_reason", None) == "cancel"
                     else "done_accepted")
             msg = (W[name].format(routed=routed, total=total) if routed is not None
-                   else "Applied to the board as one undo step (Edit → Undo).")
+                   else "Applied to the board (Edit → Undo).")
         elif outcome == "cancelled":
             msg, name = W["done_cancelled"], "done_cancelled"
         else:
@@ -1694,7 +1694,8 @@ class DoneDialog(_Base):
             facts = getattr(report, "facts", None) or {}
             if "zones_refilled" in facts:  # ruling C28
                 rid = ("done_refilled" if facts["zones_refilled"] else
-                       "done_fills_committed" if facts.get("zone_fills_committed") else "done_refill_hint")
+                       "done_fills_committed" if facts.get("zone_fills_committed") and
+                       facts.get("zone_fills_skipped") in (None, "") else "done_refill_hint")
                 body.Add(self.text(self, "report", rid, wrap_dip=420), 0, wx.BOTTOM, self.group)
             for f in facts.get("post_commit_failed") or ():  # ruling C30: committed, then a step failed
                 body.Add(self.text(self, "report", "done_post_commit", wrap_dip=420,

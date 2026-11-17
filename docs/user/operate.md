@@ -2,7 +2,7 @@
 
 topor routes the connections of a KiCad 10 board as smooth curved traces (straight segments joined by
 tangent arcs). It never changes your board until you press **Accept** in its preview, and an accepted
-result is **one undo step** (Edit → Undo). Install it first: [install.md](install.md).
+result is undone with Edit → Undo (the routes are one undo step; the zone refill after Accept is a second one). Install it first: [install.md](install.md).
 
 Contents: [Quick start](#quick-start) · [Where the settings come from](#where-the-settings-come-from) ·
 [First run](#first-run) · [Pre-flight findings](#pre-flight-findings) · [Options](#options) ·
@@ -20,7 +20,7 @@ Contents: [Quick start](#quick-start) · [Where the settings come from](#where-t
 4. Read the findings, set the [Options](#options) (on a board that is already routed choose
    *Existing copper: Rip up and re-route*, otherwise there is nothing to route), press **Route**.
 5. Watch the progress; press **Cancel** at any time to keep the best result so far (during the initial routing there is none yet: [`NOTHING_TO_DRAW`](troubleshoot.md#nothing_to_draw)).
-6. Compare *Current board* and *Result* in the preview, then **Accept** (applied as one undo step) or
+6. Compare *Current board* and *Result* in the preview, then **Accept** (applied to the board; Edit → Undo reverts it) or
    **Reject** (nothing changes).
 7. Run KiCad's own DRC (**Inspect → Design Rules Checker**) — KiCad is the judge, not topor.
 
@@ -123,6 +123,14 @@ Board Setup is looser than what you will order; KiCad's DRC still judges the res
   [`VIA_NOT_SET_UP`](troubleshoot.md#via_not_set_up) fires: no pre-defined via and only KiCad's factory
   0.8 / 0.4 mm net class via → the nets with that via get `[vias] fallback_diameter_mm` /
   `fallback_drill_mm` (0.8 / 0.4 mm by default) as their own via.
+- **Where a via goes when the plan's site is taken.** The drawing then searches nearby sites, but only sites in
+  the plan's topological class: the trace must reach the site on each of the via's layers without running over a
+  trace of another net that the plan does not cross at that spot (same layer, same place along the trace). A site on
+  the far side of such a trace is used only when no site in the class exists (counted in the run report's
+  "vias, plan vs drawn" line, "out of the plan's class"). `[vias] reach_price = true` additionally prefers the site the
+  trace reaches with the fewest clearance grazes (graded price); it is off by default because, measured on the test
+  boards, it moves vias that were fine and costs more violations than it saves until the planner's own via-site room
+  check is improved.
 
 ### topor.toml
 
@@ -582,15 +590,20 @@ the nets and both values, and nothing is applied. Please report it.
 ## Accept, Reject and undo
 
 - **Accept** (Enter) applies the result as **one** KiCad commit: the ripped tracks/vias are removed and the
-  new ones created. That is **one undo step**: one **Edit → Undo** (Ctrl+Z) reverts all of it. New tracks
+  new ones created. The routes are **one undo step**: one **Edit → Undo** (Ctrl+Z) reverts all of them (with the default zone refill see below: two steps). New tracks
   are put in a group `topor` (`topor-partial` for partial routes) when KiCad allows it.
-- **Zones come back filled for the new copper** (`[run] commit_fills = true`, the default): the fill that KiCad's
-  own filler made for the routed result (kicad-cli, on the copy the preview's DRC judged) is written into the zones
-  in the **same** commit, so the one undo step reverts copper and fills together. With `commit_fills = false` the
-  zones keep the fill they had before the run: press **B** (KiCad → Edit → Fill All Zones) yourself; KiCad's DRC
-  also refills when you run it. That refill is its own undo step. With `refill_after_accept = true` topor also
-  refills the zones live right after the commit — a **second** undo step: the first Ctrl+Z reverts the refill,
-  the next one the routes.
+- **Zones come back filled for the new copper.** Two settings, both on by default:
+  `[run] commit_fills = true`: the fill that KiCad's own filler made for the routed result (kicad-cli, on the copy
+  the preview's DRC judged) is written into the zones in the **same** commit, so the one undo step reverts copper
+  and fills together. `[run] refill_after_accept = true`: right after the commit Topor also asks KiCad to refill
+  all zones live, so the pours and KiCad's DRC / unconnected counts are right without pressing **B**; that refill is
+  a **second** undo step (the first Ctrl+Z reverts the refill, the next one the routes). With
+  `refill_after_accept = false` Accept is exactly one undo step; the zones keep the fills of `commit_fills`. With
+  both off the zones keep the fill they had before the run: press **B** (KiCad → Edit → Fill All Zones) yourself.
+  When the fills could not be written (the refilled copy is missing, or judged for other items) the finished
+  dialog and the report say so ([`ZONE_FILLS_SKIPPED`](troubleshoot.md#zone_fills_skipped)). A `topor.toml`
+  generated by an older Topor lists `refill_after_accept = false` explicitly and keeps it: delete the line (or set
+  it to true) to get the new default.
 - After Accept, `[run] kicad_cleanup = true` / `kicad_teardrops = true` open KiCad's own *Cleanup Tracks
   and Vias* / teardrop dialogs (you confirm them there); each is a **separate** undo step after the
   routes. They are skipped when the result has partial routes
