@@ -91,12 +91,43 @@ fn ok_after_stable_returns_the_best_so_far() {
     assert_eq!(r.routed, after.best_routed);
 }
 
+/// The TopoR loop's report line: (cycles, stable_at, "ended by" word).
+fn loop_line(r: &RouteResult) -> (usize, Option<usize>, String) {
+    let l = r.warnings.iter().find(|w| w.starts_with("TopoR loop (")).expect("TopoR loop line");
+    let n = l.split("): ").nth(1).and_then(|s| s.split(' ').next()).and_then(|s| s.parse().ok()).expect("cycles");
+    let by = l.split("ended by ").nth(1).and_then(|s| s.split([' ', ';', ',']).next()).unwrap_or("").to_string();
+    let st = l.split("(stable after cycle ").nth(1).and_then(|s| s.split(')').next()).and_then(|s| s.parse().ok());
+    (n, st, by)
+}
+
+/// User 2026-11-16 ("don't stop on stable"): with the dialog (`stop_when_stable` false) and the
+/// default `finish_when_stable` (false) the TopoR loop records "stable" but goes on to the cycle cap.
+#[test]
+fn a_dialog_run_goes_on_past_stable_to_the_cycle_cap() {
+    let o = opts(r#"{"runs": 1, "wall_clock_s": 300.0, "stop_when_stable": false, "topo_rounds": 40}"#);
+    assert!(!o.finish_when_stable, "default: no finish at stable");
+    let (n, st, by) = loop_line(&route(&eprom(), &o));
+    assert!(st.is_some_and(|s| s < 40), "stable is reached early: {st:?}");
+    assert_eq!(n, 40, "ran on past stable to the cap (stable at {st:?})");
+    assert_eq!(by, "cycle", "ended by the cycle cap");
+}
+
+/// Headless runs keep stopping at stable (+ `stable_patience`).
+#[test]
+fn a_headless_run_still_stops_at_stable() {
+    let o = opts(r#"{"runs": 1, "wall_clock_s": 300.0, "topo_rounds": 40}"#);
+    assert!(o.stop_when_stable);
+    let (n, st, by) = loop_line(&route(&eprom(), &o));
+    assert!(st.is_some_and(|s| n == s), "stops at the stable cycle: {n} {st:?}");
+    assert_eq!(by, "stable");
+}
+
 /// With the dialog and the defaults (`finish_when_stable`, `finish_patience` = 0) a run stops at
 /// the cycle that becomes stable (user 2026-11-07: "When route stable appears it should stop
 /// indeed"), as a normal finish.
 #[test]
 fn a_dialog_run_stops_at_stable_by_default() {
-    let o = opts(r#"{"runs": 1, "wall_clock_s": 300.0, "stop_when_stable": false, "topo_rounds": 1000}"#);
+    let o = opts(r#"{"runs": 1, "wall_clock_s": 300.0, "stop_when_stable": false, "finish_when_stable": true, "topo_rounds": 1000}"#);
     assert!(o.finish_when_stable && o.finish_patience == 0);
     let r = route(&eprom(), &o);
     assert_eq!(r.stop_reason, "stable");
@@ -111,7 +142,7 @@ fn a_dialog_run_stops_at_stable_by_default() {
 /// no time warning), without OK and long before the safety cap or the time budget.
 #[test]
 fn a_dialog_run_finishes_by_itself_after_stable() {
-    let o = opts(r#"{"runs": 2, "wall_clock_s": 300.0, "stop_when_stable": false, "topo_rounds": 1000, "finish_patience": 3}"#);
+    let o = opts(r#"{"runs": 2, "wall_clock_s": 300.0, "stop_when_stable": false, "finish_when_stable": true, "topo_rounds": 1000, "finish_patience": 3}"#);
     let r = route(&eprom(), &o);
     assert_eq!(r.stop_reason, "stable");
     assert!(!r.timed_out && !r.warnings.iter().any(|w| w.starts_with("time budget hit")));
