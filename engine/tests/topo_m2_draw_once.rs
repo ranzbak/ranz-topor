@@ -17,13 +17,10 @@ fn eprom() -> BoardModel {
     BoardModel::from_json(include_str!("fixtures/eprom-to-kernal-ripped.json")).expect("fixture parses")
 }
 
-/// The real-board crops of the P3/P4 tests, public boards only: qmtech-minimig's USB corner (4
-/// layers) and esp-rs/esp-rust-board's (2 layers, CERN-OHL-P-2.0), the latter once branch
-/// public-boards brings its fixture (it drops in by name; until then only qmtech runs).
-fn p3_crops() -> Vec<&'static str> {
-    let dir = format!("{}/tests/fixtures", env!("CARGO_MANIFEST_DIR"));
-    ["qmtech-usb-crop.json", "esp-rust-board-usb-crop.json"].into_iter().filter(|f| f.starts_with("qmtech") || std::path::Path::new(&format!("{dir}/{f}")).exists()).collect()
-}
+/// The P3/P4 tests' real-board crops, public boards only: esp-rs/esp-rust-board's USB corner (2 layers, CERN-OHL-P-2.0; the default
+/// run) and qmtech-minimig's (4 layers; `#[ignore]`d slow set: 100-200 s in release, run with `cargo test --release -- --ignored`).
+const FAST_P3_CROPS: &[&str] = &["esp-rust-board-usb-crop.json"];
+const SLOW_P3_CROPS: &[&str] = &["qmtech-usb-crop.json"];
 
 /// The smaller crop for the tests that only need "a run that reaches step X" (vm-load 2026-11-17: on qmtech's they took 90-350 s in release).
 const SMALL_CROP: &str = "esp-rust-board-usb-crop.json";
@@ -195,13 +192,12 @@ fn initial_plan_free(m: &BoardModel, extra: &str) -> RouteResult {
     run(m, &topor(&format!(r#"{extra}, "opt_loop": "cycles", "topo_rounds": 1"#)))
 }
 
-#[test]
-fn a_limit_reached_in_p3_p4_still_draws_the_initial_plan() {
+fn a_limit_reached_in_p3_p4_still_draws_the_initial_plan_on(crops: &[&str]) {
     // The limit is reached while the layer assignment and the rip-up rounds run (as the plugin's
     // CPU clock does it): they finish, and their plan is drawn, completely: the drawing's own
     // steps too (verify-m2 F2: the via reduction got 0 s past the limit, and the plane stubs
     // stopped at it): their counts are those of the same plan drawn without a limit.
-    for fx in p3_crops() {
+    for fx in crops.iter().copied() {
         let m = crop(fx);
         let o = topor(r#", "runs": 1, "capacity_model": "cuts""#);
         // The reference: the initial plan drawn with no limit.
@@ -234,6 +230,17 @@ fn a_limit_reached_in_p3_p4_still_draws_the_initial_plan() {
 }
 
 #[test]
+fn a_limit_reached_in_p3_p4_still_draws_the_initial_plan() {
+    a_limit_reached_in_p3_p4_still_draws_the_initial_plan_on(FAST_P3_CROPS);
+}
+
+#[test]
+#[ignore = "slow set (vm-load 2026-11-17): the 4-layer qmtech crop, >60 s in release; run on the VM with --ignored"]
+fn a_limit_reached_in_p3_p4_still_draws_the_initial_plan_qmtech() {
+    a_limit_reached_in_p3_p4_still_draws_the_initial_plan_on(SLOW_P3_CROPS);
+}
+
+#[test]
 fn cancel_before_any_plan_is_a_loud_error() {
     // the TopoR loop, whole-route cycles, and the cut model (Cancel during its projection)
     for extra in [r#", "runs": 2"#, r#", "runs": 2, "opt_loop": "cycles""#, r#", "runs": 2, "capacity_model": "cuts""#] {
@@ -251,13 +258,12 @@ fn cancel_before_any_plan_is_a_loud_error() {
     }
 }
 
-#[test]
-fn cancel_in_p3_p4_keeps_no_plan_and_says_so() {
+fn cancel_in_p3_p4_keeps_no_plan_and_says_so_on(crops: &[&str]) {
     // Cancel while the layer assignment and the rip-up rounds run: the initial routing (P2-P4) is
     // one step and its plan counts as a variant only once P4 ends (user 2026-11-13, M2.TL); M0's
     // stop checks end P3/P4 within a move, so nothing is kept: the loud "nothing to draw yet",
     // no copper, quickly, never half a plan drawn.
-    for fx in p3_crops() {
+    for fx in crops.iter().copied() {
         let m = crop(fx);
         let o = topor(r#", "runs": 2, "capacity_model": "cuts""#);
         let ctl = RunControl::new();
@@ -282,6 +288,17 @@ fn cancel_in_p3_p4_keeps_no_plan_and_says_so() {
         assert!(r.warnings.first().is_some_and(|w| w.starts_with("ERROR: nothing to draw yet")), "{fx}: {:?}", r.warnings);
         assert!(r.items.is_empty() && r.routed == 0, "{fx}");
     }
+}
+
+#[test]
+fn cancel_in_p3_p4_keeps_no_plan_and_says_so() {
+    cancel_in_p3_p4_keeps_no_plan_and_says_so_on(FAST_P3_CROPS);
+}
+
+#[test]
+#[ignore = "slow set (vm-load 2026-11-17): the 4-layer qmtech crop, >60 s in release; run on the VM with --ignored"]
+fn cancel_in_p3_p4_keeps_no_plan_and_says_so_qmtech() {
+    cancel_in_p3_p4_keeps_no_plan_and_says_so_on(SLOW_P3_CROPS);
 }
 
 /// The P3/P4 move counts of a run: the P4 lines (evaluations, moves tried / applied per kind) and
@@ -312,6 +329,7 @@ fn reached_in_p3(m: &BoardModel, o: &Options) -> RouteResult {
 }
 
 #[test]
+#[ignore = "slow set (vm-load 2026-11-17): >60 s in release even on the small crop; run on the VM with --ignored"]
 fn a_soft_limit_in_p3_p4_does_not_cut_their_moves_until_its_overrun_cap() {
     // M2.TL: with the soft limit only Cancel / OK ends the moves inside a step (verify-m2 C: the
     // limit stopping M0's move checks again was not caught; the plan still drew complete). The
@@ -418,6 +436,7 @@ fn reasons(r: &RouteResult, why: &str) -> usize {
 }
 
 #[test]
+#[ignore = "slow set (vm-load 2026-11-17): >60 s in release even on the small crop; run on the VM with --ignored"]
 fn a_hard_limit_reached_in_the_drawing_cuts_it_loudly() {
     // Decided behaviour (verify-m2c 3, a change is the user's call): a limit that passes while the
     // drawing runs cuts it; the board is drawn only in part, and a WARNING line says how much and
