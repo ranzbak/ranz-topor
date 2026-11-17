@@ -312,7 +312,11 @@ again — with the passages the drawing found too small lowered, and with its fa
 *fluctuation* that starts wide, narrows every round and widens again when the run is stuck (no better result for
 `fluctuation_stuck` rounds while connections are still open) — and offers its result to the variant table. Several
 independent runs (`[optimize] runs`, default 5, each with its own seed) go on at once on the CPU's threads; the best
-result over all of them is the one you get.
+result over all of them is the one you get. When fewer runs compute than the CPU has threads (fewer runs than
+threads, or runs that wait for the others at the end of their loop), the spare threads help the runs that still
+compute: their layer refinement tries its candidate moves on several lanes at once (`[optimize] refine_lanes`, default
+*auto*). The lanes keep the same moves in the same order as one lane, so the result does not depend on the thread
+count or the lane setting, only the time does.
 
 When the best result has gained less than `[optimize] stable_gain_pct` (0.5 %) over the last `stable_window` (4)
 rounds in every run, the dialog says **Routes stable** (also in its window title) and the **Cancel** button reads

@@ -408,49 +408,87 @@ struct Coord<'a> {
 struct DrawGate {
     st: std::sync::Mutex<GateState>,
     cv: std::sync::Condvar,
-    /// The runs that compute at once.
-    slots: Slots,
+    /// The runs that compute at once (and the refinements' spare lanes).
+    slots: std::sync::Arc<Slots>,
 }
 
 /// A counting semaphore: at most `n` runs compute at once (the others' threads wait idle, so the
 /// busy threads stay at the engine's share, `min(runs, rayon threads)`). O(1) per call.
+///
+/// par-refine (docs/design/47-parallel-refine.md §6): there are as many slots as rayon threads;
+/// a run takes one for its steps and its refinements borrow the free ones as lanes
+/// (`[optimize] refine_lanes = "auto"`, [`super::refine_par::lanes::Pool`]) for one epoch at a
+/// time, never while a run waits for a slot.
 struct Slots {
-    /// Free slots; below 0 only for a moment after [`Slots::take_now`] (a slot owed).
-    free: std::sync::Mutex<isize>,
+    /// Free slots and the runs waiting for one; free is below 0 only for a moment after
+    /// [`Slots::take_now`] (a slot owed).
+    free: std::sync::Mutex<(isize, usize)>,
     cv: std::sync::Condvar,
 }
 
 impl Slots {
     fn new(n: usize) -> Slots {
-        Slots { free: std::sync::Mutex::new(n.max(1) as isize), cv: std::sync::Condvar::new() }
+        Slots { free: std::sync::Mutex::new((n.max(1) as isize, 0)), cv: std::sync::Condvar::new() }
     }
 
     /// Waits for a free slot and takes it. O(1) + the wait.
     fn acquire(&self) {
         let Ok(mut f) = self.free.lock() else { return };
-        while *f <= 0 {
-            f = match self.cv.wait(f) {
-                Ok(f) => f,
-                Err(_) => return,
-            };
+        if f.0 <= 0 {
+            f.1 += 1;
+            while f.0 <= 0 {
+                f = match self.cv.wait(f) {
+                    Ok(f) => f,
+                    Err(_) => return,
+                };
+            }
+            f.1 -= 1;
         }
-        *f -= 1;
+        f.0 -= 1;
     }
 
     /// Takes a slot without waiting (a slot owed while none is free): a panic unwinding through
     /// [`DrawGate::offer`], whose [`SlotGuard`] gives the slot back once more. O(1).
     fn take_now(&self) {
         if let Ok(mut f) = self.free.lock() {
-            *f -= 1;
+            f.0 -= 1;
         }
     }
 
     /// Gives a slot back. O(1).
     fn release(&self) {
+        self.give_back(1);
+    }
+
+    /// Gives `k` slots back. O(1).
+    fn give_back(&self, k: usize) {
         if let Ok(mut f) = self.free.lock() {
-            *f += 1;
+            f.0 += k as isize;
         }
-        self.cv.notify_one();
+        if k == 1 {
+            self.cv.notify_one();
+        } else {
+            self.cv.notify_all();
+        }
+    }
+}
+
+impl super::refine_par::lanes::Pool for Slots {
+    /// Up to `k` free slots, none while a run waits for one (a run's step goes first). O(1).
+    fn try_take(&self, k: usize) -> usize {
+        let Ok(mut f) = self.free.lock() else { return 0 };
+        if f.1 > 0 || f.0 <= 0 {
+            return 0;
+        }
+        let t = k.min(f.0 as usize);
+        f.0 -= t as isize;
+        t
+    }
+
+    fn give(&self, k: usize) {
+        if k > 0 {
+            self.give_back(k);
+        }
     }
 }
 
@@ -485,7 +523,7 @@ impl DrawGate {
         DrawGate {
             st: std::sync::Mutex::new(GateState { quota: quota.max(1), open: (0..n).collect(), offered: BTreeMap::new(), decided: None }),
             cv: std::sync::Condvar::new(),
-            slots: Slots::new(slots),
+            slots: std::sync::Arc::new(Slots::new(slots)),
         }
     }
 
@@ -608,7 +646,7 @@ enum RoundEnd<'s> {
 
 impl<'a> Coord<'a> {
     fn new(ctl: &'a RunControl, n: usize, obj: Objective, candidates: usize) -> Coord<'a> {
-        Coord { ctl, obj, st: std::sync::Mutex::new(vec![RunState::default(); n]), snap: std::sync::Mutex::new(None), gate: DrawGate::new(n, candidates, n.min(rayon::current_num_threads())), judge: std::sync::Mutex::new(None) }
+        Coord { ctl, obj, st: std::sync::Mutex::new(vec![RunState::default(); n]), snap: std::sync::Mutex::new(None), gate: DrawGate::new(n, candidates, rayon::current_num_threads()), judge: std::sync::Mutex::new(None) }
     }
 
     /// cancel-fix: note a run's pick with criteria `crit` (`complete`: of a cycle not cut short)
@@ -1167,7 +1205,11 @@ fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, 
         let c = if n == 1 { ctl.clone() } else { ctl.for_run(k as u32 + 1) };
         // M2.TL: with the soft limit only Cancel / OK stops the moves inside a step (M0's stop checks)
         let _slot = topor.then(|| SlotGuard::take(&coord.gate.slots));
-        crate::control::with_control_mode(&c, opts.timeout_mode == "hard", || r.step(model, opts, &c, coord, stubs, fx, t_call));
+        // par-refine: the refinements of this step take their lanes from the free slots (TopoR
+        // loop; whole-route cycles: none) or the fixed `[optimize] refine_lanes`.
+        let pool: Option<std::sync::Arc<dyn super::refine_par::lanes::Pool>> = topor.then(|| coord.gate.slots.clone() as std::sync::Arc<dyn super::refine_par::lanes::Pool>);
+        let mode = super::refine_par::lanes::mode_of(opts.refine_lanes);
+        crate::control::with_control_mode(&c, opts.timeout_mode == "hard", || super::refine_par::lanes::with(mode, pool, || r.step(model, opts, &c, coord, stubs, fx, t_call)));
         c.idle(); // between its cycles or done: the soft limit's notice no longer names its step (F6)
         let st = (r.cycles, r.done);
         drop(r);
@@ -2412,6 +2454,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         cap_mm: if std::env::var("TOPO_NOCAP").is_ok() { 0.0 } else { reg.price(&Event::Overflow { wire: 0, edge: 0 }, &WireCtx::default()) },
         cap_vias: std::env::var("TOPO_CAPVIA").is_ok(),
         via_between: opts.via_between,
+        cap_reference: opts.refine_reference,
         ..LayerParams::default()
     };
     let sub = super::capacity::subset_check(&st);

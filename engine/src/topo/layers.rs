@@ -489,6 +489,9 @@ pub struct LayerParams {
     /// 5.4 `[vias] between_crossings`: a via sits strictly between its two events
     /// ([`super::refine::via_ranges`]); an interval without a traversal there has no site.
     pub via_between: bool,
+    /// par-refine: the refinement runs the serial in-place loop (`RefineParams::reference`), the
+    /// reference the lane executor is tested against. Off by default.
+    pub cap_reference: bool,
 }
 
 impl Default for LayerParams {
@@ -507,6 +510,7 @@ impl Default for LayerParams {
             cap_vias: false,
             ties: 0,
             via_between: false,
+            cap_reference: false,
         }
     }
 }
@@ -807,7 +811,7 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
             bottom,
             &|a, b| if a == b { 0.0 } else { via },
             &|_, _, _| 0.0,
-            &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals, add_vias: p.cap_vias, reference: false },
+            &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals, add_vias: p.cap_vias, reference: p.cap_reference },
         )
     });
     let rs = rs.unwrap_or_default();
@@ -1159,7 +1163,7 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
                 costs.plane_from.min(nl) as i32 - 1,
                 &|a, b| costs.trans(a, b),
                 &|w, i, l| costs.unary(wev[w][i], l),
-                &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals, add_vias: p.cap_vias, reference: false },
+                &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals, add_vias: p.cap_vias, reference: p.cap_reference },
             )
         })
         .unwrap_or_default();
