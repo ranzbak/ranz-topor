@@ -3,6 +3,7 @@
 #   boards  5 public boards x seq/erbs, seed 0, optimize.rounds=1 runs=1, --no-png (3 units: small / qmtech / bornhack)
 #   tests   cargo test --release (all), pytest (default + mechfix test_fx_edge_pads), fx edge_pads PNG, mutants
 #           (tools/edge_mutate.py), cargo test debug (own tests) -- one unit, serial
+#   boardsab  the same with rule C off ([rules] edge_clearance_zero = "board": the engine input of A+B alone)
 #   wq      rule C boards: wiccon + qmtech x seq/erbs (copper-to-edge 0 on both; the others are non-zero, C off)
 #   ctests  pytest (default) + rule C's Python mutants (tools/edge_mutate.py run-py)
 set -u
@@ -11,9 +12,9 @@ E=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
 Q=scratch/boards/qmtech-hand/qmtech-minimig.kicad_pcb
 A="--only 0 --no-png --set optimize.rounds=1 --set optimize.runs=1"
 note() { echo "$*" >> $R/rc.txt; }
-br() { local n=$1 b=$2; shift 2; python -m harness.score_runs $R/$n $b $A "$@" > $R/$n.log 2>&1; note "run $n rc $?"; }
+br() { local n=$1 b=$2; shift 2; mkdir -p $(dirname $R/$n); python -m harness.score_runs $R/$n $b $A "$@" > $R/$n.log 2>&1; note "run $n rc $?"; }
 pair() { local k=$1 b=$2; br seq/$k $b; br erbs/$k $b --set drawing.realise=erbs; }
-u() { local n=$1; shift; ( hzq run --threads 4 --name "$n" -- bash -c "$(declare -f note br pair tests); R=$R A='$A' ROOT=$ROOT $*" > $R/unit-$n.log 2>&1; note "unit $n rc $?" ) & }
+u() { local n=$1; shift; ( hzq run --threads 4 --name "$n" -- bash -c "$(declare -f note br pair tests); export R=$R A='$A' ROOT=$ROOT; $*" > $R/unit-$n.log 2>&1; note "unit $n rc $?" ) & }
 tests() {
   cd $ROOT/engine
   CARGO_TARGET_DIR=$ROOT/target RUST_TEST_THREADS=4 timeout 5400 cargo test --release --no-fail-fast > $R/cargo-release.log 2>&1; note "cargo release rc $?"
@@ -31,7 +32,8 @@ tests() {
 }
 for st in "$@"; do
   case $st in
-    boards)
+    boards|boardsab)
+      [ $st = boardsab ] && A="$A --set rules.edge_clearance_zero=board"
       u small "pair eprom eprom-to-kernal; pair wiccon wiccon-2023; pair esp $E"
       u qm "pair qmtech $Q"
       u bh "pair bornhack bornhack2026" ;;
