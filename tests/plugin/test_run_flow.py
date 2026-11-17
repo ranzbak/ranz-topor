@@ -991,7 +991,7 @@ def test_run_ok_at_routes_stable_is_not_a_cancel(app, eprom, tmp_path, reports):
     assert out.status == "accepted" and out.routed == 27
     assert out.stop_reason == "stable" and out.cancelled is False
     stable = [c[1][0] for c in ui.calls if c[0] == "progress" and c[1][0].stable]
-    assert stable and stable[0].runs == 5 and stable[0].runs_stable + stable[0].runs_done >= 5
+    assert stable and stable[0].runs == 5 and stable[0].runs_stable >= 1
     log = (out.report_dir / "log.txt").read_text()
     # "Report stable live": the loops are stable before any pick is drawn, so "Best so far" may still be empty
     if stable[0].best_total:
