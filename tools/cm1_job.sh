@@ -4,6 +4,7 @@
 #           headless plugin flow with the defaults (+ the harness numbering), and route_board wiccon defaults;
 #           inputs in tools/cm1_models (throw-away VM commit only)
 #   boards  ladder seq: 5 public boards, seed 0, optimize.rounds=1 runs=1, --no-png (3 units)
+#   qm, small  the qmtech unit / the eprom+wiccon+esp unit of boards alone
 #   tests   targeted release tests (rule 14c) + the config pytest files
 #   mut     mutants of the lines this branch changed (tools/cm1_mutate.py)
 set -u
@@ -35,6 +36,8 @@ for st in "$@"; do
       u bh "br seq/bornhack bornhack2026"
       u qm "br seq/qmtech $Q"
       u small "br seq/eprom eprom-to-kernal; br seq/wiccon wiccon-2023; br seq/esp $E" ;;
+    qm) u qm "br seq/qmtech $Q" ;;
+    small) u small "br seq/eprom eprom-to-kernal; br seq/wiccon wiccon-2023; br seq/esp $E" ;;
     tests) u tests "tests" ;;
     mut) u mut "python3 tools/cm1_mutate.py run $R/mut > $R/mut.log 2>&1; note 'mutants rc '\$?" ;;
   esac

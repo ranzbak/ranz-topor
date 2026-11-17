@@ -340,6 +340,10 @@ pub struct CapModel<'a> {
     /// CM1: the via points of every wire ([`CapModel::via_at`]), filled on first use and dropped
     /// when the wire's vias or events change (apply, undo).
     vpos: std::cell::RefCell<Vec<Option<Vec<Option<(usize, Vec2)>>>>>,
+    /// CM1: the wires with a planned via in each [`VCELL`] grid cell, and the cells of each wire
+    /// ([`CapModel::near_vias`] without a pass over every via).
+    vgrid: std::collections::HashMap<(i64, i64), Vec<WireId>>,
+    vcells: Vec<Vec<(i64, i64)>>,
     /// Per wire: the via owners whose gap cuts it crosses (repriced when its layers change).
     crossed_by: Vec<Vec<WireId>>,
     /// CM1: the events of every wire as last applied (for the 5.2 end sites).
@@ -392,6 +396,8 @@ impl<'a> CapModel<'a> {
             vbase: st.proj.edges.len() * nl,
             vgeom: std::cell::RefCell::new(std::collections::HashMap::new()),
             vpos: std::cell::RefCell::new(vec![None; nw]),
+            vgrid: std::collections::HashMap::new(),
+            vcells: vec![Vec::new(); nw],
             crossed_by: vec![Vec::new(); nw],
             vevs: vec![Vec::new(); nw],
         };
@@ -551,6 +557,7 @@ impl<'a> CapModel<'a> {
         if self.packer.via_cuts.is_some() {
             self.vevs[w] = ev.to_vec();
             self.vpos.get_mut()[w] = None;
+            self.index_vias(w);
         }
         self.register_crossers(w);
         if self.cut.is_some() {
@@ -719,11 +726,59 @@ impl<'a> CapModel<'a> {
         }
     }
 
+    /// CM1: the grid cell of a point.
+    fn vcell(p: Vec2) -> (i64, i64) {
+        ((p.x / VCELL).floor() as i64, (p.y / VCELL).floor() as i64)
+    }
+
+    /// CM1: move `w` to the grid cells of its current via points.
+    fn index_vias(&mut self, w: WireId) {
+        for c in std::mem::take(&mut self.vcells[w]) {
+            if let Some(v) = self.vgrid.get_mut(&c) {
+                v.retain(|&u| u != w);
+                if v.is_empty() {
+                    self.vgrid.remove(&c);
+                }
+            }
+        }
+        if !self.st.wires[w].alive {
+            return;
+        }
+        let mut cells: Vec<(i64, i64)> = (0..self.via_k[w].len()).filter_map(|i| self.via_at(w, i)).map(|(_, p)| Self::vcell(p)).collect();
+        cells.sort_unstable();
+        cells.dedup();
+        for &c in &cells {
+            self.vgrid.entry(c).or_default().push(w);
+        }
+        self.vcells[w] = cells;
+    }
+
     /// CM1: the planned vias `(wire, index, point)` within the neighbourhood reach of `g` (its
-    /// own via left out). O(planned vias).
+    /// own via left out), in wire order. O(vias in the grid cells the reach covers).
     fn near_vias(&self, g: &ViaGeom) -> Vec<(WireId, usize, Vec2)> {
+        let (lo, hi) = (Self::vcell(Vec2 { x: g.at.x - g.reach, y: g.at.y - g.reach }), Self::vcell(Vec2 { x: g.at.x + g.reach, y: g.at.y + g.reach }));
+        let mut us: Vec<WireId> = Vec::new();
+        let cells = (hi.0 - lo.0 + 1).saturating_mul(hi.1 - lo.1 + 1);
+        if cells > self.vgrid.len() as i64 {
+            // A reach wider than the board's occupied cells: scan those instead.
+            for (c, v) in &self.vgrid {
+                if (lo.0..=hi.0).contains(&c.0) && (lo.1..=hi.1).contains(&c.1) {
+                    us.extend_from_slice(v);
+                }
+            }
+        } else {
+            for cx in lo.0..=hi.0 {
+                for cy in lo.1..=hi.1 {
+                    if let Some(v) = self.vgrid.get(&(cx, cy)) {
+                        us.extend_from_slice(v);
+                    }
+                }
+            }
+        }
+        us.sort_unstable();
+        us.dedup();
         let mut out = Vec::new();
-        for u in 0..self.via_k.len() {
+        for u in us {
             if !self.st.wires[u].alive {
                 continue;
             }
@@ -1273,12 +1328,18 @@ fn try_move_in(
         cm.nosite[s.w] = s.nosite;
         cm.vevs[s.w] = s.vevs;
         cm.vpos.get_mut()[s.w] = None;
+        if cm.packer.via_cuts.is_some() {
+            cm.index_vias(s.w);
+        }
     }
     for (&((w, i), _), &l) in mv.iter().zip(&old_lab) {
         evl[w][i].2 = l;
     }
     false
 }
+
+/// CM1: grid cell size of the planned-via index (nm).
+const VCELL: f64 = 2.0e6;
 
 #[cfg(test)]
 mod tests {
