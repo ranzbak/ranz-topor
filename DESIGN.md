@@ -191,3 +191,34 @@ exemption off.
 - topo_d2 `a_via_site_across_an_uncrossed_drawn_wire_is_out_of_class`: crossed in this traversal on the track's layer
   = in class; on the other layer, or in another traversal = out of class; open layer = in class.
 - topo_d2 forced path: in force mode, no legal in-class site, a legal out-of-class one: the via is forced in class.
+
+## radii-m3-clear round 2: C27.1 pour island (design note; lead OK 2026-11-17 with conditions: runtime per board, coarse stubs bit-identical, fixture + mutants, parked prevention)
+
+#### Data (qmtech s0 rounds=1, tip fc98488, reach price OFF; TOPO_STITCHDBG, job m3c2-1)
+- The class filter alone moves JS_INTB_5V's via to (133.020,121.269) in BOTH modes (VIACAND: the old site
+  (132.887,118.904) is now `in class false`). seq: 401 -> 400, only JS_INTB_5V changes (DRC 8 -> 7). erbs: 407 -> 396
+  (JS_INTB_5V 17 -> 7, JS2_6 10 -> 12) but unconnected 24 -> 25: the C27.1 island. So the loss is the filter's, not
+  only the price's.
+- C27.1 (GND, F.Cu) is boxed in on F.Cu by JS_INTB_5V's F.Cu run (west, x 133.02) and VIN5V's 0.5 mm track
+  (east / north diagonal); the stitcher needs a pad stub to a via standing in In1.Cu's main GND fill. Its lattice
+  (rings 0.1 mm, 32 directions) has: k8 (134.152,121.850) -> In1 fill depth < via r + ring (JS_INTB_5V's via antipad
+  1.27 mm away); k7 (134.328,121.867) -> 24 um short of clearance to VIN5V's F.Cu diagonal (erbs geometry; in seq
+  the same k7 is legal, which is why seq keeps its stub). Every other lattice point fails (own pad, U6 pins,
+  JS_INTB_5V / VIN5V copper).
+- By hand: a legal site exists between k7 and k8 (about x 134.21..134.30 at y 121.87: In1 depth >= 0.65 mm,
+  >= 0.8 mm off VIN5V's diagonal, clear of the pad). The coarse lattice steps over it (0.18 mm arc spacing).
+
+#### Proposed rule (stitch.rs pad stub, generic, no board case)
+Second, finer lattice only when the coarse one finds no stub for a pad: rings every 0.025 mm, 128 directions,
+out to 1.5 mm (`stitch::STUB_LATTICES`; pretests first = raster lookups; checker queries capped as now, 4 x MAX_TRIES).
+Nearest first. Work cap over one stitching run: `FINE_POINTS_MAX` = 100 000 candidate points (about 15 pads' full
+fine search); report line "fine stub lattice: N cut piece(s) searched, M stub(s) found, P points (T ms)".
+Stubs that the coarse lattice finds are unchanged (no copper change elsewhere). This is the user's own hand technique
+(qmtech hand-fix lessons: GND pad vias, nudges <= 0.3 mm); TopoR leaves islands to the user (TopoR 6.3 manual p. 121).
+Not the root cause: the plan has no price for the pour access its copper takes. That prevention (the plan pricing
+the pour access of its via sites and runs, graded) STAYS PARKED (lead: on the parking list); it is a planner change.
+
+#### Test
+topo_d4 fixture: a GND SMD pad boxed in by two foreign tracks so that the only legal stub via site lies between two
+coarse lattice points: before the fix POUR island stays (after = 1), after the fix one pad stub (after = 0). Mutant:
+fine pass off; fine radius 0.

@@ -51,6 +51,16 @@ pub const STEP: usize = 4;
 /// Longest pad stub, nm; also the length scale of an island join (no cutoff there, see
 /// [`join_price`]).
 pub const STUB_MAX_NM: f64 = 3.0e6;
+/// Pad stub search lattices, tried in this order until one gives a stub: `(ring step nm, directions,
+/// largest ring nm)`. The coarse one (0.1 mm x 32 directions, out to [`STUB_MAX_NM`]) steps 0.18 mm
+/// along a 0.9 mm ring, so a site in a narrower window between two of its points is missed (qmtech
+/// erbs C27.1, radii-m3-clear r2: legal x 134.21..134.30 between k7 134.328 and k8 134.152); the fine
+/// one (0.025 mm x 128, out to 1.5 mm) finds such a site near the pad, the way a designer nudges a
+/// GND pad via by hand. A stub the coarse lattice finds is never replaced (copper unchanged there).
+pub const STUB_LATTICES: [(f64, usize, f64); 2] = [(0.1e6, 32, STUB_MAX_NM), (0.025e6, 128, 1.5e6)];
+/// Work cap of the fine lattice over one stitching run (candidate points, all pads and passes
+/// together): about 15 pads' full fine search, so a board with many boxed-in pads cannot blow up.
+pub const FINE_POINTS_MAX: usize = 100_000;
 
 /// What the stitching added and found.
 #[derive(Clone, Debug, Default)]
@@ -65,6 +75,12 @@ pub struct StitchOut {
     pub pad_stubs: usize,
     /// Pad-less islands joined to a connected pad of their net by a track (`[planes] join_islands`).
     pub island_joins: usize,
+    /// Fine stub lattice ([`STUB_LATTICES`]): cut pieces that needed it, the stubs it found, the
+    /// candidate points it looked at (capped by [`FINE_POINTS_MAX`]) and its time (s).
+    pub fine_cuts: usize,
+    pub fine_stubs: usize,
+    pub fine_points: usize,
+    pub fine_s: f64,
     /// Report lines.
     pub notes: Vec<String>,
 }
@@ -225,8 +241,18 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
                 placed_any = true;
                 continue;
             }
-            // Pad stub: a pad with no usable island.
-            'pads: for &pi in &c.pads {
+            // Pad stub: a pad with no usable island. The coarse lattice first for every pad; only when
+            // it finds no stub, the fine one ([`STUB_LATTICES`]).
+            'lat: for (li, &(d_step, n_dir, d_max)) in STUB_LATTICES.iter().enumerate() {
+            let fine = li > 0;
+            if fine {
+                if out.fine_points >= FINE_POINTS_MAX || c.pads.is_empty() {
+                    break;
+                }
+                out.fine_cuts += 1;
+            }
+            let t_fine = std::time::Instant::now();
+            for &pi in &c.pads {
                 let pad = &model.pads[pi];
                 let cpos = pad.center.to_vec2();
                 let w = model.rules.net_rule(c.net).width.max(1) as f64;
@@ -234,9 +260,10 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
                 let mut tries = 0usize;
                 // Out from the pad centre; the own-pad test keeps a via off the pad.
                 let mut d: f64 = 0.2e6;
-                while d <= STUB_MAX_NM && tries < 4 * MAX_TRIES {
-                    for k in 0..32 {
-                        let a = k as f64 * std::f64::consts::PI / 16.0;
+                while d <= d_max && tries < 4 * MAX_TRIES && !(fine && out.fine_points >= FINE_POINTS_MAX) {
+                    out.fine_points += usize::from(fine) * n_dir;
+                    for k in 0..n_dir {
+                        let a = k as f64 * std::f64::consts::TAU / n_dir as f64;
                         let p = cpos + Vec2 { x: a.cos(), y: a.sin() } * d;
                         for &sl in &layers {
                             // Track only, into the main fill of its own layer.
@@ -268,13 +295,21 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
                                     out.items.push(it);
                                 }
                                 out.pad_stubs += 1;
+                                out.fine_stubs += usize::from(fine);
                                 done = true;
-                                break 'pads;
+                                if fine {
+                                    out.fine_s += t_fine.elapsed().as_secs_f64();
+                                }
+                                break 'lat;
                             }
                         }
                     }
-                    d += 0.1e6;
+                    d += d_step;
                 }
+            }
+            if fine {
+                out.fine_s += t_fine.elapsed().as_secs_f64();
+            }
             }
             // Island join (`[planes] join_islands`, user 2026-11-12): a piece holding no pad that no
             // via reaches is joined to the nearest pad of its net that is connected to the rest of
@@ -324,6 +359,16 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
             }
             out.after = reach.cuts.len();
         }
+    }
+    if out.fine_cuts > 0 {
+        out.notes.push(format!(
+            "fine stub lattice: {} cut piece(s) searched, {} stub(s) found, {} points{} ({:.0} ms)",
+            out.fine_cuts,
+            out.fine_stubs,
+            out.fine_points,
+            if out.fine_points >= FINE_POINTS_MAX { ", work cap reached" } else { "" },
+            out.fine_s * 1e3
+        ));
     }
     out.notes.extend(unplaced.into_iter().map(|s| format!("no stitch site for {s}")));
     out
