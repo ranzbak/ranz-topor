@@ -1346,6 +1346,52 @@ mod tests {
         }
     }
 
+    /// vfem (verifier, m9): a stack member on no cut takes its radius from the stack's own
+    /// layout, which carries the margin of its block clearance: the single band round the corner
+    /// sits `m` further out.
+    #[test]
+    fn vfem_own_layout_margin() {
+        let d = 1.3;
+        let obs = vec![rect(0.0, 0.0, 2.0, 2.0), pad(0.5, 2.0 + d), pad(2.0 + d, 0.5)];
+        let curves = vec![vec![v(0.5, 2.0 + d), v(2.0 + 0.7 * d, 2.0 + 0.7 * d), v(2.0 + d, 0.5)]];
+        let pr = proj(obs);
+        let (sh, sts) = setup(&pr, &curves, Norm::Octagonal);
+        let mut o0 = order_layer(&sh, &sts, &[0], 0.0);
+        radii_layer(&sh, &sts, &[0], &mut o0, true, &|_| None);
+        let mut o = order_layer(&sh, &sts, &[0], 0.0);
+        radii_layer_m(&sh, &sts, &[0], &mut o, true, 10.0, &|_| None);
+        assert!(o.report.radius_own >= 1, "{:?}", o.report);
+        let (s0, s) = (stack(&o0, vert(&sh, v(2.0, 2.0))), stack(&o, vert(&sh, v(2.0, 2.0))));
+        assert!((s.radius[0] - s0.radius[0] - 10.0).abs() < 0.5, "{:?} vs {:?}", s.radius, s0.radius);
+    }
+
+    /// vfem (verifier, m10): the inside-out pass keeps width + clearance + margin between
+    /// neighbours when an inner member's largest tip pushes the outer ones (the regime case of
+    /// `stack_radii_max_then_inside_out`).
+    #[test]
+    fn vfem_inside_out_margin() {
+        let ds = [1.3, 0.9, 0.5];
+        let mut obs = vec![rect(0.0, 0.0, 2.0, 2.0)];
+        let mut curves = Vec::new();
+        for d in ds {
+            obs.push(pad(0.5, 2.0 + d));
+            obs.push(pad(2.0 + d, 0.5));
+            curves.push(vec![v(0.5, 2.0 + d), v(2.0 + 0.7 * d, 2.0 + 0.7 * d), v(2.0 + d, 0.5)]);
+        }
+        let pr = proj(obs);
+        let (sh, sts) = setup(&pr, &curves, Norm::Octagonal);
+        let corner = vert(&sh, v(2.0, 2.0));
+        for g in [0.35e6, 0.5e6] {
+            let mut o = order_layer(&sh, &sts, &[0, 1, 2], 0.0);
+            let reg = move |p: Vec2| if p.x < 2.0e6 && p.y < 2.5e6 && p.y > 2.0e6 { Some(g) } else { None };
+            radii_layer_m(&sh, &sts, &[0, 1, 2], &mut o, true, 10.0, &reg);
+            let st = stack(&o, corner);
+            for i in 1..3 {
+                assert!(st.radius[i] >= st.radius[i - 1] + 0.2e6 + 10.0 - 0.5, "{g}: member {i}: {:?}", st.radius);
+            }
+        }
+    }
+
     /// A tip at planning-norm distance rho: on a cut at 22.5 degrees the octagonal norm puts it
     /// 1 / cos 22.5 further out (Euclidean) than the Euclidean norm.
     #[test]
