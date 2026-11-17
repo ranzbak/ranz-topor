@@ -1028,6 +1028,11 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     elif out.stop_reason == "timeout":
         out.stop_reason = "timeout_wall"
         rr = {**rr, "stop_reason": "timeout_wall"}
+    if state.get("ok_stable") and out.stop_reason == "round cap":
+        # OK came at "Routes stable" but the engine had already ended at its cycle cap (the dialog shows stable once a
+        # run's loop ended): the user took the stable result, so it is "stable"; without OK the cap stays "round cap".
+        out.stop_reason = "stable"
+        rr = {**rr, "stop_reason": "stable"}
     # M-B0: OK after "Routes stable" is not a cancel (stop_reason "stable"): the user took the stable result.
     out.cancelled = bool((state["cancel"] and not state.get("ok_stable")) or out.stop_reason == "cancel")
     out.rounds, out.router_s = loop.rounds, loop.router_s
