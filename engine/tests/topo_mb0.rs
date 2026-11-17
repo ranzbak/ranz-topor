@@ -112,14 +112,52 @@ fn a_dialog_run_goes_on_past_stable_to_the_cycle_cap() {
     assert_eq!(by, "cycle", "ended by the cycle cap");
 }
 
+/// A dialog run that ends at the cycle cap says so: stable was recorded on the way, but the run did
+/// not END because of it, so its stop reason is "round cap", never "stable" (the plugin shows it).
+#[test]
+fn a_dialog_run_ended_by_the_cycle_cap_is_labelled_round_cap() {
+    let o = opts(r#"{"runs": 1, "wall_clock_s": 300.0, "stop_when_stable": false, "topo_rounds": 40}"#);
+    let r = route(&eprom(), &o);
+    let (n, st, by) = loop_line(&r);
+    assert!(st.is_some() && n == 40 && by == "cycle", "premise: {n} {st:?} {by}");
+    assert_eq!(r.stop_reason, "round cap", "{:?}", r.warnings);
+    assert!(!r.timed_out);
+}
+
+/// Patience mapping (verify-stable-toml M5/M6): a headless run stops `stable_patience` cycles after
+/// stable and ignores `finish_patience`.
+#[test]
+fn a_headless_run_waits_stable_patience_not_finish_patience() {
+    let o = opts(r#"{"runs": 1, "wall_clock_s": 300.0, "topo_rounds": 60, "stable_patience": 3, "finish_patience": 7}"#);
+    let r = route(&eprom(), &o);
+    let (n, st, by) = loop_line(&r);
+    assert_eq!(by, "stable", "{:?}", r.warnings);
+    assert_eq!(Some(n), st.map(|s| s + 3), "stable at {st:?}, ended after cycle {n}");
+    assert_eq!(r.stop_reason, "stable");
+}
+
+/// ... and a dialog run with finish_when_stable stops `finish_patience` cycles after stable and
+/// ignores `stable_patience`.
+#[test]
+fn a_dialog_run_waits_finish_patience_not_stable_patience() {
+    let o = opts(r#"{"runs": 1, "wall_clock_s": 300.0, "stop_when_stable": false, "finish_when_stable": true, "topo_rounds": 60, "finish_patience": 3, "stable_patience": 7}"#);
+    let r = route(&eprom(), &o);
+    let (n, st, by) = loop_line(&r);
+    assert_eq!(by, "stable", "{:?}", r.warnings);
+    assert_eq!(Some(n), st.map(|s| s + 3), "stable at {st:?}, ended after cycle {n}");
+    assert_eq!(r.stop_reason, "stable");
+}
+
 /// Headless runs keep stopping at stable (+ `stable_patience`).
 #[test]
 fn a_headless_run_still_stops_at_stable() {
     let o = opts(r#"{"runs": 1, "wall_clock_s": 300.0, "topo_rounds": 40}"#);
     assert!(o.stop_when_stable);
-    let (n, st, by) = loop_line(&route(&eprom(), &o));
+    let r = route(&eprom(), &o);
+    let (n, st, by) = loop_line(&r);
     assert!(st.is_some_and(|s| n == s), "stops at the stable cycle: {n} {st:?}");
     assert_eq!(by, "stable");
+    assert_eq!(r.stop_reason, "stable");
 }
 
 /// With the dialog and the defaults (`finish_when_stable`, `finish_patience` = 0) a run stops at

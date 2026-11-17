@@ -97,6 +97,18 @@ def test_no_warning_for_current_other_or_commented(past, tmp_path, body):
     assert [x for x in load_config(tmp_path)[1] if x.code == "CFG_PINNED_OLD_DEFAULT"] == []
 
 
+def test_real_history_pinned_finish_when_stable_true_is_kept_and_warned(tmp_path):
+    """User decision 2026-11-17: a topor.toml written before the default flipped (finish_when_stable = true as an active
+    line) is kept as is (no migration) and gets exactly one CFG_PINNED_OLD_DEFAULT warning per load."""
+    (tmp_path / "topor.toml").write_text("version = 1\n[optimize]\nfinish_when_stable = true\n")
+    cfg, findings = load_config(tmp_path)
+    assert cfg.get("optimize", "finish_when_stable") is True
+    f = [x for x in findings if x.code == "CFG_PINNED_OLD_DEFAULT"]
+    assert len(f) == 1 and f[0].severity == "warning" and "optimize.finish_when_stable = true" in f[0].message
+    assert "finish_when_stable = true" in (tmp_path / "topor.toml").read_text()  # file untouched
+    assert [x for x in load_config(tmp_path)[1] if x.code == "CFG_PINNED_OLD_DEFAULT"]  # again on the next load
+
+
 def test_real_history_is_consistent():
     for (sec, key), hist in schema.PAST_DEFAULTS.items():
         assert (sec, key) in schema.SETTINGS_BY_KEY

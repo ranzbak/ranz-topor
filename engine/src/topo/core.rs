@@ -213,6 +213,9 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     let lines: Vec<String> = outs.iter().map(|o| o.line.clone()).collect();
     let cycle_lines: Vec<String> = outs.iter().map(|o| o.cycles_line.clone()).collect();
     let stable_all = outs.iter().all(|o| o.stable_at.is_some());
+    // "stable" as a stop reason = every run ENDED because its routes were stable; a dialog run that
+    // went on past stable to the cycle cap ends at the cap (stop_reason "round cap").
+    let stable_stop_all = outs.iter().all(|o| o.stable_stop);
     let cancel = ctl.is_cancelled();
     let time_hit = outs.iter().any(|o| o.time_hit);
     // Every cycle's variants were stitched before they were judged (pour pieces still cut off
@@ -232,7 +235,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         if stable_all { "stable" } else { "cancel" }
     } else if time_hit {
         "timeout"
-    } else if stable_all {
+    } else if stable_stop_all {
         "stable"
     } else {
         "round cap"
@@ -373,6 +376,9 @@ struct RunOut {
     stable_at: Option<usize>,
     /// Cancel or the time budget ended it before its routes were stable.
     time_hit: bool,
+    /// The run ended BECAUSE its routes were stable (the loop's or the run's stop at stable), not
+    /// because it reached the cycle cap with `stable_at` recorded (a dialog run goes on past stable).
+    stable_stop: bool,
     /// Its summary for the report, and its cycle by cycle line.
     line: String,
     cycles_line: String,
@@ -816,6 +822,7 @@ struct Run {
     mem: Memory,
     notes: Vec<String>,
     time_hit: bool,
+    stable_stop: bool,
     stable_at: Option<usize>,
     first: Option<usize>,
     cycles: usize,
@@ -837,6 +844,7 @@ impl Run {
             mem: Memory::default(),
             notes: Vec::new(),
             time_hit: false,
+            stable_stop: false,
             stable_at: None,
             first: None,
             cycles: 0,
@@ -934,6 +942,7 @@ impl Run {
                 if e.stable {
                     self.stable_at.get_or_insert(cycle);
                 }
+                self.stable_stop = e.stopped_stable;
                 coord.report(self.k, |r| r.stable = e.stable);
             }
             self.time_hit = self.stable_at.is_none();
@@ -1069,6 +1078,7 @@ impl Run {
                 if e.stable {
                     self.stable_at.get_or_insert(cycle);
                 }
+                self.stable_stop = e.stopped_stable && !interrupted;
                 self.time_hit = e.time_hit || interrupted;
             } else {
                 self.time_hit = interrupted;
@@ -1092,6 +1102,7 @@ impl Run {
                 || !opts.stop_when_stable && opts.finish_when_stable && cycle >= s.max(self.picked_at) + opts.finish_patience
             {
                 self.done = true;
+                self.stable_stop = true;
             }
         }
     }
@@ -1140,7 +1151,7 @@ impl Run {
             self.picked_at,
             self.busy_s
         );
-        Ok(RunOut { k: self.k, result: best, crit, stable_at: self.stable_at, time_hit: self.time_hit, line, cycles_line })
+        Ok(RunOut { k: self.k, result: best, crit, stable_at: self.stable_at, time_hit: self.time_hit, stable_stop: self.stable_stop, line, cycles_line })
     }
 }
 
@@ -1277,6 +1288,8 @@ struct RoundOut {
 #[derive(Clone, Copy, Debug, Default)]
 struct LoopEnd {
     stable: bool,
+    /// The loop stopped at stable (not at the cycle cap with stable recorded).
+    stopped_stable: bool,
     time_hit: bool,
 }
 
@@ -3864,7 +3877,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         st.layers_now.clear();
         let loop_s = t_loop.elapsed().as_secs_f64();
         let time_hit = rep.stop == "time limit" || rep.stop == "loop_time_share";
-        loop_end = Some(LoopEnd { stable: rep.stable_at.is_some(), time_hit });
+        loop_end = Some(LoopEnd { stable: rep.stable_at.is_some(), stopped_stable: rep.stop == "stable", time_hit });
         let pc = arch.items[pick].crit;
         let table = table_text(&arch.table(Some(pick)), &obj);
         warnings.push(format!(

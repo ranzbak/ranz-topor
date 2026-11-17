@@ -1082,3 +1082,35 @@ def test_run_lock_unwritable_warns_and_goes_on(eprom, tmp_path, monkeypatch):
     out = run_mod.run(make_board(eprom), ScriptedUi(), CFG, ExplodingEngine(), tmp_root=tmp_path / "work")
     assert any(f.code == "RUN_LOCK_UNAVAILABLE" and f.severity == "warning" for f in out.findings)
     assert out.status != "aborted_preflight" or out.error is None
+
+
+class _NeverOkDialog(ScriptedUi):
+    """Progress dialog the user never answers: counts the polls before and after "Routes stable" and never ends the run."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.waits_for_ok = True
+        self.polls_after_stable = 0
+
+    def progress(self, p):
+        if getattr(p, "stable", False):
+            self.polls_after_stable += 1
+        return super().progress(p)
+
+
+def test_dialog_run_ends_at_the_cycle_cap_not_at_stable(app, eprom, tmp_path, reports):
+    """Stop-on-stable fix: with the dialog and the defaults the run goes on after "Routes stable" until the cycle
+    cap, and says so: stop_reason "round cap", never "stable" (patience gap M5/M6 of verify-stable-toml)."""
+    cfg = CFG.with_values({("optimize", "rounds"): 20})
+    ui = _NeverOkDialog(accept=True)
+    board, ui, out = do_run(eprom, tmp_path, ui=ui, engine=_RealCancelEngine(), cfg=cfg)
+    assert ui.polls_after_stable > 1, "the dialog saw Routes stable and the run went on"
+    assert out.stop_reason == "round cap", out.stop_reason
+    assert out.status == "accepted" and out.routed == 27 and out.cancelled is False
+
+
+def test_dialog_run_with_finish_when_stable_ends_at_stable(app, eprom, tmp_path, reports):
+    """The opt-in keeps the old behaviour: the run finishes by itself at stable, labelled "stable"."""
+    cfg = CFG.with_values({("optimize", "rounds"): 20, ("optimize", "finish_when_stable"): True})
+    board, ui, out = do_run(eprom, tmp_path, ui=_NeverOkDialog(accept=True), engine=_RealCancelEngine(), cfg=cfg)
+    assert out.stop_reason == "stable" and out.routed == 27
