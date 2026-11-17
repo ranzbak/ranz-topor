@@ -2,7 +2,7 @@
 
 topor routes the connections of a KiCad 10 board as smooth curved traces (straight segments joined by
 tangent arcs). It never changes your board until you press **Accept** in its preview, and an accepted
-result is **one undo step** (Edit → Undo). Install it first: [install.md](install.md).
+result is undone with Edit → Undo (the routes are one undo step; the zone refill after Accept is a second one). Install it first: [install.md](install.md).
 
 Contents: [Quick start](#quick-start) · [Where the settings come from](#where-the-settings-come-from) ·
 [First run](#first-run) · [Pre-flight findings](#pre-flight-findings) · [Options](#options) ·
@@ -582,7 +582,7 @@ the nets and both values, and nothing is applied. Please report it.
 ## Accept, Reject and undo
 
 - **Accept** (Enter) applies the result as **one** KiCad commit: the ripped tracks/vias are removed and the
-  new ones created. That is **one undo step**: one **Edit → Undo** (Ctrl+Z) reverts all of it. New tracks
+  new ones created. The routes are **one undo step**: one **Edit → Undo** (Ctrl+Z) reverts all of them (with the default zone refill see below: two steps). New tracks
   are put in a group `topor` (`topor-partial` for partial routes) when KiCad allows it.
 - **Zones come back filled for the new copper.** Two settings, both on by default:
   `[run] commit_fills = true`: the fill that KiCad's own filler made for the routed result (kicad-cli, on the copy

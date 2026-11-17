@@ -625,7 +625,7 @@ title/label/button/checkbox/choice/heading/text).
 | report | done_accepted_cancelled | text | Stopped early by Cancel: routed {routed}/{total} connections — applied to the board (Edit → Undo). |
 | report | done_rejected | text | Nothing was changed on the board. |
 | report | done_cancelled | text | Cancelled — nothing was changed on the board. |
-| report | done_refill_hint | text | Zones were not refilled: press B (Edit → Fill All Zones) to refill them — a separate undo step. |
+| report | done_refill_hint | text | Zones were not refilled: press B (Edit → Fill All Zones) to refill them — a separate undo step. Edit → Undo reverts the routes in one step. |
 | report | done_refilled | text | Zones were refilled by topor — a second undo step: the first Edit → Undo reverts the refill, the next one the routes. |
 | report | done_post_commit | text | {message} {fix} |
 | report | done_drc_new | text | ⚠ {n} new DRC violations ({types}) — run Inspect → Design Rules Checker |
