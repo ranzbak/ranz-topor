@@ -1,101 +1,83 @@
-# par-refine: parallel, incremental candidate evaluation in `refine` (design note; no product code)
+# DESIGN: ERBS by funnel (radii-m3, M3 step c rebuild, 2026-11-14)
 
-Base main 74ff26a (file:line = main). Evidence: profile-74ff26a stacks split by me (% of ALL samples, qm-s1 / esp-s0 / bh-det)
-and a throw-away recording run of every candidate (§7). Long version + tables: reports/par-refine-design-*.md.
+Status: already implemented (erbs.rs, commits c60428f..1399b7a); this note is sent after the fact (rule came mid-round).
 
-## 1. One candidate, and the state it reads / writes
-Stream: `refine` (refine.rs:779) walks over-full edge-layers (820-834), `moves_around` (860) builds 1-3 label moves per event
-(869-884) and calls `try_move` (887) until the first that lowers the price. A candidate = `try_move_in` (924-1021): set labels
-(939), snapshot wires (953), `relayout` (624) = `default_ks`/`rank`/`site_taken` (477/428/442) + `apply` (503) + `reprice`
-(564) + `optimise` (589: per via a sweep over its interval, `apply`+`reprice` per traversal, float sum `run`, key rounded
-609); delta from the undo log (976-986); keep (992) or restore (998-1019). `optimise` is ~80 % of a candidate (33.1 / 21.0 /
-69.6 of 41.4 / 27.0 / 83.2 %); `eval` (659) 41.6 / 26.5 / 62.0, of it `Packer::bounds` 28.7 / 18.7 / 42.6, margin cache
-19.1 / 13.2 / 28.0, SipHash 13.1 / 9.8 / 20.4, malloc/free 14.4 / 8.4 / 21.8. Grain 100-800 us per candidate.
-READS: `evl` of its wires; `pass_layer`/`pass_disc` of EVERY pass on each repriced edge (`items` 636), `cost`/`sq` there,
-`via_k` of other wires in triangles `site_taken` checks (448), own `via_iv/via_k/nosite`; static `State`, `dirs`, Packer
-config; memo caches (pure functions, RefCell): `Packer.cache` (pack.rs:193), `free_cache` (203), `end_sites` (refine.rs:317).
-WRITES (kept on accept, restored on reject): `evl` labels, the wires' pass layers/discs, `via_iv/via_k/nosite`, repriced
-`cost/sq`, cut-model state (default `capacity_model = "edges"`, model.rs:1510: out of scope v1), `meter` (thread-local OFF).
+## What
+The ERBS of a stretch = the shortest path in the band's homotopy class among point obstacles
+(Dayan 1997 PDF pp. 25-26 = printed pp. 14-15: "a minimal length member of the topological class",
+terminals = RBS terminals + spoke ends; spokes PDF p. 32). It replaces the gate-order solve (free-meeting
+order + Newton/Gauss-Seidel), which had no notion of side and zigzagged (eprom st2 1.21).
 
-## 2. Parallel with the SAME accepted sequence: ordered speculation
-I1 (tested): a rejected candidate leaves every non-memo field bit-identical. I2: verdict and floats = f(state, move) only.
-A cursor replays the serial generator (sweep, list, pass, event, move, incl. the `cost<=0` / `max_evals` checks 811/827/887)
-ASSUMING REJECTION and feeds a lane pool in stream order. Lanes evaluate on the read-only master through a private overlay
-(§3) and return {verdict, exact written values}. The run thread consumes results in stream order; the FIRST accept is
-committed by copying its values (bit copies), the cursor advances as serial does (`break` of the event, `improved`), all
-later in-flight results are dropped, the stream restarts from the new master. Proof by induction: before that accept,
-serial evaluates exactly these candidates on exactly this state (I1), so (I2) same verdicts, same first accept, same
-committed values; `evals` counts like serial. No cross-lane float reduction (each delta summed in one lane in today's
-order: BTreeMap 976, sorted edges 565); no HashMap iteration; no time input. Lane count never enters the result. W = 1 is
-the serial path (one implementation; the old try/undo stays as test reference). Deterministic reservations (keep results
-whose read set misses the accept's write set) bought <= 6 % in §7: not worth its generator proof.
-Literature: Müller, Radke, Vygen 2011 (docs/literature/mueller-radke-vygen2011-resource-sharing.pdf pp. 9-11 §6):
-BonnRoute's parallel resource sharing evaluates block solvers concurrently on shared prices, validates each against the
-prices in a fixed order and rejects/recomputes violators; 5.4-7.1x on 8 threads (Table 2, p. 22). Their order is an atomic
-time stamp (nondeterministic); fixing it to the serial index is Blelloch-Fineman-Gibbons-Shun's deterministic reservations
-(PPoPP 2012 §4) and deterministic parallel PathFinder (Gort & Anderson, FPT 2010) — both not in docs/literature, pages unchecked.
+## How (engine/src/topo/erbs.rs, module doc steps 1-4)
+1. Obstacle points with a side label: per cut item both spoke tips (a on p's side, b on q's side of the
+   band's crossing, `p_left_of`); per wrap the arc at the stack radius sampled in the wedge (octagon
+   vertices / circumscribed polygon); other-net features grown by w/2 + clearance; a frame box.
+2. Rough path = band + thin loops round every point the band passes on the wrong side (a tip whose spoke
+   the band crosses: Dayan p. 32 "goes round the spoke's end"; every arc sample; grown features on the
+   other side). Loops leave from the nearest band point, ordered by (arclength, angle), farther-first on a ray.
+3. Sleeve: walk the rough path through a Delaunay triangulation of the points; reduce back-crossings
+   (Hershberger & Snoeyink 1994, reduced sleeve; Efrat, Kobourov & Lubiw 2006 PDF p. 9: "follows the path
+   through the triangulation", O(n + k)).
+4. Funnel (topo::funnel, branch funnel-fix) through the portals; Popov & Popov 2012 PDF p. 3 Fig. 3
+   (funnel over obstacles classified left/right), p. 2 Fig. 1 (taut thread along arcs).
 
-## 3. Incremental evaluation, data layout (all exact: representation / memo only)
-- Lane overlay, not replicas: epoch-stamped dense arrays per lane over passes (stamp u32 + layer + disc) and wires (via
-  data), small sorted Vec for touched `cost/sq`; clear = epoch+1; 24 B x passes per lane, allocated once per run (qmtech
-  15 751 passes = 0.4 MB, bornhack 26 264 = 0.6 MB). No per-call model copy (qmtech cost/sq alone = 3.4 MB x 5617 calls).
-- Per-pass static item data (net, w, s, infl) in flat arrays at `build`; per-pass end/disc margins lazily in a
-  `Vec<AtomicU64>` (NaN = unset; racing fills store the same bits): `bounds` stops hashing, `items` stops allocating.
-- `bounds` into scratch (pack.rs:574-608 builds 5 Vecs/call); reuse `apply`/`optimise` buffers (`ks.clone()` 605).
-- `reprice` evaluates only layers whose item list changed (layer move: old+new; disc: all): skipped layers would return
-  equal values and log nothing (573), so it is exact.
-- Remaining caches Sync: sharded `Mutex<FxHashMap>` (inline FxHasher, no new crate); `trans`/`unary` -> `&(dyn Fn + Sync)`
-  (layers.rs:800, 1152). `build`'s all-edges initial `eval` (395-399) is pure per (e,l): parallel with ordered writes.
-- Later, measured first: (edge, layer, 128-bit content hash) -> (cost, sq) memo across `build`s (the loop re-layers almost
-  the same state each try, and `measure`, core.rs:2957, builds a 2nd model per try).
+## Invariants
+- Path homotopic to the rough path; every bend lies on an obstacle point and turns toward it.
+- No point on the wrong side; length <= band (+ detours) ; sleeve failure = loud ERBS_FALLBACK, drawn sequential.
+- O(n log n) per stretch; no rayon (sequential, deadline + cancel checked between stretches).
 
-## 4. Cores: runs and lanes share one budget
-Today one std::thread per run (core.rs:1183), `Slots` = min(runs, rayon threads) compute (core.rs:417-470, 611). New: `Slots`
-sized to the rayon pool (RAYON_NUM_THREADS = the threads option, schema.py:375); a computing run holds 1 slot and, per
-refine call, `try_take`s spare slots as lanes without waiting (none while a run waits) and returns them. runs=5 on 4-8
-cores (KiCad default): no spare, serial path, no rayon call; lanes appear for runs=1, runs < cores (VM 16 vCPU) and the
-tail when runs finish. Option `[optimize] refine_lanes` (auto = spare slots, 1 = off) to pin it for benchmarks.
+## Tests
+Unit: sleeve_straight, pushes_round_a_tip, pushed_both_ways, crossing_portals, collinear_detours_far_first,
+near_points_merge, touched_tip_is_no_detour, conflicts_counted, band_sides, grown_rectangle, erbs_u_turn_round_a_pad,
+erbs_deadline_and_stop; judge patterns (4, both modes) at 1.000 / 0 violations; harness/erbs_accept.py marks
+(a) eprom st2w2 <= 1.03 x band, 0 reversals, bends explained; (b) eprom+wiccon p50 <= 1.02, max <= 1.15, esp agg <= 1.10;
+28+ source mutants (m3-runs/funnel/mutate.py); ladder seed 0 both modes with harness/area_check.py.
 
-## 5. Cancel / time limit
-`stop_requested()` is THREAD-LOCAL (control.rs:660, 691): pool threads never see it. The run thread checks it before each
-dispatch and before each commit; a stop drops in-flight results uncommitted, so a parallel run equals a serial run stopped
-at a candidate boundary. Lanes get an `&AtomicBool` checked between via positions. Gap = one candidate (0.1-0.8 ms), as
-today; it keeps limit-wait's loop-scope check (branch limit-wait 4fd997e, refine.rs:887); no new wait.
+## Known limits
+- Tips are per item: a later own visit's tip (same cut) bounds an earlier own wrap from outside (slot model,
+  conservative, wiccon st46 +0.07 mm).
+- Pad exits stay out of the sheet (M7).
 
-## 6. Tests (VM)
-1. proptest: random small models + candidate streams, lanes {1,2,3,8,16} vs old `try_move`: same verdict sequence, same
-   final bits (`pass_layer/disc`, `via_k`, `cost/sq`, `evl`); I1 on every reject; overlay vs direct reads.
-2. Plans: eprom / wiccon / esp s0 / qmtech s1, runs=1, RAYON 1/4/16, lanes forced 1/2/8: per-refine-call hash of the
-   accepted sequence + final copper hash = main 74ff26a cached baseline; ladder_diff --json 0 deltas.
-3. Mutants: commit best not first accept; keep results after an accept; stale cursor; overlay ignores `via_k` in
-   `site_taken`; lane deltas in completion order; reprice skips a disc layer; stop only at refine start.
-4. Timing: VM --exclusive, <= 8 threads; esp s0 / qmtech s1 / bornhack s0, runs=1, lanes 1/2/4/8, 3 repeats (TOPO_TIMES
-   loop s, move_cost, wall, CPU); runs=4 at RAYON 8.
+## Round g (2026-11-16): length factor + three obstacle rules (sent to the lead before the board runs)
 
-## 7. Evidence, gain, risks
-Recording (throw-away par-refine-exp 17e6cae, shared VM, runs=1, 1 thread; plan unchanged: esp 2313/54088/3518 in 2 runs),
-replayed as a lane pool (in-order commit, 5 us dispatch, work started before an accept is seen = wasted):
+### What
+1. **Length factor (draw.rs attempt -1).** A legal ERBS of length L over its band B is priced
+   `L (1 + k max(0, L/B - 1)^2)` (`[drawing] erbs_length_weight` k = 1): the length up to the band, smooth,
+   growing, no cutoff. Past `B (1 + g)` (`[drawing] erbs_margin` g = 0.05, about the octagon's 5.5 % on arcs) a
+   sequential run is drawn too; it replaces the ERBS when `L_s (1 + g)` is below the ERBS's price (the margin =
+   the room the ERBS keeps for the others). No legal sequential run: the ERBS stays. Finding ERBS_LONG lists them.
+2. **Arc of a wrap whose feature the band runs through / wraps from inside**: no feature exit offset (the rays
+   of the wedge run over the body; esp L0 st 6: samples at 1.09 mm round a 0.31 mm pad, 3.7 x band).
+3. **Grown feature point = spoke end of the feature**: the rough path goes round it only when the band crosses
+   the spoke (the segment from the feature vertex it was grown from to the point). Dayan 1997 PDF p. 32
+   (printed p. 21): spokes "push wires away from fixed objects"; the rule that only a band separating a spoke tip
+   from its root goes round the tip follows from spokes as artificial terminals and the routability iff
+   (PDF pp. 25-26, Fig. 6). A point the band does not separate from its feature (past a band end, off a short band's
+   corner, sided only by the extended pieces) keeps the band's side (qmtech: 1-1.4 mm detours, 16 x band).
+4. **Tips at a squeezed feature**: a spoke tip at a feature of an over-full cut the stretch is on (`skip`, the
+   cut's squeeze is its predicted violation) is no detour, as the feature itself is already left out (the
+   over-full cut has not the room the tip asks for; Dayan PDF pp. 25-26: an ERBS satisfies the spacing iff the class is routable,
+   so an over-full class cannot be made legal by spokes; spoke creation, PDF p. 32, only detects it). qmtech: 0.63 mm wire between pads 0.7 mm apart, long cuts' tips 0.505 mm from both
+   pads, the ERBS wound round them (4.6 x).
 
-| board | refine calls | cand/call | accepted | cand s | build s | pool speedup T2/T4/T8/T16 | work eff T4/T8 |
-|---|---:|---:|---:|---:|---:|---|---|
-| esp s0 | 2313 | 23.4 | 6.50 % | 29.1 | 19.4 | 1.76/2.74/3.63/4.10 | 0.80/0.68 |
-| bornhack s0 (rounds=1) | 44 | 44 684 | 0.02 % | 515.9 | 5.6 | lockstep 1.65/2.59/3.98/6.24; pool ~T | 1.00/1.00 |
-| qmtech s1 | 5617 | 412 | 0.48 % | 263.5 | 187.8 | 1.85/3.47/5.98/8.98 | 0.87/0.77 |
+4b. **Pad exit** (added after the lead's OK, sent before the board run): a feature whose clearance zone holds a
+   terminal of the stretch (`poly_dist(terminal, feature) < w/2 + clearance`, or the terminal inside it) is in
+   the stretch's `exit` set: it gets no spoke tips and no grown-point detour, like a `skip` feature. Its
+   violations are predicted (they are the neck's own: the wire is wider than the room at the pad), counted in
+   the ERBS line, and the drawing's neck handles them as today. qmtech st 47: 0.63 mm wire leaving a 0.3 mm pad
+   at 0.5 mm pitch; both neighbours' long-cut tips lie 0.5 mm off the terminal on both sides, the ERBS wound
+   round them. Dayan PDF pp. 25-26 (ERBS legal iff the class is routable; a neck-violating class is not); PDF p. 32: spoke creation checks, it does not repair.
+   The violations are predicted at the pad exit only (within w/2 + clearance of the band's end), not along the stretch.
+5. **Arcs round a feature wrapped from inside** (extends 2): no arc samples at all at a vertex whose feature
+   the band crosses or wraps from inside (`through`); the wrap's vertex stays a point of the path.
 
-qmtech reproduces main exactly (2 322 868 moves, as the profile's runs=1 run). Gain (Amdahl: lanes on the candidates +
-parallel initial eval, which is 168 s on qmtech / 16 s on esp over all builds incl. `measure`): qmtech router 1042 →
-~735 s at 4 lanes (1.42x), ~680 s at 8 (1.53x); bornhack P2..loop 637 → ~270 s (2.4x); esp 195 → ~165 s (1.18x). So
-"~2x" holds for bornhack-like streams; on qmtech the rest is `build` (188 s in refine + `measure`'s second build per try):
-its per-wire via `optimise` is a commit-always sequence (needs reservations, v2) or an incremental build (§3 memo).
-Under `timeout_clock = cpu` the waste costs CPU seconds (13 % qmtech, 20 % esp at 4 lanes).
-Risks: missed write in a lane result = silent divergence (tests 1-2 in CI); Sync caches cost a little serially; HT beyond 8
-lanes; cut model stays serial; KiCad default runs=5 sees almost no gain.
+### Invariants
+- The class of the plan is never changed by a point the band is not separated from by a spoke (3, 4).
+- Over-full and pad-exit violations are never silently passed: predicted, counted in the ERBS line, and the
+  0.7 mm-pads test (`erbs_squeezed_pads_keep_the_band_and_the_finding`) asserts they stay findings.
+- A legal ERBS is never dropped for its length; it competes on a smooth price (1).
 
-## 8. Cheap single-thread items first (exact, ~3-5 days)
-FxHash (SipHash self 16.6 / 12.8 / 20.4 %), scratch buffers (malloc 10.5 / 7.1 / 10.4 %), per-pass item/margin tables
-(margin 19.1 / 13.2 / 28.0 %), reprice changed layers only: all inside the candidate, they cut serial AND lane work and
-remove the RefCell blockers, so they come first and the parallel factors above become upper bounds. New from the
-recording: every `build` re-evaluates all 215k edge-layers (qmtech: 168 s, 16 % of the run): skip pass-less edges and
-copying unchanged edges from the previous model (content memo, exact) is likely cheaper than parallelising it (measure). `free_radius` index
-(9.5 / 3.4 / 0 %), `in_piece` precompute (0 / 0 / 8.8 %), search arrays (esp expand 11.7 %): outside refine, they shrink
-the serial part. Order: items 1-4 → re-measure → lanes → parallel initial eval → outside items.
+### Tests
+Unit `erbs_length_price_and_competition`; integration `wound_erbs_gives_way_to_the_sequential_run` (test point
+"wind erbs"); unit fixtures for 2-4 (dip / no dip / squeezed tip); erbs_accept marks on eprom/wiccon/esp dumps;
+qmtech dump ratio list; mutants per rule; deterministic ladder seed 0 rounds=1 both modes.
