@@ -25,6 +25,9 @@ fn p3_crops() -> Vec<&'static str> {
     ["qmtech-usb-crop.json", "esp-rust-board-usb-crop.json"].into_iter().filter(|f| f.starts_with("qmtech") || std::path::Path::new(&format!("{dir}/{f}")).exists()).collect()
 }
 
+/// The smaller crop for the tests that only need "a run that reaches step X" (vm-load 2026-11-17: on qmtech's they took 90-350 s in release).
+const SMALL_CROP: &str = "esp-rust-board-usb-crop.json";
+
 fn crop(name: &str) -> BoardModel {
     let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
     BoardModel::from_json(&std::fs::read_to_string(path).expect("fixture")).expect("fixture parses")
@@ -315,7 +318,7 @@ fn a_soft_limit_in_p3_p4_does_not_cut_their_moves_until_its_overrun_cap() {
     // moves of P3/P4 under a limit reached in P3 are the moves of the unlimited run, one by one.
     // The optional P4 moves are on ([optimize] moves; they skip net trees with branch points on
     // traces, so the net trees are fixed) so there are moves to count.
-    let m = crop("qmtech-usb-crop.json");
+    let m = crop(SMALL_CROP);
     let o = topor(r#", "runs": 1, "capacity_model": "cuts", "moves": true, "net_tree": "fixed""#);
     let free = run(&m, &o);
     let want = move_counts(&free);
@@ -348,7 +351,7 @@ fn a_hard_limit_before_the_drawing_draws_the_kept_plan_in_full() {
     // runs (here P3/P4, reached when P3 begins) and the kept plan is drawn in full (TopoR judges
     // the variants before any copper and draws the chosen one, 6.3 manual pp. 72-73, p. 237).
     // Before, the hard limit cut the drawing too and left a nearly empty board.
-    let m = crop("qmtech-usb-crop.json");
+    let m = crop(SMALL_CROP);
     let soft = reached_in_p3(&m, &topor(r#", "runs": 1, "capacity_model": "cuts""#));
     let r = reached_in_p3(&m, &topor(r#", "runs": 1, "capacity_model": "cuts", "timeout_mode": "hard""#));
     let l = r.limit.as_ref().expect("limit report");
@@ -419,7 +422,7 @@ fn a_hard_limit_reached_in_the_drawing_cuts_it_loudly() {
     // Decided behaviour (verify-m2c 3, a change is the user's call): a limit that passes while the
     // drawing runs cuts it; the board is drawn only in part, and a WARNING line says how much and
     // what to change. The report names the step cut: the drawing (not "plan ... drawn in full").
-    let m = crop("qmtech-usb-crop.json");
+    let m = crop(SMALL_CROP);
     let o = topor(r#", "runs": 1, "capacity_model": "cuts", "timeout_mode": "hard""#);
     let (r, hit) = act_at(&m, &o, &["drawing the traces"], |c| c.limit.reach());
     assert!(hit, "the run ended before the drawing");
@@ -437,7 +440,7 @@ fn a_hard_limit_reached_in_the_drawing_cuts_it_loudly() {
 fn a_hard_limit_reached_in_the_via_reduction_names_that_step() {
     // verify-m2d O2: the step the limit cut is the via reduction (its own CutStep), not the drawing
     // that precedes it: cut_steps names it and the report line says the vias it had not removed stay.
-    let m = crop("qmtech-usb-crop.json");
+    let m = crop(SMALL_CROP);
     let o = topor(r#", "runs": 1, "capacity_model": "cuts", "timeout_mode": "hard", "opt_loop": "cycles", "topo_rounds": 1"#);
     let (r, hit) = act_at(&m, &o, &["via reduction and fuse"], |c| c.limit.reach());
     assert!(hit, "the run ended before the via reduction");
@@ -479,7 +482,7 @@ fn the_overrun_cap_firing_in_the_drawing_cuts_it() {
     // The soft limit passed in P3 (the step finishes, no new one begins); the cap fires (here: the
     // caller hardens the limit, as the plugin's CPU clock does) once the drawing runs: the drawing
     // began before it, so the cap cuts it (one path with `hard`).
-    let m = crop("qmtech-usb-crop.json");
+    let m = crop(SMALL_CROP);
     let o = topor(r#", "runs": 1, "capacity_model": "cuts""#);
     let ctl = RunControl::new();
     ctl.limit.init(o.wall_clock_s);
@@ -509,7 +512,7 @@ fn the_overrun_cap_firing_in_the_drawing_cuts_it() {
 fn a_cancel_is_no_limit_cut_and_leaves_its_own_reason() {
     // verify-m2c 4: Cancel / OK is no cut by the time limit (cut "none", whatever the mode), and a
     // whole-route cycle's drawing it ends leaves Cancel's reason, not the time limit's.
-    let m = crop("qmtech-usb-crop.json");
+    let m = crop(SMALL_CROP);
     let o = topor(r#", "runs": 1, "capacity_model": "cuts", "timeout_mode": "hard", "opt_loop": "cycles", "topo_rounds": 3"#);
     let (r, hit) = act_at(&m, &o, &["drawing the traces"], |c| c.request_cancel());
     assert!(hit, "the run ended before the drawing");

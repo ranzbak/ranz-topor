@@ -9,9 +9,12 @@ def test_python_is_venv_with_pcbnew():
     assert pcbnew.GetBuildVersion().startswith("10.0")
 
 @pytest.mark.skipif(bool(os.environ.get("CI")),
-                    reason="CI runs `cargo test --release` in its own rust job; here it would rebuild the engine in debug and rerun the timing tests")
+                    reason="CI runs `cargo test --release` in its own rust job; here it would rebuild the engine")
 def test_cargo_workspace_builds():
-    r = subprocess.run(["cargo", "test", "-p", "topor-engine", "--quiet"], cwd=ROOT, capture_output=True, text=True)
+    # build-only (PK-DBG, user 2026-11-17 VM load): the engine and all its test binaries compile in release (the profile the
+    # wheel and CI use); running them is the rust job's business (`cargo test --release`), not a pytest's. It used to run the
+    # whole debug suite here (a second, slow copy).
+    r = subprocess.run(["cargo", "test", "-p", "topor-engine", "--release", "--no-run", "--quiet"], cwd=ROOT, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
 
 def test_plugin_versions_match_engine():
