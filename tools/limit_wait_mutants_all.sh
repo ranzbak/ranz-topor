@@ -29,6 +29,6 @@ for n in "$@"; do
   python3 mut.py "$n" "$SRC" || { echo "MUTANT $n: edit failed"; continue; }
   killed=0
   cargo test --release --manifest-path engine/Cargo.toml --test topo_limit_wait > mut-$n.t1.log 2>&1 || killed=1
-  cargo test --release --manifest-path engine/Cargo.toml --lib -- control:: optimise:: model::the_limit_grace > mut-$n.t2.log 2>&1 || killed=1
+  cargo test --release --manifest-path engine/Cargo.toml --lib -- control:: optimise:: model::tests::the_limit_grace > mut-$n.t2.log 2>&1 || killed=1
   if [ $killed = 1 ]; then echo "MUTANT $n: KILLED ($(grep -h '^test .* FAILED\|panicked\|error\[' mut-$n.t*.log | head -3 | tr '\n' ' '))"; else echo "MUTANT $n: SURVIVED"; fi
 done
