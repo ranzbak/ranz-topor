@@ -65,6 +65,11 @@ pub struct MeasureOpts {
     pub sheet: SheetOpts,
     /// `mixed_clearance = "pairwise"`.
     pub pairwise: bool,
+    /// The ERBS placement margin on every clearance (nm): the checker's `margin_nm` plus the
+    /// drawing's numeric tolerance [`super::pack::DRAW_TOL_NM`], the same extra distance the
+    /// sequential drawing's packer keeps (`Packer::eps`). Used by the spoke tips, stack radii
+    /// and grown features of [`super::radii`] / [`super::erbs`] only, never by the need.
+    pub margin: f64,
 }
 
 impl MeasureOpts {
@@ -72,6 +77,7 @@ impl MeasureOpts {
         MeasureOpts {
             sheet: SheetOpts { norm: Norm::for_style(&o.draw_style), radius_nm: o.cut_radius_mm.max(0.0) * MM, via_steps: 16, prune_walk: true },
             pairwise: o.mixed_clearance == "pairwise",
+            margin: o.margin_nm.max(0) as f64 + super::pack::DRAW_TOL_NM,
         }
     }
 }
@@ -964,7 +970,7 @@ impl Recorder {
                 let mut r = super::radii::summary(&m, &ords, &nm);
                 // M3 step c: the ERBS of every stretch and their check (report only).
                 for (i, (lf, o)) in m.layers.iter().zip(&ords).enumerate() {
-                    let le = super::erbs::erbs_layer_with(&lf.sheet, &m.stretches, &lf.stretches, o, &super::erbs::ErbsOpts::default());
+                    let le = super::erbs::erbs_layer_with(&lf.sheet, &m.stretches, &lf.stretches, o, &super::erbs::ErbsOpts { margin: m.opts.margin, ..super::erbs::ErbsOpts::default() });
                     let vs = super::erbs::check_layer(&lf.sheet, &m.stretches, o, &le.es);
                     r[i]["erbs"] = super::erbs::summary(&super::erbs::report(&le, &vs), &vs, &m.stretches);
                     if let Some(d) = std::env::var_os("TOPO_ERBS_DUMP") {

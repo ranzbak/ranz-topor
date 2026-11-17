@@ -22,7 +22,10 @@
 //!      vertices in the octagonal norm, a circumscribed polygon of `arc_step_deg` otherwise), on the
 //!      wrapped vertex's side.
 //!    - every feature of another net near the band (pads, via discs, holes, keepouts, junctions):
-//!      its outline grown by half the width and its clearance (the Minkowski sum with the norm's
+//!      its outline grown by half the width, its clearance and the placement margin
+//!      ([`ErbsOpts::margin`]: `margin_nm + DRAW_TOL_NM`, 10 nm by default, which the tips and
+//!      stack radii carry on every clearance too, so the copper keeps the rule after KiCad's
+//!      rounding to whole nm; the sequential packer keeps the same) (the Minkowski sum with the norm's
 //!      circumscribed unit polygon; the convex hull for a convex feature), on the feature's side.
 //!      A feature at an end of an over-full cut the stretch is on is left out (the necked tips
 //!      hold that clearance; it is a predicted violation).
@@ -97,11 +100,16 @@ pub struct ErbsOpts {
     /// that has a stretch only, so a run has exactly one injected failure whatever its layering.
     /// Always false in real runs.
     pub fail_first: bool,
+    /// Placement margin on every feature clearance (nm; [`super::cutflow::MeasureOpts::margin`],
+    /// the same value the tips and stack radii of [`super::radii::radii_layer_m`] carry): the
+    /// grown features keep `half width + clearance + margin`, so the ERBS copper keeps the rule
+    /// after rounding to whole nm. 0 = exact (the model tests).
+    pub margin: f64,
 }
 
 impl Default for ErbsOpts {
     fn default() -> Self {
-        ErbsOpts { arc_step_deg: 22.5, deadline: None, stop: None, fail_first: false }
+        ErbsOpts { arc_step_deg: 22.5, deadline: None, stop: None, fail_first: false, margin: 0.0 }
     }
 }
 
@@ -1033,6 +1041,8 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
     // 0.5 mm pitch, the neighbours' long cuts' tips 0.505 mm out on both sides, the ERBS wound
     // round them, 4.6 x its band).
     let it = Item { net: s.net, w: s.w, s: s.s };
+    // The placement margin on every feature clearance (the tips and arcs carry it from radii).
+    let em = opts.margin.max(0.0);
     let mut exit: Vec<usize> = Vec::new();
     {
         let rmax = 0.5 * s.w + fclear.max(s.s);
@@ -1044,7 +1054,7 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
         for &f in &near {
             let ft = &sh.feats[f];
             let cl = ft.bound.clearance(&it);
-            if cl > 0.0 && ft.poly.len() >= 3 && [c0, c1].iter().any(|&c| point_in_poly(c, &ft.poly) || poly_dist(c, &ft.poly) < 0.5 * s.w + cl) {
+            if cl > 0.0 && ft.poly.len() >= 3 && [c0, c1].iter().any(|&c| point_in_poly(c, &ft.poly) || poly_dist(c, &ft.poly) < 0.5 * s.w + cl + em) {
                 exit.push(f);
             }
         }
@@ -1188,7 +1198,7 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
                 }
             }
         };
-        let r = 0.5 * s.w + cl;
+        let r = 0.5 * s.w + cl + em;
         for x in grown(&ft.poly, r, &dirs, grow) {
             let root = ft.poly.iter().copied().min_by(|a, b| (*a - x).len2().total_cmp(&(*b - x).len2())).unwrap_or(x);
             let gi = gates.len();
@@ -1878,7 +1888,7 @@ pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], pac
     let mut inject = fail_first;
     for (lf, o) in m.layers.iter().zip(&ords) {
         out.unbanded += lf.walk_failed;
-        let eo = ErbsOpts { deadline, stop: stop.clone(), fail_first: inject, ..ErbsOpts::default() };
+        let eo = ErbsOpts { deadline, stop: stop.clone(), fail_first: inject, margin: m.opts.margin, ..ErbsOpts::default() };
         let le = erbs_layer_with(&lf.sheet, &m.stretches, &lf.stretches, o, &eo);
         if !le.es.is_empty() || !le.failed.is_empty() {
             inject = false;
