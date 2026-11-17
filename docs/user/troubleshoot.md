@@ -382,9 +382,9 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: warning.*
 
-**Cause.** [drawing] realise = "erbs" ran out of time: the run's time limit (or a Cancel) passed before every trace had its extended rubber band, so the rest were drawn the sequential way. The bands cost time on large boards (several seconds to minutes per layer).
+**Cause.** [drawing] realise = "erbs" ran out of time: before every trace had its extended rubber band the run's time limit passed (timeout_mode = hard), or with the soft limit run.drawing_grace_s past it (default 60 s) or the overrun cap run.timeout_overrun_s, or you pressed Cancel; the rest were drawn the sequential way. The bands cost time on large boards (several seconds to minutes per layer).
 
-**Fix.** Raise run.timeout_s and route again, or use drawing.realise = "sequential" (the default; topor.toml [drawing] realise) on large boards.
+**Fix.** Raise run.drawing_grace_s (soft limit; negative = no bound) or run.timeout_s and route again, or use drawing.realise = "sequential" (the default; topor.toml [drawing] realise) on large boards.
 
 ### GROUPS_UNAVAILABLE
 

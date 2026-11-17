@@ -270,3 +270,24 @@ def test_any_negative_grace_is_accepted_as_no_bound(tmp_path):
     (tmp_path / "topor.toml").write_text("version = 1\n[run]\ndrawing_grace_s = 90000\n")
     _, findings = load_config(tmp_path)
     assert "CFG_VALUE" in codes(findings)
+
+
+@pytest.mark.parametrize("key", ["limit_grace_s", "drawing_grace_s", "timeout_s", "timeout_overrun_s"])
+@pytest.mark.parametrize("val", ["inf", "-inf", "+inf", "nan", "-nan"])
+def test_non_finite_seconds_are_a_config_error(tmp_path, key, val):
+    """verify limit-wait r3: -inf / nan passed the range test, serialised as -Infinity / NaN and the engine
+    then refused the whole run ('could not read this board'); a clear CFG_VALUE and the default instead."""
+    (tmp_path / "topor.toml").write_text(f"version = 1\n[run]\n{key} = {val}\n")
+    cfg, findings = load_config(tmp_path)
+    bad = [f for f in findings if f.code == "CFG_VALUE"]
+    assert len(bad) == 1 and key in bad[0].message and "finite" in bad[0].message, [f.message for f in findings]
+    assert cfg.get("run", key) == schema.SETTINGS_BY_KEY[("run", key)].default
+
+
+@pytest.mark.parametrize("key", ["limit_grace_s", "drawing_grace_s"])
+@pytest.mark.parametrize("val,want", [("-1", -1), ("0", 0), ("12.5", 12.5), ("-5", -5)])
+def test_finite_graces_still_accepted(tmp_path, key, val, want):
+    (tmp_path / "topor.toml").write_text(f"version = 1\n[run]\n{key} = {val}\n")
+    cfg, findings = load_config(tmp_path)
+    assert not [f for f in findings if f.code.startswith("CFG_")], [f.message for f in findings]
+    assert cfg.get("run", key) == want

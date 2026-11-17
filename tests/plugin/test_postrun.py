@@ -281,6 +281,8 @@ def test_erbs_fallback_and_timeout_are_loud():
     fs = {f.code: f for f in postrun.route_findings(res)}
     assert fs["ERBS_FALLBACK"].severity == "warning" and "wire 7" in fs["ERBS_FALLBACK"].message
     assert fs["ERBS_TIMEOUT"].severity == "warning" and "3 stretch(es)" in fs["ERBS_TIMEOUT"].message
+    # soft mode: the bound that cuts ERBS is run.drawing_grace_s, the finding's text and fix must name it
+    assert "drawing_grace_s" in fs["ERBS_TIMEOUT"].fix and "drawing_grace_s" in MESSAGES["ERBS_TIMEOUT"].cause
     quiet = {f.code for f in postrun.route_findings({"connections": [_c("A", "routed")], "warnings": [
         "ERBS drawing ([drawing] realise = \"erbs\"; ...): 4 stretches; drawn: 4 runs from their ERBS"]})}
     assert not quiet & {"ERBS_FALLBACK", "ERBS_TIMEOUT", "ERBS_LONG"}

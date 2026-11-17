@@ -412,6 +412,11 @@ impl TimeLimit {
         }
     }
 
+    /// The overrun cap as an instant (limit + cap); `None` = no limit or no cap. O(1).
+    pub fn cap_deadline(&self) -> Option<Instant> {
+        Some(self.deadline()? + Duration::from_secs_f64(self.overrun_cap_s()?))
+    }
+
     /// `[run] limit_grace_s`: seconds past the limit the TopoR loop step may still run (soft
     /// limit); `< 0` / non-finite = no bound, `0` = stop at the next check. O(1).
     pub fn set_grace(&self, seconds: f64) {
@@ -1249,6 +1254,17 @@ mod tests {
         ctl.limit.harden();
         assert!(ctl.limit.cap_hit(), "harden() fired the cap flag");
         assert_eq!(ctl.snapshot().notice, "time limit reached (hard): the current step stops now (drawing the traces)");
+    }
+
+    #[test]
+    fn the_cap_deadline_is_the_limit_plus_the_cap() {
+        let ctl = RunControl::new();
+        assert!(ctl.limit.cap_deadline().is_none(), "no limit");
+        ctl.limit.init(100.0);
+        assert!(ctl.limit.cap_deadline().is_none(), "no cap");
+        ctl.limit.set_overrun_cap(20.0);
+        let (d, c) = (ctl.limit.deadline().unwrap(), ctl.limit.cap_deadline().unwrap());
+        assert_eq!(c.duration_since(d), std::time::Duration::from_secs(20));
     }
 
     #[test]

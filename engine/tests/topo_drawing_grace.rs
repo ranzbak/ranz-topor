@@ -158,4 +158,32 @@ fn erbs_stretches_past_the_bound_are_drawn_the_sequential_way() {
     assert!(free.limit.as_ref().is_some_and(|l| l.draw_grace_erbs == 0), "60 s is room enough: {:?}", free.limit);
     let w = bounded.warnings.iter().find(|w| w.starts_with("time limit wait:")).unwrap_or_else(|| panic!("{:?}", bounded.warnings));
     assert!(w.contains("drawn the sequential way instead of by their ERBS"), "{w}");
+    // the warning behind ERBS_TIMEOUT names the bound that cut it, not the time limit alone
+    let et = bounded.warnings.iter().find(|w| w.starts_with("erbs_timeout:")).unwrap_or_else(|| panic!("{:?}", bounded.warnings));
+    assert!(et.contains("[run] drawing_grace_s") && !et.starts_with("erbs_timeout: the time limit passed"), "{et}");
+}
+
+/// An overrun cap that fires while ERBS runs (soft at its start) stops it, also with an unbounded
+/// drawing grace: before, the deadline was read once and ERBS ran on to its end.
+#[test]
+fn an_overrun_cap_that_fires_during_erbs_stops_it() {
+    let o = Options::from_json(
+        r#"{"wall_clock_s": 86400.0, "timeout_overrun_s": 1.5, "opt_loop": "topor", "initial": "once", "runs": 1, "topo_rounds": 1, "drawing_grace_s": -1.0, "via_reduce": false, "realise": "erbs"}"#,
+    )
+    .expect("options parse");
+    let mut ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let (l2, once, nap) = (ctl.limit.clone(), Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    ctl.set_test_hook(move |p| {
+        if p == "loop ended" && !once.swap(true, Ordering::SeqCst) {
+            l2.reach();
+        }
+        if p == "fail erbs sleeve" && !nap.swap(true, Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1800)); // the cap (1.5 s past the limit) passes before ERBS starts its work
+        }
+        false
+    });
+    let r = route_with(&board(), &o, &ctl);
+    let et = r.warnings.iter().find(|w| w.starts_with("erbs_timeout:")).unwrap_or_else(|| panic!("{:?}", r.warnings));
+    assert!(et.contains("overrun cap"), "{et}");
 }

@@ -451,9 +451,9 @@ pub(crate) fn wait_line(w: &WaitFacts) -> String {
     let why = if in_loop && w.grace_hit && w.grace_s.is_some() {
         format!("[run] limit_grace_s = {} s ran out: the step was stopped at its next check, {dropped}; raise limit_grace_s to let a cycle finish", secs_text(w.grace_s.unwrap_or(0.0)))
     } else if w.cycle_dropped && as_hard {
-        format!("{who}: the step was cut at its next check, {dropped}")
+        format!("{who}: the step was cut at its next check, {dropped}{}", draw_note("; "))
     } else if w.cycle_dropped {
-        format!("the step was cut at its next check, {dropped}")
+        format!("the step was cut at its next check, {dropped}{}", draw_note("; "))
     } else if w.step_cut && as_hard {
         format!("{who}: the limit cut this step at its next check (cut: {})", if w.cut_words.is_empty() { "the step that ran" } else { w.cut_words.as_str() })
     } else if as_hard {
@@ -4705,7 +4705,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // (`[run] drawing_grace_s`, lead 2026-11-17), as hard the limit itself.
         let erbs_soft = !ctl.limit.is_hard();
         // (The round's 1 s floor is the hard cut's; the soft bound counts from the drawing itself.)
-        let erbs_deadline = if erbs_soft { ctl.limit.draw_bound(t_draw) } else { ctl.deadline().map(|d| d.max(floor)) };
+        // An overrun cap that fires during ERBS stops it too (the snapshot at its start would not see it).
+        let erbs_deadline = if erbs_soft { [ctl.limit.draw_bound(t_draw), ctl.limit.cap_deadline()].into_iter().flatten().min() } else { ctl.deadline().map(|d| d.max(floor)) };
         let pts: BTreeMap<WireId, Vec<(usize, Vec2)>> = placed.iter().map(|(&w, v)| (w, v.iter().map(|x| (x.0, x.1)).collect())).collect();
         let layers: Vec<usize> = (0..b.n_signal).collect();
         let conn = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
@@ -4717,7 +4718,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     ctl.limit.note_draw_grace_erbs(r.timed_out);
                 }
                 if r.timed_out > 0 {
-                    warnings.push(format!("erbs_timeout: the time limit passed (or the run was cancelled) before {} stretch(es) had their ERBS; those runs are drawn the sequential way", r.timed_out));
+                    let by = if !erbs_soft || ctl.limit.hard_mode() {
+                        "the time limit passed (or the run was cancelled)"
+                    } else if ctl.limit.cap_hit() {
+                        "the overrun cap [run] timeout_overrun_s passed (or the run was cancelled)"
+                    } else {
+                        "[run] drawing_grace_s passed past the time limit (or the run was cancelled)"
+                    };
+                    warnings.push(format!("erbs_timeout: {by} before {} stretch(es) had their ERBS; those runs are drawn the sequential way", r.timed_out));
                 }
                 erbs_failed = r.failed.clone();
                 erbs_line = Some(format!(
@@ -6534,6 +6542,11 @@ mod tests {
         // a limit in the loop, then the drawing bound ran out in the drawing after it
         let then = wait_line(&WaitFacts { draw_grace_hit: true, ..loop_.clone() });
         assert!(then.contains("finished within [run] limit_grace_s") && then.contains("; then the drawing: every wire was drawn; [run] drawing_grace_s = 60 s ran out"), "{then}");
+        // a dropped cycle that is also a drawing step keeps the drawing bound's note (defensive)
+        let dd = wait_line(&WaitFacts { cycle_dropped: true, draw_grace_hit: true, draw_grace_erbs: 2, ..draw.clone() });
+        assert!(dd.contains("was dropped") && dd.contains("drawing_grace_s = 60 s ran out") && dd.contains("2 wire(s)"), "{dd}");
+        let ddh = wait_line(&WaitFacts { cycle_dropped: true, hard: true, draw_grace_hit: true, ..draw.clone() });
+        assert!(ddh.contains("was dropped") && ddh.contains("drawing_grace_s = 60 s ran out"), "{ddh}");
         // whole-route cycles
         let cyc = wait_line(&WaitFacts { whole_cycle: true, step: "drawing the traces".into(), ..loop_.clone() });
         assert!(cyc.contains("whole-route cycle") && cyc.contains("run to its end"), "{cyc}");
