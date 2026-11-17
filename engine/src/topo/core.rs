@@ -3795,7 +3795,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             reheat: opts.fluctuation_reheat,
             stable_window: opts.loop_stable_window.max(1),
             stable_gain_pct: opts.stable_gain_pct,
-            stable_patience: opts.stable_patience,
+            // headless: stop at stable (+ stable_patience); dialog: only with finish_when_stable (+ finish_patience)
+            stable_patience: if opts.stop_when_stable { opts.stable_patience } else { opts.finish_patience },
+            stop_at_stable: opts.stop_when_stable || opts.finish_when_stable,
             emphasis: Emphasis { via_start: opts.loop_via_start, via_end: opts.loop_via_end },
             obj,
         };

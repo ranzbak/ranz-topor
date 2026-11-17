@@ -317,10 +317,11 @@ result over all of them is the one you get.
 When the best result has gained less than `[optimize] stable_gain_pct` (0.5 %) over the last `stable_window` (4)
 rounds in every run, the dialog says **Routes stable** (also in its window title) and the **Cancel** button reads
 **OK**. It is the same button with the same action: stop and keep the best result so far — exactly the board shown
-under *Best so far*, which then goes to KiCad's DRC and the preview. By default the run also stops there by itself,
+under *Best so far*, which then goes to KiCad's DRC and the preview. By default the run does not stop there by itself
+(user 2026-11-16: "don't stop on stable"): it keeps going for marginal gains until OK, Cancel, the safety cap
+`[optimize] rounds` or the time limit (the TopoR way). `finish_when_stable = true` makes it finish at *Routes stable*
 like a normal finish (each run stops at the round in which it becomes stable; `[optimize] finish_patience` > 0 lets
-it look for small gains that many more rounds first). `finish_when_stable = false` keeps it going after *Routes
-stable* for marginal gains until OK, Cancel, the safety cap `[optimize] rounds` or the time limit (the TopoR way). Pressing OK at *Routes stable* is not a cancel: the summary
+it look for small gains that many more rounds first). Pressing OK at *Routes stable* is not a cancel: the summary
 says *Stopped: stable*. Headless runs (harness, MCP) stop at *Routes stable* by themselves (plus `stable_patience`
 rounds). The first round of the first run always uses the plain weights, and every run is reproducible: the same
 board and settings give the same result.

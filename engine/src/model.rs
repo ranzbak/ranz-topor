@@ -1199,8 +1199,8 @@ pub struct Options {
     /// M-B0 (`[optimize] stable_patience`): cycles a run that stops by itself keeps going after
     /// "stable" before it ends.
     pub stable_patience: usize,
-    /// M-B0 (`[optimize] finish_when_stable`): a run that does not stop at "stable" by itself (the
-    /// plugin's dialog) still finishes on its own once its best result has not improved for
+    /// M-B0 (`[optimize] finish_when_stable`, default false since user 2026-11-16 "don't stop on
+    /// stable"): true = a run that does not stop at "stable" by itself (the plugin's dialog) still finishes on its own once its best result has not improved for
     /// `finish_patience` more cycles after "stable" (a normal finish, no time warning); false =
     /// keep iterating until OK / Cancel / the safety cap / `wall_clock_s` (the TopoR way).
     pub finish_when_stable: bool,
@@ -1502,7 +1502,7 @@ impl Default for Options {
             stable_gain_pct: 0.5,
             stop_when_stable: true,
             stable_patience: 0,
-            finish_when_stable: true,
+            finish_when_stable: false,
             finish_patience: 0,
             runs: 5,
             allow_violations: true,
