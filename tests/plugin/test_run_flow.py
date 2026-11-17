@@ -986,7 +986,9 @@ def test_run_ok_at_routes_stable_is_not_a_cancel(app, eprom, tmp_path, reports):
     once the progress says stable ends it: the result is "stable", not cancelled, and is previewed and accepted
     like a finished run."""
     ui = ScriptedUi(accept=True, ok_at_stable=True)
-    cfg = CFG  # default finish_when_stable = False: the run waits for the OK poll
+    # default finish_when_stable = False: the run waits for the OK poll; a cap far away (eprom's loop runs ~20 cycles
+    # a second), so no run's loop can reach the cap before every run is stable and the OK comes
+    cfg = CFG.with_values({("optimize", "rounds"): 1000})
     board, ui, out = do_run(eprom, tmp_path, ui=ui, engine=_RealCancelEngine(), cfg=cfg)
     assert out.status == "accepted" and out.routed == 27
     assert out.stop_reason == "stable" and out.cancelled is False
