@@ -374,7 +374,10 @@ fn ok_at_stable_then_a_hard_limit_cuts_the_drawing_is_a_timeout() {
             assert!(r.timed_out && !r.converged, "{case}");
             let why = if dialog { "OK came at Routes stable, but the time limit then cut the drawing of the stable plan" } else { "the routes were stable, but the time limit then cut the drawing of the stable plan" };
             assert!(r.warnings.iter().any(|w| w.contains(why)), "{case}: {:?}", r.warnings);
-            assert!(!r.warnings.iter().any(|w| w.contains("the pour stitching ran to its end")), "{case}: {:?}", r.warnings);
+            if cut_line("the pour stitching was cut") {
+                // (eprom's one pour has no fill: its stitching has nothing to do and does run to its end)
+                assert!(!r.warnings.iter().any(|w| w.contains("the pour stitching ran to its end")), "{case}: {:?}", r.warnings);
+            }
             if board == "eprom" {
                 assert!(r.routed < r.connections_total, "{case}: the cut leaves connections undrawn (premise)");
             } else {
