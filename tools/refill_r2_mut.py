@@ -16,6 +16,9 @@ M = {
 }
 TESTS = ["tests/plugin/test_refill_matrix.py", "tests/plugin/test_config.py", "tests/plugin/test_report.py",
          "tests/plugin/test_ui_wx.py", "tests/plugin/test_messages.py", "tests/plugin/test_config_docs.py", "tests/plugin/test_toml_defaults.py"]
+import os
+if os.environ.get("RF2_TESTS"):
+    TESTS = os.environ["RF2_TESTS"].split()
 
 def main():
     tree, out = Path(sys.argv[1]), Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True)
