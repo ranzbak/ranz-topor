@@ -140,9 +140,11 @@ fn checker_accepts_a_track_at_exactly_the_clearance() {
     // Pad radius 800 000 + clearance 200 000 + half width 125 000 = 1 125 000.
     let exact = c.check_items(&[seg_item(1, 1_125_000, 250_000)]);
     assert!(exact.violations.is_empty(), "{:?}", exact.violations);
-    let closer = c.check_items(&[seg_item(1, 1_125_000 - 1, 250_000)]);
+    // 1 nm short passes (check::CHECK_TOL_NM, float rounding); 2 nm short is a violation.
+    assert!(c.check_items(&[seg_item(1, 1_125_000 - 1, 250_000)]).violations.is_empty());
+    let closer = c.check_items(&[seg_item(1, 1_125_000 - 2, 250_000)]);
     assert_eq!(closer.violations.len(), 1);
-    assert_eq!((closer.violations[0].gap, closer.violations[0].required), (199_999, 200_000));
+    assert_eq!((closer.violations[0].gap, closer.violations[0].required), (199_998, 200_000));
     let c5 = Checker::new(&m, &Options { margin_nm: 5_000, ..Options::default() });
     assert_eq!(c5.check_items(&[seg_item(1, 1_125_000, 250_000)]).violations.len(), 1);
 }
