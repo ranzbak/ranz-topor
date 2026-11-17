@@ -788,6 +788,10 @@ pub struct Drawer<'a> {
     /// Test-only (hook "erbs class keep off"): the round-i class test of the length factor's
     /// competitor ([`competitor_keeps_class`]) is skipped. Always false in real runs.
     pub test_no_class_keep: bool,
+    /// Test-only (hook "straight sequential run"): a run with an ERBS gets the straight segment
+    /// between its ends as its first sequential attempt (a competitor of another class, as the
+    /// exact window search gave qmtech ADV_CLK). Always false in real runs.
+    pub test_straight_seq: bool,
     /// Round i: the class test's reference paths, built at the first competitor.
     class_ref: Option<ClassRef>,
     /// M3 length factor: every legal ERBS a sequential run was drawn against (wire, layer, ERBS
@@ -880,6 +884,7 @@ impl<'a> Drawer<'a> {
             erbs: BTreeMap::new(),
             test_no_sequential: false,
             test_no_class_keep: false,
+            test_straight_seq: false,
             class_ref: None,
             erbs_long: Vec::new(),
             force: false,
@@ -2720,6 +2725,8 @@ impl<'a> Drawer<'a> {
                         }
                         _ => continue,
                     }
+                } else if attempt == 0 && self.test_straight_seq && band.is_some() {
+                    vec![s, e]
                 } else if attempt <= 2 {
                     if (attempt == 1 && pneck.is_none()) || (attempt == 2 && (neck.is_none() || !self.opts.neck_in_drawing)) {
                         continue;
@@ -2900,6 +2907,9 @@ impl<'a> Drawer<'a> {
                             let keep = |o: WireId| o != w && !drawn[o] && st.wires[o].alive && st.wires[o].net != wi.net;
                             let cr = self.class_ref.as_ref().expect("built");
                             let (xs, xe) = (cr.crossings(&pts, layer, &keep), cr.crossings(&k.2, layer, &keep));
+                            if std::env::var_os("TOPO_ERBS_DEBUG").is_some() {
+                                eprintln!("ERBS class check wire {w} L{layer}: competitor {xs:?}, the ERBS {xe:?}");
+                            }
                             if !competitor_keeps_class(&xs, &xe) {
                                 if std::env::var_os("TOPO_ERBS_DEBUG").is_some() {
                                     eprintln!("ERBS class kept wire {w} net {} L{layer}: competitor {:.3} mm crosses {xs:?}, the ERBS {xe:?}; pre {:?}", wi.net, ls / 1e6, pre_octi.as_ref().map(|v| v.len()));
@@ -3236,19 +3246,6 @@ impl<'a> Drawer<'a> {
         ok
     }
 
-    /// P6 (c): the drawn run `pts` of wire `w` (traversals `k0..=k1`, on `layer`) pulled taut
-    /// inside its own corridor: a vertex goes where the straight leg between its neighbours keeps
-    /// every rule (the checker against all copper accepted so far), keeps the wire on the same
-    /// side of every wire not drawn yet (the parity of its crossings with their nominal chords on
-    /// this layer in the run's triangles, and with the walls of their vias, [`Drawer::via_walls`],
-    /// is unchanged: the homotopy class stays) and, in the octilinear style, makes no 0/45/90
-    /// degree run any-angle. Repeated until nothing changes. A rubber band has no bumps: the
-    /// drawn wire is the shortest path of its homotopy class (Dayan 1997, pp. 15-16 and 22, the
-    /// spokes keep the spacing; Popov & Popov 2012, TopoR's minimum-length wire path under the
-    /// design rules), so the +-0.03 mm bumps and the spikes the lane walls left (P6 evidence,
-    /// interleaved_boundary) cannot survive, and KiCad's Cleanup finds nothing to merge there.
-    /// `None` when no vertex goes. O(passes x vertices x checker query).
-    #[allow(clippy::type_complexity)]
     /// The reference paths of the round-i class test ([`ClassRef`]). O(passes of all wires).
     fn build_class_ref(&self) -> ClassRef {
         let (st, pr) = (self.st, &self.b.proj);
@@ -3294,6 +3291,19 @@ impl<'a> Drawer<'a> {
         ClassRef { paths, grid }
     }
 
+    /// P6 (c): the drawn run `pts` of wire `w` (traversals `k0..=k1`, on `layer`) pulled taut
+    /// inside its own corridor: a vertex goes where the straight leg between its neighbours keeps
+    /// every rule (the checker against all copper accepted so far), keeps the wire on the same
+    /// side of every wire not drawn yet (the parity of its crossings with their nominal chords on
+    /// this layer in the run's triangles, and with the walls of their vias, [`Drawer::via_walls`],
+    /// is unchanged: the homotopy class stays) and, in the octilinear style, makes no 0/45/90
+    /// degree run any-angle. Repeated until nothing changes. A rubber band has no bumps: the
+    /// drawn wire is the shortest path of its homotopy class (Dayan 1997, pp. 15-16 and 22, the
+    /// spokes keep the spacing; Popov & Popov 2012, TopoR's minimum-length wire path under the
+    /// design rules), so the +-0.03 mm bumps and the spikes the lane walls left (P6 evidence,
+    /// interleaved_boundary) cannot survive, and KiCad's Cleanup finds nothing to merge there.
+    /// `None` when no vertex goes. O(passes x vertices x checker query).
+    #[allow(clippy::type_complexity)]
     pub(super) fn pull_taut(&self, w: WireId, k0: usize, k1: usize, layer: usize, lid: u32, pts: &[Vec2], pneck: &Option<super::exact::Neck>) -> Option<(Vec<Vec2>, Vec<Item>, Option<(f64, [f64; super::exact::NECK_ZONES])>)> {
         let cur = self.pull_pts(w, k0, k1, layer, pts, None)?;
         self.realise(w, layer, lid, &cur, pneck).map(|(its, pn)| (cur, its, pn))
@@ -4027,6 +4037,29 @@ mod tests {
         assert_eq!(erbs_vs_sequential(31.6, 10.0, 0.05, Some(30.0)), Some(true));
         // no band: always compared
         assert_eq!(erbs_vs_sequential(1.0, 0.0, 0.05, Some(0.9)), Some(true));
+    }
+
+    /// Round i: crossings are counted by orientation signs (proper crossings), per wire; touching
+    /// or collinear runs are no crossing, a path outside the run's box is not looked at; the
+    /// competitor keeps the class only if it crosses no wire more often than the ERBS.
+    #[test]
+    fn class_test_counts_proper_crossings_per_wire() {
+        let run = [v(0.0, 0.0), v(10.0, 0.0)];
+        let zig = [v(2.0, -1.0), v(3.0, 1.0), v(4.0, -1.0)];
+        let touch = [v(5.0, 0.0), v(5.0, 3.0)];
+        let along = [v(6.0, 0.0), v(8.0, 0.0)];
+        let near = [v(1.0, 1e-6), v(9.0, 1e-6)];
+        let far = [v(20.0, -1.0), v(20.0, 1.0)];
+        let xs = crossings_per_wire(&run, &[(1, &zig), (2, &touch), (3, &along), (4, &near), (5, &far)]);
+        assert_eq!(xs, BTreeMap::from([(1, 2)]));
+        assert!(crossings_per_wire(&run[..1], &[(1, &zig)]).is_empty());
+        let m = |v: &[(WireId, usize)]| v.iter().copied().collect::<BTreeMap<_, _>>();
+        assert!(competitor_keeps_class(&m(&[]), &m(&[])));
+        assert!(competitor_keeps_class(&m(&[(1, 2)]), &m(&[(1, 2)])));
+        assert!(competitor_keeps_class(&m(&[(1, 1)]), &m(&[(1, 2), (3, 1)])));
+        assert!(!competitor_keeps_class(&m(&[(1, 1)]), &m(&[])));
+        assert!(!competitor_keeps_class(&m(&[(1, 3)]), &m(&[(1, 2)])));
+        assert!(!competitor_keeps_class(&m(&[(1, 1), (2, 1)]), &m(&[(1, 1)])));
     }
 
     #[test]

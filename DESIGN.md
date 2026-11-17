@@ -162,7 +162,7 @@ Unit: `crossing_spokes_share_a_passed_cell`, `loop_legs_agree_on_a_point_near_th
 all earlier erbs/radii/m3-pattern tests; mutants per rule; sleeve dumps of eprom/wiccon/esp/qmtech before/after
 (bad-stretch list, fallbacks, len/band, ERBS time); deterministic ladder seq + erbs.
 
-## Round i (2026-11-17): the length factor's sequential competitor keeps the undrawn ERBS (draft, sent to the lead)
+## Round i (2026-11-17): the length factor's sequential competitor keeps the undrawn ERBS (approved by the lead 2026-11-17)
 
 ### Finding (qmtech erbs ADV_DE, round g -> h: 28.89 -> 38.98 mm, detour 1.12 -> 1.51, new ADV_CLK/ADV_DE crossing + short)
 Not the rough path. Dumps of the ladder's own run (hz-runs/m3i-dump-tip, -main; repro m3i-repro1 with the new
@@ -181,18 +181,30 @@ Not the rough path. Dumps of the ladder's own run (hz-runs/m3i-dump-tip, -main; 
 
 ### Rule (draw.rs, erbs mode only: `kept` is set only there, seq copper unchanged)
 A sequential run that competes with a legal ERBS (`erbs_vs_sequential`) replaces it only if, for every other-net
-wire not drawn yet, it crosses that wire's ERBS on this layer no more often than the kept ERBS does (proper
-segment crossings). Otherwise the ERBS is drawn (it is in the plan's class; the competitor would take a path
+wire not drawn yet, it crosses that wire's reference path on this layer no more often than the kept ERBS does
+(`competitor_keeps_class`). The reference path is the wire's ERBS run, or, on a layer where it has none (sleeve
+failed, no band), its planned path: the chords of its passes through its turn points (`build_class_ref`), so no
+undrawn wire is skipped. Crossings are counted topologically: proper segment crossings by orientation signs
+(`seg_proper`), no distance threshold. Candidates come from a 1 mm grid of the reference segments, queried by
+the boxes of the run's segments (no all-pairs scan); the grid is built once per drawing, at the first comparison. Otherwise the ERBS is drawn (it is in the plan's class; the competitor would take a path
 the plan gave another wire: a planned short). Not a threshold on a judgement value: it is the precondition of
 the comparison ("a sequential run of the same class", `erbs_vs_sequential`'s own doc), checked instead of
 assumed. Sources: Dayan 1997 PDF pp. 25-26 (the ERBS is a minimal member of the topological class; the
 realisation keeps the class), PDF p. 32 (spokes keep the room of the others); TopoR way: the topology is decided
 in the topological phase, the drawing only realises it (Polubasov 2010, docs/literature/polubasov2010-topor-inside.html, section 1: TopoR is a topological router, "стадии трассировки и метризации разделены", routing and metrisation are separate stages).
-The crossing count vs the undrawn ERBS is our own reasoning (two runs of one class cross a third wire's run the
-same number of times only up to planned crossings, which the kept ERBS carries too).
+Counting crossings: Erickson, docs/literature/erickson-shortest-homotopic.html, section "Crossing Sequences"
+("Two paths are homotopic if and only if they have identical reduced crossing sequences"); comparing the counts
+per wire (not the reduced sequences) is our own simplification: a run that crosses an undrawn wire more often
+than the ERBS cannot be of the ERBS's class. The engine already holds the same invariant for the taut pull
+(`Drawer::pull_taut`: a vertex goes only if the parity of the crossings with undrawn wires' chords is unchanged).
 
 ### Invariants / tests
-- The competitor never crosses an undrawn other-net ERBS more often than the kept ERBS (unit test of the
-  predicate; drawing test: an inner wire drawn first whose shortcut crosses the outer's ERBS keeps its ERBS).
-- Mutant: predicate always false (competitor always eligible) must fail the drawing test.
+- The competitor never crosses an undrawn other-net reference path more often than the kept ERBS
+  (draw.rs `class_test_counts_proper_crossings_per_wire`; tests/topo_m3_class_keep.rs on the synthetic
+  pattern `shortcut_across` (harness/radii_patterns.py, proposed, needs the user's approval): A drawn first,
+  its straight competitor forced by the test hook "straight sequential run" crosses B: A keeps its ERBS, no
+  crossing; with "erbs class keep off" A is straight and B is drawn across it, the qmtech symptom. With B's
+  sleeve failed ("fail erbs sleeve") B's planned path keeps A's ERBS the same way.)
+- Mutant: predicate always true (competitor always eligible) must fail the drawing test.
+- Seq mode untouched: `kept` is set only with realise = "erbs".
 - Ladder: seq copper identical on the 5 boards; erbs per-connection table for qmtech/esp (ADV_CLK, ADV_DE, net 55).
