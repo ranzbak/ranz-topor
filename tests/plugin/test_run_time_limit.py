@@ -112,7 +112,9 @@ def test_without_a_change_the_limit_is_fixed_and_reported(app, eprom, tmp_path, 
                                        # what the limit acting as hard cut (hard and the cap: one path): nothing
                                        "cut": "none", "cut_steps": [],
                                        # limit_grace_s (default 30 s): the loop step's wait past the limit
-                                       "wait_s": 0.0, "cycle_dropped": False, "grace_s": 30.0, "grace_hit": False}
+                                       "wait_s": 0.0, "cycle_dropped": False, "grace_s": 30.0, "grace_hit": False,
+                                       # drawing_grace_s (default 60 s): the drawing's optional passes
+                                       "draw_grace_s": 60.0, "draw_grace_hit": False, "draw_grace_erbs": 0}
     assert "limit 60 s wall" in "\n".join(out.report.summary_lines())
 
 
@@ -161,3 +163,58 @@ def test_cpu_no_limit_during_the_run(app, eprom, tmp_path, reports, cpu_counter)
     _, _, out = do_run(eprom, tmp_path, ui=ui, cfg=cfg, engine=eng)
     assert not eng.jobs[0].cancelled and out.router_cpu_s > 3.0
     assert _res(out)["time_limit"]["final_s"] == 0.0
+
+
+# ---------------------------------------------------------------- the time limit wait line (TIME_LIMIT_WAIT)
+def _patch_limit(limit):
+    def patch(out_json):
+        d = json.loads(out_json)
+        d["limit"] = {**(d.get("limit") or {}), **limit}
+        return json.dumps(d)
+    return patch
+
+
+_LIM = {"limit_s": 60.0, "mode": "soft", "reached": True, "step": "TopoR loop on the topology", "overrun_s": 1.0,
+        "cap_s": None, "cap_hit": False, "cut": "none", "cut_steps": [], "wait_s": 0.0}
+
+
+def _wait_lines(out):
+    return [ln for ln in _log(out).splitlines() if "time limit wait:" in ln]
+
+
+def test_a_dropped_cycle_with_an_unbounded_grace_is_logged_not_a_crash(app, eprom, tmp_path, reports):
+    """verify-lw r2 finding 1: grace_s None (limit_grace_s negative) with a dropped cycle (cap / hard / CPU harden)
+    raised a TypeError in run.py and ended the run INTERNAL; now it is logged, the result written."""
+    eng = RecordingEngine(hold=2, patch=_patch_limit({**_LIM, "grace_s": None, "grace_hit": False, "cycle_dropped": True,
+                                                      "cap_hit": True, "cap_s": 5.0}))
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=CFG, engine=eng, strict=False)
+    assert out.status != "error", _log(out)[-2000:]
+    lines = _wait_lines(out)
+    assert lines and "was dropped" in lines[0] and "overrun cap" in lines[0] and "ran out" not in lines[0], lines
+    assert _res(out)["time_limit"]["grace_s"] is None
+
+
+def test_a_cap_cut_cycle_is_not_called_a_grace_run_out(app, eprom, tmp_path, reports):
+    eng = RecordingEngine(hold=2, patch=_patch_limit({**_LIM, "grace_s": 30.0, "grace_hit": False, "cycle_dropped": True,
+                                                      "cap_hit": True, "cap_s": 5.0}))
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=CFG, engine=eng, strict=False)
+    lines = _wait_lines(out)
+    assert lines and "limit_grace_s = 30 s ran out" not in lines[0] and "was dropped" in lines[0], lines
+
+
+def test_a_grace_run_out_and_a_drawing_bound_are_logged(app, eprom, tmp_path, reports):
+    eng = RecordingEngine(hold=2, patch=_patch_limit({**_LIM, "grace_s": 30.0, "grace_hit": True, "cycle_dropped": True,
+                                                      "wait_s": 30.4, "draw_grace_s": 60.0, "draw_grace_hit": True,
+                                                      "draw_grace_erbs": 0}))
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=CFG, engine=eng, strict=False)
+    lines = _wait_lines(out)
+    assert lines and "TopoR loop on the topology ran 30.4 s past the limit" in lines[0], lines
+    assert "run.limit_grace_s = 30 s ran out" in lines[0] and "run.drawing_grace_s = 60 s ran out" in lines[0], lines
+    tl = _res(out)["time_limit"]
+    assert tl["draw_grace_hit"] is True and tl["grace_hit"] is True and tl["wait_s"] == 30.4
+
+
+def test_no_wait_line_when_the_limit_was_not_reached_in_a_waiting_step(app, eprom, tmp_path, reports):
+    eng = RecordingEngine(hold=2, patch=_patch_limit({**_LIM, "reached": False, "grace_s": 30.0}))
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=CFG, engine=eng, strict=False)
+    assert _wait_lines(out) == []

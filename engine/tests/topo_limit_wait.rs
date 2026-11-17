@@ -141,14 +141,84 @@ fn the_loop_runs_inside_the_grace_scope() {
     assert_eq!(scope, Some(true), "stop_requested saw the grace over inside the loop step");
 }
 
-/// A limit that falls in the drawing is named so, and the wait line says the grace does not bound it.
+/// A limit that falls in the drawing is named so; the wait is that of the whole drawing (its via
+/// reduction and pour stitching too, lead 2026-11-17), which is the run's last step: no later step
+/// change ends it, so it is the time from the limit to the result.
 #[test]
-fn a_limit_in_the_drawing_is_named_and_not_called_a_loop_wait() {
+fn a_limit_in_the_drawing_counts_the_whole_drawing_and_is_not_called_a_loop_wait() {
     let (r, _, _) = run_at(30.0, "fail wire drawing", 60);
     let l = r.limit.as_ref().expect("limit report");
     assert!(l.reached && !l.grace_hit && !l.cycle_dropped && l.wait_s > 0.05, "{l:?}");
+    assert!((l.wait_s - l.overrun_s).abs() < 0.005, "the drawing ran to the result: wait {} vs overrun {}", l.wait_s, l.overrun_s);
     let w = r.warnings.iter().find(|w| w.starts_with("time limit wait:")).unwrap_or_else(|| panic!("{:?}", r.warnings));
-    assert!(!w.contains("TopoR loop on") && w.contains("bounds only the TopoR loop step") && !w.contains("finished within"), "{w}");
+    assert!(!w.contains("TopoR loop on") && w.contains("(part of the drawing)") && w.contains("every wire was drawn") && !w.contains("finished within [run] limit_grace_s"), "{w}");
+    assert!(w.contains("drawing_grace_s = 60 s"), "{w}");
+}
+
+/// Hook points: the limit is reached the first time `at` is seen (Cancel too when `cancel`), the
+/// time of each point is kept (seconds on the limit's clock).
+fn run_hooked(o: &Options, at: &'static str, cancel: bool, naps: &'static [(&'static str, u64)]) -> (RouteResult, Vec<(String, f64)>) {
+    let mut ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let (l2, c2, once) = (ctl.limit.clone(), ctl.cancel.clone(), Arc::new(AtomicBool::new(false)));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<(String, f64)>::new()));
+    let s2 = seen.clone();
+    ctl.set_test_hook(move |p| {
+        if p == at && !once.swap(true, Ordering::SeqCst) {
+            l2.reach();
+            if cancel {
+                c2.store(true, Ordering::SeqCst);
+            }
+        }
+        if let Some(&(_, ms)) = naps.iter().find(|(n, _)| *n == p) {
+            std::thread::sleep(Duration::from_millis(ms));
+        }
+        s2.lock().unwrap().push((p.to_string(), l2.elapsed_s()));
+        false
+    });
+    let r = route_with(&crop(), o, &ctl);
+    let seen = seen.lock().unwrap().clone();
+    (r, seen)
+}
+
+/// The TopoR loop step ends where the loop returns, not at the drawing's first stage (the pick and
+/// the cut necks between belong to the drawing): a nap after the loop's end is no wait of the loop.
+#[test]
+fn the_loop_step_ends_where_the_loop_returns() {
+    let (r, seen) = run_hooked(&topor(-1.0), "loop move", false, &[("loop ended", 200)]);
+    let l = r.limit.as_ref().expect("limit report");
+    let t_lim = l.limit_s;
+    let t_end = seen.iter().find(|(p, _)| p == "loop ended").map(|x| x.1).expect("loop ended seen") - 0.2;
+    assert!(l.reached && l.step.contains("TopoR loop"), "{l:?}");
+    assert!((l.wait_s - (t_end - t_lim)).abs() < 0.02, "wait {} vs loop end - limit {}", l.wait_s, t_end - t_lim);
+}
+
+/// A Cancel that ends the loop's cycle is no cycle the limit dropped.
+#[test]
+fn a_cancel_in_the_loop_is_no_dropped_cycle() {
+    let (r, _) = run_hooked(&topor(-1.0), "loop move", true, &[]);
+    let l = r.limit.as_ref().expect("limit report");
+    assert!(l.reached && !l.cycle_dropped && !l.grace_hit, "{l:?}");
+}
+
+fn hard() -> Options {
+    Options::from_json(r#"{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "runs": 1, "topo_rounds": 3, "timeout_mode": "hard"}"#).expect("options parse")
+}
+
+/// Hard mode: the line is there too, and says the step was cut (not that it ran to its end).
+#[test]
+fn in_hard_mode_the_wait_line_says_the_step_was_cut() {
+    let (r, _) = run_hooked(&hard(), "loop move", false, &[("loop move", 0)]);
+    let l = r.limit.as_ref().expect("limit report");
+    assert!(l.reached && l.mode == "hard" && l.cycle_dropped, "{l:?}");
+    let w = r.warnings.iter().find(|w| w.starts_with("time limit wait:")).unwrap_or_else(|| panic!("{:?}", r.warnings));
+    assert!(w.contains("[run] timeout_mode = hard") && w.contains("was dropped") && w.contains("that step stopped after"), "{w}");
+    assert!(!w.contains("ran to its end") && !w.contains("limit_grace_s"), "{w}");
+    // each wire naps past the round's 1 s floor (the hard cut's minimum), so the drawing is cut
+    let (r, _) = run_hooked(&hard(), "fail wire drawing", false, &[("fail wire drawing", 400)]);
+    let l = r.limit.as_ref().expect("limit report");
+    let w = r.warnings.iter().find(|w| w.starts_with("time limit wait:")).unwrap_or_else(|| panic!("{:?}", r.warnings));
+    assert!(l.cut == "drawing" && w.contains("the limit cut this step") && w.contains("the drawing of the traces") && !w.contains("ran to its end"), "{l:?} {w}");
 }
 
 /// A dropped cycle is always reported, whatever the wait rounds to.

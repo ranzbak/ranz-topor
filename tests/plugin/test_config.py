@@ -254,3 +254,19 @@ def test_removed_keys_are_ignored_with_a_warning(tmp_path):
     assert cfg.get("run", "timeout_s") == 30.0 and cfg.get("expert", "drc_loop_cap") == 3
     text = render_toml(Config.defaults())
     assert "[ripup]" not in text and "[iterations]" not in text and "threads =" not in text
+
+
+def test_any_negative_grace_is_accepted_as_no_bound(tmp_path):
+    """limit_grace_s / drawing_grace_s: any negative value = no bound (user 2026-11-17): -1 and -5 load without a
+    finding and reach the engine options as given; the defaults are 30 s and 60 s."""
+    from topor.schema import SETTINGS
+    by = {(s.section, s.key): s for s in SETTINGS}
+    assert by[("run", "limit_grace_s")].default == 30 and by[("run", "drawing_grace_s")].default == 60
+    for v in (-1, -5):
+        (tmp_path / "topor.toml").write_text(f"version = 1\n[run]\nlimit_grace_s = {v}\ndrawing_grace_s = {v}\n")
+        cfg, findings = load_config(tmp_path)
+        assert "CFG_VALUE" not in codes(findings), findings
+        assert cfg.get("run", "limit_grace_s") == v and cfg.get("run", "drawing_grace_s") == v
+    (tmp_path / "topor.toml").write_text("version = 1\n[run]\ndrawing_grace_s = 90000\n")
+    _, findings = load_config(tmp_path)
+    assert "CFG_VALUE" in codes(findings)

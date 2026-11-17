@@ -294,6 +294,13 @@ pub struct LimitReport {
     pub wait_s: f64,
     /// A TopoR loop cycle was cut by the limit (grace or cap) and dropped: the best variant so far was drawn.
     pub cycle_dropped: bool,
+    /// `[run] drawing_grace_s` (`None` = no bound, or hard mode): seconds the drawing may run past the
+    /// later of the limit and its start before its optional passes (via reduction, ERBS) stop.
+    pub draw_grace_s: Option<f64>,
+    /// The drawing bound ran out: an optional pass stopped (every wire still drawn).
+    pub draw_grace_hit: bool,
+    /// Wires drawn the sequential way because the drawing bound cut their ERBS (`realise = "erbs"`).
+    pub draw_grace_erbs: usize,
 }
 
 /// A routed differential-pair connection (D7), nm. `from` / `to` are the P connection's pads.

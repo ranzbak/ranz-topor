@@ -909,6 +909,12 @@ pub struct Options {
     /// reported (`TIME_LIMIT_WAIT`). `0` = stop at the next check; negative = no bound. Never
     /// changes the order of the moves (only read once the limit has passed).
     pub limit_grace_s: f64,
+    /// `[run] drawing_grace_s`: with the soft time limit, seconds the drawing may run past the later
+    /// of the limit and its own start before its optional passes (the via reduction; ERBS, whose
+    /// stretches then draw the sequential way) stop. Every wire is drawn whatever the value (never
+    /// drop); the pour stitching is never cut by it. `0` = they stop at their first check past the
+    /// limit; negative = no bound. Read only once the limit has passed.
+    pub drawing_grace_s: f64,
     /// An accepted path longer than this factor times its slot-free ghost counts as an absurd
     /// detour and triggers rip-up of the blockers.
     pub detour_factor: f64,
@@ -1443,6 +1449,7 @@ impl Default for Options {
             timeout_mode: "soft".into(),
             timeout_overrun_s: OVERRUN_AUTO,
             limit_grace_s: 30.0,
+            drawing_grace_s: 60.0,
             detour_factor: 2.0,
             factors: Default::default(),
             drc_loop_cap: 5,
@@ -1687,6 +1694,11 @@ mod tests {
         assert_eq!(Options::from_json(r#"{"limit_grace_s": 0}"#).map(|o| o.limit_grace_s), Ok(0.0));
         assert_eq!(Options::from_json(r#"{"limit_grace_s": -1}"#).map(|o| o.limit_grace_s), Ok(-1.0));
         assert_eq!(Options::from_json("{}").map(|o| o.limit_grace_s), Ok(30.0));
+        assert_eq!(Options::from_json(r#"{"limit_grace_s": -5}"#).map(|o| o.limit_grace_s), Ok(-5.0));
+        assert_eq!(o.drawing_grace_s, 60.0);
+        assert_eq!(Options::from_json("{}").map(|o| o.drawing_grace_s), Ok(60.0));
+        assert_eq!(Options::from_json(r#"{"drawing_grace_s": -5}"#).map(|o| o.drawing_grace_s), Ok(-5.0));
+        assert_eq!(Options::from_json(r#"{"drawing_grace_s": 0}"#).map(|o| o.drawing_grace_s), Ok(0.0));
     }
 
     #[test]

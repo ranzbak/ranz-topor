@@ -174,3 +174,30 @@ def test_time_limit_text_names_a_dropped_cycle_even_with_no_wait():
     assert "dropped" in time_limit_text({**base, "cycle_dropped": True})
     assert "past it" in time_limit_text({**base, "wait_s": 2.5, "cycle_dropped": False})
     assert "that step ran" not in time_limit_text({**base, "cycle_dropped": False})
+
+
+def test_time_limit_text_takes_any_grace_the_schema_accepts():
+    """A None grace (limit_grace_s negative = unbounded) or a garbled one never raises; the cause is true for the mode."""
+    from topor.report import grace_text, time_limit_text, wait_log_text
+    base = {"final_s": 60.0, "start_s": 60.0, "changes": [], "clock": "wall", "reached": True, "step": "TopoR loop on the topology",
+            "mode": "soft", "overrun_s": 1.0, "wait_s": 0.5, "cycle_dropped": True}
+    for g in (None, -1, -5, "x", float("nan")):
+        t = time_limit_text({**base, "grace_s": g, "cap_hit": True})
+        assert "overrun cap" in t and "limit_grace_s = 0 s" not in t and "ran out" not in t, (g, t)
+        assert "unbounded" in grace_text(g), g
+        assert "limit_grace_s = 0 s" not in wait_log_text({**base, "grace_s": g}), g
+    assert grace_text(30) == "run.limit_grace_s = 30 s" and grace_text(0.5) == "run.limit_grace_s = 0.5 s"
+    # the grace is named as the cause only when it ran out
+    hit = wait_log_text({**base, "grace_s": 30.0, "grace_hit": True})
+    assert "run.limit_grace_s = 30 s ran out" in hit and "was dropped" in hit
+    cap = wait_log_text({**base, "grace_s": 30.0, "grace_hit": False, "cap_hit": True})
+    assert "ran out" not in cap and "overrun cap" in cap and "was dropped" in cap
+    hard = wait_log_text({**base, "mode": "hard", "grace_s": 30.0})
+    assert "timeout_mode = hard" in hard and "ran out" not in hard
+    none = wait_log_text({**base, "cycle_dropped": False, "grace_s": 30.0})
+    assert "no cycle was dropped" in none
+    draw = wait_log_text({**base, "step": "drawing the traces", "cycle_dropped": False, "draw_grace_hit": True, "draw_grace_s": 60.0,
+                          "draw_grace_erbs": 2})
+    assert "run.drawing_grace_s = 60 s ran out" in draw and "every wire was drawn" in draw and "2 ERBS stretch" in draw
+    assert "drawing_grace_s unbounded" in wait_log_text({**base, "draw_grace_hit": True, "draw_grace_s": None})
+    assert "drawing_grace_s = 60 s ran out" in time_limit_text({**base, "cycle_dropped": False, "draw_grace_hit": True, "draw_grace_s": 60})
