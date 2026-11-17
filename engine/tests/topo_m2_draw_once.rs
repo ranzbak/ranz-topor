@@ -192,13 +192,18 @@ fn initial_plan_free(m: &BoardModel, extra: &str) -> RouteResult {
     run(m, &topor(&format!(r#"{extra}, "opt_loop": "cycles", "topo_rounds": 1"#)))
 }
 
+/// The fixture named `fx`: "eprom" is the small default-CI board, anything else a crop file.
+fn fixture(fx: &str) -> BoardModel {
+    if fx == "eprom" { eprom() } else { crop(fx) }
+}
+
 fn a_limit_reached_in_p3_p4_still_draws_the_initial_plan_on(crops: &[&str]) {
     // The limit is reached while the layer assignment and the rip-up rounds run (as the plugin's
     // CPU clock does it): they finish, and their plan is drawn, completely: the drawing's own
     // steps too (verify-m2 F2: the via reduction got 0 s past the limit, and the plane stubs
     // stopped at it): their counts are those of the same plan drawn without a limit.
     for fx in crops.iter().copied() {
-        let m = crop(fx);
+        let m = fixture(fx);
         let o = topor(r#", "runs": 1, "capacity_model": "cuts""#);
         // The reference: the initial plan drawn with no limit.
         let free = initial_plan_free(&m, r#", "runs": 1, "capacity_model": "cuts""#);
@@ -227,6 +232,13 @@ fn a_limit_reached_in_p3_p4_still_draws_the_initial_plan_on(crops: &[&str]) {
         assert_eq!(via_reduction(&r), via_reduction(&free), "{fx}: the soft limit does not cut the via reduction");
         assert_eq!(plane_stubs(&r), plane_stubs(&free), "{fx}");
     }
+}
+
+#[test]
+fn a_limit_reached_in_p3_p4_still_draws_the_initial_plan_eprom() {
+    // Default CI (1.2 s): the soft limit in P3/P4 must not run them with the hard stop (kills the
+    // core.rs mutant that does; the esp crop below is the slow-set twin, vm-load verify round 1).
+    a_limit_reached_in_p3_p4_still_draws_the_initial_plan_on(&["eprom"]);
 }
 
 #[test]
@@ -259,6 +271,8 @@ fn cancel_before_any_plan_is_a_loud_error() {
     }
 }
 
+// Note (verify round 1, low): the esp crop's P3 has 0 moves, so Cancel ignored in P3/P4 moves is not
+// killed here; the cancel_latency qmtech test kills that mutant in CI. No change needed.
 fn cancel_in_p3_p4_keeps_no_plan_and_says_so_on(crops: &[&str]) {
     // Cancel while the layer assignment and the rip-up rounds run: the initial routing (P2-P4) is
     // one step and its plan counts as a variant only once P4 ends (user 2026-11-13, M2.TL); M0's
