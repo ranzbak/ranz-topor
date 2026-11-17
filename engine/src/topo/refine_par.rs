@@ -47,8 +47,6 @@ use crate::geom::Vec2;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-const EPS: f64 = 1e-9;
-
 /// One candidate move: the label changes `((wire, event), layer)`.
 pub(crate) type Mv = Vec<((WireId, usize), i32)>;
 
@@ -398,6 +396,8 @@ struct Writes {
 /// A candidate's result.
 struct CandOut {
     keep: bool,
+    /// The price change (the keep test's left side; folded into the stream fingerprint).
+    delta: f64,
     /// End sites it computed, in order (replayed by the scan).
     fresh: Vec<(EndKey, Site)>,
     writes: Option<Writes>,
@@ -445,13 +445,13 @@ fn evaluate(fx: &Frame, base: &Arrays, ov: &mut Overlay, mid: Option<&FxHashMap<
     let ew = 1.0;
     let d_cut = 0.0;
     let d_oc: f64 = ov.costs.iter().map(|&i| ew * (ov.cval[i].0 - base.cost[i]) + (ov.cval[i].1 - base.sq[i])).sum::<f64>() + fx.price() * (new_ns as f64 - old_ns as f64) + d_cut;
-    let keep = (new_wc - old_wc) + d_oc < -EPS && (ctx.add_vias || new_wc <= old_wc + EPS);
+    let keep = super::refine::keep_rule(new_wc, old_wc, d_oc, ctx.add_vias);
     let writes = keep.then(|| Writes {
         passes: ov.passes.iter().map(|&p| (p, ov.play[p], ov.pdisc[p])).collect(),
         wires: ov.wires.iter().map(|&w| (w, ov.wiv[w].clone(), ov.wks[w].clone(), ov.wns[w])).collect(),
         costs: ov.costs.iter().map(|&i| (i, ov.cval[i].0, ov.cval[i].1)).collect(),
     });
-    Some(CandOut { keep, fresh: std::mem::take(&mut ov.fresh), writes, move_ns: t0.elapsed().as_nanos() as u64, vp_n: ov.vp_n, vp_ns: ov.vp_ns })
+    Some(CandOut { keep, delta: (new_wc - old_wc) + d_oc, fresh: std::mem::take(&mut ov.fresh), writes, move_ns: t0.elapsed().as_nanos() as u64, vp_n: ov.vp_n, vp_ns: ov.vp_ns })
 }
 
 /// Copy a kept candidate's writes and labels into the master. O(writes).
@@ -512,6 +512,27 @@ pub mod stats {
     pub static LANE_EPOCHS: AtomicU64 = AtomicU64::new(0);
 }
 
+/// Tests (tests/par_refine_dense.rs): with `AT` > 0 the run thread's lane sets `FLAG` (the run's
+/// cancel flag) right after it evaluated its `AT`-th candidate (counted process-wide in `SEEN`), so
+/// a Cancel arrives inside an epoch at a known candidate. Off (`AT` = 0): one relaxed load per
+/// candidate.
+pub mod test_cancel {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+    use std::sync::{Arc, Mutex};
+    pub static AT: AtomicU64 = AtomicU64::new(0);
+    pub static SEEN: AtomicU64 = AtomicU64::new(0);
+    pub static FLAG: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
+
+    pub(crate) fn tick() {
+        let at = AT.load(Relaxed);
+        if at > 0 && SEEN.fetch_add(1, Relaxed) + 1 == at {
+            if let Some(f) = FLAG.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+                f.store(true, Relaxed);
+            }
+        }
+    }
+}
+
 /// The lane loop: take the next candidate of the stream, evaluate it, report; until the
 /// generator ends, a candidate before the next one to take was kept, or the run stops.
 #[allow(clippy::too_many_arguments)]
@@ -542,6 +563,9 @@ fn lane(fx: &Frame, base: &Arrays, evl: &[Vec<LEv>], ctx: &Around, ep: &Mutex<Ep
         };
         let stop = || stopping.load(Ordering::Relaxed) || (min_keep.load(Ordering::Relaxed) < seq && seq >= window);
         let out = evaluate(fx, base, ov, None, evl, &mv, ctx, &stop);
+        if run_thread {
+            test_cancel::tick();
+        }
         let mut g = lock();
         g.res[seq] = match out {
             Some(o) => {
@@ -628,7 +652,7 @@ pub(crate) fn run(ctx: &Around, cm: &mut CapModel, evl: &mut [Vec<LEv>], st_out:
             assert!(mv == ep.gen[seq], "par-refine: the cursor's replay differs from the epoch's stream at candidate {seq}");
             scanned = seq + 1;
             st_out.evals += 1;
-            st_out.stream = super::refine::stream_fold(st_out.stream, &mv, out.keep);
+            st_out.stream = super::refine::stream_fold(st_out.stream, &mv, out.delta, out.keep);
             if out.keep {
                 kept = Some((seq, out));
                 break;

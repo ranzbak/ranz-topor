@@ -60,12 +60,57 @@ pub struct RefineStats {
     pub fin: Option<FinalCap>,
 }
 
-/// One step of [`RefineStats::stream`]: the candidate `mv` and whether it was kept. O(|mv|).
-pub(crate) fn stream_fold(h: u64, mv: &[((WireId, usize), i32)], keep: bool) -> u64 {
+/// One step of [`RefineStats::stream`]: the candidate `mv`, its price change `delta` (bit for
+/// bit: the lanes promise the serial summation order) and whether it was kept. O(|mv|).
+pub(crate) fn stream_fold(h: u64, mv: &[((WireId, usize), i32)], delta: f64, keep: bool) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut x = std::collections::hash_map::DefaultHasher::new();
-    (h, mv, keep).hash(&mut x);
+    (h, mv, delta.to_bits(), keep).hash(&mut x);
     x.finish()
+}
+
+/// The keep test of a candidate (serial loop and lanes alike): the price with the wires' layer
+/// changes (`new_wc` vs `old_wc`) and the capacity change `d_oc` drops by more than [`EPS`], and
+/// without `add_vias` the wires' own price does not grow. O(1).
+pub(crate) fn keep_rule(new_wc: f64, old_wc: f64, d_oc: f64, add_vias: bool) -> bool {
+    (new_wc - old_wc) + d_oc < -EPS && (add_vias || new_wc <= old_wc + EPS)
+}
+
+/// Tests (par-refine): with [`shadow::ON`] every lane refinement ([`refine`] without the cut model
+/// and without `reference`) also runs the serial reference loop on its own model of the same
+/// labels and panics unless labels, model arrays, end-site memo, evaluations, stream and kept
+/// moves are equal bit for bit (a refinement a stop cut is not compared). Process-wide; a test
+/// binary sets it for itself. Off = one relaxed load per refinement.
+pub mod shadow {
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    pub static ON: AtomicBool = AtomicBool::new(false);
+    /// Refinements compared, and those of them that kept at least one move.
+    pub static CHECKED: AtomicU64 = AtomicU64::new(0);
+    pub static CHECKED_MOVED: AtomicU64 = AtomicU64::new(0);
+}
+
+/// [`shadow`]: the first difference between the lanes' result and the reference's, if any.
+fn shadow_diff(a: (&CapModel, &[Vec<LEv>], &RefineStats), b: (&CapModel, &[Vec<LEv>], &RefineStats)) -> Option<String> {
+    let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<u64>>();
+    let disc = |v: &[Disc]| v.iter().map(|d| (d[0].to_bits(), d[1].to_bits())).collect::<Vec<_>>();
+    let labels = |e: &[Vec<LEv>]| e.iter().map(|w| w.iter().map(|&(k, s, l)| (k, s.to_bits(), l)).collect::<Vec<_>>()).collect::<Vec<_>>();
+    let (ca, ea, sa) = a;
+    let (cb, eb, sb) = b;
+    let checks: [(&str, bool); 12] = [
+        ("labels", labels(ea) == labels(eb)),
+        ("evaluations", sa.evals == sb.evals),
+        ("stream", sa.stream == sb.stream),
+        ("kept moves", sa.moves == sb.moves),
+        ("pass layers", ca.pass_layer == cb.pass_layer),
+        ("pass discs", disc(&ca.pass_disc) == disc(&cb.pass_disc)),
+        ("via intervals", ca.via_iv == cb.via_iv),
+        ("via traversals", ca.via_k == cb.via_k),
+        ("vias without a site", ca.nosite == cb.nosite),
+        ("prices", bits(&ca.cost) == bits(&cb.cost) && bits(&ca.sq) == bits(&cb.sq)),
+        ("end-site memo", memo_hash(&ca.end_sites) == memo_hash(&cb.end_sites) && ca.end_sites.len() == cb.end_sites.len()),
+        ("over-full after", ca.overfull() == cb.overfull()),
+    ];
+    checks.iter().find(|c| !c.1).map(|c| format!("{} (lanes: {} evaluations, {} kept; reference: {} evaluations, {} kept)", c.0, sa.evals, sa.moves, sb.evals, sb.moves))
 }
 
 /// [`RefineStats::memo`]: an order-free hash of the end-site memo. O(entries).
@@ -1434,6 +1479,22 @@ pub fn refine(
     let ctx = Around { st, mask, partner, bottom, trans, unary, add_vias, max_evals: p.max_evals };
     if cm.cut.is_some() || p.reference {
         refine_reference(&ctx, &mut cm, evl, &mut stats);
+    } else if shadow::ON.load(std::sync::atomic::Ordering::Relaxed) {
+        let mut evl_ref = evl.to_vec();
+        let mut cm_ref = CapModel::new_cut(st, packer, dirs, evl, bottom, if p.overflow_mm > 0.0 { p.overflow_mm } else { 1.0 });
+        let mut st_ref = RefineStats { before: cm_ref.overfull(), ..RefineStats::default() };
+        refine_reference(&ctx, &mut cm_ref, &mut evl_ref, &mut st_ref);
+        super::refine_par::run(&ctx, &mut cm, evl, &mut stats);
+        if !crate::control::stop_requested() {
+            if let Some(d) = shadow_diff((&cm, evl, &stats), (&cm_ref, &evl_ref, &st_ref)) {
+                panic!("par-refine shadow: the lanes differ from the serial refinement in {d}");
+            }
+            use std::sync::atomic::Ordering::Relaxed;
+            shadow::CHECKED.fetch_add(1, Relaxed);
+            if stats.moves > 0 {
+                shadow::CHECKED_MOVED.fetch_add(1, Relaxed);
+            }
+        }
     } else {
         super::refine_par::run(&ctx, &mut cm, evl, &mut stats);
     }
@@ -1539,9 +1600,9 @@ impl Around<'_> {
                     break;
                 }
                 *evals += 1;
-                let keep = try_move(self.st, cm, evl, &mv, self.bottom, self.trans, self.unary, self.add_vias, false);
+                let (keep, delta) = try_move_delta(self.st, cm, evl, &mv, self.bottom, self.trans, self.unary, self.add_vias, false);
                 stats.evals += 1;
-                stats.stream = stream_fold(stats.stream, &mv, keep);
+                stats.stream = stream_fold(stats.stream, &mv, delta, keep);
                 if keep {
                     stats.moves += 1;
                     improved = true;
@@ -1568,6 +1629,22 @@ pub fn try_move(
     add_vias: bool,
     strict: bool,
 ) -> bool {
+    try_move_delta(st, cm, evl, mv, _bottom, trans, unary, add_vias, strict).0
+}
+
+/// [`try_move`], also returning the candidate's price change (the keep test's left side).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_move_delta(
+    st: &State,
+    cm: &mut CapModel,
+    evl: &mut [Vec<LEv>],
+    mv: &[((WireId, usize), i32)],
+    _bottom: i32,
+    trans: &dyn Fn(usize, usize) -> f64,
+    unary: &dyn Fn(WireId, usize, usize) -> f64,
+    add_vias: bool,
+    strict: bool,
+) -> (bool, f64) {
     let t0 = std::time::Instant::now();
     let r = try_move_in(st, cm, evl, mv, trans, unary, add_vias, strict);
     meter::add(&meter::MOVE_NS, &meter::MOVES, t0);
@@ -1584,7 +1661,7 @@ fn try_move_in(
     unary: &dyn Fn(WireId, usize, usize) -> f64,
     add_vias: bool,
     strict: bool,
-) -> bool {
+) -> (bool, f64) {
     let mut wires: Vec<WireId> = mv.iter().map(|x| x.0 .0).collect();
     wires.sort_unstable();
     wires.dedup();
@@ -1646,11 +1723,12 @@ fn try_move_in(
         None => before.iter().any(|(&i, &(c, _))| cm.cost[i] > c + EPS),
     };
     let worse_somewhere = strict && (new_ns > old_ns || worse_edge);
-    if (new_wc - old_wc) + d_oc < -EPS && (add_vias || new_wc <= old_wc + EPS) && !worse_somewhere {
+    let delta = (new_wc - old_wc) + d_oc;
+    if keep_rule(new_wc, old_wc, d_oc, add_vias) && !worse_somewhere {
         if let Some(c) = cm.cut.as_mut() {
             c.commit();
         }
-        return true;
+        return (true, delta);
     }
     if let Some(c) = cm.cut.as_mut() {
         c.rollback();
@@ -1674,7 +1752,7 @@ fn try_move_in(
     for (&((w, i), _), &l) in mv.iter().zip(&old_lab) {
         evl[w][i].2 = l;
     }
-    false
+    (false, delta)
 }
 
 #[cfg(test)]
@@ -1705,6 +1783,18 @@ mod tests {
         // A one-layer triangle (s = 0) bounds like a crossing.
         let ev = [(2, 0.0, 0), (6, 0.0, 1)];
         assert_eq!(via_ranges(&ev, true), (vec![(3, 5)], vec![true]));
+    }
+
+    #[test]
+    fn keep_rule_needs_a_drop_beyond_eps() {
+        // a drop smaller than EPS (float noise of a price-neutral move) is not kept
+        assert!(!keep_rule(1.0, 1.0, -EPS / 2.0, false));
+        assert!(!keep_rule(1.0, 1.0, -EPS, false));
+        assert!(keep_rule(1.0, 1.0, -2.0 * EPS, false));
+        // without add_vias the wires' own price may not grow, whatever the capacity gain
+        assert!(!keep_rule(3.0, 1.0, -5.0, false));
+        assert!(keep_rule(3.0, 1.0, -5.0, true));
+        assert!(keep_rule(1.0 + EPS / 2.0, 1.0, -1.0, false));
     }
 
     #[test]
