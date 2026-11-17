@@ -2997,10 +2997,21 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // 2.4 (cut model): a cut that fits only necked is a shrinkage, no violation; its price
         // (`[factors] shrinkage`) is part of what a move pays, and the necked stretches its necks
         // add count as the archive's shrinkages (TopoR 6.3 manual pp. 72-73).
+        // par-refine item 3 (`[optimize] measure_reuse`): the per-edge model's violations come from
+        // the layer refinement's final model when it was taken for this packer, bottom layer,
+        // price, state and labels ([`super::refine::FinalCap`]); otherwise the model is built.
+        let reused = |st: &State, lr: &layers::LayerReport| -> Option<(usize, f64)> {
+            let f = lr.fin_cap.filter(|_| opts.measure_reuse && !cuts_on)?;
+            (f.packer == &packer as *const Packer as usize && f.bottom == bottom && f.price == overflow_mm.to_bits() && f.key == super::refine::cap_key(st, &lr.events)).then_some(f.viol)
+        };
         let measure = |st: &State, lr: &layers::LayerReport| -> Predicted {
+            let pred = |viol: (usize, f64)| Predicted::of(viol, lr.unlayerable.len(), forced.borrow().len()).with_foreign(foreign_copper(st, &layers_now(st, &lr.events, bottom))).shorts_ranked(opts.pick_shorts, opts.short_weight);
+            if let Some(v) = reused(st, lr) {
+                return pred(v);
+            }
             let dirs = dirs_of(st);
             let cm = if cuts_on { CapModel::new_cut(st, &packer, &dirs, &lr.events, bottom, overflow_mm) } else { CapModel::new(st, &packer, &dirs, &lr.events, bottom, overflow_mm) };
-            let p = Predicted::of(cm.violations(), lr.unlayerable.len(), forced.borrow().len()).with_foreign(foreign_copper(st, &layers_now(st, &lr.events, bottom))).shorts_ranked(opts.pick_shorts, opts.short_weight);
+            let p = pred(cm.violations());
             if !cuts_on {
                 return p;
             }

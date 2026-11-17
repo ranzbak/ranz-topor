@@ -457,6 +457,9 @@ pub struct LayerReport {
     /// wire of its crossing (the two must differ in layer); for the P4 label moves.
     pub mask: Vec<Vec<u64>>,
     pub partner: Vec<Vec<Option<(WireId, usize)>>>,
+    /// The refinement's final capacity model measure ([`super::refine::FinalCap`]; par-refine
+    /// item 3), valid while the state and `events` are the ones it was taken for.
+    pub fin_cap: Option<super::refine::FinalCap>,
 }
 
 /// Parameters of P3.
@@ -822,6 +825,7 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
     rep.overfull_before = rs.before;
     rep.overfull_after = rs.after;
     rep.refine_moves = rs.moves;
+    rep.fin_cap = rs.fin;
     rep.mask = mask.clone();
     rep.partner = partner.clone();
     // Labels per (domain, wire) for the same-layer check.
@@ -1178,6 +1182,7 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
     rep.overfull_before = rs.before;
     rep.overfull_after = rs.after;
     rep.refine_moves = rs.moves;
+    rep.fin_cap = rs.fin;
     rep.mask = mask.clone();
     rep.partner = partner.clone();
     for (w, list) in wev.iter().enumerate() {

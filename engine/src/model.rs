@@ -1109,6 +1109,11 @@ pub struct Options {
     /// Debug / tests (engine only, no `topor.toml` key): every refinement runs the serial in-place
     /// reference loop the lane executor is tested against (`LayerParams::cap_reference`).
     pub refine_reference: bool,
+    /// `[optimize] measure_reuse` (par-refine item 3): the plan's measure takes the violations of
+    /// the capacity model the layer refinement ended with ([`crate::topo::refine::FinalCap`])
+    /// instead of building the model again from the same layers (per-edge model; the cut model
+    /// always builds). Default true; false = the measure before par-refine.
+    pub measure_reuse: bool,
     /// `[optimize] loop_crossing` (5.2, `loop = "topor"`): the share of the `crossing` factor's
     /// weight the loop's layer-aware reroute keeps for a crossing itself. The loop prices the via
     /// a crossing implies against the crossed stretch's present layer as a via (Polubasov 2010
@@ -1491,6 +1496,7 @@ impl Default for Options {
             loop_time_share: 0.5,
             refine_lanes: 0,
             refine_reference: false,
+            measure_reuse: true,
             loop_crossing: 0.25,
             crossing_vias: "crossing".into(),
             junction_pad_mm: 0.0,

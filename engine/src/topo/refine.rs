@@ -49,6 +49,49 @@ pub struct RefineStats {
     pub after: usize,
     /// Moves kept.
     pub moves: usize,
+    /// The final capacity model's measure (per-edge model only), for the plan's measure to take.
+    pub fin: Option<FinalCap>,
+}
+
+/// par-refine item 3 (`[optimize] measure_reuse`): the violations of the capacity model the
+/// refinement ended with ([`CapModel::violations`]) and what they belong to, so the plan's
+/// measure takes them instead of building the model again from the same labels. The two can
+/// differ in the last bits and in the via positions: the refinement's model keeps the via
+/// positions and end sites of the order its moves came in, a new build lays every wire out once
+/// in wire order. Valid for the packer at address `packer`, the `bottom` layer, the price bits
+/// `price` and the state + labels whose [`cap_key`] is `key`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FinalCap {
+    pub packer: usize,
+    pub bottom: i32,
+    pub price: u64,
+    pub key: u64,
+    pub viol: (usize, f64),
+}
+
+/// A hash of what a capacity model is built from besides the packer: the live wires (net,
+/// width, clearance, terminals, turns, passes with their edges, triangles), the pass order of
+/// every edge and the labels, bit for bit. O(passes + events).
+pub fn cap_key(st: &State, evl: &[Vec<LEv>]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = crate::fxhash::FxHasher::default();
+    (st.wires.len(), st.passes.len()).hash(&mut h);
+    st.edge_order.hash(&mut h);
+    for (w, wi) in st.wires.iter().enumerate() {
+        if !wi.alive {
+            continue;
+        }
+        (w, wi.net, wi.w.to_bits(), wi.s.to_bits(), wi.a, wi.b, wi.pa, wi.pb, &wi.turns, &wi.passes, &wi.tris).hash(&mut h);
+        for &p in &wi.passes {
+            (st.passes[p].wire, st.passes[p].edge).hash(&mut h);
+        }
+        let ev = evl.get(w).map_or(&[][..], |v| &v[..]);
+        ev.len().hash(&mut h);
+        for &(k, s, l) in ev {
+            (k, s.to_bits(), l).hash(&mut h);
+        }
+    }
+    h.finish()
 }
 
 /// The via intervals of a wire's events: `(ka, kb)` per layer change (the traversals of the two
@@ -1370,6 +1413,9 @@ pub fn refine(
         super::refine_par::run(&ctx, &mut cm, evl, &mut stats);
     }
     stats.after = cm.overfull();
+    if cm.cut.is_none() {
+        stats.fin = Some(FinalCap { packer: packer as *const Packer as usize, bottom, price: cm.fx.price.to_bits(), key: cap_key(st, evl), viol: cm.violations() });
+    }
     stats
 }
 
