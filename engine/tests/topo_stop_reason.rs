@@ -9,7 +9,6 @@
 //! A dialog run never ends BY ITSELF at stable (only OK / Cancel / cap / time limit); headless runs
 //! keep stopping at stable.
 
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use topor_engine::control::RunControl;
 use topor_engine::model::{BoardModel, Options};
@@ -93,7 +92,7 @@ fn run_on(m: BoardModel, o: &Options, act: Act, clock: Clock) -> (RouteResult, b
         }
         running = !h.is_finished();
         match act {
-            Act::OkAtStable | Act::CancelInLoop => ctl.cancel.store(true, Ordering::Relaxed),
+            Act::OkAtStable | Act::CancelInLoop => ctl.request_cancel(),
             Act::LimitInLoop if clock == Clock::Wall => ctl.set_time_limit(0.001), // below the time spent
             Act::LimitInLoop => ctl.limit.reach(),
             Act::Nothing => {}
@@ -234,4 +233,91 @@ fn ok_at_live_stable_stitches_in_full_cancel_before_stable_does_not() {
     assert!(!c.warnings.iter().any(|w| w.starts_with("OK at Routes stable")), "{:?}", c.warnings);
     let (b, a) = stitching(&c).expect("cancel: stitching line (cut before its first pass)");
     assert_eq!(a, b, "a Cancel before stable ends the stitching: nothing stitched");
+}
+
+/// Runs `o` on the eprom in a rayon pool of `threads` (the engine's share: its compute slots are
+/// `min(runs, threads)`); the watcher polls the progress every millisecond and sends one stop
+/// request (`request_cancel`: OK when the progress shows "Routes stable" at that moment, else
+/// Cancel) the first time `when` holds; when "Routes stable" comes first it stops anyway and says
+/// so. Returns the result and the progress at the request (`None`: `when` never held).
+fn run_threads(o: &Options, threads: usize, when: fn(&topor_engine::control::Progress) -> bool) -> (RouteResult, Option<topor_engine::control::Progress>) {
+    let ctl = RunControl::new();
+    let (c2, o2) = (ctl.clone(), o.clone());
+    let h = std::thread::spawn(move || {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().expect("pool");
+        pool.install(|| route_with(&eprom(), &o2, &c2))
+    });
+    let t = Instant::now();
+    let bound = Duration::from_secs(if cfg!(debug_assertions) { 300 } else { 60 });
+    let mut at = None;
+    loop {
+        assert!(!h.is_finished(), "the run ended before the stop request");
+        let p = ctl.snapshot();
+        if when(&p) {
+            ctl.request_cancel();
+            at = Some(p);
+            break;
+        }
+        if p.stable || t.elapsed() > bound {
+            ctl.request_cancel(); // missed the moment (or never): end it anyway
+            assert!(t.elapsed() <= bound, "never ready in {bound:?}: {p:?}");
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    (h.join().expect("run thread"), at)
+}
+
+/// verify-sl2 V1 (user 2026-11-17): Cancel at "1 of 2 stable" (the button still read Cancel) is a
+/// Cancel, whichever run's pick is drawn and however the other run ends after it: stop_reason
+/// "cancel", no "OK at Routes stable" and the pour stitching cut. Before the latch these seeds
+/// drew the stable run's pick and ended "stable" with the stitching in full (probe P3).
+#[test]
+fn cancel_at_one_of_two_runs_stable_is_a_cancel() {
+    let mut hit = 0;
+    for seed in [2u64, 3, 4, 8] {
+        let o = Options::from_json(&format!(r#"{{"runs": 2, "seed": {seed}, "wall_clock_s": 300, "stop_when_stable": false, "topo_rounds": 100000}}"#)).expect("options");
+        let (r, at) = run_threads(&o, 2, |p| p.runs_stable >= 1 && !p.stable);
+        let Some(p) = at else { continue };
+        hit += 1;
+        assert!(p.runs == 2 && p.runs_stable == 1 && !p.stable, "seed {seed}: premise {p:?}");
+        assert_eq!(r.stop_reason, "cancel", "seed {seed}: {:?}", r.warnings);
+        assert!(!r.warnings.iter().any(|w| w.starts_with("OK at Routes stable")), "seed {seed}: {:?}", r.warnings);
+        if let Some((before, after)) = stitching(&r) {
+            assert_eq!(after, before, "seed {seed}: a Cancel before stable cuts the stitching");
+        }
+    }
+    assert!(hit >= 3, "the moment 1 of 2 stable was seen for only {hit} of 4 seeds");
+}
+
+/// User 2026-11-17 "free the slot" (verify-sl2 V2): with fewer engine threads than runs a run whose
+/// TopoR loop is stable gives its compute slot to a run not yet begun, so "Routes stable" (every
+/// run stable) comes while the loops run, far before any cap, and Best so far is not empty then
+/// (the loops' predicted pick); OK there ends it "stable". Before, the first runs held their slots
+/// up to the cycle cap and the last run never began.
+#[test]
+fn routes_stable_comes_with_fewer_threads_than_runs() {
+    let o = Options::from_json(r#"{"runs": 3, "wall_clock_s": 300, "stop_when_stable": false, "topo_rounds": 100000}"#).expect("options");
+    let (r, at) = run_threads(&o, 2, |p| p.stable);
+    let p = at.expect("Routes stable while the loops run");
+    assert!(p.runs == 3 && p.runs_stable == 3 && p.runs_done == 0, "every run stable, none ended (no cap): {p:?}");
+    assert!(p.best_total > 0 && p.best_round > 0, "a pick to keep at Routes stable: {p:?}");
+    assert_eq!(r.stop_reason, "stable", "{:?}", r.warnings);
+    let (n, st, by) = loop_line(&r);
+    assert!(by == "Cancel" && st.is_some_and(|s| s <= n) && n < 100000, "{n} {st:?} {by}");
+}
+
+/// User 2026-11-17: the first progress that shows "Routes stable" has a pick to keep (Best so far
+/// not empty), with one run and with several (the TopoR loop's predicted pick, nothing drawn yet).
+#[test]
+fn the_first_routes_stable_has_a_best_so_far() {
+    for runs in [1usize, 3] {
+        let o = Options::from_json(&format!(r#"{{"runs": {runs}, "wall_clock_s": 300, "stop_when_stable": false, "topo_rounds": 100000}}"#)).expect("options");
+        let (r, at) = run_threads(&o, runs, |p| p.stable);
+        let p = at.expect("Routes stable");
+        assert!(p.best_total == r.connections_total && p.best_routed > 0 && p.best_round == 1 && p.best_run >= 1, "runs {runs}: {p:?}");
+        // the predicted pick counts the planned connections, and every one of them is drawn (never drop)
+        assert_eq!(p.best_routed, r.routed, "runs {runs}");
+        assert_eq!(r.stop_reason, "stable", "runs {runs}");
+    }
 }

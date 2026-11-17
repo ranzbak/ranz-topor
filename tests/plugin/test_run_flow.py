@@ -111,6 +111,7 @@ class ProxyJob:
     def __init__(self, real, hold=1, patch=None):
         self.real, self.hold, self.polls, self.cancelled, self.patch = real, hold, 0, False, patch
         self.reached = False
+        self.ok = None  # cancel(ok=...): what the button read
         self.hardened = False
         self.limits = []  # set_time_limit calls (the progress dialog's live limit, wall clock)
 
@@ -123,8 +124,9 @@ class ProxyJob:
     def done(self):
         return self.polls >= self.hold and self.real.done()
 
-    def cancel(self):
+    def cancel(self, ok=None):
         self.cancelled = True  # recorded only: the real job has to finish for a deterministic result
+        self.ok = ok  # what the plugin said the button read (user 2026-11-17: the engine latches it)
 
     def reach_limit(self):
         self.reached = True  # M2.TL soft limit (CPU clock): recorded only, as cancel
@@ -412,8 +414,8 @@ class SlowStopJob(ProxyJob):
         super().__init__(real, hold=2)
         self.clock, self.after_s, self.cancelled_at = clock, after_s, None
 
-    def cancel(self):
-        super().cancel()
+    def cancel(self, ok=None):
+        super().cancel(ok)
         self.cancelled_at = self.clock.monotonic()
 
     def done(self):
@@ -993,19 +995,22 @@ def test_run_ok_at_routes_stable_is_not_a_cancel(app, eprom, tmp_path, reports):
     assert out.status == "accepted" and out.routed == 27
     assert out.stop_reason == "stable" and out.cancelled is False
     stable = [c[1][0] for c in ui.calls if c[0] == "progress" and c[1][0].stable]
-    assert stable and stable[0].runs == 5 and stable[0].runs_stable >= 1
+    # every run stable (5 of 5, whatever the engine's thread count: a stable run frees its slot for a run not yet
+    # begun) and a pick to keep: "Routes stable" waits for the first pick (user 2026-11-17), the loops' predicted one
+    assert stable and stable[0].runs == 5 and stable[0].runs_stable == 5 and stable[0].runs_done == 0, stable[:1]
+    assert stable[0].best_total == 27 and stable[0].best_routed == 27 and stable[0].best_round >= 1, stable[0]
     log = (out.report_dir / "log.txt").read_text()
-    # "Report stable live": the loops are stable before any pick is drawn, so "Best so far" may still be empty
-    if stable[0].best_total:
-        assert f"OK at Routes stable: best so far {stable[0].best_routed}/27 routed" in log
-    else:
-        assert "OK at Routes stable: no pick drawn yet (" in log and "the TopoR loop's pick is drawn next" in log
-    # "Report stable live" (user 2026-11-17): the OK reached the running engine, so its TopoR loops ended by the OK,
-    # before the cycle cap, and the engine itself says "stable" (no plugin relabel any more)
+    assert f"OK at Routes stable: best so far {stable[0].best_routed}/27 routed" in log
+    assert "no pick drawn yet" not in log
+    # "Report stable live" (user 2026-11-17): the OK reached the running engine, so the drawn run's TopoR loop (the
+    # result carries its loop line only) ended by the OK, before the cycle cap, and the engine itself says "stable"
     rr = json.loads((out.report_dir / "result.json").read_text())
     assert rr["stop_reason"] == "stable"
     loops = [w for w in _engine_warnings(out) if w.startswith("TopoR loop (")]
-    assert loops and all("ended by Cancel / OK" in w for w in loops), loops
+    assert len(loops) == 1 and "ended by Cancel / OK" in loops[0], loops
+    # ... and every one of the 5 runs was stable when the OK came (the best-of line names each run's stable)
+    best_of = next(w for w in _engine_warnings(out) if w.startswith("best of 5 seeded runs"))
+    assert best_of.count("stable after cycle") == 5 and "not stable" not in best_of, best_of
 
 
 def _engine_warnings(out):
@@ -1017,7 +1022,7 @@ def test_ok_after_the_engine_ended_at_the_cap_stays_round_cap(app, eprom, tmp_pa
     """An OK that arrives after the engine had already ended at its cycle cap did not end the run: stop_reason stays
     "round cap" (verify-slfx F1: the plugin no longer relabels it "stable"), and it is not a cancel either. The proxy
     job records the OK and lets the real job run to its cap."""
-    class OkOnceDrawn(ScriptedUi):  # OK at "Routes stable" once a pick is drawn (the log names the best so far)
+    class OkOnceDrawn(ScriptedUi):  # OK at "Routes stable" (a pick to keep: the log names the best so far)
         def progress(self, p):
             super().progress(p)
             return not (p.stable and p.best_total)
@@ -1151,3 +1156,58 @@ def test_dialog_run_with_finish_when_stable_ends_at_stable(app, eprom, tmp_path,
     cfg = CFG.with_values({("optimize", "rounds"): 20, ("optimize", "finish_when_stable"): True})
     board, ui, out = do_run(eprom, tmp_path, ui=_NeverOkDialog(accept=True), engine=_RealCancelEngine(), cfg=cfg)
     assert out.stop_reason == "stable" and out.routed == 27
+
+
+# ------------------------------------------------------------------ OK vs Cancel at the press (user 2026-11-17)
+class _CancelWhen(ScriptedUi):
+    """Presses the button once, the first time `when(p)` holds for the progress the dialog shows."""
+
+    def __init__(self, when, **kw):
+        super().__init__(**kw)
+        self.waits_for_ok = True
+        self.when, self.pressed = when, None
+
+    def progress(self, p):
+        super().progress(p)
+        if self.pressed is None and self.when(p):
+            self.pressed = p
+        return self.pressed is None
+
+
+@pytest.mark.parametrize("press", ["cancel_before_stable", "ok_at_stable"])
+def test_the_button_read_at_the_press_reaches_the_engine(app, eprom, tmp_path, reports, press):
+    """User 2026-11-17: the engine latches what the button read at the first press: ``job.cancel(ok=...)`` gets
+    False for a Cancel (the progress not "Routes stable", e.g. at 0 of 5 stable) and True for OK at "Routes stable";
+    the run's `cancelled` follows the same value (the proxy records it, the real job runs on)."""
+    # a progress of the running engine job (its coordinator set `runs`), before / at "Routes stable"
+    when = ((lambda p: getattr(p, "runs", 0) > 0 and not p.stable) if press == "cancel_before_stable"
+            else (lambda p: p.stable))
+    ui = _CancelWhen(when, accept=True)
+    eng = ProxyEngine(hold=1)
+    _, _, out = do_run(eprom, tmp_path, ui=ui, engine=eng, cfg=CFG.with_values({("optimize", "rounds"): 20}))
+    assert ui.pressed is not None and eng.jobs[0].cancelled
+    assert ui.pressed.stable is (press == "ok_at_stable"), ui.pressed
+    assert eng.jobs[0].ok is (press == "ok_at_stable")
+    if press == "ok_at_stable":
+        assert out.cancelled is False
+    else:
+        assert out.cancelled is True
+
+
+def test_an_engine_without_ok_still_gets_the_cancel(app, eprom, tmp_path, reports):
+    """An engine older than the plugin (``RouteJob.cancel()`` without ``ok``): the plugin falls back to the plain
+    cancel, which judges by the engine's own progress (fail-safe: never an error)."""
+    class OldJob(ProxyJob):
+        def cancel(self):
+            super().cancel()
+
+    class OldEngine(ProxyEngine):
+        def route_async(self, m, o):
+            j = OldJob(topor_engine.route_async(m, o), self.hold, self.patch)
+            self.jobs.append(j)
+            return j
+
+    eng = OldEngine(hold=1)
+    ui = _CancelWhen(lambda p: p.stable, accept=True)
+    _, _, out = do_run(eprom, tmp_path, ui=ui, engine=eng, cfg=CFG.with_values({("optimize", "rounds"): 20}))
+    assert eng.jobs[0].cancelled and eng.jobs[0].ok is None and out.cancelled is False

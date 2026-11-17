@@ -952,16 +952,21 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                                           else "time limit reached (hard): the current step stops now"))
                 if state["cancel"] and cancelled_at is None:
                     cancelled_at = now
-                    job.cancel()
+                    # user 2026-11-17: the button read OK ("Routes stable": keep the result, labelled stable, the pour
+                    # stitching in full) or Cancel; the engine latches what it was at this request, so its stop_reason
+                    # and this run's `cancelled` agree whatever the runs do after it
+                    ok = bool(p.stable)
+                    try:
+                        job.cancel(ok=ok)
+                    except TypeError:  # an engine older than the plugin (no ok): it judges by its own progress
+                        job.cancel()
                     log.line("Cancel / OK: waiting for the engine to finish its current stage")
-                    if p.stable:  # M-B0: OK after "Routes stable": the best so far is the board the user gets
+                    if ok:  # M-B0: OK after "Routes stable": the best so far is the board the user gets
                         state["ok_stable"] = True
-                        if p.best_total:
-                            log.line(f"OK at Routes stable: best so far {p.best_routed}/{p.best_total} routed, "
-                                     f"{p.best_length_mm / 1000:.3f} m, {p.best_vias} vias (run {p.best_run} of {p.runs})")
-                        else:  # "Report stable live": the TopoR loops were stable before any pick was drawn
-                            log.line(f"OK at Routes stable: no pick drawn yet ({p.runs_stable} of {p.runs} runs stable); "
-                                     "the TopoR loop's pick is drawn next and is the board")
+                        # "Routes stable" waits for a pick (user 2026-11-17): with the TopoR loop Best so far is the
+                        # loops' predicted pick until the one picked is drawn
+                        log.line(f"OK at Routes stable: best so far {p.best_routed}/{p.best_total} routed, "
+                                 f"{p.best_length_mm / 1000:.3f} m, {p.best_vias} vias (run {p.best_run} of {p.runs})")
             if done:
                 break
             time.sleep(0.02)

@@ -45,7 +45,9 @@ pub struct Progress {
     #[serde(default)]
     pub rounds: u32,
     /// M-B0: the best result has gained less than `[optimize] stable_gain_pct` over the last
-    /// `stable_window` cycles in every run ("Routes stable"; the plugin's Cancel then reads OK).
+    /// `stable_window` cycles in every run ("Routes stable"; the plugin's Cancel then reads OK),
+    /// and there is a pick to keep (user 2026-11-17: *Best so far* is not empty; with the TopoR
+    /// loop the loops' predicted pick). Never goes back within a run.
     #[serde(default)]
     pub stable: bool,
     /// Seconds spent on measurements outside the time limit so far ([`RunControl::measured`]).
@@ -443,6 +445,11 @@ impl TimeLimit {
     }
 }
 
+/// [`RunControl::stop_kind`]: the first stop request was a Cancel.
+pub const STOP_CANCEL: u8 = 1;
+/// [`RunControl::stop_kind`]: the first stop request was OK at "Routes stable".
+pub const STOP_OK: u8 = 2;
+
 /// Cancel flag, time limit and progress of one run; cheap to clone (shared state).
 #[derive(Clone, Debug, Default)]
 pub struct RunControl {
@@ -450,6 +457,9 @@ pub struct RunControl {
     pub progress: Arc<Mutex<Progress>>,
     /// The live wall-clock limit ([`TimeLimit`]), shared by every run of a best-of-N call.
     pub limit: Arc<TimeLimit>,
+    /// What the first stop request was ([`RunControl::request_stop`]): 0 none yet, [`STOP_CANCEL`]
+    /// or [`STOP_OK`] (OK at "Routes stable"). Latched once, at the request, never changed after.
+    pub stop_kind: Arc<AtomicU8>,
     /// M-B0: 0 = the only run; k >= 1 = run k of a best-of-N call (its stage text is prefixed
     /// with the run, and the round is the coordinator's).
     pub run: u32,
@@ -484,9 +494,29 @@ impl RunControl {
         RunControl::default()
     }
 
-    /// Ask the run to stop at its next deadline check. O(1).
+    /// Ask the run to stop at its next deadline check: Cancel, or OK when the progress shows
+    /// "Routes stable" at this moment ([`RunControl::request_stop`] with `None`). O(1).
     pub fn request_cancel(&self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.request_stop(None);
+    }
+
+    /// Ask the run to stop (user 2026-11-17): `ok` = the button read OK when it was pressed
+    /// ("Routes stable" shown: keep the result, labelled stable, the pour stitching in full);
+    /// `None` = the progress's own [`Progress::stable`] right now. Only the first request counts:
+    /// what it was is latched here, before the flag is set, so every later reader
+    /// ([`RunControl::ok_at_stable`]) sees the state at the press, not at the time it looks (a run
+    /// that turns stable or ends after a Cancel does not make it an OK). A caller that sets
+    /// [`RunControl::cancel`] directly gets a Cancel. O(1).
+    pub fn request_stop(&self, ok: Option<bool>) {
+        let ok = ok.unwrap_or_else(|| self.progress.lock().is_ok_and(|p| p.stable));
+        let _ = self.stop_kind.compare_exchange(0, if ok { STOP_OK } else { STOP_CANCEL }, Ordering::SeqCst, Ordering::SeqCst);
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// The run was stopped by OK at "Routes stable" (the first stop request, latched by
+    /// [`RunControl::request_stop`]); `false` without a stop request or for a Cancel. O(1).
+    pub fn ok_at_stable(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst) && self.stop_kind.load(Ordering::SeqCst) == STOP_OK
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -593,7 +623,7 @@ impl RunControl {
 
     /// The same cancel flag and progress, as run `run` (1-based) of a best-of-N call. O(1).
     pub(crate) fn for_run(&self, run: u32) -> RunControl {
-        RunControl { cancel: self.cancel.clone(), progress: self.progress.clone(), limit: self.limit.clone(), run, test_hook: self.test_hook.clone() }
+        RunControl { cancel: self.cancel.clone(), progress: self.progress.clone(), limit: self.limit.clone(), stop_kind: self.stop_kind.clone(), run, test_hook: self.test_hook.clone() }
     }
 
     /// Change the progress under the lock (the M-B0 coordinator's fields). O(1) + `f`.

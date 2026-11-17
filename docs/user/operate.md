@@ -322,13 +322,19 @@ under *Best so far*, which then goes to KiCad's DRC and the preview. By default 
 `[optimize] rounds` or the time limit (the TopoR way). `finish_when_stable = true` makes it finish at *Routes stable*
 like a normal finish (each run stops at the round in which it becomes stable; `[optimize] finish_patience` > 0 lets
 it look for small gains that many more rounds first). *Routes stable* appears the moment every run's TopoR loop
-records it, while the loops still run (user 2026-11-17), so OK there really ends the run before the cap. The loops
-judge their variants on the topology and draw only the pick, so at that moment *Best so far* can still be empty
-(log.txt: *OK at Routes stable: no pick drawn yet*); OK then draws the loops' pick, and that is the board. Pressing OK
+has recorded it and there is a pick to keep, while the loops still run (user 2026-11-17), so OK there really ends the
+run before the cap; *Routes stable* itself never stops anything, it only turns Cancel into OK. The loops judge their
+variants on the topology and draw only the one picked, so until that drawing *Best so far* shows the loops' predicted
+pick (its connections, vias and length as planned); the drawn board then replaces it. With fewer engine threads
+than runs (a small CPU, or `RAYON_NUM_THREADS` set), a run whose loop is stable gives its thread to a run that has
+not begun yet and goes on when a thread is free again, so *Routes stable* still comes while the loops run (log.txt:
+*TopoR loop: stable after cycle …, it gave its compute slot to a run not yet begun*). Pressing OK
 at *Routes stable* is not a cancel: the summary says *Stopped: stable*, and the rest of the run (drawing the picked
 variant, the pour stitching) runs to its end exactly as when a run ends at stable by itself; only the time limit can
-still cut it. A Cancel before *Routes stable* ends the pour stitching after the pass in progress. The button is
-disabled after the first press, so there is no second Cancel. An OK that comes only after the engine already ended
+still cut it. Cancel (pressed while the button still reads Cancel, e.g. at *Runs* 1 of 5 stable) stays a cancel
+whatever the runs do after it: the summary says *Stopped: cancel* and the pour stitching ends after the pass in
+progress. What the button read at the press decides, and the button is disabled after the first press, so there is
+no second Cancel. An OK that comes only after the engine already ended
 at the cap leaves *Stopped: round cap*. Headless runs (harness, MCP) stop at *Routes stable* by themselves (plus `stable_patience`
 rounds). The first round of the first run always uses the plain weights, and every run is reproducible: the same
 board and settings give the same result.

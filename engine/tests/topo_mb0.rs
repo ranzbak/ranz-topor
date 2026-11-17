@@ -1,7 +1,6 @@
 //! M-B0 tests (iterations like TopoR): whole-route cycles until "Routes stable", the user's OK
 //! after stable, and the best of N seeded runs (eprom-to-kernal, routed with its tracks ripped).
 
-use std::sync::atomic::Ordering;
 use topor_engine::control::RunControl;
 use topor_engine::model::{BoardModel, Options};
 use topor_engine::route::{route, route_with, RouteResult};
@@ -79,7 +78,7 @@ fn ok_after_stable_returns_the_best_so_far() {
     assert!(!h.is_finished(), "a run with the dialog does not stop at stable by itself");
     // ... until OK: the progress's best at that moment is the board.
     let before = ctl.snapshot();
-    ctl.cancel.store(true, Ordering::Relaxed);
+    ctl.request_cancel();
     let r = h.join().expect("run thread");
     assert_eq!(r.stop_reason, "stable");
     assert!(!r.timed_out);
