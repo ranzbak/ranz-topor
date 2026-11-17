@@ -968,6 +968,13 @@ pub struct Options {
     /// Topological core (S2c, `topor.toml [vias] offset_sites`): besides the sample points of the
     /// via interval's triangles, also try the via's offset corners of nearby pads and copper.
     pub via_offset_sites: bool,
+    /// Topological core (radii-m3-clear, `topor.toml [vias] reach_price`): when the drawing searches a
+    /// via site (the plan's own site not free), each candidate in the plan's class also pays the
+    /// graded clearance violations of the straight reach from the plan's path to it
+    /// ([`crate::topo::draw::Drawer::via_reach`]); the class test itself always applies. Default
+    /// false (user 2026-11-17) until the plan's via-site room check (VS-PLAN) is fixed: measured on
+    /// qmtech, the price re-picks in-class sites board-wide (+26 DRC seq).
+    pub via_reach_price: bool,
     /// Topological core (S2c, `topor.toml [search] feedback_max_rip`): work cap, most drawn
     /// wires one feedback round may rip up and redraw. Whether a rejected wire's blockers are
     /// ripped at all is a graded price (M-B2: their reroute price against the violation the
@@ -1456,6 +1463,7 @@ impl Default for Options {
             neck_to_pad: true,
             drawing_feedback: false,
             via_offset_sites: true,
+            via_reach_price: false,
             feedback_max_rip: 8,
             history_fade: 0.5,
             soft_cuts: true,

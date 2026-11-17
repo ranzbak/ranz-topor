@@ -1,8 +1,8 @@
 """Via and junction test patterns (shopping list 5.4): redundant via pair, via-pair merge, via relocation by force
 balance, branch-point relocation (Steiner point), via size rule.
 
-Six small 2-layer boards (`via_pair_redundant`, `via_pair_slide`, `via_force_relocate`, `branch_point_relocate`,
-`branch_point_into_pad`, `via_size_rule`). Every board is SOLVABLE BY CONSTRUCTION: the reference copper is drawn first
+Seven small 2-layer boards (`via_pair_redundant`, `via_pair_slide`, `via_force_relocate`, `branch_point_relocate`,
+`branch_point_into_pad`, `via_size_rule`, `via_site_class`). Every board but via_site_class's careless answer is legal; every board is SOLVABLE BY CONSTRUCTION: the reference copper is drawn first
 from centre lines, the pads are the fixed given, and `check()` verifies with shapely (clearance, copper to edge,
 connectivity) before KiCad DRC measures it (0 violations / 0 unconnected). Nothing comes from the engine.
 
@@ -128,6 +128,8 @@ class VPat:
     layers: int = 2
     keepouts: list = field(default_factory=list)
     colors: dict = field(default_factory=dict)
+    #: False: the careless answer is ruled out because it is illegal (KiCad DRC flags it), not because it is worse.
+    careless_legal: bool = True
 
     @property
     def nets(self):
@@ -257,6 +259,10 @@ def check(pat: VPat) -> dict:
     out = {}
     for key, sol in (("reference", pat.ref), ("careless", pat.careless)):
         rep = clearance_report(pat, sol)
+        if key == "careless" and not pat.careless_legal:
+            assert rep["violations"], (pat.name, key, "the careless answer is meant to be illegal")
+            out[key] = rep
+            continue
         assert not rep["violations"], (pat.name, key, rep["violations"])
         assert rep["edge_ok"], (pat.name, key, rep)
         for net, _, _ in pat.connections:
@@ -612,8 +618,71 @@ def p_size() -> VPat:
                 colors={"SIG": PALETTE[0], "PWR": PALETTE[1], "HEAVY": PALETTE[2]})
 
 
+# ----------------------------------------------------------------------------------------------- 7 via site class
+def p_class(p_inset: float = 1.0) -> VPat:
+    """via_site_class (radii-m3-clear, user-approved 2026-11-16): a via whose roomy site lies across a wire its net does
+    not cross is out of the plan's class. Caveat: end to end this may pass before the drawing's in-class rule
+    (draw.rs `Drawer::via_reach`), because the plan's own site can be free here; the rule's real guards are the unit
+    tests in engine/tests/topo_d2.rs (`a_via_site_across_an_uncrossed_drawn_wire_is_out_of_class`, qmtech JS_INTB_5V
+    repro, and `a_forced_via_stays_in_the_plans_class`).
+
+    `p_inset`: P's pad centres this far inside the copper-to-edge band. 1.0 = the geometry the user approved
+    (2026-11-16, the suite's). 0.4 = the geometry 56a448b moved it to after the approval (P's pads touch the band,
+    nothing passes round P's ends): NOT approved, awaiting the user's choice (gallery stage "via_site_class: approved vs
+    moved pattern")."""
+    W, H = 24.0, 14.0
+    y0 = 7.0
+    A1, A2 = (2.0, y0), (22.0, y0)
+    xp, wp = 14.0, 0.5
+    xw0, xw1 = 4.0, 12.2
+    P1, P2 = (xp, EDGE + p_inset), (xp, H - EDGE - p_inset)
+    fps = [terminal("A1", "A", *A1), terminal("A2", "A", *A2, layer="B.Cu"),
+           terminal("P1", "P", *P1), terminal("P2", "P", *P2),
+           strip("N", "NB", (xw0 + xw1) / 2, EDGE, H - EDGE, w=xw1 - xw0, layer="B.Cu")]
+    w = W_NORMAL
+    d = MIN_VIA[0] / 2
+    lo, hi = xw1 + CLEAR + d, xp - wp / 2 - CLEAR - d
+    m = r4((lo + hi) / 2)
+    tp = Track("P", "F.Cu", wp, [P1, P2])
+    ref = Sol("via between the B.Cu wall and P; A passes under P on B.Cu",
+              [tp, Track("A", "F.Cu", w, [A1, (m, y0)]), Track("A", "B.Cu", w, [(m, y0), A2])], [mkvia("A", (m, y0))])
+    xc = 18.0
+    car = Sol("the roomy site right of P: A's F.Cu run crosses P (short)",
+              [tp, Track("A", "F.Cu", w, [A1, (xc, y0)]), Track("A", "B.Cu", w, [(xc, y0), A2])], [mkvia("A", (xc, y0))],
+              "the via has 3.5 mm of room instead of 0.70 mm, but the topology is another one: A crosses P on F.Cu")
+    pr, pc = price(ref, ["A"]), price(car, ["A"])
+    ref.notes = [{"p": (xw1, 8.6), "q": (m - d, 8.6), "text": f"{r4(m - d - xw1):.2f}"},
+                 {"p": (m + d, 8.6), "q": (xp - wp / 2, 8.6), "text": f"{r4(xp - wp / 2 - m - d):.2f}"}]
+    exp = {
+        "kind": "solvable", "layers": 2, "expected_vias": 1,
+        "via_positions": [{"id": "V1", "recommended": [m, y0], "tolerance_mm": 0.35, "free_interval_x": [r4(lo), r4(hi)],
+                           "role": "between the B.Cu wall N and P's F.Cu track"}],
+        "tolerance_mm": 0.35, "reference": pr, "careless": pc,
+        "interpretation": {
+            "objective": "legal copper first; the only legal topology for A crosses P on B.Cu, so its via stands left of P",
+            "bounds": "the via cannot stand left of the wall (A's B.Cu stretch would cross it) nor right of P (A's F.Cu "
+                      "stretch would cross P)"},
+        "judgement_calls": ["P is a real net (drawn first, thick before thin); its track is the straight one between its pads",
+                            "the free interval (0.70 mm) is the room; inside it any position is fine (tolerance 0.35)"],
+        "literature": [LIT["dayan_dai1991"]],
+    }
+    return VPat("via_site_class", "A via stays on its side of the wire it must not cross", (W, H), fps,
+                [("A", "A1.1", "A2.1"), ("P", "P1.1", "P2.1")], ref, car,
+                f"1 via at x = {m:.3f} (+-0.35) between the B.Cu wall and P; A on F.Cu up to it, then on B.Cu under P. "
+                f"Not the roomy site right of P: that one makes A's F.Cu run cross P.",
+                "P is drawn before A (0.5 mm before 0.25 mm). A must change layer once; the B.Cu wall leaves the via only "
+                "the 0.70 mm between the wall and P. A via right of P is in another topological class (A over P on F.Cu).",
+                exp, classes([{"name": "PWR", "clearance": CLEAR, "track_width": wp, "via_diameter": 0.8, "via_drill": 0.4,
+                               "priority": 0}]),
+                net_patterns=[{"netclass": "PWR", "pattern": "P"}],
+                zooms=[((10.5, 4.5, 19.5, 9.5), "V1 between the wall N (B.Cu) and P")],
+                colors={"A": PALETTE[0], "P": PALETTE[1], "NB": GREY}, careless_legal=False)
+
+
+
 BUILDERS = {"via_pair_redundant": p_redundant, "via_pair_slide": p_slide, "via_force_relocate": p_force,
-            "branch_point_relocate": p_branch, "branch_point_into_pad": p_branch_pad, "via_size_rule": p_size}
+            "branch_point_relocate": p_branch, "branch_point_into_pad": p_branch_pad, "via_size_rule": p_size,
+            "via_site_class": p_class}
 NAMES = list(BUILDERS)
 
 
@@ -867,7 +936,7 @@ def readme(out: Path, docs: dict[str, dict]) -> Path:
             r = json.loads(tp.read_text())
             L += [f"**TopoR Lite 5.0** ([`topor50/{n}_topor.png`]({n}/topor50/{n}_topor.png); session DSN, KiCad copy and `result.json` "
                   f"beside it): {len(r['vias'])} vias, {r['total_mm']:.2f} mm, KiCad DRC {r['kicad_drc'].get('violations')} / "
-                  f"{r['kicad_drc'].get('unconnected')}. {TOPOR_VERDICT[n]}", ""]
+                  f"{r['kicad_drc'].get('unconnected')}. {TOPOR_VERDICT.get(n, 'not run in TopoR')}", ""]
         for j in e.get("judgement_calls", []):
             judg.append(f"- {n}: {j}")
     L += ["## TopoR method (black box)", "",
