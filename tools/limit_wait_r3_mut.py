@@ -31,6 +31,9 @@ M = {
     "s_cycle": (K, "Some(_) if whole_cycle => 1,", "Some(_) if false => 1,"),
     "s_pick": (C, 'ctl.stage(rnd, rnds, "picking the variant to draw");', "let _ = rnd;"),
     "s_cutwait": (K, "self.cut_in_wait.store(true, Ordering::Relaxed);", "let _ = 0;"),
+    "s_post": (C, """    post(&mut best);
+    best.runtime_s = t0.elapsed().as_secs_f64();""", """    best.runtime_s = t0.elapsed().as_secs_f64();
+    post(&mut best);"""),
     # round 3: drawing_grace_s
     "d_reduce": (C, "ctl.is_cancelled() || limit_cut() || draw_grace_over());", "ctl.is_cancelled() || limit_cut());"),
     "d_start": (K, "Some(d.max(draw_start) + Duration::from_secs_f64(g))", "Some(d + Duration::from_secs_f64(g))"),

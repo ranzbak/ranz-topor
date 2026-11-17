@@ -193,6 +193,16 @@ fn the_loop_step_ends_where_the_loop_returns() {
     assert!((l.wait_s - (t_end - t_lim)).abs() < 0.02, "wait {} vs loop end - limit {}", l.wait_s, t_end - t_lim);
 }
 
+/// The drawing, the run's last step, ends with the copper handed back: the finishing after the core
+/// (edge trims, the Cleanup-safe tidy) is part of its wait and of the run time.
+#[test]
+fn the_last_step_counts_to_the_finished_copper() {
+    let (r, _) = run_hooked(&topor(30.0), "fail wire drawing", false, &[("finish copper", 150)]);
+    let l = r.limit.as_ref().expect("limit report");
+    assert!(l.reached && l.wait_s >= 0.15, "the finishing nap is in the wait: {l:?}");
+    assert!((l.wait_s - l.overrun_s).abs() < 0.005, "wait {} vs overrun {}", l.wait_s, l.overrun_s);
+}
+
 /// A Cancel that ends the loop's cycle is no cycle the limit dropped.
 #[test]
 fn a_cancel_in_the_loop_is_no_dropped_cycle() {

@@ -158,7 +158,10 @@ fn fail(o: &mut [Outcome], i: usize, reason: impl Into<String>) {
 /// count cycles, never time. The time budget (`wall_clock_s`) is only an emergency stop; when
 /// it fires the result says so in a warning ([`TIME_HIT`]), because then it depends on the
 /// machine's speed and load. The user's OK after "Routes stable" ends a run on purpose.
-pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteResult {
+/// `post` runs on the result before its run time and limit report are taken (the caller's
+/// finishing of the copper, `route::route_with`: ignored pads, edge trims, the Cleanup-safe tidy),
+/// so a wait of the drawing counts to the copper handed back.
+pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &mut dyn FnMut(&mut RouteResult)) -> RouteResult {
     let t0 = Instant::now();
     let n = opts.runs.max(1);
     let obj = Objective::from_options(&opts.objective, opts.mm_per_via, &opts.pick);
@@ -192,7 +195,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     if ctl.is_cancelled() && opts.capacity_model == "cuts" {
         // M2.TL (fail fast): no plan kept yet, so nothing to draw, said loudly.
         let why = format!("{NOTHING_TO_DRAW}: Cancel / OK came during the projection of the board (the cut room of [capacity] model = \"cuts\"), before any run began, so no plan was kept and no copper is written");
-        let mut r = nothing_to_draw(model, opts, ctl, &why, t0);
+        let mut r = nothing_to_draw(model, opts, ctl, &why, t0, &mut *post);
         r.converged = false;
         return r;
     }
@@ -207,7 +210,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         } else {
             format!("{NOTHING_TO_DRAW}: no run of the call kept a plan ({})", skipped.iter().map(|(k, w)| format!("run {}: {w}", k + 1)).collect::<Vec<_>>().join("; "))
         };
-        return nothing_to_draw(model, opts, ctl, &why, t0);
+        return nothing_to_draw(model, opts, ctl, &why, t0, &mut *post);
     }
     // The best run: fewest errors, then the objective, then shrinkages; ties: the lower run.
     let mut pick = 0;
@@ -249,6 +252,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     }
     best.timed_out = time_hit && !(cancel && stable_all);
     best.converged = !best.timed_out;
+    post(&mut best);
     best.runtime_s = t0.elapsed().as_secs_f64();
     if best.timed_out {
         let limit = ctl.limit.seconds().unwrap_or(opts.wall_clock_s);
@@ -276,11 +280,12 @@ pub const NOTHING_TO_DRAW: &str = "nothing to draw yet";
 /// M2.TL (fail fast): the call's result when no plan was kept (`why` starts with
 /// [`NOTHING_TO_DRAW`]): every connection unrouted with `why`, an `ERROR:` line first, no copper.
 /// O(connections).
-fn nothing_to_draw(model: &BoardModel, opts: &Options, ctl: &RunControl, why: &str, t0: Instant) -> RouteResult {
+fn nothing_to_draw(model: &BoardModel, opts: &Options, ctl: &RunControl, why: &str, t0: Instant, post: &mut dyn FnMut(&mut RouteResult)) -> RouteResult {
     let mut r = unrouted(model, opts, why);
     r.warnings.insert(0, format!("ERROR: {why}"));
     r.stop_reason = if ctl.is_cancelled() { "cancel" } else { "timeout" }.into();
     r.timed_out = true;
+    post(&mut r);
     r.runtime_s = t0.elapsed().as_secs_f64();
     r.limit = limit_report(ctl, opts, &mut r);
     r
