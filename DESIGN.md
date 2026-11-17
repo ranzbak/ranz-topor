@@ -219,6 +219,24 @@ HDMI5V's via (+6 DRC, 2 shorts, ADV_SCL connection DRC 2 -> 8). Same parity: one
 - Seq mode untouched: `kept` is set only with realise = "erbs".
 - Ladder: seq copper identical on the 5 boards; erbs per-connection table for qmtech/esp (ADV_CLK, ADV_DE, net 55).
 
+## Round j (2026-11-17): verifier findings of round i (MERGE WITH FIXES)
+- **Exact crossing parity** (draw.rs `seg_cross_sos`, `proper_crossings`, `seg_chord_crossings`). `seg_proper`'s
+  tolerance window dropped a crossing through a vertex of either polyline (parity flipped both ways). Now: exact
+  orientation signs (Shewchuk 1997 pp. 36-40, robust crate) and a symbolic translation of the run by (e, e^2)
+  (simulation of simplicity, Edelsbrunner & Muecke 1990): every degenerate contact gets one consistent answer,
+  through a vertex = 1, touch-and-return / collinear stretch = even. For two runs with the same ends (the class
+  test's competitor and ERBS; the taut pull's old and new legs) the sum mod 2 equals the even-odd rule of the closed
+  loop at the reference path's ends: exact. Used by every parity reader: the class test, the taut pull's guards and
+  the via side test. Boolean "touches a wall" uses (`seg_proper` in exact.rs, octi.rs, the walls check) are no parity
+  and keep the strict predicate. Tests: `crossing_count_degenerate_cases` (9 cases, also at nm and swapped),
+  `crossing_parity_fuzz_against_exact_reference` (4 modes x 20 000 cases against an i128 even-odd reference).
+- **Parity per (wire, path)**: `ClassRef::crossings` keys by path; two odd paths of one wire no longer cancel.
+- **Passless wire**: its reference is the terminal-to-terminal chord on its plan's layers (`Drawer::plan_layers`,
+  `ref_trav_layers`); before, a passless wire whose sleeve failed had none (the doc said none is skipped).
+- **Filters tested**: `class_test_wire` (other net, alive, undrawn) and the layer filter, unit tests
+  `class_test_filters_and_per_path_parity`.
+- shortcut_across: strict xfail against the approved judge (+0.5 %), bound = measured 19.08 mm (+0.5 %).
+
 ## radii-m3-clear (2026-11-16): a band in another stretch's terminal feature is one predicted event
 
 #### What
