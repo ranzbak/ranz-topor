@@ -956,8 +956,12 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                     log.line("Cancel / OK: waiting for the engine to finish its current stage")
                     if p.stable:  # M-B0: OK after "Routes stable": the best so far is the board the user gets
                         state["ok_stable"] = True
-                        log.line(f"OK at Routes stable: best so far {p.best_routed}/{p.best_total} routed, "
-                                 f"{p.best_length_mm / 1000:.3f} m, {p.best_vias} vias (run {p.best_run} of {p.runs})")
+                        if p.best_total:
+                            log.line(f"OK at Routes stable: best so far {p.best_routed}/{p.best_total} routed, "
+                                     f"{p.best_length_mm / 1000:.3f} m, {p.best_vias} vias (run {p.best_run} of {p.runs})")
+                        else:  # "Report stable live": the TopoR loops were stable before any pick was drawn
+                            log.line(f"OK at Routes stable: no pick drawn yet ({p.runs_stable} of {p.runs} runs stable); "
+                                     "the TopoR loop's pick is drawn next and is the board")
             if done:
                 break
             time.sleep(0.02)

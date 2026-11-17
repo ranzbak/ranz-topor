@@ -884,9 +884,11 @@ def run(a) -> int:
             import re as _re
             log_txt = (report_dir / "log.txt").read_text() if (report_dir / "log.txt").is_file() else ""
             mo = _re.search(r"OK at Routes stable: best so far (\d+)/(\d+) routed", log_txt)
+            # "Report stable live" (2026-11-17): OK can come while the TopoR loops run, before any pick was drawn
+            live = mo is None and "OK at Routes stable: no pick drawn yet" in log_txt
             res = json.loads(rds[-1].read_text())
             e.check("OK keeps the best result shown (stop: stable, not cancelled)",
-                    bool(mo) and int(mo.group(1)) == res.get("routed") and res.get("stop_reason") == "stable"
+                    (live or bool(mo) and int(mo.group(1)) == res.get("routed")) and res.get("stop_reason") == "stable"
                     and not res.get("cancelled"),
                     f"shown {mo.group(0) if mo else None}; result routed {res.get('routed')}, stop {res.get('stop_reason')}, "
                     f"cancelled {res.get('cancelled')}")

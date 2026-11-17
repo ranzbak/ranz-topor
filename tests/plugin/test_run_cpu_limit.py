@@ -290,7 +290,7 @@ def test_stop_reason_for_every_engine_label_clock_and_mode(app, eprom, tmp_path,
     eng = RecordingEngine(hold=12, patch=_as(label, timed_out=timed_out, **warn))
     ui = _Dialog(accept=False) if mode == "dialog" else ScriptedUi(accept=False)
     _, _, out = do_run(eprom, tmp_path, ui=ui, cfg=cfg, engine=eng)
-    assert eng.options[0]["stop_when_stable"] is (mode == "headless")
+    assert eng.options[0].get("stop_when_stable", True) is (mode == "headless")  # headless: the engine default
     assert eng.jobs[0].reached is (clock == "cpu") and not eng.jobs[0].cancelled
     want, tbh, cancelled = _expected(label, clock)
     codes = {x.code for x in out.findings}

@@ -322,7 +322,9 @@ under *Best so far*, which then goes to KiCad's DRC and the preview. By default 
 `[optimize] rounds` or the time limit (the TopoR way). `finish_when_stable = true` makes it finish at *Routes stable*
 like a normal finish (each run stops at the round in which it becomes stable; `[optimize] finish_patience` > 0 lets
 it look for small gains that many more rounds first). *Routes stable* appears the moment every run's TopoR loop
-records it, while the loops still run (user 2026-11-17), so OK there really ends the run before the cap. Pressing OK
+records it, while the loops still run (user 2026-11-17), so OK there really ends the run before the cap. The loops
+judge their variants on the topology and draw only the pick, so at that moment *Best so far* can still be empty
+(log.txt: *OK at Routes stable: no pick drawn yet*); OK then draws the loops' pick, and that is the board. Pressing OK
 at *Routes stable* is not a cancel: the summary says *Stopped: stable*, and the rest of the run (drawing the picked
 variant, the pour stitching) runs to its end exactly as when a run ends at stable by itself; only the time limit can
 still cut it. A Cancel before *Routes stable* ends the pour stitching after the pass in progress. The button is
