@@ -627,6 +627,8 @@ pub(crate) fn run(ctx: &Around, cm: &mut CapModel, evl: &mut [Vec<LEv>], st_out:
             let mv = cur.next(fx, base, evl, ctx).expect("the cursor replays the epoch's stream");
             assert!(mv == ep.gen[seq], "par-refine: the cursor's replay differs from the epoch's stream at candidate {seq}");
             scanned = seq + 1;
+            st_out.evals += 1;
+            st_out.stream = super::refine::stream_fold(st_out.stream, &mv, out.keep);
             if out.keep {
                 kept = Some((seq, out));
                 break;

@@ -453,6 +453,9 @@ pub struct LayerReport {
     pub overfull_before: usize,
     pub overfull_after: usize,
     pub refine_moves: usize,
+    /// par-refine: the refinement's (evaluations, stream hash, end-site memo hash), see
+    /// [`super::refine::RefineStats::stream`].
+    pub refine_stream: (usize, u64, u64),
     /// Per wire, per event: the layers it may take (bit per layer) and the event of the other
     /// wire of its crossing (the two must differ in layer); for the P4 label moves.
     pub mask: Vec<Vec<u64>>,
@@ -825,6 +828,7 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
     rep.overfull_before = rs.before;
     rep.overfull_after = rs.after;
     rep.refine_moves = rs.moves;
+    rep.refine_stream = (rs.evals, rs.stream, rs.memo);
     rep.fin_cap = rs.fin;
     rep.mask = mask.clone();
     rep.partner = partner.clone();
@@ -1182,6 +1186,7 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
     rep.overfull_before = rs.before;
     rep.overfull_after = rs.after;
     rep.refine_moves = rs.moves;
+    rep.refine_stream = (rs.evals, rs.stream, rs.memo);
     rep.fin_cap = rs.fin;
     rep.mask = mask.clone();
     rep.partner = partner.clone();

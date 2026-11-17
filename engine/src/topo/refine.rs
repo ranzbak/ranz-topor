@@ -49,8 +49,33 @@ pub struct RefineStats {
     pub after: usize,
     /// Moves kept.
     pub moves: usize,
+    /// par-refine fingerprint (tests and the plan metrics' `move_cost.refine_stream`): the
+    /// candidates evaluated, a hash of their stream in order with each keep decision, and an
+    /// order-free hash of the end-site memo at the end. The lane executor promises all three
+    /// equal to the serial loop's, not only the labels.
+    pub evals: usize,
+    pub stream: u64,
+    pub memo: u64,
     /// The final capacity model's measure (per-edge model only), for the plan's measure to take.
     pub fin: Option<FinalCap>,
+}
+
+/// One step of [`RefineStats::stream`]: the candidate `mv` and whether it was kept. O(|mv|).
+pub(crate) fn stream_fold(h: u64, mv: &[((WireId, usize), i32)], keep: bool) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut x = std::collections::hash_map::DefaultHasher::new();
+    (h, mv, keep).hash(&mut x);
+    x.finish()
+}
+
+/// [`RefineStats::memo`]: an order-free hash of the end-site memo. O(entries).
+fn memo_hash(m: &EndSites) -> u64 {
+    use std::hash::{Hash, Hasher};
+    m.iter().fold(m.len() as u64, |acc, (k, v)| {
+        let mut x = std::collections::hash_map::DefaultHasher::new();
+        (k, v.map(|(i, p)| (i, p.x.to_bits(), p.y.to_bits()))).hash(&mut x);
+        acc.wrapping_add(x.finish())
+    })
 }
 
 /// par-refine item 3 (`[optimize] measure_reuse`): the violations of the capacity model the
@@ -1413,6 +1438,7 @@ pub fn refine(
         super::refine_par::run(&ctx, &mut cm, evl, &mut stats);
     }
     stats.after = cm.overfull();
+    stats.memo = memo_hash(&cm.a.end_sites);
     if cm.cut.is_none() {
         stats.fin = Some(FinalCap { packer: packer as *const Packer as usize, bottom, price: cm.fx.price.to_bits(), key: cap_key(st, evl), viol: cm.violations() });
     }
@@ -1513,7 +1539,10 @@ impl Around<'_> {
                     break;
                 }
                 *evals += 1;
-                if try_move(self.st, cm, evl, &mv, self.bottom, self.trans, self.unary, self.add_vias, false) {
+                let keep = try_move(self.st, cm, evl, &mv, self.bottom, self.trans, self.unary, self.add_vias, false);
+                stats.evals += 1;
+                stats.stream = stream_fold(stats.stream, &mv, keep);
+                if keep {
                     stats.moves += 1;
                     improved = true;
                     break;

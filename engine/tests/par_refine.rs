@@ -55,7 +55,11 @@ fn key(r: &RouteResult) -> String {
     }
     let line = r.warnings.iter().find(|w| w.starts_with("plan metrics:")).unwrap_or_else(|| panic!("plan metrics line: {:?}", r.warnings));
     let mut plan: serde_json::Value = serde_json::from_str(line.trim_start_matches("plan metrics:").trim()).expect("plan metrics JSON");
+    // the refinement's candidate stream, keep decisions and end-site memo, not only its labels
+    let stream = plan["move_cost"]["refine_stream"].clone();
+    assert!(stream["evals"].is_u64(), "plan metrics without move_cost.refine_stream: {plan}");
     untimed(&mut plan);
+    plan["refine_stream"] = stream;
     format!("{}\n{}\n{}", serde_json::to_string(&r.items).expect("items"), serde_json::to_string(&r.connections).expect("connections"), plan)
 }
 

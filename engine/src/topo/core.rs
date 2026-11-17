@@ -4262,6 +4262,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             use super::refine_par::stats as ls;
             m["move_cost"]["lanes"] = serde_json::json!({"epochs": ls::EPOCHS.load(Relaxed), "lane_epochs": ls::LANE_EPOCHS.load(Relaxed), "wasted": ls::WASTED.load(Relaxed), "redone": ls::REDONE.load(Relaxed)});
             m["move_cost"]["build_memo"] = serde_json::json!({"hits": super::refine::meter::MEMO_HIT.load(Relaxed), "misses": super::refine::meter::MEMO_MISS.load(Relaxed)});
+            // the plan's refinement: candidates, stream and memo fingerprint (equal for every lane count)
+            let (ev, sh, mh) = lr.refine_stream;
+            m["move_cost"]["refine_stream"] = serde_json::json!({"evals": ev, "stream": format!("{sh:016x}"), "memo": format!("{mh:016x}")});
         }
         let (fl, st_ms, np, p_ms, nc, i_ms) = super::refine::meter::read_split();
         m["cut_split"] = serde_json::json!({"flushes": fl, "ms_stretches": st_ms.round(), "parts": np, "ms_parts": p_ms.round(), "cuts_priced": nc, "ms_install": i_ms.round()});
