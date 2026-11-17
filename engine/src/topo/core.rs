@@ -654,6 +654,12 @@ impl<'a> Coord<'a> {
         !complete && judged.as_ref().is_none_or(|j| self.obj.better(crit, j))
     }
 
+    /// The progress shows "Routes stable" ([`Progress::stable`]: every run stable or done, one of
+    /// them stable): a Cancel / OK now is the dialog's OK at Routes stable. O(runs).
+    fn shown_stable(&self) -> bool {
+        self.st.lock().is_ok_and(|s| s.iter().any(|r| r.stable) && s.iter().all(|r| r.stable || r.done))
+    }
+
     fn has_result(&self, complete: bool) -> bool {
         self.snap.lock().is_ok_and(|s| s.as_ref().is_some_and(|(_, done)| *done || !complete))
     }
@@ -903,7 +909,9 @@ impl Run {
             o2.initial = "once".into();
         }
         let hv: Hints = if o2.drawing_feedback && !topor { self.all.iter().map(|(&(e, l), &r)| (e, l, r)).collect() } else { Vec::new() };
-        let (ro, h2, mem2) = route_round(model, &o2, ctl, &hv, &self.mem, cycle, stubs, fx, opts.fluctuation, (self.k, &coord.gate, &obj));
+        let k = self.k;
+        let live_stable = || coord.report(k, |r| r.stable = true);
+        let (ro, h2, mem2) = route_round(model, &o2, ctl, &hv, &self.mem, cycle, stubs, fx, opts.fluctuation, (self.k, &coord.gate, &obj, &live_stable));
         self.cycles = cycle;
         self.mem = mem2;
         for (e, l, r) in h2 {
@@ -912,6 +920,10 @@ impl Run {
         }
         let interrupted = ro.result.timed_out;
         let loop_end = ro.lp;
+        if topor && loop_end.is_some_and(|e| e.stable) {
+            // reported live by the loop: the progress keeps "Routes stable" through the drawing
+            self.stable_at.get_or_insert(cycle);
+        }
         let routed = ro.result.routed;
         let (mut cyc_err, mut cyc_viol) = (ro.crit.errors, ro.crit.violations);
         let total = ro.result.connections_total;
@@ -942,7 +954,6 @@ impl Run {
                 if e.stable {
                     self.stable_at.get_or_insert(cycle);
                 }
-                self.stable_stop = e.stopped_stable;
                 coord.report(self.k, |r| r.stable = e.stable);
             }
             self.time_hit = self.stable_at.is_none();
@@ -995,10 +1006,19 @@ impl Run {
             // The same test without noting a cut (the stitching may have ended before it): whether
             // a variant counts as cut short below; only the stitching's own stop test reports one.
             let past = || !exempt && ctl.limit.is_hard() && ctl.limit.passed();
+            // OK at Routes stable (user/lead 2026-11-17): a Cancel / OK while the progress shows
+            // "Routes stable" is the user taking the stable result, so the stitching of the TopoR
+            // loop's one drawing runs to its end as at a natural stable end (the time limit still
+            // cuts it); a Cancel before stable still ends it after the pass in progress. The dialog
+            // disables its button after the first press, so there is no second Cancel to honour.
+            let ok_at_stable = || topor && ctl.is_cancelled() && coord.shown_stable();
             let stitched = |mut r: RouteResult, mut c: Criteria| -> (RouteResult, Criteria) {
                 if opts.stitch_islands {
                     ctl.stage(cycle as u32, opts.topo_rounds.max(1) as u32, "pour stitching");
-                    c.errors += stitch_pours(model, opts, &mut r, None, &|| ctl.is_cancelled() || cut());
+                    c.errors += stitch_pours(model, opts, &mut r, None, &|| (ctl.is_cancelled() && !ok_at_stable()) || cut());
+                    if ok_at_stable() {
+                        r.warnings.push("OK at Routes stable: the pour stitching ran to its end, as at a natural stable end (a Cancel before Routes stable ends it after the pass in progress)".into());
+                    }
                 }
                 (r, c)
             };
@@ -1943,8 +1963,9 @@ fn existing_plane_vias(model: &BoardModel) -> Vec<planes::PlaneVia> {
 /// `opts.fluctuation` is this cycle's width).
 #[allow(clippy::too_many_arguments)]
 /// `gate`: the run (0-based), the call's [`DrawGate`] and objective (cancel-fix: after Cancel only
-/// one TopoR loop pick of the call is drawn).
-fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize, stubs: &PlaneStubs, fx: &Fixed, fluct0: f64, gate: (usize, &DrawGate, &Objective)) -> (RoundOut, Hints, Memory) {
+/// one TopoR loop pick of the call is drawn), and the run's live stable report (the TopoR loop calls
+/// it the moment it records stable, user 2026-11-17 "Report stable live").
+fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize, stubs: &PlaneStubs, fx: &Fixed, fluct0: f64, gate: (usize, &DrawGate, &Objective, &dyn Fn())) -> (RoundOut, Hints, Memory) {
     // TOPO_TIMES=1 (debug): phase times on stderr; never part of the result.
     let times = std::env::var_os("TOPO_TIMES").is_some();
     let tlog = |what: &str, t: Instant| {
@@ -3825,7 +3846,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let clock = || t_loop.elapsed().as_secs_f64();
         // M0: the progress dialog names the loop (tests/cancel_latency.rs waits for it).
         ctl.stage(rnd, rnds, "TopoR loop on the topology");
-        let mut rep = optimise(&mut sp, &mut arch, &params, &mut stop, &mut inner, &clock);
+        // "Report stable live" (user 2026-11-17): the progress says "Routes stable" while the loop
+        // still runs, so the dialog's OK (= Cancel) ends the loop there ("Cancel / OK", labelled
+        // "stable" by route_topo); a dialog run never ends BY ITSELF at stable (finish_when_stable off).
+        let live_stable = gate.3;
+        let mut rep = optimise(&mut sp, &mut arch, &params, &mut stop, &mut inner, &clock, &mut |_| live_stable());
         if rep.stop == "time limit" {
             rep.stop = if stop_now() { "Cancel / OK" } else if ctl.over_limit() { "time limit" } else { "loop_time_share" }.into();
         }

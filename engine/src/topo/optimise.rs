@@ -260,7 +260,9 @@ pub struct LoopReport {
 /// when `stop()` before a cycle (the time limit, Cancel; then the report says so). `inner()` ends
 /// a running cycle early (M2.TL: Cancel only with the soft limit); a cycle it cut short is not
 /// offered (Cancel keeps the best variant archived so far). The caller restores the pick.
-pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopParams, stop: &mut dyn FnMut() -> bool, inner: &mut dyn FnMut() -> bool, clock: &dyn Fn() -> f64) -> LoopReport {
+/// `on_stable(cycle)` is called once, the moment the loop records stable (user 2026-11-17 "Report
+/// stable live": the dialog shows "Routes stable" while the loop still runs, so OK ends it there).
+pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopParams, stop: &mut dyn FnMut() -> bool, inner: &mut dyn FnMut() -> bool, clock: &dyn Fn() -> f64, on_stable: &mut dyn FnMut(usize)) -> LoopReport {
     let obj = p.obj;
     let mut rep = LoopReport { stop: "cycle cap".into(), ..LoopReport::default() };
     let mut rng = ChaCha8Rng::seed_from_u64(mix(p.seed, 0x5EED_7090));
@@ -324,6 +326,7 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
         sched.after_cycle(gained, sc.incomplete > 0);
         if meter.stable() && rep.stable_at.is_none() {
             rep.stable_at = Some(cycle);
+            on_stable(cycle);
         }
         rep.lines.push(format!(
             "{cycle}: amp {:.3}, reroutes {}/{}, via-rose {}/{}, layerings {}/{}, floating up {}, crossing passes {}, undone {}, {}{}, best {:.1}{}",
@@ -673,7 +676,7 @@ mod tests {
             t.set(t.get() + 1.0);
             t.get()
         };
-        let rep = optimise(&mut sp, &mut a, &params(seed, restart_after), &mut || false, &mut || false, &clock);
+        let rep = optimise(&mut sp, &mut a, &params(seed, restart_after), &mut || false, &mut || false, &clock, &mut |_| {});
         (sp, a, rep)
     }
 
@@ -733,7 +736,7 @@ mod tests {
             n += 1;
             n > 3
         };
-        let rep = optimise(&mut sp, &mut a, &params(1, 2), &mut stop, &mut || false, &|| 0.0);
+        let rep = optimise(&mut sp, &mut a, &params(1, 2), &mut stop, &mut || false, &|| 0.0, &mut |_| {});
         assert_eq!(rep.stop, "time limit");
         assert_eq!(rep.cycles, 3);
         assert!(!a.items.is_empty());
@@ -749,7 +752,7 @@ mod tests {
             n += 1;
             n > 2
         };
-        let rep = optimise(&mut sp, &mut a, &params(1, 2), &mut || false, &mut inner, &|| 0.0);
+        let rep = optimise(&mut sp, &mut a, &params(1, 2), &mut || false, &mut inner, &|| 0.0, &mut |_| {});
         assert_eq!(rep.stop, "time limit");
         assert_eq!(rep.cycles, 3, "the third cycle was cut inside");
         assert_eq!(rep.offered, 3, "the initial plan and the two finished cycles only");
@@ -760,7 +763,7 @@ mod tests {
         let mut sp = toy();
         let mut a = Archive::new(4);
         let p = LoopParams { stable_window: 2, stable_gain_pct: 50.0, ..params(1, 0) };
-        let rep = optimise(&mut sp, &mut a, &p, &mut || false, &mut || false, &|| 0.0);
+        let rep = optimise(&mut sp, &mut a, &p, &mut || false, &mut || false, &|| 0.0, &mut |_| {});
         assert_eq!(rep.stop, "stable");
         assert_eq!(rep.stable_at, Some(2), "a gain below 50 % over 2 cycles");
         assert_eq!(rep.cycles, 2);
@@ -772,10 +775,33 @@ mod tests {
         let mut sp = toy();
         let mut a = Archive::new(4);
         let p = LoopParams { stable_window: 2, stable_gain_pct: 50.0, stop_at_stable: false, ..params(1, 0) };
-        let rep = optimise(&mut sp, &mut a, &p, &mut || false, &mut || false, &|| 0.0);
+        let mut seen = Vec::new();
+        let rep = optimise(&mut sp, &mut a, &p, &mut || false, &mut || false, &|| 0.0, &mut |c| seen.push(c));
         assert_eq!(rep.stable_at, Some(2));
         assert_eq!(rep.cycles, 30, "ran to the cap");
         assert_eq!(rep.stop, "cycle cap");
+        // "Report stable live": the hook fires once, at the cycle stable is recorded, while the loop goes on.
+        assert_eq!(seen, vec![2]);
+    }
+
+    #[test]
+    fn stable_is_reported_live_before_the_loop_ends() {
+        // The stop test before cycle 3 sees the live report of cycle 2's stable (the dialog's OK = Cancel there).
+        let mut sp = toy();
+        let mut a = Archive::new(4);
+        let p = LoopParams { stable_window: 2, stable_gain_pct: 50.0, stop_at_stable: false, ..params(1, 0) };
+        let live = std::cell::Cell::new(None);
+        let mut stop = || live.get().is_some();
+        let rep = optimise(&mut sp, &mut a, &p, &mut stop, &mut || false, &|| 0.0, &mut |c| live.set(Some(c)));
+        assert_eq!(live.get(), Some(2));
+        assert_eq!((rep.cycles, rep.stop.as_str(), rep.stable_at), (2, "time limit", Some(2)), "OK at the live stable ended it mid-loop");
+        // Without stable there is no report.
+        let mut sp = toy();
+        let mut a = Archive::new(4);
+        let p = LoopParams { stable_window: 2, stable_gain_pct: 0.0, stop_at_stable: false, cycles: 6, ..params(1, 0) };
+        let mut n = 0;
+        let rep = optimise(&mut sp, &mut a, &p, &mut || false, &mut || false, &|| 0.0, &mut |_| n += 1);
+        assert_eq!((rep.stable_at, n), (None, 0), "{:?}", rep.lines);
     }
 
     #[test]

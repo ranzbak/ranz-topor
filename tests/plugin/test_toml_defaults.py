@@ -61,8 +61,10 @@ def test_update_config_uncomments(tmp_path):
 
 @pytest.fixture
 def past(monkeypatch):
+    # the bool's past default is the opposite of the current one, so the bool branch is live whatever the default is
+    old_bool = not schema.SETTINGS_BY_KEY[("optimize", "finish_when_stable")].default
     monkeypatch.setattr(schema, "PAST_DEFAULTS", {("run", "timeout_s"): ((300, "2026-01-01"),),
-                                                  ("optimize", "finish_when_stable"): ((False, "2026-02-02"),)})
+                                                  ("optimize", "finish_when_stable"): ((old_bool, "2026-02-02"),)})
 
 
 def test_pinned_old_default_warns_once_and_keeps_value(past, tmp_path):
@@ -82,10 +84,7 @@ def test_history_entry_equal_to_current_default_never_warns(tmp_path, monkeypatc
 
 
 def test_pinned_bool_says_warning_stays(past, tmp_path):
-    cur = schema.SETTINGS_BY_KEY[("optimize", "finish_when_stable")].default
-    old = False
-    if cur == old:  # history entry equals current default on this tree: nothing to warn about
-        pytest.skip("past default equals current")
+    old = not schema.SETTINGS_BY_KEY[("optimize", "finish_when_stable")].default  # the fixture's past default
     (tmp_path / "topor.toml").write_text(f"version = 1\n[optimize]\nfinish_when_stable = {str(old).lower()}\n")
     f = [x for x in load_config(tmp_path)[1] if x.code == "CFG_PINNED_OLD_DEFAULT"]
     assert len(f) == 1 and "warning stays" in f[0].message
@@ -105,6 +104,7 @@ def test_real_history_pinned_finish_when_stable_true_is_kept_and_warned(tmp_path
     assert cfg.get("optimize", "finish_when_stable") is True
     f = [x for x in findings if x.code == "CFG_PINNED_OLD_DEFAULT"]
     assert len(f) == 1 and f[0].severity == "warning" and "optimize.finish_when_stable = true" in f[0].message
+    assert "the warning stays while the value is pinned" in f[0].message  # the bool branch (verify-slfx F3)
     assert "finish_when_stable = true" in (tmp_path / "topor.toml").read_text()  # file untouched
     assert [x for x in load_config(tmp_path)[1] if x.code == "CFG_PINNED_OLD_DEFAULT"]  # again on the next load
 

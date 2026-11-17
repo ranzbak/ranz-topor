@@ -994,6 +994,30 @@ def test_run_ok_at_routes_stable_is_not_a_cancel(app, eprom, tmp_path, reports):
     assert stable and stable[0].best_total == 27 and stable[0].runs == 5
     log = (out.report_dir / "log.txt").read_text()
     assert "OK at Routes stable: best so far 27/27 routed" in log
+    # "Report stable live" (user 2026-11-17): the OK reached the running engine, so its TopoR loops ended by the OK,
+    # before the cycle cap, and the engine itself says "stable" (no plugin relabel any more)
+    rr = json.loads((out.report_dir / "result.json").read_text())
+    assert rr["stop_reason"] == "stable"
+    loops = [w for w in _engine_warnings(out) if w.startswith("TopoR loop (")]
+    assert loops and all("ended by Cancel / OK" in w for w in loops), loops
+
+
+def _engine_warnings(out):
+    """The engine's own report lines of the run (result.json "route")."""
+    return list(json.loads((out.report_dir / "result.json").read_text())["route"].get("warnings") or [])
+
+
+def test_ok_after_the_engine_ended_at_the_cap_stays_round_cap(app, eprom, tmp_path, reports):
+    """An OK that arrives after the engine had already ended at its cycle cap did not end the run: stop_reason stays
+    "round cap" (verify-slfx F1: the plugin no longer relabels it "stable"), and it is not a cancel either. The proxy
+    job records the OK and lets the real job run to its cap."""
+    cfg = CFG.with_values({("optimize", "rounds"): 20})
+    ui = ScriptedUi(accept=True, ok_at_stable=True)
+    eng = ProxyEngine(hold=1)
+    board, ui, out = do_run(eprom, tmp_path, ui=ui, engine=eng, cfg=cfg)
+    assert eng.jobs[0].cancelled, "the OK was sent"
+    assert out.stop_reason == "round cap" and out.cancelled is False, out.stop_reason
+    assert out.status == "accepted" and out.routed == 27
 
 
 class _RealCancelEngine:

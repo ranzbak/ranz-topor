@@ -321,8 +321,13 @@ under *Best so far*, which then goes to KiCad's DRC and the preview. By default 
 (user 2026-11-16: "don't stop on stable"): it keeps going for marginal gains until OK, Cancel, the safety cap
 `[optimize] rounds` or the time limit (the TopoR way). `finish_when_stable = true` makes it finish at *Routes stable*
 like a normal finish (each run stops at the round in which it becomes stable; `[optimize] finish_patience` > 0 lets
-it look for small gains that many more rounds first). Pressing OK at *Routes stable* is not a cancel: the summary
-says *Stopped: stable*. Headless runs (harness, MCP) stop at *Routes stable* by themselves (plus `stable_patience`
+it look for small gains that many more rounds first). *Routes stable* appears the moment every run's TopoR loop
+records it, while the loops still run (user 2026-11-17), so OK there really ends the run before the cap. Pressing OK
+at *Routes stable* is not a cancel: the summary says *Stopped: stable*, and the rest of the run (drawing the picked
+variant, the pour stitching) runs to its end exactly as when a run ends at stable by itself; only the time limit can
+still cut it. A Cancel before *Routes stable* ends the pour stitching after the pass in progress. The button is
+disabled after the first press, so there is no second Cancel. An OK that comes only after the engine already ended
+at the cap leaves *Stopped: round cap*. Headless runs (harness, MCP) stop at *Routes stable* by themselves (plus `stable_patience`
 rounds). The first round of the first run always uses the plain weights, and every run is reproducible: the same
 board and settings give the same result.
 
