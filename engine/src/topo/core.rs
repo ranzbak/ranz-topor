@@ -1293,7 +1293,8 @@ fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, 
     // M2: with the TopoR loop every run has a thread of its own: a run waits after its loop until
     // every run offered its pick ([`DrawGate`]), so the decision sees all of them and never waits
     // for a run that has no thread. Only `min(runs, rayon threads)` of them compute at once (the
-    // gate's slots; a run waiting at the gate gives its slot back): the busy threads stay as before.
+    // gate's slots; a run waiting at the gate gives its slot back, and so does a stable loop to a run
+    // not yet begun, [`Slots::yield_to_first`]): the busy threads stay as before.
     let workers = if topor { n } else { n.min(rayon::current_num_threads()).max(1) };
     if workers == 1 {
         worker();

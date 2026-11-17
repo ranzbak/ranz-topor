@@ -20,7 +20,8 @@ def test_defaults_are_commented_with_help_kept():
             continue
         assert re.search(rf"^# {re.escape(s.key)} = ", text, re.M), s.key
         assert not re.search(rf"^{re.escape(s.key)} = ", text, re.M), s.key
-    assert "finish_when_stable" in text and "# optimize" not in text.split("[optimize]")[0]
+    assert "stable_patience" in text and "# optimize" not in text.split("[optimize]")[0]
+    assert "finish_when_stable" not in text and "finish_patience" not in text  # deprecated 2026-11-17
     d = _active(text)
     assert d == {"version": 1, **{sec: {} for sec in d if sec != "version"}}  # nothing active
 
@@ -62,9 +63,9 @@ def test_update_config_uncomments(tmp_path):
 @pytest.fixture
 def past(monkeypatch):
     # the bool's past default is the opposite of the current one, so the bool branch is live whatever the default is
-    old_bool = not schema.SETTINGS_BY_KEY[("optimize", "finish_when_stable")].default
+    old_bool = not schema.SETTINGS_BY_KEY[("run", "respect_locked")].default
     monkeypatch.setattr(schema, "PAST_DEFAULTS", {("run", "timeout_s"): ((300, "2026-01-01"),),
-                                                  ("optimize", "finish_when_stable"): ((old_bool, "2026-02-02"),)})
+                                                  ("run", "respect_locked"): ((old_bool, "2026-02-02"),)})
 
 
 def test_pinned_old_default_warns_once_and_keeps_value(past, tmp_path):
@@ -74,6 +75,7 @@ def test_pinned_old_default_warns_once_and_keeps_value(past, tmp_path):
     f = [x for x in findings if x.code == "CFG_PINNED_OLD_DEFAULT"]
     assert len(f) == 1 and f[0].severity == "warning"
     assert "run.timeout_s = 300" in f[0].message and "current default is 600" in f[0].message
+    assert "topor.toml (line 3) pins" in f[0].message and f[0].items == ("run.timeout_s",)
     assert "set it explicitly" in f[0].message and "configuration.md#pinned-defaults" in f[0].fix
 
 
@@ -84,8 +86,8 @@ def test_history_entry_equal_to_current_default_never_warns(tmp_path, monkeypatc
 
 
 def test_pinned_bool_says_warning_stays(past, tmp_path):
-    old = not schema.SETTINGS_BY_KEY[("optimize", "finish_when_stable")].default  # the fixture's past default
-    (tmp_path / "topor.toml").write_text(f"version = 1\n[optimize]\nfinish_when_stable = {str(old).lower()}\n")
+    old = not schema.SETTINGS_BY_KEY[("run", "respect_locked")].default  # the fixture's past default
+    (tmp_path / "topor.toml").write_text(f"version = 1\n[run]\nrespect_locked = {str(old).lower()}\n")
     f = [x for x in load_config(tmp_path)[1] if x.code == "CFG_PINNED_OLD_DEFAULT"]
     assert len(f) == 1 and "warning stays" in f[0].message
 
@@ -96,17 +98,42 @@ def test_no_warning_for_current_other_or_commented(past, tmp_path, body):
     assert [x for x in load_config(tmp_path)[1] if x.code == "CFG_PINNED_OLD_DEFAULT"] == []
 
 
-def test_real_history_pinned_finish_when_stable_true_is_kept_and_warned(tmp_path):
-    """User decision 2026-11-17: a topor.toml written before the default flipped (finish_when_stable = true as an active
-    line) is kept as is (no migration) and gets exactly one CFG_PINNED_OLD_DEFAULT warning per load."""
-    (tmp_path / "topor.toml").write_text("version = 1\n[optimize]\nfinish_when_stable = true\n")
+@pytest.mark.parametrize("key,raw", [("finish_when_stable", "true"), ("finish_when_stable", "false"),
+                                     ("finish_patience", "3")])
+def test_deprecated_finish_keys_are_ignored_and_warned_with_their_line(tmp_path, key, raw):
+    """User 2026-11-17 ("the button should change from 'Cancel' to 'Ok' and the optimizer should keep running like it
+    does for TopoR"): [optimize] finish_when_stable / finish_patience are deprecated. A topor.toml that still sets
+    one (a file from 15 Nov pinned finish_when_stable = true) keeps loading, the key is ignored (not in the Config,
+    nothing reaches the engine) and the warning names the line; the file is untouched."""
+    body = f"version = 1\n[run]\ntimeout_s = 60\n[optimize]\nrounds = 20\n{key} = {raw}\n"
+    (tmp_path / "topor.toml").write_text(body)
     cfg, findings = load_config(tmp_path)
-    assert cfg.get("optimize", "finish_when_stable") is True
-    f = [x for x in findings if x.code == "CFG_PINNED_OLD_DEFAULT"]
-    assert len(f) == 1 and f[0].severity == "warning" and "optimize.finish_when_stable = true" in f[0].message
-    assert "the warning stays while the value is pinned" in f[0].message  # the bool branch (verify-slfx F3)
-    assert "finish_when_stable = true" in (tmp_path / "topor.toml").read_text()  # file untouched
-    assert [x for x in load_config(tmp_path)[1] if x.code == "CFG_PINNED_OLD_DEFAULT"]  # again on the next load
+    f = [x for x in findings if x.code == "CFG_DEPRECATED_KEY"]
+    assert len(f) == 1 and f[0].severity == "warning" and f[0].items == (f"optimize.{key}",), findings
+    assert f"topor.toml (line 6) sets optimize.{key} = {raw}" in f[0].message and "ignored" in f[0].message
+    assert "deprecated since 2026-11-17" in f[0].message and "#deprecated-keys" in f[0].fix
+    assert [x.code for x in findings] == ["CFG_DEPRECATED_KEY"]
+    assert ("optimize", key) not in cfg.values and cfg.get("optimize", "rounds") == 20
+    assert (tmp_path / "topor.toml").read_text() == body  # never edited by loading
+
+
+def test_comment_out_key_comments_only_that_line(tmp_path):
+    """The pre-flight dialog's "Use the current default" (user 2026-11-17): the active line, a multi-line value
+    included, gets '# ' in front; the rest of the file is kept, and a key without an active line writes nothing."""
+    from topor.config import comment_out_key
+    p = tmp_path / "topor.toml"
+    body = ("version = 1\n[run]\ntimeout_s = 300  # mine\n# timeout_clock = \"wall\"\n[vias]\nallowed_drills_mm = [\n  0.3,\n"
+            "  0.4,\n]\n[optimize]\nfinish_when_stable = true\n")
+    p.write_text(body)
+    assert comment_out_key(p, "optimize.finish_when_stable") == 11
+    assert comment_out_key(p, "vias.allowed_drills_mm") == 6
+    assert comment_out_key(p, "run.timeout_clock") is None  # only commented: nothing to do
+    assert comment_out_key(p, "optimize.rounds") is None
+    got = p.read_text()
+    assert "# finish_when_stable = true" in got and "# allowed_drills_mm = [\n#   0.3,\n#   0.4,\n# ]" in got
+    assert "\ntimeout_s = 300  # mine\n" in got
+    cfg, findings = load_config(tmp_path)
+    assert findings == [] and cfg.get("vias", "allowed_drills_mm") == schema.SETTINGS_BY_KEY[("vias", "allowed_drills_mm")].default
 
 
 def test_real_history_is_consistent():
@@ -118,7 +145,9 @@ def test_real_history_is_consistent():
 
 def test_docs_gen_lists_history_and_limitation():
     md = render_reference_md(schema.SETTINGS)
-    assert "## Pinned defaults" in md and "`optimize.finish_when_stable` | `true` | 2026-11-16" in md
+    assert "## Pinned defaults" in md and "Use the current default" in md
+    assert "## Deprecated keys" in md and "`optimize.finish_when_stable` | 2026-11-17 |" in md
+    assert "`optimize.finish_patience` | 2026-11-17 |" in md
     assert "Known limitation" in md and "never gets options that were added in a later version" in md
     changed = dict(schema.PAST_DEFAULTS)
     schema_hist = {**changed, ("run", "timeout_s"): ((1, "2026-03-03"),)}
@@ -136,4 +165,4 @@ def test_docs_gen_lists_history_and_limitation():
 def test_existing_file_gets_new_options(tmp_path):
     (tmp_path / "topor.toml").write_text("version = 1\n[run]\n# timeout_s = 600\n")
     load_config(tmp_path)
-    assert "finish_when_stable" in (tmp_path / "topor.toml").read_text()
+    assert "stable_patience" in (tmp_path / "topor.toml").read_text()

@@ -90,11 +90,14 @@ class RunSummary:
 @dataclass
 class Decision:
     """Pre-flight answer. ``overrides`` holds any of ``scope_mode, existing_copper, respect_locked,
-    timeout_s, timeout_clock`` ([run] key -> value) and ``drawing_style`` ([drawing] style); ``save_to_toml`` persists them."""
+    timeout_s, timeout_clock`` ([run] key -> value) and ``drawing_style`` ([drawing] style); ``save_to_toml`` persists them.
+    ``use_defaults``: the ``section.key`` of the pinned topor.toml lines (CFG_PINNED_OLD_DEFAULT, CFG_DEPRECATED_KEY)
+    to comment out, so the run uses the current default (user 2026-11-17, "Use the current default")."""
     proceed: bool
     accepted_codes: tuple = ()
     overrides: dict = field(default_factory=dict)
     save_to_toml: bool = False
+    use_defaults: tuple = ()
 
 
 @dataclass

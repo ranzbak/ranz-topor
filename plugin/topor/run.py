@@ -53,14 +53,15 @@ from . import preflight as preflight_mod
 from . import postrun, runlock
 from . import preview as preview_mod
 from . import probe as probe_mod
-from .config import CONFIG_NAME, Config, cache_root, load_config, update_config
+from .config import (CONFIG_NAME, PINNED_LINE_CODES, Config, cache_root, comment_out_key, load_config, toml_value,
+                     update_config)
 from .findings import Finding
 from .layers import resolve_layer_roles
 from .pourreach import dangling_ends, pour_reach
 from .priority import net_priorities
 from .ports import BoardPort, CommitRequest, CommitResult, Decision, Progress, RunSummary, Selection, UiPort
 from .report import RunReport, before_stats_from_model, build_report, limit_text, time_limit_text
-from .schema import CURRENT_VERSION
+from .schema import CURRENT_VERSION, SETTINGS_BY_KEY
 from .scope import connections_by_scope, do_not_touch_nets, rip_plan, scope_from_selection
 
 ACTION_CLEANUP = "pcbnew.GlobalEdit.cleanupTracksAndVias"
@@ -310,6 +311,29 @@ def apply_accepted_findings(decision: Decision, findings: list, cfg: Config, tom
     if toml_path.is_file():
         update_config(toml_path, {f"{s}.{k}": v for (s, k), v in changes.items()})
     return cfg.with_values(changes)
+
+
+def apply_use_defaults(decision: Decision, findings: list, cfg: Config, toml_path: Path) -> tuple[Config, list]:
+    """The pre-flight dialog's "Use the current default" (user 2026-11-17): for every pinned line the user chose
+    (``decision.use_defaults``, keys ``section.key`` of a CFG_PINNED_OLD_DEFAULT / CFG_DEPRECATED_KEY finding)
+    comment the line out in topor.toml (``config.comment_out_key``) and run with the current default. Returns the
+    Config and one CFG_DEFAULT_RESTORED note per line commented out. O(keys x lines)."""
+    keys = {f.items[0] for f in findings if f.code in PINNED_LINE_CODES and f.items}
+    chosen = [k for k in getattr(decision, "use_defaults", ()) if k in keys]
+    toml_path = Path(toml_path)
+    notes, changes = [], {}
+    for full in chosen:
+        sec, _, key = full.partition(".")
+        line = comment_out_key(toml_path, full) if toml_path.is_file() else None
+        s = SETTINGS_BY_KEY.get((sec, key))
+        if s is not None:  # a pinned old default: the current default from now on (a deprecated key was ignored anyway)
+            changes[(sec, key)] = s.default
+        where = f"line {line} of {CONFIG_NAME}" if line else f"{CONFIG_NAME} (no active line found: nothing written)"
+        now = f"the current default {toml_value(s.default)}" if s is not None else "nothing (the key is deprecated)"
+        notes.append(Finding("CFG_DEFAULT_RESTORED", "info",
+                             f"{full}: {where} commented out (Use the current default); this run uses {now}.",
+                             "", (full,)))
+    return (cfg.with_values(changes) if changes else cfg), notes
 
 
 # ---------------------------------------------------------------- helpers
@@ -758,6 +782,10 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         return abort_preflight(", ".join(f.code for f in errors) or "declined")
     toml = project_dir / CONFIG_NAME
     cfg = apply_accepted_findings(decision, findings, cfg, toml)
+    cfg, restored = apply_use_defaults(decision, findings, cfg, toml)
+    for f in restored:
+        log.line(f"pre-flight: {f.message}")
+    findings += restored
     over = {k: v for k, v in decision.overrides.items() if k in _ROUTE_OVERRIDES}
     if over:
         where = {k: _OVERRIDE_KEY.get(k, ("run", k)) for k in over}
@@ -766,7 +794,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
             update_config(toml, {f"{where[k][0]}.{where[k][1]}": v for k, v in over.items()})
     # `scope_whole` (dialog: whole board although a selection exists) ignores the selection; never written to topor.toml.
     plan = scope_from_selection(sel, model, cfg, whole=bool(decision.overrides.get("scope_whole")))
-    log.line(f"decision: overrides {decision.overrides}, accepted {decision.accepted_codes}")
+    log.line(f"decision: overrides {decision.overrides}, accepted {decision.accepted_codes}, "
+             f"use defaults {tuple(getattr(decision, 'use_defaults', ()))}")
 
     # 3. rip plan -> the unrouted baseline
     rip = rip_plan(model, plan, cfg)
@@ -794,10 +823,17 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
 
     # 4. route + DRC loop
     opts = build_options(cfg, engine, plan=plan, rip=rip, model=model, priorities=priorities)
-    if getattr(ui, "waits_for_ok", False) and "stop_when_stable" in json.loads(engine.default_options()):
+    known = json.loads(engine.default_options())
+    if getattr(ui, "waits_for_ok", False) and "stop_when_stable" in known:
         # M-B0: with the progress dialog the user ends the run (OK once the routes are stable); headless runs
-        # (harness, MCP) stop at "Routes stable" + [optimize] stable_patience by themselves.
+        # (harness, MCP) stop at "Routes stable" + [optimize] stable_patience by themselves. User 2026-11-17 ("the
+        # button should change from 'Cancel' to 'Ok' and the optimizer should keep running like it does for TopoR"):
+        # nothing else ends a dialog run at stable, so the engine's own finish at stable stays off (the topor.toml
+        # keys are deprecated, CFG_DEPRECATED_KEY).
         opts["stop_when_stable"] = False
+        for k, v in (("finish_when_stable", False), ("finish_patience", 0)):
+            if k in known:
+                opts[k] = v
     budget = float(opts.get("wall_clock_s", 60.0))
     # run.timeout_clock = "cpu": timeout_s counts CPU seconds of the engine jobs (time.process_time deltas, all
     # threads summed); the plugin cancels the job when it is reached and the engine's own wall limit is off.

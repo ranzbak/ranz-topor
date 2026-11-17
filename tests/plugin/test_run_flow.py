@@ -21,7 +21,7 @@ from harness.paths import board_pcb  # noqa: E402
 from topor import preview, run as run_mod  # noqa: E402
 from topor.config import Config  # noqa: E402
 from topor.fake import FakeBoard, ScriptedUi  # noqa: E402
-from topor.ports import Report  # noqa: E402
+from topor.ports import Decision, Report  # noqa: E402
 from toporlib import pcbfile  # noqa: E402
 from toporlib.drc import classify, run_drc  # noqa: E402
 
@@ -997,7 +997,7 @@ def test_run_ok_at_routes_stable_is_not_a_cancel(app, eprom, tmp_path, reports):
     stable = [c[1][0] for c in ui.calls if c[0] == "progress" and c[1][0].stable]
     # every run stable (5 of 5, whatever the engine's thread count: a stable run frees its slot for a run not yet
     # begun) and a pick to keep: "Routes stable" waits for the first pick (user 2026-11-17), the loops' predicted one
-    assert stable and stable[0].runs == 5 and stable[0].runs_stable == 5 and stable[0].runs_done == 0, stable[:1]
+    assert stable and stable[0].runs == 5 and stable[0].runs_stable == 5, stable[:1]
     assert stable[0].best_total == 27 and stable[0].best_routed == 27 and stable[0].best_round >= 1, stable[0]
     log = (out.report_dir / "log.txt").read_text()
     assert f"OK at Routes stable: best so far {stable[0].best_routed}/27 routed" in log
@@ -1151,11 +1151,87 @@ def test_dialog_run_ends_at_the_cycle_cap_not_at_stable(app, eprom, tmp_path, re
     assert out.status == "accepted" and out.routed == 27 and out.cancelled is False
 
 
-def test_dialog_run_with_finish_when_stable_ends_at_stable(app, eprom, tmp_path, reports):
-    """The opt-in keeps the old behaviour: the run finishes by itself at stable, labelled "stable"."""
-    cfg = CFG.with_values({("optimize", "rounds"): 20, ("optimize", "finish_when_stable"): True})
-    board, ui, out = do_run(eprom, tmp_path, ui=_NeverOkDialog(accept=True), engine=_RealCancelEngine(), cfg=cfg)
-    assert out.stop_reason == "stable" and out.routed == 27
+def _project_with_toml(eprom, tmp_path, toml_text):
+    """A project folder of its own (the module's eprom copy stays untouched) whose topor.toml is `toml_text`; the
+    run loads it (cfg None). Returns the board port."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "topor.toml").write_text(toml_text)
+    text = eprom.text.rstrip()
+    live = text[:-1].rstrip("\n") + "\n" + LIVE_EDIT + ")\n"
+    return FakeBoard(eprom.pcb, eprom.model, live_text=live, project_dir=proj)
+
+
+_PINNED_FINISH = ("version = 1\n[run]\nexisting_copper = \"rip\"\ntimeout_s = 60.0\n[optimize]\nrounds = 1000\n"
+                  "finish_when_stable = true\n")
+
+
+class _OkAfterStable(ScriptedUi):
+    """The progress dialog whose user presses OK only `after` polls past the first "Routes stable"."""
+
+    def __init__(self, after, **kw):
+        super().__init__(**kw)
+        self.waits_for_ok = True
+        self.after, self.polls_after_stable = after, 0
+
+    def progress(self, p):
+        super().progress(p)
+        if getattr(p, "stable", False):
+            self.polls_after_stable += 1
+        return self.polls_after_stable <= self.after
+
+
+def test_a_pinned_finish_when_stable_no_longer_ends_a_dialog_run(app, eprom, tmp_path, reports):
+    """User 2026-11-17 (a real run in the plugin stopped at "Routes stable" after 119 s of 600 because topor.toml
+    pinned finish_when_stable = true from 15 Nov): with the progress dialog nothing ends the run at stable. The key is
+    deprecated: the pre-flight lists CFG_DEPRECATED_KEY with its line, the engine gets finish_when_stable false, and
+    the run keeps iterating after "Routes stable" until the OK (the TopoR loop ended by the OK, not at stable)."""
+    board = _project_with_toml(eprom, tmp_path, _PINNED_FINISH)
+    eng = _RealCancelEngine()
+    ui = _OkAfterStable(8, accept=True)
+    out = run_mod.run(board, ui, None, eng, tmp_root=tmp_path / "work")
+    _ok(out)
+    pre = next(c[1][0] for c in ui.calls if c[0] == "preflight")
+    dep = [f for f in pre if f.code == "CFG_DEPRECATED_KEY"]
+    assert len(dep) == 1 and "topor.toml (line 7) sets optimize.finish_when_stable = true" in dep[0].message, pre
+    assert eng.options[0]["finish_when_stable"] is False and eng.options[0]["finish_patience"] == 0
+    assert ui.polls_after_stable > 8, "the run went on after Routes stable until the OK"
+    assert out.stop_reason == "stable" and out.cancelled is False and out.routed == 27
+    loops = [w for w in _engine_warnings(out) if w.startswith("TopoR loop (")]
+    assert len(loops) == 1 and "ended by Cancel / OK" in loops[0], loops
+    assert "finish_when_stable = true" in (board.project_dir() / "topor.toml").read_text()  # untouched without the tick
+
+
+def test_use_the_current_default_comments_the_pinned_line_out(app, eprom, tmp_path, reports, monkeypatch):
+    """User 2026-11-17 ("Show it in the dialog"): ticking Use the current default for a pinned line (a deprecated key,
+    a pinned old default) comments the line out in topor.toml when Route is pressed, the run uses the current default
+    and the report notes CFG_DEFAULT_RESTORED; an unticked pinned line stays as it is."""
+    from topor import schema
+    monkeypatch.setattr(schema, "PAST_DEFAULTS", {("run", "timeout_clock"): (("cpu", "2026-01-01"),),
+                                                  ("run", "respect_locked"): ((not schema.SETTINGS_BY_KEY[("run", "respect_locked")].default, "2026-01-02"),)})
+    old_locked = str(not schema.SETTINGS_BY_KEY[("run", "respect_locked")].default).lower()
+    toml = _PINNED_FINISH.replace("timeout_s = 60.0\n", f"timeout_s = 60.0\ntimeout_clock = \"cpu\"\nrespect_locked = {old_locked}\n")
+    board = _project_with_toml(eprom, tmp_path, toml)
+    chosen = ("optimize.finish_when_stable", "run.timeout_clock")
+    ui = ScriptedUi(decisions=Decision(True, use_defaults=chosen), accept=False)
+    out = run_mod.run(board, ui, None, topor_engine, tmp_root=tmp_path / "work")
+    _ok(out)
+    pre = next(c[1][0] for c in ui.calls if c[0] == "preflight")
+    assert {f.code for f in pre} >= {"CFG_DEPRECATED_KEY", "CFG_PINNED_OLD_DEFAULT"}
+    got = (board.project_dir() / "topor.toml").read_text()
+    assert "\n# finish_when_stable = true\n" in got and '\n# timeout_clock = "cpu"\n' in got
+    assert f"\nrespect_locked = {old_locked}\n" in got, "an unticked pinned line is kept"
+    assert out.time_limit["clock"] == "wall", "the run used the current default of run.timeout_clock"
+    notes = [f for f in out.findings if f.code == "CFG_DEFAULT_RESTORED"]
+    assert sorted(f.items[0] for f in notes) == sorted(chosen), notes
+    assert any("line 9 of topor.toml commented out" in f.message for f in notes), notes
+    log = (out.report_dir / "log.txt").read_text()
+    assert "pre-flight: run.timeout_clock: line 5 of topor.toml commented out" in log
+    # the next load: no warning for the lines commented out, the unticked one still warns
+    from topor.config import load_config
+    codes = [f.code for f in load_config(board.project_dir())[1]]
+    assert codes == ["CFG_PINNED_OLD_DEFAULT"], codes
+
 
 
 # ------------------------------------------------------------------ OK vs Cancel at the press (user 2026-11-17)

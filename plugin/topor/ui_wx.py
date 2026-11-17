@@ -27,7 +27,7 @@ from pathlib import Path
 
 import wx
 
-from .config import Config
+from .config import PINNED_LINE_CODES, Config
 from .findings import Finding
 from .ports import Decision, Progress, RunSummary
 
@@ -69,6 +69,8 @@ WORDING: dict[str, dict[str, str]] = {
         "items_more": "… and {n} more (all in the report)",
         "accept_pads": "Accept: skip these pads (saved to topor.toml ignore_pads)",
         "accept_drills": "Accept: add these drills to topor.toml allowed_drills_mm",
+        # user 2026-11-17 ("Show it in the dialog"): a pinned old default / deprecated key, commented out on Route
+        "use_default": "Use the current default for {key}: Route comments its line out in topor.toml",
         "options_heading": "Options",
         "scope_label": "Scope",
         "scope_whole": "Whole board",
@@ -827,7 +829,7 @@ class _FindingsMixin:
 class PreflightDialog(_FindingsMixin, _Base):
     _wk = "preflight"
     #: tab order from the note §2 (one Accept checkbox, relabelled per selected code)
-    TAB_ORDER = ("findings", "cause", "accept", "scope_whole", "scope_between",
+    TAB_ORDER = ("findings", "cause", "accept", "use_default", "scope_whole", "scope_between",
                  "scope_touching", "existing", "respect_locked", "drawing_style", "timeout", "timeout_clock",
                  "save_toml", "help", "cancel", "route")
 
@@ -855,6 +857,15 @@ class PreflightDialog(_FindingsMixin, _Base):
         self.accept_cb.Bind(wx.EVT_CHECKBOX, self._on_accept)
         self.accept_code = None
         self.root.Add(self.accept_cb, 0, wx.BOTTOM, self.row)
+        # user 2026-11-17 ("Show it in the dialog"): ONE "Use the current default" checkbox, shown while the selected
+        # row is a pinned topor.toml line (CFG_PINNED_OLD_DEFAULT, CFG_DEPRECATED_KEY) and relabelled with its key;
+        # its state is kept per key, the ticked keys form Decision.use_defaults (Route comments those lines out)
+        self.use_default_state = {f.items[0]: False for f in self.findings if f.code in PINNED_LINE_CODES and f.items}
+        self.use_default_cb = wx.CheckBox(self, label=_mn(W["use_default"].format(key="…"), "u"), name="use_default")
+        self.use_default_cb.Hide()
+        self.use_default_cb.Bind(wx.EVT_CHECKBOX, self._on_use_default)
+        self.use_default_key = None
+        self.root.Add(self.use_default_cb, 0, wx.BOTTOM, self.row)
 
         self.root.Add(self.text(self, "preflight", "options_heading", bold=True), 0, wx.TOP | wx.BOTTOM, self.row)
         self._build_options(summary, cfg)
@@ -982,11 +993,21 @@ class PreflightDialog(_FindingsMixin, _Base):
             self.accept_cb.SetLabel(_mn(WORDING["preflight"][ACCEPT_CODES[code]], "a"))
             self.accept_cb.SetValue(self.accepted_state[code])
         self.accept_cb.Show(self.accept_code is not None)
+        key = f.items[0] if f is not None and f.code in PINNED_LINE_CODES and f.items else None
+        self.use_default_key = key if key in self.use_default_state else None
+        if self.use_default_key:
+            self.use_default_cb.SetLabel(_mn(WORDING["preflight"]["use_default"].format(key=key), "u"))
+            self.use_default_cb.SetValue(self.use_default_state[key])
+        self.use_default_cb.Show(self.use_default_key is not None)
         self.Layout()
 
     def _on_accept(self, _evt) -> None:
         if self.accept_code:
             self.accepted_state[self.accept_code] = self.accept_cb.GetValue()
+
+    def _on_use_default(self, _evt) -> None:
+        if self.use_default_key:
+            self.use_default_state[self.use_default_key] = self.use_default_cb.GetValue()
 
     def _summary_text(self, connections: int) -> str:
         s = self.summary
@@ -1035,7 +1056,8 @@ class PreflightDialog(_FindingsMixin, _Base):
             ov["drawing_style"] = style
         put("timeout_s", float(self.timeout.GetValue()))
         put("timeout_clock", self._clock_keys[self.timeout_clock.GetSelection()])
-        return Decision(True, accepted, ov, self.save_toml.GetValue())
+        use = tuple(k for k, on in self.use_default_state.items() if on)
+        return Decision(True, accepted, ov, self.save_toml.GetValue(), use)
 
 
 # --------------------------------------------------------------------------------------------- (3) progress

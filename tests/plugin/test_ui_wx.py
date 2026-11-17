@@ -92,7 +92,7 @@ def test_wx_ui_dialogs_construct_headless(app, tmp_path):
     dlgs = _build_all(tmp_path)
     expected_tab = {
         "first_run": ["toml_path", "open_file", "continue"],
-        "preflight": ["findings", "cause", "accept", "scope_whole", "scope_between",
+        "preflight": ["findings", "cause", "accept", "use_default", "scope_whole", "scope_between",
                       "scope_touching", "existing", "respect_locked", "drawing_style", "timeout", "timeout_clock",
                       "save_toml", "help", "cancel", "route"],
         "progress": ["limit", "limit_set", "limit_add5", "limit_add15", "cancel"],
@@ -138,6 +138,7 @@ def test_wx_ui_dialogs_construct_headless(app, tmp_path):
         assert p.decision(False) == Decision(False)
         d0 = p.decision(True)
         assert d0.proceed and d0.accepted_codes == () and d0.overrides == {"scope_whole": False}
+        assert d0.use_defaults == () and not p.use_default_cb.IsShown()  # no pinned line among FINDINGS
         p.accept_cb.SetValue(True)
         p._on_accept(None)
         p.timeout.SetValue(30)
@@ -870,3 +871,36 @@ def test_verdict_tone():
     assert ui_wx.verdict_tone(_scored(last_vs_best="new best", last_decider="", last_delta=0.0)) == ""  # the first
     assert ui_wx.verdict_tone(_scored(last_vs_best="tie", last_decider="")) == ""
     assert ui_wx.verdict_tone(_scored(last_round=0)) == ""
+
+
+def test_preflight_offers_use_the_current_default_for_pinned_lines(app):
+    """User 2026-11-17 ("Show it in the dialog"): a pinned old default or a deprecated key in topor.toml is listed
+    with a checkbox naming its key; ticking it puts the key into Decision.use_defaults (Route comments the line out),
+    the state is kept per key, and other rows hide the checkbox."""
+    fs = [Finding("CFG_DEPRECATED_KEY", "warning", "topor.toml (line 6) sets optimize.finish_when_stable = true, which "
+                  "is deprecated since 2026-11-17 and ignored: ...", "fix", ("optimize.finish_when_stable",)),
+          Finding("CFG_PINNED_OLD_DEFAULT", "warning", "topor.toml (line 3) pins run.timeout_s = 300, the old default",
+                  "fix", ("run.timeout_s",)),
+          Finding("VIA_NOT_SET_UP", "warning", "no via set up", "Board Setup")]
+    p = ui_wx.PreflightDialog(fs, SUMMARY, Config.defaults())
+    try:
+        codes = [f.code for f in p.findings]
+        i_dep, i_pin, i_via = (codes.index(c) for c in ("CFG_DEPRECATED_KEY", "CFG_PINNED_OLD_DEFAULT", "VIA_NOT_SET_UP"))
+        p._show_finding(i_dep)
+        assert p.use_default_cb.IsShown() and not p.accept_cb.IsShown()
+        assert "optimize.finish_when_stable" in p.use_default_cb.GetLabel() and "&" in p.use_default_cb.GetLabel()
+        p.use_default_cb.SetValue(True)
+        p._on_use_default(None)
+        p._show_finding(i_pin)
+        assert p.use_default_cb.IsShown() and "run.timeout_s" in p.use_default_cb.GetLabel()
+        assert not p.use_default_cb.GetValue(), "its own state, per key"
+        p._show_finding(i_via)
+        assert not p.use_default_cb.IsShown()
+        assert p.decision(True).use_defaults == ("optimize.finish_when_stable",)
+        p._show_finding(i_pin)
+        p.use_default_cb.SetValue(True)
+        p._on_use_default(None)
+        assert set(p.decision(True).use_defaults) == {"optimize.finish_when_stable", "run.timeout_s"}
+        assert p.decision(False) == Decision(False)
+    finally:
+        p.Destroy()

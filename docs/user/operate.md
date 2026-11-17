@@ -319,9 +319,11 @@ rounds in every run, the dialog says **Routes stable** (also in its window title
 **OK**. It is the same button with the same action: stop and keep the best result so far — exactly the board shown
 under *Best so far*, which then goes to KiCad's DRC and the preview. By default the run does not stop there by itself
 (user 2026-11-16: "don't stop on stable"): it keeps going for marginal gains until OK, Cancel, the safety cap
-`[optimize] rounds` or the time limit (the TopoR way). `finish_when_stable = true` makes it finish at *Routes stable*
-like a normal finish (each run stops at the round in which it becomes stable; `[optimize] finish_patience` > 0 lets
-it look for small gains that many more rounds first). *Routes stable* appears the moment every run's TopoR loop
+`[optimize] rounds` or the time limit (the TopoR way; user 2026-11-17: "the button should change from 'Cancel' to
+'Ok' and the optimizer should keep running like it does for TopoR"). Nothing else ends a dialog run at *Routes
+stable*: the old keys `[optimize] finish_when_stable` and `finish_patience` are deprecated and ignored (warning
+`CFG_DEPRECATED_KEY` with their line; the pre-flight dialog offers *Use the current default* to comment the line
+out). *Routes stable* appears the moment every run's TopoR loop
 has recorded it and there is a pick to keep, while the loops still run (user 2026-11-17), so OK there really ends the
 run before the cap; *Routes stable* itself never stops anything, it only turns Cancel into OK. The loops judge their
 variants on the topology and draw only the one picked, so until that drawing *Best so far* shows the loops' predicted
