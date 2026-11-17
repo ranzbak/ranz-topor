@@ -30,7 +30,7 @@ M = {
     "p_cause_ell": (f"{P}/ui_wx.py", "if txt.endswith(\".\") and not txt.endswith(\"..\"):", "if txt.endswith(\".\"):"),
 }
 R, kind = sys.argv[1], sys.argv[2]
-names = sys.argv[3:] or [n for n in M if n.startswith("r_" if kind == "rust" else "p_")]
+names = sys.argv[3:] or [n for n in M if n.startswith("r_" if kind == "rust" else "p_")] + (["r_prefix"] if kind == "rust" else [])
 src = os.getcwd()
 W = f"/root/sl4-mut-{kind}"
 shutil.rmtree(W, ignore_errors=True)
@@ -44,7 +44,9 @@ py_cmd = ("PYTHONPATH=plugin python -m pytest -q -p no:cacheprovider tests/plugi
 for n in ["BASE"] + names:
     for f in {m[0] for m in M.values()}:
         shutil.copy(os.path.join(src, f), os.path.join(W, f))
-    if n != "BASE":
+    if n == "r_prefix":  # the whole core.rs before the fix (the merge e3a2e10): the F1 test must fail on it
+        shutil.copy(os.path.join(src, "tools/sl4_core_prefix.rs"), os.path.join(W, C))
+    elif n != "BASE":
         f, a, b = M[n]
         p = os.path.join(W, f)
         s = open(p).read()
