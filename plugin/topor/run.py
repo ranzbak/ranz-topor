@@ -61,7 +61,7 @@ from .layers import resolve_layer_roles
 from .pourreach import dangling_ends, pour_reach
 from .priority import net_priorities
 from .ports import BoardPort, CommitRequest, CommitResult, Decision, Progress, RunSummary, Selection, UiPort
-from .report import RunReport, before_stats_from_model, build_report, limit_text, time_limit_text
+from .report import RunReport, _num, before_stats_from_model, build_report, limit_text, time_limit_text, wait_log_text
 from .schema import CURRENT_VERSION, SETTINGS_BY_KEY
 from .scope import connections_by_scope, do_not_touch_nets, rip_plan, scope_from_selection
 
@@ -113,7 +113,9 @@ class RunOutcome:
     #: drawn in full; "drawing" = a step of the drawing (the traces: connections left unrouted; the via reduction; the
     #: pour stitching); "none"), "cut_steps" (the engine's names of the steps cut: plan, plane_stubs, drawing,
     #: via_reduction, stitching), plus mode / reached / step /
-    #: overrun_s (M2.TL)}; changes are the user's, made in the
+    #: overrun_s (M2.TL), wait_s (how long the soft step the limit fell in ran past it), cycle_dropped,
+    #: grace_s / grace_hit (run.limit_grace_s, None = unbounded), draw_grace_s / draw_grace_hit / draw_grace_erbs
+    #: (run.drawing_grace_s)}; changes are the user's, made in the
     #: progress dialog while the router ran (time_limit_text)
     time_limit: dict | None = None
     #: M1 compass (toporlib.compass.build): per violation class predicted vs drawn vs KiCad DRC, per connection
@@ -916,7 +918,16 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                                "step": str(eng.get("step") or ""),
                                "overrun_s": round(max(0.0, spent - lim), 3) if reached else 0.0,
                                "cap_hit": state["cap_hit"], "cut": str(eng.get("cut") or "none"),
-                               "cut_steps": [str(x) for x in eng.get("cut_steps") or []]})
+                               "cut_steps": [str(x) for x in eng.get("cut_steps") or []],
+                               "wait_s": _num(eng.get("wait_s")),  # the wait of the step the limit fell in past the limit
+                               "cycle_dropped": bool(eng.get("cycle_dropped")),  # limit_grace_s: a TopoR loop cycle was dropped
+                               "grace_s": eng.get("grace_s"), "grace_hit": bool(eng.get("grace_hit")),
+                               # run.drawing_grace_s: the drawing's optional passes stopped (every wire drawn)
+                               "draw_grace_s": eng.get("draw_grace_s"), "draw_grace_hit": bool(eng.get("draw_grace_hit")),
+                               "draw_grace_erbs": int(eng.get("draw_grace_erbs") or 0)})
+        tl = out.time_limit
+        if reached and (tl["wait_s"] > 0 or tl["cycle_dropped"] or tl["draw_grace_hit"]):
+            log.line(f"time limit wait: {wait_log_text(tl)}")
         if reached:
             log.line(f"time limit ({out.time_limit['mode']}): reached during {out.time_limit['step'] or 'the run'}; "
                      f"the result was ready {out.time_limit['overrun_s']:.1f} s past the limit "

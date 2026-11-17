@@ -406,9 +406,9 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: warning.*
 
-**Cause.** [drawing] realise = "erbs" ran out of time: the run's time limit (or a Cancel) passed before every trace had its extended rubber band, so the rest were drawn the sequential way. The bands cost time on large boards (several seconds to minutes per layer).
+**Cause.** [drawing] realise = "erbs" ran out of time: before every trace had its extended rubber band the run's time limit passed (timeout_mode = hard), or with the soft limit run.drawing_grace_s past it (default 60 s) or the overrun cap run.timeout_overrun_s, or you pressed Cancel; the rest were drawn the sequential way. The bands cost time on large boards (several seconds to minutes per layer).
 
-**Fix.** Raise run.timeout_s and route again, or use drawing.realise = "sequential" (the default; topor.toml [drawing] realise) on large boards.
+**Fix.** Raise run.drawing_grace_s (soft limit; negative = no bound) or run.timeout_s and route again, or use drawing.realise = "sequential" (the default; topor.toml [drawing] realise) on large boards.
 
 ### GROUPS_UNAVAILABLE
 
@@ -705,6 +705,14 @@ copper violates a rule anywhere else, file a bug.
 **Cause.** The time limit acted as hard (run.timeout_mode = hard, or the soft limit past its overrun cap run.timeout_overrun_s) while the drawing ran: the drawing had begun before the limit and ran past it, so the limit cut it there. The board is drawn only in part: the connections the drawing had not reached stay unrouted (reason "time limit reached before this connection was drawn"), a cut via reduction leaves the vias it had not removed, a cut pour stitching leaves pour pieces apart (open in KiCad's DRC). The warning says how many connections were drawn. A limit that acted as hard before the drawing began never cuts it (the kept plan is drawn in full). With [optimize] loop = "topor" the loop may use loop_time_share of the time left, so on a large board the drawing can start before the limit and still run past it.
 
 **Fix.** For a complete board use run.timeout_mode = soft (the default: the drawing always runs to its end) or a longer run.timeout_s (or run.timeout_overrun_s past the soft limit), or lower [optimize] loop_time_share so more of the limit is left for the drawing; then route again.
+
+### TIME_LIMIT_WAIT
+
+*Severity: warning.*
+
+**Cause.** The time limit (run.timeout_s) was reached during a step, and the finding says how long that step ran past it and why. The step is the whole step the limit lets finish, not one progress stage: the initial routing (plane stubs, projection, topological search, layer assignment and rip-up), the TopoR loop, or the drawing (the traces, the via reduction, the pour stitching); with [optimize] loop = "cycles" the whole-route cycle. With timeout_mode = soft (the default) the run waited for it: the TopoR loop is bounded by run.limit_grace_s (default 30 s; when it ran out the loop stopped at its next check, between rerouted connections, layer re-optimisations, label moves or crossing passes, the cycle it was in was dropped and the best variant kept so far was drawn), the drawing's optional passes by run.drawing_grace_s (default 60 s; the via reduction and, with ERBS, the rubber bands stop, every wire is still drawn and the pour stitching finishes), the initial routing runs to its end. With timeout_mode = hard (or the soft limit past its overrun cap run.timeout_overrun_s) the finding says the step was cut at its next check (TIME_DRAWING_CUT when it was the drawing), or that it had no stop check left. When the step finished within its bound, nothing was lost.
+
+**Fix.** Raise run.limit_grace_s to let a longer TopoR loop cycle finish, or run.drawing_grace_s to let the via reduction finish (any negative value = no bound), or run.timeout_s so the limit falls after the step; lower them for a shorter wait (0 = stop at the next check); in the KiCad dialog Cancel stops at once.
 
 ### TIME_OVERRUN_CAP
 

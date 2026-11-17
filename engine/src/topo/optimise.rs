@@ -251,6 +251,8 @@ pub struct LoopReport {
     pub stats: CycleStats,
     /// One line per cycle.
     pub lines: Vec<String>,
+    /// A running cycle was cut short by `inner()` and dropped (not offered).
+    pub dropped: bool,
 }
 
 /// The TopoR loop: offer the current state (generation 0), then up to `p.cycles` cycles; after
@@ -309,10 +311,20 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
             since_gain = 0;
         }
         let ctx = CycleCtx { cycle, seed: mix(p.seed, cycle as u64), amp: sched.width, emphasis: p.emphasis };
-        let cs = sp.cycle(&ctx, inner);
+        // `inner()` is latched for the cycle: once it said stop the cycle is dropped, also when a
+        // raised limit would let the check pass again afterwards.
+        let mut hit = false;
+        let cs = {
+            let mut latched = || {
+                hit = hit || inner();
+                hit
+            };
+            sp.cycle(&ctx, &mut latched)
+        };
         rep.stats.add(&cs);
         rep.cycles = cycle;
-        if inner() {
+        if hit || inner() {
+            rep.dropped = true;
             // cut short inside (Cancel): not a finished cycle, not a variant
             rep.stop = "time limit".into();
             break;
@@ -841,4 +853,74 @@ mod tests {
         assert_eq!(wire_amp(0.2, 0), 0.2);
         assert!((wire_amp(0.2, 1) - 0.3).abs() < 1e-12 && wire_amp(0.2, 100) < 0.4);
     }
+    /// limit_grace_s: a cycle of many checks on a fake clock (one tick per check); `inner()` = the
+    /// clock passed limit + grace.
+    struct Slow {
+        ticks: std::rc::Rc<std::cell::Cell<usize>>,
+        done: usize,
+    }
+
+    impl Space for Slow {
+        type Var = usize;
+        fn criteria(&mut self) -> Criteria {
+            Criteria { length_mm: 100.0 - self.done as f64, ..Criteria::default() }
+        }
+        fn snapshot(&mut self) -> usize {
+            self.done
+        }
+        fn restore(&mut self, v: &usize) {
+            self.done = *v;
+        }
+        fn cycle(&mut self, _c: &CycleCtx, stop: &mut dyn FnMut() -> bool) -> CycleStats {
+            for _ in 0..1000 {
+                if stop() {
+                    break;
+                }
+                self.ticks.set(self.ticks.get() + 1);
+                self.done += 1;
+            }
+            CycleStats::default()
+        }
+    }
+
+    #[test]
+    fn past_the_grace_the_step_stops_within_a_move_and_the_cut_cycle_is_dropped() {
+        let (limit, grace) = (50usize, 20usize);
+        let ticks = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let mut sp = Slow { ticks: ticks.clone(), done: 0 };
+        let mut a = Archive::new(4);
+        let t2 = ticks.clone();
+        let mut inner = move || t2.get() >= limit + grace;
+        let t3 = ticks.clone();
+        let mut stop = move || t3.get() >= limit; // the limit passed: no new cycle
+        let rep = optimise(&mut sp, &mut a, &params(1, 0), &mut stop, &mut inner, &|| 0.0, &mut |_, _, _| {});
+        assert_eq!(rep.stop, "time limit");
+        assert_eq!(ticks.get(), limit + grace, "the wait is bounded by the grace: no check past it");
+        assert_eq!(rep.offered, 1, "only the initial plan: the cycle cut short is not offered");
+        assert_eq!(a.items.len(), 1);
+        // without the grace bound the cycle runs its 1000 moves
+        let ticks = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let mut sp = Slow { ticks: ticks.clone(), done: 0 };
+        let mut a = Archive::new(4);
+        let rep = optimise(&mut sp, &mut a, &params(1, 0), &mut || false, &mut || false, &|| 0.0, &mut |_, _, _| {});
+        assert!(ticks.get() >= 1000 && rep.offered > 1);
+        assert!(!rep.dropped);
+    }
+
+    #[test]
+    fn a_stop_the_cycle_saw_stays_a_stop_when_the_check_passes_again() {
+        // the limit is raised between the cycle's last check and the re-check: the cut cycle stays dropped
+        let ticks = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let mut sp = Slow { ticks: ticks.clone(), done: 0 };
+        let mut a = Archive::new(4);
+        let calls = std::cell::Cell::new(0usize);
+        let mut inner = || {
+            calls.set(calls.get() + 1);
+            calls.get() == 4 // the 4th check says stop, every other check (also the re-check) passes
+        };
+        let rep = optimise(&mut sp, &mut a, &params(1, 0), &mut || false, &mut inner, &|| 0.0, &mut |_, _, _| {});
+        assert!(rep.dropped && rep.stop == "time limit", "{rep:?}");
+        assert_eq!(rep.offered, 1, "the cut cycle is not offered");
+    }
+
 }

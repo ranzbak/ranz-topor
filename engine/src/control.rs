@@ -214,6 +214,103 @@ pub struct TimeLimit {
     /// [`TimeLimit::note_cut_in`]): one bit per [`CutStep`] (the report then names what was cut,
     /// not only that the limit acted as hard).
     cut: AtomicU8,
+    /// `[run] limit_grace_s`: nanoseconds past the limit that the TopoR loop step may still run
+    /// (`LIMIT_NONE` = no grace bound here; `0` is a real value: stop at the next check).
+    grace_ns: AtomicU64,
+    /// A stop test of the TopoR loop saw the grace over ([`TimeLimit::grace_over`]).
+    grace_hit: AtomicBool,
+    /// The longest time (ns) the step that ran when the limit passed went on past it
+    /// ([`TimeLimit::note_step_end`], at the first soft-step change after the limit).
+    wait_ns: AtomicU64,
+    /// One bit per run (run 0 and runs >= 63 share bit 63): its step that ran at the limit has ended.
+    wait_runs: AtomicU64,
+    /// A TopoR loop cycle was dropped (cut by the grace or the cap, not offered).
+    cycle_dropped: AtomicBool,
+    /// The soft step each run is in ([`SoftSlot`], index = run, 0 = the only run or the call's
+    /// shared plane stubs / projection): its first change after the limit ends the wait.
+    soft: Mutex<Vec<SoftSlot>>,
+    /// `[optimize] loop = "cycles"`: the soft step is the whole-route cycle ([`soft_step_of`]).
+    whole_cycle: AtomicBool,
+    /// A stop test saw the limit, acting as hard, cut a step before the first run's soft step at
+    /// the limit ended ([`TimeLimit::note_cut_in`]): that step was cut, it did not run to its end.
+    cut_in_wait: AtomicBool,
+    /// `[run] drawing_grace_s` (ns; `LIMIT_NONE` = no bound): how long the drawing may run past the
+    /// later of the limit and its own start before its optional passes stop.
+    draw_grace_ns: AtomicU64,
+    /// An optional pass of the drawing stopped because `drawing_grace_s` ran out.
+    draw_grace_hit: AtomicBool,
+    /// Wires whose ERBS the drawing bound cut (drawn the sequential way instead).
+    draw_grace_erbs: AtomicU64,
+    /// Nanoseconds since `start` at which [`TimeLimit::harden`] was first called (the plugin's CPU-clock
+    /// cap); `LIMIT_NONE` = never. The instant the wall-clock cap rules use (with the round's 1 s floor).
+    harden_ns: AtomicU64,
+}
+
+/// What the soft time limit lets finish (operate.md, `timeout_mode`): with `[optimize] loop =
+/// "topor"` the initial routing (plane stubs, projection, topological search, layer assignment and
+/// rip-up), the TopoR loop and the drawing (traces, via reduction, fuse, pour stitching); with
+/// `loop = "cycles"` the whole-route cycle. The wait TIME_LIMIT_WAIT reports is that of the soft
+/// step the limit fell in (lead 2026-11-17), not of one progress stage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoftStep {
+    Initial,
+    Loop,
+    Drawing,
+}
+
+impl SoftStep {
+    /// Its words in the report line.
+    pub fn words(self) -> &'static str {
+        match self {
+            SoftStep::Initial => "the initial routing",
+            SoftStep::Loop => "the TopoR loop",
+            SoftStep::Drawing => "the drawing",
+        }
+    }
+}
+
+/// The progress stages of the topological core and the soft step each belongs to (prefixes of
+/// the stage texts; a test checks every `ctl.stage` literal of core.rs is here).
+pub const SOFT_STAGES: [(&str, SoftStep); 9] = [
+    ("plane stubs", SoftStep::Initial),
+    ("projection", SoftStep::Initial),
+    ("topological search", SoftStep::Initial),
+    ("layer assignment", SoftStep::Initial),
+    ("TopoR loop", SoftStep::Loop),
+    ("picking the variant to draw", SoftStep::Drawing),
+    ("drawing the traces", SoftStep::Drawing),
+    ("via reduction", SoftStep::Drawing),
+    ("pour stitching", SoftStep::Drawing),
+];
+
+/// The soft step of a stage text (`None`: not a stage of the topological core). O(1).
+pub fn soft_step_of(stage: &str) -> Option<SoftStep> {
+    SOFT_STAGES.iter().find(|(p, _)| stage.starts_with(p)).map(|&(_, s)| s)
+}
+
+/// A run's soft step: none yet, open (round, key, when it began: ns since the limit's start), or
+/// ended (idle, between steps).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SoftSlot {
+    #[default]
+    Never,
+    Open(u32, u64, u64),
+    Closed,
+}
+
+/// The key of a stage's soft step within its round: the class, or with `whole_cycle` one key for
+/// the whole cycle; a stage outside [`SOFT_STAGES`] is a step of its own (its text). O(len).
+fn soft_key(stage: &str, whole_cycle: bool) -> u64 {
+    match soft_step_of(stage) {
+        Some(_) if whole_cycle => 1,
+        Some(s) => 2 + s as u64,
+        None => {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            stage.hash(&mut h);
+            h.finish() | (1 << 63)
+        }
+    }
 }
 
 /// M2 fix 3 (verify-m2c 4): a step the time limit, acting as hard (`[run] timeout_mode = "hard"`,
@@ -275,7 +372,7 @@ const LIMIT_NONE: u64 = u64::MAX - 1;
 
 impl Default for TimeLimit {
     fn default() -> TimeLimit {
-        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false), cap_ns: AtomicU64::new(LIMIT_NONE), capped: AtomicBool::new(false), cut: AtomicU8::new(0) }
+        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false), cap_ns: AtomicU64::new(LIMIT_NONE), capped: AtomicBool::new(false), cut: AtomicU8::new(0), grace_ns: AtomicU64::new(LIMIT_NONE), grace_hit: AtomicBool::new(false), wait_ns: AtomicU64::new(0), wait_runs: AtomicU64::new(0), cycle_dropped: AtomicBool::new(false), soft: Mutex::new(Vec::new()), whole_cycle: AtomicBool::new(false), cut_in_wait: AtomicBool::new(false), draw_grace_ns: AtomicU64::new(LIMIT_NONE), draw_grace_hit: AtomicBool::new(false), draw_grace_erbs: AtomicU64::new(0), harden_ns: AtomicU64::new(LIMIT_NONE) }
     }
 }
 
@@ -320,6 +417,120 @@ impl TimeLimit {
         }
     }
 
+    /// The overrun cap as an instant (limit + cap); `None` = no limit or no cap. O(1).
+    pub fn cap_deadline(&self) -> Option<Instant> {
+        Some(self.deadline()? + Duration::from_secs_f64(self.overrun_cap_s()?))
+    }
+
+    /// `[run] limit_grace_s`: seconds past the limit the TopoR loop step may still run (soft
+    /// limit); `< 0` / non-finite = no bound, `0` = stop at the next check. O(1).
+    pub fn set_grace(&self, seconds: f64) {
+        let ns = if seconds.is_finite() && seconds >= 0.0 { ((seconds * 1e9) as u64).min(LIMIT_NONE - 1) } else { LIMIT_NONE };
+        self.grace_ns.store(ns, Ordering::Relaxed);
+    }
+
+    /// The grace in seconds; `None` = unbounded. O(1).
+    pub fn grace_s(&self) -> Option<f64> {
+        match self.grace_ns.load(Ordering::Relaxed) {
+            LIMIT_UNSET | LIMIT_NONE => None,
+            ns => Some(ns as f64 * 1e-9),
+        }
+    }
+
+    /// The limit passed and so did its grace: the stop test of the TopoR loop step ends the step
+    /// now (a cycle it cuts is not offered). Noted for the report when true ([`TimeLimit::grace_hit`]).
+    /// Only read inside the loop ([`in_loop_scope`]); the initial routing and the drawing never ask. O(1).
+    pub fn grace_over(&self) -> bool {
+        let over = match (self.seconds(), self.grace_s()) {
+            (Some(l), Some(g)) => self.elapsed_s() >= l + g,
+            _ => false,
+        };
+        if over {
+            self.grace_hit.store(true, Ordering::Relaxed);
+        }
+        over
+    }
+
+    /// The soft step that ran when the limit passed has ended (the run went on to its next soft
+    /// step or fell idle): its wait is the time since the limit. Noted once per run (`run` as in
+    /// [`RunControl::for_run`], 0 = a single run); a run's later steps began after the limit and
+    /// never count. O(1).
+    fn note_step_end(&self, run: u32) {
+        let bit = 1u64 << run.min(63);
+        if self.passed() && self.wait_runs.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+            self.note_wait();
+        }
+    }
+
+    /// `[optimize] loop = "cycles"`: the soft step is the whole-route cycle. O(1).
+    pub fn set_whole_cycle(&self, on: bool) {
+        self.whole_cycle.store(on, Ordering::Relaxed);
+    }
+
+    /// Run `run` enters the stage `stage` of round `round` (`""` = it computes nothing now): a
+    /// change of its soft step ends the one before (noted once per run, [`TimeLimit::note_step_end`]).
+    /// A run's first stage of a best-of-N call continues the call's shared step (plane stubs,
+    /// projection: part of every run's initial routing). O(runs).
+    /// Only a step that began before the limit counts: a run idle at the limit (waiting at the
+    /// draw gate) whose drawing begins later has no wait of its own.
+    fn soft_enter(&self, run: u32, round: u32, stage: &str) {
+        let now = self.start.elapsed().as_nanos().min(u128::from(LIMIT_NONE - 1)) as u64;
+        let key = (!stage.is_empty()).then(|| (round, soft_key(stage, self.whole_cycle.load(Ordering::Relaxed))));
+        let Ok(mut v) = self.soft.lock() else { return };
+        let i = run as usize;
+        if v.len() <= i {
+            v.resize(i + 1, SoftSlot::Never);
+        }
+        let mut cur = v[i];
+        if cur == SoftSlot::Never && i > 0 {
+            cur = v[0];
+        }
+        let next = match (key, cur) {
+            (None, _) => SoftSlot::Closed,
+            (Some((r, k)), SoftSlot::Open(r0, k0, t0)) if (r, k) == (r0, k0) => SoftSlot::Open(r, k, t0),
+            (Some((r, k)), _) => SoftSlot::Open(r, k, now),
+        };
+        if let SoftSlot::Open(_, _, t0) = cur {
+            let began_before = self.ns.load(Ordering::Relaxed) > t0; // the limit (ns since start) is after its start
+            if cur != next && began_before {
+                self.note_step_end(run);
+            }
+        }
+        v[i] = next;
+    }
+
+    fn note_wait(&self) {
+        if let Some(d) = self.deadline() {
+            let ns = Instant::now().saturating_duration_since(d).as_nanos().min(u128::from(u64::MAX / 2)) as u64;
+            self.wait_ns.fetch_max(ns, Ordering::Relaxed);
+        }
+    }
+
+    /// Some run's step ended after the limit passed ([`TimeLimit::note_step_end`]). O(1).
+    pub fn step_end_noted(&self) -> bool {
+        self.wait_runs.load(Ordering::Relaxed) != 0
+    }
+
+    /// Seconds the step that ran when the limit passed went on past it (0 when it ended before). O(1).
+    pub fn wait_s(&self) -> f64 {
+        self.wait_ns.load(Ordering::Relaxed) as f64 * 1e-9
+    }
+
+    /// A TopoR loop cycle was cut by the limit (grace or cap) and not offered. O(1).
+    pub fn note_cycle_dropped(&self) {
+        self.cycle_dropped.store(true, Ordering::Relaxed);
+    }
+
+    /// A TopoR loop cycle was dropped ([`TimeLimit::note_cycle_dropped`]). O(1).
+    pub fn cycle_dropped(&self) -> bool {
+        self.cycle_dropped.load(Ordering::Relaxed)
+    }
+
+    /// A stop test saw the grace over. O(1).
+    pub fn grace_hit(&self) -> bool {
+        self.grace_hit.load(Ordering::Relaxed)
+    }
+
     /// The overrun cap fired (the limit plus the cap passed, noted once), or the caller hardened
     /// the limit ([`TimeLimit::harden`]). O(1).
     pub fn cap_hit(&self) -> bool {
@@ -358,7 +569,68 @@ impl TimeLimit {
     /// The stop test of `step` found the limit cutting it: noted for the report. Always true. O(1).
     pub fn note_cut_in(&self, step: CutStep) -> bool {
         self.cut.fetch_or(step.bit(), Ordering::Relaxed);
+        if self.wait_runs.load(Ordering::Relaxed) == 0 {
+            self.cut_in_wait.store(true, Ordering::Relaxed); // the step the limit fell in is still open: it is the one cut
+        }
         true
+    }
+
+    /// The limit, acting as hard, cut the soft step it fell in (not only a later one). O(1).
+    pub fn cut_in_wait(&self) -> bool {
+        self.cut_in_wait.load(Ordering::Relaxed)
+    }
+
+    /// `[run] drawing_grace_s`: seconds the drawing may run past the later of the limit and its own
+    /// start before its optional passes (via reduction, ERBS) stop; `< 0` / non-finite = no bound,
+    /// `0` = they stop at their first check past the limit. O(1).
+    pub fn set_draw_grace(&self, seconds: f64) {
+        let ns = if seconds.is_finite() && seconds >= 0.0 { ((seconds * 1e9) as u64).min(LIMIT_NONE - 1) } else { LIMIT_NONE };
+        self.draw_grace_ns.store(ns, Ordering::Relaxed);
+    }
+
+    /// The drawing bound in seconds; `None` = unbounded. O(1).
+    pub fn draw_grace_s(&self) -> Option<f64> {
+        match self.draw_grace_ns.load(Ordering::Relaxed) {
+            LIMIT_UNSET | LIMIT_NONE => None,
+            ns => Some(ns as f64 * 1e-9),
+        }
+    }
+
+    /// The instant the optional passes of a drawing that began at `draw_start` stop (soft limit):
+    /// the later of the limit and the drawing's start, plus `drawing_grace_s`; `None` = no limit or
+    /// no bound. A snapshot: a later change of the limit does not move it. O(1).
+    pub fn draw_bound(&self, draw_start: Instant) -> Option<Instant> {
+        let d = self.deadline()?;
+        let g = self.draw_grace_s()?;
+        Some(d.max(draw_start) + Duration::from_secs_f64(g))
+    }
+
+    /// The stop test of an optional pass of the drawing: the limit passed and the drawing bound
+    /// ([`TimeLimit::draw_bound`]) with it; noted for the report when true. O(1).
+    pub fn draw_grace_over(&self, draw_start: Instant) -> bool {
+        let over = self.passed() && self.draw_bound(draw_start).is_some_and(|b| Instant::now() >= b);
+        if over {
+            self.draw_grace_hit.store(true, Ordering::Relaxed);
+        }
+        over
+    }
+
+    /// An optional pass of the drawing stopped at the drawing bound. O(1).
+    pub fn draw_grace_hit(&self) -> bool {
+        self.draw_grace_hit.load(Ordering::Relaxed)
+    }
+
+    /// `n` wires had their ERBS cut by the drawing bound (drawn the sequential way). O(1).
+    pub fn note_draw_grace_erbs(&self, n: usize) {
+        if n > 0 {
+            self.draw_grace_hit.store(true, Ordering::Relaxed);
+            self.draw_grace_erbs.fetch_add(n as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// Wires whose ERBS the drawing bound cut. O(1).
+    pub fn draw_grace_erbs(&self) -> usize {
+        self.draw_grace_erbs.load(Ordering::Relaxed) as usize
     }
 
     /// Whether the limit, acting as hard, cut a step of the run ([`TimeLimit::cuts`]). A limit
@@ -382,6 +654,28 @@ impl TimeLimit {
     /// seconds): the limit acts as the hard one from now on ([`TimeLimit::is_hard`]). O(1).
     pub fn harden(&self) {
         self.capped.store(true, Ordering::Relaxed);
+        let ns = (self.start.elapsed().as_nanos() as u64).min(LIMIT_NONE - 1);
+        let _ = self.harden_ns.compare_exchange(LIMIT_NONE, ns, Ordering::Relaxed, Ordering::Relaxed);
+    }
+
+    /// [`TimeLimit::harden`] was called (the plugin's CPU-clock cap). O(1).
+    pub fn hardened(&self) -> bool {
+        self.harden_ns.load(Ordering::Relaxed) != LIMIT_NONE
+    }
+
+    /// The instant the overrun cap took effect: the earlier of the wall-clock cap
+    /// ([`TimeLimit::cap_deadline`]) and the moment of [`TimeLimit::harden`] (the CPU clock's cap).
+    /// Both clocks are then alike: the round's 1 s floor applies to this instant (lead 2026-11-17,
+    /// verifier r6 D1). `None` = neither. O(1).
+    pub fn cap_instant(&self) -> Option<Instant> {
+        let h = match self.harden_ns.load(Ordering::Relaxed) {
+            LIMIT_NONE => None,
+            ns => Some(self.start + Duration::from_nanos(ns)),
+        };
+        match (h, self.cap_deadline()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Change the limit (seconds since the start; `0` = no limit). O(1), any thread.
@@ -581,6 +875,8 @@ impl RunControl {
         if let Ok(mut p) = self.progress.lock() {
             // M2.TL: the stage that ran when the limit passed is the step the soft limit waited for.
             Self::note_limit_step(&self.limit, &mut p);
+            // the soft step that ran at the limit ends at the first change of soft step (lead 2026-11-17)
+            self.limit.soft_enter(self.run, round, stage);
             if self.run > 0 && p.runs > 1 {
                 p.stage = if stage.is_empty() { String::new() } else { format!("run {}: {stage}", self.run) };
                 let i = self.run as usize - 1;
@@ -615,6 +911,7 @@ impl RunControl {
         }
         if let Ok(mut p) = self.progress.lock() {
             Self::note_limit_step(&self.limit, &mut p);
+            self.limit.soft_enter(self.run, 0, ""); // computes nothing: its soft step has ended
             if let Some(s) = p.run_steps.get_mut(self.run as usize - 1) {
                 s.clear();
             }
@@ -719,7 +1016,26 @@ pub fn with_control_mode<R>(ctl: &RunControl, limit_stops: bool, f: impl FnOnce(
 /// work loops that have no `RunControl` (the topology and label moves of P3/P4 and their cut
 /// prices, M0). Cheap: one atomic load, and a clock read only with a limit set. O(1).
 pub fn stop_requested() -> bool {
-    STOP.with(|c| c.borrow().as_ref().is_some_and(|(f, l, always)| f.load(Ordering::Relaxed) || ((*always || l.is_hard()) && l.passed() && l.note_cut())))
+    STOP.with(|c| c.borrow().as_ref().is_some_and(|(f, l, always)| f.load(Ordering::Relaxed) || ((*always || l.is_hard()) && l.passed() && l.note_cut()) || (LOOP_SCOPE.with(|s| s.get()) && l.grace_over())))
+}
+
+thread_local! {
+    /// Inside the TopoR loop step ([`in_loop_scope`]): the `[run] limit_grace_s` bound stops its moves.
+    static LOOP_SCOPE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` as the TopoR loop step: [`stop_requested`] then also answers true once the time limit
+/// and its grace (`[run] limit_grace_s`) have passed, so the move-level stop tests end the step.
+/// The flag before comes back after `f`, also when it panics. O(1) + `f`.
+pub fn in_loop_scope<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LOOP_SCOPE.with(|s| s.set(self.0));
+        }
+    }
+    let _restore = Restore(LOOP_SCOPE.with(|s| s.replace(true)));
+    f()
 }
 
 /// Deadline passed or run cancelled: the single stop test of every deadline site. O(1).
@@ -996,6 +1312,17 @@ mod tests {
     }
 
     #[test]
+    fn the_cap_deadline_is_the_limit_plus_the_cap() {
+        let ctl = RunControl::new();
+        assert!(ctl.limit.cap_deadline().is_none(), "no limit");
+        ctl.limit.init(100.0);
+        assert!(ctl.limit.cap_deadline().is_none(), "no cap");
+        ctl.limit.set_overrun_cap(20.0);
+        let (d, c) = (ctl.limit.deadline().unwrap(), ctl.limit.cap_deadline().unwrap());
+        assert_eq!(c.duration_since(d), std::time::Duration::from_secs(20));
+    }
+
+    #[test]
     fn the_overrun_cap_makes_the_soft_limit_hard() {
         // F3 `[run] timeout_overrun_s`: before the limit plus the cap the soft limit stops no
         // step; after it (or when the caller hardens it, the plugin's CPU clock) it acts as hard
@@ -1026,5 +1353,232 @@ mod tests {
         t.set(1e30);
         assert!(t.seconds().unwrap() > 1e9);
         assert!(!t.passed());
+    }
+    #[test]
+    fn the_grace_ends_the_loop_step_only_after_limit_plus_grace_and_only_in_its_scope() {
+        // limit_grace_s: read only inside the TopoR loop; 0 = the next check after the limit; none = never.
+        let ctl = RunControl::new();
+        ctl.limit.init(0.2);
+        ctl.limit.set_grace(0.3);
+        assert!(!ctl.limit.grace_over(), "before the limit");
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(ctl.limit.passed() && !ctl.limit.grace_over(), "inside the grace");
+        assert!(!in_loop_scope(|| with_control_mode(&ctl, false, stop_requested)), "inside the grace the loop runs on");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(ctl.limit.grace_over() && ctl.limit.grace_hit());
+        assert!(in_loop_scope(|| with_control_mode(&ctl, false, stop_requested)), "grace over: the loop's moves stop");
+        assert!(!with_control_mode(&ctl, false, stop_requested), "outside the loop (initial routing, drawing) nothing stops");
+        assert!(!stop_requested(), "outside any control nothing is installed");
+        // the scope is restored, also on a panic
+        let _ = std::panic::catch_unwind(|| in_loop_scope(|| panic!("boom")));
+        assert!(!with_control_mode(&ctl, false, stop_requested));
+    }
+
+    #[test]
+    fn grace_zero_stops_at_the_limit_and_no_grace_never() {
+        let ctl = RunControl::new();
+        ctl.limit.init(0.05);
+        ctl.limit.set_grace(0.0);
+        assert!(!ctl.limit.grace_over());
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(ctl.limit.grace_over(), "0 = stop at the next check");
+        let none = RunControl::new();
+        none.limit.init(0.05);
+        none.limit.set_grace(-1.0);
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(none.limit.passed() && !none.limit.grace_over() && none.limit.grace_s().is_none(), "negative = unbounded");
+        let free = RunControl::new();
+        free.limit.init(0.0);
+        free.limit.set_grace(0.0);
+        assert!(!free.limit.grace_over(), "no limit: the grace never fires");
+        assert!(!in_loop_scope(|| with_control_mode(&free, false, stop_requested)));
+    }
+
+    #[test]
+    fn every_stage_of_the_core_has_a_soft_step() {
+        // every `ctl.stage(..)` text literal of the topological core maps to a soft step
+        let src = concat!(include_str!("topo/core.rs"), include_str!("topo/optimise.rs"));
+        let mut n = 0;
+        for (i, _) in src.match_indices(".stage(") {
+            let line = &src[i..src[i..].find('\n').map_or(src.len(), |e| i + e)];
+            let Some(q) = line.find('"') else { continue };
+            let lit = &line[q + 1..];
+            let lit = &lit[..lit.find('"').unwrap_or(lit.len())];
+            if line.starts_with(".stage(\"") || lit.starts_with("after ") {
+                continue; // the cut report's own stage(name, ..), not the progress
+            }
+            assert!(soft_step_of(lit).is_some(), "stage {lit:?} has no soft step (SOFT_STAGES)");
+            n += 1;
+        }
+        assert!(n >= 8, "found {n} stage literals");
+        assert_eq!(soft_step_of("projection of the board"), Some(SoftStep::Initial));
+        assert_eq!(soft_step_of("TopoR loop on the topology"), Some(SoftStep::Loop));
+        assert_eq!(soft_step_of("via reduction and fuse"), Some(SoftStep::Drawing));
+        assert_eq!(soft_step_of("routing"), None);
+    }
+
+    #[test]
+    fn the_wait_counts_the_whole_soft_step_not_one_stage() {
+        let ctl = RunControl::new();
+        ctl.limit.init(0.1);
+        ctl.stage(1, 1, "plane stubs (pads of plane nets onto their pour)");
+        ctl.stage(1, 1, "projection of the board");
+        std::thread::sleep(Duration::from_millis(200)); // the limit falls in the projection
+        ctl.stage(1, 1, "topological search");
+        ctl.stage(1, 1, "layer assignment, rip-up and reroute");
+        assert!(!ctl.limit.step_end_noted(), "the initial routing goes on: no wait noted yet");
+        std::thread::sleep(Duration::from_millis(150));
+        ctl.stage(1, 1, "TopoR loop on the topology"); // the initial routing ends here
+        let w = ctl.limit.wait_s();
+        assert!(ctl.limit.step_end_noted() && (0.24..5.0).contains(&w), "{w}");
+        assert_eq!(ctl.snapshot().limit_step, "projection of the board");
+        std::thread::sleep(Duration::from_millis(100));
+        ctl.stage(1, 1, "drawing the traces"); // later steps began after the limit: no wait of theirs
+        assert_eq!(ctl.limit.wait_s(), w);
+    }
+
+    #[test]
+    fn a_limit_before_any_step_change_notes_nothing_and_a_change_before_the_limit_neither() {
+        let ctl = RunControl::new();
+        ctl.limit.init(0.15);
+        ctl.stage(1, 1, "projection of the board");
+        ctl.stage(1, 1, "TopoR loop on the topology"); // before the limit
+        assert!(!ctl.limit.step_end_noted() && ctl.limit.wait_s() == 0.0);
+    }
+
+    #[test]
+    fn the_loop_step_ends_where_the_loop_does() {
+        let ctl = RunControl::new();
+        ctl.limit.init(0.05);
+        ctl.stage(1, 1, "TopoR loop on the topology");
+        std::thread::sleep(Duration::from_millis(150));
+        ctl.stage(1, 1, "picking the variant to draw"); // the loop returned
+        let w = ctl.limit.wait_s();
+        assert!((0.09..5.0).contains(&w), "{w}");
+        std::thread::sleep(Duration::from_millis(150));
+        ctl.stage(1, 1, "drawing the traces");
+        assert_eq!(ctl.limit.wait_s(), w, "the pick and the drawing are one step");
+    }
+
+    #[test]
+    fn with_whole_route_cycles_the_cycle_is_the_step() {
+        let ctl = RunControl::new();
+        ctl.limit.set_whole_cycle(true);
+        ctl.limit.init(0.05);
+        ctl.stage(1, 2, "projection of the board");
+        std::thread::sleep(Duration::from_millis(100));
+        ctl.stage(1, 2, "drawing the traces");
+        ctl.stage(1, 2, "via reduction and fuse");
+        ctl.stage(1, 2, "pour stitching");
+        assert!(!ctl.limit.step_end_noted(), "the cycle runs to its end");
+        std::thread::sleep(Duration::from_millis(100));
+        ctl.stage(2, 2, "projection of the board"); // the next cycle
+        assert!(ctl.limit.step_end_noted() && ctl.limit.wait_s() > 0.14, "{}", ctl.limit.wait_s());
+    }
+
+    #[test]
+    fn a_run_of_many_continues_the_shared_projection_and_ends_its_step_when_idle() {
+        let ctl = RunControl::new();
+        ctl.with_progress(|p| p.runs = 2);
+        ctl.limit.init(0.05);
+        ctl.stage(1, 1, "projection of the board"); // shared by the runs
+        std::thread::sleep(Duration::from_millis(100));
+        let (r1, r2) = (ctl.for_run(1), ctl.for_run(2));
+        r1.stage(1, 1, "topological search"); // part of run 1's initial routing
+        r2.stage(1, 1, "topological search");
+        assert!(!ctl.limit.step_end_noted());
+        std::thread::sleep(Duration::from_millis(100));
+        r1.idle(); // run 1 waits at the draw gate
+        let w = ctl.limit.wait_s();
+        assert!(ctl.limit.step_end_noted() && w > 0.14, "{w}");
+        std::thread::sleep(Duration::from_millis(100));
+        r2.stage(1, 1, "TopoR loop on the topology");
+        assert!(ctl.limit.wait_s() > w + 0.08, "the longest run counts");
+    }
+
+    #[test]
+    fn a_run_idle_at_the_limit_whose_drawing_begins_later_has_no_wait() {
+        // runs 2: run 1 waits at the draw gate when the limit passes, run 2 is in its loop; run 1 then
+        // draws (began after the limit): only run 2's loop step is a wait
+        let ctl = RunControl::new();
+        ctl.with_progress(|p| p.runs = 2);
+        ctl.limit.init(0.05);
+        let (r1, r2) = (ctl.for_run(1), ctl.for_run(2));
+        r1.stage(1, 1, "TopoR loop on the topology");
+        r2.stage(1, 1, "TopoR loop on the topology");
+        r1.stage(1, 1, "picking the variant to draw");
+        r1.idle(); // before the limit
+        std::thread::sleep(Duration::from_millis(80));
+        r2.stage(1, 1, "picking the variant to draw"); // run 2's loop ends after the limit
+        let w = ctl.limit.wait_s();
+        assert!(ctl.limit.step_end_noted() && w > 0.02, "{w}");
+        r1.stage(1, 1, "drawing the traces"); // run 1 draws: began after the limit
+        std::thread::sleep(Duration::from_millis(150));
+        r1.idle();
+        assert_eq!(ctl.limit.wait_s(), w, "a step that began after the limit is no wait");
+    }
+
+    #[test]
+    fn a_cut_while_the_step_at_the_limit_runs_is_a_cut_of_that_step() {
+        let ctl = RunControl::new();
+        ctl.limit.init(0.02);
+        ctl.stage(1, 1, "TopoR loop on the topology");
+        std::thread::sleep(Duration::from_millis(50));
+        ctl.limit.note_cut_in(CutStep::Plan);
+        assert!(ctl.limit.cut_in_wait());
+        let late = RunControl::new();
+        late.limit.init(0.02);
+        late.stage(1, 1, "TopoR loop on the topology");
+        std::thread::sleep(Duration::from_millis(50));
+        late.stage(1, 1, "drawing the traces");
+        late.limit.note_cut_in(CutStep::Drawing); // a later step's cut (the cap fired in the drawing)
+        assert!(!late.limit.cut_in_wait());
+    }
+
+    #[test]
+    fn the_drawing_bound_counts_from_the_later_of_the_limit_and_the_drawing_start() {
+        let ctl = RunControl::new();
+        ctl.limit.init(0.05);
+        ctl.limit.set_draw_grace(0.1);
+        let early = Instant::now(); // the drawing began before the limit
+        assert!(!ctl.limit.draw_grace_over(early), "before the limit");
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(!ctl.limit.draw_grace_over(early), "inside the bound");
+        let late = Instant::now(); // a drawing that begins after the limit gets the whole bound
+        std::thread::sleep(Duration::from_millis(90));
+        assert!(ctl.limit.draw_grace_over(early) && ctl.limit.draw_grace_hit(), "limit + 0.1 s passed");
+        assert!(!ctl.limit.draw_grace_over(late), "late start + 0.1 s not yet");
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(ctl.limit.draw_grace_over(late));
+        for neg in [-1.0, -5.0, f64::NAN] {
+            let c = RunControl::new();
+            c.limit.init(0.01);
+            c.limit.set_draw_grace(neg);
+            std::thread::sleep(Duration::from_millis(20));
+            assert!(c.limit.draw_grace_s().is_none() && !c.limit.draw_grace_over(early) && !c.limit.draw_grace_hit(), "{neg}: no bound");
+        }
+        let free = RunControl::new();
+        free.limit.init(0.0);
+        free.limit.set_draw_grace(0.0);
+        assert!(!free.limit.draw_grace_over(early), "no limit: no bound");
+    }
+
+    #[test]
+    fn negative_graces_are_unbounded() {
+        for neg in [-1.0, -5.0, -1e9] {
+            let c = RunControl::new();
+            c.limit.init(0.01);
+            c.limit.set_grace(neg);
+            std::thread::sleep(Duration::from_millis(20));
+            assert!(c.limit.grace_s().is_none() && !c.limit.grace_over(), "{neg}");
+        }
+    }
+
+    #[test]
+    fn a_dropped_cycle_is_noted() {
+        let ctl = RunControl::new();
+        assert!(!ctl.limit.cycle_dropped());
+        ctl.limit.note_cycle_dropped();
+        assert!(ctl.limit.cycle_dropped());
     }
 }
