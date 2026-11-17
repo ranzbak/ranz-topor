@@ -9,6 +9,7 @@ Complexity: all operations are O(file size + #settings); no loops over board dat
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import tomllib
@@ -68,6 +69,8 @@ def coerce(s: Setting, raw):
     elif s.type in ("int", "float"):
         if not _is_num(raw):
             err = "must be a number"
+        elif isinstance(raw, float) and not math.isfinite(raw):
+            err = "must be a finite number (not inf or nan; for the grace settings any negative number means no bound)"
         elif s.type == "int" and isinstance(raw, float) and raw != int(raw):
             err = "must be a whole number"
         else:
@@ -92,9 +95,22 @@ def coerce(s: Setting, raw):
     elif s.type == "table":
         if not isinstance(raw, dict):
             err = "must be a table, e.g. { NET = 1 }"
+    if not err and s.type in ("list", "table") and _has_nonfinite(raw):
+        err = "must be finite (no inf or nan inside)"
     if err:
         return s.default, err
     return v, None
+
+
+def _has_nonfinite(v) -> bool:
+    """A float inf / nan anywhere inside a list or table value (they would crash or poison the engine JSON). O(size)."""
+    if isinstance(v, float):
+        return not math.isfinite(v)
+    if isinstance(v, dict):
+        return any(_has_nonfinite(x) for x in v.values())
+    if isinstance(v, (list, tuple)):
+        return any(_has_nonfinite(x) for x in v)
+    return False
 
 
 def _range_text(s: Setting) -> str:

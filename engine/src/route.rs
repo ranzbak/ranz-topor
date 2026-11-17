@@ -285,6 +285,22 @@ pub struct LimitReport {
     /// The steps the limit cut, as the stop tests noted them (`crate::control::CutStep::name`:
     /// `plan`, `plane_stubs`, `drawing`, `via_reduction`, `stitching`); empty when `cut` is `"none"`.
     pub cut_steps: Vec<String>,
+    /// `[run] limit_grace_s` (`None` = no bound): seconds past the limit the TopoR loop step may run.
+    pub grace_s: Option<f64>,
+    /// The grace ran out: the loop step was stopped at its next check and the cycle it was in dropped.
+    pub grace_hit: bool,
+    /// Seconds the step that ran when the limit passed (`step`: plane stubs, projection, initial
+    /// routing, the TopoR loop, the drawing) went on past it before it ended.
+    pub wait_s: f64,
+    /// A TopoR loop cycle was cut by the limit (grace or cap) and dropped: the best variant so far was drawn.
+    pub cycle_dropped: bool,
+    /// `[run] drawing_grace_s` (`None` = no bound, or hard mode): seconds the drawing may run past the
+    /// later of the limit and its start before its optional passes (via reduction, ERBS) stop.
+    pub draw_grace_s: Option<f64>,
+    /// The drawing bound ran out: an optional pass stopped (every wire still drawn).
+    pub draw_grace_hit: bool,
+    /// Wires drawn the sequential way because the drawing bound cut their ERBS (`realise = "erbs"`).
+    pub draw_grace_erbs: usize,
 }
 
 /// A routed differential-pair connection (D7), nm. `from` / `to` are the P connection's pads.
@@ -556,14 +572,22 @@ pub fn route(model: &BoardModel, opts: &Options) -> RouteResult {
 
 /// [`route`] under a [`RunControl`] (cancellation and progress).
 pub fn route_with(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteResult {
-    let mut r = if opts.ignore_pads.is_empty() {
-        crate::topo::core::route_topo(model, opts, ctl)
-    } else {
-        let (filtered, ignored) = drop_ignored_pads(model, opts);
-        let mut r = crate::topo::core::route_topo(&filtered, opts, ctl);
-        append_ignored(&mut r, model, &ignored);
-        r
+    let (filtered, ignored) = if opts.ignore_pads.is_empty() { (None, Vec::new()) } else { let (f, i) = drop_ignored_pads(model, opts); (Some(f), i) };
+    // The finishing of the copper runs inside the call, before its run time and time-limit report
+    // are taken (a wait of the drawing, its last step, counts to the copper handed back).
+    let mut post = |r: &mut RouteResult| {
+        if filtered.is_some() {
+            append_ignored(r, model, &ignored);
+        }
+        ctl.test_point("finish copper");
+        finish_copper(model, opts, r);
     };
+    crate::topo::core::route_topo(filtered.as_ref().unwrap_or(model), opts, ctl, &mut post)
+}
+
+/// The steps after the topological core on the whole board: track ends off pad centres within the
+/// edge clearance, and (`cleanup_safe`) the tidy that keeps KiCad's Cleanup from changing the copper.
+fn finish_copper(model: &BoardModel, opts: &Options, r: &mut RouteResult) {
     // track ends in pads that sit within the board-edge clearance: off the pad centre, so the
     // track keeps the clearance KiCad's DRC measures for it
     let trims = crate::topo::tidy::pad_ends_off_edge(model, &mut r.items);
@@ -599,7 +623,6 @@ pub fn route_with(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
             r.warnings.push(st.line());
         }
     }
-    r
 }
 
 /// Decompose `model` on its routable layers and report every connection as failed with

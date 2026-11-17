@@ -158,7 +158,10 @@ fn fail(o: &mut [Outcome], i: usize, reason: impl Into<String>) {
 /// count cycles, never time. The time budget (`wall_clock_s`) is only an emergency stop; when
 /// it fires the result says so in a warning ([`TIME_HIT`]), because then it depends on the
 /// machine's speed and load. The user's OK after "Routes stable" ends a run on purpose.
-pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> RouteResult {
+/// `post` runs on the result before its run time and limit report are taken (the caller's
+/// finishing of the copper, `route::route_with`: ignored pads, edge trims, the Cleanup-safe tidy),
+/// so a wait of the drawing counts to the copper handed back.
+pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &mut dyn FnMut(&mut RouteResult)) -> RouteResult {
     let t0 = Instant::now();
     let n = opts.runs.max(1);
     let obj = Objective::from_options(&opts.objective, opts.mm_per_via, &opts.pick);
@@ -167,6 +170,8 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         p.runs = n as u32;
         p.rounds = opts.topo_rounds.max(1) as u32;
     });
+    // The soft step the wait counts (TIME_LIMIT_WAIT): with loop = "cycles" the whole-route cycle.
+    ctl.limit.set_whole_cycle(opts.opt_loop != "topor");
     ctl.stage(1, opts.topo_rounds.max(1) as u32, "plane stubs (pads of plane nets onto their pour)");
     ctl.limit.init(opts.wall_clock_s); // live limit (control::TimeLimit): the caller may change it during the run
     ctl.limit.set_hard(opts.timeout_mode == "hard");
@@ -174,6 +179,10 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     // hardens the limit itself, RouteJob.harden): past the limit by this much, the soft limit acts
     // as the hard one. "auto" (the engine's default, user 2026-11-13) = `wall_clock_s`.
     ctl.limit.set_overrun_cap(if opts.timeout_mode == "hard" { 0.0 } else { opts.overrun_cap_s() });
+    // `[run] limit_grace_s`: how long the TopoR loop step may run on past the soft limit;
+    // `[run] drawing_grace_s`: how long the drawing's optional passes may (soft limit only).
+    ctl.limit.set_grace(opts.limit_grace_s);
+    ctl.limit.set_draw_grace(if opts.timeout_mode == "hard" { -1.0 } else { opts.drawing_grace_s });
     let stubs = place_plane_stubs(model, opts, ctl);
     ctl.stage(1, opts.topo_rounds.max(1) as u32, "projection of the board");
     let t_fx = Instant::now();
@@ -186,7 +195,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     if ctl.is_cancelled() && opts.capacity_model == "cuts" {
         // M2.TL (fail fast): no plan kept yet, so nothing to draw, said loudly.
         let why = format!("{NOTHING_TO_DRAW}: Cancel / OK came during the projection of the board (the cut room of [capacity] model = \"cuts\"), before any run began, so no plan was kept and no copper is written");
-        let mut r = nothing_to_draw(model, opts, ctl, &why, t0);
+        let mut r = nothing_to_draw(model, opts, ctl, &why, t0, &mut *post);
         r.converged = false;
         return r;
     }
@@ -201,7 +210,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         } else {
             format!("{NOTHING_TO_DRAW}: no run of the call kept a plan ({})", skipped.iter().map(|(k, w)| format!("run {}: {w}", k + 1)).collect::<Vec<_>>().join("; "))
         };
-        return nothing_to_draw(model, opts, ctl, &why, t0);
+        return nothing_to_draw(model, opts, ctl, &why, t0, &mut *post);
     }
     // The best run: fewest errors, then the objective, then shrinkages; ties: the lower run.
     let mut pick = 0;
@@ -243,6 +252,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     }
     best.timed_out = time_hit && !(cancel && stable_all);
     best.converged = !best.timed_out;
+    post(&mut best);
     best.runtime_s = t0.elapsed().as_secs_f64();
     if best.timed_out {
         let limit = ctl.limit.seconds().unwrap_or(opts.wall_clock_s);
@@ -270,11 +280,12 @@ pub const NOTHING_TO_DRAW: &str = "nothing to draw yet";
 /// M2.TL (fail fast): the call's result when no plan was kept (`why` starts with
 /// [`NOTHING_TO_DRAW`]): every connection unrouted with `why`, an `ERROR:` line first, no copper.
 /// O(connections).
-fn nothing_to_draw(model: &BoardModel, opts: &Options, ctl: &RunControl, why: &str, t0: Instant) -> RouteResult {
+fn nothing_to_draw(model: &BoardModel, opts: &Options, ctl: &RunControl, why: &str, t0: Instant, post: &mut dyn FnMut(&mut RouteResult)) -> RouteResult {
     let mut r = unrouted(model, opts, why);
     r.warnings.insert(0, format!("ERROR: {why}"));
     r.stop_reason = if ctl.is_cancelled() { "cancel" } else { "timeout" }.into();
     r.timed_out = true;
+    post(&mut r);
     r.runtime_s = t0.elapsed().as_secs_f64();
     r.limit = limit_report(ctl, opts, &mut r);
     r
@@ -350,7 +361,141 @@ fn limit_report(ctl: &RunControl, opts: &Options, r: &mut RouteResult) -> Option
         ));
     }
     let cut_steps = steps.iter().map(|s| s.name().to_string()).collect();
-    Some(crate::route::LimitReport { limit_s, mode: mode.into(), reached, step, overrun_s, cap_s, cap_hit, cut: cut.into(), cut_steps })
+    // The wait of the soft step the limit fell in (the initial routing, the TopoR loop, the drawing;
+    // with loop = "cycles" the whole-route cycle; lead 2026-11-17), always named (TIME_LIMIT_WAIT),
+    // in hard mode too. A step no soft-step change ended after the limit (the last one) ran to the
+    // result.
+    let grace_s = ctl.limit.grace_s().map(|g| (g * 1e3).round() / 1e3);
+    let grace_hit = mode == "soft" && ctl.limit.grace_hit();
+    let cycle_dropped = reached && ctl.limit.cycle_dropped();
+    let draw_grace_s = ctl.limit.draw_grace_s().map(|g| (g * 1e3).round() / 1e3);
+    let draw_grace_hit = reached && ctl.limit.draw_grace_hit();
+    let draw_grace_erbs = if reached { ctl.limit.draw_grace_erbs() } else { 0 };
+    let wait_raw = if !reached { 0.0 } else if ctl.limit.step_end_noted() || ctl.limit.wait_s() > 0.0 { ctl.limit.wait_s() } else { (runtime_s - limit_s).max(0.0) };
+    let wait_s = (wait_raw * 1e3).round() / 1e3;
+    if wait_line_due(reached, wait_raw, cycle_dropped) {
+        let w = WaitFacts {
+            step: step.clone(),
+            whole_cycle: opts.opt_loop != "topor",
+            hard: mode == "hard",
+            cap_hit,
+            step_cut: ctl.limit.cut_in_wait(),
+            cut_words: steps.iter().map(|s| s.words()).collect::<Vec<_>>().join(", "),
+            grace_s,
+            grace_hit,
+            cycle_dropped,
+            draw_grace_s,
+            draw_grace_hit,
+            draw_grace_erbs,
+            draw_cut: steps.contains(&CutStep::Drawing),
+            wait_s: wait_raw,
+        };
+        r.warnings.push(wait_line(&w));
+    }
+    Some(crate::route::LimitReport { limit_s, mode: mode.into(), reached, step, overrun_s, cap_s, cap_hit, cut: cut.into(), cut_steps, grace_s, grace_hit, wait_s, cycle_dropped, draw_grace_s, draw_grace_hit, draw_grace_erbs })
+}
+
+/// What the `time limit wait:` line says ([`wait_line`]).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct WaitFacts {
+    /// The stage text(s) the limit fell in (`Progress::limit_step`).
+    pub step: String,
+    /// `[optimize] loop = "cycles"`: the soft step is the whole-route cycle.
+    pub whole_cycle: bool,
+    /// `[run] timeout_mode = "hard"`.
+    pub hard: bool,
+    /// The soft limit's overrun cap fired (or the plugin's CPU clock hardened the limit).
+    pub cap_hit: bool,
+    /// The limit, acting as hard, cut the soft step it fell in ([`crate::control::TimeLimit::cut_in_wait`]).
+    pub step_cut: bool,
+    /// The cut steps in words (`CutStep::words`).
+    pub cut_words: String,
+    pub grace_s: Option<f64>,
+    pub grace_hit: bool,
+    pub cycle_dropped: bool,
+    pub draw_grace_s: Option<f64>,
+    pub draw_grace_hit: bool,
+    pub draw_grace_erbs: usize,
+    /// The limit, acting as hard, cut the drawing of the traces ([`CutStep::Drawing`]): not every
+    /// wire was drawn, even after a drawing-bound hit.
+    pub draw_cut: bool,
+    /// The unrounded wait (s).
+    pub wait_s: f64,
+}
+
+/// Seconds as the report lines write a setting: whole numbers without decimals. O(1).
+fn secs_text(g: f64) -> String {
+    if g == g.round() { format!("{g:.0}") } else { format!("{g}") }
+}
+
+/// The `time limit wait:` line (TIME_LIMIT_WAIT): where the limit fell (stage and soft step), how
+/// long that soft step went on past it, and why, true for the mode (soft: what bounded or did not
+/// bound it; hard / past the overrun cap: that it was cut, or had no stop check left). O(len).
+pub(crate) fn wait_line(w: &WaitFacts) -> String {
+    let first = w.step.split("; ").next().unwrap_or("");
+    let first = first.strip_prefix("run ").and_then(|t| t.split_once(": ")).map_or(first, |(_, s)| s);
+    let soft = crate::control::soft_step_of(first);
+    let in_loop = soft == Some(crate::control::SoftStep::Loop) || w.step.contains("TopoR loop");
+    let in_drawing = soft == Some(crate::control::SoftStep::Drawing);
+    let part = if w.whole_cycle && soft.is_some() { " (part of its whole-route cycle, [optimize] loop = \"cycles\")".to_string() } else { soft.map_or(String::new(), |s| format!(" (part of {})", s.words())) };
+    let as_hard = w.hard || w.cap_hit;
+    let who = if w.hard { "[run] timeout_mode = hard" } else { "the overrun cap ([run] timeout_overrun_s, or the plugin's CPU-clock cap)" };
+    let shown = if w.wait_s < 0.1 { format!("{:.3}", w.wait_s) } else { format!("{:.1}", w.wait_s) };
+    let dropped = "the cycle it was in was dropped, the best variant so far was drawn";
+    let draw_note = |lead: &str| -> String {
+        match (w.draw_grace_hit, w.draw_grace_s) {
+            (true, Some(g)) => format!(
+                "{lead}{}[run] drawing_grace_s = {} s ran out, so the drawing's optional passes stopped (the via reduction{}); raise drawing_grace_s to let them finish{}",
+                if w.draw_cut { "" } else { "every wire was drawn; " },
+                secs_text(g),
+                if w.draw_grace_erbs > 0 { format!("; {} wire(s) drawn the sequential way instead of by their ERBS", w.draw_grace_erbs) } else { String::new() },
+                if w.draw_cut { "; then the limit, acting as hard, cut the drawing of the traces (wires it had not drawn stay undrawn)" } else { "" }
+            ),
+            _ => String::new(),
+        }
+    };
+    let why = if in_loop && w.grace_hit && w.grace_s.is_some() {
+        format!("[run] limit_grace_s = {} s ran out: the step was stopped at its next check, {dropped}; raise limit_grace_s to let a cycle finish", secs_text(w.grace_s.unwrap_or(0.0)))
+    } else if w.cycle_dropped && as_hard {
+        format!("{who}: the step was cut at its next check, {dropped}{}", draw_note("; "))
+    } else if w.cycle_dropped {
+        format!("the step was cut at its next check, {dropped}{}", draw_note("; "))
+    } else if w.step_cut && as_hard {
+        format!("{who}: the limit cut this step at its next check (cut: {})", if w.cut_words.is_empty() { "the step that ran" } else { w.cut_words.as_str() })
+    } else if as_hard {
+        format!("{who}: the limit did not cut this step, it ran to its end (it had no stop check left after the limit, or ran within the 1 s each round gets)")
+    } else if in_loop {
+        match w.grace_s {
+            Some(g) if w.wait_s <= g => format!("the step finished within [run] limit_grace_s = {} s", secs_text(g)),
+            Some(g) => format!("the step ran past [run] limit_grace_s = {} s because it was between two checks or finishing its last cycle; no cycle was dropped", secs_text(g)),
+            None => "[run] limit_grace_s is unbounded (negative): the step ran to the end of its cycle".to_string(),
+        }
+    } else if in_drawing && !w.whole_cycle {
+        let d = draw_note("");
+        if !d.is_empty() {
+            d
+        } else {
+            match w.draw_grace_s {
+                Some(g) => format!("every wire was drawn and the drawing's optional passes finished within [run] drawing_grace_s = {} s (it bounds only those)", secs_text(g)),
+                None => "every wire was drawn; [run] drawing_grace_s is unbounded (negative): the optional passes ran to their end".to_string(),
+            }
+        }
+    } else {
+        "the soft limit lets this step run to its end ([run] limit_grace_s bounds only the TopoR loop step, drawing_grace_s only the drawing's optional passes)".to_string()
+    };
+    let tail = if in_drawing && !w.whole_cycle { String::new() } else { draw_note("; then the drawing: ") };
+    format!(
+        "time limit wait: the limit was reached during {}{part}; {} {shown} s ({why}){tail}",
+        if w.step.is_empty() { "the run" } else { w.step.as_str() },
+        if as_hard && (w.step_cut || w.cycle_dropped) { "that step stopped after" } else { "waited" }
+    )
+}
+
+/// Whether the report carries a `time limit wait:` line: the limit was reached and the step it fell
+/// in ran on past it (the unrounded wait) or a TopoR loop cycle was dropped (a cut that lands a
+/// moment after the limit has a wait that rounds to 0 but still lost the cycle). O(1).
+pub(crate) fn wait_line_due(reached: bool, wait_s: f64, cycle_dropped: bool) -> bool {
+    reached && (wait_s > 0.0 || cycle_dropped)
 }
 
 /// The reason of a connection the time limit left undrawn (the drawing was the step that ran).
@@ -3118,6 +3263,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// Debug (`TOPO_LOOPDBG`): one line per reroute and per cycle stage.
             dbg: bool,
             dbg_tag: u64,
+            /// The run's control: the test hook's markers between the cycle's stages.
+            ctl: &'a RunControl,
         }
         impl<'p> Sp<'_, 'p> {
             /// Debug: the criteria now as one short text.
@@ -3531,6 +3678,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     let t = self.dbg_crit();
                     eprintln!("LOOPDBG[{}] cycle {} after sweep ({}/{} kept): {t}", self.dbg_tag, c.cycle, cs.kept, cs.tried);
                 }
+                // limit_grace_s: the cycle's later steps are not begun once the loop is to stop (the
+                // caller drops a cycle cut short, so the state it leaves is never offered).
+                self.ctl.test_point("loop stage 1 check");
+                if stop() {
+                    cs.busy_s = t0.elapsed().as_secs_f64();
+                    return cs;
+                }
+                self.ctl.test_point("loop stage 2 begin");
                 if self.st.uncross_all(50) > 0 {
                     let lr = (self.assign_t)(self.st, self.ties);
                     self.set_lr(lr, None);
@@ -3593,6 +3748,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     cs.layer_runs += 1;
                     cs.layer_s += tl.elapsed().as_secs_f64();
                 }
+                self.ctl.test_point("loop stage 2 check");
+                if stop() {
+                    cs.busy_s = t0.elapsed().as_secs_f64();
+                    return cs;
+                }
+                self.ctl.test_point("loop stage 3 begin");
                 // Floating up (Polubasov 2010 «всплытие»): the label moves (crossing flips, via
                 // shifts, segment lifting), each kept when the price drops; the new labelling is
                 // taken when the board's evaluation does not rise.
@@ -3642,6 +3803,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     let t = self.dbg_crit();
                     eprintln!("LOOPDBG[{}] cycle {} after floating up (kept {}, undone {}): {t}", self.dbg_tag, c.cycle, cs.float_kept, cs.undone);
                 }
+                self.ctl.test_point("loop stage 3 check");
+                if stop() {
+                    cs.busy_s = t0.elapsed().as_secs_f64();
+                    return cs;
+                }
+                self.ctl.test_point("loop stage 4 begin");
                 // The crossing rules (clinches, double crossings, crossings no layer separates),
                 // taken when the board's evaluation does not rise.
                 let x0 = (self.xkept)();
@@ -3744,6 +3911,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         st.layers_now = layers_now(&st, &lr.events, bottom);
         let pred0 = measure(&st, &lr);
         let mut sp = Sp {
+            ctl,
             st: &mut st,
             wire_conn: &mut wire_conn,
             lr: &mut lr,
@@ -3808,11 +3976,21 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // not offered (Cancel = the best variant kept so far).
         let loop_over = || loop_deadline.is_some_and(|d| Instant::now() >= d);
         let mut stop = || stop_now() || ctl.limit_reached() || loop_over();
-        let mut inner = || stop_now() || ctl.limit.cuts() || (!soft() && loop_over());
+        // `[run] limit_grace_s`: past the limit and its grace the step stops at its next check (the
+        // cycle it cut is not offered; the archive's best variant is kept). Read only after the limit
+        // passed, so a run without a limit takes the same moves in the same order.
+        let mut inner = || ctl.test_point("loop move") || stop_now() || ctl.limit.cuts() || ctl.limit.grace_over() || (!soft() && loop_over());
         let clock = || t_loop.elapsed().as_secs_f64();
         // M0: the progress dialog names the loop (tests/cancel_latency.rs waits for it).
         ctl.stage(rnd, rnds, "TopoR loop on the topology");
-        let mut rep = optimise(&mut sp, &mut arch, &params, &mut stop, &mut inner, &clock);
+        let mut rep = crate::control::in_loop_scope(|| optimise(&mut sp, &mut arch, &params, &mut stop, &mut inner, &clock));
+        // The TopoR loop step ends here (its wait, when the limit fell in it); the pick and the cut
+        // necks belong to the drawing of the picked variant.
+        ctl.stage(rnd, rnds, "picking the variant to draw");
+        ctl.test_point("loop ended");
+        if ctl.limit.passed() && rep.dropped && !stop_now() {
+            ctl.limit.note_cycle_dropped(); // a cycle the limit cut: the report names it whatever the wait
+        }
         if rep.stop == "time limit" {
             rep.stop = if stop_now() { "Cancel / OK" } else if ctl.over_limit() { "time limit" } else { "loop_time_share" }.into();
         }
@@ -4535,14 +4713,43 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut erbs_failed: Vec<(usize, String)> = Vec::new();
     let mut erbs_err: Option<String> = None;
     if opts.realise == "erbs" {
+        // ERBS is an optional pass of the drawing (a stretch it does not reach is drawn the
+        // sequential way, never dropped): with the soft limit its bound is the drawing bound
+        // (`[run] drawing_grace_s`, lead 2026-11-17), as hard the limit itself.
+        let erbs_soft = !ctl.limit.is_hard();
+        // (The round's 1 s floor is the hard cut's and the wall-clock cap's; the soft bound counts from the drawing
+        // itself.) ERBS reads the limit live at every stretch (`ErbsOpts::limit`): the overrun cap (wall clock from the
+        // floor on, on both clocks; lead 2026-11-17) and, soft, the drawing bound from `t_draw` (a
+        // limit the CPU clock reaches during ERBS moves it), and says which stopped it first (`Realised::stopped`).
         let pts: BTreeMap<WireId, Vec<(usize, Vec2)>> = placed.iter().map(|(&w, v)| (w, v.iter().map(|x| (x.0, x.1)).collect())).collect();
         let layers: Vec<usize> = (0..b.n_signal).collect();
         let conn = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
         let mo = super::cutflow::MeasureOpts::from_options(opts);
-        match super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &dr.pad_end, &super::board::outline_segments(model), &mo, &layers, &live, ctl.deadline().map(|d| d.max(floor)), (!draw_through.get()).then(|| ctl.cancel.clone()), ctl.test_point("fail erbs sleeve")) {
+        let stops = super::erbs::ErbsOpts {
+            deadline: if erbs_soft { None } else { ctl.deadline().map(|d| d.max(floor)) },
+            stop: (!draw_through.get()).then(|| ctl.cancel.clone()),
+            limit: Some(ctl.limit.clone()),
+            draw_start: erbs_soft.then_some(t_draw),
+            floor: Some(floor),
+            fail_first: ctl.test_point("fail erbs sleeve"),
+            ..super::erbs::ErbsOpts::default()
+        };
+        match super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &dr.pad_end, &super::board::outline_segments(model), &mo, &layers, &live, stops) {
             Ok(r) => {
+                use super::erbs::ErbsStop;
+                // `[run] drawing_grace_s` (soft limit): the stretches the drawing bound cut, for the report: only when
+                // the bound stopped ERBS first (not the cap, not a Cancel).
+                if r.timed_out > 0 && r.stopped == Some(ErbsStop::Bound) {
+                    ctl.limit.note_draw_grace_erbs(r.timed_out);
+                }
                 if r.timed_out > 0 {
-                    warnings.push(format!("erbs_timeout: the time limit passed (or the run was cancelled) before {} stretch(es) had their ERBS; those runs are drawn the sequential way", r.timed_out));
+                    let by = match r.stopped {
+                        Some(ErbsStop::Cancel) => "the run was cancelled",
+                        Some(ErbsStop::Bound) => "[run] drawing_grace_s passed past the time limit",
+                        _ if ctl.limit.hard_mode() => "the time limit passed ([run] timeout_mode = hard)",
+                        _ => "the overrun cap passed ([run] timeout_overrun_s, or the plugin's CPU-clock cap; the soft limit then acts as the hard one)",
+                    };
+                    warnings.push(format!("erbs_timeout: {by} before {} stretch(es) had their ERBS; those runs are drawn the sequential way", r.timed_out));
                 }
                 erbs_failed = r.failed.clone();
                 erbs_line = Some(format!(
@@ -5122,14 +5329,26 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // 0 s, "0 relabels tried"). A limit acting as hard (`hard`, or past the overrun cap, read
         // live) cuts it only when it passed after the drawing began (`draw_exempt`).
         cut_step.set(CutStep::ViaReduction);
-        let (rs, changed) = super::reduce::reduce_vias(&mut dr, &mut drawn, &mut placed, &mut plans, &mut via_h, &end_fixed, &frozen, b.n_signal, None, &|| ctl.is_cancelled() || limit_cut());
+        // `[run] drawing_grace_s` (soft limit): the via reduction is an optional pass (anytime: every
+        // relabel accepted so far stays); past the drawing bound it stops, every wire stays drawn.
+        ctl.test_point("via reduction begin");
+        let grace_stop = std::cell::Cell::new(false);
+        let draw_grace_over = || {
+            let over = !ctl.is_cancelled() && ctl.limit.draw_grace_over(t_draw);
+            if over {
+                grace_stop.set(true);
+            }
+            over
+        };
+        let (rs, changed) = super::reduce::reduce_vias(&mut dr, &mut drawn, &mut placed, &mut plans, &mut via_h, &end_fixed, &frozen, b.n_signal, None, &|| ctl.is_cancelled() || limit_cut() || draw_grace_over());
         // Cancel / OK ends the via reduction (cancel-fix; anytime: every relabel accepted so far
         // stays; measured on qmtech it took 12-22 s for 0-10 of ~110 vias). In the TopoR loop pick's
         // one drawing that keeps the result complete; only the time limit makes it a cut-short one.
         vias_reduced = rs.vias_removed;
         // Soft limit (before its overrun cap): the limit stops nothing, so a stopped reduction is a Cancel's.
         let red_limit_cut = rs.timed_out && limit_cut();
-        let cancel_cut = rs.timed_out && !red_limit_cut;
+        let red_grace_cut = rs.timed_out && !red_limit_cut && grace_stop.get() && !ctl.is_cancelled();
+        let cancel_cut = rs.timed_out && !red_limit_cut && !red_grace_cut;
         timed_out |= red_limit_cut || cancel_cut && !draw_through.get();
         for w in changed {
             let ci = conn_of[wire_conn[w]];
@@ -5144,7 +5363,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             rs.accepted,
             rs.vias_removed,
             t_red.elapsed().as_secs_f64(),
-            if red_limit_cut { ", stopped by the time budget" } else if cancel_cut { ", stopped by Cancel / OK" } else { "" },
+            if red_limit_cut { ", stopped by the time budget" } else if red_grace_cut { ", stopped by [run] drawing_grace_s (every wire drawn)" } else if cancel_cut { ", stopped by Cancel / OK" } else { "" },
             causes_before,
             causes(&plans, &drawn)
         ));
@@ -5443,7 +5662,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let layers: Vec<usize> = (0..b.n_signal).collect();
         let conn = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
         let mo = super::cutflow::MeasureOpts::from_options(opts);
-        let _ = super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &dr.pad_end, &super::board::outline_segments(model), &mo, &layers, &live, None, None, false);
+        let _ = super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &dr.pad_end, &super::board::outline_segments(model), &mo, &layers, &live, super::erbs::ErbsOpts::default());
     }
     if let Some(d) = std::env::var_os("TOPO_ERBS_DUMP") {
         let nets: serde_json::Map<String, serde_json::Value> = model.nets.iter().map(|n| (n.code.to_string(), serde_json::Value::from(n.name.clone()))).collect();
@@ -6335,6 +6554,68 @@ fn out_vias(out: &[Outcome], reqs: &[planes::Req], _conns: &[Connection]) -> Vec
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_wait_line_is_true_for_every_case() {
+        let loop_ = WaitFacts { step: "TopoR loop on the topology".into(), grace_s: Some(30.0), draw_grace_s: Some(60.0), wait_s: 2.0, ..WaitFacts::default() };
+        let l = wait_line(&loop_);
+        assert!(l.starts_with("time limit wait: the limit was reached during TopoR loop on the topology (part of the TopoR loop); waited 2.0 s"), "{l}");
+        assert!(l.contains("finished within [run] limit_grace_s = 30 s"), "{l}");
+        let past = wait_line(&WaitFacts { wait_s: 31.5, ..loop_.clone() });
+        assert!(past.contains("ran past [run] limit_grace_s = 30 s") && !past.contains("finished within"), "{past}");
+        let hit = wait_line(&WaitFacts { wait_s: 30.2, grace_hit: true, cycle_dropped: true, ..loop_.clone() });
+        assert!(hit.contains("limit_grace_s = 30 s ran out") && hit.contains("was dropped"), "{hit}");
+        let half = wait_line(&WaitFacts { grace_s: Some(0.5), wait_s: 0.7, grace_hit: true, cycle_dropped: true, ..loop_.clone() });
+        assert!(half.contains("limit_grace_s = 0.5 s ran out"), "{half}");
+        let unb = wait_line(&WaitFacts { grace_s: None, ..loop_.clone() });
+        assert!(unb.contains("unbounded"), "{unb}");
+        // the overrun cap (grace not hit) is not called a grace run-out
+        let cap = wait_line(&WaitFacts { cap_hit: true, cycle_dropped: true, step_cut: true, ..loop_.clone() });
+        assert!(cap.contains("overrun cap") && cap.contains("was dropped") && !cap.contains("ran out") && cap.contains("that step stopped after"), "{cap}");
+        // hard mode: cut, or no stop check left; never "the soft limit"
+        let hard = wait_line(&WaitFacts { hard: true, step: "projection of the board".into(), step_cut: true, cut_words: "a planning step".into(), ..loop_.clone() });
+        assert!(hard.contains("timeout_mode = hard: the limit cut this step") && hard.contains("(part of the initial routing)") && hard.contains("a planning step"), "{hard}");
+        let hard_end = wait_line(&WaitFacts { hard: true, step: "via reduction and fuse".into(), ..loop_.clone() });
+        assert!(hard_end.contains("did not cut this step") && !hard_end.contains("soft limit"), "{hard_end}");
+        // soft, the initial routing: runs to its end
+        let init = wait_line(&WaitFacts { step: "topological search".into(), ..loop_.clone() });
+        assert!(init.contains("(part of the initial routing)") && init.contains("soft limit lets this step run to its end"), "{init}");
+        // the drawing: its bound
+        let draw = WaitFacts { step: "drawing the traces".into(), ..loop_.clone() };
+        let d = wait_line(&draw);
+        assert!(d.contains("(part of the drawing)") && d.contains("every wire was drawn") && d.contains("within [run] drawing_grace_s = 60 s"), "{d}");
+        let dh = wait_line(&WaitFacts { draw_grace_hit: true, draw_grace_erbs: 3, ..draw.clone() });
+        assert!(dh.contains("drawing_grace_s = 60 s ran out") && dh.contains("3 wire(s) drawn the sequential way"), "{dh}");
+        let du = wait_line(&WaitFacts { draw_grace_s: None, ..draw.clone() });
+        assert!(du.contains("drawing_grace_s is unbounded"), "{du}");
+        // a limit in the loop, then the drawing bound ran out in the drawing after it
+        let then = wait_line(&WaitFacts { draw_grace_hit: true, ..loop_.clone() });
+        assert!(then.contains("finished within [run] limit_grace_s") && then.contains("; then the drawing: every wire was drawn; [run] drawing_grace_s = 60 s ran out"), "{then}");
+        // a dropped cycle that is also a drawing step keeps the drawing bound's note (defensive)
+        let dd = wait_line(&WaitFacts { cycle_dropped: true, draw_grace_hit: true, draw_grace_erbs: 2, ..draw.clone() });
+        assert!(dd.contains("was dropped") && dd.contains("drawing_grace_s = 60 s ran out") && dd.contains("2 wire(s)"), "{dd}");
+        let ddh = wait_line(&WaitFacts { cycle_dropped: true, hard: true, draw_grace_hit: true, ..draw.clone() });
+        assert!(ddh.contains("was dropped") && ddh.contains("drawing_grace_s = 60 s ran out"), "{ddh}");
+        // r5 finding 1: the bound ran out, then the cap cut the drawing of the traces: no "every wire was drawn"
+        for dc in [WaitFacts { cycle_dropped: true, cap_hit: true, draw_grace_hit: true, draw_cut: true, ..draw.clone() }, WaitFacts { draw_grace_hit: true, draw_cut: true, ..loop_.clone() }] {
+            let t = wait_line(&dc);
+            assert!(t.contains("drawing_grace_s = 60 s ran out") && !t.contains("every wire was drawn") && t.contains("cut the drawing of the traces"), "{t}");
+        }
+        // whole-route cycles
+        let cyc = wait_line(&WaitFacts { whole_cycle: true, step: "drawing the traces".into(), ..loop_.clone() });
+        assert!(cyc.contains("whole-route cycle") && cyc.contains("run to its end"), "{cyc}");
+        // a run of many
+        let many = wait_line(&WaitFacts { step: "run 1: TopoR loop on the topology; run 2: topological search".into(), ..loop_.clone() });
+        assert!(many.contains("(part of the TopoR loop)") && many.contains("finished within"), "{many}");
+    }
+
+    #[test]
+    fn the_wait_line_comes_whenever_a_cycle_was_dropped_or_the_step_waited() {
+        assert!(wait_line_due(true, 0.0004, false), "any wait is reported");
+        assert!(wait_line_due(true, 0.0, true), "a dropped cycle is reported though the wait rounds to 0");
+        assert!(!wait_line_due(true, 0.0, false));
+        assert!(!wait_line_due(false, 5.0, true), "no limit reached: nothing to say");
+    }
+
     use super::*;
 
     fn eprom() -> BoardModel {
