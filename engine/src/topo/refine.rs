@@ -277,6 +277,24 @@ pub mod meter {
     }
 }
 
+/// A pass whose layout changed: `(pass, layer before, disc before)`.
+type Changed = (usize, i32, Disc);
+
+/// The layers of an edge whose pack items change when one of its passes goes from layer `ol`,
+/// disc `od` to layer `nl_`, disc `nd`, as a bit set over the `nl` layers ([`layer_items`]: a
+/// pass packs its track and disc on its own layer and its disc alone on every other layer). Same
+/// disc (bits): only the old and the new layer; with a disc and a layer of -1 (a dead wire's
+/// pass), or a changed disc: every layer. O(1).
+fn layers_changed(nl: usize, ol: i32, od: Disc, nl_: i32, nd: Disc) -> u64 {
+    let all = if nl >= 64 { u64::MAX } else { (1u64 << nl) - 1 };
+    let bit = |l: i32| if l >= 0 && (l as usize) < 64 { 1u64 << l } else { 0 };
+    let same = od[0].to_bits() == nd[0].to_bits() && od[1].to_bits() == nd[1].to_bits();
+    if !same || (od[0].max(od[1]) > 0.0 && (ol < 0 || nl_ < 0)) {
+        return all;
+    }
+    (bit(ol) | bit(nl_)) & all
+}
+
 /// Order of a via traversal: (no site, overflow + squeeze change in um-mm, other wires in the
 /// triangle, -inradius, traversal).
 type SiteKey = (bool, i64, usize, i64, usize);
@@ -547,8 +565,8 @@ impl<'a> CapModel<'a> {
     }
 
     /// Set the pass layers and via discs of `w` for via traversals `ks` (no pricing); returns the
-    /// passes whose layer or disc changed. O(passes of the wire).
-    fn apply(&mut self, w: WireId, ev: &[LEv], ks: Vec<usize>) -> Vec<usize> {
+    /// passes whose layer or disc changed, with their layer and disc before. O(passes of the wire).
+    fn apply(&mut self, w: WireId, ev: &[LEv], ks: Vec<usize>) -> Vec<Changed> {
         let wi = &self.st.wires[w];
         let n = wi.passes.len();
         let pl = pass_layers_at(n, ev, self.bottom, &ks);
@@ -557,9 +575,9 @@ impl<'a> CapModel<'a> {
         let mut changed = Vec::new();
         for (k, &p) in wi.passes.iter().enumerate() {
             if self.pass_layer[p] != pl[k] || self.pass_disc[p] != disc[k] {
+                changed.push((p, self.pass_layer[p], self.pass_disc[p]));
                 self.pass_layer[p] = pl[k];
                 self.pass_disc[p] = disc[k];
-                changed.push(p);
             }
         }
         let nr = self.need_r(w);
@@ -609,13 +627,25 @@ impl<'a> CapModel<'a> {
     }
 
     /// Price again the edge-layers of the passes `changed`; returns the change of the total.
-    fn reprice(&mut self, changed: &[usize]) -> f64 {
-        let mut es: Vec<usize> = changed.iter().map(|&p| self.st.passes[p].edge).collect();
-        es.sort_unstable();
-        es.dedup();
+    ///
+    /// Only the layers whose items changed are evaluated ([`layers_changed`]): an edge-layer
+    /// whose items are the same would price the same, log nothing and add nothing to the
+    /// change, so leaving it out is exact (par-refine §3). Edges ascending, layers ascending, as
+    /// before. O(changed passes x layers x passes of an edge).
+    fn reprice(&mut self, changed: &[Changed]) -> f64 {
+        let nl = self.nl;
+        let mut es: Vec<(usize, u64)> = changed.iter().map(|&(p, ol, od)| (self.st.passes[p].edge, layers_changed(nl, ol, od, self.pass_layer[p], self.pass_disc[p]))).collect();
+        es.sort_unstable_by_key(|x| x.0);
         let mut delta = 0.0;
-        for e in es {
-            for l in 0..self.nl {
+        let mut j = 0;
+        while j < es.len() {
+            let e = es[j].0;
+            let mut mask = 0u64;
+            while j < es.len() && es[j].0 == e {
+                mask |= es[j].1;
+                j += 1;
+            }
+            for l in (0..self.nl).filter(|&l| (mask >> l) & 1 == 1) {
                 let i = e * self.nl + l;
                 let (c, q) = self.eval(e, l);
                 if c != self.cost[i] || q != self.sq[i] {
