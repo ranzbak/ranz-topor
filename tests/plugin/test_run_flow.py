@@ -1394,6 +1394,24 @@ def test_the_button_read_at_the_press_reaches_the_engine(app, eprom, tmp_path, r
         assert out.cancelled is True
 
 
+def test_a_cancel_pressed_just_before_routes_stable_stays_a_cancel(app, eprom, tmp_path, reports):
+    """verify-sl3 F2: the dialog handles a click at its next poll, whose progress may be the first "Routes stable"
+    (the button turns into OK on it). What the button read at the press (the UI's ``ok_at_press``: Cancel) is what
+    reaches the engine, not the stable progress of that poll: ``job.cancel(ok=False)``, the run is a cancel."""
+    class CancelQueued(_CancelWhen):
+        def ok_at_press(self):
+            return None if self.pressed is None else False  # the click came while the button read Cancel
+
+    ui = CancelQueued(lambda p: p.stable, accept=True)
+    eng = ProxyEngine(hold=1)
+    _, _, out = do_run(eprom, tmp_path, ui=ui, engine=eng, cfg=CFG.with_values({("optimize", "rounds"): 20}))
+    assert ui.pressed is not None and ui.pressed.stable, "premise: the poll that handles the press is stable"
+    assert eng.jobs[0].cancelled and eng.jobs[0].ok is False
+    assert out.cancelled is True
+    log = (out.report_dir / "log.txt").read_text()
+    assert "OK at Routes stable" not in log
+
+
 def test_an_engine_without_ok_still_gets_the_cancel(app, eprom, tmp_path, reports):
     """An engine older than the plugin (``RouteJob.cancel()`` without ``ok``): the plugin falls back to the plain
     cancel, which judges by the engine's own progress (fail-safe: never an error)."""

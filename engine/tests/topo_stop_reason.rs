@@ -321,3 +321,65 @@ fn the_first_routes_stable_has_a_best_so_far() {
         assert_eq!(r.stop_reason, "stable", "runs {runs}");
     }
 }
+
+/// verify-sl3 F1 (probe P2c): OK at Routes stable (dialog), or the stop at stable (headless), then a
+/// hard time limit that passes INSIDE the one drawing, past the round's 1 s floor (the test hook at
+/// the first drawn wire sets the limit just ahead and sleeps past it). The limit, not the OK / the
+/// stable stop, ended what is drawn: the result says timeout (stop_reason "timeout", timed_out) with
+/// the TIME_HIT line naming the stable plan, never "stable"; on the pour board the limit cuts the
+/// pour stitching, so no "ran to its end" line stands next to "the pour stitching was cut".
+/// Before the fix the OK cases ended "stable", timed_out false (eprom routed 1 of 27), and the
+/// headless pour case (only its stitching cut) "stable" too.
+#[test]
+fn ok_at_stable_then_a_hard_limit_cuts_the_drawing_is_a_timeout() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    for mode in [Mode::Dialog, Mode::Headless] {
+        for (board, m) in [("eprom", eprom()), ("pour", pour_cut_board())] {
+            let o = opts(mode, Clock::Wall, r#", "topo_rounds": 100000, "timeout_mode": "hard""#);
+            let mut ctl = RunControl::new();
+            let (lim, c4) = (ctl.limit.clone(), ctl.clone());
+            let fired = Arc::new(AtomicUsize::new(0));
+            let f2 = fired.clone();
+            let dialog = mode == Mode::Dialog;
+            ctl.set_test_hook(move |pt| {
+                // the one drawing comes after the loop (draw once): after the OK, or after the headless stop
+                if (!dialog || c4.ok_at_stable()) && pt == "fail wire drawing" && f2.fetch_add(1, Ordering::SeqCst) == 0 {
+                    lim.set(lim.elapsed_s() + 0.05);
+                    std::thread::sleep(Duration::from_millis(1300));
+                }
+                false
+            });
+            let (c2, o2) = (ctl.clone(), o.clone());
+            let h = std::thread::spawn(move || route_with(&m, &o2, &c2));
+            let t = Instant::now();
+            let bound = Duration::from_secs(if cfg!(debug_assertions) { 300 } else { 60 });
+            while dialog {
+                assert!(!h.is_finished(), "{board}: the run ended before Routes stable");
+                if ctl.snapshot().stable {
+                    ctl.request_stop(Some(true));
+                    break;
+                }
+                assert!(t.elapsed() < bound, "{board}: never stable in {bound:?}");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let r = h.join().expect("run thread");
+            let case = format!("{mode:?} {board}");
+            assert_eq!(fired.load(Ordering::SeqCst), 1, "{case}: the hook reached the drawing (premise)");
+            let (_, st, _) = loop_line(&r);
+            assert!(st.is_some(), "{case}: the loop was stable (premise): {:?}", r.warnings);
+            let cut_line = |s: &str| r.warnings.iter().any(|w| w.starts_with("time limit (hard") && w.contains(s));
+            assert!(cut_line("the drawing of the traces was cut") || cut_line("the pour stitching was cut"), "{case}: premise, the limit cut the drawing: {:?}", r.warnings);
+            assert_eq!(r.stop_reason, "timeout", "{case}: routed {}/{}: {:?}", r.routed, r.connections_total, r.warnings);
+            assert!(r.timed_out && !r.converged, "{case}");
+            let why = if dialog { "OK came at Routes stable, but the time limit then cut the drawing of the stable plan" } else { "the routes were stable, but the time limit then cut the drawing of the stable plan" };
+            assert!(r.warnings.iter().any(|w| w.contains(why)), "{case}: {:?}", r.warnings);
+            assert!(!r.warnings.iter().any(|w| w.contains("the pour stitching ran to its end")), "{case}: {:?}", r.warnings);
+            if board == "eprom" {
+                assert!(r.routed < r.connections_total, "{case}: the cut leaves connections undrawn (premise)");
+            } else {
+                assert!(cut_line("the pour stitching was cut"), "{case}: the stitching is what the limit cut (premise): {:?}", r.warnings);
+            }
+        }
+    }
+}

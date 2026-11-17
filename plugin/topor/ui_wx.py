@@ -792,6 +792,8 @@ class _FindingsMixin:
         items = [str(i) for i in f.items]
         txt = f.message
         if items:
+            if txt.endswith(".") and not txt.endswith(".."):  # the sentence goes on with its items (never ".:")
+                txt = txt[:-1]
             txt += ": " + ", ".join(items[:_ITEMS_PREFLIGHT])
             if len(items) > _ITEMS_PREFLIGHT:
                 txt += ", " + W["items_more"].format(n=len(items) - _ITEMS_PREFLIGHT)
@@ -1121,6 +1123,9 @@ class ProgressDialog(_Base):
         # the score of the last round and of the best so far (what OK / Cancel keeps), over all runs
         self._build_score_rows()
         self.stable = False
+        #: What the button read when it was pressed (True = OK at "Routes stable", False = Cancel; None = not pressed),
+        #: latched in ``cancel`` (verify-sl3 F2: the label after the next poll may read OK already).
+        self.ok_at_press: bool | None = None
         self.stable_window = stable_window
         self._build_limit_row()
         hint = self.text(self, "progress", "cancel_hint")  # one short line; the full text is its tooltip
@@ -1327,11 +1332,13 @@ class ProgressDialog(_Base):
     def _set_stopping_label(self, stage: str = "") -> None:
         W = WORDING["progress"]
         s = int(time.monotonic() - (self.cancelled_at or time.monotonic()))
-        self._phase_label(W["phase_finishing" if self.stable else "phase_cancelling"].format(stage=f" ({stage})" if stage else "", s=s))
+        ok = self.stable if self.ok_at_press is None else self.ok_at_press  # the label at the press (F2)
+        self._phase_label(W["phase_finishing" if ok else "phase_cancelling"].format(stage=f" ({stage})" if stage else "", s=s))
 
     def cancel(self) -> None:
         if self.cancelled:
             return
+        self.ok_at_press = self.stable  # what the button read at the press (OK once stable, else Cancel)
         self.cancelled = True
         self.cancelled_at = time.monotonic()
         self._set_stopping_label()
@@ -1921,12 +1928,21 @@ class WxUi:
             d = dlg.decision(rc == wx.ID_OK)
         finally:
             dlg.Destroy()
+        defaults, use = Config.defaults(), set(getattr(d, "use_defaults", ()))
+
+        def eff(sec: str, key: str):
+            """The value the run uses (run.py: the dialog's own field, else the current default for a pinned line the
+            user chose "Use the current default" for, else topor.toml; verify-sl3 F3). O(1)."""
+            if sec == "run" and key in d.overrides:
+                return d.overrides[key]
+            return defaults.get(sec, key) if f"{sec}.{key}" in use else cfg.get(sec, key)
+
         if d.proceed:  # progress needs the effective limit / cap
-            self._timeout_s = float(d.overrides.get("timeout_s", cfg.get("run", "timeout_s")))
-            self._timeout_clock = str(d.overrides.get("timeout_clock", cfg.get("run", "timeout_clock")))
+            self._timeout_s = float(eff("run", "timeout_s"))
+            self._timeout_clock = str(eff("run", "timeout_clock"))
             self._limit_editable = True
-        self._iter_cap = int(cfg.get("optimize", "rounds"))  # the topological core's whole-route rounds
-        self._stable_window = int(cfg.get("optimize", "stable_window"))
+        self._iter_cap = int(eff("optimize", "rounds"))  # the topological core's whole-route rounds
+        self._stable_window = int(eff("optimize", "stable_window"))
         return d
 
     def progress(self, p: Progress) -> bool:
@@ -1937,11 +1953,20 @@ class WxUi:
                                            self._timeout_clock, limit_editable=self._limit_editable)
             self._present(self._progress)
         dlg = self._progress
+        # verify-sl3 F2: a press queued while the button still read Cancel is handled against that label first;
+        # only then may this progress turn the button into OK (and the second pump paints it)
+        self._pump()
         dlg.update(p)
         self._pump()
         if dlg.cancelled:
             self._cancelled = True
         return not self._cancelled
+
+    def ok_at_press(self) -> bool | None:
+        """What the stop button read when it was pressed: True = OK ("Routes stable"), False = Cancel, None = not
+        pressed (or no progress dialog). The run flow sends it to the engine, which latches it. O(1)."""
+        dlg = self._progress
+        return dlg.ok_at_press if dlg is not None and dlg.cancelled else None
 
     def time_limit_request(self) -> float | None:
         """The time limit the user set in the progress dialog since the last call (seconds on the run's clock,

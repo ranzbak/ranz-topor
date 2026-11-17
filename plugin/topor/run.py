@@ -1023,7 +1023,11 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                     # user 2026-11-17: the button read OK ("Routes stable": keep the result, labelled stable, the pour
                     # stitching in full) or Cancel; the engine latches what it was at this request, so its stop_reason
                     # and this run's `cancelled` agree whatever the runs do after it
-                    ok = bool(p.stable)
+                    # verify-sl3 F2: what the button read AT the press (the UI latches it), not the label after this
+                    # progress, which may have turned it into OK; a UI without the latch: the progress it stopped on
+                    read = getattr(ui, "ok_at_press", None)
+                    pressed = read() if callable(read) else None
+                    ok = bool(p.stable) if pressed is None else bool(pressed)
                     try:
                         job.cancel(ok=ok)
                     except TypeError:  # an engine older than the plugin (no ok): it judges by its own progress

@@ -220,6 +220,11 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     let stable_stop_all = outs.iter().all(|o| o.stable_stop);
     let cancel = ctl.is_cancelled();
     let time_hit = outs.iter().any(|o| o.time_hit);
+    // verify-sl3 F1: the limit (acting as hard) cut the drawing of the picked run's plan: its board
+    // is drawn only in part, so the call is never "stable" then, even after an OK at Routes stable
+    // (the user took the stable plan; the limit, not the OK, ended what is drawn of it).
+    let (draw_cut, drawn_stable) = (outs[pick].draw_cut, outs[pick].stable);
+    let ok_kept = ok_stop && !draw_cut;
     // Every cycle's variants were stitched before they were judged (pour pieces still cut off
     // count as errors), so the picked board is the one the progress showed.
     let pick_k = outs[pick].k;
@@ -234,8 +239,14 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         best.warnings.push(format!("best of {n} seeded runs ([optimize] runs): run {} picked; {}{skipped_txt}", pick_k + 1, lines.join("; ")));
     }
     best.stop_reason = if cancel {
-        if ok_stop { "stable" } else { "cancel" }
-    } else if time_hit {
+        if ok_kept {
+            "stable"
+        } else if ok_stop {
+            "timeout"
+        } else {
+            "cancel"
+        }
+    } else if time_hit || draw_cut {
         "timeout"
     } else if stable_stop_all {
         "stable"
@@ -246,7 +257,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
     if opts.stop_after == "plan" {
         best.stop_reason = "stop_after plan".into();
     }
-    best.timed_out = time_hit && !(cancel && ok_stop);
+    best.timed_out = (time_hit || draw_cut) && !(cancel && ok_kept);
     best.converged = !best.timed_out;
     best.runtime_s = t0.elapsed().as_secs_f64();
     if best.timed_out {
@@ -254,7 +265,12 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Route
         // Name the limit and its clock. The engine's own limit is the wall clock; a caller that counts
         // another clock (the plugin's [run] timeout_clock = cpu) reaches the limit itself and gives the engine
         // none (`wall_clock_s` 0), so the seconds `limit` are then wall seconds at the reach, not its limit.
-        let why = if cancel {
+        let why = if draw_cut && (ok_stop || drawn_stable && !cancel) {
+            format!(
+                "{}, but the time limit then cut the drawing of the stable plan: the board is drawn only in part (see the time limit line)",
+                if ok_stop { "OK came at Routes stable" } else { "the routes were stable" }
+            )
+        } else if cancel {
             "Cancel stopped the run before its routes were stable".to_string()
         } else if ctl.limit.changed() {
             format!("the time limit of {limit:.0} s wall clock (changed during the run; [run] timeout_s = {:.0} s at this engine job's start) stopped the run before its routes were stable", opts.wall_clock_s)
@@ -379,6 +395,12 @@ struct RunOut {
     /// The run ended BECAUSE its routes were stable (the loop's or the run's stop at stable), not
     /// because it reached the cycle cap with stable recorded (a dialog run goes on past stable).
     stable_stop: bool,
+    /// The time limit, acting as hard, cut the one drawing of its TopoR loop pick (the traces, the
+    /// via reduction or the pour stitching): its board is drawn only in part, whatever ended the
+    /// loop (verify-sl3 F1: an OK at Routes stable then a hard limit in the drawing).
+    draw_cut: bool,
+    /// Its routes were stable (at some cycle), however the run ended.
+    stable: bool,
     /// Its summary for the report, and its cycle by cycle line.
     line: String,
     cycles_line: String,
@@ -906,6 +928,7 @@ struct Run {
     notes: Vec<String>,
     time_hit: bool,
     stable_stop: bool,
+    draw_cut: bool,
     stable_at: Option<usize>,
     first: Option<usize>,
     cycles: usize,
@@ -928,6 +951,7 @@ impl Run {
             notes: Vec::new(),
             time_hit: false,
             stable_stop: false,
+            draw_cut: false,
             stable_at: None,
             first: None,
             cycles: 0,
@@ -1070,6 +1094,8 @@ impl Run {
                 judged = Some(Judged { crit, routed, total, as_drawn });
             }
         };
+        // The limit cut this cycle's pour stitching (set below; verify-sl3 F1).
+        let mut cycle_stitch_cut = false;
         if !interrupted || self.arch.items.is_empty() {
             // Pour stitching (D4) on each variant before it is judged: a pour piece the copper cut
             // off that no stitch joins back is an open connection in KiCad's DRC, so it counts as an
@@ -1082,7 +1108,16 @@ impl Run {
             // the drawing's (verify-m2c 5): after a drawing the limit cut, the stitching is cut too
             // (before, it re-decided at its own start and so ran in full).
             let exempt = ro.draw_exempt;
-            let cut = || !exempt && ctl.limit.cuts_in(CutStep::Stitching);
+            // Whether the limit cut a stitching of this cycle (verify-sl3 F1: the result is then
+            // drawn only in part, never "stable", and the stitching did not run to its end).
+            let stitch_cut = std::cell::Cell::new(false);
+            let cut = || {
+                let c = !exempt && ctl.limit.cuts_in(CutStep::Stitching);
+                if c {
+                    stitch_cut.set(true);
+                }
+                c
+            };
             // The same test without noting a cut (the stitching may have ended before it): whether
             // a variant counts as cut short below; only the stitching's own stop test reports one.
             let past = || !exempt && ctl.limit.is_hard() && ctl.limit.passed();
@@ -1098,8 +1133,12 @@ impl Run {
             let stitched = |mut r: RouteResult, mut c: Criteria| -> (RouteResult, Criteria) {
                 if opts.stitch_islands {
                     ctl.stage(cycle as u32, opts.topo_rounds.max(1) as u32, "pour stitching");
+                    let cut_before = stitch_cut.replace(false);
                     c.errors += stitch_pours(model, opts, &mut r, None, &|| (ctl.is_cancelled() && !ok_at_stable()) || cut());
-                    if ok_at_stable() {
+                    let this_cut = stitch_cut.get();
+                    stitch_cut.set(cut_before || this_cut);
+                    // Only a stitching the limit did not cut ran to its end (verify-sl3 F1).
+                    if ok_at_stable() && !this_cut {
                         r.warnings.push("OK at Routes stable: the pour stitching ran to its end, as at a natural stable end (a Cancel before Routes stable ends it after the pass in progress)".into());
                     }
                 }
@@ -1124,6 +1163,7 @@ impl Run {
                 note_judged(c, r.routed, false);
                 self.arch.offer(Variant { label: format!("round {cycle}"), crit: c, payload: Drawn { cycle, result: r } }, &obj);
             }
+            cycle_stitch_cut = stitch_cut.get();
         }
         let pick = self.arch.pick(&obj).expect("a cycle was offered");
         let pc = self.arch.items[pick].crit;
@@ -1186,6 +1226,9 @@ impl Run {
             } else {
                 self.time_hit = interrupted;
             }
+            // The loop's one drawing (draw once): the limit cut its traces / via reduction
+            // (`interrupted`; a Cancel cuts nothing of it, `draw_through`) or its pour stitching.
+            self.draw_cut = interrupted || cycle_stitch_cut;
             self.done = true;
             coord.report(self.k, |r| r.stable = loop_end.is_some_and(|e| e.stable));
             return;
@@ -1254,7 +1297,7 @@ impl Run {
             self.picked_at,
             self.busy_s
         );
-        Ok(RunOut { k: self.k, result: best, crit, time_hit: self.time_hit, stable_stop: self.stable_stop, line, cycles_line })
+        Ok(RunOut { k: self.k, result: best, crit, time_hit: self.time_hit, stable_stop: self.stable_stop, draw_cut: self.draw_cut, stable: self.stable_at.is_some(), line, cycles_line })
     }
 }
 

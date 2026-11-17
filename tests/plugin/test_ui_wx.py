@@ -566,6 +566,36 @@ def test_progress_says_the_soft_time_limit_is_waiting_for_the_step(app):
         dlg.Destroy()
 
 
+class _QueuedPressUi(_QuietUi):
+    """The press sits in the event queue until the next pump (as a real click between two polls)."""
+    queued = False
+
+    def _pump(self):
+        if self.queued and self._progress is not None:
+            self.queued = False
+            _press(self._progress.cancel_button)
+
+
+@pytest.mark.parametrize("label", ["Cancel", "OK"])
+def test_the_press_is_judged_by_the_label_it_was_pressed_on(app, label):
+    """verify-sl3 F2: a Cancel clicked while the button read Cancel stays a Cancel even when the progress that
+    the dialog gets next is the first one with "Routes stable" (before: the label turned into OK before the queued
+    click was handled, so the press counted as OK); a click on OK is an OK. ``ok_at_press`` is None until a press."""
+    ui = _QueuedPressUi()
+    kw = dict(runs=1, runs_stable=1, best_routed=27, best_total=27, best_run=1, best_round=1)
+    first = Progress("route", 1, 0, 27, 0, 1.0, "topological search", 3, 30, 2.0, stable=(label == "OK"), **kw)
+    stable = Progress("route", 1, 0, 27, 0, 1.2, "topological search", 4, 30, 2.2, stable=True, **kw)
+    assert ui.progress(first) is True and ui.ok_at_press() is None
+    dlg = ui._progress
+    assert dlg.cancel_button.GetLabel().replace("&", "") == label  # the label the user clicks on
+    ui.queued = True
+    assert ui.progress(stable) is False
+    assert ui.ok_at_press() is (label == "OK")
+    assert dlg.cancel_button.GetLabel().replace("&", "") == "OK"  # the stable progress still shows
+    assert dlg.phase.GetLabel().startswith("Cancel pressed" if label == "Cancel" else "OK pressed"), dlg.phase.GetLabel()
+    ui._close_progress()
+
+
 def test_progress_routes_stable_turns_cancel_into_ok(app):
     """M-B0 (user 2026-11-06): when the gain is below the threshold the dialog shows "Routes stable" and the
     Cancel button reads OK; same action (stop, keep the best result so far, which the dialog shows)."""
@@ -915,5 +945,60 @@ def test_preflight_offers_use_the_current_default_for_pinned_lines(app):
         p._on_use_default(None)
         assert set(p.decision(True).use_defaults) == {"optimize.finish_when_stable", "run.timeout_s"}
         assert p.decision(False) == Decision(False)
+    finally:
+        p.Destroy()
+
+
+@pytest.mark.parametrize("ticked", [False, True])
+@pytest.mark.parametrize("field", [False, True])
+def test_use_the_current_default_also_reaches_the_progress_dialog(app, monkeypatch, ticked, field):
+    """verify-sl3 F3: "Use the current default" for a pinned run.timeout_s / run.timeout_clock (or optimize.rounds /
+    stable_window) makes the run use the default (run.apply_use_defaults); the progress dialog shows the same limit,
+    clock and caps, not the pinned topor.toml values. Unticked: the pinned values, as the run uses them. A limit typed in
+    the pre-flight field wins over both (run.py applies the dialog's overrides last)."""
+    from topor.config import Config as _Config
+    pinned = {("run", "timeout_s"): 300.0, ("run", "timeout_clock"): "cpu", ("optimize", "rounds"): 7,
+              ("optimize", "stable_window"): 9}
+    cfg = _Config.defaults().with_values(pinned)
+    use = tuple(f"{s}.{k}" for s, k in pinned) if ticked else ()
+
+    class Pre:
+        def __init__(self, *a):
+            pass
+
+        def ShowModal(self):
+            return wx.ID_OK
+
+        def decision(self, proceed):
+            return Decision(True, overrides={"timeout_s": 120.0} if field else {}, use_defaults=use)
+
+        def Destroy(self):
+            pass
+
+    monkeypatch.setattr(ui_wx, "PreflightDialog", Pre)
+    ui = _QuietUi()
+    ui.preflight([], RunSummary(board="b"), cfg)
+    want = _Config.defaults() if ticked else cfg
+    ui.progress(Progress("route", 1, 0, 27, 0, 1.0))
+    dlg = ui._progress
+    assert dlg.timeout_s == (120.0 if field else float(want.get("run", "timeout_s")))
+    assert dlg.timeout_clock == want.get("run", "timeout_clock")
+    assert dlg.iteration_cap == want.get("optimize", "rounds") and dlg.stable_window == want.get("optimize", "stable_window")
+    ui._close_progress()
+
+
+def test_the_cause_pane_never_reads_full_stop_colon(app):
+    """verify-sl3 F4 (seen in the real dialog): a message that ends its sentence with "." goes on with its items
+    (CFG_DEPRECATED_KEY: "...stable_patience: optimize.finish_when_stable", not "stable_patience.:"); an
+    ellipsis stays."""
+    from topor.config import _deprecated
+    dep = _deprecated("optimize", "finish_when_stable", True, 263)
+    assert dep.message.endswith(".") and dep.items == ("optimize.finish_when_stable",)
+    ell = Finding("VIA_NOT_SET_UP", "warning", "no via set up...", "Board Setup", ("a",))
+    p = ui_wx.PreflightDialog([dep, ell], SUMMARY, Config.defaults())
+    try:
+        txt = p.cause_text(dep)
+        assert ".:" not in txt and "stable_patience: optimize.finish_when_stable" in txt, txt
+        assert "no via set up...: a" in p.cause_text(ell)
     finally:
         p.Destroy()

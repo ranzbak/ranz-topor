@@ -241,6 +241,12 @@ class UiPort(Protocol):
     #       """The start-up splash (logo, name, version, status line): opened by the first call, later calls
     #       change the status line."""
 
+    # Optional (the interactive progress dialog only; UIs without it are judged by the progress they returned False on):
+    #   def ok_at_press(self) -> bool | None:
+    #       """What the stop button read when it was pressed (True = OK at "Routes stable", False = Cancel), or None
+    #       when it was not pressed. A press is handled at the next ``progress`` call, whose progress may already
+    #       say stable: this is what the user saw, and what the run flow sends to the engine."""
+
     # Optional (the interactive progress dialog only; headless UIs leave it out, so their limit stays fixed):
     #   def time_limit_request(self) -> float | None:
     #       """A new time limit the user set during the run (seconds on the run's clock, 0 = no limit), or None.
