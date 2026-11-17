@@ -204,7 +204,9 @@ impl Drawer<'_> {
         }
         let pr = &self.b.proj;
         let o = &pr.obstacles[ob];
-        let c = pr.pos[if end == 0 { wi.a } else { wi.b }];
+        // The run's end (the pad anchor when the centre is illegal, edge-clear): the leg reaches past
+        // the tip from there.
+        let c = self.run_end(w, end);
         if o.poly.len() < 3 {
             return None;
         }

@@ -820,7 +820,7 @@ impl<'a> CutPrice<'a> {
             self.sites.borrow_mut().insert(key, x);
             x
         };
-        let r = wire_stretches(st, packer, w, ev, ks, bottom, None, &site, None);
+        let r = wire_stretches(st, packer, w, ev, ks, bottom, None, &site, None, [None, None]);
         let n = st.wires[w].passes.len();
         let mut ks2: Vec<usize> = ks.to_vec();
         let iv = super::refine::via_ranges(ev, packer.via_between).0;

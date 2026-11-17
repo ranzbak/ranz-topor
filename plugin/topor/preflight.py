@@ -280,11 +280,15 @@ EDGE_ZERO_TEXT = "copper-to-edge clearance is 0 (KiCad → File → Board Setup 
 
 
 def _edge_zero_findings(rules: dict) -> list:
-    """EDGE_CLEARANCE_ZERO: the resolved copper-to-edge clearance is 0 (Board Setup 0, no custom rule raising it). The
-    value is used as it is (no fallback); this only warns. O(1)."""
+    """EDGE_CLEARANCE_ZERO: the resolved copper-to-edge clearance is 0 (Board Setup 0, no custom rule raising it). What
+    the router keeps instead is ``[rules] edge_clearance_zero`` (rule C, ``toporlib.edge_zero``; the run flow puts its
+    record in ``rules["edge_zero"]``, named in the text); the finding warns in every mode. O(1)."""
     if rules.get("edge_clearance") is None or int(rules["edge_clearance"]) > 0:
         return []
-    return [_mk("EDGE_CLEARANCE_ZERO", EDGE_ZERO_TEXT + ".")]
+    from toporlib import edge_zero  # noqa: PLC0415
+
+    rec = rules.get("edge_zero")
+    return [_mk("EDGE_CLEARANCE_ZERO", EDGE_ZERO_TEXT + (f"; {edge_zero.text(rec)}." if rec else "."))]
 
 
 def _rule_fallback_findings(rules: dict) -> list:

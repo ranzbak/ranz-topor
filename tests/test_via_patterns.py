@@ -30,6 +30,9 @@ def test_numbers():
     s = vp.build("via_size_rule").expected["via_sizes"]
     assert (s["SIG"]["dia"], s["SIG"]["drill"]) == (0.45, 0.25) and s["PWR"]["drill"] == 0.32 and s["HEAVY"]["drill"] == 0.64
     assert all(v["pi_drill"] >= v["width"] for v in s.values())
+    c = vp.build("via_site_class")
+    lo, hi = c.expected["via_positions"][0]["free_interval_x"]
+    assert lo < c.ref.vias[0].pos[0] < hi < 14.0 < c.careless.vias[0].pos[0] and not c.careless_legal
 
 
 def test_project_values(generated):
@@ -44,8 +47,12 @@ def test_project_values(generated):
 def test_kicad_drc(name, generated):
     g = generated[name]
     assert vp.drc_of(g["problem"])["violations"] == 0
+    legal = vp.build(name).careless_legal
     for k in ("reference", "careless"):
         r = vp.drc_of(g[k])
+        if k == "careless" and not legal:
+            assert r["violations"] > 0 and r["unconnected"] == 0, r  # ruled out because it is illegal
+            continue
         assert r["violations"] == 0 and r["unconnected"] == 0
 
 

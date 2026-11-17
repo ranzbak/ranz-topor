@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .findings import Finding
 from .layers import ROLES
+from . import schema as _schema
 from .schema import (BACKLOG_VALUES, CONFIG_VERSION, CURRENT_VERSION, KICAD_ONLY, REMOVED, REMOVED_IN, SECTIONS,
                      SETTINGS, SETTINGS_BY_KEY, Setting, available)
 
@@ -225,6 +226,8 @@ def render_toml(cfg: Config) -> str:
     out = [
         "# Topor router configuration (docs/user/configuration.md is the generated reference).",
         "# Every key below is documented: meaning, [unit], default and allowed range.",
+        "# A line '# key = value' is a DEFAULT: Topor follows its current default, so a new version can change it.",
+        "# To set a value, remove the '# ' and edit it. To follow the defaults again, comment the line out or delete it.",
         "# Unknown keys produce a warning. Things set in KiCad are listed at the end (not set here).",
         f"version = {CONFIG_VERSION}",
         "",
@@ -238,6 +241,8 @@ def render_toml(cfg: Config) -> str:
             out.append(_doc_line(s))
             if not available(s) and v == s.default:
                 out.append(f"# {s.key} = {toml_value(v)}{_since_note(s)}")
+            elif v == s.default:
+                out.append(f"# {s.key} = {toml_value(v)}")
             else:
                 out.append(f"{s.key} = {toml_value(v)}")
             out.append("")
@@ -349,7 +354,27 @@ def load_config(project_dir: Path) -> tuple[Config, list[Finding]]:
                 findings.append(Finding("CFG_VALUE", "warning", f"{full} = {raw!r} {err}; the default {s.default!r} is used.",
                                         f"Correct {full} in {CONFIG_NAME} (allowed: {_range_text(s)}).", (full,)))
             values[(sec, key)] = v
+            if not err:
+                pin = _pinned_old_default(s, v)
+                if pin:
+                    findings.append(pin)
     return Config(values, layer_roles), findings
+
+
+def _pinned_old_default(s: Setting, v) -> Finding | None:
+    """CFG_PINNED_OLD_DEFAULT when active value ``v`` equals a past default of ``s`` but not the current one. O(history)."""
+    if v == s.default:
+        return None
+    for old, when in _schema.PAST_DEFAULTS.get((s.section, s.key), ()):
+        if isinstance(old, bool) == isinstance(v, bool) and old == v:
+            full = f"{s.section}.{s.key}"
+            how = ("set it explicitly to the value you want" if s.type != "bool"
+                   else "the warning stays while the value is pinned")
+            return Finding("CFG_PINNED_OLD_DEFAULT", "warning",
+                           f"{CONFIG_NAME} pins {full} = {toml_value(v)}, the old default; the current default is {toml_value(s.default)} "
+                           f"(changed {when}). Delete or comment the line to follow defaults; to keep it on purpose {how}.",
+                           f"{DOCS_HINT}#pinned-defaults.", (full,))
+    return None
 
 
 def _removed(sec: str, key: str) -> Finding:

@@ -678,7 +678,7 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
     # copper graphics and the board outline
     shapes = [(s, None) for s in board.get_shapes()] + fp_shapes
     copper_shapes, outline = [], []
-    edge_stroke = 0  # widest Edge.Cuts stroke: KiCad measures copper-to-edge from the stroke's edge
+    edge_stroke = 0  # widest Edge.Cuts stroke (informational: KiCad 10 measures copper-to-edge from its centre line)
     for s, owner in shapes:
         i = cu_id(s.layer)
         if i is not None and i in cu_ids:
@@ -705,8 +705,8 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
             keepouts += zone_to_keepouts(z, cu_ids, max_err)
     layer_ids = {g["name"]: g["id"] for g in plan}
     dru = _dru_text(project, name, dru_text)
-    # half the widest Edge.Cuts stroke (as harness.model.outline_half_stroke): the engine's edge clearance is
-    # measured from the outline's centre line (Rules::edge_clear)
+    # half the widest Edge.Cuts stroke (as harness.model.outline_half_stroke), informational: KiCad 10 and the
+    # engine (Rules::edge_clear) measure copper-to-edge from the outline's centre line, the stroke ignored
     rules = {**rules, "outline_half_stroke": edge_stroke // 2}
     keepouts, rules = merge_dru_keepouts(keepouts, rules, dru, layer_ids)
     pours = sorted((zone_to_pour(z, net_codes=codes, cu_ids=cu_ids, pads=pads, vias=vias, max_err=max_err)
