@@ -6600,10 +6600,14 @@ mod tests {
             while slots.st.lock().expect("slots").first == 0 {
                 std::thread::yield_now();
             }
-            assert!(slots.yield_to_first(), "run 2 waits: run 1 gives its slot");
-            assert_eq!(begun.load(Ordering::SeqCst), 2, "run 1 went on only after run 2 gave the slot back");
+            let gave = slots.yield_to_first();
+            let at = begun.load(Ordering::SeqCst);
+            // run 1 holds one slot either way: release it before asserting, so a failed check ends
+            // the test instead of leaving run 2 waiting for ever
             slots.release();
             h.join().expect("run 2");
+            assert!(gave, "run 2 waits: run 1 gives its slot");
+            assert_eq!(at, 2, "run 1 went on only after run 2 gave the slot back");
         });
         let g = slots.st.lock().expect("slots");
         assert_eq!((g.free, g.first), (1, 0));
