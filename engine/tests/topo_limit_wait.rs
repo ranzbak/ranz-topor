@@ -158,6 +158,7 @@ fn a_limit_in_the_drawing_counts_the_whole_drawing_and_is_not_called_a_loop_wait
 /// Hook points: the limit is reached the first time `at` is seen (Cancel too when `cancel`), the
 /// time of each point is kept (seconds on the limit's clock).
 fn run_hooked(o: &Options, at: &'static str, cancel: bool, naps: &'static [(&'static str, u64)]) -> (RouteResult, Vec<(String, f64)>) {
+    let model = crop(); // before the limit's clock starts: the run's clock and the limit's then agree
     let mut ctl = RunControl::new();
     ctl.limit.init(o.wall_clock_s);
     let (l2, c2, once) = (ctl.limit.clone(), ctl.cancel.clone(), Arc::new(AtomicBool::new(false)));
@@ -176,7 +177,7 @@ fn run_hooked(o: &Options, at: &'static str, cancel: bool, naps: &'static [(&'st
         s2.lock().unwrap().push((p.to_string(), l2.elapsed_s()));
         false
     });
-    let r = route_with(&crop(), o, &ctl);
+    let r = route_with(&model, o, &ctl);
     let seen = seen.lock().unwrap().clone();
     (r, seen)
 }
@@ -197,9 +198,11 @@ fn the_loop_step_ends_where_the_loop_returns() {
 /// (edge trims, the Cleanup-safe tidy) is part of its wait and of the run time.
 #[test]
 fn the_last_step_counts_to_the_finished_copper() {
-    let (r, _) = run_hooked(&topor(30.0), "fail wire drawing", false, &[("finish copper", 150)]);
+    let (r, seen) = run_hooked(&topor(30.0), "fail wire drawing", false, &[("finish copper", 300)]);
     let l = r.limit.as_ref().expect("limit report");
-    assert!(l.reached && l.wait_s >= 0.15, "the finishing nap is in the wait: {l:?}");
+    // the hook notes "finish copper" after its nap: the wait reaches at least that moment
+    let t_done = seen.iter().find(|(p, _)| p == "finish copper").map(|s| s.1).expect("finish copper reached");
+    assert!(l.reached && l.limit_s + l.wait_s >= t_done - 0.03, "the finishing nap is in the wait: done {t_done:.3} s, {l:?}");
     assert!((l.wait_s - l.overrun_s).abs() < 0.005, "wait {} vs overrun {}", l.wait_s, l.overrun_s);
 }
 

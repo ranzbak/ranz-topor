@@ -56,7 +56,7 @@ env = {**os.environ, "CARGO_TARGET_DIR": f"/root/lw3-mut-target-{unit}", "RUST_T
 rust_cmd = ("cargo test --release --no-fail-fast --manifest-path engine/Cargo.toml --lib --test topo_limit_wait "
             "--test topo_drawing_grace")
 py_cmd = ("PYTHONPATH=plugin python -m pytest -q -p no:cacheprovider tests/plugin/test_report.py tests/plugin/test_run_time_limit.py "
-          "tests/plugin/test_postrun.py tests/plugin/test_messages.py tests/plugin/test_config.py -x -q")
+          "tests/plugin/test_postrun.py tests/plugin/test_messages.py tests/plugin/test_config.py -x -q -rs")
 for n in ["BASE"] + names:
     for f in {m[0] for m in M.values()}:
         shutil.copy(os.path.join(src, f), os.path.join(W, f))
@@ -75,5 +75,9 @@ for n in ["BASE"] + names:
         cmd = py_cmd if f.endswith(".py") else rust_cmd
     log = os.path.join(R, f"mut-{unit}-{n}.log")
     rc = subprocess.run(cmd, shell=True, cwd=W, env=env, stdout=open(log, "w"), stderr=subprocess.STDOUT).returncode
-    fails = [ln.strip() for ln in open(log) if ("FAILED" in ln and ln.startswith("test ")) or ln.startswith("FAILED ") or "error[" in ln][:6]
-    print(f"MUTANT {n}: {'KILLED' if rc else 'SURVIVED'} rc={rc} {fails}", flush=True)
+    text = open(log).read()
+    fails = [ln.strip() for ln in text.splitlines() if ("FAILED" in ln and ln.startswith("test ")) or ln.startswith("FAILED ") or "error[" in ln][:6]
+    # a skipped test file (importorskip) or a crash at exit is no kill: the run is invalid
+    bad = [w for w in ("SKIPPED", "Gtk-ERROR", "core dumped") if w in text]
+    verdict = "INVALID" if bad else ("KILLED" if rc else "SURVIVED")
+    print(f"MUTANT {n}: {verdict} rc={rc} {fails} {bad or ''}", flush=True)
