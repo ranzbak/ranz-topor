@@ -2891,6 +2891,8 @@ impl<'a> Drawer<'a> {
             } else {
                 (0..6).collect()
             };
+            // 6b/M6 measurement (`TOPO_M6_OFF=ladder`, debug only): without the funnel + repair attempts.
+            let ladder: Vec<isize> = if super::m6_off("ladder") { ladder.into_iter().filter(|a| !(3..ERBS_KEPT).contains(a)).collect() } else { ladder };
             for attempt in ladder {
                 // -1 (`realise = "erbs"`): the run's ERBS;
                 // 0: the exact taut path at the nominal width; 1: the same with the plan's necked

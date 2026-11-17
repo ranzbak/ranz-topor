@@ -4471,7 +4471,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 for id in ids {
                     dr.uncommit(id);
                 }
-                if opts.allow_violations {
+                if opts.allow_violations && !super::m6_off("force_via") {
                     via_forced.push((w, r));
                 } else {
                     fail(&mut out, conn_of[wire_conn[w]], r);
@@ -4522,7 +4522,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     dr.compute_intervals();
     // P6 (a): the crossing partners follow the vias as placed.
-    dr.follow_vias();
+    if !super::m6_off("follow") {
+        dr.follow_vias();
+    }
     // edge-clear: a pad end whose centre breaks a static clearance (a track wider than its pad
     // beside the board edge) ends at the nearest legal point inside the pad, for ERBS and drawing
     // alike (`padend`; static only, so independent of the draw order).
@@ -4825,7 +4827,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // geometry, the feedback did not rescue it) is drawn on its best geometry against all copper
     // drawn so far; the rules it breaks are recorded with it and priced by the `violation` factor.
     let mut n_forced = 0usize;
-    if opts.allow_violations {
+    if opts.allow_violations && !super::m6_off("force_wire") {
         dr.force = true;
         ctl.test_point("never drop");
         for &w in &live {
@@ -4926,7 +4928,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     // Never drop (M-B1): the branch is joined to its trunk where they part, by a
                     // via at the branch end (the trunk passes there on another layer) or a track to
                     // the trunk's nearest copper (and a via there when that is on another layer).
-                    if opts.allow_violations {
+                    if opts.allow_violations && !super::m6_off("force_join") {
                         if let Some(bl) = bl {
                             let net = st.wires[bw].net;
                             let sz = via_sizes(&model.rules, net, opts)[0];
