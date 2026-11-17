@@ -340,7 +340,7 @@ Outcome: {outcome}
 Report: {report_dir}
 ```
 
-`{outcome}` maps 1:1 to B5's `RunOutcome.status`: `accepted` → `applied as one undo step`,
+`{outcome}` maps 1:1 to B5's `RunOutcome.status`: `accepted` → `applied to the board`,
 `rejected` → `rejected — board unchanged`, `cancelled` → `cancelled — nothing applied` (Cancel with
 nothing routed, so no preview was shown), `aborted_preflight` → `aborted at pre-flight`, `error` →
 `error {code}`. Cancel followed by Accept/Reject is `accepted`/`rejected` with `Stopped: cancel`.
@@ -621,8 +621,8 @@ title/label/button/checkbox/choice/heading/text).
 | dialog | id | kind | text |
 |---|---|---|---|
 | report | title | title | Topor — Finished |
-| report | done_accepted | text | Routed {routed}/{total} connections — applied to the board as one undo step (Edit → Undo). |
-| report | done_accepted_cancelled | text | Stopped early by Cancel: routed {routed}/{total} connections — applied to the board as one undo step (Edit → Undo). |
+| report | done_accepted | text | Routed {routed}/{total} connections — applied to the board (Edit → Undo). |
+| report | done_accepted_cancelled | text | Stopped early by Cancel: routed {routed}/{total} connections — applied to the board (Edit → Undo). |
 | report | done_rejected | text | Nothing was changed on the board. |
 | report | done_cancelled | text | Cancelled — nothing was changed on the board. |
 | report | done_refill_hint | text | Zones were not refilled: press B (Edit → Fill All Zones) to refill them — a separate undo step. |
@@ -657,7 +657,7 @@ title/label/button/checkbox/choice/heading/text).
 | report | sum_findings | text | Findings: {errors} errors · {warnings} warnings · {notes} notes |
 | report | sum_outcome | text | Outcome: {outcome} |
 | report | sum_report | text | Report: {report_dir} |
-| report | outcome_accepted | text | applied as one undo step |
+| report | outcome_accepted | text | applied to the board |
 | report | outcome_rejected | text | rejected — board unchanged |
 | report | outcome_cancelled | text | cancelled — nothing applied |
 | report | outcome_preflight | text | aborted at pre-flight |

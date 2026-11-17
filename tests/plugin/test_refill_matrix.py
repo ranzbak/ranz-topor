@@ -89,10 +89,11 @@ def test_refill_matrix(app, eprom, tmp_path, reports, monkeypatch, commit, refil
         for wid in ("done_refilled", "done_refill_hint", "done_fills_committed"):
             assert (dd.widget(wid) is not None) == (wid == want), (wid, want)
         assert "one undo step" not in re.sub(r"\s+", " ", dd.widget("done_accepted").GetLabel())
-        posts = [ln for ln in [dd.widget("done_post_commit")] if ln is not None]
+        # several done_post_commit rows can exist (a failed refill AND a skipped fill): look at every child
+        posts = [re.sub(r"\s+", " ", c.GetLabel()) for c in dd.GetChildren()
+                 if hasattr(c, "GetLabel") and "The routes were committed" in c.GetLabel()]
         if warn:
-            txt = re.sub(r"\s+", " ", dd.widget("done_post_commit").GetLabel())
-            assert re.sub(r"\s+", " ", zf[0].message) in txt, txt
+            assert any(re.sub(r"\s+", " ", zf[0].message) in t for t in posts), posts
         if not warn and refill != "fails":
             assert not posts
     finally:
