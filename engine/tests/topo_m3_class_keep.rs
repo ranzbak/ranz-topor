@@ -1,7 +1,7 @@
 //! Round i (M3): the length factor's sequential competitor keeps the plan's class: an inner wire
 //! drawn first whose sequential shortcut would cross the outer wire's ERBS keeps its own ERBS
 //! (qmtech ADV_CLK / ADV_DE). Fixture: `harness/radii_patterns.py` `shortcut_across`
-//! (`python -m harness.radii_patterns --fixture shortcut_across`; proposed, needs the user's approval).
+//! (`python -m harness.radii_patterns --fixture shortcut_across`; approved by the user 2026-11-17).
 
 use topor_engine::control::RunControl;
 use topor_engine::model::{BoardModel, Options};

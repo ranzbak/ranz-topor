@@ -211,7 +211,7 @@ HDMI5V's via (+6 DRC, 2 shorts, ADV_SCL connection DRC 2 -> 8). Same parity: one
 - The competitor crosses every undrawn other-net reference path with the kept ERBS's parity
   (draw.rs `class_test_counts_proper_crossings_per_wire`, `class_test_bigon_is_one_class` (4 against 2: one
   class, the competitor competes; 1 against 0: refused); tests/topo_m3_class_keep.rs on the synthetic
-  pattern `shortcut_across` (harness/radii_patterns.py, proposed, needs the user's approval): A drawn first,
+  pattern `shortcut_across` (harness/radii_patterns.py, approved by the user 2026-11-17): A drawn first,
   its straight competitor forced by the test hook "straight sequential run" crosses B: A keeps its ERBS, no
   crossing; with "erbs class keep off" A is straight and B is drawn across it, the qmtech symptom. With B's
   sleeve failed ("fail erbs sleeve") B's planned path keeps A's ERBS the same way.)
