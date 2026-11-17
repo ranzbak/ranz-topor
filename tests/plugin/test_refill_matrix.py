@@ -98,3 +98,23 @@ def test_refill_matrix(app, eprom, tmp_path, reports, monkeypatch, commit, refil
             assert not posts
     finally:
         dd.Destroy()
+
+
+def test_done_notice_without_counts_never_claims_one_undo_step(app, tmp_path):  # noqa: F811
+    """The done notice when the report has no 'Routed n/m' line (fallback text) must not claim one undo step either:
+    with the default refill Accept is two."""
+    from topor import ui_wx
+
+    class NoCounts:
+        facts = {"zones_refilled": True}
+        stop_reason = None
+
+        def summary_lines(self):
+            return []
+
+    dd = ui_wx.DoneDialog("accepted", NoCounts(), tmp_path)
+    try:
+        txt = re.sub(r"\s+", " ", dd.widget("done_accepted").GetLabel())
+        assert txt.startswith("Applied to the board") and "one undo step" not in txt, txt
+    finally:
+        dd.Destroy()
