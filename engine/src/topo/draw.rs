@@ -175,17 +175,15 @@ pub(super) fn seg_cross_sos(p0: Vec2, p1: Vec2, q0: Vec2, q1: Vec2) -> bool {
 
 /// Crossings of the polyline `poly` with the segment `a b` ([`seg_cross_sos`]: `poly` translated
 /// by an infinitesimal vector, exact signs, no distance threshold). Mod 2 it is the side invariant
-/// of an undrawn wire's path: the taut pull ([`Drawer::pull_taut`]), the via side test
-/// ([`Drawer::via_side_ok`]) and the round-i class test ([`competitor_keeps_class`]); the runs
-/// compared there share their end points, so the same translation applies to both. O(|poly|).
+/// of an undrawn wire's path where two runs with the same end points are compared: the taut pull
+/// ([`Drawer::pull_taut`], the legs a removed vertex leaves against the new leg) and the round-i
+/// class test ([`competitor_keeps_class`]); the same translation applies to both runs, so the
+/// comparison is exact. Not the via side test ([`Drawer::via_side_ok`]): that one asks on which
+/// side of a chord the free point `p` (a via site) lies, a translation decides a site exactly on
+/// the chord arbitrarily (esp at main 385e043: 4 of 6 disagreements were such sites), so it keeps
+/// [`seg_proper`] (round j, parked: its miss of a crossing through a chord vertex). O(|poly|).
 pub(super) fn proper_crossings(poly: &[Vec2], a: Vec2, b: Vec2) -> usize {
     poly.windows(2).filter(|x| seg_cross_sos(x[0], x[1], a, b)).count()
-}
-
-/// Crossings of the segment `r p` (translated, [`seg_cross_sos`]) with the polyline `chord`: the
-/// via side test's parity ([`Drawer::via_side_ok`]). O(|chord|).
-pub(super) fn seg_chord_crossings(r: Vec2, p: Vec2, chord: &[Vec2]) -> usize {
-    chord.windows(2).filter(|c| seg_cross_sos(r, p, c[0], c[1])).count()
 }
 
 pub(super) fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
@@ -2332,7 +2330,7 @@ impl<'a> Drawer<'a> {
         let mut chord = vec![pt(ok)];
         chord.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| pr.pos[x.1]));
         chord.push(pt(ok + 1));
-        seg_chord_crossings(r, p, &chord) % 2 == 0
+        chord.windows(2).filter(|c| seg_proper(r, p, c[0], c[1])).count() % 2 == 0
     }
 
     /// Wire `o`'s packed nominal chord through traversal `ok`: [`Drawer::chord_pt`] `ok`, its turn
@@ -2400,7 +2398,7 @@ impl<'a> Drawer<'a> {
             } else {
                 self.plan_chord(o, ok)
             };
-            let crossings = seg_chord_crossings(r, p, &chord);
+            let crossings = chord.windows(2).filter(|c| seg_proper(r, p, c[0], c[1])).count();
             if crossings % 2 == 1 {
                 return false;
             }
@@ -4411,9 +4409,6 @@ mod tests {
             old_wrong += usize::from(old(r, path) != *want);
         }
         assert!(old_wrong >= 4, "the old predicate dropped the vertex crossings: {old_wrong}");
-        // the via side test's segment against a chord through one of its vertices: once
-        assert_eq!(seg_chord_crossings(v(0.0, 0.0), v(10.0, 0.0), &[v(4.0, -1.0), v(5.0, 0.0), v(6.0, 1.0)]), 1);
-        assert_eq!(seg_chord_crossings(v(0.0, 0.0), v(10.0, 0.0), &[v(4.0, 1.0), v(5.0, 0.0), v(6.0, 1.0)]) % 2, 0);
         // exact signs: three nm points the plain f64 cross product calls collinear (0) lie right
         // of the line (Shewchuk 1997, section 1: roundoff in the naive determinant)
         let (a, b, c) = (v(12345678.613484412, -9876542.838622024), v(12377094.539984412, -9849360.020622024), v(12401723.373432381, -9828049.775413485));
