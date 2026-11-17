@@ -712,6 +712,13 @@ impl Drawer<'_> {
                 }
             }
         }
+        // TOPO_OCTINODES=<wire>: the nodes, their best price and the arrival state.
+        if std::env::var("TOPO_OCTINODES").ok().and_then(|v| v.parse::<usize>().ok()) == Some(w) {
+            for (i, nd) in nodes.iter().enumerate() {
+                let (bd, bs) = (0..ND).map(|s| (dist[i][s], s)).fold((f64::INFINITY, 9), |m, x| if x.0 < m.0 { x } else { m });
+                eprintln!("OCTINODE w{w} {i} ({:.3},{:.3}) t {:.3} taut {:?} on {} best {:.3} st {bs} from {:?}", nd.0.x / MM, -nd.0.y / MM, nd.1 / MM, nd.2, nd.3, bd / MM, back[i].get(bs).and_then(|b| b.as_ref()).map(|b| b.0));
+            }
+        }
         let (mut j, mut d) = (n - 1, (0..ND).min_by(|&a, &b| dist[n - 1][a].total_cmp(&dist[n - 1][b]))?);
         if !dist[j][d].is_finite() {
             return None;
@@ -723,6 +730,22 @@ impl Drawer<'_> {
             d = din;
         }
         chain.reverse();
+        if std::env::var("TOPO_OCTINODES").ok().and_then(|v| v.parse::<usize>().ok()) == Some(w) {
+            let mut from = taut[0];
+            for s in &chain {
+                for &(e, dk) in s {
+                    eprintln!("OCTILEG w{w} ({:.3},{:.3})->({:.3},{:.3}) dir {:?} len {:.3} room {:.3} zones {} gates {}", from.x / MM, -from.y / MM, e.x / MM, -e.y / MM, dk, (e - from).len() / MM, room(from, e) / MM, zones.len(), gates.len());
+                    from = e;
+                }
+            }
+            for z in &zones {
+                eprintln!("OCTIZONE w{w} ({:.3},{:.3})->({:.3},{:.3}) sign {}", z.0.x / MM, -z.0.y / MM, z.1.x / MM, -z.1.y / MM, z.2);
+            }
+            for g in &gates {
+                let q = g.0 + g.1 * g.2;
+                eprintln!("OCTIGATE w{w} ({:.3},{:.3})->({:.3},{:.3}) span {:.3}..{:.3}", g.0.x / MM, -g.0.y / MM, q.x / MM, -q.y / MM, g.3 / MM, g.4 / MM);
+            }
+        }
         let mut out = vec![taut[0]];
         for s in chain {
             for (e, _) in s {

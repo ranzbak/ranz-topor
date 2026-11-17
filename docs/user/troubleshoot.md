@@ -362,6 +362,30 @@ copper violates a rule anywhere else, file a bug.
 
 **Fix.** Reinstall the plugin with tools/build.sh (docs/user/install.md) and restart KiCad (File → Quit, then start KiCad again).
 
+### ERBS_FALLBACK
+
+*Severity: warning.*
+
+**Cause.** [drawing] realise = "erbs" did not draw every trace from its extended rubber band: for some (or all) of them the band had no path to its end or its check found a violation, so they were drawn the sequential way instead. The finding counts them and names the first wires with the reason; the result is valid, but those traces do not have the band's shape.
+
+**Fix.** Accept the result, or route again with drawing.realise = "sequential" (the default; topor.toml [drawing] realise) for one drawing method throughout; report the board and the listed wires if this repeats.
+
+### ERBS_LONG
+
+*Severity: warning.*
+
+**Cause.** [drawing] realise = "erbs": some extended rubber bands were longer than their band by more than [drawing] erbs_margin. Such a band is priced by its length factor (length x (1 + erbs_length_weight x (length / band - 1)^2), graded, no cutoff) and a sequential run of the trace was drawn to compare: the cheaper one was drawn (the sequential run's length counts erbs_margin more, for the room the band keeps for the others). The finding counts both outcomes and names the longest bands with their factor; a band many times its band's length means a wrong topology class in the band (report the board).
+
+**Fix.** Accept the result, or route again with drawing.realise = "sequential" (the default); raise [drawing] erbs_length_weight to replace long bands sooner, lower it (0 = no length price) to keep them.
+
+### ERBS_TIMEOUT
+
+*Severity: warning.*
+
+**Cause.** [drawing] realise = "erbs" ran out of time: the run's time limit (or a Cancel) passed before every trace had its extended rubber band, so the rest were drawn the sequential way. The bands cost time on large boards (several seconds to minutes per layer).
+
+**Fix.** Raise run.timeout_s and route again, or use drawing.realise = "sequential" (the default; topor.toml [drawing] realise) on large boards.
+
 ### GROUPS_UNAVAILABLE
 
 *Severity: info.*

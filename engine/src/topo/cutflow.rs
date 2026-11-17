@@ -54,6 +54,9 @@ pub struct Plan<'a> {
     pub packer: &'a Packer<'a>,
     /// Connection id (index into the decomposition's connections) of a wire, if any.
     pub conn: &'a dyn Fn(WireId) -> Option<usize>,
+    /// The drawing's placed vias (traversal, point) per wire: they replace the planned
+    /// traversals and static sites (M3, `[drawing] realise = "erbs"`).
+    pub placed: Option<&'a BTreeMap<WireId, Vec<(usize, Vec2)>>>,
 }
 
 /// Measurement options (from `[capacity]`).
@@ -290,7 +293,8 @@ fn stretches(plan: &Plan) -> Planned {
         }
         let ks: Vec<usize> = plan.via_k.get(w).cloned().unwrap_or_default();
         let site = |t: usize, net: i32, r: f64, s: f64| via_point(st.proj, plan.packer, t, net, r, s);
-        let r = wire_stretches(st, plan.packer, w, &plan.events[w], &ks, plan.bottom, (plan.conn)(w), &site);
+        let fixed = plan.placed.and_then(|m| m.get(&w)).map(|v| &v[..]);
+        let r = wire_stretches(st, plan.packer, w, &plan.events[w], &ks, plan.bottom, (plan.conn)(w), &site, fixed);
         out.extend(r.runs);
         vias.extend(r.vias.into_iter().map(|(v, ok)| (w, v, ok)));
         for (v, j) in r.junc {
@@ -306,8 +310,10 @@ fn stretches(plan: &Plan) -> Planned {
 /// wire is cut at every via and at every junction corner it turns at. O(passes of the wire).
 #[allow(clippy::needless_range_loop)]
 /// `site(triangle, net, r, s)` gives a via's point and whether it is a static site ([`via_point`]).
+/// `fixed`: the vias as the drawing placed them (traversal, point), in place of `via_k` and the
+/// sites.
 #[allow(clippy::too_many_arguments)]
-pub fn wire_stretches(st: &State, packer: &Packer, w: WireId, ev: &[LEv], via_k: &[usize], bottom: i32, conn: Option<usize>, site: &dyn Fn(usize, i32, f64, f64) -> (Vec2, bool)) -> WireRuns {
+pub fn wire_stretches(st: &State, packer: &Packer, w: WireId, ev: &[LEv], via_k: &[usize], bottom: i32, conn: Option<usize>, site: &dyn Fn(usize, i32, f64, f64) -> (Vec2, bool), fixed: Option<&[(usize, Vec2)]>) -> WireRuns {
     let pr = st.proj;
     let wi = &st.wires[w];
     let mut out = Vec::new();
@@ -315,7 +321,7 @@ pub fn wire_stretches(st: &State, packer: &Packer, w: WireId, ev: &[LEv], via_k:
     let mut junc: Vec<(VertId, JunctionFeat)> = Vec::new();
     let mut terms: Vec<Vec2> = Vec::new();
     let n = wi.passes.len();
-    let mut ks: Vec<usize> = via_k.to_vec();
+    let mut ks: Vec<usize> = fixed.map_or_else(|| via_k.to_vec(), |f| f.iter().map(|x| x.0).collect());
     // Every layer change has its via traversal (the drawing's default where the plan has none).
     let iv = super::refine::via_ranges(ev, packer.via_between).0;
     ks.truncate(iv.len());
@@ -352,9 +358,10 @@ pub fn wire_stretches(st: &State, packer: &Packer, w: WireId, ev: &[LEv], via_k:
             .flatten()
             .and_then(|&(a, b)| super::refine::end_site(st, w, a, b, &|t, q| pr.inradius(t) >= r + wi.s && point_free(pr, packer, q, wi.net, wi.s) >= r))
             .filter(|&(ke, _)| ke == k);
-        let (pt, ok) = match end {
-            Some((_, c)) => (c, true),
-            None => site(wi.tris[k], wi.net, r, wi.s),
+        let (pt, ok) = match (fixed.and_then(|f| f.get(i)), end) {
+            (Some(&(_, q)), _) => (q, true),
+            (None, Some((_, c))) => (c, true),
+            (None, None) => site(wi.tris[k], wi.net, r, wi.s),
         };
         vias.push((ViaFeat { at: pt, r, net: wi.net, clear: wi.s }, ok));
         terms.push(pt);
@@ -521,7 +528,7 @@ fn cw(a: Vec2, b: Vec2) -> f64 {
 
 /// Whether a band that comes in along `din`, leaves along `dout` and has the wrapped vertex on
 /// its `left`, crosses the ray from the vertex in direction `u` (the reflex side of the bend).
-fn in_wedge(din: Vec2, dout: Vec2, left: bool, u: Vec2) -> bool {
+pub(super) fn in_wedge(din: Vec2, dout: Vec2, left: bool, u: Vec2) -> bool {
     const TOL: f64 = 1e-9;
     let back = -din;
     if left {
@@ -575,7 +582,7 @@ pub fn measure(plan: &Plan, outline: &[(Vec2, Vec2)], o: &MeasureOpts, layers: &
 }
 
 /// The half width of a junction end (a point feature carries the copper of its wires).
-fn half_at(sh: &LayerSheet, f: usize, sts: &[Stretch], mine: &[usize]) -> f64 {
+pub(super) fn half_at(sh: &LayerSheet, f: usize, sts: &[Stretch], mine: &[usize]) -> f64 {
     if sh.feats[f].poly.len() != 1 {
         return 0.0;
     }
@@ -927,7 +934,7 @@ impl Recorder {
         }
         let dirs = packer.taut_dirs(st);
         let cm = super::refine::CapModel::new(st, packer, &dirs, events, bottom, 1.0);
-        let plan = Plan { st, events, via_k: &cm.via_k, bottom, packer, conn };
+        let plan = Plan { st, events, via_k: &cm.via_k, bottom, packer, conn, placed: None };
         let edge_over = cm.overfull();
         if let Some(m) = self.run(&plan) {
             let names = self.names.clone();
@@ -942,7 +949,7 @@ impl Recorder {
     /// over-full edge-layers of the per-edge model (for the "model gap" class).
     #[allow(clippy::too_many_arguments)]
     pub fn final_plan(&mut self, st: &State, events: &[Vec<LEv>], via_k: &[Vec<usize>], packer: &Packer, bottom: i32, conn: &dyn Fn(WireId) -> Option<usize>, edge_over: &[(usize, usize)]) {
-        let plan = Plan { st, events, via_k, bottom, packer, conn };
+        let plan = Plan { st, events, via_k, bottom, packer, conn, placed: None };
         if let Some(m) = self.run(&plan) {
             let names = self.names.clone();
             let nm = |l: usize| names.get(l).cloned().unwrap_or_default();
@@ -951,6 +958,23 @@ impl Recorder {
             s["edge_layers_overfull"] = json!(edge_over.len());
             self.stages.push(s);
             let mut f = m.full(&nm);
+            // M3 step a debug: the topological order of the cut items and the stacks (report only).
+            if std::env::var_os("TOPO_RADII").is_some() {
+                let ords = super::radii::from_measure(&m, &|p| st.proj.regime_at(p));
+                let mut r = super::radii::summary(&m, &ords, &nm);
+                // M3 step c: the ERBS of every stretch and their check (report only).
+                for (i, (lf, o)) in m.layers.iter().zip(&ords).enumerate() {
+                    let le = super::erbs::erbs_layer_with(&lf.sheet, &m.stretches, &lf.stretches, o, &super::erbs::ErbsOpts::default());
+                    let vs = super::erbs::check_layer(&lf.sheet, &m.stretches, o, &le.es);
+                    r[i]["erbs"] = super::erbs::summary(&super::erbs::report(&le, &vs), &vs, &m.stretches);
+                    if let Some(d) = std::env::var_os("TOPO_ERBS_DUMP") {
+                        let path = std::path::Path::new(&d).join(format!("erbs-{}.json", nm(lf.sheet.l)));
+                        let _ = std::fs::write(path, super::erbs::dump(&lf.sheet, &m.stretches, &le, &vs).to_string());
+                    }
+                }
+                eprintln!("TOPO_RADII {r}");
+                f["radii"] = r;
+            }
             let pr = st.proj;
             f["edge_over"] = Value::Array(edge_over.iter().map(|&(e, l)| {
                 let [a, b] = pr.edges[e];
