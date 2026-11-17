@@ -337,8 +337,9 @@ pub struct CapModel<'a> {
     /// Gap-cut geometry per via (triangle, net, point bits); the State is fixed for the model's
     /// life, so it never goes stale.
     vgeom: std::cell::RefCell<std::collections::HashMap<(usize, i32, u64, u64), std::rc::Rc<ViaGeom>>>,
-    /// Via point per (triangle, net) ([`super::cutflow::via_point`]: the drawing's first site).
-    vpoint: std::cell::RefCell<std::collections::HashMap<(usize, i32), Vec2>>,
+    /// CM1: the via points of every wire ([`CapModel::via_at`]), filled on first use and dropped
+    /// when the wire's vias or events change (apply, undo).
+    vpos: std::cell::RefCell<Vec<Option<Vec<Option<(usize, Vec2)>>>>>,
     /// Per wire: the via owners whose gap cuts it crosses (repriced when its layers change).
     crossed_by: Vec<Vec<WireId>>,
     /// CM1: the events of every wire as last applied (for the 5.2 end sites).
@@ -390,7 +391,7 @@ impl<'a> CapModel<'a> {
             pending: Vec::new(),
             vbase: st.proj.edges.len() * nl,
             vgeom: std::cell::RefCell::new(std::collections::HashMap::new()),
-            vpoint: std::cell::RefCell::new(std::collections::HashMap::new()),
+            vpos: std::cell::RefCell::new(vec![None; nw]),
             crossed_by: vec![Vec::new(); nw],
             vevs: vec![Vec::new(); nw],
         };
@@ -549,6 +550,7 @@ impl<'a> CapModel<'a> {
         self.via_k[w] = ks;
         if self.packer.via_cuts.is_some() {
             self.vevs[w] = ev.to_vec();
+            self.vpos.get_mut()[w] = None;
         }
         self.register_crossers(w);
         if self.cut.is_some() {
@@ -640,25 +642,36 @@ impl<'a> CapModel<'a> {
     /// CM1: the point of via `i` of `w` (the 5.2 end site when its interval has no traversal
     /// between its events, else the drawing's first site of its triangle) and its triangle.
     fn via_at(&self, w: WireId, i: usize) -> Option<(usize, Vec2)> {
+        if let Some(v) = self.vpos.borrow().get(w).and_then(|x| x.as_ref()) {
+            return v.get(i).copied().flatten();
+        }
+        let ev = self.evs_of(w);
+        let v: Vec<Option<(usize, Vec2)>> = (0..self.via_k[w].len()).map(|j| self.via_at_raw(w, j, ev.as_deref())).collect();
+        let x = v.get(i).copied().flatten();
+        self.vpos.borrow_mut()[w] = Some(v);
+        x
+    }
+
+    fn via_at_raw(&self, w: WireId, i: usize, ev: Option<&[LEv]>) -> Option<(usize, Vec2)> {
         let wi = &self.st.wires[w];
         let k = *self.via_k[w].get(i)?;
         let t = wi.tris[k.min(wi.tris.len().checked_sub(1)?)];
         if self.packer.via_between {
-            if let Some(ev) = self.evs_of(w) {
-                if via_ranges(&ev, true).1.get(i) == Some(&false) {
-                    if let Some((ke, p)) = self.end_site_of(w, &ev, i) {
+            if let Some(ev) = ev {
+                if via_ranges(ev, true).1.get(i) == Some(&false) {
+                    if let Some((ke, p)) = self.end_site_of(w, ev, i) {
                         return Some((wi.tris[ke.min(wi.tris.len() - 1)], p));
                     }
                 }
             }
         }
-        let key = (t, wi.net);
-        if let Some(&p) = self.vpoint.borrow().get(&key) {
+        let d = self.packer.via_d(wi.net);
+        let key = (t, wi.net, (0.5 * d).to_bits(), wi.s.to_bits());
+        if let Some(&p) = self.packer.via_pt.borrow().get(&key) {
             return Some((t, p));
         }
-        let d = self.packer.via_d(wi.net);
         let p = super::cutflow::via_point(self.st.proj, self.packer, t, wi.net, 0.5 * d, wi.s).0;
-        self.vpoint.borrow_mut().insert(key, p);
+        self.packer.via_pt.borrow_mut().insert(key, p);
         Some((t, p))
     }
 
@@ -1259,6 +1272,7 @@ fn try_move_in(
         cm.via_k[s.w] = s.ks;
         cm.nosite[s.w] = s.nosite;
         cm.vevs[s.w] = s.vevs;
+        cm.vpos.get_mut()[s.w] = None;
     }
     for (&((w, i), _), &l) in mv.iter().zip(&old_lab) {
         evl[w][i].2 = l;

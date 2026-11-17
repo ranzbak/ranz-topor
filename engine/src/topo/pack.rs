@@ -192,6 +192,9 @@ pub struct Packer<'a> {
     edge_clear: f64,
     cache: RefCell<HashMap<MarginKey, f64>>,
     taut_cache: RefCell<HashMap<TautKey, Rc<Taut>>>,
+    /// CM1: [`super::cutflow::via_point`] per (triangle, net, radius bits, clearance bits); static
+    /// board only, so it lives as long as the packer (every CapModel built on it shares it).
+    pub via_pt: RefCell<HashMap<(usize, i32, u64, u64), Vec2>>,
     /// Reach diameter of the first via size of every net (nm, [`crate::vias::via_reach`] x 2:
     /// the copper disc, or larger where the drill's hole clearance reaches further; 5.4 task 1);
     /// nets not listed use `via_d0`. 0 = the planner gives vias no room (a packer built without
@@ -254,6 +257,7 @@ impl<'a> Packer<'a> {
             edge_clear,
             cache: RefCell::new(HashMap::new()),
             taut_cache: RefCell::new(HashMap::new()),
+            via_pt: RefCell::new(HashMap::new()),
             via_d: HashMap::new(),
             via_d0: 0.0,
             free_cache: RefCell::new(HashMap::new()),
