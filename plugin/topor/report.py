@@ -59,7 +59,7 @@ MM = 1_000_000
 #: RunOutcome.status -> wording of the ``Outcome:`` line (wireframe section 5).
 OUTCOME_TEXT = {
     "pending": "pending — waiting for Accept or Reject",
-    "accepted": "applied as one undo step",
+    "accepted": "applied to the board",
     "rejected": "rejected — board unchanged",
     "cancelled": "cancelled — nothing applied",
     "aborted_preflight": "aborted at pre-flight",

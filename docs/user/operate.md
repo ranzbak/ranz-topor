@@ -20,7 +20,7 @@ Contents: [Quick start](#quick-start) · [Where the settings come from](#where-t
 4. Read the findings, set the [Options](#options) (on a board that is already routed choose
    *Existing copper: Rip up and re-route*, otherwise there is nothing to route), press **Route**.
 5. Watch the progress; press **Cancel** at any time to keep the best result so far (during the initial routing there is none yet: [`NOTHING_TO_DRAW`](troubleshoot.md#nothing_to_draw)).
-6. Compare *Current board* and *Result* in the preview, then **Accept** (applied as one undo step) or
+6. Compare *Current board* and *Result* in the preview, then **Accept** (applied to the board; Edit → Undo reverts it) or
    **Reject** (nothing changes).
 7. Run KiCad's own DRC (**Inspect → Design Rules Checker**) — KiCad is the judge, not topor.
 

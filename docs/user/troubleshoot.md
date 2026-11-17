@@ -752,4 +752,4 @@ copper violates a rule anywhere else, file a bug.
 
 **Cause.** Accept could not write the zone fills that KiCad's filler made for the routed result (run.commit_fills): the refilled copy is missing, it was judged for other items than the ones committed, or a zone of the copy is not on the board. The routes are on the board, but the pours in the zones are the ones from before the run, so the pours (and KiCad's DRC / unconnected counts, with 'Refill all zones before performing DRC' off) do not show the new copper yet.
 
-**Fix.** Refill the zones: KiCad → Edit → Fill All Zones (B); or set run.refill_after_accept = true so Topor does it after Accept. The report folder's log.txt names which case it was.
+**Fix.** Refill the zones: KiCad → Edit → Fill All Zones (B). The report folder's log.txt names which case it was.

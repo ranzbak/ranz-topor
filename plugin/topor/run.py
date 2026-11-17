@@ -181,6 +181,15 @@ FILLS_SKIP_TEXT = {
 }
 
 
+def _zone_fills_fix(cfg) -> str:
+    """Fix text of ZONE_FILLS_SKIPPED: the catalogue fix, plus the refill_after_accept hint only while that setting is
+    false (never tell the user to set what is already true). O(1)."""
+    fix = messages.fix_for("ZONE_FILLS_SKIPPED")
+    if not cfg.get("run", "refill_after_accept"):
+        fix += " Or set run.refill_after_accept = true so Topor refills the zones after Accept."
+    return fix
+
+
 def _routed_fills(cfg, out, state: dict, log) -> tuple:
     """``run.commit_fills``: ``(fills, skip)``. `fills` = the zone fills of the kicad-cli refilled routed copy (the DRC
     round that judged exactly the items being committed), keyed by zone uuid, for the Accept commit. `skip` = None when
@@ -1210,7 +1219,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         log.line(f"zone fills not written: {why}")
         w = Finding("ZONE_FILLS_SKIPPED", "warning",
                     f"The routes were committed, but the zone fills were not written ({why}), so the pours are the ones "
-                    "from before the run.", messages.fix_for("ZONE_FILLS_SKIPPED"), (fills_skip or "not_applied",))
+                    "from before the run.", _zone_fills_fix(cfg), (fills_skip or "not_applied",))
         findings.append(w)
         post_failed.append(w)
         report.facts["post_commit_failed"] = list(post_failed)

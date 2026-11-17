@@ -22,7 +22,7 @@ What it does (every step leaves a screenshot in <out_dir>/shots/ and a line in <
      --ok-at-stable presses OK when the dialog says "Routes stable" and checks the board is the best result shown), preview -> Accept,
      finished -> Close.
   5. Over the KiCad API (an external kipy client in the plugin environment): counts the tracks / vias after
-     Accept, presses Ctrl+Z (one undo step must remove them all), Ctrl+Shift+Z (back), saves the board.
+     Accept, presses Ctrl+Z (one undo step, two with run.refill_after_accept, must remove them all), Ctrl+Shift+Z (back), saves the board.
   6. `harness.board_metrics` judges the saved board with kicad-cli DRC (unconnected, routing_new, vias) and
      renders <name>-gui-compare.png (hand left, KiCad result right, open ratsnest blue); with --harness the
      numbers are compared with a `tools/route_board.sh` metrics JSON of the same board.
@@ -803,8 +803,15 @@ def run(a) -> int:
         cfg = Config.defaults().with_values({(s, k): v for s, k, v in map(_kv, a.toml)})
         (live.parent / "topor.toml").write_text(render_toml(cfg))
         e.log(f"topor.toml written with {a.toml}")
-    from topor.config import Config as _Config
-    eff_cfg = _Config.defaults().with_values({(s_, k): v for s_, k, v in map(_kv, a.toml)})
+    # the settings the run really uses: the board's own topor.toml (an old one may pin refill_after_accept = false),
+    # else the defaults plus --toml; the file is read before the plugin may create one
+    from topor.config import Config as _Config, load_config as _load_config
+    if (live.parent / "topor.toml").is_file():
+        eff_cfg, _ = _load_config(live.parent)
+    else:
+        eff_cfg = _Config.defaults()
+    e.log(f"effective settings from {'the board topor.toml' if (live.parent / 'topor.toml').is_file() else 'defaults'}: "
+          f"refill_after_accept={eff_cfg.get('run', 'refill_after_accept')} commit_fills={eff_cfg.get('run', 'commit_fills')}")
     e.make_home()
     e.install(a.wheel)
     started_x = e.start_x()
@@ -952,9 +959,13 @@ def run(a) -> int:
         e.x("xdotool", "windowactivate", "--sync", main[1])
         e.x("xdotool", "mousemove", "1000", "600")
         steps = 2 if refill_on else 1  # the zone refill is its own undo step (run.refill_after_accept)
-        for _ in range(steps):
+        for i_ in range(steps):
             e.key(main[1], "ctrl+z")
             time.sleep(2)
+            if steps == 2 and i_ == 0:  # the refill is its own undo step: after one Ctrl+Z the routes are still there
+                mid = e.counts()
+                e.check("the 1st Ctrl+Z undoes only the refill (routes still on the board)", mid == after,
+                        f"{mid} vs {after}")
         undone = e.counts()
         e.check(f"{steps} Ctrl+Z remove everything Topor added ({steps} undo step{'s' if steps > 1 else ''})",
                 undone == before, f"{undone}")

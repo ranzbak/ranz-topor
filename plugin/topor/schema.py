@@ -364,6 +364,7 @@ SETTINGS: list[Setting] = [
 # warning CFG_PINNED_OLD_DEFAULT while it differs from the current default. Add an entry whenever a default changes.
 PAST_DEFAULTS = {
     ("optimize", "finish_when_stable"): ((True, "2026-11-16"),),
+    ("run", "refill_after_accept"): ((False, "2026-11-17"),),
 }
 
 REMOVED_IN = "the CL cleanup of 2026-11-09"

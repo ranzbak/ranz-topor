@@ -35,10 +35,13 @@ def test_refill_after_accept_key(tmp_path):
     (tmp_path / "topor.toml").write_text('version = 1\n[run]\nrefill_after_accept = true\n')
     cfg, findings = load_config(tmp_path)
     assert findings == [] and cfg.get("run", "refill_after_accept") is True
-    # a topor.toml that pins false (older generated files list every key) keeps working: Accept = one undo step
+    # a topor.toml that pins false (older generated files list every key) keeps working (Accept = one undo step)
+    # and is told once that false was the default until 2026-11-17 (PAST_DEFAULTS)
+    assert schema.PAST_DEFAULTS[("run", "refill_after_accept")] == ((False, "2026-11-17"),)
     (tmp_path / "topor.toml").write_text('version = 1\n[run]\nrefill_after_accept = false\n')
     cfg, findings = load_config(tmp_path)
-    assert findings == [] and cfg.get("run", "refill_after_accept") is False
+    assert cfg.get("run", "refill_after_accept") is False
+    assert [f.code for f in findings] == ["CFG_PINNED_OLD_DEFAULT"] and "2026-11-17" in findings[0].message
 
 
 def test_unknown_key_warns_not_ignored(tmp_path):

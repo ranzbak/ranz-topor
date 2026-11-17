@@ -53,7 +53,7 @@ def test_report_sections_present_and_values(tmp_path):
     assert (f["routed"], f["total"], f["vias"], f["vias_before"], f["length_before_mm"]) == (3, 5, 2, 4, 10.0)
     assert f["partial_routes"] == ["VCC"] and f["zero_slack_wires"] == ["N1"] and f["vias_in_pads"] == ["U1.1"]
     for needle in ("no path", "2.000, 3.000 mm", "blocked by keepout", "clearance 2", "shorting_items 5",
-                   "J1.1", "timeout_s = 5.0", "W1** (warning, accepted)", "converged", "applied as one undo step"):
+                   "J1.1", "timeout_s = 5.0", "W1** (warning, accepted)", "converged", "applied to the board"):
         assert needle in md, needle
     assert "Detours" in "\n".join(rep.summary_lines())
     assert (tmp_path / "result.json").is_file()

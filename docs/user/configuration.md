@@ -275,6 +275,7 @@ line to follow the defaults. History of changed defaults:
 | Key | Old default | Changed |
 |---|---|---|
 | `optimize.finish_when_stable` | `true` | 2026-11-16 |
+| `run.refill_after_accept` | `false` | 2026-11-17 |
 
 Known limitation: an existing `topor.toml` never gets options that were added in a later version; they use
 their default until you add them (copy the commented block from a freshly generated file).
