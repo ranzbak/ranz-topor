@@ -214,6 +214,7 @@ fn in_hard_mode_the_wait_line_says_the_step_was_cut() {
     let w = r.warnings.iter().find(|w| w.starts_with("time limit wait:")).unwrap_or_else(|| panic!("{:?}", r.warnings));
     assert!(w.contains("[run] timeout_mode = hard") && w.contains("was dropped") && w.contains("that step stopped after"), "{w}");
     assert!(!w.contains("ran to its end") && !w.contains("limit_grace_s"), "{w}");
+    assert!(l.draw_grace_s.is_none() && !l.draw_grace_hit, "the drawing bound is the soft limit's only: {l:?}");
     // each wire naps past the round's 1 s floor (the hard cut's minimum), so the drawing is cut
     let (r, _) = run_hooked(&hard(), "fail wire drawing", false, &[("fail wire drawing", 400)]);
     let l = r.limit.as_ref().expect("limit report");
