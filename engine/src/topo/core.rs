@@ -4255,6 +4255,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // Cost per move (shopping list 3.1 measurement; process-wide sums so far).
         let (mv_n, mv_us, vp_n, vp_us) = super::refine::meter::read();
         m["move_cost"] = serde_json::json!({"moves": mv_n, "us_per_move": (mv_us * 10.0).round() / 10.0, "via_positions": vp_n, "us_per_via_position": (vp_us * 10.0).round() / 10.0});
+        // par-refine: the lane executor's epochs, lane-epochs, candidates evaluated past a kept one
+        // (wasted) and again for an end-site fill (redone); the build memo's hits and misses.
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            use super::refine_par::stats as ls;
+            m["move_cost"]["lanes"] = serde_json::json!({"epochs": ls::EPOCHS.load(Relaxed), "lane_epochs": ls::LANE_EPOCHS.load(Relaxed), "wasted": ls::WASTED.load(Relaxed), "redone": ls::REDONE.load(Relaxed)});
+            m["move_cost"]["build_memo"] = serde_json::json!({"hits": super::refine::meter::MEMO_HIT.load(Relaxed), "misses": super::refine::meter::MEMO_MISS.load(Relaxed)});
+        }
         let (fl, st_ms, np, p_ms, nc, i_ms) = super::refine::meter::read_split();
         m["cut_split"] = serde_json::json!({"flushes": fl, "ms_stretches": st_ms.round(), "parts": np, "ms_parts": p_ms.round(), "cuts_priced": nc, "ms_install": i_ms.round()});
         warnings.push(format!("plan metrics: {m}"));
