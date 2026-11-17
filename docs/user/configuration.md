@@ -257,7 +257,7 @@ Price of what a route does (social factors), in mm of copper per unit: weight, s
 | Track widths | KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Track Widths and netclass track width |
 | Via sizes | KiCad → File → Board Setup → Design Rules → Net Classes (via size / hole per net) and Pre-defined Sizes → Vias (the smaller ones are used where space requires) |
 | Minimum via, hole and annular ring | KiCad → File → Board Setup → Design Rules → Constraints (used as set; a value missing from the .kicad_pro takes a reported fallback, see operate.md, Design rules) |
-| Copper-to-edge clearance | KiCad → File → Board Setup → Design Rules → Constraints → Copper to Edge Clearance |
+| Copper-to-edge clearance | KiCad → File → Board Setup → Design Rules → Constraints → Copper to edge clearance |
 | Netclasses and net assignments | KiCad → File → Board Setup → Design Rules → Net Classes |
 | Custom rules | KiCad → File → Board Setup → Design Rules → Custom Rules (.kicad_dru) |
 | Layer types (signal/power/mixed/jumper) | KiCad → File → Board Setup → Board Editor Layers |

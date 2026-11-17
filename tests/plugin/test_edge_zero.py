@@ -127,7 +127,14 @@ def test_report_settings_line(tmp_path):
 
 
 def test_pours_ignore_a_layer_whose_fills_stay_far_inside():
-    # layer 2: GND 0.1 mm from the edge; layer 0: only the island 4 mm inside (outside the 1 mm window): 0.1 mm, not 4
+    # layer 2: GND 0.1 mm from the edge; layer 0: only an island 1.5 mm inside (outside the 1 mm window, inside the
+    # lookup grid's reach), or the 4 mm one: 0.1 mm, not 1.5 / 4
     gnd2 = pour(254_000, [(2, square(100_000, 100_000, 19_900_000, 9_900_000))])
-    _, rec = ez.apply(model(pours=[gnd2, ISLAND]), "pours")
-    assert rec["value_nm"] == 100_000, rec
+    near = pour(508_000, [(0, square(1_500_000, 4 * MM, 2_500_000, 5 * MM))])
+    for island in (near, ISLAND):
+        _, rec = ez.apply(model(pours=[gnd2, island]), "pours")
+        assert rec["value_nm"] == 100_000, rec
+    # and the window's edge: an island 0.9 mm inside is a near-edge fill (biggest layer: 0.9 mm)
+    in_win = pour(508_000, [(0, square(900_000, 4 * MM, 2_500_000, 5 * MM))])
+    _, rec = ez.apply(model(pours=[gnd2, in_win]), "pours")
+    assert rec["value_nm"] == 900_000, rec

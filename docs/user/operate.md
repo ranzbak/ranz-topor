@@ -37,7 +37,7 @@ takes a reported fallback.
 | What | Where in KiCad |
 |---|---|
 | Clearance; minimum via, hole and annular ring | KiCad → File → Board Setup → Design Rules → Constraints (used as set; a missing value takes a reported [fallback](#design-rules-and-via-sizes)) |
-| Copper-to-edge clearance | KiCad → File → Board Setup → Design Rules → Constraints → Copper to Edge Clearance |
+| Copper-to-edge clearance | KiCad → File → Board Setup → Design Rules → Constraints → Copper to edge clearance |
 | Track widths | KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Track Widths and netclass track width |
 | Via sizes | KiCad → File → Board Setup → Design Rules → Net Classes (via size / hole): each net routes with its net class via, plus the smaller [pre-defined vias](#design-rules-and-via-sizes) (KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias) where space requires; with none of them set up [`VIA_NOT_SET_UP`](troubleshoot.md#via_not_set_up) uses `[vias] fallback_diameter_mm` / `fallback_drill_mm` |
 | Net classes and net assignments; power net classes; `topor_p1`..`topor_p3` priority classes | KiCad → File → Board Setup → Design Rules → Net Classes |
