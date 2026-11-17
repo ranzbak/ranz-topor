@@ -242,3 +242,49 @@ fn via_pair_slide_two_vias() {
         clean(&m, &r.items);
     }
 }
+
+/// via_site_class (radii-m3-clear, user-approved): A from an F.Cu pad (2, 7) to a B.Cu pad (22, 7); P
+/// (0.5 mm, drawn first) F.Cu from (14, 1.5) to (14, 12.5) (the approved geometry; 56a448b's moved one with P's pads at
+/// 0.9 / 13.1 awaits the user's choice); a B.Cu wall x 4..12.2 edge to edge. The via
+/// stands between the wall and P (12.975 +-0.35), never on the roomy side right of P (A's F.Cu run
+/// would cross P). Caveat: this may pass without the drawing's in-class rule (the plan's own site can
+/// be free); the rule's guard is topo_d2 `a_via_site_across_an_uncrossed_drawn_wire_is_out_of_class`.
+///
+/// XFAIL (radii-m3-clear r2, user decision pending): with the approved geometry topor takes another,
+/// legal but longer topology: A runs on F.Cu round P's north end (0.6 mm between P's end pad and the
+/// edge band) to a via right of P at (18.46, 4.25), 25.16 mm vs the expected 20.00 mm, DRC 0, the
+/// same in sequential and erbs (job m3c2-3, gallery stage "via_site_class: approved vs moved
+/// pattern"). The plan never crosses P, so the drawing's class rule has nothing to judge; it is a
+/// planner choice (shorter topology not found). With 56a448b's moved geometry topor draws the
+/// expected path. Remove `should_panic` when the user has chosen the geometry and the planner finds it.
+#[test]
+#[should_panic(expected = "vias")]
+fn via_site_class_left_of_the_power_wire() {
+    let pads: Vec<P> = vec![
+        (1, 2.0, 7.0, 0.8, 0.8, 0),
+        (1, 22.0, 7.0, 0.8, 0.8, 2),
+        (2, 14.0, 1.5, 0.8, 0.8, 0),
+        (2, 14.0, 12.5, 0.8, 0.8, 0),
+        (3, 8.1, 7.0, 8.2, 13.0, 2),
+    ];
+    let m = board(24.0, 14.0, &pads, &[0.25, 0.5, 0.25]);
+    for lp in ["cycles", "topor"] {
+        let r = route_with(&m, &opts54(lp, false), &RunControl::new());
+        assert_eq!(r.failed, 0, "{lp}: {:?}", r.warnings);
+        let v = vias(&r.items);
+        let lay: Vec<(u32, i32, (f64, f64), (f64, f64))> = r
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Track(t) => match t.prim {
+                    topor_engine::geom::quant::TrackPrim::Seg { a, b } => Some((t.layer, t.net, (a.x as f64 / MM, a.y as f64 / MM), (b.x as f64 / MM, b.y as f64 / MM))),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(v.len(), 1, "{lp}: {v:?} {lay:?}");
+        assert!((v[0].0 - 12.975).abs() <= 0.35, "{lp}: vias {v:?} tracks {lay:?} warnings {:?}", r.warnings);
+        clean(&m, &r.items);
+    }
+}

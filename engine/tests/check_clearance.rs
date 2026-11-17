@@ -76,32 +76,28 @@ fn fuzz_respects_pad_netclass_clearance() {
     assert!(rep2.violations.is_empty(), "{:?}", rep2.violations);
 }
 
-/// B2 (KiCad drc_test_provider_edge_clearance.cpp `testAgainstEdge`: copper is collided with the
-/// edge's EFFECTIVE shape, its stroke included, at `max(0, min - epsilon)`): the model's outline is
-/// the stroke's centre line, so copper keeps `edge_clearance + outline_half_stroke` from it. With
-/// a copper-to-edge clearance of 0 (wiccon, qmtech) a track may touch the stroke, not cross it.
+/// Copper-to-edge is measured from the Edge.Cuts centre line, the stroke ignored: KiCad 10 builds
+/// the edge shapes with `stroke.SetWidth( 0 )` (drc_test_provider_edge_clearance.cpp, tag 10.0.8
+/// l. 295-298), and the 10.0.8 DRC of fx pattern edge_pads reports "actual 0.4750 mm" for a 0.25 mm
+/// track centred 0.6 mm from a 0.05 mm-stroke outline. (B2, 39e7297, added half the stroke: too
+/// strict by that much.) The model's outline is the centre line, `outline_half_stroke` informational.
 #[test]
-fn edge_clearance_counts_half_the_outline_stroke() {
+fn edge_clearance_ignores_the_outline_stroke() {
     let mut m = model("");
-    // track copper edge 30 µm inside the outline centre line (y = 20 mm): inside a 0.1 mm stroke
+    // track copper edge `inside` nm inside the outline centre line (y = 20 mm)
     let edge_track = |inside: i32| {
         let y: i32 = 20_000_000 - inside - 100_000;
         Item::Track(TrackItem { net: 1, layer: 0, width: 200_000, prim: TrackPrim::Seg { a: [-3_000_000, y].into(), b: [3_000_000, y].into() }, group: None, wire: None })
     };
     m.rules.edge_clearance = 0;
-    m.rules.outline_half_stroke = 0;
-    let o = Options::default();
-    assert!(Checker::new(&m, &o).check_items(&[edge_track(30_000)]).violations.is_empty(), "0 = 0 without a stroke");
     m.rules.outline_half_stroke = 50_000;
-    let v = Checker::new(&m, &o).check_items(&[edge_track(30_000)]).violations;
-    assert_eq!(v.len(), 1, "{v:?}");
-    assert!(Checker::new(&m, &o).check_items(&[edge_track(60_000)]).violations.is_empty());
-    // the stroke adds to a set clearance
+    let o = Options::default();
+    assert_eq!(m.rules.edge_clear(), 0);
+    assert!(Checker::new(&m, &o).check_items(&[edge_track(30_000)]).violations.is_empty(), "0 = 0, on the stroke but inside the centre line");
     m.rules.edge_clearance = 200_000;
-    assert_eq!(m.rules.edge_clear(), 250_000);
-    assert_eq!(Checker::new(&m, &o).check_items(&[edge_track(240_000)]).violations.len(), 1);
-    assert!(Checker::new(&m, &o).check_items(&[edge_track(260_000)]).violations.is_empty());
-    // an ignored copper-to-edge check: the stroke is not added (KiCad does not test it)
+    assert_eq!(m.rules.edge_clear(), 200_000, "the stroke is not added");
+    assert_eq!(Checker::new(&m, &o).check_items(&[edge_track(190_000)]).violations.len(), 1);
+    assert!(Checker::new(&m, &o).check_items(&[edge_track(210_000)]).violations.is_empty());
     m.rules.ignored_checks.push("copper_edge_clearance".into());
     assert_eq!(m.rules.edge_clear(), 200_000);
 }

@@ -97,7 +97,7 @@ SETTINGS: list[Setting] = [
        unit="s", range=(0, 86400)),
     _s("run", "commit_fills", "bool", True, "Accept also writes the zone fills that KiCad's own filler made for the routed result (kicad-cli, the refill of the preview's DRC) into the zones, in the same undo step as the copper. The board then comes back with pours that hold the new traces and vias, so KiCad's Edit → Cleanup Tracks & Vias (which judges a stub into a pour, or a via that reaches a plane, by the fill it finds) keeps them. false = the zones keep the fill they had before the run until you refill (B); the cleanup may then remove plane stubs and plane vias.",
        kicad="KiCad → Edit → Fill All Zones (B); Edit → Cleanup Tracks & Vias"),
-    _s("run", "refill_after_accept", "bool", False, "After Accept, refill all zones from topor (a second undo step in KiCad). false = Accept is exactly one undo step; press B (Edit → Fill All Zones) yourself.",
+    _s("run", "refill_after_accept", "bool", True, "After Accept, KiCad refills all zones itself (a second undo step), so the pours and the DRC counts are right without pressing B. false = Accept is exactly one undo step; the zones keep the fill written by commit_fills (or, with commit_fills = false, the fill from before the run) until you press B (Edit → Fill All Zones).",
        kicad="KiCad → Edit → Fill All Zones (B)"),
     # ---- [nets]
     _s("nets", "do_not_touch", "list", [], "Net names or glob patterns whose copper is a fixed obstacle and never routed, ripped or smoothed.",
@@ -114,6 +114,9 @@ SETTINGS: list[Setting] = [
     _s("rules", "fab_profile", "str", "board", "Authority for the design rules the router works to. board (default) = your board's KiCad configuration exactly as KiCad's DRC judges it: Board Setup constraints, the net classes, the pre-defined vias and track widths, and the custom rules (.kicad_dru; a matching custom rule wins, also below the Board Setup minimum). A value the board sets is used as is, a 0 included (KiCad: no minimum). Only a value the board does not set at all (a key missing from the .kicad_pro, or no .kicad_pro) takes a fallback: the JLCPCB 1 oz value, raised to KiCad's own value for the missing setting where that is stricter; each one is a RULE_FALLBACK finding and a line in report.md -> Settings -> Rule fallbacks naming the KiCad setting to fill in (table: docs/user/operate.md, Design rules). jlcpcb_1oz = opt-in floor mode, off by default: the same rules, but a value below the JLCPCB 1 oz manufacturing minimum (track width 0.2, clearance 0.15, via 0.45 / 0.25, annular ring 0.10 (2 layers) / 0.075 (4+ layers), hole to track 0.35 (component holes) / 0.20 (vias), hole to hole 0.25, copper to edge 0.2 mm), also a custom rule's clearance or width, is raised to it (report.md -> Settings -> Fab floors raised; custom-rule values in CUSTOM_RULE_LIMITED). Use it only when your Board Setup is looser than what you will order; KiCad's DRC still judges the result with your board's rules.",
        choices=("board", "jlcpcb_1oz"),
        kicad="KiCad → File → Board Setup → Design Rules → Constraints (also Net Classes, Pre-defined Sizes and Custom Rules)"),
+    _s("rules", "edge_clearance_zero", "str", "zone_clearance", "What the router keeps from the board edge when the board's copper-to-edge clearance is 0 (Board Setup 0 and no custom edge_clearance rule raising it; KiCad: no minimum). A non-zero board or custom value always wins and this setting is not used. zone_clearance (default) = the biggest clearance of the board's copper pours, one value for all layers: tracks and vias keep that far from the Edge.Cuts line (stricter than KiCad's DRC, which checks 0; KiCad's own zone filler does not use the zone clearance for the edge either). pours = the biggest distance the filled pours keep from the edge (per layer the closest fill that comes within 1 mm of the edge, the biggest over the layers; 0 when the pours reach the edge). board = 0 exactly as KiCad (copper may reach the line's centre). Every mode keeps the EDGE_CLEARANCE_ZERO warning; set the value your fab needs in KiCad instead.",
+       choices=("zone_clearance", "board", "pours"),
+       kicad="KiCad → File → Board Setup → Design Rules → Constraints → Copper to edge clearance (and zone properties → Clearance)"),
     # ---- [vias]
     _s("planes", "signals", "str", "costly", "Topological core: whether signal copper may use plane layers. costly = yes, at the price of the plane_signal factor (10 per mm on top of the length) plus plane_cut per cut of the plane, so a plane carries a signal only where the signal layers cannot; forbidden = never, plane layers are left to their pour. The run report lists the signal length on plane layers and the cuts.",
        choices=("costly", "forbidden"), kicad="KiCad → File → Board Setup → Board Editor Layers (layer roles)", engine="plane_signals"),
@@ -225,6 +228,8 @@ SETTINGS: list[Setting] = [
        engine="reserve_via_sites"),
     _s("vias", "offset_sites", "bool", True, "Topological core: when no sample point of the corridor where a connection changes layer has room for a via, also try positions a via-radius plus clearance away from the corners of nearby pads and copper (and from the traces drawn before), nearest to the connection's path first. More connections get a via site, at the cost of some runtime.",
        engine="via_offset_sites"),
+    _s("vias", "reach_price", "bool", False, "Topological core: when the drawing has to search a via site (the plan's own site is not free), it takes only sites in the plan's topological class: the trace's run on each of the via's layers must reach the site from the plan's path without going over a drawn trace of another net that the plan does not cross there (same layer, same triangle). That class test always applies. reach_price = true also prices each such site by the clearance violations of that reach (graded, in via diameters of squeeze), so a site the run reaches cleanly wins over one it grazes. Default false until the plan's own via-site room check is fixed: measured on the test boards, the price moves vias that were fine board-wide (one board +26 DRC violations).",
+       engine="via_reach_price"),
     _s("search", "feedback_max_rip", "int", 8, "Work cap: most already drawn traces one such feedback round may take out and draw again (a larger value rescues more connections and costs more runtime). Whether they are taken out at all is a graded price, not this count: the reroute factor's price per blocking trace (more for one redrawn before in the same round) against the violation factor's price of drawing the rejected connection through them; the cheapest rescues go first.",
        range=(0, 100), engine="feedback_max_rip"),
     _s("search", "reroute_rounds", "int", 6, "Topological core: most rounds of negotiated rip-up-and-reroute. After the layers are assigned, the connections that run through a passage holding more copper on one layer than fits are taken out and routed again, with a growing price (the congestion factor) on the passages that were over-full, until none is over-full or a round brings no gain; the best round is kept. 0 = off.",
@@ -364,6 +369,7 @@ SETTINGS: list[Setting] = [
 # warning CFG_PINNED_OLD_DEFAULT while it differs from the current default. Add an entry whenever a default changes.
 PAST_DEFAULTS = {
     ("optimize", "finish_when_stable"): ((True, "2026-11-16"),),
+    ("run", "refill_after_accept"): ((False, "2026-11-17"),),
 }
 
 REMOVED_IN = "the CL cleanup of 2026-11-09"
@@ -413,7 +419,7 @@ KICAD_ONLY = [
     ("Track widths", "KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Track Widths and netclass track width"),
     ("Via sizes", "KiCad → File → Board Setup → Design Rules → Net Classes (via size / hole per net) and Pre-defined Sizes → Vias (the smaller ones are used where space requires)"),
     ("Minimum via, hole and annular ring", "KiCad → File → Board Setup → Design Rules → Constraints (used as set; a value missing from the .kicad_pro takes a reported fallback, see operate.md, Design rules)"),
-    ("Copper-to-edge clearance", "KiCad → File → Board Setup → Design Rules → Constraints → Copper to Edge Clearance"),
+    ("Copper-to-edge clearance", "KiCad → File → Board Setup → Design Rules → Constraints → Copper to edge clearance"),
     ("Netclasses and net assignments", "KiCad → File → Board Setup → Design Rules → Net Classes"),
     ("Custom rules", "KiCad → File → Board Setup → Design Rules → Custom Rules (.kicad_dru)"),
     ("Layer types (signal/power/mixed/jumper)", "KiCad → File → Board Setup → Board Editor Layers"),
