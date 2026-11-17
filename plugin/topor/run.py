@@ -1108,6 +1108,13 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         cap_line = "WARNING: time limit overrun cap reached"
         # the engine's own cap line and time-budget line carry no CPU clock: the plugin's line below names the CPU limit
         warns = [w for w in rr.get("warnings") or [] if not str(w).startswith((cap_line, "time budget hit"))]
+        # verify-sl4 N1: ... except its reason when it is the OK / stable one (OK at Routes stable, then the limit cut
+        # the drawing of the stable plan): no clock in it, and the CPU line alone would hide why an OK ended in a
+        # timeout
+        eng_hit = next((str(w) for w in rr.get("warnings") or [] if str(w).startswith("time budget hit")), "")
+        why = eng_hit.split(" (", 1)[1] if " (" in eng_hit else ""
+        why = why[:-1] if why.endswith(")") else why  # the line's own closing parenthesis only
+        stable_why = f" ({why})" if "cut the drawing of the stable plan" in why else ""
         if state["cap_hit"]:
             # what the cap did is the engine's (it cut a planning step, the drawing, or nothing): its own line names it
             eng_cap = next((str(w) for w in rr.get("warnings") or [] if str(w).startswith(cap_line)), "")
@@ -1117,7 +1124,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
             warns.append(f"{cap_line} (run.timeout_overrun_s = {cap:g} s past the {state['limit']:.0f} s limit, CPU clock): {what}")
         rr = {**rr, "stop_reason": "timeout_cpu", "timed_out": True, "warnings": warns + [
             f"time budget hit: CPU-time limit of {state['limit']:.0f} s reached ({out.router_cpu_s:.0f} CPU s of router "
-            f"work, {state['router_s']:.0f} s on the clock, run.timeout_clock = cpu{changed}): result may differ between runs"]}
+            f"work, {state['router_s']:.0f} s on the clock, run.timeout_clock = cpu{changed}): result may differ between "
+            f"runs{stable_why}"]}
     elif out.stop_reason == "timeout":
         out.stop_reason = "timeout_wall"
         rr = {**rr, "stop_reason": "timeout_wall"}

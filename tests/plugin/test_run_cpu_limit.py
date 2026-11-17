@@ -300,3 +300,54 @@ def test_stop_reason_for_every_engine_label_clock_and_mode(app, eprom, tmp_path,
     if tbh and clock == "cpu":
         f = next(x for x in out.findings if x.code == "TIME_BUDGET_HIT")
         assert "CPU-time limit of 3 s" in f.message and "result may differ between runs" in f.message
+
+
+# ------------------------------------------------------------------ OK at Routes stable, then the limit cut the drawing
+OK_CUT_WHY = ("OK came at Routes stable, but the time limit then cut the drawing of the stable plan: the board is "
+              "drawn only in part (see the time limit line)")
+
+
+@pytest.mark.parametrize("clock", ["wall", "cpu"])
+def test_ok_at_stable_then_an_engine_timeout_is_a_timeout_that_names_the_ok(app, eprom, tmp_path, reports, cpu_counter,
+                                                                         clock):
+    """verify-sl4 N1 (rule 13, the Python side): the OK reached the engine (``job.cancel(ok=True)``), then the hard
+    limit cut the drawing of the stable plan, so the engine says "timeout" with its TIME_HIT reason "OK came at Routes
+    stable, but ...". The plugin reports a timeout on the run's clock (never "stable", never a cancel) and keeps that
+    reason: on the wall clock the engine's line itself, on the CPU clock inside the plugin's own CPU line (which
+    replaces the engine's clock-less one)."""
+    class OkAtStable(ScriptedUi):  # the progress dialog: OK once Routes stable has a pick to keep
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.waits_for_ok = True
+
+        def progress(self, p):
+            super().progress(p)
+            return not (p.stable and p.best_total)
+
+    cfg = CFG.with_values({("run", "timeout_clock"): clock, ("run", "timeout_s"): 3.0 if clock == "cpu" else 600.0,
+                           ("run", "timeout_mode"): "hard", ("optimize", "rounds"): 20})
+    eng = RecordingEngine(hold=12, patch=_as("timeout", timed_out=True,
+                                             warnings=[f"time budget hit: result may differ between runs ({OK_CUT_WHY})"]))
+    _, _, out = do_run(eprom, tmp_path, ui=OkAtStable(accept=False), cfg=cfg, engine=eng)
+    assert eng.jobs[0].cancelled and eng.jobs[0].ok is True, "premise: the OK reached the engine"
+    want = f"timeout_{clock}"
+    assert (out.stop_reason, out.cancelled) == (want, False)
+    assert _result_json(out)["stop_reason"] == want
+    assert any(f"Stopped: {want} after" in line for line in out.report.summary_lines()), out.report.summary_lines()
+    f = next(x for x in out.findings if x.code == "TIME_BUDGET_HIT")
+    assert f"({OK_CUT_WHY})." in f.message, f.message  # whole, its own inner parenthesis closed, then the line's
+    assert ("CPU-time limit of 3 s" in f.message) is (clock == "cpu"), f.message
+    log = (out.report_dir / "log.txt").read_text()
+    assert "OK at Routes stable" in log
+
+
+def test_the_cpu_line_carries_no_other_engine_reason(app, eprom, tmp_path, reports, cpu_counter):
+    """verify-sl4 N1: only the OK / stable reason is kept on the CPU clock; the engine's other reasons name its own
+    (wall) limit, which the CPU line replaces."""
+    cfg = CFG.with_values({("run", "timeout_clock"): "cpu", ("run", "timeout_s"): 3.0})
+    why = "the caller's own time limit ([run] timeout_s on its clock) stopped the run before its routes were stable"
+    eng = RecordingEngine(hold=12, patch=_as("timeout", timed_out=True,
+                                             warnings=[f"time budget hit: result may differ between runs ({why})"]))
+    _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=cfg, engine=eng)
+    f = next(x for x in out.findings if x.code == "TIME_BUDGET_HIT")
+    assert out.stop_reason == "timeout_cpu" and "CPU-time limit of 3 s" in f.message and why not in f.message, f.message

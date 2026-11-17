@@ -344,7 +344,10 @@ not begun yet and goes on when a thread is free again, so *Routes stable* still 
 *TopoR loop: stable after cycle …, it gave its compute slot to a run not yet begun*). Pressing OK
 at *Routes stable* is not a cancel: the summary says *Stopped: stable*, and the rest of the run (drawing the picked
 variant, the pour stitching) runs to its end exactly as when a run ends at stable by itself; only the time limit can
-still cut it. Cancel (pressed while the button still reads Cancel, e.g. at *Runs* 1 of 5 stable) stays a cancel
+still cut it. When it does (the hard limit, or the soft one past its overrun cap, cuts the drawing of the stable
+plan), the board is drawn only in part and the summary says *Stopped: timeout_wall* or *Stopped: timeout_cpu* (by
+`[run] timeout_clock`), not *Stopped: stable*; the time budget line then says *OK came at Routes stable, but the time
+limit then cut the drawing of the stable plan*. Cancel (pressed while the button still reads Cancel, e.g. at *Runs* 1 of 5 stable) stays a cancel
 whatever the runs do after it: the summary says *Stopped: cancel* and the pour stitching ends after the pass in
 progress. What the button read at the press decides, and the button is disabled after the first press, so there is
 no second Cancel. An OK that comes only after the engine already ended
