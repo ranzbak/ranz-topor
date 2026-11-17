@@ -44,6 +44,7 @@ from pathlib import Path
 from toporlib import compass as compass_mod
 from toporlib import drcloop, pcbfile
 from toporlib import rules as rules_mod
+from toporlib import edge_zero as edge_zero_mod
 from toporlib.drc import classify, new_routing, run_drc
 from toporlib.drcloop import DrcJudgement
 from toporlib.kicad_cli import KicadCliCancelled, KicadCliTimeout
@@ -376,6 +377,11 @@ def resolve_rules(port: BoardPort, pcb_copy: Path, copy_text: str, cfg: Config |
                                                 fab_profile=fab_profile_of(cfg))
 
 
+def edge_zero_of(cfg: Config | None) -> str:
+    """``[rules] edge_clearance_zero`` of `cfg` (the default ``"zone_clearance"`` without one). O(1)."""
+    return str(cfg.get("rules", "edge_clearance_zero")) if cfg is not None else edge_zero_mod.DEFAULT_MODE
+
+
 def fab_profile_of(cfg: Config | None) -> str:
     """``[rules] fab_profile`` of `cfg` (the default ``"board"`` without one). O(1)."""
     return str(cfg.get("rules", "fab_profile")) if cfg is not None else rules_mod.DEFAULT_FAB_PROFILE
@@ -690,10 +696,6 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     report.facts["rule_fallbacks"] = [rules_mod.fallback_text(r) for r in rules.get("fallbacks") or []]
     for line in report.facts["rule_fallbacks"]:
         log.line(line)
-    if rules.get("edge_clearance") is not None and int(rules["edge_clearance"]) <= 0:
-        from topor.preflight import EDGE_ZERO_TEXT  # noqa: PLC0415
-
-        log.line("warning: " + EDGE_ZERO_TEXT)
     pro_p = pcb_copy.with_suffix(".kicad_pro")
     try:
         pro = json.loads(pro_p.read_text()) if pro_p.is_file() else {}
@@ -710,6 +712,15 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         # reported info is the one of the engine's input.
         mr, out.via_fallback = apply_via_fallback(model["rules"], cfg)
         model = {**model, "rules": mr}
+    # rule C (edge-clear): a copper-to-edge clearance of 0 -> [rules] edge_clearance_zero (default: the biggest pour
+    # clearance); a non-zero board / custom value wins. The record goes to the pre-flight finding and the report.
+    model, edge_rec = edge_zero_mod.apply(model, edge_zero_of(cfg))
+    if edge_rec is not None:
+        from topor.preflight import EDGE_ZERO_TEXT  # noqa: PLC0415
+
+        rules = {**rules, "edge_zero": edge_rec}
+        report.facts["edge_zero"] = edge_zero_mod.text(edge_rec)
+        log.line("warning: " + EDGE_ZERO_TEXT + "; " + edge_zero_mod.text(edge_rec))
     model, dp_notes = attach_diff_pairs(model, rules, pcb_copy, pro, cfg, port.netclasses()[1])
     for line in dp_notes:
         log.line(line)

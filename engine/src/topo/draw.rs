@@ -481,6 +481,12 @@ pub struct DrawStats {
     /// sequential run was drawn to compare; of those, the ERBS a cheaper sequential run replaced.
     pub erbs_long: usize,
     pub erbs_long_replaced: usize,
+    /// edge-clear ([`super::padend`]): pad ends moved off the pad centre (a track end there broke a
+    /// static clearance), the largest move (nm), and the pad ends with no legal point in the pad
+    /// at the wire's width (left at the centre, priced by never drop).
+    pub pad_end_moved: usize,
+    pub pad_end_max: f64,
+    pub pad_end_none: usize,
 }
 
 /// M3 length factor (`[drawing] erbs_length_weight` k): the price of a legal ERBS of length `le`
@@ -709,6 +715,10 @@ pub struct Drawer<'a> {
     /// Where a branch's end (wire, end 0|1) lies on its trunk's drawn copper (D5 net trees): the
     /// drawing ends the branch there instead of at its junction vertex.
     pub end_at: BTreeMap<(WireId, usize), Vec2>,
+    /// edge-clear: the pad end of a run that cannot end at its pad centre (the track end breaks a
+    /// static clearance there) ends at this point inside the pad ([`super::padend`]); set once
+    /// before ERBS and drawing ([`Drawer::set_pad_ends`]). `end_at` wins over it.
+    pub pad_end: BTreeMap<(WireId, usize), Vec2>,
     /// 5.4 `[vias] relocate`: the site the plan decided for via `i` of wire `w`, `(traversal,
     /// point)` ([`super::viaopt::relocate_vias`]); [`Drawer::place_vias`] takes it when it is
     /// legal there, else searches as before. Empty: no planned sites.
@@ -810,6 +820,7 @@ impl<'a> Drawer<'a> {
             lanes: BTreeMap::new(),
             drawn_x: vec![None; st.passes.len()],
             end_at: BTreeMap::new(),
+            pad_end: BTreeMap::new(),
             via_site: BTreeMap::new(),
             via_site_tight: Default::default(),
             split_at: BTreeMap::new(),
@@ -2740,7 +2751,7 @@ impl<'a> Drawer<'a> {
                 (&plan_s, &vias_s[..])
             }
         };
-        let (st, pr) = (self.st, &self.b.proj);
+        let st = self.st;
         let wi = &st.wires[w];
         let n = wi.passes.len();
         let mut out = WireOut { wire: w, ..Default::default() };
@@ -2749,8 +2760,9 @@ impl<'a> Drawer<'a> {
             let k0 = if r == 0 { 0 } else { vias[r - 1].0 };
             let k1 = if r == plan.layers.len() - 1 { n } else { vias[r].0 };
             // A branch ends on its trunk's drawn copper (D5 net trees, `end_at`), else at its vertex.
-            let s = if r == 0 { self.end_at.get(&(w, 0)).copied().unwrap_or(pr.pos[wi.a]) } else { vias[r - 1].1 };
-            let e = if r == plan.layers.len() - 1 { self.end_at.get(&(w, 1)).copied().unwrap_or(pr.pos[wi.b]) } else { vias[r].1 };
+            // edge-clear: a pad end whose centre breaks a static clearance ends at its anchor (`pad_end`).
+            let s = if r == 0 { self.run_end(w, 0) } else { vias[r - 1].1 };
+            let e = if r == plan.layers.len() - 1 { self.run_end(w, 1) } else { vias[r].1 };
             let layer = plan.layers[r];
             let lid = self.layer_id(layer);
             let mut ok = false;

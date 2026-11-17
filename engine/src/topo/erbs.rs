@@ -1666,11 +1666,12 @@ pub fn precedes_order(given: &[usize], before: &BTreeSet<(usize, usize)>) -> Vec
 /// The ERBS of every wire for the drawing (`[drawing] realise = "erbs"`): the plan measured with
 /// the drawing's placed vias (sheets with the via discs, bands, cut items), the order, tips and
 /// radii (steps a, b), the ERBS per layer and their check, and the precedes order of `given`.
+/// `ends`: the pad ends off their pad centre (`Drawer::pad_end`, edge-clear): the stretches end there.
 #[allow(clippy::too_many_arguments)]
-pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], packer: &super::pack::Packer, bottom: i32, conn: &dyn Fn(usize) -> Option<usize>, placed: &BTreeMap<usize, Vec<(usize, Vec2)>>, outline: &[(Vec2, Vec2)], mo: &super::cutflow::MeasureOpts, layers: &[usize], given: &[usize], deadline: Option<std::time::Instant>, stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>, limit: Option<std::sync::Arc<crate::control::TimeLimit>>, fail_first: bool) -> Result<Realised, String> {
+pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], packer: &super::pack::Packer, bottom: i32, conn: &dyn Fn(usize) -> Option<usize>, placed: &BTreeMap<usize, Vec<(usize, Vec2)>>, ends: &BTreeMap<(usize, usize), Vec2>, outline: &[(Vec2, Vec2)], mo: &super::cutflow::MeasureOpts, layers: &[usize], given: &[usize], deadline: Option<std::time::Instant>, stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>, limit: Option<std::sync::Arc<crate::control::TimeLimit>>, fail_first: bool) -> Result<Realised, String> {
     let t0 = std::time::Instant::now();
     let none: Vec<Vec<usize>> = Vec::new();
-    let plan = super::cutflow::Plan { st, events, via_k: &none, bottom, packer, conn, placed: Some(placed) };
+    let plan = super::cutflow::Plan { st, events, via_k: &none, bottom, packer, conn, placed: Some(placed), ends: Some(ends) };
     let m = super::cutflow::measure(&plan, outline, mo, layers)?;
     let ords = super::radii::from_measure(&m, &|p| st.proj.regime_at(p));
     let mut out = Realised::default();

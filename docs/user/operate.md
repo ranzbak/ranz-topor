@@ -37,7 +37,7 @@ takes a reported fallback.
 | What | Where in KiCad |
 |---|---|
 | Clearance; minimum via, hole and annular ring | KiCad → File → Board Setup → Design Rules → Constraints (used as set; a missing value takes a reported [fallback](#design-rules-and-via-sizes)) |
-| Copper-to-edge clearance | KiCad → File → Board Setup → Design Rules → Constraints → Copper to Edge Clearance |
+| Copper-to-edge clearance | KiCad → File → Board Setup → Design Rules → Constraints → Copper to edge clearance |
 | Track widths | KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Track Widths and netclass track width |
 | Via sizes | KiCad → File → Board Setup → Design Rules → Net Classes (via size / hole): each net routes with its net class via, plus the smaller [pre-defined vias](#design-rules-and-via-sizes) (KiCad → File → Board Setup → Design Rules → Pre-defined Sizes → Vias) where space requires; with none of them set up [`VIA_NOT_SET_UP`](troubleshoot.md#via_not_set_up) uses `[vias] fallback_diameter_mm` / `fallback_drill_mm` |
 | Net classes and net assignments; power net classes; `topor_p1`..`topor_p3` priority classes | KiCad → File → Board Setup → Design Rules → Net Classes |
@@ -103,9 +103,12 @@ values are in **report.md → Settings → Fab floors raised** (`name design →
 Board Setup is looser than what you will order; KiCad's DRC still judges the result with your board's rules.
 
 - Copper to edge (Board Setup *Copper to edge clearance* or a custom `edge_clearance`) is measured as KiCad's
-  DRC measures it: from the outer side of the Edge.Cuts line, i.e. half the line width out from its centre
-  line. A clearance of 0 stays 0 (copper may touch the drawn line, not cross it); there is no hidden minimum,
-  only a warning ([`EDGE_CLEARANCE_ZERO`](troubleshoot.md#edge_clearance_zero) in report.md and the run log).
+  DRC measures it: from the centre line of the Edge.Cuts line, its width ignored (KiCad 10 sets the width
+  to 0 for this check). A clearance of 0 (Board Setup 0, no custom rule raising it) is replaced for the router by
+  `[rules] edge_clearance_zero`: by default (`"zone_clearance"`) the biggest clearance of the board's copper pours,
+  one value for all layers; `"pours"` = the distance the filled pours keep from the edge; `"board"` = 0 as KiCad
+  (copper may reach the line's centre). A non-zero board or custom value always wins. Every mode warns
+  ([`EDGE_CLEARANCE_ZERO`](troubleshoot.md#edge_clearance_zero) in report.md and the run log, naming the value).
 - Per net, the clearance and the track width are the net class values (at least the Board Setup minimums), and
   the net's via is its net class *Via Size* / *Via Hole* (a class without them: the next class, then Default),
   at least the minimum via diameter / drill.
