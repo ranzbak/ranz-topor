@@ -63,6 +63,7 @@ use super::sheet::{SegScratch, FeatKind, JunctionFeat, LayerSheet, Norm, SheetIn
 use super::state::{point_in_poly, Projection, State, VertId, VertKind, WireId, NO_OBS};
 use crate::geom::Vec2;
 use std::cell::RefCell;
+use std::sync::Arc;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
@@ -168,7 +169,7 @@ pub fn via_hits(sh: &LayerSheet, v: &ViaItem, buf: &mut Vec<u32>) -> Vec<(usize,
 type WireItems = (Vec<(usize, Itm)>, Vec<(usize, f64)>);
 
 /// Cached static sheets and the junction points they were built with.
-type SheetCache = Option<(Vec<(i64, i64, i32)>, Rc<Vec<LayerSheet>>)>;
+type SheetCache = Option<(Vec<(i64, i64, i32)>, Arc<Vec<LayerSheet>>)>;
 
 /// Per junction feature of a layer: (wire, part, half width) of the runs ending there.
 type JHalf = BTreeMap<usize, Vec<(WireId, u32, f64)>>;
@@ -582,35 +583,41 @@ fn junctions(st: &State) -> BTreeMap<VertId, JunctionFeat> {
 /// The cut-model context of a packer (`[capacity] model = "cuts"`): options, the outline and a
 /// cache of the static sheets keyed by the junction points they hold (the sheets change only
 /// when a reroute moves a junction). Single-threaded, like the packer's other caches.
+/// A mutex's guard, also after a panic poisoned it (the guarded values are counters, a list of
+/// problems and a cache replaced whole). O(1).
+pub fn lockp<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 pub struct CutCtx {
     pub o: CutOpts,
     /// `[capacity] cut_vias`: the layer refinement may add vias to remove cut overflow.
     pub add_vias: bool,
     outline: Vec<(Vec2, Vec2)>,
-    cache: RefCell<SheetCache>,
+    cache: std::sync::Mutex<SheetCache>,
     /// Sheet builds and cache hits (report).
-    pub builds: RefCell<(usize, usize)>,
+    pub builds: std::sync::Mutex<(usize, usize)>,
     /// Sheet builds that failed (the capacity model of that plan fell back to the per-edge one).
-    pub problems: RefCell<Vec<String>>,
+    pub problems: std::sync::Mutex<Vec<String>>,
 }
 
 impl CutCtx {
     pub fn new(o: CutOpts, add_vias: bool, outline: Vec<(Vec2, Vec2)>) -> CutCtx {
-        CutCtx { o, add_vias, outline, cache: RefCell::new(None), builds: RefCell::new((0, 0)), problems: RefCell::new(Vec::new()) }
+        CutCtx { o, add_vias, outline, cache: std::sync::Mutex::new(None), builds: std::sync::Mutex::new((0, 0)), problems: std::sync::Mutex::new(Vec::new()) }
     }
 
     /// The static sheets of `st` (cached while its junction points stay).
-    pub fn sheets(&self, st: &State) -> Result<Rc<Vec<LayerSheet>>, String> {
+    pub fn sheets(&self, st: &State) -> Result<Arc<Vec<LayerSheet>>, String> {
         let k: Vec<(i64, i64, i32)> = junctions(st).values().map(|j| (j.at.x.round() as i64, j.at.y.round() as i64, j.net)).collect();
-        if let Some((ck, sh)) = self.cache.borrow().as_ref() {
+        if let Some((ck, sh)) = lockp(&self.cache).as_ref() {
             if *ck == k && sh.len() == st.proj.n_layers {
-                self.builds.borrow_mut().1 += 1;
+                lockp(&self.builds).1 += 1;
                 return Ok(sh.clone());
             }
         }
-        let sh = Rc::new(static_sheets(st, &self.outline, &self.o)?);
-        self.builds.borrow_mut().0 += 1;
-        *self.cache.borrow_mut() = Some((k, sh.clone()));
+        let sh = Arc::new(static_sheets(st, &self.outline, &self.o)?);
+        lockp(&self.builds).0 += 1;
+        *lockp(&self.cache) = Some((k, sh.clone()));
         Ok(sh)
     }
 }
@@ -710,7 +717,7 @@ struct Txn {
 /// `sum price x phi` and the over-full count, with per-wire updates and an undo.
 pub struct CutPrice<'a> {
     pr: &'a Projection,
-    pub sheets: Rc<Vec<LayerSheet>>,
+    pub sheets: Arc<Vec<LayerSheet>>,
     o: CutOpts,
     price: f64,
     jf: Vec<HashMap<(i64, i64), usize>>,
@@ -765,7 +772,7 @@ pub struct CutRow {
 }
 
 impl<'a> CutPrice<'a> {
-    pub fn new(pr: &'a Projection, sheets: Rc<Vec<LayerSheet>>, o: CutOpts, price: f64, n_wires: usize) -> Self {
+    pub fn new(pr: &'a Projection, sheets: Arc<Vec<LayerSheet>>, o: CutOpts, price: f64, n_wires: usize) -> Self {
         let cuts = sheets.iter().map(|s| vec![CutSt::default(); s.cuts.len()]).collect();
         let regime = sheets.iter().map(|s| vec![None; s.cuts.len()]).collect();
         let jf = sheets.iter().map(junction_feats).collect();

@@ -476,7 +476,7 @@ impl<'a> CapModel<'a> {
                     m.cut = Some(CutPrice::new(st.proj, sh, ctx.o, price, nw));
                     m.evs = vec![Vec::new(); nw];
                 }
-                Err(e) => ctx.problems.borrow_mut().push(e),
+                Err(e) => super::cutmodel::lockp(&ctx.problems).push(e),
             }
         }
         for (w, ev) in evl.iter().enumerate().take(nw) {

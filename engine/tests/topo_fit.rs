@@ -273,7 +273,7 @@ fn c1_price(w: f64, f: f64) -> (f64, f64, f64, usize, f64, f64, usize, f64, f64,
     let pr = &fx.b.proj;
     let mut o = opts(Norm::Octagonal);
     o.shrink_mm = 30.0;
-    let sh = std::rc::Rc::new(bare_sheets(pr, &outline_segments(&fx.m), &o).expect("sheets"));
+    let sh = std::sync::Arc::new(bare_sheets(pr, &outline_segments(&fx.m), &o).expect("sheets"));
     let c = fx.doc["cuts"].as_array().unwrap().iter().find(|c| c["id"] == "C1").unwrap();
     let l = layer_idx(&fx, c["layer"].as_str().unwrap());
     let ci = find_cut(&sh[l], pt(&c["p"]), pt(&c["q"]));
@@ -639,7 +639,7 @@ fn shrink_of(cp: &CutPrice) -> Shrink {
 /// The totals of a fresh model holding `ws` (the full recompute): total, over-full count,
 /// every cut's (capacity, need, slack) by its ends, the items and the shrinkage level.
 #[allow(clippy::type_complexity)]
-fn full_price(pr: &topor_engine::topo::state::Projection, sh: &std::rc::Rc<Vec<LayerSheet>>, o: CutOpts, ws: &[EditWire], via_r: f64) -> (f64, usize, Vec<CutKey>, Vec<(usize, usize, Vec<ItemBits>)>, Shrink) {
+fn full_price(pr: &topor_engine::topo::state::Projection, sh: &std::sync::Arc<Vec<LayerSheet>>, o: CutOpts, ws: &[EditWire], via_r: f64) -> (f64, usize, Vec<CutKey>, Vec<(usize, usize, Vec<ItemBits>)>, Shrink) {
     let mut cp = CutPrice::new(pr, sh.clone(), o, 1.0, ws.len());
     for (w, x) in ws.iter().enumerate().filter(|(_, x)| x.alive) {
         let (mut r, v) = x.runs(w, via_r);
@@ -674,7 +674,7 @@ fn incremental_edits_price_as_a_full_recompute() {
     let pr = &fx.b.proj;
     let mut o = opts(Norm::Octagonal);
     o.shrink_mm = 0.6;
-    let sh = std::rc::Rc::new(bare_sheets(pr, &outline_segments(&fx.m), &o).expect("sheets"));
+    let sh = std::sync::Arc::new(bare_sheets(pr, &outline_segments(&fx.m), &o).expect("sheets"));
     let layers = [layer_idx(&fx, "F.Cu"), layer_idx(&fx, "In1.Cu"), layer_idx(&fx, "B.Cu")];
     let via_r = 0.5 * fx.m.rules.default.via_d as f64;
     let base: Vec<EditWire> = fx.doc["wires"]

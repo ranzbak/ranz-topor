@@ -4191,9 +4191,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
             }
             if let Some(ctx) = packer.cuts.as_ref() {
-                let (b, h) = *ctx.builds.borrow();
-                m["cut_sheets"] = serde_json::json!({"builds": b, "hits": h, "problems": ctx.problems.borrow().len()});
-                for e in ctx.problems.borrow().iter().take(3) {
+                let (b, h) = *super::cutmodel::lockp(&ctx.builds);
+                m["cut_sheets"] = serde_json::json!({"builds": b, "hits": h, "problems": super::cutmodel::lockp(&ctx.problems).len()});
+                for e in super::cutmodel::lockp(&ctx.problems).iter().take(3) {
                     warnings.push(format!("capacity model \"cuts\": a sheet build failed, that plan was priced per edge: {e}"));
                 }
             }

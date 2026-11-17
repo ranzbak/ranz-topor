@@ -27,9 +27,9 @@
 use super::draw::{poly_dist, seg_dist};
 use super::state::{EdgeId, Obstacle, Projection, State, VertKind, WireId};
 use crate::geom::Vec2;
-use std::cell::RefCell;
+use std::sync::Mutex;
 use crate::fxhash::{map as fxmap, FxHashMap};
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// The static via candidate points of a triangle `a b c`, in the drawing's order: incentre,
 /// centroid, then seven barycentric points (shared by [`Packer::via_site`] and the drawing's
@@ -190,8 +190,8 @@ pub struct Packer<'a> {
     eps: f64,
     /// Copper-to-edge clearance kept (nm; 0 when that check is ignored).
     edge_clear: f64,
-    cache: RefCell<FxHashMap<MarginKey, f64>>,
-    taut_cache: RefCell<FxHashMap<TautKey, Rc<Taut>>>,
+    cache: Mutex<FxHashMap<MarginKey, f64>>,
+    taut_cache: Mutex<FxHashMap<TautKey, Arc<Taut>>>,
     /// Reach diameter of the first via size of every net (nm, [`crate::vias::via_reach`] x 2:
     /// the copper disc, or larger where the drill's hole clearance reaches further; 5.4 task 1);
     /// nets not listed use `via_d0`. 0 = the planner gives vias no room (a packer built without
@@ -200,7 +200,7 @@ pub struct Packer<'a> {
     via_d0: f64,
     /// Free radius against other nets' obstacles at the incentre / centroid of a triangle, per
     /// (triangle, net). Cached.
-    free_cache: RefCell<FxHashMap<(usize, i32), f64>>,
+    free_cache: Mutex<FxHashMap<(usize, i32), f64>>,
     /// Price (mm) of a via disc that leaves its passage-layer no slack (the `via_squeeze`
     /// factor); 0 = off.
     pub via_squeeze: f64,
@@ -244,6 +244,13 @@ pub fn infl_of(pr: &Projection, e: EdgeId, pl: &[Vec2], k: usize) -> f64 {
 
 pub use super::funnel::{edge_point, funnel};
 
+/// The packer's memo caches are behind mutexes (the packer is shared read-only by the lanes of
+/// the parallel refinement, par-refine §3); a poisoned lock (a panic while one was held) still
+/// holds a consistent map: a memo of pure values, filled one whole entry at a time. O(1).
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 impl<'a> Packer<'a> {
     pub fn new(pr: &'a Projection, outline: Vec<(Vec2, Vec2)>, eps: f64, edge_clear: f64) -> Self {
         Packer {
@@ -251,11 +258,11 @@ impl<'a> Packer<'a> {
             outline,
             eps,
             edge_clear,
-            cache: RefCell::new(fxmap()),
-            taut_cache: RefCell::new(fxmap()),
+            cache: Mutex::new(fxmap()),
+            taut_cache: Mutex::new(fxmap()),
             via_d: fxmap(),
             via_d0: 0.0,
-            free_cache: RefCell::new(fxmap()),
+            free_cache: Mutex::new(fxmap()),
             via_squeeze: 0.0,
             reserve_sites: false,
             via_between: false,
@@ -290,7 +297,7 @@ impl<'a> Packer<'a> {
             return false;
         }
         let key = (t, net ^ ((s as i64 as i32) << 8));
-        if let Some(&f) = self.free_cache.borrow().get(&key) {
+        if let Some(&f) = lock(&self.free_cache).get(&key) {
             return f >= r;
         }
         let [a, b, c] = pr.tris[t].map(|v| pr.pos[v]);
@@ -310,7 +317,7 @@ impl<'a> Packer<'a> {
             }
         }
         let f = free.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        self.free_cache.borrow_mut().insert(key, f);
+        lock(&self.free_cache).insert(key, f);
         f >= r
     }
 
@@ -356,11 +363,11 @@ impl<'a> Packer<'a> {
     /// `layer` keeps its clearance to the obstacle at that vertex (0 when none). Cached.
     pub fn margin(&self, e: EdgeId, end: usize, net: i32, w: f64, s: f64, layer: usize) -> f64 {
         let key = (e, end as u8, net, w.to_bits(), s.to_bits(), layer as u8);
-        if let Some(&m) = self.cache.borrow().get(&key) {
+        if let Some(&m) = lock(&self.cache).get(&key) {
             return m;
         }
         let m = self.margin_raw(e, end, net, w, s, layer);
-        self.cache.borrow_mut().insert(key, m);
+        lock(&self.cache).insert(key, m);
         m
     }
 
@@ -369,29 +376,29 @@ impl<'a> Packer<'a> {
     /// drilled obstacle is a wall on every layer and keeps its margin). Cached.
     pub fn margin_any(&self, e: EdgeId, end: usize, net: i32, w: f64, s: f64) -> f64 {
         let key = (e, end as u8, net, w.to_bits(), s.to_bits(), u8::MAX);
-        if let Some(&m) = self.cache.borrow().get(&key) {
+        if let Some(&m) = lock(&self.cache).get(&key) {
             return m;
         }
         let m = (0..self.pr.n_layers.max(1)).map(|l| self.margin(e, end, net, w, s, l)).fold(f64::INFINITY, f64::min);
-        self.cache.borrow_mut().insert(key, m);
+        lock(&self.cache).insert(key, m);
         m
     }
 
     /// [`Packer::margin`] on whichever layer needs the most (a through via's disc). Cached.
     pub fn margin_all(&self, e: EdgeId, end: usize, net: i32, w: f64, s: f64) -> f64 {
         let key = (e, end as u8, net, w.to_bits(), s.to_bits(), u8::MAX - 1);
-        if let Some(&m) = self.cache.borrow().get(&key) {
+        if let Some(&m) = lock(&self.cache).get(&key) {
             return m;
         }
         let m = (0..self.pr.n_layers.max(1)).map(|l| self.margin(e, end, net, w, s, l)).fold(0.0, f64::max);
-        self.cache.borrow_mut().insert(key, m);
+        lock(&self.cache).insert(key, m);
         m
     }
 
     /// The taut path of wire `w` of `st` (see the module doc). Cached per wire content (net,
     /// width, clearance, terminals, turns and pass edges), so an unchanged wire is never
     /// recomputed, whatever else of the State changes. O(passes of the wire).
-    pub fn taut(&self, st: &State, w: WireId) -> Rc<Taut> {
+    pub fn taut(&self, st: &State, w: WireId) -> Arc<Taut> {
         let wi = &st.wires[w];
         let mut key: TautKey = Vec::with_capacity(6 + 2 * wi.turns.len() + wi.passes.len());
         key.extend([wi.net as i64 as u64, wi.w.to_bits(), wi.s.to_bits(), wi.a as u64, wi.b as u64, wi.turns.len() as u64]);
@@ -399,11 +406,11 @@ impl<'a> Packer<'a> {
             key.extend([k as u64, v as u64]);
         }
         key.extend(wi.passes.iter().map(|&p| st.passes[p].edge as u64));
-        if let Some(t) = self.taut_cache.borrow().get(&key) {
+        if let Some(t) = lock(&self.taut_cache).get(&key) {
             return t.clone();
         }
-        let t = Rc::new(self.taut_raw(st, w));
-        self.taut_cache.borrow_mut().insert(key, t.clone());
+        let t = Arc::new(self.taut_raw(st, w));
+        lock(&self.taut_cache).insert(key, t.clone());
         t
     }
 
@@ -646,4 +653,12 @@ impl<'a> Packer<'a> {
         let [p, q] = self.pr.edges[e];
         (self.pr.pos[q] - self.pr.pos[p]).len().max(1.0)
     }
+}
+
+/// The packer is shared read-only by the lanes of the parallel refinement (par-refine §2-3).
+#[allow(dead_code)]
+fn _packer_is_sync() {
+    fn sync<T: Sync>() {}
+    sync::<Packer<'static>>();
+    sync::<State<'static>>();
 }
