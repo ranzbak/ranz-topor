@@ -101,6 +101,7 @@ class Pad:
     shape: str = "rect"  # rect | circle
     drill: float | None = None  # PTH (all copper layers) when set
     layer: str = "F.Cu"
+    angle: float = 0.0  # degrees, counter-clockwise (KiCad); only rect pads
 
 
 @dataclass
@@ -787,7 +788,8 @@ def build_board(pat: Pattern, *, copper: bool) -> pcbnew.BOARD:
             if ps.drill is None:
                 p.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
                 ls = pcbnew.LSET()
-                for ly in (LAYER_IDS[ps.layer], pcbnew.F_Mask, pcbnew.F_Paste):
+                back = ps.layer == "B.Cu"
+                for ly in (LAYER_IDS[ps.layer], pcbnew.B_Mask if back else pcbnew.F_Mask, pcbnew.B_Paste if back else pcbnew.F_Paste):
                     ls.AddLayer(ly)
                 p.SetLayerSet(ls)
             else:
@@ -796,6 +798,8 @@ def build_board(pat: Pattern, *, copper: bool) -> pcbnew.BOARD:
                 p.SetDrillSize(_v(ps.drill, ps.drill))
             p.SetShape(pcbnew.PAD_SHAPE_CIRCLE if ps.shape == "circle" else pcbnew.PAD_SHAPE_RECT)
             p.SetSize(_v(*ps.size))
+            if ps.angle:
+                p.SetOrientationDegrees(ps.angle)
             p.SetPosition(_v(*ps.pos))
             if ps.net is not None:
                 p.SetNet(nets[ps.net])
