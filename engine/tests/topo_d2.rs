@@ -473,3 +473,61 @@ fn the_reach_price_is_opt_in() {
         assert_eq!(dr.reach_cost(2.5, 4.0), if on { 10.0 } else { 0.0 }, "reach_price {on}");
     }
 }
+
+/// radii-m3-clear round 2 (verifier F5): a via forced over every site (no site in the plan's class
+/// at all, no legal site anywhere) is counted out of the class (`via_out_of_class`, the run report's
+/// "out of the plan's class" count). The wire runs between two drawn net-2 rails 0.3 mm off its chord
+/// (every site point of its triangle lies past one of them); net-3 vias block every site.
+#[test]
+fn a_via_forced_out_of_the_class_is_counted() {
+    use topor_engine::check::Checker;
+    use topor_engine::geom::Vec2;
+    use topor_engine::model::Options;
+    use topor_engine::topo::board::{self, BuildOpts};
+    use topor_engine::topo::draw::{track_item, via_item, Drawer, Plan};
+    use topor_engine::topo::init::InitWeights;
+    use topor_engine::topo::state::State;
+    use topor_engine::vias::ViaSize;
+    let m = board((0.0, 0.0, 20.0, 20.0), &[(1, 2.0, 10.0, true, 0.6), (1, 18.0, 10.0, true, 0.6), (2, 10.0, 2.0, true, 0.6), (2, 10.0, 16.0, true, 0.6)]);
+    let b = board::build(&m, &BuildOpts { steiner_mm: 0.0, ..BuildOpts::default() }).unwrap();
+    let conns = b.connections(&m);
+    let mut st = State::new(&b.proj);
+    let c = conns.iter().find(|c| c.net == 1).unwrap();
+    st.route_conn(c, &InitWeights::default(), (c.w + c.s) / 400_000.0).expect("routes");
+    let opts = Options::default();
+    let checker = Checker::new(&m, &opts);
+    let v = |x: f64, y: f64| Vec2 { x: x * MM, y: y * MM };
+    let probe = Drawer::new(&m, &opts, &b, &st, &checker);
+    let k = (0..=st.wires[0].passes.len())
+        .find(|&k| {
+            let ch = probe.taut_chord(0, k);
+            ch.len() >= 2 && ch.iter().any(|p| p.x <= 10.0 * MM) && ch.iter().any(|p| p.x >= 10.0 * MM)
+        })
+        .expect("a traversal over x = 10");
+    let pr = &b.proj;
+    let [ta, tb, tc] = pr.tris[st.wires[0].tris[k]].map(|i| pr.pos[i]);
+    let pts = topor_engine::topo::pack::tri_site_points(ta, tb, tc);
+    assert!(pts.iter().all(|p| (p.y + 10.0 * MM).abs() > 0.15 * MM), "fixture: every site point off the chord: {pts:?}");
+    let mut dr = Drawer::new(&m, &opts, &b, &st, &checker);
+    dr.force = true;
+    for s in [-1.0, 1.0] {
+        dr.commit(&track_item(2, 0, 0.1 * MM, v(3.5, -10.0 + 0.3 * s), v(16.5, -10.0 + 0.3 * s), None));
+    }
+    let blocker = ViaSize { d: 1_000_000, drill: 500_000 };
+    let mut y = 0.4;
+    while y <= 19.6 {
+        let mut x = 0.4;
+        while x <= 19.6 {
+            dr.commit(&via_item(3, v(x, -y), blocker, None));
+            x += 0.7;
+        }
+        y += 0.7;
+    }
+    let plan = Plan { layers: vec![0, 1], vias: vec![(k, k)], at: vec![k] };
+    let mut ids = Vec::new();
+    let vias = dr.place_vias(0, &plan, &mut ids).expect("never drop: a via");
+    assert_eq!(vias.len(), 1);
+    let (vk, p, _) = vias[0];
+    assert!(!dr.via_reach(0, vk, p, 0, 1, &dr.class_crossings(0)).0, "out of class: {:?}", (p.x / MM, p.y / MM));
+    assert_eq!((dr.stats.via_forced, dr.stats.via_out_of_class), (1, 1), "{:?}", dr.stats);
+}
