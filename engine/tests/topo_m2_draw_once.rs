@@ -230,6 +230,7 @@ fn a_limit_reached_in_p3_p4_still_draws_the_initial_plan_on(crops: &[&str]) {
 }
 
 #[test]
+#[ignore = "slow set (vm-load 2026-11-17): 70 s in release even on the small crop (it draws the free reference plan too); run on the VM with --ignored"]
 fn a_limit_reached_in_p3_p4_still_draws_the_initial_plan() {
     a_limit_reached_in_p3_p4_still_draws_the_initial_plan_on(FAST_P3_CROPS);
 }
