@@ -10,13 +10,14 @@ use topor_engine::control::RunControl;
 use topor_engine::model::{BoardModel, Options};
 use topor_engine::route::{route_with, RouteResult};
 
+/// The smallest fixture whose TopoR loop has cycles with moves (the qmtech crop with the cut model took
+/// ~130 s a run in release).
 fn crop() -> BoardModel {
-    let path = format!("{}/tests/fixtures/qmtech-usb-crop.json", env!("CARGO_MANIFEST_DIR"));
-    BoardModel::from_json(&std::fs::read_to_string(path).expect("fixture")).expect("fixture parses")
+    BoardModel::from_json(include_str!("fixtures/eprom-to-kernal-ripped.json")).expect("fixture parses")
 }
 
 fn topor(grace: f64) -> Options {
-    Options::from_json(&format!(r#"{{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "runs": 1, "capacity_model": "cuts", "limit_grace_s": {grace}}}"#)).expect("options parse")
+    Options::from_json(&format!(r#"{{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "runs": 1, "topo_rounds": 3, "limit_grace_s": {grace}}}"#)).expect("options parse")
 }
 
 /// Runs with the limit reached at the loop's first move check (`reach` = false: no limit at all).
@@ -68,10 +69,9 @@ fn a_generous_grace_lets_the_cycle_finish_and_says_so() {
     assert!(r.warnings.iter().any(|w| w.starts_with("time limit wait:") && w.contains("finished within")), "{:?}", r.warnings);
 }
 
-fn untimed(r: &RouteResult) -> (usize, usize, Vec<String>) {
-    let l = loop_line(r).split(" cycles in ").next().unwrap_or("").to_string();
-    let rest: Vec<String> = r.warnings.iter().filter(|w| w.starts_with("plan metrics:")).map(|w| w.split("\"time").next().unwrap_or("").to_string()).collect();
-    (r.routed, r.vias, [vec![l], rest].concat())
+/// What a run produced, without any timing or counter that depends on the clock.
+fn untimed(r: &RouteResult) -> (usize, usize, String) {
+    (r.routed, r.vias, loop_line(r).split(" cycles in ").next().unwrap_or("").to_string())
 }
 
 #[test]
