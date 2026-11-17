@@ -807,7 +807,7 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
             bottom,
             &|a, b| if a == b { 0.0 } else { via },
             &|_, _, _| 0.0,
-            &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals, add_vias: p.cap_vias },
+            &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals, add_vias: p.cap_vias, reference: false },
         )
     });
     let rs = rs.unwrap_or_default();
@@ -1159,7 +1159,7 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
                 costs.plane_from.min(nl) as i32 - 1,
                 &|a, b| costs.trans(a, b),
                 &|w, i, l| costs.unary(wev[w][i], l),
-                &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals, add_vias: p.cap_vias },
+                &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals, add_vias: p.cap_vias, reference: false },
             )
         })
         .unwrap_or_default();
