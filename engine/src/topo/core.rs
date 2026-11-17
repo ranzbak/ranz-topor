@@ -701,7 +701,12 @@ impl<'a> Coord<'a> {
     fn ended(&self, k: usize, upd: impl FnOnce(&mut RunState), round: Option<(usize, RoundEnd)>) {
         let Ok(mut s) = self.st.lock() else { return };
         let before = self.best_of(&s).map(|i| (i, s[i].best.expect("best")));
+        let was_stable = s[k].stable;
         upd(&mut s[k]);
+        // A run's stable never goes back (the dialog's contract, ui_wx set_stable): the TopoR loop
+        // reports it live, and the round's end after the drawing must not clear it before the
+        // run's own end report, or an OK in between would not be "OK at Routes stable".
+        s[k].stable |= was_stable;
         let n = s.len();
         let stable_n = s.iter().filter(|r| r.stable).count();
         let settled = s.iter().all(|r| r.stable || r.done);
@@ -920,10 +925,6 @@ impl Run {
         }
         let interrupted = ro.result.timed_out;
         let loop_end = ro.lp;
-        if topor && loop_end.is_some_and(|e| e.stable) {
-            // reported live by the loop: the progress keeps "Routes stable" through the drawing
-            self.stable_at.get_or_insert(cycle);
-        }
         let routed = ro.result.routed;
         let (mut cyc_err, mut cyc_viol) = (ro.crit.errors, ro.crit.violations);
         let total = ro.result.connections_total;
@@ -6345,6 +6346,28 @@ fn out_vias(out: &[Outcome], reqs: &[planes::Req], _conns: &[Connection]) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_runs_stable_never_goes_back_in_the_progress() {
+        // "Report stable live": the loop's live report, then the round's end (which knows only its
+        // own meter) and the run's end; "Routes stable" stays on throughout (ui_wx: never goes back).
+        let ctl = RunControl::new();
+        let coord = Coord::new(&ctl, 1, { let o = Options::default(); Objective::from_options(&o.objective, o.mm_per_via, &o.pick) }, 1);
+        assert!(!ctl.snapshot().stable);
+        coord.report(0, |r| r.stable = true);
+        assert!(ctl.snapshot().stable && coord.shown_stable());
+        coord.ended(0, |r| r.stable = false, None);
+        assert!(ctl.snapshot().stable && coord.shown_stable(), "the round's end cleared the live stable");
+        coord.report(0, |r| r.done = true);
+        assert!(ctl.snapshot().stable);
+        // two runs: stable only when every run is stable or done
+        let ctl = RunControl::new();
+        let coord = Coord::new(&ctl, 2, { let o = Options::default(); Objective::from_options(&o.objective, o.mm_per_via, &o.pick) }, 1);
+        coord.report(0, |r| r.stable = true);
+        assert!(!ctl.snapshot().stable && !coord.shown_stable());
+        coord.report(1, |r| r.done = true);
+        assert!(ctl.snapshot().stable && coord.shown_stable());
+    }
 
     fn eprom() -> BoardModel {
         BoardModel::from_json(include_str!("../../tests/fixtures/eprom-to-kernal-ripped.json")).expect("fixture parses")
