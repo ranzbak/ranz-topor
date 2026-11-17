@@ -496,6 +496,9 @@ struct Epoch {
     gen: Vec<Mv>,
     res: Vec<Slot>,
     done: bool,
+    /// Tests ([`lanes::with_window`]): the lanes evaluate at least this many candidates of the
+    /// epoch, also past a kept one (0 = stop at the first kept one).
+    window: usize,
 }
 
 /// Counters of the parallel refinement (process-wide, never read by the routing): candidates
@@ -518,10 +521,10 @@ fn lane(fx: &Frame, base: &Arrays, evl: &[Vec<LEv>], ctx: &Around, ep: &Mutex<Ep
         if run_thread && crate::control::stop_requested() {
             stopping.store(true, Ordering::Relaxed);
         }
-        let (seq, mv) = {
+        let (seq, mv, window) = {
             let mut g = lock();
             let seq = g.gen.len();
-            if g.done || seq > min_keep.load(Ordering::Acquire) || stopping.load(Ordering::Relaxed) {
+            if g.done || (seq > min_keep.load(Ordering::Acquire) && seq >= g.window) || stopping.load(Ordering::Relaxed) {
                 return;
             }
             let g = &mut *g;
@@ -529,7 +532,7 @@ fn lane(fx: &Frame, base: &Arrays, evl: &[Vec<LEv>], ctx: &Around, ep: &Mutex<Ep
                 Some(mv) => {
                     g.gen.push(mv.clone());
                     g.res.push(Slot::Pending);
-                    (seq, mv)
+                    (seq, mv, g.window)
                 }
                 None => {
                     g.done = true;
@@ -537,7 +540,7 @@ fn lane(fx: &Frame, base: &Arrays, evl: &[Vec<LEv>], ctx: &Around, ep: &Mutex<Ep
                 }
             }
         };
-        let stop = || stopping.load(Ordering::Relaxed) || min_keep.load(Ordering::Relaxed) < seq;
+        let stop = || stopping.load(Ordering::Relaxed) || (min_keep.load(Ordering::Relaxed) < seq && seq >= window);
         let out = evaluate(fx, base, ov, None, evl, &mv, ctx, &stop);
         let mut g = lock();
         g.res[seq] = match out {
@@ -572,7 +575,7 @@ pub(crate) fn run(ctx: &Around, cm: &mut CapModel, evl: &mut [Vec<LEv>], st_out:
             ovs.resize_with(w, Overlay::default);
         }
         let (fx, base) = cm.parts();
-        let ep = Mutex::new(Epoch { look: cur.clone(), gen: Vec::new(), res: Vec::new(), done: false });
+        let ep = Mutex::new(Epoch { look: cur.clone(), gen: Vec::new(), res: Vec::new(), done: false, window: lanes::window() });
         let (min_keep, stopping) = (AtomicUsize::new(usize::MAX), AtomicBool::new(false));
         {
             let evr: &[Vec<LEv>] = evl;
@@ -690,6 +693,30 @@ pub mod lanes {
         }
         let _r = Restore(CTX.with(|c| c.replace(Some((mode, pool)))));
         f()
+    }
+
+    thread_local! {
+        static WINDOW: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Tests (`Options::refine_test_window`): runs `f` with every epoch of this thread evaluating
+    /// at least `k` candidates, also past a kept one, so the scan meets later kept candidates and
+    /// more end-site fills (the speculation a slow first lane makes, without the timing). The kept
+    /// moves do not change (only the first kept one is committed). O(1) + `f`.
+    pub fn with_window<R>(k: usize, f: impl FnOnce() -> R) -> R {
+        struct Restore(usize);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                WINDOW.with(|c| c.set(self.0));
+            }
+        }
+        let _r = Restore(WINDOW.with(|c| c.replace(k)));
+        f()
+    }
+
+    /// This thread's test window (0 = none).
+    pub(crate) fn window() -> usize {
+        WINDOW.with(|c| c.get())
     }
 
     /// The `[optimize] refine_lanes` option as a mode: 0 = auto, n = n lanes.

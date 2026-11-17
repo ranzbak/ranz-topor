@@ -1114,6 +1114,9 @@ pub struct Options {
     /// instead of building the model again from the same layers (per-edge model; the cut model
     /// always builds). Default true; false = the measure before par-refine.
     pub measure_reuse: bool,
+    /// Tests (engine only): every refinement epoch evaluates at least this many candidates, also
+    /// past a kept one ([`crate::topo::refine_par::lanes::with_window`]); 0 = off.
+    pub refine_test_window: usize,
     /// `[optimize] loop_crossing` (5.2, `loop = "topor"`): the share of the `crossing` factor's
     /// weight the loop's layer-aware reroute keeps for a crossing itself. The loop prices the via
     /// a crossing implies against the crossed stretch's present layer as a via (Polubasov 2010
@@ -1497,6 +1500,7 @@ impl Default for Options {
             refine_lanes: 0,
             refine_reference: false,
             measure_reuse: true,
+            refine_test_window: 0,
             loop_crossing: 0.25,
             crossing_vias: "crossing".into(),
             junction_pad_mm: 0.0,

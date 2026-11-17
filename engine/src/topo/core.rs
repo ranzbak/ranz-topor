@@ -1209,7 +1209,7 @@ fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, 
         // loop; whole-route cycles: none) or the fixed `[optimize] refine_lanes`.
         let pool: Option<std::sync::Arc<dyn super::refine_par::lanes::Pool>> = topor.then(|| coord.gate.slots.clone() as std::sync::Arc<dyn super::refine_par::lanes::Pool>);
         let mode = super::refine_par::lanes::mode_of(opts.refine_lanes);
-        crate::control::with_control_mode(&c, opts.timeout_mode == "hard", || super::refine_par::lanes::with(mode, pool, || r.step(model, opts, &c, coord, stubs, fx, t_call)));
+        crate::control::with_control_mode(&c, opts.timeout_mode == "hard", || super::refine_par::lanes::with(mode, pool, || super::refine_par::lanes::with_window(opts.refine_test_window, || r.step(model, opts, &c, coord, stubs, fx, t_call))));
         c.idle(); // between its cycles or done: the soft limit's notice no longer names its step (F6)
         let st = (r.cycles, r.done);
         drop(r);

@@ -75,6 +75,12 @@ fn every_lane_count_keeps_the_serial_plan_and_copper() {
             let k = key(&run(&m, &opts(&format!(r#", "runs": 1, "refine_lanes": {lanes}"#))));
             assert!(k == reference, "{name}: refine_lanes = {lanes} differs from the serial refinement, {}", first_diff(&reference, &k));
         }
+        // speculation without the timing: every epoch evaluates 1, 7 or 64 candidates past a
+        // kept one, on one lane (all on the run thread) and on three
+        for (lanes, window) in [(1usize, 7usize), (1, 64), (3, 64)] {
+            let k = key(&run(&m, &opts(&format!(r#", "runs": 1, "refine_lanes": {lanes}, "refine_test_window": {window}"#))));
+            assert!(k == reference, "{name}: refine_lanes = {lanes}, window {window} differs from the serial refinement, {}", first_diff(&reference, &k));
+        }
         // auto with one run: every other thread of the pool is a spare lane
         let k = key(&run(&m, &opts(r#", "runs": 1"#)));
         assert!(k == reference, "{name}: refine_lanes = auto differs from the serial refinement, {}", first_diff(&reference, &k));
