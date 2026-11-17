@@ -11,7 +11,7 @@ test and benchmark harness in `harness/`. Linux only for now.
 
 | Works now, from inside KiCad 10 | Comes in 0.5.0 (milestone M4a: the engine) |
 |---|---|
-| **Topor: route** button: pre-flight findings (code, cause, fix), options, progress with Cancel, before/after preview, **Accept = one undo step** / Reject = nothing changed | private-badge-b n/n routed, 0 router DRC, ≤ 10 min (now 148/n in 60 s) |
+| **Topor: route** button: pre-flight findings (code, cause, fix), options, progress with Cancel, before/after preview, **Accept = one undo step for the routes** (plus one for the zone refill) / Reject = nothing changed | private-badge-b n/n routed, 0 router DRC, ≤ 10 min (now 148/n in 60 s) |
 | Whole board or a selection (between / touching selected footprints); existing copper kept, or ripped and re-routed; locked copper respected | priorities used for routing order (`@N` markers, `topor_pN` net classes, `[nets] priority` — computed and reported now) |
 | Self-documenting `topor.toml` per project, generated [reference](docs/user/configuration.md); every finding names the KiCad menu or the key to change | pad exit stubs for fine pitch, same-net T-junctions, via rules from the board setup, bounded via relaxation, layer costs |
 | Result verified by `kicad-cli` DRC on a copy before you decide; report folder (report, preview, DRC, log) per run | engine-side `do_not_touch` / `ignore_pads` options (applied by the plugin's scope now) |
@@ -70,7 +70,7 @@ The **Topor: route** button runs this core in KiCad 10: pre-flight findings (pad
 total time (`[run] timeout_s` is now 600 s, an emergency stop; the `[optimize]` work caps end a run), Cancel at any
 time, a preview with the open ratsnest in blue, findings after routing (unrouted connections by reason, pour
 islands and stitches, via squeeze, necking, ignored rules, ...; [operate.md](docs/user/operate.md#findings-after-routing)),
-Accept as one undo step. Every `topor.toml` setting the core reads reaches it (before K1 the `[optimize]`,
+Accept (routes = one undo step, zone refill = a second). Every `topor.toml` setting the core reads reaches it (before K1 the `[optimize]`,
 `[factors]` and the other core settings were dropped as "since 0.5.0"); settings of the classic engine say so in
 the [reference](docs/user/configuration.md).
 
@@ -104,9 +104,9 @@ connections still open (annealing with reheating; `[optimize] fluctuation`, `flu
 cut off counts as an error). When the best result gains less than `stable_gain_pct` over `stable_window` cycles the
 routes are *stable* (TopoR 6.3 manual p. 73: "Autorouting may be stopped"; not before level 5–10): the progress
 dialog says **Routes stable** and its Cancel button reads **OK** — the same action, the best result shown is exactly
-the board you get. The run also stops there by itself (`finish_when_stable`, `finish_patience` = 0 since M-B1, user
-2026-11-07: "When route stable appears it should stop indeed"; `finish_when_stable = false` keeps iterating for
-marginal gains until OK), and headless runs stop at stable. `[optimize] runs` (default 5) seeded runs go on in
+the board you get. With the dialog the run keeps iterating for marginal gains until OK / Cancel
+(user 2026-11-16: "don't stop on stable"; `finish_when_stable = true` makes it finish at stable by itself,
+`finish_patience`), and headless runs stop at stable. `[optimize] runs` (default 5) seeded runs go on in
 parallel on the engine's threads and the best by the pick (errors, vias, length) is offered; `[optimize] rounds` (30) is only a
 safety cap and `[run] timeout_s` (600 s) the emergency stop: runs on large boards (private-badge-b, qmtech with runs = 5) may hit it
 and keep the best result so far (`TIME_BUDGET_HIT`).

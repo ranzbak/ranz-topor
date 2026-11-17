@@ -197,3 +197,92 @@ fn an_island_join_ends_clear_of_own_net_vias() {
     let d = ((b.x as f64 - 22.6e6).powi(2) + (b.y as f64 - 15e6).powi(2)).sqrt();
     assert!(d >= 0.3e6 + 0.125e6, "the join end keeps off the via: {b:?}, {:.3} mm", d / 1e6);
 }
+
+/// GND (net 1) poured on F.Cu and B.Cu; GND SMD pad C1.1 (F.Cu, 0.6 mm round) at (10, 15) mm, boxed in
+/// on F.Cu by four net-2 tracks: a pocket left -0.595 / right +0.725 mm of the pad centre, from 2 mm
+/// above it to 1.2 mm below. Its F.Cu piece is cut off and too narrow for an island via; a pad stub
+/// to a 0.6 mm via in the B.Cu fill fits only with the via centre 0.03..0.10 mm right of the pad
+/// centre (side clearances) and about 0.6 mm or more above it (off the pad), a window between the
+/// coarse lattice's directions (90 degrees: x 0; 78.75 degrees: x >= 0.137 at its first legal ring). THT GND pad U3.1 at (5, 15) holds the main fill.
+fn boxed_model() -> BoardModel {
+    BoardModel::from_json(BOXED).unwrap()
+}
+
+const BOXED: &str = r#"{ "layers": [ { "id": 0, "name": "F.Cu" }, { "id": 31, "name": "B.Cu" } ],
+          "nets": [ { "code": 1, "name": "GND" }, { "code": 2, "name": "SIG" } ],
+          "outline": [ { "kind": "seg", "a": [0, 0], "b": [20000000, 0] },
+            { "kind": "seg", "a": [20000000, 0], "b": [20000000, 30000000] },
+            { "kind": "seg", "a": [20000000, 30000000], "b": [0, 30000000] },
+            { "kind": "seg", "a": [0, 30000000], "b": [0, 0] } ],
+          "pads": [ { "uuid": "C1", "ref": "C1", "number": "1", "net": 1, "attr": "smd", "center": [10000000, 15000000], "layers": [0], "shapes": { "0": { "kind": "circle", "d": 600000 } } },
+                    { "uuid": "U3", "ref": "U3", "number": "1", "net": 1, "attr": "pth", "center": [5000000, 15000000], "layers": [0, 31], "shapes": { "0": { "kind": "circle", "d": 1000000 }, "31": { "kind": "circle", "d": 1000000 } } } ],
+          "pours": [ { "uuid": "zz", "net": 1, "layers": [0, 31], "pads": ["C1.1", "U3.1"],
+            "vias": [], "clearance": 200000, "min_thickness": 254000, "thermal_gap": 500000,
+            "spoke_width": 500000, "pad_connection": 2,
+            "fills": [ { "layer": 0, "outer": [[2000000, 2000000], [18000000, 2000000], [18000000, 28000000], [2000000, 28000000]] },
+                       { "layer": 31, "outer": [[2000000, 2000000], [18000000, 2000000], [18000000, 28000000], [2000000, 28000000]] } ] } ],
+          "rules": { "default": { "clearance": 200000, "width": 250000 }, "min_clearance": 0 } }"#;
+
+fn boxed_items() -> Vec<Item> {
+    let (l, r, t, b) = (10 * MM - 595_000, 10 * MM + 725_000, 13 * MM, 16_200_000);
+    vec![seg(2, 0, (l, t), (r, t)), seg(2, 0, (r, t), (r, b)), seg(2, 0, (r, b), (l, b)), seg(2, 0, (l, b), (l, t))]
+}
+
+/// radii-m3-clear r2 (qmtech erbs C27.1): the pad stub's fine lattice finds the narrow site the
+/// coarse one steps over; the coarse lattice alone leaves the island.
+#[test]
+fn a_boxed_pad_gets_its_stub_from_the_fine_lattice() {
+    use topor_engine::topo::stitch::{FINE_POINTS_MAX, STUB_LATTICES};
+    let m = boxed_model();
+    let items = boxed_items();
+    let before = check_pour_reach(&m, &items, &[]);
+    assert_eq!(before.cuts.len(), 1, "{:?}", before.notes);
+    let s = stitch(&m, &Options::default(), &reg(), &items, &[], None);
+    assert_eq!((s.before, s.after, s.island_vias, s.pad_stubs), (1, 0, 0, 1), "{:?}", s.notes);
+    assert_eq!((s.fine_cuts, s.fine_stubs), (1, 1), "{:?}", s.notes);
+    assert!(s.fine_points > 0 && s.fine_points <= FINE_POINTS_MAX + STUB_LATTICES[1].1);
+    let v = s.items.iter().find_map(|it| if let Item::Via(v) = it { Some(v) } else { None }).expect("a stub via");
+    let dx = (v.at.x as i64 - 10 * MM) as f64 / 1e6;
+    assert!((0.02..=0.11).contains(&dx) && v.at.y < 15 * MM - 600_000, "{:?} dx {dx}", v.at);
+    assert!(s.notes.iter().any(|n| n.starts_with("fine stub lattice: 1 cut piece(s) searched, 1 stub(s) found")), "{:?}", s.notes);
+    let mut all = items.clone();
+    all.extend(s.items.iter().cloned());
+    assert!(check_pour_reach(&m, &all, &[]).cuts.is_empty());
+}
+
+/// The fine lattice runs only after the coarse passes are over: a second cut-off GND pad C2.1 in a
+/// roomy net-2 box (an island via fits) is fixed before the boxed C1.1 gets its fine stub, whichever
+/// of the two pieces comes first (C2.1 below and above C1.1).
+#[test]
+fn the_fine_lattice_waits_for_the_coarse_passes() {
+    let u3 = r#"{ "uuid": "U3", "ref": "U3""#;
+    assert_eq!(BOXED.matches(u3).count(), 1);
+    let mut seen = Vec::new();
+    for y in [22_000_000i64, 8_000_000] {
+        let c2 = format!(r#"{{ "uuid": "C2", "ref": "C2", "number": "1", "net": 1, "attr": "smd", "center": [14000000, {y}], "layers": [0], "shapes": {{ "0": {{ "kind": "circle", "d": 600000 }} }} }}"#);
+        let js = BOXED.replacen(u3, &format!("{c2},\n                    {u3}"), 1).replacen(r#""pads": ["C1.1", "U3.1"]"#, r#""pads": ["C1.1", "U3.1", "C2.1"]"#, 1);
+        let m = BoardModel::from_json(&js).unwrap_or_else(|e| panic!("{e:?}\n{js}"));
+        assert_eq!(m.pads.len(), 3);
+        let (l, r, t, b) = (12_500_000, 15_500_000, y - 1_500_000, y + 1_500_000);
+        let mut items = boxed_items();
+        items.extend([seg(2, 0, (l, t), (r, t)), seg(2, 0, (r, t), (r, b)), seg(2, 0, (r, b), (l, b)), seg(2, 0, (l, b), (l, t))]);
+        let s = stitch(&m, &Options::default(), &reg(), &items, &[], None);
+        assert_eq!((s.before, s.after, s.fine_stubs), (2, 0, 1), "{:?}", s.notes);
+        let at = |pad: &str| s.notes.iter().position(|n| (n.starts_with("stitch via") || n.starts_with("pad stub")) && n.contains(pad)).unwrap_or_else(|| panic!("{pad}: {:?}", s.notes));
+        assert!(at("C2.1") < at("pad stub C1.1"), "C2.1 at y {y}: {:?}", s.notes);
+        let cuts = check_pour_reach(&m, &items, &[]).cuts;
+        seen.push(cuts.iter().position(|c| c.pads.iter().any(|&p| m.pads[p].ref_ == "C1")).unwrap());
+    }
+    assert!(seen.contains(&0), "C1.1's piece comes first in one of the two layouts: {seen:?}");
+}
+
+/// A stub the coarse lattice finds is the one it found before the fine lattice existed: the fine
+/// pass does not run (the D4 fixture's island via and a roomy boxed pad).
+#[test]
+fn a_coarse_stub_never_reaches_the_fine_lattice() {
+    let m = model();
+    let items = [seg(2, 31, (7 * MM, 1_000_000), (7 * MM, 33_000_000))];
+    let s = stitch(&m, &Options::default(), &reg(), &items, &[], None);
+    assert_eq!((s.fine_cuts, s.fine_points, s.fine_stubs), (0, 0, 0), "{:?}", s.notes);
+    assert!(!s.notes.iter().any(|n| n.starts_with("fine stub lattice")));
+}

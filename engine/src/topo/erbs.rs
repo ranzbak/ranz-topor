@@ -1245,6 +1245,26 @@ fn wraps_inside(band: &[Vec2], poly: &[Vec2], left: bool) -> bool {
 /// Depth inside a feature that counts as running through it (1 µm).
 const DEEP: f64 = 1_000.0;
 
+/// The middle of the closest points of the segments `a b` and `c d` (their crossing when they
+/// cross). O(1).
+fn seg_seg_place(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> Vec2 {
+    let o = |p: Vec2, q: Vec2, r: Vec2| (q - p).cross(r - p);
+    let (o1, o2, o3, o4) = (o(a, b, c), o(a, b, d), o(c, d, a), o(c, d, b));
+    if o1 * o2 < 0.0 && o3 * o4 < 0.0 {
+        return c + (d - c) * (o1 / (o1 - o2));
+    }
+    let foot = |p: Vec2, s: Vec2, e: Vec2| {
+        let u = e - s;
+        let l2 = u.len2();
+        let t = if l2 > 0.0 { ((p - s).dot(u) / l2).clamp(0.0, 1.0) } else { 0.0 };
+        s + u * t
+    };
+    [(a, foot(a, c, d)), (b, foot(b, c, d)), (c, foot(c, a, b)), (d, foot(d, a, b))]
+        .into_iter()
+        .min_by(|x, y| (x.0 - x.1).len2().total_cmp(&(y.0 - y.1).len2()))
+        .map_or(a, |(p, q)| (p + q) * 0.5)
+}
+
 /// Distance of segment `a b` to polygon `poly` (0 when it touches or lies inside; a single point
 /// is a point feature).
 fn seg_poly_dist(a: Vec2, b: Vec2, poly: &[Vec2]) -> f64 {
@@ -1333,6 +1353,39 @@ pub fn check_layer(sh: &LayerSheet, sts: &[Stretch], o: &LayerOrder, es: &[Erbs]
         }
         (a, b)
     };
+    // Segment `k` of ERBS `i` is a predicted violator of feature `f`: through or over-full along the
+    // stretch, a pad-exit feature only on its `exit_run`.
+    let feat_pred = |i: usize, k: usize, f: usize| -> bool {
+        let si = es[i].stretch;
+        pred_feat.contains(&(si, f)) || (pred_exit.contains(&(si, f)) && {
+            let (x, y) = exit_run(i, f);
+            k < x || k >= y
+        })
+    };
+    let (fgrid, fclear) = feat_grid(&sh.feats, cell);
+    // The terminal features of every ERBS: the features that hold one of its ends (its pad, via or
+    // junction; a foreign feature there is one its own end already violates).
+    let term: Vec<Vec<usize>> = es
+        .iter()
+        .map(|e| {
+            let mut out: BTreeSet<usize> = BTreeSet::new();
+            let mut one = BTreeSet::new();
+            for &c in [e.pts[0], e.pts[e.pts.len() - 1]].iter() {
+                let (lo, hi) = bbox(c, c, 1.0);
+                fgrid.query(lo, hi, &mut one);
+                out.extend(one.iter().copied().filter(|&f| !sh.feats[f].poly.is_empty() && seg_poly_dist(c, c, &sh.feats[f].poly) <= 1.0));
+            }
+            out.into_iter().collect()
+        })
+        .collect();
+    // Rule (DESIGN radii-m3-clear): ERBS `i` (segment `k`) violates ERBS `j` at `at` inside the zone
+    // of a terminal feature of `j` that `i` already violates as predicted (it runs through `j`'s via
+    // or pad, or that pad is its own pad exit's neighbour): the same event, predicted.
+    let at_term = |i: usize, k: usize, j: usize, at: Vec2| -> bool {
+        let s = &sts[es[i].stretch];
+        let it = Item { net: s.net, w: seg_w(i, k), s: s.s };
+        term[j].iter().any(|&f| feat_pred(i, k, f) && seg_poly_dist(at, at, &sh.feats[f].poly) < 0.5 * it.w + sh.feats[f].bound.clearance(&it))
+    };
     let mut worst: BTreeMap<(usize, Party, bool), Violation> = BTreeMap::new();
     let mut put = |v: Violation| {
         let e = worst.entry((v.stretch, v.other, v.predicted)).or_insert(v);
@@ -1357,12 +1410,13 @@ pub fn check_layer(sh: &LayerSheet, sts: &[Stretch], o: &LayerOrder, es: &[Erbs]
             let dist = seg_seg_dist(a, b, c, d);
             if dist < req - 1.0 {
                 let (x, y) = (es[i].stretch.min(es[j].stretch), es[i].stretch.max(es[j].stretch));
-                put(Violation { stretch: x, other: Party::Stretch(y), at: (a + b + c + d) * 0.25, amount: req - dist, predicted: pred_pair.contains(&(x, y)) });
+                let at = seg_seg_place(a, b, c, d);
+                let predicted = pred_pair.contains(&(x, y)) || at_term(i, k, j, at) || at_term(j, l, i, at);
+                put(Violation { stretch: x, other: Party::Stretch(y), at, amount: req - dist, predicted });
             }
         }
     }
     // Features: pads, vias, junctions, holes (in a grid of their boxes); the outline.
-    let (fgrid, fclear) = feat_grid(&sh.feats, cell);
     for &(i, k) in &segs {
         let (a, b) = (es[i].pts[k], es[i].pts[k + 1]);
         let si = es[i].stretch;
@@ -1379,7 +1433,7 @@ pub fn check_layer(sh: &LayerSheet, sts: &[Stretch], o: &LayerOrder, es: &[Erbs]
             let req = 0.5 * it.w + cl;
             let dist = seg_poly_dist(a, b, &ft.poly);
             if dist < req - 1.0 {
-                put(Violation { stretch: si, other: Party::Feature(f), at: (a + b) * 0.5, amount: req - dist, predicted: pred_feat.contains(&(si, f)) || (pred_exit.contains(&(si, f)) && { let (x, y) = exit_run(i, f); k < x || k >= y }) });
+                put(Violation { stretch: si, other: Party::Feature(f), at: (a + b) * 0.5, amount: req - dist, predicted: feat_pred(i, k, f) });
             }
         }
         if let Some(ef) = sh.edge_feat {
@@ -1451,6 +1505,23 @@ pub fn dump(sh: &LayerSheet, sts: &[Stretch], le: &LayerErbs, vs: &[Violation]) 
     let failed: Vec<Value> = le.failed.iter().map(|(si, m)| json!({"stretch": si, "wire": sts[*si].wire, "why": m, "band": sts[*si].band.iter().map(|&p| mm(p)).collect::<Vec<_>>()})).collect();
     let viol: Vec<Value> = vs.iter().map(|v| json!({"stretch": v.stretch, "other": format!("{:?}", v.other), "at": mm(v.at), "mm": v.amount / 1e6, "predicted": v.predicted})).collect();
     json!({"layer": sh.l, "feats": feats, "outline": sh.outline.iter().map(|&(a, b)| json!([mm(a), mm(b)])).collect::<Vec<_>>(), "erbs": ers, "failed": failed, "violations": viol})
+}
+
+/// Debug dump of a layer's over-full cuts (mm, engine frame): the cut, its squeeze (the predicted
+/// violation) and the nets and wires of its items.
+fn overfull(sh: &LayerSheet, sts: &[Stretch], o: &LayerOrder) -> Value {
+    let mm = |p: Vec2| json!([p.x / 1e6, p.y / 1e6]);
+    let cs: Vec<Value> = o
+        .cuts
+        .iter()
+        .filter(|cu| cu.squeeze > 0.0)
+        .map(|cu| {
+            let c = &sh.cuts[cu.cut];
+            json!({"p": mm(c.p), "q": mm(c.q), "squeeze": cu.squeeze / 1e6, "slack": cu.slack / 1e6,
+                   "nets": cu.items.iter().map(|x| x.net).collect::<Vec<_>>(), "wires": cu.items.iter().map(|x| sts[x.stretch].wire).collect::<Vec<_>>()})
+        })
+        .collect();
+    Value::from(cs)
 }
 
 /// Debug summary of one layer (mm, KiCad frame), the first `erbs_gap` places included.
@@ -1618,7 +1689,9 @@ pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], pac
         // Debug: the drawing's ERBS per layer (harness/erbs_accept.py reads `realise-L<n>.json`).
         if let Some(d) = std::env::var_os("TOPO_ERBS_DUMP") {
             let path = std::path::Path::new(&d).join(format!("realise-L{}.json", lf.sheet.l));
-            let _ = std::fs::write(path, dump(&lf.sheet, &m.stretches, &le, &vs).to_string());
+            let mut j = dump(&lf.sheet, &m.stretches, &le, &vs);
+            j["overfull"] = overfull(&lf.sheet, &m.stretches, o);
+            let _ = std::fs::write(path, j.to_string());
         }
         let r = report(&le, &vs);
         let gap: BTreeSet<usize> = vs.iter().filter(|v| !v.predicted).flat_map(|v| match v.other {

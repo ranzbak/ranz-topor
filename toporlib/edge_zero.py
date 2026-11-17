@@ -2,7 +2,7 @@
 copper-to-edge clearance is 0 (Board Setup 0, no custom ``edge_clearance`` rule raising it), ``[rules]
 edge_clearance_zero``:
 
-* ``"zone_clearance"`` (default, user decision 2026-11-17): the biggest clearance of the board's copper pours, one value
+* ``"zone_clearance"`` (default): the biggest clearance of the board's copper pours, one value
   for all layers. KiCad itself does not use a zone's clearance for the edge: its filler knocks Edge.Cuts out at
   ``max(PHYSICAL_CLEARANCE, EDGE_CLEARANCE)`` (pcbnew/zone_filler.cpp, tag 10.0.8,
   ``ZONE_FILLER::buildCopperItemClearances``, lambda ``knockoutGraphicClearance``), and the DRC judges the routed copper

@@ -425,6 +425,10 @@ pub struct Diag {
     pub against_via: bool,
 }
 
+/// The plan's crossings of one wire with other nets: `(traversal, other net, other wire's layer
+/// there or -1 = open)` ([`Drawer::class_crossings`], read by [`Drawer::via_reach`]).
+pub type ClassCrossings = std::collections::BTreeSet<(usize, i32, i32)>;
+
 /// Counters of the drawing: which method produced each accepted run.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DrawStats {
@@ -454,6 +458,9 @@ pub struct DrawStats {
     /// committed via (a wire drawn again counts again; the summary uses the final wires).
     pub via_searched: usize,
     pub via_forced: usize,
+    /// Vias placed out of the plan's class ([`Drawer::via_reach`]): no site in the class was found
+    /// at all, so the cheapest one outside it was taken (counted in the plan-vs-drawn summary).
+    pub via_out_of_class: usize,
     /// P6 (a): crossing partners whose nominal chord was moved to follow a via ([`Drawer::follow_vias`]).
     pub partners_moved: usize,
     /// P6 (a): crossing partners neither their packed nor their taut crossing keeps on a placed
@@ -1396,7 +1403,7 @@ impl<'a> Drawer<'a> {
     /// The plan's (taut) chord of wire `o` in its traversal `k`: its taut crossing of the edge it
     /// enters by (or its terminal), the turn corners there, its taut crossing of the edge it
     /// leaves by (or its terminal). O(turns) after the cached taut path.
-    fn taut_chord(&self, o: WireId, k: usize) -> Vec<Vec2> {
+    pub fn taut_chord(&self, o: WireId, k: usize) -> Vec<Vec2> {
         let (st, pr) = (self.st, &self.b.proj);
         let oi = &st.wires[o];
         let n = oi.passes.len();
@@ -1555,9 +1562,15 @@ impl<'a> Drawer<'a> {
         } else {
             Vec::new()
         };
+        // The plan's crossings of this wire, per traversal and layer: a via site's reach may go
+        // over a drawn track only where the plan crosses it ([`Drawer::via_reach`]).
+        let crossed = self.class_crossings(w);
         for (i, &(ka, kb)) in plan.vias.iter().enumerate() {
             let ka = out.last().map_or(ka, |l| ka.max(l.0));
             let mut done = false;
+            // The cheapest legal site out of the plan's class ([`Drawer::via_reach`]): taken only
+            // when no site in the class exists at all.
+            let mut oob: Option<(f64, f64, usize, Vec2, ViaSize)> = None;
             // P6 (d): the planned site when it is not free: the search then starts next to it.
             let mut missed: Option<Vec2> = None;
             // 5.4: the plan's site first, as it is, when every rule holds there.
@@ -1588,6 +1601,21 @@ impl<'a> Drawer<'a> {
                     continue;
                 }
                 self.stats.planned_sites_missed += 1;
+                if std::env::var("TOPO_VIADBG").is_ok() {
+                    // Diagnosis only: which test refused the planned site (first size).
+                    let sz = sizes[0];
+                    let item = via_item(net, p, sz, Some(w));
+                    let (la, lb) = (plan.layers[i], plan.layers[i + 1]);
+                    let rep = self.checker.check_against(&self.idx, std::slice::from_ref(&item), &[]);
+                    eprintln!(
+                        "VIAMISS wire {w} net {net} via {i} planned ({:.3},{:.3}) d {} side {} taut {} tight {} pair {} check {:?} hole {} own {} pairdisc {}",
+                        p.x / 1e6, -p.y / 1e6, sz.d,
+                        self.via_side_ok(w, k, p, la, lb), self.via_side_ok_taut(w, k, p, la, lb), self.via_site_tight.contains(&(w, i)),
+                        self.via_pair_price(w, out.last().copied(), &xs, k, p, sz),
+                        rep.violations.iter().take(3).map(|v| (v.against.clone(), v.gap, v.required)).collect::<Vec<_>>(),
+                        self.via_hole_ok(p, sz, net), self.via_own_pad_ok(p, sz, net), self.pair_via_ok(w, p, sz, net)
+                    );
+                }
                 // A site the relocation marked tight (no legal room on the plan's geometry,
                 // planned_crossing_window: the taut crossing lies outside the via window) tells
                 // nothing about where the next-best site is: the search runs as without a plan.
@@ -1685,8 +1713,19 @@ impl<'a> Drawer<'a> {
                         // 5.4 task 1: the via as its reach disc (the hole rule included).
                         let dr = 2.0 * crate::vias::via_reach(&self.model.rules, net, sz);
                         let price = self.via_plan_price(w, ka, kb.max(ka), p, dr) + self.via_pair_price(w, out.last().copied(), &xs, k, p, sz) + squeeze;
+                        // In the plan's class only; the reach's violations priced like the squeeze
+                        // (one via diameter of squeeze per violation unit, graded).
+                        let (in_class, reach) = self.via_reach(w, k, p, plan.layers[i], plan.layers[i + 1], &crossed);
+                        // `[vias] reach_price` (default off): the reach's violations priced too.
+                        let price = price + self.reach_cost(reach, self.octi.room * dv);
                         if dbg {
-                            eprintln!("VIACAND wire {w} via {i} k {k} at ({:.3},{:.3}) room {:.0} price {:.0}", p.x / 1e6, -p.y / 1e6, room, price);
+                            eprintln!("VIACAND wire {w} via {i} k {k} at ({:.3},{:.3}) room {:.0} price {:.0} reach {reach:.2} in class {in_class}", p.x / 1e6, -p.y / 1e6, room, price);
+                        }
+                        if !in_class {
+                            if oob.as_ref().is_none_or(|o| price < o.0 - 1.0 || (price <= o.0 + 1.0 && room > o.1 + 1.0)) {
+                                oob = Some((price, room, k, p, sz));
+                            }
+                            continue;
                         }
                         if best.is_none_or(|b| price < best_price - 1.0 || (price <= best_price + 1.0 && room > b.0 + 1.0)) {
                             best = Some((room, k, p));
@@ -1716,9 +1755,32 @@ impl<'a> Drawer<'a> {
                     break 'sizes;
                 }
             }
+            // No legal site in the plan's class: in force mode the cheapest site in the class with
+            // its violations (costly, not failed); with no site in the class at all, the cheapest
+            // legal one out of it (as before the class test), counted and reported.
+            let forced_in = if !done && self.force { self.force_via(w, plan, i, ka, kb.max(ka), &sizes, Some(&crossed)) } else { None };
+            if !done && forced_in.is_none() {
+                if let Some((_, room, k, p, sz)) = oob {
+                    if std::env::var("TOPO_VIADBG").is_ok() {
+                        eprintln!("VIAPICK wire {w} net {net} via {i} out of class at ({:.3},{:.3}) room {room:.0} size {}", p.x / 1e6, -p.y / 1e6, sz.d);
+                    }
+                    let id = self.commit(&via_item(net, p, sz, Some(w)));
+                    self.via_marks.push((w, k, p, plan.layers[i], plan.layers[i + 1], id));
+                    ids.push(id);
+                    out.push((k, p, sz));
+                    self.stats.via_searched += 1;
+                    self.stats.via_out_of_class += 1;
+                    done = true;
+                }
+            }
             if !done && self.force {
                 // Never drop (M-B1): the site with the least violation price.
-                if let Some((k, p, sz, vs)) = self.force_via(w, plan, i, ka, kb.max(ka), &sizes) {
+                let any_site = forced_in.is_none();
+                if let Some((k, p, sz, vs)) = forced_in.or_else(|| self.force_via(w, plan, i, ka, kb.max(ka), &sizes, None)) {
+                    // A site forced over every site may be out of the class: counted like the legal one.
+                    if any_site && !self.via_reach(w, k, p, plan.layers[i], plan.layers[i + 1], &crossed).0 {
+                        self.stats.via_out_of_class += 1;
+                    }
                     let id = self.commit(&via_item(net, p, sz, Some(w)));
                     self.via_marks.push((w, k, p, plan.layers[i], plan.layers[i + 1], id));
                     ids.push(id);
@@ -1813,7 +1875,10 @@ impl<'a> Drawer<'a> {
     /// and every via size, the one with the least `violation` price (a site on the wrong side of
     /// another wire's chord counts one violation more: its run would cross that wire), ties by
     /// the most room. Its violations go with it. O(sites x sizes x checker query).
-    fn force_via(&self, w: WireId, plan: &Plan, i: usize, ka: usize, kb: usize, sizes: &[ViaSize]) -> Option<(usize, Vec2, ViaSize, Vec<Viol>)> {
+    /// `class`: the plan's crossings of `w` ([`Drawer::class_crossings`]); `Some` = only sites in the
+    /// plan's class ([`Drawer::via_reach`]), their reach violations added to the price with
+    /// `[vias] reach_price`; `None` = every site.
+    pub fn force_via(&self, w: WireId, plan: &Plan, i: usize, ka: usize, kb: usize, sizes: &[ViaSize], class: Option<&ClassCrossings>) -> Option<(usize, Vec2, ViaSize, Vec<Viol>)> {
         let net = self.st.wires[w].net;
         let (st, pr) = (self.st, &self.b.proj);
         let wi = &st.wires[w];
@@ -1849,7 +1914,14 @@ impl<'a> Drawer<'a> {
                     vs.push(Viol { kind: "connection_width", at: p, layer: u32::MAX, depth_nm: self.model.rules.min_connection.max(1) as f64, len_nm: sz.d as f64, against: "own-net pad".into(), via: true });
                 }
                 let side = if self.via_side_ok(w, k, p, plan.layers[i], plan.layers[i + 1]) { 0.0 } else { 1.0 };
-                let price = vs.iter().map(Viol::amount).sum::<f64>() + side;
+                let reach = match class {
+                    Some(c) => match self.via_reach(w, k, p, plan.layers[i], plan.layers[i + 1], c) {
+                        (false, _) => continue,
+                        (true, r) => self.reach_cost(r, 1.0),
+                    },
+                    None => 0.0,
+                };
+                let price = vs.iter().map(Viol::amount).sum::<f64>() + side + reach;
                 let room = self.via_room(w, k, p, sz.d as f64);
                 if best.as_ref().is_none_or(|b| price < b.0 - 1e-9 || (price - b.0).abs() <= 1e-9 && room > b.1 + 1.0) {
                     best = Some((price, room, k, p, sz, vs));
@@ -1857,6 +1929,97 @@ impl<'a> Drawer<'a> {
             }
         }
         best.map(|b| (b.2, b.3, b.4, b.5))
+    }
+
+    /// `[vias] reach_price` (Options `via_reach_price`, default off): the price a via site pays for
+    /// the violation amount `reach` of its reach ([`Drawer::via_reach`]), at `scale` per unit
+    /// (`octi.room x via diameter` in the legal search, 1 in the forced search); 0 when off (the
+    /// class verdict applies either way).
+    pub fn reach_cost(&self, reach: f64, scale: f64) -> f64 {
+        if self.opts.via_reach_price {
+            scale * reach
+        } else {
+            0.0
+        }
+    }
+
+    /// The plan's crossings of wire `w` with other nets, as `(traversal of w, other net, the other
+    /// wire's layer there)` (layer -1: open there, a via interval of its own, or no pass layers
+    /// known). The class test of a via site ([`Drawer::via_reach`]) reads it per traversal and
+    /// layer: a crossing elsewhere on the wire, or on the other layer, does not make a drawn track
+    /// crossable here. O(crossings of w).
+    pub fn class_crossings(&self, w: WireId) -> ClassCrossings {
+        let st = self.st;
+        let net = st.wires[w].net;
+        let layer = |o: WireId, ok: usize| -> i32 {
+            if self.prov_layer.is_empty() {
+                return -1;
+            }
+            let ps = &st.wires[o].passes;
+            let a = if ok > 0 { self.prov_layer[ps[ok - 1]] } else { -2 };
+            let b = if ok < ps.len() { self.prov_layer[ps[ok]] } else { -2 };
+            match (a, b) {
+                (-2, -2) => -1,
+                (-2, x) | (x, -2) => x,
+                (x, y) if x == y => x,
+                _ => -1,
+            }
+        };
+        st.crossings(w).iter().filter(|x| st.wires[x.other].net != net).map(|x| (x.k, st.wires[x.other].net, layer(x.other, x.other_k))).collect()
+    }
+
+    /// Whether via site `p` in traversal `k` of wire `w` keeps the plan's class, and the graded
+    /// price of reaching it. The runs on the via's layers `la` and `lb` leave the plan's path in
+    /// `k` (the point of [`Drawer::taut_chord`] nearest `p`) for `p`: a straight reach segment at
+    /// the wire's width per layer, checked against the copper drawn so far. A reach on layer `l`
+    /// that overlaps (a short) a drawn track of another net `n` goes over that wire: the site is on
+    /// its far side, which changes the topological class (vias are placed homotopically, Dayan &
+    /// Dai 1991, UCSC-CRL-91-40, PDF p. 1; a rubber band's ends are terminals, vias or junctions,
+    /// Dayan 1997 PDF p. 29 = printed p. 18), so it is out of class unless the plan crosses `w`
+    /// with net `n` in this traversal `k` on that layer `l` (or there with `n`'s layer open):
+    /// `crossed` = [`Drawer::class_crossings`]. A crossing elsewhere on the wire or on the other
+    /// layer does not count (qmtech JS_INTB_5V: crossed with VIN5V elsewhere, the site past
+    /// VIN5V's F.Cu track in its via traversal was judged in class).
+    /// Price: the violation amounts of both reach segments ([`Viol::amount`], graded; 0 for a free
+    /// reach). O(chord + objects nearby).
+    pub fn via_reach(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize, crossed: &ClassCrossings) -> (bool, f64) {
+        let net = self.st.wires[w].net;
+        let chord = self.taut_chord(w, k);
+        let q = match chord.len() {
+            0 => return (true, 0.0),
+            1 => chord[0],
+            _ => chord
+                .windows(2)
+                .map(|x| {
+                    let d = x[1] - x[0];
+                    let l2 = d.len2();
+                    let t = if l2 > 0.0 { ((p - x[0]).dot(d) / l2).clamp(0.0, 1.0) } else { 0.0 };
+                    x[0] + d * t
+                })
+                .min_by(|a, b| (*a - p).len2().total_cmp(&(*b - p).len2()))
+                .unwrap_or(chord[0]),
+        };
+        if (p - q).len2() <= 1.0 {
+            return (true, 0.0);
+        }
+        let (mut ok, mut price) = (true, 0.0);
+        for (j, &l) in [la, lb].iter().enumerate() {
+            if j == 1 && lb == la {
+                break;
+            }
+            let items = self.run_items(w, l, &[q, p]);
+            let rep = self.checker.check_against(&self.idx, &items, &[]);
+            for v in &rep.violations {
+                let other = v.against.strip_prefix("item:").and_then(|x| x.parse::<usize>().ok()).and_then(|id| self.idx.net_of(id));
+                if let Some((n2, false)) = other {
+                    if n2 != net && !crossed.contains(&(k, n2, l as i32)) && !crossed.contains(&(k, n2, -1)) && v.gap <= 0 {
+                        ok = false;
+                    }
+                }
+            }
+            price += self.viols_of(&items, &rep).iter().map(Viol::amount).sum::<f64>();
+        }
+        (ok, price)
     }
 
     /// The via site `p` in traversal `k` of wire `w` (run layers `la` before the via, `lb` after)

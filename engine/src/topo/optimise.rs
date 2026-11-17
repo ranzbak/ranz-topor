@@ -225,6 +225,9 @@ pub struct LoopParams {
     pub stable_window: usize,
     pub stable_gain_pct: f64,
     pub stable_patience: usize,
+    /// false = never end at "stable" (the dialog run with `finish_when_stable` off: the loop goes on
+    /// until the cycle cap, Cancel / OK or the time limit; `stable_at` is still recorded).
+    pub stop_at_stable: bool,
     pub emphasis: Emphasis,
     pub obj: Objective,
 }
@@ -339,7 +342,7 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
             v,
             if gained { " (new best)" } else { "" }
         ));
-        if rep.stable_at.is_some_and(|s| cycle >= s + p.stable_patience) {
+        if p.stop_at_stable && rep.stable_at.is_some_and(|s| cycle >= s + p.stable_patience) {
             rep.stop = "stable".into();
             break;
         }
@@ -652,6 +655,7 @@ mod tests {
             stable_window: 30,
             stable_gain_pct: 0.0,
             stable_patience: 0,
+            stop_at_stable: true,
             emphasis: Emphasis::default(),
             obj: Objective::LengthVias { mm_per_via: 25.0 },
         }
@@ -760,6 +764,18 @@ mod tests {
         assert_eq!(rep.stop, "stable");
         assert_eq!(rep.stable_at, Some(2), "a gain below 50 % over 2 cycles");
         assert_eq!(rep.cycles, 2);
+    }
+
+    #[test]
+    fn without_stop_at_stable_the_loop_goes_on_to_the_cycle_cap() {
+        // Dialog run (stop_when_stable and finish_when_stable false): "stable" is recorded, not obeyed.
+        let mut sp = toy();
+        let mut a = Archive::new(4);
+        let p = LoopParams { stable_window: 2, stable_gain_pct: 50.0, stop_at_stable: false, ..params(1, 0) };
+        let rep = optimise(&mut sp, &mut a, &p, &mut || false, &mut || false, &|| 0.0);
+        assert_eq!(rep.stable_at, Some(2));
+        assert_eq!(rep.cycles, 30, "ran to the cap");
+        assert_eq!(rep.stop, "cycle cap");
     }
 
     #[test]
