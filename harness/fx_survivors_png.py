@@ -9,6 +9,7 @@ from __future__ import annotations
 import glob
 import json
 import math
+import os
 import sys
 import textwrap
 from pathlib import Path
@@ -118,9 +119,9 @@ def render(name: str, boards: Path, runs: Path, out: Path) -> Path:
             ax.text(0.5, 0.5, f"no result ({mode})", transform=ax.transAxes, ha="center")
             continue
         segs, vias = read_copper(Path(pcbs[0]))
-        _panel(ax, pat, segs, vias, f"topor main 0a53849, {'sequential' if mode == 'seq' else 'realise = erbs'}", v,
+        _panel(ax, pat, segs, vias, f"topor {os.environ.get('TOPOR_FX_REV', 'main 0a53849')}, {'sequential' if mode == 'seq' else 'realise = erbs'}", v,
                _drc_text(runs / f"{name}-{mode}"))
-    fig.suptitle(f"{name}: {pat.title}   [PROPOSED, awaiting approval]   kills: {', '.join(doc.get('kills', []))}", fontsize=12)
+    fig.suptitle(f"{name}: {pat.title}   [{os.environ.get('TOPOR_FX_STATUS', 'PROPOSED, awaiting approval')}]   kills: {', '.join(doc.get('kills', []))}", fontsize=12)
     rules = ("Rules: clearance 0.20 mm, track 0.25 mm, copper to edge 0.50 mm (red dashed), octilinear; "
              + ("B.Cu closed (rule area, one layer). " if not pat.ref_vias else "two layers, B.Cu hatched, via 0.6/0.3, hatched grey = no-via rule area. ")
              + "Dotted grey = clearance envelope of a foreign pad (half width + clearance).")

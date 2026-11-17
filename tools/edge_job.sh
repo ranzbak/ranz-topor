@@ -25,7 +25,7 @@ tests() {
   python -m harness.fx_survivors $R/fx/boards --drc > $R/fx-gen.log 2>&1
   for m in seq erbs; do X="--set optimize.rounds=1"; [ $m = erbs ] && X="$X --set drawing.realise=erbs"
     tools/route_board.sh $R/fx/boards/edge_pads/problem/edge_pads.kicad_pcb $R/fx/runs/edge_pads-$m --no-png --timeout 120 $X > $R/fx-$m.log 2>&1; note "fx $m rc $?"; done
-  $P python -m harness.fx_survivors_png $R/fx/boards $R/fx/runs > $R/fx-png.log 2>&1; note "fx png rc $?"
+  TOPOR_FX_REV="$(git rev-parse --short HEAD 2>/dev/null || cat REV)" TOPOR_FX_STATUS="approved suite test" $P python -m harness.fx_survivors_png $R/fx/boards $R/fx/runs $R/fx/png edge_pads > $R/fx-png.log 2>&1; note "fx png rc $?"
   python3 tools/edge_mutate.py run $R/mut > $R/mut.log 2>&1; note "mutants rc $?"
   cd $ROOT/engine
   CARGO_TARGET_DIR=$ROOT/target-dbg RUST_TEST_THREADS=4 timeout 7200 cargo test --no-fail-fast > $R/cargo-debug.log 2>&1; note "cargo debug rc $?"
