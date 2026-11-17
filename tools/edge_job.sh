@@ -3,6 +3,8 @@
 #   boards  5 public boards x seq/erbs, seed 0, optimize.rounds=1 runs=1, --no-png (3 units: small / qmtech / bornhack)
 #   tests   cargo test --release (all), pytest (default + mechfix test_fx_edge_pads), fx edge_pads PNG, mutants
 #           (tools/edge_mutate.py), cargo test debug (own tests) -- one unit, serial
+#   wq      rule C boards: wiccon + qmtech x seq/erbs (copper-to-edge 0 on both; the others are non-zero, C off)
+#   ctests  pytest (default) + rule C's Python mutants (tools/edge_mutate.py run-py)
 set -u
 R=$HZ_RUN_DIR; ROOT=$(pwd); mkdir -p $R
 E=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
@@ -34,6 +36,10 @@ for st in "$@"; do
       u qm "pair qmtech $Q"
       u bh "pair bornhack bornhack2026" ;;
     tests) u tests "tests" ;;
+    wq)
+      u wic "pair wiccon wiccon-2023"
+      u qm "pair qmtech $Q" ;;
+    ctests) u ctests "cd $ROOT; timeout 5400 python -m pytest -q tests > $R/pytest.log 2>&1; note 'pytest rc '\$?; python3 tools/edge_mutate.py run-py $R/mut > $R/mut.log 2>&1; note 'mutants rc '\$?" ;;
   esac
 done
 wait; note "all done"

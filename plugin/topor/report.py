@@ -86,7 +86,8 @@ class RunReport:
     preexisting, unconnected, detour_line, stop_reason, iterations, elapsed_s, threads, scope, existing_copper,
     respect_locked, non_default, defaults_used, findings (list of Finding), notes (list of str), drc_rounds,
     floors_applied (toporlib.rules ``[{"name", "design", "floor"}]`` nm; set by run.py; listed only with the opt-in
-    floor mode), fab_profile, rule_fallbacks (toporlib.rules.fallback_text lines; set by run.py);
+    floor mode), fab_profile, rule_fallbacks (toporlib.rules.fallback_text lines; set by run.py), edge_zero (rule C text,
+    toporlib.edge_zero.text; set by run.py when the board's copper-to-edge is 0);
     set by build_report: connection_rows, net_rows, partial_routes, zero_slack_wires, vias_in_pads,
     ignored_pads, fallbacks, accepted_codes, non_defaults, versions, drc_by_type_*, unconnected_pre*."""
 
@@ -285,6 +286,8 @@ class RunReport:
             rf = f["rule_fallbacks"] or []
             out.append("Rule fallbacks (fields the board does not set): " + ("none" if not rf else f"{len(rf)}"))
             out += [f"- {t}" for t in rf]
+        if f.get("edge_zero"):  # rule C (toporlib.edge_zero): copper-to-edge 0, [rules] edge_clearance_zero
+            out.append(f"Copper to edge clearance 0 on the board: {f['edge_zero']}")
         tl = f.get("time_limit")
         if tl:  # the start limit, every change the user made during the run, the final limit
             out.append(f"Time limit ({tl.get('clock', 'wall')} clock): {limit_text(tl.get('start_s'))} at the start"

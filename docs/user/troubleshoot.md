@@ -334,7 +334,7 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: warning.*
 
-**Cause.** The board's copper-to-edge clearance is 0 (KiCad: no minimum). topor uses it as it is: copper may come up to the Edge.Cuts line (its centre line: KiCad's DRC ignores the line width), which most fabs do not accept.
+**Cause.** The board's copper-to-edge clearance is 0 (KiCad: no minimum), which most fabs do not accept. By default ([rules] edge_clearance_zero = "zone_clearance") topor keeps the biggest clearance of the board's copper pours from the board edge instead; "pours" keeps the distance the filled pours keep, "board" uses 0 as KiCad does (copper may reach the Edge.Cuts line's centre: KiCad's DRC ignores the line width). The finding names the value used. KiCad's DRC still checks 0.
 
 **Fix.** Set the value your fab needs in KiCad → File → Board Setup → Design Rules → Constraints → Copper to edge clearance (or with a custom edge_clearance rule) and save the board.
 
