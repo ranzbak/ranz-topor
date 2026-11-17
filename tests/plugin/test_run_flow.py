@@ -1008,9 +1008,11 @@ def test_run_ok_at_routes_stable_is_not_a_cancel(app, eprom, tmp_path, reports):
     assert rr["stop_reason"] == "stable"
     loops = [w for w in _engine_warnings(out) if w.startswith("TopoR loop (")]
     assert len(loops) == 1 and "ended by Cancel / OK" in loops[0], loops
-    # ... and every one of the 5 runs was stable when the OK came (the best-of line names each run's stable)
+    # ... the drawn run was stable, and the other 4 runs (every one stable when the OK came, runs_stable above) each
+    # had a pick of their own, not drawn because only one pick is drawn after Cancel / OK
     best_of = next(w for w in _engine_warnings(out) if w.startswith("best of 5 seeded runs"))
-    assert best_of.count("stable after cycle") == 5 and "not stable" not in best_of, best_of
+    assert "stable after cycle" in best_of and "not stable" not in best_of, best_of
+    assert best_of.count("its TopoR loop pick not drawn") == 4, best_of
 
 
 def _engine_warnings(out):
