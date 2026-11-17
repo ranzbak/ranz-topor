@@ -6,11 +6,9 @@ E, C, K, R = "engine/src/topo/erbs.rs", "engine/src/topo/core.rs", "engine/src/c
 M = {
     "e_cancel": (E, "if self.stop.as_ref().is_some_and(", "if false && self.stop.as_ref().is_some_and("),
     "e_deadline": (E, "if self.deadline.is_some_and(|d| now >= d) {", "if false {"),
-    "e_hardened_cap": (E, "let cap = l.hardened() || wall_cap", "let cap = wall_cap"),
     "e_floor": (E, "self.floor.map_or(c, |f| c.max(f))", "c"),
     "e_ge": (E, "wall_cap.is_some_and(|c| b <= c) => Some(ErbsStop::Bound)", "wall_cap.is_some_and(|c| b >= c) => Some(ErbsStop::Bound)"),
-    "e_nocap_cmp": (E, "(Some(b), true) if l.hardened() || wall_cap.is_some_and(|c| b <= c) =>", "(Some(_b), true) if true =>"),
-    "e_hard_guard": (E, "(Some(b), true) if l.hardened() || wall_cap", "(Some(b), true) if wall_cap"),
+    "e_nocap_cmp": (E, "(Some(b), true) if wall_cap.is_some_and(|c| b <= c) =>", "(Some(_b), true) if true =>"),
     "e_nonow": (E, ".filter(|&b| now >= b);", ";"),
     "e_first_layer": (E, "out.stopped.get_or_insert(why);", "out.stopped = Some(why);"),
     "e_first_realise": (E, "        if out.stopped.is_none() {\n            out.stopped = le.stopped;", "        if le.stopped.is_some() {\n            out.stopped = le.stopped;"),
@@ -24,7 +22,9 @@ M = {
     "c_limit_none": (C, "limit: Some(ctl.limit.clone()),\n            draw_start", "limit: None,\n            draw_start"),
     "w_draw_cut": (C, "draw_cut: steps.contains(&CutStep::Drawing),", "draw_cut: false,"),
     "w_draw_note": (C, 'if w.draw_cut { "" } else { "every wire was drawn; " },', '"every wire was drawn; ",'),
-    "k_hardened": (K, "        self.hardened.store(true, Ordering::Relaxed);\n", ""),
+    "k_harden_store": (K, "let _ = self.harden_ns.compare_exchange(LIMIT_NONE, ns, Ordering::Relaxed, Ordering::Relaxed);", ""),
+    "k_harden_nofloor_instant": (K, "(Some(a), Some(b)) => Some(a.min(b)),", "(Some(_), Some(b)) => Some(b),"),
+    "k_harden_first": (K, "self.harden_ns.compare_exchange(LIMIT_NONE, ns,", "self.harden_ns.compare_exchange(LIMIT_NONE, 0,"),
     "p_traces_cut": (R, 'traces_cut = "drawing" in steps if', 'traces_cut = False and "drawing" in steps if'),
     "p_cut_fallback": (R, 'else tl.get("cut") == "drawing"', 'else False'),
 }

@@ -90,16 +90,16 @@ pub struct ErbsOpts {
     /// drawing passes it only while a Cancel may still stop the drawing (not in the TopoR loop's
     /// one drawing, which runs through, core.rs `draw_through`).
     pub stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    /// The run's time limit, read live: its overrun cap firing (the wall clock, from `floor` on;
-    /// the plugin's CPU clock via `harden`, at once) stops ERBS even after `deadline` was taken as
+    /// The run's time limit, read live: its overrun cap firing (from `floor` on, on the wall clock and on the
+    /// plugin's CPU clock via `harden` alike) stops ERBS even after `deadline` was taken as
     /// a snapshot, and so does the drawing bound from `draw_start` (soft limit).
     pub limit: Option<std::sync::Arc<crate::control::TimeLimit>>,
     /// Soft limit: the drawing's start, from which `[run] drawing_grace_s` bounds ERBS
     /// ([`crate::control::TimeLimit::draw_bound`], read live at every stretch: a limit the plugin's
     /// CPU clock reaches while ERBS runs moves it). `None`: no drawing bound (hard: `deadline`).
     pub draw_start: Option<std::time::Instant>,
-    /// The round's 1 s floor (core.rs `floor`): the wall-clock overrun cap cuts ERBS only from
-    /// then on, as it cuts the drawing; the CPU clock's `harden` cuts at once (lead 2026-11-17).
+    /// The round's 1 s floor (core.rs `floor`): the overrun cap (wall clock or the CPU clock's
+    /// `harden`) cuts ERBS only from then on, as it cuts the drawing (lead 2026-11-17).
     pub floor: Option<std::time::Instant>,
     /// Test-only: the first stretch of the layer fails ("injected sleeve failure"), to see its
     /// reason reach `failed` and the ERBS_FALLBACK line. [`realise`] sets it on the first layer
@@ -128,11 +128,11 @@ impl ErbsOpts {
         }
         let l = self.limit.as_ref()?;
         let bound = self.draw_start.and_then(|s| l.draw_bound(s)).filter(|&b| now >= b);
-        // the wall cap's instant, not before the floor; `None` with the cap fired = the CPU clock's harden
-        let wall_cap = l.cap_deadline().map(|c| self.floor.map_or(c, |f| c.max(f)));
-        let cap = l.hardened() || wall_cap.is_some_and(|c| now >= c);
+        // the cap's instant (the wall clock's, or the moment of the CPU clock's harden), not before the floor
+        let wall_cap = l.cap_instant().map(|c| self.floor.map_or(c, |f| c.max(f)));
+        let cap = wall_cap.is_some_and(|c| now >= c);
         match (bound, cap) {
-            (Some(b), true) if l.hardened() || wall_cap.is_some_and(|c| b <= c) => Some(ErbsStop::Bound),
+            (Some(b), true) if wall_cap.is_some_and(|c| b <= c) => Some(ErbsStop::Bound),
             (_, true) => Some(ErbsStop::Cap),
             (Some(_), false) => Some(ErbsStop::Bound),
             (None, false) => None,
@@ -148,7 +148,7 @@ pub enum ErbsStop {
     Cancel,
     /// The hard limit ([`ErbsOpts::deadline`]).
     Deadline,
-    /// The overrun cap (wall clock) or the plugin's CPU-clock cap (`harden`).
+    /// The overrun cap (wall clock) or the plugin's CPU-clock cap (`harden`), both from the round's floor on.
     Cap,
     /// `[run] drawing_grace_s` past the later of the limit and the drawing's start.
     Bound,

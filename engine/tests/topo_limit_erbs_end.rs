@@ -164,7 +164,7 @@ fn check(c: &Case) {
             assert!(et.is_none(), "{}: {et_s}", c.name);
         }
         Want::FloorKept => {
-            // r5 finding 4, lead 2026-11-17: on the wall clock the round's 1 s floor holds for ERBS too (a wall cap
+            // r5 finding 4 / r6 D1, lead 2026-11-17: on both clocks the round's 1 s floor holds for ERBS too (a wall cap
             // below it cuts nothing while the round is younger than 1 s)
             assert!(!hit && n == 0, "{}: {l:?}", c.name);
             assert!(et.is_none() || !young, "{}: cut inside the floor: {et_s}", c.name);
@@ -214,17 +214,18 @@ cases! {
     lw_s_both_cap_first: Case { name: "s_both_cap_first", hard: false, wall: W, grace: 1.5, cap: 0.1, lp: "topor", in_loop: NONE, at_end: &[Reach], in_nap: NONE, nap_ms: 1800, want: Want::Cap };
     // ... and inside the floor the earlier wall cap does not count: the bound (0.3 s) came first
     lw_s_both_cap_in_floor: Case { name: "s_both_cap_in_floor", hard: false, wall: W, grace: 0.3, cap: 0.1, lp: "topor", in_loop: NONE, at_end: &[Reach], in_nap: NONE, nap_ms: 1000, want: Want::Bound };
-    // soft, CPU clock (engine wall limit off and engine cap 0, like run.py): reach at the limit, harden at the cap
-    lw_c_harden_gm1: Case { name: "c_harden_gm1", hard: false, wall: 0.0, grace: -1.0, cap: 0.0, lp: "topor", in_loop: NONE, at_end: &[Reach], in_nap: &[Harden], nap_ms: 0, want: Want::Cap };
+    // soft, CPU clock (engine wall limit off and engine cap 0, like run.py): reach at the limit, harden at the cap; the cap counts
+    // from the harden's moment, not before the round's 1 s floor (lead 2026-11-17, r6 D1), so these cases nap past it
+    lw_c_harden_gm1: Case { name: "c_harden_gm1", hard: false, wall: 0.0, grace: -1.0, cap: 0.0, lp: "topor", in_loop: NONE, at_end: &[Reach], in_nap: &[Harden], nap_ms: 1800, want: Want::Cap };
     // r5 finding 5 (m_cut_nonow): harden with the bound 60 s ahead
-    lw_c_harden_g60: Case { name: "c_harden_g60", hard: false, wall: 0.0, grace: 60.0, cap: 0.0, lp: "topor", in_loop: NONE, at_end: &[Reach], in_nap: &[Harden], nap_ms: 0, want: Want::Cap };
-    // the bound passed at the drawing start, harden (no instant) after it: the bound came first
+    lw_c_harden_g60: Case { name: "c_harden_g60", hard: false, wall: 0.0, grace: 60.0, cap: 0.0, lp: "topor", in_loop: NONE, at_end: &[Reach], in_nap: &[Harden], nap_ms: 1800, want: Want::Cap };
+    // the bound passed at the drawing start, the harden's cap instant (not before the 1 s floor) after it: the bound came first
     lw_c_harden_g0: Case { name: "c_harden_g0", hard: false, wall: 0.0, grace: 0.0, cap: 0.0, lp: "topor", in_loop: NONE, at_end: &[Reach], in_nap: &[Harden], nap_ms: 0, want: Want::Bound };
     lw_c_bound_g0: Case { name: "c_bound_g0", hard: false, wall: 0.0, grace: 0.0, cap: 0.0, lp: "topor", in_loop: NONE, at_end: &[Reach], in_nap: NONE, nap_ms: 0, want: Want::Bound };
     // r5 finding 3: the CPU limit is reached once ERBS has its options (the bound read live, not a snapshot)
     lw_c_late_reach_g0: Case { name: "c_late_reach_g0", hard: false, wall: 0.0, grace: 0.0, cap: 0.0, lp: "topor", in_loop: NONE, at_end: NONE, in_nap: &[Reach], nap_ms: 200, want: Want::Bound };
     lw_c_late_reach_gm1: Case { name: "c_late_reach_gm1", hard: false, wall: 0.0, grace: -1.0, cap: 0.0, lp: "topor", in_loop: NONE, at_end: NONE, in_nap: &[Reach], nap_ms: 200, want: Want::Free };
-    lw_c_late_harden_gm1: Case { name: "c_late_harden_gm1", hard: false, wall: 0.0, grace: -1.0, cap: 0.0, lp: "topor", in_loop: NONE, at_end: NONE, in_nap: &[Harden], nap_ms: 0, want: Want::Cap };
+    lw_c_late_harden_gm1: Case { name: "c_late_harden_gm1", hard: false, wall: 0.0, grace: -1.0, cap: 0.0, lp: "topor", in_loop: NONE, at_end: NONE, in_nap: &[Harden], nap_ms: 1800, want: Want::Cap };
     // Cancel (r5 finding 2): the TopoR loop's one drawing runs through a Cancel; with loop = cycles a Cancel stops ERBS
     lw_k_topor_g0: Case { name: "k_topor_g0", hard: false, wall: W, grace: 0.0, cap: 0.0, lp: "topor", in_loop: NONE, at_end: NONE, in_nap: &[Cancel], nap_ms: 0, want: Want::Free };
     lw_k_cycles_g0: Case { name: "k_cycles_g0", hard: false, wall: W, grace: 0.0, cap: 0.0, lp: "cycles", in_loop: NONE, at_end: NONE, in_nap: &[Cancel], nap_ms: 0, want: Want::Cancel };
@@ -237,8 +238,10 @@ cases! {
     lw_h_reach_gm1: Case { name: "h_reach_gm1", hard: true, wall: W, grace: -1.0, cap: 0.0, lp: "topor", in_loop: NONE, at_end: &[Reach], in_nap: NONE, nap_ms: 1800, want: Want::Hard };
     lw_h_reach_g0: Case { name: "h_reach_g0", hard: true, wall: W, grace: 0.0, cap: 0.0, lp: "topor", in_loop: NONE, at_end: &[Reach], in_nap: NONE, nap_ms: 1800, want: Want::Hard };
     lw_h_reach_g60: Case { name: "h_reach_g60", hard: true, wall: W, grace: 60.0, cap: 0.0, lp: "topor", in_loop: NONE, at_end: &[Reach], in_nap: NONE, nap_ms: 1800, want: Want::Hard };
-    // r5 finding 4, lead 2026-11-17: the CPU clock's hard limit (harden) cuts ERBS at once, no 1 s floor
-    lw_h_cpu_g0: Case { name: "h_cpu_g0", hard: true, wall: 0.0, grace: 0.0, cap: 0.0, lp: "topor", in_loop: NONE, at_end: &[Harden], in_nap: NONE, nap_ms: 0, want: Want::Hard };
+    // r6 D1, lead 2026-11-17: the 1 s floor holds on the CPU clock too: a harden inside the round's first second cuts nothing ...
+    lw_h_cpu_g0: Case { name: "h_cpu_g0", hard: true, wall: 0.0, grace: 0.0, cap: 0.0, lp: "topor", in_loop: NONE, at_end: &[Harden], in_nap: NONE, nap_ms: 0, want: Want::FloorKept };
+    // ... and cuts ERBS once the floor has passed
+    lw_h_cpu_late_g0: Case { name: "h_cpu_late_g0", hard: true, wall: 0.0, grace: 0.0, cap: 0.0, lp: "topor", in_loop: NONE, at_end: &[Harden], in_nap: NONE, nap_ms: 1800, want: Want::Hard };
     // ... and the wall clock keeps its floor: a wall cap of 0.05 s below it cuts nothing
     lw_h_cap_floor_g0: Case { name: "h_cap_floor_g0", hard: true, wall: W, grace: 0.0, cap: 0.05, lp: "topor", in_loop: NONE, at_end: &[Reach], in_nap: NONE, nap_ms: 100, want: Want::FloorKept };
     lw_s_capped_floor_gm1: Case { name: "s_capped_floor_gm1", hard: false, wall: W, grace: -1.0, cap: 0.05, lp: "topor", in_loop: NONE, at_end: &[Reach], in_nap: NONE, nap_ms: 100, want: Want::FloorKept };

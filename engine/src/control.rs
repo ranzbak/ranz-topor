@@ -239,8 +239,9 @@ pub struct TimeLimit {
     draw_grace_hit: AtomicBool,
     /// Wires whose ERBS the drawing bound cut (drawn the sequential way instead).
     draw_grace_erbs: AtomicU64,
-    /// [`TimeLimit::harden`] was called (the plugin's CPU-clock cap), apart from a wall-clock cap.
-    hardened: AtomicBool,
+    /// Nanoseconds since `start` at which [`TimeLimit::harden`] was first called (the plugin's CPU-clock
+    /// cap); `LIMIT_NONE` = never. The instant the wall-clock cap rules use (with the round's 1 s floor).
+    harden_ns: AtomicU64,
 }
 
 /// What the soft time limit lets finish (operate.md, `timeout_mode`): with `[optimize] loop =
@@ -369,7 +370,7 @@ const LIMIT_NONE: u64 = u64::MAX - 1;
 
 impl Default for TimeLimit {
     fn default() -> TimeLimit {
-        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false), cap_ns: AtomicU64::new(LIMIT_NONE), capped: AtomicBool::new(false), cut: AtomicU8::new(0), grace_ns: AtomicU64::new(LIMIT_NONE), grace_hit: AtomicBool::new(false), wait_ns: AtomicU64::new(0), wait_runs: AtomicU64::new(0), cycle_dropped: AtomicBool::new(false), soft: Mutex::new(Vec::new()), whole_cycle: AtomicBool::new(false), cut_in_wait: AtomicBool::new(false), draw_grace_ns: AtomicU64::new(LIMIT_NONE), draw_grace_hit: AtomicBool::new(false), draw_grace_erbs: AtomicU64::new(0), hardened: AtomicBool::new(false) }
+        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false), cap_ns: AtomicU64::new(LIMIT_NONE), capped: AtomicBool::new(false), cut: AtomicU8::new(0), grace_ns: AtomicU64::new(LIMIT_NONE), grace_hit: AtomicBool::new(false), wait_ns: AtomicU64::new(0), wait_runs: AtomicU64::new(0), cycle_dropped: AtomicBool::new(false), soft: Mutex::new(Vec::new()), whole_cycle: AtomicBool::new(false), cut_in_wait: AtomicBool::new(false), draw_grace_ns: AtomicU64::new(LIMIT_NONE), draw_grace_hit: AtomicBool::new(false), draw_grace_erbs: AtomicU64::new(0), harden_ns: AtomicU64::new(LIMIT_NONE) }
     }
 }
 
@@ -651,13 +652,28 @@ impl TimeLimit {
     /// seconds): the limit acts as the hard one from now on ([`TimeLimit::is_hard`]). O(1).
     pub fn harden(&self) {
         self.capped.store(true, Ordering::Relaxed);
-        self.hardened.store(true, Ordering::Relaxed);
+        let ns = (self.start.elapsed().as_nanos() as u64).min(LIMIT_NONE - 1);
+        let _ = self.harden_ns.compare_exchange(LIMIT_NONE, ns, Ordering::Relaxed, Ordering::Relaxed);
     }
 
-    /// [`TimeLimit::harden`] was called: the CPU clock's cap, which has no wall-clock instant
-    /// (ERBS stops at once, no 1 s floor; lead 2026-11-17). O(1).
+    /// [`TimeLimit::harden`] was called (the plugin's CPU-clock cap). O(1).
     pub fn hardened(&self) -> bool {
-        self.hardened.load(Ordering::Relaxed)
+        self.harden_ns.load(Ordering::Relaxed) != LIMIT_NONE
+    }
+
+    /// The instant the overrun cap took effect: the earlier of the wall-clock cap
+    /// ([`TimeLimit::cap_deadline`]) and the moment of [`TimeLimit::harden`] (the CPU clock's cap).
+    /// Both clocks are then alike: the round's 1 s floor applies to this instant (lead 2026-11-17,
+    /// verifier r6 D1). `None` = neither. O(1).
+    pub fn cap_instant(&self) -> Option<Instant> {
+        let h = match self.harden_ns.load(Ordering::Relaxed) {
+            LIMIT_NONE => None,
+            ns => Some(self.start + Duration::from_nanos(ns)),
+        };
+        match (h, self.cap_deadline()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Change the limit (seconds since the start; `0` = no limit). O(1), any thread.

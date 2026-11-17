@@ -276,7 +276,7 @@ def test_erbs_fallback_and_timeout_are_loud():
     res = {"connections": [_c("A", "routed")], "warnings": [
         "erbs_fallback: 2 run(s) drawn by the sequential attempts after the check rejected their ERBS, 1 stretch(es) "
         "without a sleeve to the end: wire 7: sleeve: start has no portal",
-        "erbs_timeout: the time limit passed (or the run was cancelled) before 3 stretch(es) had their ERBS; those runs "
+        "erbs_timeout: the time limit passed ([run] timeout_mode = hard) before 3 stretch(es) had their ERBS; those runs "
         "are drawn the sequential way"]}
     fs = {f.code: f for f in postrun.route_findings(res)}
     assert fs["ERBS_FALLBACK"].severity == "warning" and "wire 7" in fs["ERBS_FALLBACK"].message

@@ -4719,7 +4719,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let erbs_soft = !ctl.limit.is_hard();
         // (The round's 1 s floor is the hard cut's and the wall-clock cap's; the soft bound counts from the drawing
         // itself.) ERBS reads the limit live at every stretch (`ErbsOpts::limit`): the overrun cap (wall clock from the
-        // floor on; the CPU clock's `harden` at once, lead 2026-11-17) and, soft, the drawing bound from `t_draw` (a
+        // floor on, on both clocks; lead 2026-11-17) and, soft, the drawing bound from `t_draw` (a
         // limit the CPU clock reaches during ERBS moves it), and says which stopped it first (`Realised::stopped`).
         let pts: BTreeMap<WireId, Vec<(usize, Vec2)>> = placed.iter().map(|(&w, v)| (w, v.iter().map(|x| (x.0, x.1)).collect())).collect();
         let layers: Vec<usize> = (0..b.n_signal).collect();
