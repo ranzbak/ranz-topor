@@ -334,7 +334,7 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: warning.*
 
-**Cause.** The board's copper-to-edge clearance is 0 (KiCad: no minimum). topor uses it as it is: copper may come up to the outer side of the Edge.Cuts line, which most fabs do not accept.
+**Cause.** The board's copper-to-edge clearance is 0 (KiCad: no minimum). topor uses it as it is: copper may come up to the Edge.Cuts line (its centre line: KiCad's DRC ignores the line width), which most fabs do not accept.
 
 **Fix.** Set the value your fab needs in KiCad → File → Board Setup → Design Rules → Constraints → Copper to edge clearance (or with a custom edge_clearance rule) and save the board.
 

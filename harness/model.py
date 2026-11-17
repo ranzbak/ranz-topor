@@ -283,11 +283,11 @@ def _seg(a, b) -> dict:
 
 
 def outline_half_stroke(board) -> int:
-    """Half the widest Edge.Cuts stroke (nm): KiCad's DRC measures copper-to-edge clearance from each edge's
-    effective shape, its stroke included (drc_test_provider_edge_clearance.cpp ``testAgainstEdge``:
-    ``edge->GetEffectiveShape( Edge_Cuts )``), while the model's outline is the stroke's centre line; the engine
-    adds this to the edge clearance (``Rules.outline_half_stroke``, ``Rules::edge_clear``). The widest stroke
-    covers every edge (an outline drawn with mixed widths is held to the widest). O(graphics)."""
+    """Half the widest Edge.Cuts stroke (nm), informational: KiCad 10 measures copper-to-edge clearance from the
+    edge's centre line, the stroke width set to 0 (drc_test_provider_edge_clearance.cpp, tag 10.0.8 l. 295-298:
+    ``if( item->IsOnLayer( Edge_Cuts ) ) stroke.SetWidth( 0 );``), and so does the engine (``Rules::edge_clear``
+    = the clearance alone; 39e7297 added this value, 0.025 mm too strict on a 0.05 mm stroke). The model's
+    outline is the stroke's centre line. O(graphics)."""
     w = 0
     for item, _ in _graphics(board):
         if item.GetClass() == "PCB_SHAPE" and int(item.GetLayer()) == int(pcbnew.Edge_Cuts):
