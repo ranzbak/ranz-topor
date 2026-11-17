@@ -356,8 +356,8 @@ between rerouted connections, layer re-optimisations, label moves and crossing p
 limit the step that runs may go on for at most `limit_grace_s` seconds (`0` = stop at the next check, negative =
 no bound); then it stops at the next check, the cycle it was in is dropped (a cycle cut short is never kept) and
 the best variant kept so far is drawn. This holds in the KiCad dialog too, where the overrun cap is off. The initial
-routing and the drawing are never cut by it. [`TIME_LIMIT_WAIT`](troubleshoot.md#time_limit_wait) names the step and the
-seconds waited (log.txt, the findings, report.md, `result.json` `time_limit.loop_wait_s`, `grace_hit`). Runs that
+routing and the drawing are never cut by it (their wait is named, not bounded). [`TIME_LIMIT_WAIT`](troubleshoot.md#time_limit_wait) names the step and the
+seconds waited (log.txt, the findings, report.md, `result.json` `time_limit.wait_s` (the step the limit fell in), `cycle_dropped`, `grace_hit`). Runs that
 do not reach the limit are not affected.
 
 **The overrun has a cap** (`[run] timeout_overrun_s`): seconds past `timeout_s`, on the same clock, that the step

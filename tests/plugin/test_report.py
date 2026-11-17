@@ -164,3 +164,13 @@ def test_report_lists_the_variant_table_and_the_time_budget_warning(tmp_path):
     assert "| round 2 as drawn |" in md and "reroute 3, channel swap 1" in md
     assert any("time budget hit" in ln for ln in rep.summary_lines())
     assert len(rep.summary_lines()) <= SUMMARY_MAX_LINES
+
+
+def test_time_limit_text_names_a_dropped_cycle_even_with_no_wait():
+    """limit_grace_s: a dropped TopoR loop cycle is in the text whatever the (rounded) wait is."""
+    from topor.report import time_limit_text
+    base = {"final_s": 60.0, "start_s": 60.0, "changes": [], "clock": "wall", "reached": True, "step": "TopoR loop on the topology",
+            "mode": "soft", "overrun_s": 0.0, "grace_s": 0.0, "wait_s": 0.0}
+    assert "dropped" in time_limit_text({**base, "cycle_dropped": True})
+    assert "past it" in time_limit_text({**base, "wait_s": 2.5, "cycle_dropped": False})
+    assert "that step ran" not in time_limit_text({**base, "cycle_dropped": False})

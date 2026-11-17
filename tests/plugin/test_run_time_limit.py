@@ -112,7 +112,7 @@ def test_without_a_change_the_limit_is_fixed_and_reported(app, eprom, tmp_path, 
                                        # what the limit acting as hard cut (hard and the cap: one path): nothing
                                        "cut": "none", "cut_steps": [],
                                        # limit_grace_s (default 30 s): the loop step's wait past the limit
-                                       "loop_wait_s": 0.0, "grace_s": 30.0, "grace_hit": False}
+                                       "wait_s": 0.0, "cycle_dropped": False, "grace_s": 30.0, "grace_hit": False}
     assert "limit 60 s wall" in "\n".join(out.report.summary_lines())
 
 

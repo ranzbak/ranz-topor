@@ -217,8 +217,13 @@ pub struct TimeLimit {
     grace_ns: AtomicU64,
     /// A stop test of the TopoR loop saw the grace over ([`TimeLimit::grace_over`]).
     grace_hit: AtomicBool,
-    /// The longest time (ns) a TopoR loop step ran on past the limit ([`TimeLimit::note_loop_end`]).
-    loop_wait_ns: AtomicU64,
+    /// The longest time (ns) the step that ran when the limit passed went on past it
+    /// ([`TimeLimit::note_loop_end`], [`TimeLimit::note_step_end`]).
+    wait_ns: AtomicU64,
+    /// One bit per run (run 0 and runs >= 63 share bit 63): its step that ran at the limit has ended.
+    wait_runs: AtomicU64,
+    /// A TopoR loop cycle was dropped (cut by the grace or the cap, not offered).
+    cycle_dropped: AtomicBool,
 }
 
 /// M2 fix 3 (verify-m2c 4): a step the time limit, acting as hard (`[run] timeout_mode = "hard"`,
@@ -280,7 +285,7 @@ const LIMIT_NONE: u64 = u64::MAX - 1;
 
 impl Default for TimeLimit {
     fn default() -> TimeLimit {
-        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false), cap_ns: AtomicU64::new(LIMIT_NONE), capped: AtomicBool::new(false), cut: AtomicU8::new(0), grace_ns: AtomicU64::new(LIMIT_NONE), grace_hit: AtomicBool::new(false), loop_wait_ns: AtomicU64::new(0) }
+        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false), cap_ns: AtomicU64::new(LIMIT_NONE), capped: AtomicBool::new(false), cut: AtomicU8::new(0), grace_ns: AtomicU64::new(LIMIT_NONE), grace_hit: AtomicBool::new(false), wait_ns: AtomicU64::new(0), wait_runs: AtomicU64::new(0), cycle_dropped: AtomicBool::new(false) }
     }
 }
 
@@ -357,15 +362,45 @@ impl TimeLimit {
     /// A TopoR loop step ended with the limit passed: its wait is the time since the limit
     /// (the longest of the runs counts). O(1).
     pub fn note_loop_end(&self) {
-        if let Some(d) = self.deadline() {
-            let ns = Instant::now().saturating_duration_since(d).as_nanos().min(u128::from(u64::MAX / 2)) as u64;
-            self.loop_wait_ns.fetch_max(ns, Ordering::Relaxed);
+        self.note_wait();
+    }
+
+    /// The step that ran when the limit passed has ended (the run went on to its next stage or fell
+    /// idle): its wait is the time since the limit. Noted once per run (`run` as in
+    /// [`RunControl::for_run`], 0 = a single run); a run's later stages began after the limit and
+    /// never count. O(1).
+    pub fn note_step_end(&self, run: u32) {
+        let bit = 1u64 << run.min(63);
+        if self.passed() && self.wait_runs.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+            self.note_wait();
         }
     }
 
-    /// Seconds the TopoR loop step ran past the limit (0 when it ended before). O(1).
-    pub fn loop_wait_s(&self) -> f64 {
-        self.loop_wait_ns.load(Ordering::Relaxed) as f64 * 1e-9
+    fn note_wait(&self) {
+        if let Some(d) = self.deadline() {
+            let ns = Instant::now().saturating_duration_since(d).as_nanos().min(u128::from(u64::MAX / 2)) as u64;
+            self.wait_ns.fetch_max(ns, Ordering::Relaxed);
+        }
+    }
+
+    /// Some run's step ended after the limit passed ([`TimeLimit::note_step_end`]). O(1).
+    pub fn step_end_noted(&self) -> bool {
+        self.wait_runs.load(Ordering::Relaxed) != 0
+    }
+
+    /// Seconds the step that ran when the limit passed went on past it (0 when it ended before). O(1).
+    pub fn wait_s(&self) -> f64 {
+        self.wait_ns.load(Ordering::Relaxed) as f64 * 1e-9
+    }
+
+    /// A TopoR loop cycle was cut by the limit (grace or cap) and not offered. O(1).
+    pub fn note_cycle_dropped(&self) {
+        self.cycle_dropped.store(true, Ordering::Relaxed);
+    }
+
+    /// A TopoR loop cycle was dropped ([`TimeLimit::note_cycle_dropped`]). O(1).
+    pub fn cycle_dropped(&self) -> bool {
+        self.cycle_dropped.load(Ordering::Relaxed)
     }
 
     /// A stop test saw the grace over. O(1).
@@ -606,6 +641,10 @@ impl RunControl {
         if let Ok(mut p) = self.progress.lock() {
             // M2.TL: the stage that ran when the limit passed is the step the soft limit waited for.
             Self::note_limit_step(&self.limit, &mut p);
+            let open = if self.run > 0 && p.runs > 1 { p.run_steps.get(self.run as usize - 1).is_some_and(|s| !s.is_empty()) } else { !p.stage.is_empty() };
+            if open {
+                self.limit.note_step_end(self.run); // the step that ran at the limit ends here
+            }
             if self.run > 0 && p.runs > 1 {
                 p.stage = if stage.is_empty() { String::new() } else { format!("run {}: {stage}", self.run) };
                 let i = self.run as usize - 1;
@@ -640,6 +679,9 @@ impl RunControl {
         }
         if let Ok(mut p) = self.progress.lock() {
             Self::note_limit_step(&self.limit, &mut p);
+            if p.run_steps.get(self.run as usize - 1).is_some_and(|s| !s.is_empty()) {
+                self.limit.note_step_end(self.run);
+            }
             if let Some(s) = p.run_steps.get_mut(self.run as usize - 1) {
                 s.clear();
             }
@@ -1112,15 +1154,39 @@ mod tests {
     }
 
     #[test]
-    fn the_loop_wait_is_the_time_since_the_limit() {
+    fn the_wait_is_the_time_since_the_limit() {
         let ctl = RunControl::new();
         ctl.limit.init(0.1);
         ctl.limit.note_loop_end();
-        assert_eq!(ctl.limit.loop_wait_s(), 0.0, "ended before the limit: no wait");
+        assert_eq!(ctl.limit.wait_s(), 0.0, "ended before the limit: no wait");
         std::thread::sleep(Duration::from_millis(250));
         ctl.limit.note_loop_end();
-        let w = ctl.limit.loop_wait_s();
+        let w = ctl.limit.wait_s();
         assert!((0.1..5.0).contains(&w), "{w}");
     }
 
+    #[test]
+    fn the_wait_is_that_of_the_step_the_limit_fell_in() {
+        let ctl = RunControl::new();
+        ctl.limit.init(0.1);
+        ctl.stage(1, 1, "plane stubs");
+        ctl.stage(1, 1, "projection"); // before the limit: no wait
+        assert!(!ctl.limit.step_end_noted() && ctl.limit.wait_s() == 0.0);
+        std::thread::sleep(Duration::from_millis(250));
+        ctl.stage(1, 1, "initial routing"); // ends the step the limit fell in
+        let w = ctl.limit.wait_s();
+        assert!((0.1..5.0).contains(&w) && ctl.limit.step_end_noted(), "{w}");
+        assert_eq!(ctl.snapshot().limit_step, "projection");
+        std::thread::sleep(Duration::from_millis(300));
+        ctl.stage(1, 1, "drawing"); // a step that began after the limit is no wait
+        assert_eq!(ctl.limit.wait_s(), w);
+    }
+
+    #[test]
+    fn a_dropped_cycle_is_noted() {
+        let ctl = RunControl::new();
+        assert!(!ctl.limit.cycle_dropped());
+        ctl.limit.note_cycle_dropped();
+        assert!(ctl.limit.cycle_dropped());
+    }
 }

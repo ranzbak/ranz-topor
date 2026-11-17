@@ -20,7 +20,7 @@ Codes (catalogued in messages.py, one section each in docs/user/troubleshoot.md)
     VIOLATIONS          never drop: copper written although it breaks a rule (the drawing found no legal
                         geometry), one item per violation with place, type and cause (``result["violations"]``)
     TIME_BUDGET_HIT     run.timeout_s stopped the topological core before its work caps
-    TIME_LIMIT_WAIT     the run waited past the soft time limit for the TopoR loop step (seconds; run.limit_grace_s bounds it)
+    TIME_LIMIT_WAIT     the run waited past the soft time limit for the step the limit fell in (seconds; run.limit_grace_s bounds the TopoR loop)
     TIME_OVERRUN_CAP    the soft time limit went past run.timeout_overrun_s and acted as the hard one (F3)
     TIME_DRAWING_CUT    the time limit, acting as hard, cut a step of the drawing (part of the board not drawn)
     DRC_NEW_VIOLATIONS  KiCad's DRC of the routed copy finds new violations (counts by type, the first places);

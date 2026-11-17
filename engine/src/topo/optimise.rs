@@ -248,6 +248,8 @@ pub struct LoopReport {
     pub stats: CycleStats,
     /// One line per cycle.
     pub lines: Vec<String>,
+    /// A running cycle was cut short by `inner()` and dropped (not offered).
+    pub dropped: bool,
 }
 
 /// The TopoR loop: offer the current state (generation 0), then up to `p.cycles` cycles; after
@@ -301,10 +303,20 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
             since_gain = 0;
         }
         let ctx = CycleCtx { cycle, seed: mix(p.seed, cycle as u64), amp: sched.width, emphasis: p.emphasis };
-        let cs = sp.cycle(&ctx, inner);
+        // `inner()` is latched for the cycle: once it said stop the cycle is dropped, also when a
+        // raised limit would let the check pass again afterwards.
+        let mut hit = false;
+        let cs = {
+            let mut latched = || {
+                hit = hit || inner();
+                hit
+            };
+            sp.cycle(&ctx, &mut latched)
+        };
         rep.stats.add(&cs);
         rep.cycles = cycle;
-        if inner() {
+        if hit || inner() {
+            rep.dropped = true;
             // cut short inside (Cancel): not a finished cycle, not a variant
             rep.stop = "time limit".into();
             break;
@@ -838,6 +850,23 @@ mod tests {
         let mut a = Archive::new(4);
         let rep = optimise(&mut sp, &mut a, &params(1, 0), &mut || false, &mut || false, &|| 0.0);
         assert!(ticks.get() >= 1000 && rep.offered > 1);
+        assert!(!rep.dropped);
+    }
+
+    #[test]
+    fn a_stop_the_cycle_saw_stays_a_stop_when_the_check_passes_again() {
+        // the limit is raised between the cycle's last check and the re-check: the cut cycle stays dropped
+        let ticks = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let mut sp = Slow { ticks: ticks.clone(), done: 0 };
+        let mut a = Archive::new(4);
+        let calls = std::cell::Cell::new(0usize);
+        let mut inner = || {
+            calls.set(calls.get() + 1);
+            calls.get() == 4 // the 4th check says stop, every other check (also the re-check) passes
+        };
+        let rep = optimise(&mut sp, &mut a, &params(1, 0), &mut || false, &mut inner, &|| 0.0);
+        assert!(rep.dropped && rep.stop == "time limit", "{rep:?}");
+        assert_eq!(rep.offered, 1, "the cut cycle is not offered");
     }
 
 }

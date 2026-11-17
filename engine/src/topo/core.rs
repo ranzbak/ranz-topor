@@ -352,21 +352,38 @@ fn limit_report(ctl: &RunControl, opts: &Options, r: &mut RouteResult) -> Option
         ));
     }
     let cut_steps = steps.iter().map(|s| s.name().to_string()).collect();
-    // limit_grace_s: the wait of the TopoR loop step past the limit, always named (TIME_LIMIT_WAIT).
+    // The wait of the step the limit fell in (plane stubs, projection, initial routing, the TopoR
+    // loop, the drawing), always named (TIME_LIMIT_WAIT). A step no stage change ended after the
+    // limit (the last one) ran to the result.
     let grace_s = ctl.limit.grace_s().map(|g| (g * 1e3).round() / 1e3);
     let grace_hit = mode == "soft" && ctl.limit.grace_hit();
-    let loop_wait_s = if reached { (ctl.limit.loop_wait_s() * 1e3).round() / 1e3 } else { 0.0 };
-    if reached && loop_wait_s > 0.0 {
+    let cycle_dropped = reached && ctl.limit.cycle_dropped();
+    let wait_raw = if !reached { 0.0 } else if ctl.limit.step_end_noted() || ctl.limit.wait_s() > 0.0 { ctl.limit.wait_s() } else { (runtime_s - limit_s).max(0.0) };
+    let wait_s = (wait_raw * 1e3).round() / 1e3;
+    if wait_line_due(reached, wait_raw, cycle_dropped) {
+        let in_loop = step.contains("TopoR loop");
+        let shown = if wait_raw < 0.1 { format!("{wait_raw:.3}") } else { format!("{wait_raw:.1}") };
         r.warnings.push(format!(
-            "time limit wait: the limit was reached during the TopoR loop step; waited {loop_wait_s:.1} s for it ({})",
-            match (grace_hit, grace_s) {
-                (true, Some(g)) => format!("[run] limit_grace_s = {g:.0} s ran out: the step was stopped at its next check, the cycle it was in was dropped, the best variant so far was drawn; raise limit_grace_s to let a cycle finish"),
-                (false, Some(g)) => format!("the step finished within [run] limit_grace_s = {g:.0} s"),
-                _ => "[run] limit_grace_s is unbounded here".to_string(),
+            "time limit wait: the limit was reached during {}; waited {shown} s for it ({})",
+            if step.is_empty() { "the run" } else { step.as_str() },
+            match (in_loop, grace_hit, cycle_dropped, grace_s) {
+                (true, true, _, Some(g)) => format!("[run] limit_grace_s = {g:.0} s ran out: the step was stopped at its next check, the cycle it was in was dropped, the best variant so far was drawn; raise limit_grace_s to let a cycle finish"),
+                (_, _, true, _) => "the step was cut at its next check, the cycle it was in was dropped, the best variant so far was drawn (the overrun cap or the hard limit)".to_string(),
+                (true, false, _, Some(g)) if wait_raw <= g => format!("the step finished within [run] limit_grace_s = {g:.0} s"),
+                (true, false, _, Some(g)) => format!("the step ran past [run] limit_grace_s = {g:.0} s because it was between two checks or finishing its last cycle; no cycle was dropped"),
+                (true, _, _, None) => "[run] limit_grace_s is unbounded here".to_string(),
+                (false, ..) => "[run] limit_grace_s bounds only the TopoR loop step: this step ran to its end".to_string(),
             }
         ));
     }
-    Some(crate::route::LimitReport { limit_s, mode: mode.into(), reached, step, overrun_s, cap_s, cap_hit, cut: cut.into(), cut_steps, grace_s, grace_hit, loop_wait_s })
+    Some(crate::route::LimitReport { limit_s, mode: mode.into(), reached, step, overrun_s, cap_s, cap_hit, cut: cut.into(), cut_steps, grace_s, grace_hit, wait_s, cycle_dropped })
+}
+
+/// Whether the report carries a `time limit wait:` line: the limit was reached and the step it fell
+/// in ran on past it (the unrounded wait) or a TopoR loop cycle was dropped (a cut that lands a
+/// moment after the limit has a wait that rounds to 0 but still lost the cycle). O(1).
+pub(crate) fn wait_line_due(reached: bool, wait_s: f64, cycle_dropped: bool) -> bool {
+    reached && (wait_s > 0.0 || cycle_dropped)
 }
 
 /// The reason of a connection the time limit left undrawn (the drawing was the step that ran).
@@ -3134,6 +3151,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// Debug (`TOPO_LOOPDBG`): one line per reroute and per cycle stage.
             dbg: bool,
             dbg_tag: u64,
+            /// The run's control: the test hook's markers between the cycle's stages.
+            ctl: &'a RunControl,
         }
         impl<'p> Sp<'_, 'p> {
             /// Debug: the criteria now as one short text.
@@ -3549,10 +3568,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
                 // limit_grace_s: the cycle's later steps are not begun once the loop is to stop (the
                 // caller drops a cycle cut short, so the state it leaves is never offered).
+                self.ctl.test_point("loop stage 1 check");
                 if stop() {
                     cs.busy_s = t0.elapsed().as_secs_f64();
                     return cs;
                 }
+                self.ctl.test_point("loop stage 2 begin");
                 if self.st.uncross_all(50) > 0 {
                     let lr = (self.assign_t)(self.st, self.ties);
                     self.set_lr(lr, None);
@@ -3615,10 +3636,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     cs.layer_runs += 1;
                     cs.layer_s += tl.elapsed().as_secs_f64();
                 }
+                self.ctl.test_point("loop stage 2 check");
                 if stop() {
                     cs.busy_s = t0.elapsed().as_secs_f64();
                     return cs;
                 }
+                self.ctl.test_point("loop stage 3 begin");
                 // Floating up (Polubasov 2010 «всплытие»): the label moves (crossing flips, via
                 // shifts, segment lifting), each kept when the price drops; the new labelling is
                 // taken when the board's evaluation does not rise.
@@ -3668,10 +3691,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     let t = self.dbg_crit();
                     eprintln!("LOOPDBG[{}] cycle {} after floating up (kept {}, undone {}): {t}", self.dbg_tag, c.cycle, cs.float_kept, cs.undone);
                 }
+                self.ctl.test_point("loop stage 3 check");
                 if stop() {
                     cs.busy_s = t0.elapsed().as_secs_f64();
                     return cs;
                 }
+                self.ctl.test_point("loop stage 4 begin");
                 // The crossing rules (clinches, double crossings, crossings no layer separates),
                 // taken when the board's evaluation does not rise.
                 let x0 = (self.xkept)();
@@ -3774,6 +3799,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         st.layers_now = layers_now(&st, &lr.events, bottom);
         let pred0 = measure(&st, &lr);
         let mut sp = Sp {
+            ctl,
             st: &mut st,
             wire_conn: &mut wire_conn,
             lr: &mut lr,
@@ -3846,6 +3872,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let mut rep = crate::control::in_loop_scope(|| optimise(&mut sp, &mut arch, &params, &mut stop, &mut inner, &clock));
         if ctl.limit.passed() {
             ctl.limit.note_loop_end(); // the wait of the loop step past the limit, for the report
+            if rep.dropped && !stop_now() {
+                ctl.limit.note_cycle_dropped(); // a cycle the limit cut: the report names it whatever the wait
+            }
         }
         if rep.stop == "time limit" {
             rep.stop = if stop_now() { "Cancel / OK" } else if ctl.over_limit() { "time limit" } else { "loop_time_share" }.into();
@@ -6340,6 +6369,14 @@ fn out_vias(out: &[Outcome], reqs: &[planes::Req], _conns: &[Connection]) -> Vec
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_wait_line_comes_whenever_a_cycle_was_dropped_or_the_step_waited() {
+        assert!(wait_line_due(true, 0.0004, false), "any wait is reported");
+        assert!(wait_line_due(true, 0.0, true), "a dropped cycle is reported though the wait rounds to 0");
+        assert!(!wait_line_due(true, 0.0, false));
+        assert!(!wait_line_due(false, 5.0, true), "no limit reached: nothing to say");
+    }
+
     use super::*;
 
     fn eprom() -> BoardModel {

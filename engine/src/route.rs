@@ -289,8 +289,11 @@ pub struct LimitReport {
     pub grace_s: Option<f64>,
     /// The grace ran out: the loop step was stopped at its next check and the cycle it was in dropped.
     pub grace_hit: bool,
-    /// Seconds the TopoR loop step ran past the limit before it ended (0: it was not running then).
-    pub loop_wait_s: f64,
+    /// Seconds the step that ran when the limit passed (`step`: plane stubs, projection, initial
+    /// routing, the TopoR loop, the drawing) went on past it before it ended.
+    pub wait_s: f64,
+    /// A TopoR loop cycle was cut by the limit (grace or cap) and dropped: the best variant so far was drawn.
+    pub cycle_dropped: bool,
 }
 
 /// A routed differential-pair connection (D7), nm. `from` / `to` are the P connection's pads.
