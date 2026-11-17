@@ -92,7 +92,7 @@ pub fn via_ranges(ev: &[LEv], strict: bool) -> (Vec<(usize, usize)>, Vec<bool>) 
 }
 
 /// Cache of [`end_site`] per (wire, end events as (traversal, fraction bits) pairs).
-type EndSites = std::collections::HashMap<(WireId, usize, u64, usize, u64), Option<(usize, Vec2)>>;
+type EndSites = crate::fxhash::FxHashMap<(WireId, usize, u64, usize, u64), Option<(usize, Vec2)>>;
 
 /// 5.2 (`[vias] between_crossings`): a site for the via of the interval between the events `a`
 /// and `b` of wire `w` inside an end traversal, on the via's own side of the event, for an
@@ -367,7 +367,7 @@ impl<'a> CapModel<'a> {
             via_iv: vec![Vec::new(); nw],
             via_k: vec![Vec::new(); nw],
             nosite: vec![0; nw],
-            end_sites: std::cell::RefCell::new(std::collections::HashMap::new()),
+            end_sites: std::cell::RefCell::new(crate::fxhash::map()),
             cost: vec![0.0; st.proj.edges.len() * nl],
             sq: vec![0.0; st.proj.edges.len() * nl],
             log: None,

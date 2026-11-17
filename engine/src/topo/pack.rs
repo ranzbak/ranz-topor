@@ -28,7 +28,7 @@ use super::draw::{poly_dist, seg_dist};
 use super::state::{EdgeId, Obstacle, Projection, State, VertKind, WireId};
 use crate::geom::Vec2;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use crate::fxhash::{map as fxmap, FxHashMap};
 use std::rc::Rc;
 
 /// The static via candidate points of a triangle `a b c`, in the drawing's order: incentre,
@@ -190,17 +190,17 @@ pub struct Packer<'a> {
     eps: f64,
     /// Copper-to-edge clearance kept (nm; 0 when that check is ignored).
     edge_clear: f64,
-    cache: RefCell<HashMap<MarginKey, f64>>,
-    taut_cache: RefCell<HashMap<TautKey, Rc<Taut>>>,
+    cache: RefCell<FxHashMap<MarginKey, f64>>,
+    taut_cache: RefCell<FxHashMap<TautKey, Rc<Taut>>>,
     /// Reach diameter of the first via size of every net (nm, [`crate::vias::via_reach`] x 2:
     /// the copper disc, or larger where the drill's hole clearance reaches further; 5.4 task 1);
     /// nets not listed use `via_d0`. 0 = the planner gives vias no room (a packer built without
     /// a board model).
-    via_d: HashMap<i32, f64>,
+    via_d: FxHashMap<i32, f64>,
     via_d0: f64,
     /// Free radius against other nets' obstacles at the incentre / centroid of a triangle, per
     /// (triangle, net). Cached.
-    free_cache: RefCell<HashMap<(usize, i32), f64>>,
+    free_cache: RefCell<FxHashMap<(usize, i32), f64>>,
     /// Price (mm) of a via disc that leaves its passage-layer no slack (the `via_squeeze`
     /// factor); 0 = off.
     pub via_squeeze: f64,
@@ -249,11 +249,11 @@ impl<'a> Packer<'a> {
             outline,
             eps,
             edge_clear,
-            cache: RefCell::new(HashMap::new()),
-            taut_cache: RefCell::new(HashMap::new()),
-            via_d: HashMap::new(),
+            cache: RefCell::new(fxmap()),
+            taut_cache: RefCell::new(fxmap()),
+            via_d: fxmap(),
             via_d0: 0.0,
-            free_cache: RefCell::new(HashMap::new()),
+            free_cache: RefCell::new(fxmap()),
             via_squeeze: 0.0,
             reserve_sites: false,
             via_between: false,
