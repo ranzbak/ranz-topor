@@ -3,7 +3,7 @@ DRC loop on the copy -> SVG preview -> Accept = one commit / Reject = nothing ->
 
 ``run(port, ui, cfg, engine, *, tmp_root)`` never touches the live board except in the Accept branch, which is
 exactly one ``port.commit`` (= one undo step), followed only on request by ``refill_zones``
-(``run.refill_after_accept``, default false: the user presses B) and the KiCad cleanup / teardrop actions, each its
+(``run.refill_after_accept``, default true; false: the user presses B) and the KiCad cleanup / teardrop actions, each its
 own undo step (ruling C28); a failure after the commit keeps ``accepted`` + POST_COMMIT_STEP_FAILED (C30). Every
 board that is judged or rendered derives from the ``save_as`` copy (live, including unsaved edits), never from
 the file on disk (Review Focus 2). No pcbnew (M4-R1).
@@ -174,20 +174,32 @@ def filter_model(model: dict, ripped) -> dict:
             "pours": [{**p, "vias": [u for u in p.get("vias", []) if u not in gone]} for p in model.get("pours", [])]}
 
 
-def _routed_fills(cfg, out, state: dict, log) -> dict:
-    """``run.commit_fills``: the zone fills of the kicad-cli refilled routed copy (the DRC round that judged exactly
-    the items being committed), keyed by zone uuid, for the Accept commit. Empty when off, when the judged copy
-    is missing or when it was judged for other items. O(len(board text))."""
-    if not cfg.get("run", "commit_fills") or out.routed_pcb is None or not Path(out.routed_pcb).is_file():
-        return {}
+# why `run.commit_fills` wrote no (or not every) zone fill: key -> text for the log and the finding
+FILLS_SKIP_TEXT = {
+    "no_copy": "the refilled copy of the routed result is missing",
+    "other_items": "the refilled copy was judged for other items than the ones committed",
+}
+
+
+def _routed_fills(cfg, out, state: dict, log) -> tuple:
+    """``run.commit_fills``: ``(fills, skip)``. `fills` = the zone fills of the kicad-cli refilled routed copy (the DRC
+    round that judged exactly the items being committed), keyed by zone uuid, for the Accept commit. `skip` = None when
+    they are written or nothing was asked for; ``"off"`` when the user turned the setting off (the done notice already
+    says to press B); a key of FILLS_SKIP_TEXT when the fills could not be had: then `fills` is empty and the caller
+    reports it (finding + done notice), never only the log. O(len(board text))."""
+    if not cfg.get("run", "commit_fills"):
+        return {}, "off"
+    if out.routed_pcb is None or not Path(out.routed_pcb).is_file():
+        log.line(f"zone fills not committed: {FILLS_SKIP_TEXT['no_copy']}")
+        return {}, "no_copy"
     judged = state.get("judged_items")
     if judged is not None and [{k: v for k, v in it.items() if k != "group"} for it in judged] != \
             [{k: v for k, v in it.items() if k != "group"} for it in out.items]:
-        log.line("zone fills not committed: the refilled copy was judged for other items")
-        return {}
+        log.line(f"zone fills not committed: {FILLS_SKIP_TEXT['other_items']}")
+        return {}, "other_items"
     fills = {u: p for u, p in pcbfile.parse_zone_fills(Path(out.routed_pcb).read_text()).items() if not u.startswith("#")}
     log.line(f"zone fills of the refilled routed copy committed with the copper: {len(fills)} zones")
-    return fills
+    return fills, None
 
 
 def refill_pours(model: dict, refilled_text: str) -> dict:
@@ -1162,9 +1174,9 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     # 7. Accept: one commit = one undo step. Everything after it is a separate step (ruling C28: refill only with
     # run.refill_after_accept; cleanup / teardrops opt-in) and a failure there keeps "accepted" (ruling C30).
     n_partial = sum(1 for it in out.items if it.get("group") == "topor-partial")
+    fills, fills_skip = _routed_fills(cfg, out, state, log)
     req = CommitRequest(remove_uuids=list(ripped), items=out.items,
-                        message=f"Topor: routed {out.routed}/{out.total}", group=True,
-                        zone_fills=_routed_fills(cfg, out, state, log))
+                        message=f"Topor: routed {out.routed}/{out.total}", group=True, zone_fills=fills)
     out.commit = port.commit(req)
     status = "accepted"
     out.status = status
@@ -1185,9 +1197,23 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
             return False
 
     report.facts["zones_refilled"] = False
-    report.facts["zone_fills_committed"] = len(req.zone_fills)
+    report.facts["zone_fills_committed"] = max(0, len(req.zone_fills) - len(getattr(out.commit, "fills_not_applied", None) or []))
+    report.facts["zone_fills_skipped"] = fills_skip or ("not_applied" if getattr(out.commit, "fills_not_applied", None) else "")
     if cfg.get("run", "refill_after_accept"):
         report.facts["zones_refilled"] = after_commit("zone refill", port.refill_zones)
+    # fail fast: fills that were asked for but not written are shown in the done notice and the report, not only the
+    # log; moot when the live refill above redid every zone
+    not_applied = list(getattr(out.commit, "fills_not_applied", None) or [])
+    if (fills_skip not in (None, "off") or not_applied) and not report.facts["zones_refilled"]:
+        why = (FILLS_SKIP_TEXT[fills_skip] if fills_skip else
+               f"{len(not_applied)} of {len(req.zone_fills)} zone fill(s) could not be written to the board")
+        log.line(f"zone fills not written: {why}")
+        w = Finding("ZONE_FILLS_SKIPPED", "warning",
+                    f"The routes were committed, but the zone fills were not written ({why}), so the pours are the ones "
+                    "from before the run.", messages.fix_for("ZONE_FILLS_SKIPPED"), (fills_skip or "not_applied",))
+        findings.append(w)
+        post_failed.append(w)
+        report.facts["post_commit_failed"] = list(post_failed)
     skipped = []
     for key, action in (("kicad_cleanup", ACTION_CLEANUP), ("kicad_teardrops", ACTION_TEARDROPS)):
         if not cfg.get("run", key):

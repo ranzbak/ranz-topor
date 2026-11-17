@@ -86,7 +86,7 @@ def test_report_lists_exit_stubs_and_necks(tmp_path):
 
 def test_report_outcome_line_says_how_zones_are_refilled(tmp_path):
     """Ruling C28: the summary's Outcome line after Accept tells the user to press B when topor did not refill
-    (run.refill_after_accept = false, the default) and that the refill is a second undo step when it did."""
+    (run.refill_after_accept = false) and that the refill is a second undo step when it did."""
     from topor.report import RunReport, outcome_text
 
     rep = RunReport(tmp_path, {"zones_refilled": False})
@@ -96,6 +96,13 @@ def test_report_outcome_line_says_how_zones_are_refilled(tmp_path):
     rep.facts["zones_refilled"] = True
     line = [ln for ln in rep.summary_lines() if ln.startswith("Outcome:")][0]
     assert "zones refilled" in line and "second undo step" in line
+    for why, text in (("no_copy", "refilled copy of the result is missing"), ("other_items", "judged for other items"),
+                      ("not_applied", "some zone fills could not be written")):
+        rep.facts.update(zones_refilled=False, zone_fills_committed=0, zone_fills_skipped=why)
+        line = [ln for ln in rep.summary_lines() if ln.startswith("Outcome:")][0]
+        assert "zone fills NOT written" in line and text in line and "press B" in line
+    rep.facts.update(zone_fills_skipped="off")
+    assert "zones not refilled: press B" in [ln for ln in rep.summary_lines() if ln.startswith("Outcome:")][0]
     rep.set_outcome("rejected")
     line = [ln for ln in rep.summary_lines() if ln.startswith("Outcome:")][0]
     assert line == f"Outcome: {outcome_text('rejected')}"

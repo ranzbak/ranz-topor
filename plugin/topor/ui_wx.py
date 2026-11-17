@@ -1694,7 +1694,8 @@ class DoneDialog(_Base):
             facts = getattr(report, "facts", None) or {}
             if "zones_refilled" in facts:  # ruling C28
                 rid = ("done_refilled" if facts["zones_refilled"] else
-                       "done_fills_committed" if facts.get("zone_fills_committed") else "done_refill_hint")
+                       "done_fills_committed" if facts.get("zone_fills_committed") and
+                       facts.get("zone_fills_skipped") in (None, "") else "done_refill_hint")
                 body.Add(self.text(self, "report", rid, wrap_dip=420), 0, wx.BOTTOM, self.group)
             for f in facts.get("post_commit_failed") or ():  # ruling C30: committed, then a step failed
                 body.Add(self.text(self, "report", "done_post_commit", wrap_dip=420,

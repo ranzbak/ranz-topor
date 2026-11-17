@@ -373,7 +373,7 @@ Cancel without preview (never after `error`, which has its own dialog); modal, m
 Text by `outcome`: `accepted` → `done_accepted` (prefixed "Stopped early by Cancel: " when
 `stop_reason == "cancel"`, row `done_accepted_cancelled`), `rejected` → `done_rejected`,
 `cancelled` → `done_cancelled`. After `accepted` only (FX1, rulings C28 / C30): `done_refill_hint`
-when `[run] refill_after_accept = false` (the default; report fact `zones_refilled` false) or
+when `[run] refill_after_accept = false` (default true since 2026-11-17; report fact `zones_refilled` false) or
 `done_refilled` when topor refilled the zones after the commit; one `done_post_commit` line per
 POST_COMMIT_STEP_FAILED finding (report fact `post_commit_failed`). After `accepted` with new DRC violations
 (report facts `routing_new` > 0, `drc_by_type_new`; user 2026-11-11) the icon is `ART_WARNING` instead of the

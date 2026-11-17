@@ -109,7 +109,10 @@ class FakeBoard:
                 if it.get("group"):
                     self.groups.setdefault(it["group"], []).append(it["uuid"])
                     grouped = True
-        return CommitResult(removed=len(removed), created=len(items), created_ids=ids, grouped=grouped)
+        live = set(pcbfile.parse_zone_fills(self.text))
+        missing = sorted(u for u in req.zone_fills if u not in live) if req.zone_fills else []
+        return CommitResult(removed=len(removed), created=len(items), created_ids=ids, grouped=grouped,
+                            fills_not_applied=missing)
 
     def refill_zones(self) -> None:
         self.calls.append(("refill_zones", ()))
