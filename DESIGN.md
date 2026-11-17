@@ -220,20 +220,22 @@ HDMI5V's via (+6 DRC, 2 shorts, ADV_SCL connection DRC 2 -> 8). Same parity: one
 - Ladder: seq copper identical on the 5 boards; erbs per-connection table for qmtech/esp (ADV_CLK, ADV_DE, net 55).
 
 ## Round j (2026-11-17): verifier findings of round i (MERGE WITH FIXES)
-- **Exact crossing parity** (draw.rs `seg_cross_sos`, `proper_crossings`, `seg_chord_crossings`). `seg_proper`'s
+- **Exact crossing parity** (draw.rs `seg_cross_sos`, `proper_crossings`). `seg_proper`'s
   tolerance window dropped a crossing through a vertex of either polyline (parity flipped both ways). Now: exact
   orientation signs (Shewchuk 1997 pp. 36-40, robust crate) and a symbolic translation of the run by (e, e^2)
   (simulation of simplicity, Edelsbrunner & Muecke 1990): every degenerate contact gets one consistent answer,
   through a vertex = 1, touch-and-return / collinear stretch = even. For two runs with the same ends (the class
-  test's competitor and ERBS; the taut pull's old and new legs) the sum mod 2 equals the even-odd rule of the closed
-  loop at the reference path's ends: exact. Used by the readers that compare two runs with the same ends: the class
-  test and the taut pull's guards. Not by the via side test (`via_side_ok`, `partner_side_ok`): it asks on which side
-  of another wire's chord a free point (a via site) lies; a via site exactly on the chord is decided arbitrarily by
-  the translation (esp at main 385e043, TOPO_SOSDBG dump hz-runs/m3j-dbg: 4 of 6 old/new disagreements), so it keeps
-  `seg_proper` this round. Its own flaw (a crossing through a chord vertex or along an edge counts 0: esp wire 176, a
-  via site beyond wire 31's pass point along the edge was accepted) is parked: it needs its own rule (open at the
-  segment's ends, exact inside) and a design note. Boolean "touches a wall" uses (`seg_proper` in exact.rs, octi.rs,
-  the walls check) are no parity and keep the strict predicate. Tests: `crossing_count_degenerate_cases` (9 cases, also at nm and swapped),
+  test's competitor and ERBS) the sum mod 2 equals the even-odd rule of the closed
+  loop at the reference path's ends: exact. Used by the class test only (erbs mode). The seq drawing's parity
+  readers keep `seg_proper` (code = main there): the via side test (`via_side_ok`, `partner_side_ok`) asks on which
+  side of another wire's chord a free point (a via site) lies, and the taut pull's guards are single segments whose
+  ends (pass points, via centres) a run may touch; at such a contact at a segment's END the translation decides
+  arbitrarily. Evidence at main 385e043 (TOPO_SOSDBG dumps hz-runs/m3j-dbg, m3j-bhtip): qmtech 14 and esp 4 of 6
+  disagreements were via sites on a chord's end / on the chord (ADV_SDA via moved; esp IO bundle moved); bornhack
+  10, all the taut pull of wire 417 (+3V3) whose vertex sits exactly on a guard's end. Their own flaw (a crossing
+  through a chord's interior vertex counts 0; esp wire 176: a via site beyond wire 31's pass point along the edge
+  accepted) is parked: a rule that is open at a segment's ends and exact inside needs its own design note. Boolean
+  "touches a wall" uses (`seg_proper` in exact.rs, octi.rs, the walls check) are no parity. Tests: `crossing_count_degenerate_cases` (9 cases, also at nm and swapped),
   `crossing_parity_fuzz_against_exact_reference` (4 modes x 20 000 cases against an i128 even-odd reference).
 - **Parity per (wire, path)**: `ClassRef::crossings` keys by path; two odd paths of one wire no longer cancel.
 - **Passless wire**: its reference is the terminal-to-terminal chord on its plan's layers (`Drawer::plan_layers`,

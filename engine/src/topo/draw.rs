@@ -175,13 +175,14 @@ pub(super) fn seg_cross_sos(p0: Vec2, p1: Vec2, q0: Vec2, q1: Vec2) -> bool {
 
 /// Crossings of the polyline `poly` with the segment `a b` ([`seg_cross_sos`]: `poly` translated
 /// by an infinitesimal vector, exact signs, no distance threshold). Mod 2 it is the side invariant
-/// of an undrawn wire's path where two runs with the same end points are compared: the taut pull
-/// ([`Drawer::pull_taut`], the legs a removed vertex leaves against the new leg) and the round-i
-/// class test ([`competitor_keeps_class`]); the same translation applies to both runs, so the
-/// comparison is exact. Not the via side test ([`Drawer::via_side_ok`]): that one asks on which
-/// side of a chord the free point `p` (a via site) lies, a translation decides a site exactly on
-/// the chord arbitrarily (esp at main 385e043: 4 of 6 disagreements were such sites), so it keeps
-/// [`seg_proper`] (round j, parked: its miss of a crossing through a chord vertex). O(|poly|).
+/// of an undrawn wire's path between two runs with the same end points: the round-i class test
+/// ([`competitor_keeps_class`]; the reference paths are whole polylines whose ends are the other
+/// wire's terminals, which no run touches), so the comparison is exact. Not (yet) the seq
+/// drawing's parity readers, which keep [`seg_proper`] (round j, parked, design note needed):
+/// the via side test ([`Drawer::via_side_ok`]) asks on which side of a chord a free point (a via
+/// site) lies, and the taut pull's guards ([`Drawer::pull_taut`]) are single segments whose ends
+/// (pass points, via centres) a run may touch; there the translation decides a contact at a
+/// segment's end arbitrarily (esp and qmtech via sites, bornhack +3V3 at main 385e043). O(|poly|).
 pub(super) fn proper_crossings(poly: &[Vec2], a: Vec2, b: Vec2) -> usize {
     poly.windows(2).filter(|x| seg_cross_sos(x[0], x[1], a, b)).count()
 }
@@ -3621,7 +3622,10 @@ impl<'a> Drawer<'a> {
                 guards.extend(c.windows(2).map(|x| (x[0], x[1])));
             }
         }
-        let cross = |poly: &[Vec2], g: &(Vec2, Vec2)| proper_crossings(poly, g.0, g.1) % 2;
+        // `seg_proper`, not the exact `proper_crossings` (round j, parked): the guards are single
+        // segments whose ends (pass points, via centres) a run may touch, where the translation
+        // of the run decides arbitrarily (bornhack +3V3 at main 385e043).
+        let cross = |poly: &[Vec2], g: &(Vec2, Vec2)| poly.windows(2).filter(|x| seg_proper(x[0], x[1], g.0, g.1)).count() % 2;
         // The planned room of those wires (reserve planned room): a shortcut that reaches deeper
         // into the corridor of an undrawn wire's planned path (its taut and packed chords, half
         // its width plus the clearance either side) than the two legs it replaces is not taken.
