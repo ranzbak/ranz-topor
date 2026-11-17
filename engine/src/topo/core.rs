@@ -5441,7 +5441,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let layers: Vec<usize> = (0..b.n_signal).collect();
         let conn = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
         let mo = super::cutflow::MeasureOpts::from_options(opts);
-        let _ = super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &super::board::outline_segments(model), &mo, &layers, &live, None, None, false);
+        let _ = super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &dr.pad_end, &super::board::outline_segments(model), &mo, &layers, &live, None, None, false);
     }
     if let Some(d) = std::env::var_os("TOPO_ERBS_DUMP") {
         let nets: serde_json::Map<String, serde_json::Value> = model.nets.iter().map(|n| (n.code.to_string(), serde_json::Value::from(n.name.clone()))).collect();
