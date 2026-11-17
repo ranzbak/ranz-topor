@@ -358,7 +358,7 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: warning.*
 
-**Cause.** The board's copper-to-edge clearance is 0 (KiCad: no minimum). topor uses it as it is: copper may come up to the outer side of the Edge.Cuts line, which most fabs do not accept.
+**Cause.** The board's copper-to-edge clearance is 0 (KiCad: no minimum), which most fabs do not accept. By default ([rules] edge_clearance_zero = "zone_clearance") topor keeps the biggest clearance of the board's copper pours from the board edge instead; "pours" keeps the distance the filled pours keep, "board" uses 0 as KiCad does (copper may reach the Edge.Cuts line's centre: KiCad's DRC ignores the line width). The finding names the value used. KiCad's DRC still checks 0.
 
 **Fix.** Set the value your fab needs in KiCad → File → Board Setup → Design Rules → Constraints → Copper to edge clearance (or with a custom edge_clearance rule) and save the board.
 
@@ -761,3 +761,11 @@ copper violates a rule anywhere else, file a bug.
 **Cause.** Never drop: some connections had no legal geometry when drawn (a gap too narrow, no free site for a via, a crossing that cannot be layered, a branch meeting its trace on another layer); topor kept them and wrote them on their best geometry, so the copper breaks a rule there. Each violation is listed with its place, type (clearance, short, hole_clearance, edge_clearance, connection_width) and cause; KiCad's DRC shows the same places. The summary groups them by origin: at a pad exit (a neighbour pin of the connection's own part: the trace does not get out of its pad at full width; pad exits and necking are planned in a later version), from a via without a legal site, at a crossing with another net, against other routed copper in a narrow passage, or against other pads, holes or the board edge.
 
 **Fix.** Fix each listed place by hand (move the trace or via, or a part), or give the router more room or time (run.timeout_s, [optimize] runs) and route again. [optimize] allow_violations = false writes legal copper only (those connections stay unrouted).
+
+### ZONE_FILLS_SKIPPED
+
+*Severity: warning.*
+
+**Cause.** Accept could not write the zone fills that KiCad's filler made for the routed result (run.commit_fills): the refilled copy is missing, it was judged for other items than the ones committed, or a zone of the copy is not on the board. The routes are on the board, but the pours in the zones are the ones from before the run, so the pours (and KiCad's DRC / unconnected counts, with 'Refill all zones before performing DRC' off) do not show the new copper yet.
+
+**Fix.** Refill the zones: KiCad → Edit → Fill All Zones (B). The report folder's log.txt names which case it was.

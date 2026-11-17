@@ -73,6 +73,9 @@ class CommitResult:
     created_ids: list = field(default_factory=list)  # uuids of the created items, input order
     grouped: bool = False  # new items were put into their topor group
     notes: list = field(default_factory=list)  # report lines (e.g. why grouped is False)
+    #: uuids of the zones in ``CommitRequest.zone_fills`` whose fill was NOT written (no zone with that uuid on the
+    #: live board, or a layer KiCad does not know); empty = every fill was written
+    fills_not_applied: list = field(default_factory=list)
 
 
 @dataclass

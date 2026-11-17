@@ -4678,6 +4678,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     dr.compute_intervals();
     // P6 (a): the crossing partners follow the vias as placed.
     dr.follow_vias();
+    // edge-clear: a pad end whose centre breaks a static clearance (a track wider than its pad
+    // beside the board edge) ends at the nearest legal point inside the pad, for ERBS and drawing
+    // alike (`padend`; static only, so independent of the draw order).
+    let pad_ends: Vec<(WireId, [usize; 2])> = live.iter().filter_map(|&w| plans.get(&w).filter(|p| !p.layers.is_empty()).map(|p| (w, [p.layers[0], p.layers[p.layers.len() - 1]]))).collect();
+    dr.set_pad_ends(&pad_ends);
     // M3 `[drawing] realise = "erbs"`: every run's extended rubber band from the plan with the
     // placed vias (independent of the draw order), the wires in the precedes order.
     let mut erbs_line: Option<String> = None;
@@ -4689,7 +4694,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let layers: Vec<usize> = (0..b.n_signal).collect();
         let conn = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
         let mo = super::cutflow::MeasureOpts::from_options(opts);
-        match super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &super::board::outline_segments(model), &mo, &layers, &live, ctl.deadline().map(|d| d.max(floor)), (!draw_through.get()).then(|| ctl.cancel.clone()), ctl.test_point("fail erbs sleeve")) {
+        match super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &dr.pad_end, &super::board::outline_segments(model), &mo, &layers, &live, ctl.deadline().map(|d| d.max(floor)), (!draw_through.get()).then(|| ctl.cancel.clone()), ctl.test_point("fail erbs sleeve")) {
             Ok(r) => {
                 if r.timed_out > 0 {
                     warnings.push(format!("erbs_timeout: the time limit passed (or the run was cancelled) before {} stretch(es) had their ERBS; those runs are drawn the sequential way", r.timed_out));
@@ -4713,6 +4718,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 live = r.order.clone();
                 dr.erbs = r.runs;
                 dr.test_no_sequential = ctl.test_point("no sequential run");
+                dr.test_no_class_keep = ctl.test_point("erbs class keep off");
+                dr.test_straight_seq = ctl.test_point("straight sequential run");
                 if ctl.test_point("wind erbs") {
                     // test-only fault: every ERBS runs its path three times (a wound band of the
                     // same copper, legal and three times its band), for the length factor
@@ -5576,8 +5583,29 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             fb_rescued
         ));
     }
+    // edge-clear: pad ends moved off their centre (a track end there broke a static clearance).
+    warnings.push(format!(
+        "pad ends: {} track ends moved inside their pad off the centre (the end's copper at the centre broke a static clearance: board edge, foreign pad, hole, keepout), largest move {:.3} mm; {} pad ends with no legal point in the pad at the wire's width (left at the centre)",
+        dr.stats.pad_end_moved,
+        dr.stats.pad_end_max / 1e6,
+        dr.stats.pad_end_none
+    ));
+    // Debug (`TOPO_ERBS_DUMP` with `realise = "sequential"`): the plan's ERBS model and over-full
+    // cuts dumped after the drawing (read by the packing classifier); nothing reads the result, so
+    // the copper and the drawing's time are those of the run without the dump.
+    if opts.realise != "erbs" && std::env::var_os("TOPO_ERBS_DUMP").is_some() {
+        let pts: BTreeMap<WireId, Vec<(usize, Vec2)>> = placed.iter().map(|(&w, v)| (w, v.iter().map(|x| (x.0, x.1)).collect())).collect();
+        let layers: Vec<usize> = (0..b.n_signal).collect();
+        let conn = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
+        let mo = super::cutflow::MeasureOpts::from_options(opts);
+        let _ = super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &dr.pad_end, &super::board::outline_segments(model), &mo, &layers, &live, None, None, false);
+    }
+    if let Some(d) = std::env::var_os("TOPO_ERBS_DUMP") {
+        let nets: serde_json::Map<String, serde_json::Value> = model.nets.iter().map(|n| (n.code.to_string(), serde_json::Value::from(n.name.clone()))).collect();
+        let _ = std::fs::write(std::path::Path::new(&d).join("nets.json"), serde_json::Value::Object(nets).to_string());
+    }
     if let Some(l) = erbs_line {
-        warnings.push(format!("{l}; drawn: {} runs from their ERBS ({} in its octilinear form before the check), {} by the sequential attempts after the check rejected the ERBS, {} without an ERBS, {} ERBS priced past their band against a sequential run ({} replaced by it)", dr.stats.erbs_ok, dr.stats.erbs_octi, dr.stats.erbs_fallback, dr.stats.erbs_none, dr.stats.erbs_long, dr.stats.erbs_long_replaced));
+        warnings.push(format!("{l}; drawn: {} runs from their ERBS ({} in its octilinear form before the check), {} by the sequential attempts after the check rejected the ERBS, {} without an ERBS, {} ERBS priced past their band against a sequential run ({} replaced by it, {} kept because the sequential run crossed an undrawn wire's path with another parity: another class)", dr.stats.erbs_ok, dr.stats.erbs_octi, dr.stats.erbs_fallback, dr.stats.erbs_none, dr.stats.erbs_long, dr.stats.erbs_long_replaced, dr.stats.erbs_class_kept));
     }
     // M3 length factor (`draw::erbs_length_price`): every ERBS priced past its band, the longest
     // over its band first (plugin finding ERBS_LONG).
@@ -5636,11 +5664,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let plane_vias = plane_res.iter().filter(|(_, r)| r.as_ref().is_ok_and(|o| o.via.is_some())).count();
         let lost: usize = plans.iter().filter(|(w, _)| !drawn.contains_key(w)).map(|(_, p)| p.vias.len()).sum();
         warnings.push(format!(
-            "vias, plan vs drawn: plan {plan_vias} wire vias, drawn {drawn_vias} wire vias (+ {plane_vias} plane stub vias decided before the topology); placements: {} at the planned site, {} by the drawing's site search ({} of them where the planned site was not free), {} by force (never drop); {} added joining a branch to its trunk by force; {} removed by the via reduction; {} planned vias on wires not drawn; {} crossing partners re-read from a via as placed (P6 a); {} corners removed by the taut pull of the drawn runs (P6 c, [drawing] pull_taut)",
+            "vias, plan vs drawn: plan {plan_vias} wire vias, drawn {drawn_vias} wire vias (+ {plane_vias} plane stub vias decided before the topology); placements: {} at the planned site, {} by the drawing's site search ({} of them where the planned site was not free), {} by force (never drop); {} out of the plan's class (no site in it); {} added joining a branch to its trunk by force; {} removed by the via reduction; {} planned vias on wires not drawn; {} crossing partners re-read from a via as placed (P6 a); {} corners removed by the taut pull of the drawn runs (P6 c, [drawing] pull_taut)",
             dr.stats.planned_sites,
             dr.stats.via_searched,
             dr.stats.planned_sites_missed,
             dr.stats.via_forced,
+            dr.stats.via_out_of_class,
             junction_join_vias,
             vias_reduced,
             lost,

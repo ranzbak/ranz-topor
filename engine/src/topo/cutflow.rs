@@ -57,6 +57,9 @@ pub struct Plan<'a> {
     /// The drawing's placed vias (traversal, point) per wire: they replace the planned
     /// traversals and static sites (M3, `[drawing] realise = "erbs"`).
     pub placed: Option<&'a BTreeMap<WireId, Vec<(usize, Vec2)>>>,
+    /// edge-clear: the pad ends that do not lie at their pad centre (`Drawer::pad_end`, wire and
+    /// end 0 | 1): the stretches start / end there. `None`: every end at its vertex.
+    pub ends: Option<&'a BTreeMap<(WireId, usize), Vec2>>,
 }
 
 /// Measurement options (from `[capacity]`).
@@ -65,6 +68,11 @@ pub struct MeasureOpts {
     pub sheet: SheetOpts,
     /// `mixed_clearance = "pairwise"`.
     pub pairwise: bool,
+    /// The ERBS placement margin on every clearance (nm): the checker's `margin_nm` plus the
+    /// drawing's numeric tolerance [`super::pack::DRAW_TOL_NM`], the same extra distance the
+    /// sequential drawing's packer keeps (`Packer::eps`). Used by the spoke tips, stack radii
+    /// and grown features of [`super::radii`] / [`super::erbs`] only, never by the need.
+    pub margin: f64,
 }
 
 impl MeasureOpts {
@@ -72,6 +80,7 @@ impl MeasureOpts {
         MeasureOpts {
             sheet: SheetOpts { norm: Norm::for_style(&o.draw_style), radius_nm: o.cut_radius_mm.max(0.0) * MM, via_steps: 16, prune_walk: true },
             pairwise: o.mixed_clearance == "pairwise",
+            margin: o.margin_nm.max(0) as f64 + super::pack::DRAW_TOL_NM,
         }
     }
 }
@@ -294,7 +303,8 @@ fn stretches(plan: &Plan) -> Planned {
         let ks: Vec<usize> = plan.via_k.get(w).cloned().unwrap_or_default();
         let site = |t: usize, net: i32, r: f64, s: f64| via_point(st.proj, plan.packer, t, net, r, s);
         let fixed = plan.placed.and_then(|m| m.get(&w)).map(|v| &v[..]);
-        let r = wire_stretches(st, plan.packer, w, &plan.events[w], &ks, plan.bottom, (plan.conn)(w), &site, fixed);
+        let ends = [0, 1].map(|e| plan.ends.and_then(|m| m.get(&(w, e)).copied()));
+        let r = wire_stretches(st, plan.packer, w, &plan.events[w], &ks, plan.bottom, (plan.conn)(w), &site, fixed, ends);
         out.extend(r.runs);
         vias.extend(r.vias.into_iter().map(|(v, ok)| (w, v, ok)));
         for (v, j) in r.junc {
@@ -313,7 +323,8 @@ fn stretches(plan: &Plan) -> Planned {
 /// `fixed`: the vias as the drawing placed them (traversal, point), in place of `via_k` and the
 /// sites.
 #[allow(clippy::too_many_arguments)]
-pub fn wire_stretches(st: &State, packer: &Packer, w: WireId, ev: &[LEv], via_k: &[usize], bottom: i32, conn: Option<usize>, site: &dyn Fn(usize, i32, f64, f64) -> (Vec2, bool), fixed: Option<&[(usize, Vec2)]>) -> WireRuns {
+/// `ends`: a pad end that does not lie at its vertex (edge-clear pad anchors), start and end.
+pub fn wire_stretches(st: &State, packer: &Packer, w: WireId, ev: &[LEv], via_k: &[usize], bottom: i32, conn: Option<usize>, site: &dyn Fn(usize, i32, f64, f64) -> (Vec2, bool), fixed: Option<&[(usize, Vec2)]>, ends: [Option<Vec2>; 2]) -> WireRuns {
     let pr = st.proj;
     let wi = &st.wires[w];
     let mut out = Vec::new();
@@ -334,11 +345,12 @@ pub fn wire_stretches(st: &State, packer: &Packer, w: WireId, ev: &[LEv], via_k:
     let first = ev.first().map_or(bottom, |e| e.2);
     let w_floor = st.w_min(wi.net, wi.w);
     let r = 0.5 * packer.via_d(wi.net);
-    for (v, o) in [(wi.a, wi.pa), (wi.b, wi.pb)] {
+    let end_pt = |e: usize| ends[e].unwrap_or(pr.pos[if e == 0 { wi.a } else { wi.b }]);
+    for (e, (v, o)) in [(wi.a, wi.pa), (wi.b, wi.pb)].into_iter().enumerate() {
         if o == NO_OBS || matches!(pr.vkind[v], VertKind::Node) {
             junc.push((v, JunctionFeat { at: pr.pos[v], net: wi.net, clear: wi.s }));
         } else {
-            terms.push(pr.pos[v]);
+            terms.push(end_pt(e));
         }
     }
     for &(_, v) in &wi.turns {
@@ -369,7 +381,7 @@ pub fn wire_stretches(st: &State, packer: &Packer, w: WireId, ev: &[LEv], via_k:
     }
     evs.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     let mut cur_layer = first;
-    let mut curve = vec![pr.pos[wi.a]];
+    let mut curve = vec![end_pt(0)];
     let mut ck: Vec<usize> = vec![0];
     let mut pw: Vec<f64> = Vec::new();
     let mut layer_of_cur: Option<i32> = None;
@@ -423,7 +435,7 @@ pub fn wire_stretches(st: &State, packer: &Packer, w: WireId, ev: &[LEv], via_k:
         }
     }
     let layer = layer_of_cur.unwrap_or(cur_layer);
-    flush(&mut curve, &mut ck, &mut pw, layer, pr.pos[wi.b], n, nosite_cur, [ends_via[0], false]);
+    flush(&mut curve, &mut ck, &mut pw, layer, end_pt(1), n, nosite_cur, [ends_via[0], false]);
     WireRuns { runs: out, vias, junc, terms }
 }
 
@@ -934,7 +946,7 @@ impl Recorder {
         }
         let dirs = packer.taut_dirs(st);
         let cm = super::refine::CapModel::new(st, packer, &dirs, events, bottom, 1.0);
-        let plan = Plan { st, events, via_k: &cm.via_k, bottom, packer, conn, placed: None };
+        let plan = Plan { st, events, via_k: &cm.via_k, bottom, packer, conn, placed: None, ends: None };
         let edge_over = cm.overfull();
         if let Some(m) = self.run(&plan) {
             let names = self.names.clone();
@@ -949,7 +961,7 @@ impl Recorder {
     /// over-full edge-layers of the per-edge model (for the "model gap" class).
     #[allow(clippy::too_many_arguments)]
     pub fn final_plan(&mut self, st: &State, events: &[Vec<LEv>], via_k: &[Vec<usize>], packer: &Packer, bottom: i32, conn: &dyn Fn(WireId) -> Option<usize>, edge_over: &[(usize, usize)]) {
-        let plan = Plan { st, events, via_k, bottom, packer, conn, placed: None };
+        let plan = Plan { st, events, via_k, bottom, packer, conn, placed: None, ends: None };
         if let Some(m) = self.run(&plan) {
             let names = self.names.clone();
             let nm = |l: usize| names.get(l).cloned().unwrap_or_default();
@@ -964,7 +976,7 @@ impl Recorder {
                 let mut r = super::radii::summary(&m, &ords, &nm);
                 // M3 step c: the ERBS of every stretch and their check (report only).
                 for (i, (lf, o)) in m.layers.iter().zip(&ords).enumerate() {
-                    let le = super::erbs::erbs_layer_with(&lf.sheet, &m.stretches, &lf.stretches, o, &super::erbs::ErbsOpts::default());
+                    let le = super::erbs::erbs_layer_with(&lf.sheet, &m.stretches, &lf.stretches, o, &super::erbs::ErbsOpts { margin: m.opts.margin, ..super::erbs::ErbsOpts::default() });
                     let vs = super::erbs::check_layer(&lf.sheet, &m.stretches, o, &le.es);
                     r[i]["erbs"] = super::erbs::summary(&super::erbs::report(&le, &vs), &vs, &m.stretches);
                     if let Some(d) = std::env::var_os("TOPO_ERBS_DUMP") {

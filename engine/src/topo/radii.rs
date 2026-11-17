@@ -537,6 +537,12 @@ pub struct TipItem {
 pub struct TipRules {
     pub pairwise: bool,
     pub regime: Option<f64>,
+    /// Placement margin on every clearance the tips keep (nm; the drawing's `margin_nm +
+    /// DRAW_TOL_NM`, [`super::cutflow::MeasureOpts::margin`]): the copper keeps the rule after
+    /// KiCad's rounding to whole nm, where tips at exactly the clearance land a fraction of a nm
+    /// short of it. Only as far as the cut's slack allows (graded: a cut without the room keeps
+    /// the share it has, an over-full cut none); the need stays the one without it. 0 = exact.
+    pub margin: f64,
 }
 
 /// The tips of one cut: from `p`, from `q`, the widths used, and the need, neck, squeeze.
@@ -576,8 +582,10 @@ fn ruled(items: &[TipItem], lo: Bound, hi: Bound, r: TipRules) -> (Vec<TipItem>,
 /// clearance faces the next item); same-net neighbours take no gap; the run at the `hi` end
 /// shares one start edge. Caveat: for a member `i` of an own-net end run, `tip_p + tip_q =
 /// need - (max_w - w_i) / 2` (the run is one item of its widest half width), so its portal is
-/// wider than the slack by that much; every other item has `tip_p + tip_q = need`.
-fn layout(its: &[TipItem], w: &[f64], lo: Bound, hi: Bound, half_lo: f64, half_hi: f64, g: f64) -> (Vec<f64>, f64) {
+/// wider than the slack by that much; every other item has `tip_p + tip_q = need`. `e`: added to
+/// every non-zero clearance (gap or end), the placement margin ([`TipRules::margin`]).
+#[allow(clippy::too_many_arguments)]
+fn layout(its: &[TipItem], w: &[f64], lo: Bound, hi: Bound, half_lo: f64, half_hi: f64, g: f64, e: f64) -> (Vec<f64>, f64) {
     let n = its.len();
     let own = |b: &Bound, x: &TipItem| matches!(*b, Bound::Pad { net: Some(m), .. } if m == x.net);
     let run_lo = (0..n).take_while(|&i| own(&lo, &its[i])).count();
@@ -587,6 +595,8 @@ fn layout(its: &[TipItem], w: &[f64], lo: Bound, hi: Bound, half_lo: f64, half_h
         return (tip, 0.0);
     }
     let it = |i: usize| Item { net: its[i].net, w: w[i], s: its[i].s };
+    // A clearance scaled by `g`, plus the margin where one applies.
+    let gp = |c: f64| if c > 0.0 { g * c + e } else { 0.0 };
     let mut edge;
     if run_lo > 0 {
         for t in tip.iter_mut().take(run_lo) {
@@ -594,16 +604,16 @@ fn layout(its: &[TipItem], w: &[f64], lo: Bound, hi: Bound, half_lo: f64, half_h
         }
         edge = half_lo + 0.5 * w[..run_lo].iter().copied().fold(0.0, f64::max);
     } else {
-        edge = half_lo + g * lo.clearance(&it(0));
+        edge = half_lo + gp(lo.clearance(&it(0)));
     }
-    let gap = |a: usize, b: usize| if its[a].net == its[b].net { 0.0 } else { g * its[a].s.max(its[b].s) };
+    let gap = |a: usize, b: usize| if its[a].net == its[b].net { 0.0 } else { gp(its[a].s.max(its[b].s)) };
     // An own-net run at an end counts as one item with the largest clearance of the run (as
     // `demand::need_by`).
     let run_s = |r: std::ops::Range<usize>| its[r].iter().map(|x| x.s).fold(0.0, f64::max);
     let mid_end = n - run_hi;
     for i in run_lo..mid_end {
         let tw = if i == run_lo && run_lo > 0 {
-            edge + if its[i - 1].net == its[i].net { 0.0 } else { g * run_s(0..run_lo).max(its[i].s) }
+            edge + if its[i - 1].net == its[i].net { 0.0 } else { gp(run_s(0..run_lo).max(its[i].s)) }
         } else if i > 0 {
             edge + gap(i - 1, i)
         } else {
@@ -616,7 +626,7 @@ fn layout(its: &[TipItem], w: &[f64], lo: Bound, hi: Bound, half_lo: f64, half_h
         let start = if mid_end > 0 {
             let a = mid_end - 1;
             let rs = if a < run_lo { run_s(0..run_lo) } else { its[a].s };
-            edge + if its[a].net == its[mid_end].net { 0.0 } else { g * rs.max(run_s(mid_end..n)) }
+            edge + if its[a].net == its[mid_end].net { 0.0 } else { gp(rs.max(run_s(mid_end..n))) }
         } else {
             edge
         };
@@ -626,7 +636,7 @@ fn layout(its: &[TipItem], w: &[f64], lo: Bound, hi: Bound, half_lo: f64, half_h
         edge = start + 0.5 * w[mid_end..].iter().copied().fold(0.0, f64::max);
         return (tip, edge + half_hi);
     }
-    (tip, edge + g * hi.clearance(&it(n - 1)) + half_hi)
+    (tip, edge + gp(hi.clearance(&it(n - 1))) + half_hi)
 }
 
 /// The spoke tips of the items of one cut (in order from `p`, ends `bp` / `bq` holding `half_p`
@@ -637,21 +647,29 @@ pub fn cut_tips(items: &[TipItem], bp: Bound, bq: Bound, half_p: f64, half_q: f6
     let (its, bp, bq) = ruled(items, bp, bq, r);
     let n = its.len();
     let rev: Vec<TipItem> = its.iter().rev().copied().collect();
-    let run = |w: &[f64], g: f64| -> (Vec<f64>, Vec<f64>, f64) {
-        let (tp, need) = layout(&its, w, bp, bq, half_p, half_q, g);
+    let run = |w: &[f64], g: f64, e: f64| -> (Vec<f64>, Vec<f64>, f64) {
+        let (tp, need) = layout(&its, w, bp, bq, half_p, half_q, g, e);
         let wr: Vec<f64> = w.iter().rev().copied().collect();
-        let (mut tq, _) = layout(&rev, &wr, bq, bp, half_q, half_p, g);
+        let (mut tq, _) = layout(&rev, &wr, bq, bp, half_q, half_p, g, e);
         tq.reverse();
         (tp, tq, need)
     };
     let w0: Vec<f64> = its.iter().map(|x| x.w).collect();
-    let (tp, tq, need) = run(&w0, 1.0);
+    let (tp, tq, need) = run(&w0, 1.0, 0.0);
     if need <= cap || n == 0 {
+        // The margin as far as the slack allows (the need is linear in it).
+        let m = r.margin.max(0.0);
+        if m > 0.0 && n > 0 {
+            let need_m = layout(&its, &w0, bp, bq, half_p, half_q, 1.0, m).1;
+            let e = if need_m <= cap || need_m <= need { m } else { m * ((cap - need) / (need_m - need)).clamp(0.0, 1.0) };
+            let (tp, tq, _) = run(&w0, 1.0, e);
+            return Tips { tip_p: tp, tip_q: tq, w: w0, need, neck: 0.0, squeeze: 0.0 };
+        }
         return Tips { tip_p: tp, tip_q: tq, w: w0, need, neck: 0.0, squeeze: 0.0 };
     }
     // Necks: w(f) = w - f (w - floor), the need falls monotonically in f.
     let wf = |f: f64| -> Vec<f64> { its.iter().map(|x| x.w - f * (x.w - x.floor.min(x.w)).max(0.0)).collect() };
-    let need_at = |f: f64, g: f64| layout(&its, &wf(f), bp, bq, half_p, half_q, g).1;
+    let need_at = |f: f64, g: f64| layout(&its, &wf(f), bp, bq, half_p, half_q, g, 0.0).1;
     let f = if need_at(1.0, 1.0) <= cap {
         let (mut a, mut b) = (0.0, 1.0);
         for _ in 0..60 {
@@ -672,11 +690,11 @@ pub fn cut_tips(items: &[TipItem], bp: Bound, bq: Bound, half_p: f64, half_q: f6
     // Gaps: the need is linear in g (widths fixed).
     let (n1, n0) = (need_at(f, 1.0), need_at(f, 0.0));
     if n1 <= cap {
-        let (tp, tq, _) = run(&w, 1.0);
+        let (tp, tq, _) = run(&w, 1.0, 0.0);
         return Tips { tip_p: tp, tip_q: tq, w, need, neck, squeeze: 0.0 };
     }
     let g = if n1 > n0 { ((cap - n0) / (n1 - n0)).clamp(0.0, 1.0) } else { 0.0 };
-    let (mut tp, mut tq, ng) = run(&w, g);
+    let (mut tp, mut tq, ng) = run(&w, g, 0.0);
     // Everything past the necks is the predicted violation: gaps, then overlapping widths.
     let squeeze = n1 - cap;
     if ng > cap && ng > 0.0 {
@@ -699,8 +717,15 @@ pub fn tip_point(c: &Cut, rho: f64) -> Vec2 {
 }
 
 /// Step b on a layer ordered by [`order_layer`]: the spoke tips of every cut and the stack radii.
-/// `pairwise`: `[capacity] mixed_clearance`; `regime`: the courtyard clearance at a point.
+/// `pairwise`: `[capacity] mixed_clearance`; `regime`: the courtyard clearance at a point. Exact
+/// (no placement margin): [`radii_layer_m`] with margin 0.
 pub fn radii_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &mut LayerOrder, pairwise: bool, regime: &dyn Fn(Vec2) -> Option<f64>) {
+    radii_layer_m(sh, sts, mine, o, pairwise, 0.0, regime)
+}
+
+/// [`radii_layer`] with the placement margin `margin` (nm, [`TipRules::margin`]) on every
+/// clearance of the tips (as far as each cut's slack allows) and of the stack radii.
+pub fn radii_layer_m(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &mut LayerOrder, pairwise: bool, margin: f64, regime: &dyn Fn(Vec2) -> Option<f64>) {
     let mut halves: BTreeMap<usize, f64> = BTreeMap::new();
     let mut half = |f: usize| *halves.entry(f).or_insert_with(|| half_at(sh, f, sts, mine));
     let item = |x: &CutItem| TipItem { net: x.net, w: x.w, floor: sts[x.stretch].w_floor, s: x.s };
@@ -708,7 +733,7 @@ pub fn radii_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &mut Lay
     for ci in &mut o.cuts {
         let c = &sh.cuts[ci.cut];
         let its: Vec<TipItem> = ci.items.iter().map(item).collect();
-        let r = TipRules { pairwise, regime: regime((c.p + c.q) * 0.5) };
+        let r = TipRules { pairwise, regime: regime((c.p + c.q) * 0.5), margin };
         let t = cut_tips(&its, sh.bound(c.fp), sh.bound(c.fq), half(c.fp), half(c.fq), c.cap, r);
         for (k, x) in ci.items.iter_mut().enumerate() {
             x.tip_p = t.tip_p[k];
@@ -773,10 +798,10 @@ pub fn radii_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &mut Lay
                 TipItem { net: x.net, w: x.width_at_idx(idx, x.band[k]), floor: x.w_floor, s: x.s }
             })
             .collect();
-        let r = TipRules { pairwise, regime: regime(at) };
+        let r = TipRules { pairwise, regime: regime(at), margin };
         let (rits, rb, _) = ruled(&its, b, Bound::Open, r);
         let w: Vec<f64> = rits.iter().map(|x| x.w).collect();
-        let (own, _) = layout(&rits, &w, rb, Bound::Open, h, 0.0, 1.0);
+        let (own, _) = layout(&rits, &w, rb, Bound::Open, h, 0.0, 1.0, margin.max(0.0));
         let m: Vec<Option<&MTip>> = st.order.iter().zip(&st.corner).map(|(&s, &k)| tips.get(&(st.v, s, k))).collect();
         let mut radius: Vec<f64> = Vec::with_capacity(m.len());
         for (i, mt) in m.iter().enumerate() {
@@ -795,7 +820,7 @@ pub fn radii_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &mut Lay
                     _ => false,
                 };
                 if !shared_sq {
-                    let gap = if rits[i - 1].net == rits[i].net { 0.0 } else { rits[i - 1].s.max(rits[i].s) };
+                    let gap = if rits[i - 1].net == rits[i].net { 0.0 } else { rits[i - 1].s.max(rits[i].s) + margin.max(0.0) };
                     r = r.max(radius[i - 1] + 0.5 * (w[i - 1] + w[i]) + gap);
                 }
             }
@@ -820,7 +845,7 @@ pub fn from_measure(m: &Measure, regime: &dyn Fn(Vec2) -> Option<f64>) -> Vec<La
         .iter()
         .map(|lf| {
             let mut o = order_layer(&lf.sheet, &m.stretches, &lf.stretches, 0.0);
-            radii_layer(&lf.sheet, &m.stretches, &lf.stretches, &mut o, m.opts.pairwise, regime);
+            radii_layer_m(&lf.sheet, &m.stretches, &lf.stretches, &mut o, m.opts.pairwise, m.opts.margin, regime);
             let need: BTreeMap<usize, f64> = lf.flows.iter().map(|f| (f.cut, f.need)).collect();
             o.report.need_diff = o.cuts.iter().filter(|c| need.get(&c.cut).is_some_and(|&n| (c.need - c.halves - n).abs() > 1.0)).count();
             o
@@ -1139,7 +1164,7 @@ mod tests {
     }
 
     const PAD: Bound = Bound::Pad { net: Some(1), clear: 0.2e6 };
-    const PAIR: TipRules = TipRules { pairwise: true, regime: None };
+    const PAIR: TipRules = TipRules { pairwise: true, regime: None, margin: 0.0 };
 
     /// Fit pattern 1 (`channel_fit`, approved): three 0.25 mm wires at 0.2 mm through a 1.6 mm
     /// channel. Tips from each wall at minimum clearance: 0.325, 0.775, 1.225; each portal is the
@@ -1207,10 +1232,10 @@ mod tests {
         assert_eq!(mm3(&t.tip_p), vec![0.325, 0.875, 1.425]);
         assert_eq!(mm3(&t.tip_q), vec![1.425, 0.875, 0.325]);
         assert!(close(t.need, super::super::cutflow::needs(None, &items, &floors, PAD, PAD, true).need));
-        let c = cut_tips(&its, PAD, PAD, 0.0, 0.0, 3e6, TipRules { pairwise: false, regime: None });
+        let c = cut_tips(&its, PAD, PAD, 0.0, 0.0, 3e6, TipRules { pairwise: false, regime: None, margin: 0.0 });
         assert_eq!(mm3(&c.tip_p), vec![0.425, 0.975, 1.525]);
         assert!(close(c.need, super::super::cutflow::needs(None, &items, &floors, PAD, PAD, false).need));
-        let r = cut_tips(&its, PAD, PAD, 0.0, 0.0, 3e6, TipRules { pairwise: true, regime: Some(0.15e6) });
+        let r = cut_tips(&its, PAD, PAD, 0.0, 0.0, 3e6, TipRules { pairwise: true, regime: Some(0.15e6), margin: 0.0 });
         assert_eq!(mm3(&r.tip_p), vec![0.275, 0.675, 1.075]);
         assert!(close(r.need, super::super::demand::need_in(Some(0.15e6), &items, PAD, PAD)));
         // Own-net items: no gap between them, none to their own pad, the run on the vertex.
@@ -1248,6 +1273,123 @@ mod tests {
             assert!((t.tip_p[i] + t.tip_q[i] - 0.5e6).abs() < 1.0);
         }
         assert!(t.tip_p.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    /// erbs-margin: the placement margin `m` goes on every clearance of the tips (the two ends and
+    /// the gaps: tip `i` from `p` moves out by `(i + 1) m`), as far as the slack allows (graded: a
+    /// cut with less room than `4 m` takes the share it has, and its portals close to a point);
+    /// the need stays the one without it; an own-net run at its pad takes none; an over-full cut
+    /// none (its tips are the squeezed ones without the margin).
+    #[test]
+    fn margin_tips_as_far_as_the_slack_allows() {
+        let its = [ti(10, 0.25, 0.2, 0.25), ti(11, 0.25, 0.2, 0.25), ti(12, 0.25, 0.2, 0.25)];
+        let mr = |m: f64| TipRules { margin: m, ..PAIR };
+        let t0 = cut_tips(&its, PAD, PAD, 0.0, 0.0, 1.6e6, PAIR);
+        let t = cut_tips(&its, PAD, PAD, 0.0, 0.0, 1.6e6, mr(10.0));
+        assert!(close(t.need, t0.need) && close(t.need, 1.55e6), "{t:?}");
+        for i in 0..3 {
+            assert!((t.tip_p[i] - t0.tip_p[i] - 10.0 * (i + 1) as f64).abs() < 1e-6, "{:?} vs {:?}", t.tip_p, t0.tip_p);
+            assert!((t.tip_q[i] - t0.tip_q[i] - 10.0 * (3 - i) as f64).abs() < 1e-6, "{:?} vs {:?}", t.tip_q, t0.tip_q);
+            // the portal is the slack less the four margins
+            assert!((1.6e6 - t.tip_q[i] - t.tip_p[i] - (0.05e6 - 40.0)).abs() < 1e-6);
+        }
+        // neighbours keep clearance + width + margin between their centre lines
+        assert!(t.tip_p.windows(2).all(|w| (w[1] - w[0] - (0.45e6 + 10.0)).abs() < 1e-6), "{:?}", t.tip_p);
+        // 15 nm of slack for 4 margins: each gets 3.75 nm, the portals close to a point
+        let tight = 1.55e6 + 15.0;
+        let t = cut_tips(&its, PAD, PAD, 0.0, 0.0, tight, mr(10.0));
+        for i in 0..3 {
+            assert!((t.tip_p[i] - t0.tip_p[i] - 3.75 * (i + 1) as f64).abs() < 1e-6, "{:?}", t.tip_p);
+            assert!((tight - t.tip_q[i] - t.tip_p[i]).abs() < 1e-6);
+        }
+        // exactly full: no margin, the tips as without it
+        let t = cut_tips(&its, PAD, PAD, 0.0, 0.0, 1.55e6, mr(10.0));
+        let te = cut_tips(&its, PAD, PAD, 0.0, 0.0, 1.55e6, PAIR);
+        assert_eq!(t, te);
+        // over-full: the squeezed tips of margin 0
+        let t = cut_tips(&its, PAD, PAD, 0.0, 0.0, 1.5e6, mr(10.0));
+        assert_eq!(t, cut_tips(&its, PAD, PAD, 0.0, 0.0, 1.5e6, PAIR));
+        // an own-net run at its pad: on the vertex, no margin; the foreign item after it gets one
+        // gap's margin from the run and none at the far end of its own
+        let own = [ti(1, 0.25, 0.2, 0.25), ti(1, 0.3, 0.2, 0.3), ti(12, 0.25, 0.2, 0.25)];
+        let o0 = cut_tips(&own, PAD, PAD, 0.0, 0.0, 3e6, PAIR);
+        let o = cut_tips(&own, PAD, PAD, 0.0, 0.0, 3e6, mr(10.0));
+        assert_eq!(&o.tip_p[..2], &o0.tip_p[..2]);
+        assert!((o.tip_p[2] - o0.tip_p[2] - 10.0).abs() < 1e-6, "{:?} vs {:?}", o.tip_p, o0.tip_p);
+        assert!((o.tip_q[2] - o0.tip_q[2] - 10.0).abs() < 1e-6, "{:?} vs {:?}", o.tip_q, o0.tip_q);
+    }
+
+    /// erbs-margin: the stack radii carry the margin of every clearance inside them (the block's
+    /// and each gap: member `i` from the inside `(i + 1) m` further out), on a cut or from the
+    /// stack's own layout.
+    #[test]
+    fn stack_radii_nested_margin() {
+        let ds = [1.3, 0.9, 0.5];
+        let mut obs = vec![rect(0.0, 0.0, 2.0, 2.0)];
+        let mut curves = Vec::new();
+        for d in ds {
+            obs.push(pad(0.5, 2.0 + d));
+            obs.push(pad(2.0 + d, 0.5));
+            curves.push(vec![v(0.5, 2.0 + d), v(2.0 + 0.7 * d, 2.0 + 0.7 * d), v(2.0 + d, 0.5)]);
+        }
+        let pr = proj(obs);
+        let (sh, sts) = setup(&pr, &curves, Norm::Octagonal);
+        let mut o0 = order_layer(&sh, &sts, &[0, 1, 2], 0.0);
+        radii_layer(&sh, &sts, &[0, 1, 2], &mut o0, true, &|_| None);
+        let mut o = order_layer(&sh, &sts, &[0, 1, 2], 0.0);
+        radii_layer_m(&sh, &sts, &[0, 1, 2], &mut o, true, 10.0, &|_| None);
+        let (s0, s) = (stack(&o0, vert(&sh, v(2.0, 2.0))), stack(&o, vert(&sh, v(2.0, 2.0))));
+        assert_eq!(s.order, s0.order);
+        for i in 0..3 {
+            let d = s.radius[i] - s0.radius[i];
+            assert!((d - 10.0 * (i + 1) as f64).abs() < 1.0, "member {i}: {:?} vs {:?}", s.radius, s0.radius);
+        }
+    }
+
+    /// vfem (verifier, m9): a stack member on no cut takes its radius from the stack's own
+    /// layout, which carries the margin of its block clearance: the single band round the corner
+    /// sits `m` further out.
+    #[test]
+    fn vfem_own_layout_margin() {
+        let d = 1.3;
+        let obs = vec![rect(0.0, 0.0, 2.0, 2.0), pad(0.5, 2.0 + d), pad(2.0 + d, 0.5)];
+        let curves = vec![vec![v(0.5, 2.0 + d), v(2.0 + 0.7 * d, 2.0 + 0.7 * d), v(2.0 + d, 0.5)]];
+        let pr = proj(obs);
+        let (sh, sts) = setup(&pr, &curves, Norm::Octagonal);
+        let mut o0 = order_layer(&sh, &sts, &[0], 0.0);
+        radii_layer(&sh, &sts, &[0], &mut o0, true, &|_| None);
+        let mut o = order_layer(&sh, &sts, &[0], 0.0);
+        radii_layer_m(&sh, &sts, &[0], &mut o, true, 10.0, &|_| None);
+        assert!(o.report.radius_own >= 1, "{:?}", o.report);
+        let (s0, s) = (stack(&o0, vert(&sh, v(2.0, 2.0))), stack(&o, vert(&sh, v(2.0, 2.0))));
+        assert!((s.radius[0] - s0.radius[0] - 10.0).abs() < 0.5, "{:?} vs {:?}", s.radius, s0.radius);
+    }
+
+    /// vfem (verifier, m10): the inside-out pass keeps width + clearance + margin between
+    /// neighbours when an inner member's largest tip pushes the outer ones (the regime case of
+    /// `stack_radii_max_then_inside_out`).
+    #[test]
+    fn vfem_inside_out_margin() {
+        let ds = [1.3, 0.9, 0.5];
+        let mut obs = vec![rect(0.0, 0.0, 2.0, 2.0)];
+        let mut curves = Vec::new();
+        for d in ds {
+            obs.push(pad(0.5, 2.0 + d));
+            obs.push(pad(2.0 + d, 0.5));
+            curves.push(vec![v(0.5, 2.0 + d), v(2.0 + 0.7 * d, 2.0 + 0.7 * d), v(2.0 + d, 0.5)]);
+        }
+        let pr = proj(obs);
+        let (sh, sts) = setup(&pr, &curves, Norm::Octagonal);
+        let corner = vert(&sh, v(2.0, 2.0));
+        for g in [0.35e6, 0.5e6] {
+            let mut o = order_layer(&sh, &sts, &[0, 1, 2], 0.0);
+            let reg = move |p: Vec2| if p.x < 2.0e6 && p.y < 2.5e6 && p.y > 2.0e6 { Some(g) } else { None };
+            radii_layer_m(&sh, &sts, &[0, 1, 2], &mut o, true, 10.0, &reg);
+            let st = stack(&o, corner);
+            for i in 1..3 {
+                assert!(st.radius[i] >= st.radius[i - 1] + 0.2e6 + 10.0 - 0.5, "{g}: member {i}: {:?}", st.radius);
+            }
+        }
     }
 
     /// A tip at planning-norm distance rho: on a cut at 22.5 degrees the octagonal norm puts it
@@ -1444,6 +1586,37 @@ mod tests {
         assert!(at_pads.iter().all(|x| x.predicted), "{at_pads:?}");
     }
 
+    /// Round h rule 5: the labelled points that push nothing and lie on the band's other side
+    /// (the squeezed pads' tips beyond the band) are no obstacle, but their features stay in the
+    /// check: the wire through the over-full passage still has its violations against the two
+    /// pads (here predicted), never a silent pass.
+    #[test]
+    fn erbs_unenforced_points_keep_their_features_checked() {
+        let obs = vec![
+            (pad(-0.35, 0.0), 1),
+            (pad(0.35, 0.0), 2),
+            (pad(-3.0, 1.5), 3),
+            (pad(3.0, 1.5), 4),
+            (pad(-3.0, -1.5), 5),
+            (pad(3.0, -1.5), 6),
+            (pad(0.0, 3.0), 100),
+            (pad(0.0, -3.0), 100),
+        ];
+        let curves = vec![vec![v(0.0, 3.0), v(0.0, -3.0)]];
+        let pr = proj_n(obs);
+        let (sh, sts) = setup_w(&pr, &curves, Norm::Octagonal, &[(0.63, 0.2, 0.63)]);
+        let mut o = order_layer(&sh, &sts, &[0], 0.0);
+        radii_layer(&sh, &sts, &[0], &mut o, true, &|_| None);
+        let es = erbs_layer(&sh, &sts, &[0], &o, &ErbsOpts::default());
+        assert_eq!(es.len(), 1);
+        assert!(es[0].unenforced > 0, "the squeezed tips beyond the band are left out: {}", es[0].unenforced);
+        let vs = check_layer(&sh, &sts, &o, &es);
+        for x in [-0.35, 0.35] {
+            let f = (0..sh.feats.len()).find(|&f| sh.feats[f].poly.iter().all(|p| (p.x - x * 1e6).abs() <= 0.1e6 + 1.0 && p.y.abs() <= 0.1e6 + 1.0)).expect("pad");
+            assert!(vs.iter().any(|y| y.other == Party::Feature(f)), "a violation against the pad at x = {x}: {vs:?}");
+        }
+    }
+
     /// Round g rule 3: a short band leaving a terminal next to a wide pad of another net behind
     /// it (the terminal inside the pad's clearance): the pad's grown points beside the start lie
     /// on the band's other side but the band does not run between them and the pad, so it keeps
@@ -1471,6 +1644,44 @@ mod tests {
         let es = erbs_layer(&sh, &sts, &[0], &o, &ErbsOpts::default());
         let xmin = es[0].path.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
         assert!(xmin <= -0.25e6 + 1.0, "beside the band: pushed out to {xmin}: {:?}", es[0].path);
+    }
+
+    /// erbs-margin: the grown features carry the placement margin. The pad 0.2 mm beside the
+    /// middle of a 6 mm band pushes the ERBS out to `edge - w/2 - clearance - margin` (x <= -0.25
+    /// mm - 10 nm), where margin 0 puts it at exactly -0.25 mm.
+    #[test]
+    fn erbs_margin_on_grown_features() {
+        let obs = vec![(rect(0.2, 2.5, 1.2, 3.5), 1), (pad(0.0, 0.0), 100), (pad(0.0, 6.0), 100)];
+        let curves = vec![vec![v(0.0, 0.0), v(0.0, 6.0)]];
+        let pr = proj_n(obs);
+        let (sh, sts) = setup_w(&pr, &curves, Norm::Octagonal, &[(0.5, 0.2, 0.5)]);
+        let xmin = |m: f64| {
+            let mut o = order_layer(&sh, &sts, &[0], 0.0);
+            radii_layer_m(&sh, &sts, &[0], &mut o, true, m, &|_| None);
+            let es = erbs_layer(&sh, &sts, &[0], &o, &ErbsOpts { margin: m, ..ErbsOpts::default() });
+            es[0].path.iter().map(|p| p.x).fold(f64::INFINITY, f64::min)
+        };
+        let (x0, x10) = (xmin(0.0), xmin(10.0));
+        assert!(x0 <= -0.25e6 + 0.5 && x0 > -0.25e6 - 2.0, "margin 0: at the clearance, {x0}");
+        assert!((x10 - x0 + 10.0).abs() < 0.5, "margin 10 nm: 10 nm further out, {x10} vs {x0}");
+    }
+
+    /// erbs-margin: a pad-exit feature is one whose grown outline (half width + clearance +
+    /// margin) holds the wire's end: a neighbour 5 nm beyond `w/2 + clearance` of the start is
+    /// one with the 10 nm margin (its grown points would hold the end), none with margin 0.
+    #[test]
+    fn erbs_exit_features_carry_the_margin() {
+        let obs = vec![(pad(0.0, 0.0), 100), (rect(0.325 + 5e-6, -0.5, 1.0, 0.5), 1), (pad(0.0, 6.0), 100)];
+        let curves = vec![vec![v(0.0, 0.0), v(0.0, 6.0)]];
+        let pr = proj_n(obs);
+        let (sh, sts) = setup_w(&pr, &curves, Norm::Octagonal, &[(0.25, 0.2, 0.25)]);
+        let exits = |m: f64| {
+            let mut o = order_layer(&sh, &sts, &[0], 0.0);
+            radii_layer_m(&sh, &sts, &[0], &mut o, true, m, &|_| None);
+            erbs_layer(&sh, &sts, &[0], &o, &ErbsOpts { margin: m, ..ErbsOpts::default() })[0].exit.len()
+        };
+        assert_eq!(exits(0.0), 0);
+        assert_eq!(exits(10.0), 1);
     }
 
     /// Round g rule 2: a band that runs along a pad's edge and wraps its two corners with the
@@ -1559,6 +1770,50 @@ mod tests {
         assert!(gap.len() == 1 && gap[0].at.y > 0.0, "the violation further along is a gap: {vs:?}");
     }
 
+    /// DESIGN radii-m3-clear: a band that runs through another stretch's terminal pad (a predicted
+    /// feature violation) also violates that stretch where it leaves the pad: the same event,
+    /// predicted. The same pair further from the pad, and a third stretch that only grazes the
+    /// stretch, stay `erbs_gap`.
+    #[test]
+    fn erbs_band_through_a_terminal_pad_is_one_predicted_event() {
+        let obs = vec![
+            (pad(0.0, 4.0), 100),
+            (pad(0.0, -2.0), 100),
+            (pad(0.0, 1.0), 101),
+            (pad(3.0, 1.0), 101),
+            (pad(1.0, 1.6), 102),
+            (pad(3.0, 1.6), 102),
+        ];
+        let curves = vec![vec![v(0.0, 4.0), v(-0.6, 1.0), v(0.0, -2.0)], vec![v(0.0, 1.0), v(3.0, 1.0)], vec![v(1.0, 1.6), v(3.0, 1.6)]];
+        let pr = proj_n(obs);
+        let (sh, sts) = setup_w(&pr, &curves, Norm::Octagonal, &[(0.25, 0.2, 0.25); 3]);
+        let mut o = order_layer(&sh, &sts, &[0, 1, 2], 0.0);
+        radii_layer(&sh, &sts, &[0, 1, 2], &mut o, true, &|_| None);
+        let mut es = erbs_layer(&sh, &sts, &[0, 1, 2], &o, &ErbsOpts::default());
+        assert_eq!(es.len(), 3);
+        let fb = (0..sh.feats.len()).find(|&f| sh.feats[f].poly.len() >= 3 && crate::topo::state::point_in_poly(v(0.0, 1.0), &sh.feats[f].poly)).expect("pad of stretch 1");
+        // Stretch 0 straight through stretch 1's pad (the plan's predicted violation), then 0.25 mm
+        // under stretch 1's run at x = 2 (far from the pad).
+        es[0].pts = vec![v(0.0, 4.0), v(0.0, 0.6), v(2.0, 0.75), v(2.0, -2.0)];
+        es[0].w = vec![0.25e6; 4];
+        es[0].through = vec![fb];
+        es[1].pts = vec![v(0.0, 1.0), v(3.0, 1.0)];
+        es[1].w = vec![0.25e6; 2];
+        // Stretch 2 0.3 mm over stretch 1 (a gap of the model, nowhere near a pad).
+        es[2].pts = vec![v(1.0, 1.3), v(3.0, 1.3)];
+        es[2].w = vec![0.25e6; 2];
+        let vs = check_layer(&sh, &sts, &o, &es);
+        let s01: Vec<_> = vs.iter().filter(|x| x.stretch == 0 && x.other == Party::Stretch(1)).collect();
+        assert!(s01.iter().any(|x| x.predicted && (x.at - v(0.0, 1.0)).len() < 0.2e6), "at the pad: predicted {vs:?}");
+        assert!(s01.iter().any(|x| !x.predicted && x.at.x > 1.5e6), "far from the pad: a gap {vs:?}");
+        let s12: Vec<_> = vs.iter().filter(|x| x.stretch == 1 && x.other == Party::Stretch(2)).collect();
+        assert!(s12.len() == 1 && !s12[0].predicted, "a plain graze stays a gap {vs:?}");
+        // Symmetric: the same with the pad's own stretch checked first.
+        es.reverse();
+        let vr = check_layer(&sh, &sts, &o, &es);
+        assert!(vr.iter().any(|x| x.stretch == 0 && x.other == Party::Stretch(1) && x.predicted && (x.at - v(0.0, 1.0)).len() < 0.2e6), "either order {vr:?}");
+    }
+
     /// Independent per stretch: the ERBS do not depend on the order of `mine`.
     #[test]
     fn erbs_order_independent() {
@@ -1570,6 +1825,66 @@ mod tests {
         let a = erbs_layer(&sh, &sts, &[0, 1, 2], &o, &ErbsOpts::default());
         let b = erbs_layer(&sh, &sts, &[2, 1, 0], &o, &ErbsOpts::default());
         assert_eq!(format!("{a:?}"), format!("{b:?}"));
+    }
+
+    /// Round h rule 4: pushes settled at a cut (opposite pushes with crossing spokes) leave the
+    /// band at its over-full room; its violations of that cut's parties are predicted, as an
+    /// over-full cut's: the ERBS moved against the first block and the other wire are gaps, and
+    /// predicted once the stretch reports the channel's cut settled.
+    #[test]
+    fn erbs_settled_pushes_predict_their_violations() {
+        use crate::topo::erbs::GateSrc;
+        let xs = [2.3375, 3.2625];
+        let mut obs = vec![(rect(0.0, 0.0, 2.0, 2.0), 1), (rect(3.6, 0.0, 5.6, 2.0), 2)];
+        let mut curves = Vec::new();
+        for (i, &x) in xs.iter().enumerate() {
+            obs.push((pad(x, 4.0), 100 + i as i32));
+            obs.push((pad(x, -2.0), 100 + i as i32));
+            curves.push(vec![v(x, 4.0), v(x, -2.0)]);
+        }
+        let pr = proj_n(obs);
+        let (sh, sts) = setup_w(&pr, &curves, Norm::Octagonal, &[(0.25, 0.2, 0.25); 2]);
+        let mut o = order_layer(&sh, &sts, &[0, 1], 0.0);
+        radii_layer(&sh, &sts, &[0, 1], &mut o, true, &|_| None);
+        let mut es = erbs_layer(&sh, &sts, &[0, 1], &o, &ErbsOpts::default());
+        assert!(es.iter().all(|e| e.settled.is_empty()), "nothing settled in a channel that fits");
+        for p in es[0].pts.iter_mut() {
+            p.x = 2.1e6;
+        }
+        for p in es[1].pts.iter_mut() {
+            p.x = 2.4375e6;
+        }
+        let vs = check_layer(&sh, &sts, &o, &es);
+        let mine = |vs: &[crate::topo::erbs::Violation], ci: usize| -> Vec<crate::topo::erbs::Violation> {
+            let c = &sh.cuts[o.cuts[ci].cut];
+            vs.iter().filter(|v| v.stretch == 0 && (v.other == Party::Stretch(1) || v.other == Party::Feature(c.fp) || v.other == Party::Feature(c.fq))).cloned().collect()
+        };
+        // the channel's cut: both wires on it, the first block one of its ends
+        let ci = (0..o.cuts.len())
+            .find(|&ci| {
+                let ss: std::collections::BTreeSet<usize> = o.cuts[ci].items.iter().map(|x| x.stretch).collect();
+                ss.contains(&0) && ss.contains(&1) && mine(&vs, ci).iter().any(|v| matches!(v.other, Party::Feature(_)))
+            })
+            .expect("a cut of the channel with both wires");
+        let before = mine(&vs, ci);
+        assert!(before.len() >= 2 && before.iter().all(|v| !v.predicted), "gaps before: {before:?}");
+        es[0].settled = vec![GateSrc::Cut(ci)];
+        let after = mine(&check_layer(&sh, &sts, &o, &es), ci);
+        assert!(after.len() == before.len() && after.iter().all(|v| v.predicted), "predicted once settled: {after:?}");
+        // A settled grown point (GateSrc::Feature) or arc sample (GateSrc::Arc, a vertex of the
+        // feature) predicts that feature only: the violation against it becomes predicted, the
+        // one against the other wire stays a gap (condition (a) for every gate source).
+        let c = &sh.cuts[o.cuts[ci].cut];
+        let block = [c.fp, c.fq].into_iter().find(|&f| before.iter().any(|v| v.other == Party::Feature(f))).expect("a violation against a block");
+        let vtx = (0..sh.vfeat.len()).find(|&v| sh.vfeat[v] == Some(block)).expect("a sheet vertex of the block");
+        for g in [GateSrc::Feature(block), GateSrc::Arc(vtx)] {
+            es[0].settled = vec![g];
+            let after = mine(&check_layer(&sh, &sts, &o, &es), ci);
+            let at_block: Vec<_> = after.iter().filter(|v| v.other == Party::Feature(block)).collect();
+            let at_wire: Vec<_> = after.iter().filter(|v| v.other == Party::Stretch(1)).collect();
+            assert!(!at_block.is_empty() && at_block.iter().all(|v| v.predicted), "{g:?}: the block's violation predicted: {after:?}");
+            assert!(!at_wire.is_empty() && at_wire.iter().all(|v| !v.predicted), "{g:?}: the other wire's still a gap: {after:?}");
+        }
     }
 
     /// A violation no over-full cut predicts is an erbs_gap.

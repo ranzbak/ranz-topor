@@ -119,6 +119,14 @@ pub(super) fn seg_proper(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
     t > 1e-9 && t < 1.0 - 1e-9 && u > 1e-9 && u < 1.0 - 1e-9
 }
 
+/// Proper crossings of the polyline `poly` with the segment `a b` ([`seg_proper`], orientation
+/// signs, no distance threshold). Mod 2 it is the side invariant of an undrawn wire's path: the
+/// taut pull ([`Drawer::pull_taut`]) and the round-i class test ([`competitor_keeps_class`]).
+/// O(|poly|).
+pub(super) fn proper_crossings(poly: &[Vec2], a: Vec2, b: Vec2) -> usize {
+    poly.windows(2).filter(|x| seg_proper(x[0], x[1], a, b)).count()
+}
+
 pub(super) fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
     let d = b - a;
     let l2 = d.len2();
@@ -425,6 +433,10 @@ pub struct Diag {
     pub against_via: bool,
 }
 
+/// The plan's crossings of one wire with other nets: `(traversal, other net, other wire's layer
+/// there or -1 = open)` ([`Drawer::class_crossings`], read by [`Drawer::via_reach`]).
+pub type ClassCrossings = std::collections::BTreeSet<(usize, i32, i32)>;
+
 /// Counters of the drawing: which method produced each accepted run.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DrawStats {
@@ -454,6 +466,9 @@ pub struct DrawStats {
     /// committed via (a wire drawn again counts again; the summary uses the final wires).
     pub via_searched: usize,
     pub via_forced: usize,
+    /// Vias placed out of the plan's class ([`Drawer::via_reach`]): no site in the class was found
+    /// at all, so the cheapest one outside it was taken (counted in the plan-vs-drawn summary).
+    pub via_out_of_class: usize,
     /// P6 (a): crossing partners whose nominal chord was moved to follow a via ([`Drawer::follow_vias`]).
     pub partners_moved: usize,
     /// P6 (a): crossing partners neither their packed nor their taut crossing keeps on a placed
@@ -474,6 +489,15 @@ pub struct DrawStats {
     /// sequential run was drawn to compare; of those, the ERBS a cheaper sequential run replaced.
     pub erbs_long: usize,
     pub erbs_long_replaced: usize,
+    /// Round i: of `erbs_long`, competitors that would have replaced the ERBS but cross an undrawn
+    /// wire's path with another parity than it ([`competitor_keeps_class`]): the ERBS is drawn.
+    pub erbs_class_kept: usize,
+    /// edge-clear ([`super::padend`]): pad ends moved off the pad centre (a track end there broke a
+    /// static clearance), the largest move (nm), and the pad ends with no legal point in the pad
+    /// at the wire's width (left at the centre, priced by never drop).
+    pub pad_end_moved: usize,
+    pub pad_end_max: f64,
+    pub pad_end_none: usize,
 }
 
 /// M3 length factor (`[drawing] erbs_length_weight` k): the price of a legal ERBS of length `le`
@@ -501,6 +525,74 @@ pub fn erbs_vs_sequential(pe: f64, lb: f64, g: f64, ls: Option<f64>) -> Option<b
         return None;
     }
     Some(ls.is_some_and(|ls| ls * (1.0 + g) < pe))
+}
+
+/// Proper crossings of the run `run` with each path of `others` (wire, path), per wire (the wires
+/// it crosses at least once). O(|run| x sum |path|), boxes first.
+pub fn crossings_per_wire(run: &[Vec2], others: &[(WireId, &[Vec2])]) -> BTreeMap<WireId, usize> {
+    let mut out = BTreeMap::new();
+    if run.len() < 2 {
+        return out;
+    }
+    let bb = |p: &[Vec2]| p.iter().fold((Vec2 { x: f64::INFINITY, y: f64::INFINITY }, Vec2 { x: f64::NEG_INFINITY, y: f64::NEG_INFINITY }), |(lo, hi), q| (Vec2 { x: lo.x.min(q.x), y: lo.y.min(q.y) }, Vec2 { x: hi.x.max(q.x), y: hi.y.max(q.y) }));
+    let (rlo, rhi) = bb(run);
+    for &(o, path) in others {
+        if path.len() < 2 {
+            continue;
+        }
+        let (lo, hi) = bb(path);
+        if lo.x > rhi.x || hi.x < rlo.x || lo.y > rhi.y || hi.y < rlo.y {
+            continue;
+        }
+        let n = path.windows(2).map(|b| proper_crossings(run, b[0], b[1])).sum::<usize>();
+        if n > 0 {
+            *out.entry(o).or_insert(0) += n;
+        }
+    }
+    out
+}
+
+/// Round i: the sequential run competing with a legal ERBS (`erbs_vs_sequential`) is of the plan's
+/// class only if, for every undrawn other-net wire, it crosses that wire's reference path as often
+/// mod 2 as the ERBS does (`seq`, `erbs`: [`crossings_per_wire`] of the two runs against those
+/// paths). The parity of the crossings of an arc with a cut between two fixed points (the other
+/// wire's path between its terminals) is a homotopy invariant; the raw count is not (a bigon of two
+/// extra crossings comes and goes with the representatives: qmtech HDMI5V crossed ADV_SCL's path
+/// 4 times sequentially, 2 times as ERBS, one class). A run of the other parity takes a path the
+/// plan gave that wire (a planned short once it is drawn: qmtech ADV_CLK, drawn before ADV_DE, cut
+/// straight across ADV_DE's ERBS to its pad and left ADV_DE no legal geometry); it does not compete
+/// and the ERBS is drawn (Dayan 1997 PDF pp. 25-26: the ERBS is a member of the class; Polubasov
+/// 2010: the drawing realises the topology, it does not change it). The taut pull holds the same
+/// invariant against undrawn chords ([`Drawer::pull_taut`]). Sound, not complete: a different
+/// parity proves a different class, an equal one does not prove the same. O(wires crossed).
+pub fn competitor_keeps_class(seq: &BTreeMap<WireId, usize>, erbs: &BTreeMap<WireId, usize>) -> bool {
+    seq.keys().chain(erbs.keys()).all(|o| seq.get(o).copied().unwrap_or(0) % 2 == erbs.get(o).copied().unwrap_or(0) % 2)
+}
+
+/// Round i: the reference paths of the class test ([`competitor_keeps_class`]): per wire and
+/// layer its ERBS runs, or, where the wire has no ERBS on that layer (its sleeve failed, the time
+/// limit), its planned path (the chords through its passes' nominal crossings and its turns),
+/// so no undrawn wire is skipped; segments in a grid of their boxes (a competitor is tested
+/// against the paths whose boxes it meets only).
+pub(super) struct ClassRef {
+    paths: Vec<(WireId, usize, Vec<Vec2>)>,
+    grid: Grid<(usize, usize)>,
+}
+
+fn aabb_of(a: Vec2, b: Vec2) -> Aabb {
+    Aabb { min: Vec2 { x: a.x.min(b.x), y: a.y.min(b.y) }, max: Vec2 { x: a.x.max(b.x), y: a.y.max(b.y) } }
+}
+
+impl ClassRef {
+    /// Proper crossings of `run` (on `layer`) with the reference paths of the wires `keep` admits,
+    /// per wire. O(segments of the run x paths in their cells).
+    fn crossings(&self, run: &[Vec2], layer: usize, keep: &dyn Fn(WireId) -> bool) -> BTreeMap<WireId, usize> {
+        let mut ids: Vec<usize> = run.windows(2).flat_map(|s| self.grid.query(aabb_of(s[0], s[1]))).map(|(i, _)| i).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let others: Vec<(WireId, &[Vec2])> = ids.into_iter().filter_map(|i| self.paths.get(i)).filter(|p| p.1 == layer && keep(p.0)).map(|p| (p.0, p.2.as_slice())).collect();
+        crossings_per_wire(run, &others)
+    }
 }
 
 /// Per-stretch widths that replace a wire's single width (the drawing witness, variant A: the
@@ -702,6 +794,10 @@ pub struct Drawer<'a> {
     /// Where a branch's end (wire, end 0|1) lies on its trunk's drawn copper (D5 net trees): the
     /// drawing ends the branch there instead of at its junction vertex.
     pub end_at: BTreeMap<(WireId, usize), Vec2>,
+    /// edge-clear: the pad end of a run that cannot end at its pad centre (the track end breaks a
+    /// static clearance there) ends at this point inside the pad ([`super::padend`]); set once
+    /// before ERBS and drawing ([`Drawer::set_pad_ends`]). `end_at` wins over it.
+    pub pad_end: BTreeMap<(WireId, usize), Vec2>,
     /// 5.4 `[vias] relocate`: the site the plan decided for via `i` of wire `w`, `(traversal,
     /// point)` ([`super::viaopt::relocate_vias`]); [`Drawer::place_vias`] takes it when it is
     /// legal there, else searches as before. Empty: no planned sites.
@@ -719,6 +815,15 @@ pub struct Drawer<'a> {
     /// Test-only (hook "no sequential run"): every sequential attempt (0..5) of a run with an ERBS
     /// is illegal, so a parked ERBS reaches its last step (`ERBS_KEPT`). Always false in real runs.
     pub test_no_sequential: bool,
+    /// Test-only (hook "erbs class keep off"): the round-i class test of the length factor's
+    /// competitor ([`competitor_keeps_class`]) is skipped. Always false in real runs.
+    pub test_no_class_keep: bool,
+    /// Test-only (hook "straight sequential run"): a run with an ERBS gets the straight segment
+    /// between its ends as its first sequential attempt (a competitor of another class, as the
+    /// exact window search gave qmtech ADV_CLK). Always false in real runs.
+    pub test_straight_seq: bool,
+    /// Round i: the class test's reference paths, built at the first competitor.
+    class_ref: Option<ClassRef>,
     /// M3 length factor: every legal ERBS a sequential run was drawn against (wire, layer, ERBS
     /// length, band length, sequential length or NaN when none was legal, replaced), for the
     /// `erbs_long` warning (core.rs).
@@ -803,11 +908,15 @@ impl<'a> Drawer<'a> {
             lanes: BTreeMap::new(),
             drawn_x: vec![None; st.passes.len()],
             end_at: BTreeMap::new(),
+            pad_end: BTreeMap::new(),
             via_site: BTreeMap::new(),
             via_site_tight: Default::default(),
             split_at: BTreeMap::new(),
             erbs: BTreeMap::new(),
             test_no_sequential: false,
+            test_no_class_keep: false,
+            test_straight_seq: false,
+            class_ref: None,
             erbs_long: Vec::new(),
             force: false,
             via_viol: BTreeMap::new(),
@@ -1385,7 +1494,7 @@ impl<'a> Drawer<'a> {
     /// The plan's (taut) chord of wire `o` in its traversal `k`: its taut crossing of the edge it
     /// enters by (or its terminal), the turn corners there, its taut crossing of the edge it
     /// leaves by (or its terminal). O(turns) after the cached taut path.
-    fn taut_chord(&self, o: WireId, k: usize) -> Vec<Vec2> {
+    pub fn taut_chord(&self, o: WireId, k: usize) -> Vec<Vec2> {
         let (st, pr) = (self.st, &self.b.proj);
         let oi = &st.wires[o];
         let n = oi.passes.len();
@@ -1453,9 +1562,7 @@ impl<'a> Drawer<'a> {
                 seen.push((o, ok));
                 // Both views of where the plan puts the wire: its taut chord (where the drawing
                 // pulls it) and its packed nominal chord (the side test's and the via walls').
-                let mut nom = vec![self.chord_pt(o, ok)];
-                nom.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| self.b.proj.pos[x.1]));
-                nom.push(self.chord_pt(o, ok + 1));
+                let nom = self.plan_chord(o, ok);
                 let taut = self.taut_chord(o, ok);
                 let Some(dist) = taut.windows(2).chain(nom.windows(2)).map(|x| seg_dist(p, x[0], x[1])).reduce(f64::min) else { continue };
                 let s = oi.s.max(wi.s);
@@ -1544,9 +1651,15 @@ impl<'a> Drawer<'a> {
         } else {
             Vec::new()
         };
+        // The plan's crossings of this wire, per traversal and layer: a via site's reach may go
+        // over a drawn track only where the plan crosses it ([`Drawer::via_reach`]).
+        let crossed = self.class_crossings(w);
         for (i, &(ka, kb)) in plan.vias.iter().enumerate() {
             let ka = out.last().map_or(ka, |l| ka.max(l.0));
             let mut done = false;
+            // The cheapest legal site out of the plan's class ([`Drawer::via_reach`]): taken only
+            // when no site in the class exists at all.
+            let mut oob: Option<(f64, f64, usize, Vec2, ViaSize)> = None;
             // P6 (d): the planned site when it is not free: the search then starts next to it.
             let mut missed: Option<Vec2> = None;
             // 5.4: the plan's site first, as it is, when every rule holds there.
@@ -1577,6 +1690,21 @@ impl<'a> Drawer<'a> {
                     continue;
                 }
                 self.stats.planned_sites_missed += 1;
+                if std::env::var("TOPO_VIADBG").is_ok() {
+                    // Diagnosis only: which test refused the planned site (first size).
+                    let sz = sizes[0];
+                    let item = via_item(net, p, sz, Some(w));
+                    let (la, lb) = (plan.layers[i], plan.layers[i + 1]);
+                    let rep = self.checker.check_against(&self.idx, std::slice::from_ref(&item), &[]);
+                    eprintln!(
+                        "VIAMISS wire {w} net {net} via {i} planned ({:.3},{:.3}) d {} side {} taut {} tight {} pair {} check {:?} hole {} own {} pairdisc {}",
+                        p.x / 1e6, -p.y / 1e6, sz.d,
+                        self.via_side_ok(w, k, p, la, lb), self.via_side_ok_taut(w, k, p, la, lb), self.via_site_tight.contains(&(w, i)),
+                        self.via_pair_price(w, out.last().copied(), &xs, k, p, sz),
+                        rep.violations.iter().take(3).map(|v| (v.against.clone(), v.gap, v.required)).collect::<Vec<_>>(),
+                        self.via_hole_ok(p, sz, net), self.via_own_pad_ok(p, sz, net), self.pair_via_ok(w, p, sz, net)
+                    );
+                }
                 // A site the relocation marked tight (no legal room on the plan's geometry,
                 // planned_crossing_window: the taut crossing lies outside the via window) tells
                 // nothing about where the next-best site is: the search runs as without a plan.
@@ -1674,8 +1802,19 @@ impl<'a> Drawer<'a> {
                         // 5.4 task 1: the via as its reach disc (the hole rule included).
                         let dr = 2.0 * crate::vias::via_reach(&self.model.rules, net, sz);
                         let price = self.via_plan_price(w, ka, kb.max(ka), p, dr) + self.via_pair_price(w, out.last().copied(), &xs, k, p, sz) + squeeze;
+                        // In the plan's class only; the reach's violations priced like the squeeze
+                        // (one via diameter of squeeze per violation unit, graded).
+                        let (in_class, reach) = self.via_reach(w, k, p, plan.layers[i], plan.layers[i + 1], &crossed);
+                        // `[vias] reach_price` (default off): the reach's violations priced too.
+                        let price = price + self.reach_cost(reach, self.octi.room * dv);
                         if dbg {
-                            eprintln!("VIACAND wire {w} via {i} k {k} at ({:.3},{:.3}) room {:.0} price {:.0}", p.x / 1e6, -p.y / 1e6, room, price);
+                            eprintln!("VIACAND wire {w} via {i} k {k} at ({:.3},{:.3}) room {:.0} price {:.0} reach {reach:.2} in class {in_class}", p.x / 1e6, -p.y / 1e6, room, price);
+                        }
+                        if !in_class {
+                            if oob.as_ref().is_none_or(|o| price < o.0 - 1.0 || (price <= o.0 + 1.0 && room > o.1 + 1.0)) {
+                                oob = Some((price, room, k, p, sz));
+                            }
+                            continue;
                         }
                         if best.is_none_or(|b| price < best_price - 1.0 || (price <= best_price + 1.0 && room > b.0 + 1.0)) {
                             best = Some((room, k, p));
@@ -1705,9 +1844,32 @@ impl<'a> Drawer<'a> {
                     break 'sizes;
                 }
             }
+            // No legal site in the plan's class: in force mode the cheapest site in the class with
+            // its violations (costly, not failed); with no site in the class at all, the cheapest
+            // legal one out of it (as before the class test), counted and reported.
+            let forced_in = if !done && self.force { self.force_via(w, plan, i, ka, kb.max(ka), &sizes, Some(&crossed)) } else { None };
+            if !done && forced_in.is_none() {
+                if let Some((_, room, k, p, sz)) = oob {
+                    if std::env::var("TOPO_VIADBG").is_ok() {
+                        eprintln!("VIAPICK wire {w} net {net} via {i} out of class at ({:.3},{:.3}) room {room:.0} size {}", p.x / 1e6, -p.y / 1e6, sz.d);
+                    }
+                    let id = self.commit(&via_item(net, p, sz, Some(w)));
+                    self.via_marks.push((w, k, p, plan.layers[i], plan.layers[i + 1], id));
+                    ids.push(id);
+                    out.push((k, p, sz));
+                    self.stats.via_searched += 1;
+                    self.stats.via_out_of_class += 1;
+                    done = true;
+                }
+            }
             if !done && self.force {
                 // Never drop (M-B1): the site with the least violation price.
-                if let Some((k, p, sz, vs)) = self.force_via(w, plan, i, ka, kb.max(ka), &sizes) {
+                let any_site = forced_in.is_none();
+                if let Some((k, p, sz, vs)) = forced_in.or_else(|| self.force_via(w, plan, i, ka, kb.max(ka), &sizes, None)) {
+                    // A site forced over every site may be out of the class: counted like the legal one.
+                    if any_site && !self.via_reach(w, k, p, plan.layers[i], plan.layers[i + 1], &crossed).0 {
+                        self.stats.via_out_of_class += 1;
+                    }
                     let id = self.commit(&via_item(net, p, sz, Some(w)));
                     self.via_marks.push((w, k, p, plan.layers[i], plan.layers[i + 1], id));
                     ids.push(id);
@@ -1802,7 +1964,10 @@ impl<'a> Drawer<'a> {
     /// and every via size, the one with the least `violation` price (a site on the wrong side of
     /// another wire's chord counts one violation more: its run would cross that wire), ties by
     /// the most room. Its violations go with it. O(sites x sizes x checker query).
-    fn force_via(&self, w: WireId, plan: &Plan, i: usize, ka: usize, kb: usize, sizes: &[ViaSize]) -> Option<(usize, Vec2, ViaSize, Vec<Viol>)> {
+    /// `class`: the plan's crossings of `w` ([`Drawer::class_crossings`]); `Some` = only sites in the
+    /// plan's class ([`Drawer::via_reach`]), their reach violations added to the price with
+    /// `[vias] reach_price`; `None` = every site.
+    pub fn force_via(&self, w: WireId, plan: &Plan, i: usize, ka: usize, kb: usize, sizes: &[ViaSize], class: Option<&ClassCrossings>) -> Option<(usize, Vec2, ViaSize, Vec<Viol>)> {
         let net = self.st.wires[w].net;
         let (st, pr) = (self.st, &self.b.proj);
         let wi = &st.wires[w];
@@ -1838,7 +2003,14 @@ impl<'a> Drawer<'a> {
                     vs.push(Viol { kind: "connection_width", at: p, layer: u32::MAX, depth_nm: self.model.rules.min_connection.max(1) as f64, len_nm: sz.d as f64, against: "own-net pad".into(), via: true });
                 }
                 let side = if self.via_side_ok(w, k, p, plan.layers[i], plan.layers[i + 1]) { 0.0 } else { 1.0 };
-                let price = vs.iter().map(Viol::amount).sum::<f64>() + side;
+                let reach = match class {
+                    Some(c) => match self.via_reach(w, k, p, plan.layers[i], plan.layers[i + 1], c) {
+                        (false, _) => continue,
+                        (true, r) => self.reach_cost(r, 1.0),
+                    },
+                    None => 0.0,
+                };
+                let price = vs.iter().map(Viol::amount).sum::<f64>() + side + reach;
                 let room = self.via_room(w, k, p, sz.d as f64);
                 if best.as_ref().is_none_or(|b| price < b.0 - 1e-9 || (price - b.0).abs() <= 1e-9 && room > b.1 + 1.0) {
                     best = Some((price, room, k, p, sz, vs));
@@ -1846,6 +2018,97 @@ impl<'a> Drawer<'a> {
             }
         }
         best.map(|b| (b.2, b.3, b.4, b.5))
+    }
+
+    /// `[vias] reach_price` (Options `via_reach_price`, default off): the price a via site pays for
+    /// the violation amount `reach` of its reach ([`Drawer::via_reach`]), at `scale` per unit
+    /// (`octi.room x via diameter` in the legal search, 1 in the forced search); 0 when off (the
+    /// class verdict applies either way).
+    pub fn reach_cost(&self, reach: f64, scale: f64) -> f64 {
+        if self.opts.via_reach_price {
+            scale * reach
+        } else {
+            0.0
+        }
+    }
+
+    /// The plan's crossings of wire `w` with other nets, as `(traversal of w, other net, the other
+    /// wire's layer there)` (layer -1: open there, a via interval of its own, or no pass layers
+    /// known). The class test of a via site ([`Drawer::via_reach`]) reads it per traversal and
+    /// layer: a crossing elsewhere on the wire, or on the other layer, does not make a drawn track
+    /// crossable here. O(crossings of w).
+    pub fn class_crossings(&self, w: WireId) -> ClassCrossings {
+        let st = self.st;
+        let net = st.wires[w].net;
+        let layer = |o: WireId, ok: usize| -> i32 {
+            if self.prov_layer.is_empty() {
+                return -1;
+            }
+            let ps = &st.wires[o].passes;
+            let a = if ok > 0 { self.prov_layer[ps[ok - 1]] } else { -2 };
+            let b = if ok < ps.len() { self.prov_layer[ps[ok]] } else { -2 };
+            match (a, b) {
+                (-2, -2) => -1,
+                (-2, x) | (x, -2) => x,
+                (x, y) if x == y => x,
+                _ => -1,
+            }
+        };
+        st.crossings(w).iter().filter(|x| st.wires[x.other].net != net).map(|x| (x.k, st.wires[x.other].net, layer(x.other, x.other_k))).collect()
+    }
+
+    /// Whether via site `p` in traversal `k` of wire `w` keeps the plan's class, and the graded
+    /// price of reaching it. The runs on the via's layers `la` and `lb` leave the plan's path in
+    /// `k` (the point of [`Drawer::taut_chord`] nearest `p`) for `p`: a straight reach segment at
+    /// the wire's width per layer, checked against the copper drawn so far. A reach on layer `l`
+    /// that overlaps (a short) a drawn track of another net `n` goes over that wire: the site is on
+    /// its far side, which changes the topological class (vias are placed homotopically, Dayan &
+    /// Dai 1991, UCSC-CRL-91-40, PDF p. 1; a rubber band's ends are terminals, vias or junctions,
+    /// Dayan 1997 PDF p. 29 = printed p. 18), so it is out of class unless the plan crosses `w`
+    /// with net `n` in this traversal `k` on that layer `l` (or there with `n`'s layer open):
+    /// `crossed` = [`Drawer::class_crossings`]. A crossing elsewhere on the wire or on the other
+    /// layer does not count (qmtech JS_INTB_5V: crossed with VIN5V elsewhere, the site past
+    /// VIN5V's F.Cu track in its via traversal was judged in class).
+    /// Price: the violation amounts of both reach segments ([`Viol::amount`], graded; 0 for a free
+    /// reach). O(chord + objects nearby).
+    pub fn via_reach(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize, crossed: &ClassCrossings) -> (bool, f64) {
+        let net = self.st.wires[w].net;
+        let chord = self.taut_chord(w, k);
+        let q = match chord.len() {
+            0 => return (true, 0.0),
+            1 => chord[0],
+            _ => chord
+                .windows(2)
+                .map(|x| {
+                    let d = x[1] - x[0];
+                    let l2 = d.len2();
+                    let t = if l2 > 0.0 { ((p - x[0]).dot(d) / l2).clamp(0.0, 1.0) } else { 0.0 };
+                    x[0] + d * t
+                })
+                .min_by(|a, b| (*a - p).len2().total_cmp(&(*b - p).len2()))
+                .unwrap_or(chord[0]),
+        };
+        if (p - q).len2() <= 1.0 {
+            return (true, 0.0);
+        }
+        let (mut ok, mut price) = (true, 0.0);
+        for (j, &l) in [la, lb].iter().enumerate() {
+            if j == 1 && lb == la {
+                break;
+            }
+            let items = self.run_items(w, l, &[q, p]);
+            let rep = self.checker.check_against(&self.idx, &items, &[]);
+            for v in &rep.violations {
+                let other = v.against.strip_prefix("item:").and_then(|x| x.parse::<usize>().ok()).and_then(|id| self.idx.net_of(id));
+                if let Some((n2, false)) = other {
+                    if n2 != net && !crossed.contains(&(k, n2, l as i32)) && !crossed.contains(&(k, n2, -1)) && v.gap <= 0 {
+                        ok = false;
+                    }
+                }
+            }
+            price += self.viols_of(&items, &rep).iter().map(Viol::amount).sum::<f64>();
+        }
+        (ok, price)
     }
 
     /// The via site `p` in traversal `k` of wire `w` (run layers `la` before the via, `lb` after)
@@ -1971,6 +2234,16 @@ impl<'a> Drawer<'a> {
         chord.windows(2).filter(|c| seg_proper(r, p, c[0], c[1])).count() % 2 == 0
     }
 
+    /// Wire `o`'s packed nominal chord through traversal `ok`: [`Drawer::chord_pt`] `ok`, its turn
+    /// points there, `ok + 1` (the plan's path; the side test, the via walls, the taut pull's
+    /// guards and the round-i class test all read it). O(turns).
+    fn plan_chord(&self, o: WireId, ok: usize) -> Vec<Vec2> {
+        let mut c = vec![self.chord_pt(o, ok)];
+        c.extend(self.st.wires[o].turns.iter().filter(|x| x.0 == ok).map(|x| self.b.proj.pos[x.1]));
+        c.push(self.chord_pt(o, ok + 1));
+        c
+    }
+
     /// Point `j` of wire `w`'s chord polyline (0: its start terminal, `n + 1`: its end, else
     /// the crossing of pass `j - 1`): the packed nominal crossing once the edges are packed
     /// (where the drawing and the via sites put it, D3), else the evenly spread pass point of
@@ -1994,7 +2267,7 @@ impl<'a> Drawer<'a> {
         if self.prov_layer.is_empty() {
             return true;
         }
-        let (st, pr) = (self.st, &self.b.proj);
+        let st = self.st;
         let wi = &st.wires[w];
         let t = wi.tris[k];
         let chord_layer = |o: WireId, ok: usize| -> i32 {
@@ -2024,10 +2297,7 @@ impl<'a> Drawer<'a> {
             let chord = if taut && self.taut_chord(o, ok).len() >= 2 {
                 self.taut_chord(o, ok)
             } else {
-                let mut c = vec![self.chord_pt(o, ok)];
-                c.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| pr.pos[x.1]));
-                c.push(self.chord_pt(o, ok + 1));
-                c
+                self.plan_chord(o, ok)
             };
             let crossings = chord.windows(2).filter(|c| seg_proper(r, p, c[0], c[1])).count();
             if crossings % 2 == 1 {
@@ -2577,7 +2847,7 @@ impl<'a> Drawer<'a> {
                 (&plan_s, &vias_s[..])
             }
         };
-        let (st, pr) = (self.st, &self.b.proj);
+        let st = self.st;
         let wi = &st.wires[w];
         let n = wi.passes.len();
         let mut out = WireOut { wire: w, ..Default::default() };
@@ -2586,8 +2856,9 @@ impl<'a> Drawer<'a> {
             let k0 = if r == 0 { 0 } else { vias[r - 1].0 };
             let k1 = if r == plan.layers.len() - 1 { n } else { vias[r].0 };
             // A branch ends on its trunk's drawn copper (D5 net trees, `end_at`), else at its vertex.
-            let s = if r == 0 { self.end_at.get(&(w, 0)).copied().unwrap_or(pr.pos[wi.a]) } else { vias[r - 1].1 };
-            let e = if r == plan.layers.len() - 1 { self.end_at.get(&(w, 1)).copied().unwrap_or(pr.pos[wi.b]) } else { vias[r].1 };
+            // edge-clear: a pad end whose centre breaks a static clearance ends at its anchor (`pad_end`).
+            let s = if r == 0 { self.run_end(w, 0) } else { vias[r - 1].1 };
+            let e = if r == plan.layers.len() - 1 { self.run_end(w, 1) } else { vias[r].1 };
             let layer = plan.layers[r];
             let lid = self.layer_id(layer);
             let mut ok = false;
@@ -2647,6 +2918,8 @@ impl<'a> Drawer<'a> {
                         }
                         _ => continue,
                     }
+                } else if attempt == 0 && self.test_straight_seq && band.is_some() {
+                    vec![s, e]
                 } else if attempt <= 2 {
                     if (attempt == 1 && pneck.is_none()) || (attempt == 2 && (neck.is_none() || !self.opts.neck_in_drawing)) {
                         continue;
@@ -2739,6 +3012,8 @@ impl<'a> Drawer<'a> {
                     // M-45: the legal taut run redrawn octilinear where that keeps every rule
                     // (`super::octi`); else the taut run stays (its any-angle stretches priced).
                     let (mut pts, mut items, mut pneck_out) = (pts, items, pneck_out);
+                    // Debug (`TOPO_ERBS_DEBUG`): the run before its octilinear form and pull.
+                    let pre_octi = (band.is_some() && std::env::var_os("TOPO_ERBS_DEBUG").is_some()).then(|| pts.clone());
                     if self.octi.on && neck.is_none() && pts.len() >= 2 && !restored {
                         let t_o = std::time::Instant::now();
                         let wneck = if pneck_out.is_some() || attempt == 1 { pneck } else { None };
@@ -2815,6 +3090,27 @@ impl<'a> Drawer<'a> {
                     } else if let Some(k) = kept.take() {
                         let ls = poly_len(&pts);
                         replaced = erbs_vs_sequential(k.0, band_len, self.opts.erbs_margin, Some(ls)) == Some(true);
+                        // Round i: a competitor that crosses an undrawn wire's path with another
+                        // parity than the ERBS left the plan's class (`competitor_keeps_class`).
+                        if replaced && !self.test_no_class_keep {
+                            if self.class_ref.is_none() {
+                                self.class_ref = Some(self.build_class_ref());
+                            }
+                            let (st, drawn) = (self.st, &self.drawn_once);
+                            let keep = |o: WireId| o != w && !drawn[o] && st.wires[o].alive && st.wires[o].net != wi.net;
+                            let cr = self.class_ref.as_ref().expect("built");
+                            let (xs, xe) = (cr.crossings(&pts, layer, &keep), cr.crossings(&k.2, layer, &keep));
+                            if std::env::var_os("TOPO_ERBS_DEBUG").is_some() {
+                                eprintln!("ERBS class check wire {w} L{layer}: competitor {xs:?}, the ERBS {xe:?}");
+                            }
+                            if !competitor_keeps_class(&xs, &xe) {
+                                if std::env::var_os("TOPO_ERBS_DEBUG").is_some() {
+                                    eprintln!("ERBS class kept wire {w} net {} L{layer}: competitor {:.3} mm crosses {xs:?}, the ERBS {xe:?}; pre {:?}", wi.net, ls / 1e6, pre_octi.as_ref().map(|v| v.len()));
+                                }
+                                replaced = false;
+                                self.stats.erbs_class_kept += 1;
+                            }
+                        }
                         self.erbs_long.push((w, layer, k.1, band_len, ls, replaced));
                         if replaced {
                             self.stats.erbs_long_replaced += 1;
@@ -2847,6 +3143,12 @@ impl<'a> Drawer<'a> {
                                 }
                             }
                         }
+                    }
+                    // Debug (`TOPO_ERBS_DEBUG`): how each run of the ERBS drawing was drawn.
+                    if band.is_some() && std::env::var_os("TOPO_ERBS_DEBUG").is_some() {
+                        eprintln!("ERBS draw wire {w} net {} L{layer} k {k0}..{k1}: src {src} len {:.3} band {:.3} replaced {replaced}", wi.net, poly_len(&pts) / 1e6, band_len / 1e6);
+                        let mm = |v: &[Vec2]| v.iter().map(|p| ((p.x / 1e3).round() / 1e3, (-p.y / 1e3).round() / 1e3)).collect::<Vec<_>>();
+                        eprintln!("  pre {:?}\n  drawn {:?}", pre_octi.as_deref().map(mm), mm(&pts));
                     }
                     if src < 0 {
                         self.stats.erbs_ok += 1;
@@ -3137,6 +3439,49 @@ impl<'a> Drawer<'a> {
         ok
     }
 
+    /// The reference paths of the round-i class test ([`ClassRef`]). O(passes of all wires).
+    fn build_class_ref(&self) -> ClassRef {
+        let st = self.st;
+        let mut paths: Vec<(WireId, usize, Vec<Vec2>)> = Vec::new();
+        for (o, oi) in st.wires.iter().enumerate() {
+            if !oi.alive {
+                continue;
+            }
+            let runs = self.erbs.get(&o).map_or(&[][..], |v| v.as_slice());
+            for rb in runs {
+                paths.push((o, rb.layer, rb.path.clone()));
+            }
+            // Its planned path on the layers it has no ERBS on.
+            let n = oi.passes.len();
+            let lay = |j: usize| -> i32 { oi.passes.get(j).map_or(-2, |&q| self.prov_layer.get(q).copied().unwrap_or(-2)) };
+            let mut cur: BTreeMap<usize, Vec<Vec2>> = BTreeMap::new();
+            for ok in 0..=n {
+                let ls: Vec<usize> = [if ok > 0 { lay(ok - 1) } else { -2 }, lay(ok)].into_iter().filter(|&l| l >= 0).map(|l| l as usize).filter(|l| !runs.iter().any(|rb| rb.layer == *l)).collect();
+                for l in cur.keys().copied().collect::<Vec<_>>() {
+                    if !ls.contains(&l) {
+                        if let Some(p) = cur.remove(&l) {
+                            paths.push((o, l, p));
+                        }
+                    }
+                }
+                for &l in &ls {
+                    let e = cur.entry(l).or_default();
+                    let c = self.plan_chord(o, ok);
+                    let skip = usize::from(!e.is_empty());
+                    e.extend_from_slice(&c[skip..]);
+                }
+            }
+            paths.extend(cur.into_iter().map(|(l, p)| (o, l, p)));
+        }
+        let mut grid = Grid::new(1.0e6);
+        for (i, p) in paths.iter().enumerate() {
+            for (k, s) in p.2.windows(2).enumerate() {
+                let _ = grid.try_insert(aabb_of(s[0], s[1]), (i, k));
+            }
+        }
+        ClassRef { paths, grid }
+    }
+
     /// P6 (c): the drawn run `pts` of wire `w` (traversals `k0..=k1`, on `layer`) pulled taut
     /// inside its own corridor: a vertex goes where the straight leg between its neighbours keeps
     /// every rule (the checker against all copper accepted so far), keeps the wire on the same
@@ -3162,7 +3507,7 @@ impl<'a> Drawer<'a> {
         if pts.len() < 3 {
             return None;
         }
-        let (st, pr) = (self.st, &self.b.proj);
+        let st = self.st;
         let wi = &st.wires[w];
         // The guards: undrawn wires' chords on this layer and their via walls.
         let mut guards: Vec<(Vec2, Vec2)> = self.via_walls(w, k0, k1.min(wi.tris.len().saturating_sub(1)), layer);
@@ -3178,13 +3523,11 @@ impl<'a> Drawer<'a> {
                 if !(on(a) || on(b)) {
                     continue;
                 }
-                let mut c = vec![self.chord_pt(o, ok)];
-                c.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| pr.pos[x.1]));
-                c.push(self.chord_pt(o, ok + 1));
+                let c = self.plan_chord(o, ok);
                 guards.extend(c.windows(2).map(|x| (x[0], x[1])));
             }
         }
-        let cross = |poly: &[Vec2], g: &(Vec2, Vec2)| poly.windows(2).filter(|x| seg_proper(x[0], x[1], g.0, g.1)).count() % 2;
+        let cross = |poly: &[Vec2], g: &(Vec2, Vec2)| proper_crossings(poly, g.0, g.1) % 2;
         // The planned room of those wires (reserve planned room): a shortcut that reaches deeper
         // into the corridor of an undrawn wire's planned path (its taut and packed chords, half
         // its width plus the clearance either side) than the two legs it replaces is not taken.
@@ -3208,10 +3551,7 @@ impl<'a> Drawer<'a> {
                 let s = oi.s.max(wi.s);
                 let reach = 0.5 * wi.w + s + 0.5 * oi.w;
                 let pitch = (oi.w + s).max(1.0);
-                let mut nom = vec![self.chord_pt(o, ok)];
-                nom.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| pr.pos[x.1]));
-                nom.push(self.chord_pt(o, ok + 1));
-                corr.push((nom, reach, pitch));
+                corr.push((self.plan_chord(o, ok), reach, pitch));
                 let taut = self.taut_chord(o, ok);
                 if taut.len() >= 2 {
                     corr.push((taut, reach, pitch));
@@ -3883,6 +4223,57 @@ mod tests {
         assert_eq!(erbs_vs_sequential(31.6, 10.0, 0.05, Some(30.0)), Some(true));
         // no band: always compared
         assert_eq!(erbs_vs_sequential(1.0, 0.0, 0.05, Some(0.9)), Some(true));
+    }
+
+    /// Round i: crossings are counted by orientation signs (proper crossings), per wire; touching
+    /// or collinear runs are no crossing, a path outside the run's box is not looked at; the
+    /// competitor keeps the class only if it crosses every wire with the ERBS's parity.
+    #[test]
+    fn class_test_counts_proper_crossings_per_wire() {
+        let run = [v(0.0, 0.0), v(10.0, 0.0)];
+        let zig = [v(2.0, -1.0), v(3.0, 1.0), v(4.0, -1.0)];
+        let touch = [v(5.0, 0.0), v(5.0, 3.0)];
+        let along = [v(6.0, 0.0), v(8.0, 0.0)];
+        let near = [v(1.0, 1e-6), v(9.0, 1e-6)];
+        let far = [v(20.0, -1.0), v(20.0, 1.0)];
+        let xs = crossings_per_wire(&run, &[(1, &zig), (2, &touch), (3, &along), (4, &near), (5, &far)]);
+        assert_eq!(xs, BTreeMap::from([(1, 2)]));
+        assert!(crossings_per_wire(&run[..1], &[(1, &zig)]).is_empty());
+        let m = |v: &[(WireId, usize)]| v.iter().copied().collect::<BTreeMap<_, _>>();
+        assert!(competitor_keeps_class(&m(&[]), &m(&[])));
+        assert!(competitor_keeps_class(&m(&[(1, 2)]), &m(&[(1, 2)])));
+        // qmtech HDMI5V / ADV_SCL: 4 against 2 is one class (a bigon), the competitor may win
+        assert!(competitor_keeps_class(&m(&[(1, 4)]), &m(&[(1, 2)])));
+        assert!(competitor_keeps_class(&m(&[(1, 2)]), &m(&[])));
+        assert!(competitor_keeps_class(&m(&[(1, 1), (2, 2)]), &m(&[(1, 3)])));
+        // the other parity on any wire, on either side: another class
+        assert!(!competitor_keeps_class(&m(&[(1, 1)]), &m(&[])));
+        assert!(!competitor_keeps_class(&m(&[]), &m(&[(3, 1)])));
+        assert!(!competitor_keeps_class(&m(&[(1, 3)]), &m(&[(1, 2)])));
+        assert!(!competitor_keeps_class(&m(&[(1, 1), (2, 1)]), &m(&[(1, 1)])));
+    }
+
+    /// Round i, the bigon (qmtech HDMI5V / ADV_SCL): A's ERBS dips across B's undrawn path and back
+    /// (2 crossings), A's sequential competitor zigzags across it 4 times. Both bound a disc free
+    /// of B's terminals with B's path: one class, the competitor may win. A competitor that ends on
+    /// B's other side of A's terminals' line, crossing once (the qmtech ADV_CLK shortcut), may not.
+    #[test]
+    fn class_test_bigon_is_one_class() {
+        let b = [v(0.0, 0.0), v(10.0, 0.0)];
+        let erbs = [v(2.0, -3.0), v(3.0, 1.0), v(5.0, 1.0), v(6.0, -3.0)];
+        let seq = [v(2.0, -3.0), v(3.0, 1.0), v(3.5, -1.0), v(4.5, 1.0), v(6.0, -3.0)];
+        let (xe, xs) = (crossings_per_wire(&erbs, &[(7, &b)]), crossings_per_wire(&seq, &[(7, &b)]));
+        assert_eq!((xe.get(&7), xs.get(&7)), (Some(&2), Some(&4)));
+        assert!(competitor_keeps_class(&xs, &xe));
+        let straight = [v(2.0, -3.0), v(6.0, -3.0)];
+        assert!(competitor_keeps_class(&crossings_per_wire(&straight, &[(7, &b)]), &xe));
+        // the ADV_CLK shortcut: B's path ends between A's ERBS and the shortcut (fixture shortcut_across)
+        let b2 = [v(0.0, 0.0), v(4.0, 0.0)];
+        let wrap = [v(5.0, -3.0), v(-1.0, -1.0), v(-1.0, 1.0), v(5.0, 3.0)];
+        let short = [v(5.0, -3.0), v(2.0, 3.0)];
+        let (xw, xc) = (crossings_per_wire(&wrap, &[(7, &b2)]), crossings_per_wire(&short, &[(7, &b2)]));
+        assert_eq!((xw.get(&7), xc.get(&7)), (None, Some(&1)));
+        assert!(!competitor_keeps_class(&xc, &xw));
     }
 
     #[test]

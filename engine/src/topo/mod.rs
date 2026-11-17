@@ -42,6 +42,7 @@ pub mod moves;
 pub mod octi;
 pub mod optimise;
 pub mod pack;
+pub mod padend;
 pub mod state;
 pub mod stitch;
 pub mod tidy;
