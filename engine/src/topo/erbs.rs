@@ -90,6 +90,9 @@ pub struct ErbsOpts {
     /// drawing passes it only while a Cancel may still stop the drawing (not in the TopoR loop's
     /// one drawing, which runs through, core.rs `draw_through`).
     pub stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The run's time limit, read live: its overrun cap firing (the wall clock, or the plugin's
+    /// CPU clock via `harden`) stops ERBS even after `deadline` was taken as a snapshot.
+    pub limit: Option<std::sync::Arc<crate::control::TimeLimit>>,
     /// Test-only: the first stretch of the layer fails ("injected sleeve failure"), to see its
     /// reason reach `failed` and the ERBS_FALLBACK line. [`realise`] sets it on the first layer
     /// that has a stretch only, so a run has exactly one injected failure whatever its layering.
@@ -99,14 +102,14 @@ pub struct ErbsOpts {
 
 impl Default for ErbsOpts {
     fn default() -> Self {
-        ErbsOpts { arc_step_deg: 22.5, deadline: None, stop: None, fail_first: false }
+        ErbsOpts { arc_step_deg: 22.5, deadline: None, stop: None, limit: None, fail_first: false }
     }
 }
 
 impl ErbsOpts {
     /// The time limit has passed or the run was cancelled. O(1).
     fn expired(&self) -> bool {
-        self.deadline.is_some_and(|d| std::time::Instant::now() >= d) || self.stop.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+        self.deadline.is_some_and(|d| std::time::Instant::now() >= d) || self.stop.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) || self.limit.as_ref().is_some_and(|l| l.cap_hit())
     }
 }
 
@@ -1593,7 +1596,7 @@ pub fn precedes_order(given: &[usize], before: &BTreeSet<(usize, usize)>) -> Vec
 /// the drawing's placed vias (sheets with the via discs, bands, cut items), the order, tips and
 /// radii (steps a, b), the ERBS per layer and their check, and the precedes order of `given`.
 #[allow(clippy::too_many_arguments)]
-pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], packer: &super::pack::Packer, bottom: i32, conn: &dyn Fn(usize) -> Option<usize>, placed: &BTreeMap<usize, Vec<(usize, Vec2)>>, outline: &[(Vec2, Vec2)], mo: &super::cutflow::MeasureOpts, layers: &[usize], given: &[usize], deadline: Option<std::time::Instant>, stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>, fail_first: bool) -> Result<Realised, String> {
+pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], packer: &super::pack::Packer, bottom: i32, conn: &dyn Fn(usize) -> Option<usize>, placed: &BTreeMap<usize, Vec<(usize, Vec2)>>, outline: &[(Vec2, Vec2)], mo: &super::cutflow::MeasureOpts, layers: &[usize], given: &[usize], deadline: Option<std::time::Instant>, stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>, limit: Option<std::sync::Arc<crate::control::TimeLimit>>, fail_first: bool) -> Result<Realised, String> {
     let t0 = std::time::Instant::now();
     let none: Vec<Vec<usize>> = Vec::new();
     let plan = super::cutflow::Plan { st, events, via_k: &none, bottom, packer, conn, placed: Some(placed) };
@@ -1607,7 +1610,7 @@ pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], pac
     let mut inject = fail_first;
     for (lf, o) in m.layers.iter().zip(&ords) {
         out.unbanded += lf.walk_failed;
-        let eo = ErbsOpts { deadline, stop: stop.clone(), fail_first: inject, ..ErbsOpts::default() };
+        let eo = ErbsOpts { deadline, stop: stop.clone(), limit: limit.clone(), fail_first: inject, ..ErbsOpts::default() };
         let le = erbs_layer_with(&lf.sheet, &m.stretches, &lf.stretches, o, &eo);
         if !le.es.is_empty() || !le.failed.is_empty() {
             inject = false;

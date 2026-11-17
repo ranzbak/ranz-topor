@@ -4705,25 +4705,28 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // (`[run] drawing_grace_s`, lead 2026-11-17), as hard the limit itself.
         let erbs_soft = !ctl.limit.is_hard();
         // (The round's 1 s floor is the hard cut's; the soft bound counts from the drawing itself.)
-        // An overrun cap that fires during ERBS stops it too (the snapshot at its start would not see it).
-        let erbs_deadline = if erbs_soft { [ctl.limit.draw_bound(t_draw), ctl.limit.cap_deadline()].into_iter().flatten().min() } else { ctl.deadline().map(|d| d.max(floor)) };
+        // An overrun cap that fires during ERBS stops it too: ERBS reads it live (`ErbsOpts::limit`; also the
+        // CPU clock's `harden`), so the deadline is the drawing bound alone and a cap cut is not a drawing_grace_s hit.
+        let erbs_deadline = if erbs_soft { ctl.limit.draw_bound(t_draw) } else { ctl.deadline().map(|d| d.max(floor)) };
         let pts: BTreeMap<WireId, Vec<(usize, Vec2)>> = placed.iter().map(|(&w, v)| (w, v.iter().map(|x| (x.0, x.1)).collect())).collect();
         let layers: Vec<usize> = (0..b.n_signal).collect();
         let conn = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
         let mo = super::cutflow::MeasureOpts::from_options(opts);
-        match super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &super::board::outline_segments(model), &mo, &layers, &live, erbs_deadline, (!draw_through.get()).then(|| ctl.cancel.clone()), ctl.test_point("fail erbs sleeve")) {
+        match super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &super::board::outline_segments(model), &mo, &layers, &live, erbs_deadline, (!draw_through.get()).then(|| ctl.cancel.clone()), Some(ctl.limit.clone()), ctl.test_point("fail erbs sleeve")) {
             Ok(r) => {
-                // `[run] drawing_grace_s` (soft limit): the stretches the drawing bound cut, for the report.
-                if r.timed_out > 0 && erbs_soft && !ctl.is_cancelled() && erbs_deadline.is_some_and(|d| Instant::now() >= d) {
+                // `[run] drawing_grace_s` (soft limit): the stretches the drawing bound cut, for the report. Only when the
+                // drawing bound itself passed and no earlier overrun cap cut ERBS first (then the cap did it).
+                let drawing_cut = erbs_soft && !ctl.is_cancelled() && erbs_deadline.is_some_and(|d| Instant::now() >= d) && ctl.limit.cap_deadline().is_none_or(|c| erbs_deadline.is_some_and(|d| d <= c));
+                if r.timed_out > 0 && drawing_cut {
                     ctl.limit.note_draw_grace_erbs(r.timed_out);
                 }
                 if r.timed_out > 0 {
                     let by = if !erbs_soft || ctl.limit.hard_mode() {
                         "the time limit passed (or the run was cancelled)"
-                    } else if ctl.limit.cap_hit() {
-                        "the overrun cap [run] timeout_overrun_s passed (or the run was cancelled)"
-                    } else {
+                    } else if drawing_cut {
                         "[run] drawing_grace_s passed past the time limit (or the run was cancelled)"
+                    } else {
+                        "the overrun cap [run] timeout_overrun_s passed (or the run was cancelled)"
                     };
                     warnings.push(format!("erbs_timeout: {by} before {} stretch(es) had their ERBS; those runs are drawn the sequential way", r.timed_out));
                 }

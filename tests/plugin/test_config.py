@@ -291,3 +291,22 @@ def test_finite_graces_still_accepted(tmp_path, key, val, want):
     cfg, findings = load_config(tmp_path)
     assert not [f for f in findings if f.code.startswith("CFG_")], [f.message for f in findings]
     assert cfg.get("run", key) == want
+
+
+@pytest.mark.parametrize("val", ["inf", "-inf", "nan"])
+def test_non_finite_inside_list_and_table_is_a_config_error(tmp_path, val):
+    """limit-wait r5: inf / nan inside a list or table setting passed (allowed_drills_mm = [inf] crashed
+    engine_options with OverflowError, factors.weight inf/nan went out as Infinity/NaN JSON)."""
+    for sec, key, text in (("vias", "allowed_drills_mm", f"[0.3, {val}]"), ("factors", "weight", "{ via = " + val + " }")):
+        (tmp_path / "topor.toml").write_text(f"version = 1\n[{sec}]\n{key} = {text}\n")
+        cfg, findings = load_config(tmp_path)
+        bad = [f for f in findings if f.code == "CFG_VALUE"]
+        assert len(bad) == 1 and key in bad[0].message and ("finite" in bad[0].message or (val != "inf" and sec == "vias")), (sec, [f.message for f in findings])
+        assert cfg.get(sec, key) == schema.SETTINGS_BY_KEY[(sec, key)].default
+
+
+def test_finite_list_and_table_values_still_accepted(tmp_path):
+    (tmp_path / "topor.toml").write_text("version = 1\n[factors]\nweight = { via = 30.5 }\n")
+    cfg, findings = load_config(tmp_path)
+    assert not [f for f in findings if f.code.startswith("CFG_")], [f.message for f in findings]
+    assert cfg.get("factors", "weight") == {"via": 30.5}
