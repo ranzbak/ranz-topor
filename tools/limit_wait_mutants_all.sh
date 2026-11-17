@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# limit-wait: one mutant: tools/limit_wait_mutant.sh <name>; copies the tree, applies the edit, runs the killing tests
+# limit-wait: all mutants one after another on one copy of the tree (shared incremental target).
+# usage (cwd = the synced tree): bash mutants_all.sh name...
 set -u
-n=$1; W=/root/lw-mut-$n
+SRC=$PWD; W=/root/lw-mut-all
 python3 -c "import shutil,sys; shutil.rmtree(sys.argv[1], ignore_errors=True)" "$W"
 mkdir -p "$W"
 tar --exclude=./target --exclude=./scratch --exclude=./.git -cf - . | tar -xf - -C "$W"
 cd "$W" || exit 2
-python3 - "$n" <<'PY'
-import sys
-n=sys.argv[1]
+export CARGO_TARGET_DIR=/root/lw-mut-all-target
+cat > mut.py <<'PY'
+import sys,shutil
+n=sys.argv[1]; src=sys.argv[2]
 M={
  "inner_no_grace":("engine/src/topo/core.rs","ctl.limit.grace_over() || (!soft()","(!soft()"),
  "scope_ignored":("engine/src/control.rs","(LOOP_SCOPE.with(|s| s.get()) && l.grace_over())","l.grace_over()"),
@@ -20,13 +22,13 @@ M={
  "default_off":("engine/src/model.rs","            limit_grace_s: 30.0,","            limit_grace_s: -1.0,"),
  "no_extra_stop":("engine/src/topo/core.rs","                if stop() {\n                    cs.busy_s = t0.elapsed().as_secs_f64();\n                    return cs;\n                }\n                // Floating up","                // Floating up"),
 }
-f,a,b=M[n]; s=open(f).read(); assert a in s,(n,"pattern not found"); open(f,"w").write(s.replace(a,b,1))
+f,a,b=M[n]; shutil.copy(src+"/"+f, f); s=open(f).read(); assert a in s,(n,"pattern not found"); open(f,"w").write(s.replace(a,b,1))
 PY
-[ $? -eq 0 ] || { echo "MUTANT $n: edit failed"; exit 2; }
-export CARGO_TARGET_DIR=/root/lw-mut-target-$n
-case $n in
- default_off) T="--lib model::";;
- inner_no_grace|no_set_grace|no_loop_end|no_hit|partial_offered|no_extra_stop) T="--test topo_limit_wait --lib optimise::";;
- *) T="--lib control::";;
-esac
-if cargo test --release --manifest-path engine/Cargo.toml $T; then echo "MUTANT $n: SURVIVED"; else echo "MUTANT $n: KILLED"; fi
+for n in "$@"; do
+  for f in engine/src/topo/core.rs engine/src/control.rs engine/src/topo/optimise.rs engine/src/model.rs; do cp "$SRC/$f" "$f"; done
+  python3 mut.py "$n" "$SRC" || { echo "MUTANT $n: edit failed"; continue; }
+  killed=0
+  cargo test --release --manifest-path engine/Cargo.toml --test topo_limit_wait > mut-$n.t1.log 2>&1 || killed=1
+  cargo test --release --manifest-path engine/Cargo.toml --lib -- control:: optimise:: model::the_limit_grace > mut-$n.t2.log 2>&1 || killed=1
+  if [ $killed = 1 ]; then echo "MUTANT $n: KILLED ($(grep -h '^test .* FAILED\|panicked\|error\[' mut-$n.t*.log | head -3 | tr '\n' ' '))"; else echo "MUTANT $n: SURVIVED"; fi
+done
