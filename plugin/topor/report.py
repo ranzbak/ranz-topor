@@ -67,10 +67,16 @@ def wait_cause(tl: dict) -> str:
 
 
 def draw_grace_text(tl: dict) -> str:
-    """run.drawing_grace_s ran out: the drawing's optional passes stopped, every wire drawn. O(1)."""
+    """run.drawing_grace_s ran out: the drawing's optional passes stopped; every wire drawn, unless the limit,
+    acting as hard (the overrun cap), then cut the drawing of the traces (cut_steps "drawing"; a record without
+    cut_steps: cut == "drawing"). O(1)."""
     n = int(_num(tl.get("draw_grace_erbs")))
+    steps = tl.get("cut_steps")
+    traces_cut = "drawing" in steps if isinstance(steps, (list, tuple)) and steps else tl.get("cut") == "drawing"
     return (f"{grace_text(tl.get('draw_grace_s'), 'drawing_grace_s')} ran out: the drawing's optional passes stopped "
-            f"(the via reduction{f'; {n} ERBS stretch(es) drawn the sequential way' if n else ''}), every wire was drawn")
+            f"(the via reduction{f'; {n} ERBS stretch(es) drawn the sequential way' if n else ''}), "
+            + ("then the limit, acting as hard, cut the drawing of the traces (wires it had not drawn stay unrouted)"
+               if traces_cut else "every wire was drawn"))
 
 
 def wait_log_text(tl: dict) -> str:

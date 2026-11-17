@@ -387,6 +387,7 @@ fn limit_report(ctl: &RunControl, opts: &Options, r: &mut RouteResult) -> Option
             draw_grace_s,
             draw_grace_hit,
             draw_grace_erbs,
+            draw_cut: steps.contains(&CutStep::Drawing),
             wait_s: wait_raw,
         };
         r.warnings.push(wait_line(&w));
@@ -415,6 +416,9 @@ pub(crate) struct WaitFacts {
     pub draw_grace_s: Option<f64>,
     pub draw_grace_hit: bool,
     pub draw_grace_erbs: usize,
+    /// The limit, acting as hard, cut the drawing of the traces ([`CutStep::Drawing`]): not every
+    /// wire was drawn, even after a drawing-bound hit.
+    pub draw_cut: bool,
     /// The unrounded wait (s).
     pub wait_s: f64,
 }
@@ -441,9 +445,11 @@ pub(crate) fn wait_line(w: &WaitFacts) -> String {
     let draw_note = |lead: &str| -> String {
         match (w.draw_grace_hit, w.draw_grace_s) {
             (true, Some(g)) => format!(
-                "{lead}every wire was drawn; [run] drawing_grace_s = {} s ran out, so the drawing's optional passes stopped (the via reduction{}); raise drawing_grace_s to let them finish",
+                "{lead}{}[run] drawing_grace_s = {} s ran out, so the drawing's optional passes stopped (the via reduction{}); raise drawing_grace_s to let them finish{}",
+                if w.draw_cut { "" } else { "every wire was drawn; " },
                 secs_text(g),
-                if w.draw_grace_erbs > 0 { format!("; {} wire(s) drawn the sequential way instead of by their ERBS", w.draw_grace_erbs) } else { String::new() }
+                if w.draw_grace_erbs > 0 { format!("; {} wire(s) drawn the sequential way instead of by their ERBS", w.draw_grace_erbs) } else { String::new() },
+                if w.draw_cut { "; then the limit, acting as hard, cut the drawing of the traces (wires it had not drawn stay undrawn)" } else { "" }
             ),
             _ => String::new(),
         }
@@ -4708,32 +4714,40 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut erbs_err: Option<String> = None;
     if opts.realise == "erbs" {
         // ERBS is an optional pass of the drawing (a stretch it does not reach is drawn the
-        // sequential way, never dropped): with the soft limit its deadline is the drawing bound
+        // sequential way, never dropped): with the soft limit its bound is the drawing bound
         // (`[run] drawing_grace_s`, lead 2026-11-17), as hard the limit itself.
         let erbs_soft = !ctl.limit.is_hard();
-        // (The round's 1 s floor is the hard cut's; the soft bound counts from the drawing itself.)
-        // An overrun cap that fires during ERBS stops it too: ERBS reads it live (`ErbsOpts::limit`; also the
-        // CPU clock's `harden`), so the deadline is the drawing bound alone and a cap cut is not a drawing_grace_s hit.
-        let erbs_deadline = if erbs_soft { ctl.limit.draw_bound(t_draw) } else { ctl.deadline().map(|d| d.max(floor)) };
+        // (The round's 1 s floor is the hard cut's and the wall-clock cap's; the soft bound counts from the drawing
+        // itself.) ERBS reads the limit live at every stretch (`ErbsOpts::limit`): the overrun cap (wall clock from the
+        // floor on; the CPU clock's `harden` at once, lead 2026-11-17) and, soft, the drawing bound from `t_draw` (a
+        // limit the CPU clock reaches during ERBS moves it), and says which stopped it first (`Realised::stopped`).
         let pts: BTreeMap<WireId, Vec<(usize, Vec2)>> = placed.iter().map(|(&w, v)| (w, v.iter().map(|x| (x.0, x.1)).collect())).collect();
         let layers: Vec<usize> = (0..b.n_signal).collect();
         let conn = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
         let mo = super::cutflow::MeasureOpts::from_options(opts);
-        match super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &dr.pad_end, &super::board::outline_segments(model), &mo, &layers, &live, erbs_deadline, (!draw_through.get()).then(|| ctl.cancel.clone()), Some(ctl.limit.clone()), ctl.test_point("fail erbs sleeve")) {
+        let stops = super::erbs::ErbsOpts {
+            deadline: if erbs_soft { None } else { ctl.deadline().map(|d| d.max(floor)) },
+            stop: (!draw_through.get()).then(|| ctl.cancel.clone()),
+            limit: Some(ctl.limit.clone()),
+            draw_start: erbs_soft.then_some(t_draw),
+            floor: Some(floor),
+            fail_first: ctl.test_point("fail erbs sleeve"),
+            ..super::erbs::ErbsOpts::default()
+        };
+        match super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &dr.pad_end, &super::board::outline_segments(model), &mo, &layers, &live, stops) {
             Ok(r) => {
-                // `[run] drawing_grace_s` (soft limit): the stretches the drawing bound cut, for the report. Only when the
-                // drawing bound itself passed and no earlier overrun cap cut ERBS first (then the cap did it).
-                let drawing_cut = erbs_soft && !ctl.is_cancelled() && erbs_deadline.is_some_and(|d| Instant::now() >= d) && ctl.limit.cap_deadline().is_none_or(|c| erbs_deadline.is_some_and(|d| d <= c));
-                if r.timed_out > 0 && drawing_cut {
+                use super::erbs::ErbsStop;
+                // `[run] drawing_grace_s` (soft limit): the stretches the drawing bound cut, for the report: only when
+                // the bound stopped ERBS first (not the cap, not a Cancel).
+                if r.timed_out > 0 && r.stopped == Some(ErbsStop::Bound) {
                     ctl.limit.note_draw_grace_erbs(r.timed_out);
                 }
                 if r.timed_out > 0 {
-                    let by = if !erbs_soft || ctl.limit.hard_mode() {
-                        "the time limit passed (or the run was cancelled)"
-                    } else if drawing_cut {
-                        "[run] drawing_grace_s passed past the time limit (or the run was cancelled)"
-                    } else {
-                        "the overrun cap [run] timeout_overrun_s passed (or the run was cancelled)"
+                    let by = match r.stopped {
+                        Some(ErbsStop::Cancel) => "the run was cancelled",
+                        Some(ErbsStop::Bound) => "[run] drawing_grace_s passed past the time limit",
+                        _ if ctl.limit.hard_mode() => "the time limit passed ([run] timeout_mode = hard)",
+                        _ => "the overrun cap passed ([run] timeout_overrun_s, or the plugin's CPU-clock cap; the soft limit then acts as the hard one)",
                     };
                     warnings.push(format!("erbs_timeout: {by} before {} stretch(es) had their ERBS; those runs are drawn the sequential way", r.timed_out));
                 }
@@ -5646,7 +5660,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let layers: Vec<usize> = (0..b.n_signal).collect();
         let conn = |w: WireId| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]);
         let mo = super::cutflow::MeasureOpts::from_options(opts);
-        let _ = super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &dr.pad_end, &super::board::outline_segments(model), &mo, &layers, &live, None, None, None, false);
+        let _ = super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &dr.pad_end, &super::board::outline_segments(model), &mo, &layers, &live, super::erbs::ErbsOpts::default());
     }
     if let Some(d) = std::env::var_os("TOPO_ERBS_DUMP") {
         let nets: serde_json::Map<String, serde_json::Value> = model.nets.iter().map(|n| (n.code.to_string(), serde_json::Value::from(n.name.clone()))).collect();
@@ -6579,6 +6593,11 @@ mod tests {
         assert!(dd.contains("was dropped") && dd.contains("drawing_grace_s = 60 s ran out") && dd.contains("2 wire(s)"), "{dd}");
         let ddh = wait_line(&WaitFacts { cycle_dropped: true, hard: true, draw_grace_hit: true, ..draw.clone() });
         assert!(ddh.contains("was dropped") && ddh.contains("drawing_grace_s = 60 s ran out"), "{ddh}");
+        // r5 finding 1: the bound ran out, then the cap cut the drawing of the traces: no "every wire was drawn"
+        for dc in [WaitFacts { cycle_dropped: true, cap_hit: true, draw_grace_hit: true, draw_cut: true, ..draw.clone() }, WaitFacts { draw_grace_hit: true, draw_cut: true, ..loop_.clone() }] {
+            let t = wait_line(&dc);
+            assert!(t.contains("drawing_grace_s = 60 s ran out") && !t.contains("every wire was drawn") && t.contains("cut the drawing of the traces"), "{t}");
+        }
         // whole-route cycles
         let cyc = wait_line(&WaitFacts { whole_cycle: true, step: "drawing the traces".into(), ..loop_.clone() });
         assert!(cyc.contains("whole-route cycle") && cyc.contains("run to its end"), "{cyc}");

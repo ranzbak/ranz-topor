@@ -239,6 +239,8 @@ pub struct TimeLimit {
     draw_grace_hit: AtomicBool,
     /// Wires whose ERBS the drawing bound cut (drawn the sequential way instead).
     draw_grace_erbs: AtomicU64,
+    /// [`TimeLimit::harden`] was called (the plugin's CPU-clock cap), apart from a wall-clock cap.
+    hardened: AtomicBool,
 }
 
 /// What the soft time limit lets finish (operate.md, `timeout_mode`): with `[optimize] loop =
@@ -367,7 +369,7 @@ const LIMIT_NONE: u64 = u64::MAX - 1;
 
 impl Default for TimeLimit {
     fn default() -> TimeLimit {
-        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false), cap_ns: AtomicU64::new(LIMIT_NONE), capped: AtomicBool::new(false), cut: AtomicU8::new(0), grace_ns: AtomicU64::new(LIMIT_NONE), grace_hit: AtomicBool::new(false), wait_ns: AtomicU64::new(0), wait_runs: AtomicU64::new(0), cycle_dropped: AtomicBool::new(false), soft: Mutex::new(Vec::new()), whole_cycle: AtomicBool::new(false), cut_in_wait: AtomicBool::new(false), draw_grace_ns: AtomicU64::new(LIMIT_NONE), draw_grace_hit: AtomicBool::new(false), draw_grace_erbs: AtomicU64::new(0) }
+        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false), cap_ns: AtomicU64::new(LIMIT_NONE), capped: AtomicBool::new(false), cut: AtomicU8::new(0), grace_ns: AtomicU64::new(LIMIT_NONE), grace_hit: AtomicBool::new(false), wait_ns: AtomicU64::new(0), wait_runs: AtomicU64::new(0), cycle_dropped: AtomicBool::new(false), soft: Mutex::new(Vec::new()), whole_cycle: AtomicBool::new(false), cut_in_wait: AtomicBool::new(false), draw_grace_ns: AtomicU64::new(LIMIT_NONE), draw_grace_hit: AtomicBool::new(false), draw_grace_erbs: AtomicU64::new(0), hardened: AtomicBool::new(false) }
     }
 }
 
@@ -649,6 +651,13 @@ impl TimeLimit {
     /// seconds): the limit acts as the hard one from now on ([`TimeLimit::is_hard`]). O(1).
     pub fn harden(&self) {
         self.capped.store(true, Ordering::Relaxed);
+        self.hardened.store(true, Ordering::Relaxed);
+    }
+
+    /// [`TimeLimit::harden`] was called: the CPU clock's cap, which has no wall-clock instant
+    /// (ERBS stops at once, no 1 s floor; lead 2026-11-17). O(1).
+    pub fn hardened(&self) -> bool {
+        self.hardened.load(Ordering::Relaxed)
     }
 
     /// Change the limit (seconds since the start; `0` = no limit). O(1), any thread.
