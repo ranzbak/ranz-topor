@@ -7,8 +7,10 @@
 //! class", its terminals a superset of the RBS's, the spoke ends added; the spokes PDF p. 32).
 //! There is no order of gates to solve: the class says on which side of the path every obstacle
 //! lies, and the shortest path of a class among point obstacles is the funnel through the sleeve
-//! of a triangulation of the points (Hershberger & Snoeyink 1994; Efrat, Kobourov & Lubiw 2006,
-//! PDF p. 9: the sleeve, then the funnel, O(n + k) per path; Popov & Popov 2012, PDF p. 3, Fig. 3:
+//! of a triangulation of the points (Erickson, lecture notes "Shortest (Homotopic) Paths",
+//! sections "Crossing Sequences" and "Sleeves", docs/literature/erickson-shortest-homotopic.html;
+//! Efrat, Kobourov & Lubiw 2006, PDF p. 9: the sleeve, then the funnel, O(n + k) per path;
+//! Popov & Popov 2012, PDF p. 3, Fig. 3:
 //! the funnel over circles classified left or right of the path, p. 2, Fig. 1: the taut thread
 //! runs along the arcs). Per stretch:
 //!
@@ -651,7 +653,9 @@ fn rough_points(start: Vec2, steps: &[Step], pp: &Points) -> Vec<Vec2> {
 /// The sleeve's portals: the triangulation edges the rough path crosses from `pts[0]` to `pts[1]`
 /// in a Delaunay triangulation of the points (Efrat, Kobourov & Lubiw 2006, PDF p. 9: the funnel
 /// "follows the path through the triangulation"), a crossing straight back over the edge before
-/// cancelled (the reduced sleeve of the homotopy class, Hershberger & Snoeyink 1994), as point
+/// cancelled (the reduced sleeve of the homotopy class: Erickson's notes, "Crossing Sequences":
+/// two paths are homotopic iff their reduced crossing sequences agree; adjacent equal crossings
+/// cancel), as point
 /// indices `(left, right)` in the direction of travel. A band piece closer than [`ON`] to a
 /// vertex's line takes the vertex's label; a loop's leg gives such a vertex the loop point's
 /// label side, the same on the way out and back ([`Step::Loop`]). `Err` when the path leaves the
@@ -758,7 +762,7 @@ fn sleeve(pp: &Points, rough: &[Step]) -> Result<Vec<(usize, usize)>, String> {
                 return Err("the walk through the triangulation does not end".into());
             }
             if steps + 12 > nf + 8 && sleeve_dbg() {
-                eprintln!("  walk piece {wi} {:?} -> {:?}: face {:?} labels {:?} sides {:?}", a, b, f.map(|c| pos(c)), f.map(|c| lab(c)), f.map(|c| left_of(c, a, b, tie)));
+                eprintln!("  walk piece {wi} {:?} -> {:?}: face {:?} labels {:?} sides {:?}", a, b, f.map(&pos), f.map(&lab), f.map(|c| left_of(c, a, b, tie)));
             }
             // The exit edge: from a right vertex to a left one (counter-clockwise), b beyond it.
             let mut next = None;
@@ -771,7 +775,7 @@ fn sleeve(pp: &Points, rough: &[Step]) -> Result<Vec<(usize, usize)>, String> {
             }
             let Some((l, r)) = next else {
                 if sleeve_dbg() {
-                    eprintln!("  no exit: face {:?} labels {:?} seg {:?} -> {:?}", f.map(|c| pos(c)), f.map(|c| lab(c)), a, b);
+                    eprintln!("  no exit: face {:?} labels {:?} seg {:?} -> {:?}", f.map(&pos), f.map(&lab), a, b);
                 }
                 return Err("no exit edge (the path runs along a vertex of both sides)".into());
             };
@@ -863,10 +867,6 @@ fn band_cross(c: &super::sheet::Cut, x: &super::radii::CutItem) -> Vec2 {
     c.p + (c.q - c.p) * x.t_band.clamp(0.0, 1.0)
 }
 
-/// The ERBS of stretch `si` (module documentation, steps 1-4). `items`: its cut items `(cut,
-/// item)`; `radius`: stack radius per (vertex, stretch, corner); `skip`: features at the ends of
-/// over-full cuts it is on. O(n log n) in the obstacle points.
-#[allow(clippy::too_many_arguments)]
 /// Round h: make the pushes of one stretch agree before the rough path is built (Dayan 1997,
 /// PDF p. 32: spoke creation "checks the routability of a sketch"; PDF pp. 25-26: the ERBS keeps
 /// the spacing iff the class is routable, so where the spokes contradict each other there is no
@@ -881,6 +881,7 @@ fn band_cross(c: &super::sheet::Cut, x: &super::radii::CutItem) -> Vec2 {
 ///    obstacle: its label is not enforced (a squeezed or pad-exit feature's tip, rules 4 / 4b, or
 ///    1 above), and kept on that side it hooks the path round it wherever another point's loop
 ///    sweeps over it (qmtech st 108: 805 such tips among 748 pushed ones, the ERBS 21 x its band).
+///
 /// O(c log c) for c candidates (a grid of the pushed spokes).
 fn settle_pushes(band: &[Vec2], cand: &mut Vec<(Vec2, bool, usize, f64, Detour, Vec2)>) -> (Vec<usize>, usize) {
     let pushed = |&(p, left, _, _, det, _): &(Vec2, bool, usize, f64, Detour, Vec2)| match det {
@@ -999,6 +1000,10 @@ fn seg_cross(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
     o(a, b, c) * o(a, b, d) < 0.0 && o(c, d, a) * o(c, d, b) < 0.0
 }
 
+/// The ERBS of stretch `si` (module documentation, steps 1-4). `items`: its cut items `(cut,
+/// item)`; `radius`: stack radius per (vertex, stretch, corner); `skip`: features at the ends of
+/// over-full cuts it is on. O(n log n) in the obstacle points.
+#[allow(clippy::too_many_arguments)]
 fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize, o: &LayerOrder, items: &[(usize, usize)], radius: &BTreeMap<(usize, usize, usize), f64>, skip: &BTreeSet<usize>, opts: &ErbsOpts) -> Result<Erbs, String> {
     let band = &s.band;
     let (c0, c1) = (band[0], band[band.len() - 1]);
@@ -2037,6 +2042,21 @@ mod tests {
         assert_eq!(p, vec![s, v(5.0, -1.0), e]);
     }
 
+    /// Round h rule 1's tie with a point of the other label on the leg: a right-labelled point
+    /// q on the segment from the base to a pushed left-labelled point c counts as on c's label
+    /// side of the leg (the out leg passes it on c's side), not by its own label. The lasso
+    /// w (turn round c) w^-1 then depends on that side: the path goes round c first and then
+    /// keeps q on its right ([s, c, q, e]); by q's own label the leg would pass q on the other
+    /// side and the path would touch q first ([s, q, c, e]), a different class.
+    #[test]
+    fn loop_leg_point_of_the_other_label_takes_the_loop_side() {
+        let (s, e) = (v(0.0, 0.0), v(10.0, 0.0));
+        let x = v(5.0, 0.0);
+        let (c, q) = (v(5.0, -1.0), v(5.0, -0.5));
+        let p = path_band(&[s, e], &[(c, 2, Detour::From(x)), (q, 3, Detour::Never)]).unwrap();
+        assert_eq!(p, vec![s, c, q, e]);
+    }
+
     /// Round h: many loops deep into a field of pushed points (esp st 38: 1029 tips round a pad,
     /// the unreduced walk longer than the old cap of 8 (faces + rough) + 64 steps). Each
     /// straight piece is capped by the face count; the path goes round the outermost points and
@@ -2107,6 +2127,17 @@ mod tests {
         let b2 = (v(7.0, 0.5), false, Detour::From(v(7.0, 0.0)), v(7.0, -0.5));
         let (p, n) = path_settled(&[s, e], &[a, b2]);
         assert_eq!((p, n), (vec![s, v(5.0, -0.5), v(7.0, 0.5), e], 2));
+        // The same with Auto pushes (grown points on the other side of the band than their
+        // feature): pushed means on the wrong side, so the two settle as well.
+        let aa = (v(5.0, -0.5), true, Detour::Auto, v(5.2, 0.5));
+        let ba = (v(5.0, 0.5), false, Detour::Auto, v(5.2, -0.5));
+        let ((p, n), settled, out) = path_settled_by(&[s, e], &[aa, ba]);
+        assert_eq!((p, n, settled, out), (vec![s, e], 0, vec![0, 1], 2));
+        // An Auto point on its own side pushes nothing, though its spoke crosses a pushed one of
+        // the other label: nothing settles, the pushed tip keeps its loop and the Auto point stays.
+        let c = (v(5.3, -0.6), false, Detour::Auto, v(4.9, -0.2));
+        let ((p, n), settled, out) = path_settled_by(&[s, e], &[a, c]);
+        assert_eq!((p, n, settled, out), (vec![s, v(5.0, -0.5), e], 2, vec![], 0));
     }
 
     #[test]

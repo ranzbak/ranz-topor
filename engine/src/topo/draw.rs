@@ -2848,6 +2848,10 @@ impl<'a> Drawer<'a> {
                             }
                         }
                     }
+                    // Debug (`TOPO_ERBS_DEBUG`): how each run of the ERBS drawing was drawn.
+                    if band.is_some() && std::env::var_os("TOPO_ERBS_DEBUG").is_some() {
+                        eprintln!("ERBS draw wire {w} net {} L{layer} k {k0}..{k1}: src {src} len {:.3} band {:.3} replaced {replaced}", wi.net, poly_len(&pts) / 1e6, band_len / 1e6);
+                    }
                     if src < 0 {
                         self.stats.erbs_ok += 1;
                     } else if src <= 2 {

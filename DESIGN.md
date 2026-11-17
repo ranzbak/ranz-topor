@@ -16,8 +16,10 @@ order + Newton/Gauss-Seidel), which had no notion of side and zigzagged (eprom s
    the band crosses: Dayan p. 32 "goes round the spoke's end"; every arc sample; grown features on the
    other side). Loops leave from the nearest band point, ordered by (arclength, angle), farther-first on a ray.
 3. Sleeve: walk the rough path through a Delaunay triangulation of the points; reduce back-crossings
-   (Hershberger & Snoeyink 1994, reduced sleeve; Efrat, Kobourov & Lubiw 2006 PDF p. 9: "follows the path
-   through the triangulation", O(n + k)).
+   (Erickson, lecture notes "Shortest (Homotopic) Paths", section "Crossing Sequences",
+   docs/literature/erickson-shortest-homotopic.html: homotopic iff equal reduced crossing sequences, adjacent
+   equal crossings cancel; Efrat, Kobourov & Lubiw 2006 PDF p. 9: "follows the path through the
+   triangulation", O(n + k). Hershberger & Snoeyink 1994 is in docs/01-bibliography.md, not in docs/literature).
 4. Funnel (topo::funnel, branch funnel-fix) through the portals; Popov & Popov 2012 PDF p. 3 Fig. 3
    (funnel over obstacles classified left/right), p. 2 Fig. 1 (taut thread along arcs).
 
@@ -103,9 +105,16 @@ qmtech dump ratio list; mutants per rule; deterministic ladder seed 0 rounds=1 b
 
 ### Rules (erbs.rs, rough path only)
 1. **A loop is out, round, back over the same edges** (`Step::Loop`): the way back is the way out reversed,
-   so a loop is the conjugate of one turn round its point and never encloses another point (Hershberger &
-   Snoeyink 1994: the class as a reduced crossing sequence; Efrat, Kobourov & Lubiw 2006 PDF p. 9). A point on
-   the leg counts as on the loop point's label side, as the thin loop had it.
+   so a loop is the conjugate of one turn round its point and never encloses another point. Sources: the class
+   is its reduced crossing sequence (Erickson, lecture notes "Shortest (Homotopic) Paths", section "Crossing
+   Sequences", docs/literature/erickson-shortest-homotopic.html: "Two paths are homotopic if and only if they
+   have identical reduced crossing sequences", adjacent equal crossings cancel); the funnel over the sleeve
+   (Efrat, Kobourov & Lubiw 2006 PDF p. 9; it supports the funnel only, not the loop). **The conjugate argument
+   is our own reasoning** (round i; no source in docs/literature): the loop's crossing sequence is w R w^-1
+   (w the out leg, R one turn round the point's star), so every crossing of w is undone by w^-1 and the loop
+   winds once round its own point and zero times round any other. A point on the leg counts as on the loop
+   point's label side (round i test `loop_leg_point_of_the_other_label_takes_the_loop_side`: the side of w
+   picks the conjugate, so it decides the class).
 2. **Walk cap per straight piece** (faces + 8): a straight piece crosses a face at most once with a consistent
    side test, so more steps is a cycle; the total is the real work O(sum of loop depths).
 3. **Loops at one base** (within 0.5 nm) share it and go in angle order.

@@ -1647,6 +1647,20 @@ mod tests {
         es[0].settled = vec![GateSrc::Cut(ci)];
         let after = mine(&check_layer(&sh, &sts, &o, &es), ci);
         assert!(after.len() == before.len() && after.iter().all(|v| v.predicted), "predicted once settled: {after:?}");
+        // A settled grown point (GateSrc::Feature) or arc sample (GateSrc::Arc, a vertex of the
+        // feature) predicts that feature only: the violation against it becomes predicted, the
+        // one against the other wire stays a gap (condition (a) for every gate source).
+        let c = &sh.cuts[o.cuts[ci].cut];
+        let block = [c.fp, c.fq].into_iter().find(|&f| before.iter().any(|v| v.other == Party::Feature(f))).expect("a violation against a block");
+        let vtx = (0..sh.vfeat.len()).find(|&v| sh.vfeat[v] == Some(block)).expect("a sheet vertex of the block");
+        for g in [GateSrc::Feature(block), GateSrc::Arc(vtx)] {
+            es[0].settled = vec![g];
+            let after = mine(&check_layer(&sh, &sts, &o, &es), ci);
+            let at_block: Vec<_> = after.iter().filter(|v| v.other == Party::Feature(block)).collect();
+            let at_wire: Vec<_> = after.iter().filter(|v| v.other == Party::Stretch(1)).collect();
+            assert!(!at_block.is_empty() && at_block.iter().all(|v| v.predicted), "{g:?}: the block's violation predicted: {after:?}");
+            assert!(!at_wire.is_empty() && at_wire.iter().all(|v| !v.predicted), "{g:?}: the other wire's still a gap: {after:?}");
+        }
     }
 
     /// A violation no over-full cut predicts is an erbs_gap.
