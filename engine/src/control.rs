@@ -283,12 +283,13 @@ pub fn soft_step_of(stage: &str) -> Option<SoftStep> {
     SOFT_STAGES.iter().find(|(p, _)| stage.starts_with(p)).map(|&(_, s)| s)
 }
 
-/// A run's soft step: none yet, open (round, key), or ended (idle, between steps).
+/// A run's soft step: none yet, open (round, key, when it began: ns since the limit's start), or
+/// ended (idle, between steps).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum SoftSlot {
     #[default]
     Never,
-    Open(u32, u64),
+    Open(u32, u64, u64),
     Closed,
 }
 
@@ -460,8 +461,11 @@ impl TimeLimit {
     /// change of its soft step ends the one before (noted once per run, [`TimeLimit::note_step_end`]).
     /// A run's first stage of a best-of-N call continues the call's shared step (plane stubs,
     /// projection: part of every run's initial routing). O(runs).
+    /// Only a step that began before the limit counts: a run idle at the limit (waiting at the
+    /// draw gate) whose drawing begins later has no wait of its own.
     fn soft_enter(&self, run: u32, round: u32, stage: &str) {
-        let next = if stage.is_empty() { SoftSlot::Closed } else { SoftSlot::Open(round, soft_key(stage, self.whole_cycle.load(Ordering::Relaxed))) };
+        let now = self.start.elapsed().as_nanos().min(u128::from(LIMIT_NONE - 1)) as u64;
+        let key = (!stage.is_empty()).then(|| (round, soft_key(stage, self.whole_cycle.load(Ordering::Relaxed))));
         let Ok(mut v) = self.soft.lock() else { return };
         let i = run as usize;
         if v.len() <= i {
@@ -471,8 +475,16 @@ impl TimeLimit {
         if cur == SoftSlot::Never && i > 0 {
             cur = v[0];
         }
-        if matches!(cur, SoftSlot::Open(..)) && cur != next {
-            self.note_step_end(run);
+        let next = match (key, cur) {
+            (None, _) => SoftSlot::Closed,
+            (Some((r, k)), SoftSlot::Open(r0, k0, t0)) if (r, k) == (r0, k0) => SoftSlot::Open(r, k, t0),
+            (Some((r, k)), _) => SoftSlot::Open(r, k, now),
+        };
+        if let SoftSlot::Open(_, _, t0) = cur {
+            let began_before = self.ns.load(Ordering::Relaxed) > t0; // the limit (ns since start) is after its start
+            if cur != next && began_before {
+                self.note_step_end(run);
+            }
         }
         v[i] = next;
     }
@@ -1411,6 +1423,28 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         r2.stage(1, 1, "TopoR loop on the topology");
         assert!(ctl.limit.wait_s() > w + 0.08, "the longest run counts");
+    }
+
+    #[test]
+    fn a_run_idle_at_the_limit_whose_drawing_begins_later_has_no_wait() {
+        // runs 2: run 1 waits at the draw gate when the limit passes, run 2 is in its loop; run 1 then
+        // draws (began after the limit): only run 2's loop step is a wait
+        let ctl = RunControl::new();
+        ctl.with_progress(|p| p.runs = 2);
+        ctl.limit.init(0.05);
+        let (r1, r2) = (ctl.for_run(1), ctl.for_run(2));
+        r1.stage(1, 1, "TopoR loop on the topology");
+        r2.stage(1, 1, "TopoR loop on the topology");
+        r1.stage(1, 1, "picking the variant to draw");
+        r1.idle(); // before the limit
+        std::thread::sleep(Duration::from_millis(80));
+        r2.stage(1, 1, "picking the variant to draw"); // run 2's loop ends after the limit
+        let w = ctl.limit.wait_s();
+        assert!(ctl.limit.step_end_noted() && w > 0.02, "{w}");
+        r1.stage(1, 1, "drawing the traces"); // run 1 draws: began after the limit
+        std::thread::sleep(Duration::from_millis(150));
+        r1.idle();
+        assert_eq!(ctl.limit.wait_s(), w, "a step that began after the limit is no wait");
     }
 
     #[test]

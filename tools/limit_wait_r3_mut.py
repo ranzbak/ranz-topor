@@ -24,8 +24,9 @@ M = {
     "p_run": (f"{P}/run.py", 'if reached and (tl["wait_s"] > 0 or tl["cycle_dropped"] or tl["draw_grace_hit"]):', "if False:"),
     "p_postrun": (f"{P}/postrun.py", 'lw = lines("time limit wait: ")', "lw = []"),
     # round 3: the soft step
-    "s_change": (K, "if matches!(cur, SoftSlot::Open(..)) && cur != next {", "if matches!(cur, SoftSlot::Open(..)) && false {"),
-    "s_every": (K, "if matches!(cur, SoftSlot::Open(..)) && cur != next {", "if matches!(cur, SoftSlot::Open(..)) {"),
+    "s_change": (K, "if cur != next && began_before {", "if false && began_before {"),
+    "s_every": (K, "if cur != next && began_before {", "if began_before {"),
+    "s_before": (K, "if cur != next && began_before {", "if cur != next {"),
     "s_inherit": (K, "if cur == SoftSlot::Never && i > 0 {", "if false {"),
     "s_cycle": (K, "Some(_) if whole_cycle => 1,", "Some(_) if false => 1,"),
     "s_pick": (C, 'ctl.stage(rnd, rnds, "picking the variant to draw");', "let _ = rnd;"),

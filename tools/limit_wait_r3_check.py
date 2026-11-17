@@ -46,6 +46,7 @@ def run_stage(rec, k):
 def main(paths, show, jout):
     viol, info = defaultdict(list), Counter()
     phases = Counter()
+    stages_judged = Counter()
     for p in paths:
         for ln in open(p):
             d = json.loads(ln)
@@ -92,6 +93,8 @@ def main(paths, show, jout):
                 info["near a stage change (not judged)"] += 1
                 continue
             phases[group(per_run(at).get(0) or next(iter(per_run(at).values()), ''))] += 1
+            first = per_run(at).get(0) or next(iter(per_run(at).values()), '')
+            stages_judged[next((k for k, _ in GROUP if first.startswith(k)), first or "-")] += 1
             if step != at:
                 viol["step != polled stage at the limit"].append((key, step, at))
             if abs(wait - exp) > max(TOL, 0.02 * exp):
@@ -107,7 +110,7 @@ def main(paths, show, jout):
             in_loop = "TopoR loop" in step
             if step and step not in w:
                 viol["line does not name the step"].append((key, step, w))
-            if "finished within" in w and (not in_loop or wait > (d["grace_s"] or 1e9) + 0.0005 or dropped):
+            if "finished within [run] limit_grace_s" in w and (not in_loop or wait > (d["grace_s"] or 1e9) + 0.0005 or dropped):
                 viol["'finished within' but not true"].append((key, wait, d["grace_s"], w))
             if "limit_grace_s" in w and "ran out" in w and "drawing_grace_s" not in w.split("ran out")[0][-40:] and not (in_loop and gh):
                 viol["'limit_grace_s ran out' without a grace hit in the loop"].append((key, w))
@@ -123,6 +126,7 @@ def main(paths, show, jout):
                 info[f"line in {mode} mode / cap_hit={d.get('cap_hit')}"] += 1
     print("cases:", dict(sorted(info.items())))
     print("judged per soft step:", dict(phases))
+    print("judged per stage at the limit:", dict(stages_judged))
     for k, v in viol.items():
         print(f"VIOLATION {k}: {len(v)}")
         for x in v[:show]:
@@ -130,7 +134,7 @@ def main(paths, show, jout):
     if not viol:
         print("no violations")
     if jout:
-        json.dump({"cases": dict(info), "judged": dict(phases), "violations": {k: len(v) for k, v in viol.items()}}, open(jout, "w"), indent=1)
+        json.dump({"cases": dict(info), "judged": dict(phases), "judged_stages": dict(stages_judged), "violations": {k: len(v) for k, v in viol.items()}}, open(jout, "w"), indent=1)
 
 
 if __name__ == "__main__":
