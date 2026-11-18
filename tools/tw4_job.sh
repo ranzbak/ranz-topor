@@ -107,6 +107,15 @@ case ${1:-} in
     u eqn-2 16 "e2w:esp:4" "e2wn:esp:4" "e3w:esp:4" "e3wn:esp:4"
     u eqn-3 16 "e4w:esp:4" "e4wn:esp:4" "e0w:qmtech:4" "e0wn:qmtech:4"
     wait; note "all done" ;;
+  abn)
+    # TW4 merge round (lead 2026-11-19, no exclusive ccx43 free): neck_depth 1000 A/B at a fixed cycle count (rounds 16,
+    # stable_patience 16) on the via_cuts default, esp s0-s4 + qmtech s0; off and on side by side in each unit (same load);
+    # the per-cycle cost from the loop's CPU time / cycles (result.json router_cpu_s, compass loop)
+    u abn-q 8 "r16s0:qmtech:4" "r16s0n:qmtech:4"
+    u abn-e1 4 "r16s0:esp:2 r16s1:esp:2" "r16s0n:esp:2 r16s1n:esp:2"
+    u abn-e2 4 "r16s2:esp:2 r16s3:esp:2" "r16s2n:esp:2 r16s3n:esp:2"
+    u abn-e3 4 "r16s4:esp:2" "r16s4n:esp:2"
+    wait; note "all done" ;;
   eqnbh)
     # the equal-time units first (alone on the --exclusive ccx43), then the long board's quality units
     bash $ROOT/tools/tw4_job.sh eqn; bash $ROOT/tools/tw4_job.sh bh ;;
