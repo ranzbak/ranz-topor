@@ -568,9 +568,21 @@ fn cross_s(st: &State, polys: &[Vec<Vec2>], w: WireId, x: &super::state::Crossin
     }
 }
 
-/// Stretches, via slots and counts of `rep` from the labelled events `evl[w] = (k, s, layer)` of
-/// every wire (shared by the two-layer and the N-layer assignment). O(events).
-fn stretches_and_vias(st: &State, polys: &[Vec<Vec2>], evl: &[Vec<(usize, f64, i32)>], p: &LayerParams, rep: &mut LayerReport) {
+/// The stretches, vias and vias without a site of one wire ([`stretches_and_vias`]): the pieces
+/// `(layer, points)`, per via its point and slot, and how many vias have no plausible site.
+#[derive(Clone, Debug)]
+struct WireStretches {
+    pieces: Vec<(i32, Vec<Vec2>)>,
+    vias: Vec<(Vec2, ViaSlot)>,
+    no_site: usize,
+}
+
+/// The stretches of live wire `w` from its labelled events `ev` (the body of
+/// [`stretches_and_vias`]). Reads the wire's net, triangles, turns, pass count and polyline
+/// `polys[w]`, and the static projection ([`StretchKey`]: whether an end site exists does not
+/// depend on the crossed chords [`super::refine::end_site`] ranks its candidates by).
+/// O(events + passes x cost of `free_radius`).
+fn wire_stretches(st: &State, polys: &[Vec<Vec2>], w: WireId, ev: &[(usize, f64, i32)], p: &LayerParams) -> WireStretches {
     let pr = st.proj;
     // A plausible site: a point of the stretch (pass point or triangle centroid) whose free disc
     // against other nets' obstacles holds a via pad plus clearance (wire demand ignored).
@@ -582,6 +594,129 @@ fn stretches_and_vias(st: &State, polys: &[Vec<Vec2>], evl: &[Vec<(usize, f64, i
             !pr.tri_out[t] && free(c)
         }) || (k1 + 1..=k2).any(|k| free(polys[w][k]))
     };
+    let wi = &st.wires[w];
+    let pts = &polys[w];
+    let n = wi.passes.len();
+    let mut out = WireStretches { pieces: Vec::new(), vias: Vec::new(), no_site: 0 };
+    let Some(&(fk, fs, fl)) = ev.first() else {
+        // Crosses nothing: the bottom layer (TopoR's default).
+        let bottom = if p.n_signal == 0 { pr.n_layers } else { p.n_signal };
+        out.pieces.push((bottom as i32 - 1, pts.clone()));
+        return out;
+    };
+    out.pieces.push((fl, piece(pts, 0, 0.0, fk, fs)));
+    let (ranges, between) = super::refine::via_ranges(ev, p.via_between);
+    let mut vi = 0usize;
+    for x in ev.windows(2) {
+        let ((ka, sa, la), (kb, sb, lb)) = (x[0], x[1]);
+        if la == lb {
+            out.pieces.push((la, piece(pts, ka, sa, kb, sb)));
+            continue;
+        }
+        // The via in the middle of its interval: a pass point when the stretch spans one.
+        // With [vias] between_crossings the middle of the traversals strictly between the
+        // two events (`ranges`), and no site when there are none.
+        let (r, has) = (ranges[vi], between[vi]);
+        vi += 1;
+        let (km, sm) = if p.via_between && has {
+            ((r.0 + r.1).div_ceil(2), 0.0)
+        } else if kb > ka {
+            ((ka + kb).div_ceil(2), 0.0)
+        } else {
+            (ka, 0.5 * (sa + sb))
+        };
+        out.pieces.push((la, piece(pts, ka, sa, km, sm)));
+        out.pieces.push((lb, piece(pts, km, sm, kb, sb)));
+        out.vias.push((at(pts, km, sm), ViaSlot { wire: w, from: (ka, sa), to: (kb, sb), at: (km, sm) }));
+        // 5.2: without a traversal strictly between its events the via may still stand on
+        // its own side of an end event ([`super::refine::end_site`]).
+        let free = |t: TriId, q: Vec2| pr.inradius(t) >= p.via_site_r && pr.free_radius(q, wi.net) >= p.via_site_r;
+        let site_ok = if has { site(r.0, r.1, w) } else { super::refine::end_site(st, w, x[0], x[1], &free).is_some() };
+        if !site_ok {
+            out.no_site += 1;
+        }
+    }
+    let &(lk, ls, ll) = ev.last().expect("non-empty");
+    out.pieces.push((ll, piece(pts, lk, ls, n, 1.0)));
+    out
+}
+
+/// loop-local Step A (profile F9): a per-wire cache of [`wire_stretches`], so a layering that
+/// leaves most wires as they were (every TopoR-loop move is judged by one) does not search
+/// their via sites again (`Projection::free_radius` over every obstacle). Exact: an entry is
+/// used only when everything [`wire_stretches`] reads for that wire is bit-equal
+/// ([`StretchKey`]) under the same parameters and projection, so the reports are bit-identical
+/// with and without it. Shared by reference (a mutex, uncontended: one run's layerings are
+/// serial).
+#[derive(Default)]
+pub struct StretchCache {
+    inner: std::sync::Mutex<CacheInner>,
+}
+
+/// One cached wire: the inputs it was made from and its result.
+type CacheEntry = Option<(StretchKey, WireStretches)>;
+
+#[derive(Default)]
+struct CacheInner {
+    /// (projection address, via_site_r bits, n_signal, via_between) the entries were made under.
+    params: Option<(usize, u64, usize, bool)>,
+    wires: Vec<CacheEntry>,
+    hits: u64,
+    misses: u64,
+}
+
+/// Everything [`wire_stretches`] reads for one wire (f64 as bits) besides the static projection
+/// and the parameters: its net (the free radius against other nets), triangles (the site
+/// centroids, the end-site triangle), turns (an end site skips a turning traversal), polyline
+/// (the pieces, the pass-point sites; its length gives the pass count) and events. The end site
+/// ([`super::refine::end_site`]) also reads the crossed wires' chords, but only to rank the
+/// candidate centres: whether a site exists (all the stretch pass asks) does not depend on them.
+#[derive(Clone, Debug, PartialEq)]
+struct StretchKey {
+    net: i32,
+    tris: Vec<TriId>,
+    turns: Vec<(usize, usize)>,
+    poly: Vec<(u64, u64)>,
+    ev: Vec<(usize, u64, i32)>,
+}
+
+impl StretchKey {
+    /// The key of live wire `w` with events `ev`. O(passes + events).
+    fn of(st: &State, polys: &[Vec<Vec2>], w: WireId, ev: &[(usize, f64, i32)]) -> StretchKey {
+        let wi = &st.wires[w];
+        StretchKey {
+            net: wi.net,
+            tris: wi.tris.clone(),
+            turns: wi.turns.clone(),
+            poly: polys[w].iter().map(|q| (q.x.to_bits(), q.y.to_bits())).collect(),
+            ev: ev.iter().map(|&(k, s, l)| (k, s.to_bits(), l)).collect(),
+        }
+    }
+}
+
+impl StretchCache {
+    /// `(hits, misses)` so far.
+    pub fn stats(&self) -> (u64, u64) {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        (g.hits, g.misses)
+    }
+}
+
+/// Stretches, via slots and counts of `rep` from the labelled events `evl[w] = (k, s, layer)` of
+/// every wire (shared by the two-layer and the N-layer assignment); with `cache`, a wire whose
+/// inputs are unchanged takes its last result ([`StretchCache`], bit-identical). O(events).
+fn stretches_and_vias(st: &State, polys: &[Vec<Vec2>], evl: &[Vec<(usize, f64, i32)>], p: &LayerParams, rep: &mut LayerReport, cache: Option<&StretchCache>) {
+    let mut guard = cache.map(|c| c.inner.lock().unwrap_or_else(|e| e.into_inner()));
+    if let Some(g) = guard.as_mut() {
+        let params = (st.proj as *const _ as usize, p.via_site_r.to_bits(), p.n_signal, p.via_between);
+        if g.params != Some(params) {
+            g.params = Some(params);
+            g.wires.clear();
+        }
+        if g.wires.len() < evl.len() {
+            g.wires.resize(evl.len(), None);
+        }
+    }
     for (w, ev) in evl.iter().enumerate() {
         let wi = &st.wires[w];
         if !wi.alive {
@@ -589,60 +724,44 @@ fn stretches_and_vias(st: &State, polys: &[Vec<Vec2>], evl: &[Vec<(usize, f64, i
             rep.events.push(Vec::new());
             continue;
         }
-        let pts = &polys[w];
-        let n = wi.passes.len();
-        let mut pieces: Vec<(i32, Vec<Vec2>)> = Vec::new();
         rep.events.push(ev.clone());
-        let Some(&(fk, fs, fl)) = ev.first() else {
-            // Crosses nothing: the bottom layer (TopoR's default).
-            let bottom = if p.n_signal == 0 { pr.n_layers } else { p.n_signal };
-            pieces.push((bottom as i32 - 1, pts.clone()));
-            rep.stretches.push(pieces);
-            continue;
+        let ws = match guard.as_mut() {
+            None => wire_stretches(st, polys, w, ev, p),
+            Some(g) => {
+                let key = StretchKey::of(st, polys, w, ev);
+                let hit = g.wires[w].as_ref().filter(|(k, _)| *k == key).map(|(_, ws)| ws.clone());
+                match hit {
+                    Some(ws) => {
+                        g.hits += 1;
+                        ws
+                    }
+                    None => {
+                        g.misses += 1;
+                        let ws = wire_stretches(st, polys, w, ev, p);
+                        g.wires[w] = Some((key, ws.clone()));
+                        ws
+                    }
+                }
+            }
         };
-        pieces.push((fl, piece(pts, 0, 0.0, fk, fs)));
-        let (ranges, between) = super::refine::via_ranges(ev, p.via_between);
-        let mut vi = 0usize;
-        for x in ev.windows(2) {
-            let ((ka, sa, la), (kb, sb, lb)) = (x[0], x[1]);
-            if la == lb {
-                pieces.push((la, piece(pts, ka, sa, kb, sb)));
-                continue;
-            }
-            // The via in the middle of its interval: a pass point when the stretch spans one.
-            // With [vias] between_crossings the middle of the traversals strictly between the
-            // two events (`ranges`), and no site when there are none.
-            let (r, has) = (ranges[vi], between[vi]);
-            vi += 1;
-            let (km, sm) = if p.via_between && has {
-                ((r.0 + r.1).div_ceil(2), 0.0)
-            } else if kb > ka {
-                ((ka + kb).div_ceil(2), 0.0)
-            } else {
-                (ka, 0.5 * (sa + sb))
-            };
-            pieces.push((la, piece(pts, ka, sa, km, sm)));
-            pieces.push((lb, piece(pts, km, sm, kb, sb)));
+        for (q, slot) in &ws.vias {
             rep.vias += 1;
-            rep.via_pts.push(at(pts, km, sm));
-            rep.slots.push(ViaSlot { wire: w, from: (ka, sa), to: (kb, sb), at: (km, sm) });
-            // 5.2: without a traversal strictly between its events the via may still stand on
-            // its own side of an end event ([`super::refine::end_site`]).
-            let free = |t: TriId, q: Vec2| pr.inradius(t) >= p.via_site_r && pr.free_radius(q, wi.net) >= p.via_site_r;
-            let site_ok = if has { site(r.0, r.1, w) } else { super::refine::end_site(st, w, x[0], x[1], &free).is_some() };
-            if !site_ok {
-                rep.vias_no_site += 1;
-            }
+            rep.via_pts.push(*q);
+            rep.slots.push(*slot);
         }
-        let &(lk, ls, ll) = ev.last().expect("non-empty");
-        pieces.push((ll, piece(pts, lk, ls, n, 1.0)));
-        rep.stretches.push(pieces);
+        rep.vias_no_site += ws.no_site;
+        rep.stretches.push(ws.pieces);
     }
 }
 
 /// Recompute the stretches, via slots and via counts of `rep` from changed labels `evl` (the P4
 /// label moves; the wires and their events are unchanged). O(events + passes).
 pub fn relabel(st: &State, evl: &[Vec<(usize, f64, i32)>], p: &LayerParams, rep: &mut LayerReport) {
+    relabel_cached(st, evl, p, rep, None)
+}
+
+/// [`relabel`] with the per-wire stretch cache ([`StretchCache`]; bit-identical).
+pub fn relabel_cached(st: &State, evl: &[Vec<(usize, f64, i32)>], p: &LayerParams, rep: &mut LayerReport, cache: Option<&StretchCache>) {
     let polys: Vec<Vec<Vec2>> = (0..st.wires.len()).map(|w| if st.wires[w].alive { st.polyline(w) } else { Vec::new() }).collect();
     rep.stretches.clear();
     rep.events.clear();
@@ -650,7 +769,7 @@ pub fn relabel(st: &State, evl: &[Vec<(usize, f64, i32)>], p: &LayerParams, rep:
     rep.via_pts.clear();
     rep.slots.clear();
     rep.vias_no_site = 0;
-    stretches_and_vias(st, &polys, evl, p, rep);
+    stretches_and_vias(st, &polys, evl, p, rep, cache);
 }
 
 /// Assign layers to the wires of `st`: the exact two-layer Polubasov solve for two signal layers,
@@ -663,14 +782,20 @@ pub fn assign(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
 /// [`assign`] with the drawing's packer: the labelling is then refined against capacity
 /// ([`refine`]) and the over-full edge-layers are counted.
 pub fn assign_with(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams, packer: Option<&Packer>) -> LayerReport {
+    assign_cached(st, smd_layer, p, packer, None)
+}
+
+/// [`assign_with`] with the per-wire stretch cache ([`StretchCache`]; the same report bit for
+/// bit, the untouched wires' via sites not searched again).
+pub fn assign_cached(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams, packer: Option<&Packer>, cache: Option<&StretchCache>) -> LayerReport {
     if st.proj.n_layers == 2 {
-        assign_two(st, smd_layer, p, packer)
+        assign_two(st, smd_layer, p, packer, cache)
     } else {
-        assign_n(st, smd_layer, p, packer)
+        assign_n(st, smd_layer, p, packer, cache)
     }
 }
 
-fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams, packer: Option<&Packer>) -> LayerReport {
+fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams, packer: Option<&Packer>, cache: Option<&StretchCache>) -> LayerReport {
     let pr = st.proj;
     let mut rep = LayerReport::default();
     let mut dom: BTreeMap<(WireId, usize, WireId, usize), usize> = BTreeMap::new();
@@ -841,7 +966,7 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
             }
         }
     }
-    stretches_and_vias(st, &polys, &evl, p, &mut rep);
+    stretches_and_vias(st, &polys, &evl, p, &mut rep, cache);
     rep.same_layer = dom_labels.values().filter(|l| l.len() == 2 && l[0] == l[1]).count();
     let mut pairs: BTreeMap<(WireId, WireId), Vec2> = BTreeMap::new();
     for &(w, k, o, _) in &unl {
@@ -928,7 +1053,7 @@ fn n_cost(wev: &[Vec<usize>], ev: &[NEv], lab: &[u8], c: &Costs) -> f64 {
 /// 3. the swap is kept when the total cost drops; repeated until a full sweep improves nothing.
 ///
 /// Complexity: O(events · L²) per greedy wire pass; a sweep is L² / 2 domain-graph solves.
-pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams, packer: Option<&Packer>) -> LayerReport {
+pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams, packer: Option<&Packer>, cache: Option<&StretchCache>) -> LayerReport {
     let pr = st.proj;
     let nl = pr.n_layers;
     let full: u64 = if nl >= 64 { u64::MAX } else { (1u64 << nl) - 1 };
@@ -1215,6 +1340,6 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
         pairs.entry((w, o)).or_insert(p);
     }
     (rep.unlayerable_pairs, rep.unlayerable_at) = pairs.into_iter().unzip();
-    stretches_and_vias(st, &polys, &evl, p, &mut rep);
+    stretches_and_vias(st, &polys, &evl, p, &mut rep, cache);
     rep
 }

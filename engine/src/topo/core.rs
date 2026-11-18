@@ -2797,9 +2797,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // branch ends on it. Two layers: inside P3, a tee is one layer domain (D6b); more layers: a
     // fix-up after P3 (D5).
     // `ties` != 0: a random choice among the equal layerings (the TopoR loop, 5.2); 0 = as before.
+    // loop-local Step A (profile F9): the untouched wires' stretches and via sites are taken from
+    // the last layering instead of searched again (exact, [`layers::StretchCache`]);
+    // TOPO_NOSCACHE=1 (debug) switches it off for an A/B check.
+    let scache = layers::StretchCache::default();
+    let scache_on = std::env::var_os("TOPO_NOSCACHE").is_none();
+    let scache_ref = scache_on.then_some(&scache);
     let assign_t = |st: &State, ties: u64| {
         let lp = LayerParams { ties, ..lp };
-        let mut lr = layers::assign_with(st, &|ob| b.smd_layer(ob), &lp, Some(&packer));
+        let mut lr = layers::assign_cached(st, &|ob| b.smd_layer(ob), &lp, Some(&packer), scache_ref);
         if tree_free && proj.n_layers != 2 && st.wires.iter().any(|w| w.alive && !w.turns.is_empty()) {
             let mut evl = lr.events.clone();
             let bottom_l = (if b.n_signal == 0 { proj.n_layers } else { b.n_signal }) as i32 - 1;
@@ -2807,7 +2813,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             lr.mask.resize(st.wires.len(), Vec::new());
             lr.partner.resize(st.wires.len(), Vec::new());
             tree::fix_layers(st, &mut evl, &mut lr.mask, &mut lr.partner, bottom_l);
-            layers::relabel(st, &evl, &lp, &mut lr);
+            layers::relabel_cached(st, &evl, &lp, &mut lr, scache_ref);
         }
         lr
     };
@@ -3282,7 +3288,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let o1 = lb.cm.overfull();
         let evl = std::mem::take(&mut lb.evl);
         drop(lb);
-        layers::relabel(&st, &evl, &lp, &mut lr);
+        layers::relabel_cached(&st, &evl, &lp, &mut lr, scache_ref);
         if let Some(n) = pairs_removed {
             warnings.push(format!("local via-pair minimisation ([vias] pair_min; Luzin, Popov & Popov 2013): {n} via pair(s) removed by moving the stretch between them onto its neighbours' layer"));
         }
@@ -3501,6 +3507,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             pair_move: Option<f64>,
             /// The objective's price of a via (mm, `mm_per_via`), the unit of that stretch price.
             via_mm: f64,
+            /// loop-local Step A: the per-wire stretch cache of the layerings (exact).
+            scache: Option<&'a layers::StretchCache>,
             /// Debug (`TOPO_LOOPDBG`): one line per reroute and per cycle stage.
             dbg: bool,
             dbg_tag: u64,
@@ -4031,7 +4039,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     let moved: usize = lt.applied.iter().sum::<usize>() + lifted;
                     if moved > 0 {
                         let mut lr = self.lr.clone();
-                        layers::relabel(self.st, &evl, &self.lp, &mut lr);
+                        layers::relabel_cached(self.st, &evl, &self.lp, &mut lr, self.scache);
                         if self.try_layers(lr, self.ties) {
                             cs.float_kept = moved - lifted;
                             cs.pair_lifts = lifted;
@@ -4194,6 +4202,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             pair_max: opts.via_pair_min.then(|| opts.via_pair_max_mm.max(0.0) * MM),
             pair_move: opts.via_pair_move.then(|| opts.via_pair_max_mm.max(0.0) * MM),
             via_mm: opts.mm_per_via,
+            scache: scache_ref,
             dbg: std::env::var_os("TOPO_LOOPDBG").is_some(),
             dbg_tag: opts.seed,
         };
