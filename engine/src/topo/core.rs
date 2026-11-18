@@ -6363,6 +6363,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // trunk's copper where the two part (TopoR FreeStyle auto move of T-points, black-box E8c-e;
     // overlap removal, REPORT section 4.C). Geometric, after everything is drawn: the checker sees
     // all copper. A wire at a pad end fuses only onto a wire not fused there itself (no cycle).
+    // (price gain, length gain mm) of every fuse applied, for the report line.
+    let mut fused: Vec<(f64, f64)> = Vec::new();
+    // Fuse pour check ([`super::fusepour`], after the octilinear polish: the variant table judges
+    // the copper the steps after the fuse leave): each applied move with the state it replaced
+    // (drawn wire, outcome, necked stretches of its connection), in the order made.
+    let pour_check = opts.fuse_pour_check && opts.stitch_islands && model.pours.iter().any(|z| !z.fills.is_empty());
+    type Saved = (WireOut, Outcome, Vec<(usize, Event)>);
+    let mut moves: Vec<(super::fusepour::Move, Saved)> = Vec::new();
     if tree_free && opts.fuse_branches {
         let jw = reg.price(&Event::JunctionAngle { at: Vec2::default(), deg: 60.0, ws_mm: 1.0 / super::factors::junction_psi(60.0) }, &WireCtx::default());
         let js = tree::junctions(&st);
@@ -6378,13 +6386,6 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let u = ((p - x[0]).dot(ab) / ab.len2().max(1.0)).clamp(0.0, 1.0);
             (x[0] + ab * u - p).len() < 1_000.0
         });
-        // (price gain, length gain mm) of every fuse applied, for the report line.
-        let mut fused: Vec<(f64, f64)> = Vec::new();
-        // Fuse pour check ([`super::fusepour`]): each applied move with the state it replaced
-        // (drawn wire, outcome, necked stretches of its connection), in the order made.
-        let pour_check = opts.fuse_pour_check && opts.stitch_islands && model.pours.iter().any(|z| !z.fills.is_empty());
-        type Saved = (WireOut, Outcome, Vec<(usize, Event)>);
-        let mut moves: Vec<(super::fusepour::Move, Saved)> = Vec::new();
         let ids: Vec<WireId> = drawn.keys().copied().collect();
         let pad_nm = opts.junction_pad_mm * MM;
         for &w in &ids {
@@ -6479,83 +6480,6 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
             }
         }
-        if !moves.is_empty() {
-            use super::fusepour;
-            let t_pc = Instant::now();
-            let (sreg, _) = Registry::from_config(standard_factors(), &opts.factors);
-            // The pieces a stitching leaves cut off in the copper of `o` (the variant table's pass).
-            let left_of = |o: &[Outcome]| {
-                let a = assemble(model, dec, o, &term_over, signal[0], &reg);
-                let pads = super::stitch::routed_pour_pads(model, &a.reports);
-                super::stitch::stitch_until(model, opts, &sreg, &a.items, &pads, None, &|| ctl.is_cancelled()).left
-            };
-            let mut unfused = out.clone();
-            for (m, sv) in moves.iter().rev() {
-                unfused[conn_of[wire_conn[m.w]]] = sv.1.clone();
-            }
-            let base = left_of(&unfused);
-            let mut cur = left_of(&out);
-            let first = cur.len();
-            let mv: Vec<fusepour::Move> = moves.iter().map(|(m, _)| m.clone()).collect();
-            let mut live = vec![true; mv.len()];
-            let mut rounds = 0usize;
-            let mut undone_nets: BTreeSet<String> = BTreeSet::new();
-            // Test hook: judge the fused copper worse whatever it leaves, so every move is undone.
-            let undo_all = ctl.test_point("fuse pour undo all");
-            while (undo_all || !fusepour::fused_ok(cur.len(), base.len())) && !ctl.is_cancelled() {
-                let mut seed: BTreeSet<usize> = BTreeSet::new();
-                if rounds < fusepour::ROUNDS && !undo_all {
-                    for c in fusepour::new_pieces(&cur, &base) {
-                        seed.extend(fusepour::nearest_move(&mv, &live, &fusepour::piece_points(model, c)));
-                    }
-                }
-                let all = seed.is_empty();
-                if all {
-                    seed = (0..mv.len()).filter(|&i| live[i]).collect();
-                }
-                for &i in fusepour::with_dependents(&mv, &seed).iter().rev() {
-                    if !std::mem::replace(&mut live[i], false) {
-                        continue;
-                    }
-                    let (m, (wo, o, nk)) = &moves[i];
-                    let ci = conn_of[wire_conn[m.w]];
-                    let now = drawn.remove(&m.w).expect("fused wire is drawn");
-                    let back = dr.restore_wire(&now, wo);
-                    drawn.insert(m.w, back);
-                    out[ci] = o.clone();
-                    necking.retain(|(c, _)| *c != ci);
-                    necking.extend(nk.iter().cloned());
-                    undone_nets.insert(model.nets.iter().find(|n| n.code == st.wires[m.w].net).map_or_else(|| st.wires[m.w].net.to_string(), |n| n.name.clone()));
-                }
-                rounds += 1;
-                if all || live.iter().all(|l| !l) {
-                    cur = base.clone();
-                    break;
-                }
-                cur = left_of(&out);
-            }
-            let n_undone = live.iter().filter(|l| !**l).count();
-            // Self-check: the undone wires' tracks are back in the drawing's index.
-            let stale = moves.iter().enumerate().filter(|(i, (m, _))| !live[*i] && drawn.get(&m.w).is_some_and(|wo| !dr.handles_hold(wo))).count();
-            if stale > 0 {
-                warnings.push(format!("fuse pour check: {stale} undone fuse moves left wires whose tracks are not in the drawing's index (engine bug)"));
-            }
-            if n_undone > 0 {
-                // The fuse line counts the moves kept (`fused` and `moves`: one entry per applied
-                // move, in the same order).
-                let mut it = live.iter();
-                fused.retain(|_| *it.next().unwrap_or(&true));
-            }
-            warnings.push(format!(
-                "fuse pour check: the stitching leaves {first} pour pieces cut off in the fused copper, {} without the fuse; {n_undone} of {} fuse moves undone{}, now {} ({:.2} s; the fuse never adds a cut-off pour piece, errors first, TopoR 6.3 p. 72)",
-                base.len(),
-                mv.len(),
-                if undone_nets.is_empty() { String::new() } else { format!(" ({})", undone_nets.iter().cloned().collect::<Vec<_>>().join(", ")) },
-                cur.len(),
-                t_pc.elapsed().as_secs_f64()
-            ));
-        }
-        warnings.push(fuse_line(&fused));
     }
     // M-45: what the steps after the drawing left not at 0/45/90 degrees (a fused branch end)
     // becomes an elbow or Z where the checker accepts it.
@@ -6595,6 +6519,90 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 bb.iter().map(|x| x.skew_nm).sum::<f64>() / MM
             ));
         }
+    }
+    if !moves.is_empty() {
+        use super::fusepour;
+        let t_pc = Instant::now();
+        let (sreg, _) = Registry::from_config(standard_factors(), &opts.factors);
+        // The pieces a stitching leaves cut off in the copper of `o` (the variant table's pass).
+        let left_of = |o: &[Outcome]| {
+            let a = assemble(model, dec, o, &term_over, signal[0], &reg);
+            let pads = super::stitch::routed_pour_pads(model, &a.reports);
+            super::stitch::stitch_until(model, opts, &sreg, &a.items, &pads, None, &|| ctl.is_cancelled()).left
+        };
+        let mut unfused = out.clone();
+        for (m, sv) in moves.iter().rev() {
+            unfused[conn_of[wire_conn[m.w]]] = sv.1.clone();
+        }
+        let base = left_of(&unfused);
+        let mut cur = left_of(&out);
+        let first = cur.len();
+        let mv: Vec<fusepour::Move> = moves.iter().map(|(m, _)| m.clone()).collect();
+        let mut live = vec![true; mv.len()];
+        let mut rounds = 0usize;
+        let mut undone_nets: BTreeSet<String> = BTreeSet::new();
+        // Test hook: judge the fused copper worse whatever it leaves, so every move is undone.
+        let undo_all = ctl.test_point("fuse pour undo all");
+        while (undo_all || !fusepour::fused_ok(cur.len(), base.len())) && !ctl.is_cancelled() {
+            let mut seed: BTreeSet<usize> = BTreeSet::new();
+            if rounds < fusepour::ROUNDS && !undo_all {
+                for c in fusepour::new_pieces(&cur, &base) {
+                    seed.extend(fusepour::nearest_move(&mv, &live, &fusepour::piece_points(model, c)));
+                }
+            }
+            let all = seed.is_empty();
+            if all {
+                seed = (0..mv.len()).filter(|&i| live[i]).collect();
+            }
+            for &i in fusepour::with_dependents(&mv, &seed).iter().rev() {
+                if !std::mem::replace(&mut live[i], false) {
+                    continue;
+                }
+                let (m, (wo, o, nk)) = &moves[i];
+                let ci = conn_of[wire_conn[m.w]];
+                let now = drawn.remove(&m.w).expect("fused wire is drawn");
+                let mut back = dr.restore_wire(&now, wo);
+                out[ci] = o.clone();
+                necking.retain(|(c, _)| *c != ci);
+                necking.extend(nk.iter().cloned());
+                // The wire as without the fuse: the octilinear polish acts on it as it would there.
+                if octi_on && dr.octi_polish(&mut back) > 0 {
+                    necking.retain(|(c, _)| *c != ci);
+                    settle(octi_on, &mut out, &mut necking, ci, m.w, &back, b, &st);
+                }
+                drawn.insert(m.w, back);
+                undone_nets.insert(model.nets.iter().find(|n| n.code == st.wires[m.w].net).map_or_else(|| st.wires[m.w].net.to_string(), |n| n.name.clone()));
+            }
+            rounds += 1;
+            if all || live.iter().all(|l| !l) {
+                cur = base.clone();
+                break;
+            }
+            cur = left_of(&out);
+        }
+        let n_undone = live.iter().filter(|l| !**l).count();
+        // Self-check: the undone wires' tracks are back in the drawing's index.
+        let stale = moves.iter().enumerate().filter(|(i, (m, _))| !live[*i] && drawn.get(&m.w).is_some_and(|wo| !dr.handles_hold(wo))).count();
+        if stale > 0 {
+            warnings.push(format!("fuse pour check: {stale} undone fuse moves left wires whose tracks are not in the drawing's index (engine bug)"));
+        }
+        if n_undone > 0 {
+            // The fuse line counts the moves kept (`fused` and `moves`: one entry per applied
+            // move, in the same order).
+            let mut it = live.iter();
+            fused.retain(|_| *it.next().unwrap_or(&true));
+        }
+        warnings.push(format!(
+            "fuse pour check: the stitching leaves {first} pour pieces cut off in the fused copper, {} without the fuse; {n_undone} of {} fuse moves undone{}, now {} ({:.2} s; the fuse never adds a cut-off pour piece, errors first, TopoR 6.3 p. 72)",
+            base.len(),
+            mv.len(),
+            if undone_nets.is_empty() { String::new() } else { format!(" ({})", undone_nets.iter().cloned().collect::<Vec<_>>().join(", ")) },
+            cur.len(),
+            t_pc.elapsed().as_secs_f64()
+        ));
+    }
+    if tree_free && opts.fuse_branches {
+        warnings.push(fuse_line(&fused));
     }
     // Vias in a narrow pass (the `via_squeeze` factor's report): a drawn wire via whose
     // passages keep less slack than half its diameter in the drawing's packing.
