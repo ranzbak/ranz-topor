@@ -5790,7 +5790,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         dr.force = false;
     }
     // TW2: how the drawing drew each run (`realise = "erbs"`): the ERBS line and result.json route.erbs.
-    let erbs_runs = (opts.realise == "erbs" && erbs_err.is_none()).then(|| super::joint::tally(drawn.values(), &dr.joint, &opts.erbs_conflict_keep));
+    let mut erbs_runs = (opts.realise == "erbs" && erbs_err.is_none()).then(|| super::joint::tally(drawn.values(), &dr.joint, &opts.erbs_conflict_keep));
+    if let Some(rep) = erbs_runs.as_mut() {
+        // Only the runs of wires that were drawn; their connection by name.
+        rep.no_band_list.retain(|x| drawn.contains_key(&x.wire));
+        for x in &mut rep.no_band_list {
+            let c = &dec.connections[conn_of[wire_conn[x.wire]]];
+            x.net = model.nets.iter().find(|n| n.code == c.net).map_or(c.net.to_string(), |n| n.name.clone());
+            (x.from, x.to) = (c.from.label.clone(), c.to.label.clone());
+        }
+    }
     debug_assert!(erbs_runs.as_ref().is_none_or(|r| r.lost_to_other == 0), "TW2 I1: a reserved band was taken out by another wire");
     // ---- Junctions (D5 net trees): a branch whose trunk was not drawn, or that reaches its
     // junction on another layer than the trunk passes it, is not connected: its copper goes and

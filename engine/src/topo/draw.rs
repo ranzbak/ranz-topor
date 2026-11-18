@@ -2925,6 +2925,16 @@ impl<'a> Drawer<'a> {
             // M3 `[drawing] realise = "erbs"`: the run's ERBS first (attempt -1), checked like any
             // attempt against the copper drawn so far; the ladder below is the counted fallback.
             let rb = self.erbs.get(&w).and_then(|v| v.iter().find(|b| b.layer == layer && (b.s - s).len() < 1000.0 && (b.e - e).len() < 1000.0));
+            if rb.is_none() && !self.erbs.is_empty() {
+                // TW2: why the run has no band (result.json route.erbs.no_band_list).
+                let on_layer = self.erbs.get(&w).map(|v| v.iter().filter(|b| b.layer == layer).map(|b| (b.s - s).len().max((b.e - e).len())).fold(f64::INFINITY, f64::min));
+                let why = match on_layer {
+                    None => ("no stretch", 0),
+                    Some(d) if d.is_infinite() => ("other layer", 0),
+                    Some(d) => ("ends moved", d.round() as i64),
+                };
+                self.joint.no_band.insert((w, r), (layer as u32, why.0, why.1));
+            }
             let band_len = rb.map_or(0.0, |b| b.band_len);
             let band = rb.map(|b| b.path.clone());
             // TW2: the run's band as the joint commit reserved it (`super::joint`): attempt -1

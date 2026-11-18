@@ -277,6 +277,23 @@ pub struct ErbsGapKept {
     pub layer: u32,
 }
 
+/// TW2: a run of a drawn wire with no ERBS stretch at its ends ([`ErbsRunReport::no_band_list`],
+/// class `cut_no_band`): the wire, run, layer id, connection (net, pad labels) and why: "no
+/// stretch" (the ERBS drawing has none for the wire), "other layer" (none on the run's layer), or
+/// "ends moved" (a stretch on the layer whose ends lie `end_moved_mm` from the run's: a via or
+/// pad end placed elsewhere than the ERBS assumed).
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+pub struct ErbsNoBand {
+    pub wire: usize,
+    pub run: usize,
+    pub layer: u32,
+    pub net: String,
+    pub from: String,
+    pub to: String,
+    pub why: String,
+    pub end_moved_mm: f64,
+}
+
 /// TW2 (`[drawing] realise = "erbs"`): the runs of the drawn wires by how they came about, and the
 /// joint band commit ([`crate::topo::joint`]). `runs` = `from_erbs + replaced + cut_back +
 /// forced_erbs`; `cut_back` = the sum of the `cut_*` classes (legal sequential runs and runs drawn
@@ -303,6 +320,8 @@ pub struct ErbsRunReport {
     pub gap_kept: usize,
     pub gap_kept_max_mm: f64,
     pub gap_kept_list: Vec<ErbsGapKept>,
+    /// The runs drawn without a band (`cut_no_band` and forced ones), one entry each.
+    pub no_band_list: Vec<ErbsNoBand>,
     /// Runs of the drawn wires.
     pub runs: usize,
     pub from_erbs: usize,

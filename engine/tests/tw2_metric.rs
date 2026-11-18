@@ -37,6 +37,9 @@ fn partition_holds(e: &ErbsRunReport) {
     assert_eq!(e.bands, e.kept + e.rejected_static + e.rejected_predicted + e.rejected_gap, "{e:?}");
     assert_eq!(e.lost_to_other, 0, "I1: {e:?}");
     assert_eq!(e.left_reserved, 0, "{e:?}");
+    // Every run cut back for want of a band is listed with its connection (forced ones may add).
+    assert!(e.no_band_list.len() >= e.cut_no_band, "{e:?}");
+    assert!(e.no_band_list.iter().all(|x| !x.net.is_empty() && !x.from.is_empty() && !x.to.is_empty() && ["no stretch", "other layer", "ends moved"].contains(&x.why.as_str())), "{e:?}");
 }
 
 /// A copper fingerprint of the result: every item as text, sorted.
@@ -93,6 +96,7 @@ fn a_failed_sleeve_costs_only_its_own_run() {
         partition_holds(&base);
         partition_holds(&hook);
         assert!(hook.cut_no_band >= 1, "{dir}/{p} {style}: {hook:?}");
+        assert!(!hook.no_band_list.is_empty() && base.no_band_list.len() < hook.no_band_list.len(), "{dir}/{p} {style}: {hook:?}");
         assert!(hook.cut_back <= base.cut_back + 1, "{dir}/{p} {style}: cascade, base {base:?}, hook {hook:?}");
         assert!(hook.from_erbs + 1 >= base.from_erbs, "{dir}/{p} {style}: base {base:?}, hook {hook:?}");
     }

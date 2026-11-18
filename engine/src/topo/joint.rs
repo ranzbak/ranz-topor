@@ -119,6 +119,8 @@ pub struct JointState {
     pub lost_to_other: usize,
     /// Reserved bands no wire adopted or released by the end of the drawing loop (invariant 0).
     pub left_reserved: usize,
+    /// Runs drawn with no ERBS stretch at their ends: (wire, run) -> (layer, why, end moved nm).
+    pub no_band: BTreeMap<(WireId, usize), (u32, &'static str, i64)>,
     pub bands: usize,
     pub n_static: usize,
     pub n_predicted: usize,
@@ -437,6 +439,11 @@ pub fn tally<'w>(drawn: impl Iterator<Item = &'w WireOut>, j: &JointState, keep:
             .gap_kept
             .iter()
             .map(|g| crate::route::ErbsGapKept { wire: g.wire, run: g.run, other_wire: g.other, overlap_mm: g.overlap_nm as f64 / 1e6, x_mm: g.at.0 as f64 / 1e6, y_mm: g.at.1 as f64 / 1e6, layer: g.layer })
+            .collect(),
+        no_band_list: j
+            .no_band
+            .iter()
+            .map(|(&(w, r), &(layer, why, d))| crate::route::ErbsNoBand { wire: w, run: r, layer, why: why.to_string(), end_moved_mm: d as f64 / 1e6, ..Default::default() })
             .collect(),
         ..ErbsRunReport::default()
     };
