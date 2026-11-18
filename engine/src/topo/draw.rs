@@ -3675,7 +3675,10 @@ impl<'a> Drawer<'a> {
     /// The rule violations of the tracks of `wo` (committed, plain tracks first in its items)
     /// against the board and the rest of the drawing (its own tracks skipped): the re-check of
     /// the moves kept after a partial undo of the fuse pour check compares it before and after
-    /// the undo (verify V3), so a wire's own forced violations (never drop) undo nothing.
+    /// the undo (verify V3). A wire's own forced violations (never drop) are in both counts, so they
+    /// undo nothing while they stay; one that an undone move had cleared and the undo brings back
+    /// raises the count, and that counts as a clash (the kept move is undone too: safe, it goes
+    /// back toward the drawing's own copper).
     /// O(tracks x query).
     pub fn wire_viols(&self, wo: &WireOut) -> usize {
         let n = wo.handles.len();
