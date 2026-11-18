@@ -3,8 +3,7 @@
 #   tw3_job.sh tip      tip rev: bornhack first (4 threads), the targeted release tests + clippy + pytest + mutants
 #                       (one 4-thread unit), the fixed-cycle ladder (eprom, wiccon, qmtech, esp seeds 0-4) and the
 #                       drawing cost at runs = 1 / 1 thread (lead condition 1), hzq units, then wait
-#   tw3_job.sh base     base rev (main): bornhack first, the same ladder, and the F6/F7 copper check runs
-#                       (rounds=1 runs=1, the vx4b options: qmtech 4 threads, the rest 1)
+#   tw3_job.sh base     base rev (main): bornhack first, the same ladder
 #   tw3_job.sh lad NAME BOARD SEED THREADS SETS...   one ladder run (inside a unit)
 #   tw3_job.sh tests-in                              (inside a unit)
 # The script may run from a base tree that does not have it (piped in): ROOT = the current dir (hz.sh runs in the
@@ -96,9 +95,6 @@ case ${1:-} in
   base)
     mkdir -p $R/lad
     ladder
-    for nb in "eprom eprom-to-kernal 1" "wiccon wiccon-2023 1" "esp $E 1" "qmtech $Q 4"; do
-      set -- $nb; unit f67-$1 $3 f67-$1 $2 0 $3 --set optimize.rounds=1 --set optimize.runs=1
-    done
     wait; note "all done" ;;
   *) sed -n 2,16p "$0"; exit 2 ;;
 esac

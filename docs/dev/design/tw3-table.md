@@ -1,6 +1,6 @@
 # tw3-table: one variant table for all runs, long descents, the four bests drawn
 
-Branch `tw3-table` (off main 34877dc0 = TW1 merged). Stage TW3 of the topor-way plan (section 4,
+Branch `tw3-table` (off main 34877dc0 = TW1 merged; merged with main 01e85fce, which carries F6/F7). Stage TW3 of the topor-way plan (section 4,
 Appendix E, Appendix F points 8-12, D5, D6, D7). Sources: TopoR 6.3 manual
 (docs/literature/eremex2017-topor63-user-manual.pdf) pp. 72-73 (variant table, criteria, sorting,
 25 mm/via, the user picks); Polubasov 2010 «Многовариантная оптимизация» (fig. 13; "periodically stops
@@ -52,7 +52,7 @@ parallel from one table).
    KiCad; `errors_vias_length` stays as the old lexicographic order. Report line + `result.json`
    `bests: [{role, row, predicted, drawn, applied}]`; the dialog's summary lists the four.
    With runs < distinct bests only the first `runs` of them are drawn (said in the report).
-4. **F6 / F7 (exact).** F6: a spatial index for the pairwise segment tests of the drawing and the
+4. **F6 / F7 (exact; done on branch tw3-f67, merged to main 01e85fce).** F6: a spatial index for the pairwise segment tests of the drawing and the
    via reduction (seg_clear_w, seg_seg, Grid::query_counted) and FxHash for their maps; F7: bbox
    prefilter + index for planes.rs in_piece / in_fill_on / far_candidates. Copper hash = main.
 
