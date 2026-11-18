@@ -950,6 +950,11 @@ mod tests {
     /// Run `f` on a few random fields, each with one routed net-1 wire (wire 0) and random
     /// drawn copper of nets 2 and 3 committed.
     fn with_fields(f: &mut dyn FnMut(&Drawer, &mut Rng)) {
+        with_fields_opts(&Options::default(), f)
+    }
+
+    /// [`with_fields`] with the given options.
+    fn with_fields_opts(opts0: &Options, f: &mut dyn FnMut(&Drawer, &mut Rng)) {
         for seed in 1..=4u64 {
             let mut g = Rng(0x51_7c_c1_b7_27_22_0a_95 ^ seed);
             let m = field(&mut g);
@@ -958,7 +963,7 @@ mod tests {
             let mut st = State::new(&b.proj);
             let c = conns.iter().find(|c| c.w > 0.0 && c.net == 1).expect("a net-1 connection");
             st.route_conn(c, &InitWeights::default(), (c.w + c.s) / 400_000.0).expect("routes");
-            let opts = Options::default();
+            let opts = opts0.clone();
             let checker = Checker::new(&m, &opts);
             let mut dr = Drawer::new(&m, &opts, &b, &st, &checker);
             for _ in 0..40 {
@@ -985,6 +990,96 @@ mod tests {
         });
         let relax = [0.0, 0.0, 20_000.0, 1e9][g.int(0, 3) as usize];
         Wp { wire: 0, net: g.int(1, 3) as i32, w: 100_000.0 + 400_000.0 * g.f(), s: 100_000.0 + 200_000.0 * g.f(), layer: g.int(0, 1) as usize, own: [wi.pa, wi.pb], neck, relax }
+    }
+
+    /// nd-perf F2: `via_reach` gives the same class verdict with `[vias] reach_price` off and on; with
+    /// it on the price is the measured price of the reach segments (positive where they break a
+    /// rule), with it off 0 (its only reader, `reach_cost`, returns 0 then). Random via sites on
+    /// the routed wire's traversals of the pad field with drawn copper.
+    #[test]
+    fn via_reach_verdict_is_the_same_and_priced_only_when_read() {
+        if std::env::var_os("TOPO_VIADBG").is_some() {
+            return;
+        }
+        let crossed = crate::topo::draw::ClassCrossings::new();
+        let sites = |opts: &Options| -> Vec<(bool, f64)> {
+            let mut out = Vec::new();
+            with_fields_opts(opts, &mut |dr, g| {
+                let n = dr.st.wires[0].passes.len();
+                for _ in 0..80 {
+                    let k = g.int(0, n as i64) as usize;
+                    out.push(dr.via_reach(0, k, pt(g), g.int(0, 1) as usize, g.int(0, 1) as usize, &crossed));
+                }
+            });
+            out
+        };
+        let off = sites(&Options::default());
+        let mut on_opts = Options::default();
+        on_opts.via_reach_price = true;
+        let on = sites(&on_opts);
+        assert_eq!(off.len(), on.len());
+        assert!(off.iter().zip(&on).all(|(a, b)| a.0 == b.0), "the class verdict depends on reach_price");
+        assert!(off.iter().all(|a| a.1 == 0.0));
+        let priced = on.iter().filter(|b| b.1 > 0.0).count();
+        assert!(priced > 20, "only {priced} priced reaches");
+        assert!(off.iter().any(|a| !a.0), "no out-of-class site exercised");
+    }
+
+    /// nd-perf F1: the violations without probes ([`viols_measured`] with `probe = false`) bound the
+    /// measured ones from below: the same groups (kind, depth, place for vias, against, layer), each
+    /// length at most the measured one, so the short amount, the total and the price are at most the
+    /// measured ones. Random runs of net 1 (one to four segments, any width, either layer, a via
+    /// sometimes) across the pad field and the random drawn copper of nets 2 and 3.
+    #[test]
+    fn unprobed_violations_bound_the_measured_ones() {
+        use crate::topo::draw::{viol_key, viols_measured, viols_with, Viol};
+        let mut with_viols = 0usize;
+        with_fields(&mut |dr, g| {
+            for _ in 0..40 {
+                let layer = [0u32, 2][g.int(0, 1) as usize];
+                let w = 100_000.0 + 400_000.0 * g.f();
+                let mut items = Vec::new();
+                let mut p = pt(g);
+                for _ in 0..g.int(1, 4) {
+                    let q = pt(g);
+                    items.push(track_item(1, layer, w, p, q, None));
+                    p = q;
+                }
+                if g.int(0, 3) == 0 {
+                    items.push(via_item(1, p, ViaSize { d: 600_000, drill: 300_000 }, None));
+                }
+                let rep = dr.checker.check_against(&dr.idx, &items, &[]);
+                let exact = viols_with(dr.model, dr.opts, dr.checker, &dr.idx, &items, &rep);
+                let lb = viols_measured(dr.model, dr.opts, dr.checker, &dr.idx, &items, &rep, false);
+                with_viols += usize::from(!exact.is_empty());
+                assert_eq!(lb.len(), exact.len());
+                for (a, b) in lb.iter().zip(&exact) {
+                    assert_eq!((a.kind, a.layer, a.via, &a.against, a.depth_nm), (b.kind, b.layer, b.via, &b.against, b.depth_nm));
+                    assert!(a.len_nm <= b.len_nm, "{a:?} vs {b:?}");
+                    assert!(a.amount() <= b.amount());
+                }
+                let (kl, ke) = (viol_key(&lb), viol_key(&exact));
+                assert!(kl.0 <= ke.0 && kl.1 <= ke.1, "{kl:?} vs {ke:?}");
+                let (pl, pe): (f64, f64) = (lb.iter().map(Viol::amount).sum(), exact.iter().map(Viol::amount).sum());
+                assert!(pl <= pe);
+                // The lazy candidate priced later is the eager one (violations in the same order,
+                // the same price bits), and its bound is at or below that key.
+                let wire = 0;
+                let (p0, vs0, lazy) = dr.lazy_cand(wire, &items, &rep);
+                let mut c: crate::topo::draw::ForcedCand = (p0, Vec::new(), items.clone(), vs0, None, "test", lazy);
+                let bound = dr.cand_bound(&c);
+                dr.price_cand(&mut c);
+                let mut eager = dr.viols_of(&items, &rep);
+                eager.extend(dr.graze_viols(wire, &items));
+                let pe: f64 = eager.iter().map(Viol::amount).sum();
+                assert!(c.6.is_none());
+                assert_eq!(c.3, eager);
+                assert_eq!(c.0.to_bits(), pe.to_bits());
+                let ke = crate::topo::draw::forced_key(&eager, pe);
+                assert!(bound.0 <= ke.0 && bound.1 <= ke.1 && bound.2 <= ke.2, "{bound:?} vs {ke:?}");
+            }
+        });
+        assert!(with_viols > 40, "only {with_viols} runs with violations");
     }
 
     /// [`Drawer::seg_clear_near`] (the [`Near`] grid) and [`Drawer::seg_clear`] (the cached
