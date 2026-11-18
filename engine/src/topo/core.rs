@@ -5080,6 +5080,23 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 erbs_err = Some(e);
             }
         }
+        // TW2: every band committed and checked at once, a conflict keeps an independent set
+        // (`super::joint`); the kept bands are reserved for their wires, so the order below only
+        // says who draws first among the rest.
+        if !dr.erbs.is_empty() {
+            let mode = super::erbs::KeepMode::parse(&opts.erbs_conflict_keep).unwrap_or_else(|| {
+                warnings.push(format!("[drawing] erbs_conflict_keep = {:?} is not \"tier\" or \"count\": \"tier\" used", opts.erbs_conflict_keep));
+                super::erbs::KeepMode::Tier
+            });
+            let rank: BTreeMap<WireId, usize> = draw_order.iter().enumerate().map(|(i, &w)| (w, i)).collect();
+            let key = |w: WireId| (wire_conn.get(w).filter(|&&c| c != usize::MAX).map_or(u8::MAX, |&c| tier_of(conn_of[c])), rank.get(&w).copied().unwrap_or(usize::MAX));
+            let skip: BTreeSet<(WireId, usize)> = tree_js.iter().filter_map(|&(bw, end, ..)| plans.get(&bw).map(|p| (bw, if end == 0 { 0 } else { p.layers.len().saturating_sub(1) }))).collect();
+            if ctl.test_point("reverse draw order") {
+                // test-only: the precedes order backwards (the kept bands must not change)
+                live.reverse();
+            }
+            dr.reserve_bands(&live, &plans, &placed, &skip, &key, mode);
+        }
     }
     let over_n = dr.over.iter().filter(|&&o| o).count();
     // Planning-time check (D0 item 4): an edge-layer the plan packs without overflow (P3 labels,
@@ -5135,6 +5152,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     for &w in &live {
         if expired() {
             timed_out = true;
+            dr.release_bands(w);
             fail(&mut out, conn_of[wire_conn[w]], draw_cut_reason());
             continue;
         }
@@ -5142,6 +5160,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let mut ids = via_ids.remove(&w).unwrap_or_default();
         if ctl.test_point("fail wire drawing") {
             // test-only fault: this wire's drawing fails (no feedback diagnosis), so never drop meets it
+            dr.release_bands(w);
             for id in ids {
                 dr.uncommit(id);
             }
@@ -5172,6 +5191,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         if drawn_ok.is_multiple_of(50) {
             ctl.update("route", 3, drawn_ok, nconn, 0, t0.elapsed().as_secs_f64());
         }
+    }
+    // TW2: every reserved band was adopted or released with its wire; one left over would be copper
+    // no wire owns (counted, invariant 0).
+    let left: BTreeSet<WireId> = dr.joint.reserved.keys().map(|k| k.0).collect();
+    dr.joint.left_reserved = dr.joint.reserved.len();
+    for w in left {
+        dr.release_bands(w);
     }
     // Debug (D0): TOPO_D0AUDIT=<file> writes the neighbour audit of the drawing (packer
     // positions against the drawn crossings and copper gaps, `dwitness::audit`) as JSON.
@@ -5384,6 +5410,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         dr.force = false;
     }
+    // TW2: how the drawing drew each run (`realise = "erbs"`): the ERBS line and result.json route.erbs.
+    let erbs_runs = (opts.realise == "erbs" && erbs_err.is_none()).then(|| super::joint::tally(drawn.values(), &dr.joint, &opts.erbs_conflict_keep));
+    debug_assert!(erbs_runs.as_ref().is_none_or(|r| r.lost_to_other == 0), "TW2 I1: a reserved band was taken out by another wire");
     // ---- Junctions (D5 net trees): a branch whose trunk was not drawn, or that reaches its
     // junction on another layer than the trunk passes it, is not connected: its copper goes and
     // its connection fails (locally; the rest of the tree stays).
@@ -5980,7 +6009,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let _ = std::fs::write(std::path::Path::new(&d).join("nets.json"), serde_json::Value::Object(nets).to_string());
     }
     if let Some(l) = erbs_line {
-        warnings.push(format!("{l}; drawn: {} runs from their ERBS ({} in its octilinear form before the check), {} by the sequential attempts after the check rejected the ERBS, {} without an ERBS, {} ERBS priced past their band against a sequential run ({} replaced by it, {} kept because the sequential run crossed an undrawn wire's path with another parity: another class)", dr.stats.erbs_ok, dr.stats.erbs_octi, dr.stats.erbs_fallback, dr.stats.erbs_none, dr.stats.erbs_long, dr.stats.erbs_long_replaced, dr.stats.erbs_class_kept));
+        let drawn_part = erbs_runs.as_ref().map_or_else(|| "drawn: 0 runs from their ERBS".to_string(), super::joint::drawn_text);
+        warnings.push(format!("{l}; {drawn_part}; {} ERBS priced past their band against a sequential run ({} replaced by it, {} kept because the sequential run crossed an undrawn wire's path with another parity: another class)", dr.stats.erbs_long, dr.stats.erbs_long_replaced, dr.stats.erbs_class_kept));
     }
     // M3 length factor (`draw::erbs_length_price`): every ERBS priced past its band, the longest
     // over its band first (plugin finding ERBS_LONG).
@@ -6013,11 +6043,18 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // (plugin finding ERBS_FALLBACK; the time limit's share is erbs_timeout's, ERBS_TIMEOUT).
     if let Some(e) = &erbs_err {
         warnings.push(format!("erbs_fallback: no ERBS for the whole run, every trace drawn the sequential way: {e}"));
-    } else if opts.realise == "erbs" && (dr.stats.erbs_fallback > 0 || !erbs_failed.is_empty()) {
+    } else if let Some(er) = erbs_runs.as_ref().filter(|r| r.cut_back + r.forced_erbs > 0 || !erbs_failed.is_empty()) {
         let ex: Vec<String> = erbs_failed.iter().take(3).map(|(w, m)| format!("wire {w}: {m}")).collect();
         warnings.push(format!(
-            "erbs_fallback: {} run(s) drawn by the sequential attempts after the check rejected their ERBS, {} stretch(es) without a sleeve to the end{}{}",
-            dr.stats.erbs_fallback,
+            "erbs_fallback: {} run(s) drawn by the sequential attempts after the check rejected their ERBS (static {}, predicted {}, gap {}, no band {}, junction {}, redrawn {}), {} on their ERBS by never drop, {} stretch(es) without a sleeve to the end{}{}",
+            er.cut_back,
+            er.cut_static,
+            er.cut_predicted,
+            er.cut_gap,
+            er.cut_no_band,
+            er.cut_junction,
+            er.cut_redrawn,
+            er.forced_erbs,
             erbs_failed.len(),
             if ex.is_empty() { "" } else { ": " },
             ex.join("; ")
@@ -6401,6 +6438,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         violations: viol_list,
         diff_pairs: dp_list,
         limit: None,
+        erbs: erbs_runs,
         compass: compass_plan.map(|mut c| {
             c.drawn_shrinkages = crit_main.shrinkages;
             c

@@ -288,6 +288,21 @@ def test_erbs_fallback_and_timeout_are_loud():
     assert not quiet & {"ERBS_FALLBACK", "ERBS_TIMEOUT", "ERBS_LONG"}
 
 
+def test_erbs_fallback_names_the_joint_check_classes():
+    """TW2: the engine line counts the cut-back runs per class; the finding keeps them, and its text says erbs is the
+    default and names erbs_conflict_keep (sequential is no longer the default)."""
+    res = {"connections": [_c("A", "routed")], "warnings": [
+        "erbs_fallback: 3 run(s) drawn by the sequential attempts after the check rejected their ERBS (static 1, "
+        "predicted 1, gap 1, no band 0, junction 0, redrawn 0), 0 on their ERBS by never drop, 0 stretch(es) without a "
+        "sleeve to the end"]}
+    f = {f.code: f for f in postrun.route_findings(res)}["ERBS_FALLBACK"]
+    assert "(static 1, predicted 1, gap 1, no band 0, junction 0, redrawn 0)" in f.message
+    m = MESSAGES["ERBS_FALLBACK"]
+    assert "erbs_conflict_keep" in m.cause and "erbs_conflict_keep" in m.fix
+    assert "(the default)" in m.cause and "the default" not in m.fix
+    assert all("sequential\" (the default" not in MESSAGES[c].fix for c in ("ERBS_FALLBACK", "ERBS_LONG", "ERBS_TIMEOUT"))
+
+
 def test_erbs_long_is_a_warning():
     """M3 length factor: ERBS priced past their band (engine line erbs_long) are the finding ERBS_LONG."""
     res = {"connections": [_c("A", "routed")], "warnings": [

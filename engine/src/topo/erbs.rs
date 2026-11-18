@@ -2182,13 +2182,15 @@ fn keep_score(comp: &[usize], keys: &[(u8, usize)], sel: &[bool], mode: KeepMode
     (counts, sel.to_vec())
 }
 
+/// A kept set's score ([`keep_score`]) and the set.
+type Scored = Option<((Vec<usize>, Vec<bool>), Vec<bool>)>;
+
 fn exact_keep(comp: &[usize], keys: &[(u8, usize)], adj: &[BTreeSet<usize>], mode: KeepMode) -> Vec<bool> {
     let pos: BTreeMap<usize, usize> = comp.iter().enumerate().map(|(k, &i)| (i, k)).collect();
     let nb: Vec<Vec<usize>> = comp.iter().map(|&i| adj[i].iter().filter_map(|j| pos.get(j).copied()).collect()).collect();
-    let mut best: Option<((Vec<usize>, Vec<bool>), Vec<bool>)> = None;
+    let mut best: Scored = None;
     let mut sel = vec![false; comp.len()];
-    #[allow(clippy::type_complexity)]
-    fn rec(k: usize, sel: &mut Vec<bool>, nb: &[Vec<usize>], comp: &[usize], keys: &[(u8, usize)], mode: KeepMode, best: &mut Option<((Vec<usize>, Vec<bool>), Vec<bool>)>) {
+    fn rec(k: usize, sel: &mut Vec<bool>, nb: &[Vec<usize>], comp: &[usize], keys: &[(u8, usize)], mode: KeepMode, best: &mut Scored) {
         if k == sel.len() {
             let sc = keep_score(comp, keys, sel, mode);
             if best.as_ref().is_none_or(|b| sc > b.0) {
@@ -2542,7 +2544,7 @@ mod tests {
                     comps.push(c);
                 }
                 for c in &comps {
-                    let mut best: Option<((Vec<usize>, Vec<bool>), Vec<bool>)> = None;
+                    let mut best: Scored = None;
                     for m in 0u32..(1 << c.len()) {
                         let sel: Vec<bool> = (0..c.len()).map(|k| m >> k & 1 == 1).collect();
                         let ok = edges.iter().all(|&(a, b)| {

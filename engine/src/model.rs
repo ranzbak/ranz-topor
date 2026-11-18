@@ -1323,6 +1323,12 @@ pub struct Options {
     /// kept bands of the highest priority tier first, then of the next) or `"count"` (the most
     /// kept bands). Ties by route order.
     pub erbs_conflict_keep: String,
+    /// TW2 (`[drawing] erbs_gap_keep_max_mm`): with realise = "erbs", two bands the joint check
+    /// finds too close by a model gap of the ERBS (`RunBand::gap`, no over-full cut predicts it)
+    /// are both kept when the overlap is at most this: the gap stays as a clearance violation of
+    /// the band drawn second, counted (`route.erbs.gap_kept`), instead of a forced run. A larger
+    /// overlap goes to the selector (`erbs_conflict_keep`). 0 = every conflict to the selector.
+    pub erbs_gap_keep_max_mm: f64,
     /// M3 (`[drawing] erbs_length_weight`): with realise = "erbs", the graded price of an ERBS
     /// longer than its band: the drawing prices a legal ERBS of length `L` over a band of length
     /// `B` at `L (1 + k max(0, L/B - 1)^2)` and keeps it unless a legal sequential run is cheaper
@@ -1563,6 +1569,7 @@ impl Default for Options {
             draw_pull_taut: true,
             realise: "erbs".into(),
             erbs_conflict_keep: "tier".into(),
+            erbs_gap_keep_max_mm: 0.15,
             erbs_length_weight: 1.0,
             erbs_margin: 0.05,
             bundle_pull: 0.3,

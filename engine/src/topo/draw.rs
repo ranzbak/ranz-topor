@@ -752,6 +752,8 @@ pub struct WireOut {
     /// Rules the written copper breaks (M-B1 never drop: a run or via drawn by [`Drawer::force`]
     /// on its best geometry); empty for a legal wire.
     pub viol: Vec<Viol>,
+    /// TW2: how each run of `runs` came about (`realise = "erbs"`; [`super::joint::tally`]).
+    pub run_src: Vec<super::joint::RunSrc>,
 }
 
 /// One violation per object and layer (a via: per object, over all its layers): the stretches of a run's segments below
@@ -871,7 +873,7 @@ pub struct Drawer<'a> {
     pub(super) ents: Vec<Ent>,
     pub(super) grid: Grid<usize>,
     /// `(ItemIndex id, ent id)` per committed item; the handle is the position.
-    handles: Vec<(usize, usize)>,
+    pub(super) handles: Vec<(usize, usize)>,
     /// Query distance of the repair (largest clearance + width).
     pub(super) qgrow: f64,
     /// Number of static objects (they come first in `ents`).
@@ -951,6 +953,8 @@ pub struct Drawer<'a> {
     pub force: bool,
     /// Violations of the vias placed by force, per wire.
     pub via_viol: BTreeMap<WireId, Vec<Viol>>,
+    /// TW2 joint band commit (`realise = "erbs"`, [`super::joint`]): reserved bands and their counts.
+    pub joint: super::joint::JointState,
     /// Octilinear drawing (M-45, [`super::octi`]): style switch and prices.
     pub octi: super::octi::OctiCfg,
 }
@@ -1038,6 +1042,7 @@ impl<'a> Drawer<'a> {
             erbs_long: Vec::new(),
             force: false,
             via_viol: BTreeMap::new(),
+            joint: super::joint::JointState::default(),
             octi: super::octi::OctiCfg::from_opts(opts),
         }
         .with_static()
@@ -1224,7 +1229,7 @@ impl<'a> Drawer<'a> {
         }
     }
 
-    fn layer_id(&self, l: usize) -> u32 {
+    pub(super) fn layer_id(&self, l: usize) -> u32 {
         self.b.signal_layers[l]
     }
 
@@ -2778,6 +2783,7 @@ impl<'a> Drawer<'a> {
         if let Some(en) = self.ents.get_mut(e) {
             en.live = false;
         }
+        self.joint.on_uncommit(handle, i);
     }
 
     /// Give the passes of wire `w` the layers of `layers` (runs separated at the traversals
@@ -2841,6 +2847,18 @@ impl<'a> Drawer<'a> {
     /// Draw wire `w` with its `plan` and placed `vias`; on success its copper is indexed.
     /// `ids` collects the indexed item ids for a rollback by the caller.
     pub fn draw_wire(&mut self, w: WireId, plan: &Plan, vias: &[(usize, Vec2, ViaSize)], ids: &mut Vec<usize>) -> WireOut {
+        // TW2: copper this drawing takes out of the index belongs to `w` (`JointState::lost_to_other`).
+        let cur = self.joint.cur.replace(w);
+        let out = self.draw_wire_runs(w, plan, vias, ids);
+        if !out.ok {
+            // The reserved bands of its runs after the one that failed go with the wire.
+            self.release_bands(w);
+        }
+        self.joint.cur = cur;
+        out
+    }
+
+    fn draw_wire_runs(&mut self, w: WireId, plan: &Plan, vias: &[(usize, Vec2, ViaSize)], ids: &mut Vec<usize>) -> WireOut {
         // 5.4 `[search] branch_relocate`: a junction point the plan moved splits the run it lies
         // in, like a via that keeps the layer (a zero-size via, never emitted).
         let split = self.split_at.get(&w).filter(|v| !v.is_empty()).cloned();
@@ -2896,6 +2914,16 @@ impl<'a> Drawer<'a> {
             let rb = self.erbs.get(&w).and_then(|v| v.iter().find(|b| b.layer == layer && (b.s - s).len() < 1000.0 && (b.e - e).len() < 1000.0));
             let band_len = rb.map_or(0.0, |b| b.band_len);
             let band = rb.map(|b| b.path.clone());
+            // TW2: the run's band as the joint commit reserved it (`super::joint`): attempt -1
+            // adopts its committed copper (`adopt`) instead of checking it against the copper
+            // drawn so far. From here on it is this wire's copper.
+            let mut res = self.joint.reserved.remove(&(w, r));
+            for h in res.iter().flat_map(|x| &x.handles) {
+                self.joint.owner.remove(h);
+            }
+            let mut adopt: Option<Vec<usize>> = None;
+            let (mut erbs_octi, mut octi_vs_band) = (false, false);
+            let cut = self.cut_class(w, r, band.is_some());
             // M3 length factor: a legal ERBS priced past its band waits here while the ladder
             // draws a sequential run to compare (`erbs_vs_sequential`); the last step
             // (`ERBS_KEPT`) draws it when no sequential run was legal. Nothing is committed while
@@ -2919,6 +2947,12 @@ impl<'a> Drawer<'a> {
                 // drawing's own pad-end necks of `neck_in_drawing`, before M-C, removed 2026-11-18);
                 // 3..5: S2a's funnel + repair attempts.
                 let restored = attempt == ERBS_KEPT;
+                if attempt >= 0 && kept.is_none() {
+                    // A reserved band that did not end the run at attempt -1 leaves with it.
+                    for h in adopt.take().into_iter().flatten().chain(res.take().map(|x| x.handles).into_iter().flatten()) {
+                        self.uncommit(h);
+                    }
+                }
                 if self.test_no_sequential && band.is_some() && (0..ERBS_KEPT).contains(&attempt) {
                     continue;
                 }
@@ -2972,9 +3006,25 @@ impl<'a> Drawer<'a> {
                     }
                 }
                 let (ps, pe) = (r == 0, r == plan.layers.len() - 1);
-                let mut items = if restored { kept.as_ref().map(|k| k.3.clone()).unwrap_or_default() } else { self.run_items(w, layer, &pts) };
-                let mut pneck_out: Option<(f64, [f64; super::exact::NECK_ZONES])> = if restored { kept.as_ref().and_then(|k| k.4) } else { None };
-                let full = if restored { CheckReport::default() } else { self.checker.check_against(&self.idx, &items, &[]) };
+                let adopted = if attempt < 0 { res.take() } else { None };
+                let mut items = if restored {
+                    kept.as_ref().map(|k| k.3.clone()).unwrap_or_default()
+                } else if let Some(x) = &adopted {
+                    x.items.clone()
+                } else {
+                    self.run_items(w, layer, &pts)
+                };
+                let mut pneck_out: Option<(f64, [f64; super::exact::NECK_ZONES])> = if restored {
+                    kept.as_ref().and_then(|k| k.4)
+                } else {
+                    adopted.as_ref().and_then(|x| x.pneck)
+                };
+                // A reserved band passed the joint check against every band and static item.
+                let full = if restored || adopted.is_some() { CheckReport::default() } else { self.checker.check_against(&self.idx, &items, &[]) };
+                if let Some(x) = adopted {
+                    erbs_octi = x.octi;
+                    adopt = Some(x.handles);
+                }
                 let mut rep = match &pneck {
                     _ if full.violations.is_empty() => full,
                     Some(pn) => match self.plan_neck_run(w, lid, &pts, pn) {
@@ -3005,6 +3055,7 @@ impl<'a> Drawer<'a> {
                             pneck_out = pn;
                             rep = CheckReport::default();
                             self.stats.erbs_octi += 1;
+                            erbs_octi = true;
                         }
                     }
                 }
@@ -3013,7 +3064,7 @@ impl<'a> Drawer<'a> {
                     last_reason = "drawing: a track grazes a pad or via of its own net (KiCad minimum connection width)".to_string();
                     if self.force {
                         let vs = self.graze_viols(w, &items);
-                        cands.push((vs.iter().map(Viol::amount).sum(), pts.clone(), items.clone(), vs, neck, "attempt"));
+                        cands.push((vs.iter().map(Viol::amount).sum(), pts.clone(), items.clone(), vs, neck, if attempt < 0 { "erbs" } else { "attempt" }));
                     }
                     continue;
                 }
@@ -3036,9 +3087,20 @@ impl<'a> Drawer<'a> {
                                     items = its;
                                     pneck_out = pn;
                                     self.stats.octi_ok += 1;
+                                    if attempt < 0 {
+                                        // The adopted band gives way to its own octilinear form.
+                                        erbs_octi = true;
+                                        for h in adopt.take().into_iter().flatten() {
+                                            self.uncommit(h);
+                                        }
+                                    }
                                     "ok"
                                 }
                                 None => {
+                                    // TW2 (lead Q1): the D11 transform's share, counted.
+                                    if attempt < 0 && adopt.is_some() && self.hits_band(w, layer, &o.pts) {
+                                        octi_vs_band = true;
+                                    }
                                     if dbg {
                                         eprintln!("OCTIREJ wire {w} pts {:?}", o.pts.iter().map(|p| (p.x / 1e6, -p.y / 1e6)).collect::<Vec<_>>());
                                     }
@@ -3066,7 +3128,7 @@ impl<'a> Drawer<'a> {
                         if self.octi.any_forbidden && !super::octi::breaks(&pts).0.is_empty() {
                             last_reason = "drawing: no octilinear geometry for this run ([drawing] any_angle = \"forbidden\")".to_string();
                             if self.force {
-                                cands.push((0.0, pts.clone(), items.clone(), Vec::new(), None, "attempt"));
+                                cands.push((0.0, pts.clone(), items.clone(), Vec::new(), None, if attempt < 0 { "erbs" } else { "attempt" }));
                             }
                             continue;
                         }
@@ -3123,18 +3185,39 @@ impl<'a> Drawer<'a> {
                         self.erbs_long.push((w, layer, k.1, band_len, ls, replaced));
                         if replaced {
                             self.stats.erbs_long_replaced += 1;
+                            for h in adopt.take().into_iter().flatten() {
+                                self.uncommit(h);
+                            }
                         } else {
                             (pts, items, pneck_out, neck, src) = (k.2, k.3, k.4, k.5, -1);
                         }
                     }
                     let first = committed.len();
-                    for it in &items {
-                        let id = self.commit(it);
-                        committed.push(id);
-                        ids.push(id);
+                    match adopt.take() {
+                        // The reserved band's copper is already in the index.
+                        Some(hs) if src < 0 => {
+                            committed.extend(&hs);
+                            ids.extend(&hs);
+                        }
+                        other => {
+                            for h in other.into_iter().flatten() {
+                                self.uncommit(h);
+                            }
+                            for it in &items {
+                                let id = self.commit(it);
+                                committed.push(id);
+                                ids.push(id);
+                            }
+                        }
                     }
                     if let Some(&h) = committed.get(first) {
                         self.record_crossings(w, k0, k1, &pts, h);
+                    }
+                    // TW2 `[drawing] erbs_gap_keep_max_mm`: a band kept across a model gap
+                    // carries the gap as its violation when it is drawn second (no hiding).
+                    if src < 0 {
+                        let gv = self.gap_viols(w, r, &items);
+                        out.viol.extend(gv);
                     }
                     if let Some((wn, ls)) = neck {
                         if ps {
@@ -3173,13 +3256,22 @@ impl<'a> Drawer<'a> {
                     }
                     out.items.extend(items);
                     out.runs.push((layer, pts));
+                    out.run_src.push(if self.opts.realise != "erbs" {
+                        super::joint::RunSrc::Seq
+                    } else if src < 0 {
+                        super::joint::RunSrc::Erbs { octi: erbs_octi, octi_vs_band }
+                    } else if replaced {
+                        super::joint::RunSrc::Replaced
+                    } else {
+                        super::joint::RunSrc::Cut(cut)
+                    });
                     ok = true;
                     break;
                 }
                 if self.force {
                     let mut vs = self.viols_of(&items, &rep);
                     vs.extend(self.graze_viols(w, &items));
-                    cands.push((vs.iter().map(Viol::amount).sum(), pts.clone(), items.clone(), vs, neck, "attempt"));
+                    cands.push((vs.iter().map(Viol::amount).sum(), pts.clone(), items.clone(), vs, neck, if attempt < 0 { "erbs" } else { "attempt" }));
                 }
                 let v = &rep.violations[0];
                 last_viol = Some(v.clone());
@@ -3369,9 +3461,14 @@ impl<'a> Drawer<'a> {
                     out.necks.extend(fnecks);
                     out.items.extend(items);
                     out.runs.push((layer, pts));
+                    out.run_src.push(if self.opts.realise != "erbs" { super::joint::RunSrc::Seq } else { super::joint::RunSrc::Forced { erbs: src == "erbs", class: cut } });
                     out.viol.extend(vs);
                     ok = true;
                 }
+            }
+            // A reserved band no attempt drew from leaves with its run.
+            for h in adopt.take().into_iter().flatten().chain(res.take().map(|x| x.handles).into_iter().flatten()) {
+                self.uncommit(h);
             }
             if !ok {
                 // Never a blank reason (M6 F-1): when no attempt produced copper to check (the
@@ -3645,7 +3742,7 @@ impl<'a> Drawer<'a> {
 
     /// Track items of the run polyline `pts` of wire `w` on `layer`: the wire's width, or the
     /// per-segment width of [`Drawer::widths`].
-    fn run_items(&self, w: WireId, layer: usize, pts: &[Vec2]) -> Vec<Item> {
+    pub(super) fn run_items(&self, w: WireId, layer: usize, pts: &[Vec2]) -> Vec<Item> {
         let wi = &self.st.wires[w];
         let lid = self.layer_id(layer);
         match &self.widths {

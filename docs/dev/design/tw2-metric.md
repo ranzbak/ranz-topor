@@ -154,3 +154,33 @@ two tip radii there, so the arc and the tips agree. A wire is never pushed past 
   - The detour counters on the approved patterns are compared before and after. The change must not be noticeable.
 - **Unit test**: the segment distance to v along the whole outer polyline is ≥ r − 1 nm, for both the passed-corner case
   and a wrap case.
+
+## Implementation (2026-11-18)
+- `engine/src/topo/joint.rs`: `Drawer::reserve_bands` (steps a-c), `release_bands` (a wire the time limit or a test
+  fault skips), `hits_band` (octi_vs_band), `cut_class`, `tally` and the ERBS line text. Called in core.rs right after
+  `erbs::realise`. Keys: (connection tier, position in the route order `draw_order`), so the kept set does not depend
+  on `live` (hook "reverse draw order" reverses it in tests).
+- draw.rs `draw_wire`: attempt -1 adopts a reserved band (no new check; its handles become the run's copper). The band
+  leaves the index only through its own run: its octilinear form, the length-factor competitor, an `any_forbidden`
+  continue, or the run's failure. `JointState::on_uncommit` counts any other removal (`lost_to_other`, I1; a
+  `debug_assert` in core.rs).
+- Every drawn run carries a `RunSrc` (`WireOut::run_src`). The counts come from the final wires after the never-drop
+  pass, once per run, so forced runs are counted (the counter gap). result.json: `route.erbs` (`ErbsRunReport`).
+- Partition: runs = from_erbs + replaced + cut_back + forced_erbs; cut_back = static + predicted + gap + no band +
+  junction + redrawn (legal sequential runs and forced runs off their band).
+- Octilinear form in the commit (`octi_rescued`, lead: not the Q1 sweep): as attempt -1 does, a band whose any-angle
+  form breaks a static rule, or loses a conflict, is kept in its octilinear form when that form is legal against the
+  kept bands (losers in key order, so order-free). swap_vias octilinear 8 → 0 violations.
+
+## Lead decision 2026-11-18 (b): gap class keeps both bands
+- Finding: with the winner fixed, the loser of a model-gap conflict (0.02-0.13 mm) had no legal room and went to never
+  drop (smooth: distant_radius 0 → 4, gap_squeeze 0 → 12, river_wrap 6 → 18 engine violations). Before, its sequential
+  copper pushed the neighbours off their bands legally (a cascade that resolved the gap by displacement).
+- Rule: a conflict where one of the two bands has a model gap (`RunBand::gap`, no over-full cut predicts it) and whose
+  deepest overlap of the clearance is at most `[drawing] erbs_gap_keep_max_mm` (default 0.15 mm) keeps both bands. The
+  gap stays as a clearance violation of the band drawn second (`Drawer::gap_viols`, against drawn copper only, so each
+  gap is reported once). A deeper overlap or a predicted conflict goes to the selector. 0 = every conflict to it.
+- Counted: `route.erbs.gap_kept`, `gap_kept_max_mm`, `gap_kept_list` (yielding wire/run, other wire, overlap, place,
+  layer): the TW2b starting list. Source: Dayan PDF p. 26 (routable class ⇒ spacing holds, so the gap is the model's).
+- Cost seen on the fixtures (smooth): qfn_fan 0 → 2 and swap_vias 0 → 4 engine violations, where the loser had found a
+  legal sequential path; gap_squeeze 12 → 6, distant_radius 4 (two overlaps of 6.6 µm and 0.1 µm), river_wrap 18.
