@@ -1370,6 +1370,7 @@ mod tests {
             let opts = Options::default();
             let checker = Checker::new(&m, &opts);
             let mut dr = Drawer::new(&m, &opts, &b, &st, &checker);
+            dr.compute_intervals();
             for _ in 0..40 {
                 let a = pt(&mut g);
                 let e = match g.int(0, 2) {
