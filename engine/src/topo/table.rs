@@ -76,6 +76,8 @@ struct Inner<V> {
     gain: Vec<bool>,
     restarts: Vec<usize>,
     offers: usize,
+    /// The cycles each run restarted at (committed).
+    restart_at: BTreeSet<(usize, usize)>,
 }
 
 /// The call's one variant table ([`Row`]s), shared by its runs.
@@ -97,7 +99,7 @@ impl<V> SharedTable<V> {
     pub fn new(runs: usize, cap: usize, obj: Objective, window: usize) -> SharedTable<V> {
         let n = runs.max(1);
         SharedTable {
-            inner: Mutex::new(Inner { arch: Archive::new(cap), done: vec![None; n], ended: vec![false; n], pending: BTreeMap::new(), committed: None, accepted: BTreeSet::new(), fps: BTreeMap::new(), gain: Vec::new(), restarts: Vec::new(), offers: 0 }),
+            inner: Mutex::new(Inner { arch: Archive::new(cap), done: vec![None; n], ended: vec![false; n], pending: BTreeMap::new(), committed: None, accepted: BTreeSet::new(), fps: BTreeMap::new(), gain: Vec::new(), restarts: Vec::new(), offers: 0, restart_at: BTreeSet::new() }),
             cv: Condvar::new(),
             obj,
             window: window.max(1),
@@ -156,6 +158,9 @@ impl<V> SharedTable<V> {
             for k in keys {
                 let p = g.pending.remove(&k).expect("key");
                 restarted += usize::from(p.restarted);
+                if p.restarted {
+                    g.restart_at.insert((k.1, k.0));
+                }
                 g.offers += 1;
                 if g.arch.offer(Variant { label: p.label, crit: p.crit, payload: p.row }, &self.obj) {
                     g.accepted.insert((k.1, k.0));
@@ -258,6 +263,22 @@ impl<V> SharedTable<V> {
         self.commit(&mut g);
         let p = g.arch.pick(&self.obj);
         (g.arch.table(p), g.offers, self.stable_now(&g))
+    }
+
+    /// The restarts of all runs and how many of them led to a new row (an offer of that run taken
+    /// into the table before its next restart), after every run ended. O(restarts x accepted).
+    pub fn restart_stats(&self) -> (usize, usize) {
+        let mut g = self.lock();
+        self.commit(&mut g);
+        let rs: Vec<(usize, usize)> = g.restart_at.iter().copied().collect();
+        let new_row = (0..rs.len())
+            .filter(|&i| {
+                let (r, c) = rs[i];
+                let next = rs.get(i + 1).filter(|x| x.0 == r).map_or(usize::MAX, |x| x.1);
+                g.accepted.iter().any(|&(ar, ac)| ar == r && ac >= c && ac < next)
+            })
+            .count();
+        (rs.len(), new_row)
     }
 
     /// Rows now (committed). O(1).

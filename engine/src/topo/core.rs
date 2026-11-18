@@ -284,7 +284,8 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
     }
     if let Some(t) = coord.gate.table.as_ref() {
         let (rows, offers, _) = t.summary();
-        best.warnings.push(format!("TopoR variant table (one for all {n} runs, TW3; committed in cycle order): {offers} offers; {}", table_text(&rows, &obj)));
+        let (restarts, new_row) = t.restart_stats();
+        best.warnings.push(format!("TopoR variant table (one for all {n} runs, TW3; committed in cycle order): {offers} offers, {restarts} restarts ({new_row} led to a new row); {}", table_text(&rows, &obj)));
     }
     best.bests = bests_json;
     if n > 1 {
