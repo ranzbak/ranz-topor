@@ -534,53 +534,16 @@ impl Drawer<'_> {
             room_cache.insert(key, v);
             v
         };
-        // The same two prices with the per-leg work cut, exactly: the zones' unit directions and
-        // lengths and the gates' far ends computed once (the same expressions), the sample
-        // count once per leg; the bundle neighbours per direction sorted by their offset across
-        // it, so only those whose offset can lie within `tol` of their clearance are looked at
-        // (window: the widest clearance + tol + 1 nm against rounding; `max` is order-free).
-        let zpre: Vec<(Vec2, f64, f64, Vec2)> = zones
-            .iter()
-            .map(|&(za, zb, sign)| {
-                let zl = (zb - za).len();
-                (za, sign, zl, (zb - za) * (1.0 / zl))
-            })
-            .collect();
-        let gpre: Vec<(Vec2, Vec2, f64, f64, f64)> = gates.iter().map(|&(gp, gu, glen, glo, ghi)| (gp, gp + gu * glen, glen, glo, ghi)).collect();
-        let side_by: Vec<(Vec<(f64, usize)>, f64)> = (0..8)
-            .map(|k| {
-                let u = dir(k);
-                let mut v: Vec<(f64, usize)> = side.iter().enumerate().filter(|(_, x)| x.2 == k % 4).map(|(i, x)| (u.cross(x.0), i)).collect();
-                v.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-                let nmax = v.iter().map(|&(_, i)| side[i].3).fold(0.0, f64::max);
-                (v, nmax)
-            })
-            .collect();
+        // The same two prices with the per-leg work cut, exactly (see `RoomPre`, `FollowIdx`).
+        let rpre = RoomPre::new(&zones, &gates);
+        let fidx = FollowIdx::new(&side);
         let mut follow_cache2: FxHashMap<[u64; 4], f64> = crate::fxhash::map();
         let mut follow = |a: Vec2, b: Vec2, k: usize| -> f64 {
             let key = [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()];
             if let Some(&v) = follow_cache2.get(&key) {
                 return v;
             }
-            let u = dir(k);
-            let (t0, t1) = (0.0f64, (b - a).dot(u));
-            let mut best = 0.0f64;
-            let (by, nmax) = &side_by[k % 8];
-            let (sa, r) = (u.cross(a), nmax + tol + 1.0);
-            let from = by.partition_point(|x| x.0 < sa - r);
-            for &(sc, i) in &by[from..] {
-                if sc > sa + r {
-                    break;
-                }
-                let (c, e, _, need) = side[i];
-                let off = u.cross(c - a).abs();
-                if (off - need).abs() > tol {
-                    continue;
-                }
-                let (s0, s1) = ((c - a).dot(u), (e - a).dot(u));
-                let ov = (t1.min(s0.max(s1)) - t0.max(s0.min(s1))).max(0.0);
-                best = best.max(ov);
-            }
+            let best = fidx.follow(&side, tol, a, b, k);
             #[cfg(test)]
             OCTI_HITS.with(|h| h.set([h.get()[0] + usize::from(best > 0.0), h.get()[1]]));
             follow_cache2.insert(key, best);
@@ -595,49 +558,7 @@ impl Drawer<'_> {
             if let Some(&v) = room_cache2.get(&key) {
                 return v;
             }
-            let l = (b - a).len();
-            let mut tot = 0.0;
-            if l >= 1.0 {
-                let n = ((l / (0.25 * pitch)).ceil() as usize).clamp(2, 24);
-                let ds = l / n as f64;
-                for &(za, sign, zl, zu) in &zpre {
-                    let d0 = sign * zu.cross(a - za);
-                    let d1 = sign * zu.cross(b - za);
-                    if d0 <= 0.0 && d1 <= 0.0 {
-                        continue;
-                    }
-                    let (t0, t1) = ((a - za).dot(zu), (b - za).dot(zu));
-                    if (t0 < 0.0 && t1 < 0.0) || (t0 > zl && t1 > zl) {
-                        continue;
-                    }
-                    for i in 0..n {
-                        let f = (i as f64 + 0.5) / n as f64;
-                        let (d, t) = (d0 + (d1 - d0) * f, t0 + (t1 - t0) * f);
-                        if d > 0.0 && (0.0..=zl).contains(&t) {
-                            let x = d / pitch;
-                            tot += ds * (x + x * x);
-                        }
-                    }
-                }
-            }
-            // The lane slots beyond the span (P6 b): the depth of the crossing past it.
-            for &(gp, gq, glen, glo, ghi) in &gpre {
-                if !super::draw::seg_proper(a, b, gp, gq) {
-                    continue;
-                }
-                let (d1, d2) = (b - a, gq - gp);
-                let den = d1.cross(d2);
-                if den.abs() < 1e-9 {
-                    continue;
-                }
-                let t = (gp - a).cross(d1) / den * glen;
-                let depth = (glo - t).max(t - ghi).max(0.0);
-                if depth > 0.0 {
-                    let x = depth / pitch;
-                    tot += pitch * (x + x * x);
-                }
-            }
-            let v = cfg.room * tot;
+            let v = cfg.room * rpre.room(pitch, a, b);
             #[cfg(test)]
             OCTI_HITS.with(|h| h.set([h.get()[0], h.get()[1] + usize::from(v > 0.0)]));
             room_cache2.insert(key, v);
@@ -1156,6 +1077,126 @@ impl Drawer<'_> {
     }
 }
 
+/// The `planned_room` zones (a, b, sign) and lane-slot gates (first end, unit direction,
+/// length, span lo, span hi) of one octilinear run with what every leg needs of them computed
+/// once: the zone's length and unit direction, the gate's far end (the same expressions as the
+/// scan in `octilinear`, so the price is bit-identical).
+pub(super) struct RoomPre {
+    zones: Vec<(Vec2, f64, f64, Vec2)>,
+    gates: Vec<(Vec2, Vec2, f64, f64, f64)>,
+}
+
+impl RoomPre {
+    pub(super) fn new(zones: &[(Vec2, Vec2, f64)], gates: &[(Vec2, Vec2, f64, f64, f64)]) -> RoomPre {
+        let zones = zones
+            .iter()
+            .map(|&(za, zb, sign)| {
+                let zl = (zb - za).len();
+                (za, sign, zl, (zb - za) * (1.0 / zl))
+            })
+            .collect();
+        let gates = gates.iter().map(|&(gp, gu, glen, glo, ghi)| (gp, gp + gu * glen, glen, glo, ghi)).collect();
+        RoomPre { zones, gates }
+    }
+
+    /// The room price of the leg `a-b` before the `room` factor (the scan's `tot`). O(zones x
+    /// samples + gates).
+    pub(super) fn room(&self, pitch: f64, a: Vec2, b: Vec2) -> f64 {
+        let l = (b - a).len();
+        let mut tot = 0.0;
+        if l >= 1.0 {
+            let n = ((l / (0.25 * pitch)).ceil() as usize).clamp(2, 24);
+            let ds = l / n as f64;
+            for &(za, sign, zl, zu) in &self.zones {
+                let d0 = sign * zu.cross(a - za);
+                let d1 = sign * zu.cross(b - za);
+                if d0 <= 0.0 && d1 <= 0.0 {
+                    continue;
+                }
+                let (t0, t1) = ((a - za).dot(zu), (b - za).dot(zu));
+                if (t0 < 0.0 && t1 < 0.0) || (t0 > zl && t1 > zl) {
+                    continue;
+                }
+                for i in 0..n {
+                    let f = (i as f64 + 0.5) / n as f64;
+                    let (d, t) = (d0 + (d1 - d0) * f, t0 + (t1 - t0) * f);
+                    if d > 0.0 && (0.0..=zl).contains(&t) {
+                        let x = d / pitch;
+                        tot += ds * (x + x * x);
+                    }
+                }
+            }
+        }
+        // The lane slots beyond the span (P6 b): the depth of the crossing past it.
+        for &(gp, gq, glen, glo, ghi) in &self.gates {
+            if !super::draw::seg_proper(a, b, gp, gq) {
+                continue;
+            }
+            let (d1, d2) = (b - a, gq - gp);
+            let den = d1.cross(d2);
+            if den.abs() < 1e-9 {
+                continue;
+            }
+            let t = (gp - a).cross(d1) / den * glen;
+            let depth = (glo - t).max(t - ghi).max(0.0);
+            if depth > 0.0 {
+                let x = depth / pitch;
+                tot += pitch * (x + x * x);
+            }
+        }
+        tot
+    }
+}
+
+/// The drawn bundle neighbours (a, b, direction class 0..4, clearance) of one octilinear run per
+/// direction `k` (0..8): (`dir(k) x a`, index) of those of class `k % 4`, sorted, and the widest
+/// clearance. `follow` looks only at the neighbours whose offset across the leg can lie within
+/// `tol` of their clearance (window: widest clearance + tol + 1 nm against rounding) and takes the
+/// same `max` as the scan of every neighbour (order-free).
+pub(super) struct FollowIdx {
+    by: Vec<(Vec<(f64, usize)>, f64)>,
+}
+
+impl FollowIdx {
+    pub(super) fn new(side: &[(Vec2, Vec2, usize, f64)]) -> FollowIdx {
+        let by = (0..8)
+            .map(|k| {
+                let u = dir(k);
+                let mut v: Vec<(f64, usize)> = side.iter().enumerate().filter(|(_, x)| x.2 == k % 4).map(|(i, x)| (u.cross(x.0), i)).collect();
+                v.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+                let nmax = v.iter().map(|&(_, i)| side[i].3).fold(0.0, f64::max);
+                (v, nmax)
+            })
+            .collect();
+        FollowIdx { by }
+    }
+
+    /// Length of the leg `a-b` (direction `k`) that runs beside a neighbour of `side` at its
+    /// clearance (the overlap of their projections). O(log n + window).
+    pub(super) fn follow(&self, side: &[(Vec2, Vec2, usize, f64)], tol: f64, a: Vec2, b: Vec2, k: usize) -> f64 {
+        let u = dir(k);
+        let (t0, t1) = (0.0f64, (b - a).dot(u));
+        let mut best = 0.0f64;
+        let (by, nmax) = &self.by[k % 8];
+        let (sa, r) = (u.cross(a), nmax + tol + 1.0);
+        let from = by.partition_point(|x| x.0 < sa - r);
+        for &(sc, i) in &by[from..] {
+            if sc > sa + r {
+                break;
+            }
+            let (c, e, _, need) = side[i];
+            let off = u.cross(c - a).abs();
+            if (off - need).abs() > tol {
+                continue;
+            }
+            let (s0, s1) = ((c - a).dot(u), (e - a).dot(u));
+            let ov = (t1.min(s0.max(s1)) - t0.max(s0.min(s1))).max(0.0);
+            best = best.max(ov);
+        }
+        best
+    }
+}
+
 /// Octilinear connectors from `p` to `q`: the straight leg when they are aligned, else the two
 /// elbows and the two Z shapes over the two octilinear directions that bracket `q - p`.
 fn connectors(p: Vec2, q: Vec2) -> Vec<Vec<Leg>> {
@@ -1190,6 +1231,163 @@ mod tests {
 
     fn v(x: f64, y: f64) -> Vec2 {
         Vec2 { x, y }
+    }
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+        fn f(&mut self) -> f64 {
+            (self.next() >> 11) as f64 / (1u64 << 53) as f64
+        }
+        fn int(&mut self, lo: i64, hi: i64) -> i64 {
+            lo + (self.next() % (hi - lo + 1) as u64) as i64
+        }
+    }
+
+    /// The `room` scan of `octilinear` before `RoomPre` (its `tot`), verbatim.
+    fn room_ref(zones: &[(Vec2, Vec2, f64)], gates: &[(Vec2, Vec2, f64, f64, f64)], pitch: f64, a: Vec2, b: Vec2) -> f64 {
+        let l = (b - a).len();
+        let mut tot = 0.0;
+        if l >= 1.0 {
+            for &(za, zb, sign) in zones {
+                let zl = (zb - za).len();
+                let zu = (zb - za) * (1.0 / zl);
+                let d0 = sign * zu.cross(a - za);
+                let d1 = sign * zu.cross(b - za);
+                if d0 <= 0.0 && d1 <= 0.0 {
+                    continue;
+                }
+                let (t0, t1) = ((a - za).dot(zu), (b - za).dot(zu));
+                if (t0 < 0.0 && t1 < 0.0) || (t0 > zl && t1 > zl) {
+                    continue;
+                }
+                let n = ((l / (0.25 * pitch)).ceil() as usize).clamp(2, 24);
+                let ds = l / n as f64;
+                for i in 0..n {
+                    let f = (i as f64 + 0.5) / n as f64;
+                    let (d, t) = (d0 + (d1 - d0) * f, t0 + (t1 - t0) * f);
+                    if d > 0.0 && (0.0..=zl).contains(&t) {
+                        let x = d / pitch;
+                        tot += ds * (x + x * x);
+                    }
+                }
+            }
+        }
+        for &(gp, gu, glen, glo, ghi) in gates {
+            let gq = gp + gu * glen;
+            if !super::super::draw::seg_proper(a, b, gp, gq) {
+                continue;
+            }
+            let (d1, d2) = (b - a, gq - gp);
+            let den = d1.cross(d2);
+            if den.abs() < 1e-9 {
+                continue;
+            }
+            let t = (gp - a).cross(d1) / den * glen;
+            let depth = (glo - t).max(t - ghi).max(0.0);
+            if depth > 0.0 {
+                let x = depth / pitch;
+                tot += pitch * (x + x * x);
+            }
+        }
+        tot
+    }
+
+    /// The `follow` scan of `octilinear` before `FollowIdx`, verbatim.
+    fn follow_ref(side: &[(Vec2, Vec2, usize, f64)], tol: f64, a: Vec2, b: Vec2, k: usize) -> f64 {
+        let u = dir(k);
+        let (t0, t1) = (0.0f64, (b - a).dot(u));
+        let mut best = 0.0f64;
+        for &(c, e, kk, need) in side {
+            if kk != k % 4 {
+                continue;
+            }
+            let off = u.cross(c - a).abs();
+            if (off - need).abs() > tol {
+                continue;
+            }
+            let (s0, s1) = ((c - a).dot(u), (e - a).dot(u));
+            let ov = (t1.min(s0.max(s1)) - t0.max(s0.min(s1))).max(0.0);
+            best = best.max(ov);
+        }
+        best
+    }
+
+    /// `RoomPre::room` and `FollowIdx::follow` equal the scans bit for bit on random runs:
+    /// zones and gates crossed, touched and missed, zero-length and sub-nm legs, gates parallel
+    /// to the leg, gate spans open on one side; neighbours exactly at clearance +- tol, at the
+    /// window edge (widest clearance + tol), of every direction class, collinear with the leg.
+    #[test]
+    fn room_and_follow_indexes_match_the_scans() {
+        let mut g = Rng(0x6a09_e667_f3bc_c909);
+        let (mut room_hits, mut follow_hits) = (0usize, 0usize);
+        const MM: f64 = 1e6;
+        for _ in 0..300 {
+            let o = v(1e8 * g.f(), -1e8 * g.f());
+            let sc = [0.2, 2.0, 10.0][g.int(0, 2) as usize] * MM;
+            let rp = |g: &mut Rng| o + v(g.f() * sc, g.f() * sc);
+            let pitch = (0.1 + 0.5 * g.f()) * MM;
+            let zones: Vec<(Vec2, Vec2, f64)> = (0..g.int(0, 12)).map(|_| (rp(&mut g), rp(&mut g), if g.int(0, 1) == 0 { 1.0 } else { -1.0 })).collect();
+            let gates: Vec<(Vec2, Vec2, f64, f64, f64)> = (0..g.int(0, 12))
+                .map(|_| {
+                    let (p, q) = (rp(&mut g), rp(&mut g));
+                    let len = (q - p).len().max(1.0);
+                    let lo = if g.int(0, 2) == 0 { f64::NEG_INFINITY } else { len * 0.5 * g.f() };
+                    let hi = if g.int(0, 2) == 0 { f64::INFINITY } else { len * (0.5 + 0.5 * g.f()) };
+                    (p, (q - p) * (1.0 / len), len, lo, hi)
+                })
+                .collect();
+            let tol = 0.05 * pitch + 1_000.0;
+            let mut side: Vec<(Vec2, Vec2, usize, f64)> = Vec::new();
+            for _ in 0..g.int(0, 30) {
+                let kk = g.int(0, 7) as usize;
+                let c = rp(&mut g);
+                side.push((c, c + dir(kk) * sc * g.f(), kk % 4, pitch * (0.5 + g.f())));
+            }
+            let rpre = RoomPre::new(&zones, &gates);
+            let fidx = FollowIdx::new(&side);
+            for _ in 0..60 {
+                let a = match g.int(0, 3) {
+                    0 if !side.is_empty() => side[g.int(0, side.len() as i64 - 1) as usize].0,
+                    1 if !gates.is_empty() => gates[g.int(0, gates.len() as i64 - 1) as usize].0,
+                    _ => rp(&mut g),
+                };
+                let k = g.int(0, 7) as usize;
+                let b = match g.int(0, 4) {
+                    0 => a,
+                    1 => a + dir(k) * 0.5,
+                    2 if !gates.is_empty() => {
+                        let gt = gates[g.int(0, gates.len() as i64 - 1) as usize];
+                        a + gt.1 * sc * g.f()
+                    }
+                    _ => a + dir(k) * sc * g.f(),
+                };
+                let r0 = room_ref(&zones, &gates, pitch, a, b);
+                assert_eq!(rpre.room(pitch, a, b).to_bits(), r0.to_bits(), "room a {a:?} b {b:?}");
+                room_hits += usize::from(r0 > 0.0);
+                // A leg next to a neighbour: offset exactly at its clearance, +- tol, the window edge.
+                let (a2, k2) = if !side.is_empty() && g.int(0, 1) == 0 {
+                    let (c, _, kk, need) = side[g.int(0, side.len() as i64 - 1) as usize];
+                    let k2 = kk + 4 * g.int(0, 1) as usize;
+                    let nmax = side.iter().map(|x| x.3).fold(0.0, f64::max);
+                    let off = [need, need + tol, need - tol, need + tol + 1e-3, nmax + tol, nmax + tol + 1.0, 0.0][g.int(0, 6) as usize];
+                    let u = dir(k2);
+                    (c + v(-u.y, u.x) * off * if g.int(0, 1) == 0 { 1.0 } else { -1.0 } - u * sc * g.f(), k2)
+                } else {
+                    (a, k)
+                };
+                let b2 = a2 + dir(k2) * sc * (0.2 + g.f());
+                let f0 = follow_ref(&side, tol, a2, b2, k2);
+                assert_eq!(fidx.follow(&side, tol, a2, b2, k2).to_bits(), f0.to_bits(), "follow a {a2:?} k {k2}");
+                follow_hits += usize::from(f0 > 0.0);
+            }
+        }
+        assert!(room_hits > 500 && follow_hits > 500, "room {room_hits} follow {follow_hits}");
     }
 
     #[test]

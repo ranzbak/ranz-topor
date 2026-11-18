@@ -22,7 +22,7 @@ mutrun() {  # K: apply mutant K to a copy of the engine, run the F6/F7 tests, re
   cp $ROOT/engine/src/topo/planes.rs $ROOT/engine/src/topo/exact.rs $ROOT/engine/src/topo/draw.rs $ROOT/engine/src/topo/octi.rs $d/engine/src/topo/
   python3 $ROOT/tools/tw3f67_mutants.py apply $d $k || { note "mutant $k: patch did not apply"; return; }
   touch $d/engine/src/topo/*.rs
-  ( cd $d/engine && timeout 1800 cargo test --release --lib -- planes::tests::fill_index exact::tests 9>&- ) > $R/mut-$k.log 2>&1
+  ( cd $d/engine && timeout 1800 cargo test --release --lib -- planes::tests::fill_index exact::tests octi::tests::room_and_follow 9>&- ) > $R/mut-$k.log 2>&1
   local rc=$?
   if [ $rc -ne 0 ]; then note "mutant $k: killed (rc $rc)"; else note "mutant $k: SURVIVED"; fi
 }
@@ -52,7 +52,7 @@ case ${1:-} in
     cp -a $ROOT/engine $d/ 2>/dev/null; rm -rf $d/engine/target
     export CARGO_TARGET_DIR=/root/f67-mut-$u-target CARGO_BUILD_JOBS=4
     # The unmutated tree must pass first (else every mutant is "killed" for nothing).
-    ( cd $d/engine && timeout 1800 cargo test --release --lib -- planes::tests::fill_index exact::tests 9>&- ) > $R/mut-$u-clean.log 2>&1 \
+    ( cd $d/engine && timeout 1800 cargo test --release --lib -- planes::tests::fill_index exact::tests octi::tests::room_and_follow 9>&- ) > $R/mut-$u-clean.log 2>&1 \
       || { note "mutants $u: the unmutated tests fail (rc $?), mutants not run"; exit 1; }
     for k in "$@"; do mutrun $k $d; done
     note "mutants $u done" ;;

@@ -1418,6 +1418,6 @@ mod tests {
             }
         });
         let hits = OCTI_HITS.with(|h| h.get());
-        assert!(some > 10 && hits[0] > 20 && hits[1] > 20, "{some} of {runs}, hits {hits:?}");
+        assert!(some > 10 && hits[0] > 20, "{some} of {runs}, hits {hits:?}");
     }
 }
