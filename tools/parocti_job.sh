@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# parocti_job.sh (branch par-octi = tw3-f67 + par-draw A + octilinear lanes, Hetzner): acceptance.
-#   all : par tests (lib par::, tests/par_draw at --test-threads 1), config pytest, clippy; board copper hashes
-#         (eprom/wiccon/esp/qmtech x realise sequential/erbs x RAYON 1/2/4/8, rounds=1 runs=1; eprom/wiccon erbs
-#         with the default runs at RAYON 1/4/8); then the completion-order mutant, which must fail the tests.
+# parocti_job.sh (branch par-octi = par-draw A + octilinear lanes on main 01e85fce, Hetzner): acceptance.
+#   all : par tests (lib par:: octi exact::, tests/par_draw at --test-threads 1), near tests, config pytest, clippy;
+#         board copper hashes (esp/qmtech x sequential/erbs x RAYON 2/4, eprom/wiccon x sequential/erbs x RAYON 1,
+#         rounds=1 runs=1); then the mutants M1-M4 (tools/parocti_mut.py).
 #   ref : the board hashes of this rev at RAYON 4 only (run it on main for "copper = main").
 #   time (timebase: a rev without draw_lanes): qmtech + esp, sequential/erbs: runs=1 at RAYON 1 and 8, runs=4 at RAYON 8 with draw_lanes auto and 1 (exclusive VM).
 # Runs in the repo root (ROOT = pwd), so the same text works for a rev without this file (base64 in the command).
@@ -32,10 +32,19 @@ case ${1:-all} in
   all)
     ( hzq run --threads 4 --name pd-tests -- bash -c "cd $ROOT/engine && RAYON_NUM_THREADS=4 cargo test --release --lib -- par:: octi exact:: 9>&- > $R/tests.log 2>&1; echo \"lib rc \$?\" >> $R/tests.log; RAYON_NUM_THREADS=4 cargo test --release --test par_draw -- --test-threads 1 9>&- >> $R/tests.log 2>&1; echo \"par_draw rc \$?\" >> $R/tests.log; RAYON_NUM_THREADS=4 cargo test --release --test par_refine --test par_refine_dense --test topo_drawing_grace --test topo_m3_class_keep 9>&- >> $R/tests.log 2>&1; echo \"near rc \$?\" >> $R/tests.log; cargo clippy --release --all-targets 9>&- >> $R/tests.log 2>&1; echo \"clippy rc \$?\" >> $R/tests.log; cd $ROOT && CI=1 python -m pytest -q tests/plugin/test_config.py tests/plugin/test_config_docs.py tests/plugin/test_toml_defaults.py tests/test_docs_links.py >> $R/tests.log 2>&1; echo \"pytest rc \$?\" >> $R/tests.log" ) & sleep 1
     if [ -z "${NOBOARDS:-}" ]; then  # NOBOARDS=1: tests and mutants only
-    boards 1 2 4 8
-    for t in 1 4 8; do
-      one eprom-def-t$t $P $t --set drawing.realise=erbs & sleep 1
-      one wiccon-def-t$t $W $t --set drawing.realise=erbs & sleep 1
+    # slim (lead 2026-11-18, smart compute): esp/qmtech at RAYON 2 and 4 (1 and 8 come from the
+    # exclusive timing run), eprom/wiccon at RAYON 1; no default-runs configs
+    for t in 2 4; do
+      for bb in esp:$E qmtech:$Q; do
+        n=${bb%%:*}; b=${bb#*:}
+        one $n-seq-t$t $b $t --set optimize.rounds=1 --set optimize.runs=1 --set drawing.realise=sequential & sleep 1
+        one $n-erbs-t$t $b $t --set optimize.rounds=1 --set optimize.runs=1 --set drawing.realise=erbs & sleep 1
+      done
+    done
+    for bb in eprom:$P wiccon:$W; do
+      n=${bb%%:*}; b=${bb#*:}
+      one $n-seq-t1 $b 1 --set optimize.rounds=1 --set optimize.runs=1 --set drawing.realise=sequential & sleep 1
+      one $n-erbs-t1 $b 1 --set optimize.rounds=1 --set optimize.runs=1 --set drawing.realise=erbs & sleep 1
     done
     fi
     wait
