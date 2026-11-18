@@ -218,6 +218,8 @@ case ${1:-} in
   both) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-tests -- bash $ROOT/tools/tw2_job.sh tests-in ) & sleep 1; wait; note "all done" ;;
   ladder-retest) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-retest -- bash $ROOT/tools/tw2_job.sh retest-in ) & sleep 1; wait; note "all done" ;;
   r3mut-in) r3mut ;;
+  r3v5-in) mt_tree; ( cd $MT/engine && cargo test --release --test tw2_fuse_pour > $R/mut-base.log 2>&1 9>&- ); note "v5 base (unmutated) rc $?"
+    sub '        cut_step.set(CutStep::Stitching);' '' | mut v5_no_step engine/src/topo/core.rs --test tw2_fuse_pour; rm -rf $MT; note "all done" ;;
   r3) shift; ( hzq run --threads 4 --name tw2t-suite -- bash $ROOT/tools/tw2_job.sh r2-in ) & sleep 1
     ( hzq run --threads 4 --name tw2t-mut -- bash $ROOT/tools/tw2_job.sh r3mut-in ) & sleep 1
     ladder "$@"; wait; note "all done" ;;

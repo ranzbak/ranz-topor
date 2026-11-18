@@ -170,6 +170,9 @@ fn a_hard_limit_reached_at_the_start_of_the_check_cuts_its_stitching() {
     assert!(l.contains("cut its stitching") && undone(l).0 == 0, "{l}");
     let lr = r.limit.as_ref().expect("limit report");
     assert!(lr.reached && lr.cut_steps.contains(&"stitching".to_string()), "{lr:?}");
+    // Only the stitching was cut: without the step set at the check's start the cut would be
+    // noted under the step before it (the drawing or the via reduction).
+    assert!(!lr.cut_steps.iter().any(|s| s == "drawing" || s == "via_reduction" || s == "plan"), "{lr:?}");
 }
 
 /// Verify V10: `[search] fuse_pour_rounds`. Hook "fuse pour worse" judges the first round worse and
