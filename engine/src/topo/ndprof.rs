@@ -4,11 +4,12 @@ use std::cell::RefCell;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-pub const N: usize = 24;
+pub const N: usize = 30;
 pub const NAMES: [&str; N] = [
     "place_vias", "force_via", "draw_wire", "strip", "exact0", "exact_relax", "local_path", "check",
     "octi0", "octi_relax", "repair", "pull_taut", "pull_pts", "realise", "via_reach", "lp_fail",
     "lp_nodes", "lp_edges", "exact_iters", "chord_sites", "via_cands", "neck", "diagnose", "runs",
+    "viols", "viols_lb", "raw_viols", "probes", "bb_eval", "bb_skip",
 ];
 pub const PLACE_VIAS: usize = 0;
 pub const FORCE_VIA: usize = 1;
@@ -34,6 +35,12 @@ pub const VIA_CANDS: usize = 20;
 pub const NECK: usize = 21;
 pub const DIAGNOSE: usize = 22;
 pub const RUNS: usize = 23;
+pub const VIOLS: usize = 24;
+pub const VIOLS_LB: usize = 25;
+pub const RAW_VIOLS: usize = 26;
+pub const PROBES: usize = 27;
+pub const BB_EVAL: usize = 28;
+pub const BB_SKIP: usize = 29;
 
 thread_local! {
     static ACC: RefCell<[(u64, f64); N]> = const { RefCell::new([(0, 0.0); N]) };
