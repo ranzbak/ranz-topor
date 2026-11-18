@@ -24,7 +24,9 @@ build() {  # build <srcdir> <site>
 prep() {  # prep <rev> <tag>: a worktree of <rev> with the hooks (patch applied when the rev lacks them)
   local wt="$OUT/src-$2"; git -C "$ROOT" worktree add --detach "$wt" "$1" > /dev/null 2>&1 || { note "worktree $1 failed"; return 1; }
   if ! grep -q "TOPO_PROF" "$wt/engine/src/topo/prof.rs" 2>/dev/null; then
-    python3 "$ROOT/tools/prof_hooks_apply.py" "$wt" "$ROOT/tools/prof-hooks.patch" > "$OUT/patch-$2.log" 2>&1 || { note "hooks patch does not apply on $1"; return 1; }
+    local hp="$ROOT/tools/prof-hooks.patch" sp; sp="$ROOT/tools/prof-hooks-$(git -C "$ROOT" rev-parse --short=8 "$1").patch"
+    [ -f "$sp" ] && hp=$sp  # a hand-ported patch for exactly this rev (loop-local moves the call sites)
+    python3 "$ROOT/tools/prof_hooks_apply.py" "$wt" "$hp" > "$OUT/patch-$2.log" 2>&1 || { note "hooks patch does not apply on $1"; return 1; }
   fi
   echo "$wt"
 }
