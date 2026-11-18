@@ -176,6 +176,19 @@ r2mut() {  # fix round 2 mutants: this round's lines (V3 re-check, V5 polish cou
   sub 'moves.push((super::fusepour::Move { w, onto: super::fusepour::NO_WIRE, path }, sv));' 'drop((path, sv));' | mut fp6_polish $C --test tw2_fuse_pour
   rm -rf $MT; note "r2mut done"
 }
+r3mut() {  # tw2-tests: the mutants v1-v3 (V3 re-check), v5/v6 (V6 limit path), v7 (fuse_pour_rounds), own tree, unmutated check first
+  mt_tree; local F=engine/src/topo/fusepour.rs C=engine/src/topo/core.rs
+  ( cd $MT/engine && cargo test --release --no-run > $R/mt-build.log 2>&1 9>&- ); note "mutant tree build rc $?"
+  ( cd $MT/engine && cargo test --release --lib topo::fusepour > $R/mut-base.log 2>&1 9>&- && cargo test --release --test tw2_fuse_pour >> $R/mut-base.log 2>&1 9>&- ); local br=$?
+  note "mutant base (unmutated) rc $br"; [ $br -ne 0 ] && { note "r3mut stopped: the unmutated tests fail"; return; }
+  sub 'viols(w) > pre.get(&w).copied().unwrap_or(0)' 'false' | mut v1_cmp_false $F --lib topo::fusepour
+  sub 'viols(w) > pre.get(&w).copied().unwrap_or(0)' 'viols(w) > 0' | mut v2_cmp_zero $F --lib topo::fusepour
+  sub 'with_dependents(moves, &clash_seed(moves, live, &|w| viols(w) > pre.get(&w).copied().unwrap_or(0)))' 'clash_seed(moves, live, &|w| viols(w) > pre.get(&w).copied().unwrap_or(0))' | mut v3_no_dependents $F --lib topo::fusepour
+  sub '        cut_step.set(CutStep::Stitching);' '' | mut v5_no_step $C --test tw2_fuse_pour
+  sub 'let c = test_cut || ctl.is_cancelled() || limit_cut();' 'let c = test_cut || ctl.is_cancelled();' | mut v6_no_limit $C --test tw2_fuse_pour
+  sub 'rounds < opts.fuse_pour_rounds && !undo_all' 'rounds < 2 && !undo_all' | mut v7_rounds_fixed $C --test tw2_fuse_pour
+  rm -rf $MT; note "r3mut done"
+}
 bhtiles() {  # bornhack J once (4 threads), then the tiled DRC of its routed board (tools/drc_tiles.py, area U6)
   task J bornhack 4
   local pcb; pcb=$(ls $R/J/bornhack/*-topor/*.kicad_pcb 2>/dev/null | head -1)
@@ -204,6 +217,10 @@ case ${1:-} in
   ladder-fp) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-fpcheck -- bash $ROOT/tools/tw2_job.sh fpcheck-in ) & sleep 1; wait; note "all done" ;;
   both) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-tests -- bash $ROOT/tools/tw2_job.sh tests-in ) & sleep 1; wait; note "all done" ;;
   ladder-retest) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-retest -- bash $ROOT/tools/tw2_job.sh retest-in ) & sleep 1; wait; note "all done" ;;
+  r3mut-in) r3mut ;;
+  r3) shift; ( hzq run --threads 4 --name tw2t-suite -- bash $ROOT/tools/tw2_job.sh r2-in ) & sleep 1
+    ( hzq run --threads 4 --name tw2t-mut -- bash $ROOT/tools/tw2_job.sh r3mut-in ) & sleep 1
+    ladder "$@"; wait; note "all done" ;;
   r2-in) r2suite ;;
   r2mut-in) r2mut ;;
   bhtiles-in) bhtiles ;;
