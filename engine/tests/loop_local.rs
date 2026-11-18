@@ -484,6 +484,12 @@ fn local_layering_keeps_off_the_held_layer() {
         let loc = layers::assign_local(&st, &smd, &p, None, None, &Held { prev: &prev, free: &free });
         let links = check_local(&st, &prev, &loc, &free, &format!("{n_layers} layers, held on F.Cu"));
         assert!(links > 0, "{n_layers} layers: crossings of free and held wires");
+        if n_layers == 4 {
+            // Three other layers are open to every free event: none of its crossings with a held
+            // wire is left on one layer (counted unlayerable).
+            let fh: Vec<&(WireId, WireId)> = loc.unlayerable_w.iter().filter(|&&(a, c)| free.get(a).copied().unwrap_or(true) != free.get(c).copied().unwrap_or(true)).collect();
+            assert!(fh.is_empty(), "4 layers: free x held crossings on one layer {fh:?}");
+        }
     }
 }
 
