@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # TW0: profile one or two revs side by side on ONE exclusive ccx43 (timing numbers only come from there).
-#   hz.sh job --exclusive --wait --rev <tip> -- bash tools/prof_job.sh [--base <rev>] [--boards a,b,...] [--flame]
+#   hz.sh job --exclusive --wait --rev <tw0 branch tip> -- bash tools/prof_job.sh --base 27c36203 --tip <loop-local tip> [--boards a,b,...] [--flame]
+# (--rev = the checkout whose plugin/harness/tools drive both engines; --tip default = that checkout's HEAD)
 # For each rev (base optional): build a wheel (sccache, frame pointers + debug info with --flame), then, one board at a time,
 # tools/prof_run.sh <board> <out>/<tag>/<board> (seed 0, optimize.rounds=1 runs=1, RAYON_NUM_THREADS=1, --timeout 600
 # wall, no extra options: same options for both revs); finally tools/prof_compare.py base vs tip -> <out>/compare.{md,json}.
@@ -9,8 +10,8 @@
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${HZ_RUN_DIR:-$ROOT/scratch/prof-job}; mkdir -p "$OUT"
-BASE=""; BOARDS="eprom-to-kernal,wiccon-2023,esp-rust-board,qmtech-hand,bornhack2026"; FLAME=""
-while [ $# -gt 0 ]; do case $1 in --base) BASE=$2; shift 2;; --boards) BOARDS=$2; shift 2;; --flame) FLAME=--flame; shift;; *) shift;; esac; done
+BASE=""; TIP=""; BOARDS="eprom-to-kernal,wiccon-2023,esp-rust-board,qmtech,bornhack2026"; FLAME=""
+while [ $# -gt 0 ]; do case $1 in --base) BASE=$2; shift 2;; --tip) TIP=$2; shift 2;; --boards) BOARDS=$2; shift 2;; --flame) FLAME=--flame; shift;; *) shift;; esac; done
 note() { echo "$*" >> "$OUT/rc.txt"; }
 export TOPO_PROF_THREADS=${TOPO_PROF_THREADS:-1} RAYON_NUM_THREADS=${TOPO_PROF_THREADS:-1}
 PATH=/root/.cargo/bin:$PATH
@@ -32,12 +33,13 @@ run_rev() {  # run_rev <rev> <tag>
   note "build done $2 ($1)"
   IFS=, read -ra BS <<< "$BOARDS"
   for b in "${BS[@]}"; do
+    local bp=$b; [ "$b" = qmtech ] && bp=$ROOT/scratch/boards/qmtech-hand/qmtech-minimig.kicad_pcb  # not a BENCH_BOARDS key
     # plugin, harness and tools of THIS checkout drive both engines; only the engine wheel differs
-    ( cd "$ROOT" && TOPOR_ENGINE_SITE="$OUT/site-$2" tools/prof_run.sh "$b" "$OUT/$2/$b" --timeout 600 $FLAME ) > "$OUT/$2-$b.log" 2>&1
+    ( cd "$ROOT" && TOPOR_ENGINE_SITE="$OUT/site-$2" tools/prof_run.sh "$bp" "$OUT/$2/$b" --timeout 600 $FLAME ) > "$OUT/$2-$b.log" 2>&1
     note "$2 $b rc $?"
   done
 }
 [ -n "$BASE" ] && run_rev "$BASE" base
-run_rev "$(git -C "$ROOT" rev-parse HEAD)" tip
+run_rev "${TIP:-$(git -C "$ROOT" rev-parse HEAD)}" tip
 [ -n "$BASE" ] && python3 "$ROOT/tools/prof_compare.py" "$OUT/base" "$OUT/tip" --md "$OUT/compare.md" --json "$OUT/compare.json" > /dev/null 2>&1
 note "all done"
