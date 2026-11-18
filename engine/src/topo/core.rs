@@ -6135,18 +6135,28 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
                 let ws_mm = (wi.w + wi.s) / MM;
                 let mut done = false;
+                if std::env::var("TOPO_FUSEDBG").is_ok() && !trunks.is_empty() {
+                    eprintln!("FUSE try wire {w} net {} end {end} layer {layer} trunks {trunks:?}", wi.net);
+                }
                 for u in trunks {
                     let Some(uo) = drawn.get(&u) else { continue };
                     let tp: Vec<Vec<Vec2>> = uo.runs.iter().filter(|(l, _)| *l == layer).map(|(_, p)| p.clone()).collect();
                     let tr: Vec<&[Vec2]> = tp.iter().map(|p| p.as_slice()).collect();
                     for (gain, len_gain, i, mut pts) in draw::fuse_candidates(&run, &tr, ws_mm, jw).into_iter().take(8) {
                         let cut = &run[..=i];
+                        let fdbg = std::env::var("TOPO_FUSEDBG").is_ok();
                         if anchors.get(&w).is_some_and(|a| a.iter().any(|&p| (p - run[i]).len() > 1_000.0 && near_poly(p, cut))) {
+                            if fdbg {
+                                eprintln!("FUSE skip wire {w} end {end} onto {u} i {i} gain {gain:.2}: an anchor on the cut part");
+                            }
                             continue;
                         }
                         let q = pts[0];
                         // `junction_pad_mm`: no T that close to a pad of the net.
                         if pad_nm > 0.0 && pad_verts.get(&wi.net).is_some_and(|ps| ps.iter().any(|&(v, _)| (proj.pos[v] - q).len() < pad_nm)) {
+                            if fdbg {
+                                eprintln!("FUSE skip wire {w} end {end} onto {u} i {i} gain {gain:.2}: junction_pad_mm at ({:.3}, {:.3})", q.x / MM, -q.y / MM);
+                            }
                             continue;
                         }
                         if end == 1 {
@@ -6160,6 +6170,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                             settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st);
                         }
                         drawn.insert(w, wo);
+                        if !ok && fdbg {
+                            eprintln!("FUSE skip wire {w} end {end} onto {u} i {i} gain {gain:.2}: refit not legal at ({:.3}, {:.3})", q.x / MM, -q.y / MM);
+                        }
                         if ok {
                             fused.push((gain, len_gain));
                             fused_at.insert((w, end));

@@ -21,7 +21,7 @@ cfg() {
   SETS=(); ENVS=()
   case $1 in
     D) ;;
-    JD) SETS=(--set 'drawing.realise="erbs"'); ENVS=(TOPO_ERBS_DEBUG=1) ;;
+    JD) SETS=(--set 'drawing.realise="erbs"'); ENVS=(TOPO_ERBS_DEBUG=1 TOPO_FUSEDBG=1) ;;
     J) SETS=(--set 'drawing.realise="erbs"') ;;
     S) SETS=(--set 'drawing.realise="sequential"') ;;
     JF) SETS=(--set 'drawing.realise="erbs"' --set optimize.allow_violations=false) ;;
