@@ -1827,7 +1827,7 @@ pub fn probe(model: &BoardModel, opts: &Options) -> Probe {
 /// The projection's build options of a route: `[search] steiner` adds the Steiner grid (4.2).
 fn build_opts(opts: &Options) -> BuildOpts {
     let d = BuildOpts::default();
-    BuildOpts { steiner_mm: if opts.steiner { d.steiner_mm } else { 0.0 }, existing_vias: true, keepouts: true, plane_layers: opts.plane_signals != "forbidden", copper_shapes: true, kept_tracks: true, lead_margin_nm: opts.margin_nm.max(0) as f64 + super::pack::DRAW_TOL_NM, ..d }
+    BuildOpts { steiner_mm: if opts.steiner { d.steiner_mm } else { 0.0 }, existing_vias: true, keepouts: true, plane_layers: opts.plane_signals != "forbidden", copper_shapes: true, kept_tracks: true, lead_margin_nm: opts.margin_nm.max(0) as f64 + super::pack::DRAW_TOL_NM, lead_choice: opts.dangling_lead_choice, ..d }
 }
 
 /// The failure reason of a connection whose ends the topological core does not route: an end on
@@ -2590,6 +2590,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut exist_groups: BTreeMap<usize, (i32, Vec<VertId>)> = BTreeMap::new();
     let mut exist_dang: BTreeSet<VertId> = BTreeSet::new();
     let mut cont_dirs: BTreeMap<VertId, Vec2> = BTreeMap::new();
+    // tw4 T3 (`[search] dangling_lead_choice`): per continued dangling end's main vertex (its
+    // lead's end), the start points its lead offers `(vertex, distance from the hand end, nm)`.
+    let mut lead_alt: BTreeMap<VertId, Vec<(VertId, f64)>> = BTreeMap::new();
     for c in &dec.connections {
         let i = c.id;
         let (ta, tb) = (&c.from.kind, &c.to.kind);
@@ -2672,15 +2675,25 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 };
                 match (res(&c.from), res(&c.to)) {
                     (Ok((oa, va, ea)), Ok((ob, vb, eb))) => {
-                        for (v, e) in [(va, &ea), (vb, &eb)] {
+                        for (v, o, e) in [(va, oa, &ea), (vb, ob, &eb)] {
                             if let Some(ExistEnd::Kept { kept, dangling, dir, .. }) = e {
+                                // tw4 T3: a lead's start points (empty unless dangling_lead_choice)
+                                let ch: &[(VertId, f64)] = if *dangling { b.kept_ends.iter().find(|k| k.obs == o).map_or(&[], |k| &k.choices[..]) } else { &[] };
                                 if let Some(&cl) = dec.kept_cluster.get(kept) {
-                                    exist_groups.entry(cl).or_insert_with(|| (c.net, Vec::new())).1.push(v);
+                                    let g = &mut exist_groups.entry(cl).or_insert_with(|| (c.net, Vec::new())).1;
+                                    g.push(v);
+                                    g.extend(ch.iter().map(|x| x.0));
                                 }
                                 if *dangling {
                                     exist_dang.insert(v);
                                     if let Some(d) = dir {
                                         cont_dirs.insert(v, *d);
+                                        for &(u, _) in ch {
+                                            cont_dirs.insert(u, *d);
+                                        }
+                                    }
+                                    if !ch.is_empty() {
+                                        lead_alt.insert(v, ch.to_vec());
                                     }
                                 }
                             }
@@ -2848,11 +2861,18 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 // picked it as the cluster's nearest port) continues that end: the search starts
                 // at its lead alone, not at another vertex of the cluster that may be cheaper
                 // (test a_dangling_end_the_decomposition_picked_stays_the_root_behind_a_wall).
-                if exist_dang.contains(&c.a) {
-                    src.retain(|e| e.v == c.a);
-                }
-                if exist_dang.contains(&c.b) {
-                    dst.retain(|e| e.v == c.b);
+                // tw4 T3 (`dangling_lead_choice`): at any start point its lead offers. The lead up to
+                // it is not priced (as the fixed lead: it continues the hand track); the search
+                // prices the length from it and the `dangling_turn` there, so a lead pointing
+                // past its target is cut where going on costs more than turning.
+                for (v, ends) in [(c.a, &mut src), (c.b, &mut dst)] {
+                    if !exist_dang.contains(&v) {
+                        continue;
+                    }
+                    match lead_alt.get(&v) {
+                        Some(alt) => ends.retain(|e| alt.iter().any(|x| x.0 == e.v)),
+                        None => ends.retain(|e| e.v == v),
+                    }
                 }
                 // The branch reward, the SMD assembly cost and the junction angle are priced in the
                 // search (social factors): a sharp or costly branch loses to a separate path.

@@ -634,14 +634,26 @@ pub struct State<'p> {
     pub cont_dir: BTreeMap<VertId, Vec2>,
 }
 
-impl<'p> State<'p> {
-    pub fn new(proj: &'p Projection) -> Self {
-        let mut centre = vec![None; proj.obstacles.len()];
-        for (v, k) in proj.vkind.iter().enumerate() {
-            if let VertKind::Centre(o) = *k {
+/// The main centre vertex of every obstacle (`None`: none): of its centre vertices the one
+/// nearest its `center` (the first such on a tie). An obstacle has one, except a dangling end's
+/// lead with tw4 T3's start points (`board::KeptEndOut::choices`), whose main one is its end.
+/// O(vertices).
+pub fn centre_vertices(proj: &Projection) -> Vec<Option<VertId>> {
+    let mut centre: Vec<Option<VertId>> = vec![None; proj.obstacles.len()];
+    for (v, k) in proj.vkind.iter().enumerate() {
+        if let VertKind::Centre(o) = *k {
+            let c = proj.obstacles[o].center;
+            if centre[o].is_none_or(|u| (proj.pos[v] - c).len() < (proj.pos[u] - c).len()) {
                 centre[o] = Some(v);
             }
         }
+    }
+    centre
+}
+
+impl<'p> State<'p> {
+    pub fn new(proj: &'p Projection) -> Self {
+        let centre = centre_vertices(proj);
         let mut ring: Vec<Vec<TriId>> = vec![Vec::new(); proj.obstacles.len()];
         for (t, vs) in proj.tris.iter().enumerate().filter(|(t, _)| !proj.tri_out[*t]) {
             for &v in vs {

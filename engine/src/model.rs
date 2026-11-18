@@ -1182,6 +1182,14 @@ pub struct Options {
     /// track-only length. Default on; off = the via goes to the plan's site, the lead keeps its
     /// track-only length.
     pub dangling_lead_via: bool,
+    /// Topological core (tw4 T3, `topor.toml [search] dangling_lead_choice`): the lead of a
+    /// continued dangling end is a plan choice: the search may also start at 0, 1/3 or 2/3 of
+    /// its length (`topo::board::KeptEndOut::choices`), each leaving along the hand track's
+    /// direction; the search prices the length from it and the `dangling_turn` factor of the turn
+    /// there (the lead up to it is free, as the fixed lead is), and the drawing draws the lead up
+    /// to the chosen point. A lead that points past its target gets shorter. Default off (the
+    /// lead's end only). The unused part of the lead still blocks other nets in the plan.
+    pub dangling_lead_choice: bool,
     /// Topological core (D6b, `topor.toml [search] fuse_branches`): after the drawing, a trace
     /// that leaves a junction or a pad beside another trace of its net leaves that trace's copper
     /// where the two part instead (one copper, a T there), when that is cheaper by length and the
@@ -1583,6 +1591,7 @@ impl Default for Options {
             junction_pad_mm: 0.0,
             dangling_lead_mm: 0.0,
             dangling_lead_via: true,
+            dangling_lead_choice: false,
             fuse_branches: true,
             fuse_pour_check: true,
             fuse_pour_rounds: 2,

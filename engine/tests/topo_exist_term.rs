@@ -631,3 +631,98 @@ fn two_wires_from_one_dangling_end_share_one_lead() {
     }
     assert!(bad.is_empty(), "{bad:#?}");
 }
+
+/// tw4 T3 (`[search] dangling_lead_choice`; synthetic pattern `dangling_lead_away`, its expected
+/// answer PROVISIONAL until the user approves the pattern): a hand-started F.Cu track from R1
+/// (3, 6) ends at (8, 6) heading +x; R2 (8.3, 9.5) lies below the end, behind the end of a
+/// 1.5 mm lead (`dangling_lead_mm`). From the lead's end (9.5, 6) the trace turns 108.9 deg
+/// off +x, from the hand end itself 85.1 deg. With `dangling_turn` 4 (graded, 1 - cos a; cost
+/// of a start = the length from it + that price: hand end 5.16, 1/3 5.41, 2/3 5.72, lead end
+/// 6.08 mm) and the option on, the search starts at the hand end: the lead is
+/// shortened (here to nothing) and the trace leaves the hand track at most 90 deg off it. Off
+/// (today): the full lead, then down and back towards R2 (the plan's turn past 90 deg). Mutants: no lead points in the build,
+/// the drawing drawing the full lead, the search keeping the lead's end only.
+#[test]
+fn a_lead_that_points_away_is_shortened_with_lead_choice() {
+    use topor_engine::topo::factors::FactorConfig;
+    let pads = [("R1", 1, 3.0, 6.0, 1.0, 0), ("R2", 1, 8.3, 9.5, 0.8, 0)];
+    let kept = [("t1", 1, 0, 3.0, 6.0, 8.0, 6.0, 0.25)];
+    let dang = [("t1", 1, 0, 0.25, 8.0, 6.0, 1.0, 0.0)];
+    let m = board(14.0, 12.0, &pads, &kept, &[], &dang);
+    let run = |choice: bool| {
+        let factors = FactorConfig { weight: [("dangling_turn".to_string(), 4.0)].into_iter().collect(), ..FactorConfig::default() };
+        let o = Options { dangling_lead_mm: 1.5, dangling_lead_choice: choice, factors, ..Options::default() };
+        route_with(&m, &o, &RunControl::new())
+    };
+    // (lead length along +x, the angle (deg) of the first piece after it off +x)
+    let shape = |r: &RouteResult| -> (f64, f64) {
+        let ts = tracks(&r.items);
+        let (q0, q1, _) = leaving(r, 0, (3.0, 6.0), (8.0, 6.0), "t1").unwrap_or_else(|| panic!("no new track at the dangling end: {ts:?}"));
+        let ang = |a: (f64, f64), b: (f64, f64)| (b.1 - a.1).atan2(b.0 - a.0).to_degrees().abs();
+        if ang(q0, q1) > 1.0 {
+            return (0.0, ang(q0, q1));
+        }
+        // the lead, then the piece that leaves its end
+        let next = ts.iter().filter(|t| t.0 == 0 && pt_seg(q0, t.1, t.2) > 1e-3).find_map(|t| if d(t.1, q1) < 1e-3 { Some(t.2) } else if d(t.2, q1) < 1e-3 { Some(t.1) } else { None });
+        (d(q0, q1), next.map_or(0.0, |n| ang(q1, n)))
+    };
+    let off = run(false);
+    assert_eq!(off.routed, 1, "{}", summary(&off));
+    let (l0, a0) = shape(&off);
+    eprintln!("T3 off: lead {l0:.3} mm, turn {a0:.1} deg, {:?}", tracks(&off.items));
+    assert!(l0 > 1.5 - 0.02, "today: the full lead: {l0:.3} mm");
+    let on = run(true);
+    assert_eq!(on.routed, 1, "{}", summary(&on));
+    assert!(on.violations.is_empty(), "{}", summary(&on));
+    let (l1, a1) = shape(&on);
+    eprintln!("T3 on: lead {l1:.3} mm, turn {a1:.1} deg, {:?}", tracks(&on.items));
+    assert!(l1 < 1.5 - 0.1, "the lead is shortened: {l1:.3} mm, {:?}", tracks(&on.items));
+    assert!(a1 <= 90.0 + 1.0, "the trace leaves at most 90 deg off the hand track: {a1:.1} deg, {:?}", tracks(&on.items));
+    assert!(ends_at(&on, 0, (8.3, 9.5)), "it reaches R2: {:?}", tracks(&on.items));
+    // R2 ahead, at (11, 9): going on costs less than turning early (costs hand end 4.77, 1/3 4.55,
+    // 2/3 4.41, lead end 4.35 mm), so the lead keeps its full length. Mutant: no lead direction
+    // (no dangling_turn price) at the start points short of the end.
+    let pads = [("R1", 1, 3.0, 6.0, 1.0, 0), ("R2", 1, 11.0, 9.0, 0.8, 0)];
+    let m2 = board(14.0, 12.0, &pads, &kept, &[], &dang);
+    let factors = FactorConfig { weight: [("dangling_turn".to_string(), 4.0)].into_iter().collect(), ..FactorConfig::default() };
+    let ahead = route_with(&m2, &Options { dangling_lead_mm: 1.5, dangling_lead_choice: true, factors, ..Options::default() }, &RunControl::new());
+    assert_eq!(ahead.routed, 1, "{}", summary(&ahead));
+    let (l2, a2) = shape(&ahead);
+    eprintln!("T3 ahead: lead {l2:.3} mm, turn {a2:.1} deg, {:?}", tracks(&ahead.items));
+    assert!(l2 > 1.5 - 0.02, "a lead towards the target keeps its length: {l2:.3} mm, {:?}", tracks(&ahead.items));
+}
+
+/// tw4 T3, the drawing at a start point short of the lead's end (`dangling_lead_choice` on,
+/// `dangling_turn` 4, lead 1.5 mm from the hand end (8, 6) along +x):
+/// * R2 on B.Cu at (8.3, 9.5): the plan changes layer at the start; the lead's via end (r4,
+///   where a via fits on the lead, here its end (9.5, 6)) lies past the chosen start, so it is
+///   not used: no via there and no lead drawn to it (the drawing places the via on the plan's
+///   stretch). Mutant: the via end taken anyway.
+/// * R2 on F.Cu at (6, 7.2), behind the end: the run from the hand end goes on from the hand
+///   track (octi `lead_in`), so its first leg never runs back along it (no new F.Cu track on
+///   the hand track's line y = 6 west of the end). Mutant: no lead direction at a start point.
+#[test]
+fn a_start_short_of_the_lead_end_draws_no_via_past_it_and_no_fold_back() {
+    use topor_engine::topo::factors::FactorConfig;
+    let kept = [("t1", 1, 0, 3.0, 6.0, 8.0, 6.0, 0.25)];
+    let dang = [("t1", 1, 0, 0.25, 8.0, 6.0, 1.0, 0.0)];
+    let run = |r2: (f64, f64), layer: u32| {
+        let pads = [("R1", 1, 3.0, 6.0, 1.0, 0), ("R2", 1, r2.0, r2.1, 0.8, layer)];
+        let m = board(14.0, 12.0, &pads, &kept, &[], &dang);
+        let factors = FactorConfig { weight: [("dangling_turn".to_string(), 4.0)].into_iter().collect(), ..FactorConfig::default() };
+        route_with(&m, &Options { dangling_lead_mm: 1.5, dangling_lead_choice: true, factors, ..Options::default() }, &RunControl::new())
+    };
+    let r = run((8.3, 9.5), 2);
+    let vias: Vec<(f64, f64)> = r.items.iter().filter_map(|i| if let Item::Via(v) = i { Some((v.at.x as f64 / MM, v.at.y as f64 / MM)) } else { None }).collect();
+    eprintln!("T3 via: vias {vias:?} tracks {:?}", tracks(&r.items));
+    assert_eq!(r.routed, 1, "{}", summary(&r));
+    assert!(r.violations.is_empty(), "{}", summary(&r));
+    assert!(!vias.iter().any(|&v| d(v, (9.5, 6.0)) < 0.05), "no via at the lead's end past the chosen start: {vias:?}");
+    assert!(!tracks(&r.items).iter().any(|t| t.0 == 0 && (d(t.1, (9.5, 6.0)) < 1e-3 || d(t.2, (9.5, 6.0)) < 1e-3)), "no lead drawn to (9.5, 6): {:?}", tracks(&r.items));
+    let r = run((6.0, 7.2), 0);
+    let ts = tracks(&r.items);
+    eprintln!("T3 fold: tracks {ts:?}");
+    assert_eq!(r.routed, 1, "{}", summary(&r));
+    let back = ts.iter().any(|t| t.0 == 0 && (t.1 .1 - 6.0).abs() < 1e-3 && (t.2 .1 - 6.0).abs() < 1e-3 && t.1 .0.min(t.2 .0) < 8.0 - 1e-3 && (d(t.1, (8.0, 6.0)) < 1e-3 || d(t.2, (8.0, 6.0)) < 1e-3));
+    assert!(!back, "a new track runs back along the hand track from its end: {ts:?}");
+}

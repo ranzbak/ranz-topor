@@ -177,6 +177,8 @@ class Pattern:
     closed: list[dict] = field(default_factory=list)  # other ways across the barrier and what they cost
     extra: dict = field(default_factory=dict)  # neck, wrong-model readings, norm notes
     views: list[list[str]] = field(default_factory=lambda: [["F.Cu", "B.Cu"]])
+    # existing copper on the problem board too (a hand-started track: tw4 T3); the reference keeps it
+    kept_tracks: list[Track] = field(default_factory=list)
 
     @property
     def solvable(self) -> bool:
@@ -523,6 +525,72 @@ def exit_tip_from_plan() -> Pattern:
                                     "leaves the pad through), not from the straight line to the target"}})
 
 
+def dangling_lead_away() -> Pattern:
+    """tw4 T3. A hand-started track whose end points past its target: the lead that continues it (dangling_lead_mm)
+    is a plan choice (dangling_lead_choice); the start on the lead that costs least (the lead's length plus the
+    graded dangling_turn price of the turn after it) wins, so the lead is shortened."""
+    W, H = 14.0, 12.0
+    end, lead = (8.0, 6.0), 1.5
+    r2 = (8.3, 9.5)
+    turn_w, ws = 4.0, W_SIG + CLEAR  # [factors] weight dangling_turn, the price unit width + clearance
+    r1 = Fp("R1", [Pad("1", "SIG", (3.0, 6.0), (1.0, 1.0))], "terminal")
+    t2 = Fp("R2", [Pad("1", "SIG", r2, (0.8, 0.8))], "terminal")
+    hand = Track("SIG", "F.Cu", W_SIG, [(3.0, 6.0), end])
+    ref = [end, r2]
+    rows = []
+    for k, t in enumerate((0.0, lead / 3, 2 * lead / 3, lead)):
+        p = (end[0] + t, end[1])
+        dx, dy = r2[0] - p[0], r2[1] - p[1]
+        a = math.degrees(math.atan2(dy, dx))  # off +x (the hand track's direction), KiCad frame
+        price = turn_w * ws * (1 - math.cos(math.radians(a)))
+        rows.append({"start": ["hand end", "1/3", "2/3", "lead end"][k], "t": _r(t), "at": [_r(p[0]), _r(p[1])],
+                     "turn_deg": round(a, 2), "length_from_start": _r(math.hypot(dx, dy)), "turn_price": _r(price),
+                     "total": _r(math.hypot(dx, dy) + price)})
+    # the search's cost of each start: length from it + dangling_turn there (the lead up to it is free, as today's)
+    hand_rows = {"hand end": (85.10, 5.1591), "1/3": (93.27, 5.4084), "2/3": (101.31, 5.7223), "lead end": (108.92, 6.0838)}
+    for r in rows:
+        ha, ht = hand_rows[r["start"]]
+        assert abs(r["turn_deg"] - ha) < 0.01 and abs(r["total"] - ht) < 1e-3, (r, ha, ht)
+    best = min(rows, key=lambda r: r["total"])
+    assert best["start"] == "hand end"
+    return Pattern(
+        name="dangling_lead_away", title="Hand-started track pointing past its target: shorten the lead",
+        kind="solvable", gap_classes=["dangling lead length as a plan choice (tw4 T3, DANGLE-TURN D2)"],
+        purpose="A hand-started F.Cu track (SIG, 0.25 mm) from R1.1 (3, 6) ends at nothing at (8, 6), heading +x. "
+                "Its other terminal R2.1 lies 3.5 mm below, 0.3 mm past the end. Options: [search] dangling_ends = "
+                "\"continue\" (default), dangling_lead_mm = 1.5, dangling_lead_choice = true, [factors] weight "
+                "dangling_turn = 4. B.Cu is a rule area.",
+        answer=("SIG continues the hand track from its end (8, 6) without a lead (shortened from 1.5 mm to none) and "
+                "leaves it 85.1 deg off its direction (at most 90 deg), straight to R2.1. Cost of each start (length "
+                "from it + dangling_turn 4 x 0.45 x (1 - cos a) there; the lead up to it is free, as today's): "
+                "hand end 5.16, 1/3 5.41, 2/3 5.72, lead end 6.08. Without the choice (today) the trace runs the "
+                "full 1.5 mm lead to (9.5, 6) and turns 108.9 deg back to R2.1 (drawn: down, then back)."),
+        why=("Solvable by construction: nothing but the two pads and the hand track; the reference is the straight "
+             "track from the hand end to R2.1. The lead's start points are its hand end and 1/3, 2/3 of it besides "
+             "its end; from every point the straight line to R2.1 is free, so the costs above are the plan's."),
+        size=(W, H), layers=2, nets=["SIG"], fps=[r1, t2],
+        connections=[("SIG", "R1.1", "R2.1")], cuts=[],
+        keepouts=[Keepout(["B.Cu"], _strip(W, 0.0, H))],
+        ref_tracks=[Track("SIG", "F.Cu", W_SIG, ref)],
+        witness={"SIG": ("F.Cu", ref)},
+        closed=[{"way": "on B.Cu", "capacity": 0.0, "formula": "rule area on B.Cu (tracks, vias) over the board"}],
+        kept_tracks=[hand],
+        extra={"dangling_lead": {
+            "hand_end": list(end), "direction": [1.0, 0.0], "lead_mm": lead, "starts": rows,
+            "expected_start": best["start"], "expected_lead_mm": best["t"], "expected_turn_deg": best["turn_deg"],
+            "today": {"lead_mm": lead, "turn_deg": rows[-1]["turn_deg"]},
+            "options": {"search.dangling_ends": "continue", "search.dangling_lead_mm": lead,
+                        "search.dangling_lead_choice": True, "factors.weight.dangling_turn": turn_w},
+            "rule": "tw4 T3: the lead's length in [0, lead] is a plan choice priced by the length from its end and "
+                    "the graded dangling_turn there (1 - cos a, no cutoff); TopoR 6.3 manual p. 56 (exits), Maley "
+                    "1987 p. 29 (features are segments).",
+            "weight_0_note": "with dangling_turn at its default 0 the length alone decides: 1/3 (3.506 mm) beats the "
+                             "hand end (3.513 mm) and the turn there is 93.3 deg; the pattern names weight 4",
+            "problem_drc_note": "the hand track is dangling: KiCad's DRC reports a track_dangling warning on the "
+                                "problem board; 1 unconnected (R2.1)",
+            "detail_box": [6.5, 4.5, 10.5, 10.3]}})
+
+
 def model_gap_cut() -> Pattern:
     """4. Maley's non-adjacent cut: every edge of the triangulation has room, the cut across the opening does not."""
     W, H, Yr = 14.3, 16.0, 8.0
@@ -760,6 +828,9 @@ def diagonal_cut_norm() -> Pattern:
 
 PATTERNS = {f.__name__: f for f in (channel_fit, channel_overfull, neck_fit, neck_too_narrow, model_gap_cut,
                                      inner_layer_room, diagonal_cut_norm, neck_or_detour, exit_tip_from_plan)}
+# Proposed for the user's approval (patterns rule): generated with the rest, not in the test suite (tests use PATTERNS)
+# until approved; their expected answers are provisional.
+PROPOSED = {f.__name__: f for f in (dangling_lead_away,)}
 
 
 # ----------------------------------------------------------------------------------------------- expected values
@@ -956,6 +1027,15 @@ def build_board(pat: Pattern, *, copper: bool) -> pcbnew.BOARD:
         ol.SetClosed(True)
         z.AddPolygon(ol)
         b.Add(z)
+    for t in pat.kept_tracks:
+        for a, c in zip(t.pts, t.pts[1:]):
+            tr = pcbnew.PCB_TRACK(b)
+            tr.SetStart(_v(*a))
+            tr.SetEnd(_v(*c))
+            tr.SetWidth(int(round(t.width * MM)))
+            tr.SetLayer(LAYER_IDS[t.layer])
+            tr.SetNet(nets[t.net])
+            b.Add(tr)
     if copper:
         for t in pat.ref_tracks:
             for a, c in zip(t.pts, t.pts[1:]):
@@ -991,7 +1071,7 @@ def write_board(pat: Pattern, path: Path, *, copper: bool) -> Path:
 
 def generate(name: str, out: Path, *, png: bool = True) -> dict:
     """Write one pattern under out/<name>/: problem/, reference/ (solvable), expected.json, <name>.png."""
-    pat = PATTERNS[name]()
+    pat = {**PATTERNS, **PROPOSED}[name]()
     d = Path(out) / name
     d.mkdir(parents=True, exist_ok=True)
     paths = {"problem": write_board(pat, d / "problem" / f"{name}.kicad_pcb", copper=False)}
@@ -1039,6 +1119,11 @@ def readme(out: Path) -> Path:
         lines += [f"## {i}. `{name}`: {pat.title}", "",
                   f"{pat.purpose} **Gap class:** {'; '.join(pat.gap_classes)}. **Expected:** {pat.answer} "
                   f"**Why {pat.kind}:** {pat.why}", "", f"![{name}]({name}/{name}.png)", ""]
+    for name, f in PROPOSED.items():
+        pat = f()
+        lines += [f"## Proposed (awaiting approval): `{name}`: {pat.title}", "",
+                  f"{pat.purpose} **Expected (provisional):** {pat.answer} **Why {pat.kind}:** {pat.why}", "",
+                  f"![{name}]({name}/{name}.png)", ""]
     lines += [
         "## Notes for the review", "",
         "- **Changes to the proposed set.** (a) Case 6 asked for a 45 deg cut; at exactly 45 deg the octagonal and "
@@ -1073,7 +1158,7 @@ def readme(out: Path) -> Path:
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     out = Path(argv[0]) if argv else Path(__file__).resolve().parents[1] / "scratch" / "fit-patterns"
-    for name in PATTERNS:
+    for name in [*PATTERNS, *PROPOSED]:
         paths = generate(name, out)
         print(name, *(str(p) for p in paths.values()))
     print(readme(out))
