@@ -568,6 +568,11 @@ pub struct Frame<'a> {
     /// and via-to-via cuts of wire `w`'s planned vias (weight 1 in both capacity models; the undo
     /// log and a lane's overlay cover it like an edge-layer). `vbase` = edges x layers.
     pub(crate) vbase: usize,
+    /// tw4 T2 cost cut (loop-local judge, [`CapModel::new_only_focus`]): only the wires `w` with
+    /// `vfocus[w]` own priced via terms and have their vias swept for room in the build; the
+    /// others' via terms are 0 and their vias stay where [`Frame::default_ks`] puts them, in both
+    /// states of a judgement alike. `None` (every other model): all wires.
+    pub(crate) vfocus: Option<Vec<bool>>,
     /// CM1: the gap cuts of a via with their crossers per (triangle, net, point bits): the static
     /// part from the packer's run-wide cache ([`Packer::via_static_of`]), the crossers from the
     /// state, fixed for the model's life. A memo (a pure function of its key), so the order lanes
@@ -834,7 +839,7 @@ impl<'a> Frame<'a> {
         let margins = (0..st.passes.len() * margin_slots(nl)).map(|_| std::sync::atomic::AtomicU64::new(MARGIN_UNSET)).collect();
         let vbase = pr.edges.len() * nl;
         let nstar = (0..st.wires.len()).map(|_| std::sync::OnceLock::new()).collect();
-        Frame { st, packer, dirs, nl, price, bottom, pass_k, item0, wire_d, margins, vbase, vgeo: std::sync::Mutex::new(crate::fxhash::map()), nstar }
+        Frame { st, packer, dirs, nl, price, bottom, pass_k, item0, wire_d, margins, vbase, vfocus: None, vgeo: std::sync::Mutex::new(crate::fxhash::map()), nstar }
     }
 
     /// The price of one over-full edge-layer (mm).
@@ -1110,6 +1115,9 @@ impl<'a> Frame<'a> {
     pub(crate) fn via_over<M: MemRead + ?Sized>(&self, m: &M, w: WireId) -> viacut::Over {
         let mut tot = viacut::Over::default();
         let Some(norm) = self.packer.via_cuts else { return tot };
+        if self.vfocus.as_ref().is_some_and(|f| !f.get(w).copied().unwrap_or(false)) {
+            return tot;
+        }
         let st = self.st;
         let wi = &st.wires[w];
         let d = self.wire_d[w];
@@ -1436,7 +1444,7 @@ impl<'a> CapModel<'a> {
     /// The model of the labelling `evl` (events per wire). O(passes x margin lookups + vias x
     /// interval length x layers).
     pub fn new(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64) -> Self {
-        Self::build(st, packer, dirs, evl, bottom, price, false, None)
+        Self::build(st, packer, dirs, evl, bottom, price, false, None, None)
     }
 
     /// loop-local: the per-edge model of the wires `only[w]` alone (the other wires' passes are
@@ -1444,18 +1452,26 @@ impl<'a> CapModel<'a> {
     /// `dirs` needs only their directions ([`Packer::taut_dirs_only`]). O(their passes x margin
     /// lookups + their vias x interval x layers) plus O(passes) for the arrays.
     pub fn new_only(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64, only: &[bool]) -> Self {
-        Self::build(st, packer, dirs, evl, bottom, price, false, Some(only))
+        Self::build(st, packer, dirs, evl, bottom, price, false, Some(only), None)
+    }
+
+    /// [`CapModel::new_only`] with the via-cut focus `focus` ([`Frame::vfocus`]; tw4 T2: the
+    /// local judge's wires whose via terms a move can change). Without `[capacity] via_cuts` the
+    /// same as `new_only`. O(as new_only).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_only_focus(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64, only: &[bool], focus: &[bool]) -> Self {
+        Self::build(st, packer, dirs, evl, bottom, price, false, Some(only), packer.via_cuts.map(|_| focus))
     }
 
     /// As [`CapModel::new`], priced by the per-layer cuts when `[capacity] model = "cuts"`
     /// ([`Packer::cuts`]; the P3 refinement). A sheet build that fails is recorded in
     /// [`super::cutmodel::CutCtx::problems`] and the model stays per-edge.
     pub fn new_cut(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64) -> Self {
-        Self::build(st, packer, dirs, evl, bottom, price, true, None)
+        Self::build(st, packer, dirs, evl, bottom, price, true, None, None)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn build(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64, cuts: bool, only: Option<&[bool]>) -> Self {
+    fn build(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64, cuts: bool, only: Option<&[bool]>, focus: Option<&[bool]>) -> Self {
         let tb = std::time::Instant::now();
         let used = |w: WireId| only.is_none_or(|o| o.get(w).copied().unwrap_or(false));
         let nl = st.proj.n_layers;
@@ -1472,7 +1488,9 @@ impl<'a> CapModel<'a> {
             log: None,
             vpts: vec![Vec::new(); nw],
         };
-        let mut m = CapModel { fx: Frame::new(st, packer, dirs, bottom, price, only), a, cut: None, evs: Vec::new(), pending: Vec::new() };
+        let mut fx = Frame::new(st, packer, dirs, bottom, price, only);
+        fx.vfocus = focus.map(|f| f.to_vec());
+        let mut m = CapModel { fx, a, cut: None, evs: Vec::new(), pending: Vec::new() };
         if let Some(ctx) = packer.cuts.as_ref().filter(|_| cuts) {
             match ctx.sheets(st) {
                 Ok(sh) => {
@@ -1507,7 +1525,8 @@ impl<'a> CapModel<'a> {
             ms.flush(fx);
         }
         for (w, ev) in evl.iter().enumerate().take(nw) {
-            if st.wires[w].alive && used(w) && !m.via_iv[w].is_empty() {
+            let swept = m.fx.vfocus.as_ref().is_none_or(|f| f.get(w).copied().unwrap_or(false));
+            if st.wires[w].alive && used(w) && swept && !m.via_iv[w].is_empty() {
                 let all: Vec<usize> = (0..m.via_iv[w].len()).collect();
                 let (fx, mut ms) = m.master();
                 fx.optimise(&mut ms, w, ev, &all);

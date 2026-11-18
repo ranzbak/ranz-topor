@@ -959,8 +959,10 @@ pub fn neighbourhood(st: &State, free: &[bool]) -> Vec<bool> {
 /// the vertex star of that change's traversals (its via's interval: the other participants of
 /// its terms). Wires without a layer change own no via, so their second star is left out (the
 /// two-star rule of ae57e35f, 2.4x the model wires on esp). O(free wires' triangles x star sizes
-/// x traversals + layer changes there x their intervals' stars).
-pub fn via_neighbourhood(st: &State, free: &[bool], events: &[Vec<(usize, f64, i32)>]) -> Vec<bool> {
+/// x traversals + layer changes there x their intervals' stars). Returns `(model wires, focus)`:
+/// focus = the free wires and the traversers of S (the only wires that can own a via term a free
+/// wire enters; [`super::refine::CapModel::new_only_focus`]).
+pub fn via_neighbourhood(st: &State, free: &[bool], events: &[Vec<(usize, f64, i32)>]) -> (Vec<bool>, Vec<bool>) {
     let pr = st.proj;
     let mut out = vec![false; st.wires.len()];
     let star = |ts: &mut dyn Iterator<Item = usize>| -> Vec<usize> {
@@ -986,6 +988,10 @@ pub fn via_neighbourhood(st: &State, free: &[bool], events: &[Vec<(usize, f64, i
     }
     iv.sort_unstable();
     iv.dedup();
+    let mut focus = out.clone();
+    for (w, f) in focus.iter_mut().enumerate() {
+        *f |= st.wires[w].alive && free.get(w).copied().unwrap_or(false);
+    }
     for t in star(&mut iv.into_iter()) {
         for &(w, _) in &st.tri_trav[t] {
             if st.wires[w].alive {
@@ -993,7 +999,7 @@ pub fn via_neighbourhood(st: &State, free: &[bool], events: &[Vec<(usize, f64, i
             }
         }
     }
-    out
+    (out, focus)
 }
 
 /// The free wires' part of a local layering ([`assign_local`]), before it is merged with the

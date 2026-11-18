@@ -3801,8 +3801,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let mut w_after = layers::neighbourhood(st, &free);
             // tw4 T2: with the via cuts, every wire their changed terms involve (both states).
             let or = |a: &mut Vec<bool>, b: Vec<bool>| a.iter_mut().zip(b).for_each(|(x, y)| *x |= y);
+            let mut vfocus: Vec<bool> = Vec::new();
             if opts.via_cuts {
-                or(&mut w_after, layers::via_neighbourhood(st, &free, &lr.events));
+                let (m, f) = layers::via_neighbourhood(st, &free, &lr.events);
+                or(&mut w_after, m);
+                vfocus = f;
             }
             let after = st.take_topology();
             st.restore(saved.clone());
@@ -3810,13 +3813,22 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let free_b: Vec<bool> = (0..nb).map(|w| free.get(w).copied().unwrap_or(false) || gone.contains(&w)).collect();
             let mut w_before = layers::neighbourhood(st, &free_b);
             if opts.via_cuts {
-                or(&mut w_before, layers::via_neighbourhood(st, &free_b, &prev.events));
+                let (m, f) = layers::via_neighbourhood(st, &free_b, &prev.events);
+                or(&mut w_before, m);
+                // One focus for both states (the union), so a term is priced on both sides or on none.
+                vfocus.resize(vfocus.len().max(f.len()), false);
+                or(&mut vfocus, f);
             }
             let wm: Vec<bool> = (0..nw.max(nb)).map(|w| w_after.get(w).copied().unwrap_or(false) || w_before.get(w).copied().unwrap_or(false)).collect();
             let cap_of = |st: &State, evl: &[Vec<(usize, f64, i32)>], only: &[bool]| -> (usize, f64) {
                 let only = &only[..st.wires.len().min(only.len())];
                 let dirs = packer.taut_dirs_only(st, only);
-                CapModel::new_only(st, &packer, &dirs, evl, bottom, overflow_mm, only).violations()
+                if opts.via_cuts {
+                    let fo: Vec<bool> = (0..st.wires.len()).map(|w| vfocus.get(w).copied().unwrap_or(false)).collect();
+                    CapModel::new_only_focus(st, &packer, &dirs, evl, bottom, overflow_mm, only, &fo).violations()
+                } else {
+                    CapModel::new_only(st, &packer, &dirs, evl, bottom, overflow_mm, only).violations()
+                }
             };
             let cap_b = cap_of(st, &prev.events, &wm);
             let nd_b = if neck_k > 0.0 { st.neck_depth(Some(&wm)) } else { 0.0 };
