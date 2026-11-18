@@ -18,7 +18,25 @@ W=scratch/boards/wiccon-2023/2d3063e70ed5/2023.kicad_pcb
 E=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
 Q=scratch/boards/qmtech-hand/qmtech-minimig.kicad_pcb
 B=scratch/boards/bornhack2026/21c5f478f1af/bornhack2026-hardware.kicad_pcb
-board_path() { case $1 in eprom) echo $P;; wiccon) echo $W;; esp) echo $E;; qmtech) echo $Q;; bornhack) echo $B;; esac; }
+board_path() { case $1 in eprom) echo $P;; wiccon) echo $W;; esp) echo $E;; qmtech) echo $Q;; bornhack) echo $B;; p-*) echo $R/pat/${1#p-}/problem/${1#p-}.kicad_pcb;; esac; }
+VIA="via_pair_redundant via_pair_slide via_force_relocate branch_point_relocate branch_point_into_pad via_size_rule"
+gen() {  # the synthetic patterns (fit all, via approved 6, radii all) into $R/pat, as looplocal_job.sh
+  [ -d $R/pat ] && return
+  mkdir -p $R/pat
+  PYTHONPATH=$ROOT:$ROOT/plugin python - "$R/pat" $VIA > $R/gen.log 2>&1 <<'PY'
+import sys
+from pathlib import Path
+from harness import fit_patterns, via_patterns, radii_patterns
+out = Path(sys.argv[1])
+for n in fit_patterns.PATTERNS:
+    fit_patterns.generate(n, out, png=False)
+for n in sys.argv[2:]:
+    via_patterns.generate(n, out, png=False, drc=False)
+for n in radii_patterns.PATTERNS:
+    radii_patterns.generate(n, out, png=False, drc=False)
+PY
+  note "gen rc $? patterns: $(ls $R/pat | tr '\n' ' ')"
+}
 OLD=(--set 'optimize.oscillation="cooling"' --set 'optimize.escape="ties"' --set 'optimize.escape_take="not_worse"'
      --set optimize.relay_count_fade=1.0 --set optimize.loop_history=false --set optimize.float_wire=false --set optimize.preloop_p4=true)
 part() {  # the OLD settings with part $1 at its TW5 value
@@ -50,6 +68,7 @@ one() {
   env RAYON_NUM_THREADS=$th TOPO_TIMES=1 tools/route_board.sh "$(board_path $b)" $out --clock cpu --timeout 2400 --no-png "${SETS[@]}" \
     > $R/$c-$b.log 2>&1 9>&-
   note "run $c $b th $th rc $? wall $(( $(date +%s) - t0 )) s"
+  rm -rf $out/work $out/*/work 2>/dev/null
 }
 lane() { for x in "$@"; do one "$x"; done; }
 u() {  # name threads "lane1 runs" "lane2 runs" ...
@@ -75,6 +94,17 @@ case ${1:-} in
     u q 4 "Or1:qmtech" "Nr1:qmtech" "Nr16:qmtech:2"
     u e 4 "Or1:esp Or1:wiccon Or1:eprom" "Nr1:esp Nr1:wiccon Nr1:eprom" "Nr16:esp" "Nr16:wiccon Nr16:eprom"
     ( hzq run --threads 2 --name tw5-tests -- bash $ROOT/tools/tw5_job.sh tests > $R/tests.log 2>&1; note "tests unit rc $?" ) & sleep 1
+    wait; note "all done" ;;
+  r2)
+    # Round 2: O vs N at 16 cycles on the ladder (esp 5 seeds), the patterns O vs N at 16 cycles, targeted tests.
+    gen
+    ( hzq run --threads 2 --name tw5-tests -- bash $ROOT/tools/tw5_job.sh tests > $R/tests.log 2>&1; note "tests unit rc $?" ) & sleep 1
+    u q 4 "Or16:qmtech:2" "Nr16:qmtech:2"
+    u e 5 "Or16:esp Or16s1:esp" "Nr16:esp Nr16s1:esp" "Or16s2:esp Or16s3:esp Or16s4:esp" "Nr16s2:esp Nr16s3:esp Nr16s4:esp" \
+          "Or16:wiccon Nr16:wiccon Or16:eprom Nr16:eprom"
+    pats=$(ls $R/pat); po=""; pn=""
+    for n in $pats; do po+="Or16:p-$n "; pn+="Nr16:p-$n "; done
+    u p 2 "$po" "$pn"
     wait; note "all done" ;;
   *) echo "usage: see header" ;;
 esac

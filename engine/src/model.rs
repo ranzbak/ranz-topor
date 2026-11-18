@@ -1167,7 +1167,10 @@ pub struct Options {
     pub escape_walk: usize,
     pub escape_share: f64,
     /// Work units of a global layering per alive wire against a re-lay's units per wire its local
-    /// judge layers (calibrated from a TW0 profile; deterministic, never the clock).
+    /// judge layers (deterministic, never the clock). 0.07 = the time of one whole-board layering
+    /// escape per alive wire against the time of a re-lay per wire its local judge lays, measured on
+    /// eprom 0.062, wiccon 0.069, qmtech 0.069, esp 0.123 (tw5r1, 1 thread, ccx43; a re-lay's path
+    /// search dominates its time, so a global layering is cheap per wire).
     pub escape_kappa: f64,
     /// TW5 `[optimize] escape_take`: `"always"` (default) = the whole-board moves (layering
     /// escape, floating up, crossing passes) are taken as they come, the variant table keeps the
@@ -1617,7 +1620,7 @@ impl Default for Options {
             escape: "layering".into(),
             escape_walk: 4,
             escape_share: 0.35,
-            escape_kappa: 1.0,
+            escape_kappa: 0.07,
             escape_take: "always".into(),
             relay_count_fade: 0.8,
             loop_history: true,

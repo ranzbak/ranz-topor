@@ -424,6 +424,14 @@ fn loop_opts(extra: &str) -> Options {
     Options::from_json(&serde_json::Value::Object(o).to_string()).unwrap()
 }
 
+/// The TW5 escape report line ("TopoR loop escapes (TW5): ...").
+fn escape_line(m: &BoardModel, o: &Options) -> String {
+    let ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let r = route_with(m, o, &ctl);
+    r.warnings.iter().find(|w| w.starts_with("TopoR loop escapes")).unwrap_or_else(|| panic!("escape line: {:?}", r.warnings)).clone()
+}
+
 /// The loop judge's report line: (whole-board layerings per cycle, local layerings per cycle, the
 /// line).
 fn judge_line(m: &BoardModel, o: &Options) -> (f64, f64, String) {
@@ -449,8 +457,17 @@ fn local_judge_layers_the_board_a_few_times_per_cycle() {
         pads.push(("F3", 6, 26.0, 4.0, 1.0, 1.0, 0));
         let m = board_layers(30.0, 20.0, 8, &pads, n_layers);
         let (g, gl, lg) = judge_line(&m, &loop_opts(r#""loop_judge": "global""#));
-        let (l, ll, ln) = judge_line(&m, &loop_opts(r#""loop_judge": "local""#));
+        // The per-cycle layer pass of the old loop (escape = "ties"): a few whole-board layerings per cycle.
+        let (l, ll, ln) = judge_line(&m, &loop_opts(r#""loop_judge": "local", "escape": "ties""#));
         assert!(l <= 4.0, "{n_layers} layers, local: {ln}");
+        // TW5 (b): the layering escapes run inside the sweep, as many as the work-unit throttle allows
+        // ([optimize] escape_share 0.35 of the work), so more whole-board layerings, within the share.
+        let (le, _, lne) = judge_line(&m, &loop_opts(r#""loop_judge": "local""#));
+        let esc = escape_line(&m, &loop_opts(r#""loop_judge": "local""#));
+        let share: f64 = esc.split("work share of the escapes ").nth(1).and_then(|t| t.split(' ').next()).and_then(|t| t.parse().ok())
+            .unwrap_or_else(|| panic!("share in {esc}"));
+        assert!(share <= 35.0 + 1e-6, "{n_layers} layers, escape share {share} % > 35 %: {esc}");
+        assert!(le > 0.0 && esc.contains("escapes ("), "{n_layers} layers, escapes: {lne} / {esc}");
         assert!(ll > 0.0, "{n_layers} layers, local re-lays: {ln}");
         assert!(gl == 0.0 && g > l, "{n_layers} layers, global: {lg} vs local {ln}");
         assert!(lg.contains("loop_judge = \"global\"") && ln.contains("loop_judge = \"local\""));

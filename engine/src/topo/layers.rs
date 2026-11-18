@@ -406,8 +406,10 @@ impl DomainGraph {
     /// the graph that does not reach node 0 (no SMD pad, no one-layer triangle fixes it) is
     /// flipped as a whole with probability 1/2: every stretch of its wires on the other layer, the
     /// vias the same (Polubasov 2001 p. 4: only the parity along a wire counts). Then `tries`
-    /// cluster moves: a random domain, grown across the edges that carry no via under `o`, each
-    /// taken with probability 1/2 (node 0 never), is flipped when that adds no via (the cut value
+    /// cluster moves: a random domain, grown across the edges that carry no via under `o` with
+    /// probability 1/2 each and across the via edges with 1/4 (node 0 never; any other optimum
+    /// differs from `o` by connected parts with change 0 each, so every optimum stays reachable),
+    /// is flipped when that adds no via (the cut value
     /// of its boundary does not rise: the vias move to other stretches of the same wires, or fall
     /// when `o` was no optimum). The cut value never rises, so an optimum stays an optimum.
     /// Returns the domains flipped (a domain may count more than once). Deterministic per `seed`.
@@ -423,7 +425,7 @@ impl DomainGraph {
         let mut part = vec![usize::MAX; n];
         let mut free_nodes: Vec<usize> = Vec::new();
         for s in 1..n {
-            if part[s] != usize::MAX || self.adj[s].is_empty() {
+            if part[s] != usize::MAX {
                 continue;
             }
             let mut stack = vec![s];
@@ -464,7 +466,12 @@ impl DomainGraph {
                 let x = s[i];
                 i += 1;
                 for (&u, &w) in &self.adj[x] {
-                    if u != 0 && !in_s[u] && cost(o, x, u, w, false) == 0.0 && rng.gen_range(0..2u8) == 1 {
+                    // A satisfied edge joins with probability 1/2, a via edge with 1/4: a via inside the
+                    // cluster stays a via, so it does not help the flip, but without it the other optima
+                    // whose difference holds a via inside are out of reach (any optimum differs from `o` by
+                    // connected parts with change 0 each).
+                    let p4 = if cost(o, x, u, w, false) == 0.0 { 2 } else { 1 };
+                    if u != 0 && !in_s[u] && rng.gen_range(0..4u8) < p4 {
                         in_s[u] = true;
                         s.push(u);
                     }
@@ -1656,89 +1663,116 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
             }
         }
     }
-    // 2./3. Alpha-beta swaps.
+    // 2./3. Alpha-beta swaps. `solve_pair` re-solves the events labelled a or b exactly (the
+    // others fixed); with `walk` > 0 the result is moved by the plateau walk (TW5 b) to a random
+    // labelling of the same cost.
+    let solve_pair = |lab: &[u8], a: usize, b: usize, walk: usize, wseed: u64| -> (Vec<u8>, f64) {
+        let ab = (1u64 << a) | (1u64 << b);
+        let active = |e: usize| lab[e] as usize == a || lab[e] as usize == b;
+        let mut g_nodes = 1usize;
+        // node, pi per active event
+        let mut np: Vec<Option<(usize, u8)>> = vec![None; ev.len()];
+        let mut dom: BTreeMap<usize, usize> = BTreeMap::new();
+        for e in 0..ev.len() {
+            if !active(e) {
+                continue;
+            }
+            let ra = ev[e].mask & ab;
+            let to_pi = |l: usize| (l == b) as u8;
+            np[e] = Some(if ra.count_ones() == 1 {
+                (0, to_pi(ra.trailing_zeros() as usize))
+            } else {
+                match ev[e].partner.filter(|&q| active(q)) {
+                    Some(q) => {
+                        let rp = ev[q].mask & ab;
+                        if rp.count_ones() == 1 {
+                            let f = rp.trailing_zeros() as usize;
+                            (0, to_pi(if f == a { b } else { a }))
+                        } else {
+                            let key = e.min(q);
+                            let next = g_nodes;
+                            let d = *dom.entry(key).or_insert(next);
+                            if d == next {
+                                g_nodes += 1;
+                            }
+                            (d, (e > q) as u8)
+                        }
+                    }
+                    None => {
+                        g_nodes += 1;
+                        (g_nodes - 1, 0)
+                    }
+                }
+            });
+        }
+        let mut g = DomainGraph::new(g_nodes);
+        let tv = costs.trans(a, b);
+        // Plane surcharge: a free event costs `u(b) - u(a)` more on b than on a.
+        for (e, slot) in np.iter().enumerate() {
+            if let Some((nd, pi)) = *slot {
+                let d = costs.unary(e, b) - costs.unary(e, a);
+                if nd != 0 && d != 0.0 {
+                    // label b iff o[nd] ^ pi = 1.
+                    g.add_term(nd, 0, if pi == 0 { d } else { -d });
+                    if pi == 1 {
+                        g.k += d;
+                    }
+                }
+            }
+        }
+        for list in &wev {
+            for x in list.windows(2) {
+                if let (Some((n0, p0)), Some((n1, p1))) = (np[x[0]], np[x[1]]) {
+                    g.add_edge(n0, n1, if p0 == p1 { tv } else { -tv });
+                }
+            }
+        }
+        let g0 = (walk > 0).then(|| g.clone());
+        let mut o = g.solve_ties(p.exact_max, p.restarts, p.seed, if p.ties == 0 { 0 } else { p.ties ^ ((a as u64) << 8 | b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) });
+        if let Some(g0) = g0 {
+            g0.plateau_walk(&mut o, walk.saturating_mul(g_nodes), wseed);
+        }
+        let mut cand = lab.to_vec();
+        for e in 0..ev.len() {
+            if let Some((nd, pi)) = np[e] {
+                cand[e] = if (o[nd] ^ pi) == 0 { a as u8 } else { b as u8 };
+            }
+        }
+        let c = n_cost(&wev, &ev, &cand, &costs);
+        (cand, c)
+    };
+    let escape = p.walk > 0 && p.ties != 0 && held.is_none();
     let mut best = n_cost(&wev, &ev, &lab, &costs);
     for _round in 0..20 {
         let mut improved = false;
         for a in 0..nl {
             for b in a + 1..nl {
-                let ab = (1u64 << a) | (1u64 << b);
-                let active = |e: usize| lab[e] as usize == a || lab[e] as usize == b;
-                let mut g_nodes = 1usize;
-                // node, pi per active event
-                let mut np: Vec<Option<(usize, u8)>> = vec![None; ev.len()];
-                let mut dom: BTreeMap<usize, usize> = BTreeMap::new();
-                for e in 0..ev.len() {
-                    if !active(e) {
-                        continue;
-                    }
-                    let ra = ev[e].mask & ab;
-                    let to_pi = |l: usize| (l == b) as u8;
-                    np[e] = Some(if ra.count_ones() == 1 {
-                        (0, to_pi(ra.trailing_zeros() as usize))
-                    } else {
-                        match ev[e].partner.filter(|&q| active(q)) {
-                            Some(q) => {
-                                let rp = ev[q].mask & ab;
-                                if rp.count_ones() == 1 {
-                                    let f = rp.trailing_zeros() as usize;
-                                    (0, to_pi(if f == a { b } else { a }))
-                                } else {
-                                    let key = e.min(q);
-                                    let next = g_nodes;
-                                    let d = *dom.entry(key).or_insert(next);
-                                    if d == next {
-                                        g_nodes += 1;
-                                    }
-                                    (d, (e > q) as u8)
-                                }
-                            }
-                            None => {
-                                g_nodes += 1;
-                                (g_nodes - 1, 0)
-                            }
-                        }
-                    });
-                }
-                let mut g = DomainGraph::new(g_nodes);
-                let tv = costs.trans(a, b);
-                // Plane surcharge: a free event costs `u(b) - u(a)` more on b than on a.
-                for (e, slot) in np.iter().enumerate() {
-                    if let Some((nd, pi)) = *slot {
-                        let d = costs.unary(e, b) - costs.unary(e, a);
-                        if nd != 0 && d != 0.0 {
-                            // label b iff o[nd] ^ pi = 1.
-                            g.add_term(nd, 0, if pi == 0 { d } else { -d });
-                            if pi == 1 {
-                                g.k += d;
-                            }
-                        }
-                    }
-                }
-                for list in &wev {
-                    for x in list.windows(2) {
-                        if let (Some((n0, p0)), Some((n1, p1))) = (np[x[0]], np[x[1]]) {
-                            g.add_edge(n0, n1, if p0 == p1 { tv } else { -tv });
-                        }
-                    }
-                }
-                let o = g.solve_ties(p.exact_max, p.restarts, p.seed, if p.ties == 0 { 0 } else { p.ties ^ ((a as u64) << 8 | b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) });
-                let mut cand = lab.clone();
-                for e in 0..ev.len() {
-                    if let Some((nd, pi)) = np[e] {
-                        cand[e] = if (o[nd] ^ pi) == 0 { a as u8 } else { b as u8 };
-                    }
-                }
-                let c = n_cost(&wev, &ev, &cand, &costs);
+                let (cand, c) = solve_pair(&lab, a, b, 0, 0);
                 if c < best - EPS {
                     best = c;
                     lab = cand;
                     improved = true;
+                } else if escape && c <= best + EPS && cand != lab {
+                    // TW5 (Appendix F 7): an equal-cost swap is taken too (random among equals).
+                    lab = cand;
                 }
             }
         }
         if !improved {
             break;
+        }
+    }
+    // TW5 (b) the layering escape on N layers: one random pair of layers (any two, not only
+    // neighbours) re-solved and moved by the plateau walk to a random labelling of the same cost.
+    if escape && nl >= 2 {
+        let mut rng = ChaCha8Rng::seed_from_u64(p.ties ^ 0x9A12_5EED);
+        let a = rng.gen_range(0..nl);
+        let b = (a + 1 + rng.gen_range(0..nl - 1)) % nl;
+        let (a, b) = (a.min(b), a.max(b));
+        let (cand, c) = solve_pair(&lab, a, b, p.walk, p.ties);
+        if c <= best + EPS {
+            rep.walked = cand.iter().zip(&lab).filter(|(x, y)| x != y).count();
+            lab = cand;
         }
     }
     // Capacity-aware refinement of the labelling.

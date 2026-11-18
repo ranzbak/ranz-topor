@@ -210,10 +210,13 @@ mod tests {
         for &(share, kappa, alive) in &[(0.35, 2.0, 40usize), (0.5, 1.0, 7), (0.1, 5.0, 300)] {
             let mut t = Throttle::new(share, kappa, alive);
             assert!(!t.due(), "the first escape waits for re-lay work");
+            // Re-lay steps small against one escape's work (kappa x alive), as on a board: a step
+            // larger than the whole budget can only overshoot, the share then falls below the target.
+            let step = 1 + (kappa * alive as f64 / 4.0) as u64;
             let mut s = 1u64;
             for _ in 0..20_000 {
                 s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                t.add(((s >> 33) % 50) as f64);
+                t.add(((s >> 33) % step) as f64);
                 if t.due() {
                     t.ran(alive);
                 }

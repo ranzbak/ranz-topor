@@ -306,7 +306,7 @@ SETTINGS: list[Setting] = [
        range=(0, 1000), engine="escape_walk"),
     _s("optimize", "escape_share", "float", 0.35, "Topological core, escape = \"layering\": the largest share of the loop's work the layering escapes may take (at most 0.5: an escape never comes sooner than its own last duration, TopoR). Counted in work units, never the clock, so the result does not depend on the machine or its load.",
        range=(0.01, 0.5), engine="escape_share"),
-    _s("optimize", "escape_kappa", "float", 1.0, "Topological core, escape = \"layering\" (tuning): the work units of one whole-board layering per trace, against a reroute's units per trace it lays out again (set from a profile; deterministic).",
+    _s("optimize", "escape_kappa", "float", 0.07, "Topological core, escape = \"layering\" (tuning): the work units of one whole-board layering per trace, against a reroute's units per trace it lays out again (deterministic, never the clock; 0.07 measured: a reroute's path search makes it about 14 times dearer per trace than a layering).",
        range=(0.0, 1000.0), engine="escape_kappa"),
     _s("optimize", "escape_take", "str", "always", "Topological core, loop = \"topor\" (TW5): the whole-board moves (layering escape, floating up, crossing passes). \"always\" (default) = taken as they come; the variant table keeps the best variants, so a worse state is a step on the way, never the result. \"not_worse\" = each is undone when the board's evaluation rises (before TW5).",
        choices=["always", "not_worse"], engine="escape_take"),
