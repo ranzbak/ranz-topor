@@ -6,6 +6,7 @@ OUT=${1:?out dir}; shift
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 W=${T3_MUT_TREE:-$OUT/tree}; mkdir -p "$OUT" "$W"
 rsync -a --delete --exclude target "$ROOT/engine/" "$W/engine/"
+cp "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" "$W/"   # the workspace root (else cargo finds the repo's)
 export CARGO_TARGET_DIR=${T3_MUT_TARGET:-$OUT/target}
 TESTS="--test topo_exist_term"
 declare -A F P R
@@ -33,7 +34,8 @@ PY
   touch "$f"
   ( cd "$W/engine" && cargo test --release $TESTS --lib -- a_lead_offers a_lead_that_points a_start_short > "$OUT/mut-$m.log" 2>&1 )
   rc=$?
-  echo "mutant $m rc $rc ($( [ $rc -ne 0 ] && echo killed || echo SURVIVED )): $(grep -E '^test .* FAILED|panicked' "$OUT/mut-$m.log" | head -3 | tr '\n' ' ')" >> "$OUT/mutants.txt"
+  grep -q "^test result" "$OUT/mut-$m.log" || rc="build-failed($rc)"
+  echo "mutant $m rc $rc ($( [ "$rc" = 0 ] && echo SURVIVED || echo killed )): $(grep -E '^test .* FAILED|panicked' "$OUT/mut-$m.log" | head -3 | tr '\n' ' ')" >> "$OUT/mutants.txt"
   mv "$f.orig" "$f"; touch "$f"
 done
 echo "all done" >> "$OUT/mutants.txt"

@@ -23,9 +23,12 @@ one() {
   local SETS=(--set 'drawing.realise="erbs"' --set optimize.runs=1) ENVS=() only=0 cc=$c CLK=()
   # suffix v: [capacity] via_cuts = true (tw4 T2), with TOPO_VIACHECK (stored vs fresh via prices)
   # suffix n: [factors] neck_depth = 1000 (tw4 T1, the violation weight); suffixes combine (vn)
+  # suffix c: [search] dangling_lead_choice = true (tw4 T3); suffix d: [factors] dangling_turn = 4 (not with n)
   while :; do
     if [ "${c%v}" != "$c" ]; then SETS+=(--set capacity.via_cuts=true); ENVS+=(TOPO_VIACHECK=1); c=${c%v}
     elif [ "${c%n}" != "$c" ]; then SETS+=(--set 'factors.weight={"neck_depth": 1000}'); c=${c%n}
+    elif [ "${c%c}" != "$c" ]; then SETS+=(--set search.dangling_lead_choice=true); c=${c%c}
+    elif [ "${c%d}" != "$c" ]; then SETS+=(--set 'factors.weight={"dangling_turn": 4}'); c=${c%d}
     else break; fi
   done
   case $c in
@@ -104,6 +107,46 @@ case ${1:-} in
     u t1-s 4 "JK:esp JK:wiccon JK:eprom" "JKn:esp JKn:wiccon JKn:eprom" "r16s0:wiccon r16s0n:wiccon" "r16s1n:esp"
     u t1-e 4 "r16s0:esp r16s2n:esp" "r16s0n:esp"
     wait; note "all done" ;;
+  t3)
+    # TW4 T3 ([search] dangling_lead_choice): off = today's copper (JK 4 boards vs tw4t2d); on (c) on the 4 boards
+    # (no kept copper there: score_runs strips the board) and on the private badge with its copper kept (route_board
+    # --keep-copper, rounds=1): off / c / cd (dangling_turn 4); the proposed pattern dangling_lead_away: boards, PNG,
+    # KiCad DRC of both boards, and its problem board routed off / cd (plugin flow, PNG)
+    for n in off c cd; do
+      ( hzq run --threads 2 --name t3-badge-$n -- bash tools/tw4_job.sh badge $n > $R/badge-$n.log 2>&1; note "badge $n rc $?" ) & sleep 1
+    done
+    u t3-q 4 "JK:qmtech:2" "JKc:qmtech:2"
+    u t3-s 2 "JK:esp JK:wiccon JK:eprom" "JKc:esp JKc:wiccon JKc:eprom"
+    ( hzq run --threads 1 --name t3-pat -- bash tools/tw4_job.sh pattern > $R/pattern.log 2>&1; note "pattern rc $?" ) & sleep 1
+    wait; note "all done" ;;
+  badge)
+    # one private-badge run (copper kept, rounds=1): off | c (dangling_lead_choice) | cd (c + dangling_turn 4)
+    BADGE=$(ls scratch/boards/xt-badge/*.kicad_pcb | head -1)
+    A=(--keep-copper --no-png --set optimize.rounds=1)
+    case $2 in
+      off) ;;
+      c) A+=(--set search.dangling_lead_choice=true) ;;
+      cd) A+=(--set search.dangling_lead_choice=true --set 'factors.weight={"dangling_turn": 4}') ;;
+    esac
+    tools/route_board.sh "$BADGE" $R/badge/$2 "${A[@]}" > $R/badge-$2.txt 2>&1 9>&- ;;
+  pattern)
+    P=$R/patterns
+    python -c "
+from pathlib import Path
+from harness import fit_patterns as fp
+from harness.drc import run_drc
+for k, v in fp.generate('dangling_lead_away', Path('$P')).items(): print(k, v)
+d = Path('$P/dangling_lead_away')
+for kind in ('problem', 'reference'):
+    pb = d / kind / 'dangling_lead_away.kicad_pcb'
+    r = run_drc(pb, pb.with_name('drc.json'))
+    print(kind, 'DRC violations', [(getattr(v, 'type', ''), v.description) for v in r.violations], 'unconnected', len(r.unconnected))
+"
+    PB=$P/dangling_lead_away/problem/dangling_lead_away.kicad_pcb
+    tools/route_board.sh $PB $P/routed-cd --keep-copper --set optimize.rounds=1 --set search.dangling_lead_mm=1.5 \
+      --set search.dangling_lead_choice=true --set 'factors.weight={"dangling_turn": 4}' > $P/routed-cd.txt 2>&1; echo "routed cd rc $?"
+    tools/route_board.sh $PB $P/routed-off15 --keep-copper --set optimize.rounds=1 --set search.dangling_lead_mm=1.5 \
+      --set 'factors.weight={"dangling_turn": 4}' > $P/routed-off15.txt 2>&1; echo "routed off15 rc $?" ;;
   hooks)
     # TW4 unit 1 (meter hooks): targeted tests, then rounds=1 copper (must equal the tw4b base) + the new compass items
     ( cd engine && cargo test --release --test topo_compass --test topo_exits 9>&- > $R/cargo.log 2>&1; note "cargo rc $?" )
