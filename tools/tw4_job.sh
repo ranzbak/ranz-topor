@@ -20,7 +20,7 @@ board_path() { case $1 in eprom) echo eprom-to-kernal;; wiccon) echo wiccon-2023
 one() {
   local c=${1%%:*} rest=${1#*:}; local b=${rest%%:*} th=1
   [ "$rest" != "$b" ] && th=${rest#*:}
-  local SETS=(--set 'drawing.realise="erbs"' --set optimize.runs=1) ENVS=() only=0 cc=$c
+  local SETS=(--set 'drawing.realise="erbs"' --set optimize.runs=1) ENVS=() only=0 cc=$c CLK=()
   # suffix v: [capacity] via_cuts = true (tw4 T2), with TOPO_VIACHECK (stored vs fresh via prices)
   # suffix n: [factors] neck_depth = 1000 (tw4 T1, the violation weight); suffixes combine (vn)
   while :; do
@@ -33,6 +33,8 @@ one() {
     JF) SETS+=(--set optimize.rounds=1 --set optimize.allow_violations=false) ;;
     JPK) SETS+=(--set optimize.rounds=1 --set search.pad_exit_stubs=true); ENVS+=(TOPO_ERBS_DEBUG=1) ;;
     JPF) SETS+=(--set optimize.rounds=1 --set search.pad_exit_stubs=true --set optimize.allow_violations=false) ;;
+    e*) only=${c#e}   # equal time: wall 300 s, the loop runs until its time share (no round cap, no stable stop)
+        SETS+=(--set optimize.rounds=1000 --set optimize.stable_patience=1000); CLK=(--clock wall --timeout 300) ;;
     r*s*) local n=${c#r}; n=${n%%s*}; only=${c##*s}
           SETS+=(--set optimize.rounds=$n --set optimize.stable_patience=$n) ;;
     *) note "unknown cfg $c"; return ;;
@@ -41,7 +43,7 @@ one() {
   local bt=$b; [ "$th" -ge 4 ] && [ "$c" != "${c#J}" ] && bt=$b-t$th   # J* runs at 4+ threads: own dir (thread check)
   local o=$R/$c/$bt; mkdir -p $o
   local t0=$(date +%s)
-  env "${ENVS[@]}" python -m harness.score_runs $o "$(board_path $b)" --only $only --no-png --threads $th "${SETS[@]}" \
+  env "${ENVS[@]}" python -m harness.score_runs $o "$(board_path $b)" --only $only --no-png --threads $th "${CLK[@]}" "${SETS[@]}" \
     > $R/$c-$bt.log 2>&1 9>&-
   note "run $c $bt th $th rc $? wall $(( $(date +%s) - t0 )) s"
   rm -rf $o/*/s*/work 2>/dev/null
@@ -85,7 +87,19 @@ case ${1:-} in
       ( cd engine && cargo test --release --test topo_cm1_room via_prices 9>&- > $R/mutant.log 2>&1; note "mutant (expect != 0) rc $?" )
     else note "mutant not applied"; fi
     cp $R/refine.rs.orig engine/src/topo/refine.rs
+    # mutant 2: the memo forgets the moved partner via (pair terms of other owners go stale)
+    sed -i 's/meets(\&relaid, \&g.deps) || meets(mtris, \&g.tris)/meets(\&relaid, \&g.deps)/' engine/src/topo/refine.rs
+    if ! grep -q "meets(mtris" engine/src/topo/refine.rs; then
+      ( cd engine && cargo test --release --test topo_cm1_room via_prices 9>&- > $R/mutant2.log 2>&1; note "mutant2 (expect != 0) rc $?" )
+    else note "mutant2 not applied"; fi
+    cp $R/refine.rs.orig engine/src/topo/refine.rs
     note "all done" ;;
+  eq)
+    # TW4 T2 at equal time (lead 2026-11-18): via_cuts off vs on, wall 300 s, 4 threads, esp s0-s4 + qmtech s0
+    u eq-1 16 "e0:esp:4" "e0v:esp:4" "e1:esp:4" "e1v:esp:4"
+    u eq-2 16 "e2:esp:4" "e2v:esp:4" "e3:esp:4" "e3v:esp:4"
+    u eq-3 16 "e4:esp:4" "e4v:esp:4" "e0:qmtech:4" "e0v:qmtech:4"
+    wait; note "all done" ;;
   t1)
     # TW4 T1 part 1 ([factors] neck_depth): targeted tests; off = main copper (JK 4 boards, r16s0 esp vs tw4t2b);
     # A/B neck_depth 1000 per connection: JK 4 boards, r16 esp s0-s2, r16 qmtech, r16 wiccon

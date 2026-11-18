@@ -594,6 +594,11 @@ struct NStar {
 /// CM1: a planned via's point and its triangle (`None`: no point, the wire has no via size).
 pub(crate) type ViaPt = Option<(usize, Vec2)>;
 
+/// CM1: a wire whose via points an apply changed, with the triangles of its old and new via
+/// points (ascending): the via-to-via terms of other owners whose neighbourhood holds one of them
+/// change ([`Frame::reprice_vias`]).
+pub(crate) type Moved = Option<(WireId, Vec<usize>)>;
+
 /// The labelling-dependent arrays of a [`CapModel`] (its "master" in the parallel refinement:
 /// the lanes read it, only the run thread writes it, between the lanes' epochs).
 pub struct Arrays {
@@ -946,7 +951,7 @@ impl<'a> Frame<'a> {
     /// Set the pass layers and via discs of `w` for via traversals `ks` (no pricing); appends the
     /// passes whose layer or disc changed, with their layer and disc before, to `changed`.
     /// O(passes of the wire).
-    fn apply<M: Mem + ?Sized>(&self, m: &mut M, w: WireId, ev: &[LEv], ks: &[usize], changed: &mut Vec<Changed>) -> Option<WireId> {
+    fn apply<M: Mem + ?Sized>(&self, m: &mut M, w: WireId, ev: &[LEv], ks: &[usize], changed: &mut Vec<Changed>) -> Moved {
         let wi = &self.st.wires[w];
         let n = wi.passes.len();
         let d = self.wire_d[w];
@@ -979,7 +984,7 @@ impl<'a> Frame<'a> {
         };
         m.set_nosite(w, ns);
         m.set_via_k(w, ks);
-        let mut moved = false;
+        let mut moved: Moved = None;
         if self.packer.via_cuts.is_some() && d > 0.0 {
             let pts: Vec<ViaPt> = ks
                 .iter()
@@ -995,15 +1000,18 @@ impl<'a> Frame<'a> {
                     Some((t, self.packer.via_point_cached(t, wi.net, d, wi.s)))
                 })
                 .collect();
-            moved = m.vpts(w) != pts.as_slice();
-            if moved {
+            if m.vpts(w) != pts.as_slice() {
+                let mut tris: Vec<usize> = m.vpts(w).iter().chain(pts.iter()).flatten().map(|x| x.0).collect();
+                tris.sort_unstable();
+                tris.dedup();
+                moved = Some((w, tris));
                 m.set_vpts(w, &pts);
             }
         }
         m.applied(w, ev);
         // CM1: `w` when its via points changed (its via prices must be repriced even when no pass
         // of it changed layer, e.g. an end site that moved or a wire without passes).
-        moved.then_some(w)
+        moved
     }
 
     /// Price again the edge-layers of the passes `changed`; returns the change of the total.
@@ -1012,7 +1020,7 @@ impl<'a> Frame<'a> {
     /// whose items are the same would price the same, log nothing and add nothing to the
     /// change, so leaving it out is exact (par-refine §3). Edges ascending, layers ascending, as
     /// before. O(changed passes x layers x passes of an edge).
-    fn reprice<M: Mem + ?Sized>(&self, m: &mut M, changed: &[Changed], moved: Option<WireId>) -> f64 {
+    fn reprice<M: Mem + ?Sized>(&self, m: &mut M, changed: &[Changed], moved: Moved) -> f64 {
         let nl = self.nl;
         let mut es = LAY_SCRATCH.with(|sc| std::mem::take(&mut sc.borrow_mut().es));
         es.clear();
@@ -1065,13 +1073,25 @@ impl<'a> Frame<'a> {
     /// their triangles (a gap cut's crossers, a via-to-via partner and a pair's crossers all lie
     /// in the via triangle's vertex star, and that relation is symmetric). Returns the change of
     /// the total (weight 1). O(owners x their vias x cuts x crossers).
-    fn reprice_vias<M: Mem + ?Sized>(&self, m: &mut M, changed: &[Changed], moved: Option<WireId>) -> f64 {
+    ///
+    /// tw4 T2 memo (exact): an owner's stored price is a function of its via points, the layers of
+    /// the passes its terms read ([`ViaGeom::deps`]) and the partner vias in its neighbourhoods; an
+    /// owner is priced again only when its own via points moved, a pass of its `deps` changed layer,
+    /// or the moved wire's old or new via triangle lies in one of its neighbourhoods. The others
+    /// keep their price (it would come out the same; `TOPO_VIACHECK` checks it).
+    fn reprice_vias<M: Mem + ?Sized>(&self, m: &mut M, changed: &[Changed], moved: Moved) -> f64 {
         if self.packer.via_cuts.is_none() || (changed.is_empty() && moved.is_none()) {
             return 0.0;
         }
+        let Some(norm) = self.packer.via_cuts else { return 0.0 };
         let t0 = std::time::Instant::now();
         let st = self.st;
-        let mut ws: Vec<WireId> = changed.iter().map(|&(p, _, _)| st.passes[p].wire).chain(moved).collect();
+        let mut relaid: Vec<usize> = changed.iter().filter(|&&(p, ol, _)| m.layer(p) != ol).map(|&(p, _, _)| p).collect();
+        relaid.sort_unstable();
+        relaid.dedup();
+        let mover = moved.as_ref().map(|x| x.0);
+        let mtris: &[usize] = moved.as_ref().map_or(&[], |x| x.1.as_slice());
+        let mut ws: Vec<WireId> = changed.iter().map(|&(p, _, _)| st.passes[p].wire).chain(mover).collect();
         ws.sort_unstable();
         ws.dedup();
         let mut owners: Vec<WireId> = Vec::new();
@@ -1082,8 +1102,22 @@ impl<'a> Frame<'a> {
         }
         owners.sort_unstable();
         owners.dedup();
+        let meets = |a: &[usize], b: &[usize]| {
+            let (s, l) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+            s.iter().any(|x| l.binary_search(x).is_ok())
+        };
         let mut delta = 0.0;
         for u in owners {
+            if Some(u) != mover {
+                let net = st.wires[u].net;
+                let hit = m.vpts(u).iter().flatten().any(|&(t, p)| {
+                    let g = self.geo(t, net, p, norm);
+                    meets(&relaid, &g.deps) || meets(mtris, &g.tris)
+                });
+                if !hit {
+                    continue;
+                }
+            }
             let i = self.vbase + u;
             let c = self.price * self.via_over(&*m, u).graded;
             let (oc, _) = m.cost(i);

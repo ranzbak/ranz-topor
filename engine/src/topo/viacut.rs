@@ -70,6 +70,10 @@ pub struct ViaGeom {
     pub tris: Vec<TriId>,
     /// The wires of `chords`, distinct, ascending (the via-to-via partner candidates).
     pub wires: Vec<WireId>,
+    /// tw4 T2 memo: the passes whose layers the via's terms read (per chord `(w, k)` the passes
+    /// `k - 1` and `k` of `w`, the `on` rule of [`over`] and [`pair_over`]), ascending. The terms
+    /// change only when one of these changes layer or a partner via moves in `tris`.
+    pub deps: Vec<usize>,
 }
 
 /// The over-full amount of a via's gap cuts: per layer the worst `(need - len, pitch)`.
@@ -210,7 +214,7 @@ pub fn via_static(pr: &Projection, packer: &Packer, t: TriId, net: i32, at: Vec2
         }
         cuts.extend(mine);
     }
-    ViaGeom { at, cuts, chords: Vec::new(), reach, tris, wires: Vec::new() }
+    ViaGeom { at, cuts, chords: Vec::new(), reach, tris, wires: Vec::new(), deps: Vec::new() }
 }
 
 /// The gap cuts of `s` ([`via_static`] of a via of `net`) with their crossers under the state
@@ -252,7 +256,16 @@ pub fn with_crossers(st: &State, packer: &Packer, s: &ViaGeom, net: i32) -> ViaG
     wires.dedup();
     wires.sort_unstable();
     wires.dedup();
-    ViaGeom { at: s.at, cuts, chords, reach: s.reach, tris: s.tris.clone(), wires }
+    let mut deps: Vec<usize> = chords
+        .iter()
+        .flat_map(|&(w, k, _, _)| {
+            let ps = &st.wires[w].passes;
+            [k.checked_sub(1), Some(k)].into_iter().flatten().filter(|&j| j < ps.len()).map(|j| ps[j]).collect::<Vec<_>>()
+        })
+        .collect();
+    deps.sort_unstable();
+    deps.dedup();
+    ViaGeom { at: s.at, cuts, chords, reach: s.reach, tris: s.tris.clone(), wires, deps }
 }
 
 /// The gap cuts of a via of `net` at `at` in triangle `t` with their crossers ([`via_static`] +
@@ -365,7 +378,7 @@ mod tests {
             via_t: 0.4,
             cross: vec![(7, 3, 0.8)],
         };
-        (ViaGeom { at: v(0.0, 0.4 * MM), cuts: vec![cut], chords: Vec::new(), reach: 3.0 * MM, tris: Vec::new(), wires: Vec::new() }, Item { net: 1, w: 0.8 * MM, s: 0.2 * MM })
+        (ViaGeom { at: v(0.0, 0.4 * MM), cuts: vec![cut], chords: Vec::new(), reach: 3.0 * MM, tris: Vec::new(), wires: Vec::new(), deps: Vec::new() }, Item { net: 1, w: 0.8 * MM, s: 0.2 * MM })
     }
 
     fn rst(_: WireId, _: usize) -> Item {
@@ -424,7 +437,7 @@ mod tests {
     fn a_wire_between_two_planned_vias_needs_their_gap() {
         let via = Item { net: 2, w: 0.8 * MM, s: 0.2 * MM };
         let sda = |_: WireId, _: usize| Item { net: 1, w: 0.25 * MM, s: 0.2 * MM };
-        let g = ViaGeom { at: v(0.0, 0.0), cuts: Vec::new(), chords: vec![(5, 2, v(0.68 * MM, -MM), v(0.68 * MM, 1.0 * MM))], reach: 5.0 * MM, tris: Vec::new(), wires: vec![5] };
+        let g = ViaGeom { at: v(0.0, 0.0), cuts: Vec::new(), chords: vec![(5, 2, v(0.68 * MM, -MM), v(0.68 * MM, 1.0 * MM))], reach: 5.0 * MM, tris: Vec::new(), wires: vec![5], deps: Vec::new() };
         let on = |_: WireId, _: usize| Some(0usize);
         let f = pair_over(&g, via, v(1.36 * MM, 0.0), via, Norm::Euclid, &on, &sda).expect("over-full");
         assert!((f - (1.0 + 0.09 / 0.45)).abs() < 1e-9, "{f}");
