@@ -3651,8 +3651,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let f = lr.fin_cap.filter(|_| opts.measure_reuse && !cuts_on)?;
             (f.packer == &packer as *const Packer as usize && f.bottom == bottom && f.price == overflow_mm.to_bits() && f.key == super::refine::cap_key(st, &lr.events)).then_some(f.viol)
         };
+        // tw4 T1 (`[factors] neck_depth`): the neck-depth part of the measure, as a share of the
+        // violation weight (graded only: price = viol_mm x graded).
+        let neck_k = if viol_mm > 0.0 { reg.weight("neck_depth").unwrap_or(0.0).max(0.0) / viol_mm } else { 0.0 };
         let measure = |st: &State, lr: &layers::LayerReport| -> Predicted {
-            let pred = |viol: (usize, f64)| Predicted::of(viol, lr.unlayerable.len(), forced.borrow().len()).with_foreign(foreign_copper(st, &layers_now(st, &lr.events, bottom))).shorts_ranked(opts.pick_shorts, opts.short_weight);
+            let neck = if neck_k > 0.0 { neck_k * st.neck_depth(None) } else { 0.0 };
+            let pred = |viol: (usize, f64)| Predicted::of(viol, lr.unlayerable.len(), forced.borrow().len()).with_foreign(foreign_copper(st, &layers_now(st, &lr.events, bottom))).with_neck(neck).shorts_ranked(opts.pick_shorts, opts.short_weight);
             if let Some(v) = reused(st, lr) {
                 return pred(v);
             }
@@ -3815,9 +3819,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 CapModel::new_only(st, &packer, &dirs, evl, bottom, overflow_mm, only).violations()
             };
             let cap_b = cap_of(st, &prev.events, &wm);
+            let nd_b = if neck_k > 0.0 { st.neck_depth(Some(&wm)) } else { 0.0 };
             let fc_b = foreign_copper_only(st, &layers_now_only(st, &prev.events, bottom, Some(&free_b)), Some(&free_b));
             st.restore(after);
             let cap_a = cap_of(st, &lr.events, &wm);
+            let nd_a = if neck_k > 0.0 { st.neck_depth(Some(&wm)) } else { 0.0 };
             let fc_a = foreign_copper_only(st, &layers_now_only(st, &lr.events, bottom, Some(&free)), Some(&free));
             LoopCtr::add(&lctr.local_free, free.iter().filter(|&&f| f).count());
             LoopCtr::add(&lctr.local_model, wm.iter().filter(|&&f| f).count());
@@ -3828,6 +3834,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 unlayerable: lr.unlayerable.len(),
                 forced: forced.borrow().len(),
                 foreign: (du(pp.foreign.0, fc_a.0, fc_b.0), (pp.foreign.1 + fc_a.1 - fc_b.1).max(0.0), du(pp.foreign.2, fc_a.2, fc_b.2)),
+                neck: if neck_k > 0.0 { (pp.neck + neck_k * (nd_a - nd_b)).max(0.0) } else { 0.0 },
             };
             let p = Predicted::from_parts(parts, opts.pick_shorts, opts.short_weight);
             if local_check {
