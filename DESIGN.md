@@ -1,3 +1,5 @@
+> Branch design notes live in docs/dev/design/<branch>.md (one file per branch). loop-local (TopoR-loop re-lays priced locally, one global layering per cycle): [docs/dev/design/loop-local.md](docs/dev/design/loop-local.md).
+
 # DESIGN: ERBS by funnel (radii-m3, M3 step c rebuild, 2026-11-14)
 
 Status: already implemented (erbs.rs, commits c60428f..1399b7a); this note is sent after the fact (rule came mid-round).

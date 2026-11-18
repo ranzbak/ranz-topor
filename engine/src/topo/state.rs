@@ -559,6 +559,13 @@ pub struct Topology {
     pass_w: Vec<f64>,
 }
 
+impl Topology {
+    /// The wires of this topology (loop-local: which wires a move changed).
+    pub fn wires(&self) -> &[Wire] {
+        &self.wires
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct State<'p> {
     pub proj: &'p Projection,
@@ -651,9 +658,23 @@ impl<'p> State<'p> {
         Topology { passes: self.passes.clone(), edge_order: self.edge_order.clone(), wires: self.wires.clone(), tri_trav: self.tri_trav.clone(), ends: self.ends.clone(), pass_w: self.pass_w.clone() }
     }
 
+    /// The [`Topology`] moved out (no copy; loop-local: the state now while the state before is
+    /// read), leaving an empty state that only [`State::restore`] may follow. O(1).
+    pub fn take_topology(&mut self) -> Topology {
+        Topology {
+            passes: std::mem::take(&mut self.passes),
+            edge_order: std::mem::take(&mut self.edge_order),
+            wires: std::mem::take(&mut self.wires),
+            tri_trav: std::mem::take(&mut self.tri_trav),
+            ends: std::mem::take(&mut self.ends),
+            pass_w: std::mem::take(&mut self.pass_w),
+        }
+    }
+
     /// Put a [`Topology`] of the same projection back (the wires, their passes in edge order).
     pub fn restore(&mut self, t: Topology) {
-        assert_eq!(t.edge_order.len(), self.edge_order.len(), "a topology of the same projection");
+        // A state emptied by `take_topology` has no edges to compare with.
+        assert!(self.edge_order.is_empty() || t.edge_order.len() == self.edge_order.len(), "a topology of the same projection");
         (self.passes, self.edge_order, self.wires, self.tri_trav, self.ends, self.pass_w) = (t.passes, t.edge_order, t.wires, t.tri_trav, t.ends, t.pass_w);
     }
 

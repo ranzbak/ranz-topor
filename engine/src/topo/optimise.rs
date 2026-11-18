@@ -41,7 +41,7 @@
 
 use super::archive::{Archive, Criteria, Objective, Variant};
 use super::schedule::{Meter, Schedule, Score};
-use super::state::{State, WireId};
+use super::state::{State, Topology, WireId};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -154,6 +154,25 @@ pub struct CycleStats {
     /// Kept moves whose stretch was longer than the `[vias] pair_max_mm` scale (its graded price
     /// grows with the square of the length over that scale; warned).
     pub pair_moved_long: usize,
+    /// loop-local (deterministic work counters): whole-board layerings and whole-board measures
+    /// (capacity model builds) in the cycle, local layerings, and over them the free wires and the
+    /// wires of the local capacity models (before + after).
+    pub layer_global: usize,
+    pub measure_global: usize,
+    pub layer_local: usize,
+    pub local_free: usize,
+    pub local_model: usize,
+    /// `[optimize] loop_shadow`: the re-lays also judged by the whole board, how many the two
+    /// judges kept alike, the sum of |local - global| change of the graded violations and of the
+    /// vias, and how many differed in the unlayerable crossings.
+    pub shadow_n: usize,
+    pub shadow_agree: usize,
+    pub shadow_err_graded: f64,
+    pub shadow_err_vias: usize,
+    pub shadow_unl_diff: usize,
+    /// The shadow's sum of |graded violations of the whole-board layering - of the present one|
+    /// of the state before each sampled move (the offset the global judge would charge).
+    pub shadow_base_graded: f64,
 }
 
 impl CycleStats {
@@ -176,6 +195,17 @@ impl CycleStats {
         self.pair_moved_kept += o.pair_moved_kept;
         self.pair_moved_wires += o.pair_moved_wires;
         self.pair_moved_long += o.pair_moved_long;
+        self.layer_global += o.layer_global;
+        self.measure_global += o.measure_global;
+        self.layer_local += o.layer_local;
+        self.local_free += o.local_free;
+        self.local_model += o.local_model;
+        self.shadow_n += o.shadow_n;
+        self.shadow_agree += o.shadow_agree;
+        self.shadow_err_graded += o.shadow_err_graded;
+        self.shadow_err_vias += o.shadow_err_vias;
+        self.shadow_unl_diff += o.shadow_unl_diff;
+        self.shadow_base_graded += o.shadow_base_graded;
     }
 }
 
@@ -344,7 +374,7 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
         }
         on_pick(cycle, &arch.items[arch.pick(&obj).expect("scored")].crit, rep.stable_at.is_some());
         rep.lines.push(format!(
-            "{cycle}: amp {:.3}, reroutes {}/{}, via-rose {}/{}, layerings {}/{}, floating up {}, crossing passes {}, undone {}, {}{}, best {:.1}{}",
+            "{cycle}: amp {:.3}, reroutes {}/{}, via-rose {}/{}, layerings {}/{}, floating up {}, crossing passes {}, undone {}, judge {}g/{}m/{}l, {}{}, best {:.1}{}",
             ctx.amp,
             cs.kept,
             cs.tried,
@@ -355,6 +385,9 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
             cs.float_kept,
             cs.cross_kept,
             cs.undone,
+            cs.layer_global,
+            cs.measure_global,
+            cs.layer_local,
             if kept { "archived" } else { "not archived" },
             rep.restarts.last().filter(|r| r.0 == cycle).map(|r| format!(" (restart from {})", r.1)).unwrap_or_default(),
             v,
@@ -378,7 +411,7 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
 /// Polubasov 2010 («Пространство решений»): the evaluation of a whole topology uses "only the
 /// factors obvious to the designer ... with constant coefficients"; the violations are the first
 /// of them, so their weight here never oscillates.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Predicted {
     pub count: usize,
     pub graded: f64,
@@ -395,6 +428,27 @@ pub struct Predicted {
     pub shorts: usize,
     /// `[optimize] short_weight` minus 1 ([`Criteria::short_extra`]); 0 with `pick_shorts` off.
     pub short_extra: f64,
+    /// loop-local: the parts it was made of (the capacity model's `(count, graded)`, the
+    /// unlayerable crossings, the forced connections, the foreign-copper traversals), so a local
+    /// judge can change one part by its local change and make it again ([`Predicted::from_parts`]).
+    pub parts: MeasureParts,
+}
+
+/// The parts of a [`Predicted`] (loop-local).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MeasureParts {
+    pub cap: (usize, f64),
+    pub unlayerable: usize,
+    pub forced: usize,
+    pub foreign: (usize, f64, usize),
+}
+
+/// Equal predictions: the same numbers; how they were made ([`Predicted::parts`]) is not
+/// compared.
+impl PartialEq for Predicted {
+    fn eq(&self, o: &Self) -> bool {
+        (self.count, self.graded, self.shrink_n, self.shrink_mm, self.shorts, self.short_extra) == (o.count, o.graded, o.shrink_n, o.shrink_mm, o.shorts, o.short_extra)
+    }
 }
 
 impl Predicted {
@@ -402,12 +456,20 @@ impl Predicted {
     /// connections. O(1).
     pub fn of(cap: (usize, f64), unlayerable: usize, forced: usize) -> Predicted {
         let n = unlayerable + forced;
-        Predicted { count: cap.0 + n, graded: cap.1 + n as f64, shrink_n: 0, shrink_mm: 0.0, shorts: unlayerable, short_extra: 0.0 }
+        let parts = MeasureParts { cap, unlayerable, forced, foreign: (0, 0.0, 0) };
+        Predicted { count: cap.0 + n, graded: cap.1 + n as f64, shrink_n: 0, shrink_mm: 0.0, shorts: unlayerable, short_extra: 0.0, parts }
+    }
+    /// loop-local: the prediction of `parts` (the per-edge model; no shrinkages), shorts ranked
+    /// as [`Predicted::shorts_ranked`]. Equal to the measure's own prediction of the same parts.
+    /// O(1).
+    pub fn from_parts(parts: MeasureParts, pick_shorts: bool, short_weight: f64) -> Predicted {
+        Predicted::of(parts.cap, parts.unlayerable, parts.forced).with_foreign(parts.foreign).shorts_ranked(pick_shorts, short_weight)
     }
     /// Plus the traversals through foreign copper `(count, graded, shorts)` ([`foreign_copper`]:
     /// the ones through a no-tracks rule area are violations but no shorts). O(1).
     pub fn with_foreign(self, f: (usize, f64, usize)) -> Predicted {
-        Predicted { count: self.count + f.0, graded: self.graded + f.1, shorts: self.shorts + f.2, ..self }
+        let parts = MeasureParts { foreign: (self.parts.foreign.0 + f.0, self.parts.foreign.1 + f.1, self.parts.foreign.2 + f.2), ..self.parts };
+        Predicted { count: self.count + f.0, graded: self.graded + f.1, shorts: self.shorts + f.2, parts, ..self }
     }
     /// The same prediction with the shorts ranked at weight `k` (`[optimize] short_weight`, at
     /// least 1) when `on` (`[optimize] pick_shorts`); off: not ranked (they stay in `count` and
@@ -451,11 +513,17 @@ impl Predicted {
 /// Polubasov 2010 («Многовариантная оптимизация»): "a design-rule violation cannot be compensated
 /// by any reduction of wire length". O(traversals x obstacles per triangle).
 pub fn foreign_copper(st: &State, layers: &[Vec<u64>]) -> (usize, f64, usize) {
+    foreign_copper_only(st, layers, None)
+}
+
+/// [`foreign_copper`] of the wires `only[w]` alone (loop-local; per wire, so the sum over all
+/// wires is the board's). O(their traversals x obstacles per triangle).
+pub fn foreign_copper_only(st: &State, layers: &[Vec<u64>], only: Option<&[bool]>) -> (usize, f64, usize) {
     let pr = st.proj;
     let all = if pr.n_layers >= 64 { u64::MAX } else { (1u64 << pr.n_layers) - 1 };
     let (mut count, mut graded, mut shorts) = (0usize, 0.0f64, 0usize);
     for (w, wi) in st.wires.iter().enumerate() {
-        if !wi.alive || wi.tris.is_empty() {
+        if !wi.alive || wi.tris.is_empty() || only.is_some_and(|o| !o.get(w).copied().unwrap_or(false)) {
             continue;
         }
         let Some(lw) = layers.get(w).filter(|l| l.len() == wi.tris.len()) else { continue };
@@ -519,12 +587,18 @@ pub fn evaluation(obj: &Objective, c: &Criteria, viol_mm: f64) -> f64 {
 /// different layers, the stretch needs a via"); a wire without events lies on `bottom`
 /// ([`super::draw::plan`]). Bit `l` = layer `l`. O(traversals + events).
 pub fn layers_now(st: &State, events: &[Vec<(usize, f64, i32)>], bottom: i32) -> Vec<Vec<u64>> {
+    layers_now_only(st, events, bottom, None)
+}
+
+/// [`layers_now`] of the wires `only[w]`, empty for the others (loop-local). O(their traversals
+/// + events) plus O(wires).
+pub fn layers_now_only(st: &State, events: &[Vec<(usize, f64, i32)>], bottom: i32, only: Option<&[bool]>) -> Vec<Vec<u64>> {
     let bit = |l: i32| 1u64 << l.clamp(0, 63);
     (0..st.wires.len())
         .map(|w| {
             let wi = &st.wires[w];
             let n = wi.tris.len();
-            if !wi.alive || n == 0 {
+            if !wi.alive || n == 0 || only.is_some_and(|o| !o.get(w).copied().unwrap_or(false)) {
                 return Vec::new();
             }
             let ev = events.get(w).map_or(&[][..], |e| &e[..]);
@@ -564,6 +638,12 @@ pub trait Rerouter<'p> {
     fn violations(&mut self, _st: &mut State<'p>, _after: bool) -> f64 {
         0.0
     }
+    /// The violations' price of the state now (as `violations(st, true)`), given the topology
+    /// `saved` before the try, the wires `gone` taken out and `new` laid; a local judge
+    /// (loop-local) reads the state before from `saved` and must leave `st` as it found it.
+    fn violations_after(&mut self, st: &mut State<'p>, _saved: &Topology, _gone: &[WireId], _new: &[WireId]) -> f64 {
+        self.violations(st, true)
+    }
     /// The try was undone (the state is back as before): undo the bookkeeping of `place`.
     fn undo(&mut self);
     /// The try was kept (adopt what `violations(after)` computed for the new state).
@@ -602,7 +682,7 @@ pub fn reroute_set<'p>(st: &mut State<'p>, set: &[WireId], r: &mut dyn Rerouter<
     let (new, viol_new) = match r.place(st, set) {
         Some(ws) => {
             let local: f64 = ws.iter().map(|&w| r.price(st, w)).sum();
-            let v = r.violations(st, true);
+            let v = r.violations_after(st, &saved, set, &ws);
             (local + v, v)
         }
         None => (f64::INFINITY, f64::INFINITY),
