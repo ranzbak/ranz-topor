@@ -8,6 +8,7 @@
 #   tw2_job.sh fpcheck         one hzq unit (4 threads): the fuse pour check tests, clippy, config pytest, mutants fp1-fp5
 #   tw2_job.sh ladder-fp CFG...  ladder CFG... and fpcheck in one job
 #   tw2_job.sh final CFG...    ladder CFG..., tests and fpcheck in one job
+#   tw2_job.sh end CFG...      bornhack J (4 threads, started first), ladder CFG..., tests and fpcheck in one job
 #   tw2_job.sh task CFG BOARD  one run (inside a unit)
 # CFG: D (the tree's defaults; main = sequential, tw2-metric = erbs joint), J (realise erbs), S (realise sequential),
 #      JF / SF (J / S with optimize.allow_violations = false: no never-drop forcing), JD (J + TOPO_ERBS_DEBUG=1: per-run trace).
@@ -108,8 +109,8 @@ fpcheck() {  # the fuse pour check (TW2, qmtech 43 vs 44 forensics)
   sub 'fused_left <= unfused_left' 'fused_left < unfused_left' | mut fp1_fused_ok $F --lib topo::fusepour
   sub '(moves[j].w == moves[i].w || moves[j].onto == moves[i].w)' '(moves[j].onto == moves[i].w)' | mut fp2_dependents $F --lib topo::fusepour
   sub 'let back = dr.restore_wire(&now, wo);' 'let back = { let _ = &now; wo.clone() };' | mut fp3_index $C --test tw2_fuse_pour
-  sub '                    out[ci] = o.clone();
-                    necking.retain' '                    necking.retain' | mut fp4_outcome $C --test tw2_fuse_pour
+  sub '                out[ci] = o.clone();
+                necking.retain' '                necking.retain' | mut fp4_outcome $C --test tw2_fuse_pour
   sub 'let pour_check = opts.fuse_pour_check &&' 'let pour_check = false && opts.fuse_pour_check &&' | mut fp5_off $C --test tw2_fuse_pour
   sub 'moves.push((super::fusepour::Move { w, onto: super::fusepour::NO_WIRE, path }, sv));' 'drop((path, sv));' | mut fp6_polish $C --test tw2_fuse_pour
   note "fpcheck done"
@@ -134,6 +135,9 @@ case ${1:-} in
   fpcheck-in) fpcheck ;;
   flake) hzq run --threads 4 --name tw2-flake -- bash $ROOT/tools/tw2_job.sh flake-in; ( hzq run --threads 4 --name tw2-fpcheck -- bash $ROOT/tools/tw2_job.sh fpcheck-in ); note "all done" ;;
   flake-in) flake ;;
+  end) shift; ( hzq run --threads 4 --name J-bornhack -- bash $ROOT/tools/tw2_job.sh task J bornhack 4 ) & sleep 2
+    ladder "$@"; ( hzq run --threads 4 --name tw2-tests -- bash $ROOT/tools/tw2_job.sh tests-in ) & sleep 1
+    ( hzq run --threads 4 --name tw2-fpcheck -- bash $ROOT/tools/tw2_job.sh fpcheck-in ) & sleep 1; wait; note "all done" ;;
   final) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-tests -- bash $ROOT/tools/tw2_job.sh tests-in ) & sleep 1
     ( hzq run --threads 4 --name tw2-fpcheck -- bash $ROOT/tools/tw2_job.sh fpcheck-in ) & sleep 1; wait; note "all done" ;;
   ladder-fp) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-fpcheck -- bash $ROOT/tools/tw2_job.sh fpcheck-in ) & sleep 1; wait; note "all done" ;;
