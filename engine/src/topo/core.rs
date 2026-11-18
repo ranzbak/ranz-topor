@@ -4813,8 +4813,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
     };
     dr.prov_layer = vec![-1; st.passes.len()];
+    dr.plan_layers = vec![Vec::new(); st.wires.len()];
     for (&w, pl) in &plans {
         set_layers(pl, None, &st.wires[w].passes, &mut dr.prov_layer);
+        dr.plan_layers[w] = pl.layers.clone();
     }
     // Pack with the planned vias (their discs take room, as in P3/P4), so the vias can be put
     // where the packing left them room: on their wire's nominal chord.
