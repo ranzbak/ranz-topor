@@ -129,7 +129,11 @@ case ${1:-} in
       cd) A+=(--set search.dangling_lead_choice=true --set 'factors.weight={"dangling_turn": 4}') ;;
       d) A+=(--set 'factors.weight={"dangling_turn": 4}') ;;
     esac
-    TOPO_T3DBG=1 tools/route_board.sh "$BADGE" $R/badge/$2 "${A[@]}" > $R/badge-$2.txt 2>&1 9>&- ;;
+    TOPO_T3DBG=1 TOPO_KEPTDBG=${KEPTDBG:-} tools/route_board.sh "$BADGE" $R/badge/$2 "${A[@]}" > $R/badge-$2.txt 2>&1 9>&- ;;
+  t3c)
+    # T3 round c: badge c with the T3DBG counts and TOPO_KEPTDBG (is the debug env seen at all?)
+    ( KEPTDBG=1 hzq run --threads 2 --name t3c-badge-c -- bash tools/tw4_job.sh badge c > $R/badge-c.log 2>&1; note "badge c rc $?" ) & sleep 1
+    wait; note "all done" ;;
   t3b)
     # T3 round b: the private badge with the T3DBG starts: d (dangling_turn 4 alone = the base of cd), c, cd
     for n in d c cd; do

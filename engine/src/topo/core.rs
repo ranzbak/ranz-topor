@@ -2756,6 +2756,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         st.pre_join.extend(g.1.windows(2).map(|x| (x[0], x[1])));
     }
     st.cont_dir = cont_dirs.clone();
+    if std::env::var_os("TOPO_T3DBG").is_some() {
+        // Debug (tw4 T3): the kept ends with a lead / with start points, and the dangling ends rooted here.
+        let leads = b.kept_ends.iter().filter(|k| k.lead.is_some()).count();
+        let ch = b.kept_ends.iter().filter(|k| !k.choices.is_empty()).count();
+        eprintln!("T3DBG round {round}: kept ends {}, with a lead {leads}, with start points {ch}; dangling roots {}, with start points {}", b.kept_ends.len(), exist_dang.len(), lead_alt.len());
+    }
     // 4.3: the length the search prices (`[search] length`).
     st.taut_len = opts.search_length == "taut";
     // M-C: the plan necks a wire where its nominal width does not fit (width in P2).
