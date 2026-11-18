@@ -2076,6 +2076,160 @@ pub fn precedes(es: &[Erbs], sts: &[Stretch], o: &LayerOrder, before: &mut BTree
     }
 }
 
+/// TW2 (`[drawing] erbs_conflict_keep`): which bands of a conflict component are kept when the
+/// joint check finds two bands of different nets too close.
+/// - `Tier`: the most kept bands of the highest priority tier, then of the next one.
+/// - `Count`: the most kept bands over all tiers.
+///
+/// Ties go by the yield rank: route order, the user rule "priority tier, then thick to thin, then
+/// short to long". D12: in the ERBS drawing the sort only says who yields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeepMode {
+    Tier,
+    Count,
+}
+
+impl KeepMode {
+    /// The option's value (`"tier"`, `"count"`); `None` for anything else.
+    pub fn parse(s: &str) -> Option<KeepMode> {
+        match s {
+            "tier" => Some(KeepMode::Tier),
+            "count" => Some(KeepMode::Count),
+            _ => None,
+        }
+    }
+}
+
+/// The selector's result ([`keep_bands`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Kept {
+    /// Per band: kept.
+    pub keep: Vec<bool>,
+    /// Conflict components solved exactly, and the larger ones solved greedily (the work cap).
+    pub exact: usize,
+    pub greedy: usize,
+}
+
+/// Components up to this many bands are solved exactly (an independent set, enumerated). Larger
+/// ones go greedily in priority order. This is a work cap, not a judgement rule, and the run counts them.
+pub const KEEP_EXACT_CAP: usize = 20;
+
+/// TW2: the bands kept from a conflict graph, independent of the input order. Each band has a key
+/// `(tier, rank)`, lower first. Bands without a conflict are kept. In each connected component the
+/// kept set is a maximum independent set under `mode`, ties by rank: the set that keeps the
+/// best-ranked band where two sets differ. Exact up to `cap` bands, greedy above. Greedy goes per
+/// tier in `Tier` mode, the fewest open neighbours first, ties by rank. O(2^cap) per exact
+/// component, O(n^2) greedy.
+pub fn keep_bands(keys: &[(u8, usize)], edges: &[(usize, usize)], mode: KeepMode, cap: usize) -> Kept {
+    let n = keys.len();
+    let mut adj: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+    for &(a, b) in edges {
+        if a != b && a < n && b < n {
+            adj[a].insert(b);
+            adj[b].insert(a);
+        }
+    }
+    let mut out = Kept { keep: vec![true; n], ..Kept::default() };
+    let mut seen = vec![false; n];
+    // Components in the order of their best key, nodes in key order (input order does not matter).
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| (keys[i], i));
+    for &s in &order {
+        if seen[s] || adj[s].is_empty() {
+            continue;
+        }
+        let mut comp = vec![s];
+        seen[s] = true;
+        let mut k = 0;
+        while k < comp.len() {
+            for &j in &adj[comp[k]] {
+                if !seen[j] {
+                    seen[j] = true;
+                    comp.push(j);
+                }
+            }
+            k += 1;
+        }
+        comp.sort_by_key(|&i| (keys[i], i));
+        let chosen = if comp.len() <= cap {
+            out.exact += 1;
+            exact_keep(&comp, keys, &adj, mode)
+        } else {
+            out.greedy += 1;
+            greedy_keep(&comp, keys, &adj, mode)
+        };
+        for (&i, &c) in comp.iter().zip(&chosen) {
+            out.keep[i] = c;
+        }
+    }
+    out
+}
+
+/// The score of a kept set of a component (`comp` in key order): per tier the kept count (`Tier`)
+/// or the total (`Count`), then the kept flags in key order. Larger is better.
+fn keep_score(comp: &[usize], keys: &[(u8, usize)], sel: &[bool], mode: KeepMode) -> (Vec<usize>, Vec<bool>) {
+    let mut counts: Vec<usize> = Vec::new();
+    match mode {
+        KeepMode::Count => counts.push(sel.iter().filter(|&&b| b).count()),
+        KeepMode::Tier => {
+            let mut tiers: Vec<u8> = comp.iter().map(|&i| keys[i].0).collect();
+            tiers.dedup();
+            for t in tiers {
+                counts.push(comp.iter().zip(sel).filter(|(&i, &b)| b && keys[i].0 == t).count());
+            }
+        }
+    }
+    (counts, sel.to_vec())
+}
+
+fn exact_keep(comp: &[usize], keys: &[(u8, usize)], adj: &[BTreeSet<usize>], mode: KeepMode) -> Vec<bool> {
+    let pos: BTreeMap<usize, usize> = comp.iter().enumerate().map(|(k, &i)| (i, k)).collect();
+    let nb: Vec<Vec<usize>> = comp.iter().map(|&i| adj[i].iter().filter_map(|j| pos.get(j).copied()).collect()).collect();
+    let mut best: Option<((Vec<usize>, Vec<bool>), Vec<bool>)> = None;
+    let mut sel = vec![false; comp.len()];
+    #[allow(clippy::type_complexity)]
+    fn rec(k: usize, sel: &mut Vec<bool>, nb: &[Vec<usize>], comp: &[usize], keys: &[(u8, usize)], mode: KeepMode, best: &mut Option<((Vec<usize>, Vec<bool>), Vec<bool>)>) {
+        if k == sel.len() {
+            let sc = keep_score(comp, keys, sel, mode);
+            if best.as_ref().is_none_or(|b| sc > b.0) {
+                *best = Some((sc, sel.clone()));
+            }
+            return;
+        }
+        if nb[k].iter().all(|&j| !(j < k && sel[j])) {
+            sel[k] = true;
+            rec(k + 1, sel, nb, comp, keys, mode, best);
+            sel[k] = false;
+        }
+        rec(k + 1, sel, nb, comp, keys, mode, best);
+    }
+    rec(0, &mut sel, &nb, comp, keys, mode, &mut best);
+    best.map(|b| b.1).unwrap_or_else(|| vec![false; comp.len()])
+}
+
+fn greedy_keep(comp: &[usize], keys: &[(u8, usize)], adj: &[BTreeSet<usize>], mode: KeepMode) -> Vec<bool> {
+    let pos: BTreeMap<usize, usize> = comp.iter().enumerate().map(|(k, &i)| (i, k)).collect();
+    let mut open = vec![true; comp.len()];
+    let mut sel = vec![false; comp.len()];
+    loop {
+        // Among the open bands of the best open tier (`Tier`) or all (`Count`): the fewest open
+        // neighbours, ties by key order.
+        let tier = comp.iter().zip(&open).filter(|(_, &o)| o).map(|(&i, _)| keys[i].0).min();
+        let Some(tier) = tier else { break };
+        let deg = |k: usize| adj[comp[k]].iter().filter(|j| pos.get(j).is_some_and(|&q| open[q])).count();
+        let pick = (0..comp.len()).filter(|&k| open[k] && (mode == KeepMode::Count || keys[comp[k]].0 == tier)).min_by_key(|&k| (deg(k), k));
+        let Some(k) = pick else { break };
+        sel[k] = true;
+        open[k] = false;
+        for j in &adj[comp[k]] {
+            if let Some(&q) = pos.get(j) {
+                open[q] = false;
+            }
+        }
+    }
+    sel
+}
+
 /// Topological order of `given` under `before` (pairs of wires), the given order as tie-break.
 pub fn precedes_order(given: &[usize], before: &BTreeSet<(usize, usize)>) -> Vec<usize> {
     let pos: BTreeMap<usize, usize> = given.iter().enumerate().map(|(i, &w)| (w, i)).collect();
@@ -2317,6 +2471,127 @@ mod tests {
         assert!(dmin(&full) >= rho - 1.0, "with corner points: {:.1} nm inside, path {full:?}", rho - dmin(&full));
         let sag = rho * (1.0 - (0.5 * 68.6f64.to_radians()).cos());
         assert!(rho - dmin(&bare) > 0.9 * sag, "tips alone: the chord should sag ~{sag:.0} nm, got {:.0} ({bare:?})", rho - dmin(&bare));
+    }
+
+    /// TW2 selector: bands without a conflict are kept; a conflict pair keeps the better-ranked
+    /// band; `Tier` keeps a tier-2 band against two tier-3 bands, `Count` keeps the two.
+    #[test]
+    fn keep_bands_tier_count_and_rank() {
+        // 0 alone, 1-2 a pair (2 ranks better), 3 (tier 2) against 4 and 5 (tier 3, no conflict between them)
+        let keys = [(3, 0), (3, 5), (3, 1), (2, 9), (3, 2), (3, 3)];
+        let edges = [(1, 2), (3, 4), (3, 5)];
+        let t = keep_bands(&keys, &edges, KeepMode::Tier, KEEP_EXACT_CAP);
+        assert_eq!(t.keep, vec![true, false, true, true, false, false]);
+        assert_eq!((t.exact, t.greedy), (2, 0));
+        let c = keep_bands(&keys, &edges, KeepMode::Count, KEEP_EXACT_CAP);
+        assert_eq!(c.keep, vec![true, false, true, false, true, true]);
+        // no conflicts: everything kept, nothing solved
+        let n = keep_bands(&keys, &[], KeepMode::Tier, KEEP_EXACT_CAP);
+        assert_eq!((n.keep, n.exact, n.greedy), (vec![true; 6], 0, 0));
+        assert_eq!(KeepMode::parse("tier"), Some(KeepMode::Tier));
+        assert_eq!(KeepMode::parse("count"), Some(KeepMode::Count));
+        assert_eq!(KeepMode::parse("Tier"), None);
+    }
+
+    /// The exact selector against brute force over all subsets (random graphs of up to 12 bands,
+    /// both modes), every kept set independent, and the result independent of the input order
+    /// (the bands permuted, keys and edges with them).
+    #[test]
+    fn keep_bands_exact_matches_brute_force_and_ignores_input_order() {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(7);
+        for case in 0..400 {
+            let n = rng.gen_range(1..=12);
+            let keys: Vec<(u8, usize)> = (0..n).map(|i| (rng.gen_range(2..=3u8), (i * 7919 + case) % 1000)).collect();
+            let mut edges = Vec::new();
+            for a in 0..n {
+                for b in a + 1..n {
+                    if rng.gen_bool(0.3) {
+                        edges.push((a, b));
+                    }
+                }
+            }
+            for mode in [KeepMode::Tier, KeepMode::Count] {
+                let got = keep_bands(&keys, &edges, mode, KEEP_EXACT_CAP);
+                for &(a, b) in &edges {
+                    assert!(!(got.keep[a] && got.keep[b]), "case {case}: {a}-{b} both kept");
+                }
+                // brute force per component: the best independent set by the same score
+                let isolated: Vec<bool> = (0..n).map(|i| !edges.iter().any(|&(a, b)| a == i || b == i)).collect();
+                let mut comps: Vec<Vec<usize>> = Vec::new();
+                let mut seen = vec![false; n];
+                for s in 0..n {
+                    if seen[s] || isolated[s] {
+                        continue;
+                    }
+                    let mut c = vec![s];
+                    seen[s] = true;
+                    let mut k = 0;
+                    while k < c.len() {
+                        for &(a, b) in &edges {
+                            for (x, y) in [(a, b), (b, a)] {
+                                if x == c[k] && !seen[y] {
+                                    seen[y] = true;
+                                    c.push(y);
+                                }
+                            }
+                        }
+                        k += 1;
+                    }
+                    c.sort_by_key(|&i| (keys[i], i));
+                    comps.push(c);
+                }
+                for c in &comps {
+                    let mut best: Option<((Vec<usize>, Vec<bool>), Vec<bool>)> = None;
+                    for m in 0u32..(1 << c.len()) {
+                        let sel: Vec<bool> = (0..c.len()).map(|k| m >> k & 1 == 1).collect();
+                        let ok = edges.iter().all(|&(a, b)| {
+                            let (pa, pb) = (c.iter().position(|&x| x == a), c.iter().position(|&x| x == b));
+                            !matches!((pa, pb), (Some(x), Some(y)) if sel[x] && sel[y])
+                        });
+                        if ok {
+                            let sc = keep_score(c, &keys, &sel, mode);
+                            if best.as_ref().is_none_or(|b| sc > b.0) {
+                                best = Some((sc, sel));
+                            }
+                        }
+                    }
+                    let want = best.unwrap().1;
+                    let have: Vec<bool> = c.iter().map(|&i| got.keep[i]).collect();
+                    assert_eq!(have, want, "case {case} {mode:?}: component {c:?}");
+                }
+                assert!(isolated.iter().enumerate().all(|(i, &iso)| !iso || got.keep[i]));
+                // input order: reverse the band ids
+                let perm: Vec<usize> = (0..n).rev().collect();
+                let pk: Vec<(u8, usize)> = perm.iter().map(|&i| keys[i]).collect();
+                let inv = |i: usize| n - 1 - i;
+                let pe: Vec<(usize, usize)> = edges.iter().map(|&(a, b)| (inv(a), inv(b))).collect();
+                let pg = keep_bands(&pk, &pe, mode, KEEP_EXACT_CAP);
+                for i in 0..n {
+                    assert_eq!(pg.keep[inv(i)], got.keep[i], "case {case} {mode:?}: order changed band {i}");
+                }
+            }
+        }
+    }
+
+    /// Above the cap the selector is greedy: still independent, still order-free, counted.
+    /// A path of 6 bands with cap 4 keeps the 3 alternate bands starting at the end with the fewest
+    /// open neighbours.
+    #[test]
+    fn keep_bands_greedy_above_the_cap() {
+        let keys: Vec<(u8, usize)> = (0..6).map(|i| (3, i)).collect();
+        let edges: Vec<(usize, usize)> = (0..5).map(|i| (i, i + 1)).collect();
+        let g = keep_bands(&keys, &edges, KeepMode::Count, 4);
+        assert_eq!((g.exact, g.greedy), (0, 1));
+        assert_eq!(g.keep, vec![true, false, true, false, true, false]);
+        let e = keep_bands(&keys, &edges, KeepMode::Count, 6);
+        assert_eq!((e.exact, e.greedy), (1, 0));
+        assert_eq!(e.keep, vec![true, false, true, false, true, false]);
+        // tier greedy: the tier-2 middle band first, then the tier-3 ones it leaves open
+        let keys2 = [(3, 0), (3, 1), (2, 2), (3, 3), (3, 4)];
+        let edges2 = [(0, 1), (1, 2), (2, 3), (3, 4)];
+        let t = keep_bands(&keys2, &edges2, KeepMode::Tier, 2);
+        assert_eq!(t.keep, vec![true, false, true, false, true]);
     }
 
     /// TW2 addendum A, lead condition: a wrap's arc samples (global directions of the
