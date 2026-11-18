@@ -577,7 +577,7 @@ fn local_judge_falls_back_to_global_under_cuts() {
 
 /// Step B (`[optimize] local_depth`): a deeper ring frees at least as many wires per local
 /// layering as depth 1 (the crossings of the crossings; more on one of the boards), and the layerings stay exact (no partner
-/// fault, no unpriced held-held crossing), 2 and 4 layers.
+/// fault, no unpriced held-held crossing, no stale held event), 2 and 4 layers.
 #[test]
 fn local_depth_two_frees_more_and_stays_exact() {
     // SAFETY: the variable only switches on a debug count; tests reading it all want it on.
@@ -599,7 +599,7 @@ fn local_depth_two_frees_more_and_stays_exact() {
         assert!(mean_free(&d2) >= mean_free(&d1), "{n_layers} layers: depth 2 frees fewer: {d1} / {d2}");
         (f1, f2) = (f1 + mean_free(&d1), f2 + mean_free(&d2));
         for d in [&d1, &d2] {
-            assert!(d.contains("TOPO_LOCALCHECK: 0 partner faults, 0 unpriced held-held crossings"), "{n_layers} layers: {d}");
+            assert!(d.contains("TOPO_LOCALCHECK: 0 partner faults, 0 unpriced held-held crossings, 0 stale held events"), "{n_layers} layers: {d}");
         }
     }
     assert!(f2 > f1, "depth 2 frees more wires somewhere: {f1} vs {f2}");

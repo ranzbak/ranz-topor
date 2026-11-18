@@ -62,8 +62,9 @@ A move's placing changes more than O and N, so F must take those wires too:
   keeps only partner links to held live wires.
 - `TOPO_LOCALCHECK=1` checks each local layering: partner links that point nowhere
   (`layers::partner_faults`) and different-net crossings of two held wires left on one equal
-  layer that the layering neither pairs nor counts unlayerable (`layers::unpriced_crossings`).
-  Both must be 0; the judge line reports them.
+  layer that the layering neither pairs nor counts unlayerable (`layers::unpriced_crossings`), and
+  held events whose crossing partner the move killed (`layers::stale_held_events`: a via kept for a
+  crossing that is gone). All three must be 0; the judge line reports them.
 
 ### Why a local re-solve, not the present layers (topor-way plan: "no layering inside a try")
 The search already prices a path against the present layers (5.2b: a crossing costs the via it
@@ -123,7 +124,7 @@ plan. This branch does not touch it.
 - B, dense boards (`engine/tests/loop_local_fuzz.rs`, the verifier's fuzz cut to two seeds; run in
   release with `CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true`): seed 1000 (a relay kills a held
   wire inside a move) and seed 1446 (swaps change held-held crossings) run without a panic, with
-  0 partner faults and 0 unpriced held-held crossings. `dense_board_scan` (ignored) scans a range.
+  0 partner faults, 0 unpriced held-held crossings and 0 stale held events. `dense_board_scan` (ignored) scans a range.
 - B, options: the `cuts` fallback (warning + global judge line) and `local_depth = 2` (frees at
   least as many wires, stays exact).
 - B, boards: eprom/esp/qmtech counters (global layerings, local W' sizes, work per re-lay) show

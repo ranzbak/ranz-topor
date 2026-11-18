@@ -920,6 +920,19 @@ pub fn unpriced_crossings(st: &State, rep: &LayerReport, bottom: i32, free: Opti
     (all, hh)
 }
 
+/// loop-local (debug, tests): the events a local layering would keep stale: an event of a wire
+/// `free` holds whose crossing partner in `prev` is dead in `st` (or gone past its end). The
+/// crossing no longer exists, so the held wire would keep a layer change (a via) for nothing;
+/// a judge that lays out again every wire a move killed frees those partners, so this is 0.
+/// O(events of the held wires).
+pub fn stale_held_events(st: &State, prev: &LayerReport, free: &[bool]) -> usize {
+    let dead = |t: usize| st.wires.get(t).is_none_or(|x| !x.alive);
+    (0..st.wires.len().min(prev.partner.len()))
+        .filter(|&w| st.wires[w].alive && !free.get(w).copied().unwrap_or(true))
+        .map(|w| prev.partner[w].iter().filter(|x| x.is_some_and(|(t, _)| dead(t))).count())
+        .sum()
+}
+
 /// loop-local: the free wires and every wire with a pass on an edge one of them passes (the
 /// wires whose packing a free wire's layers can change; [`assign_local`]'s capacity model).
 /// O(passes of the free wires x passes per edge).

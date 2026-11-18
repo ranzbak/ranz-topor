@@ -116,6 +116,9 @@ struct LoopCtr {
     /// `TOPO_LOCALCHECK`: the held-held crossings the local layerings leave unpriced
     /// ([`layers::unpriced_crossings`]; 0 when the judge is exact).
     local_unpriced: std::cell::Cell<usize>,
+    /// `TOPO_LOCALCHECK`: the held events whose crossing partner the move killed
+    /// ([`layers::stale_held_events`]; 0 when the judge is exact).
+    local_stale: std::cell::Cell<usize>,
 }
 
 impl LoopCtr {
@@ -3563,6 +3566,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 LoopCtr::add(&lctr.local_faults, f.len());
                 let (_, hh) = layers::unpriced_crossings(st, &lr, bottom, Some(&free));
                 LoopCtr::add(&lctr.local_unpriced, hh);
+                let stale = layers::stale_held_events(st, prev, &free);
+                LoopCtr::add(&lctr.local_stale, stale);
+                if stale > 0 {
+                    eprintln!("LOOPLOCAL stale held events {stale}; gone {gone:?} new {new:?} changed {changed}");
+                }
                 if hh > 0 {
                     eprintln!("LOOPLOCAL unpriced held-held crossings {hh}; gone {gone:?} new {new:?} changed {changed}");
                 }
@@ -4746,7 +4754,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 mean(st_.local_free),
                 mean(st_.local_model),
                 lctr.local_changed.get(),
-                if local_check { format!("; TOPO_LOCALCHECK: {} partner faults, {} unpriced held-held crossings", lctr.local_faults.get(), lctr.local_unpriced.get()) } else { String::new() },
+                if local_check { format!("; TOPO_LOCALCHECK: {} partner faults, {} unpriced held-held crossings, {} stale held events", lctr.local_faults.get(), lctr.local_unpriced.get(), lctr.local_stale.get()) } else { String::new() },
                 if st_.shadow_n > 0 {
                     format!("; shadow check ([optimize] loop_shadow = {}): {} moves also judged by the whole board (its change after - before, both layered whole), {} kept alike ({:.1} %), mean |local change - whole-board change| graded violations {:.4}, vias {:.2}, unlayerable crossings {:.2}; mean |whole-board layering - present layering| before the move, graded {:.4}", opts.loop_shadow, st_.shadow_n, st_.shadow_agree, 100.0 * st_.shadow_agree as f64 / st_.shadow_n as f64, st_.shadow_err_graded / st_.shadow_n as f64, st_.shadow_err_vias as f64 / st_.shadow_n as f64, st_.shadow_unl_diff as f64 / st_.shadow_n as f64, st_.shadow_base_graded / st_.shadow_n as f64)
                 } else {

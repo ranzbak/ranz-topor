@@ -6,6 +6,7 @@
 #                                        default cycles (quality ladder at 100 % drawn), then wait
 #   looplocal_job.sh tests               engine tests + clippy + plugin config tests + Step B mutants (one hzq unit, 4 threads)
 #   looplocal_job.sh fuzz                tests (4 threads) + dense fuzz units on tip and mutants R M1 M2 M3 (fix round 2)
+#   looplocal_job.sh fuzz2               the same without the seed scan
 #   looplocal_job.sh both                tip: main G SH + full G L + tests in one session
 #   looplocal_job.sh task CFG KIND NAME  one run (inside a unit); KIND b = board, p = pattern, f = board, default cycles
 # CFG: D (defaults), NOSC (TOPO_NOSCACHE=1: Step A cache off), G (optimize.loop_judge="global"), L (="local"),
@@ -114,6 +115,7 @@ fz() {  # NAME: tree copy with the mutant (tip R M1 M2 M3), release + debug asse
   local t0=$(date +%s)
   cargo test --release --test loop_local --test loop_local_fuzz -- --nocapture > $R/fz-$n.log 2>&1 9>&-
   note "fz $n tests rc $? wall $(( $(date +%s) - t0 )) s: $(grep -E '^test .* (ok|FAILED)$' $R/fz-$n.log | grep -c FAILED) failed: $(grep -E '^test .*FAILED$' $R/fz-$n.log | awk '{print $2}' | tr '\n' ' ')"
+  [ "${FZ_SCAN:-1}" = 0 ] && { rm -rf $d; return; }
   t0=$(date +%s)
   LOOPLOCAL_FUZZ=1000,30 cargo test --release --test loop_local_fuzz dense_board_scan -- --ignored --nocapture > $R/fz-$n-scan.log 2>&1 9>&-
   note "fz $n scan rc $? wall $(( $(date +%s) - t0 )) s: $(grep -c PANIC $R/fz-$n-scan.log) panics, $(grep FUZZ $R/fz-$n-scan.log | grep -vc 'partner faults 0 ') with faults, $(grep FUZZ $R/fz-$n-scan.log | grep -c 'unpriced [1-9]') unpriced"
@@ -124,6 +126,10 @@ case ${1:-} in
   fuzz)  # fix round 2: the tests (4 threads) + the dense fuzz on the tip and the mutants R M1 M2 M3 (2 threads each)
     ( hzq run --threads 4 --name tests -- bash $ROOT/tools/looplocal_job.sh tests-in ) & sleep 1
     for n in tip R M1 M2 M3; do ( hzq run --threads 2 --name "fz-$n" -- env CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 bash $ROOT/tools/looplocal_job.sh fz-in $n ) & sleep 1; done
+    wait; note "all done" ;;
+  fuzz2)  # fix round 2b (stale held events): tests (4 threads) + the two dense seeds on tip and R M1 M2 M3, no scan
+    ( hzq run --threads 4 --name tests -- bash $ROOT/tools/looplocal_job.sh tests-in ) & sleep 1
+    for n in tip R M1 M2 M3; do ( hzq run --threads 2 --name "fz-$n" -- env FZ_SCAN=0 CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 bash $ROOT/tools/looplocal_job.sh fz-in $n ) & sleep 1; done
     wait; note "all done" ;;
   task) shift; task "$@" ;;
   small) for n in eprom wiccon; do task $2 b $n; done; for n in $(ls $R/pat); do task $2 p $n; done ;;

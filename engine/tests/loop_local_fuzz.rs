@@ -10,8 +10,8 @@
 //!   does not lay those wires out again leaves one-layer crossings unpriced (89 in 47 moves on
 //!   dfd8bc72).
 //!
-//! Each fixture must run without a panic, with 0 partner faults and 0 unpriced held-held
-//! crossings. `dense_board_scan` (ignored; `LOOPLOCAL_FUZZ=first,count`) runs a seed range (seeds
+//! Each fixture must run without a panic, with 0 partner faults, 0 unpriced held-held crossings
+//! and 0 stale held events (a held wire's event at a crossing with a wire the move killed). `dense_board_scan` (ignored; `LOOPLOCAL_FUZZ=first,count`) runs a seed range (seeds
 //! 1000-1449 are the verifier's range, ~5 s each in release). Run in release with debug assertions:
 //! `CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo test --release --test loop_local_fuzz`.
 
@@ -111,7 +111,7 @@ fn num_before(l: &str, key: &str) -> Option<usize> {
 }
 
 /// The dense fixtures `seeds` through the loop (`TOPO_LOCALCHECK` on): per seed a panic, partner
-/// faults or unpriced held-held crossings are failures; asserts there are none.
+/// faults, unpriced held-held crossings or stale held events are failures; asserts there are none.
 fn run_seeds(seeds: &[u64]) {
     // SAFETY: a debug switch the engine reads; every test of this binary wants it on.
     unsafe {
@@ -140,7 +140,11 @@ fn run_seeds(seeds: &[u64]) {
                 let ch = num_before(&l, " wires a move changed").unwrap_or(0);
                 let pf = num_before(&l, " partner faults").unwrap_or(usize::MAX);
                 let up = num_before(&l, " unpriced held-held crossings").unwrap_or(usize::MAX);
-                println!("FUZZ seed {s} layers {nl}: changed {ch} partner faults {pf} unpriced {up} ({dt:.1} s)");
+                let se = num_before(&l, " stale held events").unwrap_or(usize::MAX);
+                println!("FUZZ seed {s} layers {nl}: changed {ch} partner faults {pf} unpriced {up} stale {se} ({dt:.1} s)");
+                if se != 0 {
+                    bad.push((s, "stale held events"));
+                }
                 if pf != 0 {
                     bad.push((s, "partner faults"));
                 }
@@ -153,7 +157,8 @@ fn run_seeds(seeds: &[u64]) {
     assert!(bad.is_empty(), "{bad:?}");
 }
 
-/// Seed 1000: a relay inside a move kills a held wire (the bornhack2026 panic without the fix).
+/// Seed 1000: a relay inside a move kills a held wire (the bornhack2026 panic without the fix;
+/// stale held events when the judge does not lay the killed wire's partners out again).
 #[test]
 fn dense_board_relay_inside_a_move_keeps_every_link() {
     run_seeds(&[1000]);
