@@ -16,6 +16,8 @@ use std::sync::OnceLock;
 thread_local! {
     static MODE: std::cell::Cell<Option<Mode>> = const { std::cell::Cell::new(None) };
     static REVERSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Calls of [`map`] on this thread since the reverse hook was set (the hook acts on every 16th).
+    static REV_N: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// Units started on lanes (more than one lane) and on one lane, process-wide (tests).
@@ -33,6 +35,9 @@ pub fn with_mode<R>(mode: Option<Mode>, reverse: bool, f: impl FnOnce() -> R) ->
 /// The drawing's mode on this thread until the guard drops (the one before comes back), for a
 /// stage too long to pass as a closure ([`with_mode`]). O(1).
 pub fn set_mode(mode: Option<Mode>, reverse: bool) -> ModeGuard {
+    if reverse {
+        REV_N.with(|c| c.set(0));
+    }
     ModeGuard(MODE.with(|c| c.replace(mode)), REVERSE.with(|c| c.replace(reverse)))
 }
 
@@ -52,8 +57,10 @@ fn serial_debug() -> bool {
     *S.get_or_init(|| std::env::var_os("TOPO_ERBS_TIME").is_some() || std::env::var_os("TOPO_ERBS_SLEEVE").is_some())
 }
 
-/// Test hook (`Options::draw_test_reverse`, or `TOPO_PAR_REVERSE` set): unit `i` of the first 16
-/// waits `16 - i` ms before it starts, so with several lanes the first units finish last. Only
+/// Test hook (`Options::draw_test_reverse`, or `TOPO_PAR_REVERSE` set): in every 16th call on
+/// this thread (the first one after the hook was set included; the octilinear DP calls [`map`]
+/// once per node), unit `i` of the first 8 waits `8 - i` ms before it starts, so with several
+/// lanes the first units finish last. Only
 /// the timing changes, never a result.
 fn reverse_on() -> bool {
     static E: OnceLock<bool> = OnceLock::new();
@@ -66,10 +73,14 @@ fn reverse_on() -> bool {
 /// A panic in a unit comes back here. O(sum of the units / lanes).
 pub fn map<T: Sync, R: Send>(items: &[T], f: impl Fn(usize, &T) -> R + Sync) -> Vec<R> {
     let n = items.len();
-    let rev = reverse_on();
+    let rev = reverse_on() && REV_N.with(|c| {
+        let k = c.get();
+        c.set(k.wrapping_add(1));
+        k % 16 == 0
+    });
     let unit = |i: usize| {
-        if rev && i < 16 {
-            std::thread::sleep(std::time::Duration::from_millis(16 - i as u64));
+        if rev && i < 8 {
+            std::thread::sleep(std::time::Duration::from_millis(8 - i as u64));
         }
         // a unit runs without the drawing's mode: it never fans out again
         with_mode(None, false, || f(i, &items[i]))

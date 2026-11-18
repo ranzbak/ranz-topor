@@ -211,3 +211,18 @@ expected. Small calls (< ~40 nodes, < 10 % of the time) stay serial. Drawing tim
 qmtech ~8-9 of 11.2 s octilinear (in the loop, the joint bands and never drop), esp ~3.5 of 4.5 s, bornhack
 ~13 of 17 s. With A: qmtech drawing ~26 s -> ~11 s at 8 threads (instrumented 1-thread base), esp ~8 s -> ~4 s;
 bornhack ~199 s -> ~180 s (the forced wires of section 12 dominate).
+
+## 14. Octilinear lanes as built (branch par-octi = tw3-f67 ff1c6fce + A, lead 2026-11-18)
+`octilinear()`'s cached DP (f67) is restructured into a per-successor unit `relax(i, j, fin, dist[j])`: the pair's
+shapes are built once; for every finite arrival state of `i` in order and every shape in order it prices, prunes
+against its own copy of `dist[j]` (updated as it goes, as the serial loop's row was), checks legality lazily and
+returns the states of `j` it improved. The caller applies them in successor order. The serial path and the lane path
+run the same unit, so the f67 reference test (the loop before the shape cache, `OCTI_REF`) checks both; it now also
+runs every node on 1/2/4/8 lanes with the reverse hook (`OCTI_LANE_MIN` = 1). Memo: leg prices (room, follow) and
+legality are pure functions of the leg; a lane reads the call's memo and writes its own overlay, merged after the node.
+Lanes: `topo::par::map`, so the same rayon pool and the same lane source as `refine_lanes` (the run's spare slots,
+`[drawing] draw_lanes`); no pool of its own; a unit (an A unit, a lane) never fans out again. Work-size rule: a node
+with fewer than `OCTI_LANE_MIN_PAIRS` = 64 (finite state, successor) pairs stays on the calling thread.
+Mutants: M1 the lanes' results in completion order (par::map); M2 the overlays merged in another order (equivalent
+by design: pure values; expected to survive); M3 the prune against the row as the node found it; M4 a node's results
+applied to its successors in reverse order.

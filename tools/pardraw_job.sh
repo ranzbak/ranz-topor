@@ -30,7 +30,7 @@ boards() { # boards THREADS...
   done; }
 case ${1:-all} in
   all)
-    ( hzq run --threads 4 --name pd-tests -- bash -c "cd $ROOT/engine && RAYON_NUM_THREADS=4 cargo test --release --lib par:: 9>&- > $R/tests.log 2>&1; echo \"lib rc \$?\" >> $R/tests.log; RAYON_NUM_THREADS=4 cargo test --release --test par_draw -- --test-threads 1 9>&- >> $R/tests.log 2>&1; echo \"par_draw rc \$?\" >> $R/tests.log; RAYON_NUM_THREADS=4 cargo test --release --test par_refine --test par_refine_dense --test topo_drawing_grace --test topo_m3_class_keep 9>&- >> $R/tests.log 2>&1; echo \"near rc \$?\" >> $R/tests.log; cargo clippy --release --all-targets 9>&- >> $R/tests.log 2>&1; echo \"clippy rc \$?\" >> $R/tests.log; cd $ROOT && CI=1 python -m pytest -q tests/plugin/test_config.py tests/plugin/test_config_docs.py tests/plugin/test_toml_defaults.py tests/test_docs_links.py >> $R/tests.log 2>&1; echo \"pytest rc \$?\" >> $R/tests.log" ) & sleep 1
+    ( hzq run --threads 4 --name pd-tests -- bash -c "cd $ROOT/engine && RAYON_NUM_THREADS=4 cargo test --release --lib -- par:: 9>&- > $R/tests.log 2>&1; echo \"lib rc \$?\" >> $R/tests.log; RAYON_NUM_THREADS=4 cargo test --release --test par_draw -- --test-threads 1 9>&- >> $R/tests.log 2>&1; echo \"par_draw rc \$?\" >> $R/tests.log; RAYON_NUM_THREADS=4 cargo test --release --test par_refine --test par_refine_dense --test topo_drawing_grace --test topo_m3_class_keep 9>&- >> $R/tests.log 2>&1; echo \"near rc \$?\" >> $R/tests.log; cargo clippy --release --all-targets 9>&- >> $R/tests.log 2>&1; echo \"clippy rc \$?\" >> $R/tests.log; cd $ROOT && CI=1 python -m pytest -q tests/plugin/test_config.py tests/plugin/test_config_docs.py tests/plugin/test_toml_defaults.py tests/test_docs_links.py >> $R/tests.log 2>&1; echo \"pytest rc \$?\" >> $R/tests.log" ) & sleep 1
     boards 1 2 4 8
     for t in 1 4 8; do
       one eprom-def-t$t $P $t --set drawing.realise=erbs & sleep 1
@@ -49,7 +49,7 @@ assert s.count(a) == 1 and s.count(b) == 1
 s = s.replace(a, a + "    let done = AtomicUsize::new(0);\n").replace(b, b + "        let i = done.fetch_add(1, Ordering::Relaxed);\n")
 open(p, "w").write(s)
 EOF
-    hzq run --threads 4 --name pd-mut -- bash -c "RAYON_NUM_THREADS=4 cargo test --release --lib par:: 9>&- > $R/mutant.log 2>&1; echo \"lib rc \$?\" >> $R/mutant.log; RAYON_NUM_THREADS=4 cargo test --release --test par_draw -- --test-threads 1 9>&- >> $R/mutant.log 2>&1; echo \"par_draw rc \$?\" >> $R/mutant.log"
+    hzq run --threads 4 --name pd-mut -- bash -c "RAYON_NUM_THREADS=4 cargo test --release --lib -- par:: 9>&- > $R/mutant.log 2>&1; echo \"lib rc \$?\" >> $R/mutant.log; RAYON_NUM_THREADS=4 cargo test --release --test par_draw -- --test-threads 1 9>&- >> $R/mutant.log 2>&1; echo \"par_draw rc \$?\" >> $R/mutant.log"
     grep -E "rc [0-9]|^test result" $R/mutant.log | while read -r l; do note "mutant (must fail): $l"; done
     note "all done" ;;
   ref)
